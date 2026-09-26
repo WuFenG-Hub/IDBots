@@ -1,7 +1,10 @@
 # MetaTask Integration Plan — IDBots Host Support + Protocol v1.2
 
-Status: **P0 draft for owner review** — the decision register (§2) is the part
-that needs owner sign-off; everything else follows from those rulings.
+Status: **P0 approved** — owner rulings 2026-09-27: D-1 = A (weights + role
+split + accuracy-weighted reviews), D-2 = 0%, D-3 = defaults confirmed with A,
+D-4 = A (minimal amend), D-5 = replay output only. D-6 (wave-1 problem
+shortlist) is approved procedurally; the concrete list is generated and
+confirmed at P3. Ready for P1.
 Branch/worktree: `docs/metatask-integration-plan` @ `.worktrees/metatask-integration-plan`.
 Inputs: `MetaTask 现状盘点` (2026-09-27, AI_Sunny), `docs/design/long-term-task-redesign-plan.md`
 (quadrant routing + reference-not-mixin boundary), owner session 2026-09-27.
@@ -21,7 +24,8 @@ Owner rulings already taken (2026-09-27 session):
   mathematically but not yet formalized in Lean ("solved-but-unformalized");
   Riemann-style open problems run as a long-line showcase task, explicitly
   positioned as research/demonstration, not award-claiming.
-- Split function form and amend scope: **pending** — options in §2 (D-1, D-4).
+- Split function form and amend scope: **ruled 2026-09-27** — D-1 = A,
+  D-4 = A (§2).
 
 ## 1. Goal and positioning
 
@@ -48,23 +52,23 @@ optional accelerator, never a dependency. All UI progress views display the
 block height they were computed at (MVC index lag is a measured fact — 67m46s
 worst case on record).
 
-## 2. Decision register (owner to decide)
+## 2. Decision register (owner rulings 2026-09-27)
 
-| # | Decision | Options | Recommendation |
+| # | Decision | Options | Ruling |
 | --- | --- | --- | --- |
-| D-1 | Split function form | **A** weights + role split + accuracy-weighted reviews (§3.1); **B** = A + rework damping; **C** flat per-verified-node | **A** |
-| D-2 | Publisher share | 0% (publisher earns via own claimed nodes) vs reserved β | **0%** |
-| D-3 | Reviewer pool default | policy-configurable σ/ρ with bounds, default 80/20 | **configurable, default 80/20, bounds [60/40, 90/10]** |
-| D-4 | Amend scope | **A** minimal (never-claimed nodes only, publisher authority); **B** = A + reweight of claimed-never-submitted; **C** full dynamic re-parenting | **A** |
-| D-5 | Settlement manifest | replay output only (off-chain, hash-publishable); vs new on-chain path `/protocols/metatask/settle` | **replay output only** for v1.2; on-chain path deferred until escrow exists |
-| D-6 | Wave-1 problem shortlist | approve the shortlist produced per §6.2 (3–5 problems) | approve after shortlist is generated |
+| D-1 | Split function form | **A** weights + role split + accuracy-weighted reviews (§3.1); **B** = A + rework damping; **C** flat per-verified-node | **A — ruled 2026-09-27** |
+| D-2 | Publisher share | 0% (publisher earns via own claimed nodes) vs reserved β | **0% — ruled 2026-09-27** |
+| D-3 | Reviewer pool default | policy-configurable σ/ρ with bounds, default 80/20 | **Confirmed with A: configurable, default 80/20, bounds [60/40, 90/10]** |
+| D-4 | Amend scope | **A** minimal (never-claimed nodes only, publisher authority); **B** = A + reweight of claimed-never-submitted; **C** full dynamic re-parenting | **A — ruled 2026-09-27** |
+| D-5 | Settlement manifest | replay output only (off-chain, hash-publishable); vs new on-chain path `/protocols/metatask/settle` | **Replay output only for v1.2**; on-chain path revisited when escrow exists |
+| D-6 | Wave-1 problem shortlist | approve the shortlist produced per §6.2 (3–5 problems) | Pending — list generated and confirmed at P3 |
 
 ## 3. Protocol v1.2 change spec
 
 Handed to the designated publishing metabot after owner confirmation. Every
 change below follows the activation process in §3.6.
 
-### 3.1 Settlement (split) semantics — D-1 Option A (recommended)
+### 3.1 Settlement (split) semantics — D-1 Option A (ruled 2026-09-27)
 
 Philosophy: **the split function is declared at publish time and evaluated by
 replay**. The chain never stores a leaderboard (existing protocol rule); the
@@ -112,11 +116,11 @@ automatic β invites publish-farming.
 
 **Rework cycles**: Option A pays only the effective submission's submitter;
 earlier-cycle submitters earn nothing (recorded in the manifest as unpaid
-history). Option B (rejected recommendation): damp by `0.9^(k−1)` per extra
+history). Option B (ruled out 2026-09-27): damp by `0.9^(k−1)` per extra
 cycle — discourages honest iteration on hard nodes.
 
-**Option C (rejected)**: flat equal split per verified node — undervalues
-hard nodes, maximally gameable by dust-node farming.
+**Option C (ruled out 2026-09-27)**: flat equal split per verified node —
+undervalues hard nodes, maximally gameable by dust-node farming.
 
 **Settlement manifest (D-5)**: computed once at task completion (root
 verified). Canonical JSON (ensure_ascii=False conventions per protocol),
@@ -125,7 +129,7 @@ participants → basis-point shares, unpaid history, disputed-node holdouts
 manifest hash may be announced (buzz) by anyone; no new protocol path in
 v1.2.
 
-### 3.2 Task amend — D-4 Option A (recommended)
+### 3.2 Task amend — D-4 Option A (ruled 2026-09-27)
 
 New event path `/protocols/metatask/amend`.
 
