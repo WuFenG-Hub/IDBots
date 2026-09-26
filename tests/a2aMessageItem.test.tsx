@@ -104,8 +104,44 @@ test('A2A message avatars expose Bot Browser targets for both local and peer Bot
     />
   );
 
-  assert.match(incomingMarkup, /<button[^>]*data-browser-global-metaid="idq1senderpeer"[^>]*aria-label="Open Peer Bot in Bot Browser"/);
+  assert.match(incomingMarkup, /<button[^>]*data-browser-global-metaid="idq1senderpeer"[^>]*aria-label="Open Fallback Peer in Bot Browser"/);
   assert.doesNotMatch(incomingMarkup, /data-browser-global-metaid="idq1fallbackpeer"/);
+});
+
+test('A2A incoming message prefers the session-level peerName over the stale message snapshot', () => {
+  const txid = 'a'.repeat(64);
+  const markup = renderToStaticMarkup(
+    <A2AMessageItem
+      message={{
+        id: 'msg-stale-peer-name',
+        type: 'user',
+        content: 'Hello after the peer renamed itself',
+        timestamp: 1_744_444_451_000,
+        metadata: { direction: 'incoming', senderName: 'Twin Bot', txid },
+      }}
+      peerName="小峰"
+    />
+  );
+
+  assert.match(markup, /小峰/);
+  assert.doesNotMatch(markup, /Twin Bot/);
+});
+
+test('A2A incoming message falls back to the message-level senderName when peerName is missing', () => {
+  const txid = 'b'.repeat(64);
+  const markup = renderToStaticMarkup(
+    <A2AMessageItem
+      message={{
+        id: 'msg-sender-name-fallback',
+        type: 'user',
+        content: 'Hello from a snapshot-only peer',
+        timestamp: 1_744_444_452_000,
+        metadata: { direction: 'incoming', senderName: 'Snapshot Peer', txid },
+      }}
+    />
+  );
+
+  assert.match(markup, /Snapshot Peer/);
 });
 
 test('A2A non-chain ordinary messages render as internal status instead of chat bubbles', () => {
