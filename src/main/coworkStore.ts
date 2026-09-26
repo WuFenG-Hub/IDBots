@@ -3538,6 +3538,18 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Message count of one session — the long-term heartbeat's session-rotation
+   * budget check (indexed on cowork_messages.session_id).
+   */
+  countSessionMessages(sessionId: string): number {
+    const row = this.getOne<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM cowork_messages WHERE session_id = ?',
+      [sessionId],
+    );
+    return Number(row?.count ?? 0);
+  }
+
+  /**
    * Archived conversations for the Settings "Archived Chats" panel: sessions
    * put away by the user (records preserved), newest archive first. Separate
    * from listSessions, which deliberately excludes archived rows.

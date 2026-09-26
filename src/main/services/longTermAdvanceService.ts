@@ -38,6 +38,8 @@ const DEFAULT_WAITING_OWNER_REMINDER_MS = 30 * 60_000;
 const DEFAULT_EXTERNAL_REMINDER_MS = 4 * 3_600_000;
 const DEFAULT_FAILURE_STREAK_THRESHOLD = 2;
 const DEFAULT_EXPECTED_MINUTES = 240;
+/** Bound-session message budget before the heartbeat rotates to a fresh session. */
+const DEFAULT_SESSION_ROTATION_MESSAGES = 60;
 
 /** Worker-dispatch telemetry used by supervision (P1) — one row per orchestration attempt tied to the task. */
 export interface LongTermWorkerAttemptSummary {
@@ -63,6 +65,8 @@ export interface LongTermAdvanceSessionStore {
   updateSession(id: string, patch: { status?: string }): unknown;
   addMessage(id: string, message: { type: string; content: string; metadata?: Record<string, unknown> }): unknown;
   getSession(id: string): unknown;
+  /** Message count of a session — the rotation budget check (optional). */
+  countSessionMessages?(id: string): number;
 }
 
 /** Minimal runner shape (satisfied by CoworkRunner). */
@@ -97,6 +101,8 @@ export interface LongTermAdvanceDeps {
   failureStreakThreshold?: number;
   /** P1 supervision: default expected duration (minutes) when the sub-project sets none. */
   defaultExpectedMinutes?: number;
+  /** Session rotation: message budget for the bound session (default 60). */
+  sessionRotationThreshold?: number;
 }
 
 export interface LongTermAdvanceReport {
@@ -181,12 +187,19 @@ function buildNudgePrompt(
   reasons: string[],
   language: string,
   supervisionAttempts: LongTermWorkerAttemptSummary[] | null = null,
+  rotation: { messages: number } | null = null,
 ): string {
   const criteria = current.acceptanceCriteria.length > 0
     ? current.acceptanceCriteria.map((criterion, index) => `   ${index + 1}. ${criterion}`).join('\n')
     : '   (no acceptance criteria on file — align them with the owner before pushing)';
   if (language === 'zh') {
     const lines = [
+      ...(rotation
+        ? [
+            `【会话轮换】这是本子项目的新接续会话。旧会话已满（${rotation.messages} 条消息）并保持可读归档；你在本会话中没有任何历史上下文。你的持久记忆是任务 journal——绝不依赖聊天历史：先 longterm_task_get 读取完整状态简报，再按下面的要求行动。回复主人时无需解释轮换本身。`,
+            '',
+          ]
+        : []),
       '你是正在为主人推进长期任务的 TwinBot。这个回合由心跳自动开启（不是主人发起的），因为任务看起来可以继续推进。',
       '',
       `任务：「${detail.title}」（taskId: ${detail.id}）`,
@@ -215,6 +228,12 @@ function buildNudgePrompt(
     return lines.join('\n');
   }
   const lines = [
+    ...(rotation
+      ? [
+          `[SESSION ROTATION] This is a fresh continuation session for this sub-project. The previous session reached its message budget (${rotation.messages} messages) and stays readable as an archive; you have NO history in this session. Your persistent memory is the task journal — never chat history: read the full state brief with longterm_task_get first, then act per the requirements below. No need to explain the rotation to the owner.`,
+          '',
+        ]
+      : []),
     'You are the TwinBot driving the owner\'s long-term task. This turn was opened by the heartbeat (not by the owner) because the task looks advanceable.',
     '',
     `Task: "${detail.title}" (taskId: ${detail.id})`,
@@ -251,6 +270,7 @@ export class LongTermAdvanceService {
   private readonly externalReminderMs: number;
   private readonly failureStreakThreshold: number;
   private readonly defaultExpectedMinutes: number;
+  private readonly sessionRotationThreshold: number;
   private readonly emitLog: (line: string) => void;
 
   constructor(deps: LongTermAdvanceDeps) {
@@ -261,6 +281,7 @@ export class LongTermAdvanceService {
     this.externalReminderMs = Math.max(3_600_000, Math.trunc(deps.externalReminderMs ?? DEFAULT_EXTERNAL_REMINDER_MS));
     this.failureStreakThreshold = Math.max(1, Math.trunc(deps.failureStreakThreshold ?? DEFAULT_FAILURE_STREAK_THRESHOLD));
     this.defaultExpectedMinutes = Math.max(1, Math.trunc(deps.defaultExpectedMinutes ?? DEFAULT_EXPECTED_MINUTES));
+    this.sessionRotationThreshold = Math.max(10, Math.trunc(deps.sessionRotationThreshold ?? DEFAULT_SESSION_ROTATION_MESSAGES));
     this.emitLog = deps.emitLog ?? ((line: string) => console.log(line));
   }
 
@@ -517,13 +538,25 @@ export class LongTermAdvanceService {
     const runner = this.deps.coworkRunner();
     const twinId = this.deps.resolveTwinMetabotId();
     const language = this.deps.getAppLanguage?.() ?? 'en';
-    const prompt = buildNudgePrompt(detail, current, reasons, language, supervisionAttempts);
 
-    let sessionId = current.sessionId ?? '';
+    const boundSessionId = current.sessionId ?? '';
+    let sessionId = '';
     let reusedSession = false;
-    if (sessionId && coworkStore.getSession(sessionId)) {
-      reusedSession = true;
-    } else {
+    let rotation: { from: string; messages: number } | null = null;
+    if (boundSessionId && coworkStore.getSession(boundSessionId)) {
+      const messageCount = coworkStore.countSessionMessages?.(boundSessionId) ?? 0;
+      if (messageCount < this.sessionRotationThreshold) {
+        sessionId = boundSessionId;
+        reusedSession = true;
+      } else {
+        // Session rotation: the bound session is over its message budget —
+        // unbounded context growth is how anchor drift starts on multi-week
+        // tasks. The journal (not chat history) is the TwinBot's memory, so a
+        // fresh session carrying the continuity preamble is safe.
+        rotation = { from: boundSessionId, messages: messageCount };
+      }
+    }
+    if (!sessionId) {
       let skillsPrompt: string | null = null;
       if (this.deps.getSkillsPrompt) {
         try {
@@ -544,7 +577,19 @@ export class LongTermAdvanceService {
       );
       sessionId = session.id;
       this.deps.store().bindSession(current.id, sessionId, 'system');
+      if (rotation) {
+        this.deps.store().addNote(
+          detail.id,
+          current.id,
+          `session rotated: ${rotation.from} → ${sessionId} (${rotation.messages} messages; continuity via journal)`,
+          'system',
+        );
+        this.emitLog(
+          `[LongTermAdvance] rotated session for task "${detail.title}" sub-project #${current.ordinal}: ${rotation.from} → ${sessionId} (${rotation.messages} messages)`,
+        );
+      }
     }
+    const prompt = buildNudgePrompt(detail, current, reasons, language, supervisionAttempts, rotation);
 
     coworkStore.updateSession(sessionId, { status: 'running' });
     coworkStore.addMessage(sessionId, {

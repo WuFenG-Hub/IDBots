@@ -20,9 +20,11 @@ const HOUR = 3_600_000;
 
 function makeStubCowork() {
   const sessions = new Map();
+  const counts = new Map();
   const calls = { create: [], update: [], message: [] };
   return {
     calls,
+    counts,
     createSession(title, cwd, systemPrompt, mode, skills, metabotId, sessionType) {
       const id = `sess-${sessions.size + 1}`;
       sessions.set(id, { id, title, sessionType, skills: [...(skills ?? [])] });
@@ -30,8 +32,9 @@ function makeStubCowork() {
       return { id };
     },
     updateSession(id, patch) { calls.update.push({ id, patch }); },
-    addMessage(id, msg) { calls.message.push({ id, msg }); },
+    addMessage(id, msg) { counts.set(id, (counts.get(id) ?? 0) + 1); calls.message.push({ id, msg }); },
     getSession(id) { return sessions.get(id) ?? null; },
+    countSessionMessages(id) { return counts.get(id) ?? 0; },
   };
 }
 
@@ -271,6 +274,41 @@ test('stale detection survives the 200-event detail cap (direct queries, not sli
   const report = await advance.run(Date.now() + HOUR);
   assert.equal(report.escalated.length, 1, JSON.stringify(report));
   assert.match(report.escalated[0].reasons[0], /stale owner wait/);
+});
+
+test('session rotation: an over-budget bound session is rotated with a continuity preamble', async () => {
+  const { store, cowork, runner, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  await new LongTermAdvanceService(deps).run(now); // opens + binds session 1
+  const firstSessionId = store.getTask(taskId).subtasks[0].sessionId;
+  cowork.counts.set(firstSessionId, 60); // over the default budget
+
+  const report = await new LongTermAdvanceService(deps).run(now + 2 * HOUR);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  const hit = report.escalated[0];
+  assert.equal(hit.reusedSession, false, 'rotation opens a fresh session');
+  assert.notEqual(hit.sessionId, firstSessionId);
+  assert.equal(store.getTask(taskId).subtasks[0].sessionId, hit.sessionId, 'sub-project rebound to the new session');
+  assert.match(runner.starts[1].prompt, /SESSION ROTATION/);
+  assert.ok(runner.starts[1].prompt.includes('60 messages'), 'rotation budget stated in the preamble');
+  // The rotation is journaled as a system note (excluded from stale-work detection).
+  const events = store.getTask(taskId).events;
+  assert.ok(events.some((event) => event.kind === 'note' && event.actor === 'system' && /session rotated/.test(event.detail)));
+});
+
+test('session rotation: under-budget bound sessions are reused as before', async () => {
+  const { store, cowork, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  await new LongTermAdvanceService(deps).run(now);
+  const firstSessionId = store.getTask(taskId).subtasks[0].sessionId;
+  cowork.counts.set(firstSessionId, 12);
+
+  const report = await new LongTermAdvanceService(deps).run(now + 2 * HOUR);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.equal(report.escalated[0].reusedSession, true);
+  assert.equal(report.escalated[0].sessionId, firstSessionId);
 });
 
 test('supervision: a leading streak of failed worker dispatches trips a supervise turn, once per new failure', async () => {
