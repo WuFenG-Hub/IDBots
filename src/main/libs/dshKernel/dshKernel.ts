@@ -115,7 +115,20 @@ export class DshKernel {
   /** Diagnostics/tests: how many times the runtime process was restarted. */
   restartCount = 0
 
-  /** Generate config, spawn the runtime, and perform the wire handshake. */
+  /** In-flight boot promise shared by concurrent ensureRuntime callers. The
+   * turn hub serializes its own calls through a per-slot chain, but the crash
+   * respawn-once path restarts outside that chain, and `this.client` only
+   * appears after the ~20s wire handshake — an unmerged second caller in that
+   * window would boot a DUPLICATE runtime; whichever client finished first
+   * got dropped without close(), leaking its process while both wrote one
+   * sessionRoot. Everyone awaits the same boot; a failure clears the memo so
+   * the next caller retries fresh. */
+  private ensureInFlight: Promise<void> | null = null
+
+  /** Generate config, spawn the runtime, and perform the wire handshake.
+   * Concurrent calls coalesce onto one boot (first caller's config); callers
+   * that queued behind the boot re-enter the reuse branch afterwards, so a
+   * config change still takes effect through the normal restart path. */
   async ensureRuntime(config: DshRuntimeConfigInput): Promise<void> {
     if (this.closed) throw new Error('DshKernel: closed')
     if (this.client) {
@@ -125,7 +138,22 @@ export class DshKernel {
       }
       return
     }
+    if (this.ensureInFlight) {
+      await this.ensureInFlight
+      return this.ensureRuntime(config)
+    }
+    const boot = this.bootRuntime(config)
+    this.ensureInFlight = boot
+    try {
+      await boot
+    } finally {
+      this.ensureInFlight = null
+    }
+  }
 
+  /** Spawn the runtime process and complete the wire handshake — the
+   * single-flight body of {@link ensureRuntime}. */
+  private async bootRuntime(config: DshRuntimeConfigInput): Promise<void> {
     const runtimeDir = this.runtimeDir
     const binPath = join(runtimeDir, 'bin.mjs')
     if (!existsSync(binPath)) {
@@ -484,13 +512,27 @@ export class DshKernel {
         // `running` reports false and the next ensureRuntime boots a successor
         // instead of "reusing the live runtime" that no longer exists; the
         // identity guard keeps a superseded pump from nulling a successor's
-        // client after restart() already swapped it. In-flight turns were
+        // client after restart() already swapped it. The per-process mapper
+        // and slot bookkeeping is dead state for a successor process (same
+        // contract as restart()) — clear it so the successor's first events
+        // cannot fold into stale stream positions. In-flight turns were
         // settled through onError below; requests racing the death reject on
         // the dead client and the turn hub's respawn-once path covers them.
         if (this.client === client) {
           this.client = null
           this.pump = null
+          this.mappers.clear()
+          this.slotIds.clear()
+          this.runtimeConfig = null
         }
+        // The transport can reject while the process still hangs (half-dead
+        // stdio), so reap this pump's own child through the SDK's
+        // EOF→SIGTERM→SIGKILL ladder in the background instead of trusting
+        // the exit — idempotent for an already-reaped client, and it never
+        // blocks turn settlement.
+        try {
+          void Promise.resolve(client.close?.()).catch(() => undefined)
+        } catch { /* a broken client object must not block settlement either */ }
         this.opts.handlers.onError?.(error instanceof Error ? error : new Error(String(error)))
       }
     }
