@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { LongTermTaskStore } = require('../dist-electron/main/longTermTaskStore.js');
+const { OrchestrationStore } = require('../dist-electron/main/orchestrationStore.js');
 const { LongTermAdvanceService } = require('../dist-electron/main/services/longTermAdvanceService.js');
 
 /**
@@ -309,6 +310,66 @@ test('routine (non-supervision) turns carry no supervision block', async () => {
   await createActive(store);
   await advance.run(Date.now());
   assert.doesNotMatch(runner.starts[0].prompt, /SUPERVISION check on delegated work/i);
+});
+
+test('telemetry wiring: real OrchestrationStore attempts sourced from the bound session drive the failure streak', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-lt-telemetry-'));
+  const sqliteStore = await SqliteStore.create(dir);
+  const store = new LongTermTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  const orchestration = new OrchestrationStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  const cowork = makeStubCowork();
+  const runner = makeRunner();
+  const deps = {
+    store: () => store,
+    coworkStore: () => cowork,
+    coworkRunner: () => runner,
+    resolveTwinMetabotId: () => 7,
+    resolveWorkingDirectory: () => '/tmp/lt',
+    getBaseSystemPrompt: () => 'base',
+    getSkillsPrompt: async () => null,
+    // Mirrors the main.ts adapter: attempts joined via the bound session id.
+    listWorkerAttempts: (taskId) => {
+      const detail = store.getTask(taskId);
+      const sessionIds = (detail?.subtasks ?? []).map((sub) => sub.sessionId).filter(Boolean);
+      if (sessionIds.length === 0) return [];
+      return orchestration.listAttemptsForSourceSessions(sessionIds).map((attempt) => ({
+        id: attempt.id,
+        label: attempt.idempotencyKey,
+        status: attempt.status,
+        startedAtMs: attempt.startedAt ? Date.parse(attempt.startedAt) : null,
+        finishedAtMs: attempt.finishedAt ? Date.parse(attempt.finishedAt) : null,
+      }));
+    },
+  };
+  const advance = new LongTermAdvanceService(deps);
+  const taskId = await createActive(store);
+  const now = Date.now();
+  // First escalation while the sub-project is pending opens + binds the session.
+  await advance.run(now);
+  const boundSessionId = store.getTask(taskId).subtasks[0].sessionId;
+  assert.ok(boundSessionId, 'session bound by the first escalation');
+
+  // The Twin begins, then two dispatches sourced from that session both fail.
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  const orch = orchestration.createTask({
+    ownerIntent: 'build the thing',
+    sourceSessionId: boundSessionId,
+    twinMetabotId: 7,
+    ownerGlobalMetaId: 'owner-global',
+    origin: 'twin_delegate',
+  });
+  const step = orchestration.createStep({ taskId: orch.id, ordinal: 1, title: 's', objective: 'o' });
+  const first = orchestration.createAttempt({ stepId: step.id, idempotencyKey: 'ltt_x_v1', workerMetabotId: 15, prompt: 'go' });
+  orchestration.updateAttempt(first.id, 'failed', { error: 'boom' });
+  const second = orchestration.createAttempt({ stepId: step.id, idempotencyKey: 'ltt_x_v2', workerMetabotId: 15, prompt: 'go again' });
+  orchestration.updateAttempt(second.id, 'failed', { error: 'boom again' });
+
+  const report = await advance.run(now + 10 * 60_000);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.match(report.escalated[0].reasons[0], /supervision: 2 consecutive failed\/timed-out worker dispatches/);
+  // The dispatch record embedded in the supervision prompt comes from the real store.
+  assert.ok(runner.starts[1].prompt.includes('ltt_x_v2: failed'), 'real attempt rendered in the prompt');
 });
 
 test('in_progress with fresh work events is NOT re-pushed (quiet rule)', async () => {

@@ -6752,6 +6752,28 @@ const getLongTermAdvanceService = () => {
       getSkillsPrompt: async () => getSkillManager().buildAutoRoutingPrompt(),
       // The heartbeat hand-off message follows the owner's UI language.
       getAppLanguage: () => getPersistedAppLanguage(),
+      // P1 supervision telemetry: worker dispatch attempts sourced from this
+      // task's bound sessions (steps → tasks.source_session_id join).
+      listWorkerAttempts: (taskId) => {
+        try {
+          const detail = getLongTermTaskStore().getTask(taskId);
+          const sessionIds = (detail?.subtasks ?? [])
+            .map((sub) => sub.sessionId)
+            .filter((id): id is string => Boolean(id));
+          if (sessionIds.length === 0) return [];
+          return getOrchestrationStore()
+            .listAttemptsForSourceSessions(sessionIds)
+            .map((attempt) => ({
+              id: attempt.id,
+              label: attempt.idempotencyKey,
+              status: attempt.status,
+              startedAtMs: attempt.startedAt ? Date.parse(attempt.startedAt) : null,
+              finishedAtMs: attempt.finishedAt ? Date.parse(attempt.finishedAt) : null,
+            }));
+        } catch {
+          return [];
+        }
+      },
     });
   }
   return longTermAdvanceService;
