@@ -50,6 +50,29 @@ function readYaml(filePath) {
 
 const EXACT_SPEC = /^\d+\.\d+\.\d+(\S*)$/;
 
+// Optional platform binaries that a pnpm install interrupted mid-copy can
+// leave recorded-but-missing: .modules.yaml lists them as hoisted, so later
+// incremental installs never heal the gap (observed 2026-09-27 on an exFAT
+// worktree — @trycua/cua-driver-darwin-arm64 absent, and the first failure
+// surfaced only when a computer-use runtime booted with ResolveLibPathError).
+// These are transitive optionals, so the declared-deps loop never sees them;
+// watch them explicitly when their parent feature is part of the runtime.
+const PLATFORM_OPTIONAL_WATCH = [
+  {
+    whenDeclared: '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native',
+    packageFor(platform, arch) {
+      return {
+        'darwin-arm64': '@trycua/cua-driver-darwin-arm64',
+        'darwin-x64': '@trycua/cua-driver-darwin-x64',
+        'linux-arm64': '@trycua/cua-driver-linux-arm64-gnu',
+        'linux-x64': '@trycua/cua-driver-linux-x64-gnu',
+        'win32-arm64': '@trycua/cua-driver-win32-arm64-msvc',
+        'win32-x64': '@trycua/cua-driver-win32-x64-msvc',
+      }[`${platform}-${arch}`];
+    },
+  },
+];
+
 // pnpm records peer-suffix annotations on resolved versions
 // (e.g. `0.1.7-rc.2(zod@4.3.6)`); the plain semver is what gets installed.
 function stripPeerSuffix(version) {
@@ -123,6 +146,18 @@ function checkDshRuntimeDeps(projectRoot) {
       if (installedVersion !== spec) {
         problems.push(`${name}: installed ${installedVersion}, required ${spec}`);
       }
+    }
+  }
+
+  for (const watch of PLATFORM_OPTIONAL_WATCH) {
+    if (!(watch.whenDeclared in declared)) continue;
+    const pkgName = watch.packageFor(process.platform, process.arch);
+    if (!pkgName) continue; // unknown platform: nothing to verify here
+    if (!fs.existsSync(path.join(nodeModulesDir, pkgName, 'package.json'))) {
+      problems.push(
+        `${pkgName} is recorded but missing on disk (optional platform binary for ${watch.whenDeclared}); ` +
+        'an interrupted pnpm install can leave this gap forever — heal with: pnpm --dir dsh-runtime install --force',
+      );
     }
   }
 
