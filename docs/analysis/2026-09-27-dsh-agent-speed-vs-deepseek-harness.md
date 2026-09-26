@@ -169,3 +169,54 @@ Composition of the IDBots overhead:
 - Telemetry: DSH session JSONL `assistant/message.usage`
   (`inputTokens/cacheReadTokens/outputTokens/reasoningTokens`) and
   `stream[].dt` timings; analysis script logic reproduced in this document.
+
+---
+
+## Addendum (2026-09-27, same day): controlled A/B + first optimization slice
+
+**A/B harness.** `scripts/perf/ab-baseline-dsh.mjs` drives BOTH shapes through
+this repo's own dsh-runtime (same kernel, same driver, same model
+deepseek-flash at effort high): side "idbots" replays the app's real request
+shape (system prompt + host-tool catalog extracted from a live session
+artifact), side "stock" runs a hand-translated stock base-bundle composition
+(23-tool catalog, harness identity, lean prompt). Fresh session per task;
+artifacts parsed with one shared parser.
+
+**Baseline result (identical scripted tasks):**
+
+| | idbots shape | stock shape |
+|---|---|---|
+| first-step input tokens | 36,769 | 11,791 (3.1× smaller) |
+| reasoning tokens/step | 0 | 0 |
+| wall per simple task | 4.4–9.6 s | 4.9–11.4 s |
+
+On trivial scripted prompts the model (V4.1 flash, adaptive thinking) does not
+reason on either side — confirming that the real-world 9× reasoning gap
+(p50 732 vs 81) is driven by real task complexity engaging the extra
+instruction surface, not by the pipeline. Decode speeds match (~200–250 tok/s).
+Known harness limitation: file-tool tasks stall after the first tool result on
+both sides (follow-up model request never completes; under investigation) —
+the default task set is reasoning-only for now.
+
+**Landed slices (this branch):**
+
+1. **R3 — output ceiling**: DeepSeek V4 family max output 32,768 → 256,000
+   (upstream parity; `coworkModelLimits.ts`, generator default, idempotent
+   startup migration for provider rows pinning the legacy 32K).
+2. **R1 — prompt layers**: the four always-on MetaWeb sections rewritten in
+   compact form with every normative rule preserved
+   (worldview 3.9 KB→2.5 KB, learning loop 3.0 KB→1.5 KB, Q&A behavior
+   3.3 KB→1.7 KB, chain-ids 1.7 KB→0.9 KB).
+3. **R2 — tool schemas**: the 8 heaviest host-tool descriptions compressed
+   (omni_read 1.7 K→0.9 K, search_metaweb 1.5 K→0.9 K, post_* suite, batch
+   reader; shared on-chain-write disclaimer ×4 files).
+
+**Measured effect on the real app request shape** (same session extraction,
+before vs after): system prompt −3,448 B, tool descriptions −3,471 chars —
+**≈ −6.9 KB per request**, first-step input 36,769 → 35,194 tokens (−4.3%).
+
+**Not yet done (follow-ups):** the remaining ~20 mid-size host-tool
+descriptions (like_pin, comment_pin, knowledge_*, procedure_*, search_qa,
+get_question_answers, social_* ≈ 8 KB more); per-session gating of metaweb
+layers for non-MetaWeb workspaces; the A/B tool-task stall; effort=low default
+for conversational sessions.
