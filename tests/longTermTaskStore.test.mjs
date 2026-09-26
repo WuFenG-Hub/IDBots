@@ -281,6 +281,11 @@ test('expected-duration budget: persisted at creation, updated, cleared; invalid
   const cleared = store.updateSubtask({ subtaskId: id, expectedMinutes: null }, 'twin');
   assert.ok(cleared.ok);
   assert.equal(cleared.value.expectedMinutes, null);
+
+  // The budget rides the board summary so the card can show it.
+  assert.equal(store.getTask(created.value.id).currentExpectedMinutes, null);
+  store.updateSubtask({ subtaskId: id, expectedMinutes: 300 }, 'twin');
+  assert.equal(store.getTask(created.value.id).currentExpectedMinutes, 300);
 });
 
 test('migration: a pre-P1 database gains expected_minutes via a guarded ALTER, rows intact', async () => {

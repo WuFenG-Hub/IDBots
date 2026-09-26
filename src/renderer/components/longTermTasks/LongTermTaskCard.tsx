@@ -44,6 +44,13 @@ export function formatAbsDate(iso: string): string {
   }
 }
 
+/** Compact budget rendering for the card line: 240 → 4h, 90 → 1.5h, 45 → 45min. */
+function formatBudget(minutes: number): string {
+  if (minutes < 60) return `${minutes}min`;
+  const hours = minutes / 60;
+  return `${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`;
+}
+
 /** The "next step" line under the current stage (renderer composes, main supplies facts). */
 export function nextActionText(card: LongTermTaskSummary): string {
   const note = card.currentWaitNote ?? '';
@@ -52,8 +59,12 @@ export function nextActionText(card: LongTermTaskSummary): string {
       return i18nService.t('longTermTask.next.waitingOwner').replace('{note}', note);
     case 'waiting_external':
       return i18nService.t('longTermTask.next.waitingExternal').replace('{note}', note);
-    case 'in_progress':
-      return i18nService.t('longTermTask.next.inProgress');
+    case 'in_progress': {
+      const base = i18nService.t('longTermTask.next.inProgress');
+      return card.currentExpectedMinutes !== null
+        ? `${base} · ${i18nService.t('longTermTask.next.budget').replace('{minutes}', formatBudget(card.currentExpectedMinutes))}`
+        : base;
+    }
     default:
       return card.stage === 'defining'
         ? i18nService.t('longTermTask.next.defining')

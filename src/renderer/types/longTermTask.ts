@@ -157,6 +157,8 @@ export interface LongTermTaskSummary {
   currentSubtaskStatus: LongTermSubtaskStatus | null;
   /** Present when the current sub-task waits on something (wait_note). */
   currentWaitNote: string | null;
+  /** The current sub-task's expected-duration budget in minutes (null = default). */
+  currentExpectedMinutes: number | null;
   progress: LongTermProgress;
   counts: Record<LongTermSubtaskStatus, number>;
   /** Participating bots: twin + delegated workers + group-task members (derived read-time). */

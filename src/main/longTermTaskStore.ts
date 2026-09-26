@@ -388,6 +388,7 @@ export class LongTermTaskStore {
       currentSubtaskTitle: current?.title ?? null,
       currentSubtaskStatus: current?.status ?? null,
       currentWaitNote: current && current.waitNote ? current.waitNote : null,
+      currentExpectedMinutes: current?.expectedMinutes ?? null,
       progress: deriveProgress(subtasks),
       counts,
       participants: this.resolveParticipants(this.listParticipantIds(taskRow, subtasks)),
