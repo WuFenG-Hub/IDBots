@@ -7,14 +7,22 @@ export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 32_768;
 export const DEEPSEEK_V4_PRO_CONTEXT_WINDOW = 1_000_000;
 export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
 // The DeepSeek API allows up to 384K output tokens for the whole V4 family
-// (https://api-docs.deepseek.com/zh-cn/quick_start/pricing). 32K is the app's
-// declared ceiling — aligned with the MetaApp bridge's maxOutputTokens
-// validation limit (botBrowserBridgeService) — and only caps generation; it
-// costs nothing for short replies since billing is by actual tokens used.
-// Thinking-mode reasoning shares this budget, so small ceilings truncate
-// thinking-enabled replies (the 2026-08-08 dream-diary failure mode).
-export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 32_768;
-export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 32_768;
+// (https://api-docs.deepseek.com/zh-cn/quick_start/pricing). 256K is the app's
+// declared ceiling — aligned with upstream deepseek-harness
+// (DEFAULT_MAX_TOKENS in packages/llm/llm-deepseek/src/defaults.ts), whose
+// flash catalog entries declare no per-model maxTokens so the 256K default
+// applies. Thinking-mode reasoning shares the output budget, so the earlier
+// 32K ceiling truncated effort-high/effort-max steps mid-thought and forced
+// the paid truncated-turn auto-continue (observed as `max-tokens` turn/end
+// reasons in IDBots logs, none upstream); 256K restores parity. This is
+// independent of the MetaApp bridge's maxOutputTokens validation limit
+// (botBrowserBridgeService caps MetaApp-requested completions at 32K — that
+// is a separate API contract and stays unchanged). Billing is by actual
+// tokens used, so a higher declared ceiling costs nothing for short replies.
+// Existing installs' provider rows that pin the old 32_768 default are
+// rewritten once at startup (services/deepseekOutputCeilingMigration).
+export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 256_000;
+export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 256_000;
 // GLM-5.x actual max output is 128K (z.ai). The app's declared ceiling is
 // 32K — same cap as DeepSeek / the MetaApp bridge / the app-wide default —
 // so thinking-enabled turns cannot exhaust a small ceiling mid-thought
@@ -302,6 +310,14 @@ function buildLimits(
  * false). Used by the OpenAI-compat proxy to degrade image blocks for
  * non-vision models when replaying history.
  */
+/** True for model ids of the DeepSeek V4+/flash family (V4.1 renamed to
+ *  `deepseek-flash`), including gateway-prefixed and ephemeral-SKU forms.
+ *  Shared with the output-ceiling startup migration so both layers agree on
+ *  which provider rows count as "DeepSeek family". */
+export function isDeepSeekFamilyModelId(modelId: string | null | undefined): boolean {
+  return deepseekV4FamilyLimits(normalizeModelId(modelId)) !== undefined;
+}
+
 export function modelSupportsVision(modelId: string | null | undefined): boolean {
   const normalized = normalizeModelId(modelId);
   if (!normalized) {

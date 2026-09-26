@@ -82,13 +82,13 @@ test('resolveCoworkModelLimits can use built-in DeepSeek V4 Pro defaults by mode
   assert.deepEqual(limits, {
     modelId: 'deepseek-v4-pro',
     contextWindow: 1_000_000,
-    maxOutputTokens: 32_768,
+    maxOutputTokens: 256_000,
     supportsVision: false,
     source: 'known-model',
   });
 });
 
-test('deepseek-v4-flash declares a 32K output ceiling instead of a smaller fallback', async () => {
+test('deepseek-v4-flash declares the 256K harness-aligned output ceiling', async () => {
   const { resolveCoworkModelLimits } = await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   const limits = resolveCoworkModelLimits({
@@ -98,7 +98,7 @@ test('deepseek-v4-flash declares a 32K output ceiling instead of a smaller fallb
 
   assert.equal(limits.source, 'known-model');
   assert.equal(limits.contextWindow, 1_000_000);
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 256_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -459,7 +459,7 @@ test('deepseek-v4-flash-vision-exp resolves supportsVision=true', async () => {
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek-v4-flash-vision-exp');
   assert.equal(limits.supportsVision, true);
   assert.equal(limits.contextWindow, 1_000_000);
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 256_000);
   assert.equal(limits.source, 'known-model');
   assert.equal(modelSupportsVision('deepseek-v4-flash-vision-exp'), true);
 });
@@ -507,7 +507,7 @@ test('uncatalogued v4.1 promo SKU with partial provider metadata inherits the fa
   });
 
   assert.equal(limits.contextWindow, 1_000_000);
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 256_000);
   assert.equal(limits.supportsVision, false);
   assert.equal(limits.source, 'provider-model');
 });
@@ -518,7 +518,7 @@ test('uncatalogued v4 family id without any provider metadata resolves family-mo
 
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek-v4.2-ultra');
   assert.equal(limits.contextWindow, 1_000_000);
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 256_000);
   assert.equal(limits.supportsVision, false);
   assert.equal(limits.source, 'family-model');
 });
@@ -528,7 +528,7 @@ test('gateway-prefixed v4.1 ids match on the last path segment', async () => {
     await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek/deepseek-v4.1-flash');
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 256_000);
   assert.equal(limits.source, 'family-model');
 });
 
@@ -541,7 +541,7 @@ test('gateway-prefixed deepseek-flash ids inherit the multimodal V4.1 family lim
   // the legacy v4-* line, which stays fail-safe false unless the SKU says so.
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek/deepseek-flash');
   assert.equal(limits.contextWindow, 1_000_000);
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 256_000);
   assert.equal(limits.supportsVision, true);
   assert.equal(limits.source, 'family-model');
 });
@@ -552,7 +552,7 @@ test('family fallback marks vision SKUs and never overrides explicit provider va
 
   const vision = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek-v4.1-flash-vision');
   assert.equal(vision.supportsVision, true);
-  assert.equal(vision.maxOutputTokens, 32_768);
+  assert.equal(vision.maxOutputTokens, 256_000);
 
   const explicit = resolveCoworkModelLimits({
     model: { defaultModel: 'deepseek-v4.1-pro', availableModels: [] },
@@ -586,4 +586,18 @@ test('catalogued models without an explicit output ceiling inherit the 32K defau
     assert.equal(limits.maxOutputTokens, 32_768, `${modelId} must inherit the 32K default`);
     assert.equal(limits.source, 'known-model', modelId);
   }
+});
+
+
+test('isDeepSeekFamilyModelId matches the V4+/flash family across gateway and SKU forms', async () => {
+  const { isDeepSeekFamilyModelId } = await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  assert.equal(isDeepSeekFamilyModelId('deepseek-flash'), true);
+  assert.equal(isDeepSeekFamilyModelId('deepseek/deepseek-flash'), true);
+  assert.equal(isDeepSeekFamilyModelId('deepseek-v4.1-flash-expires-on-0910'), true);
+  assert.equal(isDeepSeekFamilyModelId('deepseek-v4-pro'), true);
+  assert.equal(isDeepSeekFamilyModelId('deepseek-chat'), false);
+  assert.equal(isDeepSeekFamilyModelId('glm-5.3-flash'), false);
+  assert.equal(isDeepSeekFamilyModelId(''), false);
+  assert.equal(isDeepSeekFamilyModelId(null), false);
 });
