@@ -19,6 +19,10 @@ import type { LongTermSubtask, LongTermTaskDetail } from '../../renderer/types/l
  *  - a wait-establishing event is STALE: the journal shows work on the
  *    sub-project after it, so the board state must be converged (unblocked
  *    or re-recorded) instead of re-reminding the owner.
+ *  - (P1 supervision) the current in-progress sub-project is stalling: its
+ *    most recent worker dispatches all failed/timed out, or it has run past
+ *    its expected-duration budget without converging — a supervision turn
+ *    then demands a verdict and ONE corrective action from the TwinBot.
  *
  * Discipline (owner ruling): driving completion outranks quiet — there is no
  * daily cap. The only throttle is "no new information, no new nudge": per
@@ -32,6 +36,18 @@ const DEFAULT_MAX_ESCALATIONS_PER_RUN = 2;
 const DEFAULT_NUDGE_THROTTLE_MS = 30 * 60_000;
 const DEFAULT_WAITING_OWNER_REMINDER_MS = 30 * 60_000;
 const DEFAULT_EXTERNAL_REMINDER_MS = 4 * 3_600_000;
+const DEFAULT_FAILURE_STREAK_THRESHOLD = 2;
+const DEFAULT_EXPECTED_MINUTES = 240;
+
+/** Worker-dispatch telemetry used by supervision (P1) — one row per orchestration attempt tied to the task. */
+export interface LongTermWorkerAttemptSummary {
+  id: string;
+  /** Human-readable dispatch label (the attempt's idempotency key). */
+  label: string | null;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled';
+  startedAtMs: number | null;
+  finishedAtMs: number | null;
+}
 
 /** Minimal session-store shape (satisfied by CoworkStore). */
 export interface LongTermAdvanceSessionStore {
@@ -75,6 +91,12 @@ export interface LongTermAdvanceDeps {
   waitingOwnerReminderMs?: number;
   /** Quiet time before re-checking an untimed external wait (default 4h). */
   externalReminderMs?: number;
+  /** P1 supervision: worker dispatch attempts tied to the task (via its bound sessions). */
+  listWorkerAttempts?: (taskId: string) => LongTermWorkerAttemptSummary[];
+  /** P1 supervision: leading failed/timed-out dispatch count that trips a supervise turn. */
+  failureStreakThreshold?: number;
+  /** P1 supervision: default expected duration (minutes) when the sub-project sets none. */
+  defaultExpectedMinutes?: number;
 }
 
 export interface LongTermAdvanceReport {
@@ -177,6 +199,8 @@ export class LongTermAdvanceService {
   private readonly nudgeThrottleMs: number;
   private readonly waitingOwnerReminderMs: number;
   private readonly externalReminderMs: number;
+  private readonly failureStreakThreshold: number;
+  private readonly defaultExpectedMinutes: number;
   private readonly emitLog: (line: string) => void;
 
   constructor(deps: LongTermAdvanceDeps) {
@@ -185,6 +209,8 @@ export class LongTermAdvanceService {
     this.nudgeThrottleMs = Math.max(60_000, Math.trunc(deps.nudgeThrottleMs ?? DEFAULT_NUDGE_THROTTLE_MS));
     this.waitingOwnerReminderMs = Math.max(60_000, Math.trunc(deps.waitingOwnerReminderMs ?? DEFAULT_WAITING_OWNER_REMINDER_MS));
     this.externalReminderMs = Math.max(3_600_000, Math.trunc(deps.externalReminderMs ?? DEFAULT_EXTERNAL_REMINDER_MS));
+    this.failureStreakThreshold = Math.max(1, Math.trunc(deps.failureStreakThreshold ?? DEFAULT_FAILURE_STREAK_THRESHOLD));
+    this.defaultExpectedMinutes = Math.max(1, Math.trunc(deps.defaultExpectedMinutes ?? DEFAULT_EXPECTED_MINUTES));
     this.emitLog = deps.emitLog ?? ((line: string) => console.log(line));
   }
 
@@ -212,13 +238,17 @@ export class LongTermAdvanceService {
       }
       const latestEventId = detail.events[0]?.id ?? 0;
       const nudgeState = store.getNudgeState(card.id);
-      const reasons = this.collectReasons(detail, current, nowMs, nudgeState === null || latestEventId > nudgeState.lastEventId);
+      const supervision = this.supervisionSignal(detail, current, nowMs);
+      const reasons = this.collectReasons(detail, current, nowMs, nudgeState === null || latestEventId > nudgeState.lastEventId, supervision);
       if (reasons.length === 0) {
         report.skipped.push({ taskId: card.id, reason: `current sub-project is ${current.status}, nothing due` });
         continue;
       }
       // Throttle: one escalation per task per window, unless the journal moved
-      // (new information) or a timed wait expired (a clock condition, not noise).
+      // (new information) or a timed wait expired (a clock condition, not
+      // noise). A supervision signal is new information by construction — a
+      // fresh failure signature or an elapsed budget window — so it too
+      // bypasses the noise throttle (its own re-arm state prevents spam).
       const waitDue =
         current.status === 'waiting_external' &&
         current.waitUntil !== null &&
@@ -227,7 +257,7 @@ export class LongTermAdvanceService {
         nudgeState !== null &&
         nowMs - nudgeState.lastNudgeAtMs < this.nudgeThrottleMs &&
         latestEventId <= nudgeState.lastEventId;
-      if (throttled && !waitDue) {
+      if (throttled && !waitDue && supervision === null) {
         report.skipped.push({ taskId: card.id, reason: 'nudge throttled (no new events since last escalation)' });
         continue;
       }
@@ -249,6 +279,9 @@ export class LongTermAdvanceService {
         // nudge would count as "new events" and defeat the throttle next run.
         const postEventId = store.getTask(card.id)?.events[0]?.id ?? latestEventId;
         store.setNudgeState(card.id, { lastNudgeAtMs: nowMs, lastEventId: postEventId });
+        if (supervision) {
+          store.setSuperviseState(card.id, { lastSuperviseAtMs: nowMs, lastSignal: supervision.signature });
+        }
         this.emitLog(
           `[LongTermAdvance] escalated task "${detail.title}" sub-project #${current.ordinal} ` +
             `(${outcome.reusedSession ? 'continued' : 'opened'} session ${outcome.sessionId}): ${reasons.join('; ')}`,
@@ -266,19 +299,29 @@ export class LongTermAdvanceService {
     return report;
   }
 
-  private collectReasons(detail: LongTermTaskDetail, current: LongTermSubtask, nowMs: number, hasNewEventsSinceNudge: boolean): string[] {
+  private collectReasons(
+    detail: LongTermTaskDetail,
+    current: LongTermSubtask,
+    nowMs: number,
+    hasNewEventsSinceNudge: boolean,
+    supervision: { reasons: string[]; signature: string } | null,
+  ): string[] {
     const lastActivityAtMs = detail.events[0] ? Date.parse(detail.events[0].createdAt) : Date.parse(detail.updatedAt);
     const quietMs = nowMs - lastActivityAtMs;
     switch (current.status) {
       case 'pending':
         return ['current sub-project is pending and ready to begin'];
-      case 'in_progress':
+      case 'in_progress': {
+        // P1: supervision outranks the plain quiet push — a stalling or
+        // looping delegation gets a supervision turn, not just "push it".
+        if (supervision) return supervision.reasons;
         // A fresh begin/work event means a turn just ran — only re-push once
         // the work has gone quiet for a full throttle window.
         if (quietMs > this.nudgeThrottleMs) {
           return ['current sub-project is in progress but has gone quiet — needs a push'];
         }
         return [];
+      }
       case 'waiting_external':
         if (current.waitUntil !== null && Date.parse(current.waitUntil) <= nowMs) {
           return [`timed wait expired — re-check the condition (${current.waitNote})`];
@@ -342,6 +385,77 @@ export class LongTermAdvanceService {
     const anchorIndex = events.findIndex((event) => event.kind === 'waiting' || event.kind === 'proposed');
     if (anchorIndex === -1) return false;
     return events.slice(0, anchorIndex).some((event) => event.kind !== 'nudged');
+  }
+
+  /**
+   * P1 supervision: cheap local stall detection on the current in-progress
+   * sub-project — no LLM involved. Two triggers, each self-re-arming via the
+   * per-task supervise state:
+   *  - failure streak: the N most recent worker dispatches for this task all
+   *    ended failed/timed_out; the signature (count + latest failed id) means
+   *    each NEW failure supervises exactly once;
+   *  - duration overrun: in progress longer than the sub-project's expected
+   *    budget (or the default) without converging; re-armed once per budget
+   *    window since the last supervision.
+   */
+  private supervisionSignal(
+    detail: LongTermTaskDetail,
+    current: LongTermSubtask,
+    nowMs: number,
+  ): { reasons: string[]; signature: string } | null {
+    if (current.status !== 'in_progress') return null;
+    const state = this.deps.store().getSuperviseState(detail.id);
+    const attempts = this.deps.listWorkerAttempts?.(detail.id) ?? [];
+    const ordered = [...attempts].sort(
+      (a, b) => (b.finishedAtMs ?? b.startedAtMs ?? 0) - (a.finishedAtMs ?? a.startedAtMs ?? 0),
+    );
+    let streak = 0;
+    let latestFailedId = '';
+    for (const attempt of ordered) {
+      if (attempt.status === 'failed' || attempt.status === 'timed_out') {
+        streak += 1;
+        if (!latestFailedId) latestFailedId = attempt.id;
+      } else break;
+    }
+    if (streak >= this.failureStreakThreshold) {
+      const signature = `fails:${streak}@${latestFailedId}`;
+      if (signature !== state?.lastSignal) {
+        return {
+          reasons: [
+            `supervision: ${streak} consecutive failed/timed-out worker dispatches (latest ${latestFailedId}) — supervise the delegated work: diagnose the common failure mode and correct course or reassign; a third identical retry is forbidden`,
+          ],
+          signature,
+        };
+      }
+    }
+    const enteredAtMs = this.enteredInProgressAtMs(detail, current);
+    const expectedMinutes = current.expectedMinutes ?? this.defaultExpectedMinutes;
+    const budgetMs = expectedMinutes * 60_000;
+    if (
+      enteredAtMs !== null &&
+      nowMs - enteredAtMs > budgetMs &&
+      (!state || nowMs - state.lastSuperviseAtMs >= budgetMs)
+    ) {
+      const hours = Math.max(1, Math.round((nowMs - enteredAtMs) / 3_600_000));
+      return {
+        reasons: [
+          `supervision: in progress for >${hours}h without converging (budget ${expectedMinutes}min) — supervise: verify the work is still moving toward the acceptance criteria, not looping`,
+        ],
+        signature: 'duration',
+      };
+    }
+    return null;
+  }
+
+  /** When the sub-project last entered in_progress: newest began/unblocked/rejected event, else updatedAt. */
+  private enteredInProgressAtMs(detail: LongTermTaskDetail, current: LongTermSubtask): number | null {
+    const event = detail.events.find(
+      (entry) =>
+        entry.subtaskId === current.id &&
+        (entry.kind === 'began' || entry.kind === 'unblocked' || entry.kind === 'rejected'),
+    );
+    const parsed = Date.parse(event?.createdAt ?? current.updatedAt);
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   /** Open (once) or continue (afterwards) the sub-project's bound session. */

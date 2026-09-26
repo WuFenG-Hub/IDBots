@@ -225,6 +225,61 @@ test('stale owner wait converges: after the Twin re-records the wait, reminders 
   assert.match(report.escalated[0].reasons[0], /owner decision still pending/);
 });
 
+test('supervision: a leading streak of failed worker dispatches trips a supervise turn, once per new failure', async () => {
+  const { store, runner, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  const now = Date.now();
+  const attempts = [
+    { id: 'a1', label: 'ltt_x_step_v1', status: 'completed', startedAtMs: now - 9 * HOUR, finishedAtMs: now - 8 * HOUR },
+    { id: 'a2', label: 'ltt_x_step_v2', status: 'failed', startedAtMs: now - 7 * HOUR, finishedAtMs: now - 6 * HOUR },
+    { id: 'a3', label: 'ltt_x_step_v3', status: 'timed_out', startedAtMs: now - 5 * HOUR, finishedAtMs: now - 4 * HOUR },
+  ];
+  deps.listWorkerAttempts = () => attempts;
+  const supervisor = new LongTermAdvanceService(deps);
+
+  const first = await supervisor.run(now);
+  assert.equal(first.escalated.length, 1, JSON.stringify(first));
+  assert.match(first.escalated[0].reasons[0], /supervision: 2 consecutive failed\/timed-out worker dispatches/);
+
+  // Signature already consumed: later runs fall back to ordinary logic (a
+  // quiet push at most) — never a repeated supervision for the same failures.
+  const second = await supervisor.run(now + 45 * 60_000);
+  assert.ok(second.escalated.every((hit) => !hit.reasons[0].startsWith('supervision:')), JSON.stringify(second));
+
+  // A NEW failure changes the signature: supervision re-fires — and bypasses
+  // the 30-min noise throttle (last nudge was 5 min ago).
+  const fourth = { id: 'a4', label: 'ltt_x_step_v4', status: 'failed', startedAtMs: now - 3 * HOUR, finishedAtMs: now - 2 * HOUR };
+  deps.listWorkerAttempts = () => [...attempts, fourth];
+  const third = await supervisor.run(now + 50 * 60_000);
+  assert.equal(third.escalated.length, 1, JSON.stringify(third));
+  assert.match(third.escalated[0].reasons[0], /supervision: 3 consecutive/);
+  assert.equal(runner.starts.length, 3, 'three turns total: supervise, quiet push, re-supervise');
+});
+
+test('supervision: duration overrun past the expected budget trips a supervise turn, re-armed once per budget window', async () => {
+  const { store, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(store.updateSubtask({ subtaskId: subtask.id, expectedMinutes: 60 }, 'twin').ok);
+  const supervisor = new LongTermAdvanceService(deps);
+
+  const first = await supervisor.run(now + 90 * 60_000); // 1.5x the budget
+  assert.equal(first.escalated.length, 1, JSON.stringify(first));
+  assert.match(first.escalated[0].reasons[0], /supervision: in progress for >\d+h without converging \(budget 60min\)/);
+
+  // Inside the re-arm window since that supervision: no second supervision.
+  const second = await supervisor.run(now + 2 * HOUR);
+  assert.ok(second.escalated.every((hit) => !hit.reasons[0].startsWith('supervision:')), JSON.stringify(second));
+
+  // A full budget window after the last supervision: it fires again.
+  const third = await supervisor.run(now + 4 * HOUR);
+  assert.equal(third.escalated.filter((hit) => hit.reasons[0].startsWith('supervision:')).length, 1, JSON.stringify(third));
+});
+
 test('in_progress with fresh work events is NOT re-pushed (quiet rule)', async () => {
   const { store, advance } = await openWorld();
   const taskId = await createActive(store);
