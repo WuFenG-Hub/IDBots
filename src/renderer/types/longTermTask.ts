@@ -78,6 +78,7 @@ export type LongTermEventKind =
   | 'waiting'
   | 'unblocked'
   | 'nudged'
+  | 'supervised'
   | 'paused'
   | 'resumed'
   | 'completed'

@@ -552,7 +552,13 @@ export class LongTermAdvanceService {
       content: prompt,
       metadata: { origin: 'heartbeat' },
     });
-    this.deps.store().recordNudge(detail.id, current.id, `heartbeat escalation (${reasons.join('; ')}) → session ${sessionId}`);
+    // Supervision turns journal as 'supervised' — the owner's audit trail
+    // distinguishes interventions from routine pushes.
+    if (supervisionAttempts !== null) {
+      this.deps.store().recordSupervision(detail.id, current.id, `supervision escalation (${reasons.join('; ')}) → session ${sessionId}`);
+    } else {
+      this.deps.store().recordNudge(detail.id, current.id, `heartbeat escalation (${reasons.join('; ')}) → session ${sessionId}`);
+    }
     await runner.startSession(sessionId, prompt, { skipInitialUserMessage: true, confirmationMode: 'text' });
     return { sessionId, reusedSession };
   }

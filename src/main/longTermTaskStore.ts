@@ -604,15 +604,16 @@ export class LongTermTaskStore {
 
   /**
    * True when the sub-project has REAL work after the given event id: any
-   * newer event except heartbeat infrastructure — 'nudged' escalations and
-   * system notes (session binds). A system bookkeeping note is not "the Twin
-   * worked past the wait"; a twin note, replan, or owner action is.
+   * newer event except heartbeat infrastructure — 'nudged'/'supervised'
+   * escalations and system notes (session binds). A system bookkeeping note
+   * is not "the Twin worked past the wait"; a twin note, replan, or owner
+   * action is.
    */
   hasTwinWorkAfter(taskId: string, subtaskId: string, afterEventId: number): boolean {
     const row = this.getOne<{ one: number }>(
       `SELECT 1 AS one FROM long_term_events
        WHERE task_id = ? AND subtask_id = ? AND id > ?
-         AND NOT (kind = 'nudged' OR (kind = 'note' AND actor = 'system'))
+         AND NOT (kind IN ('nudged','supervised') OR (kind = 'note' AND actor = 'system'))
        LIMIT 1`,
       [taskId, subtaskId, afterEventId],
     );
@@ -943,6 +944,18 @@ export class LongTermTaskStore {
    */
   recordNudge(taskId: string, subtaskId: string, detail: string): void {
     this.addEvent(taskId, subtaskId, 'nudged', 'system', detail);
+    this.touch(taskId);
+    this.saveDb();
+  }
+
+  /**
+   * Journal a SUPERVISION escalation (kind 'supervised', actor 'system'): the
+   * heartbeat opened a supervision turn (failure streak / duration overrun)
+   * on this sub-project. Distinct from 'nudged' so the owner's journal — and
+   * future telemetry — can tell routine pushes from interventions.
+   */
+  recordSupervision(taskId: string, subtaskId: string, detail: string): void {
+    this.addEvent(taskId, subtaskId, 'supervised', 'system', detail);
     this.touch(taskId);
     this.saveDb();
   }

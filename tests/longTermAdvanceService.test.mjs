@@ -434,6 +434,10 @@ test('telemetry wiring: real OrchestrationStore attempts sourced from the bound 
   assert.match(report.escalated[0].reasons[0], /supervision: 2 consecutive failed\/timed-out worker dispatches/);
   // The dispatch record embedded in the supervision prompt comes from the real store.
   assert.ok(runner.starts[2].prompt.includes('ltt_x_v2: failed'), 'real attempt rendered in the prompt');
+  // Supervision turns journal as 'supervised' (distinct from routine 'nudged').
+  const events = store.getTask(taskId).events;
+  assert.equal(events[0].kind, 'supervised');
+  assert.equal(events[0].actor, 'system');
 });
 
 test('in_progress with fresh work events is NOT re-pushed (quiet rule)', async () => {
