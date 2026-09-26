@@ -233,7 +233,7 @@ import {
   setRendererMetabotSetting,
 } from './services/metabotSettingsService';
 import { isCoworkMcpMountEnabled } from './services/coworkMcpToolsPreference';
-import { isCoworkBrowserAutomationEnabled, isCoworkComputerUseEnabled } from './services/coworkAutomationPreference';
+import { isCoworkBrowserAutomationEnabled, isCoworkComputerUseEnabled, isExperimentalAutomationAllowed, setExperimentalAutomationAllowed } from './services/coworkAutomationPreference';
 import {
   resumeOpenTeamInviteWatchers,
   setOpenTeamServiceDeps,
@@ -3087,6 +3087,17 @@ const getStore = (): SqliteStore => {
   return store;
 };
 
+/** Store access that tolerates early-boot callers (runtime providers fire
+ *  before every init path has settled; a missing store must read as
+ *  "no override recorded", never as a turn-breaking exception). */
+const getStoreOrNull = (): SqliteStore | null => {
+  try {
+    return getStore();
+  } catch {
+    return null;
+  }
+};
+
 /**
  * R3: rough upper-bound MVC fee estimate for a typical pin (funding + payload
  * outputs, ~600 vB at the resolved fee rate) — feeds the `need ~N sats` part
@@ -5288,11 +5299,13 @@ const getCoworkRunner = () => {
         if (!isCoworkMcpMountEnabled(getMetabotStore(), metabotId)) return [];
         return getMcpStore().getEnabledServers();
       },
-      // Per-bot opt-in (default off): 0.1.7 experimental browser automation
-      // (Playwright MCP) launches one headless Chromium per DSH session.
-      // Prefer the installed Chrome over a Playwright-managed download.
-      // See services/coworkAutomationPreference.ts.
+      // Per-bot opt-in (default off) behind the app-level kill-switch
+      // (automation.experimentalEnabled, default allow): 0.1.7 experimental
+      // browser automation (Playwright MCP) launches one headless Chromium
+      // per DSH session. Prefer the installed Chrome over a Playwright-
+      // managed download. See services/coworkAutomationPreference.ts.
       browserAutomationProvider: (coworkSessionId: string) => {
+        if (!isExperimentalAutomationAllowed(getStoreOrNull())) return undefined;
         const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
         if (!isCoworkBrowserAutomationEnabled(getMetabotStore(), metabotId)) return undefined;
         return { mode: 'launch' as const, headless: true, ...detectSystemChromium() };
@@ -5301,6 +5314,7 @@ const getCoworkRunner = () => {
       // (cua-driver native, in-process). Requires the app to hold the macOS
       // Accessibility/Screen Recording grants — the OS prompts on first use.
       computerUseProvider: (coworkSessionId: string) => {
+        if (!isExperimentalAutomationAllowed(getStoreOrNull())) return false;
         const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
         return isCoworkComputerUseEnabled(getMetabotStore(), metabotId);
       },
@@ -6127,6 +6141,10 @@ const getCoworkRunner = () => {
         const coworkStoreInstance = getCoworkStore();
         const session = coworkStoreInstance.getSession(sessionId);
         if (session?.sessionType !== 'browser') return null;
+        // The Playwright MCP guidance is truthful only when this bot actually
+        // opted in: slot isolation guarantees the tools exist exactly for
+        // opted-in bots, so the prompt must follow the same per-session flag.
+        const browserAutomationOn = isCoworkBrowserAutomationEnabled(getMetabotStore(), session?.metabotId);
         try {
           const result = await getBotBrowserTabBridge().execute({ action: 'get-tabs' });
           const active = result.activeTab;
@@ -6190,7 +6208,9 @@ const getCoworkRunner = () => {
             '- When the user asks for currently-online Bot services, who can do a task right now, or the live service directory, call list_online_services first (query with short task keywords). Present the table with provider names kept as metaid:// links. Open a provider Bot page with bot_browser_open_uri only when the user wants to view it.',
             '- When the user wants to find a person or bot on-chain (view someone\'s bot page, look up who someone is, find users/bots by personality or skill, find someone to chat with), call search_metaids first (query/skill/chainName/chatOnly/sinceDays), open the best match\'s bot page with bot_browser_open_uri on metaid://<globalMetaId>, and offer 2-3 alternatives by name. Use metaid_profile for a specific identity\'s full profile.',
             '- When you mention a specific app or bot in your reply, write it as a markdown link: [title](metaapp://<pinId>) or [name](metaid://<globalMetaId>) — these render as clickable links that open in the Bot Browser. NEVER shorten, truncate, or ellipsis a globalMetaId or pinId; always output them in full inside the link. Prefer the publisher\'s display name (and avatar when available) for authors, but the full globalMetaId must always be the link target. When search_metaapps, search_metaids, list_online_bots, or list_online_services returns table/bullet lines, reuse them VERBATIM — never restate an app, an author, or a person as plain text.',
-            '- External browser automation (Playwright MCP tools, mcp__playwright-mcp__*) exists only when this bot has browser automation enabled, and is for ordinary public websites: the Bot Browser is a separate on-chain surface whose sandboxed pages no external browser can see. Never automate the Bot Browser itself.',
+            ...(browserAutomationOn
+              ? ['- External browser automation (Playwright MCP tools, mcp__playwright-mcp__*) is enabled for this bot and is for ordinary public websites: the Bot Browser is a separate on-chain surface whose sandboxed pages no external browser can see. Never automate the Bot Browser itself.']
+              : []),
             active?.uri
               ? `<active_tab ${activeTabAttrs}>${escapeXml(active.uri)}</active_tab>`
               : '<active_tab />',
@@ -8568,6 +8588,29 @@ if (!gotTheLock) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to set auto-launch',
+      };
+    }
+  });
+
+  // Fleet-wide kill-switch for the 0.1.7 experimental automation backends
+  // (browser automation + desktop computer use). Default allow; '0' cuts
+  // both providers for every bot on their next turn (slot isolation re-pins
+  // the sessions onto the clean runtime).
+  ipcMain.handle('app:getExperimentalAutomation', () => {
+    return { enabled: isExperimentalAutomationAllowed(getStoreOrNull()) };
+  });
+
+  ipcMain.handle('app:setExperimentalAutomation', (_event, enabled: unknown) => {
+    if (typeof enabled !== 'boolean') {
+      return { success: false, error: 'Invalid parameter: enabled must be boolean' };
+    }
+    try {
+      setExperimentalAutomationAllowed(getStore(), enabled);
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set the experimental automation switch',
       };
     }
   });

@@ -75,9 +75,34 @@ export interface DshTurnProviderRoute {
   reasoningEffort?: string
 }
 
-/** Pool key for a DSH runtime process: one subprocess per provider. */
-export function dshRuntimeKeyOf(provider: Pick<DshTurnProviderRoute, 'key'>): string {
-  return provider.key
+/** Automation backends bundled into a runtime slot key. Browser automation
+ *  and computer use mount at composition scope (runtime-wide), so a bot that
+ *  opts in must not share its process with bots that did not — keying the
+ *  slot by the exact opt-in combo makes cross-bot tool leaks structurally
+ *  impossible and lets an opt-out take effect on the very next turn (the
+ *  session re-pins onto the clean runtime, the automation slot idles out). */
+export interface DshAutomationSlotFlags {
+  browser: boolean
+  computer: boolean
+}
+
+/** Pool key for a DSH runtime process: one subprocess per provider AND
+ *  automation combo. Both-off keeps the legacy bare provider key (existing
+ *  runtime ids/config files are untouched); opted-in combos get a filename-
+ *  safe suffix (`.auto-b` / `.auto-c` / `.auto-bc`). */
+export function dshRuntimeKeyOf(
+  provider: Pick<DshTurnProviderRoute, 'key'>,
+  automation?: DshAutomationSlotFlags,
+): string {
+  const browser = automation?.browser === true
+  const computer = automation?.computer === true
+  if (!browser && !computer) return provider.key
+  return `${provider.key}.auto-${browser ? 'b' : ''}${computer ? 'c' : ''}`
+}
+
+/** Map a turn's resolved automation state onto the slot-key flags. */
+function automationSlotFlagsOf(state: DshAutomationSlotState): DshAutomationSlotFlags {
+  return { browser: state.browserUse !== undefined, computer: state.computerUse }
 }
 
 /** Env var carrying the DeepSeek key for the runtime's web-search provider. */
@@ -292,12 +317,15 @@ export interface DshHubOptions {
    * next turn; the config union never removes until restart, same as providers). */
   mcpServersProvider?: (coworkSessionId: string) => DshMcpServerDefinition[]
   /** 0.1.7 experimental browser automation (dsh-browser-use + Playwright MCP),
-   *  per-bot opt-in like MCP mounting. One headless Chromium per session; the
-   *  provider activates for every session on a slot once any bot on it opted
-   *  in — the slot composition is shared, so the entry stays until restart. */
+   *  per-bot opt-in. One headless Chromium per session. The provider mounts at
+   *  composition scope, so opted-in sessions are routed onto their own
+   *  provider+automation runtime slot (dshRuntimeKeyOf) — sessions whose bot
+   *  did not opt in never see the tools, and opting out re-pins the session
+   *  onto the clean slot on the very next turn. */
   browserAutomationProvider?: (coworkSessionId: string) => DshRuntimeConfigInput['browserUse'] | undefined
-  /** 0.1.7 experimental desktop control (cua-driver native). Per-bot opt-in;
-   *  the host app must hold the OS desktop permission grants. */
+  /** 0.1.7 experimental desktop control (cua-driver native). Per-bot opt-in
+   *  with the same slot isolation as browser automation; the host app must
+   *  hold the OS desktop permission grants. */
   computerUseProvider?: (coworkSessionId: string) => boolean
   log?: DshKernelOptions['log']
   /** Extra composition entries for the runtime (test fixtures; later the
@@ -318,8 +346,8 @@ export interface DshHubOptions {
    *  runtime); those values are written to a DSH_SESSION_ID-keyed env file
    *  that bash sources via BASH_ENV after the KEY/TOKEN scrub. */
   skillHostEnvProvider?: () => Record<string, string>
-  /** Close a provider-keyed runtime after this long with no in-flight turns
-   *  (default 30min; 0 disables; tests shrink it). Next turn on that provider
+  /** Close a slot's runtime after this long with no in-flight turns
+   *  (default 30min; 0 disables; tests shrink it). Next turn on that slot
    *  cold-starts and resumes sessions from disk. Also sweeps drained
    *  (superseded) kernels whose turns have all settled. */
   runtimeIdleTtlMs?: number
@@ -365,6 +393,15 @@ const DSH_WARMUP_CALLBACKS: DshTurnCallbacks = {
   onApprovalCancelled: () => undefined,
 }
 
+/** One turn's resolved automation opt-in state, read ONCE per turn from the
+ *  host providers so the slot key, the re-pin decision and the accumulated
+ *  composition can never disagree (a mid-turn toggle race would otherwise
+ *  route by stale flags while unioning fresh ones). */
+interface DshAutomationSlotState {
+  browserUse: DshRuntimeConfigInput['browserUse'] | undefined
+  computerUse: boolean
+}
+
 interface DshEnsureKernelOptions {
   /** Real turns pin composition bash/fs plugin load to the first workspace
    *  (plugin default only). Per-session execution cwd rides session/ensure.
@@ -373,6 +410,9 @@ interface DshEnsureKernelOptions {
   /** Real turns union MCP servers into the composition; warmup does not spawn
    *  user MCP subprocesses at app start. */
   accumulateMcp?: boolean
+  /** Pre-resolved by runTurn (it needs the flags for the re-pin decision
+   *  before ensureKernel runs); ensureKernel resolves them itself otherwise. */
+  automation?: DshAutomationSlotState
 }
 
 /** One DSH subprocess and the composition state it was last spawned with. */
@@ -393,15 +433,18 @@ interface DshRuntimeSlot {
   providersSeen: Map<string, DshProviderRoute>
   routeApiKeys: Map<string, { envName: string; apiKey: string }>
   mcpServersSeen: Map<string, DshMcpServerDefinition>
-  /** First opt-in wins for the slot's lifetime (config unions never remove
-   *  until restart — same stickiness as mcpServersSeen). */
+  /** The slot key already encodes this combo, so every turn landing here
+   *  carries the same values — these simply record them for config rebuilds
+   *  (warmup turns skip accumulation, so the first real turn writes them). */
   browserUseSeen?: DshRuntimeConfigInput['browserUse']
   computerUseSeen: boolean
   lastUsedAt: number
 }
 
 export class DshTurnHub {
-  /** One runtime process per provider key. */
+  /** One runtime process per provider key + automation combo (a bot opted
+   *  into browser/desktop automation never shares a process with bots that
+   *  did not — see dshRuntimeKeyOf). */
   private readonly slots = new Map<string, DshRuntimeSlot>()
   /** Keyed by DSH session id — that is what kernel event callbacks carry. */
   private controllersByDsh = new Map<string, DshTurnController>()
@@ -456,7 +499,7 @@ export class DshTurnHub {
     return total
   }
 
-  /** Test/diagnostics: how many provider-keyed runtime processes exist. */
+  /** Test/diagnostics: how many runtime slots (provider + automation combo) exist. */
   get runtimeSlotCount(): number {
     return this.slots.size
   }
@@ -517,17 +560,24 @@ export class DshTurnHub {
 
   private async runTurnExclusive(input: DshTurnInput): Promise<DshTurnOutcome> {
     if (this.closed) throw new DshShutdownError()
-    const nextKey = dshRuntimeKeyOf(input.provider)
+    // Resolve the automation opt-in ONCE per turn: the slot key below, the
+    // re-pin decision and the composition union inside ensureKernel must all
+    // agree, or a mid-setup toggle could route by stale flags while unioning
+    // fresh ones (re-introducing the cross-bot leak the key split prevents).
+    const automation = this.automationSlotStateOf(input.sessionId)
+    const nextKey = dshRuntimeKeyOf(input.provider, automationSlotFlagsOf(automation))
     const prevKey = this.runtimeKeyByDsh.get(input.dshSessionId)
-    // Same dsh session id + a new provider key: the old process still holds
+    // Same dsh session id + a new slot key: the old process still holds
     // the live agent (idbotsAgents never evicts on its own). Re-pinning
     // without dispose leaves A→B→A talking to A's stale in-memory agent
-    // that never saw B's turns, and two processes writing one JSONL.
+    // that never saw B's turns, and two processes writing one JSONL. A key
+    // change is also how an automation toggle takes effect: the session
+    // leaves the old combo's runtime and resumes from disk on the new one.
     if (prevKey && prevKey !== nextKey) {
       await this.disposeSessionOnSlot(prevKey, input.dshSessionId)
     }
     this.runtimeKeyByDsh.set(input.dshSessionId, nextKey)
-    let kernel = await this.ensureKernel(input)
+    let kernel = await this.ensureKernel(input, { automation })
     // The session's live agent may sit on a superseded (draining) kernel when
     // this turn starts — release it there first so exactly one process owns
     // the JSONL (same contract as the cross-provider re-pin above).
@@ -1096,7 +1146,18 @@ export class DshTurnHub {
     return count
   }
 
-  private rememberTurnInputs(slot: DshRuntimeSlot, input: DshTurnInput, options?: DshEnsureKernelOptions): void {
+  /** Resolve this turn's automation opt-in from the host providers. Warmup's
+   *  synthetic session resolves to both-off, so warmup always lands on (and
+   *  pre-warms) the clean slot — the automation slots cold-start on the
+   *  first real turn that needs them. */
+  private automationSlotStateOf(coworkSessionId: string): DshAutomationSlotState {
+    return {
+      browserUse: this.opts.browserAutomationProvider?.(coworkSessionId) ?? undefined,
+      computerUse: this.opts.computerUseProvider?.(coworkSessionId) === true,
+    }
+  }
+
+  private rememberTurnInputs(slot: DshRuntimeSlot, input: DshTurnInput, options?: DshEnsureKernelOptions, automation?: DshAutomationSlotState): void {
     slot.providersSeen.set(
       input.provider.key,
       mergeProviderRoute(slot.providersSeen.get(input.provider.key), providerRouteOf(input.provider)),
@@ -1113,12 +1174,15 @@ export class DshTurnHub {
     }
     // Browser automation / computer use ride the same accumulateMcp gate:
     // warmup turns must not claim a browser/desktop for a synthetic session.
-    if (options?.accumulateMcp !== false) {
-      if (slot.browserUseSeen === undefined) {
-        slot.browserUseSeen = this.opts.browserAutomationProvider?.(input.sessionId) ?? undefined
+    // The values come from the turn's pre-resolved automation state — the
+    // slot key already encodes this combo, so every real turn landing here
+    // writes the same thing (the guards only cover the skipped-warmup case).
+    if (options?.accumulateMcp !== false && automation !== undefined) {
+      if (slot.browserUseSeen === undefined && automation.browserUse !== undefined) {
+        slot.browserUseSeen = automation.browserUse
       }
-      if (!slot.computerUseSeen) {
-        slot.computerUseSeen = this.opts.computerUseProvider?.(input.sessionId) === true
+      if (!slot.computerUseSeen && automation.computerUse) {
+        slot.computerUseSeen = true
       }
     }
     if (isOfficialDeepSeekRoute(input.provider) && input.provider.apiKey) {
@@ -1182,8 +1246,9 @@ export class DshTurnHub {
     // Apply this slot's route/MCP/workspace immediately so a racing first
     // turn can steer a still-booting warmup spawn (config is snapshotted
     // only after the per-slot serialize lock is acquired).
-    const slot = this.getOrCreateSlot(dshRuntimeKeyOf(input.provider))
-    this.rememberTurnInputs(slot, input, options)
+    const automation = options?.automation ?? this.automationSlotStateOf(input.sessionId)
+    const slot = this.getOrCreateSlot(dshRuntimeKeyOf(input.provider, automationSlotFlagsOf(automation)))
+    this.rememberTurnInputs(slot, input, options, automation)
     const run = slot.kernelEnsureChain.then(() => this.spawnOrReuseFromSeenState(slot, input))
     slot.kernelEnsureChain = run.then(() => undefined, () => undefined)
     return run

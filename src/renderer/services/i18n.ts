@@ -1678,10 +1678,10 @@ const translations: Record<LanguageType, Record<string, string>> = {
     metabotCoworkMcpToolsHint: '默认关闭：关闭时该 Bot 的 cowork 会话不挂载你在设置中配置的 MCP server，每轮请求不再携带 MCP 工具 schema（首请求更小、token 费用更低）。仅对确实需要 MCP 工具的 Bot 开启，切换立即生效。注意：DSH 会话共享同一运行时，任一 Bot 挂载后所有 DSH 会话都会看到这些工具，直至应用重启。',
     metabotCoworkMcpToolsSaveFailed: 'MCP 工具设置保存失败',
     metabotCoworkBrowserAutomation: '浏览器自动化（实验）',
-    metabotCoworkBrowserAutomationHint: '默认关闭：开启后该 Bot 的 cowork 会话会通过 Playwright MCP 操作一个独立的 headless Chromium（每个会话一个浏览器），可导航/点击/填表/截图任意公开网站。Bot Browser（链上内容）不受其影响也不可被其读取。注意：DSH 会话共享同一运行时，任一 Bot 开启后该 slot 的所有会话都会挂载浏览器工具，直至运行时重启。',
+    metabotCoworkBrowserAutomationHint: '默认关闭：开启后该 Bot 的 cowork 会话会通过 Playwright MCP 操作一个独立的 headless Chromium（每个会话一个浏览器），可导航/点击/填表/截图任意公开网站。Bot Browser（链上内容）不受其影响也不可被其读取。浏览器工具只会挂载到该 Bot 的会话（开启的 Bot 运行在独立的运行时上，不会泄漏给其他 Bot）；关闭后下一轮对话即生效。',
     metabotCoworkBrowserAutomationSaveFailed: '浏览器自动化设置保存失败',
     metabotCoworkComputerUse: '桌面操作（实验）',
-    metabotCoworkComputerUseHint: '默认关闭：开启后该 Bot 的 cowork 会话可截屏并操作本机桌面（cua-driver）。需要给 IDBots 授予 macOS 辅助功能/录屏权限（首次使用系统会弹窗）。谨慎开启：模型对桌面的输入不可撤销。',
+    metabotCoworkComputerUseHint: '默认关闭：开启后该 Bot 的 cowork 会话可截屏并操作本机桌面（cua-driver）。需要给 IDBots 授予 macOS 辅助功能/录屏权限（首次使用系统会弹窗）。谨慎开启：模型对桌面的输入不可撤销。桌面操作工具只会挂载到该 Bot 的会话（开启的 Bot 运行在独立的运行时上，不会泄漏给其他 Bot）；关闭后下一轮对话即生效。',
     metabotCoworkComputerUseSaveFailed: '桌面操作设置保存失败',
     metabotHomepage: '主页',
     metabotHomepageHint: '设置 Bot 个人主页的来源，将写入链上 /info/homepage。',
@@ -1949,6 +1949,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // 通用设置
     autoLaunch: '开机自启动',
     autoLaunchDescription: '系统启动时自动运行应用',
+    experimentalAutomation: '实验性自动化（全局开关）',
+    experimentalAutomationDescription: '允许各 Bot 开启浏览器自动化与桌面操作（实验）。关闭则立即对所有 Bot 一刀切停用，下一轮对话生效',
     preventDeviceSleep: '阻止设备休眠',
     preventDeviceSleepDescription: 'IDBots 工作期间保持设备唤醒',
 
@@ -4305,10 +4307,10 @@ const translations: Record<LanguageType, Record<string, string>> = {
     metabotCoworkMcpToolsHint: 'Off by default: while off, this bot\'s cowork sessions do not mount your configured MCP servers, so MCP tool schemas stay out of every request (smaller first request, lower token cost). Enable only for bots that actually need MCP tools; applies immediately. Note: DSH sessions share one runtime — once any bot mounts MCP tools, they remain visible to all DSH sessions until the app restarts.',
     metabotCoworkMcpToolsSaveFailed: 'Failed to save the MCP tools setting',
     metabotCoworkBrowserAutomation: 'Browser automation (experimental)',
-    metabotCoworkBrowserAutomationHint: 'Off by default: while off, this bot\'s cowork sessions mount no browser tools. When on, each DSH session gets its own headless Chromium via Playwright MCP and can navigate, click, fill forms, and screenshot ordinary public websites. The Bot Browser (on-chain content) is unaffected and stays invisible to external automation. Note: DSH sessions share one runtime — once any bot on a slot opts in, browser tools mount for every session on that slot until the runtime restarts.',
+    metabotCoworkBrowserAutomationHint: 'Off by default: while off, this bot\'s cowork sessions mount no browser tools. When on, each DSH session gets its own headless Chromium via Playwright MCP and can navigate, click, fill forms, and screenshot ordinary public websites. The Bot Browser (on-chain content) is unaffected and stays invisible to external automation. Browser tools mount only for this bot\'s sessions — opted-in bots run on a dedicated runtime, so the tools never leak to other bots — and turning this off applies from the next turn.',
     metabotCoworkBrowserAutomationSaveFailed: 'Failed to save the browser automation setting',
     metabotCoworkComputerUse: 'Desktop computer use (experimental)',
-    metabotCoworkComputerUseHint: 'Off by default. When on, this bot\'s cowork sessions can screenshot and operate this desktop (cua-driver). IDBots needs the macOS Accessibility/Screen Recording grants (the OS prompts on first use). Use with care: input delivered to the desktop cannot be rolled back.',
+    metabotCoworkComputerUseHint: 'Off by default. When on, this bot\'s cowork sessions can screenshot and operate this desktop (cua-driver). IDBots needs the macOS Accessibility/Screen Recording grants (the OS prompts on first use). Use with care: input delivered to the desktop cannot be rolled back. Desktop-control tools mount only for this bot\'s sessions — opted-in bots run on a dedicated runtime, so the tools never leak to other bots — and turning this off applies from the next turn.',
     metabotCoworkComputerUseSaveFailed: 'Failed to save the computer use setting',
     metabotHomepage: 'Homepage',
     metabotHomepageHint: 'Set the source for this Bot page; published to /info/homepage on-chain.',
@@ -4576,6 +4578,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // General Settings
     autoLaunch: 'Launch at Login',
     autoLaunchDescription: 'Automatically start the app when you log in',
+    experimentalAutomation: 'Experimental Automation (global)',
+    experimentalAutomationDescription: 'Allow bots to opt into browser automation and desktop computer use (experimental). Turning this off disables both for every bot from the next turn',
     preventDeviceSleep: 'Prevent Device Sleep',
     preventDeviceSleepDescription: 'Keep your device awake while IDBots is working',
 

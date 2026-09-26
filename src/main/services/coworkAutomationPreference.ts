@@ -9,11 +9,11 @@
  * operates the user's actual desktop and needs OS permission grants held by
  * the host app. Neither should ever be a fleet-wide default.
  *
- * DSH caveat (same as cowork.mountMcpTools): cowork sessions share one DSH
- * runtime per provider slot and the providers mount at composition scope, so
- * once ANY bot on a slot opts in, the backend activates for every session on
- * that slot until the runtime restarts. The toggle still guarantees the
- * default fleet-wide behavior when no bot opts in.
+ * Slot isolation: the backends mount at composition scope (runtime-wide), so
+ * the DSH turn hub keys runtime slots by provider + automation combo
+ * (dshRuntimeKeyOf). Sessions whose bot did not opt in never share a process
+ * with an automation backend, and opting out re-pins the session onto the
+ * clean slot on the very next turn — no runtime restart needed.
  */
 
 import type { MetabotStore } from '../metabotStore';
@@ -21,6 +21,40 @@ import type { MetabotStore } from '../metabotStore';
 /** metabot_settings keys; values are '1' (enable) / '0' (off, the default). */
 export const COWORK_BROWSER_AUTOMATION_KEY = 'cowork.browserAutomation';
 export const COWORK_COMPUTER_USE_KEY = 'cowork.computerUse';
+
+/** App-scoped kv key for the fleet-wide kill-switch: '0'/false disables BOTH
+ * backends for every bot regardless of the per-bot switches. Missing or
+ * unparsable means allowed — the per-bot opt-ins already default off, so
+ * this gate exists only to contain a backend incident in one flip. */
+export const EXPERIMENTAL_AUTOMATION_GLOBAL_KEY = 'automation.experimentalEnabled';
+
+/** Minimal kv reader/writer shape shared by SqliteStore and test doubles. */
+export interface ExperimentalAutomationStore {
+  get<T = unknown>(key: string): T | undefined;
+  set(key: string, value: unknown): void;
+}
+
+export function isExperimentalAutomationAllowed(
+  store: Pick<ExperimentalAutomationStore, 'get'> | null | undefined,
+): boolean {
+  try {
+    const value = store?.get(EXPERIMENTAL_AUTOMATION_GLOBAL_KEY);
+    return value !== '0' && value !== false;
+  } catch {
+    return true;
+  }
+}
+
+export function setExperimentalAutomationAllowed(
+  store: ExperimentalAutomationStore | null | undefined,
+  allowed: boolean,
+): void {
+  try {
+    store?.set(EXPERIMENTAL_AUTOMATION_GLOBAL_KEY, allowed ? '1' : '0');
+  } catch {
+    // Persistence loss is non-fatal; the next read falls back to allowed.
+  }
+}
 
 /** Missing or unparsable records mean off — automation is per-bot opt-in. */
 export function isCoworkBrowserAutomationEnabled(

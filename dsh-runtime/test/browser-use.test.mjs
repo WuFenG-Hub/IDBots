@@ -1,7 +1,10 @@
 // Browser-use E2E (0.1.7): the experimental Playwright MCP provider mounts
 // through the generator's browserUse option, connects one MCP server +
 // headless Chromium per session inside agent/created, and the model's
-// browser_navigate call round-trips to a real page snapshot.
+// browser_navigate call round-trips to a real page snapshot. The mutating
+// call crosses the automation-approval patch's fail-closed gate, which this
+// test grants (the gate's reject/allow matrix lives in
+// automation-approval.test.mjs).
 //
 // Requires a Chrome/Chromium executable — skipped cleanly when none is found
 // (CI-less machines). Run: node test/browser-use.test.mjs   (from dsh-runtime/)
@@ -66,6 +69,11 @@ const main = async () => {
       if (notification.method === 'session.event' && notification.params.sessionId === sessionId) {
         events.push(notification.params.event)
         for (const wait of waiters) wait(notification.params.event)
+      } else if (notification.method === 'idbots/approval/request') {
+        // The automation-approval kernel patch gates the navigate below;
+        // this smoke test is not about the gate, so grant it (the gate's
+        // own reject/allow coverage lives in automation-approval.test.mjs).
+        client.request('idbots/approval/respond', { id: notification.params.id, outcome: 'allowed-once' }).catch(() => {})
       }
     }
   })()
