@@ -112,6 +112,37 @@ attachment write fails with ENOTSUP. The patch adds an ENOTSUP branch
 that publishes through an exclusive `copyFile`; an existing target races
 into the same sha256 digest verification as the EEXIST branch.
 
+### `@deepseek-ai+dsh-experimental-browser-use-runtime+0.1.7-rc.2.patch`
+
+TICKET-2026-09-04. The experimental browser-use provider executes every
+Playwright-MCP tool with zero approval — `browser_navigate`/`browser_click`/
+`browser_evaluate` act on arbitrary public websites the moment the model
+asks. The kernel's fail-closed approval seam (`ctx.approval`,
+`dsh-user-approval`) exists but the provider never calls it.
+
+The patch gates the provider's `tools/execute` dispatch (`lib/types/mcp.js`):
+any `mcp__<server>__*` call outside the observation set (`browser_snapshot`,
+`browser_take_screenshot`, `browser_console_messages`,
+`browser_network_requests`, `browser_wait_for`) first asks
+`approval.request(...)` and proceeds only on `allowed-once`; a missing
+approval service, rejection, cancellation, or unavailable answerer throws
+(fail-closed). In IDBots the ask round-trips through idbots-sdk-server's
+global answerer into the renderer permission dialog (60s auto-reject),
+and session `autoApproveTools` / permission modes short-circuit repeats —
+identical semantics to the bash tool. Regression test:
+`dsh-runtime/test/automation-approval.test.mjs`.
+
+### `@deepseek-ai+dsh-experimental-computer-use-cua-driver-native+0.1.7-rc.2.patch`
+
+Same ticket, same seam, higher stakes: cua-driver tools inject real input
+into the user's physical desktop, which cannot be rolled back. The patch
+gates every catalog tool outside the observation set (`list_apps`,
+`list_windows`, `get_window_state`, `get_screen_size`) with the same
+one-shot `approval.request(...)` in the provider's `tools/execute`
+listener, fail-closed on any non-grant. The tool-name prefix is extracted
+to a `TOOL_PREFIX` constant so the gate's bare-name lookup cannot drift
+from the registration.
+
 ## Adding / rebasing a patch
 
 1. Edit the installed file under `dsh-runtime/node_modules/<pkg>/` directly.

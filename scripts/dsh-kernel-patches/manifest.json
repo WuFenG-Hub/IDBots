@@ -56,6 +56,28 @@
           "count": 2
         }
       ]
+    },
+    {
+      "patch": "@deepseek-ai+dsh-experimental-browser-use-runtime+0.1.7-rc.2.patch",
+      "why": "automation approval (TICKET-2026-09-04): mutating Playwright-MCP browser tools ask through ctx.approval, fail-closed — the provider ships zero approval logic and browser actions are irreversible on public websites",
+      "targets": [
+        {
+          "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-experimental-browser-use-runtime/lib/types/mcp.js",
+          "match": "mutating browser tools need the approval service",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "patch": "@deepseek-ai+dsh-experimental-computer-use-cua-driver-native+0.1.7-rc.2.patch",
+      "why": "automation approval (TICKET-2026-09-04): mutating cua-driver desktop tools ask through ctx.approval, fail-closed — desktop input cannot be rolled back",
+      "targets": [
+        {
+          "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-experimental-computer-use-cua-driver-native/lib/index.js",
+          "match": "mutating desktop tools need the approval service",
+          "count": 1
+        }
+      ]
     }
   ]
 }

@@ -1,0 +1,36 @@
+--- a/dsh-runtime/node_modules/@deepseek-ai/dsh-experimental-browser-use-runtime/lib/types/mcp.js
++++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-experimental-browser-use-runtime/lib/types/mcp.js
+@@ -48,6 +48,9 @@
+     const clients = new Map();
+     const toolPrefix = `mcp__${options.name}__`;
+     const resourceTools = new Set(['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource']);
++    // IDBots patch (automation-approval): observation-only Playwright MCP tools
++    // that do not prompt; every other browser action asks first (fail-closed).
++    const readOnlyTools = new Set(['browser_snapshot', 'browser_take_screenshot', 'browser_console_messages', 'browser_network_requests', 'browser_wait_for']);
+     let stopping = false;
+     let refreshingMasks = false;
+     const refreshBlockedMasks = () => {
+@@ -151,6 +154,23 @@
+         if (agent === undefined || clients.get(agent)?.status !== 'ready') {
+             throw new Error(`${options.name}: browser tool belongs to another Session`);
+         }
++        // IDBots patch (automation-approval): mutating browser actions require
++        // one-shot user approval through the kernel's fail-closed seam;
++        // observation tools (snapshot/screenshot/console/network/wait) pass.
++        if (exec.name.startsWith(toolPrefix) && !readOnlyTools.has(exec.name.slice(toolPrefix.length))) {
++            const approval = ctx.get('approval');
++            if (approval === undefined)
++                throw new Error(`${options.name}: mutating browser tools need the approval service (fail-closed)`);
++            const outcome = await approval.request({
++                agent,
++                toolName: exec.name,
++                callId: exec.callId,
++                reason: `Browser automation action: ${exec.name.slice(toolPrefix.length)}`,
++                signal: exec.signal,
++            });
++            if (outcome !== 'allowed-once')
++                throw new Error(`${options.name}: browser action "${exec.name}" was not approved (${outcome})`);
++        }
+         return resources.run(agent, exec.signal, async (_scope, combined) => {
+             const original = exec.signal;
+             exec.signal = combined;
