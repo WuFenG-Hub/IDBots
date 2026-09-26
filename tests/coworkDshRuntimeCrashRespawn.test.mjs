@@ -116,3 +116,74 @@ test('a SIGKILLed runtime is respawned by the next turn, not turned into an erro
     fs.rmSync(sessionRoot, { recursive: true, force: true })
   }
 })
+
+test('two concurrent turns after a crash share one respawned runtime (no duplicate process)', {
+  skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed',
+}, async () => {
+  const { DshTurnHub } = loadModules()
+  const { startMockServer } = await import(path.join(runtimeDir, 'test', 'fixtures', 'mock-openai.mjs'))
+  const { server } = await startMockServer(48832)
+  const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-crashrace-'))
+  const marker = path.basename(sessionRoot)
+  const logs = []
+  const hub = new DshTurnHub({
+    runtimeDir,
+    sessionRoot,
+    log: (level, message, detail) => logs.push({ level, message, detail: detail ?? {} }),
+  })
+  const callbacks = () => ({
+    onMessage: () => `m-${Math.random().toString(36).slice(2)}`,
+    onMessageUpdate: () => undefined,
+    onMessageFinalize: () => undefined,
+    onUsage: () => undefined,
+    onApprovalRequest: () => undefined,
+    onApprovalCancelled: () => undefined,
+  })
+  const route = {
+    key: 'mockgw', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48832/v1',
+    apiKey: 'sk-a', model: 'mock-1',
+  }
+  const runTurn = (dshSessionId, prompt) => hub.runTurn({
+    sessionId: `cowork-${dshSessionId}`, dshSessionId, prompt, provider: route,
+    sections: [{ name: 'idbots:base', order: 0, text: 'You are Alice.' }],
+    hostTools: [],
+    callbacks: callbacks(),
+  })
+  const liveRuntimes = () => {
+    try {
+      return execSync(`pgrep -f "bin.mjs .*${marker}" | wc -l`, { encoding: 'utf8' }).trim()
+    } catch {
+      return '0'
+    }
+  }
+
+  try {
+    const outA = await runTurn('race-1', 'hello')
+    assert.notEqual(outA.kind, 'error', `baseline turn must succeed: ${JSON.stringify(outA).slice(0, 240)}`)
+    await waitFor(() => logs.some((l) => l.message.includes('dshKernel.ensureRuntime')), 45000, 'first runtime boot')
+
+    // External death, then two sessions race the respawn window at once: the
+    // hub's chain serializes their ensureKernel calls, and the kernel-level
+    // single-flight boot is the hard guarantee that no duplicate process
+    // spawns while the wire handshake is still in flight.
+    execSync(`pkill -9 -f "bin.mjs .*${marker}"`)
+    await waitFor(
+      () => logs.some((l) => l.message.includes('dshTurnHub.pump')),
+      45000,
+      'hub observing the transport death',
+    )
+    const [outB, outC] = await Promise.all([
+      runTurn('race-1', 'concurrent turn one'),
+      runTurn('race-2', 'concurrent turn two'),
+    ])
+    assert.notEqual(outB.kind, 'error', `concurrent turn one must succeed: ${JSON.stringify(outB).slice(0, 240)}`)
+    assert.notEqual(outC.kind, 'error', `concurrent turn two must succeed: ${JSON.stringify(outC).slice(0, 240)}`)
+    await waitFor(() => liveRuntimes() === '1', 10000, 'exactly one respawned runtime process')
+    assert.equal(liveRuntimes(), '1', `one runtime process serves both turns (found ${liveRuntimes()})`)
+  } finally {
+    await hub.close().catch(() => undefined)
+    try { execSync(`pkill -9 -f "bin.mjs .*${marker}"`) } catch { /* already gone */ }
+    server.close()
+    fs.rmSync(sessionRoot, { recursive: true, force: true })
+  }
+})
