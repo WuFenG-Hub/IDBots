@@ -39,6 +39,28 @@ test('currentClientTimeZone returns a canonical IANA zone or undefined', () => {
   assert.equal(canonical, zone, 'the returned zone must be canonical — the kernel throws otherwise')
 })
 
+test('zone changes are picked up on the very next call (no permanent cache)', () => {
+  // Regression guard for the frozen-zone bug: a process-lifetime cache kept
+  // declaring the old zone after the user crossed time zones, short-
+  // circuiting both self-heal paths (per-prompt source line, and the hub's
+  // restart-on-config-change for the clock plugin).
+  const before = currentClientTimeZone()
+  const alternative = before === 'America/New_York' ? 'Asia/Shanghai' : 'America/New_York'
+  const savedTz = process.env.TZ
+  try {
+    process.env.TZ = alternative
+    assert.equal(currentClientTimeZone(), alternative, 'a zone change must be visible without an app restart')
+  } finally {
+    if (savedTz === undefined) delete process.env.TZ
+    else process.env.TZ = savedTz
+  }
+})
+
+test('the zone helper carries no module-level cache', () => {
+  const source = fs.readFileSync(path.join(repoRoot, 'src', 'main', 'libs', 'dshKernel', 'clientTimeZone.ts'), 'utf8')
+  assert.doesNotMatch(source, /\blet\s+cached\b/, 'a module-level zone cache freezes the zone for the process lifetime')
+})
+
 test('the kernel prompt declares clientTimeZone on the idbots/prompt request', () => {
   const source = fs.readFileSync(path.join(repoRoot, 'src', 'main', 'libs', 'dshKernel', 'dshKernel.ts'), 'utf8')
   assert.match(source, /request\('idbots\/prompt'/, 'text prompts ride the zone-capable extension')
