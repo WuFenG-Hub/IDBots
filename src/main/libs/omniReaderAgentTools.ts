@@ -179,13 +179,9 @@ export function buildOmniReaderAgentTools(deps: {
   const omniRead = tool(
     'omni_read',
     [
-      'Read-only raw MetaID/MetaWeb indexer queries over HTTP.',
-      'Users: action "user_info" with exactly one of metaid | address | globalmetaid (metafile-indexer first, falls back to manapi for metaid/address); "search_users" with keyword plus optional keytype metaid|name and limit (default 10).',
-      'Social/buzz: "buzz_newest" (lastId, size, metaid, followed 0/1), "buzz_recommended" (lastId, size, userAddress), "buzz_hot" (lastId, size <= 50), "buzz_search" (key required), "buzz_info" (pinId required); "notifications" (address required, size, lastId; lastId returns entries NEWER than that id, not a page-down cursor; answers to YOUR questions are NOT included — poll get_question_answers per own question pin); "followers"/"following" (metaid required, cursor default 0, size).',
-      'Pins: "pin" (pinId), "pin_version" (pinId + ver int, 0 = initial), "pin_list"/"metaid_list"/"block_list"/"mempool_list" (page, size), "pins_by_path" (path required, e.g. /protocols/simplebuzz, size 1-100, cursor), "pins_by_metaid" (metaid required, optional path), "pins_by_address" (address + path required), "pin_content" (pinId, returns the raw content body).',
-      'Metafile index: "file_info" (pinId), "file_latest" (firstPinId), "files_by_creator" (address), "files_by_metaid" (metaid), "files_by_extension" (extension like .jpg required, optional metaid/timestamp/size); plus "indexer_status", "indexer_stats", "global_counts".',
-      'Paged actions echo lastId/cursor in the response; pass it back for the next page. All parameters are URL-encoded automatically.',
-      'Prefer search_metaids / metaid_profile for identity discovery and search_social_posts for full-text social search when those fit; omni_read is the low-level fallback returning raw indexer JSON. It never writes on-chain.',
+      'Read-only raw MetaID/MetaWeb indexer queries — the low-level fallback returning raw indexer JSON; never writes on-chain.',
+      'Actions: user_info, search_users, buzz_newest | buzz_recommended | buzz_hot | buzz_search | buzz_info, notifications, followers | following, pin, pin_version, pin_list, metaid_list, block_list, mempool_list, pins_by_path | pins_by_metaid | pins_by_address, pin_content, file_info, file_latest, files_by_creator | files_by_metaid | files_by_extension, indexer_status | indexer_stats, global_counts.',
+      'Parameters per action are documented on the fields below; paged actions echo lastId/cursor — pass it back for the next page (notifications lastId returns entries NEWER than that id and excludes answers to your questions; poll get_question_answers for those). Prefer search_metaids / metaid_profile for identity discovery and search_social_posts for full-text social search when those fit.',
     ].join(' '),
     {
       action: z.enum(ACTIONS).describe('Which indexer query to run.'),
