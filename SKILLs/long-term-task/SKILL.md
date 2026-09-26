@@ -166,12 +166,18 @@ longterm_task_create({
   goal,                    // includes the whole-task done-ness definition
   subtasks: [              // ordered; dependencies by 1-based ordinal
     { title, description, acceptanceCriteria: [...], dependsOnOrdinals: [...],
-      preferredChannel, notes },
+      preferredChannel, notes, expectedMinutes },
     ...
   ],
   definitionSessionId,     // this session's id, for traceability
 })
 ```
+
+`expectedMinutes` is the sub-project's rough duration estimate (minutes) —
+ALWAYS estimate one during grilling (a ranged guess beats none: 120, 480,
+2400). It sets the supervision heartbeat's check-in budget: when a
+sub-project runs past it without converging, the Twin gets a supervision
+turn ("still moving toward acceptance, or looping?") instead of silence.
 
 This creates a **draft** (`defining` stage) — visible on the board's
 "Defining" column, not yet driven.
@@ -186,7 +192,8 @@ FULL definition in one well-structured message:
 - **任务标题 + 目标全文** — including the whole-task done-ness definition
   (never omit this; a sub-project table alone is NOT the definition).
 - **每个子项目的全部字段**: ordinal / title / description（含义与边界）/
-  acceptance criteria（逐条列出）/ dependencies / preferred channel / notes.
+  acceptance criteria（逐条列出）/ dependencies / preferred channel / notes /
+  expected duration（预计时长）.
 - **已锁定的关键决策**（架构、费用、范围等）与**预估节奏**（各阶段粗排期）。
 - **已知的等待点**: external deliveries, owner decisions, dates.
 

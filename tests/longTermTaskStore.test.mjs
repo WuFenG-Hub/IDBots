@@ -261,3 +261,108 @@ test('dependency-linked sub-projects cannot be manually reordered; free ones can
   assert.match(linkedEdit.error, /dependency-linked/);
   assert.ok(store.updateSubtask({ subtaskId: c.id, ordinal: 6 }, 'owner').ok);
 });
+
+test('expected-duration budget: persisted at creation, updated, cleared; invalid values fall back to null', async () => {
+  const { store } = await openStore();
+  const created = store.createTask(
+    { title: 't', goal: 'g', subtasks: [{ title: 's1', expectedMinutes: 90 }, { title: 's2', expectedMinutes: -5 }] },
+    'owner',
+  );
+  assert.ok(created.ok);
+  assert.equal(created.value.subtasks[0].expectedMinutes, 90);
+  assert.equal(created.value.subtasks[1].expectedMinutes, null, 'invalid budget falls back to null');
+
+  const id = created.value.subtasks[0].id;
+  const updated = store.updateSubtask({ subtaskId: id, expectedMinutes: 240 }, 'twin');
+  assert.ok(updated.ok);
+  assert.equal(updated.value.expectedMinutes, 240);
+  assert.match(store.getTask(created.value.id).events[0].detail, /expected duration/);
+
+  const cleared = store.updateSubtask({ subtaskId: id, expectedMinutes: null }, 'twin');
+  assert.ok(cleared.ok);
+  assert.equal(cleared.value.expectedMinutes, null);
+
+  // The budget rides the board summary so the card can show it.
+  assert.equal(store.getTask(created.value.id).currentExpectedMinutes, null);
+  store.updateSubtask({ subtaskId: id, expectedMinutes: 300 }, 'twin');
+  assert.equal(store.getTask(created.value.id).currentExpectedMinutes, 300);
+});
+
+test('migration: a pre-P1 database gains expected_minutes via a guarded ALTER, rows intact', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-longterm-mig-'));
+  const sqliteStore = await SqliteStore.create(dir);
+  const db = sqliteStore.getDatabase();
+  // Old shape: no expected_minutes column (pre-P1 databases).
+  db.run(`CREATE TABLE long_term_subtasks (
+    id TEXT PRIMARY KEY, task_id TEXT NOT NULL, ordinal INTEGER NOT NULL, title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '', acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending', depends_on_json TEXT NOT NULL DEFAULT '[]',
+    preferred_channel TEXT, evidence_json TEXT NOT NULL DEFAULT '[]', session_id TEXT,
+    wait_note TEXT NOT NULL DEFAULT '', wait_until TEXT, notes TEXT NOT NULL DEFAULT '',
+    accepted_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, accepted_at TEXT,
+    UNIQUE(task_id, ordinal))`);
+  const now = new Date().toISOString();
+  db.run(
+    `INSERT INTO long_term_subtasks
+     (id, task_id, ordinal, title, status, created_at, updated_at) VALUES ('lts_old', 'ltt_old', 1, 'legacy', 'pending', ?, ?)`,
+    [now, now],
+  );
+
+  const store = new LongTermTaskStore(db, sqliteStore.getSaveFunction());
+  const subtask = store.getSubtask('lts_old');
+  assert.ok(subtask, 'legacy row readable after migration');
+  assert.equal(subtask.expectedMinutes, null, 'legacy row has no budget');
+  // New writes can carry a budget on the migrated table.
+  assert.ok(store.updateSubtask({ subtaskId: 'lts_old', expectedMinutes: 120 }, 'twin').ok);
+  assert.equal(store.getSubtask('lts_old').expectedMinutes, 120);
+});
+
+test('proposing acceptance clears a residual external waitUntil (no phantom quiet window)', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  const first = store.getTask(taskId).subtasks[0];
+  store.beginSubtask(first.id, 'twin');
+  store.waitSubtask(
+    first.id,
+    { kind: 'external', note: 'notarization', waitUntil: new Date(Date.now() + 12 * 3_600_000).toISOString() },
+    'twin',
+  );
+  assert.ok(store.proposeSubtask(first.id, { evidence: [{ kind: 'dir', uri: '/tmp/x' }], summary: 's' }, 'twin').ok);
+  assert.equal(store.getSubtask(first.id).waitUntil, null, 'acceptance proposal must not inherit the external wait window');
+});
+
+test('proposeSubtask validates evidence URI shapes', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  const first = store.getTask(taskId).subtasks[0];
+  store.beginSubtask(first.id, 'twin');
+  const bad = store.proposeSubtask(first.id, {
+    evidence: [{ kind: 'pin', uri: 'https://not-a-pin' }, { kind: 'dir', uri: 'relative/path' }],
+    summary: 's',
+  }, 'twin');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, 'VALIDATION');
+  assert.match(bad.error, /malformed evidence/);
+  const good = store.proposeSubtask(first.id, {
+    evidence: [{ kind: 'pin', uri: 'pin://abc' }, { kind: 'dir', uri: '/tmp/x' }, { kind: 'other', uri: 'anything' }],
+    summary: 's',
+  }, 'twin');
+  assert.ok(good.ok, JSON.stringify(good));
+});
+
+test('supervision re-arm state: set and read back per task', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  assert.equal(store.getSuperviseState(taskId), null);
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 1234, lastSignal: 'fails:2@a1' });
+  assert.deepEqual(
+    store.getSuperviseState(taskId),
+    { lastSuperviseAtMs: 1234, lastSignal: 'fails:2@a1', convergenceAtMs: [] },
+  );
+  // A supervision-turn write preserves the churn trail; a convergence write appends to it.
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 5678, lastSignal: 'duration' });
+  assert.deepEqual(store.getSuperviseState(taskId).convergenceAtMs, [], 'supervision write preserves an empty trail');
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 5678, lastSignal: 'duration', convergenceAtMs: [100, 200] });
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 6000, lastSignal: 'duration' });
+  assert.deepEqual(store.getSuperviseState(taskId).convergenceAtMs, [100, 200], 'omitted field keeps the existing trail');
+});

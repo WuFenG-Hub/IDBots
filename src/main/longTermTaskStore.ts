@@ -65,6 +65,18 @@ export interface LongTermNudgeState {
   lastEventId: number;
 }
 
+/** kv key of the per-task supervision re-arm map (advance service, P1). */
+export const LONGTERM_SUPERVISE_STATE_KV_KEY = 'longterm_supervise_state';
+
+/** Supervision re-arm state for one task's supervise escalations. */
+export interface LongTermSuperviseState {
+  lastSuperviseAtMs: number;
+  /** Signature of the supervision signal already escalated (new signal = new turn). */
+  lastSignal: string;
+  /** Timestamps of recent stale-wait convergence escalations (churn breaker). */
+  convergenceAtMs?: number[];
+}
+
 const CHANNELS: LongTermPreferredChannel[] = ['delegate_bot', 'group_task', 'owner_external', 'owner_together'];
 
 function nowIso(): string {
@@ -73,6 +85,11 @@ function nowIso(): string {
 
 function asText(value: unknown): string {
   return typeof value === 'string' ? value : '';
+}
+
+/** Normalize an expected-duration input: positive integer minutes or null. */
+function asExpectedMinutes(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
 }
 
 function parseJsonArray<T>(raw: unknown): T[] {
@@ -158,6 +175,7 @@ interface SubtaskRow {
   wait_note: string;
   wait_until: string | null;
   notes: string;
+  expected_minutes: number | null;
   accepted_by: string | null;
   created_at: string;
   updated_at: string;
@@ -220,6 +238,7 @@ export class LongTermTaskStore {
         wait_note TEXT NOT NULL DEFAULT '',
         wait_until TEXT,
         notes TEXT NOT NULL DEFAULT '',
+        expected_minutes INTEGER,
         accepted_by TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -241,6 +260,13 @@ export class LongTermTaskStore {
       CREATE INDEX IF NOT EXISTS idx_long_term_events_task
         ON long_term_events(task_id, id DESC);
     `);
+    // P1: `expected_minutes` on an additive column — CREATE TABLE IF NOT EXISTS
+    // cannot extend an existing table, so databases created before P1 get the
+    // column via a guarded ALTER (idempotent first-run migration, rows intact).
+    const subtaskColumns = this.getAll<{ name: unknown }>('PRAGMA table_info(long_term_subtasks)').map((row) => String(row.name));
+    if (!subtaskColumns.includes('expected_minutes')) {
+      this.db.run('ALTER TABLE long_term_subtasks ADD COLUMN expected_minutes INTEGER');
+    }
     this.saveDb();
   }
 
@@ -300,6 +326,7 @@ export class LongTermTaskStore {
       waitNote: row.wait_note ?? '',
       waitUntil: row.wait_until ?? null,
       notes: row.notes ?? '',
+      expectedMinutes: row.expected_minutes ?? null,
       acceptedBy: row.accepted_by === 'owner' || row.accepted_by === 'twin' ? row.accepted_by : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -361,6 +388,7 @@ export class LongTermTaskStore {
       currentSubtaskTitle: current?.title ?? null,
       currentSubtaskStatus: current?.status ?? null,
       currentWaitNote: current && current.waitNote ? current.waitNote : null,
+      currentExpectedMinutes: current?.expectedMinutes ?? null,
       progress: deriveProgress(subtasks),
       counts,
       participants: this.resolveParticipants(this.listParticipantIds(taskRow, subtasks)),
@@ -435,8 +463,8 @@ export class LongTermTaskStore {
       const dependsOn = (draft.dependsOnOrdinals ?? []).map((ordinal) => subtaskIds[ordinal - 1]);
       this.db.run(
         `INSERT INTO long_term_subtasks
-         (id, task_id, ordinal, title, description, acceptance_criteria_json, status, depends_on_json, preferred_channel, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+         (id, task_id, ordinal, title, description, acceptance_criteria_json, status, depends_on_json, preferred_channel, notes, expected_minutes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
         [
           subtaskIds[index],
           taskId,
@@ -447,6 +475,7 @@ export class LongTermTaskStore {
           JSON.stringify(dependsOn),
           draft.preferredChannel && CHANNELS.includes(draft.preferredChannel) ? draft.preferredChannel : null,
           asText(draft.notes ?? ''),
+          asExpectedMinutes(draft.expectedMinutes),
           now,
           now,
         ],
@@ -561,6 +590,39 @@ export class LongTermTaskStore {
     ]).map((row) => this.mapEvent(row));
   }
 
+  /**
+   * Newest event of the given kinds for one sub-project (null when none).
+   * Direct query — immune to the capped 200-event detail projection that
+   * heartbeat state detection must not depend on.
+   */
+  getLatestSubtaskEventOfKinds(taskId: string, subtaskId: string, kinds: LongTermEventKind[]): LongTermEvent | null {
+    if (kinds.length === 0) return null;
+    const placeholders = kinds.map(() => '?').join(',');
+    const row = this.getOne<EventRow>(
+      `SELECT * FROM long_term_events WHERE task_id = ? AND subtask_id = ? AND kind IN (${placeholders}) ORDER BY id DESC LIMIT 1`,
+      [taskId, subtaskId, ...kinds],
+    );
+    return row ? this.mapEvent(row) : null;
+  }
+
+  /**
+   * True when the sub-project has REAL work after the given event id: any
+   * newer event except heartbeat infrastructure — 'nudged'/'supervised'
+   * escalations and system notes (session binds). A system bookkeeping note
+   * is not "the Twin worked past the wait"; a twin note, replan, or owner
+   * action is.
+   */
+  hasTwinWorkAfter(taskId: string, subtaskId: string, afterEventId: number): boolean {
+    const row = this.getOne<{ one: number }>(
+      `SELECT 1 AS one FROM long_term_events
+       WHERE task_id = ? AND subtask_id = ? AND id > ?
+         AND NOT (kind IN ('nudged','supervised') OR (kind = 'note' AND actor = 'system'))
+       LIMIT 1`,
+      [taskId, subtaskId, afterEventId],
+    );
+    return row != null;
+  }
+
   // ── sub-task mutations ───────────────────────────────────────────────────
 
   addSubtask(taskId: string, draft: LongTermSubtaskDraft, actor: LongTermActor): LongTermResult<LongTermSubtask> {
@@ -578,8 +640,8 @@ export class LongTermTaskStore {
     const now = nowIso();
     this.db.run(
       `INSERT INTO long_term_subtasks
-       (id, task_id, ordinal, title, description, acceptance_criteria_json, status, depends_on_json, preferred_channel, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+       (id, task_id, ordinal, title, description, acceptance_criteria_json, status, depends_on_json, preferred_channel, notes, expected_minutes, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
       [
         id,
         taskId,
@@ -590,6 +652,7 @@ export class LongTermTaskStore {
         JSON.stringify(dependsOn),
         draft.preferredChannel && CHANNELS.includes(draft.preferredChannel) ? draft.preferredChannel : null,
         asText(draft.notes ?? ''),
+        asExpectedMinutes(draft.expectedMinutes),
         now,
         now,
       ],
@@ -628,6 +691,12 @@ export class LongTermTaskStore {
       set('acceptance_criteria_json', JSON.stringify(input.acceptanceCriteria), 'acceptance criteria');
     }
     if (typeof input.notes === 'string' && input.notes !== current.notes) set('notes', input.notes, 'notes');
+    if (input.expectedMinutes !== undefined) {
+      const next = asExpectedMinutes(input.expectedMinutes);
+      if ((next !== null || input.expectedMinutes === null) && next !== current.expectedMinutes) {
+        set('expected_minutes', next, 'expected duration');
+      }
+    }
     if (input.preferredChannel === null || CHANNELS.includes(input.preferredChannel as LongTermPreferredChannel)) {
       if (input.preferredChannel !== undefined && input.preferredChannel !== current.preferredChannel) {
         set('preferred_channel', input.preferredChannel, 'preferred channel');
@@ -759,8 +828,27 @@ export class LongTermTaskStore {
     }
     const evidence = (input.evidence ?? []).filter((entry) => entry && asText(entry.uri).trim());
     if (evidence.length === 0) return { ok: false, code: 'VALIDATION', error: 'at least one evidence URI is required' };
+    // Shape validation: the acceptance chain is only as good as its evidence
+    // — a criterion "proven" by a malformed URI was never proven.
+    const malformed = evidence.filter((entry) => {
+      const uri = asText(entry.uri).trim();
+      const kind = asText(entry.kind).trim();
+      if (kind === 'pin') return !uri.startsWith('pin://');
+      if (kind === 'metaapp') return !uri.startsWith('metaapp://');
+      if (kind === 'metafile') return !uri.startsWith('metafile://');
+      if (kind === 'url') return !/^https?:\/\//.test(uri);
+      if (kind === 'dir') return !uri.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(uri);
+      return false;
+    });
+    if (malformed.length > 0) {
+      return {
+        ok: false,
+        code: 'VALIDATION',
+        error: `malformed evidence URI(s): ${malformed.map((entry) => `${asText(entry.kind) || 'untyped'} ${asText(entry.uri).slice(0, 80)}`).join('; ')}`,
+      };
+    }
     this.db.run(
-      "UPDATE long_term_subtasks SET status = 'waiting_owner', evidence_json = ?, wait_note = ?, updated_at = ? WHERE id = ?",
+      "UPDATE long_term_subtasks SET status = 'waiting_owner', evidence_json = ?, wait_note = ?, wait_until = NULL, updated_at = ? WHERE id = ?",
       [JSON.stringify(evidence), `acceptance proposed: ${asText(input.summary).slice(0, 500)}`, nowIso(), subtaskId],
     );
     this.addEvent(current.taskId, subtaskId, 'proposed', actor, asText(input.summary).slice(0, 1000));
@@ -882,6 +970,18 @@ export class LongTermTaskStore {
     this.saveDb();
   }
 
+  /**
+   * Journal a SUPERVISION escalation (kind 'supervised', actor 'system'): the
+   * heartbeat opened a supervision turn (failure streak / duration overrun)
+   * on this sub-project. Distinct from 'nudged' so the owner's journal — and
+   * future telemetry — can tell routine pushes from interventions.
+   */
+  recordSupervision(taskId: string, subtaskId: string, detail: string): void {
+    this.addEvent(taskId, subtaskId, 'supervised', 'system', detail);
+    this.touch(taskId);
+    this.saveDb();
+  }
+
   /** Per-task nudge throttle state, one kv JSON map row (`longterm_nudge_state`). */
   getNudgeState(taskId: string): LongTermNudgeState | null {
     const map = this.readNudgeStateMap();
@@ -908,6 +1008,47 @@ export class LongTermTaskStore {
       const row = this.getOne<{ value: string }>('SELECT value FROM kv WHERE key = ?', [LONGTERM_NUDGE_STATE_KV_KEY]);
       const parsed = row?.value ? JSON.parse(row.value) : null;
       return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, LongTermNudgeState>) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /** Per-task supervision re-arm state (advance service P1): when did the last
+   *  supervise escalation run and which signal signature did it consume. */
+  getSuperviseState(taskId: string): LongTermSuperviseState | null {
+    const map = this.readSuperviseStateMap();
+    const entry = map[taskId];
+    if (!entry || typeof entry !== 'object') return null;
+    const lastSuperviseAtMs = Number((entry as LongTermSuperviseState).lastSuperviseAtMs);
+    if (!Number.isFinite(lastSuperviseAtMs)) return null;
+    const convergenceAtMs = Array.isArray((entry as LongTermSuperviseState).convergenceAtMs)
+      ? (entry as LongTermSuperviseState).convergenceAtMs.map(Number).filter((value) => Number.isFinite(value))
+      : [];
+    return { lastSuperviseAtMs, lastSignal: String((entry as LongTermSuperviseState).lastSignal ?? ''), convergenceAtMs };
+  }
+
+  setSuperviseState(taskId: string, state: LongTermSuperviseState): void {
+    const map = this.readSuperviseStateMap();
+    // Omitted convergenceAtMs preserves the existing trail (a supervision-turn
+    // write must not wipe the churn-breaker history).
+    const convergenceAtMs = state.convergenceAtMs ?? map[taskId]?.convergenceAtMs ?? [];
+    map[taskId] = {
+      lastSuperviseAtMs: Math.trunc(state.lastSuperviseAtMs),
+      lastSignal: String(state.lastSignal),
+      convergenceAtMs: convergenceAtMs.map(Number).filter((value) => Number.isFinite(value)),
+    };
+    this.db.run(
+      'INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      [LONGTERM_SUPERVISE_STATE_KV_KEY, JSON.stringify(map), Date.now()],
+    );
+    this.saveDb();
+  }
+
+  private readSuperviseStateMap(): Record<string, LongTermSuperviseState> {
+    try {
+      const row = this.getOne<{ value: string }>('SELECT value FROM kv WHERE key = ?', [LONGTERM_SUPERVISE_STATE_KV_KEY]);
+      const parsed = row?.value ? JSON.parse(row.value) : null;
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, LongTermSuperviseState>) : {};
     } catch {
       return {};
     }
@@ -983,13 +1124,5 @@ export class LongTermTaskStore {
     this.saveDb();
     const updated = this.getSubtask(subtaskId);
     return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
-  }
-
-  /** Heartbeat read: open sub-projects waiting on a time-based condition that's now due. */
-  listDueWaits(now: Date = new Date()): LongTermSubtask[] {
-    return this.getAll<SubtaskRow>(
-      "SELECT * FROM long_term_subtasks WHERE wait_until IS NOT NULL AND wait_until <= ? AND status IN ('waiting_owner','waiting_external')",
-      [now.toISOString()],
-    ).map((row) => this.mapSubtask(row));
   }
 }

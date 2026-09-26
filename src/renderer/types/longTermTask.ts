@@ -78,6 +78,7 @@ export type LongTermEventKind =
   | 'waiting'
   | 'unblocked'
   | 'nudged'
+  | 'supervised'
   | 'paused'
   | 'resumed'
   | 'completed'
@@ -111,6 +112,8 @@ export interface LongTermSubtask {
   /** ISO time for time-based re-checks (heartbeat), null otherwise. */
   waitUntil: string | null;
   notes: string;
+  /** Expected duration in minutes — the supervision heartbeat checks in when a sub-project runs past it (P1). */
+  expectedMinutes: number | null;
   acceptedBy: 'owner' | 'twin' | null;
   createdAt: string;
   updatedAt: string;
@@ -154,6 +157,8 @@ export interface LongTermTaskSummary {
   currentSubtaskStatus: LongTermSubtaskStatus | null;
   /** Present when the current sub-task waits on something (wait_note). */
   currentWaitNote: string | null;
+  /** The current sub-task's expected-duration budget in minutes (null = default). */
+  currentExpectedMinutes: number | null;
   progress: LongTermProgress;
   counts: Record<LongTermSubtaskStatus, number>;
   /** Participating bots: twin + delegated workers + group-task members (derived read-time). */
@@ -184,6 +189,8 @@ export interface LongTermSubtaskDraft {
   dependsOnOrdinals?: number[];
   preferredChannel?: LongTermPreferredChannel;
   notes?: string;
+  /** Expected duration in minutes; null/invalid = use the supervision default. */
+  expectedMinutes?: number;
 }
 
 export interface LongTermTaskCreateInput {
@@ -209,6 +216,8 @@ export interface LongTermSubtaskUpdateInput {
   preferredChannel?: LongTermPreferredChannel | null;
   notes?: string;
   ordinal?: number;
+  /** Set or clear the expected-duration budget (null clears back to the default). */
+  expectedMinutes?: number | null;
 }
 
 export interface LongTermResult<T> {

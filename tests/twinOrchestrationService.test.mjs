@@ -243,7 +243,9 @@ test('r6: direct failure notifies the Twin with 未完成 + reason', async () =>
 
     assert.equal(cross.inserted.length, 1, 'exactly one failure notification');
     assert.match(cross.inserted[0].message.content, /\[ORCH-NOTIFY\] worker Builder 未完成 task/);
-    assert.match(cross.inserted[0].message.content, /worker crashed（failed）/);
+    assert.match(cross.inserted[0].message.content, /worker crashed<\/worker_report>（failed）/);
+    // Worker-derived failure text is delimited as untrusted data.
+    assert.match(cross.inserted[0].message.content, /<worker_report trust="untrusted">worker crashed<\/worker_report>/);
     assert.equal(kv.get('orch_notify:' + result.task.id + ':' + result.attempt.id + ':failed'), '1', 'failure guard set');
   } finally {
     sqliteStore.close();
@@ -297,7 +299,7 @@ test('r6: late failure settlement (onLateTermination) notifies the Twin with the
 
     assert.equal(cross.inserted.length, 1, 'one failure notification');
     assert.match(cross.inserted[0].message.content, /未完成/);
-    assert.match(cross.inserted[0].message.content, /worker died late（failed）/);
+    assert.match(cross.inserted[0].message.content, /worker died late<\/worker_report>（failed）/);
     assert.equal(kv.get('orch_notify:' + result.task.id + ':' + result.attempt.id + ':failed'), '1');
   } finally {
     sqliteStore.close();
@@ -769,7 +771,7 @@ test('P-A: empty final reply + bare session → plain WORKER_EMPTY_HANDOFF (unch
 
     assert.equal(orchestrationStore.getAttempt(result.attempt.id).error, 'WORKER_EMPTY_HANDOFF');
     assert.equal(cross.inserted.length, 1);
-    assert.match(cross.inserted[0].message.content, /WORKER_EMPTY_HANDOFF（failed）/);
+    assert.match(cross.inserted[0].message.content, /WORKER_EMPTY_HANDOFF<\/worker_report>（failed）/);
     assert.doesNotMatch(cross.inserted[0].message.content, /WITH_ACTIVITY/);
   } finally {
     sqliteStore.close();

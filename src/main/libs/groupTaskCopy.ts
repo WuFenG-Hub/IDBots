@@ -690,9 +690,14 @@ export function buildOrchNotifyFailed(
   detail: string,
   language: AppLanguage = groupTaskLanguage(),
 ): string {
+  // The detail can embed worker-authored text (handoff summaries, error
+  // strings). Delimit it as UNTRUSTED DATA so a compromised or confused
+  // worker cannot smuggle instructions into the Twin session through its
+  // failure report — the Twin overlay treats worker_report blocks as data.
+  const safeDetail = `<worker_report trust="untrusted">${detail}</worker_report>`;
   return language === 'en'
-    ? `[ORCH-NOTIFY] worker ${workerName} did not complete task ${taskId}: ${detail} (failed)`
-    : `[ORCH-NOTIFY] worker ${workerName} 未完成 task ${taskId}：${detail}（failed）`;
+    ? `[ORCH-NOTIFY] worker ${workerName} did not complete task ${taskId}: ${safeDetail} (failed)`
+    : `[ORCH-NOTIFY] worker ${workerName} 未完成 task ${taskId}：${safeDetail}（failed）`;
 }
 
 export function wrapCrossSessionMessage(

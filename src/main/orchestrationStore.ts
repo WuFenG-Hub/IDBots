@@ -515,6 +515,24 @@ export class OrchestrationStore {
     return this.getAll<Row>('SELECT * FROM orchestration_attempts WHERE step_id = ? ORDER BY queued_at ASC', [stepId]).map(attemptFromRow);
   }
 
+  /**
+   * Long-term supervision telemetry (P1): attempts whose step's task was
+   * sourced from any of these sessions — i.e. every worker dispatch the Twin
+   * made from those sessions — newest first.
+   */
+  listAttemptsForSourceSessions(sessionIds: string[]): OrchestrationAttempt[] {
+    if (sessionIds.length === 0) return [];
+    const placeholders = sessionIds.map(() => '?').join(',');
+    return this.getAll<Row>(
+      `SELECT a.* FROM orchestration_attempts a
+       JOIN orchestration_steps s ON s.id = a.step_id
+       JOIN orchestration_tasks t ON t.id = s.task_id
+       WHERE t.source_session_id IN (${placeholders})
+       ORDER BY a.queued_at DESC`,
+      sessionIds,
+    ).map(attemptFromRow);
+  }
+
   updateAttempt(id: string, status: OrchestrationAttemptStatus, patch: { workerSessionId?: string | null; result?: unknown; error?: string | null } = {}): OrchestrationAttempt {
     const current = this.getAttempt(id);
     if (!current) throw new Error(`Orchestration attempt ${id} not found`);
