@@ -185,15 +185,18 @@ function findListRows(data: Record<string, unknown>): ListRowsLocation | null {
  * The envelope therefore keeps every sibling field, drops only TRAILING rows,
  * and adds `truncated` / `returned` / `hint` beside the page so the partial page
  * is machine-checkable and the caller can page with `cursor` instead of
- * guessing. When not even one whole row fits, the raw head of the row array is
- * carried as a STRING (`head`); and when a SIBLING (not the page) is itself
- * bigger than the whole budget, the siblings are clamped — labelled as trimmed —
- * rather than letting them push the page back onto the torn-string path.
+ * guessing. When a SIBLING (not the page) is itself bigger than the whole
+ * budget, the siblings are clamped — labelled as trimmed — rather than letting
+ * them push the page back onto the torn-string path.
  *
- * Returns null when the payload carries no usable page (no array of plain
- * objects at the root or one level down, e.g. a bare top-level array or a page
- * whose rows are not objects): the caller then keeps the legacy narrowing note,
- * which still announces the cut instead of hiding it.
+ * Returns null — deferring to the caller's H-71 truncation note — whenever no
+ * list-shaped output can be built honestly: the payload carries no usable page
+ * (no array of plain objects at the root or one level down, e.g. a bare
+ * top-level array or a page whose rows are not objects), or not even ONE whole
+ * row fits inside the budget. There is deliberately no `head`/empty-page
+ * fallback: a page with no rows is not a page, and the note announces the cut,
+ * names the pagination token, and never passes a torn document off as a whole
+ * one.
  */
 function truncateListPayload(data: Record<string, unknown>, budget: number): string | null {
   const found = findListRows(data);
@@ -201,25 +204,21 @@ function truncateListPayload(data: Record<string, unknown>, budget: number): str
   const { container, containerPath, key, rows } = found;
   const hint = (kept: number): string =>
     `${key}: ${kept}/${rows.length} rows returned (result budget ${budget} chars) — treat this page as PARTIAL and continue with cursor/size; the server's own fields (total, nextCursor) are preserved.`;
-  const render = (pageContainer: Record<string, unknown>, outerSiblings: Record<string, unknown>, kept: number, extra: Record<string, unknown> = {}): string => {
-    const page = { ...pageContainer, [key]: rows.slice(0, kept), truncated: true, returned: kept, hint: hint(kept), ...extra };
+  const render = (pageContainer: Record<string, unknown>, outerSiblings: Record<string, unknown>, kept: number): string => {
+    const page = { ...pageContainer, [key]: rows.slice(0, kept), truncated: true, returned: kept, hint: hint(kept) };
     const outer = containerPath.length === 0 ? page : { ...outerSiblings, [containerPath[0]]: page };
     return JSON.stringify(outer, null, 2);
   };
-  const rowsJson = JSON.stringify(rows);
   const attempt = (pageContainer: Record<string, unknown>, outerSiblings: Record<string, unknown>): string | null => {
     for (let kept = rows.length - 1; kept >= 1; kept -= 1) {
       const text = render(pageContainer, outerSiblings, kept);
       if (text.length <= budget) return text;
     }
-    // Not a single whole row fits: hand back the raw head of the row array as a
-    // string, so the caller sees its shape instead of a torn tail.
-    for (let take = Math.min(rowsJson.length, budget); take >= 1; take = Math.floor(take * 0.9)) {
-      const text = render(pageContainer, outerSiblings, 0, { head: rowsJson.slice(0, take) });
-      if (text.length <= budget) return text;
-    }
-    const emptyPage = render(pageContainer, outerSiblings, 0);
-    return emptyPage.length <= budget ? emptyPage : null;
+    // Not even one whole row fits: no list-shaped page can be built inside the
+    // budget, so hand the decision back to formatData, which declares the cut in
+    // the H-71 note. An empty page or a `head` string would only dress up a
+    // document the caller cannot page from.
+    return null;
   };
   const exact = attempt(container, data);
   if (exact) return exact;
@@ -372,7 +371,7 @@ export function buildOmniReaderAgentTools(deps: {
       'Pins: "pin" (pinId), "pin_version" (pinId + ver int, 0 = initial), "pin_list"/"metaid_list"/"block_list"/"mempool_list" (page, size), "pins_by_path" (path required, e.g. /protocols/simplebuzz, size 1-100, cursor), "pins_by_metaid" (metaid required, optional path), "pins_by_address" (address + path required), "pin_content" (pinId, returns the raw content body).',
       'Metafile index: "file_info" (pinId), "file_latest" (firstPinId), "files_by_creator" (address), "files_by_metaid" (metaid), "files_by_extension" (extension like .jpg required, optional metaid/timestamp/size); plus "indexer_status", "indexer_stats", "global_counts".',
       'Paged actions echo lastId/cursor in the response; pass it back for the next page. All parameters are URL-encoded automatically.',
-      'List pages that exceed the result budget come back as VALID JSON holding whole rows only, with `truncated: true` and `returned` telling you how much of the page you got; the server\'s own `total`/`nextCursor` are preserved, so when `truncated` is true the page is PARTIAL — page with cursor/size instead of treating it as the full list.',
+      'List pages that exceed the result budget come back as VALID JSON holding whole rows only, with `truncated: true` and `returned` telling you how much of the page you got; the server\'s own `total`/`nextCursor` are preserved, so when `truncated` is true the page is PARTIAL — page with cursor/size instead of treating it as the full list. When not even one whole row fits, the result falls back to a declared `[omni_read: first N of M chars — …]` cut instead (still page with cursor/size); either way an over-budget result is never a silently torn document.',
       'Prefer search_metaids / metaid_profile for identity discovery and search_social_posts for full-text social search when those fit; omni_read is the low-level fallback returning raw indexer JSON. It never writes on-chain.',
     ].join(' '),
     {

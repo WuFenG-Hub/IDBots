@@ -16,7 +16,11 @@
 //      explicit machine-checkable `truncated` / `returned` pair, inside the cap;
 //   3. the previous shape is kept as a negative control so the new assertions
 //      are demonstrably discriminative (they FAIL on the pre-fix form);
-//   4. a non-list oversized payload keeps the historical narrowing note.
+//   4. a non-list oversized payload — and any list page where not even ONE whole
+//      row fits — falls back to the H-71 truncation note
+//      (`[omni_read: first N of M chars — …]`, which echoes the response's own
+//      pagination token when there is one), so an over-budget result is always a
+//      DECLARED cut rather than a silently torn document.
 //
 // Run:
 //   npm run compile:electron && node --test tests/omniReadListTruncation.test.mjs
@@ -31,6 +35,11 @@ const { buildOmniReaderAgentTools } = require('../dist-electron/main/libs/omniRe
 /** Result budget mirrored from the tool under test; asserted as a hard cap. */
 const MAX_RESULT_CHARS = 20000;
 const NARROWING_NOTE = '(truncated, narrow the query with cursor/size)';
+/**
+ * The H-71 declared-cut note. Only its stable "first N of M chars" head is
+ * pinned — the tail legitimately differs (cursor echoed vs. no cursor found).
+ */
+const H71_NOTE = /\[omni_read: first \d+ of \d+ chars — /;
 
 function makeHarness(fetchJsonResult) {
   const control = {
@@ -141,13 +150,14 @@ test('the pre-fix shaping fails the same assertions (negative control: the new c
   assert.ok(!legacy.includes(NEXT_CURSOR), 'the torn tail swallows the server nextCursor');
 });
 
-test('non-list oversized payloads keep the historical narrowing note', async () => {
+test('non-list oversized payloads fall back to the H-71 truncation note', async () => {
   const big = { code: 0, data: { blob: 'x'.repeat(30000) } };
   const omniRead = makeHarness(big).omni_read;
   const result = await omniRead.handler({ action: 'indexer_stats' });
   assert.equal(result.isError, undefined);
-  assert.match(result.content[0].text, /\(truncated, narrow the query with cursor\/size\)/);
-  assert.ok(result.content[0].text.length < 30000);
+  assert.match(result.content[0].text, H71_NOTE);
+  assert.doesNotMatch(result.content[0].text, /narrow the query with cursor\/size/, 'the pre-H-71 wording is gone');
+  assert.ok(result.content[0].text.length <= MAX_RESULT_CHARS, 'the note path stays inside the shaping cap');
 });
 
 test('an unfamiliar envelope shape is still trimmed to whole rows (no fixed-key blind spot)', async () => {
@@ -183,7 +193,7 @@ test('a known row key wins over a larger unfamiliar array (deterministic choice)
   assert.equal(parsed.data.noise.length, 40, 'the non-row array must be left untouched');
 });
 
-test('a single oversized row still returns valid JSON (raw head), never the row-internal array as the page', async () => {
+test('a single oversized row falls back to the H-71 note, and its row-internal array is never taken for the page', async () => {
   const payload = {
     data: {
       list: [{ id: 'only-row', modify_history: Array.from({ length: 400 }, (_, i) => ({ v: i, pad: 'h'.repeat(60) })) }],
@@ -193,12 +203,21 @@ test('a single oversized row still returns valid JSON (raw head), never the row-
   const omniRead = makeHarness(payload).omni_read;
   const text = (await omniRead.handler({ action: 'pins_by_path', path: '/x' })).content[0].text;
   assert.ok(text.length <= MAX_RESULT_CHARS);
-  const parsed = JSON.parse(text);
-  assert.equal(parsed.data.truncated, true);
-  assert.equal(parsed.data.returned, 0);
-  assert.deepEqual(parsed.data.list, [], 'no whole row fits, so the page must be empty — not the row-internal array');
-  assert.equal(typeof parsed.data.head, 'string');
-  assert.ok(parsed.data.head.startsWith('[{'), 'the head carries the raw row array so the caller still sees its shape');
+  // No whole row fits, so no honest partial page can be built: the result is the
+  // DECLARED H-71 cut — not a `head` string, not an empty page.
+  assert.match(text, H71_NOTE);
+  // Adversarial core, kept from the first cut: `modify_history` sits INSIDE a row,
+  // so it must never be promoted to the page container. A page envelope around it
+  // would render `"truncated": true` / `"returned": n` / a `"head"` string — none
+  // of those may appear, and the cut must start at the payload root (so the page
+  // key `list` is still ahead of the row-internal array).
+  assert.doesNotMatch(text, /"truncated": true/);
+  assert.doesNotMatch(text, /"returned":/);
+  assert.doesNotMatch(text, /"head":/);
+  assert.ok(
+    text.indexOf('"list"') < text.indexOf('"modify_history"'),
+    'the cut starts at the payload root, never inside a row',
+  );
 });
 
 // --- Adversarial envelopes found by an independent reviewer of the first cut ---
@@ -309,20 +328,20 @@ test('a summary block carrying only a total must not outrank the paged container
   assert.ok(summaryKeptWhole || summaryLabelled, 'the summary block survives whole or as a labelled placeholder — never dropped silently');
 });
 
-// --- Documented boundaries: payloads that carry no usable page keep the note ---
-test('a bare top-level array payload has no page container and keeps the note (documented boundary)', async () => {
+// --- Documented boundaries: payloads that carry no usable page fall back to the H-71 note ---
+test('a bare top-level array payload has no page container and falls back to the H-71 note (documented boundary)', async () => {
   const payload = Array.from({ length: 200 }, (_, i) => ({ i, pad: 'p'.repeat(200) }));
   assert.ok(JSON.stringify(payload, null, 2).length > MAX_RESULT_CHARS);
   const omniRead = makeHarness(payload).omni_read;
   const text = (await omniRead.handler({ action: 'indexer_status' })).content[0].text;
-  assert.match(text, /\(truncated, narrow the query with cursor\/size\)/);
-  assert.ok(text.length <= MAX_RESULT_CHARS + 64, 'the note path stays within the documented 20000 + note budget');
+  assert.match(text, H71_NOTE);
+  assert.ok(text.length <= MAX_RESULT_CHARS, 'the note path stays inside the documented 20000-char cap');
 });
 
-test('a page whose rows are not objects keeps the note (documented boundary)', async () => {
+test('a page whose rows are not objects falls back to the H-71 note (documented boundary)', async () => {
   const payload = { data: { list: Array.from({ length: 200 }, (_, i) => `row-${i}-${'s'.repeat(200)}`) } };
   assert.ok(JSON.stringify(payload, null, 2).length > MAX_RESULT_CHARS);
   const omniRead = makeHarness(payload).omni_read;
   const text = (await omniRead.handler({ action: 'pins_by_path', path: '/x' })).content[0].text;
-  assert.match(text, /\(truncated, narrow the query with cursor\/size\)/);
+  assert.match(text, H71_NOTE);
 });
