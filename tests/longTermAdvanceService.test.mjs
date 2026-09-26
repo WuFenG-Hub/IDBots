@@ -155,6 +155,43 @@ test('owner decision quiet beyond the reminder window → reminder escalation', 
   assert.match(report.escalated[0].reasons[0], /owner decision still pending/);
 });
 
+test('owner wait with a future waitUntil stays silent inside the promised quiet window', async () => {
+  const { store, advance } = await openWorld();
+  const taskId = await createActive(store);
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(
+    store.waitSubtask(subtask.id, {
+      kind: 'owner',
+      note: 'need a channel decision',
+      waitUntil: new Date(Date.now() + 12 * HOUR).toISOString(),
+    }, 'twin').ok,
+  );
+
+  const report = await advance.run(Date.now() + 5 * HOUR);
+  assert.equal(report.escalated.length, 0, JSON.stringify(report));
+  assert.match(report.skipped.find((s) => s.taskId === taskId)?.reason ?? '', /nothing due/);
+});
+
+test('owner wait: the first tick after the quiet window passes re-escalates as a window-ended re-presentation', async () => {
+  const { store, advance } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(
+    store.waitSubtask(subtask.id, {
+      kind: 'owner',
+      note: 'need a channel decision',
+      waitUntil: new Date(now + HOUR).toISOString(),
+    }, 'twin').ok,
+  );
+
+  const report = await advance.run(now + 5 * HOUR);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.match(report.escalated[0].reasons[0], /quiet window ended/);
+});
+
 test('in_progress with fresh work events is NOT re-pushed (quiet rule)', async () => {
   const { store, advance } = await openWorld();
   const taskId = await createActive(store);

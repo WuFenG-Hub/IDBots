@@ -13,7 +13,9 @@ import type { LongTermSubtask, LongTermTaskDetail } from '../../renderer/types/l
  *  - the current sub-project is `pending` (begin) or `in_progress` (push);
  *  - a time-based external wait expired (`wait_until` passed);
  *  - an owner decision or untimed external wait has gone quiet for
- *    `ownerReminderMs` (a reminder is due).
+ *    `ownerReminderMs` (a reminder is due). A `waitUntil` quiet window on an
+ *    owner wait is honored: no reminders inside the window, then one full
+ *    re-presentation once it passes.
  *
  * Discipline (owner ruling): driving completion outranks quiet — there is no
  * daily cap. The only throttle is "no new information, no new nudge": per
@@ -258,7 +260,17 @@ export class LongTermAdvanceService {
         ) {
           return ['acceptance proposal awaiting the owner\'s call'];
         }
+        // A promised quiet window on an owner wait is honored: the TwinBot
+        // told the owner "silent until <waitUntil>" (e.g. an overnight
+        // window), so no reminder may fire inside it. The first turn after
+        // the window passes must re-present the decision in full.
+        if (current.waitUntil !== null && Date.parse(current.waitUntil) > nowMs) {
+          return [];
+        }
         if (quietMs > this.waitingOwnerReminderMs) {
+          if (current.waitUntil !== null) {
+            return [`owner quiet window ended (${current.waitUntil}) — re-present the pending decision in full (${current.waitNote})`];
+          }
           return [`owner decision still pending for >${Math.round(this.waitingOwnerReminderMs / 60_000)}min (${current.waitNote})`];
         }
         return [];
