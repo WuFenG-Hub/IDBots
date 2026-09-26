@@ -226,6 +226,53 @@ test('stale owner wait converges: after the Twin re-records the wait, reminders 
   assert.match(report.escalated[0].reasons[0], /owner decision still pending/);
 });
 
+test('proposing from an external wait leaves reminders un-silenced; the session-bind note is not "work"', async () => {
+  const { store, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(
+    store.waitSubtask(
+      subtask.id,
+      { kind: 'external', note: 'notarization', waitUntil: new Date(now + 12 * HOUR).toISOString() },
+      'twin',
+    ).ok,
+  );
+  assert.ok(store.proposeSubtask(subtask.id, { evidence: [{ kind: 'dir', uri: '/tmp/deliverable' }], summary: 'criteria met' }, 'twin').ok);
+
+  const advance = new LongTermAdvanceService(deps);
+  // The fresh proposal escalates immediately (一提请就叫你) — this first
+  // escalation also binds the session, journaling a system note AFTER the
+  // proposal anchor.
+  const first = await advance.run(now + 60_000);
+  assert.equal(first.escalated.length, 1, JSON.stringify(first));
+  // Hours later the pending decision still reminds as a plain reminder —
+  // the residual external window is gone and the bind note must not trip
+  // stale-wait convergence.
+  const later = await advance.run(now + 5 * HOUR);
+  assert.equal(later.escalated.length, 1, JSON.stringify(later));
+  assert.match(later.escalated[0].reasons[0], /owner decision still pending/);
+  assert.doesNotMatch(later.escalated[0].reasons[0], /stale owner wait/);
+});
+
+test('stale detection survives the 200-event detail cap (direct queries, not sliced journal)', async () => {
+  const { store, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'waiting for owner' }, 'twin').ok);
+  assert.ok(store.addNote(taskId, subtask.id, 'worked past the wait', 'twin').ok);
+  // Bury the anchor and the work beyond the 200-event projection with noise.
+  for (let i = 0; i < 205; i += 1) store.recordNudge(taskId, subtask.id, `noise ${i}`);
+  assert.equal(store.getTask(taskId).events.length, 200, 'the detail journal projection is capped');
+
+  const advance = new LongTermAdvanceService(deps);
+  const report = await advance.run(Date.now() + HOUR);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.match(report.escalated[0].reasons[0], /stale owner wait/);
+});
+
 test('supervision: a leading streak of failed worker dispatches trips a supervise turn, once per new failure', async () => {
   const { store, runner, deps } = await openWorld();
   const taskId = await createActive(store);

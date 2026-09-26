@@ -587,6 +587,38 @@ export class LongTermTaskStore {
     ]).map((row) => this.mapEvent(row));
   }
 
+  /**
+   * Newest event of the given kinds for one sub-project (null when none).
+   * Direct query — immune to the capped 200-event detail projection that
+   * heartbeat state detection must not depend on.
+   */
+  getLatestSubtaskEventOfKinds(taskId: string, subtaskId: string, kinds: LongTermEventKind[]): LongTermEvent | null {
+    if (kinds.length === 0) return null;
+    const placeholders = kinds.map(() => '?').join(',');
+    const row = this.getOne<EventRow>(
+      `SELECT * FROM long_term_events WHERE task_id = ? AND subtask_id = ? AND kind IN (${placeholders}) ORDER BY id DESC LIMIT 1`,
+      [taskId, subtaskId, ...kinds],
+    );
+    return row ? this.mapEvent(row) : null;
+  }
+
+  /**
+   * True when the sub-project has REAL work after the given event id: any
+   * newer event except heartbeat infrastructure — 'nudged' escalations and
+   * system notes (session binds). A system bookkeeping note is not "the Twin
+   * worked past the wait"; a twin note, replan, or owner action is.
+   */
+  hasTwinWorkAfter(taskId: string, subtaskId: string, afterEventId: number): boolean {
+    const row = this.getOne<{ one: number }>(
+      `SELECT 1 AS one FROM long_term_events
+       WHERE task_id = ? AND subtask_id = ? AND id > ?
+         AND NOT (kind = 'nudged' OR (kind = 'note' AND actor = 'system'))
+       LIMIT 1`,
+      [taskId, subtaskId, afterEventId],
+    );
+    return row != null;
+  }
+
   // ── sub-task mutations ───────────────────────────────────────────────────
 
   addSubtask(taskId: string, draft: LongTermSubtaskDraft, actor: LongTermActor): LongTermResult<LongTermSubtask> {
@@ -1047,13 +1079,5 @@ export class LongTermTaskStore {
     this.saveDb();
     const updated = this.getSubtask(subtaskId);
     return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
-  }
-
-  /** Heartbeat read: open sub-projects waiting on a time-based condition that's now due. */
-  listDueWaits(now: Date = new Date()): LongTermSubtask[] {
-    return this.getAll<SubtaskRow>(
-      "SELECT * FROM long_term_subtasks WHERE wait_until IS NOT NULL AND wait_until <= ? AND status IN ('waiting_owner','waiting_external')",
-      [now.toISOString()],
-    ).map((row) => this.mapSubtask(row));
   }
 }

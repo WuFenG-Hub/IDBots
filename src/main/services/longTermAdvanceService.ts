@@ -289,7 +289,7 @@ export class LongTermAdvanceService {
       const latestEventId = detail.events[0]?.id ?? 0;
       const nudgeState = store.getNudgeState(card.id);
       const supervision = this.supervisionSignal(detail, current, nowMs);
-      const reasons = this.collectReasons(detail, current, nowMs, nudgeState === null || latestEventId > nudgeState.lastEventId, supervision);
+      const reasons = this.collectReasons(detail, current, nowMs, nudgeState?.lastEventId ?? 0, supervision);
       if (reasons.length === 0) {
         report.skipped.push({ taskId: card.id, reason: `current sub-project is ${current.status}, nothing due` });
         continue;
@@ -358,7 +358,7 @@ export class LongTermAdvanceService {
     detail: LongTermTaskDetail,
     current: LongTermSubtask,
     nowMs: number,
-    hasNewEventsSinceNudge: boolean,
+    nudgeLastEventId: number,
     supervision: { reasons: string[]; signature: string } | null,
   ): string[] {
     const lastActivityAtMs = detail.events[0] ? Date.parse(detail.events[0].createdAt) : Date.parse(detail.updatedAt);
@@ -387,14 +387,10 @@ export class LongTermAdvanceService {
         return [];
       case 'waiting_owner': {
         // A fresh acceptance proposal reaches the owner at the next heartbeat
-        // tick — not after a quiet window (owner ruling: 一提请就叫你).
-        const latestEvent = detail.events[0];
-        if (
-          latestEvent &&
-          latestEvent.kind === 'proposed' &&
-          latestEvent.subtaskId === current.id &&
-          hasNewEventsSinceNudge
-        ) {
+        // tick — not after a quiet window (owner ruling: 一提请就叫你). Direct
+        // query: the proposal just has to be newer than the last nudge.
+        const proposed = this.deps.store().getLatestSubtaskEventOfKinds(detail.id, current.id, ['proposed']);
+        if (proposed && proposed.id > nudgeLastEventId) {
           return ['acceptance proposal awaiting the owner\'s call'];
         }
         // A promised quiet window on an owner wait is honored: the TwinBot
@@ -409,11 +405,8 @@ export class LongTermAdvanceService {
         // reflects reality. Converge it instead of re-nudging the owner about
         // a decision that may no longer exist (regression: 55 reminders over
         // 40h for a wait the TwinBot had already worked past).
-        if (this.hasWorkedPastWait(detail, current)) {
-          return [
-            `stale owner wait — the journal shows work after the wait was parked (${current.waitNote}); converge the state first: longterm_subtask_unblock to resume, or longterm_subtask_wait to re-record it, then re-present whatever still needs the owner`,
-          ];
-        }
+        const staleReason = this.staleWaitReason(detail, current);
+        if (staleReason) return [staleReason];
         if (quietMs > this.waitingOwnerReminderMs) {
           if (current.waitUntil !== null) {
             return [`owner quiet window ended (${current.waitUntil}) — re-present the pending decision in full (${current.waitNote})`];
@@ -428,18 +421,19 @@ export class LongTermAdvanceService {
   }
 
   /**
-   * True when the journal shows sub-project activity AFTER the latest
-   * wait-establishing event ('waiting' or 'proposed'): the recorded wait no
-   * longer reflects reality and must be converged (unblocked or re-recorded),
-   * not re-reminded. Heartbeat 'nudged' events are not work. Events arrive
-   * newest-first; the anchor is the newest wait-establishing event, and
-   * anything non-nudge ahead of it is post-wait work.
+   * The wait recorded on this waiting_owner sub-project is stale: the journal
+   * shows real work after the latest wait-establishing event ('waiting' or
+   * 'proposed'). Direct indexed queries — never the capped 200-event detail
+   * projection. Heartbeat 'nudged' events and system notes (session binds)
+   * are infrastructure, not work.
    */
-  private hasWorkedPastWait(detail: LongTermTaskDetail, current: LongTermSubtask): boolean {
-    const events = detail.events.filter((event) => event.subtaskId === current.id);
-    const anchorIndex = events.findIndex((event) => event.kind === 'waiting' || event.kind === 'proposed');
-    if (anchorIndex === -1) return false;
-    return events.slice(0, anchorIndex).some((event) => event.kind !== 'nudged');
+  private staleWaitReason(detail: LongTermTaskDetail, current: LongTermSubtask): string | null {
+    if (current.status !== 'waiting_owner') return null;
+    const store = this.deps.store();
+    const anchor = store.getLatestSubtaskEventOfKinds(detail.id, current.id, ['waiting', 'proposed']);
+    if (!anchor) return null;
+    if (!store.hasTwinWorkAfter(detail.id, current.id, anchor.id)) return null;
+    return `stale owner wait — the journal shows work after the wait was parked (${current.waitNote}); converge the state first: longterm_subtask_unblock to resume, or longterm_subtask_wait to re-record it, then re-present whatever still needs the owner`;
   }
 
   /**
@@ -502,13 +496,10 @@ export class LongTermAdvanceService {
     return null;
   }
 
-  /** When the sub-project last entered in_progress: newest began/unblocked/rejected event, else updatedAt. */
+  /** When the sub-project last entered in_progress: newest began/unblocked/rejected
+   *  event (direct query), else updatedAt. */
   private enteredInProgressAtMs(detail: LongTermTaskDetail, current: LongTermSubtask): number | null {
-    const event = detail.events.find(
-      (entry) =>
-        entry.subtaskId === current.id &&
-        (entry.kind === 'began' || entry.kind === 'unblocked' || entry.kind === 'rejected'),
-    );
+    const event = this.deps.store().getLatestSubtaskEventOfKinds(detail.id, current.id, ['began', 'unblocked', 'rejected']);
     const parsed = Date.parse(event?.createdAt ?? current.updatedAt);
     return Number.isFinite(parsed) ? parsed : null;
   }
