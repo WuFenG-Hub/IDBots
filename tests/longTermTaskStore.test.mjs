@@ -304,7 +304,7 @@ test('migration: a pre-P1 database gains expected_minutes via a guarded ALTER, r
   const now = new Date().toISOString();
   db.run(
     `INSERT INTO long_term_subtasks
-     (id, task_id, ordinal, title, status, created_at, updated_at) VALUES ('lts_old', 'ltt_old', 1, 'legacy', 'pending', ?, ?)`,
+     (id, task_id, ordinal, title, status, session_id, created_at, updated_at) VALUES ('lts_old', 'ltt_old', 1, 'legacy', 'pending', 'sess-legacy', ?, ?)`,
     [now, now],
   );
 
@@ -312,6 +312,8 @@ test('migration: a pre-P1 database gains expected_minutes via a guarded ALTER, r
   const subtask = store.getSubtask('lts_old');
   assert.ok(subtask, 'legacy row readable after migration');
   assert.equal(subtask.expectedMinutes, null, 'legacy row has no budget');
+  // The read-time union surfaces the pre-column bound session immediately.
+  assert.deepEqual(subtask.sessionHistory, ['sess-legacy'], 'legacy session_id joins the history');
   // New writes can carry a budget on the migrated table.
   assert.ok(store.updateSubtask({ subtaskId: 'lts_old', expectedMinutes: 120 }, 'twin').ok);
   assert.equal(store.getSubtask('lts_old').expectedMinutes, 120);
@@ -348,6 +350,47 @@ test('proposeSubtask validates evidence URI shapes', async () => {
     summary: 's',
   }, 'twin');
   assert.ok(good.ok, JSON.stringify(good));
+});
+
+test('session history accumulates across binds and unions legacy rows at read time', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  const first = store.getTask(taskId).subtasks[0];
+  assert.ok(store.bindSession(first.id, 'sess-a', 'system').ok);
+  assert.ok(store.bindSession(first.id, 'sess-b', 'system').ok);
+  assert.ok(store.bindSession(first.id, 'sess-a', 'system').ok, 'rebind keeps history idempotent');
+  const after = store.getSubtask(first.id);
+  assert.equal(after.sessionId, 'sess-a');
+  assert.deepEqual(after.sessionHistory, ['sess-a', 'sess-b']);
+});
+
+test('waitUntil must be a full ISO timestamp with an explicit timezone designator', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  const first = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(first.id, 'twin').ok);
+  for (const bad of ['2026-09-27', '2026-09-26T09:00:00', 'tomorrow', '']) {
+    const result = store.waitSubtask(first.id, { kind: 'external', note: 'n', waitUntil: bad }, 'twin');
+    assert.equal(result.ok, false, `rejected: ${JSON.stringify(bad)}`);
+    assert.equal(result.code, 'VALIDATION');
+    assert.match(result.error, /timezone offset/);
+  }
+  assert.ok(store.waitSubtask(first.id, { kind: 'external', note: 'with offset', waitUntil: '2026-09-26T09:00:00+08:00' }, 'twin').ok);
+  assert.ok(
+    store.waitSubtask(first.id, { kind: 'external', note: 'z form', waitUntil: new Date().toISOString() }, 'twin').ok,
+    'Z-suffixed ISO accepted',
+  );
+});
+
+test('proposeSubtask rejects unknown evidence kinds', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  const first = store.getTask(taskId).subtasks[0];
+  store.beginSubtask(first.id, 'twin');
+  const bad = store.proposeSubtask(first.id, { evidence: [{ kind: 'sneaky', uri: 'anything goes' }], summary: 's' }, 'twin');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, 'VALIDATION');
+  assert.match(bad.error, /unknown evidence kind "sneaky"/);
 });
 
 test('supervision re-arm state: set and read back per task', async () => {

@@ -107,6 +107,10 @@ export interface LongTermSubtask {
   evidence: LongTermEvidence[];
   /** Bound cowork session (sessionType 'longterm'); null until one is opened. */
   sessionId: string | null;
+  /** Every session EVER bound to this sub-project (rotation appends) — the
+   *  supervision telemetry spans all of them so a rotation cannot blind the
+   *  failure-streak detector. */
+  sessionHistory: string[];
   /** What we are waiting for, when status is waiting_owner / waiting_external. */
   waitNote: string;
   /** ISO time for time-based re-checks (heartbeat), null otherwise. */

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { LongTermTaskStore } from '../longTermTaskStore';
+import { WAIT_UNTIL_STRICT_ISO } from '../longTermTaskStore';
 import { buildDelegationAnchorBlock } from './longTermDelegationAnchor';
 
 /**
@@ -231,7 +232,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       subtaskId: z.string().min(1),
       kind: z.enum(['owner', 'external']),
       note: z.string().min(1).describe('Precisely what is being waited on.'),
-      waitUntil: z.string().optional().describe('ISO datetime for time-based re-checks (e.g. an expected delivery date).'),
+      waitUntil: z.string().regex(WAIT_UNTIL_STRICT_ISO, 'full ISO timestamp WITH timezone offset (Z or ±HH:MM), converted to the owner\'s local timezone').optional().describe('ISO datetime for time-based re-checks — must carry an explicit timezone offset.'),
     },
     async (args: { subtaskId?: string; kind?: 'owner' | 'external'; note?: string; waitUntil?: string }) => {
       try {
@@ -268,7 +269,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
     'Propose acceptance for a sub-project: attach verifiable evidence (local dir, metaapp:// URI, pin:// id, URL) and a summary of how each acceptance criterion is met. Moves the card to waiting-owner; the owner accepts or rejects with feedback.',
     {
       subtaskId: z.string().min(1),
-      evidence: z.array(z.object({ kind: z.string(), uri: z.string().min(1), note: z.string().optional() })).min(1),
+      evidence: z.array(z.object({ kind: z.enum(['dir', 'metaapp', 'pin', 'url', 'other']), uri: z.string().min(1), note: z.string().optional() })).min(1),
       summary: z.string().min(1),
     },
     async (args: { subtaskId?: string; evidence?: unknown[]; summary?: string }) => {
