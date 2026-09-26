@@ -354,15 +354,22 @@ test('supervision re-arm state: set and read back per task', async () => {
   const { store } = await openStore();
   const taskId = await createActive(store);
   assert.equal(store.getSuperviseState(taskId), null);
-  store.setSuperviseState(taskId, { lastSuperviseAtMs: 1234, lastSignal: 'fails:2@a1' });
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 1234, lastFailureSignal: 'fails:2@a1' });
   assert.deepEqual(
     store.getSuperviseState(taskId),
-    { lastSuperviseAtMs: 1234, lastSignal: 'fails:2@a1', convergenceAtMs: [] },
+    { lastSuperviseAtMs: 1234, lastFailureSignal: 'fails:2@a1', convergenceAtMs: [] },
   );
-  // A supervision-turn write preserves the churn trail; a convergence write appends to it.
-  store.setSuperviseState(taskId, { lastSuperviseAtMs: 5678, lastSignal: 'duration' });
+  // P1-A: a duration-style write (no failure signature) must NOT wipe the
+  // failure dedup marker — the two signals consume separately.
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 5678 });
+  assert.equal(store.getSuperviseState(taskId).lastFailureSignal, 'fails:2@a1', 'duration write preserves the failure marker');
   assert.deepEqual(store.getSuperviseState(taskId).convergenceAtMs, [], 'supervision write preserves an empty trail');
-  store.setSuperviseState(taskId, { lastSuperviseAtMs: 5678, lastSignal: 'duration', convergenceAtMs: [100, 200] });
-  store.setSuperviseState(taskId, { lastSuperviseAtMs: 6000, lastSignal: 'duration' });
+  // A new failure signature overwrites the old one; convergence writes keep it.
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 6000, lastFailureSignal: 'fails:3@a9' });
+  assert.equal(store.getSuperviseState(taskId).lastFailureSignal, 'fails:3@a9');
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 6500, convergenceAtMs: [100, 200] });
+  assert.equal(store.getSuperviseState(taskId).lastFailureSignal, 'fails:3@a9', 'convergence write preserves the failure marker');
+  assert.deepEqual(store.getSuperviseState(taskId).convergenceAtMs, [100, 200]);
+  store.setSuperviseState(taskId, { lastSuperviseAtMs: 7000 });
   assert.deepEqual(store.getSuperviseState(taskId).convergenceAtMs, [100, 200], 'omitted field keeps the existing trail');
 });

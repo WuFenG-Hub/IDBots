@@ -390,6 +390,38 @@ test('supervision: duration overrun past the expected budget trips a supervise t
   assert.equal(third.escalated.filter((hit) => hit.reasons[0].startsWith('supervision:')).length, 1, JSON.stringify(third));
 });
 
+test('P1-A regression: a duration turn does not reset the failure-streak dedup (no paired supervision)', async () => {
+  const { store, runner, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(store.updateSubtask({ subtaskId: subtask.id, expectedMinutes: 60 }, 'twin').ok);
+  deps.listWorkerAttempts = () => [
+    { id: 'a1', label: 'v1', status: 'failed', startedAtMs: now - 3 * HOUR, finishedAtMs: now - 2.5 * HOUR },
+    { id: 'a2', label: 'v2', status: 'failed', startedAtMs: now - 2 * HOUR, finishedAtMs: now - 1.5 * HOUR },
+  ];
+  const supervisor = new LongTermAdvanceService(deps);
+
+  // Failure-streak supervision consumes its signature.
+  const first = await supervisor.run(now);
+  assert.equal(first.escalated.length, 1, JSON.stringify(first));
+  assert.match(first.escalated[0].reasons[0], /supervision: 2 consecutive/);
+
+  // One budget window later (no new failures): duration supervision fires.
+  const second = await supervisor.run(now + 90 * 60_000);
+  assert.equal(second.escalated.length, 1, JSON.stringify(second));
+  assert.match(second.escalated[0].reasons[0], /supervision: in progress for >\d+h without converging/);
+
+  // Five minutes after that duration turn — still no new failures, and the
+  // last nudge is 5 min old (inside the 30-min noise throttle): the OLD
+  // failure signature must NOT look fresh again. With the shared-slot bug
+  // this spurious turn fired and bypassed the throttle.
+  const third = await supervisor.run(now + 95 * 60_000);
+  assert.equal(third.escalated.length, 0, JSON.stringify(third));
+  assert.equal(runner.starts.length, 2, 'exactly two supervision turns total');
+});
+
 test('supervision turn prompt carries the verdict contract, responsibility chain, and dispatch record', async () => {
   const { store, runner, deps } = await openWorld();
   const taskId = await createActive(store);

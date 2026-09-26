@@ -71,8 +71,14 @@ export const LONGTERM_SUPERVISE_STATE_KV_KEY = 'longterm_supervise_state';
 /** Supervision re-arm state for one task's supervise escalations. */
 export interface LongTermSuperviseState {
   lastSuperviseAtMs: number;
-  /** Signature of the supervision signal already escalated (new signal = new turn). */
-  lastSignal: string;
+  /**
+   * Signature of the failure-streak signal already supervised (a NEW failure
+   * changes the signature and fires again). Kept separate from duration
+   * turns, which re-arm purely by lastSuperviseAtMs — one shared slot let a
+   * duration turn reset the failure dedup and cause spurious paired
+   * supervision turns per budget window (review P1-A).
+   */
+  lastFailureSignal?: string;
   /** Timestamps of recent stale-wait convergence escalations (churn breaker). */
   convergenceAtMs?: number[];
 }
@@ -1014,7 +1020,7 @@ export class LongTermTaskStore {
   }
 
   /** Per-task supervision re-arm state (advance service P1): when did the last
-   *  supervise escalation run and which signal signature did it consume. */
+   *  supervise escalation run, and which failure signature did it consume. */
   getSuperviseState(taskId: string): LongTermSuperviseState | null {
     const map = this.readSuperviseStateMap();
     const entry = map[taskId];
@@ -1024,17 +1030,23 @@ export class LongTermTaskStore {
     const convergenceAtMs = Array.isArray((entry as LongTermSuperviseState).convergenceAtMs)
       ? (entry as LongTermSuperviseState).convergenceAtMs.map(Number).filter((value) => Number.isFinite(value))
       : [];
-    return { lastSuperviseAtMs, lastSignal: String((entry as LongTermSuperviseState).lastSignal ?? ''), convergenceAtMs };
+    return {
+      lastSuperviseAtMs,
+      lastFailureSignal: String((entry as LongTermSuperviseState).lastFailureSignal ?? ''),
+      convergenceAtMs,
+    };
   }
 
   setSuperviseState(taskId: string, state: LongTermSuperviseState): void {
     const map = this.readSuperviseStateMap();
-    // Omitted convergenceAtMs preserves the existing trail (a supervision-turn
-    // write must not wipe the churn-breaker history).
+    // Omitted optional fields preserve their existing values: a duration-turn
+    // write must not wipe the failure dedup, and a supervision-turn write
+    // must not wipe the churn-breaker trail.
+    const lastFailureSignal = state.lastFailureSignal ?? map[taskId]?.lastFailureSignal ?? '';
     const convergenceAtMs = state.convergenceAtMs ?? map[taskId]?.convergenceAtMs ?? [];
     map[taskId] = {
       lastSuperviseAtMs: Math.trunc(state.lastSuperviseAtMs),
-      lastSignal: String(state.lastSignal),
+      lastFailureSignal,
       convergenceAtMs: convergenceAtMs.map(Number).filter((value) => Number.isFinite(value)),
     };
     this.db.run(
