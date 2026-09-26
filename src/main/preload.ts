@@ -737,6 +737,10 @@ contextBridge.exposeInMainWorld('electron', {
     get: () => ipcRenderer.invoke('app:getAutoLaunch'),
     set: (enabled: boolean) => ipcRenderer.invoke('app:setAutoLaunch', enabled),
   },
+  experimentalAutomation: {
+    get: () => ipcRenderer.invoke('app:getExperimentalAutomation') as Promise<{ enabled: boolean }>,
+    set: (enabled: boolean) => ipcRenderer.invoke('app:setExperimentalAutomation', enabled) as Promise<{ success: boolean; error?: string }>,
+  },
   feeRates: {
     getTiers: () => ipcRenderer.invoke('feeRates:getTiers') as Promise<Record<string, { title: string; desc: string; feeRate: number }[]>>,
     getSelected: () => ipcRenderer.invoke('feeRates:getSelected') as Promise<Record<string, string>>,

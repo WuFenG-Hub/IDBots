@@ -1347,6 +1347,10 @@ interface IElectronAPI {
     get: () => Promise<{ enabled: boolean }>;
     set: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   };
+  experimentalAutomation: {
+    get: () => Promise<{ enabled: boolean }>;
+    set: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+  };
   feeRates: {
     getTiers: () => Promise<Record<string, { title: string; desc: string; feeRate: number }[]>>;
     getSelected: () => Promise<Record<string, string>>;

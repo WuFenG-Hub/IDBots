@@ -482,6 +482,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
   const [language, setLanguage] = useState<LanguageType>(i18nService.getLanguage());
   const [autoLaunch, setAutoLaunchState] = useState(false);
   const [isUpdatingAutoLaunch, setIsUpdatingAutoLaunch] = useState(false);
+  const [experimentalAutomation, setExperimentalAutomationState] = useState(true);
+  const [isUpdatingExperimentalAutomation, setIsUpdatingExperimentalAutomation] = useState(false);
   const [preventDeviceSleep, setPreventDeviceSleepState] = useState(false);
   const [isUpdatingPreventDeviceSleep, setIsUpdatingPreventDeviceSleep] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -674,6 +676,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         setAutoLaunchState(enabled);
       }).catch(err => {
         console.error('Failed to load auto-launch setting:', err);
+      });
+
+      // Load the experimental automation kill-switch (missing key = allowed)
+      window.electron.experimentalAutomation.get().then(({ enabled }) => {
+        setExperimentalAutomationState(enabled);
+      }).catch(err => {
+        console.error('Failed to load the experimental automation setting:', err);
       });
 
       // Load prevent-device-sleep setting (missing key = OFF)
@@ -2171,6 +2180,55 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                   <span
                     className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
                       autoLaunch ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </label>
+            </div>
+
+            {/* Experimental automation kill-switch (browser automation + desktop computer use) */}
+            <div>
+              <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mb-3">
+                {i18nService.t('experimentalAutomation')}
+              </h4>
+              <label className="flex items-center justify-between cursor-pointer">
+                <span className="text-sm dark:text-claude-darkSecondaryText text-claude-secondaryText">
+                  {i18nService.t('experimentalAutomationDescription')}
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={experimentalAutomation}
+                  onClick={async () => {
+                    if (isUpdatingExperimentalAutomation) return;
+                    const next = !experimentalAutomation;
+                    setIsUpdatingExperimentalAutomation(true);
+                    try {
+                      const result = await window.electron.experimentalAutomation.set(next);
+                      if (result.success) {
+                        setExperimentalAutomationState(next);
+                      } else {
+                        setError(result.error || 'Failed to update the experimental automation setting');
+                      }
+                    } catch (err) {
+                      console.error('Failed to set experimental automation:', err);
+                      setError('Failed to update the experimental automation setting');
+                    } finally {
+                      setIsUpdatingExperimentalAutomation(false);
+                    }
+                  }}
+                  disabled={isUpdatingExperimentalAutomation}
+                  className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
+                    isUpdatingExperimentalAutomation ? 'opacity-50 cursor-not-allowed' : ''
+                  } ${
+                    experimentalAutomation
+                      ? 'bg-claude-accent'
+                      : 'bg-gray-300 dark:bg-gray-600'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      experimentalAutomation ? 'translate-x-6' : 'translate-x-1'
                     }`}
                   />
                 </button>

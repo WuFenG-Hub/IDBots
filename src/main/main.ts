@@ -233,7 +233,7 @@ import {
   setRendererMetabotSetting,
 } from './services/metabotSettingsService';
 import { isCoworkMcpMountEnabled } from './services/coworkMcpToolsPreference';
-import { isCoworkBrowserAutomationEnabled, isCoworkComputerUseEnabled } from './services/coworkAutomationPreference';
+import { isCoworkBrowserAutomationEnabled, isCoworkComputerUseEnabled, isExperimentalAutomationAllowed, setExperimentalAutomationAllowed } from './services/coworkAutomationPreference';
 import {
   resumeOpenTeamInviteWatchers,
   setOpenTeamServiceDeps,
@@ -3086,6 +3086,17 @@ const getStore = (): SqliteStore => {
   return store;
 };
 
+/** Store access that tolerates early-boot callers (runtime providers fire
+ *  before every init path has settled; a missing store must read as
+ *  "no override recorded", never as a turn-breaking exception). */
+const getStoreOrNull = (): SqliteStore | null => {
+  try {
+    return getStore();
+  } catch {
+    return null;
+  }
+};
+
 /**
  * R3: rough upper-bound MVC fee estimate for a typical pin (funding + payload
  * outputs, ~600 vB at the resolved fee rate) — feeds the `need ~N sats` part
@@ -5287,11 +5298,13 @@ const getCoworkRunner = () => {
         if (!isCoworkMcpMountEnabled(getMetabotStore(), metabotId)) return [];
         return getMcpStore().getEnabledServers();
       },
-      // Per-bot opt-in (default off): 0.1.7 experimental browser automation
-      // (Playwright MCP) launches one headless Chromium per DSH session.
-      // Prefer the installed Chrome over a Playwright-managed download.
-      // See services/coworkAutomationPreference.ts.
+      // Per-bot opt-in (default off) behind the app-level kill-switch
+      // (automation.experimentalEnabled, default allow): 0.1.7 experimental
+      // browser automation (Playwright MCP) launches one headless Chromium
+      // per DSH session. Prefer the installed Chrome over a Playwright-
+      // managed download. See services/coworkAutomationPreference.ts.
       browserAutomationProvider: (coworkSessionId: string) => {
+        if (!isExperimentalAutomationAllowed(getStoreOrNull())) return undefined;
         const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
         if (!isCoworkBrowserAutomationEnabled(getMetabotStore(), metabotId)) return undefined;
         return { mode: 'launch' as const, headless: true, ...detectSystemChromium() };
@@ -5300,6 +5313,7 @@ const getCoworkRunner = () => {
       // (cua-driver native, in-process). Requires the app to hold the macOS
       // Accessibility/Screen Recording grants — the OS prompts on first use.
       computerUseProvider: (coworkSessionId: string) => {
+        if (!isExperimentalAutomationAllowed(getStoreOrNull())) return false;
         const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
         return isCoworkComputerUseEnabled(getMetabotStore(), metabotId);
       },
@@ -8567,6 +8581,29 @@ if (!gotTheLock) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to set auto-launch',
+      };
+    }
+  });
+
+  // Fleet-wide kill-switch for the 0.1.7 experimental automation backends
+  // (browser automation + desktop computer use). Default allow; '0' cuts
+  // both providers for every bot on their next turn (slot isolation re-pins
+  // the sessions onto the clean runtime).
+  ipcMain.handle('app:getExperimentalAutomation', () => {
+    return { enabled: isExperimentalAutomationAllowed(getStoreOrNull()) };
+  });
+
+  ipcMain.handle('app:setExperimentalAutomation', (_event, enabled: unknown) => {
+    if (typeof enabled !== 'boolean') {
+      return { success: false, error: 'Invalid parameter: enabled must be boolean' };
+    }
+    try {
+      setExperimentalAutomationAllowed(getStore(), enabled);
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set the experimental automation switch',
       };
     }
   });
