@@ -326,6 +326,25 @@ test('proposing acceptance clears a residual external waitUntil (no phantom quie
   assert.equal(store.getSubtask(first.id).waitUntil, null, 'acceptance proposal must not inherit the external wait window');
 });
 
+test('proposeSubtask validates evidence URI shapes', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  const first = store.getTask(taskId).subtasks[0];
+  store.beginSubtask(first.id, 'twin');
+  const bad = store.proposeSubtask(first.id, {
+    evidence: [{ kind: 'pin', uri: 'https://not-a-pin' }, { kind: 'dir', uri: 'relative/path' }],
+    summary: 's',
+  }, 'twin');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, 'VALIDATION');
+  assert.match(bad.error, /malformed evidence/);
+  const good = store.proposeSubtask(first.id, {
+    evidence: [{ kind: 'pin', uri: 'pin://abc' }, { kind: 'dir', uri: '/tmp/x' }, { kind: 'other', uri: 'anything' }],
+    summary: 's',
+  }, 'twin');
+  assert.ok(good.ok, JSON.stringify(good));
+});
+
 test('supervision re-arm state: set and read back per task', async () => {
   const { store } = await openStore();
   const taskId = await createActive(store);

@@ -827,6 +827,25 @@ export class LongTermTaskStore {
     }
     const evidence = (input.evidence ?? []).filter((entry) => entry && asText(entry.uri).trim());
     if (evidence.length === 0) return { ok: false, code: 'VALIDATION', error: 'at least one evidence URI is required' };
+    // Shape validation: the acceptance chain is only as good as its evidence
+    // — a criterion "proven" by a malformed URI was never proven.
+    const malformed = evidence.filter((entry) => {
+      const uri = asText(entry.uri).trim();
+      const kind = asText(entry.kind).trim();
+      if (kind === 'pin') return !uri.startsWith('pin://');
+      if (kind === 'metaapp') return !uri.startsWith('metaapp://');
+      if (kind === 'metafile') return !uri.startsWith('metafile://');
+      if (kind === 'url') return !/^https?:\/\//.test(uri);
+      if (kind === 'dir') return !uri.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(uri);
+      return false;
+    });
+    if (malformed.length > 0) {
+      return {
+        ok: false,
+        code: 'VALIDATION',
+        error: `malformed evidence URI(s): ${malformed.map((entry) => `${asText(entry.kind) || 'untyped'} ${asText(entry.uri).slice(0, 80)}`).join('; ')}`,
+      };
+    }
     this.db.run(
       "UPDATE long_term_subtasks SET status = 'waiting_owner', evidence_json = ?, wait_note = ?, wait_until = NULL, updated_at = ? WHERE id = ?",
       [JSON.stringify(evidence), `acceptance proposed: ${asText(input.summary).slice(0, 500)}`, nowIso(), subtaskId],
