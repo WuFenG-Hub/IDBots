@@ -197,10 +197,14 @@ jobs:
       - name: Run MetaWeb agent-tool tests
         run: pnpm run test:metaweb
 
-      # Behavioral regression for the omni_read shaping-cap fix (H-71): a
-      # truncated read must declare first-N-of-M plus a resume cursor instead
-      # of spilling silently. Runs compile:electron first (project convention).
-      - name: Run omni-read agent-tool tests
+      # Behavioral regression for the omni_read shaping cap (H-71) and for the
+      # over-budget LIST-page contract built on top of it: a truncated read must
+      # declare first-N-of-M plus a resume cursor instead of spilling silently,
+      # and a list page that still fits whole rows must come back as parseable
+      # JSON carrying only whole rows. test:omni-read runs both suites
+      # (omniReaderAgentTools + omniReadListTruncation); compile:electron runs
+      # first (project convention).
+      - name: Run omni-read agent-tool and list-page contract tests
         run: pnpm run test:omni-read
 
       - name: Install web-search skill dependencies

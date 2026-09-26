@@ -140,7 +140,7 @@ test('over-budget list payload: valid JSON, whole rows only, server accounting a
   assert.match(parsed.data.hint, /\/100 rows returned/);
 });
 
-test('the pre-fix shaping fails the same assertions (negative control: the new checks have discriminative power)', () => {
+test('the torn-string shaping fails the same assertions (negative control: the new checks have discriminative power)', () => {
   const payload = listPayload(100);
   const legacy = legacyShaping(payload);
   assert.match(legacy, /\(truncated, narrow the query with cursor\/size\)/);
@@ -338,10 +338,22 @@ test('a bare top-level array payload has no page container and falls back to the
   assert.ok(text.length <= MAX_RESULT_CHARS, 'the note path stays inside the documented 20000-char cap');
 });
 
-test('a page whose rows are not objects falls back to the H-71 note (documented boundary)', async () => {
-  const payload = { data: { list: Array.from({ length: 200 }, (_, i) => `row-${i}-${'s'.repeat(200)}`) } };
+test('a page whose rows are not objects falls through to the H-71 note, cursor intact (documented boundary)', async () => {
+  const payload = {
+    data: {
+      list: Array.from({ length: 200 }, (_, i) => `row-${i}-${'s'.repeat(200)}`),
+      nextCursor: NEXT_CURSOR,
+      total: 200,
+    },
+  };
   assert.ok(JSON.stringify(payload, null, 2).length > MAX_RESULT_CHARS);
   const omniRead = makeHarness(payload).omni_read;
   const text = (await omniRead.handler({ action: 'pins_by_path', path: '/x' })).content[0].text;
   assert.match(text, H71_NOTE);
+  assert.doesNotMatch(text, /\(truncated, narrow the query with cursor\/size\)/, 'the pre-H-71 torn wording must not come back');
+  assert.ok(
+    text.includes(`nextCursor "${NEXT_CURSOR}" present`),
+    'the fall-through path must not lose the response cursor — that is the H-71 contract',
+  );
+  assert.ok(text.length <= MAX_RESULT_CHARS);
 });
