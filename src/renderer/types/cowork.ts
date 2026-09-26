@@ -22,7 +22,9 @@ export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result
 // action entry, 'heartbeat' = long-term task heartbeat, 'schedule' = cron
 // task, 'cross_session' = forwarded from another local session,
 // 'metaweb_group'/'metaweb_private' = relayed MetaWeb messages,
-// 'orchestrator' = orchestrator-injected turn.
+// 'orchestrator' = orchestrator-injected turn,
+// 'group_task' = group-task daemon turn (chair directive, member report,
+// host context snapshot, ...).
 export type CoworkMessageOrigin =
   | 'user'
   | 'quick_action'
@@ -31,7 +33,8 @@ export type CoworkMessageOrigin =
   | 'cross_session'
   | 'metaweb_group'
   | 'metaweb_private'
-  | 'orchestrator';
+  | 'orchestrator'
+  | 'group_task';
 
 // Cowork execution mode
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';

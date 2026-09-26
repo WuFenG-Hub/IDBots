@@ -21,7 +21,8 @@ export type UserMessageOriginKind =
   | 'cross_session'
   | 'metaweb_group'
   | 'metaweb_private'
-  | 'orchestrator';
+  | 'orchestrator'
+  | 'group_task';
 
 export interface UserMessageOrigin {
   kind: UserMessageOriginKind;
@@ -29,6 +30,9 @@ export interface UserMessageOrigin {
   detail?: string;
   /** Remote sender globalMetaId for metaweb_group / metaweb_private origins. */
   senderGlobalMetaId?: string;
+  /** Persisted sender display name / avatar (when the writer recorded them). */
+  senderName?: string;
+  senderAvatar?: string;
 }
 
 export interface UserMessageOriginContext {
@@ -45,6 +49,7 @@ const EXPLICIT_ORIGIN_KINDS: ReadonlySet<string> = new Set<UserMessageOriginKind
   'metaweb_group',
   'metaweb_private',
   'orchestrator',
+  'group_task',
 ]);
 
 const asNonEmptyString = (value: unknown): string | undefined =>
@@ -78,6 +83,8 @@ export const resolveUserMessageOrigin = (
       senderGlobalMetaId:
         asNonEmptyString(metadata.latestMessageSenderGlobalmetaid)
         ?? asNonEmptyString(metadata.senderGlobalMetaId),
+      senderName: asNonEmptyString(metadata.senderName),
+      senderAvatar: asNonEmptyString(metadata.senderAvatar),
     };
   }
 
@@ -88,12 +95,17 @@ export const resolveUserMessageOrigin = (
     return { kind: 'user' };
   }
 
-  // Legacy heuristics for untagged messages: heartbeat escalations and
-  // scheduled-task prompts were persisted with no metadata at all. Composer
-  // input in those sessions always carries a submissionId, so an untagged
-  // user message in a longterm / [定时] session is machine-submitted.
+  // Legacy heuristics for untagged messages: heartbeat escalations,
+  // scheduled-task prompts and group-task daemon turns (chair directives,
+  // member reports, host context snapshots) were all persisted with no
+  // metadata at all. Composer input in those sessions always carries a
+  // submissionId, so an untagged user message there is machine-submitted —
+  // it must never fall through to the "you" default.
   if (context?.sessionType === 'longterm') {
     return { kind: 'heartbeat' };
+  }
+  if (context?.sessionType === 'group_task') {
+    return { kind: 'group_task' };
   }
   const title = context?.sessionTitle ?? '';
   if (title.startsWith('[定时] ')) {

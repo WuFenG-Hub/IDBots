@@ -56,15 +56,51 @@ test('cross-session forwards carry the source session id', () => {
 test('metaweb relays resolve sender identity fields', () => {
   assert.deepEqual(
     resolveUserMessageOrigin(msg({ sourceChannel: 'metaweb_group', latestMessageSenderGlobalmetaid: 'gmid-1' })),
-    { kind: 'metaweb_group', senderGlobalMetaId: 'gmid-1' },
+    { kind: 'metaweb_group', senderGlobalMetaId: 'gmid-1', senderName: undefined, senderAvatar: undefined },
   );
   assert.deepEqual(
     resolveUserMessageOrigin(msg({ sourceChannel: 'metaweb_private', senderGlobalMetaId: 'gmid-2' })),
-    { kind: 'metaweb_private', senderGlobalMetaId: 'gmid-2' },
+    { kind: 'metaweb_private', senderGlobalMetaId: 'gmid-2', senderName: undefined, senderAvatar: undefined },
   );
   assert.equal(
     resolveUserMessageOrigin(msg({ sourceChannel: 'orchestrator' })).kind,
     'orchestrator',
+  );
+});
+
+test('metaweb relays prefer persisted senderName/senderAvatar over a network lookup', () => {
+  assert.deepEqual(
+    resolveUserMessageOrigin(msg({
+      sourceChannel: 'metaweb_group',
+      latestMessageSenderGlobalmetaid: 'gmid-1',
+      senderName: 'AI_Sunny',
+      senderAvatar: 'metafile://avatar.png',
+    })),
+    {
+      kind: 'metaweb_group',
+      senderGlobalMetaId: 'gmid-1',
+      senderName: 'AI_Sunny',
+      senderAvatar: 'metafile://avatar.png',
+    },
+  );
+});
+
+test('group-task daemon turns are never mislabeled as the local user', () => {
+  // Untagged historical daemon writes (chair directives, member reports,
+  // host context snapshots) in group_task sessions.
+  assert.equal(
+    resolveUserMessageOrigin(msg(undefined), { sessionType: 'group_task' }).kind,
+    'group_task',
+  );
+  // Explicit tag from the daemon writers.
+  assert.equal(
+    resolveUserMessageOrigin(msg({ origin: 'group_task' }), { sessionType: 'group_task' }).kind,
+    'group_task',
+  );
+  // Composer input in a group-task session (carries submissionId) stays "user".
+  assert.equal(
+    resolveUserMessageOrigin(msg({ submissionId: 's1' }), { sessionType: 'group_task' }).kind,
+    'user',
   );
 });
 
