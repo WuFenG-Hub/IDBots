@@ -289,6 +289,8 @@ import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService'
 import { TwinOrchestrationService } from './services/twinOrchestrationService';
 import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationBridge';
 import { LongTermTaskStore } from './longTermTaskStore';
+import { MetaTaskProjectionStore } from './services/metatask/projectionStore';
+import { MetaTaskRefresher } from './services/metatask/refresher';
 import { HeartbeatService } from './services/heartbeatService';
 import { LongTermAdvanceService, LONGTERM_ADVANCE_INTERVAL_MS } from './services/longTermAdvanceService';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
@@ -6805,6 +6807,40 @@ const getLongTermAdvanceService = () => {
   return longTermAdvanceService;
 };
 
+let metaTaskRefresher: MetaTaskRefresher | null = null;
+/**
+ * MetaTask read path (quadrant four, chain-sourced): the chain is the source
+ * of truth; the local projection store is a rebuildable cache. Board reads
+ * trigger a background sweep when the cache is stale (10 min).
+ */
+const getMetaTaskRefresher = () => {
+  if (!metaTaskRefresher) {
+    const sqliteStore = getStore();
+    const projectionStore = new MetaTaskProjectionStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction()
+    );
+    metaTaskRefresher = new MetaTaskRefresher({
+      store: () => projectionStore,
+      rosterMetaIds: () =>
+        getMetabotStore()
+          .listMetabots()
+          .map((bot) => bot.globalmetaid)
+          .filter((id): id is string => typeof id === 'string' && Boolean(id)),
+      onUpdated: (payload) => {
+        BrowserWindow.getAllWindows().forEach((win) => {
+          if (!win.isDestroyed()) {
+            try {
+              win.webContents.send('metatask:update', payload);
+            } catch { /* ignore */ }
+          }
+        });
+      },
+    });
+  }
+  return metaTaskRefresher;
+};
+
 let longTermTaskUpdateSeq = 0;
 /** Long-term board refresh push; the seq is a process-local monotonic counter. */
 const broadcastLongTermTaskUpdate = (taskIds: string[], reason: string): void => {
@@ -12207,6 +12243,41 @@ if (!gotTheLock) {
       return result;
     } catch (error) {
       return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to move the sub-project' };
+    }
+  });
+
+  // ==================== MetaTask IPC (chain-side read path, P1) ====================
+  // The chain is the source of truth; these read the local rebuildable
+  // projection. Board reads kick a background sweep when the cache is stale.
+
+  ipcMain.handle('metatask:board', async () => {
+    try {
+      const refresher = getMetaTaskRefresher();
+      const info = refresher.board().refresh;
+      const stale = !info.lastRefreshAtMs || Date.now() - info.lastRefreshAtMs > 10 * 60 * 1000;
+      if (stale) void refresher.refreshOnce('board-auto');
+      return { success: true, board: refresher.board() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to read the MetaTask board' };
+    }
+  });
+
+  ipcMain.handle('metatask:get', async (_event, input: { rootPinId: string }) => {
+    try {
+      const detail = getMetaTaskRefresher().detail(String(input?.rootPinId ?? ''));
+      if (!detail) return { success: false, error: 'MetaTask root not found in the local projection' };
+      return { success: true, detail };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to read the MetaTask' };
+    }
+  });
+
+  ipcMain.handle('metatask:refresh', async () => {
+    try {
+      const result = await getMetaTaskRefresher().refreshOnce('manual');
+      return { success: result.ok, board: result.board ?? undefined, error: result.error ?? undefined };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'MetaTask refresh failed' };
     }
   });
 

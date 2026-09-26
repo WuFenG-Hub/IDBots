@@ -906,6 +906,18 @@ contextBridge.exposeInMainWorld('electron', {
       return () => ipcRenderer.removeListener('longtermTask:update', handler);
     },
   },
+  metatask: {
+    // MetaTask (chain-side, read path P1): local projection of on-chain tasks.
+    // The chain is the source of truth; the projection is rebuildable.
+    board: () => ipcRenderer.invoke('metatask:board'),
+    get: (input: { rootPinId: string }) => ipcRenderer.invoke('metatask:get', input),
+    refresh: () => ipcRenderer.invoke('metatask:refresh'),
+    onUpdate: (callback: (data: { seq: number; reason: string }) => void) => {
+      const handler = (_event: any, data: any) => callback(data);
+      ipcRenderer.on('metatask:update', handler);
+      return () => ipcRenderer.removeListener('metatask:update', handler);
+    },
+  },
   groupTask: {
     create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[]; mode?: 'task' | 'chat' }) =>
       ipcRenderer.invoke('groupTask:create', input),

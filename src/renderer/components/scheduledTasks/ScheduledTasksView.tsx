@@ -10,9 +10,10 @@ import TaskDetail from './TaskDetail';
 import AllRunsHistory from './AllRunsHistory';
 import DeleteConfirmModal from './DeleteConfirmModal';
 import LongTermTasksBoard from '../longTermTasks/LongTermTasksBoard';
+import MetaTaskBoard from '../metatask/MetaTaskBoard';
 
-/** 跟踪任务页的外层 Tab：「长期任务」默认在前，「定时任务」原样保留。 */
-type TrackingTabId = 'longTerm' | 'scheduled';
+/** 跟踪任务页的外层 Tab：「长期任务」默认在前，「定时任务」原样保留，「MetaTask」链上多方协作（P1 只读）。 */
+type TrackingTabId = 'longTerm' | 'scheduled' | 'metaTask';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -108,7 +109,7 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
 
   // 「定时任务」Tab 里的创建/编辑/详情子视图会顶掉 Tab 行，把标题位让给返回按钮
   const inScheduledSubView = viewMode !== 'list' || Boolean(selectedTaskId);
-  const showTrackingTabs = trackingTab === 'longTerm' || !inScheduledSubView;
+  const showTrackingTabs = trackingTab === 'longTerm' || trackingTab === 'metaTask' || !inScheduledSubView;
   const showScheduledSubTabs = trackingTab === 'scheduled' && !inScheduledSubView;
 
   return (
@@ -175,6 +176,16 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
                 <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
               )}
             </button>
+            <button
+              type="button"
+              onClick={() => handleTrackingTabChange('metaTask')}
+              className={tabButtonClass(trackingTab === 'metaTask')}
+            >
+              {i18nService.t('trackedTask.tab.metaTask')}
+              {trackingTab === 'metaTask' && (
+                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
+              )}
+            </button>
           </div>
         </div>
       )}
@@ -220,6 +231,8 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
       <div className="flex-1 min-h-0 overflow-hidden">
         {trackingTab === 'longTerm' ? (
           <LongTermTasksBoard />
+        ) : trackingTab === 'metaTask' ? (
+          <MetaTaskBoard />
         ) : (
           <div className="h-full overflow-y-auto">
             {showScheduledSubTabs && scheduledSubTab === 'history' ? (

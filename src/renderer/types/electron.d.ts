@@ -1457,6 +1457,23 @@ interface IElectronAPI {
     /** seq is monotonic per process: drop frames with seq <= lastSeenSeq and refetch. */
     onUpdate: (callback: (data: { seq: number; taskIds: string[]; reason: string }) => void) => () => void;
   };
+  /**
+   * MetaTask (chain-side multi-bot collaboration, read path P1). Local
+   * projection of on-chain tasks; the chain is the source of truth and every
+   * payload carries the boundary block it was computed at.
+   * Main-process implementation: src/main/services/metatask/.
+   */
+  metatask: {
+    board: () => Promise<{ success: boolean; board?: import('./metatask').MetaTaskBoard; error?: string }>;
+    get: (input: { rootPinId: string }) => Promise<{
+      success: boolean;
+      detail?: import('./metatask').MetaTaskTaskProjection;
+      error?: string;
+    }>;
+    refresh: () => Promise<{ success: boolean; board?: import('./metatask').MetaTaskBoard; error?: string }>;
+    /** seq is monotonic per process: drop frames with seq <= lastSeenSeq and refetch. */
+    onUpdate: (callback: (data: { seq: number; reason: string }) => void) => () => void;
+  };
   groupTask: {
     create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[] }) => Promise<any>;
     list: (filter?: { status?: string }) => Promise<any>;
