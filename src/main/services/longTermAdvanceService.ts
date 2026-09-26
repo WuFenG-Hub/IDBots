@@ -135,7 +135,53 @@ function buildOwnerWaitBlock(current: LongTermSubtask, language: string): string
   ].join('\n');
 }
 
-function buildNudgePrompt(detail: LongTermTaskDetail, current: LongTermSubtask, reasons: string[], language: string): string {
+/**
+ * Extra prompt block for SUPERVISION turns (P1): the TwinBot must deliver a
+ * supervision verdict — closer to acceptance, or looping? — and exactly ONE
+ * corrective action. Null when this is not a supervision turn.
+ */
+function buildSupervisionBlock(attempts: LongTermWorkerAttemptSummary[] | null, language: string): string {
+  if (attempts === null) return '';
+  const dispatchLines = attempts
+    .slice(0, 8)
+    .map((attempt) => {
+      const durationMin = attempt.startedAtMs !== null && attempt.finishedAtMs !== null
+        ? Math.max(1, Math.round((attempt.finishedAtMs - attempt.startedAtMs) / 60_000))
+        : null;
+      return `   - ${attempt.label ?? attempt.id}: ${attempt.status}${durationMin !== null ? ` (${durationMin}min)` : ''}`;
+    })
+    .join('\n') || '   (no worker dispatches on record)';
+  if (language === 'zh') {
+    return [
+      '',
+      '特别要求（本轮是监督回合，不是例行推进）：',
+      '- 这是针对委派工作的主动监督：先读 journal（longterm_task_get）与证据，再结合下面的派发记录判断。',
+      '- 回复必须回答三个问题：① 自上次监督以来，工作离验收标准更近了吗——给出证据；② 是否在重复同一类失败（同错误、同方法、盲目重试）；③ 监督结论 + 恰好一项行动：继续 / 纠偏（给 worker 发带锚点的纠正指令）/ 终止并重派 / 确属主人决策时才提问。',
+      '- 责任链：worker 的所有问题第一责任人是你——先诊断、纠偏、换方法、重派，穷尽之后才升级主人；主人只处理产品决策与不可逆取舍。绝不允许静默等待一个反复失败的循环跑下去。',
+      '- 反盲试规则：同一方法以同类方式失败 2 次以上，禁止原样重试第三次——必须换方法、先取证（例如核实代码实际运行的位置与版本），或升级。',
+      '- 用 longterm_event_note 记录监督结论（以「supervision: 」开头），让下一轮监督可以直接对比。',
+      `- 本任务最近的 worker 派发（新→旧）：\n${dispatchLines}`,
+    ].join('\n');
+  }
+  return [
+    '',
+    'SPECIAL REQUIREMENT (this turn is a SUPERVISION check on delegated work, not a routine push):',
+    '- Read the journal (longterm_task_get) and the evidence first, then judge against the dispatch record below.',
+    '- Your reply must answer three questions: (1) is the work closer to the acceptance criteria than at the last check — with evidence; (2) is it repeating the same class of failure (same error, same approach, blind retries); (3) verdict + exactly ONE action: continue / correct course (send the worker a corrective instruction carrying the anchor) / stop and reassign / ask the owner only if it is genuinely their call.',
+    '- Responsibility chain: worker problems are YOURS first — diagnose, correct, change approach, reassign; escalate to the owner only product decisions and irreversible trade-offs. Never silently wait out a repeatedly failing loop.',
+    '- Anti-blind-retry rule: after the same approach has failed the same way twice, a third identical retry is forbidden — change the approach, gather evidence first (e.g. verify where and which version of the code actually runs), or escalate.',
+    '- Journal the verdict with longterm_event_note (prefix "supervision: ") so the next supervision turn can diff against it.',
+    `- Recent worker dispatches for this task (newest first):\n${dispatchLines}`,
+  ].join('\n');
+}
+
+function buildNudgePrompt(
+  detail: LongTermTaskDetail,
+  current: LongTermSubtask,
+  reasons: string[],
+  language: string,
+  supervisionAttempts: LongTermWorkerAttemptSummary[] | null = null,
+): string {
   const criteria = current.acceptanceCriteria.length > 0
     ? current.acceptanceCriteria.map((criterion, index) => `   ${index + 1}. ${criterion}`).join('\n')
     : '   (no acceptance criteria on file — align them with the owner before pushing)';
@@ -164,6 +210,8 @@ function buildNudgePrompt(detail: LongTermTaskDetail, current: LongTermSubtask, 
     ];
     const ownerWaitBlock = buildOwnerWaitBlock(current, language);
     if (ownerWaitBlock) lines.push(ownerWaitBlock);
+    const supervisionBlock = buildSupervisionBlock(supervisionAttempts, language);
+    if (supervisionBlock) lines.push(supervisionBlock);
     return lines.join('\n');
   }
   const lines = [
@@ -190,6 +238,8 @@ function buildNudgePrompt(detail: LongTermTaskDetail, current: LongTermSubtask, 
   ];
   const ownerWaitBlock = buildOwnerWaitBlock(current, language);
   if (ownerWaitBlock) lines.push(ownerWaitBlock);
+  const supervisionBlock = buildSupervisionBlock(supervisionAttempts, language);
+  if (supervisionBlock) lines.push(supervisionBlock);
   return lines.join('\n');
 }
 
@@ -267,7 +317,12 @@ export class LongTermAdvanceService {
         continue;
       }
       try {
-        const outcome = await this.escalate(detail, current, reasons);
+        const outcome = await this.escalate(
+          detail,
+          current,
+          reasons,
+          supervision ? (this.deps.listWorkerAttempts?.(detail.id) ?? []) : null,
+        );
         report.escalated.push({
           taskId: card.id,
           subtaskId: current.id,
@@ -463,12 +518,13 @@ export class LongTermAdvanceService {
     detail: LongTermTaskDetail,
     current: LongTermSubtask,
     reasons: string[],
+    supervisionAttempts: LongTermWorkerAttemptSummary[] | null = null,
   ): Promise<{ sessionId: string; reusedSession: boolean }> {
     const coworkStore = this.deps.coworkStore();
     const runner = this.deps.coworkRunner();
     const twinId = this.deps.resolveTwinMetabotId();
     const language = this.deps.getAppLanguage?.() ?? 'en';
-    const prompt = buildNudgePrompt(detail, current, reasons, language);
+    const prompt = buildNudgePrompt(detail, current, reasons, language, supervisionAttempts);
 
     let sessionId = current.sessionId ?? '';
     let reusedSession = false;

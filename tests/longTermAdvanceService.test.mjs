@@ -280,6 +280,37 @@ test('supervision: duration overrun past the expected budget trips a supervise t
   assert.equal(third.escalated.filter((hit) => hit.reasons[0].startsWith('supervision:')).length, 1, JSON.stringify(third));
 });
 
+test('supervision turn prompt carries the verdict contract, responsibility chain, and dispatch record', async () => {
+  const { store, runner, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  const now = Date.now();
+  deps.listWorkerAttempts = () => [
+    { id: 'a1', label: 'ltt_x_v1', status: 'completed', startedAtMs: now - 9 * HOUR, finishedAtMs: now - 8 * HOUR },
+    { id: 'a2', label: 'ltt_x_v2', status: 'failed', startedAtMs: now - 7 * HOUR, finishedAtMs: now - 6 * HOUR },
+    { id: 'a3', label: 'ltt_x_v3', status: 'timed_out', startedAtMs: now - 4 * HOUR, finishedAtMs: now - 3 * HOUR },
+  ];
+  const supervisor = new LongTermAdvanceService(deps);
+  const report = await supervisor.run(now);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  const prompt = runner.starts[0].prompt;
+  assert.match(prompt, /SUPERVISION check on delegated work/i);
+  assert.match(prompt, /three questions/i);
+  assert.match(prompt, /Responsibility chain/i);
+  assert.match(prompt, /third identical retry is forbidden/i);
+  assert.ok(prompt.includes('ltt_x_v3: timed_out (60min)'), 'dispatch record embedded with duration');
+  assert.ok(prompt.includes('ltt_x_v2: failed (60min)'), 'failed dispatch visible');
+});
+
+test('routine (non-supervision) turns carry no supervision block', async () => {
+  const { store, runner, deps } = await openWorld();
+  const advance = new LongTermAdvanceService(deps);
+  await createActive(store);
+  await advance.run(Date.now());
+  assert.doesNotMatch(runner.starts[0].prompt, /SUPERVISION check on delegated work/i);
+});
+
 test('in_progress with fresh work events is NOT re-pushed (quiet rule)', async () => {
   const { store, advance } = await openWorld();
   const taskId = await createActive(store);
