@@ -266,7 +266,7 @@ test('write tool inserts source-prefixed message, ignores spoofed source, emits 
   assert.equal(payload.sourceSessionId, source.id);
   assert.equal(payload.targetSessionId, target.id);
   assert.equal(payload.runQueued, true);
-  assert.equal(payload.message.content, `来自${source.id} 的信息：continue from source`);
+  assert.equal(payload.message.content, `来自${source.id} 的信息：<cross_session_message trust="untrusted">continue from source</cross_session_message>`);
   assert.deepEqual(payload.message.metadata, {
     sourceChannel: 'idbots_cross_session',
     sourceSessionId: source.id,
@@ -363,7 +363,7 @@ test('write tool reports unqueued when target was already stopped before insert'
   assert.equal(payload.warning, 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED');
   assert.equal(payload.reason, 'TARGET_SESSION_STOPPED');
   assert.match(payload.error, /TARGET_SESSION_STOPPED/);
-  assert.equal(payload.message.content, `来自${source.id} 的信息：insert without restart`);
+  assert.equal(payload.message.content, `来自${source.id} 的信息：<cross_session_message trust="untrusted">insert without restart</cross_session_message>`);
 
   assert.deepEqual(emittedMessages.map((event) => [event.sessionId, event.message.id]), [
     [target.id, payload.message.id],
@@ -403,12 +403,12 @@ test('running target drains queued cross-session continuations in order after th
   await waitFor(() => assert.equal(runCalls.length, 2), 500);
   assert.deepEqual(runCalls.map((call) => call.sessionId), [target.id, target.id]);
   assert.deepEqual(runCalls.map((call) => call.prompt), [
-    `来自${source.id} 的信息：first queued prompt`,
-    `来自${source.id} 的信息：second queued prompt`,
+    `来自${source.id} 的信息：<cross_session_message trust="untrusted">first queued prompt</cross_session_message>`,
+    `来自${source.id} 的信息：<cross_session_message trust="untrusted">second queued prompt</cross_session_message>`,
   ]);
   assert.deepEqual(store.getSession(target.id).messages.map((message) => message.content), [
-    `来自${source.id} 的信息：first queued prompt`,
-    `来自${source.id} 的信息：second queued prompt`,
+    `来自${source.id} 的信息：<cross_session_message trust="untrusted">first queued prompt</cross_session_message>`,
+    `来自${source.id} 的信息：<cross_session_message trust="untrusted">second queued prompt</cross_session_message>`,
   ]);
   assert.equal(runner.activeSessions.has(target.id), true);
 });
@@ -437,7 +437,7 @@ test('stopped target drops queued cross-session continuation and does not restar
 
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(runCalls.length, 0);
-  assert.equal(store.getSession(target.id).messages[0].content, `来自${source.id} 的信息：do not auto-run after stop`);
+  assert.equal(store.getSession(target.id).messages[0].content, `来自${source.id} 的信息：<cross_session_message trust="untrusted">do not auto-run after stop</cross_session_message>`);
 });
 
 
@@ -473,7 +473,7 @@ test('insertCrossSessionMessageAndQueue inserts, emits once, and drains to activ
   assert.equal(runCalls[0].sessionId, target.id);
   assert.match(runCalls[0].prompt, /wake up twin session/);
   assert.deepEqual(store.getSession(target.id).messages.map((message) => message.content), [
-    `来自${source.id} 的信息：wake up twin session`,
+    `来自${source.id} 的信息：<cross_session_message trust="untrusted">wake up twin session</cross_session_message>`,
   ]);
 });
 

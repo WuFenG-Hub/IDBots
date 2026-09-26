@@ -246,7 +246,7 @@ test('inserts a source-prefixed user message into a standard target session with
     assert.equal(result.sourceSessionId, source.id);
     assert.equal(result.targetSessionId, target.id);
     assert.equal(result.message.type, 'user');
-    assert.equal(result.message.content, `来自${source.id} 的信息：hello from elsewhere`);
+    assert.equal(result.message.content, `来自${source.id} 的信息：<cross_session_message trust="untrusted">hello from elsewhere</cross_session_message>`);
     assert.deepEqual(result.message.metadata, {
       sourceChannel: 'idbots_cross_session',
       sourceSessionId: source.id,
