@@ -37,9 +37,29 @@ export function isEmptyListDataPayload(payload: unknown): boolean {
 }
 
 /**
+ * Bound the remote fallback so a blackholed route cannot hang a read; without
+ * this the fetch runs to undici's default ~300s. A caller-provided AbortSignal
+ * always wins over the default timeout.
+ */
+const REMOTE_JSON_TIMEOUT_MS = 8_000;
+/** Content payloads (metafile ZIPs, avatars) can be multi-MB — bound more generously. */
+const REMOTE_CONTENT_TIMEOUT_MS = 60_000;
+
+function withRemoteFallbackTimeout(
+  options: RequestInit | undefined,
+  timeoutMs: number,
+): RequestInit {
+  return {
+    ...(options ?? {}),
+    signal: options?.signal ?? AbortSignal.timeout(timeoutMs),
+  };
+}
+
+/**
  * Fetch from an external indexer when IDBOTS_MAN_P2P_LOCAL_BASE is set; fall
  * back to the remote URL when it is unset, unavailable, returns a non-2xx
- * status, or times out.
+ * status, or times out. The remote fetch is bounded by REMOTE_JSON_TIMEOUT_MS
+ * unless the caller supplies a signal.
  *
  * @param localPath   Path starting with '/', e.g. '/api/pin/abc'
  * @param fallbackUrl Full remote URL to use when local is unavailable
@@ -69,11 +89,8 @@ export async function fetchFromLocalOrFallback(
     }
   }
 
-  return fetch(fallbackUrl, options);
+  return fetch(fallbackUrl, withRemoteFallbackTimeout(options, REMOTE_JSON_TIMEOUT_MS));
 }
-
-/** Bound the remote fallback so a blackholed route cannot hang a read. */
-const REMOTE_JSON_TIMEOUT_MS = 8_000;
 
 /**
  * Fetch from an external indexer when IDBOTS_MAN_P2P_LOCAL_BASE is set; fall
@@ -165,7 +182,9 @@ export async function fetchJsonWithFallbackOnMiss(
  *
  * @param pinId       The pin identifier (appended to /content/)
  * @param fallbackUrl Full remote URL to use when local content is unavailable
- * @param options     Optional RequestInit forwarded to both fetch calls
+ * @param options     Optional RequestInit forwarded to both fetch calls; the
+ *                    remote fetch is bounded by REMOTE_CONTENT_TIMEOUT_MS
+ *                    unless the caller supplies a signal
  * @param validateContent Optional body validator; when the local response body
  *                        does not pass it, the local response is treated as a
  *                        miss and the remote fallback is used instead
@@ -187,7 +206,7 @@ export async function fetchContentWithFallback(
       });
 
       if (localRes.headers.get('x-man-content-status') === 'metadata-only') {
-        return fetch(fallbackUrl, options);
+        return fetch(fallbackUrl, withRemoteFallbackTimeout(options, REMOTE_CONTENT_TIMEOUT_MS));
       }
 
       const contentLength = localRes.headers.get('content-length');
@@ -213,5 +232,5 @@ export async function fetchContentWithFallback(
     }
   }
 
-  return fetch(fallbackUrl, options);
+  return fetch(fallbackUrl, withRemoteFallbackTimeout(options, REMOTE_CONTENT_TIMEOUT_MS));
 }

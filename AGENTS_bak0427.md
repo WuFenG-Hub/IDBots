@@ -1,5 +1,10 @@
 # AGENTS.md
 
+> **Historical snapshot (2026-04-27), kept for reference only.** Live guidance is in `AGENTS.md`.
+> The bundled `man-p2p` runtime was removed in Sept 2026: `resources/man-p2p/*`, the local
+> indexer services, the P2P settings UI, and the `sync:man-p2p` script no longer exist, and
+> indexer reads are remote-first. Every man-p2p/local-first instruction below is obsolete.
+
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Project Overview
@@ -64,7 +69,7 @@ As of March 23, 2026, `main` includes the local-first `man-p2p` Alpha baseline u
   - healthy + `peerCount === 0` should render as online peerless state
   - startup failure should render offline with error detail
 - Keep packaged runtime paths isolated from dev/runtime temp paths.
-- Do not remove checked-in `resources/man-p2p/*` assets unless the packaging strategy is intentionally changed.
+- ~~Do not remove checked-in `resources/man-p2p/*` assets unless the packaging strategy is intentionally changed.~~ (obsolete — man-p2p assets were removed in Sept 2026)
 - Windows NSIS uninstall policy is to preserve user data (`electron-builder.json` -> `nsis.deleteAppDataOnUninstall=false`); do not flip this unless a release explicitly requires destructive uninstall behavior.
 - The team preference is `main` as the only long-lived shared branch. Temporary branches should be short-lived and deleted after merge.
 

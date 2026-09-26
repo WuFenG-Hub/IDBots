@@ -329,6 +329,7 @@ import { resolveMetaidAvatarSource, resolvePinAssetSource } from './services/pin
 import { buildMetafileUri } from './services/metaFileUploadShared';
 import { resolveMetaAppVisualFields } from './services/metaAppVisualService';
 import { runAppCleanup as runSharedAppCleanup } from './services/appCleanup';
+import { findLegacyManP2pData, formatDataSize } from './services/legacyManP2pCleanup';
 import { ensureMetaAppServerReady, stopMetaAppServer } from './services/metaAppLocalServer';
 import { createBotBrowserMetaAppCacheService, type BotBrowserMetaAppCacheService } from './services/botBrowserMetaAppCacheService';
 import {
@@ -16258,6 +16259,46 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   process.once('SIGINT', () => handleTerminationSignal('SIGINT'));
   process.once('SIGTERM', () => handleTerminationSignal('SIGTERM'));
 
+  const LEGACY_MAN_P2P_CLEANUP_DISMISSED_KEY = 'legacy_manp2p_cleanup_dismissed';
+
+  /**
+   * One-time offer (per upgrade) to clean up the Pebble data the removed
+   * man-p2p runtime left in userData. The dismissal flag is written before the
+   * dialog so a crash (or "Keep It") never re-prompts; cleanup moves the
+   * directory to the Trash so it stays recoverable.
+   */
+  const offerLegacyManP2pCleanup = async (): Promise<void> => {
+    try {
+      const store = getStore();
+      if (store.get<string>(LEGACY_MAN_P2P_CLEANUP_DISMISSED_KEY)) {
+        return;
+      }
+      store.set(LEGACY_MAN_P2P_CLEANUP_DISMISSED_KEY, '1');
+
+      const legacy = findLegacyManP2pData(app.getPath('userData'));
+      if (!legacy) {
+        return;
+      }
+
+      const { response } = await dialog.showMessageBox({
+        type: 'info',
+        buttons: ['Move to Trash', 'Keep It'],
+        defaultId: 1,
+        noLink: true,
+        title: 'Clean up unused man-p2p data',
+        message: `A previous IDBots version left ${formatDataSize(legacy.sizeBytes)} of unused man-p2p data on this machine.`,
+        detail: 'The bundled P2P sync runtime was removed and this data is no longer read. Moving it to the Trash frees the space and stays recoverable.',
+      });
+      if (response !== 0) {
+        return;
+      }
+      await shell.trashItem(legacy.dir);
+      console.log(`[cleanup] moved legacy man-p2p data to Trash: ${legacy.dir}`);
+    } catch (error) {
+      console.warn('[cleanup] legacy man-p2p cleanup offer failed:', error);
+    }
+  };
+
   // 初始化应用
   const initApp = async () => {
     startupLog('initApp begin');
@@ -16282,6 +16323,9 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
 
     store = await initStore();
     startupLog('store ready');
+
+    // One-time offer to reclaim data left by the removed man-p2p runtime.
+    void offerLegacyManP2pCleanup();
 
     // Chain write ledger: wire the store into the runtime accessor before the
     // RPC server / daemons can broadcast the first pin.
