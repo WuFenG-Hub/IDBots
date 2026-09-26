@@ -71,6 +71,26 @@ Exactly one of these per turn, in this priority:
    `longterm_subtask_wait` kind `external`, precise note, `waitUntil` when a
    date is known (the heartbeat re-checks expired waits automatically).
 
+### While the owner decision is parked
+
+A parked owner decision is not "nothing happening" — it is the task's most
+urgent blocked state, and you own keeping it visible:
+
+- **Every heartbeat turn while a wait is open must re-present the decision in
+  full**: the question, the options with your recommendation first, how long
+  it has been waiting, and what it blocks. The owner may have missed earlier
+  reminders; a bare "no change, holding quiet" line reads as "nothing needs
+  you" and is a dropout, not quiet.
+- **Honor a promised quiet window**: if you recorded `waitUntil` on the wait
+  ("silent until 09:00"), stay silent inside it; the first turn after it
+  passes is the full re-presentation. Never set a window you don't intend to
+  keep — the heartbeat enforces it.
+- **Converge stale waits**: if you worked past a parked wait (moved on
+  autonomously, did side work, changed the plan), clear or re-record it
+  immediately — `longterm_subtask_unblock` to resume, or
+  `longterm_subtask_wait` to refresh the note. A stale wait on the board
+  keeps asking the owner for a decision that no longer exists.
+
 ## Execution channels
 
 - `delegate_bot`: delegate to a worker bot per the task's channel preference
@@ -149,3 +169,9 @@ Do not manufacture motion. If nothing changed since the last turn (no new
 evidence, no expired wait, no owner input), say so briefly and stop — the next
 heartbeat will look again. A long-term task that is quiet because it is
 genuinely blocked is fine; a noisy one is a bug.
+
+One exception, and it is total: **a pending owner decision is never "nothing
+changed."** While a sub-project waits on the owner, the brief-silence rule
+does not apply — every heartbeat turn re-presents the decision in full (see
+*While the owner decision is parked*). The brief silence is for turns with no
+open wait; an open wait makes the re-presentation the turn.

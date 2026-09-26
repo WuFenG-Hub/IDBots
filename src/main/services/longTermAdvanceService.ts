@@ -83,12 +83,42 @@ export interface LongTermAdvanceReport {
   skipped: Array<{ taskId: string; reason: string }>;
 }
 
+/**
+ * Extra prompt block for turns where the current sub-project waits on the
+ * owner (P0 contract): the reply must re-present the pending decision in
+ * full — never a bare "no change" line — and converge a stale wait first.
+ * Empty string for every other status.
+ */
+function buildOwnerWaitBlock(current: LongTermSubtask, language: string): string {
+  if (current.status !== 'waiting_owner') return '';
+  if (language === 'zh') {
+    return [
+      '',
+      '特别要求（当前子项目正在等待主人拍板——这是本轮最重要的义务）：',
+      '- 回复必须以「待拍板重申」开头：完整重述等主人决定的问题——问题本体、可选项（你的推荐项最前、附一句理由）、这项决策已经等待了多久、在它拍板之前阻塞了什么。每条心跳消息都必须自含完整上下文：主人可能错过之前的提醒，绝不能要求他翻聊天记录才能拍板。',
+      '- 禁止「状态无变化／静默保持」式的一行回复——对一个等拍板的任务，那读起来就是「没有事需要你」，是失联不是安静。',
+      `- 等待备注：${current.waitNote || '(无记录——先用 longterm_subtask_wait 补上)'}${current.waitUntil ? `；承诺的静默窗口至 ${current.waitUntil}（本轮在窗口之后）` : ''}`,
+      '- 先核对这条等待是否仍然成立：如果 journal 显示挂起等待之后你又推进过工作（等待已过时），先用 longterm_subtask_unblock 解除等待再继续推进；若等待仍成立但备注需要更新，用 longterm_subtask_wait 重新记录（会刷新等待锚点）。',
+      '- 重申之后，若还有不依赖这个决策的推进空间，可以继续推进——但重申必须是回复的第一部分。',
+    ].join('\n');
+  }
+  return [
+    '',
+    'SPECIAL REQUIREMENT (this sub-project is waiting on the owner\'s decision — the single most important duty of this turn):',
+    '- Open your reply with a full re-presentation of the pending decision: the question itself, the options (your recommendation first, one-line reasoning), how long it has been waiting, and what stays blocked until it is answered. Every heartbeat message must be self-contained — the owner may have missed earlier reminders and must never have to scroll back through history to act.',
+    '- A bare "no change / holding quiet" one-liner is FORBIDDEN while a decision is pending — to the owner it reads as "nothing needs you": a dropout, not quiet.',
+    `- Wait note: ${current.waitNote || '(none recorded — record one with longterm_subtask_wait first)'}${current.waitUntil ? `; promised quiet window until ${current.waitUntil} (this turn is past the window)` : ''}`,
+    '- First verify the wait still holds: if the journal shows you worked on this sub-project AFTER parking the wait, converge the state before anything else — longterm_subtask_unblock to resume, or longterm_subtask_wait to re-record it (this refreshes the wait anchor).',
+    '- After the re-presentation you may keep pushing any part that does not depend on the decision — but the re-presentation comes first.',
+  ].join('\n');
+}
+
 function buildNudgePrompt(detail: LongTermTaskDetail, current: LongTermSubtask, reasons: string[], language: string): string {
   const criteria = current.acceptanceCriteria.length > 0
     ? current.acceptanceCriteria.map((criterion, index) => `   ${index + 1}. ${criterion}`).join('\n')
     : '   (no acceptance criteria on file — align them with the owner before pushing)';
   if (language === 'zh') {
-    return [
+    const lines = [
       '你是正在为主人推进长期任务的 TwinBot。这个回合由心跳自动开启（不是主人发起的），因为任务看起来可以继续推进。',
       '',
       `任务：「${detail.title}」（taskId: ${detail.id}）`,
@@ -109,9 +139,12 @@ function buildNudgePrompt(detail: LongTermTaskDetail, current: LongTermSubtask, 
       '   - 如果被外部条件卡住，用 longterm_subtask_wait 记录等待（精确的备注 + 知道日期就写 waitUntil）。',
       '   - 如果交付物可验证地满足全部验收标准，带上证据提请验收。',
       '4. 用主人的语言回复。',
-    ].join('\n');
+    ];
+    const ownerWaitBlock = buildOwnerWaitBlock(current, language);
+    if (ownerWaitBlock) lines.push(ownerWaitBlock);
+    return lines.join('\n');
   }
-  return [
+  const lines = [
     'You are the TwinBot driving the owner\'s long-term task. This turn was opened by the heartbeat (not by the owner) because the task looks advanceable.',
     '',
     `Task: "${detail.title}" (taskId: ${detail.id})`,
@@ -132,7 +165,10 @@ function buildNudgePrompt(detail: LongTermTaskDetail, current: LongTermSubtask, 
     '   - If blocked externally, record the wait with longterm_subtask_wait (precise note + waitUntil when known).',
     '   - If the deliverable verifiably meets every acceptance criterion, propose acceptance with evidence.',
     '4. Reply in the owner\'s language.',
-  ].join('\n');
+  ];
+  const ownerWaitBlock = buildOwnerWaitBlock(current, language);
+  if (ownerWaitBlock) lines.push(ownerWaitBlock);
+  return lines.join('\n');
 }
 
 export class LongTermAdvanceService {

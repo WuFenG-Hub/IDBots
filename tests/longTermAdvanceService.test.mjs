@@ -330,3 +330,28 @@ test('nudge prompt embeds acceptance criteria lines', async () => {
   await advance.run(Date.now());
   assert.ok(runner.starts[0].prompt.includes('criterion one'), 'criteria lines missing');
 });
+
+test('waiting-owner nudge prompt carries the full-restatement contract and the wait note', async () => {
+  const { store, runner, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'pick channel A or B' }, 'twin').ok);
+
+  const advance = new LongTermAdvanceService(deps);
+  const report = await advance.run(Date.now() + 5 * HOUR);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  const prompt = runner.starts[0].prompt;
+  assert.match(prompt, /waiting on the owner/i);
+  assert.match(prompt, /full re-presentation/i);
+  assert.match(prompt, /no change/);
+  assert.ok(prompt.includes('pick channel A or B'), 'wait note embedded in the prompt');
+});
+
+test('non-waiting nudge prompts carry no restatement contract', async () => {
+  const { store, runner, deps } = await openWorld();
+  const advance = new LongTermAdvanceService(deps);
+  await createActive(store);
+  await advance.run(Date.now());
+  assert.doesNotMatch(runner.starts[0].prompt, /SPECIAL REQUIREMENT/);
+});
