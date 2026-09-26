@@ -161,9 +161,13 @@ export class AgentGameRuntime extends EventEmitter {
    *  (accepted = the adapter changed its serialized state — the same notion
    *  the adapter's own lastProgressTs tracks, approximated on the host). */
   private lastProgressAt = new Map<string, number>();
-  /** GAP-4: wall-clock time of the last timeout.claimed we queued, for the
-   *  one-claim-per-progress-epoch guard (a rejected claim is final: the
-   *  adapter judged the window still open, re-claiming would burn pins). */
+  /** GAP-4: wall-clock time of the last timeout.claimed we queued. B1: this
+   *  is a per-window THROTTLE, not an epoch lock — a rejected claim (the
+   *  adapter judged the window still open) may be retried after each full
+   *  MOVE_TIMEOUT_MS + MOVE_CLAIM_MARGIN_MS has elapsed, because chain/host
+   *  drift beyond the margin can keep a genuinely-expired window reading as
+   *  open; re-claiming INSIDE the window would burn pins on a verdict that
+   *  cannot have changed. */
   private lastClaimAt = new Map<string, number>();
   /**
    * GAP-4: in-flight move-LLM windows (one per session — the busy guard keeps
@@ -410,6 +414,17 @@ export class AgentGameRuntime extends EventEmitter {
           } catch {
             afterSerialized = null;
           }
+          // B2 (conservative by design, no behavior change): when either
+          // serializeState call fails (null) the acceptance inference below
+          // cannot run, so the progress re-anchor and the lastActionSeq
+          // advance are skipped — the reduced state itself still lands.
+          // lastActionSeq is the expected-next-seq cursor: advancing it on an
+          // UNCONFIRMED acceptance would bake a seq-skip into our next write
+          // and permanently wedge third-party replay (the GAP-3b wedge), while
+          // a skipped advance only delays our own next move. Thorough fix is
+          // an adapter ABI change — reduce() returning an explicit accept
+          // signal instead of inferring acceptance from serialized-state
+          // change; until that lands, the conservative skip stays.
           if (
             beforeSerialized !== null &&
             afterSerialized !== null &&
@@ -473,7 +488,22 @@ export class AgentGameRuntime extends EventEmitter {
     const fresh = this.deps.store.getSession(s.sessionId) ?? s;
     fresh.lastIndex = s.lastIndex;
     fresh.lastActionSeq = s.lastActionSeq;
-    fresh.budget = s.budget;
+    // Budget merge is DIRECTIONAL. budget.llmCallsUsed / writesUsed are
+    // cumulative SPEND counters (incremented in place at the LLM call site
+    // and the write-commit site, never reset while the session lives), so
+    // under a concurrent interleave the truthful value is the MAX of the two
+    // snapshots: a whole-value assignment from the stale in-flight snapshot
+    // rolled spend back past a concurrent writer's charge and could push a
+    // depleted session past its cap (isExpiredOrDepleted inputs must be
+    // monotonic). If a budget field were ever a REMAINING BALANCE, the
+    // direction flips to min — do not copy this merge onto balance-shaped
+    // fields. The caps (llmCalls / writes) are create-time constants; the
+    // fresh row's copy stays canonical.
+    fresh.budget = {
+      ...fresh.budget,
+      llmCallsUsed: Math.max(fresh.budget.llmCallsUsed, s.budget.llmCallsUsed),
+      writesUsed: Math.max(fresh.budget.writesUsed, s.budget.writesUsed),
+    };
     this.persist(fresh, state);
   }
 
@@ -676,8 +706,11 @@ export class AgentGameRuntime extends EventEmitter {
    * finishes the match with the stalled seat losing; a premature claim reduces
    * to a no-op there. This side only decides when to spend a pin: game
    * playing, not our turn, no accepted progress for window+margin, and at
-   * most one claim per progress epoch (a rejected claim is final — the
-   * adapter judged the window still open, and re-claiming it would loop).
+   * most one claim per (window + margin) per progress epoch (B1: a rejected
+   * claim no longer locks the epoch — clock drift past the margin can make a
+   * genuine timeout read as still-open forever, so each elapsed full window
+   * earns one retry; inside the window a re-claim cannot change the verdict
+   * and would only burn pins).
    */
   private considerTimeoutClaim(s: GameSession, turn: { phase: string; seat?: string | null }): void {
     if (turn.phase !== 'playing' || turn.seat == null || turn.seat === s.seat) return;
@@ -685,7 +718,22 @@ export class AgentGameRuntime extends EventEmitter {
     if (anchoredAt === undefined) return;
     if (this.now() - anchoredAt <= MOVE_TIMEOUT_MS + MOVE_CLAIM_MARGIN_MS) return;
     const lastClaim = this.lastClaimAt.get(s.sessionId);
-    if (lastClaim !== undefined && lastClaim >= anchoredAt) return;
+    // B1: a rejected claim must not lock the progress epoch forever. A claim
+    // that landed via the catch-up dedup path never re-anchors the window
+    // (retryPendingWrite's unconditional re-anchor is skipped), and a rejected
+    // claim produces no accepted change either — with chain/host drift past
+    // the 60s margin the adapter can keep judging a genuinely-expired window
+    // open, and the old hard lock (lastClaim >= anchoredAt → return) wedged
+    // such games with no exit. Throttle instead: at most one claim per full
+    // window (window + margin) per progress epoch; claims from a PREVIOUS
+    // epoch (lastClaim < anchoredAt) never block.
+    if (
+      lastClaim !== undefined &&
+      lastClaim >= anchoredAt &&
+      this.now() - lastClaim < MOVE_TIMEOUT_MS + MOVE_CLAIM_MARGIN_MS
+    ) {
+      return;
+    }
     if (this.pending.has(s.sessionId)) return; // a write is already in flight
     this.lastClaimAt.set(s.sessionId, this.now());
     const event: TimeoutClaimedEvent = {

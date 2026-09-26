@@ -16,7 +16,8 @@
  *           llm_timeout；普通错误 → llm_unavailable（挂死必须按规则落盘）。
  *  - 判负   等待方在窗口(900s)+margin(60s) 后自动写 timeout.claimed，真实
  *           裁判 adapter（v1.0.2 字节级 fixture）按链上时间戳判超时负；
- *           窗口未满不得写（省 pin 费）；每个进度纪元至多一次申诉。
+ *           窗口未满不得写（省 pin 费）；申诉被拒后每等满一个完整窗口
+ *           （900s+margin）允许再试一次，窗口内仍节流（B1，防时钟漂移死锁）。
  *
  * 真实用例与裁判：
  *  - tests/fixtures/xiangqi-adapter/ = 字节级裁判 adapter（sha256 锁定，
@@ -29,7 +30,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import { createRequire } from 'node:module';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
@@ -611,12 +612,13 @@ test('GAP-4 超时判负闭环：黑方挂死 → 红方 900s+margin 自动 time
     assert.equal(state.plies, 1, '第三方重放的有效手数必须停在 1（黑方从未落子）');
     assert.deepEqual(state.result, { winner: 'red', reason: 'timeout' }, '裁判必须按 900s 链上判据判黑方超时负');
 
-    // 纪元守卫：申诉后（即使假设被拒）同进度纪元不得再写 —— 防拒绝循环烧 pin。
+    // 节流守卫（B1 语义）：申诉后 510s（< 900s+60s 完整窗口）内不得再写 ——
+    // 被拒申诉必须等满一个完整窗口才允许重试，窗口内重复申诉只会烧 pin。
     const writesAtClaim = recorder.calls.length;
     fakeNow = T0 + 1_500_000;
     host.onGroupMessage(GROUP_ID);
     await new Promise((r) => setTimeout(r, 150));
-    assert.equal(recorder.calls.length, writesAtClaim, '同进度纪元至多一次 timeout.claimed');
+    assert.equal(recorder.calls.length, writesAtClaim, '申诉后未满一个完整窗口必须节流（不重复写 timeout.claimed）');
 
     const blackFinal = await host.handleSessionMethod('status', { sessionId: black.sessionId }, BLACK_AGENT, {});
     // GAP-4②（runtime-owned window）语义升级：黑方挂死超 120s 合同窗后不再
@@ -631,5 +633,142 @@ test('GAP-4 超时判负闭环：黑方挂死 → 红方 900s+margin 自动 time
     if (host) await host.runtime.dispose().catch(() => {});
     if (cleanup) cleanup();
     uninstallFakeClock();
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* B1 / A2 单元回归（轻量 stub 直驱 runtime，不经完整 host）              */
+/* ------------------------------------------------------------------ */
+
+const { AgentGameRuntime } = require('../dist-electron/main/agentGame/runtime.js');
+
+/** 最小 RuntimeDeps stub：只覆盖 considerTimeoutClaim / persist / 窗强断触面。 */
+function stubRuntimeDeps({ now, llm } = {}) {
+  return {
+    store: {
+      getSession: () => null,
+      upsertSession: () => {},
+      getSerializedState: () => undefined,
+      recordWriteIntent: () => {},
+      markWriteStatus: () => {},
+      audit: () => {},
+      listRecoverableSessions: () => [],
+    },
+    messageStore: { readSince: () => [] },
+    llmComplete: llm ?? (async () => { throw new Error('unused'); }),
+    chainWrite: async () => ({ pinId: 'stub-pin' }),
+    manifestFetch: async () => { throw new Error('unused'); },
+    adapterPathFor: async () => { throw new Error('unused'); },
+    now,
+  };
+}
+
+function stubSession(overrides = {}) {
+  return {
+    sessionId: 'stub-sid',
+    appId: 'stub.v1',
+    groupId: 'stub-group',
+    gameId: 'xiangqi',
+    agentId: 'agent-red',
+    seat: 'red',
+    rulesHash: 'stub-rules',
+    adapterHash: 'stub-adapter',
+    manifestUri: 'metaapp://stub',
+    status: 'running',
+    budget: { llmCalls: 20, llmCallsUsed: 0, writes: 20, writesUsed: 0 },
+    lastIndex: 0,
+    lastActionSeq: 0,
+    lastError: null,
+    expiresAt: 0,
+    consent: undefined,
+    leaseId: undefined,
+    leaseExpiresAt: undefined,
+    createdAt: 0,
+    updatedAt: 0,
+    ...overrides,
+  };
+}
+
+test('B1 回归：timeout.claimed 被拒后满一个完整窗口允许重试一次，窗口内仍节流', { timeout: 30_000 }, () => {
+  let fakeNow = 1_785_000_000_000;
+  const intents = [];
+  const deps = stubRuntimeDeps({ now: () => fakeNow });
+  deps.store.recordWriteIntent = (key) => intents.push(key); // 申诉排队的唯一可观测面
+  const rt = new AgentGameRuntime(deps);
+  try {
+    const s = stubSession();
+    const waitingTurn = { phase: 'playing', seat: 'black' }; // 红方等待黑方
+    const WINDOW = 900_000 + 60_000; // MOVE_TIMEOUT_MS + MOVE_CLAIM_MARGIN_MS
+    const T0 = fakeNow;
+    rt.lastProgressAt.set(s.sessionId, T0); // 进度锚点：最后一次被接受的操作
+
+    // 窗口未满（恰好到点仍算未满，guard 语义为 <=）：不得申诉
+    fakeNow = T0 + WINDOW;
+    rt.considerTimeoutClaim(s, waitingTurn);
+    assert.equal(intents.length, 0, '窗口未满不得写 timeout.claimed（省 pin）');
+
+    // 窗口满：第一次申诉
+    fakeNow = T0 + WINDOW + 1;
+    rt.considerTimeoutClaim(s, waitingTurn);
+    assert.equal(intents.length, 1, '窗口满必须排队一次 timeout.claimed');
+
+    // 模拟该申诉已落链且被裁判拒绝（adapter no-op）：清除 pending，锚点不动。
+    // 锚点不动不是测试偷懒——catch-up 去重路径提交本方申诉行时不经过
+    // retryPendingWrite 的无条件再锚点，被拒申诉又不产生被接受的操作，
+    // 这正是 B1 修复针对的「锚点冻结 + 纪元锁死」生产形态。
+    rt.pending.delete(s.sessionId);
+
+    // 拒绝后未满一个完整窗口：仍节流
+    fakeNow = T0 + 2 * WINDOW;
+    rt.considerTimeoutClaim(s, waitingTurn);
+    assert.equal(intents.length, 1, '拒绝后未满一个完整窗口必须节流（不重复申诉烧 pin）');
+
+    // 拒绝后满一个完整窗口：允许再试一次（旧代码在这里永久锁死纪元）
+    fakeNow = T0 + 2 * WINDOW + 1;
+    rt.considerTimeoutClaim(s, waitingTurn);
+    assert.equal(intents.length, 2, '拒绝后满一个完整窗口必须允许重试一次（旧代码死锁点）');
+    assert.notEqual(intents[1].eventId, intents[0].eventId, '重试必须是新事件');
+
+    // 重试后同样要等满一个完整窗口才可能有下一次
+    rt.pending.delete(s.sessionId);
+    fakeNow = T0 + 3 * WINDOW;
+    rt.considerTimeoutClaim(s, waitingTurn);
+    assert.equal(intents.length, 2, '重试后窗口内同样节流');
+    fakeNow = T0 + 3 * WINDOW + 1;
+    rt.considerTimeoutClaim(s, waitingTurn);
+    assert.equal(intents.length, 3, '每个满窗口至多一次申诉');
+  } finally {
+    void rt.dispose().catch(() => {});
+  }
+});
+
+test('A2 回归：真实 setInterval sweeper（node:test 假钟）— 懒启用 → 时间推进 → sweep 实际强断挂死调用', { timeout: 30_000 }, async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval'] }); // clear* 自动跟随 mock
+  let fakeNow = 1_785_000_000_000;
+  const rt = new AgentGameRuntime(stubRuntimeDeps({
+    now: () => fakeNow,
+    llm: () => new Promise(() => {}), // 挂死形态：永不 settle
+  }));
+  try {
+    let settled = null;
+    const p = rt.completeMoveInWindow('stub-a2', [{ role: 'user', content: 'move?' }]);
+    p.then(
+      () => { settled = { ok: true }; },
+      (err) => { settled = { err }; },
+    );
+    assert.equal(rt.llmWindows.has('stub-a2'), true, 'completeMoveInWindow 必须登记运行窗');
+    assert.ok(rt.llmWindowTimer, '懒启用：ensureLlmWindowTimer 必须已挂载真实 interval');
+
+    // 假钟推进跨过 120s 合同窗 + sweeper 间隔；真实 interval 回调在 tick 内
+    // 触发 sweepLlmWindows（不手动驱动 sweep）。
+    fakeNow += 120_000 + 2_000;
+    mock.timers.tick(3_000); // 1s 间隔 → 至少 3 次真实回调
+    await new Promise((r) => setImmediate(r));
+    assert.ok(settled && settled.err, '真实定时 sweeper 必须在窗到点后实际强断挂死调用');
+    assert.equal(settled.err.name, 'BrowserLlmTimeout', '强断错误必须是 BrowserLlmTimeout（isAbort → llm_timeout）');
+    assert.equal(rt.llmWindows.has('stub-a2'), false, '强断后窗口必须摘除');
+  } finally {
+    await rt.dispose().catch(() => {});
+    mock.timers.reset();
   }
 });

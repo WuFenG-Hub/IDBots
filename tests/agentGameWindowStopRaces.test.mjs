@@ -542,3 +542,83 @@ test('case 3 (P1-B generational check): hang → sweep → resume → OLD callee
     uninstallFakeClock();
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* A1 回归：persistOwnedFields 预算定向合并                              */
+/* ------------------------------------------------------------------ */
+
+const { AgentGameRuntime } = require('../dist-electron/main/agentGame/runtime.js');
+
+test('A1 回归：persistOwnedFields 预算合并 — 并发交错不回滚花费、快照自增不丢失、上限守恒', { timeout: 30_000 }, () => {
+  const fakeNow = 1_785_000_000_000;
+  let persisted = null;
+  let currentRow = null; // store 中的 fresh 行（getSession 每次返回它）
+  const baseRow = {
+    sessionId: 'stub-a1',
+    appId: 'stub.v1',
+    groupId: 'stub-group',
+    gameId: 'xiangqi',
+    agentId: 'agent-red',
+    seat: 'red',
+    rulesHash: 'stub-rules',
+    adapterHash: 'stub-adapter',
+    manifestUri: 'metaapp://stub',
+    status: 'running',
+    budget: { llmCalls: 20, llmCallsUsed: 5, writes: 20, writesUsed: 5 },
+    lastIndex: 3,
+    lastActionSeq: 2,
+    lastError: null,
+    expiresAt: 0,
+    consent: undefined,
+    leaseId: 'lease-1',
+    leaseExpiresAt: fakeNow + 3_600_000,
+    createdAt: fakeNow,
+    updatedAt: fakeNow,
+  };
+  const deps = {
+    store: {
+      getSession: () => currentRow,
+      upsertSession: (row, serialized) => { persisted = { row, serialized }; },
+      getSerializedState: () => undefined,
+      recordWriteIntent: () => {},
+      markWriteStatus: () => {},
+      audit: () => {},
+      listRecoverableSessions: () => [],
+    },
+    messageStore: { readSince: () => [] },
+    llmComplete: async () => { throw new Error('unused'); },
+    chainWrite: async () => ({ pinId: 'stub-pin' }),
+    manifestFetch: async () => { throw new Error('unused'); },
+    adapterPathFor: async () => { throw new Error('unused'); },
+    now: () => fakeNow,
+  };
+  const rt = new AgentGameRuntime(deps);
+  try {
+    // case 1 — 并发交错：在途旧快照（读取时花费 3/4，随后另一路径把 store 行
+    // 推进到 5/5）persist 时不得把花费回滚。
+    currentRow = { ...baseRow, budget: { ...baseRow.budget } };
+    const stale = { ...currentRow, budget: { ...currentRow.budget, llmCallsUsed: 3, writesUsed: 4 }, lastIndex: 4, lastActionSeq: 3 };
+    rt.persistOwnedFields(stale, { plies: 1 });
+    assert.ok(persisted, 'persistOwnedFields 必须落盘');
+    assert.equal(persisted.row.budget.llmCallsUsed, 5, '并发交错下 LLM 花费不得被在途快照回滚（max 定向合并，RED on main: 整值覆盖回滚到 3）');
+    assert.equal(persisted.row.budget.writesUsed, 5, '并发交错下写花费不得被在途快照回滚（max 定向合并）');
+    assert.equal(persisted.row.lastIndex, 4, 'owned cursor 仍按快照覆盖');
+    assert.equal(persisted.row.budget.llmCalls, 20, '预算上限（cap）保持 create 时常量');
+
+    // case 2 — 反向：快照领先（本路径刚自增到 6）也必须落盘，不得被 store 旧行吞掉
+    currentRow = { ...baseRow, budget: { ...baseRow.budget } };
+    const ahead = { ...currentRow, budget: { ...currentRow.budget, llmCallsUsed: 6, writesUsed: 5 } };
+    rt.persistOwnedFields(ahead, undefined);
+    assert.equal(persisted.row.budget.llmCallsUsed, 6, '快照新增花费必须落盘（不得丢失）');
+
+    // case 3 — 预算上限守恒：快照自增恰好到 cap（第 5 次 LLM 调用）必须落盘，
+    // 且 isExpiredOrDepleted 依合并后的账目判停——并发交错不得开出免费超支通道。
+    currentRow = { ...baseRow, budget: { llmCalls: 5, llmCallsUsed: 4, writes: 20, writesUsed: 0 } };
+    const capped = { ...currentRow, budget: { ...currentRow.budget, llmCallsUsed: 5 } };
+    rt.persistOwnedFields(capped, undefined);
+    assert.equal(persisted.row.budget.llmCallsUsed, 5, '达到 cap 的花费不得被 store 旧行回滚');
+    assert.equal(rt.isExpiredOrDepleted(persisted.row), true, 'cap 守恒：合并后账目必须让 isExpiredOrDepleted 判停');
+  } finally {
+    void rt.dispose().catch(() => {});
+  }
+});
