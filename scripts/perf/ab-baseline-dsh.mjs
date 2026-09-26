@@ -62,12 +62,11 @@ const DEFAULT_TASKS = [
   { id: 'kvcache', kind: 'reason', text: 'In one short paragraph: what is the difference between KV-cache prefix reuse and a full prefill?' },
   { id: 'reconnect', kind: 'reason', text: 'Name two common causes of WebSocket reconnect storms and one mitigation for each.' },
   { id: 'biglog', kind: 'reason', text: 'You have a 2 GiB log file on a machine with 512 MiB RAM. Describe an efficient way to count occurrences of each unique error code (format ABC-1234) in the file. Sketch the approach and its memory profile.' },
+  { id: 'read-note', kind: 'tool', text: 'Read the file notes.txt in the current directory and summarize it in one sentence.', seed: { 'notes.txt': 'Meeting 2026-09-27: latency diagnosis found the agent thinks ~9x longer per step than upstream. Next step is prompt-surface reduction, then re-measure.\n' } },
+  { id: 'write-hello', kind: 'tool', text: 'Create a file hello.txt containing exactly the text hi, then read it back to confirm.', seed: {} },
 ];
-// NOTE: file-tool tasks (read/write in a seeded temp workspace) are currently
-// DISABLED: on BOTH sides the follow-up model request after the first tool
-// result stalls until the idle watchdog (harness limitation under
-// investigation — the kernel's stock read tool completes and step/end is
-// written; the next request never completes). Re-enable after diagnosis.
+// Tool tasks ride the kernel's bash/fs tools in a seeded temp workspace; the
+// runner answers the sdk-server policy gate (allow) so file tools never block.
 
 // ---------- shared artifact parsing ----------
 function readSessionText(file) {
@@ -316,6 +315,8 @@ async function runComposition({ label, entries, childEnv, ws, task, run, promptM
         const params = notification?.params ?? {};
         if (method === 'idbots/tool/request') {
           await client.request('idbots/tool/respond', { id: params.id, ok: false, error: '[ab-benchmark] this host tool is unavailable in the benchmark harness — for file tasks use the built-in read/write/glob/grep/bash tools instead, then finish the task' }).catch(() => {});
+        } else if (method === 'idbots/policy/request') {
+          await client.request('idbots/policy/respond', { id: params.id, decision: 'allow' }).catch(() => {});
         } else if (method === 'idbots/approval/request') {
           await client.request('idbots/approval/respond', { id: params.id, outcome: 'allowed-once' }).catch(() => {});
         } else if (method === 'idbots/ask/request') {

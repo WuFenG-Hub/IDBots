@@ -220,3 +220,32 @@ descriptions (like_pin, comment_pin, knowledge_*, procedure_*, search_qa,
 get_question_answers, social_* ≈ 8 KB more); per-session gating of metaweb
 layers for non-MetaWeb workspaces; the A/B tool-task stall; effort=low default
 for conversational sessions.
+
+## Addendum 2 (2026-09-27 evening): tool-task stall fixed, full A/B with tool tasks, batch-2 descriptions
+
+**Stall root cause (4a).** The A/B harness now answers the sdk-server's
+`idbots/policy/request` gate (bash/read/write/edit/read_image wait for a host
+policy decision — the benchmark replies `allow`). This was the tool-task
+"stall": the kernel was correctly waiting for the host. File-tool tasks now
+complete on both sides in ~8 s with normal multi-step turns.
+
+**Full A/B with tool tasks (7 tasks × both sides, same fixed shape files):**
+
+| shape | first-step input | system bytes | tools | steps/7 tasks |
+|---|---|---|---|---|
+| stock composition | 11,791 | 2,162 | 23 | 10 |
+| app shape — baseline | 36,769 | 65,544 | 115 | 14 |
+| app shape — R1+R2 | 35,194 | 62,076 | 115 | 15 |
+| app shape — + batch-2 descriptions | **34,716** | 62,076 | 115 | 15 |
+
+Cumulative: **−2,053 input tokens per request (−5.6%)**, system prompt
+−3.4 KB, host-tool descriptions −7.4 KB (batch 1: 8 heaviest tools; batch 2:
+19 more: qa/social/knowledge/procedure/like/comment/agentpedia/scheduled/
+pin-versions). All normative rules preserved; 382/383 tests pass (the one
+failure, `dshHostToolRegistry` "twin turn slow_tool" timeout, also fails on
+`main` with no branch changes — pre-existing, out of scope here).
+
+Reasoning tokens remain 0 on scripted tasks for every shape (V4.1-flash
+adaptive thinking) — the reasoning-length effect remains measurable only in
+real usage telemetry; the request-size reduction above is the direct,
+verifiable win.
