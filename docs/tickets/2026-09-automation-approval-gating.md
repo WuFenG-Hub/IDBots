@@ -29,10 +29,11 @@ The 0.1.7 experimental automation backends (Playwright-MCP browser tools, cua-dr
 
 ## Proposed work
 
-1. **Upstream issue** on `deepseek-ai/deepseek-harness`: request `ctx.approval` integration in the experimental automation providers (mutating tools should ask; reads may pass). This is squarely upstream's design — a local patch is a stopgap.
-2. **Kernel patch (stopgap)**: wrap the providers' tool execution so mutating tools (`browser_navigate`, `browser_click`, `browser_type`, …; all cua-driver input tools) call `ctx.approval` first, fail-closed. Read-only tools (`browser_snapshot`, screenshots) may stay ungated. Patch lives in `scripts/dsh-kernel-patches/` with a manifest entry (see the README there).
-3. **Host answerer**: register an approval answerer in the runtime composition that bridges to the cowork permission overlay UI (the existing `evaluatePolicy` ask path / `coworkPermissionOverlay`), so the user gets an approve/deny prompt per action or per session.
-4. **Tests**: E2E in `dsh-runtime/test/browser-use.test.mjs` asserting a mutating call without an answerer fails closed; host-side contract test that the patch stayed applied (the manifest verifier covers this).
+Upstream note: `deepseek-ai/deepseek-harness` does not accept issues, so there is no upstream track — the kernel patch below is the fix, not a stopgap. That also keeps the approval semantics fully under our control.
+
+1. **Kernel patch (the fix)**: wrap the providers' tool execution so mutating tools (`browser_navigate`, `browser_click`, `browser_type`, …; all cua-driver input tools) call `ctx.approval` first, fail-closed. Read-only tools (`browser_snapshot`, screenshots) may stay ungated. Patch lives in `scripts/dsh-kernel-patches/` with a manifest entry (see the README there).
+2. **Host answerer**: register an approval answerer in the runtime composition that bridges to the cowork permission overlay UI (the existing `evaluatePolicy` ask path / `coworkPermissionOverlay`), so the user gets an approve/deny prompt per action or per session.
+3. **Tests**: E2E in `dsh-runtime/test/browser-use.test.mjs` asserting a mutating call without an answerer fails closed; host-side contract test that the patch stayed applied (the manifest verifier covers this).
 
 ## References
 
