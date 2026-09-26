@@ -92,7 +92,7 @@ export interface LongTermAdvanceDeps {
   /** Quiet time before re-checking an untimed external wait (default 4h). */
   externalReminderMs?: number;
   /** P1 supervision: worker dispatch attempts tied to the task (via its bound sessions). */
-  listWorkerAttempts?: (taskId: string) => LongTermWorkerAttemptSummary[];
+  listWorkerAttempts?: (taskId: string, subtaskId: string) => LongTermWorkerAttemptSummary[];
   /** P1 supervision: leading failed/timed-out dispatch count that trips a supervise turn. */
   failureStreakThreshold?: number;
   /** P1 supervision: default expected duration (minutes) when the sub-project sets none. */
@@ -321,7 +321,7 @@ export class LongTermAdvanceService {
           detail,
           current,
           reasons,
-          supervision ? (this.deps.listWorkerAttempts?.(detail.id) ?? []) : null,
+          supervision ? (this.deps.listWorkerAttempts?.(detail.id, current.id) ?? []) : null,
         );
         report.escalated.push({
           taskId: card.id,
@@ -454,7 +454,9 @@ export class LongTermAdvanceService {
   ): { reasons: string[]; signature: string } | null {
     if (current.status !== 'in_progress') return null;
     const state = this.deps.store().getSuperviseState(detail.id);
-    const attempts = this.deps.listWorkerAttempts?.(detail.id) ?? [];
+    // Scoped to THIS sub-project's bound session: a previous sub-project's
+    // failed dispatches must not trip supervision on the one just begun.
+    const attempts = this.deps.listWorkerAttempts?.(detail.id, current.id) ?? [];
     const ordered = [...attempts].sort(
       (a, b) => (b.finishedAtMs ?? b.startedAtMs ?? 0) - (a.finishedAtMs ?? a.startedAtMs ?? 0),
     );

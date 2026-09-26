@@ -6752,17 +6752,16 @@ const getLongTermAdvanceService = () => {
       getSkillsPrompt: async () => getSkillManager().buildAutoRoutingPrompt(),
       // The heartbeat hand-off message follows the owner's UI language.
       getAppLanguage: () => getPersistedAppLanguage(),
-      // P1 supervision telemetry: worker dispatch attempts sourced from this
-      // task's bound sessions (steps → tasks.source_session_id join).
-      listWorkerAttempts: (taskId) => {
+      // P1 supervision telemetry: worker dispatch attempts sourced from the
+      // CURRENT sub-project's bound session only — a previous sub-project's
+      // failures must not trip supervision on the one just begun.
+      listWorkerAttempts: (taskId: string, subtaskId: string) => {
         try {
-          const detail = getLongTermTaskStore().getTask(taskId);
-          const sessionIds = (detail?.subtasks ?? [])
-            .map((sub) => sub.sessionId)
-            .filter((id): id is string => Boolean(id));
-          if (sessionIds.length === 0) return [];
+          void taskId;
+          const subtask = getLongTermTaskStore().getSubtask(subtaskId);
+          if (!subtask?.sessionId) return [];
           return getOrchestrationStore()
-            .listAttemptsForSourceSessions(sessionIds)
+            .listAttemptsForSourceSessions([subtask.sessionId])
             .map((attempt) => ({
               id: attempt.id,
               label: attempt.idempotencyKey,

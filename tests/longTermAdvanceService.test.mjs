@@ -374,12 +374,12 @@ test('telemetry wiring: real OrchestrationStore attempts sourced from the bound 
     resolveWorkingDirectory: () => '/tmp/lt',
     getBaseSystemPrompt: () => 'base',
     getSkillsPrompt: async () => null,
-    // Mirrors the main.ts adapter: attempts joined via the bound session id.
-    listWorkerAttempts: (taskId) => {
-      const detail = store.getTask(taskId);
-      const sessionIds = (detail?.subtasks ?? []).map((sub) => sub.sessionId).filter(Boolean);
-      if (sessionIds.length === 0) return [];
-      return orchestration.listAttemptsForSourceSessions(sessionIds).map((attempt) => ({
+    // Mirrors the main.ts adapter: attempts scoped to the CURRENT sub-project's
+    // bound session only.
+    listWorkerAttempts: (taskId, subtaskId) => {
+      const subtask = store.getSubtask(subtaskId);
+      if (!subtask?.sessionId) return [];
+      return orchestration.listAttemptsForSourceSessions([subtask.sessionId]).map((attempt) => ({
         id: attempt.id,
         label: attempt.idempotencyKey,
         status: attempt.status,
@@ -396,9 +396,26 @@ test('telemetry wiring: real OrchestrationStore attempts sourced from the bound 
   const boundSessionId = store.getTask(taskId).subtasks[0].sessionId;
   assert.ok(boundSessionId, 'session bound by the first escalation');
 
-  // The Twin begins, then two dispatches sourced from that session both fail.
+  // Two failed dispatches sourced from an UNRELATED session: must not trip
+  // supervision for this sub-project.
+  const stranger = orchestration.createTask({
+    ownerIntent: 'someone else', sourceSessionId: 'unrelated-session',
+    twinMetabotId: 7, ownerGlobalMetaId: 'owner-global', origin: 'twin_delegate',
+  });
+  const strangerStep = orchestration.createStep({ taskId: stranger.id, ordinal: 1, title: 's', objective: 'o' });
+  const s1 = orchestration.createAttempt({ stepId: strangerStep.id, idempotencyKey: 'other_v1', workerMetabotId: 15, prompt: 'go' });
+  orchestration.updateAttempt(s1.id, 'failed', { error: 'boom' });
+  const s2 = orchestration.createAttempt({ stepId: strangerStep.id, idempotencyKey: 'other_v2', workerMetabotId: 15, prompt: 'go' });
+  orchestration.updateAttempt(s2.id, 'failed', { error: 'boom' });
+
+  // The Twin begins. With only the unrelated session's failures visible, the
+  // next turn is an ordinary quiet push — never supervision.
   const subtask = store.getTask(taskId).subtasks[0];
   assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  const midRun = await advance.run(now + 45 * 60_000);
+  assert.ok(midRun.escalated.length === 1 && !midRun.escalated[0].reasons[0].startsWith('supervision:'), JSON.stringify(midRun));
+
+  // Dispatches from THIS session then both fail → supervision fires.
   const orch = orchestration.createTask({
     ownerIntent: 'build the thing',
     sourceSessionId: boundSessionId,
@@ -412,11 +429,11 @@ test('telemetry wiring: real OrchestrationStore attempts sourced from the bound 
   const second = orchestration.createAttempt({ stepId: step.id, idempotencyKey: 'ltt_x_v2', workerMetabotId: 15, prompt: 'go again' });
   orchestration.updateAttempt(second.id, 'failed', { error: 'boom again' });
 
-  const report = await advance.run(now + 10 * 60_000);
+  const report = await advance.run(now + 50 * 60_000);
   assert.equal(report.escalated.length, 1, JSON.stringify(report));
   assert.match(report.escalated[0].reasons[0], /supervision: 2 consecutive failed\/timed-out worker dispatches/);
   // The dispatch record embedded in the supervision prompt comes from the real store.
-  assert.ok(runner.starts[1].prompt.includes('ltt_x_v2: failed'), 'real attempt rendered in the prompt');
+  assert.ok(runner.starts[2].prompt.includes('ltt_x_v2: failed'), 'real attempt rendered in the prompt');
 });
 
 test('in_progress with fresh work events is NOT re-pushed (quiet rule)', async () => {
