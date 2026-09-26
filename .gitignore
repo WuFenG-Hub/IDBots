@@ -104,6 +104,7 @@ tests/*
 !tests/coworkForkSession.test.mjs
 !tests/coworkDshIntegration.test.mjs
 !tests/coworkDshAutomationSlotIsolation.test.mjs
+!tests/coworkExperimentalAutomationSwitch.test.mjs
 !tests/composerCommands.test.ts
 !tests/coworkTranscriptExport.test.mjs
 !tests/coworkSessionGoal.test.mjs
