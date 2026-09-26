@@ -79,7 +79,7 @@ test('kernel-initiated turn still executes host tools after the host turn tore d
 }, async () => {
   const { DshTurnHub } = loadModules()
   const { startMockServer } = await import(path.join(runtimeDir, 'test', 'fixtures', 'mock-openai.mjs'))
-  const { server, seen } = await startMockServer(48831)
+  const { server, seen } = await startMockServer(48833)
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-idle-tool-'))
   const logs = []
   const executed = []
@@ -93,7 +93,7 @@ test('kernel-initiated turn still executes host tools after the host turn tore d
     },
   })
   const provider = {
-    key: 'mockgw', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48831/v1',
+    key: 'mockgw', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48833/v1',
     apiKey: 'sk-a', model: 'mock-1',
   }
   const dshSessionId = 'idle-wake-target'
