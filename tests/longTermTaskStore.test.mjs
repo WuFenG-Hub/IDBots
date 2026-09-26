@@ -312,6 +312,20 @@ test('migration: a pre-P1 database gains expected_minutes via a guarded ALTER, r
   assert.equal(store.getSubtask('lts_old').expectedMinutes, 120);
 });
 
+test('proposing acceptance clears a residual external waitUntil (no phantom quiet window)', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  const first = store.getTask(taskId).subtasks[0];
+  store.beginSubtask(first.id, 'twin');
+  store.waitSubtask(
+    first.id,
+    { kind: 'external', note: 'notarization', waitUntil: new Date(Date.now() + 12 * 3_600_000).toISOString() },
+    'twin',
+  );
+  assert.ok(store.proposeSubtask(first.id, { evidence: [{ kind: 'dir', uri: '/tmp/x' }], summary: 's' }, 'twin').ok);
+  assert.equal(store.getSubtask(first.id).waitUntil, null, 'acceptance proposal must not inherit the external wait window');
+});
+
 test('supervision re-arm state: set and read back per task', async () => {
   const { store } = await openStore();
   const taskId = await createActive(store);

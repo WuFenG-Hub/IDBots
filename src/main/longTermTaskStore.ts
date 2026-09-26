@@ -793,7 +793,7 @@ export class LongTermTaskStore {
     const evidence = (input.evidence ?? []).filter((entry) => entry && asText(entry.uri).trim());
     if (evidence.length === 0) return { ok: false, code: 'VALIDATION', error: 'at least one evidence URI is required' };
     this.db.run(
-      "UPDATE long_term_subtasks SET status = 'waiting_owner', evidence_json = ?, wait_note = ?, updated_at = ? WHERE id = ?",
+      "UPDATE long_term_subtasks SET status = 'waiting_owner', evidence_json = ?, wait_note = ?, wait_until = NULL, updated_at = ? WHERE id = ?",
       [JSON.stringify(evidence), `acceptance proposed: ${asText(input.summary).slice(0, 500)}`, nowIso(), subtaskId],
     );
     this.addEvent(current.taskId, subtaskId, 'proposed', actor, asText(input.summary).slice(0, 1000));
