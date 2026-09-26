@@ -16,6 +16,9 @@ import type { LongTermSubtask, LongTermTaskDetail } from '../../renderer/types/l
  *    `ownerReminderMs` (a reminder is due). A `waitUntil` quiet window on an
  *    owner wait is honored: no reminders inside the window, then one full
  *    re-presentation once it passes.
+ *  - a wait-establishing event is STALE: the journal shows work on the
+ *    sub-project after it, so the board state must be converged (unblocked
+ *    or re-recorded) instead of re-reminding the owner.
  *
  * Discipline (owner ruling): driving completion outranks quiet — there is no
  * daily cap. The only throttle is "no new information, no new nudge": per
@@ -267,6 +270,16 @@ export class LongTermAdvanceService {
         if (current.waitUntil !== null && Date.parse(current.waitUntil) > nowMs) {
           return [];
         }
+        // Stale wait: the journal shows work on this sub-project AFTER the
+        // wait was parked (or the proposal made) — the board state no longer
+        // reflects reality. Converge it instead of re-nudging the owner about
+        // a decision that may no longer exist (regression: 55 reminders over
+        // 40h for a wait the TwinBot had already worked past).
+        if (this.hasWorkedPastWait(detail, current)) {
+          return [
+            `stale owner wait — the journal shows work after the wait was parked (${current.waitNote}); converge the state first: longterm_subtask_unblock to resume, or longterm_subtask_wait to re-record it, then re-present whatever still needs the owner`,
+          ];
+        }
         if (quietMs > this.waitingOwnerReminderMs) {
           if (current.waitUntil !== null) {
             return [`owner quiet window ended (${current.waitUntil}) — re-present the pending decision in full (${current.waitNote})`];
@@ -278,6 +291,21 @@ export class LongTermAdvanceService {
       default:
         return [];
     }
+  }
+
+  /**
+   * True when the journal shows sub-project activity AFTER the latest
+   * wait-establishing event ('waiting' or 'proposed'): the recorded wait no
+   * longer reflects reality and must be converged (unblocked or re-recorded),
+   * not re-reminded. Heartbeat 'nudged' events are not work. Events arrive
+   * newest-first; the anchor is the newest wait-establishing event, and
+   * anything non-nudge ahead of it is post-wait work.
+   */
+  private hasWorkedPastWait(detail: LongTermTaskDetail, current: LongTermSubtask): boolean {
+    const events = detail.events.filter((event) => event.subtaskId === current.id);
+    const anchorIndex = events.findIndex((event) => event.kind === 'waiting' || event.kind === 'proposed');
+    if (anchorIndex === -1) return false;
+    return events.slice(0, anchorIndex).some((event) => event.kind !== 'nudged');
   }
 
   /** Open (once) or continue (afterwards) the sub-project's bound session. */

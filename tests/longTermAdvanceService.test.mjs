@@ -192,6 +192,39 @@ test('owner wait: the first tick after the quiet window passes re-escalates as a
   assert.match(report.escalated[0].reasons[0], /quiet window ended/);
 });
 
+test('stale owner wait: twin work after the wait was parked → convergence escalation, not an owner reminder', async () => {
+  const { store, advance } = await openWorld();
+  const taskId = await createActive(store);
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'waiting for owner to start first game' }, 'twin').ok);
+  // The Twin works past the parked wait (journal note) but never clears it.
+  assert.ok(store.addNote(taskId, subtask.id, 'proceeded autonomously: first bot-vs-bot game started', 'twin').ok);
+
+  const report = await advance.run(Date.now());
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.match(report.escalated[0].reasons[0], /stale owner wait/);
+  assert.doesNotMatch(report.escalated[0].reasons[0], /owner decision still pending/);
+});
+
+test('stale owner wait converges: after the Twin re-records the wait, reminders return to the normal cadence', async () => {
+  const { store, advance } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'need a channel decision' }, 'twin').ok);
+  assert.ok(store.addNote(taskId, subtask.id, 'side work while waiting', 'twin').ok);
+  // The convergence turn re-records the wait — fresh anchor, nothing after it.
+  assert.ok(
+    store.waitSubtask(subtask.id, { kind: 'owner', note: 'need a channel decision (re-confirmed)' }, 'twin').ok,
+  );
+
+  const report = await advance.run(now + 5 * HOUR);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.match(report.escalated[0].reasons[0], /owner decision still pending/);
+});
+
 test('in_progress with fresh work events is NOT re-pushed (quiet rule)', async () => {
   const { store, advance } = await openWorld();
   const taskId = await createActive(store);
