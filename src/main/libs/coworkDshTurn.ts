@@ -1336,17 +1336,43 @@ export class DshTurnHub {
         }
       },
       onPolicyRequest: (request) => {
-        const coworkId = this.coworkByDsh.get(request.sessionId)
-        if (!coworkId || !this.opts.evaluatePolicy) {
+        // Resolve through the pinned fallback like onToolRequest: kernel-
+        // initiated turns (subagent-finished wakes) raise native-tool policy
+        // checks with no live mapping, and those turns are exactly as real as
+        // host-submitted ones — plan-mode gating, read-image guards, and
+        // delete confirmations must not silently lapse on them.
+        const coworkId = this.coworkOfDsh(request.sessionId)
+        if (!coworkId) {
+          if (this.opts.evaluatePolicy) {
+            // Fail closed: with a host policy configured, an unresolvable
+            // session must not settle to the permissive default — the settle
+            // VALUE matters as much as settling at all. Deny so the kernel
+            // turn unwinds instead of executing ungated native tools.
+            this.opts.log?.('warn', 'dshTurnHub.onPolicyRequest', {
+              message: 'policy request has no cowork session mapping; denying',
+              toolName: request.name,
+              dshSessionId: request.sessionId,
+              runtime: slot.key,
+            })
+            void kernelOf()
+              .respondPolicy(request.id, 'deny', 'no cowork session mapping for this runtime session')
+              .catch(() => undefined)
+            return
+          }
+          // Ungated deployment (no host policy anywhere): default-allow.
+          void kernelOf().respondPolicy(request.id, 'allow').catch(() => undefined)
+          return
+        }
+        if (!this.opts.evaluatePolicy) {
           // No host policy: default-allow so ungated deployments keep working.
-          void kernelOf().respondPolicy(request.id, 'allow')
+          void kernelOf().respondPolicy(request.id, 'allow').catch(() => undefined)
           return
         }
         void this.opts.evaluatePolicy(coworkId, request.name, request.arguments ?? {})
-          .then((result) => kernelOf().respondPolicy(request.id, result.decision, result.reason))
+          .then((result) => kernelOf().respondPolicy(request.id, result.decision, result.reason).catch(() => undefined))
           .catch(() => {
             try {
-              kernelOf().respondPolicy(request.id, 'deny', 'policy evaluation failed')
+              void kernelOf().respondPolicy(request.id, 'deny', 'policy evaluation failed').catch(() => undefined)
             } catch {
               // Drained kernel already closed — nothing left to answer.
             }
@@ -1381,7 +1407,7 @@ export class DshTurnHub {
             void kernelOf().respondTool(request.id, {
               ok: false,
               error: `host tool "${request.name}" was rejected: the host has no session mapping for this runtime session (it may have been closed)`,
-            })
+            }).catch(() => undefined)
           } catch {
             // Kernel already closed — nothing left to answer.
           }
