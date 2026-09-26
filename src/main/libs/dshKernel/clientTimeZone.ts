@@ -14,21 +14,25 @@
  * undefined and the caller simply omits the zone — dsh-time-context then
  * reports "unavailable" instead of failing the request assembly, which THROWS
  * on a non-canonical value.
+ *
+ * Deliberately re-resolved on EVERY call (no cache): the read costs
+ * microseconds, and caching would freeze the zone for the process lifetime —
+ * a user crossing time zones would keep declaring the stale one until
+ * restart. Fresh reads let both consumers self-heal: the per-prompt source
+ * line follows on the very next turn, and the changed runtime config trips
+ * the hub's restart-on-config-change path, rebooting the slot with the new
+ * clock zone once its in-flight turns settle.
  */
 
-let cached: string | undefined | null = null
-
 export function currentClientTimeZone(): string | undefined {
-  if (cached !== null) return cached
-  cached = undefined
   try {
     const zone = new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone
     if (typeof zone === 'string' && zone.length > 0) {
       const canonical = new Intl.DateTimeFormat('en-US', { timeZone: zone }).resolvedOptions().timeZone
-      if (canonical === zone) cached = zone
+      if (canonical === zone) return zone
     }
   } catch {
-    cached = undefined
+    // fall through: unresolvable zone reads as "unavailable"
   }
-  return cached
+  return undefined
 }
