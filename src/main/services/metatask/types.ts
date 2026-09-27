@@ -209,6 +209,8 @@ export interface MetaTaskBoard {
   localRosterMetaIds: string[];
   tasks: MetaTaskBoardTask[];
   alerts: MetaTaskAlert[];
+  /** Activation notice input: the v1.2 feature gate height (null = not gated). */
+  activation: { hAct2: number | null };
   refresh: {
     lastRefreshAtMs: number | null;
     lastOkAtMs: number | null;

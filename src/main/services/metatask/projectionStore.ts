@@ -1,5 +1,5 @@
 import type { SqliteDatabase as Database } from '../../sqliteTypes';
-import type { MetaTaskEventPath } from './constants';
+import { H_ACT2, type MetaTaskEventPath } from './constants';
 import type {
   MetaTaskAlert,
   MetaTaskBoard,
@@ -304,7 +304,13 @@ export class MetaTaskProjectionStore {
         // skip malformed rows; the next refresh rewrites them
       }
     }
-    return { localRosterMetaIds: localRosterMetaIds.filter(Boolean), tasks, alerts: this.listAlerts(), refresh: this.refreshInfo() };
+    return {
+      localRosterMetaIds: localRosterMetaIds.filter(Boolean),
+      tasks,
+      alerts: this.listAlerts(),
+      activation: { hAct2: H_ACT2 },
+      refresh: this.refreshInfo(),
+    };
   }
 
   // ── watch state + alerts (P2 heartbeat) ────────────────────────────────────

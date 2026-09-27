@@ -97,6 +97,24 @@ const MetaTaskBoard: React.FC = () => {
           {bridgeMissingReason ?? error}
         </div>
       )}
+      {board?.activation?.hAct2 != null &&
+        (board.refresh.boundaryBlock === null || board.refresh.boundaryBlock < board.activation.hAct2) && (
+          <div className="mx-4 mt-3 px-3 py-2 text-xs rounded-lg bg-sky-50 dark:bg-sky-900/20 text-sky-700 dark:text-sky-400">
+            {i18nService
+              .t('metatask.activationNotice')
+              .replace('{hAct2}', String(board.activation.hAct2))
+              .replace(
+                '{block}',
+                board.refresh.boundaryBlock === null ? '—' : String(board.refresh.boundaryBlock),
+              )
+              .replace(
+                '{remaining}',
+                board.refresh.boundaryBlock === null
+                  ? '—'
+                  : String(board.activation.hAct2 - board.refresh.boundaryBlock),
+              )}
+          </div>
+        )}
       {board && board.alerts.length > 0 && (
         <div className="mx-4 mt-3 space-y-1">
           {board.alerts.slice(0, 6).map((alert, index) => (
