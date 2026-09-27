@@ -41,3 +41,22 @@ a v1.2.2 clause restricting settlement to tasks published at/after H_ACT2.
    (v1.3.0) and pins the vector set + sha256 announcement.
 2. metaso Go side reaches the same vector green (in progress separately).
 3. Three-green confirmed → publisher keeps or postpones H_ACT2=191500.
+
+## Closure addendum (2026-09-27, evening) — DELIVERED & PUBLISHED
+
+- **Published on chain** (verified by direct registry read): pin
+  `c9c34a414a063ac472dd758bb9e1b26cc9cbeaf321ea3311ca5b04941a4321c8i0` under
+  `/protocols/metabot-skill`, author = registration author (idq14hmv…):
+  name `metatask-replay`, **version 1.3.0**, skill-file
+  `metafile://8274dec1…i0.zip`.
+- **Review feedback adopted** (valid): no machine-absolute paths in
+  distributed artifacts — the vector set ships WITH the package and
+  `run_vectors.py` prefers the package-local copy (argv still overrides; the
+  canonical-sha256 assertion `106aa1f3…` remains the anti-drift anchor). The
+  author patched and republished (patched package hash relayed as
+  `ff484eda…`); the local delivery copy in the app skill directory carries
+  the same convention and re-verified 16/16 with the unchanged canonical
+  sha256. Repo-side runner (`scripts/metatask-vectors.mjs`) already used
+  repo-relative paths — no change needed there.
+- metaso Go: in production since chain height 191232 (see launch-kit runbook).
+- Remaining before wave-1 launch: chain reaches H_ACT2=191500.
