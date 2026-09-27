@@ -25,6 +25,7 @@ import {
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
+import { formatKnowledgeBaseLearnSummary } from '../../services/knowledgeBasePresentation.js';
 import type { KnowledgeBaseInfo, KnowledgeBaseLearnSummary } from '../../types/knowledgeBase';
 import { buildMetaBotToggleViewModel } from './metaBotCardPresentation.js';
 import MetawebStudyJobsPanel from './MetawebStudyJobsPanel';
@@ -73,11 +74,8 @@ interface KnowledgeBaseNotice {
   text: string;
 }
 
-const formatLearnSummary = (summary: KnowledgeBaseLearnSummary): string =>
-  i18nService.t('knowledgeBaseLearnSummary')
-    .replace('{added}', String(summary.added))
-    .replace('{updated}', String(summary.updated))
-    .replace('{removed}', String(summary.removed));
+const formatLearnSummary = (summary: KnowledgeBaseLearnSummary): KnowledgeBaseNotice =>
+  formatKnowledgeBaseLearnSummary(summary, (key: string) => i18nService.t(key));
 
 const KnowledgeBasePanel: React.FC<KnowledgeBasePanelProps> = ({ metabotId }) => {
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseInfo[]>([]);
@@ -168,7 +166,7 @@ const KnowledgeBasePanel: React.FC<KnowledgeBasePanelProps> = ({ metabotId }) =>
         return next;
       });
       if (payload.state === 'done' && payload.summary) {
-        showNotice(payload.kbId, { kind: 'success', text: formatLearnSummary(payload.summary) });
+        showNotice(payload.kbId, formatLearnSummary(payload.summary));
         void loadKnowledgeBases();
       } else if (payload.state === 'error') {
         showNotice(payload.kbId, { kind: 'error', text: payload.error || i18nService.t('knowledgeBaseLearnFailed') });

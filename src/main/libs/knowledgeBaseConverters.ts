@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 
 /**
  * Pure-JS document-to-text converters for the built-in MetaBot knowledge base.
@@ -42,15 +43,88 @@ async function htmlToMarkdown(html: string): Promise<string> {
   return service.turndown(html) as string;
 }
 
+/**
+ * pdfjs-dist ships as native ESM only. The tsc/vite CJS bundles rewrite a
+ * literal dynamic import into require(), which needs require(esm) (Node
+ * >= 22.12) and has failed for ASAR-packed ESM on some Electron builds —
+ * the Windows symptom was every PDF failing while plain-text formats kept
+ * working. The fallback below re-imports the resolved file through a
+ * runtime import() (hidden from the transpilers inside new Function) so
+ * such runtimes still parse PDFs.
+ */
+const runtimeDynamicImport = new Function('specifier', 'return import(specifier);') as (
+  specifier: string
+) => Promise<unknown>;
+
+interface PdfjsPageLike {
+  getTextContent(): Promise<{ items: Array<{ str?: string; hasEOL?: boolean }> }>;
+}
+
+interface PdfjsDocumentLike {
+  numPages: number;
+  getPage(pageNumber: number): Promise<PdfjsPageLike>;
+  destroy(): Promise<void>;
+}
+
+interface PdfjsModuleLike {
+  getDocument(options: Record<string, unknown>): {
+    promise: Promise<PdfjsDocumentLike>;
+    destroy(): Promise<void>;
+  };
+}
+
+let pdfjsModulePromise: Promise<PdfjsModuleLike> | null = null;
+
+/**
+ * Loads pdfjs-dist once per process, preferring the bundler-friendly dynamic
+ * import and falling back to a runtime ESM import of the resolved file URL.
+ * Exported for the knowledgeBaseText tests.
+ */
+export async function loadPdfjs(): Promise<PdfjsModuleLike> {
+  if (!pdfjsModulePromise) {
+    const load = async (): Promise<PdfjsModuleLike> => {
+      const attempts: string[] = [];
+      try {
+        return (await import('pdfjs-dist/legacy/build/pdf.mjs')) as unknown as PdfjsModuleLike;
+      } catch (error) {
+        attempts.push(`import('pdfjs-dist/legacy/build/pdf.mjs') failed: ${errorDetail(error)}`);
+      }
+      let resolved = '';
+      try {
+        resolved = require.resolve('pdfjs-dist/legacy/build/pdf.mjs');
+        return (await runtimeDynamicImport(pathToFileURL(resolved).href)) as PdfjsModuleLike;
+      } catch (error) {
+        attempts.push(`ESM import of ${resolved || 'pdfjs-dist/legacy/build/pdf.mjs'} failed: ${errorDetail(error)}`);
+        throw new KnowledgeBaseTextError(
+          'extract_failed',
+          `pdfjs-dist could not be loaded (${attempts.join(' | ')})`
+        );
+      }
+    };
+    pdfjsModulePromise = load();
+    // Never cache a failed load — the next learn run should retry it.
+    pdfjsModulePromise.catch(() => {
+      pdfjsModulePromise = null;
+    });
+  }
+  return pdfjsModulePromise;
+}
+
 export async function extractPdfText(filePath: string): Promise<KnowledgeBaseExtraction> {
   try {
-    const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const pdfjs = await loadPdfjs();
     // Ship-side standard fonts give correct glyph metrics for non-embedded
     // (base-14) fonts; without them pdfjs still extracts but warns and guesses
     // glyph widths. Resolve via require so both the tsc test build and the
-    // vite CJS main bundle find node_modules at runtime.
-    const pdfjsRoot = path.resolve(path.dirname(require.resolve('pdfjs-dist/legacy/build/pdf.mjs')), '../..');
-    const standardFontDataUrl = path.join(pdfjsRoot, 'standard_fonts') + path.sep;
+    // vite CJS main bundle find node_modules at runtime. Optional on purpose:
+    // a resolve failure must not fail extraction.
+    let standardFontDataUrl: string | undefined;
+    try {
+      const pdfjsRoot = path.resolve(path.dirname(require.resolve('pdfjs-dist/legacy/build/pdf.mjs')), '../..');
+      standardFontDataUrl = path.join(pdfjsRoot, 'standard_fonts') + path.sep;
+    } catch {
+      // pdfjs falls back to warn-only built-in glyph handling.
+    }
     const data = new Uint8Array(await fs.promises.readFile(filePath));
     const loadingTask = pdfjs.getDocument({ data, disableFontFace: true, standardFontDataUrl, verbosity: 0 });
     const doc = await loadingTask.promise;
@@ -61,9 +135,9 @@ export async function extractPdfText(filePath: string): Promise<KnowledgeBaseExt
         const content = await page.getTextContent();
         let pageText = '';
         for (const item of content.items) {
-          if (!('str' in item)) continue;
+          if (typeof item.str !== 'string') continue;
           pageText += item.str;
-          if ('hasEOL' in item && item.hasEOL) pageText += '\n';
+          if (item.hasEOL) pageText += '\n';
         }
         if (pageText.trim()) pages.push(pageText.trim());
       }

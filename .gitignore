@@ -453,6 +453,7 @@ man_base_data_pebble/
 !tests/metabotLlmBrainMigration.test.mjs
 !tests/sqliteStoreMetabotsRebuildExtras.test.mjs
 !tests/knowledgeBaseText.test.mjs
+!tests/knowledgeBasePresentation.test.mjs
 !tests/knowledgeBaseIndexStore.test.mjs
 !tests/knowledgeBaseService.test.mjs
 !tests/knowledgeBaseAgentTools.test.mjs
