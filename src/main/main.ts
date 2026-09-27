@@ -5320,20 +5320,22 @@ const getCoworkRunner = () => {
         if (!isCoworkMcpMountEnabled(getMetabotStore(), metabotId)) return [];
         return getMcpStore().getEnabledServers();
       },
-      // Per-bot opt-in (default off) behind the app-level kill-switch
-      // (automation.experimentalEnabled, default allow): 0.1.7 experimental
-      // browser automation (Playwright MCP) launches one headless Chromium
-      // per DSH session. Prefer the installed Chrome over a Playwright-
-      // managed download. See services/coworkAutomationPreference.ts.
+      // Per-bot switch (default ON since 2026-09-28, explicit '0' opts out)
+      // behind the app-level kill-switch (automation.experimentalEnabled,
+      // default allow): 0.1.7 experimental browser automation (Playwright
+      // MCP) launches one headless Chromium per DSH session. Prefer the
+      // installed Chrome over a Playwright-managed download. See
+      // services/coworkAutomationPreference.ts.
       browserAutomationProvider: (coworkSessionId: string) => {
         if (!isExperimentalAutomationAllowed(getStoreOrNull())) return undefined;
         const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
         if (!isCoworkBrowserAutomationEnabled(getMetabotStore(), metabotId)) return undefined;
         return { mode: 'launch' as const, headless: true, ...detectSystemChromium() };
       },
-      // Per-bot opt-in (default off): 0.1.7 experimental desktop computer use
-      // (cua-driver native, in-process). Requires the app to hold the macOS
-      // Accessibility/Screen Recording grants — the OS prompts on first use.
+      // Per-bot switch (default ON since 2026-09-28, explicit '0' opts out):
+      // 0.1.7 experimental desktop computer use (cua-driver native,
+      // in-process). Requires the app to hold the macOS Accessibility/Screen
+      // Recording grants — the OS prompts on first use.
       computerUseProvider: (coworkSessionId: string) => {
         if (!isExperimentalAutomationAllowed(getStoreOrNull())) return false;
         const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
@@ -6170,8 +6172,9 @@ const getCoworkRunner = () => {
         const coworkStoreInstance = getCoworkStore();
         const session = coworkStoreInstance.getSession(sessionId);
         if (session?.sessionType !== 'browser') return null;
-        // The Playwright MCP guidance is truthful only when this bot actually
-        // opted in: slot isolation guarantees the tools exist exactly for
+        // The Playwright MCP guidance is truthful only when this bot's switch
+        // is actually on (default ON since 2026-09-28; explicit opt-outs
+        // excluded): slot isolation guarantees the tools exist exactly for
         // opted-in bots, so the prompt must follow the same per-session flag.
         const browserAutomationOn = isCoworkBrowserAutomationEnabled(getMetabotStore(), session?.metabotId);
         try {

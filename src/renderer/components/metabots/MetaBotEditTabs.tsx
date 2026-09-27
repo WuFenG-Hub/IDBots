@@ -1,14 +1,16 @@
 /**
  * Tabbed MetaBot edit form (replaces the old single-page MetaBotForm edit mode).
  *
- * Five tabs — Basic / Persona / Chat Settings / Knowledge Base / Advanced. The
- * four profile tabs each have their own save button, per-tab dirty tracking
- * and per-tab on-chain sync grouping, so a user can iterate on one slice of
- * the profile without publishing unrelated edits. The Knowledge Base tab is
- * different: it manages the bot's document corpora through the knowledgeBase:*
- * IPC surface with immediate effect, so it owns no MetaBotEditValues fields,
- * no dirty tracking and no on-chain sync (deliberately absent from
- * EDIT_TAB_FIELDS / EDIT_TAB_SYNC_GROUPS). All panels stay mounted (inactive
+ * Six tabs — Basic / Persona / Chat Settings / Knowledge Base / Surf /
+ * Advanced. The four profile tabs each have their own save button, per-tab
+ * dirty tracking and per-tab on-chain sync grouping, so a user can iterate on
+ * one slice of the profile without publishing unrelated edits. The Knowledge
+ * Base and Surf tabs are different: Knowledge Base manages the bot's document
+ * corpora through the knowledgeBase:* IPC surface, and Surf hosts the
+ * immediate-effect MetaWeb surf switches plus the surf reports panel, so
+ * neither owns MetaBotEditValues fields, dirty tracking nor on-chain sync
+ * (deliberately absent from EDIT_TAB_FIELDS / EDIT_TAB_SYNC_GROUPS). All
+ * panels stay mounted (inactive
  * ones are CSS-hidden) so unsaved edits in other tabs survive tab switches;
  * switching away from a dirty tab asks for confirmation and reverts that tab's
  * fields on confirm.
@@ -20,7 +22,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PhotoIcon, PlusIcon, QuestionMarkCircleIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { PhotoIcon, PlusIcon, QuestionMarkCircleIcon, WrenchScrewdriverIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { configService } from '../../services/config';
 import { isLlmEffortLevel, type LlmEffortLevel } from '../../services/modelCatalog';
@@ -109,12 +111,13 @@ export interface LlmOption {
   label: string;
 }
 
-export type MetaBotEditTabKey = 'basic' | 'persona' | 'chatSettings' | 'knowledgeBase' | 'advanced';
+export type MetaBotEditTabKey = 'basic' | 'persona' | 'chatSettings' | 'knowledgeBase' | 'surf' | 'advanced';
 
 /** Editable fields owned by each tab; drives dirty tracking and save scoping. */
-// 'knowledgeBase' is deliberately absent: that panel manages the bot's
-// document corpora via the knowledgeBase:* IPC surface with immediate effect,
-// so it owns no MetaBotEditValues fields and needs no dirty tracking.
+// 'knowledgeBase' and 'surf' are deliberately absent: Knowledge Base manages
+// the bot's document corpora via the knowledgeBase:* IPC surface and Surf
+// hosts the immediate-effect metabot_settings surf switches, so neither owns
+// MetaBotEditValues fields nor needs dirty tracking.
 export const EDIT_TAB_FIELDS: Partial<Record<MetaBotEditTabKey, readonly (keyof MetaBotEditValues)[]>> = {
   basic: ['name', 'avatar', 'bio', 'metabot_type', 'boss_global_metaid', 'llm_id', 'llm_provider', 'llm_effort', 'fallback_llm_id', 'fallback_llm_provider', 'fallback_llm_effort'],
   persona: ['role', 'soul', 'goal'],
@@ -124,7 +127,8 @@ export const EDIT_TAB_FIELDS: Partial<Record<MetaBotEditTabKey, readonly (keyof 
 
 // metabot_type is deliberately absent from EDIT_TAB_SYNC_GROUPS: the Twin/Worker
 // role is a local-only setting and is never published on-chain.
-// 'knowledgeBase' is likewise absent: nothing in that panel syncs on-chain.
+// 'knowledgeBase' and 'surf' are likewise absent: nothing in those panels
+// syncs on-chain on save.
 /** On-chain sync step groups each tab is allowed to publish on save. */
 export const EDIT_TAB_SYNC_GROUPS: Partial<Record<MetaBotEditTabKey, readonly SyncStepKey[]>> = {
   basic: ['name', 'avatar', 'bio', 'owner', 'llm'],
@@ -133,13 +137,14 @@ export const EDIT_TAB_SYNC_GROUPS: Partial<Record<MetaBotEditTabKey, readonly Sy
   advanced: ['homepage'],
 };
 
-const EDIT_TAB_ORDER: readonly MetaBotEditTabKey[] = ['basic', 'persona', 'chatSettings', 'knowledgeBase', 'advanced'];
+const EDIT_TAB_ORDER: readonly MetaBotEditTabKey[] = ['basic', 'persona', 'chatSettings', 'knowledgeBase', 'surf', 'advanced'];
 
-const EDIT_TAB_LABEL_KEYS: Record<MetaBotEditTabKey, 'metabotTabBasic' | 'metabotTabPersona' | 'metabotTabChatSettings' | 'metabotTabKnowledgeBase' | 'metabotTabAdvanced'> = {
+const EDIT_TAB_LABEL_KEYS: Record<MetaBotEditTabKey, 'metabotTabBasic' | 'metabotTabPersona' | 'metabotTabChatSettings' | 'metabotTabKnowledgeBase' | 'metabotTabSurf' | 'metabotTabAdvanced'> = {
   basic: 'metabotTabBasic',
   persona: 'metabotTabPersona',
   chatSettings: 'metabotTabChatSettings',
   knowledgeBase: 'metabotTabKnowledgeBase',
+  surf: 'metabotTabSurf',
   advanced: 'metabotTabAdvanced',
 };
 
@@ -258,15 +263,17 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const [openTeamRemoteCollab, setOpenTeamRemoteCollab] = useState(true);
   const [openTeamRemoteCollabLoaded, setOpenTeamRemoteCollabLoaded] = useState(false);
   const [openTeamRemoteCollabSaving, setOpenTeamRemoteCollabSaving] = useState(false);
-  // Cowork MCP-tools switch: same metabot_settings kv channel as OpenTeam,
-  // but the default (no record) is OFF — MCP mounting is per-bot opt-in.
+  // Cowork capability switches: same metabot_settings kv channel as OpenTeam.
+  // Defaults mirror the main process: MCP mounting is per-bot opt-in (no
+  // record = OFF), while browser automation and desktop computer use ship
+  // enabled (no record = ON; an explicit '0' opts the bot out).
   const [coworkMcpTools, setCoworkMcpTools] = useState(false);
   const [coworkMcpToolsLoaded, setCoworkMcpToolsLoaded] = useState(false);
   const [coworkMcpToolsSaving, setCoworkMcpToolsSaving] = useState(false);
-  const [coworkBrowserAutomation, setCoworkBrowserAutomation] = useState(false);
+  const [coworkBrowserAutomation, setCoworkBrowserAutomation] = useState(true);
   const [coworkBrowserAutomationLoaded, setCoworkBrowserAutomationLoaded] = useState(false);
   const [coworkBrowserAutomationSaving, setCoworkBrowserAutomationSaving] = useState(false);
-  const [coworkComputerUse, setCoworkComputerUse] = useState(false);
+  const [coworkComputerUse, setCoworkComputerUse] = useState(true);
   const [coworkComputerUseLoaded, setCoworkComputerUseLoaded] = useState(false);
   const [coworkComputerUseSaving, setCoworkComputerUseSaving] = useState(false);
   const [twinDemoteConfirmOpen, setTwinDemoteConfirmOpen] = useState(false);
@@ -309,28 +316,29 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   }, [metabotId]);
 
   // Load the cowork MCP-tools / browser-automation / computer-use switches
-  // for the bot being edited. A missing or failed read falls back to off,
-  // matching the main-process defaults.
+  // for the bot being edited. A missing or failed read falls back to the
+  // per-switch default, matching the main process: MCP mounting off, browser
+  // automation and computer use on. An explicit '1'/'0' always wins.
   useEffect(() => {
     let cancelled = false;
     const resetters = [
-      [setCoworkMcpTools, setCoworkMcpToolsLoaded, setCoworkMcpToolsSaving, COWORK_MOUNT_MCP_TOOLS_KEY],
-      [setCoworkBrowserAutomation, setCoworkBrowserAutomationLoaded, setCoworkBrowserAutomationSaving, COWORK_BROWSER_AUTOMATION_KEY],
-      [setCoworkComputerUse, setCoworkComputerUseLoaded, setCoworkComputerUseSaving, COWORK_COMPUTER_USE_KEY],
+      [setCoworkMcpTools, setCoworkMcpToolsLoaded, setCoworkMcpToolsSaving, COWORK_MOUNT_MCP_TOOLS_KEY, false],
+      [setCoworkBrowserAutomation, setCoworkBrowserAutomationLoaded, setCoworkBrowserAutomationSaving, COWORK_BROWSER_AUTOMATION_KEY, true],
+      [setCoworkComputerUse, setCoworkComputerUseLoaded, setCoworkComputerUseSaving, COWORK_COMPUTER_USE_KEY, true],
     ] as const;
-    for (const [setValue, setLoaded, setSaving, key] of resetters) {
-      setValue(false);
+    for (const [setValue, setLoaded, setSaving, key, fallback] of resetters) {
+      setValue(fallback);
       setLoaded(false);
       setSaving(false);
       window.electron.metabot.getSetting(metabotId, key)
         .then((result) => {
           if (cancelled) return;
-          setValue(result.success ? result.value === '1' : false);
+          setValue(result.success && result.value != null ? result.value === '1' : fallback);
           setLoaded(true);
         })
         .catch(() => {
           if (cancelled) return;
-          setValue(false);
+          setValue(fallback);
           setLoaded(true);
         });
     }
@@ -1078,81 +1086,6 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
           </div>
         </div>
 
-        {/* Cowork MCP tools: immediate-effect kv switch, default off (per-bot opt-in). */}
-        <div className={rowClass}>
-          <label id="metabot-cowork-mcp-tools-label" className={labelClass}>
-            {i18nService.t('metabotCoworkMcpTools')}
-          </label>
-          <div className="min-w-0">
-            <div className="flex items-center gap-3 pt-1">
-              <div
-                role="switch"
-                aria-checked={coworkMcpTools}
-                aria-labelledby="metabot-cowork-mcp-tools-label"
-                data-slot="metabot-cowork-mcp-tools-switch"
-                title={i18nService.t('metabotCoworkMcpToolsHint')}
-                className={coworkMcpToolsToggleView.trackClass}
-                onClick={handleCoworkMcpToolsToggle}
-              >
-                <div className={coworkMcpToolsToggleView.knobClass} />
-              </div>
-            </div>
-            <p className={hintClass}>
-              {i18nService.t('metabotCoworkMcpToolsHint')}
-            </p>
-          </div>
-        </div>
-
-        {/* Browser automation (experimental): per-bot opt-in, immediate effect. */}
-        <div className={rowClass}>
-          <label id="metabot-cowork-browser-automation-label" className={labelClass}>
-            {i18nService.t('metabotCoworkBrowserAutomation')}
-          </label>
-          <div className="min-w-0">
-            <div className="flex items-center gap-3 pt-1">
-              <div
-                role="switch"
-                aria-checked={coworkBrowserAutomation}
-                aria-labelledby="metabot-cowork-browser-automation-label"
-                data-slot="metabot-cowork-browser-automation-switch"
-                title={i18nService.t('metabotCoworkBrowserAutomationHint')}
-                className={coworkBrowserAutomationToggleView.trackClass}
-                onClick={handleCoworkBrowserAutomationToggle}
-              >
-                <div className={coworkBrowserAutomationToggleView.knobClass} />
-              </div>
-            </div>
-            <p className={hintClass}>
-              {i18nService.t('metabotCoworkBrowserAutomationHint')}
-            </p>
-          </div>
-        </div>
-
-        {/* Desktop computer use (experimental): per-bot opt-in, immediate effect. */}
-        <div className={rowClass}>
-          <label id="metabot-cowork-computer-use-label" className={labelClass}>
-            {i18nService.t('metabotCoworkComputerUse')}
-          </label>
-          <div className="min-w-0">
-            <div className="flex items-center gap-3 pt-1">
-              <div
-                role="switch"
-                aria-checked={coworkComputerUse}
-                aria-labelledby="metabot-cowork-computer-use-label"
-                data-slot="metabot-cowork-computer-use-switch"
-                title={i18nService.t('metabotCoworkComputerUseHint')}
-                className={coworkComputerUseToggleView.trackClass}
-                onClick={handleCoworkComputerUseToggle}
-              >
-                <div className={coworkComputerUseToggleView.knobClass} />
-              </div>
-            </div>
-            <p className={hintClass}>
-              {i18nService.t('metabotCoworkComputerUseHint')}
-            </p>
-          </div>
-        </div>
-
         <div className={rowClass}>
           <label htmlFor="metabot-allow-chat-skills" className={labelClass}>
             {i18nService.t('metabotAllowChatSkills')}
@@ -1312,6 +1245,16 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
         <KnowledgeBasePanel metabotId={metabotId} />
       </div>
 
+      {/* Surf tab: MetaWeb surf settings, "Surf now" trigger and the
+          run-history reports panel — immediate effects (no save row). */}
+      <div
+        role="tabpanel"
+        data-slot="metabot-edit-panel-surf"
+        className={`space-y-3 ${activeTab === 'surf' ? '' : 'hidden'}`}
+      >
+        <SurfSection metabotId={metabotId} />
+      </div>
+
       {/* Advanced tab: on-chain homepage source */}
       <div
         role="tabpanel"
@@ -1331,10 +1274,94 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
 
         {renderPanelSaveRow('advanced')}
 
-        {/* MetaWeb surf (AI 冲浪): per-bot surf settings, "Surf now" trigger and
-            the run-history reports panel. Immediate effects, kept out of the
-            homepage save above. */}
-        <SurfSection metabotId={metabotId} />
+        {/* Cowork capability switches (moved here from the Chat Settings tab,
+            into the slot the Surf section used to occupy before Surf got its
+            own tab): immediate-effect kv switches, kept out of the homepage
+            save above. */}
+        <div
+          className="space-y-3 pt-4 mt-4 border-t dark:border-claude-darkBorder border-claude-border"
+          data-slot="metabot-cowork-capabilities-section"
+        >
+          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            <WrenchScrewdriverIcon className="h-3.5 w-3.5" aria-hidden />
+            <span>{i18nService.t('metabotCoworkCapabilitiesTitle')}</span>
+          </div>
+
+          {/* Cowork MCP tools: immediate-effect kv switch, default off (per-bot opt-in). */}
+          <div className={rowClass}>
+            <label id="metabot-cowork-mcp-tools-label" className={labelClass}>
+              {i18nService.t('metabotCoworkMcpTools')}
+            </label>
+            <div className="min-w-0">
+              <div className="flex items-center gap-3 pt-1">
+                <div
+                  role="switch"
+                  aria-checked={coworkMcpTools}
+                  aria-labelledby="metabot-cowork-mcp-tools-label"
+                  data-slot="metabot-cowork-mcp-tools-switch"
+                  title={i18nService.t('metabotCoworkMcpToolsHint')}
+                  className={coworkMcpToolsToggleView.trackClass}
+                  onClick={handleCoworkMcpToolsToggle}
+                >
+                  <div className={coworkMcpToolsToggleView.knobClass} />
+                </div>
+              </div>
+              <p className={hintClass}>
+                {i18nService.t('metabotCoworkMcpToolsHint')}
+              </p>
+            </div>
+          </div>
+
+          {/* Browser automation (experimental): ships enabled, explicit '0' opts out; immediate effect. */}
+          <div className={rowClass}>
+            <label id="metabot-cowork-browser-automation-label" className={labelClass}>
+              {i18nService.t('metabotCoworkBrowserAutomation')}
+            </label>
+            <div className="min-w-0">
+              <div className="flex items-center gap-3 pt-1">
+                <div
+                  role="switch"
+                  aria-checked={coworkBrowserAutomation}
+                  aria-labelledby="metabot-cowork-browser-automation-label"
+                  data-slot="metabot-cowork-browser-automation-switch"
+                  title={i18nService.t('metabotCoworkBrowserAutomationHint')}
+                  className={coworkBrowserAutomationToggleView.trackClass}
+                  onClick={handleCoworkBrowserAutomationToggle}
+                >
+                  <div className={coworkBrowserAutomationToggleView.knobClass} />
+                </div>
+              </div>
+              <p className={hintClass}>
+                {i18nService.t('metabotCoworkBrowserAutomationHint')}
+              </p>
+            </div>
+          </div>
+
+          {/* Desktop computer use (experimental): ships enabled, explicit '0' opts out; immediate effect. */}
+          <div className={rowClass}>
+            <label id="metabot-cowork-computer-use-label" className={labelClass}>
+              {i18nService.t('metabotCoworkComputerUse')}
+            </label>
+            <div className="min-w-0">
+              <div className="flex items-center gap-3 pt-1">
+                <div
+                  role="switch"
+                  aria-checked={coworkComputerUse}
+                  aria-labelledby="metabot-cowork-computer-use-label"
+                  data-slot="metabot-cowork-computer-use-switch"
+                  title={i18nService.t('metabotCoworkComputerUseHint')}
+                  className={coworkComputerUseToggleView.trackClass}
+                  onClick={handleCoworkComputerUseToggle}
+                >
+                  <div className={coworkComputerUseToggleView.knobClass} />
+                </div>
+              </div>
+              <p className={hintClass}>
+                {i18nService.t('metabotCoworkComputerUseHint')}
+              </p>
+            </div>
+          </div>
+        </div>
 
         {/* Wallet / Backup / Delete — OAC-aligned Advanced actions. Immediate
             effects (panels / delete flow), kept out of the homepage save above. */}
