@@ -77,6 +77,7 @@ import {
   getCoworkSessionTitleClassName,
   shouldShowA2AServiceSessionId,
 } from './coworkSessionPresentation.js';
+import { isAssistantTurnComplete } from './assistantTurnPresentation.js';
 import {
   buildRefundStatusDismissKey,
   getRefundCardVariant,
@@ -2046,6 +2047,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   showCopyButtons = true,
   showImagePreviews = true,
   sessionLive = false,
+  isActiveTurn = false,
   onOpenLocalFile,
   onBranch,
 }: {
@@ -2056,6 +2058,8 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   showCopyButtons?: boolean;
   showImagePreviews?: boolean;
   sessionLive?: boolean;
+  /** This turn is the session's current in-flight turn (live session, last turn). */
+  isActiveTurn?: boolean;
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
 }) {
@@ -2289,10 +2293,15 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   // before it (thinking, tool calls, intermediate notes) is the working
   // process. Once the turn completes, the process collapses behind a
   // "Worked for X" header so only the delivery stays visible.
-  const isTurnComplete = !sessionLive || !visibleAssistantItems.some((item) => {
+  // The active turn of a running session stays expanded through inter-round
+  // gaps (tool execution + next model roundtrip), even though nothing carries
+  // isStreaming then — collapsing there is the glm-5.3 fold/unfold flash; see
+  // isAssistantTurnComplete.
+  const hasStreamingItem = visibleAssistantItems.some((item) => {
     const message = item.type === 'tool_group' ? item.group.toolUse : item.message;
     return Boolean(message.metadata?.isStreaming);
   });
+  const isTurnComplete = isAssistantTurnComplete({ sessionLive, isActiveTurn, hasStreamingItem });
   const showInterruptedBanner = !sessionLive && (
     visibleAssistantItems.some((item) => {
       if (item.type === 'system') return item.message.metadata?.dshTurnInterrupted === true;
@@ -3748,6 +3757,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             showCopyButtons={!isStreaming}
             showImagePreviews
             sessionLive={isStreaming || currentSession?.status === 'running'}
+            isActiveTurn={currentSession?.status === 'running'}
             onOpenLocalFile={handleOpenLocalFile}
           />
         </div>
@@ -3781,6 +3791,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 showCopyButtons={!isStreaming}
                 showImagePreviews
                 sessionLive={isStreaming || currentSession?.status === 'running'}
+                isActiveTurn={currentSession?.status === 'running' && isLastTurn}
                 onOpenLocalFile={handleOpenLocalFile}
                 onBranch={handleBranchFromMessage}
               />
