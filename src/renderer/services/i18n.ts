@@ -2200,6 +2200,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     'metatask.alert.claimTtlSoon': '节点 {node} 的认领即将到期',
     'metatask.alert.submissionChange': '节点 {node} 状态变化：{detail}',
     'metatask.alert.closingDrive': '发布的任务聚合停滞：{detail}',
+    'metatask.activationNotice': '协议 v1.2 新要件（权重结算 / amend / challenge / 聚合前置）将在块高 {hAct2} 生效；当前投影至块高 {block}，约差 {remaining} 块。生效前发布的新任务不带 v1.2 要件。',
     'longTermTask.subtask.metataskChip': '链上任务 {progress}',
     // 长期任务看板（一等实体重构版：状态分列 + 子项目进度）
     'longTermTask.column.waitingOwner': '等你拍板',
@@ -4872,6 +4873,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     'metatask.alert.claimTtlSoon': 'Claim on node {node} expiring soon',
     'metatask.alert.submissionChange': 'Node {node} changed: {detail}',
     'metatask.alert.closingDrive': 'Published task aggregation stalled: {detail}',
+    'metatask.activationNotice': 'Protocol v1.2 features (weighted settlement / amend / challenge / aggregation precondition) activate at block {hAct2}; this projection reaches block {block}, about {remaining} blocks to go. New tasks published before then carry no v1.2 requirements.',
     'longTermTask.subtask.metataskChip': 'MetaTask {progress}',
     // Long-term task board (first-class redesign: status columns + sub-task progress)
     'longTermTask.column.waitingOwner': 'Needs you',
