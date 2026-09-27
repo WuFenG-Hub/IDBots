@@ -195,6 +195,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       notes: z.string().optional(),
       ordinal: z.number().optional(),
       expectedMinutes: z.number().int().positive().nullable().optional().describe('Set or clear the expected-duration budget in minutes (null = use the supervision default).'),
+      metataskRoot: z.string().regex(/^[0-9a-f]{64}i0$/).nullable().optional().describe('Link this sub-project to an on-chain MetaTask root pinId as its execution channel (multi-bot × long quadrant); null unlinks. Progress shows from the chain projection.'),
     },
     async (args: { subtaskId?: string } & Record<string, unknown>) => {
       try {

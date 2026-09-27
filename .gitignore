@@ -68,6 +68,9 @@ tests/*
 !tests/longTermTaskAgentTools.test.mjs
 !tests/heartbeatService.test.mjs
 !tests/longTermAdvanceService.test.mjs
+!tests/metataskEngine.test.mjs
+!tests/metataskProjectionStore.test.mjs
+!tests/metataskAgentTools.test.mjs
 !tests/quotaRendererSync.test.mjs
 !tests/surfHostStatsFold.test.mjs
 !tests/rsiLadderCompute.test.ts

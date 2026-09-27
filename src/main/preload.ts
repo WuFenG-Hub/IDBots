@@ -889,6 +889,7 @@ contextBridge.exposeInMainWorld('electron', {
       preferredChannel?: 'delegate_bot' | 'group_task' | 'owner_external' | 'owner_together' | null;
       notes?: string;
       ordinal?: number;
+      metataskRoot?: string | null;
     }) => ipcRenderer.invoke('longtermTask:subtaskUpdate', input),
     begin: (input: { subtaskId: string; channel?: 'delegate_bot' | 'group_task' | 'owner_external' | 'owner_together' }) =>
       ipcRenderer.invoke('longtermTask:begin', input),
@@ -904,6 +905,18 @@ contextBridge.exposeInMainWorld('electron', {
       const handler = (_event: any, data: any) => callback(data);
       ipcRenderer.on('longtermTask:update', handler);
       return () => ipcRenderer.removeListener('longtermTask:update', handler);
+    },
+  },
+  metatask: {
+    // MetaTask (chain-side, read path P1): local projection of on-chain tasks.
+    // The chain is the source of truth; the projection is rebuildable.
+    board: () => ipcRenderer.invoke('metatask:board'),
+    get: (input: { rootPinId: string }) => ipcRenderer.invoke('metatask:get', input),
+    refresh: () => ipcRenderer.invoke('metatask:refresh'),
+    onUpdate: (callback: (data: { seq: number; reason: string }) => void) => {
+      const handler = (_event: any, data: any) => callback(data);
+      ipcRenderer.on('metatask:update', handler);
+      return () => ipcRenderer.removeListener('metatask:update', handler);
     },
   },
   groupTask: {
