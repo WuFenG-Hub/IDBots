@@ -249,3 +249,20 @@ Reasoning tokens remain 0 on scripted tasks for every shape (V4.1-flash
 adaptive thinking) — the reasoning-length effect remains measurable only in
 real usage telemetry; the request-size reduction above is the direct,
 verifiable win.
+
+## Addendum 3 (2026-09-27 night): decisions 1A/2A implemented
+
+Two-tier MetaWeb guidance is live (`metawebPromptTier.ts`): Tier 0 (compact
+worldview + chain-ids) always; the deep learning-loop/Q&A sections mount only
+after the session's first MetaWeb tool call (monotonic per SDK session
+generation, injected via the next turn's session/ensure — in-history, cache-
+friendly). Tool mounting is content-gated with the creator exception:
+knowledge_upsert / procedure_save / knowledge_base_add_document /
+knowledge_base_learn always mount; knowledge_recall / procedure_recall /
+procedure_archive / knowledge_base_list / knowledge_base_query wait for
+content. A2A automation profile runs metawebMode 'compact'.
+
+Measured (A/B, main-project bot): Tier-0 session first-step input 34,008
+tokens — cumulative −7.5% from the 36,769 baseline; fresh no-content bots
+additionally drop 5 tool schemas. 361/362 tests pass (the single failure is
+the pre-existing main-branch dshHostToolRegistry issue).

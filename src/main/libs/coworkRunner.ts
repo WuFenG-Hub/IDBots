@@ -28,6 +28,7 @@ import {
   writeDshSkillSessionEnvFile,
 } from './dshSkillSessionEnv';
 import { mapDshReasoningEffort } from './dshReasoningEffort';
+import { shouldIncludeMetawebDeepSections, nextMetawebPromptTier, type MetawebPromptMode, type MetawebPromptTier } from './metawebPromptTier';
 import { dshModelReasoningDeclaration, undeclaredReasoningRouteWarning } from './dshModelReasoning';
 import { toLlmEffortLevel, type LlmEffortLevel } from './llmEffort';
 import {
@@ -1403,6 +1404,10 @@ interface SystemPromptProfile {
   localTimeMode: SystemPromptBlockMode;
   includeMemoryPromptBlocks: boolean;
   includeMemoryStrategy: boolean;
+  // Two-tier MetaWeb guidance (design 2026-09-27, decision 1A): 'tiered'
+  // mounts the deep learning-loop/Q&A sections only after the session first
+  // uses a MetaWeb tool; 'compact' never mounts them; 'full' always does.
+  metawebMode: MetawebPromptMode;
 }
 
 const DEFAULT_SYSTEM_PROMPT_PROFILE: SystemPromptProfile = {
@@ -1411,6 +1416,7 @@ const DEFAULT_SYSTEM_PROMPT_PROFILE: SystemPromptProfile = {
   localTimeMode: 'full',
   includeMemoryPromptBlocks: true,
   includeMemoryStrategy: true,
+  metawebMode: 'tiered',
 };
 
 const SERVICE_ORDER_A2A_SYSTEM_PROMPT_PROFILE: SystemPromptProfile = {
@@ -1419,6 +1425,7 @@ const SERVICE_ORDER_A2A_SYSTEM_PROMPT_PROFILE: SystemPromptProfile = {
   localTimeMode: 'compact',
   includeMemoryPromptBlocks: false,
   includeMemoryStrategy: false,
+  metawebMode: 'compact',
 };
 
 interface SandboxPendingPermission {
@@ -2060,6 +2067,11 @@ export class CoworkRunner extends EventEmitter {
    * the injected blocks live in the SDK history between turns, so the dedup
    * hashes must survive the per-turn activeSession cleanup.
    */
+  // MetaWeb prompt tier per cowork session (design 2026-09-27): Tier 0 until
+  // the session first calls a MetaWeb tool, Tier 1 from the next turn on.
+  // Bound to the SDK session generation like the volatile-dedup state: a
+  // reset SDK session starts fresh at Tier 0.
+  private metawebTierBySessionId = new Map<string, { generation: string | null; tier: MetawebPromptTier }>();
   private volatileDedupBySessionId: Map<string, VolatileDedupState> = new Map();
   /** Latest estimated thinking-token count from SDK thinking_tokens events. */
   private thinkingTokensBySessionId: Map<string, number> = new Map();
@@ -5357,6 +5369,29 @@ export class CoworkRunner extends EventEmitter {
    * pre-joined and will be split into individual grid slots when the other
    * channels migrate onto the same composer.
    */
+  /** Current MetaWeb prompt tier for the session, reset with the SDK session generation. */
+  private getMetawebPromptTier(sessionId: string, activeSession?: ActiveSession | null): MetawebPromptTier {
+    const generation = activeSession?.claudeSessionId ?? null;
+    const entry = this.metawebTierBySessionId.get(sessionId);
+    if (!entry || entry.generation !== generation) {
+      return 0;
+    }
+    return entry.tier;
+  }
+
+  /** Monotonic Tier 0 -> 1 bump when the session calls a MetaWeb tool. */
+  private noteHostToolCallForMetawebTier(sessionId: string, toolName: string): void {
+    const activeSession = this.activeSessions.get(sessionId);
+    const generation = activeSession?.claudeSessionId ?? null;
+    const entry = this.metawebTierBySessionId.get(sessionId);
+    const current: MetawebPromptTier = entry && entry.generation === generation ? entry.tier : 0;
+    const next = nextMetawebPromptTier(current, String(toolName ?? ''));
+    if (next !== current) {
+      this.metawebTierBySessionId.set(sessionId, { generation, tier: next });
+      coworkLog('INFO', 'metawebPromptTier', 'Session reached MetaWeb Tier 1 — deep sections mount from the next turn', { sessionId });
+    }
+  }
+
   private composeEffectiveSystemPrompt(
     baseSystemPrompt: string,
     workspaceRoot: string,
@@ -5366,7 +5401,8 @@ export class CoworkRunner extends EventEmitter {
     personaBlock?: string,
     profile: SystemPromptProfile = DEFAULT_SYSTEM_PROMPT_PROFILE,
     implicitMemoryUpdateEnabled = false,
-    skillsSection?: string | null
+    skillsSection?: string | null,
+    metawebDeepSections = true
   ): string {
     return composePromptSections([
       { name: 'persona:metabot', order: PROMPT_SECTION_ORDER.PERSONA, text: personaBlock },
@@ -5391,20 +5427,24 @@ export class CoworkRunner extends EventEmitter {
         order: PROMPT_SECTION_ORDER.METAWEB_WORLDVIEW,
         text: this.buildMetawebWorldviewPrompt(),
       },
-      // The learning loop rides right after the worldview: how to follow
-      // on-chain tutorials end to end (install → verify → report → record).
-      {
-        name: 'idbots:metaweb-learning-loop',
-        order: PROMPT_SECTION_ORDER.METAWEB_LEARNING_LOOP,
-        text: this.buildMetawebLearningLoopPrompt(),
-      },
-      // On-chain Q&A participation discipline (ask when stuck, answer what
-      // you know, react honestly). Static rule prose, cacheable head.
-      {
-        name: 'idbots:metaweb-qa-behavior',
-        order: PROMPT_SECTION_ORDER.METAWEB_QA_BEHAVIOR,
-        text: QA_BEHAVIOR_RULE,
-      },
+      // Deep MetaWeb sections (learning loop + Q&A participation) are Tier 1:
+      // in the default 'tiered' profile mode they mount only after the session
+      // first used a MetaWeb tool (see metawebPromptTier.ts); the worldview
+      // and chain-id rules are the always-mounted Tier 0.
+      ...(metawebDeepSections
+        ? [
+            {
+              name: 'idbots:metaweb-learning-loop',
+              order: PROMPT_SECTION_ORDER.METAWEB_LEARNING_LOOP,
+              text: this.buildMetawebLearningLoopPrompt(),
+            },
+            {
+              name: 'idbots:metaweb-qa-behavior',
+              order: PROMPT_SECTION_ORDER.METAWEB_QA_BEHAVIOR,
+              text: QA_BEHAVIOR_RULE,
+            },
+          ]
+        : []),
       // Chain-identifier output discipline: quoting pinids/txids verbatim is
       // load-bearing for host matching (deliverables, dependency gates,
       // verification). Static rule prose, cacheable head.
@@ -6570,7 +6610,11 @@ export class CoworkRunner extends EventEmitter {
         personaWithExperience,
         systemPromptProfile,
         this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled,
-        skillsSection
+        skillsSection,
+        shouldIncludeMetawebDeepSections(
+          systemPromptProfile.metawebMode,
+          this.getMetawebPromptTier(sessionId, activeSession),
+        )
       );
       this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
@@ -6694,7 +6738,11 @@ export class CoworkRunner extends EventEmitter {
         personaWithExperience,
         systemPromptProfile,
         this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled,
-        skillsSection
+        skillsSection,
+        shouldIncludeMetawebDeepSections(
+          systemPromptProfile.metawebMode,
+          this.getMetawebPromptTier(sessionId, activeSession),
+        )
       );
       this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
@@ -7127,8 +7175,12 @@ export class CoworkRunner extends EventEmitter {
     return this.isMetabotTypeSession(sessionId, 'welcome');
   }
 
-  private async handleHostToolExecution(payload: Record<string, unknown>, sessionId: string): Promise<{ success: boolean; text: string }> {
+  private async handleHostToolExecution(payload: Record<string, unknown>, sessionId: string): Promise<{    success: boolean; text: string }> {
     const toolName = String(payload.toolName ?? payload.name ?? '');
+    // MetaWeb prompt tier (design 2026-09-27): a host tool call is the Tier 0
+    // -> Tier 1 trigger; the deep sections mount from the NEXT turn's
+    // session/ensure, keeping the in-flight request shape stable.
+    this.noteHostToolCallForMetawebTier(sessionId, toolName);
     const rawInput = payload.toolInput ?? payload.input ?? {};
     const toolInput =
       rawInput && typeof rawInput === 'object'
@@ -9442,6 +9494,29 @@ export class CoworkRunner extends EventEmitter {
       );
     }
     if (sessionMemoryEnabled && this.knowledgeStore) {
+      // Tool-mount tightening (design 2026-09-27, decision 2A): recall tools
+      // mount only when the bot already has content to recall; the creator
+      // tools (knowledge_upsert / procedure_save) stay mounted so the first
+      // save always works. Counts are cheap sync store reads, recomputed per
+      // tool-surface rebuild so a first save mounts recall from the next turn
+      // (tool additions ride the kernel's in-history tool updates).
+      const memoryMetabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+      let hasKnowledgePoints = false;
+      let hasProcedures = false;
+      if (memoryMetabotId != null) {
+        try {
+          hasKnowledgePoints = this.knowledgeStore.listKnowledge({ metabotId: memoryMetabotId, status: 'active', limit: 1 }).length > 0;
+          hasProcedures = this.knowledgeStore.listProcedures({ metabotId: memoryMetabotId, status: 'active', limit: 1 }).length > 0;
+        } catch (error) {
+          coworkLog('WARN', 'buildSessionInlineTools', 'memory content probe failed — mounting recall tools unguarded', {
+            sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          hasKnowledgePoints = true;
+          hasProcedures = true;
+        }
+      }
+      if (hasKnowledgePoints) {
       memoryTools.push(
         tool(
           'knowledge_recall',
@@ -9461,6 +9536,7 @@ export class CoworkRunner extends EventEmitter {
           }
         )
       );
+      }
       memoryTools.push(
         tool(
           'knowledge_upsert',
@@ -9481,6 +9557,7 @@ export class CoworkRunner extends EventEmitter {
           }
         )
       );
+      if (hasProcedures) {
       memoryTools.push(
         tool(
           'procedure_recall',
@@ -9499,6 +9576,7 @@ export class CoworkRunner extends EventEmitter {
           }
         )
       );
+      }
       memoryTools.push(
         tool(
           'procedure_save',
@@ -9521,6 +9599,7 @@ export class CoworkRunner extends EventEmitter {
           }
         )
       );
+      if (hasProcedures) {
       memoryTools.push(
         tool(
           'procedure_archive',
@@ -9537,6 +9616,7 @@ export class CoworkRunner extends EventEmitter {
           }
         )
       );
+      }
     }
     // Local MetaApp launcher tools are retired for browser-type sessions:
     // in that surface apps open on-chain via search_metaapps + metaapp:// URIs.
@@ -10068,6 +10148,21 @@ export class CoworkRunner extends EventEmitter {
       // The budget counter rides the session marker (kbAddsUsed) so a per-turn
       // tool-surface rebuild cannot reset it mid-run (review P2.1).
       const kbMarker = studySession ?? surfKbSession;
+      // Decision 2A content gate: with zero documents across all KBs, only the
+      // creator pair mounts (see buildKnowledgeBaseAgentTools). Sync store
+      // read, recomputed per tool-surface rebuild.
+      let kbHasDocuments = true;
+      try {
+        const kbMetabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+        kbHasDocuments = kbMetabotId == null
+          ? true
+          : this.knowledgeBase.listKnowledgeBases(kbMetabotId).some((record) => record.docCount > 0);
+      } catch (error) {
+        coworkLog('WARN', 'buildSessionInlineTools', 'KB content probe failed — mounting KB tools unguarded', {
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       memoryTools.push(
         ...buildKnowledgeBaseAgentTools({
           tool,
@@ -10076,6 +10171,7 @@ export class CoworkRunner extends EventEmitter {
             : this.knowledgeBase,
           sessionId,
           resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
+          contentStatus: { hasDocuments: kbHasDocuments },
         })
       );
     }

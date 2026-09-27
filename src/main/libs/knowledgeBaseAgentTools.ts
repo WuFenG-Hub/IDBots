@@ -131,6 +131,11 @@ export function buildKnowledgeBaseAgentTools(deps: {
   knowledgeBase: KnowledgeBaseControl;
   sessionId: string;
   resolveMetabotId: (sessionId: string) => number | null | undefined;
+  /** Tool-mount tightening (design 2026-09-27, decision 2A): when the caller
+   *  knows the bot's KBs hold no documents yet, only the creator pair
+   *  (add_document + learn) mounts; query/list join once content exists.
+   *  Omitted = legacy behavior (mount everything). */
+  contentStatus?: { hasDocuments: boolean };
 }): unknown[] {
   const { tool, knowledgeBase, sessionId, resolveMetabotId } = deps;
 
@@ -293,5 +298,9 @@ export function buildKnowledgeBaseAgentTools(deps: {
     }
   );
 
+    const hasDocuments = deps.contentStatus ? deps.contentStatus.hasDocuments : true;
+  if (!hasDocuments) {
+    return [knowledgeBaseAddDocument, knowledgeBaseLearn];
+  }
   return [knowledgeBaseList, knowledgeBaseQuery, knowledgeBaseAddDocument, knowledgeBaseLearn];
 }

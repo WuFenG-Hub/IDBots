@@ -1,6 +1,14 @@
 # DSH Prompt Surface — Lazy MetaWeb Layer Injection & Tool-Mount Tightening
 
-**Status:** design draft, awaiting product decision (branch `perf/dsh-agent-speed`)
+**Status:** decisions approved 2026-09-27 (1A tiered-by-default, 2A
+creator-exception gating, 3A keep MCP opt-in) — decisions 1 and 2 IMPLEMENTED
+on this branch; the MCP usage nudge (3A, settings UX) remains a follow-up.
+Measured Tier-0 effect (A/B harness, content-rich main-project bot):
+first-step input 34,716 → 34,008 tokens (−708; system prompt −3.0 KB when the
+deep sections wait); cumulative from the pre-optimization baseline
+36,769 → 34,008 = −7.5%. The tool-mount gating additionally trims ~5 schemas
+for fresh bots with no knowledge/KB content (not reflected in the measured
+bot, which has content).
 **Context:** [2026-09-27 speed diagnosis](../analysis/2026-09-27-dsh-agent-speed-vs-deepseek-harness.md)
 
 ## Problem
