@@ -4,8 +4,9 @@
  * Persisted through the generic metabot_settings kv store and whitelisted for
  * the renderer in metabotSettingsService. Read helpers centralize the defaults
  * so a bot that never touched the settings gets the product defaults
- * (surf-before-dream OFF — opt-in, interaction budget 50; the renderer copy in
- * SurfSection.tsx is pinned to these values by tests/quotaRendererSync.test.mjs).
+ * (surf-before-dream ON — owner decision 2026-09-28, interaction budget 50;
+ * the renderer copy in SurfSection.tsx is pinned to these values by
+ * tests/quotaRendererSync.test.mjs).
  */
 
 import type { MetabotStore } from '../metabotStore';
@@ -15,7 +16,7 @@ export interface SurfSettingsReader {
   getMetabotSetting(metabotId: number, key: string): string | null;
 }
 
-/** '1'/'0' toggle; unset means OFF (default) — nightly surfing is opt-in per bot. */
+/** '1'/'0' toggle; unset means ON (default since 2026-09-28) — an explicit '0' opts a bot out. */
 export const SURF_BEFORE_DREAM_ENABLED_KEY = 'surf_before_dream_enabled';
 /** Integer string; chain-writing interactions allowed per surf run. */
 export const SURF_INTERACTION_BUDGET_KEY = 'surf_interaction_budget';
@@ -32,13 +33,13 @@ export const normalizeSurfBudgetValue = (value: unknown): string | null => {
 };
 
 /**
- * Default OFF (opt-in): only an explicit '1' enables pre-dream surfing. Every
- * nightly surf spends LLM tokens and gas, so a bot that never touched the
- * toggle stays off (owner decision, 2026-09-14); an explicit '1'/'0' always
- * wins — users who turned it on keep it on.
+ * Default ON (owner decision, 2026-09-28 — flips the 2026-09-14 opt-in
+ * default): pre-dream surfing ships enabled for every bot, and only an
+ * explicit '0' opts out — users who turned it off keep it off; an explicit
+ * '1' is a no-op against the default.
  */
 export const isSurfBeforeDreamEnabled = (reader: SurfSettingsReader, metabotId: number): boolean =>
-  reader.getMetabotSetting(metabotId, SURF_BEFORE_DREAM_ENABLED_KEY) === '1';
+  reader.getMetabotSetting(metabotId, SURF_BEFORE_DREAM_ENABLED_KEY) !== '0';
 
 export const getSurfInteractionBudget = (reader: SurfSettingsReader, metabotId: number): number => {
   const raw = reader.getMetabotSetting(metabotId, SURF_INTERACTION_BUDGET_KEY);

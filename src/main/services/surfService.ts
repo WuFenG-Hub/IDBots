@@ -190,10 +190,10 @@ export class SurfService {
   }
 
   /**
-   * Pre-dream gate: the bot's surf-before-dream toggle is explicitly enabled
-   * (default OFF — opt-in, since every surf spends LLM tokens and gas) and it
-   * has not finished a surf within the recency window (a manual evening surf
-   * makes the nightly one redundant).
+   * Pre-dream gate: the bot's surf-before-dream setting is enabled (default
+   * ON since 2026-09-28; an explicit '0' opts the bot out) and it has not
+   * finished a surf within the recency window (a manual evening surf makes
+   * the nightly one redundant).
    */
   shouldPreDreamSurf(metabotId: number): boolean {
     if (!isSurfBeforeDreamEnabled(this.metabotStore, metabotId)) return false;
