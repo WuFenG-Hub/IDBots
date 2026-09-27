@@ -87,22 +87,30 @@ const buildTask = (over = {}) => {
 const claimOn = (rootPinId, node, author, over = {}) =>
   ev('claim', { taskid: rootPinId, node }, { author, ...over });
 
-const submitOn = (rootPinId, node, claimPinId, author, over = {}) =>
-  ev(
+const submitOn = (rootPinId, node, claimPinId, author, over = {}) => {
+  const childIds = Array.isArray(over.childIds) ? over.childIds : [];
+  const resultBody = {
+    type: 'table',
+    hash: '0'.repeat(64),
+    rows: [],
+    ...(childIds.length > 0 ? { childids: childIds } : {}),
+  };
+  return ev(
     'submission',
     {
       taskid: rootPinId,
       node,
       claimid: claimPinId,
-      result: { type: 'table', hash: '0'.repeat(64), rows: [] },
+      result: resultBody,
       hash: '1'.repeat(64),
       contentType: 'application/json;utf-8',
       attachment: null,
-      childids: [],
+      childids: childIds,
       ...(over.supersedeid ? { supersedeid: over.supersedeid } : {}),
     },
-    { author, ...over }
+    { author, ...over },
   );
+};
 
 const voteOn = (targetPinId, verdict, author, over = {}) =>
   ev(
@@ -416,7 +424,7 @@ test('challenge: holdout blocks settlement; withdraw and expiry lift it', () => 
   const claim = claimOn(rootPinId, 't1', S, { height: 190_300 });
   const sub = submitOn(rootPinId, 't1', claim.pinId, S, { height: 190_310, pinId: 'challengedsub0i0' });
   const claimR = claimOn(rootPinId, 'r1', S, { height: 190_315 });
-  const subR = submitOn(rootPinId, 'r1', claimR.pinId, S, { height: 190_316 });
+  const subR = submitOn(rootPinId, 'r1', claimR.pinId, S, { height: 190_316, childIds: ['challengedsub0i0'] });
   const base = [
     tree,
     task,
@@ -461,4 +469,107 @@ test('eventSetHash: order-independent input, deterministic output', () => {
   assert.equal(forward.freshness.eventSetHash, backward.freshness.eventSetHash);
   assert.equal(forward.freshness.boundaryBlock, 190_151);
   assert.match(forward.freshness.eventSetHash, /^[0-9a-f]{64}$/);
+});
+
+// ── v1.2.1: aggregation precondition (registration paths.aggregationPrecondition) ──
+
+const buildAggregationTask = (over = {}) => {
+  const nodes = [
+    { id: 'r1', parent: null, title: 'root', kind: 'aggregate', specid: null, params: {}, deps: [], weight: 3000 },
+    { id: 't1', parent: 'r1', title: 'a', kind: 'proof', specid: null, params: {}, deps: [], weight: 3500 },
+    { id: 't2', parent: 'r1', title: 'b', kind: 'proof', specid: null, params: {}, deps: [], weight: 3500 },
+  ];
+  return buildTask({ nodes, quorum: 1, ...over });
+};
+
+const aggEvents = ({ base, t2Verified, childIds }) => {
+  const { tree, task, rootPinId } = buildAggregationTask();
+  const c1 = claimOn(rootPinId, 't1', S, { height: base + 10 });
+  const s1 = submitOn(rootPinId, 't1', c1.pinId, S, { height: base + 11, pinId: 'aggt1sub00000000000000000000000000i0' });
+  const v1 = voteOn('aggt1sub00000000000000000000000000i0', 'pass', R1, { height: base + 12 });
+  const events = [tree, task, c1, s1, v1];
+  if (t2Verified) {
+    const c2 = claimOn(rootPinId, 't2', S, { height: base + 13 });
+    const s2 = submitOn(rootPinId, 't2', c2.pinId, S, { height: base + 14, pinId: 'aggt2sub00000000000000000000000000i0' });
+    const v2 = voteOn('aggt2sub00000000000000000000000000i0', 'pass', R2, { height: base + 15 });
+    events.push(c2, s2, v2);
+  } else {
+    events.push(claimOn(rootPinId, 't2', R2, { height: base + 13 }));
+  }
+  const cr = claimOn(rootPinId, 'r1', S, { height: base + 20 });
+  const sr = submitOn(rootPinId, 'r1', cr.pinId, S, { height: base + 21, childIds });
+  const vr = voteOn(sr.pinId, 'pass', R1, { height: base + 22 });
+  events.push(cr, sr, vr);
+  return { events, rootPinId };
+};
+
+test('v1.2.1 aggregation precondition: unverified child blocks the parent (H_ACT2 era)', () => {
+  const { events, rootPinId } = aggEvents({ base: 191_600, t2Verified: false, childIds: ['aggt1sub00000000000000000000000000i0'] });
+  const projection = replayMetaTask(events, { rootPinId });
+  assert.equal(projection.nodeStates.t1.status, 'verified');
+  assert.equal(projection.nodeStates.t2.status, 'claimed');
+  // Parent passed its own quorum but the precondition demotes it: not verified.
+  assert.equal(projection.nodeStates.r1.status, 'claimed');
+  assert.equal(projection.taskComplete, false);
+  assert.equal(projection.settlement, null);
+});
+
+test('v1.2.1 aggregation precondition: pre-H_ACT2 parent grandfathered (pilot #01 pattern)', () => {
+  const { events, rootPinId } = aggEvents({ base: 189_600, t2Verified: false, childIds: ['aggt1sub00000000000000000000000000i0'] });
+  const projection = replayMetaTask(events, { rootPinId });
+  // Grandfathered: the parent keeps its recorded vote-level verified state.
+  assert.equal(projection.nodeStates.r1.status, 'verified');
+  assert.equal(projection.taskComplete, true); // root verified, even though t2 is not
+  assert.equal(projection.progress.verified, 2); // r1 + t1 only
+});
+
+test('v1.2.1 aggregation precondition: all children verified + childids match -> parent verified + settlement', () => {
+  const { events, rootPinId } = aggEvents({
+    base: 191_600,
+    t2Verified: true,
+    childIds: ['aggt1sub00000000000000000000000000i0', 'aggt2sub00000000000000000000000000i0'],
+  });
+  const projection = replayMetaTask(events, { rootPinId });
+  assert.equal(projection.nodeStates.r1.status, 'verified');
+  assert.equal(projection.taskComplete, true);
+  assert.ok(projection.settlement);
+  const total = projection.settlement.shares.reduce((sum, s) => sum + s.shareBP, 0);
+  assert.equal(total, 10000);
+});
+
+test('v1.2.1 aggregation precondition: childids mismatch blocks the parent', () => {
+  const { events, rootPinId } = aggEvents({
+    base: 191_600,
+    t2Verified: true,
+    childIds: ['aggt1sub00000000000000000000000000i0', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefi0'],
+  });
+  const projection = replayMetaTask(events, { rootPinId });
+  assert.equal(projection.nodeStates.t1.status, 'verified');
+  assert.equal(projection.nodeStates.t2.status, 'verified');
+  assert.equal(projection.nodeStates.r1.status, 'claimed'); // listed set != children's verified pins
+  assert.equal(projection.taskComplete, false);
+});
+
+test('v1.2.1 amend: conflict on shared bases, stale on foreign bases', () => {
+  const { tree, task, rootPinId, treePinId } = buildTask();
+  const first = ev(
+    'amend',
+    { taskid: rootPinId, bases: treePinId, ops: [{ op: 'retitle', node: 't1', title: 'renamed once' }] },
+    { author: P, height: 191_610 }
+  );
+  const conflicting = ev(
+    'amend',
+    { taskid: rootPinId, bases: treePinId, ops: [{ op: 'retitle', node: 't1', title: 'renamed twice' }] },
+    { author: P, height: 191_620 }
+  );
+  const stale = ev(
+    'amend',
+    { taskid: rootPinId, bases: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaai0', ops: [{ op: 'retitle', node: 't1', title: 'x' }] },
+    { author: P, height: 191_630 }
+  );
+  const projection = replayMetaTask([tree, task, first, conflicting, stale], { rootPinId });
+  assert.equal(projection.nodes.find((node) => node.id === 't1').title, 'renamed once');
+  const reasons = Object.fromEntries(projection.ignoredEvents.map((e) => [e.pinId, e.reason]));
+  assert.equal(reasons[conflicting.pinId], 'amend_conflict');
+  assert.equal(reasons[stale.pinId], 'amend_stale');
 });

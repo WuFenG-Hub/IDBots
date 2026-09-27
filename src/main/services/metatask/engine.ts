@@ -348,9 +348,11 @@ export function replayMetaTask(
     .filter((p) => asStr(p.body.taskid) === rootPin.pinId)
     .sort(compareByOrderKey);
   const submissionAuthorByPin = new Map<string, string>();
+  const submissionBodyByPin = new Map<string, Record<string, unknown>>();
   const knownTargets = new Set<string>();
   for (const sub of submissions) {
     submissionAuthorByPin.set(sub.pinId, sub.author);
+    submissionBodyByPin.set(sub.pinId, sub.body);
     knownTargets.add(sub.pinId);
   }
   // Verify and challenge pins carry no taskid; they scope by target (a task submission).
@@ -557,6 +559,27 @@ export function replayMetaTask(
     activeCycleByNode.set(cycle.node, cycle);
   }
 
+  // -- expiry pass (guard semantics; only when a clock is provided) ---------
+  const expiryApplied = now !== null;
+  if (now !== null) {
+    for (const [node, holder] of holders) {
+      const cycle = cycleByNodeClaim.get(`${node} ${holder.pinId}`);
+      const effective = cycle?.effective ?? null;
+      if (!effective) {
+        if (ttlHours > 0 && now - holder.sinceMs > ttlHours * 3_600_000) {
+          holders.delete(node);
+          passVotersByNode.delete(node);
+        }
+      } else if (windowHours > 0) {
+        const good = passVotersByNode.get(node)?.size ?? 0;
+        if (good < quorum && now - effective.atMs > windowHours * 3_600_000) {
+          holders.delete(node);
+          passVotersByNode.delete(node);
+        }
+      }
+    }
+  }
+
   // -- node bookkeeping -------------------------------------------------------
   const initialTree = treePin ? (treePin.body as unknown as TreeBody) : null;
   const initialNodes = new Map<string, TreeNodeBody>();
@@ -569,6 +592,8 @@ export function replayMetaTask(
   const nodeIds = new Set<string>(initialNodes.keys());
   for (const cycle of cycleByNodeClaim.values()) nodeIds.add(cycle.node);
   for (const node of holders.keys()) nodeIds.add(node);
+  // Vote-level verified set (walk outcome) feeds the amend fold; the final
+  // aggregation-precondition pass below may still demote parents afterwards.
   const verifiedNodeIds = new Set<string>();
   for (const [nodeId, cycle] of activeCycleByNode) {
     if (cycle.effective && verifiedSubmissionPins.has(cycle.effective.pinId)) {
@@ -592,6 +617,74 @@ export function replayMetaTask(
   const effectiveTree = amendResult.nodes;
   const amendHead = amendResult.head;
   for (const id of effectiveTree.keys()) nodeIds.add(id);
+
+  // -- aggregation precondition (v1.2.1 paths.aggregationPrecondition) -------
+  // Parent verified = all children verified AND own submission passed votes;
+  // an aggregate's childids must correspond exactly to the children's
+  // effective VERIFIED submissions (pinId identity = "hash 与对应子件一致").
+  // Enforced from H_ACT2, anchored on the parent's effective-submission
+  // height; pre-H_ACT2 parents are grandfathered at their recorded vote level
+  // (pilot #01's root keeps its historical verified state). Two documented
+  // implementation readings flagged for v1.2.2: the amend fold gates parents
+  // on the vote-level set (conservative), and childids equality is set-based
+  // (order-insensitive).
+  const childrenOf = new Map<string, string[]>();
+  for (const node of effectiveTree.values()) {
+    if (node.parent !== null) {
+      const list = childrenOf.get(node.parent) ?? [];
+      list.push(node.id);
+      childrenOf.set(node.parent, list);
+    }
+  }
+  const heightOfEffective = (node: string): number => {
+    const cycle = activeCycleByNode.get(node);
+    if (!cycle?.effective) return -1;
+    return cycle.submissions.find((s) => s.pinId === cycle.effective?.pinId)?.height ?? -1;
+  };
+  const finalVerifiedCache = new Map<string, boolean>();
+  const finalVerified = (node: string): boolean => {
+    const cached = finalVerifiedCache.get(node);
+    if (cached !== undefined) return cached;
+    finalVerifiedCache.set(node, false); // cycle guard; the tree is already acyclic
+    let result = false;
+    const cycle = activeCycleByNode.get(node);
+    if (cycle?.effective && cycle.outcome === 'verified') {
+      result = true;
+      const children = childrenOf.get(node) ?? [];
+      if (children.length > 0 && heightOfEffective(node) >= hAct2) {
+        const childPins = new Set<string>();
+        const allChildrenVerified = children.every((child) => {
+          if (!finalVerified(child)) return false;
+          const childCycle = activeCycleByNode.get(child);
+          if (childCycle?.effective) childPins.add(childCycle.effective.pinId);
+          return true;
+        });
+        const body = submissionBodyByPin.get(cycle.effective.pinId);
+        const resultObject = body?.result as Record<string, unknown> | undefined;
+        const canonical = Array.isArray(resultObject?.childids)
+          ? (resultObject.childids as unknown[])
+          : Array.isArray(body?.childids)
+            ? (body.childids as unknown[])
+            : [];
+        const listed = new Set(canonical.filter((id): id is string => typeof id === 'string'));
+        result =
+          allChildrenVerified &&
+          listed.size === childPins.size &&
+          Array.from(childPins).every((pin) => listed.has(pin));
+      }
+    }
+    finalVerifiedCache.set(node, result);
+    return result;
+  };
+  const finalVerifiedNodeIds = new Set<string>();
+  for (const node of nodeIds) {
+    if (finalVerified(node)) finalVerifiedNodeIds.add(node);
+  }
+  const finalVerifiedPins = new Set<string>();
+  for (const node of finalVerifiedNodeIds) {
+    const pin = activeCycleByNode.get(node)?.effective?.pinId;
+    if (pin) finalVerifiedPins.add(pin);
+  }
 
   // -- challenges (H_ACT2): open = unwithdrawn, unexpired, not overturned ----
   const openChallenges = new Map<string, { pinId: string; node: string; author: string; target: string }>();
@@ -639,36 +732,16 @@ export function replayMetaTask(
       openChallenges.set(key, { pinId: ch.pinId, node: cycle.node, author: ch.author, target });
     }
   }
-  // A challenge stands only while its target still anchors a verified node.
+  // A challenge stands only while its target still anchors a FINAL-verified
+  // node (aggregation precondition included).
   const disputedNodeIds = new Set<string>();
   for (const [key, open] of openChallenges) {
     const cycle = activeCycleByNode.get(open.node);
-    const stillVerified = Boolean(cycle?.effective && verifiedSubmissionPins.has(cycle.effective!.pinId));
+    const stillVerified = Boolean(cycle?.effective && finalVerifiedPins.has(cycle.effective!.pinId));
     if (cycle?.effective?.pinId === open.target && stillVerified) {
       disputedNodeIds.add(open.node);
     } else {
       openChallenges.delete(key); // overturned via the fail path: resolves closed, never revives
-    }
-  }
-
-  // -- expiry pass (guard semantics; only when a clock is provided) ---------
-  const expiryApplied = now !== null;
-  if (now !== null) {
-    for (const [node, holder] of holders) {
-      const cycle = cycleByNodeClaim.get(`${node} ${holder.pinId}`);
-      const effective = cycle?.effective ?? null;
-      if (!effective) {
-        if (ttlHours > 0 && now - holder.sinceMs > ttlHours * 3_600_000) {
-          holders.delete(node);
-          passVotersByNode.delete(node);
-        }
-      } else if (windowHours > 0) {
-        const good = passVotersByNode.get(node)?.size ?? 0;
-        if (good < quorum && now - effective.atMs > windowHours * 3_600_000) {
-          holders.delete(node);
-          passVotersByNode.delete(node);
-        }
-      }
     }
   }
 
@@ -702,7 +775,7 @@ export function replayMetaTask(
     const cycle = activeCycleByNode.get(node);
     const holder = holders.get(node) ?? null;
     const effective = cycle?.effective ?? null;
-    const isVerified = Boolean(effective && verifiedSubmissionPins.has(effective.pinId));
+    const isVerified = finalVerifiedNodeIds.has(node);
     const voteList: MetaTaskVoteSummary[] = [];
     let passVotes = 0;
     let failVotes = 0;
@@ -775,7 +848,17 @@ export function replayMetaTask(
     }
   }
 
-  const taskComplete = progress.total > 0 && progress.verified === progress.total;
+  // Task completion = the ROOT node verified (v1.2.1 aggregation text). Via
+  // the precondition this equals all-verified for H_ACT2-era trees; grandfathered
+  // trees keep their recorded divergence (pilot #01: root verified, all_verified=false).
+  const rootTreeNodeId =
+    Array.from(effectiveTree.values()).find((node) => node.parent === null)?.id ??
+    asStr(initialTree?.root) ??
+    null;
+  const taskComplete =
+    rootTreeNodeId !== null && rootTreeNodeId !== ''
+      ? finalVerifiedNodeIds.has(rootTreeNodeId)
+      : progress.total > 0 && progress.verified === progress.total;
 
   // -- eventSetHash (recipe per rev-2, settlement section) -------------------
   const pathOrder = [
@@ -789,11 +872,11 @@ export function replayMetaTask(
     'amend',
     'challenge',
   ];
+  // Membership table (v1.2.1 settlement.eventSetHash.membership): spec pins
+  // enter the set ONLY via task.specid — node-level specid overrides are not
+  // task members for hashing purposes.
   const specRefs = new Set<string>();
   if (taskBody.specid) specRefs.add(taskBody.specid);
-  for (const node of effectiveTree.values()) {
-    if (node.specid) specRefs.add(node.specid);
-  }
   const hashEntries: { path: string; pinId: string; height: number; txIndex: number }[] = [];
   let boundaryBlock = -1;
   for (const path of pathOrder) {
@@ -867,7 +950,7 @@ export function replayMetaTask(
     };
     for (const node of nodeIds) {
       const cycle = activeCycleByNode.get(node);
-      if (!cycle?.effective || !verifiedSubmissionPins.has(cycle.effective.pinId)) continue;
+      if (!cycle?.effective || !finalVerifiedPins.has(cycle.effective.pinId)) continue;
       const w = weights.get(node) ?? 0;
       if (w <= 0) continue;
       const submitter = ensureShare(cycle.effective.author);
