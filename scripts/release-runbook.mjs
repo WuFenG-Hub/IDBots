@@ -292,8 +292,10 @@ async function downloadArtifacts() {
     ]);
     const wanted = new Set([
       `IDBots-${version}-arm64.dmg`,
+      `IDBots-${version}-x64.dmg`,
       `IDBots.Setup.${version}.exe`,
       "latest-mac.yml",
+      "latest-mac-x64.yml",
       "latest.yml",
     ]);
     for (const asset of assets) {
@@ -306,12 +308,13 @@ async function downloadArtifacts() {
       run("gh", ["release", "download", tag, "--repo", "metaid-developers/IDBots",
         "--pattern", asset.name, "--dir", assetDir, "--clobber"], { stdio: "inherit" });
     }
-    const dmgName = `IDBots-${version}-arm64.dmg`;
+    for (const dmgName of [`IDBots-${version}-arm64.dmg`, `IDBots-${version}-x64.dmg`]) {
+      const dmgSize = statSync(join(assetDir, dmgName)).size;
+      const dmgSha512 = computeSha512Base64(join(assetDir, dmgName));
+      console.log(`DMG ${dmgName} size=${dmgSize} sha512=${dmgSha512}`);
+    }
     const exeName = `IDBots.Setup.${version}.exe`;
-    const dmgSize = statSync(join(assetDir, dmgName)).size;
     const exeSize = statSync(join(assetDir, exeName)).size;
-    const dmgSha512 = computeSha512Base64(join(assetDir, dmgName));
-    console.log(`DMG size=${dmgSize} sha512=${dmgSha512}`);
     console.log(`EXE size=${exeSize}`);
     phaseFinished(state, "download", { ok: true, assetDir });
   } catch (error) {
@@ -361,8 +364,10 @@ version = os.environ["RUNBOOK_VERSION"]
 dirpath = os.environ["RUNBOOK_ASSET_DIR"]
 objects = [
   ("IDBots-" + version + "-arm64.dmg", "IDBots-" + version + "-arm64.dmg", "application/octet-stream", 'attachment; filename="IDBots-' + version + '-arm64.dmg"', "public, max-age=31536000, immutable"),
+  ("IDBots-" + version + "-x64.dmg", "IDBots-" + version + "-x64.dmg", "application/octet-stream", 'attachment; filename="IDBots-' + version + '-x64.dmg"', "public, max-age=31536000, immutable"),
   ("IDBots-Setup-" + version + ".exe", "IDBots.Setup." + version + ".exe", "application/octet-stream", 'attachment; filename="IDBots-Setup-' + version + '.exe"', "public, max-age=31536000, immutable"),
   ("latest-mac.yml", "latest-mac.yml", "application/x-yaml", "inline", "no-cache, max-age=0, must-revalidate"),
+  ("latest-mac-x64.yml", "latest-mac-x64.yml", "application/x-yaml", "inline", "no-cache, max-age=0, must-revalidate"),
   ("latest.yml", "latest.yml", "application/x-yaml", "inline", "no-cache, max-age=0, must-revalidate"),
 ]
 for key, local_name, content_type, disposition, cache in objects:
@@ -381,6 +386,7 @@ for key, local_name, content_type, disposition, cache in objects:
 
 urls = [
   "https://download.idbots.ai/IDBots-" + version + "-arm64.dmg",
+  "https://download.idbots.ai/IDBots-" + version + "-x64.dmg",
   "https://download.idbots.ai/IDBots-Setup-" + version + ".exe",
 ]
 
@@ -550,7 +556,8 @@ async function main() {
       console.log(JSON.stringify({
         liveVersion: value.version,
         expected: state.version,
-        macUrl: value.macArm.url,
+        macArmUrl: value.macArm?.url,
+        macIntelUrl: value.macIntel?.url,
         windowsUrl: value.windowsX64.url,
       }, null, 2));
       const ok = value.version === state.version;
