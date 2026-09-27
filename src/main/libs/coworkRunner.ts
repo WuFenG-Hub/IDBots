@@ -8740,10 +8740,19 @@ export class CoworkRunner extends EventEmitter {
               toModel: fallbackRoute.model,
             }
           );
-          // First attempt on the fallback route is unconditional — the gate
-          // above only lets us in when the primary route is dead.
-          lastAttemptRoute = fallbackRoute;
-          outcome = await runGuardedTurn(TRANSIENT_TURN_RESUME_PROMPT, undefined, fallbackRoute);
+          // Quota-only unconditional first attempt: a quota entry skips the
+          // same-route ladder above by construction, so without this the
+          // fallback route would never be tried at all. The TRANSIENT path
+          // must NOT take this — its first fallback attempt comes from the
+          // loop below, so the fallback resume budget stays exactly
+          // `DSH_FALLBACK_TURN_MAX_RESUMES` as on origin/main (independent
+          // verification 2026-09-28 caught a first draft where the
+          // unconditional attempt also applied to the transient path,
+          // silently raising the fallback cap 2→3).
+          if (gateQuota) {
+            lastAttemptRoute = fallbackRoute;
+            outcome = await runGuardedTurn(TRANSIENT_TURN_RESUME_PROMPT, undefined, fallbackRoute);
+          }
           for (let fallbackAttempt = 1; fallbackAttempt <= DSH_FALLBACK_TURN_MAX_RESUMES; fallbackAttempt += 1) {
             if (outcome.kind !== 'error' || activeSession.abortController.signal.aborted || !isTransientDshTurnError(outcome)) break;
             coworkLog(

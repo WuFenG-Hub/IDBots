@@ -422,3 +422,21 @@ test('a quota death on the fallback route settles with the notice naming the fal
   assert.match(result.errors[0].error, /mock-b1/, 'the quota notice names the fallback model (lastAttemptRoute)')
   assert.match(result.errors[0].error, /gw-b/)
 })
+
+// Regression pin for the 2026-09-28 independent-verification finding: the
+// quota-only unconditional first attempt must NOT leak into the transient
+// path. When BOTH routes keep failing transiently, the fallback budget stays
+// exactly what origin/main gives (DSH_FALLBACK_TURN_MAX_RESUMES = 2): total
+// calls = 1 initial + 3 primary resumes + 2 fallback resumes = 6. A draft of
+// this fix raised it to 7 by adding an unconditional attempt for transient
+// entries too.
+test('persistent transient failure on both routes keeps the origin fallback budget (6 calls, not 7)', async () => {
+  const result = await driveTurn({
+    sessionId: 'gt02-transient-budget-unchanged',
+    metabot: BOT_WITH_FALLBACK,
+    script: () => transientError(),
+  })
+
+  assert.equal(result.runTurnCalls.length, 6, '1 initial + 3 primary resumes + 2 fallback resumes — quota fix must not change this')
+  assert.equal(result.sessionRow?.status, 'error')
+})
