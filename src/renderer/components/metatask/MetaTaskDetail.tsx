@@ -1,13 +1,11 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useSelector } from 'react-redux';
-import { ArrowLeftIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, BoltIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
 import { RootState } from '../../store';
 import { metaTaskService } from '../../services/metatask';
 import { i18nService } from '../../services/i18n';
-import type { MetaTaskNodeProjection } from '../../types/metatask';
-
-const shortId = (metaId: string): string =>
-  metaId.length > 14 ? `${metaId.slice(0, 8)}…${metaId.slice(-4)}` : metaId;
+import MetaIdBadge from './MetaIdBadge';
+import type { MetaTaskIdentity, MetaTaskNodeProjection } from '../../types/metatask';
 
 const statusTone: Record<string, string> = {
   open: 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300',
@@ -20,13 +18,32 @@ const statusLabel = (status: string): string =>
     ? status
     : i18nService.t(`metatask.status.${status}`);
 
-/** Task detail: node states (chain replay output), roster, settlement manifest.
- * Deep-link actions (publish / join) arrive with the P2 participation loop;
- * this view is read-only by design ("referenced, not mixed in"). */
+const participateDraft = (title: string, rootPinId: string, nodeHint?: string | null): void => {
+  const text = i18nService
+    .t('metatask.participateDraft')
+    .replace('{title}', title)
+    .replace('{root}', rootPinId)
+    .replace(
+      '{node_hint}',
+      nodeHint ? `（建议从开放节点 ${nodeHint} 开始评估）` : '',
+    );
+  window.dispatchEvent(new CustomEvent('cowork:newChatWithDraft', { detail: { text } }));
+};
+
+const prettyJson = (value: unknown): string => JSON.stringify(value, null, 2);
+
+/**
+ * Task detail: node table where each row EXPANDS to show the branch task's
+ * actual content — tree params (what the node asks for), the effective
+ * submission (result payload, hashes, attachment) of whichever bot holds it,
+ * and the review votes. Settlement shows when the task closes; until then an
+ * explicit empty state explains what is still missing.
+ */
 const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
   const detail = useSelector((state: RootState) => state.metatask.details[rootPinId] ?? null);
   const rosterMetaIds = useSelector((state: RootState) => state.metatask.board?.localRosterMetaIds) ?? [];
   const rosterIds = new Set(rosterMetaIds);
+  const [expandedNode, setExpandedNode] = useState<string | null>(null);
 
   useEffect(() => {
     void metaTaskService.loadTask(rootPinId);
@@ -52,10 +69,15 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
     );
   }
 
+  const identities = detail.identities ?? {};
   const roster = [...detail.participants].sort(
     (a, b) => b.verifiedContrib - a.verifiedContrib || a.metaId.localeCompare(b.metaId)
   );
-  const nodes = Object.values(detail.nodeStates).sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+  const nodes = Object.values(detail.nodeStates).sort((a, b) =>
+    a.id.localeCompare(b.id, undefined, { numeric: true })
+  );
+  const openNodes = nodes.filter((node) => node.status === 'open');
+  const rootNode = nodes.find((node) => node.parent === null);
 
   return (
     <div className="flex flex-col h-full">
@@ -68,79 +90,110 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
           <ArrowLeftIcon className="h-4 w-4" />
           {i18nService.t('back')}
         </button>
-        <h2 className="mt-1 text-base font-semibold dark:text-claude-darkText text-claude-text">
-          {detail.title}
-        </h2>
-        <div className="mt-1 flex items-center gap-2 flex-wrap text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-          <span>
-            {i18nService.t('metatask.publisher')} {shortId(detail.publisher)}
-          </span>
-          <span>·</span>
-          <span>
-            {i18nService.t('metatask.progressVerified')
-              .replace('{verified}', String(detail.progress.verified))
-              .replace('{total}', String(detail.progress.total))}
-          </span>
-          <span>·</span>
-          <span>
-            {i18nService.t('metatask.freshnessBlock').replace('{block}', String(detail.freshness.boundaryBlock))}
-          </span>
-          <span>·</span>
-          <span>
-            {i18nService.t('metatask.events').replace('{count}', String(detail.freshness.eventCount))}
-          </span>
+        <div className="mt-1 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold dark:text-claude-darkText text-claude-text truncate">
+              {detail.title}
+            </h2>
+            <div className="mt-1 flex items-center gap-2 flex-wrap text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              <span className="inline-flex items-center gap-1">
+                {i18nService.t('metatask.publisher')}
+                <MetaIdBadge metaId={detail.publisher} identities={identities} compact />
+              </span>
+              <span>·</span>
+              <span>
+                {i18nService.t('metatask.progressVerified')
+                  .replace('{verified}', String(detail.progress.verified))
+                  .replace('{total}', String(detail.progress.total))}
+              </span>
+              <span>·</span>
+              <span title={i18nService.t('metatask.activityAnchorTip')}>
+                {i18nService.t('metatask.activityAnchorShort').replace(
+                  '{block}',
+                  String(detail.freshness.boundaryBlock),
+                )}
+              </span>
+              <span>·</span>
+              <span>{i18nService.t('metatask.events').replace('{count}', String(detail.freshness.eventCount))}</span>
+            </div>
+          </div>
+          {!detail.taskComplete && (
+            <button
+              type="button"
+              onClick={() => participateDraft(detail.title, detail.rootPinId, openNodes[0]?.id ?? null)}
+              className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium rounded-lg btn-idchat-primary-filled"
+            >
+              <BoltIcon className="h-4 w-4" />
+              {i18nService.t('metatask.participateNow')}
+            </button>
+          )}
         </div>
+        <p className="mt-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {i18nService.t('metatask.detail.explainer')}
+        </p>
         {detail.brief && (
-          <p className="mt-2 text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">{detail.brief}</p>
+          <p className="mt-1.5 text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">{detail.brief}</p>
         )}
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-4">
-        {/* Nodes */}
+        {/* Nodes: each row expands to the branch task's actual content */}
         <section>
           <h3 className="text-sm font-semibold dark:text-claude-darkText text-claude-text mb-2">
             {i18nService.t('metatask.nodes')}
+            <span className="ml-2 font-normal text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('metatask.nodesHint')}
+            </span>
           </h3>
-          <div className="rounded-xl border dark:border-claude-darkBorder border-claude-border overflow-hidden">
-            <table className="w-full text-xs">
-              <thead className="bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                <tr>
-                  <th className="text-left px-3 py-2 font-medium">ID</th>
-                  <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.nodeTitle')}</th>
-                  <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.statusLabel')}</th>
-                  <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.holder')}</th>
-                  <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.votes')}</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y dark:divide-claude-darkBorder divide-claude-border">
-                {nodes.map((node: MetaTaskNodeProjection) => (
-                  <tr key={node.id} className="dark:text-claude-darkText text-claude-text">
-                    <td className="px-3 py-2 font-mono">{node.id}</td>
-                    <td className="px-3 py-2 max-w-[240px] truncate" title={node.title}>
-                      {node.title}
+          <div className="rounded-xl border dark:border-claude-darkBorder border-claude-border overflow-hidden divide-y dark:divide-claude-darkBorder divide-claude-border">
+            {nodes.map((node) => {
+              const expanded = expandedNode === node.id;
+              return (
+                <div key={node.id}>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedNode(expanded ? null : node.id)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover/60 transition-colors"
+                  >
+                    <span className="flex items-center gap-1.5 min-w-0 flex-1">
+                      <span className="font-mono text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary shrink-0">
+                        {node.id}
+                      </span>
+                      <span
+                        className="truncate text-xs dark:text-claude-darkText text-claude-text"
+                        title={node.title}
+                      >
+                        {node.title}
+                      </span>
                       {node.weight !== null && (
-                        <span className="ml-1 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                          ({(node.weight / 100).toFixed(2)}%)
+                        <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                          {(node.weight / 100).toFixed(2)}%
                         </span>
                       )}
-                    </td>
-                    <td className="px-3 py-2">
-                      <span className={`px-1.5 py-0.5 rounded text-[11px] ${statusTone[node.status] ?? ''}`}>
-                        {statusLabel(node.status)}
-                        {node.disputed ? ` · ${i18nService.t('metatask.disputed')}` : ''}
+                    </span>
+                    <span className={`shrink-0 px-1.5 py-0.5 rounded text-[11px] ${statusTone[node.status] ?? ''}`}>
+                      {statusLabel(node.status)}
+                      {node.disputed ? ` · ${i18nService.t('metatask.disputed')}` : ''}
+                    </span>
+                    {node.holder && (
+                      <span className="shrink-0 hidden sm:inline-flex">
+                        <MetaIdBadge metaId={node.holder.claimant} identities={identities} compact />
                       </span>
-                    </td>
-                    <td className="px-3 py-2 font-mono dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                      {node.holder ? shortId(node.holder.claimant) : '—'}
-                    </td>
-                    <td className="px-3 py-2 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    )}
+                    <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary w-14 text-right">
                       {node.passVotes}/{detail.policy.verifyQuorum}
-                      {node.failVotes > 0 ? ` · ${node.failVotes} fail` : ''}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                      {node.failVotes > 0 ? ` ·${node.failVotes}✗` : ''}
+                    </span>
+                    {expanded ? (
+                      <ChevronUpIcon className="h-3.5 w-3.5 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+                    ) : (
+                      <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+                    )}
+                  </button>
+                  {expanded && <NodeExpanded node={node} identities={identities} />}
+                </div>
+              );
+            })}
           </div>
         </section>
 
@@ -153,7 +206,7 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
             <table className="w-full text-xs">
               <thead className="bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 <tr>
-                  <th className="text-left px-3 py-2 font-medium">MetaID</th>
+                  <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.participant')}</th>
                   <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.claims')}</th>
                   <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.verifiedContrib')}</th>
                   <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.reviewVotes')}</th>
@@ -161,19 +214,18 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
               </thead>
               <tbody className="divide-y dark:divide-claude-darkBorder divide-claude-border">
                 {roster.map((participant) => (
-                  <tr
-                    key={participant.metaId}
-                    className={rosterIds.has(participant.metaId) ? 'bg-brand/5' : 'dark:text-claude-darkText text-claude-text'}
-                  >
-                    <td className="px-3 py-2 font-mono">
-                      {shortId(participant.metaId)}
-                      {rosterIds.has(participant.metaId) && (
-                        <span className="ml-1 text-[11px] text-brand">{i18nService.t('metatask.mineTag')}</span>
-                      )}
+                  <tr key={participant.metaId}>
+                    <td className="px-3 py-2">
+                      <span className="inline-flex items-center gap-1.5">
+                        <MetaIdBadge metaId={participant.metaId} identities={identities} compact />
+                        {rosterIds.has(participant.metaId) && (
+                          <span className="text-[11px] text-brand">{i18nService.t('metatask.mineTag')}</span>
+                        )}
+                      </span>
                     </td>
-                    <td className="px-3 py-2">{participant.effectiveClaims}</td>
-                    <td className="px-3 py-2">{participant.verifiedContrib}</td>
-                    <td className="px-3 py-2">{participant.reviewVotes}</td>
+                    <td className="px-3 py-2 dark:text-claude-darkText text-claude-text">{participant.effectiveClaims}</td>
+                    <td className="px-3 py-2 dark:text-claude-darkText text-claude-text">{participant.verifiedContrib}</td>
+                    <td className="px-3 py-2 dark:text-claude-darkText text-claude-text">{participant.reviewVotes}</td>
                   </tr>
                 ))}
               </tbody>
@@ -181,50 +233,158 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
           </div>
         </section>
 
-        {/* Settlement manifest */}
-        {detail.settlement && (
-          <section>
-            <h3 className="text-sm font-semibold dark:text-claude-darkText text-claude-text mb-2">
-              {i18nService.t('metatask.settlement')}
-            </h3>
-            <div className="rounded-xl border dark:border-claude-darkBorder border-claude-border overflow-hidden">
-              <table className="w-full text-xs">
-                <thead className="bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                  <tr>
-                    <th className="text-left px-3 py-2 font-medium">MetaID</th>
-                    <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.shareBP')}</th>
-                    <th className="text-left px-3 py-2 font-medium">%</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y dark:divide-claude-darkBorder divide-claude-border">
-                  {detail.settlement.shares.map((share) => (
-                    <tr key={share.metaId} className="dark:text-claude-darkText text-claude-text">
-                      <td className="px-3 py-2 font-mono">{shortId(share.metaId)}</td>
-                      <td className="px-3 py-2">
-                        {share.shareBP} bp
-                        <span className="ml-1 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                          ({share.from.submittedBP}+{share.from.reviewedBP})
-                        </span>
-                      </td>
-                      <td className="px-3 py-2">{(share.shareBP / 100).toFixed(2)}%</td>
+        {/* Settlement: manifest when closed; explicit empty state until then */}
+        <section>
+          <h3 className="text-sm font-semibold dark:text-claude-darkText text-claude-text mb-2">
+            {i18nService.t('metatask.settlement')}
+          </h3>
+          {detail.settlement ? (
+            <>
+              <div className="rounded-xl border dark:border-claude-darkBorder border-claude-border overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead className="bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    <tr>
+                      <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.participant')}</th>
+                      <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.shareBP')}</th>
+                      <th className="text-left px-3 py-2 font-medium">%</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y dark:divide-claude-darkBorder divide-claude-border">
+                    {detail.settlement.shares.map((share) => (
+                      <tr key={share.metaId}>
+                        <td className="px-3 py-2">
+                          <MetaIdBadge metaId={share.metaId} identities={identities} compact />
+                        </td>
+                        <td className="px-3 py-2 dark:text-claude-darkText text-claude-text">
+                          {share.shareBP} bp
+                          <span className="ml-1 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                            ({share.from.submittedBP}+{share.from.reviewedBP})
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 dark:text-claude-darkText text-claude-text">
+                          {(share.shareBP / 100).toFixed(2)}%
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {detail.settlement.unpaidHistory.length > 0 && (
+                <p className="mt-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('metatask.unpaidCount').replace(
+                    '{count}',
+                    String(detail.settlement.unpaidHistory.length),
+                  )}
+                </p>
+              )}
+            </>
+          ) : (
+            <div className="px-3 py-3 text-xs rounded-xl border border-dashed dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService
+                .t('metatask.settlementPending')
+                .replace('{verified}', String(detail.progress.verified))
+                .replace('{total}', String(detail.progress.total))}
+              {rootNode && rootNode.status !== 'verified' && (
+                <span className="block mt-1">{i18nService.t('metatask.settlementRootOpen')}</span>
+              )}
             </div>
-            {detail.settlement.unpaidHistory.length > 0 && (
-              <p className="mt-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {i18nService.t('metatask.unpaidCount').replace(
-                  '{count}',
-                  String(detail.settlement.unpaidHistory.length)
-                )}
-              </p>
-            )}
-          </section>
-        )}
+          )}
+        </section>
       </div>
     </div>
   );
 };
+
+/** The expanded node body: what the branch task asks for + what was submitted. */
+const NodeExpanded: React.FC<{
+  node: MetaTaskNodeProjection;
+  identities: Record<string, MetaTaskIdentity>;
+}> = ({ node, identities }) => (
+  <div className="px-4 py-3 bg-claude-surfaceHover/40 dark:bg-claude-darkSurfaceHover/20 space-y-3 text-xs">
+    {/* What this branch task asks for */}
+    <div>
+      <div className="font-medium dark:text-claude-darkText text-claude-text mb-1">
+        {i18nService.t('metatask.node.taskDef')}
+      </div>
+      <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
+        <span className="font-mono mr-1">{node.kind}</span>
+        {node.specid && (
+          <span className="break-all">
+            spec: <span className="font-mono">{node.specid}</span>
+          </span>
+        )}
+      </div>
+      {node.params && Object.keys(node.params).length > 0 && (
+        <pre className="mt-1 p-2 rounded-lg bg-claude-surface dark:bg-claude-darkSurface overflow-x-auto text-[11px] dark:text-claude-darkText text-claude-text">
+          {prettyJson(node.params)}
+        </pre>
+      )}
+    </div>
+    {/* The submitted work (chain fact — any bot's submission is viewable) */}
+    {node.submission ? (
+      <div>
+        <div className="font-medium dark:text-claude-darkText text-claude-text mb-1 flex items-center flex-wrap gap-1">
+          {i18nService.t('metatask.node.submissionBy')}
+          <span className="ml-1 inline-flex">
+            <MetaIdBadge metaId={node.submission.submitter} identities={identities} compact />
+          </span>
+          <span className="ml-2 font-mono font-normal text-[10px] opacity-70" title={node.submission.pinId}>
+            {node.submission.pinId.slice(0, 18)}…
+          </span>
+        </div>
+        {node.submission.result && (
+          <pre className="mt-1 p-2 rounded-lg bg-claude-surface dark:bg-claude-darkSurface overflow-x-auto text-[11px] dark:text-claude-darkText text-claude-text max-h-56">
+            {prettyJson(node.submission.result)}
+          </pre>
+        )}
+        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {node.submission.hash && (
+            <span className="font-mono text-[10px] break-all" title={node.submission.hash}>
+              hash {node.submission.hash.slice(0, 24)}…
+            </span>
+          )}
+          {node.submission.attachment && (
+            <span className="font-mono text-[10px] break-all" title={node.submission.attachment}>
+              attachment {node.submission.attachment.slice(0, 48)}
+            </span>
+          )}
+        </div>
+      </div>
+    ) : (
+      <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
+        {i18nService.t('metatask.node.noSubmissionYet')}
+      </div>
+    )}
+    {/* Review votes */}
+    {node.votes.length > 0 && (
+      <div>
+        <div className="font-medium dark:text-claude-darkText text-claude-text mb-1">
+          {i18nService.t('metatask.node.votes')}
+        </div>
+        <div className="space-y-0.5">
+          {node.votes.map((vote) => (
+            <div key={vote.pinId} className="flex items-center gap-2 flex-wrap">
+              <MetaIdBadge metaId={vote.voter} identities={identities} compact />
+              <span
+                className={`px-1 py-0.5 rounded text-[10px] ${
+                  vote.verdict === 'pass'
+                    ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400'
+                    : 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'
+                }`}
+              >
+                {vote.verdict}
+              </span>
+              {!vote.counted && (
+                <span className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {vote.ignoreReason ?? 'not counted'}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    )}
+  </div>
+);
 
 export default MetaTaskDetail;

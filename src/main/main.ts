@@ -6841,7 +6841,24 @@ const getMetaTaskProjectionStore = () => {
     const sqliteStore = getStore();
     metaTaskProjectionStore = new MetaTaskProjectionStore(
       sqliteStore.getDatabase(),
-      sqliteStore.getSaveFunction()
+      sqliteStore.getSaveFunction(),
+      {
+        // Display identities: local roster resolves fully today; external
+        // bots stay short-id until MetaSo exposes a by-metaId identity
+        // endpoint (cached in metatask_identities, ready to enrich).
+        resolveIdentities: async (metaIds) => {
+          const byGlobal: Map<string, { name: string; avatar: string | null }> = new Map();
+          for (const bot of getMetabotStore().listMetabots()) {
+            if (bot.globalmetaid) byGlobal.set(bot.globalmetaid, { name: bot.name, avatar: bot.avatar ?? null });
+          }
+          const out: Record<string, { metaId: string; name: string | null; avatar: string | null }> = {};
+          for (const metaId of metaIds) {
+            const local = byGlobal.get(metaId);
+            if (local) out[metaId] = { metaId, name: local.name, avatar: local.avatar };
+          }
+          return out;
+        },
+      }
     );
   }
   return metaTaskProjectionStore;

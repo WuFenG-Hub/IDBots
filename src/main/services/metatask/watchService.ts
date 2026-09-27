@@ -115,12 +115,15 @@ export class MetaTaskWatchService {
         );
         const stalled = nowMs - projection.lastActivityMs > CLOSING_DRIVE_STALL_MS;
         if (openAggregates.length > 0 && stalled) {
-          if (!recent('closing_drive', projection.rootPinId, null, CLOSING_DRIVE_DEDUPE_MS)) {
+          // Dedupe key must match the stored alert exactly (node included) —
+          // the v1 bug compared against null and re-fired every watch tick.
+          const anchorNode = openAggregates[0].id;
+          if (!recent('closing_drive', projection.rootPinId, anchorNode, CLOSING_DRIVE_DEDUPE_MS)) {
             newAlerts.push({
               kind: 'closing_drive',
               rootPinId: projection.rootPinId,
-              node: openAggregates[0].id,
-              detail: `${openAggregates.length} open aggregation node(s)`,
+              node: anchorNode,
+              detail: `${openAggregates.length}`,
               createdAtMs: nowMs,
             });
           }

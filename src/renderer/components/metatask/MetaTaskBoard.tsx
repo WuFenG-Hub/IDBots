@@ -1,29 +1,39 @@
 import React, { useEffect, useMemo } from 'react';
 import { useSelector } from 'react-redux';
-import { ArrowPathIcon } from '@heroicons/react/24/outline';
+import { ArrowPathIcon, BoltIcon } from '@heroicons/react/24/outline';
 import { RootState } from '../../store';
 import { metaTaskService } from '../../services/metatask';
 import { setView } from '../../store/slices/metataskSlice';
 import { store } from '../../store';
 import { i18nService } from '../../services/i18n';
 import MetaTaskDetail from './MetaTaskDetail';
-import type { MetaTaskAlert, MetaTaskBoardTask } from '../../types/metatask';
+import MetaIdBadge from './MetaIdBadge';
+import type { MetaTaskAlert, MetaTaskBoardTask, MetaTaskIdentity } from '../../types/metatask';
 
-const alertText = (alert: MetaTaskAlert): string => {
-  const node = alert.node ?? '—';
-  const detail = alert.detail ?? '';
-  if (alert.kind === 'claim_ttl_soon') {
-    return `${i18nService.t('metatask.alert.claimTtlSoon').replace('{node}', node)} · ${detail}`;
-  }
-  if (alert.kind === 'submission_change') {
-    return i18nService.t('metatask.alert.submissionChange').replace('{node}', node).replace('{detail}', detail);
-  }
-  return i18nService.t('metatask.alert.closingDrive').replace('{detail}', detail);
+/** Prefilled participation draft: the bot reads the task, picks an open node,
+ * claims with the guard and completes it (prose-first; the button never acts). */
+const participateDraft = (title: string, rootPinId: string, nodeHint?: string | null): void => {
+  const text = i18nService
+    .t('metatask.participateDraft')
+    .replace('{title}', title)
+    .replace('{root}', rootPinId)
+    .replace(
+      '{node_hint}',
+      nodeHint ? `（建议从开放节点 ${nodeHint} 开始评估）` : '',
+    );
+  window.dispatchEvent(new CustomEvent('cowork:newChatWithDraft', { detail: { text } }));
 };
 
-/** MetaTask tab (P1 read path). 任务广场 / 我的参与 inner views over the
- * chain-sourced projection; every surface shows the boundary block it was
- * computed at (chain index lag is a measured fact, never hidden). */
+/** Alerts are grouped into ONE actionable card per (kind+task+node) — the raw
+ * feed was noisy (and the stored duplicates from the v1 dedupe bug are folded
+ * away here until the 48h horizon prunes them). */
+interface GroupedAlert {
+  key: string;
+  alert: MetaTaskAlert;
+  count: number;
+  taskTitle: string;
+}
+
 const MetaTaskBoard: React.FC = () => {
   const board = useSelector((state: RootState) => state.metatask.board);
   const view = useSelector((state: RootState) => state.metatask.view);
@@ -43,6 +53,22 @@ const MetaTaskBoard: React.FC = () => {
   const mine = useMemo(() => tasks.filter((task) => task.myRoles.length > 0), [tasks]);
   const shown = view === 'mine' ? mine : tasks;
 
+  const groupedAlerts: GroupedAlert[] = useMemo(() => {
+    const byKey = new Map<string, GroupedAlert>();
+    for (const alert of board?.alerts ?? []) {
+      const taskTitle = tasks.find((task) => task.rootPinId === alert.rootPinId)?.title ?? '';
+      const key = `${alert.kind}|${alert.rootPinId}|${alert.node ?? ''}`;
+      const existing = byKey.get(key);
+      if (existing) {
+        existing.count += 1;
+        if (alert.createdAtMs > existing.alert.createdAtMs) existing.alert = alert;
+      } else {
+        byKey.set(key, { key, alert, count: 1, taskTitle });
+      }
+    }
+    return Array.from(byKey.values()).slice(0, 4);
+  }, [board?.alerts, tasks]);
+
   if (selectedRootPinId) {
     return <MetaTaskDetail rootPinId={selectedRootPinId} />;
   }
@@ -56,7 +82,7 @@ const MetaTaskBoard: React.FC = () => {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header: inner views + refresh + freshness */}
+      {/* Header: inner views + refresh + activity anchor */}
       <div className="flex items-center justify-between border-b dark:border-claude-darkBorder border-claude-border px-4 py-2 shrink-0">
         <div className="flex items-center gap-1">
           <button
@@ -76,8 +102,13 @@ const MetaTaskBoard: React.FC = () => {
         </div>
         <div className="flex items-center gap-3">
           {board && (
-            <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-              {i18nService.t('metatask.freshnessBlock').replace('{block}', String(board.refresh.boundaryBlock ?? '—'))}
+            <span
+              className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary"
+              title={i18nService.t('metatask.activityAnchorTip')}
+            >
+              {i18nService
+                .t('metatask.activityAnchor')
+                .replace('{block}', String(board.refresh.boundaryBlock ?? '—'))}
             </span>
           )}
           <button
@@ -106,27 +137,62 @@ const MetaTaskBoard: React.FC = () => {
               .replace(
                 '{block}',
                 board.refresh.boundaryBlock === null ? '—' : String(board.refresh.boundaryBlock),
-              )
-              .replace(
-                '{remaining}',
-                board.refresh.boundaryBlock === null
-                  ? '—'
-                  : String(board.activation.hAct2 - board.refresh.boundaryBlock),
               )}
           </div>
         )}
-      {board && board.alerts.length > 0 && (
-        <div className="mx-4 mt-3 space-y-1">
-          {board.alerts.slice(0, 6).map((alert, index) => (
-            <button
-              key={`${alert.createdAtMs}-${index}`}
-              type="button"
-              onClick={() => metaTaskService.selectTask(alert.rootPinId)}
-              className="block w-full text-left px-3 py-1.5 text-xs rounded-lg bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors"
-            >
-              {alertText(alert)}
-            </button>
-          ))}
+
+      {/* Actionable alert cards (grouped; each offers the participate handoff) */}
+      {groupedAlerts.length > 0 && (
+        <div className="mx-4 mt-3 space-y-2">
+          {groupedAlerts.map(({ key, alert, count, taskTitle }) => {
+            const isClosing = alert.kind === 'closing_drive';
+            const message = isClosing
+              ? i18nService
+                  .t('metatask.alertCard.closingDrive')
+                  .replace('{title}', taskTitle || alert.rootPinId.slice(0, 12))
+                  .replace('{count}', alert.detail ?? '')
+              : alert.kind === 'claim_ttl_soon'
+                ? i18nService
+                    .t('metatask.alertCard.claimTtl')
+                    .replace('{node}', alert.node ?? '—')
+                    .replace('{detail}', alert.detail ?? '')
+                : i18nService
+                    .t('metatask.alertCard.submissionChange')
+                    .replace('{node}', alert.node ?? '—')
+                    .replace('{detail}', alert.detail ?? '');
+            return (
+              <div
+                key={key}
+                className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200/60 dark:border-amber-800/40"
+              >
+                <button
+                  type="button"
+                  onClick={() => metaTaskService.selectTask(alert.rootPinId)}
+                  className="min-w-0 flex-1 text-left"
+                >
+                  <span className="block text-xs font-medium text-amber-700 dark:text-amber-400 truncate">
+                    {message}
+                    {count > 1 && (
+                      <span className="ml-1 opacity-60">×{count}</span>
+                    )}
+                  </span>
+                  {taskTitle && (
+                    <span className="block text-[11px] text-amber-600/80 dark:text-amber-400/70 truncate">
+                      {taskTitle}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => participateDraft(taskTitle || alert.rootPinId, alert.rootPinId, alert.node)}
+                  className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg bg-amber-600 text-white hover:bg-amber-500 transition-colors"
+                >
+                  <BoltIcon className="h-3.5 w-3.5" />
+                  {i18nService.t('metatask.participateNow')}
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
       {board?.refresh.lastError && !error && (
@@ -148,7 +214,7 @@ const MetaTaskBoard: React.FC = () => {
         ) : (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {shown.map((task) => (
-              <MetaTaskCard key={task.rootPinId} task={task} />
+              <MetaTaskCard key={task.rootPinId} task={task} identities={board?.identities} />
             ))}
           </div>
         )}
@@ -160,85 +226,98 @@ const MetaTaskBoard: React.FC = () => {
   );
 };
 
-const shortId = (metaId: string): string =>
-  metaId.length > 14 ? `${metaId.slice(0, 8)}…${metaId.slice(-4)}` : metaId;
-
-const MetaTaskCard: React.FC<{ task: MetaTaskBoardTask }> = ({ task }) => {
+const MetaTaskCard: React.FC<{ task: MetaTaskBoardTask; identities?: Record<string, MetaTaskIdentity> }> = ({
+  task,
+  identities,
+}) => {
   const progressPct = task.progress.total > 0 ? Math.round((task.progress.verified / task.progress.total) * 100) : 0;
   return (
-    <button
-      type="button"
-      onClick={() => metaTaskService.selectTask(task.rootPinId)}
-      className="text-left p-3 rounded-xl border dark:border-claude-darkBorder border-claude-border hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors flex flex-col gap-2"
-    >
-      <div className="flex items-start justify-between gap-2">
-        <span className="text-sm font-medium dark:text-claude-darkText text-claude-text line-clamp-2">
-          {task.title}
-        </span>
-        {task.settlementFinalized && (
-          <span className="shrink-0 px-1.5 py-0.5 text-[11px] rounded bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400">
-            {i18nService.t('metatask.settled')}
+    <div className="p-3 rounded-xl border dark:border-claude-darkBorder border-claude-border hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors flex flex-col gap-2">
+      <button
+        type="button"
+        onClick={() => metaTaskService.selectTask(task.rootPinId)}
+        className="text-left flex flex-col gap-2"
+      >
+        <div className="flex items-start justify-between gap-2">
+          <span className="text-sm font-medium dark:text-claude-darkText text-claude-text line-clamp-2">
+            {task.title}
+          </span>
+          {task.settlementFinalized && (
+            <span className="shrink-0 px-1.5 py-0.5 text-[11px] rounded bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400">
+              {i18nService.t('metatask.settled')}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          <MetaIdBadge metaId={task.publisher} identities={identities} compact />
+          <span>·</span>
+          <span>
+            {i18nService.t('metatask.participants').replace('{count}', String(task.participantCount))}
+          </span>
+        </div>
+        {/* Progress bar */}
+        <div>
+          <div className="flex items-center justify-between text-xs mb-1">
+            <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('metatask.progressVerified')
+                .replace('{verified}', String(task.progress.verified))
+                .replace('{total}', String(task.progress.total))}
+            </span>
+            <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">{progressPct}%</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover overflow-hidden">
+            <div
+              className="h-full bg-brand rounded-full transition-all"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+        </div>
+        {task.progress.disputed > 0 && (
+          <span className="text-xs text-amber-600 dark:text-amber-400">
+            {i18nService.t('metatask.disputedCount').replace('{count}', String(task.progress.disputed))}
           </span>
         )}
-      </div>
-      <div className="flex items-center gap-2 flex-wrap text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-        <span>
-          {i18nService.t('metatask.publisher')} {shortId(task.publisher)}
+        {task.myRoles.length > 0 && (
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {task.myRoles.includes('publisher') && (
+              <span className="px-1.5 py-0.5 text-[11px] rounded bg-brand/10 text-brand">
+                {i18nService.t('metatask.role.publisher')}
+              </span>
+            )}
+            {task.myRoles.includes('participant') && (
+              <span className="px-1.5 py-0.5 text-[11px] rounded bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-400">
+                {i18nService.t('metatask.role.participant')}
+              </span>
+            )}
+            {task.myStats && (
+              <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('metatask.myStatsSummary')
+                  .replace('{verified}', String(task.myStats.verified))
+                  .replace('{reviews}', String(task.myStats.reviewVotes))}
+              </span>
+            )}
+          </div>
+        )}
+        <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {i18nService.t('metatask.events').replace('{count}', String(task.freshness.eventCount))}
+          {' · '}
+          {i18nService.t('metatask.activityAnchorShort').replace(
+            '{block}',
+            String(task.freshness.boundaryBlock),
+          )}
         </span>
-        <span>·</span>
-        <span>
-          {i18nService.t('metatask.participants').replace('{count}', String(task.participantCount))}
-        </span>
-      </div>
-      {/* Progress bar */}
-      <div>
-        <div className="flex items-center justify-between text-xs mb-1">
-          <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
-            {i18nService.t('metatask.progressVerified')
-              .replace('{verified}', String(task.progress.verified))
-              .replace('{total}', String(task.progress.total))}
-          </span>
-          <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">{progressPct}%</span>
-        </div>
-        <div className="h-1.5 rounded-full bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover overflow-hidden">
-          <div
-            className="h-full bg-brand rounded-full transition-all"
-            style={{ width: `${progressPct}%` }}
-          />
-        </div>
-      </div>
-      {task.progress.disputed > 0 && (
-        <span className="text-xs text-amber-600 dark:text-amber-400">
-          {i18nService.t('metatask.disputedCount').replace('{count}', String(task.progress.disputed))}
-        </span>
+      </button>
+      {!task.taskComplete && (
+        <button
+          type="button"
+          onClick={() => participateDraft(task.title, task.rootPinId)}
+          className="inline-flex items-center justify-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-brand/40 text-brand hover:bg-brand/5 transition-colors"
+        >
+          <BoltIcon className="h-3.5 w-3.5" />
+          {i18nService.t('metatask.participateNow')}
+        </button>
       )}
-      {task.myRoles.length > 0 && (
-        <div className="flex items-center gap-1.5 flex-wrap">
-          {task.myRoles.includes('publisher') && (
-            <span className="px-1.5 py-0.5 text-[11px] rounded bg-brand/10 text-brand">
-              {i18nService.t('metatask.role.publisher')}
-            </span>
-          )}
-          {task.myRoles.includes('participant') && (
-            <span className="px-1.5 py-0.5 text-[11px] rounded bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-400">
-              {i18nService.t('metatask.role.participant')}
-            </span>
-          )}
-          {task.myStats && (
-            <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-              {i18nService.t('metatask.myStatsSummary')
-                .replace('{verified}', String(task.myStats.verified))
-                .replace('{reviews}', String(task.myStats.reviewVotes))}
-            </span>
-          )}
-        </div>
-      )}
-      <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-        {i18nService.t('metatask.freshnessBlock').replace('{block}', String(task.freshness.boundaryBlock))}
-        {' · '}
-        {i18nService.t('metatask.events').replace('{count}', String(task.freshness.eventCount))}
-      </span>
-    </button>
+    </div>
   );
 };
 

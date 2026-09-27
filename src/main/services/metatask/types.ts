@@ -93,12 +93,23 @@ export interface MetaTaskVoteSummary {
   failreason: boolean;
 }
 
+/** Display identity for a metaId (local roster first; external needs MetaSo). */
+export interface MetaTaskIdentity {
+  metaId: string;
+  name: string | null;
+  avatar: string | null;
+}
+
 export interface MetaTaskNodeProjection {
   id: string;
   parent: string | null;
   title: string;
   kind: string;
   weight: number | null;
+  /** Tree-node params (what the branch task actually asks for). */
+  params: Record<string, unknown> | null;
+  /** Per-node verifier override (null = inherits task root spec). */
+  specid: string | null;
   status: MetaTaskNodeStatus;
   disputed: boolean;
   /** Effective claim, if any. */
@@ -109,6 +120,11 @@ export interface MetaTaskNodeProjection {
     submitter: string;
     atMs: number;
     superseded: boolean;
+    /** Result payload as published (chain fact). */
+    result: Record<string, unknown> | null;
+    hash: string | null;
+    contentType: string | null;
+    attachment: string | null;
   } | null;
   passVotes: number;
   failVotes: number;
@@ -167,6 +183,8 @@ export interface MetaTaskTaskProjection {
   progress: { total: number; verified: number; claimed: number; open: number; disputed: number };
   taskComplete: boolean;
   participants: MetaTaskParticipantStats[];
+  /** Display identities keyed by metaId (publisher + participants + node actors). */
+  identities: Record<string, MetaTaskIdentity>;
   settlement: MetaTaskSettlementManifest | null;
   /** Blocks the settlement would pay but for open challenges (node ids). */
   freshness: {
@@ -209,6 +227,8 @@ export interface MetaTaskBoard {
   localRosterMetaIds: string[];
   tasks: MetaTaskBoardTask[];
   alerts: MetaTaskAlert[];
+  /** Merged display identities across tasks (publisher + participants). */
+  identities: Record<string, MetaTaskIdentity>;
   /** Activation notice input: the v1.2 feature gate height (null = not gated). */
   activation: { hAct2: number | null };
   refresh: {
