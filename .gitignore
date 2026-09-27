@@ -109,6 +109,7 @@ tests/*
 !tests/coworkExperimentalAutomationSwitch.test.mjs
 !tests/composerCommands.test.ts
 !tests/coworkTranscriptExport.test.mjs
+!tests/coworkAssistantTurnCollapse.test.mjs
 !tests/coworkSessionGoal.test.mjs
 !tests/coworkSessionGtCloseStatus.test.mjs
 !tests/coworkSessionSortAnchor.test.ts
