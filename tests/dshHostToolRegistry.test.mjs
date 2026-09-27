@@ -106,6 +106,9 @@ class RecordingStore {
     }
   }
   getSessionUsageStats() { return null }
+  // Proven-techniques injection (a6f7d570) reads capability drafts every
+  // memory-enabled turn; none exist in this fixture.
+  listCapabilityDrafts() { return [] }
 }
 
 const fakeStore = {
