@@ -13,7 +13,7 @@ try {
   migration = undefined;
 }
 
-test('deepseek output ceiling migration rewrites legacy 32K rows to 256K and leaves everything else alone', async (t) => {
+test('output ceiling migration raises legacy 32K rows (deepseek family to 256K, everything else to 128K)', async (t) => {
   if (!migration) return t.skip('dist-electron not compiled');
 
   const config = {
@@ -33,6 +33,12 @@ test('deepseek output ceiling migration rewrites legacy 32K rows to 256K and lea
       metaid: {
         models: [{ id: 'deepseek-chat', maxOutputTokens: 32_768 }],
       },
+      zhipu: {
+        models: [
+          { id: 'glm-5.3-flash', maxOutputTokens: 32_768 },
+          { id: 'glm-5.3', maxOutputTokens: 128_000 },
+        ],
+      },
     },
     model: {
       availableModels: [
@@ -48,17 +54,19 @@ test('deepseek output ceiling migration rewrites legacy 32K rows to 256K and lea
     setAppConfig: (value) => { saved = value; },
   });
 
-  assert.equal(result.migrated, 3);
+  assert.equal(result.migrated, 7);
   assert.equal(saved, config, 'rewrites and persists the SAME config object');
   const rows = config.providers.deepseek.models;
-  assert.equal(rows[0].maxOutputTokens, 256_000);
-  assert.equal(rows[1].maxOutputTokens, 256_000);
+  assert.equal(rows[0].maxOutputTokens, 256_000, 'deepseek family -> 256K');
+  assert.equal(rows[1].maxOutputTokens, 256_000, 'deepseek family -> 256K');
   assert.equal(rows[2].maxOutputTokens, 16_000, 'custom ceilings untouched');
-  assert.equal(rows[3].maxOutputTokens, 256_000);
-  assert.equal(rows[4].maxOutputTokens, 32_768, 'non-deepseek rows untouched');
-  assert.equal(config.providers.metaid.models[0].maxOutputTokens, 32_768, 'deepseek-chat is not V4 family');
-  assert.equal(config.model.availableModels[0].maxOutputTokens, 256_000, 'gateway-prefixed family id migrates');
-  assert.equal(config.model.availableModels[1].maxOutputTokens, 32_768);
+  assert.equal(rows[3].maxOutputTokens, 256_000, 'already-migrated rows are no-ops');
+  assert.equal(rows[4].maxOutputTokens, 128_000, 'non-deepseek legacy rows -> 128K');
+  assert.equal(config.providers.metaid.models[0].maxOutputTokens, 128_000, 'deepseek-chat is not V4 family -> 128K');
+  assert.equal(config.providers.zhipu.models[0].maxOutputTokens, 128_000, 'GLM legacy rows -> 128K');
+  assert.equal(config.providers.zhipu.models[1].maxOutputTokens, 128_000, 'already-raised GLM rows untouched');
+  assert.equal(config.model.availableModels[0].maxOutputTokens, 256_000, 'gateway-prefixed deepseek family id migrates');
+  assert.equal(config.model.availableModels[1].maxOutputTokens, 128_000, 'availableModels legacy rows -> 128K');
 
   // Idempotent: second run finds nothing to do and does not re-persist.
   let secondSave = null;

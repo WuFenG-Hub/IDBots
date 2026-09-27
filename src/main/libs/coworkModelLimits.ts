@@ -1,5 +1,11 @@
 export const DEFAULT_COWORK_CONTEXT_WINDOW = 128_000;
-export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 32_768;
+// Uncatalogued-model output ceiling. Current mainstream models cap output far
+// above 32K, and thinking-mode reasoning shares the output budget — the old
+// 32K default truncated long-thinking steps on uncatalogued SKUs and forced
+// the paid truncated-turn auto-continue. 128K keeps headroom without
+// over-declaring for exotic small models (billing is by actual tokens used,
+// so a higher declared ceiling costs nothing for short replies).
+export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 128_000;
 // The whole DeepSeek V4 family shares the same 1M context window. The flash
 // variant powers cowork/A2A automation sessions (via resolveAutomationModelOverride),
 // so it must carry the same window as v4-pro or the context ring wrongly falls back
@@ -23,12 +29,12 @@ export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
 // rewritten once at startup (services/deepseekOutputCeilingMigration).
 export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 256_000;
 export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 256_000;
-// GLM-5.x actual max output is 128K (z.ai). The app's declared ceiling is
-// 32K — same cap as DeepSeek / the MetaApp bridge / the app-wide default —
-// so thinking-enabled turns cannot exhaust a small ceiling mid-thought
-// (2026-09-14 silent stall on glm-5.3-flash sessions e6af1710, 572751a8,
-// 10b02949).
-export const GLM_MAX_OUTPUT_TOKENS = 32_768;
+// GLM-5.x actual max output is 128K (z.ai); the declared ceiling now matches
+// it. The 2026-09-14 silent-stall incident (glm-5.3-flash sessions e6af1710,
+// 572751a8, 10b02949) came from the old 8192 fallback, not from a generous
+// ceiling — thinking shares the output budget, so matching the real cap
+// removes mid-thought truncation. Billing is by actual tokens used.
+export const GLM_MAX_OUTPUT_TOKENS = 128_000;
 
 export type CoworkModelLimitSource = 'provider-model' | 'available-model' | 'known-model' | 'family-model' | 'fallback';
 
@@ -192,8 +198,8 @@ function deepseekV4FamilyLimits(modelId: string): Partial<Pick<CoworkModelLimits
 /**
  * GLM-4.5+ / GLM-5.x family fallback for gateway ids the exact catalog does
  * not track (`z-ai/glm-5.4-flash`, ephemeral SKUs). Thinking shares the
- * output budget, so uncatalogued ids pin the 32K ceiling even if a future
- * DEFAULT change regresses. Context window stays on the conservative
+ * output budget, so uncatalogued ids pin the family's 128K ceiling even if
+ * a future DEFAULT change regresses. Context window stays on the conservative
  * default unless the exact SKU is catalogued — only the output ceiling is
  * the stall-critical field.
  */
