@@ -297,8 +297,8 @@ const PROVIDER_MODEL_MIGRATIONS: Record<number, ProviderModelMigration> = {
     },
     added: {
       zhipu: [
-        { id: 'glm-5.3', name: 'GLM-5.3', supportsImage: false, contextWindow: 1_048_576, maxOutputTokens: 32_768 },
-        { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', supportsImage: true, contextWindow: 1_048_576, maxOutputTokens: 32_768 },
+        { id: 'glm-5.3', name: 'GLM-5.3', supportsImage: false, contextWindow: 1_048_576, maxOutputTokens: 128_000 },
+        { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', supportsImage: true, contextWindow: 1_048_576, maxOutputTokens: 128_000 },
       ],
     },
     defaultModelRemap: {

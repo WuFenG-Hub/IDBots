@@ -202,14 +202,14 @@ type ModelLike = {
 export const DEEPSEEK_DEFAULT_MODEL_ID = 'deepseek-flash';
 export const DEEPSEEK_V4_PRO_CONTEXT_WINDOW = 1_000_000;
 // The DeepSeek API allows up to 384K output tokens for the whole V4 family;
-// the app declares a 32K ceiling (aligned with the MetaApp bridge limit).
-// Keep in sync with src/main/libs/coworkModelLimits.ts.
-export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 32_768;
+// the app declares 256K (parity with upstream deepseek-harness). Keep in sync
+// with src/main/libs/coworkModelLimits.ts.
+export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 256_000;
 // Same family, same 1M context window. The flash variant drives cowork/A2A
 // automation sessions, so it must carry a real context window or the context
 // usage ring falls back to the 128K default.
 export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
-export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 32_768;
+export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 256_000;
 
 const DEEPSEEK_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
   {
@@ -285,10 +285,9 @@ export function getDefaultDeepSeekModels(): ModelDefinition[] {
 export const ZHIPU_DEFAULT_MODEL_ID = 'glm-5.3';
 export const ZHIPU_GLM_53_CONTEXT_WINDOW = 1_048_576;
 // The Zhipu API allows up to 128K output tokens for the GLM-5.3 family; the
-// app declares the same 32K ceiling as DeepSeek (aligned with the MetaApp
-// bridge limit). Keep in sync with GLM_MAX_OUTPUT_TOKENS in
+// app now declares that real cap. Keep in sync with GLM_MAX_OUTPUT_TOKENS in
 // src/main/libs/coworkModelLimits.ts.
-export const ZHIPU_GLM_53_MAX_OUTPUT_TOKENS = 32_768;
+export const ZHIPU_GLM_53_MAX_OUTPUT_TOKENS = 128_000;
 
 const ZHIPU_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
   {
