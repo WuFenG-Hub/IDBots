@@ -26,7 +26,7 @@
         { "id": "b10", "parent": "root", "title": "批 10：JSP-000901 ~ 001022", "kind": "triage", "weight": 900 }
       ],
       "policyOverride": { "claim_ttl_hours": 72, "verify_window_hours": 120 },
-      "spec": { "name": "triage-table-check", "lang": "python", "entry": "spec-triage-table.py", "note": "发布时补：校验提交表覆盖该批全部题号且四字段齐备（null 容错）。本仓库暂以评审 semantic_check 兜底。" }
+      "spec": { "name": "triage-table-check", "lang": "python", "entry": "spec-triage-table.py", "scriptFile": "spec-triage-table.py", "note": "机器可判部分（schema/区间/唯一性/数量覆盖）自测通过；逐题分类实质正确性由 review 侧 semantic_check 承接。提交时 expected 取扫描清单该批的 solved-no-lean 计数。" }
     },
     {
       "id": "T1-JSP-000301",

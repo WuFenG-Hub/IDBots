@@ -18,6 +18,7 @@ Status: READY — fires the moment the gate clears. Owner-approved 2026-09-27
 | File | Purpose |
 | --- | --- |
 | `wave1-task-drafts.json` | The five launch tasks (T0 + T1–T4) with trees, weights (Σ=10000 each), policies, spec pointers; plus the HELD list. |
+| `spec-triage-table.py` | T0 batch-table verifier (schema + JSP-range + uniqueness + count coverage; null → invalid). Self-tested across five scenarios. Substance of each classification stays with review-side semantic_check. |
 | `spec-powerful-pair.py` | JSP-000301 witness verifier (adjacent powerful non-square pair). Self-tested: rejects non-powerful/square/non-consecutive inputs. |
 | `spec-lpf-triplet.py` | Witness verifier for descending-largest-prime-factor triplets WITH factorization certificates (deterministic Miller–Rabin). Self-tested PASS on (13,14,15). **Held** with JSP-000307 pending fidelity clarification. |
 | `spec-lean-build.sh` | Generic Lean formalization verifier (`lake build --warning-as-error=error`; pin://|metafile:// artifacts fetched first; null → invalid). |
