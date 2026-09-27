@@ -403,25 +403,28 @@ test('catch-up stamps events with row metadata (senderMetaId / index / timestamp
     }, { label: 'own seat.claimed committed' });
 
     // 种入对局群历史：红方 match.created / 红方 action / 匿名 chat（sender 为 NULL）。
+    // chain_timestamp 是索引器的 Unix 秒；宿主 runtime 的 withRowMeta 把它归一到
+    // 毫秒后才写进 meta.timestamp（EventMeta 单位契约：毫秒），故 fixture 用真实
+    // 10 位秒值、断言用 ×1000 的毫秒值 —— 这两种口径的混装就是 S1 时基缺陷。
     insertRow(db, {
       pinId: 'pin-match-created',
       senderGlobalMetaId: RED_AGENT,
       msgIndex: 1,
-      chainTimestamp: 1_000,
+      chainTimestamp: 1_790_450_690,
       content: envelopeOf('match.created', { payload: { title: 'R vs B' } }),
     });
     insertRow(db, {
       pinId: 'pin-action-1',
       senderGlobalMetaId: RED_AGENT,
       msgIndex: 2,
-      chainTimestamp: 2_000,
+      chainTimestamp: 1_790_450_691,
       content: envelopeOf('action', { actionSeq: 1, prevStateHash: 'sha256:a', stateHash: 'sha256:b', payload: { move: 'h2e2' } }),
     });
     insertRow(db, {
       pinId: 'pin-chat-anon',
       senderGlobalMetaId: null,
       msgIndex: 3,
-      chainTimestamp: 3_000,
+      chainTimestamp: 1_790_450_692,
       content: envelopeOf('chat', { payload: {} }),
     });
 
@@ -435,26 +438,26 @@ test('catch-up stamps events with row metadata (senderMetaId / index / timestamp
     const state = await serializedStateOf(host, session.sessionId);
     const byType = (type) => state.log.filter((entry) => entry.type === type);
 
-    // 红方 match.created：完整元组（index/timestamp/sender 全取自行）。
+    // 红方 match.created：完整元组（index/timestamp/sender 全取自行，时间戳已归一为毫秒）。
     const created = byType('match.created');
     assert.equal(created.length, 1);
     assert.equal(created[0].sender, RED_AGENT);
     assert.equal(created[0].index, 1);
-    assert.equal(created[0].timestamp, 1_000);
+    assert.equal(created[0].timestamp, 1_790_450_690_000);
 
     // 走子归因恢复：action 的 senderMetaId 来自行元数据（此前恒为 ''）。
     const action = byType('action');
     assert.equal(action.length, 1);
     assert.equal(action[0].sender, RED_AGENT);
     assert.equal(action[0].index, 2);
-    assert.equal(action[0].timestamp, 2_000);
+    assert.equal(action[0].timestamp, 1_790_450_691_000);
 
     // 禁止凭空合成：行 sender 为 NULL → 元数据缺省（adapter 侧读作 ''）。
     const chat = byType('chat');
     assert.equal(chat.length, 1);
     assert.equal(chat[0].sender, '');
     assert.equal(chat[0].index, 3);
-    assert.equal(chat[0].timestamp, 3_000);
+    assert.equal(chat[0].timestamp, 1_790_450_692_000);
 
     // 自家 seat.claimed：post-write 本地 reduce 的 own-meta 盖章归因正确。
     const ownClaim = byType('seat.claimed');
