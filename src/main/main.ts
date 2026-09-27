@@ -135,6 +135,7 @@ import {
 } from './services/metabotManageService';
 import { deleteBootstrapDoc } from './libs/welcomeBootstrap';
 import { migrateLegacyLlmBrainValues } from './services/llmBrainMigration';
+import { migrateDeepSeekOutputCeiling } from './services/deepseekOutputCeilingMigration';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
 import {
   startMetaWebListener,
@@ -16456,6 +16457,23 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       console.error('[llm-brain-migration] failed (non-fatal):', error);
     }
     startupLog('llm brain migration done');
+
+    // One-shot DeepSeek output-ceiling migration: rewrite provider model rows
+    // still pinning the legacy 32_768 default to the 256_000 harness-aligned
+    // ceiling (user-customized values are left untouched). Idempotent.
+    try {
+      const ceilingResult = migrateDeepSeekOutputCeiling({
+        getAppConfig: () => getStore()?.get('app_config') ?? null,
+        setAppConfig: (config) => {
+          const storeRef = getStore();
+          if (storeRef) storeRef.set('app_config', config);
+        },
+        log: (message) => console.log(message),
+      });
+      startupLog(`deepseek output ceiling migration done (migrated=${ceilingResult.migrated})`);
+    } catch (error) {
+      console.error('[deepseek-output-ceiling-migration] failed (non-fatal):', error);
+    }
 
     const manager = getSkillManager();
     startupLog('sync bundled skills begin');

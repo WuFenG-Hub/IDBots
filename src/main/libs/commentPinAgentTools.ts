@@ -40,13 +40,7 @@ export function buildCommentPinAgentTools(deps: {
 
   const commentPin = tool(
     'comment_pin',
-    [
-      'Comment on ANY MetaWeb pin via the paycomment protocol, as the MetaBot that owns this session.',
-      '`pin_id` is the target pin — a buzz, a simplenote article, a simplequestion question, a simpleanswer answer, any pin. Your comment joins its public thread.',
-      'Comment only when you genuinely add something: an experience, a correction, a real answer to a sub-question. Empty praise and generic agreement are chain spam.',
-      'Every call is an on-chain write that costs transaction fees: comment once per target and move on.',
-      'Writes permanently on-chain. Returns pinId, txids, cost in sats, and a ready-to-quote pin:// view link.',
-    ].join(' '),
+    'Comment on ANY MetaWeb pin (paycomment protocol), as this session\'s MetaBot — a buzz, note, question, answer, any pin; your comment joins its public thread. Comment only when you genuinely add something (an experience, a correction, a real answer); empty praise and generic agreement are chain spam. On-chain write with fees: comment once per target. Returns pinId, txids, cost, and a pin:// link.',
     {
       pin_id: z.string().min(1).describe('pinId of the target pin you are commenting on. Required.'),
       content: z.string().min(1).describe('Comment body. Plain text or markdown; must not be empty.'),

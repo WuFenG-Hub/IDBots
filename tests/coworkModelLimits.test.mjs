@@ -63,7 +63,7 @@ test('resolveCoworkModelLimits falls back conservatively for unknown models', as
     source: 'fallback',
   });
   assert.equal(DEFAULT_COWORK_CONTEXT_WINDOW, 128_000);
-  assert.equal(DEFAULT_COWORK_MAX_OUTPUT_TOKENS, 32_768);
+  assert.equal(DEFAULT_COWORK_MAX_OUTPUT_TOKENS, 128_000);
 });
 
 test('resolveCoworkModelLimits can use built-in DeepSeek V4 Pro defaults by model id', async () => {
@@ -82,13 +82,13 @@ test('resolveCoworkModelLimits can use built-in DeepSeek V4 Pro defaults by mode
   assert.deepEqual(limits, {
     modelId: 'deepseek-v4-pro',
     contextWindow: 1_000_000,
-    maxOutputTokens: 32_768,
+    maxOutputTokens: 256_000,
     supportsVision: false,
     source: 'known-model',
   });
 });
 
-test('deepseek-v4-flash declares a 32K output ceiling instead of a smaller fallback', async () => {
+test('deepseek-v4-flash declares the 256K harness-aligned output ceiling', async () => {
   const { resolveCoworkModelLimits } = await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   const limits = resolveCoworkModelLimits({
@@ -98,7 +98,7 @@ test('deepseek-v4-flash declares a 32K output ceiling instead of a smaller fallb
 
   assert.equal(limits.source, 'known-model');
   assert.equal(limits.contextWindow, 1_000_000);
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 256_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -353,14 +353,14 @@ test('glm-5.3-flash — multimodal since the GLM-5.3 launch — resolves vision=
 // 2026-09-14 silent-stall: glm-5.3-flash (commandcode catalog entries carry
 // contextWindow but no maxOutputTokens) inherited the old DEFAULT 8192.
 // Thinking at effort-max burned that ceiling. Catalog + family fallback now
-// pin 32K, which matches the raised default so unknown models get the same.
-test('glm-5.3-flash thinking models get the 32K output ceiling', async () => {
+// pin the family's 128K ceiling, matching the raised default.
+test('glm-5.3-flash thinking models get the 128K output ceiling', async () => {
   const { resolveCoworkModelLimits } =
     await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   for (const modelId of ['glm-5.3-flash', 'glm-5.3-flashx', 'z-ai/glm-5.3-flash', 'glm-5.3', 'zai-org/GLM-5.3']) {
     const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, modelId);
-    assert.equal(limits.maxOutputTokens, 32_768, `${modelId} must resolve to the 32K output ceiling`);
+    assert.equal(limits.maxOutputTokens, 128_000, `${modelId} must resolve to the 128K output ceiling`);
   }
 
   // Commandcode-shaped catalog: contextWindow only, no maxOutputTokens.
@@ -373,16 +373,16 @@ test('glm-5.3-flash thinking models get the 32K output ceiling', async () => {
       },
     },
   });
-  assert.equal(gatewayLimits.maxOutputTokens, 32_768);
+  assert.equal(gatewayLimits.maxOutputTokens, 128_000);
   assert.equal(gatewayLimits.contextWindow, 1_048_576);
 });
 
-test('uncatalogued glm-5.x gateway ids inherit the 32K output ceiling via family fallback', async () => {
+test('uncatalogued glm-5.x gateway ids inherit the 128K output ceiling via family fallback', async () => {
   const { resolveCoworkModelLimits } =
     await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'acme/glm-5.4-flash');
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 128_000);
   assert.equal(limits.source, 'family-model');
 });
 
@@ -459,7 +459,7 @@ test('deepseek-v4-flash-vision-exp resolves supportsVision=true', async () => {
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek-v4-flash-vision-exp');
   assert.equal(limits.supportsVision, true);
   assert.equal(limits.contextWindow, 1_000_000);
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 256_000);
   assert.equal(limits.source, 'known-model');
   assert.equal(modelSupportsVision('deepseek-v4-flash-vision-exp'), true);
 });
@@ -507,7 +507,7 @@ test('uncatalogued v4.1 promo SKU with partial provider metadata inherits the fa
   });
 
   assert.equal(limits.contextWindow, 1_000_000);
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 256_000);
   assert.equal(limits.supportsVision, false);
   assert.equal(limits.source, 'provider-model');
 });
@@ -518,7 +518,7 @@ test('uncatalogued v4 family id without any provider metadata resolves family-mo
 
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek-v4.2-ultra');
   assert.equal(limits.contextWindow, 1_000_000);
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 256_000);
   assert.equal(limits.supportsVision, false);
   assert.equal(limits.source, 'family-model');
 });
@@ -528,7 +528,7 @@ test('gateway-prefixed v4.1 ids match on the last path segment', async () => {
     await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek/deepseek-v4.1-flash');
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 256_000);
   assert.equal(limits.source, 'family-model');
 });
 
@@ -541,7 +541,7 @@ test('gateway-prefixed deepseek-flash ids inherit the multimodal V4.1 family lim
   // the legacy v4-* line, which stays fail-safe false unless the SKU says so.
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek/deepseek-flash');
   assert.equal(limits.contextWindow, 1_000_000);
-  assert.equal(limits.maxOutputTokens, 32_768);
+  assert.equal(limits.maxOutputTokens, 256_000);
   assert.equal(limits.supportsVision, true);
   assert.equal(limits.source, 'family-model');
 });
@@ -552,7 +552,7 @@ test('family fallback marks vision SKUs and never overrides explicit provider va
 
   const vision = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek-v4.1-flash-vision');
   assert.equal(vision.supportsVision, true);
-  assert.equal(vision.maxOutputTokens, 32_768);
+  assert.equal(vision.maxOutputTokens, 256_000);
 
   const explicit = resolveCoworkModelLimits({
     model: { defaultModel: 'deepseek-v4.1-pro', availableModels: [] },
@@ -567,23 +567,37 @@ test('family fallback marks vision SKUs and never overrides explicit provider va
   assert.equal(explicit.source, 'provider-model');
 });
 
-test('unknown models inherit the 32K default output ceiling', async () => {
+test('unknown models inherit the 128K default output ceiling', async () => {
   const { resolveCoworkModelLimits, DEFAULT_COWORK_MAX_OUTPUT_TOKENS } =
     await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'some-gw/deepseek-chat');
-  assert.equal(DEFAULT_COWORK_MAX_OUTPUT_TOKENS, 32_768);
+  assert.equal(DEFAULT_COWORK_MAX_OUTPUT_TOKENS, 128_000);
   assert.equal(limits.maxOutputTokens, DEFAULT_COWORK_MAX_OUTPUT_TOKENS);
   assert.equal(limits.source, 'fallback');
 });
 
-test('catalogued models without an explicit output ceiling inherit the 32K default', async () => {
+test('catalogued models without an explicit output ceiling inherit the 128K default', async () => {
   const { resolveCoworkModelLimits } =
     await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   for (const modelId of ['claude-sonnet-4-6', 'gpt-5.6-sol', 'kimi-k2.6', 'MiniMax-M3', 'qwen3.6-plus']) {
     const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, modelId);
-    assert.equal(limits.maxOutputTokens, 32_768, `${modelId} must inherit the 32K default`);
+    assert.equal(limits.maxOutputTokens, 128_000, `${modelId} must inherit the 128K default`);
     assert.equal(limits.source, 'known-model', modelId);
   }
+});
+
+
+test('isDeepSeekFamilyModelId matches the V4+/flash family across gateway and SKU forms', async () => {
+  const { isDeepSeekFamilyModelId } = await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  assert.equal(isDeepSeekFamilyModelId('deepseek-flash'), true);
+  assert.equal(isDeepSeekFamilyModelId('deepseek/deepseek-flash'), true);
+  assert.equal(isDeepSeekFamilyModelId('deepseek-v4.1-flash-expires-on-0910'), true);
+  assert.equal(isDeepSeekFamilyModelId('deepseek-v4-pro'), true);
+  assert.equal(isDeepSeekFamilyModelId('deepseek-chat'), false);
+  assert.equal(isDeepSeekFamilyModelId('glm-5.3-flash'), false);
+  assert.equal(isDeepSeekFamilyModelId(''), false);
+  assert.equal(isDeepSeekFamilyModelId(null), false);
 });

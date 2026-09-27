@@ -57,8 +57,8 @@ test('CoworkSessionDetail renders empty diagnostic flags via the shared visibili
   );
 });
 
-test('GLM-5 thinking models declare a 32K output ceiling in KNOWN_MODEL_LIMITS', () => {
-  assert.ok(limitsSource.includes('GLM_MAX_OUTPUT_TOKENS = 32_768'));
+test('GLM-5 thinking models declare the 128K output ceiling in KNOWN_MODEL_LIMITS', () => {
+  assert.ok(limitsSource.includes('GLM_MAX_OUTPUT_TOKENS = 128_000'));
   assert.ok(limitsSource.includes("'glm-5.3-flash':"));
   assert.ok(limitsSource.includes("'z-ai/glm-5.3-flash':"));
   const flashEntry = limitsSource.slice(

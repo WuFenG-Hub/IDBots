@@ -86,8 +86,12 @@ const sanitizeRouteKey = (key) => String(key).replace(/[^a-zA-Z0-9_-]/g, '-')
 
 /** DeepSeek official Messages-API wire: thinking disabled (`off`) or
  *  reasoning_effort low/high/max (`output_config.effort`). Kept for the
- *  effort ladder documentation; the native adapter validates it itself. */
-const NATIVE_DEEPSEEK_DEFAULT_MAX_TOKENS = 32_768
+ *  effort ladder documentation; the native adapter validates it itself.
+ *  256K mirrors upstream deepseek-harness (DEFAULT_MAX_TOKENS in
+ *  packages/llm/llm-deepseek/src/defaults.ts), whose flash catalog entries
+ *  declare no per-model maxTokens so the default applies. Only used when a
+ *  provider row carries no explicit maxOutputTokens. */
+const NATIVE_DEEPSEEK_DEFAULT_MAX_TOKENS = 256_000
 
 /** Normalize any DeepSeek provider base URL onto the Messages API root the
  *  0.1.7 native adapter expects (it appends `/v1/messages` unless the path

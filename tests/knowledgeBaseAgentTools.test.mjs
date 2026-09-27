@@ -33,6 +33,7 @@ function loadRunnerModule() {
 
 const { CoworkRunner } = loadRunnerModule();
 const { buildKnowledgeBasesPromptBlock } = require('../dist-electron/main/libs/knowledgeBasePromptBlocks.js');
+const { formatKnowledgeBaseList } = require('../dist-electron/main/libs/knowledgeBaseAgentTools.js');
 const { createNativeSqliteDatabase } = await import('../dist-electron/main/nativeSqliteDatabase.js')
   .catch(() => import('../dist-electron/main/nativeSqliteDatabase.js'));
 const { KnowledgeBaseStore } = await import('../dist-electron/main/knowledgeBaseStore.js')
@@ -51,7 +52,7 @@ const MOCK_TOOL = (name, description, schema, handler) => ({ name, description, 
 
 const METABOT_ID = 5;
 
-const setup = async ({ withKnowledgeBase = true } = {}) => {
+const setup = async ({ withKnowledgeBase = true, withDocuments = true } = {}) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-tools-test-'));
   const { db, cleanup: cleanupCowork } = await createSqliteStore();
   const coworkStore = createCoworkStore(db);
@@ -68,10 +69,17 @@ const setup = async ({ withKnowledgeBase = true } = {}) => {
     const tools = runner.buildSessionInlineTools(sessionId, MOCK_TOOL);
     return Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   };
+  if (withDocuments) {
+    const kbs = service.listKnowledgeBases(METABOT_ID);
+    if (kbs.length > 0) {
+      kbStore.updateLearnStats(kbs[0].id, { docCount: 3, chunkCount: 3, lastLearnedAt: new Date().toISOString() });
+    }
+  }
   return {
     tmpDir,
     coworkStore,
     service,
+    kbStore,
     runner,
     session,
     buildTools,
@@ -121,17 +129,21 @@ test('knowledge_base_list errors clearly without bot attribution', async () => {
   }
 });
 
-test('knowledge_base_list auto-creates and lists the default KB even at 0 docs', async () => {
-  const { buildTools, session, cleanup } = await setup();
+test('knowledge base listing auto-creates and lists the default KB even at 0 docs', async () => {
+  // Tool-mount gating (decision 2A) keeps knowledge_base_list unmounted while
+  // no documents exist, so the auto-create behavior is asserted at the
+  // service/format layer the tool delegates to.
+  const { service, cleanup } = await setup({ withDocuments: false });
   try {
-    const tools = buildTools(session.id);
-    const result = await tools.knowledge_base_list.handler({});
-    assert.equal(result.isError, undefined);
-    const text = result.content[0].text;
+    const records = service.listKnowledgeBases(METABOT_ID);
+    assert.equal(records.length, 1);
+    assert.equal(records[0].isDefault, true);
+    assert.equal(records[0].docCount, 0);
+    assert.equal(records[0].chunkCount, 0);
+    const text = formatKnowledgeBaseList(records);
     assert.match(text, /1 knowledge base\(s\)/);
-    assert.match(text, /Default \(id: default_5\) \[default\]/);
+    assert.match(text, /\[default\]/);
     assert.match(text, /documents: 0 \| chunks: 0 \| last learned: never/);
-    assert.match(text, /knowledge_base_query/);
   } finally {
     cleanup();
   }
@@ -267,5 +279,32 @@ test('runner volatile prompt lists the bot knowledge bases and stays empty witho
     assert.equal(withoutKb.runner.buildKnowledgeBasesPromptXml(withoutKb.session.id), '');
   } finally {
     withoutKb.cleanup();
+  }
+});
+
+
+// Tool-mount tightening (design 2026-09-27, decision 2A): with no documents
+// across the bot's KBs only the creator pair (add_document + learn) mounts;
+// query/list join once content exists.
+test('KB query/list tools are gated on existing documents; creator pair always mounts', async () => {
+  const empty = await setup({ withDocuments: false });
+  try {
+    const tools = empty.buildTools(empty.session.id);
+    assert.ok(tools.knowledge_base_add_document, 'creator add_document always mounts');
+    assert.ok(tools.knowledge_base_learn, 'creator learn always mounts');
+    assert.ok(!tools.knowledge_base_list, 'list hidden while no documents exist');
+    assert.ok(!tools.knowledge_base_query, 'query hidden while no documents exist');
+
+    // First content lands via the creator pair: learn stats flip the gate for
+    // the NEXT tool-surface rebuild.
+    const kbs = empty.service.listKnowledgeBases(METABOT_ID);
+    empty.kbStore.updateLearnStats(kbs[0].id, { docCount: 1, chunkCount: 1, lastLearnedAt: new Date().toISOString() });
+    const toolsAfter = empty.buildTools(empty.session.id);
+    assert.ok(toolsAfter.knowledge_base_list, 'list mounts once documents exist');
+    assert.ok(toolsAfter.knowledge_base_query, 'query mounts once documents exist');
+    assert.ok(toolsAfter.knowledge_base_add_document);
+    assert.ok(toolsAfter.knowledge_base_learn);
+  } finally {
+    empty.cleanup();
   }
 });

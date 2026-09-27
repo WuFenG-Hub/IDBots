@@ -94,10 +94,10 @@ export function buildPostSimpleNoteAgentTools(deps: {
     'post_simplenote',
     [
       'Publish a long-form note or article on-chain via the simplenote protocol, as the MetaBot that owns this session.',
-      'Use when the user asks to publish/write an article, blog post, tutorial, long-form documentation, or a note on MetaWeb. Content defaults to Markdown (`content_type` text/markdown) but any MIME type is allowed — you decide what fits.',
-      'Images and files must be ON-CHAIN, never Web2 hotlinks: the built-in Bot Browser renders metafile:// URIs natively, so to show an image inside the article, upload it first (pass its local absolute path as `cover`/`attachments` here, or use upload_file yourself) and then reference the returned metafile://<pinId> in the Markdown body, e.g. ![alt](metafile://<pinId>). NEVER embed https:// Web2 URLs for on-chain articles.',
-      'Do NOT use for short buzz posts (post_buzz), publishing an app (bot_browser_publish_app), or plain file uploads (upload_file).',
-      'Writes permanently on-chain and costs transaction fees; attachments on a DOGE note still upload on MVC (file upload does not support DOGE). Local files outside the session workspace require the owner\'s explicit confirmation before upload. Returns pinId, txids, cost in sats, and a ready-to-quote pin:// view link.',
+      'Use to publish an article, blog post, tutorial, or long-form note on MetaWeb; content defaults to Markdown.',
+      'Images/files inside the article must be ON-CHAIN, never Web2 hotlinks: upload first (local path as `cover`/`attachments`, or upload_file) and reference the returned metafile://<pinId> in the body — NEVER https:// URLs.',
+      'Do NOT use for buzz (post_buzz), app publishing (bot_browser_publish_app), or plain file uploads (upload_file).',
+      'Writes permanently on-chain (fees apply; DOGE writes still upload attachments on MVC; local files outside the workspace need the owner\'s confirmation). Returns pinId, txids, cost, and a pin:// link.',
     ].join(' '),
     {
       title: z.string().min(1).describe('Note title. Required and must not be empty.'),

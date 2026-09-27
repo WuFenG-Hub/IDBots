@@ -181,12 +181,7 @@ export function buildQaRecallAgentTools(deps: {
 
   const searchQa = tool(
     'search_qa',
-    [
-      'Search the on-chain Q&A knowledge base (questions and their answers published on MetaWeb via simplequestion/simpleanswer).',
-      'SEARCH BEFORE ASKING: whenever you are stuck or missing knowledge, call this FIRST — an existing high-scored answer may solve your problem immediately. Only when the search comes up empty (or the answers do not actually help) should you publish a new question with post_simplequestion.',
-      'Returns questions matching keywords, each with its top answer, answer count and engagement; answers are ranked by community likes. Open a question\'s full ranked answers with get_question_answers, and read full answer bodies with read_metaweb_pin.',
-      '`answered`: true = only answered questions; false = only unanswered. `publisher` accepts a GlobalMetaID or MetaID. Full bodies are never returned here — summaries only.',
-    ].join(' '),
+    'Search the on-chain Q&A knowledge base (simplequestion/simpleanswer questions + answers). SEARCH BEFORE ASKING: when stuck or missing knowledge, call this FIRST — an existing high-scored answer may solve it; only when results are empty or unhelpful publish a new question with post_simplequestion. Returns questions with their top answer, answer count, and engagement (ranked by community likes); open full ranked answers with get_question_answers and bodies with read_metaweb_pin. `answered`: true = answered only, false = unanswered only; `publisher` takes a GlobalMetaID/MetaID. Summaries only, never full bodies.',
     {
       query: z.string().min(1).describe('Keyword query, e.g. "recover wallet mnemonic" or "MVC fee rate".'),
       tags: z.array(z.string()).optional().describe('Filter by question tags (all must match).'),
@@ -242,12 +237,7 @@ export function buildQaRecallAgentTools(deps: {
 
   const listLatestQuestions = tool(
     'list_latest_questions',
-    [
-      'Browse the latest questions published on-chain (simplequestion) — the feed for bots that want to answer.',
-      'Use `max_answers: 0` to see UNANSWERED questions only: scan them, and when one is squarely in your competence, answer it with post_simpleanswer (`answer_to` = the question pinId). Answering what you genuinely know is how the whole network levels up.',
-      '`sort: hot` ranks by recent engagement (answers + likes + comments over the last 7 days). Tags filter by topic.',
-      'Open a specific question with get_question_answers; read full bodies with read_metaweb_pin.',
-    ].join(' '),
+    'Browse the latest on-chain questions (simplequestion) — the feed for answering. `max_answers: 0` = UNANSWERED only: scan them and answer what is squarely in your competence with post_simpleanswer (answer_to = the question pinId). `sort: hot` ranks by recent 7-day engagement; tags filter by topic. Full thread via get_question_answers, bodies via read_metaweb_pin.',
     {
       tags: z.array(z.string()).optional().describe('Filter by question tags (all must match).'),
       min_answers: z.number().optional().describe('Lower bound on answer count.'),
@@ -296,11 +286,7 @@ export function buildQaRecallAgentTools(deps: {
 
   const getQuestionAnswers = tool(
     'get_question_answers',
-    [
-      'Get one on-chain question by pinId together with its answers, RANKED by community score (likes − dislikes, best first) — the ZhiHu/Quora page view of a question.',
-      'Use after search_qa / list_latest_questions picked a question, or on any simplequestion pinId you hold. Answer summaries are ~200 chars; read the full body with read_metaweb_pin before relying on one. React with like_pin on answer pinIds.',
-      '`publisher` (GlobalMetaID or MetaID) filters the answer list to one author — e.g. to review someone\'s (or your own) answers to this question before posting your own with post_simpleanswer.',
-    ].join(' '),
+    'Get one on-chain question by pinId with its answers RANKED by community score (likes − dislikes, best first). Use after search_qa / list_latest_questions, or on any simplequestion pinId you hold. Summaries are ~200 chars — read the full body with read_metaweb_pin before relying on one; react with like_pin. `publisher` (GlobalMetaID/MetaID) filters answers to one author (e.g. your own before re-answering with post_simpleanswer).',
     {
       question_pin_id: z.string().min(1).describe('pinId of the question (any version of it works).'),
       publisher: z.string().optional().describe('Filter answers to one publisher (GlobalMetaID or MetaID).'),

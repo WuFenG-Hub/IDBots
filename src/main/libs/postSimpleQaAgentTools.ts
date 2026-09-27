@@ -170,12 +170,11 @@ export function buildPostSimpleQaAgentTools(deps: {
     'post_simplequestion',
     [
       'Publish a question on-chain via the simplequestion protocol, as the MetaBot that owns this session.',
-      'Use when you hit a knowledge gap you cannot resolve yourself — a stuck task, repeated failures, unclear how to proceed — and an answer from the MetaWeb community would help. Write a clear, specific title; `content` for context and `tags` for discoverability are optional (a title alone is a complete question).',
-      'The title MUST be an actual question and end with a question mark — half-width `?` or full-width `？` (the ZhiHu/Quora convention; the tool rejects titles without one).',
-      'Attachments (local absolute paths) are uploaded on-chain automatically; error screenshots often make questions answerable.',
-      'Returns the question pinId — others reference exactly this pinId when answering (`answer_to` in post_simpleanswer). Keep it to check answers later.',
-      'Do NOT use for notes/articles (post_simplenote), short buzz posts (post_buzz), or plain file uploads (upload_file).',
-      'Writes permanently on-chain and costs transaction fees; attachments on a DOGE write still upload on MVC (file upload does not support DOGE). Local files outside the session workspace require the owner\'s explicit confirmation before upload. Returns pinId, txids, cost in sats, and a ready-to-quote pin:// view link.',
+      'Use for knowledge gaps you cannot resolve yourself (stuck task, repeated failures). A clear specific title alone is a complete question; `content` and `tags` are optional context.',
+      'The title MUST be an actual question ending with a question mark — `?` or full-width `？` (the tool rejects titles without one).',
+      'Attachments (local absolute paths) upload automatically; error screenshots help. Returns the question pinId — answers reference it via `answer_to`; keep it to check answers later.',
+      'Do NOT use for notes/articles (post_simplenote), buzz (post_buzz), or plain file uploads (upload_file).',
+      'Writes permanently on-chain (fees apply; DOGE writes still upload attachments on MVC; local files outside the workspace need the owner\'s confirmation). Returns pinId, txids, cost, and a pin:// link.',
     ].join(' '),
     {
       title: z.string().min(1).describe('Question title, plain text, MUST end with a question mark (`?` or `？`). Required — the only required field.'),
@@ -284,10 +283,10 @@ export function buildPostSimpleQaAgentTools(deps: {
     'post_simpleanswer',
     [
       'Answer a question published on-chain via the simplequestion protocol, as the MetaBot that owns this session.',
-      '`answer_to` must be the pinId of a simplequestion pin (the question). Answer only when you have a clear, useful answer — quality is ranked by community likes (PayLike), not by protocol.',
-      'If you have already answered this question from this host, the tool first returns your previous answers WITHOUT publishing; whether a repeat answer adds value is your decision. Call again with allow_repeat=true if the new answer substantially improves the old one; small additions are usually better as a PayComment on the existing answer.',
+      '`answer_to` must be the pinId of a simplequestion pin. Answer only with something clear and useful — ranking is by community likes.',
+      'If you already answered from this host, the tool returns your previous answers WITHOUT publishing; re-call with allow_repeat=true only when the new answer substantially improves the old one (small additions belong in a comment on the existing answer).',
       'Do NOT use for buzz (post_buzz), notes/articles (post_simplenote), or plain file uploads (upload_file).',
-      'Writes permanently on-chain and costs transaction fees; attachments on a DOGE write still upload on MVC (file upload does not support DOGE). Local files outside the session workspace require the owner\'s explicit confirmation before upload. Returns pinId, txids, cost in sats, and a ready-to-quote pin:// view link.',
+      'Writes permanently on-chain (fees apply; DOGE writes still upload attachments on MVC; local files outside the workspace need the owner\'s confirmation). Returns pinId, txids, cost, and a pin:// link.',
     ].join(' '),
     {
       answer_to: z.string().min(1).describe('pinId of the simplequestion pin being answered. Required.'),

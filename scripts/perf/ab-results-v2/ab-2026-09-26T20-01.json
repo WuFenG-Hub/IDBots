@@ -1,0 +1,518 @@
+{
+  "results": [
+    {
+      "side": "idbots",
+      "task": "explain-idempotency",
+      "run": 1,
+      "ok": true,
+      "wallMs": 6303,
+      "steps": [
+        {
+          "input": 36769,
+          "cacheRead": 36480,
+          "output": 233,
+          "reasoning": 0,
+          "decodeMs": 1236
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 65544,
+      "toolCount": 115,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-idbots-root-5OBCE8/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-explain-idempotency-9WDBHt--/ab-idbots-explain-idempotency-1-muitcq8l/session.v4.jsonl"
+    },
+    {
+      "side": "stock",
+      "task": "explain-idempotency",
+      "run": 1,
+      "ok": true,
+      "wallMs": 4286,
+      "steps": [
+        {
+          "input": 11791,
+          "cacheRead": 11648,
+          "output": 132,
+          "reasoning": 0,
+          "decodeMs": 724
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 2162,
+      "toolCount": 23,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-stock-root-3rcbyv/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-explain-idempotency-URTn4F--/ab-stock-explain-idempotency-1-muitcv4j/session.v4.jsonl"
+    },
+    {
+      "side": "idbots",
+      "task": "debounce",
+      "run": 1,
+      "ok": true,
+      "wallMs": 6300,
+      "steps": [
+        {
+          "input": 36769,
+          "cacheRead": 36480,
+          "output": 355,
+          "reasoning": 0,
+          "decodeMs": 1871
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 65544,
+      "toolCount": 115,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-idbots-root-PokTlE/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-debounce-EFviKV--/ab-idbots-debounce-1-muitcyia/session.v4.jsonl"
+    },
+    {
+      "side": "stock",
+      "task": "debounce",
+      "run": 1,
+      "ok": true,
+      "wallMs": 5307,
+      "steps": [
+        {
+          "input": 11791,
+          "cacheRead": 11648,
+          "output": 387,
+          "reasoning": 0,
+          "decodeMs": 1520
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 2162,
+      "toolCount": 23,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-stock-root-87tacX/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-debounce-N2XeWt--/ab-stock-debounce-1-muitd3dw/session.v4.jsonl"
+    },
+    {
+      "side": "idbots",
+      "task": "kvcache",
+      "run": 1,
+      "ok": true,
+      "wallMs": 7315,
+      "steps": [
+        {
+          "input": 36772,
+          "cacheRead": 36480,
+          "output": 456,
+          "reasoning": 0,
+          "decodeMs": 2623
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 65544,
+      "toolCount": 115,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-idbots-root-mD0eIl/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-kvcache-tZAgSa--/ab-idbots-kvcache-1-muitd7ki/session.v4.jsonl"
+    },
+    {
+      "side": "stock",
+      "task": "kvcache",
+      "run": 1,
+      "ok": true,
+      "wallMs": 5340,
+      "steps": [
+        {
+          "input": 11794,
+          "cacheRead": 11648,
+          "output": 440,
+          "reasoning": 0,
+          "decodeMs": 2305
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 2162,
+      "toolCount": 23,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-stock-root-NnBXza/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-kvcache-PF2YsJ--/ab-stock-kvcache-1-muitdd88/session.v4.jsonl"
+    },
+    {
+      "side": "idbots",
+      "task": "reconnect",
+      "run": 1,
+      "ok": true,
+      "wallMs": 7401,
+      "steps": [
+        {
+          "input": 36766,
+          "cacheRead": 36480,
+          "output": 777,
+          "reasoning": 0,
+          "decodeMs": 3886
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 65544,
+      "toolCount": 115,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-idbots-root-uk11s0/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-reconnect-Xj12Gx--/ab-idbots-reconnect-1-muitdhfr/session.v4.jsonl"
+    },
+    {
+      "side": "stock",
+      "task": "reconnect",
+      "run": 1,
+      "ok": true,
+      "wallMs": 6311,
+      "steps": [
+        {
+          "input": 11788,
+          "cacheRead": 11648,
+          "output": 487,
+          "reasoning": 0,
+          "decodeMs": 2657
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 2162,
+      "toolCount": 23,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-stock-root-Uj6irl/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-reconnect-hiqtnr--/ab-stock-reconnect-1-muitdn5v/session.v4.jsonl"
+    },
+    {
+      "side": "idbots",
+      "task": "biglog",
+      "run": 1,
+      "ok": true,
+      "wallMs": 22373,
+      "steps": [
+        {
+          "input": 36801,
+          "cacheRead": 36608,
+          "output": 3393,
+          "reasoning": 0,
+          "decodeMs": 17413
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 65544,
+      "toolCount": 115,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-idbots-root-UewPEx/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-biglog-YXKYQP--/ab-idbots-biglog-1-muitds38/session.v4.jsonl"
+    },
+    {
+      "side": "stock",
+      "task": "biglog",
+      "run": 1,
+      "ok": true,
+      "wallMs": 31466,
+      "steps": [
+        {
+          "input": 11823,
+          "cacheRead": 11648,
+          "output": 5730,
+          "reasoning": 0,
+          "decodeMs": 27819
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 2162,
+      "toolCount": 23,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-stock-root-UOTqXe/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-biglog-vFpaMT--/ab-stock-biglog-1-muite9d8/session.v4.jsonl"
+    },
+    {
+      "side": "idbots",
+      "task": "read-note",
+      "run": 1,
+      "ok": true,
+      "wallMs": 14764,
+      "steps": [
+        {
+          "input": 36767,
+          "cacheRead": 36480,
+          "output": 217,
+          "reasoning": 0,
+          "decodeMs": 587
+        },
+        {
+          "input": 37865,
+          "cacheRead": 36864,
+          "output": 237,
+          "reasoning": 0,
+          "decodeMs": 655
+        },
+        {
+          "input": 38126,
+          "cacheRead": 37888,
+          "output": 1187,
+          "reasoning": 0,
+          "decodeMs": 3344
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 65544,
+      "toolCount": 115,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-idbots-root-rb4s5b/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-read-note-Uuke2F--/ab-idbots-read-note-1-muitexuw/session.v4.jsonl"
+    },
+    {
+      "side": "stock",
+      "task": "read-note",
+      "run": 1,
+      "ok": true,
+      "wallMs": 7805,
+      "steps": [
+        {
+          "input": 11789,
+          "cacheRead": 11648,
+          "output": 47,
+          "reasoning": 0,
+          "decodeMs": 1769
+        },
+        {
+          "input": 11954,
+          "cacheRead": 11776,
+          "output": 58,
+          "reasoning": 0,
+          "decodeMs": 217
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 2162,
+      "toolCount": 23,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-stock-root-gExLOq/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-read-note-JWKHm4--/ab-stock-read-note-1-muitf99p/session.v4.jsonl"
+    },
+    {
+      "side": "idbots",
+      "task": "write-hello",
+      "run": 1,
+      "ok": true,
+      "wallMs": 11550,
+      "steps": [
+        {
+          "input": 36769,
+          "cacheRead": 36480,
+          "output": 304,
+          "reasoning": 0,
+          "decodeMs": 1745
+        },
+        {
+          "input": 37089,
+          "cacheRead": 36864,
+          "output": 85,
+          "reasoning": 0,
+          "decodeMs": 229
+        },
+        {
+          "input": 37228,
+          "cacheRead": 36992,
+          "output": 60,
+          "reasoning": 0,
+          "decodeMs": 28
+        },
+        {
+          "input": 37353,
+          "cacheRead": 37120,
+          "output": 100,
+          "reasoning": 0,
+          "decodeMs": 411
+        },
+        {
+          "input": 37498,
+          "cacheRead": 37248,
+          "output": 129,
+          "reasoning": 0,
+          "decodeMs": 248
+        },
+        {
+          "input": 37652,
+          "cacheRead": 37504,
+          "output": 104,
+          "reasoning": 0,
+          "decodeMs": 431
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 65544,
+      "toolCount": 115,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-idbots-root-dBPR9x/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-write-hello-QGL5P1--/ab-idbots-write-hello-1-muitffff/session.v4.jsonl"
+    },
+    {
+      "side": "stock",
+      "task": "write-hello",
+      "run": 1,
+      "ok": true,
+      "wallMs": 6403,
+      "steps": [
+        {
+          "input": 11791,
+          "cacheRead": 11648,
+          "output": 109,
+          "reasoning": 0,
+          "decodeMs": 368
+        },
+        {
+          "input": 11974,
+          "cacheRead": 11776,
+          "output": 71,
+          "reasoning": 0,
+          "decodeMs": 422
+        },
+        {
+          "input": 12130,
+          "cacheRead": 11904,
+          "output": 89,
+          "reasoning": 0,
+          "decodeMs": 271
+        }
+      ],
+      "turns": 1,
+      "sysBytes": 2162,
+      "toolCount": 23,
+      "artifact": "/var/folders/g7/vhsqhtnj4ybb57rhrhxnmvc80000gq/T/ab-stock-root-sJFYIc/--var-folders-g7-vhsqhtnj4ybb57rhrhxnmvc80000gq-T-ab-ws-write-hello-wEreUw--/ab-stock-write-hello-1-muitfocu/session.v4.jsonl"
+    }
+  ],
+  "summary": {
+    "idbots": {
+      "tasks": 7,
+      "reasoning": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "output": [
+        233,
+        355,
+        456,
+        777,
+        3393,
+        217,
+        237,
+        1187,
+        304,
+        85,
+        60,
+        100,
+        129,
+        104
+      ],
+      "firstInput": [
+        36769,
+        36769,
+        36772,
+        36766,
+        36801,
+        36767,
+        36769
+      ],
+      "wallMs": [
+        6303,
+        6300,
+        7315,
+        7401,
+        22373,
+        14764,
+        11550
+      ],
+      "sysBytes": [
+        65544,
+        65544,
+        65544,
+        65544,
+        65544,
+        65544,
+        65544
+      ],
+      "toolCount": [
+        115,
+        115,
+        115,
+        115,
+        115,
+        115,
+        115
+      ],
+      "decode": [
+        188.51132686084142,
+        189.7381079636558,
+        173.846740373618,
+        199.9485331960885,
+        194.8544191121576,
+        369.6763202725724,
+        361.8320610687023,
+        354.9641148325359,
+        174.21203438395415,
+        371.17903930131,
+        2142.8571428571427,
+        243.30900243309003,
+        520.1612903225806,
+        241.29930394431554
+      ]
+    },
+    "stock": {
+      "tasks": 7,
+      "reasoning": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "output": [
+        132,
+        387,
+        440,
+        487,
+        5730,
+        47,
+        58,
+        109,
+        71,
+        89
+      ],
+      "firstInput": [
+        11791,
+        11791,
+        11794,
+        11788,
+        11823,
+        11789,
+        11791
+      ],
+      "wallMs": [
+        4286,
+        5307,
+        5340,
+        6311,
+        31466,
+        7805,
+        6403
+      ],
+      "sysBytes": [
+        2162,
+        2162,
+        2162,
+        2162,
+        2162,
+        2162,
+        2162
+      ],
+      "toolCount": [
+        23,
+        23,
+        23,
+        23,
+        23,
+        23,
+        23
+      ],
+      "decode": [
+        182.32044198895028,
+        254.60526315789474,
+        190.88937093275487,
+        183.2894241625894,
+        205.9743340882131,
+        26.568682871678917,
+        267.28110599078343,
+        296.19565217391306,
+        168.24644549763033,
+        328.4132841328413
+      ]
+    }
+  }
+}

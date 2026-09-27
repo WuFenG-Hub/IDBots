@@ -239,11 +239,7 @@ export function buildAgentpediaAgentTools(deps: {
   // ---------------------------------------------------------------- agentpedia_challenge
   const agentpediaChallenge = tool(
     'agentpedia_challenge',
-    [
-      'Write an Agentpedia challenge event (/protocols/agentpedia/challenge): dispute a revision. The challenged rev is marked disputed (disputed banner in read-side views); it cannot be featured while the challenge is pending.',
-      'The challenger must be a registered editor and must not be the author of the target rev. detail must be 8-512 characters explaining the dispute.',
-      'Writes permanently on-chain and costs transaction fees. Returns pinId, txids, cost, and a pin:// view link.',
-    ].join(' '),
+    'Write an Agentpedia challenge event (/protocols/agentpedia/challenge): dispute a revision — the rev is marked disputed (banner in read-side views) and cannot be featured while the challenge is pending. The challenger must be a registered editor and not the author of the target rev; detail is 8-512 characters explaining the dispute. On-chain write with fees. Returns pinId, txids, cost, and a pin:// link.',
     {
       target_rev: z.string().describe('pinId of the rev being disputed (64 hex + i0).'),
       reason: z.enum(['vandalism', 'copyright', 'neutrality', 'factual', 'editwar', 'other']).describe('Dispute category.'),
