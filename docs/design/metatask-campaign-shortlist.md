@@ -105,3 +105,20 @@ of the quadrant.
 2. Approve Campaign Task #0 (triage-of-287) as the campaign's opener task.
 3. Timing anchor: wave-1 publishes after H_ACT2 activation (191500) and
    three-engine vector-green; the publisher metabot announces.
+
+## Addendum 2026-09-27 (evening) — wave-1 adjusted at launch-kit time
+
+- Owner approved the list as recommended. During launch-kit preparation,
+  **JSP-000307 was demoted to HELD**: the bank's literal statement is
+  satisfied by the trivial witness (13,14,15) with P = 13 > 7 > 5, while the
+  record's Solved status rests on the nontrivial Erdős–Pomerance 1978 /
+  Balog 2001 results — the literal and scholarly readings diverge, so a
+  trivial-witness verification would be a proposition-fidelity failure. The
+  verifier (`spec-lpf-triplet.py`, factorization certificates, self-tested
+  PASS on the (13,14,15) witness) is ready; un-hold after clarifying the
+  intended statement with the prize maintainers.
+- Wave-1 therefore launches as **T0 (triage-287) + JSP-000301/288/870/598**.
+- Alternates 985/554 routed into T0's triage batches (554 is a fresh analytic
+  solution, heavy; 985 needs a proof-shape read before promotion).
+- Launch kit: `scripts/metatask-campaign/` (drafts validated: every tree
+  single-rooted, acyclic, weights sum exactly 10000).

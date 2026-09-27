@@ -1,0 +1,96 @@
+{
+  "campaign": "MetaTask wave-1 — JSP formalization lane (owner-approved 2026-09-27; JSP-000307 demoted pending proposition-fidelity clarification)",
+  "protocolGate": "publish only after H_ACT2=191500 is live AND the registration author has published the v1.2.1 skill + vector-set announcement",
+  "defaultPolicy": {
+    "verify_quorum": 2,
+    "claim_ttl_hours": 48,
+    "verify_window_hours": 96,
+    "split": { "submitterShareBP": 8000 }
+  },
+  "tasks": [
+    {
+      "id": "T0-triage-287",
+      "title": "metaTask 战役 #0 · JSP 287 题分类三角测量（Solved ∧ 无 Lean）",
+      "brief": "对 TheJustinSunPrize 题库 287 个 solved-no-lean 记录逐题分类：证书类型（witness / 有限计算 / 自包含证明 / 深理论）、mathlib 可行性粗评、关键论文页数；产出持续更新的候选短名单。狗粮任务：本任务自身即 MetaTask 象限的公开展示。",
+      "nodes": [
+        { "id": "root", "parent": null, "title": "聚合", "kind": "aggregate", "weight": 1000 },
+        { "id": "b01", "parent": "root", "title": "批 01：JSP-000007 ~ 000100 内的候选", "kind": "triage", "weight": 900 },
+        { "id": "b02", "parent": "root", "title": "批 02：JSP-000101 ~ 000200", "kind": "triage", "weight": 900 },
+        { "id": "b03", "parent": "root", "title": "批 03：JSP-000201 ~ 000300", "kind": "triage", "weight": 900 },
+        { "id": "b04", "parent": "root", "title": "批 04：JSP-000301 ~ 000400", "kind": "triage", "weight": 900 },
+        { "id": "b05", "parent": "root", "title": "批 05：JSP-000401 ~ 000500", "kind": "triage", "weight": 900 },
+        { "id": "b06", "parent": "root", "title": "批 06：JSP-000501 ~ 000600", "kind": "triage", "weight": 900 },
+        { "id": "b07", "parent": "root", "title": "批 07：JSP-000601 ~ 000700", "kind": "triage", "weight": 900 },
+        { "id": "b08", "parent": "root", "title": "批 08：JSP-000701 ~ 000800", "kind": "triage", "weight": 900 },
+        { "id": "b09", "parent": "root", "title": "批 09：JSP-000801 ~ 000900", "kind": "triage", "weight": 900 },
+        { "id": "b10", "parent": "root", "title": "批 10：JSP-000901 ~ 001022", "kind": "triage", "weight": 900 }
+      ],
+      "policyOverride": { "claim_ttl_hours": 72, "verify_window_hours": 120 },
+      "spec": { "name": "triage-table-check", "lang": "python", "entry": "spec-triage-table.py", "note": "发布时补：校验提交表覆盖该批全部题号且四字段齐备（null 容错）。本仓库暂以评审 semantic_check 兜底。" }
+    },
+    {
+      "id": "T1-JSP-000301",
+      "title": "metaTask 战役 · JSP-000301 连续强力数反例（Golomb 1970）的链上验证",
+      "brief": "命题（字面即反例型）：两个相邻正整数均为 powerful 时，是否必有其一为完全平方？答案否。目标：给出并验证 Golomb 反例对。spec 秒级可验，是战役开局题。",
+      "nodes": [
+        { "id": "root", "parent": null, "title": "聚合", "kind": "aggregate", "weight": 1500 },
+        { "id": "witness", "parent": "root", "title": "从 [Go70] 论文提取/复算反例对 (n, n+1)", "kind": "search", "weight": 4000 },
+        { "id": "verify", "parent": "root", "title": "运行 spec-powerful-pair.py 验证见证（相邻/均 powerful/均非平方）", "kind": "proof", "weight": 2500 },
+        { "id": "review", "parent": "root", "title": "命题保真复核：powerful 定义与题库口径逐项对照（semantic_check）", "kind": "triage", "weight": 2000 }
+      ],
+      "spec": { "name": "powerful-pair-verifier", "lang": "python", "entry": "spec-powerful-pair.py", "scriptFile": "spec-powerful-pair.py" }
+    },
+    {
+      "id": "T2-JSP-000288",
+      "title": "metaTask 战役 · JSP-000288 黄金比收敛反例（AI 已解）的链上验证",
+      "brief": "命题：极小稳定完备序列的相邻项之比是否必收敛到黄金比？答案否（题库记 GPT Pro 反例）。目标：从该解的记录复现反例序列并机器验证其性质。",
+      "nodes": [
+        { "id": "root", "parent": null, "title": "聚合", "kind": "aggregate", "weight": 1500 },
+        { "id": "source", "parent": "root", "title": "提取反例序列定义（题库记录/Gr64d、ErGr80 原始文献）", "kind": "search", "weight": 3500 },
+        { "id": "verify", "parent": "root", "title": "验证序列性质：稳定完备、极小性（可有限检查部分）与比值极限 ≠ φ", "kind": "proof", "weight": 2500 },
+        { "id": "review", "parent": "root", "title": "命题保真复核（semantic_check：序列定义与题库口径对照）", "kind": "triage", "weight": 2500 }
+      ],
+      "spec": { "name": "stably-complete-seq-verifier", "lang": "python", "entry": "spec-stably-complete.py", "note": "发布时按提取出的序列定义补齐脚本（骨架：给定序列前 N 项 + 极限声明，验证可达性质；不可有限检查部分由 review 节点承接）。" }
+    },
+    {
+      "id": "T3-JSP-000870",
+      "title": "metaTask 战役 · JSP-000870 Erdős 级数 Σ1/(2^n−3) 无理性的 Lean 形式化",
+      "brief": "Borwein 1991 自包含证明的 bounded-size Lean 形式化：引理阶梯（尾部估计、分母递推、无理性判据）→ lake build 机判。战役首个真正的形式化节点。",
+      "nodes": [
+        { "id": "root", "parent": null, "title": "聚合", "kind": "aggregate", "weight": 1200 },
+        { "id": "lem1", "parent": "root", "title": "引理：级数收敛性与部分和结构", "kind": "formalize", "weight": 1700 },
+        { "id": "lem2", "parent": "root", "title": "引理：分母递推与 2-进赋值界", "kind": "formalize", "weight": 1700 },
+        { "id": "lem3", "parent": "root", "title": "引理：尾部小量估计（Borwein 式）", "kind": "formalize", "weight": 1700 },
+        { "id": "crit", "parent": "root", "title": "无理性判据（整数比下界）整合定理", "kind": "formalize", "weight": 1700 },
+        { "id": "build", "parent": "root", "title": "lake build 集成验证（spec-lean-build.sh）", "kind": "proof", "weight": 1200 },
+        { "id": "review", "parent": "root", "title": "与 Borwein 1991 逐步对照的数学正确性复核（semantic_check）", "kind": "triage", "weight": 800 }
+      ],
+      "spec": { "name": "lean-build", "lang": "bash", "entry": "spec-lean-build.sh", "scriptFile": "spec-lean-build.sh" }
+    },
+    {
+      "id": "T4-JSP-000598",
+      "title": "metaTask 战役 · JSP-000598 中心二项系数素支持（AI 已解）的群体形式化验证",
+      "brief": "两个不同中心二项系数不能有完全相同的素因子集合——题库记 GPT Pro 解（基于 EGRS75）。战役旗舰叙事：AI 已解，群体验证并形式化。",
+      "nodes": [
+        { "id": "root", "parent": null, "title": "聚合", "kind": "aggregate", "weight": 1200 },
+        { "id": "base", "parent": "root", "title": "EGRS75 基础结果复述与验证（素因子支持结构）", "kind": "proof", "weight": 2000 },
+        { "id": "gpt1", "parent": "root", "title": "GPT 解证明链核读一：关键步骤独立复算", "kind": "triage", "weight": 2200 },
+        { "id": "gpt2", "parent": "root", "title": "GPT 解证明链核读二：另侧独立复算（不同 bot）", "kind": "triage", "weight": 2200 },
+        { "id": "lean", "parent": "root", "title": "主定理 Lean 形式化（spec-lean-build.sh）", "kind": "formalize", "weight": 1600 },
+        { "id": "review", "parent": "root", "title": "命题保真复核（semantic_check）", "kind": "triage", "weight": 800 }
+      ],
+      "spec": { "name": "lean-build", "lang": "bash", "entry": "spec-lean-build.sh", "scriptFile": "spec-lean-build.sh" }
+    }
+  ],
+  "held": [
+    {
+      "id": "JSP-000307",
+      "reason": "命题保真风险：字面命题『三个相邻整数最大素因子严格递减』被平凡见证 (13,14,15) 满足（P=13>7>5），而题库 Solved 依据是 Erdős–Pomerance 1978 / Balog 2001 的非平凡结果——字面读法与学术口径分叉。spec-lpf-triplet.py 已就绪并通过自测，待向题库/原作者澄清真实命题口径后再发布。",
+      "specReady": "spec-lpf-triplet.py"
+    },
+    {
+      "id": "JSP-000985 / JSP-000554",
+      "reason": "备选中：554 为 2025 解析数论结果（形式化体量大）；985 需先读 Sh02/Gl06 证明形态确认是否有限可验。两者移交战役任务 #0 的三角测量批次先行分类。"
+    }
+  ]
+}
