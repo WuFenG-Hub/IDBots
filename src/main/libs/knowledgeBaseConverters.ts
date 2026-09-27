@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import { ensureDomMatrixPolyfill } from './domMatrixPolyfill';
 
 /**
  * Pure-JS document-to-text converters for the built-in MetaBot knowledge base.
@@ -81,6 +82,12 @@ let pdfjsModulePromise: Promise<PdfjsModuleLike> | null = null;
  * Exported for the knowledgeBaseText tests.
  */
 export async function loadPdfjs(): Promise<PdfjsModuleLike> {
+  // pdfjs-dist 6 evaluates `new DOMMatrix()` at module level but only
+  // polyfills it from the optional, platform-binary @napi-rs/canvas package —
+  // without a loadable canvas (e.g. Windows installers packed from a macOS
+  // checkout) the import itself throws. Our 2D subset must be in place first;
+  // text extraction never renders, so it never needs the full geometry spec.
+  ensureDomMatrixPolyfill();
   if (!pdfjsModulePromise) {
     const load = async (): Promise<PdfjsModuleLike> => {
       const attempts: string[] = [];
