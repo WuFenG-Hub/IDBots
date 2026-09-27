@@ -8680,20 +8680,37 @@ export class CoworkRunner extends EventEmitter {
       // resolves to a DIFFERENT route, keep the turn alive by resuming on it:
       // the hub re-pins the live dsh session to the fallback provider runtime
       // and the JSONL history carries over (same mechanism as a mid-session
-      // model switch). Non-transient errors (auth 401, context overflow)
-      // never enter this chain; without a usable fallback the behavior is
-      // exactly as before (error settlement below).
+      // model switch).
+      //
+      // Quota deaths join the switch (2026-09-28 nightly-automation
+      // post-mortem: opencode credit exhaustion killed every nightly study /
+      // dream turn with 429 GoUsageLimitError while the bot's zhipu fallback
+      // brain sat unused). A quota death skips the same-route resume ladder
+      // above (retrying an out-of-credit route cannot succeed) and takes the
+      // fallback switch DIRECTLY, with a SINGLE attempt on the fallback
+      // route — exhausted credit does not heal mid-turn, so a resume ladder
+      // there would only multiply dead attempts; the fallback ladder below
+      // still only continues on TRANSIENT failures of the fallback route.
+      // Auth 401 / context overflow never enter this chain; without a usable
+      // fallback the behavior is exactly as before (error settlement below,
+      // whose quota notice names `lastAttemptRoute` — the fallback route when
+      // the switch happened, so "top up" points at the route that actually
+      // ran out).
+      const gateTransient = isTransientDshTurnError(outcome);
+      const gateQuota = isQuotaDshTurnError(outcome);
       if (
         outcome.kind === 'error'
         && !activeSession.abortController.signal.aborted
-        && isTransientDshTurnError(outcome)
+        && (gateTransient || gateQuota)
       ) {
         const fallbackRoute = this.resolveSessionFallbackDshRoute(sessionId, route);
         if (fallbackRoute) {
           coworkLog(
             'WARN',
             'runDshSessionLocal',
-            'Primary provider route still failing transiently after the resume budget — switching to the bot fallback brain route',
+            gateQuota
+              ? 'Primary provider route is out of credit — switching to the bot fallback brain route'
+              : 'Primary provider route still failing transiently after the resume budget — switching to the bot fallback brain route',
             {
               sessionId,
               code: outcome.error?.code,
@@ -8708,8 +8725,12 @@ export class CoworkRunner extends EventEmitter {
           this.addSystemMessage(
             sessionId,
             tApp(
-              `主模型路由持续不可用，本轮已切换到该 Bot 的备用模型 ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`,
-              `The primary model route kept failing; this turn switched to the bot's fallback model ${fallbackRoute.model} (${fallbackRoute.provider}).`
+              gateQuota
+                ? `主模型 ${route.model}（${route.provider}）额度不足，本轮已切换到该 Bot 的备用模型 ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`
+                : `主模型路由持续不可用，本轮已切换到该 Bot 的备用模型 ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`,
+              gateQuota
+                ? `The primary model ${route.model} (${route.provider}) ran out of credit; this turn switched to the bot's fallback model ${fallbackRoute.model} (${fallbackRoute.provider}).`
+                : `The primary model route kept failing; this turn switched to the bot's fallback model ${fallbackRoute.model} (${fallbackRoute.provider}).`
             ),
             {
               dshRouteFallback: true,
@@ -8719,9 +8740,12 @@ export class CoworkRunner extends EventEmitter {
               toModel: fallbackRoute.model,
             }
           );
+          // First attempt on the fallback route is unconditional — the gate
+          // above only lets us in when the primary route is dead.
+          lastAttemptRoute = fallbackRoute;
+          outcome = await runGuardedTurn(TRANSIENT_TURN_RESUME_PROMPT, undefined, fallbackRoute);
           for (let fallbackAttempt = 1; fallbackAttempt <= DSH_FALLBACK_TURN_MAX_RESUMES; fallbackAttempt += 1) {
             if (outcome.kind !== 'error' || activeSession.abortController.signal.aborted || !isTransientDshTurnError(outcome)) break;
-            lastAttemptRoute = fallbackRoute;
             coworkLog(
               'WARN',
               'runDshSessionLocal',
