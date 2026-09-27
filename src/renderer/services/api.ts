@@ -386,6 +386,7 @@ class ApiService {
         supportsImages,
         provider,
         selectedModel.options,
+        selectedModel.maxOutputTokens,
       );
     }
 
@@ -411,6 +412,7 @@ class ApiService {
     supportsImages: boolean = false,
     provider: string = 'anthropic',
     modelOptions?: ModelOptions,
+    maxOutputTokens?: number,
   ): Promise<{ content: string; reasoning?: string }> {
     let fullContent = '';
     let fullReasoning = '';
@@ -437,9 +439,12 @@ class ApiService {
         ...(formattedUserMessage ? [formattedUserMessage] : []),
       ];
 
+      // Follow the model's configured output ceiling; uncatalogued models
+      // resolve to the 128K main-process default (thinking shares the budget,
+      // so the old hardcoded 32K truncated long replies).
       const requestBody: any = {
         model: modelId,
-        max_tokens: 32768,
+        max_tokens: maxOutputTokens ?? 128_000,
         messages: messages,
         stream: true,
       };
@@ -467,7 +472,7 @@ class ApiService {
           budget_tokens: 10000
         };
         // Thinking models need max_tokens above the thinking budget.
-        requestBody.max_tokens = 32768;
+        requestBody.max_tokens = Math.max(maxOutputTokens ?? 128_000, 32_768);
       }
 
       return new Promise((resolve, reject) => {
