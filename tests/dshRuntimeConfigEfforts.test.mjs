@@ -76,7 +76,11 @@ test('model entries without maxOutputTokens fall back to the default ceiling', (
     models: [{ id: 'deepseek-v4-flash', contextWindow: 1_000_000 }],
   }]))
   const native = entryById(config, 'llm-deepseek-deepseek-official')
-  assert.equal(native.config.models[0].maxTokens, 32_768)
+  // 256K, not the old 32K: d80f0ad5 raised the DeepSeek V4 output ceiling to
+  // match upstream deepseek-harness (NATIVE_DEEPSEEK_DEFAULT_MAX_TOKENS in
+  // dsh-runtime/lib/generate-runtime-config.mjs) and migrated existing 32K
+  // provider rows at startup (services/deepseekOutputCeilingMigration).
+  assert.equal(native.config.models[0].maxTokens, 256_000)
 })
 
 test('native vision catalog emits inputModalities and request-image budgets', () => {
