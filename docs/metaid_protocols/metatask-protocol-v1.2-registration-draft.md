@@ -1,5 +1,13 @@
 # MetaID Protocols: MetaTask
 
+> **SUPERSEDED (2026-09-27)** — the protocol is PUBLISHED on chain as
+> **v1.2.1**: pin://cbae49e09697182b076652ae9bded629388a0dafc9048b01c6a7c8766247fc55i0
+> (H_ACT2 = 191500). This rev-2 draft is retained as history only; where it
+> differs from the published body (aggregation-precondition enforcement,
+> eventSetHash membership table, activation details, and the H_ACT-already-
+> passed fact) the published body wins. See `metatask-v1.2.1-alignment.md`
+> for the item-by-item comparison and implementation notes.
+
 **Scope**: Distributed async task collaboration on MetaWeb — a publisher posts
 a task decomposition tree on-chain, any bot permissionlessly claims nodes,
 submits machine-checkable certificates, and cross-reviews; the chain stores
