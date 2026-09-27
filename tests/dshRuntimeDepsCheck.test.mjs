@@ -96,6 +96,46 @@ test('extra installed packages not in package.json do not fail the check', () =>
   assert.equal(checkDshRuntimeDeps(root).ok, true);
 });
 
+// 2026-09-27: an interrupted pnpm install on an exFAT worktree left
+// @trycua/cua-driver-darwin-arm64 recorded in .modules.yaml but never copied
+// to disk; incremental installs trusted the record and never healed it, and
+// the first failure surfaced at computer-use runtime boot (ResolveLibPathError).
+const CUA_PROVIDER = '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native';
+const CUA_PLATFORM_PKG = {
+  'darwin-arm64': '@trycua/cua-driver-darwin-arm64',
+  'darwin-x64': '@trycua/cua-driver-darwin-x64',
+  'linux-arm64': '@trycua/cua-driver-linux-arm64-gnu',
+  'linux-x64': '@trycua/cua-driver-linux-x64-gnu',
+  'win32-arm64': '@trycua/cua-driver-win32-arm64-msvc',
+  'win32-x64': '@trycua/cua-driver-win32-x64-msvc',
+}[`${process.platform}-${process.arch}`];
+
+test('fails when the cua-driver platform binary is recorded-but-missing', { skip: !CUA_PLATFORM_PKG && 'unknown platform mapping' }, () => {
+  const root = makeFixture({
+    deps: { [CUA_PROVIDER]: '0.1.7-rc.2' },
+    installed: { [CUA_PROVIDER]: '0.1.7-rc.2' },
+  });
+  const result = checkDshRuntimeDeps(root);
+  assert.equal(result.ok, false);
+  assert.ok(result.problems.some((p) => p.includes(CUA_PLATFORM_PKG) && p.includes('install --force')));
+});
+
+test('passes when the cua-driver platform binary is present', { skip: !CUA_PLATFORM_PKG && 'unknown platform mapping' }, () => {
+  const root = makeFixture({
+    deps: { [CUA_PROVIDER]: '0.1.7-rc.2' },
+    installed: { [CUA_PROVIDER]: '0.1.7-rc.2', [CUA_PLATFORM_PKG]: '0.28.0' },
+  });
+  assert.equal(checkDshRuntimeDeps(root).ok, true);
+});
+
+test('the platform-binary watch stays silent without the CU provider', { skip: !CUA_PLATFORM_PKG && 'unknown platform mapping' }, () => {
+  const root = makeFixture({
+    deps: { '@deepseek-ai/dsh-agent': '0.1.7-rc.2' },
+    installed: { '@deepseek-ai/dsh-agent': '0.1.7-rc.2' },
+  });
+  assert.equal(checkDshRuntimeDeps(root).ok, true);
+});
+
 test('ranged specs only require presence, not an exact version', () => {
   const root = makeFixture({
     deps: { 'node-addon-require-builtin': '^0.1.4' },
