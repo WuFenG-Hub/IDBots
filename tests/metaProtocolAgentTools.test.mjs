@@ -3,9 +3,12 @@
 //   node --test tests/metaProtocolAgentTools.test.mjs
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import Module from 'node:module';
-import test from 'node:test';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test, { after } from 'node:test';
 
 const require = Module.createRequire(import.meta.url);
 const {
@@ -77,7 +80,7 @@ function makeDetail(record = makeRecord()) {
 }
 
 function makeHarness(overrides = {}) {
-  const calls = { createPin: [], check: [], list: [], detail: [], pinVersions: [], fallbackList: [], fallbackVersions: [] };
+  const calls = { createPin: [], check: [], list: [], detail: [], pinVersions: [], fallbackList: [], fallbackVersions: [], gate: [] };
   const createPin = async (metabotId, metaidData, options) => {
     calls.createPin.push({ metabotId, metaidData, options });
     if (overrides.createPinError) throw overrides.createPinError;
@@ -113,6 +116,12 @@ function makeHarness(overrides = {}) {
       return [];
     },
   };
+  const gateLocalFile = 'gateLocalFile' in overrides
+    ? overrides.gateLocalFile
+    : async (filePath) => {
+        calls.gate.push(filePath);
+        return null;
+      };
   const tools = buildMetaProtocolAgentTools({
     tool: (name, description, schema, handler) => ({ name, description, handler }),
     metaProtocol: control,
@@ -120,6 +129,9 @@ function makeHarness(overrides = {}) {
     sessionId: SESSION_ID,
     resolveMetabotId: () => ('metabotId' in overrides ? overrides.metabotId : METABOT_ID),
     resolveActingIdentity: overrides.resolveActingIdentity ?? (() => ACTING_IDENTITY),
+    // Default: a gate that approves and records. Pass `gateLocalFile: null` to
+    // simulate a host that wired no gate at all (must fail closed).
+    ...(gateLocalFile ? { gateLocalFile } : {}),
   });
   const byName = Object.fromEntries(tools.map((item) => [item.name, item]));
   return { calls, byName, tools };
@@ -150,12 +162,17 @@ test('registers metaprotocol_registry and post_metaprotocol with the verbatim sp
     byName.post_metaprotocol.description,
     [
       'Publish or update a protocol in the MetaID protocol registry (/protocols/metaprotocol).',
-      '- publish: register a NEW protocol. Requires title, protocolName and a body (field',
-      '  definitions). The registry path /protocols/<protocolName> must be free — if already',
+      '- publish: register a NEW protocol. Requires title, protocolName and a definition',
+      '  (body, protocolContent or protocolContentFile — see below). The registry path',
+      '  /protocols/<protocolName> must be free — if already',
       '  registered by someone else the call fails with the current registrant info; pick another',
       '  protocolName.',
       '- update: publish a new version of an existing protocol. Only the original registrant',
       '  (identity check) may update; version auto-increments unless given.',
+      'Either action takes the definition as body (field definitions) or verbatim protocolContent',
+      '(raw JSON5 text) — or as protocolContentFile, an absolute local path whose bytes are used',
+      'as protocolContent unchanged (use it when the body is too large to pass inline without',
+      'transcription loss).',
       'Both actions validate the payload against the metaprotocol schema BEFORE anything reaches',
       'the wallet, then ask the host to sign and broadcast the on-chain pin (fees apply).',
       'Resolve the target for update by protocolPath, protocolName or pinId.',
@@ -194,7 +211,7 @@ test('schema validation: missing title/protocolName and body/protocolContent XOR
     protocolContent: '{}',
   });
   assert.equal(both.isError, true);
-  assert.match(both.content[0].text, /pass exactly one of body .* or protocolContent/);
+  assert.match(both.content[0].text, /pass exactly one of body .*or protocolContent/);
 
   const neither = await byName.post_metaprotocol.handler({
     action: 'publish',
@@ -202,7 +219,31 @@ test('schema validation: missing title/protocolName and body/protocolContent XOR
     protocolName: 'TaskBoard',
   });
   assert.equal(neither.isError, true);
-  assert.match(neither.content[0].text, /pass exactly one of body .* or protocolContent/);
+  assert.match(neither.content[0].text, /pass exactly one of body .*or protocolContent/);
+
+  // protocolContentFile participates in the same XOR: any pair of the three
+  // content sources is refused, and a file may not be combined with either
+  // inline form (before this guard the file argument was silently ignored and
+  // the write proceeded from body/protocolContent).
+  const fileAndBody = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'T',
+    protocolName: 'TaskBoard',
+    body: { task: '' },
+    protocolContentFile: '/tmp/any.json',
+  });
+  assert.equal(fileAndBody.isError, true);
+  assert.match(fileAndBody.content[0].text, /pass exactly one of body .*protocolContentFile/);
+
+  const fileAndContent = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'T',
+    protocolName: 'TaskBoard',
+    protocolContent: '{}',
+    protocolContentFile: '/tmp/any.json',
+  });
+  assert.equal(fileAndContent.isError, true);
+  assert.match(fileAndContent.content[0].text, /pass exactly one of body .*protocolContentFile/);
 
   assert.equal(calls.createPin.length, 0, 'no chain write may happen on validation failures');
 });
@@ -316,6 +357,279 @@ test('publish serializes body to JSON5 protocolContent verbatim on-chain', async
     result.content[0].text,
     /Protocol published: pin:\/\/tx-mp-1i0 \(tx tx-mp-1\)[\s\S]*verify with metaprotocol_registry \(action "read"\)\./,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Large definitions: protocolContentFile (issue: a body too large to pass
+// inline cannot be published without transcription loss)
+// ---------------------------------------------------------------------------
+
+const largeBodyDir = mkdtempSync(join(tmpdir(), 'metaprotocol-large-body-'));
+after(() => rmSync(largeBodyDir, { recursive: true, force: true }));
+
+// A body with the two properties that make inlining lossy: it is far larger
+// than a comfortable context window, and it contains a line past the host's
+// 2000-character line truncation threshold.
+const LONG_LINE = ` "note": "${'规范原文 '.repeat(1500)}",`;
+const LARGE_BODY = ['{', ' "title": "Large",', LONG_LINE, ' "tail": "end"', '}'].join('\n');
+
+function sha256(text) {
+  return createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
+}
+
+function writeBodyFile(name, text) {
+  const filePath = join(largeBodyDir, name);
+  writeFileSync(filePath, text, 'utf8');
+  return filePath;
+}
+
+test('the generated fixture is actually large and has a line past the host truncation threshold', () => {
+  assert.ok(Buffer.byteLength(LARGE_BODY, 'utf8') > 16384, 'fixture must exceed the inline-friendly size');
+  assert.ok(
+    LARGE_BODY.split('\n').some((line) => line.length > 2000),
+    'fixture must contain a line the host read tool would truncate',
+  );
+});
+
+test('protocolContentFile: publish sends the file bytes verbatim as protocolContent', async () => {
+  const filePath = writeBodyFile('large-publish.json', LARGE_BODY);
+  const { byName, calls } = makeHarness();
+  const result = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'Large Protocol',
+    protocolName: 'LargeProto',
+    protocolContentType: 'application/json5',
+    protocolContentFile: filePath,
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(calls.createPin.length, 1);
+  const { metaidData, options } = calls.createPin[0];
+  assert.deepEqual(options, { network: 'mvc', origin: 'tool:post_metaprotocol' });
+  // Same 7-tuple shape as the inline path — no base64, no version drift.
+  assert.equal(metaidData.operation, 'create');
+  assert.equal(metaidData.path, '/protocols/metaprotocol');
+  assert.equal(metaidData.version, '1.0.0');
+  assert.equal(metaidData.contentType, 'application/json');
+  assert.equal(metaidData.encoding, 'utf-8');
+  assert.equal(metaidData.encryption, '0');
+  const payload = JSON.parse(metaidData.payload);
+  assert.equal(payload.protocolContent, LARGE_BODY, 'file bytes are used unchanged, not re-serialized');
+  assert.equal(payload.protocolContentType, 'application/json5');
+  assert.equal(sha256(payload.protocolContent), sha256(LARGE_BODY));
+});
+
+test('protocolContentFile: bytes are verbatim including a trailing newline (no trimming)', async () => {
+  const withNewline = `${LARGE_BODY}\n`;
+  const filePath = writeBodyFile('large-trailing-newline.json', withNewline);
+  const { byName, calls } = makeHarness();
+  const result = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'Large Protocol',
+    protocolName: 'LargeProto',
+    protocolContentFile: filePath,
+  });
+  assert.equal(result.isError, undefined);
+  const payload = JSON.parse(calls.createPin[0].metaidData.payload);
+  assert.equal(payload.protocolContent, withNewline);
+  assert.ok(payload.protocolContent.endsWith('\n'), 'a trailing newline must survive');
+  assert.equal(sha256(payload.protocolContent), sha256(withNewline));
+});
+
+test('protocolContentFile: update keeps the modify 7-tuple and outer version = replaced', async () => {
+  const filePath = writeBodyFile('large-update.json', LARGE_BODY);
+  const { byName, calls } = makeHarness();
+  const result = await byName.post_metaprotocol.handler({
+    action: 'update',
+    target: '/protocols/taskboard',
+    title: 'Task Board Protocol',
+    protocolName: 'TaskBoard',
+    version: '1.2.2',
+    protocolContentType: 'application/json5',
+    protocolContentFile: filePath,
+  });
+  assert.equal(result.isError, undefined);
+  const { metaidData } = calls.createPin[0];
+  assert.equal(metaidData.operation, 'modify');
+  assert.equal(metaidData.path, `@${SOURCE_PIN_ID}`);
+  assert.equal(metaidData.version, '1.0.9', 'outer version = the body.version being replaced');
+  assert.equal(metaidData.encoding, 'utf-8');
+  const payload = JSON.parse(metaidData.payload);
+  assert.equal(payload.version, '1.2.2');
+  assert.equal(payload.protocolContent, LARGE_BODY);
+  assert.equal(sha256(payload.protocolContent), sha256(LARGE_BODY));
+});
+
+test('protocolContentFile: relative path, missing file and empty file are refused before the wallet', async () => {
+  const { byName, calls } = makeHarness();
+
+  const relative = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'T',
+    protocolName: 'TaskBoard',
+    protocolContentFile: 'fixtures/large.json',
+  });
+  assert.equal(relative.isError, true);
+  assert.match(relative.content[0].text, /ABSOLUTE local path/);
+
+  const missing = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'T',
+    protocolName: 'TaskBoard',
+    protocolContentFile: join(largeBodyDir, 'nope.json'),
+  });
+  assert.equal(missing.isError, true);
+  assert.match(missing.content[0].text, /protocolContentFile not found/);
+
+  const emptyPath = writeBodyFile('empty.json', '  \n\t');
+  const empty = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'T',
+    protocolName: 'TaskBoard',
+    protocolContentFile: emptyPath,
+  });
+  assert.equal(empty.isError, true);
+  assert.match(empty.content[0].text, /protocolContentFile is empty/);
+
+  assert.equal(calls.createPin.length, 0, 'no chain write may happen on file-source failures');
+});
+
+test('protocolContentFile: honors the local-file approval gate', async () => {
+  const filePath = writeBodyFile('large-gated.json', LARGE_BODY);
+  const gated = [];
+  const { byName, calls } = makeHarness({
+    gateLocalFile: async (candidate) => {
+      gated.push(candidate);
+      return 'owner approval required before publishing a local file';
+    },
+  });
+  const result = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'Large Protocol',
+    protocolName: 'LargeProto',
+    protocolContentFile: filePath,
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /owner approval required/);
+  assert.deepEqual(gated, [filePath], 'the gate sees the exact path being read');
+  assert.equal(calls.createPin.length, 0, 'a denied file must not reach the wallet');
+
+  // …and a granting gate lets the write through.
+  const allowed = [];
+  const granting = makeHarness({
+    gateLocalFile: async (candidate) => {
+      allowed.push(candidate);
+      return null;
+    },
+  });
+  const ok = await granting.byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'Large Protocol',
+    protocolName: 'LargeProto',
+    protocolContentFile: filePath,
+  });
+  assert.equal(ok.isError, undefined);
+  assert.deepEqual(allowed, [filePath]);
+  assert.equal(granting.calls.createPin.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Large definitions: protocolContentFile — owner gate placement and hard edges
+// ---------------------------------------------------------------------------
+
+test('protocolContentFile: a non-UTF-8 file is refused instead of being published lossily', async () => {
+  const filePath = join(largeBodyDir, 'invalid-utf8.json');
+  writeFileSync(filePath, Buffer.from([0x7b, 0x0a, 0x22, 0x61, 0x22, 0x3a, 0x20, 0xff, 0x0a, 0x7d]));
+  const { byName, calls } = makeHarness();
+  const result = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'T',
+    protocolName: 'TaskBoard',
+    protocolContentFile: filePath,
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /not valid UTF-8/);
+  assert.equal(calls.createPin.length, 0, 'an undecodable file must not reach the wallet');
+  assert.equal(calls.gate.length, 0, 'no owner prompt for a file that cannot be published verbatim');
+});
+
+test('protocolContentFile: with no owner gate wired, publishing is refused (fails closed)', async () => {
+  const filePath = writeBodyFile('large-no-gate.json', LARGE_BODY);
+  const { byName, calls } = makeHarness({ gateLocalFile: null });
+  const result = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'Large Protocol',
+    protocolName: 'LargeProto',
+    protocolContentFile: filePath,
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /no owner-approval gate wired/);
+  assert.equal(calls.createPin.length, 0, 'an ungated local-file publish must never happen');
+});
+
+test('protocolContentFile: a file swapped while approval was pending is refused (not published)', async () => {
+  const filePath = writeBodyFile('large-swap.json', LARGE_BODY);
+  const evil = '{"title": "swapped while the owner was deciding"}';
+  const { byName, calls } = makeHarness({
+    gateLocalFile: async (candidate) => {
+      calls.gate.push(candidate);
+      writeFileSync(filePath, evil, 'utf8'); // the swap lands inside the approval window
+      return null;
+    },
+  });
+  const result = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'Large Protocol',
+    protocolName: 'LargeProto',
+    protocolContentFile: filePath,
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /changed while approval was pending/);
+  assert.equal(calls.createPin.length, 0, 'the swapped content must not be published');
+});
+
+test('protocolContentFile: the owner gate runs only after the calls that would be refused anyway', async () => {
+  const filePath = writeBodyFile('large-ordering.json', LARGE_BODY);
+
+  // Schema-invalid definition: refused by the draft-07 gate, no owner prompt.
+  const schemaInvalid = makeHarness();
+  const bad = await schemaInvalid.byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'T',
+    protocolName: 'Bad-Name',
+    protocolContentFile: filePath,
+  });
+  assert.equal(bad.isError, true);
+  assert.match(bad.content[0].text, /Invalid protocol payload/);
+  assert.equal(schemaInvalid.calls.gate.length, 0, 'no owner prompt for a schema-invalid call');
+  assert.equal(schemaInvalid.calls.createPin.length, 0);
+
+  // Occupied path: refused by the conflict precheck, no owner prompt.
+  const conflict = makeHarness({ check: async (p) => ({ path: p, available: false, existing: makeRecord() }) });
+  const occupied = await conflict.byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'T',
+    protocolName: 'TaskBoard',
+    protocolContentFile: filePath,
+  });
+  assert.equal(occupied.isError, true);
+  assert.match(occupied.content[0].text, /already registered by/);
+  assert.equal(conflict.calls.gate.length, 0, 'no owner prompt for an occupied path');
+
+  // Non-registrant update: refused by the identity cascade, no owner prompt.
+  const foreign = makeHarness({
+    resolveActingIdentity: () => ({ ...ACTING_IDENTITY, globalMetaId: 'idq1someone-else', metaId: 'other', address: 'other-addr' }),
+    detail: () => makeDetail(makeRecord({ payload: { protocolContent: LARGE_BODY } })),
+  });
+  const notMine = await foreign.byName.post_metaprotocol.handler({
+    action: 'update',
+    target: '/protocols/taskboard',
+    title: 'T',
+    protocolName: 'TaskBoard',
+    protocolContentFile: filePath,
+  });
+  assert.equal(notMine.isError, true);
+  assert.match(notMine.content[0].text, /Only the original registrant/);
+  assert.equal(foreign.calls.gate.length, 0, 'no owner prompt for a non-registrant update');
 });
 
 // ---------------------------------------------------------------------------
@@ -668,4 +982,11 @@ test('coworkRunner assigns the metaProtocolRegistry option and registers both to
   const chainWriteIdx = source.indexOf('if (this.metabotChainWrite) {');
   const writerIdx = source.indexOf('post_metaprotocol publish/update');
   assert.ok(chainWriteIdx !== -1 && writerIdx !== -1 && writerIdx > chainWriteIdx);
+
+  // The writer wiring must hand over the local-file approval gate, otherwise
+  // protocolContentFile reads a workspace-external file with no owner consent.
+  const writerCallIdx = source.indexOf('buildMetaProtocolAgentTools({', writerIdx);
+  assert.ok(writerCallIdx !== -1, 'writer wiring must call buildMetaProtocolAgentTools');
+  const writerCallBlock = source.slice(writerCallIdx, source.indexOf('});', writerCallIdx));
+  assert.match(writerCallBlock, /gateLocalFile/, 'writer wiring must pass gateLocalFile');
 });
