@@ -9,7 +9,12 @@ import { createRequire } from 'node:module';
 // https://vitejs.dev/config/
 // Override both the HTTP and HMR port for parallel checkouts (e.g. git
 // worktrees) via IDBOTS_VITE_DEV_PORT; the main checkout keeps 5175.
-const devPort = Number(process.env.IDBOTS_VITE_DEV_PORT || 5175);
+// A `--port` CLI override must realign the HMR port too: vite's CLI flag only
+// changes server.port, and a stale hmr.port would point renderer HMR at
+// whatever else listens on that port (another checkout's dev server), which
+// vite rejects by token and the client answers with an endless reload loop.
+const cliPort = process.argv.join(' ').match(/(?:^|\s)--port[= ](\d+)/)?.[1];
+const devPort = Number(process.env.IDBOTS_VITE_DEV_PORT || cliPort || 5175);
 const isProductionBuild = process.env.NODE_ENV === 'production';
 const shouldUseVitePolling = process.env.IDBOTS_VITE_USE_POLLING === '1';
 
