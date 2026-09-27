@@ -67,6 +67,7 @@ export class MetaTaskRefresher {
           // one malformed task must not fail the sweep; next refresh retries it
         }
       }
+      await store.enrichIdentities(projections);
       store.saveProjections(projections);
       const boundaryBlock = projections.reduce(
         (max, projection) => Math.max(max, projection.freshness.boundaryBlock),

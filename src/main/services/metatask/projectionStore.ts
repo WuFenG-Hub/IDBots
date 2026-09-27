@@ -5,6 +5,7 @@ import type {
   MetaTaskBoard,
   MetaTaskBoardTask,
   MetaTaskChainEvent,
+  MetaTaskIdentity,
   MetaTaskTaskProjection,
 } from './types';
 
@@ -12,19 +13,24 @@ interface Row {
   [column: string]: unknown;
 }
 
+/** Resolves display identities for metaIds (local roster now; MetaSo later). */
+export type MetaTaskIdentityResolver = (metaIds: string[]) => Promise<Record<string, MetaTaskIdentity>>;
+
 /**
  * MetaTask projection cache (P1 read path). These tables are REBUILDABLE
  * caches of the chain replay — never a task entity of record ("referenced,
  * not mixed in" boundary from the long-term-task redesign). Dropping all
- * three tables and re-running the refresher reproduces identical content.
+ * tables and re-running the refresher reproduces identical content.
  */
 export class MetaTaskProjectionStore {
   private readonly db: Database;
   private readonly saveDb: () => void;
+  private readonly resolveIdentities?: MetaTaskIdentityResolver;
 
-  constructor(db: Database, saveDb: () => void) {
+  constructor(db: Database, saveDb: () => void, options?: { resolveIdentities?: MetaTaskIdentityResolver }) {
     this.db = db;
     this.saveDb = saveDb;
+    this.resolveIdentities = options?.resolveIdentities;
     this.ensureTables();
   }
 
@@ -87,6 +93,13 @@ export class MetaTaskProjectionStore {
         created_at_ms INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_metatask_alerts_id ON metatask_alerts(id DESC);
+      CREATE TABLE IF NOT EXISTS metatask_identities (
+        meta_id TEXT PRIMARY KEY,
+        name TEXT,
+        avatar TEXT,
+        source TEXT NOT NULL DEFAULT 'local',
+        resolved_at TEXT NOT NULL
+      );
     `);
     this.saveDb();
   }
@@ -168,6 +181,78 @@ export class MetaTaskProjectionStore {
   }
 
   // ── projections ────────────────────────────────────────────────────────────
+
+  /** Every metaId a projection displays (publisher, participants, node actors, voters). */
+  private static actorsOf(projection: MetaTaskTaskProjection): Set<string> {
+    const actors = new Set<string>([projection.publisher]);
+    for (const participant of projection.participants) actors.add(participant.metaId);
+    for (const node of Object.values(projection.nodeStates)) {
+      if (node.holder) actors.add(node.holder.claimant);
+      if (node.submission) actors.add(node.submission.submitter);
+      for (const vote of node.votes) actors.add(vote.voter);
+    }
+    if (projection.settlement) {
+      for (const share of projection.settlement.shares) actors.add(share.metaId);
+    }
+    actors.delete('');
+    return actors;
+  }
+
+  /**
+   * Resolve display identities for every actor and stamp them onto the
+   * projections before persisting (single enrichment point). Local roster
+   * now; external names/avatars land when a by-metaId identity endpoint
+   * exists on MetaSo — the resolver + cache table are the injection point.
+   */
+  async enrichIdentities(projections: MetaTaskTaskProjection[]): Promise<void> {
+    const actors = new Set<string>();
+    for (const projection of projections) {
+      for (const actor of MetaTaskProjectionStore.actorsOf(projection)) actors.add(actor);
+    }
+    const merged: Record<string, MetaTaskIdentity> = {};
+    for (const metaId of actors) {
+      const cached = this.getIdentityRow(metaId);
+      if (cached) merged[metaId] = cached;
+    }
+    const missing = Array.from(actors).filter((metaId) => !merged[metaId]);
+    if (missing.length > 0 && this.resolveIdentities) {
+      try {
+        const resolved = await this.resolveIdentities(missing);
+        for (const [metaId, identity] of Object.entries(resolved)) {
+          merged[metaId] = identity;
+          this.putIdentityRow(identity, 'local');
+        }
+      } catch {
+        // identity enrichment is best-effort display sugar; never fail the sweep
+      }
+    }
+    for (const projection of projections) {
+      const scoped: Record<string, MetaTaskIdentity> = {};
+      for (const actor of MetaTaskProjectionStore.actorsOf(projection)) {
+        if (merged[actor]) scoped[actor] = merged[actor];
+      }
+      projection.identities = scoped;
+    }
+  }
+
+  private getIdentityRow(metaId: string): MetaTaskIdentity | null {
+    const row = this.getOne<Row>('SELECT meta_id, name, avatar FROM metatask_identities WHERE meta_id = ?', [metaId]);
+    if (!row) return null;
+    return { metaId, name: row.name === null ? null : String(row.name), avatar: row.avatar === null ? null : String(row.avatar) };
+  }
+
+  private putIdentityRow(identity: MetaTaskIdentity, source: string): void {
+    this.db.run(
+      `INSERT INTO metatask_identities (meta_id, name, avatar, source, resolved_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(meta_id) DO UPDATE SET
+         name = COALESCE(excluded.name, metatask_identities.name),
+         avatar = COALESCE(excluded.avatar, metatask_identities.avatar),
+         resolved_at = excluded.resolved_at`,
+      [identity.metaId, identity.name, identity.avatar, source, new Date().toISOString()]
+    );
+    this.saveDb();
+  }
 
   saveProjections(projections: MetaTaskTaskProjection[]): void {
     const now = new Date().toISOString();
@@ -256,6 +341,7 @@ export class MetaTaskProjectionStore {
          ORDER BY last_activity_ms DESC, root_pin_id ASC`
     );
     const tasks: MetaTaskBoardTask[] = [];
+    const identities: Record<string, MetaTaskIdentity> = {};
     for (const row of rows) {
       try {
         const projection = JSON.parse(String(row.projection_json ?? '{}')) as MetaTaskTaskProjection;
@@ -300,6 +386,7 @@ export class MetaTaskProjectionStore {
           myStats,
           settlementFinalized: Boolean(projection.settlement),
         });
+        Object.assign(identities, projection.identities ?? {});
       } catch {
         // skip malformed rows; the next refresh rewrites them
       }
@@ -307,6 +394,7 @@ export class MetaTaskProjectionStore {
     return {
       localRosterMetaIds: localRosterMetaIds.filter(Boolean),
       tasks,
+      identities,
       alerts: this.listAlerts(),
       activation: { hAct2: H_ACT2 },
       refresh: this.refreshInfo(),

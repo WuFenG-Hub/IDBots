@@ -6,6 +6,12 @@
 
 export type MetaTaskNodeStatus = 'open' | 'claimed' | 'verified';
 
+export interface MetaTaskIdentity {
+  metaId: string;
+  name: string | null;
+  avatar: string | null;
+}
+
 export interface MetaTaskVoteSummary {
   voter: string;
   verdict: string;
@@ -22,10 +28,21 @@ export interface MetaTaskNodeProjection {
   title: string;
   kind: string;
   weight: number | null;
+  params: Record<string, unknown> | null;
+  specid: string | null;
   status: MetaTaskNodeStatus;
   disputed: boolean;
   holder: { pinId: string; claimant: string; sinceMs: number } | null;
-  submission: { pinId: string; submitter: string; atMs: number; superseded: boolean } | null;
+  submission: {
+    pinId: string;
+    submitter: string;
+    atMs: number;
+    superseded: boolean;
+    result: Record<string, unknown> | null;
+    hash: string | null;
+    contentType: string | null;
+    attachment: string | null;
+  } | null;
   passVotes: number;
   failVotes: number;
   votes: MetaTaskVoteSummary[];
@@ -79,6 +96,7 @@ export interface MetaTaskTaskProjection {
   progress: { total: number; verified: number; claimed: number; open: number; disputed: number };
   taskComplete: boolean;
   participants: MetaTaskParticipantStats[];
+  identities: Record<string, MetaTaskIdentity>;
   settlement: MetaTaskSettlementManifest | null;
   freshness: {
     boundaryBlock: number;
@@ -124,6 +142,8 @@ export interface MetaTaskBoard {
   localRosterMetaIds: string[];
   tasks: MetaTaskBoardTask[];
   alerts: MetaTaskAlert[];
+  /** Merged display identities across tasks (publisher + participants). */
+  identities: Record<string, MetaTaskIdentity>;
   /** Activation notice input: the v1.2 feature gate height (null = not gated). */
   activation: { hAct2: number | null };
   refresh: {

@@ -530,3 +530,4 @@ man_base_data_pebble/
 # macOS AppleDouble sidecars (._foo) created for xattr-bearing files on the
 # exFAT worktree SSD volume; gitignored so status stays clean there
 ._*
+!tests/metataskWatch.test.mjs

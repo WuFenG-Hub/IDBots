@@ -807,13 +807,32 @@ export function replayMetaTask(
       title: treeRec?.title ?? node,
       kind: treeRec?.kind ?? 'proof',
       weight: treeRec?.weight ?? null,
+      params: treeRec && treeRec.params && typeof treeRec.params === 'object'
+        ? (treeRec.params as Record<string, unknown>)
+        : null,
+      specid: treeRec?.specid ?? null,
       status,
       disputed,
       holder: holder
         ? { pinId: holder.pinId, claimant: holder.claimant, sinceMs: holder.sinceMs }
         : null,
       submission: effective
-        ? { pinId: effective.pinId, submitter: effective.author, atMs: effective.atMs, superseded: false }
+        ? {
+            pinId: effective.pinId,
+            submitter: effective.author,
+            atMs: effective.atMs,
+            superseded: false,
+            result: (() => {
+              const body = submissionBodyByPin.get(effective.pinId);
+              const result = body?.result;
+              return result && typeof result === 'object' && !Array.isArray(result)
+                ? (result as Record<string, unknown>)
+                : null;
+            })(),
+            hash: asStr(submissionBodyByPin.get(effective.pinId)?.hash) || null,
+            contentType: asStr(submissionBodyByPin.get(effective.pinId)?.contentType) || null,
+            attachment: asStr(submissionBodyByPin.get(effective.pinId)?.attachment) || null,
+          }
         : null,
       passVotes,
       failVotes,
@@ -1041,6 +1060,7 @@ export function replayMetaTask(
     participants: Array.from(participants.values()).sort(
       (a, b) => b.verifiedContrib - a.verifiedContrib || (a.metaId < b.metaId ? -1 : 1)
     ),
+    identities: {}, // enriched at the projection-store layer (local roster resolver)
     settlement,
     lastActivityMs,
     freshness: {
