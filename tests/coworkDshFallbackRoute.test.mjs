@@ -440,3 +440,22 @@ test('persistent transient failure on both routes keeps the origin fallback budg
   assert.equal(result.runTurnCalls.length, 6, '1 initial + 3 primary resumes + 2 fallback resumes — quota fix must not change this')
   assert.equal(result.sessionRow?.status, 'error')
 })
+
+// F7 regression pin (PR #53 verification round 2): a TRANSIENT entry that
+// burns the primary ladder and then dies on the FALLBACK route with QUOTA
+// must settle with the notice naming the fallback route (lastAttemptRoute),
+// not the primary — the fallback is the route that actually ran out.
+test('transient primary exhaustion then quota on fallback settles naming the fallback route', async () => {
+  const result = await driveTurn({
+    sessionId: 'gt02-f7-notice-route',
+    metabot: BOT_WITH_FALLBACK,
+    // Calls 1-4: transient on gw-a (initial + 3 resumes). Call 5: quota on gw-b.
+    script: (_input, callNo) => (callNo <= 4 ? transientError() : quotaError()),
+  })
+
+  assert.equal(result.runTurnCalls.length, 5, '1 initial + 3 primary resumes + 1 single fallback attempt')
+  assert.equal(result.runTurnCalls[4].provider.key, 'gw-b')
+  assert.equal(result.sessionRow?.status, 'error')
+  assert.match(result.errors[0].error, /mock-b1/, 'the quota notice names the fallback model')
+  assert.match(result.errors[0].error, /gw-b/)
+})

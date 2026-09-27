@@ -8755,6 +8755,12 @@ export class CoworkRunner extends EventEmitter {
           }
           for (let fallbackAttempt = 1; fallbackAttempt <= DSH_FALLBACK_TURN_MAX_RESUMES; fallbackAttempt += 1) {
             if (outcome.kind !== 'error' || activeSession.abortController.signal.aborted || !isTransientDshTurnError(outcome)) break;
+            // Track the route the NEXT attempt rides, so the terminal quota
+            // notice (and any provider-facing message) names the route that
+            // actually ran out — the fallback once the switch happened
+            // (F7, PR #53 verification: without this a transient entry that
+            // later dies on the fallback route settles naming the primary).
+            lastAttemptRoute = fallbackRoute;
             coworkLog(
               'WARN',
               'runDshSessionLocal',
