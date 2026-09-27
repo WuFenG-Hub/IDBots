@@ -123,7 +123,9 @@ function requireNonEmpty(params: Record<string, unknown>, keys: string[]): void 
   }
 }
 
-/** Read group-chat messages for a group strictly after the given msg_index. */
+/** Read group-chat messages for a group strictly after the given msg_index.
+ *  `chain_timestamp` is the indexer's Unix SECONDS value — read as-is, the
+ *  row→milliseconds normalization happens in runtime.ts's withRowMeta. */
 function readMessagesSince(db: Database, groupId: string, afterMsgIndex: number): SessionMessage[] {
   const result = db.exec(
     `SELECT pin_id, content, sender_global_metaid, msg_index, chain_timestamp
