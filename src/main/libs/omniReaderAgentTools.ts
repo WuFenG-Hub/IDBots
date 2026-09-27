@@ -76,13 +76,199 @@ function truncationNote(kept: number, total: number, cursor: { key: string; valu
   return `[omni_read: first ${kept} of ${total} chars — no pagination cursor in the response; narrow the query (page/size) to reach the rest]`;
 }
 
-function formatData(data: unknown): string {
-  const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
-  if (text.length > MAX_RESULT_CHARS - TRUNCATION_NOTE_RESERVE) {
-    const kept = truncateUtf16Units(text, MAX_RESULT_CHARS - TRUNCATION_NOTE_RESERVE);
-    return `${kept}\n${truncationNote(kept.length, text.length, responseCursor(data))}`;
+/**
+ * Row-array keys the indexers are known to put list pages under (MANAPI
+ * `data.list`, the metaso feeds' `data.items`, follower lists). A known key
+ * always wins over an unknown array, wherever the two sit (root or one level
+ * down), so an incidental array such as a root-level `trace` or a bigger array
+ * in a sibling container can never be mistaken for the page.
+ */
+const LIST_ROW_KEYS = ['list', 'items', 'followerList', 'followingList'] as const;
+
+/**
+ * Marks a container as a paged envelope rather than an incidental object. Used
+ * only to break ties: a property merely NAMED like a page is not treated as a
+ * page marker, so the list stays free of speculative names.
+ */
+const PAGE_MARKER_KEYS = ['nextCursor', 'cursor', 'total', 'hasMore'] as const;
+
+type ListRowsLocation = {
+  /** Object that owns the row array (`data` for both indexer families). */
+  container: Record<string, unknown>;
+  /** Key path from the payload root to `container`; [] means the root itself. */
+  containerPath: string[];
+  /** Key holding the row array inside `container`. */
+  key: string;
+  rows: Record<string, unknown>[];
+};
+
+function isRowArray(value: unknown): value is Record<string, unknown>[] {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.every((row) => row !== null && typeof row === 'object' && !Array.isArray(row));
+}
+
+const isPageContainer = (container: Record<string, unknown>): boolean =>
+  PAGE_MARKER_KEYS.some((marker) => marker in container);
+
+/**
+ * A cursor is the strong paging signal: it only appears on a real page envelope,
+ * whereas `total` also turns up on stats/summary blocks. Used ahead of the size
+ * comparison so a summary block carrying a `total` cannot outrank the page it
+ * summarises.
+ */
+const hasCursorToken = (container: Record<string, unknown>): boolean =>
+  'nextCursor' in container || 'cursor' in container;
+
+/** Largest page wins; a container carrying page markers breaks a size tie. */
+function byPageSize(pool: ListRowsLocation[]): ListRowsLocation | null {
+  let best: ListRowsLocation | null = null;
+  for (const location of pool) {
+    const longer = best === null || location.rows.length > best.rows.length;
+    const tieWithMarker = best !== null
+      && location.rows.length === best.rows.length
+      && !isPageContainer(best.container)
+      && isPageContainer(location.container);
+    if (longer || tieWithMarker) best = location;
   }
-  return text;
+  return best;
+}
+
+/**
+ * Locate the page among the candidates at the root and one level down:
+ *
+ *  1. a KNOWN row key wins outright, whichever container it sits in — among
+ *     those, a container carrying a cursor wins over one that does not, then the
+ *     largest array, with page markers only breaking a size tie — so an
+ *     incidental array (a root-level `trace`), a bigger unrelated array in a
+ *     sibling container, or a summary block cannot be mistaken for the page;
+ *  2. with no known key, the same order applies to unfamiliar arrays.
+ *
+ * Arrays nested inside a row are never candidates — only a container's own
+ * properties are inspected.
+ */
+function findListRows(data: Record<string, unknown>): ListRowsLocation | null {
+  const containers: Array<{ container: Record<string, unknown>; path: string[] }> = [{ container: data, path: [] }];
+  for (const [key, value] of Object.entries(data)) {
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      containers.push({ container: value as Record<string, unknown>, path: [key] });
+    }
+  }
+  const known: ListRowsLocation[] = [];
+  const unknown: ListRowsLocation[] = [];
+  for (const { container, path } of containers) {
+    for (const [key, value] of Object.entries(container)) {
+      if (!isRowArray(value)) continue;
+      const location: ListRowsLocation = { container, containerPath: path, key, rows: value };
+      if ((LIST_ROW_KEYS as readonly string[]).includes(key)) known.push(location);
+      else unknown.push(location);
+    }
+  }
+  for (const pool of [known, unknown]) {
+    if (pool.length === 0) continue;
+    const withCursor = pool.filter((location) => hasCursorToken(location.container));
+    if (withCursor.length > 0) return byPageSize(withCursor);
+    const marked = pool.filter((location) => isPageContainer(location.container));
+    return byPageSize(marked.length > 0 ? marked : pool);
+  }
+  return null;
+}
+
+/**
+ * Row-level truncation for over-budget list pages. A plain string cut hands the
+ * caller a TORN document: everything after the cut — including the server's own
+ * `nextCursor` — is unrecoverable, so a leading slice of the rows reads like the
+ * whole page. Live case (2026-09-24): `pins_by_path /protocols/agentpedia/rev
+ * size=100` answered 430,281 bytes / 100 rows / nextCursor present, while the
+ * tool returned 20,068 chars holding 5 whole rows and did not parse as JSON.
+ *
+ * The envelope therefore keeps every sibling field, drops only TRAILING rows,
+ * and adds `truncated` / `returned` / `hint` beside the page so the partial page
+ * is machine-checkable and the caller can page with `cursor` instead of
+ * guessing. When a SIBLING (not the page) is itself bigger than the whole
+ * budget, the siblings are clamped — labelled as trimmed — rather than letting
+ * them push the page back onto the torn-string path.
+ *
+ * Returns null — deferring to the caller's H-71 truncation note — whenever no
+ * list-shaped output can be built honestly: the payload carries no usable page
+ * (no array of plain objects at the root or one level down, e.g. a bare
+ * top-level array or a page whose rows are not objects), or not even ONE whole
+ * row fits inside the budget. There is deliberately no `head`/empty-page
+ * fallback: a page with no rows is not a page, and the note announces the cut,
+ * names the pagination token, and never passes a torn document off as a whole
+ * one.
+ */
+function truncateListPayload(data: Record<string, unknown>, budget: number): string | null {
+  const found = findListRows(data);
+  if (!found) return null;
+  const { container, containerPath, key, rows } = found;
+  const hint = (kept: number): string =>
+    `${key}: ${kept}/${rows.length} rows returned (result budget ${budget} chars) — treat this page as PARTIAL and continue with cursor/size; the server's own fields (total, nextCursor) are preserved.`;
+  const render = (pageContainer: Record<string, unknown>, outerSiblings: Record<string, unknown>, kept: number): string => {
+    const page = { ...pageContainer, [key]: rows.slice(0, kept), truncated: true, returned: kept, hint: hint(kept) };
+    const outer = containerPath.length === 0 ? page : { ...outerSiblings, [containerPath[0]]: page };
+    return JSON.stringify(outer, null, 2);
+  };
+  const attempt = (pageContainer: Record<string, unknown>, outerSiblings: Record<string, unknown>): string | null => {
+    for (let kept = rows.length - 1; kept >= 1; kept -= 1) {
+      const text = render(pageContainer, outerSiblings, kept);
+      if (text.length <= budget) return text;
+    }
+    // Not even one whole row fits: no list-shaped page can be built inside the
+    // budget, so hand the decision back to formatData, which declares the cut in
+    // the H-71 note. An empty page or a `head` string would only dress up a
+    // document the caller cannot page from.
+    return null;
+  };
+  const exact = attempt(container, data);
+  if (exact) return exact;
+  // A sibling larger than the whole budget must not defeat the page: clamp
+  // siblings (keeping a labelled preview) and retry. The page itself is never
+  // clamped this way.
+  return attempt(clampSiblings(container, key), clampSiblings(data, containerPath[0]));
+}
+
+/** Preview length kept for a sibling value that is clamped to make room for the page. */
+const SIBLING_PREVIEW_CHARS = 200;
+
+/**
+ * Shallow copy of `container` with every property except the page key bounded to
+ * a short, CLEARLY LABELLED preview. Used only as a second attempt, after the
+ * exact envelope failed to fit, so an oversized sibling cannot push the page
+ * back onto the torn-string path. The page itself is never passed through here.
+ */
+function clampSiblings(container: Record<string, unknown>, pageKey: string | undefined): Record<string, unknown> {
+  const clamped: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(container)) {
+    if (key === pageKey) {
+      clamped[key] = value;
+    } else if (typeof value === 'string' && value.length > SIBLING_PREVIEW_CHARS) {
+      clamped[key] = `${value.slice(0, SIBLING_PREVIEW_CHARS)}…[sibling trimmed: ${value.length} chars; omitted from this truncated page]`;
+    } else if (value !== null && typeof value === 'object') {
+      const size = (JSON.stringify(value) ?? '').length;
+      clamped[key] = size > SIBLING_PREVIEW_CHARS
+        ? `[sibling omitted from this truncated page: ${Array.isArray(value) ? `array of ${value.length}` : 'object'} / ${size} chars]`
+        : value;
+    } else {
+      clamped[key] = value;
+    }
+  }
+  return clamped;
+}
+
+function formatData(data: unknown): string {
+  const budget = MAX_RESULT_CHARS - TRUNCATION_NOTE_RESERVE;
+  const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+  if (text.length <= budget) return text;
+  // A list page keeps whole rows (see truncateListPayload); everything else
+  // falls through to the H-71 note below, so no over-budget result is ever a
+  // silently torn document.
+  if (data !== null && typeof data === 'object' && !Array.isArray(data)) {
+    const trimmed = truncateListPayload(data as Record<string, unknown>, budget);
+    if (trimmed) return trimmed;
+  }
+  const kept = truncateUtf16Units(text, budget);
+  return `${kept}\n${truncationNote(kept.length, text.length, responseCursor(data))}`;
 }
 
 /**
@@ -181,6 +367,7 @@ export function buildOmniReaderAgentTools(deps: {
     [
       'Read-only raw MetaID/MetaWeb indexer queries — the low-level fallback returning raw indexer JSON; never writes on-chain.',
       'Actions: user_info, search_users, buzz_newest | buzz_recommended | buzz_hot | buzz_search | buzz_info, notifications, followers | following, pin, pin_version, pin_list, metaid_list, block_list, mempool_list, pins_by_path | pins_by_metaid | pins_by_address, pin_content, file_info, file_latest, files_by_creator | files_by_metaid | files_by_extension, indexer_status | indexer_stats, global_counts.',
+      'List pages that exceed the result budget come back as VALID JSON holding whole rows only, with `truncated: true` and `returned` telling you how much of the page you got; the server\'s own `total`/`nextCursor` are preserved, so when `truncated` is true the page is PARTIAL — page with cursor/size instead of treating it as the full list. When not even one whole row fits, the result falls back to a declared `[omni_read: first N of M chars — …]` cut instead (still page with cursor/size); either way an over-budget result is never a silently torn document.',
       'Parameters per action are documented on the fields below; paged actions echo lastId/cursor — pass it back for the next page (notifications lastId returns entries NEWER than that id and excludes answers to your questions; poll get_question_answers for those). Prefer search_metaids / metaid_profile for identity discovery and search_social_posts for full-text social search when those fit.',
     ].join(' '),
     {

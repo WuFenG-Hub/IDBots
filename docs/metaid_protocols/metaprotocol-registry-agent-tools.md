@@ -19,7 +19,7 @@
 - **Actions**: `publish` (register a NEW protocol under `/protocols/<protocolName-lowercase>`), `update` (publish a new version of an existing protocol; only the original registrant may update).
 - **Gate order** (spec §5.4):
   1. Acting MetaBot must be selected (no wallet/identity otherwise).
-  2. Payload validated against the metaprotocol draft-07 schema **before anything reaches the wallet** — `body` and `protocolContent` are mutually exclusive (exactly one required).
+  2. Payload validated against the metaprotocol draft-07 schema **before anything reaches the wallet** — `body`, `protocolContent` and `protocolContentFile` are mutually exclusive (exactly one required).
   3. MetaSo precheck: `GET /api/metaweb/protocols/check` for publish (path occupancy; unconfirmed mempool registrations count as occupied); `GET /api/metaweb/protocols/detail` for update (target resolution). MetaSo failure degrades to the MANAPI scan; **both down → the write is refused** (`Protocol registry check is unavailable (registry and fallback both failed). Refusing to publish to avoid duplicate registration — try again later.`).
   4. Conflict / authorization: an occupied path returns the current registrant info (name, first-registration date, current version, `pin://` link) and **never writes**; a non-registrant update is refused with the registrant's name and the acting bot's name and **never writes**.
   5. Pass → `createPin` with the local MetaBot wallet (`origin: 'tool:post_metaprotocol'`).
@@ -41,7 +41,7 @@ Publish (create) and update (modify) share the human square's body JSON:
 | `protocolName` | param |
 | `protocolAttachments` | param (default `[]`) |
 | `metadata` | param (default `''`; strings are `JSON.parse`-ed when possible) |
-| `protocolContent` | JSON5 serialization of `body`, or the raw `protocolContent` param |
+| `protocolContent` | JSON5 serialization of `body`, the raw `protocolContent` param (surrounding whitespace trimmed), or the verbatim UTF-8 bytes of `protocolContentFile` |
 | `protocolContentType` | param (default `application/json`) |
 
 **Body → JSON5** (human square semantics): a field shaped `{value, description}` emits a `/** description */` comment line (1-space base indent, the on-chain convention) followed by the unwrapped value; plain values serialize directly; nested objects/arrays use 2-space-per-level multiline JSON.
@@ -59,6 +59,8 @@ Publish (create) and update (modify) share the human square's body JSON:
 | `encryption` | `0` | `0` |
 | outer `version` | `1.0.0` | body version of the version being replaced |
 | payload | body JSON above | body JSON above (`version` = new version) |
+
+**Large definitions (`protocolContentFile`)**: when a definition is too large to pass inline without loss — the host's file/text readers truncate long lines, so a large body cannot be held in-context verbatim — pass an absolute local path via `protocolContentFile`. The file is read as UTF-8 and its bytes become `protocolContent` **verbatim** (no trimming, no re-serialization), so the `protocolContent` value on-chain is byte-identical to the file and the 7-tuple above is unchanged (the inline `utf-8` shape, the same outer `version` rule). A file that is not valid UTF-8 is refused, because publishing it would replace its invalid bytes. The existing owner-approval gate for local files (`chainUploadGate.checkUploadAllowed`) applies to the same paths the upload tools gate; it runs immediately before the wallet (after the schema, conflict and registrant refusals, so the owner is never asked about a call that would be rejected anyway), and the file is re-read at that point — if it changed while the owner was deciding, the write is refused. When the host wires no gate at all, `protocolContentFile` is refused rather than published ungated. Relative paths, missing files and whitespace-only files are refused before the wallet is touched.
 
 ## 4. MetaSo API contract (§3 mirror)
 
