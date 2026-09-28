@@ -317,7 +317,28 @@ test('seat claim is written on-chain right after the phase-2 grant, signed as th
     const session = await startSession(host);
 
     // 授座后 seat.claimed 落链（复用 action 写路径：intent → pending → retry）。
-    await waitFor(() => recorder.calls.length >= 1, { label: 'seat.claimed chain write' });
+    // The predicate must cover the persisted facts asserted below: chainWrite
+    // being called (the recorder signal) is only the midpoint — the runtime
+    // still has to markWriteStatus('committed'), `await sandbox.reduce(...)`,
+    // and persistOwnedFields before the write-log row and the session budget
+    // are readable. A calls-only wait can observe a pending ledger row or
+    // writesUsed=0 on slow runners (same window as Windows CI run 36427382778).
+    await waitFor(
+      () => {
+        if (recorder.calls.length < 1) return false;
+        const logRow = db.exec(
+          `SELECT status FROM agent_game_write_log WHERE group_id = ? AND action_seq = 0`,
+          [GROUP_ID],
+        )[0]?.values?.[0];
+        if (String(logRow?.[0]) !== 'committed') return false;
+        const sessionRow = db.exec(
+          `SELECT budget_writes_used FROM agent_game_sessions WHERE session_id = ?`,
+          [session.sessionId],
+        )[0]?.values?.[0];
+        return Boolean(sessionRow) && Number(sessionRow[0]) >= 1;
+      },
+      { label: 'seat.claimed chain write + ledger commit + persisted budget' },
+    );
     const call = recorder.calls[0];
     assert.equal(call.groupId, GROUP_ID);
     // 身份写链：非 action 事件必须带 asAgentId（会话身份），归因才成立。
@@ -374,9 +395,20 @@ test('seat claim write retries through the same ledger on failure and commits on
           `SELECT status, attempts FROM agent_game_write_log WHERE group_id = ? AND action_seq = 0`,
           [GROUP_ID],
         )[0]?.values?.[0];
-        return Boolean(row) && String(row[0]) === 'committed' && Number(row[1]) >= 2;
+        if (!(Boolean(row) && String(row[0]) === 'committed' && Number(row[1]) >= 2)) return false;
+        // A committed ledger row is NOT proof the session row caught up:
+        // retryPendingWrite marks the write committed right after chainWrite,
+        // then `await sandbox.reduce(...)` runs before persistOwnedFields
+        // writes budget.writesUsed back — Windows CI run 36427382778 failed
+        // below reading writesUsed=0 in that window. Wait for the persisted
+        // budget itself.
+        const sessionRow = db.exec(
+          `SELECT budget_writes_used FROM agent_game_sessions WHERE session_id = ?`,
+          [session.sessionId],
+        )[0]?.values?.[0];
+        return Boolean(sessionRow) && Number(sessionRow[0]) >= 1;
       },
-      { timeoutMs: 15_000, stepMs: 50, label: 'seat.claimed retry-to-commit' },
+      { timeoutMs: 15_000, stepMs: 50, label: 'seat.claimed retry-to-commit + persisted budget' },
     );
 
     assert.equal(recorder.calls.length, 2, 'exactly one failure + one successful retry');
