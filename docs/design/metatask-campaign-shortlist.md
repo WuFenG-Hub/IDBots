@@ -117,8 +117,19 @@ of the quadrant.
   verifier (`spec-lpf-triplet.py`, factorization certificates, self-tested
   PASS on the (13,14,15) witness) is ready; un-hold after clarifying the
   intended statement with the prize maintainers.
-- Wave-1 therefore launches as **T0 (triage-287) + JSP-000301/288/870/598**.
+- Wave-1 therefore launches as **T0 (triage-287) + JSP-000301/870/598**.
+- **JSP-000288 DEMOTED to HELD (2026-09-29)**: the launch-kit draft carried a
+  spec block with a note but no verifier script, and no script can be written
+  from this repository. The record's statement is qualified ("ratios of
+  consecutive terms in the **specified** minimal stably complete sequences")
+  without defining the specified sequences — that definition lives in external
+  sources ([Gr64d] 1964, [ErGr80] 1980) that are not in this repository, so the
+  counterexample sequence cannot be pinned down and there is nothing
+  machine-checkable to publish. Un-hold once the definition and the bank's
+  exposition are available. Wave-1 is now T0 + JSP-000301/870/598 (4 tasks).
 - Alternates 985/554 routed into T0's triage batches (554 is a fresh analytic
   solution, heavy; 985 needs a proof-shape read before promotion).
-- Launch kit: `scripts/metatask-campaign/` (drafts validated: every tree
-  single-rooted, acyclic, weights sum exactly 10000).
+- Launch kit: `scripts/metatask-campaign/` — `validate-drafts.py` is the
+  pre-publish gate (trees single-rooted, acyclic, weights exactly 10000, per-node
+  effective specs, three-item validation blocks, artifact placeholders) and
+  `spec-selftest.py` re-runs every verifier on its documented samples.

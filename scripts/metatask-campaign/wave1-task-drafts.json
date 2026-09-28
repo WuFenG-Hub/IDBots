@@ -1,96 +1,1038 @@
 {
-  "campaign": "MetaTask wave-1 — JSP formalization lane (owner-approved 2026-09-27; JSP-000307 demoted pending proposition-fidelity clarification)",
+  "campaign": "MetaTask wave-1 - JSP formalization lane (owner-approved 2026-09-27; JSP-000307 HELD pending proposition-fidelity clarification, T2-JSP-000288 HELD 2026-09-29 because its verifier cannot be written from this repository)",
+  "campaignStatus": "wave-1 = T0-triage-287 + T1-JSP-000301 + T3-JSP-000870 + T4-JSP-000598 (4 tasks, 8 specs, 4 correspondence artifacts)",
   "protocolGate": "publish only after H_ACT2=191500 is live AND the registration author has published the v1.2.1 skill + vector-set announcement",
+  "protocol": {
+    "path": "/protocols/metatask",
+    "version": "1.2.1",
+    "registrationPin": "pin://cbae49e09697182b076652ae9bded629388a0dafc9048b01c6a7c8766247fc55i0",
+    "activationHeight": 191500,
+    "authorityNote": "The published registration body is the sole authority; the local rev-2 draft docs/metaid_protocols/metatask-protocol-v1.2-registration-draft.md is superseded. See docs/metaid_protocols/metatask-v1.2.1-alignment.md."
+  },
+  "protocolGateReadings": {
+    "specValidation": "paths.spec.fields.validation (verbatim, fetched from the published pin on 2026-09-29): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）",
+    "aggregationPrecondition": "the parent's aggregate must carry childids equal (as a set) to the children's effective verified submission pinIds; enforced by replay from H_ACT2",
+    "eventSetHashMembership": "spec pins enter the settlement event set only via task.specid - node-level specid overrides are not task members (this is why per-node specs are separate pins, published before the tree)"
+  },
+  "publishOrder": [
+    "T0-triage-287",
+    "T1-JSP-000301",
+    "T3-JSP-000870",
+    "T4-JSP-000598"
+  ],
+  "publishProcedure": [
+    "Confirm the gate: chain height >= 191500 and the registration author's v1.2.1 skill + vector-set announcement live.",
+    "Publish each correspondence artifact FIRST (wave1-correspondence-artifacts.json) and substitute its pin id into BOTH spec.validation.proposition_fidelity.correspondence and .artifactPin of every spec that cites it (see the archive's artifactKey).",
+    "Publish the standalone spec pins (specPinPlan value PUBLISH_SPEC_FIRST) before the task that references them, and replace every node specid of the form SPEC_PIN:<key> with the returned spec pin id (nodes with specid null inherit the task's root spec pin).",
+    "Feed each task's publish object to metatask_publish with spec = specs[rootSpec]; collect taskRootPinId / treePinId / specPinId.",
+    "Within 24h post the discovery buzz for every published task: title + the FULL task root pinId + #metatask.",
+    "Never call metatask_amend on a wave-1 task (see noAmendPolicy)."
+  ],
+  "noAmendPolicy": {
+    "rule": "wave-1 trees are FINAL at publish - metatask_amend must not be used",
+    "engineReading": "The TS engine evaluates the amend fold against the final replay state: an amend accepted on a task that later completes is retroactively ignored, and remove_node cannot unblock a stuck aggregate whose children are already verified.",
+    "consequence": "A typo or a wrong weight in a published wave-1 tree cannot be repaired by amend; the only correction path is a new task (or a new registration).",
+    "protocolStatus": "pending a protocol v1.2.2 ruling on the amend anchor and fold inputs (docs/metaid_protocols/metatask-v1.2.1-alignment.md, section 3, items 3-4)"
+  },
+  "placeholderTokens": {
+    "PUBLISH_ARTIFACT_FIRST": "spec.validation.proposition_fidelity.correspondence / .artifactPin until the correspondence artifact is published; the artifact file carries the same token in publishStatus/publishedPin",
+    "SPEC_PIN:<spec key>": "node specid override until that standalone spec pin is published; replace with the pin id, or set null when the node inherits the task root spec"
+  },
   "defaultPolicy": {
-    "verify_quorum": 2,
-    "claim_ttl_hours": 48,
-    "verify_window_hours": 96,
-    "split": { "submitterShareBP": 8000 }
+    "claimTtlHours": 48,
+    "verifyQuorum": 2,
+    "verifyWindowHours": 96,
+    "submitterShareBP": 8000
+  },
+  "specPinPlan": {
+    "triage-table-check": "PUBLISHED_BY_METATASK_PUBLISH",
+    "powerful-pair-verifier": "PUBLISHED_BY_METATASK_PUBLISH",
+    "witness-extraction-301": "PUBLISH_SPEC_FIRST",
+    "semantic-review-301": "PUBLISH_SPEC_FIRST",
+    "semantic-review-870": "PUBLISH_SPEC_FIRST",
+    "semantic-review-598": "PUBLISH_SPEC_FIRST",
+    "lean-build-870": "PUBLISHED_BY_METATASK_PUBLISH",
+    "lean-build-598": "PUBLISHED_BY_METATASK_PUBLISH"
+  },
+  "specSharingNote": "validation.proposition_fidelity is per-artifact, so a spec pin whose fidelity reference is task-specific cannot be shared between tasks. That is why lean-build and semantic-review appear once per task even though the scripts are byte-identical (validate-drafts.py checks the inlined text against the standalone file).",
+  "specPinPublishingGap": {
+    "problem": "metatask_publish writes exactly one spec pin per call (roster -> tree -> spec -> task) and the in-app tool library exposes no standalone spec writer, so the four PUBLISH_SPEC_FIRST pins have no host task of their own.",
+    "workaround": "spec-carrier publish: call metatask_publish with a single-node tree of weight 10000 and the wanted spec, take specPinId, and never advertise the carrier task. Cost per standalone spec: 3 pins (4 when the local roster has 2+ bots) and one unadvertised single-node task left open.",
+    "recommendedFix": "a metatask_publish_spec tool (or a specs[] array argument on metatask_publish) so the auxiliary spec pins can be written without carrier tasks; decision owner: the tool owner or the v1.2.2 registration author"
+  },
+  "correspondenceArtifactsFile": "wave1-correspondence-artifacts.json",
+  "validator": "python3 scripts/metatask-campaign/validate-drafts.py",
+  "verifierSelftest": "python3 scripts/metatask-campaign/spec-selftest.py",
+  "specs": {
+    "triage-table-check": {
+      "name": "triage-table-check",
+      "lang": "python",
+      "entry": "spec-triage-table.py",
+      "script": "#!/usr/bin/env python3\n\"\"\"\nspec-triage-table.py — 战役任务 #0（287 题分类三角测量）批次提交表验证器\n（MetaTask spec 脚本，协议 v1.2.1 §spec 契约）\n\n命题口径：T0 每个批次节点提交一张分类表，覆盖该批 JSP 区间内全部\nsolved-no-lean 记录。本脚本做机器可判部分（schema + 区间覆盖 + 唯一性）；\n逐题分类的实质正确性（证书类型判断是否成立等）由该节点 review 侧的\nsemantic_check 承接——这正是 T0 树里 review 权重存在的原因。\n\n输入（stdin，JSON）:\n  {\n    \"from\": 1, \"to\": 100,                       // 本批 JSP 编号区间（含端点）\n    \"expected\": 12,                              // 区间内 solved-no-lean 记录数（来自扫描清单）\n    \"records\": [\n      { \"jsp\": \"JSP-000007\", \"certificateType\": \"deep-theory\",\n        \"mathlibFeasibility\": \"low\", \"keyPaperPages\": 260, \"notes\": \"...\" },\n      ...\n    ]\n  }\n输出（stdout，JSON）: { \"verdict\": \"pass\" | \"fail\" | \"invalid\", \"detail\": \"...\" }\n判据（全过 = pass）:\n  1) from/to 为正整数且 from <= to；expected 为非负整数；records 为数组\n  2) 每条记录：jsp 匹配 ^JSP-\\\\d{6}$ 且编号落在 [from, to]；certificateType ∈\n     {witness, bounded-computation, self-contained-proof, deep-theory}；\n     mathlibFeasibility ∈ {high, medium, low, unknown}；keyPaperPages 为\n     null 或正整数；jsp 编号不重复\n  3) 覆盖性：records 数量 == expected（逐条对应由 review 抽查）\nnull/缺失 → invalid 并注明位置（协议 null_tolerance 判据）。\n\"\"\"\nimport json\nimport re\nimport sys\n\nCERT_TYPES = {\"witness\", \"bounded-computation\", \"self-contained-proof\", \"deep-theory\"}\nFEASIBILITY = {\"high\", \"medium\", \"low\", \"unknown\"}\nJSP_RE = re.compile(r\"^JSP-(\\d{6})$\")\n\n\ndef bad(msg):\n    print(json.dumps({\"verdict\": \"fail\", \"detail\": msg}, ensure_ascii=False))\n    sys.exit(0)\n\n\ndef invalid(msg):\n    print(json.dumps({\"verdict\": \"invalid\", \"detail\": msg}, ensure_ascii=False))\n    sys.exit(0)\n\n\ndef main():\n    try:\n        raw = json.load(sys.stdin)\n    except Exception as err:\n        invalid(\"input json: %s\" % err)\n        return\n    if not isinstance(raw, dict):\n        invalid(\"input must be an object\")\n        return\n    for field in (\"from\", \"to\", \"expected\"):\n        v = raw.get(field)\n        if not isinstance(v, int) or v < 0:\n            invalid(\"missing or non-integer field: %s\" % field)\n            return\n    lo, hi, expected = raw[\"from\"], raw[\"to\"], raw[\"expected\"]\n    if lo < 1 or lo > hi:\n        bad(\"invalid range: %d..%d\" % (lo, hi))\n        return\n    records = raw.get(\"records\")\n    if not isinstance(records, list):\n        invalid(\"missing field: records\")\n        return\n    seen = set()\n    for i, rec in enumerate(records):\n        where = \"records[%d]\" % i\n        if not isinstance(rec, dict):\n            invalid(\"%s: not an object\" % where)\n            return\n        jsp = rec.get(\"jsp\")\n        m = JSP_RE.match(jsp) if isinstance(jsp, str) else None\n        if not m:\n            invalid(\"%s: jsp must match JSP-######\" % where)\n            return\n        num = int(m.group(1))\n        if not (lo <= num <= hi):\n            bad(\"%s: %s outside batch range %d..%d\" % (where, jsp, lo, hi))\n            return\n        if jsp in seen:\n            bad(\"%s: duplicate %s\" % (where, jsp))\n            return\n        seen.add(jsp)\n        ct = rec.get(\"certificateType\")\n        if ct not in CERT_TYPES:\n            bad(\"%s: certificateType must be one of %s\" % (where, sorted(CERT_TYPES)))\n            return\n        mf = rec.get(\"mathlibFeasibility\")\n        if mf not in FEASIBILITY:\n            bad(\"%s: mathlibFeasibility must be one of %s\" % (where, sorted(FEASIBILITY)))\n            return\n        pages = rec.get(\"keyPaperPages\")\n        if pages is not None and (not isinstance(pages, int) or pages < 1):\n            invalid(\"%s: keyPaperPages must be null or a positive integer\" % where)\n            return\n        if not isinstance(rec.get(\"notes\", \"\"), str):\n            invalid(\"%s: notes must be a string\" % where)\n            return\n    if len(records) != expected:\n        bad(\"coverage mismatch: %d records vs expected %d\" % (len(records), expected))\n        return\n    print(json.dumps({\n        \"verdict\": \"pass\",\n        \"detail\": \"batch %04d-%04d: %d records, schema + range + uniqueness + coverage OK\" % (lo, hi, len(records)),\n    }, ensure_ascii=False))\n\n\nif __name__ == \"__main__\":\n    main()\n",
+      "input": {
+        "stdin": "one JSON object",
+        "fields": {
+          "from": "integer, batch lower JSP number (1..1022)",
+          "to": "integer, batch upper JSP number (inclusive)",
+          "expected": "integer, solved-no-lean record count of the batch in the snapshotted scan",
+          "records": "array of {jsp: JSP-######, certificateType: enum, mathlibFeasibility: enum, keyPaperPages: integer|null, notes: string}"
+        },
+        "nodeParams": [
+          "from",
+          "to",
+          "expected"
+        ]
+      },
+      "output": {
+        "stdout": "one JSON object",
+        "verdict": "pass | fail | invalid",
+        "detail": "string; the offending location when the verdict is not pass",
+        "onPass": "batch range and record count, so the reviewer can reconcile it with the node params"
+      },
+      "validation": {
+        "null_tolerance": true,
+        "enumeration_closure": {
+          "closure": "every record whose JSP number lies in [from, to] and whose bank record reads Current status starting with Solved AND Lean proof = No, under the snapshot recorded in the node params; batches b01..b10 partition JSP-000001..JSP-001022 with no gap and no overlap, so the union is the whole triage universe",
+          "snapshot": "2026-09-29",
+          "selfcheck": [
+            {
+              "node": "b01",
+              "from": 1,
+              "to": 100,
+              "expected": 15
+            },
+            {
+              "node": "b02",
+              "from": 101,
+              "to": 200,
+              "expected": 18
+            },
+            {
+              "node": "b03",
+              "from": 201,
+              "to": 300,
+              "expected": 22
+            },
+            {
+              "node": "b04",
+              "from": 301,
+              "to": 400,
+              "expected": 28
+            },
+            {
+              "node": "b05",
+              "from": 401,
+              "to": 500,
+              "expected": 31
+            },
+            {
+              "node": "b06",
+              "from": 501,
+              "to": 600,
+              "expected": 28
+            },
+            {
+              "node": "b07",
+              "from": 601,
+              "to": 700,
+              "expected": 43
+            },
+            {
+              "node": "b08",
+              "from": 701,
+              "to": 800,
+              "expected": 30
+            },
+            {
+              "node": "b09",
+              "from": 801,
+              "to": 900,
+              "expected": 36
+            },
+            {
+              "node": "b10",
+              "from": 901,
+              "to": 1022,
+              "expected": 36
+            }
+          ],
+          "expected_count": 287,
+          "count_meaning": "sum of the ten batch expected counts = solved-no-lean records in the 2026-09-29 snapshot (prefix-Solved reading); every batch param.expected must equal its vector and the reviewed submission's records.length must equal expected"
+        },
+        "proposition_fidelity": {
+          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
+          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactKey": "correspondence-T0-triage-287",
+          "coverage": [
+            "statement",
+            "definitions",
+            "proof-direction"
+          ],
+          "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T0-triage-287. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (see the artifact's filter-reading divergence risk)."
+        },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+      }
+    },
+    "powerful-pair-verifier": {
+      "name": "powerful-pair-verifier",
+      "lang": "python",
+      "entry": "spec-powerful-pair.py",
+      "script": "#!/usr/bin/env python3\n\"\"\"\nspec-powerful-pair.py — JSP-000301 反例见证验证器（MetaTask spec 脚本，协议 v1.2.1 §spec 契约）\n\n命题（已解·反例型，Golomb 1970）：「两个相邻正整数均为 powerful（∀ 素数 p | n: p² | n），\n是否必有其一为完全平方数？」 答案：否。见证 = 一对相邻 powerful 非平方整数。\n\n输入（stdin，JSON）: { \"n\": <int>, \"m\": <int> }   （约定 m = n + 1）\n输出（stdout，JSON）: { \"verdict\": \"pass\" | \"fail\", \"detail\": \"...\" }\n判据（全过 = pass）:\n  1) m == n + 1（相邻）\n  2) n 与 m 均为 powerful：每个素因子 p 满足 p² | 该数\n  3) n 与 m 均非完全平方数\nnull/缺失输入 → verdict=invalid 并注明位置（协议 null_tolerance 判据）。\n\"\"\"\nimport json\nimport sys\n\n\ndef factorize(x):\n    \"\"\"试除分解（见证量级 ~10^7 级别毫秒完成；更大见证换 sympy/ECPP 由聚合件另行升级）。\"\"\"\n    if not isinstance(x, int) or x < 2:\n        return None\n    factors = {}\n    d = 2\n    while d * d <= x:\n        while x % d == 0:\n            factors[d] = factors.get(d, 0) + 1\n            x //= d\n        d += 1 if d == 2 else 2\n    if x > 1:\n        factors[x] = factors.get(x, 0) + 1\n    return factors\n\n\ndef is_powerful(x):\n    factors = factorize(x)\n    if factors is None:\n        return False, \"not factorizable as an integer >= 2\"\n    bad = [p for p, e in factors.items() if e < 2]\n    return (not bad), (\"weak prime %d (exp 1)\" % bad[0] if bad else \"all prime exponents >= 2\")\n\n\ndef is_square(x):\n    if x < 0:\n        return False\n    r = int(x ** 0.5)\n    for c in (r - 1, r, r + 1):\n        if c >= 0 and c * c == x:\n            return True\n    return False\n\n\ndef main():\n    try:\n        raw = json.load(sys.stdin)\n    except Exception as err:\n        print(json.dumps({\"verdict\": \"invalid\", \"detail\": \"input json: %s\" % err}))\n        return\n    n, m = raw.get(\"n\"), raw.get(\"m\")\n    if n is None or m is None:\n        print(json.dumps({\"verdict\": \"invalid\", \"detail\": \"missing field: %s\" % (\"n\" if n is None else \"m\")}))\n        return\n    if not isinstance(n, int) or not isinstance(m, int):\n        print(json.dumps({\"verdict\": \"invalid\", \"detail\": \"n/m must be integers\"}))\n        return\n    if m != n + 1:\n        print(json.dumps({\"verdict\": \"fail\", \"detail\": \"not consecutive: m != n + 1\"}))\n        return\n    notes = []\n    for label, v in ((\"n\", n), (\"m\", m)):\n        ok, why = is_powerful(v)\n        if not ok:\n            notes.append(\"%s not powerful: %s\" % (label, why))\n        if is_square(v):\n            notes.append(\"%s is a perfect square (%d)\" % (label, int(v ** 0.5)))\n    if notes:\n        print(json.dumps({\"verdict\": \"fail\", \"detail\": \"; \".join(notes)}))\n        return\n    print(json.dumps({\n        \"verdict\": \"pass\",\n        \"detail\": \"adjacent powerful non-square pair verified: n=%d m=%d\" % (n, m),\n        \"factorization\": {\"n\": factorize(n), \"m\": factorize(m)},\n    }))\n\n\nif __name__ == \"__main__\":\n    main()\n",
+      "input": {
+        "stdin": "one JSON object",
+        "fields": {
+          "n": "integer >= 2 (the smaller member of the claimed pair)",
+          "m": "integer (must equal n + 1)"
+        },
+        "nodeParams": []
+      },
+      "output": {
+        "stdout": "one JSON object",
+        "verdict": "pass | fail | invalid",
+        "detail": "string; the first violated condition",
+        "onPass": "the full trial-division factorization of both members"
+      },
+      "validation": {
+        "null_tolerance": true,
+        "enumeration_closure": {
+          "closure": "the complete prime support of n and of n + 1 (every prime p | x is found by trial division up to sqrt(x), so the decision is a function of the full support, never a sample) together with the exact integer square test on both members",
+          "selfcheck": {
+            "n": 12167,
+            "m": 12168,
+            "expected_count": 4,
+            "count_meaning": "distinct primes in the union of the two factorizations {2, 3, 13, 23}, recomputable from the pass payload's factorization field",
+            "expected_verdict": "pass"
+          }
+        },
+        "proposition_fidelity": {
+          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
+          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactKey": "correspondence-T1-JSP-000301",
+          "coverage": [
+            "statement",
+            "definitions",
+            "proof-direction"
+          ],
+          "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T1-JSP-000301. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (powerful = every prime exponent >= 2, per the record's own note)."
+        },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+      }
+    },
+    "witness-extraction-301": {
+      "name": "witness-extraction",
+      "lang": "python",
+      "entry": "spec-witness-extraction.py",
+      "script": "#!/usr/bin/env python3\n\"\"\"\nspec-witness-extraction.py — witness-extraction submission checker (MetaTask\nspec script, protocol v1.2.1 §spec contract). Used by search-kind nodes.\n\nNode shape it judges: \"extract the counterexample witness from the source\nrecord/literature AND re-derive its own factorization certificate with a citable\nprovenance block\" (T1-JSP-000301 node `witness`). This script closes everything\nmachine-checkable about that submission — schema, consecutiveness, provenance\nbinding, certificate validity. The mathematical substance (is this really the\npublished pair, does the locator exist) stays with the review node's\nsemantic_check; the primary witness verification is the proof node's\nspec-powerful-pair.py run, deliberately independent of this one.\n\nInput (stdin, JSON):\n  {\n    \"jsp\": \"JSP-000301\",\n    \"claim\": { \"n\": 12167, \"m\": 12168 },\n    \"provenance\": {\n      \"reference\": \"Solomon W. Golomb, Powerful numbers, Amer. Math. Monthly 77(8) (1970), 848-852\",\n      \"locator\": \"https://doi.org/10.2307/2317020\",\n      \"recordField\": \"JSP-000301 review note (Record correction)\",\n      \"quotedText\": \"... 12167 = 23^3 and 12168 = 2^3 x 3^2 x 13^2 are consecutive powerful numbers ...\"\n    },\n    \"factorization\": { \"n\": [[23, 3]], \"m\": [[2, 3], [3, 2], [13, 2]] }\n  }\nOutput (stdout, JSON): { \"verdict\": \"pass\" | \"fail\" | \"invalid\", \"detail\": \"...\" }\nCriteria (all must hold for pass):\n  1) jsp matches ^JSP-[0-9]{6}$; claim.n and claim.m are integers >= 1 and\n     m == n + 1 (a consecutive pair is the whole point of the node)\n  2) provenance: reference / locator / recordField / quotedText are non-empty\n     strings AND quotedText contains both n and m as decimal substrings — the\n     extraction must bind the pair back to a citable source text\n  3) every factorization entry [p, e]: p prime (deterministic Miller-Rabin,\n     fixed witness set), e >= 2, and the product of all entries equals the\n     labelled value — a powerful witness must exhibit an exponent >= 2 for\n     every prime, not just a plausible-looking pair\nnull/missing input, or a shape that cannot be judged -> verdict=invalid with the\noffending location (protocol null_tolerance criterion).\n\"\"\"\nimport json\nimport re\nimport sys\n\n# Deterministic Miller-Rabin fixed bases (proof-level for n < 3,317,044,064,679,887,385,961,981)\n_WITNESSES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)\nJSP_RE = re.compile(r\"^JSP-\\d{6}$\")\n\n\ndef is_prime(n):\n    if not isinstance(n, int) or n < 2:\n        return False\n    for p in _WITNESSES:\n        if n % p == 0:\n            return n == p\n    d, r = n - 1, 0\n    while d % 2 == 0:\n        d //= 2\n        r += 1\n    for a in _WITNESSES:\n        x = pow(a, d, n)\n        if x in (1, n - 1):\n            continue\n        for _ in range(r - 1):\n            x = x * x % n\n            if x == n - 1:\n                break\n        else:\n            return False\n    return True\n\n\ndef check_certificate(pairs, value, label):\n    \"\"\"pairs: [[p, e], ...] -> (primes, error or None). Every exponent must be >= 2.\"\"\"\n    if not isinstance(pairs, list) or not pairs:\n        return None, \"%s: empty factorization certificate\" % label\n    product = 1\n    primes = []\n    for pair in pairs:\n        if not isinstance(pair, list) or len(pair) != 2:\n            return None, \"%s: malformed [p, e] pair %r\" % (label, pair)\n        p, e = pair\n        if not isinstance(p, int) or not isinstance(e, int):\n            return None, \"%s: non-integer pair %r\" % (label, pair)\n        if not is_prime(p):\n            return None, \"%s: %d is not prime\" % (label, p)\n        if e < 2:\n            return None, \"%s: prime %d has exponent %d (< 2) — not a powerful witness\" % (label, p, e)\n        product *= p ** e\n        primes.append(p)\n    if product != value:\n        return None, \"%s: certificate product %d != %d\" % (label, product, value)\n    return primes, None\n\n\ndef emit(verdict, detail, **extra):\n    payload = {\"verdict\": verdict, \"detail\": detail}\n    payload.update(extra)\n    print(json.dumps(payload, ensure_ascii=False))\n    sys.exit(0)\n\n\ndef main():\n    try:\n        raw = json.load(sys.stdin)\n    except Exception as err:\n        emit(\"invalid\", \"input json: %s\" % err)\n    if not isinstance(raw, dict):\n        emit(\"invalid\", \"input must be an object\")\n\n    jsp = raw.get(\"jsp\")\n    if not isinstance(jsp, str) or not JSP_RE.match(jsp):\n        emit(\"invalid\", \"jsp: must be a string matching JSP-######\")\n    claim = raw.get(\"claim\")\n    if not isinstance(claim, dict):\n        emit(\"invalid\", \"claim: missing or not an object\")\n    n, m = claim.get(\"n\"), claim.get(\"m\")\n    if not isinstance(n, int) or not isinstance(m, int) or n < 1 or m < 1:\n        emit(\"invalid\", \"claim.n/claim.m: missing or not integers >= 1\")\n    if m != n + 1:\n        emit(\"fail\", \"claim: not consecutive (m != n + 1)\")\n\n    prov = raw.get(\"provenance\")\n    if not isinstance(prov, dict):\n        emit(\"invalid\", \"provenance: missing or not an object\")\n    for field in (\"reference\", \"locator\", \"recordField\", \"quotedText\"):\n        value = prov.get(field)\n        if not isinstance(value, str) or not value.strip():\n            emit(\"invalid\", \"provenance.%s: missing or empty\" % field)\n    quoted = prov[\"quotedText\"]\n    for label, value in ((\"n\", n), (\"m\", m)):\n        if str(value) not in quoted:\n            emit(\"fail\", \"provenance.quotedText does not contain %s = %d\" % (label, value))\n\n    factors = raw.get(\"factorization\")\n    if not isinstance(factors, dict):\n        emit(\"invalid\", \"factorization: missing or not an object\")\n    primes = []\n    for key, value in ((\"n\", n), (\"m\", m)):\n        cert = factors.get(key)\n        if cert is None:\n            emit(\"invalid\", \"factorization.%s: missing\" % key)\n        found, err = check_certificate(cert, value, key)\n        if err:\n            emit(\"fail\", err)\n        primes.extend(found)\n    print(json.dumps({\n        \"verdict\": \"pass\",\n        \"detail\": \"witness extraction verified: %s n=%d m=%d; provenance bound to %s\"\n                  % (jsp, n, m, prov[\"recordField\"]),\n        \"primeSupport\": sorted(set(primes)),\n        \"expected_count\": len(set(primes)),\n    }, ensure_ascii=False))\n\n\nif __name__ == \"__main__\":\n    main()\n",
+      "input": {
+        "stdin": "one JSON object",
+        "fields": {
+          "jsp": "JSP-######",
+          "claim": {
+            "n": "integer >= 1",
+            "m": "integer, must equal n + 1"
+          },
+          "provenance": {
+            "reference": "string, the cited publication of the witness",
+            "locator": "string, DOI or URL",
+            "recordField": "string, which bank field or note states the witness",
+            "quotedText": "string, the quote; must contain both n and m as decimal substrings"
+          },
+          "factorization": {
+            "n": "[[p, e], ...]",
+            "m": "[[p, e], ...]"
+          }
+        },
+        "nodeParams": [
+          "jsp",
+          "witnessSource"
+        ]
+      },
+      "output": {
+        "stdout": "one JSON object",
+        "verdict": "pass | fail | invalid",
+        "detail": "string; the first violated condition",
+        "onPass": "primeSupport and expected_count (distinct primes), so replay can reconcile the closure"
+      },
+      "validation": {
+        "null_tolerance": true,
+        "enumeration_closure": {
+          "closure": "every prime appearing in the witness's two factorization certificates, with the provenance quote binding the pair back to the cited source text; certificates are checked prime-by-prime (deterministic Miller-Rabin) and every exponent must be >= 2, so a plausible-looking pair without a full support cannot close",
+          "selfcheck": {
+            "jsp": "JSP-000301",
+            "n": 12167,
+            "m": 12168,
+            "expected_count": 4,
+            "count_meaning": "distinct primes across both certificates = |{2, 3, 13, 23}|; the script prints the same integer as expected_count on the pass payload",
+            "expected_verdict": "pass"
+          }
+        },
+        "proposition_fidelity": {
+          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
+          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactKey": "correspondence-T1-JSP-000301",
+          "coverage": [
+            "statement",
+            "definitions",
+            "proof-direction"
+          ],
+          "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T1-JSP-000301. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (the provenance quote is checked against the artifact's record quote)."
+        },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+      }
+    },
+    "semantic-review-301": {
+      "name": "semantic-review",
+      "lang": "python",
+      "entry": "spec-semantic-review.py",
+      "script": "#!/usr/bin/env python3\n\"\"\"\nspec-semantic-review.py — proposition-fidelity review submission checker\n(MetaTask spec script, protocol v1.2.1 §spec contract). Used by triage-kind\nreview nodes (and by proof-kind nodes whose deliverable is a literature-aligned\nrestatement, e.g. T4 node `base`).\n\nNode shape it judges: \"review an on-chain deliverable against the INDEPENDENT\ncorrespondence artifact cited by the task's spec.validation.proposition_fidelity\nand report, item by item, whether the formalized statement / definitions /\nproof direction still match the original proposition\". This script closes the\nmachine-checkable part of that delivery: the artifact reference is a real pin\nreference (never the unresolved publish placeholder), the protocol's three\ncorrespondence items are all covered exactly once, each item carries a\nsubstantive note, a `divergent` item carries evidence, and the summary verdict\nagrees with the items.\n\nVerdict semantics: `pass` means the review report is complete and well formed —\nincluding a well-evidenced `divergent` report, which is a legitimate delivery\n(it tells the publisher the task's proposition may not match the bank's\nrecord). `fail` is reserved for malformed or incomplete reports. The substance\nof the review (is the alignment claim true?) stays with the reviewer's\nsemantic_check, which the protocol routes to this same artifact.\n\nInput (stdin, JSON):\n  {\n    \"task\": \"T1-JSP-000301\",\n    \"artifactPin\": \"metafile://...i0\",\n    \"items\": [\n      { \"id\": \"statement\", \"assessment\": \"aligned\", \"note\": \"...\" },\n      { \"id\": \"definitions\", \"assessment\": \"aligned\", \"note\": \"...\" },\n      { \"id\": \"proof-direction\", \"assessment\": \"divergent\", \"note\": \"...\", \"evidence\": \"...\" }\n    ],\n    \"reviewerVerdict\": \"divergent\",\n    \"semanticCheck\": \"...\"\n  }\nOutput (stdout, JSON): { \"verdict\": \"pass\" | \"fail\" | \"invalid\", \"detail\": \"...\" }\nCriteria (all must hold for pass):\n  1) task is a non-empty string; artifactPin matches ^(pin://|metafile://)\\\\S+$\n     and is NOT the publish-time placeholder PUBLISH_ARTIFACT_FIRST\n  2) items is a non-empty array; ids unique; the three protocol items\n     statement / definitions / proof-direction are all present\n  3) every item: assessment in {aligned, divergent}; note a string of >= 20\n     characters; a divergent item carries an evidence string of >= 10 characters\n  4) reviewerVerdict in {aligned, divergent} and consistent with the items:\n     any divergent item -> \"divergent\", none -> \"aligned\"\n  5) semanticCheck is a string of >= 20 characters (the pointer the protocol\n     tells reviewers to raise)\nnull/missing input, or a shape that cannot be judged -> verdict=invalid with the\noffending location (protocol null_tolerance criterion).\n\"\"\"\nimport json\nimport re\nimport sys\n\nREQUIRED_ITEMS = (\"statement\", \"definitions\", \"proof-direction\")\nARTIFACT_RE = re.compile(r\"^(pin://|metafile://)\\S+$\")\nPLACEHOLDER = \"PUBLISH_ARTIFACT_FIRST\"\nMIN_NOTE = 20\nMIN_EVIDENCE = 10\n\n\ndef emit(verdict, detail, **extra):\n    payload = {\"verdict\": verdict, \"detail\": detail}\n    payload.update(extra)\n    print(json.dumps(payload, ensure_ascii=False))\n    sys.exit(0)\n\n\ndef main():\n    try:\n        raw = json.load(sys.stdin)\n    except Exception as err:\n        emit(\"invalid\", \"input json: %s\" % err)\n    if not isinstance(raw, dict):\n        emit(\"invalid\", \"input must be an object\")\n\n    task = raw.get(\"task\")\n    if not isinstance(task, str) or not task.strip():\n        emit(\"invalid\", \"task: missing or empty\")\n\n    artifact_pin = raw.get(\"artifactPin\")\n    if not isinstance(artifact_pin, str) or not artifact_pin.strip():\n        emit(\"invalid\", \"artifactPin: missing or empty\")\n    if artifact_pin.strip() == PLACEHOLDER:\n        emit(\"fail\", \"artifactPin: unresolved publish placeholder %s — the correspondence \"\n                     \"artifact must be published and its pinId substituted before review\" % PLACEHOLDER)\n    if not ARTIFACT_RE.match(artifact_pin.strip()):\n        emit(\"invalid\", \"artifactPin: must be a pin:// or metafile:// reference\")\n\n    items = raw.get(\"items\")\n    if not isinstance(items, list) or not items:\n        emit(\"invalid\", \"items: missing or empty array\")\n    seen = set()\n    assessments = {}\n    for index, item in enumerate(items):\n        where = \"items[%d]\" % index\n        if not isinstance(item, dict):\n            emit(\"invalid\", \"%s: not an object\" % where)\n        item_id = item.get(\"id\")\n        if not isinstance(item_id, str) or not item_id.strip():\n            emit(\"invalid\", \"%s.id: missing or empty\" % where)\n        if item_id in seen:\n            emit(\"fail\", \"%s.id: duplicate item %s\" % (where, item_id))\n        seen.add(item_id)\n        assessment = item.get(\"assessment\")\n        if assessment not in (\"aligned\", \"divergent\"):\n            emit(\"invalid\", \"%s.assessment: must be aligned or divergent\" % where)\n        note = item.get(\"note\")\n        if not isinstance(note, str) or len(note.strip()) < MIN_NOTE:\n            emit(\"fail\", \"%s.note: must be a substantive string (>= %d characters)\" % (where, MIN_NOTE))\n        if assessment == \"divergent\":\n            evidence = item.get(\"evidence\")\n            if not isinstance(evidence, str) or len(evidence.strip()) < MIN_EVIDENCE:\n                emit(\"fail\", \"%s: divergent item needs evidence (>= %d characters)\" % (where, MIN_EVIDENCE))\n        assessments[item_id] = assessment\n\n    missing = [item_id for item_id in REQUIRED_ITEMS if item_id not in assessments]\n    if missing:\n        emit(\"fail\", \"items: missing required correspondence item(s): %s\" % \", \".join(missing))\n\n    reviewer_verdict = raw.get(\"reviewerVerdict\")\n    if reviewer_verdict not in (\"aligned\", \"divergent\"):\n        emit(\"invalid\", \"reviewerVerdict: must be aligned or divergent\")\n    expected_verdict = \"divergent\" if \"divergent\" in assessments.values() else \"aligned\"\n    if reviewer_verdict != expected_verdict:\n        emit(\"fail\", \"reviewerVerdict %s disagrees with the item assessments (expected %s)\"\n                     % (reviewer_verdict, expected_verdict))\n\n    semantic_check = raw.get(\"semanticCheck\")\n    if not isinstance(semantic_check, str) or len(semantic_check.strip()) < MIN_NOTE:\n        emit(\"fail\", \"semanticCheck: must be a substantive string (>= %d characters)\" % MIN_NOTE)\n\n    print(json.dumps({\n        \"verdict\": \"pass\",\n        \"detail\": \"review report complete for %s against %s: %d item(s), reviewer verdict %s\"\n                  % (task, artifact_pin, len(items), reviewer_verdict),\n        \"coveredItems\": sorted(assessments),\n        \"expected_count\": len(REQUIRED_ITEMS),\n        \"reviewerVerdict\": reviewer_verdict,\n    }, ensure_ascii=False))\n\n\nif __name__ == \"__main__\":\n    main()\n",
+      "input": {
+        "stdin": "one JSON object",
+        "fields": {
+          "task": "string, the task id",
+          "artifactPin": "pin://|metafile:// reference to the independent correspondence artifact",
+          "items": "array of {id: statement|definitions|proof-direction|<extra>, assessment: aligned|divergent, note: string >= 20 chars, evidence: string (required when divergent)}",
+          "reviewerVerdict": "aligned | divergent",
+          "semanticCheck": "string >= 20 chars, the pointer the protocol tells reviewers to raise"
+        },
+        "nodeParams": [
+          "task",
+          "artifactKey",
+          "requiredItems"
+        ]
+      },
+      "output": {
+        "stdout": "one JSON object",
+        "verdict": "pass | fail | invalid",
+        "detail": "string; the first violated condition",
+        "onPass": "coveredItems, expected_count (3) and the reviewer verdict",
+        "verdictSemantics": "pass = complete, well-formed report (an evidenced divergent report is a legitimate delivery and still passes); fail = malformed or incomplete report. Whether the alignment claim itself is true stays with the reviewer's semantic_check against the same artifact."
+      },
+      "validation": {
+        "null_tolerance": true,
+        "enumeration_closure": {
+          "closure": "the three protocol correspondence items of the cited artifact (statement, definitions, proof-direction), each exactly once; extra items are allowed but cannot replace them, and the summary verdict must agree with the item assessments",
+          "selfcheck": [
+            {
+              "vector": "complete aligned report",
+              "expected_count": 3,
+              "expected_verdict": "pass"
+            },
+            {
+              "vector": "evidenced divergent report",
+              "expected_count": 3,
+              "expected_verdict": "pass"
+            },
+            {
+              "vector": "divergent item without evidence",
+              "expected_count": 3,
+              "expected_verdict": "fail"
+            }
+          ],
+          "count_meaning": "covered required items out of 3; the script prints expected_count = 3"
+        },
+        "proposition_fidelity": {
+          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
+          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactKey": "correspondence-T1-JSP-000301",
+          "coverage": [
+            "statement",
+            "definitions",
+            "proof-direction"
+          ],
+          "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T1-JSP-000301. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (the review must cite this pin, not a self-declared claim)."
+        },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+      }
+    },
+    "semantic-review-870": {
+      "name": "semantic-review",
+      "lang": "python",
+      "entry": "spec-semantic-review.py",
+      "script": "#!/usr/bin/env python3\n\"\"\"\nspec-semantic-review.py — proposition-fidelity review submission checker\n(MetaTask spec script, protocol v1.2.1 §spec contract). Used by triage-kind\nreview nodes (and by proof-kind nodes whose deliverable is a literature-aligned\nrestatement, e.g. T4 node `base`).\n\nNode shape it judges: \"review an on-chain deliverable against the INDEPENDENT\ncorrespondence artifact cited by the task's spec.validation.proposition_fidelity\nand report, item by item, whether the formalized statement / definitions /\nproof direction still match the original proposition\". This script closes the\nmachine-checkable part of that delivery: the artifact reference is a real pin\nreference (never the unresolved publish placeholder), the protocol's three\ncorrespondence items are all covered exactly once, each item carries a\nsubstantive note, a `divergent` item carries evidence, and the summary verdict\nagrees with the items.\n\nVerdict semantics: `pass` means the review report is complete and well formed —\nincluding a well-evidenced `divergent` report, which is a legitimate delivery\n(it tells the publisher the task's proposition may not match the bank's\nrecord). `fail` is reserved for malformed or incomplete reports. The substance\nof the review (is the alignment claim true?) stays with the reviewer's\nsemantic_check, which the protocol routes to this same artifact.\n\nInput (stdin, JSON):\n  {\n    \"task\": \"T1-JSP-000301\",\n    \"artifactPin\": \"metafile://...i0\",\n    \"items\": [\n      { \"id\": \"statement\", \"assessment\": \"aligned\", \"note\": \"...\" },\n      { \"id\": \"definitions\", \"assessment\": \"aligned\", \"note\": \"...\" },\n      { \"id\": \"proof-direction\", \"assessment\": \"divergent\", \"note\": \"...\", \"evidence\": \"...\" }\n    ],\n    \"reviewerVerdict\": \"divergent\",\n    \"semanticCheck\": \"...\"\n  }\nOutput (stdout, JSON): { \"verdict\": \"pass\" | \"fail\" | \"invalid\", \"detail\": \"...\" }\nCriteria (all must hold for pass):\n  1) task is a non-empty string; artifactPin matches ^(pin://|metafile://)\\\\S+$\n     and is NOT the publish-time placeholder PUBLISH_ARTIFACT_FIRST\n  2) items is a non-empty array; ids unique; the three protocol items\n     statement / definitions / proof-direction are all present\n  3) every item: assessment in {aligned, divergent}; note a string of >= 20\n     characters; a divergent item carries an evidence string of >= 10 characters\n  4) reviewerVerdict in {aligned, divergent} and consistent with the items:\n     any divergent item -> \"divergent\", none -> \"aligned\"\n  5) semanticCheck is a string of >= 20 characters (the pointer the protocol\n     tells reviewers to raise)\nnull/missing input, or a shape that cannot be judged -> verdict=invalid with the\noffending location (protocol null_tolerance criterion).\n\"\"\"\nimport json\nimport re\nimport sys\n\nREQUIRED_ITEMS = (\"statement\", \"definitions\", \"proof-direction\")\nARTIFACT_RE = re.compile(r\"^(pin://|metafile://)\\S+$\")\nPLACEHOLDER = \"PUBLISH_ARTIFACT_FIRST\"\nMIN_NOTE = 20\nMIN_EVIDENCE = 10\n\n\ndef emit(verdict, detail, **extra):\n    payload = {\"verdict\": verdict, \"detail\": detail}\n    payload.update(extra)\n    print(json.dumps(payload, ensure_ascii=False))\n    sys.exit(0)\n\n\ndef main():\n    try:\n        raw = json.load(sys.stdin)\n    except Exception as err:\n        emit(\"invalid\", \"input json: %s\" % err)\n    if not isinstance(raw, dict):\n        emit(\"invalid\", \"input must be an object\")\n\n    task = raw.get(\"task\")\n    if not isinstance(task, str) or not task.strip():\n        emit(\"invalid\", \"task: missing or empty\")\n\n    artifact_pin = raw.get(\"artifactPin\")\n    if not isinstance(artifact_pin, str) or not artifact_pin.strip():\n        emit(\"invalid\", \"artifactPin: missing or empty\")\n    if artifact_pin.strip() == PLACEHOLDER:\n        emit(\"fail\", \"artifactPin: unresolved publish placeholder %s — the correspondence \"\n                     \"artifact must be published and its pinId substituted before review\" % PLACEHOLDER)\n    if not ARTIFACT_RE.match(artifact_pin.strip()):\n        emit(\"invalid\", \"artifactPin: must be a pin:// or metafile:// reference\")\n\n    items = raw.get(\"items\")\n    if not isinstance(items, list) or not items:\n        emit(\"invalid\", \"items: missing or empty array\")\n    seen = set()\n    assessments = {}\n    for index, item in enumerate(items):\n        where = \"items[%d]\" % index\n        if not isinstance(item, dict):\n            emit(\"invalid\", \"%s: not an object\" % where)\n        item_id = item.get(\"id\")\n        if not isinstance(item_id, str) or not item_id.strip():\n            emit(\"invalid\", \"%s.id: missing or empty\" % where)\n        if item_id in seen:\n            emit(\"fail\", \"%s.id: duplicate item %s\" % (where, item_id))\n        seen.add(item_id)\n        assessment = item.get(\"assessment\")\n        if assessment not in (\"aligned\", \"divergent\"):\n            emit(\"invalid\", \"%s.assessment: must be aligned or divergent\" % where)\n        note = item.get(\"note\")\n        if not isinstance(note, str) or len(note.strip()) < MIN_NOTE:\n            emit(\"fail\", \"%s.note: must be a substantive string (>= %d characters)\" % (where, MIN_NOTE))\n        if assessment == \"divergent\":\n            evidence = item.get(\"evidence\")\n            if not isinstance(evidence, str) or len(evidence.strip()) < MIN_EVIDENCE:\n                emit(\"fail\", \"%s: divergent item needs evidence (>= %d characters)\" % (where, MIN_EVIDENCE))\n        assessments[item_id] = assessment\n\n    missing = [item_id for item_id in REQUIRED_ITEMS if item_id not in assessments]\n    if missing:\n        emit(\"fail\", \"items: missing required correspondence item(s): %s\" % \", \".join(missing))\n\n    reviewer_verdict = raw.get(\"reviewerVerdict\")\n    if reviewer_verdict not in (\"aligned\", \"divergent\"):\n        emit(\"invalid\", \"reviewerVerdict: must be aligned or divergent\")\n    expected_verdict = \"divergent\" if \"divergent\" in assessments.values() else \"aligned\"\n    if reviewer_verdict != expected_verdict:\n        emit(\"fail\", \"reviewerVerdict %s disagrees with the item assessments (expected %s)\"\n                     % (reviewer_verdict, expected_verdict))\n\n    semantic_check = raw.get(\"semanticCheck\")\n    if not isinstance(semantic_check, str) or len(semantic_check.strip()) < MIN_NOTE:\n        emit(\"fail\", \"semanticCheck: must be a substantive string (>= %d characters)\" % MIN_NOTE)\n\n    print(json.dumps({\n        \"verdict\": \"pass\",\n        \"detail\": \"review report complete for %s against %s: %d item(s), reviewer verdict %s\"\n                  % (task, artifact_pin, len(items), reviewer_verdict),\n        \"coveredItems\": sorted(assessments),\n        \"expected_count\": len(REQUIRED_ITEMS),\n        \"reviewerVerdict\": reviewer_verdict,\n    }, ensure_ascii=False))\n\n\nif __name__ == \"__main__\":\n    main()\n",
+      "input": {
+        "stdin": "one JSON object (same contract as semantic-review-301)",
+        "nodeParams": [
+          "task",
+          "artifactKey",
+          "requiredItems"
+        ]
+      },
+      "output": {
+        "stdout": "one JSON object",
+        "verdict": "pass | fail | invalid",
+        "onPass": "coveredItems, expected_count (3) and the reviewer verdict"
+      },
+      "validation": {
+        "null_tolerance": true,
+        "enumeration_closure": {
+          "closure": "the three protocol correspondence items (statement, definitions, proof-direction) of the JSP-000870 artifact, each exactly once, including the index-base question that artifact raises",
+          "selfcheck": {
+            "vector": "complete report for the JSP-000870 artifact",
+            "expected_count": 3,
+            "expected_verdict": "pass"
+          }
+        },
+        "proposition_fidelity": {
+          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
+          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactKey": "correspondence-T3-JSP-000870",
+          "coverage": [
+            "statement",
+            "definitions",
+            "proof-direction"
+          ],
+          "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T3-JSP-000870. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (index base and irrationality scope are the items to recheck)."
+        },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+      }
+    },
+    "semantic-review-598": {
+      "name": "semantic-review",
+      "lang": "python",
+      "entry": "spec-semantic-review.py",
+      "script": "#!/usr/bin/env python3\n\"\"\"\nspec-semantic-review.py — proposition-fidelity review submission checker\n(MetaTask spec script, protocol v1.2.1 §spec contract). Used by triage-kind\nreview nodes (and by proof-kind nodes whose deliverable is a literature-aligned\nrestatement, e.g. T4 node `base`).\n\nNode shape it judges: \"review an on-chain deliverable against the INDEPENDENT\ncorrespondence artifact cited by the task's spec.validation.proposition_fidelity\nand report, item by item, whether the formalized statement / definitions /\nproof direction still match the original proposition\". This script closes the\nmachine-checkable part of that delivery: the artifact reference is a real pin\nreference (never the unresolved publish placeholder), the protocol's three\ncorrespondence items are all covered exactly once, each item carries a\nsubstantive note, a `divergent` item carries evidence, and the summary verdict\nagrees with the items.\n\nVerdict semantics: `pass` means the review report is complete and well formed —\nincluding a well-evidenced `divergent` report, which is a legitimate delivery\n(it tells the publisher the task's proposition may not match the bank's\nrecord). `fail` is reserved for malformed or incomplete reports. The substance\nof the review (is the alignment claim true?) stays with the reviewer's\nsemantic_check, which the protocol routes to this same artifact.\n\nInput (stdin, JSON):\n  {\n    \"task\": \"T1-JSP-000301\",\n    \"artifactPin\": \"metafile://...i0\",\n    \"items\": [\n      { \"id\": \"statement\", \"assessment\": \"aligned\", \"note\": \"...\" },\n      { \"id\": \"definitions\", \"assessment\": \"aligned\", \"note\": \"...\" },\n      { \"id\": \"proof-direction\", \"assessment\": \"divergent\", \"note\": \"...\", \"evidence\": \"...\" }\n    ],\n    \"reviewerVerdict\": \"divergent\",\n    \"semanticCheck\": \"...\"\n  }\nOutput (stdout, JSON): { \"verdict\": \"pass\" | \"fail\" | \"invalid\", \"detail\": \"...\" }\nCriteria (all must hold for pass):\n  1) task is a non-empty string; artifactPin matches ^(pin://|metafile://)\\\\S+$\n     and is NOT the publish-time placeholder PUBLISH_ARTIFACT_FIRST\n  2) items is a non-empty array; ids unique; the three protocol items\n     statement / definitions / proof-direction are all present\n  3) every item: assessment in {aligned, divergent}; note a string of >= 20\n     characters; a divergent item carries an evidence string of >= 10 characters\n  4) reviewerVerdict in {aligned, divergent} and consistent with the items:\n     any divergent item -> \"divergent\", none -> \"aligned\"\n  5) semanticCheck is a string of >= 20 characters (the pointer the protocol\n     tells reviewers to raise)\nnull/missing input, or a shape that cannot be judged -> verdict=invalid with the\noffending location (protocol null_tolerance criterion).\n\"\"\"\nimport json\nimport re\nimport sys\n\nREQUIRED_ITEMS = (\"statement\", \"definitions\", \"proof-direction\")\nARTIFACT_RE = re.compile(r\"^(pin://|metafile://)\\S+$\")\nPLACEHOLDER = \"PUBLISH_ARTIFACT_FIRST\"\nMIN_NOTE = 20\nMIN_EVIDENCE = 10\n\n\ndef emit(verdict, detail, **extra):\n    payload = {\"verdict\": verdict, \"detail\": detail}\n    payload.update(extra)\n    print(json.dumps(payload, ensure_ascii=False))\n    sys.exit(0)\n\n\ndef main():\n    try:\n        raw = json.load(sys.stdin)\n    except Exception as err:\n        emit(\"invalid\", \"input json: %s\" % err)\n    if not isinstance(raw, dict):\n        emit(\"invalid\", \"input must be an object\")\n\n    task = raw.get(\"task\")\n    if not isinstance(task, str) or not task.strip():\n        emit(\"invalid\", \"task: missing or empty\")\n\n    artifact_pin = raw.get(\"artifactPin\")\n    if not isinstance(artifact_pin, str) or not artifact_pin.strip():\n        emit(\"invalid\", \"artifactPin: missing or empty\")\n    if artifact_pin.strip() == PLACEHOLDER:\n        emit(\"fail\", \"artifactPin: unresolved publish placeholder %s — the correspondence \"\n                     \"artifact must be published and its pinId substituted before review\" % PLACEHOLDER)\n    if not ARTIFACT_RE.match(artifact_pin.strip()):\n        emit(\"invalid\", \"artifactPin: must be a pin:// or metafile:// reference\")\n\n    items = raw.get(\"items\")\n    if not isinstance(items, list) or not items:\n        emit(\"invalid\", \"items: missing or empty array\")\n    seen = set()\n    assessments = {}\n    for index, item in enumerate(items):\n        where = \"items[%d]\" % index\n        if not isinstance(item, dict):\n            emit(\"invalid\", \"%s: not an object\" % where)\n        item_id = item.get(\"id\")\n        if not isinstance(item_id, str) or not item_id.strip():\n            emit(\"invalid\", \"%s.id: missing or empty\" % where)\n        if item_id in seen:\n            emit(\"fail\", \"%s.id: duplicate item %s\" % (where, item_id))\n        seen.add(item_id)\n        assessment = item.get(\"assessment\")\n        if assessment not in (\"aligned\", \"divergent\"):\n            emit(\"invalid\", \"%s.assessment: must be aligned or divergent\" % where)\n        note = item.get(\"note\")\n        if not isinstance(note, str) or len(note.strip()) < MIN_NOTE:\n            emit(\"fail\", \"%s.note: must be a substantive string (>= %d characters)\" % (where, MIN_NOTE))\n        if assessment == \"divergent\":\n            evidence = item.get(\"evidence\")\n            if not isinstance(evidence, str) or len(evidence.strip()) < MIN_EVIDENCE:\n                emit(\"fail\", \"%s: divergent item needs evidence (>= %d characters)\" % (where, MIN_EVIDENCE))\n        assessments[item_id] = assessment\n\n    missing = [item_id for item_id in REQUIRED_ITEMS if item_id not in assessments]\n    if missing:\n        emit(\"fail\", \"items: missing required correspondence item(s): %s\" % \", \".join(missing))\n\n    reviewer_verdict = raw.get(\"reviewerVerdict\")\n    if reviewer_verdict not in (\"aligned\", \"divergent\"):\n        emit(\"invalid\", \"reviewerVerdict: must be aligned or divergent\")\n    expected_verdict = \"divergent\" if \"divergent\" in assessments.values() else \"aligned\"\n    if reviewer_verdict != expected_verdict:\n        emit(\"fail\", \"reviewerVerdict %s disagrees with the item assessments (expected %s)\"\n                     % (reviewer_verdict, expected_verdict))\n\n    semantic_check = raw.get(\"semanticCheck\")\n    if not isinstance(semantic_check, str) or len(semantic_check.strip()) < MIN_NOTE:\n        emit(\"fail\", \"semanticCheck: must be a substantive string (>= %d characters)\" % MIN_NOTE)\n\n    print(json.dumps({\n        \"verdict\": \"pass\",\n        \"detail\": \"review report complete for %s against %s: %d item(s), reviewer verdict %s\"\n                  % (task, artifact_pin, len(items), reviewer_verdict),\n        \"coveredItems\": sorted(assessments),\n        \"expected_count\": len(REQUIRED_ITEMS),\n        \"reviewerVerdict\": reviewer_verdict,\n    }, ensure_ascii=False))\n\n\nif __name__ == \"__main__\":\n    main()\n",
+      "input": {
+        "stdin": "one JSON object (same contract as semantic-review-301)",
+        "nodeParams": [
+          "task",
+          "artifactKey",
+          "requiredItems",
+          "role"
+        ]
+      },
+      "output": {
+        "stdout": "one JSON object",
+        "verdict": "pass | fail | invalid",
+        "onPass": "coveredItems, expected_count (3) and the reviewer verdict"
+      },
+      "validation": {
+        "null_tolerance": true,
+        "enumeration_closure": {
+          "closure": "the three protocol correspondence items of the JSP-000598 artifact, each exactly once; the four referencing nodes (base, gpt1, gpt2, review) each file their own report and each must cover all three items",
+          "selfcheck": {
+            "vector": "complete report for the JSP-000598 artifact",
+            "expected_count": 3,
+            "expected_verdict": "pass"
+          }
+        },
+        "proposition_fidelity": {
+          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
+          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactKey": "correspondence-T4-JSP-000598",
+          "coverage": [
+            "statement",
+            "definitions",
+            "proof-direction"
+          ],
+          "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T4-JSP-000598. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (radical (set) reading of equal prime divisors is the item to recheck)."
+        },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+      }
+    },
+    "lean-build-870": {
+      "name": "lean-build",
+      "lang": "bash",
+      "entry": "spec-lean-build.sh",
+      "script": "#!/usr/bin/env bash\n# spec-lean-build.sh — 通用 Lean 形式化验证器（MetaTask spec 脚本，协议 v1.2.1 §spec 契约）\n#\n# 输入（stdin，JSON）: { \"repo\": \"pin://|metafile://|本地路径\", \"target\": \"相对于 repo 根的 .lean 文件\" }\n# 输出（stdout，JSON）: { \"verdict\": \"pass\" | \"fail\" | \"invalid\", \"detail\": \"...\" }\n# 判据: 在仓库根执行 lake build <target>，退出码 0 = pass（全部定理无 sorry 报错即视为\n#       编译判定；--warning-as-error=error 保证 sorry/lint 失败即失败）。\n# null/缺失 → invalid 并注明位置（协议 null_tolerance 判据）。\n# 离线性: 输入为 pin://|metafile:// 时先经 metaid 内容端点拉取（发射环境自带工具）；\n#         拉取失败 → invalid，不悬挂。\nset -euo pipefail\n\ninput=\"$(cat)\"\n\nrepo=\"$(printf '%s' \"$input\" | python3 -c 'import json,sys; d=sys.stdin.read(); print(json.loads(d).get(\"repo\") or \"\")' 2>/dev/null || true)\"\ntarget=\"$(printf '%s' \"$input\" | python3 -c 'import json,sys; d=sys.stdin.read(); print(json.loads(d).get(\"target\") or \"\")' 2>/dev/null || true)\"\n\ninvalid() { printf '{\"verdict\":\"invalid\",\"detail\":\"%s\"}\\n' \"$1\"; exit 0; }\n[ -n \"$repo\" ] || invalid \"missing field: repo\"\n[ -n \"$target\" ] || invalid \"missing field: target\"\n\nworkdir=\"$repo\"\ncase \"$repo\" in\n  pin://*|metafile://*)\n    tmp=\"$(mktemp -d)\"\n    if ! fetch_output=\"$(metabot \"$repo\" --download \"$tmp\" 2>&1)\"; then\n      invalid \"artifact fetch failed: $fetch_output\"\n    fi\n    workdir=\"$tmp\"\n    ;;\nesac\n\n[ -f \"$workdir/lakefile.lean\" ] || [ -f \"$workdir/lakefile.toml\" ] || invalid \"not a lake project root: $workdir\"\n\nif (cd \"$workdir\" && lake build \"$target\" --warning-as-error=error >/dev/null 2>&1); then\n  printf '{\"verdict\":\"pass\",\"detail\":\"lake build %s clean\"}\\n' \"$target\"\nelse\n  printf '{\"verdict\":\"fail\",\"detail\":\"lake build %s failed (or contains sorry/admitted)\"}\\n' \"$target\"\nfi\n",
+      "input": {
+        "stdin": "one JSON object",
+        "fields": {
+          "repo": "pin://|metafile:// artifact or local path of the lake project root",
+          "target": "path of the .lean file to build, relative to the repo root"
+        },
+        "nodeParams": [
+          "target"
+        ]
+      },
+      "output": {
+        "stdout": "one JSON object",
+        "verdict": "pass | fail | invalid",
+        "detail": "string; `lake build <target> --warning-as-error=error` outcome"
+      },
+      "validation": {
+        "null_tolerance": true,
+        "enumeration_closure": {
+          "closure": "the transitive import closure of the target .lean file inside the pinned repo, compiled by lake with --warning-as-error=error, so the verdict is a function of the complete set of compiler errors and sorry/admitted warnings — not of a subset",
+          "selfcheck": [
+            {
+              "vector": "empty lake project, target = `theorem t : True := trivial`",
+              "expected_count": 0,
+              "expected_verdict": "pass"
+            },
+            {
+              "vector": "same project with `theorem t : True := by sorry`",
+              "expected_count": 1,
+              "expected_verdict": "fail"
+            }
+          ],
+          "count_meaning": "numbers of build-failing declarations (errors + sorry warnings) in each vector"
+        },
+        "proposition_fidelity": {
+          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
+          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactKey": "correspondence-T3-JSP-000870",
+          "coverage": [
+            "statement",
+            "definitions",
+            "proof-direction"
+          ],
+          "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T3-JSP-000870. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (the theorem statement must match the artifact's series and index base)."
+        },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+      }
+    },
+    "lean-build-598": {
+      "name": "lean-build",
+      "lang": "bash",
+      "entry": "spec-lean-build.sh",
+      "script": "#!/usr/bin/env bash\n# spec-lean-build.sh — 通用 Lean 形式化验证器（MetaTask spec 脚本，协议 v1.2.1 §spec 契约）\n#\n# 输入（stdin，JSON）: { \"repo\": \"pin://|metafile://|本地路径\", \"target\": \"相对于 repo 根的 .lean 文件\" }\n# 输出（stdout，JSON）: { \"verdict\": \"pass\" | \"fail\" | \"invalid\", \"detail\": \"...\" }\n# 判据: 在仓库根执行 lake build <target>，退出码 0 = pass（全部定理无 sorry 报错即视为\n#       编译判定；--warning-as-error=error 保证 sorry/lint 失败即失败）。\n# null/缺失 → invalid 并注明位置（协议 null_tolerance 判据）。\n# 离线性: 输入为 pin://|metafile:// 时先经 metaid 内容端点拉取（发射环境自带工具）；\n#         拉取失败 → invalid，不悬挂。\nset -euo pipefail\n\ninput=\"$(cat)\"\n\nrepo=\"$(printf '%s' \"$input\" | python3 -c 'import json,sys; d=sys.stdin.read(); print(json.loads(d).get(\"repo\") or \"\")' 2>/dev/null || true)\"\ntarget=\"$(printf '%s' \"$input\" | python3 -c 'import json,sys; d=sys.stdin.read(); print(json.loads(d).get(\"target\") or \"\")' 2>/dev/null || true)\"\n\ninvalid() { printf '{\"verdict\":\"invalid\",\"detail\":\"%s\"}\\n' \"$1\"; exit 0; }\n[ -n \"$repo\" ] || invalid \"missing field: repo\"\n[ -n \"$target\" ] || invalid \"missing field: target\"\n\nworkdir=\"$repo\"\ncase \"$repo\" in\n  pin://*|metafile://*)\n    tmp=\"$(mktemp -d)\"\n    if ! fetch_output=\"$(metabot \"$repo\" --download \"$tmp\" 2>&1)\"; then\n      invalid \"artifact fetch failed: $fetch_output\"\n    fi\n    workdir=\"$tmp\"\n    ;;\nesac\n\n[ -f \"$workdir/lakefile.lean\" ] || [ -f \"$workdir/lakefile.toml\" ] || invalid \"not a lake project root: $workdir\"\n\nif (cd \"$workdir\" && lake build \"$target\" --warning-as-error=error >/dev/null 2>&1); then\n  printf '{\"verdict\":\"pass\",\"detail\":\"lake build %s clean\"}\\n' \"$target\"\nelse\n  printf '{\"verdict\":\"fail\",\"detail\":\"lake build %s failed (or contains sorry/admitted)\"}\\n' \"$target\"\nfi\n",
+      "input": {
+        "stdin": "one JSON object (same contract as lean-build-870)",
+        "nodeParams": [
+          "target"
+        ]
+      },
+      "output": {
+        "stdout": "one JSON object",
+        "verdict": "pass | fail | invalid",
+        "detail": "string; `lake build <target> --warning-as-error=error` outcome"
+      },
+      "validation": {
+        "null_tolerance": true,
+        "enumeration_closure": {
+          "closure": "the transitive import closure of the target .lean file inside the pinned repo, compiled by lake with --warning-as-error=error; the verdict is a function of the complete set of compiler errors and sorry/admitted warnings",
+          "selfcheck": [
+            {
+              "vector": "empty lake project, target = `theorem t : True := trivial`",
+              "expected_count": 0,
+              "expected_verdict": "pass"
+            },
+            {
+              "vector": "same project with `theorem t : True := by sorry`",
+              "expected_count": 1,
+              "expected_verdict": "fail"
+            }
+          ],
+          "count_meaning": "numbers of build-failing declarations (errors + sorry warnings) in each vector"
+        },
+        "proposition_fidelity": {
+          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
+          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactKey": "correspondence-T4-JSP-000598",
+          "coverage": [
+            "statement",
+            "definitions",
+            "proof-direction"
+          ],
+          "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T4-JSP-000598. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (the theorem statement must use the radical (set) reading of equal prime divisors)."
+        },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+      }
+    }
   },
   "tasks": [
     {
       "id": "T0-triage-287",
-      "title": "metaTask 战役 #0 · JSP 287 题分类三角测量（Solved ∧ 无 Lean）",
-      "brief": "对 TheJustinSunPrize 题库 287 个 solved-no-lean 记录逐题分类：证书类型（witness / 有限计算 / 自包含证明 / 深理论）、mathlib 可行性粗评、关键论文页数；产出持续更新的候选短名单。狗粮任务：本任务自身即 MetaTask 象限的公开展示。",
-      "nodes": [
-        { "id": "root", "parent": null, "title": "聚合", "kind": "aggregate", "weight": 1000 },
-        { "id": "b01", "parent": "root", "title": "批 01：JSP-000007 ~ 000100 内的候选", "kind": "triage", "weight": 900 },
-        { "id": "b02", "parent": "root", "title": "批 02：JSP-000101 ~ 000200", "kind": "triage", "weight": 900 },
-        { "id": "b03", "parent": "root", "title": "批 03：JSP-000201 ~ 000300", "kind": "triage", "weight": 900 },
-        { "id": "b04", "parent": "root", "title": "批 04：JSP-000301 ~ 000400", "kind": "triage", "weight": 900 },
-        { "id": "b05", "parent": "root", "title": "批 05：JSP-000401 ~ 000500", "kind": "triage", "weight": 900 },
-        { "id": "b06", "parent": "root", "title": "批 06：JSP-000501 ~ 000600", "kind": "triage", "weight": 900 },
-        { "id": "b07", "parent": "root", "title": "批 07：JSP-000601 ~ 000700", "kind": "triage", "weight": 900 },
-        { "id": "b08", "parent": "root", "title": "批 08：JSP-000701 ~ 000800", "kind": "triage", "weight": 900 },
-        { "id": "b09", "parent": "root", "title": "批 09：JSP-000801 ~ 000900", "kind": "triage", "weight": 900 },
-        { "id": "b10", "parent": "root", "title": "批 10：JSP-000901 ~ 001022", "kind": "triage", "weight": 900 }
-      ],
-      "policyOverride": { "claim_ttl_hours": 72, "verify_window_hours": 120 },
-      "spec": { "name": "triage-table-check", "lang": "python", "entry": "spec-triage-table.py", "scriptFile": "spec-triage-table.py", "note": "机器可判部分（schema/区间/唯一性/数量覆盖）自测通过；逐题分类实质正确性由 review 侧 semantic_check 承接。提交时 expected 取扫描清单该批的 solved-no-lean 计数。" }
+      "rootSpec": "triage-table-check",
+      "correspondenceArtifact": "correspondence-T0-triage-287",
+      "publish": {
+        "title": "metaTask 战役 #0 · JSP 287 题分类三角测量（Solved ∧ 无 Lean）",
+        "brief": "对 TheJustinSunPrize 题库 287 个 solved-no-lean 记录逐题分类：证书类型（witness / 有限计算 / 自包含证明 / 深理论）、mathlib 可行性粗评、关键论文页数；产出持续更新的候选短名单。狗粮任务：本任务自身即 MetaTask 象限的公开展示。批次契约（from/to/expected/filter）在节点 params 中，expected 取 2026-09-29 题库快照（前缀读法 Solved ∧ Lean proof=No，合计 287）。",
+        "nodes": [
+          {
+            "id": "root",
+            "parent": null,
+            "title": "聚合",
+            "kind": "aggregate",
+            "specid": null,
+            "params": {
+              "aggregation": "the root aggregate submission must carry childids equal (as a set) to the children's effective verified submission pinIds; the protocol's aggregationPrecondition is enforced by replay from H_ACT2 and is what judges this node, not a script"
+            },
+            "weight": 1000
+          },
+          {
+            "id": "b01",
+            "parent": "root",
+            "title": "批 01：JSP-000001 ~ 000100（首条候选 JSP-000007）",
+            "kind": "triage",
+            "specid": null,
+            "params": {
+              "from": 1,
+              "to": 100,
+              "expected": 15,
+              "scanDate": "2026-09-29",
+              "filter": "Current status starts with \"Solved\" AND Lean proof == \"No\""
+            },
+            "weight": 900
+          },
+          {
+            "id": "b02",
+            "parent": "root",
+            "title": "批 02：JSP-000101 ~ 000200",
+            "kind": "triage",
+            "specid": null,
+            "params": {
+              "from": 101,
+              "to": 200,
+              "expected": 18,
+              "scanDate": "2026-09-29",
+              "filter": "Current status starts with \"Solved\" AND Lean proof == \"No\""
+            },
+            "weight": 900
+          },
+          {
+            "id": "b03",
+            "parent": "root",
+            "title": "批 03：JSP-000201 ~ 000300",
+            "kind": "triage",
+            "specid": null,
+            "params": {
+              "from": 201,
+              "to": 300,
+              "expected": 22,
+              "scanDate": "2026-09-29",
+              "filter": "Current status starts with \"Solved\" AND Lean proof == \"No\""
+            },
+            "weight": 900
+          },
+          {
+            "id": "b04",
+            "parent": "root",
+            "title": "批 04：JSP-000301 ~ 000400",
+            "kind": "triage",
+            "specid": null,
+            "params": {
+              "from": 301,
+              "to": 400,
+              "expected": 28,
+              "scanDate": "2026-09-29",
+              "filter": "Current status starts with \"Solved\" AND Lean proof == \"No\""
+            },
+            "weight": 900
+          },
+          {
+            "id": "b05",
+            "parent": "root",
+            "title": "批 05：JSP-000401 ~ 000500",
+            "kind": "triage",
+            "specid": null,
+            "params": {
+              "from": 401,
+              "to": 500,
+              "expected": 31,
+              "scanDate": "2026-09-29",
+              "filter": "Current status starts with \"Solved\" AND Lean proof == \"No\""
+            },
+            "weight": 900
+          },
+          {
+            "id": "b06",
+            "parent": "root",
+            "title": "批 06：JSP-000501 ~ 000600",
+            "kind": "triage",
+            "specid": null,
+            "params": {
+              "from": 501,
+              "to": 600,
+              "expected": 28,
+              "scanDate": "2026-09-29",
+              "filter": "Current status starts with \"Solved\" AND Lean proof == \"No\""
+            },
+            "weight": 900
+          },
+          {
+            "id": "b07",
+            "parent": "root",
+            "title": "批 07：JSP-000601 ~ 000700",
+            "kind": "triage",
+            "specid": null,
+            "params": {
+              "from": 601,
+              "to": 700,
+              "expected": 43,
+              "scanDate": "2026-09-29",
+              "filter": "Current status starts with \"Solved\" AND Lean proof == \"No\""
+            },
+            "weight": 900
+          },
+          {
+            "id": "b08",
+            "parent": "root",
+            "title": "批 08：JSP-000701 ~ 000800",
+            "kind": "triage",
+            "specid": null,
+            "params": {
+              "from": 701,
+              "to": 800,
+              "expected": 30,
+              "scanDate": "2026-09-29",
+              "filter": "Current status starts with \"Solved\" AND Lean proof == \"No\""
+            },
+            "weight": 900
+          },
+          {
+            "id": "b09",
+            "parent": "root",
+            "title": "批 09：JSP-000801 ~ 000900",
+            "kind": "triage",
+            "specid": null,
+            "params": {
+              "from": 801,
+              "to": 900,
+              "expected": 36,
+              "scanDate": "2026-09-29",
+              "filter": "Current status starts with \"Solved\" AND Lean proof == \"No\""
+            },
+            "weight": 900
+          },
+          {
+            "id": "b10",
+            "parent": "root",
+            "title": "批 10：JSP-000901 ~ 001022",
+            "kind": "triage",
+            "specid": null,
+            "params": {
+              "from": 901,
+              "to": 1022,
+              "expected": 36,
+              "scanDate": "2026-09-29",
+              "filter": "Current status starts with \"Solved\" AND Lean proof == \"No\""
+            },
+            "weight": 900
+          }
+        ],
+        "policy": {
+          "claimTtlHours": 72,
+          "verifyQuorum": 2,
+          "verifyWindowHours": 120,
+          "submitterShareBP": 8000
+        },
+        "tags": [
+          "metatask",
+          "wave-1",
+          "jsp-bank-287",
+          "triage"
+        ]
+      }
     },
     {
       "id": "T1-JSP-000301",
-      "title": "metaTask 战役 · JSP-000301 连续强力数反例（Golomb 1970）的链上验证",
-      "brief": "命题（字面即反例型）：两个相邻正整数均为 powerful 时，是否必有其一为完全平方？答案否。目标：给出并验证 Golomb 反例对。spec 秒级可验，是战役开局题。",
-      "nodes": [
-        { "id": "root", "parent": null, "title": "聚合", "kind": "aggregate", "weight": 1500 },
-        { "id": "witness", "parent": "root", "title": "从 [Go70] 论文提取/复算反例对 (n, n+1)", "kind": "search", "weight": 4000 },
-        { "id": "verify", "parent": "root", "title": "运行 spec-powerful-pair.py 验证见证（相邻/均 powerful/均非平方）", "kind": "proof", "weight": 2500 },
-        { "id": "review", "parent": "root", "title": "命题保真复核：powerful 定义与题库口径逐项对照（semantic_check）", "kind": "triage", "weight": 2000 }
-      ],
-      "spec": { "name": "powerful-pair-verifier", "lang": "python", "entry": "spec-powerful-pair.py", "scriptFile": "spec-powerful-pair.py" }
-    },
-    {
-      "id": "T2-JSP-000288",
-      "title": "metaTask 战役 · JSP-000288 黄金比收敛反例（AI 已解）的链上验证",
-      "brief": "命题：极小稳定完备序列的相邻项之比是否必收敛到黄金比？答案否（题库记 GPT Pro 反例）。目标：从该解的记录复现反例序列并机器验证其性质。",
-      "nodes": [
-        { "id": "root", "parent": null, "title": "聚合", "kind": "aggregate", "weight": 1500 },
-        { "id": "source", "parent": "root", "title": "提取反例序列定义（题库记录/Gr64d、ErGr80 原始文献）", "kind": "search", "weight": 3500 },
-        { "id": "verify", "parent": "root", "title": "验证序列性质：稳定完备、极小性（可有限检查部分）与比值极限 ≠ φ", "kind": "proof", "weight": 2500 },
-        { "id": "review", "parent": "root", "title": "命题保真复核（semantic_check：序列定义与题库口径对照）", "kind": "triage", "weight": 2500 }
-      ],
-      "spec": { "name": "stably-complete-seq-verifier", "lang": "python", "entry": "spec-stably-complete.py", "note": "发布时按提取出的序列定义补齐脚本（骨架：给定序列前 N 项 + 极限声明，验证可达性质；不可有限检查部分由 review 节点承接）。" }
+      "rootSpec": "powerful-pair-verifier",
+      "correspondenceArtifact": "correspondence-T1-JSP-000301",
+      "publish": {
+        "title": "metaTask 战役 · JSP-000301 连续强力数反例（Golomb 1970）的链上验证",
+        "brief": "命题（字面即反例型）：两个相邻正整数均为 powerful（∀ 素数 p | n: p² | n）时，是否必有其一为完全平方？答案否。目标：给出并验证 Golomb 反例对（题库记录给出 12167 与 12168）。spec 秒级可验，是战役开局题。见证节点的提交必须自带 provenance 引用与独立复算的分解证书；证明节点独立重跑判据；复核节点对照独立 correspondence 件（含题库对『仅此问题、不涉及计数问题』的范围声明）。",
+        "nodes": [
+          {
+            "id": "root",
+            "parent": null,
+            "title": "聚合",
+            "kind": "aggregate",
+            "specid": null,
+            "params": {
+              "aggregation": "the root aggregate submission must carry childids equal (as a set) to the children's effective verified submission pinIds; the protocol's aggregationPrecondition is enforced by replay from H_ACT2 and is what judges this node, not a script"
+            },
+            "weight": 1500
+          },
+          {
+            "id": "witness",
+            "parent": "root",
+            "title": "从 [Go70] / 题库记录提取并复算反例对 (n, n+1)，附 provenance 与分解证书",
+            "kind": "search",
+            "specid": "SPEC_PIN:witness-extraction-301",
+            "params": {
+              "jsp": "JSP-000301",
+              "witnessSource": "JSP-000301 review note (Record correction, source review 2026-09-13) / [Go70] Golomb 1970",
+              "deliverable": "claim{n,m} + provenance{reference,locator,recordField,quotedText} + factorization{n,m}"
+            },
+            "weight": 4000
+          },
+          {
+            "id": "verify",
+            "parent": "root",
+            "title": "运行 spec-powerful-pair.py 验证见证（相邻 / 均 powerful / 均非平方）",
+            "kind": "proof",
+            "specid": null,
+            "weight": 2500
+          },
+          {
+            "id": "review",
+            "parent": "root",
+            "title": "命题保真复核：powerful 定义与题库口径逐项对照（semantic_check，指向 correspondence 件）",
+            "kind": "triage",
+            "specid": "SPEC_PIN:semantic-review-301",
+            "params": {
+              "task": "T1-JSP-000301",
+              "artifactKey": "correspondence-T1-JSP-000301",
+              "requiredItems": [
+                "statement",
+                "definitions",
+                "proof-direction"
+              ]
+            },
+            "weight": 2000
+          }
+        ],
+        "policy": {
+          "claimTtlHours": 48,
+          "verifyQuorum": 2,
+          "verifyWindowHours": 96,
+          "submitterShareBP": 8000
+        },
+        "tags": [
+          "metatask",
+          "wave-1",
+          "JSP-000301",
+          "formalization"
+        ]
+      }
     },
     {
       "id": "T3-JSP-000870",
-      "title": "metaTask 战役 · JSP-000870 Erdős 级数 Σ1/(2^n−3) 无理性的 Lean 形式化",
-      "brief": "Borwein 1991 自包含证明的 bounded-size Lean 形式化：引理阶梯（尾部估计、分母递推、无理性判据）→ lake build 机判。战役首个真正的形式化节点。",
-      "nodes": [
-        { "id": "root", "parent": null, "title": "聚合", "kind": "aggregate", "weight": 1200 },
-        { "id": "lem1", "parent": "root", "title": "引理：级数收敛性与部分和结构", "kind": "formalize", "weight": 1700 },
-        { "id": "lem2", "parent": "root", "title": "引理：分母递推与 2-进赋值界", "kind": "formalize", "weight": 1700 },
-        { "id": "lem3", "parent": "root", "title": "引理：尾部小量估计（Borwein 式）", "kind": "formalize", "weight": 1700 },
-        { "id": "crit", "parent": "root", "title": "无理性判据（整数比下界）整合定理", "kind": "formalize", "weight": 1700 },
-        { "id": "build", "parent": "root", "title": "lake build 集成验证（spec-lean-build.sh）", "kind": "proof", "weight": 1200 },
-        { "id": "review", "parent": "root", "title": "与 Borwein 1991 逐步对照的数学正确性复核（semantic_check）", "kind": "triage", "weight": 800 }
-      ],
-      "spec": { "name": "lean-build", "lang": "bash", "entry": "spec-lean-build.sh", "scriptFile": "spec-lean-build.sh" }
+      "rootSpec": "lean-build-870",
+      "correspondenceArtifact": "correspondence-T3-JSP-000870",
+      "publish": {
+        "title": "metaTask 战役 · JSP-000870 Erdős 级数 Σ1/(2^n−3) 无理性的 Lean 形式化",
+        "brief": "Borwein 1991 自包含证明的 bounded-size Lean 形式化：引理阶梯（收敛与部分和结构、分母递推与2-进赋值界、尾部估计、无理性判据）→ lake build 机判。形式化陈述以独立 correspondence 件为准（级数起点 n≥2 与『无理性』范围必须先对照 [Bo91] 确认）。战役首个真正的形式化节点。",
+        "nodes": [
+          {
+            "id": "root",
+            "parent": null,
+            "title": "聚合",
+            "kind": "aggregate",
+            "specid": null,
+            "params": {
+              "aggregation": "the root aggregate submission must carry childids equal (as a set) to the children's effective verified submission pinIds; the protocol's aggregationPrecondition is enforced by replay from H_ACT2 and is what judges this node, not a script"
+            },
+            "weight": 1200
+          },
+          {
+            "id": "lem1",
+            "parent": "root",
+            "title": "引理：级数收敛性与部分和结构",
+            "kind": "formalize",
+            "specid": null,
+            "params": {
+              "target": "Erdos870/Convergence.lean"
+            },
+            "weight": 1700
+          },
+          {
+            "id": "lem2",
+            "parent": "root",
+            "title": "引理：分母递推与 2-进赋值界",
+            "kind": "formalize",
+            "specid": null,
+            "params": {
+              "target": "Erdos870/DenominatorRecurrence.lean"
+            },
+            "weight": 1700
+          },
+          {
+            "id": "lem3",
+            "parent": "root",
+            "title": "引理：尾部小量估计（Borwein 式）",
+            "kind": "formalize",
+            "specid": null,
+            "params": {
+              "target": "Erdos870/TailEstimate.lean"
+            },
+            "weight": 1700
+          },
+          {
+            "id": "crit",
+            "parent": "root",
+            "title": "无理性判据（整数比下界）整合定理",
+            "kind": "formalize",
+            "specid": null,
+            "params": {
+              "target": "Erdos870/Irrationality.lean"
+            },
+            "weight": 1700
+          },
+          {
+            "id": "build",
+            "parent": "root",
+            "title": "lake build 集成验证（spec-lean-build.sh）",
+            "kind": "proof",
+            "specid": null,
+            "params": {
+              "target": "Erdos870/Irrationality.lean"
+            },
+            "weight": 1200
+          },
+          {
+            "id": "review",
+            "parent": "root",
+            "title": "与 Borwein 1991 逐步对照的数学正确性复核（semantic_check，指向 correspondence 件）",
+            "kind": "triage",
+            "specid": "SPEC_PIN:semantic-review-870",
+            "params": {
+              "task": "T3-JSP-000870",
+              "artifactKey": "correspondence-T3-JSP-000870",
+              "requiredItems": [
+                "statement",
+                "definitions",
+                "proof-direction"
+              ],
+              "reference": "[Bo91] On the irrationality of sum(1/(q^n+r)), J. Number Theory (1991), 253-259"
+            },
+            "weight": 800
+          }
+        ],
+        "policy": {
+          "claimTtlHours": 48,
+          "verifyQuorum": 2,
+          "verifyWindowHours": 96,
+          "submitterShareBP": 8000
+        },
+        "tags": [
+          "metatask",
+          "wave-1",
+          "JSP-000870",
+          "lean"
+        ]
+      }
     },
     {
       "id": "T4-JSP-000598",
-      "title": "metaTask 战役 · JSP-000598 中心二项系数素支持（AI 已解）的群体形式化验证",
-      "brief": "两个不同中心二项系数不能有完全相同的素因子集合——题库记 GPT Pro 解（基于 EGRS75）。战役旗舰叙事：AI 已解，群体验证并形式化。",
-      "nodes": [
-        { "id": "root", "parent": null, "title": "聚合", "kind": "aggregate", "weight": 1200 },
-        { "id": "base", "parent": "root", "title": "EGRS75 基础结果复述与验证（素因子支持结构）", "kind": "proof", "weight": 2000 },
-        { "id": "gpt1", "parent": "root", "title": "GPT 解证明链核读一：关键步骤独立复算", "kind": "triage", "weight": 2200 },
-        { "id": "gpt2", "parent": "root", "title": "GPT 解证明链核读二：另侧独立复算（不同 bot）", "kind": "triage", "weight": 2200 },
-        { "id": "lean", "parent": "root", "title": "主定理 Lean 形式化（spec-lean-build.sh）", "kind": "formalize", "weight": 1600 },
-        { "id": "review", "parent": "root", "title": "命题保真复核（semantic_check）", "kind": "triage", "weight": 800 }
-      ],
-      "spec": { "name": "lean-build", "lang": "bash", "entry": "spec-lean-build.sh", "scriptFile": "spec-lean-build.sh" }
+      "rootSpec": "lean-build-598",
+      "correspondenceArtifact": "correspondence-T4-JSP-000598",
+      "publish": {
+        "title": "metaTask 战役 · JSP-000598 中心二项系数素支持（AI 已解）的群体形式化验证",
+        "brief": "两个不同中心二项系数不能有完全相同的素因子集合（= 相同 radical，不是相同分解）——题库记 GPT Pro 解（基于 EGRS75）。战役旗舰叙事：AI 已解，群体验证并形式化。base 节点复述并核验 EGRS75 基础结果，两个 proof-read 节点各自独立复算证明链，Lean 节点提交可 lake build 的主定理；全部复核节点必须指向独立 correspondence 件（含 radical 读法与 Overleaf 出处稳定性风险）。",
+        "nodes": [
+          {
+            "id": "root",
+            "parent": null,
+            "title": "聚合",
+            "kind": "aggregate",
+            "specid": null,
+            "params": {
+              "aggregation": "the root aggregate submission must carry childids equal (as a set) to the children's effective verified submission pinIds; the protocol's aggregationPrecondition is enforced by replay from H_ACT2 and is what judges this node, not a script"
+            },
+            "weight": 1200
+          },
+          {
+            "id": "base",
+            "parent": "root",
+            "title": "EGRS75 基础结果复述与验证（素因子支持结构），指向 correspondence 件",
+            "kind": "proof",
+            "specid": "SPEC_PIN:semantic-review-598",
+            "params": {
+              "task": "T4-JSP-000598",
+              "artifactKey": "correspondence-T4-JSP-000598",
+              "role": "restate and recheck the EGRS75 base result ([EGRS75] Math. Comp. (1975), 83-92)",
+              "requiredItems": [
+                "statement",
+                "definitions",
+                "proof-direction"
+              ]
+            },
+            "weight": 2000
+          },
+          {
+            "id": "gpt1",
+            "parent": "root",
+            "title": "GPT 解证明链核读一：关键步骤独立复算",
+            "kind": "triage",
+            "specid": "SPEC_PIN:semantic-review-598",
+            "params": {
+              "task": "T4-JSP-000598",
+              "artifactKey": "correspondence-T4-JSP-000598",
+              "role": "independent recomputation, side A (different bot from side B)",
+              "requiredItems": [
+                "statement",
+                "definitions",
+                "proof-direction"
+              ]
+            },
+            "weight": 2200
+          },
+          {
+            "id": "gpt2",
+            "parent": "root",
+            "title": "GPT 解证明链核读二：另侧独立复算（不同 bot）",
+            "kind": "triage",
+            "specid": "SPEC_PIN:semantic-review-598",
+            "params": {
+              "task": "T4-JSP-000598",
+              "artifactKey": "correspondence-T4-JSP-000598",
+              "role": "independent recomputation, side B (different bot from side A)",
+              "requiredItems": [
+                "statement",
+                "definitions",
+                "proof-direction"
+              ]
+            },
+            "weight": 2200
+          },
+          {
+            "id": "lean",
+            "parent": "root",
+            "title": "主定理 Lean 形式化（spec-lean-build.sh）",
+            "kind": "formalize",
+            "specid": null,
+            "params": {
+              "target": "Erdos598/CentralBinomialPrimeSupport.lean"
+            },
+            "weight": 1600
+          },
+          {
+            "id": "review",
+            "parent": "root",
+            "title": "命题保真复核：radical（集合）读法逐项对照（semantic_check，指向 correspondence 件）",
+            "kind": "triage",
+            "specid": "SPEC_PIN:semantic-review-598",
+            "params": {
+              "task": "T4-JSP-000598",
+              "artifactKey": "correspondence-T4-JSP-000598",
+              "role": "proposition-fidelity review of the radical reading",
+              "requiredItems": [
+                "statement",
+                "definitions",
+                "proof-direction"
+              ]
+            },
+            "weight": 800
+          }
+        ],
+        "policy": {
+          "claimTtlHours": 48,
+          "verifyQuorum": 2,
+          "verifyWindowHours": 96,
+          "submitterShareBP": 8000
+        },
+        "tags": [
+          "metatask",
+          "wave-1",
+          "JSP-000598",
+          "lean"
+        ]
+      }
     }
   ],
   "held": [
     {
       "id": "JSP-000307",
-      "reason": "命题保真风险：字面命题『三个相邻整数最大素因子严格递减』被平凡见证 (13,14,15) 满足（P=13>7>5），而题库 Solved 依据是 Erdős–Pomerance 1978 / Balog 2001 的非平凡结果——字面读法与学术口径分叉。spec-lpf-triplet.py 已就绪并通过自测，待向题库/原作者澄清真实命题口径后再发布。",
-      "specReady": "spec-lpf-triplet.py"
+      "reason": "命题保真风险（已在 README 记录）：字面命题『三个相邻整数最大素因子严格递减』被平凡见证 (13,14,15) 满足（P=13>7>5），而题库 Solved 依据是 Erdős–Pomerance 1978 / Balog 2001 的非平凡结果——字面读法与学术口径分叉。spec-lpf-triplet.py 已就绪并通过自测，待向题库/原作者澄清真实命题口径后再发布。",
+      "verifierReady": true,
+      "spec": "spec-lpf-triplet.py",
+      "unholdCondition": "the prize maintainers state which reading the record intends (trivial witness vs nontrivial family)"
+    },
+    {
+      "id": "T2-JSP-000288",
+      "reason": "DEMOTED to HELD 2026-09-29 (wave-1 became T0/T1/T3/T4): the verifier script was never written and this repository cannot write one. The record's own statement is qualified in a way the record does not define: \"Must ratios of consecutive terms in the SPECIFIED minimal stably complete sequences converge to the golden ratio?\" - the definition of the specified minimal stably complete sequences lives in the external sources ([Gr64d] A property of Fibonacci numbers, Fibonacci Quart. (1964), 1-10; [ErGr80] Old and new problems and results in combinatorial number theory (1980)), neither of which is in this repository and neither of which is fetchable as text here. Without that definition the counterexample sequence cannot be pinned down, so there is nothing machine-checkable to publish and the old draft's spec block carried only a note. Un-hold once the exact sequence definition (and the bank's solution exposition) is available and a verifier can be written and self-tested.",
+      "verifierReady": false,
+      "spec": null,
+      "unholdCondition": "the exact definition of the specified minimal stably complete sequences is available in a citable, machine-readable form, and a verifier script for it is written and self-tested"
     },
     {
       "id": "JSP-000985 / JSP-000554",
-      "reason": "备选中：554 为 2025 解析数论结果（形式化体量大）；985 需先读 Sh02/Gl06 证明形态确认是否有限可验。两者移交战役任务 #0 的三角测量批次先行分类。"
+      "reason": "备选中：554 为 2025 解析数论结果（形式化体量大）；985 需先读 Sh02/Gl06 证明形态确认是否有限可验。两者移交战役任务 #0 的三角测量批次先行分类。",
+      "verifierReady": false,
+      "spec": null,
+      "unholdCondition": "T0's triage batches classify them and name a certificate type a spec can check"
     }
   ]
 }
