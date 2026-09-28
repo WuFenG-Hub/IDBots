@@ -99,15 +99,24 @@ test('sidebar feeds the list with the split halves and keeps search over every s
   assert.match(src, /<CoworkSearchModal[\s\S]*?sessions=\{homeSessions\}/);
 });
 
-test('the list renders one Auto Tasks fold that is collapsed by default and last in every view mode', () => {
+test('the list renders one Auto Tasks fold, collapsed by default, directly under the pinned block in every view mode', () => {
   const src = readSource('src/renderer/components/cowork/CoworkSessionList.tsx');
 
   assert.match(src, /data-testid="auto-tasks-section"/);
   assert.match(src, /const \[isAutoTasksExpanded, setIsAutoTasksExpanded\] = useState<boolean>\(loadAutoTasksExpanded\)/);
   assert.match(src, /parseAutoTasksExpandedPreference\(window\.localStorage\.getItem\(AUTO_TASKS_EXPANDED_STORAGE_KEY\)\)/);
-  // Timeline, project and flat branches all append the same fold, so it is
-  // always the last section regardless of the view mode.
+  // Timeline, project and flat branches all render the same fold.
   assert.equal((src.match(/\{renderAutoTasksSection\(\)\}/g) ?? []).length, 3);
+  // Position: directly under the pinned block, above the content groups, so
+  // the folder is visible without scrolling — sitting last made it read as if
+  // the feature did not exist.
+  assert.match(src, /\{renderPinnedSection\(timelineGrouped\.pinned\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{timelineGrouped\.groups\.map/);
+  assert.match(src, /\{renderPinnedSection\(projectGrouped\.pinned\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{projectGrouped\.groups\.map/);
+  const flatPinned = src.indexOf('sortedSessions.filter((session) => session.pinned).map(renderItem)');
+  const flatFold = src.indexOf('{renderAutoTasksSection()}', flatPinned);
+  const flatRest = src.indexOf('sortedSessions.filter((session) => !session.pinned).map(renderItem)');
+  assert.ok(flatPinned !== -1 && flatPinned < flatFold && flatFold < flatRest,
+    'flat branch: pinned rows, then the fold, then the rest');
   // Nothing is rendered when there is nothing to fold.
   assert.match(src, /sortedAutoSessions\.length > 0 && \(/);
 });
