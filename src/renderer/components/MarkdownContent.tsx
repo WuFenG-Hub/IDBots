@@ -3,12 +3,125 @@ import ReactMarkdown from 'react-markdown';
 // @ts-ignore
 import remarkGfm from 'remark-gfm';
 // @ts-ignore
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism-light';
 // @ts-ignore
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+// @ts-ignore
+import prismTypescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript';
+// @ts-ignore
+import prismJavascript from 'react-syntax-highlighter/dist/esm/languages/prism/javascript';
+// @ts-ignore
+import prismJsx from 'react-syntax-highlighter/dist/esm/languages/prism/jsx';
+// @ts-ignore
+import prismTsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx';
+// @ts-ignore
+import prismJson from 'react-syntax-highlighter/dist/esm/languages/prism/json';
+// @ts-ignore
+import prismJson5 from 'react-syntax-highlighter/dist/esm/languages/prism/json5';
+// @ts-ignore
+import prismBash from 'react-syntax-highlighter/dist/esm/languages/prism/bash';
+// @ts-ignore
+import prismPython from 'react-syntax-highlighter/dist/esm/languages/prism/python';
+// @ts-ignore
+import prismYaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml';
+// @ts-ignore
+import prismToml from 'react-syntax-highlighter/dist/esm/languages/prism/toml';
+// @ts-ignore
+import prismMarkdown from 'react-syntax-highlighter/dist/esm/languages/prism/markdown';
+// @ts-ignore
+import prismMarkup from 'react-syntax-highlighter/dist/esm/languages/prism/markup';
+// @ts-ignore
+import prismCss from 'react-syntax-highlighter/dist/esm/languages/prism/css';
+// @ts-ignore
+import prismSql from 'react-syntax-highlighter/dist/esm/languages/prism/sql';
+// @ts-ignore
+import prismGo from 'react-syntax-highlighter/dist/esm/languages/prism/go';
+// @ts-ignore
+import prismRust from 'react-syntax-highlighter/dist/esm/languages/prism/rust';
+// @ts-ignore
+import prismC from 'react-syntax-highlighter/dist/esm/languages/prism/c';
+// @ts-ignore
+import prismCpp from 'react-syntax-highlighter/dist/esm/languages/prism/cpp';
+// @ts-ignore
+import prismDiff from 'react-syntax-highlighter/dist/esm/languages/prism/diff';
 import { ClipboardDocumentIcon, CheckIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../services/i18n';
 import LocalFileLink from './ui/LocalFileLink';
+
+/**
+ * Code-block languages worth highlighting in chat output.
+ *
+ * The default `react-syntax-highlighter` Prism entry point imports refractor's
+ * full grammar table (~300 languages, ~1 MB of source) for a surface that only
+ * ever renders the handful of languages bots emit. The light entry point starts
+ * with an empty grammar registry, so the bundle carries exactly this list.
+ *
+ * Keep it curated: every entry costs bytes on the first paint of every chat
+ * message. Anything not listed here degrades to a plain code block (see
+ * `CodeBlock`), which is the same rendering an unknown `language-` fence got
+ * before.
+ */
+const PRISM_LANGUAGE_MODULES: Array<[string, unknown]> = [
+  ['typescript', prismTypescript],
+  ['javascript', prismJavascript],
+  ['jsx', prismJsx],
+  ['tsx', prismTsx],
+  ['json', prismJson],
+  ['json5', prismJson5],
+  ['bash', prismBash],
+  ['python', prismPython],
+  ['yaml', prismYaml],
+  ['toml', prismToml],
+  ['markdown', prismMarkdown],
+  ['markup', prismMarkup],
+  ['css', prismCss],
+  ['sql', prismSql],
+  ['go', prismGo],
+  ['rust', prismRust],
+  ['c', prismC],
+  ['cpp', prismCpp],
+  ['diff', prismDiff],
+];
+
+for (const [name, grammar] of PRISM_LANGUAGE_MODULES) {
+  SyntaxHighlighter.registerLanguage(name, grammar);
+}
+
+/**
+ * Fence tags these grammars answer to, including the aliases refractor
+ * registers alongside each display name (bash -> sh/shell, markup ->
+ * html/xml/svg, markdown -> md, typescript -> ts, yaml -> yml, …), plus the
+ * `text`/`plaintext` tags refractor's core ships with.
+ *
+ * `CodeBlock` consults this set before handing a fence to the highlighter, so
+ * a fence we cannot tokenize renders through the plain-text path instead of
+ * being tokenized by accident.
+ */
+const HIGHLIGHTABLE_LANGUAGES = new Set([
+  'typescript', 'ts',
+  'javascript', 'js',
+  'jsx',
+  'tsx',
+  'json', 'webmanifest',
+  'json5',
+  'bash', 'sh', 'shell',
+  'python', 'py',
+  'yaml', 'yml',
+  'toml',
+  'markdown', 'md',
+  'markup', 'html', 'xml', 'svg', 'mathml', 'atom', 'rss', 'ssml',
+  'css',
+  'sql',
+  'go',
+  'rust',
+  'c',
+  'cpp',
+  'diff',
+  'text', 'plaintext', 'txt', 'plain',
+]);
+
+const isHighlightableLanguage = (language: string): boolean =>
+  HIGHLIGHTABLE_LANGUAGES.has(language);
 
 const CODE_BLOCK_LINE_LIMIT = 200;
 const CODE_BLOCK_CHAR_LIMIT = 20000;
@@ -250,6 +363,7 @@ const CodeBlock: React.FC<any> = ({ node, className, children, ...props }) => {
     ? className.join(' ')
     : className || '';
   const match = /language-([\w-]+)/.exec(normalizedClassName);
+  const fenceLanguage = match ? match[1].toLowerCase() : '';
   const hasPosition = node?.position?.start?.line != null && node?.position?.end?.line != null;
   const isInline = typeof props.inline === 'boolean'
     ? props.inline
@@ -258,7 +372,9 @@ const CodeBlock: React.FC<any> = ({ node, className, children, ...props }) => {
       : !match;
   const codeText = Array.isArray(children) ? children.join('') : String(children);
   const trimmedCodeText = codeText.replace(/\n$/, '');
-  const shouldHighlight = !isInline && match
+  // Only fences backed by a registered grammar reach the highlighter; anything
+  // else keeps the plain-text code block it has always fallen back to.
+  const shouldHighlight = !isInline && isHighlightableLanguage(fenceLanguage)
     && trimmedCodeText.length <= CODE_BLOCK_CHAR_LIMIT
     && trimmedCodeText.split('\n').length <= CODE_BLOCK_LINE_LIMIT;
   const [isCopied, setIsCopied] = useState(false);
@@ -332,7 +448,7 @@ const CodeBlock: React.FC<any> = ({ node, className, children, ...props }) => {
         {shouldHighlight ? (
           <SyntaxHighlighter
             style={oneDark}
-            language={match[1]}
+            language={fenceLanguage}
             PreTag="div"
             customStyle={SYNTAX_HIGHLIGHTER_STYLE}
           >
@@ -699,14 +815,14 @@ interface MarkdownContentProps {
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
 }
 
-const MarkdownContent: React.FC<MarkdownContentProps> = ({
+const MarkdownContent = React.memo(({
   content,
   className = '',
   compact = false,
   onOpenBotBrowserUri,
   resolveLocalFilePath,
   onOpenLocalFile,
-}) => {
+}: MarkdownContentProps) => {
   const components = useMemo(
     () => createMarkdownComponents(resolveLocalFilePath, onOpenBotBrowserUri, onOpenLocalFile),
     [resolveLocalFilePath, onOpenBotBrowserUri, onOpenLocalFile]
@@ -726,6 +842,6 @@ const MarkdownContent: React.FC<MarkdownContentProps> = ({
       </ReactMarkdown>
     </div>
   );
-};
+});
 
 export default MarkdownContent;

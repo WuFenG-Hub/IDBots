@@ -414,6 +414,24 @@ export class SqliteStore {
         metadata TEXT,
         created_at INTEGER NOT NULL,
         sequence INTEGER,
+        is_streaming INTEGER GENERATED ALWAYS AS (
+          CASE
+            WHEN metadata IS NOT NULL AND instr(metadata, '"isStreaming":true') > 0 THEN 1
+            ELSE 0
+          END
+        ) VIRTUAL,
+        steer_pending INTEGER GENERATED ALWAYS AS (
+          CASE
+            WHEN metadata IS NOT NULL
+              AND instr(metadata, '"interactionKind":"steer"') > 0
+              AND (
+                instr(metadata, '"steerStatus":"queued"') > 0
+                OR instr(metadata, '"steerStatus":"delivered"') > 0
+              )
+            THEN 1
+            ELSE 0
+          END
+        ) VIRTUAL,
         FOREIGN KEY (session_id) REFERENCES cowork_sessions(id) ON DELETE CASCADE
       );
     `);

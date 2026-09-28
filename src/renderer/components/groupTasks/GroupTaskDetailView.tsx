@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { i18nService } from '../../services/i18n';
 import { groupTaskService } from '../../services/groupTaskService';
 import type {
@@ -6,6 +6,7 @@ import type {
   GroupTaskDetail,
 } from '../../types/groupTask';
 import GroupTaskMessageItem from './GroupTaskMessageItem';
+import GroupTaskComposer from './GroupTaskComposer';
 import AcceptanceSummaryCard from './AcceptanceSummaryCard';
 import { GroupTaskTinyAvatar } from './GroupTaskListMeta';
 import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
@@ -130,6 +131,10 @@ const DeliverableUri: React.FC<{ uri: string }> = ({ uri }) => {
   );
 };
 
+/** Field-for-field equality of two detail payloads (IPC rows are plain JSON). */
+const isSameDetail = (a: GroupTaskDetail, b: GroupTaskDetail): boolean =>
+  JSON.stringify(a) === JSON.stringify(b);
+
 interface GroupTaskDetailViewProps {
   taskId: number;
   isSidebarCollapsed?: boolean;
@@ -158,7 +163,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const [loadingMessages, setLoadingMessages] = useState(true);
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const [ownerGlobalMetaId, setOwnerGlobalMetaId] = useState<string | null>(null);
-  const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sentHint, setSentHint] = useState(false);
@@ -189,6 +193,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const sentHintTimerRef = useRef<number | null>(null);
+  // Id of the newest rendered row — the auto-scroll effect only fires when it
+  // actually advances.
+  const latestMessageIdRef = useRef<number | null>(null);
   // Scroll-up pagination: oldestLoadedId is the backwards cursor (beforeId),
   // hasMore whether an older page may exist, plus in-flight + scroll-restore
   // state. Refs back the scroll handler so it never reads a stale closure.
@@ -207,7 +214,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const refreshDetail = useCallback(async (opts?: { quiet?: boolean }) => {
     try {
       const task = await groupTaskService.getTask(taskId);
-      setDetail(task);
+      // The 5s poll usually re-fetches an unchanged row: keep the previous
+      // detail reference so the panel (and every memoized child) stays put.
+      setDetail((previous) => (previous && isSameDetail(previous, task) ? previous : task));
       setDetailError(null);
     } catch (err) {
       // Background (poll/event) refreshes must never blank a healthy view on a
@@ -312,26 +321,36 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     hasMoreRef.current = true;
     loadingOlderRef.current = false;
     pendingScrollRestoreRef.current = null;
+    latestMessageIdRef.current = null;
     setHasMore(true);
     setLoadingOlder(false);
   }, [taskId]);
 
   // Transcript: initial load + 5s poll while mounted. The poll also refreshes
   // the task detail so a missed/lost groupTask:statusChanged push can never
-  // leave the header badge stale (R1 self-heal).
+  // leave the header badge stale (R1 self-heal). A hidden window skips the
+  // tick entirely (the interval stays armed) and refreshes once on becoming
+  // visible again, so a backgrounded app stops re-rendering.
   useEffect(() => {
     let cancelled = false;
     setLoadingMessages(true);
     void loadMessages().finally(() => {
       if (!cancelled) setLoadingMessages(false);
     });
-    const timer = window.setInterval(() => {
+    const pollTick = () => {
+      if (document.visibilityState !== 'visible') return;
       void loadMessages();
       void refreshDetail({ quiet: true });
-    }, 5000);
+    };
+    const timer = window.setInterval(pollTick, 5000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') pollTick();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [loadMessages, refreshDetail]);
 
@@ -364,8 +383,13 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     setCheckpointSummaryExpanded(false);
   }, [openCheckpointId]);
 
-  // Auto-scroll to bottom on new messages unless the user scrolled up.
+  // Auto-scroll to bottom on a genuinely new message unless the user scrolled
+  // up. An in-place row update (same latest id) is not a new message, so it
+  // never forces a synchronous layout.
   useEffect(() => {
+    const latestId = messages.length > 0 ? messages[messages.length - 1].id : null;
+    if (latestId === null || latestId === latestMessageIdRef.current) return;
+    latestMessageIdRef.current = latestId;
     const el = scrollRef.current;
     if (el && stickToBottomRef.current) {
       el.scrollTop = el.scrollHeight;
@@ -446,25 +470,29 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }, 60);
   }, [loadOlder]);
 
-  const handleSend = async () => {
-    const text = input.trim();
-    if (!text || sending) return;
+  const handleJumpToReply = useCallback((pinId: string) => {
+    void jumpToMessage(pinId);
+  }, [jumpToMessage]);
+
+  const handleSendText = useCallback(async (text: string): Promise<boolean> => {
+    if (sending) return false;
     setSending(true);
     setSendError(null);
     try {
       await groupTaskService.sendUserMessage(taskId, text);
-      setInput('');
       setSentHint(true);
       if (sentHintTimerRef.current != null) {
         window.clearTimeout(sentHintTimerRef.current);
       }
       sentHintTimerRef.current = window.setTimeout(() => setSentHint(false), 4000);
+      return true;
     } catch (err) {
       setSendError(err instanceof Error ? err.message : String(err));
+      return false;
     } finally {
       setSending(false);
     }
-  };
+  }, [sending, taskId]);
 
   const handleConfirmClose = async (rating?: number, ratingComment?: string) => {
     if (!confirmAction || !detail) return;
@@ -544,6 +572,84 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }
   };
 
+  // Render derivations that feed memoized children stay ABOVE the loading/error
+  // returns (hooks must run on every render): every value crossing into a
+  // memoized row is reference-stable, and the pin lookups are O(1) instead of a
+  // per-row scan of the whole transcript.
+  // Nested collections can be missing on a stale/partial close payload.
+  // Always coerce to arrays so Accept & Close cannot white-screen the view.
+  const members = useMemo(
+    () => (detail && Array.isArray(detail.members) ? detail.members : []),
+    [detail],
+  );
+  // Text rows (kind=text, no uri) are process notes, not deliverables — the
+  // rail lists digital outcomes only, mirroring the acceptance checklist.
+  // Task #63: one artifact = one card — pinid-keyed dedupe so legacy ledgers
+  // (same URI recorded under two authors before artifact-identity folding)
+  // never render twice; the earliest row (the publisher's) wins.
+  const deliverables = useMemo(
+    () => dedupeDeliverablesByPinid(
+      (detail && Array.isArray(detail.deliverables) ? detail.deliverables : [])
+        .filter((deliverable) => isDigitalDeliverable(deliverable)),
+    ),
+    [detail],
+  );
+  // Remote members (metabotId == null) joined via OpenTeam; their messages are
+  // matched by globalmetaid so the transcript can flag them.
+  const remoteMemberGlobalMetaIds = useMemo(
+    () => new Set(
+      members
+        .filter((member) => member.metabotId == null && member.globalmetaid)
+        .map((member) => member.globalmetaid as string),
+    ),
+    [members],
+  );
+  // P13 (v1.1): the roster wins over the chain nickname. A worker session can
+  // post under a runtime identity nickname (task #22 rendered Builder阿码's
+  // delivery as "claude bot"), while senderGlobalMetaId always points at the
+  // registered member — resolve transcript author names through this map.
+  const memberNameByGmid = useMemo(() => {
+    const byGmid = new Map<string, string>();
+    for (const member of members) {
+      const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      const name = (member.name ?? member.displayName ?? '').trim();
+      if (gmid && name) byGmid.set(gmid, name);
+    }
+    return byGmid;
+  }, [members]);
+  const resolveTranscriptSenderName = useCallback((message: {
+    senderGlobalMetaId?: string | null;
+    senderName?: string | null;
+  }): string => {
+    const gmid = message.senderGlobalMetaId?.trim().toLowerCase();
+    return (gmid ? memberNameByGmid.get(gmid) : undefined) || message.senderName?.trim() || 'Unknown';
+  }, [memberNameByGmid]);
+  const messagesByPinId = useMemo(() => {
+    const byPinId = new Map<string, GroupChatTranscriptMessage>();
+    for (const message of messages) {
+      // First row wins, mirroring the previous Array.find lookup.
+      if (message.pinId && !byPinId.has(message.pinId)) byPinId.set(message.pinId, message);
+    }
+    return byPinId;
+  }, [messages]);
+  // R5: the replied-to message for each replyPin in the loaded window; null
+  // when the target is on an older page (the bar still jumps/loads it).
+  const replyTargetByPinId = useMemo(() => {
+    const byPinId = new Map<string, { senderName: string; preview: string } | null>();
+    for (const message of messages) {
+      const replyPin = message.replyPin?.trim();
+      if (!replyPin || byPinId.has(replyPin)) continue;
+      const target = messagesByPinId.get(replyPin);
+      byPinId.set(replyPin, target
+        ? {
+          senderName: resolveTranscriptSenderName(target),
+          preview: (target.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
+        }
+        : null);
+    }
+    return byPinId;
+  }, [messages, messagesByPinId, resolveTranscriptSenderName]);
+
   if (loadingDetail) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -570,18 +676,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   }
 
   const isTerminal = !isActiveGroupTaskStatus(detail.status);
-  // Nested collections can be missing on a stale/partial close payload.
-  // Always coerce to arrays so Accept & Close cannot white-screen the view.
-  const members = Array.isArray(detail.members) ? detail.members : [];
-  // Text rows (kind=text, no uri) are process notes, not deliverables — the
-  // rail lists digital outcomes only, mirroring the acceptance checklist.
-  // Task #63: one artifact = one card — pinid-keyed dedupe so legacy ledgers
-  // (same URI recorded under two authors before artifact-identity folding)
-  // never render twice; the earliest row (the publisher's) wins.
-  const deliverables = dedupeDeliverablesByPinid(
-    (Array.isArray(detail.deliverables) ? detail.deliverables : [])
-      .filter((deliverable) => isDigitalDeliverable(deliverable)),
-  );
   // HITL: the currently open human checkpoint, if any (drives the pause banner).
   const openCheckpoint = detail.checkpoints?.find((checkpoint) => checkpoint.status === 'open') ?? null;
   // HITL: what the owner must decide, shown under the banner topic — the
@@ -609,30 +703,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
       : member.globalmetaid
         ? `${member.globalmetaid.slice(0, 10)}…`
         : 'remote bot');
-  // Remote members (metabotId == null) joined via OpenTeam; their messages are
-  // matched by globalmetaid so the transcript can flag them.
-  const remoteMemberGlobalMetaIds = new Set(
-    members
-      .filter((member) => member.metabotId == null && member.globalmetaid)
-      .map((member) => member.globalmetaid as string),
-  );
-  // P13 (v1.1): the roster wins over the chain nickname. A worker session can
-  // post under a runtime identity nickname (task #22 rendered Builder阿码's
-  // delivery as "claude bot"), while senderGlobalMetaId always points at the
-  // registered member — resolve transcript author names through this map.
-  const memberNameByGmid = new Map<string, string>();
-  for (const member of members) {
-    const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
-    const name = (member.name ?? member.displayName ?? '').trim();
-    if (gmid && name) memberNameByGmid.set(gmid, name);
-  }
-  const resolveTranscriptSenderName = (message: {
-    senderGlobalMetaId?: string | null;
-    senderName?: string | null;
-  }): string => {
-    const gmid = message.senderGlobalMetaId?.trim().toLowerCase();
-    return (gmid ? memberNameByGmid.get(gmid) : undefined) || message.senderName?.trim() || 'Unknown';
-  };
   const deliverableAuthorName = (authorGlobalMetaId: string | null): string => {
     if (!authorGlobalMetaId) return '—';
     const member = members.find((candidate) => candidate.globalmetaid === authorGlobalMetaId);
@@ -916,21 +986,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
               </div>
             ) : (
               messages.map((message) => {
-                // R5: resolve the replied-to message from the loaded transcript
-                // for the reply bar preview (null when the target is on an older
+                // R5: the replied-to message (null when the target is on an older
                 // page — clicking still jumps/loads it via jumpToMessage).
                 const replyPin = message.replyPin?.trim();
-                const replyTargetMessage = replyPin
-                  ? messages.find((candidate) => candidate.pinId === replyPin)
-                  : undefined;
-                const replyTarget = replyPin
-                  ? (replyTargetMessage
-                    ? {
-                      senderName: resolveTranscriptSenderName(replyTargetMessage),
-                      preview: (replyTargetMessage.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
-                    }
-                    : null)
-                  : undefined;
                 return (
                 <GroupTaskMessageItem
                   key={message.id}
@@ -948,8 +1006,8 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     && remoteMemberGlobalMetaIds.has(message.senderGlobalMetaId),
                   )}
                   highlight={highlightPinId != null && message.pinId === highlightPinId}
-                  replyTarget={replyTarget}
-                  onJumpToReply={(pinId) => void jumpToMessage(pinId)}
+                  replyTarget={replyPin ? replyTargetByPinId.get(replyPin) : undefined}
+                  onJumpToReply={handleJumpToReply}
                 />
                 );
               })
@@ -958,41 +1016,12 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
 
           {/* Composer (non-terminal only) */}
           {!isTerminal && (
-            <div className="shrink-0 border-t dark:border-claude-darkBorder border-claude-border px-4 py-3">
-              <div className="flex items-end gap-2">
-                <textarea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    // Same contract as the new-task composer: Enter sends,
-                    // Shift+Enter inserts a newline. Enter during IME
-                    // composition confirms the candidate instead of sending.
-                    const isComposing = e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
-                    if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
-                      e.preventDefault();
-                      void handleSend();
-                    }
-                  }}
-                  rows={2}
-                  className="flex-1 rounded-2xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3 py-2 text-sm leading-relaxed dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent/50 resize-none"
-                  placeholder={i18nService.t('groupTasksSendPlaceholder')}
-                />
-                <button
-                  type="button"
-                  onClick={() => void handleSend()}
-                  disabled={!input.trim() || sending}
-                  className="btn-idchat-primary-filled px-4 py-2 text-sm font-medium disabled:opacity-50"
-                >
-                  {sending ? i18nService.t('groupTasksSending') : i18nService.t('groupTasksSend')}
-                </button>
-              </div>
-              {sendError && <p className="text-xs text-red-500 mt-1">{sendError}</p>}
-              {sentHint && !sendError && (
-                <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-1">
-                  {i18nService.t('groupTasksSentHint')}
-                </p>
-              )}
-            </div>
+            <GroupTaskComposer
+              sending={sending}
+              sendError={sendError}
+              sentHint={sentHint}
+              onSend={handleSendText}
+            />
           )}
         </div>
 
@@ -1004,8 +1033,8 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             </h3>
             <div className="space-y-1.5">
               {members.map((member) => (
-                <>
-                <div key={member.id} className="group flex items-center gap-2">
+                <React.Fragment key={member.id}>
+                <div className="group flex items-center gap-2">
                   <GroupTaskTinyAvatar
                     src={member.avatar}
                     name={memberDisplayName(member)}
@@ -1091,7 +1120,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     )}
                   </div>
                 )}
-                </>
+                </React.Fragment>
               ))}
             </div>
           </div>

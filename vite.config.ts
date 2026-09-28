@@ -76,6 +76,24 @@ export default defineConfig({
     emptyOutDir: true,
     sourcemap: !isProductionBuild,
     minify: isProductionBuild ? 'esbuild' : false,
+    rollupOptions: {
+      output: {
+        // Split the vendor tables that dominate the renderer bundle into
+        // long-lived chunks, so the startup chunk holds app code + the shell
+        // and a dependency bump only invalidates the chunk it touched.
+        // `vendor-bot-browser` stays off the startup path entirely: the only
+        // importers are the lazily loaded Bot Browser surface and its adapter.
+        manualChunks(id) {
+          const modulePath = id.replace(/\\/g, '/');
+          if (!modulePath.includes('/node_modules/')) return undefined;
+          if (/\/node_modules\/(react|react-dom|scheduler)\//.test(modulePath)) return 'vendor-react';
+          if (/\/node_modules\/(@reduxjs|react-redux|redux|reselect|immer|use-sync-external-store)\//.test(modulePath)) return 'vendor-redux';
+          if (/\/node_modules\/(react-markdown|remark-[^/]+|rehype-[^/]+|react-syntax-highlighter|refractor|prismjs|highlight\.js|katex|micromark[^/]*|mdast[^/]*|hast[^/]*|unist[^/]*|vfile[^/]*|unified|bail|trough|devlop|is-plain-obj|property-information|comma-separated-tokens|space-separated-tokens|trim-lines|zwitch|ccount|character-entities[^/]*|decode-named-character-reference|html-url-attributes|longest-streak|markdown-table|escape-string-regexp|estree-[^/]+|style-to-object|web-namespaces|parse-entities|parse5[^/]*|entities|domhandler|domutils|domelementtype|hastscript|html-void-elements|stringify-entities)\//.test(modulePath)) return 'vendor-markdown';
+          if (/\/node_modules\/@openagentinternet\//.test(modulePath)) return 'vendor-bot-browser';
+          return undefined;
+        },
+      },
+    },
   },
   server: {
     port: devPort,

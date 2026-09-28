@@ -64,6 +64,14 @@ export class IMCoworkHandler extends EventEmitter {
   // Populated by `requestSessionReset()` (e.g. from the `start_new_im_session` MCP tool).
   private pendingResets: Set<string> = new Set();
 
+  // Bound once so registration and removal share the same function reference
+  // (a fresh .bind(this) on each call can never be removed).
+  private readonly boundHandleMessage = this.handleMessage.bind(this);
+  private readonly boundHandleMessageUpdate = this.handleMessageUpdate.bind(this);
+  private readonly boundHandlePermissionRequest = this.handlePermissionRequest.bind(this);
+  private readonly boundHandleComplete = this.handleComplete.bind(this);
+  private readonly boundHandleError = this.handleError.bind(this);
+
   constructor(options: IMCoworkHandlerOptions) {
     super();
     this.coworkRunner = options.coworkRunner;
@@ -83,11 +91,11 @@ export class IMCoworkHandler extends EventEmitter {
    * Set up event listeners for CoworkRunner
    */
   private setupEventListeners(): void {
-    this.coworkRunner.on('message', this.handleMessage.bind(this));
-    this.coworkRunner.on('messageUpdate', this.handleMessageUpdate.bind(this));
-    this.coworkRunner.on('permissionRequest', this.handlePermissionRequest.bind(this));
-    this.coworkRunner.on('complete', this.handleComplete.bind(this));
-    this.coworkRunner.on('error', this.handleError.bind(this));
+    this.coworkRunner.on('message', this.boundHandleMessage);
+    this.coworkRunner.on('messageUpdate', this.boundHandleMessageUpdate);
+    this.coworkRunner.on('permissionRequest', this.boundHandlePermissionRequest);
+    this.coworkRunner.on('complete', this.boundHandleComplete);
+    this.coworkRunner.on('error', this.boundHandleError);
   }
 
   /**
@@ -882,10 +890,10 @@ export class IMCoworkHandler extends EventEmitter {
     }
 
     // Remove event listeners
-    this.coworkRunner.removeListener('message', this.handleMessage.bind(this));
-    this.coworkRunner.removeListener('messageUpdate', this.handleMessageUpdate.bind(this));
-    this.coworkRunner.removeListener('permissionRequest', this.handlePermissionRequest.bind(this));
-    this.coworkRunner.removeListener('complete', this.handleComplete.bind(this));
-    this.coworkRunner.removeListener('error', this.handleError.bind(this));
+    this.coworkRunner.removeListener('message', this.boundHandleMessage);
+    this.coworkRunner.removeListener('messageUpdate', this.boundHandleMessageUpdate);
+    this.coworkRunner.removeListener('permissionRequest', this.boundHandlePermissionRequest);
+    this.coworkRunner.removeListener('complete', this.boundHandleComplete);
+    this.coworkRunner.removeListener('error', this.boundHandleError);
   }
 }

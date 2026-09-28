@@ -45,6 +45,7 @@ import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduled
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
 import { isWorkspaceMetabotId, resolveBotWorkspaceCwd, resolveSessionWorkingDirectory, shouldUseBotWorkspaceCwd } from './libs/botWorkspace';
 import { getGitBranch } from './libs/gitWorkspace';
+import { CoworkStreamUiDeltaEncoder } from './libs/coworkStreamUiDelta';
 import { IMGatewayManager, IMPlatform, IMGatewayConfig } from './im';
 import { APP_NAME } from './appConstants';
 import { getSkillServiceManager } from './skillServices';
@@ -746,17 +747,36 @@ const emitCoworkStreamMessage = (sessionId: string, message: unknown): void => {
   });
 };
 
-const emitCoworkStreamMessageUpdate = (
+/**
+ * Turns the full-content stream updates every producer emits into append-only
+ * deltas (first update full, later updates the grown tail). See
+ * libs/coworkStreamUiDelta.ts — the renderer reassembles the exact same text,
+ * so only the wire size changes.
+ */
+const coworkStreamUiDelta = new CoworkStreamUiDeltaEncoder({
+  truncate: (value) => truncateIpcString(value, IPC_UPDATE_CONTENT_MAX_CHARS),
+});
+
+/** Live reassembly baseline for a message, for the renderer's resync request. */
+const readCoworkStreamLiveContent = (sessionId: string, messageId: string): string | null => {
+  if (typeof sessionId !== 'string' || typeof messageId !== 'string') return null;
+  return coworkStreamUiDelta.liveContent(sessionId, messageId);
+};
+
+const sendCoworkStreamMessageUpdate = (
   sessionId: string,
   messageId: string,
   update: { content?: string; metadata?: Record<string, unknown> },
 ): void => {
-  const payload = {
+  const payload = coworkStreamUiDelta.encode({
     sessionId,
     messageId,
-    ...(update.content !== undefined ? { content: truncateIpcString(update.content, IPC_UPDATE_CONTENT_MAX_CHARS) } : {}),
-    ...(update.metadata !== undefined ? { metadata: sanitizeIpcPayload(update.metadata) } : {}),
-  };
+    content: update.content,
+    metadata: update.metadata !== undefined
+      ? sanitizeIpcPayload(update.metadata) as Record<string, unknown>
+      : undefined,
+  });
+  if (!payload) return;
   const windows = BrowserWindow.getAllWindows();
   windows.forEach((win) => {
     if (!win.isDestroyed()) {
@@ -767,6 +787,14 @@ const emitCoworkStreamMessageUpdate = (
       }
     }
   });
+};
+
+const emitCoworkStreamMessageUpdate = (
+  sessionId: string,
+  messageId: string,
+  update: { content?: string; metadata?: Record<string, unknown> },
+): void => {
+  sendCoworkStreamMessageUpdate(sessionId, messageId, update);
 };
 
 /**
@@ -3257,11 +3285,6 @@ const startSqliteBackgroundJobs = async (): Promise<void> => {
   await stopSqliteBackgroundJobs({ waitForActiveJobs: true });
   sqliteBackgroundJobsStarted = true;
 
-  runSqliteBackgroundJob(
-    'gigSquare:initialSync',
-    '[GigSquare] Initial sync failed',
-    syncGigSquareRemoteData,
-  );
   gigSquareSyncInterval = setInterval(() => {
     runSqliteBackgroundJob(
       'gigSquare:periodicSync',
@@ -3270,13 +3293,6 @@ const startSqliteBackgroundJobs = async (): Promise<void> => {
     );
   }, GIG_SQUARE_SYNC_INTERVAL_MS);
 
-  startProviderDiscoveryPolling();
-
-  runSqliteBackgroundJob(
-    'serviceOrder:initialTimeoutScan',
-    '[ServiceOrder] Initial timeout scan failed',
-    () => getServiceOrderLifecycleService().scanTimedOutOrders(),
-  );
   serviceOrderTimeoutScanInterval = setInterval(() => {
     runSqliteBackgroundJob(
       'serviceOrder:periodicTimeoutScan',
@@ -3285,11 +3301,6 @@ const startSqliteBackgroundJobs = async (): Promise<void> => {
     );
   }, SERVICE_ORDER_TIMEOUT_SCAN_INTERVAL_MS);
 
-  runSqliteBackgroundJob(
-    'serviceOrder:initialRefundSync',
-    '[ServiceOrder] Initial refund sync failed',
-    syncServiceRefundProtocols,
-  );
   serviceRefundSyncInterval = setInterval(() => {
     runSqliteBackgroundJob(
       'serviceOrder:periodicRefundSync',
@@ -3309,13 +3320,148 @@ const startSqliteBackgroundJobs = async (): Promise<void> => {
   }, SQLITE_MAINTENANCE_INTERVAL_MS);
 };
 
+/**
+ * The initial runs of the periodic sqlite-backed background jobs. These are
+ * the same jobs their intervals re-run; they used to fire the moment the
+ * window was created (three of them hit the network/chain, one scans every
+ * timed-out order), so they ride the idle startup tier instead. Their cadence
+ * is unchanged: the intervals above start immediately, only the first overly
+ * eager run moves.
+ */
+const runInitialSqliteBackgroundJobs = (): void => {
+  runSqliteBackgroundJob(
+    'gigSquare:initialSync',
+    '[GigSquare] Initial sync failed',
+    syncGigSquareRemoteData,
+  );
+  startProviderDiscoveryPolling();
+  runSqliteBackgroundJob(
+    'serviceOrder:initialTimeoutScan',
+    '[ServiceOrder] Initial timeout scan failed',
+    () => getServiceOrderLifecycleService().scanTimedOutOrders(),
+  );
+  runSqliteBackgroundJob(
+    'serviceOrder:initialRefundSync',
+    '[ServiceOrder] Initial refund sync failed',
+    syncServiceRefundProtocols,
+  );
+};
+
+/**
+ * Deferred startup tiers (time from window-visible to interactive).
+ *
+ * createAppWindow() only starts loading the renderer; everything the old code
+ * ran synchronously right after it competed with the renderer's first IPC
+ * round-trips on the main thread. Startup work is split by what it unblocks so
+ * each group can be deferred independently:
+ *
+ *  - wiring tier: what an IPC/RPC path reads synchronously — pure setters,
+ *    handler registration, the ingest hooks.
+ *  - message tier (+2s): the daemons that turn stored private-chat / group
+ *    messages into replies. Nothing they do is needed for the window to be
+ *    interactive, and their internal start order is unchanged from the
+ *    pre-tier code — every setter in the block still lands synchronously
+ *    before any daemon's first asynchronously-resuming tick.
+ *  - idle tier (+7s): nightly/idle background services plus the one-time data
+ *    migration, which run one step at a time on the idle queue (a setImmediate
+ *    chain) instead of as the single synchronous block they used to be.
+ *
+ * A scheduled tier is cancelled by app cleanup, so quitting inside the first
+ * seconds can never start a daemon that then has no stopper.
+ */
+const STARTUP_MESSAGE_TIER_DELAY_MS = 2_000;
+const STARTUP_IDLE_TIER_DELAY_MS = 7_000;
+
+let startupTierTimers: Array<ReturnType<typeof setTimeout>> = [];
+let startupTiersCancelled = false;
+
+const clearPendingStartupTiers = (): void => {
+  for (const timer of startupTierTimers) {
+    clearTimeout(timer);
+  }
+  startupTierTimers = [];
+};
+
+/** App cleanup calls this: a pending tier must never start work after cleanup. */
+const cancelDeferredStartupWork = (): void => {
+  startupTiersCancelled = true;
+  clearPendingStartupTiers();
+};
+
+const scheduleStartupTier = (label: string, delayMs: number, run: () => void): void => {
+  if (startupTiersCancelled) return;
+  const timer = setTimeout(() => {
+    startupTierTimers = startupTierTimers.filter((entry) => entry !== timer);
+    if (startupTiersCancelled) return;
+    startupLog(`deferred startup "${label}" begin`);
+    try {
+      run();
+    } catch (error) {
+      console.error(`[Startup] deferred startup "${label}" failed:`, error);
+    }
+    startupLog(`deferred startup "${label}" done`);
+  }, delayMs);
+  startupTierTimers.push(timer);
+};
+
+interface StartupIdleStep {
+  label: string;
+  run: () => void;
+}
+
+/**
+ * Run idle steps one at a time, yielding to the event loop between them: the
+ * old code ran the same work as one synchronous block, which is exactly what
+ * froze the main thread for seconds at a time.
+ */
+const runIdleStartupSteps = (steps: StartupIdleStep[]): void => {
+  const queue = [...steps];
+  const runNext = (): void => {
+    const step = queue.shift();
+    if (!step || startupTiersCancelled) return;
+    startupLog(`idle startup step "${step.label}" begin`);
+    try {
+      step.run();
+    } catch (error) {
+      console.error(`[Startup] idle startup step "${step.label}" failed:`, error);
+    }
+    startupLog(`idle startup step "${step.label}" done`);
+    setImmediate(runNext);
+  };
+  setImmediate(runNext);
+};
+
+/**
+ * Group-chat ingest seams that must be live before ANY group message is
+ * inserted — including the ones the MetaWeb listener pushes while the daemons
+ * are still waiting for their tier. The agent-game hook resolves the host
+ * lazily (the host starts in the idle tier, and an RPC may start it on
+ * demand); the sender-name resolver keeps locally registered bot names, which
+ * the chain indexer flip-flops on (EP28 "claude bot" display bug).
+ */
+const wireGroupChatIngestHooks = (): void => {
+  setGroupMessageInsertedHook((groupId) => getAgentGameHost()?.onGroupMessage(groupId));
+  setLocalSenderNameResolver(
+    (globalMetaId) => getMetabotStore().getMetabotByGlobalMetaId(globalMetaId)?.name?.trim() || null,
+  );
+};
+
 const startSqliteDaemons = (): void => {
-  const skillMgr = getSkillManager();
+  // A re-entry (sqlite recovery restarts the daemons) drops the previous
+  // generation's pending tiers so no daemon is started twice by an old timer.
+  clearPendingStartupTiers();
   // Publish the chain write ledger store before any daemon/RPC flow can pin.
   getChainContentHistoryStore();
+  // Group-chat ingest must know about the agent-game runtime and local bot
+  // names from the very first inserted message, so both seams are wired here
+  // rather than with the host they belong to.
+  wireGroupChatIngestHooks();
   // Heartbeat (first-class, decoupled from long-term tasks): one 5s master
-  // tick; long-term advancement is its first throttled handler. start() is
-  // idempotent — safe on sqlite-recovery re-entry.
+  // tick; long-term advancement is its first throttled handler. Handlers are
+  // only REGISTERED here — registration is pure bookkeeping, and its start()
+  // moves to the idle tier so the first tick (long-term advancement + the
+  // MetaTask chain sweep) does not compete with the first renderer IPC.
+  // start() is idempotent — safe on sqlite-recovery re-entry.
   getHeartbeatService().registerHandler({
     name: 'longterm.advance',
     intervalMs: LONGTERM_ADVANCE_INTERVAL_MS,
@@ -3340,7 +3486,8 @@ const startSqliteDaemons = (): void => {
       getMetaTaskWatchService().run(nowMs);
     },
   });
-  getHeartbeatService().start();
+  // No start() here: the idle tier starts the heartbeat once the window is
+  // interactive (see startStartupNightlyServices).
   setGroupChatTransportMetabotStoreGetter(getMetabotStore);
   setGroupChatTransportUserIdentityStoreGetter(getUserIdentityStore);
   setGroupTaskServiceMetabotStoreGetter(getMetabotStore);
@@ -3488,38 +3635,41 @@ const startSqliteDaemons = (): void => {
     return Array.from(new Set([...taskGroups, ...openTeamGroups, ...gameGroups]));
   });
 
-  // One-time, versioned historical cognition migration. It is deliberately
-  // run before the realtime daemons so the first dream sees old and new facts
-  // through the same owner-scoped ledger. Source tables remain untouched.
-  try {
-    const historicalExperienceStore = new MetaIDExperienceStore(
-      getStore().getDatabase(),
-      () => undefined,
-    );
-    runMetaIDExperienceBackfill({
-      db: getStore().getDatabase(),
-      experienceStore: historicalExperienceStore,
-      saveDb: getStore().getSaveFunction(),
-      migrationState: getStore(),
-      localIdentities: () => getMetabotStore().listMetabots()
-        .filter((metabot) => metabot.enabled !== false && toSafeString(metabot.globalmetaid).trim())
-        .map((metabot) => ({
-          metabotId: metabot.id,
-          globalMetaID: toSafeString(metabot.globalmetaid).trim(),
-        })),
-      serviceOrders: () => [
-        ...getServiceOrderStore().listOrdersByRole('buyer'),
-        ...getServiceOrderStore().listOrdersByRole('seller'),
-      ],
-      groupTaskStore: getGroupTaskStore(),
-      emitLog: (msg) => console.log(msg),
-    });
-  } catch (error) {
-    console.warn(
-      `[MetaIDExperienceBackfill] Startup backfill failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  // P3 culture base: task-close distillation rides the same orchestrator chat.
+  setTeamCultureDistillationDeps({
+    getTeamCultureStore: () => getTeamCultureStore(),
+    getGroupTaskStore: () => getGroupTaskStore(),
+    performChat: performChatCompletionForOrchestrator,
+    listMetabots: () => getMetabotStore().listMetabots(),
+  });
+  // Cowork memory judge/extraction: fleet-level automation riding the Twin
+  // Bot system brain (primary + fallback), never the bare app default model.
+  setMemoryJudgeBrainResolver(() => resolveSystemBrainOptions(getMetabotStore().listMetabots()));
+  // Session titling (cowork/private-chat/order sessions): same system-brain
+  // rule — the Twin Bot brain pair, app default only during onboarding.
+  // These three are pure seam wiring read by the first cowork turn / task
+  // close, so they stay on the immediate path even though the services they
+  // serve start in the idle tier.
+  setSessionTitleBrainProvider(() => resolveSystemBrainOptions(getMetabotStore().listMetabots()));
 
+  // Everything below is daemon start-up, not wiring, and it is exactly what
+  // used to hold the main thread while the renderer waited for its first IPC.
+  scheduleStartupTier('message daemons', STARTUP_MESSAGE_TIER_DELAY_MS, startStartupMessageTier);
+  scheduleStartupTier('idle background work', STARTUP_IDLE_TIER_DELAY_MS, startStartupIdleTier);
+};
+
+/**
+ * Message tier (+2s): daemons that turn stored private-chat / group messages
+ * into replies.
+ *
+ * The statement order below is the pre-tier order verbatim. That matters: the
+ * private-chat daemon is started before the OpenTeam dependency setters, and
+ * the only reason that is safe is that a daemon's first tick resumes in a
+ * microtask — every setter in this synchronous block still lands first. Keep
+ * the block synchronous and keep the order.
+ */
+const startStartupMessageTier = (): void => {
+  const skillMgr = getSkillManager();
   startCognitiveOrchestrator(
     getStore().getDatabase(),
     getStore().getSaveFunction(),
@@ -3979,42 +4129,6 @@ const startSqliteDaemons = (): void => {
     },
   });
 
-  // One-time ledger repair: the line-scoped [DELIVERABLE] parser dropped URIs
-  // delivered in the "description line + blank line + URI line" shape (task
-  // #62: a skill-pack pin, a zip metafile and a MetaApp, all unrecorded).
-  // Re-scan every task's chat history with the fixed parser and insert the
-  // missing on-chain rows — additive-only, idempotent via the store's
-  // (msgPin,uri)/(author,uri) dedupe, so this is safe on every boot.
-  try {
-    const repaired = backfillMultiLineDeliverables(getGroupTaskStore());
-    if (repaired.inserted > 0) {
-      console.log(
-        `[GroupTask] deliverable backfill inserted ${repaired.inserted} row(s) ` +
-        `(${repaired.messagesScanned} tagged messages across ${repaired.tasksScanned} tasks)`,
-      );
-    }
-  } catch (error) {
-    console.error(
-      '[GroupTask] deliverable backfill failed:',
-      error instanceof Error ? error.message : String(error),
-    );
-  }
-
-  // Task #83 audit (P6): stamp comm stats for legacy closed tasks that
-  // predated close-time stamping (42/71 done + 5/11 cancelled rows were NULL).
-  // Idempotent and additive — safe on every boot.
-  try {
-    const stamped = getGroupTaskStore().backfillTaskCommStats();
-    if (stamped > 0) {
-      console.log(`[GroupTask] comm-stats backfill stamped ${stamped} closed task(s)`);
-    }
-  } catch (error) {
-    console.error(
-      '[GroupTask] comm-stats backfill failed:',
-      error instanceof Error ? error.message : String(error),
-    );
-  }
-
   // OpenTeam (M1): guest-side wiring. The guest service answers OpenTeam
   // invite envelopes intercepted by the private-chat daemon (join the external
   // group + ACCEPT/DECLINE reply); the guest daemon then lets the invited bot
@@ -4130,6 +4244,123 @@ const startSqliteDaemons = (): void => {
   if (resumedInviteWatchers > 0) {
     console.log(`[OpenTeam] Resumed ${resumedInviteWatchers} pending invite watcher(s)`);
   }
+};
+
+/**
+ * One-time, versioned historical cognition migration. It used to run before
+ * the realtime daemons so the first dream would see old and new facts through
+ * the same owner-scoped ledger; the idle tier keeps that guarantee by running
+ * this step ahead of the nightly services, and running it off the first-paint
+ * path. Source tables remain untouched.
+ */
+const runStartupMetaIDExperienceBackfill = (): void => {
+  try {
+    const historicalExperienceStore = new MetaIDExperienceStore(
+      getStore().getDatabase(),
+      () => undefined,
+    );
+    runMetaIDExperienceBackfill({
+      db: getStore().getDatabase(),
+      experienceStore: historicalExperienceStore,
+      saveDb: getStore().getSaveFunction(),
+      migrationState: getStore(),
+      localIdentities: () => getMetabotStore().listMetabots()
+        .filter((metabot) => metabot.enabled !== false && toSafeString(metabot.globalmetaid).trim())
+        .map((metabot) => ({
+          metabotId: metabot.id,
+          globalMetaID: toSafeString(metabot.globalmetaid).trim(),
+        })),
+      serviceOrders: () => [
+        ...getServiceOrderStore().listOrdersByRole('buyer'),
+        ...getServiceOrderStore().listOrdersByRole('seller'),
+      ],
+      groupTaskStore: getGroupTaskStore(),
+      emitLog: (msg) => console.log(msg),
+    });
+  } catch (error) {
+    console.warn(
+      `[MetaIDExperienceBackfill] Startup backfill failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+};
+
+/**
+ * One-time ledger repair: the line-scoped [DELIVERABLE] parser dropped URIs
+ * delivered in the "description line + blank line + URI line" shape (task
+ * #62: a skill-pack pin, a zip metafile and a MetaApp, all unrecorded).
+ * Re-scan every task's chat history with the fixed parser and insert the
+ * missing on-chain rows — additive-only, idempotent via the store's
+ * (msgPin,uri)/(author,uri) dedupe, so this is safe on every boot.
+ */
+const runStartupGroupTaskDeliverableBackfill = (): void => {
+  try {
+    const repaired = backfillMultiLineDeliverables(getGroupTaskStore());
+    if (repaired.inserted > 0) {
+      console.log(
+        `[GroupTask] deliverable backfill inserted ${repaired.inserted} row(s) ` +
+        `(${repaired.messagesScanned} tagged messages across ${repaired.tasksScanned} tasks)`,
+      );
+    }
+  } catch (error) {
+    console.error(
+      '[GroupTask] deliverable backfill failed:',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+};
+
+/**
+ * Task #83 audit (P6): stamp comm stats for legacy closed tasks that
+ * predated close-time stamping (42/71 done + 5/11 cancelled rows were NULL).
+ * Idempotent and additive — safe on every boot.
+ */
+const runStartupGroupTaskCommStatsBackfill = (): void => {
+  try {
+    const stamped = getGroupTaskStore().backfillTaskCommStats();
+    if (stamped > 0) {
+      console.log(`[GroupTask] comm-stats backfill stamped ${stamped} closed task(s)`);
+    }
+  } catch (error) {
+    console.error(
+      '[GroupTask] comm-stats backfill failed:',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+};
+
+/**
+ * Idle tier (+7s): the nightly/idle background services and the one-time data
+ * repairs. Steps run sequentially on the idle queue — the migration first
+ * because the nightly services read the ledger it rewrites, then the repairs,
+ * then the services themselves — so no single step can block the main thread
+ * the way the old synchronous startup block did.
+ */
+const startStartupIdleTier = (): void => {
+  runIdleStartupSteps([
+    { label: 'metaid experience backfill', run: runStartupMetaIDExperienceBackfill },
+    { label: 'group task deliverable backfill', run: runStartupGroupTaskDeliverableBackfill },
+    { label: 'group task comm stats backfill', run: runStartupGroupTaskCommStatsBackfill },
+    { label: 'nightly services', run: startStartupNightlyServices },
+    { label: 'idle sync jobs', run: runInitialSqliteBackgroundJobs },
+  ]);
+};
+
+/**
+ * Nightly / idle background services, in the order the pre-tier code started
+ * them: heartbeat, dream consolidation, memory hygiene, knowledge-base
+ * auto-learn, MetaWeb study, surf crash recovery, chain content summaries and
+ * the Agent-Game host. Each keeps its own cadence; only the moment it comes up
+ * moves off the first-paint path.
+ *
+ * The one order that matters inside the block is dream-before-hygiene ("the
+ * deterministic compression stroke that follows the dreams"), which is why
+ * they are started together rather than split across the ladder.
+ */
+const startStartupNightlyServices = (): void => {
+  // The heartbeat's first tick fires every handler whose interval has elapsed
+  // — i.e. all three, including the 5-min MetaTask chain sweep. All of them
+  // are periodic, so the first run can wait for the idle tier.
+  getHeartbeatService().start();
 
   // Nightly dream consolidation: each enabled MetaBot reviews its previous
   // day's experiences with its own LLM (summaries, dream memories, identity).
@@ -4224,22 +4455,6 @@ const startSqliteDaemons = (): void => {
       });
     },
   });
-
-  // P3 culture base: task-close distillation rides the same orchestrator chat.
-  setTeamCultureDistillationDeps({
-    getTeamCultureStore: () => getTeamCultureStore(),
-    getGroupTaskStore: () => getGroupTaskStore(),
-    performChat: performChatCompletionForOrchestrator,
-    listMetabots: () => getMetabotStore().listMetabots(),
-  });
-
-  // Cowork memory judge/extraction: fleet-level automation riding the Twin
-  // Bot system brain (primary + fallback), never the bare app default model.
-  setMemoryJudgeBrainResolver(() => resolveSystemBrainOptions(getMetabotStore().listMetabots()));
-
-  // Session titling (cowork/private-chat/order sessions): same system-brain
-  // rule — the Twin Bot brain pair, app default only during onboarding.
-  setSessionTitleBrainProvider(() => resolveSystemBrainOptions(getMetabotStore().listMetabots()));
 
   // Knowledge bases ("知识库"): per-bot document corpora learned into a local
   // search index. Nightly auto-learn shares the dream window but is LLM-free
@@ -6405,22 +6620,7 @@ const getCoworkRunner = () => {
       if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
         return;
       }
-      const safeContent = truncateIpcString(content, IPC_UPDATE_CONTENT_MAX_CHARS);
-      const windows = BrowserWindow.getAllWindows();
-      windows.forEach(win => {
-        if (!win.isDestroyed()) {
-          try {
-            win.webContents.send('cowork:stream:messageUpdate', {
-              sessionId,
-              messageId,
-              content: safeContent,
-              ...(metadata ? { metadata } : {}),
-            });
-          } catch (error) {
-            console.error('Failed to forward cowork message update:', error);
-          }
-        }
-      });
+      sendCoworkStreamMessageUpdate(sessionId, messageId, { content, metadata });
     });
 
     coworkRunner.on('permissionRequest', (sessionId: string, request: any) => {
@@ -7267,13 +7467,10 @@ const startAgentGameHost = (): void => {
     });
   });
   // Route group-chat inserts into the runtime (no-op when no session exists).
-  setGroupMessageInsertedHook((groupId) => agentGameHost?.onGroupMessage(groupId));
-  // Speedup R-04: local bots' registered names win over the chain-resolved
-  // userInfo.name at group-chat ingest (the indexer flip-flops between a
-  // bot's historical names — the EP28 "claude bot" display bug).
-  setLocalSenderNameResolver(
-    (globalMetaId) => getMetabotStore().getMetabotByGlobalMetaId(globalMetaId)?.name?.trim() || null,
-  );
+  // The startup wiring tier already set these seams so early ingest resolves
+  // correctly; re-asserting them here keeps a host started on demand (RPC /
+  // MetaApp) self-sufficient. Both setters are idempotent.
+  wireGroupChatIngestHooks();
 };
 
 const getAgentGameHost = (): AgentGameHost | null => agentGameHost;
@@ -9306,6 +9503,10 @@ if (!gotTheLock) {
   // Agent-Game-v2 `browser.app.session.*` host surface (docs/14 §1). IDBots is
   // the authorization + session-state owner; ABC (when integrated) forwards.
   ipcMain.handle('agentGame:session', async (_event, input: { method: string; payload?: unknown; actorId?: string; resourceUri?: string } | undefined) => {
+    // The host starts on the idle startup tier, so a MetaApp that loads before
+    // that must still be able to bring it up — same on-demand start the RPC
+    // surface performs.
+    startAgentGameHost();
     const host = getAgentGameHost();
     if (!host) {
       return { __error: true, code: 'unsupported_method', message: 'Agent-Game runtime not started' };
@@ -11124,6 +11325,22 @@ if (!gotTheLock) {
     });
   });
 
+  /**
+   * Resync request from the renderer: returns the exact live text the delta
+   * stream is currently appending to. Non-null only while the encoder is in
+   * delta mode for that message, so adopting it realigns both sides; null means
+   * the next update for the message is a full send anyway.
+   */
+  ipcMain.handle('cowork:stream:liveContent', async (_event, payload: { sessionId?: unknown; messageId?: unknown }) => {
+    const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : '';
+    const messageId = typeof payload?.messageId === 'string' ? payload.messageId : '';
+    if (!sessionId || !messageId) return { success: false as const };
+    const content = readCoworkStreamLiveContent(sessionId, messageId);
+    return content === null
+      ? { success: false as const }
+      : { success: true as const, content };
+  });
+
   ipcMain.handle('cowork:session:refreshPeerProfile', async (_event, input: {
     sessionId?: unknown;
     force?: unknown;
@@ -11306,6 +11523,21 @@ if (!gotTheLock) {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to list sessions',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:listMetabotAvatars', async (_event, metabotIds?: number[]) => {
+    return withSqliteRecovery('cowork:session:listMetabotAvatars', async () => {
+      try {
+        const avatars = getCoworkStore().listMetabotAvatars(metabotIds);
+        return { success: true, avatars };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to list MetaBot avatars',
         };
       }
     });
@@ -16471,6 +16703,9 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   let isCleanupInProgress = false;
 
   const runAppCleanup = async (): Promise<void> => {
+    // Cancel any startup tier that has not fired yet: cleanup is running, and
+    // a tier firing now would start a daemon with no stopper left behind.
+    cancelDeferredStartupWork();
     // Release the sleep guard first so the device may sleep normally during
     // shutdown even if a later cleanup step stalls.
     stopSleepGuardRefresh();
@@ -16670,12 +16905,6 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
     startupLog(`reset running sessions done (count=${resetCount})`);
 
-    const healedStreaming = getCoworkStore().healAbandonedStreamingMessages();
-    if (healedStreaming > 0) {
-      console.log(`[Main] Healed ${healedStreaming} abandoned cowork streaming placeholder(s)`);
-    }
-    startupLog(`heal abandoned streaming messages done (count=${healedStreaming})`);
-
     // Heal A2A conversations parked on 'error' solely by a shutdown abort
     // (latest transcript message is the DSH shutdown marker). Runs before the
     // private-chat daemon restarts so the UI never shows the stale banner.
@@ -16742,11 +16971,17 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     metaAppMgr.startWatching();
     startupLog('metaapp manager watching done');
 
-    // Start skill services
+    // Start skill services. Deliberately not awaited: the web-search bridge
+    // boot must never sit between the app and its first paint, and the skill's
+    // own search.sh health check starts the bridge on first use if it is still
+    // coming up when the first search request lands.
     const skillServices = getSkillServiceManager();
     startupLog('skill services startAll begin');
-    await skillServices.startAll();
-    startupLog('skill services ready');
+    void skillServices.startAll()
+      .then(() => startupLog('skill services ready'))
+      .catch((error) => {
+        console.error('[SkillServices] startAll failed:', error);
+      });
 
     // [关键代码] 显式告诉 Electron 使用系统的代理配置
     // 这会涵盖绝大多数 VPN（如 Clash, V2Ray 等开启了"系统代理"模式的情况）
@@ -16769,6 +17004,21 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('about to create window');
     createAppWindow();
 
+    // The abandoned-streaming scan only ever touches rows a hard quit left
+    // dirty, yet it used to walk every message row before the window existed.
+    // Queued after createAppWindow so it never sits on the first-paint path.
+    setTimeout(() => {
+      try {
+        const healedStreaming = getCoworkStore().healAbandonedStreamingMessages();
+        if (healedStreaming > 0) {
+          console.log(`[Main] Healed ${healedStreaming} abandoned cowork streaming placeholder(s)`);
+        }
+        startupLog(`heal abandoned streaming messages done (count=${healedStreaming})`);
+      } catch (error) {
+        console.error('[Main] Abandoned streaming heal failed; continuing startup:', error);
+      }
+    }, 0);
+
     // Spawn the shared DSH runtime in the background so the first cowork
     // turn does not pay process boot + plugin load. Must not delay first
     // paint — same contract as the retired Claude SDK pre-warm. Store getter,
@@ -16780,9 +17030,13 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     await startSqliteBackgroundJobs();
     startSqliteDaemons();
 
-    // Auto-reconnect IM bots that were enabled before restart
-    getIMGatewayManager().startAllEnabled().catch((error) => {
-      console.error('[IM] Failed to auto-start enabled gateways:', error);
+    // Auto-reconnect IM bots that were enabled before restart. Deferred to the
+    // idle tier: each enabled gateway opens a long-lived connection, and none
+    // of that is needed for the window to be usable.
+    scheduleStartupTier('IM gateway reconnect', STARTUP_IDLE_TIER_DELAY_MS, () => {
+      getIMGatewayManager().startAllEnabled().catch((error) => {
+        console.error('[IM] Failed to auto-start enabled gateways:', error);
+      });
     });
 
     // 首次启动时默认开启开机自启动（先写标记再设置，避免崩溃后重复设置）

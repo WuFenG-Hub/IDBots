@@ -81,7 +81,11 @@ test('the combined derivation reports longTerm, the reserved metaTask slot and t
 
 test('the board is initialized app-wide, so the badges work without opening the tab', () => {
   const app = readSource('src/renderer/App.tsx');
-  assert.match(app, /await longTermTaskService\.init\(\)/, 'App.tsx hoists the long-term board init');
+  assert.match(
+    app,
+    /await Promise\.all\(\[[\s\S]*longTermTaskService\.init\(\),[\s\S]*\]\);/,
+    'App.tsx hoists the long-term board init into the startup barrier',
+  );
 
   // The board component's own init stays, and init() is idempotent.
   const service = readSource('src/renderer/services/longTermTask.ts');

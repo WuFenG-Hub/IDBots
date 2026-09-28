@@ -34,6 +34,11 @@ import {
   type VersionedComposerField,
   type VersionedComposerSnapshot,
 } from './coworkPromptSubmission';
+import {
+  composerTextareaHeight,
+  shouldRemeasureComposerHeight,
+  type ComposerHeightMeasurement,
+} from './composerTextareaResize';
 
 type CoworkAttachment = {
   path: string;
@@ -403,34 +408,6 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       });
     }
 
-  // 暴露方法给父组件
-  React.useImperativeHandle(ref, () => ({
-    setValue: (newValue: string) => {
-      draftFieldRef.current?.set(newValue);
-      // 触发自动调整高度
-      requestAnimationFrame(() => {
-        const textarea = textareaRef.current;
-        if (textarea) {
-          textarea.style.height = 'auto';
-          textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight)}px`;
-        }
-      });
-    },
-    focus: () => {
-      textareaRef.current?.focus();
-    },
-    addAttachments: (paths: string[]) => {
-      const field = attachmentFieldRef.current;
-      if (!field) return;
-      const next = [...field.get()];
-      for (const path of paths) {
-        if (!path || next.some((attachment) => attachment.path === path)) continue;
-        next.push({ path, name: getFileNameFromPath(path) });
-      }
-      field.set(next);
-    },
-  }));
-
   const activeSkillIds = useSelector((state: RootState) => state.skill.activeSkillIds);
   const skills = useSelector((state: RootState) => state.skill.skills);
   const inputFileLabel = i18nService.t('coworkInputFileLabel');
@@ -458,14 +435,123 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     };
   }, [dispatch]);
 
-  // Auto-resize textarea
+  // Auto-resize textarea.
+  //
+  // Reading `scrollHeight` forces a synchronous layout of the whole document
+  // and the height write right after invalidates it again, so measuring on
+  // every keystroke re-lays out a transcript of hundreds of session rows plus
+  // thousands of message nodes per key. The read and the write therefore share
+  // one rAF callback - coalesced per frame through `resizeFrameRef`, so a burst
+  // of keystrokes measures once - and are skipped outright while the rendered
+  // row count provably cannot change (see composerTextareaResize).
+  const resizeFrameRef = useRef<number | null>(null);
+  const resizeMeasurementRef = useRef<ComposerHeightMeasurement | null>(null);
+  const observedWidthRef = useRef<number | null>(null);
+
+  const applyTextareaHeight = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    // 'auto' first, so scrollHeight reports the content height instead of the
+    // height applied by the previous pass.
+    textarea.style.height = 'auto';
+    const contentHeight = textarea.scrollHeight;
+    textarea.style.height = `${composerTextareaHeight(contentHeight, minHeight, maxHeight)}px`;
+    // The layout is clean after the read above, so these metrics come without a
+    // second flush. They are what the next skip decision is based on.
+    const style = getComputedStyle(textarea);
+    const glyphWidth = (parseFloat(style.fontSize) || 0) + (parseFloat(style.letterSpacing) || 0);
+    const contentWidth = textarea.clientWidth
+      - (parseFloat(style.paddingLeft) || 0)
+      - (parseFloat(style.paddingRight) || 0);
+    resizeMeasurementRef.current = {
+      // Taken from the DOM, not from the `value` state: by the time this runs
+      // the commit has already written the new text, and scrollHeight describes
+      // what the DOM holds.
+      value: textarea.value,
+      contentWidth,
+      glyphWidth,
+      minHeight,
+      maxHeight,
+    };
+    observedWidthRef.current = contentWidth;
+  }, [minHeight, maxHeight]);
+
+  const scheduleTextareaHeight = useCallback(() => {
+    if (resizeFrameRef.current !== null) return;
+    resizeFrameRef.current = requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      applyTextareaHeight();
+    });
+  }, [applyTextareaHeight]);
+
+  const cancelScheduledTextareaHeight = useCallback(() => {
+    if (resizeFrameRef.current === null) return;
+    cancelAnimationFrame(resizeFrameRef.current);
+    resizeFrameRef.current = null;
+  }, []);
+
+  // The measurement taken when the composer mounts (or when min/max height
+  // change with it) lands before the browser paints, so the textarea never
+  // shows a frame at its default rows height; everything after that goes
+  // through the rAF above.
+  useLayoutEffect(() => {
+    cancelScheduledTextareaHeight();
+    applyTextareaHeight();
+  }, [applyTextareaHeight, cancelScheduledTextareaHeight]);
+
   useEffect(() => {
     const textarea = textareaRef.current;
-    if (textarea) {
-      textarea.style.height = 'auto';
-      textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight)}px`;
+    if (!textarea) return;
+    if (!shouldRemeasureComposerHeight(resizeMeasurementRef.current, {
+      value: textarea.value,
+      currentWidth: observedWidthRef.current,
+      minHeight,
+      maxHeight,
+    })) {
+      return;
     }
-  }, [value, minHeight, maxHeight]);
+    scheduleTextareaHeight();
+  }, [value, minHeight, maxHeight, scheduleTextareaHeight]);
+
+  useEffect(() => cancelScheduledTextareaHeight, [cancelScheduledTextareaHeight]);
+
+  // The box width is the one input of the skip decision the value cannot carry:
+  // it decides how much text fits per row. ResizeObserver reports it without a
+  // layout read, keeping the keystroke path read-free.
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[entries.length - 1];
+      if (!entry) return;
+      observedWidthRef.current = entry.contentRect.width;
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
+  }, [isLarge]);
+
+  // 暴露方法给父组件
+  React.useImperativeHandle(ref, () => ({
+    setValue: (newValue: string) => {
+      draftFieldRef.current?.set(newValue);
+      // Prefills and clears go through the same frame-coalesced measurement as
+      // the keystroke path, so both agree on what the current height is.
+      scheduleTextareaHeight();
+    },
+    focus: () => {
+      textareaRef.current?.focus();
+    },
+    addAttachments: (paths: string[]) => {
+      const field = attachmentFieldRef.current;
+      if (!field) return;
+      const next = [...field.get()];
+      for (const path of paths) {
+        if (!path || next.some((attachment) => attachment.path === path)) continue;
+        next.push({ path, name: getFileNameFromPath(path) });
+      }
+      field.set(next);
+    },
+  }));
 
   React.useLayoutEffect(() => () => {
     draftFieldRef.current?.invalidate();

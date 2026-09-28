@@ -779,8 +779,17 @@ export interface CoworkSessionSummary {
   peerAvatar?: string | null;
   /** Owning MetaBot's display name, when attributed */
   metabotName?: string | null;
-  /** Owning MetaBot's avatar (data URL or remote URL), when attributed */
+  /**
+   * Owning MetaBot's avatar (data URL or remote URL), when attributed. Only
+   * getSession populates it; list rows carry metabotAvatarVersion and the
+   * renderer resolves the image through the avatar cache instead.
+   */
   metabotAvatar?: string | null;
+  /**
+   * Revision of the owning MetaBot row (metabots.updated_at) the identity
+   * fields came from — the freshness key of the renderer's avatar cache.
+   */
+  metabotAvatarVersion?: number | null;
   /** Bot Browser context: URI of the tab this session is about (browser sessions only) */
   browserUri?: string | null;
   /** Bot Browser context: title of the tab this session is about (browser sessions only) */
@@ -1157,6 +1166,9 @@ export class CoworkStore implements MemoryBackend {
 
   // In-memory tracking of delegation-blocked sessions
   private delegationBlockedSessions: Map<string, { orderId: string }> = new Map();
+  // Whether the generated heal columns exist; false keeps the boot heals on
+  // the legacy metadata LIKE scans.
+  private coworkMessageHealColumnsReady = false;
 
   constructor(db: Database, saveDb: () => void, options?: { deferHeavyStartupMaintenance?: boolean }) {
     this.db = db;
@@ -1206,6 +1218,7 @@ export class CoworkStore implements MemoryBackend {
     this.ensureMemoryPolicySchemaCompatibility();
     this.ensureConversationMappingSchemaCompatibility();
     this.ensureA2AConversationSchemaCompatibility();
+    this.ensureCoworkMessageHealColumns();
     this.ensureCoworkMessageIndexes();
     this.ensureCoworkSessionIndexes();
     this.backfillScopedMemoryMetadata();
@@ -1245,6 +1258,98 @@ export class CoworkStore implements MemoryBackend {
     } catch (error) {
       console.warn('[CoworkStore] Failed to verify cowork_messages indexes:', error);
     }
+  }
+
+  /**
+   * Heal columns for the boot-time leftover-state scans, so those queries stop
+   * scanning every metadata blob. Both are VIRTUAL generated columns: any
+   * insert or update keeps them correct without touching a single write path.
+   * The matched substrings are the canonical JSON.stringify spelling of the
+   * metadata flags (every metadata write goes through this store).
+   */
+  private ensureCoworkMessageHealColumns(): void {
+    if (!this.tableExists('cowork_messages')) {
+      return;
+    }
+    try {
+      const colsResult = this.db.exec('PRAGMA table_xinfo(cowork_messages);');
+      const columns = (colsResult[0]?.values || []).map((row) => String(row[1]));
+      let changed = false;
+      if (!columns.includes('is_streaming')) {
+        this.db.run(`
+          ALTER TABLE cowork_messages ADD COLUMN is_streaming INTEGER
+          GENERATED ALWAYS AS (
+            CASE
+              WHEN metadata IS NOT NULL AND instr(metadata, '"isStreaming":true') > 0 THEN 1
+              ELSE 0
+            END
+          ) VIRTUAL
+        `);
+        changed = true;
+      }
+      if (!columns.includes('steer_pending')) {
+        this.db.run(`
+          ALTER TABLE cowork_messages ADD COLUMN steer_pending INTEGER
+          GENERATED ALWAYS AS (
+            CASE
+              WHEN metadata IS NOT NULL
+                AND instr(metadata, '"interactionKind":"steer"') > 0
+                AND (
+                  instr(metadata, '"steerStatus":"queued"') > 0
+                  OR instr(metadata, '"steerStatus":"delivered"') > 0
+                )
+              THEN 1
+              ELSE 0
+            END
+          ) VIRTUAL
+        `);
+        changed = true;
+      }
+      if (changed) {
+        this.saveDb();
+      }
+      this.coworkMessageHealColumnsReady = true;
+    } catch (error) {
+      console.warn('[CoworkStore] Failed to add cowork_messages heal columns:', error);
+    }
+  }
+
+  /**
+   * Partial indexes for the two boot heals. Built lazily by the heals rather
+   * than at construction: the first build evaluates the generated expressions
+   * over every row, and once the dirty rows are healed the index is empty, so
+   * every later scan is an index seek over nothing. Deliberately does not save:
+   * the callers already save once when they change rows, and an extra
+   * saveDb() here would rewrite the whole database file a second time.
+   */
+  private ensureCoworkMessageHealIndexes(): void {
+    if (!this.tableExists('cowork_messages')) {
+      return;
+    }
+    try {
+      if (!this.indexExists('idx_cowork_messages_streaming_heal')) {
+        this.db.run(`
+          CREATE INDEX IF NOT EXISTS idx_cowork_messages_streaming_heal
+          ON cowork_messages(type) WHERE is_streaming = 1
+        `);
+      }
+      if (!this.indexExists('idx_cowork_messages_steer_heal')) {
+        this.db.run(`
+          CREATE INDEX IF NOT EXISTS idx_cowork_messages_steer_heal
+          ON cowork_messages(type) WHERE steer_pending = 1
+        `);
+      }
+    } catch (error) {
+      console.warn('[CoworkStore] Failed to build cowork_messages heal indexes:', error);
+    }
+  }
+
+  private indexExists(indexName: string): boolean {
+    const result = this.db.exec(
+      "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1",
+      [indexName],
+    );
+    return (result[0]?.values?.length ?? 0) > 0;
   }
 
   private ensureCoworkSessionIndexes(): void {
@@ -3404,7 +3509,7 @@ export class CoworkStore implements MemoryBackend {
       peer_name?: string | null;
       peer_avatar?: string | null;
       metabot_name?: string | null;
-      metabot_avatar?: string | Uint8Array | null;
+      metabot_updated_at?: number | null;
       browser_uri?: string | null;
       browser_title?: string | null;
       hidden_from_session_list?: number | null;
@@ -3432,7 +3537,7 @@ export class CoworkStore implements MemoryBackend {
         s.peer_name,
         s.peer_avatar,
         mb.name AS metabot_name,
-        mb.avatar AS metabot_avatar,
+        mb.updated_at AS metabot_updated_at,
         s.browser_uri,
         s.browser_title,
         s.hidden_from_session_list,
@@ -3497,7 +3602,7 @@ export class CoworkStore implements MemoryBackend {
       peerName: row.peer_name ?? null,
       peerAvatar: row.peer_avatar ?? null,
       metabotName: row.metabot_name ?? null,
-      metabotAvatar: normalizeMetabotAvatarForDisplay(row.metabot_avatar),
+      metabotAvatarVersion: parseIdNumber(row.metabot_updated_at),
       browserUri: row.browser_uri ?? null,
       browserTitle: row.browser_title ?? null,
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
@@ -3507,6 +3612,37 @@ export class CoworkStore implements MemoryBackend {
       effort: row.effort ?? null,
       projectId: row.project_id ?? null,
       cwd: row.cwd ?? null,
+    }));
+  }
+
+  /**
+   * Display avatars of the given MetaBots, read from the same metabots.avatar
+   * column listSessions used to inline. Avatar images travel over IPC once per
+   * bot instead of once per session row: callers keep a cache keyed by the
+   * metabotAvatarVersion the list rows carry and ask only for the ids whose
+   * revision moved (unknown ids included). The id list is capped so a runaway
+   * caller cannot exhaust the SQLite bind-parameter budget.
+   */
+  listMetabotAvatars(metabotIds?: number[] | null): Array<{ metabotId: number; avatar: string | null }> {
+    const ids = Array.isArray(metabotIds)
+      ? [...new Set(
+          metabotIds
+            .map((id) => parseIdNumber(id))
+            .filter((id): id is number => typeof id === 'number' && id > 0),
+        )].slice(0, 200)
+      : [];
+    if (ids.length === 0) {
+      return [];
+    }
+
+    const rows = this.getAll<{ id?: number | null; avatar?: string | Uint8Array | null }>(
+      `SELECT id, avatar FROM metabots WHERE id IN (${ids.map(() => '?').join(', ')})`,
+      ids,
+    );
+
+    return rows.map((row) => ({
+      metabotId: parseIdNumber(row.id) ?? 0,
+      avatar: normalizeMetabotAvatarForDisplay(row.avatar),
     }));
   }
 
@@ -3692,6 +3828,7 @@ export class CoworkStore implements MemoryBackend {
       return 0;
     }
 
+    this.ensureCoworkMessageHealIndexes();
     const rows = this.getAll<{
       id: string;
       session_id: string;
@@ -3703,6 +3840,7 @@ export class CoworkStore implements MemoryBackend {
       FROM cowork_messages
       WHERE metadata IS NOT NULL
         AND metadata LIKE '%"isStreaming":true%'
+        ${this.coworkMessageHealColumnsReady ? 'AND is_streaming = 1' : ''}
     `);
     if (rows.length === 0) {
       return 0;
@@ -3803,6 +3941,7 @@ export class CoworkStore implements MemoryBackend {
       return 0;
     }
 
+    this.ensureCoworkMessageHealIndexes();
     let changed = 0;
     this.db.run('BEGIN TRANSACTION');
     try {
@@ -3813,6 +3952,7 @@ export class CoworkStore implements MemoryBackend {
           AND metadata IS NOT NULL
           AND metadata LIKE ?
           AND (metadata LIKE ? OR metadata LIKE ?)
+          ${this.coworkMessageHealColumnsReady ? 'AND steer_pending = 1' : ''}
       `, [
         '%"interactionKind":"steer"%',
         '%"steerStatus":"queued"%',

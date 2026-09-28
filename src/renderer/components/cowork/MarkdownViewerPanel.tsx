@@ -90,6 +90,13 @@ const MarkdownViewerPanel: React.FC<MarkdownViewerPanelProps> = ({ filePath, onC
     (href: string) => resolveRelativeToDocument(filePath, href),
     [filePath]
   );
+  const handleOpenLocalFile = useCallback((path: string): boolean => {
+    if (/\.(md|markdown)$/i.test(path)) {
+      onOpenFile(path);
+      return true;
+    }
+    return false;
+  }, [onOpenFile]);
 
   useEffect(() => {
     let cancelled = false;
@@ -197,13 +204,7 @@ const MarkdownViewerPanel: React.FC<MarkdownViewerPanelProps> = ({ filePath, onC
             content={state.content}
             compact
             resolveLocalFilePath={resolveLocalFilePath}
-            onOpenLocalFile={(path) => {
-              if (/\.(md|markdown)$/i.test(path)) {
-                onOpenFile(path);
-                return true;
-              }
-              return false;
-            }}
+            onOpenLocalFile={handleOpenLocalFile}
           />
         </div>
       )}
