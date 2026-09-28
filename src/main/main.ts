@@ -3357,8 +3357,11 @@ const runInitialSqliteBackgroundJobs = (): void => {
  *
  *  - wiring tier: what an IPC/RPC path reads synchronously — pure setters,
  *    handler registration, the ingest hooks.
- *  - message tier: the daemons that turn stored private-chat / group messages
- *    into replies, plus the one-time group-task repairs that ride with them.
+ *  - message tier (+2s): the daemons that turn stored private-chat / group
+ *    messages into replies. Nothing they do is needed for the window to be
+ *    interactive, and their internal start order is unchanged from the
+ *    pre-tier code — every setter in the block still lands synchronously
+ *    before any daemon's first asynchronously-resuming tick.
  *  - idle tier (+7s): nightly/idle background services plus the one-time data
  *    migration, which run one step at a time on the idle queue (a setImmediate
  *    chain) instead of as the single synchronous block they used to be.
@@ -3366,6 +3369,7 @@ const runInitialSqliteBackgroundJobs = (): void => {
  * A scheduled tier is cancelled by app cleanup, so quitting inside the first
  * seconds can never start a daemon that then has no stopper.
  */
+const STARTUP_MESSAGE_TIER_DELAY_MS = 2_000;
 const STARTUP_IDLE_TIER_DELAY_MS = 7_000;
 
 let startupTierTimers: Array<ReturnType<typeof setTimeout>> = [];
@@ -3650,15 +3654,13 @@ const startSqliteDaemons = (): void => {
 
   // Everything below is daemon start-up, not wiring, and it is exactly what
   // used to hold the main thread while the renderer waited for its first IPC.
-  // The message daemons still start on this path; the idle tier's services and
-  // one-time migration move to the deferred ladder.
-  startStartupMessageTier();
+  scheduleStartupTier('message daemons', STARTUP_MESSAGE_TIER_DELAY_MS, startStartupMessageTier);
   scheduleStartupTier('idle background work', STARTUP_IDLE_TIER_DELAY_MS, startStartupIdleTier);
 };
 
 /**
- * Message tier: daemons that turn stored private-chat / group messages into
- * replies, plus the one-time group-task repairs that ride with them.
+ * Message tier (+2s): daemons that turn stored private-chat / group messages
+ * into replies.
  *
  * The statement order below is the pre-tier order verbatim. That matters: the
  * private-chat daemon is started before the OpenTeam dependency setters, and
