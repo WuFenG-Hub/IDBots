@@ -112,6 +112,73 @@ test('metatask projection store: projections persist and board derives my-roles'
   }
 });
 
+test('metatask projection store: board activity uses the engine clock, not holder/submission stamps', async () => {
+  const { dir, sqliteStore, store } = await openStore();
+  try {
+    const base = 1_790_000_000_000;
+    const trace = (pinId, path, body, author, height, offsetMs) => ({
+      ...ev(pinId, path, body, author, height),
+      timestampMs: base + offsetMs,
+    });
+    const events = [
+      trace(
+        'tree0000000002i0',
+        'tree',
+        {
+          root: 'r1',
+          nodes: [
+            { id: 'r1', parent: null, title: 'root', kind: 'aggregate', specid: null, params: {}, deps: [], weight: 5000 },
+            { id: 't1', parent: 'r1', title: 'leaf', kind: 'proof', specid: null, params: {}, deps: [], weight: 5000 },
+          ],
+        },
+        'idq1publisherx',
+        190_100,
+        0,
+      ),
+      trace(
+        'task0000000002i0',
+        'task',
+        { title: 'actively reviewed', treeid: 'tree0000000002i0', policy: { verify_quorum: 1, claim_ttl_hours: 48, verify_window_hours: 72 } },
+        'idq1publisherx',
+        190_101,
+        1_000,
+      ),
+      trace('claim00000002i0', 'claim', { taskid: 'task0000000002i0', node: 't1' }, 'idq1workerbee', 190_110, 60_000),
+      trace(
+        'submiss0000002i0',
+        'submission',
+        { taskid: 'task0000000002i0', node: 't1', claimid: 'claim00000002i0', result: { type: 'table' }, hash: '5'.repeat(64) },
+        'idq1workerbee',
+        190_111,
+        120_000,
+      ),
+      trace(
+        'verify00000002i0',
+        'verify',
+        { targetid: 'submiss0000002i0', verdict: 'pass', method: 'ran the spec', semantic_check: 'checked' },
+        'idq1reviewerzz',
+        190_120,
+        600_000,
+      ),
+    ];
+    const projection = replayMetaTask(events, { rootPinId: 'task0000000002i0' });
+    assert.equal(projection.nodeStates.t1.status, 'verified');
+    // The freshest task-scoped event is a VOTE: it is outside the
+    // holder/submission scan, which is exactly how a freshly reviewed task used
+    // to sort first while displaying "days ago".
+    assert.equal(projection.lastActivityMs, base + 600_000);
+    assert.ok(projection.lastActivityMs > projection.nodeStates.t1.submission.atMs);
+
+    store.saveProjections([projection]);
+    const board = store.board([]);
+    assert.equal(board.tasks.length, 1);
+    assert.equal(board.tasks[0].lastActivityMs, projection.lastActivityMs);
+  } finally {
+    sqliteStore.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('metatask projection store: refresh state transitions', async () => {
   const { dir, sqliteStore, store } = await openStore();
   try {

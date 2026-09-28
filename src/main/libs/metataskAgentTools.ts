@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import type { ChainWriteCreatePin } from './postBuzzAgentTools';
 import { innerHash, outerHash } from '../services/metatask/canon';
+import { rosterPinsFromEvents } from '../services/metatask/collector';
+import { METATASK_ROSTER_PATH } from '../services/metatask/constants';
 import { replayMetaTask } from '../services/metatask/engine';
 import type {
   MetaTaskBoard,
@@ -17,11 +19,14 @@ import type {
  *
  * Discipline the tool descriptions encode:
  *  - claim runs the replay guard FIRST; a non-open node is refused before
- *    any chain spend (claim-rejected:<node>:<state>).
+ *    any chain spend (claim-rejected:<node>:<state>), and the task root
+ *    author is refused its own task (protocol §12 item 6: submitter != root
+ *    author; the refusal is writer-side, the engine does not enforce it).
  *  - verify forces semantic_check (ruling #9) and failreason on fail
  *    (ruling #8) at WRITE time, so votes never land as not-counted.
- *  - same-side review is refused locally (roster = local bots); chain-side
- *    roster enforcement is H_ACT2-gated in the engine.
+ *  - same-side review is refused locally (roster = local bots); the
+ *    chain-side roster rule is H_ACT2-gated in the engine and fed from the
+ *    collected /protocols/metatask-roster pins.
  *  - publish runs tree → spec → task with the weight invariant (sum=10000)
  *    checked before the first pin is spent.
  *  - the chain is the source of truth: after every write the local
@@ -122,7 +127,11 @@ export function buildMetataskAgentTools(deps: {
   ): { ok: true; projection: MetaTaskTaskProjection } | { ok: false; reason: string } => {
     let projection: MetaTaskTaskProjection;
     try {
-      projection = replayMetaTask(events, { rootPinId, now: Date.now() });
+      projection = replayMetaTask(events, {
+        rootPinId,
+        now: Date.now(),
+        rosterPins: rosterPinsFromEvents(events),
+      });
     } catch (error) {
       return { ok: false, reason: `replay failed: ${error instanceof Error ? error.message : String(error)}` };
     }
@@ -216,7 +225,7 @@ export function buildMetataskAgentTools(deps: {
                   (roster.has(node.submission.submitter) || roster.has(detail.publisher)),
               )
               .map((node) => node.id),
-            note: 'same-side targets must not be reviewed by local bots (review independence); submission eligibility only excludes the task root author (H_ACT2-gated).',
+            note: 'same-side targets must not be reviewed by local bots (review independence); the engine also excludes the submitter and the task root author from an effective review (H_ACT2-gated roster filtering included). A task root author is refused its own task writer-side by metatask_claim — protocol §12 item 6 (submitter != task root author).',
           },
           participants: detail.participants,
           settlement: detail.settlement,
@@ -236,9 +245,11 @@ export function buildMetataskAgentTools(deps: {
     },
     async (args: { rootPinId?: string }) => {
       try {
-        const projection = replayMetaTask(refresher().loadEvents(), {
+        const events = refresher().loadEvents();
+        const projection = replayMetaTask(events, {
           rootPinId: String(args.rootPinId ?? ''),
           now: Date.now(),
+          rosterPins: rosterPinsFromEvents(events),
         });
         return jsonResult({
           taskComplete: projection.taskComplete,
@@ -263,7 +274,7 @@ export function buildMetataskAgentTools(deps: {
 
   const claimNode = tool(
     'metatask_claim',
-    'Claim an OPEN node of an on-chain MetaTask as this session\'s MetaBot. Runs the replay guard FIRST (claimTTL / review-window expiry included) and refuses without spending when the node is not open — output `claim-rejected:<node>:<state>`. Before claiming, read the task with metatask_get so you actually intend to do the node\'s work: an effective claim starts a TTL clock and, per protocol, freezing the node against publisher amends.',
+    'Claim an OPEN node of an on-chain MetaTask as this session\'s MetaBot. Runs the replay guard FIRST (claimTTL / review-window expiry included) and refuses without spending when the node is not open — output `claim-rejected:<node>:<state>`. The task root author (publisher) is refused its own task nodes (protocol §12 item 6: submitter != task root author — no self-claim). Before claiming, read the task with metatask_get so you actually intend to do the node\'s work: an effective claim starts a TTL clock and, per protocol, freezing the node against publisher amends.',
     {
       rootPinId: z.string().min(1).describe('Task root pinId.'),
       node: z.string().min(1).describe('Node id from the task tree (metatask_get).'),
@@ -276,6 +287,12 @@ export function buildMetataskAgentTools(deps: {
         const node = String(args.node ?? '');
         const guard = guardOpenNode(refresher().loadEvents(), rootPinId, node);
         if (guard.ok === false) return textResult(guard.reason, true);
+        if (guard.projection.publisher === who.globalMetaId) {
+          return textResult(
+            'Refused: protocol §12 item 6 (submitter != task root author) — you published this MetaTask, so claiming its nodes would be a self-claim; publisher work does not earn a submitter share. Let another bot claim it.',
+            true,
+          );
+        }
         const result = await writePin(who.metabotId, 'claim', { taskid: rootPinId, node }, 'tool:metatask_claim');
         void refresher().refreshOnce('metatask_claim');
         return jsonResult({
@@ -589,8 +606,8 @@ export function buildMetataskAgentTools(deps: {
         }
 
         // roster pin (same-side declaration) when the local roster can cross-review.
-        // Deliberately NOT under /protocols/metatask/* — it is a reference pin,
-        // not one of the nine replay event paths.
+        // Flat sibling of the protocol root (the collector sweeps it as the
+        // tenth pool); a reference pin, never a replay event.
         const roster = control.localRosterMetaIds().filter(Boolean);
         let rosterid: string | null = null;
         if (roster.length >= 2) {
@@ -599,10 +616,12 @@ export function buildMetataskAgentTools(deps: {
               who.metabotId,
               {
                 operation: 'create',
-                path: '/protocols/metatask-roster',
+                path: METATASK_ROSTER_PATH,
                 encryption: '0',
                 version: PIN_VERSION,
                 contentType: 'application/json',
+                // `groups: string[][]` is exactly what the engine's
+                // rosterGroupsFor reads (and what the collector round-trips).
                 payload: JSON.stringify({ groups: [roster], owner: 'idbots-local-roster', createdAt: Date.now() }),
               },
               { origin: 'tool:metatask_publish' },

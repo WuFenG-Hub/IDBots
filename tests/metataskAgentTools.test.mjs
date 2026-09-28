@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url);
 const { buildMetataskAgentTools } = require('../dist-electron/main/libs/metataskAgentTools.js');
 const { replayMetaTask } = require('../dist-electron/main/services/metatask/engine.js');
 const { innerHash, outerHash } = require('../dist-electron/main/services/metatask/canon.js');
+const { rosterPinsFromEvents } = require('../dist-electron/main/services/metatask/collector.js');
 
 /**
  * MetaTask agent tools (P2): writer-side protocol discipline before any chain
@@ -73,7 +74,12 @@ const buildHarness = (initialEvents) => {
     board: () => null,
     detail: (rootPinId) => {
       try {
-        return replayMetaTask(state.events, { rootPinId, now: 1_790_050_000_000 });
+        // Mirrors the refresher: roster pins travel with the event set.
+        return replayMetaTask(state.events, {
+          rootPinId,
+          now: 1_790_050_000_000,
+          rosterPins: rosterPinsFromEvents(state.events),
+        });
       } catch {
         return null;
       }
@@ -352,4 +358,123 @@ test('metatask_amend: publisher-only; bases from the current tree head', async (
   const payload = JSON.parse(writes[0].metaidData.payload);
   assert.equal(payload.bases, treePinId);
   assert.equal(payload.taskid, rootPinId);
+});
+
+// ── publisher self-claim refusal (protocol §12 item 6) ───────────────────────
+
+test('metatask_claim: the task root author is refused its own task before any spend', async () => {
+  const treePinId = nextPinId();
+  const rootPinId = nextPinId();
+  const tree = ev(
+    'tree',
+    {
+      root: 'r1',
+      nodes: [
+        { id: 'r1', parent: null, title: 'root', kind: 'aggregate', specid: null, params: {}, deps: [], weight: 5000 },
+        { id: 't1', parent: 'r1', title: 'leaf', kind: 'proof', specid: null, params: {}, deps: [], weight: 5000 },
+      ],
+    },
+    { pinId: treePinId, height: 189_800 },
+  );
+  // Authored by the SESSION bot: it is the task root author (publisher).
+  const task = ev(
+    'task',
+    { title: 'published by me', treeid: treePinId, policy: { verify_quorum: 2, claim_ttl_hours: 0, verify_window_hours: 0 }, tags: [] },
+    { pinId: rootPinId, height: 189_801 },
+  );
+  const { handlers, writes } = buildHarness([tree, task]);
+
+  const refused = await handlers.metatask_claim({ rootPinId, node: 't1' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /§12 item 6/);
+  assert.match(refused.content[0].text, /submitter != task root author/);
+  assert.equal(writes.length, 0, 'the publisher must never spend a claim fee on its own task');
+});
+
+// ── same-side roster wiring (collected roster pins reach the engine) ─────────
+
+test('metatask_claim/replay: collected roster pins filter same-side votes (guard sees it)', async () => {
+  const rosterPinId = nextPinId();
+  const treePinId = nextPinId();
+  const rootPinId = nextPinId();
+  const roster = ev(
+    'metatask-roster',
+    { groups: [[SESSION_BOT, LOCAL_PEER]], owner: 'idbots-local-roster', createdAt: 1_790_000_000_000 },
+    { pinId: rosterPinId, author: FOREIGN_PUBLISHER, height: 191_490 },
+  );
+  const tree = ev(
+    'tree',
+    {
+      root: 'r1',
+      nodes: [
+        { id: 'r1', parent: null, title: 'root', kind: 'aggregate', specid: null, params: {}, deps: [], weight: 3000 },
+        { id: 't1', parent: 'r1', title: 'leaf', kind: 'proof', specid: null, params: {}, deps: [], weight: 7000 },
+      ],
+    },
+    { pinId: treePinId, author: FOREIGN_PUBLISHER, height: 191_491 },
+  );
+  // The task points at the roster pin through its split policy.
+  const task = ev(
+    'task',
+    {
+      title: 'roster task',
+      treeid: treePinId,
+      policy: {
+        verify_quorum: 2,
+        claim_ttl_hours: 0,
+        verify_window_hours: 0,
+        split: { submitterShareBP: 8000, rosterid: rosterPinId },
+      },
+      tags: [],
+    },
+    { pinId: rootPinId, author: FOREIGN_PUBLISHER, height: 191_492 },
+  );
+  const claim = ev('claim', { taskid: rootPinId, node: 't1' }, { author: SESSION_BOT, height: 191_500 });
+  const sub = ev(
+    'submission',
+    {
+      taskid: rootPinId,
+      node: 't1',
+      claimid: claim.pinId,
+      result: { type: 'triage' },
+      hash: '4'.repeat(64),
+      contentType: 'application/json;utf-8',
+      attachment: null,
+      childids: [],
+    },
+    { author: SESSION_BOT, height: 191_501 },
+  );
+  const vote = (author, over) =>
+    ev(
+      'verify',
+      { targetid: sub.pinId, verdict: 'pass', method: 'replay pass', semantic_check: 'checked' },
+      { author, ...over },
+    );
+  const independent = vote('idq1foreignreviewer0000000000000', { height: 191_502 });
+  // Same-side (LOCAL_PEER shares a roster group with the submitter): if the
+  // roster pin were NOT fed to the engine, this fail would reopen the node.
+  const sameSideFail = ev(
+    'verify',
+    { targetid: sub.pinId, verdict: 'fail', method: 'replay fail', semantic_check: 'checked', failreason: 'counterexample' },
+    { author: LOCAL_PEER, height: 191_503 },
+  );
+  const { handlers, writes } = buildHarness([roster, tree, task, claim, sub, independent, sameSideFail]);
+
+  const replay = await handlers.metatask_replay({ rootPinId });
+  assert.equal(replay.isError, undefined);
+  const replayed = JSON.parse(replay.content[0].text);
+  assert.equal(replayed.nodeStates.t1.status, 'claimed');
+  assert.ok(
+    replayed.ignoredEvents.some(
+      (entry) => entry.pinId === sameSideFail.pinId && entry.reason === 'same_side_roster',
+    ),
+    `expected same_side_roster for the local peer vote, got ${JSON.stringify(replayed.ignoredEvents)}`,
+  );
+
+  // The claim guard replays with the same roster map: t1 is still held, so the
+  // claim is refused before any spend.
+  const refused = await handlers.metatask_claim({ rootPinId, node: 't1' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /claim-rejected:t1:claimed/);
+  assert.equal(writes.length, 0);
 });

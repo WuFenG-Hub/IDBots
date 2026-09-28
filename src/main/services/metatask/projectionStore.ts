@@ -1,5 +1,5 @@
 import type { SqliteDatabase as Database } from '../../sqliteTypes';
-import { H_ACT2, type MetaTaskEventPath } from './constants';
+import { H_ACT2, type MetaTaskCollectedPath } from './constants';
 import type {
   MetaTaskAlert,
   MetaTaskBoard,
@@ -169,7 +169,7 @@ export class MetaTaskProjectionStore {
         }
         return {
           pinId: String(row.pin_id),
-          path: String(row.path) as MetaTaskEventPath,
+          path: String(row.path) as MetaTaskCollectedPath,
           author: String(row.author ?? ''),
           height: Number(row.height ?? -1),
           txIndex: Number(row.tx_index ?? 0),
@@ -325,15 +325,6 @@ export class MetaTaskProjectionStore {
     }
   }
 
-  private lastActivityOf(projection: MetaTaskTaskProjection): number {
-    let latest = 0;
-    for (const node of Object.values(projection.nodeStates)) {
-      if (node.holder && node.holder.sinceMs > latest) latest = node.holder.sinceMs;
-      if (node.submission && node.submission.atMs > latest) latest = node.submission.atMs;
-    }
-    return latest;
-  }
-
   board(localRosterMetaIds: string[]): MetaTaskBoard {
     const roster = new Set(localRosterMetaIds.filter(Boolean));
     const rows = this.getAll<Row>(
@@ -377,7 +368,10 @@ export class MetaTaskProjectionStore {
           taskComplete: projection.taskComplete,
           progress: projection.progress,
           participantCount: projection.participants.length,
-          lastActivityMs: this.lastActivityOf(projection),
+          // Board ordering uses the persisted engine-computed last_activity_ms
+          // (all task-scoped events); the card must show the SAME clock, or an
+          // actively reviewed task sorts freshest yet renders "days ago".
+          lastActivityMs: projection.lastActivityMs,
           freshness: {
             boundaryBlock: projection.freshness.boundaryBlock,
             evaluatedAtMs: projection.freshness.evaluatedAtMs,
