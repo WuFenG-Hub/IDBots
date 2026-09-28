@@ -1289,6 +1289,12 @@ export class CoworkStore implements MemoryBackend {
     const migratedMetawebOrderSessions = this.migrateMetawebOrderSessionsToPeerConversations();
     const backfilledMetawebOrderMessages = this.backfillMetawebOrderSimplemsgMetadata();
     const backfilledMetawebPrivateMessages = this.backfillMetawebPrivateSimplemsgMetadata();
+    // The transcript-order indexes are built here rather than in the ensure
+    // tier: the first build reads every message row, which on a multi-GB
+    // database is exactly the kind of one-time cost the deferred tier exists
+    // for. Every query stays correct without them, only sorted instead of
+    // index-ordered.
+    this.ensureCoworkMessageWindowIndexes();
     // Order matters: the metadata backfills above can tag legacy rows as
     // metaweb_private, and those rows must count toward the activity stamp.
     const backfilledSessionActivityAt = this.backfillSessionActivityAt();
@@ -1354,6 +1360,49 @@ export class CoworkStore implements MemoryBackend {
    * The matched substrings are the canonical JSON.stringify spelling of the
    * metadata flags (every metadata write goes through this store).
    */
+  /**
+   * Indexes that turn the transcript order into an index-ordered walk.
+   *
+   * The transcript order is (created_at, sequence, ROWID) — the order
+   * getSessionMessages returns, the order a message page walks, and the order
+   * getSession rewinds along. An index on (session_id, created_at, sequence)
+   * carries the rowid last implicitly, so a forward scan yields that order
+   * exactly (older-message pages, the full transcript) and a backward scan
+   * yields its exact reverse (the newest-first window). The sequence-led index
+   * does the same for the newest-first page whose cursor is a sequence.
+   *
+   * Every ORDER BY these serve used to spell sequence as COALESCE(sequence, 0),
+   * an expression no index can order by, so each page materialized the whole
+   * session into a temp B-tree before applying its LIMIT.
+   */
+  private ensureCoworkMessageWindowIndexes(): void {
+    if (!this.tableExists('cowork_messages')) {
+      return;
+    }
+    try {
+      let changed = false;
+      if (!this.indexExists('idx_cowork_messages_session_created_sequence')) {
+        this.db.run(`
+          CREATE INDEX IF NOT EXISTS idx_cowork_messages_session_created_sequence
+          ON cowork_messages(session_id, created_at, sequence)
+        `);
+        changed = true;
+      }
+      if (!this.indexExists('idx_cowork_messages_session_sequence_created')) {
+        this.db.run(`
+          CREATE INDEX IF NOT EXISTS idx_cowork_messages_session_sequence_created
+          ON cowork_messages(session_id, sequence, created_at)
+        `);
+        changed = true;
+      }
+      if (changed) {
+        this.saveDb();
+      }
+    } catch (error) {
+      console.warn('[CoworkStore] Failed to build cowork_messages transcript-order indexes:', error);
+    }
+  }
+
   private ensureCoworkMessageHealColumns(): void {
     if (!this.tableExists('cowork_messages')) {
       return;
@@ -4125,6 +4174,19 @@ export class CoworkStore implements MemoryBackend {
     return deduped;
   }
 
+  /**
+   * The full transcript, oldest first, in the canonical order every transcript
+   * consumer shares: (created_at, sequence, ROWID). Spelled without the
+   * COALESCE(sequence, 0) it used to carry — that expression forced SQLite to
+   * sort every row of the session (a real chat session reaches five figures),
+   * while idx_cowork_messages_session_created_sequence carries exactly this key
+   * and serves the read as a plain index scan.
+   *
+   * The two spellings are interchangeable: sequence is never 0 or negative
+   * (every insert path assigns MAX(sequence) + 1), so COALESCE(sequence, 0)
+   * only ever rewrites NULL — and a NULL sorts first in ASC either way. NULL
+   * sequence rows can only come from a database predating the column.
+   */
   private getSessionMessages(sessionId: string): CoworkMessage[] {
     const rows = this.getAll<CoworkMessageRow>(`
       SELECT id, type, content, metadata, created_at, sequence
@@ -4132,7 +4194,7 @@ export class CoworkStore implements MemoryBackend {
       WHERE session_id = ?
       ORDER BY
         created_at ASC,
-        COALESCE(sequence, 0) ASC,
+        sequence ASC,
         ROWID ASC
     `, [sessionId]);
 
@@ -4278,6 +4340,17 @@ export class CoworkStore implements MemoryBackend {
 
   /**
    * Newest-first SQL page. `hasMoreBefore` means older rows exist beyond this chunk.
+   *
+   * Ordering is the sequence-led newest-first order, spelled without the
+   * COALESCE(sequence, 0) it used to carry: that expression made every page a
+   * temp B-tree sort of the whole session, while
+   * idx_cowork_messages_session_sequence_created carries exactly this key
+   * (sequence, then created_at, then the implicit rowid) and serves it as a
+   * backward index scan. NULL sequences — rows written before the column
+   * existed, and only those: every insert path assigns MAX(sequence) + 1 —
+   * still sort last, which is what COALESCE(sequence, 0) achieved by mapping
+   * them onto key 0. The index is not forced: without it the planner falls back
+   * to the sort, which is the old shape rather than an error.
    */
   private querySessionMessageRows(
     sessionId: string,
@@ -4294,11 +4367,11 @@ export class CoworkStore implements MemoryBackend {
 
     const rows = this.getAll<CoworkMessageRow>(`
       SELECT id, type, content, metadata, created_at, sequence
-      FROM cowork_messages INDEXED BY idx_cowork_messages_session_sequence
+      FROM cowork_messages
       WHERE session_id = ?
       ${beforeClause}
       ORDER BY
-        COALESCE(sequence, 0) DESC,
+        sequence DESC,
         created_at DESC,
         ROWID DESC
       LIMIT ?
