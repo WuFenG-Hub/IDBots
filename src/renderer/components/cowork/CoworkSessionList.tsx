@@ -49,10 +49,11 @@ interface CoworkSessionListProps {
   /**
    * Auto-created sessions (long-term task runs, orchestration runs, scheduled
    * runs) for the local-chats list. They are NEVER mixed into the main list:
-   * they render as one collapsed "Auto Tasks" folder pinned to the bottom,
-   * independent of the view mode, so the rows the human started stay on top.
-   * Only the local tab passes this; every other caller leaves it off and its
-   * output is unchanged.
+   * they render as one collapsed "Auto Tasks" folder directly under the pinned
+   * section and above the content groups, independent of the view mode — tucked
+   * out of the human conversations, but visible at a glance instead of buried
+   * at the bottom. Only the local tab passes this; every other caller leaves
+   * it off and its output is unchanged.
    */
   autoSessions?: CoworkSessionSummary[];
   /** Online-chats (A2A) Bot selector — that list's ONLY selector. When on, one
@@ -337,8 +338,9 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
 
   // The Auto Tasks fold: machine-started runs, ordered like the main list
   // (pinned first, then the active sort mode) inside ONE flat section that
-  // always sits last, whatever the view mode. A pin keeps its place inside the
-  // fold — it never rescues a background run back into the human list.
+  // always sits directly under the pinned block, whatever the view mode. A pin
+  // keeps its place inside the fold — it never rescues a background run back
+  // into the human list.
   const sortedAutoSessions = useMemo(() => {
     const list = autoSessions ?? [];
     if (list.length === 0) return [];
@@ -409,8 +411,10 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     );
 
   /**
-   * The Auto Tasks fold. Rendered last in every view mode, and only when there
-   * is something to fold — an empty folder would be noise of its own. The header
+   * The Auto Tasks fold. Rendered in every view mode directly under the pinned
+   * block (above the timeline/project groups, where it is seen without
+   * scrolling), and only when there is something to fold — an empty folder
+   * would be noise of its own. The header
    * is styled like the project groups' folder header (subdued secondary text +
    * folder glyph) so it reads as a container, not as a conversation, and carries
    * only label + count + the fold's newest activity time: an unread number here
@@ -503,6 +507,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     return (
       <div ref={rootRef}>
         {renderPinnedSection(timelineGrouped.pinned)}
+        {renderAutoTasksSection()}
         {timelineGrouped.groups.map((group) => {
           if (!revealBudgetLeft()) return null;
           return (
@@ -514,7 +519,6 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
             </section>
           );
         })}
-        {renderAutoTasksSection()}
       </div>
     );
   }
@@ -524,6 +528,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     return (
       <div ref={rootRef}>
         {renderPinnedSection(projectGrouped.pinned)}
+        {renderAutoTasksSection()}
         {projectGrouped.groups.map((group) => {
           if (!revealBudgetLeft()) return null;
           const collapsed = collapsedGroupKeys.has(group.key);
@@ -573,7 +578,6 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
             </section>
           );
         })}
-        {renderAutoTasksSection()}
       </div>
     );
   }
@@ -603,8 +607,13 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
 
   return (
     <div ref={rootRef} className="space-y-1">
-      {sortedSessions.map(renderItem)}
+      {/* Flat mode has no group headers, so the fold's anchor is the pinned
+       * block itself: pinned rows first, then the fold, then the rest —
+       * the same "under pinned, above everything else" spot the grouped
+       * views give it. */}
+      {sortedSessions.filter((session) => session.pinned).map(renderItem)}
       {renderAutoTasksSection()}
+      {sortedSessions.filter((session) => !session.pinned).map(renderItem)}
     </div>
   );
 };
