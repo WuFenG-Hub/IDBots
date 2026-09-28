@@ -115,6 +115,19 @@ export class DshKernel {
   /** Diagnostics/tests: how many times the runtime process was restarted. */
   restartCount = 0
 
+  /**
+   * Timestamp of the newest notification this kernel's pump observed (any
+   * session event, status, subagent lifecycle edge — host-turn OR
+   * kernel-initiated). The turn hub uses it as the "something is still
+   * running on this process" signal that controller-only accounting cannot
+   * provide: continuable-subagent turns have no host controller, so a
+   * drained/superseded kernel must not be retired (nor in-place-restarted
+   * on a config change) while notifications keep flowing (2026-09-28
+   * session cluster 540635be/cf70e758/406a8208: two runtimes exited under
+   * in-flight turns, exit 0, zero close-side log trails).
+   */
+  lastNotificationAt = 0
+
   /** In-flight boot promise shared by concurrent ensureRuntime callers. The
    * turn hub serializes its own calls through a per-slot chain, but the crash
    * respawn-once path restarts outside that chain, and `this.client` only
@@ -128,14 +141,18 @@ export class DshKernel {
   /** Generate config, spawn the runtime, and perform the wire handshake.
    * Concurrent calls coalesce onto one boot (first caller's config); callers
    * that queued behind the boot re-enter the reuse branch afterwards, so a
-   * config change still takes effect through the normal restart path. */
+   * config change still takes effect through the normal restart path.
+   *
+   * Contract (kill-safety): with a live runtime this NEVER restarts the
+   * process on its own — it reuses it whatever the config says. Applying a
+   * config change is the turn hub's decision (in-place restart only when
+   * truly idle, successor+drain otherwise); the silent kernel-level restart
+   * this method used to perform killed in-flight turns with no log whenever
+   * the incoming config JSON drifted from the recorded one. */
   async ensureRuntime(config: DshRuntimeConfigInput): Promise<void> {
     if (this.closed) throw new Error('DshKernel: closed')
     if (this.client) {
-      // Reuse the live runtime; regenerate config only when inputs changed.
-      if (this.runtimeConfig && !shallowEqualConfig(this.runtimeConfig, config)) {
-        await this.restart(config)
-      }
+      // Reuse the live runtime. Config application is hub-owned.
       return
     }
     if (this.ensureInFlight) {
@@ -149,6 +166,20 @@ export class DshKernel {
     } finally {
       this.ensureInFlight = null
     }
+  }
+
+  /**
+   * True when a notification arrived within the grace window — i.e. the
+   * process showed observable activity too recently to be retired or
+   * restarted underneath. Kernel-side turns stream constantly while they
+   * work; total silence for the whole window means nothing observable is
+   * running (long provider-side waits still stream status/usage edges, and
+   * host-controller turns are protected separately by the hub's controller
+   * accounting).
+   */
+  hasRecentActivity(graceMs: number): boolean {
+    if (this.lastNotificationAt <= 0) return false
+    return Date.now() - this.lastNotificationAt < Math.max(0, graceMs)
   }
 
   /** Spawn the runtime process and complete the wire handshake — the
@@ -228,6 +259,7 @@ export class DshKernel {
 
     this.client = client
     this.closed = false
+    this.lastNotificationAt = Date.now()
     this.pump = this.pumpNotifications(client)
     this.opts.log?.('info', 'dshKernel.ensureRuntime', { configPath, providers: config.providers.length })
   }
@@ -443,6 +475,9 @@ export class DshKernel {
       const subscription = client.subscribe()
       for (;;) {
         const notification = await subscription.next()
+        // Every observed notification is process liveness, host-side turn or
+        // kernel-initiated alike — feeds hasRecentActivity (see field docs).
+        this.lastNotificationAt = Date.now()
         const { method, params } = notification
         if (method === 'session.event') {
           // One bad handler must never kill the whole event stream: contain
@@ -583,6 +618,3 @@ export class DshKernel {
   }
 }
 
-function shallowEqualConfig(a: DshRuntimeConfigInput, b: DshRuntimeConfigInput): boolean {
-  return JSON.stringify(a) === JSON.stringify(b)
-}
