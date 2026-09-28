@@ -144,6 +144,13 @@ const coworkSlice = createSlice({
 
     setCurrentSession(state, action: PayloadAction<CoworkSession | null>) {
       let nextSession = action.payload;
+      // Every session kind now arrives as a bounded newest-messages window plus
+      // the cursor for the pages below it (coworkStore getSessionView), so a
+      // refresh mid-conversation must not drop what the user already loaded:
+      // merge into the transcript held here — newer ids appended, ids the window
+      // does not carry left as they are, and the local paging cursor kept, since
+      // it still describes where this list stops. A payload without
+      // messageHistory is a full read (fork, rewind) and replaces the list.
       if (
         nextSession
         && nextSession.messageHistory
