@@ -246,6 +246,7 @@ export async function runOrchestratorSkillTurn(
     metabotId ?? null
   );
   const sessionId = session.id;
+  store.setSessionAutoOrigin(sessionId, 'orchestration');
   claimManagedOrchestratorSession(runner, sessionId, store);
 
   try {

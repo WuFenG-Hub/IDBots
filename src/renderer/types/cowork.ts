@@ -40,8 +40,13 @@ export type CoworkMessageOrigin =
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 
 // Session type: standard = human↔MetaBot, a2a = MetaBot↔MetaBot,
-// browser = Bot Browser co-work panel, group_task = group task chat channel
-export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task';
+// browser = Bot Browser co-work panel, group_task = group task chat channel,
+// longterm = [长期] long-term task session (auto-created; see CoworkSessionSummary.autoOrigin)
+export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task' | 'longterm';
+
+// Why the app created a session on its own (mirrors the auto_origin column).
+// null/undefined = human-initiated.
+export type CoworkSessionAutoOrigin = 'longterm' | 'orchestration' | 'schedule';
 
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 
@@ -378,6 +383,8 @@ export interface CoworkSession {
   browserUri?: string | null;
   /** Bot Browser context: title of the tab this session is about (browser sessions only) */
   browserTitle?: string | null;
+  /** Auto-origin marker (see CoworkSessionSummary.autoOrigin); null = human-initiated. */
+  autoOrigin?: CoworkSessionAutoOrigin | null;
   /** Local MetaBot's display name */
   metabotName?: string | null;
   /** Local MetaBot's avatar data URL */
@@ -813,6 +820,12 @@ export interface CoworkSessionSummary {
   projectId?: string | null;
   /** Working directory the session runs in; used by the sidebar's by-project grouping. */
   cwd?: string | null;
+  /**
+   * Set when the app created this session on its own (long-term task run,
+   * orchestration/delegation run, scheduled-task run); null/undefined =
+   * human-initiated. The sidebar folds non-null rows into "Auto Tasks".
+   */
+  autoOrigin?: CoworkSessionAutoOrigin | null;
 }
 
 // The New Task composer's working-directory choice. `project` and `folder` both

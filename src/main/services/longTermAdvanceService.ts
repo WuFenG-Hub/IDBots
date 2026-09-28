@@ -1,4 +1,4 @@
-import type { CoworkExecutionMode } from '../coworkStore';
+import type { CoworkExecutionMode, CoworkSessionAutoOrigin } from '../coworkStore';
 import type { LongTermTaskStore } from '../longTermTaskStore';
 import type { LongTermSubtask, LongTermTaskDetail } from '../../renderer/types/longTermTask';
 
@@ -68,6 +68,8 @@ export interface LongTermAdvanceSessionStore {
     sessionType: string,
   ): { id: string };
   updateSession(id: string, patch: { status?: string }): unknown;
+  /** Stamp the auto-origin marker so the sidebar can fold this session away. */
+  setSessionAutoOrigin(id: string, autoOrigin: CoworkSessionAutoOrigin): void;
   addMessage(id: string, message: { type: string; content: string; metadata?: Record<string, unknown> }): unknown;
   getSession(id: string): unknown;
   /** Message count of a session — the rotation budget check (optional). */
@@ -605,6 +607,7 @@ export class LongTermAdvanceService {
         'longterm',
       );
       sessionId = session.id;
+      coworkStore.setSessionAutoOrigin(sessionId, 'longterm');
       this.deps.store().bindSession(current.id, sessionId, 'system');
       if (rotation) {
         this.deps.store().addNote(

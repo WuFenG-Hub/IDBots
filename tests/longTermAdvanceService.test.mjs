@@ -21,7 +21,7 @@ const HOUR = 3_600_000;
 function makeStubCowork() {
   const sessions = new Map();
   const counts = new Map();
-  const calls = { create: [], update: [], message: [] };
+  const calls = { create: [], update: [], message: [], autoOrigin: [] };
   return {
     calls,
     counts,
@@ -32,6 +32,7 @@ function makeStubCowork() {
       return { id };
     },
     updateSession(id, patch) { calls.update.push({ id, patch }); },
+    setSessionAutoOrigin(id, autoOrigin) { calls.autoOrigin.push({ id, autoOrigin }); },
     addMessage(id, msg) { counts.set(id, (counts.get(id) ?? 0) + 1); calls.message.push({ id, msg }); },
     getSession(id) { return sessions.get(id) ?? null; },
     countSessionMessages(id) { return counts.get(id) ?? 0; },

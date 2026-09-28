@@ -63,6 +63,7 @@ tests/*
 !tests/trackedTaskBoard.test.mjs
 !tests/metaAppBundleEntry.test.mjs
 !tests/orchestrationOriginMigration.test.mjs
+!tests/coworkSessionAutoOrigin.test.mjs
 !tests/longTermTaskStore.test.mjs
 !tests/twinDelegationAnchor.test.mjs
 !tests/longTermTaskAgentTools.test.mjs
