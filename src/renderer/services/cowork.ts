@@ -137,6 +137,11 @@ class CoworkService {
                 metabotId: s.metabotId ?? null,
                 metabotName: s.metabotName ?? null,
                 metabotAvatar: s.metabotAvatar ?? null,
+                // Stream-created background sessions (long-term task runs,
+                // orchestration runs, scheduled runs) must arrive with their
+                // fold marker: without it a machine-started session would pop
+                // into the human list until the next full refresh.
+                autoOrigin: s.autoOrigin ?? null,
                 serviceOrderSummary: s.serviceOrderSummary ?? null,
               }));
             }

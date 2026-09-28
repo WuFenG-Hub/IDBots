@@ -33,6 +33,7 @@ import type {
   SessionSortMode,
   SessionViewMode,
 } from '../utils/sessionViewGrouping';
+import { splitSessionsByAutoOrigin } from '../utils/sessionAutoGrouping';
 import type { SettingsOpenOptions } from './Settings';
 
 interface SidebarProps {
@@ -209,6 +210,18 @@ const Sidebar: React.FC<SidebarProps> = ({
       group: homeSessions.filter((session) => session.sessionType === 'group_task'),
     };
   }, [homeSessions]);
+  // The local tab's list is split in two: the human's own conversations stay in
+  // the main list, while everything the app started on its own (autoOrigin set)
+  // folds into the collapsed "Auto Tasks" section at the bottom. Search still
+  // sees every session, folded or not.
+  const { humanSessions: localHumanSessions, autoSessions: localAutoSessions } = useMemo(
+    () => splitSessionsByAutoOrigin(sessionGroups.local),
+    [sessionGroups.local],
+  );
+  const localListSessions = taskRecordTab === 'local' ? localHumanSessions : sessionGroups[taskRecordTab];
+  // The tab-scoped list the search modal searches: intentionally the WHOLE
+  // bucket (folded auto sessions included), so a hidden background run is still
+  // findable by name.
   const tabbedSessions = sessionGroups[taskRecordTab];
   // Locally-stored tasks with at least one remote (OpenTeam invitee) seat —
   // their records rows carry the Open Team type badge instead of the local one.
@@ -216,16 +229,19 @@ const Sidebar: React.FC<SidebarProps> = ({
     () => new Set<number>(splitGroupTasksByOpenTeam(groupTasks).openTeam.map((task) => task.id)),
     [groupTasks],
   );
-  // Per-tab totals and unread counts, shown on the tab buttons.
+  // Per-tab totals and unread counts, shown on the tab buttons. The local tab
+  // counts human sessions only: the folded auto sessions are background runs,
+  // and letting them light the tab's red dot would be exactly the noise the
+  // fold exists to remove (the fold header carries their own unread instead).
   const tabStats = useMemo(() => {
     const unreadSet = new Set(unreadSessionIds);
     const unreadOf = (list: CoworkSessionSummary[]) => list.filter((session) => unreadSet.has(session.id)).length;
     return {
-      local: { count: sessionGroups.local.length, unread: unreadOf(sessionGroups.local) },
+      local: { count: localHumanSessions.length, unread: unreadOf(localHumanSessions) },
       a2a: { count: sessionGroups.a2a.length, unread: unreadOf(sessionGroups.a2a) },
       group: { count: groupTasks.length + openTeamCollabs.length, unread: unreadOf(sessionGroups.group) },
     };
-  }, [sessionGroups, unreadSessionIds, groupTasks, openTeamCollabs]);
+  }, [sessionGroups, localHumanSessions, unreadSessionIds, groupTasks, openTeamCollabs]);
   const isMac = window.electron.platform === 'darwin';
   const hasRunningScheduledTask = scheduledTasks.some(
     (task) => task.enabled && task.state.runningAtMs !== null && task.state.lastStatus === 'running'
@@ -285,12 +301,13 @@ const Sidebar: React.FC<SidebarProps> = ({
     setIsViewMenuOpen(false);
   }, [taskRecordTab]);
 
-  // The toolbar row (and its filter & sort menu) only exists while the local
-  // list is non-empty.
+  // The toolbar row (and its filter & sort menu) only exists while the human
+  // list is non-empty: over an empty list (only folded background runs left) it
+  // would control nothing the user can see.
   useEffect(() => {
-    if (sessionGroups.local.length > 0) return;
+    if (localHumanSessions.length > 0) return;
     setIsViewMenuOpen(false);
-  }, [sessionGroups.local.length]);
+  }, [localHumanSessions.length]);
 
   useEffect(() => {
     if (!isCollapsed) return;
@@ -614,7 +631,7 @@ const Sidebar: React.FC<SidebarProps> = ({
           {/* Toolbar row above the local list: current view label on the
               left, filter & sort + batch archive on the right. Fixed with the
               header; only the list scrolls. */}
-          {taskRecordTab === 'local' && sessionGroups.local.length > 0 && (
+          {taskRecordTab === 'local' && localHumanSessions.length > 0 && (
             <div className="flex items-center justify-between gap-1.5 px-3 pb-1.5 shrink-0">
               <span className="min-w-0 truncate text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 {i18nService.t(sessionViewMode === 'project' ? 'sessionViewByProject' : 'sessionViewTimeline')}
@@ -715,7 +732,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               )
             ) : (
               <CoworkSessionList
-                sessions={tabbedSessions}
+                sessions={localListSessions}
                 currentSessionId={currentSessionId}
                 onSelectSession={handleSelectSession}
                 onDeleteSession={handleDeleteSession}
@@ -727,6 +744,10 @@ const Sidebar: React.FC<SidebarProps> = ({
                 onToggleSessionSelected={handleToggleBatchSelected}
                 viewMode={taskRecordTab === 'local' ? sessionViewMode : undefined}
                 sortMode={taskRecordTab === 'local' ? sessionSortMode : undefined}
+                /** Local chats: the machine-started runs (long-term task,
+                 * orchestration, scheduled) fold into one collapsed folder at
+                 * the bottom instead of mixing into the human list. */
+                autoSessions={taskRecordTab === 'local' ? localAutoSessions : undefined}
                 /** Online chats: the Bot selector is this list's only
                  * selector, so it is switched on here — nothing else changes. */
                 botSelector={taskRecordTab === 'a2a'}

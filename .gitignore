@@ -64,6 +64,8 @@ tests/*
 !tests/metaAppBundleEntry.test.mjs
 !tests/orchestrationOriginMigration.test.mjs
 !tests/coworkSessionAutoOrigin.test.mjs
+!tests/sessionAutoGrouping.test.ts
+!tests/coworkUnreadAutoOrigin.test.ts
 !tests/longTermTaskStore.test.mjs
 !tests/twinDelegationAnchor.test.mjs
 !tests/longTermTaskAgentTools.test.mjs

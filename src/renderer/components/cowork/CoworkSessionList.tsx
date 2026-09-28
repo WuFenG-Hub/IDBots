@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import type { CoworkSessionSummary } from '../../types/cowork';
-import CoworkSessionItem, { SessionAvatarCircle } from './CoworkSessionItem';
+import CoworkSessionItem, { SessionAvatarCircle, formatRelativeTime } from './CoworkSessionItem';
 import BotSelectorPopover from './BotSelectorPopover';
 import { i18nService } from '../../services/i18n';
 import {
@@ -13,10 +13,16 @@ import {
   groupSessionsByTimeline,
   sessionBotKey,
   shouldShowBotSelector,
+  sortSessionsByMode,
   unreadOutsideBotSelection,
   type SessionSortMode,
   type SessionViewMode,
 } from '../../utils/sessionViewGrouping';
+import {
+  AUTO_TASKS_EXPANDED_STORAGE_KEY,
+  parseAutoTasksExpandedPreference,
+  serializeAutoTasksExpandedPreference,
+} from '../../utils/sessionAutoGrouping';
 import { ChevronDownIcon, FolderIcon } from '@heroicons/react/24/outline';
 
 interface CoworkSessionListProps {
@@ -38,6 +44,15 @@ interface CoworkSessionListProps {
   viewMode?: SessionViewMode;
   /** Ordering within the flat list and inside every group. */
   sortMode?: SessionSortMode;
+  /**
+   * Auto-created sessions (long-term task runs, orchestration runs, scheduled
+   * runs) for the local-chats list. They are NEVER mixed into the main list:
+   * they render as one collapsed "Auto Tasks" folder pinned to the bottom,
+   * independent of the view mode, so the rows the human started stay on top.
+   * Only the local tab passes this; every other caller leaves it off and its
+   * output is unchanged.
+   */
+  autoSessions?: CoworkSessionSummary[];
   /** Online-chats (A2A) Bot selector — that list's ONLY selector. When on, one
    * avatar-led control renders above the flat list (BotSelectorPopover: avatar +
    * current value + ▾, no "Bot:" label), listing 全部 and one entry per local bot
@@ -57,6 +72,16 @@ interface CoworkSessionListProps {
 const groupHeaderLabelClass =
   'text-[11px] font-semibold tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary';
 
+/** Remembered open/closed state of the Auto Tasks fold, read once on mount. */
+const loadAutoTasksExpanded = (): boolean => {
+  try {
+    return parseAutoTasksExpandedPreference(window.localStorage.getItem(AUTO_TASKS_EXPANDED_STORAGE_KEY));
+  } catch {
+    // localStorage unavailable; fall through to the collapsed default.
+  }
+  return false;
+};
+
 const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
   sessions,
   currentSessionId,
@@ -71,6 +96,7 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
   viewMode,
   sortMode = 'updatedAt',
   botSelector = false,
+  autoSessions,
 }) => {
   const unreadSessionIds = useSelector((state: RootState) => state.cowork.unreadSessionIds);
   const unreadSessionIdSet = useMemo(() => new Set(unreadSessionIds), [unreadSessionIds]);
@@ -78,6 +104,23 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
   // Project-group collapse state lives here (not in the parent) so the search
   // modal and A2A tab, which render flat, never see it. Defaults to expanded.
   const [collapsedGroupKeys, setCollapsedGroupKeys] = useState<Set<string>>(new Set);
+  // The Auto Tasks fold, unlike the project groups, remembers its state across
+  // restarts: it holds background runs, so it opens collapsed every launch.
+  const [isAutoTasksExpanded, setIsAutoTasksExpanded] = useState<boolean>(loadAutoTasksExpanded);
+  const toggleAutoTasksExpanded = () => {
+    setIsAutoTasksExpanded((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(
+          AUTO_TASKS_EXPANDED_STORAGE_KEY,
+          serializeAutoTasksExpandedPreference(next),
+        );
+      } catch {
+        // localStorage unavailable; the fold still toggles for this session.
+      }
+      return next;
+    });
+  };
   const [pickedBotKey, setPickedBotKey] = useState<string | null>(null);
   // undefined = the Twin lookup has not settled yet, null = no Twin on this
   // install. The control waits for the answer: while it is pending the row is
@@ -173,6 +216,29 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
     [visibleSessions, viewMode, sortMode],
   );
 
+  // The Auto Tasks fold: machine-started runs, ordered like the main list
+  // (pinned first, then the active sort mode) inside ONE flat section that
+  // always sits last, whatever the view mode. A pin keeps its place inside the
+  // fold — it never rescues a background run back into the human list.
+  const sortedAutoSessions = useMemo(() => {
+    const list = autoSessions ?? [];
+    if (list.length === 0) return [];
+    return [
+      ...sortSessionsByMode(list.filter((session) => session.pinned), sortMode),
+      ...sortSessionsByMode(list.filter((session) => !session.pinned), sortMode),
+    ];
+  }, [autoSessions, sortMode]);
+  const autoUnreadCount = useMemo(
+    () => sortedAutoSessions.filter((session) => unreadSessionIdSet.has(session.id)).length,
+    [sortedAutoSessions, unreadSessionIdSet],
+  );
+  // Newest activity in the fold (updatedAt is the session's last-activity
+  // anchor, the same value the row's own timestamp shows).
+  const autoLatestActivityAt = useMemo(
+    () => sortedAutoSessions.reduce((latest, session) => Math.max(latest, session.updatedAt), 0),
+    [sortedAutoSessions],
+  );
+
   const toggleGroupCollapsed = (key: string) => {
     setCollapsedGroupKeys((prev) => {
       const next = new Set(prev);
@@ -184,16 +250,6 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
       return next;
     });
   };
-
-  if (visibleSessions.length === 0) {
-    return (
-      <div className="text-center py-8">
-        <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
-          {emptyText ?? i18nService.t('coworkNoSessions')}
-        </p>
-      </div>
-    );
-  }
 
   const renderItem = (session: CoworkSessionSummary) => (
     <CoworkSessionItem
@@ -220,6 +276,50 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
           {i18nService.t('coworkPinnedGroup')}
         </div>
         {pinned.map(renderItem)}
+      </section>
+    );
+
+  /**
+   * The Auto Tasks fold. Rendered last in every view mode, and only when there
+   * is something to fold — an empty folder would be noise of its own. The header
+   * is styled like the project groups' folder header (subdued secondary text +
+   * folder glyph) so it reads as a container, not as a conversation; the row
+   * itself carries the count, the unread of the folded rows (the tab's own dot
+   * counts human sessions only), and the fold's newest activity time.
+   */
+  const renderAutoTasksSection = () =>
+    sortedAutoSessions.length > 0 && (
+      <section data-testid="auto-tasks-section">
+        <button
+          type="button"
+          aria-expanded={isAutoTasksExpanded}
+          onClick={toggleAutoTasksExpanded}
+          title={i18nService.t('coworkAutoTasksCount').replace('{count}', String(sortedAutoSessions.length))}
+          className={`flex w-full items-center gap-1.5 px-2.5 pb-1 pt-2.5 text-left transition-colors hover:text-claude-text dark:hover:text-claude-darkText ${groupHeaderLabelClass}`}
+        >
+          <ChevronDownIcon
+            className={`h-3 w-3 flex-shrink-0 transition-transform duration-150 ${isAutoTasksExpanded ? '' : '-rotate-90'}`}
+          />
+          <FolderIcon className="h-3.5 w-3.5 flex-shrink-0" />
+          <span className="truncate">{i18nService.t('coworkAutoTasks')}</span>
+          <span className="flex-shrink-0 font-normal tabular-nums">{sortedAutoSessions.length}</span>
+          {autoUnreadCount > 0 && (
+            <span
+              data-testid="auto-tasks-unread"
+              aria-label={i18nService.t('coworkAutoTasksUnread').replace('{count}', String(autoUnreadCount))}
+              className="inline-flex flex-shrink-0 items-center gap-1 text-red-500"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-red-500" aria-hidden />
+              <span className="font-normal tabular-nums">{autoUnreadCount}</span>
+            </span>
+          )}
+          {autoLatestActivityAt > 0 && (
+            <span className="ml-auto flex-shrink-0 font-normal tabular-nums" title={formatRelativeTime(autoLatestActivityAt).full}>
+              {formatRelativeTime(autoLatestActivityAt).compact}
+            </span>
+          )}
+        </button>
+        {isAutoTasksExpanded && sortedAutoSessions.map(renderItem)}
       </section>
     );
 
@@ -260,6 +360,22 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
     )
   ) : null;
 
+  // An empty human list still renders the fold when background runs exist:
+  // showing "no chats yet" above a folder of them would be a lie. Every caller
+  // that passes no autoSessions (A2A tab, search modal) keeps the old empty
+  // state exactly — the fold belongs to the local list only, so the selector
+  // path never counts it either.
+  const hasAutoTasks = sortedAutoSessions.length > 0 && !showBotSelector;
+  if (visibleSessions.length === 0 && !hasAutoTasks) {
+    return (
+      <div className="text-center py-8">
+        <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {emptyText ?? i18nService.t('coworkNoSessions')}
+        </p>
+      </div>
+    );
+  }
+
   // Timeline view: static time headers (never collapsible), pinned first.
   if (timelineGrouped) {
     return (
@@ -273,6 +389,7 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
             {group.sessions.map(renderItem)}
           </section>
         ))}
+        {renderAutoTasksSection()}
       </div>
     );
   }
@@ -330,6 +447,7 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
             </section>
           );
         })}
+        {renderAutoTasksSection()}
       </div>
     );
   }
@@ -360,6 +478,7 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
   return (
     <div className="space-y-1">
       {sortedSessions.map(renderItem)}
+      {renderAutoTasksSection()}
     </div>
   );
 };
