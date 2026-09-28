@@ -74,3 +74,23 @@ test('start/stop are idempotent', () => {
   hb.stop();
   assert.equal(hb.isRunning(), false);
 });
+
+test('jitter: an opted-in handler is due immediately but runs after the delay', async () => {
+  const calls = [];
+  // Deterministic random seam: 0.5 * 60ms = a 30ms delay.
+  const hb = new HeartbeatService({ emitLog: () => {}, random: () => 0.5 });
+  hb.registerHandler({ name: 'jittered', intervalMs: 1_000, jitterMs: 60, run: (nowMs) => { calls.push(nowMs); } });
+
+  assert.deepEqual(hb.runDueHandlers(0), ['jittered'], 'reported due at schedule time');
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(calls, [], 'the run is deferred by the jitter');
+  assert.deepEqual(hb.runDueHandlers(500), [], 'not re-scheduled while the delayed run is pending');
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.deepEqual(calls, [0], 'ran once, with the due instant');
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(hb.runDueHandlers(2_000), ['jittered'], 'due again after the interval');
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.deepEqual(calls, [0, 2_000]);
+  hb.stop();
+});

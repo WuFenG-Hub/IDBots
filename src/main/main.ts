@@ -3474,16 +3474,21 @@ const startSqliteDaemons = (): void => {
   // MetaTask chain sweep (5 min) + watch (10 min): the sweep keeps the local
   // projection warm; watch turns local-roster-relevant changes into alerts
   // surfaced on the MetaTask tab. Both are local/cheap; no LLM escalation.
+  // Jitter (≤45s / ≤90s) spreads the manapi pool walks of many instances; the
+  // sweep itself bypasses the refresher's tool-coalescing window (this cadence
+  // is already spaced, and a burst of tool writes must not defer it).
   getHeartbeatService().registerHandler({
     name: 'metatask.refresh',
     intervalMs: 5 * 60_000,
+    jitterMs: 45_000,
     run: async () => {
-      await getMetaTaskRefresher().refreshOnce('heartbeat-refresh');
+      await getMetaTaskRefresher().refreshOnce('heartbeat-refresh', { bypassMinInterval: true });
     },
   });
   getHeartbeatService().registerHandler({
     name: 'metatask.watch',
     intervalMs: 10 * 60_000,
+    jitterMs: 90_000,
     run: (nowMs) => {
       getMetaTaskWatchService().run(nowMs);
     },
@@ -16930,6 +16935,11 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
           providerDiscoveryService = null;
         }
         idchatPresenceService = null;
+      },
+      stopMetaTaskSweeps: () => {
+        // Drops a pending coalesced MetaTask sweep (its timer is unref'd, so
+        // this is tidiness rather than a shutdown blocker).
+        metaTaskRefresher?.dispose();
       },
       deactivateGroupChatTasks: () => {
         try {
