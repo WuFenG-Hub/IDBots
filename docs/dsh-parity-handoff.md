@@ -127,6 +127,15 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
    the non-user `aborted` settlement lands idle + a localized diagnostic
    (metadata `dshTurnStalled` + i18n key `coworkDshTurnStalled`), never a
    hollow completed. App-side E2E with a wedged-provider mock fixture.
+   Adaptive since `fix/cowork-stall-watchdog` (2026-09-28 session 2bcfbb63:
+   three 10-min cancellations of healthy GLM turns whose provider-side
+   prefill/queueing produced zero host events; every re-send died at the
+   same ceiling): the effective deadline is `computeDshStallDeadlineMs` =
+   base + 2 min per full 10k prompt tokens over 32k (cap +20 min) + 10 min
+   per prior stall cancellation of the session (strike ladder, cleared on
+   any normal settlement), clamped to DSH_TURN_STALL_ABSOLUTE_CAP_MS
+   (60 min). In-flight tool calls and pending dialogs keep extending as
+   before; the tool-call hard cap is unchanged.
 
 **Done in session 4 (branch `feat/dsh-p2-parity`):**
 
