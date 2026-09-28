@@ -62,7 +62,7 @@ const buildForeignTask = () => {
   return { events: [tree, task], treePinId, rootPinId };
 };
 
-const buildHarness = (initialEvents) => {
+const buildHarness = (initialEvents, over = {}) => {
   const state = { events: [...initialEvents] };
   const writes = [];
   const createPin = async (metabotId, metaidData, options) => {
@@ -71,7 +71,8 @@ const buildHarness = (initialEvents) => {
     return { pinId, txids: [`tx${writes.length}`], totalCost: 0 };
   };
   const refresher = {
-    board: () => null,
+    // A synthetic board lets read tools be tested without a projection store.
+    board: () => over.board ?? null,
     detail: (rootPinId) => {
       try {
         // Mirrors the refresher: roster pins travel with the event set.
@@ -648,4 +649,113 @@ test('metatask_publish_spec: pin:// script reference, campaign artifactPin shape
   assert.equal(legacyPayload.input, '');
   assert.equal(legacyPayload.output, '');
   assert.equal(legacyPayload.lang, 'bash');
+});
+
+// ── mid-task estimates surfaced by the read tools ────────────────────────────
+
+test('metatask_get: estimation block for an in-progress task, null once settled', async () => {
+  const reviewerA = 'idq1foreignrevieweraaa';
+  const reviewerB = 'idq1foreignreviewerbbb';
+  const { events, rootPinId } = buildForeignTask(); // r1:3000 aggregate, t1:7000 leaf, quorum 2
+  const claimT1 = ev('claim', { taskid: rootPinId, node: 't1' }, { author: FOREIGN_SUBMITTER, height: 189_910 });
+  const subT1 = ev(
+    'submission',
+    {
+      taskid: rootPinId,
+      node: 't1',
+      claimid: claimT1.pinId,
+      result: { type: 'triage' },
+      hash: '7'.repeat(64),
+      contentType: 'application/json;utf-8',
+      attachment: null,
+      childids: [],
+    },
+    { author: FOREIGN_SUBMITTER, height: 189_920 },
+  );
+  const passOnT1 = (author, height) =>
+    ev(
+      'verify',
+      { targetid: subT1.pinId, verdict: 'pass', method: 'replay pass', semantic_check: 'checked' },
+      { author, height },
+    );
+  const midTaskEvents = [...events, claimT1, subT1, passOnT1(reviewerA, 189_930), passOnT1(reviewerB, 189_931)];
+
+  const midTask = buildHarness(midTaskEvents);
+  const midRead = await midTask.handlers.metatask_get({ rootPinId });
+  assert.equal(midRead.isError, undefined, midRead.content?.[0]?.text);
+  const midDetail = JSON.parse(midRead.content[0].text);
+  assert.equal(midDetail.settlement, null);
+  assert.equal(midDetail.estimation.basis, 'weighted');
+  // t1 (7000bp) is the only verified node: submitter 5600, pool 1400 split
+  // equally between two reviewers with identical (1/1) accuracy histories.
+  assert.deepEqual(midDetail.estimation.shares, [
+    { metaId: FOREIGN_SUBMITTER, shareBP: 5600, from: { submittedBP: 5600, reviewedBP: 0 } },
+    { metaId: reviewerA, shareBP: 700, from: { submittedBP: 0, reviewedBP: 700 } },
+    { metaId: reviewerB, shareBP: 700, from: { submittedBP: 0, reviewedBP: 700 } },
+  ]);
+  assert.equal(midDetail.progress.verified, 1);
+
+  // Complete the task (root verified too): a manifest now exists and the
+  // estimate must not be surfaced alongside it.
+  const claimR1 = ev('claim', { taskid: rootPinId, node: 'r1' }, { author: FOREIGN_SUBMITTER, height: 189_940 });
+  const subR1 = ev(
+    'submission',
+    {
+      taskid: rootPinId,
+      node: 'r1',
+      claimid: claimR1.pinId,
+      result: { type: 'aggregate' },
+      hash: '8'.repeat(64),
+      contentType: 'application/json;utf-8',
+      attachment: null,
+      childids: [],
+    },
+    { author: FOREIGN_SUBMITTER, height: 189_941 },
+  );
+  const settled = buildHarness([
+    ...midTaskEvents,
+    claimR1,
+    subR1,
+    ev('verify', { targetid: subR1.pinId, verdict: 'pass', method: 'replay pass', semantic_check: 'checked' }, { author: reviewerA, height: 189_950 }),
+    ev('verify', { targetid: subR1.pinId, verdict: 'pass', method: 'replay pass', semantic_check: 'checked' }, { author: reviewerB, height: 189_951 }),
+  ]);
+  const settledRead = await settled.handlers.metatask_get({ rootPinId });
+  const settledDetail = JSON.parse(settledRead.content[0].text);
+  assert.ok(settledDetail.settlement, 'the completed task settles');
+  assert.equal(settledDetail.estimation, null, 'settlement.shares is the truth once a manifest exists');
+  assert.equal(settledDetail.settlement.shares.reduce((sum, share) => sum + share.shareBP, 0), 10000);
+});
+
+test('metatask_list: per-task myStats carries estShareBP', async () => {
+  const board = {
+    refresh: { lastRefreshAtMs: 1, lastOkAtMs: 1, lastError: null, boundaryBlock: 189_931, refreshing: false },
+    alerts: [],
+    tasks: [
+      {
+        rootPinId: 'task0000000009i0',
+        title: 'mid-task',
+        publisher: FOREIGN_PUBLISHER,
+        progress: { total: 2, verified: 1, claimed: 0, open: 1, disputed: 0 },
+        participantCount: 2,
+        myRoles: ['participant'],
+        myStats: { claimed: 1, submitted: 1, verified: 1, reviewVotes: 0, shareBP: 0, estShareBP: 4000 },
+        settlementFinalized: false,
+        freshness: { boundaryBlock: 189_931, evaluatedAtMs: 0, eventCount: 5 },
+      },
+    ],
+  };
+  const { handlers } = buildHarness([], { board });
+  const listed = await handlers.metatask_list({});
+  assert.equal(listed.isError, undefined, listed.content?.[0]?.text);
+  const payload = JSON.parse(listed.content[0].text);
+  assert.equal(payload.tasks.length, 1);
+  assert.deepEqual(payload.tasks[0].myStats, {
+    claimed: 1,
+    submitted: 1,
+    verified: 1,
+    reviewVotes: 0,
+    shareBP: 0,
+    estShareBP: 4000,
+  });
+  assert.equal(payload.tasks[0].settlementFinalized, false);
 });

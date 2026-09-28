@@ -1,5 +1,6 @@
 import type { SqliteDatabase as Database } from '../../sqliteTypes';
 import { H_ACT2, type MetaTaskCollectedPath } from './constants';
+import { estimateMetaTaskShares } from './estimate';
 import type {
   MetaTaskAlert,
   MetaTaskBoard,
@@ -346,6 +347,12 @@ export class MetaTaskProjectionStore {
             participant.effectiveClaims + participant.submissions + participant.verifiedContrib + participant.reviewVotes > 0
         );
         if (mine.length > 0) myRoles.push('participant');
+        // Mid-task "if it settled now" estimate: computed once per projection
+        // and reused for the roster's estShareBP (and any future per-participant
+        // surfacing). It equals the manifest exactly on a completed task, so
+        // estShareBP is safe to compute either way — the renderer prefers the
+        // settled shareBP when a manifest exists.
+        const estimation = estimateMetaTaskShares(projection);
         const myStats = mine.length
           ? {
               claimed: mine.reduce((sum, p) => sum + p.effectiveClaims, 0),
@@ -357,6 +364,9 @@ export class MetaTaskProjectionStore {
                     .filter((share) => roster.has(share.metaId))
                     .reduce((sum, share) => sum + share.shareBP, 0)
                 : 0,
+              estShareBP: estimation.shares
+                .filter((share) => roster.has(share.metaId))
+                .reduce((sum, share) => sum + share.shareBP, 0),
             }
           : null;
         tasks.push({

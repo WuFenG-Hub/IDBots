@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { canonJ, innerHash, outerHash, sha256Hex } = require('../dist-electron/main/services/metatask/canon.js');
 const { replayMetaTask } = require('../dist-electron/main/services/metatask/engine.js');
+const { estimateMetaTaskShares } = require('../dist-electron/main/services/metatask/estimate.js');
 const {
   collectMetaTaskEvents,
   normalizeChainEvent,
@@ -900,4 +901,214 @@ test('collector: sweeps the ten pools (roster included) at page size 100', async
   assert.equal(collected.events[0].path, 'metatask-roster');
   assert.deepEqual(collected.events[0].body.groups, [[S]]);
   assert.deepEqual(Object.keys(rosterPinsFromEvents(collected.events)), [rosterRawItem.id]);
+});
+
+// ── mid-task share estimates (estimate.ts) ───────────────────────────────────
+// estimateMetaTaskShares is a pure derivation over a projection: it must
+// reproduce the settlement formula exactly (so a completed task's estimate
+// equals its manifest) while also answering "if it settled now" mid-task.
+
+const normalizeShares = (shares) =>
+  [...shares]
+    .map((share) => ({ metaId: share.metaId, shareBP: share.shareBP, from: { ...share.from } }))
+    .sort((a, b) => (a.metaId < b.metaId ? -1 : 1));
+
+test('estimation: mid-task estimate matches the hand-computed split', () => {
+  const { tree, task, rootPinId } = buildTask({ quorum: 1 }); // r1:3000, t1:7000
+  const claim = claimOn(rootPinId, 't1', S, { height: 190_100 });
+  const sub = submitOn(rootPinId, 't1', claim.pinId, S, { height: 190_110 });
+  const pass = voteOn(sub.pinId, 'pass', R1, { height: 190_120 });
+  const projection = replayMetaTask([tree, task, claim, sub, pass], { rootPinId });
+
+  assert.equal(projection.nodeStates.t1.status, 'verified');
+  assert.equal(projection.nodeStates.r1.status, 'open');
+  assert.equal(projection.settlement, null, 'mid-task: the root is not verified yet');
+  assert.equal('estimation' in projection, false, 'replay output never carries estimation');
+
+  const estimation = estimateMetaTaskShares(projection);
+  assert.equal(estimation.basis, 'weighted');
+  // t1 carries 7000bp: submitter floor(7000*8000/10000) = 5600, pool 1400.
+  // R1's accuracy: 1 correct of 1 terminal -> floor(10000*2/3) = 6666, so the
+  // single reviewer takes the whole pool.
+  assert.deepEqual(estimation.shares, [
+    { metaId: S, shareBP: 5600, from: { submittedBP: 5600, reviewedBP: 0 } },
+    { metaId: R1, shareBP: 1400, from: { submittedBP: 0, reviewedBP: 1400 } },
+  ]);
+  // Only verified nodes pay out: the estimate sums to t1's weight, not 10000.
+  assert.equal(estimation.shares.reduce((sum, share) => sum + share.shareBP, 0), 7000);
+});
+
+test('estimation: on a completed task the estimate equals the manifest, exactly', () => {
+  const { events, rootPinId } = settledTwoNodeTask();
+  const projection = replayMetaTask(events, { rootPinId });
+  assert.ok(projection.settlement, 'fixture must settle');
+
+  const estimation = estimateMetaTaskShares(projection);
+  assert.equal(estimation.basis, 'weighted');
+  assert.deepEqual(normalizeShares(estimation.shares), normalizeShares(projection.settlement.shares));
+  assert.equal(estimation.shares.reduce((sum, share) => sum + share.shareBP, 0), 10000);
+});
+
+test('estimation: the persisted σ drives both the estimate and the manifest', () => {
+  const buildCompleted = (split) => {
+    const { tree, task, rootPinId } = buildTask({ quorum: 1, ...(split ? { split } : {}) });
+    const claimT1 = claimOn(rootPinId, 't1', S, { height: 190_100 });
+    const subT1 = submitOn(rootPinId, 't1', claimT1.pinId, S, { height: 190_110 });
+    const claimR1 = claimOn(rootPinId, 'r1', S, { height: 190_120 });
+    const subR1 = submitOn(rootPinId, 'r1', claimR1.pinId, S, { height: 190_130 });
+    return replayMetaTask(
+      [tree, task, claimT1, subT1, voteOn(subT1.pinId, 'pass', R1, { height: 190_140 }), claimR1, subR1, voteOn(subR1.pinId, 'pass', R1, { height: 190_150 })],
+      { rootPinId }
+    );
+  };
+
+  // σ = 6500 (inside the clamp): t1 4550 + r1 1950 to S, pools 2450 + 1050 to R1.
+  const custom = buildCompleted({ submitterShareBP: 6500 });
+  assert.equal(custom.policy.submitterShareBP, 6500);
+  const customEstimate = estimateMetaTaskShares(custom);
+  assert.deepEqual(
+    customEstimate.shares.map((share) => [share.metaId, share.shareBP]),
+    [[S, 6500], [R1, 3500]]
+  );
+  assert.deepEqual(normalizeShares(customEstimate.shares), normalizeShares(custom.settlement.shares));
+
+  // Out-of-range σ clamps exactly like the engine (6000 floor / 9000 ceiling).
+  assert.equal(buildCompleted({ submitterShareBP: 5000 }).policy.submitterShareBP, 6000);
+  assert.equal(buildCompleted({ submitterShareBP: 9500 }).policy.submitterShareBP, 9000);
+  // No split block at all: the protocol default.
+  assert.equal(buildCompleted(null).policy.submitterShareBP, 8000);
+
+  // A projection persisted BEFORE the σ field existed falls back to 8000 (the
+  // documented caveat: a custom-split task's estimate assumes the default split
+  // until the next refresh rewrites the projection).
+  const stale = { ...custom, policy: { ...custom.policy } };
+  delete stale.policy.submitterShareBP;
+  assert.deepEqual(
+    estimateMetaTaskShares(stale).shares.map((share) => [share.metaId, share.shareBP]),
+    [[S, 8000], [R1, 2000]]
+  );
+});
+
+test('estimation: weight-null (legacy) trees use the uniform basis', () => {
+  const nodes = ['a', 'b', 'c'].map((id, index) => ({
+    id,
+    parent: index === 0 ? null : 'a',
+    title: id,
+    kind: index === 0 ? 'aggregate' : 'proof',
+    specid: null,
+    params: {},
+    deps: [],
+    // no weight field: pre-H_ACT2 legacy task
+  }));
+  const treePinId = nextPinId();
+  const rootPinId = nextPinId();
+  const tree = ev('tree', { root: 'a', nodes }, { pinId: treePinId, author: P, height: 189_800 });
+  const task = ev(
+    'task',
+    { title: 'legacy', treeid: treePinId, policy: { verify_quorum: 1, claim_ttl_hours: 48, verify_window_hours: 72 }, tags: [] },
+    { pinId: rootPinId, author: P, height: 189_801 }
+  );
+  const submitters = { b: 'idq1legacybb', c: 'idq1legacycc', a: 'idq1legacyaa' };
+  const reviewer = 'idq1legacyrev';
+  const events = [tree, task];
+  let afterFirstLeaf = 0;
+  // Verify the leaves first so a prefix replay stays genuinely mid-task.
+  for (const node of ['b', 'c', 'a']) {
+    const claim = claimOn(rootPinId, node, submitters[node], { height: 189_900 + events.length });
+    const sub = submitOn(rootPinId, node, claim.pinId, submitters[node], { height: 189_910 + events.length });
+    events.push(claim, sub, voteOn(sub.pinId, 'pass', reviewer, { height: 189_920 + events.length }));
+    if (node === 'b') afterFirstLeaf = events.length;
+  }
+
+  const partial = replayMetaTask(events.slice(0, afterFirstLeaf), { rootPinId });
+  assert.equal(partial.taskComplete, false);
+  const partialEstimate = estimateMetaTaskShares(partial);
+  assert.equal(partialEstimate.basis, 'uniform');
+  // uniform floor(10000/3) = 3333 per node; submitter floor(3333*8000/10000) = 2666,
+  // pool 667 to the single reviewer.
+  assert.deepEqual(
+    partialEstimate.shares.map((share) => [share.metaId, share.shareBP]),
+    [[submitters.b, 2666], [reviewer, 667]]
+  );
+
+  const full = replayMetaTask(events, { rootPinId });
+  assert.equal(full.taskComplete, true);
+  const fullEstimate = estimateMetaTaskShares(full);
+  assert.equal(fullEstimate.basis, 'uniform');
+  assert.deepEqual(normalizeShares(fullEstimate.shares), normalizeShares(full.settlement.shares));
+  // Legacy uniform weights discard the residue: 3 x 3333 = 9999 distributed.
+  assert.equal(fullEstimate.shares.reduce((sum, share) => sum + share.shareBP, 0), 9999);
+});
+
+test('estimation: an empty reviewer pool pays the whole node to the submitter', () => {
+  // Defensive branch: a verified node always carries at least one counted pass
+  // vote, so the engine cannot produce this state — the estimate must still
+  // never strand the pool.
+  const projection = {
+    rootPinId: 'task-synthetic',
+    publisher: P,
+    nodes: [{ id: 't1', parent: null, title: 'leaf', kind: 'proof', specid: null, params: {}, deps: [], weight: 10000 }],
+    nodeStates: {
+      t1: {
+        id: 't1',
+        parent: null,
+        title: 'leaf',
+        kind: 'proof',
+        weight: 10000,
+        params: null,
+        specid: null,
+        status: 'verified',
+        disputed: false,
+        holder: null,
+        submission: { pinId: 'synthetic-sub', submitter: S, atMs: 1, superseded: false, result: null, hash: null, contentType: null, attachment: null },
+        passVotes: 0,
+        failVotes: 0,
+        votes: [],
+        cycleCount: 1,
+      },
+    },
+    participants: [],
+    policy: { claimTtlHours: 0, verifyQuorum: 1, verifyWindowHours: 0, rewardSat: 0, challengeTtlDays: 14, hasSplit: false, rosterid: null, submitterShareBP: 8000 },
+  };
+  const estimation = estimateMetaTaskShares(projection);
+  assert.equal(estimation.basis, 'weighted');
+  assert.deepEqual(estimation.shares, [
+    { metaId: S, shareBP: 10000, from: { submittedBP: 10000, reviewedBP: 0 } },
+  ]);
+});
+
+test('estimation: the reviewer pool splits by Laplace accuracy a(r)', () => {
+  const { tree, task, rootPinId } = buildTask({ quorum: 2 }); // r1:3000, t1:7000
+  // Cycle 1: R1's pass is followed by R2's valid fail, so the cycle is
+  // rejected and R1's vote counts as an inaccuracy in its history.
+  const claim1 = claimOn(rootPinId, 't1', S, { height: 190_100 });
+  const sub1 = submitOn(rootPinId, 't1', claim1.pinId, S, { height: 190_101, pinId: 'reviewsplit1i0' });
+  const earlyPass = voteOn('reviewsplit1i0', 'pass', R1, { height: 190_110 });
+  const fail = voteOn('reviewsplit1i0', 'fail', R2, { height: 190_111 });
+  // Cycle 2 verifies with both reviewers.
+  const claim2 = claimOn(rootPinId, 't1', S, { height: 190_120 });
+  const sub2 = submitOn(rootPinId, 't1', claim2.pinId, S, { height: 190_121, pinId: 'reviewsplit2i0' });
+  const passR1 = voteOn('reviewsplit2i0', 'pass', R1, { height: 190_130 });
+  const passR2 = voteOn('reviewsplit2i0', 'pass', R2, { height: 190_131 });
+  const projection = replayMetaTask(
+    [tree, task, claim1, sub1, earlyPass, fail, claim2, sub2, passR1, passR2],
+    { rootPinId }
+  );
+
+  assert.equal(projection.nodeStates.t1.status, 'verified');
+  assert.equal(projection.nodeStates.t1.submission.pinId, 'reviewsplit2i0');
+  const stats = Object.fromEntries(projection.participants.map((participant) => [participant.metaId, participant]));
+  // R1: 1 correct of 2 terminal -> 5000. R2: 2 correct of 2 -> 7500.
+  assert.deepEqual([stats[R1].reviewCorrect, stats[R1].reviewTerminal], [1, 2]);
+  assert.deepEqual([stats[R2].reviewCorrect, stats[R2].reviewTerminal], [2, 2]);
+
+  const estimation = estimateMetaTaskShares(projection);
+  // t1 pool = 7000 - 5600 = 1400, accSum 12500:
+  // R1 floor(1400*5000/12500) = 560, R2 floor(1400*7500/12500) = 840.
+  assert.deepEqual(estimation.shares, [
+    { metaId: S, shareBP: 5600, from: { submittedBP: 5600, reviewedBP: 0 } },
+    { metaId: R2, shareBP: 840, from: { submittedBP: 0, reviewedBP: 840 } },
+    { metaId: R1, shareBP: 560, from: { submittedBP: 0, reviewedBP: 560 } },
+  ]);
+  assert.equal(estimation.shares.reduce((sum, share) => sum + share.shareBP, 0), 7000);
 });

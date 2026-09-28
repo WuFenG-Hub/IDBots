@@ -292,6 +292,7 @@ import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationB
 import { LongTermTaskStore } from './longTermTaskStore';
 import { MetaTaskProjectionStore } from './services/metatask/projectionStore';
 import { MetaTaskRefresher } from './services/metatask/refresher';
+import { estimateMetaTaskShares } from './services/metatask/estimate';
 import { MetaTaskWatchService } from './services/metatask/watchService';
 import { HeartbeatService } from './services/heartbeatService';
 import { LongTermAdvanceService, LONGTERM_ADVANCE_INTERVAL_MS } from './services/longTermAdvanceService';
@@ -12405,7 +12406,12 @@ if (!gotTheLock) {
     try {
       const detail = getMetaTaskRefresher().detail(String(input?.rootPinId ?? ''));
       if (!detail) return { success: false, error: 'MetaTask root not found in the local projection' };
-      return { success: true, detail };
+      // Mid-task "if it settled now" estimate: attached at this boundary only —
+      // never persisted into SQLite and never part of replayMetaTask's output.
+      // Once a manifest exists the estimate is redundant (it equals it), so it
+      // is nulled out and the renderer shows settlement.shares instead.
+      const estimation = detail.settlement ? null : estimateMetaTaskShares(detail);
+      return { success: true, detail: { ...detail, estimation } };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to read the MetaTask' };
     }

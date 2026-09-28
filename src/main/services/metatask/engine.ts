@@ -336,6 +336,13 @@ export function replayMetaTask(
   const windowHours = asNum(policy.verify_window_hours, 0);
   const challengeTtlDays = asNum(policy.challenge_ttl_days, CHALLENGE_TTL_DAYS_DEFAULT);
   const split = policy.split ?? null;
+  // σ: the submitter share actually used by the split, published in the
+  // projection so consumers (mid-task share estimates) read the SAME clamp the
+  // settlement applies. Not an engine input: the clamp is protocol-fixed.
+  const submitterShareBP = Math.min(
+    SUBMITTER_SHARE_BP_MAX,
+    Math.max(SUBMITTER_SHARE_BP_MIN, asNum(split?.submitterShareBP, SUBMITTER_SHARE_BP_DEFAULT)),
+  );
 
   // Task-scoped events: root pin + tree by reference + taskid references.
   const treePinId = asStr(taskBody.treeid);
@@ -1006,8 +1013,7 @@ export function replayMetaTask(
       const uniform = nodeCount > 0 ? Math.floor(10000 / nodeCount) : 0;
       for (const node of nodeIds) weights.set(node, uniform);
     }
-    const sigmaRaw = asNum(split?.submitterShareBP, SUBMITTER_SHARE_BP_DEFAULT);
-    const sigma = Math.min(SUBMITTER_SHARE_BP_MAX, Math.max(SUBMITTER_SHARE_BP_MIN, sigmaRaw));
+    const sigma = submitterShareBP;
 
     const accuracy = new Map<string, number>();
     for (const stats of participants.values()) {
@@ -1108,6 +1114,7 @@ export function replayMetaTask(
       challengeTtlDays,
       hasSplit: Boolean(split),
       rosterid: split?.rosterid ?? null,
+      submitterShareBP,
     },
     nodes: Array.from(effectiveTree.values()),
     amendHead,

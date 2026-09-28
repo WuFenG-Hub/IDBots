@@ -3,6 +3,7 @@ import type { ChainWriteCreatePin } from './postBuzzAgentTools';
 import { innerHash, outerHash } from '../services/metatask/canon';
 import { rosterPinsFromEvents } from '../services/metatask/collector';
 import { METATASK_ROSTER_PATH } from '../services/metatask/constants';
+import { estimateMetaTaskShares } from '../services/metatask/estimate';
 import { replayMetaTask } from '../services/metatask/engine';
 import type {
   MetaTaskBoard,
@@ -257,7 +258,7 @@ export function buildMetataskAgentTools(deps: {
 
   const listTasks = tool(
     'metatask_list',
-    'List on-chain MetaTasks from the local chain-sourced projection: root pinId, title, publisher, verified/total progress, participant count, my roles (publisher / participant), boundary block. Pass refresh=true to force a chain sweep first (default reads the cache). On-chain indexing lags — the boundary block is the truth anchor, never assume real-time.',
+    'List on-chain MetaTasks from the local chain-sourced projection: root pinId, title, publisher, verified/total progress, participant count, my roles (publisher / participant), and my stats (claims/submissions/reviews, settled shareBP, estShareBP = my mid-task "if it settled now" share in whole-task basis points), plus the boundary block. Pass refresh=true to force a chain sweep first (default reads the cache). On-chain indexing lags — the boundary block is the truth anchor, never assume real-time.',
     {
       refresh: z.boolean().optional().describe('Force a background chain sweep before reading (slower, fresher).'),
     },
@@ -279,6 +280,19 @@ export function buildMetataskAgentTools(deps: {
             progress: task.progress,
             participants: task.participantCount,
             myRoles: task.myRoles,
+            // estShareBP = the local roster's mid-task "if it settled now"
+            // share (whole-task bp); shareBP is the settled truth once a
+            // manifest exists.
+            myStats: task.myStats
+              ? {
+                  claimed: task.myStats.claimed,
+                  submitted: task.myStats.submitted,
+                  verified: task.myStats.verified,
+                  reviewVotes: task.myStats.reviewVotes,
+                  shareBP: task.myStats.shareBP,
+                  estShareBP: task.myStats.estShareBP,
+                }
+              : null,
             settlementFinalized: task.settlementFinalized,
             boundaryBlock: task.freshness.boundaryBlock,
           })),
@@ -291,7 +305,7 @@ export function buildMetataskAgentTools(deps: {
 
   const getTask = tool(
     'metatask_get',
-    'Get one MetaTask in full from the local projection: policy (TTL/quorum/window/split), every node with status/holder/weight/effective submission and pass votes, the participant roster, and the settlement manifest when finalized. Includes `openNodes` — the nodes currently claimable — plus reviewEligibility notes (same-side targets you must NOT review). Read-only.',
+    'Get one MetaTask in full from the local projection: policy (TTL/quorum/window/split), every node with status/holder/weight/effective submission and pass votes, the participant roster, and the settlement manifest when finalized. Includes `openNodes` — the nodes currently claimable — plus reviewEligibility notes (same-side targets you must NOT review). While the task is unfinished it also reports `estimation`: the "if it settled now" share split (whole-task basis points per metaId, computed with the settlement formula), which is null once a manifest exists. Read-only.',
     {
       rootPinId: z.string().min(1).describe('Task root pinId (66-char, ends with i0).'),
       refresh: z.boolean().optional(),
@@ -339,6 +353,10 @@ export function buildMetataskAgentTools(deps: {
           },
           participants: detail.participants,
           settlement: detail.settlement,
+          // Mid-task "if it settled now" estimate, from the same formula as the
+          // manifest: per-metaId whole-task basis points (sorted desc). Null
+          // once a manifest exists — settlement.shares is the truth then.
+          estimation: detail.settlement ? null : estimateMetaTaskShares(detail),
           freshness: detail.freshness,
         });
       } catch (error) {

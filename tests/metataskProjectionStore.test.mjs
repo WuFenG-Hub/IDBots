@@ -98,6 +98,8 @@ test('metatask projection store: projections persist and board derives my-roles'
     const asWorker = store.board(['idq1workerbee']);
     assert.equal(asWorker.tasks.length, 1);
     assert.deepEqual(asWorker.tasks[0].myRoles, ['participant']);
+    // Nothing verified yet: the mid-task estimate is 0 (not undefined).
+    assert.equal(asWorker.tasks[0].myStats.estShareBP, 0);
     const asPublisher = store.board(['idq1publisherx']);
     assert.deepEqual(asPublisher.tasks[0].myRoles, ['publisher']);
     const asStranger = store.board(['idq1stranger']);
@@ -173,6 +175,68 @@ test('metatask projection store: board activity uses the engine clock, not holde
     const board = store.board([]);
     assert.equal(board.tasks.length, 1);
     assert.equal(board.tasks[0].lastActivityMs, projection.lastActivityMs);
+  } finally {
+    sqliteStore.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('metatask projection store: board myStats carries the mid-task estShareBP', async () => {
+  const { dir, sqliteStore, store } = await openStore();
+  try {
+    const events = [
+      ev('tree0000000003i0', 'tree', {
+        root: 'r1',
+        nodes: [
+          { id: 'r1', parent: null, title: 'root', kind: 'aggregate', specid: null, params: {}, deps: [], weight: 5000 },
+          { id: 't1', parent: 'r1', title: 'leaf', kind: 'proof', specid: null, params: {}, deps: [], weight: 5000 },
+        ],
+      }, 'idq1publisherx'),
+      ev('task0000000003i0', 'task', {
+        title: 'mid-task estimate',
+        treeid: 'tree0000000003i0',
+        policy: { verify_quorum: 1, claim_ttl_hours: 48, verify_window_hours: 72 },
+        tags: ['metatask'],
+      }, 'idq1publisherx'),
+      ev('claim00000003i0', 'claim', { taskid: 'task0000000003i0', node: 't1' }, 'idq1workerbee'),
+      ev('submiss0000003i0', 'submission', {
+        taskid: 'task0000000003i0',
+        node: 't1',
+        claimid: 'claim00000003i0',
+        result: { type: 'table' },
+        hash: '6'.repeat(64),
+      }, 'idq1workerbee'),
+      ev('verify00000003i0', 'verify', {
+        targetid: 'submiss0000003i0',
+        verdict: 'pass',
+        method: 'ran the spec',
+        semantic_check: 'checked',
+      }, 'idq1reviewerzz'),
+    ];
+    const projection = replayMetaTask(events, { rootPinId: 'task0000000003i0' });
+    assert.equal(projection.nodeStates.t1.status, 'verified');
+    assert.equal(projection.settlement, null, 'the root is still open, so nothing is settled');
+    assert.equal('estimation' in projection, false, 'replay output never carries estimation');
+    store.saveProjections([projection]);
+    assert.equal('estimation' in (store.getProjection('task0000000003i0') ?? {}), false, 'estimation is never persisted');
+
+    // t1 carries 5000bp: submitter floor(5000*8000/10000) = 4000, pool 1000 to
+    // the single reviewer -> the whole roster estimates 5000.
+    const both = store.board(['idq1workerbee', 'idq1reviewerzz']);
+    assert.equal(both.tasks[0].myStats.estShareBP, 5000);
+    assert.equal(both.tasks[0].myStats.shareBP, 0, 'shareBP stays 0 until a manifest exists');
+    assert.equal(both.tasks[0].settlementFinalized, false);
+
+    const workerOnly = store.board(['idq1workerbee']);
+    assert.deepEqual(workerOnly.tasks[0].myRoles, ['participant']);
+    assert.equal(workerOnly.tasks[0].myStats.estShareBP, 4000);
+    assert.equal(workerOnly.tasks[0].myStats.verified, 1);
+
+    // A roster with no recorded activity has no myStats at all (publisher-only
+    // role is not participation).
+    const publisherOnly = store.board(['idq1publisherx']);
+    assert.deepEqual(publisherOnly.tasks[0].myRoles, ['publisher']);
+    assert.equal(publisherOnly.tasks[0].myStats, null);
   } finally {
     sqliteStore.close?.();
     fs.rmSync(dir, { recursive: true, force: true });
