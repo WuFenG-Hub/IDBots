@@ -16653,11 +16653,17 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     metaAppMgr.startWatching();
     startupLog('metaapp manager watching done');
 
-    // Start skill services
+    // Start skill services. Deliberately not awaited: the web-search bridge
+    // boot must never sit between the app and its first paint, and the skill's
+    // own search.sh health check starts the bridge on first use if it is still
+    // coming up when the first search request lands.
     const skillServices = getSkillServiceManager();
     startupLog('skill services startAll begin');
-    await skillServices.startAll();
-    startupLog('skill services ready');
+    void skillServices.startAll()
+      .then(() => startupLog('skill services ready'))
+      .catch((error) => {
+        console.error('[SkillServices] startAll failed:', error);
+      });
 
     // [关键代码] 显式告诉 Electron 使用系统的代理配置
     // 这会涵盖绝大多数 VPN（如 Clash, V2Ray 等开启了"系统代理"模式的情况）

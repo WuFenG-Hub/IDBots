@@ -2,13 +2,16 @@
  * Skill Services Manager - Manages background services for skills
  */
 
-import { execSync, spawn, spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { app } from 'electron';
 import { getEnhancedEnv } from './libs/coworkUtil';
 import { resolveElectronExecutablePath } from './libs/runtimePaths';
 import { resolveBundledSkillsRoot, resolveWritableSkillsRoot } from './libs/skillRoots';
+
+const WEB_SEARCH_HEALTH_POLL_INTERVAL_MS = 200;
+const WEB_SEARCH_HEALTH_WAIT_MS = 3000;
 
 /**
  * Build an environment for spawning skill service scripts.
@@ -26,6 +29,31 @@ async function buildSkillServiceEnv(): Promise<Record<string, string | undefined
 export class SkillServiceManager {
   private webSearchPid: number | null = null;
   private skillEnv: Record<string, string | undefined> | null = null;
+  private stopping = false;
+
+  /**
+   * Async stand-in for execSync: the web-search repair runs on the main
+   * process, so npm must not freeze the UI while it works.
+   */
+  private runRepairCommand(commandLine: string, cwd: string, env: NodeJS.ProcessEnv): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(commandLine, {
+        cwd,
+        stdio: 'ignore',
+        env,
+        shell: true,
+        windowsHide: true,
+      });
+      child.on('error', reject);
+      child.on('close', (code, signal) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(`${commandLine} failed (${signal ?? `exit code ${code}`})`));
+      });
+    });
+  }
 
   private hasWebSearchRuntimeScriptSupport(skillPath: string): boolean {
     const startServerScript = path.join(skillPath, 'scripts', 'start-server.sh');
@@ -106,7 +134,7 @@ export class SkillServiceManager {
     };
   }
 
-  private ensureWebSearchRuntimeReady(skillPath: string): void {
+  private async ensureWebSearchRuntimeReady(skillPath: string): Promise<void> {
     const startedAt = Date.now();
     console.log(`[SkillServices] Checking web-search runtime health: ${skillPath}`);
     if (this.isWebSearchRuntimeHealthy(skillPath)) {
@@ -131,7 +159,7 @@ export class SkillServiceManager {
         throw new Error('Web-search runtime is incomplete and npm is not available to repair it');
       }
       console.log('[SkillServices] Installing/reparing web-search dependencies...');
-      execSync('npm install', { cwd: skillPath, stdio: 'ignore', env });
+      await this.runRepairCommand('npm install', skillPath, env);
       console.log(`[SkillServices] Web-search dependencies repaired in ${Date.now() - startedAt}ms`);
     }
 
@@ -140,7 +168,7 @@ export class SkillServiceManager {
         throw new Error('Web-search dist files are missing and npm is not available to rebuild them');
       }
       console.log('[SkillServices] Compiling web-search TypeScript...');
-      execSync('npm run build', { cwd: skillPath, stdio: 'ignore', env });
+      await this.runRepairCommand('npm run build', skillPath, env);
       console.log(`[SkillServices] Web-search dist rebuilt in ${Date.now() - startedAt}ms`);
     }
 
@@ -155,6 +183,7 @@ export class SkillServiceManager {
    */
   async startAll(): Promise<void> {
     const startedAt = Date.now();
+    this.stopping = false;
     console.log('[SkillServices] Starting skill services...');
 
     // Resolve environment once for all service spawns
@@ -174,11 +203,30 @@ export class SkillServiceManager {
    */
   async stopAll(): Promise<void> {
     console.log('[SkillServices] Stopping skill services...');
+    this.stopping = true;
 
     try {
       await this.stopWebSearchService();
     } catch (error) {
       console.error('[SkillServices] Error stopping services:', error);
+    }
+  }
+
+  /**
+   * Wait for the bridge server to answer its health probe, polling instead of
+   * sleeping a fixed 3s: the server usually answers within a few hundred ms,
+   * and a shutdown must not be held behind the wait.
+   */
+  private async waitForWebSearchHealth(timeoutMs: number = WEB_SEARCH_HEALTH_WAIT_MS): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (await this.checkWebSearchHealth()) {
+        return true;
+      }
+      if (this.stopping || Date.now() >= deadline) {
+        return false;
+      }
+      await new Promise(resolve => setTimeout(resolve, WEB_SEARCH_HEALTH_POLL_INTERVAL_MS));
     }
   }
 
@@ -205,8 +253,14 @@ export class SkillServiceManager {
 
       await this.startWebSearchServiceProcess(skillPath);
 
-      // Wait a moment for the server to start
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      if (this.stopping) {
+        await this.stopWebSearchService();
+        return;
+      }
+
+      if (!(await this.waitForWebSearchHealth())) {
+        console.warn('[SkillServices] Web Search Bridge Server did not answer its health probe in time');
+      }
 
       // Check if server started successfully
       const pidFile = path.join(skillPath, '.server.pid');
@@ -228,7 +282,7 @@ export class SkillServiceManager {
     const pidFile = path.join(skillPath, '.server.pid');
     const logFile = path.join(skillPath, '.server.log');
     const serverEntry = path.join(skillPath, 'dist', 'server', 'index.js');
-    this.ensureWebSearchRuntimeReady(skillPath);
+    await this.ensureWebSearchRuntimeReady(skillPath);
     const baseEnv = this.skillEnv as NodeJS.ProcessEnv ?? process.env;
     const runtime = this.resolveNodeRuntime(baseEnv);
     const env = {
