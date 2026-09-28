@@ -315,6 +315,14 @@ const MetaTaskCard: React.FC<{ task: MetaTaskBoardTask; identities?: Record<stri
                   .replace('{reviews}', String(task.myStats.reviewVotes))}
               </span>
             )}
+            {!task.settlementFinalized && task.myStats && task.myStats.estShareBP > 0 && (
+              <span
+                className="px-1.5 py-0.5 text-[11px] rounded bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-400"
+                title={i18nService.t('metatask.estShareTip')}
+              >
+                {i18nService.t('metatask.estShare').replace('{pct}', (task.myStats.estShareBP / 100).toFixed(2))}
+              </span>
+            )}
             {task.settlementFinalized && task.myStats && task.myStats.shareBP > 0 && (
               <span className="px-1.5 py-0.5 text-[11px] rounded bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400">
                 {i18nService.t('metatask.myShare').replace('{pct}', (task.myStats.shareBP / 100).toFixed(2))}

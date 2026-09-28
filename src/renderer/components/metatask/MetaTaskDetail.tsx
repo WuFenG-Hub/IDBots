@@ -26,6 +26,58 @@ const statusTone: Record<string, string> = {
 
 const statusLabel = metaTaskNodeStatusLabel;
 
+/** Closing-checklist row: ✓ (emerald) when the condition holds, ○ otherwise. */
+const ClosingCheckRow: React.FC<{ ok: boolean; text: string }> = ({ ok, text }) => (
+  <li className="flex items-start gap-1.5">
+    <span
+      className={`shrink-0 ${
+        ok
+          ? 'text-emerald-600 dark:text-emerald-400'
+          : 'dark:text-claude-darkTextSecondary text-claude-textSecondary'
+      }`}
+    >
+      {ok ? '✓' : '○'}
+    </span>
+    <span
+      className={
+        ok
+          ? 'dark:text-claude-darkText text-claude-text'
+          : 'dark:text-claude-darkTextSecondary text-claude-textSecondary'
+      }
+    >
+      {text}
+    </span>
+  </li>
+);
+
+/** One row of the local-participation feed: a node plus what the local bots
+ * currently have in flight on it. */
+type MineItemKind = 'claimed' | 'submitted' | 'voted' | 'verified';
+
+interface MineItem {
+  kind: MineItemKind;
+  node: MetaTaskNodeProjection;
+  groupId: string | null;
+  text: string;
+}
+
+/** In-flight work first: claimed → submitted → voted → verified. */
+const mineKindOrder: Record<MineItemKind, number> = { claimed: 0, submitted: 1, voted: 2, verified: 3 };
+
+const mineKindDot: Record<MineItemKind, string> = {
+  claimed: 'bg-sky-400',
+  submitted: 'bg-amber-400',
+  verified: 'bg-emerald-400',
+  voted: 'bg-slate-400 dark:bg-slate-500',
+};
+
+const mineKindText: Record<MineItemKind, string> = {
+  claimed: 'text-sky-600 dark:text-sky-400',
+  submitted: 'text-amber-600 dark:text-amber-400',
+  verified: 'text-emerald-600 dark:text-emerald-400',
+  voted: 'dark:text-claude-darkTextSecondary text-claude-textSecondary',
+};
+
 const participateDraft = (title: string, rootPinId: string, nodeHint?: string | null): void => {
   const text = i18nService
     .t('metatask.participateDraft')
@@ -100,6 +152,12 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
   const roster = [...detail.participants].sort(
     (a, b) => b.verifiedContrib - a.verifiedContrib || a.metaId.localeCompare(b.metaId)
   );
+  // Mid-task estimates (present only until a settlement manifest exists); the
+  // renderer never computes shares, it only displays the engine's numbers.
+  const showEstShare = !detail.settlement && !!detail.estimation;
+  const estShareByMetaId = new Map(
+    (detail.estimation?.shares ?? []).map((share) => [share.metaId, share.shareBP])
+  );
   const nodes = Object.values(detail.nodeStates).sort((a, b) =>
     a.id.localeCompare(b.id, undefined, { numeric: true })
   );
@@ -120,6 +178,68 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
     : nodes.filter((node) => !childIds.has(node.id));
   const groups = baseChildren.filter((node) => (childrenOf.get(node.id)?.length ?? 0) > 0);
   const topLeaves = baseChildren.filter((node) => !(childrenOf.get(node.id)?.length));
+
+  // Local-participation feed: what the local roster currently holds or has done
+  // on this task's nodes (claim TTL, pending review, local votes).
+  const groupIdSet = new Set(groups.map((group) => group.id));
+  const mineItems: MineItem[] = [];
+  if (rosterIds.size > 0) {
+    const now = Date.now();
+    for (const node of nodes) {
+      const effective = node.submission && !node.submission.superseded ? node.submission : null;
+      const groupId = node.parent && groupIdSet.has(node.parent) ? node.parent : null;
+      if (effective && rosterIds.has(effective.submitter)) {
+        mineItems.push({
+          kind: node.status === 'verified' ? 'verified' : 'submitted',
+          node,
+          groupId,
+          text:
+            node.status === 'verified'
+              ? i18nService.t('metatask.mine.verified')
+              : i18nService
+                  .t('metatask.mine.submitted')
+                  .replace('{votes}', String(node.passVotes))
+                  .replace('{quorum}', String(detail.policy.verifyQuorum)),
+        });
+      } else if (
+        !effective &&
+        node.status === 'claimed' &&
+        node.holder &&
+        rosterIds.has(node.holder.claimant)
+      ) {
+        const remainingMs = detail.policy.claimTtlHours * 3600e3 - (now - node.holder.sinceMs);
+        mineItems.push({
+          kind: 'claimed',
+          node,
+          groupId,
+          text: i18nService
+            .t('metatask.mine.claimed')
+            .replace('{hours}', String(Math.max(0, Math.ceil(remainingMs / 3600e3)))),
+        });
+      }
+      // Votes carry no submission reference, so a local ballot is attributed to
+      // the node's effective submission — the only one votes can act on.
+      const localVote = effective ? node.votes.find((vote) => rosterIds.has(vote.voter)) : undefined;
+      if (localVote) {
+        const verdict =
+          localVote.verdict === 'pass'
+            ? i18nService.t('metatask.mine.votedPass')
+            : i18nService.t('metatask.mine.votedFail');
+        mineItems.push({
+          kind: 'voted',
+          node,
+          groupId,
+          text: localVote.counted
+            ? verdict
+            : verdict +
+              i18nService
+                .t('metatask.mine.voteNotCounted')
+                .replace('{reason}', localVote.ignoreReason ?? '—'),
+        });
+      }
+    }
+    mineItems.sort((a, b) => mineKindOrder[a.kind] - mineKindOrder[b.kind]);
+  }
 
   const toggleGroup = (groupId: string): void => {
     setExpandedGroups((prev) => {
@@ -271,6 +391,39 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
           </section>
         )}
 
+        {/* Local participation: what this machine's bots hold or did here */}
+        {mineItems.length > 0 && (
+          <section>
+            <h3 className="text-sm font-semibold dark:text-claude-darkText text-claude-text mb-2">
+              {i18nService.t('metatask.mine.title')}
+            </h3>
+            <div className="rounded-xl border dark:border-claude-darkBorder border-claude-border overflow-hidden divide-y dark:divide-claude-darkBorder divide-claude-border">
+              {mineItems.map((item, index) => (
+                <button
+                  key={`${item.kind}-${item.node.id}-${index}`}
+                  type="button"
+                  onClick={() => selectNodeFromMap(item.node.id, item.groupId)}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover/60 transition-colors"
+                >
+                  <span className={`h-2 w-2 rounded-full shrink-0 ${mineKindDot[item.kind]}`} />
+                  <span className="font-mono text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary shrink-0">
+                    {item.node.id}
+                  </span>
+                  <span
+                    className="truncate dark:text-claude-darkText text-claude-text"
+                    title={item.node.title}
+                  >
+                    {item.node.title}
+                  </span>
+                  <span className={`ml-auto shrink-0 text-[11px] ${mineKindText[item.kind]}`}>
+                    {item.text}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* Structure overview: status at a glance, click to locate nodes */}
         <MetaTaskTreeMap
           root={rootNode}
@@ -319,24 +472,41 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
                   <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.claims')}</th>
                   <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.verifiedContrib')}</th>
                   <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.reviewVotes')}</th>
+                  {showEstShare && (
+                    <th className="text-left px-3 py-2 font-medium">{i18nService.t('metatask.estShareCol')}</th>
+                  )}
                 </tr>
               </thead>
               <tbody className="divide-y dark:divide-claude-darkBorder divide-claude-border">
-                {roster.map((participant) => (
-                  <tr key={participant.metaId}>
-                    <td className="px-3 py-2">
-                      <span className="inline-flex items-center gap-1.5">
-                        <MetaIdBadge metaId={participant.metaId} identities={identities} compact />
-                        {rosterIds.has(participant.metaId) && (
-                          <span className="text-[11px] text-brand">{i18nService.t('metatask.mineTag')}</span>
-                        )}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 dark:text-claude-darkText text-claude-text">{participant.effectiveClaims}</td>
-                    <td className="px-3 py-2 dark:text-claude-darkText text-claude-text">{participant.verifiedContrib}</td>
-                    <td className="px-3 py-2 dark:text-claude-darkText text-claude-text">{participant.reviewVotes}</td>
-                  </tr>
-                ))}
+                {roster.map((participant) => {
+                  const estShareBP = estShareByMetaId.get(participant.metaId);
+                  return (
+                    <tr key={participant.metaId}>
+                      <td className="px-3 py-2">
+                        <span className="inline-flex items-center gap-1.5">
+                          <MetaIdBadge metaId={participant.metaId} identities={identities} compact />
+                          {rosterIds.has(participant.metaId) && (
+                            <span className="text-[11px] text-brand">{i18nService.t('metatask.mineTag')}</span>
+                          )}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 dark:text-claude-darkText text-claude-text">
+                        {participant.effectiveClaims}
+                      </td>
+                      <td className="px-3 py-2 dark:text-claude-darkText text-claude-text">
+                        {participant.verifiedContrib}
+                      </td>
+                      <td className="px-3 py-2 dark:text-claude-darkText text-claude-text">
+                        {participant.reviewVotes}
+                      </td>
+                      {showEstShare && (
+                        <td className="px-3 py-2 dark:text-claude-darkText text-claude-text">
+                          {estShareBP === undefined ? '—' : `${(estShareBP / 100).toFixed(2)}%`}
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -398,6 +568,25 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
                 .t('metatask.settlementPending')
                 .replace('{verified}', String(detail.progress.verified))
                 .replace('{total}', String(detail.progress.total))}
+              <ul className="mt-2 space-y-1">
+                <ClosingCheckRow
+                  ok={detail.progress.verified === detail.progress.total}
+                  text={i18nService
+                    .t('metatask.closing.allVerified')
+                    .replace('{verified}', String(detail.progress.verified))
+                    .replace('{total}', String(detail.progress.total))}
+                />
+                <ClosingCheckRow
+                  ok={rootNode?.status === 'verified'}
+                  text={i18nService.t('metatask.closing.rootAggregated')}
+                />
+                <ClosingCheckRow
+                  ok={detail.progress.disputed === 0}
+                  text={i18nService
+                    .t('metatask.closing.noDisputes')
+                    .replace('{count}', String(detail.progress.disputed))}
+                />
+              </ul>
               {rootNode && rootNode.status !== 'verified' && (
                 <span className="block mt-1">{i18nService.t('metatask.settlementRootOpen')}</span>
               )}
