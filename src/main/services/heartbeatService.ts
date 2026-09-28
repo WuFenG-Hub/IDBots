@@ -28,6 +28,13 @@ export interface HeartbeatHandler {
   name: string;
   /** Minimum spacing between runs of THIS handler. */
   intervalMs: number;
+  /**
+   * Optional per-fire random delay drawn from [0, jitterMs) so that many
+   * instances of this app do not hit the same remote endpoint in lockstep.
+   * Opt-in per handler; the run still counts as due immediately (it is not
+   * re-scheduled while the delayed run is pending).
+   */
+  jitterMs?: number;
   run: (nowMs: number) => void | Promise<void>;
 }
 
@@ -42,6 +49,8 @@ export interface HeartbeatServiceOptions {
   tickMs?: number;
   watchdogMs?: number;
   now?: () => number;
+  /** Random source for jittered handlers (default Math.random). */
+  random?: () => number;
   emitLog?: (line: string) => void;
 }
 
@@ -49,6 +58,7 @@ export class HeartbeatService {
   private readonly tickMs: number;
   private readonly watchdogMs: number;
   private readonly now: () => number;
+  private readonly random: () => number;
   private readonly emitLog: (line: string) => void;
   private readonly handlers = new Map<string, HandlerState>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -60,6 +70,7 @@ export class HeartbeatService {
     this.tickMs = Math.max(1_000, Math.trunc(options.tickMs ?? HEARTBEAT_TICK_MS));
     this.watchdogMs = Math.max(10_000, Math.trunc(options.watchdogMs ?? HEARTBEAT_WATCHDOG_MS));
     this.now = options.now ?? Date.now;
+    this.random = options.random ?? Math.random;
     this.emitLog = options.emitLog ?? ((line: string) => console.log(line));
   }
 
@@ -90,18 +101,34 @@ export class HeartbeatService {
       state.running = true;
       fired.push(state.handler.name);
       const stateRef = state;
-      Promise.resolve()
-        .then(() => stateRef.handler.run(nowMs))
-        .catch((error: unknown) => {
-          this.emitLog(
-            `[Heartbeat] handler "${stateRef.handler.name}" failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        })
-        .finally(() => {
-          stateRef.running = false;
-        });
+      const jitterMs = Math.max(0, Math.trunc(state.handler.jitterMs ?? 0));
+      if (jitterMs > 0) {
+        // Spread this handler's fire times across instances. The handler is
+        // already marked due+running, so no tick can schedule it twice while
+        // the delay is pending; the timer must not hold the process open.
+        const timer = setTimeout(() => {
+          this.runHandler(stateRef, nowMs);
+        }, Math.floor(this.random() * jitterMs));
+        timer.unref?.();
+        continue;
+      }
+      this.runHandler(stateRef, nowMs);
     }
     return fired;
+  }
+
+  /** Fire one handler, isolating failures and clearing the re-entry flag. */
+  private runHandler(stateRef: HandlerState, nowMs: number): void {
+    Promise.resolve()
+      .then(() => stateRef.handler.run(nowMs))
+      .catch((error: unknown) => {
+        this.emitLog(
+          `[Heartbeat] handler "${stateRef.handler.name}" failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      })
+      .finally(() => {
+        stateRef.running = false;
+      });
   }
 
   private readonly runGuardedTick = (): void => {

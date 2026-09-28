@@ -243,6 +243,149 @@ test('metatask projection store: board myStats carries the mid-task estShareBP',
   }
 });
 
+test('metatask projection store: sweep state exposes the persisted dirty key and preserves skipped rows', async () => {
+  const { dir, sqliteStore, store } = await openStore();
+  try {
+    const projection = buildProjection();
+    const root = projection.rootPinId;
+
+    // A row written by the sweep carries the dirty key it was built from.
+    store.saveProjections([projection], { liveRootIds: [root], dirtyKeys: { [root]: 'dirty-abc' } });
+    const state = store.projectionSweepState();
+    assert.deepEqual(state.map((entry) => [entry.rootPinId, entry.dirtyKey]), [[root, 'dirty-abc']]);
+    assert.equal(state[0].projection.title, 'store test task');
+
+    // A skipped root is absent from `projections` but stays live: its row must
+    // survive untouched (the sentinel title is not overwritten).
+    sqliteStore.getDatabase().run('UPDATE metatask_task_projections SET title = ? WHERE root_pin_id = ?', ['SENTINEL', root]);
+    store.saveProjections([], { liveRootIds: [root], dirtyKeys: {} });
+    assert.equal(String(store.projectionSweepState()[0].projection.title), 'store test task', 'projection body untouched');
+    assert.equal(store.getProjection(root).title, 'store test task');
+    const sentinel = sqliteStore
+      .getDatabase()
+      .exec('SELECT title FROM metatask_task_projections WHERE root_pin_id = ?', [root]);
+    assert.equal(String(sentinel[0].values[0][0]), 'SENTINEL', 'the row itself was not rewritten');
+
+    // A root outside liveRootIds is pruned (the stale-root rule).
+    store.saveProjections([], { liveRootIds: [] });
+    assert.equal(store.getProjection(root), null);
+
+    // A write without an explicit key reports '' so the next sweep replays it.
+    store.saveProjections([projection]);
+    assert.equal(store.projectionSweepState()[0].dirtyKey, '');
+  } finally {
+    sqliteStore.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('metatask projection store: a failing statement rolls the whole batch back', async () => {
+  const { dir, sqliteStore, store } = await openStore();
+  try {
+    const db = sqliteStore.getDatabase();
+    store.upsertEvents([ev('ev0000000001i0', 'claim', { taskid: 't', node: 'n1' })]);
+    assert.equal(store.loadEvents().length, 1);
+
+    const realRun = db.run.bind(db);
+    let eventInserts = 0;
+    db.run = (sql, params) => {
+      if (String(sql).includes('INSERT INTO metatask_events')) {
+        eventInserts += 1;
+        if (eventInserts === 2) throw new Error('injected failure');
+      }
+      return realRun(sql, params);
+    };
+    assert.throws(
+      () =>
+        store.upsertEvents([
+          ev('ev0000000002i0', 'claim', { taskid: 't', node: 'n2' }),
+          ev('ev0000000003i0', 'claim', { taskid: 't', node: 'n3' }),
+        ]),
+      /injected failure/
+    );
+    db.run = realRun;
+    // Nothing from the failed batch landed — not even its first row.
+    assert.deepEqual(store.loadEvents().map((event) => event.pinId), ['ev0000000001i0']);
+    // The connection is not wedged in an open transaction.
+    store.upsertEvents([ev('ev0000000004i0', 'claim', { taskid: 't', node: 'n4' })]);
+    assert.deepEqual(
+      store.loadEvents().map((event) => event.pinId).sort(),
+      ['ev0000000001i0', 'ev0000000004i0']
+    );
+
+    // saveProjections is one batch too: a mid-way failure leaves no partial row.
+    const projectionA = buildProjection();
+    const projectionB = { ...buildProjection(), rootPinId: 'task0000000009i0' };
+    const realRun2 = db.run.bind(db);
+    let projectionInserts = 0;
+    db.run = (sql, params) => {
+      if (String(sql).includes('INSERT INTO metatask_task_projections')) {
+        projectionInserts += 1;
+        if (projectionInserts === 2) throw new Error('injected projection failure');
+      }
+      return realRun2(sql, params);
+    };
+    assert.throws(
+      () => store.saveProjections([projectionA, projectionB], { liveRootIds: [projectionA.rootPinId, projectionB.rootPinId] }),
+      /injected projection failure/
+    );
+    db.run = realRun2;
+    assert.equal(store.getProjection(projectionA.rootPinId), null, 'the first insert rolled back with the batch');
+    assert.equal(store.getProjection(projectionB.rootPinId), null);
+    store.saveProjections([projectionA]);
+    assert.ok(store.getProjection(projectionA.rootPinId));
+  } finally {
+    sqliteStore.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('metatask projection store: watch statuses and alerts batch-write in one transaction', async () => {
+  const { dir, sqliteStore, store } = await openStore();
+  try {
+    store.setWatchStatuses([
+      { root: 'task1', node: 't1', status: 'claimed' },
+      { root: 'task1', node: 'r1', status: 'open' },
+    ]);
+    store.setWatchStatuses([{ root: 'task1', node: 't1', status: 'verified' }]);
+    assert.deepEqual(
+      store.getWatchStatuses().map((entry) => [entry.node, entry.status]).sort(),
+      [['r1', 'open'], ['t1', 'verified']]
+    );
+
+    store.appendAlerts([
+      { kind: 'claim_ttl_soon', rootPinId: 'task1', node: 't1', detail: '1h', createdAtMs: 10 },
+      { kind: 'submission_change', rootPinId: 'task1', node: 'r1', detail: 'open->claimed', createdAtMs: 11 },
+    ]);
+    assert.equal(store.listAlerts().length, 2);
+
+    // A failing batch rolls back the rows this call added.
+    const db = sqliteStore.getDatabase();
+    const realRun = db.run.bind(db);
+    let alertInserts = 0;
+    db.run = (sql, params) => {
+      if (String(sql).includes('INSERT INTO metatask_alerts')) {
+        alertInserts += 1;
+        if (alertInserts === 2) throw new Error('injected alert failure');
+      }
+      return realRun(sql, params);
+    };
+    assert.throws(
+      () =>
+        store.appendAlerts([
+          { kind: 'closing_drive', rootPinId: 'task1', node: 'r1', detail: '2', createdAtMs: 12 },
+          { kind: 'closing_drive', rootPinId: 'task1', node: 'r1', detail: '2', createdAtMs: 13 },
+        ]),
+      /injected alert failure/
+    );
+    db.run = realRun;
+    assert.equal(store.listAlerts().length, 2, 'the failed alert batch wrote nothing');
+  } finally {
+    sqliteStore.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('metatask projection store: refresh state transitions', async () => {
   const { dir, sqliteStore, store } = await openStore();
   try {

@@ -22,6 +22,8 @@ export interface AppCleanupDeps {
   /** Optional so older cleanup callers that predate the hygiene service still type-check. */
   stopMemoryHygieneService?: () => void;
   stopProviderDiscovery: () => void;
+  /** Drop a pending coalesced MetaTask sweep timer (optional: older callers). */
+  stopMetaTaskSweeps?: () => void;
   deactivateGroupChatTasks: () => void;
   log: (message: string) => void;
   error: (message: string, error: unknown) => void;
@@ -61,5 +63,6 @@ export async function runAppCleanup(deps: AppCleanupDeps): Promise<void> {
   deps.stopDreamService();
   deps.stopMemoryHygieneService?.();
   deps.stopProviderDiscovery();
+  deps.stopMetaTaskSweeps?.();
   deps.deactivateGroupChatTasks();
 }
