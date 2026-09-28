@@ -1225,6 +1225,150 @@ test('GT-10: a message dropped after 5 processing failures alerts the origin ses
   }
 });
 
+test('HOST-FIX-RFP D1/D4: a model-layer config failure parks the trigger uncharged, alerts on FIRST failure, probes, and heals', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    // The zhipu incident wording: the member's binding names a provider that
+    // vanished from the catalog — every turn fails in milliseconds.
+    chatErrorAlways: "Provider 'zhipu' does not offer enabled model 'glm-5.3'; provider selection is required.",
+    deps: {
+      modelStallProbeMs: 30_000,
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-rfp-d1', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'rfp-d1-mention-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot redo the demo video',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+
+    await h.loop.runTick();
+    // Host-note delivery runs CHAIR turns (bot 1, llm 'llm-1'); count only the
+    // parked member's attempts (bot 2, llm 'llm-2').
+    const workerCalls = () => h.chatCalls.filter((call) => call.llmId === 'llm-2');
+    assert.equal(workerCalls().length, 1, 'fail-fast: exactly one attempt, no 5x retry ladder burn');
+    const modelAlerts = () => milestones.filter((m) => m.kind === 'anomaly' && /^member_model_error:/.test(m.subject ?? ''));
+    assert.equal(modelAlerts().length, 1, 'the FIRST failure already alerts the origin session (D4: immediate)');
+    assert.match(modelAlerts()[0].message, /zhipu/, 'the alert carries the root cause');
+    assert.match(modelAlerts()[0].message, /PARKED/, 'the alert says the dispatch is parked, not dropped');
+    const hostNoteRows = h.db.exec(
+      'SELECT kind, body FROM group_task_host_notes WHERE task_id = ?', [task.id],
+    )[0]?.values ?? [];
+    assert.ok(
+      hostNoteRows.some((row) => row[0] === 'member_model_error' && /zhipu/.test(row[1])),
+      'the chair host-note ledger records the member failure with its reason',
+    );
+    // The trigger is parked, NOT dropped: deferred, uncharged, stall armed.
+    const parked = JSON.parse(h.store.get(`group_task_deferred:${task.id}`));
+    assert.equal(parked.length, 1, 'the dispatch survives in the deferred queue');
+    assert.equal(parked[0].failures ?? 0, 0, 'the park is UNCHARGED');
+    assert.ok(h.store.get(`group_task_model_stall:${task.id}:2`) != null, 'the model stall is armed');
+
+    // Within the probe window the drain holds the entry — no hot requeue loop.
+    for (let i = 0; i < 3; i += 1) await h.loop.runTick();
+    assert.equal(workerCalls().length, 1, 'the drain holds the parked entry inside the probe window');
+    assert.equal(modelAlerts().length, 1, 'no duplicate alert while parked (D4: dedup by root cause)');
+
+    // After the probe interval the drain releases ONE probe; it fails again —
+    // still uncharged, still exactly ONE alert.
+    h.state.nowMs += 31_000;
+    await h.loop.runTick();
+    assert.equal(workerCalls().length, 2, 'one probe per stall interval');
+    assert.equal(modelAlerts().length, 1, 'a failed probe does not re-alert');
+    assert.equal((JSON.parse(h.store.get(`group_task_deferred:${task.id}`)))[0].failures ?? 0, 0, 'probe failure stays uncharged');
+
+    // Healing: the owner re-picks the model — the next probe turn succeeds and
+    // lifts the stall, and the parked dispatch finally gets its answer.
+    h.state.chatErrorAlways = null;
+    h.state.nowMs += 31_000;
+    await h.loop.runTick();
+    assert.equal(workerCalls().length, 3, 'the healed member answers the parked trigger');
+    assert.ok(h.sends.some((s) => s.metabotId === 2), 'the answer is posted to the group');
+    assert.equal(h.store.get(`group_task_model_stall:${task.id}:2`), undefined, 'a successful turn lifts the stall');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('HOST-FIX-RFP D1: the E1d protocol-incompatibility fingerprint also parks instead of dropping', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    chatErrorAlways: 'DSH turn failed: OpenAI API error (400): ModelProtocolUnsupported: Model does not support this protocol.',
+    deps: {
+      modelStallProbeMs: 30_000,
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-rfp-e1d', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'rfp-e1d-mention-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot build the lobby visuals',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const workerCalls = () => h.chatCalls.filter((call) => call.llmId === 'llm-2');
+    assert.equal(workerCalls().length, 1, 'fail-fast on the protocol fingerprint too');
+    assert.ok(
+      milestones.some((m) => m.kind === 'anomaly' && /^member_model_error:/.test(m.subject ?? '') && /ModelProtocolUnsupported/.test(m.message)),
+      'first-failure alert carries the protocol root cause',
+    );
+    assert.ok(h.store.get(`group_task_model_stall:${task.id}:2`) != null, 'the trigger is parked, not dropped');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('HOST-FIX-RFP D1: a model stall past the 24h cap resumes the charged ladder and terminates with a drop alert', async () => {
+  const milestones = [];
+  const h = await createHarness({
+    chatErrorAlways: "Provider 'zhipu' does not offer enabled model 'glm-5.3'; provider selection is required.",
+    deps: {
+      modelStallProbeMs: 30_000,
+      sendMilestoneToSourceSession: ({ taskId, kind, message, subject }) => {
+        milestones.push({ taskId, kind, message, subject });
+        return true;
+      },
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    h.db.run('UPDATE group_tasks SET source_session_id = ? WHERE id = ?', ['sess-rfp-cap', task.id]);
+    insertGroupMessage(h.db, {
+      pinId: 'rfp-cap-mention-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot redo the demo video',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const workerCalls = () => h.chatCalls.filter((call) => call.llmId === 'llm-2');
+    assert.equal(workerCalls().length, 1, 'initial failure parks the trigger');
+
+    // The binding stays broken past the 24h park cap: the ordinary charged
+    // ladder resumes so the episode still terminates.
+    h.state.nowMs += 25 * 3_600_000;
+    for (let tick = 0; tick < 5; tick += 1) await h.loop.runTick();
+    assert.equal(workerCalls().length, 6, 'the charged ladder runs to exhaustion after the cap');
+    assert.ok(
+      milestones.some((m) => m.kind === 'anomaly' && /^turn_failed_drop:/.test(m.subject ?? '') && /persisted past the 24h park window/.test(m.message)),
+      'the terminal drop alerts with the model-stall context',
+    );
+    assert.equal(h.store.get(`group_task_deferred:${task.id}`), undefined, 'the trigger is gone after the drop');
+    assert.equal(h.store.get(`group_task_model_stall:${task.id}:2`), undefined, 'the stall record is cleared on the terminal drop');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('review fix (single-commander): a fresh chair-stated deadline resets the delivery-reminded flag before re-arming', async () => {
   const h = await createHarness({
     deps: { memberTimeoutAfterMinutes: 1, memberUnreachableAfterMinutes: 1 },

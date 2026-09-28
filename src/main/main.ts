@@ -136,6 +136,7 @@ import {
 } from './services/metabotManageService';
 import { deleteBootstrapDoc } from './libs/welcomeBootstrap';
 import { migrateLegacyLlmBrainValues } from './services/llmBrainMigration';
+import { reconcileStaleModelBindings } from './services/staleModelBindingReconcile';
 import { migrateDeepSeekOutputCeiling } from './services/deepseekOutputCeilingMigration';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
 import {
@@ -16937,6 +16938,39 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       console.error('[llm-brain-migration] failed (non-fatal):', error);
     }
     startupLog('llm brain migration done');
+
+    // HOST-FIX-RFP 2026-09-28 (D2, the zhipu silent-drop incident): reconcile
+    // every stored model binding (session picks + bot brains) against the live
+    // provider catalog at startup. Auto-rebinds when the model id maps to
+    // exactly one enabled provider; flags the rest with a readable session
+    // notice instead of letting turns fail silently. Runs after the legacy
+    // migration above so provider-key-shaped llm_id values are already
+    // normalized; never publishes on-chain pins.
+    try {
+      const reconcileResult = reconcileStaleModelBindings({
+        metabotStore: getMetabotStore(),
+        coworkStore: getCoworkStore(),
+        getAppConfig: () => getStore()?.get<{
+          providers?: Record<string, { enabled?: boolean; models?: Array<{ id?: string }> }>;
+        }>('app_config') ?? null,
+        insertSessionSystemMessage: (sessionId, content) => {
+          getCoworkStore().addMessage(sessionId, { type: 'system', content });
+        },
+        getLastSessionMessage: (sessionId) => {
+          const page = getCoworkStore().getSessionMessagesPage(sessionId, { limit: 1 });
+          return page?.messages?.[page.messages.length - 1] ?? null;
+        },
+        pinSessionUpdatedAt: (sessionId, updatedAtMs) => {
+          getCoworkStore().setSessionUpdatedAt(sessionId, updatedAtMs);
+        },
+      });
+      startupLog(
+        `stale model binding reconcile done (reboundSessions=${reconcileResult.reboundSessions}, ` +
+        `reboundBots=${reconcileResult.reboundBots}, flagged=${reconcileResult.flagged.length})`,
+      );
+    } catch (error) {
+      console.error('[stale-binding-reconcile] failed (non-fatal):', error);
+    }
 
     // One-shot DeepSeek output-ceiling migration: rewrite provider model rows
     // still pinning the legacy 32_768 default to the 256_000 harness-aligned
