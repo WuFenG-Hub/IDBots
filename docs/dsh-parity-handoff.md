@@ -197,6 +197,22 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
 
 ## 4. Hard-won contracts (do not relearn these)
 
+- **Never kill a runtime under live work** (`fix/dsh-runtime-kill-guard`, from
+  the 2026-09-28 incident: two zhipu.auto-bc processes exited — exit code 0,
+  which the runtime's SIGTERM handler also produces, masking any killer —
+  under three in-flight turns, including a brand-new session's first message,
+  ~5 min after a providers config change booted a successor):
+  `dshKernel.ensureRuntime` NEVER restarts a running process on its own
+  (config application is hub-owned and explicit); "busy" means host
+  controllers OR kernel-side activity (`DshKernel.lastNotificationAt` —
+  stamped by every pump notification, because continuable-subagent turns
+  have no host controller and are invisible to controller-only accounting);
+  a busy config change takes the successor+drain path; in-place restart and
+  drain retirement require true idleness (no notifications for
+  `kernelActivityGraceMs`, default 10 min) and log themselves
+  (`inPlaceRuntimeRestart`, `drainRetireDeferredByActivity`,
+  `drainedRuntimeClosed` with idle age). Exit code 0 is NOT proof of a
+  graceful self-exit.
 - **Resume-first**: `agents.create` never consults the persisted log; ensure
   must resume first (`session "<id>" not found` = fresh-create signal).
 - **Tools must settle on abort** (`exec.signal`) or the whole turn drain hangs.
