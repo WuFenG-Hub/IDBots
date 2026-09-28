@@ -317,10 +317,12 @@ export class ServiceOrderStore {
       ON service_orders(status, updated_at DESC);
     `);
     // listOrdersByStatuses filters on (role, status) and orders by
-    // updated_at DESC, created_at DESC; the index above (status-first) can only
-    // seek on status and then sorts every match in a temp b-tree. This one
-    // covers the whole predicate and the sort, which drops the repair scan
-    // (run on every cowork session read) to an index range search.
+    // updated_at DESC, created_at DESC; no existing index serves that predicate,
+    // so the self-directed repair scan (run on every cowork session read) sorted
+    // every matching row off a full table scan. This index turns the scan into
+    // an index range search; SQLite still adds a temp b-tree for the ORDER BY
+    // because the `status IN (...)` list breaks the ordering guarantee, but the
+    // table itself is no longer read.
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_service_orders_role_status_updated
       ON service_orders(role, status, updated_at DESC, created_at DESC);
