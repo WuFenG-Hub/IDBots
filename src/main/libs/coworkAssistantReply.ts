@@ -73,6 +73,13 @@ export const TRANSIENT_TURN_ERROR_CODES: ReadonlySet<string> = new Set([
 export const TRANSIENT_TURN_RESUME_PROMPT =
   'The previous turn was interrupted by a transient network or provider failure. Continue the task from where you left off.';
 
+/** Cue fed back to the model when a DSH turn died on a context-overflow error
+ *  and the runner auto-resumed it on the fallback (larger-context) route. The
+ *  history is fully preserved; the ask is to continue without re-reading
+ *  everything, so the resumed request stays well inside the new window. */
+export const OVERFLOW_TURN_RESUME_PROMPT =
+  'The previous turn failed because it exceeded the previous model\'s context window; this turn continues on a fallback model with the full preserved history. Continue the task from where you left off, working from what is already in the conversation without re-reading files or repeating large tool calls.';
+
 /** True when a DSH turn outcome is an error whose failure code is transient
  *  (environmental) and therefore worth an automatic turn-level resume. */
 export function isTransientDshTurnError(outcome: { kind?: string; error?: { code?: string } }): boolean {
@@ -98,6 +105,44 @@ export function isQuotaDshTurnError(outcome: { kind?: string; error?: { code?: s
   const code = outcome.error?.code;
   if (typeof code === 'string' && code.toUpperCase() === 'QUOTA') return true;
   return QUOTA_ERROR_MESSAGE_FINGERPRINT.test(String(outcome.error?.message ?? ''));
+}
+
+/**
+ * Upstream "request exceeds the model's context window" fingerprints mirrored
+ * from provider error bodies (OpenAI-compat relays, DeepSeek, aggregator
+ * gateways). ASCII upstream error fingerprints only — never natural-language
+ * intent. A bare `400 status code` with no body does NOT classify on its own:
+ * too many non-overflow failures share that shape; recovery for that shape is
+ * paired with the compaction-failure signal in runDshSessionLocal instead.
+ */
+const OVERFLOW_ERROR_MESSAGE_FINGERPRINT = /maximum[ _-]context[ _-]length|context[ _-]length[ _-]?(exceed|too[ _-]long)|exceeds?[ _-]the[ _-]?(maximum[ _-]?)?(context|model)[ _-]?(length|window)|too[ _-]many[ _-](input[ _-])?tokens|prompt[ _-]is[ _-]too[ _-]long|request[ _-](entity[ _-])?too[ _-]large|input[ _-]?(length|tokens?)[ _-]exceed/i;
+
+/** True when a DSH turn outcome failed because the request exceeded the
+ *  model's context window — a kernel-normalized overflow code, or an upstream
+ *  overflow fingerprint in the raw message. Retrying on the same route cannot
+ *  succeed (history cannot shrink mid-request), but the bot's fallback brain
+ *  may resolve to a route with a larger context window, and the terminal
+ *  transcript error should tell the operator the session needs compaction or
+ *  a fresh session rather than a blind resend. */
+export function isOverflowDshTurnError(
+  outcome: { kind?: string; error?: { code?: string; message?: string } },
+  context: { compactionFailedThisTurn?: boolean } = {},
+): boolean {
+  if (outcome?.kind !== 'error') return false;
+  const code = String(outcome.error?.code ?? '').toUpperCase();
+  // CONTEXT_WINDOW_EXCEEDED is the code this incident actually shipped with
+  // (2026-09-28 cowork.log: opencode zen deepseek-flash returned
+  // `{ message: '400 status code (no body)', code: 'CONTEXT_WINDOW_EXCEEDED' }`
+  // three times on the wedged session).
+  if (code === 'CONTEXT_LENGTH' || code === 'CONTEXT_OVERFLOW' || code === 'CONTEXT_WINDOW_EXCEEDED' || code === 'REQUEST_TOO_LARGE' || code === 'PAYLOAD_TOO_LARGE') return true;
+  if (OVERFLOW_ERROR_MESSAGE_FINGERPRINT.test(String(outcome.error?.message ?? ''))) return true;
+  // Bare `400 status code (no body)` never classifies on the message alone —
+  // but when the SAME turn also logged a failed auto-compaction (the
+  // 2026-09-28 compaction-deadlock incident: history over the context window
+  // killed both the compaction request and the turn with identical bodyless
+  // 400s), the pairing is decisive evidence of overflow.
+  if (context.compactionFailedThisTurn === true && /^\s*400[^\n]*no body/i.test(String(outcome.error?.message ?? ''))) return true;
+  return false;
 }
 
 const NON_ANSWER_PLACEHOLDERS = new Set<string>([
