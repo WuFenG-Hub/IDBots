@@ -543,3 +543,4 @@ man_base_data_pebble/
 !tests/coworkSessionAvatarChannel.test.mjs
 !tests/coworkSessionListThrottle.test.mjs
 !tests/coworkComposerAutoResize.test.mjs
+!tests/coworkStreamDeltaProtocol.test.mjs

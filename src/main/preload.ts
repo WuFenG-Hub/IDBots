@@ -676,11 +676,13 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('cowork:stream:message', handler);
       return () => ipcRenderer.removeListener('cowork:stream:message', handler);
     },
-    onStreamMessageUpdate: (callback: (data: { sessionId: string; messageId: string; content?: string; metadata?: Record<string, unknown> }) => void) => {
-      const handler = (_event: any, data: { sessionId: string; messageId: string; content?: string; metadata?: Record<string, unknown> }) => callback(data);
+    onStreamMessageUpdate: (callback: (data: { sessionId: string; messageId: string; content?: string; delta?: string; baseLength?: number; metadata?: Record<string, unknown> }) => void) => {
+      const handler = (_event: any, data: { sessionId: string; messageId: string; content?: string; delta?: string; baseLength?: number; metadata?: Record<string, unknown> }) => callback(data);
       ipcRenderer.on('cowork:stream:messageUpdate', handler);
       return () => ipcRenderer.removeListener('cowork:stream:messageUpdate', handler);
     },
+    getStreamLiveContent: (payload: { sessionId: string; messageId: string }) =>
+      ipcRenderer.invoke('cowork:stream:liveContent', payload) as Promise<{ success: boolean; content?: string }>,
     onStreamPermission: (callback: (data: { sessionId: string; request: any }) => void) => {
       const handler = (_event: any, data: { sessionId: string; request: any }) => callback(data);
       ipcRenderer.on('cowork:stream:permission', handler);

@@ -45,6 +45,7 @@ import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduled
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
 import { isWorkspaceMetabotId, resolveBotWorkspaceCwd, resolveSessionWorkingDirectory, shouldUseBotWorkspaceCwd } from './libs/botWorkspace';
 import { getGitBranch } from './libs/gitWorkspace';
+import { CoworkStreamUiDeltaEncoder } from './libs/coworkStreamUiDelta';
 import { IMGatewayManager, IMPlatform, IMGatewayConfig } from './im';
 import { APP_NAME } from './appConstants';
 import { getSkillServiceManager } from './skillServices';
@@ -746,17 +747,36 @@ const emitCoworkStreamMessage = (sessionId: string, message: unknown): void => {
   });
 };
 
-const emitCoworkStreamMessageUpdate = (
+/**
+ * Turns the full-content stream updates every producer emits into append-only
+ * deltas (first update full, later updates the grown tail). See
+ * libs/coworkStreamUiDelta.ts — the renderer reassembles the exact same text,
+ * so only the wire size changes.
+ */
+const coworkStreamUiDelta = new CoworkStreamUiDeltaEncoder({
+  truncate: (value) => truncateIpcString(value, IPC_UPDATE_CONTENT_MAX_CHARS),
+});
+
+/** Live reassembly baseline for a message, for the renderer's resync request. */
+const readCoworkStreamLiveContent = (sessionId: string, messageId: string): string | null => {
+  if (typeof sessionId !== 'string' || typeof messageId !== 'string') return null;
+  return coworkStreamUiDelta.liveContent(sessionId, messageId);
+};
+
+const sendCoworkStreamMessageUpdate = (
   sessionId: string,
   messageId: string,
   update: { content?: string; metadata?: Record<string, unknown> },
 ): void => {
-  const payload = {
+  const payload = coworkStreamUiDelta.encode({
     sessionId,
     messageId,
-    ...(update.content !== undefined ? { content: truncateIpcString(update.content, IPC_UPDATE_CONTENT_MAX_CHARS) } : {}),
-    ...(update.metadata !== undefined ? { metadata: sanitizeIpcPayload(update.metadata) } : {}),
-  };
+    content: update.content,
+    metadata: update.metadata !== undefined
+      ? sanitizeIpcPayload(update.metadata) as Record<string, unknown>
+      : undefined,
+  });
+  if (!payload) return;
   const windows = BrowserWindow.getAllWindows();
   windows.forEach((win) => {
     if (!win.isDestroyed()) {
@@ -767,6 +787,14 @@ const emitCoworkStreamMessageUpdate = (
       }
     }
   });
+};
+
+const emitCoworkStreamMessageUpdate = (
+  sessionId: string,
+  messageId: string,
+  update: { content?: string; metadata?: Record<string, unknown> },
+): void => {
+  sendCoworkStreamMessageUpdate(sessionId, messageId, update);
 };
 
 /**
@@ -6280,22 +6308,7 @@ const getCoworkRunner = () => {
       if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
         return;
       }
-      const safeContent = truncateIpcString(content, IPC_UPDATE_CONTENT_MAX_CHARS);
-      const windows = BrowserWindow.getAllWindows();
-      windows.forEach(win => {
-        if (!win.isDestroyed()) {
-          try {
-            win.webContents.send('cowork:stream:messageUpdate', {
-              sessionId,
-              messageId,
-              content: safeContent,
-              ...(metadata ? { metadata } : {}),
-            });
-          } catch (error) {
-            console.error('Failed to forward cowork message update:', error);
-          }
-        }
-      });
+      sendCoworkStreamMessageUpdate(sessionId, messageId, { content, metadata });
     });
 
     coworkRunner.on('permissionRequest', (sessionId: string, request: any) => {
@@ -10996,6 +11009,22 @@ if (!gotTheLock) {
         };
       }
     });
+  });
+
+  /**
+   * Resync request from the renderer: returns the exact live text the delta
+   * stream is currently appending to. Non-null only while the encoder is in
+   * delta mode for that message, so adopting it realigns both sides; null means
+   * the next update for the message is a full send anyway.
+   */
+  ipcMain.handle('cowork:stream:liveContent', async (_event, payload: { sessionId?: unknown; messageId?: unknown }) => {
+    const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : '';
+    const messageId = typeof payload?.messageId === 'string' ? payload.messageId : '';
+    if (!sessionId || !messageId) return { success: false as const };
+    const content = readCoworkStreamLiveContent(sessionId, messageId);
+    return content === null
+      ? { success: false as const }
+      : { success: true as const, content };
   });
 
   ipcMain.handle('cowork:session:refreshPeerProfile', async (_event, input: {

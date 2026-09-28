@@ -1327,7 +1327,8 @@ interface IElectronAPI {
     installSandbox: () => Promise<{ success: boolean; status: CoworkSandboxStatus; error?: string }>;
     onSandboxDownloadProgress: (callback: (data: CoworkSandboxProgress) => void) => () => void;
     onStreamMessage: (callback: (data: { sessionId: string; message: CoworkMessage }) => void) => () => void;
-    onStreamMessageUpdate: (callback: (data: { sessionId: string; messageId: string; content?: string; metadata?: CoworkMessage['metadata'] }) => void) => () => void;
+    onStreamMessageUpdate: (callback: (data: { sessionId: string; messageId: string; content?: string; delta?: string; baseLength?: number; metadata?: CoworkMessage['metadata'] }) => void) => () => void;
+    getStreamLiveContent: (payload: { sessionId: string; messageId: string }) => Promise<{ success: boolean; content?: string }>;
     onStreamPermission: (callback: (data: { sessionId: string; request: CoworkPermissionRequest }) => void) => () => void;
     onStreamPermissionResolved: (callback: (data: { sessionId: string; requestId: string }) => void) => () => void;
     onStreamComplete: (callback: (data: { sessionId: string; claudeSessionId: string | null }) => void) => () => void;

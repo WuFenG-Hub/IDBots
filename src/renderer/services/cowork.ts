@@ -77,6 +77,10 @@ import {
 } from './coworkStreamPresentation';
 import { i18nService } from './i18n';
 import { metabotAvatarCache } from './metabotAvatarCache';
+import {
+  CoworkStreamReassembler,
+  type CoworkStreamUpdatePayload,
+} from './coworkStreamReassembly';
 
 /**
  * Trailing window that folds a burst of session-list refresh requests into one
@@ -90,6 +94,8 @@ const SESSIONS_RELOAD_DEBOUNCE_MS = 300;
 class CoworkService {
   private streamListenerCleanups: Array<() => void> = [];
   private initialized = false;
+  /** Incremental stream reassembly (renderer half of the delta protocol). */
+  private readonly streamReassembly = new CoworkStreamReassembler();
   /** The session-list read in progress, if any; reads never overlap. */
   private sessionsLoadInFlight: Promise<void> | null = null;
   private sessionsReloadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -245,10 +251,11 @@ class CoworkService {
     });
     this.streamListenerCleanups.push(messageCleanup);
 
-    // Message update listener (for streaming content updates)
-    const messageUpdateCleanup = cowork.onStreamMessageUpdate(({ sessionId, messageId, content, metadata }) => {
-      store.dispatch(updateMessageContent({ sessionId, messageId, content, metadata }));
-      store.dispatch(updateBrowserMessageContent({ sessionId, messageId, content, metadata }));
+    // Message update listener (for streaming content updates). Payloads are
+    // incremental (see main/libs/coworkStreamUiDelta.ts); the reassembler turns
+    // them back into the accumulated text the store has always received.
+    const messageUpdateCleanup = cowork.onStreamMessageUpdate((payload) => {
+      this.handleStreamMessageUpdate(payload);
     });
     this.streamListenerCleanups.push(messageUpdateCleanup);
 
@@ -335,6 +342,59 @@ class CoworkService {
   private cleanupListeners(): void {
     this.streamListenerCleanups.forEach(cleanup => cleanup());
     this.streamListenerCleanups = [];
+    this.streamReassembly.reset();
+  }
+
+  /** Reassemble one incremental stream update and push it into the stores. */
+  private handleStreamMessageUpdate(payload: CoworkStreamUpdatePayload): void {
+    const result = this.streamReassembly.apply(payload);
+    switch (result.kind) {
+      case 'full':
+      case 'append':
+        this.dispatchStreamContent(
+          result.sessionId,
+          result.messageId,
+          result.text,
+          result.kind === 'full' ? result.metadata : undefined,
+        );
+        break;
+      case 'metadata':
+        this.dispatchStreamContent(result.sessionId, result.messageId, undefined, result.metadata);
+        break;
+      case 'desync':
+        // The delta does not fit the text held here (dropped payload, session
+        // switched in mid-stream, renderer reloaded). Ask the main process for
+        // the text the stream is appending to; the finalize payload is always
+        // full, so ignoring a delta can only cost live smoothness.
+        void this.resyncStreamMessage(result.sessionId, result.messageId);
+        break;
+      default:
+        break;
+    }
+  }
+
+  private dispatchStreamContent(
+    sessionId: string,
+    messageId: string,
+    content: string | undefined,
+    metadata?: CoworkMessage['metadata'],
+  ): void {
+    store.dispatch(updateMessageContent({ sessionId, messageId, content, metadata }));
+    store.dispatch(updateBrowserMessageContent({ sessionId, messageId, content, metadata }));
+  }
+
+  private async resyncStreamMessage(sessionId: string, messageId: string): Promise<void> {
+    let content: string | null = null;
+    try {
+      const result = await window.electron?.cowork?.getStreamLiveContent?.({ sessionId, messageId });
+      if (result?.success && typeof result.content === 'string') content = result.content;
+    } catch {
+      content = null;
+    }
+    const applied = this.streamReassembly.resolveResync(sessionId, messageId, content);
+    if (applied.kind === 'full') {
+      this.dispatchStreamContent(applied.sessionId, applied.messageId, applied.text);
+    }
   }
 
   /**
