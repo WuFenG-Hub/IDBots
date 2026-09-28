@@ -26,11 +26,21 @@
  *     default root = this checkout's dsh-runtime/node_modules
  *   node scripts/verify-dsh-kernel-patches.cjs --root release/win-unpacked/resources
  *   node scripts/verify-dsh-kernel-patches.cjs --root "release/mac-arm64/IDBots.app/Contents/Resources"
+ *   node scripts/verify-dsh-kernel-patches.cjs --packaged
+ *     resolve this OS's packaged resources root itself (CI runs this form)
  *   node scripts/verify-dsh-kernel-patches.cjs --platform win32   # override the host platform
  *   node scripts/verify-dsh-kernel-patches.cjs --list             # print the manifest
  *
  * Wired into: check:dsh-deps (local gate; every packaging pre-hook runs it)
  * and the Build/Release workflow (packaged-artifact check, all three jobs).
+ *
+ * `--packaged` exists so the workflow does not need a shell to compute the
+ * packaged root: the CI step used to be `shell: bash` with a `case "$RUNNER_OS"`
+ * block, which dies on the self-hosted Windows runner with
+ * `bash: command not found` (SOP §11.10 — bash only lands on PATH once MinGit
+ * is set up, and the guard step runs after that but on a shell GitHub cannot
+ * spawn). Node is present on every runner, so resolving the root in-process
+ * removes the shell from the equation entirely.
  */
 const fs = require('fs');
 const path = require('path');
@@ -55,6 +65,39 @@ const flagValue = (name) => {
  */
 const resolveTarget = (root, file) => path.join(root, file);
 
+/**
+ * Resolve this OS's electron-builder output directory: the packaged app's
+ * resources root, where `extraResources` copies dsh-runtime verbatim.
+ *
+ * RUNNER_OS is set by GitHub Actions on every runner; process.platform is the
+ * fallback so the flag also works locally.
+ */
+const resolvePackagedRoot = () => {
+  const runnerOs = process.env.RUNNER_OS
+    || ({ darwin: 'macOS', win32: 'Windows', linux: 'Linux' })[process.platform]
+    || '';
+
+  if (runnerOs === 'Windows') {
+    return path.join(PROJECT_ROOT, 'release', 'win-unpacked', 'resources');
+  }
+  if (runnerOs === 'Linux') {
+    return path.join(PROJECT_ROOT, 'release', 'linux-unpacked', 'resources');
+  }
+
+  // macOS: electron-builder writes release/mac-<arch>/; prefer one that
+  // actually contains the app bundle, then fall back to the first entry.
+  const releaseDir = path.join(PROJECT_ROOT, 'release');
+  const macDirs = fs.existsSync(releaseDir)
+    ? fs.readdirSync(releaseDir).filter((name) => name.startsWith('mac-')).sort()
+    : [];
+  const candidates = macDirs.length > 0 ? macDirs : ['mac-arm64'];
+  for (const name of candidates) {
+    const resources = path.join(releaseDir, name, 'IDBots.app', 'Contents', 'Resources');
+    if (fs.existsSync(resources)) return resources;
+  }
+  return path.join(releaseDir, candidates[0], 'IDBots.app', 'Contents', 'Resources');
+};
+
 const main = () => {
   if (!fs.existsSync(MANIFEST_PATH)) {
     console.error(`[verify-dsh-kernel-patches] missing manifest: ${MANIFEST_PATH}`);
@@ -74,10 +117,24 @@ const main = () => {
   }
 
   const rootFlag = flagValue('--root');
+  const packaged = argv.includes('--packaged');
+  if (packaged && rootFlag !== undefined) {
+    console.error('[verify-dsh-kernel-patches] pass either --packaged or --root, not both.');
+    process.exit(1);
+  }
   // Default: this checkout's runtime install. dsh-runtime/node_modules is the
   // first path segment in every manifest entry, so the default root is the
   // repository root.
-  const root = rootFlag === undefined ? PROJECT_ROOT : path.resolve(rootFlag);
+  const root = packaged
+    ? resolvePackagedRoot()
+    : (rootFlag === undefined ? PROJECT_ROOT : path.resolve(rootFlag));
+  if (packaged && !fs.existsSync(root)) {
+    console.error(
+      '[verify-dsh-kernel-patches] packaged resources directory not found: '
+      + `${root} (RUNNER_OS=${process.env.RUNNER_OS ?? process.platform})`,
+    );
+    process.exit(1);
+  }
   const platform = flagValue('--platform') ?? process.platform;
 
   // Completeness: a patch file without a fingerprint must never ship unverified.

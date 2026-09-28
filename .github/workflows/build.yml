@@ -377,20 +377,14 @@ jobs:
       # of today's five patches, and the installer silently regressed).
       # Adding or rebasing a patch means updating that manifest.
       - name: Verify DSH kernel patches in the packaged app
-        shell: bash
-        run: |
-          case "$RUNNER_OS" in
-            Windows) ROOT="release/win-unpacked/resources" ;;
-            macOS)   ROOT="$(ls -d release/mac-*/IDBots.app/Contents/Resources 2>/dev/null | head -1)" ;;
-            Linux)   ROOT="release/linux-unpacked/resources" ;;
-            *)       echo "::error::unsupported runner OS $RUNNER_OS"; exit 1 ;;
-          esac
-          if [ -z "$ROOT" ] || [ ! -d "$ROOT" ]; then
-            echo "::error::packaged resources directory not found (RUNNER_OS=$RUNNER_OS)"
-            exit 1
-          fi
-          echo "Checking kernel patches in $ROOT"
-          node scripts/verify-dsh-kernel-patches.cjs --root "$ROOT"
+        # No `shell:` override on purpose. This step used to be `shell: bash`
+        # with a `case "$RUNNER_OS"` block, which dies on the self-hosted
+        # Windows runner with `bash: command not found` (SOP §11.10: bash only
+        # reaches PATH once MinGit is set up, and GitHub cannot spawn a shell
+        # that is not there yet). `--packaged` resolves this OS's resources
+        # root inside the script, so the step needs nothing beyond the runner's
+        # default shell.
+        run: node scripts/verify-dsh-kernel-patches.cjs --packaged
 
       - name: Notarize app (macOS)
         if: runner.os == 'macOS'
