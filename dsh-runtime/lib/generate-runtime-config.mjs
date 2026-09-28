@@ -354,6 +354,13 @@ export function generateRuntimeConfig(input) {
     enabled: selectionEnabled,
     allowedModels: [...allowedModelMap.values()],
   }
+  // One knob, two consumers: the spill-policy inline cap AND the shaping
+  // plugin's inlineTokenBudget (a shaped copy must price strictly under the
+  // policy's early-return, or the policy re-spills the trimmed text as
+  // "Full formatted result" — session 540635be's corrupted recovery file).
+  const spillMaxInlineTokens = Number.isFinite(input.spill?.maxInlineTokens) && input.spill.maxInlineTokens > 0
+    ? input.spill.maxInlineTokens
+    : 2048
 
   return [
     { id: 'sessions', name: '@deepseek-ai/dsh-session' },
@@ -524,7 +531,9 @@ export function generateRuntimeConfig(input) {
     {
       id: 'idbots-tool-result-shaping',
       name: plugin('idbots-tool-result-shaping.mjs'),
-      config: input.shaping ?? {},
+      // inlineTokenBudget mirrors the spill cap (see spillMaxInlineTokens);
+      // host-provided shaping keys still win over the mirror.
+      config: { inlineTokenBudget: spillMaxInlineTokens, ...(input.shaping ?? {}) },
     },
     {
       id: 'llm-pi-ai',
@@ -552,7 +561,12 @@ export function generateRuntimeConfig(input) {
       // bounded head/tail preview + read-back path in history; the
       // policy's cap sits UNDER idbots-tool-result-shaping's 20K so
       // mid-size results spill recoverably while shaping stays the hard
-      // backstop for mixed content and pathological sizes.
+      // backstop for mixed content and no-spill compositions. Oversized
+      // results are shaped AND spill-recoverable: since the 540635be fix
+      // the shaping plugin saves the full original through the spill
+      // store itself and sizes its inline under this cap, so the policy
+      // never spills a trimmed copy behind a "Full formatted result"
+      // notice again.
       {
         id: 'spill-local',
         name: '@deepseek-ai/dsh-spill-local',
@@ -564,11 +578,7 @@ export function generateRuntimeConfig(input) {
         // 0.1.7 renamed the cap to estimated TOKENS (text and images now
         // share one budget; omitted content leaves a read-back path). 2048
         // tokens ≈ the old 8192-byte cap for ASCII-heavy tool output.
-        config: {
-          maxInlineTokens: Number.isFinite(input.spill?.maxInlineTokens) && input.spill.maxInlineTokens > 0
-            ? input.spill.maxInlineTokens
-            : 2048,
-        },
+        config: { maxInlineTokens: spillMaxInlineTokens },
       },
       {
         id: 'bash',

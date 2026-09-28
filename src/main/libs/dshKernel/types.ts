@@ -171,7 +171,13 @@ export interface DshRuntimeConfigInput {
   sessionRoot: string
   providers: DshProviderRoute[]
   sections?: DshPromptSectionInput[]
-  shaping?: { maxChars?: number; tailChars?: number }
+  /**
+   * Commit-time tool-result shaping. `inlineTokenBudget` defaults to the
+   * spill-policy cap (mirrored by generate-runtime-config): a shaped copy
+   * must price strictly under that cap so the policy never re-spills the
+   * trimmed text as "Full formatted result" (session 540635be).
+   */
+  shaping?: { maxChars?: number; tailChars?: number; inlineTokenBudget?: number }
   hostTools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>
   workspace?: { cwd: string }
   /**

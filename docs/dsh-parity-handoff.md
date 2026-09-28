@@ -175,6 +175,22 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
     `ownedCoworkOfDsh` so child chatter stays in the panel and a child title
     never renames the parent. Unknown sessions still fail closed.
 
+10b. ✅ **Spill-cooperative tool-result shaping** (same 540635be run): the
+     spill-policy cap (2048 tokens) sits under idbots-tool-result-shaping's
+     20K, so oversized results took the shaping trim FIRST and spill-policy
+     then spilled the ALREADY-TRIMMED text under a "Full formatted result
+     stored at:" notice — the recovery channel silently held a head+tail
+     paste, and the chair extracted code from it into a corrupted file (the
+     trim marker turned up mid-file inside the "full" spill). The shaping
+     plugin now saves the FULL original through the spill store before
+     slicing, embeds the locator + retrieval hint in its marker, and
+     token-bounds its inline under the policy cap (`inlineTokenBudget`
+     mirrored from the same `spill.maxInlineTokens` knob in
+     generate-runtime-config), so the policy's under-cap early-return keeps
+     the marker verbatim in history and the recovery file always holds the
+     original. No spill store (non-workspace compositions) → legacy
+     byte-for-byte behavior.
+
 **Remaining backlog:**
 11. **P2 — Behavioral foundation decision**: claude path sits on the full
     claude_code preset; DSH has DSH tool docs + our ~10-line guidance. If

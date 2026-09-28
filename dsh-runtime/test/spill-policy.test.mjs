@@ -3,10 +3,13 @@
 // Workspace compositions mount the spill trio under idbots-tool-result-shaping's
 // hard cap: mid-size all-text tool results (over the ~2048-token policy budget,
 // under 20KB) spill to a session-scoped file with the ORIGINAL text recoverable
-// (shaping never engages), while oversized results (>20KB) still take the
-// shaping trim first and spill the trimmed text — history stays bounded either
-// way, and the durable entry carries a "Full formatted result stored at:"
-// notice with the spill path.
+// (shaping never engages). Oversized results (>20KB) take the shaping trim, but
+// shaping itself saves the FULL original through the spill store first and
+// sizes its inline under the policy cap, so the marker carries a true
+// read-back path and the policy never re-spills a trimmed copy behind a
+// "Full formatted result stored at:" notice (2026-09-28 session 540635be: the
+// old order spilled the TRIMMED text under that notice — a chair extracted
+// code from the head+tail paste and shipped a corrupted file).
 //
 // Run: node test/spill-policy.test.mjs   (from dsh-runtime/)
 
@@ -130,18 +133,24 @@ const main = async () => {
   assert.ok(midSpill.text.includes('y'.repeat(1000)), 'spill file retains the untrimmed blob')
   assert.ok(!midSpill.text.includes('tool result trimmed'), 'original text spilled without shaping loss')
 
-  // ---- Case 2: 60KB result — shaping trims first, spill keeps the ladder --
+  // ---- Case 2: 60KB result — shaping trims, spills the ORIGINAL itself ----
+  // The shaped inline must price under the policy cap (marker + locator stay
+  // verbatim in history) and the spill file must hold the full 60K original —
+  // never the shaped copy (the 540635be pollution regression).
   await runTurn('CALL_BIG_TOOL please')
   const bigResult = toolResultFor('big_output_tool')
   assert.ok(bigResult, 'big tool executed through the real path')
   const bigText = resultText(bigResult)
-  assert.ok(bigText.includes(SPILL_NOTICE), `big result carries the spill notice (got ${bigText.length} chars)`)
+  assert.ok(bigText.includes('tool result trimmed'), `shaping engaged on the oversize result (got ${bigText.length} chars)`)
+  assert.ok(!bigText.includes(SPILL_NOTICE), 'spill-policy did not re-spill the shaped copy (under its cap)')
+  const locatorMatch = bigText.match(/full original stored at: (.+?)\. Use read/)
+  assert.ok(locatorMatch, 'marker carries the spill locator for the full original')
+  assert.ok(fs.existsSync(locatorMatch[1]), `locator points at a real file (${locatorMatch[1]})`)
   assert.ok(bigText.length < 10000, `big result bounded in history (${bigText.length} chars)`)
-  const bigSpill = spillFiles().map((f) => ({ f, text: fs.readFileSync(f, 'utf8') }))
-    .find((s) => s.text.includes('BIG-BLOB-START'))
-  assert.ok(bigSpill, 'big spill file exists under the session spill root')
-  assert.ok(bigSpill.text.includes('tool result trimmed'), 'oversize spill retains the shaped 20K text (ladder)')
-  assert.ok(bigSpill.text.length < 25000, 'oversize spill is the shaped text, not the 60K original')
+  const bigSpillText = fs.readFileSync(locatorMatch[1], 'utf8')
+  assert.ok(bigSpillText.includes('BIG-BLOB-START') && bigSpillText.includes('BIG-BLOB-END'), 'spill file retains the FULL original text')
+  assert.ok(bigSpillText.includes('x'.repeat(1000)), 'spill file retains the untrimmed blob')
+  assert.ok(!bigSpillText.includes('tool result trimmed'), 'spill file is the original, not the shaped copy')
 
   // ---- Provider requests stay bounded: the 60K blob never goes upstream ---
   const toolMessages = seen
