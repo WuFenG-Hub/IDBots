@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { ClockIcon, XMarkIcon, TrashIcon, FolderIcon } from '@heroicons/react/24/outline';
 import ComposeIcon from '../../components/icons/ComposeIcon';
@@ -272,9 +272,9 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
     await browserCoworkService.archiveSession(sessionId);
   };
 
-  const handleOpenUri = (uri: string) => {
+  const handleOpenUri = useCallback((uri: string) => {
     window.dispatchEvent(new CustomEvent('botBrowser:openUri', { detail: { uri } }));
-  };
+  }, []);
 
   const renderMessage = (message: CoworkMessage) => (
     <PanelMessage key={message.id} message={message} onOpenUri={handleOpenUri} />

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { i18nService } from '../../services/i18n';
 import { groupTaskService } from '../../services/groupTaskService';
 import type {
@@ -446,6 +446,10 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }, 60);
   }, [loadOlder]);
 
+  const handleJumpToReply = useCallback((pinId: string) => {
+    void jumpToMessage(pinId);
+  }, [jumpToMessage]);
+
   const handleSend = async () => {
     const text = input.trim();
     if (!text || sending) return;
@@ -544,6 +548,84 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }
   };
 
+  // Render derivations that feed memoized children stay ABOVE the loading/error
+  // returns (hooks must run on every render): every value crossing into a
+  // memoized row is reference-stable, and the pin lookups are O(1) instead of a
+  // per-row scan of the whole transcript.
+  // Nested collections can be missing on a stale/partial close payload.
+  // Always coerce to arrays so Accept & Close cannot white-screen the view.
+  const members = useMemo(
+    () => (detail && Array.isArray(detail.members) ? detail.members : []),
+    [detail],
+  );
+  // Text rows (kind=text, no uri) are process notes, not deliverables — the
+  // rail lists digital outcomes only, mirroring the acceptance checklist.
+  // Task #63: one artifact = one card — pinid-keyed dedupe so legacy ledgers
+  // (same URI recorded under two authors before artifact-identity folding)
+  // never render twice; the earliest row (the publisher's) wins.
+  const deliverables = useMemo(
+    () => dedupeDeliverablesByPinid(
+      (detail && Array.isArray(detail.deliverables) ? detail.deliverables : [])
+        .filter((deliverable) => isDigitalDeliverable(deliverable)),
+    ),
+    [detail],
+  );
+  // Remote members (metabotId == null) joined via OpenTeam; their messages are
+  // matched by globalmetaid so the transcript can flag them.
+  const remoteMemberGlobalMetaIds = useMemo(
+    () => new Set(
+      members
+        .filter((member) => member.metabotId == null && member.globalmetaid)
+        .map((member) => member.globalmetaid as string),
+    ),
+    [members],
+  );
+  // P13 (v1.1): the roster wins over the chain nickname. A worker session can
+  // post under a runtime identity nickname (task #22 rendered Builder阿码's
+  // delivery as "claude bot"), while senderGlobalMetaId always points at the
+  // registered member — resolve transcript author names through this map.
+  const memberNameByGmid = useMemo(() => {
+    const byGmid = new Map<string, string>();
+    for (const member of members) {
+      const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      const name = (member.name ?? member.displayName ?? '').trim();
+      if (gmid && name) byGmid.set(gmid, name);
+    }
+    return byGmid;
+  }, [members]);
+  const resolveTranscriptSenderName = useCallback((message: {
+    senderGlobalMetaId?: string | null;
+    senderName?: string | null;
+  }): string => {
+    const gmid = message.senderGlobalMetaId?.trim().toLowerCase();
+    return (gmid ? memberNameByGmid.get(gmid) : undefined) || message.senderName?.trim() || 'Unknown';
+  }, [memberNameByGmid]);
+  const messagesByPinId = useMemo(() => {
+    const byPinId = new Map<string, GroupChatTranscriptMessage>();
+    for (const message of messages) {
+      // First row wins, mirroring the previous Array.find lookup.
+      if (message.pinId && !byPinId.has(message.pinId)) byPinId.set(message.pinId, message);
+    }
+    return byPinId;
+  }, [messages]);
+  // R5: the replied-to message for each replyPin in the loaded window; null
+  // when the target is on an older page (the bar still jumps/loads it).
+  const replyTargetByPinId = useMemo(() => {
+    const byPinId = new Map<string, { senderName: string; preview: string } | null>();
+    for (const message of messages) {
+      const replyPin = message.replyPin?.trim();
+      if (!replyPin || byPinId.has(replyPin)) continue;
+      const target = messagesByPinId.get(replyPin);
+      byPinId.set(replyPin, target
+        ? {
+          senderName: resolveTranscriptSenderName(target),
+          preview: (target.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
+        }
+        : null);
+    }
+    return byPinId;
+  }, [messages, messagesByPinId, resolveTranscriptSenderName]);
+
   if (loadingDetail) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -570,18 +652,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   }
 
   const isTerminal = !isActiveGroupTaskStatus(detail.status);
-  // Nested collections can be missing on a stale/partial close payload.
-  // Always coerce to arrays so Accept & Close cannot white-screen the view.
-  const members = Array.isArray(detail.members) ? detail.members : [];
-  // Text rows (kind=text, no uri) are process notes, not deliverables — the
-  // rail lists digital outcomes only, mirroring the acceptance checklist.
-  // Task #63: one artifact = one card — pinid-keyed dedupe so legacy ledgers
-  // (same URI recorded under two authors before artifact-identity folding)
-  // never render twice; the earliest row (the publisher's) wins.
-  const deliverables = dedupeDeliverablesByPinid(
-    (Array.isArray(detail.deliverables) ? detail.deliverables : [])
-      .filter((deliverable) => isDigitalDeliverable(deliverable)),
-  );
   // HITL: the currently open human checkpoint, if any (drives the pause banner).
   const openCheckpoint = detail.checkpoints?.find((checkpoint) => checkpoint.status === 'open') ?? null;
   // HITL: what the owner must decide, shown under the banner topic — the
@@ -609,30 +679,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
       : member.globalmetaid
         ? `${member.globalmetaid.slice(0, 10)}…`
         : 'remote bot');
-  // Remote members (metabotId == null) joined via OpenTeam; their messages are
-  // matched by globalmetaid so the transcript can flag them.
-  const remoteMemberGlobalMetaIds = new Set(
-    members
-      .filter((member) => member.metabotId == null && member.globalmetaid)
-      .map((member) => member.globalmetaid as string),
-  );
-  // P13 (v1.1): the roster wins over the chain nickname. A worker session can
-  // post under a runtime identity nickname (task #22 rendered Builder阿码's
-  // delivery as "claude bot"), while senderGlobalMetaId always points at the
-  // registered member — resolve transcript author names through this map.
-  const memberNameByGmid = new Map<string, string>();
-  for (const member of members) {
-    const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
-    const name = (member.name ?? member.displayName ?? '').trim();
-    if (gmid && name) memberNameByGmid.set(gmid, name);
-  }
-  const resolveTranscriptSenderName = (message: {
-    senderGlobalMetaId?: string | null;
-    senderName?: string | null;
-  }): string => {
-    const gmid = message.senderGlobalMetaId?.trim().toLowerCase();
-    return (gmid ? memberNameByGmid.get(gmid) : undefined) || message.senderName?.trim() || 'Unknown';
-  };
   const deliverableAuthorName = (authorGlobalMetaId: string | null): string => {
     if (!authorGlobalMetaId) return '—';
     const member = members.find((candidate) => candidate.globalmetaid === authorGlobalMetaId);
@@ -916,21 +962,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
               </div>
             ) : (
               messages.map((message) => {
-                // R5: resolve the replied-to message from the loaded transcript
-                // for the reply bar preview (null when the target is on an older
+                // R5: the replied-to message (null when the target is on an older
                 // page — clicking still jumps/loads it via jumpToMessage).
                 const replyPin = message.replyPin?.trim();
-                const replyTargetMessage = replyPin
-                  ? messages.find((candidate) => candidate.pinId === replyPin)
-                  : undefined;
-                const replyTarget = replyPin
-                  ? (replyTargetMessage
-                    ? {
-                      senderName: resolveTranscriptSenderName(replyTargetMessage),
-                      preview: (replyTargetMessage.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
-                    }
-                    : null)
-                  : undefined;
                 return (
                 <GroupTaskMessageItem
                   key={message.id}
@@ -948,8 +982,8 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     && remoteMemberGlobalMetaIds.has(message.senderGlobalMetaId),
                   )}
                   highlight={highlightPinId != null && message.pinId === highlightPinId}
-                  replyTarget={replyTarget}
-                  onJumpToReply={(pinId) => void jumpToMessage(pinId)}
+                  replyTarget={replyPin ? replyTargetByPinId.get(replyPin) : undefined}
+                  onJumpToReply={handleJumpToReply}
                 />
                 );
               })
@@ -1004,8 +1038,8 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             </h3>
             <div className="space-y-1.5">
               {members.map((member) => (
-                <>
-                <div key={member.id} className="group flex items-center gap-2">
+                <React.Fragment key={member.id}>
+                <div className="group flex items-center gap-2">
                   <GroupTaskTinyAvatar
                     src={member.avatar}
                     name={memberDisplayName(member)}
@@ -1091,7 +1125,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     )}
                   </div>
                 )}
-                </>
+                </React.Fragment>
               ))}
             </div>
           </div>

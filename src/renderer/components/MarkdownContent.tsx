@@ -699,14 +699,14 @@ interface MarkdownContentProps {
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
 }
 
-const MarkdownContent: React.FC<MarkdownContentProps> = ({
+const MarkdownContent = React.memo(({
   content,
   className = '',
   compact = false,
   onOpenBotBrowserUri,
   resolveLocalFilePath,
   onOpenLocalFile,
-}) => {
+}: MarkdownContentProps) => {
   const components = useMemo(
     () => createMarkdownComponents(resolveLocalFilePath, onOpenBotBrowserUri, onOpenLocalFile),
     [resolveLocalFilePath, onOpenBotBrowserUri, onOpenLocalFile]
@@ -726,6 +726,6 @@ const MarkdownContent: React.FC<MarkdownContentProps> = ({
       </ReactMarkdown>
     </div>
   );
-};
+});
 
 export default MarkdownContent;
