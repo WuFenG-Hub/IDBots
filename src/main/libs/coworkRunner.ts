@@ -42,7 +42,7 @@ import { rewriteWin32McpStdioServer } from './win32StdioCommand';
 import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
-import { CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isQuotaDshTurnError, isTransientDshTurnError, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
+import { CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isOverflowDshTurnError, isQuotaDshTurnError, isTransientDshTurnError, OVERFLOW_TURN_RESUME_PROMPT, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
 import {
   filterSdkInternalDiagnostics,
   isSdkInternalDiagnostic,
@@ -8377,6 +8377,9 @@ export class CoworkRunner extends EventEmitter {
       // must not exempt the stall watchdog indefinitely.
       const dshInFlightToolUses = new Map<string, number>();
       let dshAnonInFlightToolStarts: number[] = [];
+      // Set when this turn attempt logs a failed auto-compaction; consumed by
+      // the overflow gate below (bodyless 400 + failed compaction ⇒ overflow).
+      let compactionFailedThisTurn = false;
       const dshInFlightToolCallCount = () => dshInFlightToolUses.size + dshAnonInFlightToolStarts.length;
       const trackDshToolActivity = (message: unknown) => {
         const type = (message as { type?: string } | null)?.type;
@@ -8552,6 +8555,12 @@ export class CoworkRunner extends EventEmitter {
             // executes (long bash renders emit nothing until they finish).
             trackDshToolActivity(message);
             armDshStallWatchdog();
+            // Compaction-failure marker for the overflow gate below: a bodyless
+            // `400 (no body)` turn death only classifies as context overflow
+            // when the same turn also failed auto-compaction (the 2026-09-28
+            // compaction-deadlock incident).
+            const messageMeta = (message as { metadata?: Record<string, unknown> } | null)?.metadata;
+            if (messageMeta?.compaction === true && messageMeta?.isError === true) compactionFailedThisTurn = true;
             const stored = this.store.addMessage(sessionId, message as Omit<CoworkMessage, 'id' | 'timestamp'>);
             this.emit('message', sessionId, stored);
             return stored.id;
@@ -8962,10 +8971,22 @@ export class CoworkRunner extends EventEmitter {
       // ran out).
       const gateTransient = isTransientDshTurnError(outcome);
       const gateQuota = isQuotaDshTurnError(outcome);
+      // Context-overflow deaths join the switch (2026-09-28 compaction-deadlock
+      // incident: a five-day session crossed the model's context window; both
+      // the auto-compaction request and the turn itself died with `400 (no
+      // body)` on every subsequent message and the session wedged permanently).
+      // Like quota, overflow cannot heal on the same route — history cannot
+      // shrink mid-request — but the fallback brain may resolve to a model
+      // with a LARGER context window, so a single fallback attempt is the only
+      // self-heal available without forking the pinned compaction package. If
+      // the fallback route also overflows, the terminal notice below tells the
+      // operator what actually fixes it (compact / fresh session), ending the
+      // retry-the-same-400 dead loop.
+      const gateOverflow = isOverflowDshTurnError(outcome, { compactionFailedThisTurn });
       if (
         outcome.kind === 'error'
         && !activeSession.abortController.signal.aborted
-        && (gateTransient || gateQuota)
+        && (gateTransient || gateQuota || gateOverflow)
       ) {
         const fallbackRoute = this.resolveSessionFallbackDshRoute(sessionId, route);
         if (fallbackRoute) {
@@ -8974,6 +8995,8 @@ export class CoworkRunner extends EventEmitter {
             'runDshSessionLocal',
             gateQuota
               ? 'Primary provider route is out of credit — switching to the bot fallback brain route'
+              : gateOverflow
+                ? 'Primary provider route is out of context window — switching to the bot fallback brain route'
               : 'Primary provider route still failing transiently after the resume budget — switching to the bot fallback brain route',
             {
               sessionId,
@@ -8991,10 +9014,14 @@ export class CoworkRunner extends EventEmitter {
             tApp(
               gateQuota
                 ? `主模型 ${route.model}（${route.provider}）额度不足，本轮已切换到该 Bot 的备用模型 ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`
-                : `主模型路由持续不可用，本轮已切换到该 Bot 的备用模型 ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`,
+                : gateOverflow
+                  ? `主模型 ${route.model}（${route.provider}）上下文超限，本轮已切换到该 Bot 的备用模型 ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`
+                  : `主模型路由持续不可用，本轮已切换到该 Bot 的备用模型 ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`,
               gateQuota
                 ? `The primary model ${route.model} (${route.provider}) ran out of credit; this turn switched to the bot's fallback model ${fallbackRoute.model} (${fallbackRoute.provider}).`
-                : `The primary model route kept failing; this turn switched to the bot's fallback model ${fallbackRoute.model} (${fallbackRoute.provider}).`
+                : gateOverflow
+                  ? `The primary model ${route.model} (${route.provider}) exceeded its context window; this turn switched to the bot's fallback model ${fallbackRoute.model} (${fallbackRoute.provider}).`
+                  : `The primary model route kept failing; this turn switched to the bot's fallback model ${fallbackRoute.model} (${fallbackRoute.provider}).`
             ),
             {
               dshRouteFallback: true,
@@ -9004,8 +9031,9 @@ export class CoworkRunner extends EventEmitter {
               toModel: fallbackRoute.model,
             }
           );
-          // Quota-only unconditional first attempt: a quota entry skips the
-          // same-route ladder above by construction, so without this the
+          // Quota/overflow unconditional first attempt: these entries skip the
+          // same-route ladder above by construction (retrying an out-of-credit
+          // or over-context route cannot succeed), so without this the
           // fallback route would never be tried at all. The TRANSIENT path
           // must NOT take this — its first fallback attempt comes from the
           // loop below, so the fallback resume budget stays exactly
@@ -9013,9 +9041,13 @@ export class CoworkRunner extends EventEmitter {
           // verification 2026-09-28 caught a first draft where the
           // unconditional attempt also applied to the transient path,
           // silently raising the fallback cap 2→3).
-          if (gateQuota) {
+          if (gateQuota || gateOverflow) {
             lastAttemptRoute = fallbackRoute;
-            outcome = await runGuardedTurn(TRANSIENT_TURN_RESUME_PROMPT, undefined, fallbackRoute);
+            outcome = await runGuardedTurn(
+              gateOverflow ? OVERFLOW_TURN_RESUME_PROMPT : TRANSIENT_TURN_RESUME_PROMPT,
+              undefined,
+              fallbackRoute,
+            );
           }
           for (let fallbackAttempt = 1; fallbackAttempt <= DSH_FALLBACK_TURN_MAX_RESUMES; fallbackAttempt += 1) {
             if (outcome.kind !== 'error' || activeSession.abortController.signal.aborted || !isTransientDshTurnError(outcome)) break;
@@ -9058,7 +9090,20 @@ export class CoworkRunner extends EventEmitter {
               ` (Provider ${lastAttemptRoute.provider} model ${lastAttemptRoute.model} is out of credits and the turn was aborted: top up that provider or switch models, then resend.)`
             )}`
           : '';
-        this.handleError(sessionId, `DSH turn failed: ${failureDetail}${quotaNotice}`);
+        // Context-overflow death (2026-09-28 compaction-deadlock incident): a
+        // bare `400 status code (no body)` names no culprit, and the same
+        // failure repeats on EVERY subsequent message — the auto-compaction
+        // request carries the same over-limit history, so it dies with the
+        // same 400 and the session wedges. End the dead loop with an
+        // actionable terminal notice: this state is only fixed by shrinking
+        // the history (manual compaction) or starting a fresh session.
+        const overflowNotice = isOverflowDshTurnError(outcome, { compactionFailedThisTurn })
+          ? ` ${tApp(
+              `（会话历史已超过模型 ${lastAttemptRoute.model} 的上下文窗口，且自动压缩同样被拒，会话已无法在原会话内继续：请点击顶部压缩按钮手动压缩历史；若压缩仍失败，请新开会话并让 Bot 摘要携带关键结论过去。）`,
+              ` (The session history has exceeded model ${lastAttemptRoute.model}'s context window and automatic compaction is rejected too, so this session cannot continue as-is: try the manual compact button in the header; if compaction still fails, start a fresh session and have the bot carry a summary of the key conclusions over.)`
+            )}`
+          : '';
+        this.handleError(sessionId, `DSH turn failed: ${failureDetail}${quotaNotice}${overflowNotice}`);
         this.clearPendingPermissions(sessionId);
         this.settleDshSteerSubmissions(activeSession, 'failed', `DSH turn failed: ${failureDetail}`);
         this.removeActiveSession(sessionId, activeSession);
