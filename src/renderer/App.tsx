@@ -292,6 +292,12 @@ const App: React.FC = () => {
         // 初始化定时任务服务
         await scheduledTaskService.init();
         await groupTaskService.init();
+        // Long-term board data must be live BEFORE the board is ever opened:
+        // the sidebar's 跟踪任务 amber dot and the 长期任务 tab badge both read
+        // this board, and the badge has to work on a machine where the tab was
+        // never opened. init() is idempotent, so the board component keeps its
+        // own init call as a harmless fallback.
+        await longTermTaskService.init();
 
         // Onboarding is no longer shown to first-run users: fresh installs are
         // provisioned with the free-quota welcome bot and land directly in the

@@ -325,6 +325,7 @@ export class Scheduler {
       task.metabotId ?? null
     );
     const sessionId = session.id;
+    this.coworkStore.setSessionAutoOrigin(sessionId, 'schedule');
 
     // Update session to running
     this.coworkStore.updateSession(sessionId, { status: 'running' });

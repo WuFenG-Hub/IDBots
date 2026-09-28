@@ -287,6 +287,8 @@ interface CoworkSession {
   peerAvatar?: string | null;
   metabotName?: string | null;
   metabotAvatar?: string | null;
+  /** Auto-created session marker: long-term task run, orchestration run, or scheduled run. */
+  autoOrigin?: 'longterm' | 'orchestration' | 'schedule' | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 
@@ -394,6 +396,8 @@ interface CoworkSessionSummary {
   peerAvatar?: string | null;
   metabotName?: string | null;
   metabotAvatar?: string | null;
+  /** Auto-created session marker: long-term task run, orchestration run, or scheduled run. */
+  autoOrigin?: 'longterm' | 'orchestration' | 'schedule' | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 

@@ -85,6 +85,26 @@ export interface LongTermSuperviseState {
 
 const CHANNELS: LongTermPreferredChannel[] = ['delegate_bot', 'group_task', 'owner_external', 'owner_together'];
 
+/**
+ * One subtask status transition, emitted to `onSubtaskStatusChange` listeners.
+ * The owner-facing surfaces (sidebar badge, board) use it to refresh in real
+ * time instead of waiting for the 30s board poll.
+ */
+export interface LongTermSubtaskStatusChange {
+  taskId: string;
+  subtaskId: string;
+  status: LongTermSubtaskStatus;
+  /** null when the subtask was just created (no previous status). */
+  previousStatus: LongTermSubtaskStatus | null;
+  /** Short machine reason, e.g. 'began' | 'waiting' | 'proposed' | 'accepted'. */
+  reason: string;
+}
+
+export type LongTermSubtaskStatusListener = (change: LongTermSubtaskStatusChange) => void;
+
+/** Longest owner decision brief kept in `wait_note` on the proposal path. */
+const WAIT_NOTE_MAX_CHARS = 4000;
+
 /** Allowed evidence kinds (LongTermEvidence.kind) — anything else bypasses
  *  the per-kind URI shape checks and is refused. */
 const EVIDENCE_KINDS = ['dir', 'metaapp', 'pin', 'url', 'other'];
@@ -218,12 +238,57 @@ export class LongTermTaskStore {
   private readonly saveDb: () => void;
   /** Resolves metabot ids to display rows (name + avatar) for participant chips. */
   private readonly resolveParticipants: (ids: number[]) => LongTermParticipant[];
+  /** Status-transition subscribers (main wires the push broadcast here). */
+  private readonly statusListeners = new Set<LongTermSubtaskStatusListener>();
 
   constructor(db: Database, saveDb: () => void, options?: { resolveParticipants?: (ids: number[]) => LongTermParticipant[] }) {
     this.db = db;
     this.saveDb = saveDb;
     this.resolveParticipants = options?.resolveParticipants ?? ((ids) => ids.map((id) => ({ id, name: `#${id}`, avatar: null })));
     this.ensureTables();
+  }
+
+  /**
+   * Subscribe to subtask status transitions; returns the unsubscribe function.
+   * Twin-side mutations (agent tools, heartbeat) go through this store with no
+   * IPC reply, so listeners are the only way the renderer learns of a new
+   * `waiting_owner` without waiting out the board poll.
+   */
+  onSubtaskStatusChange(listener: LongTermSubtaskStatusListener): () => void {
+    this.statusListeners.add(listener);
+    return () => {
+      this.statusListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Fire the transition listeners. Transitions that leave the status untouched
+   * (re-recording a note on an already-waiting sub-project, rebinding a
+   * session) stay silent — a push per keystroke would be noise, not news.
+   * A throwing listener never breaks the mutation it was notified about.
+   */
+  private emitStatusChange(
+    previous: LongTermSubtask | null,
+    updated: LongTermSubtask | null,
+    reason: string,
+  ): void {
+    if (!updated) return;
+    const previousStatus = previous?.status ?? null;
+    if (previousStatus === updated.status) return;
+    const change: LongTermSubtaskStatusChange = {
+      taskId: updated.taskId,
+      subtaskId: updated.id,
+      status: updated.status,
+      previousStatus,
+      reason,
+    };
+    for (const listener of [...this.statusListeners]) {
+      try {
+        listener(change);
+      } catch {
+        // A subscriber must never break the store mutation it rides on.
+      }
+    }
   }
 
   private ensureTables(): void {
@@ -699,6 +764,7 @@ export class LongTermTaskStore {
     this.addEvent(taskId, id, 'replanned', actor, `sub-project added (#${ordinal}): ${title}`);
     this.saveDb();
     const created = this.getSubtask(id);
+    this.emitStatusChange(null, created, 'created');
     return created ? { ok: true, value: created } : { ok: false, code: 'NOT_FOUND', error: 'creation failed' };
   }
 
@@ -836,6 +902,7 @@ export class LongTermTaskStore {
     this.addEvent(current.taskId, subtaskId, 'began', actor, `began (channel: ${channelClause ?? 'undecided'})`);
     this.saveDb();
     const updated = this.getSubtask(subtaskId);
+    this.emitStatusChange(current, updated, 'began');
     return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
   }
 
@@ -871,6 +938,7 @@ export class LongTermTaskStore {
     this.addEvent(current.taskId, subtaskId, 'waiting', actor, `${input.kind}: ${asText(input.note)}`);
     this.saveDb();
     const updated = this.getSubtask(subtaskId);
+    this.emitStatusChange(current, updated, input.kind === 'owner' ? 'waiting_owner' : 'waiting_external');
     return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
   }
 
@@ -913,11 +981,20 @@ export class LongTermTaskStore {
     }
     this.db.run(
       "UPDATE long_term_subtasks SET status = 'waiting_owner', evidence_json = ?, wait_note = ?, wait_until = NULL, updated_at = ? WHERE id = ?",
-      [JSON.stringify(evidence), `acceptance proposed: ${asText(input.summary).slice(0, 500)}`, nowIso(), subtaskId],
+      [
+        JSON.stringify(evidence),
+        // The proposal note IS the owner's decision brief: keep it whole (an
+        // acceptance proposal carries the same background/options/recommendation
+        // structure), trimming only against a pathological payload.
+        `acceptance proposed: ${asText(input.summary).slice(0, WAIT_NOTE_MAX_CHARS)}`,
+        nowIso(),
+        subtaskId,
+      ],
     );
     this.addEvent(current.taskId, subtaskId, 'proposed', actor, asText(input.summary).slice(0, 1000));
     this.saveDb();
     const updated = this.getSubtask(subtaskId);
+    this.emitStatusChange(current, updated, 'proposed');
     return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
   }
 
@@ -958,6 +1035,7 @@ export class LongTermTaskStore {
     }
     this.saveDb();
     const updated = this.getSubtask(subtaskId);
+    this.emitStatusChange(current, updated, 'accepted');
     return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
   }
 
@@ -975,6 +1053,7 @@ export class LongTermTaskStore {
     this.touch(current.taskId);
     this.saveDb();
     const updated = this.getSubtask(subtaskId);
+    this.emitStatusChange(current, updated, 'rejected');
     return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
   }
 
@@ -993,6 +1072,7 @@ export class LongTermTaskStore {
     this.touch(current.taskId);
     this.saveDb();
     const updated = this.getSubtask(subtaskId);
+    this.emitStatusChange(current, updated, 'unblocked');
     return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
   }
 

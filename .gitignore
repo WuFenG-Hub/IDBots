@@ -63,7 +63,12 @@ tests/*
 !tests/trackedTaskBoard.test.mjs
 !tests/metaAppBundleEntry.test.mjs
 !tests/orchestrationOriginMigration.test.mjs
+!tests/coworkSessionAutoOrigin.test.mjs
+!tests/sessionAutoGrouping.test.ts
+!tests/coworkUnreadAutoOrigin.test.ts
 !tests/longTermTaskStore.test.mjs
+!tests/longTermTaskStoreNotify.test.mjs
+!tests/trackedTaskDecisionBadge.test.ts
 !tests/twinDelegationAnchor.test.mjs
 !tests/longTermTaskAgentTools.test.mjs
 !tests/heartbeatService.test.mjs

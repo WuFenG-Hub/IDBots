@@ -13,12 +13,48 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const t = (key) => key;
 
+/** The 跟踪任务 entry of the Bot Home nav model. */
+const trackedTasksItem = (params) =>
+  getSidebarPrimaryNavModel({ t, ...params }).find((item) => item.id === 'scheduledTasks');
+
 test('Bot Home primary nav keeps tasks and bots, without Bot Hub or Meta Apps', () => {
   const ids = getSidebarPrimaryNavModel({ t, hasRunningScheduledTask: false })
     .filter((item) => !item.hidden)
     .map((item) => item.id);
 
   assert.deepEqual(ids, ['scheduledTasks', 'groupTasks', 'metabots']);
+});
+
+test('the 跟踪任务 entry carries no dot by default, an amber running dot while a task runs', () => {
+  const idle = trackedTasksItem({ hasRunningScheduledTask: false, needsDecisionCount: 0 });
+  assert.equal(idle.hasIndicator, false);
+  assert.equal(idle.indicatorKind, undefined);
+  assert.equal(idle.indicatorLabel, undefined);
+
+  const running = trackedTasksItem({ hasRunningScheduledTask: true, needsDecisionCount: 0 });
+  assert.equal(running.hasIndicator, true);
+  assert.equal(running.indicatorKind, 'running', 'no owner decision pending: the plain running dot');
+  assert.equal(running.indicatorLabel, undefined, 'the running dot stays unlabelled (historic behaviour)');
+});
+
+test('a pending owner decision lights the 跟踪任务 dot with its own count label, and outranks "running"', () => {
+  const decision = trackedTasksItem({ hasRunningScheduledTask: false, needsDecisionCount: 2 });
+  assert.equal(decision.hasIndicator, true);
+  assert.equal(decision.indicatorKind, 'decision');
+  assert.equal(decision.indicatorLabel, 'trackedTaskNeedsDecision', 'the label key carries the count placeholder');
+
+  const both = trackedTasksItem({ hasRunningScheduledTask: true, needsDecisionCount: 1 });
+  assert.equal(both.indicatorKind, 'decision', 'the owner decision wins over a running task');
+  assert.equal(both.hasIndicator, true);
+
+  // Garbage counts must not light the dot.
+  for (const needsDecisionCount of [0, -3, undefined, null, NaN]) {
+    assert.equal(
+      trackedTasksItem({ hasRunningScheduledTask: false, needsDecisionCount }).hasIndicator,
+      false,
+      `needsDecisionCount=${String(needsDecisionCount)} keeps the dot off`,
+    );
+  }
 });
 
 test('Bot Internet nav model keeps Bot Hub implemented but hidden behind its flag', () => {

@@ -341,7 +341,12 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
               </div>
 
               {selectedSubtask.waitNote && (
-                <div className="mt-3 rounded-lg bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-200/90">
+                // whitespace-pre-line: the wait note is the owner's decision
+                // brief (background / situation / decision / options /
+                // recommendation / next step), so its line structure is content,
+                // not formatting — collapsing it into one paragraph would bury
+                // the sections the owner has to read.
+                <div className="mt-3 whitespace-pre-line rounded-lg bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-200/90">
                   {i18nService.t('longTermTask.subtask.waitingOn').replace('{note}', selectedSubtask.waitNote)}
                 </div>
               )}

@@ -6772,6 +6772,19 @@ const getLongTermTaskStore = () => {
           return { id, name: bot?.name ?? `#${id}`, avatar: bot?.avatar ?? null };
         }),
     });
+    // Twin-side mutations (agent tools, heartbeat) write straight to the store
+    // and never touch the owner IPC handlers, so without this hook a new
+    // `waiting_owner` card would stay invisible to the sidebar badge until the
+    // renderer's 30s board poll came round. One push per real status change,
+    // with the same monotonic seq counter and payload shape as the owner-IPC
+    // broadcasts below. An owner action that flips a status is therefore pushed
+    // twice (its IPC handler pushes, then the store listener does): both carry
+    // fresh seqs and the same task id, the renderer just re-reads the board —
+    // cheap, and it keeps this hook correct on its own instead of depending on
+    // every owner path remembering to broadcast.
+    longTermTaskStore.onSubtaskStatusChange((change) => {
+      broadcastLongTermTaskUpdate([change.taskId], `subtask_${change.reason}`);
+    });
   }
   return longTermTaskStore;
 };

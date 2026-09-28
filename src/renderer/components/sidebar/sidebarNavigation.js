@@ -8,13 +8,25 @@ const GROUP_TASKS_NAV_ENABLED = true;
 // `true` to restore the entry on the Bot Internet page.
 const BOT_HUB_NAV_ENABLED = false;
 
-export function getSidebarPrimaryNavModel({ t, hasRunningScheduledTask }) {
+export function getSidebarPrimaryNavModel({ t, hasRunningScheduledTask, needsDecisionCount = 0 }) {
+  // A parked owner decision (waiting_owner) outranks "a task is running": a
+  // running task needs nobody, while a parked decision needs the OWNER. Both
+  // surface as the same amber dot, so the decision wins and carries its own
+  // label/count.
+  const decisionCount = Number.isFinite(needsDecisionCount) && needsDecisionCount > 0
+    ? Math.floor(needsDecisionCount)
+    : 0;
+  const hasDecision = decisionCount > 0;
   return [
     {
       id: 'scheduledTasks',
       label: t('scheduledTasks'),
       icon: 'clock',
-      hasIndicator: Boolean(hasRunningScheduledTask),
+      hasIndicator: Boolean(hasRunningScheduledTask) || hasDecision,
+      indicatorKind: hasDecision ? 'decision' : hasRunningScheduledTask ? 'running' : undefined,
+      indicatorLabel: hasDecision
+        ? t('trackedTaskNeedsDecision').replace('{count}', String(decisionCount))
+        : undefined,
     },
     {
       id: 'groupTasks',

@@ -493,3 +493,20 @@ select::-ms-expand {
 .dark .scheduled-task-running-indicator {
   background-color: #fbbf24;
 }
+
+/* A tracked task waiting on the OWNER (waiting_owner): the sidebar dot for
+ * "you are the blocker". Same amber family and pulse as the running indicator,
+ * but a slower, calmer cycle — a standing request for a human decision, not
+ * ongoing machine work. */
+.tracked-task-decision-indicator {
+  display: inline-block;
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 9999px;
+  background-color: #f59e0b;
+  animation: scheduled-task-running-glow 4s ease-in-out infinite;
+}
+
+.dark .tracked-task-decision-indicator {
+  background-color: #fbbf24;
+}
