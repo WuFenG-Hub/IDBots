@@ -481,6 +481,87 @@ export const DSH_TURN_STALL_TIMEOUT_MS = 10 * 60_000;
 export const DSH_TOOL_CALL_HARD_CAP_MS = 60 * 60_000;
 
 /**
+ * Absolute ceiling for the adaptive DSH turn stall deadline. The context and
+ * strike extensions below may raise the effective deadline, never past this.
+ * Matches the in-flight tool-call hard cap so no wait outlives a lost
+ * subprocess.
+ */
+export const DSH_TURN_STALL_ABSOLUTE_CAP_MS = 60 * 60_000;
+
+/**
+ * Context extension: each full DSH_STALL_CONTEXT_STEP_TOKENS of live
+ * prompt-side context above DSH_STALL_CONTEXT_BASE_TOKENS adds one
+ * DSH_STALL_CONTEXT_STEP_MS to the stall deadline (capped at
+ * DSH_STALL_CONTEXT_EXTENSION_CAP_MS). A long-context request legitimately
+ * waits many minutes on provider-side prefill/queueing before the first
+ * streamed byte — the host sees zero events while the provider is still
+ * working, and the flat 10-minute deadline killed healthy turns there
+ * (2026-09-28 session 2bcfbb63: glm-5.3 at max effort on a ~900-message
+ * context, three cancellations each exactly one stall window after the last
+ * event; every re-send re-entered the same wait and was killed again).
+ */
+export const DSH_STALL_CONTEXT_BASE_TOKENS = 32_000;
+export const DSH_STALL_CONTEXT_STEP_TOKENS = 10_000;
+export const DSH_STALL_CONTEXT_STEP_MS = 2 * 60_000;
+export const DSH_STALL_CONTEXT_EXTENSION_CAP_MS = 20 * 60_000;
+
+/**
+ * Strike extension: every prior stall-watchdog cancellation of this session
+ * adds this much headroom to the next attempt's deadline. Without it, the
+ * re-send of a heavy session is killed by the same ceiling that killed the
+ * first attempt (the context does not shrink on re-send), which makes such
+ * sessions uncontinuable. Cleared as soon as one turn settles normally.
+ */
+export const DSH_STALL_STRIKE_EXTENSION_MS = 10 * 60_000;
+
+/**
+ * The effective no-progress deadline for one arming of the DSH stall
+ * watchdog: base + context extension + strike extension, clamped to the
+ * absolute cap (an explicit base override larger than the cap wins).
+ * Pure + exported for unit tests.
+ */
+export function computeDshStallDeadlineMs(input: {
+  baseMs: number;
+  strikes?: number;
+  contextTokens?: number;
+  /** Multiplier on both extensions; tests shrink them to test scale. */
+  scale?: number;
+}): number {
+  if (input.baseMs <= 0) return 0;
+  const scale = Math.max(0, input.scale ?? 1);
+  const overBaseTokens = Math.max(0, (input.contextTokens ?? 0) - DSH_STALL_CONTEXT_BASE_TOKENS);
+  const contextSteps = Math.floor(overBaseTokens / DSH_STALL_CONTEXT_STEP_TOKENS);
+  const contextExtensionMs = Math.min(
+    DSH_STALL_CONTEXT_EXTENSION_CAP_MS,
+    contextSteps * DSH_STALL_CONTEXT_STEP_MS,
+  ) * scale;
+  const strikeExtensionMs = Math.max(0, input.strikes ?? 0) * DSH_STALL_STRIKE_EXTENSION_MS * scale;
+  const deadline = input.baseMs + contextExtensionMs + strikeExtensionMs;
+  return Math.max(input.baseMs, Math.min(deadline, DSH_TURN_STALL_ABSOLUTE_CAP_MS));
+}
+
+/**
+ * Render a DSH turn abort reason for the transcript. Turn-end reasons can be
+ * plain strings (hub cancel tags) or objects (abort causes like
+ * { kind: 'hook', reason: 'steer' }, provider { message, code }); the old
+ * template literal printed objects as "[object Object]" and hid the actual
+ * cause from users post-morteming a stopped turn.
+ * Pure + exported for unit tests.
+ */
+export function describeDshAbortReason(reason: unknown): string {
+  if (typeof reason === 'string' && reason.trim()) return reason;
+  if (reason && typeof reason === 'object') {
+    try {
+      const json = JSON.stringify(reason);
+      if (json && json !== '{}') return json;
+    } catch { /* non-serializable cause — fall through to .message */ }
+    const message = (reason as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message;
+  }
+  return 'cancelled';
+}
+
+/**
  * Count tool calls older than the hard cap. Pure + exported for unit tests.
  * `capMs <= 0` disables the cap (nothing ever expires).
  */
@@ -1917,6 +1998,13 @@ export interface CoworkRunnerOptions {
    */
   dshTurnStallTimeoutMs?: number;
   /**
+   * Multiplier on the DSH stall deadline's context and strike extensions
+   * (see computeDshStallDeadlineMs). Defaults to 1 (production values);
+   * tests shrink it so extended deadlines stay test-fast. 0 disables both
+   * extensions (flat base deadline).
+   */
+  dshStallExtensionScale?: number;
+  /**
    * Hard cap for one in-flight DSH tool call with no result (runtime lost
    * the subprocess). Past the cap the stall watchdog cancels + force-settles
    * the turn instead of re-arming forever. Defaults to
@@ -2051,7 +2139,15 @@ export class CoworkRunner extends EventEmitter {
   private screenshotHost?: ScreenshotHost;
   private readonly localTurnStallTimeoutMs: number;
   private readonly dshTurnStallTimeoutMs: number;
+  private readonly dshStallExtensionScale: number;
   private readonly dshToolCallHardCapMs: number;
+  /**
+   * Consecutive stall-watchdog cancellations per cowork session, feeding the
+   * strike extension of the adaptive DSH stall deadline. Lives on the runner
+   * (not the ActiveSession) so it survives the per-turn session teardown and
+   * lifts the next re-send's deadline; cleared when a turn settles normally.
+   */
+  private dshStallStrikesBySessionId = new Map<string, number>();
   private activeSessions: Map<string, ActiveSession> = new Map();
   /**
    * Per-session accumulated usage stats, keyed by sessionId. Independent of the
@@ -2194,6 +2290,10 @@ export class CoworkRunner extends EventEmitter {
     this.dshTurnStallTimeoutMs = Math.max(
       0,
       options?.dshTurnStallTimeoutMs ?? DSH_TURN_STALL_TIMEOUT_MS
+    );
+    this.dshStallExtensionScale = Math.max(
+      0,
+      options?.dshStallExtensionScale ?? 1
     );
     this.dshToolCallHardCapMs = Math.max(
       0,
@@ -8156,14 +8256,19 @@ export class CoworkRunner extends EventEmitter {
         mapped: dshReasoningEffort ?? null,
       });
       // Turn-level stall watchdog: cancel a turn that made no progress for
-      // dshTurnStallTimeoutMs (runtime wedge, provider hang past every tool's
-      // own timeout). Progress is re-armed on every LLM-side event (message,
-      // stream update, usage), and a pending permission dialog means a human
-      // is the slow party — those extend the deadline instead of firing
-      // through it. A tool call executing in the runtime (bash rendering a
-      // video, npm install) emits no LLM-side events by design, so in-flight
-      // tool calls extend the deadline the same way. The non-user-aborted
-      // settlement below turns the cancel into idle + a localized diagnostic.
+      // the adaptive stall deadline (runtime wedge, provider hang past every
+      // tool's own timeout). Progress is re-armed on every LLM-side event
+      // (message, stream update, usage), and a pending permission dialog
+      // means a human is the slow party — those extend the deadline instead
+      // of firing through it. A tool call executing in the runtime (bash
+      // rendering a video, npm install) emits no LLM-side events by design,
+      // so in-flight tool calls extend the deadline the same way. The
+      // deadline itself is NOT flat: long prompt contexts legitimately wait
+      // minutes on provider prefill/queueing before the first byte (zero
+      // host events while healthy), and each prior stall cancellation of
+      // this session widens the next attempt's window — see
+      // computeDshStallDeadlineMs. The non-user-aborted settlement below
+      // turns the cancel into idle + a localized diagnostic.
       let dshStallTimer: NodeJS.Timeout | null = null;
       // Watermark of the newest usage-projection snapshot applied to the live
       // ring value (onUsage refines it over the wire; guards out-of-order).
@@ -8200,7 +8305,21 @@ export class CoworkRunner extends EventEmitter {
       };
       const armDshStallWatchdog = () => {
         clearDshStallWatchdog();
-        if (this.dshTurnStallTimeoutMs <= 0) return;
+        // Live context first (maintained by onUsage during the run), then the
+        // persisted last-turn input as the restart fallback — a heavy session
+        // continued after an app relaunch must get its extension on the very
+        // first turn, before any usage event arrives.
+        const contextTokens = activeSession.realContextUsage?.usedTokens
+          ?? this.getSessionUsageStats(sessionId)?.lastTurnInputTokens
+          ?? 0;
+        const strikes = this.dshStallStrikesBySessionId.get(sessionId) ?? 0;
+        const stallDeadlineMs = computeDshStallDeadlineMs({
+          baseMs: this.dshTurnStallTimeoutMs,
+          strikes,
+          contextTokens,
+          scale: this.dshStallExtensionScale,
+        });
+        if (stallDeadlineMs <= 0) return;
         dshStallTimer = setTimeout(() => {
           dshStallTimer = null;
           if (activeSession.abortController.signal.aborted) return;
@@ -8233,15 +8352,19 @@ export class CoworkRunner extends EventEmitter {
             'WARN',
             'runDshSessionLocal',
             'DSH turn stalled with no progress; cancelling via the stall watchdog',
-            { sessionId, stallMs: this.dshTurnStallTimeoutMs }
+            { sessionId, stallMs: stallDeadlineMs, contextTokens, strikes }
           );
+          // Record the strike so the re-send gets a wider window: a heavy
+          // context re-enters the same long provider wait, and without the
+          // strike extension every re-send dies at the same ceiling.
+          this.dshStallStrikesBySessionId.set(sessionId, strikes + 1);
           void hub.cancel(sessionId, 'turn stall watchdog').catch(() => undefined);
           // A cancel against an idle agent is a no-op that never emits a
           // turn boundary — force-settle the controller too, or a turn whose
           // boundary was swallowed (steer follow-up that never woke) would
           // await forever despite the watchdog having fired.
           hub.forceSettle(sessionId, 'turn stall watchdog');
-        }, this.dshTurnStallTimeoutMs);
+        }, stallDeadlineMs);
         dshStallTimer.unref?.();
       };
       const runGuardedTurn = async (
@@ -8811,7 +8934,7 @@ export class CoworkRunner extends EventEmitter {
       }
 
       if (activeSession.abortController.signal.aborted) {
-        this.addSystemMessage(sessionId, `Turn aborted: ${outcome.reason ?? 'cancelled'}.`);
+        this.addSystemMessage(sessionId, `Turn aborted: ${describeDshAbortReason(outcome.reason)}.`);
         finish('idle');
         await this.settleDshUsageStats(sessionId, hub);
         this.emit('complete', sessionId, activeSession.claudeSessionId);
@@ -8880,6 +9003,10 @@ export class CoworkRunner extends EventEmitter {
       } else {
         finish('completed');
       }
+      // Any terminal outcome here (completed / empty terminal / truncated)
+      // proves the provider path is live again — clear the consecutive-stall
+      // escalation so the next turn's watchdog returns to its base window.
+      this.dshStallStrikesBySessionId.delete(sessionId);
       // Usage stats settle BEFORE emit('complete') — the renderer refreshes the
       // session on streamComplete and must see the folded projection.
       await this.settleDshUsageStats(sessionId, hub);
