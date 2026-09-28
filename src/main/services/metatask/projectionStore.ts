@@ -200,9 +200,9 @@ export class MetaTaskProjectionStore {
 
   /**
    * Resolve display identities for every actor and stamp them onto the
-   * projections before persisting (single enrichment point). Local roster
-   * now; external names/avatars land when a by-metaId identity endpoint
-   * exists on MetaSo — the resolver + cache table are the injection point.
+   * projections before persisting (single enrichment point). The injected
+   * resolver is local-roster-first with a throttled remote fallback; resolved
+   * rows persist in metatask_identities so later sweeps serve them from cache.
    */
   async enrichIdentities(projections: MetaTaskTaskProjection[]): Promise<void> {
     const actors = new Set<string>();

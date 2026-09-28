@@ -6851,6 +6851,34 @@ const getLongTermAdvanceService = () => {
 };
 
 let metaTaskProjectionStore: MetaTaskProjectionStore | null = null;
+
+/** Retry a failed/unresolved remote identity lookup after this cooldown. */
+const META_TASK_IDENTITY_REMOTE_RETRY_MS = 6 * 60 * 60 * 1000;
+/** Bound one sweep's remote lookups; the rest resolve on later sweeps. */
+const META_TASK_IDENTITY_REMOTE_BATCH_CAP = 64;
+const metaTaskIdentityRemoteAttemptAt = new Map<string, number>();
+
+/** Best-effort remote GlobalMetaID -> {name, avatar} lookup for display:
+ * local indexer / file.metaid.io first, so.metaid.io detail as fallback. */
+const fetchMetaTaskRemoteIdentity = async (
+  metaId: string,
+): Promise<{ name: string | null; avatar: string | null } | null> => {
+  try {
+    const payload = await fetchMetaidUserInfoByGlobalMetaId(metaId);
+    const data = payload?.data ?? {};
+    const name = typeof data.name === 'string' && data.name.trim() ? data.name.trim() : null;
+    const avatar = typeof data.avatarUrl === 'string' && data.avatarUrl ? data.avatarUrl : null;
+    if (name || avatar) return { name, avatar };
+  } catch { /* fall through to the so.metaid.io fallback */ }
+  try {
+    const detail = await getMetaIdDetail(metaId);
+    const name = detail.name || null;
+    const avatar = detail.avatarId ? await resolvePinAssetSource(detail.avatarId) : null;
+    if (name || avatar) return { name, avatar };
+  } catch { /* identity enrichment is best-effort display sugar */ }
+  return null;
+};
+
 /** Shared rebuildable projection cache (refresher + watch service both use it). */
 const getMetaTaskProjectionStore = () => {
   if (!metaTaskProjectionStore) {
@@ -6859,19 +6887,32 @@ const getMetaTaskProjectionStore = () => {
       sqliteStore.getDatabase(),
       sqliteStore.getSaveFunction(),
       {
-        // Display identities: local roster resolves fully today; external
-        // bots stay short-id until MetaSo exposes a by-metaId identity
-        // endpoint (cached in metatask_identities, ready to enrich).
+        // Display identities: local roster resolves instantly; external bots
+        // are looked up remotely (throttled + capped per sweep) and persisted
+        // in the metatask_identities cache table by the store.
         resolveIdentities: async (metaIds) => {
           const byGlobal: Map<string, { name: string; avatar: string | null }> = new Map();
           for (const bot of getMetabotStore().listMetabots()) {
             if (bot.globalmetaid) byGlobal.set(bot.globalmetaid, { name: bot.name, avatar: bot.avatar ?? null });
           }
           const out: Record<string, { metaId: string; name: string | null; avatar: string | null }> = {};
+          const remoteQueue: string[] = [];
           for (const metaId of metaIds) {
             const local = byGlobal.get(metaId);
-            if (local) out[metaId] = { metaId, name: local.name, avatar: local.avatar };
+            if (local) {
+              out[metaId] = { metaId, name: local.name, avatar: local.avatar };
+              continue;
+            }
+            const lastAttempt = metaTaskIdentityRemoteAttemptAt.get(metaId) ?? 0;
+            if (Date.now() - lastAttempt >= META_TASK_IDENTITY_REMOTE_RETRY_MS) remoteQueue.push(metaId);
           }
+          await Promise.all(
+            remoteQueue.slice(0, META_TASK_IDENTITY_REMOTE_BATCH_CAP).map(async (metaId) => {
+              metaTaskIdentityRemoteAttemptAt.set(metaId, Date.now());
+              const remote = await fetchMetaTaskRemoteIdentity(metaId);
+              if (remote) out[metaId] = { metaId, name: remote.name, avatar: remote.avatar };
+            }),
+          );
           return out;
         },
       }

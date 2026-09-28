@@ -1,9 +1,9 @@
 import React from 'react';
 
 /**
- * MetaTask identity display: avatar + name when known (local roster today;
- * external bots once MetaSo exposes a by-metaId identity endpoint), else a
- * short metaId with the full id on hover. Replaces bare truncated metaIds
+ * MetaTask identity display: avatar + name when known (local roster, or
+ * remotely resolved via the main-process identity cache), else a short
+ * metaId with the full id on hover. Replaces bare truncated metaIds
  * everywhere (board cards, detail header, roster, node actors, votes, shares).
  */
 const MetaIdBadge: React.FC<{
