@@ -364,3 +364,140 @@ test('a transport death during the reject respondTool never becomes an unhandled
     await hub.close().catch(() => undefined)
   }
 })
+
+// ---- Continuable-subagent lineage (2026-09-28 session 540635be) ------------
+// Resident children run kernel-initiated turns whose policy/tool requests
+// carry the CHILD's own dsh session id. coworkByDsh/pinnedDshIds only ever
+// hold the PARENT session's id, so every native-tool check from a continuable
+// child resolved to nothing and — since the fail-closed change — denied with
+// "no cowork session mapping" (the incident: 48 denied tool calls while the
+// workers kept retrying; the chair probed, worked around, and shut down).
+// The fix: idbots/subagent/started registers child→parent lineage, and
+// coworkOfDsh resolves the child through the parent's mapping (live or
+// pinned). Genuinely unknown sessions still fail closed.
+
+test('a continuable child policy request resolves through its parent lineage, not the fail-closed deny', async () => {
+  const logs = []
+  const consulted = []
+  const hub = makePolicyHub(logs, async (coworkId, name) => {
+    consulted.push({ coworkId, name })
+    return { decision: 'allow', reason: 'acceptEdits (test)' }
+  })
+  try {
+    const { kernel, responses } = spyPolicyKernel(hub)
+    // The parent chair's host turn settled long ago: only its pin remains.
+    hub.pinnedDshIds.set('cowork-chair', 'cw-chair-parent')
+    // The runtime re-emits started on every re-materialization of the child.
+    kernel.opts.handlers.onSubagentEvent({
+      kind: 'started', sessionId: 'cw-chair-parent', agentId: 'cw-worker-child',
+    })
+    kernel.opts.handlers.onPolicyRequest({
+      sessionId: 'cw-worker-child',
+      id: 'pol-lineage-1',
+      name: 'bash',
+      arguments: { command: 'echo lineage' },
+    })
+    await waitFor(() => responses.length === 1, 5000, 'lineage-evaluated respondPolicy')
+    assert.deepEqual(
+      consulted.map((c) => c.coworkId),
+      ['cowork-chair'],
+      'the child check was gated by the parent cowork session policy',
+    )
+    assert.equal(responses[0].decision, 'allow')
+    assert.equal(responses[0].reason, 'acceptEdits (test)')
+    assert.ok(
+      !logs.some((l) => l.message.includes('dshTurnHub.onPolicyRequest')
+        && String(l.detail.message ?? '').includes('denying')),
+      'a lineage-resolvable child must not hit the fail-closed deny',
+    )
+  } finally {
+    await hub.close().catch(() => undefined)
+  }
+})
+
+test('child lineage also routes host tool requests to the parent cowork session', async () => {
+  const logs = []
+  const executed = []
+  const hub = new (loadModules().DshTurnHub)({
+    runtimeDir,
+    sessionRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-idle-tool-lineage-')),
+    log: (level, message, detail) => logs.push({ level, message, detail: detail ?? {} }),
+    executeTool: async (coworkId, name) => {
+      executed.push({ coworkId, name })
+      return { ok: true, text: `LINEAGE_OK:${name}` }
+    },
+  })
+  try {
+    const slot = hub.getOrCreateSlot('mockgw')
+    const kernel = slot.kernel
+    const responds = []
+    kernel.respondTool = async (id, result) => {
+      responds.push({ id, result })
+      return { answered: true }
+    }
+    hub.coworkByDsh.set('cw-chair-live', 'cowork-chair')
+    kernel.opts.handlers.onSubagentEvent({
+      kind: 'started', sessionId: 'cw-chair-live', agentId: 'cw-worker-tools',
+    })
+    kernel.opts.handlers.onToolRequest({
+      sessionId: 'cw-worker-tools',
+      id: 'tool-lineage-1',
+      name: 'host_echo_tool',
+      arguments: { message: 'from the child' },
+    })
+    await waitFor(() => responds.length === 1, 5000, 'child host-tool respondTool')
+    assert.deepEqual(executed, [{ coworkId: 'cowork-chair', name: 'host_echo_tool' }])
+    assert.equal(responds[0].result.ok, true)
+  } finally {
+    await hub.close().catch(() => undefined)
+  }
+})
+
+test('a finished child drops its lineage and fails closed again', async () => {
+  const logs = []
+  const hub = makePolicyHub(logs, async () => ({ decision: 'allow' }))
+  try {
+    const { kernel, responses } = spyPolicyKernel(hub)
+    hub.pinnedDshIds.set('cowork-chair', 'cw-chair-parent')
+    kernel.opts.handlers.onSubagentEvent({
+      kind: 'started', sessionId: 'cw-chair-parent', agentId: 'cw-worker-done',
+    })
+    kernel.opts.handlers.onSubagentEvent({
+      kind: 'finished', sessionId: 'cw-chair-parent', agentId: 'cw-worker-done',
+    })
+    kernel.opts.handlers.onPolicyRequest({
+      sessionId: 'cw-worker-done',
+      id: 'pol-lineage-2',
+      name: 'bash',
+      arguments: { command: 'echo gone' },
+    })
+    await waitFor(() => responses.length === 1, 5000, 'post-finish deny respondPolicy')
+    assert.equal(responses[0].decision, 'deny', 'a disposed child is unknown again — fail closed')
+    assert.match(responses[0].reason ?? '', /no cowork session mapping/)
+  } finally {
+    await hub.close().catch(() => undefined)
+  }
+})
+
+test('a child whose parent itself cannot resolve still fails closed', async () => {
+  const logs = []
+  const hub = makePolicyHub(logs, async () => ({ decision: 'allow' }))
+  try {
+    const { kernel, responses } = spyPolicyKernel(hub)
+    // Lineage registered, but the parent has neither a live mapping nor a pin
+    // (e.g. its cowork session was deleted) — the deny must still hold.
+    kernel.opts.handlers.onSubagentEvent({
+      kind: 'started', sessionId: 'cw-orphan-parent', agentId: 'cw-orphan-child',
+    })
+    kernel.opts.handlers.onPolicyRequest({
+      sessionId: 'cw-orphan-child',
+      id: 'pol-lineage-3',
+      name: 'bash',
+      arguments: { command: 'echo orphan' },
+    })
+    await waitFor(() => responses.length === 1, 5000, 'orphan deny respondPolicy')
+    assert.equal(responses[0].decision, 'deny')
+  } finally {
+    await hub.close().catch(() => undefined)
+  }
+})

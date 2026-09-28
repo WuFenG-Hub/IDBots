@@ -165,6 +165,15 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
     prompt as the row summary, finished keys the same agent id); the runner
     maps them onto the SAME emitSubagentEvent task channel the Claude path
     uses, so the panel's Redux consumes them unchanged (zero renderer edits).
+    Since `fix/cowork-stall-watchdog` (2026-09-28 session 540635be: 48
+    fail-closed "no cowork session mapping" denials of continuable workers'
+    tools), started/finished ALSO feed a child→parent lineage map
+    (`subagentParentByChild`) in the hub: request routing
+    (onPolicyRequest/onToolRequest) resolves a child through its parent's
+    cowork mapping via `coworkOfDsh`, while transcript-affecting paths
+    (idle-message insertion, session titles) use the strictly-owned
+    `ownedCoworkOfDsh` so child chatter stays in the panel and a child title
+    never renames the parent. Unknown sessions still fail closed.
 
 **Remaining backlog:**
 11. **P2 — Behavioral foundation decision**: claude path sits on the full

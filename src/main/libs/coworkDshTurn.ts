@@ -454,6 +454,20 @@ export class DshTurnHub {
   private coworkByDsh = new Map<string, string>()
   /** cowork id → dsh id, kept across turns for post-hoc panel lookups. */
   private pinnedDshIds = new Map<string, string>()
+  /**
+   * Continuable-subagent lineage: child DSH session id (== runtime agent id)
+   * → parent DSH session id, learned from idbots/subagent/started. Resident
+   * children run kernel-initiated turns with NO host controller, so their
+   * policy/tool requests can only resolve through this lineage → parent's
+   * cowork mapping (the delegation captured the parent's policy, making the
+   * parent's checks exactly the right gate). Without it every native-tool
+   * check from a continuable child fails closed with "no cowork session
+   * mapping" (2026-09-28 session 540635be: 48 denied tool calls while the
+   * workers kept retrying). The runtime re-emits started on every
+   * re-materialization, so entries stay fresh for live children; finished
+   * (agent/disposed) and close() remove them.
+   */
+  private subagentParentByChild = new Map<string, string>()
   /** dsh session id → provider key of the kernel that last served it. */
   private runtimeKeyByDsh = new Map<string, string>()
   /** dsh session id → the kernel instance whose process holds the session's
@@ -699,11 +713,34 @@ export class DshTurnHub {
     }
   }
 
-  private coworkOfDsh(dshSessionId: string): string | undefined {
+  /**
+   * Strictly-owned resolution: the live turn mapping plus the session's OWN
+   * pin. Used by transcript-affecting paths (idle message insertion, session
+   * titles) — a continuable child's raw transcript must NOT fold into the
+   * parent chat (children report through send_message + the subagent panel
+   * by design) and a child title must not rename its parent's session.
+   */
+  private ownedCoworkOfDsh(dshSessionId: string): string | undefined {
     const live = this.coworkByDsh.get(dshSessionId)
     if (live) return live
     for (const [coworkId, dshId] of this.pinnedDshIds) {
       if (dshId === dshSessionId) return coworkId
+    }
+    return undefined
+  }
+
+  private coworkOfDsh(dshSessionId: string): string | undefined {
+    const owned = this.ownedCoworkOfDsh(dshSessionId)
+    if (owned) return owned
+    // Continuable-subagent lineage: a resident child session resolves through
+    // its parent's cowork mapping — the delegation captured the parent's
+    // policy, so the child's checks are exactly the parent's checks. Used by
+    // request routing (policy/tool); an unknown session still returns
+    // undefined so the fail-closed deny for genuinely unresolvable sessions
+    // is preserved.
+    const parent = this.subagentParentByChild.get(dshSessionId)
+    if (parent !== undefined && parent !== dshSessionId) {
+      return this.ownedCoworkOfDsh(parent)
     }
     return undefined
   }
@@ -969,6 +1006,7 @@ export class DshTurnHub {
     this.controllersByDsh.clear()
     this.dshByCowork.clear()
     this.coworkByDsh.clear()
+    this.subagentParentByChild.clear()
     this.runtimeKeyByDsh.clear()
     this.kernelByDsh.clear()
     this.askKernelById.clear()
@@ -1303,7 +1341,10 @@ export class DshTurnHub {
       onMessage: (sessionId, message, streamSlot) => {
         const controller = controllerOf(sessionId)
         if (controller) return controller.cb.onMessage(message, streamSlot)
-        const coworkId = this.coworkOfDsh(sessionId)
+        // Transcript-affecting: strictly-owned resolution only. A continuable
+        // child's raw messages stay out of the parent chat (they report via
+        // send_message + the subagent panel).
+        const coworkId = this.ownedCoworkOfDsh(sessionId)
         if (coworkId && this.opts.onIdleSessionMessage) {
           return this.opts.onIdleSessionMessage(coworkId, message)
         }
@@ -1380,13 +1421,28 @@ export class DshTurnHub {
         for (const controller of this.controllersByDsh.values()) controller.cb.onAskCancelled?.(askId)
       },
       onSubagentEvent: (event) => {
+        // Lineage first — it must register even with no live parent
+        // controller (a continuable child re-materializes and runs turns
+        // long after the parent's host turn settled). started carries the
+        // PARENT dsh session id and the child's id as agentId.
+        const childId = typeof event.agentId === 'string' ? event.agentId : ''
+        const parentId = typeof event.sessionId === 'string' ? event.sessionId : ''
+        if (childId && parentId && parentId !== childId) {
+          if (event.kind === 'started') {
+            this.subagentParentByChild.set(childId, parentId)
+          } else if (event.kind === 'finished') {
+            this.subagentParentByChild.delete(childId)
+          }
+        }
         controllerOf(event.sessionId)?.cb.onSubagentEvent?.(event)
       },
       onSessionTitle: (sessionId, title) => {
         // Title events arrive outside the turn-controller lifecycle (the
         // provider's auxiliary LLM call can settle after turn end), so resolve
         // through the pinned mapping rather than the live controller.
-        const coworkId = this.coworkOfDsh(sessionId)
+        // Strictly-owned: a continuable child's title must not rename its
+        // parent's cowork session.
+        const coworkId = this.ownedCoworkOfDsh(sessionId)
         if (coworkId) this.opts.onSessionTitle?.(coworkId, title)
       },
       onError: (error) => {
