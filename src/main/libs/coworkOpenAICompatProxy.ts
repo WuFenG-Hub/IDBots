@@ -1837,11 +1837,17 @@ function writeJSON(
   body: Record<string, unknown>
 ): void {
   const payload = JSON.stringify(body);
-  res.writeHead(statusCode, {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(payload),
-  });
-  res.end(payload);
+  try {
+    res.writeHead(statusCode, {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(payload),
+    });
+    res.end(payload);
+  } catch {
+    // The caller disconnected mid-request (socket destroyed); there is nobody
+    // left to read this response, and a write-after-destroy must not crash the
+    // proxy's error path itself.
+  }
 }
 
 /**
@@ -3985,6 +3991,23 @@ async function handleRequest(
   const targetURLs = buildUpstreamTargetUrls(upstream.baseURL, upstreamAPIType, upstream.provider);
   let currentTargetURL = targetURLs[0];
 
+  // Propagate caller disconnects into the upstream request. Callers bound each
+  // attempt with their own timeout (dreams: 180s/600s) and abort THEIR fetch to
+  // this proxy when it fires; before 2026-09-29 that closed socket went
+  // unnoticed here and the upstream request ran to completion anyway, burning
+  // provider quota nobody would read — and across ~20 nightly dream bots the
+  // orphaned requests could trip upstream rate limits. `res` 'close' also
+  // fires after a normal finish, so only abort when the response never
+  // completed. The aborted fetch surfaces as ERR_ABORTED/AbortError, which is
+  // deliberately NOT in the transient retry list — retries would fight the
+  // caller's cancellation.
+  const upstreamAbort = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      upstreamAbort.abort();
+    }
+  });
+
   const sendUpstreamRequest = async (
     payload: Record<string, unknown>,
     targetURL: string
@@ -3994,6 +4017,7 @@ async function handleRequest(
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
+      signal: upstreamAbort.signal,
     });
   };
   // Every upstream send goes through the transient-retry wrapper: a single
