@@ -213,8 +213,10 @@ async function main() {
   const items = [
     // local file, oss object name, yaml flag, content type
     [path.join(macDir, `IDBots-${version}-arm64.dmg`), `IDBots-${version}-arm64.dmg`, false, 'application/x-apple-diskimage'],
+    [path.join(macDir, `IDBots-${version}-x64.dmg`), `IDBots-${version}-x64.dmg`, false, 'application/x-apple-diskimage'],
     [path.join(winDir, `IDBots Setup ${version}.exe`), `IDBots-Setup-${version}.exe`, false, 'application/vnd.microsoft.portable-executable'],
     [path.join(macDir, 'latest-mac.yml'), 'latest-mac.yml', true, 'application/x-yaml'],
+    [path.join(macDir, 'latest-mac-x64.yml'), 'latest-mac-x64.yml', true, 'application/x-yaml'],
     [path.join(winDir, 'oss-latest.yml'), 'latest.yml', true, 'application/x-yaml'],
   ];
   for (const [p] of items) {
@@ -237,6 +239,7 @@ async function main() {
 
   await cdnWarmup([
     `https://download.idbots.ai/IDBots-${version}-arm64.dmg`,
+    `https://download.idbots.ai/IDBots-${version}-x64.dmg`,
     `https://download.idbots.ai/IDBots-Setup-${version}.exe`,
   ]);
 

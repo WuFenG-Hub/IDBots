@@ -23,10 +23,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS arm64 (Apple Silicon). mac_arch drives every arch-dependent
+          # path below (the electron-builder --dir output dir, the notarized
+          # app bundle, the DMG step and scripts/release-artifact-paths.cjs).
           - os: macos-latest
             build_args: --mac --arm64 --dir
+            mac_arch: arm64
+          # macOS x64 (Intel). Built on a native Intel hosted runner on purpose:
+          # pnpm then resolves the darwin-x64 siblings of every optional native
+          # package (dsh-runtime carries ~9 darwin-arm64 ones: cua-driver, sharp,
+          # ripgrep, sherpa-onnx, koffi, ...). Cross-building --x64 from the arm64
+          # runner would embed arm64 binaries into the Intel bundle.
+          - os: macos-15-intel
+            build_args: --mac --x64 --dir
+            mac_arch: x64
           - os: windows-signer
             build_args: --win --x64
+            mac_arch: ""
 
     steps:
       # Windows: 必须在 checkout 之前启用长路径，否则 git 操作可能被截断
@@ -385,16 +398,17 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_ARCH: ${{ matrix.mac_arch }}
         run: |
           APP_ZIP_PATH="$(node scripts/release-artifact-paths.cjs zip)"
           echo "Using APP_ZIP_PATH=$APP_ZIP_PATH"
-          ditto -c -k --keepParent "release/mac-arm64/IDBots.app" "$APP_ZIP_PATH"
+          ditto -c -k --keepParent "release/mac-${{ matrix.mac_arch }}/IDBots.app" "$APP_ZIP_PATH"
           xcrun notarytool submit "$APP_ZIP_PATH" \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --wait
-          xcrun stapler staple "release/mac-arm64/IDBots.app"
+          xcrun stapler staple "release/mac-${{ matrix.mac_arch }}/IDBots.app"
 
       - name: Build DMG from prepackaged app (macOS)
         if: runner.os == 'macOS'
@@ -405,7 +419,7 @@ jobs:
           PATH="$PWD/.tmp-bin:$PATH"
           mkdir -p .tmp-bin
           ln -sf /usr/bin/python3 .tmp-bin/python
-          pnpm exec electron-builder --mac dmg --arm64 --prepackaged "release/mac-arm64/IDBots.app" --publish never
+          pnpm exec electron-builder --mac dmg --${{ matrix.mac_arch }} --prepackaged "release/mac-${{ matrix.mac_arch }}/IDBots.app" --publish never
 
       - name: Codesign + notarize DMG (macOS)
         if: runner.os == 'macOS'
@@ -416,6 +430,7 @@ jobs:
           MAC_CODESIGN_IDENTITY: ${{ secrets.MAC_CODESIGN_IDENTITY }}
           CSC_KEYCHAIN: ${{ env.CSC_KEYCHAIN }}
           CSC_KEYCHAIN_PASSWORD: ${{ env.CSC_KEYCHAIN_PASSWORD }}
+          APP_ARCH: ${{ matrix.mac_arch }}
         run: |
           if [ -z "$MAC_CODESIGN_IDENTITY" ]; then
             echo "MAC_CODESIGN_IDENTITY is required for DMG signing." >&2
@@ -467,6 +482,17 @@ jobs:
           name: dist-macos-latest
           path: release-assets/macos
 
+      # Intel (x64) DMG + its own manifest land in the same directory: the
+      # macOS arm64 and x64 assets never collide by name (…-arm64.dmg vs
+      # …-x64.dmg, latest-mac.yml vs latest-mac-x64.yml). Both jobs emit a
+      # latest-mac.yml, but `finalize` rewrites it from the final signed DMG
+      # afterwards, so whichever copy arrives last is not the shipped one.
+      - name: Download macOS (Intel x64) artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-macos-15-intel
+          path: release-assets/macos
+
       - name: Download Windows artifacts
         uses: actions/download-artifact@v4
         with:
@@ -476,8 +502,9 @@ jobs:
       - name: Finalize update manifests from signed artifacts
         # electron-builder writes latest-mac.yml BEFORE the final DMG sign/staple,
         # so its size/sha512 never match the shipped DMG (SOP §8). Recompute all
-        # three manifests from the FINAL artifacts so the GitHub Release ships
-        # correct hashes and OSS gets the hyphen-name Windows manifest.
+        # manifests from the FINAL artifacts so the GitHub Release ships correct
+        # hashes (latest-mac.yml = arm64, latest-mac-x64.yml = Intel) and OSS
+        # gets the hyphen-name Windows manifest.
         run: |
           VERSION="${{ inputs.release_tag || github.ref_name }}"
           node scripts/release-finalize-yaml.cjs "${VERSION#v}"
@@ -499,16 +526,21 @@ jobs:
             Cross-platform desktop installers for IDBots.
 
             Included packages:
-            - macOS DMG package (.dmg, signed & notarized)
+            - macOS DMG package, Apple Silicon (.dmg, signed & notarized)
+            - macOS DMG package, Intel x64 (.dmg, signed & notarized)
             - Windows NSIS installer (.exe)
 
             Notes:
-            - macOS DMG is signed and notarized in GitHub Actions.
+            - Both macOS DMGs are signed and notarized in GitHub Actions.
+            - `latest-mac.yml` describes the Apple Silicon DMG; `latest-mac-x64.yml`
+              describes the Intel DMG. The in-app updater reads
+              https://idbots.ai/update.json instead.
           fail_on_unmatched_files: true
           files: |
             release-assets/macos/*.dmg
             release-assets/macos/*.blockmap
             release-assets/macos/latest-mac.yml
+            release-assets/macos/latest-mac-x64.yml
             release-assets/windows/*.exe
             release-assets/windows/*.blockmap
             release-assets/windows/latest.yml
@@ -516,9 +548,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish artifacts to OSS and warm CDN
-        # Requires the four OSS_* secrets (already configured). Uploads the DMG,
-        # the space-free Windows installer name, and both manifests to OSS with
-        # the correct per-object headers, then pre-warms the CDN and verifies it.
+        # Requires the four OSS_* secrets (already configured). Uploads both mac
+        # DMGs (arm64 + x64), the space-free Windows installer name, and all
+        # three manifests (latest-mac.yml, latest-mac-x64.yml, latest.yml) to OSS
+        # with the correct per-object headers, then pre-warms the CDN and verifies it.
         env:
           OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
           OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
