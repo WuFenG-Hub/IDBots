@@ -59,6 +59,7 @@
     "target": [
       "dmg"
     ],
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "icon": "build/icons/mac/icon.icns",
     "category": "public.app-category.productivity",
     "notarize": false,

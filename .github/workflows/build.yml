@@ -23,12 +23,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS arm64 (Apple Silicon). mac_arch drives every arch-dependent
-          # path below (the electron-builder --dir output dir, the notarized
-          # app bundle, the DMG step and scripts/release-artifact-paths.cjs).
+          # macOS arm64 (Apple Silicon).
+          # mac_arch  -> the electron-builder arch flag and APP_ARCH for
+          #             scripts/release-artifact-paths.cjs (the DMG file name).
+          # mac_dir   -> electron-builder's --dir output directory. It is NOT
+          #             derived from the arch: electron-builder treats x64 as
+          #             the default arch, so x64 lands in `release/mac` while
+          #             arm64 gets the `-arm64` suffix (`getArchSuffix` in
+          #             builder-util returns "" for the default arch).
           - os: macos-latest
             build_args: --mac --arm64 --dir
             mac_arch: arm64
+            mac_dir: mac-arm64
           # macOS x64 (Intel). Built on a native Intel hosted runner on purpose:
           # pnpm then resolves the darwin-x64 siblings of every optional native
           # package (dsh-runtime carries ~9 darwin-arm64 ones: cua-driver, sharp,
@@ -37,9 +43,11 @@ jobs:
           - os: macos-15-intel
             build_args: --mac --x64 --dir
             mac_arch: x64
+            mac_dir: mac
           - os: windows-signer
             build_args: --win --x64
             mac_arch: ""
+            mac_dir: ""
 
     steps:
       # Windows: 必须在 checkout 之前启用长路径，否则 git 操作可能被截断
@@ -396,13 +404,13 @@ jobs:
         run: |
           APP_ZIP_PATH="$(node scripts/release-artifact-paths.cjs zip)"
           echo "Using APP_ZIP_PATH=$APP_ZIP_PATH"
-          ditto -c -k --keepParent "release/mac-${{ matrix.mac_arch }}/IDBots.app" "$APP_ZIP_PATH"
+          ditto -c -k --keepParent "release/${{ matrix.mac_dir }}/IDBots.app" "$APP_ZIP_PATH"
           xcrun notarytool submit "$APP_ZIP_PATH" \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --wait
-          xcrun stapler staple "release/mac-${{ matrix.mac_arch }}/IDBots.app"
+          xcrun stapler staple "release/${{ matrix.mac_dir }}/IDBots.app"
 
       - name: Build DMG from prepackaged app (macOS)
         if: runner.os == 'macOS'
@@ -413,7 +421,7 @@ jobs:
           PATH="$PWD/.tmp-bin:$PATH"
           mkdir -p .tmp-bin
           ln -sf /usr/bin/python3 .tmp-bin/python
-          pnpm exec electron-builder --mac dmg --${{ matrix.mac_arch }} --prepackaged "release/mac-${{ matrix.mac_arch }}/IDBots.app" --publish never
+          pnpm exec electron-builder --mac dmg --${{ matrix.mac_arch }} --prepackaged "release/${{ matrix.mac_dir }}/IDBots.app" --publish never
 
       - name: Codesign + notarize DMG (macOS)
         if: runner.os == 'macOS'
