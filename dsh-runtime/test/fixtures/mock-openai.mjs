@@ -163,6 +163,7 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('DELEGATE_MODEL') ? 'subagent'
         : lastUserText.includes('DELEGATE_FG') ? 'subagent'
         : lastUserText.includes('LIST_MODELS') ? 'list_subagent_models'
+        : lastUserText.includes('FOLLOWUP_AGENT') ? 'send_message'
         : lastUserText.includes('DELEGATE') ? 'subagent'
         : null
       // HANG_TEST: open the SSE stream, emit one delta, and never finish —
@@ -180,7 +181,12 @@ export function startMockServer(port = 48787) {
         && (parsed.messages ?? []).filter((m) => m?.role === 'tool').length < 4
       if (toolCallFor !== null && (!alreadyHasToolResult || loopRepeating)) {
         const writeMatch = /RUN_BASH_WRITE:([A-Za-z0-9_-]+)/.exec(lastUserText)
+        // FOLLOWUP_AGENT:<childId> — the parent sends a follow-up to an
+        // existing (possibly dematerialized) continuable child; drives the
+        // cold-resume path (subagent-cold-resume test).
+        const followupMatch = /FOLLOWUP_AGENT:([A-Za-z0-9-]+)/.exec(lastUserText)
         const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__playwright-mcp__browser_navigate' ? { url: 'data:text/html,<h1>BROWSER_SMOKE_OK</h1>' } : toolCallFor === 'mcp__playwright-mcp__browser_network_requests' ? {} : toolCallFor?.startsWith('cua_driver_native__') ? {} : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' }
+          : toolCallFor === 'send_message' ? { agent_id: followupMatch?.[1] ?? 'unknown-agent', message: 'FOLLOWUP_PING please answer this' }
           : toolCallFor === 'ask_user_question' ? { questions: [{ id: 'q1', question: 'Pick a color', header: 'auto-confirm', detail: 'Picking a color refreshes the theme; Red is warm, Blue is calm.', options: [{ label: 'Red' }, { label: 'Blue' }] }] }
           : toolCallFor === 'web_search' ? { queries: [lastUserText.includes('CALL_WEB_SEARCH_FAIL') ? 'fail please' : 'latest stable Node.js version'] }
           : toolCallFor === 'read' ? { file_path: 'readable.txt' } : toolCallFor === 'glob' ? { pattern: '**/*.marker.txt' } : toolCallFor === 'grep' ? { pattern: 'NEEDLE_ALPHA' } : toolCallFor === 'exit_plan_mode' ? { plan: '# Test Plan\n\nDo the thing.' } : toolCallFor === 'bash' ? (lastUserText.includes('RUN_LONG_BASH')

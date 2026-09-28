@@ -174,6 +174,18 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
     (idle-message insertion, session titles) use the strictly-owned
     `ownedCoworkOfDsh` so child chatter stays in the panel and a child title
     never renames the parent. Unknown sessions still fail closed.
+    Companion fix (branch `fix/dsh-session-query-mount`): the composition
+    now mounts `@deepseek-ai/dsh-session-query` beside the persistence
+    backend — without it every follow-up to a dematerialized continuable
+    child failed with CONTINUATION_UNAVAILABLE ("continuable subagents
+    require session query", the same session's other symptom: the chair's
+    subagent-tool probes could not cold-resume the persisted workers). The
+    plain engine suffices (observeSession/listSessions through the mounted
+    persistence); the SQLite FTS5 search backend stays unmounted. E2E:
+    `dsh-runtime/test/subagent-cold-resume.test.mjs` boots a fresh runtime
+    on the same sessionRoot, resumes the parent via session/ensure, and
+    proves the child cold-resumes onto the provider (verified failing at
+    runtime level with the entry removed).
 
 **Remaining backlog:**
 11. **P2 — Behavioral foundation decision**: claude path sits on the full

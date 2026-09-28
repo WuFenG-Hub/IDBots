@@ -461,6 +461,16 @@ export function generateRuntimeConfig(input) {
       config: { root: input.sessionRoot, compression: input.persistenceCompression ?? 'zstd' },
     },
     { id: 'checkpoint-policy', name: '@deepseek-ai/dsh-session-checkpoint-policy' },
+    // Unified live-preferred session query (ctx.sessionQuery): reads persisted
+    // logs through the mounted persistence service, so continuable subagents
+    // can cold-resume dematerialized children (dsh-subagent coldResume) and
+    // session listings work. Without it every follow-up to a child whose
+    // live activation is gone fails with CONTINUATION_UNAVAILABLE
+    // ("continuable subagents require session query" — 2026-09-28 session
+    // 540635be: the chair could not wake its persisted workers after a
+    // runtime handoff). The plain engine is enough (observeSession/
+    // listSessions); the SQLite FTS5 search backend stays unmounted.
+    { id: 'session-query', name: '@deepseek-ai/dsh-session-query' },
     { id: 'user-approval', name: '@deepseek-ai/dsh-user-approval' },
     // Model-facing ask_user_question: the service seam plus its tool consumer.
     // The provider (UI side) is registered by idbots-sdk-server and bridges
