@@ -381,6 +381,8 @@ man_base_data_pebble/
 !tests/omniReaderAgentTools.test.mjs
 !tests/browserOpenAgentTools.test.mjs
 !tests/screenshotAgentTools.test.mjs
+!tests/hostLocationService.test.mjs
+!tests/locationAgentTools.test.mjs
 !tests/visionRelayService.test.mjs
 !tests/visionRelayAgentTools.test.mjs
 !tests/visionVideoRelay.test.mjs
