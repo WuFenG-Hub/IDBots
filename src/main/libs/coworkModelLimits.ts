@@ -43,12 +43,15 @@ export interface CoworkModelLimits {
   contextWindow: number;
   maxOutputTokens: number;
   /**
-   * Whether the model can consume image content blocks (vision). Unknown /
-   * unlisted models default to `false` (fail-safe): the Read-image guard then
-   * denies image reads with an explicit pointer to the relay-backed
-   * describe_image instead of silently dropping pixels on a model that
-   * cannot read them (the 2026-09-04 glm-5.3-flash regression). Only models
-   * KNOWN to support vision are marked true.
+   * Whether the model can consume image content blocks (vision). Resolution
+   * order: the session provider's own model row (the Settings "支持图像输入"
+   * checkbox — the user's per-provider override, honored exactly as checked),
+   * then the catalog/family knowledge below. Unknown / unlisted models
+   * default to `false` (fail-safe): the Read-image guard then denies image
+   * reads with an explicit pointer to the relay-backed describe_image
+   * instead of silently dropping pixels on a model that cannot read them
+   * (the 2026-09-04 glm-5.3-flash regression). Only models KNOWN to support
+   * vision are marked true.
    */
   supportsVision: boolean;
   source: CoworkModelLimitSource;
@@ -130,14 +133,17 @@ const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contex
   // the Responses endpoint on 2026-09-18 (matches the official GLM-5.3-Flash
   // docs); the flagship glm-5.3 stays text-only ("目前仅支持处理文本模态信
   // 息"). Older GLM ids keep the historical no-vision/no-1M entries. Gateway
-  // ids (commandcode z-ai/glm-5.3-flash, zai-org/GLM-*) are NOT verified for
-  // image passthrough, so they stay fail-safe false.
+  // ids (commandcode z-ai/glm-5.3-flash, zai-org/GLM-*) serve the SAME
+  // upstream multimodal flash SKU, so they declare vision too (2026-09-28
+  // owner decision: every provider's GLM-5.3 Flash must read images; the
+  // earlier fail-safe false silenced vision for users who proxied the model
+  // through a gateway).
   'glm-5.3-flash': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: true },
   'glm-5.3-flashx': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: true },
   'glm-5.3': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
   'glm-5.2': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
   'glm-5.2-fast': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
-  'z-ai/glm-5.3-flash': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'z-ai/glm-5.3-flash': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: true },
   'zai-org/GLM-5.3': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
   'zai-org/GLM-5.2': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
   'zai-org/GLM-5.2-Fast': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
@@ -201,11 +207,18 @@ function deepseekV4FamilyLimits(modelId: string): Partial<Pick<CoworkModelLimits
  * output budget, so uncatalogued ids pin the family's 128K ceiling even if
  * a future DEFAULT change regresses. Context window stays on the conservative
  * default unless the exact SKU is catalogued — only the output ceiling is
- * the stall-critical field.
+ * the stall-critical field. Vision is the one modality the family rule
+ * declares: every spelling of the GLM-5.3 flash variant (vendor prefixes,
+ * case variants like `GLM-5.3-Flash`) serves the same natively multimodal
+ * SKU (2026-09-18 live verification), so it resolves vision=true; the
+ * flagship and older families stay fail-safe text-only.
  */
 function glmFamilyLimits(modelId: string): Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>> | undefined {
   const segment = (modelId.split('/').pop() ?? modelId);
   if (!/^glm-(?:4\.[5-9]|[5-9])/i.test(segment)) return undefined;
+  if (/^glm-5\.3-flash/i.test(segment)) {
+    return { maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: true };
+  }
   return { maxOutputTokens: GLM_MAX_OUTPUT_TOKENS };
 }
 
@@ -338,20 +351,48 @@ export function modelSupportsVision(modelId: string | null | undefined): boolean
 export function resolveCoworkModelLimits(
   appConfig: AppConfigLike,
   overrideModelId?: string | null,
+  providerKey?: string | null,
 ): CoworkModelLimits {
   const modelId = resolveTargetModelId(appConfig, overrideModelId);
+  const scopedProviderKey = typeof providerKey === 'string' ? providerKey.trim() : '';
 
-  for (const provider of Object.values(appConfig.providers ?? {})) {
-    if (!provider?.enabled) {
-      continue;
+  if (scopedProviderKey) {
+    // Provider-scoped resolution (2026-09-28 glm-5.3-flash incident): model
+    // ids are NOT unique across providers — `glm-5.3-flash` exists on zhipu
+    // (supportsImage true), opencode (fail-safe false), and custom gateways
+    // alike. The legacy cross-provider scan returned whichever enabled row
+    // came first in insertion order, so an unrelated provider's fail-safe
+    // flag silently silenced vision for the provider the session actually
+    // runs on. When the caller names the session's provider (every DSH route
+    // resolution does), ONLY that provider's row may contribute explicit
+    // limits; other providers' rows describe different deployments of the
+    // same id and must never win. Enabled-ness is deliberately not required
+    // here: the route was already resolved, and a mid-session disable must
+    // not flip capability answers.
+    const scopedProvider = (appConfig.providers ?? {})[scopedProviderKey];
+    const scopedModel = scopedProvider ? findModelById(scopedProvider.models, modelId) : null;
+    if (scopedModel) {
+      const explicit = getModelLimits(scopedModel);
+      if (explicit.contextWindow || explicit.maxOutputTokens || explicit.supportsVision !== undefined) {
+        return buildLimits(modelId, 'provider-model', explicit);
+      }
     }
-    const model = findModelById(provider.models, modelId);
-    if (!model) {
-      continue;
-    }
-    const explicit = getModelLimits(model);
-    if (explicit.contextWindow || explicit.maxOutputTokens || explicit.supportsVision !== undefined) {
-      return buildLimits(modelId, 'provider-model', explicit);
+    // The named provider has no explicit row for the model (or the row is
+    // flagless): fall through to the provider-agnostic layers below — never
+    // to another provider's row.
+  } else {
+    for (const provider of Object.values(appConfig.providers ?? {})) {
+      if (!provider?.enabled) {
+        continue;
+      }
+      const model = findModelById(provider.models, modelId);
+      if (!model) {
+        continue;
+      }
+      const explicit = getModelLimits(model);
+      if (explicit.contextWindow || explicit.maxOutputTokens || explicit.supportsVision !== undefined) {
+        return buildLimits(modelId, 'provider-model', explicit);
+      }
     }
   }
 

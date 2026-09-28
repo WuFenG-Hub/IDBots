@@ -17,6 +17,13 @@ type ProviderModel = {
   contextWindow?: number;
   maxOutputTokens?: number;
   /**
+   * The Settings "支持图像输入" checkbox value for this provider's row.
+   * Present in the app_config blob; declared here so provider-scoped model
+   * limit resolution (resolveCoworkModelLimits) can honor it as the user's
+   * per-provider vision override.
+   */
+  supportsImage?: boolean;
+  /**
    * Per-model options mirroring the renderer's ModelOptions. Present in the
    * app_config blob but previously stripped by this typed reader, so the cowork
    * SDK path never saw effort/thinking settings.
@@ -472,6 +479,10 @@ function buildApiConfigFromMatched(
     // Pin this upstream to the cowork session so the proxy's per-session
     // registry isolates it from concurrent sessions on other providers.
     sessionKey: sessionKey ?? undefined,
+    // Provider-scoped vision capability for this exact model row, so the
+    // proxy's Responses converter honors the Settings 支持图像输入 checkbox
+    // instead of only the static catalog (2026-09-28 glm-5.3-flash incident).
+    supportsImage: resolveCurrentModelLimits(matched.modelId, matched.providerName).supportsVision,
   });
 
   const proxyBaseURL = getCoworkOpenAICompatProxyBaseURL(target);
@@ -670,10 +681,10 @@ export function setPersistedCoworkPreference(updates: {
   sqliteStore.set('app_config', appConfig);
 }
 
-export function resolveCurrentModelLimits(modelId?: string | null): CoworkModelLimits {
+export function resolveCurrentModelLimits(modelId?: string | null, providerKey?: string | null): CoworkModelLimits {
   const sqliteStore = getStore();
   const appConfig = sqliteStore?.get<AppConfig>('app_config') ?? {};
-  return resolveCoworkModelLimits(appConfig, modelId);
+  return resolveCoworkModelLimits(appConfig, modelId, providerKey);
 }
 
 /**

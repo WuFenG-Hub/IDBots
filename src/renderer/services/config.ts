@@ -209,14 +209,27 @@ export const mergeProvidersConfig = (
 // 重要：deepseek 不参与迁移，已配置 DeepSeek 的老用户升级后保持完全不变。
 // ---------------------------------------------------------------------------
 
-export const PROVIDER_MODEL_MIGRATION_VERSION = 2;
+export const PROVIDER_MODEL_MIGRATION_VERSION = 3;
 
 type ProviderModelEntry = NonNullable<NonNullable<AppConfig['providers']>[string]['models']>[number];
+
+/**
+ * One capability correction applied to EXISTING model rows across EVERY
+ * provider (custom gateways included; deepseek stays untouched like the rest
+ * of the migration machinery). `idPattern` is a case-insensitive regex
+ * source matched against the id's last path segment, so vendor prefixes
+ * (`z-ai/glm-5.3-flash`) and case variants (`GLM-5.3-Flash`) all match.
+ */
+type ProviderModelVisionFlip = {
+  idPattern: string;
+  supportsImage: boolean;
+};
 
 type ProviderModelMigration = {
   removed: Record<string, string[]>;
   added: Record<string, ProviderModelEntry[]>;
   defaultModelRemap: Record<string, string>;
+  visionFlips?: ProviderModelVisionFlip[];
 };
 
 const PROVIDER_MODEL_MIGRATIONS: Record<number, ProviderModelMigration> = {
@@ -307,6 +320,20 @@ const PROVIDER_MODEL_MIGRATIONS: Record<number, ProviderModelMigration> = {
       'glm-4.7': 'glm-5.3',
     },
   },
+  // v3：GLM-5.3-Flash 全供应商开启视觉（2026-09-28）。该 SKU 原生多模态，
+  // 所有网关转发的是同一个上游模型；存量行上的 supportsImage:false 并非
+  // 用户主动取消勾选，而是行创建时"未验证即文本"的 fail-safe 默认值——
+  // 它让 opencode/commandcode 等网关上的 GLM-5.3 Flash 一直无法读图
+  // （当天的 glm-5.3-flash 读图事故根因之一）。一次性翻转为 true；
+  // 旗舰 glm-5.3 及更早家族确为纯文本，保持不动。
+  3: {
+    removed: {},
+    added: {},
+    defaultModelRemap: {},
+    visionFlips: [
+      { idPattern: '^glm-5\\.3-flash', supportsImage: true },
+    ],
+  },
 };
 
 export const applyProviderModelMigrations = (config: AppConfig): AppConfig => {
@@ -323,6 +350,7 @@ export const applyProviderModelMigrations = (config: AppConfig): AppConfig => {
     if (!migration) {
       continue;
     }
+    const visionFlips = migration.visionFlips ?? [];
 
     const providers = { ...(nextProviders ?? {}) } as NonNullable<AppConfig['providers']>;
     for (const [providerKey, providerConfig] of Object.entries(providers)) {
@@ -331,19 +359,32 @@ export const applyProviderModelMigrations = (config: AppConfig): AppConfig => {
       }
       const removedIds = new Set(migration.removed[providerKey] ?? []);
       const addedModels = migration.added[providerKey] ?? [];
-      if (removedIds.size === 0 && addedModels.length === 0) {
+      if (removedIds.size === 0 && addedModels.length === 0 && visionFlips.length === 0) {
         continue;
       }
       const existingModels = providerConfig.models ?? [];
       const keptModels = existingModels.filter((model) => !removedIds.has(model.id));
       const keptIds = new Set(keptModels.map((model) => model.id));
       const modelsToAdd = addedModels.filter((model) => !keptIds.has(model.id));
-      if (keptModels.length === existingModels.length && modelsToAdd.length === 0) {
+      let flipped = false;
+      const nextModels = [...modelsToAdd, ...keptModels].map((model) => {
+        if (visionFlips.length === 0) {
+          return model;
+        }
+        const segment = model.id.split('/').pop() ?? model.id;
+        const flip = visionFlips.find((candidate) => new RegExp(candidate.idPattern, 'i').test(segment));
+        if (!flip || model.supportsImage === flip.supportsImage) {
+          return model;
+        }
+        flipped = true;
+        return { ...model, supportsImage: flip.supportsImage };
+      });
+      if (!flipped && keptModels.length === existingModels.length && modelsToAdd.length === 0) {
         continue;
       }
       providers[providerKey] = {
         ...providerConfig,
-        models: [...modelsToAdd, ...keptModels],
+        models: nextModels,
       };
     }
     nextProviders = providers;
