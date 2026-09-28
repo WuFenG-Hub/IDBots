@@ -34,12 +34,39 @@ import type { LongTermSubtask, LongTermTaskDetail } from '../../renderer/types/l
 export const LONGTERM_ADVANCE_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_MAX_ESCALATIONS_PER_RUN = 2;
 const DEFAULT_NUDGE_THROTTLE_MS = 30 * 60_000;
-const DEFAULT_WAITING_OWNER_REMINDER_MS = 30 * 60_000;
+/**
+ * Quiet time before re-presenting a parked owner decision (default 2h).
+ * The sidebar's 跟踪任务 dot and the 长期任务 tab badge now carry the "you are
+ * the blocker" attention, so the heartbeat only has to re-present the pending
+ * decision — every 30 minutes was nagging, not reminding. The sweep cadence
+ * (LONGTERM_ADVANCE_INTERVAL_MS) and the nudge throttle are untouched: only the
+ * owner-nag interval relaxes.
+ */
+const DEFAULT_WAITING_OWNER_REMINDER_MS = 2 * 3_600_000;
 const DEFAULT_EXTERNAL_REMINDER_MS = 4 * 3_600_000;
 const DEFAULT_FAILURE_STREAK_THRESHOLD = 2;
 const DEFAULT_EXPECTED_MINUTES = 240;
-/** Bound-session message budget before the heartbeat rotates to a fresh session. */
-const DEFAULT_SESSION_ROTATION_MESSAGES = 60;
+/**
+ * Bound-session budget before the heartbeat rotates to a fresh session.
+ *
+ * What is actually counted (CoworkStore.countSessionMessages): EVERY
+ * `cowork_messages` row of the session — user + assistant + tool_use +
+ * tool_result + system, no type filter. That is not "conversation turns", and
+ * one tool-heavy turn adds 60–400 rows, so the intended "about this many turns
+ * of context" reading never held: production rotation points (the counts
+ * journaled by the rotation note) run 62–2024 with a median of 129 and a mean
+ * of 202 across 36 rotations.
+ *
+ * 180 therefore states the real intent: one session carries a whole day of
+ * heartbeat advances for an active sub-project (~150–300 counted messages/day)
+ * before the journal-only continuity hand-off, roughly halving-to-thirding the
+ * rotation count. The check runs BEFORE a turn, so the effective rotation point
+ * still overshoots by one turn — that overshoot is inherent to the mechanism,
+ * which this constant does not change.
+ */
+export const DEFAULT_SESSION_ROTATION_MESSAGES = 180;
+/** Longest subtask fragment carried in a `[长期]` session title. */
+const SESSION_TITLE_SUBTASK_MAX_CHARS = 40;
 /** Convergence churn breaker: stale-wait convergence turns per window before escalation to the owner. */
 const CONVERGENCE_CHURN_LIMIT = 3;
 const CONVERGENCE_CHURN_WINDOW_MS = 2 * 3_600_000;
@@ -108,8 +135,37 @@ export interface LongTermAdvanceDeps {
   failureStreakThreshold?: number;
   /** P1 supervision: default expected duration (minutes) when the sub-project sets none. */
   defaultExpectedMinutes?: number;
-  /** Session rotation: message budget for the bound session (default 60). */
+  /** Session rotation: message budget for the bound session (default 180 — see DEFAULT_SESSION_ROTATION_MESSAGES for what is counted). */
   sessionRotationThreshold?: number;
+}
+
+/**
+ * Title for the session a sub-project runs in: `[长期] <task> · #<ordinal> <subtask>`.
+ *
+ * Without the sub-project part every session of a task — and every rotation —
+ * carried the identical `[长期] <task>` title, so the sidebar's folded Auto
+ * Tasks list showed a column of indistinguishable rows. Rotations of the SAME
+ * sub-project keep the identical title on purpose: the continuity preamble,
+ * not the title, carries the "this is a fresh session" signal, and a stable
+ * title lets the owner follow one sub-project across rotations.
+ *
+ * The `[长期]` prefix stays a hardcoded zh artifact (it is a stored title, not
+ * UI chrome, and the fold's own label is localized separately).
+ */
+export function buildLongTermSessionTitle(
+  taskTitle: string,
+  ordinal: number,
+  subtaskTitle: string,
+): string {
+  const task = taskTitle.trim();
+  const subtask = subtaskTitle.trim();
+  const shortSubtask = subtask.length > SESSION_TITLE_SUBTASK_MAX_CHARS
+    ? `${subtask.slice(0, SESSION_TITLE_SUBTASK_MAX_CHARS - 1).trimEnd()}…`
+    : subtask;
+  const taskPart = task ? `[长期] ${task}` : '[长期]';
+  const hasOrdinal = Number.isFinite(ordinal) && ordinal > 0;
+  if (!hasOrdinal) return shortSubtask ? `${taskPart} · ${shortSubtask}` : taskPart;
+  return shortSubtask ? `${taskPart} · #${ordinal} ${shortSubtask}` : `${taskPart} · #${ordinal}`;
 }
 
 export interface LongTermAdvanceReport {
@@ -585,7 +641,9 @@ export class LongTermAdvanceService {
         // Session rotation: the bound session is over its message budget —
         // unbounded context growth is how anchor drift starts on multi-week
         // tasks. The journal (not chat history) is the TwinBot's memory, so a
-        // fresh session carrying the continuity preamble is safe.
+        // fresh session carrying the continuity preamble is safe. The budget
+        // counts EVERY message row (tool traffic included) and is checked
+        // before a turn, so the count at rotation overshoots it by one turn.
         rotation = { from: boundSessionId, messages: messageCount };
       }
     }
@@ -600,7 +658,7 @@ export class LongTermAdvanceService {
       }
       const systemPrompt = [skillsPrompt, this.deps.getBaseSystemPrompt()].filter((part): part is string => Boolean(part?.trim())).join('\n\n');
       const session = coworkStore.createSession(
-        `[长期] ${detail.title}`,
+        buildLongTermSessionTitle(detail.title, current.ordinal, current.title),
         this.deps.resolveWorkingDirectory(twinId),
         systemPrompt,
         'local',

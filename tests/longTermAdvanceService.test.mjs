@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { LongTermTaskStore } = require('../dist-electron/main/longTermTaskStore.js');
 const { OrchestrationStore } = require('../dist-electron/main/orchestrationStore.js');
-const { LongTermAdvanceService } = require('../dist-electron/main/services/longTermAdvanceService.js');
+const { LongTermAdvanceService, DEFAULT_SESSION_ROTATION_MESSAGES } = require('../dist-electron/main/services/longTermAdvanceService.js');
 
 /**
  * LongTermAdvanceService (P1): the longterm.advance heartbeat handler. Real
@@ -160,6 +160,29 @@ test('owner decision quiet beyond the reminder window → reminder escalation', 
   assert.match(report.escalated[0].reasons[0], /owner decision still pending/);
 });
 
+test('owner reminder cadence: silent at 1h, reminding past the relaxed 2h window', async () => {
+  const { store, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  const now = Date.now();
+  assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'need a channel decision' }, 'twin').ok);
+
+  // The amber owner-decision badge (commit 3) carries the attention now; the
+  // heartbeat only re-presents, so one hour in is no longer a reminder.
+  const advance = new LongTermAdvanceService(deps);
+  const early = await advance.run(now + HOUR);
+  assert.equal(early.escalated.length, 0, JSON.stringify(early));
+
+  // The engine cadence itself is untouched — the sweep still runs and the
+  // reminder lands just past the 2h window (the comparison is strictly
+  // greater-than on the quiet time), quoting the relaxed interval.
+  const due = await advance.run(now + 2 * HOUR + 5 * 60_000);
+  assert.equal(due.escalated.length, 1, JSON.stringify(due));
+  assert.match(due.escalated[0].reasons[0], /owner decision still pending/);
+  assert.match(due.escalated[0].reasons[0], /120min/, 'the relaxed window is what the reason states');
+});
+
 test('owner wait with a future waitUntil stays silent inside the promised quiet window', async () => {
   const { store, advance } = await openWorld();
   const taskId = await createActive(store);
@@ -283,7 +306,7 @@ test('session rotation: an over-budget bound session is rotated with a continuit
   const now = Date.now();
   await new LongTermAdvanceService(deps).run(now); // opens + binds session 1
   const firstSessionId = store.getTask(taskId).subtasks[0].sessionId;
-  cowork.counts.set(firstSessionId, 60); // over the default budget
+  cowork.counts.set(firstSessionId, DEFAULT_SESSION_ROTATION_MESSAGES); // at the budget
 
   const report = await new LongTermAdvanceService(deps).run(now + 2 * HOUR);
   assert.equal(report.escalated.length, 1, JSON.stringify(report));
@@ -292,10 +315,41 @@ test('session rotation: an over-budget bound session is rotated with a continuit
   assert.notEqual(hit.sessionId, firstSessionId);
   assert.equal(store.getTask(taskId).subtasks[0].sessionId, hit.sessionId, 'sub-project rebound to the new session');
   assert.match(runner.starts[1].prompt, /SESSION ROTATION/);
-  assert.ok(runner.starts[1].prompt.includes('60 messages'), 'rotation budget stated in the preamble');
+  assert.ok(
+    runner.starts[1].prompt.includes(`${DEFAULT_SESSION_ROTATION_MESSAGES} messages`),
+    'rotation budget stated in the preamble',
+  );
   // The rotation is journaled as a system note (excluded from stale-work detection).
   const events = store.getTask(taskId).events;
   assert.ok(events.some((event) => event.kind === 'note' && event.actor === 'system' && /session rotated/.test(event.detail)));
+});
+
+test('the rotation budget counts every message row, so a turn-heavy session rotates once it crosses it', async () => {
+  // The budget is compared against CoworkStore.countSessionMessages, which
+  // counts ALL cowork_messages rows (user + assistant + tool_use + tool_result
+  // + system) — not conversation turns. Production rotation points run 62–2024
+  // with a median of 129, which is why the default sits at 180: one tool-heavy
+  // turn adds 60–400 rows, so a smaller budget only bought an extra rotation
+  // per day without buying a smaller context.
+  assert.ok(
+    DEFAULT_SESSION_ROTATION_MESSAGES >= 150 && DEFAULT_SESSION_ROTATION_MESSAGES <= 200,
+    `expected a 150-200 budget for the all-rows unit, got ${DEFAULT_SESSION_ROTATION_MESSAGES}`,
+  );
+
+  const { store, cowork, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  await new LongTermAdvanceService(deps).run(now);
+  const firstSessionId = store.getTask(taskId).subtasks[0].sessionId;
+
+  // One row below the budget: reused (the comparison is strict `<`).
+  cowork.counts.set(firstSessionId, DEFAULT_SESSION_ROTATION_MESSAGES - 1);
+  const reused = await new LongTermAdvanceService(deps).run(now + 2 * HOUR);
+  assert.equal(reused.escalated[0].reusedSession, true);
+
+  cowork.counts.set(firstSessionId, DEFAULT_SESSION_ROTATION_MESSAGES);
+  const rotated = await new LongTermAdvanceService(deps).run(now + 4 * HOUR);
+  assert.equal(rotated.escalated[0].reusedSession, false, 'exactly at the budget rotates');
 });
 
 test('session rotation: under-budget bound sessions are reused as before', async () => {
@@ -310,6 +364,29 @@ test('session rotation: under-budget bound sessions are reused as before', async
   assert.equal(report.escalated.length, 1, JSON.stringify(report));
   assert.equal(report.escalated[0].reusedSession, true);
   assert.equal(report.escalated[0].sessionId, firstSessionId);
+});
+
+test('the opened session title names the sub-project, and a rotation keeps it', async () => {
+  const { store, cowork, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  await new LongTermAdvanceService(deps).run(now);
+
+  const firstCreate = cowork.calls.create[0];
+  assert.match(firstCreate.title, /^\[长期\] /);
+  assert.match(firstCreate.title, /#1 /, 'the sub-project ordinal is in the title');
+  assert.ok(
+    firstCreate.title.includes(store.getTask(taskId).subtasks[0].title),
+    `sub-project title missing from "${firstCreate.title}"`,
+  );
+  assert.notEqual(firstCreate.title, `[长期] ${store.getTask(taskId).title}`, 'not the bare task title');
+
+  // Rotation: same sub-project → same title (continuity lives in the preamble).
+  const firstSessionId = store.getTask(taskId).subtasks[0].sessionId;
+  cowork.counts.set(firstSessionId, DEFAULT_SESSION_ROTATION_MESSAGES);
+  await new LongTermAdvanceService(deps).run(now + 2 * HOUR);
+  assert.equal(cowork.calls.create.length, 2, 'a fresh session was created');
+  assert.equal(cowork.calls.create[1].title, firstCreate.title, 'rotations keep the identical title');
 });
 
 test('convergence churn breaker: repeated stale-wait convergence escalates to the owner instead of looping', async () => {
@@ -591,7 +668,7 @@ test('session rotation does not blind the failure streak (history spans all boun
 
   // Push the bound session over the rotation budget: the NEXT escalation must
   // rotate — and the streak from the OLD session must still trip supervision.
-  cowork.counts.set(firstSessionId, 60);
+  cowork.counts.set(firstSessionId, DEFAULT_SESSION_ROTATION_MESSAGES);
   const report = await advance.run(now + 10 * 60_000);
   assert.equal(report.escalated.length, 1, JSON.stringify(report));
   assert.match(report.escalated[0].reasons[0], /supervision: 2 consecutive failed\/timed-out worker dispatches/);

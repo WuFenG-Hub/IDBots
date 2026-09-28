@@ -228,10 +228,6 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
       ...sortSessionsByMode(list.filter((session) => !session.pinned), sortMode),
     ];
   }, [autoSessions, sortMode]);
-  const autoUnreadCount = useMemo(
-    () => sortedAutoSessions.filter((session) => unreadSessionIdSet.has(session.id)).length,
-    [sortedAutoSessions, unreadSessionIdSet],
-  );
   // Newest activity in the fold (updatedAt is the session's last-activity
   // anchor, the same value the row's own timestamp shows).
   const autoLatestActivityAt = useMemo(
@@ -283,9 +279,12 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
    * The Auto Tasks fold. Rendered last in every view mode, and only when there
    * is something to fold — an empty folder would be noise of its own. The header
    * is styled like the project groups' folder header (subdued secondary text +
-   * folder glyph) so it reads as a container, not as a conversation; the row
-   * itself carries the count, the unread of the folded rows (the tab's own dot
-   * counts human sessions only), and the fold's newest activity time.
+   * folder glyph) so it reads as a container, not as a conversation, and carries
+   * only label + count + the fold's newest activity time: an unread number here
+   * was pure noise (assistant stream chunks carry no `metadata.origin`, so a
+   * heartbeat exemption cannot cover the replies and an active folded session
+   * looks unread almost permanently). Per-row dots inside the EXPANDED fold stay
+   * — that is where "which run has news" is actually traceable.
    */
   const renderAutoTasksSection = () =>
     sortedAutoSessions.length > 0 && (
@@ -303,16 +302,6 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
           <FolderIcon className="h-3.5 w-3.5 flex-shrink-0" />
           <span className="truncate">{i18nService.t('coworkAutoTasks')}</span>
           <span className="flex-shrink-0 font-normal tabular-nums">{sortedAutoSessions.length}</span>
-          {autoUnreadCount > 0 && (
-            <span
-              data-testid="auto-tasks-unread"
-              aria-label={i18nService.t('coworkAutoTasksUnread').replace('{count}', String(autoUnreadCount))}
-              className="inline-flex flex-shrink-0 items-center gap-1 text-red-500"
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-red-500" aria-hidden />
-              <span className="font-normal tabular-nums">{autoUnreadCount}</span>
-            </span>
-          )}
           {autoLatestActivityAt > 0 && (
             <span className="ml-auto flex-shrink-0 font-normal tabular-nums" title={formatRelativeTime(autoLatestActivityAt).full}>
               {formatRelativeTime(autoLatestActivityAt).compact}

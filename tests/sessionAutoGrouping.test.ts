@@ -111,3 +111,30 @@ test('the list renders one Auto Tasks fold that is collapsed by default and last
   // Nothing is rendered when there is nothing to fold.
   assert.match(src, /sortedAutoSessions\.length > 0 && \(/);
 });
+
+test('the fold header carries label + count + latest activity, and no unread number', () => {
+  const src = readSource('src/renderer/components/cowork/CoworkSessionList.tsx');
+  const header = src.slice(
+    src.indexOf('const renderAutoTasksSection'),
+    src.indexOf('{isAutoTasksExpanded && sortedAutoSessions.map(renderItem)}'),
+  );
+
+  assert.match(header, /coworkAutoTasks'/);
+  assert.match(header, /coworkAutoTasksCount/);
+  assert.match(header, /\{sortedAutoSessions\.length\}/, 'the session count stays');
+  assert.match(header, /formatRelativeTime\(autoLatestActivityAt\)/, 'the newest-activity stamp stays');
+  // The unread number was noise: assistant stream chunks carry no
+  // metadata.origin, so the heartbeat exemption cannot cover the replies and
+  // an active folded session looked unread permanently.
+  assert.doesNotMatch(header, /unread/i);
+  assert.doesNotMatch(header, /autoUnreadCount/);
+  assert.doesNotMatch(header, /bg-red-500/);
+  assert.equal((src.match(/autoUnreadCount/g) ?? []).length, 0, 'the derivation is gone, not just unrendered');
+  // Per-row dots inside the expanded fold are untouched.
+  assert.match(src, /hasUnread=\{unreadSessionIdSet\.has\(session\.id\)\}/);
+
+  // The label key is gone from both dictionaries, keeping coverage symmetric.
+  const i18n = readSource('src/renderer/services/i18n.ts');
+  assert.equal((i18n.match(/coworkAutoTasksUnread/g) ?? []).length, 0);
+  assert.equal((i18n.match(/coworkAutoTasksCount:/g) ?? []).length, 2, 'still one per locale');
+});
