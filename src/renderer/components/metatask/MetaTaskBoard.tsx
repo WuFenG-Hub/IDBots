@@ -73,7 +73,7 @@ const MetaTaskBoard: React.FC = () => {
   }, [board?.alerts, tasks]);
 
   if (selectedRootPinId) {
-    return <MetaTaskDetail rootPinId={selectedRootPinId} />;
+    return <MetaTaskDetail key={selectedRootPinId} rootPinId={selectedRootPinId} />;
   }
 
   const tabButtonClass = (active: boolean): string =>

@@ -1,11 +1,21 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
-import { ArrowLeftIcon, BoltIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, BoltIcon, ChevronDownIcon, ChevronRightIcon, ChevronUpIcon } from '@heroicons/react/24/outline';
 import { RootState } from '../../store';
 import { metaTaskService } from '../../services/metatask';
 import { i18nService } from '../../services/i18n';
 import MetaIdBadge from './MetaIdBadge';
-import { metaTaskLifeStatus, metaTaskLifeStatusLabel, metaTaskLifeStatusTone } from './metaTaskStatus';
+import MetaTaskTreeMap from './MetaTaskTreeMap';
+import {
+  metaTaskChildrenOf,
+  metaTaskLifeStatus,
+  metaTaskLifeStatusLabel,
+  metaTaskLifeStatusTone,
+  metaTaskNodeStatusLabel,
+  metaTaskSubtreeHasAttention,
+  metaTaskSubtreeStats,
+} from './metaTaskStatus';
+import { formatMetaTaskRelativeTime } from './metaTaskFormat';
 import type { MetaTaskIdentity, MetaTaskNodeProjection } from '../../types/metatask';
 
 const statusTone: Record<string, string> = {
@@ -14,10 +24,7 @@ const statusTone: Record<string, string> = {
   verified: 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400',
 };
 
-const statusLabel = (status: string): string =>
-  i18nService.t(`metatask.status.${status}`) === `metatask.status.${status}`
-    ? status
-    : i18nService.t(`metatask.status.${status}`);
+const statusLabel = metaTaskNodeStatusLabel;
 
 const participateDraft = (title: string, rootPinId: string, nodeHint?: string | null): void => {
   const text = i18nService
@@ -45,10 +52,29 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
   const rosterMetaIds = useSelector((state: RootState) => state.metatask.board?.localRosterMetaIds) ?? [];
   const rosterIds = new Set(rosterMetaIds);
   const [expandedNode, setExpandedNode] = useState<string | null>(null);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const groupsInitForRef = useRef<string | null>(null);
 
   useEffect(() => {
     void metaTaskService.loadTask(rootPinId);
   }, [rootPinId]);
+
+  // Default group expansion, computed once per task: groups with in-flight or
+  // disputed descendants open; quiet groups stay collapsed. Refresh pushes
+  // must not clobber the user's manual toggles.
+  useEffect(() => {
+    if (!detail || groupsInitForRef.current === rootPinId) return;
+    groupsInitForRef.current = rootPinId;
+    const childrenOf = metaTaskChildrenOf(Object.values(detail.nodeStates));
+    const root = Object.values(detail.nodeStates).find((node) => node.parent === null);
+    const defaults = new Set<string>();
+    for (const child of childrenOf.get(root?.id ?? '') ?? []) {
+      if ((childrenOf.get(child.id)?.length ?? 0) > 0 && metaTaskSubtreeHasAttention(childrenOf, child.id)) {
+        defaults.add(child.id);
+      }
+    }
+    setExpandedGroups(defaults);
+  }, [detail, rootPinId]);
 
   if (!detail) {
     return (
@@ -85,6 +111,68 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
     progress: detail.progress,
     participantCount: detail.participants.length,
   });
+  const lastActive = formatMetaTaskRelativeTime(detail.lastActivityMs);
+
+  const childrenOf = metaTaskChildrenOf(nodes);
+  const childIds = new Set(Array.from(childrenOf.values()).flat().map((node) => node.id));
+  const baseChildren = rootNode
+    ? childrenOf.get(rootNode.id) ?? []
+    : nodes.filter((node) => !childIds.has(node.id));
+  const groups = baseChildren.filter((node) => (childrenOf.get(node.id)?.length ?? 0) > 0);
+  const topLeaves = baseChildren.filter((node) => !(childrenOf.get(node.id)?.length));
+
+  const toggleGroup = (groupId: string): void => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
+  };
+  const scrollToNode = (nodeId: string): void => {
+    window.setTimeout(() => {
+      document.getElementById(`metatask-node-${nodeId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 80);
+  };
+  const selectNodeFromMap = (nodeId: string, groupId: string | null): void => {
+    if (groupId) setExpandedGroups((prev) => new Set(prev).add(groupId));
+    setExpandedNode(nodeId);
+    scrollToNode(nodeId);
+  };
+  const toggleGroupFromMap = (groupId: string): void => {
+    const willExpand = !expandedGroups.has(groupId);
+    toggleGroup(groupId);
+    if (willExpand) scrollToNode(groupId);
+  };
+
+  const renderTreeRow = (node: MetaTaskNodeProjection): React.ReactNode => {
+    const children = childrenOf.get(node.id) ?? [];
+    const isGroup = children.length > 0;
+    const collapsed = !expandedGroups.has(node.id);
+    return (
+      <div key={node.id}>
+        <NodeRow
+          node={node}
+          identities={identities}
+          verifyQuorum={detail.policy.verifyQuorum}
+          expanded={expandedNode === node.id}
+          onToggleExpand={() => setExpandedNode(expandedNode === node.id ? null : node.id)}
+          isGroup={isGroup}
+          groupCollapsed={collapsed}
+          groupStats={isGroup ? metaTaskSubtreeStats(childrenOf, node.id) : undefined}
+          onToggleGroup={() => toggleGroup(node.id)}
+        />
+        {expandedNode === node.id && <NodeExpanded node={node} identities={identities} />}
+        {isGroup && !collapsed && (
+          <div className="border-t dark:border-claude-darkBorder border-claude-border">
+            <div className="ml-6 border-l dark:border-claude-darkBorder border-claude-border divide-y dark:divide-claude-darkBorder divide-claude-border">
+              {children.map((child) => renderTreeRow(child))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -119,8 +207,14 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
                   .replace('{total}', String(detail.progress.total))}
               </span>
               <span>·</span>
+              {lastActive && (
+                <>
+                  <span>{i18nService.t('metatask.lastActive').replace('{when}', lastActive)}</span>
+                  <span>·</span>
+                </>
+              )}
               <span title={i18nService.t('metatask.activityAnchorTip')}>
-                {i18nService.t('metatask.activityAnchorShort').replace(
+                {i18nService.t('metatask.blockAnchor').replace(
                   '{block}',
                   String(detail.freshness.boundaryBlock),
                 )}
@@ -149,7 +243,45 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-4">
-        {/* Nodes: each row expands to the branch task's actual content */}
+        {/* How to join: open nodes as one-click participation candidates */}
+        {!detail.taskComplete && openNodes.length > 0 && (
+          <section className="rounded-xl border border-brand/30 bg-brand/5 px-3 py-2.5">
+            <div className="text-xs font-medium text-brand">{i18nService.t('metatask.howToJoin')}</div>
+            <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('metatask.howToJoinHint').replace('{count}', String(openNodes.length))}
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {openNodes.slice(0, 6).map((node) => (
+                <button
+                  key={node.id}
+                  type="button"
+                  onClick={() => participateDraft(detail.title, detail.rootPinId, node.id)}
+                  className="inline-flex items-center gap-1.5 max-w-[200px] px-2 py-1 text-xs rounded-lg border border-brand/40 text-brand hover:bg-brand/10 transition-colors"
+                >
+                  <span className="font-mono shrink-0">{node.id}</span>
+                  <span className="truncate">{node.title}</span>
+                </button>
+              ))}
+              {openNodes.length > 6 && (
+                <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('metatask.moreOpenNodes').replace('{count}', String(openNodes.length - 6))}
+                </span>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* Structure overview: status at a glance, click to locate nodes */}
+        <MetaTaskTreeMap
+          root={rootNode}
+          groups={groups}
+          topLeaves={topLeaves}
+          childrenOf={childrenOf}
+          onSelectNode={selectNodeFromMap}
+          onToggleGroup={toggleGroupFromMap}
+        />
+
+        {/* Nodes: grouped by aggregate; each row expands to the branch content */}
         <section>
           <h3 className="text-sm font-semibold dark:text-claude-darkText text-claude-text mb-2">
             {i18nService.t('metatask.nodes')}
@@ -158,54 +290,19 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
             </span>
           </h3>
           <div className="rounded-xl border dark:border-claude-darkBorder border-claude-border overflow-hidden divide-y dark:divide-claude-darkBorder divide-claude-border">
-            {nodes.map((node) => {
-              const expanded = expandedNode === node.id;
-              return (
-                <div key={node.id}>
-                  <button
-                    type="button"
-                    onClick={() => setExpandedNode(expanded ? null : node.id)}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover/60 transition-colors"
-                  >
-                    <span className="flex items-center gap-1.5 min-w-0 flex-1">
-                      <span className="font-mono text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary shrink-0">
-                        {node.id}
-                      </span>
-                      <span
-                        className="truncate text-xs dark:text-claude-darkText text-claude-text"
-                        title={node.title}
-                      >
-                        {node.title}
-                      </span>
-                      {node.weight !== null && (
-                        <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                          {(node.weight / 100).toFixed(2)}%
-                        </span>
-                      )}
-                    </span>
-                    <span className={`shrink-0 px-1.5 py-0.5 rounded text-[11px] ${statusTone[node.status] ?? ''}`}>
-                      {statusLabel(node.status)}
-                      {node.disputed ? ` · ${i18nService.t('metatask.disputed')}` : ''}
-                    </span>
-                    {node.holder && (
-                      <span className="shrink-0 hidden sm:inline-flex">
-                        <MetaIdBadge metaId={node.holder.claimant} identities={identities} compact />
-                      </span>
-                    )}
-                    <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary w-14 text-right">
-                      {node.passVotes}/{detail.policy.verifyQuorum}
-                      {node.failVotes > 0 ? ` ·${node.failVotes}✗` : ''}
-                    </span>
-                    {expanded ? (
-                      <ChevronUpIcon className="h-3.5 w-3.5 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
-                    ) : (
-                      <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
-                    )}
-                  </button>
-                  {expanded && <NodeExpanded node={node} identities={identities} />}
-                </div>
-              );
-            })}
+            {rootNode && (
+              <div>
+                <NodeRow
+                  node={rootNode}
+                  identities={identities}
+                  verifyQuorum={detail.policy.verifyQuorum}
+                  expanded={expandedNode === rootNode.id}
+                  onToggleExpand={() => setExpandedNode(expandedNode === rootNode.id ? null : rootNode.id)}
+                />
+                {expandedNode === rootNode.id && <NodeExpanded node={rootNode} identities={identities} />}
+              </div>
+            )}
+            {baseChildren.map((node) => renderTreeRow(node))}
           </div>
         </section>
 
@@ -311,6 +408,93 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
     </div>
   );
 };
+
+/** One node row: group collapse toggle (when it has children) + the main
+ * button that expands the branch task's definition/submission/votes. */
+const NodeRow: React.FC<{
+  node: MetaTaskNodeProjection;
+  identities: Record<string, MetaTaskIdentity>;
+  verifyQuorum: number;
+  expanded: boolean;
+  onToggleExpand: () => void;
+  isGroup?: boolean;
+  groupCollapsed?: boolean;
+  groupStats?: { verified: number; total: number };
+  onToggleGroup?: () => void;
+}> = ({
+  node,
+  identities,
+  verifyQuorum,
+  expanded,
+  onToggleExpand,
+  isGroup,
+  groupCollapsed,
+  groupStats,
+  onToggleGroup,
+}) => (
+  <div
+    id={`metatask-node-${node.id}`}
+    className="w-full flex items-center gap-1 px-3 py-2 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover/60 transition-colors"
+  >
+    {isGroup && (
+      <button
+        type="button"
+        onClick={onToggleGroup}
+        title={i18nService.t('metatask.groupToggleTip')}
+        className="shrink-0 p-0.5 rounded dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
+      >
+        {groupCollapsed ? (
+          <ChevronRightIcon className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronDownIcon className="h-3.5 w-3.5" />
+        )}
+      </button>
+    )}
+    <button
+      type="button"
+      onClick={onToggleExpand}
+      title={i18nService.t('metatask.nodeExpandTip')}
+      className="flex items-center gap-2 min-w-0 flex-1 text-left"
+    >
+      <span className="flex items-center gap-1.5 min-w-0 flex-1">
+        <span className="font-mono text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary shrink-0">
+          {node.id}
+        </span>
+        <span className="truncate text-xs dark:text-claude-darkText text-claude-text" title={node.title}>
+          {node.title}
+        </span>
+        {node.weight !== null && (
+          <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {(node.weight / 100).toFixed(2)}%
+          </span>
+        )}
+        {isGroup && groupStats && groupStats.total > 0 && (
+          <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {groupStats.verified}/{groupStats.total}
+          </span>
+        )}
+      </span>
+      <span className={`shrink-0 px-1.5 py-0.5 rounded text-[11px] ${statusTone[node.status] ?? ''}`}>
+        {statusLabel(node.status)}
+        {node.disputed ? ` · ${i18nService.t('metatask.disputed')}` : ''}
+      </span>
+      {node.holder && (
+        <span className="shrink-0 hidden sm:inline-flex">
+          <MetaIdBadge metaId={node.holder.claimant} identities={identities} compact />
+        </span>
+      )}
+      <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary w-14 text-right">
+        {node.passVotes}/{verifyQuorum}
+        {node.failVotes > 0 ? ` ·${node.failVotes}✗` : ''}
+      </span>
+      {expanded ? (
+        <ChevronUpIcon className="h-3.5 w-3.5 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+      ) : (
+        <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+      )}
+    </button>
+  </div>
+);
 
 /** The expanded node body: what the branch task asks for + what was submitted. */
 const NodeExpanded: React.FC<{
