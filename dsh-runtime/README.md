@@ -41,7 +41,11 @@ loop publishes transient `agent/assistant-stream` frames, which
   `ctx.systemPrompt.section` (the app's promptComposer section list passes through
   verbatim; volatile per-turn context stays on the user-message path as today)
 - `plugins/idbots-tool-result-shaping.mjs` (M3) — bounds oversized tool results at
-  commit time via `tools/post-execute` (head+tail + marker). This replaces the
+  commit time via `tools/post-execute` (head+tail + marker; a single oversized
+  JSON text block instead takes a JSON-safe trim that keeps the document
+  parseable — whole array elements only, marker on the
+  `__idbots_tool_result_shaping__` key, array roots enveloped under
+  `__idbots_tool_result_envelope__`). This replaces the
   OpenAICompatProxy's per-session tool_result trimming with an architectural
   correction: DSH deep-freezes loop-built requests (`llm/stream` listeners read,
   never rewrite — the request must stay a pure function of the session log), so
