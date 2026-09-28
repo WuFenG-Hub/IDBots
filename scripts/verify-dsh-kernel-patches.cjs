@@ -84,13 +84,16 @@ const resolvePackagedRoot = () => {
     return path.join(PROJECT_ROOT, 'release', 'linux-unpacked', 'resources');
   }
 
-  // macOS: electron-builder writes release/mac-<arch>/; prefer one that
-  // actually contains the app bundle, then fall back to the first entry.
+  // macOS: electron-builder names the unpacked directory after the arch
+  // SUFFIX, and x64 is its default arch — so arm64 lands in `release/mac-arm64`
+  // while Intel x64 lands in plain `release/mac` (getArchSuffix in
+  // builder-util returns "" for the default arch). Both shapes are candidates;
+  // prefer whichever actually contains the app bundle.
   const releaseDir = path.join(PROJECT_ROOT, 'release');
   const macDirs = fs.existsSync(releaseDir)
-    ? fs.readdirSync(releaseDir).filter((name) => name.startsWith('mac-')).sort()
+    ? fs.readdirSync(releaseDir).filter((name) => name === 'mac' || name.startsWith('mac-')).sort()
     : [];
-  const candidates = macDirs.length > 0 ? macDirs : ['mac-arm64'];
+  const candidates = macDirs.length > 0 ? macDirs : ['mac', 'mac-arm64'];
   for (const name of candidates) {
     const resources = path.join(releaseDir, name, 'IDBots.app', 'Contents', 'Resources');
     if (fs.existsSync(resources)) return resources;
