@@ -548,3 +548,8 @@ man_base_data_pebble/
 !tests/coworkStreamDeltaProtocol.test.mjs
 !tests/coworkStreamFlushCoalescing.test.mjs
 !tests/coworkConversationTurnReuse.test.mjs
+!tests/sessionListRenderBudget.test.mjs
+!tests/sessionListRevealBudget.test.ts
+!tests/coworkSessionActivityAt.test.mjs
+!tests/coworkMessageTranscriptOrdering.test.mjs
+!tests/coworkSessionMessageWindow.test.mjs

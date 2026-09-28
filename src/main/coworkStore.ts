@@ -113,11 +113,106 @@ const SCOPED_USER_MEMORIES_BACKFILL_KEY = 'userMemories.scopeBackfill.v1.complet
 const METAWEB_ORDER_SESSION_MIGRATION_KEY = 'cowork.metawebOrderSessionsToPeerConversations.v1.completed';
 const METAWEB_ORDER_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebOrderSimplemsgMetadata.v1.completed';
 const METAWEB_PRIVATE_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebPrivateSimplemsgMetadata.v1.completed';
+/**
+ * Canonical JSON.stringify spelling of the metaweb-private sourceChannel flag.
+ * Every metadata write goes through this store's stringify, so a LIKE on this
+ * fragment is exact — it never matches a spaced or reordered spelling.
+ */
+const COWORK_METAWEB_PRIVATE_METADATA_FRAGMENT = '"sourceChannel":"metaweb_private"';
+/**
+ * The session-list activity key: the created_at of the last conversation event
+ * that may reorder the sidebar. User turns count, and so do on-chain A2A private
+ * DMs synced into the session (bot-driven owner threads must keep surfacing);
+ * local stream chunks carry no sourceChannel metadata, so they never bump it —
+ * that is the anti-flicker guarantee while several sessions run in parallel.
+ */
+const coworkActivityMessageMatch = (alias = ''): string =>
+  `(${alias}type = 'user' OR ${alias}metadata LIKE '%${COWORK_METAWEB_PRIVATE_METADATA_FRAGMENT}%')`;
+/**
+ * The activity_at value of one session row: the stored column when it has been
+ * stamped, else the pre-column computation (last activity message, else newest
+ * message, else updated_at). `sessionRef` is the cowork_sessions reference the
+ * subqueries correlate against ('s' in a SELECT, 'cowork_sessions' in an UPDATE).
+ */
+const coworkSessionActivityAtSelectSql = (sessionRef: string): string => `COALESCE((
+          SELECT m.created_at
+          FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
+          WHERE m.session_id = ${sessionRef}.id
+            AND ${coworkActivityMessageMatch('m.')}
+          ORDER BY m.created_at DESC
+          LIMIT 1
+        ), (
+          SELECT m.created_at
+          FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
+          WHERE m.session_id = ${sessionRef}.id
+          ORDER BY m.created_at DESC
+          LIMIT 1
+        ), ${sessionRef}.updated_at)`;
+/** Activity key of a single session row, ignoring the stored column (may be NULL). */
+const coworkSessionActivityAtMessageSql = (sessionRef: string): string => `(
+          SELECT m.created_at
+          FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
+          WHERE m.session_id = ${sessionRef}.id
+            AND ${coworkActivityMessageMatch('m.')}
+          ORDER BY m.created_at DESC
+          LIMIT 1
+        )`;
 const MEMORY_ROW_SELECT_COLUMNS = `
   id, text, fingerprint, confidence, is_explicit, status,
   created_at, updated_at, last_used_at, scope_kind, scope_key, usage_class, visibility, origin, archived_at
 `;
 const PRIVATE_CHAT_SIMPLEMSG_BACKFILL_TIME_WINDOW_MS = 10 * 60 * 1000;
+/**
+ * How many of a session's newest messages a session view carries. The transcript
+ * is paged from the bottom up from there (the A2A display window has always
+ * worked this way); everything older is one "load earlier" away. 100 matches the
+ * message page size the A2A window already used, so the same affordance walks
+ * both session kinds.
+ */
+const COWORK_SESSION_VIEW_MESSAGE_LIMIT = 100;
+const COWORK_MESSAGE_PAGE_LIMIT_MAX = 200;
+
+/**
+ * Page request normalization shared by the window and the page reader, so the
+ * size a window advertises as pageSize is exactly the size it will page with.
+ */
+function normalizeCoworkMessagePageRequest(options?: {
+  beforeSequence?: number | null;
+  limit?: number;
+}): { limit: number; beforeSequence: number | null } {
+  const requestedLimit = Number(options?.limit);
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(COWORK_MESSAGE_PAGE_LIMIT_MAX, Math.floor(requestedLimit)))
+    : COWORK_SESSION_VIEW_MESSAGE_LIMIT;
+  const requestedBeforeSequence = Number(options?.beforeSequence);
+  const beforeSequence = Number.isFinite(requestedBeforeSequence) && requestedBeforeSequence > 0
+    ? Math.floor(requestedBeforeSequence)
+    : null;
+  return { limit, beforeSequence };
+}
+
+/**
+ * Wire format of a transcript page cursor: '<created_at>:<sequence>:<rowid>'.
+ * Kept a plain string because it is a row key, not a value the renderer reads.
+ */
+function formatCoworkTranscriptCursor(row: CoworkMessageRow): string {
+  const rowId = Number(row.rowid);
+  const sequence = Number(row.sequence);
+  return `${Math.floor(row.created_at)}:${Number.isFinite(sequence) && sequence > 0 ? Math.floor(sequence) : 0}:${Number.isFinite(rowId) ? Math.floor(rowId) : 0}`;
+}
+
+function parseCoworkTranscriptCursor(raw: unknown): CoworkTranscriptCursor | null {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 64) return null;
+  const match = /^(\d{1,15}):(\d{1,15}):(\d{1,15})$/.exec(raw);
+  if (!match) return null;
+  const createdAt = Number(match[1]);
+  const sequence = Number(match[2]);
+  const rowId = Number(match[3]);
+  if (!Number.isSafeInteger(createdAt) || !Number.isSafeInteger(sequence) || !Number.isSafeInteger(rowId)) {
+    return null;
+  }
+  return { createdAt, sequence, rowId };
+}
 
 function normalizeMemoryGuardLevel(value: string | undefined): CoworkMemoryGuardLevel {
   if (value === 'strict' || value === 'standard' || value === 'relaxed') return value;
@@ -614,6 +709,13 @@ export interface CoworkMessagePage {
   messages: CoworkMessage[];
   hasMoreBefore: boolean;
   beforeSequence: number | null;
+  /**
+   * Cursor for the next older page of a non-A2A window. Non-A2A sessions page in
+   * transcript order (created_at, sequence, ROWID), which a bare sequence cannot
+   * address — a migrated copy appends turns with old timestamps and fresh
+   * sequences. Opaque to the renderer, which only ever hands it back.
+   */
+  beforeTranscriptCursor?: string | null;
 }
 
 export interface CoworkA2AHistoryCursor {
@@ -683,6 +785,13 @@ export interface CoworkMessageHistoryState {
    * episodes of the thread.
    */
   beforeEpisodeIndex?: number | null;
+  /**
+   * Non-A2A sessions page in transcript order, whose cursor is a row key rather
+   * than a sequence. Opaque to the renderer: it holds the value the window was
+   * handed and passes it back to load earlier. Null once the start of the
+   * transcript is reached.
+   */
+  beforeTranscriptCursor?: string | null;
 }
 
 export interface CoworkSession {
@@ -1014,6 +1123,19 @@ interface CoworkMessageRow {
   metadata: string | null;
   created_at: number;
   sequence: number | null;
+  /** Selected only where the row key itself is the page cursor. */
+  rowid?: number;
+}
+
+/**
+ * Row key of a transcript-order page cursor, in the (created_at, sequence,
+ * ROWID) order the transcript is read in. Not part of the IPC contract: the
+ * store hands the renderer an opaque string and parses it back.
+ */
+interface CoworkTranscriptCursor {
+  createdAt: number;
+  sequence: number;
+  rowId: number;
 }
 
 interface MetawebOrderMessageBackfillRow {
@@ -1233,12 +1355,54 @@ export class CoworkStore implements MemoryBackend {
     migratedMetawebOrderSessions: number;
     backfilledMetawebOrderMessages: number;
     backfilledMetawebPrivateMessages: number;
+    backfilledSessionActivityAt: number;
   } {
+    const migratedMetawebOrderSessions = this.migrateMetawebOrderSessionsToPeerConversations();
+    const backfilledMetawebOrderMessages = this.backfillMetawebOrderSimplemsgMetadata();
+    const backfilledMetawebPrivateMessages = this.backfillMetawebPrivateSimplemsgMetadata();
+    // The transcript-order indexes are built here rather than in the ensure
+    // tier: the first build reads every message row, which on a multi-GB
+    // database is exactly the kind of one-time cost the deferred tier exists
+    // for. Every query stays correct without them, only sorted instead of
+    // index-ordered.
+    this.ensureCoworkMessageWindowIndexes();
+    // Order matters: the metadata backfills above can tag legacy rows as
+    // metaweb_private, and those rows must count toward the activity stamp.
+    const backfilledSessionActivityAt = this.backfillSessionActivityAt();
     return {
-      migratedMetawebOrderSessions: this.migrateMetawebOrderSessionsToPeerConversations(),
-      backfilledMetawebOrderMessages: this.backfillMetawebOrderSimplemsgMetadata(),
-      backfilledMetawebPrivateMessages: this.backfillMetawebPrivateSimplemsgMetadata(),
+      migratedMetawebOrderSessions,
+      backfilledMetawebOrderMessages,
+      backfilledMetawebPrivateMessages,
+      backfilledSessionActivityAt,
     };
+  }
+
+  /**
+   * Stamp activity_at for every session row that predates the column (or was
+   * left NULL by a write path). One statement, idempotent, re-entrant: rows
+   * already stamped are not touched, so a re-run after an interrupted boot
+   * continues where it left off. The value is the pre-column computation, so
+   * an upgraded database lists in exactly the order it did before.
+   */
+  private backfillSessionActivityAt(): number {
+    if (!this.tableExists('cowork_sessions') || !this.tableExists('cowork_messages')) {
+      return 0;
+    }
+    try {
+      this.db.run(`
+        UPDATE cowork_sessions
+        SET activity_at = ${coworkSessionActivityAtSelectSql('cowork_sessions')}
+        WHERE activity_at IS NULL
+      `);
+      const changed = this.db.getRowsModified?.() || 0;
+      if (changed > 0) {
+        this.saveDb();
+      }
+      return changed;
+    } catch (error) {
+      console.warn('[CoworkStore] Failed to backfill cowork session activity_at:', error);
+      return 0;
+    }
   }
 
   private ensureCoworkMessageIndexes(): void {
@@ -1267,6 +1431,49 @@ export class CoworkStore implements MemoryBackend {
    * The matched substrings are the canonical JSON.stringify spelling of the
    * metadata flags (every metadata write goes through this store).
    */
+  /**
+   * Indexes that turn the transcript order into an index-ordered walk.
+   *
+   * The transcript order is (created_at, sequence, ROWID) — the order
+   * getSessionMessages returns, the order a message page walks, and the order
+   * getSession rewinds along. An index on (session_id, created_at, sequence)
+   * carries the rowid last implicitly, so a forward scan yields that order
+   * exactly (older-message pages, the full transcript) and a backward scan
+   * yields its exact reverse (the newest-first window). The sequence-led index
+   * does the same for the newest-first page whose cursor is a sequence.
+   *
+   * Every ORDER BY these serve used to spell sequence as COALESCE(sequence, 0),
+   * an expression no index can order by, so each page materialized the whole
+   * session into a temp B-tree before applying its LIMIT.
+   */
+  private ensureCoworkMessageWindowIndexes(): void {
+    if (!this.tableExists('cowork_messages')) {
+      return;
+    }
+    try {
+      let changed = false;
+      if (!this.indexExists('idx_cowork_messages_session_created_sequence')) {
+        this.db.run(`
+          CREATE INDEX IF NOT EXISTS idx_cowork_messages_session_created_sequence
+          ON cowork_messages(session_id, created_at, sequence)
+        `);
+        changed = true;
+      }
+      if (!this.indexExists('idx_cowork_messages_session_sequence_created')) {
+        this.db.run(`
+          CREATE INDEX IF NOT EXISTS idx_cowork_messages_session_sequence_created
+          ON cowork_messages(session_id, sequence, created_at)
+        `);
+        changed = true;
+      }
+      if (changed) {
+        this.saveDb();
+      }
+    } catch (error) {
+      console.warn('[CoworkStore] Failed to build cowork_messages transcript-order indexes:', error);
+    }
+  }
+
   private ensureCoworkMessageHealColumns(): void {
     if (!this.tableExists('cowork_messages')) {
       return;
@@ -1448,6 +1655,16 @@ export class CoworkStore implements MemoryBackend {
         // /goal command state: JSON {text, status: active|paused, updatedAt}.
         // NULL = no goal (the DSH /goal port's storage).
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN goal TEXT;');
+        changed = true;
+      }
+      if (!sessionColumns.includes('activity_at')) {
+        // Session-list ordering key (see coworkSessionActivityAtSelectSql): the
+        // created_at of the last activity message. The message write paths keep
+        // it current; the one-time backfill for pre-existing rows runs in the
+        // deferred heavy tier (runHeavyStartupMaintenance), so the ALTER here
+        // stays instant on a multi-GB database. A NULL row simply keeps sorting
+        // through the older correlated-subquery computation.
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN activity_at INTEGER;');
         changed = true;
       }
 
@@ -3069,37 +3286,63 @@ export class CoworkStore implements MemoryBackend {
     };
   }
 
-  getSessionView(id: string, messageLimit: number = 100): CoworkSession | null {
+  /**
+   * A session as the renderer opens it: its newest messages plus the state
+   * needed to page the rest in. A real conversation reaches five figures of
+   * messages and 12MB of content, and the whole transcript used to cross IPC on
+   * every open, every stream completion and every summary refresh (11,554
+   * messages / 12.1MB for the largest session in a live library) only for the
+   * transcript to render its newest screenful.
+   *
+   * Browser-panel sessions are the one exception: the Bot Browser side panel
+   * renders a minimal projection of the transcript and has no "load earlier"
+   * affordance, so those keep the full read.
+   */
+  getSessionView(id: string, messageLimit: number = COWORK_SESSION_VIEW_MESSAGE_LIMIT): CoworkSession | null {
     const session = this.getSessionWithoutMessages(id);
     if (!session) return null;
-    if (session.sessionType !== 'a2a') {
+    if (session.sessionType === 'a2a') {
+      const page = this.getSessionMessagesPage(id, { limit: messageLimit, displayWindow: true });
+      // Thread aggregation: "load earlier" must be offered not only while the
+      // session's own window has more, but also when previous episodes of the
+      // thread exist below it.
+      const hasEarlierEpisodes = this.getOne<{ found: number }>(`
+        SELECT 1 AS found
+        FROM a2a_conversation_episodes anchor
+        WHERE anchor.session_id = ?
+          AND EXISTS (
+            SELECT 1 FROM a2a_conversation_episodes earlier
+            WHERE earlier.thread_id = anchor.thread_id
+              AND earlier.episode_index < anchor.episode_index
+          )
+        LIMIT 1
+      `, [id]) != null;
+      return {
+        ...session,
+        messages: page.messages,
+        messageHistory: {
+          hasMoreBefore: page.hasMoreBefore || hasEarlierEpisodes,
+          beforeSequence: page.beforeSequence,
+          pageSize: normalizeCoworkMessagePageRequest({ limit: messageLimit }).limit,
+          beforeEpisodeIndex: null,
+        },
+      };
+    }
+    if (session.sessionType === 'browser') {
       return {
         ...session,
         messages: this.getSessionMessages(id),
       };
     }
-    const page = this.getSessionMessagesPage(id, { limit: messageLimit, displayWindow: true });
-    // Thread aggregation: "load earlier" must be offered not only while the
-    // session's own window has more, but also when previous episodes of the
-    // thread exist below it.
-    const hasEarlierEpisodes = this.getOne<{ found: number }>(`
-      SELECT 1 AS found
-      FROM a2a_conversation_episodes anchor
-      WHERE anchor.session_id = ?
-        AND EXISTS (
-          SELECT 1 FROM a2a_conversation_episodes earlier
-          WHERE earlier.thread_id = anchor.thread_id
-            AND earlier.episode_index < anchor.episode_index
-        )
-      LIMIT 1
-    `, [id]) != null;
+    const page = this.getSessionMessagesPage(id, { limit: messageLimit });
     return {
       ...session,
       messages: page.messages,
       messageHistory: {
-        hasMoreBefore: page.hasMoreBefore || hasEarlierEpisodes,
-        beforeSequence: page.beforeSequence,
-        pageSize: Math.max(1, Math.min(200, Math.floor(messageLimit))),
+        hasMoreBefore: page.hasMoreBefore,
+        beforeSequence: null,
+        beforeTranscriptCursor: page.beforeTranscriptCursor ?? null,
+        pageSize: normalizeCoworkMessagePageRequest({ limit: messageLimit }).limit,
         beforeEpisodeIndex: null,
       },
     };
@@ -3552,29 +3795,16 @@ export class CoworkStore implements MemoryBackend {
         -- Sort by the LAST CONVERSATION EVENT time (a user message OR an
         -- on-chain A2A private DM synced into the session), not the newest
         -- assistant stream message: while tasks run, stream updates no longer
-        -- reshuffle the session list top (no more flickering). Local stream
-        -- chunks carry no sourceChannel metadata, so the LIKE keeps them out;
-        -- daemon-synced metaweb_private messages are atomic inserts (bot DMs
-        -- to a peer/owner, e.g. morning reports) and MUST bump the session —
-        -- sorting by the last user message alone sank bot-driven threads to
-        -- the list bottom (owner could not find the bot's DM conversation).
-        -- Sessions without either fall back to newest message, then
-        -- updated_at. Stable tie-breakers keep the order deterministic.
-        COALESCE((
-          SELECT m.created_at
-          FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
-          WHERE m.session_id = s.id
-            AND (m.type = 'user'
-                 OR m.metadata LIKE '%"sourceChannel":"metaweb_private"%')
-          ORDER BY m.created_at DESC
-          LIMIT 1
-        ), (
-          SELECT m.created_at
-          FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
-          WHERE m.session_id = s.id
-          ORDER BY m.created_at DESC
-          LIMIT 1
-        ), s.updated_at) AS activity_at
+        -- reshuffle the session list top (no more flickering). The key is
+        -- stored on the session row (activity_at) and maintained by the message
+        -- write paths; this used to be the correlated subquery below, run once
+        -- per session on every list read (0.3-0.83s on a real library, most of
+        -- it metadata LIKE scans). The subquery stays as the fallback for a row
+        -- the stamp has not reached yet (a pre-upgrade database before the
+        -- deferred backfill, or a session that never saw an activity message),
+        -- and COALESCE short-circuits, so the steady state never evaluates it.
+        -- Stable tie-breakers keep the order deterministic.
+        COALESCE(s.activity_at, ${coworkSessionActivityAtSelectSql('s')}) AS activity_at
       FROM cowork_sessions s
       LEFT JOIN metabots mb ON mb.id = s.metabot_id
       WHERE COALESCE(s.hidden_from_session_list, 0) = 0
@@ -4041,6 +4271,19 @@ export class CoworkStore implements MemoryBackend {
     return deduped;
   }
 
+  /**
+   * The full transcript, oldest first, in the canonical order every transcript
+   * consumer shares: (created_at, sequence, ROWID). Spelled without the
+   * COALESCE(sequence, 0) it used to carry — that expression forced SQLite to
+   * sort every row of the session (a real chat session reaches five figures),
+   * while idx_cowork_messages_session_created_sequence carries exactly this key
+   * and serves the read as a plain index scan.
+   *
+   * The two spellings are interchangeable: sequence is never 0 or negative
+   * (every insert path assigns MAX(sequence) + 1), so COALESCE(sequence, 0)
+   * only ever rewrites NULL — and a NULL sorts first in ASC either way. NULL
+   * sequence rows can only come from a database predating the column.
+   */
   private getSessionMessages(sessionId: string): CoworkMessage[] {
     const rows = this.getAll<CoworkMessageRow>(`
       SELECT id, type, content, metadata, created_at, sequence
@@ -4048,7 +4291,7 @@ export class CoworkStore implements MemoryBackend {
       WHERE session_id = ?
       ORDER BY
         created_at ASC,
-        COALESCE(sequence, 0) ASC,
+        sequence ASC,
         ROWID ASC
     `, [sessionId]);
 
@@ -4164,22 +4407,33 @@ export class CoworkStore implements MemoryBackend {
     return Boolean(row?.found);
   }
 
+  /**
+   * One page of a session's transcript, newest page first.
+   *
+   * `displayWindow` pages an A2A session through its display projection (hidden
+   * internals skipped) and answers with a sequence cursor — the shape A2A has
+   * always used. Everything else pages in transcript order and answers with the
+   * opaque `beforeTranscriptCursor` the previous page handed over. Each kind of
+   * view therefore has exactly one cursor, and a caller always passes back the
+   * one it was given: the page order can never quietly differ from the window's.
+   */
   getSessionMessagesPage(
     sessionId: string,
-    options?: { beforeSequence?: number | null; limit?: number; displayWindow?: boolean },
+    options?: {
+      beforeSequence?: number | null;
+      beforeTranscriptCursor?: string | null;
+      limit?: number;
+      displayWindow?: boolean;
+    },
   ): CoworkMessagePage {
-    const requestedLimit = Number(options?.limit);
-    const limit = Number.isFinite(requestedLimit)
-      ? Math.max(1, Math.min(200, Math.floor(requestedLimit)))
-      : 100;
-    const requestedBeforeSequence = Number(options?.beforeSequence);
-    const beforeSequence = Number.isFinite(requestedBeforeSequence) && requestedBeforeSequence > 0
-      ? Math.floor(requestedBeforeSequence)
-      : null;
+    const { limit, beforeSequence } = normalizeCoworkMessagePageRequest(options);
     if (options?.displayWindow === true) {
       return this.getA2ADisplayMessagesPage(sessionId, { beforeSequence, limit });
     }
-    return this.getRawSessionMessagesPage(sessionId, { beforeSequence, limit });
+    return this.getTranscriptSessionMessagesPage(sessionId, {
+      cursor: parseCoworkTranscriptCursor(options?.beforeTranscriptCursor),
+      limit,
+    });
   }
 
   private mapCoworkMessageRow(row: CoworkMessageRow): CoworkMessage {
@@ -4193,7 +4447,91 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Newest-first page in transcript order — the order getSessionMessages reads
+   * the whole session in, so the window and the full read agree wherever a
+   * session's timestamps and its sequences disagree (a migrated copy appends
+   * old turns with fresh sequences).
+   *
+   * idx_cowork_messages_session_created_sequence carries the key, so this is a
+   * backward index scan; the cursor predicate costs nothing extra because the
+   * scan is already in that order and stops after limit + 1 matches. The index
+   * is not forced: without it SQLite sorts instead, which is the pre-existing
+   * shape rather than an error.
+   */
+  private queryTranscriptMessageRows(
+    sessionId: string,
+    options: { cursor: CoworkTranscriptCursor | null; limit: number },
+  ): { rows: CoworkMessageRow[]; hasMoreBefore: boolean } {
+    const params: Array<string | number> = [sessionId];
+    let beforeClause = '';
+    if (options.cursor) {
+      // Strictly below the cursor row, in (created_at, sequence, ROWID) order.
+      // COALESCE on the cursor side only: it is the same mapping the ASC
+      // transcript read applies to a NULL sequence, which cannot occur for rows
+      // written by this store.
+      beforeClause = `
+        AND (
+          created_at < ?
+          OR (created_at = ? AND COALESCE(sequence, 0) < ?)
+          OR (created_at = ? AND COALESCE(sequence, 0) = ? AND ROWID < ?)
+        )`;
+      params.push(
+        options.cursor.createdAt,
+        options.cursor.createdAt,
+        options.cursor.sequence,
+        options.cursor.createdAt,
+        options.cursor.sequence,
+        options.cursor.rowId,
+      );
+    }
+    params.push(options.limit + 1);
+
+    const rows = this.getAll<CoworkMessageRow>(`
+      SELECT id, type, content, metadata, created_at, sequence, ROWID AS rowid
+      FROM cowork_messages
+      WHERE session_id = ?
+      ${beforeClause}
+      ORDER BY
+        created_at DESC,
+        sequence DESC,
+        ROWID DESC
+      LIMIT ?
+    `, params);
+    return {
+      rows,
+      hasMoreBefore: rows.length > options.limit,
+    };
+  }
+
+  private getTranscriptSessionMessagesPage(
+    sessionId: string,
+    options: { cursor: CoworkTranscriptCursor | null; limit: number },
+  ): CoworkMessagePage {
+    const { rows, hasMoreBefore } = this.queryTranscriptMessageRows(sessionId, options);
+    const page = rows.slice(0, options.limit);
+    const oldest = page.length > 0 ? page[page.length - 1] : null;
+    return {
+      // Rows arrive newest-first and are handed over oldest-first.
+      messages: page.slice().reverse().map((row) => this.mapCoworkMessageRow(row)),
+      hasMoreBefore,
+      beforeSequence: null,
+      beforeTranscriptCursor: hasMoreBefore && oldest ? formatCoworkTranscriptCursor(oldest) : null,
+    };
+  }
+
+  /**
    * Newest-first SQL page. `hasMoreBefore` means older rows exist beyond this chunk.
+   *
+   * Ordering is the sequence-led newest-first order, spelled without the
+   * COALESCE(sequence, 0) it used to carry: that expression made every page a
+   * temp B-tree sort of the whole session, while
+   * idx_cowork_messages_session_sequence_created carries exactly this key
+   * (sequence, then created_at, then the implicit rowid) and serves it as a
+   * backward index scan. NULL sequences — rows written before the column
+   * existed, and only those: every insert path assigns MAX(sequence) + 1 —
+   * still sort last, which is what COALESCE(sequence, 0) achieved by mapping
+   * them onto key 0. The index is not forced: without it the planner falls back
+   * to the sort, which is the old shape rather than an error.
    */
   private querySessionMessageRows(
     sessionId: string,
@@ -4210,11 +4548,11 @@ export class CoworkStore implements MemoryBackend {
 
     const rows = this.getAll<CoworkMessageRow>(`
       SELECT id, type, content, metadata, created_at, sequence
-      FROM cowork_messages INDEXED BY idx_cowork_messages_session_sequence
+      FROM cowork_messages
       WHERE session_id = ?
       ${beforeClause}
       ORDER BY
-        COALESCE(sequence, 0) DESC,
+        sequence DESC,
         created_at DESC,
         ROWID DESC
       LIMIT ?
@@ -4223,24 +4561,6 @@ export class CoworkStore implements MemoryBackend {
     return {
       rows: rows.slice(0, options.limit),
       hasMoreBefore,
-    };
-  }
-
-  private getRawSessionMessagesPage(
-    sessionId: string,
-    options: { beforeSequence: number | null; limit: number },
-  ): CoworkMessagePage {
-    const { rows, hasMoreBefore } = this.querySessionMessageRows(sessionId, options);
-    const oldestSequence = rows.length > 0
-      ? Number(rows[rows.length - 1]?.sequence)
-      : null;
-
-    return {
-      messages: rows.slice().reverse().map((row) => this.mapCoworkMessageRow(row)),
-      hasMoreBefore,
-      beforeSequence: hasMoreBefore && Number.isFinite(oldestSequence) && Number(oldestSequence) > 0
-        ? Number(oldestSequence)
-        : null,
     };
   }
 
@@ -4567,6 +4887,44 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Bump a session's stored activity key for a message that may reorder the
+   * session list (see coworkActivityMessageMatch). Monotonic: an insert whose
+   * created_at is older than the stamp (a migrated/legacy copy) leaves it alone,
+   * so the column always equals the newest activity message. Messages that do
+   * not qualify — assistant stream chunks above all — never touch the row, which
+   * is what keeps a running task from reshuffling the sidebar.
+   */
+  private touchSessionActivityAt(
+    sessionId: string,
+    createdAt: number,
+    type: string,
+    metadataJson: string | null,
+  ): void {
+    if (type !== 'user' && !metadataJson?.includes(COWORK_METAWEB_PRIVATE_METADATA_FRAGMENT)) {
+      return;
+    }
+    this.db.run(`
+      UPDATE cowork_sessions
+      SET activity_at = ?
+      WHERE id = ? AND ? > COALESCE(activity_at, 0)
+    `, [createdAt, sessionId, createdAt]);
+  }
+
+  /**
+   * Recompute one session's activity key from its remaining messages after a
+   * history truncation (rewind). Writes NULL when no activity message is left,
+   * which hands the row back to the list's fallback computation instead of
+   * freezing a value that no longer describes the session.
+   */
+  private refreshSessionActivityAt(sessionId: string): void {
+    this.db.run(`
+      UPDATE cowork_sessions
+      SET activity_at = ${coworkSessionActivityAtMessageSql('cowork_sessions')}
+      WHERE id = ?
+    `, [sessionId]);
+  }
+
+  /**
    * fix/group-task-duration: pin a session's updated_at back to a prior value
    * after a HOST-generated system notice (e.g. the stale-working wake).
    * addMessage refreshes updated_at, and the group-task daemon classifies
@@ -4595,6 +4953,7 @@ export class CoworkStore implements MemoryBackend {
     `, [sessionId]);
     const sequence = sequenceRow[0]?.values[0]?.[0] as number || 1;
 
+    const metadataJson = message.metadata ? JSON.stringify(message.metadata) : null;
     this.db.run(`
       INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -4603,12 +4962,13 @@ export class CoworkStore implements MemoryBackend {
       sessionId,
       message.type,
       message.content,
-      message.metadata ? JSON.stringify(message.metadata) : null,
+      metadataJson,
       now,
       sequence,
     ]);
 
     this.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [now, sessionId]);
+    this.touchSessionActivityAt(sessionId, now, message.type, metadataJson);
     this.db.run(`
       UPDATE a2a_conversation_threads
       SET updated_at = ?
@@ -5035,6 +5395,7 @@ export class CoworkStore implements MemoryBackend {
           WHERE session_id = ?
         `, [forked.id]);
         const sequence = sequenceRow[0]?.values[0]?.[0] as number || 1;
+        const metadataJson = message.metadata ? JSON.stringify(message.metadata) : null;
         this.db.run(`
           INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence)
           VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -5043,10 +5404,11 @@ export class CoworkStore implements MemoryBackend {
           forked.id,
           message.type,
           message.content,
-          message.metadata ? JSON.stringify(message.metadata) : null,
+          metadataJson,
           message.timestamp,
           sequence,
         ]);
+        this.touchSessionActivityAt(forked.id, message.timestamp, message.type, metadataJson);
       }
     } catch (error) {
       // Defensive: never leak a half-forked session row. FK cascade is not
@@ -5100,6 +5462,9 @@ export class CoworkStore implements MemoryBackend {
       rewindRowId,
     ]);
     this.db.run('UPDATE cowork_sessions SET claude_session_id = NULL, updated_at = ? WHERE id = ?', [Date.now(), sessionId]);
+    // The truncated tail may have held the newest activity message; recompute
+    // from what is left so the sidebar rank matches the surviving transcript.
+    this.refreshSessionActivityAt(sessionId);
     this.saveDb();
 
     return this.getSession(sessionId);
@@ -5131,6 +5496,7 @@ export class CoworkStore implements MemoryBackend {
       WHERE session_id = ?
     `, [sessionId]);
     const sequence = sequenceRow[0]?.values[0]?.[0] as number || 1;
+    const metadataJson = message.metadata ? JSON.stringify(message.metadata) : null;
     this.db.run(`
       INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -5139,11 +5505,14 @@ export class CoworkStore implements MemoryBackend {
       sessionId,
       message.type,
       message.content,
-      message.metadata ? JSON.stringify(message.metadata) : null,
+      metadataJson,
       timestamp,
       sequence,
     ]);
     this.db.run('UPDATE cowork_sessions SET updated_at = MAX(updated_at, ?) WHERE id = ?', [timestamp, sessionId]);
+    // A migrated row keeps its original created_at, so the activity stamp is
+    // monotonic here too — an old copied turn never sinks a busy session.
+    this.touchSessionActivityAt(sessionId, timestamp, message.type, metadataJson);
     return {
       id,
       type: message.type,

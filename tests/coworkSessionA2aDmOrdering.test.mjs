@@ -26,6 +26,18 @@ const backdate = (db, messageId, createdAtMs) => {
   db.run('UPDATE cowork_messages SET created_at = ? WHERE id = ?', [createdAtMs, messageId]);
 };
 
+/**
+ * listSessions reads the stored activity key (cowork_sessions.activity_at),
+ * stamped by the message write paths at insert time, with the pre-column
+ * computation as its fallback. These fixtures stage a transcript by backdating
+ * rows with direct SQL, so the stamps have to be re-derived from it — exactly
+ * what an upgraded database does on its first boot.
+ */
+const rederiveActivityAt = (db, store) => {
+  db.run('UPDATE cowork_sessions SET activity_at = NULL');
+  store.runHeavyStartupMaintenance();
+};
+
 test('a metaweb_private DM bumps the session above stream-only activity', async () => {
   const { db, cleanup } = await createSqliteStore();
   try {
@@ -60,6 +72,7 @@ test('a metaweb_private DM bumps the session above stream-only activity', async 
     });
     backdate(db, busyUserMsg.id, Date.now() - 48 * HOUR);
     backdate(db, streamChunk.id, Date.now() - 30_000);
+    rederiveActivityAt(db, store);
 
     const listed = store.listSessions({ metabotId: 1 });
     assert.equal(listed.length, 2);
@@ -93,6 +106,7 @@ test('a session with only metaweb_private messages (no user message) still has a
       metadata: null,
     });
     backdate(db, staleMsg.id, Date.now() - 24 * HOUR);
+    rederiveActivityAt(db, store);
 
     const listed = store.listSessions({ metabotId: 2 });
     assert.deepEqual(listed.map((summary) => summary.id), [peerThread.id, staleThread.id]);
@@ -129,6 +143,7 @@ test('internal sync channels (orchestrator/order) do not bump the activity key',
       content: 'recent human turn',
     });
     backdate(db, chattyUser.id, Date.now() - 10 * 60_000);
+    rederiveActivityAt(db, store);
 
     const listed = store.listSessions({ metabotId: 3 });
     assert.deepEqual(listed.map((summary) => summary.id), [chatty.id, quiet.id]);

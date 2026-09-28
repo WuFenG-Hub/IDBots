@@ -8431,7 +8431,7 @@ const getGigSquareRefundsService = () => {
         }
       },
       resolveCoworkSessionIdForOrder: (order) => {
-        const sessions = listCoworkSessionsForOrderResolution();
+        const sessions = getOrderResolutionSessions();
         return resolveCoworkSessionIdForOrder(order as ServiceOrderRecord, sessions);
       },
       refreshRefundProtocols: () => syncServiceRefundProtocols(),
@@ -8626,12 +8626,102 @@ const resolveSessionServiceOrderOutputType = (
   return resolveGigSquareLocalServiceOutputType({ serviceId, serviceName });
 };
 
-const listCoworkSessionsForOrderResolution = (): NonNullable<ReturnType<CoworkStore['getSession']>>[] => {
+type OrderResolutionSession = NonNullable<ReturnType<CoworkStore['getSession']>>;
+
+/**
+ * Columns findMatchingOrderSessionId reads beyond the session summary. They are
+ * read in one pass instead of through getSession() so that resolving orders for
+ * a whole refund batch or the "my services" page does not materialize the full
+ * message history of every session.
+ */
+const readOrderResolutionSessionIdentities = (): Map<string, { peerGlobalMetaId: string | null; updatedAt: number }> => {
+  const identities = new Map<string, { peerGlobalMetaId: string | null; updatedAt: number }>();
+  const result = getStore().getDatabase().exec(`
+    SELECT id, peer_global_metaid, updated_at
+    FROM cowork_sessions
+    WHERE COALESCE(hidden_from_session_list, 0) = 0
+      AND archived_at IS NULL
+  `);
+  const columns = result[0]?.columns ?? [];
+  const idIndex = columns.indexOf('id');
+  const peerIndex = columns.indexOf('peer_global_metaid');
+  const updatedAtIndex = columns.indexOf('updated_at');
+  if (idIndex < 0 || peerIndex < 0 || updatedAtIndex < 0) return identities;
+  for (const row of result[0]?.values ?? []) {
+    const id = toSafeString(row[idIndex]).trim();
+    if (!id) continue;
+    identities.set(id, {
+      peerGlobalMetaId: toSafeString(row[peerIndex]).trim() || null,
+      updatedAt: toSafeNumber(row[updatedAtIndex]),
+    });
+  }
+  return identities;
+};
+
+/**
+ * Candidate sessions for order -> session resolution.
+ *
+ * This used to be `listSessions().map(getSession)`: every visible session
+ * loaded with its full message history. On a real library (~900 visible
+ * sessions, ~200 messages each, ~1 GB of content plus metadata JSON) that is
+ * seconds of synchronous work on the main process, paid again for every order
+ * in a refund batch and for every "my services" page load.
+ *
+ * Messages are now loaded lazily per session: findMatchingOrderSessionId only
+ * touches `messages` for candidates that already match the MetaBot, the session
+ * type and the peer, so unmatched sessions never load a single message. The
+ * summary fields it reads (id / sessionType / metabotId / updatedAt) and the two
+ * extra identity columns mirror getSession()'s values exactly, which keeps the
+ * resolution result unchanged.
+ */
+const listCoworkSessionsForOrderResolution = (): OrderResolutionSession[] => {
   const coworkStore = getCoworkStore();
-  return coworkStore
-    .listSessions()
-    .map((session) => coworkStore.getSession(session.id))
-    .filter((session): session is NonNullable<ReturnType<CoworkStore['getSession']>> => Boolean(session));
+  const summaries = coworkStore.listSessions();
+  if (summaries.length === 0) return [];
+  const identities = readOrderResolutionSessionIdentities();
+  return summaries.map((summary) => {
+    const identity = identities.get(summary.id);
+    let loaded: OrderResolutionSession | null | undefined;
+    const session = {
+      ...summary,
+      peerGlobalMetaId: identity?.peerGlobalMetaId ?? null,
+      updatedAt: identity?.updatedAt ?? summary.updatedAt,
+    } as unknown as OrderResolutionSession;
+    Object.defineProperty(session, 'messages', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        if (loaded === undefined) {
+          loaded = coworkStore.getSession(summary.id);
+        }
+        return loaded?.messages ?? [];
+      },
+    });
+    return session;
+  });
+};
+
+/**
+ * Candidate list shared by every order lookup issued in the same synchronous
+ * turn. A refund batch resolves all of its orders at once (`Promise.all` over
+ * buildRefundItem), and the candidate query itself is ~60ms, so without this the
+ * batch paid it once per order. The entry is dropped in a microtask, i.e. before
+ * any awaited boundary can observe it, so no caller ever sees a stale list.
+ */
+let orderResolutionSessionsForTurn: { sessions: OrderResolutionSession[] } | null = null;
+
+const getOrderResolutionSessions = (): OrderResolutionSession[] => {
+  if (!orderResolutionSessionsForTurn) {
+    const entry = { sessions: listCoworkSessionsForOrderResolution() };
+    orderResolutionSessionsForTurn = entry;
+    queueMicrotask(() => {
+      if (orderResolutionSessionsForTurn === entry) {
+        orderResolutionSessionsForTurn = null;
+      }
+    });
+    return entry.sessions;
+  }
+  return orderResolutionSessionsForTurn.sessions;
 };
 
 const resolveCoworkSessionIdForOrder = (
@@ -11252,12 +11342,27 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:get', async (_event, sessionId: string) => {
+  ipcMain.handle('cowork:session:get', async (_event, payload: string | { sessionId?: unknown; messageLimit?: unknown }) => {
     return withSqliteRecovery('cowork:session:get', async () => {
       try {
+        // The session view is a bounded window (newest messages first) plus the
+        // cursor to page older ones in from; callers that need a different
+        // window size pass it, and the browser panel — whose surface has no
+        // paging — asks for the whole transcript.
+        const sessionId = typeof payload === 'string'
+          ? payload
+          : toSafeString(payload?.sessionId).trim();
+        const requestedMessageLimit = typeof payload === 'object' && payload !== null
+          ? Number(payload.messageLimit)
+          : Number.NaN;
+        const messageLimit = Number.isFinite(requestedMessageLimit) && requestedMessageLimit > 0
+          ? Math.floor(requestedMessageLimit)
+          : undefined;
         repairSelfDirectedServiceOrders();
         const session = enrichCoworkSessionWithServiceOrderSummary(
-          getCoworkStore().getSessionView(sessionId)
+          messageLimit == null
+            ? getCoworkStore().getSessionView(sessionId)
+            : getCoworkStore().getSessionView(sessionId, messageLimit)
         );
         if (session?.sessionType === 'a2a') {
           scheduleA2APeerProfileRefresh(session.id);
@@ -11357,6 +11462,7 @@ if (!gotTheLock) {
   ipcMain.handle('cowork:session:getMessagesPage', async (_event, input: {
     sessionId?: unknown;
     beforeSequence?: unknown;
+    beforeTranscriptCursor?: unknown;
     limit?: unknown;
   }) => {
     return withSqliteRecovery('cowork:session:getMessagesPage', async () => {
@@ -11368,6 +11474,9 @@ if (!gotTheLock) {
         }
         const page = getCoworkStore().getSessionMessagesPage(sessionId, {
           beforeSequence: typeof input?.beforeSequence === 'number' ? input.beforeSequence : null,
+          beforeTranscriptCursor: typeof input?.beforeTranscriptCursor === 'string'
+            ? input.beforeTranscriptCursor
+            : null,
           limit: typeof input?.limit === 'number' ? input.limit : undefined,
           displayWindow: metadata.sessionType === 'a2a',
         });
@@ -14175,7 +14284,7 @@ if (!gotTheLock) {
         pageSize,
       });
       const sellerOrderById = new Map(sellerOrders.map((order) => [order.id, order] as const));
-      const coworkSessions = listCoworkSessionsForOrderResolution();
+      const coworkSessions = getOrderResolutionSessions();
       const sessionResolvedItems = detailPage.items.map((item) => {
         if (toSafeString(item.coworkSessionId).trim()) {
           return item;

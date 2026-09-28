@@ -3505,15 +3505,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     const sessionId = currentSession?.id;
     const history = currentSession?.messageHistory;
     const container = scrollContainerRef.current;
-    // NOTE: no beforeSequence guard here. For A2A sessions a null
+    // Every session kind opens on a bounded newest-messages window, so this
+    // walks the transcript downwards for standard sessions exactly as it does
+    // for A2A ones. NOTE: no cursor guard here. For A2A sessions a null
     // beforeSequence with hasMoreBefore=true is the episode-rollover state:
     // the current episode's window fits entirely, and the service pages into
     // the PREVIOUS episodes of the thread (first cross-episode page uses the
     // null-null cursor). Guarding on beforeSequence dead-ends the history
-    // right after a rollover.
+    // right after a rollover, and a non-A2A window carries its own cursor.
     if (
       !sessionId
-      || currentSession?.sessionType !== 'a2a'
       || !history?.hasMoreBefore
       || !container
       || historyLoadInFlightRef.current
@@ -3541,7 +3542,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       historyLoadInFlightRef.current = false;
       setIsLoadingEarlierMessages(false);
     }
-  }, [currentSession?.id, currentSession?.sessionType, currentSession?.messageHistory]);
+  }, [currentSession?.id, currentSession?.messageHistory]);
 
   useEffect(() => {
     if (
@@ -3752,6 +3753,24 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     cache.turns = stable;
     return stable;
   }, [sessionMessages, sessionId]);
+
+  // A window whose messages all render as nothing (the transcript hides control
+  // and internal-signal messages) would strand the history: there is nothing to
+  // scroll up, so the scroll handler never asks for the page below. Same safety
+  // net the A2A window has; each page advances the cursor, and the loop ends when
+  // a page fills the transcript or the cursor runs out.
+  useEffect(() => {
+    if (isA2ASession || !currentSession?.id || !currentSession.messageHistory?.hasMoreBefore) {
+      return;
+    }
+    if (turns.length > 0) return;
+    void coworkService.loadEarlierMessages(currentSession.id);
+  }, [
+    isA2ASession,
+    currentSession?.id,
+    currentSession?.messageHistory?.hasMoreBefore,
+    turns.length,
+  ]);
 
   if (!currentSession) {
     return null;
@@ -4073,7 +4092,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         onScroll={handleMessagesScroll}
         className="flex-1 overflow-y-auto overflow-anchor-none min-h-0 pt-3"
       >
-        {isA2ASession && isLoadingEarlierMessages && (
+        {isLoadingEarlierMessages && (
           <div className="flex items-center justify-center gap-2 px-4 py-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
             <span className="h-3 w-3 animate-spin rounded-full border border-current border-t-transparent" />
             <span>Loading earlier messages…</span>

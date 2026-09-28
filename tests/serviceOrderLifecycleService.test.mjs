@@ -210,6 +210,49 @@ test('repairSelfDirectedOrders locally resolves broken self-order rows so they n
   );
 });
 
+test('repairSelfDirectedOrders still repairs when the local identity is bound after the candidate scan ran', async () => {
+  const now = 1_770_000_444_000;
+  let localGlobalMetaId = 'unrelated-global-metaid';
+  const { service, store } = await createLifecycleServiceForTest({
+    now: () => now,
+    resolveLocalMetabotGlobalMetaId: (localMetabotId) => (
+      localMetabotId === 7 ? localGlobalMetaId : null
+    ),
+  });
+
+  const order = store.createOrder({
+    role: 'buyer',
+    localMetabotId: 7,
+    counterpartyGlobalMetaid: 'self-global-metaid',
+    servicePinId: 'service-pin-id',
+    serviceName: 'Weather Pro',
+    paymentTxid: 'd'.repeat(64),
+    paymentChain: 'mvc',
+    paymentAmount: '12.34',
+    paymentCurrency: 'SPACE',
+    coworkSessionId: 'buyer-session-id',
+    status: 'refund_pending',
+    now,
+  });
+
+  // First pass caches the candidate scan with no order write and no matching
+  // identity: nothing to repair yet.
+  assert.deepEqual(service.repairSelfDirectedOrders(), []);
+
+  // The identity binding happens later and writes no service_orders row, so the
+  // cached scan must not have frozen the self-directed decision.
+  localGlobalMetaId = 'self-global-metaid';
+  const repaired = service.repairSelfDirectedOrders();
+
+  assert.equal(repaired.length, 1);
+  assert.equal(repaired[0]?.id, order.id);
+  assert.equal(store.getOrderById(order.id)?.status, 'refunded');
+  assert.equal(store.getOrderById(order.id)?.failureReason, SERVICE_ORDER_SELF_ORDER_NOT_ALLOWED_ERROR_CODE);
+
+  // A second pass over the now-clean ledger stays a no-op.
+  assert.deepEqual(service.repairSelfDirectedOrders(), []);
+});
+
 test('createSellerOrder persists a seller-side ledger row keyed by payment txid', async () => {
   const { service } = await createLifecycleServiceForTest();
 

@@ -284,11 +284,28 @@ const SERVICE_ORDER_TABLE_SQL = `
 export class ServiceOrderStore {
   private db: Database;
   private saveDb: () => void;
+  /**
+   * Monotonic count of persisted service_orders mutations. Read paths that
+   * cache derived order state (e.g. the self-directed order repair scan) use it
+   * as a cheap "did the ledger change?" signal instead of re-querying the
+   * table. ensureSchema()'s one-time migrations write through this.db directly
+   * and run before the first read, so they deliberately do not count.
+   */
+  private ordersRevision = 0;
 
   constructor(db: Database, saveDb: () => void) {
     this.db = db;
-    this.saveDb = saveDb;
+    // Every runtime mutation of service_orders ends in saveDb(); wrapping it
+    // keeps the revision correct without touching every write method.
+    this.saveDb = () => {
+      this.ordersRevision += 1;
+      saveDb();
+    };
     this.ensureSchema();
+  }
+
+  getOrdersRevision(): number {
+    return this.ordersRevision;
   }
 
   private ensureSchema(): void {
@@ -298,6 +315,17 @@ export class ServiceOrderStore {
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_service_orders_status_updated_at
       ON service_orders(status, updated_at DESC);
+    `);
+    // listOrdersByStatuses filters on (role, status) and orders by
+    // updated_at DESC, created_at DESC; no existing index serves that predicate,
+    // so the self-directed repair scan (run on every cowork session read) sorted
+    // every matching row off a full table scan. This index turns the scan into
+    // an index range search; SQLite still adds a temp b-tree for the ORDER BY
+    // because the `status IN (...)` list breaks the ordering guarantee, but the
+    // table itself is no longer read.
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_service_orders_role_status_updated
+      ON service_orders(role, status, updated_at DESC, created_at DESC);
     `);
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_service_orders_order_message_txid

@@ -131,6 +131,9 @@ const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
               onDeleteSession={onDeleteSession}
               onTogglePin={onTogglePin}
               onRenameSession={onRenameSession}
+              /** The modal re-renders with the app on a language switch; the
+               * memoized list needs to see it to refresh its labels. */
+              language={i18nService.getLanguage()}
             />
           )}
         </div>

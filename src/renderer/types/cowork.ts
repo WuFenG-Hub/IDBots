@@ -252,6 +252,8 @@ export interface CoworkMessagePage {
   messages: CoworkMessage[];
   hasMoreBefore: boolean;
   beforeSequence: number | null;
+  /** Opaque cursor for the next older page of a non-A2A session window. */
+  beforeTranscriptCursor?: string | null;
 }
 
 export interface CoworkA2AHistoryCursor {
@@ -292,6 +294,12 @@ export interface CoworkMessageHistoryState {
   pageSize: number;
   /** Episode index of the A2A cross-episode paging cursor; null while paging stays inside the current episode. */
   beforeEpisodeIndex?: number | null;
+  /**
+   * Non-A2A sessions page in transcript order, which a bare sequence cannot
+   * address (a migrated copy appends old turns with fresh sequences). Opaque:
+   * the renderer holds what the window returned and hands it back unchanged.
+   */
+  beforeTranscriptCursor?: string | null;
 }
 
 export interface CoworkServiceOrderSummary {

@@ -1297,10 +1297,14 @@ class CoworkService {
       return page.page.messages.length;
     }
 
-    if (history.beforeSequence == null) return 0;
+    // Non-A2A sessions page in transcript order, addressed by the opaque
+    // cursor the window handed over; A2A keeps its sequence cursor.
+    const beforeTranscriptCursor = history.beforeTranscriptCursor ?? null;
+    if (history.beforeSequence == null && beforeTranscriptCursor == null) return 0;
     const result = await cowork.getSessionMessagesPage({
       sessionId,
       beforeSequence: history.beforeSequence,
+      beforeTranscriptCursor,
       limit: history.pageSize,
     });
     if (!result.success || !result.page) {
@@ -1348,6 +1352,7 @@ class CoworkService {
       messageHistory: {
         hasMoreBefore: result.page.hasMoreBefore,
         beforeSequence: result.page.beforeSequence,
+        beforeTranscriptCursor: result.page.beforeTranscriptCursor ?? null,
         pageSize: history.pageSize,
       },
     }));

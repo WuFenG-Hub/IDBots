@@ -13,6 +13,15 @@ export const SERVICE_ORDER_SKILL_SCOPE_UNRESOLVED_REASON = 'skill_scope_unresolv
 export const DEFAULT_REFUND_REQUEST_RETRY_DELAY_MS = 60_000;
 export const SERVICE_ORDER_FREE_REFUND_SKIPPED_REASON = 'free_order_no_refund_required';
 
+/** Statuses whose orders can still be flipped to refunded by the self-directed
+ * order repair. */
+const SELF_DIRECTED_REPAIR_CANDIDATE_STATUSES = [
+  'awaiting_first_response',
+  'in_progress',
+  'failed',
+  'refund_pending',
+] as const;
+
 export interface CreateBuyerOrderInput {
   localMetabotId: number;
   counterpartyGlobalMetaId: string;
@@ -163,6 +172,12 @@ export class ServiceOrderLifecycleService {
   private now: () => number;
   private resolveLocalMetabotGlobalMetaId: (localMetabotId: number) => string | null | undefined;
   private pendingBuyerOrderPayments = new Set<string>();
+  /** Cached candidate scan for repairSelfDirectedOrders(), invalidated by any
+   * service_orders write (see ServiceOrderStore.getOrdersRevision). */
+  private selfDirectedRepairCandidates: {
+    ordersRevision: number;
+    orders: ServiceOrderRecord[];
+  } | null = null;
   private buildRefundRequestPayload: (order: ServiceOrderRecord) => Record<string, unknown>;
   private createRefundRequestPin?: (input: {
     order: ServiceOrderRecord;
@@ -532,21 +547,13 @@ export class ServiceOrderLifecycleService {
   repairSelfDirectedOrders(): ServiceOrderRecord[] {
     const paymentTxids = new Set<string>();
     const orderPinIds = new Set<string>();
-    const candidateStatuses = [
-      'awaiting_first_response',
-      'in_progress',
-      'failed',
-      'refund_pending',
-    ] as const;
 
-    for (const role of ['buyer', 'seller'] as const) {
-      for (const order of this.store.listOrdersByStatuses(role, [...candidateStatuses])) {
-        if (this.isSelfDirectedOrder(order)) {
-          if (order.orderPinId) {
-            orderPinIds.add(order.orderPinId);
-          } else if (order.paymentTxid) {
-            paymentTxids.add(order.paymentTxid);
-          }
+    for (const order of this.listSelfDirectedRepairCandidates()) {
+      if (this.isSelfDirectedOrder(order)) {
+        if (order.orderPinId) {
+          orderPinIds.add(order.orderPinId);
+        } else if (order.paymentTxid) {
+          paymentTxids.add(order.paymentTxid);
         }
       }
     }
@@ -587,6 +594,36 @@ export class ServiceOrderLifecycleService {
     }
 
     return repaired;
+  }
+
+  /**
+   * Candidate scan for repairSelfDirectedOrders(): every buyer/seller order in a
+   * status the repair can still resolve.
+   *
+   * The repair runs on hot read paths (cowork session get/list, gig-square
+   * lists), and this scan was two full ORDER BY sorts of the whole ledger per
+   * call. The scan is derived state that changes only when service_orders is
+   * written, so it is cached until the store's revision moves (a repair write
+   * invalidates it immediately).
+   *
+   * isSelfDirectedOrder is deliberately NOT cached with it: it resolves the
+   * local MetaBot's GlobalMetaID, which can change without an order write (an
+   * identity bound after the order was created), and re-evaluating it per call
+   * keeps that transition repairing as before.
+   */
+  private listSelfDirectedRepairCandidates(): ServiceOrderRecord[] {
+    const ordersRevision = this.store.getOrdersRevision();
+    const cached = this.selfDirectedRepairCandidates;
+    if (cached && cached.ordersRevision === ordersRevision) {
+      return cached.orders;
+    }
+
+    const orders: ServiceOrderRecord[] = [];
+    for (const role of ['buyer', 'seller'] as const) {
+      orders.push(...this.store.listOrdersByStatuses(role, [...SELF_DIRECTED_REPAIR_CANDIDATE_STATUSES]));
+    }
+    this.selfDirectedRepairCandidates = { ordersRevision, orders };
+    return orders;
   }
 
   async tryCreateRefundRequest(

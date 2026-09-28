@@ -364,6 +364,10 @@ test('session list sorts migrated conversations by message activity instead of m
     sqlite.db.run('UPDATE cowork_messages SET created_at = ? WHERE id = ?', [1_000, oldMessage.id]);
     sqlite.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [2_000, recentSession.id]);
     sqlite.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [9_000, oldMigratedSession.id]);
+    // Staged with direct SQL, so re-derive the stored activity key from the
+    // transcript the way an upgraded database does on its first boot.
+    sqlite.db.run('UPDATE cowork_sessions SET activity_at = NULL');
+    store.runHeavyStartupMaintenance();
 
     assert.deepEqual(
       store.listSessions().map((session) => session.title),

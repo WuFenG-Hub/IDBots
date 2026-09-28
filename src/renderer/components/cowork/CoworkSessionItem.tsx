@@ -10,15 +10,37 @@ interface CoworkSessionItemProps {
   session: CoworkSessionSummary;
   hasUnread: boolean;
   isActive: boolean;
-  onSelect: () => void;
-  onDelete: () => void;
-  onTogglePin: (pinned: boolean) => void;
-  onRename: (title: string) => void;
+  /**
+   * Row actions take the session id instead of being pre-bound closures. The
+   * list renders hundreds of rows, so it hands every row the same callback
+   * instances and lets the row close over its own id — one closure per row per
+   * render would make the memo below compare unequal on every list render.
+   */
+  onSelect: (sessionId: string) => void;
+  onDelete: (sessionId: string) => void;
+  onTogglePin: (sessionId: string, pinned: boolean) => void;
+  onRename: (sessionId: string, title: string) => void;
   /** Batch-selection mode (e.g. batch archive): the row shows a checkbox and
    * clicking it toggles selection instead of opening the session. */
   selectionMode?: boolean;
   isSelected?: boolean;
-  onToggleSelected?: () => void;
+  onToggleSelected?: (sessionId: string) => void;
+  /**
+   * The list's clock for the relative-time stamp, ticked once a minute. Without
+   * it the row would call Date.now() itself, and a memoized row whose data has
+   * not changed would keep showing whatever it computed the last time it
+   * rendered ("5m" would stay "5m" indefinitely). Omitted in standalone
+   * renders, where the row falls back to Date.now().
+   */
+  nowMs?: number;
+  /**
+   * i18n generation marker. Every label in this row is read from i18nService at
+   * render time, so the language is an input of this component like any prop —
+   * leaving it out would let a switch to the other language keep the labels of
+   * every unchanged row in the old language. It is deliberately not read in the
+   * body; the memo comparator is what consumes it.
+   */
+  language?: string;
 }
 
 const statusLabels: Record<CoworkSessionStatus, string> = {
@@ -59,9 +81,13 @@ const PushPinIcon: React.FC<React.SVGProps<SVGSVGElement> & { slashed?: boolean 
  * Compact ("5m") + full ("5 minutes ago") relative-time pair for a session row.
  * Exported so list-level chrome (the Auto Tasks fold header) can stamp the same
  * newest-activity time the rows themselves show.
+ *
+ * `nowMs` lets the caller pass one shared clock (the list ticks it once a
+ * minute) so every row stamps the same instant and a memoized row can still
+ * refresh; standalone callers get Date.now().
  */
-export const formatRelativeTime = (timestamp: number): { compact: string; full: string } => {
-  const now = Date.now();
+export const formatRelativeTime = (timestamp: number, nowMs: number = Date.now()): { compact: string; full: string } => {
+  const now = nowMs;
   const diff = now - timestamp;
 
   const minutes = Math.floor(diff / 60000);
@@ -209,7 +235,7 @@ export const CoworkSessionAvatars: React.FC<{ session: CoworkSessionSummary }> =
   );
 };
 
-const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
+const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   session,
   hasUnread,
   isActive,
@@ -220,6 +246,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
   selectionMode = false,
   isSelected = false,
   onToggleSelected,
+  nowMs,
 }) => {
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(session.title);
@@ -297,7 +324,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
 
   const handleTogglePin = (e: React.MouseEvent) => {
     e.stopPropagation();
-    onTogglePin(!session.pinned);
+    onTogglePin(session.id, !session.pinned);
     closeMenu();
   };
 
@@ -314,7 +341,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
     ignoreNextBlurRef.current = true;
     const nextTitle = renameValue.trim();
     if (nextTitle && nextTitle !== session.title) {
-      onRename(nextTitle);
+      onRename(session.id, nextTitle);
     }
     setIsRenaming(false);
   };
@@ -351,7 +378,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
   const handleDeleteClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     setMenuPosition(null);
-    onDelete();
+    onDelete(session.id);
   };
 
   useEffect(() => {
@@ -407,7 +434,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
   const copySessionIdLabel = i18nService.t('coworkCopySessionId');
   const renameLabel = i18nService.t('renameConversation');
   const archiveLabel = i18nService.t('archiveSession');
-  const relativeTime = formatRelativeTime(session.updatedAt);
+  const relativeTime = formatRelativeTime(session.updatedAt, nowMs);
   const showRunningIndicator = session.status === 'running';
   const showUnreadIndicator = !showRunningIndicator && hasUnread;
   const showStatusIndicator = showRunningIndicator || showUnreadIndicator;
@@ -445,19 +472,23 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
     renameLabel,
   ]);
 
+  // transition-colors, not transition-all: the row only ever animates its
+  // background (hover / active / batch-selected), while transition-all
+  // subscribed every property of every one of the hundreds of mounted rows to a
+  // transition — pointless style work on each list render.
   return (
     <div
       onClick={() => {
         if (isRenaming) return;
         if (selectionMode) {
-          onToggleSelected?.();
+          onToggleSelected?.(session.id);
           return;
         }
         closeMenu();
-        onSelect();
+        onSelect(session.id);
       }}
       onContextMenu={handleContextMenu}
-      className={`group relative px-2.5 py-1.5 rounded-lg cursor-pointer transition-all duration-150 ${
+      className={`group relative px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors duration-150 ${
         isActive
           ? 'bg-black/[0.06] dark:bg-white/[0.08]'
           : selectionMode && isSelected
@@ -472,7 +503,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
             <input
               type="checkbox"
               checked={isSelected}
-              onChange={() => onToggleSelected?.()}
+              onChange={() => onToggleSelected?.(session.id)}
               onClick={(event) => event.stopPropagation()}
               aria-label={i18nService.t('batchArchiveSelect')}
               className="h-3.5 w-3.5 cursor-pointer accent-claude-accent"
@@ -600,5 +631,19 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
     </div>
   );
 };
+
+/**
+ * Memoized because the sidebar keeps hundreds of rows mounted at once and every
+ * session-list refresh used to re-render all of them — each one re-running its
+ * relative-time formatter, its i18n lookups and its effects (the refresh path
+ * also rebuilt every row's callbacks, which is why the actions now take the
+ * session id instead of being pre-bound closures).
+ *
+ * This only pays off because the list hands the rows referentially stable
+ * props: the summary objects are stabilized by id (coworkSlice.setSessions
+ * replaces the whole array on every read), the action callbacks come from
+ * useStableCallback, and the clock/language come from list state.
+ */
+const CoworkSessionItem = React.memo(CoworkSessionItemRow);
 
 export default CoworkSessionItem;
