@@ -21,6 +21,7 @@ import type {
   MetaTaskTaskProjection,
   MetaTaskVoteSummary,
   TaskBody,
+  TaskPolicyPayload,
   TreeNodeBody,
   TreeBody,
 } from './types';
@@ -291,6 +292,193 @@ const foldAmends = (input: {
   return { nodes, ignored, head };
 };
 
+export interface MetaTaskEventHashEntry {
+  path: string;
+  pinId: string;
+  height: number;
+  txIndex: number;
+}
+
+/**
+ * One task root's replay-relevant event set — the SINGLE source of truth for
+ * membership, shared by replayMetaTask and the refresher's dirty-root check so
+ * the two can never drift.
+ *
+ * Membership (protocol v1.2.1 settlement.eventSetHash.membership):
+ *  - the root task pin and the tree pin it references (`treeid`);
+ *  - every pin carrying `taskid === rootPinId` (claim/release/submission/
+ *    verify/amend/challenge), excluding the task/tree/spec paths;
+ *  - spec pins ONLY via the root's `specid` (node-level specid overrides are
+ *    not task members);
+ *  - verify/challenge pins scope by `targetid` (a submission of this task).
+ */
+export interface MetaTaskTaskEventSet {
+  rootPin: MetaTaskChainEvent;
+  rootAuthor: string;
+  taskBody: TaskBody;
+  treePinId: string;
+  treePin: MetaTaskChainEvent | null;
+  /** Task submissions (taskid-scoped), in chain order. */
+  submissions: MetaTaskChainEvent[];
+  /** Submission pin ids of this task — the verify/challenge target universe. */
+  knownTargets: Set<string>;
+  /** Every pin that can affect this task's replay, confirmed AND mempool. */
+  scoped: MetaTaskChainEvent[];
+  /** Same pins keyed by pinId (the replay walk's membership view). */
+  scopedByPin: Map<string, MetaTaskChainEvent>;
+  /** eventSetHash input rows — the engine's recipe, confirmed pins only. */
+  hashEntries: MetaTaskEventHashEntry[];
+  /** Highest confirmed height in the set (-1 when nothing is confirmed). */
+  boundaryBlock: number;
+  /** Scoped pins excluded from eventSetHash (height < 0 = mempool). */
+  mempoolPinIds: string[];
+}
+
+/**
+ * Compute a task's replay-relevant event set from a raw event pool. Pure and
+ * side-effect free: replayMetaTask passes its own byPath so the sweep of a
+ * large pool is not repeated, external callers (the refresher) omit it.
+ */
+export function taskEventSet(
+  events: MetaTaskChainEvent[],
+  options: { rootPinId?: string; byPath?: Map<string, MetaTaskChainEvent[]> } = {}
+): MetaTaskTaskEventSet {
+  const byPath = options.byPath ?? new Map<string, MetaTaskChainEvent[]>();
+  if (!options.byPath) {
+    for (const event of events) {
+      const list = byPath.get(event.path) ?? [];
+      list.push(event);
+      byPath.set(event.path, list);
+    }
+    // Callers that pass a byPath (replayMetaTask) already sorted it.
+    for (const list of byPath.values()) list.sort(compareByOrderKey);
+  }
+
+  const taskPins = byPath.get('task') ?? [];
+  const rootPin = options.rootPinId
+    ? taskPins.find((pin) => pin.pinId === options.rootPinId) ?? null
+    : taskPins[taskPins.length - 1] ?? null;
+  if (!rootPin) throw new Error('metatask replay: no task root pin in event set');
+  const taskBody = rootPin.body as unknown as TaskBody;
+  const treePinId = asStr(taskBody.treeid);
+  const treePin = (byPath.get('tree') ?? []).find((pin) => pin.pinId === treePinId) ?? null;
+
+  const submissions = (byPath.get('submission') ?? [])
+    .filter((pin) => asStr(pin.body.taskid) === rootPin.pinId)
+    .sort(compareByOrderKey);
+  const knownTargets = new Set<string>();
+  for (const submission of submissions) knownTargets.add(submission.pinId);
+
+  const scopedByPin = new Map<string, MetaTaskChainEvent>();
+  scopedByPin.set(rootPin.pinId, rootPin);
+  if (treePin) scopedByPin.set(treePin.pinId, treePin);
+  for (const [path, list] of byPath) {
+    if (path === 'task' || path === 'tree' || path === 'spec') continue;
+    for (const pin of list) {
+      if (asStr(pin.body.taskid) === rootPin.pinId) scopedByPin.set(pin.pinId, pin);
+    }
+  }
+  for (const scopePath of ['verify', 'challenge'] as const) {
+    for (const pin of byPath.get(scopePath) ?? []) {
+      if (knownTargets.has(asStr(pin.body.targetid))) scopedByPin.set(pin.pinId, pin);
+    }
+  }
+  const scoped = Array.from(scopedByPin.values());
+
+  // eventSetHash recipe: the nine event paths in fixed order, confirmed pins
+  // only, spec pins only via task.specid.
+  const pathOrder = [
+    'task',
+    'tree',
+    'spec',
+    'claim',
+    'release',
+    'submission',
+    'verify',
+    'amend',
+    'challenge',
+  ];
+  const specRefs = new Set<string>();
+  if (taskBody.specid) specRefs.add(taskBody.specid);
+  const hashEntries: MetaTaskEventHashEntry[] = [];
+  let boundaryBlock = -1;
+  for (const path of pathOrder) {
+    const list = (byPath.get(path) ?? []).filter((pin) => {
+      if (pin.height < 0) return false; // confirmed only; mempool excluded
+      if (path === 'task') return pin.pinId === rootPin.pinId;
+      if (path === 'tree') return pin.pinId === treePinId;
+      if (path === 'spec') return specRefs.has(pin.pinId);
+      if (path === 'verify' || path === 'challenge') return knownTargets.has(asStr(pin.body.targetid));
+      return asStr(pin.body.taskid) === rootPin.pinId;
+    });
+    list.sort((a, b) => {
+      if (a.height !== b.height) return a.height - b.height;
+      if (a.txIndex !== b.txIndex) return a.txIndex - b.txIndex;
+      return a.pinId < b.pinId ? -1 : a.pinId > b.pinId ? 1 : 0;
+    });
+    for (const pin of list) {
+      hashEntries.push({
+        path: `/protocols/metatask/${path}`,
+        pinId: pin.pinId,
+        height: pin.height,
+        txIndex: asNum(pin.txIndex),
+      });
+      if (pin.height > boundaryBlock) boundaryBlock = pin.height;
+    }
+  }
+
+  const mempoolPinIds = scoped
+    .filter((pin) => pin.height < 0)
+    .map((pin) => pin.pinId)
+    .sort();
+
+  return {
+    rootPin,
+    rootAuthor: rootPin.author,
+    taskBody,
+    treePinId,
+    treePin,
+    submissions,
+    knownTargets,
+    scoped,
+    scopedByPin,
+    hashEntries,
+    boundaryBlock,
+    mempoolPinIds,
+  };
+}
+
+/**
+ * Stable dirty key for a task root: everything replayMetaTask reads.
+ *
+ *  - the engine's eventSetHash INPUT (shared helper, so the two can never
+ *    drift);
+ *  - the scoped-but-unconfirmed (mempool) pins. The eventSetHash recipe
+ *    deliberately excludes height < 0 pins, but they DO act in the replay walk
+ *    (a brand-new unconfirmed submission must dirty its root), so they are part
+ *    of this key while the engine's own eventSetHash stays untouched;
+ *  - the roster pin the task's split references. Same-side roster filtering
+ *    reads that pin's body, and it is NOT part of the task's own event set
+ *    (reference pin, no taskid), so its arrival or absence must dirty the root
+ *    on its own.
+ *
+ * Equal keys ⇒ the same inputs produce the same projection, time-driven expiry
+ * aside; that residual is covered by nextTimeDeadlineMs.
+ */
+export const taskDirtyKey = (
+  taskSet: MetaTaskTaskEventSet,
+  options: { rosterPins?: Record<string, unknown> } = {}
+): string => {
+  const rosterid = (taskSet.taskBody.policy as TaskPolicyPayload | undefined)?.split?.rosterid ?? null;
+  return sha256Hex(
+    canonJ({
+      confirmed: taskSet.hashEntries,
+      unconfirmed: taskSet.mempoolPinIds,
+      rosterPin: rosterid ? options.rosterPins?.[rosterid] ?? null : null,
+    })
+  );
+};
+
 /**
  * Replay one MetaTask from its event set. Baseline node states follow the
  * reference Python engine exactly (final-holder anchoring, last-valid vote
@@ -322,14 +510,11 @@ export function replayMetaTask(
   }
   for (const list of byPath.values()) list.sort(compareByOrderKey);
 
-  // -- task root -----------------------------------------------------------
-  const taskPins = byPath.get('task') ?? [];
-  const rootPin = options.rootPinId
-    ? taskPins.find((pin) => pin.pinId === options.rootPinId) ?? null
-    : taskPins[taskPins.length - 1] ?? null;
-  if (!rootPin) throw new Error('metatask replay: no task root pin in event set');
-  const rootAuthor = rootPin.author;
-  const taskBody = rootPin.body as unknown as TaskBody;
+  // -- task root + membership (shared with the refresher's dirty check) ------
+  const taskSet = taskEventSet(events, { rootPinId: options.rootPinId, byPath });
+  const rootPin = taskSet.rootPin;
+  const rootAuthor = taskSet.rootAuthor;
+  const taskBody = taskSet.taskBody;
   const policy = taskBody.policy ?? {};
   const quorum = Math.max(1, asNum(policy.verify_quorum, 2));
   const ttlHours = asNum(policy.claim_ttl_hours, 0);
@@ -344,36 +529,18 @@ export function replayMetaTask(
     Math.max(SUBMITTER_SHARE_BP_MIN, asNum(split?.submitterShareBP, SUBMITTER_SHARE_BP_DEFAULT)),
   );
 
-  // Task-scoped events: root pin + tree by reference + taskid references.
-  const treePinId = asStr(taskBody.treeid);
-  const treePin = (byPath.get('tree') ?? []).find((pin) => pin.pinId === treePinId) ?? null;
-  const taskScoped = new Map<string, MetaTaskChainEvent>();
-  taskScoped.set(rootPin.pinId, rootPin);
-  if (treePin) taskScoped.set(treePin.pinId, treePin);
-  for (const [path, list] of byPath) {
-    if (path === 'task' || path === 'tree' || path === 'spec') continue;
-    for (const pin of list) {
-      if (asStr(pin.body.taskid) === rootPin.pinId) taskScoped.set(pin.pinId, pin);
-    }
-  }
-
-  // -- submissions (task-scoped, ordered) ------------------------------------
-  const submissions = (byPath.get('submission') ?? [])
-    .filter((p) => asStr(p.body.taskid) === rootPin.pinId)
-    .sort(compareByOrderKey);
+  // Task-scoped events, submissions and known targets come from the shared
+  // membership helper (same call the refresher's dirty check uses).
+  const treePinId = taskSet.treePinId;
+  const treePin = taskSet.treePin;
+  const taskScoped = taskSet.scopedByPin;
+  const submissions = taskSet.submissions;
+  const knownTargets = taskSet.knownTargets;
   const submissionAuthorByPin = new Map<string, string>();
   const submissionBodyByPin = new Map<string, Record<string, unknown>>();
-  const knownTargets = new Set<string>();
   for (const sub of submissions) {
     submissionAuthorByPin.set(sub.pinId, sub.author);
     submissionBodyByPin.set(sub.pinId, sub.body);
-    knownTargets.add(sub.pinId);
-  }
-  // Verify and challenge pins carry no taskid; they scope by target (a task submission).
-  for (const scopePath of ['verify', 'challenge'] as const) {
-    for (const pin of byPath.get(scopePath) ?? []) {
-      if (knownTargets.has(asStr(pin.body.targetid))) taskScoped.set(pin.pinId, pin);
-    }
   }
 
   // -- vote pre-pass: gates, roster, last valid per (target, bot) -------------
@@ -941,49 +1108,10 @@ export function replayMetaTask(
       : progress.total > 0 && progress.verified === progress.total;
 
   // -- eventSetHash (recipe per rev-2, settlement section) -------------------
-  const pathOrder = [
-    'task',
-    'tree',
-    'spec',
-    'claim',
-    'release',
-    'submission',
-    'verify',
-    'amend',
-    'challenge',
-  ];
-  // Membership table (v1.2.1 settlement.eventSetHash.membership): spec pins
-  // enter the set ONLY via task.specid — node-level specid overrides are not
-  // task members for hashing purposes.
-  const specRefs = new Set<string>();
-  if (taskBody.specid) specRefs.add(taskBody.specid);
-  const hashEntries: { path: string; pinId: string; height: number; txIndex: number }[] = [];
-  let boundaryBlock = -1;
-  for (const path of pathOrder) {
-    const scoped = (byPath.get(path) ?? []).filter((pin) => {
-      if (pin.height < 0) return false; // confirmed only; mempool excluded
-      if (path === 'task') return pin.pinId === rootPin.pinId;
-      if (path === 'tree') return pin.pinId === treePinId;
-      if (path === 'spec') return specRefs.has(pin.pinId);
-      if (path === 'verify' || path === 'challenge') return knownTargets.has(asStr(pin.body.targetid));
-      return asStr(pin.body.taskid) === rootPin.pinId;
-    });
-    scoped.sort((a, b) => {
-      if (a.height !== b.height) return a.height - b.height;
-      if (a.txIndex !== b.txIndex) return a.txIndex - b.txIndex;
-      return a.pinId < b.pinId ? -1 : a.pinId > b.pinId ? 1 : 0;
-    });
-    for (const pin of scoped) {
-      hashEntries.push({
-        path: `/protocols/metatask/${path}`,
-        pinId: pin.pinId,
-        height: pin.height,
-        txIndex: asNum(pin.txIndex),
-      });
-      if (pin.height > boundaryBlock) boundaryBlock = pin.height;
-    }
-  }
-  const eventSetHash = sha256Hex(canonJ(hashEntries));
+  // The hash input rows are computed by the shared membership helper, so the
+  // refresher's dirty key and this hash can never describe different sets.
+  const eventSetHash = sha256Hex(canonJ(taskSet.hashEntries));
+  const boundaryBlock = taskSet.boundaryBlock;
 
   // -- settlement manifest (v1.2) -------------------------------------------
   let settlement: MetaTaskSettlementManifest | null = null;

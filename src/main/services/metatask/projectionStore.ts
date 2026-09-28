@@ -27,12 +27,42 @@ export class MetaTaskProjectionStore {
   private readonly db: Database;
   private readonly saveDb: () => void;
   private readonly resolveIdentities?: MetaTaskIdentityResolver;
+  /** Depth guard: nested batch writers reuse the outer transaction. */
+  private batchDepth = 0;
 
   constructor(db: Database, saveDb: () => void, options?: { resolveIdentities?: MetaTaskIdentityResolver }) {
     this.db = db;
     this.saveDb = saveDb;
     this.resolveIdentities = options?.resolveIdentities;
     this.ensureTables();
+  }
+
+  /**
+   * Run a multi-statement writer as ONE transaction with ONE save. SQLite (both
+   * backends) has no nested BEGIN, so an inner batch reuses the outer
+   * transaction instead of opening a second one; the outermost scope commits
+   * and persists, and any failure rolls the whole batch back.
+   */
+  private withBatch<T>(write: () => T): T {
+    if (this.batchDepth > 0) return write();
+    this.batchDepth = 1;
+    this.db.run('BEGIN TRANSACTION;');
+    try {
+      const result = write();
+      this.db.run('COMMIT;');
+      // Persist once per committed batch (a no-op for the native backend).
+      this.saveDb();
+      return result;
+    } catch (error) {
+      try {
+        this.db.run('ROLLBACK;');
+      } catch {
+        // keep the original failure; the transaction is abandoned either way
+      }
+      throw error;
+    } finally {
+      this.batchDepth = 0;
+    }
   }
 
   private ensureTables(): void {
@@ -102,6 +132,14 @@ export class MetaTaskProjectionStore {
         resolved_at TEXT NOT NULL
       );
     `);
+    // Additive migration (idempotent, runs on every start): the sweep's
+    // dirty-root key. Kept separate from event_set_hash, which stays the
+    // engine's own eventSetHash (a different recipe — see taskDirtyKey).
+    const projectionColumns = this.db.exec('PRAGMA table_info(metatask_task_projections);');
+    const hasDirtyKey = (projectionColumns[0]?.values ?? []).some((row) => String(row[1]) === 'dirty_key');
+    if (!hasDirtyKey) {
+      this.db.run("ALTER TABLE metatask_task_projections ADD COLUMN dirty_key TEXT NOT NULL DEFAULT '';");
+    }
     this.saveDb();
   }
 
@@ -124,36 +162,38 @@ export class MetaTaskProjectionStore {
   // ── event cache ────────────────────────────────────────────────────────────
 
   upsertEvents(events: MetaTaskChainEvent[]): number {
+    if (events.length === 0) return 0;
     const now = new Date().toISOString();
-    let written = 0;
-    for (const event of events) {
-      this.db.run(
-        `INSERT INTO metatask_events
-           (pin_id, path, author, height, tx_index, timestamp_ms, content_json, collected_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(pin_id) DO UPDATE SET
-           path = excluded.path,
-           author = excluded.author,
-           height = excluded.height,
-           tx_index = excluded.tx_index,
-           timestamp_ms = excluded.timestamp_ms,
-           content_json = excluded.content_json,
-           collected_at = excluded.collected_at`,
-        [
-          event.pinId,
-          event.path,
-          event.author,
-          event.height,
-          event.txIndex,
-          event.timestampMs,
-          JSON.stringify(event.body),
-          now,
-        ]
-      );
-      written += 1;
-    }
-    if (written > 0) this.saveDb();
-    return written;
+    return this.withBatch(() => {
+      let written = 0;
+      for (const event of events) {
+        this.db.run(
+          `INSERT INTO metatask_events
+             (pin_id, path, author, height, tx_index, timestamp_ms, content_json, collected_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(pin_id) DO UPDATE SET
+             path = excluded.path,
+             author = excluded.author,
+             height = excluded.height,
+             tx_index = excluded.tx_index,
+             timestamp_ms = excluded.timestamp_ms,
+             content_json = excluded.content_json,
+             collected_at = excluded.collected_at`,
+          [
+            event.pinId,
+            event.path,
+            event.author,
+            event.height,
+            event.txIndex,
+            event.timestampMs,
+            JSON.stringify(event.body),
+            now,
+          ]
+        );
+        written += 1;
+      }
+      return written;
+    });
   }
 
   loadEvents(): MetaTaskChainEvent[] {
@@ -219,10 +259,11 @@ export class MetaTaskProjectionStore {
     if (missing.length > 0 && this.resolveIdentities) {
       try {
         const resolved = await this.resolveIdentities(missing);
-        for (const [metaId, identity] of Object.entries(resolved)) {
-          merged[metaId] = identity;
-          this.putIdentityRow(identity, 'local');
-        }
+        // Batch: one transaction + one save for the whole resolved set instead
+        // of a write+save per identity row.
+        const rows = Object.values(resolved).filter((identity) => identity && identity.metaId);
+        for (const identity of rows) merged[identity.metaId] = identity;
+        this.putIdentityRows(rows, 'local');
       } catch {
         // identity enrichment is best-effort display sugar; never fail the sweep
       }
@@ -242,76 +283,125 @@ export class MetaTaskProjectionStore {
     return { metaId, name: row.name === null ? null : String(row.name), avatar: row.avatar === null ? null : String(row.avatar) };
   }
 
-  private putIdentityRow(identity: MetaTaskIdentity, source: string): void {
-    this.db.run(
-      `INSERT INTO metatask_identities (meta_id, name, avatar, source, resolved_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(meta_id) DO UPDATE SET
-         name = COALESCE(excluded.name, metatask_identities.name),
-         avatar = COALESCE(excluded.avatar, metatask_identities.avatar),
-         resolved_at = excluded.resolved_at`,
-      [identity.metaId, identity.name, identity.avatar, source, new Date().toISOString()]
-    );
-    this.saveDb();
+  /** Batched identity upsert: one transaction, one save for the whole set. */
+  private putIdentityRows(identities: MetaTaskIdentity[], source: string): void {
+    const rows = identities.filter((identity) => identity && identity.metaId);
+    if (rows.length === 0) return;
+    const resolvedAt = new Date().toISOString();
+    this.withBatch(() => {
+      for (const identity of rows) {
+        this.db.run(
+          `INSERT INTO metatask_identities (meta_id, name, avatar, source, resolved_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(meta_id) DO UPDATE SET
+             name = COALESCE(excluded.name, metatask_identities.name),
+             avatar = COALESCE(excluded.avatar, metatask_identities.avatar),
+             resolved_at = excluded.resolved_at`,
+          [identity.metaId, identity.name, identity.avatar, source, resolvedAt]
+        );
+      }
+    });
   }
 
-  saveProjections(projections: MetaTaskTaskProjection[]): void {
+  /**
+   * Persist a sweep's projections.
+   *
+   * `liveRootIds` is every root the sweep still sees; rows outside it are
+   * pruned. Projections whose replay was SKIPPED (unchanged event set and no
+   * pending deadline) are simply absent from `projections` — their persisted
+   * row already holds identical content and is left untouched. `dirtyKeys`
+   * records the event-set key each written row was built from.
+   */
+  saveProjections(
+    projections: MetaTaskTaskProjection[],
+    options: { liveRootIds?: string[]; dirtyKeys?: Record<string, string> } = {}
+  ): void {
     const now = new Date().toISOString();
-    const keep = new Set(projections.map((projection) => projection.rootPinId));
-    for (const projection of projections) {
-      this.db.run(
-        `INSERT INTO metatask_task_projections
-           (root_pin_id, title, publisher, task_complete, verified, claimed, open, disputed,
-            total, participant_count, last_activity_ms, boundary_block, event_count,
-            event_set_hash, settlement_json, projection_json, refreshed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(root_pin_id) DO UPDATE SET
-           title = excluded.title,
-           publisher = excluded.publisher,
-           task_complete = excluded.task_complete,
-           verified = excluded.verified,
-           claimed = excluded.claimed,
-           open = excluded.open,
-           disputed = excluded.disputed,
-           total = excluded.total,
-           participant_count = excluded.participant_count,
-           last_activity_ms = excluded.last_activity_ms,
-           boundary_block = excluded.boundary_block,
-           event_count = excluded.event_count,
-           event_set_hash = excluded.event_set_hash,
-           settlement_json = excluded.settlement_json,
-           projection_json = excluded.projection_json,
-           refreshed_at = excluded.refreshed_at`,
-        [
-          projection.rootPinId,
-          projection.title,
-          projection.publisher,
-          projection.taskComplete ? 1 : 0,
-          projection.progress.verified,
-          projection.progress.claimed,
-          projection.progress.open,
-          projection.progress.disputed,
-          projection.progress.total,
-          projection.participants.length,
-          projection.lastActivityMs,
-          projection.freshness.boundaryBlock,
-          projection.freshness.eventCount,
-          projection.freshness.eventSetHash,
-          projection.settlement ? JSON.stringify(projection.settlement) : null,
-          JSON.stringify(projection),
-          now,
-        ]
-      );
-    }
-    // Stale roots (task pins no longer returned by the sweep) drop out.
-    const existing = this.getAll<Row>('SELECT root_pin_id FROM metatask_task_projections');
-    for (const row of existing) {
-      const root = String(row.root_pin_id);
-      if (!keep.has(root)) {
-        this.db.run('DELETE FROM metatask_task_projections WHERE root_pin_id = ?', [root]);
+    const keep = new Set(options.liveRootIds ?? projections.map((projection) => projection.rootPinId));
+    const dirtyKeys = options.dirtyKeys ?? {};
+    this.withBatch(() => {
+      for (const projection of projections) {
+        this.db.run(
+          `INSERT INTO metatask_task_projections
+             (root_pin_id, title, publisher, task_complete, verified, claimed, open, disputed,
+              total, participant_count, last_activity_ms, boundary_block, event_count,
+              event_set_hash, dirty_key, settlement_json, projection_json, refreshed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(root_pin_id) DO UPDATE SET
+             title = excluded.title,
+             publisher = excluded.publisher,
+             task_complete = excluded.task_complete,
+             verified = excluded.verified,
+             claimed = excluded.claimed,
+             open = excluded.open,
+             disputed = excluded.disputed,
+             total = excluded.total,
+             participant_count = excluded.participant_count,
+             last_activity_ms = excluded.last_activity_ms,
+             boundary_block = excluded.boundary_block,
+             event_count = excluded.event_count,
+             event_set_hash = excluded.event_set_hash,
+             dirty_key = excluded.dirty_key,
+             settlement_json = excluded.settlement_json,
+             projection_json = excluded.projection_json,
+             refreshed_at = excluded.refreshed_at`,
+          [
+            projection.rootPinId,
+            projection.title,
+            projection.publisher,
+            projection.taskComplete ? 1 : 0,
+            projection.progress.verified,
+            projection.progress.claimed,
+            projection.progress.open,
+            projection.progress.disputed,
+            projection.progress.total,
+            projection.participants.length,
+            projection.lastActivityMs,
+            projection.freshness.boundaryBlock,
+            projection.freshness.eventCount,
+            projection.freshness.eventSetHash,
+            dirtyKeys[projection.rootPinId] ?? '',
+            projection.settlement ? JSON.stringify(projection.settlement) : null,
+            JSON.stringify(projection),
+            now,
+          ]
+        );
       }
-    }
-    this.saveDb();
+      // Stale roots (task pins no longer returned by the sweep) drop out.
+      const existing = this.getAll<Row>('SELECT root_pin_id FROM metatask_task_projections');
+      for (const row of existing) {
+        const root = String(row.root_pin_id);
+        if (!keep.has(root)) {
+          this.db.run('DELETE FROM metatask_task_projections WHERE root_pin_id = ?', [root]);
+        }
+      }
+    });
+  }
+
+  /**
+   * Read-only sweep state per persisted root: the dirty key of the event set
+   * the row was built from and the parsed projection (the deadline check needs
+   * holders, submissions and policy). Cheap next to a replay; a row written
+   * before the dirty key existed reports '' and is therefore replayed once.
+   */
+  projectionSweepState(): { rootPinId: string; dirtyKey: string; projection: MetaTaskTaskProjection }[] {
+    return this.getAll<Row>('SELECT root_pin_id, dirty_key, projection_json FROM metatask_task_projections').flatMap(
+      (row) => {
+        try {
+          const parsed = JSON.parse(String(row.projection_json ?? '{}'));
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+          return [
+            {
+              rootPinId: String(row.root_pin_id),
+              dirtyKey: String(row.dirty_key ?? ''),
+              projection: parsed as MetaTaskTaskProjection,
+            },
+          ];
+        } catch {
+          return []; // malformed row: treated as absent, so the root is replayed
+        }
+      }
+    );
   }
 
   getProjection(rootPinId: string): MetaTaskTaskProjection | null {
@@ -418,27 +508,30 @@ export class MetaTaskProjectionStore {
 
   setWatchStatuses(entries: { root: string; node: string; status: string }[]): void {
     const now = new Date().toISOString();
-    for (const entry of entries) {
-      this.db.run(
-        `INSERT INTO metatask_watch_state (task_root, node_id, last_status, updated_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(task_root, node_id) DO UPDATE SET
-           last_status = excluded.last_status,
-           updated_at = excluded.updated_at`,
-        [entry.root, entry.node, entry.status, now]
-      );
-    }
-    this.saveDb();
+    this.withBatch(() => {
+      for (const entry of entries) {
+        this.db.run(
+          `INSERT INTO metatask_watch_state (task_root, node_id, last_status, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(task_root, node_id) DO UPDATE SET
+             last_status = excluded.last_status,
+             updated_at = excluded.updated_at`,
+          [entry.root, entry.node, entry.status, now]
+        );
+      }
+    });
   }
 
   appendAlerts(alerts: MetaTaskAlert[]): void {
-    for (const alert of alerts) {
-      this.db.run(
-        'INSERT INTO metatask_alerts (kind, root_pin_id, node_id, detail, created_at_ms) VALUES (?, ?, ?, ?, ?)',
-        [alert.kind, alert.rootPinId, alert.node, alert.detail, alert.createdAtMs]
-      );
-    }
-    if (alerts.length > 0) this.saveDb();
+    if (alerts.length === 0) return;
+    this.withBatch(() => {
+      for (const alert of alerts) {
+        this.db.run(
+          'INSERT INTO metatask_alerts (kind, root_pin_id, node_id, detail, created_at_ms) VALUES (?, ?, ?, ?, ?)',
+          [alert.kind, alert.rootPinId, alert.node, alert.detail, alert.createdAtMs]
+        );
+      }
+    });
   }
 
   /** Drop alerts older than the horizon so one-shot transition notices decay. */
