@@ -1120,20 +1120,37 @@ function buildUpstreamTargetUrls(baseURL: string, apiType: UpstreamAPIType, prov
  * and killed the whole multi-minute caller attempt (three dream runs died on
  * one zhipu gateway flap), because the proxy had zero transport-level
  * retries. Match by substring: Electron prefixes these codes with `net::`.
+ *
+ * 2026-09-29: added the TLS/protocol-session codes a relayed connection
+ * (system proxy, e.g. ClashX) produces when a node flaps mid-handshake or
+ * mid-stream. The 2026-09-28 nightly dream died on `ERR_SSL_PROTOCOL_ERROR` —
+ * one sub-second TLS handshake jitter through the proxy was NOT in this list,
+ * skipped every retry, and failed a 45-minute run at its last fragment.
+ * `ERR_ABORTED` stays out deliberately: that is a programmatic abort (our own
+ * caller-disconnect propagation), never a network flap.
  */
 const TRANSIENT_UPSTREAM_NETWORK_ERROR_RE = new RegExp(
   [
     'ERR_CONNECTION_CLOSED',
     'ERR_CONNECTION_RESET',
+    'ERR_CONNECTION_ABORTED',
+    'ERR_CONNECTION_FAILED',
     'ERR_EMPTY_RESPONSE',
     'ERR_TIMED_OUT',
     'ERR_NETWORK_CHANGED',
+    'ERR_NETWORK_IO_SUSPENDED',
     'ERR_NAME_NOT_RESOLVED',
     'ERR_SOCKET_NOT_CONNECTED',
     'ERR_TUNNEL_CONNECTION_FAILED',
     'ERR_INTERNET_DISCONNECTED',
     'ERR_PROXY_CONNECTION_FAILED',
     'ERR_ADDRESS_UNREACHABLE',
+    'ERR_SSL_PROTOCOL_ERROR',
+    'ERR_SSL_VERSION_OR_CIPHER_MISMATCH',
+    'ERR_QUIC_PROTOCOL_ERROR',
+    'ERR_QUIC_HANDSHAKE_FAILED',
+    'ERR_HTTP2_PROTOCOL_ERROR',
+    'ERR_HTTP2_PING_FAILED',
   ].join('|')
 );
 
@@ -1825,6 +1842,22 @@ function writeJSON(
     'Content-Length': Buffer.byteLength(payload),
   });
   res.end(payload);
+}
+
+/**
+ * Wrap an upstream transport exception into the 502 the caller sees. Always
+ * coworkLogs it: exceptions that exhausted the transient-retry budget were
+ * already logged per attempt, but a NON-transient transport code previously
+ * only set lastProxyError and left zero trace in cowork.log — the 2026-09-28
+ * dream failure (net::ERR_SSL_PROTOCOL_ERROR) was invisible in the logs for
+ * exactly that reason.
+ */
+function writeUpstreamTransportError(res: http.ServerResponse, message: string): void {
+  lastProxyError = message;
+  coworkLog('WARN', 'upstream-transport-error', 'upstream request failed at the transport layer; returning 502 to the caller', {
+    error: message,
+  });
+  writeJSON(res, 502, createAnthropicErrorBody(message));
 }
 
 function readRequestBody(req: http.IncomingMessage): Promise<string> {
@@ -3977,8 +4010,7 @@ async function handleRequest(
     upstreamResponse = await sendUpstreamRequestWithRetry(upstreamRequest, targetURLs[0]);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Network error';
-    lastProxyError = message;
-    writeJSON(res, 502, createAnthropicErrorBody(message));
+    writeUpstreamTransportError(res, message);
     return;
   }
 
@@ -3990,8 +4022,7 @@ async function handleRequest(
           upstreamResponse = await sendUpstreamRequestWithRetry(upstreamRequest, retryURL);
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Network error';
-          lastProxyError = message;
-          writeJSON(res, 502, createAnthropicErrorBody(message));
+          writeUpstreamTransportError(res, message);
           return;
         }
         if (upstreamResponse.ok || upstreamResponse.status !== 404) {
@@ -4030,8 +4061,7 @@ async function handleRequest(
               }
             } catch (error) {
               const message = error instanceof Error ? error.message : 'Network error';
-              lastProxyError = message;
-              writeJSON(res, 502, createAnthropicErrorBody(message));
+              writeUpstreamTransportError(res, message);
               return;
             }
           }
@@ -4054,8 +4084,7 @@ async function handleRequest(
               }
             } catch (error) {
               const message = error instanceof Error ? error.message : 'Network error';
-              lastProxyError = message;
-              writeJSON(res, 502, createAnthropicErrorBody(message));
+              writeUpstreamTransportError(res, message);
               return;
             }
           }

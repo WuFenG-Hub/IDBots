@@ -40,6 +40,49 @@ test('isTransientUpstreamNetworkError matches Chromium net error codes', () => {
   assert.equal(isTransientUpstreamNetworkError(''), false);
 });
 
+test('isTransientUpstreamNetworkError matches relay/proxy TLS and protocol-session flap codes', () => {
+  // The 2026-09-28 nightly dream failure: one TLS handshake jitter through the
+  // system proxy surfaced as ERR_SSL_PROTOCOL_ERROR, matched nothing, and
+  // failed a 45-minute run at its last fragment. These codes are one-dead-
+  // connection events a fresh socket usually clears.
+  assert.equal(isTransientUpstreamNetworkError('net::ERR_SSL_PROTOCOL_ERROR'), true);
+  assert.equal(isTransientUpstreamNetworkError('net::ERR_SSL_VERSION_OR_CIPHER_MISMATCH'), true);
+  assert.equal(isTransientUpstreamNetworkError('net::ERR_CONNECTION_ABORTED'), true);
+  assert.equal(isTransientUpstreamNetworkError('net::ERR_CONNECTION_FAILED'), true);
+  assert.equal(isTransientUpstreamNetworkError('net::ERR_NETWORK_IO_SUSPENDED'), true);
+  assert.equal(isTransientUpstreamNetworkError('net::ERR_QUIC_PROTOCOL_ERROR'), true);
+  assert.equal(isTransientUpstreamNetworkError('net::ERR_QUIC_HANDSHAKE_FAILED'), true);
+  assert.equal(isTransientUpstreamNetworkError('net::ERR_HTTP2_PROTOCOL_ERROR'), true);
+  assert.equal(isTransientUpstreamNetworkError('net::ERR_HTTP2_PING_FAILED'), true);
+});
+
+test('programmatic aborts and deterministic certificate errors are never transient', () => {
+  // ERR_ABORTED is our own caller-disconnect propagation aborting the upstream
+  // fetch — retrying it would fight the caller's cancellation.
+  assert.equal(isTransientUpstreamNetworkError('net::ERR_ABORTED'), false);
+  assert.equal(isTransientUpstreamNetworkError('AbortError: This operation was aborted'), false);
+  // Certificate validity errors reproduce on every fresh connection.
+  assert.equal(isTransientUpstreamNetworkError('net::ERR_CERT_AUTHORITY_INVALID'), false);
+  assert.equal(isTransientUpstreamNetworkError('net::ERR_CERT_DATE_INVALID'), false);
+});
+
+test('an SSL protocol flap is retried and the retry answer is returned', async () => {
+  let sends = 0;
+  const response = await sendUpstreamRequestWithTransientRetry(
+    async () => {
+      sends += 1;
+      if (sends === 1) {
+        throw new Error('net::ERR_SSL_PROTOCOL_ERROR');
+      }
+      return makeResponse(200);
+    },
+    { model: 'm' },
+    TARGET_URL
+  );
+  assert.equal(sends, 2);
+  assert.equal(response.status, 200);
+});
+
 test('a transient network error is retried and the retry answer is returned', async () => {
   let sends = 0;
   const response = await sendUpstreamRequestWithTransientRetry(
