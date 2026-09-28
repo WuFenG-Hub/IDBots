@@ -23,7 +23,7 @@
   "publishProcedure": [
     "Confirm the gate: chain height >= 191500 and the registration author's v1.2.1 skill + vector-set announcement live.",
     "Publish each correspondence artifact FIRST (wave1-correspondence-artifacts.json) and substitute its pin id into BOTH spec.validation.proposition_fidelity.correspondence and .artifactPin of every spec that cites it (see the archive's artifactKey).",
-    "Publish the standalone spec pins (specPinPlan value PUBLISH_SPEC_FIRST) before the task that references them, and replace every node specid of the form SPEC_PIN:<key> with the returned spec pin id (nodes with specid null inherit the task's root spec pin).",
+    "Publish the standalone spec pins (specPinPlan value PUBLISH_SPEC_FIRST) with the built-in metatask_publish_spec tool (one call per spec, one pin each, no carrier task) before the task that references them, and replace every node specid of the form SPEC_PIN:<key> with the returned spec pin id (nodes with specid null inherit the task's root spec pin).",
     "Feed each task's publish object to metatask_publish with spec = specs[rootSpec]; collect taskRootPinId / treePinId / specPinId.",
     "Within 24h post the discovery buzz for every published task: title + the FULL task root pinId + #metatask.",
     "Never call metatask_amend on a wave-1 task (see noAmendPolicy)."
@@ -57,8 +57,8 @@
   "specSharingNote": "validation.proposition_fidelity is per-artifact, so a spec pin whose fidelity reference is task-specific cannot be shared between tasks. That is why lean-build and semantic-review appear once per task even though the scripts are byte-identical (validate-drafts.py checks the inlined text against the standalone file).",
   "specPinPublishingGap": {
     "problem": "metatask_publish writes exactly one spec pin per call (roster -> tree -> spec -> task) and the in-app tool library exposes no standalone spec writer, so the four PUBLISH_SPEC_FIRST pins have no host task of their own.",
-    "workaround": "spec-carrier publish: call metatask_publish with a single-node tree of weight 10000 and the wanted spec, take specPinId, and never advertise the carrier task. Cost per standalone spec: 3 pins (4 when the local roster has 2+ bots) and one unadvertised single-node task left open.",
-    "recommendedFix": "a metatask_publish_spec tool (or a specs[] array argument on metatask_publish) so the auxiliary spec pins can be written without carrier tasks; decision owner: the tool owner or the v1.2.2 registration author"
+    "workaround": "RETIRED 2026-09-29 — do not use. Was: spec-carrier publish — call metatask_publish with a single-node tree of weight 10000 and the wanted spec, take specPinId, and never advertise the carrier task; cost per standalone spec was 3 pins (4 when the local roster has 2+ bots) plus one unadvertised single-node task left open in every client's MetaTask square and claimable by strangers.",
+    "resolution": "metatask_publish_spec (built-in tool): one call per standalone spec spends exactly one /protocols/metatask/spec pin — no roster, no tree, no task — and enforces the protocol three-item spec.validation block at write time (all three items, null_tolerance boolean true, enumeration_closure with an integer self-check count, proposition_fidelity referencing a real pin://|metafile:// artifact; no self-attested booleans, no PUBLISH_ARTIFACT_FIRST placeholder; enforceHAct2Validation defaults to true). Order per task: correspondence artifact pin -> metatask_publish_spec for that task's standalone specs -> metatask_publish with the SPEC_PIN:<key> node specid overrides substituted."
   },
   "correspondenceArtifactsFile": "wave1-correspondence-artifacts.json",
   "validator": "python3 scripts/metatask-campaign/validate-drafts.py",

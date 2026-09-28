@@ -310,6 +310,15 @@ test('metatask_publish: invariants checked before the first pin; roster→tree�
   assert.equal(treePayload.nodes.length, 3);
   assert.equal(taskPayload.policy.split.submitterShareBP, 8000);
   assert.equal(taskPayload.policy.split.rosterid, writes[0].pinId);
+  // The root spec goes through the SAME payload builder as metatask_publish_spec.
+  assert.deepEqual(Object.keys(specPayload), ['name', 'lang', 'entry', 'script', 'input', 'output']);
+  assert.equal(specPayload.name, 'lean-build-check');
+  assert.equal(specPayload.lang, 'bash');
+  assert.equal(specPayload.entry, 'check.sh');
+  assert.equal(specPayload.script, 'lake build');
+  assert.equal(specPayload.input, '');
+  assert.equal(specPayload.output, '');
+  assert.equal(specPayload.validation, undefined);
   assert.match(ok.content[0].text, /discovery buzz/i);
 });
 
@@ -477,4 +486,166 @@ test('metatask_claim/replay: collected roster pins filter same-side votes (guard
   assert.equal(refused.isError, true);
   assert.match(refused.content[0].text, /claim-rejected:t1:claimed/);
   assert.equal(writes.length, 0);
+});
+
+// ── metatask_publish_spec: standalone spec pins (no carrier task) ────────────
+
+const ARTIFACT_REF = 'metafile://correspondenceartifact000000000000000000000000000000i0';
+const SPEC_SCRIPT = '#!/usr/bin/env python3\nimport json, sys\nprint("pass")\n';
+
+/** The wave-1 campaign's validation shape (protocol §3, all three items). */
+const buildValidation = (correspondence = ARTIFACT_REF, over = {}) => ({
+  null_tolerance: true,
+  enumeration_closure: { closure: '2^n + 2^i + 2^j, 0<=j<i<=n-1', selfcheck_n: 8, expected_count: 28 },
+  proposition_fidelity: {
+    correspondence,
+    artifactPin: correspondence,
+    coverage: ['statement', 'definitions', 'proof-direction'],
+  },
+  ...over,
+});
+
+const specArgs = (over = {}) => ({
+  name: 'witness-extraction-301',
+  lang: 'python3',
+  entry: 'spec-witness-extraction.py',
+  script: SPEC_SCRIPT,
+  input: { repo: 'metafile://repo-artifact' },
+  output: { verdict: 'pass|fail|invalid' },
+  validation: buildValidation(),
+  ...over,
+});
+
+test('metatask_publish_spec: exactly one spec pin, no carrier task, protocol payload', async () => {
+  const { handlers, writes } = buildHarness([]);
+  // Registered alongside the other metatask_* tools.
+  assert.equal(typeof handlers.metatask_publish_spec, 'function');
+  const result = await handlers.metatask_publish_spec(specArgs());
+  assert.equal(result.isError, undefined, result.content?.[0]?.text);
+
+  assert.equal(writes.length, 1, 'a standalone spec publish spends one pin and creates no task/tree');
+  const [write] = writes;
+  assert.equal(write.metaidData.path, '/protocols/metatask/spec');
+  assert.equal(write.metaidData.contentType, 'application/json');
+  assert.equal(write.metaidData.version, '1.1.0');
+  assert.equal(write.metaidData.encryption, '0');
+  assert.equal(write.options.origin, 'tool:metatask_publish_spec');
+
+  const payload = JSON.parse(write.metaidData.payload);
+  assert.deepEqual(Object.keys(payload), ['name', 'lang', 'entry', 'script', 'input', 'output', 'validation']);
+  assert.equal(payload.name, 'witness-extraction-301');
+  assert.equal(payload.lang, 'python3');
+  assert.equal(payload.entry, 'spec-witness-extraction.py');
+  assert.equal(payload.script, SPEC_SCRIPT);
+  assert.deepEqual(payload.input, { repo: 'metafile://repo-artifact' });
+  assert.deepEqual(payload.output, { verdict: 'pass|fail|invalid' });
+  assert.deepEqual(payload.validation, buildValidation());
+
+  const out = JSON.parse(result.content[0].text);
+  assert.equal(out.specPinId, write.pinId);
+  assert.deepEqual(out.txids, ['tx1']);
+  assert.equal(out.totalCost, 0);
+  assert.equal(out.hasValidation, true);
+  assert.match(out.note, /specid/);
+  assert.equal(write.folded, true, 'the write is followed by a projection refresh');
+});
+
+test('metatask_publish_spec: validation block enforced before any spend', async () => {
+  const { handlers, writes } = buildHarness([]);
+
+  const noValidation = await handlers.metatask_publish_spec(specArgs({ validation: undefined }));
+  assert.equal(noValidation.isError, true);
+  assert.match(noValidation.content[0].text, /spec\.validation is required/);
+
+  const missingItem = await handlers.metatask_publish_spec(
+    specArgs({ validation: { null_tolerance: true, enumeration_closure: { closure: 'x', expected_count: 1 } } }),
+  );
+  assert.equal(missingItem.isError, true);
+  assert.match(missingItem.content[0].text, /proposition_fidelity/);
+
+  const placeholder = await handlers.metatask_publish_spec(
+    specArgs({ validation: buildValidation('PUBLISH_ARTIFACT_FIRST') }),
+  );
+  assert.equal(placeholder.isError, true);
+  assert.match(placeholder.content[0].text, /placeholder/i);
+  assert.match(placeholder.content[0].text, /PUBLISH_ARTIFACT_FIRST/);
+
+  const notAPin = await handlers.metatask_publish_spec(
+    specArgs({ validation: buildValidation('https://example.com/correspondence.md') }),
+  );
+  assert.equal(notAPin.isError, true);
+  assert.match(notAPin.content[0].text, /pin:\/\/ \| metafile:\/\//);
+
+  const selfAttested = await handlers.metatask_publish_spec(
+    specArgs({
+      validation: buildValidation(ARTIFACT_REF, {
+        proposition_fidelity: { statement: true, definitions: true, proof_direction: true },
+      }),
+    }),
+  );
+  assert.equal(selfAttested.isError, true);
+  assert.match(selfAttested.content[0].text, /self-attested boolean/);
+
+  const closureWithoutCount = await handlers.metatask_publish_spec(
+    specArgs({
+      validation: buildValidation(ARTIFACT_REF, {
+        enumeration_closure: { closure: '2^n + 2^i' },
+      }),
+    }),
+  );
+  assert.equal(closureWithoutCount.isError, true);
+  assert.match(closureWithoutCount.content[0].text, /integer self-check count/);
+
+  const emptyScript = await handlers.metatask_publish_spec(specArgs({ script: '   ' }));
+  assert.equal(emptyScript.isError, true);
+  assert.match(emptyScript.content[0].text, /verifier script/);
+
+  assert.equal(writes.length, 0, 'every gate refusal must happen before any chain spend');
+
+  const ok = await handlers.metatask_publish_spec(specArgs());
+  assert.equal(ok.isError, undefined);
+  assert.equal(writes.length, 1);
+});
+
+test('metatask_publish_spec: pin:// script reference, campaign artifactPin shape, pre-H_ACT2 opt-out', async () => {
+  const { handlers, writes } = buildHarness([]);
+
+  const referenceScript = await handlers.metatask_publish_spec(
+    specArgs({ script: '  pin://scriptpin000000000000000000000000000000000000000000000000000i0  ' }),
+  );
+  assert.equal(referenceScript.isError, undefined, referenceScript.content?.[0]?.text);
+  const referenced = JSON.parse(writes[0].metaidData.payload);
+  assert.equal(referenced.script, 'pin://scriptpin000000000000000000000000000000000000000000000000000i0');
+  assert.equal(referenced.input.repo, 'metafile://repo-artifact');
+
+  // The protocol's `correspondence` field alone is enough (no artifactPin).
+  const correspondenceOnly = await handlers.metatask_publish_spec(
+    specArgs({
+      validation: buildValidation(ARTIFACT_REF, {
+        proposition_fidelity: { correspondence: ARTIFACT_REF },
+      }),
+    }),
+  );
+  assert.equal(correspondenceOnly.isError, undefined, correspondenceOnly.content?.[0]?.text);
+
+  // A single-line non-protocol URI is refused instead of being published as
+  // "inline text" (protocol §3 allows inline text or a pin://|metafile:// ref).
+  const httpsOnly = await handlers.metatask_publish_spec(specArgs({ script: 'https://example.com/verifier.py' }));
+  assert.equal(httpsOnly.isError, true);
+  assert.match(httpsOnly.content[0].text, /not pin:\/\/ or metafile:\/\//);
+
+  // Pre-H_ACT2 (v1.1-era) specs: explicit opt-out, no validation block written.
+  const legacy = await handlers.metatask_publish_spec({
+    name: 'legacy-verifier',
+    lang: 'bash',
+    entry: 'check.sh',
+    script: 'echo pass',
+    enforceHAct2Validation: false,
+  });
+  assert.equal(legacy.isError, undefined, legacy.content?.[0]?.text);
+  const legacyPayload = JSON.parse(writes[writes.length - 1].metaidData.payload);
+  assert.equal(legacyPayload.validation, undefined);
+  assert.equal(legacyPayload.input, '');
+  assert.equal(legacyPayload.output, '');
+  assert.equal(legacyPayload.lang, 'bash');
 });

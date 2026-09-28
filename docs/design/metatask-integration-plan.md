@@ -299,6 +299,7 @@ New `src/main/libs/metataskAgentTools.ts`, wired like
 | Tool | Behavior |
 | --- | --- |
 | `metatask_publish` | Wizard: draft tree+weights+specs+split policy; invariant checks; publish order tree→spec→task; discovery buzz within 24h (protocol rule). |
+| `metatask_publish_spec` | Standalone spec pin for node-level `specid` overrides (one pin, no carrier task); enforces the v1.2.1 three-item `validation` block at write time. |
 | `metatask_list` / `metatask_get` | Square/detail reads from the local projection incl. freshness block. |
 | `metatask_claim` | Runs the claim guard (claimPrecheck + TTL/review-window expiry derivation) **before** broadcasting; refuses non-open nodes (saves the fee). |
 | `metatask_submit` | Assembles the submission cert (content hash canon, content type, attachment, childids) with invariant checks. |

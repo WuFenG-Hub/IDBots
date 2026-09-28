@@ -2,10 +2,11 @@
 
 Status: PUBLISH-READY, with two operator actions gated on the launch itself —
 every correspondence artifact pin must be published before the spec that cites
-it, and the four standalone spec pins must exist before their trees (see "Spec
-pins"). Owner-approved 2026-09-27 (wave-1 list), with two demotions recorded
-below (JSP-000307; T2-JSP-000288 demoted 2026-09-29 because its verifier cannot
-be written from this repository).
+it, and the four standalone spec pins must exist before their trees, written
+with the built-in `metatask_publish_spec` tool (see "Spec pins"). Owner-approved
+2026-09-27 (wave-1 list), with two demotions recorded below (JSP-000307;
+T2-JSP-000288 demoted 2026-09-29 because its verifier cannot be written from
+this repository).
 
 Wave-1 is **T0-triage-287 + T1-JSP-000301 + T3-JSP-000870 + T4-JSP-000598**:
 4 tasks, 8 spec pins, 4 correspondence artifact pins. Every claim in this
@@ -19,7 +20,8 @@ open judgement calls are listed under "Open decisions".
    pin + sha256 announcement (`106aa1f3…22f2c4`).
 3. Three engines green on the announced set (TS main / Python v1.3.0 / Go
    metaso `4af4139` — all confirmed 2026-09-27; production indexer live).
-4. Launching bot acts from IDBots with the built-in `metatask_publish` tool.
+4. Launching bot acts from IDBots with the built-in `metatask_publish` and
+   `metatask_publish_spec` tools.
    Run `python3 scripts/metatask-campaign/validate-drafts.py` first and require
    `DRAFTS PUBLISH-READY` — it re-checks every invariant the tool enforces
    (single root, acyclic parents, integer weights summing to exactly 10000,
@@ -59,11 +61,13 @@ superseded; read `docs/metaid_protocols/metatask-v1.2.1-alignment.md` instead.
    the artifact). The `PUBLISH_ARTIFACT_FIRST` placeholder must be gone from the
    spec you are about to publish. A self-declared boolean there is
    non-compliant with v1.2.1.
-3. **Publish the standalone spec pins** (plan `PUBLISH_SPEC_FIRST` in
-   `specPinPlan`) before the tree that uses them, and replace every node
-   `specid` written as `SPEC_PIN:<spec key>` with the returned spec pin id.
-   Nodes whose `specid` is `null` inherit the task root spec — leave them null.
-   See "Spec pins" below for how to write a standalone spec pin today.
+3. **Publish the four standalone spec pins** (plan `PUBLISH_SPEC_FIRST` in
+   `specPinPlan`) with the built-in **`metatask_publish_spec`** tool — one call
+   per spec, one pin each, no carrier task — **before** the tree that uses
+   them, and replace every node `specid` written as `SPEC_PIN:<spec key>` with
+   the returned `specPinId`. Nodes whose `specid` is `null` inherit the task
+   root spec — leave them null. See "Spec pins" below for the tool's arguments
+   and the validation gate it enforces at write time.
 4. **Feed each task's `publish` object to `metatask_publish`**, with
    `spec = specs[rootSpec]` (the scripts are already inlined in the specs map —
    publish them as-is, do not re-transcribe). Collect `taskRootPinId`,
@@ -104,16 +108,41 @@ cannot be shared between tasks whose artifacts differ. `lean-build` and
 Four of the eight spec pins are the task root specs and are written by
 `metatask_publish` itself. The other four (`witness-extraction-301`,
 `semantic-review-301`, `semantic-review-870`, `semantic-review-598`) need their
-own pins **before** the tree is published. The in-app tool library exposes
-exactly one spec writer (`metatask_publish`: roster → tree → spec → task, one
-spec per call), so today the only mechanical path is a **spec-carrier publish**:
-call `metatask_publish` with a single-node tree (weight 10000, title marked as a
-spec carrier), take `specPinId`, and never advertise the carrier task. Cost per
-standalone spec: 3 pins (4 when the local roster has ≥ 2 bots) plus one
-unadvertised single-node task. A `metatask_publish_spec` tool (or a `specs[]`
-argument on `metatask_publish`) removes that litter and is the recommended
-follow-up — flagged as a tool/registration-author decision, not something this
-kit can do on its own.
+own pins **before** the tree is published. Write each of them with the built-in
+**`metatask_publish_spec`** tool:
+
+```
+metatask_publish_spec {
+  name, lang, entry,
+  script,        // inline text, or a pin:// | metafile:// reference when too long
+  input, output, // descriptors (string or object), interpreted by the script
+  validation     // the protocol's three-item block (see below)
+}
+```
+
+One call spends exactly one pin (`/protocols/metatask/spec`): no roster, no
+tree, no task. Nothing is left in the MetaTask square and nothing can be
+claimed by a stranger, so the earlier **spec-carrier publish** workaround
+(`metatask_publish` with a junk single-node tree, then harvesting `specPinId`
+and never advertising the task) is **retired — do not use it**. The returned
+`specPinId` is what the node `specid` overrides (and a task root `specid`)
+reference.
+
+The tool enforces the protocol's `validation` block at write time, before any
+spend — the same three items `validate-drafts.py` checks: all three items
+present, `null_tolerance` boolean `true`, `enumeration_closure` with a declared
+`closure` plus at least one integer self-check count, and `proposition_fidelity`
+pointing at an INDEPENDENT correspondence artifact (`pin://` | `metafile://`) —
+a self-attested boolean or a `PUBLISH_ARTIFACT_FIRST` placeholder is refused.
+The tool cannot read chain height, so the block is required by default
+(`enforceHAct2Validation: true`, mandatory for specs at/after H_ACT2=191500);
+`false` exists only for a pre-H_ACT2 (v1.1-era) spec, where the block did not
+yet exist. An empty script is refused (inline text or a protocol reference is
+required).
+
+Publish order per task is therefore: correspondence artifact pin →
+`metatask_publish_spec` for that task's standalone specs → `metatask_publish`
+with the `SPEC_PIN:` overrides substituted (that call writes the root spec).
 
 Note also `settlement.eventSetHash.membership`: only `task.specid` brings a spec
 pin into the settlement event set, which is exactly why every node-level spec is
@@ -207,12 +236,12 @@ null/missing → `invalid` boundary, the coverage-mismatch → `fail` boundary, 
 
 ## Open decisions (human / registration author)
 
-1. **Standalone spec-pin writer** — the four `PUBLISH_SPEC_FIRST` specs need a
-   pin before their trees, but the in-app tool library writes exactly one spec
-   per `metatask_publish` call. Either accept the spec-carrier publish cost
-   (one unadvertised single-node task per standalone spec) or add a
-   `metatask_publish_spec` tool / a `specs[]` argument. Not decidable from this
-   repository.
+1. **Standalone spec-pin writer — RESOLVED 2026-09-29** by the built-in
+   `metatask_publish_spec` tool: the four `PUBLISH_SPEC_FIRST` specs are written
+   directly (one pin per call, no carrier task), so the spec-carrier workaround
+   is retired. Remaining operator duty: keep the tool's write-time validation
+   gate in sync with `validate-drafts.py` if the protocol's `validation` block
+   ever changes.
 2. **Aggregate nodes and their judge** — the drafts leave every tree-root
    aggregate on the root spec and rely on the protocol's
    `paths.aggregationPrecondition` for its verdict. If the registration author

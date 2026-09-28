@@ -29,6 +29,9 @@ import type {
  *    collected /protocols/metatask-roster pins.
  *  - publish runs tree → spec → task with the weight invariant (sum=10000)
  *    checked before the first pin is spent.
+ *  - a STANDALONE spec pin (node-level specid override that must exist before
+ *    its tree) is written by metatask_publish_spec: one pin, no carrier task,
+ *    and the v1.2.1 three-item validation block enforced at write time.
  *  - the chain is the source of truth: after every write the local
  *    projection refreshes in the background; reads state their boundary block.
  */
@@ -68,6 +71,113 @@ export interface MetaTaskAgentControl {
 }
 
 const asString = (value: unknown, fallback = ''): string => (typeof value === 'string' ? value : fallback);
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+/** Spec script reference form (protocol §3): pin:// or metafile://, no spaces. */
+const SPEC_REF_RE = /^(pin:\/\/|metafile:\/\/)\S+$/;
+/** Obvious "publish me later" tokens that must never reach the chain as a ref. */
+const SPEC_PLACEHOLDER_RE = /PUBLISH_ARTIFACT_FIRST|PLACEHOLDER|TODO|FIXME|TBD/i;
+/** A single-line URI-looking value must be a protocol reference, not e.g. https://. */
+const URI_LOOKING_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+/** The v1.2.1 spec.validation items (protocol §3, mandatory at/after H_ACT2). */
+const SPEC_VALIDATION_ITEMS = ['null_tolerance', 'enumeration_closure', 'proposition_fidelity'] as const;
+
+interface SpecPayloadInput {
+  name?: string;
+  lang?: string;
+  entry?: string;
+  script?: string;
+  input?: unknown;
+  output?: unknown;
+  validation?: Record<string, unknown>;
+}
+
+/**
+ * The canonical spec pin payload (protocol §3), shared by metatask_publish and
+ * metatask_publish_spec so both writers emit byte-identical field order:
+ * name, lang, entry, script, input, output, then validation when present.
+ */
+const buildSpecPayload = (spec: SpecPayloadInput): Record<string, unknown> => {
+  const payload: Record<string, unknown> = {
+    name: asString(spec.name).trim(),
+    lang: asString(spec.lang).trim() || 'bash',
+    entry: asString(spec.entry).trim(),
+    script: spec.script === undefined ? '' : spec.script,
+    input: spec.input ?? '',
+    output: spec.output ?? '',
+  };
+  if (isPlainObject(spec.validation)) payload.validation = spec.validation;
+  return payload;
+};
+
+/** Refuse a missing/empty/bogus script reference; returns null when usable. */
+const specScriptRefusal = (script: unknown): string | null => {
+  const text = typeof script === 'string' ? script.trim() : '';
+  if (!text) {
+    return 'Refused: a spec pin needs a verifier script — inline text, or a pin:// | metafile:// reference when too long (protocol §3).';
+  }
+  if (!text.includes('\n') && URI_LOOKING_RE.test(text) && !SPEC_REF_RE.test(text)) {
+    return `Refused: the script looks like a URI reference but is not pin:// or metafile:// ("${text}") — protocol §3 allows inline text or a pin:// | metafile:// reference.`;
+  }
+  return null;
+};
+
+/**
+ * Writer-side enforcement of the v1.2.1 spec.validation block (protocol §3,
+ * mandatory for specs published at/after H_ACT2): all three items present,
+ * null_tolerance boolean true, enumeration_closure declaring the closure plus
+ * an integer self-check count, and proposition_fidelity pointing at a REAL
+ * independent correspondence artifact — never a self-attested boolean and
+ * never a publish-me-later placeholder. Returns a refusal message or null.
+ */
+const specValidationRefusal = (validation: unknown): string | null => {
+  if (!isPlainObject(validation)) {
+    return `Refused: spec.validation is required (protocol §3, mandatory at/after H_ACT2) — a block carrying all three items: ${SPEC_VALIDATION_ITEMS.join(', ')}.`;
+  }
+  const missing = SPEC_VALIDATION_ITEMS.filter((item) => !(item in validation));
+  if (missing.length > 0) {
+    return `Refused: spec.validation is missing ${missing.join(', ')} — protocol §3 requires all three items (null/missing input -> verdict=invalid; the enumeration closure with an integer self-check count; proposition fidelity against an INDEPENDENT correspondence artifact).`;
+  }
+  if (validation.null_tolerance !== true) {
+    return 'Refused: spec.validation.null_tolerance must be boolean true (protocol §3: every branch maps null/missing input to verdict=invalid with a location in detail).';
+  }
+  const closure = validation.enumeration_closure;
+  const closureCounts = isPlainObject(closure)
+    ? Object.values(closure).filter((value) => typeof value === 'number' && Number.isInteger(value))
+    : [];
+  if (!isPlainObject(closure) || !asString(closure.closure).trim() || closureCounts.length === 0) {
+    return 'Refused: spec.validation.enumeration_closure needs the closure declared in a string `closure` field AND at least one integer self-check count, so replay can mechanically reconcile theory vs implementation (protocol §3).';
+  }
+  const fidelity = validation.proposition_fidelity;
+  if (!isPlainObject(fidelity)) {
+    return 'Refused: spec.validation.proposition_fidelity must be an object referencing an INDEPENDENT correspondence artifact (protocol §3).';
+  }
+  const booleanItem = Object.entries(fidelity).find(([, value]) => typeof value === 'boolean');
+  if (booleanItem) {
+    return `Refused: spec.validation.proposition_fidelity.${booleanItem[0]} is a self-attested boolean — protocol §3 makes that NON-compliant; the artifact pin itself must carry the per-item table (statement / definitions / proof direction).`;
+  }
+  const reference =
+    typeof fidelity.correspondence === 'string'
+      ? fidelity.correspondence
+      : typeof fidelity.artifactPin === 'string'
+        ? fidelity.artifactPin
+        : typeof fidelity.artifact === 'string'
+          ? fidelity.artifact
+          : '';
+  const trimmedReference = reference.trim();
+  if (!trimmedReference) {
+    return 'Refused: spec.validation.proposition_fidelity needs the correspondence artifact referenced as pin:// | metafile:// (field `correspondence`, or `artifactPin` for the campaign shape) — a self-declared flag is non-compliant.';
+  }
+  if (SPEC_PLACEHOLDER_RE.test(trimmedReference)) {
+    return `Refused: proposition_fidelity still carries the placeholder "${trimmedReference}" — publish the correspondence artifact pin FIRST, then substitute its pinId.`;
+  }
+  if (!SPEC_REF_RE.test(trimmedReference)) {
+    return `Refused: proposition_fidelity must reference a REAL correspondence artifact (pin:// | metafile://) — got "${trimmedReference}".`;
+  }
+  return null;
+};
 
 export function buildMetataskAgentTools(deps: {
   tool: SdkToolFactory;
@@ -645,16 +755,12 @@ export function buildMetataskAgentTools(deps: {
         };
         const treePin = await writePin(who.metabotId, 'tree', treePayload, 'tool:metatask_publish');
 
-        const specPayload: Record<string, unknown> = {
-          name: asString(spec.name).trim(),
-          lang: asString(spec.lang).trim() || 'bash',
-          entry: asString(spec.entry).trim(),
-          script: spec.script === undefined ? '' : spec.script,
-          input: spec.input ?? '',
-          output: spec.output ?? '',
-        };
-        if (spec.validation && typeof spec.validation === 'object') specPayload.validation = spec.validation;
-        const specPin = await writePin(who.metabotId, 'spec', specPayload, 'tool:metatask_publish');
+        const specPin = await writePin(
+          who.metabotId,
+          'spec',
+          buildSpecPayload(spec),
+          'tool:metatask_publish',
+        );
 
         const shareBP = Number(policy.submitterShareBP ?? 8000);
         const taskPayload: Record<string, unknown> = {
@@ -685,6 +791,82 @@ export function buildMetataskAgentTools(deps: {
         });
       } catch (error) {
         return textResult(`Publish failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
+  const publishSpec = tool(
+    'metatask_publish_spec',
+    'Publish a STANDALONE verifier spec pin (path /protocols/metatask/spec) as this session\'s MetaBot — for node-level specid overrides that must exist BEFORE their task tree, with no carrier task (the old workaround published a junk single-node task just to harvest its specPinId, littering the MetaTask square with claimable tasks). Exactly one pin is spent. Writer-side gates, all before any spend: name + entry, a script that is inline text or a pin:// | metafile:// reference (protocol §3), and — since this tool cannot read chain height — the v1.2.1 spec.validation block is REQUIRED by default (enforceHAct2Validation defaults to true; the protocol makes it mandatory for specs published at/after H_ACT2=191500, where every current campaign spec runs): all three items null_tolerance (boolean true), enumeration_closure (a `closure` string plus at least one integer self-check count) and proposition_fidelity (an INDEPENDENT correspondence artifact referenced as pin:// | metafile:// — a self-attested boolean or a PUBLISH_ARTIFACT_FIRST placeholder is refused). Set enforceHAct2Validation=false ONLY for a pre-H_ACT2 (v1.1-era) spec, where the block did not yet exist. The returned specPinId is what node specid overrides (and a task-root specid) must reference; the local projection refreshes after the write.',
+    {
+      name: z.string().min(1).describe('Spec name, e.g. witness-extraction-301.'),
+      lang: z.string().min(1).describe('Verifier implementation language, e.g. python3, bash.'),
+      entry: z.string().min(1).describe('Offline entry point, e.g. spec-witness-extraction.py.'),
+      script: z.string().min(1).describe('Inline verifier script text, or a pin:// | metafile:// reference when too long.'),
+      input: z.unknown().optional().describe('Input descriptor (string or object); interpreted by the script.'),
+      output: z.unknown().optional().describe('Output/verdict contract (string or object): pass | fail | invalid.'),
+      validation: z.record(z.string(), z.unknown()).optional().describe('v1.2.1 validation block: null_tolerance, enumeration_closure (closure + integer self-check count), proposition_fidelity (correspondence artifact pin). Required unless enforceHAct2Validation=false.'),
+      enforceHAct2Validation: z.boolean().optional().describe('Default true: enforce the v1.2.1 three-item validation block. Set false only for a pre-H_ACT2 (v1.1-era) spec.'),
+    },
+    async (args: {
+      name?: string;
+      lang?: string;
+      entry?: string;
+      script?: string;
+      input?: unknown;
+      output?: unknown;
+      validation?: Record<string, unknown>;
+      enforceHAct2Validation?: boolean;
+    }) => {
+      try {
+        const who = identity();
+        if ('error' in who) return textResult(who.error, true);
+        const name = asString(args.name).trim();
+        const entry = asString(args.entry).trim();
+        if (!name || !entry) {
+          return textResult('Refused: a spec needs name + entry (the offline verifier entry point).', true);
+        }
+        const scriptRefusal = specScriptRefusal(args.script);
+        if (scriptRefusal) return textResult(scriptRefusal, true);
+        const rawScript = typeof args.script === 'string' ? args.script : '';
+        const trimmedScript = rawScript.trim();
+        // A pin://|metafile:// reference is normalized; inline script bytes are
+        // published verbatim (they are the verifier that reviewers replay).
+        const script = SPEC_REF_RE.test(trimmedScript) ? trimmedScript : rawScript;
+        // Chains at/after H_ACT2 owe the protocol's validation block; the tool
+        // cannot measure height, so it enforces by default and the caller must
+        // explicitly declare a pre-H_ACT2 (v1.1-era) spec to opt out.
+        if (args.enforceHAct2Validation !== false) {
+          const validationRefusal = specValidationRefusal(args.validation);
+          if (validationRefusal) return textResult(validationRefusal, true);
+        }
+        const written = await writePin(
+          who.metabotId,
+          'spec',
+          buildSpecPayload({
+            name,
+            lang: args.lang,
+            entry,
+            script,
+            input: args.input,
+            output: args.output,
+            validation: args.validation,
+          }),
+          'tool:metatask_publish_spec',
+        );
+        void refresher().refreshOnce('metatask_publish_spec');
+        return jsonResult({
+          specPinId: written.pinId,
+          txids: written.txids,
+          totalCost: written.totalCost,
+          name,
+          lang: asString(args.lang).trim() || 'bash',
+          entry,
+          hasValidation: isPlainObject(args.validation),
+          note: 'Standalone spec pin written — no task/tree was spent. Reference this specPinId from any tree node specid override (replace SPEC_PIN:<key> placeholders before publishing the tree) or as a task root specid.',
+        });
+      } catch (error) {
+        return textResult(`Spec publish failed: ${error instanceof Error ? error.message : String(error)}`, true);
       }
     },
   );
@@ -833,6 +1015,7 @@ export function buildMetataskAgentTools(deps: {
     verifySubmission,
     releaseClaim,
     publishTask,
+    publishSpec,
     amendTree,
   ];
 }
