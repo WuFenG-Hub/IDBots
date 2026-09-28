@@ -15,7 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { classifyDreamError, DREAM_RETRY_MAX_ATTEMPTS } = await import(
+const { classifyDreamError, DREAM_RETRY_MAX_ATTEMPTS, isTransientDreamLlmError, DREAM_TRANSIENT_LLM_RETRY_DELAYS_MS } = await import(
   '../dist-electron/main/libs/dreamRetryPolicy.js'
 );
 const { computeDueDreamDates, computeDreamRetryDelayMs } = await import(
@@ -132,4 +132,49 @@ test('cap degradation: legacy failed rows stop at DREAM_RETRY_MAX_ATTEMPTS, belo
   assert.equal(due(failedAt(DREAM_RETRY_MAX_ATTEMPTS, now.getTime() - hours(48))), false);
   // Above cap (pre-H-80 row that burned extra attempts) → degraded too.
   assert.equal(due(failedAt(DREAM_RETRY_MAX_ATTEMPTS + 3, now.getTime() - hours(96))), false);
+});
+
+// In-run transient retry (2026-09-29): which failures the dream call layer
+// re-drives immediately (primary→fallback pair, bounded rounds) instead of
+// failing the run into the 30-minute scheduled backoff.
+
+test('in-run transient retry: the 2026-09-28 real failure signature qualifies', () => {
+  // Verbatim shape of the error that killed the 45-minute nightly run at its
+  // 54th fragment: proxy-wrapped TLS flap on the primary, timeout on the
+  // fallback, combined by llmFallback.
+  const real = "LLM request failed: 502 {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"net::ERR_SSL_PROTOCOL_ERROR\"}} (fallback 'glm-5.3-flash@custom-provider' also failed: The operation was aborted due to timeout)";
+  assert.equal(isTransientDreamLlmError(real), true);
+  assert.equal(classifyDreamError(real), 'retryable', 'must stay in the run-level retryable class too');
+});
+
+test('in-run transient retry: transport and gateway signatures qualify', () => {
+  assert.equal(isTransientDreamLlmError('LLM request failed: 502 Bad Gateway'), true);
+  assert.equal(isTransientDreamLlmError('LLM request failed: 503 Service Unavailable'), true);
+  assert.equal(isTransientDreamLlmError('LLM request failed: 504 Gateway Timeout'), true);
+  assert.equal(isTransientDreamLlmError('LLM request failed: 408 upstream read timeout'), true);
+  assert.equal(isTransientDreamLlmError('LLM request failed: 429 concurrency limit, retry soon'), true);
+  assert.equal(isTransientDreamLlmError(new Error('fetch failed')), true);
+  assert.equal(isTransientDreamLlmError('request to https://open.bigmodel.cn failed: ECONNRESET'), true);
+  assert.equal(isTransientDreamLlmError('net::ERR_CONNECTION_CLOSED'), true);
+  assert.equal(isTransientDreamLlmError('The operation was aborted due to timeout'), true);
+  assert.equal(isTransientDreamLlmError('LLM returned empty content'), true);
+  assert.equal(isTransientDreamLlmError('socket hang up'), true);
+});
+
+test('in-run transient retry: terminal and non-transport errors never qualify', () => {
+  // Deterministic rejections: re-driving the same prompt can never help.
+  assert.equal(isTransientDreamLlmError('LLM request failed: 400 {"error":{"code":"1210","message":"该模型始终思考"}}'), false);
+  assert.equal(isTransientDreamLlmError('LLM request failed: 401 invalid api key'), false);
+  assert.equal(isTransientDreamLlmError('LLM request failed: 403 forbidden'), false);
+  assert.equal(isTransientDreamLlmError('LLM request failed: 429 free_quota_exhausted'), false, 'terminal quota class wins over the 429 gateway pattern');
+  // 500s are often request-specific rejections misreported by relays — the
+  // proxy makes the same call; the run-level backoff owns them.
+  assert.equal(isTransientDreamLlmError('LLM request failed: 500 internal error'), false);
+  // Parse failures belong to generateAndParse's own retry, not this loop.
+  assert.equal(isTransientDreamLlmError('dream output unparseable after retry: no json object found'), false);
+  assert.equal(isTransientDreamLlmError(undefined), false);
+});
+
+test('in-run transient retry budget: two bounded re-drives', () => {
+  assert.deepEqual([...DREAM_TRANSIENT_LLM_RETRY_DELAYS_MS], [10_000, 30_000]);
 });

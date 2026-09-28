@@ -73,7 +73,7 @@ const makePayload = (overrides = {}) => JSON.stringify({
   ...overrides,
 });
 
-const setup = async (performChat) => {
+const setup = async (performChat, extraDeps = {}) => {
   const { db, cleanup } = await createSqliteStore();
   const coworkStore = createCoworkStore(db);
   const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
@@ -88,6 +88,7 @@ const setup = async (performChat) => {
     emitToRenderer: (channel, payload) => events.push({ channel, payload }),
     llmTimeoutMs: 5000,
     now: () => new Date(2026, 7, 1, 3, 0),
+    ...extraDeps,
   });
   return { db, cleanup, coworkStore, dreamStore, service, events };
 };
@@ -670,6 +671,61 @@ test('an empty day WITH a surf report still dreams (surf is fresh experience)', 
     await service.runNow(5, '2026-07-31');
     assert.equal(dreamStore.getRun(5, '2026-07-31').status, 'completed');
     assert.equal(llmCalls, 1, 'the surf report alone justifies the dream LLM call');
+  } finally {
+    cleanup();
+  }
+});
+
+// In-run transient retry (2026-09-29): a sub-minute transport/gateway flap
+// that kills BOTH brains of one call must be re-driven inside the run instead
+// of failing a 45-minute run at its last call (the 2026-09-28 incident).
+
+test('a transient 502 that clears on re-drive no longer fails the run', async () => {
+  let llmCalls = 0;
+  const { cleanup, dreamStore, service } = await setup(async () => {
+    llmCalls += 1;
+    if (llmCalls === 1) {
+      throw new Error('LLM request failed: 502 {"type":"error","error":{"type":"api_error","message":"net::ERR_SSL_PROTOCOL_ERROR"}} (fallback \'glm@backup\' also failed: The operation was aborted due to timeout)');
+    }
+    return makePayload();
+  }, { transientRetryDelaysMs: [1, 1] });
+  try {
+    await service.runNow(5, DAY);
+    assert.equal(dreamStore.getRun(5, DAY).status, 'completed');
+    assert.equal(llmCalls, 2, 'the failed first round is re-driven exactly once before success');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a persistent transient failure exhausts the bounded in-run rounds before failing the run', async () => {
+  let llmCalls = 0;
+  const { cleanup, dreamStore, service } = await setup(async () => {
+    llmCalls += 1;
+    throw new Error('LLM request failed: 503 Service Unavailable');
+  }, { transientRetryDelaysMs: [1, 1] });
+  try {
+    await service.runNow(5, DAY);
+    const run = dreamStore.getRun(5, DAY);
+    assert.equal(run.status, 'failed', 'retryable class keeps the scheduled backoff (not terminal-failed)');
+    assert.equal(llmCalls, 3, 'one initial call plus two bounded re-drives, then the run-level backoff owns it');
+    assert.match(run.error, /503/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a terminal 400 is never re-driven in-run', async () => {
+  let llmCalls = 0;
+  const { cleanup, dreamStore, service } = await setup(async () => {
+    llmCalls += 1;
+    throw new Error('LLM request failed: 400 {"error":{"code":"1210","message":"该模型始终思考，不支持关闭思考"}}');
+  }, { transientRetryDelaysMs: [1, 1] });
+  try {
+    await service.runNow(5, DAY);
+    const run = dreamStore.getRun(5, DAY);
+    assert.equal(run.status, 'terminal-failed');
+    assert.equal(llmCalls, 1, 'deterministic rejections fail immediately — re-driving the same prompt cannot help');
   } finally {
     cleanup();
   }

@@ -69,3 +69,63 @@ export const classifyDreamError = (error: unknown): DreamErrorKind => {
   }
   return 'retryable';
 };
+
+/**
+ * In-run transient retry (2026-09-29): which LLM failures are worth an
+ * IMMEDIATE re-drive of the primary→fallback pair inside one dream run,
+ * instead of failing the run and waiting for the 30-minute scheduled backoff.
+ *
+ * Motivation: the 2026-09-28 nightly dream survived 53 fragments on the
+ * primary brain, then one sub-second TLS flap (net::ERR_SSL_PROTOCOL_ERROR
+ * through the local system proxy) failed the 54th call on BOTH brains and
+ * killed the 45-minute run — the run-level retry never fired because the
+ * serial queue was busy and the app shut down first. Sub-minute transport
+ * flaps must be absorbed at the call layer; the run-level backoff remains for
+ * genuine outages.
+ *
+ * The gate is deliberately narrower than classifyDreamError's 'retryable':
+ * only transport/gateway signatures that plausibly clear within seconds.
+ * Excluded on purpose:
+ *  - 500s (often request-specific rejections misreported by relays — the proxy
+ *    makes the same call for its own retries);
+ *  - every other 4xx (deterministic; classifyDreamError already terminals
+ *    them);
+ *  - parse failures (generateAndParse owns that retry).
+ */
+const TRANSIENT_TRANSPORT_ERROR_PATTERNS: RegExp[] = [
+  // Gateway/proxy statuses: 408 read timeout, 429 concurrency flap, 502/503/504
+  // bad-gateway family. Anchored to the cognitiveChatCompletion prefix so a
+  // body error id can never masquerade as a status (same rule as above).
+  /llm request failed:\s*(?:408|429|502|503|504)\b/,
+  // Chromium net codes surfaced through the cowork proxy's 502 body, or bare.
+  /net::err_[a-z0-9_]+/,
+  // undici/Electron fetch transport failures (connection refused, reset, DNS).
+  /fetch failed/,
+  /\b(?:etimedout|econnreset|econnrefused|econnaborted|epipe|eai_again|enetunreach|ehostunreach)\b/,
+  /socket hang up/,
+  // Per-attempt timeout aborts (dream calls carry no external cancel signal,
+  // so an abort can only be the attempt window expiring on a stalled network).
+  /operation was aborted/,
+  // A 200 with an empty body from a flapping gateway; throwOnEmptyContent
+  // turns it into this error after both brains returned nothing.
+  /llm returned empty content/,
+];
+
+/**
+ * Whether a failed dream LLM call is worth an immediate in-run re-drive.
+ * Terminal-classified errors (4xx rejections, quota, auth) never qualify.
+ */
+export const isTransientDreamLlmError = (error: unknown): boolean => {
+  if (classifyDreamError(error) !== 'retryable') return false;
+  const text = toErrorText(error).toLowerCase();
+  return TRANSIENT_TRANSPORT_ERROR_PATTERNS.some((pattern) => pattern.test(text));
+};
+
+/**
+ * Delays before each in-run transient re-drive. Each re-drive gets the full
+ * primary→fallback pair with fresh per-attempt timeouts, so two extra rounds
+ * mean a fragment call survives up to 6 brain attempts over ~40s before the
+ * run is allowed to fail. Sized for sub-minute proxy node flaps; genuine
+ * outages still escalate to the run-level backoff unchanged.
+ */
+export const DREAM_TRANSIENT_LLM_RETRY_DELAYS_MS: readonly number[] = [10_000, 30_000];
