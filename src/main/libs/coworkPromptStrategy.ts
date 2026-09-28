@@ -63,3 +63,29 @@ export function resolveContinueSystemPrompt(
     ? undefined
     : requestedSystemPrompt;
 }
+
+/**
+ * Turn-start framing for owner-typed chat text (the continue path of
+ * CoworkTurnSubmissionController).
+ *
+ * A continue turn composes the kernel user message as
+ * "<volatile context head>\n\n<owner text>" — the owner's words sit as a bare
+ * tail after up to ~45k chars of local-time/memory/catalog blocks. Mid-turn
+ * steers never hit this (the kernel frames them as <operator_steer>), but on
+ * an idle-session continue a terse ruling ("1", "A", "过") reads as context
+ * noise: the model concluded "no owner message arrived this turn" and
+ * confabulated a heartbeat round while the UI showed the reply as delivered
+ * (long-term task sessions 883caf62/7ac5533e, 2026-09-28/29). The envelope
+ * makes the owner text unmissable; the persisted/UI-visible message stays
+ * raw (the controller wraps only the runner-bound copy).
+ */
+export function buildOwnerTurnInputPrompt(text: string): string {
+  return [
+    '<owner_message>',
+    'This turn was opened by the human OWNER sending the message below in the chat. It is the ONLY new owner input this turn — the other blocks in this user message (local time, memory projections, catalogs) are per-turn background context, not the owner\'s words.',
+    'If the message is terse (a digit, a single word — e.g. "1", "A", "过"), it answers the most recent question or pending decision you put to the owner: locate that question in the recent conversation (for long-term tasks, also the task journal), map the reply to its options, and act on the ruling. Never claim the owner has not replied while this block is present.',
+    '',
+    text,
+    '</owner_message>',
+  ].join('\n');
+}

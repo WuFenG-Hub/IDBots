@@ -4,7 +4,7 @@ import type {
   CoworkSession,
 } from '../coworkStore';
 import { CoworkDshSteerWindowClosedError } from '../libs/coworkSteerChannel';
-import { resolveContinueSystemPrompt } from '../libs/coworkPromptStrategy';
+import { buildOwnerTurnInputPrompt, resolveContinueSystemPrompt } from '../libs/coworkPromptStrategy';
 
 export type CoworkSubmitInput = {
   sessionId: string;
@@ -488,7 +488,7 @@ export class CoworkTurnSubmissionController {
         activeSkillIds: requestedSkillIds,
         persistedActiveSkillIds: currentSession.activeSkillIds,
       });
-      await this.runner.continueSession(sessionId, text, {
+      await this.runner.continueSession(sessionId, buildOwnerTurnInputPrompt(text), {
         skipUserMessage: true,
         systemPrompt: resolvedSystemPrompt,
         skillIds: requestedSkillIds,
