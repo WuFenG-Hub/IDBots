@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url);
 const { buildMetataskAgentTools } = require('../dist-electron/main/libs/metataskAgentTools.js');
 const { replayMetaTask } = require('../dist-electron/main/services/metatask/engine.js');
 const { innerHash, outerHash } = require('../dist-electron/main/services/metatask/canon.js');
+const { rosterPinsFromEvents } = require('../dist-electron/main/services/metatask/collector.js');
 
 /**
  * MetaTask agent tools (P2): writer-side protocol discipline before any chain
@@ -61,7 +62,7 @@ const buildForeignTask = () => {
   return { events: [tree, task], treePinId, rootPinId };
 };
 
-const buildHarness = (initialEvents) => {
+const buildHarness = (initialEvents, over = {}) => {
   const state = { events: [...initialEvents] };
   const writes = [];
   const createPin = async (metabotId, metaidData, options) => {
@@ -70,10 +71,16 @@ const buildHarness = (initialEvents) => {
     return { pinId, txids: [`tx${writes.length}`], totalCost: 0 };
   };
   const refresher = {
-    board: () => null,
+    // A synthetic board lets read tools be tested without a projection store.
+    board: () => over.board ?? null,
     detail: (rootPinId) => {
       try {
-        return replayMetaTask(state.events, { rootPinId, now: 1_790_050_000_000 });
+        // Mirrors the refresher: roster pins travel with the event set.
+        return replayMetaTask(state.events, {
+          rootPinId,
+          now: 1_790_050_000_000,
+          rosterPins: rosterPinsFromEvents(state.events),
+        });
       } catch {
         return null;
       }
@@ -304,6 +311,15 @@ test('metatask_publish: invariants checked before the first pin; roster→tree�
   assert.equal(treePayload.nodes.length, 3);
   assert.equal(taskPayload.policy.split.submitterShareBP, 8000);
   assert.equal(taskPayload.policy.split.rosterid, writes[0].pinId);
+  // The root spec goes through the SAME payload builder as metatask_publish_spec.
+  assert.deepEqual(Object.keys(specPayload), ['name', 'lang', 'entry', 'script', 'input', 'output']);
+  assert.equal(specPayload.name, 'lean-build-check');
+  assert.equal(specPayload.lang, 'bash');
+  assert.equal(specPayload.entry, 'check.sh');
+  assert.equal(specPayload.script, 'lake build');
+  assert.equal(specPayload.input, '');
+  assert.equal(specPayload.output, '');
+  assert.equal(specPayload.validation, undefined);
   assert.match(ok.content[0].text, /discovery buzz/i);
 });
 
@@ -352,4 +368,394 @@ test('metatask_amend: publisher-only; bases from the current tree head', async (
   const payload = JSON.parse(writes[0].metaidData.payload);
   assert.equal(payload.bases, treePinId);
   assert.equal(payload.taskid, rootPinId);
+});
+
+// ── publisher self-claim refusal (protocol §12 item 6) ───────────────────────
+
+test('metatask_claim: the task root author is refused its own task before any spend', async () => {
+  const treePinId = nextPinId();
+  const rootPinId = nextPinId();
+  const tree = ev(
+    'tree',
+    {
+      root: 'r1',
+      nodes: [
+        { id: 'r1', parent: null, title: 'root', kind: 'aggregate', specid: null, params: {}, deps: [], weight: 5000 },
+        { id: 't1', parent: 'r1', title: 'leaf', kind: 'proof', specid: null, params: {}, deps: [], weight: 5000 },
+      ],
+    },
+    { pinId: treePinId, height: 189_800 },
+  );
+  // Authored by the SESSION bot: it is the task root author (publisher).
+  const task = ev(
+    'task',
+    { title: 'published by me', treeid: treePinId, policy: { verify_quorum: 2, claim_ttl_hours: 0, verify_window_hours: 0 }, tags: [] },
+    { pinId: rootPinId, height: 189_801 },
+  );
+  const { handlers, writes } = buildHarness([tree, task]);
+
+  const refused = await handlers.metatask_claim({ rootPinId, node: 't1' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /§12 item 6/);
+  assert.match(refused.content[0].text, /submitter != task root author/);
+  assert.equal(writes.length, 0, 'the publisher must never spend a claim fee on its own task');
+});
+
+// ── same-side roster wiring (collected roster pins reach the engine) ─────────
+
+test('metatask_claim/replay: collected roster pins filter same-side votes (guard sees it)', async () => {
+  const rosterPinId = nextPinId();
+  const treePinId = nextPinId();
+  const rootPinId = nextPinId();
+  const roster = ev(
+    'metatask-roster',
+    { groups: [[SESSION_BOT, LOCAL_PEER]], owner: 'idbots-local-roster', createdAt: 1_790_000_000_000 },
+    { pinId: rosterPinId, author: FOREIGN_PUBLISHER, height: 191_490 },
+  );
+  const tree = ev(
+    'tree',
+    {
+      root: 'r1',
+      nodes: [
+        { id: 'r1', parent: null, title: 'root', kind: 'aggregate', specid: null, params: {}, deps: [], weight: 3000 },
+        { id: 't1', parent: 'r1', title: 'leaf', kind: 'proof', specid: null, params: {}, deps: [], weight: 7000 },
+      ],
+    },
+    { pinId: treePinId, author: FOREIGN_PUBLISHER, height: 191_491 },
+  );
+  // The task points at the roster pin through its split policy.
+  const task = ev(
+    'task',
+    {
+      title: 'roster task',
+      treeid: treePinId,
+      policy: {
+        verify_quorum: 2,
+        claim_ttl_hours: 0,
+        verify_window_hours: 0,
+        split: { submitterShareBP: 8000, rosterid: rosterPinId },
+      },
+      tags: [],
+    },
+    { pinId: rootPinId, author: FOREIGN_PUBLISHER, height: 191_492 },
+  );
+  const claim = ev('claim', { taskid: rootPinId, node: 't1' }, { author: SESSION_BOT, height: 191_500 });
+  const sub = ev(
+    'submission',
+    {
+      taskid: rootPinId,
+      node: 't1',
+      claimid: claim.pinId,
+      result: { type: 'triage' },
+      hash: '4'.repeat(64),
+      contentType: 'application/json;utf-8',
+      attachment: null,
+      childids: [],
+    },
+    { author: SESSION_BOT, height: 191_501 },
+  );
+  const vote = (author, over) =>
+    ev(
+      'verify',
+      { targetid: sub.pinId, verdict: 'pass', method: 'replay pass', semantic_check: 'checked' },
+      { author, ...over },
+    );
+  const independent = vote('idq1foreignreviewer0000000000000', { height: 191_502 });
+  // Same-side (LOCAL_PEER shares a roster group with the submitter): if the
+  // roster pin were NOT fed to the engine, this fail would reopen the node.
+  const sameSideFail = ev(
+    'verify',
+    { targetid: sub.pinId, verdict: 'fail', method: 'replay fail', semantic_check: 'checked', failreason: 'counterexample' },
+    { author: LOCAL_PEER, height: 191_503 },
+  );
+  const { handlers, writes } = buildHarness([roster, tree, task, claim, sub, independent, sameSideFail]);
+
+  const replay = await handlers.metatask_replay({ rootPinId });
+  assert.equal(replay.isError, undefined);
+  const replayed = JSON.parse(replay.content[0].text);
+  assert.equal(replayed.nodeStates.t1.status, 'claimed');
+  assert.ok(
+    replayed.ignoredEvents.some(
+      (entry) => entry.pinId === sameSideFail.pinId && entry.reason === 'same_side_roster',
+    ),
+    `expected same_side_roster for the local peer vote, got ${JSON.stringify(replayed.ignoredEvents)}`,
+  );
+
+  // The claim guard replays with the same roster map: t1 is still held, so the
+  // claim is refused before any spend.
+  const refused = await handlers.metatask_claim({ rootPinId, node: 't1' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /claim-rejected:t1:claimed/);
+  assert.equal(writes.length, 0);
+});
+
+// ── metatask_publish_spec: standalone spec pins (no carrier task) ────────────
+
+const ARTIFACT_REF = 'metafile://correspondenceartifact000000000000000000000000000000i0';
+const SPEC_SCRIPT = '#!/usr/bin/env python3\nimport json, sys\nprint("pass")\n';
+
+/** The wave-1 campaign's validation shape (protocol §3, all three items). */
+const buildValidation = (correspondence = ARTIFACT_REF, over = {}) => ({
+  null_tolerance: true,
+  enumeration_closure: { closure: '2^n + 2^i + 2^j, 0<=j<i<=n-1', selfcheck_n: 8, expected_count: 28 },
+  proposition_fidelity: {
+    correspondence,
+    artifactPin: correspondence,
+    coverage: ['statement', 'definitions', 'proof-direction'],
+  },
+  ...over,
+});
+
+const specArgs = (over = {}) => ({
+  name: 'witness-extraction-301',
+  lang: 'python3',
+  entry: 'spec-witness-extraction.py',
+  script: SPEC_SCRIPT,
+  input: { repo: 'metafile://repo-artifact' },
+  output: { verdict: 'pass|fail|invalid' },
+  validation: buildValidation(),
+  ...over,
+});
+
+test('metatask_publish_spec: exactly one spec pin, no carrier task, protocol payload', async () => {
+  const { handlers, writes } = buildHarness([]);
+  // Registered alongside the other metatask_* tools.
+  assert.equal(typeof handlers.metatask_publish_spec, 'function');
+  const result = await handlers.metatask_publish_spec(specArgs());
+  assert.equal(result.isError, undefined, result.content?.[0]?.text);
+
+  assert.equal(writes.length, 1, 'a standalone spec publish spends one pin and creates no task/tree');
+  const [write] = writes;
+  assert.equal(write.metaidData.path, '/protocols/metatask/spec');
+  assert.equal(write.metaidData.contentType, 'application/json');
+  assert.equal(write.metaidData.version, '1.1.0');
+  assert.equal(write.metaidData.encryption, '0');
+  assert.equal(write.options.origin, 'tool:metatask_publish_spec');
+
+  const payload = JSON.parse(write.metaidData.payload);
+  assert.deepEqual(Object.keys(payload), ['name', 'lang', 'entry', 'script', 'input', 'output', 'validation']);
+  assert.equal(payload.name, 'witness-extraction-301');
+  assert.equal(payload.lang, 'python3');
+  assert.equal(payload.entry, 'spec-witness-extraction.py');
+  assert.equal(payload.script, SPEC_SCRIPT);
+  assert.deepEqual(payload.input, { repo: 'metafile://repo-artifact' });
+  assert.deepEqual(payload.output, { verdict: 'pass|fail|invalid' });
+  assert.deepEqual(payload.validation, buildValidation());
+
+  const out = JSON.parse(result.content[0].text);
+  assert.equal(out.specPinId, write.pinId);
+  assert.deepEqual(out.txids, ['tx1']);
+  assert.equal(out.totalCost, 0);
+  assert.equal(out.hasValidation, true);
+  assert.match(out.note, /specid/);
+  assert.equal(write.folded, true, 'the write is followed by a projection refresh');
+});
+
+test('metatask_publish_spec: validation block enforced before any spend', async () => {
+  const { handlers, writes } = buildHarness([]);
+
+  const noValidation = await handlers.metatask_publish_spec(specArgs({ validation: undefined }));
+  assert.equal(noValidation.isError, true);
+  assert.match(noValidation.content[0].text, /spec\.validation is required/);
+
+  const missingItem = await handlers.metatask_publish_spec(
+    specArgs({ validation: { null_tolerance: true, enumeration_closure: { closure: 'x', expected_count: 1 } } }),
+  );
+  assert.equal(missingItem.isError, true);
+  assert.match(missingItem.content[0].text, /proposition_fidelity/);
+
+  const placeholder = await handlers.metatask_publish_spec(
+    specArgs({ validation: buildValidation('PUBLISH_ARTIFACT_FIRST') }),
+  );
+  assert.equal(placeholder.isError, true);
+  assert.match(placeholder.content[0].text, /placeholder/i);
+  assert.match(placeholder.content[0].text, /PUBLISH_ARTIFACT_FIRST/);
+
+  const notAPin = await handlers.metatask_publish_spec(
+    specArgs({ validation: buildValidation('https://example.com/correspondence.md') }),
+  );
+  assert.equal(notAPin.isError, true);
+  assert.match(notAPin.content[0].text, /pin:\/\/ \| metafile:\/\//);
+
+  const selfAttested = await handlers.metatask_publish_spec(
+    specArgs({
+      validation: buildValidation(ARTIFACT_REF, {
+        proposition_fidelity: { statement: true, definitions: true, proof_direction: true },
+      }),
+    }),
+  );
+  assert.equal(selfAttested.isError, true);
+  assert.match(selfAttested.content[0].text, /self-attested boolean/);
+
+  const closureWithoutCount = await handlers.metatask_publish_spec(
+    specArgs({
+      validation: buildValidation(ARTIFACT_REF, {
+        enumeration_closure: { closure: '2^n + 2^i' },
+      }),
+    }),
+  );
+  assert.equal(closureWithoutCount.isError, true);
+  assert.match(closureWithoutCount.content[0].text, /integer self-check count/);
+
+  const emptyScript = await handlers.metatask_publish_spec(specArgs({ script: '   ' }));
+  assert.equal(emptyScript.isError, true);
+  assert.match(emptyScript.content[0].text, /verifier script/);
+
+  assert.equal(writes.length, 0, 'every gate refusal must happen before any chain spend');
+
+  const ok = await handlers.metatask_publish_spec(specArgs());
+  assert.equal(ok.isError, undefined);
+  assert.equal(writes.length, 1);
+});
+
+test('metatask_publish_spec: pin:// script reference, campaign artifactPin shape, pre-H_ACT2 opt-out', async () => {
+  const { handlers, writes } = buildHarness([]);
+
+  const referenceScript = await handlers.metatask_publish_spec(
+    specArgs({ script: '  pin://scriptpin000000000000000000000000000000000000000000000000000i0  ' }),
+  );
+  assert.equal(referenceScript.isError, undefined, referenceScript.content?.[0]?.text);
+  const referenced = JSON.parse(writes[0].metaidData.payload);
+  assert.equal(referenced.script, 'pin://scriptpin000000000000000000000000000000000000000000000000000i0');
+  assert.equal(referenced.input.repo, 'metafile://repo-artifact');
+
+  // The protocol's `correspondence` field alone is enough (no artifactPin).
+  const correspondenceOnly = await handlers.metatask_publish_spec(
+    specArgs({
+      validation: buildValidation(ARTIFACT_REF, {
+        proposition_fidelity: { correspondence: ARTIFACT_REF },
+      }),
+    }),
+  );
+  assert.equal(correspondenceOnly.isError, undefined, correspondenceOnly.content?.[0]?.text);
+
+  // A single-line non-protocol URI is refused instead of being published as
+  // "inline text" (protocol §3 allows inline text or a pin://|metafile:// ref).
+  const httpsOnly = await handlers.metatask_publish_spec(specArgs({ script: 'https://example.com/verifier.py' }));
+  assert.equal(httpsOnly.isError, true);
+  assert.match(httpsOnly.content[0].text, /not pin:\/\/ or metafile:\/\//);
+
+  // Pre-H_ACT2 (v1.1-era) specs: explicit opt-out, no validation block written.
+  const legacy = await handlers.metatask_publish_spec({
+    name: 'legacy-verifier',
+    lang: 'bash',
+    entry: 'check.sh',
+    script: 'echo pass',
+    enforceHAct2Validation: false,
+  });
+  assert.equal(legacy.isError, undefined, legacy.content?.[0]?.text);
+  const legacyPayload = JSON.parse(writes[writes.length - 1].metaidData.payload);
+  assert.equal(legacyPayload.validation, undefined);
+  assert.equal(legacyPayload.input, '');
+  assert.equal(legacyPayload.output, '');
+  assert.equal(legacyPayload.lang, 'bash');
+});
+
+// ── mid-task estimates surfaced by the read tools ────────────────────────────
+
+test('metatask_get: estimation block for an in-progress task, null once settled', async () => {
+  const reviewerA = 'idq1foreignrevieweraaa';
+  const reviewerB = 'idq1foreignreviewerbbb';
+  const { events, rootPinId } = buildForeignTask(); // r1:3000 aggregate, t1:7000 leaf, quorum 2
+  const claimT1 = ev('claim', { taskid: rootPinId, node: 't1' }, { author: FOREIGN_SUBMITTER, height: 189_910 });
+  const subT1 = ev(
+    'submission',
+    {
+      taskid: rootPinId,
+      node: 't1',
+      claimid: claimT1.pinId,
+      result: { type: 'triage' },
+      hash: '7'.repeat(64),
+      contentType: 'application/json;utf-8',
+      attachment: null,
+      childids: [],
+    },
+    { author: FOREIGN_SUBMITTER, height: 189_920 },
+  );
+  const passOnT1 = (author, height) =>
+    ev(
+      'verify',
+      { targetid: subT1.pinId, verdict: 'pass', method: 'replay pass', semantic_check: 'checked' },
+      { author, height },
+    );
+  const midTaskEvents = [...events, claimT1, subT1, passOnT1(reviewerA, 189_930), passOnT1(reviewerB, 189_931)];
+
+  const midTask = buildHarness(midTaskEvents);
+  const midRead = await midTask.handlers.metatask_get({ rootPinId });
+  assert.equal(midRead.isError, undefined, midRead.content?.[0]?.text);
+  const midDetail = JSON.parse(midRead.content[0].text);
+  assert.equal(midDetail.settlement, null);
+  assert.equal(midDetail.estimation.basis, 'weighted');
+  // t1 (7000bp) is the only verified node: submitter 5600, pool 1400 split
+  // equally between two reviewers with identical (1/1) accuracy histories.
+  assert.deepEqual(midDetail.estimation.shares, [
+    { metaId: FOREIGN_SUBMITTER, shareBP: 5600, from: { submittedBP: 5600, reviewedBP: 0 } },
+    { metaId: reviewerA, shareBP: 700, from: { submittedBP: 0, reviewedBP: 700 } },
+    { metaId: reviewerB, shareBP: 700, from: { submittedBP: 0, reviewedBP: 700 } },
+  ]);
+  assert.equal(midDetail.progress.verified, 1);
+
+  // Complete the task (root verified too): a manifest now exists and the
+  // estimate must not be surfaced alongside it.
+  const claimR1 = ev('claim', { taskid: rootPinId, node: 'r1' }, { author: FOREIGN_SUBMITTER, height: 189_940 });
+  const subR1 = ev(
+    'submission',
+    {
+      taskid: rootPinId,
+      node: 'r1',
+      claimid: claimR1.pinId,
+      result: { type: 'aggregate' },
+      hash: '8'.repeat(64),
+      contentType: 'application/json;utf-8',
+      attachment: null,
+      childids: [],
+    },
+    { author: FOREIGN_SUBMITTER, height: 189_941 },
+  );
+  const settled = buildHarness([
+    ...midTaskEvents,
+    claimR1,
+    subR1,
+    ev('verify', { targetid: subR1.pinId, verdict: 'pass', method: 'replay pass', semantic_check: 'checked' }, { author: reviewerA, height: 189_950 }),
+    ev('verify', { targetid: subR1.pinId, verdict: 'pass', method: 'replay pass', semantic_check: 'checked' }, { author: reviewerB, height: 189_951 }),
+  ]);
+  const settledRead = await settled.handlers.metatask_get({ rootPinId });
+  const settledDetail = JSON.parse(settledRead.content[0].text);
+  assert.ok(settledDetail.settlement, 'the completed task settles');
+  assert.equal(settledDetail.estimation, null, 'settlement.shares is the truth once a manifest exists');
+  assert.equal(settledDetail.settlement.shares.reduce((sum, share) => sum + share.shareBP, 0), 10000);
+});
+
+test('metatask_list: per-task myStats carries estShareBP', async () => {
+  const board = {
+    refresh: { lastRefreshAtMs: 1, lastOkAtMs: 1, lastError: null, boundaryBlock: 189_931, refreshing: false },
+    alerts: [],
+    tasks: [
+      {
+        rootPinId: 'task0000000009i0',
+        title: 'mid-task',
+        publisher: FOREIGN_PUBLISHER,
+        progress: { total: 2, verified: 1, claimed: 0, open: 1, disputed: 0 },
+        participantCount: 2,
+        myRoles: ['participant'],
+        myStats: { claimed: 1, submitted: 1, verified: 1, reviewVotes: 0, shareBP: 0, estShareBP: 4000 },
+        settlementFinalized: false,
+        freshness: { boundaryBlock: 189_931, evaluatedAtMs: 0, eventCount: 5 },
+      },
+    ],
+  };
+  const { handlers } = buildHarness([], { board });
+  const listed = await handlers.metatask_list({});
+  assert.equal(listed.isError, undefined, listed.content?.[0]?.text);
+  const payload = JSON.parse(listed.content[0].text);
+  assert.equal(payload.tasks.length, 1);
+  assert.deepEqual(payload.tasks[0].myStats, {
+    claimed: 1,
+    submitted: 1,
+    verified: 1,
+    reviewVotes: 0,
+    shareBP: 0,
+    estShareBP: 4000,
+  });
+  assert.equal(payload.tasks[0].settlementFinalized, false);
 });

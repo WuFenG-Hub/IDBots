@@ -59,6 +59,21 @@ export interface MetaTaskParticipantStats {
   reviewTerminal: number;
 }
 
+/** Mid-task "if it settled now" share estimate, computed main-side by the same
+ * formula the settlement manifest uses (engine-owned; the renderer only
+ * displays it). shareBP is basis points of the WHOLE task value (out of
+ * 10000); it grows as more nodes verify. */
+export interface MetaTaskShareEstimate {
+  metaId: string;
+  shareBP: number;
+  from: { submittedBP: number; reviewedBP: number };
+}
+
+export interface MetaTaskEstimation {
+  basis: 'weighted' | 'uniform';
+  shares: MetaTaskShareEstimate[];
+}
+
 export interface MetaTaskSettlementShare {
   metaId: string;
   shareBP: number;
@@ -90,6 +105,9 @@ export interface MetaTaskTaskProjection {
     challengeTtlDays: number;
     hasSplit: boolean;
     rosterid: string | null;
+    /** σ actually used by the engine's split, clamped to [6000, 9000]
+     * (defaults to 8000 when the task carries no split block). */
+    submitterShareBP: number;
   };
   nodes: { id: string; parent: string | null; title: string; kind: string; weight?: number }[];
   nodeStates: Record<string, MetaTaskNodeProjection>;
@@ -98,6 +116,10 @@ export interface MetaTaskTaskProjection {
   participants: MetaTaskParticipantStats[];
   identities: Record<string, MetaTaskIdentity>;
   settlement: MetaTaskSettlementManifest | null;
+  /** Attached at the IPC boundary (never persisted, never part of replay
+   * output): mid-task share estimates. Null/absent once settlement exists —
+   * use settlement.shares instead. */
+  estimation?: MetaTaskEstimation | null;
   freshness: {
     boundaryBlock: number;
     evaluatedAtMs: number;
@@ -112,6 +134,7 @@ export interface MetaTaskTaskProjection {
 export interface MetaTaskBoardTask {
   rootPinId: string;
   title: string;
+  brief: string;
   publisher: string;
   tags: string[];
   taskComplete: boolean;
@@ -126,6 +149,10 @@ export interface MetaTaskBoardTask {
     verified: number;
     reviewVotes: number;
     shareBP: number;
+    /** Sum of the local roster's estimated shares (whole-task basis points)
+     * for work verified SO FAR — shown as "est. share" while the task runs;
+     * shareBP above is the settled truth once a manifest exists. */
+    estShareBP: number;
   } | null;
   settlementFinalized: boolean;
 }

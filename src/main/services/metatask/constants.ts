@@ -10,6 +10,7 @@
  */
 export const METATASK_PROTOCOL_ROOT = '/protocols/metatask';
 
+/** The nine replay event paths: engine input and eventSetHash membership. */
 export const METATASK_EVENT_PATHS = [
   'task',
   'tree',
@@ -23,6 +24,30 @@ export const METATASK_EVENT_PATHS = [
 ] as const;
 
 export type MetaTaskEventPath = (typeof METATASK_EVENT_PATHS)[number];
+
+/**
+ * Same-side roster declaration (protocol §10.4 verifyCount): a reference pin
+ * published by `metatask_publish` as a flat sibling of the protocol root and
+ * referenced only through `policy.split.rosterid`. It is NOT a replay event —
+ * it carries no taskid, never joins eventSetHash, and is read by the engine
+ * solely through its task's split policy.
+ */
+export const METATASK_ROSTER_PATH = '/protocols/metatask-roster';
+export const METATASK_ROSTER_SEGMENT = 'metatask-roster';
+
+/** Every pool the collector sweeps: the nine event paths + the roster pool. */
+export const METATASK_COLLECTED_PATHS = [
+  ...METATASK_EVENT_PATHS,
+  METATASK_ROSTER_SEGMENT,
+] as const;
+
+export type MetaTaskCollectedPath = (typeof METATASK_COLLECTED_PATHS)[number];
+
+/** Pool URL for a collected segment (the roster pin is a flat sibling). */
+export const metataskPoolPath = (segment: MetaTaskCollectedPath): string =>
+  segment === METATASK_ROSTER_SEGMENT
+    ? METATASK_ROSTER_PATH
+    : `${METATASK_PROTOCOL_ROOT}/${segment}`;
 
 /** Engine-ruled switch for the #8/#9 vote gates. Frozen. */
 export const H_ACT = 190_000;

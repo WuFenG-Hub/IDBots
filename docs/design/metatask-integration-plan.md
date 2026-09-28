@@ -283,11 +283,12 @@ same vector files run in all engines (§4).
   entities** — chain replay is authoritative; tables can be rebuilt at any
   time ("referenced, not mixed in" — the MetaTask tab never feeds the
   long-term board).
-- Refresher walks the seven (now nine, with amend/challenge) event paths via
-  the `protocolPinFetch.ts` pattern: `pins_by_path` pagination with
-  cursor-to-empty-page (null-page handling), then TS-engine replay into the
-  cache. Optional configured indexer endpoint short-circuits the walk when
-  available and fresh (freshness headers honored).
+- Refresher walks the ten pools (seven original event paths + amend/challenge,
+  plus the flat `/protocols/metatask-roster` reference pool the same-side
+  review rule reads) via the `protocolPinFetch.ts` pattern: `pins_by_path`
+  pagination with cursor-to-empty-page (null-page handling), then TS-engine
+  replay into the cache. Optional configured indexer endpoint short-circuits
+  the walk when available and fresh (freshness headers honored).
 
 ### 5.3 Agent tools (built-in, productizing the skill)
 
@@ -298,6 +299,7 @@ New `src/main/libs/metataskAgentTools.ts`, wired like
 | Tool | Behavior |
 | --- | --- |
 | `metatask_publish` | Wizard: draft tree+weights+specs+split policy; invariant checks; publish order tree→spec→task; discovery buzz within 24h (protocol rule). |
+| `metatask_publish_spec` | Standalone spec pin for node-level `specid` overrides (one pin, no carrier task); enforces the v1.2.1 three-item `validation` block at write time. |
 | `metatask_list` / `metatask_get` | Square/detail reads from the local projection incl. freshness block. |
 | `metatask_claim` | Runs the claim guard (claimPrecheck + TTL/review-window expiry derivation) **before** broadcasting; refuses non-open nodes (saves the fee). |
 | `metatask_submit` | Assembles the submission cert (content hash canon, content type, attachment, childids) with invariant checks. |

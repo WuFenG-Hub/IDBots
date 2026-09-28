@@ -1,5 +1,6 @@
 import type { SqliteDatabase as Database } from '../../sqliteTypes';
-import { H_ACT2, type MetaTaskEventPath } from './constants';
+import { H_ACT2, type MetaTaskCollectedPath } from './constants';
+import { estimateMetaTaskShares } from './estimate';
 import type {
   MetaTaskAlert,
   MetaTaskBoard,
@@ -169,7 +170,7 @@ export class MetaTaskProjectionStore {
         }
         return {
           pinId: String(row.pin_id),
-          path: String(row.path) as MetaTaskEventPath,
+          path: String(row.path) as MetaTaskCollectedPath,
           author: String(row.author ?? ''),
           height: Number(row.height ?? -1),
           txIndex: Number(row.tx_index ?? 0),
@@ -200,9 +201,9 @@ export class MetaTaskProjectionStore {
 
   /**
    * Resolve display identities for every actor and stamp them onto the
-   * projections before persisting (single enrichment point). Local roster
-   * now; external names/avatars land when a by-metaId identity endpoint
-   * exists on MetaSo — the resolver + cache table are the injection point.
+   * projections before persisting (single enrichment point). The injected
+   * resolver is local-roster-first with a throttled remote fallback; resolved
+   * rows persist in metatask_identities so later sweeps serve them from cache.
    */
   async enrichIdentities(projections: MetaTaskTaskProjection[]): Promise<void> {
     const actors = new Set<string>();
@@ -325,15 +326,6 @@ export class MetaTaskProjectionStore {
     }
   }
 
-  private lastActivityOf(projection: MetaTaskTaskProjection): number {
-    let latest = 0;
-    for (const node of Object.values(projection.nodeStates)) {
-      if (node.holder && node.holder.sinceMs > latest) latest = node.holder.sinceMs;
-      if (node.submission && node.submission.atMs > latest) latest = node.submission.atMs;
-    }
-    return latest;
-  }
-
   board(localRosterMetaIds: string[]): MetaTaskBoard {
     const roster = new Set(localRosterMetaIds.filter(Boolean));
     const rows = this.getAll<Row>(
@@ -355,6 +347,12 @@ export class MetaTaskProjectionStore {
             participant.effectiveClaims + participant.submissions + participant.verifiedContrib + participant.reviewVotes > 0
         );
         if (mine.length > 0) myRoles.push('participant');
+        // Mid-task "if it settled now" estimate: computed once per projection
+        // and reused for the roster's estShareBP (and any future per-participant
+        // surfacing). It equals the manifest exactly on a completed task, so
+        // estShareBP is safe to compute either way — the renderer prefers the
+        // settled shareBP when a manifest exists.
+        const estimation = estimateMetaTaskShares(projection);
         const myStats = mine.length
           ? {
               claimed: mine.reduce((sum, p) => sum + p.effectiveClaims, 0),
@@ -366,17 +364,24 @@ export class MetaTaskProjectionStore {
                     .filter((share) => roster.has(share.metaId))
                     .reduce((sum, share) => sum + share.shareBP, 0)
                 : 0,
+              estShareBP: estimation.shares
+                .filter((share) => roster.has(share.metaId))
+                .reduce((sum, share) => sum + share.shareBP, 0),
             }
           : null;
         tasks.push({
           rootPinId: projection.rootPinId,
           title: projection.title,
+          brief: projection.brief,
           publisher: projection.publisher,
           tags: projection.tags,
           taskComplete: projection.taskComplete,
           progress: projection.progress,
           participantCount: projection.participants.length,
-          lastActivityMs: this.lastActivityOf(projection),
+          // Board ordering uses the persisted engine-computed last_activity_ms
+          // (all task-scoped events); the card must show the SAME clock, or an
+          // actively reviewed task sorts freshest yet renders "days ago".
+          lastActivityMs: projection.lastActivityMs,
           freshness: {
             boundaryBlock: projection.freshness.boundaryBlock,
             evaluatedAtMs: projection.freshness.evaluatedAtMs,

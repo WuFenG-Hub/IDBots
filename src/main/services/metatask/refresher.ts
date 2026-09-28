@@ -1,4 +1,4 @@
-import { collectMetaTaskEvents, type CollectMetaTaskEventsOptions } from './collector';
+import { collectMetaTaskEvents, rosterPinsFromEvents, type CollectMetaTaskEventsOptions } from './collector';
 import { replayMetaTask } from './engine';
 import type { MetaTaskBoard, MetaTaskTaskProjection } from './types';
 import type { MetaTaskProjectionStore } from './projectionStore';
@@ -13,7 +13,7 @@ export interface MetaTaskRefresherOptions {
 
 /**
  * Chain → projection pipeline for the MetaTask tab (P1 read path):
- * collect the nine pools → cache events → replay every task root → persist
+ * collect the ten pools → cache events → replay every task root → persist
  * projections → board. The chain is the source of truth; everything in the
  * store is a rebuildable projection. A failed network sweep keeps the last
  * good projections and records the error for the freshness line.
@@ -58,11 +58,16 @@ export class MetaTaskRefresher {
       const collected = await collectMetaTaskEvents(this.options.collectOptions);
       store.upsertEvents(collected.events);
       const allEvents = store.loadEvents();
+      // Same-side roster pins travel with the event set: the engine filters a
+      // post-H_ACT2 vote whose voter shares a roster group with the submitter
+      // or the root author (pre-H_ACT2 votes stay untouched, so the pilots'
+      // projections are unchanged).
+      const rosterPins = rosterPinsFromEvents(allEvents);
       const roots = allEvents.filter((event) => event.path === 'task');
       const projections: MetaTaskTaskProjection[] = [];
       for (const root of roots) {
         try {
-          projections.push(replayMetaTask(allEvents, { rootPinId: root.pinId, now: Date.now() }));
+          projections.push(replayMetaTask(allEvents, { rootPinId: root.pinId, now: Date.now(), rosterPins }));
         } catch {
           // one malformed task must not fail the sweep; next refresh retries it
         }

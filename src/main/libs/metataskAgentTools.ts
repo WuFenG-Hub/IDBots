@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import type { ChainWriteCreatePin } from './postBuzzAgentTools';
 import { innerHash, outerHash } from '../services/metatask/canon';
+import { rosterPinsFromEvents } from '../services/metatask/collector';
+import { METATASK_ROSTER_PATH } from '../services/metatask/constants';
+import { estimateMetaTaskShares } from '../services/metatask/estimate';
 import { replayMetaTask } from '../services/metatask/engine';
 import type {
   MetaTaskBoard,
@@ -17,13 +20,19 @@ import type {
  *
  * Discipline the tool descriptions encode:
  *  - claim runs the replay guard FIRST; a non-open node is refused before
- *    any chain spend (claim-rejected:<node>:<state>).
+ *    any chain spend (claim-rejected:<node>:<state>), and the task root
+ *    author is refused its own task (protocol §12 item 6: submitter != root
+ *    author; the refusal is writer-side, the engine does not enforce it).
  *  - verify forces semantic_check (ruling #9) and failreason on fail
  *    (ruling #8) at WRITE time, so votes never land as not-counted.
- *  - same-side review is refused locally (roster = local bots); chain-side
- *    roster enforcement is H_ACT2-gated in the engine.
+ *  - same-side review is refused locally (roster = local bots); the
+ *    chain-side roster rule is H_ACT2-gated in the engine and fed from the
+ *    collected /protocols/metatask-roster pins.
  *  - publish runs tree → spec → task with the weight invariant (sum=10000)
  *    checked before the first pin is spent.
+ *  - a STANDALONE spec pin (node-level specid override that must exist before
+ *    its tree) is written by metatask_publish_spec: one pin, no carrier task,
+ *    and the v1.2.1 three-item validation block enforced at write time.
  *  - the chain is the source of truth: after every write the local
  *    projection refreshes in the background; reads state their boundary block.
  */
@@ -63,6 +72,113 @@ export interface MetaTaskAgentControl {
 }
 
 const asString = (value: unknown, fallback = ''): string => (typeof value === 'string' ? value : fallback);
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+/** Spec script reference form (protocol §3): pin:// or metafile://, no spaces. */
+const SPEC_REF_RE = /^(pin:\/\/|metafile:\/\/)\S+$/;
+/** Obvious "publish me later" tokens that must never reach the chain as a ref. */
+const SPEC_PLACEHOLDER_RE = /PUBLISH_ARTIFACT_FIRST|PLACEHOLDER|TODO|FIXME|TBD/i;
+/** A single-line URI-looking value must be a protocol reference, not e.g. https://. */
+const URI_LOOKING_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+/** The v1.2.1 spec.validation items (protocol §3, mandatory at/after H_ACT2). */
+const SPEC_VALIDATION_ITEMS = ['null_tolerance', 'enumeration_closure', 'proposition_fidelity'] as const;
+
+interface SpecPayloadInput {
+  name?: string;
+  lang?: string;
+  entry?: string;
+  script?: string;
+  input?: unknown;
+  output?: unknown;
+  validation?: Record<string, unknown>;
+}
+
+/**
+ * The canonical spec pin payload (protocol §3), shared by metatask_publish and
+ * metatask_publish_spec so both writers emit byte-identical field order:
+ * name, lang, entry, script, input, output, then validation when present.
+ */
+const buildSpecPayload = (spec: SpecPayloadInput): Record<string, unknown> => {
+  const payload: Record<string, unknown> = {
+    name: asString(spec.name).trim(),
+    lang: asString(spec.lang).trim() || 'bash',
+    entry: asString(spec.entry).trim(),
+    script: spec.script === undefined ? '' : spec.script,
+    input: spec.input ?? '',
+    output: spec.output ?? '',
+  };
+  if (isPlainObject(spec.validation)) payload.validation = spec.validation;
+  return payload;
+};
+
+/** Refuse a missing/empty/bogus script reference; returns null when usable. */
+const specScriptRefusal = (script: unknown): string | null => {
+  const text = typeof script === 'string' ? script.trim() : '';
+  if (!text) {
+    return 'Refused: a spec pin needs a verifier script — inline text, or a pin:// | metafile:// reference when too long (protocol §3).';
+  }
+  if (!text.includes('\n') && URI_LOOKING_RE.test(text) && !SPEC_REF_RE.test(text)) {
+    return `Refused: the script looks like a URI reference but is not pin:// or metafile:// ("${text}") — protocol §3 allows inline text or a pin:// | metafile:// reference.`;
+  }
+  return null;
+};
+
+/**
+ * Writer-side enforcement of the v1.2.1 spec.validation block (protocol §3,
+ * mandatory for specs published at/after H_ACT2): all three items present,
+ * null_tolerance boolean true, enumeration_closure declaring the closure plus
+ * an integer self-check count, and proposition_fidelity pointing at a REAL
+ * independent correspondence artifact — never a self-attested boolean and
+ * never a publish-me-later placeholder. Returns a refusal message or null.
+ */
+const specValidationRefusal = (validation: unknown): string | null => {
+  if (!isPlainObject(validation)) {
+    return `Refused: spec.validation is required (protocol §3, mandatory at/after H_ACT2) — a block carrying all three items: ${SPEC_VALIDATION_ITEMS.join(', ')}.`;
+  }
+  const missing = SPEC_VALIDATION_ITEMS.filter((item) => !(item in validation));
+  if (missing.length > 0) {
+    return `Refused: spec.validation is missing ${missing.join(', ')} — protocol §3 requires all three items (null/missing input -> verdict=invalid; the enumeration closure with an integer self-check count; proposition fidelity against an INDEPENDENT correspondence artifact).`;
+  }
+  if (validation.null_tolerance !== true) {
+    return 'Refused: spec.validation.null_tolerance must be boolean true (protocol §3: every branch maps null/missing input to verdict=invalid with a location in detail).';
+  }
+  const closure = validation.enumeration_closure;
+  const closureCounts = isPlainObject(closure)
+    ? Object.values(closure).filter((value) => typeof value === 'number' && Number.isInteger(value))
+    : [];
+  if (!isPlainObject(closure) || !asString(closure.closure).trim() || closureCounts.length === 0) {
+    return 'Refused: spec.validation.enumeration_closure needs the closure declared in a string `closure` field AND at least one integer self-check count, so replay can mechanically reconcile theory vs implementation (protocol §3).';
+  }
+  const fidelity = validation.proposition_fidelity;
+  if (!isPlainObject(fidelity)) {
+    return 'Refused: spec.validation.proposition_fidelity must be an object referencing an INDEPENDENT correspondence artifact (protocol §3).';
+  }
+  const booleanItem = Object.entries(fidelity).find(([, value]) => typeof value === 'boolean');
+  if (booleanItem) {
+    return `Refused: spec.validation.proposition_fidelity.${booleanItem[0]} is a self-attested boolean — protocol §3 makes that NON-compliant; the artifact pin itself must carry the per-item table (statement / definitions / proof direction).`;
+  }
+  const reference =
+    typeof fidelity.correspondence === 'string'
+      ? fidelity.correspondence
+      : typeof fidelity.artifactPin === 'string'
+        ? fidelity.artifactPin
+        : typeof fidelity.artifact === 'string'
+          ? fidelity.artifact
+          : '';
+  const trimmedReference = reference.trim();
+  if (!trimmedReference) {
+    return 'Refused: spec.validation.proposition_fidelity needs the correspondence artifact referenced as pin:// | metafile:// (field `correspondence`, or `artifactPin` for the campaign shape) — a self-declared flag is non-compliant.';
+  }
+  if (SPEC_PLACEHOLDER_RE.test(trimmedReference)) {
+    return `Refused: proposition_fidelity still carries the placeholder "${trimmedReference}" — publish the correspondence artifact pin FIRST, then substitute its pinId.`;
+  }
+  if (!SPEC_REF_RE.test(trimmedReference)) {
+    return `Refused: proposition_fidelity must reference a REAL correspondence artifact (pin:// | metafile://) — got "${trimmedReference}".`;
+  }
+  return null;
+};
 
 export function buildMetataskAgentTools(deps: {
   tool: SdkToolFactory;
@@ -122,7 +238,11 @@ export function buildMetataskAgentTools(deps: {
   ): { ok: true; projection: MetaTaskTaskProjection } | { ok: false; reason: string } => {
     let projection: MetaTaskTaskProjection;
     try {
-      projection = replayMetaTask(events, { rootPinId, now: Date.now() });
+      projection = replayMetaTask(events, {
+        rootPinId,
+        now: Date.now(),
+        rosterPins: rosterPinsFromEvents(events),
+      });
     } catch (error) {
       return { ok: false, reason: `replay failed: ${error instanceof Error ? error.message : String(error)}` };
     }
@@ -138,7 +258,7 @@ export function buildMetataskAgentTools(deps: {
 
   const listTasks = tool(
     'metatask_list',
-    'List on-chain MetaTasks from the local chain-sourced projection: root pinId, title, publisher, verified/total progress, participant count, my roles (publisher / participant), boundary block. Pass refresh=true to force a chain sweep first (default reads the cache). On-chain indexing lags — the boundary block is the truth anchor, never assume real-time.',
+    'List on-chain MetaTasks from the local chain-sourced projection: root pinId, title, publisher, verified/total progress, participant count, my roles (publisher / participant), and my stats (claims/submissions/reviews, settled shareBP, estShareBP = my mid-task "if it settled now" share in whole-task basis points), plus the boundary block. Pass refresh=true to force a chain sweep first (default reads the cache). On-chain indexing lags — the boundary block is the truth anchor, never assume real-time.',
     {
       refresh: z.boolean().optional().describe('Force a background chain sweep before reading (slower, fresher).'),
     },
@@ -160,6 +280,19 @@ export function buildMetataskAgentTools(deps: {
             progress: task.progress,
             participants: task.participantCount,
             myRoles: task.myRoles,
+            // estShareBP = the local roster's mid-task "if it settled now"
+            // share (whole-task bp); shareBP is the settled truth once a
+            // manifest exists.
+            myStats: task.myStats
+              ? {
+                  claimed: task.myStats.claimed,
+                  submitted: task.myStats.submitted,
+                  verified: task.myStats.verified,
+                  reviewVotes: task.myStats.reviewVotes,
+                  shareBP: task.myStats.shareBP,
+                  estShareBP: task.myStats.estShareBP,
+                }
+              : null,
             settlementFinalized: task.settlementFinalized,
             boundaryBlock: task.freshness.boundaryBlock,
           })),
@@ -172,7 +305,7 @@ export function buildMetataskAgentTools(deps: {
 
   const getTask = tool(
     'metatask_get',
-    'Get one MetaTask in full from the local projection: policy (TTL/quorum/window/split), every node with status/holder/weight/effective submission and pass votes, the participant roster, and the settlement manifest when finalized. Includes `openNodes` — the nodes currently claimable — plus reviewEligibility notes (same-side targets you must NOT review). Read-only.',
+    'Get one MetaTask in full from the local projection: policy (TTL/quorum/window/split), every node with status/holder/weight/effective submission and pass votes, the participant roster, and the settlement manifest when finalized. Includes `openNodes` — the nodes currently claimable — plus reviewEligibility notes (same-side targets you must NOT review). While the task is unfinished it also reports `estimation`: the "if it settled now" share split (whole-task basis points per metaId, computed with the settlement formula), which is null once a manifest exists. Read-only.',
     {
       rootPinId: z.string().min(1).describe('Task root pinId (66-char, ends with i0).'),
       refresh: z.boolean().optional(),
@@ -216,10 +349,14 @@ export function buildMetataskAgentTools(deps: {
                   (roster.has(node.submission.submitter) || roster.has(detail.publisher)),
               )
               .map((node) => node.id),
-            note: 'same-side targets must not be reviewed by local bots (review independence); submission eligibility only excludes the task root author (H_ACT2-gated).',
+            note: 'same-side targets must not be reviewed by local bots (review independence); the engine also excludes the submitter and the task root author from an effective review (H_ACT2-gated roster filtering included). A task root author is refused its own task writer-side by metatask_claim — protocol §12 item 6 (submitter != task root author).',
           },
           participants: detail.participants,
           settlement: detail.settlement,
+          // Mid-task "if it settled now" estimate, from the same formula as the
+          // manifest: per-metaId whole-task basis points (sorted desc). Null
+          // once a manifest exists — settlement.shares is the truth then.
+          estimation: detail.settlement ? null : estimateMetaTaskShares(detail),
           freshness: detail.freshness,
         });
       } catch (error) {
@@ -236,9 +373,11 @@ export function buildMetataskAgentTools(deps: {
     },
     async (args: { rootPinId?: string }) => {
       try {
-        const projection = replayMetaTask(refresher().loadEvents(), {
+        const events = refresher().loadEvents();
+        const projection = replayMetaTask(events, {
           rootPinId: String(args.rootPinId ?? ''),
           now: Date.now(),
+          rosterPins: rosterPinsFromEvents(events),
         });
         return jsonResult({
           taskComplete: projection.taskComplete,
@@ -263,7 +402,7 @@ export function buildMetataskAgentTools(deps: {
 
   const claimNode = tool(
     'metatask_claim',
-    'Claim an OPEN node of an on-chain MetaTask as this session\'s MetaBot. Runs the replay guard FIRST (claimTTL / review-window expiry included) and refuses without spending when the node is not open — output `claim-rejected:<node>:<state>`. Before claiming, read the task with metatask_get so you actually intend to do the node\'s work: an effective claim starts a TTL clock and, per protocol, freezing the node against publisher amends.',
+    'Claim an OPEN node of an on-chain MetaTask as this session\'s MetaBot. Runs the replay guard FIRST (claimTTL / review-window expiry included) and refuses without spending when the node is not open — output `claim-rejected:<node>:<state>`. The task root author (publisher) is refused its own task nodes (protocol §12 item 6: submitter != task root author — no self-claim). Before claiming, read the task with metatask_get so you actually intend to do the node\'s work: an effective claim starts a TTL clock and, per protocol, freezing the node against publisher amends.',
     {
       rootPinId: z.string().min(1).describe('Task root pinId.'),
       node: z.string().min(1).describe('Node id from the task tree (metatask_get).'),
@@ -276,6 +415,12 @@ export function buildMetataskAgentTools(deps: {
         const node = String(args.node ?? '');
         const guard = guardOpenNode(refresher().loadEvents(), rootPinId, node);
         if (guard.ok === false) return textResult(guard.reason, true);
+        if (guard.projection.publisher === who.globalMetaId) {
+          return textResult(
+            'Refused: protocol §12 item 6 (submitter != task root author) — you published this MetaTask, so claiming its nodes would be a self-claim; publisher work does not earn a submitter share. Let another bot claim it.',
+            true,
+          );
+        }
         const result = await writePin(who.metabotId, 'claim', { taskid: rootPinId, node }, 'tool:metatask_claim');
         void refresher().refreshOnce('metatask_claim');
         return jsonResult({
@@ -589,8 +734,8 @@ export function buildMetataskAgentTools(deps: {
         }
 
         // roster pin (same-side declaration) when the local roster can cross-review.
-        // Deliberately NOT under /protocols/metatask/* — it is a reference pin,
-        // not one of the nine replay event paths.
+        // Flat sibling of the protocol root (the collector sweeps it as the
+        // tenth pool); a reference pin, never a replay event.
         const roster = control.localRosterMetaIds().filter(Boolean);
         let rosterid: string | null = null;
         if (roster.length >= 2) {
@@ -599,10 +744,12 @@ export function buildMetataskAgentTools(deps: {
               who.metabotId,
               {
                 operation: 'create',
-                path: '/protocols/metatask-roster',
+                path: METATASK_ROSTER_PATH,
                 encryption: '0',
                 version: PIN_VERSION,
                 contentType: 'application/json',
+                // `groups: string[][]` is exactly what the engine's
+                // rosterGroupsFor reads (and what the collector round-trips).
                 payload: JSON.stringify({ groups: [roster], owner: 'idbots-local-roster', createdAt: Date.now() }),
               },
               { origin: 'tool:metatask_publish' },
@@ -626,16 +773,12 @@ export function buildMetataskAgentTools(deps: {
         };
         const treePin = await writePin(who.metabotId, 'tree', treePayload, 'tool:metatask_publish');
 
-        const specPayload: Record<string, unknown> = {
-          name: asString(spec.name).trim(),
-          lang: asString(spec.lang).trim() || 'bash',
-          entry: asString(spec.entry).trim(),
-          script: spec.script === undefined ? '' : spec.script,
-          input: spec.input ?? '',
-          output: spec.output ?? '',
-        };
-        if (spec.validation && typeof spec.validation === 'object') specPayload.validation = spec.validation;
-        const specPin = await writePin(who.metabotId, 'spec', specPayload, 'tool:metatask_publish');
+        const specPin = await writePin(
+          who.metabotId,
+          'spec',
+          buildSpecPayload(spec),
+          'tool:metatask_publish',
+        );
 
         const shareBP = Number(policy.submitterShareBP ?? 8000);
         const taskPayload: Record<string, unknown> = {
@@ -666,6 +809,82 @@ export function buildMetataskAgentTools(deps: {
         });
       } catch (error) {
         return textResult(`Publish failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
+  const publishSpec = tool(
+    'metatask_publish_spec',
+    'Publish a STANDALONE verifier spec pin (path /protocols/metatask/spec) as this session\'s MetaBot — for node-level specid overrides that must exist BEFORE their task tree, with no carrier task (the old workaround published a junk single-node task just to harvest its specPinId, littering the MetaTask square with claimable tasks). Exactly one pin is spent. Writer-side gates, all before any spend: name + entry, a script that is inline text or a pin:// | metafile:// reference (protocol §3), and — since this tool cannot read chain height — the v1.2.1 spec.validation block is REQUIRED by default (enforceHAct2Validation defaults to true; the protocol makes it mandatory for specs published at/after H_ACT2=191500, where every current campaign spec runs): all three items null_tolerance (boolean true), enumeration_closure (a `closure` string plus at least one integer self-check count) and proposition_fidelity (an INDEPENDENT correspondence artifact referenced as pin:// | metafile:// — a self-attested boolean or a PUBLISH_ARTIFACT_FIRST placeholder is refused). Set enforceHAct2Validation=false ONLY for a pre-H_ACT2 (v1.1-era) spec, where the block did not yet exist. The returned specPinId is what node specid overrides (and a task-root specid) must reference; the local projection refreshes after the write.',
+    {
+      name: z.string().min(1).describe('Spec name, e.g. witness-extraction-301.'),
+      lang: z.string().min(1).describe('Verifier implementation language, e.g. python3, bash.'),
+      entry: z.string().min(1).describe('Offline entry point, e.g. spec-witness-extraction.py.'),
+      script: z.string().min(1).describe('Inline verifier script text, or a pin:// | metafile:// reference when too long.'),
+      input: z.unknown().optional().describe('Input descriptor (string or object); interpreted by the script.'),
+      output: z.unknown().optional().describe('Output/verdict contract (string or object): pass | fail | invalid.'),
+      validation: z.record(z.string(), z.unknown()).optional().describe('v1.2.1 validation block: null_tolerance, enumeration_closure (closure + integer self-check count), proposition_fidelity (correspondence artifact pin). Required unless enforceHAct2Validation=false.'),
+      enforceHAct2Validation: z.boolean().optional().describe('Default true: enforce the v1.2.1 three-item validation block. Set false only for a pre-H_ACT2 (v1.1-era) spec.'),
+    },
+    async (args: {
+      name?: string;
+      lang?: string;
+      entry?: string;
+      script?: string;
+      input?: unknown;
+      output?: unknown;
+      validation?: Record<string, unknown>;
+      enforceHAct2Validation?: boolean;
+    }) => {
+      try {
+        const who = identity();
+        if ('error' in who) return textResult(who.error, true);
+        const name = asString(args.name).trim();
+        const entry = asString(args.entry).trim();
+        if (!name || !entry) {
+          return textResult('Refused: a spec needs name + entry (the offline verifier entry point).', true);
+        }
+        const scriptRefusal = specScriptRefusal(args.script);
+        if (scriptRefusal) return textResult(scriptRefusal, true);
+        const rawScript = typeof args.script === 'string' ? args.script : '';
+        const trimmedScript = rawScript.trim();
+        // A pin://|metafile:// reference is normalized; inline script bytes are
+        // published verbatim (they are the verifier that reviewers replay).
+        const script = SPEC_REF_RE.test(trimmedScript) ? trimmedScript : rawScript;
+        // Chains at/after H_ACT2 owe the protocol's validation block; the tool
+        // cannot measure height, so it enforces by default and the caller must
+        // explicitly declare a pre-H_ACT2 (v1.1-era) spec to opt out.
+        if (args.enforceHAct2Validation !== false) {
+          const validationRefusal = specValidationRefusal(args.validation);
+          if (validationRefusal) return textResult(validationRefusal, true);
+        }
+        const written = await writePin(
+          who.metabotId,
+          'spec',
+          buildSpecPayload({
+            name,
+            lang: args.lang,
+            entry,
+            script,
+            input: args.input,
+            output: args.output,
+            validation: args.validation,
+          }),
+          'tool:metatask_publish_spec',
+        );
+        void refresher().refreshOnce('metatask_publish_spec');
+        return jsonResult({
+          specPinId: written.pinId,
+          txids: written.txids,
+          totalCost: written.totalCost,
+          name,
+          lang: asString(args.lang).trim() || 'bash',
+          entry,
+          hasValidation: isPlainObject(args.validation),
+          note: 'Standalone spec pin written — no task/tree was spent. Reference this specPinId from any tree node specid override (replace SPEC_PIN:<key> placeholders before publishing the tree) or as a task root specid.',
+        });
+      } catch (error) {
+        return textResult(`Spec publish failed: ${error instanceof Error ? error.message : String(error)}`, true);
       }
     },
   );
@@ -814,6 +1033,7 @@ export function buildMetataskAgentTools(deps: {
     verifySubmission,
     releaseClaim,
     publishTask,
+    publishSpec,
     amendTree,
   ];
 }

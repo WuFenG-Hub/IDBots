@@ -1,9 +1,9 @@
-import type { MetaTaskEventPath } from './constants';
+import type { MetaTaskCollectedPath } from './constants';
 
 /** A chain event normalized for replay (pin list item → engine input). */
 export interface MetaTaskChainEvent {
   pinId: string;
-  path: MetaTaskEventPath;
+  path: MetaTaskCollectedPath;
   /** Pin author globalMetaId. */
   author: string;
   /** Genesis block height; -1 (or missing) = unconfirmed/mempool. */
@@ -143,6 +143,21 @@ export interface MetaTaskParticipantStats {
   reviewTerminal: number;
 }
 
+/** Mid-task "if it settled now" share estimate, computed by estimate.ts with
+ * the SAME formula the settlement manifest uses (engine-owned; callers only
+ * display it). shareBP is basis points of the WHOLE task value (out of 10000)
+ * and grows as more nodes verify. Never persisted, never replay output. */
+export interface MetaTaskShareEstimate {
+  metaId: string;
+  shareBP: number;
+  from: { submittedBP: number; reviewedBP: number };
+}
+
+export interface MetaTaskEstimation {
+  basis: 'weighted' | 'uniform';
+  shares: MetaTaskShareEstimate[];
+}
+
 export interface MetaTaskSettlementShare {
   metaId: string;
   shareBP: number;
@@ -174,6 +189,9 @@ export interface MetaTaskTaskProjection {
     challengeTtlDays: number;
     hasSplit: boolean;
     rosterid: string | null;
+    /** σ actually used by the engine's split, clamped to [6000, 9000]
+     * (defaults to 8000 when the task carries no split block). */
+    submitterShareBP: number;
   };
   /** Tree in effect at boundary (after amend fold), with weights (null = legacy task). */
   nodes: TreeNodeBody[];
@@ -186,6 +204,10 @@ export interface MetaTaskTaskProjection {
   /** Display identities keyed by metaId (publisher + participants + node actors). */
   identities: Record<string, MetaTaskIdentity>;
   settlement: MetaTaskSettlementManifest | null;
+  /** Attached at the IPC boundary (never persisted, never part of replay
+   * output): mid-task share estimates. Null once a settlement exists — use
+   * settlement.shares instead. */
+  estimation?: MetaTaskEstimation | null;
   /** Blocks the settlement would pay but for open challenges (node ids). */
   freshness: {
     boundaryBlock: number;
@@ -202,6 +224,7 @@ export interface MetaTaskTaskProjection {
 export interface MetaTaskBoardTask {
   rootPinId: string;
   title: string;
+  brief: string;
   publisher: string;
   tags: string[];
   taskComplete: boolean;
@@ -210,7 +233,17 @@ export interface MetaTaskBoardTask {
   lastActivityMs: number;
   freshness: { boundaryBlock: number; evaluatedAtMs: number; eventCount: number };
   myRoles: ('publisher' | 'participant')[];
-  myStats: { claimed: number; submitted: number; verified: number; reviewVotes: number; shareBP: number } | null;
+  myStats: {
+    claimed: number;
+    submitted: number;
+    verified: number;
+    reviewVotes: number;
+    shareBP: number;
+    /** Sum of the local roster's estimated shares (whole-task basis points)
+     * for work verified SO FAR — shown as "est. share" while the task runs;
+     * shareBP above is the settled truth once a manifest exists. */
+    estShareBP: number;
+  } | null;
   settlementFinalized: boolean;
 }
 
