@@ -113,6 +113,50 @@ const SCOPED_USER_MEMORIES_BACKFILL_KEY = 'userMemories.scopeBackfill.v1.complet
 const METAWEB_ORDER_SESSION_MIGRATION_KEY = 'cowork.metawebOrderSessionsToPeerConversations.v1.completed';
 const METAWEB_ORDER_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebOrderSimplemsgMetadata.v1.completed';
 const METAWEB_PRIVATE_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebPrivateSimplemsgMetadata.v1.completed';
+/**
+ * Canonical JSON.stringify spelling of the metaweb-private sourceChannel flag.
+ * Every metadata write goes through this store's stringify, so a LIKE on this
+ * fragment is exact — it never matches a spaced or reordered spelling.
+ */
+const COWORK_METAWEB_PRIVATE_METADATA_FRAGMENT = '"sourceChannel":"metaweb_private"';
+/**
+ * The session-list activity key: the created_at of the last conversation event
+ * that may reorder the sidebar. User turns count, and so do on-chain A2A private
+ * DMs synced into the session (bot-driven owner threads must keep surfacing);
+ * local stream chunks carry no sourceChannel metadata, so they never bump it —
+ * that is the anti-flicker guarantee while several sessions run in parallel.
+ */
+const coworkActivityMessageMatch = (alias = ''): string =>
+  `(${alias}type = 'user' OR ${alias}metadata LIKE '%${COWORK_METAWEB_PRIVATE_METADATA_FRAGMENT}%')`;
+/**
+ * The activity_at value of one session row: the stored column when it has been
+ * stamped, else the pre-column computation (last activity message, else newest
+ * message, else updated_at). `sessionRef` is the cowork_sessions reference the
+ * subqueries correlate against ('s' in a SELECT, 'cowork_sessions' in an UPDATE).
+ */
+const coworkSessionActivityAtSelectSql = (sessionRef: string): string => `COALESCE((
+          SELECT m.created_at
+          FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
+          WHERE m.session_id = ${sessionRef}.id
+            AND ${coworkActivityMessageMatch('m.')}
+          ORDER BY m.created_at DESC
+          LIMIT 1
+        ), (
+          SELECT m.created_at
+          FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
+          WHERE m.session_id = ${sessionRef}.id
+          ORDER BY m.created_at DESC
+          LIMIT 1
+        ), ${sessionRef}.updated_at)`;
+/** Activity key of a single session row, ignoring the stored column (may be NULL). */
+const coworkSessionActivityAtMessageSql = (sessionRef: string): string => `(
+          SELECT m.created_at
+          FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
+          WHERE m.session_id = ${sessionRef}.id
+            AND ${coworkActivityMessageMatch('m.')}
+          ORDER BY m.created_at DESC
+          LIMIT 1
+        )`;
 const MEMORY_ROW_SELECT_COLUMNS = `
   id, text, fingerprint, confidence, is_explicit, status,
   created_at, updated_at, last_used_at, scope_kind, scope_key, usage_class, visibility, origin, archived_at
@@ -614,6 +658,13 @@ export interface CoworkMessagePage {
   messages: CoworkMessage[];
   hasMoreBefore: boolean;
   beforeSequence: number | null;
+  /**
+   * Cursor for the next older page of a non-A2A window. Non-A2A sessions page in
+   * transcript order (created_at, sequence, ROWID), which a bare sequence cannot
+   * address — a migrated copy appends turns with old timestamps and fresh
+   * sequences. Opaque to the renderer, which only ever hands it back.
+   */
+  beforeTranscriptCursor?: string | null;
 }
 
 export interface CoworkA2AHistoryCursor {
@@ -1233,12 +1284,48 @@ export class CoworkStore implements MemoryBackend {
     migratedMetawebOrderSessions: number;
     backfilledMetawebOrderMessages: number;
     backfilledMetawebPrivateMessages: number;
+    backfilledSessionActivityAt: number;
   } {
+    const migratedMetawebOrderSessions = this.migrateMetawebOrderSessionsToPeerConversations();
+    const backfilledMetawebOrderMessages = this.backfillMetawebOrderSimplemsgMetadata();
+    const backfilledMetawebPrivateMessages = this.backfillMetawebPrivateSimplemsgMetadata();
+    // Order matters: the metadata backfills above can tag legacy rows as
+    // metaweb_private, and those rows must count toward the activity stamp.
+    const backfilledSessionActivityAt = this.backfillSessionActivityAt();
     return {
-      migratedMetawebOrderSessions: this.migrateMetawebOrderSessionsToPeerConversations(),
-      backfilledMetawebOrderMessages: this.backfillMetawebOrderSimplemsgMetadata(),
-      backfilledMetawebPrivateMessages: this.backfillMetawebPrivateSimplemsgMetadata(),
+      migratedMetawebOrderSessions,
+      backfilledMetawebOrderMessages,
+      backfilledMetawebPrivateMessages,
+      backfilledSessionActivityAt,
     };
+  }
+
+  /**
+   * Stamp activity_at for every session row that predates the column (or was
+   * left NULL by a write path). One statement, idempotent, re-entrant: rows
+   * already stamped are not touched, so a re-run after an interrupted boot
+   * continues where it left off. The value is the pre-column computation, so
+   * an upgraded database lists in exactly the order it did before.
+   */
+  private backfillSessionActivityAt(): number {
+    if (!this.tableExists('cowork_sessions') || !this.tableExists('cowork_messages')) {
+      return 0;
+    }
+    try {
+      this.db.run(`
+        UPDATE cowork_sessions
+        SET activity_at = ${coworkSessionActivityAtSelectSql('cowork_sessions')}
+        WHERE activity_at IS NULL
+      `);
+      const changed = this.db.getRowsModified?.() || 0;
+      if (changed > 0) {
+        this.saveDb();
+      }
+      return changed;
+    } catch (error) {
+      console.warn('[CoworkStore] Failed to backfill cowork session activity_at:', error);
+      return 0;
+    }
   }
 
   private ensureCoworkMessageIndexes(): void {
@@ -1448,6 +1535,16 @@ export class CoworkStore implements MemoryBackend {
         // /goal command state: JSON {text, status: active|paused, updatedAt}.
         // NULL = no goal (the DSH /goal port's storage).
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN goal TEXT;');
+        changed = true;
+      }
+      if (!sessionColumns.includes('activity_at')) {
+        // Session-list ordering key (see coworkSessionActivityAtSelectSql): the
+        // created_at of the last activity message. The message write paths keep
+        // it current; the one-time backfill for pre-existing rows runs in the
+        // deferred heavy tier (runHeavyStartupMaintenance), so the ALTER here
+        // stays instant on a multi-GB database. A NULL row simply keeps sorting
+        // through the older correlated-subquery computation.
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN activity_at INTEGER;');
         changed = true;
       }
 
@@ -3552,29 +3649,16 @@ export class CoworkStore implements MemoryBackend {
         -- Sort by the LAST CONVERSATION EVENT time (a user message OR an
         -- on-chain A2A private DM synced into the session), not the newest
         -- assistant stream message: while tasks run, stream updates no longer
-        -- reshuffle the session list top (no more flickering). Local stream
-        -- chunks carry no sourceChannel metadata, so the LIKE keeps them out;
-        -- daemon-synced metaweb_private messages are atomic inserts (bot DMs
-        -- to a peer/owner, e.g. morning reports) and MUST bump the session —
-        -- sorting by the last user message alone sank bot-driven threads to
-        -- the list bottom (owner could not find the bot's DM conversation).
-        -- Sessions without either fall back to newest message, then
-        -- updated_at. Stable tie-breakers keep the order deterministic.
-        COALESCE((
-          SELECT m.created_at
-          FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
-          WHERE m.session_id = s.id
-            AND (m.type = 'user'
-                 OR m.metadata LIKE '%"sourceChannel":"metaweb_private"%')
-          ORDER BY m.created_at DESC
-          LIMIT 1
-        ), (
-          SELECT m.created_at
-          FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
-          WHERE m.session_id = s.id
-          ORDER BY m.created_at DESC
-          LIMIT 1
-        ), s.updated_at) AS activity_at
+        -- reshuffle the session list top (no more flickering). The key is
+        -- stored on the session row (activity_at) and maintained by the message
+        -- write paths; this used to be the correlated subquery below, run once
+        -- per session on every list read (0.3-0.83s on a real library, most of
+        -- it metadata LIKE scans). The subquery stays as the fallback for a row
+        -- the stamp has not reached yet (a pre-upgrade database before the
+        -- deferred backfill, or a session that never saw an activity message),
+        -- and COALESCE short-circuits, so the steady state never evaluates it.
+        -- Stable tie-breakers keep the order deterministic.
+        COALESCE(s.activity_at, ${coworkSessionActivityAtSelectSql('s')}) AS activity_at
       FROM cowork_sessions s
       LEFT JOIN metabots mb ON mb.id = s.metabot_id
       WHERE COALESCE(s.hidden_from_session_list, 0) = 0
@@ -4567,6 +4651,44 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Bump a session's stored activity key for a message that may reorder the
+   * session list (see coworkActivityMessageMatch). Monotonic: an insert whose
+   * created_at is older than the stamp (a migrated/legacy copy) leaves it alone,
+   * so the column always equals the newest activity message. Messages that do
+   * not qualify — assistant stream chunks above all — never touch the row, which
+   * is what keeps a running task from reshuffling the sidebar.
+   */
+  private touchSessionActivityAt(
+    sessionId: string,
+    createdAt: number,
+    type: string,
+    metadataJson: string | null,
+  ): void {
+    if (type !== 'user' && !metadataJson?.includes(COWORK_METAWEB_PRIVATE_METADATA_FRAGMENT)) {
+      return;
+    }
+    this.db.run(`
+      UPDATE cowork_sessions
+      SET activity_at = ?
+      WHERE id = ? AND ? > COALESCE(activity_at, 0)
+    `, [createdAt, sessionId, createdAt]);
+  }
+
+  /**
+   * Recompute one session's activity key from its remaining messages after a
+   * history truncation (rewind). Writes NULL when no activity message is left,
+   * which hands the row back to the list's fallback computation instead of
+   * freezing a value that no longer describes the session.
+   */
+  private refreshSessionActivityAt(sessionId: string): void {
+    this.db.run(`
+      UPDATE cowork_sessions
+      SET activity_at = ${coworkSessionActivityAtMessageSql('cowork_sessions')}
+      WHERE id = ?
+    `, [sessionId]);
+  }
+
+  /**
    * fix/group-task-duration: pin a session's updated_at back to a prior value
    * after a HOST-generated system notice (e.g. the stale-working wake).
    * addMessage refreshes updated_at, and the group-task daemon classifies
@@ -4595,6 +4717,7 @@ export class CoworkStore implements MemoryBackend {
     `, [sessionId]);
     const sequence = sequenceRow[0]?.values[0]?.[0] as number || 1;
 
+    const metadataJson = message.metadata ? JSON.stringify(message.metadata) : null;
     this.db.run(`
       INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -4603,12 +4726,13 @@ export class CoworkStore implements MemoryBackend {
       sessionId,
       message.type,
       message.content,
-      message.metadata ? JSON.stringify(message.metadata) : null,
+      metadataJson,
       now,
       sequence,
     ]);
 
     this.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [now, sessionId]);
+    this.touchSessionActivityAt(sessionId, now, message.type, metadataJson);
     this.db.run(`
       UPDATE a2a_conversation_threads
       SET updated_at = ?
@@ -5035,6 +5159,7 @@ export class CoworkStore implements MemoryBackend {
           WHERE session_id = ?
         `, [forked.id]);
         const sequence = sequenceRow[0]?.values[0]?.[0] as number || 1;
+        const metadataJson = message.metadata ? JSON.stringify(message.metadata) : null;
         this.db.run(`
           INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence)
           VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -5043,10 +5168,11 @@ export class CoworkStore implements MemoryBackend {
           forked.id,
           message.type,
           message.content,
-          message.metadata ? JSON.stringify(message.metadata) : null,
+          metadataJson,
           message.timestamp,
           sequence,
         ]);
+        this.touchSessionActivityAt(forked.id, message.timestamp, message.type, metadataJson);
       }
     } catch (error) {
       // Defensive: never leak a half-forked session row. FK cascade is not
@@ -5100,6 +5226,9 @@ export class CoworkStore implements MemoryBackend {
       rewindRowId,
     ]);
     this.db.run('UPDATE cowork_sessions SET claude_session_id = NULL, updated_at = ? WHERE id = ?', [Date.now(), sessionId]);
+    // The truncated tail may have held the newest activity message; recompute
+    // from what is left so the sidebar rank matches the surviving transcript.
+    this.refreshSessionActivityAt(sessionId);
     this.saveDb();
 
     return this.getSession(sessionId);
@@ -5131,6 +5260,7 @@ export class CoworkStore implements MemoryBackend {
       WHERE session_id = ?
     `, [sessionId]);
     const sequence = sequenceRow[0]?.values[0]?.[0] as number || 1;
+    const metadataJson = message.metadata ? JSON.stringify(message.metadata) : null;
     this.db.run(`
       INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -5139,11 +5269,14 @@ export class CoworkStore implements MemoryBackend {
       sessionId,
       message.type,
       message.content,
-      message.metadata ? JSON.stringify(message.metadata) : null,
+      metadataJson,
       timestamp,
       sequence,
     ]);
     this.db.run('UPDATE cowork_sessions SET updated_at = MAX(updated_at, ?) WHERE id = ?', [timestamp, sessionId]);
+    // A migrated row keeps its original created_at, so the activity stamp is
+    // monotonic here too — an old copied turn never sinks a busy session.
+    this.touchSessionActivityAt(sessionId, timestamp, message.type, metadataJson);
     return {
       id,
       type: message.type,

@@ -6,6 +6,7 @@ import CoworkSessionItem, { SessionAvatarCircle, formatRelativeTime } from './Co
 import BotSelectorPopover from './BotSelectorPopover';
 import { i18nService } from '../../services/i18n';
 import { useStableCallback } from '../../utils/useStableCallback';
+import { useProgressiveRowReveal } from './sessionListRevealBudget';
 import {
   ALL_BOTS_OPTION_KEY,
   buildBotSelectorOptions,
@@ -89,6 +90,12 @@ const groupHeaderLabelClass =
  * "6m" (and the group-memo timestamp into the current minute).
  */
 const RELATIVE_TIME_TICK_MS = 60_000;
+
+/**
+ * Stand-in for an omitted `onToggleSessionSelected` (a caller that never enters
+ * batch-selection mode leaves it out), so the rows always receive a callable.
+ */
+const noopToggleSelected = (): void => {};
 
 /**
  * Shallow equality, one level deep: `Object.is` per key, and for nested objects
@@ -196,7 +203,14 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   const deleteSession = useStableCallback(onDeleteSession);
   const togglePin = useStableCallback(onTogglePin);
   const renameSession = useStableCallback(onRenameSession);
-  const toggleSessionSelected = useStableCallback(onToggleSessionSelected);
+  // Batch selection is the one optional action (the search modal never enters
+  // selection mode). A no-op keeps the memoized prop a function, so the row's
+  // guard cannot silently let an undefined callback through to a click.
+  const toggleSessionSelected = useStableCallback(onToggleSessionSelected ?? noopToggleSelected);
+  // How many rows may mount right now (see useProgressiveRowReveal), and the
+  // cursor renderItem consumes it with.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const revealedRows = useProgressiveRowReveal(rootRef);
   const unreadSessionIds = useSelector((state: RootState) => state.cowork.unreadSessionIds);
   const unreadSessionIdSet = useMemo(() => new Set(unreadSessionIds), [unreadSessionIds]);
   const selectedSessionIdSet = useMemo(() => new Set(selectedSessionIds ?? []), [selectedSessionIds]);
@@ -355,26 +369,37 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   // The row takes the session id for every action and one shared clock/language,
   // so that two consecutive renders of an unchanged row produce referentially
   // equal props and the memo on CoworkSessionItem bails out.
-  const renderItem = (session: CoworkSessionSummary) => (
-    <CoworkSessionItem
-      key={session.id}
-      session={session}
-      hasUnread={unreadSessionIdSet.has(session.id)}
-      isActive={session.id === currentSessionId}
-      selectionMode={selectionMode}
-      isSelected={selectedSessionIdSet.has(session.id)}
-      nowMs={nowMs}
-      language={language}
-      onSelect={selectSession}
-      onDelete={deleteSession}
-      onTogglePin={togglePin}
-      onRename={renameSession}
-      onToggleSelected={toggleSessionSelected}
-    />
-  );
+  //
+  // It also spends the render budget: the maps below still walk the whole list,
+  // but every row past the budget returns null and never mounts. Sections check
+  // the budget before rendering their header (revealBudgetLeft), so an exhausted
+  // budget cannot leave a header with no rows under it.
+  let remainingRows = revealedRows;
+  const revealBudgetLeft = () => remainingRows > 0;
+  const renderItem = (session: CoworkSessionSummary) => {
+    if (remainingRows <= 0) return null;
+    remainingRows -= 1;
+    return (
+      <CoworkSessionItem
+        key={session.id}
+        session={session}
+        hasUnread={unreadSessionIdSet.has(session.id)}
+        isActive={session.id === currentSessionId}
+        selectionMode={selectionMode}
+        isSelected={selectedSessionIdSet.has(session.id)}
+        nowMs={nowMs}
+        language={language}
+        onSelect={selectSession}
+        onDelete={deleteSession}
+        onTogglePin={togglePin}
+        onRename={renameSession}
+        onToggleSelected={toggleSessionSelected}
+      />
+    );
+  };
 
   const renderPinnedSection = (pinned: CoworkSessionSummary[]) =>
-    pinned.length > 0 && (
+    pinned.length > 0 && revealBudgetLeft() && (
       <section key="pinned">
         <div className={`px-2.5 pb-1 pt-2 ${groupHeaderLabelClass}`}>
           {i18nService.t('coworkPinnedGroup')}
@@ -395,7 +420,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
    * — that is where "which run has news" is actually traceable.
    */
   const renderAutoTasksSection = () =>
-    sortedAutoSessions.length > 0 && (
+    revealBudgetLeft() && sortedAutoSessions.length > 0 && (
       <section data-testid="auto-tasks-section">
         <button
           type="button"
@@ -465,7 +490,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   const hasAutoTasks = sortedAutoSessions.length > 0 && !showBotSelector;
   if (visibleSessions.length === 0 && !hasAutoTasks) {
     return (
-      <div className="text-center py-8">
+      <div ref={rootRef} className="text-center py-8">
         <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
           {emptyText ?? i18nService.t('coworkNoSessions')}
         </p>
@@ -476,16 +501,19 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   // Timeline view: static time headers (never collapsible), pinned first.
   if (timelineGrouped) {
     return (
-      <div>
+      <div ref={rootRef}>
         {renderPinnedSection(timelineGrouped.pinned)}
-        {timelineGrouped.groups.map((group) => (
-          <section key={group.key}>
-            <div className={`px-2.5 pb-1 pt-2.5 ${groupHeaderLabelClass}`}>
-              {group.labelKey ? i18nService.t(group.labelKey) : group.monthLabel}
-            </div>
-            {group.sessions.map(renderItem)}
-          </section>
-        ))}
+        {timelineGrouped.groups.map((group) => {
+          if (!revealBudgetLeft()) return null;
+          return (
+            <section key={group.key}>
+              <div className={`px-2.5 pb-1 pt-2.5 ${groupHeaderLabelClass}`}>
+                {group.labelKey ? i18nService.t(group.labelKey) : group.monthLabel}
+              </div>
+              {group.sessions.map(renderItem)}
+            </section>
+          );
+        })}
         {renderAutoTasksSection()}
       </div>
     );
@@ -494,9 +522,10 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   // Project view: collapsible per-project / per-bot groups, pinned first.
   if (projectGrouped) {
     return (
-      <div>
+      <div ref={rootRef}>
         {renderPinnedSection(projectGrouped.pinned)}
         {projectGrouped.groups.map((group) => {
+          if (!revealBudgetLeft()) return null;
           const collapsed = collapsedGroupKeys.has(group.key);
           let headerLabel: React.ReactNode;
           if (group.kind === 'bot' && group.bot) {
@@ -556,7 +585,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   // shouldShowBotSelector), and the list is then simply flat.
   if (botSelectorRow) {
     return (
-      <div>
+      <div ref={rootRef}>
         {botSelectorRow}
         {/* Hairline between the control area and the list area, using the host's
          * own separator token (SessionViewOptionsMenu.tsx:149). It is a plain
@@ -573,7 +602,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   }
 
   return (
-    <div className="space-y-1">
+    <div ref={rootRef} className="space-y-1">
       {sortedSessions.map(renderItem)}
       {renderAutoTasksSection()}
     </div>
