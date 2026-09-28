@@ -531,3 +531,7 @@ man_base_data_pebble/
 # exFAT worktree SSD volume; gitignored so status stays clean there
 ._*
 !tests/metataskWatch.test.mjs
+
+# ad-hoc @napi-rs/canvas API probe left at repo root during the v0.9.5 pdfjs
+# investigation (2026-09-27); root-anchored so other index.js files are unaffected
+/index.js
