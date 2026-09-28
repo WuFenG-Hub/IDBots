@@ -459,11 +459,16 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:plan-mode:set', options),
     getPlanMode: (options: { sessionId: string }) =>
       ipcRenderer.invoke('cowork:plan-mode:get', options),
-    getSession: (sessionId: string) =>
-      ipcRenderer.invoke('cowork:session:get', sessionId),
+    getSession: (sessionId: string, options?: { messageLimit?: number }) =>
+      ipcRenderer.invoke('cowork:session:get', options ? { sessionId, ...options } : sessionId),
     refreshPeerProfile: (input: { sessionId: string; force?: boolean }) =>
       ipcRenderer.invoke('cowork:session:refreshPeerProfile', input),
-    getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) =>
+    getSessionMessagesPage: (input: {
+      sessionId: string;
+      beforeSequence?: number | null;
+      beforeTranscriptCursor?: string | null;
+      limit?: number;
+    }) =>
       ipcRenderer.invoke('cowork:session:getMessagesPage', input),
     setMessageFeedback: (input: { messageId: string; rating: 'up' | 'down' | null; comment?: string | null }) =>
       ipcRenderer.invoke('cowork:message:setFeedback', input),

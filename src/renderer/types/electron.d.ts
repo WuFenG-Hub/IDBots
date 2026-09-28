@@ -277,6 +277,10 @@ interface CoworkSession {
     hasMoreBefore: boolean;
     beforeSequence: number | null;
     pageSize: number;
+    /** Episode index of the A2A cross-episode cursor; null while paging stays in the current episode. */
+    beforeEpisodeIndex?: number | null;
+    /** Opaque transcript-order cursor for non-A2A sessions; hand it back to getSessionMessagesPage. */
+    beforeTranscriptCursor?: string | null;
   };
   createdAt: number;
   updatedAt: number;
@@ -309,6 +313,8 @@ interface CoworkMessagePage {
   messages: CoworkMessage[];
   hasMoreBefore: boolean;
   beforeSequence: number | null;
+  /** Opaque cursor for the next older page of a non-A2A session window. */
+  beforeTranscriptCursor?: string | null;
 }
 
 interface CoworkA2AHistoryCursor {
@@ -1120,9 +1126,9 @@ interface IElectronAPI {
     renameSession: (options: { sessionId: string; title: string }) => Promise<{ success: boolean; error?: string }>;
     setPlanMode: (options: { sessionId: string; active: boolean }) => Promise<{ ok: boolean; result?: string; plan?: { active: boolean; pending?: boolean }; reason?: string }>;
     getPlanMode: (options: { sessionId: string }) => Promise<{ ok: boolean; plan?: { active: boolean; pending?: boolean } | null; reason?: string }>;
-    getSession: (sessionId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
+    getSession: (sessionId: string, options?: { messageLimit?: number }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     refreshPeerProfile: (input: { sessionId: string; force?: boolean }) => Promise<{ success: boolean; changed?: boolean; error?: string }>;
-    getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkMessagePage; error?: string }>;
+    getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; beforeTranscriptCursor?: string | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkMessagePage; error?: string }>;
     setMessageFeedback: (input: { messageId: string; rating: 'up' | 'down' | null; comment?: string | null }) => Promise<{ success: boolean; feedback?: CoworkMessageFeedbackRecord | null; error?: string }>;
     listSessionFeedback: (input: { sessionId: string }) => Promise<{ success: boolean; feedback?: CoworkMessageFeedbackRecord[]; error?: string }>;
     getA2AConversationHistoryPage: (input: { sessionId: string; beforeCursor?: CoworkA2AHistoryCursor | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkA2AHistoryPage; error?: string }>;

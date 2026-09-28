@@ -162,6 +162,57 @@ const MEMORY_ROW_SELECT_COLUMNS = `
   created_at, updated_at, last_used_at, scope_kind, scope_key, usage_class, visibility, origin, archived_at
 `;
 const PRIVATE_CHAT_SIMPLEMSG_BACKFILL_TIME_WINDOW_MS = 10 * 60 * 1000;
+/**
+ * How many of a session's newest messages a session view carries. The transcript
+ * is paged from the bottom up from there (the A2A display window has always
+ * worked this way); everything older is one "load earlier" away. 100 matches the
+ * message page size the A2A window already used, so the same affordance walks
+ * both session kinds.
+ */
+const COWORK_SESSION_VIEW_MESSAGE_LIMIT = 100;
+const COWORK_MESSAGE_PAGE_LIMIT_MAX = 200;
+
+/**
+ * Page request normalization shared by the window and the page reader, so the
+ * size a window advertises as pageSize is exactly the size it will page with.
+ */
+function normalizeCoworkMessagePageRequest(options?: {
+  beforeSequence?: number | null;
+  limit?: number;
+}): { limit: number; beforeSequence: number | null } {
+  const requestedLimit = Number(options?.limit);
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(COWORK_MESSAGE_PAGE_LIMIT_MAX, Math.floor(requestedLimit)))
+    : COWORK_SESSION_VIEW_MESSAGE_LIMIT;
+  const requestedBeforeSequence = Number(options?.beforeSequence);
+  const beforeSequence = Number.isFinite(requestedBeforeSequence) && requestedBeforeSequence > 0
+    ? Math.floor(requestedBeforeSequence)
+    : null;
+  return { limit, beforeSequence };
+}
+
+/**
+ * Wire format of a transcript page cursor: '<created_at>:<sequence>:<rowid>'.
+ * Kept a plain string because it is a row key, not a value the renderer reads.
+ */
+function formatCoworkTranscriptCursor(row: CoworkMessageRow): string {
+  const rowId = Number(row.rowid);
+  const sequence = Number(row.sequence);
+  return `${Math.floor(row.created_at)}:${Number.isFinite(sequence) && sequence > 0 ? Math.floor(sequence) : 0}:${Number.isFinite(rowId) ? Math.floor(rowId) : 0}`;
+}
+
+function parseCoworkTranscriptCursor(raw: unknown): CoworkTranscriptCursor | null {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 64) return null;
+  const match = /^(\d{1,15}):(\d{1,15}):(\d{1,15})$/.exec(raw);
+  if (!match) return null;
+  const createdAt = Number(match[1]);
+  const sequence = Number(match[2]);
+  const rowId = Number(match[3]);
+  if (!Number.isSafeInteger(createdAt) || !Number.isSafeInteger(sequence) || !Number.isSafeInteger(rowId)) {
+    return null;
+  }
+  return { createdAt, sequence, rowId };
+}
 
 function normalizeMemoryGuardLevel(value: string | undefined): CoworkMemoryGuardLevel {
   if (value === 'strict' || value === 'standard' || value === 'relaxed') return value;
@@ -734,6 +785,13 @@ export interface CoworkMessageHistoryState {
    * episodes of the thread.
    */
   beforeEpisodeIndex?: number | null;
+  /**
+   * Non-A2A sessions page in transcript order, whose cursor is a row key rather
+   * than a sequence. Opaque to the renderer: it holds the value the window was
+   * handed and passes it back to load earlier. Null once the start of the
+   * transcript is reached.
+   */
+  beforeTranscriptCursor?: string | null;
 }
 
 export interface CoworkSession {
@@ -1065,6 +1123,19 @@ interface CoworkMessageRow {
   metadata: string | null;
   created_at: number;
   sequence: number | null;
+  /** Selected only where the row key itself is the page cursor. */
+  rowid?: number;
+}
+
+/**
+ * Row key of a transcript-order page cursor, in the (created_at, sequence,
+ * ROWID) order the transcript is read in. Not part of the IPC contract: the
+ * store hands the renderer an opaque string and parses it back.
+ */
+interface CoworkTranscriptCursor {
+  createdAt: number;
+  sequence: number;
+  rowId: number;
 }
 
 interface MetawebOrderMessageBackfillRow {
@@ -3215,37 +3286,63 @@ export class CoworkStore implements MemoryBackend {
     };
   }
 
-  getSessionView(id: string, messageLimit: number = 100): CoworkSession | null {
+  /**
+   * A session as the renderer opens it: its newest messages plus the state
+   * needed to page the rest in. A real conversation reaches five figures of
+   * messages and 12MB of content, and the whole transcript used to cross IPC on
+   * every open, every stream completion and every summary refresh (11,554
+   * messages / 12.1MB for the largest session in a live library) only for the
+   * transcript to render its newest screenful.
+   *
+   * Browser-panel sessions are the one exception: the Bot Browser side panel
+   * renders a minimal projection of the transcript and has no "load earlier"
+   * affordance, so those keep the full read.
+   */
+  getSessionView(id: string, messageLimit: number = COWORK_SESSION_VIEW_MESSAGE_LIMIT): CoworkSession | null {
     const session = this.getSessionWithoutMessages(id);
     if (!session) return null;
-    if (session.sessionType !== 'a2a') {
+    if (session.sessionType === 'a2a') {
+      const page = this.getSessionMessagesPage(id, { limit: messageLimit, displayWindow: true });
+      // Thread aggregation: "load earlier" must be offered not only while the
+      // session's own window has more, but also when previous episodes of the
+      // thread exist below it.
+      const hasEarlierEpisodes = this.getOne<{ found: number }>(`
+        SELECT 1 AS found
+        FROM a2a_conversation_episodes anchor
+        WHERE anchor.session_id = ?
+          AND EXISTS (
+            SELECT 1 FROM a2a_conversation_episodes earlier
+            WHERE earlier.thread_id = anchor.thread_id
+              AND earlier.episode_index < anchor.episode_index
+          )
+        LIMIT 1
+      `, [id]) != null;
+      return {
+        ...session,
+        messages: page.messages,
+        messageHistory: {
+          hasMoreBefore: page.hasMoreBefore || hasEarlierEpisodes,
+          beforeSequence: page.beforeSequence,
+          pageSize: normalizeCoworkMessagePageRequest({ limit: messageLimit }).limit,
+          beforeEpisodeIndex: null,
+        },
+      };
+    }
+    if (session.sessionType === 'browser') {
       return {
         ...session,
         messages: this.getSessionMessages(id),
       };
     }
-    const page = this.getSessionMessagesPage(id, { limit: messageLimit, displayWindow: true });
-    // Thread aggregation: "load earlier" must be offered not only while the
-    // session's own window has more, but also when previous episodes of the
-    // thread exist below it.
-    const hasEarlierEpisodes = this.getOne<{ found: number }>(`
-      SELECT 1 AS found
-      FROM a2a_conversation_episodes anchor
-      WHERE anchor.session_id = ?
-        AND EXISTS (
-          SELECT 1 FROM a2a_conversation_episodes earlier
-          WHERE earlier.thread_id = anchor.thread_id
-            AND earlier.episode_index < anchor.episode_index
-        )
-      LIMIT 1
-    `, [id]) != null;
+    const page = this.getSessionMessagesPage(id, { limit: messageLimit });
     return {
       ...session,
       messages: page.messages,
       messageHistory: {
-        hasMoreBefore: page.hasMoreBefore || hasEarlierEpisodes,
-        beforeSequence: page.beforeSequence,
-        pageSize: Math.max(1, Math.min(200, Math.floor(messageLimit))),
+        hasMoreBefore: page.hasMoreBefore,
+        beforeSequence: null,
+        beforeTranscriptCursor: page.beforeTranscriptCursor ?? null,
+        pageSize: normalizeCoworkMessagePageRequest({ limit: messageLimit }).limit,
         beforeEpisodeIndex: null,
       },
     };
@@ -4310,22 +4407,33 @@ export class CoworkStore implements MemoryBackend {
     return Boolean(row?.found);
   }
 
+  /**
+   * One page of a session's transcript, newest page first.
+   *
+   * `displayWindow` pages an A2A session through its display projection (hidden
+   * internals skipped) and answers with a sequence cursor — the shape A2A has
+   * always used. Everything else pages in transcript order and answers with the
+   * opaque `beforeTranscriptCursor` the previous page handed over. Each kind of
+   * view therefore has exactly one cursor, and a caller always passes back the
+   * one it was given: the page order can never quietly differ from the window's.
+   */
   getSessionMessagesPage(
     sessionId: string,
-    options?: { beforeSequence?: number | null; limit?: number; displayWindow?: boolean },
+    options?: {
+      beforeSequence?: number | null;
+      beforeTranscriptCursor?: string | null;
+      limit?: number;
+      displayWindow?: boolean;
+    },
   ): CoworkMessagePage {
-    const requestedLimit = Number(options?.limit);
-    const limit = Number.isFinite(requestedLimit)
-      ? Math.max(1, Math.min(200, Math.floor(requestedLimit)))
-      : 100;
-    const requestedBeforeSequence = Number(options?.beforeSequence);
-    const beforeSequence = Number.isFinite(requestedBeforeSequence) && requestedBeforeSequence > 0
-      ? Math.floor(requestedBeforeSequence)
-      : null;
+    const { limit, beforeSequence } = normalizeCoworkMessagePageRequest(options);
     if (options?.displayWindow === true) {
       return this.getA2ADisplayMessagesPage(sessionId, { beforeSequence, limit });
     }
-    return this.getRawSessionMessagesPage(sessionId, { beforeSequence, limit });
+    return this.getTranscriptSessionMessagesPage(sessionId, {
+      cursor: parseCoworkTranscriptCursor(options?.beforeTranscriptCursor),
+      limit,
+    });
   }
 
   private mapCoworkMessageRow(row: CoworkMessageRow): CoworkMessage {
@@ -4335,6 +4443,79 @@ export class CoworkStore implements MemoryBackend {
       content: row.content,
       timestamp: row.created_at,
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    };
+  }
+
+  /**
+   * Newest-first page in transcript order — the order getSessionMessages reads
+   * the whole session in, so the window and the full read agree wherever a
+   * session's timestamps and its sequences disagree (a migrated copy appends
+   * old turns with fresh sequences).
+   *
+   * idx_cowork_messages_session_created_sequence carries the key, so this is a
+   * backward index scan; the cursor predicate costs nothing extra because the
+   * scan is already in that order and stops after limit + 1 matches. The index
+   * is not forced: without it SQLite sorts instead, which is the pre-existing
+   * shape rather than an error.
+   */
+  private queryTranscriptMessageRows(
+    sessionId: string,
+    options: { cursor: CoworkTranscriptCursor | null; limit: number },
+  ): { rows: CoworkMessageRow[]; hasMoreBefore: boolean } {
+    const params: Array<string | number> = [sessionId];
+    let beforeClause = '';
+    if (options.cursor) {
+      // Strictly below the cursor row, in (created_at, sequence, ROWID) order.
+      // COALESCE on the cursor side only: it is the same mapping the ASC
+      // transcript read applies to a NULL sequence, which cannot occur for rows
+      // written by this store.
+      beforeClause = `
+        AND (
+          created_at < ?
+          OR (created_at = ? AND COALESCE(sequence, 0) < ?)
+          OR (created_at = ? AND COALESCE(sequence, 0) = ? AND ROWID < ?)
+        )`;
+      params.push(
+        options.cursor.createdAt,
+        options.cursor.createdAt,
+        options.cursor.sequence,
+        options.cursor.createdAt,
+        options.cursor.sequence,
+        options.cursor.rowId,
+      );
+    }
+    params.push(options.limit + 1);
+
+    const rows = this.getAll<CoworkMessageRow>(`
+      SELECT id, type, content, metadata, created_at, sequence, ROWID AS rowid
+      FROM cowork_messages
+      WHERE session_id = ?
+      ${beforeClause}
+      ORDER BY
+        created_at DESC,
+        sequence DESC,
+        ROWID DESC
+      LIMIT ?
+    `, params);
+    return {
+      rows,
+      hasMoreBefore: rows.length > options.limit,
+    };
+  }
+
+  private getTranscriptSessionMessagesPage(
+    sessionId: string,
+    options: { cursor: CoworkTranscriptCursor | null; limit: number },
+  ): CoworkMessagePage {
+    const { rows, hasMoreBefore } = this.queryTranscriptMessageRows(sessionId, options);
+    const page = rows.slice(0, options.limit);
+    const oldest = page.length > 0 ? page[page.length - 1] : null;
+    return {
+      // Rows arrive newest-first and are handed over oldest-first.
+      messages: page.slice().reverse().map((row) => this.mapCoworkMessageRow(row)),
+      hasMoreBefore,
+      beforeSequence: null,
+      beforeTranscriptCursor: hasMoreBefore && oldest ? formatCoworkTranscriptCursor(oldest) : null,
     };
   }
 
@@ -4380,24 +4561,6 @@ export class CoworkStore implements MemoryBackend {
     return {
       rows: rows.slice(0, options.limit),
       hasMoreBefore,
-    };
-  }
-
-  private getRawSessionMessagesPage(
-    sessionId: string,
-    options: { beforeSequence: number | null; limit: number },
-  ): CoworkMessagePage {
-    const { rows, hasMoreBefore } = this.querySessionMessageRows(sessionId, options);
-    const oldestSequence = rows.length > 0
-      ? Number(rows[rows.length - 1]?.sequence)
-      : null;
-
-    return {
-      messages: rows.slice().reverse().map((row) => this.mapCoworkMessageRow(row)),
-      hasMoreBefore,
-      beforeSequence: hasMoreBefore && Number.isFinite(oldestSequence) && Number(oldestSequence) > 0
-        ? Number(oldestSequence)
-        : null,
     };
   }
 

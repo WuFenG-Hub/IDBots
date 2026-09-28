@@ -292,7 +292,7 @@ test('cross-episode history pages spend their budget on VISIBLE messages only', 
   }
 });
 
-test('message pages use a stable sequence cursor and preserve chronological order', async () => {
+test('message pages use a stable cursor and preserve chronological order', async () => {
   const { db, cleanup } = await createSqliteStore();
   try {
     const store = createCoworkStore(db);
@@ -305,26 +305,43 @@ test('message pages use a stable sequence cursor and preserve chronological orde
       }).id);
     }
 
+    // Every session opens on a bounded newest-messages window; the page that
+    // walks below it answers with the cursor for its own order. Non-A2A windows
+    // page in transcript order, the A2A display window in sequence order.
     const latest = store.getSessionMessagesPage(session.id, { limit: 3 });
     assert.deepEqual(latest.messages.map((message) => message.content), ['message-5', 'message-6', 'message-7']);
     assert.equal(latest.hasMoreBefore, true);
-    assert.equal(latest.beforeSequence, 5);
+    assert.equal(latest.beforeSequence, null);
+    assert.equal(typeof latest.beforeTranscriptCursor, 'string');
 
     const middle = store.getSessionMessagesPage(session.id, {
-      beforeSequence: latest.beforeSequence,
+      beforeTranscriptCursor: latest.beforeTranscriptCursor,
       limit: 3,
     });
     assert.deepEqual(middle.messages.map((message) => message.content), ['message-2', 'message-3', 'message-4']);
     assert.equal(middle.hasMoreBefore, true);
-    assert.equal(middle.beforeSequence, 2);
+    assert.equal(typeof middle.beforeTranscriptCursor, 'string');
 
     const oldest = store.getSessionMessagesPage(session.id, {
-      beforeSequence: middle.beforeSequence,
+      beforeTranscriptCursor: middle.beforeTranscriptCursor,
       limit: 3,
     });
     assert.deepEqual(oldest.messages.map((message) => message.content), ['message-1']);
     assert.equal(oldest.hasMoreBefore, false);
-    assert.equal(oldest.beforeSequence, null);
+    assert.equal(oldest.beforeTranscriptCursor, null);
+
+    // The A2A display window keeps its sequence cursor over the same rows.
+    const displayLatest = store.getSessionMessagesPage(session.id, { limit: 3, displayWindow: true });
+    assert.deepEqual(displayLatest.messages.map((message) => message.content), ['message-5', 'message-6', 'message-7']);
+    assert.equal(displayLatest.hasMoreBefore, true);
+    assert.equal(displayLatest.beforeSequence, 5);
+    const displayMiddle = store.getSessionMessagesPage(session.id, {
+      beforeSequence: displayLatest.beforeSequence,
+      limit: 3,
+      displayWindow: true,
+    });
+    assert.deepEqual(displayMiddle.messages.map((message) => message.content), ['message-2', 'message-3', 'message-4']);
+    assert.equal(displayMiddle.beforeSequence, 2);
 
     const view = store.getSessionView(session.id, 3);
     assert.deepEqual(view?.messages.map((message) => message.content), ['message-5', 'message-6', 'message-7']);

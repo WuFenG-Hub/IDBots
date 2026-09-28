@@ -77,10 +77,10 @@ test('page hits are the newest rows of the session and page back without gaps', 
     const collected = [];
     let cursor = null;
     for (let guard = 0; guard < 20; guard += 1) {
-      const page = store.getSessionMessagesPage(session.id, { beforeSequence: cursor, limit: 4 });
+      const page = store.getSessionMessagesPage(session.id, { beforeTranscriptCursor: cursor, limit: 4 });
       collected.unshift(...page.messages.map((message) => message.content));
       if (!page.hasMoreBefore) break;
-      cursor = page.beforeSequence;
+      cursor = page.beforeTranscriptCursor;
     }
     assert.deepEqual(collected, ids.map((_, index) => `message-${index + 1}`));
     assert.deepEqual(
@@ -111,14 +111,23 @@ test('a transcript whose sequence order differs from its timestamps keeps both r
       store.getSession(session.id).messages.map((message) => message.content),
       ['older copied turn', 'newer turn'],
     );
-    // The page window is the newest rows in insert order (sequence-led), and
-    // reports them oldest-first inside the window.
+    // The page window follows the transcript (created_at) too, so the newest
+    // page is the later timestamp and the page below it is the migrated copy.
     const page = store.getSessionMessagesPage(session.id, { limit: 1 });
-    assert.deepEqual(page.messages.map((message) => message.content), ['older copied turn']);
-    assert.equal(page.beforeSequence, 2);
-    const below = store.getSessionMessagesPage(session.id, { beforeSequence: page.beforeSequence, limit: 1 });
-    assert.deepEqual(below.messages.map((message) => message.content), ['newer turn']);
+    assert.deepEqual(page.messages.map((message) => message.content), ['newer turn']);
+    assert.equal(page.beforeSequence, null);
+    assert.equal(typeof page.beforeTranscriptCursor, 'string');
+    const below = store.getSessionMessagesPage(session.id, {
+      beforeTranscriptCursor: page.beforeTranscriptCursor,
+      limit: 1,
+    });
+    assert.deepEqual(below.messages.map((message) => message.content), ['older copied turn']);
     assert.equal(below.hasMoreBefore, false);
+    // The A2A display window, by contrast, is sequence-led (insert order): the
+    // migrated copy carries the highest sequence and opens its window.
+    const displayPage = store.getSessionMessagesPage(session.id, { limit: 1, displayWindow: true });
+    assert.deepEqual(displayPage.messages.map((message) => message.content), ['older copied turn']);
+    assert.equal(displayPage.beforeSequence, 2);
   } finally {
     cleanup();
   }
