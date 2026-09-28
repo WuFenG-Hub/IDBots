@@ -1,17 +1,12 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { Suspense, useState, useEffect, useRef, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from './store';
-import Settings, { type SettingsOpenOptions } from './components/Settings';
+import type { SettingsOpenOptions } from './components/Settings';
 import Sidebar from './components/Sidebar';
 import Toast from './components/Toast';
 import WindowTitleBar from './components/window/WindowTitleBar';
 import { CoworkView } from './components/cowork';
 import CoworkPermissionOverlay from './components/cowork/CoworkPermissionOverlay';
-import { MetaAppsView } from './components/metaapps';
-import { ScheduledTasksView } from './components/scheduledTasks';
-import { GroupTasksView, NewGroupTaskModal } from './components/groupTasks';
-import MetabotsView from './components/metabots/MetabotsView';
-import GigSquareView from './components/gigSquare/GigSquareView';
 import AgentGameConsentCard from './components/agentGame/AgentGameConsentCard';
 import { configService } from './services/config';
 import { ensureFreeQuotaProvisioning } from './services/llmFreeQuotaBootstrap';
@@ -49,7 +44,6 @@ import { metaAppService } from './services/metaApp';
 import AppUpdateBadge from './components/update/AppUpdateBadge';
 import UpdateChangeLogPanel from './components/update/UpdateChangeLogPanel';
 import AppUpdateModal, { type UpdateModalState } from './components/update/AppUpdateModal';
-import Onboarding from './components/onboarding/Onboarding';
 import { openSelectedMetaApp } from './components/metaapps/metaAppLaunch.js';
 import { normalizePreselectedSkillId } from './utils/newChatPreselect';
 import {
@@ -59,12 +53,54 @@ import {
   sidebarWidthStorageKey,
   type SidebarWidthMode,
 } from './utils/sidebarWidth';
-import { BotBrowserSurface } from './features/botBrowser/BotBrowserSurface';
 import { useBotBrowserShell } from './features/botBrowser/useBotBrowserShell';
 import { openBotBrowserConversationInCowork } from './features/botBrowser/conversationNavigationAdapter';
 import type { BotBrowserConversationRequest } from './features/botBrowser/types';
 import SidebarToggleIcon from './components/icons/SidebarToggleIcon';
 import { FREE_PROVIDER_DISPLAY_NAME, LLM_FREE_PROVIDER_KEY } from './services/llmFreeQuotaGate.js';
+
+/**
+ * Everything the user cannot see on first paint is split into its own chunk:
+ * Settings (a 200 kB settings shell behind a click), the non-Co-Work main
+ * views, the onboarding flow, the new-group-task modal, and — the heaviest of
+ * them — the Bot Browser surface, which drags in the ABC browser UI + core
+ * (~1.5 MB of vendor code) that nothing else in the app imports.
+ *
+ * Co-Work, the Sidebar and the shell stay in the startup chunk. Each lazy
+ * binding keeps the identifier its import used to have, so every JSX call site
+ * is unchanged.
+ */
+const Settings = React.lazy(() => import('./components/Settings'));
+const MetaAppsView = React.lazy(() =>
+  import('./components/metaapps').then((module) => ({ default: module.MetaAppsView })));
+const ScheduledTasksView = React.lazy(() =>
+  import('./components/scheduledTasks').then((module) => ({ default: module.ScheduledTasksView })));
+const GroupTasksView = React.lazy(() =>
+  import('./components/groupTasks').then((module) => ({ default: module.GroupTasksView })));
+const NewGroupTaskModal = React.lazy(() =>
+  import('./components/groupTasks').then((module) => ({ default: module.NewGroupTaskModal })));
+const MetabotsView = React.lazy(() => import('./components/metabots/MetabotsView'));
+const GigSquareView = React.lazy(() => import('./components/gigSquare/GigSquareView'));
+const Onboarding = React.lazy(() => import('./components/onboarding/Onboarding'));
+const BotBrowserSurface = React.lazy(() =>
+  import('./features/botBrowser/BotBrowserSurface').then((module) => ({ default: module.BotBrowserSurface })));
+
+// Shared loading indicator: the startup screen and every lazy view fallback
+// render the same mark, so a chunk arriving late looks like the app still
+// loading rather than a blank pane.
+const AppLoadingIndicator: React.FC = () => (
+  <div className="flex-1 h-full flex items-center justify-center dark:bg-claude-darkBg bg-claude-bg">
+    <div className="flex flex-col items-center space-y-4">
+      <div className="w-16 h-16 rounded-full bg-gradient-to-br from-claude-accent to-claude-accentHover flex items-center justify-center shadow-glow-accent animate-pulse">
+        <ChatBubbleLeftRightIcon className="h-8 w-8 text-claude-accentInk" />
+      </div>
+      <div className="w-24 h-1 rounded-full bg-claude-accent/20 overflow-hidden">
+        <div className="h-full w-1/2 rounded-full bg-claude-accent animate-shimmer" />
+      </div>
+      <div className="dark:text-claude-darkText text-claude-text text-xl font-medium">{i18nService.t('loading')}</div>
+    </div>
+  </div>
+);
 
 type FocusedOrderTarget = {
   sessionId: string;
@@ -1171,17 +1207,7 @@ const App: React.FC = () => {
     return (
       <div className="h-screen overflow-hidden flex flex-col">
         {windowsStandaloneTitleBar}
-        <div className="flex-1 flex items-center justify-center dark:bg-claude-darkBg bg-claude-bg">
-          <div className="flex flex-col items-center space-y-4">
-            <div className="w-16 h-16 rounded-full bg-gradient-to-br from-claude-accent to-claude-accentHover flex items-center justify-center shadow-glow-accent animate-pulse">
-              <ChatBubbleLeftRightIcon className="h-8 w-8 text-claude-accentInk" />
-            </div>
-            <div className="w-24 h-1 rounded-full bg-claude-accent/20 overflow-hidden">
-              <div className="h-full w-1/2 rounded-full bg-claude-accent animate-shimmer" />
-            </div>
-            <div className="dark:text-claude-darkText text-claude-text text-xl font-medium">{i18nService.t('loading')}</div>
-          </div>
-        </div>
+        <AppLoadingIndicator />
       </div>
     );
   }
@@ -1204,12 +1230,14 @@ const App: React.FC = () => {
             </button>
           </div>
           {showSettings && (
-            <Settings
-              onClose={handleCloseSettings}
-              initialTab={settingsOptions.initialTab}
-              notice={settingsOptions.notice}
-              openNewProjectForm={settingsOptions.openNewProjectForm}
-            />
+            <Suspense fallback={null}>
+              <Settings
+                onClose={handleCloseSettings}
+                initialTab={settingsOptions.initialTab}
+                notice={settingsOptions.notice}
+                openNewProjectForm={settingsOptions.openNewProjectForm}
+              />
+            </Suspense>
           )}
         </div>
       </div>
@@ -1217,7 +1245,11 @@ const App: React.FC = () => {
   }
 
   if (showOnboarding) {
-    return <Onboarding onComplete={handleOnboardingComplete} onClose={handleCloseOnboarding} />;
+    return (
+      <Suspense fallback={<AppLoadingIndicator />}>
+        <Onboarding onComplete={handleOnboardingComplete} onClose={handleCloseOnboarding} />
+      </Suspense>
+    );
   }
 
   const homeContent = mainView === 'scheduledTasks' ? (
@@ -1289,10 +1321,12 @@ const App: React.FC = () => {
         inlineSessionId={mainView === 'cowork' && showHomeSurface ? currentSessionId : null}
       />
       {isNewGroupTaskOpen && (
-        <NewGroupTaskModal
-          onClose={() => setIsNewGroupTaskOpen(false)}
-          onCreated={handleGroupTaskCreated}
-        />
+        <Suspense fallback={null}>
+          <NewGroupTaskModal
+            onClose={() => setIsNewGroupTaskOpen(false)}
+            onCreated={handleGroupTaskCreated}
+          />
+        </Suspense>
       )}
       <Sidebar
         onShowLogin={handleShowLogin}
@@ -1337,7 +1371,9 @@ const App: React.FC = () => {
         {showHomeSurface || showInternetCatalog ? (
           <div className={`flex-1 min-w-0 py-1.5 pr-1.5 ${isSidebarCollapsed ? 'pl-1.5' : ''}`}>
             <div className="h-full rounded-xl dark:bg-claude-darkBg bg-claude-bg overflow-hidden">
-              {showHomeSurface ? homeContent : internetCatalogContent}
+              <Suspense fallback={<AppLoadingIndicator />}>
+                {showHomeSurface ? homeContent : internetCatalogContent}
+              </Suspense>
             </div>
           </div>
         ) : null}
@@ -1349,13 +1385,15 @@ const App: React.FC = () => {
               </div>
             ) : null}
             <div className="flex-1 min-h-0">
-              <BotBrowserSurface
-                ref={botBrowserShell.browserRef}
-                visible={botBrowserShell.isBrowserPaneVisible}
-                onOpenConversation={handleBrowserOpenConversation}
-                onError={showToast}
-                onReady={botBrowserShell.onBrowserReady}
-              />
+              <Suspense fallback={<AppLoadingIndicator />}>
+                <BotBrowserSurface
+                  ref={botBrowserShell.browserRef}
+                  visible={botBrowserShell.isBrowserPaneVisible}
+                  onOpenConversation={handleBrowserOpenConversation}
+                  onError={showToast}
+                  onReady={botBrowserShell.onBrowserReady}
+                />
+              </Suspense>
             </div>
             {isSidebarCollapsed ? (
               <button
@@ -1373,12 +1411,14 @@ const App: React.FC = () => {
 
       {/* 设置窗口显示在所有主内容之上，但不影响主界面的交互 */}
       {showSettings && (
-        <Settings
-          onClose={handleCloseSettings}
-          initialTab={settingsOptions.initialTab}
-          notice={settingsOptions.notice}
-          openNewProjectForm={settingsOptions.openNewProjectForm}
-        />
+        <Suspense fallback={null}>
+          <Settings
+            onClose={handleCloseSettings}
+            initialTab={settingsOptions.initialTab}
+            notice={settingsOptions.notice}
+            openNewProjectForm={settingsOptions.openNewProjectForm}
+          />
+        </Suspense>
       )}
       {showUpdateModal && updateInfo && (
         <AppUpdateModal
