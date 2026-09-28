@@ -131,6 +131,10 @@ const DeliverableUri: React.FC<{ uri: string }> = ({ uri }) => {
   );
 };
 
+/** Field-for-field equality of two detail payloads (IPC rows are plain JSON). */
+const isSameDetail = (a: GroupTaskDetail, b: GroupTaskDetail): boolean =>
+  JSON.stringify(a) === JSON.stringify(b);
+
 interface GroupTaskDetailViewProps {
   taskId: number;
   isSidebarCollapsed?: boolean;
@@ -189,6 +193,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const sentHintTimerRef = useRef<number | null>(null);
+  // Id of the newest rendered row — the auto-scroll effect only fires when it
+  // actually advances.
+  const latestMessageIdRef = useRef<number | null>(null);
   // Scroll-up pagination: oldestLoadedId is the backwards cursor (beforeId),
   // hasMore whether an older page may exist, plus in-flight + scroll-restore
   // state. Refs back the scroll handler so it never reads a stale closure.
@@ -207,7 +214,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const refreshDetail = useCallback(async (opts?: { quiet?: boolean }) => {
     try {
       const task = await groupTaskService.getTask(taskId);
-      setDetail(task);
+      // The 5s poll usually re-fetches an unchanged row: keep the previous
+      // detail reference so the panel (and every memoized child) stays put.
+      setDetail((previous) => (previous && isSameDetail(previous, task) ? previous : task));
       setDetailError(null);
     } catch (err) {
       // Background (poll/event) refreshes must never blank a healthy view on a
@@ -312,26 +321,36 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     hasMoreRef.current = true;
     loadingOlderRef.current = false;
     pendingScrollRestoreRef.current = null;
+    latestMessageIdRef.current = null;
     setHasMore(true);
     setLoadingOlder(false);
   }, [taskId]);
 
   // Transcript: initial load + 5s poll while mounted. The poll also refreshes
   // the task detail so a missed/lost groupTask:statusChanged push can never
-  // leave the header badge stale (R1 self-heal).
+  // leave the header badge stale (R1 self-heal). A hidden window skips the
+  // tick entirely (the interval stays armed) and refreshes once on becoming
+  // visible again, so a backgrounded app stops re-rendering.
   useEffect(() => {
     let cancelled = false;
     setLoadingMessages(true);
     void loadMessages().finally(() => {
       if (!cancelled) setLoadingMessages(false);
     });
-    const timer = window.setInterval(() => {
+    const pollTick = () => {
+      if (document.visibilityState !== 'visible') return;
       void loadMessages();
       void refreshDetail({ quiet: true });
-    }, 5000);
+    };
+    const timer = window.setInterval(pollTick, 5000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') pollTick();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [loadMessages, refreshDetail]);
 
@@ -364,8 +383,13 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     setCheckpointSummaryExpanded(false);
   }, [openCheckpointId]);
 
-  // Auto-scroll to bottom on new messages unless the user scrolled up.
+  // Auto-scroll to bottom on a genuinely new message unless the user scrolled
+  // up. An in-place row update (same latest id) is not a new message, so it
+  // never forces a synchronous layout.
   useEffect(() => {
+    const latestId = messages.length > 0 ? messages[messages.length - 1].id : null;
+    if (latestId === null || latestId === latestMessageIdRef.current) return;
+    latestMessageIdRef.current = latestId;
     const el = scrollRef.current;
     if (el && stickToBottomRef.current) {
       el.scrollTop = el.scrollHeight;
