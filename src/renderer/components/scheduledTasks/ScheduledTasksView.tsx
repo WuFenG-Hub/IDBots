@@ -1,18 +1,20 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from '../../store';
 import { setViewMode, selectTask } from '../../store/slices/scheduledTaskSlice';
 import { scheduledTaskService } from '../../services/scheduledTask';
 import { i18nService } from '../../services/i18n';
+import { selectTrackedTasksNeedingAttention } from '../../utils/trackedTaskAttention';
 import TaskList from './TaskList';
 import TaskForm from './TaskForm';
 import TaskDetail from './TaskDetail';
 import AllRunsHistory from './AllRunsHistory';
 import DeleteConfirmModal from './DeleteConfirmModal';
 import LongTermTasksBoard from '../longTermTasks/LongTermTasksBoard';
+import MetaTaskBoard from '../metatask/MetaTaskBoard';
 
-/** 跟踪任务页的外层 Tab：「长期任务」默认在前，「定时任务」原样保留。 */
-type TrackingTabId = 'longTerm' | 'scheduled';
+/** 跟踪任务页的外层 Tab：「长期任务」默认在前，「定时任务」原样保留，「MetaTask」链上多方协作（P1 只读）。 */
+type TrackingTabId = 'longTerm' | 'scheduled' | 'metaTask';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -59,6 +61,14 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
   const [trackingTab, setTrackingTab] = useState<TrackingTabId>('longTerm');
   const [scheduledSubTab, setScheduledSubTab] = useState<ScheduledSubTab>('tasks');
   const [deleteTaskInfo, setDeleteTaskInfo] = useState<{ id: string; name: string } | null>(null);
+  // 长期任务 tab badge: cards parked on an owner decision (waiting_owner). The
+  // board is kept live app-wide (App.tsx init), so the badge is already correct
+  // on the first paint of this tab.
+  const longTermBoard = useSelector((state: RootState) => state.longTermTask.board);
+  const longTermNeedsDecisionCount = useMemo(
+    () => selectTrackedTasksNeedingAttention({ longTermTask: { board: longTermBoard } }).longTerm,
+    [longTermBoard],
+  );
 
   const handleRequestDelete = useCallback((taskId: string, taskName: string) => {
     setDeleteTaskInfo({ id: taskId, name: taskName });
@@ -108,7 +118,7 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
 
   // 「定时任务」Tab 里的创建/编辑/详情子视图会顶掉 Tab 行，把标题位让给返回按钮
   const inScheduledSubView = viewMode !== 'list' || Boolean(selectedTaskId);
-  const showTrackingTabs = trackingTab === 'longTerm' || !inScheduledSubView;
+  const showTrackingTabs = trackingTab === 'longTerm' || trackingTab === 'metaTask' || !inScheduledSubView;
   const showScheduledSubTabs = trackingTab === 'scheduled' && !inScheduledSubView;
 
   return (
@@ -160,7 +170,25 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
               onClick={() => handleTrackingTabChange('longTerm')}
               className={tabButtonClass(trackingTab === 'longTerm')}
             >
-              {i18nService.t('trackedTask.tab.longTerm')}
+              <span className="inline-flex items-center gap-1.5">
+                {longTermNeedsDecisionCount > 0 && (
+                  // Owner decision pending on this tab: the same amber dot the
+                  // sidebar entry carries, with the count beside it.
+                  <span
+                    data-testid="long-term-tab-decision-indicator"
+                    title={i18nService.t('trackedTaskNeedsDecision').replace('{count}', String(longTermNeedsDecisionCount))}
+                    aria-label={i18nService.t('trackedTaskNeedsDecision').replace('{count}', String(longTermNeedsDecisionCount))}
+                    role="img"
+                    className="tracked-task-decision-indicator shrink-0"
+                  />
+                )}
+                {i18nService.t('trackedTask.tab.longTerm')}
+                {longTermNeedsDecisionCount > 0 && (
+                  <span className="text-[11px] font-normal tabular-nums" aria-hidden>
+                    {longTermNeedsDecisionCount}
+                  </span>
+                )}
+              </span>
               {trackingTab === 'longTerm' && (
                 <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
               )}
@@ -172,6 +200,16 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
             >
               {i18nService.t('trackedTask.tab.scheduled')}
               {trackingTab === 'scheduled' && (
+                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleTrackingTabChange('metaTask')}
+              className={tabButtonClass(trackingTab === 'metaTask')}
+            >
+              {i18nService.t('trackedTask.tab.metaTask')}
+              {trackingTab === 'metaTask' && (
                 <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
               )}
             </button>
@@ -220,6 +258,8 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
       <div className="flex-1 min-h-0 overflow-hidden">
         {trackingTab === 'longTerm' ? (
           <LongTermTasksBoard />
+        ) : trackingTab === 'metaTask' ? (
+          <MetaTaskBoard />
         ) : (
           <div className="h-full overflow-y-auto">
             {showScheduledSubTabs && scheduledSubTab === 'history' ? (

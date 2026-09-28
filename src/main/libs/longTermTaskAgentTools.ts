@@ -195,6 +195,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       notes: z.string().optional(),
       ordinal: z.number().optional(),
       expectedMinutes: z.number().int().positive().nullable().optional().describe('Set or clear the expected-duration budget in minutes (null = use the supervision default).'),
+      metataskRoot: z.string().regex(/^[0-9a-f]{64}i0$/).nullable().optional().describe('Link this sub-project to an on-chain MetaTask root pinId as its execution channel (multi-bot × long quadrant); null unlinks. Progress shows from the chain projection.'),
     },
     async (args: { subtaskId?: string } & Record<string, unknown>) => {
       try {
@@ -225,13 +226,20 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
     },
   );
 
+  // The owner reads the wait note as the DECISION BRIEF — main-side surfaces
+  // (board card, detail panel, heartbeat re-presentation) all render this same
+  // text, so the required structure is stated identically in
+  // SKILLs/long-term-task{,-exec}/SKILL.md and buildOwnerWaitBlock().
+  const ownerBriefRule =
+    'When kind=owner (and whenever you ask the owner to accept a proposal), the note IS the decision brief: the owner must be able to decide WITHOUT reading the session. Write it in the owner\'s language with these six labeled sections, one per line, in this order — 1) 背景与已完成进展 (background & progress so far), 2) 当前状况 (current situation), 3) 需要你拍板的事项 (the decision itself, one question), 4) 选项与利弊 (each option with its trade-offs, your recommendation first), 5) 推荐项及理由 (recommendation & why), 6) 拍板后的下一步 (what happens after the call). Newlines matter: the panel renders them as-is.';
+
   const waitSubtask = tool(
     'longterm_subtask_wait',
-    'Park the current sub-project on a blocking point: kind=owner when you need the owner to decide something (say exactly WHAT in the note), kind=external when waiting on an outside condition (notarization, external delivery, a date). The heartbeat re-checks time-based waits and the card shows the note.',
+    `Park the current sub-project on a blocking point: kind=owner when you need the owner to decide something (say exactly WHAT in the note), kind=external when waiting on an outside condition (notarization, external delivery, a date). The heartbeat re-checks time-based waits and the card shows the note. ${ownerBriefRule}`,
     {
       subtaskId: z.string().min(1),
       kind: z.enum(['owner', 'external']),
-      note: z.string().min(1).describe('Precisely what is being waited on.'),
+      note: z.string().min(1).describe('Precisely what is being waited on. For kind=owner, the six-section decision brief described in the tool description (multi-line, owner\'s language).'),
       waitUntil: z.string().regex(WAIT_UNTIL_STRICT_ISO, 'full ISO timestamp WITH timezone offset (Z or ±HH:MM), converted to the owner\'s local timezone').optional().describe('ISO datetime for time-based re-checks — must carry an explicit timezone offset.'),
     },
     async (args: { subtaskId?: string; kind?: 'owner' | 'external'; note?: string; waitUntil?: string }) => {
@@ -266,11 +274,11 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
 
   const proposeSubtask = tool(
     'longterm_subtask_propose',
-    'Propose acceptance for a sub-project: attach verifiable evidence (local dir, metaapp:// URI, pin:// id, URL) and a summary of how each acceptance criterion is met. Moves the card to waiting-owner; the owner accepts or rejects with feedback.',
+    `Propose acceptance for a sub-project: attach verifiable evidence (local dir, metaapp:// URI, pin:// id, URL) and a summary of how each acceptance criterion is met. Moves the card to waiting-owner; the owner accepts or rejects with feedback. The summary is also the owner's decision brief (criterion-by-criterion evidence recap inside section 1/2): ${ownerBriefRule}`,
     {
       subtaskId: z.string().min(1),
       evidence: z.array(z.object({ kind: z.enum(['dir', 'metaapp', 'pin', 'url', 'other']), uri: z.string().min(1), note: z.string().optional() })).min(1),
-      summary: z.string().min(1),
+      summary: z.string().min(1).describe('Evidence recap per acceptance criterion AND the six-section decision brief described in the tool description (multi-line, owner\'s language).'),
     },
     async (args: { subtaskId?: string; evidence?: unknown[]; summary?: string }) => {
       try {

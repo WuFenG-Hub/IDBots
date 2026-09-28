@@ -159,7 +159,7 @@ interface GroupTaskMessageItemProps {
   onJumpToReply?: (pinId: string) => void;
 }
 
-const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
+const GroupTaskMessageItem = React.memo(({
   message,
   senderDisplayName,
   isChairSender,
@@ -169,7 +169,7 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
   highlight,
   replyTarget,
   onJumpToReply,
-}) => {
+}: GroupTaskMessageItemProps) => {
   // Round-4 attribution: the chain-signature GlobalMetaID is the ONLY identity
   // source. A message whose sender is neither a task member nor the owner is
   // flagged SUSPECT — never attributed by senderName.
@@ -351,6 +351,6 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
       </div>
     </div>
   );
-};
+});
 
 export default GroupTaskMessageItem;

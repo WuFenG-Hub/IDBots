@@ -154,6 +154,33 @@ test('mergeTranscriptMessages: dedupe by id, ascending, tolerates junk', () => {
   assert.deepEqual(mergeTranscriptMessages(existing, null).map((m) => m.id), [1, 3]);
 });
 
+test('mergeTranscriptMessages: an unchanged poll keeps the previous array and row references', () => {
+  const existing = [
+    { id: 1, pinId: 'a1i0', content: 'a', senderSuspect: false },
+    { id: 2, pinId: 'b2i0', content: 'b', senderSuspect: false },
+  ];
+  // The 5s poll re-delivers the same rows as fresh objects (IPC clone).
+  const repolled = existing.map((row) => ({ ...row }));
+  assert.equal(mergeTranscriptMessages(existing, repolled), existing);
+  assert.equal(mergeTranscriptMessages(existing, repolled)[0], existing[0]);
+
+  // A field change, an appended row and a dropped row all produce a new array.
+  const contentChanged = [{ ...existing[0], content: 'a2' }, { ...existing[1] }];
+  assert.notEqual(mergeTranscriptMessages(existing, contentChanged), existing);
+  assert.deepEqual(
+    mergeTranscriptMessages(existing, contentChanged).map((m) => m.content),
+    ['a2', 'b'],
+  );
+  const appended = [...repolled, { id: 3, pinId: 'c3i0', content: 'c' }];
+  assert.notEqual(mergeTranscriptMessages(existing, appended), existing);
+  assert.deepEqual(mergeTranscriptMessages(existing, appended).map((m) => m.id), [1, 2, 3]);
+  // The merge is additive: a poll window that no longer carries an old row
+  // keeps it, and an unchanged re-delivery still reuses the array.
+  const narrowed = [{ ...existing[1] }];
+  assert.equal(mergeTranscriptMessages(existing, narrowed), existing);
+  assert.deepEqual(mergeTranscriptMessages(existing, narrowed).map((m) => m.id), [1, 2]);
+});
+
 test('shortGroupId: elides long room ids, keeps i0 suffix visible, passes short/junk through', () => {
   const longId = '198206ac14f950dbfc25fad73992b6091232623987f1ab0251de1c7825de6ca5i0';
   assert.equal(shortGroupId(longId), '198206ac…6ca5i0');

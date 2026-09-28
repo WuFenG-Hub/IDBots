@@ -18,10 +18,17 @@
  * - OSS object / CDN url: IDBots-Setup-X.Y.Z.exe   (no spaces allowed on OSS)
  *
  * Outputs:
- * - release-assets/macos/latest-mac.yml          (final DMG values)
+ * - release-assets/macos/latest-mac.yml          (final Apple Silicon DMG values)
+ * - release-assets/macos/latest-mac-x64.yml      (final Intel x64 DMG values)
  * - release-assets/windows/latest.yml            (dot-name url, for GitHub Release)
  * - release-assets/windows/oss-latest.yml        (hyphen-name url, for OSS; NOT uploaded to GitHub —
  *                                                 "oss-latest.yml" does not match the release glob latest*.yml)
+ *
+ * macOS ships two DMGs (arm64 + x64) and electron-builder can only emit one
+ * latest-mac.yml per platform, so this script owns the manifest split: the
+ * historic name keeps the arm64 semantics and the Intel DMG gets its own
+ * manifest, so each arch's final signed hashes stay independently verifiable.
+ * The in-app updater reads https://idbots.ai/update.json, not these files.
  *
  * Zero runtime dependencies: only node:crypto / node:fs / node:path.
  */
@@ -29,6 +36,13 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+
+// macOS artifacts, in manifest order. The first entry keeps the long-standing
+// latest-mac.yml name so nothing that already consumes it changes behaviour.
+const MAC_DMGS = [
+  { arch: 'arm64', manifest: 'latest-mac.yml' },
+  { arch: 'x64', manifest: 'latest-mac-x64.yml' },
+];
 
 function fail(msg) {
   console.error(`[finalize-yaml] ERROR: ${msg}`);
@@ -72,9 +86,12 @@ async function main() {
   const macDir = 'release-assets/macos';
   const winDir = 'release-assets/windows';
 
-  const dmgName = `IDBots-${version}-arm64.dmg`;
-  const dmgPath = path.join(macDir, dmgName);
-  if (!fs.existsSync(dmgPath)) fail(`final DMG not found: ${dmgPath}`);
+  const macDmgs = MAC_DMGS.map(({ arch, manifest }) => {
+    const name = `IDBots-${version}-${arch}.dmg`;
+    const filePath = path.join(macDir, name);
+    if (!fs.existsSync(filePath)) fail(`final DMG not found: ${filePath}`);
+    return { arch, manifest, name, filePath };
+  });
 
   // GitHub asset names use dots where electron-builder uses spaces.
   const exeDiskName = `IDBots Setup ${version}.exe`;
@@ -89,15 +106,20 @@ async function main() {
     if (m) releaseDate = m[1];
   }
 
-  const [dmgSha, exeSha] = await Promise.all([sha512Base64(dmgPath), sha512Base64(exePath)]);
-  const dmgSize = fs.statSync(dmgPath).size;
+  const [macShas, exeSha] = await Promise.all([
+    Promise.all(macDmgs.map((d) => sha512Base64(d.filePath))),
+    sha512Base64(exePath),
+  ]);
   const exeSize = fs.statSync(exePath).size;
 
-  // 1) macOS manifest — final signed/notarized DMG values.
-  fs.writeFileSync(
-    existingMacYml,
-    buildYaml({ version, url: dmgName, sha512: dmgSha, size: dmgSize, releaseDate }),
-  );
+  // 1) macOS manifests — final signed/notarized DMG values, one manifest per arch.
+  macDmgs.forEach((dmg, index) => {
+    const size = fs.statSync(dmg.filePath).size;
+    const sha = macShas[index];
+    const out = dmg.manifest === 'latest-mac.yml' ? existingMacYml : path.join(macDir, dmg.manifest);
+    fs.writeFileSync(out, buildYaml({ version, url: dmg.name, sha512: sha, size, releaseDate }));
+    console.log(`[finalize-yaml] ${dmg.manifest.padEnd(19)} <- ${dmg.name} (size=${size}, sha512=${sha.slice(0, 12)}...)`);
+  });
 
   // 2) GitHub latest.yml — url must equal the actual GitHub asset name (dots).
   const githubYml = buildYaml({
@@ -113,7 +135,6 @@ async function main() {
   const ossYml = githubYml.replace(/IDBots\.Setup\./g, 'IDBots-Setup-');
   fs.writeFileSync(path.join(winDir, 'oss-latest.yml'), ossYml);
 
-  console.log(`[finalize-yaml] latest-mac.yml <- ${dmgName} (size=${dmgSize}, sha512=${dmgSha.slice(0, 12)}...)`);
   console.log(`[finalize-yaml] latest.yml     <- ${exeDiskName} (size=${exeSize}, sha512=${exeSha.slice(0, 12)}...) github dot-name`);
   console.log(`[finalize-yaml] oss-latest.yml <- hyphen-name variant for OSS`);
   console.log('[finalize-yaml] OK');

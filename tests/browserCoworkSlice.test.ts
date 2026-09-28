@@ -5,11 +5,16 @@ import reducer, {
   setBrowserSession,
   addBrowserMessage,
   updateBrowserMessageContent,
+  appendBrowserMessageContent,
   updateBrowserSessionStatus,
   setBrowserStreaming,
   clearBrowserSession,
 } from '../src/renderer/store/slices/browserCoworkSlice';
-import { deleteSession } from '../src/renderer/store/slices/coworkSlice';
+import coworkReducer, {
+  deleteSession,
+  setCurrentSession as setCoworkCurrentSession,
+  appendMessageContent as appendCoworkMessageContent,
+} from '../src/renderer/store/slices/coworkSlice';
 import type { CoworkSession } from '../src/renderer/types/cowork';
 
 const makeSession = (overrides: Partial<CoworkSession> = {}): CoworkSession => ({
@@ -128,4 +133,76 @@ test('deleteSession for another session leaves the panel session untouched', () 
   state = reducer(state, deleteSession('other-session'));
   assert.equal(state.currentSession?.id, 'session-1');
   assert.equal(state.isStreaming, true);
+});
+
+test('appendBrowserMessageContent grows one message without touching the others', () => {
+  let state = reducer(undefined, setBrowserSession(makeSession({
+    messages: [
+      { id: 'm1', type: 'user', content: 'question', timestamp: 1002 },
+      { id: 'm2', type: 'assistant', content: 'partial', timestamp: 1003, metadata: { isStreaming: true } },
+    ],
+  })));
+  const before = state.currentSession!.messages;
+
+  state = reducer(state, appendBrowserMessageContent({
+    sessionId: 'session-1',
+    messageId: 'm2',
+    delta: ' + more',
+  }));
+
+  assert.equal(state.currentSession!.messages[1].content, 'partial + more');
+  assert.equal(state.currentSession!.messages[1].metadata?.isStreaming, true, 'marks survive the append');
+  assert.notEqual(state.currentSession!.messages[1], before[1], 'the streamed message is a new object');
+  assert.equal(state.currentSession!.messages[0], before[0], 'other messages keep their identity');
+  assert.notEqual(state.currentSession, before, 'the session object is replaced');
+});
+
+test('appendBrowserMessageContent ignores another session and unknown messages', () => {
+  const state = reducer(undefined, setBrowserSession(makeSession({
+    messages: [{ id: 'm2', type: 'assistant', content: 'partial', timestamp: 1003 }],
+  })));
+  const afterOtherSession = reducer(state, appendBrowserMessageContent({
+    sessionId: 'other-session',
+    messageId: 'm2',
+    delta: 'nope',
+  }));
+  assert.equal(afterOtherSession, state, 'no state change at all');
+
+  const afterUnknown = reducer(state, appendBrowserMessageContent({
+    sessionId: 'session-1',
+    messageId: 'missing',
+    delta: 'nope',
+  }));
+  assert.equal(afterUnknown.currentSession!.messages[0].content, 'partial');
+});
+
+test('appendMessageContent streams into the task view the same way', () => {
+  const session = makeSession({
+    sessionType: 'standard',
+    messages: [
+      { id: 'm1', type: 'user', content: 'question', timestamp: 1002 },
+      { id: 'm2', type: 'assistant', content: 'partial', timestamp: 1003, metadata: { isStreaming: true } },
+    ],
+  });
+  let state = coworkReducer(undefined, setCoworkCurrentSession(session));
+  const before = state.currentSession!.messages;
+
+  state = coworkReducer(state, appendCoworkMessageContent({
+    sessionId: 'session-1',
+    messageId: 'm2',
+    delta: ' + more',
+  }));
+
+  assert.equal(state.currentSession!.messages[1].content, 'partial + more');
+  assert.notEqual(state.currentSession!.messages[1], before[1], 'only the streamed message is rebuilt');
+  assert.equal(state.currentSession!.messages[0], before[0], 'every other message keeps its identity');
+
+  // A session the user is not looking at still raises its unread marker.
+  state = coworkReducer(state, appendCoworkMessageContent({
+    sessionId: 'background-session',
+    messageId: 'm2',
+    delta: 'behind the scenes',
+  }));
+  assert.ok(state.unreadSessionIds.includes('background-session'));
+  assert.equal(state.currentSession!.messages[1].content, 'partial + more', 'content is untouched');
 });

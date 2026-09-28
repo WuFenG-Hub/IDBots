@@ -478,6 +478,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:getA2AEpisodes', sessionId),
     listSessions: (options?: { metabotId?: number | null }) =>
       ipcRenderer.invoke('cowork:session:list', options),
+    listMetabotAvatars: (metabotIds: number[]) =>
+      ipcRenderer.invoke('cowork:session:listMetabotAvatars', metabotIds),
     processServiceRefund: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:processServiceRefund', sessionId),
     readLocalImage: (options: { path: string; maxBytes?: number }) =>
@@ -674,11 +676,13 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('cowork:stream:message', handler);
       return () => ipcRenderer.removeListener('cowork:stream:message', handler);
     },
-    onStreamMessageUpdate: (callback: (data: { sessionId: string; messageId: string; content?: string; metadata?: Record<string, unknown> }) => void) => {
-      const handler = (_event: any, data: { sessionId: string; messageId: string; content?: string; metadata?: Record<string, unknown> }) => callback(data);
+    onStreamMessageUpdate: (callback: (data: { sessionId: string; messageId: string; content?: string; delta?: string; baseLength?: number; metadata?: Record<string, unknown> }) => void) => {
+      const handler = (_event: any, data: { sessionId: string; messageId: string; content?: string; delta?: string; baseLength?: number; metadata?: Record<string, unknown> }) => callback(data);
       ipcRenderer.on('cowork:stream:messageUpdate', handler);
       return () => ipcRenderer.removeListener('cowork:stream:messageUpdate', handler);
     },
+    getStreamLiveContent: (payload: { sessionId: string; messageId: string }) =>
+      ipcRenderer.invoke('cowork:stream:liveContent', payload) as Promise<{ success: boolean; content?: string }>,
     onStreamPermission: (callback: (data: { sessionId: string; request: any }) => void) => {
       const handler = (_event: any, data: { sessionId: string; request: any }) => callback(data);
       ipcRenderer.on('cowork:stream:permission', handler);
@@ -889,6 +893,7 @@ contextBridge.exposeInMainWorld('electron', {
       preferredChannel?: 'delegate_bot' | 'group_task' | 'owner_external' | 'owner_together' | null;
       notes?: string;
       ordinal?: number;
+      metataskRoot?: string | null;
     }) => ipcRenderer.invoke('longtermTask:subtaskUpdate', input),
     begin: (input: { subtaskId: string; channel?: 'delegate_bot' | 'group_task' | 'owner_external' | 'owner_together' }) =>
       ipcRenderer.invoke('longtermTask:begin', input),
@@ -904,6 +909,18 @@ contextBridge.exposeInMainWorld('electron', {
       const handler = (_event: any, data: any) => callback(data);
       ipcRenderer.on('longtermTask:update', handler);
       return () => ipcRenderer.removeListener('longtermTask:update', handler);
+    },
+  },
+  metatask: {
+    // MetaTask (chain-side, read path P1): local projection of on-chain tasks.
+    // The chain is the source of truth; the projection is rebuildable.
+    board: () => ipcRenderer.invoke('metatask:board'),
+    get: (input: { rootPinId: string }) => ipcRenderer.invoke('metatask:get', input),
+    refresh: () => ipcRenderer.invoke('metatask:refresh'),
+    onUpdate: (callback: (data: { seq: number; reason: string }) => void) => {
+      const handler = (_event: any, data: any) => callback(data);
+      ipcRenderer.on('metatask:update', handler);
+      return () => ipcRenderer.removeListener('metatask:update', handler);
     },
   },
   groupTask: {

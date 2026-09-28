@@ -63,11 +63,19 @@ tests/*
 !tests/trackedTaskBoard.test.mjs
 !tests/metaAppBundleEntry.test.mjs
 !tests/orchestrationOriginMigration.test.mjs
+!tests/coworkSessionAutoOrigin.test.mjs
+!tests/sessionAutoGrouping.test.ts
+!tests/coworkUnreadAutoOrigin.test.ts
 !tests/longTermTaskStore.test.mjs
+!tests/longTermTaskStoreNotify.test.mjs
+!tests/trackedTaskDecisionBadge.test.ts
 !tests/twinDelegationAnchor.test.mjs
 !tests/longTermTaskAgentTools.test.mjs
 !tests/heartbeatService.test.mjs
 !tests/longTermAdvanceService.test.mjs
+!tests/metataskEngine.test.mjs
+!tests/metataskProjectionStore.test.mjs
+!tests/metataskAgentTools.test.mjs
 !tests/quotaRendererSync.test.mjs
 !tests/surfHostStatsFold.test.mjs
 !tests/rsiLadderCompute.test.ts
@@ -80,7 +88,6 @@ tests/*
 !tests/devWindowLoadRetry.test.mjs
 !tests/runtimeDependencyContract.test.mjs
 !tests/localIndexerProxyRemoteTimeout.test.mjs
-!tests/legacyManP2pCleanup.test.mjs
 !tests/dshClientTimeZone.test.mjs
 !tests/dshRuntimeDepsCheck.test.mjs
 !tests/dshKernelEventMapper.test.mjs
@@ -109,6 +116,7 @@ tests/*
 !tests/coworkExperimentalAutomationSwitch.test.mjs
 !tests/composerCommands.test.ts
 !tests/coworkTranscriptExport.test.mjs
+!tests/coworkAssistantTurnCollapse.test.mjs
 !tests/coworkSessionGoal.test.mjs
 !tests/coworkSessionGtCloseStatus.test.mjs
 !tests/coworkSessionSortAnchor.test.ts
@@ -216,6 +224,8 @@ tests/*
 !tests/dshStreamUiGate.test.mjs
 !tests/coworkFormatTransform.test.mjs
 !tests/coworkModelLimits.test.mjs
+!tests/deepseekOutputCeilingMigration.test.mjs
+!tests/metawebPromptTier.test.mjs
 !tests/coworkContextBudget.test.mjs
 !tests/coworkManualCompactionQueue.test.mjs
 !tests/coworkContextCompaction.test.mjs
@@ -370,6 +380,8 @@ man_base_data_pebble/
 !tests/omniReaderAgentTools.test.mjs
 !tests/browserOpenAgentTools.test.mjs
 !tests/screenshotAgentTools.test.mjs
+!tests/hostLocationService.test.mjs
+!tests/locationAgentTools.test.mjs
 !tests/visionRelayService.test.mjs
 !tests/visionRelayAgentTools.test.mjs
 !tests/visionVideoRelay.test.mjs
@@ -450,6 +462,8 @@ man_base_data_pebble/
 !tests/metabotLlmBrainMigration.test.mjs
 !tests/sqliteStoreMetabotsRebuildExtras.test.mjs
 !tests/knowledgeBaseText.test.mjs
+!tests/domMatrixPolyfill.test.mjs
+!tests/knowledgeBasePresentation.test.mjs
 !tests/knowledgeBaseIndexStore.test.mjs
 !tests/knowledgeBaseService.test.mjs
 !tests/knowledgeBaseAgentTools.test.mjs
@@ -475,6 +489,7 @@ man_base_data_pebble/
 !tests/metaFileUploadTrafficModeGate.test.mjs
 !tests/coworkDshWarmupStaleSessionRoute.test.mjs
 !tests/coworkDshIdleTurnToolRequest.test.mjs
+!tests/coworkDshRuntimeKillGuard.test.mjs
 
 # Local extracted skill packages and tool output artifacts (runtime-generated)
 /.proposal-demo-data/
@@ -522,3 +537,14 @@ man_base_data_pebble/
 # macOS AppleDouble sidecars (._foo) created for xattr-bearing files on the
 # exFAT worktree SSD volume; gitignored so status stays clean there
 ._*
+!tests/metataskWatch.test.mjs
+
+# ad-hoc @napi-rs/canvas API probe left at repo root during the v0.9.5 pdfjs
+# investigation (2026-09-27); root-anchored so other index.js files are unaffected
+/index.js
+!tests/coworkSessionAvatarChannel.test.mjs
+!tests/coworkSessionListThrottle.test.mjs
+!tests/coworkComposerAutoResize.test.mjs
+!tests/coworkStreamDeltaProtocol.test.mjs
+!tests/coworkStreamFlushCoalescing.test.mjs
+!tests/coworkConversationTurnReuse.test.mjs

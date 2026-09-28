@@ -50,13 +50,27 @@ export interface SessionMessage {
   msgIndex: number | null;
   content: string;
   senderGlobalMetaId: string | null;
-  /** Chain timestamp of the message (docs/07 §2 event metadata). */
+  /** Chain timestamp of the message (docs/07 §2 event metadata): Unix SECONDS
+   *  (10 digits) — it is `group_chat_messages.chain_timestamp` as the indexer
+   *  writes it (metaWebListenerService.ts; seconds are the chain's own unit,
+   *  see coworkStore.ts). It is normalized to milliseconds at the single
+   *  conversion point in withRowMeta below. */
   chainTimestamp: number | null;
   pinId: string;
 }
 
 /** docs/07 §2: the group message's `index`, `senderMetaId`, `timestamp` are
- *  event metadata — conveyed alongside the envelope, never inside the body. */
+ *  event metadata — conveyed alongside the envelope, never inside the body.
+ *  UNIT CONTRACT: `timestamp` is Unix MILLISECONDS since epoch on BOTH lanes —
+ *  the chain-row lane is normalized by toEventMetaMs() (seconds → ms) and own
+ *  writes are stamped with this.now() (already ms). Adapters compare it against
+ *  ms constants, so feeding one lane seconds is what made a writer and a reader
+ *  reach opposite timeout verdicts on the same pin. A legacy caller handing in
+ *  seconds is still tolerated by magnitude (|v| < 1e11 ⇒ seconds), the same
+ *  rule the third-party replayer uses.
+ *  NOTE: every event payload body also carries a `timestamp` (Date.now(), ms —
+ *  groupChatTransport). Event metadata always means THIS row timestamp, never
+ *  the body one; mixing them is the second unit drift of the same defect. */
 export interface EventMeta {
   index?: number;
   senderMetaId?: string;
@@ -1164,14 +1178,34 @@ function isAbort(err: unknown): boolean {
   return name === 'AbortError' || name === 'TimeoutError' || name === 'BrowserLlmTimeout';
 }
 
+/** Unix MILLISECONDS since epoch — the ONE unit of `EventMeta.timestamp`
+ *  (docs/07 §2). Adapter windows are ms (xiangqi MOVE_TIMEOUT_MS = 900_000) and
+ *  withOwnMeta already stamps ms (this.now()); only the chain-row lane used to
+ *  hand over raw seconds, which is the S1 timebase defect. The range test
+ *  mirrors the third-party replayer's normalizeTs (|v| < 1e11 ⇒ seconds), so an
+ *  already-ms row passes through untouched and a seconds row from a legacy
+ *  writer is still understood. */
+export function toEventMetaMs(v: number): number {
+  return Math.abs(v) < 1e11 ? Math.round(v * 1000) : Math.round(v);
+}
+
 /** Stamp docs/07 §2 event metadata from the group-chat message row itself
  *  (index / senderMetaId / chain timestamp). Missing row fields stay missing —
- *  nothing is synthesized (adapters treat an absent senderMetaId as ''). */
+ *  nothing is synthesized (adapters treat an absent senderMetaId as '').
+ *  The row's `chainTimestamp` is Unix SECONDS (see SessionMessage); this is the
+ *  single conversion point onto the ms event-metadata contract. */
 function withRowMeta(env: MetaStampedEvent, msg: SessionMessage): MetaStampedEvent {
   const meta: EventMeta = {};
   if (msg.msgIndex !== null && msg.msgIndex >= 0) meta.index = msg.msgIndex;
   if (msg.senderGlobalMetaId) meta.senderMetaId = msg.senderGlobalMetaId;
-  if (msg.chainTimestamp !== null && Number.isFinite(msg.chainTimestamp)) meta.timestamp = msg.chainTimestamp;
+  // docs/07 §2: EventMeta.timestamp is Unix MILLISECONDS. The written artifact
+  // is /protocols/simplegroupchat with a ms body timestamp
+  // (groupChatTransport.ts), but the ROW (group_chat_messages.chain_timestamp)
+  // is the indexer's Unix SECONDS (metaWebListenerService.ts). Normalize here —
+  // the only row→event lane in the runtime.
+  if (msg.chainTimestamp !== null && Number.isFinite(msg.chainTimestamp)) {
+    meta.timestamp = toEventMetaMs(msg.chainTimestamp);
+  }
   return { ...env, meta };
 }
 

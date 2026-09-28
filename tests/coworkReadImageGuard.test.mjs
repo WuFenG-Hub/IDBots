@@ -235,9 +235,11 @@ test('N2: first read of a large file registers without denying', () => {
 // silent metadata-only read the glm-5.3-flash incident produced.
 // 2026-09-19: glm-5.3-flash (Zhipu direct) is natively multimodal since the
 // GLM-5.3 launch (image input live-verified on both the Responses and
-// Anthropic endpoints) — it now belongs to the ALLOW side. The DENY side is
-// guarded by the text-only flagship glm-5.3, the incident's gateway spelling
-// z-ai/glm-5.3-flash, and uncatalogued ids.
+// Anthropic endpoints) — it now belongs to the ALLOW side. 2026-09-28: the
+// gateway spelling z-ai/glm-5.3-flash flipped to the ALLOW side too (every
+// gateway proxies the same multimodal SKU). The DENY side is guarded by the
+// text-only flagship glm-5.3, a provider row whose 支持图像输入 checkbox is
+// unchecked, and uncatalogued ids.
 // ---------------------------------------------------------------------------
 
 test('regression: guard composed with model limits — vision route allows, non-vision and unknown routes deny explicitly', async () => {
@@ -264,17 +266,26 @@ test('regression: guard composed with model limits — vision route allows, non-
   });
   assert.equal(flash.action, 'allow');
 
+  // The 2026-09-28 provider-scoping incident shape: the same id exists on an
+  // unchecked provider row — that provider's session denies, exactly as its
+  // checkbox says, even though the catalog model itself is multimodal.
+  const uncheckedRow = resolveCoworkModelLimits({
+    model: { defaultModel: '', availableModels: [] },
+    providers: {
+      opencode: { enabled: true, models: [{ id: 'glm-5.3-flash', supportsImage: false }] },
+    },
+  }, 'glm-5.3-flash', 'opencode');
   // Non-vision routes must deny with an explicit, actionable message instead
   // of a silent metadata-only result: the text-only flagship (today's default
-  // preset) and the 2026-09-04 incident's gateway spelling.
-  for (const modelId of ['glm-5.3', 'z-ai/glm-5.3-flash']) {
+  // preset) and an unchecked provider row for a vision-capable catalog model.
+  for (const supportsVision of [limitsFor('glm-5.3').supportsVision, uncheckedRow.supportsVision]) {
     const incident = evaluateReadImageGuard({
       toolName: 'read',
       absolutePath: PNG_PATH,
       fileStat: stat(1000, 120000),
-      supportsVision: limitsFor(modelId).supportsVision,
+      supportsVision,
     });
-    assert.equal(incident.action, 'deny', `${modelId} must deny image reads`);
+    assert.equal(incident.action, 'deny', 'non-vision route must deny image reads');
     assert.equal(incident.reason, 'no-vision-image');
     assert.match(incident.message, /describe_image/);
     assert.match(incident.message, /NOT loaded/);

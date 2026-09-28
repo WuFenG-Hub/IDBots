@@ -101,6 +101,27 @@ this list):
 6. Likely **waits**: external deliveries, owner decisions, dates — they become
    `wait_note`/`wait_until` later; name them now.
 
+### The owner-decision brief (拍板) — required shape of every `wait_note`
+
+Whenever a sub-project is parked on `kind=owner` (or you propose acceptance),
+the `wait_note` is the OWNER'S DECISION BRIEF: the owner must be able to decide
+WITHOUT reading the session. Write it in the owner's own language, one labeled
+line per section, in exactly this order:
+
+1. **背景与已完成进展** — background and what has been done so far.
+2. **当前状况** — the current situation, concretely.
+3. **需要你拍板的事项** — the decision itself, ONE question.
+4. **选项与利弊** — every option with its trade-offs, your recommendation first.
+5. **推荐项及理由** — the recommendation and why.
+6. **拍板后的下一步** — what happens immediately after the owner's call.
+
+Newlines are preserved by the UI, so keep the sections on their own lines. A
+one-line note ("need your decision on X") is a failed hand-off: it forces the
+owner back into the chat log to reconstruct the context, and an owner who has to
+dig is an owner who delays the task. The same six sections are demanded by the
+`longterm_subtask_wait` / `longterm_subtask_propose` tool descriptions and by
+the heartbeat re-presentation — this is one contract, stated once per surface.
+
 ## Step 2.5 — Anti-drift gates (read the scar before every definition)
 
 Long tasks die by drift: a bot misunderstands, never says so, and builds the

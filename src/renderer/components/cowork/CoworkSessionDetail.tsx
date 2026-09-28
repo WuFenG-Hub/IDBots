@@ -77,6 +77,8 @@ import {
   getCoworkSessionTitleClassName,
   shouldShowA2AServiceSessionId,
 } from './coworkSessionPresentation.js';
+import { isAssistantTurnComplete } from './assistantTurnPresentation.js';
+import { reuseStableTurns } from './conversationTurnReuse.js';
 import {
   buildRefundStatusDismissKey,
   getRefundCardVariant,
@@ -907,7 +909,7 @@ export const buildAutoScrollFollowSignal = (
   return source.map((message) => `${message.id}:${message.content.length}`).join('|');
 };
 
-const buildDisplayItems = (messages: CoworkMessage[]): DisplayItem[] => {
+export const buildDisplayItems = (messages: CoworkMessage[]): DisplayItem[] => {
   const items: DisplayItem[] = [];
   const groupsByToolUseId = new Map<string, ToolGroupItem>();
   let pendingAdjacentGroup: ToolGroupItem | null = null;
@@ -957,7 +959,7 @@ const buildDisplayItems = (messages: CoworkMessage[]): DisplayItem[] => {
   return items;
 };
 
-const buildConversationTurns = (items: DisplayItem[]): ConversationTurn[] => {
+export const buildConversationTurns = (items: DisplayItem[]): ConversationTurn[] => {
   const turns: ConversationTurn[] = [];
   let currentTurn: ConversationTurn | null = null;
   let orphanIndex = 0;
@@ -2046,6 +2048,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   showCopyButtons = true,
   showImagePreviews = true,
   sessionLive = false,
+  isActiveTurn = false,
   onOpenLocalFile,
   onBranch,
 }: {
@@ -2056,6 +2059,8 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   showCopyButtons?: boolean;
   showImagePreviews?: boolean;
   sessionLive?: boolean;
+  /** This turn is the session's current in-flight turn (live session, last turn). */
+  isActiveTurn?: boolean;
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
 }) {
@@ -2289,10 +2294,15 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   // before it (thinking, tool calls, intermediate notes) is the working
   // process. Once the turn completes, the process collapses behind a
   // "Worked for X" header so only the delivery stays visible.
-  const isTurnComplete = !sessionLive || !visibleAssistantItems.some((item) => {
+  // The active turn of a running session stays expanded through inter-round
+  // gaps (tool execution + next model roundtrip), even though nothing carries
+  // isStreaming then — collapsing there is the glm-5.3 fold/unfold flash; see
+  // isAssistantTurnComplete.
+  const hasStreamingItem = visibleAssistantItems.some((item) => {
     const message = item.type === 'tool_group' ? item.group.toolUse : item.message;
     return Boolean(message.metadata?.isStreaming);
   });
+  const isTurnComplete = isAssistantTurnComplete({ sessionLive, isActiveTurn, hasStreamingItem });
   const showInterruptedBanner = !sessionLive && (
     visibleAssistantItems.some((item) => {
       if (item.type === 'system') return item.message.metadata?.dshTurnInterrupted === true;
@@ -2638,14 +2648,26 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   // Branch in a new chat: copies the conversation up to and including the
   // assistant message into a fresh session and switches to it. The forked
   // session records its origin (parentSessionId) for the "branched from" hint.
+  //
+  // Read through a ref so the callback identity survives stream updates:
+  // `currentSession` is replaced on every flush, and a new `onBranch` would
+  // break AssistantTurnBlock's memo for the whole transcript.
+  const branchRequestRef = useRef<{ sessionId: string | null; isStreaming: boolean }>({
+    sessionId: null,
+    isStreaming: false,
+  });
+  useEffect(() => {
+    branchRequestRef.current = { sessionId: currentSession?.id ?? null, isStreaming };
+  }, [currentSession?.id, isStreaming]);
   const handleBranchFromMessage = useCallback(async (msg: CoworkMessage) => {
-    if (!currentSession || isStreaming) return;
+    const { sessionId, isStreaming: streaming } = branchRequestRef.current;
+    if (!sessionId || streaming) return;
     setBranchActionError(null);
-    const forked = await coworkService.forkSession(currentSession.id, msg.id);
+    const forked = await coworkService.forkSession(sessionId, msg.id);
     if (!forked) {
       setBranchActionError(i18nService.t('coworkForkFailed'));
     }
-  }, [currentSession, isStreaming]);
+  }, []);
   const detailRootRef = useRef<HTMLDivElement>(null);
   // Markdown viewer sidebar: .md/.markdown file links in assistant messages
   // open in this right-hand panel instead of an external app. The width is a
@@ -3707,11 +3729,29 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
   // Memoized on the messages array identity so unrelated re-renders keep
   // stable turn references (AssistantTurnBlock is memoized on its props).
+  //
+  // A live stream rewrites the messages array on every flush, which used to
+  // rebuild every turn object and therefore re-render (and re-parse the
+  // Markdown of) the whole transcript. The turns are a pure projection of their
+  // messages, so unchanged turns are handed back by identity — only the
+  // streaming turn is new.
   const sessionMessages = currentSession?.messages;
-  const turns = useMemo(
-    () => buildConversationTurns(sessionMessages ? buildDisplayItems(sessionMessages) : []),
-    [sessionMessages],
-  );
+  const sessionId = currentSession?.id ?? null;
+  const turnsCacheRef = useRef<{ sessionId: string | null; turns: ConversationTurn[] }>({
+    sessionId: null,
+    turns: [],
+  });
+  const turns = useMemo(() => {
+    const cache = turnsCacheRef.current;
+    if (cache.sessionId !== sessionId) {
+      cache.sessionId = sessionId;
+      cache.turns = [];
+    }
+    const rebuilt = buildConversationTurns(sessionMessages ? buildDisplayItems(sessionMessages) : []);
+    const stable = reuseStableTurns(cache.turns, rebuilt);
+    cache.turns = stable;
+    return stable;
+  }, [sessionMessages, sessionId]);
 
   if (!currentSession) {
     return null;
@@ -3748,6 +3788,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             showCopyButtons={!isStreaming}
             showImagePreviews
             sessionLive={isStreaming || currentSession?.status === 'running'}
+            isActiveTurn={currentSession?.status === 'running'}
             onOpenLocalFile={handleOpenLocalFile}
           />
         </div>
@@ -3781,6 +3822,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 showCopyButtons={!isStreaming}
                 showImagePreviews
                 sessionLive={isStreaming || currentSession?.status === 'running'}
+                isActiveTurn={currentSession?.status === 'running' && isLastTurn}
                 onOpenLocalFile={handleOpenLocalFile}
                 onBranch={handleBranchFromMessage}
               />

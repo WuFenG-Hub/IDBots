@@ -118,6 +118,9 @@ export interface LongTermSubtask {
   notes: string;
   /** Expected duration in minutes — the supervision heartbeat checks in when a sub-project runs past it (P1). */
   expectedMinutes: number | null;
+  /** Linked on-chain MetaTask root pinId when this sub-project's execution
+   *  channel is a chain-side multi-bot task (referenced, not mixed in). */
+  metataskRoot: string | null;
   acceptedBy: 'owner' | 'twin' | null;
   createdAt: string;
   updatedAt: string;
@@ -222,6 +225,8 @@ export interface LongTermSubtaskUpdateInput {
   ordinal?: number;
   /** Set or clear the expected-duration budget (null clears back to the default). */
   expectedMinutes?: number | null;
+  /** Link/unlink an on-chain MetaTask root as this sub-project's execution channel. */
+  metataskRoot?: string | null;
 }
 
 export interface LongTermResult<T> {

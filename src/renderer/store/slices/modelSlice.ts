@@ -8,6 +8,9 @@ export interface Model {
   /** 原始 provider key（'deepseek'/'opencode'/...），用于记录默认 provider 选择。 */
   providerKey?: string;
   supportsImage?: boolean;
+  /** Output-token ceiling from the provider's model entry (uncatalogued
+   *  models resolve to the 128K main-process default when absent). */
+  maxOutputTokens?: number;
   options?: ModelOptions;
 }
 

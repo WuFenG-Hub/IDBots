@@ -1,5 +1,11 @@
 export const DEFAULT_COWORK_CONTEXT_WINDOW = 128_000;
-export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 32_768;
+// Uncatalogued-model output ceiling. Current mainstream models cap output far
+// above 32K, and thinking-mode reasoning shares the output budget — the old
+// 32K default truncated long-thinking steps on uncatalogued SKUs and forced
+// the paid truncated-turn auto-continue. 128K keeps headroom without
+// over-declaring for exotic small models (billing is by actual tokens used,
+// so a higher declared ceiling costs nothing for short replies).
+export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 128_000;
 // The whole DeepSeek V4 family shares the same 1M context window. The flash
 // variant powers cowork/A2A automation sessions (via resolveAutomationModelOverride),
 // so it must carry the same window as v4-pro or the context ring wrongly falls back
@@ -7,20 +13,28 @@ export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 32_768;
 export const DEEPSEEK_V4_PRO_CONTEXT_WINDOW = 1_000_000;
 export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
 // The DeepSeek API allows up to 384K output tokens for the whole V4 family
-// (https://api-docs.deepseek.com/zh-cn/quick_start/pricing). 32K is the app's
-// declared ceiling — aligned with the MetaApp bridge's maxOutputTokens
-// validation limit (botBrowserBridgeService) — and only caps generation; it
-// costs nothing for short replies since billing is by actual tokens used.
-// Thinking-mode reasoning shares this budget, so small ceilings truncate
-// thinking-enabled replies (the 2026-08-08 dream-diary failure mode).
-export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 32_768;
-export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 32_768;
-// GLM-5.x actual max output is 128K (z.ai). The app's declared ceiling is
-// 32K — same cap as DeepSeek / the MetaApp bridge / the app-wide default —
-// so thinking-enabled turns cannot exhaust a small ceiling mid-thought
-// (2026-09-14 silent stall on glm-5.3-flash sessions e6af1710, 572751a8,
-// 10b02949).
-export const GLM_MAX_OUTPUT_TOKENS = 32_768;
+// (https://api-docs.deepseek.com/zh-cn/quick_start/pricing). 256K is the app's
+// declared ceiling — aligned with upstream deepseek-harness
+// (DEFAULT_MAX_TOKENS in packages/llm/llm-deepseek/src/defaults.ts), whose
+// flash catalog entries declare no per-model maxTokens so the 256K default
+// applies. Thinking-mode reasoning shares the output budget, so the earlier
+// 32K ceiling truncated effort-high/effort-max steps mid-thought and forced
+// the paid truncated-turn auto-continue (observed as `max-tokens` turn/end
+// reasons in IDBots logs, none upstream); 256K restores parity. This is
+// independent of the MetaApp bridge's maxOutputTokens validation limit
+// (botBrowserBridgeService caps MetaApp-requested completions at 32K — that
+// is a separate API contract and stays unchanged). Billing is by actual
+// tokens used, so a higher declared ceiling costs nothing for short replies.
+// Existing installs' provider rows that pin the old 32_768 default are
+// rewritten once at startup (services/deepseekOutputCeilingMigration).
+export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 256_000;
+export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 256_000;
+// GLM-5.x actual max output is 128K (z.ai); the declared ceiling now matches
+// it. The 2026-09-14 silent-stall incident (glm-5.3-flash sessions e6af1710,
+// 572751a8, 10b02949) came from the old 8192 fallback, not from a generous
+// ceiling — thinking shares the output budget, so matching the real cap
+// removes mid-thought truncation. Billing is by actual tokens used.
+export const GLM_MAX_OUTPUT_TOKENS = 128_000;
 
 export type CoworkModelLimitSource = 'provider-model' | 'available-model' | 'known-model' | 'family-model' | 'fallback';
 
@@ -29,12 +43,15 @@ export interface CoworkModelLimits {
   contextWindow: number;
   maxOutputTokens: number;
   /**
-   * Whether the model can consume image content blocks (vision). Unknown /
-   * unlisted models default to `false` (fail-safe): the Read-image guard then
-   * denies image reads with an explicit pointer to the relay-backed
-   * describe_image instead of silently dropping pixels on a model that
-   * cannot read them (the 2026-09-04 glm-5.3-flash regression). Only models
-   * KNOWN to support vision are marked true.
+   * Whether the model can consume image content blocks (vision). Resolution
+   * order: the session provider's own model row (the Settings "支持图像输入"
+   * checkbox — the user's per-provider override, honored exactly as checked),
+   * then the catalog/family knowledge below. Unknown / unlisted models
+   * default to `false` (fail-safe): the Read-image guard then denies image
+   * reads with an explicit pointer to the relay-backed describe_image
+   * instead of silently dropping pixels on a model that cannot read them
+   * (the 2026-09-04 glm-5.3-flash regression). Only models KNOWN to support
+   * vision are marked true.
    */
   supportsVision: boolean;
   source: CoworkModelLimitSource;
@@ -116,14 +133,17 @@ const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contex
   // the Responses endpoint on 2026-09-18 (matches the official GLM-5.3-Flash
   // docs); the flagship glm-5.3 stays text-only ("目前仅支持处理文本模态信
   // 息"). Older GLM ids keep the historical no-vision/no-1M entries. Gateway
-  // ids (commandcode z-ai/glm-5.3-flash, zai-org/GLM-*) are NOT verified for
-  // image passthrough, so they stay fail-safe false.
+  // ids (commandcode z-ai/glm-5.3-flash, zai-org/GLM-*) serve the SAME
+  // upstream multimodal flash SKU, so they declare vision too (2026-09-28
+  // owner decision: every provider's GLM-5.3 Flash must read images; the
+  // earlier fail-safe false silenced vision for users who proxied the model
+  // through a gateway).
   'glm-5.3-flash': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: true },
   'glm-5.3-flashx': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: true },
   'glm-5.3': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
   'glm-5.2': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
   'glm-5.2-fast': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
-  'z-ai/glm-5.3-flash': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
+  'z-ai/glm-5.3-flash': { contextWindow: 1_048_576, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: true },
   'zai-org/GLM-5.3': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
   'zai-org/GLM-5.2': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
   'zai-org/GLM-5.2-Fast': { contextWindow: 1_000_000, maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: false },
@@ -184,14 +204,21 @@ function deepseekV4FamilyLimits(modelId: string): Partial<Pick<CoworkModelLimits
 /**
  * GLM-4.5+ / GLM-5.x family fallback for gateway ids the exact catalog does
  * not track (`z-ai/glm-5.4-flash`, ephemeral SKUs). Thinking shares the
- * output budget, so uncatalogued ids pin the 32K ceiling even if a future
- * DEFAULT change regresses. Context window stays on the conservative
+ * output budget, so uncatalogued ids pin the family's 128K ceiling even if
+ * a future DEFAULT change regresses. Context window stays on the conservative
  * default unless the exact SKU is catalogued — only the output ceiling is
- * the stall-critical field.
+ * the stall-critical field. Vision is the one modality the family rule
+ * declares: every spelling of the GLM-5.3 flash variant (vendor prefixes,
+ * case variants like `GLM-5.3-Flash`) serves the same natively multimodal
+ * SKU (2026-09-18 live verification), so it resolves vision=true; the
+ * flagship and older families stay fail-safe text-only.
  */
 function glmFamilyLimits(modelId: string): Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>> | undefined {
   const segment = (modelId.split('/').pop() ?? modelId);
   if (!/^glm-(?:4\.[5-9]|[5-9])/i.test(segment)) return undefined;
+  if (/^glm-5\.3-flash/i.test(segment)) {
+    return { maxOutputTokens: GLM_MAX_OUTPUT_TOKENS, supportsVision: true };
+  }
   return { maxOutputTokens: GLM_MAX_OUTPUT_TOKENS };
 }
 
@@ -302,6 +329,14 @@ function buildLimits(
  * false). Used by the OpenAI-compat proxy to degrade image blocks for
  * non-vision models when replaying history.
  */
+/** True for model ids of the DeepSeek V4+/flash family (V4.1 renamed to
+ *  `deepseek-flash`), including gateway-prefixed and ephemeral-SKU forms.
+ *  Shared with the output-ceiling startup migration so both layers agree on
+ *  which provider rows count as "DeepSeek family". */
+export function isDeepSeekFamilyModelId(modelId: string | null | undefined): boolean {
+  return deepseekV4FamilyLimits(normalizeModelId(modelId)) !== undefined;
+}
+
 export function modelSupportsVision(modelId: string | null | undefined): boolean {
   const normalized = normalizeModelId(modelId);
   if (!normalized) {
@@ -316,20 +351,48 @@ export function modelSupportsVision(modelId: string | null | undefined): boolean
 export function resolveCoworkModelLimits(
   appConfig: AppConfigLike,
   overrideModelId?: string | null,
+  providerKey?: string | null,
 ): CoworkModelLimits {
   const modelId = resolveTargetModelId(appConfig, overrideModelId);
+  const scopedProviderKey = typeof providerKey === 'string' ? providerKey.trim() : '';
 
-  for (const provider of Object.values(appConfig.providers ?? {})) {
-    if (!provider?.enabled) {
-      continue;
+  if (scopedProviderKey) {
+    // Provider-scoped resolution (2026-09-28 glm-5.3-flash incident): model
+    // ids are NOT unique across providers — `glm-5.3-flash` exists on zhipu
+    // (supportsImage true), opencode (fail-safe false), and custom gateways
+    // alike. The legacy cross-provider scan returned whichever enabled row
+    // came first in insertion order, so an unrelated provider's fail-safe
+    // flag silently silenced vision for the provider the session actually
+    // runs on. When the caller names the session's provider (every DSH route
+    // resolution does), ONLY that provider's row may contribute explicit
+    // limits; other providers' rows describe different deployments of the
+    // same id and must never win. Enabled-ness is deliberately not required
+    // here: the route was already resolved, and a mid-session disable must
+    // not flip capability answers.
+    const scopedProvider = (appConfig.providers ?? {})[scopedProviderKey];
+    const scopedModel = scopedProvider ? findModelById(scopedProvider.models, modelId) : null;
+    if (scopedModel) {
+      const explicit = getModelLimits(scopedModel);
+      if (explicit.contextWindow || explicit.maxOutputTokens || explicit.supportsVision !== undefined) {
+        return buildLimits(modelId, 'provider-model', explicit);
+      }
     }
-    const model = findModelById(provider.models, modelId);
-    if (!model) {
-      continue;
-    }
-    const explicit = getModelLimits(model);
-    if (explicit.contextWindow || explicit.maxOutputTokens || explicit.supportsVision !== undefined) {
-      return buildLimits(modelId, 'provider-model', explicit);
+    // The named provider has no explicit row for the model (or the row is
+    // flagless): fall through to the provider-agnostic layers below — never
+    // to another provider's row.
+  } else {
+    for (const provider of Object.values(appConfig.providers ?? {})) {
+      if (!provider?.enabled) {
+        continue;
+      }
+      const model = findModelById(provider.models, modelId);
+      if (!model) {
+        continue;
+      }
+      const explicit = getModelLimits(model);
+      if (explicit.contextWindow || explicit.maxOutputTokens || explicit.supportsVision !== undefined) {
+        return buildLimits(modelId, 'provider-model', explicit);
+      }
     }
   }
 

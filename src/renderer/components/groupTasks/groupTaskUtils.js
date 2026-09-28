@@ -272,17 +272,27 @@ export function formatGroupTaskRelativeTime(value, now = Date.now()) {
 
 /**
  * Merge transcript pages by id (ascending). Used when polling: the incoming
- * page replaces rows it overlaps and appends genuinely new ones.
+ * page replaces rows it overlaps and appends genuinely new ones. Re-delivered
+ * pages carry fresh row objects, so when the merged result is field-for-field
+ * identical to `existing` the previous array (and its row references) is
+ * returned unchanged — the memoized transcript rows then skip re-rendering.
  */
 export function mergeTranscriptMessages(existing, incoming) {
+  const current = Array.isArray(existing) ? existing : [];
   const byId = new Map();
-  for (const message of Array.isArray(existing) ? existing : []) {
+  for (const message of current) {
     if (message && typeof message.id === 'number') byId.set(message.id, message);
   }
   for (const message of Array.isArray(incoming) ? incoming : []) {
     if (message && typeof message.id === 'number') byId.set(message.id, message);
   }
-  return [...byId.values()].sort((a, b) => a.id - b.id);
+  const merged = [...byId.values()].sort((a, b) => a.id - b.id);
+  if (!Array.isArray(existing) || merged.length !== current.length) return merged;
+  for (let index = 0; index < merged.length; index += 1) {
+    if (merged[index] === current[index]) continue;
+    if (JSON.stringify(merged[index]) !== JSON.stringify(current[index])) return merged;
+  }
+  return existing;
 }
 
 /** Whether the transcript view should stick to the bottom on new messages. */

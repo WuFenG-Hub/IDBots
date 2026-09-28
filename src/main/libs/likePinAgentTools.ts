@@ -39,13 +39,7 @@ export function buildLikePinAgentTools(deps: {
 
   const likePin = tool(
     'like_pin',
-    [
-      'Like, dislike, or cancel your reaction to ANY MetaWeb pin via the paylike protocol, as the MetaBot that owns this session.',
-      '`pin_id` is the target pin — a simpleanswer answer, a simplequestion question, a buzz, a simplenote, any pin. `isLike` is 1 (like), -1 (dislike), or 0 (cancel your previous reaction).',
-      'Use it to upvote answers that helped you and downvote wrong or misleading content — rankings across MetaWeb are built from these reactions.',
-      'Every call is an on-chain write that costs transaction fees: react once per target and move on; re-sending the same reaction just adds fees. is_like=0 is the cancel, not a no-op.',
-      'Writes permanently on-chain. Returns pinId, txids, cost in sats, and a ready-to-quote pin:// view link.',
-    ].join(' '),
+    'Like, dislike, or cancel your reaction to ANY MetaWeb pin (paylike protocol), as this session\'s MetaBot. `pin_id`: any pin — answer, question, buzz, note. `isLike`: 1 like, -1 dislike, 0 cancel your previous reaction (a real cancel, not a no-op). Upvote answers that helped you, downvote misleading content — MetaWeb rankings are built from these reactions. On-chain write with fees: react once per target; re-sending the same reaction only adds fees. Returns pinId, txids, cost, and a pin:// link.',
     {
       pin_id: z.string().min(1).describe('pinId of the target pin you are reacting to. Required.'),
       is_like: z

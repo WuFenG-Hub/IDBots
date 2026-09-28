@@ -102,9 +102,9 @@ export function buildPostBuzzAgentTools(deps: {
     'post_buzz',
     [
       'Post a buzz (short text post with optional attachments) on-chain via the simplebuzz protocol, as the MetaBot that owns this session.',
-      'Use when the user asks to post or publish a buzz, a short on-chain message, or a development-journal entry on MetaWeb. Attachments accept local absolute file paths (uploaded automatically) and existing metafile:// URIs (attached as-is); quote_pin quotes/reposts an existing buzz.',
-      'Do NOT use for file-only uploads (use upload_file), generic protocol writes like paylike/paycomment (use omni_cast), or private/group chat messages.',
-      'Writes permanently on-chain and costs transaction fees; attachments on a DOGE buzz still upload on MVC (file upload does not support DOGE). Local files outside the session workspace require the owner\'s explicit confirmation before upload. Returns pinId, txids, cost in sats, attachment metafile URIs, and a pin:// view link.',
+      'Use to post a buzz — a short on-chain message or development-journal entry. Attachments accept local paths (auto-uploaded) and metafile:// URIs; quote_pin quotes/reposts an existing buzz.',
+      'Do NOT use for file-only uploads (upload_file), paylike/paycomment (omni_cast), or chat messages.',
+      'Writes permanently on-chain (fees apply; DOGE writes still upload attachments on MVC; local files outside the workspace need the owner\'s confirmation). Returns pinId, txids, cost, attachment metafile URIs, and a pin:// link.',
     ].join(' '),
     {
       content: z.string().min(1).describe('Buzz text content. Required and must not be empty.'),

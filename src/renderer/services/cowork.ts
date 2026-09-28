@@ -9,6 +9,7 @@ import {
   addMessage,
   prependMessages,
   updateMessageContent,
+  appendMessageContent,
   setMessageFeedback as setMessageFeedbackAction,
   clearMessageFeedback as clearMessageFeedbackAction,
   loadSessionFeedback as loadSessionFeedbackAction,
@@ -27,6 +28,7 @@ import {
 import {
   addBrowserMessage,
   updateBrowserMessageContent,
+  appendBrowserMessageContent,
   updateBrowserSessionStatus,
 } from '../store/slices/browserCoworkSlice';
 import type {
@@ -76,10 +78,56 @@ import {
   shouldRegisterStreamSessionFromFetch,
 } from './coworkStreamPresentation';
 import { i18nService } from './i18n';
+import { metabotAvatarCache } from './metabotAvatarCache';
+import {
+  CoworkStreamReassembler,
+  type CoworkStreamUpdatePayload,
+} from './coworkStreamReassembly';
+
+/**
+ * Trailing window that folds a burst of session-list refresh requests into one
+ * read. Event-driven refreshes (a stream message carrying refreshSessionSummary,
+ * a peer-profile refresh, a background session appearing) arrive faster than a
+ * full list read completes; without the fold every one of them sent its own
+ * ~36MB-shaped list read through IPC.
+ */
+const SESSIONS_RELOAD_DEBOUNCE_MS = 300;
+
+/**
+ * Ceiling on how long a buffered stream update may wait for the next animation
+ * frame. A hidden or backgrounded window throttles frames; live tokens must
+ * still land in the stores.
+ */
+const STREAM_FLUSH_MAX_DELAY_MS = 100;
+/** Bound on the per-message stream baselines kept for the append fast path. */
+const STREAM_DISPATCHED_MAX_KEYS = 256;
+
+type PendingStreamUpdate = {
+  sessionId: string;
+  messageId: string;
+  /** Accumulated stream text, or null for a metadata-only update. */
+  text: string | null;
+  metadata?: CoworkMessage['metadata'];
+  /** What this service last wrote for the message (see rememberStreamDispatched). */
+  dispatched: string | null;
+};
 
 class CoworkService {
   private streamListenerCleanups: Array<() => void> = [];
   private initialized = false;
+  /** Incremental stream reassembly (renderer half of the delta protocol). */
+  private readonly streamReassembly = new CoworkStreamReassembler();
+  /** Buffered stream updates waiting for the next flush. */
+  private readonly streamPending = new Map<string, PendingStreamUpdate>();
+  /** Per-message text the stores were last given, for the append fast path. */
+  private readonly streamDispatched = new Map<string, string>();
+  private streamFlushHandle: ReturnType<typeof setTimeout> | null = null;
+  private streamFlushFrame: number | null = null;
+  /** The session-list read in progress, if any; reads never overlap. */
+  private sessionsLoadInFlight: Promise<void> | null = null;
+  private sessionsReloadTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Callers waiting for the next read the current burst will produce. */
+  private sessionsReloadWaiters: Array<() => void> = [];
 
   async init(): Promise<void> {
     if (this.initialized) return;
@@ -137,6 +185,11 @@ class CoworkService {
                 metabotId: s.metabotId ?? null,
                 metabotName: s.metabotName ?? null,
                 metabotAvatar: s.metabotAvatar ?? null,
+                // Stream-created background sessions (long-term task runs,
+                // orchestration runs, scheduled runs) must arrive with their
+                // fold marker: without it a machine-started session would pop
+                // into the human list until the next full refresh.
+                autoOrigin: s.autoOrigin ?? null,
                 serviceOrderSummary: s.serviceOrderSummary ?? null,
               }));
             }
@@ -225,10 +278,11 @@ class CoworkService {
     });
     this.streamListenerCleanups.push(messageCleanup);
 
-    // Message update listener (for streaming content updates)
-    const messageUpdateCleanup = cowork.onStreamMessageUpdate(({ sessionId, messageId, content, metadata }) => {
-      store.dispatch(updateMessageContent({ sessionId, messageId, content, metadata }));
-      store.dispatch(updateBrowserMessageContent({ sessionId, messageId, content, metadata }));
+    // Message update listener (for streaming content updates). Payloads are
+    // incremental (see main/libs/coworkStreamUiDelta.ts); the reassembler turns
+    // them back into the accumulated text the store has always received.
+    const messageUpdateCleanup = cowork.onStreamMessageUpdate((payload) => {
+      this.handleStreamMessageUpdate(payload);
     });
     this.streamListenerCleanups.push(messageUpdateCleanup);
 
@@ -315,13 +369,294 @@ class CoworkService {
   private cleanupListeners(): void {
     this.streamListenerCleanups.forEach(cleanup => cleanup());
     this.streamListenerCleanups = [];
+    this.streamReassembly.reset();
+    this.streamPending.clear();
+    this.cancelStreamFlush();
   }
 
-  async loadSessions(): Promise<void> {
-    const result = await window.electron?.cowork?.listSessions();
-    if (result?.success && result.sessions) {
-      store.dispatch(setSessions(result.sessions));
+  /**
+   * Reassemble one incremental stream update into the pending buffer.
+   *
+   * Updates are coalesced rather than dispatched on arrival: several turns can
+   * stream at once (parallel sessions, IM/A2A relays, the Bot Browser panel),
+   * and each dispatch re-renders every component subscribed to the cowork
+   * slice. One flush per animation frame (bounded by a trailing timer for
+   * background windows) keeps the transcript at paint cadence while the stores
+   * still receive the accumulated text they always received.
+   */
+  private handleStreamMessageUpdate(payload: CoworkStreamUpdatePayload): void {
+    const result = this.streamReassembly.apply(payload);
+    switch (result.kind) {
+      case 'full':
+      case 'append': {
+        const metadata = result.kind === 'full' ? result.metadata : undefined;
+        this.bufferStreamContent(result.sessionId, result.messageId, result.text, metadata, {
+          // Finalize is the authoritative sync point for a message; never make
+          // the settled state wait for the next paint.
+          immediate: Boolean(metadata?.isFinal),
+        });
+        break;
+      }
+      case 'metadata':
+        // Metadata-only updates stay immediate: they are rare (finalize
+        // bookkeeping, private-chat tags) and carry no content to coalesce.
+        this.bufferStreamContent(result.sessionId, result.messageId, undefined, result.metadata, {
+          immediate: Boolean(result.metadata?.isFinal),
+        });
+        break;
+      case 'desync':
+        // The delta does not fit the text held here (dropped payload, session
+        // switched in mid-stream, renderer reloaded). Ask the main process for
+        // the text the stream is appending to; the finalize payload is always
+        // full, so ignoring a delta can only cost live smoothness.
+        void this.resyncStreamMessage(result.sessionId, result.messageId);
+        break;
+      default:
+        break;
     }
+  }
+
+  private bufferStreamContent(
+    sessionId: string,
+    messageId: string,
+    text: string | undefined,
+    metadata?: CoworkMessage['metadata'],
+    options?: { immediate?: boolean },
+  ): void {
+    const key = `${sessionId}\0${messageId}`;
+    const pending = this.streamPending.get(key) ?? {
+      sessionId,
+      messageId,
+      text: null,
+      dispatched: this.streamDispatched.get(key) ?? null,
+    };
+    if (text !== undefined) pending.text = text;
+    if (metadata !== undefined) pending.metadata = metadata;
+    this.streamPending.set(key, pending);
+    if (options?.immediate) {
+      this.flushStreamPending();
+      return;
+    }
+    this.scheduleStreamFlush();
+  }
+
+  /**
+   * Land every buffered stream update in both stores. The delta form is used
+   * only when the store's copy still holds exactly what this service last
+   * wrote for it; anything else (a slice reloaded mid-stream, a resync, the
+   * panel showing a different point in time) gets the whole text.
+   */
+  private flushStreamPending(): void {
+    this.cancelStreamFlush();
+    if (this.streamPending.size === 0) return;
+    const pending = [...this.streamPending.values()];
+    this.streamPending.clear();
+    const taskState = store.getState();
+    /** Session ids already given their "has traffic" bookkeeping this flush. */
+    const trafficMarked = new Set<string>();
+    const targets: Array<{
+      session: CoworkSession | null | undefined;
+      /** The slice that also keeps the unread marker for streamed traffic. */
+      tracksTraffic: boolean;
+      append: (payload: { sessionId: string; messageId: string; delta: string }) => void;
+      update: (payload: { sessionId: string; messageId: string; content?: string; metadata?: CoworkMessage['metadata'] }) => void;
+    }> = [
+      {
+        session: taskState.cowork.currentSession,
+        tracksTraffic: true,
+        append: (payload) => store.dispatch(appendMessageContent(payload)),
+        update: (payload) => store.dispatch(updateMessageContent(payload)),
+      },
+      {
+        session: taskState.browserCowork.currentSession,
+        tracksTraffic: false,
+        append: (payload) => store.dispatch(appendBrowserMessageContent(payload)),
+        update: (payload) => store.dispatch(updateBrowserMessageContent(payload)),
+      },
+    ];
+
+    for (const entry of pending) {
+      const key = `${entry.sessionId}\0${entry.messageId}`;
+
+      for (const target of targets) {
+        if (target.session?.id !== entry.sessionId) {
+          // The slice is not showing this session, but the reducer still keeps
+          // its "this session has traffic" bookkeeping on every stream update —
+          // the unread marker a background turn raises. Replay exactly that,
+          // once per session and flush, without any content.
+          if (target.tracksTraffic && !trafficMarked.has(entry.sessionId)) {
+            trafficMarked.add(entry.sessionId);
+            target.update({
+              sessionId: entry.sessionId,
+              messageId: entry.messageId,
+              ...(entry.metadata !== undefined ? { metadata: entry.metadata } : {}),
+            });
+          }
+          continue;
+        }
+        const message = target.session.messages.find((item) => item.id === entry.messageId);
+        if (!message) continue;
+        if (entry.text === null) {
+          if (entry.metadata !== undefined) {
+            target.update({ sessionId: entry.sessionId, messageId: entry.messageId, metadata: entry.metadata });
+          }
+          continue;
+        }
+        if (message.content === entry.text) {
+          // Nothing to append, but a metadata payload (finalize settles the
+          // bubble) still has to land.
+          if (entry.metadata !== undefined) {
+            target.update({ sessionId: entry.sessionId, messageId: entry.messageId, metadata: entry.metadata });
+          }
+          continue;
+        }
+        if (entry.dispatched !== null
+          && message.content === entry.dispatched
+          && entry.text.startsWith(entry.dispatched)) {
+          target.append({
+            sessionId: entry.sessionId,
+            messageId: entry.messageId,
+            delta: entry.text.slice(entry.dispatched.length),
+          });
+          continue;
+        }
+        target.update({
+          sessionId: entry.sessionId,
+          messageId: entry.messageId,
+          content: entry.text,
+          ...(entry.metadata !== undefined ? { metadata: entry.metadata } : {}),
+        });
+      }
+
+      this.rememberStreamDispatched(key, entry);
+    }
+  }
+
+  /**
+   * Remember what the stores now hold for a message so the next flush can send
+   * only the tail — and forget it as soon as the message settles, so a
+   * long-lived app does not keep one content string per streamed message.
+   * Losing the record only costs one full update.
+   */
+  private rememberStreamDispatched(key: string, entry: PendingStreamUpdate): void {
+    if (entry.text === null) return;
+    this.streamDispatched.delete(key);
+    if (entry.metadata?.isFinal) return;
+    this.streamDispatched.set(key, entry.text);
+    while (this.streamDispatched.size > STREAM_DISPATCHED_MAX_KEYS) {
+      const oldest = this.streamDispatched.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.streamDispatched.delete(oldest);
+    }
+  }
+
+  /**
+   * One flush per frame, with a trailing timer as the ceiling: a backgrounded
+   * window throttles animation frames, and live tokens must still land.
+   */
+  private scheduleStreamFlush(): void {
+    if (this.streamFlushHandle !== null || this.streamFlushFrame !== null) return;
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      this.streamFlushFrame = window.requestAnimationFrame(() => {
+        this.streamFlushFrame = null;
+        this.flushStreamPending();
+      });
+    }
+    this.streamFlushHandle = setTimeout(() => {
+      this.streamFlushHandle = null;
+      this.flushStreamPending();
+    }, STREAM_FLUSH_MAX_DELAY_MS);
+  }
+
+  private cancelStreamFlush(): void {
+    if (this.streamFlushFrame !== null && typeof window !== 'undefined') {
+      window.cancelAnimationFrame?.(this.streamFlushFrame);
+    }
+    this.streamFlushFrame = null;
+    if (this.streamFlushHandle !== null) clearTimeout(this.streamFlushHandle);
+    this.streamFlushHandle = null;
+  }
+
+  private async resyncStreamMessage(sessionId: string, messageId: string): Promise<void> {
+    let content: string | null = null;
+    try {
+      const result = await window.electron?.cowork?.getStreamLiveContent?.({ sessionId, messageId });
+      if (result?.success && typeof result.content === 'string') content = result.content;
+    } catch {
+      content = null;
+    }
+    const applied = this.streamReassembly.resolveResync(sessionId, messageId, content);
+    if (applied.kind === 'full') {
+      this.bufferStreamContent(applied.sessionId, applied.messageId, applied.text);
+    }
+  }
+
+  /**
+   * Refresh the session list.
+   *
+   * One read runs at a time: a request that arrives while a read is in flight
+   * (or while a burst is already queued) joins that burst and resolves only once
+   * a read that started after it has completed, so callers that reload and then
+   * inspect the list still see their own change. An idle request reads at once —
+   * the init path is never delayed.
+   */
+  async loadSessions(): Promise<void> {
+    if (this.sessionsLoadInFlight || this.sessionsReloadTimer) {
+      await this.queueSessionsReload();
+      return;
+    }
+    await this.readSessions();
+  }
+
+  /** Splice the waiters a read covers: it resolves the burst queued before it
+   * started, while requests made during the read wait for the next one. */
+  private async readSessions(): Promise<void> {
+    const waiters = this.sessionsReloadWaiters.splice(0);
+    const read = (async () => {
+      const result = await window.electron?.cowork?.listSessions();
+      if (result?.success && result.sessions) {
+        store.dispatch(setSessions(await metabotAvatarCache.attachAvatars(result.sessions)));
+      }
+    })();
+    this.sessionsLoadInFlight = read;
+    try {
+      await read;
+    } finally {
+      if (this.sessionsLoadInFlight === read) {
+        this.sessionsLoadInFlight = null;
+      }
+      waiters.forEach((resolve) => resolve());
+    }
+  }
+
+  /** Queue this request into the trailing burst and wait for its read. The
+   * read is best effort for the queued callers: a failed one resolves them
+   * without an error, and the list simply stays as it was. */
+  private queueSessionsReload(): Promise<void> {
+    if (this.sessionsReloadTimer) {
+      clearTimeout(this.sessionsReloadTimer);
+    }
+    const waiter = new Promise<void>((resolve) => {
+      this.sessionsReloadWaiters.push(resolve);
+    });
+    this.sessionsReloadTimer = setTimeout(() => {
+      this.sessionsReloadTimer = null;
+      void this.flushSessionsReload().catch(() => undefined);
+    }, SESSIONS_RELOAD_DEBOUNCE_MS);
+    return waiter;
+  }
+
+  private async flushSessionsReload(): Promise<void> {
+    while (this.sessionsLoadInFlight) {
+      // The running read started before the newest request, so it cannot
+      // satisfy it; wait it out and then read once for the whole burst.
+      await this.sessionsLoadInFlight.catch(() => undefined);
+    }
+    if (this.sessionsReloadTimer) {
+      // A newer request re-armed the window while waiting; its own flush runs.
+      return;
+    }
+    await this.readSessions();
   }
 
   async loadConfig(): Promise<void> {

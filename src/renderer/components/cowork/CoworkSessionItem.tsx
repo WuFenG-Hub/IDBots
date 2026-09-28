@@ -55,7 +55,12 @@ const PushPinIcon: React.FC<React.SVGProps<SVGSVGElement> & { slashed?: boolean 
   </svg>
 );
 
-const formatRelativeTime = (timestamp: number): { compact: string; full: string } => {
+/**
+ * Compact ("5m") + full ("5 minutes ago") relative-time pair for a session row.
+ * Exported so list-level chrome (the Auto Tasks fold header) can stamp the same
+ * newest-activity time the rows themselves show.
+ */
+export const formatRelativeTime = (timestamp: number): { compact: string; full: string } => {
   const now = Date.now();
   const diff = now - timestamp;
 

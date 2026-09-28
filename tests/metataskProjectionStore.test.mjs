@@ -1,0 +1,134 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
+const { MetaTaskProjectionStore } = require('../dist-electron/main/services/metatask/projectionStore.js');
+const { replayMetaTask } = require('../dist-electron/main/services/metatask/engine.js');
+
+/**
+ * MetaTask projection store (P1): additive idempotent migration + event cache
+ * round-trip + projection persistence + board derivation (my-roles) + refresh
+ * state transitions. The store is a rebuildable cache of the chain replay.
+ */
+
+const ev = (pinId, path, body, author = 'idq1somebot', height = 190_100) => ({
+  pinId,
+  path,
+  author,
+  height,
+  txIndex: 0,
+  timestampMs: 1_790_000_000_000,
+  body,
+});
+
+const buildProjection = () => {
+  const events = [
+    ev('tree0000000001i0', 'tree', {
+      root: 'r1',
+      nodes: [
+        { id: 'r1', parent: null, title: 'root', kind: 'aggregate', specid: null, params: {}, deps: [], weight: 5000 },
+        { id: 't1', parent: 'r1', title: 'leaf', kind: 'proof', specid: null, params: {}, deps: [], weight: 5000 },
+      ],
+    }, 'idq1publisherx'),
+    ev('task0000000001i0', 'task', {
+      title: 'store test task',
+      treeid: 'tree0000000001i0',
+      policy: { verify_quorum: 2, claim_ttl_hours: 48, verify_window_hours: 72 },
+      tags: ['metatask'],
+    }, 'idq1publisherx'),
+    ev('claim00000001i0', 'claim', { taskid: 'task0000000001i0', node: 't1' }, 'idq1workerbee'),
+  ];
+  return replayMetaTask(events, { rootPinId: 'task0000000001i0' });
+};
+
+async function openStore() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-metatask-'));
+  const sqliteStore = await SqliteStore.create(dir);
+  const store = new MetaTaskProjectionStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  return { dir, sqliteStore, store };
+}
+
+test('metatask projection store: idempotent migration', async () => {
+  const { dir, sqliteStore, store } = await openStore();
+  try {
+    // Re-instantiate on the same database: tables already exist, no error.
+    const again = new MetaTaskProjectionStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+    assert.ok(again);
+  } finally {
+    sqliteStore.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('metatask projection store: event cache round-trip', async () => {
+  const { dir, sqliteStore, store } = await openStore();
+  try {
+    const events = [
+      ev('aaa0000000001i0', 'claim', { taskid: 't', node: 'n1' }, 'idq1a', 190_100),
+      ev('aaa0000000002i0', 'verify', { targetid: 'x', verdict: 'pass', semantic_check: 'ok' }, 'idq1b', 190_101),
+    ];
+    store.upsertEvents(events);
+    store.upsertEvents(events); // idempotent by pin_id
+    const loaded = store.loadEvents();
+    assert.equal(loaded.length, 2);
+    assert.equal(loaded[0].path, 'claim');
+    assert.equal(loaded[0].body.node, 'n1');
+  } finally {
+    sqliteStore.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('metatask projection store: projections persist and board derives my-roles', async () => {
+  const { dir, sqliteStore, store } = await openStore();
+  try {
+    const projection = buildProjection();
+    store.saveProjections([projection]);
+    const loaded = store.getProjection(projection.rootPinId);
+    assert.ok(loaded);
+    assert.equal(loaded.title, 'store test task');
+    assert.equal(loaded.nodeStates.t1.status, 'claimed');
+
+    // The worker's roster marks the task as "participating"; a stranger's does not.
+    const asWorker = store.board(['idq1workerbee']);
+    assert.equal(asWorker.tasks.length, 1);
+    assert.deepEqual(asWorker.tasks[0].myRoles, ['participant']);
+    const asPublisher = store.board(['idq1publisherx']);
+    assert.deepEqual(asPublisher.tasks[0].myRoles, ['publisher']);
+    const asStranger = store.board(['idq1stranger']);
+    assert.deepEqual(asStranger.tasks[0].myRoles, []);
+
+    // Stale roots drop out on the next save.
+    store.saveProjections([]);
+    assert.equal(store.board([]).tasks.length, 0);
+  } finally {
+    sqliteStore.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('metatask projection store: refresh state transitions', async () => {
+  const { dir, sqliteStore, store } = await openStore();
+  try {
+    assert.equal(store.refreshInfo().refreshing, false);
+    store.setRefreshing(true);
+    assert.equal(store.refreshInfo().refreshing, true);
+    store.markRefreshDone(true, null, 190_151);
+    const info = store.refreshInfo();
+    assert.equal(info.refreshing, false);
+    assert.equal(info.boundaryBlock, 190_151);
+    assert.equal(info.lastError, null);
+    assert.ok(info.lastOkAtMs);
+    const seq1 = store.bumpSeq();
+    const seq2 = store.bumpSeq();
+    assert.equal(seq2, seq1 + 1);
+  } finally {
+    sqliteStore.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

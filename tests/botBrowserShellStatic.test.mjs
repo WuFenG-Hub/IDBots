@@ -24,7 +24,17 @@ test('Sidebar owns the mode switch while App keeps the Browser surface', () => {
   assert.ok(existsSync(switchPath), 'BotBrowserModeSwitch.tsx should exist');
   assert.ok(existsSync(shellPath), 'useBotBrowserShell.ts should exist');
   assert.match(sidebarSource, /import BotBrowserModeSwitch from '\.\.\/features\/botBrowser\/BotBrowserModeSwitch';/);
-  assert.match(appSource, /import \{ BotBrowserSurface \} from '\.\/features\/botBrowser\/BotBrowserSurface';/);
+  // The surface (and the ~550 kB ABC browser vendor chunk behind it) is code
+  // split off the startup bundle; App binds it lazily under the same name.
+  assert.match(
+    appSource,
+    /const BotBrowserSurface = React\.lazy\(\(\) =>\s*import\('\.\/features\/botBrowser\/BotBrowserSurface'\)\.then\(\(module\) => \(\{ default: module\.BotBrowserSurface \}\)\)\);/,
+  );
+  assert.doesNotMatch(
+    appSource,
+    /^import \{ BotBrowserSurface \} from '\.\/features\/botBrowser\/BotBrowserSurface';/m,
+    'the surface must not be statically imported by App',
+  );
   assert.match(sidebarSource, /<BotBrowserModeSwitch/);
   assert.doesNotMatch(appSource, /<BotBrowserModeSwitch/);
   assert.match(appSource, /<BotBrowserSurface/);

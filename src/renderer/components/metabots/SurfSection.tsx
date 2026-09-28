@@ -1,5 +1,5 @@
 /**
- * MetaWeb surf ("AI 冲浪") section for the MetaBot editor's Advanced tab.
+ * MetaWeb surf ("AI 冲浪") section for the MetaBot editor's Surf tab.
  *
  * Lets the owner control and observe the bot's autonomous MetaWeb surfing:
  * the surf-before-dream toggle and the per-surf on-chain interaction budget
@@ -42,9 +42,10 @@ interface SurfSectionProps {
 }
 
 const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
-  // Surf-before-dream toggle; the kv default (no record) means OFF (opt-in —
-  // every nightly surf spends LLM tokens and gas).
-  const [surfBeforeDream, setSurfBeforeDream] = useState(false);
+  // Surf-before-dream toggle; the kv default (no record) means ON (owner
+  // decision, 2026-09-28 — pre-dream surfing ships enabled; an explicit '0'
+  // opts the bot out).
+  const [surfBeforeDream, setSurfBeforeDream] = useState(true);
   const [surfBeforeDreamLoaded, setSurfBeforeDreamLoaded] = useState(false);
   // Interaction budget, kept as the raw input string while typing.
   const [surfBudget, setSurfBudget] = useState(String(DEFAULT_SURF_INTERACTION_BUDGET));
@@ -60,10 +61,10 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
   const [runVersion, setRunVersion] = useState(0);
 
   // Load both surf settings on mount / metabotId change. A missing or failed
-  // read falls back to the product defaults (OFF, 20).
+  // read falls back to the product defaults (surf-before-dream ON, budget 50).
   useEffect(() => {
     let cancelled = false;
-    setSurfBeforeDream(false);
+    setSurfBeforeDream(true);
     setSurfBeforeDreamLoaded(false);
     setSurfBudget(String(DEFAULT_SURF_INTERACTION_BUDGET));
     setSettingsError('');
@@ -71,12 +72,12 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
     window.electron.metabot.getSetting(metabotId, SURF_BEFORE_DREAM_ENABLED_KEY)
       .then((result) => {
         if (cancelled) return;
-        setSurfBeforeDream(result.success ? result.value === '1' : false);
+        setSurfBeforeDream(result.success ? result.value !== '0' : true);
         setSurfBeforeDreamLoaded(true);
       })
       .catch(() => {
         if (cancelled) return;
-        setSurfBeforeDream(false);
+        setSurfBeforeDream(true);
         setSurfBeforeDreamLoaded(true);
       });
     window.electron.metabot.getSetting(metabotId, SURF_INTERACTION_BUDGET_KEY)
@@ -178,7 +179,7 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
 
   return (
     <div
-      className="space-y-3 pt-4 mt-4 border-t dark:border-claude-darkBorder border-claude-border"
+      className="space-y-3"
       data-slot="metabot-surf-section"
     >
       <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider dark:text-claude-darkTextSecondary text-claude-textSecondary">

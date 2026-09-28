@@ -59,9 +59,12 @@ overrides:
 # patch-package writes patched files in place, which would mutate the
 # hard-linked pnpm store; pnpm instead applies the patch to a private store
 # entry, so fresh installs are patched without a postinstall pass. The patch
-# file below is the former patches/ entry, unchanged (same git-diff format).
+# (allow-forms on the MetaApp html-frame sandbox constants/branches) is
+# regenerated per ABC release: `pnpm patch @openagentinternet/agent-browser-ui`
+# + apply the allow-forms edits + `pnpm patch-commit`, then rename the
+# generated file to the patches/<scope>+<name>+<version>.patch convention.
 patchedDependencies:
-  '@openagentinternet/agent-browser-ui@0.6.1': patches/@openagentinternet+agent-browser-ui+0.6.1.patch
+  '@openagentinternet/agent-browser-ui@0.6.2': patches/@openagentinternet+agent-browser-ui+0.6.2.patch
 
 # Dependencies whose install scripts are allowed to run (pnpm blocks them by
 # default): electron downloads its platform binary, esbuild installs its
@@ -79,8 +82,8 @@ allowBuilds:
   utf-8-validate: true
 
 minimumReleaseAgeExclude:
-  - '@openagentinternet/agent-browser-core@0.6.1'
-  - '@openagentinternet/agent-browser-host-contract@0.6.1'
-  - '@openagentinternet/agent-browser-name-resolvers@0.6.1'
-  - '@openagentinternet/agent-browser-renderers@0.6.1'
-  - '@openagentinternet/agent-browser-ui@0.6.1'
+  - '@openagentinternet/agent-browser-core@0.6.2'
+  - '@openagentinternet/agent-browser-host-contract@0.6.2'
+  - '@openagentinternet/agent-browser-name-resolvers@0.6.2'
+  - '@openagentinternet/agent-browser-renderers@0.6.2'
+  - '@openagentinternet/agent-browser-ui@0.6.2'

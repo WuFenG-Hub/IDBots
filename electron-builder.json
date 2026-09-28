@@ -59,6 +59,7 @@
     "target": [
       "dmg"
     ],
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "icon": "build/icons/mac/icon.icns",
     "category": "public.app-category.productivity",
     "notarize": false,
@@ -76,7 +77,8 @@
       "CFBundleIconName": "icon",
       "NSCalendarsUsageDescription": "IDBots 需要访问您的日历来帮助您查看和管理日程安排，例如查找事件、创建会议等。",
       "NSRemindersUsageDescription": "IDBots 需要访问您的提醒事项来帮助您管理待办事项。",
-      "NSAppleEventsUsageDescription": "IDBots 需要使用 Apple Events 来控制 Calendar 应用执行自动化操作。"
+      "NSAppleEventsUsageDescription": "IDBots 需要使用 Apple Events 来控制 Calendar 应用执行自动化操作。",
+      "NSLocationWhenInUseUsageDescription": "IDBots 需要访问您的位置，以便您的 Bot 回答基于位置的查询（例如查找附近的服务）。精确定位仅在您同意后使用。"
     }
   },
   "dmg": {

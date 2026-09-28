@@ -115,11 +115,11 @@ test('unknown bot is rejected', async () => {
   await assert.rejects(() => service.runSurfAndWait(9, 'manual-ui'), /not found/);
 });
 
-test('pre-dream surf toggle is opt-in: unset means OFF, explicit 1 opts in, 0 stays off', () => {
-  // Owner decision (2026-09-14): nightly surfing spends LLM tokens and gas,
-  // so the DEFAULT flipped from ON to OFF. Every bot that never touched the
-  // toggle (the pre-upgrade state of the fleet) stops pre-dream surfing
-  // until the user opts in; an explicit '1'/'0' always wins.
+test('pre-dream surf toggle is default-on: unset means ON, explicit 0 opts out, 1 stays on', () => {
+  // Owner decision (2026-09-28): pre-dream surfing ships enabled for every
+  // bot, flipping the 2026-09-14 opt-in default. An explicit '0' opts out
+  // (users who turned it off keep it off); an explicit '1' is a no-op
+  // against the default.
   const settings = new Map();
   const db = createNativeSqliteDatabase(':memory:');
   const store = new MetawebSurfStore(db, () => {});
@@ -133,11 +133,11 @@ test('pre-dream surf toggle is opt-in: unset means OFF, explicit 1 opts in, 0 st
     registry: [],
     nowMs: () => NOW_MS,
   });
-  assert.equal(service.shouldPreDreamSurf(7), false, 'unset means OFF (opt-in default)');
+  assert.equal(service.shouldPreDreamSurf(7), true, 'unset means ON (default-on)');
   settings.set('surf_before_dream_enabled', '1');
-  assert.equal(service.shouldPreDreamSurf(7), true, 'explicit 1 opts in');
+  assert.equal(service.shouldPreDreamSurf(7), true, 'explicit 1 stays on');
   settings.set('surf_before_dream_enabled', '0');
-  assert.equal(service.shouldPreDreamSurf(7), false, 'explicit 0 stays off');
+  assert.equal(service.shouldPreDreamSurf(7), false, 'explicit 0 opts out');
 });
 
 test('memory-disabled bot: manual surf runs degraded, pre-dream stays gated (review 2, item 9B)', async () => {

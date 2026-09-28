@@ -377,3 +377,66 @@ test('a group-task worker session degrades to the bot fallback brain and logs th
   assert.ok(logText.includes(sessionId), 'the degradation log line names the worker session')
   await result.completed
 })
+
+// Quota death joins the fallback switch (2026-09-28 nightly-automation
+// post-mortem: opencode credit exhaustion killed every nightly study/dream
+// turn with 429 GoUsageLimitError while the bot's zhipu fallback brain sat
+// unused). A QUOTA error is NOT transient — it never enters the same-route
+// resume ladder — but the fallback switch must still fire, with a SINGLE
+// attempt on the fallback route (exhausted credit does not heal, so no
+// ladder there).
+const quotaError = () => ({ kind: 'error', error: { code: 'QUOTA', message: '429: {"type":"GoUsageLimitError","message":"Go usage limit exceeded"}' } })
+
+test('a quota death on the primary route switches to the fallback brain with a single attempt and completes', async () => {
+  const result = await driveTurn({
+    sessionId: 'gt02-quota-fallback-success',
+    metabot: BOT_WITH_FALLBACK,
+    // Call 1 dies on quota; the fallback attempt (call 2) succeeds. No
+    // same-route resumes and no fallback ladder may appear.
+    script: (_input, callNo) => (callNo === 1 ? quotaError() : { kind: 'completed' }),
+  })
+
+  assert.equal(result.runTurnCalls.length, 2, '1 initial quota death + 1 single fallback attempt')
+  assert.equal(result.runTurnCalls[0].provider.key, 'gw-a')
+  assert.equal(result.runTurnCalls[1].provider.key, 'gw-b', 'the out-of-credit turn degrades to the fallback brain')
+  assert.equal(result.runTurnCalls[1].provider.model, 'mock-b1')
+  assert.equal(result.sessionRow?.status, 'completed')
+  assert.equal(result.errors.length, 0)
+  await result.completed
+})
+
+// When the fallback route ALSO dies on quota, the turn settles with the
+// error whose quota notice names the route that actually ran out — the
+// fallback route (via lastAttemptRoute), not the primary.
+test('a quota death on the fallback route settles with the notice naming the fallback route', async () => {
+  const result = await driveTurn({
+    sessionId: 'gt02-quota-both-routes-dead',
+    metabot: BOT_WITH_FALLBACK,
+    script: (_input) => quotaError(),
+  })
+
+  assert.equal(result.runTurnCalls.length, 2, '1 initial + 1 single fallback attempt — no ladders on quota')
+  assert.equal(result.sessionRow?.status, 'error')
+  assert.equal(result.errors.length, 1)
+  assert.match(result.errors[0].error, /GoUsageLimitError/)
+  assert.match(result.errors[0].error, /mock-b1/, 'the quota notice names the fallback model (lastAttemptRoute)')
+  assert.match(result.errors[0].error, /gw-b/)
+})
+
+// Regression pin for the 2026-09-28 independent-verification finding: the
+// quota-only unconditional first attempt must NOT leak into the transient
+// path. When BOTH routes keep failing transiently, the fallback budget stays
+// exactly what origin/main gives (DSH_FALLBACK_TURN_MAX_RESUMES = 2): total
+// calls = 1 initial + 3 primary resumes + 2 fallback resumes = 6. A draft of
+// this fix raised it to 7 by adding an unconditional attempt for transient
+// entries too.
+test('persistent transient failure on both routes keeps the origin fallback budget (6 calls, not 7)', async () => {
+  const result = await driveTurn({
+    sessionId: 'gt02-transient-budget-unchanged',
+    metabot: BOT_WITH_FALLBACK,
+    script: () => transientError(),
+  })
+
+  assert.equal(result.runTurnCalls.length, 6, '1 initial + 3 primary resumes + 2 fallback resumes — quota fix must not change this')
+  assert.equal(result.sessionRow?.status, 'error')
+})

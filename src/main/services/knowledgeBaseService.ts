@@ -417,10 +417,11 @@ export class KnowledgeBaseService {
           if (existing) summary.updated += 1;
           else summary.added += 1;
         } catch (error) {
-          summary.failed.push({
-            relpath: file.relpath,
-            error: error instanceof Error ? error.message : String(error),
-          });
+          const message = error instanceof Error ? error.message : String(error);
+          // Main-process trail for support: the card notice only names the
+          // first failure, so every failed file is logged here as well.
+          console.warn(`[knowledgeBase] learn failed for ${file.relpath}: ${message}`);
+          summary.failed.push({ relpath: file.relpath, error: message });
         }
         // Let the event loop breathe between files (chunking/tokenizing is
         // sync CPU work bounded per file; the await points above cover I/O).

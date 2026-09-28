@@ -66,7 +66,10 @@ Exactly one of these per turn, in this priority:
    - free-text answers always allowed; "按推荐来" is a complete answer;
    - prose only — never UI option panels.
    Then park it: `longterm_subtask_wait` kind `owner` with a precise note of
-   WHAT you need decided.
+   WHAT you need decided. The note must be the six-section DECISION BRIEF
+   (background & progress / current situation / the decision / options with
+   trade-offs / recommendation & why / next step) — see
+   "The owner-decision brief" below.
 3. **Wait** when blocked externally (delivery, notarization, a date):
    `longterm_subtask_wait` kind `external`, precise note, `waitUntil` when a
    date is known (the heartbeat re-checks expired waits automatically).
@@ -84,6 +87,17 @@ urgent blocked state, and you own keeping it visible:
   it has been waiting, and what it blocks. The owner may have missed earlier
   reminders; a bare "no change, holding quiet" line reads as "nothing needs
   you" and is a dropout, not quiet.
+- **The re-presentation (and the parked `wait_note` itself) follows the
+  six-section DECISION BRIEF**, one labeled line per section, in this order:
+  1) 背景与已完成进展 (background & progress so far) 2) 当前状况 (current
+  situation) 3) 需要你拍板的事项 (the decision, ONE question) 4) 选项与利弊
+  (each option with its trade-offs, recommendation first) 5) 推荐项及理由
+  (recommendation & why) 6) 拍板后的下一步 (what happens after the call).
+  Write it in the owner's language; keep the section lines separate (the UI
+  renders the newlines). This is the only thing the owner has to read to
+  decide — a one-liner forces them back into the chat log, which is exactly
+  how a parked decision rots. The same sections are required by the
+  `longterm_subtask_wait` / `longterm_subtask_propose` tool descriptions.
 - **Honor a promised quiet window**: if you recorded `waitUntil` on the wait
   ("silent until 09:00"), stay silent inside it; the first turn after it
   passes is the full re-presentation. Never set a window you don't intend to

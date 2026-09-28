@@ -412,9 +412,22 @@ test('GAP-5: 重启恢复先从库水合——初始板不得覆盖库中真状�
     await seedPrehistory(db);
     const session = await startSession(phaseA.host, startParams());
     sessionId = session.sessionId;
+    // A landed chain write is NOT proof the move reached the store:
+    // retryPendingWrite still has to `await sandbox.reduce(...)` and
+    // persistOwnedFields after chainWrite returns, so a write-only wait can
+    // observe plies=0 on slow runners (Windows CI signer, run 36427382778).
+    // Wait for the persisted truth itself — that is the prehistory Phase B
+    // hydrates from.
     await waitFor(
-      () => phaseA.recorder.calls.filter((c) => JSON.parse(c.plaintext).type === 'action').length >= 1,
-      { label: 'red seq1 action write' },
+      () => {
+        const acted = phaseA.recorder.calls.some((c) => JSON.parse(c.plaintext).type === 'action');
+        if (!acted) return false;
+        const raw = phaseA.host.store.getSerializedState(sessionId);
+        if (!raw) return false;
+        const persisted = JSON.parse(raw);
+        return persisted.plies === 1 && persisted.board.turn === 'black';
+      },
+      { label: 'red seq1 action write persisted (plies=1, black to move)' },
     );
     const truth = JSON.parse(phaseA.host.store.getSerializedState(sessionId));
     assert.equal(truth.plies, 1, '前史：红方 h2e2 已入账（plies=1）');
@@ -492,9 +505,22 @@ test('GAP-5: 库中状态损坏——恢复暂停并报 state_corrupt，不预�
     await seedPrehistory(db);
     const session = await startSession(phaseA.host, startParams());
     sessionId = session.sessionId;
+    // A landed chain write is NOT proof the move reached the store:
+    // retryPendingWrite still has to `await sandbox.reduce(...)` and
+    // persistOwnedFields after chainWrite returns, so a write-only wait can
+    // observe plies=0 on slow runners (Windows CI signer, run 36427382778).
+    // Wait for the persisted truth itself — that is the prehistory Phase B
+    // hydrates from.
     await waitFor(
-      () => phaseA.recorder.calls.filter((c) => JSON.parse(c.plaintext).type === 'action').length >= 1,
-      { label: 'red seq1 action write' },
+      () => {
+        const acted = phaseA.recorder.calls.some((c) => JSON.parse(c.plaintext).type === 'action');
+        if (!acted) return false;
+        const raw = phaseA.host.store.getSerializedState(sessionId);
+        if (!raw) return false;
+        const persisted = JSON.parse(raw);
+        return persisted.plies === 1 && persisted.board.turn === 'black';
+      },
+      { label: 'red seq1 action write persisted (plies=1, black to move)' },
     );
   } finally {
     await phaseA.host.runtime.dispose().catch(() => {});

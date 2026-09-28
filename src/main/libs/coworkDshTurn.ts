@@ -351,6 +351,16 @@ export interface DshHubOptions {
    *  cold-starts and resumes sessions from disk. Also sweeps drained
    *  (superseded) kernels whose turns have all settled. */
   runtimeIdleTtlMs?: number
+  /**
+   * Grace window for kernel-side activity (any runtime notification —
+   * host-turn or kernel-initiated, e.g. continuable-subagent turns with no
+   * host controller). A runtime that observed a notification within this
+   * window is treated as busy: drained kernels are not retired, slots are
+   * not reaped, and config changes take the successor+drain path instead
+   * of an in-place restart (default 10min; 0 disables the protection for
+   * tests that need deterministic retirement).
+   */
+  kernelActivityGraceMs?: number
 }
 
 /** Child-env map for the shared DSH runtime. Route credentials and the RPC
@@ -383,6 +393,14 @@ export function buildDshChildEnv(parts: {
 
 /** Sentinel cowork/DSH session id for startup warmup (no MCP, no pin). */
 export const DSH_WARMUP_SESSION_ID = '__dsh_warmup__'
+
+/**
+ * Default kernel-activity grace window (see DshHubOptions.kernelActivityGraceMs).
+ * Streaming turns emit notifications continuously, so total silence for this
+ * long means nothing observable is running host-side OR kernel-side; anything
+ * more recent keeps the process alive through drains/reaps/config changes.
+ */
+export const DSH_KERNEL_ACTIVITY_GRACE_MS = 10 * 60_000
 
 const DSH_WARMUP_CALLBACKS: DshTurnCallbacks = {
   onMessage: () => 'dsh-warmup',
@@ -454,6 +472,20 @@ export class DshTurnHub {
   private coworkByDsh = new Map<string, string>()
   /** cowork id → dsh id, kept across turns for post-hoc panel lookups. */
   private pinnedDshIds = new Map<string, string>()
+  /**
+   * Continuable-subagent lineage: child DSH session id (== runtime agent id)
+   * → parent DSH session id, learned from idbots/subagent/started. Resident
+   * children run kernel-initiated turns with NO host controller, so their
+   * policy/tool requests can only resolve through this lineage → parent's
+   * cowork mapping (the delegation captured the parent's policy, making the
+   * parent's checks exactly the right gate). Without it every native-tool
+   * check from a continuable child fails closed with "no cowork session
+   * mapping" (2026-09-28 session 540635be: 48 denied tool calls while the
+   * workers kept retrying). The runtime re-emits started on every
+   * re-materialization, so entries stay fresh for live children; finished
+   * (agent/disposed) and close() remove them.
+   */
+  private subagentParentByChild = new Map<string, string>()
   /** dsh session id → provider key of the kernel that last served it. */
   private runtimeKeyByDsh = new Map<string, string>()
   /** dsh session id → the kernel instance whose process holds the session's
@@ -699,11 +731,34 @@ export class DshTurnHub {
     }
   }
 
-  private coworkOfDsh(dshSessionId: string): string | undefined {
+  /**
+   * Strictly-owned resolution: the live turn mapping plus the session's OWN
+   * pin. Used by transcript-affecting paths (idle message insertion, session
+   * titles) — a continuable child's raw transcript must NOT fold into the
+   * parent chat (children report through send_message + the subagent panel
+   * by design) and a child title must not rename its parent's session.
+   */
+  private ownedCoworkOfDsh(dshSessionId: string): string | undefined {
     const live = this.coworkByDsh.get(dshSessionId)
     if (live) return live
     for (const [coworkId, dshId] of this.pinnedDshIds) {
       if (dshId === dshSessionId) return coworkId
+    }
+    return undefined
+  }
+
+  private coworkOfDsh(dshSessionId: string): string | undefined {
+    const owned = this.ownedCoworkOfDsh(dshSessionId)
+    if (owned) return owned
+    // Continuable-subagent lineage: a resident child session resolves through
+    // its parent's cowork mapping — the delegation captured the parent's
+    // policy, so the child's checks are exactly the parent's checks. Used by
+    // request routing (policy/tool); an unknown session still returns
+    // undefined so the fail-closed deny for genuinely unresolvable sessions
+    // is preserved.
+    const parent = this.subagentParentByChild.get(dshSessionId)
+    if (parent !== undefined && parent !== dshSessionId) {
+      return this.ownedCoworkOfDsh(parent)
     }
     return undefined
   }
@@ -969,6 +1024,7 @@ export class DshTurnHub {
     this.controllersByDsh.clear()
     this.dshByCowork.clear()
     this.coworkByDsh.clear()
+    this.subagentParentByChild.clear()
     this.runtimeKeyByDsh.clear()
     this.kernelByDsh.clear()
     this.askKernelById.clear()
@@ -1026,6 +1082,10 @@ export class DshTurnHub {
     }
   }
 
+  private get kernelActivityGraceMs(): number {
+    return this.opts.kernelActivityGraceMs ?? DSH_KERNEL_ACTIVITY_GRACE_MS
+  }
+
   private scheduleReap(): void {
     const ttl = this.opts.runtimeIdleTtlMs ?? 30 * 60 * 1000
     if (ttl <= 0 || this.reapTimer) return
@@ -1046,6 +1106,9 @@ export class DshTurnHub {
       // slot itself is too young/fresh to reap.
       this.settleDrains(key)
       if (this.inFlightOnSlot(key) > 0) continue
+      // Kernel-side activity (subagent turns with no host controller) keeps
+      // the slot's processes alive through the reap the same way.
+      if (slot.kernel.hasRecentActivity(this.kernelActivityGraceMs)) continue
       if (now - slot.lastUsedAt < ttl) continue
       this.opts.log?.('info', 'dshTurnHub.reapIdleRuntime', { runtime: key })
       await slot.kernel.close().catch(() => undefined)
@@ -1127,11 +1190,25 @@ export class DshTurnHub {
     if (!slot) return
     slot.drainingKernels = slot.drainingKernels.filter((kernel) => {
       if (kernel.running && this.inFlightOnKernel(kernel) > 0) return true
+      // Kernel-side activity extends the drain too: continuable-subagent
+      // turns run with no host controller, so controller-only accounting
+      // alone retired kernels under live work (2026-09-28 incident cluster).
+      if (kernel.running && kernel.hasRecentActivity(this.kernelActivityGraceMs)) {
+        this.opts.log?.('info', 'dshTurnHub.drainRetireDeferredByActivity', {
+          runtime: key,
+          idleForMs: Date.now() - kernel.lastNotificationAt,
+        })
+        return true
+      }
       void kernel.close().then(() => undefined, () => undefined)
       for (const [dshId, holder] of this.kernelByDsh) {
         if (holder === kernel) this.kernelByDsh.delete(dshId)
       }
-      this.opts.log?.('info', 'dshTurnHub.drainedRuntimeClosed', { runtime: key })
+      this.opts.log?.('info', 'dshTurnHub.drainedRuntimeClosed', {
+        runtime: key,
+        inFlightAtClose: this.inFlightOnKernel(kernel),
+        idleForMs: kernel.lastNotificationAt > 0 ? Date.now() - kernel.lastNotificationAt : null,
+      })
       return false
     })
   }
@@ -1262,7 +1339,13 @@ export class DshTurnHub {
     if (slot.kernel.running && slot.lastConfigJson !== undefined) {
       const nextJson = JSON.stringify(config)
       const inFlight = this.inFlightOnSlot(slot.key)
-      if (nextJson !== slot.lastConfigJson && inFlight > 0) {
+      // "Busy" includes kernel-side activity the controller accounting
+      // cannot see: continuable-subagent turns run with no host controller
+      // (2026-09-28 incident: the old code counted controllers only, saw 0
+      // while subagents worked, and the kernel-level silent restart killed
+      // the process under them).
+      const kernelSideBusy = slot.kernel.hasRecentActivity(this.kernelActivityGraceMs)
+      if (nextJson !== slot.lastConfigJson && (inFlight > 0 || kernelSideBusy)) {
         const changedKeys = dshConfigChangedKeys(slot.lastConfigJson, nextJson)
         const callerRouteJson = JSON.stringify(providerRouteOf(input.provider))
         const servedByRunningRuntime =
@@ -1270,7 +1353,7 @@ export class DshTurnHub {
         if (servedByRunningRuntime) {
           this.opts.log?.('warn',
             'config changed but the running runtime serves this turn; restart deferred until quiescence',
-            { runtime: slot.key, changed: changedKeys, inFlight })
+            { runtime: slot.key, changed: changedKeys, inFlight, kernelSideBusy })
           return slot.kernel
         }
         // The caller needs a config the running process cannot serve (e.g.
@@ -1280,13 +1363,33 @@ export class DshTurnHub {
         // the config diff). Instead boot a successor process immediately and
         // let the old one drain its in-flight turns.
         this.opts.log?.('warn',
-          'config change with in-flight turns; booting a successor runtime and draining the old one',
-          { runtime: slot.key, changed: changedKeys, inFlight })
+          'config change with live activity; booting a successor runtime and draining the old one',
+          { runtime: slot.key, changed: changedKeys, inFlight, kernelSideBusy })
         const successor = this.supersedeKernel(slot)
         await successor.ensureRuntime(config)
         slot.lastConfigJson = nextJson
         return successor
       }
+      if (nextJson !== slot.lastConfigJson) {
+        // Truly idle (no host controllers AND no kernel-side activity for a
+        // full grace window): safe to restart in place. This is the ONLY
+        // place a live runtime may be restarted for a config change —
+        // explicit and logged, replacing the kernel-level silent restart
+        // that killed in-flight work with no trail.
+        const changedKeys = dshConfigChangedKeys(slot.lastConfigJson, nextJson)
+        this.opts.log?.('info', 'dshTurnHub.inPlaceRuntimeRestart', {
+          runtime: slot.key,
+          changed: changedKeys,
+          idleForMs: Date.now() - (slot.kernel.lastNotificationAt || Date.now()),
+        })
+        await slot.kernel.restart(config)
+        slot.lastConfigJson = nextJson
+        return slot.kernel
+      }
+      // Config unchanged: plain reuse (ensureRuntime boots only when the
+      // process is not running; it never restarts on its own).
+      await slot.kernel.ensureRuntime(config)
+      return slot.kernel
     }
     await slot.kernel.ensureRuntime(config)
     slot.lastConfigJson = JSON.stringify(config)
@@ -1303,7 +1406,10 @@ export class DshTurnHub {
       onMessage: (sessionId, message, streamSlot) => {
         const controller = controllerOf(sessionId)
         if (controller) return controller.cb.onMessage(message, streamSlot)
-        const coworkId = this.coworkOfDsh(sessionId)
+        // Transcript-affecting: strictly-owned resolution only. A continuable
+        // child's raw messages stay out of the parent chat (they report via
+        // send_message + the subagent panel).
+        const coworkId = this.ownedCoworkOfDsh(sessionId)
         if (coworkId && this.opts.onIdleSessionMessage) {
           return this.opts.onIdleSessionMessage(coworkId, message)
         }
@@ -1380,13 +1486,28 @@ export class DshTurnHub {
         for (const controller of this.controllersByDsh.values()) controller.cb.onAskCancelled?.(askId)
       },
       onSubagentEvent: (event) => {
+        // Lineage first — it must register even with no live parent
+        // controller (a continuable child re-materializes and runs turns
+        // long after the parent's host turn settled). started carries the
+        // PARENT dsh session id and the child's id as agentId.
+        const childId = typeof event.agentId === 'string' ? event.agentId : ''
+        const parentId = typeof event.sessionId === 'string' ? event.sessionId : ''
+        if (childId && parentId && parentId !== childId) {
+          if (event.kind === 'started') {
+            this.subagentParentByChild.set(childId, parentId)
+          } else if (event.kind === 'finished') {
+            this.subagentParentByChild.delete(childId)
+          }
+        }
         controllerOf(event.sessionId)?.cb.onSubagentEvent?.(event)
       },
       onSessionTitle: (sessionId, title) => {
         // Title events arrive outside the turn-controller lifecycle (the
         // provider's auxiliary LLM call can settle after turn end), so resolve
         // through the pinned mapping rather than the live controller.
-        const coworkId = this.coworkOfDsh(sessionId)
+        // Strictly-owned: a continuable child's title must not rename its
+        // parent's cowork session.
+        const coworkId = this.ownedCoworkOfDsh(sessionId)
         if (coworkId) this.opts.onSessionTitle?.(coworkId, title)
       },
       onError: (error) => {

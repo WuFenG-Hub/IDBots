@@ -79,7 +79,24 @@
 // shape (its marker is appended after the sliced budget). Nothing else changes:
 // non-JSON text, several text blocks, non-accept decisions, error results and
 // results already inside the budget all take the legacy path untouched.
-// Zero dependencies: node builtins only.
+//
+// Spill cooperation (2026-09-28, cowork session 540635be — upstream dade791b):
+// the spill-policy cap sits under this plugin's 20K, so an oversized result took
+// the shaping trim FIRST and spill-policy then spilled the ALREADY-TRIMMED text
+// into its "Full formatted result stored at:" file — the recovery channel
+// silently held a head+tail paste, and a chair that extracted code from it built
+// a file with a missing mid-section. Now, when a spillStore service is mounted,
+// shaping saves the FULL original through it BEFORE slicing and the marker
+// carries the same locator + retrieval hint the spill notice uses; the shaped
+// inline is then token-bounded to sit under the spill-policy cap
+// (inlineTokenBudget mirrors the policy's maxInlineTokens via
+// generate-runtime-config) so the policy's under-cap early-return keeps the
+// marker verbatim and its "full result" promise stays true. Without a
+// spillStore (no workspace composition) the legacy 20K behavior is kept
+// byte-for-byte. Both paths carry the locator when one exists: the JSON-safe
+// marker's `note` names the stored original too.
+
+import { estimateContent } from '@deepseek-ai/dsh-token-meter/estimate'
 
 export const name = 'idbots-tool-result-shaping'
 export const inject = ['tools']
@@ -87,6 +104,14 @@ export const inject = ['tools']
 const DEFAULT_MAX_CHARS = 20000
 const DEFAULT_TAIL_CHARS = 4000
 const MARKER = (original) => `\n[idbots: tool result trimmed, ${original} chars total — head+tail shown]\n`
+const SPILL_MARKER = (original, ref) =>
+  `\n[idbots: tool result trimmed, ${original} chars total — head+tail shown; full original stored at: ${ref.locator}. ${ref.retrievalHint}]\n`
+const DEFAULT_INLINE_TOKEN_BUDGET = 2048
+// Headroom inside the inline token budget for framing and estimator drift —
+// the shaped copy must price strictly under the spill-policy cap, or the
+// policy re-spills the trimmed text as "Full formatted result" and the
+// locator ends up pointing at the wrong (trimmed) copy.
+const TOKEN_RESERVE = 128
 
 export const MARKER_KEY = '__idbots_tool_result_shaping__'
 export const ENVELOPE_KEY = '__idbots_tool_result_envelope__'
@@ -108,6 +133,30 @@ const REGROW_MAX_NODES = 8
 const MARKER_MAX_TRIMS = 8
 
 const textLength = (content) => content.reduce((sum, block) => sum + (block.type === 'text' ? block.text.length : 0), 0)
+const tokenPrice = (content) => content.reduce((sum, block) => sum + (block.type === 'text' ? estimateContent([block]) : 0), 0)
+
+/** Head+tail render with the original block walk: the char budget is
+ *  front-loaded across blocks and the last block keeps a tail slice. */
+function renderShaped(content, markerFor, totalChars, tailChars) {
+  let remaining = totalChars
+  const shaped = []
+  for (let i = 0; i < content.length; i++) {
+    const block = content[i]
+    if (block.type !== 'text') {
+      shaped.push(block)
+      continue
+    }
+    const budget = Math.min(block.text.length, remaining)
+    if (budget <= 0) break
+    const keepTail = i === content.length - 1 ? Math.min(tailChars, Math.floor(budget / 4)) : 0
+    const head = block.text.slice(0, budget - keepTail)
+    const tail = keepTail > 0 ? block.text.slice(-keepTail) : ''
+    shaped.push({ type: 'text', text: head + markerFor(block) + tail })
+    remaining -= budget
+  }
+  return shaped
+}
+
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
 const childPath = (path, key) => (IDENTIFIER.test(key) ? `${path}.${key}` : `${path}[${JSON.stringify(key)}]`)
@@ -170,13 +219,14 @@ const rebuildDocument = (node, nodePath, trims) => {
   return node
 }
 
-const JSON_NOTE = (originalChars, maxChars) =>
-  `tool result trimmed: JSON kept parseable — arrays lose whole elements only; original ${originalChars} chars, budget ${maxChars} chars`
+const JSON_NOTE = (originalChars, maxChars, ref) =>
+  `tool result trimmed: JSON kept parseable — arrays lose whole elements only; original ${originalChars} chars, budget ${maxChars} chars` +
+  (ref ? `; full original stored at: ${ref.locator}. ${ref.retrievalHint}` : '')
 
 // JSON-safe shaping of one text block. Returns the shaped text, or null to let
 // the caller fall back to the legacy head+tail path (non-JSON document, a
 // namespaced-key collision, or a document no trim plan can bring inside budget).
-const shapeJsonText = (text, maxChars) => {
+const shapeJsonText = (text, maxChars, ref) => {
   let parsed
   try { parsed = JSON.parse(text) } catch { return null }
   // A pretty-printed document can be over budget purely on whitespace: emitting
@@ -225,7 +275,7 @@ const shapeJsonText = (text, maxChars) => {
       returned: list[0].returned,
       total: list[0].total,
       originalChars,
-      note: JSON_NOTE(originalChars, maxChars),
+      note: JSON_NOTE(originalChars, maxChars, ref),
       trimCount: count,
       trims: list,
     }
@@ -368,16 +418,19 @@ const shapeJsonText = (text, maxChars) => {
 }
 
 // The JSON-safe path is only eligible for a single text block.
-const shapeJsonResultText = (content, maxChars) => {
+const shapeJsonResultText = (content, maxChars, ref) => {
   if (!Array.isArray(content) || content.length !== 1) return null
   const block = content[0]
   if (!isPlainObject(block) || block.type !== 'text' || typeof block.text !== 'string') return null
-  return shapeJsonText(block.text, maxChars)
+  return shapeJsonText(block.text, maxChars, ref)
 }
 
 export function apply(ctx, config = {}) {
   const maxChars = Number.isFinite(config.maxChars) ? config.maxChars : DEFAULT_MAX_CHARS
   const tailChars = Number.isFinite(config.tailChars) ? config.tailChars : DEFAULT_TAIL_CHARS
+  const inlineTokenBudget = Number.isFinite(config.inlineTokenBudget) && config.inlineTokenBudget > 0
+    ? config.inlineTokenBudget
+    : DEFAULT_INLINE_TOKEN_BUDGET
   if (maxChars <= tailChars) {
     throw new Error(`idbots-tool-result-shaping: maxChars (${maxChars}) must exceed tailChars (${tailChars})`)
   }
@@ -390,9 +443,50 @@ export function apply(ctx, config = {}) {
     if (result.isError) return decision
     if (textLength(result.content ?? []) <= maxChars) return decision
 
-    const jsonText = shapeJsonResultText(result.content, maxChars)
+    // Recoverable trim: persist the FULL original before any slice drops it.
+    // Best-effort — a spill failure degrades to the legacy trim instead of
+    // failing an otherwise-successful tool result.
+    let ref
+    const spillStore = ctx.get('spillStore')
+    const sessionId = exec.agent?.session?.header?.id
+    if (spillStore !== undefined && sessionId !== undefined) {
+      try {
+        ref = await spillStore.saveText({
+          owner: { sessionId },
+          source: { kind: 'tool', toolName: exec.name, callId: exec.callId, label: 'shaping' },
+          suggestedName: `${exec.name}.txt`,
+          content: result.content.filter((block) => block.type === 'text').map((block) => block.text).join(''),
+        })
+      } catch (error) {
+        console.error(`[idbots-tool-result-shaping] ${exec.name}: spill save failed (${String(error)}); trimming without a recovery path`)
+      }
+    }
+
+    // The shaped copy must price under the spill-policy cap (minus reserve) so the
+    // policy's under-cap early-return keeps our marker — locator included —
+    // verbatim in history.
+    const tokenBudget = inlineTokenBudget - TOKEN_RESERVE
+
+    // JSON-safe path first: one text block whose content parses as a JSON
+    // document loses whole elements only, so a consumer never reads a torn key.
+    let jsonText = shapeJsonResultText(result.content, maxChars, ref)
+    if (jsonText !== null && ref) {
+      // Shrink the document (dropping more whole elements) until it prices under
+      // the cap. When the document cannot be shrunk that far the head+tail path
+      // below takes over, so the policy's honesty invariant still holds.
+      let budget = maxChars
+      while (tokenPrice([{ type: 'text', text: jsonText }]) > tokenBudget && budget > 500) {
+        budget = Math.floor(budget * 0.7)
+        const smaller = shapeJsonResultText(result.content, budget, ref)
+        if (smaller === null) {
+          jsonText = null
+          break
+        }
+        jsonText = smaller
+      }
+    }
     if (jsonText !== null) {
-      console.error(`[idbots-tool-result-shaping] ${exec.name}: ${textLength(result.content)} chars -> ${jsonText.length} chars (json-safe)`)
+      console.error(`[idbots-tool-result-shaping] ${exec.name}: ${textLength(result.content)} chars -> ${jsonText.length} chars (json-safe)${ref ? ` (full original: ${ref.locator})` : ''}`)
       return {
         kind: 'accept',
         content: [{ type: 'text', text: jsonText }],
@@ -400,23 +494,23 @@ export function apply(ctx, config = {}) {
       }
     }
 
-    let remaining = maxChars
-    const shaped = []
-    for (let i = 0; i < result.content.length; i++) {
-      const block = result.content[i]
-      if (block.type !== 'text') {
-        shaped.push(block)
-        continue
+    // Legacy head+tail path: byte-for-byte its historical shape without a
+    // spillStore; token-bounded with one so the policy never re-spills it.
+    const markerFor = ref
+      ? (block) => SPILL_MARKER(block.text.length, ref)
+      : (block) => MARKER(block.text.length)
+    let totalChars = maxChars
+    let shaped = renderShaped(result.content, markerFor, totalChars, tailChars)
+    if (ref) {
+      // The 500-char floor keeps the loop finite; an estimator-pathological
+      // result may still overflow and take the policy's re-bound, which bounds
+      // history either way.
+      while (tokenPrice(shaped) > tokenBudget && totalChars > 500) {
+        totalChars = Math.floor(totalChars * 0.7)
+        shaped = renderShaped(result.content, markerFor, totalChars, Math.min(tailChars, Math.floor(totalChars / 4)))
       }
-      const budget = Math.min(block.text.length, remaining)
-      if (budget <= 0) break
-      const keepTail = i === result.content.length - 1 ? Math.min(tailChars, Math.floor(budget / 4)) : 0
-      const head = block.text.slice(0, budget - keepTail)
-      const tail = keepTail > 0 ? block.text.slice(-keepTail) : ''
-      shaped.push({ type: 'text', text: head + MARKER(block.text.length) + tail })
-      remaining -= budget
     }
-    console.error(`[idbots-tool-result-shaping] ${exec.name}: ${textLength(result.content)} chars -> ${textLength(shaped)}`)
+    console.error(`[idbots-tool-result-shaping] ${exec.name}: ${textLength(result.content)} chars -> ${textLength(shaped)}${ref ? ` (full original: ${ref.locator})` : ''}`)
     return {
       kind: 'accept',
       content: shaped,

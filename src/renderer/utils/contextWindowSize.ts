@@ -13,12 +13,13 @@ export const CONTEXT_WINDOW_INPUT_MAX = 100_000_000;
 export const NEW_MODEL_DEFAULT_CONTEXT_WINDOW = 1_000_000;
 
 /**
- * Output ceiling pinned onto every newly created model entry. Without an
- * explicit value an uncatalogued id falls back to the 32K main-process
- * default. The ceiling only caps generation and costs nothing for short
- * replies since billing is by actual tokens used.
+ * Output ceiling pinned onto every newly created model entry, matching the
+ * main-process default for uncatalogued ids (128K — mainstream models cap
+ * output far above the old 32K, and thinking shares the budget). The ceiling
+ * only caps generation and costs nothing for short replies since billing is
+ * by actual tokens used.
  */
-export const NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
+export const NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS = 128_000;
 
 /**
  * Parse the raw input into a token count.

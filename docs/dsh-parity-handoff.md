@@ -127,6 +127,15 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
    the non-user `aborted` settlement lands idle + a localized diagnostic
    (metadata `dshTurnStalled` + i18n key `coworkDshTurnStalled`), never a
    hollow completed. App-side E2E with a wedged-provider mock fixture.
+   Adaptive since `fix/cowork-stall-watchdog` (2026-09-28 session 2bcfbb63:
+   three 10-min cancellations of healthy GLM turns whose provider-side
+   prefill/queueing produced zero host events; every re-send died at the
+   same ceiling): the effective deadline is `computeDshStallDeadlineMs` =
+   base + 2 min per full 10k prompt tokens over 32k (cap +20 min) + 10 min
+   per prior stall cancellation of the session (strike ladder, cleared on
+   any normal settlement), clamped to DSH_TURN_STALL_ABSOLUTE_CAP_MS
+   (60 min). In-flight tool calls and pending dialogs keep extending as
+   before; the tool-call hard cap is unchanged.
 
 **Done in session 4 (branch `feat/dsh-p2-parity`):**
 
@@ -156,6 +165,43 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
     prompt as the row summary, finished keys the same agent id); the runner
     maps them onto the SAME emitSubagentEvent task channel the Claude path
     uses, so the panel's Redux consumes them unchanged (zero renderer edits).
+    Since `fix/cowork-stall-watchdog` (2026-09-28 session 540635be: 48
+    fail-closed "no cowork session mapping" denials of continuable workers'
+    tools), started/finished ALSO feed a child→parent lineage map
+    (`subagentParentByChild`) in the hub: request routing
+    (onPolicyRequest/onToolRequest) resolves a child through its parent's
+    cowork mapping via `coworkOfDsh`, while transcript-affecting paths
+    (idle-message insertion, session titles) use the strictly-owned
+    `ownedCoworkOfDsh` so child chatter stays in the panel and a child title
+    never renames the parent. Unknown sessions still fail closed.
+    Companion fix (branch `fix/dsh-session-query-mount`): the composition
+    now mounts `@deepseek-ai/dsh-session-query` beside the persistence
+    backend — without it every follow-up to a dematerialized continuable
+    child failed with CONTINUATION_UNAVAILABLE ("continuable subagents
+    require session query", the same session's other symptom: the chair's
+    subagent-tool probes could not cold-resume the persisted workers). The
+    plain engine suffices (observeSession/listSessions through the mounted
+    persistence); the SQLite FTS5 search backend stays unmounted. E2E:
+    `dsh-runtime/test/subagent-cold-resume.test.mjs` boots a fresh runtime
+    on the same sessionRoot, resumes the parent via session/ensure, and
+    proves the child cold-resumes onto the provider (verified failing at
+    runtime level with the entry removed).
+
+10b. ✅ **Spill-cooperative tool-result shaping** (same 540635be run): the
+     spill-policy cap (2048 tokens) sits under idbots-tool-result-shaping's
+     20K, so oversized results took the shaping trim FIRST and spill-policy
+     then spilled the ALREADY-TRIMMED text under a "Full formatted result
+     stored at:" notice — the recovery channel silently held a head+tail
+     paste, and the chair extracted code from it into a corrupted file (the
+     trim marker turned up mid-file inside the "full" spill). The shaping
+     plugin now saves the FULL original through the spill store before
+     slicing, embeds the locator + retrieval hint in its marker, and
+     token-bounds its inline under the policy cap (`inlineTokenBudget`
+     mirrored from the same `spill.maxInlineTokens` knob in
+     generate-runtime-config), so the policy's under-cap early-return keeps
+     the marker verbatim in history and the recovery file always holds the
+     original. No spill store (non-workspace compositions) → legacy
+     byte-for-byte behavior.
 
 **Remaining backlog:**
 11. **P2 — Behavioral foundation decision**: claude path sits on the full
@@ -167,6 +213,22 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
 
 ## 4. Hard-won contracts (do not relearn these)
 
+- **Never kill a runtime under live work** (`fix/dsh-runtime-kill-guard`, from
+  the 2026-09-28 incident: two zhipu.auto-bc processes exited — exit code 0,
+  which the runtime's SIGTERM handler also produces, masking any killer —
+  under three in-flight turns, including a brand-new session's first message,
+  ~5 min after a providers config change booted a successor):
+  `dshKernel.ensureRuntime` NEVER restarts a running process on its own
+  (config application is hub-owned and explicit); "busy" means host
+  controllers OR kernel-side activity (`DshKernel.lastNotificationAt` —
+  stamped by every pump notification, because continuable-subagent turns
+  have no host controller and are invisible to controller-only accounting);
+  a busy config change takes the successor+drain path; in-place restart and
+  drain retirement require true idleness (no notifications for
+  `kernelActivityGraceMs`, default 10 min) and log themselves
+  (`inPlaceRuntimeRestart`, `drainRetireDeferredByActivity`,
+  `drainedRuntimeClosed` with idle age). Exit code 0 is NOT proof of a
+  graceful self-exit.
 - **Resume-first**: `agents.create` never consults the persisted log; ensure
   must resume first (`session "<id>" not found` = fresh-create signal).
 - **Tools must settle on abort** (`exec.signal`) or the whole turn drain hangs.

@@ -414,6 +414,24 @@ export class SqliteStore {
         metadata TEXT,
         created_at INTEGER NOT NULL,
         sequence INTEGER,
+        is_streaming INTEGER GENERATED ALWAYS AS (
+          CASE
+            WHEN metadata IS NOT NULL AND instr(metadata, '"isStreaming":true') > 0 THEN 1
+            ELSE 0
+          END
+        ) VIRTUAL,
+        steer_pending INTEGER GENERATED ALWAYS AS (
+          CASE
+            WHEN metadata IS NOT NULL
+              AND instr(metadata, '"interactionKind":"steer"') > 0
+              AND (
+                instr(metadata, '"steerStatus":"queued"') > 0
+                OR instr(metadata, '"steerStatus":"delivered"') > 0
+              )
+            THEN 1
+            ELSE 0
+          END
+        ) VIRTUAL,
         FOREIGN KEY (session_id) REFERENCES cowork_sessions(id) ON DELETE CASCADE
       );
     `);
@@ -2012,6 +2030,54 @@ export class SqliteStore {
 
       if (!columns.includes('hidden_from_session_list')) {
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN hidden_from_session_list INTEGER NOT NULL DEFAULT 0;');
+        this.save();
+      }
+
+      if (!columns.includes('auto_origin')) {
+        // Origin marker for auto-created sessions: the renderer folds rows with
+        // a non-NULL value into the collapsed "Auto Tasks" sidebar section
+        // instead of the regular conversation list. NULL = human-initiated.
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN auto_origin TEXT;');
+
+        // One-shot backfill for sessions created before the column existed. The
+        // ALTER above is the run marker, so this whole block executes exactly
+        // once per database; re-running it would be a no-op anyway (every
+        // statement is predicated on auto_origin still being NULL).
+        const hasSessionType = columns.includes('session_type');
+        // session_type is added by CoworkStore on a later startup, so an old
+        // database may not have it yet — fall back to the title prefix alone.
+        const longtermPredicate = hasSessionType
+          ? "(session_type = 'longterm' OR title LIKE '[长期] %')"
+          : "title LIKE '[长期] %'";
+        this.db.run(`UPDATE cowork_sessions SET auto_origin = 'longterm' WHERE ${longtermPredicate}`);
+        this.db.run(`
+          UPDATE cowork_sessions
+          SET auto_origin = 'orchestration'
+          WHERE auto_origin IS NULL
+            AND (title LIKE '[编排任务] %' OR title LIKE '[Orchestration Task] %')
+        `);
+
+        // Scheduled-run sessions carry the '[定时] ' title prefix, but a session
+        // renamed by the user is still a scheduled run — the run ledger is the
+        // authoritative link when it exists.
+        let scheduledRunPredicate = "title LIKE '[定时] %'";
+        try {
+          const runTableResult = this.db.exec(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_task_runs'"
+          );
+          if (runTableResult[0]?.values?.length) {
+            scheduledRunPredicate += ' OR id IN (SELECT session_id FROM scheduled_task_runs WHERE session_id IS NOT NULL)';
+          }
+        } catch {
+          // sqlite_master unreadable — the title predicate alone is enough.
+        }
+        this.db.run(`
+          UPDATE cowork_sessions
+          SET auto_origin = 'schedule'
+          WHERE auto_origin IS NULL
+            AND (${scheduledRunPredicate})
+        `);
+
         this.save();
       }
 

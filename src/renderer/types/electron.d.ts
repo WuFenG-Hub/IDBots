@@ -287,6 +287,8 @@ interface CoworkSession {
   peerAvatar?: string | null;
   metabotName?: string | null;
   metabotAvatar?: string | null;
+  /** Auto-created session marker: long-term task run, orchestration run, or scheduled run. */
+  autoOrigin?: 'longterm' | 'orchestration' | 'schedule' | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 
@@ -394,6 +396,10 @@ interface CoworkSessionSummary {
   peerAvatar?: string | null;
   metabotName?: string | null;
   metabotAvatar?: string | null;
+  /** Revision of the owning MetaBot row (metabots.updated_at); the avatar cache's freshness key. */
+  metabotAvatarVersion?: number | null;
+  /** Auto-created session marker: long-term task run, orchestration run, or scheduled run. */
+  autoOrigin?: 'longterm' | 'orchestration' | 'schedule' | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 
@@ -1122,6 +1128,11 @@ interface IElectronAPI {
     getA2AConversationHistoryPage: (input: { sessionId: string; beforeCursor?: CoworkA2AHistoryCursor | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkA2AHistoryPage; error?: string }>;
     getA2AEpisodes: (sessionId: string) => Promise<{ success: boolean; episodes?: CoworkA2AEpisodeInfo[]; error?: string }>;
     listSessions: (options?: { metabotId?: number | null }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; error?: string }>;
+    listMetabotAvatars: (metabotIds: number[]) => Promise<{
+      success: boolean;
+      avatars?: Array<{ metabotId: number; avatar: string | null }>;
+      error?: string;
+    }>;
     processServiceRefund: (sessionId: string) => Promise<{
       success: boolean;
       refundTxid?: string;
@@ -1316,7 +1327,8 @@ interface IElectronAPI {
     installSandbox: () => Promise<{ success: boolean; status: CoworkSandboxStatus; error?: string }>;
     onSandboxDownloadProgress: (callback: (data: CoworkSandboxProgress) => void) => () => void;
     onStreamMessage: (callback: (data: { sessionId: string; message: CoworkMessage }) => void) => () => void;
-    onStreamMessageUpdate: (callback: (data: { sessionId: string; messageId: string; content?: string; metadata?: CoworkMessage['metadata'] }) => void) => () => void;
+    onStreamMessageUpdate: (callback: (data: { sessionId: string; messageId: string; content?: string; delta?: string; baseLength?: number; metadata?: CoworkMessage['metadata'] }) => void) => () => void;
+    getStreamLiveContent: (payload: { sessionId: string; messageId: string }) => Promise<{ success: boolean; content?: string }>;
     onStreamPermission: (callback: (data: { sessionId: string; request: CoworkPermissionRequest }) => void) => () => void;
     onStreamPermissionResolved: (callback: (data: { sessionId: string; requestId: string }) => void) => () => void;
     onStreamComplete: (callback: (data: { sessionId: string; claudeSessionId: string | null }) => void) => () => void;
@@ -1456,6 +1468,23 @@ interface IElectronAPI {
     moveSubtask: (input: { subtaskId: string; direction: 'up' | 'down' }) => Promise<LongTermResult<LongTermSubtask>>;
     /** seq is monotonic per process: drop frames with seq <= lastSeenSeq and refetch. */
     onUpdate: (callback: (data: { seq: number; taskIds: string[]; reason: string }) => void) => () => void;
+  };
+  /**
+   * MetaTask (chain-side multi-bot collaboration, read path P1). Local
+   * projection of on-chain tasks; the chain is the source of truth and every
+   * payload carries the boundary block it was computed at.
+   * Main-process implementation: src/main/services/metatask/.
+   */
+  metatask: {
+    board: () => Promise<{ success: boolean; board?: import('./metatask').MetaTaskBoard; error?: string }>;
+    get: (input: { rootPinId: string }) => Promise<{
+      success: boolean;
+      detail?: import('./metatask').MetaTaskTaskProjection;
+      error?: string;
+    }>;
+    refresh: () => Promise<{ success: boolean; board?: import('./metatask').MetaTaskBoard; error?: string }>;
+    /** seq is monotonic per process: drop frames with seq <= lastSeenSeq and refetch. */
+    onUpdate: (callback: (data: { seq: number; reason: string }) => void) => () => void;
   };
   groupTask: {
     create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[] }) => Promise<any>;

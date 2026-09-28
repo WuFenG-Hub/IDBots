@@ -154,8 +154,12 @@ export interface ActionEvent extends GameEventBase {
 /** `timeout.claimed` (docs/07 §3): written by the NOT-on-turn seat when the
  *  mover's move window (adapter-defined; 900s for xiangqi) lapses without an
  *  accepted move. Identity and the judging timestamps come from the group-chat
- *  message metadata; the adapter's reduce re-checks the window at replay —
- *  the write only triggers the judgment, it never decides it. */
+ *  message metadata; `meta.timestamp` is Unix MILLISECONDS (see the EventMeta
+ *  unit contract in runtime.ts) and adapter windows are ms too
+ *  (MOVE_TIMEOUT_MS = 900_000) — writer and replayer must read the same unit or
+ *  they reach opposite verdicts on one and the same pin. The adapter's reduce
+ *  re-checks the window at replay — the write only triggers the judgment, it
+ *  never decides it. */
 export interface TimeoutClaimedEvent extends GameEventBase {
   type: 'timeout.claimed';
   payload: Record<string, unknown>;

@@ -94,6 +94,16 @@ const markSessionUnread = (state: CoworkState, sessionId: string) => {
   state.unreadSessionIds.push(sessionId);
 };
 
+/**
+ * Heartbeat-driven long-term-task turns (the [长期] escalation the heartbeat
+ * opens on its own) are machine traffic, not something the human should be
+ * paged about: they must not raise the session's unread marker. Everything else
+ * keeps the historic behavior — scheduled-task prompts, orchestration turns and
+ * plain user input still mark unread.
+ */
+const isHeartbeatOrigin = (metadata?: CoworkMessageMetadata | null): boolean =>
+  metadata?.origin === 'heartbeat';
+
 const coworkSlice = createSlice({
   name: 'cowork',
   initialState,
@@ -164,6 +174,7 @@ const coworkSlice = createSlice({
             updatedAt,
             sessionType,
             peerName,
+            autoOrigin,
             serviceOrderSummary,
           } = nextSession;
           const summary: CoworkSessionSummary = {
@@ -175,6 +186,10 @@ const coworkSlice = createSlice({
             updatedAt,
             sessionType,
             peerName,
+            // Carry the fold marker through the rebuild. Spread-if-present so a
+            // payload without the field never erases a marker the list row
+            // already learned from listSessions.
+            ...(autoOrigin ? { autoOrigin } : {}),
             serviceOrderSummary: serviceOrderSummary ?? null,
           };
           const sessionIndex = state.sessions.findIndex((session) => session.id === id);
@@ -231,6 +246,10 @@ const coworkSlice = createSlice({
         metabotId: action.payload.metabotId,
         metabotName: action.payload.metabotName,
         metabotAvatar: action.payload.metabotAvatar,
+        // A session opened through addSession is one the human just started
+        // (auto-created runs arrive via registerBackgroundSession /
+        // loadSessions), so the marker is carried only if the payload has one.
+        autoOrigin: action.payload.autoOrigin ?? null,
         serviceOrderSummary: action.payload.serviceOrderSummary ?? null,
       };
       state.sessions.unshift(summary);
@@ -308,7 +327,11 @@ const coworkSlice = createSlice({
         state.sessions[sessionIndex].updatedAt = message.timestamp;
       }
 
-      markSessionUnread(state, sessionId);
+      // A heartbeat turn is background progress on a long-term task, not an
+      // inbound message the human has to be told about (see isHeartbeatOrigin).
+      if (!isHeartbeatOrigin(message.metadata)) {
+        markSessionUnread(state, sessionId);
+      }
     },
 
     prependMessages(state, action: PayloadAction<{
@@ -345,6 +368,28 @@ const coworkSlice = createSlice({
         }
       }
 
+      // Same rule as addMessage: a heartbeat-driven turn never raises the
+      // session's unread marker.
+      if (!isHeartbeatOrigin(metadata)) {
+        markSessionUnread(state, sessionId);
+      }
+    },
+
+    /**
+     * Append a streamed delta to one message. The streaming service coalesces
+     * its buffered deltas and lands them here, so a live answer no longer
+     * rebuilds and re-dispatches the whole content string on every update; only
+     * the target message object changes, every other message keeps its identity
+     * (which is what keeps the transcript's memoized turns from re-rendering).
+     */
+    appendMessageContent(state, action: PayloadAction<{ sessionId: string; messageId: string; delta: string }>) {
+      const { sessionId, messageId, delta } = action.payload;
+      if (state.currentSession?.id === sessionId && delta) {
+        const message = state.currentSession.messages.find(m => m.id === messageId);
+        if (message) {
+          message.content = `${message.content ?? ''}${delta}`;
+        }
+      }
       markSessionUnread(state, sessionId);
     },
 
@@ -512,6 +557,7 @@ export const {
   addMessage,
   prependMessages,
   updateMessageContent,
+  appendMessageContent,
   setMessageFeedback,
   clearMessageFeedback,
   loadSessionFeedback,

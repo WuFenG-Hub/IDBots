@@ -1,13 +1,21 @@
-// Unit test: JSON-safe truncation in idbots-tool-result-shaping (issue #50).
+// Unit tests: idbots-tool-result-shaping.
 //
-// Zero dependencies, no network, no runtime boot: the plugin is imported
-// directly and driven through a fake ctx that captures the tools/post-execute
-// waterfall handler, then every assertion inspects the returned decision.
+// Two suites in one file, both driven through a fake ctx that captures the
+// tools/post-execute waterfall handler:
+//   * JSON-safe truncation (issue #50) — an oversized single-JSON-block result
+//     must stay parseable: arrays lose whole elements only, the marker rides a
+//     namespaced key, the legacy head+tail path is kept for everything else.
+//   * spill cooperation (upstream dade791b, cowork session 540635be) — when a
+//     spillStore is mounted the FULL original is saved before any slice, the
+//     marker carries its locator, and the shaped inline prices strictly under
+//     the spill-policy cap.
 //
+// Zero dependencies beyond the token meter, no network, no runtime boot.
 // Run: node test/tool-result-shaping.test.mjs   (from dsh-runtime/)
 
 import assert from 'node:assert/strict'
 import { apply, MARKER_KEY, ENVELOPE_KEY } from '../plugins/idbots-tool-result-shaping.mjs'
+import { estimateContent } from '@deepseek-ai/dsh-token-meter/estimate'
 
 const MARKER_TEXT = 'tool result trimmed'
 const results = []
@@ -35,7 +43,7 @@ const legacySingleBlock = (text, maxChars = 20000, tailChars = 4000) => {
 
 const harness = (config = {}) => {
   const handlers = []
-  apply({ on: (event, handler, options) => handlers.push({ event, handler, options }) }, config)
+  apply({ on: (event, handler, options) => handlers.push({ event, handler, options }), get: () => undefined }, config)
   const entry = handlers.find((h) => h.event === 'tools/post-execute')
   assert.ok(entry, 'tools/post-execute handler registered')
   assert.equal(entry.options?.global, true, 'handler registered globally')
@@ -63,7 +71,7 @@ const listPayload = JSON.stringify(workers(200))
 const numbers = Array.from({ length: 30000 }, (_, i) => i)
 const sized = (chars) => JSON.stringify({ pad: 'y'.repeat(chars - JSON.stringify({ pad: '' }).length) })
 
-const main = async () => {
+const runJsonSafeSuite = async () => {
   const shaper = harness()
 
   // ---- JSON path: root object with one oversized string member ------------
@@ -301,10 +309,133 @@ const main = async () => {
 
   const failed = results.filter((r) => !r.pass).length
   console.log(`\n${results.length - failed}/${results.length} checks passed`)
-  process.exit(failed === 0 ? 0 : 1)
+  return failed
 }
 
-main().catch((error) => {
+// ---- spill cooperation suite (upstream dade791b; identifiers namespaced) ----
+const OVER_CAP = 'HEAD-MARK ' + 'x'.repeat(40000) + ' TAIL-MARK'
+const tokenPrice = (blocks) => blocks.reduce((sum, block) => sum + (block.type === 'text' ? estimateContent([block]) : 0), 0)
+const textOfBlocks = (content) => content.map((block) => (block.type === 'text' ? block.text : JSON.stringify(block))).join('')
+
+function spillHarness({ spillStore, config = {} } = {}) {
+  const handlers = {}
+  const ctx = {
+    on: (event, handler) => { handlers[event] = handler },
+    get: (service) => (service === 'spillStore' ? spillStore : undefined),
+  }
+  apply(ctx, config)
+  const exec = { name: 'big_tool', callId: 'call-1', agent: { session: { header: { id: 'session-1' } } } }
+  const run = (content) => handlers['tools/post-execute'](
+    exec,
+    { isError: false, content },
+    async () => ({ kind: 'accept' }),
+  )
+  return { run }
+}
+
+const saved = []
+const store = {
+  async saveText(input) {
+    const ref = {
+      locator: `/tmp/spill/session-1/big_tool-${saved.length + 1}.txt`,
+      bytes: input.content.length,
+      retrievalHint: 'Use read with offset/limit, or grep this path to search within it.',
+    }
+    saved.push({ ...input, ref })
+    return ref
+  },
+}
+
+const runSpillSuite = async () => {
+  // 1. Oversize result with a spill store: the FULL original is saved, the
+  //    marker carries its locator, and the shaped inline prices strictly
+  //    under the spill-policy cap (no re-spill of the trimmed copy).
+  {
+    const decision = await spillHarness({ spillStore: store }).run([{ type: 'text', text: OVER_CAP }])
+    assert.equal(saved.length, 1, 'exactly one spill save')
+    assert.equal(saved[0].content, OVER_CAP, 'spill file received the FULL original')
+    assert.equal(saved[0].owner.sessionId, 'session-1', 'spill saved under the session owner')
+    const text = textOfBlocks(decision.content)
+    assert.ok(text.includes('tool result trimmed'), 'marker present')
+    assert.ok(text.includes(`full original stored at: ${saved[0].ref.locator}`), 'marker carries the locator')
+    assert.ok(text.includes('HEAD-MARK') && text.includes('TAIL-MARK'), 'head and tail survive')
+    assert.ok(tokenPrice(decision.content) <= 2048 - 128, `shaped copy prices under the policy cap (${tokenPrice(decision.content)} tokens)`)
+  }
+
+  // 2. saveText failure degrades to the legacy trim (bounded, no locator).
+  {
+    const failing = { async saveText() { throw new Error('disk full') } }
+    const decision = await spillHarness({ spillStore: failing }).run([{ type: 'text', text: OVER_CAP }])
+    const text = textOfBlocks(decision.content)
+    assert.ok(text.includes('tool result trimmed'), 'legacy marker present')
+    assert.ok(!text.includes('full original stored at:'), 'no locator promised on spill failure')
+    assert.ok(text.length < 21000, `legacy trim bounds history (${text.length} chars)`)
+  }
+
+  // 3. No spill store mounted: byte-for-byte legacy behavior.
+  {
+    const decision = await spillHarness().run([{ type: 'text', text: OVER_CAP }])
+    const text = textOfBlocks(decision.content)
+    assert.ok(text.includes('[idbots: tool result trimmed, 40020 chars total — head+tail shown]'), 'legacy marker verbatim')
+    assert.equal(saved.length, 1, 'no extra spill saves')
+  }
+
+  // 4. Under-cap results pass through untouched.
+  {
+    const decision = await spillHarness({ spillStore: store }).run([{ type: 'text', text: 'small result' }])
+    assert.equal(decision.content, undefined, 'plain accept returned unshaped')
+  }
+
+  // 5. Multi-block results: the original is saved whole; the inline keeps the
+  //    front-loaded head and the locator covers whatever the budget dropped.
+  {
+    const blocks = [
+      { type: 'text', text: 'A-HEAD ' + 'a'.repeat(15000) },
+      { type: 'text', text: 'B-HEAD ' + 'b'.repeat(15000) },
+    ]
+    const decision = await spillHarness({ spillStore: store }).run(blocks)
+    assert.equal(saved.at(-1).content, blocks.map((block) => block.text).join(''), 'multi-block original saved whole')
+    const text = textOfBlocks(decision.content)
+    assert.ok(text.includes('A-HEAD'), 'head budget front-loaded across blocks')
+    assert.ok(text.includes('full original stored at:'), 'locator present for everything the budget dropped')
+    assert.ok(tokenPrice(decision.content) <= 2048 - 128, `multi-block copy prices under the policy cap (${tokenPrice(decision.content)} tokens)`)
+  }
+
+  console.log('tool-result-shaping.test.mjs: all assertions passed')
+}
+
+// ---- interaction: JSON-safe shaping AND spill cooperation on one payload ----
+// Neither suite above covers this: the JSON-safe suite runs with no spillStore
+// and the spill suite uses a non-JSON payload, so the composite behaviour
+// (full original saved, locator in the JSON marker, inline still parseable and
+// under the policy cap) is asserted here.
+const JSON_BIG = JSON.stringify({ list: Array.from({ length: 500 }, (_, i) => ({ i, pad: 'x'.repeat(200) })) })
+
+const runInteractionSuite = async () => {
+  const before = saved.length
+  const decision = await spillHarness({ spillStore: store }).run([{ type: 'text', text: JSON_BIG }])
+  const text = textOfBlocks(decision.content)
+  assert.equal(saved.length, before + 1, 'the FULL JSON original is saved before any trim')
+  assert.equal(saved.at(-1).content, JSON_BIG, 'spill file received the full original document')
+  const parsed = JSON.parse(text)
+  const marker = parsed.__idbots_tool_result_shaping__
+  assert.ok(marker, 'JSON marker present on the shaped inline')
+  assert.ok(marker.note.includes(saved.at(-1).ref.locator), 'JSON marker note carries the locator')
+  assert.ok(Array.isArray(parsed.list) && parsed.list.length < 500 && parsed.list.length > 0, `oversized array lost whole elements only (${parsed.list.length}/500)`)
+  assert.ok(text.length <= 20000, `inline stays inside maxChars (${text.length})`)
+  assert.ok(tokenPrice(decision.content) <= 2048 - 128, `inline prices under the spill-policy cap (${tokenPrice(decision.content)} tokens)`)
+  console.log('tool-result-shaping.test.mjs: interaction assertions passed')
+}
+
+// ---- one entrypoint: JSON-safe suite first, then the spill-cooperation suite
+const run = async () => {
+  const jsonFailed = await runJsonSafeSuite()
+  await runSpillSuite()
+  await runInteractionSuite()
+  process.exit(jsonFailed === 0 ? 0 : 1)
+}
+
+run().catch((error) => {
   console.error('[shaping-test] fatal:', error)
   process.exit(1)
 })

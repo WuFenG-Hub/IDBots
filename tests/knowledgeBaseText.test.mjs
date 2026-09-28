@@ -22,6 +22,8 @@ const {
 } = await import('../dist-electron/main/libs/knowledgeBaseText.js')
   .catch(() => import('../dist-electron/main/libs/knowledgeBaseText.js'));
 
+const { loadPdfjs } = await import('../dist-electron/main/libs/knowledgeBaseConverters.js');
+
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-text-test-'));
 
 const writeTmp = (name, content) => {
@@ -243,6 +245,11 @@ test('extractKnowledgeBaseText extracts PDF text without external binaries', asy
   assert.ok(result.text.includes('Hello PDF Knowledge Base'), result.text);
 });
 
+test('loadPdfjs resolves a usable module via the primary import or the file-URL fallback', async () => {
+  const pdfjs = await loadPdfjs();
+  assert.equal(typeof pdfjs.getDocument, 'function');
+});
+
 test('extractKnowledgeBaseText converts DOCX to text', async () => {
   const zip = new AdmZip();
   zip.addFile(
@@ -354,7 +361,10 @@ test('extractKnowledgeBaseText reports corrupt binary files as extract_failed', 
   const pdfPath = writeTmpBuffer('broken.pdf', Buffer.from('this is not a pdf at all', 'utf8'));
   await assert.rejects(
     () => extractKnowledgeBaseText(pdfPath),
-    (error) => error instanceof KnowledgeBaseTextError && error.code === 'extract_failed'
+    (error) =>
+      error instanceof KnowledgeBaseTextError &&
+      error.code === 'extract_failed' &&
+      /Failed to parse PDF/.test(error.message)
   );
   const pptxPath = writeTmpBuffer('broken.pptx', Buffer.from('not a zip either', 'utf8'));
   await assert.rejects(
