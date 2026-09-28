@@ -10,6 +10,7 @@ import MetaTaskDetail from './MetaTaskDetail';
 import MetaIdBadge from './MetaIdBadge';
 import Tooltip from '../ui/Tooltip';
 import { metaTaskLifeStatus, metaTaskLifeStatusLabel, metaTaskLifeStatusTone } from './metaTaskStatus';
+import { formatMetaTaskRelativeTime } from './metaTaskFormat';
 import type { MetaTaskAlert, MetaTaskBoardTask, MetaTaskIdentity } from '../../types/metatask';
 
 /** Prefilled participation draft: the bot reads the task, picks an open node,
@@ -245,6 +246,7 @@ const MetaTaskCard: React.FC<{ task: MetaTaskBoardTask; identities?: Record<stri
     progress: task.progress,
     participantCount: task.participantCount,
   });
+  const lastActive = formatMetaTaskRelativeTime(task.lastActivityMs);
   return (
     <div className="p-3 rounded-xl border dark:border-claude-darkBorder border-claude-border hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors flex flex-col gap-2">
       <button
@@ -267,6 +269,11 @@ const MetaTaskCard: React.FC<{ task: MetaTaskBoardTask; identities?: Record<stri
             {i18nService.t('metatask.participants').replace('{count}', String(task.participantCount))}
           </span>
         </div>
+        {task.brief && (
+          <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary line-clamp-2">
+            {task.brief}
+          </span>
+        )}
         {/* Progress bar */}
         <div>
           <div className="flex items-center justify-between text-xs mb-1">
@@ -308,15 +315,21 @@ const MetaTaskCard: React.FC<{ task: MetaTaskBoardTask; identities?: Record<stri
                   .replace('{reviews}', String(task.myStats.reviewVotes))}
               </span>
             )}
+            {task.settlementFinalized && task.myStats && task.myStats.shareBP > 0 && (
+              <span className="px-1.5 py-0.5 text-[11px] rounded bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400">
+                {i18nService.t('metatask.myShare').replace('{pct}', (task.myStats.shareBP / 100).toFixed(2))}
+              </span>
+            )}
           </div>
         )}
-        <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+        <span
+          className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary"
+          title={i18nService.t('metatask.activityAnchorTip')}
+        >
+          {lastActive && `${i18nService.t('metatask.lastActive').replace('{when}', lastActive)} · `}
           {i18nService.t('metatask.events').replace('{count}', String(task.freshness.eventCount))}
           {' · '}
-          {i18nService.t('metatask.activityAnchorShort').replace(
-            '{block}',
-            String(task.freshness.boundaryBlock),
-          )}
+          {i18nService.t('metatask.blockAnchor').replace('{block}', String(task.freshness.boundaryBlock))}
         </span>
       </button>
       {!task.taskComplete && (

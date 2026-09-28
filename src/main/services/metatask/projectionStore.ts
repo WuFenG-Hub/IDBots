@@ -371,6 +371,7 @@ export class MetaTaskProjectionStore {
         tasks.push({
           rootPinId: projection.rootPinId,
           title: projection.title,
+          brief: projection.brief,
           publisher: projection.publisher,
           tags: projection.tags,
           taskComplete: projection.taskComplete,

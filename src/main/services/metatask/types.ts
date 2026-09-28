@@ -202,6 +202,7 @@ export interface MetaTaskTaskProjection {
 export interface MetaTaskBoardTask {
   rootPinId: string;
   title: string;
+  brief: string;
   publisher: string;
   tags: string[];
   taskComplete: boolean;
