@@ -64,6 +64,18 @@ const browserCoworkSlice = createSlice({
       }
     },
 
+    /** Streaming delta for the panel's copy of a live assistant message. */
+    appendBrowserMessageContent(
+      state,
+      action: PayloadAction<{ sessionId: string; messageId: string; delta: string }>
+    ) {
+      const { sessionId, messageId, delta } = action.payload;
+      if (state.currentSession?.id !== sessionId || !delta) return;
+      const message = state.currentSession.messages.find((m) => m.id === messageId);
+      if (!message) return;
+      message.content = `${message.content ?? ''}${delta}`;
+    },
+
     updateBrowserSessionStatus(state, action: PayloadAction<{ sessionId: string; status: CoworkSessionStatus }>) {
       const { sessionId, status } = action.payload;
       if (state.currentSession?.id !== sessionId) return;
@@ -97,6 +109,7 @@ export const {
   setBrowserSession,
   addBrowserMessage,
   updateBrowserMessageContent,
+  appendBrowserMessageContent,
   updateBrowserSessionStatus,
   setBrowserStreaming,
   clearBrowserSession,

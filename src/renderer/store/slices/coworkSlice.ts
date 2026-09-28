@@ -375,6 +375,24 @@ const coworkSlice = createSlice({
       }
     },
 
+    /**
+     * Append a streamed delta to one message. The streaming service coalesces
+     * its buffered deltas and lands them here, so a live answer no longer
+     * rebuilds and re-dispatches the whole content string on every update; only
+     * the target message object changes, every other message keeps its identity
+     * (which is what keeps the transcript's memoized turns from re-rendering).
+     */
+    appendMessageContent(state, action: PayloadAction<{ sessionId: string; messageId: string; delta: string }>) {
+      const { sessionId, messageId, delta } = action.payload;
+      if (state.currentSession?.id === sessionId && delta) {
+        const message = state.currentSession.messages.find(m => m.id === messageId);
+        if (message) {
+          message.content = `${message.content ?? ''}${delta}`;
+        }
+      }
+      markSessionUnread(state, sessionId);
+    },
+
     setMessageFeedback(state, action: PayloadAction<{ messageId: string; rating: MessageFeedbackRating; comment?: string }>) {
       const { messageId, rating, comment } = action.payload;
       state.feedbackByMessageId[messageId] = { rating, comment };
@@ -539,6 +557,7 @@ export const {
   addMessage,
   prependMessages,
   updateMessageContent,
+  appendMessageContent,
   setMessageFeedback,
   clearMessageFeedback,
   loadSessionFeedback,
