@@ -2,7 +2,10 @@
 
 Date: 2026-09-28
 Branch: `feat/bot-location`
-Status: evaluation only, no implementation yet
+Status: v1 implemented — coarse IP layer + consent-gated precise OS layer
+(`get_host_location` tool; see `src/main/services/hostLocationService.ts`,
+`src/main/libs/locationAgentTools.ts`). The address-book layer is deferred and
+will be planned together with other user-profile features.
 
 ## 1. Background and problem
 

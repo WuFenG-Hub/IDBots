@@ -237,6 +237,11 @@ import {
   type ScreenshotHost,
 } from './screenshotAgentTools';
 import {
+  buildLocationAgentTools,
+  type LocationHost,
+  type PreciseLocationConsent,
+} from './locationAgentTools';
+import {
   buildSandboxRequest,
   collectSkillFilesForSandbox,
   ensureCoworkSandboxDirs,
@@ -1983,6 +1988,13 @@ export interface CoworkRunnerOptions {
    */
   screenshotHost?: ScreenshotHost;
   /**
+   * Host geolocation surface for the get_host_location tool: IP-based coarse
+   * lookup plus the consent-gated OS precise fix (implemented in main.ts over
+   * services/hostLocationService.ts). When set, the tool is registered for
+   * every cowork surface.
+   */
+  locationHost?: LocationHost;
+  /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
    * turn ended without terminal events) and settled so the query can close.
@@ -2137,6 +2149,13 @@ export class CoworkRunner extends EventEmitter {
   private groupChat?: GroupChatControl;
   private omniReader?: OmniReaderControl;
   private screenshotHost?: ScreenshotHost;
+  private locationHost?: LocationHost;
+  /**
+   * Per-session precise-location consent memory: the owner is asked at most
+   * once per session (first precise request) and the approval sticks for the
+   * session's lifetime.
+   */
+  private preciseLocationConsentedSessions = new Set<string>();
   private readonly localTurnStallTimeoutMs: number;
   private readonly dshTurnStallTimeoutMs: number;
   private readonly dshStallExtensionScale: number;
@@ -2283,6 +2302,7 @@ export class CoworkRunner extends EventEmitter {
     this.groupChat = options?.groupChat;
     this.omniReader = options?.omniReader;
     this.screenshotHost = options?.screenshotHost;
+    this.locationHost = options?.locationHost;
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
@@ -6280,6 +6300,48 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Consent gate for get_host_location granularity="precise". Interactive
+   * sessions prompt once per session through the standard safety-approval
+   * dialog and the approval sticks (preciseLocationConsentedSessions).
+   * Unattended sessions (acceptEdits / bypassPermissions / autoApprove — the
+   * withSkillInstallApproval posture) fail closed with 'unattended' so the
+   * tool falls back to coarse instead of blocking on a dialog nobody answers.
+   */
+  private async requestPreciseLocationConsent(sessionId: string): Promise<PreciseLocationConsent> {
+    if (this.preciseLocationConsentedSessions.has(sessionId)) {
+      return 'granted';
+    }
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) {
+      return 'unattended';
+    }
+    const mode = activeSession.permissionMode ?? 'default';
+    const unattended = mode === 'acceptEdits'
+      || mode === 'bypassPermissions'
+      || activeSession.autoApprove === true;
+    if (unattended) {
+      return 'unattended';
+    }
+    const question = tApp(
+      'Agent 请求获取本机的精确位置（调用操作系统定位，可达到街道级精度）。是否允许？允许后本次会话内不再重复询问。',
+      'The agent requests this machine\'s precise location (OS geolocation, street-level accuracy). Allow it? You will not be asked again in this session.'
+    );
+    const outcome = await this.requestSafetyApproval(
+      sessionId,
+      activeSession.abortController.signal,
+      activeSession,
+      question,
+      'get_host_location',
+      { granularity: 'precise' }
+    );
+    if (outcome === 'approved') {
+      this.preciseLocationConsentedSessions.add(sessionId);
+      return 'granted';
+    }
+    return 'denied';
+  }
+
+  /**
    * Owner-approval gate for chain-write uploads (post_buzz / post_simplenote):
    * local files OUTSIDE the session workspace are only published after the
    * owner confirms (chainUploadGate). Mirrors withSkillInstallApproval's
@@ -10194,6 +10256,18 @@ export class CoworkRunner extends EventEmitter {
     memoryTools.push(
       ...buildScreenshotAgentTools({ tool, host: this.screenshotHost })
     );
+    // Host geolocation for every cowork surface: coarse (IP-based) is the
+    // default; precise (OS geolocation) is gated by requestPreciseLocationConsent,
+    // which fails closed to coarse on unattended sessions.
+    if (this.locationHost) {
+      memoryTools.push(
+        ...buildLocationAgentTools({
+          tool,
+          locationHost: this.locationHost,
+          requestPreciseConsent: () => this.requestPreciseLocationConsent(sessionId),
+        })
+      );
+    }
     // Bot Browser screenshot is registered for EVERY cowork surface (not only
     // browser sessions) so any MetaBot can capture the active tab. When the
     // surface is not visible the tool returns a graceful hint instead of

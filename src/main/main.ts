@@ -328,6 +328,7 @@ import { toSessionView as toPublicSessionView } from './agentGame/abi';
 import { assignGroupChatTask, resolveMetabotIdByName, type AssignGroupChatTaskParams } from './services/assignGroupChatTaskService';
 import { cancelActiveDownload, downloadUpdate, installUpdate, applyMacUpdateSilently, relaunchPendingMacUpdate, cleanupStaleDownloads } from './libs/appUpdateInstaller';
 import { fetchFromLocalOrFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './services/localIndexerProxy';
+import { HostLocationService, type SystemFix } from './services/hostLocationService';
 import { freshGetUrlAndInit } from './services/freshFetch';
 import { resolveMetaidAvatarSource, resolvePinAssetSource } from './services/pinAssetService';
 import { buildMetafileUri } from './services/metaFileUploadShared';
@@ -5183,6 +5184,120 @@ const detectSystemChromium = (): { executablePath: string } | Record<string, nev
   return hit ? { executablePath: hit } : {};
 };
 
+// --- Host geolocation (get_host_location tool) ------------------------------
+// One service instance shared by all sessions so the 6h coarse cache and the
+// reverse-geocode cache actually span sessions. Provider localization follows
+// the persisted app language.
+let hostLocationService: HostLocationService | null = null;
+const getHostLocationService = () => {
+  if (!hostLocationService) {
+    hostLocationService = new HostLocationService({
+      getLanguage: () => getPersistedAppLanguage(),
+    });
+  }
+  return hostLocationService;
+};
+
+/** Hard cap for one precise-location attempt (fix + no endless wait). */
+const HOST_LOCATION_FIX_GUARD_TIMEOUT_MS = 20_000;
+
+const GEOLOCATION_FIX_SCRIPT = `
+new Promise((resolve) => {
+  if (!('geolocation' in navigator)) {
+    resolve({ ok: false, code: 2, message: 'navigator.geolocation is not available in this context' });
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    (position) => resolve({
+      ok: true,
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+      accuracyMeters: typeof position.coords.accuracy === 'number' ? position.coords.accuracy : null,
+    }),
+    (error) => resolve({ ok: false, code: error.code, message: error.message }),
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 300000 }
+  );
+})
+`;
+
+type GeolocationFixScriptResult =
+  | { ok: true; latitude: number; longitude: number; accuracyMeters: number | null }
+  | { ok: false; code: number; message: string };
+
+const hostLocationOsHint = (): string => process.platform === 'darwin'
+  ? 'Check System Settings > Privacy & Security > Location Services (IDBots must be allowed).'
+  : process.platform === 'win32'
+    ? 'Check Settings > Privacy & security > Location (let desktop apps access your location).'
+    : 'Check the OS location service settings.';
+
+/**
+ * Acquire one OS geolocation fix by running navigator.geolocation inside an
+ * existing renderer (macOS CoreLocation / Windows Location service — the fix
+ * must come from inside the bundled app so the OS prompt carries our usage
+ * description). Prefers an already-loaded window; falls back to a hidden
+ * BrowserWindow that loads the same entry as the main window and is destroyed
+ * afterwards.
+ */
+const requestSystemLocationFix = async (): Promise<SystemFix> => {
+  let hiddenWindow: BrowserWindow | null = null;
+  try {
+    const fixPromise = (async (): Promise<SystemFix> => {
+      let webContents = BrowserWindow.getAllWindows()
+        .filter((win) => !win.isDestroyed() && !win.webContents.isDestroyed() && !win.webContents.isLoadingMainFrame())
+        .sort((a, b) => Number(b === mainWindow) - Number(a === mainWindow))[0]?.webContents;
+
+      if (!webContents) {
+        hiddenWindow = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+        if (isDev) {
+          await hiddenWindow.loadURL(DEV_SERVER_URL);
+        } else {
+          await hiddenWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+        }
+        webContents = hiddenWindow.webContents;
+      }
+
+      const result = await webContents.executeJavaScript(GEOLOCATION_FIX_SCRIPT) as GeolocationFixScriptResult;
+      if (!result || typeof result !== 'object') {
+        throw new Error(`Unexpected geolocation result from the renderer: ${String(result)}`);
+      }
+      if (result.ok) {
+        return {
+          latitude: result.latitude,
+          longitude: result.longitude,
+          accuracyMeters: result.accuracyMeters,
+        };
+      }
+      const failure = result as Extract<GeolocationFixScriptResult, { ok: false }>;
+      // GeolocationPositionError codes: 1 PERMISSION_DENIED, 2 POSITION_UNAVAILABLE, 3 TIMEOUT.
+      if (failure.code === 1) {
+        throw new Error(`Location permission was denied by the OS. ${hostLocationOsHint()}`);
+      }
+      if (failure.code === 3) {
+        throw new Error(`Timed out waiting for the OS location fix. ${hostLocationOsHint()}`);
+      }
+      throw new Error(`The OS could not determine the position (location services may be disabled): ${failure.message}. ${hostLocationOsHint()}`);
+    })();
+
+    let guard: ReturnType<typeof setTimeout> | undefined;
+    const guardPromise = new Promise<never>((_resolve, reject) => {
+      guard = setTimeout(() => reject(new Error('Precise location timed out (no renderer available or the OS prompt was left unanswered).')), HOST_LOCATION_FIX_GUARD_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([fixPromise, guardPromise]);
+    } finally {
+      if (guard) clearTimeout(guard);
+      // After a guard-timeout win the fix attempt is still in flight (window
+      // load or OS prompt); swallow its late rejection so it cannot surface
+      // as an unhandledRejection.
+      fixPromise.catch(() => {});
+    }
+  } finally {
+    if (hiddenWindow && !hiddenWindow.isDestroyed()) {
+      hiddenWindow.destroy();
+    }
+  }
+};
+
 const getCoworkRunner = () => {
   if (!coworkRunner) {
     const resolveMetaAppSourceByPinId = async (pinId: string) => {
@@ -5532,6 +5647,17 @@ const getCoworkRunner = () => {
             })),
             hasMore: page.hasMore,
           };
+        },
+      },
+      // get_host_location tool backend: coarse = IP lookup via the shared
+      // service (cached 6h); precise = OS fix from a renderer's
+      // navigator.geolocation, reverse-geocoded by the same service. The
+      // in-app consent gate lives in coworkRunner.
+      locationHost: {
+        getCoarseLocation: () => getHostLocationService().getCoarseLocation(),
+        getPreciseLocation: async () => {
+          const fix = await requestSystemLocationFix();
+          return getHostLocationService().reverseGeocode(fix);
         },
       },
       metaIdSearch: {
