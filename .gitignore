@@ -541,3 +541,4 @@ man_base_data_pebble/
 # investigation (2026-09-27); root-anchored so other index.js files are unaffected
 /index.js
 !tests/coworkSessionAvatarChannel.test.mjs
+!tests/coworkSessionListThrottle.test.mjs

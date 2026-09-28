@@ -78,9 +78,23 @@ import {
 import { i18nService } from './i18n';
 import { metabotAvatarCache } from './metabotAvatarCache';
 
+/**
+ * Trailing window that folds a burst of session-list refresh requests into one
+ * read. Event-driven refreshes (a stream message carrying refreshSessionSummary,
+ * a peer-profile refresh, a background session appearing) arrive faster than a
+ * full list read completes; without the fold every one of them sent its own
+ * ~36MB-shaped list read through IPC.
+ */
+const SESSIONS_RELOAD_DEBOUNCE_MS = 300;
+
 class CoworkService {
   private streamListenerCleanups: Array<() => void> = [];
   private initialized = false;
+  /** The session-list read in progress, if any; reads never overlap. */
+  private sessionsLoadInFlight: Promise<void> | null = null;
+  private sessionsReloadTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Callers waiting for the next read the current burst will produce. */
+  private sessionsReloadWaiters: Array<() => void> = [];
 
   async init(): Promise<void> {
     if (this.initialized) return;
@@ -323,11 +337,72 @@ class CoworkService {
     this.streamListenerCleanups = [];
   }
 
+  /**
+   * Refresh the session list.
+   *
+   * One read runs at a time: a request that arrives while a read is in flight
+   * (or while a burst is already queued) joins that burst and resolves only once
+   * a read that started after it has completed, so callers that reload and then
+   * inspect the list still see their own change. An idle request reads at once —
+   * the init path is never delayed.
+   */
   async loadSessions(): Promise<void> {
-    const result = await window.electron?.cowork?.listSessions();
-    if (result?.success && result.sessions) {
-      store.dispatch(setSessions(await metabotAvatarCache.attachAvatars(result.sessions)));
+    if (this.sessionsLoadInFlight || this.sessionsReloadTimer) {
+      await this.queueSessionsReload();
+      return;
     }
+    await this.readSessions();
+  }
+
+  /** Splice the waiters a read covers: it resolves the burst queued before it
+   * started, while requests made during the read wait for the next one. */
+  private async readSessions(): Promise<void> {
+    const waiters = this.sessionsReloadWaiters.splice(0);
+    const read = (async () => {
+      const result = await window.electron?.cowork?.listSessions();
+      if (result?.success && result.sessions) {
+        store.dispatch(setSessions(await metabotAvatarCache.attachAvatars(result.sessions)));
+      }
+    })();
+    this.sessionsLoadInFlight = read;
+    try {
+      await read;
+    } finally {
+      if (this.sessionsLoadInFlight === read) {
+        this.sessionsLoadInFlight = null;
+      }
+      waiters.forEach((resolve) => resolve());
+    }
+  }
+
+  /** Queue this request into the trailing burst and wait for its read. The
+   * read is best effort for the queued callers: a failed one resolves them
+   * without an error, and the list simply stays as it was. */
+  private queueSessionsReload(): Promise<void> {
+    if (this.sessionsReloadTimer) {
+      clearTimeout(this.sessionsReloadTimer);
+    }
+    const waiter = new Promise<void>((resolve) => {
+      this.sessionsReloadWaiters.push(resolve);
+    });
+    this.sessionsReloadTimer = setTimeout(() => {
+      this.sessionsReloadTimer = null;
+      void this.flushSessionsReload().catch(() => undefined);
+    }, SESSIONS_RELOAD_DEBOUNCE_MS);
+    return waiter;
+  }
+
+  private async flushSessionsReload(): Promise<void> {
+    while (this.sessionsLoadInFlight) {
+      // The running read started before the newest request, so it cannot
+      // satisfy it; wait it out and then read once for the whole burst.
+      await this.sessionsLoadInFlight.catch(() => undefined);
+    }
+    if (this.sessionsReloadTimer) {
+      // A newer request re-armed the window while waiting; its own flush runs.
+      return;
+    }
+    await this.readSessions();
   }
 
   async loadConfig(): Promise<void> {
