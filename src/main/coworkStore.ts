@@ -779,8 +779,17 @@ export interface CoworkSessionSummary {
   peerAvatar?: string | null;
   /** Owning MetaBot's display name, when attributed */
   metabotName?: string | null;
-  /** Owning MetaBot's avatar (data URL or remote URL), when attributed */
+  /**
+   * Owning MetaBot's avatar (data URL or remote URL), when attributed. Only
+   * getSession populates it; list rows carry metabotAvatarVersion and the
+   * renderer resolves the image through the avatar cache instead.
+   */
   metabotAvatar?: string | null;
+  /**
+   * Revision of the owning MetaBot row (metabots.updated_at) the identity
+   * fields came from — the freshness key of the renderer's avatar cache.
+   */
+  metabotAvatarVersion?: number | null;
   /** Bot Browser context: URI of the tab this session is about (browser sessions only) */
   browserUri?: string | null;
   /** Bot Browser context: title of the tab this session is about (browser sessions only) */
@@ -3500,7 +3509,7 @@ export class CoworkStore implements MemoryBackend {
       peer_name?: string | null;
       peer_avatar?: string | null;
       metabot_name?: string | null;
-      metabot_avatar?: string | Uint8Array | null;
+      metabot_updated_at?: number | null;
       browser_uri?: string | null;
       browser_title?: string | null;
       hidden_from_session_list?: number | null;
@@ -3528,7 +3537,7 @@ export class CoworkStore implements MemoryBackend {
         s.peer_name,
         s.peer_avatar,
         mb.name AS metabot_name,
-        mb.avatar AS metabot_avatar,
+        mb.updated_at AS metabot_updated_at,
         s.browser_uri,
         s.browser_title,
         s.hidden_from_session_list,
@@ -3593,7 +3602,7 @@ export class CoworkStore implements MemoryBackend {
       peerName: row.peer_name ?? null,
       peerAvatar: row.peer_avatar ?? null,
       metabotName: row.metabot_name ?? null,
-      metabotAvatar: normalizeMetabotAvatarForDisplay(row.metabot_avatar),
+      metabotAvatarVersion: parseIdNumber(row.metabot_updated_at),
       browserUri: row.browser_uri ?? null,
       browserTitle: row.browser_title ?? null,
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
@@ -3603,6 +3612,37 @@ export class CoworkStore implements MemoryBackend {
       effort: row.effort ?? null,
       projectId: row.project_id ?? null,
       cwd: row.cwd ?? null,
+    }));
+  }
+
+  /**
+   * Display avatars of the given MetaBots, read from the same metabots.avatar
+   * column listSessions used to inline. Avatar images travel over IPC once per
+   * bot instead of once per session row: callers keep a cache keyed by the
+   * metabotAvatarVersion the list rows carry and ask only for the ids whose
+   * revision moved (unknown ids included). The id list is capped so a runaway
+   * caller cannot exhaust the SQLite bind-parameter budget.
+   */
+  listMetabotAvatars(metabotIds?: number[] | null): Array<{ metabotId: number; avatar: string | null }> {
+    const ids = Array.isArray(metabotIds)
+      ? [...new Set(
+          metabotIds
+            .map((id) => parseIdNumber(id))
+            .filter((id): id is number => typeof id === 'number' && id > 0),
+        )].slice(0, 200)
+      : [];
+    if (ids.length === 0) {
+      return [];
+    }
+
+    const rows = this.getAll<{ id?: number | null; avatar?: string | Uint8Array | null }>(
+      `SELECT id, avatar FROM metabots WHERE id IN (${ids.map(() => '?').join(', ')})`,
+      ids,
+    );
+
+    return rows.map((row) => ({
+      metabotId: parseIdNumber(row.id) ?? 0,
+      avatar: normalizeMetabotAvatarForDisplay(row.avatar),
     }));
   }
 

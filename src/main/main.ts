@@ -11185,6 +11185,21 @@ if (!gotTheLock) {
     });
   });
 
+  ipcMain.handle('cowork:session:listMetabotAvatars', async (_event, metabotIds?: number[]) => {
+    return withSqliteRecovery('cowork:session:listMetabotAvatars', async () => {
+      try {
+        const avatars = getCoworkStore().listMetabotAvatars(metabotIds);
+        return { success: true, avatars };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to list MetaBot avatars',
+        };
+      }
+    });
+  });
+
   ipcMain.handle('cowork:session:processServiceRefund', async (_event, sessionId: string) => {
     return withSqliteRecovery('cowork:session:processServiceRefund', async () => {
     try {

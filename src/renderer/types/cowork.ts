@@ -803,8 +803,13 @@ export interface CoworkSessionSummary {
   peerAvatar?: string | null;
   /** Owning MetaBot's display name, when attributed */
   metabotName?: string | null;
-  /** Owning MetaBot's avatar (data URL or remote URL), when attributed */
+  /** Owning MetaBot's avatar (data URL or remote URL), when attributed. List rows resolve it through the avatar cache, not through listSessions. */
   metabotAvatar?: string | null;
+  /**
+   * Revision of the owning MetaBot row (metabots.updated_at) this summary's
+   * identity came from; the avatar cache refetches a bot only when it moves.
+   */
+  metabotAvatarVersion?: number | null;
   /** Bot Browser context: URI of the tab this session is about (browser sessions only) */
   browserUri?: string | null;
   /** Bot Browser context: title of the tab this session is about (browser sessions only) */

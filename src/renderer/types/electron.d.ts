@@ -396,6 +396,8 @@ interface CoworkSessionSummary {
   peerAvatar?: string | null;
   metabotName?: string | null;
   metabotAvatar?: string | null;
+  /** Revision of the owning MetaBot row (metabots.updated_at); the avatar cache's freshness key. */
+  metabotAvatarVersion?: number | null;
   /** Auto-created session marker: long-term task run, orchestration run, or scheduled run. */
   autoOrigin?: 'longterm' | 'orchestration' | 'schedule' | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
@@ -1126,6 +1128,11 @@ interface IElectronAPI {
     getA2AConversationHistoryPage: (input: { sessionId: string; beforeCursor?: CoworkA2AHistoryCursor | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkA2AHistoryPage; error?: string }>;
     getA2AEpisodes: (sessionId: string) => Promise<{ success: boolean; episodes?: CoworkA2AEpisodeInfo[]; error?: string }>;
     listSessions: (options?: { metabotId?: number | null }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; error?: string }>;
+    listMetabotAvatars: (metabotIds: number[]) => Promise<{
+      success: boolean;
+      avatars?: Array<{ metabotId: number; avatar: string | null }>;
+      error?: string;
+    }>;
     processServiceRefund: (sessionId: string) => Promise<{
       success: boolean;
       refundTxid?: string;

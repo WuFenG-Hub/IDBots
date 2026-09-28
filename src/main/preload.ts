@@ -478,6 +478,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:getA2AEpisodes', sessionId),
     listSessions: (options?: { metabotId?: number | null }) =>
       ipcRenderer.invoke('cowork:session:list', options),
+    listMetabotAvatars: (metabotIds: number[]) =>
+      ipcRenderer.invoke('cowork:session:listMetabotAvatars', metabotIds),
     processServiceRefund: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:processServiceRefund', sessionId),
     readLocalImage: (options: { path: string; maxBytes?: number }) =>

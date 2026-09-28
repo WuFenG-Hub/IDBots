@@ -76,6 +76,7 @@ import {
   shouldRegisterStreamSessionFromFetch,
 } from './coworkStreamPresentation';
 import { i18nService } from './i18n';
+import { metabotAvatarCache } from './metabotAvatarCache';
 
 class CoworkService {
   private streamListenerCleanups: Array<() => void> = [];
@@ -325,7 +326,7 @@ class CoworkService {
   async loadSessions(): Promise<void> {
     const result = await window.electron?.cowork?.listSessions();
     if (result?.success && result.sessions) {
-      store.dispatch(setSessions(result.sessions));
+      store.dispatch(setSessions(await metabotAvatarCache.attachAvatars(result.sessions)));
     }
   }
 
