@@ -3,7 +3,7 @@
 // deepseek-harness-shaped composition, same kernel, same model + effort,
 // same scripted tasks, same driver.
 //
-// Both sides spawn THIS repo's dsh-runtime (kernel 0.1.7-rc.2, the same
+// Both sides spawn THIS repo's dsh-runtime (kernel 0.2.0-rc.1, the same
 // packages deepseek-harness builds) and are driven over the same SDK client,
 // so the only variable is the composition (prompt surface + tool catalog):
 //
