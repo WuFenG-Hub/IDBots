@@ -49,7 +49,7 @@ import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../li
 import { budgetAssumesThinking } from '../libs/modelThinking';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import { metabotBrainOptions } from './llmFallback';
-import { classifyDreamError, DREAM_RETRY_MAX_ATTEMPTS } from '../libs/dreamRetryPolicy';
+import { classifyDreamError, DREAM_RETRY_MAX_ATTEMPTS, DREAM_TRANSIENT_LLM_RETRY_DELAYS_MS, isTransientDreamLlmError } from '../libs/dreamRetryPolicy';
 import {
   applyMetaIDDreamImpressionUpdates,
   buildMetaIDDreamImpressionContext,
@@ -172,6 +172,12 @@ export interface DreamServiceDeps {
   surfBeforeDream?: (metabotId: number) => Promise<{ reportMarkdown: string | null } | null>;
   tickIntervalMs?: number;
   llmTimeoutMs?: number;
+  /**
+   * Delays before each in-run transient LLM re-drive (default
+   * DREAM_TRANSIENT_LLM_RETRY_DELAYS_MS). Tests inject tiny values; pass an
+   * empty array to disable in-run retries entirely.
+   */
+  transientRetryDelaysMs?: readonly number[];
   now?: () => Date;
 }
 
@@ -459,28 +465,53 @@ export class DreamService {
     maxTokens?: number,
     attemptTimeoutMs?: number,
   ): Promise<string> {
-    return await this.performChat(systemPrompt, userMessage, brain.llmId, {
-      // Each attempt (primary, then fallback) gets its own fresh timeout
-      // window — a primary that burns the full budget must not leave the
-      // fallback retry a dead shared signal. Callers emitting the full dream
-      // JSON (synthesis, self-identity) pass the wider window; fragments and
-      // post-dream passes keep the lean default.
-      attemptTimeoutMs: attemptTimeoutMs ?? this.deps.llmTimeoutMs ?? DREAM_LLM_TIMEOUT_MS,
-      maxTokens: maxTokens ?? this.resolveDreamBudgets(brain).maxOutputTokens,
-      llmProvider: brain.llmProvider,
-      fallbackLlmId: brain.fallbackLlmId,
-      fallbackLlmProvider: brain.fallbackLlmProvider,
-      // DeepSeek automation models default to reasoning mode. Dream prompts
-      // need the output budget for the final JSON, not hidden reasoning.
-      thinking: 'disabled',
-      // Dream prompts summarize the bot's own day — a stray built-in
-      // web search both wastes the fragment budget and drags outside
-      // noise into the diary JSON.
-      webSearch: false,
-      // Empty content must fail inside runWithLlmFallback so a configured
-      // secondary provider gets a chance before the dream attempt fails.
-      throwOnEmptyContent: true,
-    });
+    // In-run transient retry: a sub-minute transport/gateway flap (proxy TLS
+    // jitter, a 502 burst, one stalled attempt window) must not fail the whole
+    // run when both brains happen to catch it — re-drive the primary→fallback
+    // pair a bounded number of times with fresh per-attempt timeouts. Terminal
+    // errors (4xx, quota, auth) and parse failures are never retried here; the
+    // run-level backoff still owns genuine outages. The 2026-09-28 nightly run
+    // died at its 54th fragment on one net::ERR_SSL_PROTOCOL_ERROR that this
+    // loop now absorbs.
+    const delays = this.deps.transientRetryDelaysMs ?? DREAM_TRANSIENT_LLM_RETRY_DELAYS_MS;
+    for (let round = 0; ; round += 1) {
+      try {
+        return await this.performChat(systemPrompt, userMessage, brain.llmId, {
+          // Each attempt (primary, then fallback) gets its own fresh timeout
+          // window — a primary that burns the full budget must not leave the
+          // fallback retry a dead shared signal. Callers emitting the full dream
+          // JSON (synthesis, self-identity) pass the wider window; fragments and
+          // post-dream passes keep the lean default.
+          attemptTimeoutMs: attemptTimeoutMs ?? this.deps.llmTimeoutMs ?? DREAM_LLM_TIMEOUT_MS,
+          maxTokens: maxTokens ?? this.resolveDreamBudgets(brain).maxOutputTokens,
+          llmProvider: brain.llmProvider,
+          fallbackLlmId: brain.fallbackLlmId,
+          fallbackLlmProvider: brain.fallbackLlmProvider,
+          // DeepSeek automation models default to reasoning mode. Dream prompts
+          // need the output budget for the final JSON, not hidden reasoning.
+          thinking: 'disabled',
+          // Dream prompts summarize the bot's own day — a stray built-in
+          // web search both wastes the fragment budget and drags outside
+          // noise into the diary JSON.
+          webSearch: false,
+          // Empty content must fail inside runWithLlmFallback so a configured
+          // secondary provider gets a chance before the dream attempt fails.
+          throwOnEmptyContent: true,
+        });
+      } catch (error) {
+        if (round >= delays.length || !isTransientDreamLlmError(error)) {
+          throw error;
+        }
+        const delayMs = delays[round];
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `[DreamService] transient LLM failure on round ${round + 1}/${delays.length + 1}; `
+          + `re-driving primary→fallback in ${delayMs}ms:`,
+          message,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
   }
 
   private resolveDreamBudgets(brain: DreamBrainPair): {
