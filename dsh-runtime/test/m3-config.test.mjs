@@ -52,6 +52,9 @@ record('generator: three apiFormats map to three pi-ai protocols',
 // root (`<origin>/anthropic`) and declares systemPromptUpdate: in-history on
 // every catalog model (changed system snapshots append after the cached
 // prefix instead of rewriting the leading system message).
+// Since d80f0ad5 the DeepSeek V4 default output ceiling is 256K (NATIVE_
+// DEEPSEEK_DEFAULT_MAX_TOKENS), so the catalog entry below — which declares no
+// maxOutputTokens — rides 256000, not the old 32768.
 const nativeEntry = unit.find((e) => e.name === '@deepseek-ai/dsh-llm-deepseek-api-key')
 record('generator: native DeepSeek route rides dsh-llm-deepseek (never pi-ai)',
   nativeEntry !== undefined
@@ -60,7 +63,7 @@ record('generator: native DeepSeek route rides dsh-llm-deepseek (never pi-ai)',
   && nativeEntry.config.baseURL === 'https://api.deepseek.com/anthropic'
   && nativeEntry.config.thinking === 'enabled'
   && nativeEntry.config.reasoningEffort === 'high'
-  && nativeEntry.config.models[0].maxTokens === 32768
+  && nativeEntry.config.models[0].maxTokens === 256000
   && nativeEntry.config.models[0].systemPromptUpdate === 'in-history'
   && nativeEntry.config.models[0].toolUpdate === 'in-history'
   && piEntry.config.providers.opencode.models[0].maxTokens === 8192)
