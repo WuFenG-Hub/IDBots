@@ -68,3 +68,47 @@ test('isQuotaDshTurnError matches the kernel QUOTA code and upstream credit fing
   assert.equal(isQuotaDshTurnError({ kind: 'completed' }), false);
   assert.equal(isQuotaDshTurnError(null), false);
 });
+
+test('isOverflowDshTurnError classifies context-overflow turn failures', async () => {
+  const { isOverflowDshTurnError } = await import('../dist-electron/main/libs/coworkAssistantReply.js');
+
+  // Kernel-normalized overflow codes.
+  assert.equal(
+    isOverflowDshTurnError({ kind: 'error', error: { code: 'CONTEXT_LENGTH', message: 'this model supports at most 65536 tokens' } }),
+    true,
+  );
+  // The code the 2026-09-28 incident actually shipped with (cowork.log:
+  // opencode zen deepseek-flash, bodyless 400 + CONTEXT_WINDOW_EXCEEDED).
+  assert.equal(
+    isOverflowDshTurnError({ kind: 'error', error: { code: 'CONTEXT_WINDOW_EXCEEDED', message: '400 status code (no body)' } }),
+    true,
+  );
+  // Upstream overflow fingerprints (OpenAI-compat / DeepSeek bodies).
+  assert.equal(
+    isOverflowDshTurnError({ kind: 'error', error: { code: 'BAD_REQUEST', message: "This model's maximum context length is 32768 tokens. However, you requested 40123 tokens." } }),
+    true,
+  );
+  assert.equal(
+    isOverflowDshTurnError({ kind: 'error', error: { message: 'prompt is too long: 190000 tokens > 131072 maximum' } }),
+    true,
+  );
+  assert.equal(
+    isOverflowDshTurnError({ kind: 'error', error: { code: 'REQUEST_TOO_LARGE', message: '' } }),
+    true,
+  );
+  // The 2026-09-28 compaction-deadlock incident shape: a bodyless 400 only
+  // classifies when the same turn also failed auto-compaction.
+  const bodyless400 = { kind: 'error', error: { code: 'ERROR', message: '400 status code (no body)' } };
+  assert.equal(isOverflowDshTurnError(bodyless400), false);
+  assert.equal(isOverflowDshTurnError(bodyless400, { compactionFailedThisTurn: true }), true);
+  // A bodyless 400 WITHOUT a failed compaction must not classify — too many
+  // unrelated provider failures share that shape.
+  assert.equal(isOverflowDshTurnError({ kind: 'error', error: { message: '400 status code (no body)' } }), false);
+  // Non-overflow failures must not classify.
+  assert.equal(
+    isOverflowDshTurnError({ kind: 'error', error: { code: 'QUOTA', message: 'You have insufficient credits.' } }),
+    false,
+  );
+  assert.equal(isOverflowDshTurnError({ kind: 'completed' }), false);
+  assert.equal(isOverflowDshTurnError(null), false);
+});
