@@ -1,9 +1,9 @@
-import type { MetaTaskEventPath } from './constants';
+import type { MetaTaskCollectedPath } from './constants';
 
 /** A chain event normalized for replay (pin list item → engine input). */
 export interface MetaTaskChainEvent {
   pinId: string;
-  path: MetaTaskEventPath;
+  path: MetaTaskCollectedPath;
   /** Pin author globalMetaId. */
   author: string;
   /** Genesis block height; -1 (or missing) = unconfirmed/mempool. */

@@ -5,6 +5,12 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { canonJ, innerHash, outerHash, sha256Hex } = require('../dist-electron/main/services/metatask/canon.js');
 const { replayMetaTask } = require('../dist-electron/main/services/metatask/engine.js');
+const {
+  collectMetaTaskEvents,
+  normalizeChainEvent,
+  rosterPinsFromEvents,
+} = require('../dist-electron/main/services/metatask/collector.js');
+const { METATASK_COLLECTED_PATHS } = require('../dist-electron/main/services/metatask/constants.js');
 
 /**
  * MetaTask TS engine — conformance vectors (P1).
@@ -572,4 +578,326 @@ test('v1.2.1 amend: conflict on shared bases, stale on foreign bases', () => {
   const reasons = Object.fromEntries(projection.ignoredEvents.map((e) => [e.pinId, e.reason]));
   assert.equal(reasons[conflicting.pinId], 'amend_conflict');
   assert.equal(reasons[stale.pinId], 'amend_stale');
+});
+
+// ── consensus-critical: ghost claims / effective-tree membership ─────────────
+// A claim (or release/submission) naming a node that is not in the task's
+// effective (post-amend) tree is a chain fact about a node this task does not
+// have. It must not create node state, appear in openNodes, inflate
+// progress.total, or force the settlement weight table off the tree weights.
+
+const sharesOf = (projection) =>
+  Object.fromEntries(projection.settlement.shares.map((share) => [share.metaId, share]));
+
+/** r1 (3000 aggregate) + t1 (7000 leaf), both submitted by S and verified. */
+const verifiedTwoNodeEvents = () => {
+  const { tree, task, rootPinId } = buildTask();
+  const claimT1 = claimOn(rootPinId, 't1', S, { height: 190_100 });
+  const subT1 = submitOn(rootPinId, 't1', claimT1.pinId, S, { height: 190_110 });
+  const claimR1 = claimOn(rootPinId, 'r1', S, { height: 190_120 });
+  const subR1 = submitOn(rootPinId, 'r1', claimR1.pinId, S, { height: 190_130 });
+  const events = [
+    tree,
+    task,
+    claimT1,
+    subT1,
+    voteOn(subT1.pinId, 'pass', R1, { height: 190_140 }),
+    voteOn(subT1.pinId, 'pass', R2, { height: 190_141 }),
+    claimR1,
+    subR1,
+    voteOn(subR1.pinId, 'pass', R1, { height: 190_150 }),
+    voteOn(subR1.pinId, 'pass', R2, { height: 190_151 }),
+  ];
+  return { events, rootPinId };
+};
+
+test('ghost claim: an invented node id never creates state or poisons the weight table', () => {
+  const { events, rootPinId } = verifiedTwoNodeEvents();
+  const ghost = claimOn(rootPinId, 'invented-node', R2, { height: 190_135 });
+  // Ghost claim interleaved BEFORE the task is fully verified.
+  const projection = replayMetaTask([...events, ghost], { rootPinId });
+
+  assert.equal(projection.progress.total, 2, 'progress.total counts effective-tree nodes only');
+  assert.deepEqual(Object.keys(projection.nodeStates).sort(), ['r1', 't1']);
+  assert.equal(projection.nodeStates['invented-node'], undefined);
+  assert.equal(projection.nodes.length, 2);
+  assert.ok(projection.ignoredEvents.some((e) => e.pinId === ghost.pinId && e.reason === 'unknown_node'));
+  // ...and the ghost claimant is not credited with a claim.
+  assert.equal(projection.participants.find((p) => p.metaId === R2).effectiveClaims, 0);
+
+  // The 8000/1000/1000 split survives; without the filter nodeCount would be 3
+  // and every task would silently fall back to uniform floor(10000/3) weights.
+  assert.equal(projection.taskComplete, true);
+  const shares = sharesOf(projection);
+  assert.equal(shares[S].from.submittedBP, 8000);
+  assert.equal(shares[R1].from.reviewedBP, 1000);
+  assert.equal(shares[R2].from.reviewedBP, 1000);
+  assert.equal(projection.settlement.weightsTableHash, replayMetaTask(events, { rootPinId }).settlement.weightsTableHash);
+});
+
+test('ghost claim: arriving AFTER verification changes neither progress nor the split', () => {
+  const { events, rootPinId } = verifiedTwoNodeEvents();
+  const clean = replayMetaTask(events, { rootPinId });
+  const ghost = claimOn(rootPinId, 'invented-node', C, { height: 190_400 });
+  const poisoned = replayMetaTask([...events, ghost], { rootPinId });
+
+  assert.ok(poisoned.ignoredEvents.some((e) => e.pinId === ghost.pinId && e.reason === 'unknown_node'));
+  assert.deepEqual(poisoned.progress, clean.progress);
+  assert.deepEqual(Object.keys(poisoned.nodeStates).sort(), Object.keys(clean.nodeStates).sort());
+  assert.deepEqual(poisoned.settlement.shares, clean.settlement.shares);
+  assert.equal(poisoned.settlement.weightsTableHash, clean.settlement.weightsTableHash);
+});
+
+test('amend remove_node: the removed node stops being claimable, counted, or weighted', () => {
+  const { tree, task, rootPinId, treePinId } = buildTask(); // r1:3000, t1:7000
+  const amend = ev(
+    'amend',
+    {
+      taskid: rootPinId,
+      bases: treePinId,
+      ops: [
+        { op: 'remove_node', node: 't1' },
+        { op: 'reweight', node: 'r1', weight: 10000 },
+      ],
+    },
+    { author: P, height: 191_610 }
+  );
+  const amended = replayMetaTask([tree, task, amend], { rootPinId });
+  // The effective tree (the settlement weight source) is exactly one node at
+  // 10000bp: the amended-away node leaves no residual row and no uniform
+  // floor(10000/2) fallback.
+  assert.deepEqual(amended.nodes.map((node) => [node.id, node.weight]), [['r1', 10000]]);
+  assert.equal(amended.nodeStates.t1, undefined);
+  assert.equal(amended.progress.total, 1);
+  assert.equal(amended.progress.open, 1);
+
+  // A claim that was valid when published but whose node the amend removed is
+  // simply dropped (no crash, no zombie "open" node)...
+  const zombieClaim = claimOn(rootPinId, 't1', S, { height: 191_620 });
+  const withZombie = replayMetaTask([tree, task, amend, zombieClaim], { rootPinId });
+  assert.equal(withZombie.nodeStates.t1, undefined);
+  assert.ok(withZombie.ignoredEvents.some((e) => e.pinId === zombieClaim.pinId && e.reason === 'unknown_node'));
+  assert.deepEqual(withZombie.progress, amended.progress);
+  assert.equal(withZombie.participants.find((p) => p.metaId === S)?.effectiveClaims ?? 0, 0);
+  // ...and the node is not claimable: the claimable set is the effective tree.
+  assert.deepEqual(
+    Object.values(withZombie.nodeStates).filter((node) => node.status === 'open').map((node) => node.id),
+    ['r1']
+  );
+});
+
+test('amend remove_node: an effective amend and a verified root cannot coexist (deferred hindsight fold)', () => {
+  const { tree, task, rootPinId, treePinId } = buildTask({ quorum: 1 });
+  const amend = ev(
+    'amend',
+    {
+      taskid: rootPinId,
+      bases: treePinId,
+      ops: [
+        { op: 'remove_node', node: 't1' },
+        { op: 'reweight', node: 'r1', weight: 10000 },
+      ],
+    },
+    { author: P, height: 191_610 }
+  );
+  const claimR1 = claimOn(rootPinId, 'r1', S, { height: 191_620 });
+  const subR1 = submitOn(rootPinId, 'r1', claimR1.pinId, S, { height: 191_621 });
+  const pass = voteOn(subR1.pinId, 'pass', R1, { height: 191_622 });
+  const projection = replayMetaTask([tree, task, amend, claimR1, subR1, pass], { rootPinId });
+
+  // DEFERRED (out of scope; protocol v1.2.2 ruling pending): the amend fold
+  // reads the hindsight vote-level verified set, so NO amend folds once the
+  // initial root has been vote-verified — which is exactly the situation in
+  // which a settlement manifest exists. Pinned as an observation so the
+  // deferred fix has to update this expectation deliberately. Consequence for
+  // the effective-tree filter: the removed node's weight can never have been
+  // silently replaced by uniform weights (settlement cannot be reached), but
+  // the node id used to leak into progress/openNodes — covered above.
+  assert.ok(
+    projection.ignoredEvents.some((e) => e.pinId === amend.pinId && e.reason === 'amend_task_finalized')
+  );
+  assert.deepEqual(projection.nodes.map((node) => node.id), ['r1', 't1']);
+});
+
+// ── consensus-critical: reviewer accuracy identity filter ────────────────────
+
+test('reviewer accuracy: a bot self-votes without changing a(r) or the manifest', () => {
+  // t1 is submitted by S and reviewed by R1; r1 is submitted by R2 and reviewed
+  // by S and R1 (quorum 1). The submitter of t1 (S) is therefore a REAL
+  // reviewer elsewhere, so its Laplace accuracy a(r) moves the split of r1.
+  const build = (selfVotes) => {
+    const { tree, task, rootPinId } = buildTask({ quorum: 1 });
+    const claimT1 = claimOn(rootPinId, 't1', S, { height: 190_100 });
+    const subT1 = submitOn(rootPinId, 't1', claimT1.pinId, S, { height: 190_110, pinId: 'accfiltert1sub00000000000000000000i0' });
+    const claimR1 = claimOn(rootPinId, 'r1', R2, { height: 190_120 });
+    const subR1 = submitOn(rootPinId, 'r1', claimR1.pinId, R2, { height: 190_130, pinId: 'accfilterr1sub00000000000000000000i0' });
+    const events = [
+      tree,
+      task,
+      claimT1,
+      subT1,
+      voteOn(subT1.pinId, 'pass', R1, { height: 190_140 }),
+      claimR1,
+      subR1,
+      voteOn(subR1.pinId, 'pass', S, { height: 190_150 }),
+      voteOn(subR1.pinId, 'pass', R1, { height: 190_151 }),
+      ...selfVotes(subT1.pinId),
+    ];
+    return replayMetaTask(events, { rootPinId });
+  };
+
+  const baseline = build(() => []);
+  // S votes fail-then-pass on its OWN submission: the fail is dropped by
+  // last-valid-vote resolution and the pass must be identity-filtered.
+  const withSelfVotes = build((target) => [
+    voteOn(target, 'fail', S, { height: 190_160 }),
+    voteOn(target, 'pass', S, { height: 190_161 }),
+  ]);
+
+  assert.equal(baseline.taskComplete, true);
+  assert.equal(withSelfVotes.taskComplete, true);
+  const selfStats = withSelfVotes.participants.find((p) => p.metaId === S);
+  const baseStats = baseline.participants.find((p) => p.metaId === S);
+  assert.equal(selfStats.reviewCorrect, baseStats.reviewCorrect);
+  assert.equal(selfStats.reviewTerminal, baseStats.reviewTerminal);
+  // Self votes are not review participation either (node view `counted=false`).
+  assert.equal(selfStats.reviewVotes, baseStats.reviewVotes);
+  assert.deepEqual(withSelfVotes.settlement.shares, baseline.settlement.shares);
+  assert.equal(withSelfVotes.settlement.weightsTableHash, baseline.settlement.weightsTableHash);
+  // Sanity: with the self-vote counted, S's smoothed accuracy would be 7500
+  // instead of the honest 6666 (1 correct of 1 terminal) — assert the honest
+  // value is what the split is computed from.
+  assert.equal(Math.floor((10000 * (selfStats.reviewCorrect + 1)) / (selfStats.reviewTerminal + 2)), 6666);
+});
+
+// ── consensus-critical: participation visibility (reviewVotes) ───────────────
+
+test('participation: a counted vote on a still-open cycle is review activity', () => {
+  const { tree, task, rootPinId } = buildTask({ quorum: 2 });
+  const claim = claimOn(rootPinId, 't1', S, { height: 190_100 });
+  const sub = submitOn(rootPinId, 't1', claim.pinId, S, { height: 190_110 });
+  const onePass = voteOn(sub.pinId, 'pass', R1, { height: 190_120 }); // still open: 1 < quorum 2
+  const projection = replayMetaTask([tree, task, claim, sub, onePass], { rootPinId });
+
+  assert.equal(projection.nodeStates.t1.status, 'claimed');
+  const stats = projection.participants.find((p) => p.metaId === R1);
+  assert.equal(stats.reviewVotes, 1, 'open-cycle votes are participation');
+  // Accuracy inputs stay terminal-only.
+  assert.equal(stats.reviewTerminal, 0);
+  assert.equal(stats.reviewCorrect, 0);
+});
+
+// ── same-side roster (H_ACT2-gated), fed by collected roster pins ────────────
+
+test('roster: the collector-shaped roster pin filters same-side votes at/after H_ACT2 only', () => {
+  const rosterPinId = 'rosterpin00000000000000000000000000000000000000000000001i0';
+  const peerOfSubmitter = 'idq1peerbotaa';
+  const peerOfPublisher = 'idq1peerbotbb';
+  // Exactly the body `metatask_publish` writes, round-tripped through the
+  // collector's contentBody base64 decoding.
+  const rosterBody = {
+    groups: [[S, peerOfSubmitter], [P, peerOfPublisher]],
+    owner: 'idbots-local-roster',
+    createdAt: 1_790_000_000_000,
+  };
+  const rosterEvent = normalizeChainEvent(
+    rosterPinId,
+    {
+      id: rosterPinId,
+      path: '/protocols/metatask-roster',
+      globalMetaId: P,
+      genesisHeight: 191_400,
+      txIndex: 0,
+      timestamp: 1_790_000_000_000,
+      contentBody: Buffer.from(JSON.stringify(rosterBody)).toString('base64'),
+    },
+    null
+  );
+  assert.equal(rosterEvent.path, 'metatask-roster');
+  assert.deepEqual(rosterEvent.body, rosterBody);
+  const rosterPins = rosterPinsFromEvents([rosterEvent]);
+  assert.deepEqual(Object.keys(rosterPins), [rosterPinId]);
+
+  const { tree, task, rootPinId } = buildTask({
+    quorum: 1,
+    split: { submitterShareBP: 8000, rosterid: rosterPinId },
+  });
+  const claim = claimOn(rootPinId, 't1', S, { height: 191_600 });
+  const sub = submitOn(rootPinId, 't1', claim.pinId, S, { height: 191_601 });
+  const sameSideSubmitter = voteOn(sub.pinId, 'pass', peerOfSubmitter, { height: 191_602 });
+  const sameSidePublisher = voteOn(sub.pinId, 'pass', peerOfPublisher, { height: 191_603 });
+  const independent = voteOn(sub.pinId, 'pass', R1, { height: 191_604 });
+
+  const gated = replayMetaTask([tree, task, claim, sub, sameSideSubmitter, sameSidePublisher], {
+    rootPinId,
+    rosterPins,
+  });
+  assert.equal(gated.nodeStates.t1.status, 'claimed', 'same-side passes do not reach quorum');
+  const reasons = Object.fromEntries(gated.ignoredEvents.map((entry) => [entry.pinId, entry.reason]));
+  assert.equal(reasons[sameSideSubmitter.pinId], 'same_side_roster');
+  assert.equal(reasons[sameSidePublisher.pinId], 'same_side_roster');
+
+  const withIndependent = replayMetaTask([tree, task, claim, sub, sameSideSubmitter, sameSidePublisher, independent], {
+    rootPinId,
+    rosterPins,
+  });
+  assert.equal(withIndependent.nodeStates.t1.status, 'verified', 'an independent reviewer still counts');
+
+  // No roster supplied (e.g. an unreachable roster pin) = no filtering.
+  const unmapped = replayMetaTask([tree, task, claim, sub, sameSideSubmitter], { rootPinId });
+  assert.equal(unmapped.nodeStates.t1.status, 'verified');
+
+  // Below H_ACT2 the roster rule does not exist: the pilots stay byte-identical.
+  const preClaim = claimOn(rootPinId, 't1', S, { height: 189_900 });
+  const preSub = submitOn(rootPinId, 't1', preClaim.pinId, S, { height: 189_901 });
+  const preAct2 = [
+    tree,
+    task,
+    preClaim,
+    preSub,
+    voteOn(preSub.pinId, 'pass', peerOfSubmitter, { height: 189_902 }),
+  ];
+  const grandfathered = replayMetaTask(preAct2, { rootPinId, rosterPins });
+  assert.equal(grandfathered.nodeStates.t1.status, 'verified');
+  assert.ok(grandfathered.ignoredEvents.every((entry) => entry.reason !== 'same_side_roster'));
+});
+
+// ── collector: ten pools + manapi-safe page size ─────────────────────────────
+
+test('collector: sweeps the ten pools (roster included) at page size 100', async () => {
+  const rosterRawItem = {
+    id: 'rosterpin00000000000000000000000000000000000000000000002i0',
+    path: '/protocols/metatask-roster',
+    globalMetaId: P,
+    genesisHeight: 191_400,
+    txIndex: 0,
+    timestamp: 1_790_000_000_000,
+    contentBody: Buffer.from(JSON.stringify({ groups: [[S]], owner: 'idbots-local-roster' })).toString('base64'),
+  };
+  const requestedPaths = new Set();
+  const requestedSizes = new Set();
+  const fetchImpl = async (url) => {
+    const parsed = new URL(String(url));
+    requestedPaths.add(parsed.searchParams.get('path'));
+    requestedSizes.add(parsed.searchParams.get('size'));
+    const list = parsed.searchParams.get('path') === '/protocols/metatask-roster' ? [rosterRawItem] : [];
+    return new Response(JSON.stringify({ code: 1, data: { list } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  const collected = await collectMetaTaskEvents({ fetchImpl });
+  assert.deepEqual(
+    collected.perPath.map((entry) => entry.path),
+    [...METATASK_COLLECTED_PATHS]
+  );
+  assert.equal(collected.perPath.length, 10);
+  assert.ok(requestedPaths.has('/protocols/metatask-roster'));
+  assert.ok(!requestedPaths.has('/protocols/metatask/roster'));
+  assert.deepEqual([...requestedSizes], ['100']);
+  assert.equal(collected.events.length, 1);
+  assert.equal(collected.events[0].path, 'metatask-roster');
+  assert.deepEqual(collected.events[0].body.groups, [[S]]);
+  assert.deepEqual(Object.keys(rosterPinsFromEvents(collected.events)), [rosterRawItem.id]);
 });

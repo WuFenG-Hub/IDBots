@@ -297,6 +297,13 @@ const foldAmends = (input: {
  * per bot with #8/#9 filtered first, quorum judgment, immediate reopen on a
  * valid fail). v1.2 features (amend / supersede / challenge / settlement)
  * are H_ACT2-gated per the rev-2 registration draft.
+ *
+ * Node universe: only the effective (post-amend) tree exists. Claims,
+ * releases, submissions and cycles naming any other node id — a stray claim
+ * on an invented node, or a node an effective amend removed — are dropped
+ * and recorded in `ignoredEvents` with reason 'unknown_node'; they never
+ * create node state, appear in openNodes, count in progress, or join the
+ * settlement weight table.
  */
 export function replayMetaTask(
   events: MetaTaskChainEvent[],
@@ -425,7 +432,9 @@ export function replayMetaTask(
   }
   const holders = new Map<string, HolderState>();
   const firstClaimOrder = new Map<string, [number, number, number, string]>();
-  const effectiveClaimCounts = new Map<string, number>();
+  /** Claims that took a node lock, in chain order; node membership is resolved
+   *  only after the amend fold (effective-tree filter below). */
+  const effectiveClaims: { node: string; author: string }[] = [];
   const cycleByNodeClaim = new Map<string, CycleRecord>();
   const verifiedSubmissionPins = new Set<string>();
   const passVotersByNode = new Map<string, Map<string, string>>();
@@ -438,7 +447,7 @@ export function replayMetaTask(
       if (node && !holders.has(node)) {
         holders.set(node, { pinId: pin.pinId, claimant: pin.author, sinceMs: asNum(pin.timestampMs) });
         if (!firstClaimOrder.has(node)) firstClaimOrder.set(node, orderKey(pin));
-        effectiveClaimCounts.set(pin.author, (effectiveClaimCounts.get(pin.author) ?? 0) + 1);
+        effectiveClaims.push({ node, author: pin.author });
       }
       continue;
     }
@@ -590,8 +599,6 @@ export function replayMetaTask(
     }
   }
   const nodeIds = new Set<string>(initialNodes.keys());
-  for (const cycle of cycleByNodeClaim.values()) nodeIds.add(cycle.node);
-  for (const node of holders.keys()) nodeIds.add(node);
   // Vote-level verified set (walk outcome) feeds the amend fold; the final
   // aggregation-precondition pass below may still demote parents afterwards.
   const verifiedNodeIds = new Set<string>();
@@ -616,7 +623,39 @@ export function replayMetaTask(
   ignoredEvents.push(...amendResult.ignored);
   const effectiveTree = amendResult.nodes;
   const amendHead = amendResult.head;
-  for (const id of effectiveTree.keys()) nodeIds.add(id);
+
+  // -- effective-tree filter -------------------------------------------------
+  // The task's node universe IS its effective (post-amend) tree. A claim,
+  // release, submission or cycle naming any other node id is a chain fact
+  // about a node this task does not have: it must not create node state,
+  // appear in openNodes, inflate progress.total, or reach the settlement
+  // weight table (which keys strictly on the effective tree). This closes two
+  // holes: a stray claim pin on an INVENTED node id no longer de-validates the
+  // tree weights (which used to dump every task onto legacy uniform weights),
+  // and a node an effective amend REMOVED stops being claimable/counted. A
+  // claim that was valid when published but whose node a later amend removed
+  // simply drops out of the effective projection — no crash.
+  const effectiveNodeIds = new Set<string>(effectiveTree.keys());
+  const alreadyIgnoredPins = new Set(ignoredEvents.map((entry) => entry.pinId));
+  const markIgnored = (pinId: string, reason: string): void => {
+    if (alreadyIgnoredPins.has(pinId)) return;
+    alreadyIgnoredPins.add(pinId);
+    ignoredEvents.push({ pinId, reason });
+  };
+  for (const [node, holder] of Array.from(holders)) {
+    if (effectiveNodeIds.has(node)) continue;
+    holders.delete(node);
+    passVotersByNode.delete(node);
+    markIgnored(holder.pinId, 'unknown_node');
+  }
+  for (const [key, cycle] of Array.from(cycleByNodeClaim)) {
+    if (effectiveNodeIds.has(cycle.node)) continue;
+    cycleByNodeClaim.delete(key);
+    markIgnored(cycle.claimId, 'unknown_node');
+    for (const submission of cycle.submissions) markIgnored(submission.pinId, 'unknown_node');
+  }
+  nodeIds.clear();
+  for (const id of effectiveNodeIds) nodeIds.add(id);
 
   // -- aggregation precondition (v1.2.1 paths.aggregationPrecondition) -------
   // Parent verified = all children verified AND own submission passed votes;
@@ -764,6 +803,13 @@ export function replayMetaTask(
     }
     return stats;
   };
+  // Effective claims per author, restricted to the effective tree: a claim on
+  // a node this task does not have must not inflate a participant's standing.
+  const effectiveClaimCounts = new Map<string, number>();
+  for (const claim of effectiveClaims) {
+    if (!effectiveNodeIds.has(claim.node)) continue;
+    effectiveClaimCounts.set(claim.author, (effectiveClaimCounts.get(claim.author) ?? 0) + 1);
+  }
   bump(rootAuthor);
   for (const [author, count] of effectiveClaimCounts) bump(author).effectiveClaims = count;
 
@@ -784,6 +830,10 @@ export function replayMetaTask(
         const identityOk = v.bot !== effective.author && v.bot !== rootAuthor;
         if (v.body.verdict === 'pass' && identityOk) passVotes += 1;
         if (v.body.verdict === 'fail') failVotes += 1;
+        // Participation visible from the node view: EVERY counted vote (same
+        // identity rule as `counted` below) is review activity, whether the
+        // cycle is still open or already terminal.
+        if (identityOk) bump(v.bot).reviewVotes += 1;
         voteList.push({
           voter: v.bot,
           verdict: asStr(v.body.verdict, 'invalid'),
@@ -850,15 +900,19 @@ export function replayMetaTask(
     }
   }
 
-  // Review stats: counted votes on terminally-resolved cycles (boundary = boundary block).
+  // Reviewer accuracy input: counted votes on terminally-resolved cycles
+  // (boundary = boundary block). The identity filter mirrors the node view and
+  // the settlement reviewer set R(n) exactly — a self vote or the publisher's
+  // vote must never move a(r) (it used to inflate Laplace accuracy from 5000
+  // to 7500, i.e. +50% of the reviewer pool).
   const terminalCycles = Array.from(cycleByNodeClaim.values()).filter(
     (cycle) => cycle.outcome === 'verified' || cycle.outcome === 'fail_rejected'
   );
   for (const cycle of terminalCycles) {
     if (!cycle.effective) continue;
     for (const v of votesByTarget.get(cycle.effective.pinId) ?? []) {
+      if (v.bot === cycle.effective.author || v.bot === rootAuthor) continue;
       const stats = bump(v.bot);
-      stats.reviewVotes += 1;
       stats.reviewTerminal += 1;
       const correct =
         (v.body.verdict === 'pass' && cycle.outcome === 'verified') ||
@@ -927,9 +981,12 @@ export function replayMetaTask(
   // -- settlement manifest (v1.2) -------------------------------------------
   let settlement: MetaTaskSettlementManifest | null = null;
   if (taskComplete && openChallenges.size === 0) {
-    const nodeCount = progress.total;
+    // The weight table keys STRICTLY on the effective tree: nodeIds is that
+    // same set (any other node id never survives the effective-tree filter),
+    // so a stray claim pin can no longer force the legacy uniform fallback.
+    const nodeCount = nodeIds.size;
     const weights = new Map<string, number>();
-    let weightsValid = nodeCount > 0 && effectiveTree.size === nodeCount;
+    let weightsValid = nodeCount > 0;
     let totalWeight = 0;
     if (weightsValid) {
       for (const node of effectiveTree.values()) {

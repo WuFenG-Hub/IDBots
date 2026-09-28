@@ -283,11 +283,12 @@ same vector files run in all engines (§4).
   entities** — chain replay is authoritative; tables can be rebuilt at any
   time ("referenced, not mixed in" — the MetaTask tab never feeds the
   long-term board).
-- Refresher walks the seven (now nine, with amend/challenge) event paths via
-  the `protocolPinFetch.ts` pattern: `pins_by_path` pagination with
-  cursor-to-empty-page (null-page handling), then TS-engine replay into the
-  cache. Optional configured indexer endpoint short-circuits the walk when
-  available and fresh (freshness headers honored).
+- Refresher walks the ten pools (seven original event paths + amend/challenge,
+  plus the flat `/protocols/metatask-roster` reference pool the same-side
+  review rule reads) via the `protocolPinFetch.ts` pattern: `pins_by_path`
+  pagination with cursor-to-empty-page (null-page handling), then TS-engine
+  replay into the cache. Optional configured indexer endpoint short-circuits
+  the walk when available and fresh (freshness headers honored).
 
 ### 5.3 Agent tools (built-in, productizing the skill)
 
