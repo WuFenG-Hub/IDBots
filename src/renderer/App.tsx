@@ -267,6 +267,12 @@ const App: React.FC = () => {
         // 初始化配置
         await configService.init();
 
+        // 初始化主题
+        // Depends only on the config just loaded (config.theme), so it applies
+        // before the provisioning round-trips below instead of after them: the
+        // window is themed as soon as the config is in memory.
+        themeService.initialize();
+
         // First-run free-quota bootstrap: provisions the built-in metaid-free
         // provider (identity-signed relay key) and the welcome bot before the
         // model list / onboarding decision, so a fresh install lands directly
@@ -274,14 +280,17 @@ const App: React.FC = () => {
         // onboarding path as fallback.
         const freeQuotaProvision = await ensureFreeQuotaProvisioning();
 
-        // 初始化主题
-        themeService.initialize();
-
         // 初始化语言
+        // Stays strictly AFTER provisioning: initialize() captures the whole
+        // config and writes that snapshot back, so overlapping it with
+        // provisioning's provider write would revert the provisioned provider.
         await i18nService.initialize();
-        
-        const config = await configService.getConfig();
-        
+
+        // Read the config once for the whole init path. getConfig() returns the
+        // already-loaded in-memory config synchronously (init() populated it),
+        // so this is a plain read, not an awaited round-trip.
+        const config = configService.getConfig();
+
         const apiConfig: ApiConfig = {
           apiKey: config.api.key,
           baseUrl: config.api.baseUrl,
@@ -326,14 +335,20 @@ const App: React.FC = () => {
         }
         
         // 初始化定时任务服务
-        await scheduledTaskService.init();
-        await groupTaskService.init();
-        // Long-term board data must be live BEFORE the board is ever opened:
-        // the sidebar's 跟踪任务 amber dot and the 长期任务 tab badge both read
-        // this board, and the badge has to work on a machine where the tab was
-        // never opened. init() is idempotent, so the board component keeps its
-        // own init call as a harmless fallback.
-        await longTermTaskService.init();
+        // The three boards are mutually independent: separate IPC channels,
+        // separate Redux slices, and none of them reads the config or i18n
+        // state that the awaits above settle. Running them together collapses
+        // their serial IPC round-trips into one wait.
+        await Promise.all([
+          scheduledTaskService.init(),
+          groupTaskService.init(),
+          // Long-term board data must be live BEFORE the board is ever opened:
+          // the sidebar's 跟踪任务 amber dot and the 长期任务 tab badge both read
+          // this board, and the badge has to work on a machine where the tab was
+          // never opened. init() is idempotent, so the board component keeps its
+          // own init call as a harmless fallback.
+          longTermTaskService.init(),
+        ]);
 
         // Onboarding is no longer shown to first-run users: fresh installs are
         // provisioned with the free-quota welcome bot and land directly in the
