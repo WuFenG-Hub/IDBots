@@ -1057,6 +1057,55 @@ const isQuotaExhaustedError = (error: unknown): boolean => {
   return /\b429\b/.test(message) && /quota/i.test(message);
 };
 /**
+ * HOST-FIX-RFP 2026-09-28 (D1, the zhipu silent-drop incident): model-layer
+ * configuration failures a turn can NEVER out-retry — the member's model
+ * binding points at a provider that vanished from the catalog, an ambiguous
+ * model id with no provider pick, a provider missing base URL/API key, no
+ * enabled provider at all, or a model rejecting the harness protocol. The old
+ * path burned the whole MSG_RETRY_MAX_FAILURES ladder on these (every attempt
+ * failing within milliseconds) and then DROPPED the trigger with a single
+ * delayed alert — the dispatch vanished and neither the chair nor the member
+ * saw anything. Fingerprint on upstream error wording only: the DSH skill-turn
+ * bridge re-wraps the original Error, so the error class never reaches this
+ * catch. Keep in sync with the route-resolution wording in
+ * libs/claudeSettings.ts and the member-facing message in
+ * libs/coworkRunner.ts (both embed the raw reason).
+ */
+const isModelLayerConfigError = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return message.includes('provider selection is required.')
+    || message.includes('does not offer enabled model')
+    || message.includes('No enabled provider found for model:')
+    || /Provider \S+ is missing base URL\./.test(message)
+    || /Provider \S+ requires API key/.test(message)
+    || message.includes('ModelProtocolUnsupported');
+};
+/**
+ * Stable root-cause signature of a model-layer config error, used for alert /
+ * host-note dedup keys so a fleet of triggers dying on the SAME broken binding
+ * raises ONE alert instead of one per message (HOST-FIX-RFP D4).
+ */
+const modelConfigErrorSignature = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return message.replace(/\s+/g, ' ').trim().slice(0, 160);
+};
+/**
+ * HOST-FIX-RFP (D1): per-(task, bot) park state for model-layer config
+ * failures, kv `group_task_model_stall:<taskId>:<metabotId>` =
+ * {since, lastProbeAt, signature}. While set (and younger than
+ * MODEL_STALL_MAX_MS) the deferred drain holds the bot's entries and releases
+ * ONE probe dispatch per MODEL_STALL_PROBE_MS — a broken binding must not burn
+ * the charged retry ladder, and the parked trigger fires automatically once
+ * the owner re-picks the model (the probe turn then succeeds and lifts the
+ * stall). Past the cap the ordinary charged ladder resumes so the episode
+ * still terminates (drop + anomaly), mirroring the quota-stall contract.
+ */
+const MODEL_STALL_PREFIX = 'group_task_model_stall:';
+/** Default interval between probe dispatches while a (task, bot) is model-stalled. */
+const MODEL_STALL_PROBE_DEFAULT_MS = 5 * 60_000;
+/** Past this stall age the ordinary charged retry ladder resumes. */
+const MODEL_STALL_MAX_MS = 24 * 60 * 60_000;
+/**
  * GT#87 (quota stall): per-task kv `group_task_quota_stall:<taskId>` =
  * {since, lastProbeAt}. While set (and younger than QUOTA_STALL_MAX_MS) the
  * deferred drain holds every entry and releases ONE probe dispatch per
@@ -1954,6 +2003,11 @@ export interface GroupTaskDaemonDeps {
    * quota-stalled (default 15 min). Test seam only — prod never overrides it.
    */
   quotaStallProbeMs?: number;
+  /**
+   * HOST-FIX-RFP (D1): interval between probe dispatches while a (task, bot)
+   * is model-stalled (default 5 min). Test seam only — prod never overrides.
+   */
+  modelStallProbeMs?: number;
   /**
    * P4 (v1.2): inject the review-stage owner report (same body the A2A
    * private chat receives) into the task's origin CoWork session under the
@@ -3037,6 +3091,42 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
   const clearQuotaStall = (taskId: number): boolean => {
     const key = `${QUOTA_STALL_PREFIX}${taskId}`;
+    const existed = deps.getStore().get<string>(key) != null;
+    deps.getStore().delete(key);
+    return existed;
+  };
+  /**
+   * HOST-FIX-RFP (D1): read/write/clear the per-(task, bot) model stall — the
+   * same contract as the quota stall above, but keyed by member so one bot's
+   * broken binding parks only ITS triggers, not the whole task.
+   */
+  const readModelStall = (
+    taskId: number,
+    metabotId: number,
+  ): { since: number; lastProbeAt: number; signature: string } | null => {
+    try {
+      const raw = deps.getStore().get<string>(`${MODEL_STALL_PREFIX}${taskId}:${metabotId}`);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { since?: unknown; lastProbeAt?: unknown; signature?: unknown };
+      if (typeof parsed.since !== 'number') return null;
+      return {
+        since: parsed.since,
+        lastProbeAt: typeof parsed.lastProbeAt === 'number' ? parsed.lastProbeAt : 0,
+        signature: typeof parsed.signature === 'string' ? parsed.signature : '',
+      };
+    } catch {
+      return null;
+    }
+  };
+  const writeModelStall = (
+    taskId: number,
+    metabotId: number,
+    stall: { since: number; lastProbeAt: number; signature: string },
+  ): void => {
+    deps.getStore().set(`${MODEL_STALL_PREFIX}${taskId}:${metabotId}`, JSON.stringify(stall));
+  };
+  const clearModelStall = (taskId: number, metabotId: number): boolean => {
+    const key = `${MODEL_STALL_PREFIX}${taskId}:${metabotId}`;
     const existed = deps.getStore().get<string>(key) != null;
     deps.getStore().delete(key);
     return existed;
@@ -7425,6 +7515,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             'the deferred drain resumes at full cadence',
           );
         }
+        // HOST-FIX-RFP (D1): a successful turn from THIS bot also proves its
+        // model binding healed — lift its model stall so parked triggers
+        // drain at full cadence again.
+        if (clearModelStall(task.id, bot.id)) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: a turn succeeded — model stall lifted for bot ${bot.id}; ` +
+            'the deferred drain resumes at full cadence',
+          );
+        }
         // Task #51 safety net: a completed chair turn answers every pending
         // trigger up to this message; a NEWER trigger survives.
         if (member.role === 'chair') {
@@ -7594,7 +7693,125 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             }
           }
           const failures = (args.entry?.failures ?? 0) + 1;
-          if (isQuotaExhaustedError(error)) {
+          if (isModelLayerConfigError(error)) {
+            // HOST-FIX-RFP 2026-09-28 (D1, the zhipu silent-drop incident): a
+            // broken model/provider binding fails EVERY turn within
+            // milliseconds, so the charged ladder used to burn 5 attempts in
+            // seconds and then DROP the trigger with one delayed alert — the
+            // dispatch vanished and chair + member saw nothing (task #99 sat
+            // silent ~30 min until the chair reverse-engineered the failure
+            // from the empty filesystem). Instead: park the trigger
+            // UNCHARGED, surface the root cause IMMEDIATELY on first failure
+            // (origin-session anomaly + chair host note, both deduped by
+            // root-cause signature — D4), and let the drain probe once per
+            // interval so the parked dispatch fires automatically once the
+            // binding is re-picked. Past the 24h cap the charged ladder
+            // resumes so the episode still terminates.
+            const signature = modelConfigErrorSignature(error);
+            const existing = readModelStall(task.id, bot.id);
+            const stalledTooLong = existing != null && now() - existing.since >= MODEL_STALL_MAX_MS;
+            if (!stalledTooLong) {
+              const since = existing?.since ?? now();
+              writeModelStall(task.id, bot.id, {
+                since,
+                lastProbeAt: existing?.lastProbeAt ?? since,
+                signature,
+              });
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} failed ` +
+                'on a model-layer config error — requeued UNCHARGED; the member is model-stalled ' +
+                '(the drain probes once per stall interval; the first successful turn lifts the stall): ' +
+                signature,
+              );
+              if (!existing) {
+                const memberLabel = member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`);
+                try {
+                  deps.getGroupTaskStore().recordHostNote({
+                    taskId: task.id,
+                    kind: 'member_model_error',
+                    target: member.name ?? bot.name ?? null,
+                    body:
+                      `${memberLabel} cannot answer message #${message.id}: every turn fails before ` +
+                      `producing any output — ${signature}. This is a broken model/provider binding ` +
+                      '(the provider was removed/renamed, or the model id is no longer offered), not a ' +
+                      'transient outage. The dispatch is PARKED, not dropped: it retries automatically ' +
+                      'on a probe cadence and fires as soon as the bot\'s model is re-picked (My Bots, ' +
+                      'or the session model picker). Do NOT re-dispatch additional work to this member ' +
+                      'until the binding heals; re-drive the parked trigger with a supervisor nudge ' +
+                      'after the fix if it does not resume on its own.',
+                    dedupeKey: `member_model_error:${bot.id}:${signature}`,
+                  });
+                } catch (noteError) {
+                  emitLog(
+                    `[GroupTaskDaemon] Task ${task.id}: failed to record member-model-error host note: ` +
+                    `${noteError instanceof Error ? noteError.message : String(noteError)}`,
+                  );
+                }
+                notifySourceSessionMilestone(
+                  task,
+                  'anomaly',
+                  buildSourceSessionAnomalyNotice({
+                    title: task.title,
+                    status: task.status,
+                    summary:
+                      `${memberLabel} could not answer message #${message.id}: the turn fails before ` +
+                      `producing any output (${signature}). The member's model/provider binding is ` +
+                      'broken — the provider was removed or renamed, or the model id is no longer ' +
+                      'offered. The dispatch is PARKED (not dropped) and retries automatically every ' +
+                      `~${Math.round((deps.modelStallProbeMs ?? MODEL_STALL_PROBE_DEFAULT_MS) / 60_000)} min; ` +
+                      're-pick the bot\'s model under My Bots (or in the session model picker) and the ' +
+                      'parked trigger fires on the next probe. This alert fires once per root cause, ' +
+                      'not per message.',
+                  }),
+                  `member_model_error:${task.id}:${bot.id}:${signature}`,
+                );
+              }
+              deferReply({
+                taskId: task.id,
+                metabotId: bot.id,
+                messageId: message.id,
+                reason: args.reason,
+                verificationNotes: args.verificationNotes,
+                failures: args.entry?.failures,
+              });
+            } else {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} model stall exceeded ` +
+                `${Math.round(MODEL_STALL_MAX_MS / 3_600_000)}h — the ordinary charged retry budget ` +
+                `governs again (attempt ${failures}/${MSG_RETRY_MAX_FAILURES})`,
+              );
+              if (failures >= MSG_RETRY_MAX_FAILURES) {
+                clearModelStall(task.id, bot.id);
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn for message #${message.id} ` +
+                  `dropped after ${failures} failures (model-layer config error persisted past the stall cap): ` +
+                  signature,
+                );
+                notifySourceSessionMilestone(
+                  task,
+                  'anomaly',
+                  buildSourceSessionAnomalyNotice({
+                    title: task.title,
+                    status: task.status,
+                    summary:
+                      `${member.role === 'chair' ? 'The chair' : (member.name ?? `Bot ${bot.id}`)} did not answer ` +
+                      `message #${message.id}: the model-layer config error persisted past the 24h park window ` +
+                      `(${signature}). The trigger was dropped — fix the bot's model binding and re-drive it manually.`,
+                  }),
+                  `turn_failed_drop:${task.id}:${bot.id}:${message.id}`,
+                );
+              } else {
+                deferReply({
+                  taskId: task.id,
+                  metabotId: bot.id,
+                  messageId: message.id,
+                  reason: args.reason,
+                  verificationNotes: args.verificationNotes,
+                  failures,
+                });
+              }
+            }
+          } else if (isQuotaExhaustedError(error)) {
             // GT#87 (quota stall): fleet-wide token-plan exhaustion is
             // environmental — each failed attempt already burned ~10min of
             // provider retry ladders, and charging MSG_RETRY_MAX_FAILURES
@@ -11218,6 +11435,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               `for bot ${entry.metabotId} (one dispatch per ${Math.round(quotaProbeMs / 60_000)} min while stalled)`,
             );
           }
+        }
+        // HOST-FIX-RFP (D1): while THIS bot is model-stalled the drain holds
+        // its entries and releases ONE probe per interval — a broken binding
+        // fails in milliseconds, so an unthrottled drain would spin a hot
+        // requeue loop; the probe is what lets a healed binding resume
+        // automatically. Past the 24h cap the entry flows through to the
+        // charged ladder (the catch side handles the termination drop).
+        const modelStall = readModelStall(task.id, entry.metabotId);
+        if (modelStall && now() - modelStall.since < MODEL_STALL_MAX_MS) {
+          const modelProbeMs = Math.max(30_000, Math.trunc(deps.modelStallProbeMs ?? MODEL_STALL_PROBE_DEFAULT_MS));
+          if (now() - modelStall.lastProbeAt < modelProbeMs) {
+            deferReply(entry);
+            continue;
+          }
+          writeModelStall(task.id, entry.metabotId, { ...modelStall, lastProbeAt: now() });
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: model stall probe — releasing message #${entry.messageId} ` +
+            `for bot ${entry.metabotId} (one dispatch per ${Math.round(modelProbeMs / 60_000)} min while stalled)`,
+          );
         }
         const lastReplyAt = lastReplyAtByKey.get(key) ?? 0;
         const cooldownMs = isChair ? chairCooldownMs : workerCooldownMs;

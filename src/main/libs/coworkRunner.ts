@@ -10,7 +10,7 @@ import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { PermissionResult } from './coworkPermissionTypes';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
-import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, resolveDshProviderRoute, isFreeQuotaProvider, type DshProviderRouteInfo } from './claudeSettings';
+import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, resolveDshProviderRoute, isFreeQuotaProvider, ModelProviderSelectionError, type DshProviderRouteInfo } from './claudeSettings';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { buildGoalPromptSection, type CoworkSessionGoal } from './coworkSessionGoal';
 import { DshTurnHub, dshSessionRootFor, isNativeDeepSeekChatRoute, type DshTurnProviderRoute } from './coworkDshTurn';
@@ -8130,7 +8130,32 @@ export class CoworkRunner extends EventEmitter {
     const { sessionId } = activeSession;
     // Direct upstream route: the DSH runtime speaks the provider's native
     // protocol (pi-ai) and bypasses the OpenAI-compat proxy entirely.
-    const route = this.resolveSessionDshRoute(sessionId);
+    let route: DshProviderRouteInfo | null = null;
+    try {
+      route = this.resolveSessionDshRoute(sessionId);
+    } catch (routeError) {
+      if (routeError instanceof ModelProviderSelectionError) {
+        // HOST-FIX-RFP 2026-09-28 (D3): a stale binding (session-level pick or
+        // bot brain pointing at a provider that vanished from the catalog)
+        // used to surface as the RAW resolution string — members (and owners)
+        // read it as "message never arrived". Settle the turn like the
+        // no-route branch below, but with a readable, actionable message that
+        // still embeds the original reason so the group-task daemon's
+        // model-layer classifier (isModelLayerConfigError) keeps matching and
+        // PARKS the trigger instead of dropping it.
+        this.handleError(
+          sessionId,
+          tApp(
+            `模型绑定已失效：${routeError.message} 请在本会话的模型选择器中重新选择模型（或在「我的 Bots」中调整该 Bot 的主模型）；修复后排队的回合会自动重试。`,
+            `The model binding is stale: ${routeError.message} Re-pick the model in this session's model picker (or change the bot's primary model under My Bots); queued turns retry automatically once fixed.`
+          )
+        );
+        this.clearPendingPermissions(sessionId);
+        this.removeActiveSession(sessionId, activeSession);
+        return;
+      }
+      throw routeError;
+    }
     if (!route?.baseUrl || !route.apiKey) {
       const brain = this.getSessionAutomationBrain(sessionId);
       this.handleError(
