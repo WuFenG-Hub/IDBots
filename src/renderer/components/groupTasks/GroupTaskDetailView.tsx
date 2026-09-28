@@ -6,6 +6,7 @@ import type {
   GroupTaskDetail,
 } from '../../types/groupTask';
 import GroupTaskMessageItem from './GroupTaskMessageItem';
+import GroupTaskComposer from './GroupTaskComposer';
 import AcceptanceSummaryCard from './AcceptanceSummaryCard';
 import { GroupTaskTinyAvatar } from './GroupTaskListMeta';
 import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
@@ -158,7 +159,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const [loadingMessages, setLoadingMessages] = useState(true);
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const [ownerGlobalMetaId, setOwnerGlobalMetaId] = useState<string | null>(null);
-  const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sentHint, setSentHint] = useState(false);
@@ -450,25 +450,25 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     void jumpToMessage(pinId);
   }, [jumpToMessage]);
 
-  const handleSend = async () => {
-    const text = input.trim();
-    if (!text || sending) return;
+  const handleSendText = useCallback(async (text: string): Promise<boolean> => {
+    if (sending) return false;
     setSending(true);
     setSendError(null);
     try {
       await groupTaskService.sendUserMessage(taskId, text);
-      setInput('');
       setSentHint(true);
       if (sentHintTimerRef.current != null) {
         window.clearTimeout(sentHintTimerRef.current);
       }
       sentHintTimerRef.current = window.setTimeout(() => setSentHint(false), 4000);
+      return true;
     } catch (err) {
       setSendError(err instanceof Error ? err.message : String(err));
+      return false;
     } finally {
       setSending(false);
     }
-  };
+  }, [sending, taskId]);
 
   const handleConfirmClose = async (rating?: number, ratingComment?: string) => {
     if (!confirmAction || !detail) return;
@@ -992,41 +992,12 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
 
           {/* Composer (non-terminal only) */}
           {!isTerminal && (
-            <div className="shrink-0 border-t dark:border-claude-darkBorder border-claude-border px-4 py-3">
-              <div className="flex items-end gap-2">
-                <textarea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    // Same contract as the new-task composer: Enter sends,
-                    // Shift+Enter inserts a newline. Enter during IME
-                    // composition confirms the candidate instead of sending.
-                    const isComposing = e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
-                    if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
-                      e.preventDefault();
-                      void handleSend();
-                    }
-                  }}
-                  rows={2}
-                  className="flex-1 rounded-2xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3 py-2 text-sm leading-relaxed dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent/50 resize-none"
-                  placeholder={i18nService.t('groupTasksSendPlaceholder')}
-                />
-                <button
-                  type="button"
-                  onClick={() => void handleSend()}
-                  disabled={!input.trim() || sending}
-                  className="btn-idchat-primary-filled px-4 py-2 text-sm font-medium disabled:opacity-50"
-                >
-                  {sending ? i18nService.t('groupTasksSending') : i18nService.t('groupTasksSend')}
-                </button>
-              </div>
-              {sendError && <p className="text-xs text-red-500 mt-1">{sendError}</p>}
-              {sentHint && !sendError && (
-                <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-1">
-                  {i18nService.t('groupTasksSentHint')}
-                </p>
-              )}
-            </div>
+            <GroupTaskComposer
+              sending={sending}
+              sendError={sendError}
+              sentHint={sentHint}
+              onSend={handleSendText}
+            />
           )}
         </div>
 
