@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from '../../store';
 import { setViewMode, selectTask } from '../../store/slices/scheduledTaskSlice';
 import { scheduledTaskService } from '../../services/scheduledTask';
 import { i18nService } from '../../services/i18n';
+import { selectTrackedTasksNeedingAttention } from '../../utils/trackedTaskAttention';
 import TaskList from './TaskList';
 import TaskForm from './TaskForm';
 import TaskDetail from './TaskDetail';
@@ -60,6 +61,14 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
   const [trackingTab, setTrackingTab] = useState<TrackingTabId>('longTerm');
   const [scheduledSubTab, setScheduledSubTab] = useState<ScheduledSubTab>('tasks');
   const [deleteTaskInfo, setDeleteTaskInfo] = useState<{ id: string; name: string } | null>(null);
+  // 长期任务 tab badge: cards parked on an owner decision (waiting_owner). The
+  // board is kept live app-wide (App.tsx init), so the badge is already correct
+  // on the first paint of this tab.
+  const longTermBoard = useSelector((state: RootState) => state.longTermTask.board);
+  const longTermNeedsDecisionCount = useMemo(
+    () => selectTrackedTasksNeedingAttention({ longTermTask: { board: longTermBoard } }).longTerm,
+    [longTermBoard],
+  );
 
   const handleRequestDelete = useCallback((taskId: string, taskName: string) => {
     setDeleteTaskInfo({ id: taskId, name: taskName });
@@ -161,7 +170,25 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
               onClick={() => handleTrackingTabChange('longTerm')}
               className={tabButtonClass(trackingTab === 'longTerm')}
             >
-              {i18nService.t('trackedTask.tab.longTerm')}
+              <span className="inline-flex items-center gap-1.5">
+                {longTermNeedsDecisionCount > 0 && (
+                  // Owner decision pending on this tab: the same amber dot the
+                  // sidebar entry carries, with the count beside it.
+                  <span
+                    data-testid="long-term-tab-decision-indicator"
+                    title={i18nService.t('trackedTaskNeedsDecision').replace('{count}', String(longTermNeedsDecisionCount))}
+                    aria-label={i18nService.t('trackedTaskNeedsDecision').replace('{count}', String(longTermNeedsDecisionCount))}
+                    role="img"
+                    className="tracked-task-decision-indicator shrink-0"
+                  />
+                )}
+                {i18nService.t('trackedTask.tab.longTerm')}
+                {longTermNeedsDecisionCount > 0 && (
+                  <span className="text-[11px] font-normal tabular-nums" aria-hidden>
+                    {longTermNeedsDecisionCount}
+                  </span>
+                )}
+              </span>
               {trackingTab === 'longTerm' && (
                 <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
               )}

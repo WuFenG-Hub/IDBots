@@ -131,9 +131,10 @@ function buildOwnerWaitBlock(current: LongTermSubtask, language: string): string
       '',
       '特别要求（当前子项目正在等待主人拍板——这是本轮最重要的义务）：',
       '- 回复必须以「待拍板重申」开头：完整重述等主人决定的问题——问题本体、可选项（你的推荐项最前、附一句理由）、这项决策已经等待了多久、在它拍板之前阻塞了什么。每条心跳消息都必须自含完整上下文：主人可能错过之前的提醒，绝不能要求他翻聊天记录才能拍板。',
+      '- 重申必须按「决策简报」的六段结构展开，每段一行小标题，顺序固定：1) 背景与已完成进展 2) 当前状况 3) 需要你拍板的事项 4) 选项与利弊 5) 推荐项及理由 6) 拍板后的下一步。这是主人不需要读完整会话就能拍板的唯一依据。',
       '- 禁止「状态无变化／静默保持」式的一行回复——对一个等拍板的任务，那读起来就是「没有事需要你」，是失联不是安静。',
       `- 等待备注：${current.waitNote || '(无记录——先用 longterm_subtask_wait 补上)'}${current.waitUntil ? `；承诺的静默窗口至 ${current.waitUntil}（本轮在窗口之后）` : ''}`,
-      '- 先核对这条等待是否仍然成立：如果 journal 显示挂起等待之后你又推进过工作（等待已过时），先用 longterm_subtask_unblock 解除等待再继续推进；若等待仍成立但备注需要更新，用 longterm_subtask_wait 重新记录（会刷新等待锚点）。',
+      '- 先核对这条等待是否仍然成立：如果 journal 显示挂起等待之后你又推进过工作（等待已过时），先用 longterm_subtask_unblock 解除等待再继续推进；若等待仍成立但备注需要更新，用 longterm_subtask_wait 重新记录（会刷新等待锚点）——重记时同样按上面的六段结构重写 note。',
       '- 重申之后，若还有不依赖这个决策的推进空间，可以继续推进——但重申必须是回复的第一部分。',
     ].join('\n');
   }
@@ -141,9 +142,10 @@ function buildOwnerWaitBlock(current: LongTermSubtask, language: string): string
     '',
     'SPECIAL REQUIREMENT (this sub-project is waiting on the owner\'s decision — the single most important duty of this turn):',
     '- Open your reply with a full re-presentation of the pending decision: the question itself, the options (your recommendation first, one-line reasoning), how long it has been waiting, and what stays blocked until it is answered. Every heartbeat message must be self-contained — the owner may have missed earlier reminders and must never have to scroll back through history to act.',
+    '- The re-presentation MUST follow the six-section decision-brief structure, each section on its own labeled line, in this order: 1) background & progress so far 2) current situation 3) the decision you need 4) options with trade-offs 5) recommendation & why 6) next step after the call. It is the only thing the owner has to read to decide.',
     '- A bare "no change / holding quiet" one-liner is FORBIDDEN while a decision is pending — to the owner it reads as "nothing needs you": a dropout, not quiet.',
     `- Wait note: ${current.waitNote || '(none recorded — record one with longterm_subtask_wait first)'}${current.waitUntil ? `; promised quiet window until ${current.waitUntil} (this turn is past the window)` : ''}`,
-    '- First verify the wait still holds: if the journal shows you worked on this sub-project AFTER parking the wait, converge the state before anything else — longterm_subtask_unblock to resume, or longterm_subtask_wait to re-record it (this refreshes the wait anchor).',
+    '- First verify the wait still holds: if the journal shows you worked on this sub-project AFTER parking the wait, converge the state before anything else — longterm_subtask_unblock to resume, or longterm_subtask_wait to re-record it (this refreshes the wait anchor; re-recorded notes use the same six sections).',
     '- After the re-presentation you may keep pushing any part that does not depend on the decision — but the re-presentation comes first.',
   ].join('\n');
 }

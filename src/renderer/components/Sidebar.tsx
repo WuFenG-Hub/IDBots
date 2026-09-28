@@ -34,6 +34,7 @@ import type {
   SessionViewMode,
 } from '../utils/sessionViewGrouping';
 import { splitSessionsByAutoOrigin } from '../utils/sessionAutoGrouping';
+import { selectTrackedTasksNeedingAttention } from '../utils/trackedTaskAttention';
 import type { SettingsOpenOptions } from './Settings';
 
 interface SidebarProps {
@@ -246,9 +247,18 @@ const Sidebar: React.FC<SidebarProps> = ({
   const hasRunningScheduledTask = scheduledTasks.some(
     (task) => task.enabled && task.state.runningAtMs !== null && task.state.lastStatus === 'running'
   );
+  // The 跟踪任务 nav entry's dot: a parked owner decision (waiting_owner) is the
+  // stronger signal, and the board behind it is kept live app-wide (App.tsx
+  // init) so the dot is correct even if the 长期任务 tab was never opened.
+  const longTermBoard = useSelector((state: RootState) => state.longTermTask.board);
+  const trackedTaskAttention = useMemo(
+    () => selectTrackedTasksNeedingAttention({ longTermTask: { board: longTermBoard } }),
+    [longTermBoard],
+  );
   const primaryNavItems = getSidebarPrimaryNavModel({
     t: (key) => i18nService.t(key),
     hasRunningScheduledTask,
+    needsDecisionCount: trackedTaskAttention.total,
   }).filter((item) => !item.hidden);
   const internetNavItems = getSidebarInternetNavModel({
     t: (key) => i18nService.t(key),
@@ -429,16 +439,31 @@ const Sidebar: React.FC<SidebarProps> = ({
     id: string;
     label: string;
     hasIndicator?: boolean;
+    indicatorKind?: 'running' | 'decision';
+    indicatorLabel?: string;
     badge?: string;
   }) => {
     if (item.id === 'scheduledTasks') {
       return (
         <span className="inline-flex min-w-0 items-center gap-2">
           {item.hasIndicator ? (
-            <span
-              aria-hidden
-              className="scheduled-task-running-indicator shrink-0"
-            />
+            item.indicatorKind === 'decision' ? (
+              // A parked owner decision: same amber family as the running dot,
+              // but its own class so the two meanings stay distinguishable in
+              // the DOM/CSS, and labelled — this dot means "you are the
+              // blocker", not "work is happening".
+              <span
+                role="img"
+                aria-label={item.indicatorLabel}
+                title={item.indicatorLabel}
+                className="tracked-task-decision-indicator shrink-0"
+              />
+            ) : (
+              <span
+                aria-hidden
+                className="scheduled-task-running-indicator shrink-0"
+              />
+            )
           ) : null}
           <span className="truncate">{item.label}</span>
         </span>
