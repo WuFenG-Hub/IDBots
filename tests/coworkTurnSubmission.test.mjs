@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import { CoworkTurnSubmissionController } from '../dist-electron/main/services/coworkTurnSubmission.js';
 import { CoworkDshSteerWindowClosedError } from '../dist-electron/main/libs/coworkSteerChannel.js';
+import { buildOwnerTurnInputPrompt } from '../dist-electron/main/libs/coworkPromptStrategy.js';
 
 const UUID = '11111111-1111-4111-8111-111111111111';
 
@@ -146,7 +147,7 @@ test('inactive sessions continue once with the requested system prompt and skill
   assert.equal(result.mode, 'continue');
   assert.deepEqual(harness.runner.continueCalls, [{
     sessionId: 'session-1',
-    text: 'next direction',
+    text: buildOwnerTurnInputPrompt('next direction'),
     options: {
       skipUserMessage: true,
       systemPrompt: 'ordinary continuation prompt',
@@ -180,7 +181,7 @@ test('pinned-skill backstop: sanitized ids flow into the continue turn, scoped t
   ]);
   assert.deepEqual(harness.runner.continueCalls, [{
     sessionId: 'session-1',
-    text: 'next direction',
+    text: buildOwnerTurnInputPrompt('next direction'),
     options: {
       skipUserMessage: true,
       systemPrompt: 'skills-carrying prompt',
@@ -750,7 +751,7 @@ test('open-dsh steer whose window closed degrades to the next turn instead of er
   assert.equal(harness.runner.waitCalls, 1);
   assert.deepEqual(harness.runner.continueCalls, [{
     sessionId: 'session-1',
-    text: 'next direction',
+    text: buildOwnerTurnInputPrompt('next direction'),
     options: {
       skipUserMessage: true,
       systemPrompt: undefined,
@@ -784,4 +785,63 @@ test('open-dsh degraded steer stops with the session instead of continuing', asy
   assert.equal(harness.runner.continueCalls.length, 0);
   const metadata = harness.store.getMessageById('session-1', UUID).metadata;
   assert.equal(metadata.steerStatus, 'cancelled');
+});
+
+// ---- Owner-turn input framing (regression: invisible idle-session replies) --
+//
+// A continue turn composes the kernel user message as "<volatile context
+// head>\n\n<owner text>"; a terse owner ruling ("1", "过") glued bare onto
+// ~45k chars of context read as noise, and the model concluded "no owner
+// message arrived" while the UI showed the reply delivered (long-term task
+// sessions 883caf62/7ac5533e, 2026-09-28/29). The controller therefore wraps
+// only the runner-bound text in an <owner_message> envelope; the persisted
+// message, the renderer, and the steer path keep the raw text.
+
+test('continue turns frame owner text in an owner_message envelope; persistence stays raw', async () => {
+  const harness = createHarness({ capability: 'inactive' });
+  const result = await harness.controller.submit(input({ text: '1' }));
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'continue');
+  const continued = harness.runner.continueCalls[0];
+  assert.equal(continued.text, buildOwnerTurnInputPrompt('1'));
+  assert.ok(continued.text.startsWith('<owner_message>'));
+  assert.ok(continued.text.endsWith('1\n</owner_message>'));
+  assert.match(continued.text, /pending decision/);
+  assert.match(continued.text, /Never claim the owner has not replied/);
+  // The stored/UI-visible message keeps exactly what the owner typed.
+  assert.equal(result.message.content, '1');
+  assert.equal(harness.store.getMessageById('session-1', UUID).content, '1');
+  assert.equal(harness.emitted[0].message.content, '1');
+});
+
+test('owner-turn envelope keeps multi-line owner text verbatim at the tail', async () => {
+  const harness = createHarness({ capability: 'closing-local' });
+  const text = '按选项一执行\n另外把证据文件补上';
+  const result = await harness.controller.submit(input({ text }));
+
+  assert.equal(result.success, true);
+  const continued = harness.runner.continueCalls[0];
+  assert.ok(continued.text.endsWith(`${text}\n</owner_message>`));
+  assert.equal(harness.store.getMessageById('session-1', UUID).content, text);
+});
+
+test('live steers keep raw owner text (kernel applies operator_steer framing)', async () => {
+  const harness = createHarness({ capability: 'open-dsh' });
+  const result = await harness.controller.submit(input({ text: '1' }));
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'steer');
+  assert.deepEqual(harness.runner.steerCalls, [{
+    sessionId: 'session-1', submissionId: UUID, text: '1',
+  }]);
+  assert.equal(harness.runner.continueCalls.length, 0);
+});
+
+test('buildOwnerTurnInputPrompt wraps the owner text exactly once', () => {
+  const framed = buildOwnerTurnInputPrompt('过');
+  assert.equal(framed.startsWith('<owner_message>\n'), true);
+  assert.equal(framed.endsWith('\n过\n</owner_message>'), true);
+  assert.equal(framed.split('过').length - 1 >= 1, true);
+  assert.equal(framed.indexOf('<owner_message>'), framed.lastIndexOf('<owner_message>'));
 });
