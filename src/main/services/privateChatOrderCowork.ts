@@ -148,6 +148,14 @@ export class PrivateChatOrderCowork extends EventEmitter {
   private sessionIds: Set<string> = new Set();
   private accumulators: Map<string, MessageAccumulator> = new Map();
 
+  // Bound once so registration and removal share the same function reference
+  // (a fresh .bind(this) on each call can never be removed).
+  private readonly boundHandleMessage = this.handleMessage.bind(this);
+  private readonly boundHandleMessageUpdate = this.handleMessageUpdate.bind(this);
+  private readonly boundHandlePermissionRequest = this.handlePermissionRequest.bind(this);
+  private readonly boundHandleComplete = this.handleComplete.bind(this);
+  private readonly boundHandleError = this.handleError.bind(this);
+
   constructor(options: PrivateChatOrderCoworkOptions) {
     super();
     this.coworkRunner = options.coworkRunner;
@@ -169,11 +177,24 @@ export class PrivateChatOrderCowork extends EventEmitter {
   }
 
   private setupListeners(): void {
-    this.coworkRunner.on('message', this.handleMessage.bind(this));
-    this.coworkRunner.on('messageUpdate', this.handleMessageUpdate.bind(this));
-    this.coworkRunner.on('permissionRequest', this.handlePermissionRequest.bind(this));
-    this.coworkRunner.on('complete', this.handleComplete.bind(this));
-    this.coworkRunner.on('error', this.handleError.bind(this));
+    this.coworkRunner.on('message', this.boundHandleMessage);
+    this.coworkRunner.on('messageUpdate', this.boundHandleMessageUpdate);
+    this.coworkRunner.on('permissionRequest', this.boundHandlePermissionRequest);
+    this.coworkRunner.on('complete', this.boundHandleComplete);
+    this.coworkRunner.on('error', this.boundHandleError);
+  }
+
+  /**
+   * Detach from the shared CoworkRunner. The daemon rebuilds this handler on
+   * every (re)start, so leaving the listeners behind would deliver every live
+   * session event to dead instances.
+   */
+  dispose(): void {
+    this.coworkRunner.off('message', this.boundHandleMessage);
+    this.coworkRunner.off('messageUpdate', this.boundHandleMessageUpdate);
+    this.coworkRunner.off('permissionRequest', this.boundHandlePermissionRequest);
+    this.coworkRunner.off('complete', this.boundHandleComplete);
+    this.coworkRunner.off('error', this.boundHandleError);
   }
 
   async runOrder(request: OrderCoworkRequest): Promise<OrderCoworkResult> {

@@ -6136,6 +6136,7 @@ export async function stopPrivateChatDaemon(options?: { waitForTick?: boolean })
     pollTimer = null;
   }
   privateChatPollTickRunning = false;
+  orderCowork?.dispose();
   orderCowork = null;
   thinkingTasks.clear();
   privateChatSkillTurnRetries.clear();
