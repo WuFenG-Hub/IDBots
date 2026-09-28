@@ -16587,12 +16587,6 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
     startupLog(`reset running sessions done (count=${resetCount})`);
 
-    const healedStreaming = getCoworkStore().healAbandonedStreamingMessages();
-    if (healedStreaming > 0) {
-      console.log(`[Main] Healed ${healedStreaming} abandoned cowork streaming placeholder(s)`);
-    }
-    startupLog(`heal abandoned streaming messages done (count=${healedStreaming})`);
-
     // Heal A2A conversations parked on 'error' solely by a shutdown abort
     // (latest transcript message is the DSH shutdown marker). Runs before the
     // private-chat daemon restarts so the UI never shows the stale banner.
@@ -16685,6 +16679,21 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     // 创建窗口
     startupLog('about to create window');
     createAppWindow();
+
+    // The abandoned-streaming scan only ever touches rows a hard quit left
+    // dirty, yet it used to walk every message row before the window existed.
+    // Queued after createAppWindow so it never sits on the first-paint path.
+    setTimeout(() => {
+      try {
+        const healedStreaming = getCoworkStore().healAbandonedStreamingMessages();
+        if (healedStreaming > 0) {
+          console.log(`[Main] Healed ${healedStreaming} abandoned cowork streaming placeholder(s)`);
+        }
+        startupLog(`heal abandoned streaming messages done (count=${healedStreaming})`);
+      } catch (error) {
+        console.error('[Main] Abandoned streaming heal failed; continuing startup:', error);
+      }
+    }, 0);
 
     // Spawn the shared DSH runtime in the background so the first cowork
     // turn does not pay process boot + plugin load. Must not delay first
