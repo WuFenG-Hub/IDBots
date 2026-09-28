@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo } from 'react';
 import { useSelector } from 'react-redux';
-import { ArrowPathIcon, BoltIcon } from '@heroicons/react/24/outline';
+import { ArrowPathIcon, BoltIcon, QuestionMarkCircleIcon } from '@heroicons/react/24/outline';
 import { RootState } from '../../store';
 import { metaTaskService } from '../../services/metatask';
 import { setView } from '../../store/slices/metataskSlice';
@@ -8,6 +8,8 @@ import { store } from '../../store';
 import { i18nService } from '../../services/i18n';
 import MetaTaskDetail from './MetaTaskDetail';
 import MetaIdBadge from './MetaIdBadge';
+import Tooltip from '../ui/Tooltip';
+import { metaTaskLifeStatus, metaTaskLifeStatusLabel, metaTaskLifeStatusTone } from './metaTaskStatus';
 import type { MetaTaskAlert, MetaTaskBoardTask, MetaTaskIdentity } from '../../types/metatask';
 
 /** Prefilled participation draft: the bot reads the task, picks an open node,
@@ -19,7 +21,7 @@ const participateDraft = (title: string, rootPinId: string, nodeHint?: string | 
     .replace('{root}', rootPinId)
     .replace(
       '{node_hint}',
-      nodeHint ? `（建议从开放节点 ${nodeHint} 开始评估）` : '',
+      nodeHint ? i18nService.t('metatask.participateNodeHint').replace('{node}', nodeHint) : '',
     );
   window.dispatchEvent(new CustomEvent('cowork:newChatWithDraft', { detail: { text } }));
 };
@@ -99,6 +101,12 @@ const MetaTaskBoard: React.FC = () => {
           >
             {i18nService.t('metatask.view.mine')}
           </button>
+          <Tooltip content={i18nService.t('metatask.whatIsTip')} position="bottom" maxWidth="340px">
+            <span className="inline-flex items-center gap-1 px-2 py-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary cursor-help">
+              <QuestionMarkCircleIcon className="h-4 w-4" />
+              {i18nService.t('metatask.whatIs')}
+            </span>
+          </Tooltip>
         </div>
         <div className="flex items-center gap-3">
           {board && (
@@ -231,6 +239,12 @@ const MetaTaskCard: React.FC<{ task: MetaTaskBoardTask; identities?: Record<stri
   identities,
 }) => {
   const progressPct = task.progress.total > 0 ? Math.round((task.progress.verified / task.progress.total) * 100) : 0;
+  const lifeStatus = metaTaskLifeStatus({
+    taskComplete: task.taskComplete,
+    settlementFinalized: task.settlementFinalized,
+    progress: task.progress,
+    participantCount: task.participantCount,
+  });
   return (
     <div className="p-3 rounded-xl border dark:border-claude-darkBorder border-claude-border hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors flex flex-col gap-2">
       <button
@@ -242,11 +256,9 @@ const MetaTaskCard: React.FC<{ task: MetaTaskBoardTask; identities?: Record<stri
           <span className="text-sm font-medium dark:text-claude-darkText text-claude-text line-clamp-2">
             {task.title}
           </span>
-          {task.settlementFinalized && (
-            <span className="shrink-0 px-1.5 py-0.5 text-[11px] rounded bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400">
-              {i18nService.t('metatask.settled')}
-            </span>
-          )}
+          <span className={`shrink-0 px-1.5 py-0.5 text-[11px] rounded ${metaTaskLifeStatusTone[lifeStatus]}`}>
+            {metaTaskLifeStatusLabel(lifeStatus)}
+          </span>
         </div>
         <div className="flex items-center gap-2 flex-wrap text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
           <MetaIdBadge metaId={task.publisher} identities={identities} compact />
@@ -311,7 +323,7 @@ const MetaTaskCard: React.FC<{ task: MetaTaskBoardTask; identities?: Record<stri
         <button
           type="button"
           onClick={() => participateDraft(task.title, task.rootPinId)}
-          className="inline-flex items-center justify-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-brand/40 text-brand hover:bg-brand/5 transition-colors"
+          className="inline-flex items-center justify-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg btn-idchat-primary-filled"
         >
           <BoltIcon className="h-3.5 w-3.5" />
           {i18nService.t('metatask.participateNow')}

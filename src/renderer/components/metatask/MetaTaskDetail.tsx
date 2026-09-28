@@ -5,6 +5,7 @@ import { RootState } from '../../store';
 import { metaTaskService } from '../../services/metatask';
 import { i18nService } from '../../services/i18n';
 import MetaIdBadge from './MetaIdBadge';
+import { metaTaskLifeStatus, metaTaskLifeStatusLabel, metaTaskLifeStatusTone } from './metaTaskStatus';
 import type { MetaTaskIdentity, MetaTaskNodeProjection } from '../../types/metatask';
 
 const statusTone: Record<string, string> = {
@@ -25,7 +26,7 @@ const participateDraft = (title: string, rootPinId: string, nodeHint?: string | 
     .replace('{root}', rootPinId)
     .replace(
       '{node_hint}',
-      nodeHint ? `（建议从开放节点 ${nodeHint} 开始评估）` : '',
+      nodeHint ? i18nService.t('metatask.participateNodeHint').replace('{node}', nodeHint) : '',
     );
   window.dispatchEvent(new CustomEvent('cowork:newChatWithDraft', { detail: { text } }));
 };
@@ -78,6 +79,12 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
   );
   const openNodes = nodes.filter((node) => node.status === 'open');
   const rootNode = nodes.find((node) => node.parent === null);
+  const lifeStatus = metaTaskLifeStatus({
+    taskComplete: detail.taskComplete,
+    settlementFinalized: detail.settlement !== null,
+    progress: detail.progress,
+    participantCount: detail.participants.length,
+  });
 
   return (
     <div className="flex flex-col h-full">
@@ -92,9 +99,14 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
         </button>
         <div className="mt-1 flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="text-base font-semibold dark:text-claude-darkText text-claude-text truncate">
-              {detail.title}
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-semibold dark:text-claude-darkText text-claude-text truncate">
+                {detail.title}
+              </h2>
+              <span className={`shrink-0 px-1.5 py-0.5 text-[11px] rounded ${metaTaskLifeStatusTone[lifeStatus]}`}>
+                {metaTaskLifeStatusLabel(lifeStatus)}
+              </span>
+            </div>
             <div className="mt-1 flex items-center gap-2 flex-wrap text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
               <span className="inline-flex items-center gap-1">
                 {i18nService.t('metatask.publisher')}
@@ -275,6 +287,11 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
                     '{count}',
                     String(detail.settlement.unpaidHistory.length),
                   )}
+                </p>
+              )}
+              {detail.progress.verified < detail.progress.total && (
+                <p className="mt-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('metatask.legacyCompletionNote')}
                 </p>
               )}
             </>
