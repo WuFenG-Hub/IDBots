@@ -279,15 +279,16 @@ test('deepseek-v4-flash — the automation model behind cowork/A2A — resolves 
 // glm-5.3-flash (Zhipu direct) flipped to vision-capable on 2026-09-19: the
 // GLM-5.3 launch made Flash natively multimodal — image input verified live
 // through BOTH the Responses (/api/v1/responses) and Anthropic
-// (/api/anthropic/v1/messages) endpoints. Gateway ids (z-ai/…) stay
-// fail-safe false until their image passthrough is verified.
+// (/api/anthropic/v1/messages) endpoints. On 2026-09-28 the gateway spellings
+// (z-ai/glm-5.3-flash, case variants, uncatalogued vendor prefixes) flipped
+// too: every gateway proxies the same multimodal upstream SKU, and the
+// fail-safe false kept gateway-served GLM-5.3 Flash from reading images.
 // ---------------------------------------------------------------------------
 
 const NON_VISION_MODELS = [
   'deepseek-v4-pro',
   'deepseek-v4-flash',
-  // GLM text-only ids — the flagship glm-5.3, the 2026-09-04 incident's
-  // gateway spelling, and the legacy text families.
+  // GLM text-only ids — the flagship glm-5.3 and the legacy text families.
   'glm-5.3',
   'glm-5.2',
   'glm-5.2-fast',
@@ -295,7 +296,6 @@ const NON_VISION_MODELS = [
   'glm-5',
   'glm-4.7',
   'glm-4.7-flash',
-  'z-ai/glm-5.3-flash',
   'zai-org/GLM-5.3',
   'zai-org/GLM-5.2',
   'zai-org/GLM-5.2-Fast',
@@ -336,10 +336,10 @@ test('glm-5.3-flash — multimodal since the GLM-5.3 launch — resolves vision=
   assert.equal(limits.supportsVision, true);
   assert.notEqual(limits.source, 'fallback');
 
-  // The 2026-09-04 incident spelling — the commandcode gateway id — keeps the
-  // fail-safe non-vision answer until gateway image passthrough is verified.
+  // The 2026-09-04 incident spelling — the commandcode gateway id — serves the
+  // same multimodal upstream SKU, so it resolves vision=true since 2026-09-28.
   const gateway = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'z-ai/glm-5.3-flash');
-  assert.equal(gateway.supportsVision, false);
+  assert.equal(gateway.supportsVision, true);
   assert.equal(gateway.source, 'known-model');
 
   // glm-5.3-flashx shares the multimodal flash spec (not in coding plans, but
@@ -600,4 +600,123 @@ test('isDeepSeekFamilyModelId matches the V4+/flash family across gateway and SK
   assert.equal(isDeepSeekFamilyModelId('glm-5.3-flash'), false);
   assert.equal(isDeepSeekFamilyModelId(''), false);
   assert.equal(isDeepSeekFamilyModelId(null), false);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-28 glm-5.3-flash incident: provider-scoped capability resolution.
+// Model ids are NOT unique across providers — the incident machine had
+// glm-5.3-flash on zhipu (支持图像输入 checked) and on opencode (fail-safe
+// false), and the legacy cross-provider scan answered with whichever enabled
+// row came first in insertion order (opencode). Result: the Read-image guard
+// denied pixels and the DSH route omitted inputModalities, so the kernel
+// degraded every image block to a text placeholder — the bot reported
+// "图像被宿主裁掉了（当前模型不吃图）" while DeepSeek (whose deepseek-flash id
+// no earlier provider shadows) worked. When the caller names the session's
+// provider, ONLY that provider's row may contribute explicit limits.
+// ---------------------------------------------------------------------------
+
+test('provider-scoped resolution: another provider\'s same-id row never shadows the session provider\'s checkbox', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  // The exact incident shape: opencode listed first (insertion order), its
+  // fail-safe false row used to win over zhipu's checked row.
+  const incidentConfig = {
+    model: { defaultModel: 'glm-5.3-flash', availableModels: [] },
+    providers: {
+      opencode: {
+        enabled: true,
+        models: [{ id: 'glm-5.3-flash', supportsImage: false, contextWindow: 200_000 }],
+      },
+      zhipu: {
+        enabled: true,
+        models: [{ id: 'glm-5.3-flash', supportsImage: true, contextWindow: 1_048_576, maxOutputTokens: 128_000 }],
+      },
+    },
+  };
+
+  const zhipuScoped = resolveCoworkModelLimits(incidentConfig, 'glm-5.3-flash', 'zhipu');
+  assert.equal(zhipuScoped.supportsVision, true, 'the zhipu checkbox must win for a zhipu session');
+  assert.equal(zhipuScoped.source, 'provider-model');
+  assert.equal(zhipuScoped.contextWindow, 1_048_576);
+
+  // And symmetrically: an opencode session keeps its own (unchecked) row.
+  const opencodeScoped = resolveCoworkModelLimits(incidentConfig, 'glm-5.3-flash', 'opencode');
+  assert.equal(opencodeScoped.supportsVision, false, 'the session provider\'s own row decides, both ways');
+  assert.equal(opencodeScoped.source, 'provider-model');
+
+  // Without a provider key the legacy config-order scan still answers (the
+  // default-model path has no provider identity to scope to).
+  const unscoped = resolveCoworkModelLimits(incidentConfig, 'glm-5.3-flash');
+  assert.equal(unscoped.source, 'provider-model');
+});
+
+test('provider-scoped resolution: named provider without a matching row falls to the catalog, never to another provider', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  const config = {
+    model: { defaultModel: 'glm-5.3-flash', availableModels: [] },
+    providers: {
+      opencode: {
+        enabled: true,
+        models: [{ id: 'glm-5.3-flash', supportsImage: false, contextWindow: 200_000 }],
+      },
+      'custom-relay': {
+        enabled: true,
+        models: [{ id: 'some-other-model' }],
+      },
+    },
+  };
+
+  // The session runs on custom-relay, which does not list glm-5.3-flash: the
+  // opencode row must NOT answer for it; the known-model catalog does.
+  const limits = resolveCoworkModelLimits(config, 'glm-5.3-flash', 'custom-relay');
+  assert.equal(limits.supportsVision, true);
+  assert.equal(limits.source, 'known-model');
+  assert.equal(limits.contextWindow, 1_048_576);
+});
+
+test('provider-scoped resolution: disabled named provider still answers (route already resolved)', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  const limits = resolveCoworkModelLimits({
+    model: { defaultModel: 'glm-5.3-flash', availableModels: [] },
+    providers: {
+      zhipu: {
+        enabled: false,
+        models: [{ id: 'glm-5.3-flash', supportsImage: true, contextWindow: 1_048_576 }],
+      },
+    },
+  }, 'glm-5.3-flash', 'zhipu');
+  assert.equal(limits.supportsVision, true);
+  assert.equal(limits.source, 'provider-model');
+});
+
+// ---------------------------------------------------------------------------
+// GLM-5.3-flash family rule: uncatalogued spellings (case variants, unknown
+// vendor prefixes) resolve vision=true because they all serve the same
+// natively multimodal SKU; the flagship and older families stay text-only.
+// ---------------------------------------------------------------------------
+
+test('uncatalogued glm-5.3-flash spellings resolve vision via the family rule', async () => {
+  const { resolveCoworkModelLimits, modelSupportsVision } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  for (const modelId of ['acme/glm-5.3-flash', 'GLM-5.3-Flash', 'glm-5.3-flash-preview']) {
+    const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, modelId);
+    assert.equal(limits.supportsVision, true, `${modelId} must resolve vision=true`);
+    assert.equal(limits.maxOutputTokens, 128_000, `${modelId} keeps the family output ceiling`);
+    assert.equal(modelSupportsVision(modelId), true);
+  }
+
+  // The flagship stays fail-safe text-only even uncatalogued.
+  const flagship = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'acme/glm-5.3');
+  assert.equal(flagship.supportsVision, false);
+  assert.equal(flagship.source, 'family-model');
+
+  // Older flash variants were text-only — the rule is scoped to 5.3-flash.
+  const legacyFlash = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'glm-4.7-flash');
+  assert.equal(legacyFlash.supportsVision, false);
 });

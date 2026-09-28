@@ -11081,10 +11081,11 @@ if (!gotTheLock) {
           if (realUsage) {
             contextUsage = realUsage;
           } else {
+            const localApi = getCurrentApiConfig('local');
             contextUsage = computeCoworkContextUsage({
               messages: sessionWithLiveStream.messages ?? [],
               systemPrompt: session.systemPrompt,
-              modelLimits: resolveCurrentModelLimits(getCurrentApiConfig('local')?.model),
+              modelLimits: resolveCurrentModelLimits(localApi?.model, localApi?.provider),
               // Deliberately NOT passing realUsageTokens here. The provider's
               // last-turn input count is the FULL request payload — the SDK
               // preset system prompt, every MCP/builtin tool definition, and

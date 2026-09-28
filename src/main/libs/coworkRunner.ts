@@ -1365,6 +1365,14 @@ interface ActiveSession {
    */
   activeTurnModelId?: string | null;
   /**
+   * Provider key that owns activeTurnModelId (set/cleared with it). Model ids
+   * are not unique across providers, so capability lookups (Read-image guard)
+   * must scope to THIS provider's model row — an earlier-listed provider
+   * serving the same id must not answer for it (2026-09-28 glm-5.3-flash
+   * incident). Null between turns.
+   */
+  activeTurnProviderKey?: string | null;
+  /**
    * Billing identity resolved from the API config at run start ('deepseek'
    * only when the DeepSeek account is actually billed — provider key
    * 'deepseek' or a deepseek host; gateway providers serving deepseek models
@@ -7777,7 +7785,7 @@ export class CoworkRunner extends EventEmitter {
     extras?: { reasoningEffort?: string | null }
   ): DshTurnProviderRoute {
     const apiFormat = dshApiFormatOf(route.apiFormat);
-    const modelLimits = resolveCurrentModelLimits(route.model);
+    const modelLimits = resolveCurrentModelLimits(route.model, route.provider);
     // Official DeepSeek rides the first-party dsh-llm-deepseek adapter under
     // its own route key — but ONLY on the official api.deepseek.com host: a
     // 'deepseek'-keyed provider with a custom proxy base URL stays on the
@@ -8139,7 +8147,7 @@ export class CoworkRunner extends EventEmitter {
       return;
     }
     const apiFormat = dshApiFormatOf(route.apiFormat);
-    const modelLimits = resolveCurrentModelLimits(route.model);
+    const modelLimits = resolveCurrentModelLimits(route.model, route.provider);
     let dshUserPrompt = prompt;
     const sessionRecord = this.store.getSession(sessionId);
     const sessionMessages = sessionRecord?.messages ?? [];
@@ -8446,7 +8454,7 @@ export class CoworkRunner extends EventEmitter {
         let turnReasoningEffort = dshReasoningEffort;
         if (routeOverride) {
           turnRoute = routeOverride;
-          turnModelLimits = resolveCurrentModelLimits(routeOverride.model);
+          turnModelLimits = resolveCurrentModelLimits(routeOverride.model, routeOverride.provider);
           turnOfficialDeepSeekNative = isNativeDeepSeekChatRoute(routeOverride);
           // Same effort chain as the primary route above, except the bot-brain
           // rung reads the FALLBACK brain's effort (that brain's model is the
@@ -8477,6 +8485,7 @@ export class CoworkRunner extends EventEmitter {
         // model, so a GT-02 fallback-brain resume onto a text-only model
         // denies reads explicitly instead of letting pixels die upstream.
         activeSession.activeTurnModelId = turnRoute.model;
+        activeSession.activeTurnProviderKey = turnRoute.provider;
         // Fresh guarded attempt → clean tool ledger (a cancelled/steered
         // previous attempt may leave calls whose results never settle).
         dshInFlightToolUses.clear();
@@ -8825,6 +8834,7 @@ export class CoworkRunner extends EventEmitter {
       } finally {
         clearDshStallWatchdog();
         activeSession.activeTurnModelId = null;
+        activeSession.activeTurnProviderKey = null;
       }
       };
 
@@ -9211,12 +9221,20 @@ export class CoworkRunner extends EventEmitter {
           // Judge against the model the CURRENT turn actually runs on: a
           // GT-02 fallback resume re-pins the session to the fallback brain's
           // route, so the primary route's model is the wrong capability
-          // source mid-fallback. Unresolvable => fail safe (non-vision):
-          // the denial message points at describe_image, which works on
-          // every route, whereas a wrongly-permissive read silently drops
-          // the pixels (2026-09-04 glm-5.3-flash regression).
+          // source mid-fallback. The provider key rides along: model ids are
+          // not unique across providers, and the capability answer must come
+          // from the row of the provider actually serving this turn — not
+          // from whichever other enabled provider lists the same id first
+          // (2026-09-28 glm-5.3-flash incident: opencode's fail-safe row
+          // silenced Zhipu's checked 支持图像输入). Unresolvable => fail safe
+          // (non-vision): the denial message points at describe_image, which
+          // works on every route, whereas a wrongly-permissive read silently
+          // drops the pixels (2026-09-04 glm-5.3-flash regression).
           const guardModelId = activeSession?.activeTurnModelId ?? route?.model ?? null;
-          const guardModelLimits = guardModelId ? resolveCurrentModelLimits(guardModelId) : null;
+          const guardProviderKey = activeSession?.activeTurnModelId
+            ? (activeSession.activeTurnProviderKey ?? route?.provider ?? null)
+            : (route?.provider ?? null);
+          const guardModelLimits = guardModelId ? resolveCurrentModelLimits(guardModelId, guardProviderKey) : null;
           const guardDecision = evaluateReadImageGuard({
             toolName: 'read',
             absolutePath: absoluteGuardPath,

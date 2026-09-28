@@ -51,6 +51,15 @@ export type OpenAICompatUpstreamConfig = {
    * falls back to the singleton when absent.
    */
   sessionKey?: string;
+  /**
+   * Whether this provider's model row accepts image input (the Settings
+   * 支持图像输入 checkbox, resolved provider-scoped by the caller). When
+   * present it overrides the static catalog in the Responses converter's
+   * image-degradation decision, so a checked vision model never gets its
+   * history images placeholdered (2026-09-28 glm-5.3-flash incident). Absent
+   * on legacy callers — the static catalog keeps deciding.
+   */
+  supportsImage?: boolean;
 };
 
 export type OpenAICompatProxyTarget = 'local' | 'sandbox';
@@ -1375,7 +1384,8 @@ function normalizeResponsesToolChoiceFromChat(toolChoice: unknown): unknown {
 
 function convertChatCompletionsRequestToResponsesRequest(
   chatRequest: Record<string, unknown>,
-  provider?: string
+  provider?: string,
+  supportsImageHint?: boolean
 ): Record<string, unknown> {
   const request: Record<string, unknown> = {};
   const input: Array<Record<string, unknown>> = [];
@@ -1384,10 +1394,14 @@ function convertChatCompletionsRequestToResponsesRequest(
 
   const isDeepSeek = provider?.toLowerCase() === 'deepseek'
     || isDeepSeekModel(toString(chatRequest.model));
-  // N1 scheme-B: whether the effective model can consume image blocks. Unknown
-  // models default to true (safe default), only known non-vision models
-  // (DeepSeek V4 family) degrade images to placeholders.
-  const supportsVision = modelSupportsVision(toString(chatRequest.model));
+  // N1 scheme-B: whether the effective model can consume image blocks. The
+  // provider-scoped checkbox hint (this provider's 支持图像输入 row for this
+  // model) wins when present; otherwise the static catalog decides, where
+  // unknown models default to true (safe default) and only known non-vision
+  // models (DeepSeek V4 family) degrade images to placeholders.
+  const supportsVision = typeof supportsImageHint === 'boolean'
+    ? supportsImageHint
+    : modelSupportsVision(toString(chatRequest.model));
 
   if (chatRequest.model !== undefined) {
     request.model = chatRequest.model;
@@ -3920,7 +3934,7 @@ async function handleRequest(
   }
 
   const upstreamRequest = upstreamAPIType === 'responses'
-    ? convertChatCompletionsRequestToResponsesRequest(openAIRequest, upstream.provider)
+    ? convertChatCompletionsRequestToResponsesRequest(openAIRequest, upstream.provider, upstream.supportsImage)
     : openAIRequest;
   const stream = Boolean(upstreamRequest.stream);
 

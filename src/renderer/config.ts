@@ -574,7 +574,10 @@ export const defaultConfig: AppConfig = {
         { id: 'moonshotai/Kimi-K2.7-Code-Highspeed', name: 'Kimi K2.7 Code HighSpeed', supportsImage: true, contextWindow: 262_000 },
         { id: 'moonshotai/Kimi-K2.6', name: 'Kimi K2.6', supportsImage: true, contextWindow: 256_000 },
         { id: 'moonshotai/Kimi-K2.5', name: 'Kimi K2.5', supportsImage: true, contextWindow: 256_000 },
-        { id: 'z-ai/glm-5.3-flash', name: 'GLM-5.3 Flash', supportsImage: false, contextWindow: 1_048_576 },
+        // GLM-5.3-Flash is natively multimodal on every route — the gateway
+        // serves the same upstream SKU as Zhipu direct (2026-09-28 owner
+        // decision; see coworkModelLimits KNOWN_MODEL_LIMITS).
+        { id: 'z-ai/glm-5.3-flash', name: 'GLM-5.3 Flash', supportsImage: true, contextWindow: 1_048_576 },
         { id: 'zai-org/GLM-5.3', name: 'GLM-5.3', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'zai-org/GLM-5.2', name: 'GLM-5.2', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'zai-org/GLM-5.2-Fast', name: 'GLM-5.2 Fast', supportsImage: false, contextWindow: 1_000_000 },
