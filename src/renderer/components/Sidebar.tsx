@@ -34,6 +34,7 @@ import type {
   SessionViewMode,
 } from '../utils/sessionViewGrouping';
 import { splitSessionsByAutoOrigin } from '../utils/sessionAutoGrouping';
+import { useStableCallback } from '../utils/useStableCallback';
 import { selectTrackedTasksNeedingAttention } from '../utils/trackedTaskAttention';
 import type { SettingsOpenOptions } from './Settings';
 
@@ -255,14 +256,27 @@ const Sidebar: React.FC<SidebarProps> = ({
     () => selectTrackedTasksNeedingAttention({ longTermTask: { board: longTermBoard } }),
     [longTermBoard],
   );
-  const primaryNavItems = getSidebarPrimaryNavModel({
-    t: (key) => i18nService.t(key),
-    hasRunningScheduledTask,
-    needsDecisionCount: trackedTaskAttention.total,
-  }).filter((item) => !item.hidden);
-  const internetNavItems = getSidebarInternetNavModel({
-    t: (key) => i18nService.t(key),
-  }).filter((item) => !item.hidden);
+  // Labels come from i18nService at call time, so the language is an input of
+  // every memo below (and of the session list): this component re-renders on a
+  // language switch through App's i18n subscription, and the memo has to see
+  // the new language to rebuild what it cached.
+  const language = i18nService.getLanguage();
+  // The nav models only change when something they actually show changes —
+  // rebuilding both on every sidebar render (board pushes, unread changes) was
+  // wasted work and a fresh array identity for the nav lists each time.
+  const primaryNavItems = useMemo(
+    () =>
+      getSidebarPrimaryNavModel({
+        t: (key) => i18nService.t(key),
+        hasRunningScheduledTask,
+        needsDecisionCount: trackedTaskAttention.total,
+      }).filter((item) => !item.hidden),
+    [hasRunningScheduledTask, trackedTaskAttention.total, language],
+  );
+  const internetNavItems = useMemo(
+    () => getSidebarInternetNavModel({ t: (key) => i18nService.t(key) }).filter((item) => !item.hidden),
+    [language],
+  );
 
   useEffect(() => {
     const handleSearch = () => {
@@ -383,6 +397,18 @@ const Sidebar: React.FC<SidebarProps> = ({
   const handleRenameSession = async (sessionId: string, title: string) => {
     await coworkService.renameSession(sessionId, title);
   };
+
+  // The session list is memoized, and its rows are memoized on the callbacks it
+  // receives. The handlers above are plain closures — rebuilt on every render
+  // (handleSelectSession also closes over the sessions array, which is replaced
+  // on every list read) — so the list gets one stable identity per action
+  // instead, which still invokes the newest handler. Rebinding them per render
+  // would re-render every mounted row of the list.
+  const listOnSelectSession = useStableCallback(handleSelectSession);
+  const listOnDeleteSession = useStableCallback(handleDeleteSession);
+  const listOnTogglePin = useStableCallback(handleTogglePin);
+  const listOnRenameSession = useStableCallback(handleRenameSession);
+  const listOnToggleSessionSelected = useStableCallback(handleToggleBatchSelected);
 
   /** Open a group task from the sidebar: switch to the Group Tasks view and select the task. */
   const handleSelectGroupTask = (taskId: number) => {
@@ -759,16 +785,17 @@ const Sidebar: React.FC<SidebarProps> = ({
               <CoworkSessionList
                 sessions={localListSessions}
                 currentSessionId={currentSessionId}
-                onSelectSession={handleSelectSession}
-                onDeleteSession={handleDeleteSession}
-                onTogglePin={handleTogglePin}
-                onRenameSession={handleRenameSession}
+                onSelectSession={listOnSelectSession}
+                onDeleteSession={listOnDeleteSession}
+                onTogglePin={listOnTogglePin}
+                onRenameSession={listOnRenameSession}
                 emptyText={i18nService.t(activeTaskRecordTab.emptyKey)}
                 selectionMode={isBatchArchiveMode && taskRecordTab === 'local'}
                 selectedSessionIds={batchSelectedIds}
-                onToggleSessionSelected={handleToggleBatchSelected}
+                onToggleSessionSelected={listOnToggleSessionSelected}
                 viewMode={taskRecordTab === 'local' ? sessionViewMode : undefined}
                 sortMode={taskRecordTab === 'local' ? sessionSortMode : undefined}
+                language={language}
                 /** Local chats: the machine-started runs (long-term task,
                  * orchestration, scheduled) fold into one collapsed folder at
                  * the bottom instead of mixing into the human list. */

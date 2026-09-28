@@ -1,10 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import type { CoworkSessionSummary } from '../../types/cowork';
 import CoworkSessionItem, { SessionAvatarCircle, formatRelativeTime } from './CoworkSessionItem';
 import BotSelectorPopover from './BotSelectorPopover';
 import { i18nService } from '../../services/i18n';
+import { useStableCallback } from '../../utils/useStableCallback';
 import {
   ALL_BOTS_OPTION_KEY,
   buildBotSelectorOptions,
@@ -67,10 +68,85 @@ interface CoworkSessionListProps {
    * only on hover — and a hairline separates the control area from the rows.
    * Every other caller leaves it off, so their output is unchanged. */
   botSelector?: boolean;
+  /**
+   * i18n generation marker. The rows and the group headers read their copy from
+   * i18nService at render time, so a memoized list needs the language among its
+   * props — without it, switching language would leave every label in this list
+   * in the previous language until the session data happened to change. Callers
+   * pass i18nService.getLanguage() (they re-render on a language switch through
+   * App's i18n subscription).
+   */
+  language?: string;
 }
 
 const groupHeaderLabelClass =
   'text-[11px] font-semibold tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary';
+
+/**
+ * Cadence of the shared clock the rows stamp their relative time with. One
+ * minute matches the "5m" granularity of the label: a row that is memoized no
+ * longer recomputes anything on its own, so the list is what turns "5m" into
+ * "6m" (and the group-memo timestamp into the current minute).
+ */
+const RELATIVE_TIME_TICK_MS = 60_000;
+
+/**
+ * Shallow equality, one level deep: `Object.is` per key, and for nested objects
+ * a key-wise comparison of their own fields (session summaries carry at most
+ * `serviceOrderSummary`, which is an object). Deliberately conservative — any
+ * field that differs, at any depth, reports unequal, so a changed session is
+ * never mistaken for an unchanged one. It only has to be good enough to reuse
+ * the previous object when nothing changed.
+ */
+const sameSummaryValue = (a: unknown, b: unknown): boolean => {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((key) => Object.is(
+    (a as Record<string, unknown>)[key],
+    (b as Record<string, unknown>)[key],
+  ));
+};
+
+const sameSessionSummary = (a: CoworkSessionSummary, b: CoworkSessionSummary): boolean =>
+  sameSummaryValue(a, b);
+
+/**
+ * Hold on to the previous summary object for every session whose fields did not
+ * change. `coworkSlice.setSessions` replaces the whole array — and each summary
+ * with it — on every list read, so without this the row-level memo would compare
+ * unequal on every refresh and nothing would ever bail out. Reusing the object
+ * for unchanged rows is what lets a refresh re-render only the rows that moved;
+ * changed rows keep their fresh object, so no update can be swallowed.
+ *
+ * The returned arrays are new whenever the inputs are (the list has to re-derive
+ * its sorting and grouping then anyway); only the row objects are stabilized.
+ */
+const useStableSessionSummaries = (
+  sessions: CoworkSessionSummary[],
+  autoSessions?: CoworkSessionSummary[],
+): [CoworkSessionSummary[], CoworkSessionSummary[] | undefined] => {
+  const cacheRef = useRef<Map<string, CoworkSessionSummary>>(new Map());
+  return useMemo(() => {
+    const nextCache = new Map<string, CoworkSessionSummary>();
+    const stabilize = (list: CoworkSessionSummary[]): CoworkSessionSummary[] =>
+      list.map((session) => {
+        const previous = cacheRef.current.get(session.id);
+        const kept = previous && sameSessionSummary(previous, session) ? previous : session;
+        nextCache.set(session.id, kept);
+        return kept;
+      });
+    const result: [CoworkSessionSummary[], CoworkSessionSummary[] | undefined] = [
+      stabilize(sessions),
+      autoSessions ? stabilize(autoSessions) : undefined,
+    ];
+    cacheRef.current = nextCache;
+    return result;
+  }, [sessions, autoSessions]);
+};
 
 /** Remembered open/closed state of the Auto Tasks fold, read once on mount. */
 const loadAutoTasksExpanded = (): boolean => {
@@ -82,8 +158,8 @@ const loadAutoTasksExpanded = (): boolean => {
   return false;
 };
 
-const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
-  sessions,
+const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
+  sessions: incomingSessions,
   currentSessionId,
   onSelectSession,
   onDeleteSession,
@@ -96,8 +172,31 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
   viewMode,
   sortMode = 'updatedAt',
   botSelector = false,
-  autoSessions,
+  autoSessions: incomingAutoSessions,
+  language: languageProp,
 }) => {
+  // Same summary objects for the rows whose fields did not change (see the
+  // hook); everything below reads these instead of the raw props.
+  const [sessions, autoSessions] = useStableSessionSummaries(incomingSessions, incomingAutoSessions);
+  // One shared clock for the rows' relative-time stamps, ticked once a minute.
+  // Rows are memoized, so a row that recomputed Date.now() itself would freeze
+  // its label until its data changed; the tick is what keeps "5m" turning into
+  // "6m" on its own (and what the group memo stamps with).
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), RELATIVE_TIME_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+  /**
+   * The rows are memoized, so the action callbacks they receive must keep one
+   * identity: a fresh closure per render (which is what a parent's inline
+   * handler gives us) would re-render every mounted row on every list render.
+   */
+  const selectSession = useStableCallback(onSelectSession);
+  const deleteSession = useStableCallback(onDeleteSession);
+  const togglePin = useStableCallback(onTogglePin);
+  const renameSession = useStableCallback(onRenameSession);
+  const toggleSessionSelected = useStableCallback(onToggleSessionSelected);
   const unreadSessionIds = useSelector((state: RootState) => state.cowork.unreadSessionIds);
   const unreadSessionIdSet = useMemo(() => new Set(unreadSessionIds), [unreadSessionIds]);
   const selectedSessionIdSet = useMemo(() => new Set(selectedSessionIds ?? []), [selectedSessionIds]);
@@ -129,7 +228,8 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
   // default-Twin promise is kept on the very first painted frame.
   const [twinMetabotId, setTwinMetabotId] = useState<number | null | undefined>(undefined);
   const twinSettled = twinMetabotId !== undefined;
-  const language = i18nService.getLanguage();
+  // The caller's language, with a standalone fallback (see the prop's docs).
+  const language = languageProp ?? i18nService.getLanguage();
 
   // Which local bot is the Twin comes from the same read-only IPC the rest of
   // the renderer uses. Best effort: any failure leaves the selector on 全部.
@@ -204,11 +304,16 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
     return [...pinnedSessions, ...unpinnedSessions];
   }, [visibleSessions]);
 
+  // Buckets are day-relative ("Today" / "Yesterday"), so the grouping has to be
+  // re-derived as the clock moves on: it now depends on the shared tick, not
+  // only on the session list. Without that, a sidebar left open past midnight
+  // kept filing the new day's sessions under "Today" until something else
+  // changed the list.
   const timelineGrouped = useMemo(
     () => (viewMode === 'timeline'
-      ? groupSessionsByTimeline(visibleSessions, sortMode, Date.now(), language)
+      ? groupSessionsByTimeline(visibleSessions, sortMode, nowMs, language)
       : null),
-    [visibleSessions, viewMode, sortMode, language],
+    [visibleSessions, viewMode, sortMode, language, nowMs],
   );
 
   const projectGrouped = useMemo(
@@ -247,21 +352,24 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
     });
   };
 
+  // The row takes the session id for every action and one shared clock/language,
+  // so that two consecutive renders of an unchanged row produce referentially
+  // equal props and the memo on CoworkSessionItem bails out.
   const renderItem = (session: CoworkSessionSummary) => (
     <CoworkSessionItem
       key={session.id}
       session={session}
       hasUnread={unreadSessionIdSet.has(session.id)}
       isActive={session.id === currentSessionId}
-      onSelect={() => onSelectSession(session.id)}
-      onDelete={() => onDeleteSession(session.id)}
-      onTogglePin={(pinned) => onTogglePin(session.id, pinned)}
-      onRename={(title) => onRenameSession(session.id, title)}
       selectionMode={selectionMode}
       isSelected={selectedSessionIdSet.has(session.id)}
-      onToggleSelected={
-        onToggleSessionSelected ? () => onToggleSessionSelected(session.id) : undefined
-      }
+      nowMs={nowMs}
+      language={language}
+      onSelect={selectSession}
+      onDelete={deleteSession}
+      onTogglePin={togglePin}
+      onRename={renameSession}
+      onToggleSelected={toggleSessionSelected}
     />
   );
 
@@ -471,5 +579,15 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
     </div>
   );
 };
+
+/**
+ * Memoized: the sidebar re-renders for reasons that have nothing to do with the
+ * session list (long-term-task board pushes, the open-team poll), and this list
+ * renders hundreds of rows. With the memo, such a re-render stops at the list —
+ * provided the parent's props are stable, which is why Sidebar hands over
+ * useStableCallback-wrapped handlers and state-backed arrays instead of inline
+ * closures and freshly mapped lists.
+ */
+const CoworkSessionList = React.memo(CoworkSessionListRow);
 
 export default CoworkSessionList;

@@ -103,11 +103,18 @@ const daysAgoStartLocal = (t: number, days: number): number => {
   return d.getTime();
 };
 
+/**
+ * Month-name formatter for the English calendar-month buckets. Built once at
+ * module scope: constructing an Intl.DateTimeFormat is orders of magnitude more
+ * expensive than formatting with it, and the timeline regroups the whole list
+ * (900+ sessions, one format call per month bucket) on every list refresh.
+ */
+const enMonthFormatter = new Intl.DateTimeFormat('en-US', { month: 'short', timeZone: 'UTC' });
+
 /** "Jul 2026" (en) / "2026年7月" (zh) label for a calendar-month bucket. */
 export const formatMonthLabel = (year: number, month: number, language: string): string => {
   if (language === 'zh') return `${year}年${month}月`;
-  const monthName = new Intl.DateTimeFormat('en-US', { month: 'short', timeZone: 'UTC' })
-    .format(new Date(Date.UTC(2000, month - 1, 15)));
+  const monthName = enMonthFormatter.format(new Date(Date.UTC(2000, month - 1, 15)));
   return `${monthName} ${year}`;
 };
 
