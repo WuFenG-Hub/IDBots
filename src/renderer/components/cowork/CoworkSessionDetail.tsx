@@ -2764,11 +2764,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const [renameValue, setRenameValue] = useState('');
   const renameInputRef = useRef<HTMLInputElement>(null);
   const ignoreNextBlurRef = useRef(false);
-  const [sessionMetabot, setSessionMetabot] = useState<{ name: string; avatar: string | null; llm_id: string | null; llm_provider?: string | null; llm_effort?: string | null; globalmetaid: string | null; metabot_type: string } | null>(null);
+  const [sessionMetabot, setSessionMetabot] = useState<{ name: string; avatar: string | null; llm_id: string | null; llm_provider?: string | null; llm_effort?: string | null; fallback_llm_id?: string | null; globalmetaid: string | null; metabot_type: string } | null>(null);
   // Picker value: session pick wins, else the bound bot's brain (model id or
   // legacy provider key — the picker resolves legacy keys for display), else
   // nothing (global default). Effort mirrors the runtime tiering:
-  // session pick > bot brain effort > global default > model default. A
+  // session pick > bot brain effort > model default; the persisted global
+  // effort only fills in when the session has no bot brain at all. A
   // persisted 'default' sentinel (explicit Default pick) converts to null and
   // displays as Default instead of snapping to a fallback rung.
   const sessionUsesBrainModel = sessionModelId == null && Boolean(sessionMetabot?.llm_id);
@@ -2781,6 +2782,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       if (sessionEffortOverride != null) return convertLegacyEffortLevel(sessionEffortOverride);
       if (currentSession?.effort) return convertLegacyEffortLevel(currentSession.effort);
       if (sessionMetabot?.llm_effort) return convertLegacyEffortLevel(sessionMetabot.llm_effort);
+      if (sessionMetabot?.llm_id || sessionMetabot?.fallback_llm_id) return null;
       return convertLegacyEffortLevel(configService.getConfig().coworkEffortLevel ?? null);
     })(),
   };
@@ -2970,6 +2972,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         llm_id: result.metabot.llm_id ?? null,
         llm_provider: result.metabot.llm_provider ?? null,
         llm_effort: result.metabot.llm_effort ?? null,
+        fallback_llm_id: result.metabot.fallback_llm_id ?? null,
         globalmetaid: result.metabot.globalmetaid ?? null,
         metabot_type: result.metabot.metabot_type ?? 'worker',
       });
