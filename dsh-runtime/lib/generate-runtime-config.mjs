@@ -669,9 +669,14 @@ export function generateRuntimeConfig(input) {
     // 0.1.7 experimental desktop control (cua-driver native, in-process).
     // The host app must hold macOS Accessibility/Screen Recording grants;
     // nothing here requests them. Off unless the host opts in.
+    // The route guard rides the same switch: in this in-process topology the
+    // cursor-overlay facility is unavailable and the foreground/desktop/
+    // modifier/drag routes move the user's PHYSICAL pointer — the guard
+    // denies both at tools/pre-execute, before the provider's approval gate.
     ...(input.computerUse === true ? [
       { id: 'computer-use', name: '@deepseek-ai/dsh-computer-use' },
       { id: 'computer-use-cua-native', name: '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native' },
+      { id: 'idbots-cu-route-guard', name: plugin('idbots-cu-route-guard.mjs') },
     ] : []),
     ...(input.extraEntries ?? []),
   ]

@@ -142,9 +142,10 @@ record('generator: timeContext honours an explicit refresh interval',
     sections: [],
     timeContext: { timeZone: 'UTC', refreshIntervalMs: 0 },
   }).find((e) => e.name === '@deepseek-ai/dsh-time-context')?.config?.refreshIntervalMs === 0)
-record('generator: computerUse mounts the service + cua native provider',
+record('generator: computerUse mounts the service + cua native provider + route guard',
   withBrowser.some((e) => e.name === '@deepseek-ai/dsh-computer-use')
-  && withBrowser.some((e) => e.name === '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native'))
+  && withBrowser.some((e) => e.name === '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native')
+  && withBrowser.some((e) => e.id === 'idbots-cu-route-guard' && String(e.name).endsWith('idbots-cu-route-guard.mjs')))
 record('generator: sections config emitted', unit.some((e) => e.config?.sections?.[0]?.name === 'persona:metabot'))
 record('generator: plugin paths are absolute (config location-independent)',
   unit.every((e) => !String(e.name).startsWith('./')))

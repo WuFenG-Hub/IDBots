@@ -13,7 +13,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 
 test('memory strategy prompt requires background + session links for pending items', () => {
   const source = readFileSync(new URL('../src/main/libs/coworkRunner.ts', import.meta.url), 'utf8');
@@ -34,8 +34,13 @@ test('memory strategy prompt requires background + session links for pending ite
 });
 
 test('dsh-tool-ask-user kernel patch carries the ask-context fix', () => {
+  // The patch filename carries the pinned kernel version and changes on every
+  // bump — locate it by prefix instead of pinning a version here.
+  const patchFile = readdirSync(new URL('../scripts/dsh-kernel-patches/', import.meta.url))
+    .find((name) => name.startsWith('@deepseek-ai+dsh-tool-ask-user+') && name.endsWith('.patch'));
+  assert.ok(patchFile, 'dsh-tool-ask-user kernel patch must exist under scripts/dsh-kernel-patches/');
   const patch = readFileSync(
-    new URL('../scripts/dsh-kernel-patches/@deepseek-ai+dsh-tool-ask-user+0.1.7-rc.2.patch', import.meta.url),
+    new URL(`../scripts/dsh-kernel-patches/${patchFile}`, import.meta.url),
     'utf8',
   );
   // Description: the model must explain before asking, never fire a bare question.
