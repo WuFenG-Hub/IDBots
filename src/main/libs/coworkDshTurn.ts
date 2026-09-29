@@ -337,6 +337,11 @@ export interface DshHubOptions {
   extraEntriesProvider?: () => Array<Record<string, unknown>>
   /** Idle-session events (native compact checkpoints) when no turn controller is live. */
   onIdleSessionMessage?: (coworkSessionId: string, message: { type: string; content: string; metadata?: Record<string, unknown> }) => string
+  /** Whole-agent status transitions for OWNED sessions (strict mapping — a
+   *  continuable child's lifecycle never maps to its parent). Fires for
+   *  kernel-initiated turns too, so hosts can hold queue gates closed while
+   *  a controller-less kernel turn runs and release them when it settles. */
+  onSessionStatusChange?: (coworkSessionId: string, status: 'idle' | 'running') => void
   /** Kernel-owned session titles (dsh-session-title, 0.1.5): fallback on the
    *  first human message, then the first-prompt LLM refinement. Fires for live
    *  appends only; the host decides whether the sidebar title may follow. */
@@ -778,6 +783,24 @@ export class DshTurnHub {
       return this.ownedCoworkOfDsh(parent)
     }
     return undefined
+  }
+
+  /**
+   * True while the kernel reports this cowork session's agent as running —
+   * the ONLY signal that covers kernel-initiated turns (subagent-finished
+   * wakes, scheduled nudges), which run with no host controller and are
+   * invisible to controllersByDsh/activeSession-based busy checks.
+   */
+  isKernelSessionBusy(coworkSessionId: string): boolean {
+    const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
+    if (!dshId) return false
+    for (const slot of this.slots.values()) {
+      if (slot.kernel.isSessionBusy(dshId)) return true
+      for (const kernel of slot.drainingKernels) {
+        if (kernel.isSessionBusy(dshId)) return true
+      }
+    }
+    return false
   }
 
   /**
@@ -1481,6 +1504,12 @@ export class DshTurnHub {
         // release a queued next turn waiting on it before dispatching.
         this.pendingAbortByDsh.get(sessionId)?.settle()
         controllerOf(sessionId)?.handleTurnEnd(reason, emptyTerminal)
+      },
+      onStatus: (sessionId, status) => {
+        // Strictly-owned like onMessage's idle path: a continuable child's
+        // lifecycle must not mark its parent's cowork session busy/idle.
+        const coworkId = this.ownedCoworkOfDsh(sessionId)
+        if (coworkId) this.opts.onSessionStatusChange?.(coworkId, status)
       },
       onApprovalRequest: (sessionId, ask) => {
         this.askKernelById.set(ask.id, kernelOf())

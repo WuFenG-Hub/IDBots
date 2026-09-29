@@ -6437,7 +6437,11 @@ export class CoworkRunner extends EventEmitter {
   }
 
   private isCrossSessionTurnRunning(sessionId: string): boolean {
-    return this.crossSessionRunningTurns.has(sessionId);
+    if (this.crossSessionRunningTurns.has(sessionId)) return true;
+    // Kernel-initiated turns (subagent-finished wakes, scheduled nudges) run
+    // with no host controller — the kernel's agent status is the only signal
+    // that keeps the drain gate closed while one is in flight.
+    return this.dshTurnHub?.isKernelSessionBusy(sessionId) === true;
   }
 
   private scheduleCrossSessionContinuationDrain(sessionId: string): void {
@@ -7944,6 +7948,14 @@ export class CoworkRunner extends EventEmitter {
           return stored.id;
         },
         onSessionTitle: (coworkSessionId, title) => this.applyDshSessionTitle(coworkSessionId, title),
+        onSessionStatusChange: (coworkSessionId, status) => {
+          // A kernel-initiated turn settling releases queued cross-session
+          // continuations, same as a host turn's own settle does. The drain
+          // re-checks isCrossSessionTurnRunning, so an idle edge that races a
+          // host turn's finally simply no-ops and leaves the scheduling to
+          // that finally's markCrossSessionTurnSettled.
+          if (status === 'idle') this.scheduleCrossSessionContinuationDrain(coworkSessionId);
+        },
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
       });
     }
@@ -13464,7 +13476,10 @@ export class CoworkRunner extends EventEmitter {
   }
 
   isSessionActive(sessionId: string): boolean {
-    return this.activeSessions.has(sessionId);
+    if (this.activeSessions.has(sessionId)) return true;
+    // Kernel-initiated turns have no activeSession entry; heartbeat/A2A/
+    // group-task busy guards all ride this check, so it must see them too.
+    return this.dshTurnHub?.isKernelSessionBusy(sessionId) === true;
   }
 
   interruptActiveTurnBeforeAssistantOutput(sessionId: string): boolean {
