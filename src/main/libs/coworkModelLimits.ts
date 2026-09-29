@@ -2,10 +2,42 @@ export const DEFAULT_COWORK_CONTEXT_WINDOW = 128_000;
 // Uncatalogued-model output ceiling. Current mainstream models cap output far
 // above 32K, and thinking-mode reasoning shares the output budget — the old
 // 32K default truncated long-thinking steps on uncatalogued SKUs and forced
-// the paid truncated-turn auto-continue. 128K keeps headroom without
-// over-declaring for exotic small models (billing is by actual tokens used,
-// so a higher declared ceiling costs nothing for short replies).
+// the paid truncated-turn auto-continue. Billing is by actual tokens used, so
+// a generous DECLARED ceiling costs nothing for short replies — but the
+// resolved value is still clamped against the context window at resolution
+// time (see clampCoworkMaxOutputTokens) so small-window models keep a viable
+// compaction pressure budget.
 export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 128_000;
+
+/**
+ * Effective output-ceiling clamp, applied at resolution time to every source
+ * (explicit provider rows included). The DSH kernel's proactive compaction
+ * computes its pressure budget as
+ * `contextWindow - reservedOutput - headroomTokens` and silently disables
+ * itself for a route when that goes non-positive (TargetPressureConfigError:
+ * one suppressed warning, then the turn continues with compaction OFF). The
+ * 128K default output ceiling does exactly that to every model whose window
+ * is ≤192K — the 2026-09-30 space-bunny-free incident: a real-128K model
+ * never compacted proactively, overflowed at its true window, and the
+ * reactive summarize request (full history, same model) overflowed again.
+ * Capping the effective ceiling at ~32% of the window — floored at 8K so
+ * thinking models keep a viable reasoning budget — guarantees a positive
+ * pressure budget for any window while leaving catalogued big-window
+ * ceilings untouched (DeepSeek 1M/256K and GLM 1M/128K both sit under
+ * window×0.32).
+ */
+export const COWORK_MAX_OUTPUT_WINDOW_RATIO = 0.32;
+export const COWORK_MAX_OUTPUT_FLOOR_TOKENS = 8_192;
+
+export function clampCoworkMaxOutputTokens(maxOutputTokens: number, contextWindow: number): number {
+  if (!Number.isFinite(maxOutputTokens) || maxOutputTokens <= 0) return maxOutputTokens;
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return maxOutputTokens;
+  const windowCap = Math.max(
+    COWORK_MAX_OUTPUT_FLOOR_TOKENS,
+    Math.floor(contextWindow * COWORK_MAX_OUTPUT_WINDOW_RATIO),
+  );
+  return Math.min(Math.floor(maxOutputTokens), windowCap);
+}
 // The whole DeepSeek V4 family shares the same 1M context window. The flash
 // variant powers cowork/A2A automation sessions (via resolveAutomationModelOverride),
 // so it must carry the same window as v4-pro or the context ring wrongly falls back
@@ -308,10 +340,16 @@ function buildLimits(
   explicit?: Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>>,
 ): CoworkModelLimits {
   const known = KNOWN_MODEL_LIMITS[modelId] ?? deepseekV4FamilyLimits(modelId) ?? glmFamilyLimits(modelId);
+  const contextWindow = explicit?.contextWindow ?? known?.contextWindow ?? DEFAULT_COWORK_CONTEXT_WINDOW;
+  const configuredMaxOutputTokens = explicit?.maxOutputTokens ?? known?.maxOutputTokens ?? DEFAULT_COWORK_MAX_OUTPUT_TOKENS;
   return {
     modelId,
-    contextWindow: explicit?.contextWindow ?? known?.contextWindow ?? DEFAULT_COWORK_CONTEXT_WINDOW,
-    maxOutputTokens: explicit?.maxOutputTokens ?? known?.maxOutputTokens ?? DEFAULT_COWORK_MAX_OUTPUT_TOKENS,
+    contextWindow,
+    // The resolved ceiling is EFFECTIVE, not stored: clamped under the window
+    // so the kernel's proactive compaction always has a positive pressure
+    // budget (see clampCoworkMaxOutputTokens). Stored provider rows keep the
+    // user-entered value; only the resolved view is capped.
+    maxOutputTokens: clampCoworkMaxOutputTokens(configuredMaxOutputTokens, contextWindow),
     // Fail-safe default: uncatalogued models are treated as text-only. A
     // wrong "true" silently drops image pixels on a model that cannot read
     // them (and, while describe_image was gated by this flag, removed the
