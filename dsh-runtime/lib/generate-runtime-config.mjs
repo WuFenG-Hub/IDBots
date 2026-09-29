@@ -132,6 +132,52 @@ const TRANSIENT_OUTAGE_RETRY_POLICY = Object.freeze({
   backoff: Object.freeze({ initialDelayMs: 1_000, maxDelayMs: 30_000 }),
 })
 
+/** Per-route compaction headroom scaling. compaction-basic's pressure budget
+ *  is `contextWindow - reservedOutput - headroomTokens`; the upstream flat
+ *  64K headroom is sized for 1M-class windows and eats half of a 128K window
+ *  (and with an unclamped output ceiling it zeroes the budget entirely,
+ *  silently disabling proactive compaction for the route — the 2026-09-30
+ *  space-bunny-free incident). Scale the headroom at 8% of the model's
+ *  window, clamped to [4K, 64K]: 1M routes keep today's exact behavior
+ *  (64K), while a 128K model compacts at ~60% of its window instead of
+ *  never. The host additionally clamps the output ceiling itself
+ *  (coworkModelLimits), so reservedOutput stays proportional too. */
+const COMPACTION_HEADROOM_RATIO = 0.08
+const COMPACTION_HEADROOM_MIN_TOKENS = 4_096
+const COMPACTION_HEADROOM_MAX_TOKENS = 65_536
+
+const compactionHeadroomTokens = (contextWindow) => {
+  const window = Number.isFinite(contextWindow) ? Math.floor(contextWindow) : 0
+  if (window <= 0) return undefined
+  return Math.max(
+    COMPACTION_HEADROOM_MIN_TOKENS,
+    Math.min(COMPACTION_HEADROOM_MAX_TOKENS, Math.floor(window * COMPACTION_HEADROOM_RATIO)),
+  )
+}
+
+/** One compaction-basic modelPolicies entry per configured provider/model
+ *  route. `provider` must equal the REGISTERED route key (sanitized pi-ai
+ *  key, or the native adapter's fixed `deepseek-official`) and `model` the
+ *  exact model id — a mismatch silently never applies, and a duplicate
+ *  target fails plugin load, so dedupe last-wins per target (mirroring the
+ *  routes-dict overwrite semantics for sanitized-key collisions). */
+const compactionModelPolicies = (providers) => {
+  const byTarget = new Map()
+  for (const provider of providers ?? []) {
+    const routeKey = provider.native ? 'deepseek-official' : sanitizeRouteKey(provider.key)
+    for (const model of provider.models ?? []) {
+      const headroomTokens = compactionHeadroomTokens(model?.contextWindow)
+      if (headroomTokens === undefined || !model?.id) continue
+      byTarget.set(JSON.stringify([routeKey, model.id]), {
+        provider: routeKey,
+        model: model.id,
+        headroomTokens,
+      })
+    }
+  }
+  return [...byTarget.values()]
+}
+
 const modelDeclaresImageInput = (model) =>
   Array.isArray(model.input) && model.input.includes('image')
 
@@ -287,6 +333,8 @@ export function generateRuntimeConfig(input) {
   if (providers.length === 0) {
     throw new Error('generate-runtime-config: at least one provider is required')
   }
+
+  const compactionPolicies = compactionModelPolicies(providers)
 
   const routes = {}
   const nativeDeepSeekRoutes = []
@@ -450,7 +498,16 @@ export function generateRuntimeConfig(input) {
     {
       id: 'compaction-basic',
       name: '@deepseek-ai/dsh-compaction-basic',
-      config: { thresholdRatio: 0.8, retainRatio: 0.16, maxTokens: 8192, compactionRetries: 1 },
+      config: {
+        thresholdRatio: 0.8,
+        retainRatio: 0.16,
+        maxTokens: 8192,
+        compactionRetries: 1,
+        // Per-route window-scaled headroom (see compactionHeadroomTokens) —
+        // without it the flat 64K default zeroes the pressure budget on
+        // small-window routes and proactive compaction silently turns off.
+        ...compactionPolicies.length > 0 ? { modelPolicies: compactionPolicies } : {},
+      },
     },
     // 0.1.5 tool-result pruner: model-free head/middle/tail pruning of
     // tool-result surface nodes during compaction (defaults 8192/4096/1024
