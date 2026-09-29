@@ -10071,10 +10071,10 @@ if (!gotTheLock) {
       });
 
       // Start the session asynchronously (skip initial user message since we already added it).
-      // Permission mode + effort default to the persisted app-level values (the
-      // user's latest global choices, survive restart). When the renderer
-      // passes a value it is the UI's current selection — persist it too so the
-      // global default stays in sync with what the user just picked.
+      // Permission mode defaults to the persisted app-level value (the user's
+      // latest global choice, survives restart). When the renderer passes a
+      // value it is the UI's current selection — persist it too so the global
+      // default stays in sync with what the user just picked.
       const resolvedPermissionMode = options.permissionMode ?? getPersistedCoworkPermissionMode();
       if (options.permissionMode && options.permissionMode !== getPersistedCoworkPermissionMode()) {
         setPersistedCoworkPreference({ permissionMode: options.permissionMode });
@@ -10086,11 +10086,13 @@ if (!gotTheLock) {
         confirmationMode: 'modal',
         permissionMode: resolvedPermissionMode,
         autoApproveTools: getPersistedAutoApproveTools(),
-        // Explicit picker pick (even "Default") seeds the session; otherwise the
-        // persisted global effort applies.
+        // An explicit picker pick (even "Default") seeds the session; otherwise
+        // leave effort unset so the per-turn tiering (bot brain → global →
+        // model default) resolves it — seeding the global here would shadow
+        // the bot brain rung for bot-bound sessions.
         effortOverride: options.effort !== undefined
           ? (options.effort?.trim() || null)
-          : getPersistedCoworkEffortLevel(),
+          : undefined,
       }).catch(error => {
         console.error('Cowork session error:', error);
       });

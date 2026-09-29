@@ -5481,11 +5481,6 @@ export class CoworkRunner extends EventEmitter {
     };
   }
 
-  /** Effort of the session bot's primary brain (null when no bot / no effort). */
-  private getSessionBrainEffort(sessionId: string): LlmEffortLevel | null {
-    return this.getSessionAutomationBrain(sessionId)?.effort ?? null;
-  }
-
   /**
    * Compose the STABLE system prompt. Only session-invariant blocks belong
    * here (persona, safety policy, memory strategy, base prompt) so the first
@@ -8321,9 +8316,11 @@ export class CoworkRunner extends EventEmitter {
       // reference user files, not the volatile context head).
       const promptImages = await this.collectDshPromptImages(prompt, cwd, modelLimits?.supportsVision === true);
       // Same effort/thinking resolution the Claude path applies per query:
-      // session UI override wins, then the bot brain effort, then the global
-      // default, then the per-model default. DSH previously dropped this, so
-      // the runtime always used the provider default (thinking ON, no
+      // session UI override wins, then the bot brain effort (a bot with a
+      // configured brain is authoritative — its null effort means "model
+      // default"), then the persisted global default for brain-less sessions,
+      // then the per-model default. DSH previously dropped this, so the
+      // runtime always used the provider default (thinking ON, no
       // reasoning_effort).
       const modelOptions = resolveModelOptions(route.model);
       // Official DeepSeek rides the first-party dsh-llm-deepseek adapter under
@@ -8332,11 +8329,15 @@ export class CoworkRunner extends EventEmitter {
       // Must stay in sync with dshTurnProviderFromRoute (same predicate).
       const officialDeepSeekNative = isNativeDeepSeekChatRoute(route);
       const dshEffortDialect = officialDeepSeekNative ? 'deepseek-native' : 'generic';
+      // A session bound to a bot with a configured brain follows that brain
+      // (a null brain effort means "model default"); the persisted global
+      // effort only fills in for sessions without any bot brain.
+      const automationBrain = this.getSessionAutomationBrain(sessionId);
       const dshReasoningEffort = mapDshReasoningEffort(
         toLlmEffortLevel(
           activeSession.effortOverride
-            ?? this.getSessionBrainEffort(sessionId)
-            ?? getPersistedCoworkEffortLevel()
+            ?? automationBrain?.effort
+            ?? (automationBrain ? null : getPersistedCoworkEffortLevel())
             ?? modelOptions?.reasoningEffort,
         ),
         activeSession.thinkingOverride ?? modelOptions?.thinking,
@@ -8346,7 +8347,7 @@ export class CoworkRunner extends EventEmitter {
         sessionId,
         dialect: dshEffortDialect,
         uiOverride: activeSession.effortOverride ?? null,
-        brainEffort: this.getSessionBrainEffort(sessionId),
+        brainEffort: automationBrain?.effort ?? null,
         modelDefault: modelOptions?.reasoningEffort ?? null,
         mapped: dshReasoningEffort ?? null,
       });
@@ -8491,8 +8492,8 @@ export class CoworkRunner extends EventEmitter {
           turnReasoningEffort = mapDshReasoningEffort(
             toLlmEffortLevel(
               activeSession.effortOverride
-                ?? this.getSessionAutomationBrain(sessionId)?.fallbackEffort
-                ?? getPersistedCoworkEffortLevel()
+                ?? automationBrain?.fallbackEffort
+                ?? (automationBrain ? null : getPersistedCoworkEffortLevel())
                 ?? fallbackModelOptions?.reasoningEffort,
             ),
             activeSession.thinkingOverride ?? fallbackModelOptions?.thinking,

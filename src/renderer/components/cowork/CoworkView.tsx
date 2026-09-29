@@ -76,6 +76,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     llm_id: string | null;
     llm_provider?: string | null;
     llm_effort?: string | null;
+    fallback_llm_id?: string | null;
   } | null>(null);
   // Pending model+effort for the session about to be started from this home
   // view. The whole state being null = follow the selected bot's brain (its
@@ -292,6 +293,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         llm_id: metabot.llm_id ?? null,
         llm_provider: metabot.llm_provider ?? null,
         llm_effort: metabot.llm_effort ?? null,
+        fallback_llm_id: metabot.fallback_llm_id ?? null,
       });
     };
     void fetchMetaBot();
@@ -833,10 +835,14 @@ const CoworkView: React.FC<CoworkViewProps> = ({
                 ? (selectedMetabotBrain?.llm_provider ?? null)
                 : (pendingModelEffort?.providerKey ?? null),
               // An explicit pick sticks as chosen (null = Default); only a
-              // missing pick resolves the brain → global fallback chain.
+              // missing pick resolves the fallback chain. A bot with a
+              // configured brain (primary or fallback model) is authoritative —
+              // the persisted global effort only fills in when no brain exists.
               effort: effortDisplayForPick(pendingModelEffort, [
                 selectedMetabotBrain?.llm_effort ?? null,
-                configService.getConfig().coworkEffortLevel ?? null,
+                ...(selectedMetabotBrain?.llm_id || selectedMetabotBrain?.fallback_llm_id
+                  ? []
+                  : [configService.getConfig().coworkEffortLevel ?? null]),
               ]),
             }}
             onModelEffortChange={(value) => {
