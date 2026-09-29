@@ -72,6 +72,7 @@ import WindowTitleBar from '../window/WindowTitleBar';
 import { getCompactFolderName } from '../../utils/path';
 import { isRenderableAvatarSource as isSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import { isRenderableAssistantOrSystemMessage } from '../../utils/coworkMessageVisibility';
+import { scrollEventMovesAnchor } from '../../utils/anchoredPopover';
 import {
   buildPrivateA2ASessionDisplayId,
   getCoworkSessionTitleClassName,
@@ -3218,16 +3219,24 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         closeMenu();
       }
     };
-    const handleScroll = () => closeMenu();
+    // The capture listener hears every scroll in the app — including this
+    // session's own transcript auto-pinning to the bottom on each streamed
+    // chunk while it runs. That scroll never moves the header action button,
+    // so it must not dismiss the menu; only scrolls that move the anchor (an
+    // ancestor of it, or the document) do.
+    const handleScroll = (event: Event) => {
+      if (scrollEventMovesAnchor(event, actionButtonRef.current)) closeMenu();
+    };
+    const handleResize = () => closeMenu();
     document.addEventListener('mousedown', handleClickOutside);
     document.addEventListener('keydown', handleEscape);
     window.addEventListener('scroll', handleScroll, true);
-    window.addEventListener('resize', handleScroll);
+    window.addEventListener('resize', handleResize);
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleEscape);
       window.removeEventListener('scroll', handleScroll, true);
-      window.removeEventListener('resize', handleScroll);
+      window.removeEventListener('resize', handleResize);
     };
   }, [menuPosition]);
 

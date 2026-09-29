@@ -553,6 +553,7 @@ man_base_data_pebble/
 !tests/coworkConversationTurnReuse.test.mjs
 !tests/sessionListRenderBudget.test.mjs
 !tests/sessionListRevealBudget.test.ts
+!tests/sessionMenuScrollDismiss.test.mjs
 !tests/coworkSessionActivityAt.test.mjs
 !tests/coworkMessageTranscriptOrdering.test.mjs
 !tests/coworkSessionMessageWindow.test.mjs
