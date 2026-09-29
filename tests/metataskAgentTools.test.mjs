@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -758,4 +761,318 @@ test('metatask_list: per-task myStats carries estShareBP', async () => {
     estShareBP: 4000,
   });
   assert.equal(payload.tasks[0].settlementFinalized, false);
+});
+
+// ── draftsFile mode: publish machine-validated campaign drafts verbatim ──────
+// The wave-1 launch failed because the publishing bot re-typed a ~90KB nested
+// validation block by hand, mangled it, and read the resulting refusal as a
+// validator disagreement. File mode removes that transcription step entirely.
+
+const DRAFTS_TASK_ID = 'T1-JSP-000301';
+const DRAFTS_ROOT_SPEC_KEY = 'powerful-pair-verifier';
+const DRAFTS_STANDALONE_SPEC_KEY = 'witness-extraction-301';
+
+/** A whole spec object with all seven protocol fields, in payload key order. */
+const fileSpec = (name, entry, over = {}) => ({
+  name,
+  lang: 'python3',
+  entry,
+  script: `#!/usr/bin/env python3\nprint("${name} pass")\n`,
+  input: { repo: 'metafile://repo-artifact' },
+  output: { verdict: 'pass|fail|invalid' },
+  validation: buildValidation(),
+  ...over,
+});
+
+const buildDraftsFixture = () => ({
+  specs: {
+    [DRAFTS_ROOT_SPEC_KEY]: fileSpec(DRAFTS_ROOT_SPEC_KEY, 'spec-powerful-pair.py'),
+    [DRAFTS_STANDALONE_SPEC_KEY]: fileSpec(DRAFTS_STANDALONE_SPEC_KEY, 'spec-witness-extraction.py'),
+    'semantic-review-301': fileSpec('semantic-review-301', 'spec-semantic-review.py'),
+  },
+  tasks: [
+    {
+      id: DRAFTS_TASK_ID,
+      rootSpec: DRAFTS_ROOT_SPEC_KEY,
+      correspondenceArtifact: 'correspondence-T1-JSP-000301',
+      publish: {
+        title: 'formalize JSP-000301 (drafts fixture)',
+        brief: 'fixture brief',
+        nodes: [
+          { id: 'root', parent: null, title: 'aggregate', kind: 'aggregate', specid: null, params: {}, deps: [], weight: 3000 },
+          { id: 'witness', parent: 'root', title: 'search', kind: 'search', specid: `SPEC_PIN:${DRAFTS_STANDALONE_SPEC_KEY}`, params: {}, deps: [], weight: 4000 },
+          { id: 'review', parent: 'root', title: 'triage', kind: 'triage', specid: 'SPEC_PIN:semantic-review-301', params: {}, deps: [], weight: 3000 },
+        ],
+        policy: { claimTtlHours: 48, verifyQuorum: 2, verifyWindowHours: 72, submitterShareBP: 8000 },
+        tags: ['metatask', 'jsp'],
+      },
+    },
+  ],
+});
+
+/** Run `body` with a temp drafts file (never the real 91KB launch kit). */
+const withDraftsFile = async (drafts, body) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-metatask-drafts-'));
+  const file = path.join(dir, 'wave1-task-drafts.json');
+  fs.writeFileSync(file, JSON.stringify(drafts, null, 2), 'utf8');
+  try {
+    return await body(file, dir);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+};
+
+test('metatask_publish_spec: draftsFile+specKey publishes the file spec byte-for-byte', async () => {
+  const { handlers, writes } = buildHarness([]);
+  await withDraftsFile(buildDraftsFixture(), async (draftsFile) => {
+    const result = await handlers.metatask_publish_spec({ draftsFile, specKey: DRAFTS_STANDALONE_SPEC_KEY });
+    assert.equal(result.isError, undefined, result.content?.[0]?.text);
+    assert.equal(writes.length, 1, 'one spec pin, no tree/task');
+    assert.equal(writes[0].metaidData.path, '/protocols/metatask/spec');
+    assert.equal(writes[0].options.origin, 'tool:metatask_publish_spec');
+
+    const expected = buildDraftsFixture().specs[DRAFTS_STANDALONE_SPEC_KEY];
+    assert.deepEqual(Object.keys(JSON.parse(writes[0].metaidData.payload)), Object.keys(expected));
+    assert.equal(writes[0].metaidData.payload, JSON.stringify(expected), 'payload bytes equal the drafts entry');
+
+    const out = JSON.parse(result.content[0].text);
+    assert.equal(out.specPinId, writes[0].pinId);
+    assert.equal(out.source, 'draftsFile');
+    assert.equal(out.specKey, DRAFTS_STANDALONE_SPEC_KEY);
+    assert.equal(out.hasValidation, true);
+  });
+});
+
+test('metatask_publish_spec: refuse when both modes are supplied, or one half is missing', async () => {
+  const { handlers, writes } = buildHarness([]);
+  await withDraftsFile(buildDraftsFixture(), async (draftsFile) => {
+    const both = await handlers.metatask_publish_spec({
+      draftsFile,
+      specKey: DRAFTS_STANDALONE_SPEC_KEY,
+      name: 'hand-typed-name',
+    });
+    assert.equal(both.isError, true);
+    assert.match(both.content[0].text, /not both/);
+
+    const bothValidationOnly = await handlers.metatask_publish_spec({
+      draftsFile,
+      specKey: DRAFTS_STANDALONE_SPEC_KEY,
+      validation: buildValidation(),
+    });
+    assert.equal(bothValidationOnly.isError, true);
+    assert.match(bothValidationOnly.content[0].text, /not both/);
+
+    const fileOnly = await handlers.metatask_publish_spec({ draftsFile });
+    assert.equal(fileOnly.isError, true);
+    assert.match(fileOnly.content[0].text, /draftsFile and specKey must be passed together/);
+
+    const keyOnly = await handlers.metatask_publish_spec({ specKey: DRAFTS_STANDALONE_SPEC_KEY });
+    assert.equal(keyOnly.isError, true);
+    assert.match(keyOnly.content[0].text, /draftsFile and specKey must be passed together/);
+
+    const unknownKey = await handlers.metatask_publish_spec({ draftsFile, specKey: 'nope-301' });
+    assert.equal(unknownKey.isError, true);
+    assert.match(unknownKey.content[0].text, /specs\["nope-301"\] not found/);
+    assert.match(unknownKey.content[0].text, /witness-extraction-301/);
+
+    assert.equal(writes.length, 0, 'every file-mode refusal precedes any spend');
+  });
+});
+
+test('metatask_publish_spec: unreadable draftsFile or non-object JSON is refused', async () => {
+  const { handlers, writes } = buildHarness([]);
+  await withDraftsFile(buildDraftsFixture(), async (draftsFile, dir) => {
+    const missing = await handlers.metatask_publish_spec({
+      draftsFile: path.join(dir, 'missing-file.json'),
+      specKey: DRAFTS_STANDALONE_SPEC_KEY,
+    });
+    assert.equal(missing.isError, true);
+    assert.match(missing.content[0].text, /cannot read draftsFile/);
+
+    const relative = await handlers.metatask_publish_spec({
+      draftsFile: 'scripts/metatask-campaign/wave1-task-drafts.json',
+      specKey: DRAFTS_STANDALONE_SPEC_KEY,
+    });
+    assert.equal(relative.isError, true);
+    assert.match(relative.content[0].text, /must be an absolute path/);
+
+    const arrayFile = path.join(dir, 'array.json');
+    fs.writeFileSync(arrayFile, '[]', 'utf8');
+    const notObject = await handlers.metatask_publish_spec({ draftsFile: arrayFile, specKey: 'x' });
+    assert.equal(notObject.isError, true);
+    assert.match(notObject.content[0].text, /must contain a JSON object/);
+
+    assert.equal(writes.length, 0);
+  });
+});
+
+test('metatask_publish: draftsFile+taskId substitutes SPEC_PIN placeholders and refuses unmapped ones', async () => {
+  const { handlers, writes } = buildHarness([]);
+  await withDraftsFile(buildDraftsFixture(), async (draftsFile) => {
+    const unmapped = await handlers.metatask_publish({ draftsFile, taskId: DRAFTS_TASK_ID });
+    assert.equal(unmapped.isError, true);
+    assert.match(unmapped.content[0].text, /SPEC_PIN:semantic-review-301/);
+    assert.match(unmapped.content[0].text, /SPEC_PIN:witness-extraction-301/);
+    assert.equal(writes.length, 0, 'no spend with an unresolved placeholder');
+
+    const result = await handlers.metatask_publish({
+      draftsFile,
+      taskId: DRAFTS_TASK_ID,
+      specPinByKey: {
+        [DRAFTS_STANDALONE_SPEC_KEY]: 'pin://witnessspec0000000000000000000000000000000000001i0',
+      },
+    });
+    assert.equal(result.isError, true, 'the second placeholder is still unmapped');
+    assert.match(result.content[0].text, /SPEC_PIN:semantic-review-301/);
+    assert.ok(!/SPEC_PIN:witness-extraction-301/.test(result.content[0].text), 'mapped placeholder is not reported');
+    assert.equal(writes.length, 0);
+
+    const ok = await handlers.metatask_publish({
+      draftsFile,
+      taskId: DRAFTS_TASK_ID,
+      specPinByKey: {
+        [DRAFTS_STANDALONE_SPEC_KEY]: 'pin://witnessspec0000000000000000000000000000000000001i0',
+        'semantic-review-301': 'pin://reviewspec0000000000000000000000000000000000001i0',
+      },
+    });
+    assert.equal(ok.isError, undefined, ok.content?.[0]?.text);
+    const paths = writes.map((write) => write.metaidData.path);
+    assert.deepEqual(paths, [
+      '/protocols/metatask-roster',
+      '/protocols/metatask/tree',
+      '/protocols/metatask/spec',
+      '/protocols/metatask/task',
+    ]);
+    const treePayload = JSON.parse(writes[1].metaidData.payload);
+    assert.equal(treePayload.root, 'root');
+    assert.deepEqual(
+      treePayload.nodes.map((node) => [node.id, node.specid]),
+      [
+        ['root', null],
+        ['witness', 'pin://witnessspec0000000000000000000000000000000000001i0'],
+        ['review', 'pin://reviewspec0000000000000000000000000000000000001i0'],
+      ]
+    );
+    const taskPayload = JSON.parse(writes[3].metaidData.payload);
+    assert.equal(taskPayload.title, 'formalize JSP-000301 (drafts fixture)');
+    assert.equal(taskPayload.brief, 'fixture brief');
+    assert.equal(taskPayload.policy.verify_quorum, 2);
+    assert.deepEqual(taskPayload.tags, ['metatask', 'jsp']);
+    // The root spec is written by this call from the drafts' rootSpec entry.
+    const specPayload = JSON.parse(writes[2].metaidData.payload);
+    assert.equal(specPayload.name, DRAFTS_ROOT_SPEC_KEY);
+    assert.equal(specPayload.script, buildDraftsFixture().specs[DRAFTS_ROOT_SPEC_KEY].script);
+    const out = JSON.parse(ok.content[0].text);
+    assert.equal(out.source, 'draftsFile');
+    assert.equal(out.taskId, DRAFTS_TASK_ID);
+  });
+});
+
+test('metatask_publish: both modes, unknown taskId and stray specPinByKey are refused', async () => {
+  const { handlers, writes } = buildHarness([]);
+  await withDraftsFile(buildDraftsFixture(), async (draftsFile) => {
+    const both = await handlers.metatask_publish({
+      draftsFile,
+      taskId: DRAFTS_TASK_ID,
+      title: 'hand-typed title',
+    });
+    assert.equal(both.isError, true);
+    assert.match(both.content[0].text, /not both/);
+
+    const missingTaskId = await handlers.metatask_publish({ draftsFile });
+    assert.equal(missingTaskId.isError, true);
+    assert.match(missingTaskId.content[0].text, /draftsFile and taskId must be passed together/);
+
+    const unknownTask = await handlers.metatask_publish({
+      draftsFile,
+      taskId: 'T9-JSP-000999',
+      specPinByKey: {},
+    });
+    assert.equal(unknownTask.isError, true);
+    assert.match(unknownTask.content[0].text, /no tasks\[\] entry with id "T9-JSP-000999"/);
+    assert.match(unknownTask.content[0].text, /T1-JSP-000301/);
+
+    const strayMap = await handlers.metatask_publish({
+      title: 'inline',
+      nodes: [
+        { id: 'root', parent: null, title: 'root', kind: 'aggregate', weight: 10000 },
+      ],
+      spec: { name: 'x', lang: 'bash', entry: 'x.sh', script: 'echo pass' },
+      policy: { claimTtlHours: 1, verifyQuorum: 1, verifyWindowHours: 1 },
+      specPinByKey: {},
+    });
+    assert.equal(strayMap.isError, true);
+    assert.match(strayMap.content[0].text, /specPinByKey only applies in draftsFile mode/);
+
+    assert.equal(writes.length, 0);
+  });
+});
+
+// ── enumeration_closure integer search is recursive ──────────────────────────
+
+test('metatask_publish_spec: enumeration_closure accepts an integer at any depth', async () => {
+  const { handlers, writes } = buildHarness([]);
+
+  // The campaign drafts' own shape: the count lives inside a selfcheck object.
+  const nestedObject = await handlers.metatask_publish_spec({
+    name: 'nested-object',
+    lang: 'python3',
+    entry: 'nested.py',
+    script: SPEC_SCRIPT,
+    validation: buildValidation(ARTIFACT_REF, {
+      enumeration_closure: {
+        closure: 'primes of the two certificates',
+        selfcheck: { jsp: 'JSP-000301', expected_count: 4, count_meaning: 'distinct primes' },
+      },
+    }),
+  });
+  assert.equal(nestedObject.isError, undefined, nestedObject.content?.[0]?.text);
+
+  // ...and inside an array of vectors.
+  const nestedArray = await handlers.metatask_publish_spec({
+    name: 'nested-array',
+    lang: 'python3',
+    entry: 'nested-array.py',
+    script: SPEC_SCRIPT,
+    validation: buildValidation(ARTIFACT_REF, {
+      enumeration_closure: {
+        closure: 'every batch',
+        selfcheck: [{ batch: 'b01', expected_count: 27 }, { batch: 'b02', expected_count: 30 }],
+      },
+    }),
+  });
+  assert.equal(nestedArray.isError, undefined, nestedArray.content?.[0]?.text);
+  assert.equal(writes.length, 2);
+
+  // A block with no integer anywhere (and no integer-looking string) refuses.
+  const noInteger = await handlers.metatask_publish_spec({
+    name: 'no-integer',
+    lang: 'python3',
+    entry: 'no-integer.py',
+    script: SPEC_SCRIPT,
+    validation: buildValidation(ARTIFACT_REF, {
+      enumeration_closure: {
+        closure: 'every batch',
+        selfcheck: { batch: 'b01', count: 'twenty-seven' },
+        count_meaning: 'a word, not a field',
+      },
+    }),
+  });
+  assert.equal(noInteger.isError, true);
+  assert.match(noInteger.content[0].text, /integer self-check count/);
+
+  // The closure string requirement is untouched.
+  const noClosure = await handlers.metatask_publish_spec({
+    name: 'no-closure',
+    lang: 'python3',
+    entry: 'no-closure.py',
+    script: SPEC_SCRIPT,
+    validation: buildValidation(ARTIFACT_REF, {
+      enumeration_closure: { selfcheck: { expected_count: 4 } },
+    }),
+  });
+  assert.equal(noClosure.isError, true);
+  assert.match(noClosure.content[0].text, /closure/);
+
+  assert.equal(writes.length, 2, 'only the two accepted specs were written');
 });
