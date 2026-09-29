@@ -206,7 +206,7 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
 
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-5">
         {/* Sub-project checklist */}
-        <div className="rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface p-3 lg:col-span-2">
+        <div className="min-w-0 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface p-3 lg:col-span-2">
           <div className="px-1 pb-2 text-[11px] font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
             {i18nService.t('longTermTask.subtasks')}
           </div>
@@ -256,16 +256,16 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
                   <button
                     type="button"
                     onClick={() => setSelectedSubtaskId(subtask.id)}
-                    className={`flex-1 rounded-lg border px-3 py-2 text-left transition ${
+                    className={`min-w-0 flex-1 rounded-lg border px-3 py-2 text-left transition ${
                       isSelected
                         ? 'border-brand/60 dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover'
                         : 'border-transparent dark:hover:bg-claude-darkSurfaceHover/60 hover:bg-claude-surfaceHover/60'
                     }`}
                   >
-                    <div className="flex items-center gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
                       <span className={`w-5 shrink-0 text-center text-xs ${icon.className}`}>{icon.glyph}</span>
                       <span
-                        className={`min-w-0 flex-1 truncate text-xs font-medium dark:text-claude-darkText text-claude-text ${
+                        className={`min-w-0 flex-1 break-words text-xs font-medium dark:text-claude-darkText text-claude-text ${
                           subtask.status === 'accepted' ? 'line-through opacity-70' : ''
                         }`}
                       >
@@ -280,7 +280,7 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
                         {i18nService.t(LONG_TERM_SUBTASK_STATUS_LABEL_KEYS[subtask.status])}
                       </span>
                     </div>
-                    <div className="ml-7 mt-0.5 flex items-center gap-2 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    <div className="ml-7 mt-0.5 flex min-w-0 flex-wrap items-center gap-2 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
                       {subtask.dependsOn.length > 0 && (
                         <span>{i18nService.t('longTermTask.dependsOn').replace('{ids}', String(subtask.dependsOn.length))}</span>
                       )}
