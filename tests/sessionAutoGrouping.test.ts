@@ -102,8 +102,9 @@ test('sidebar feeds the list with the split halves and keeps search over every s
   assert.match(src, /sessions=\{localListSessions\}/);
   assert.match(src, /autoSessions=\{taskRecordTab === 'local' \? localAutoSessions : undefined\}/);
   assert.match(src, /splitSessionsByAutoOrigin\(sessionGroups\.local\)/);
-  // The local tab's count + red unread dot ignore the folded rows.
-  assert.match(src, /local: \{ count: localHumanSessions\.length, unread: unreadOf\(localHumanSessions\) \}/);
+  // The local tab's count tip describes the main list only, but its red dot
+  // also lights for unread inside the fold (same dot as the A2A tab).
+  assert.match(src, /unread: unreadOf\(localHumanSessions\) \+ unreadOf\(localAutoSessions\)/);
   // Search still receives the complete list, folded sessions included.
   assert.match(src, /<CoworkSearchModal[\s\S]*?sessions=\{homeSessions\}/);
 });
@@ -130,7 +131,7 @@ test('the list renders one Auto Tasks fold, collapsed by default, directly under
   assert.match(src, /sortedAutoSessions\.length > 0 && \(/);
 });
 
-test('the fold header carries label + count + latest activity, and no unread number', () => {
+test('the fold header carries label + unread count + latest activity, and no total count', () => {
   const src = readSource('src/renderer/components/cowork/CoworkSessionList.tsx');
   const header = src.slice(
     src.indexOf('const renderAutoTasksSection'),
@@ -138,21 +139,23 @@ test('the fold header carries label + count + latest activity, and no unread num
   );
 
   assert.match(header, /coworkAutoTasks'/);
-  assert.match(header, /coworkAutoTasksCount/);
-  assert.match(header, /\{sortedAutoSessions\.length\}/, 'the session count stays');
   assert.match(header, /formatRelativeTime\(autoLatestActivityAt\)/, 'the newest-activity stamp stays');
-  // The unread number was noise: assistant stream chunks carry no
-  // metadata.origin, so the heartbeat exemption cannot cover the replies and
-  // an active folded session looked unread permanently.
-  assert.doesNotMatch(header, /unread/i);
-  assert.doesNotMatch(header, /autoUnreadCount/);
-  assert.doesNotMatch(header, /bg-red-500/);
-  assert.equal((src.match(/autoUnreadCount/g) ?? []).length, 0, 'the derivation is gone, not just unrendered');
+  // The displayed number is the fold's unread session count — the signal the
+  // user watches — in the same red as the tab dot, and only when > 0.
+  assert.match(header, /autoUnreadCount > 0 && \(/);
+  assert.match(header, /\{autoUnreadCount\}/);
+  assert.match(header, /text-red-500/);
+  assert.match(header, /coworkAutoTasksUnread/);
+  // The total is no longer rendered as a header number (it survives only in
+  // the hover tooltip).
+  assert.doesNotMatch(header, /<span className="flex-shrink-0 font-normal tabular-nums">\{sortedAutoSessions\.length\}<\/span>/);
   // Per-row dots inside the expanded fold are untouched.
   assert.match(src, /hasUnread=\{unreadSessionIdSet\.has\(session\.id\)\}/);
+  // The derivation feeds from the same unread set the rows use.
+  assert.match(src, /const autoUnreadCount = useMemo\(\s*\(\) => sortedAutoSessions\.filter\(\(session\) => unreadSessionIdSet\.has\(session\.id\)\)\.length,/);
 
-  // The label key is gone from both dictionaries, keeping coverage symmetric.
+  // Both label keys exist once per locale, keeping coverage symmetric.
   const i18n = readSource('src/renderer/services/i18n.ts');
-  assert.equal((i18n.match(/coworkAutoTasksUnread/g) ?? []).length, 0);
+  assert.equal((i18n.match(/coworkAutoTasksUnread:/g) ?? []).length, 2, 'one per locale');
   assert.equal((i18n.match(/coworkAutoTasksCount:/g) ?? []).length, 2, 'still one per locale');
 });

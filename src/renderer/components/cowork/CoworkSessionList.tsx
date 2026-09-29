@@ -356,6 +356,13 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     () => sortedAutoSessions.reduce((latest, session) => Math.max(latest, session.updatedAt), 0),
     [sortedAutoSessions],
   );
+  // Unread sessions inside the fold. This — not the total — is the header's
+  // number: the user watches for background runs with news, and the local
+  // tab's red dot lights from the same unread set in the sidebar's tabStats.
+  const autoUnreadCount = useMemo(
+    () => sortedAutoSessions.filter((session) => unreadSessionIdSet.has(session.id)).length,
+    [sortedAutoSessions, unreadSessionIdSet],
+  );
 
   const toggleGroupCollapsed = (key: string) => {
     setCollapsedGroupKeys((prev) => {
@@ -415,14 +422,13 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
    * The Auto Tasks fold. Rendered in every view mode directly under the pinned
    * block (above the timeline/project groups, where it is seen without
    * scrolling), and only when there is something to fold — an empty folder
-   * would be noise of its own. The header
-   * is styled like the project groups' folder header (subdued secondary text +
-   * folder glyph) so it reads as a container, not as a conversation, and carries
-   * only label + count + the fold's newest activity time: an unread number here
-   * was pure noise (assistant stream chunks carry no `metadata.origin`, so a
-   * heartbeat exemption cannot cover the replies and an active folded session
-   * looks unread almost permanently). Per-row dots inside the EXPANDED fold stay
-   * — that is where "which run has news" is actually traceable.
+   * would be noise of its own. The header is styled like the project groups'
+   * folder header (subdued secondary text + folder glyph) so it reads as a
+   * container, not as a conversation, and carries label + the fold's UNREAD
+   * session count (red, only when > 0 — the number the user actually watches;
+   * the total is kept to the hover tooltip) + the fold's newest activity time.
+   * Per-row dots inside the EXPANDED fold stay — that is where "which run has
+   * news" is actually traceable.
    */
   const renderAutoTasksSection = () =>
     revealBudgetLeft() && sortedAutoSessions.length > 0 && (
@@ -431,7 +437,9 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
           type="button"
           aria-expanded={isAutoTasksExpanded}
           onClick={toggleAutoTasksExpanded}
-          title={i18nService.t('coworkAutoTasksCount').replace('{count}', String(sortedAutoSessions.length))}
+          title={(autoUnreadCount > 0
+            ? i18nService.t('coworkAutoTasksUnread').replace('{count}', String(autoUnreadCount))
+            : i18nService.t('coworkAutoTasksCount').replace('{count}', String(sortedAutoSessions.length)))}
           className={`flex w-full items-center gap-1.5 px-2.5 pb-1 pt-2.5 text-left transition-colors hover:text-claude-text dark:hover:text-claude-darkText ${groupHeaderLabelClass}`}
         >
           <ChevronDownIcon
@@ -439,7 +447,9 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
           />
           <FolderIcon className="h-3.5 w-3.5 flex-shrink-0" />
           <span className="truncate">{i18nService.t('coworkAutoTasks')}</span>
-          <span className="flex-shrink-0 font-normal tabular-nums">{sortedAutoSessions.length}</span>
+          {autoUnreadCount > 0 && (
+            <span className="flex-shrink-0 font-medium tabular-nums text-red-500">{autoUnreadCount}</span>
+          )}
           {autoLatestActivityAt > 0 && (
             <span className="ml-auto flex-shrink-0 font-normal tabular-nums" title={formatRelativeTime(autoLatestActivityAt).full}>
               {formatRelativeTime(autoLatestActivityAt).compact}
