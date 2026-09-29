@@ -150,7 +150,7 @@ export function buildScheduledTaskAgentTools(deps: {
 
   const createScheduledTask = tool(
     'create_scheduled_task',
-    'Create one scheduled task for THIS bot — a prompt the bot executes later, unattended, as a FULL work session (coding tools, skills, publishing — all available there, unlike this surf session). Hand off work you decided to undertake but cannot do here. The prompt must be fully self-contained: what to do, the source pinId/thread, and the exact delivery step. Prefer scheduleType "at" (one-time). By default the task opens a NEW session; pass sessionId "current" when the follow-up belongs in THIS conversation (e.g. verifying a release, build or deploy you set up here).',
+    'Create one scheduled task for THIS bot — a prompt the bot executes later, unattended, as a FULL work session (coding tools, skills, publishing — all available there, unlike this surf session). Hand off work you decided to undertake but cannot do here. The prompt must be fully self-contained: what to do, the source pinId/thread, and the exact delivery step. Prefer scheduleType "at" (one-time). One-shot tasks (scheduleType "at") run in THIS conversation by default; recurring tasks run in a new session each time. Pass sessionId to override.',
     {
       name: z.string().min(1).describe(`Short task name, at most ${MAX_TASK_NAME_CHARS} chars`),
       prompt: z.string().min(1).describe(`Self-contained runtime instructions for the future work session, at most ${MAX_TASK_PROMPT_CHARS} chars: what to do, source pinIds/threads, delivery step`),
@@ -159,7 +159,7 @@ export function buildScheduledTaskAgentTools(deps: {
       intervalValue: z.number().optional().describe('For scheduleType "interval": positive integer count'),
       intervalUnit: z.enum(['minutes', 'hours', 'days']).optional().describe('For scheduleType "interval": the unit'),
       cron: z.string().optional().describe('For scheduleType "cron": 5-field cron expression in local time'),
-      sessionId: z.string().optional().describe("Which chat session the task runs in. Pass 'current' to run in THIS conversation (recommended when the task follows up on work happening here), or a session UUID to run in that session. Omit to run in a new session each time. If the session is missing or archived at run time, the task runs in a new session instead."),
+      sessionId: z.union([z.string(), z.null()]).optional().describe("Which chat session the task runs in. Pass 'current' to run in THIS conversation, or a session UUID to run in that session. Omit to use the default: this conversation for one-shot 'at' tasks, a new session for recurring tasks. Pass null to deliberately run a one-shot task in a new session (opt out of the default). If the session is missing or archived at run time, the task runs in a new session instead."),
     },
     async (args: {
       name?: string;
@@ -169,7 +169,7 @@ export function buildScheduledTaskAgentTools(deps: {
       intervalValue?: number;
       intervalUnit?: 'minutes' | 'hours' | 'days';
       cron?: string;
-      sessionId?: string;
+      sessionId?: string | null;
     }) => {
       try {
         if (surfState) {
@@ -207,11 +207,26 @@ export function buildScheduledTaskAgentTools(deps: {
           cron: args.cron,
         });
         // `sessionId: "current"` resolves HERE, against the surf session this
-        // run belongs to — the literal must never reach the host/store.
-        const requestedSessionId = args.sessionId?.trim();
-        const targetSessionId = requestedSessionId
-          ? (requestedSessionId === 'current' ? sessionId : requestedSessionId)
-          : undefined;
+        // run belongs to — the literal must never reach the host/store. An
+        // explicit null is the deliberate opt-out: it is forwarded as null so
+        // the one-shot default below cannot claim it (the store maps a null
+        // binding to "no binding" on create).
+        let targetSessionId: string | null | undefined;
+        if (args.sessionId === null) {
+          targetSessionId = null;
+        } else {
+          const requestedSessionId = args.sessionId?.trim();
+          targetSessionId = requestedSessionId
+            ? (requestedSessionId === 'current' ? sessionId : requestedSessionId)
+            : undefined;
+          // Default: a one-shot task created inside a session belongs to that
+          // session (the follow-up continues this conversation). Recurring
+          // tasks keep the fresh-session-per-run default so they cannot bloat
+          // one context with every repeat.
+          if (targetSessionId === undefined && scheduleType === 'at') {
+            targetSessionId = sessionId;
+          }
+        }
         const created = control.createTask({
           metabotId,
           name,

@@ -11,7 +11,8 @@
 #                 from IDBOTS_COWORK_SESSION_ID)
 #   "<uuid>"   -> runs in that session
 #   null or "" -> CLEARS an existing binding (task runs in a new session again)
-#   omitted    -> keeps the current binding
+#   omitted    -> keeps the current binding (no defaulting here — only
+#                 create-task.sh defaults one-shot "at" tasks to the current session)
 #   If the bound session is missing or archived at run time, the task runs in a
 #   new session instead. The API response may add a "sessionWarning" field when
 #   the sessionId does not resolve to a usable session.

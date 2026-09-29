@@ -161,23 +161,55 @@ test('sessionId "current" resolves to the surf session the tool runs in', async 
   assert.equal(calls[0].targetSessionId, SESSION_ID);
 });
 
-test('an explicit sessionId UUID passes through to the host payload', async () => {
+test('an omitted sessionId on a one-shot "at" task defaults to the surf session', async () => {
   const { calls, byName } = makeHarness();
-  const result = await byName.create_scheduled_task.handler(validArgs({ sessionId: '  session-uuid-9  ' }));
-  assert.equal(result.isError, undefined);
+  await byName.create_scheduled_task.handler(validArgs());
+  assert.equal(calls[0].targetSessionId, SESSION_ID);
+  // A blank value is treated the same as omitted.
+  await byName.create_scheduled_task.handler(validArgs({ sessionId: '   ' }));
+  assert.equal(calls[1].targetSessionId, SESSION_ID);
+});
+
+test('an omitted sessionId on a recurring task stays unbound (fresh session each run)', async () => {
+  const { calls, byName } = makeHarness();
+  await byName.create_scheduled_task.handler(
+    validArgs({ scheduleType: 'interval', at: undefined, intervalValue: 2, intervalUnit: 'hours' }),
+  );
+  assert.equal(calls[0].targetSessionId, undefined);
+  await byName.create_scheduled_task.handler(validArgs({ scheduleType: 'cron', at: undefined, cron: '0 9 * * *' }));
+  assert.equal(calls[1].targetSessionId, undefined);
+});
+
+test('an explicit sessionId always wins over the one-shot default', async () => {
+  const { calls, byName } = makeHarness();
+  await byName.create_scheduled_task.handler(validArgs({ sessionId: '  session-uuid-9  ' }));
   assert.equal(calls[0].targetSessionId, 'session-uuid-9');
 });
 
-test('an omitted or blank sessionId leaves the host payload unbound', async () => {
+test('an explicit null opts a one-shot "at" task out of the default', async () => {
   const { calls, byName } = makeHarness();
-  await byName.create_scheduled_task.handler(validArgs());
-  assert.equal(calls[0].targetSessionId, undefined);
-  await byName.create_scheduled_task.handler(validArgs({ sessionId: '   ' }));
-  assert.equal(calls[1].targetSessionId, undefined);
+  const result = await byName.create_scheduled_task.handler(validArgs({ sessionId: null }));
+  assert.equal(result.isError, undefined);
+  // null must reach the host as null (no binding) — never the closure session.
+  assert.equal(calls[0].targetSessionId, null);
+  assert.notEqual(calls[0].targetSessionId, SESSION_ID);
+});
+
+test('an explicit null on a recurring task is forwarded as null too', async () => {
+  const { calls, byName } = makeHarness();
+  await byName.create_scheduled_task.handler(
+    validArgs({ scheduleType: 'cron', at: undefined, cron: '0 9 * * *', sessionId: null }),
+  );
+  assert.equal(calls[0].targetSessionId, null);
 });
 
 test('the sessionId param is advertised on the tool schema', () => {
   const { byName } = makeHarness();
   assert.ok(byName.create_scheduled_task.schema.sessionId, 'sessionId must be part of the tool schema');
-  assert.match(byName.create_scheduled_task.description, /sessionId "current"/);
+  assert.match(byName.create_scheduled_task.description, /One-shot tasks \(scheduleType "at"\) run in THIS conversation by default/);
+  // The opt-out is documented on the param itself.
+  assert.match(
+    byName.create_scheduled_task.schema.sessionId.description,
+    /Pass null to deliberately run a one-shot task in a new session \(opt out of the default\)/,
+  );
 });
