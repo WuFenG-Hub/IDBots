@@ -26,7 +26,7 @@ import type {
 } from '../types/cowork';
 import type { GroupTaskSummary } from '../types/groupTask';
 import { groupTaskService } from '../services/groupTaskService';
-import { formatContextWindowSize, NEW_MODEL_DEFAULT_CONTEXT_WINDOW, NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS, parseContextWindowSizeInput } from '../utils/contextWindowSize';
+import { effectiveMaxOutputForWindow, formatContextWindowSize, NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS, parseContextWindowSizeInput } from '../utils/contextWindowSize';
 import { groupTaskStatusBadgeClass } from './groupTasks/groupTaskUtils';
 import { groupTaskStatusLabelKey } from './groupTasks/GroupTasksView';
 import IMSettings from './im/IMSettings';
@@ -471,6 +471,21 @@ const generateCustomProviderKey = (name: string, existingKeys: string[]): string
     suffix += 1;
   }
   return candidate;
+};
+
+/**
+ * Hint under the context-window field: when the entered window is small
+ * enough that the resolution-time clamp (main: clampCoworkMaxOutputTokens)
+ * would pull the output ceiling below the new-model 128K pin, tell the user
+ * the effective cap instead of letting them discover it via overflow
+ * failures. Returns null when nothing would change.
+ */
+const contextWindowClampHint = (raw: string): string | null => {
+  const parsed = parseContextWindowSizeInput(raw);
+  if (parsed === undefined || parsed === null) return null;
+  const effective = effectiveMaxOutputForWindow(parsed);
+  if (effective >= NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS) return null;
+  return i18nService.t('contextWindowOutputClampHint').replace('{value}', formatContextWindowSize(effective));
 };
 
 const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNewProjectForm }) => {
@@ -1408,9 +1423,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setEditingModelId(null);
     setNewModelName('');
     setNewModelId('');
-    // New models start from the 1M default (visible and editable); clearing
-    // the field still falls back to the known-model catalog at resolution.
-    setNewModelContextWindow(formatContextWindowSize(NEW_MODEL_DEFAULT_CONTEXT_WINDOW));
+    // The context-window field starts EMPTY: prefilling 1M silently stored a
+    // wrong window for every small model added without edits, which pushed the
+    // kernel's auto-compaction threshold far past the provider's real limit
+    // (2026-09-30 space-bunny-free incident). Empty persists nothing, and
+    // resolution falls back to the known-model catalog, then a safe 128K.
+    setNewModelContextWindow('');
     setNewModelSupportsImage(false);
     setModelFormError(null);
   };
@@ -1475,10 +1493,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
       id: modelId,
       name: modelName,
       supportsImage: newModelSupportsImage,
-      // A new model pins a 32K output ceiling so an uncatalogued id matches
+      // A new model pins a 128K output ceiling so an uncatalogued id matches
       // the main-process default (thinking-heavy models used to burn the old
-      // 8192 fallback on reasoning alone — the cw-86812c4f stall). Edits keep
-      // whatever the entry already stored via the spread above.
+      // 8192 fallback on reasoning alone — the cw-86812c4f stall); resolution
+      // clamps it against the stored window. Edits keep whatever the entry
+      // already stored via the spread above.
       ...(!isEditingModel && { maxOutputTokens: NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS }),
       // Empty input clears an explicitly stored window (JSON drops the
       // undefined key) so resolution falls back to the known-model catalog.
@@ -1538,8 +1557,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setCustomProviderModels([]);
     setCustomModelName('');
     setCustomModelId('');
-    // Same new-model default as the add-model form (1M, editable).
-    setCustomModelContextWindow(formatContextWindowSize(NEW_MODEL_DEFAULT_CONTEXT_WINDOW));
+    // Same as the add-model form: the window field starts empty so no wrong
+    // default gets persisted; resolution falls back to the catalog / 128K.
+    setCustomModelContextWindow('');
     setCustomProviderError(null);
     setIsAddingCustomProvider(true);
   };
@@ -1571,8 +1591,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         id: modelId,
         name: modelName,
         supportsImage: false,
-        // Same rationale as the add-model form: draft entries pin the 32K
-        // output ceiling so they match the main-process default.
+        // Same rationale as the add-model form: draft entries pin the 128K
+        // output ceiling so they match the main-process default (clamped
+        // against the window at resolution).
         maxOutputTokens: NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS,
         // Omitted when left empty so resolution keeps the known-model catalog
         // / 128K default instead of pinning an explicit value.
@@ -1581,7 +1602,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     ]);
     setCustomModelName('');
     setCustomModelId('');
-    setCustomModelContextWindow(formatContextWindowSize(NEW_MODEL_DEFAULT_CONTEXT_WINDOW));
+    setCustomModelContextWindow('');
     setCustomProviderError(null);
   };
 
@@ -3563,6 +3584,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                     <p className="mt-1 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
                       {i18nService.t('contextWindowSizeHint')}
                     </p>
+                    {contextWindowClampHint(newModelContextWindow) && (
+                      <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">
+                        {contextWindowClampHint(newModelContextWindow)}
+                      </p>
+                    )}
                   </div>
                   <div className="flex items-center space-x-2">
                     <input
@@ -3766,6 +3792,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                       <p className="mt-1 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
                         {i18nService.t('contextWindowSizeHint')}
                       </p>
+                      {contextWindowClampHint(customModelContextWindow) && (
+                        <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">
+                          {contextWindowClampHint(customModelContextWindow)}
+                        </p>
+                      )}
                     </div>
                     <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
                       {customProviderModels.map(model => (

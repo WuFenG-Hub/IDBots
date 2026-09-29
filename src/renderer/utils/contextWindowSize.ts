@@ -9,17 +9,31 @@
 /** Sanity ceiling for a user-entered window (100M tokens is never real). */
 export const CONTEXT_WINDOW_INPUT_MAX = 100_000_000;
 
-/** Window prefilled when the add-model / custom-provider forms open. */
-export const NEW_MODEL_DEFAULT_CONTEXT_WINDOW = 1_000_000;
-
 /**
  * Output ceiling pinned onto every newly created model entry, matching the
  * main-process default for uncatalogued ids (128K — mainstream models cap
  * output far above the old 32K, and thinking shares the budget). The ceiling
  * only caps generation and costs nothing for short replies since billing is
- * by actual tokens used.
+ * by actual tokens used. Note the RESOLVED ceiling is additionally clamped
+ * against the context window in the main process — see
+ * effectiveMaxOutputForWindow below.
  */
 export const NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS = 128_000;
+
+/**
+ * Renderer mirror of the main-process output-ceiling clamp
+ * (src/main/libs/coworkModelLimits.ts — clampCoworkMaxOutputTokens; keep the
+ * ratio/floor in sync). The kernel's proactive compaction budget is
+ * window - reservedOutput - headroom, so the resolved output ceiling never
+ * exceeds ~32% of the window. The model form surfaces this so a user typing
+ * a small window understands why the effective output cap is lower than the
+ * pinned 128K.
+ */
+export function effectiveMaxOutputForWindow(contextWindow: number, configuredMaxOutput: number = NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS): number {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return configuredMaxOutput;
+  const windowCap = Math.max(8_192, Math.floor(contextWindow * 0.32));
+  return Math.min(configuredMaxOutput, windowCap);
+}
 
 /**
  * Parse the raw input into a token count.
