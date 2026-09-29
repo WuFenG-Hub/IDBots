@@ -177,7 +177,18 @@ export class MetaTaskProjectionStore {
              height = excluded.height,
              tx_index = excluded.tx_index,
              timestamp_ms = excluded.timestamp_ms,
-             content_json = excluded.content_json,
+             -- Anti-downgrade: a degraded (empty {}) inline body must never
+             -- overwrite a good cached one. The indexer truncates list-row
+             -- summaries, so a later sweep that failed to recover the full
+             -- content would otherwise poison the cache permanently. Every
+             -- other column still refreshes.
+             content_json = CASE
+               WHEN excluded.content_json = '{}'
+                 AND metatask_events.content_json IS NOT NULL
+                 AND metatask_events.content_json NOT IN ('{}', '')
+                 THEN metatask_events.content_json
+               ELSE excluded.content_json
+             END,
              collected_at = excluded.collected_at`,
           [
             event.pinId,
