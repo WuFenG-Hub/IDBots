@@ -2078,8 +2078,9 @@ export class SqliteStore {
 
       if (!columns.includes('auto_origin')) {
         // Origin marker for auto-created sessions: the renderer folds rows with
-        // a non-NULL value into the collapsed "Auto Tasks" sidebar section
-        // instead of the regular conversation list. NULL = human-initiated.
+        // a non-NULL value into the collapsed "Delegated Tasks" (委派任务)
+        // sidebar section instead of the regular conversation list. NULL =
+        // human-initiated.
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN auto_origin TEXT;');
 
         // One-shot backfill for sessions created before the column existed. The

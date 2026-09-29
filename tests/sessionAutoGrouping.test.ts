@@ -1,4 +1,4 @@
-// Auto Tasks folding for the sidebar's local-chats list.
+// Delegated Tasks folding for the sidebar's local-chats list.
 //
 // Main stamps `auto_origin` on sessions the app created on its own (long-term
 // task runs, orchestration/delegation runs, scheduled-task runs); the summary
@@ -20,8 +20,8 @@ import {
   isAutoCreatedSession,
   parseAutoTasksExpandedPreference,
   serializeAutoTasksExpandedPreference,
-  shouldFoldIntoAutoTasks,
-  splitSessionsByAutoOrigin,
+  shouldFoldIntoDelegatedTasks,
+  splitSessionsByDelegatedFold,
 } from '../src/renderer/utils/sessionAutoGrouping';
 import type { CoworkSessionSummary } from '../src/renderer/types/cowork';
 
@@ -48,10 +48,10 @@ test('a session is auto-created when it carries a real origin marker, but only l
   assert.equal(isAutoCreatedSession(mkSession('orchestration', 'orchestration')), true);
   assert.equal(isAutoCreatedSession(mkSession('schedule', 'schedule')), true, 'the creation fact is still recorded');
 
-  assert.equal(shouldFoldIntoAutoTasks(mkSession('human')), false);
-  assert.equal(shouldFoldIntoAutoTasks(mkSession('longterm', 'longterm')), true);
-  assert.equal(shouldFoldIntoAutoTasks(mkSession('orchestration', 'orchestration')), true);
-  assert.equal(shouldFoldIntoAutoTasks(mkSession('schedule', 'schedule')), false,
+  assert.equal(shouldFoldIntoDelegatedTasks(mkSession('human')), false);
+  assert.equal(shouldFoldIntoDelegatedTasks(mkSession('longterm', 'longterm')), true);
+  assert.equal(shouldFoldIntoDelegatedTasks(mkSession('orchestration', 'orchestration')), true);
+  assert.equal(shouldFoldIntoDelegatedTasks(mkSession('schedule', 'schedule')), false,
     'scheduled-task runs stay in the main list — they are the user\'s own automations');
 });
 
@@ -65,7 +65,7 @@ test('split keeps main-list and folded halves in input order', () => {
   ];
   const snapshot = sessions.map((session) => session.id);
 
-  const { humanSessions, autoSessions } = splitSessionsByAutoOrigin(sessions);
+  const { humanSessions, autoSessions } = splitSessionsByDelegatedFold(sessions);
 
   assert.deepEqual(humanSessions.map((session) => session.id), ['human-1', 'human-2', 'human-3'],
     'scheduled runs ride the main list, in place');
@@ -74,13 +74,13 @@ test('split keeps main-list and folded halves in input order', () => {
 });
 
 test('split handles an empty list and a list with one half missing', () => {
-  assert.deepEqual(splitSessionsByAutoOrigin([]), { humanSessions: [], autoSessions: [] });
+  assert.deepEqual(splitSessionsByDelegatedFold([]), { humanSessions: [], autoSessions: [] });
 
-  const onlyHuman = splitSessionsByAutoOrigin([mkSession('human-1'), mkSession('human-2')]);
+  const onlyHuman = splitSessionsByDelegatedFold([mkSession('human-1'), mkSession('human-2')]);
   assert.equal(onlyHuman.autoSessions.length, 0);
   assert.equal(onlyHuman.humanSessions.length, 2);
 
-  const onlyAuto = splitSessionsByAutoOrigin([mkSession('auto-1', 'longterm')]);
+  const onlyAuto = splitSessionsByDelegatedFold([mkSession('auto-1', 'longterm')]);
   assert.equal(onlyAuto.humanSessions.length, 0);
   assert.equal(onlyAuto.autoSessions.length, 1);
 });
@@ -101,7 +101,7 @@ test('sidebar feeds the list with the split halves and keeps search over every s
   // The visible local list gets the human half; the auto half rides alongside.
   assert.match(src, /sessions=\{localListSessions\}/);
   assert.match(src, /autoSessions=\{taskRecordTab === 'local' \? localAutoSessions : undefined\}/);
-  assert.match(src, /splitSessionsByAutoOrigin\(sessionGroups\.local\)/);
+  assert.match(src, /splitSessionsByDelegatedFold\(sessionGroups\.local\)/);
   // The local tab's count + red unread dot ignore the folded rows — the fold
   // carries its own red dot + unread count on its header row.
   assert.match(src, /local: \{ count: localHumanSessions\.length, unread: unreadOf\(localHumanSessions\) \}/);
@@ -109,10 +109,10 @@ test('sidebar feeds the list with the split halves and keeps search over every s
   assert.match(src, /<CoworkSearchModal[\s\S]*?sessions=\{homeSessions\}/);
 });
 
-test('the list renders one Auto Tasks fold, collapsed by default, directly under the pinned block in every view mode', () => {
+test('the list renders one Delegated Tasks fold, collapsed by default, directly under the pinned block in every view mode', () => {
   const src = readSource('src/renderer/components/cowork/CoworkSessionList.tsx');
 
-  assert.match(src, /data-testid="auto-tasks-section"/);
+  assert.match(src, /data-testid="delegated-tasks-section"/);
   assert.match(src, /const \[isAutoTasksExpanded, setIsAutoTasksExpanded\] = useState<boolean>\(loadAutoTasksExpanded\)/);
   assert.match(src, /parseAutoTasksExpandedPreference\(window\.localStorage\.getItem\(AUTO_TASKS_EXPANDED_STORAGE_KEY\)\)/);
   // Timeline, project and flat branches all render the same fold.
@@ -138,7 +138,7 @@ test('the fold header carries label + unread count + latest activity, and no tot
     src.indexOf('{isAutoTasksExpanded && sortedAutoSessions.map(renderItem)}'),
   );
 
-  assert.match(header, /coworkAutoTasks'/);
+  assert.match(header, /coworkDelegatedTasks'/);
   assert.match(header, /formatRelativeTime\(autoLatestActivityAt\)/, 'the newest-activity stamp stays');
   // The header signals unread the way the user asked for it: a red dot at the
   // row's left (same dot the tabs use) plus the fold's unread session count in
@@ -147,7 +147,7 @@ test('the fold header carries label + unread count + latest activity, and no tot
   assert.match(header, /rounded-full bg-red-500/);
   assert.match(header, /\{autoUnreadCount\}/);
   assert.match(header, /text-red-500/);
-  assert.match(header, /coworkAutoTasksUnread/);
+  assert.match(header, /coworkDelegatedTasksUnread/);
   // The total is no longer rendered as a header number (it survives only in
   // the hover tooltip).
   assert.doesNotMatch(header, /<span className="flex-shrink-0 font-normal tabular-nums">\{sortedAutoSessions\.length\}<\/span>/);
@@ -158,6 +158,6 @@ test('the fold header carries label + unread count + latest activity, and no tot
 
   // Both label keys exist once per locale, keeping coverage symmetric.
   const i18n = readSource('src/renderer/services/i18n.ts');
-  assert.equal((i18n.match(/coworkAutoTasksUnread:/g) ?? []).length, 2, 'one per locale');
-  assert.equal((i18n.match(/coworkAutoTasksCount:/g) ?? []).length, 2, 'still one per locale');
+  assert.equal((i18n.match(/coworkDelegatedTasksUnread:/g) ?? []).length, 2, 'one per locale');
+  assert.equal((i18n.match(/coworkDelegatedTasksCount:/g) ?? []).length, 2, 'still one per locale');
 });

@@ -826,9 +826,9 @@ export interface CoworkSession {
   hiddenFromSessionList?: boolean;
   /**
    * Auto-origin marker for sessions the app created on its own (long-term task
-   * runs, orchestration/delegation runs, scheduled-task runs). The renderer
-   * folds these into a collapsed "Auto Tasks" section. null/undefined =
-   * human-initiated.
+   * runs, orchestration/delegation runs, scheduled-task runs). Long-term and
+   * orchestration rows fold into the sidebar's collapsed "Delegated Tasks"
+   * section (see sessionAutoGrouping). null/undefined = human-initiated.
    */
   autoOrigin?: CoworkSessionAutoOrigin | null;
   /** Local MetaBot's display name (populated from metabots table) */

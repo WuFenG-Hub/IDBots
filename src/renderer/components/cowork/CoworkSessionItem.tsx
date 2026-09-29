@@ -79,7 +79,7 @@ const PushPinIcon: React.FC<React.SVGProps<SVGSVGElement> & { slashed?: boolean 
 
 /**
  * Compact ("5m") + full ("5 minutes ago") relative-time pair for a session row.
- * Exported so list-level chrome (the Auto Tasks fold header) can stamp the same
+ * Exported so list-level chrome (the Delegated Tasks fold header) can stamp the same
  * newest-activity time the rows themselves show.
  *
  * `nowMs` lets the caller pass one shared clock (the list ticks it once a

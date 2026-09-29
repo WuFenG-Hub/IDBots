@@ -33,7 +33,7 @@ import type {
   SessionSortMode,
   SessionViewMode,
 } from '../utils/sessionViewGrouping';
-import { splitSessionsByAutoOrigin } from '../utils/sessionAutoGrouping';
+import { splitSessionsByDelegatedFold } from '../utils/sessionAutoGrouping';
 import { useStableCallback } from '../utils/useStableCallback';
 import { selectTrackedTasksNeedingAttention } from '../utils/trackedTaskAttention';
 import type { SettingsOpenOptions } from './Settings';
@@ -214,12 +214,12 @@ const Sidebar: React.FC<SidebarProps> = ({
   }, [homeSessions]);
   // The local tab's list is split in two: the human's own conversations stay in
   // the main list, while long-term task runs and orchestration delegations
-  // (shouldFoldIntoAutoTasks) fold into the collapsed "Auto Tasks" section under
-  // the pinned block. Scheduled-task runs stay in the main list on purpose —
-  // they are the user's own automations. Search still sees every session,
-  // folded or not.
+  // (shouldFoldIntoDelegatedTasks) fold into the collapsed "Delegated Tasks"
+  // section under the pinned block. Scheduled-task runs stay in the main list on
+  // purpose — they are the user's own automations. Search still sees every
+  // session, folded or not.
   const { humanSessions: localHumanSessions, autoSessions: localAutoSessions } = useMemo(
-    () => splitSessionsByAutoOrigin(sessionGroups.local),
+    () => splitSessionsByDelegatedFold(sessionGroups.local),
     [sessionGroups.local],
   );
   const localListSessions = taskRecordTab === 'local' ? localHumanSessions : sessionGroups[taskRecordTab];

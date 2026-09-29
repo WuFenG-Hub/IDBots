@@ -50,7 +50,7 @@ interface CoworkSessionListProps {
    * Auto-folded sessions (long-term task runs, orchestration/delegation runs)
    * for the local-chats list — scheduled-task runs are NOT folded, they stay in
    * the main list. Folded rows are NEVER mixed into the main list: they render
-   * as one collapsed "Auto Tasks" folder directly under the pinned
+   * as one collapsed "Delegated Tasks" folder directly under the pinned
    * section and above the content groups, independent of the view mode — tucked
    * out of the human conversations, but visible at a glance instead of buried
    * at the bottom. Only the local tab passes this; every other caller leaves
@@ -157,7 +157,7 @@ const useStableSessionSummaries = (
   }, [sessions, autoSessions]);
 };
 
-/** Remembered open/closed state of the Auto Tasks fold, read once on mount. */
+/** Remembered open/closed state of the Delegated Tasks fold, read once on mount. */
 const loadAutoTasksExpanded = (): boolean => {
   try {
     return parseAutoTasksExpandedPreference(window.localStorage.getItem(AUTO_TASKS_EXPANDED_STORAGE_KEY));
@@ -219,8 +219,9 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   // Project-group collapse state lives here (not in the parent) so the search
   // modal and A2A tab, which render flat, never see it. Defaults to expanded.
   const [collapsedGroupKeys, setCollapsedGroupKeys] = useState<Set<string>>(new Set);
-  // The Auto Tasks fold, unlike the project groups, remembers its state across
-  // restarts: it holds background runs, so it opens collapsed every launch.
+  // The Delegated Tasks fold, unlike the project groups, remembers its state
+  // across restarts: it holds background runs, so it opens collapsed every
+  // launch.
   const [isAutoTasksExpanded, setIsAutoTasksExpanded] = useState<boolean>(loadAutoTasksExpanded);
   const toggleAutoTasksExpanded = () => {
     setIsAutoTasksExpanded((prev) => {
@@ -337,10 +338,10 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     [visibleSessions, viewMode, sortMode],
   );
 
-  // The Auto Tasks fold: machine-started runs, ordered like the main list
+  // The Delegated Tasks fold: machine-started runs, ordered like the main list
   // (pinned first, then the active sort mode) inside ONE flat section that
   // always sits directly under the pinned block, whatever the view mode. A pin
-  // keeps its place inside the fold — it never rescues a background run back
+  // keeps its place inside the fold — it never rescues a delegated run back
   // into the human list.
   const sortedAutoSessions = useMemo(() => {
     const list = autoSessions ?? [];
@@ -419,8 +420,8 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     );
 
   /**
-   * The Auto Tasks fold. Rendered in every view mode directly under the pinned
-   * block (above the timeline/project groups, where it is seen without
+   * The Delegated Tasks fold. Rendered in every view mode directly under the
+   * pinned block (above the timeline/project groups, where it is seen without
    * scrolling), and only when there is something to fold — an empty folder
    * would be noise of its own. The header is styled like the project groups'
    * folder header (subdued secondary text + folder glyph) so it reads as a
@@ -433,14 +434,14 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
    */
   const renderAutoTasksSection = () =>
     revealBudgetLeft() && sortedAutoSessions.length > 0 && (
-      <section data-testid="auto-tasks-section">
+      <section data-testid="delegated-tasks-section">
         <button
           type="button"
           aria-expanded={isAutoTasksExpanded}
           onClick={toggleAutoTasksExpanded}
           title={(autoUnreadCount > 0
-            ? i18nService.t('coworkAutoTasksUnread').replace('{count}', String(autoUnreadCount))
-            : i18nService.t('coworkAutoTasksCount').replace('{count}', String(sortedAutoSessions.length)))}
+            ? i18nService.t('coworkDelegatedTasksUnread').replace('{count}', String(autoUnreadCount))
+            : i18nService.t('coworkDelegatedTasksCount').replace('{count}', String(sortedAutoSessions.length)))}
           className={`flex w-full items-center gap-1.5 px-2.5 pb-1 pt-2.5 text-left transition-colors hover:text-claude-text dark:hover:text-claude-darkText ${groupHeaderLabelClass}`}
         >
           {autoUnreadCount > 0 && (
@@ -450,7 +451,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
             className={`h-3 w-3 flex-shrink-0 transition-transform duration-150 ${isAutoTasksExpanded ? '' : '-rotate-90'}`}
           />
           <FolderIcon className="h-3.5 w-3.5 flex-shrink-0" />
-          <span className="truncate">{i18nService.t('coworkAutoTasks')}</span>
+          <span className="truncate">{i18nService.t('coworkDelegatedTasks')}</span>
           {autoUnreadCount > 0 && (
             <span className="flex-shrink-0 font-medium tabular-nums text-red-500">{autoUnreadCount}</span>
           )}

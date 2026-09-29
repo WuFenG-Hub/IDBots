@@ -836,7 +836,8 @@ export interface CoworkSessionSummary {
   /**
    * Set when the app created this session on its own (long-term task run,
    * orchestration/delegation run, scheduled-task run); null/undefined =
-   * human-initiated. The sidebar folds non-null rows into "Auto Tasks".
+   * human-initiated. Long-term and orchestration rows fold into the sidebar's
+   * "Delegated Tasks" folder unless the row carries a manual foldOverride.
    */
   autoOrigin?: CoworkSessionAutoOrigin | null;
 }
