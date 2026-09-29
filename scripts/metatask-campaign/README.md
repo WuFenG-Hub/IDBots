@@ -1,9 +1,9 @@
 # MetaTask Campaign — Wave-1 Launch Kit (scripts/metatask-campaign/)
 
-Status: PUBLISH-READY, with two operator actions gated on the launch itself —
-every correspondence artifact pin must be published before the spec that cites
-it, and the four standalone spec pins must exist before their trees, written
-with the built-in `metatask_publish_spec` tool (see "Spec pins"). Owner-approved
+Status: **LAUNCHED 2026-09-29** — all four tasks, eight spec pins, four
+correspondence artifact pins and the four discovery buzzes are on-chain; the
+authoritative pin map lives in `wave1-launch-record.json`. The instructions
+below remain as the procedure reference for future waves. Owner-approved
 2026-09-27 (wave-1 list), with two demotions recorded below (JSP-000307;
 T2-JSP-000288 demoted 2026-09-29 because its verifier cannot be written from
 this repository).

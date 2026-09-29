@@ -193,31 +193,31 @@
         "onPass": "the full trial-division factorization of both members"
       },
       "validation": {
-        "null_tolerance": true,
         "enumeration_closure": {
           "closure": "the complete prime support of n and of n + 1 (every prime p | x is found by trial division up to sqrt(x), so the decision is a function of the full support, never a sample) together with the exact integer square test on both members",
-          "selfcheck": {
-            "n": 12167,
-            "m": 12168,
-            "expected_count": 4,
-            "count_meaning": "distinct primes in the union of the two factorizations {2, 3, 13, 23}, recomputable from the pass payload's factorization field",
-            "expected_verdict": "pass"
-          },
+          "count_meaning": "distinct primes in the union of the two factorizations {2, 3, 13, 23}, recomputable from the pass payload's factorization field",
           "expected_count": 4,
-          "count_meaning": "top-level lift for write-gate reconciliation; per-vector counts remain in selfcheck"
+          "selfcheck": {
+            "count_meaning": "distinct primes in the union of the two factorizations {2, 3, 13, 23}, recomputable from the pass payload's factorization field",
+            "expected_count": 4,
+            "expected_verdict": "pass",
+            "m": 12168,
+            "n": 12167
+          }
         },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）",
+        "null_tolerance": true,
         "proposition_fidelity": {
+          "artifactKey": "correspondence-T1-JSP-000301",
           "artifactPin": "metafile://bee0627b78619f3646190e9440520368390d29222e0b06fdba848dfc3dd951a9i0.json",
           "correspondence": "metafile://bee0627b78619f3646190e9440520368390d29222e0b06fdba848dfc3dd951a9i0.json",
-          "artifactKey": "correspondence-T1-JSP-000301",
           "coverage": [
             "statement",
             "definitions",
             "proof-direction"
           ],
           "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T1-JSP-000301. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (powerful = every prime exponent >= 2, per the record's own note)."
-        },
-        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+        }
       }
     },
     "witness-extraction-301": {
@@ -256,32 +256,32 @@
         "onPass": "primeSupport and expected_count (distinct primes), so replay can reconcile the closure"
       },
       "validation": {
-        "null_tolerance": true,
         "enumeration_closure": {
           "closure": "every prime appearing in the witness's two factorization certificates, with the provenance quote binding the pair back to the cited source text; certificates are checked prime-by-prime (deterministic Miller-Rabin) and every exponent must be >= 2, so a plausible-looking pair without a full support cannot close",
+          "count_meaning": "distinct primes across both certificates = |{2, 3, 13, 23}|; the script prints the same integer as expected_count on the pass payload",
+          "expected_count": 4,
           "selfcheck": {
+            "expected_verdict": "pass",
+            "expected_count": 4,
             "jsp": "JSP-000301",
             "n": 12167,
             "m": 12168,
-            "expected_count": 4,
-            "count_meaning": "distinct primes across both certificates = |{2, 3, 13, 23}|; the script prints the same integer as expected_count on the pass payload",
-            "expected_verdict": "pass"
-          },
-          "expected_count": 4,
-          "count_meaning": "top-level lift for write-gate reconciliation; per-vector counts remain in selfcheck"
+            "count_meaning": "distinct primes across both certificates = |{2, 3, 13, 23}|; the script prints the same integer as expected_count on the pass payload"
+          }
         },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）",
+        "null_tolerance": true,
         "proposition_fidelity": {
+          "artifactKey": "correspondence-T1-JSP-000301",
           "artifactPin": "metafile://bee0627b78619f3646190e9440520368390d29222e0b06fdba848dfc3dd951a9i0.json",
           "correspondence": "metafile://bee0627b78619f3646190e9440520368390d29222e0b06fdba848dfc3dd951a9i0.json",
-          "artifactKey": "correspondence-T1-JSP-000301",
           "coverage": [
             "statement",
             "definitions",
             "proof-direction"
           ],
           "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T1-JSP-000301. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (the provenance quote is checked against the artifact's record quote)."
-        },
-        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+        }
       }
     },
     "semantic-review-301": {
@@ -368,29 +368,28 @@
         "onPass": "coveredItems, expected_count (3) and the reviewer verdict"
       },
       "validation": {
-        "null_tolerance": true,
         "enumeration_closure": {
           "closure": "the three protocol correspondence items (statement, definitions, proof-direction) of the JSP-000870 artifact, each exactly once, including the index-base question that artifact raises",
-          "selfcheck": {
-            "vector": "complete report for the JSP-000870 artifact",
-            "expected_count": 3,
-            "expected_verdict": "pass"
-          },
           "expected_count": 3,
-          "count_meaning": "top-level lift for write-gate reconciliation; per-vector counts remain in selfcheck"
+          "selfcheck": {
+            "expected_count": 3,
+            "expected_verdict": "pass",
+            "vector": "complete report for the JSP-000870 artifact"
+          }
         },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）",
+        "null_tolerance": true,
         "proposition_fidelity": {
+          "artifactKey": "correspondence-T3-JSP-000870",
           "artifactPin": "metafile://028e1432d1059070fc76ceeed018c45429d1263ba5c2f0ad1c5e6e69c8dfb01ci0.json",
           "correspondence": "metafile://028e1432d1059070fc76ceeed018c45429d1263ba5c2f0ad1c5e6e69c8dfb01ci0.json",
-          "artifactKey": "correspondence-T3-JSP-000870",
           "coverage": [
             "statement",
             "definitions",
             "proof-direction"
           ],
           "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T3-JSP-000870. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (index base and irrationality scope are the items to recheck)."
-        },
-        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+        }
       }
     },
     "semantic-review-598": {
@@ -413,29 +412,28 @@
         "onPass": "coveredItems, expected_count (3) and the reviewer verdict"
       },
       "validation": {
-        "null_tolerance": true,
         "enumeration_closure": {
           "closure": "the three protocol correspondence items of the JSP-000598 artifact, each exactly once; the four referencing nodes (base, gpt1, gpt2, review) each file their own report and each must cover all three items",
-          "selfcheck": {
-            "vector": "complete report for the JSP-000598 artifact",
-            "expected_count": 3,
-            "expected_verdict": "pass"
-          },
           "expected_count": 3,
-          "count_meaning": "top-level lift for write-gate reconciliation; per-vector counts remain in selfcheck"
+          "selfcheck": {
+            "expected_count": 3,
+            "expected_verdict": "pass",
+            "vector": "complete report for the JSP-000598 artifact"
+          }
         },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）",
+        "null_tolerance": true,
         "proposition_fidelity": {
+          "artifactKey": "correspondence-T4-JSP-000598",
           "artifactPin": "metafile://278227d8e0c2190de8a40a17d15dde99dc6062bdfc75ec5dd0f7b7ef747e21b9i0.json",
           "correspondence": "metafile://278227d8e0c2190de8a40a17d15dde99dc6062bdfc75ec5dd0f7b7ef747e21b9i0.json",
-          "artifactKey": "correspondence-T4-JSP-000598",
           "coverage": [
             "statement",
             "definitions",
             "proof-direction"
           ],
           "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T4-JSP-000598. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (radical (set) reading of equal prime divisors is the item to recheck)."
-        },
-        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+        }
       }
     },
     "lean-build-870": {
@@ -508,36 +506,36 @@
         "detail": "string; `lake build <target> --warning-as-error=error` outcome"
       },
       "validation": {
-        "null_tolerance": true,
         "enumeration_closure": {
           "closure": "the transitive import closure of the target .lean file inside the pinned repo, compiled by lake with --warning-as-error=error; the verdict is a function of the complete set of compiler errors and sorry/admitted warnings",
+          "count_meaning": "numbers of build-failing declarations (errors + sorry warnings) in each vector",
+          "expected_count": 1,
           "selfcheck": [
             {
-              "vector": "empty lake project, target = `theorem t : True := trivial`",
               "expected_count": 0,
-              "expected_verdict": "pass"
+              "expected_verdict": "pass",
+              "vector": "empty lake project, target = `theorem t : True := trivial`"
             },
             {
-              "vector": "same project with `theorem t : True := by sorry`",
               "expected_count": 1,
-              "expected_verdict": "fail"
+              "expected_verdict": "fail",
+              "vector": "same project with `theorem t : True := by sorry`"
             }
-          ],
-          "count_meaning": "numbers of build-failing declarations (errors + sorry warnings) in each vector",
-          "expected_count": 1
+          ]
         },
+        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）",
+        "null_tolerance": true,
         "proposition_fidelity": {
+          "artifactKey": "correspondence-T4-JSP-000598",
           "artifactPin": "metafile://278227d8e0c2190de8a40a17d15dde99dc6062bdfc75ec5dd0f7b7ef747e21b9i0.json",
           "correspondence": "metafile://278227d8e0c2190de8a40a17d15dde99dc6062bdfc75ec5dd0f7b7ef747e21b9i0.json",
-          "artifactKey": "correspondence-T4-JSP-000598",
           "coverage": [
             "statement",
             "definitions",
             "proof-direction"
           ],
-          "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T4-JSP-000598. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (the theorem statement must use the radical (set) reading of equal prime divisors)."
-        },
-        "note": "Protocol v1.2.1 paths.spec.fields.validation (verbatim): H_ACT2 及以后发布的 spec 必填且三项齐备——null_tolerance（bool：任何分支把 null/缺失输入映射为 verdict=invalid 并在 detail 给出位置，未捕获异常判非合规）；enumeration_closure（object：声明闭包并附至少一个具体自检向量，期望计数须为整数字段供机械对账，如 n=8→28）；proposition_fidelity（object：必须引用独立 correspondence 件（pin://|metafile://）承载逐项对照表——定理陈述／定义／证明方向对齐原始命题；自报布尔判非合规；复核者经 semantic_check 指向该件）"
+          "note": "Independent correspondence artifact: wave1-correspondence-artifacts.json#correspondence-T4-JSP-000598. Publish it first and replace the placeholder with its pin://|metafile:// id in BOTH correspondence and artifactPin. A self-declared boolean is non-compliant (radical (set) reading of equal prime divisors is the item to recheck)."
+        }
       }
     }
   },
@@ -1045,5 +1043,6 @@
       "spec": null,
       "unholdCondition": "T0's triage batches classify them and name a certificate type a spec can check"
     }
-  ]
+  ],
+  "launchRecord": "wave1-launch-record.json"
 }
