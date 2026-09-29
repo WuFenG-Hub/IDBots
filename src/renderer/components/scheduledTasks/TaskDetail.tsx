@@ -42,6 +42,7 @@ interface TaskDetailProps {
 const TaskDetail: React.FC<TaskDetailProps> = ({ task, onRequestDelete }) => {
   const dispatch = useDispatch();
   const runs = useSelector((state: RootState) => state.scheduledTask.runs[task.id] ?? EMPTY_RUNS);
+  const sessions = useSelector((state: RootState) => state.cowork.sessions);
   const [metabots, setMetabots] = useState<Metabot[]>([]);
 
   useEffect(() => {
@@ -63,6 +64,11 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, onRequestDelete }) => {
   const metabotNameById = useMemo(() => {
     return new Map(metabots.map((metabot) => [metabot.id, metabot.name]));
   }, [metabots]);
+
+  const boundSessionTitle = useMemo(() => {
+    if (!task.targetSessionId) return null;
+    return sessions.find((session) => session.id === task.targetSessionId)?.title ?? null;
+  }, [sessions, task.targetSessionId]);
 
   const handleEdit = () => {
     dispatch(setViewMode('edit'));
@@ -169,6 +175,21 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, onRequestDelete }) => {
               {task.metabotId
                 ? metabotNameById.get(task.metabotId) ?? `#${task.metabotId}`
                 : i18nService.t('scheduledTasksNotSet')}
+            </div>
+          </div>
+          <div>
+            <div className={labelClass}>{i18nService.t('scheduledTasksFormSession')}</div>
+            <div className={valueClass}>
+              {task.targetSessionId ? (
+                <>
+                  {boundSessionTitle && <span className="mr-1">{boundSessionTitle}</span>}
+                  <span className="font-mono text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {task.targetSessionId}
+                  </span>
+                </>
+              ) : (
+                i18nService.t('scheduledTasksFormSessionNew')
+              )}
             </div>
           </div>
           <div>

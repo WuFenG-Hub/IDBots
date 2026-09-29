@@ -153,3 +153,31 @@ test('without a surf marker there is no cap bookkeeping (defensive path)', async
   assert.equal(result.isError, undefined);
   assert.doesNotMatch(result.content[0].text, /Tasks remaining/);
 });
+
+test('sessionId "current" resolves to the surf session the tool runs in', async () => {
+  const { calls, byName } = makeHarness();
+  const result = await byName.create_scheduled_task.handler(validArgs({ sessionId: 'current' }));
+  assert.equal(result.isError, undefined);
+  assert.equal(calls[0].targetSessionId, SESSION_ID);
+});
+
+test('an explicit sessionId UUID passes through to the host payload', async () => {
+  const { calls, byName } = makeHarness();
+  const result = await byName.create_scheduled_task.handler(validArgs({ sessionId: '  session-uuid-9  ' }));
+  assert.equal(result.isError, undefined);
+  assert.equal(calls[0].targetSessionId, 'session-uuid-9');
+});
+
+test('an omitted or blank sessionId leaves the host payload unbound', async () => {
+  const { calls, byName } = makeHarness();
+  await byName.create_scheduled_task.handler(validArgs());
+  assert.equal(calls[0].targetSessionId, undefined);
+  await byName.create_scheduled_task.handler(validArgs({ sessionId: '   ' }));
+  assert.equal(calls[1].targetSessionId, undefined);
+});
+
+test('the sessionId param is advertised on the tool schema', () => {
+  const { byName } = makeHarness();
+  assert.ok(byName.create_scheduled_task.schema.sessionId, 'sessionId must be part of the tool schema');
+  assert.match(byName.create_scheduled_task.description, /sessionId "current"/);
+});

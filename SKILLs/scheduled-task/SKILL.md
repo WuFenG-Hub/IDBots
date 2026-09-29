@@ -24,6 +24,7 @@ official: true
 3. **执行频率**（必填）— 一次性、每天、每周、每月或自定义 Cron
 4. **工作目录**（可选）— 默认为当前会话的工作目录
 5. **通知平台**（可选）— 任务完成后发送通知
+6. **会话绑定**（可选）— 在当前会话、指定会话（UUID）中运行，或每次都在新会话中运行（默认）
 
 ### Step 2: 构建 JSON 并执行脚本
 
@@ -56,12 +57,14 @@ official: true
 请先写入 UTF-8 文件，再用 `@文件路径` 传给脚本。
 
 ```bash
+# "sessionId": "current" 表示在「当前会话」中运行；删除该行则每次都在新会话中运行
 cat > /tmp/scheduled-task.json <<'JSON'
 {
   "name": "任务名称",
   "schedule": { "type": "cron", "expression": "0 9 * * *" },
   "prompt": "任务运行时 Claude 将执行的详细指令...",
-  "workingDirectory": "/path/to/project"
+  "workingDirectory": "/path/to/project",
+  "sessionId": "current"
 }
 JSON
 
@@ -76,6 +79,7 @@ bash "$SKILLS_ROOT/scheduled-task/scripts/create-task.sh" @/tmp/scheduled-task.j
 | `prompt` | ✅ | 任务运行时 Claude 收到的指令（应清晰完整） |
 | `schedule` | ✅ | 调度配置（见上方类型说明） |
 | `workingDirectory` | ❌ | 执行目录（默认空） |
+| `sessionId` | ❌ | 任务每次执行所在的会话。`"current"` = 当前所在会话（**推荐**用于承接当前工作的后续动作，例如检查刚设置好的发版、构建或部署）；其他字符串 = 该会话的 UUID；省略 = 每次都在新会话中运行。绑定的会话在运行时已不存在或已归档时，任务会自动退回新会话运行（此时响应中会带上顶层字段 `sessionWarning`）。更新任务时：省略该字段 = 保持原有绑定，传 `null`（或 `""`）= 清除绑定 |
 | `metabotId` | ❌ | 定时会话所属 MetaBot 的数字 id（默认 null = Twin/默认会话身份）。传入后任务将以该 bot 的身份运行：会话归属该 bot，且未显式指定 `workingDirectory` 时自动使用该 bot 的专属工作目录。适合「让某个 Worker bot 每天以本人身份跑自己的活」的场景（如新员工入职首跑、每日简报）。bot id 可通过 metabot_list / My Bots 查看 |
 | `description` | ❌ | 详细描述（默认空） |
 | `systemPrompt` | ❌ | 自定义系统提示词（默认空） |
@@ -111,3 +115,4 @@ bash "$SKILLS_ROOT/scheduled-task/scripts/create-task.sh" @/tmp/scheduled-task.j
 - **自动禁用**：连续失败 5 次的任务会自动禁用
 - **一次性任务**：`type: "at"` 的任务执行后自动禁用
 - **Cowork 会话**：每次执行会创建一个新的 Cowork 会话（标题前缀为「[定时]」），可在 Cowork 列表中查看执行详情
+- **会话绑定**：传入 `sessionId` 时 prompt 会直接注入指定会话，执行记录以普通对话轮次出现在该会话中（而不是新建「[定时]」会话）。绑定的会话在运行时已不存在、已归档，或为 A2A / 沙箱会话时，任务会自动退回新会话运行。

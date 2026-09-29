@@ -461,6 +461,15 @@ function trackRequestHeadStability(
 interface ScheduledTaskDeps {
   getScheduledTaskStore: () => ScheduledTaskStore;
   getScheduler: () => Scheduler;
+  /**
+   * Advisory `sessionId` probe for the HTTP create/update path. The proxy has
+   * no cowork-store handle of its own, so main.ts injects this predicate (same
+   * validity rules the scheduler applies at fire time: exists, not archived,
+   * not A2A, not sandbox). It only drives the non-fatal `sessionWarning` in the
+   * response — an unusable target is never a hard error, the task simply runs
+   * in a fresh session. Absent → warnings are skipped.
+   */
+  isSessionUsableAsTaskTarget?: (sessionId: string) => boolean;
 }
 let scheduledTaskDeps: ScheduledTaskDeps | null = null;
 
@@ -3414,6 +3423,53 @@ async function handleChatCompletionsStreamResponse(
   res.end();
 }
 
+/**
+ * Resolve the caller-supplied `sessionId` for CREATE into a stored
+ * `targetSessionId`. Absent / null / '' mean "no binding" (new session each
+ * run). The literal `"current"` must be resolved by the CALLER — the skill
+ * script from `IDBOTS_COWORK_SESSION_ID`, the agent tool from its session
+ * closure — so an unresolved `"current"` reaching this layer is a caller bug:
+ * warn and drop it rather than storing the literal.
+ */
+function resolveCreateTargetSessionId(raw: unknown): { targetSessionId?: string; warning?: string } {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== 'string') {
+    console.warn(`[CoworkProxy] Ignoring non-string sessionId (${typeof raw}) on scheduled-task create`);
+    return { warning: 'sessionId must be a string, null, or omitted; it was ignored and the task will run in a new session.' };
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+  if (trimmed === 'current') {
+    console.warn(
+      '[CoworkProxy] sessionId "current" reached the scheduled-task API unresolved; treating it as omitted (the task will run in a new session).'
+    );
+    return {
+      warning: 'sessionId "current" was not resolved by the caller; the task will run in a new session. Resolve it before calling the API.',
+    };
+  }
+  return { targetSessionId: trimmed };
+}
+
+/**
+ * Advisory warning for a `targetSessionId` that does not resolve to a usable
+ * session. Non-fatal on purpose: the scheduler falls back to a fresh session at
+ * fire time. Returns null when the binding is fine, absent, or unprobeable
+ * (no predicate wired).
+ */
+function describeUnusableTargetSession(targetSessionId: string): string | null {
+  const probe = scheduledTaskDeps?.isSessionUsableAsTaskTarget;
+  if (!probe) return null;
+  let usable: boolean;
+  try {
+    usable = probe(targetSessionId);
+  } catch (error) {
+    console.warn('[CoworkProxy] Session validity probe failed:', error);
+    return null;
+  }
+  if (usable) return null;
+  return `sessionId ${targetSessionId} does not resolve to a usable chat session (missing, archived, A2A or sandbox); the task will run in a new session instead.`;
+}
+
 async function handleCreateScheduledTask(
   req: http.IncomingMessage,
   res: http.ServerResponse
@@ -3483,6 +3539,9 @@ async function handleCreateScheduledTask(
     }
   }
 
+  // Optional session binding submitted as `sessionId`; stored as targetSessionId.
+  const sessionBinding = resolveCreateTargetSessionId(input.sessionId);
+
   // Build ScheduledTaskInput with defaults
   const taskInput: ScheduledTaskInput = {
     name: input.name.trim(),
@@ -3496,7 +3555,13 @@ async function handleCreateScheduledTask(
     expiresAt: input.expiresAt || null,
     notifyPlatforms: input.notifyPlatforms || [],
     enabled: input.enabled !== false,
+    ...(sessionBinding.targetSessionId ? { targetSessionId: sessionBinding.targetSessionId } : {}),
   };
+
+  const sessionWarning = sessionBinding.warning
+    ?? (sessionBinding.targetSessionId
+      ? describeUnusableTargetSession(sessionBinding.targetSessionId)
+      : null);
 
   try {
     const task = scheduledTaskDeps.getScheduledTaskStore().createTask(taskInput);
@@ -3511,7 +3576,14 @@ async function handleCreateScheduledTask(
     }
 
     console.log(`[CoworkProxy] Scheduled task created via API: ${task.id} "${task.name}"`);
-    writeJSON(res, 201, { success: true, task } as any);
+    if (sessionWarning) {
+      console.warn(`[CoworkProxy] Scheduled task ${task.id} session binding warning: ${sessionWarning}`);
+    }
+    writeJSON(res, 201, {
+      success: true,
+      task,
+      ...(sessionWarning ? { sessionWarning } : {}),
+    } as any);
   } catch (err: any) {
     console.error('[CoworkProxy] Failed to create scheduled task:', err);
     writeJSON(res, 500, { success: false, error: err.message } as any);
@@ -3630,6 +3702,11 @@ function validateScheduledTaskPartialInput(input: Record<string, unknown>): stri
       return 'Expiration date must be in the future';
     }
   }
+  // `sessionId` mirrors `expiresAt` on the nullable axis: absent = keep, null =
+  // clear, string = set. Anything else is a caller bug.
+  if (input.sessionId !== undefined && input.sessionId !== null && typeof input.sessionId !== 'string') {
+    return 'sessionId must be a string, null, or omitted';
+  }
   return null;
 }
 
@@ -3672,6 +3749,32 @@ async function handleUpdateScheduledTask(
   if (Object.prototype.hasOwnProperty.call(normalizedInput, 'metabotId')) {
     normalizedInput.metabotId = normalizeScheduledTaskMetabotId(normalizedInput.metabotId);
   }
+  // `sessionId` is the caller-facing alias of the stored `targetSessionId`
+  // (same nullable pattern as expiresAt): key absent = keep the current
+  // binding; null / '' = clear it; "current" = caller bug → warn and keep;
+  // any other string = bind to that session id.
+  let sessionWarning: string | null = null;
+  if (Object.prototype.hasOwnProperty.call(normalizedInput, 'sessionId')) {
+    const rawSessionId = normalizedInput.sessionId;
+    delete normalizedInput.sessionId;
+    if (rawSessionId === null || (typeof rawSessionId === 'string' && !rawSessionId.trim())) {
+      normalizedInput.targetSessionId = null;
+    } else if (typeof rawSessionId === 'string') {
+      const requested = rawSessionId.trim();
+      if (requested === 'current') {
+        console.warn(
+          '[CoworkProxy] sessionId "current" reached the scheduled-task API unresolved; keeping the existing binding (callers must resolve it first).'
+        );
+        sessionWarning = 'sessionId "current" was not resolved by the caller; the existing session binding was kept.';
+      } else {
+        normalizedInput.targetSessionId = requested;
+        sessionWarning = describeUnusableTargetSession(requested);
+      }
+    } else {
+      console.warn(`[CoworkProxy] Ignoring non-string sessionId (${typeof rawSessionId}) on scheduled-task update`);
+      sessionWarning = 'sessionId must be a string, null, or omitted; it was ignored and the existing session binding was kept.';
+    }
+  }
   try {
     const task = store.updateTask(id, normalizedInput as Partial<ScheduledTaskInput>);
     if (!task) {
@@ -3681,7 +3784,14 @@ async function handleUpdateScheduledTask(
     scheduledTaskDeps.getScheduler().reschedule();
     broadcastScheduledTaskState(task.id, task.state);
     console.log(`[CoworkProxy] Scheduled task updated via API: ${task.id} "${task.name}"`);
-    writeJSON(res, 200, { success: true, task } as any);
+    if (sessionWarning) {
+      console.warn(`[CoworkProxy] Scheduled task ${task.id} session binding warning: ${sessionWarning}`);
+    }
+    writeJSON(res, 200, {
+      success: true,
+      task,
+      ...(sessionWarning ? { sessionWarning } : {}),
+    } as any);
   } catch (err: any) {
     console.error('[CoworkProxy] Failed to update scheduled task:', err);
     writeJSON(res, 500, { success: false, error: err.message } as any);

@@ -39,6 +39,7 @@ export interface ScheduledTask {
   executionMode: 'auto' | 'local' | 'sandbox';
   metabotId: number | null;
   coworkSessionId: string | null;
+  targetSessionId: string | null;
   expiresAt: string | null;
   notifyPlatforms: NotifyPlatform[];
   state: TaskState;
@@ -67,6 +68,7 @@ export interface ScheduledTaskInput {
   systemPrompt: string;
   executionMode: 'auto' | 'local' | 'sandbox';
   metabotId?: number | null;
+  targetSessionId?: string | null;
   expiresAt: string | null;
   notifyPlatforms: NotifyPlatform[];
   enabled: boolean;
@@ -85,6 +87,7 @@ interface TaskRow {
   execution_mode: string;
   metabot_id: number | null;
   cowork_session_id: string | null;
+  target_session_id: string | null;
   expires_at: string | null;
   notify_platforms_json: string;
   next_run_at_ms: number | null;
@@ -110,6 +113,15 @@ interface RunRow {
   trigger_type: string;
 }
 
+/**
+ * A blank/whitespace-only binding means "no binding" — store NULL, never ''.
+ */
+function normalizeTargetSessionId(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 export class ScheduledTaskStore {
   private db: Database;
   private saveDb: () => void;
@@ -118,6 +130,7 @@ export class ScheduledTaskStore {
     this.db = db;
     this.saveDb = saveDb;
     this.ensureTaskSessionColumn();
+    this.ensureTargetSessionColumn();
     this.ensureMigrationColumns();
     this.unmigrateLegacySdkCronTasks();
     this.resetStuckRunningTasks();
@@ -180,6 +193,28 @@ export class ScheduledTaskStore {
       }
     } catch (error) {
       console.warn('Failed to ensure scheduled task cowork session column:', error);
+    }
+  }
+
+  /**
+   * `target_session_id` binds a task to an existing session it injects its
+   * prompt into (as opposed to `cowork_session_id`, the legacy "last run
+   * session" bookkeeping column, which a startup backfill keeps overwriting).
+   * Idempotent: repeated startup never errors.
+   */
+  private ensureTargetSessionColumn(): void {
+    try {
+      if (!this.tableExists('scheduled_tasks')) return;
+
+      const columnsResult = this.db.exec('PRAGMA table_info(scheduled_tasks);');
+      const columns = columnsResult[0]?.values.map((row) => String(row[1])) ?? [];
+
+      if (!columns.includes('target_session_id')) {
+        this.db.run('ALTER TABLE scheduled_tasks ADD COLUMN target_session_id TEXT');
+        this.saveDb();
+      }
+    } catch (error) {
+      console.warn('Failed to ensure scheduled task target session column:', error);
     }
   }
 
@@ -336,9 +371,9 @@ export class ScheduledTaskStore {
     this.db.run(`
       INSERT INTO scheduled_tasks
         (id, name, description, enabled, schedule_json, prompt,
-         working_directory, system_prompt, execution_mode, metabot_id, cowork_session_id, expires_at,
+         working_directory, system_prompt, execution_mode, metabot_id, cowork_session_id, target_session_id, expires_at,
          notify_platforms_json, next_run_at_ms, consecutive_errors, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 0, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, ?, ?)
     `, [
       id, input.name, input.description,
       input.enabled ? 1 : 0,
@@ -346,6 +381,7 @@ export class ScheduledTaskStore {
       input.prompt,
       input.workingDirectory, input.systemPrompt, resolveCoworkExecutionMode(input.executionMode),
       input.metabotId ?? null,
+      normalizeTargetSessionId(input.targetSessionId),
       input.expiresAt ?? null,
       JSON.stringify(input.notifyPlatforms ?? []),
       nextRunAtMs,
@@ -370,7 +406,11 @@ export class ScheduledTaskStore {
     const systemPrompt = input.systemPrompt ?? existing.systemPrompt;
     const executionMode = resolveCoworkExecutionMode(input.executionMode ?? existing.executionMode);
     const metabotId = input.metabotId !== undefined ? input.metabotId : existing.metabotId;
-    const shouldResetCoworkSession = input.metabotId !== undefined && metabotId !== existing.metabotId;
+    // Both session bindings belong to the previous bot: a bot change drops them.
+    const shouldResetSessionBindings = input.metabotId !== undefined && metabotId !== existing.metabotId;
+    const targetSessionId = input.targetSessionId !== undefined
+      ? normalizeTargetSessionId(input.targetSessionId)
+      : existing.targetSessionId;
     const expiresAt = input.expiresAt !== undefined ? input.expiresAt : existing.expiresAt;
     const notifyPlatforms = input.notifyPlatforms !== undefined ? input.notifyPlatforms : existing.notifyPlatforms;
 
@@ -387,7 +427,7 @@ export class ScheduledTaskStore {
       SET name = ?, description = ?, enabled = ?, schedule_json = ?,
           prompt = ?, working_directory = ?, system_prompt = ?,
           execution_mode = ?, metabot_id = ?, expires_at = ?, notify_platforms_json = ?,
-          next_run_at_ms = ?, cowork_session_id = ?, updated_at = ?
+          next_run_at_ms = ?, cowork_session_id = ?, target_session_id = ?, updated_at = ?
       WHERE id = ?
     `, [
       name, description,
@@ -399,7 +439,8 @@ export class ScheduledTaskStore {
       expiresAt,
       JSON.stringify(notifyPlatforms),
       nextRunAtMs,
-      shouldResetCoworkSession ? null : existing.coworkSessionId,
+      shouldResetSessionBindings ? null : existing.coworkSessionId,
+      shouldResetSessionBindings ? null : targetSessionId,
       now, id,
     ]);
 
@@ -687,6 +728,7 @@ export class ScheduledTaskStore {
       executionMode: resolveCoworkExecutionMode(row.execution_mode),
       metabotId: row.metabot_id ?? null,
       coworkSessionId: row.cowork_session_id ?? null,
+      targetSessionId: row.target_session_id ?? null,
       expiresAt: row.expires_at,
       notifyPlatforms,
       state: {

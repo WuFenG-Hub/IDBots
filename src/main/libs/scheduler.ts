@@ -1,10 +1,21 @@
 import { BrowserWindow } from 'electron';
+import { randomUUID } from 'node:crypto';
 import { ScheduledTaskStore, ScheduledTask, ScheduledTaskRun, Schedule, NotifyPlatform } from '../scheduledTaskStore';
 import type { CoworkStore } from '../coworkStore';
 import type { CoworkRunner } from './coworkRunner';
 import { resolveSessionWorkingDirectory } from './botWorkspace';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import type { IMGatewayManager } from '../im/imGatewayManager';
+import type { CoworkSubmitInput, CoworkSubmitInputResult } from '../services/coworkTurnSubmission';
+
+type SubmitToSessionFailure = Extract<CoworkSubmitInputResult, { success: false }>;
+
+/**
+ * Structural view of CoworkSubmitInputResult the scheduler consumes. `success`
+ * is a plain boolean on purpose: electron-tsconfig runs with strictNullChecks
+ * off, where a boolean-literal discriminant does not narrow.
+ */
+type SubmitToSessionResult = { success: boolean; error?: SubmitToSessionFailure['error'] };
 
 interface SchedulerDeps {
   scheduledTaskStore: ScheduledTaskStore;
@@ -14,6 +25,13 @@ interface SchedulerDeps {
   getSkillsPrompt?: () => Promise<string | null>;
   isRecoverableSqliteError?: (error: unknown) => boolean;
   recoverSqlite?: (error: unknown, operationName: string) => void | Promise<void>;
+  /**
+   * Injects a prompt into an existing cowork session (the same seam the
+   * renderer's submit-input IPC uses). Enables scheduled tasks bound to a
+   * session via `targetSessionId` to post their prompt there instead of
+   * spawning a fresh session.
+   */
+  submitToSession?: (input: CoworkSubmitInput) => Promise<SubmitToSessionResult>;
 }
 
 class SchedulerStoppedError extends Error {
@@ -31,6 +49,7 @@ export class Scheduler {
   private getSkillsPrompt: (() => Promise<string | null>) | null;
   private isRecoverableSqliteError: ((error: unknown) => boolean) | null;
   private recoverSqlite: ((error: unknown, operationName: string) => void | Promise<void>) | null;
+  private submitToSession: ((input: CoworkSubmitInput) => Promise<SubmitToSessionResult>) | null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private activeTasks: Map<string, AbortController> = new Map();
@@ -49,6 +68,7 @@ export class Scheduler {
     this.getSkillsPrompt = deps.getSkillsPrompt ?? null;
     this.isRecoverableSqliteError = deps.isRecoverableSqliteError ?? null;
     this.recoverSqlite = deps.recoverSqlite ?? null;
+    this.submitToSession = deps.submitToSession ?? null;
   }
 
   // --- Lifecycle ---
@@ -297,6 +317,15 @@ export class Scheduler {
 
   private async startCoworkSession(task: ScheduledTask, executionGeneration: number): Promise<string> {
     this.assertExecutionCurrent(executionGeneration);
+
+    // A task bound to an existing session posts its prompt there instead of
+    // opening a fresh one. An invalid binding (deleted/archived/A2A/sandbox
+    // session) falls through to the fresh-session path below.
+    if (task.targetSessionId) {
+      const boundSessionId = await this.submitToBoundSession(task, task.targetSessionId, executionGeneration);
+      if (boundSessionId) return boundSessionId;
+    }
+
     const config = this.coworkStore.getConfig();
     // A per-task folder override always wins; otherwise metabot tasks run
     // inside their per-bot dated workspace.
@@ -349,6 +378,63 @@ export class Scheduler {
     this.assertExecutionCurrent(executionGeneration);
 
     return sessionId;
+  }
+
+  /**
+   * Fire-time resolution of a `targetSessionId` binding. Returns the bound
+   * session id once the prompt was accepted there, or null when the target is
+   * not usable at fire time (caller then runs the task in a fresh session).
+   * A failed submit throws so the run is recorded as failed — never fall back
+   * to a fresh session after an attempt, the message may already be persisted.
+   */
+  private async submitToBoundSession(
+    task: ScheduledTask,
+    targetSessionId: string,
+    executionGeneration: number,
+  ): Promise<string | null> {
+    // Defense in depth: without the submit seam we cannot honour the binding.
+    if (!this.submitToSession) {
+      console.log(
+        `[Scheduler] Task ${task.id} is bound to session ${targetSessionId} but no submit handler is wired, using a fresh session`
+      );
+      return null;
+    }
+
+    const targetSession = this.coworkStore.getSessionWithoutMessages(targetSessionId);
+    if (!targetSession) {
+      console.log(`[Scheduler] Task ${task.id} bound session ${targetSessionId} no longer exists, using a fresh session`);
+      return null;
+    }
+    if (this.coworkStore.isSessionArchived(targetSessionId)) {
+      console.log(`[Scheduler] Task ${task.id} bound session ${targetSessionId} is archived, using a fresh session`);
+      return null;
+    }
+    if (targetSession.sessionType === 'a2a') {
+      console.log(`[Scheduler] Task ${task.id} bound session ${targetSessionId} is an A2A session, using a fresh session`);
+      return null;
+    }
+    if (targetSession.executionMode === 'sandbox') {
+      console.log(`[Scheduler] Task ${task.id} bound session ${targetSessionId} runs in a sandbox, using a fresh session`);
+      return null;
+    }
+
+    this.taskSessionIds.set(task.id, targetSessionId);
+    this.assertExecutionCurrent(executionGeneration);
+    const result = await this.submitToSession({
+      sessionId: targetSessionId,
+      submissionId: randomUUID(),
+      text: task.prompt,
+      origin: 'schedule',
+      originLabel: task.name,
+    });
+    this.assertExecutionCurrent(executionGeneration);
+
+    if (!result.success) {
+      throw new Error(result.error ?? `Failed to submit task ${task.id} into session ${targetSessionId}`);
+    }
+
+    console.log(`[Scheduler] Task ${task.id} submitted into bound session ${targetSessionId}`);
+    return targetSessionId;
   }
 
   // --- IM Notifications ---
