@@ -2638,6 +2638,47 @@ export class CoworkRunner extends EventEmitter {
       : 'closing-local';
   }
 
+  /**
+   * Human interjection while a kernel-initiated turn (subagent-finished wake,
+   * scheduled nudge) is running: those turns have no host controller, so the
+   * regular steer paths report 'inactive'. Interrupt at the kernel instead —
+   * abort the in-flight turn so the caller's Continue flow can start the
+   * human input as a regular hosted turn. Returns true when a kernel turn was
+   * actually interrupted.
+   *
+   * The cross-session gate is marked running up front so machine-originated
+   * messages queued during the kernel turn do not drain ahead of the human's
+   * turn; the follow-up continueSession/startSession finally releases the
+   * gate (or releaseKernelTurnInterrupt on failure).
+   */
+  async interruptKernelTurnForHumanInput(sessionId: string): Promise<boolean> {
+    if (this.activeSessions.has(sessionId)) return false;
+    const hub = this.dshTurnHub;
+    if (!hub?.isKernelSessionBusy(sessionId)) return false;
+    this.markCrossSessionTurnRunning(sessionId);
+    try {
+      const interrupted = await hub.cancelKernelTurn(sessionId, 'steer');
+      if (!interrupted) {
+        // The kernel turn ended in the race — nothing to hold the gate for.
+        this.markCrossSessionTurnSettled(sessionId);
+      }
+      return interrupted;
+    } catch (error) {
+      this.markCrossSessionTurnSettled(sessionId);
+      coworkLog('WARN', 'interruptKernelTurnForHumanInput', 'Kernel turn abort failed; continuing without interrupt', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  /** Release the gate held by interruptKernelTurnForHumanInput when the
+   *  follow-up Continue flow failed before startSession could own it. */
+  releaseKernelTurnInterrupt(sessionId: string): void {
+    this.markCrossSessionTurnSettled(sessionId);
+  }
+
   waitForActiveTurnSettlement(sessionId: string): Promise<void> {
     return this.activeSessions.get(sessionId)?.turnSettled ?? Promise.resolve();
   }

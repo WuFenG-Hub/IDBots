@@ -589,3 +589,119 @@ test('kernel-busy target holds queued cross-session continuations until the kern
   assert.equal(runCalls[0].sessionId, target.id);
   assert.equal(runCalls[0].prompt, `来自${source.id} 的信息：<cross_session_message trust="untrusted">orch notify during a kernel turn</cross_session_message>`);
 });
+
+// ---------------------------------------------------------------------------
+// Human interjection during a kernel-initiated turn: the kernel turn has no
+// host controller, so the submission controller interrupts at the kernel
+// (interruptKernelTurnForHumanInput) and holds the cross-session gate until
+// the human's own turn owns it — machine messages queued meanwhile must not
+// jump ahead of the human.
+// ---------------------------------------------------------------------------
+
+test('interruptKernelTurnForHumanInput aborts the kernel turn and holds the drain gate until released', async () => {
+  const { store, runner, runCalls } = createHarness();
+  const source = store.createSession('source-session');
+  const target = store.createSession('target-session');
+  let kernelBusy = true;
+  const cancelCalls = [];
+  runner.dshTurnHub = {
+    isKernelSessionBusy: (sessionId) => sessionId === target.id && kernelBusy,
+    cancelKernelTurn: async (sessionId, cause) => {
+      cancelCalls.push([sessionId, cause]);
+      kernelBusy = false;
+      return true;
+    },
+  };
+
+  const interrupted = await runner.interruptKernelTurnForHumanInput(target.id);
+  assert.equal(interrupted, true);
+  assert.deepEqual(cancelCalls, [[target.id, 'steer']]);
+
+  // A machine-originated message queued now must NOT drain even though the
+  // kernel is already idle — the gate is held for the human's follow-up turn.
+  const result = await runner.handleHostToolExecution({
+    toolName: 'idbots_session_insert_user_message',
+    toolInput: { targetSessionId: target.id, message: 'queued behind the human turn' },
+  }, source.id);
+  assert.equal(result.success, true);
+  assert.equal(parseToolJson(result).runQueued, true);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(runCalls.length, 0);
+
+  // Failure path: the follow-up Continue never started its turn, so the
+  // submission controller releases the gate explicitly and the queued
+  // machine message drains.
+  runner.releaseKernelTurnInterrupt(target.id);
+  await waitFor(() => assert.equal(runCalls.length, 1), 500);
+  assert.equal(runCalls[0].sessionId, target.id);
+  assert.equal(runCalls[0].prompt, `来自${source.id} 的信息：<cross_session_message trust="untrusted">queued behind the human turn</cross_session_message>`);
+});
+
+test('interruptKernelTurnForHumanInput releases the gate immediately when the kernel turn ended in the race', async () => {
+  const { store, runner, runCalls } = createHarness();
+  const source = store.createSession('source-session');
+  const target = store.createSession('target-session');
+  let kernelBusy = true;
+  runner.dshTurnHub = {
+    isKernelSessionBusy: (sessionId) => sessionId === target.id && kernelBusy,
+    // The turn ended between the busy check and the cancel: nothing was
+    // interrupted, nothing to hold the gate for.
+    cancelKernelTurn: async () => {
+      kernelBusy = false;
+      return false;
+    },
+  };
+
+  const interrupted = await runner.interruptKernelTurnForHumanInput(target.id);
+  assert.equal(interrupted, false);
+
+  const result = await runner.handleHostToolExecution({
+    toolName: 'idbots_session_insert_user_message',
+    toolInput: { targetSessionId: target.id, message: 'drains right away' },
+  }, source.id);
+  assert.equal(result.success, true);
+  await waitFor(() => assert.equal(runCalls.length, 1), 500);
+  assert.equal(runCalls[0].sessionId, target.id);
+});
+
+test('interruptKernelTurnForHumanInput swallows a failed abort and releases the gate', async () => {
+  const { store, runner, runCalls } = createHarness();
+  const source = store.createSession('source-session');
+  const target = store.createSession('target-session');
+  let kernelBusy = true;
+  runner.dshTurnHub = {
+    isKernelSessionBusy: (sessionId) => sessionId === target.id && kernelBusy,
+    cancelKernelTurn: async () => {
+      kernelBusy = false;
+      throw new Error('runtime gone');
+    },
+  };
+
+  const interrupted = await runner.interruptKernelTurnForHumanInput(target.id);
+  assert.equal(interrupted, false);
+  assert.equal(runner.isCrossSessionTurnRunning(target.id), false);
+
+  const result = await runner.handleHostToolExecution({
+    toolName: 'idbots_session_insert_user_message',
+    toolInput: { targetSessionId: target.id, message: 'still drains after the failed abort' },
+  }, source.id);
+  assert.equal(result.success, true);
+  await waitFor(() => assert.equal(runCalls.length, 1), 500);
+});
+
+test('interruptKernelTurnForHumanInput is a no-op while a hosted turn is active', async () => {
+  const { store, runner } = createHarness();
+  const target = store.createSession('target-session');
+  runner.activeSessions.set(target.id, makeRetainedActiveSession(target.id, store.cwd));
+  let cancelCalled = false;
+  runner.dshTurnHub = {
+    isKernelSessionBusy: () => true,
+    cancelKernelTurn: async () => {
+      cancelCalled = true;
+      return true;
+    },
+  };
+
+  assert.equal(await runner.interruptKernelTurnForHumanInput(target.id), false);
+  assert.equal(cancelCalled, false);
+});

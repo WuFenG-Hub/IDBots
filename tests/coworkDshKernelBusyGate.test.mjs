@@ -98,3 +98,90 @@ test('coworkRunner wires the kernel-busy gate into the drain and the shared busy
     'a kernel idle edge releases queued cross-session continuations',
   )
 })
+
+test('cancelKernelTurn cancels on the kernel that reports the session busy and arms the convergence latch', async () => {
+  const { DshTurnHub } = loadHub()
+  const hub = new DshTurnHub({ sessionRoot: process.cwd() })
+  hub.pinnedDshIds.set('cowork-1', 'dsh-1')
+  const calls = []
+  const busyKernel = {
+    running: true,
+    isSessionBusy: (id) => id === 'dsh-1',
+    cancel: async (id, cause) => {
+      calls.push([id, cause])
+      return { cancelled: true }
+    },
+  }
+  hub.slots.set('slot-a', {
+    kernel: { running: true, isSessionBusy: () => false },
+    drainingKernels: [busyKernel],
+  })
+
+  const interrupted = await hub.cancelKernelTurn('cowork-1', 'steer')
+  assert.equal(interrupted, true)
+  assert.deepEqual(calls, [['dsh-1', 'steer']])
+  // The abort-convergence latch is armed so the follow-up human turn's
+  // runTurn waits for the aborted turn's end boundary.
+  assert.equal(hub.pendingAbortByDsh.has('dsh-1'), true)
+
+  // The turn-end boundary settles the latch.
+  const handlers = hub.hubHandlers({ key: 'slot-a' }, () => null)
+  handlers.onTurnEnd('dsh-1', 'aborted')
+  await hub.pendingAbortByDsh.get('dsh-1')?.promise
+  assert.equal(hub.pendingAbortByDsh.has('dsh-1'), false)
+})
+
+test('cancelKernelTurn disarms and reports false when the turn already ended', async () => {
+  const { DshTurnHub } = loadHub()
+  const hub = new DshTurnHub({ sessionRoot: process.cwd() })
+  hub.pinnedDshIds.set('cowork-1', 'dsh-1')
+  // Holder-map fallback path: no slot reports busy, kernelForDsh resolves the
+  // holder, and the cancel comes back as a no-op (turn ended in the race).
+  const holderKernel = {
+    running: true,
+    isSessionBusy: () => false,
+    cancel: async () => ({ cancelled: false }),
+  }
+  hub.kernelByDsh.set('dsh-1', holderKernel)
+  hub.slots.set('slot-a', {
+    kernel: { running: true, isSessionBusy: () => false },
+    drainingKernels: [],
+  })
+
+  const interrupted = await hub.cancelKernelTurn('cowork-1', 'steer')
+  assert.equal(interrupted, false)
+  // No boundary is coming for a no-op cancel — the latch must be cleared so
+  // the follow-up turn is not held to the backstop.
+  assert.equal(hub.pendingAbortByDsh.has('dsh-1'), false)
+})
+
+test('cancelKernelTurn rejects with the latch cleared when the cancel RPC fails', async () => {
+  const { DshTurnHub } = loadHub()
+  const hub = new DshTurnHub({ sessionRoot: process.cwd() })
+  hub.pinnedDshIds.set('cowork-1', 'dsh-1')
+  const failingKernel = {
+    running: true,
+    isSessionBusy: (id) => id === 'dsh-1',
+    cancel: async () => {
+      throw new Error('runtime gone')
+    },
+  }
+  hub.slots.set('slot-a', { kernel: failingKernel, drainingKernels: [] })
+
+  await assert.rejects(() => hub.cancelKernelTurn('cowork-1', 'steer'), /runtime gone/)
+  assert.equal(hub.pendingAbortByDsh.has('dsh-1'), false)
+})
+
+test('cancelKernelTurn returns false without a cowork mapping', async () => {
+  const { DshTurnHub } = loadHub()
+  const hub = new DshTurnHub({ sessionRoot: process.cwd() })
+  hub.slots.set('slot-a', {
+    kernel: {
+      running: true,
+      isSessionBusy: () => true,
+      cancel: async () => ({ cancelled: true }),
+    },
+    drainingKernels: [],
+  })
+  assert.equal(await hub.cancelKernelTurn('cowork-unknown', 'steer'), false)
+})
