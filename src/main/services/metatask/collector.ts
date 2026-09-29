@@ -1,4 +1,5 @@
 import { fetchProtocolPinsFromIndexer, type ProtocolPinRecord } from '../protocolPinFetch';
+import { looksLikeContentUrl } from '../protocolPinContent';
 import {
   METATASK_COLLECTED_PATHS,
   METATASK_ROSTER_SEGMENT,
@@ -16,10 +17,30 @@ import type { MetaTaskChainEvent } from './types';
  * the engine's MetaTaskChainEvent shape (body parsed from contentBody base64,
  * falling back to contentSummary — same decoding order as the reference
  * Python engine).
+ *
+ * Content recovery (MAN-p2p f23e8ec): list rows now carry `contentSummary`
+ * truncated to the first 4096 bytes of the body, an empty `contentBody`, and
+ * `content` = a download URL serving the raw full body. A truncated body makes
+ * the replay drop every node of a large tree pin, so rows whose inline body is
+ * missing or visibly shorter than the row's declared `contentLength` are
+ * refetched from that URL (bounded concurrency, one extra request only for the
+ * rows that need it; a healthy small pin issues none).
  */
 
 /** manapi silently falls back to 20 rows/page for size > 100. */
 const DEFAULT_PAGE_SIZE = 100;
+
+/** Extra content downloads per sweep (rows needing recovery only). */
+const CONTENT_RECOVERY_CONCURRENCY = 4;
+const CONTENT_FETCH_TIMEOUT_MS = 8_000;
+/** Refuse a pathological download rather than buffering it on the main thread. */
+const CONTENT_MAX_BYTES = 8 * 1024 * 1024;
+/**
+ * The indexer truncates `contentSummary` to the first 4096 bytes, but JSON
+ * escaping can legitimately shift the byte count, so a declared length only
+ * counts as "longer than what we have" past this margin.
+ */
+const TRUNCATION_MARGIN_BYTES = 16;
 
 const parseBody = (item: Record<string, unknown>): Record<string, unknown> => {
   const contentBody = item.contentBody;
@@ -51,6 +72,93 @@ const normalizeTimestampMs = (value: unknown): number => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return 0;
   return parsed >= 10_000_000_000 ? Math.floor(parsed) : Math.floor(parsed * 1000);
+};
+
+const isEmptyBody = (body: Record<string, unknown>): boolean => Object.keys(body).length === 0;
+
+/** Byte length of the inline summary exactly as the indexer would count it. */
+const inlineSummaryByteLength = (item: Record<string, unknown>): number =>
+  typeof item.contentSummary === 'string' ? Buffer.byteLength(item.contentSummary, 'utf8') : 0;
+
+const declaredContentLength = (item: Record<string, unknown>): number | null => {
+  const value = Number(item.contentLength);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+};
+
+/**
+ * The download URL to refetch when this row's inline body may be truncated,
+ * or null when the inline body is complete (a healthy small pin must never
+ * cost a request).
+ *
+ *  - no usable body at all ({} = parse failure or absent) + a content URL → refetch;
+ *  - the row declares more bytes than the inline summary holds (beyond the
+ *    escaping margin) → refetch even though the summary parsed. A non-empty
+ *    `contentBody` is the full payload by contract (pre-f23e8ec list format), so
+ *    such rows never qualify.
+ */
+const contentRecoveryUrl = (
+  item: Record<string, unknown>,
+  body: Record<string, unknown>
+): string | null => {
+  const url = typeof item.content === 'string' ? item.content.trim() : '';
+  // A content-download URL is never the body (protocolPinContent semantics).
+  if (!looksLikeContentUrl(url)) return null;
+  if (isEmptyBody(body)) return url;
+  const contentBody = item.contentBody;
+  if (typeof contentBody === 'string' && contentBody.trim()) return null;
+  const declared = declaredContentLength(item);
+  if (declared === null) return null;
+  return declared > inlineSummaryByteLength(item) + TRUNCATION_MARGIN_BYTES ? url : null;
+};
+
+/**
+ * Fetch a pin's full body from its content URL (plain text → JSON object).
+ * Any failure — non-2xx, timeout, transport error, non-object JSON, oversized
+ * body — returns null so the caller keeps whatever it parsed inline.
+ */
+const fetchContentBody = async (
+  url: string,
+  fetchImpl: ((input: string, init?: RequestInit) => Promise<Response>) | undefined
+): Promise<Record<string, unknown> | null> => {
+  const impl = fetchImpl ?? fetch;
+  const init: RequestInit = {};
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    init.signal = AbortSignal.timeout(CONTENT_FETCH_TIMEOUT_MS);
+  }
+  try {
+    const response = await impl(url, init);
+    if (!response.ok) return null;
+    const text = await response.text();
+    if (text.length > CONTENT_MAX_BYTES) return null;
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+/** Refetch the pending rows with bounded concurrency, patching bodies in place. */
+const recoverTruncatedBodies = async (
+  pending: { event: MetaTaskChainEvent; url: string }[],
+  fetchImpl: ((input: string, init?: RequestInit) => Promise<Response>) | undefined
+): Promise<void> => {
+  if (pending.length === 0) return;
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.min(CONTENT_RECOVERY_CONCURRENCY, pending.length) },
+    async () => {
+      while (cursor < pending.length) {
+        const index = cursor;
+        cursor += 1;
+        const { event, url } = pending[index];
+        const body = await fetchContentBody(url, fetchImpl);
+        if (body) event.body = body; // else keep the inline (possibly empty) body
+      }
+    }
+  );
+  await Promise.all(workers);
 };
 
 export const normalizeChainEvent = (
@@ -107,6 +215,8 @@ export async function collectMetaTaskEvents(
 ): Promise<CollectMetaTaskEventsResult> {
   const events: MetaTaskChainEvent[] = [];
   const perPath: { path: MetaTaskCollectedPath; count: number }[] = [];
+  // Rows whose inline body looks truncated; fetched once, after the walk.
+  const pendingRecoveries: { event: MetaTaskChainEvent; url: string }[] = [];
 
   // Keep the whole raw item as "content" so the normalizer can read
   // genesisHeight / txIndex / globalMetaId / contentBody.
@@ -131,10 +241,16 @@ export async function collectMetaTaskEvents(
       const event = normalizeChainEvent(pin.pinId, rawItem, pin.timestampMs ?? null);
       if (event && event.path === segment) {
         events.push(event);
+        // The row may come from the local P2P base, but the content URL is
+        // absolute — fetch it as-is.
+        const recoveryUrl = contentRecoveryUrl(rawItem, event.body);
+        if (recoveryUrl) pendingRecoveries.push({ event, url: recoveryUrl });
         count += 1;
       }
     }
     perPath.push({ path: segment, count });
   }
+
+  await recoverTruncatedBodies(pendingRecoveries, options.fetchImpl);
   return { events, perPath };
 }

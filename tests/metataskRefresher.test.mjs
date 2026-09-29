@@ -83,10 +83,25 @@ const openHarness = async (clock, over = {}) => {
   const sqliteStore = await SqliteStore.create(dir);
   const store = new MetaTaskProjectionStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   const items = over.items ? [...over.items] : [treeItem(), taskItem(), claimItem()];
+  // Content-download bodies the fake indexer serves: pinId -> decoded body
+  // (a missing entry answers 404, i.e. an unrecoverable row).
+  const contentBodies = over.contentBodies ?? {};
   let fetchCalls = 0;
+  let contentCalls = 0;
   const fetchImpl = async (url) => {
     fetchCalls += 1;
-    const parsed = new URL(String(url));
+    const href = String(url);
+    if (href.includes('/content/')) {
+      contentCalls += 1;
+      const pinId = href.split('/content/').pop();
+      const served = contentBodies[pinId];
+      if (served === undefined) return new Response('not found', { status: 404 });
+      return new Response(JSON.stringify(served), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    const parsed = new URL(href);
     const poolPath = parsed.searchParams.get('path') ?? '';
     const segment = poolPath.split('/').pop();
     const list = items.filter((item) => String(item.path).split('/').pop() === segment);
@@ -108,6 +123,7 @@ const openHarness = async (clock, over = {}) => {
     refresher,
     items,
     fetchCount: () => fetchCalls,
+    contentFetchCount: () => contentCalls,
     cleanup: () => {
       refresher.dispose();
       sqliteStore.close?.();
@@ -349,6 +365,130 @@ test('membership: the dirty key hashes exactly the engine eventSetHash input', (
   assert.deepEqual(taskSet.mempoolPinIds, ['claim00000011i0']);
   assert.equal(taskSet.hashEntries.some((entry) => entry.pinId === 'claim00000011i0'), false);
   assert.notEqual(taskDirtyKey(taskSet), sha256Hex(canonJ(taskSet.hashEntries)));
+});
+
+test('dirty key: a body change with identical pin ids and heights flips the key', () => {
+  const eventSet = (treeBody) => [
+    { pinId: TREE_PIN, path: 'tree', author: PUBLISHER, height: 189_900, txIndex: 0, timestampMs: T0, body: treeBody },
+    { pinId: TASK_PIN, path: 'task', author: PUBLISHER, height: 189_901, txIndex: 0, timestampMs: T0, body: JSON.parse(Buffer.from(taskItem().contentBody, 'base64').toString('utf-8')) },
+    { pinId: CLAIM_PIN, path: 'claim', author: WORKER, height: 189_910, txIndex: 0, timestampMs: T0, body: { taskid: TASK_PIN, node: 't1' } },
+  ];
+  const treeBody = JSON.parse(Buffer.from(treeItem().contentBody, 'base64').toString('utf-8'));
+  const keyOf = (events) => taskDirtyKey(taskEventSet(events, { rootPinId: TASK_PIN }), { rosterPins: {} });
+
+  // Identical inputs (fresh objects) hash identically.
+  assert.equal(keyOf(eventSet(treeBody)), keyOf(eventSet(JSON.parse(JSON.stringify(treeBody)))));
+
+  // The degraded indexer body (truncated summary that never parsed) must
+  // produce a DIFFERENT key than the recovered full body — same pin ids and
+  // heights, only the content differs.
+  const degraded = keyOf(eventSet({}));
+  assert.notEqual(degraded, keyOf(eventSet(treeBody)));
+  assert.notEqual(degraded, keyOf(eventSet({ ...treeBody, padding: 'y'.repeat(10) })));
+
+  // ...while the protocol eventSetHash is body-insensitive by design.
+  assert.equal(
+    replayMetaTask(eventSet({}), { rootPinId: TASK_PIN }).freshness.eventSetHash,
+    replayMetaTask(eventSet(treeBody), { rootPinId: TASK_PIN }).freshness.eventSetHash,
+    'the recovery must not disturb the pinned protocol hash'
+  );
+});
+
+// ── content recovery: end-to-end self-heal ───────────────────────────────────
+
+const BIG_TREE_PIN = 'treebig0000001i0';
+
+/** The f23e8ec list-row shape for a body longer than the summary window. */
+const truncatedTreeRow = (fullBody) => {
+  const json = JSON.stringify(fullBody);
+  return {
+    id: BIG_TREE_PIN,
+    path: '/protocols/metatask/tree',
+    globalMetaId: PUBLISHER,
+    genesisHeight: 189_900,
+    txIndex: 0,
+    timestamp: T0,
+    contentSummary: json.slice(0, 4096),
+    contentBody: '',
+    content: `https://manapi.metaid.io/content/${BIG_TREE_PIN}`,
+    contentLength: Buffer.byteLength(json, 'utf8'),
+  };
+};
+
+const bigTreeBody = () => ({
+  root: 'r1',
+  nodes: [
+    { id: 'r1', parent: null, title: 'root', kind: 'aggregate', specid: null, params: {}, deps: [], weight: 3000 },
+    { id: 't1', parent: 'r1', title: 'leaf', kind: 'proof', specid: null, params: {}, deps: [], weight: 7000 },
+    { id: 't2', parent: 'r1', title: 'leaf', kind: 'proof', specid: null, params: {}, deps: [], weight: 1000 },
+    { id: 't3', parent: 'r1', title: 'leaf', kind: 'proof', specid: null, params: {}, deps: [], weight: 1000 },
+  ],
+  // Past the summary window, so the truncation cuts inside this string.
+  padding: 'x'.repeat(5_000),
+});
+
+test('sweep: a poisoned tree body self-heals once the indexer serves the full content', async () => {
+  const clock = { value: T0 + 60_000 };
+  const treePin = BIG_TREE_PIN;
+  const treeBody = bigTreeBody();
+  const taskBody = {
+    title: 'sweep fixture',
+    treeid: treePin,
+    policy: { verify_quorum: 2, claim_ttl_hours: 1, verify_window_hours: 0 },
+    tags: [],
+  };
+  const items = [
+    truncatedTreeRow(treeBody),
+    { ...taskItem(), contentBody: Buffer.from(JSON.stringify(taskBody)).toString('base64') },
+    claimItem(),
+  ];
+  const h = await openHarness(clock, { items, contentBodies: { [treePin]: treeBody } });
+  try {
+    // Seed the cache with the DEGRADED body an earlier sweep stored, and the
+    // broken projection it produced (all nodes dropped as unknown_node).
+    const poisonedEvents = [
+      { pinId: treePin, path: 'tree', author: PUBLISHER, height: 189_900, txIndex: 0, timestampMs: T0, body: {} },
+      { pinId: TASK_PIN, path: 'task', author: PUBLISHER, height: 189_901, txIndex: 0, timestampMs: T0, body: taskBody },
+      { pinId: CLAIM_PIN, path: 'claim', author: WORKER, height: 189_910, txIndex: 0, timestampMs: T0, body: { taskid: TASK_PIN, node: 't1' } },
+    ];
+    h.store.upsertEvents(poisonedEvents);
+    const broken = replayMetaTask(h.store.loadEvents(), { rootPinId: TASK_PIN });
+    assert.equal(broken.progress.total, 0, 'the poisoned tree has no nodes');
+    assert.equal(broken.freshness.eventSetHash, replayMetaTask(
+      poisonedEvents.map((event) => (event.pinId === treePin ? { ...event, body: treeBody } : event)),
+      { rootPinId: TASK_PIN }
+    ).freshness.eventSetHash, 'same chain facts, different body');
+    // Persist it with the dirty key the CURRENT content produces: the pin ids
+    // and heights do not change during recovery, so only a body-sensitive key
+    // can tell the sweep that this root needs another replay.
+    h.store.saveProjections([broken], {
+      liveRootIds: [TASK_PIN],
+      dirtyKeys: {
+        [TASK_PIN]: taskDirtyKey(taskEventSet(h.store.loadEvents(), { rootPinId: TASK_PIN }), { rosterPins: {} }),
+      },
+    });
+
+    const result = await h.refresher.refreshOnce('self-heal');
+    assert.equal(result.ok, true, result.error ?? '');
+    assert.equal(h.contentFetchCount(), 1, 'exactly the poisoned pin was refetched');
+
+    const healed = h.store.getProjection(TASK_PIN);
+    assert.equal(healed.progress.total, 4, 'every tree node is back');
+    assert.equal(healed.progress.claimed, 1, 'the claim is effective again');
+    assert.deepEqual(Object.keys(healed.nodeStates).sort(), ['r1', 't1', 't2', 't3']);
+    assert.equal(
+      healed.freshness.eventSetHash,
+      broken.freshness.eventSetHash,
+      'the protocol hash never moved — only the recovered body did'
+    );
+    assert.deepEqual(
+      h.store.loadEvents().find((event) => event.pinId === treePin).body,
+      treeBody,
+      'the cache now holds the full body'
+    );
+  } finally {
+    h.cleanup();
+  }
 });
 
 // ── nextTimeDeadlineMs: the three engine clocks ──────────────────────────────

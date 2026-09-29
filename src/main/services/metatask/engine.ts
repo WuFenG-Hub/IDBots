@@ -457,10 +457,19 @@ export function taskEventSet(
  *    deliberately excludes height < 0 pins, but they DO act in the replay walk
  *    (a brand-new unconfirmed submission must dirty its root), so they are part
  *    of this key while the engine's own eventSetHash stays untouched;
+ *  - a BODY fingerprint of every scoped event. Pin ids and heights alone do not
+ *    change when the indexer's content contract degrades (truncated summary →
+ *    empty body) or when a later sweep recovers the full body again, so without
+ *    the body the root would stay "clean" and a broken projection would stick
+ *    forever;
  *  - the roster pin the task's split references. Same-side roster filtering
  *    reads that pin's body, and it is NOT part of the task's own event set
  *    (reference pin, no taskid), so its arrival or absence must dirty the root
  *    on its own.
+ *
+ * The body fingerprints deliberately changed this key's format: every root is
+ * re-dirtied ONCE on upgrade (one extra replay per task, then stable again).
+ * The engine's protocol eventSetHash recipe is untouched by this.
  *
  * Equal keys ⇒ the same inputs produce the same projection, time-driven expiry
  * aside; that residual is covered by nextTimeDeadlineMs.
@@ -470,10 +479,14 @@ export const taskDirtyKey = (
   options: { rosterPins?: Record<string, unknown> } = {}
 ): string => {
   const rosterid = (taskSet.taskBody.policy as TaskPolicyPayload | undefined)?.split?.rosterid ?? null;
+  const bodies = taskSet.scoped
+    .map((pin) => ({ pinId: pin.pinId, bodyHash: sha256Hex(canonJ(pin.body)) }))
+    .sort((a, b) => (a.pinId < b.pinId ? -1 : a.pinId > b.pinId ? 1 : 0));
   return sha256Hex(
     canonJ({
       confirmed: taskSet.hashEntries,
       unconfirmed: taskSet.mempoolPinIds,
+      bodies,
       rosterPin: rosterid ? options.rosterPins?.[rosterid] ?? null : null,
     })
   );

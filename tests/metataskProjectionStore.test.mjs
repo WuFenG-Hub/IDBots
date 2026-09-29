@@ -386,6 +386,38 @@ test('metatask projection store: watch statuses and alerts batch-write in one tr
   }
 });
 
+test('metatask projection store: a degraded empty body never overwrites a cached good one', async () => {
+  const { dir, sqliteStore, store } = await openStore();
+  try {
+    const goodTree = { root: 'r1', nodes: [{ id: 'r1', parent: null, title: 'root', weight: 10_000, deps: [], params: {} }] };
+    const treePin = 'tree0000000009i0';
+    store.upsertEvents([ev(treePin, 'tree', goodTree, 'idq1publisherx')]);
+
+    // A later sweep whose content recovery failed reports {} — the truncated
+    // summary that never parsed. The cached good body must survive, while the
+    // rest of the row still refreshes.
+    store.upsertEvents([ev(treePin, 'tree', {}, 'idq1publisherx', 190_200)]);
+    const cached = store.loadEvents().find((event) => event.pinId === treePin);
+    assert.deepEqual(cached.body, goodTree, 'anti-downgrade: the good body is kept');
+    assert.equal(cached.height, 190_200, 'every other column still updates');
+
+    // A genuinely changed non-empty body still wins.
+    const changedTree = { root: 'r1', nodes: [{ id: 'r2', parent: null, title: 'root2', weight: 10_000, deps: [], params: {} }] };
+    store.upsertEvents([ev(treePin, 'tree', changedTree, 'idq1publisherx')]);
+    assert.deepEqual(store.loadEvents().find((event) => event.pinId === treePin).body, changedTree);
+
+    // The upgrade path stays open: a cached {} is still replaceable by a
+    // recovered body (the self-heal case).
+    const poisonPin = 'tree0000000008i0';
+    store.upsertEvents([ev(poisonPin, 'tree', {}, 'idq1publisherx')]);
+    store.upsertEvents([ev(poisonPin, 'tree', goodTree, 'idq1publisherx')]);
+    assert.deepEqual(store.loadEvents().find((event) => event.pinId === poisonPin).body, goodTree);
+  } finally {
+    sqliteStore.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('metatask projection store: refresh state transitions', async () => {
   const { dir, sqliteStore, store } = await openStore();
   try {
