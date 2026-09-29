@@ -60,3 +60,45 @@ a v1.2.2 clause restricting settlement to tasks published at/after H_ACT2.
   repo-relative paths — no change needed there.
 - metaso Go: in production since chain height 191232 (see launch-kit runbook).
 - Remaining before wave-1 launch: chain reaches H_ACT2=191500.
+
+## v1.3.1 closure (2026-09-29) — REVIEWER B1/B2/B3 FIXED & PUBLISHED
+
+- **Reviewer findings (all valid, all fixed by the IDBots side)**: B1
+  ghost-node weight poisoning (claims/submissions on node ids outside the
+  effective post-amend tree → `unknown_node`; no node state / progress
+  inflation / weight-table entry; ignored pins REMAIN in eventSetHash); B2
+  reviewer-accuracy identity filter (reviewTerminal/reviewCorrect exclude
+  voter==submitter/root-author, matching settlement R(n); reviewVotes stays
+  a display counter); B3 roster pins travel in the event set
+  (`path=metatask-roster` auto-builds rosterPins by pinId; post-H_ACT2
+  same-side votes ignored, pre-gate untouched). Plus the manifest
+  engineAlgoVersion pinned to `idbots-metatask-engine/1.2.1` for three-
+  engine byte parity. TS reference = main `de3f704e` (+`e7104c18`,
+  `5d76b0c9`); Go = metaso v121.go.
+- **Verification**: canonical vector set frozen and green 16/16 (sha256
+  `106aa1f3…22f2c4` unchanged); `regressions_b1_b2_b3.py` **10/10**
+  (B1×4 / B2×3 / B3×3 — the delivery note initially miscounted "12/12";
+  the registration author caught it and, under an explicit owner
+  authorization, fixed the three display layers to a dynamic count with
+  zero bytes changed in engine or vectors); both on-chain pilots replay
+  identically to pre-fix readings (654 events incl. the two fresh
+  post-deploy pins — a late conflicting claim on t118 correctly inert).
+- **Published on chain** (verified by direct registry read): registration
+  pin `cd78ab4ede4c6be77cf774736672651d25446305e06106b91c3cf3f61d250ebei0`
+  → name `metatask-replay`, **version 1.3.1**, skill-file
+  `metafile://dbcbdba4…i0.zip` (28538 B, sha256
+  `a746577d98b3c35a79b8ee24ef6c5fc1dfd5ce978385546baebb96c9efd9fe98`),
+  announcement buzz
+  `56ed617ffc51c234e15e929d84f779d263e1e76044803d9757456ebacf8bbcd7i0`;
+  supersedes v1.3.0 (`c9c34a41…`). The v1.3.0 "roster on-chain fetch"
+  known-gap is closed by B3.
+- Side note logged by the author: manapi now truncates list-row
+  `contentSummary` to 4096 B — both the IDBots collector (main `ef05a2a8`)
+  and the skill's fetch path follow the content URL for full bodies.
+- v1.2.2 owner rulings (seven items incl. point-in-time amend, fail-vote
+  identity gate at a new H_ACT3, settlement scoped to post-H_ACT2 tasks,
+  implementation-neutral engineAlgoVersion string) ride the next
+  registration update via the #10 process — NOT in this package.
+- **Three-engine status**: TS main / Python v1.3.1 on chain / Go in
+  production. Remaining before wave-1 launch: chain reaches H_ACT2=191500
+  (newest observed event ≈ 191388 on 2026-09-29; ≈112 blocks ≈ 1 day).
