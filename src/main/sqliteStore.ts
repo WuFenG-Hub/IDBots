@@ -782,6 +782,7 @@ export class SqliteStore {
         execution_mode TEXT NOT NULL DEFAULT 'auto',
         metabot_id INTEGER,
         cowork_session_id TEXT,
+        target_session_id TEXT,
         expires_at TEXT,
         notify_platforms_json TEXT NOT NULL DEFAULT '[]',
         next_run_at_ms INTEGER,
@@ -2284,6 +2285,11 @@ export class SqliteStore {
 
         if (!stColumns.includes('cowork_session_id')) {
           this.db.run('ALTER TABLE scheduled_tasks ADD COLUMN cowork_session_id TEXT');
+          this.save();
+        }
+
+        if (!stColumns.includes('target_session_id')) {
+          this.db.run('ALTER TABLE scheduled_tasks ADD COLUMN target_session_id TEXT');
           this.save();
         }
       }

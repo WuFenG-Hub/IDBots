@@ -6,8 +6,19 @@
 # The JSON payload should contain only the fields to update (partial update).
 # Returns JSON response: { "success": true, "task": { ... } } or { "success": false, "error": "..." }
 #
+# Session binding ("sessionId"):
+#   "current"  -> runs in the session this script is called from (resolved here
+#                 from IDBOTS_COWORK_SESSION_ID)
+#   "<uuid>"   -> runs in that session
+#   null or "" -> CLEARS an existing binding (task runs in a new session again)
+#   omitted    -> keeps the current binding
+#   If the bound session is missing or archived at run time, the task runs in a
+#   new session instead. The API response may add a "sessionWarning" field when
+#   the sessionId does not resolve to a usable session.
+#
 # Environment variables (set automatically by IDBots cowork session):
 #   IDBOTS_API_BASE_URL - Internal proxy URL (always points to local proxy)
+#   IDBOTS_COWORK_SESSION_ID - id of the session this script runs in
 
 HTTP_NODE_CMD=""
 HTTP_NODE_ARGS=()
@@ -101,6 +112,53 @@ const [url, body] = process.argv.slice(2);
 NODE
 }
 
+# `sessionId: "current"` means "the session this bot is running in". The HTTP
+# layer never resolves it (it would store the literal), so resolve it here from
+# the env IDBots injects into every cowork subprocess; without that env var the
+# key is dropped so the binding is left untouched.
+resolve_current_session_id_in_payload() {
+  local BODY="$1"
+
+  if ! resolve_http_node_runtime; then
+    # No JSON runtime available: leave the payload alone. The API treats an
+    # unresolved "current" as "keep the existing binding" and reports it in
+    # "sessionWarning".
+    printf '%s' "$BODY"
+    return 0
+  fi
+
+  env "${HTTP_NODE_ENV_PREFIX[@]}" "$HTTP_NODE_CMD" "${HTTP_NODE_ARGS[@]}" - "$BODY" <<'NODE'
+const [body] = process.argv.slice(2);
+
+let parsed;
+try {
+  parsed = JSON.parse(body);
+} catch {
+  process.stdout.write(body);
+  process.exit(0);
+}
+
+if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  process.stdout.write(body);
+  process.exit(0);
+}
+
+if (parsed.sessionId === 'current') {
+  const sessionId = String(process.env.IDBOTS_COWORK_SESSION_ID ?? '').trim();
+  if (sessionId) {
+    parsed.sessionId = sessionId;
+  } else {
+    delete parsed.sessionId;
+    process.stderr.write(
+      "Warning: sessionId 'current' requested but IDBOTS_COWORK_SESSION_ID is not set; the existing session binding is kept\n"
+    );
+  }
+}
+
+process.stdout.write(JSON.stringify(parsed));
+NODE
+}
+
 if [ -z "$IDBOTS_API_BASE_URL" ]; then
   echo '{"success":false,"error":"IDBOTS_API_BASE_URL not set. This script must run inside a IDBots cowork session."}'
   exit 1
@@ -130,6 +188,8 @@ if [ "${PAYLOAD#@}" != "$PAYLOAD" ]; then
   fi
   PAYLOAD="$(cat "$PAYLOAD_FILE")"
 fi
+
+PAYLOAD="$(resolve_current_session_id_in_payload "$PAYLOAD")"
 
 # IDBOTS_API_BASE_URL always points to the local proxy: http://127.0.0.1:PORT
 BASE_URL="${IDBOTS_API_BASE_URL%/}"

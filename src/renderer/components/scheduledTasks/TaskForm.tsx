@@ -19,6 +19,9 @@ interface TaskFormProps {
   onSaved: () => void;
 }
 
+// Which conversation the task runs in.
+type SessionMode = 'new' | 'current' | 'custom';
+
 const NOTIFY_PLATFORMS: NotifyPlatform[] = ['dingtalk', 'feishu', 'telegram', 'discord'];
 const WEEKDAYS = [0, 1, 2, 3, 4, 5, 6] as const; // 0=Sunday
 
@@ -26,11 +29,21 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
   const coworkConfig = useSelector((state: RootState) => state.cowork.config);
   const currentSessionMetabotId = useSelector((state: RootState) => state.cowork.currentSession?.metabotId ?? null);
   const preferredMetabotId = useSelector((state: RootState) => state.cowork.preferredMetabotId);
+  const currentSessionId = useSelector((state: RootState) => state.cowork.currentSessionId);
+  const currentSession = useSelector((state: RootState) => state.cowork.currentSession);
   const defaultWorkingDirectory = coworkConfig?.workingDirectory ?? '';
   const defaultMetabotId = task?.metabotId ?? currentSessionMetabotId ?? preferredMetabotId ?? null;
 
   // Parse existing schedule for edit mode
   const parsed = task ? parseScheduleToFormState(task.schedule) : null;
+
+  // Seed the session binding from the edited task (new tasks run in a fresh session).
+  const boundSessionId = task?.targetSessionId ?? null;
+  const initialSessionMode: SessionMode = boundSessionId == null
+    ? 'new'
+    : boundSessionId === currentSessionId
+      ? 'current'
+      : 'custom';
 
   // Form state
   const [name, setName] = useState(task?.name ?? '');
@@ -47,6 +60,10 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
   const [expiresAt, setExpiresAt] = useState(task?.expiresAt ?? '');
   const [metabots, setMetabots] = useState<Metabot[]>([]);
   const [selectedMetabotId, setSelectedMetabotId] = useState<number | null>(defaultMetabotId);
+  const [sessionMode, setSessionMode] = useState<SessionMode>(initialSessionMode);
+  const [customSessionId, setCustomSessionId] = useState(
+    initialSessionMode === 'custom' ? boundSessionId ?? '' : ''
+  );
   const [notifyPlatforms, setNotifyPlatforms] = useState<NotifyPlatform[]>(task?.notifyPlatforms ?? []);
   const [notifyDropdownOpen, setNotifyDropdownOpen] = useState(false);
   const notifyDropdownRef = useRef<HTMLDivElement>(null);
@@ -134,6 +151,12 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
     return Object.keys(newErrors).length === 0;
   };
 
+  const resolveTargetSessionId = (): string | null => {
+    if (sessionMode === 'new') return null;
+    if (sessionMode === 'current') return currentSessionId ?? null;
+    return customSessionId.trim() || null;
+  };
+
   const handleSubmit = async () => {
     if (!validate()) return;
     setSubmitting(true);
@@ -147,6 +170,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
         systemPrompt: '',
         executionMode: 'local',
         metabotId: selectedMetabotId,
+        targetSessionId: resolveTargetSessionId(),
         expiresAt: expiresAt || null,
         notifyPlatforms,
         enabled: task?.enabled ?? true,
@@ -243,6 +267,38 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
           )}
         </select>
         {errors.metabot && <p className={errorClass}>{errors.metabot}</p>}
+      </div>
+
+      {/* Run in session */}
+      <div>
+        <label className={labelClass}>{i18nService.t('scheduledTasksFormSession')}</label>
+        <select
+          value={sessionMode}
+          onChange={(e) => setSessionMode(e.target.value as SessionMode)}
+          className={inputClass}
+        >
+          <option value="new">{i18nService.t('scheduledTasksFormSessionNew')}</option>
+          <option value="current" disabled={currentSessionId == null}>
+            {currentSession?.title
+              ? `${i18nService.t('scheduledTasksFormSessionCurrent')} (${currentSession.title})`
+              : i18nService.t('scheduledTasksFormSessionCurrent')}
+          </option>
+          <option value="custom">{i18nService.t('scheduledTasksFormSessionCustom')}</option>
+        </select>
+        {sessionMode === 'custom' && (
+          <>
+            <input
+              type="text"
+              value={customSessionId}
+              onChange={(e) => setCustomSessionId(e.target.value)}
+              className={inputClass + ' mt-2'}
+              placeholder={i18nService.t('scheduledTasksFormSessionIdPlaceholder')}
+            />
+            <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-1">
+              {i18nService.t('scheduledTasksFormSessionFallbackHint')}
+            </p>
+          </>
+        )}
       </div>
 
       {/* Schedule */}

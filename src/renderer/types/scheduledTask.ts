@@ -47,6 +47,7 @@ export interface ScheduledTask {
   executionMode: 'auto' | 'local' | 'sandbox';
   metabotId: number | null;
   coworkSessionId: string | null;
+  targetSessionId: string | null; // bound cowork session id; null = start a new session each run
   expiresAt: string | null; // ISO 8601 日期（精确到天），null 表示不过期
   notifyPlatforms: NotifyPlatform[]; // 任务完成后通知的 IM 平台
   state: TaskState;
@@ -82,6 +83,7 @@ export interface ScheduledTaskInput {
   systemPrompt: string;
   executionMode: 'auto' | 'local' | 'sandbox';
   metabotId?: number | null;
+  targetSessionId?: string | null; // bound cowork session id; null/undefined = start a new session each run
   expiresAt: string | null; // ISO 8601 日期（精确到天），null 表示不过期
   notifyPlatforms: NotifyPlatform[]; // 任务完成后通知的 IM 平台
   enabled: boolean;

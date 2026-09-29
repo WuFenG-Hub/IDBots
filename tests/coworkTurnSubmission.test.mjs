@@ -158,6 +158,43 @@ test('inactive sessions continue once with the requested system prompt and skill
   assert.equal(result.message.metadata.submissionMode, 'continue');
 });
 
+test('continue submissions persist origin and originLabel on the user message', async () => {
+  const harness = createHarness();
+  const result = await harness.controller.submit(input({
+    origin: 'schedule',
+    originLabel: 'Daily check',
+  }));
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'continue');
+  const persisted = harness.store.getMessageById('session-1', UUID);
+  assert.equal(persisted.type, 'user');
+  assert.equal(persisted.content, 'next direction');
+  assert.equal(persisted.metadata.origin, 'schedule');
+  assert.equal(persisted.metadata.originLabel, 'Daily check');
+  assert.equal(persisted.metadata.submissionMode, 'continue');
+  assert.equal(persisted.metadata.submissionResult, 'completed');
+  // The emitted message carries the same origin metadata for the live badge.
+  assert.equal(harness.emitted[0].message.metadata.origin, 'schedule');
+  assert.equal(harness.emitted[0].message.metadata.originLabel, 'Daily check');
+});
+
+test('steer submissions persist origin and originLabel on the queued user message', async () => {
+  const harness = createHarness({ capability: 'open-local' });
+  harness.runner.delivery = Promise.resolve();
+  const result = await harness.controller.submit(input({
+    origin: 'schedule',
+    originLabel: 'Daily check',
+  }));
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'steer');
+  const persisted = harness.store.getMessageById('session-1', UUID);
+  assert.equal(persisted.metadata.origin, 'schedule');
+  assert.equal(persisted.metadata.originLabel, 'Daily check');
+  assert.equal(persisted.metadata.interactionKind, 'steer');
+});
+
 test('pinned-skill backstop: sanitized ids flow into the continue turn, scoped to the session bot', async () => {
   const sanitizeCalls = [];
   // Mimics the main.ts wiring around SkillManager.filterSkillIdsForMetabotView:

@@ -6216,6 +6216,9 @@ const getCoworkRunner = () => {
             systemPrompt: '',
             executionMode: 'auto',
             metabotId: input.metabotId ?? null,
+            // Session binding resolved by the tool ("current" → the surf
+            // session it runs in); undefined/null means a fresh session per run.
+            targetSessionId: input.targetSessionId ?? null,
             expiresAt: null,
             notifyPlatforms: [],
             enabled: true,
@@ -8825,6 +8828,7 @@ const getScheduler = () => {
       },
       isRecoverableSqliteError: isSqliteWasmBoundsError,
       recoverSqlite: recoverSqliteStore,
+      submitToSession: (input) => getCoworkTurnSubmissionController().submit(input),
     });
   }
   return scheduler;
@@ -12953,6 +12957,13 @@ if (!gotTheLock) {
     return Math.floor(value);
   };
 
+  // `targetSessionId` binds a task to an existing session (its prompt is
+  // injected there at fire time). '' / blank means "no binding" → null.
+  const normalizeScheduledTaskTargetSessionId = (value: string): string | null => {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  };
+
   ipcMain.handle('scheduledTask:create', async (_event, input: any) => {
     try {
       const coworkConfig = getCoworkStore().getConfig();
@@ -12962,6 +12973,11 @@ if (!gotTheLock) {
         : coworkConfig.workingDirectory;
       normalizedInput.workingDirectory = resolveExistingTaskWorkingDirectory(candidateWorkingDirectory);
       normalizedInput.metabotId = normalizeScheduledTaskMetabotId(normalizedInput.metabotId);
+      if (typeof normalizedInput.targetSessionId === 'string') {
+        normalizedInput.targetSessionId = normalizeScheduledTaskTargetSessionId(normalizedInput.targetSessionId);
+      } else {
+        delete normalizedInput.targetSessionId;
+      }
 
       const task = getScheduledTaskStore().createTask(normalizedInput);
       getScheduler().reschedule();
@@ -12987,6 +13003,13 @@ if (!gotTheLock) {
       normalizedInput.workingDirectory = resolveExistingTaskWorkingDirectory(candidateWorkingDirectory);
       if (Object.prototype.hasOwnProperty.call(normalizedInput, 'metabotId')) {
         normalizedInput.metabotId = normalizeScheduledTaskMetabotId(normalizedInput.metabotId);
+      }
+      if (typeof normalizedInput.targetSessionId === 'string') {
+        normalizedInput.targetSessionId = normalizeScheduledTaskTargetSessionId(normalizedInput.targetSessionId);
+      } else if (normalizedInput.targetSessionId !== null) {
+        // Absent or non-string payload values preserve the existing binding;
+        // an explicit null clears it.
+        delete normalizedInput.targetSessionId;
       }
 
       const task = scheduledTaskStore.updateTask(id, normalizedInput);
@@ -17219,7 +17242,24 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     });
 
     // Inject scheduled task dependencies into the proxy server
-    setScheduledTaskDeps({ getScheduledTaskStore, getScheduler });
+    setScheduledTaskDeps({
+      getScheduledTaskStore,
+      getScheduler,
+      // The proxy cannot reach the cowork store itself, so the advisory
+      // `sessionWarning` on API create/update with a `sessionId` is probed
+      // here — same validity rules the scheduler applies at fire time
+      // (exists, not archived, not A2A, not sandbox). An unusable binding is
+      // never a hard error: the task just runs in a fresh session.
+      isSessionUsableAsTaskTarget: (sessionId: string) => {
+        const store = getCoworkStore();
+        const session = store.getSessionWithoutMessages(sessionId);
+        if (!session) return false;
+        if (store.isSessionArchived(sessionId)) return false;
+        if (session.sessionType === 'a2a') return false;
+        if (session.executionMode === 'sandbox') return false;
+        return true;
+      },
+    });
 
     // 设置安全策略
     setContentSecurityPolicy();

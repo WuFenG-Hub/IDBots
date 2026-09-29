@@ -14,6 +14,14 @@ export type CoworkSubmitInput = {
   activeSkillIds?: string[];
   /** Set when the text was filled verbatim from a quick action (建议操作) entry. */
   source?: 'quick_action';
+  /**
+   * Who/what submitted this turn when it did not come from the composer
+   * (e.g. a scheduled task injecting into its bound session). Persisted on the
+   * user message so the renderer can badge the origin.
+   */
+  origin?: CoworkMessageMetadata['origin'];
+  /** Optional human-readable detail for the origin (e.g. scheduled task name). */
+  originLabel?: string;
 };
 
 export type CoworkSubmitInputErrorCode =
@@ -333,12 +341,16 @@ export class CoworkTurnSubmissionController {
       ? 'steer'
       : undefined;
     const sourceMetadata = input.source ? { source: input.source } : {};
+    const originMetadata = input.origin
+      ? { origin: input.origin, ...(input.originLabel ? { originLabel: input.originLabel } : {}) }
+      : {};
     const message = existing ?? this.store.addMessageWithId(sessionId, submissionId, {
       type: 'user',
       content: requestedText,
       metadata: interactionKind
         ? {
             ...sourceMetadata,
+            ...originMetadata,
             interactionKind,
             submissionId,
             submissionMode: 'steer',
@@ -347,6 +359,7 @@ export class CoworkTurnSubmissionController {
           }
         : {
             ...sourceMetadata,
+            ...originMetadata,
             submissionId,
             submissionMode: 'continue',
             submissionResult: 'pending',
