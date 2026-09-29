@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArchiveBoxIcon, ClipboardDocumentIcon, PencilSquareIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { GroupTaskSummary } from '../../types/groupTask';
+import { scrollEventMovesAnchor } from '../../utils/anchoredPopover';
 
 export const PushPinIcon: React.FC<React.SVGProps<SVGSVGElement> & { slashed?: boolean }> = ({
   slashed,
@@ -204,16 +205,23 @@ const GroupTaskItemMenu: React.FC<GroupTaskItemMenuProps> = ({
         closeMenu();
       }
     };
-    const handleScroll = () => closeMenu();
+    // The capture listener hears every scroll in the app — including a running
+    // chat auto-pinning to the bottom on each streamed chunk. That scroll never
+    // moves this row, so it must not dismiss the menu; only scrolls that move
+    // the anchor (its own list container, or the document) do.
+    const handleScroll = (event: Event) => {
+      if (scrollEventMovesAnchor(event, actionButtonRef.current)) closeMenu();
+    };
+    const handleResize = () => closeMenu();
     document.addEventListener('mousedown', handleClickOutside);
     document.addEventListener('keydown', handleEscape);
     window.addEventListener('scroll', handleScroll, true);
-    window.addEventListener('resize', handleScroll);
+    window.addEventListener('resize', handleResize);
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleEscape);
       window.removeEventListener('scroll', handleScroll, true);
-      window.removeEventListener('resize', handleScroll);
+      window.removeEventListener('resize', handleResize);
     };
   }, [menuPosition]);
 

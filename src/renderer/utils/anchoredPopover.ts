@@ -91,6 +91,24 @@ export function placePopoverAbove(
 }
 
 /**
+ * Decide whether a capture-phase scroll event should dismiss a fixed-position
+ * menu anchored to `anchor`.
+ *
+ * Such menus listen on `window` with `capture: true`, which hears EVERY scroll
+ * in the app — including a streaming chat pane auto-pinning itself to the
+ * bottom on every chunk. That unrelated scroll used to flicker-close menus
+ * anchored in the sidebar (the anchor never moved). A scroll only invalidates
+ * the anchor's rect when it comes from an ancestor of the anchor (the event
+ * target is the scrolling element) or from the document itself.
+ */
+export function scrollEventMovesAnchor(event: Event, anchor: HTMLElement | null): boolean {
+  if (!anchor) return true;
+  const target = event.target as Node | null;
+  if (!target) return false;
+  return target.contains(anchor);
+}
+
+/**
  * Keep an anchored popover glued to its anchor while the anchor MOVES. Resize
  * and scroll listeners only catch window-level changes; they miss layout
  * shifts inside the sidebar (sidebar width drag, the composer textarea

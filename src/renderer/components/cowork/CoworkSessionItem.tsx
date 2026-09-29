@@ -6,6 +6,7 @@ import { getCoworkSessionTitleClassName, shouldShowCoworkA2ADot } from './cowork
 import { copyCoworkSessionLinkToClipboard } from './coworkSessionLink.js';
 import { isRenderableAvatarSource } from '../../utils/avatarSource';
 import { isInAutonomousFold } from '../../utils/sessionAutoGrouping';
+import { scrollEventMovesAnchor } from '../../utils/anchoredPopover';
 
 interface CoworkSessionItemProps {
   session: CoworkSessionSummary;
@@ -411,16 +412,23 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
         closeMenu();
       }
     };
-    const handleScroll = () => closeMenu();
+    // The capture listener hears every scroll in the app — including a running
+    // chat auto-pinning to the bottom on each streamed chunk. That scroll never
+    // moves this row, so it must not dismiss the menu; only scrolls that move
+    // the anchor (its own list container, or the document) do.
+    const handleScroll = (event: Event) => {
+      if (scrollEventMovesAnchor(event, actionButtonRef.current)) closeMenu();
+    };
+    const handleResize = () => closeMenu();
     document.addEventListener('mousedown', handleClickOutside);
     document.addEventListener('keydown', handleEscape);
     window.addEventListener('scroll', handleScroll, true);
-    window.addEventListener('resize', handleScroll);
+    window.addEventListener('resize', handleResize);
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleEscape);
       window.removeEventListener('scroll', handleScroll, true);
-      window.removeEventListener('resize', handleScroll);
+      window.removeEventListener('resize', handleResize);
     };
   }, [menuPosition]);
 
