@@ -128,6 +128,15 @@ export class DshKernel {
    */
   lastNotificationAt = 0
 
+  /**
+   * DSH session ids whose agent the runtime currently reports as 'running'
+   * (session.status notifications) — host turns AND kernel-initiated turns
+   * (subagent-finished wakes, scheduled nudges) alike. The turn hub reads
+   * this to hold queue gates closed while a controller-less kernel turn is
+   * in flight; cleared with the rest of the process state on restart/death.
+   */
+  private readonly busySessions = new Set<string>()
+
   /** In-flight boot promise shared by concurrent ensureRuntime callers. The
    * turn hub serializes its own calls through a per-slot chain, but the crash
    * respawn-once path restarts outside that chain, and `this.client` only
@@ -180,6 +189,12 @@ export class DshKernel {
   hasRecentActivity(graceMs: number): boolean {
     if (this.lastNotificationAt <= 0) return false
     return Date.now() - this.lastNotificationAt < Math.max(0, graceMs)
+  }
+
+  /** True while the runtime reports this session's agent as 'running'
+   *  (session.status) — host and kernel-initiated turns alike. */
+  isSessionBusy(sessionId: string): boolean {
+    return this.busySessions.has(sessionId)
   }
 
   /** Spawn the runtime process and complete the wire handshake — the
@@ -452,6 +467,7 @@ export class DshKernel {
     this.pump = null
     this.mappers.clear()
     this.slotIds.clear()
+    this.busySessions.clear()
     this.runtimeConfig = null
     if (config) {
       this.restartCount += 1
@@ -528,6 +544,11 @@ export class DshKernel {
         } else if (method === 'idbots/subagent/finished') {
           this.opts.handlers.onSubagentEvent?.({ kind: 'finished', ...params })
         } else if (method === 'session.status') {
+          if (params.status === 'running') {
+            this.busySessions.add(params.sessionId)
+          } else {
+            this.busySessions.delete(params.sessionId)
+          }
           this.opts.handlers.onStatus?.(params.sessionId, params.status)
         }
         // Yield so session-switch / other IPC can run while two sessions
@@ -558,6 +579,7 @@ export class DshKernel {
           this.pump = null
           this.mappers.clear()
           this.slotIds.clear()
+          this.busySessions.clear()
           this.runtimeConfig = null
         }
         // The transport can reject while the process still hangs (half-dead

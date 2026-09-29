@@ -545,3 +545,47 @@ test('insertCrossSessionMessageAndQueue reports partial success if queue accepta
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(runCalls.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// Kernel-busy gate (2026-09-29 incident, twinbot session df7d89d3): a
+// kernel-initiated turn (subagent-finished wake, scheduled nudge) runs with
+// NO host turn controller, so neither crossSessionRunningTurns nor
+// activeSessions sees it — an ORCH-NOTIFY drained mid-turn and sealed the
+// still-streaming reply. The gate now also consults the kernel's own
+// session.status signal via dshTurnHub.isKernelSessionBusy.
+// ---------------------------------------------------------------------------
+
+test('kernel-busy target holds queued cross-session continuations until the kernel reports idle', async () => {
+  const { store, runner, runCalls } = createHarness();
+  const source = store.createSession('source-session');
+  const target = store.createSession('target-session');
+  // No activeSessions entry, no markCrossSessionTurnRunning: the turn in
+  // flight is kernel-initiated, visible only through the hub's kernel status.
+  let kernelBusy = true;
+  runner.dshTurnHub = { isKernelSessionBusy: (sessionId) => sessionId === target.id && kernelBusy };
+
+  const result = await runner.handleHostToolExecution({
+    toolName: 'idbots_session_insert_user_message',
+    toolInput: {
+      targetSessionId: target.id,
+      message: 'orch notify during a kernel turn',
+    },
+  }, source.id);
+  assert.equal(result.success, true);
+  assert.equal(parseToolJson(result).runQueued, true);
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(runCalls.length, 0);
+  // The same kernel-busy signal widens the shared busy guards (heartbeat
+  // escalate, A2A defer, group-task daemon) that ride isSessionActive.
+  assert.equal(runner.isSessionActive(target.id), true);
+
+  // Kernel settles: the hub's onSessionStatusChange('idle') wiring schedules
+  // the drain — the callback body is exactly this schedule call.
+  kernelBusy = false;
+  runner.scheduleCrossSessionContinuationDrain(target.id);
+
+  await waitFor(() => assert.equal(runCalls.length, 1), 500);
+  assert.equal(runCalls[0].sessionId, target.id);
+  assert.equal(runCalls[0].prompt, `来自${source.id} 的信息：<cross_session_message trust="untrusted">orch notify during a kernel turn</cross_session_message>`);
+});
