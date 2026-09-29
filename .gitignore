@@ -559,4 +559,5 @@ man_base_data_pebble/
 !tests/coworkSessionMessageWindow.test.mjs
 !tests/scheduledTaskSessionFieldUi.test.mjs
 !tests/scheduledTaskTargetSession.test.mjs
+!tests/scheduledTaskCreateDefaultBinding.test.mjs
 !tests/schedulerTargetSession.test.mjs

@@ -9,7 +9,16 @@
 #   "sessionId": "current"  -> runs in the session this script is called from
 #                              (resolved here from IDBOTS_COWORK_SESSION_ID)
 #   "sessionId": "<uuid>"   -> runs in that session
-#   omitted                 -> runs in a NEW session each time
+#   "sessionId": null       -> runs in a NEW session each time (explicit opt-out
+#                              of the one-shot default below)
+#   omitted or ""           -> default by schedule type:
+#                              - one-shot ("schedule.type": "at") created inside
+#                                a session binds to that session
+#                                (IDBOTS_COWORK_SESSION_ID)
+#                              - recurring (interval / cron) runs in a NEW session
+#                                each time
+#   An explicit sessionId always wins over the default. The defaulting is
+#   announced on stderr; pass "sessionId": null to opt a one-shot task out.
 #   If the bound session is missing or archived at run time, the task runs in a
 #   new session instead. The API response may add a "sessionWarning" field when
 #   the sessionId does not resolve to a usable session.
@@ -209,6 +218,56 @@ process.stdout.write(JSON.stringify(parsed));
 NODE
 }
 
+# One-shot tasks created inside a session default to that session: a follow-up
+# ("check the release I just started") belongs in the conversation that asked for
+# it. Recurring tasks keep the new-session-per-run default — repeating inside one
+# conversation would bloat its context. An explicit sessionId always wins; an
+# explicit null opts a one-shot task out of the default.
+apply_default_session_binding() {
+  local BODY="$1"
+
+  if ! resolve_http_node_runtime; then
+    # No JSON runtime available: leave the payload alone. The API then sees an
+    # absent sessionId and keeps its own no-binding default.
+    printf '%s' "$BODY"
+    return 0
+  fi
+
+  env "${HTTP_NODE_ENV_PREFIX[@]}" "$HTTP_NODE_CMD" "${HTTP_NODE_ARGS[@]}" - "$BODY" <<'NODE'
+const [body] = process.argv.slice(2);
+
+let parsed;
+try {
+  parsed = JSON.parse(body);
+} catch {
+  process.stdout.write(body);
+  process.exit(0);
+}
+
+if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  process.stdout.write(body);
+  process.exit(0);
+}
+
+const sessionIdAbsent =
+  !Object.prototype.hasOwnProperty.call(parsed, 'sessionId') || parsed.sessionId === '';
+const scheduleType =
+  parsed.schedule && typeof parsed.schedule === 'object' ? parsed.schedule.type : undefined;
+
+if (sessionIdAbsent && scheduleType === 'at') {
+  const sessionId = String(process.env.IDBOTS_COWORK_SESSION_ID ?? '').trim();
+  if (sessionId) {
+    parsed.sessionId = sessionId;
+    process.stderr.write(
+      `Note: one-shot task defaults to current session ${sessionId}; pass "sessionId": null to run in a new session\n`
+    );
+  }
+}
+
+process.stdout.write(JSON.stringify(parsed));
+NODE
+}
+
 if [ -z "$IDBOTS_API_BASE_URL" ]; then
   echo '{"success":false,"error":"IDBOTS_API_BASE_URL not set. This script must run inside a IDBots cowork session."}'
   exit 1
@@ -235,6 +294,7 @@ fi
 
 PAYLOAD="$(inject_metabot_id_into_payload "$PAYLOAD" "${IDBOTS_METABOT_ID:-}")"
 PAYLOAD="$(resolve_current_session_id_in_payload "$PAYLOAD")"
+PAYLOAD="$(apply_default_session_binding "$PAYLOAD")"
 
 # IDBOTS_API_BASE_URL always points to the local proxy: http://127.0.0.1:PORT
 BASE_URL="${IDBOTS_API_BASE_URL%/}"
