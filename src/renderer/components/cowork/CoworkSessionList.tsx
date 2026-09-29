@@ -47,9 +47,10 @@ interface CoworkSessionListProps {
   /** Ordering within the flat list and inside every group. */
   sortMode?: SessionSortMode;
   /**
-   * Auto-created sessions (long-term task runs, orchestration runs, scheduled
-   * runs) for the local-chats list. They are NEVER mixed into the main list:
-   * they render as one collapsed "Auto Tasks" folder directly under the pinned
+   * Auto-folded sessions (long-term task runs, orchestration/delegation runs)
+   * for the local-chats list — scheduled-task runs are NOT folded, they stay in
+   * the main list. Folded rows are NEVER mixed into the main list: they render
+   * as one collapsed "Auto Tasks" folder directly under the pinned
    * section and above the content groups, independent of the view mode — tucked
    * out of the human conversations, but visible at a glance instead of buried
    * at the bottom. Only the local tab passes this; every other caller leaves

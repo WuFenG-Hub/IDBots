@@ -213,9 +213,11 @@ const Sidebar: React.FC<SidebarProps> = ({
     };
   }, [homeSessions]);
   // The local tab's list is split in two: the human's own conversations stay in
-  // the main list, while everything the app started on its own (autoOrigin set)
-  // folds into the collapsed "Auto Tasks" section at the bottom. Search still
-  // sees every session, folded or not.
+  // the main list, while long-term task runs and orchestration delegations
+  // (shouldFoldIntoAutoTasks) fold into the collapsed "Auto Tasks" section under
+  // the pinned block. Scheduled-task runs stay in the main list on purpose —
+  // they are the user's own automations. Search still sees every session,
+  // folded or not.
   const { humanSessions: localHumanSessions, autoSessions: localAutoSessions } = useMemo(
     () => splitSessionsByAutoOrigin(sessionGroups.local),
     [sessionGroups.local],

@@ -2,11 +2,12 @@
 //
 // Main stamps `auto_origin` on sessions the app created on its own (long-term
 // task runs, orchestration/delegation runs, scheduled-task runs); the summary
-// carries it as `autoOrigin`. The sidebar splits the local list into the human
-// conversations (main list) and those auto rows (one collapsed fold), which is
-// what this suite pins: the pure split, the persisted fold preference, and the
-// wiring invariants that keep a folded row out of the human list while keeping
-// it searchable.
+// carries it as `autoOrigin`. The sidebar splits the local list into the main
+// list and the folded rows per the fold policy — long-term and orchestration
+// runs fold, scheduled-task runs stay in the main list — which is what this
+// suite pins: the pure split, the persisted fold preference, and the wiring
+// invariants that keep a folded row out of the main list while keeping it
+// searchable.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,6 +20,7 @@ import {
   isAutoCreatedSession,
   parseAutoTasksExpandedPreference,
   serializeAutoTasksExpandedPreference,
+  shouldFoldIntoAutoTasks,
   splitSessionsByAutoOrigin,
 } from '../src/renderer/utils/sessionAutoGrouping';
 import type { CoworkSessionSummary } from '../src/renderer/types/cowork';
@@ -39,28 +41,35 @@ const mkSession = (
   autoOrigin,
 });
 
-test('a session folds only when it carries a real origin marker', () => {
+test('a session is auto-created when it carries a real origin marker, but only long-term and orchestration runs fold', () => {
   assert.equal(isAutoCreatedSession(mkSession('human')), false, 'legacy rows (undefined) are human');
   assert.equal(isAutoCreatedSession(mkSession('human-null', null)), false);
   assert.equal(isAutoCreatedSession(mkSession('longterm', 'longterm')), true);
   assert.equal(isAutoCreatedSession(mkSession('orchestration', 'orchestration')), true);
-  assert.equal(isAutoCreatedSession(mkSession('schedule', 'schedule')), true);
+  assert.equal(isAutoCreatedSession(mkSession('schedule', 'schedule')), true, 'the creation fact is still recorded');
+
+  assert.equal(shouldFoldIntoAutoTasks(mkSession('human')), false);
+  assert.equal(shouldFoldIntoAutoTasks(mkSession('longterm', 'longterm')), true);
+  assert.equal(shouldFoldIntoAutoTasks(mkSession('orchestration', 'orchestration')), true);
+  assert.equal(shouldFoldIntoAutoTasks(mkSession('schedule', 'schedule')), false,
+    'scheduled-task runs stay in the main list — they are the user\'s own automations');
 });
 
-test('split keeps human and auto halves in input order', () => {
+test('split keeps main-list and folded halves in input order', () => {
   const sessions = [
     mkSession('human-1'),
     mkSession('auto-1', 'longterm'),
     mkSession('human-2', null),
-    mkSession('auto-2', 'schedule'),
-    mkSession('auto-3', 'orchestration'),
+    mkSession('human-3', 'schedule'),
+    mkSession('auto-2', 'orchestration'),
   ];
   const snapshot = sessions.map((session) => session.id);
 
   const { humanSessions, autoSessions } = splitSessionsByAutoOrigin(sessions);
 
-  assert.deepEqual(humanSessions.map((session) => session.id), ['human-1', 'human-2']);
-  assert.deepEqual(autoSessions.map((session) => session.id), ['auto-1', 'auto-2', 'auto-3']);
+  assert.deepEqual(humanSessions.map((session) => session.id), ['human-1', 'human-2', 'human-3'],
+    'scheduled runs ride the main list, in place');
+  assert.deepEqual(autoSessions.map((session) => session.id), ['auto-1', 'auto-2']);
   assert.deepEqual(sessions.map((session) => session.id), snapshot, 'the input array is not reordered');
 });
 
