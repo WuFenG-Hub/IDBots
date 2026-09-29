@@ -1,4 +1,4 @@
-// Delegated Tasks folding for the sidebar's local-chats list.
+// Autonomous Tasks folding for the sidebar's local-chats list.
 //
 // Main stamps `auto_origin` on sessions the app created on its own (long-term
 // task runs, orchestration/delegation runs, scheduled-task runs); the summary
@@ -18,11 +18,11 @@ import { fileURLToPath } from 'node:url';
 import {
   AUTO_TASKS_EXPANDED_STORAGE_KEY,
   isAutoCreatedSession,
-  isInDelegatedFold,
+  isInAutonomousFold,
   parseAutoTasksExpandedPreference,
   serializeAutoTasksExpandedPreference,
-  shouldFoldIntoDelegatedTasks,
-  splitSessionsByDelegatedFold,
+  shouldFoldIntoAutonomousTasks,
+  splitSessionsByAutonomousFold,
 } from '../src/renderer/utils/sessionAutoGrouping';
 import type { CoworkSessionSummary } from '../src/renderer/types/cowork';
 
@@ -46,19 +46,19 @@ const mkSession = (
 
 test('a manual fold placement wins over the auto-origin policy in both directions', () => {
   // No manual placement: the policy decides (the state of every untouched row).
-  assert.equal(isInDelegatedFold(mkSession('human')), false);
-  assert.equal(isInDelegatedFold(mkSession('lt', 'longterm')), true);
-  assert.equal(isInDelegatedFold(mkSession('orch', 'orchestration')), true);
-  assert.equal(isInDelegatedFold(mkSession('sched', 'schedule')), false);
-  assert.equal(isInDelegatedFold(mkSession('human-null', null, null)), false, 'null override = policy');
+  assert.equal(isInAutonomousFold(mkSession('human')), false);
+  assert.equal(isInAutonomousFold(mkSession('lt', 'longterm')), true);
+  assert.equal(isInAutonomousFold(mkSession('orch', 'orchestration')), true);
+  assert.equal(isInAutonomousFold(mkSession('sched', 'schedule')), false);
+  assert.equal(isInAutonomousFold(mkSession('human-null', null, null)), false, 'null override = policy');
 
   // 'in' parks a human row in the fold — even a scheduled run nobody wanted folded.
-  assert.equal(isInDelegatedFold(mkSession('human-in', undefined, 'in')), true);
-  assert.equal(isInDelegatedFold(mkSession('sched-in', 'schedule', 'in')), true);
+  assert.equal(isInAutonomousFold(mkSession('human-in', undefined, 'in')), true);
+  assert.equal(isInAutonomousFold(mkSession('sched-in', 'schedule', 'in')), true);
 
-  // 'out' pulls a delegated run back into the main list without touching its origin.
-  assert.equal(isInDelegatedFold(mkSession('lt-out', 'longterm', 'out')), false);
-  assert.equal(isInDelegatedFold(mkSession('orch-out', 'orchestration', 'out')), false);
+  // 'out' pulls an autonomous run back into the main list without touching its origin.
+  assert.equal(isInAutonomousFold(mkSession('lt-out', 'longterm', 'out')), false);
+  assert.equal(isInAutonomousFold(mkSession('orch-out', 'orchestration', 'out')), false);
   assert.equal(mkSession('lt-out', 'longterm', 'out').autoOrigin, 'longterm',
     'the creation fact survives the move');
 });
@@ -71,7 +71,7 @@ test('the split honours overrides: moved rows land on the other side, in order',
     mkSession('auto-1', 'orchestration'),
   ];
 
-  const { humanSessions, autoSessions } = splitSessionsByDelegatedFold(sessions);
+  const { humanSessions, autoSessions } = splitSessionsByAutonomousFold(sessions);
 
   assert.deepEqual(humanSessions.map((session) => session.id), ['human-1', 'pulled-out']);
   assert.deepEqual(autoSessions.map((session) => session.id), ['pushed-in', 'auto-1']);
@@ -84,10 +84,10 @@ test('a session is auto-created when it carries a real origin marker, but only l
   assert.equal(isAutoCreatedSession(mkSession('orchestration', 'orchestration')), true);
   assert.equal(isAutoCreatedSession(mkSession('schedule', 'schedule')), true, 'the creation fact is still recorded');
 
-  assert.equal(shouldFoldIntoDelegatedTasks(mkSession('human')), false);
-  assert.equal(shouldFoldIntoDelegatedTasks(mkSession('longterm', 'longterm')), true);
-  assert.equal(shouldFoldIntoDelegatedTasks(mkSession('orchestration', 'orchestration')), true);
-  assert.equal(shouldFoldIntoDelegatedTasks(mkSession('schedule', 'schedule')), false,
+  assert.equal(shouldFoldIntoAutonomousTasks(mkSession('human')), false);
+  assert.equal(shouldFoldIntoAutonomousTasks(mkSession('longterm', 'longterm')), true);
+  assert.equal(shouldFoldIntoAutonomousTasks(mkSession('orchestration', 'orchestration')), true);
+  assert.equal(shouldFoldIntoAutonomousTasks(mkSession('schedule', 'schedule')), false,
     'scheduled-task runs stay in the main list — they are the user\'s own automations');
 });
 
@@ -101,7 +101,7 @@ test('split keeps main-list and folded halves in input order', () => {
   ];
   const snapshot = sessions.map((session) => session.id);
 
-  const { humanSessions, autoSessions } = splitSessionsByDelegatedFold(sessions);
+  const { humanSessions, autoSessions } = splitSessionsByAutonomousFold(sessions);
 
   assert.deepEqual(humanSessions.map((session) => session.id), ['human-1', 'human-2', 'human-3'],
     'scheduled runs ride the main list, in place');
@@ -110,13 +110,13 @@ test('split keeps main-list and folded halves in input order', () => {
 });
 
 test('split handles an empty list and a list with one half missing', () => {
-  assert.deepEqual(splitSessionsByDelegatedFold([]), { humanSessions: [], autoSessions: [] });
+  assert.deepEqual(splitSessionsByAutonomousFold([]), { humanSessions: [], autoSessions: [] });
 
-  const onlyHuman = splitSessionsByDelegatedFold([mkSession('human-1'), mkSession('human-2')]);
+  const onlyHuman = splitSessionsByAutonomousFold([mkSession('human-1'), mkSession('human-2')]);
   assert.equal(onlyHuman.autoSessions.length, 0);
   assert.equal(onlyHuman.humanSessions.length, 2);
 
-  const onlyAuto = splitSessionsByDelegatedFold([mkSession('auto-1', 'longterm')]);
+  const onlyAuto = splitSessionsByAutonomousFold([mkSession('auto-1', 'longterm')]);
   assert.equal(onlyAuto.humanSessions.length, 0);
   assert.equal(onlyAuto.autoSessions.length, 1);
 });
@@ -137,7 +137,7 @@ test('sidebar feeds the list with the split halves and keeps search over every s
   // The visible local list gets the human half; the auto half rides alongside.
   assert.match(src, /sessions=\{localListSessions\}/);
   assert.match(src, /autoSessions=\{taskRecordTab === 'local' \? localAutoSessions : undefined\}/);
-  assert.match(src, /splitSessionsByDelegatedFold\(sessionGroups\.local\)/);
+  assert.match(src, /splitSessionsByAutonomousFold\(sessionGroups\.local\)/);
   // The local tab's count + red unread dot ignore the folded rows — the fold
   // carries its own red dot + unread count on its header row.
   assert.match(src, /local: \{ count: localHumanSessions\.length, unread: unreadOf\(localHumanSessions\) \}/);
@@ -145,10 +145,10 @@ test('sidebar feeds the list with the split halves and keeps search over every s
   assert.match(src, /<CoworkSearchModal[\s\S]*?sessions=\{homeSessions\}/);
 });
 
-test('the list renders one Delegated Tasks fold, collapsed by default, directly under the pinned block in every view mode', () => {
+test('the list renders one Autonomous Tasks fold, collapsed by default, directly under the pinned block in every view mode', () => {
   const src = readSource('src/renderer/components/cowork/CoworkSessionList.tsx');
 
-  assert.match(src, /data-testid="delegated-tasks-section"/);
+  assert.match(src, /data-testid="autonomous-tasks-section"/);
   assert.match(src, /const \[isAutoTasksExpanded, setIsAutoTasksExpanded\] = useState<boolean>\(loadAutoTasksExpanded\)/);
   assert.match(src, /parseAutoTasksExpandedPreference\(window\.localStorage\.getItem\(AUTO_TASKS_EXPANDED_STORAGE_KEY\)\)/);
   // Timeline, project and flat branches all render the same fold.
@@ -174,7 +174,7 @@ test('the fold header carries label + unread count + latest activity, and no tot
     src.indexOf('{isAutoTasksExpanded && sortedAutoSessions.map(renderItem)}'),
   );
 
-  assert.match(header, /coworkDelegatedTasks'/);
+  assert.match(header, /coworkAutonomousTasks'/);
   assert.match(header, /formatRelativeTime\(autoLatestActivityAt\)/, 'the newest-activity stamp stays');
   // The header signals unread the way the user asked for it: a red dot at the
   // row's left (same dot the tabs use) plus the fold's unread session count in
@@ -183,7 +183,7 @@ test('the fold header carries label + unread count + latest activity, and no tot
   assert.match(header, /rounded-full bg-red-500/);
   assert.match(header, /\{autoUnreadCount\}/);
   assert.match(header, /text-red-500/);
-  assert.match(header, /coworkDelegatedTasksUnread/);
+  assert.match(header, /coworkAutonomousTasksUnread/);
   // The total is no longer rendered as a header number (it survives only in
   // the hover tooltip).
   assert.doesNotMatch(header, /<span className="flex-shrink-0 font-normal tabular-nums">\{sortedAutoSessions\.length\}<\/span>/);
@@ -194,8 +194,8 @@ test('the fold header carries label + unread count + latest activity, and no tot
 
   // Both label keys exist once per locale, keeping coverage symmetric.
   const i18n = readSource('src/renderer/services/i18n.ts');
-  assert.equal((i18n.match(/coworkDelegatedTasksUnread:/g) ?? []).length, 2, 'one per locale');
-  assert.equal((i18n.match(/coworkDelegatedTasksCount:/g) ?? []).length, 2, 'still one per locale');
+  assert.equal((i18n.match(/coworkAutonomousTasksUnread:/g) ?? []).length, 2, 'one per locale');
+  assert.equal((i18n.match(/coworkAutonomousTasksCount:/g) ?? []).length, 2, 'still one per locale');
 });
 
 test('the row menu offers the fold move, labels it by current membership, and only renders when wired', () => {
@@ -205,36 +205,36 @@ test('the row menu offers the fold move, labels it by current membership, and on
   // is now (move IN while in the main list, OUT while folded).
   assert.match(
     item,
-    /\{ key: 'pin'[\s\S]{0,600}\{ key: 'delegated-fold'[\s\S]{0,400}\{ key: 'archive'/,
+    /\{ key: 'pin'[\s\S]{0,600}\{ key: 'autonomous-fold'[\s\S]{0,400}\{ key: 'archive'/,
     'between pin and archive',
   );
-  assert.match(item, /onToggleDelegatedFold\?\.\(session\.id, isInDelegatedFold\(session\)\)/);
-  assert.match(item, /inDelegatedFold \? 'coworkMoveOutOfDelegated' : 'coworkMoveToDelegated'/);
+  assert.match(item, /onToggleAutonomousFold\?\.\(session\.id, isInAutonomousFold\(session\)\)/);
+  assert.match(item, /inAutonomousFold \? 'coworkMoveOutOfAutonomous' : 'coworkMoveToAutonomous'/);
   // Optional prop: hidden, not dead, when the host does not offer the move.
-  assert.match(item, /onToggleDelegatedFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);
-  assert.match(item, /\.\.\.\(onToggleDelegatedFold\s*\n?\s*\? \[\{ key: 'delegated-fold'/);
+  assert.match(item, /onToggleAutonomousFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);
+  assert.match(item, /\.\.\.\(onToggleAutonomousFold\s*\n?\s*\? \[\{ key: 'autonomous-fold'/);
 
   // The list threads it through to the rows (and keeps a stable identity for
   // the memoized rows, like every other action).
   const list = readSource('src/renderer/components/cowork/CoworkSessionList.tsx');
-  assert.match(list, /onToggleDelegatedFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);
-  assert.match(list, /const toggleDelegatedFold = useStableCallback\(onToggleDelegatedFold \?\? noopToggleDelegatedFold\)/);
-  assert.match(list, /onToggleDelegatedFold=\{onToggleDelegatedFold \? toggleDelegatedFold : undefined\}/);
+  assert.match(list, /onToggleAutonomousFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);
+  assert.match(list, /const toggleAutonomousFold = useStableCallback\(onToggleAutonomousFold \?\? noopToggleAutonomousFold\)/);
+  assert.match(list, /onToggleAutonomousFold=\{onToggleAutonomousFold \? toggleAutonomousFold : undefined\}/);
 
   // The sidebar owns the override decision and gives the list a stable handler;
   // only the local tab (the fold's own list) offers the move.
   const sidebar = readSource('src/renderer/components/Sidebar.tsx');
-  assert.match(sidebar, /const handleToggleDelegatedFold = async \(sessionId: string, currentlyFolded: boolean\) => \{/);
-  assert.match(sidebar, /\? \(shouldFoldIntoDelegatedTasks\(session\) \? 'out' : null\)/);
+  assert.match(sidebar, /const handleToggleAutonomousFold = async \(sessionId: string, currentlyFolded: boolean\) => \{/);
+  assert.match(sidebar, /\? \(shouldFoldIntoAutonomousTasks\(session\) \? 'out' : null\)/);
   assert.match(sidebar, /: 'in';/);
   assert.match(sidebar, /await coworkService\.setSessionFoldOverride\(sessionId, override\)/);
-  assert.match(sidebar, /const listOnToggleDelegatedFold = useStableCallback\(handleToggleDelegatedFold\)/);
-  assert.match(sidebar, /onToggleDelegatedFold=\{taskRecordTab === 'local' \? listOnToggleDelegatedFold : undefined\}/);
+  assert.match(sidebar, /const listOnToggleAutonomousFold = useStableCallback\(handleToggleAutonomousFold\)/);
+  assert.match(sidebar, /onToggleAutonomousFold=\{taskRecordTab === 'local' \? listOnToggleAutonomousFold : undefined\}/);
   // The search modal renders the same rows, so it offers the move too.
-  assert.match(sidebar, /<CoworkSearchModal[\s\S]{0,400}onToggleDelegatedFold=\{handleToggleDelegatedFold\}/);
+  assert.match(sidebar, /<CoworkSearchModal[\s\S]{0,400}onToggleAutonomousFold=\{handleToggleAutonomousFold\}/);
   const modal = readSource('src/renderer/components/cowork/CoworkSearchModal.tsx');
-  assert.match(modal, /onToggleDelegatedFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);
-  assert.match(modal, /onToggleDelegatedFold=\{onToggleDelegatedFold\}/);
+  assert.match(modal, /onToggleAutonomousFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);
+  assert.match(modal, /onToggleAutonomousFold=\{onToggleAutonomousFold\}/);
 
   // The service dispatches the local patch on success (mirrors setSessionPinned).
   const service = readSource('src/renderer/services/cowork.ts');
@@ -244,6 +244,6 @@ test('the row menu offers the fold move, labels it by current membership, and on
 
   // Both menu labels exist once per locale.
   const i18n = readSource('src/renderer/services/i18n.ts');
-  assert.equal((i18n.match(/coworkMoveToDelegated:/g) ?? []).length, 2, 'one per locale');
-  assert.equal((i18n.match(/coworkMoveOutOfDelegated:/g) ?? []).length, 2, 'one per locale');
+  assert.equal((i18n.match(/coworkMoveToAutonomous:/g) ?? []).length, 2, 'one per locale');
+  assert.equal((i18n.match(/coworkMoveOutOfAutonomous:/g) ?? []).length, 2, 'one per locale');
 });

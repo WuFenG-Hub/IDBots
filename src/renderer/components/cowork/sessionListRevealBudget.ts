@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react';
  * (40-ish rows instead of 900 on open).
  *
  * Deliberately a count of rows, not spacer-based windowing: the rows are not a
- * uniform grid. Pinned / timeline / project / Delegated Tasks headers carry their own
+ * uniform grid. Pinned / timeline / project / Autonomous Tasks headers carry their own
  * heights, and the flat list spaces its rows with `space-y-1` while the grouped
  * branches deliberately do not — a spacer model would have to reproduce every
  * one of those heights and gaps out of Tailwind's cascade, and one wrong

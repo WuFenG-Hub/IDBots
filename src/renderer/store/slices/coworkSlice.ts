@@ -437,7 +437,7 @@ const coworkSlice = createSlice({
     },
 
     /**
-     * Manual "Delegated Tasks" fold placement ('in' | 'out' | null) — mirrors
+     * Manual "Autonomous Tasks" fold placement ('in' | 'out' | null) — mirrors
      * updateSessionPinned: the row moves between the fold and the main list
      * without a re-read, and null hands the row back to the auto-origin policy.
      */

@@ -1,9 +1,9 @@
 // cowork_sessions.fold_override — manual placement of a session in the
-// sidebar's "Delegated Tasks" (委派任务) fold.
+// sidebar's "Autonomous Tasks" (自主任务) fold.
 //
 // The fold policy (long-term task runs + orchestration delegations) decides by
 // default; this column lets the owner overrule it per row: 'out' pulls a
-// delegated run back into the main conversation list, 'in' parks a human row in
+// autonomous run back into the main conversation list, 'in' parks a human row in
 // the fold, and NULL (every untouched row) hands the decision back to the
 // policy. Pure renderer preference — the column never changes a session's
 // content, status or origin marker.

@@ -33,7 +33,7 @@ import type {
   SessionSortMode,
   SessionViewMode,
 } from '../utils/sessionViewGrouping';
-import { shouldFoldIntoDelegatedTasks, splitSessionsByDelegatedFold } from '../utils/sessionAutoGrouping';
+import { shouldFoldIntoAutonomousTasks, splitSessionsByAutonomousFold } from '../utils/sessionAutoGrouping';
 import { useStableCallback } from '../utils/useStableCallback';
 import { selectTrackedTasksNeedingAttention } from '../utils/trackedTaskAttention';
 import type { SettingsOpenOptions } from './Settings';
@@ -214,12 +214,12 @@ const Sidebar: React.FC<SidebarProps> = ({
   }, [homeSessions]);
   // The local tab's list is split in two: the human's own conversations stay in
   // the main list, while long-term task runs and orchestration delegations
-  // (shouldFoldIntoDelegatedTasks) fold into the collapsed "Delegated Tasks"
+  // (shouldFoldIntoAutonomousTasks) fold into the collapsed "Autonomous Tasks"
   // section under the pinned block. Scheduled-task runs stay in the main list on
   // purpose — they are the user's own automations. Search still sees every
   // session, folded or not.
   const { humanSessions: localHumanSessions, autoSessions: localAutoSessions } = useMemo(
-    () => splitSessionsByDelegatedFold(sessionGroups.local),
+    () => splitSessionsByAutonomousFold(sessionGroups.local),
     [sessionGroups.local],
   );
   const localListSessions = taskRecordTab === 'local' ? localHumanSessions : sessionGroups[taskRecordTab];
@@ -398,7 +398,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   };
 
   /**
-   * Move a session in or out of the Delegated Tasks fold.
+   * Move a session in or out of the Autonomous Tasks fold.
    *
    * The override the move writes depends on WHICH LIST the row came from:
    *  - moving out of the fold: an auto-created run (the fold's own policy put it
@@ -406,11 +406,11 @@ const Sidebar: React.FC<SidebarProps> = ({
    *    was manually moved in only has to drop its override back to null;
    *  - moving in: always 'in', which parks a human row in the fold.
    */
-  const handleToggleDelegatedFold = async (sessionId: string, currentlyFolded: boolean) => {
+  const handleToggleAutonomousFold = async (sessionId: string, currentlyFolded: boolean) => {
     const session = sessions.find((item) => item.id === sessionId);
     if (!session) return;
     const override = currentlyFolded
-      ? (shouldFoldIntoDelegatedTasks(session) ? 'out' : null)
+      ? (shouldFoldIntoAutonomousTasks(session) ? 'out' : null)
       : 'in';
     await coworkService.setSessionFoldOverride(sessionId, override);
   };
@@ -428,7 +428,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const listOnSelectSession = useStableCallback(handleSelectSession);
   const listOnDeleteSession = useStableCallback(handleDeleteSession);
   const listOnTogglePin = useStableCallback(handleTogglePin);
-  const listOnToggleDelegatedFold = useStableCallback(handleToggleDelegatedFold);
+  const listOnToggleAutonomousFold = useStableCallback(handleToggleAutonomousFold);
   const listOnRenameSession = useStableCallback(handleRenameSession);
   const listOnToggleSessionSelected = useStableCallback(handleToggleBatchSelected);
 
@@ -810,7 +810,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                 onSelectSession={listOnSelectSession}
                 onDeleteSession={listOnDeleteSession}
                 onTogglePin={listOnTogglePin}
-                onToggleDelegatedFold={taskRecordTab === 'local' ? listOnToggleDelegatedFold : undefined}
+                onToggleAutonomousFold={taskRecordTab === 'local' ? listOnToggleAutonomousFold : undefined}
                 onRenameSession={listOnRenameSession}
                 emptyText={i18nService.t(activeTaskRecordTab.emptyKey)}
                 selectionMode={isBatchArchiveMode && taskRecordTab === 'local'}
@@ -848,7 +848,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
         onTogglePin={handleTogglePin}
-        onToggleDelegatedFold={handleToggleDelegatedFold}
+        onToggleAutonomousFold={handleToggleAutonomousFold}
         onRenameSession={handleRenameSession}
       />
       <div className="px-3 pb-3 pt-1">

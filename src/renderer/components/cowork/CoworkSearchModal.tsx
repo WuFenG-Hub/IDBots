@@ -17,9 +17,9 @@ interface CoworkSearchModalProps {
   onDeleteSession: (sessionId: string) => void;
   onTogglePin: (sessionId: string, pinned: boolean) => void;
   onRenameSession: (sessionId: string, title: string) => void;
-  /** Move a result row in or out of the Delegated Tasks fold; optional, so a
+  /** Move a result row in or out of the Autonomous Tasks fold; optional, so a
    * host without the fold (or without the handler) simply omits the menu entry. */
-  onToggleDelegatedFold?: (sessionId: string, currentlyFolded: boolean) => void;
+  onToggleAutonomousFold?: (sessionId: string, currentlyFolded: boolean) => void;
 }
 
 const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
@@ -33,7 +33,7 @@ const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
   onDeleteSession,
   onTogglePin,
   onRenameSession,
-  onToggleDelegatedFold,
+  onToggleAutonomousFold,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [scopedOnly, setScopedOnly] = useState(true);
@@ -135,7 +135,7 @@ const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
               onDeleteSession={onDeleteSession}
               onTogglePin={onTogglePin}
               onRenameSession={onRenameSession}
-              onToggleDelegatedFold={onToggleDelegatedFold}
+              onToggleAutonomousFold={onToggleAutonomousFold}
               /** The modal re-renders with the app on a language switch; the
                * memoized list needs to see it to refresh its labels. */
               language={i18nService.getLanguage()}

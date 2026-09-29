@@ -48,7 +48,7 @@ export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task' | 
 // null/undefined = human-initiated.
 export type CoworkSessionAutoOrigin = 'longterm' | 'orchestration' | 'schedule';
 
-// Manual placement in the sidebar's "Delegated Tasks" fold (mirrors the
+// Manual placement in the sidebar's "Autonomous Tasks" fold (mirrors the
 // fold_override column): 'out' forces an auto-created row back into the main
 // conversation list, 'in' parks a human row in the fold. null/undefined = no
 // manual placement, so the auto-origin policy decides.
@@ -845,7 +845,7 @@ export interface CoworkSessionSummary {
    * Set when the app created this session on its own (long-term task run,
    * orchestration/delegation run, scheduled-task run); null/undefined =
    * human-initiated. Long-term and orchestration rows fold into the sidebar's
-   * "Delegated Tasks" folder unless the row carries a manual foldOverride.
+   * "Autonomous Tasks" folder unless the row carries a manual foldOverride.
    */
   autoOrigin?: CoworkSessionAutoOrigin | null;
   /**

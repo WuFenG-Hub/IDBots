@@ -659,11 +659,11 @@ export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task' | 
  */
 export type CoworkSessionAutoOrigin = 'longterm' | 'orchestration' | 'schedule';
 /**
- * Manual placement of a session in the sidebar's "Delegated Tasks" fold,
+ * Manual placement of a session in the sidebar's "Autonomous Tasks" fold,
  * mirroring the `fold_override` column. It wins over the auto-origin fold
  * policy: 'out' pulls an auto-created row back into the main conversation list,
  * 'in' parks a human row in the fold. NULL = no manual placement, so the policy
- * (shouldFoldIntoDelegatedTasks) decides.
+ * (shouldFoldIntoAutonomousTasks) decides.
  */
 export type CoworkSessionFoldOverride = 'in' | 'out';
 export type CoworkPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
@@ -835,7 +835,7 @@ export interface CoworkSession {
   /**
    * Auto-origin marker for sessions the app created on its own (long-term task
    * runs, orchestration/delegation runs, scheduled-task runs). Long-term and
-   * orchestration rows fold into the sidebar's collapsed "Delegated Tasks"
+   * orchestration rows fold into the sidebar's collapsed "Autonomous Tasks"
    * section (see sessionAutoGrouping). null/undefined = human-initiated.
    */
   autoOrigin?: CoworkSessionAutoOrigin | null;
@@ -3658,7 +3658,7 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
-   * Manual placement of a session in the sidebar's "Delegated Tasks" fold.
+   * Manual placement of a session in the sidebar's "Autonomous Tasks" fold.
    * 'in' parks a human row in the fold, 'out' pulls an auto-created run back
    * into the main list, null clears the override so the auto-origin policy
    * decides again. This is a pure renderer preference — it never touches the
