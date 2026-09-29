@@ -1,0 +1,62 @@
+{
+  "key": "correspondence-T3-JSP-000870",
+  "taskId": "T3-JSP-000870",
+  "jspId": "JSP-000870",
+  "scope": "record",
+  "recordTitle": "Is the series of reciprocals of powers of two minus three irrational?",
+  "recordStatementVerbatim": "Is the series of reciprocals of powers of two minus three irrational?",
+  "recordProvenance": {
+    "repository": "github.com/TheJustinSunPrize/awards",
+    "ref": "main",
+    "source": "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0801-0900.md",
+    "file": "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0801-0900.md",
+    "fetchedAt": "2026-09-29",
+    "recordFieldsVerbatim": {
+      "Current status": "Solved",
+      "Lean proof": "No"
+    },
+    "note": "Fetched live from the public bank repository on the given date; the quotes above are the bank's own cells. Re-fetch and diff before publishing if the snapshot date has moved.",
+    "jspId": "JSP-000870",
+    "publicationDetailsVerbatim": "&#91;Er48&#93; On arithmetical properties of Lambert series — J. Indian Math. Soc. (N.S.) (1948), 63-66.<br>&#91;Er88c&#93; On the irrationality of certain series: problems and results — New advances in transcendence theory (Durham, 1986) (1988), 102-109.<br>&#91;Bo91&#93; On the irrationality of $\\sum(1/(q^n+r))$ — J. Number Theory (1991), 253--259."
+  },
+  "formalizedStatement": "The series sum over n >= 2 of 1 / (2^n - 3) is irrational, formalized in Lean as an irrationality statement about the real value of that series (the index base is part of the formal statement; see the divergence risk below).",
+  "formalizationCarrier": "the Lean theorem statement the formalize nodes (lem1..lem3, crit) and the build node are checked against",
+  "definitions": [
+    {
+      "term": "the series of reciprocals of powers of two minus three",
+      "recordReading": "the bank gives only the prose phrase and cites [Er48]/[Er88c]/[Bo91]",
+      "formalizedReading": "sum_{n >= 2} 1 / (2^n - 3)",
+      "note": "Parsing of the phrase itself is a divergence risk: with n >= 1 the first denominator is 2^1 - 3 = -1, so the index base must be fixed explicitly."
+    },
+    {
+      "term": "irrational",
+      "recordReading": "the question asks whether the series is irrational (not merely whether it is transcendental)",
+      "formalizedReading": "the series value is not a rational number",
+      "note": "The formal statement must not silently strengthen the question."
+    },
+    {
+      "term": "series convergence",
+      "recordReading": "not stated separately in the record",
+      "formalizedReading": "the terms are summable (tail bounds are part of the lemma ladder)",
+      "note": "Convergence is a proof obligation of the formalization, not an extra claim of the task."
+    }
+  ],
+  "proofDirection": {
+    "recordReading": "solved by a self-contained proof (Borwein 1991, on the irrationality of sum 1/(q^n + r)); the bank records no Lean proof",
+    "formalizedReading": "proof direction: a Lambert-type/denominator-recurrence argument in a lemma ladder (convergence and partial-sum structure, denominator recurrence with a 2-adic bound, tail estimate, integer-ratio lower bound), then lake build"
+  },
+  "divergenceRisks": [
+    "Index base: the bank's phrasing does not fix where the series starts. 2^1 - 3 = -1, so the series must start at n >= 2 (or be written as a value-shifted Lambert series); this must be confirmed against [Bo91] before the Lean statement is frozen, since the artifact's statement is what the formalization is checked against.",
+    "The record says Lean proof = No. The campaign is producing the first formalization of this statement; the artifact and the task text must not claim an existing formalization.",
+    "[Er48] is the problem source, [Er88c] the survey, [Bo91] the proof (J. Number Theory (1991), 253-259). Proof-direction reviews must be compared against [Bo91], not against the record's one-line question.",
+    "Scope: the formalized statement is the irrationality of this specific series — not of a general family, and not a transcendence claim."
+  ],
+  "coverage": [
+    "statement",
+    "definitions",
+    "proof-direction"
+  ],
+  "publishStatus": "PUBLISH_ARTIFACT_FIRST",
+  "publishedPin": "PUBLISH_ARTIFACT_FIRST",
+  "publishFormat": "Publish this artifact as a MetaWeb file/metafile pin (metabot upload) BEFORE the spec that cites it, then replace BOTH spec.validation.proposition_fidelity.correspondence and .artifactPin with the returned pin:// or metafile:// id (they must stay equal). Never replace it with a self-declared boolean: protocol v1.2.1 paths.spec.fields.validation.proposition_fidelity requires an independent correspondence artifact."
+}

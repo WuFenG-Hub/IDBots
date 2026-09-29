@@ -1,0 +1,63 @@
+{
+  "key": "correspondence-T4-JSP-000598",
+  "taskId": "T4-JSP-000598",
+  "jspId": "JSP-000598",
+  "scope": "record",
+  "recordTitle": "Can two distinct central binomial coefficients have exactly the same prime divisors?",
+  "recordStatementVerbatim": "Can two distinct central binomial coefficients have exactly the same prime divisors?",
+  "recordProvenance": {
+    "repository": "github.com/TheJustinSunPrize/awards",
+    "ref": "main",
+    "source": "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0501-0600.md",
+    "file": "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0501-0600.md",
+    "fetchedAt": "2026-09-29",
+    "recordFieldsVerbatim": {
+      "Current status": "Solved<br>Proof contributors: GPT Pro, prompted by Liam Price (solution).",
+      "Lean proof": "No"
+    },
+    "note": "Fetched live from the public bank repository on the given date; the quotes above are the bank's own cells. Re-fetch and diff before publishing if the snapshot date has moved.",
+    "jspId": "JSP-000598",
+    "publicationDetailsVerbatim": "&#91;EGRS75&#93; On the prime factors of $(\\sp{2n}\\sb{n})$ — Math. Comp. (1975), 83-92.<br>[Additional proof or exposition](https://www.overleaf.com/read/gpttrsmhbhbk#a7cfdf)",
+    "expositionLink": "https://www.overleaf.com/read/gpttrsmhbhbk#a7cfdf"
+  },
+  "formalizedStatement": "For all distinct a, b >= 0 the central binomial coefficients C(2a,a) and C(2b,b) do not have exactly the same set of prime divisors, i.e. rad(C(2a,a)) != rad(C(2b,b)) where rad(x) is the product of the distinct primes dividing x.",
+  "formalizationCarrier": "the Lean theorem statement of the T4 formalize node and the base/step recheck scope of the four review nodes",
+  "definitions": [
+    {
+      "term": "have exactly the same prime divisors",
+      "recordReading": "the question's phrase, matching the prime-support results of [EGRS75]",
+      "formalizedReading": "equal radical (set of prime divisors), NOT equal factorization with multiplicities",
+      "note": "The distinction matters: equality of the full prime factorization would be a different (trivial) question. The formal statement must use the set reading."
+    },
+    {
+      "term": "two distinct central binomial coefficients",
+      "recordReading": "central binomial coefficients C(2a,a), C(2b,b) of the record's title",
+      "formalizedReading": "C(2a,a) with a != b",
+      "note": "Central binomial coefficients are strictly increasing in a, so numerical distinctness is automatic; the formal statement keeps a != b as the index condition."
+    },
+    {
+      "term": "prime support of C(2n,n)",
+      "recordReading": "[EGRS75] 'On the prime factors of C(2n,n)' (Math. Comp. (1975), 83-92)",
+      "formalizedReading": "the set of primes p for which the p-adic valuation of C(2n,n) is positive",
+      "note": "The formalization's base lemmas must be stated in this form to match the cited result."
+    }
+  ],
+  "proofDirection": {
+    "recordReading": "solved (solution credited to GPT Pro, prompted by Liam Price) on top of the [EGRS75] base result",
+    "formalizedReading": "proof direction: (i) restate and check the [EGRS75] base statement, (ii) recheck the credited proof chain step by step, (iii) formalize the resulting theorem and build it — no counting or asymptotic claim is added"
+  },
+  "divergenceRisks": [
+    "Prime-divisor equality means the SET of primes (radical), not multiplicities; the formal statement must say so explicitly or it formalizes a different question.",
+    "The credited solution is AI-authored and the bank's scholarly-recognition field reads Unverified; the artifact must not present the solution as externally recognized.",
+    "The proof exposition is a read-only Overleaf link supplied by the record (overleaf.com/read/gpttrsmhbhbk). Its long-term stability is not guaranteed, so the proof-direction chain the nodes recheck must be written into the artifact itself, not only referenced.",
+    "[EGRS75] Math. Comp. (1975), 83-92 is the only peer-reviewed anchor; the Lean formalization should not depend on the exposition link."
+  ],
+  "coverage": [
+    "statement",
+    "definitions",
+    "proof-direction"
+  ],
+  "publishStatus": "PUBLISH_ARTIFACT_FIRST",
+  "publishedPin": "PUBLISH_ARTIFACT_FIRST",
+  "publishFormat": "Publish this artifact as a MetaWeb file/metafile pin (metabot upload) BEFORE the spec that cites it, then replace BOTH spec.validation.proposition_fidelity.correspondence and .artifactPin with the returned pin:// or metafile:// id (they must stay equal). Never replace it with a self-declared boolean: protocol v1.2.1 paths.spec.fields.validation.proposition_fidelity requires an independent correspondence artifact."
+}

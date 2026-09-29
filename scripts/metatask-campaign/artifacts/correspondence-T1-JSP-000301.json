@@ -1,0 +1,64 @@
+{
+  "key": "correspondence-T1-JSP-000301",
+  "taskId": "T1-JSP-000301",
+  "jspId": "JSP-000301",
+  "scope": "record",
+  "recordTitle": "If two consecutive positive integers are powerful, must at least one be a perfect square?",
+  "recordStatementVerbatim": "If two consecutive positive integers are powerful, must at least one be a perfect square?",
+  "recordProvenance": {
+    "repository": "github.com/TheJustinSunPrize/awards",
+    "ref": "main",
+    "source": "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0301-0400.md",
+    "file": "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0301-0400.md",
+    "fetchedAt": "2026-09-29",
+    "recordFieldsVerbatim": {
+      "Current status": "Solved<br>Proof contributors: Solomon W. Golomb (counterexample in [Go70], 1970; [attribution source](https://www.erdosproblems.com/latex/365)).",
+      "Lean proof": "No"
+    },
+    "note": "Fetched live from the public bank repository on the given date; the quotes above are the bank's own cells. Re-fetch and diff before publishing if the snapshot date has moved.",
+    "jspId": "JSP-000301",
+    "reviewNoteField": "Record correction - Source review 2026-09-13",
+    "reviewNoteVerbatim": "Disproved: 12167 = 23³ and 12168 = 2³ × 3² × 13² are consecutive powerful numbers, and neither is a perfect square. A powerful number has exponent at least two in every prime factor. The displayed factorizations verify this property for 12167 and 12168. Both lie strictly between 110² = 12100 and 111² = 12321, so neither is a square. This disproves the stated yes/no question. This record covers that question only, not the separate counting question in [Erdős problem #365](https://www.erdosproblems.com/365). The previous 1976→2026 interval is removed because it does not establish the duration of the stated question.",
+    "publicationDetailsVerbatim": "&#91;Go70&#93; [Powerful numbers](https://doi.org/10.2307/2317020) — Amer. Math. Monthly 77(8) (1970), 848-852.<br>&#91;Wa76&#93; [Consecutive integer pairs of powerful numbers and related Diophantine equations](https://doi.org/10.1080/00150517.1976.12430562) — Fibonacci Quart. (1976), 111-116.<br>&#91;Gu04&#93; Unsolved problems in number theory — (2004), xviii+437."
+  },
+  "formalizedStatement": "There exist consecutive positive integers n and m = n + 1 (both >= 1) that are both powerful and neither of which is a perfect square. The verifier accepts the explicit pair as its input and checks (i) m = n + 1, (ii) every prime divisor p of n and of m satisfies p^2 | the number, (iii) neither n nor m is a square. The published pair of the record is 12167 and 12168.",
+  "formalizationCarrier": "the T1 verifier input contract (spec-powerful-pair.py fields n, m) and the witness node's provenance quote",
+  "definitions": [
+    {
+      "term": "powerful",
+      "recordReading": "the record's own review note: \"A powerful number has exponent at least two in every prime factor\"",
+      "formalizedReading": "for every prime p, p | x implies p^2 | x",
+      "note": "Equivalent definitions agree; the exponent form is what the verifier certifies."
+    },
+    {
+      "term": "consecutive positive integers",
+      "recordReading": "\"two consecutive positive integers\" in the question",
+      "formalizedReading": "m = n + 1 with n >= 1",
+      "note": "The pair is unordered in the record; the task fixes the smaller member as n."
+    },
+    {
+      "term": "perfect square",
+      "recordReading": "the question's square condition",
+      "formalizedReading": "there is no integer k with k^2 = x",
+      "note": "The record's note proves it by bounding 110^2 = 12100 < 12167, 12168 < 12321 = 111^2; the verifier tests the exact integer square condition instead."
+    }
+  ],
+  "proofDirection": {
+    "recordReading": "a yes/no question answered NO by an explicit counterexample pair (attributed to Solomon W. Golomb, [Go70], 1970)",
+    "formalizedReading": "counterexample direction: an existential statement over pairs, refuted by one certified pair; no family, density or counting claim is required"
+  },
+  "divergenceRisks": [
+    "Scope limit stated by the record itself: \"This record covers that question only, not the separate counting question in [Erdos problem #365]\". The task must not ask for families or counts.",
+    "The witness is printed in the record's own review note, so the witness node's work is the provenance binding plus an independently re-derived factorization certificate — not discovery. The proof node re-runs the predicates independently (spec-powerful-pair.py); review binds both to this artifact.",
+    "The record's yes/no phrasing must not be formalized as a positive existence claim about the question's phrasing; the formal statement is the negation form (an explicit pair exists).",
+    "[Wa76]/[Gu04] are listed alongside [Go70]; the artifact pins [Go70] as the attribution source used by the record (Amer. Math. Monthly 77(8) (1970), 848-852)."
+  ],
+  "coverage": [
+    "statement",
+    "definitions",
+    "proof-direction"
+  ],
+  "publishStatus": "PUBLISH_ARTIFACT_FIRST",
+  "publishedPin": "PUBLISH_ARTIFACT_FIRST",
+  "publishFormat": "Publish this artifact as a MetaWeb file/metafile pin (metabot upload) BEFORE the spec that cites it, then replace BOTH spec.validation.proposition_fidelity.correspondence and .artifactPin with the returned pin:// or metafile:// id (they must stay equal). Never replace it with a self-declared boolean: protocol v1.2.1 paths.spec.fields.validation.proposition_fidelity requires an independent correspondence artifact."
+}

@@ -168,8 +168,8 @@
         "definitions",
         "proof-direction"
       ],
-      "publishStatus": "PUBLISH_ARTIFACT_FIRST",
-      "publishedPin": "PUBLISH_ARTIFACT_FIRST",
+      "publishStatus": "published",
+      "publishedPin": "metafile://57803539799580c39f98b4d8705604e4e24767c0cbefcf6eab12a0f15c4d652ci0.json",
       "publishFormat": "Publish this artifact as a MetaWeb file/metafile pin (metabot upload) BEFORE the spec that cites it, then replace BOTH spec.validation.proposition_fidelity.correspondence and .artifactPin with the returned pin:// or metafile:// id (they must stay equal). Never replace it with a self-declared boolean: protocol v1.2.1 paths.spec.fields.validation.proposition_fidelity requires an independent correspondence artifact."
     },
     {
@@ -232,8 +232,8 @@
         "definitions",
         "proof-direction"
       ],
-      "publishStatus": "PUBLISH_ARTIFACT_FIRST",
-      "publishedPin": "PUBLISH_ARTIFACT_FIRST",
+      "publishStatus": "published",
+      "publishedPin": "metafile://bee0627b78619f3646190e9440520368390d29222e0b06fdba848dfc3dd951a9i0.json",
       "publishFormat": "Publish this artifact as a MetaWeb file/metafile pin (metabot upload) BEFORE the spec that cites it, then replace BOTH spec.validation.proposition_fidelity.correspondence and .artifactPin with the returned pin:// or metafile:// id (they must stay equal). Never replace it with a self-declared boolean: protocol v1.2.1 paths.spec.fields.validation.proposition_fidelity requires an independent correspondence artifact."
     },
     {
@@ -294,8 +294,8 @@
         "definitions",
         "proof-direction"
       ],
-      "publishStatus": "PUBLISH_ARTIFACT_FIRST",
-      "publishedPin": "PUBLISH_ARTIFACT_FIRST",
+      "publishStatus": "published",
+      "publishedPin": "metafile://028e1432d1059070fc76ceeed018c45429d1263ba5c2f0ad1c5e6e69c8dfb01ci0.json",
       "publishFormat": "Publish this artifact as a MetaWeb file/metafile pin (metabot upload) BEFORE the spec that cites it, then replace BOTH spec.validation.proposition_fidelity.correspondence and .artifactPin with the returned pin:// or metafile:// id (they must stay equal). Never replace it with a self-declared boolean: protocol v1.2.1 paths.spec.fields.validation.proposition_fidelity requires an independent correspondence artifact."
     },
     {
@@ -357,8 +357,8 @@
         "definitions",
         "proof-direction"
       ],
-      "publishStatus": "PUBLISH_ARTIFACT_FIRST",
-      "publishedPin": "PUBLISH_ARTIFACT_FIRST",
+      "publishStatus": "published",
+      "publishedPin": "metafile://278227d8e0c2190de8a40a17d15dde99dc6062bdfc75ec5dd0f7b7ef747e21b9i0.json",
       "publishFormat": "Publish this artifact as a MetaWeb file/metafile pin (metabot upload) BEFORE the spec that cites it, then replace BOTH spec.validation.proposition_fidelity.correspondence and .artifactPin with the returned pin:// or metafile:// id (they must stay equal). Never replace it with a self-declared boolean: protocol v1.2.1 paths.spec.fields.validation.proposition_fidelity requires an independent correspondence artifact."
     }
   ]

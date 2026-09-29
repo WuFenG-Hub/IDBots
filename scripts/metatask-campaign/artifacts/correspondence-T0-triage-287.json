@@ -1,0 +1,81 @@
+{
+  "key": "correspondence-T0-triage-287",
+  "taskId": "T0-triage-287",
+  "jspId": null,
+  "scope": "batch",
+  "recordTitle": "JSP bank records — filters that define the triage universe",
+  "recordStatementVerbatim": "Filter fields read verbatim from every record: \"Current status\" = Solved (the bank writes either exactly \"Solved\" or \"Solved<br>Proof contributors: ...\") and \"Lean proof\" = No.",
+  "recordProvenance": {
+    "repository": "github.com/TheJustinSunPrize/awards",
+    "ref": "main",
+    "source": "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/README.md",
+    "file": "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/README.md",
+    "recordFiles": [
+      "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0001-0100.md",
+      "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0101-0200.md",
+      "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0201-0300.md",
+      "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0301-0400.md",
+      "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0401-0500.md",
+      "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0501-0600.md",
+      "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0601-0700.md",
+      "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0701-0800.md",
+      "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0801-0900.md",
+      "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-0901-1000.md",
+      "https://raw.githubusercontent.com/TheJustinSunPrize/awards/main/problems/catalog-1001-1022.md"
+    ],
+    "fetchedAt": "2026-09-29",
+    "note": "All 11 catalog files were fetched and parsed on the snapshot date; the per-batch counts below are reproducible from them."
+  },
+  "formalizedStatement": "Every batch node submits exactly one classification table {\"from\", \"to\", \"expected\", \"records\":[{\"jsp\",\"certificateType\",\"mathlibFeasibility\",\"keyPaperPages\",\"notes\"}]} covering the records whose JSP number lies in [from, to] and whose bank record reads \"Current status\" starting with Solved AND \"Lean proof\" = No under the 2026-09-29 snapshot: records.length must equal expected, every jsp must be inside [from, to], and certificateType / mathlibFeasibility / keyPaperPages must lie in the declared domains.",
+  "formalizationCarrier": "the batch table contract of spec triage-table-check (T0 tree nodes b01..b10)",
+  "definitions": [
+    {
+      "term": "Current status = Solved (the enumeration filter)",
+      "recordReading": "the bank marks the record solved; some cells append \"<br>Proof contributors: ...\"",
+      "formalizedReading": "\"Current status\" begins with \"Solved\"",
+      "note": "This reading yields 287 records over JSP-000001..JSP-001022 on 2026-09-29; exact equality (\"Solved\" with no contributor note) yields 253. The prefix reading is the campaign's declared filter and is pinned by the batch params."
+    },
+    {
+      "term": "Lean proof = No",
+      "recordReading": "the bank field \"Lean proof\" equals \"No\"",
+      "formalizedReading": "\"Lean proof\" == \"No\"",
+      "note": "Records marked \"Yes\" are out of scope; the eligibility field (\"Eligible to claim\") is NOT part of the filter."
+    },
+    {
+      "term": "certificateType",
+      "recordReading": "not a bank field — the classification axis the campaign adds",
+      "formalizedReading": "enum {witness, bounded-computation, self-contained-proof, deep-theory}",
+      "note": "The enum is the campaign's own vocabulary; the artifact states it so reviewers can compare."
+    },
+    {
+      "term": "mathlibFeasibility",
+      "recordReading": "not a bank field — a campaign-side feasibility guess",
+      "formalizedReading": "enum {high, medium, low, unknown}",
+      "note": "\"unknown\" is a legitimate value; the bank carries no formalization-state information."
+    },
+    {
+      "term": "keyPaperPages",
+      "recordReading": "the publication details of the record (journal article page ranges)",
+      "formalizedReading": "integer >= 1, or null when the record carries no publication details",
+      "note": "Convention: the inclusive page count of the single key paper cited for the solution, not every entry of the publication list; batches must state the convention in notes."
+    }
+  ],
+  "proofDirection": {
+    "recordReading": "the bank's status field asserts a solved record; the campaign does not re-solve it",
+    "formalizedReading": "the task classifies, it does not verify mathematics: machine closure is schema, range, uniqueness and count coverage; per-row substantive correctness is the review node's semantic_check"
+  },
+  "divergenceRisks": [
+    "Filter reading: prefix Solved = 287 records vs exact Solved = 253 on 2026-09-29. Every batch param.expected uses the prefix reading; if the intended universe is the exact reading the counts change everywhere, so this must be re-published (never amended) rather than patched.",
+    "Snapshot drift: the bank is a live repository (ref main). The counts are valid for 2026-09-29 only; re-run the scan and compare before publishing, and never amend the params afterwards.",
+    "Page-count convention: the bank lists journal page ranges (for example \"848-852\"); whether keyPaperPages counts those four pages or the whole publication list must be stated per row.",
+    "Scope: two 2026-09-11 review notes in the bank reclassify Lean proof and eligibility. Only the two filter fields above are in scope; classification must not import the eligibility field."
+  ],
+  "coverage": [
+    "statement",
+    "definitions",
+    "proof-direction"
+  ],
+  "publishStatus": "PUBLISH_ARTIFACT_FIRST",
+  "publishedPin": "PUBLISH_ARTIFACT_FIRST",
+  "publishFormat": "Publish this artifact as a MetaWeb file/metafile pin (metabot upload) BEFORE the spec that cites it, then replace BOTH spec.validation.proposition_fidelity.correspondence and .artifactPin with the returned pin:// or metafile:// id (they must stay equal). Never replace it with a self-declared boolean: protocol v1.2.1 paths.spec.fields.validation.proposition_fidelity requires an independent correspondence artifact."
+}

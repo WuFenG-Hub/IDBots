@@ -160,8 +160,8 @@
           "count_meaning": "sum of the ten batch expected counts = solved-no-lean records in the 2026-09-29 snapshot (prefix-Solved reading); every batch param.expected must equal its vector and the reviewed submission's records.length must equal expected"
         },
         "proposition_fidelity": {
-          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
-          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactPin": "metafile://57803539799580c39f98b4d8705604e4e24767c0cbefcf6eab12a0f15c4d652ci0.json",
+          "correspondence": "metafile://57803539799580c39f98b4d8705604e4e24767c0cbefcf6eab12a0f15c4d652ci0.json",
           "artifactKey": "correspondence-T0-triage-287",
           "coverage": [
             "statement",
@@ -205,8 +205,8 @@
           }
         },
         "proposition_fidelity": {
-          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
-          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactPin": "metafile://bee0627b78619f3646190e9440520368390d29222e0b06fdba848dfc3dd951a9i0.json",
+          "correspondence": "metafile://bee0627b78619f3646190e9440520368390d29222e0b06fdba848dfc3dd951a9i0.json",
           "artifactKey": "correspondence-T1-JSP-000301",
           "coverage": [
             "statement",
@@ -267,8 +267,8 @@
           }
         },
         "proposition_fidelity": {
-          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
-          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactPin": "metafile://bee0627b78619f3646190e9440520368390d29222e0b06fdba848dfc3dd951a9i0.json",
+          "correspondence": "metafile://bee0627b78619f3646190e9440520368390d29222e0b06fdba848dfc3dd951a9i0.json",
           "artifactKey": "correspondence-T1-JSP-000301",
           "coverage": [
             "statement",
@@ -331,8 +331,8 @@
           "count_meaning": "covered required items out of 3; the script prints expected_count = 3"
         },
         "proposition_fidelity": {
-          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
-          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactPin": "metafile://bee0627b78619f3646190e9440520368390d29222e0b06fdba848dfc3dd951a9i0.json",
+          "correspondence": "metafile://bee0627b78619f3646190e9440520368390d29222e0b06fdba848dfc3dd951a9i0.json",
           "artifactKey": "correspondence-T1-JSP-000301",
           "coverage": [
             "statement",
@@ -373,8 +373,8 @@
           }
         },
         "proposition_fidelity": {
-          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
-          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactPin": "metafile://028e1432d1059070fc76ceeed018c45429d1263ba5c2f0ad1c5e6e69c8dfb01ci0.json",
+          "correspondence": "metafile://028e1432d1059070fc76ceeed018c45429d1263ba5c2f0ad1c5e6e69c8dfb01ci0.json",
           "artifactKey": "correspondence-T3-JSP-000870",
           "coverage": [
             "statement",
@@ -416,8 +416,8 @@
           }
         },
         "proposition_fidelity": {
-          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
-          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactPin": "metafile://278227d8e0c2190de8a40a17d15dde99dc6062bdfc75ec5dd0f7b7ef747e21b9i0.json",
+          "correspondence": "metafile://278227d8e0c2190de8a40a17d15dde99dc6062bdfc75ec5dd0f7b7ef747e21b9i0.json",
           "artifactKey": "correspondence-T4-JSP-000598",
           "coverage": [
             "statement",
@@ -468,8 +468,8 @@
           "count_meaning": "numbers of build-failing declarations (errors + sorry warnings) in each vector"
         },
         "proposition_fidelity": {
-          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
-          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactPin": "metafile://028e1432d1059070fc76ceeed018c45429d1263ba5c2f0ad1c5e6e69c8dfb01ci0.json",
+          "correspondence": "metafile://028e1432d1059070fc76ceeed018c45429d1263ba5c2f0ad1c5e6e69c8dfb01ci0.json",
           "artifactKey": "correspondence-T3-JSP-000870",
           "coverage": [
             "statement",
@@ -516,8 +516,8 @@
           "count_meaning": "numbers of build-failing declarations (errors + sorry warnings) in each vector"
         },
         "proposition_fidelity": {
-          "artifactPin": "PUBLISH_ARTIFACT_FIRST",
-          "correspondence": "PUBLISH_ARTIFACT_FIRST",
+          "artifactPin": "metafile://278227d8e0c2190de8a40a17d15dde99dc6062bdfc75ec5dd0f7b7ef747e21b9i0.json",
+          "correspondence": "metafile://278227d8e0c2190de8a40a17d15dde99dc6062bdfc75ec5dd0f7b7ef747e21b9i0.json",
           "artifactKey": "correspondence-T4-JSP-000598",
           "coverage": [
             "statement",
