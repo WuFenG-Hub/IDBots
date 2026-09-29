@@ -505,6 +505,17 @@ export class DshTurnHub {
    *  the overwrite made the loser's finally delete the winner's event
    *  registrations, silently dropping a reply the runtime had produced. */
   private turnChainsByDsh = new Map<string, Promise<void>>()
+  /** Abort-convergence guard: the kernel's session/cancel ack means the abort
+   *  was REQUESTED, not that it converged (0.2.0 does tool-result recovery
+   *  work on the abort path, widening the window further). Session-scoped
+   *  wire events carry no turn discriminator, so a runTurn that registers its
+   *  controller while the previous turn's abort is still converging catches
+   *  the late turn-end boundary and settles instantly with a phantom
+   *  'aborted' (observed 2026-09-29: a watchdog-cancelled turn's boundary
+   *  killed the re-sent turn 7ms in). runTurn waits for the next turn-end
+   *  boundary after a cancel — or a bounded backstop, since a cancel against
+   *  an already-idle agent never emits one. */
+  private pendingAbortByDsh = new Map<string, { promise: Promise<void>; settle: () => void; timer: ReturnType<typeof setTimeout> }>()
   /** Set the moment close() begins: turns submitted afterwards fail soft
    *  (DshShutdownError) instead of booting orphan runtimes during shutdown. */
   private closed = false
@@ -581,6 +592,12 @@ export class DshTurnHub {
     const mine = new Promise<void>((resolve) => { releaseTurn = resolve })
     this.turnChainsByDsh.set(input.dshSessionId, mine)
     try {
+      // Hold the chain while the previous turn's abort converges: queued
+      // turns wait behind us, and we must not register a controller while a
+      // late turn-end boundary for the cancelled predecessor can still arrive
+      // (see pendingAbortByDsh).
+      await this.pendingAbortByDsh.get(input.dshSessionId)?.promise
+      if (this.closed) throw new DshShutdownError()
       return await this.runTurnExclusive(input)
     } finally {
       // Runs after runTurnExclusive's own finally (controller cleanup), so a
@@ -858,7 +875,39 @@ export class DshTurnHub {
     const controller = this.controllerOfCowork(sessionId)
     const kernel = this.kernelForDsh(controller?.dshSessionId)
     if (!controller || !kernel) return
-    await kernel.cancel(controller.dshSessionId, cause)
+    // Arm BEFORE issuing the RPC: the abort's turn-end boundary can arrive
+    // ahead of the ack, and a missed boundary would hold the next turn until
+    // the backstop.
+    this.armAbortConvergence(controller.dshSessionId)
+    try {
+      await kernel.cancel(controller.dshSessionId, cause)
+    } catch (error) {
+      // A rejected cancel means no abort is converging (session gone, dead
+      // runtime) — disarm so the next turn is not held to the backstop.
+      this.pendingAbortByDsh.get(controller.dshSessionId)?.settle()
+      throw error
+    }
+  }
+
+  /** Backstop for the abort-convergence guard: a cancel against an already
+   *  idle agent never emits a turn-end boundary, so the wait must be bounded. */
+  private static readonly ABORT_CONVERGENCE_BACKSTOP_MS = 2000
+
+  private armAbortConvergence(dshSessionId: string): void {
+    if (this.pendingAbortByDsh.has(dshSessionId)) return
+    let settle!: () => void
+    const promise = new Promise<void>((resolve) => {
+      settle = () => {
+        const entry = this.pendingAbortByDsh.get(dshSessionId)
+        if (!entry) return
+        clearTimeout(entry.timer)
+        this.pendingAbortByDsh.delete(dshSessionId)
+        resolve()
+      }
+    })
+    const timer = setTimeout(() => settle(), DshTurnHub.ABORT_CONVERGENCE_BACKSTOP_MS)
+    timer.unref?.()
+    this.pendingAbortByDsh.set(dshSessionId, { promise, settle, timer })
   }
 
   /** Cancel a live DSH agent by its runtime session id (subagent Stop). */
@@ -1014,6 +1063,9 @@ export class DshTurnHub {
       clearTimeout(this.reapTimer)
       this.reapTimer = null
     }
+    // Release turns parked on the abort-convergence guard; they fail soft on
+    // the closed check right after.
+    for (const entry of [...this.pendingAbortByDsh.values()]) entry.settle()
     const kernels: Promise<void>[] = []
     for (const slot of this.slots.values()) {
       kernels.push(slot.kernel.close())
@@ -1425,6 +1477,9 @@ export class DshTurnHub {
         controllerOf(sessionId)?.cb.onUsage(usage)
       },
       onTurnEnd: (sessionId, reason, emptyTerminal) => {
+        // A turn boundary marks the session's pending abort as converged —
+        // release a queued next turn waiting on it before dispatching.
+        this.pendingAbortByDsh.get(sessionId)?.settle()
         controllerOf(sessionId)?.handleTurnEnd(reason, emptyTerminal)
       },
       onApprovalRequest: (sessionId, ask) => {

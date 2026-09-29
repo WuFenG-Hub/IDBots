@@ -82,7 +82,7 @@ class RecordingStore {
   getSessionUsageStats() { return null }
 }
 
-test('DSH turn stall watchdog cancels a wedged turn', { skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed' }, async () => {
+test('DSH turn stall watchdog cancels a wedged turn', { skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed' }, async (t) => {
   const { runner: runnerModule, claudeSettings } = loadModules()
   const { CoworkRunner } = runnerModule
   const { startMockServer } = await import(path.join(runtimeDir, 'test', 'fixtures', 'mock-openai.mjs'))
@@ -108,6 +108,13 @@ test('DSH turn stall watchdog cancels a wedged turn', { skip: runtimeReady ? fal
 
   const store = new RecordingStore()
   const runner = new CoworkRunner(store, { dshTurnStallTimeoutMs: 1500 })
+  // Cleanup rides t.after: a failed assertion skips trailing statements, and
+  // a leaked runtime + mock server wedged the whole test process (2026-09-29).
+  t.after(async () => {
+    await runner.dshTurnHub?.close().catch(() => undefined)
+    server.close()
+    fs.rmSync(userData, { recursive: true, force: true })
+  })
 
   const sessionId = 'stall-watch'
   const activeSession = {
@@ -137,10 +144,6 @@ test('DSH turn stall watchdog cancels a wedged turn', { skip: runtimeReady ? fal
   const diagnostic = store.messages.find((m) => m.sessionId === sessionId && m.metadata?.dshTurnStalled === true)
   assert.ok(diagnostic, 'stall diagnostic system message recorded (metadata flag for the i18n renderer)')
   assert.equal(runner.dshStallStrikesBySessionId.get(sessionId), 1, 'the watchdog cancellation recorded a strike')
-
-  await runner.dshTurnHub?.close().catch(() => undefined)
-  server.close()
-  fs.rmSync(userData, { recursive: true, force: true })
 })
 
 // Group Task #26 regression: a long foreground bash command (render, first
@@ -148,7 +151,7 @@ test('DSH turn stall watchdog cancels a wedged turn', { skip: runtimeReady ? fal
 // the watchdog must treat the in-flight tool call as progress instead of
 // cancelling the turn at the deadline. The watchdog here (1.5s) is far
 // shorter than the command (5s), so the old code cancelled mid-tool.
-test('DSH turn survives a long-running foreground tool call past the stall deadline', { skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed' }, async () => {
+test('DSH turn survives a long-running foreground tool call past the stall deadline', { skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed' }, async (t) => {
   const { runner: runnerModule, claudeSettings } = loadModules()
   const { CoworkRunner } = runnerModule
   const { startMockServer } = await import(path.join(runtimeDir, 'test', 'fixtures', 'mock-openai.mjs'))
@@ -174,6 +177,13 @@ test('DSH turn survives a long-running foreground tool call past the stall deadl
 
   const store = new RecordingStore()
   const runner = new CoworkRunner(store, { dshTurnStallTimeoutMs: 1500 })
+  // Cleanup rides t.after: a failed assertion skips trailing statements, and
+  // a leaked runtime + mock server wedged the whole test process (2026-09-29).
+  t.after(async () => {
+    await runner.dshTurnHub?.close().catch(() => undefined)
+    server.close()
+    fs.rmSync(userData, { recursive: true, force: true })
+  })
 
   const sessionId = 'stall-watch-long-tool'
   const activeSession = {
@@ -211,10 +221,6 @@ test('DSH turn survives a long-running foreground tool call past the stall deadl
   assert.equal(stalled, undefined, 'no stall diagnostic fired while the tool was in flight')
   // A normally completed turn clears the consecutive-stall ladder.
   assert.equal(runner.dshStallStrikesBySessionId.get(sessionId), undefined, 'healthy completion clears the stall-strike ladder')
-
-  await runner.dshTurnHub?.close().catch(() => undefined)
-  server.close()
-  fs.rmSync(userData, { recursive: true, force: true })
 })
 
 // 2026-09-28 regression (session 2bcfbb63): a heavy-context turn legitimately
@@ -225,7 +231,7 @@ test('DSH turn survives a long-running foreground tool call past the stall deadl
 // re-send gets a wider window, and (b) widen the FIRST attempt by the live
 // context size. Both extension tests run at scale 1/300 so production
 // minutes collapse to test seconds while the base stays overridden-fast.
-test('DSH stall watchdog records a strike and widens the next deadline', { skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed' }, async () => {
+test('DSH stall watchdog records a strike and widens the next deadline', { skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed' }, async (t) => {
   const { runner: runnerModule, claudeSettings } = loadModules()
   const { CoworkRunner } = runnerModule
   const { startMockServer } = await import(path.join(runtimeDir, 'test', 'fixtures', 'mock-openai.mjs'))
@@ -251,6 +257,13 @@ test('DSH stall watchdog records a strike and widens the next deadline', { skip:
 
   const store = new RecordingStore()
   const runner = new CoworkRunner(store, { dshTurnStallTimeoutMs: 1500, dshStallExtensionScale: 1 / 300 })
+  // Cleanup rides t.after: a failed assertion skips trailing statements, and
+  // a leaked runtime + mock server wedged the whole test process (2026-09-29).
+  t.after(async () => {
+    await runner.dshTurnHub?.close().catch(() => undefined)
+    server.close()
+    fs.rmSync(userData, { recursive: true, force: true })
+  })
 
   const sessionId = 'stall-watch-strike'
   const activeSession = {
@@ -270,18 +283,31 @@ test('DSH stall watchdog records a strike and widens the next deadline', { skip:
   runner.on('error', () => undefined)
   runner.on('permissionRequest', () => undefined)
 
+  // Full state snapshot for the failure messages below — the 2026-09-29 flake
+  // (a late abort boundary from the cancelled first turn killing the re-sent
+  // second turn 7ms in) was only diagnosable from a dump like this.
+  const dumpState = () => JSON.stringify({
+    strikes: runner.dshStallStrikesBySessionId.get(sessionId) ?? null,
+    sessionStatus: store.sessions.get(sessionId)?.status ?? null,
+    messages: store.messages
+      .filter((m) => m.sessionId === sessionId)
+      .map((m) => ({ type: m.type, meta: m.metadata ?? null, content: String(m.content ?? '').slice(0, 160) })),
+  })
+
   // First attempt: no strikes yet → base deadline (1.5s) cancels the wedged
   // turn exactly as before, and the cancellation records strike 1.
   const completed = new Promise((resolve) => runner.once('complete', resolve))
   await runner.runDshSessionLocal(activeSession, 'HANG_TEST please', process.cwd(), 'You are Alice.')
   await completed
-  assert.equal(store.messages.some((m) => m.sessionId === sessionId && m.metadata?.dshTurnStalled === true), true, 'first attempt cancelled at the base deadline')
-  assert.equal(runner.dshStallStrikesBySessionId.get(sessionId), 1, 'the cancellation recorded a strike')
+  assert.equal(store.messages.some((m) => m.sessionId === sessionId && m.metadata?.dshTurnStalled === true), true, `first attempt cancelled at the base deadline; state=${dumpState()}`)
+  assert.equal(runner.dshStallStrikesBySessionId.get(sessionId), 1, `the cancellation recorded a strike; state=${dumpState()}`)
 
   // Second attempt: strike 1 adds 10 min × 1/300 = 2s → the SAME wedged
   // provider now survives past the 1.5s base deadline and is only cancelled
   // at the extended deadline (~3.5s). This is the "re-send must outlive the
-  // ceiling that killed the first attempt" contract.
+  // ceiling that killed the first attempt" contract. The hub's abort-
+  // convergence guard (pendingAbortByDsh) holds this re-send until the first
+  // turn's abort boundary arrives, so the late boundary cannot kill it.
   const activeSession2 = {
     ...activeSession,
     pendingPermission: null,
@@ -293,16 +319,12 @@ test('DSH stall watchdog records a strike and widens the next deadline', { skip:
   await runner.runDshSessionLocal(activeSession2, 'HANG_TEST please', process.cwd(), 'You are Alice.')
   await completed2
   const elapsed = Date.now() - startedAt
-  assert.ok(elapsed >= 3000, `second attempt outlived the base deadline (elapsed ${elapsed}ms)`)
-  assert.ok(elapsed < 15000, `extended deadline still bounded (elapsed ${elapsed}ms)`)
-  assert.equal(runner.dshStallStrikesBySessionId.get(sessionId), 2, 'second cancellation escalated the strike ladder')
-
-  await runner.dshTurnHub?.close().catch(() => undefined)
-  server.close()
-  fs.rmSync(userData, { recursive: true, force: true })
+  assert.ok(elapsed >= 3000, `second attempt outlived the base deadline (elapsed ${elapsed}ms); state=${dumpState()}`)
+  assert.ok(elapsed < 15000, `extended deadline still bounded (elapsed ${elapsed}ms); state=${dumpState()}`)
+  assert.equal(runner.dshStallStrikesBySessionId.get(sessionId), 2, `second cancellation escalated the strike ladder; state=${dumpState()}`)
 })
 
-test('DSH stall deadline widens with live prompt context on the first attempt', { skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed' }, async () => {
+test('DSH stall deadline widens with live prompt context on the first attempt', { skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed' }, async (t) => {
   const { runner: runnerModule, claudeSettings } = loadModules()
   const { CoworkRunner } = runnerModule
   const { startMockServer } = await import(path.join(runtimeDir, 'test', 'fixtures', 'mock-openai.mjs'))
@@ -328,6 +350,13 @@ test('DSH stall deadline widens with live prompt context on the first attempt', 
 
   const store = new RecordingStore()
   const runner = new CoworkRunner(store, { dshTurnStallTimeoutMs: 1500, dshStallExtensionScale: 1 / 300 })
+  // Cleanup rides t.after: a failed assertion skips trailing statements, and
+  // a leaked runtime + mock server wedged the whole test process (2026-09-29).
+  t.after(async () => {
+    await runner.dshTurnHub?.close().catch(() => undefined)
+    server.close()
+    fs.rmSync(userData, { recursive: true, force: true })
+  })
 
   const sessionId = 'stall-watch-ctx'
   // 72k live prompt tokens → 4 full 10k steps over the 32k base → 8 min of
@@ -359,10 +388,6 @@ test('DSH stall deadline widens with live prompt context on the first attempt', 
   assert.ok(elapsed < 15000, `context extension stays bounded (elapsed ${elapsed}ms)`)
   const diagnostic = store.messages.find((m) => m.sessionId === sessionId && m.metadata?.dshTurnStalled === true)
   assert.ok(diagnostic, 'the wedged turn still gets cancelled at the extended deadline')
-
-  await runner.dshTurnHub?.close().catch(() => undefined)
-  server.close()
-  fs.rmSync(userData, { recursive: true, force: true })
 })
 
 // Pure deadline math: the adaptive ladder without any runtime.
