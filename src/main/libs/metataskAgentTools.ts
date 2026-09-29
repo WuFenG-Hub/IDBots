@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { ChainWriteCreatePin } from './postBuzzAgentTools';
 import { innerHash, outerHash } from '../services/metatask/canon';
 import { rosterPinsFromEvents } from '../services/metatask/collector';
@@ -126,6 +128,157 @@ const specScriptRefusal = (script: unknown): string | null => {
 };
 
 /**
+ * True when an integer number appears ANYWHERE inside the value. The protocol
+ * requires enumeration_closure to carry "at least one concrete self-check
+ * vector whose expected count is an INTEGER field" without prescribing where
+ * that field lives, so the campaign drafts nest it (e.g.
+ * `selfcheck: { expected_count: 4 }`) and an array of vectors is equally valid.
+ */
+const hasIntegerAtAnyDepth = (value: unknown, depth = 0): boolean => {
+  if (typeof value === 'number') return Number.isInteger(value);
+  if (depth > 8 || !value || typeof value !== 'object') return false;
+  const children = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
+  return children.some((child) => hasIntegerAtAnyDepth(child, depth + 1));
+};
+
+// ── campaign drafts file mode ────────────────────────────────────────────────
+// The wave-1 launch kit ships one machine-validated drafts JSON (specs{} +
+// tasks[]). Reading it directly removes the LLM transcription risk of
+// re-typing a large nested spec/validation argument by hand — a real launch
+// failed exactly that way and misread the mangled JSON as a gate disagreement.
+
+/** Node specid placeholders the drafts carry until their spec pins exist. */
+const SPEC_PIN_PREFIX = 'SPEC_PIN:';
+
+interface DraftsPublishInput {
+  taskId: string;
+  title: string;
+  brief: string;
+  nodes: Array<Record<string, unknown>>;
+  policy: Record<string, unknown>;
+  tags: unknown;
+  spec: SpecPayloadInput;
+}
+
+const readDraftsFile = (draftsFile: string): Record<string, unknown> | string => {
+  if (!path.isAbsolute(draftsFile)) {
+    return `Refused: draftsFile must be an absolute path (got "${draftsFile}").`;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(draftsFile, 'utf8'));
+  } catch (error) {
+    return `Refused: cannot read draftsFile "${draftsFile}" — ${error instanceof Error ? error.message : String(error)}.`;
+  }
+  if (!isPlainObject(parsed)) {
+    return `Refused: draftsFile "${draftsFile}" must contain a JSON object.`;
+  }
+  return parsed;
+};
+
+/**
+ * One `specs[key]` entry, normalized to the spec payload input shape — or a
+ * refusal message. (Helpers in this file return the value or a refusal string;
+ * the electron build runs without strictNullChecks, so boolean-discriminated
+ * union narrowing is unavailable.)
+ */
+const specFromDrafts = (drafts: Record<string, unknown>, specKey: string): SpecPayloadInput | string => {
+  const specs = drafts.specs;
+  if (!isPlainObject(specs)) {
+    return 'Refused: draftsFile has no specs{} object (expected the campaign drafts shape).';
+  }
+  const raw = specs[specKey];
+  if (!isPlainObject(raw)) {
+    const available = Object.keys(specs).sort().join(', ');
+    return `Refused: specs["${specKey}"] not found in the draftsFile (available: ${available || 'none'}).`;
+  }
+  return {
+    name: asString(raw.name),
+    lang: asString(raw.lang),
+    entry: asString(raw.entry),
+    script: typeof raw.script === 'string' ? raw.script : '',
+    input: raw.input,
+    output: raw.output,
+    validation: isPlainObject(raw.validation) ? raw.validation : undefined,
+  };
+};
+
+/**
+ * Replace `SPEC_PIN:<key>` node specid placeholders with the published pins
+ * from `specPinByKey`; the returned string is a refusal listing EVERY unmapped
+ * placeholder so the caller can publish those specs first. Nodes with a null
+ * specid stay null (they inherit the task root spec).
+ */
+const substituteSpecPins = (nodes: unknown[], specPinByKey: Record<string, string>): unknown[] | string => {
+  const unmapped = new Set<string>();
+  const substituted = nodes.map((node) => {
+    if (!isPlainObject(node)) return node;
+    const specid = typeof node.specid === 'string' ? node.specid.trim() : '';
+    if (!specid.startsWith(SPEC_PIN_PREFIX)) return node;
+    const key = specid.slice(SPEC_PIN_PREFIX.length).trim();
+    const pinId = asString(specPinByKey?.[key]).trim();
+    if (!key || !pinId) {
+      unmapped.add(key || specid);
+      return node;
+    }
+    return { ...node, specid: pinId };
+  });
+  if (unmapped.size > 0) {
+    const named = [...unmapped].sort().map((key) => `${SPEC_PIN_PREFIX}${key}`).join(', ');
+    return `Refused: unmapped node specid placeholder(s) ${named} — publish each standalone spec first with metatask_publish_spec and pass its specPinId in specPinByKey.`;
+  }
+  return substituted;
+};
+
+/** One `tasks[]` entry (its ready `publish` object plus the root spec). */
+const taskFromDrafts = (
+  drafts: Record<string, unknown>,
+  taskId: string,
+  specPinByKey: Record<string, string>
+): DraftsPublishInput | string => {
+  const tasks = Array.isArray(drafts.tasks) ? drafts.tasks : [];
+  if (tasks.length === 0) {
+    return 'Refused: draftsFile has no tasks[] array (expected the campaign drafts shape).';
+  }
+  const entry = tasks.find(
+    (candidate) =>
+      isPlainObject(candidate) && (asString(candidate.id) === taskId || asString(candidate.taskId) === taskId)
+  );
+  if (!isPlainObject(entry)) {
+    const available = tasks
+      .map((candidate) => (isPlainObject(candidate) ? asString(candidate.id) || asString(candidate.taskId) : ''))
+      .filter(Boolean)
+      .sort()
+      .join(', ');
+    return `Refused: no tasks[] entry with id "${taskId}" (available: ${available || 'none'}).`;
+  }
+  const publish = entry.publish;
+  if (!isPlainObject(publish)) {
+    return `Refused: tasks[] entry "${taskId}" has no publish object.`;
+  }
+  if (!Array.isArray(publish.nodes)) {
+    return `Refused: tasks[] entry "${taskId}" publish.nodes must be an array.`;
+  }
+  const rootSpecKey = asString(entry.rootSpec).trim();
+  if (!rootSpecKey) {
+    return `Refused: tasks[] entry "${taskId}" has no rootSpec key for its root verifier spec.`;
+  }
+  const spec = specFromDrafts(drafts, rootSpecKey);
+  if (typeof spec === 'string') return spec;
+  const nodes = substituteSpecPins(publish.nodes, specPinByKey);
+  if (typeof nodes === 'string') return nodes;
+  return {
+    taskId,
+    title: asString(publish.title),
+    brief: asString(publish.brief),
+    nodes: nodes.filter(isPlainObject) as Array<Record<string, unknown>>,
+    policy: isPlainObject(publish.policy) ? publish.policy : {},
+    tags: publish.tags,
+    spec,
+  };
+};
+
+/**
  * Writer-side enforcement of the v1.2.1 spec.validation block (protocol §3,
  * mandatory for specs published at/after H_ACT2): all three items present,
  * null_tolerance boolean true, enumeration_closure declaring the closure plus
@@ -145,11 +298,8 @@ const specValidationRefusal = (validation: unknown): string | null => {
     return 'Refused: spec.validation.null_tolerance must be boolean true (protocol §3: every branch maps null/missing input to verdict=invalid with a location in detail).';
   }
   const closure = validation.enumeration_closure;
-  const closureCounts = isPlainObject(closure)
-    ? Object.values(closure).filter((value) => typeof value === 'number' && Number.isInteger(value))
-    : [];
-  if (!isPlainObject(closure) || !asString(closure.closure).trim() || closureCounts.length === 0) {
-    return 'Refused: spec.validation.enumeration_closure needs the closure declared in a string `closure` field AND at least one integer self-check count, so replay can mechanically reconcile theory vs implementation (protocol §3).';
+  if (!isPlainObject(closure) || !asString(closure.closure).trim() || !hasIntegerAtAnyDepth(closure)) {
+    return 'Refused: spec.validation.enumeration_closure needs the closure declared in a string `closure` field AND at least one integer self-check count (any depth within the block), so replay can mechanically reconcile theory vs implementation (protocol §3).';
   }
   const fidelity = validation.proposition_fidelity;
   if (!isPlainObject(fidelity)) {
@@ -628,9 +778,9 @@ export function buildMetataskAgentTools(deps: {
 
   const publishTask = tool(
     'metatask_publish',
-    'Publish a new on-chain MetaTask as this session\'s MetaBot (you become the task root author = publisher). Publish order is roster-pin (auto, when the local roster has 2+ bots) → tree → spec → task; nothing is spent before every invariant passes: single root, acyclic parents, integer weights 1..10000 summing to EXACTLY 10000 across all nodes, quorum >= 1, TTL/window > 0. After publishing you MUST post a discovery buzz within 24h (title + the full task-root pinId + #metatask) — use the post_buzz tool.',
+    'Publish a new on-chain MetaTask as this session\'s MetaBot (you become the task root author = publisher). Publish order is roster-pin (auto, when the local roster has 2+ bots) → tree → spec → task; nothing is spent before every invariant passes: single root, acyclic parents, integer weights 1..10000 summing to EXACTLY 10000 across all nodes, quorum >= 1, TTL/window > 0. RECOMMENDED for campaign launches: pass draftsFile (absolute path to the machine-validated campaign drafts JSON) + taskId instead of re-typing title/nodes/spec/policy by hand, because file mode removes LLM transcription errors on large nested arguments — a real launch failed when a large nested validation block was reproduced by hand, came out mangled, and was misread as a gate disagreement. File mode also substitutes SPEC_PIN:<key> node specid placeholders with the pinIds you pass in specPinByKey (unmapped placeholders are refused). Never mix the two modes: either draftsFile+taskId, or inline arguments. After publishing you MUST post a discovery buzz within 24h (title + the full task-root pinId + #metatask) — use the post_buzz tool.',
     {
-      title: z.string().min(1),
+      title: z.string().min(1).optional(),
       brief: z.string().optional().describe('What the task is about; shown to every participant.'),
       nodes: z.array(
         z.object({
@@ -643,7 +793,7 @@ export function buildMetataskAgentTools(deps: {
           deps: z.array(z.string()).optional(),
           weight: z.number().int().min(1).max(10000).describe('Settlement weight in basis points; ALL nodes sum to exactly 10000.'),
         }),
-      ).min(1),
+      ).min(1).optional(),
       spec: z.object({
         name: z.string().min(1),
         lang: z.string().min(1),
@@ -652,7 +802,7 @@ export function buildMetataskAgentTools(deps: {
         input: z.unknown().optional(),
         output: z.unknown().optional(),
         validation: z.record(z.string(), z.unknown()).optional(),
-      }),
+      }).optional(),
       policy: z.object({
         claimTtlHours: z.number().int().positive(),
         verifyQuorum: z.number().int().min(1),
@@ -660,8 +810,11 @@ export function buildMetataskAgentTools(deps: {
         rewardSat: z.number().int().optional().describe('Stays 0 in v1.2 (escrow excluded).'),
         challengeTtlDays: z.number().int().positive().optional().describe('Default 14.'),
         submitterShareBP: z.number().int().min(6000).max(9000).optional().describe('Default 8000.'),
-      }),
+      }).optional(),
       tags: z.array(z.string()).optional(),
+      draftsFile: z.string().min(1).optional().describe('Absolute path to a campaign drafts JSON (top-level specs{} + tasks[]); use with taskId instead of inline arguments.'),
+      taskId: z.string().min(1).optional().describe('tasks[] entry id in the draftsFile (its `publish` object and `rootSpec` are used).'),
+      specPinByKey: z.record(z.string(), z.string()).optional().describe('File mode only: spec key -> published specPinId, substituting SPEC_PIN:<key> node specid placeholders.'),
     },
     async (args: {
       title?: string;
@@ -670,13 +823,50 @@ export function buildMetataskAgentTools(deps: {
       spec?: { name?: string; lang?: string; entry?: string; script?: string; input?: unknown; output?: unknown; validation?: Record<string, unknown> };
       policy?: { claimTtlHours?: number; verifyQuorum?: number; verifyWindowHours?: number; rewardSat?: number; challengeTtlDays?: number; submitterShareBP?: number };
       tags?: string[];
+      draftsFile?: string;
+      taskId?: string;
+      specPinByKey?: Record<string, string>;
     }) => {
       try {
         const who = identity();
         if ('error' in who) return textResult(who.error, true);
-        const title = asString(args.title).trim();
+
+        const draftsFile = asString(args.draftsFile).trim();
+        const taskId = asString(args.taskId).trim();
+        const fileModeRequested = Boolean(draftsFile || taskId);
+        const inlineProvided =
+          args.title !== undefined ||
+          args.brief !== undefined ||
+          args.nodes !== undefined ||
+          args.spec !== undefined ||
+          args.policy !== undefined ||
+          args.tags !== undefined;
+        let fileInput: DraftsPublishInput | null = null;
+        if (fileModeRequested) {
+          if (!draftsFile || !taskId) {
+            return textResult(
+              'Refused: draftsFile and taskId must be passed together (draftsFile = absolute path to the campaign drafts file, taskId = its tasks[] entry id).',
+              true,
+            );
+          }
+          if (inlineProvided) {
+            return textResult(
+              'Refused: pass either draftsFile+taskId OR inline arguments (title/brief/nodes/spec/policy/tags), not both.',
+              true,
+            );
+          }
+          const drafts = readDraftsFile(draftsFile);
+          if (typeof drafts === 'string') return textResult(drafts, true);
+          const fromFile = taskFromDrafts(drafts, taskId, args.specPinByKey ?? {});
+          if (typeof fromFile === 'string') return textResult(fromFile, true);
+          fileInput = fromFile;
+        } else if (args.specPinByKey !== undefined) {
+          return textResult('Refused: specPinByKey only applies in draftsFile mode (pass draftsFile + taskId).', true);
+        }
+
+        const title = fileInput ? fileInput.title.trim() : asString(args.title).trim();
         if (!title) return textResult('Refused: title is empty.', true);
-        const policy = args.policy ?? {};
+        const policy = (fileInput ? fileInput.policy : args.policy ?? {}) as Record<string, unknown>;
         const quorum = Number(policy.verifyQuorum ?? 0);
         const ttlHours = Number(policy.claimTtlHours ?? 0);
         const windowHours = Number(policy.verifyWindowHours ?? 0);
@@ -684,7 +874,9 @@ export function buildMetataskAgentTools(deps: {
         if (!Number.isInteger(ttlHours) || ttlHours <= 0) return textResult('Refused: claimTtlHours must be a positive integer.', true);
         if (!Number.isInteger(windowHours) || windowHours <= 0) return textResult('Refused: verifyWindowHours must be a positive integer.', true);
 
-        const rawNodes = args.nodes ?? [];
+        const rawNodes: Array<Record<string, unknown>> = fileInput
+          ? fileInput.nodes
+          : ((args.nodes ?? []) as Array<Record<string, unknown>>);
         const nodes = rawNodes.map((raw) => ({
           id: asString(raw.id),
           parent: raw.parent === null || raw.parent === undefined ? null : asString(raw.parent),
@@ -692,7 +884,7 @@ export function buildMetataskAgentTools(deps: {
           kind: asString(raw.kind, 'proof'),
           specid: raw.specid === undefined || raw.specid === null ? null : asString(raw.specid),
           params: (raw.params && typeof raw.params === 'object' ? raw.params : {}) as Record<string, unknown>,
-          deps: (raw.deps ?? []).map((d) => String(d)),
+          deps: (Array.isArray(raw.deps) ? raw.deps : []).map((dep) => String(dep)),
           weight: Number(raw.weight),
         }));
         if (nodes.length === 0) return textResult('Refused: empty node list.', true);
@@ -728,7 +920,17 @@ export function buildMetataskAgentTools(deps: {
             cursor = byId.get(cursor)?.parent ?? null;
           }
         }
-        const spec = args.spec ?? {};
+        const spec: SpecPayloadInput = fileInput
+          ? fileInput.spec
+          : {
+              name: args.spec?.name,
+              lang: args.spec?.lang,
+              entry: args.spec?.entry,
+              script: args.spec?.script,
+              input: args.spec?.input,
+              output: args.spec?.output,
+              validation: args.spec?.validation,
+            };
         if (!asString(spec.name).trim() || !asString(spec.entry).trim()) {
           return textResult('Refused: a root verifier spec (name + entry) is required — every task needs a machine-checkable spec.', true);
         }
@@ -781,9 +983,11 @@ export function buildMetataskAgentTools(deps: {
         );
 
         const shareBP = Number(policy.submitterShareBP ?? 8000);
+        const rawTags = fileInput ? fileInput.tags : args.tags;
+        const tags = (Array.isArray(rawTags) ? rawTags : []).map((tag) => String(tag));
         const taskPayload: Record<string, unknown> = {
           title,
-          brief: asString(args.brief),
+          brief: fileInput ? fileInput.brief : asString(args.brief),
           treeid: treePin.pinId,
           specid: specPin.pinId,
           policy: {
@@ -794,7 +998,7 @@ export function buildMetataskAgentTools(deps: {
             challenge_ttl_days: Number.isInteger(policy.challengeTtlDays) ? Number(policy.challengeTtlDays) : 14,
             split: { submitterShareBP: shareBP, rosterid },
           },
-          tags: (args.tags ?? []).map((tag) => String(tag)),
+          tags,
         };
         const taskPin = await writePin(who.metabotId, 'task', taskPayload, 'tool:metatask_publish');
 
@@ -805,6 +1009,8 @@ export function buildMetataskAgentTools(deps: {
           specPinId: specPin.pinId,
           rosterPinId: rosterid,
           txids: [...treePin.txids, ...specPin.txids, ...taskPin.txids],
+          source: fileInput ? 'draftsFile' : 'inline',
+          ...(fileInput ? { taskId: fileInput.taskId } : {}),
           reminder: 'Post the discovery buzz within 24h: title + the FULL task root pinId + #metatask tag (use post_buzz).',
         });
       } catch (error) {
@@ -815,16 +1021,18 @@ export function buildMetataskAgentTools(deps: {
 
   const publishSpec = tool(
     'metatask_publish_spec',
-    'Publish a STANDALONE verifier spec pin (path /protocols/metatask/spec) as this session\'s MetaBot — for node-level specid overrides that must exist BEFORE their task tree, with no carrier task (the old workaround published a junk single-node task just to harvest its specPinId, littering the MetaTask square with claimable tasks). Exactly one pin is spent. Writer-side gates, all before any spend: name + entry, a script that is inline text or a pin:// | metafile:// reference (protocol §3), and — since this tool cannot read chain height — the v1.2.1 spec.validation block is REQUIRED by default (enforceHAct2Validation defaults to true; the protocol makes it mandatory for specs published at/after H_ACT2=191500, where every current campaign spec runs): all three items null_tolerance (boolean true), enumeration_closure (a `closure` string plus at least one integer self-check count) and proposition_fidelity (an INDEPENDENT correspondence artifact referenced as pin:// | metafile:// — a self-attested boolean or a PUBLISH_ARTIFACT_FIRST placeholder is refused). Set enforceHAct2Validation=false ONLY for a pre-H_ACT2 (v1.1-era) spec, where the block did not yet exist. The returned specPinId is what node specid overrides (and a task-root specid) must reference; the local projection refreshes after the write.',
+    'Publish a STANDALONE verifier spec pin (path /protocols/metatask/spec) as this session\'s MetaBot — for node-level specid overrides that must exist BEFORE their task tree, with no carrier task (the old workaround published a junk single-node task just to harvest its specPinId, littering the MetaTask square with claimable tasks). Exactly one pin is spent. RECOMMENDED for campaign launches: pass draftsFile (absolute path to the machine-validated campaign drafts JSON) + specKey instead of re-typing name/lang/entry/script/input/output/validation by hand, because file mode removes LLM transcription errors on large nested arguments — a real launch failed when a ~90KB nested validation block was reproduced by hand, came out mangled, and was refused by the validation gate. Never mix the two modes: either draftsFile+specKey, or inline arguments. Writer-side gates, all before any spend: name + entry, a script that is inline text or a pin:// | metafile:// reference (protocol §3), and — since this tool cannot read chain height — the v1.2.1 spec.validation block is REQUIRED by default (enforceHAct2Validation defaults to true; the protocol makes it mandatory for specs published at/after H_ACT2=191500, where every current campaign spec runs): all three items null_tolerance (boolean true), enumeration_closure (a `closure` string plus at least one integer self-check count, at any depth in the block) and proposition_fidelity (an INDEPENDENT correspondence artifact referenced as pin:// | metafile:// — a self-attested boolean or a PUBLISH_ARTIFACT_FIRST placeholder is refused). Set enforceHAct2Validation=false ONLY for a pre-H_ACT2 (v1.1-era) spec, where the block did not yet exist. The returned specPinId is what node specid overrides (and a task-root specid) must reference; the local projection refreshes after the write.',
     {
-      name: z.string().min(1).describe('Spec name, e.g. witness-extraction-301.'),
-      lang: z.string().min(1).describe('Verifier implementation language, e.g. python3, bash.'),
-      entry: z.string().min(1).describe('Offline entry point, e.g. spec-witness-extraction.py.'),
-      script: z.string().min(1).describe('Inline verifier script text, or a pin:// | metafile:// reference when too long.'),
+      name: z.string().min(1).optional().describe('Spec name, e.g. witness-extraction-301.'),
+      lang: z.string().min(1).optional().describe('Verifier implementation language, e.g. python3, bash.'),
+      entry: z.string().min(1).optional().describe('Offline entry point, e.g. spec-witness-extraction.py.'),
+      script: z.string().min(1).optional().describe('Inline verifier script text, or a pin:// | metafile:// reference when too long.'),
       input: z.unknown().optional().describe('Input descriptor (string or object); interpreted by the script.'),
       output: z.unknown().optional().describe('Output/verdict contract (string or object): pass | fail | invalid.'),
       validation: z.record(z.string(), z.unknown()).optional().describe('v1.2.1 validation block: null_tolerance, enumeration_closure (closure + integer self-check count), proposition_fidelity (correspondence artifact pin). Required unless enforceHAct2Validation=false.'),
       enforceHAct2Validation: z.boolean().optional().describe('Default true: enforce the v1.2.1 three-item validation block. Set false only for a pre-H_ACT2 (v1.1-era) spec.'),
+      draftsFile: z.string().min(1).optional().describe('Absolute path to a campaign drafts JSON (top-level specs{}); use with specKey instead of inline arguments.'),
+      specKey: z.string().min(1).optional().describe('Key under the draftsFile specs{} map to publish verbatim.'),
     },
     async (args: {
       name?: string;
@@ -835,18 +1043,62 @@ export function buildMetataskAgentTools(deps: {
       output?: unknown;
       validation?: Record<string, unknown>;
       enforceHAct2Validation?: boolean;
+      draftsFile?: string;
+      specKey?: string;
     }) => {
       try {
         const who = identity();
         if ('error' in who) return textResult(who.error, true);
-        const name = asString(args.name).trim();
-        const entry = asString(args.entry).trim();
+
+        const draftsFile = asString(args.draftsFile).trim();
+        const specKey = asString(args.specKey).trim();
+        const inlineProvided =
+          args.name !== undefined ||
+          args.lang !== undefined ||
+          args.entry !== undefined ||
+          args.script !== undefined ||
+          args.input !== undefined ||
+          args.output !== undefined ||
+          args.validation !== undefined;
+        let spec: SpecPayloadInput;
+        if (draftsFile || specKey) {
+          if (!draftsFile || !specKey) {
+            return textResult(
+              'Refused: draftsFile and specKey must be passed together (draftsFile = absolute path to the campaign drafts file, specKey = key under its specs{} map).',
+              true,
+            );
+          }
+          if (inlineProvided) {
+            return textResult(
+              'Refused: pass either draftsFile+specKey OR inline arguments (name/lang/entry/script/input/output/validation), not both.',
+              true,
+            );
+          }
+          const drafts = readDraftsFile(draftsFile);
+          if (typeof drafts === 'string') return textResult(drafts, true);
+          const fromFile = specFromDrafts(drafts, specKey);
+          if (typeof fromFile === 'string') return textResult(fromFile, true);
+          spec = fromFile;
+        } else {
+          spec = {
+            name: args.name,
+            lang: args.lang,
+            entry: args.entry,
+            script: args.script,
+            input: args.input,
+            output: args.output,
+            validation: args.validation,
+          };
+        }
+
+        const name = asString(spec.name).trim();
+        const entry = asString(spec.entry).trim();
         if (!name || !entry) {
           return textResult('Refused: a spec needs name + entry (the offline verifier entry point).', true);
         }
-        const scriptRefusal = specScriptRefusal(args.script);
+        const scriptRefusal = specScriptRefusal(spec.script);
         if (scriptRefusal) return textResult(scriptRefusal, true);
-        const rawScript = typeof args.script === 'string' ? args.script : '';
+        const rawScript = typeof spec.script === 'string' ? spec.script : '';
         const trimmedScript = rawScript.trim();
         // A pin://|metafile:// reference is normalized; inline script bytes are
         // published verbatim (they are the verifier that reviewers replay).
@@ -855,7 +1107,7 @@ export function buildMetataskAgentTools(deps: {
         // cannot measure height, so it enforces by default and the caller must
         // explicitly declare a pre-H_ACT2 (v1.1-era) spec to opt out.
         if (args.enforceHAct2Validation !== false) {
-          const validationRefusal = specValidationRefusal(args.validation);
+          const validationRefusal = specValidationRefusal(spec.validation);
           if (validationRefusal) return textResult(validationRefusal, true);
         }
         const written = await writePin(
@@ -863,12 +1115,12 @@ export function buildMetataskAgentTools(deps: {
           'spec',
           buildSpecPayload({
             name,
-            lang: args.lang,
+            lang: spec.lang,
             entry,
             script,
-            input: args.input,
-            output: args.output,
-            validation: args.validation,
+            input: spec.input,
+            output: spec.output,
+            validation: spec.validation,
           }),
           'tool:metatask_publish_spec',
         );
@@ -878,9 +1130,11 @@ export function buildMetataskAgentTools(deps: {
           txids: written.txids,
           totalCost: written.totalCost,
           name,
-          lang: asString(args.lang).trim() || 'bash',
+          lang: asString(spec.lang).trim() || 'bash',
           entry,
-          hasValidation: isPlainObject(args.validation),
+          hasValidation: isPlainObject(spec.validation),
+          source: draftsFile ? 'draftsFile' : 'inline',
+          ...(draftsFile ? { specKey } : {}),
           note: 'Standalone spec pin written — no task/tree was spent. Reference this specPinId from any tree node specid override (replace SPEC_PIN:<key> placeholders before publishing the tree) or as a task root specid.',
         });
       } catch (error) {
