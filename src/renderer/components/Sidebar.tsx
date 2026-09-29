@@ -233,23 +233,20 @@ const Sidebar: React.FC<SidebarProps> = ({
     () => new Set<number>(splitGroupTasksByOpenTeam(groupTasks).openTeam.map((task) => task.id)),
     [groupTasks],
   );
-  // Per-tab totals and unread counts, shown on the tab buttons. The local tab's
-  // count tip describes the main list only (human sessions + scheduled runs),
-  // but its red dot also lights for unread inside the Auto Tasks fold —
-  // background runs with news must be visible without opening the fold (the
-  // same red dot the A2A tab uses).
+  // Per-tab totals and unread counts, shown on the tab buttons. The local tab
+  // counts the main list only: the folded auto sessions carry their own red
+  // dot + unread count on the fold's header row (see CoworkSessionList), and
+  // letting heartbeat-driven background runs also light the tab would be the
+  // noise the fold exists to remove.
   const tabStats = useMemo(() => {
     const unreadSet = new Set(unreadSessionIds);
     const unreadOf = (list: CoworkSessionSummary[]) => list.filter((session) => unreadSet.has(session.id)).length;
     return {
-      local: {
-        count: localHumanSessions.length,
-        unread: unreadOf(localHumanSessions) + unreadOf(localAutoSessions),
-      },
+      local: { count: localHumanSessions.length, unread: unreadOf(localHumanSessions) },
       a2a: { count: sessionGroups.a2a.length, unread: unreadOf(sessionGroups.a2a) },
       group: { count: groupTasks.length + openTeamCollabs.length, unread: unreadOf(sessionGroups.group) },
     };
-  }, [sessionGroups, localHumanSessions, localAutoSessions, unreadSessionIds, groupTasks, openTeamCollabs]);
+  }, [sessionGroups, localHumanSessions, unreadSessionIds, groupTasks, openTeamCollabs]);
   const isMac = window.electron.platform === 'darwin';
   const hasRunningScheduledTask = scheduledTasks.some(
     (task) => task.enabled && task.state.runningAtMs !== null && task.state.lastStatus === 'running'

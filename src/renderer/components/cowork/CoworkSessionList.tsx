@@ -424,9 +424,10 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
    * scrolling), and only when there is something to fold — an empty folder
    * would be noise of its own. The header is styled like the project groups'
    * folder header (subdued secondary text + folder glyph) so it reads as a
-   * container, not as a conversation, and carries label + the fold's UNREAD
-   * session count (red, only when > 0 — the number the user actually watches;
-   * the total is kept to the hover tooltip) + the fold's newest activity time.
+   * container, not as a conversation, and carries a red dot at the row's left
+   * + the fold's UNREAD session count in red (both only when > 0 — the signal
+   * the user actually watches; the total survives only in the hover tooltip)
+   * + the fold's newest activity time.
    * Per-row dots inside the EXPANDED fold stay — that is where "which run has
    * news" is actually traceable.
    */
@@ -442,6 +443,9 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
             : i18nService.t('coworkAutoTasksCount').replace('{count}', String(sortedAutoSessions.length)))}
           className={`flex w-full items-center gap-1.5 px-2.5 pb-1 pt-2.5 text-left transition-colors hover:text-claude-text dark:hover:text-claude-darkText ${groupHeaderLabelClass}`}
         >
+          {autoUnreadCount > 0 && (
+            <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-red-500" aria-hidden />
+          )}
           <ChevronDownIcon
             className={`h-3 w-3 flex-shrink-0 transition-transform duration-150 ${isAutoTasksExpanded ? '' : '-rotate-90'}`}
           />

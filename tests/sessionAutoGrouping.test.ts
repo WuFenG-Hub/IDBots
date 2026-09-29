@@ -102,9 +102,9 @@ test('sidebar feeds the list with the split halves and keeps search over every s
   assert.match(src, /sessions=\{localListSessions\}/);
   assert.match(src, /autoSessions=\{taskRecordTab === 'local' \? localAutoSessions : undefined\}/);
   assert.match(src, /splitSessionsByAutoOrigin\(sessionGroups\.local\)/);
-  // The local tab's count tip describes the main list only, but its red dot
-  // also lights for unread inside the fold (same dot as the A2A tab).
-  assert.match(src, /unread: unreadOf\(localHumanSessions\) \+ unreadOf\(localAutoSessions\)/);
+  // The local tab's count + red unread dot ignore the folded rows — the fold
+  // carries its own red dot + unread count on its header row.
+  assert.match(src, /local: \{ count: localHumanSessions\.length, unread: unreadOf\(localHumanSessions\) \}/);
   // Search still receives the complete list, folded sessions included.
   assert.match(src, /<CoworkSearchModal[\s\S]*?sessions=\{homeSessions\}/);
 });
@@ -140,9 +140,11 @@ test('the fold header carries label + unread count + latest activity, and no tot
 
   assert.match(header, /coworkAutoTasks'/);
   assert.match(header, /formatRelativeTime\(autoLatestActivityAt\)/, 'the newest-activity stamp stays');
-  // The displayed number is the fold's unread session count — the signal the
-  // user watches — in the same red as the tab dot, and only when > 0.
+  // The header signals unread the way the user asked for it: a red dot at the
+  // row's left (same dot the tabs use) plus the fold's unread session count in
+  // red, both only when > 0.
   assert.match(header, /autoUnreadCount > 0 && \(/);
+  assert.match(header, /rounded-full bg-red-500/);
   assert.match(header, /\{autoUnreadCount\}/);
   assert.match(header, /text-red-500/);
   assert.match(header, /coworkAutoTasksUnread/);
