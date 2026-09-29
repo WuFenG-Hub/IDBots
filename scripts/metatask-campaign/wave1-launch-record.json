@@ -1,0 +1,57 @@
+{
+  "launchRecord": "MetaTask wave-1 campaign — on-chain launch record",
+  "launchedAt": "2026-09-29",
+  "network": "mvc",
+  "publisher": "AI_Sunny (Twin bot, idq1w8ye…, publisher share 0% per ruling D-2)",
+  "chainGate": "H_ACT2 191500 reached before launch",
+  "correspondenceArtifacts": {
+    "correspondence-T0-triage-287": "metafile://57803539799580c39f98b4d8705604e4e24767c0cbefcf6eab12a0f15c4d652ci0.json",
+    "correspondence-T1-JSP-000301": "metafile://bee0627b78619f3646190e9440520368390d29222e0b06fdba848dfc3dd951a9i0.json",
+    "correspondence-T3-JSP-000870": "metafile://028e1432d1059070fc76ceeed018c45429d1263ba5c2f0ad1c5e6e69c8dfb01ci0.json",
+    "correspondence-T4-JSP-000598": "metafile://278227d8e0c2190de8a40a17d15dde99dc6062bdfc75ec5dd0f7b7ef747e21b9i0.json"
+  },
+  "specs": {
+    "witness-extraction-301": "c5ccf1acea65ee914fbb718216c71bc0c05e90ab6d79bdb76e8789ee3c3f0115i0",
+    "semantic-review-301": "93f4daf4768897392d207a283e28a9fada651cc93429c6f456cbe486c207c2a0i0",
+    "semantic-review-870": "47c1806ebf9fcbc58e4d7cc3e288af2d161c8290ca70054af0f99e9429576cd1i0",
+    "semantic-review-598": "c1c0b8b172c9efc9f1a83df09d4f154ceb9431c1c07cc203b055c50fab5e4102i0"
+  },
+  "tasks": {
+    "T0-triage-287": {
+      "taskRootPinId": "22ea4c0695a806fa1fed6fba3d6658d7a3640c5ef35120b252bea16f27eb99cei0",
+      "treePinId": "993819d55731d6f3921bd014fc9c06d6bb2211a70eb299cbf5264f5a7b417b29i0",
+      "specPinId": "96957f9714bf3ca123567c919386ca7fad32b90a11e4416176f7f0d532297343i0",
+      "rosterPinId": "e568c23b72d45db8342d3c6d5cc4c803742bcd1f73102469165eb84dd0926a5ai0"
+    },
+    "T1-JSP-000301": {
+      "taskRootPinId": "9b90d918682fc656decddf7c56a20f266743cf37bb9c689885f83ffb3cae1c2ei0",
+      "treePinId": "4664b2ddf0f397a1f64109f6eef0a6d0099a4d5acc25c30fa60c179862119d2ei0",
+      "specPinId": "dc296429d5d94ce5c4781722cd7cbb9ce9f44066db24c73855127f9961c0c891i0",
+      "rosterPinId": "d912d23743d33f0b1aae1c5668a7ad58aaced5c322e214c938661967e017667fi0"
+    },
+    "T3-JSP-000870": {
+      "taskRootPinId": "26bc504c946c798b47ef090d4c3b7f629917c0fc3a51740ce1252db586692181i0",
+      "treePinId": "4ed895a8d675ceef2f41c3831686dab50d478f4869e23534521e243ac19380e3i0",
+      "specPinId": "5a4c2e6057444afcdd83aaaec0c19782c97e8d8e9d87fb53b483c326e8c79151i0",
+      "rosterPinId": "796fee0826c3f3400cfe5c21387e0d9b0970a6311b32ec9361bf5170e12ec27fi0"
+    },
+    "T4-JSP-000598": {
+      "taskRootPinId": "ea3e520e6174a077684fbec95ac48cf45332acebfce44668aeee16d9564c8673i0",
+      "treePinId": "3d17cc873aae1c5ed04c324263a0156dad9ad141e078e30482ae2e0f3844e542i0",
+      "specPinId": "e71b6be0b574ef54f4d299119e06765385c8a4dbdffa5828f24148d7d4e34d58i0",
+      "rosterPinId": "9a0e29b6d3fc9d05e24edc6b85c1259abad447acabbfa11927ad14756df0c63ai0"
+    }
+  },
+  "discoveryBuzzes": {
+    "T0-triage-287": "4be0de4de3abbe2273f22dfdefaf9732cb57dae93a0dab0bb928f841c297b28ai0",
+    "T1-JSP-000301": "9e1bfd4b991ce90bde13b31ec940ad34a4dfa441d96f8e9b5e66251a596b02edi0",
+    "T3-JSP-000870": "101a260f0da6c44145fe71c807d2be529f591318accca0195064342a222e8eb7i0",
+    "T4-JSP-000598": "2441dab164e1708b3bcabcd98b87e48cb4ef68ddc150867c9d2ab770088eceeai0"
+  },
+  "verification": {
+    "trees": "T0 11 nodes / T1 4 / T3 7 / T4 6, every tree Σweight=10000, node specid overrides all point at the published spec pins above, no SPEC_PIN literals on chain (verified 2026-09-29 against manapi /content)",
+    "specValidation": "all 8 published spec pins carry the three-item v1.2.1 validation block with null_tolerance=true and the real correspondence artifact pins; wave1-task-drafts.json was aligned to the on-chain validation blocks (prose-only deltas in count_meaning / note fields; semantic-review-301 was already byte-identical)",
+    "policies": "T0 claim_ttl 72h / verify window 120h; T1/T3/T4 48h / 96h; verify_quorum 2; submitterShareBP 8000; rosterid stamped on all four tasks (local roster >= 2)"
+  },
+  "notes": "Fees went from the publisher's own wallet (traffic sponsorship unavailable). The publisher's first publish attempt was refused at the write gate due to an LLM argument-transcription error; the final on-chain content was verified byte-consistent with the machine-validated drafts after the alignment above. draftsFile mode (metatask_publish_spec / metatask_publish) is the recommended path for any future wave."
+}
