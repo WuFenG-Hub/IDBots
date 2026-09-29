@@ -8,6 +8,7 @@ import type {
   CoworkConfig,
   CoworkPermissionRequest,
   CoworkPermissionMode,
+  CoworkSessionFoldOverride,
   CoworkSessionGoal,
   CoworkSessionStatus,
   MessageFeedback,
@@ -182,6 +183,7 @@ const coworkSlice = createSlice({
             sessionType,
             peerName,
             autoOrigin,
+            foldOverride,
             serviceOrderSummary,
           } = nextSession;
           const summary: CoworkSessionSummary = {
@@ -197,6 +199,9 @@ const coworkSlice = createSlice({
             // payload without the field never erases a marker the list row
             // already learned from listSessions.
             ...(autoOrigin ? { autoOrigin } : {}),
+            // Same rule for the manual fold placement ('in' / 'out'), which the
+            // session-open payload also carries.
+            ...(foldOverride ? { foldOverride } : {}),
             serviceOrderSummary: serviceOrderSummary ?? null,
           };
           const sessionIndex = state.sessions.findIndex((session) => session.id === id);
@@ -257,6 +262,7 @@ const coworkSlice = createSlice({
         // (auto-created runs arrive via registerBackgroundSession /
         // loadSessions), so the marker is carried only if the payload has one.
         autoOrigin: action.payload.autoOrigin ?? null,
+        foldOverride: action.payload.foldOverride ?? null,
         serviceOrderSummary: action.payload.serviceOrderSummary ?? null,
       };
       state.sessions.unshift(summary);
@@ -430,6 +436,22 @@ const coworkSlice = createSlice({
       }
     },
 
+    /**
+     * Manual "Delegated Tasks" fold placement ('in' | 'out' | null) — mirrors
+     * updateSessionPinned: the row moves between the fold and the main list
+     * without a re-read, and null hands the row back to the auto-origin policy.
+     */
+    updateSessionFoldOverride(state, action: PayloadAction<{ sessionId: string; override: CoworkSessionFoldOverride | null }>) {
+      const { sessionId, override } = action.payload;
+      const sessionIndex = state.sessions.findIndex(s => s.id === sessionId);
+      if (sessionIndex !== -1) {
+        state.sessions[sessionIndex].foldOverride = override;
+      }
+      if (state.currentSession?.id === sessionId) {
+        state.currentSession.foldOverride = override;
+      }
+    },
+
     updateSessionTitle(state, action: PayloadAction<{ sessionId: string; title: string }>) {
       const { sessionId, title } = action.payload;
       const sessionIndex = state.sessions.findIndex(s => s.id === sessionId);
@@ -570,6 +592,7 @@ export const {
   loadSessionFeedback,
   setStreaming,
   updateSessionPinned,
+  updateSessionFoldOverride,
   updateSessionTitle,
   updateSessionPermissionMode,
   updateSessionGoal,

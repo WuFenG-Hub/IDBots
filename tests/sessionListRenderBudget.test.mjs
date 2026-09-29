@@ -115,9 +115,10 @@ test('only a bounded prefix of rows mounts, and scrolling toward the end reveals
 });
 
 test('the reveal budget applies to every branch that renders rows', () => {
-  // Every row list ends in renderItem, which is what spends the budget: pinned,
-  // the timeline groups, the project groups, the expanded Auto Tasks fold and
-  // both flat lists (the selector branch and the plain one).
-  assert.equal((listSource.match(/\.map\(renderItem\)/g) ?? []).length, 6);
+  // Every row list ends in renderItem, which is what spends the budget: the
+  // pinned block, the expanded Delegated Tasks fold, the timeline groups, the
+  // project groups, and the three flat lists (the selector branch, plus the
+  // plain branch's pinned and unpinned halves).
+  assert.equal((listSource.match(/\.map\(renderItem\)/g) ?? []).length, 7);
   assert.equal((listSource.match(/renderItem = \(session: CoworkSessionSummary\)/g) ?? []).length, 1);
 });

@@ -33,7 +33,7 @@ import type {
   SessionSortMode,
   SessionViewMode,
 } from '../utils/sessionViewGrouping';
-import { splitSessionsByAutoOrigin } from '../utils/sessionAutoGrouping';
+import { shouldFoldIntoDelegatedTasks, splitSessionsByDelegatedFold } from '../utils/sessionAutoGrouping';
 import { useStableCallback } from '../utils/useStableCallback';
 import { selectTrackedTasksNeedingAttention } from '../utils/trackedTaskAttention';
 import type { SettingsOpenOptions } from './Settings';
@@ -213,11 +213,13 @@ const Sidebar: React.FC<SidebarProps> = ({
     };
   }, [homeSessions]);
   // The local tab's list is split in two: the human's own conversations stay in
-  // the main list, while everything the app started on its own (autoOrigin set)
-  // folds into the collapsed "Auto Tasks" section at the bottom. Search still
-  // sees every session, folded or not.
+  // the main list, while long-term task runs and orchestration delegations
+  // (shouldFoldIntoDelegatedTasks) fold into the collapsed "Delegated Tasks"
+  // section under the pinned block. Scheduled-task runs stay in the main list on
+  // purpose — they are the user's own automations. Search still sees every
+  // session, folded or not.
   const { humanSessions: localHumanSessions, autoSessions: localAutoSessions } = useMemo(
-    () => splitSessionsByAutoOrigin(sessionGroups.local),
+    () => splitSessionsByDelegatedFold(sessionGroups.local),
     [sessionGroups.local],
   );
   const localListSessions = taskRecordTab === 'local' ? localHumanSessions : sessionGroups[taskRecordTab];
@@ -232,9 +234,10 @@ const Sidebar: React.FC<SidebarProps> = ({
     [groupTasks],
   );
   // Per-tab totals and unread counts, shown on the tab buttons. The local tab
-  // counts human sessions only: the folded auto sessions are background runs,
-  // and letting them light the tab's red dot would be exactly the noise the
-  // fold exists to remove (the fold header carries their own unread instead).
+  // counts the main list only: the folded auto sessions carry their own red
+  // dot + unread count on the fold's header row (see CoworkSessionList), and
+  // letting heartbeat-driven background runs also light the tab would be the
+  // noise the fold exists to remove.
   const tabStats = useMemo(() => {
     const unreadSet = new Set(unreadSessionIds);
     const unreadOf = (list: CoworkSessionSummary[]) => list.filter((session) => unreadSet.has(session.id)).length;
@@ -394,6 +397,24 @@ const Sidebar: React.FC<SidebarProps> = ({
     await coworkService.setSessionPinned(sessionId, pinned);
   };
 
+  /**
+   * Move a session in or out of the Delegated Tasks fold.
+   *
+   * The override the move writes depends on WHICH LIST the row came from:
+   *  - moving out of the fold: an auto-created run (the fold's own policy put it
+   *    there) needs an explicit 'out' to survive the policy, while a row that
+   *    was manually moved in only has to drop its override back to null;
+   *  - moving in: always 'in', which parks a human row in the fold.
+   */
+  const handleToggleDelegatedFold = async (sessionId: string, currentlyFolded: boolean) => {
+    const session = sessions.find((item) => item.id === sessionId);
+    if (!session) return;
+    const override = currentlyFolded
+      ? (shouldFoldIntoDelegatedTasks(session) ? 'out' : null)
+      : 'in';
+    await coworkService.setSessionFoldOverride(sessionId, override);
+  };
+
   const handleRenameSession = async (sessionId: string, title: string) => {
     await coworkService.renameSession(sessionId, title);
   };
@@ -407,6 +428,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const listOnSelectSession = useStableCallback(handleSelectSession);
   const listOnDeleteSession = useStableCallback(handleDeleteSession);
   const listOnTogglePin = useStableCallback(handleTogglePin);
+  const listOnToggleDelegatedFold = useStableCallback(handleToggleDelegatedFold);
   const listOnRenameSession = useStableCallback(handleRenameSession);
   const listOnToggleSessionSelected = useStableCallback(handleToggleBatchSelected);
 
@@ -788,6 +810,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                 onSelectSession={listOnSelectSession}
                 onDeleteSession={listOnDeleteSession}
                 onTogglePin={listOnTogglePin}
+                onToggleDelegatedFold={taskRecordTab === 'local' ? listOnToggleDelegatedFold : undefined}
                 onRenameSession={listOnRenameSession}
                 emptyText={i18nService.t(activeTaskRecordTab.emptyKey)}
                 selectionMode={isBatchArchiveMode && taskRecordTab === 'local'}
@@ -825,6 +848,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
         onTogglePin={handleTogglePin}
+        onToggleDelegatedFold={handleToggleDelegatedFold}
         onRenameSession={handleRenameSession}
       />
       <div className="px-3 pb-3 pt-1">

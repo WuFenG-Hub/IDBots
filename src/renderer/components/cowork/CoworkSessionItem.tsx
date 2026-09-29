@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CoworkSessionSummary, CoworkSessionStatus } from '../../types/cowork';
-import { ArchiveBoxIcon, ClipboardDocumentIcon, EllipsisHorizontalIcon, PencilSquareIcon } from '@heroicons/react/24/outline';
+import { ArchiveBoxIcon, ArrowRightOnRectangleIcon, ClipboardDocumentIcon, EllipsisHorizontalIcon, PencilSquareIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { getCoworkSessionTitleClassName, shouldShowCoworkA2ADot } from './coworkSessionPresentation.js';
 import { copyCoworkSessionLinkToClipboard } from './coworkSessionLink.js';
 import { isRenderableAvatarSource } from '../../utils/avatarSource';
+import { isInDelegatedFold } from '../../utils/sessionAutoGrouping';
 
 interface CoworkSessionItemProps {
   session: CoworkSessionSummary;
@@ -20,6 +21,13 @@ interface CoworkSessionItemProps {
   onDelete: (sessionId: string) => void;
   onTogglePin: (sessionId: string, pinned: boolean) => void;
   onRename: (sessionId: string, title: string) => void;
+  /**
+   * Move this session in or out of the sidebar's Delegated Tasks fold.
+   * Optional: lists that do not offer the move (and the A2A tab) leave it off,
+   * and the row then omits the menu entry entirely rather than showing a dead
+   * action.
+   */
+  onToggleDelegatedFold?: (sessionId: string, currentlyFolded: boolean) => void;
   /** Batch-selection mode (e.g. batch archive): the row shows a checkbox and
    * clicking it toggles selection instead of opening the session. */
   selectionMode?: boolean;
@@ -79,7 +87,7 @@ const PushPinIcon: React.FC<React.SVGProps<SVGSVGElement> & { slashed?: boolean 
 
 /**
  * Compact ("5m") + full ("5 minutes ago") relative-time pair for a session row.
- * Exported so list-level chrome (the Auto Tasks fold header) can stamp the same
+ * Exported so list-level chrome (the Delegated Tasks fold header) can stamp the same
  * newest-activity time the rows themselves show.
  *
  * `nowMs` lets the caller pass one shared clock (the list ticks it once a
@@ -243,6 +251,7 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   onDelete,
   onTogglePin,
   onRename,
+  onToggleDelegatedFold,
   selectionMode = false,
   isSelected = false,
   onToggleSelected,
@@ -325,6 +334,14 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   const handleTogglePin = (e: React.MouseEvent) => {
     e.stopPropagation();
     onTogglePin(session.id, !session.pinned);
+    closeMenu();
+  };
+
+  const handleToggleDelegatedFold = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    // The row tells the handler where it is NOW; the caller turns that into the
+    // next override ('in' when moving in, 'out'/null when moving out).
+    onToggleDelegatedFold?.(session.id, isInDelegatedFold(session));
     closeMenu();
   };
 
@@ -434,6 +451,12 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   const copySessionIdLabel = i18nService.t('coworkCopySessionId');
   const renameLabel = i18nService.t('renameConversation');
   const archiveLabel = i18nService.t('archiveSession');
+  // The label mirrors where the row sits right now, so the menu always reads as
+  // the action it will perform.
+  const inDelegatedFold = isInDelegatedFold(session);
+  const delegatedFoldLabel = i18nService.t(
+    inDelegatedFold ? 'coworkMoveOutOfDelegated' : 'coworkMoveToDelegated',
+  );
   const relativeTime = formatRelativeTime(session.updatedAt, nowMs);
   const showRunningIndicator = session.status === 'running';
   const showUnreadIndicator = !showRunningIndicator && hasUnread;
@@ -459,15 +482,23 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
       { key: 'copy-session-id', label: copySessionIdLabel, onClick: handleCopySessionIdClick },
       { key: 'rename', label: renameLabel, onClick: handleRenameClick },
       { key: 'pin', label: pinButtonLabel, onClick: handleTogglePin },
+      // Only offered where the move can actually happen (the local list and the
+      // search modal); the A2A/group lists have no fold, so they get no entry.
+      ...(onToggleDelegatedFold
+        ? [{ key: 'delegated-fold', label: delegatedFoldLabel, onClick: handleToggleDelegatedFold }]
+        : []),
       { key: 'archive', label: archiveLabel, onClick: handleDeleteClick },
     ];
   }, [
     copySessionIdLabel,
     archiveLabel,
+    delegatedFoldLabel,
     handleCopySessionIdClick,
     handleDeleteClick,
     handleRenameClick,
+    handleToggleDelegatedFold,
     handleTogglePin,
+    onToggleDelegatedFold,
     pinButtonLabel,
     renameLabel,
   ]);
@@ -620,6 +651,11 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
                 <PushPinIcon
                   slashed={session.pinned}
                   className={`h-4 w-4 ${session.pinned ? 'opacity-60' : ''}`}
+                />
+              )}
+              {item.key === 'delegated-fold' && (
+                <ArrowRightOnRectangleIcon
+                  className={`h-4 w-4 ${inDelegatedFold ? 'rotate-180' : ''}`}
                 />
               )}
               {item.key === 'archive' && <ArchiveBoxIcon className="h-4 w-4" />}

@@ -293,6 +293,8 @@ interface CoworkSession {
   metabotAvatar?: string | null;
   /** Auto-created session marker: long-term task run, orchestration run, or scheduled run. */
   autoOrigin?: 'longterm' | 'orchestration' | 'schedule' | null;
+  /** Manual "Delegated Tasks" fold placement; null = follow the auto-origin policy. */
+  foldOverride?: 'in' | 'out' | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 
@@ -406,6 +408,8 @@ interface CoworkSessionSummary {
   metabotAvatarVersion?: number | null;
   /** Auto-created session marker: long-term task run, orchestration run, or scheduled run. */
   autoOrigin?: 'longterm' | 'orchestration' | 'schedule' | null;
+  /** Manual "Delegated Tasks" fold placement; null = follow the auto-origin policy. */
+  foldOverride?: 'in' | 'out' | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 
@@ -1115,6 +1119,7 @@ interface IElectronAPI {
     unarchiveSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
     listArchivedSessions: (options?: { metabotId?: number | null; query?: string; searchContent?: boolean; sessionType?: 'standard' | 'a2a' | 'browser' | 'group_task'; limit?: number; offset?: number }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; total?: number; error?: string }>;
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) => Promise<{ success: boolean; error?: string }>;
+    setSessionFoldOverride: (options: { sessionId: string; override: 'in' | 'out' | null }) => Promise<{ success: boolean; error?: string }>;
     setSessionModel: (options: {
       sessionId: string;
       model: string | null;

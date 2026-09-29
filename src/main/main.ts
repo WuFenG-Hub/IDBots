@@ -11304,6 +11304,33 @@ if (!gotTheLock) {
     });
   });
 
+  ipcMain.handle('cowork:session:foldOverride', async (_event, options: { sessionId: string; override: 'in' | 'out' | null }) => {
+    return withSqliteRecovery('cowork:session:foldOverride', async () => {
+      try {
+        const sessionId = typeof options?.sessionId === 'string' ? options.sessionId.trim() : '';
+        if (!sessionId) {
+          return { success: false, error: 'sessionId is required' };
+        }
+        // Strict value gate: the column is read by the fold policy, so an
+        // unknown string would silently behave like NULL — refuse instead of
+        // storing something the renderer did not ask for.
+        const override = options?.override ?? null;
+        if (override !== null && override !== 'in' && override !== 'out') {
+          return { success: false, error: "override must be 'in', 'out' or null" };
+        }
+        const coworkStoreInstance = getCoworkStore();
+        coworkStoreInstance.setSessionFoldOverride(sessionId, override);
+        return { success: true };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to update session fold placement',
+        };
+      }
+    });
+  });
+
   ipcMain.handle('cowork:session:setModel', async (_event, options: {
     sessionId: string;
     model: string | null;
