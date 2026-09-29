@@ -2079,7 +2079,7 @@ export class SqliteStore {
 
       if (!columns.includes('auto_origin')) {
         // Origin marker for auto-created sessions: the renderer folds rows with
-        // a non-NULL value into the collapsed "Delegated Tasks" (委派任务)
+        // a non-NULL value into the collapsed "Autonomous Tasks" (自主任务)
         // sidebar section instead of the regular conversation list. NULL =
         // human-initiated.
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN auto_origin TEXT;');
@@ -2127,8 +2127,8 @@ export class SqliteStore {
       }
 
       if (!columns.includes('fold_override')) {
-        // Manual placement of a session in the sidebar's "Delegated Tasks"
-        // (委派任务) fold: 'in' | 'out', NULL = follow the auto_origin policy.
+        // Manual placement of a session in the sidebar's "Autonomous Tasks"
+        // (自主任务) fold: 'in' | 'out', NULL = follow the auto_origin policy.
         // Additive and unbackfilled on purpose — the policy already covers every
         // existing row, and an override is only ever set by a deliberate user
         // move.

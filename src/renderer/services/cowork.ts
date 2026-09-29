@@ -1126,7 +1126,7 @@ class CoworkService {
   }
 
   /**
-   * Move a session in or out of the sidebar's "Delegated Tasks" fold. null
+   * Move a session in or out of the sidebar's "Autonomous Tasks" fold. null
    * clears the manual placement so the auto-origin policy decides again.
    */
   async setSessionFoldOverride(

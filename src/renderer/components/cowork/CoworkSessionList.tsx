@@ -50,7 +50,7 @@ interface CoworkSessionListProps {
    * Auto-folded sessions (long-term task runs, orchestration/delegation runs)
    * for the local-chats list — scheduled-task runs are NOT folded, they stay in
    * the main list. Folded rows are NEVER mixed into the main list: they render
-   * as one collapsed "Delegated Tasks" folder directly under the pinned
+   * as one collapsed "Autonomous Tasks" folder directly under the pinned
    * section and above the content groups, independent of the view mode — tucked
    * out of the human conversations, but visible at a glance instead of buried
    * at the bottom. Only the local tab passes this; every other caller leaves
@@ -58,13 +58,13 @@ interface CoworkSessionListProps {
    */
   autoSessions?: CoworkSessionSummary[];
   /**
-   * Move one session in or out of the Delegated Tasks fold (the row menu's
-   * 移入委派任务 / 移出委派任务 entry). Optional: callers that do not offer the
+   * Move one session in or out of the Autonomous Tasks fold (the row menu's
+   * 移入自主任务 / 移出自主任务 entry). Optional: callers that do not offer the
    * move (and every non-local list) simply leave it off, and the row then hides
    * the menu entry. `currentlyFolded` is the membership at menu-open time, so
    * the caller decides the next override without re-deriving it.
    */
-  onToggleDelegatedFold?: (sessionId: string, currentlyFolded: boolean) => void;
+  onToggleAutonomousFold?: (sessionId: string, currentlyFolded: boolean) => void;
   /** Online-chats (A2A) Bot selector — that list's ONLY selector. When on, one
    * avatar-led control renders above the flat list (BotSelectorPopover: avatar +
    * current value + ▾, no "Bot:" label), listing 全部 and one entry per local bot
@@ -108,7 +108,7 @@ const RELATIVE_TIME_TICK_MS = 60_000;
 const noopToggleSelected = (): void => {};
 
 /** Placeholder for the optional fold move; hidden behind the menu entry's own guard. */
-const noopToggleDelegatedFold = (): void => {};
+const noopToggleAutonomousFold = (): void => {};
 
 /**
  * Shallow equality, one level deep: `Object.is` per key, and for nested objects
@@ -168,7 +168,7 @@ const useStableSessionSummaries = (
   }, [sessions, autoSessions]);
 };
 
-/** Remembered open/closed state of the Delegated Tasks fold, read once on mount. */
+/** Remembered open/closed state of the Autonomous Tasks fold, read once on mount. */
 const loadAutoTasksExpanded = (): boolean => {
   try {
     return parseAutoTasksExpandedPreference(window.localStorage.getItem(AUTO_TASKS_EXPANDED_STORAGE_KEY));
@@ -193,7 +193,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   sortMode = 'updatedAt',
   botSelector = false,
   autoSessions: incomingAutoSessions,
-  onToggleDelegatedFold,
+  onToggleAutonomousFold,
   language: languageProp,
 }) => {
   // Same summary objects for the rows whose fields did not change (see the
@@ -220,7 +220,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   // Optional, so it needs the same no-op treatment as batch selection: a
   // memoized row must never receive an undefined callback and then have to
   // guard every click itself.
-  const toggleDelegatedFold = useStableCallback(onToggleDelegatedFold ?? noopToggleDelegatedFold);
+  const toggleAutonomousFold = useStableCallback(onToggleAutonomousFold ?? noopToggleAutonomousFold);
   // Batch selection is the one optional action (the search modal never enters
   // selection mode). A no-op keeps the memoized prop a function, so the row's
   // guard cannot silently let an undefined callback through to a click.
@@ -235,7 +235,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   // Project-group collapse state lives here (not in the parent) so the search
   // modal and A2A tab, which render flat, never see it. Defaults to expanded.
   const [collapsedGroupKeys, setCollapsedGroupKeys] = useState<Set<string>>(new Set);
-  // The Delegated Tasks fold, unlike the project groups, remembers its state
+  // The Autonomous Tasks fold, unlike the project groups, remembers its state
   // across restarts: it holds background runs, so it opens collapsed every
   // launch.
   const [isAutoTasksExpanded, setIsAutoTasksExpanded] = useState<boolean>(loadAutoTasksExpanded);
@@ -354,10 +354,10 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     [visibleSessions, viewMode, sortMode],
   );
 
-  // The Delegated Tasks fold: machine-started runs, ordered like the main list
+  // The Autonomous Tasks fold: machine-started runs, ordered like the main list
   // (pinned first, then the active sort mode) inside ONE flat section that
   // always sits directly under the pinned block, whatever the view mode. A pin
-  // keeps its place inside the fold — it never rescues a delegated run back
+  // keeps its place inside the fold — it never rescues an autonomous run back
   // into the human list.
   const sortedAutoSessions = useMemo(() => {
     const list = autoSessions ?? [];
@@ -421,7 +421,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
         onTogglePin={togglePin}
         onRename={renameSession}
         onToggleSelected={toggleSessionSelected}
-        onToggleDelegatedFold={onToggleDelegatedFold ? toggleDelegatedFold : undefined}
+        onToggleAutonomousFold={onToggleAutonomousFold ? toggleAutonomousFold : undefined}
       />
     );
   };
@@ -437,15 +437,15 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     );
 
   /**
-   * The Delegated Tasks fold. Rendered in every view mode directly under the
+   * The Autonomous Tasks fold. Rendered in every view mode directly under the
    * pinned block (above the timeline/project groups, where it is seen without
    * scrolling), and only when there is something to fold — an empty folder
    * would be noise of its own.
    *
    * Membership = the auto-origin policy (long-term task runs, orchestration
    * delegations) with the row's manual placement winning over it ('in' parks a
-   * human row here, 'out' keeps a delegated run in the main list) — see
-   * isInDelegatedFold. Rows leave the fold by being archived, and the whole
+   * human row here, 'out' keeps an autonomous run in the main list) — see
+   * isInAutonomousFold. Rows leave the fold by being archived, and the whole
    * section disappears once nothing is left in it.
    *
    * The header is styled like the project groups' folder header (subdued
@@ -459,14 +459,14 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
    */
   const renderAutoTasksSection = () =>
     revealBudgetLeft() && sortedAutoSessions.length > 0 && (
-      <section data-testid="delegated-tasks-section">
+      <section data-testid="autonomous-tasks-section">
         <button
           type="button"
           aria-expanded={isAutoTasksExpanded}
           onClick={toggleAutoTasksExpanded}
           title={(autoUnreadCount > 0
-            ? i18nService.t('coworkDelegatedTasksUnread').replace('{count}', String(autoUnreadCount))
-            : i18nService.t('coworkDelegatedTasksCount').replace('{count}', String(sortedAutoSessions.length)))}
+            ? i18nService.t('coworkAutonomousTasksUnread').replace('{count}', String(autoUnreadCount))
+            : i18nService.t('coworkAutonomousTasksCount').replace('{count}', String(sortedAutoSessions.length)))}
           className={`flex w-full items-center gap-1.5 px-2.5 pb-1 pt-2.5 text-left transition-colors hover:text-claude-text dark:hover:text-claude-darkText ${groupHeaderLabelClass}`}
         >
           {autoUnreadCount > 0 && (
@@ -476,7 +476,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
             className={`h-3 w-3 flex-shrink-0 transition-transform duration-150 ${isAutoTasksExpanded ? '' : '-rotate-90'}`}
           />
           <FolderIcon className="h-3.5 w-3.5 flex-shrink-0" />
-          <span className="truncate">{i18nService.t('coworkDelegatedTasks')}</span>
+          <span className="truncate">{i18nService.t('coworkAutonomousTasks')}</span>
           {autoUnreadCount > 0 && (
             <span className="flex-shrink-0 font-medium tabular-nums text-red-500">{autoUnreadCount}</span>
           )}

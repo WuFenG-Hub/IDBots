@@ -1,18 +1,18 @@
 /**
- * Delegated-task session folding for the bot-home sidebar's local-chats list.
+ * Autonomous-task session folding for the bot-home sidebar's local-chats list.
  *
  * The app creates sessions on its own — [长期] long-term task runs,
  * [编排任务] / [Orchestration Task] delegation runs, [定时] scheduled-task runs.
  * Main stamps `auto_origin` on those rows (CoworkStore.setSessionAutoOrigin) and
  * the summary carries it as `autoOrigin`. The sidebar folds SOME of them into a
- * collapsed "Delegated Tasks" (委派任务) section per the policy below;
+ * collapsed "Autonomous Tasks" (自主任务) section per the policy below;
  * scheduled-task runs are deliberately NOT folded — they are usually the user's
  * own automations, and their one-session-per-fire cadence belongs in the main
  * list the user watches.
  *
- * The folder is named for what the rows ARE to the owner — runs the app
- * delegated on their behalf — while the `autoOrigin` field keeps naming the
- * creation fact (who created the session).
+ * The folder is named for HOW those rows run — the Twin Bot drives them
+ * autonomously, without the owner in the loop — while the `autoOrigin` field
+ * keeps naming the creation fact (who created the session).
  *
  * Pure module (no React / i18n / electron imports) so it can be unit-tested with
  * tsx directly, mirroring sessionViewGrouping.ts.
@@ -21,10 +21,10 @@
 import type { CoworkSessionSummary } from '../types/cowork';
 
 /** The two halves of a local-chats list after folding. */
-export interface SessionsByDelegatedFold {
+export interface SessionsByAutonomousFold {
   /** Human-initiated sessions (plus scheduled-task runs) — the visible main list. */
   humanSessions: CoworkSessionSummary[];
-  /** Folded delegated sessions — the collapsed "Delegated Tasks" fold. */
+  /** Folded autonomous sessions — the collapsed "Autonomous Tasks" fold. */
   autoSessions: CoworkSessionSummary[];
 }
 
@@ -32,13 +32,13 @@ export interface SessionsByDelegatedFold {
  * Whether the app created this session on its own. Only a real marker counts:
  * `null` (and legacy rows, whose field is `undefined`) is human-initiated.
  * This is the creation FACT; whether the session actually folds is the policy
- * in shouldFoldIntoDelegatedTasks (plus any manual override on the row).
+ * in shouldFoldIntoAutonomousTasks (plus any manual override on the row).
  */
 export const isAutoCreatedSession = (
   session: Pick<CoworkSessionSummary, 'autoOrigin'>,
 ): boolean => session.autoOrigin != null;
 
-/** Origins that collapse into the Delegated Tasks fold. Everything else — human
+/** Origins that collapse into the Autonomous Tasks fold. Everything else — human
  * rows and 'schedule' runs alike — stays in the main list. */
 const FOLDED_AUTO_ORIGINS: ReadonlySet<NonNullable<CoworkSessionSummary['autoOrigin']>> = new Set([
   'longterm',
@@ -46,7 +46,7 @@ const FOLDED_AUTO_ORIGINS: ReadonlySet<NonNullable<CoworkSessionSummary['autoOri
 ]);
 
 /** Fold policy: only long-term task runs and orchestration delegations fold. */
-export const shouldFoldIntoDelegatedTasks = (
+export const shouldFoldIntoAutonomousTasks = (
   session: Pick<CoworkSessionSummary, 'autoOrigin'>,
 ): boolean => session.autoOrigin != null && FOLDED_AUTO_ORIGINS.has(session.autoOrigin);
 
@@ -56,25 +56,25 @@ export const shouldFoldIntoDelegatedTasks = (
  * list. With no manual placement (null/undefined, the state of every row that
  * the user never moved) the auto-origin policy decides.
  */
-export const isInDelegatedFold = (
+export const isInAutonomousFold = (
   session: Pick<CoworkSessionSummary, 'autoOrigin' | 'foldOverride'>,
 ): boolean => {
   if (session.foldOverride === 'in') return true;
   if (session.foldOverride === 'out') return false;
-  return shouldFoldIntoDelegatedTasks(session);
+  return shouldFoldIntoAutonomousTasks(session);
 };
 
 /**
- * Split sessions into the main list and the delegated fold, preserving input
+ * Split sessions into the main list and the autonomous fold, preserving input
  * order in both halves (the caller owns ordering; this helper never re-sorts).
  */
-export const splitSessionsByDelegatedFold = (
+export const splitSessionsByAutonomousFold = (
   sessions: readonly CoworkSessionSummary[],
-): SessionsByDelegatedFold => {
+): SessionsByAutonomousFold => {
   const humanSessions: CoworkSessionSummary[] = [];
   const autoSessions: CoworkSessionSummary[] = [];
   for (const session of sessions) {
-    (isInDelegatedFold(session) ? autoSessions : humanSessions).push(session);
+    (isInAutonomousFold(session) ? autoSessions : humanSessions).push(session);
   }
   return { humanSessions, autoSessions };
 };

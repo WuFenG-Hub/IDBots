@@ -293,7 +293,7 @@ interface CoworkSession {
   metabotAvatar?: string | null;
   /** Auto-created session marker: long-term task run, orchestration run, or scheduled run. */
   autoOrigin?: 'longterm' | 'orchestration' | 'schedule' | null;
-  /** Manual "Delegated Tasks" fold placement; null = follow the auto-origin policy. */
+  /** Manual "Autonomous Tasks" fold placement; null = follow the auto-origin policy. */
   foldOverride?: 'in' | 'out' | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
@@ -408,7 +408,7 @@ interface CoworkSessionSummary {
   metabotAvatarVersion?: number | null;
   /** Auto-created session marker: long-term task run, orchestration run, or scheduled run. */
   autoOrigin?: 'longterm' | 'orchestration' | 'schedule' | null;
-  /** Manual "Delegated Tasks" fold placement; null = follow the auto-origin policy. */
+  /** Manual "Autonomous Tasks" fold placement; null = follow the auto-origin policy. */
   foldOverride?: 'in' | 'out' | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }

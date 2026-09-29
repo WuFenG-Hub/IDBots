@@ -1,6 +1,6 @@
 // cowork_sessions.auto_origin — the origin marker that lets the sidebar fold
 // auto-created sessions ([长期] long-term runs, [编排任务] orchestration runs,
-// [定时] scheduled runs) into a collapsed "Delegated Tasks" section.
+// [定时] scheduled runs) into a collapsed "Autonomous Tasks" section.
 //
 // Contract under test:
 //   a. a fresh database gets the column, and createSession still yields a

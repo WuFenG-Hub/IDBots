@@ -116,7 +116,7 @@ test('only a bounded prefix of rows mounts, and scrolling toward the end reveals
 
 test('the reveal budget applies to every branch that renders rows', () => {
   // Every row list ends in renderItem, which is what spends the budget: the
-  // pinned block, the expanded Delegated Tasks fold, the timeline groups, the
+  // pinned block, the expanded Autonomous Tasks fold, the timeline groups, the
   // project groups, and the three flat lists (the selector branch, plus the
   // plain branch's pinned and unpinned halves).
   assert.equal((listSource.match(/\.map\(renderItem\)/g) ?? []).length, 7);
