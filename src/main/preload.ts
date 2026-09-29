@@ -444,6 +444,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:listArchived', options),
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) =>
       ipcRenderer.invoke('cowork:session:pin', options),
+    setSessionFoldOverride: (options: { sessionId: string; override: 'in' | 'out' | null }) =>
+      ipcRenderer.invoke('cowork:session:foldOverride', options),
     setSessionModel: (options: {
       sessionId: string;
       model: string | null;

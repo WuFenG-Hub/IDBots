@@ -57,6 +57,14 @@ interface CoworkSessionListProps {
    * it off and its output is unchanged.
    */
   autoSessions?: CoworkSessionSummary[];
+  /**
+   * Move one session in or out of the Delegated Tasks fold (the row menu's
+   * 移入委派任务 / 移出委派任务 entry). Optional: callers that do not offer the
+   * move (and every non-local list) simply leave it off, and the row then hides
+   * the menu entry. `currentlyFolded` is the membership at menu-open time, so
+   * the caller decides the next override without re-deriving it.
+   */
+  onToggleDelegatedFold?: (sessionId: string, currentlyFolded: boolean) => void;
   /** Online-chats (A2A) Bot selector — that list's ONLY selector. When on, one
    * avatar-led control renders above the flat list (BotSelectorPopover: avatar +
    * current value + ▾, no "Bot:" label), listing 全部 and one entry per local bot
@@ -98,6 +106,9 @@ const RELATIVE_TIME_TICK_MS = 60_000;
  * batch-selection mode leaves it out), so the rows always receive a callable.
  */
 const noopToggleSelected = (): void => {};
+
+/** Placeholder for the optional fold move; hidden behind the menu entry's own guard. */
+const noopToggleDelegatedFold = (): void => {};
 
 /**
  * Shallow equality, one level deep: `Object.is` per key, and for nested objects
@@ -182,6 +193,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   sortMode = 'updatedAt',
   botSelector = false,
   autoSessions: incomingAutoSessions,
+  onToggleDelegatedFold,
   language: languageProp,
 }) => {
   // Same summary objects for the rows whose fields did not change (see the
@@ -205,6 +217,10 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   const deleteSession = useStableCallback(onDeleteSession);
   const togglePin = useStableCallback(onTogglePin);
   const renameSession = useStableCallback(onRenameSession);
+  // Optional, so it needs the same no-op treatment as batch selection: a
+  // memoized row must never receive an undefined callback and then have to
+  // guard every click itself.
+  const toggleDelegatedFold = useStableCallback(onToggleDelegatedFold ?? noopToggleDelegatedFold);
   // Batch selection is the one optional action (the search modal never enters
   // selection mode). A no-op keeps the memoized prop a function, so the row's
   // guard cannot silently let an undefined callback through to a click.
@@ -405,6 +421,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
         onTogglePin={togglePin}
         onRename={renameSession}
         onToggleSelected={toggleSessionSelected}
+        onToggleDelegatedFold={onToggleDelegatedFold ? toggleDelegatedFold : undefined}
       />
     );
   };
@@ -423,12 +440,20 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
    * The Delegated Tasks fold. Rendered in every view mode directly under the
    * pinned block (above the timeline/project groups, where it is seen without
    * scrolling), and only when there is something to fold — an empty folder
-   * would be noise of its own. The header is styled like the project groups'
-   * folder header (subdued secondary text + folder glyph) so it reads as a
-   * container, not as a conversation, and carries a red dot at the row's left
-   * + the fold's UNREAD session count in red (both only when > 0 — the signal
-   * the user actually watches; the total survives only in the hover tooltip)
-   * + the fold's newest activity time.
+   * would be noise of its own.
+   *
+   * Membership = the auto-origin policy (long-term task runs, orchestration
+   * delegations) with the row's manual placement winning over it ('in' parks a
+   * human row here, 'out' keeps a delegated run in the main list) — see
+   * isInDelegatedFold. Rows leave the fold by being archived, and the whole
+   * section disappears once nothing is left in it.
+   *
+   * The header is styled like the project groups' folder header (subdued
+   * secondary text + folder glyph) so it reads as a container, not as a
+   * conversation, and carries a red dot at the row's left + the fold's UNREAD
+   * session count in red (both only when > 0 — the signal the user actually
+   * watches; the total survives only in the hover tooltip) + the fold's newest
+   * activity time.
    * Per-row dots inside the EXPANDED fold stay — that is where "which run has
    * news" is actually traceable.
    */

@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import {
   AUTO_TASKS_EXPANDED_STORAGE_KEY,
   isAutoCreatedSession,
+  isInDelegatedFold,
   parseAutoTasksExpandedPreference,
   serializeAutoTasksExpandedPreference,
   shouldFoldIntoDelegatedTasks,
@@ -31,6 +32,7 @@ const readSource = (relative: string): string => fs.readFileSync(path.join(ROOT,
 const mkSession = (
   id: string,
   autoOrigin?: CoworkSessionSummary['autoOrigin'],
+  foldOverride?: CoworkSessionSummary['foldOverride'],
 ): CoworkSessionSummary => ({
   id,
   title: `Session ${id}`,
@@ -39,6 +41,40 @@ const mkSession = (
   createdAt: 0,
   updatedAt: 0,
   autoOrigin,
+  foldOverride,
+});
+
+test('a manual fold placement wins over the auto-origin policy in both directions', () => {
+  // No manual placement: the policy decides (the state of every untouched row).
+  assert.equal(isInDelegatedFold(mkSession('human')), false);
+  assert.equal(isInDelegatedFold(mkSession('lt', 'longterm')), true);
+  assert.equal(isInDelegatedFold(mkSession('orch', 'orchestration')), true);
+  assert.equal(isInDelegatedFold(mkSession('sched', 'schedule')), false);
+  assert.equal(isInDelegatedFold(mkSession('human-null', null, null)), false, 'null override = policy');
+
+  // 'in' parks a human row in the fold — even a scheduled run nobody wanted folded.
+  assert.equal(isInDelegatedFold(mkSession('human-in', undefined, 'in')), true);
+  assert.equal(isInDelegatedFold(mkSession('sched-in', 'schedule', 'in')), true);
+
+  // 'out' pulls a delegated run back into the main list without touching its origin.
+  assert.equal(isInDelegatedFold(mkSession('lt-out', 'longterm', 'out')), false);
+  assert.equal(isInDelegatedFold(mkSession('orch-out', 'orchestration', 'out')), false);
+  assert.equal(mkSession('lt-out', 'longterm', 'out').autoOrigin, 'longterm',
+    'the creation fact survives the move');
+});
+
+test('the split honours overrides: moved rows land on the other side, in order', () => {
+  const sessions = [
+    mkSession('human-1'),
+    mkSession('pulled-out', 'longterm', 'out'),
+    mkSession('pushed-in', undefined, 'in'),
+    mkSession('auto-1', 'orchestration'),
+  ];
+
+  const { humanSessions, autoSessions } = splitSessionsByDelegatedFold(sessions);
+
+  assert.deepEqual(humanSessions.map((session) => session.id), ['human-1', 'pulled-out']);
+  assert.deepEqual(autoSessions.map((session) => session.id), ['pushed-in', 'auto-1']);
 });
 
 test('a session is auto-created when it carries a real origin marker, but only long-term and orchestration runs fold', () => {
@@ -160,4 +196,54 @@ test('the fold header carries label + unread count + latest activity, and no tot
   const i18n = readSource('src/renderer/services/i18n.ts');
   assert.equal((i18n.match(/coworkDelegatedTasksUnread:/g) ?? []).length, 2, 'one per locale');
   assert.equal((i18n.match(/coworkDelegatedTasksCount:/g) ?? []).length, 2, 'still one per locale');
+});
+
+test('the row menu offers the fold move, labels it by current membership, and only renders when wired', () => {
+  const item = readSource('src/renderer/components/cowork/CoworkSessionItem.tsx');
+
+  // The entry sits between pin and archive, and its label mirrors where the row
+  // is now (move IN while in the main list, OUT while folded).
+  assert.match(
+    item,
+    /\{ key: 'pin'[\s\S]{0,600}\{ key: 'delegated-fold'[\s\S]{0,400}\{ key: 'archive'/,
+    'between pin and archive',
+  );
+  assert.match(item, /onToggleDelegatedFold\?\.\(session\.id, isInDelegatedFold\(session\)\)/);
+  assert.match(item, /inDelegatedFold \? 'coworkMoveOutOfDelegated' : 'coworkMoveToDelegated'/);
+  // Optional prop: hidden, not dead, when the host does not offer the move.
+  assert.match(item, /onToggleDelegatedFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);
+  assert.match(item, /\.\.\.\(onToggleDelegatedFold\s*\n?\s*\? \[\{ key: 'delegated-fold'/);
+
+  // The list threads it through to the rows (and keeps a stable identity for
+  // the memoized rows, like every other action).
+  const list = readSource('src/renderer/components/cowork/CoworkSessionList.tsx');
+  assert.match(list, /onToggleDelegatedFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);
+  assert.match(list, /const toggleDelegatedFold = useStableCallback\(onToggleDelegatedFold \?\? noopToggleDelegatedFold\)/);
+  assert.match(list, /onToggleDelegatedFold=\{onToggleDelegatedFold \? toggleDelegatedFold : undefined\}/);
+
+  // The sidebar owns the override decision and gives the list a stable handler;
+  // only the local tab (the fold's own list) offers the move.
+  const sidebar = readSource('src/renderer/components/Sidebar.tsx');
+  assert.match(sidebar, /const handleToggleDelegatedFold = async \(sessionId: string, currentlyFolded: boolean\) => \{/);
+  assert.match(sidebar, /\? \(shouldFoldIntoDelegatedTasks\(session\) \? 'out' : null\)/);
+  assert.match(sidebar, /: 'in';/);
+  assert.match(sidebar, /await coworkService\.setSessionFoldOverride\(sessionId, override\)/);
+  assert.match(sidebar, /const listOnToggleDelegatedFold = useStableCallback\(handleToggleDelegatedFold\)/);
+  assert.match(sidebar, /onToggleDelegatedFold=\{taskRecordTab === 'local' \? listOnToggleDelegatedFold : undefined\}/);
+  // The search modal renders the same rows, so it offers the move too.
+  assert.match(sidebar, /<CoworkSearchModal[\s\S]{0,400}onToggleDelegatedFold=\{handleToggleDelegatedFold\}/);
+  const modal = readSource('src/renderer/components/cowork/CoworkSearchModal.tsx');
+  assert.match(modal, /onToggleDelegatedFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);
+  assert.match(modal, /onToggleDelegatedFold=\{onToggleDelegatedFold\}/);
+
+  // The service dispatches the local patch on success (mirrors setSessionPinned).
+  const service = readSource('src/renderer/services/cowork.ts');
+  assert.match(service, /async setSessionFoldOverride\(\s*sessionId: string,\s*override: CoworkSessionFoldOverride \| null,\s*\)/);
+  assert.match(service, /await cowork\.setSessionFoldOverride\(\{ sessionId, override \}\)/);
+  assert.match(service, /store\.dispatch\(updateSessionFoldOverride\(\{ sessionId, override \}\)\)/);
+
+  // Both menu labels exist once per locale.
+  const i18n = readSource('src/renderer/services/i18n.ts');
+  assert.equal((i18n.match(/coworkMoveToDelegated:/g) ?? []).length, 2, 'one per locale');
+  assert.equal((i18n.match(/coworkMoveOutOfDelegated:/g) ?? []).length, 2, 'one per locale');
 });

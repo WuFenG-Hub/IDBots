@@ -15,6 +15,7 @@ import {
   loadSessionFeedback as loadSessionFeedbackAction,
   setStreaming,
   updateSessionPinned,
+  updateSessionFoldOverride,
   updateSessionTitle,
   updateSessionPermissionMode,
   updateSessionGoal,
@@ -64,6 +65,7 @@ import type {
   CoworkA2AHistoryCursor,
   CoworkA2AHistoryPage,
   CoworkPermissionMode,
+  CoworkSessionFoldOverride,
   CoworkStartOptions,
   CoworkContinueOptions,
   CoworkSubmitInput,
@@ -1120,6 +1122,27 @@ class CoworkService {
     }
 
     console.error('Failed to update session pin:', result.error);
+    return false;
+  }
+
+  /**
+   * Move a session in or out of the sidebar's "Delegated Tasks" fold. null
+   * clears the manual placement so the auto-origin policy decides again.
+   */
+  async setSessionFoldOverride(
+    sessionId: string,
+    override: CoworkSessionFoldOverride | null,
+  ): Promise<boolean> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.setSessionFoldOverride) return false;
+
+    const result = await cowork.setSessionFoldOverride({ sessionId, override });
+    if (result.success) {
+      store.dispatch(updateSessionFoldOverride({ sessionId, override }));
+      return true;
+    }
+
+    console.error('Failed to update session fold placement:', result.error);
     return false;
   }
 

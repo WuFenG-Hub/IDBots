@@ -2125,6 +2125,16 @@ export class SqliteStore {
         this.save();
       }
 
+      if (!columns.includes('fold_override')) {
+        // Manual placement of a session in the sidebar's "Delegated Tasks"
+        // (委派任务) fold: 'in' | 'out', NULL = follow the auto_origin policy.
+        // Additive and unbackfilled on purpose — the policy already covers every
+        // existing row, and an override is only ever set by a deliberate user
+        // move.
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN fold_override TEXT;');
+        this.save();
+      }
+
       if (!columns.includes('metabot_id')) {
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN metabot_id INTEGER;');
         this.save();

@@ -33,7 +33,7 @@ import type {
   SessionSortMode,
   SessionViewMode,
 } from '../utils/sessionViewGrouping';
-import { splitSessionsByDelegatedFold } from '../utils/sessionAutoGrouping';
+import { shouldFoldIntoDelegatedTasks, splitSessionsByDelegatedFold } from '../utils/sessionAutoGrouping';
 import { useStableCallback } from '../utils/useStableCallback';
 import { selectTrackedTasksNeedingAttention } from '../utils/trackedTaskAttention';
 import type { SettingsOpenOptions } from './Settings';
@@ -397,6 +397,24 @@ const Sidebar: React.FC<SidebarProps> = ({
     await coworkService.setSessionPinned(sessionId, pinned);
   };
 
+  /**
+   * Move a session in or out of the Delegated Tasks fold.
+   *
+   * The override the move writes depends on WHICH LIST the row came from:
+   *  - moving out of the fold: an auto-created run (the fold's own policy put it
+   *    there) needs an explicit 'out' to survive the policy, while a row that
+   *    was manually moved in only has to drop its override back to null;
+   *  - moving in: always 'in', which parks a human row in the fold.
+   */
+  const handleToggleDelegatedFold = async (sessionId: string, currentlyFolded: boolean) => {
+    const session = sessions.find((item) => item.id === sessionId);
+    if (!session) return;
+    const override = currentlyFolded
+      ? (shouldFoldIntoDelegatedTasks(session) ? 'out' : null)
+      : 'in';
+    await coworkService.setSessionFoldOverride(sessionId, override);
+  };
+
   const handleRenameSession = async (sessionId: string, title: string) => {
     await coworkService.renameSession(sessionId, title);
   };
@@ -410,6 +428,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const listOnSelectSession = useStableCallback(handleSelectSession);
   const listOnDeleteSession = useStableCallback(handleDeleteSession);
   const listOnTogglePin = useStableCallback(handleTogglePin);
+  const listOnToggleDelegatedFold = useStableCallback(handleToggleDelegatedFold);
   const listOnRenameSession = useStableCallback(handleRenameSession);
   const listOnToggleSessionSelected = useStableCallback(handleToggleBatchSelected);
 
@@ -791,6 +810,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                 onSelectSession={listOnSelectSession}
                 onDeleteSession={listOnDeleteSession}
                 onTogglePin={listOnTogglePin}
+                onToggleDelegatedFold={taskRecordTab === 'local' ? listOnToggleDelegatedFold : undefined}
                 onRenameSession={listOnRenameSession}
                 emptyText={i18nService.t(activeTaskRecordTab.emptyKey)}
                 selectionMode={isBatchArchiveMode && taskRecordTab === 'local'}
@@ -828,6 +848,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
         onTogglePin={handleTogglePin}
+        onToggleDelegatedFold={handleToggleDelegatedFold}
         onRenameSession={handleRenameSession}
       />
       <div className="px-3 pb-3 pt-1">

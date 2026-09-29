@@ -48,6 +48,12 @@ export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task' | 
 // null/undefined = human-initiated.
 export type CoworkSessionAutoOrigin = 'longterm' | 'orchestration' | 'schedule';
 
+// Manual placement in the sidebar's "Delegated Tasks" fold (mirrors the
+// fold_override column): 'out' forces an auto-created row back into the main
+// conversation list, 'in' parks a human row in the fold. null/undefined = no
+// manual placement, so the auto-origin policy decides.
+export type CoworkSessionFoldOverride = 'in' | 'out';
+
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 
 // Cowork message metadata
@@ -393,6 +399,8 @@ export interface CoworkSession {
   browserTitle?: string | null;
   /** Auto-origin marker (see CoworkSessionSummary.autoOrigin); null = human-initiated. */
   autoOrigin?: CoworkSessionAutoOrigin | null;
+  /** Manual fold placement (see CoworkSessionSummary.foldOverride); null = policy. */
+  foldOverride?: CoworkSessionFoldOverride | null;
   /** Local MetaBot's display name */
   metabotName?: string | null;
   /** Local MetaBot's avatar data URL */
@@ -840,6 +848,12 @@ export interface CoworkSessionSummary {
    * "Delegated Tasks" folder unless the row carries a manual foldOverride.
    */
   autoOrigin?: CoworkSessionAutoOrigin | null;
+  /**
+   * Manual fold placement: 'out' keeps an auto-created run in the main list,
+   * 'in' parks a human row in the fold, null/undefined = follow the auto-origin
+   * policy. A manual move always wins over the policy.
+   */
+  foldOverride?: CoworkSessionFoldOverride | null;
 }
 
 // The New Task composer's working-directory choice. `project` and `folder` both

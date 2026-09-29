@@ -658,6 +658,14 @@ export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task' | 
  * 'schedule' = [定时] scheduled-task run session.
  */
 export type CoworkSessionAutoOrigin = 'longterm' | 'orchestration' | 'schedule';
+/**
+ * Manual placement of a session in the sidebar's "Delegated Tasks" fold,
+ * mirroring the `fold_override` column. It wins over the auto-origin fold
+ * policy: 'out' pulls an auto-created row back into the main conversation list,
+ * 'in' parks a human row in the fold. NULL = no manual placement, so the policy
+ * (shouldFoldIntoDelegatedTasks) decides.
+ */
+export type CoworkSessionFoldOverride = 'in' | 'out';
 export type CoworkPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 const SERVICE_ORDER_RATING_SESSION_HOLD_MS = 24 * 60 * 60 * 1000;
@@ -831,6 +839,11 @@ export interface CoworkSession {
    * section (see sessionAutoGrouping). null/undefined = human-initiated.
    */
   autoOrigin?: CoworkSessionAutoOrigin | null;
+  /**
+   * Manual fold placement (see CoworkSessionFoldOverride); null = follow the
+   * auto-origin policy. The renderer's fold membership reads this first.
+   */
+  foldOverride?: CoworkSessionFoldOverride | null;
   /** Local MetaBot's display name (populated from metabots table) */
   metabotName?: string | null;
   /** Local MetaBot's avatar data URL (populated from metabots table) */
@@ -912,6 +925,8 @@ export interface CoworkSessionSummary {
   hiddenFromSessionList?: boolean;
   /** Auto-origin marker (see CoworkSession.autoOrigin); null = human-initiated. */
   autoOrigin?: CoworkSessionAutoOrigin | null;
+  /** Manual fold placement (see CoworkSession.foldOverride); null = follow the policy. */
+  foldOverride?: CoworkSessionFoldOverride | null;
   /** FK to projects.id; the Settings > Projects project this conversation is bound to. */
   projectId?: string | null;
   /** Working directory the session runs in; used by the sidebar's by-project grouping. */
@@ -3268,6 +3283,7 @@ export class CoworkStore implements MemoryBackend {
       // Auto-created flows stamp the real origin with setSessionAutoOrigin right
       // after this call; a freshly created row starts human-initiated.
       autoOrigin: null,
+      foldOverride: null,
       permissionMode,
       model,
       effort,
@@ -3368,6 +3384,7 @@ export class CoworkStore implements MemoryBackend {
       browser_title?: string | null;
       hidden_from_session_list?: number | null;
       auto_origin?: string | null;
+      fold_override?: string | null;
       permission_mode?: string | null;
       parent_session_id?: string | null;
       fork_point_message_id?: string | null;
@@ -3382,7 +3399,7 @@ export class CoworkStore implements MemoryBackend {
 
     const row = this.getOne<SessionRow>(`
       SELECT id, title, claude_session_id, status, pinned, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id,
-             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, auto_origin, permission_mode, parent_session_id, fork_point_message_id, model, model_provider, effort, project_id, goal, created_at, updated_at
+             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, auto_origin, fold_override, permission_mode, parent_session_id, fork_point_message_id, model, model_provider, effort, project_id, goal, created_at, updated_at
       FROM cowork_sessions
       WHERE id = ?
     `, [id]);
@@ -3430,6 +3447,7 @@ export class CoworkStore implements MemoryBackend {
       peerAvatar: row.peer_avatar ?? null,
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
       autoOrigin: (row.auto_origin as CoworkSessionAutoOrigin | null) ?? null,
+      foldOverride: (row.fold_override as CoworkSessionFoldOverride | null) ?? null,
       browserUri: row.browser_uri ?? null,
       browserTitle: row.browser_title ?? null,
       permissionMode: (row.permission_mode as CoworkPermissionMode) || 'default',
@@ -3640,6 +3658,22 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Manual placement of a session in the sidebar's "Delegated Tasks" fold.
+   * 'in' parks a human row in the fold, 'out' pulls an auto-created run back
+   * into the main list, null clears the override so the auto-origin policy
+   * decides again. This is a pure renderer preference — it never touches the
+   * session's content, status or origin marker.
+   */
+  setSessionFoldOverride(id: string, override: CoworkSessionFoldOverride | null): void {
+    this.db.run('UPDATE cowork_sessions SET fold_override = ?, updated_at = ? WHERE id = ?', [
+      override,
+      Date.now(),
+      id,
+    ]);
+    this.saveDb();
+  }
+
+  /**
    * Per-session model override. null clears the override so the session falls
    * back to the global default model again. The choice only affects this
    * session — other (running or idle) cowork sessions are untouched.
@@ -3757,6 +3791,7 @@ export class CoworkStore implements MemoryBackend {
       browser_title?: string | null;
       hidden_from_session_list?: number | null;
       auto_origin?: string | null;
+      fold_override?: string | null;
       model?: string | null;
       model_provider?: string | null;
       effort?: string | null;
@@ -3785,6 +3820,7 @@ export class CoworkStore implements MemoryBackend {
         s.browser_title,
         s.hidden_from_session_list,
         s.auto_origin,
+        s.fold_override,
         s.model,
         s.model_provider,
         s.effort,
@@ -3837,6 +3873,7 @@ export class CoworkStore implements MemoryBackend {
       browserTitle: row.browser_title ?? null,
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
       autoOrigin: (row.auto_origin as CoworkSessionAutoOrigin | null) ?? null,
+      foldOverride: (row.fold_override as CoworkSessionFoldOverride | null) ?? null,
       model: row.model ?? null,
       modelProvider: row.model_provider ?? null,
       effort: row.effort ?? null,
@@ -3982,6 +4019,7 @@ export class CoworkStore implements MemoryBackend {
       browser_title?: string | null;
       hidden_from_session_list?: number | null;
       auto_origin?: string | null;
+      fold_override?: string | null;
       model?: string | null;
       model_provider?: string | null;
       effort?: string | null;
@@ -3998,7 +4036,7 @@ export class CoworkStore implements MemoryBackend {
     const rows = this.getAll<ArchivedSessionRow>(`
       SELECT
         s.id, s.title, s.status, s.pinned, s.metabot_id, s.session_type, s.peer_name,
-        s.browser_uri, s.browser_title, s.hidden_from_session_list, s.auto_origin, s.model, s.model_provider, s.effort, s.project_id,
+        s.browser_uri, s.browser_title, s.hidden_from_session_list, s.auto_origin, s.fold_override, s.model, s.model_provider, s.effort, s.project_id,
         s.archived_at, s.created_at, s.updated_at
       FROM cowork_sessions s
       WHERE ${clauses.join(' AND ')}
@@ -4021,6 +4059,7 @@ export class CoworkStore implements MemoryBackend {
       browserTitle: row.browser_title ?? null,
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
       autoOrigin: (row.auto_origin as CoworkSessionAutoOrigin | null) ?? null,
+      foldOverride: (row.fold_override as CoworkSessionFoldOverride | null) ?? null,
       model: row.model ?? null,
       modelProvider: row.model_provider ?? null,
       effort: row.effort ?? null,

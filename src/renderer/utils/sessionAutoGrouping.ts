@@ -51,6 +51,20 @@ export const shouldFoldIntoDelegatedTasks = (
 ): boolean => session.autoOrigin != null && FOLDED_AUTO_ORIGINS.has(session.autoOrigin);
 
 /**
+ * Fold MEMBERSHIP: a manual placement wins over the policy — 'in' parks the row
+ * in the fold whatever its origin, 'out' keeps an auto-created run in the main
+ * list. With no manual placement (null/undefined, the state of every row that
+ * the user never moved) the auto-origin policy decides.
+ */
+export const isInDelegatedFold = (
+  session: Pick<CoworkSessionSummary, 'autoOrigin' | 'foldOverride'>,
+): boolean => {
+  if (session.foldOverride === 'in') return true;
+  if (session.foldOverride === 'out') return false;
+  return shouldFoldIntoDelegatedTasks(session);
+};
+
+/**
  * Split sessions into the main list and the delegated fold, preserving input
  * order in both halves (the caller owns ordering; this helper never re-sorts).
  */
@@ -60,7 +74,7 @@ export const splitSessionsByDelegatedFold = (
   const humanSessions: CoworkSessionSummary[] = [];
   const autoSessions: CoworkSessionSummary[] = [];
   for (const session of sessions) {
-    (shouldFoldIntoDelegatedTasks(session) ? autoSessions : humanSessions).push(session);
+    (isInDelegatedFold(session) ? autoSessions : humanSessions).push(session);
   }
   return { humanSessions, autoSessions };
 };
