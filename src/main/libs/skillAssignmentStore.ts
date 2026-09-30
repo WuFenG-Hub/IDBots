@@ -366,7 +366,25 @@ export function runSkillAssignmentMigration(
 
   ensureSkillAssignmentSchema(db);
 
+  // Crash-recovery guard: the flag row can vanish when a crash lands between
+  // the migration's kv write and the next DB save (observed in the wild: the
+  // seed ran twice, re-globalizing 88 skills). The assignment model leaves
+  // durable traces beyond the flag — any assignment row, or a non-empty scope
+  // map — so their presence means the bridge already ran; re-seeding would
+  // re-globalize skills the owner has deliberately de-globalized since. Mark
+  // the flag (so later launches short-circuit above) and skip.
+  const assignmentRowCount = Number(
+    db.exec(`SELECT COUNT(*) FROM ${ASSIGNMENT_TABLE}`)[0]?.values?.[0]?.[0] ?? 0
+  );
   const scope = getGlobalScopeMap(store);
+  if (assignmentRowCount > 0 || Object.keys(scope).length > 0) {
+    store.set(SKILL_ASSIGNMENT_MIGRATION_KEY, true);
+    console.log(
+      '[skills] Assignment migration: flag row missing but assignment data exists — skipping global re-seed (crash-recovery guard)'
+    );
+    return { ran: false, globalSeeded: 0, assignmentsMigrated: 0 };
+  }
+
   let globalSeeded = 0;
   for (const skill of listSkills()) {
     if (skill.isBuiltIn) continue;

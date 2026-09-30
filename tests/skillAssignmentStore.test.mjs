@@ -314,3 +314,49 @@ test('listMissingAuthorizedSkillIds reports authorized-but-absent skills only', 
     []
   );
 });
+
+test('migration crash-recovery: flag lost but assignment data exists -> no re-seed', () => {
+  const { db, kv, saveDb } = createFixture();
+  // Simulate a post-migration install whose flag row was lost in a crash:
+  // assignment rows + a deliberately de-globalized scope map survive.
+  setMetabotAssignedSkills(db, saveDb, 1, ['skill-a'], 'skill_tool');
+  setSkillScope(kv, 'skill-b', 'global');
+  // flag row absent by construction (fresh fixture)
+
+  let listed = 0;
+  const result = runSkillAssignmentMigration({
+    db,
+    saveDb,
+    store: kv,
+    listSkills: () => {
+      listed += 1;
+      return [
+        { id: 'skill-c', isBuiltIn: false },
+        { id: 'skill-d', isBuiltIn: false },
+      ];
+    },
+    listMetabots: () => [],
+    resolveSkillId: (x) => x,
+  });
+
+  assert.equal(result.ran, false, 'no re-seed when assignment data exists');
+  assert.equal(result.globalSeeded, 0);
+  assert.equal(listed, 0, 'skills never even enumerated');
+  assert.deepEqual(getGlobalScopeMap(kv), { 'skill-b': 'global' }, 'scope map untouched — skill-c/skill-d NOT globalized');
+  assert.equal(kv.get(SKILL_ASSIGNMENT_MIGRATION_KEY), true, 'flag re-armed so later launches short-circuit');
+});
+
+test('migration crash-recovery: truly fresh store (no rows, no scope) still seeds', () => {
+  const { db, kv, saveDb } = createFixture();
+  const result = runSkillAssignmentMigration({
+    db,
+    saveDb,
+    store: kv,
+    listSkills: () => [{ id: 'skill-c', isBuiltIn: false }],
+    listMetabots: () => [],
+    resolveSkillId: (x) => x,
+  });
+  assert.equal(result.ran, true);
+  assert.equal(result.globalSeeded, 1);
+  assert.equal(getGlobalScopeMap(kv)['skill-c'], 'global');
+});
