@@ -235,3 +235,33 @@ test('extractTarGzBuffer unpacks an npm-style package/ SKILL.md', () => {
   extractTarBuffer(tar, dest);
   assert.equal(findSkillRoot(dest), path.join(dest, 'package'));
 });
+
+test('installSkill records the install source in skills.config.json for later reinstall', async () => {
+  const skillsRoot = makeTempDir('idbots-skills-root-');
+  const result = await installSkill({ zip: 'metafile://abc123i0.zip' }, {
+    fetchPin: async () => ({}),
+    downloadBytes: async () => ({
+      buffer: zipSkill('crs-image', '1.0.0'),
+      contentType: 'application/zip',
+    }),
+    getSkillsRoot: () => skillsRoot,
+    workspaceDir: skillsRoot,
+  });
+  assert.equal(result.ok, true);
+  const config = JSON.parse(fs.readFileSync(path.join(skillsRoot, 'skills.config.json'), 'utf8'));
+  assert.equal(config.defaults['crs-image'].sourceUri, 'metafile://abc123i0.zip');
+  assert.equal(config.defaults['crs-image'].version, '1.0.0');
+
+  // A reinstall from a different source overwrites the recorded reference.
+  const zipPath = path.join(makeTempDir('idbots-skill-zip-'), 'pack.zip');
+  fs.writeFileSync(zipPath, zipSkill('crs-image', '1.1.0'));
+  const again = await installSkill({ zip: zipPath }, {
+    fetchPin: async () => ({}),
+    getSkillsRoot: () => skillsRoot,
+    workspaceDir: skillsRoot,
+  });
+  assert.equal(again.ok, true);
+  const configAfter = JSON.parse(fs.readFileSync(path.join(skillsRoot, 'skills.config.json'), 'utf8'));
+  assert.equal(configAfter.defaults['crs-image'].sourceUri, zipPath, 'new source overwrites');
+  assert.equal(configAfter.defaults['crs-image'].version, '1.1.0');
+});

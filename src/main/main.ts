@@ -28,7 +28,7 @@ import {
   type DelegationRequest,
 } from './libs/coworkRunner';
 import { SkillManager } from './skillManager';
-import { removeMetabotAssignments, runSkillAssignmentMigration } from './libs/skillAssignmentStore';
+import { listAssignedSkillIds, removeMetabotAssignments, runSkillAssignmentMigration } from './libs/skillAssignmentStore';
 import { MetaAppManager } from './metaAppManager';
 import type { PermissionResult } from './libs/coworkPermissionTypes';
 import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools, getPersistedCoworkPermissionMode, getPersistedCoworkEffortLevel, setPersistedCoworkPreference } from './libs/claudeSettings';
@@ -6501,11 +6501,14 @@ const getCoworkRunner = () => {
           }
           return { ...result, skillId, assignedToMetabotId };
         },
-        // The caller's view: bundled + global + (for bot sessions) assigned.
+        // The caller's view: bundled + global + (for bot sessions) assigned,
+        // plus a "missing" section for authorized skills whose directory is
+        // gone — so the agent asks for a reinstall instead of concluding the
+        // skill was never installed.
         listInstalledSkills: (perspective) => {
           const manager = getSkillManager();
           const info = manager.getSkillAssignmentInfo();
-          return manager.listSkillsForMetabot(perspective.metabotId ?? null).map((skill) => ({
+          const visible = manager.listSkillsForMetabot(perspective.metabotId ?? null).map((skill) => ({
             id: skill.id,
             name: skill.name,
             origin: skill.isBuiltIn
@@ -6514,6 +6517,16 @@ const getCoworkRunner = () => {
                 ? ('global' as const)
                 : ('assigned' as const),
           }));
+          const missing = manager.listMissingExternalSkills()
+            .filter((entry) => entry.scope === 'global'
+              || (perspective.metabotId != null && entry.assignedMetabotIds.includes(perspective.metabotId)))
+            .map((entry) => ({
+              id: entry.id,
+              name: entry.id,
+              origin: (entry.scope === 'global' ? 'global' : 'assigned') as 'global' | 'assigned',
+              missing: true as const,
+            }));
+          return [...visible, ...missing];
         },
         readSkill: (nameOrId, perspective) =>
           getSkillManager().readSkillCatalogEntry(nameOrId, perspective.metabotId ?? null),
@@ -6793,7 +6806,24 @@ const getCoworkTurnSubmissionController = (): CoworkTurnSubmissionController => 
 const getSkillManager = () => {
   if (!skillManager) {
     skillManager = new SkillManager(getStore);
+    // Assignment rows (authorization truth) must mirror into the
+    // metabots.allow_chat_skills column (published projection the bot editors
+    // initialize replacement lists from) — otherwise the next bot edit
+    // silently un-assigns everything the column does not know about.
+    skillManager.setMetabotStoreGetter(() => getMetabotStore());
     runSkillAssignmentMigrationSafe();
+    // Heal historical drift once per launch (idempotent): skill_tool installs
+    // used to write assignment rows only, leaving the column stale.
+    skillManager.reconcileAllowChatSkillsColumns();
+    // Surface authorized-but-missing installs loudly instead of letting the
+    // skill vanish without a trace (the crs-image incident).
+    const missing = skillManager.listMissingExternalSkills();
+    if (missing.length > 0) {
+      console.log(
+        `[skills-audit] ${missing.length} authorized skill(s) have no directory on disk ` +
+        `(reinstall to restore): ${missing.map((entry) => entry.id).join(', ')}`
+      );
+    }
   }
   return skillManager;
 };
@@ -7601,6 +7631,11 @@ function getMetabotManageDeps(): MetabotManageDeps {
     // that bot's assignment rows (the local authorization source of truth).
     applyChatSkillAssignments: (metabotId, skillIdsOrNames) =>
       getSkillManager().applyMetabotAssignedSkills(metabotId, skillIdsOrNames, 'metabot_update'),
+    // Read seam for the removal diff: lets updateMetaBotCore report which
+    // previously assigned skills a whitelist replace dropped (silent wipes
+    // were the crs-image incident's invisible half).
+    listChatSkillAssignments: (metabotId) =>
+      listAssignedSkillIds(getStore().getDatabase(), metabotId),
     // Provider catalog for legacy provider-key validation on brain writes.
     getLlmProviders: () =>
       getStore()?.get<{
@@ -9343,6 +9378,25 @@ if (!gotTheLock) {
       return { success: true, skills };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to delete skill' };
+    }
+  });
+
+  // Authorized-but-missing installs (directory gone, assignment rows intact) —
+  // the Skills page banner surfaces them with one-click reinstall/forget.
+  ipcMain.handle('skills:listMissing', () => {
+    try {
+      return { success: true, missing: getSkillManager().listMissingExternalSkills() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list missing skills' };
+    }
+  });
+
+  ipcMain.handle('skills:forgetMissing', (_event, id: string) => {
+    try {
+      getSkillManager().forgetMissingSkill(id);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to forget missing skill' };
     }
   });
 

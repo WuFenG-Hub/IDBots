@@ -108,6 +108,7 @@ const mockDeps = (store, overrides = {}) => ({
   ...(overrides.readSpendableBalance ? { readSpendableBalance: overrides.readSpendableBalance } : {}),
   // Assignment seam: absent by default (bare-embedding callers).
   ...(overrides.applyChatSkillAssignments ? { applyChatSkillAssignments: overrides.applyChatSkillAssignments } : {}),
+  ...(overrides.listChatSkillAssignments ? { listChatSkillAssignments: overrides.listChatSkillAssignments } : {}),
 });
 
 // ---------------------------------------------------------------------------
@@ -901,4 +902,28 @@ test('updateMetaBotCore: assignment dep result replaces the raw whitelist (names
   const res = await updateMetaBotCore(m.id, { allow_chat_skills: ['friendly', 'official-thing'] }, deps);
   assert.equal(res.success, true);
   assert.deepEqual(res.metabot.allow_chat_skills, ['friendly-skill'], 'column mirrors resolved rows');
+});
+
+test('updateMetaBotCore: whitelist replace reports which assigned skills were dropped', async () => {
+  const store = await openStore();
+  const m = seedMetabot(store, { name: 'Diffed', llm_id: 'deepseek-v4-pro' });
+  const deps = mockDeps(store, {
+    listChatSkillAssignments: () => ['skill-a', 'skill-b'],
+    applyChatSkillAssignments: () => ['skill-a'],
+  });
+  const res = await updateMetaBotCore(m.id, { allow_chat_skills: ['skill-a'] }, deps);
+  assert.equal(res.success, true);
+  assert.deepEqual(res.removedChatSkills, ['skill-b']);
+});
+
+test('updateMetaBotCore: no removals -> removedChatSkills absent', async () => {
+  const store = await openStore();
+  const m = seedMetabot(store, { name: 'Kept', llm_id: 'deepseek-v4-pro' });
+  const deps = mockDeps(store, {
+    listChatSkillAssignments: () => ['skill-a'],
+    applyChatSkillAssignments: () => ['skill-a', 'skill-b'],
+  });
+  const res = await updateMetaBotCore(m.id, { allow_chat_skills: ['skill-a', 'skill-b'] }, deps);
+  assert.equal(res.success, true);
+  assert.equal(res.removedChatSkills, undefined);
 });

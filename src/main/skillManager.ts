@@ -15,12 +15,15 @@ import {
   getGlobalScopeMap,
   listAssignedSkillIds,
   listAssignmentMetabotIds,
+  listMissingAuthorizedSkillIds,
   removeSkillFromAssignmentStore,
   setMetabotAssignedSkills,
   setSkillAssignments,
   setSkillScope,
+  syncAllowChatSkillsColumnsFromRows,
   type SkillAssignmentVia,
 } from './libs/skillAssignmentStore';
+import type { MetabotStore } from './metabotStore';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
 import { getMetaidRpcBase, getMetaidRpcToken } from './services/metaidRpcEndpoint';
 
@@ -72,6 +75,10 @@ type SkillDefaultConfig = {
   version?: string;
   'creator-metaid'?: string;
   installedAt?: number;
+  /** Where this skill was installed from (metafile://, URL, local path,
+   * github ref, npm:<pkg>, skills.sh:<name>) — enables reinstall after the
+   * directory is lost. Absent for installs that predate source tracking. */
+  sourceUri?: string;
 };
 
 type SkillsConfig = {
@@ -754,8 +761,62 @@ const isWebSearchSkillBroken = (skillRoot: string): boolean => {
 export class SkillManager {
   private watchers: fs.FSWatcher[] = [];
   private notifyTimer: NodeJS.Timeout | null = null;
+  private getMetabotStoreImpl: (() => MetabotStore) | null = null;
 
   constructor(private getStore: () => SqliteStore) {}
+
+  /**
+   * Wire the MetabotStore (main.ts) so assignment-row writes can mirror into
+   * metabots.allow_chat_skills — the published projection the bot editors
+   * initialize their replacement lists from. Optional: callers without a bot
+   * roster (tests, bare embeddings) simply skip the column sync.
+   */
+  setMetabotStoreGetter(getter: () => MetabotStore): void {
+    this.getMetabotStoreImpl = getter;
+  }
+
+  /**
+   * Mirror rows -> allow_chat_skills column for the given bots (no-op when the
+   * metabot store is not wired). Runs after every assignment-row write so the
+   * column never goes stale again: a stale column is what made bot edits
+   * silently un-assign skill_tool-installed skills.
+   */
+  private syncAllowChatSkillsColumns(metabotIds: Iterable<number>): void {
+    if (!this.getMetabotStoreImpl) return;
+    try {
+      const store = this.getStore();
+      const synced = syncAllowChatSkillsColumnsFromRows(
+        store.getDatabase(),
+        store.getSaveFunction(),
+        this.getMetabotStoreImpl(),
+        metabotIds
+      );
+      if (synced.length > 0) {
+        console.log(
+          `[skills-audit] allow_chat_skills column re-synced from assignment rows for metabot(s): ${synced.join(', ')}`
+        );
+      }
+    } catch (error) {
+      console.warn('[skills] allow_chat_skills column sync failed:', error);
+    }
+  }
+
+  /**
+   * One heal pass over every bot: the column must equal the assignment rows.
+   * Idempotent (writes only on drift), so it runs at every startup — covers
+   * both historical drift (skill_tool installs never reached the column) and
+   * any future write path that forgets to sync.
+   */
+  reconcileAllowChatSkillsColumns(): void {
+    if (!this.getMetabotStoreImpl) return;
+    try {
+      this.ensureAssignmentSchema();
+      const ids = this.getMetabotStoreImpl().listMetabots().map((metabot) => metabot.id);
+      this.syncAllowChatSkillsColumns(ids);
+    } catch (error) {
+      console.warn('[skills] allow_chat_skills reconcile failed:', error);
+    }
+  }
 
   private getSkillIdCandidates(skillId: string): string[] {
     const trimmed = String(skillId || '').trim();
@@ -1106,6 +1167,7 @@ export class SkillManager {
       throw new Error(`Unknown skill: ${id}`);
     }
     setSkillScope(this.getStore(), resolved.id, scope);
+    console.log(`[skills-audit] skill "${resolved.id}" scope set to ${scope}`);
     this.notifySkillsChanged();
   }
 
@@ -1116,7 +1178,19 @@ export class SkillManager {
       throw new Error(`Unknown skill: ${id}`);
     }
     const store = this.getStore();
-    setSkillAssignments(store.getDatabase(), store.getSaveFunction(), resolved.id, metabotIds, via);
+    const db = store.getDatabase();
+    const before = new Set(listAssignmentMetabotIds(db, resolved.id));
+    setSkillAssignments(db, store.getSaveFunction(), resolved.id, metabotIds, via);
+    const after = new Set(
+      metabotIds.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0)
+    );
+    const removed = [...before].filter((metabotId) => !after.has(metabotId));
+    if (removed.length > 0) {
+      console.log(
+        `[skills-audit] unassigned skill "${resolved.id}" from metabot(s) ${removed.join(', ')} (via=${via})`
+      );
+    }
+    this.syncAllowChatSkillsColumns([...before, ...after]);
     this.notifySkillsChanged();
   }
 
@@ -1149,7 +1223,16 @@ export class SkillManager {
       resolvedIds.push(match.id);
     }
     const store = this.getStore();
-    setMetabotAssignedSkills(store.getDatabase(), store.getSaveFunction(), metabotId, resolvedIds, via);
+    const db = store.getDatabase();
+    const previous = listAssignedSkillIds(db, metabotId);
+    setMetabotAssignedSkills(db, store.getSaveFunction(), metabotId, resolvedIds, via);
+    const removed = previous.filter((skillId) => !resolvedIds.includes(skillId));
+    if (removed.length > 0) {
+      console.log(
+        `[skills-audit] metabot ${metabotId} assignment replace (via=${via}) removed skill(s): ${removed.join(', ')}`
+      );
+    }
+    this.syncAllowChatSkillsColumns([metabotId]);
     this.notifySkillsChanged();
     return resolvedIds;
   }
@@ -1159,6 +1242,8 @@ export class SkillManager {
     this.ensureAssignmentSchema();
     const store = this.getStore();
     assignSkillToMetabot(store.getDatabase(), store.getSaveFunction(), skillId, metabotId, via);
+    console.log(`[skills-audit] assigned skill "${skillId}" to metabot ${metabotId} (via=${via})`);
+    this.syncAllowChatSkillsColumns([metabotId]);
     this.notifySkillsChanged();
   }
 
@@ -1704,6 +1789,7 @@ export class SkillManager {
       throw new Error('Skill not found');
     }
 
+    const affectedBots = listAssignmentMetabotIds(this.getStore().getDatabase(), id);
     fs.rmSync(targetDir, { recursive: true, force: true });
     const state = this.loadSkillStateMap();
     delete state[id];
@@ -1717,9 +1803,84 @@ export class SkillManager {
       this.getStore(),
       id
     );
+    console.log(
+      `[skills-audit] deleted skill "${id}" from disk (was assigned to metabot(s): ${affectedBots.join(', ') || 'none'})`
+    );
+    this.syncAllowChatSkillsColumns(affectedBots);
     this.startWatching();
     this.notifySkillsChanged();
     return this.listSkills();
+  }
+
+  /**
+   * External skills that are still authorized (global scope, or assigned to
+   * some bot) but whose directory is gone from disk. The authorization rows
+   * survive a directory loss, so after a reinstall the skill is immediately
+   * usable again — surfacing this list (startup audit log, Skills UI, bot's
+   * list_installed_skills) is what turns "skill mysteriously gone" into a
+   * recoverable state.
+   */
+  listMissingExternalSkills(): Array<{
+    id: string;
+    scope: 'library' | 'global';
+    assignedMetabotIds: number[];
+    sourceUri: string | null;
+  }> {
+    this.ensureAssignmentSchema();
+    const store = this.getStore();
+    const db = store.getDatabase();
+    const onDisk = new Set(this.listSkills().map((skill) => skill.id));
+    const builtIn = this.listBuiltInSkillIds();
+    const missing = listMissingAuthorizedSkillIds(db, store, onDisk)
+      .filter((id) => !builtIn.has(id));
+    if (missing.length === 0) return [];
+    const scopeMap = getGlobalScopeMap(store);
+    const defaults = this.loadSkillsDefaults(this.getSkillRoots());
+    return missing.map((id) => ({
+      id,
+      scope: scopeMap[id] === 'global' ? ('global' as const) : ('library' as const),
+      assignedMetabotIds: listAssignmentMetabotIds(db, id),
+      sourceUri: typeof defaults[id]?.sourceUri === 'string' && defaults[id].sourceUri.trim()
+        ? defaults[id].sourceUri.trim()
+        : null,
+    }));
+  }
+
+  /**
+   * Purge the authorization + config record of a skill whose directory is
+   * already gone (one entry of the missing list). Refused while the directory
+   * still exists — that is what deleteSkill is for.
+   */
+  forgetMissingSkill(id: string): void {
+    if (id !== path.basename(id)) {
+      throw new Error('Invalid skill id');
+    }
+    const root = this.ensureSkillsRoot();
+    if (fs.existsSync(resolveWithin(root, id))) {
+      throw new Error('Skill still exists on disk; use deleteSkill instead');
+    }
+    this.ensureAssignmentSchema();
+    const store = this.getStore();
+    const db = store.getDatabase();
+    const affectedBots = listAssignmentMetabotIds(db, id);
+    removeSkillFromAssignmentStore(db, store.getSaveFunction(), store, id);
+    const configPath = path.join(root, SKILLS_CONFIG_FILE);
+    if (fs.existsSync(configPath)) {
+      try {
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf8')) as SkillsConfig;
+        if (config.defaults && typeof config.defaults === 'object' && id in config.defaults) {
+          delete config.defaults[id];
+          fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+        }
+      } catch (error) {
+        console.warn(`[skills] Failed to prune config entry for missing skill "${id}":`, error);
+      }
+    }
+    console.log(
+      `[skills-audit] forgot missing skill "${id}" (was assigned to metabot(s): ${affectedBots.join(', ') || 'none'})`
+    );
+    this.syncAllowChatSkillsColumns(affectedBots);
+    this.notifySkillsChanged();
   }
 
   async downloadSkill(source: string): Promise<{ success: boolean; skills?: SkillRecord[]; error?: string }> {
@@ -1816,6 +1977,7 @@ export class SkillManager {
         return { success: false, error: 'No SKILL.md found in source' };
       }
 
+      const placedSkillIds: string[] = [];
       for (const skillDir of skillDirs) {
         const folderName = normalizeFolderName(path.basename(skillDir));
         let targetDir = resolveWithin(root, folderName);
@@ -1825,7 +1987,9 @@ export class SkillManager {
           suffix += 1;
         }
         fs.cpSync(skillDir, targetDir, { recursive: true, dereference: false });
+        placedSkillIds.push(path.basename(targetDir));
       }
+      this.recordSkillInstallSources(placedSkillIds, trimmed);
 
       cleanupPathSafely(cleanupPath);
       cleanupPath = null;
@@ -2177,6 +2341,42 @@ export class SkillManager {
       fs.writeFileSync(targetConfigPath, JSON.stringify(targetConfig, null, 2), 'utf8');
     } catch (error) {
       console.warn('[skills] Failed to merge bundled skill defaults:', error);
+    }
+  }
+
+  /**
+   * Record where a skill came from (downloadSkill / UI add-from-source) so a
+   * lost directory can be reinstalled from the same reference later.
+   */
+  private recordSkillInstallSources(skillIds: string[], sourceUri: string): void {
+    if (skillIds.length === 0 || !sourceUri.trim()) return;
+    try {
+      const root = this.ensureSkillsRoot();
+      const configPath = path.join(root, SKILLS_CONFIG_FILE);
+      let config: SkillsConfig = { version: 1, defaults: {} };
+      if (fs.existsSync(configPath)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8')) as SkillsConfig;
+          if (parsed && typeof parsed.defaults === 'object') {
+            config = parsed;
+          }
+        } catch {
+          config = { version: 1, defaults: {} };
+        }
+      }
+      const now = Date.now();
+      for (const id of skillIds) {
+        const existing = config.defaults[id] ?? {};
+        config.defaults[id] = {
+          ...existing,
+          installedAt: existing.installedAt ?? now,
+          enabled: existing.enabled ?? true,
+          sourceUri,
+        };
+      }
+      fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+    } catch (error) {
+      console.warn('[skills] Failed to record skill install source:', error);
     }
   }
 

@@ -32,6 +32,9 @@ export type SkillToolControl = {
     id: string;
     name: string;
     origin: 'bundled' | 'global' | 'assigned';
+    /** True when the skill is still authorized but its directory is gone from
+     * disk — listed separately so the agent can ask for a reinstall. */
+    missing?: boolean;
   }>;
   /**
    * Load one enabled skill's full SKILL.md plus its directory (for relative
@@ -126,10 +129,19 @@ export function buildSkillAgentTools(deps: {
           if (skills.length === 0) {
             return textResult('No skills available for this session.');
           }
-          const lines = skills.map((skill) => `- ${skill.name} (${skill.id}, ${skill.origin})`);
+          const available = skills.filter((skill) => !skill.missing);
+          const missing = skills.filter((skill) => skill.missing);
+          const lines = available.map((skill) => `- ${skill.name} (${skill.id}, ${skill.origin})`);
+          if (missing.length > 0) {
+            lines.push(
+              '',
+              'Missing on disk (still assigned to this bot, but the skill directory is gone — tell the owner to reinstall it from the Skills page; the assignment survives, so it works again right after reinstall):',
+              ...missing.map((skill) => `- ${skill.name} (${skill.id})`)
+            );
+          }
           return textResult(
             [
-              `Skills available to this session (${skills.length}; origin: bundled = shipped with IDBots, global = shared with all bots, assigned = assigned to this bot):`,
+              `Skills available to this session (${available.length}; origin: bundled = shipped with IDBots, global = shared with all bots, assigned = assigned to this bot):`,
               ...lines,
             ].join('\n'),
           );
