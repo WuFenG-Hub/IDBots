@@ -29,7 +29,7 @@ JSON 为 skill-service 业务字段。`providerMetaBot` 代表当前使用技能
 
 ## Payload 字段说明 (Schema)
 
-与 skill-service 协议（`/protocols/skill-service`，链上权威定义可用 `metaprotocol_registry` 工具查询）一致：
+与 skill-service 协议 **v1.1**（`/protocols/skill-service`，链上权威定义可用 `metaprotocol_registry` 工具查询）一致：
 
 | 字段 | 说明 | 必填 | 默认 |
 |------|------|------|------|
@@ -38,13 +38,19 @@ JSON 为 skill-service 业务字段。`providerMetaBot` 代表当前使用技能
 | description | 简短描述，用于轻量级列表展示 | 是 | - |
 | serviceIcon | 图标，如 `metafile://pinid.png` | 否 | 空 |
 | providerMetaBot | 乙方机器人的GlobalMetaID | 否 | 空 |
-| providerSkill | 乙方执行的本地技能名，如 web-search | 是 | - |
-| price | 价格，建议字符串防止精度丢失 | 是 | - |
-| currency | 支付币种：SPACE、BTC、DOGE | 是 | - |
+| providerSkill | 乙方允许执行的本地技能**数组**（权限白名单，非执行流水线），如 `["web-search"]`；为兼容旧版，传单个字符串会被归一化为单元素数组 | 是 | - |
+| price | 价格，建议字符串防止精度丢失；免费服务发布为 "0" | 是 | - |
+| currency | 报价币种：原生结算为 SPACE、BTC、DOGE（别名 MVC/MICROVISIONCHAIN 自动归一为 SPACE）；法币结算可用 CNY、USD 等 | 是 | - |
+| paymentTiming | 付费时机：`prepaid`（先付后交付）/ `free`（免费）。不传时按 price 推导（>0 为 prepaid，否则 free）；`free` 时 price 强制写 "0" | 否 | 按 price 推导 |
+| settlementKind | 结算方式：`native`（链上原生资产）/ `fiat`（链下法币凭证） | 否 | native |
+| executionReminder | 给乙方 MetaBot 的执行注意事项 | 否 | 空 |
+| metadata | 自由格式发布者元数据（核心客户端不得用它覆盖上述字段） | 否 | 空 |
 | skillDocument | 技能对应 markdown 文档，如 `metafile://pinid.md` | 否 | 空 |
 | inputType | 输入类型：text / image / video / zip | 否 | text |
 | outputType | 输出类型：text / image / video / zip | 否 | text |
 | endpoint | 通信方式，如 simplemsg | 否 | simplemsg |
+
+> 本技能发布 envelope version `1.1.0`。`providerSkill` 为空数组会导致服务无法被执行；`paymentTiming: free` 时即使 price 写了正数，有效价格也是 0。
 
 **providerMetaBot**：可选的乙方 GlobalMetaID。若 payload 中传入且非空则优先使用；未传或为空时使用环境变量 `IDBOTS_METABOT_GLOBALMETAID`。二者都缺失或为空时报错。
 

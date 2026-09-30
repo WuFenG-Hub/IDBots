@@ -97,20 +97,47 @@ function main() {
   const serviceName = (payload.serviceName ?? '').trim();
   const displayName = (payload.displayName ?? '').trim();
   const description = (payload.description ?? '').trim();
-  const providerSkill = (payload.providerSkill ?? '').trim();
+  // skill-service v1.1: providerSkill is a non-empty ARRAY of provider-local
+  // skill names (a permission allow-list, not an execution pipeline). A
+  // legacy single string is normalized to a one-element array.
+  const providerSkill = (Array.isArray(payload.providerSkill) ? payload.providerSkill : [payload.providerSkill])
+    .map((v) => String(v ?? '').trim())
+    .filter(Boolean);
   const price = payload.price != null ? String(payload.price).trim() : '';
-  const currency = (payload.currency ?? '').trim().toUpperCase();
+  let currency = (payload.currency ?? '').trim().toUpperCase();
+  // Publisher-side alias normalization (readers normalize these too).
+  if (currency === 'MVC' || currency === 'MICROVISIONCHAIN') currency = 'SPACE';
 
-  if (!serviceName || !displayName || !description || !providerSkill || !price || !currency) {
+  if (!serviceName || !displayName || !description || providerSkill.length === 0 || !price || !currency) {
     writeStderr(
-      'Error: payload must include serviceName, displayName, description, providerSkill, price, and currency.'
+      'Error: payload must include serviceName, displayName, description, providerSkill (non-empty array or name), price, and currency.'
     );
     process.exit(1);
   }
-  if (!['SPACE', 'BTC', 'DOGE'].includes(currency)) {
-    writeStderr('Error: currency must be one of SPACE, BTC, DOGE.');
+
+  // settlementKind: native (on-chain asset) | fiat (off-chain fiat verification).
+  const settlementKind = ((payload.settlementKind ?? 'native').trim().toLowerCase()) || 'native';
+  if (!['native', 'fiat'].includes(settlementKind)) {
+    writeStderr('Error: settlementKind must be one of native, fiat.');
     process.exit(1);
   }
+  if (settlementKind === 'native' && !['SPACE', 'BTC', 'DOGE'].includes(currency)) {
+    writeStderr('Error: currency must be one of SPACE, BTC, DOGE for native settlement.');
+    process.exit(1);
+  }
+
+  // paymentTiming: prepaid | free. Default derives from price (price > 0 →
+  // prepaid, otherwise free); free always publishes price "0".
+  let paymentTiming = (payload.paymentTiming ?? '').trim().toLowerCase();
+  const numericPrice = Number(price);
+  if (!paymentTiming) {
+    paymentTiming = Number.isFinite(numericPrice) && numericPrice > 0 ? 'prepaid' : 'free';
+  }
+  if (!['prepaid', 'free'].includes(paymentTiming)) {
+    writeStderr('Error: paymentTiming must be one of prepaid, free.');
+    process.exit(1);
+  }
+  const effectivePrice = paymentTiming === 'free' ? '0' : price;
 
   // Use payload.providerMetaBot if present and non-empty; otherwise fall back to env
   const fromPayload = (payload.providerMetaBot ?? '').trim();
@@ -130,8 +157,12 @@ function main() {
     serviceIcon: (payload.serviceIcon ?? '').trim() || undefined,
     providerMetaBot: effectiveGlobalMetaId,
     providerSkill,
-    price,
+    price: effectivePrice,
     currency,
+    paymentTiming,
+    settlementKind,
+    executionReminder: (payload.executionReminder ?? '').trim() || undefined,
+    metadata: payload.metadata != null ? String(payload.metadata) : undefined,
     skillDocument: (payload.skillDocument ?? '').trim() || undefined,
     inputType: (payload.inputType ?? DEFAULT_INPUT_TYPE).trim().toLowerCase() || DEFAULT_INPUT_TYPE,
     outputType: (payload.outputType ?? DEFAULT_OUTPUT_TYPE).trim().toLowerCase() || DEFAULT_OUTPUT_TYPE,
@@ -158,7 +189,7 @@ function main() {
       operation: 'create',
       path: SKILL_SERVICE_PATH,
       encryption: '0',
-      version: '1.0',
+      version: '1.1.0',
       contentType: 'application/json',
       payload: JSON.stringify(cleaned),
     },
