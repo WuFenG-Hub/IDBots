@@ -20,13 +20,16 @@ export type SkillToolControl = {
   extractMetaApp(input: { pinId: string; workspaceDir: string }): Promise<ExtractMetaAppResult>;
   installSkill(
     input: InstallSkillSource,
-    perspective: SkillToolPerspective
+    perspective: SkillToolPerspective,
+    options?: { share?: 'bot' | 'global' }
   ): Promise<InstallSkillResult & {
     /** Skill id (folder name) of the installed package, when ok. */
     skillId?: string;
     /** metabot the skill was auto-assigned to; null = installed to the
      * library unassigned (bot-less session — assign via the Skills UI). */
     assignedToMetabotId?: number | null;
+    /** True when the skill was shared with every bot (Twin-only request). */
+    sharedGlobally?: boolean;
   }>;
   listInstalledSkills(perspective: SkillToolPerspective): Array<{
     id: string;
@@ -101,10 +104,10 @@ export function buildSkillAgentTools(deps: {
       [
         'Install, read, and list on-device skills; also extract a MetaApp package to read its APP.md.',
         'Use action "extract_metaapp" with pinId (or metaapp://<pinId>) after search_metaapps: unpacks the app zip into the workspace temp dir, returns the file list plus APP.md (install instructions live there). Not for just opening an app in the Bot Browser.',
-        'Use action "install_skill" to install one skill into the user-data SKILLs directory (never the source tree). Pass exactly one source: zip (local path, http(s) URL, or metafile://<pinId>), github (owner/repo or a github.com tree/blob URL), skills.sh (package name), or npm (package name). Package must contain SKILL.md; installed as SKILLs/<name from SKILL.md>/; 4MB limit. Skills belong to bots: when called from a bot session the install is auto-assigned to that bot; from a bot-less session it lands in the library unassigned — tell the owner to assign it via the Skills UI if it should be usable.',
+        'Use action "install_skill" to install one skill into the user-data SKILLs directory (never the source tree). Pass exactly one source: zip (local path, http(s) URL, or metafile://<pinId>), github (owner/repo or a github.com tree/blob URL), skills.sh (package name), or npm (package name). Package must contain SKILL.md; installed as SKILLs/<name from SKILL.md>/; 4MB limit. Skills belong to bots: when called from a bot session the install is auto-assigned to that bot (share defaults to "bot"); from a bot-less session it lands in the library unassigned — tell the owner to assign it via the Skills UI if it should be usable. Keep per-bot installs the default so each bot\'s catalog stays minimal; share "global" (every current AND future bot on this machine) is a Twin-Bot-only choice and must be requested explicitly.',
         'Use action "list_installed_skills" to list the skills THIS session\'s bot can use (bundled / global / assigned) and verify a skill is usable after install.',
         'Use action "read_skill" with name (id or name from the <available_skills> catalog) to load a skill\'s full SKILL.md plus its on-disk directory; resolve the SKILL.md\'s relative paths against that directory.',
-        'Assigning already-installed skills to bots is owner-only (the Twin Bot\'s metabot_update chat_skill_op, or My Bots > Edit) — this tool never changes assignments; installs auto-assign to the calling bot. Returns JSON per action.',
+        'Assigning already-installed skills to bots is owner-only (the Twin Bot\'s metabot_update chat_skill_op, or My Bots > Edit) — this tool never changes assignments; installs auto-assign to the calling bot unless share="global" is set. Returns JSON per action.',
       ].join(' '),
       {
         action: z.enum(['extract_metaapp', 'install_skill', 'list_installed_skills', 'read_skill']),
@@ -114,6 +117,7 @@ export function buildSkillAgentTools(deps: {
         github: z.string().optional().describe('GitHub owner/repo or a github.com tree/blob URL.'),
         'skills.sh': z.string().optional().describe('skills.sh package name (owner/repo or registry name).'),
         npm: z.string().optional().describe('npm package name whose tarball contains SKILL.md.'),
+        share: z.enum(['bot', 'global']).optional().describe('install_skill visibility: "bot" (default) assigns to the calling bot only; "global" shares with every current and future bot on this machine — Twin Bot sessions only, workers get an error.'),
       },
       async (args: {
         action: 'extract_metaapp' | 'install_skill' | 'list_installed_skills' | 'read_skill';
@@ -123,6 +127,7 @@ export function buildSkillAgentTools(deps: {
         github?: string;
         'skills.sh'?: string;
         npm?: string;
+        share?: 'bot' | 'global';
       }) => {
         if (args.action === 'list_installed_skills') {
           const skills = control.listInstalledSkills(perspective());
@@ -197,7 +202,7 @@ export function buildSkillAgentTools(deps: {
           npm: asString(args.npm) || undefined,
         };
         try {
-          const result = await control.installSkill(source, perspective());
+          const result = await control.installSkill(source, perspective(), { share: args.share });
           return textResult(JSON.stringify(result, null, 2), result.ok === false);
         } catch (error) {
           return textResult(
