@@ -1,10 +1,13 @@
 // Per-route compaction policy config: generate-runtime-config emits one
 // compaction-basic modelPolicies entry per provider/model route with a
-// window-scaled headroom (8% of the window, clamped to [4K, 64K]). The
+// tiered threshold (90% of the window below 256K, 80% at/above) and a
+// window-scaled headroom (4% of the window, clamped to [2K, 64K]). The
 // upstream flat 64K headroom is sized for 1M-class windows; on small-window
 // routes the pressure budget (window - reservedOutput - headroom) goes
 // non-positive and proactive compaction silently disables itself via
-// TargetPressureConfigError (the 2026-09-30 space-bunny-free incident).
+// TargetPressureConfigError (the 2026-09-30 space-bunny-free incident). The
+// host clamps the output ceiling on matching tiers (coworkModelLimits), so
+// the 90% small-window threshold is actually reachable.
 //
 // Run: node test/compaction-policy-config.test.mjs   (from dsh-runtime/)
 
@@ -17,7 +20,8 @@ import { generateRuntimeConfig } from '../lib/generate-runtime-config.mjs'
 const compactionEntry = (config) => config.find((entry) => entry.id === 'compaction-basic')
 const sessionRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-compact-policy-'))
 
-// Scaled headroom: 8% of the window, clamped to [4K, 64K]; globals unchanged.
+// Tiered threshold + scaled headroom: 4% of the window, clamped to [2K, 64K];
+// globals unchanged.
 {
   const root = sessionRoot()
   const config = generateRuntimeConfig({
@@ -33,17 +37,18 @@ const sessionRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-compact-pol
   assert.ok(Array.isArray(policies), 'modelPolicies emitted')
   assert.deepEqual(
     policies.find((p) => p.provider === 'small-gw' && p.model === 'm-128k'),
-    { provider: 'small-gw', model: 'm-128k', headroomTokens: 10240 },
+    // Sub-256K window → 90% threshold tier; headroom = 4% of 128K.
+    { provider: 'small-gw', model: 'm-128k', thresholdRatio: 0.9, headroomTokens: 5120 },
   )
   assert.deepEqual(
     policies.find((p) => p.provider === 'big-gw' && p.model === 'm-1m'),
-    // 8% of 1M clamps to the 64K ceiling — 1M-class routes keep today's behavior.
-    { provider: 'big-gw', model: 'm-1m', headroomTokens: 65536 },
+    // 1M-class route keeps the 80% upstream threshold; headroom = 4% of 1M.
+    { provider: 'big-gw', model: 'm-1m', thresholdRatio: 0.8, headroomTokens: 40000 },
   )
   const { modelPolicies: _ignored, ...globals } = entryConfig
   assert.deepEqual(globals, { thresholdRatio: 0.8, retainRatio: 0.16, maxTokens: 8192, compactionRetries: 1 })
   fs.rmSync(root, { recursive: true, force: true })
-  console.log('PASS  per-route headroom scales at 8% of the window, clamped to [4K, 64K]')
+  console.log('PASS  per-route threshold tiers at 90%/80% (boundary 256K), headroom scales at 4% of the window, clamped to [2K, 64K]')
 }
 
 // Native DeepSeek routes key their policy to the fixed deepseek-official id.
@@ -57,7 +62,7 @@ const sessionRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-compact-pol
     sections: [],
   })
   assert.deepEqual(compactionEntry(config).config.modelPolicies, [
-    { provider: 'deepseek-official', model: 'deepseek-flash', headroomTokens: 65536 },
+    { provider: 'deepseek-official', model: 'deepseek-flash', thresholdRatio: 0.8, headroomTokens: 40000 },
   ])
   fs.rmSync(root, { recursive: true, force: true })
   console.log('PASS  native routes key their policy to deepseek-official')
@@ -77,7 +82,8 @@ const sessionRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-compact-pol
   const policies = compactionEntry(config).config.modelPolicies
   const matches = policies.filter((p) => p.provider === 'my-gw' && p.model === 'm')
   assert.equal(matches.length, 1, 'colliding route keys dedupe to one policy')
-  assert.equal(matches[0].headroomTokens, 20480, 'last route wins, mirroring the routes dict')
+  // Last route wins, mirroring the routes dict. 256000 < 262144 → 90% tier.
+  assert.deepEqual(matches[0], { provider: 'my-gw', model: 'm', thresholdRatio: 0.9, headroomTokens: 10240 })
   fs.rmSync(root, { recursive: true, force: true })
   console.log('PASS  sanitized-key collisions dedupe last-wins')
 }

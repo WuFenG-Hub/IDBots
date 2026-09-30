@@ -23,15 +23,17 @@ export const NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS = 128_000;
 /**
  * Renderer mirror of the main-process output-ceiling clamp
  * (src/main/libs/coworkModelLimits.ts — clampCoworkMaxOutputTokens; keep the
- * ratio/floor in sync). The kernel's proactive compaction budget is
- * window - reservedOutput - headroom, so the resolved output ceiling never
- * exceeds ~32% of the window. The model form surfaces this so a user typing
- * a small window understands why the effective output cap is lower than the
- * pinned 128K.
+ * tier boundary, ratios, and floor in sync). The kernel's proactive
+ * compaction budget is window - reservedOutput - headroom, with a 90%
+ * threshold tier for small windows and 80% for large ones — so the resolved
+ * output ceiling never exceeds 6% of a small (<256K) window or 32% of a
+ * large one. The model form surfaces this so a user typing a small window
+ * understands why the effective output cap is lower than the pinned 128K.
  */
 export function effectiveMaxOutputForWindow(contextWindow: number, configuredMaxOutput: number = NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS): number {
   if (!Number.isFinite(contextWindow) || contextWindow <= 0) return configuredMaxOutput;
-  const windowCap = Math.max(8_192, Math.floor(contextWindow * 0.32));
+  const ratio = contextWindow < 262_144 ? 0.06 : 0.32;
+  const windowCap = Math.max(8_192, Math.floor(contextWindow * ratio));
   return Math.min(configuredMaxOutput, windowCap);
 }
 

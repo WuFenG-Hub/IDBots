@@ -132,18 +132,38 @@ const TRANSIENT_OUTAGE_RETRY_POLICY = Object.freeze({
   backoff: Object.freeze({ initialDelayMs: 1_000, maxDelayMs: 30_000 }),
 })
 
-/** Per-route compaction headroom scaling. compaction-basic's pressure budget
- *  is `contextWindow - reservedOutput - headroomTokens`; the upstream flat
- *  64K headroom is sized for 1M-class windows and eats half of a 128K window
- *  (and with an unclamped output ceiling it zeroes the budget entirely,
- *  silently disabling proactive compaction for the route — the 2026-09-30
- *  space-bunny-free incident). Scale the headroom at 8% of the model's
- *  window, clamped to [4K, 64K]: 1M routes keep today's exact behavior
- *  (64K), while a 128K model compacts at ~60% of its window instead of
- *  never. The host additionally clamps the output ceiling itself
- *  (coworkModelLimits), so reservedOutput stays proportional too. */
-const COMPACTION_HEADROOM_RATIO = 0.08
-const COMPACTION_HEADROOM_MIN_TOKENS = 4_096
+/** Per-route compaction policy scaling. compaction-basic's threshold is
+ *  `min(thresholdRatio × window, window − reservedOutput − headroomTokens)`
+ *  and it silently disables proactive compaction for a route whose pressure
+ *  budget (window − reservedOutput − headroom) goes non-positive — the
+ *  2026-09-30 space-bunny-free incident: a real-128K model with the flat 64K
+ *  headroom and an unclamped 128K output ceiling had a zero budget, never
+ *  compacted proactively, overflowed at its true window, and the reactive
+ *  summarize request overflowed again.
+ *
+ *  The policy is tiered by window size (keep in sync with the output-ceiling
+ *  clamp tiers in src/main/libs/coworkModelLimits.ts — clampCoworkMaxOutputTokens):
+ *
+ *  - Small windows (<256K): thresholdRatio 0.9. A small-window model burns a
+ *    noticeable share of its context on the first prompt (~8K against 128K),
+ *    so the threshold must sit high to keep usable context. That only works
+ *    because the host caps small-window output at 6% of the window (8K
+ *    floor) and headroom scales at 4%: out + headroom ≤ 10% of the window,
+ *    so the 90% ratio is actually reachable (128K → ~89.6%).
+ *  - Large windows (≥256K): thresholdRatio 0.8 (upstream default). The 32%
+ *    output reserve matters more than the last percentiles of context for
+ *    long-form / thinking workloads (1M/256K DeepSeek → 70.4% effective —
+ *    the output reserve makes 80% physically unreachable, by design; 1M/128K
+ *    GLM → exactly 80%).
+ *
+ *  Headroom scales at 4% of the window, clamped to [2K, 64K]: 1M routes keep
+ *  40K of summarization slack, while even a 16K window keeps a positive
+ *  pressure budget (16384 − 8192 output floor − 2048 headroom = 6144). */
+const COMPACTION_SMALL_WINDOW_TOKENS = 262_144
+const COMPACTION_THRESHOLD_RATIO_SMALL_WINDOW = 0.9
+const COMPACTION_THRESHOLD_RATIO_DEFAULT = 0.8
+const COMPACTION_HEADROOM_RATIO = 0.04
+const COMPACTION_HEADROOM_MIN_TOKENS = 2_048
 const COMPACTION_HEADROOM_MAX_TOKENS = 65_536
 
 const compactionHeadroomTokens = (contextWindow) => {
@@ -168,9 +188,13 @@ const compactionModelPolicies = (providers) => {
     for (const model of provider.models ?? []) {
       const headroomTokens = compactionHeadroomTokens(model?.contextWindow)
       if (headroomTokens === undefined || !model?.id) continue
+      const window = Math.floor(model.contextWindow)
       byTarget.set(JSON.stringify([routeKey, model.id]), {
         provider: routeKey,
         model: model.id,
+        thresholdRatio: window < COMPACTION_SMALL_WINDOW_TOKENS
+          ? COMPACTION_THRESHOLD_RATIO_SMALL_WINDOW
+          : COMPACTION_THRESHOLD_RATIO_DEFAULT,
         headroomTokens,
       })
     }
@@ -503,9 +527,10 @@ export function generateRuntimeConfig(input) {
         retainRatio: 0.16,
         maxTokens: 8192,
         compactionRetries: 1,
-        // Per-route window-scaled headroom (see compactionHeadroomTokens) —
-        // without it the flat 64K default zeroes the pressure budget on
-        // small-window routes and proactive compaction silently turns off.
+        // Per-route tiered threshold + window-scaled headroom (see
+        // compactionModelPolicies) — without it the flat 64K default zeroes
+        // the pressure budget on small-window routes and proactive
+        // compaction silently turns off.
         ...compactionPolicies.length > 0 ? { modelPolicies: compactionPolicies } : {},
       },
     },

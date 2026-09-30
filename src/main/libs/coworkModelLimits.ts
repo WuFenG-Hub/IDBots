@@ -20,21 +20,41 @@ export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 128_000;
  * is ≤192K — the 2026-09-30 space-bunny-free incident: a real-128K model
  * never compacted proactively, overflowed at its true window, and the
  * reactive summarize request (full history, same model) overflowed again.
- * Capping the effective ceiling at ~32% of the window — floored at 8K so
- * thinking models keep a viable reasoning budget — guarantees a positive
- * pressure budget for any window while leaving catalogued big-window
- * ceilings untouched (DeepSeek 1M/256K and GLM 1M/128K both sit under
- * window×0.32).
+ *
+ * The cap is tiered by window size so the compaction threshold (ratio×window,
+ * further capped by window − output − headroom) can sit at 90% for small
+ * windows and 80% for large ones (see compactionModelPolicies in
+ * dsh-runtime/lib/generate-runtime-config.mjs — keep the tiers in sync):
+ *
+ * - Small windows (<256K): output ≤ 6% of the window. A small-window model
+ *   burns a noticeable share of its context on the very first prompt (~8K
+ *   against 128K), so the threshold must sit high (90%) to keep usable
+ *   context; that only works if output + headroom stay within the remaining
+ *   10%. A 128K model lands at the 8K floor — 6.4% of its window.
+ * - Large windows (≥256K): output ≤ 32% of the window. Long-form / thinking
+ *   workloads need the generous completion budget, and the threshold cap is
+ *   dominated by ratio×window (80%) anyway, so reserving a third of the
+ *   window for output costs no usable context.
+ *
+ * The 8K floor keeps a viable thinking budget on tiny windows either way.
+ * The tier boundary is intentionally discontinuous (262143 → ~15.4K cap vs
+ * 262144 → ~81.9K): crossing into the ≥256K tier drops the compaction
+ * threshold to 80%, which funds the larger output reserve.
  */
+export const COWORK_SMALL_WINDOW_TOKENS = 262_144;
+export const COWORK_MAX_OUTPUT_SMALL_WINDOW_RATIO = 0.06;
 export const COWORK_MAX_OUTPUT_WINDOW_RATIO = 0.32;
 export const COWORK_MAX_OUTPUT_FLOOR_TOKENS = 8_192;
 
 export function clampCoworkMaxOutputTokens(maxOutputTokens: number, contextWindow: number): number {
   if (!Number.isFinite(maxOutputTokens) || maxOutputTokens <= 0) return maxOutputTokens;
   if (!Number.isFinite(contextWindow) || contextWindow <= 0) return maxOutputTokens;
+  const ratio = contextWindow < COWORK_SMALL_WINDOW_TOKENS
+    ? COWORK_MAX_OUTPUT_SMALL_WINDOW_RATIO
+    : COWORK_MAX_OUTPUT_WINDOW_RATIO;
   const windowCap = Math.max(
     COWORK_MAX_OUTPUT_FLOOR_TOKENS,
-    Math.floor(contextWindow * COWORK_MAX_OUTPUT_WINDOW_RATIO),
+    Math.floor(contextWindow * ratio),
   );
   return Math.min(Math.floor(maxOutputTokens), windowCap);
 }

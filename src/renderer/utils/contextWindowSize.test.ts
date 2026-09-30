@@ -38,11 +38,14 @@ test('formatContextWindowSize renders compact forms', () => {
   assert.equal(formatContextWindowSize(-5), '');
 });
 
-test('effectiveMaxOutputForWindow caps the output ceiling at 32% of the window (floor 8K)', () => {
+test('effectiveMaxOutputForWindow caps the output ceiling per window tier (6% below 256K, 32% above; floor 8K)', () => {
   // Mirror of the main-process clamp (coworkModelLimits) that the model form
-  // surfaces: small windows must leave the kernel a viable compaction budget.
-  assert.equal(effectiveMaxOutputForWindow(128_000), 40_960);
+  // surfaces: small windows must leave the kernel a viable compaction budget
+  // while keeping the 90% threshold tier reachable.
+  assert.equal(effectiveMaxOutputForWindow(128_000), 8_192);
   assert.equal(effectiveMaxOutputForWindow(16_000), 8_192);
+  assert.equal(effectiveMaxOutputForWindow(262_143), Math.floor(262_143 * 0.06));
+  assert.equal(effectiveMaxOutputForWindow(262_144), Math.floor(262_144 * 0.32));
   assert.equal(effectiveMaxOutputForWindow(1_000_000), 128_000);
   assert.equal(effectiveMaxOutputForWindow(1_000_000, 256_000), 256_000);
   assert.equal(effectiveMaxOutputForWindow(0), NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS);

@@ -55,10 +55,11 @@ test('resolveCoworkModelLimits falls back conservatively for unknown models', as
     modelId: 'custom-model',
     contextWindow: DEFAULT_COWORK_CONTEXT_WINDOW,
     // The 128K default output ceiling no longer survives resolution on the
-    // 128K fallback window: it clamps to 32% (40960) so the kernel's
-    // compaction pressure budget (window - reserved output - headroom) stays
-    // positive. The exported default itself is unchanged.
-    maxOutputTokens: 40_960,
+    // 128K fallback window: the small-window tier caps it at 6% of the window
+    // (7680) and the 8K floor takes over, so the kernel's compaction pressure
+    // budget (window - reserved output - headroom) stays positive while the
+    // 90% threshold tier remains reachable. The exported default is unchanged.
+    maxOutputTokens: 8_192,
     // Fail-safe default: models we have not catalogued are treated as
     // text-only. The Read-image guard then denies with an explicit pointer
     // to describe_image instead of silently dropping pixels on a model that
@@ -386,10 +387,10 @@ test('uncatalogued glm-5.x gateway ids inherit the family output ceiling, clampe
     await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   // The family rule contributes only the 128K output ceiling (no window), so
-  // resolution pairs it with the 128K fallback window and the clamp caps the
-  // effective ceiling at 32% of that window (40960).
+  // resolution pairs it with the 128K fallback window and the small-window
+  // clamp caps the effective ceiling at the 8K floor (6% of 128K = 7680 < 8K).
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'acme/glm-5.4-flash');
-  assert.equal(limits.maxOutputTokens, 40_960);
+  assert.equal(limits.maxOutputTokens, 8_192);
   assert.equal(limits.source, 'family-model');
 });
 
@@ -580,8 +581,8 @@ test('unknown models inherit the 128K default output ceiling, clamped to the fal
 
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'some-gw/deepseek-chat');
   assert.equal(DEFAULT_COWORK_MAX_OUTPUT_TOKENS, 128_000);
-  // window 128K (fallback) → effective ceiling = min(128K, 128K×0.32) = 40960.
-  assert.equal(limits.maxOutputTokens, 40_960);
+  // window 128K (fallback) → small-window tier: min(128K, max(8K, 128K×6%)) = 8192.
+  assert.equal(limits.maxOutputTokens, 8_192);
   assert.equal(limits.source, 'fallback');
 });
 
@@ -722,10 +723,11 @@ test('uncatalogued glm-5.3-flash spellings resolve vision via the family rule', 
   for (const modelId of ['acme/glm-5.3-flash', 'GLM-5.3-Flash', 'glm-5.3-flash-preview']) {
     const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, modelId);
     assert.equal(limits.supportsVision, true, `${modelId} must resolve vision=true`);
-    // Family rule carries no window → 128K fallback window → ceiling clamps
-    // to 32% (40960); the family's 128K ceiling only survives on catalogued
-    // ids whose window is known (1M).
-    assert.equal(limits.maxOutputTokens, 40_960, `${modelId} output ceiling clamps to the fallback window`);
+    // Family rule carries no window → 128K fallback window → small-window
+    // tier: ceiling clamps to the 8K floor (6% of 128K = 7680 < 8K); the
+    // family's 128K ceiling only survives on catalogued ids whose window is
+    // known (1M).
+    assert.equal(limits.maxOutputTokens, 8_192, `${modelId} output ceiling clamps to the fallback window`);
     assert.equal(modelSupportsVision(modelId), true);
   }
 
@@ -745,8 +747,10 @@ test('uncatalogued glm-5.3-flash spellings resolve vision via the family rule', 
 // compaction pressure budget (window - reserved output - headroom) go
 // non-positive, which silently disabled proactive compaction for the route —
 // small-window models then overflowed, and the reactive summarize call
-// overflowed again. Resolution now caps the effective ceiling at
-// window × 0.32 (floor 8K) for EVERY source, stored rows included.
+// overflowed again. Resolution now caps the effective ceiling per window
+// tier — 6% of the window below 256K (so the 90% compaction threshold tier
+// stays reachable) and 32% at/above 256K, with an 8K floor — for EVERY
+// source, stored rows included.
 // ---------------------------------------------------------------------------
 
 test('explicit 128K window + 128K output ceiling clamps so proactive compaction stays viable', async () => {
@@ -765,7 +769,10 @@ test('explicit 128K window + 128K output ceiling clamps so proactive compaction 
     },
   }, 'space-bunny-free', 'opencode');
   assert.equal(limits.contextWindow, 128_000);
-  assert.equal(limits.maxOutputTokens, 40_960);
+  // Small-window tier: min(128K, max(8K, floor(128K × 6%) = 7680)) = 8192.
+  // Together with the 4% headroom (5120) this leaves a 114.7K pressure
+  // budget, so the 90% threshold tier (115.2K) is effectively reached.
+  assert.equal(limits.maxOutputTokens, 8_192);
   assert.equal(limits.source, 'provider-model');
 });
 
@@ -782,9 +789,20 @@ test('the clamp floor keeps an 8K output budget on tiny windows', async () => {
       },
     },
   }, 'tiny-model', 'local');
-  // floor(16000 × 0.32) = 5120 < 8192 → the 8K floor wins (thinking models
+  // floor(16000 × 0.06) = 960 < 8192 → the 8K floor wins (thinking models
   // still get a viable reasoning budget; the window is degenerate anyway).
   assert.equal(limits.maxOutputTokens, 8_192);
+});
+
+test('the 256K tier boundary switches the ratio from 6% to 32%', async () => {
+  const { clampCoworkMaxOutputTokens } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  // The boundary is intentionally discontinuous: crossing into the ≥256K
+  // tier drops the compaction threshold to 80%, which funds the larger
+  // output reserve.
+  assert.equal(clampCoworkMaxOutputTokens(128_000, 262_143), Math.floor(262_143 * 0.06));
+  assert.equal(clampCoworkMaxOutputTokens(128_000, 262_144), Math.floor(262_144 * 0.32));
 });
 
 test('catalogued big-window ceilings are never clamped (DeepSeek 1M/256K, GLM 1M/128K)', async () => {
@@ -805,7 +823,7 @@ test('clampCoworkMaxOutputTokens handles degenerate inputs without throwing', as
   const { clampCoworkMaxOutputTokens } =
     await import('../dist-electron/main/libs/coworkModelLimits.js');
 
-  assert.equal(clampCoworkMaxOutputTokens(128_000, 128_000), 40_960);
+  assert.equal(clampCoworkMaxOutputTokens(128_000, 128_000), 8_192);
   assert.equal(clampCoworkMaxOutputTokens(256_000, 1_000_000), 256_000);
   assert.equal(clampCoworkMaxOutputTokens(8_000, 1_000_000), 8_000);
   assert.equal(clampCoworkMaxOutputTokens(Number.NaN, 128_000), Number.NaN);
