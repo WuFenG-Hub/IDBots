@@ -1,6 +1,34 @@
 --- a/dsh-runtime/node_modules/@deepseek-ai/dsh-tool-ask-user/lib/index.js
 +++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-tool-ask-user/lib/index.js
-@@ -214,7 +214,7 @@ const Config = z.object({
+@@ -16,7 +16,7 @@ function validateQuestionIds(questions) {
+ 		ids.add(question.id);
+ 	}
+ }
+-const description$1 = "Ask brief, direct, self-contained questions about missing information, preferences, or decisions. Use user-facing terms; assume no knowledge of background work or internal names. Use distinct stable question IDs. A submitted skipped question is an answer item with empty selected and no custom; pending instead means no answer batch arrived before the timeout and the user can still answer.";
++const description$1 = "Ask brief, direct, self-contained questions about missing information, preferences, or decisions. Use user-facing terms; assume no knowledge of background work or internal names. Use distinct stable question IDs. A submitted skipped question is an answer item with empty selected and no custom; pending instead means no answer batch arrived before the timeout and the user can still answer. The question panel reaches the user with no surrounding context and your reasoning is invisible to them, so never fire a bare question: in the same assistant message, before calling this tool, write a short visible explanation of the background, why you are asking, and your recommendation, and also fill each question's detail field with that context so it renders with the panel. Spell out internal shorthand — task codes, metric names, and session-local jargon mean nothing to the user on their own.";
+ /**
+ * Instruction the pending result carries in its `message` field. It is a field
+ * of the result value rather than prose beside it because the recorded result
+@@ -37,6 +37,7 @@ function questionRequest(questions, exec) {
+ 			id: question.id,
+ 			question: question.question,
+ 			...question.header !== void 0 ? { header: question.header } : {},
++			...question.detail !== void 0 ? { detail: question.detail } : {},
+ 			...question.options !== void 0 ? { options: question.options.map((option) => ({ ...option })) } : {},
+ 			...question.multi_select !== void 0 ? { multiSelect: question.multi_select } : {}
+ 		})),
+@@ -89,6 +90,10 @@ function registerTimedAskUser(ctx, timeout = 120) {
+ 							type: "string",
+ 							description: "Optional short heading for the question, such as \"Confirm\" or \"Choose Mode\"."
+ 						},
++						detail: {
++							type: "string",
++							description: "Markdown context rendered above the options: the background, why you are asking, what the numbers or terms mean, and what each choice implies. Include it whenever the user would otherwise lack context; omit only when the visible message you sent immediately before this tool call already explains everything."
++						},
+ 						options: {
+ 							type: "array",
+ 							description: "Optional choices to show the user. If you recommend one, put it first and append \"(Recommended)\" to that label.",
+@@ -214,7 +219,7 @@ const Config = z.object({
  });
  const name = "tool-ask-user";
  const inject = ["tools", "userQuestions"];
@@ -9,7 +37,7 @@
  function apply(ctx, config = {}) {
  	if (config.mode === "timed") {
  		registerTimedAskUser(ctx, config.timeout);
-@@ -245,6 +245,10 @@ function apply(ctx, config = {}) {
+@@ -245,6 +250,10 @@ function apply(ctx, config = {}) {
  						type: "string",
  						description: "Optional short heading for the question, such as \"Confirm\" or \"Choose Mode\"."
  					},
@@ -20,7 +48,7 @@
  					options: {
  						type: "array",
  						description: "Optional choices to show the user. If you recommend one, put it first and append \"(Recommended)\" to that label.",
-@@ -307,6 +311,7 @@ function apply(ctx, config = {}) {
+@@ -307,6 +316,7 @@ function apply(ctx, config = {}) {
  					id: question.id,
  					question: question.question,
  					...question.header !== void 0 ? { header: question.header } : {},
