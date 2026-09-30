@@ -215,6 +215,71 @@ export function removeSkillFromAssignmentStore(
   }
 }
 
+/**
+ * Minimal metabot-store surface needed to mirror assignment rows into the
+ * metabots.allow_chat_skills JSON column (the on-chain published projection).
+ */
+export type AllowChatSkillsColumnStore = {
+  getMetabotById(id: number): { allow_chat_skills: string[] } | null;
+  updateMetabot(id: number, input: { allow_chat_skills: string[] }): unknown;
+};
+
+/**
+ * Mirror the given bots' assignment rows (the local authorization source of
+ * truth) into their allow_chat_skills column. Every assignment-row write must
+ * be followed by this sync: the bot editors (My Bots > Edit, metabot_update)
+ * initialize their "full replacement list" from the column, so a stale column
+ * silently wipes any assignment the column does not know about. The
+ * skill_tool install auto-assign path historically wrote rows only, and the
+ * next bot edit made freshly installed skills vanish from the bot's catalog.
+ * Writes only when the column actually differs; returns the bots re-synced.
+ */
+export function syncAllowChatSkillsColumnsFromRows(
+  db: SqliteDatabase,
+  saveDb: () => void,
+  metabotStore: AllowChatSkillsColumnStore,
+  metabotIds: Iterable<number>
+): number[] {
+  const synced: number[] = [];
+  for (const metabotId of new Set(metabotIds)) {
+    const bot = metabotStore.getMetabotById(metabotId);
+    if (!bot) continue;
+    const rows = listAssignedSkillIds(db, metabotId);
+    const column = Array.isArray(bot.allow_chat_skills) ? bot.allow_chat_skills.map(String) : [];
+    if (JSON.stringify(column) === JSON.stringify(rows)) continue;
+    metabotStore.updateMetabot(metabotId, { allow_chat_skills: rows });
+    synced.push(metabotId);
+  }
+  if (synced.length > 0) {
+    saveDb();
+  }
+  return synced;
+}
+
+/**
+ * External skill ids that are still authorized (global scope, or assigned to
+ * some bot) but have no skill directory on disk — the install vanished behind
+ * the authorization's back. A non-empty result is always worth an audit log
+ * line plus a UI/bot surface so the owner can reinstall instead of believing
+ * the skill was never installed.
+ */
+export function listMissingAuthorizedSkillIds(
+  db: SqliteDatabase,
+  store: SqliteStore,
+  onDiskSkillIds: ReadonlySet<string>
+): string[] {
+  const authorized = new Set<string>();
+  for (const id of Object.keys(getGlobalScopeMap(store))) {
+    if (id.trim()) authorized.add(id);
+  }
+  const result = db.exec(`SELECT DISTINCT skill_id FROM ${ASSIGNMENT_TABLE} WHERE enabled = 1`);
+  for (const row of result[0]?.values ?? []) {
+    const id = typeof row[0] === 'string' ? row[0].trim() : '';
+    if (id) authorized.add(id);
+  }
+  return Array.from(authorized).filter((id) => !onDiskSkillIds.has(id)).sort();
+}
+
 /** KV map of skills explicitly shared with all bots. */
 export function getGlobalScopeMap(store: SqliteStore): Record<string, 'global'> {
   const raw = store.get<Record<string, unknown>>(SKILL_SCOPE_KEY);
@@ -301,7 +366,25 @@ export function runSkillAssignmentMigration(
 
   ensureSkillAssignmentSchema(db);
 
+  // Crash-recovery guard: the flag row can vanish when a crash lands between
+  // the migration's kv write and the next DB save (observed in the wild: the
+  // seed ran twice, re-globalizing 88 skills). The assignment model leaves
+  // durable traces beyond the flag — any assignment row, or a non-empty scope
+  // map — so their presence means the bridge already ran; re-seeding would
+  // re-globalize skills the owner has deliberately de-globalized since. Mark
+  // the flag (so later launches short-circuit above) and skip.
+  const assignmentRowCount = Number(
+    db.exec(`SELECT COUNT(*) FROM ${ASSIGNMENT_TABLE}`)[0]?.values?.[0]?.[0] ?? 0
+  );
   const scope = getGlobalScopeMap(store);
+  if (assignmentRowCount > 0 || Object.keys(scope).length > 0) {
+    store.set(SKILL_ASSIGNMENT_MIGRATION_KEY, true);
+    console.log(
+      '[skills] Assignment migration: flag row missing but assignment data exists — skipping global re-seed (crash-recovery guard)'
+    );
+    return { ran: false, globalSeeded: 0, assignmentsMigrated: 0 };
+  }
+
   let globalSeeded = 0;
   for (const skill of listSkills()) {
     if (skill.isBuiltIn) continue;

@@ -24,6 +24,8 @@ const {
   getGlobalScopeMap,
   getSkillScope,
   setSkillScope,
+  syncAllowChatSkillsColumnsFromRows,
+  listMissingAuthorizedSkillIds,
   runSkillAssignmentMigration,
   SKILL_SCOPE_KEY,
   SKILL_ASSIGNMENT_MIGRATION_KEY,
@@ -257,4 +259,104 @@ test('migration flag: absent row runs the migration (fresh install)', () => {
 
   assert.equal(result.ran, true);
   assert.equal(result.globalSeeded, 1);
+});
+
+test('syncAllowChatSkillsColumnsFromRows mirrors rows into the column, writes only on drift', () => {
+  const { db, saveDb } = createFixture();
+  setMetabotAssignedSkills(db, saveDb, 1, ['skill-a'], 'skill_tool');
+  setMetabotAssignedSkills(db, saveDb, 2, ['skill-b'], 'ui');
+
+  const updates = [];
+  const bots = new Map([
+    [1, { allow_chat_skills: [] }],
+    [2, { allow_chat_skills: ['skill-b'] }],
+  ]);
+  const metabotStore = {
+    getMetabotById: (id) => bots.get(id) ?? null,
+    updateMetabot: (id, input) => {
+      updates.push([id, input]);
+      bots.get(id).allow_chat_skills = input.allow_chat_skills;
+    },
+  };
+
+  // Bot 2 already in sync; bot 99 does not exist — only bot 1 is written.
+  const synced = syncAllowChatSkillsColumnsFromRows(db, saveDb, metabotStore, [1, 2, 99]);
+  assert.deepEqual(synced, [1]);
+  assert.deepEqual(updates, [[1, { allow_chat_skills: ['skill-a'] }]]);
+  assert.deepEqual(bots.get(1).allow_chat_skills, ['skill-a']);
+
+  // Second run: no drift, no writes.
+  const again = syncAllowChatSkillsColumnsFromRows(db, saveDb, metabotStore, [1]);
+  assert.deepEqual(again, []);
+  assert.equal(updates.length, 1);
+
+  // A row removal is mirrored too (un-assign clears the column entry) — this
+  // is the regression guard for skill_tool installs vanishing on bot edits.
+  setMetabotAssignedSkills(db, saveDb, 1, [], 'metabot_update');
+  syncAllowChatSkillsColumnsFromRows(db, saveDb, metabotStore, [1]);
+  assert.deepEqual(bots.get(1).allow_chat_skills, []);
+});
+
+test('listMissingAuthorizedSkillIds reports authorized-but-absent skills only', () => {
+  const { db, kv, saveDb } = createFixture();
+  setMetabotAssignedSkills(db, saveDb, 1, ['skill-a', 'skill-b'], 'ui');
+  setSkillScope(kv, 'skill-c', 'global');
+  setSkillScope(kv, 'skill-d', 'library');
+
+  // skill-a on disk; skill-b (assigned) + skill-c (global) missing; library
+  // scope without rows is not authorized, so skill-d never appears.
+  assert.deepEqual(
+    listMissingAuthorizedSkillIds(db, kv, new Set(['skill-a'])),
+    ['skill-b', 'skill-c']
+  );
+  assert.deepEqual(
+    listMissingAuthorizedSkillIds(db, kv, new Set(['skill-a', 'skill-b', 'skill-c'])),
+    []
+  );
+});
+
+test('migration crash-recovery: flag lost but assignment data exists -> no re-seed', () => {
+  const { db, kv, saveDb } = createFixture();
+  // Simulate a post-migration install whose flag row was lost in a crash:
+  // assignment rows + a deliberately de-globalized scope map survive.
+  setMetabotAssignedSkills(db, saveDb, 1, ['skill-a'], 'skill_tool');
+  setSkillScope(kv, 'skill-b', 'global');
+  // flag row absent by construction (fresh fixture)
+
+  let listed = 0;
+  const result = runSkillAssignmentMigration({
+    db,
+    saveDb,
+    store: kv,
+    listSkills: () => {
+      listed += 1;
+      return [
+        { id: 'skill-c', isBuiltIn: false },
+        { id: 'skill-d', isBuiltIn: false },
+      ];
+    },
+    listMetabots: () => [],
+    resolveSkillId: (x) => x,
+  });
+
+  assert.equal(result.ran, false, 'no re-seed when assignment data exists');
+  assert.equal(result.globalSeeded, 0);
+  assert.equal(listed, 0, 'skills never even enumerated');
+  assert.deepEqual(getGlobalScopeMap(kv), { 'skill-b': 'global' }, 'scope map untouched — skill-c/skill-d NOT globalized');
+  assert.equal(kv.get(SKILL_ASSIGNMENT_MIGRATION_KEY), true, 'flag re-armed so later launches short-circuit');
+});
+
+test('migration crash-recovery: truly fresh store (no rows, no scope) still seeds', () => {
+  const { db, kv, saveDb } = createFixture();
+  const result = runSkillAssignmentMigration({
+    db,
+    saveDb,
+    store: kv,
+    listSkills: () => [{ id: 'skill-c', isBuiltIn: false }],
+    listMetabots: () => [],
+    resolveSkillId: (x) => x,
+  });
+  assert.equal(result.ran, true);
+  assert.equal(result.globalSeeded, 1);
+  assert.equal(getGlobalScopeMap(kv)['skill-c'], 'global');
 });

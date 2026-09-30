@@ -45,6 +45,8 @@ contextBridge.exposeInMainWorld('electron', {
     getRoot: () => ipcRenderer.invoke('skills:getRoot'),
     autoRoutingPrompt: () => ipcRenderer.invoke('skills:autoRoutingPrompt'),
     getAssignmentInfo: () => ipcRenderer.invoke('skills:getAssignmentInfo'),
+    listMissing: () => ipcRenderer.invoke('skills:listMissing'),
+    forgetMissing: (id: string) => ipcRenderer.invoke('skills:forgetMissing', id),
     setScope: (options: { id: string; scope: 'library' | 'global' | 'bots'; metabotIds?: number[] }) =>
       ipcRenderer.invoke('skills:setScope', options),
     getConfig: (skillId: string) => ipcRenderer.invoke('skills:getConfig', skillId),

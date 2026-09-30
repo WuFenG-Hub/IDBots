@@ -76,7 +76,7 @@ bash "$SKILLS_ROOT/scheduled-task/scripts/create-task.sh" @/tmp/scheduled-task.j
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `name` | ✅ | 简短的任务名称 |
-| `prompt` | ✅ | 任务运行时 Claude 收到的指令（应清晰完整） |
+| `prompt` | ✅ | 任务运行时执行 agent 收到的指令（应清晰完整） |
 | `schedule` | ✅ | 调度配置（见上方类型说明） |
 | `workingDirectory` | ❌ | 执行目录（默认空） |
 | `sessionId` | ❌ | 任务每次执行所在的会话。默认值规则：一次性任务（`schedule.type` 为 `"at"`）在会话中创建时默认绑定当前会话；重复任务（`interval` / `cron`）默认每次新建会话。显式传 `"sessionId": null` 可为一次性任务选择新会话。显式传 `"current"` = 当前所在会话（**推荐**在检查刚设置好的发版、构建或部署等承接当前工作的场景显式传入）；其他字符串 = 该会话的 UUID。绑定的会话在运行时已不存在或已归档时，任务会自动退回新会话运行（此时响应中会带上顶层字段 `sessionWarning`）。更新任务时：省略该字段 = 保持原有绑定，传 `null`（或 `""`）= 清除绑定 |
@@ -111,7 +111,7 @@ bash "$SKILLS_ROOT/scheduled-task/scripts/create-task.sh" @/tmp/scheduled-task.j
   node -e 'const d=new Date();const p=n=>String(n).padStart(2,"0");console.log(`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`)'
   ```
 - **自动执行**：定时任务运行时所有工具调用自动批准（auto-approve），无需人工审批
-- **独立运行**：`prompt` 是任务独立运行时 Claude 收到的唯一指令，应写得清晰完整
+- **独立运行**：`prompt` 是任务独立运行时执行 agent 收到的唯一指令，应写得清晰完整
 - **自动禁用**：连续失败 5 次的任务会自动禁用
 - **一次性任务**：`type: "at"` 的任务执行后自动禁用
 - **Cowork 会话**：每次执行会创建一个新的 Cowork 会话（标题前缀为「[定时]」），可在 Cowork 列表中查看执行详情

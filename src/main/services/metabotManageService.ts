@@ -169,6 +169,12 @@ export interface MetabotManageDeps {
    * Absent = assignment write skipped (bare-embedding callers).
    */
   applyChatSkillAssignments?: (metabotId: number, skillIdsOrNames: readonly string[]) => string[];
+  /**
+   * Read seam for the removal diff (wired to listAssignedSkillIds). When an
+   * update replaces a bot's skill whitelist, the core reports which
+   * previously assigned skills were dropped so the change is never silent.
+   */
+  listChatSkillAssignments?: (metabotId: number) => string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +206,12 @@ export interface UpdateMetaBotLocalResult {
 export interface UpdateMetaBotResult {
   success: boolean;
   metabot?: Metabot;
+  /**
+   * Skill ids this update un-assigned from the bot (whitelist replace only) —
+   * surfaced so a replace that silently drops previously assigned skills is
+   * visible to the caller (and the owner) instead of going unnoticed.
+   */
+  removedChatSkills?: string[];
   /** On-chain sync outcome (absent when there was nothing to publish). */
   sync?: {
     skipped: boolean;
@@ -1126,11 +1138,13 @@ export async function updateMetaBotCore(
   // truth — before the regular column write + on-chain sync proceed. The
   // resolved id list (bundled skills dropped, names resolved) replaces the
   // raw input so the published column and the assignment rows never diverge.
+  let removedChatSkills: string[] | undefined;
   if (input.allow_chat_skills !== undefined && deps.applyChatSkillAssignments) {
     // Fail-closed: assignment rows are the authorization source of truth, so
     // a failed write must abort the whole update — continuing would publish
     // the column on-chain while the local rows keep the OLD (possibly
     // revoked) grants, a permanent fork the user cannot see.
+    const previousSkillIds = deps.listChatSkillAssignments?.(id) ?? [];
     let resolvedSkillIds: string[];
     try {
       resolvedSkillIds = deps.applyChatSkillAssignments(id, normalizedList(input.allow_chat_skills));
@@ -1139,6 +1153,13 @@ export async function updateMetaBotCore(
         success: false,
         error: `Chat-skill assignment write failed: ${error instanceof Error ? error.message : String(error)}`,
       };
+    }
+    const removed = previousSkillIds.filter((skillId) => !resolvedSkillIds.includes(skillId));
+    if (removed.length > 0) {
+      removedChatSkills = removed;
+      console.log(
+        `[skills-audit] metabot ${id} update dropped ${removed.length} previously assigned skill(s): ${removed.join(', ')}`
+      );
     }
     input = { ...input, allow_chat_skills: resolvedSkillIds };
   }
@@ -1157,6 +1178,7 @@ export async function updateMetaBotCore(
     return {
       success: true,
       metabot: local.metabot,
+      ...(removedChatSkills ? { removedChatSkills } : {}),
       sync: { skipped: true, success: true, attemptedStepKeys, remainingSyncInput: emptyRemaining },
     };
   }
@@ -1210,6 +1232,7 @@ export async function updateMetaBotCore(
     return {
       success: true,
       metabot: local.metabot,
+      ...(removedChatSkills ? { removedChatSkills } : {}),
       sync: {
         skipped: false,
         success: false,
@@ -1232,6 +1255,7 @@ export async function updateMetaBotCore(
   return {
     success: overallSuccess,
     metabot: updated,
+    ...(removedChatSkills ? { removedChatSkills } : {}),
     sync: {
       skipped: false,
       success: syncResult.success,

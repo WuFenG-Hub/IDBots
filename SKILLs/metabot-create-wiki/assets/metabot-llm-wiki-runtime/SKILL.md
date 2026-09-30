@@ -69,8 +69,10 @@ official: true
 ## 命令
 
 ```bash
-node "$SKILLS_ROOT/metabot-llm-wiki/scripts/index.js" --payload '<JSON>'
+node "<生成的 wiki 技能目录>/runtime/metabot-llm-wiki/scripts/index.js" --payload '<JSON>'
 ```
+
+（本 runtime 由 metabot-create-wiki 内嵌进每个生成的 wiki 技能，无需单独安装 metabot-llm-wiki；历史上它来自该技能，故目录名沿用。）
 
 其中 JSON 统一格式：
 

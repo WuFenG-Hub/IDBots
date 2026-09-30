@@ -215,7 +215,7 @@ node "$SKILLS_ROOT/metabot-metaapp/scripts/index.js" \
    - **管理**：本地 My Apps 页（用户可在里面管理已发布应用）
    - **分享**：`https://openagentinternet.org/browser/metaapp/<viewPinId>` —— 这条 web2 链接**只用于发给别人**，不要把它当成让本地用户打开应用的方式。
 
-   发布后顺手在当前对话里把分享 URI/URL 整理好；如果用户想发一条公告 buzz，直接在本技能里调用 `metabot-post-buzz`，不要把用户赶到别的技能。
+   发布后顺手在当前对话里把分享 URI/URL 整理好；如果用户想发一条公告 buzz，直接调用内置 `post_buzz` 工具（原 metabot-post-buzz 技能已转为内置工具），不要把用户赶到别的技能。
 
 ### 关于 `firstPinId`
 

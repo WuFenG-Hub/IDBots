@@ -123,7 +123,7 @@ node "$SKILLS_ROOT/metabot-metaapp/scripts/index.js" \
   --first-pin-id <firstPinId>
 ```
 
-如果用户想“顺手发一条公告 buzz”，保持在本技能里完成：先生成分享 URI/URL，再把它写进 buzz 文案，调用 `metabot-post-buzz/scripts/post-buzz.js`。不要把用户赶去另一个技能重新开始。
+如果用户想“顺手发一条公告 buzz”，保持在本技能里完成：先生成分享 URI/URL，再把它写进 buzz 文案，调用内置 `post_buzz` 工具。不要把用户赶去另一个技能重新开始。
 
 ### 修改后对外展示用 first pin（重要，容易出错）
 

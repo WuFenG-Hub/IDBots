@@ -178,16 +178,19 @@ function formatUpdateResult(result: UpdateMetaBotResult): string {
     return `MetaBot update failed: ${result.error ?? 'unknown error'}`;
   }
   const m = result.metabot;
+  const removedNote = result.removedChatSkills && result.removedChatSkills.length > 0
+    ? ` NOTE: this update also UN-assigned ${result.removedChatSkills.length} previously assigned skill(s): ${result.removedChatSkills.join(', ')}. If that was not intended, re-add them with metabot_update chat_skill_op { action: "add" } — un-assigned skills immediately disappear from the bot's available skill catalog.`
+    : '';
   if (!result.sync || result.sync.skipped) {
-    return `Updated ${m.name} (id=${m.id}). Change applied locally (no on-chain sync needed for this field).`;
+    return `Updated ${m.name} (id=${m.id}). Change applied locally (no on-chain sync needed for this field).${removedNote}`;
   }
   const sync = result.sync;
   if (sync.success) {
     const tx = sync.txids && sync.txids.length ? ` (txids: ${sync.txids.join(', ')})` : '';
-    return `Updated ${m.name} (id=${m.id}) and published the change on-chain${tx}.`;
+    return `Updated ${m.name} (id=${m.id}) and published the change on-chain${tx}.${removedNote}`;
   }
   // Local write succeeded but chain sync failed/partial.
-  return `Updated ${m.name} (id=${m.id}) locally, but on-chain sync ${sync.canSkip ? 'was partial' : 'failed'}: ${sync.error ?? 'unknown error'}. The bot works locally; the user can re-sync from My Bots.`;
+  return `Updated ${m.name} (id=${m.id}) locally, but on-chain sync ${sync.canSkip ? 'was partial' : 'failed'}: ${sync.error ?? 'unknown error'}. The bot works locally; the user can re-sync from My Bots.${removedNote}`;
 }
 
 function formatDeleteResult(id: number, result: DeleteMetaBotResult): string {
@@ -442,7 +445,7 @@ export function buildMetabotManageAgentTools(deps: {
       allow_chat_skills: z
         .array(z.string())
         .optional()
-        .describe('Full replacement list of skill ids assigned to this bot (used across its chats and work sessions). Prefer chat_skill_op for a single add/remove.'),
+        .describe('Full replacement list of skill ids assigned to this bot (used across its chats and work sessions). Anything omitted is un-assigned IMMEDIATELY — first read the bot\'s CURRENT list via metabot_getinfo(list_bot_chat_skills) and carry over every skill that should stay. Prefer chat_skill_op for a single add/remove.'),
       chat_skill_op: z
         .object({
           action: z.enum(['add', 'remove']).describe('Assign or unassign one skill without replacing the rest of the list.'),

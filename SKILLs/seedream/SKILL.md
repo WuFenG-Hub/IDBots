@@ -235,8 +235,6 @@ node "$SKILLS_ROOT/seedream/scripts/generate_image.js" \
 | `--max-images` | 组图数量 | 4 | 1-8 |
 | `--search` | 启用联网搜索 | 否 | 标志参数 |
 | `--output` | 输出文件路径 | `generated_image.png` | 文件路径 |
-| `--poll-interval` | 状态查询间隔（秒） | 5 | 1-10 |
-| `--timeout` | 最大等待时间（秒） | 300 | 60-600 |
 
 ## 模型选择
 
@@ -263,7 +261,7 @@ node "$SKILLS_ROOT/seedream/scripts/generate_image.js" \
 - **模型ID**: `doubao-seedream-5-0-260128`
 - **特点**: 支持联网搜索，融合实时网络信息
 - **使用**: 通过 `--search` 参数自动启用
-- **注意**: 2026年2月24日18点后正式开放 API
+- **注意**: 该模型需要账号在火山引擎控制台开通权限；未开通时调用返回权限类错误，退回 4.0/4.5 即可
 
 **推荐使用场景：**
 - 追求最高质量 → 4.5
@@ -297,21 +295,6 @@ node "$SKILLS_ROOT/seedream/scripts/generate_image.js" \
 
 ```bash
 --no-watermark
-```
-
-### 轮询和超时控制
-
-调整轮询策略以适应不同场景：
-
-```bash
-# 快速查询（适合小图）
---poll-interval 3 --timeout 180
-
-# 标准配置
---poll-interval 5 --timeout 300
-
-# 耐心等待（适合4K或组图）
---poll-interval 10 --timeout 600
 ```
 
 ## 状态说明
@@ -402,7 +385,7 @@ node "$SKILLS_ROOT/seedream/scripts/generate_image.js" \
 ### 产品设计
 
 ```bash
-node scripts/generate_image.js \
+node "$SKILLS_ROOT/seedream/scripts/generate_image.js" \
   --prompt "现代简约风格，智能手表产品展示，白色背景，工作室灯光" \
   --size "4K"
 ```
@@ -410,7 +393,7 @@ node scripts/generate_image.js \
 ### 艺术创作
 
 ```bash
-node scripts/generate_image.js \
+node "$SKILLS_ROOT/seedream/scripts/generate_image.js" \
   --prompt "超现实主义，漂浮的岛屿，瀑布从天而降，梦幻色彩" \
   --size "2K"
 ```
@@ -418,7 +401,7 @@ node scripts/generate_image.js \
 ### 社交媒体内容
 
 ```bash
-node scripts/generate_image.js \
+node "$SKILLS_ROOT/seedream/scripts/generate_image.js" \
   --prompt "美食特写，热气腾腾的拉面，筷子夹起面条，暖色调" \
   --size "2K"
 ```
@@ -426,7 +409,7 @@ node scripts/generate_image.js \
 ### 品牌视觉设计
 
 ```bash
-node scripts/generate_image.js \
+node "$SKILLS_ROOT/seedream/scripts/generate_image.js" \
   --prompt "参考logo，生成一套完整的品牌视觉系统，包括名片、海报、包装设计" \
   --image brand_logo.png \
   --sequential \

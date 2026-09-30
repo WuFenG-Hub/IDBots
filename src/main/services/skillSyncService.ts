@@ -44,7 +44,7 @@ export type OfficialSkillItem = {
 type SkillsConfig = {
   version?: number;
   description?: string;
-  defaults: Record<string, { order?: number; enabled?: boolean; version?: string; 'creator-metaid'?: string; installedAt?: number }>;
+  defaults: Record<string, { order?: number; enabled?: boolean; version?: string; 'creator-metaid'?: string; installedAt?: number; sourceUri?: string }>;
 };
 
 type ParsedOfficialSkillDefinition = {
@@ -399,6 +399,7 @@ export async function installOfficialSkill(
       'creator-metaid': remoteCreator,
       installedAt,
       enabled: true,
+      sourceUri: skillFileUri,
     };
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
 

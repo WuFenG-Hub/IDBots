@@ -90,6 +90,10 @@ type SkillsConfig = {
     version?: string;
     'creator-metaid'?: string;
     installedAt?: number;
+    /** Where the skill was installed from (metafile://, URL, local path,
+     * github ref, npm:<pkg>, skills.sh:<name>) — enables reinstall after the
+     * directory is lost. Absent for installs that predate source tracking. */
+    sourceUri?: string;
   }>;
 };
 
@@ -270,7 +274,7 @@ export function findSkillRoot(extractedDir: string): string | null {
   return null;
 }
 
-function writeSkillConfig(root: string, name: string, version: string, now: number): void {
+function writeSkillConfig(root: string, name: string, version: string, now: number, sourceUri?: string): void {
   const configPath = path.join(root, SKILLS_CONFIG_FILE);
   let config: SkillsConfig = { version: 1, defaults: {} };
   if (fs.existsSync(configPath)) {
@@ -289,6 +293,7 @@ function writeSkillConfig(root: string, name: string, version: string, now: numb
     version,
     installedAt: now,
     enabled: existing.enabled ?? true,
+    sourceUri: text(sourceUri) || existing.sourceUri,
   };
   fs.mkdirSync(root, { recursive: true });
   fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
@@ -466,6 +471,7 @@ function placeSkillFromExtracted(
   skillsRoot: string,
   now: number,
   subpath?: string,
+  sourceUri?: string,
 ): { name: string; version: string; dest: string } {
   const scoped = subpath
     ? path.resolve(extractedDir, ...subpath.split('/').filter(Boolean))
@@ -489,7 +495,7 @@ function placeSkillFromExtracted(
     fs.rmSync(dest, { recursive: true, force: true });
   }
   copyDir(skillRoot, dest);
-  writeSkillConfig(skillsRoot, name, parsed.version, now);
+  writeSkillConfig(skillsRoot, name, parsed.version, now, sourceUri);
   return { name, version: parsed.version, dest };
 }
 
@@ -608,7 +614,7 @@ export async function installSkill(
       if (fs.existsSync(zipRef)) {
         const stat = fs.statSync(zipRef);
         if (stat.isDirectory()) {
-          const placed = placeSkillFromExtracted(zipRef, deps.getSkillsRoot(), now);
+          const placed = placeSkillFromExtracted(zipRef, deps.getSkillsRoot(), now, undefined, zipRef);
           deps.reloadSkills?.();
           return { ok: true, ...placed };
         }
@@ -653,9 +659,10 @@ export async function installSkill(
     }
     assertPackageSize(downloaded.buffer);
 
+    const sourceUri = zipRef || githubRef || (skillsShRef ? `skills.sh:${skillsShRef}` : '') || (npmRef ? `npm:${npmRef}` : '');
     const extractDir = path.join(staging, 'extracted');
     await extractArchiveToDir(downloaded.buffer, downloaded.contentType, extractDir);
-    const placed = placeSkillFromExtracted(extractDir, deps.getSkillsRoot(), now, githubSubpath);
+    const placed = placeSkillFromExtracted(extractDir, deps.getSkillsRoot(), now, githubSubpath, sourceUri);
     deps.reloadSkills?.();
     return { ok: true, ...placed };
   } catch (error) {

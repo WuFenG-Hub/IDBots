@@ -38,7 +38,7 @@ function rpcHeaders() {
 const CREATE_PIN_URL = `${RPC_BASE}/api/metaid/create-pin`;
 const UPLOAD_URL = `${RPC_BASE}/api/idbots/files/upload-largefile`;
 const SKILL_PROTOCOL_PATH = '/protocols/metabot-skill';
-const MAX_ZIP_SIZE = 4 * 1024 * 1024; // 4 MB
+const MAX_ZIP_SIZE = 50 * 1024 * 1024; // 50 MB — matches the host upload-largefile limit (chunked automatically above 5 MB)
 
 function writeStderr(msg) {
   process.stderr.write(msg + '\n');

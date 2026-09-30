@@ -10,6 +10,9 @@ official: true
 Drive a real browser from the terminal using `playwright-cli`. Prefer the bundled wrapper script so the CLI works even when it is not globally installed.
 Treat this skill as CLI-first automation. Do not pivot to `@playwright/test` unless the user explicitly asks for test files.
 
+**Tool priority**: when the session already offers `mcp__playwright-mcp__*` browser-automation tools (IDBots ships them and most bots have the switch on by default), prefer those over this CLI — they need no downloads and keep state in the app's managed browser slots. Use this CLI skill when the MCP tools are unavailable/disabled or when you explicitly need a terminal-driven workflow (traces, custom output dirs, scripting).
+**Offline note**: the wrapper resolves `@playwright/mcp` through `npx`, which downloads the package on first use — this skill needs network access at least once per machine.
+
 ## Prerequisite check (required)
 
 Before proposing commands, check whether `npx` is available (the wrapper depends on it):
@@ -144,5 +147,5 @@ Open only what you need:
 - Prefer explicit commands over `eval` and `run-code` unless needed.
 - When you do not have a fresh snapshot, use placeholder refs like `eX` and say why; do not bypass refs with `run-code`.
 - Use `--headed` when a visual check will help.
-- When capturing artifacts in this repo, use `output/playwright/` and avoid introducing new top-level artifact folders.
+- Capture artifacts inside the current session workspace (e.g. `playwright/` under it); do not write into the IDBots repository tree.
 - Default to CLI commands and workflows, not Playwright test specs.

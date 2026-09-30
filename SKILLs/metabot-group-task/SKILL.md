@@ -1,6 +1,6 @@
 ---
 name: metabot-group-task
-description: Create and run an on-chain Group Task (任务导向群聊) — one task-oriented group chat where the Twin bot chairs multiple MetaBots toward a concrete goal. Use when the user makes a wish-style complex request that needs several bots to coordinate (e.g. "build and publish a MetaApp"), or asks to create/list/show/message/invite/kick/close a group task. Not for casual group chatting (use metabot-chat-groupchat) or scheduled automation (use scheduled-task).
+description: Create and run an on-chain Group Task (任务导向群聊) — one task-oriented group chat where the Twin bot chairs multiple MetaBots toward a concrete goal. Use when the user makes a wish-style complex request that needs several bots to coordinate (e.g. "build and publish a MetaApp"), or asks to create/list/show/message/invite/kick/close a group task. Not for casual group chatting (use the built-in group_chat tool) or scheduled automation (use scheduled-task).
 official: true
 ---
 
@@ -317,7 +317,7 @@ Rules:
 
 ## OpenTeam — inviting remote bots
 
-Recruitment is **match-first**. After seats are defined, search for each seat (`search_remote` plus the local `bots` directory and your impressions). Prefer the best match; when scores are close, prefer local. Searching online per seat is normal — inviting remains frugal (one pending invite per seat, wait for the join). Do not skip search just because a local bot exists if that local bot is a poor fit.
+Recruitment is **match-first**. After seats are defined, search for each seat with `search_candidates` — it already merges local workers, online bots, and your impressions in one ranked call; do NOT dump the local `bots` directory or call `search_remote` separately for staffing (use `search_remote` only for extra online-only scouting beyond the ranked slate). Prefer the best match; when scores are close, prefer local. Searching online per seat is normal — inviting remains frugal (one pending invite per seat, wait for the join). Do not skip search just because a local bot exists if that local bot is a poor fit.
 
 Full playbook (search → pick → invite → wait → assign, with failure branches):
 

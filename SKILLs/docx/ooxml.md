@@ -275,16 +275,15 @@ Use the Document class from `scripts/document.py` for all tracked changes and co
 
 **Find the docx skill root** (directory containing `scripts/` and `ooxml/`):
 ```bash
-# Search for document.py to locate the skill root
-# Note: /mnt/skills is used here as an example; check your context for the actual location
-find /mnt/skills -name "document.py" -path "*/docx/scripts/*" 2>/dev/null | head -1
-# Example output: /mnt/skills/docx/scripts/document.py
-# Skill root is: /mnt/skills/docx
+# The session injects $SKILLS_ROOT (the IDBots skills directory):
+DOCX_ROOT="$SKILLS_ROOT/docx"
+# Fallback if it is unset: search for document.py to locate the skill root
+find "$SKILLS_ROOT" -name "document.py" -path "*/docx/scripts/*" 2>/dev/null | head -1
 ```
 
 **Run your script with PYTHONPATH** set to the docx skill root:
 ```bash
-PYTHONPATH=/mnt/skills/docx python your_script.py
+PYTHONPATH="$SKILLS_ROOT/docx" python your_script.py
 ```
 
 **In your script**, import from the skill root:

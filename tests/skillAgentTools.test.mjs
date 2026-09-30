@@ -17,8 +17,8 @@ function makeHarness(overrides = {}) {
         extractedDir: '/tmp/extract',
       };
     },
-    installSkill: async (input, perspective) => {
-      calls.install.push({ input, perspective });
+    installSkill: async (input, perspective, options) => {
+      calls.install.push({ input, perspective, options });
       return overrides.installResult ?? {
         ok: true,
         name: 'video-maker',
@@ -119,4 +119,32 @@ test('install_skill surfaces a failure as isError', async () => {
   const res = await byName.skill_tool.handler({ action: 'install_skill', zip: '/tmp/x.zip' });
   assert.equal(res.isError, true);
   assert.match(textOf(res), /not a valid skill package/);
+});
+
+test('list_installed_skills separates missing-on-disk skills into their own section', async () => {
+  const { byName } = makeHarness({
+    listResult: [
+      { id: 'official-core', name: 'Official Core', origin: 'bundled' },
+      { id: 'video-maker', name: 'Video Maker', origin: 'assigned' },
+      { id: 'crs-image', name: 'crs-image', origin: 'assigned', missing: true },
+    ],
+  });
+  const res = await byName.skill_tool.handler({ action: 'list_installed_skills' });
+  const text = textOf(res);
+  assert.match(text, /Skills available to this session \(2;/);
+  assert.match(text, /Video Maker \(video-maker, assigned\)/);
+  assert.match(text, /Missing on disk/);
+  assert.match(text, /crs-image/);
+  // The missing entry must not inflate the available count or appear as usable.
+  assert.ok(text.indexOf('Missing on disk') > text.indexOf('Video Maker'));
+});
+
+test('install_skill forwards the share option to the control (default = per-bot)', async () => {
+  const { byName, calls } = makeHarness();
+  await byName.skill_tool.handler({ action: 'install_skill', github: 'acme/video' });
+  await byName.skill_tool.handler({ action: 'install_skill', github: 'acme/video', share: 'global' });
+  assert.deepEqual(calls.install[0].input, { zip: undefined, github: 'acme/video', 'skills.sh': undefined, npm: undefined });
+  assert.deepEqual(calls.install[0].perspective, { metabotId: 42 });
+  assert.equal(calls.install[0].options?.share, undefined, 'no share param => default per-bot install');
+  assert.equal(calls.install[1].options?.share, 'global', 'explicit share=global forwarded for the (Twin-only) gate');
 });
