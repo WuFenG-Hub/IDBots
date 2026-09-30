@@ -17,7 +17,7 @@ import { i18nService } from '../../services/i18n';
 import { skillService } from '../../services/skill';
 import { setSkills } from '../../store/slices/skillSlice';
 import { RootState } from '../../store';
-import { Skill, OfficialSkillItem } from '../../types/skill';
+import { Skill, OfficialSkillItem, MissingSkillEntry } from '../../types/skill';
 import SkillScopeEditor, { type AssignableMetabot } from './SkillScopeEditor';
 import ErrorMessage from '../ErrorMessage';
 import Tooltip from '../ui/Tooltip';
@@ -60,10 +60,16 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({
   const [isSyncingAll, setIsSyncingAll] = useState(false);
   // Assignment model: bots available for per-skill scope assignment.
   const [assignableMetabots, setAssignableMetabots] = useState<AssignableMetabot[]>([]);
+  // Authorized-but-missing installs (directory gone, authorization intact).
+  const [missingSkills, setMissingSkills] = useState<MissingSkillEntry[]>([]);
+  const [missingSkillPendingForget, setMissingSkillPendingForget] = useState<MissingSkillEntry | null>(null);
+  const [isForgettingMissingSkill, setIsForgettingMissingSkill] = useState(false);
+  const [reinstallingMissingSkillId, setReinstallingMissingSkillId] = useState<string | null>(null);
 
   const addSkillMenuRef = useRef<HTMLDivElement>(null);
   const addSkillButtonRef = useRef<HTMLButtonElement>(null);
   const githubImportInputRef = useRef<HTMLInputElement>(null);
+  const missingSkillsLoaderRef = useRef<(() => Promise<void>) | null>(null);
   const resolvedActiveTab = activeTab ?? internalActiveTab;
 
   const setCurrentTab = (tab: SkillsTab) => {
@@ -94,14 +100,29 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({
     };
     loadMetabots();
 
+    const loadMissingSkills = async () => {
+      try {
+        const result = await window.electron.skills.listMissing();
+        if (isActive && result.success && result.missing) {
+          setMissingSkills(result.missing);
+        }
+      } catch {
+        // The missing banner simply stays hidden until the next successful load.
+      }
+    };
+    loadMissingSkills();
+    missingSkillsLoaderRef.current = loadMissingSkills;
+
     const unsubscribe = skillService.onSkillsChanged(async () => {
       const loadedSkills = await skillService.loadSkills();
       if (!isActive) return;
       dispatch(setSkills(loadedSkills));
+      loadMissingSkills();
     });
 
     return () => {
       isActive = false;
+      missingSkillsLoaderRef.current = null;
       unsubscribe();
     };
   }, [dispatch]);
@@ -387,6 +408,73 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({
     await handleAddSkillFromSource(skillDownloadSource);
   };
 
+  // Which reinstall route a missing entry supports: metafile:// goes through
+  // the official-skill installer; plain URLs / absolute paths go through the
+  // generic source downloader; anything else must be reinstalled manually.
+  const reinstallRouteFor = (entry: MissingSkillEntry): 'official' | 'download' | null => {
+    const uri = entry.sourceUri?.trim() ?? '';
+    if (!uri) return null;
+    if (uri.startsWith('metafile://')) return 'official';
+    if (/^https?:\/\//i.test(uri) || uri.startsWith('/')) return 'download';
+    return null;
+  };
+
+  const handleReinstallMissingSkill = async (entry: MissingSkillEntry) => {
+    const route = reinstallRouteFor(entry);
+    const uri = entry.sourceUri?.trim() ?? '';
+    if (!route || !uri || reinstallingMissingSkillId) return;
+    setReinstallingMissingSkillId(entry.id);
+    setSkillActionError('');
+    try {
+      if (route === 'official') {
+        const result = await window.electron.idbots.installOfficialSkill({
+          name: entry.id,
+          skillFileUri: uri,
+          remoteVersion: '0',
+          remoteCreator: '',
+        });
+        if (!result.success) {
+          setSkillActionError(result.error || i18nService.t('missingSkillReinstallFailed'));
+          return;
+        }
+      } else {
+        const result = await skillService.downloadSkill(uri);
+        if (!result.success) {
+          setSkillActionError(result.error || i18nService.t('missingSkillReinstallFailed'));
+          return;
+        }
+        if (result.skills) {
+          dispatch(setSkills(result.skills));
+        }
+      }
+      await missingSkillsLoaderRef.current?.();
+      const loadedSkills = await skillService.loadSkills();
+      dispatch(setSkills(loadedSkills));
+    } finally {
+      setReinstallingMissingSkillId(null);
+    }
+  };
+
+  const handleCancelForgetMissingSkill = () => {
+    if (isForgettingMissingSkill) return;
+    setMissingSkillPendingForget(null);
+  };
+
+  const handleConfirmForgetMissingSkill = async () => {
+    if (!missingSkillPendingForget || isForgettingMissingSkill) return;
+    setIsForgettingMissingSkill(true);
+    setSkillActionError('');
+    const result = await window.electron.skills.forgetMissing(missingSkillPendingForget.id);
+    if (!result.success) {
+      setSkillActionError(result.error || i18nService.t('missingSkillForgetFailed'));
+      setIsForgettingMissingSkill(false);
+      return;
+    }
+    await missingSkillsLoaderRef.current?.();
+    setIsForgettingMissingSkill(false);
+    setMissingSkillPendingForget(null);
+  };
+
   return (
     <div className="space-y-4">
       {!hideTabBar && (
@@ -625,6 +713,62 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({
 
       {resolvedActiveTab === 'local' && (
         <>
+      {missingSkills.length > 0 && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 space-y-2">
+          <div className="flex items-center gap-2 text-sm font-medium text-amber-600 dark:text-amber-400">
+            <ExclamationTriangleIcon className="h-4 w-4 flex-shrink-0" />
+            {i18nService.t('missingSkillsBannerTitle').replace('{count}', String(missingSkills.length))}
+          </div>
+          <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('missingSkillsBannerDescription')}
+          </p>
+          <div className="space-y-1.5">
+            {missingSkills.map((entry) => {
+              const route = reinstallRouteFor(entry);
+              return (
+                <div key={entry.id} className="flex items-center justify-between gap-2 text-xs">
+                  <div className="min-w-0 truncate dark:text-claude-darkText text-claude-text">
+                    <span className="font-medium">{entry.id}</span>
+                    <span className="ml-2 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {entry.scope === 'global'
+                        ? i18nService.t('missingSkillScopeGlobal')
+                        : i18nService.t('missingSkillScopeAssigned').replace('{count}', String(entry.assignedMetabotIds.length))}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    {route && (
+                      <button
+                        type="button"
+                        onClick={() => handleReinstallMissingSkill(entry)}
+                        disabled={reinstallingMissingSkillId !== null}
+                        className="btn-idchat-primary-filled inline-flex items-center gap-1 px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {reinstallingMissingSkillId === entry.id ? <ArrowPathIcon className="h-3 w-3 animate-spin" /> : null}
+                        {i18nService.t('missingSkillReinstall')}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSkillActionError('');
+                        setMissingSkillPendingForget(entry);
+                      }}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+                    >
+                      {i18nService.t('missingSkillForget')}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {skillActionError && (
+            <div className="text-xs text-red-500">
+              {skillActionError}
+            </div>
+          )}
+        </div>
+      )}
       <div className="flex items-center gap-3">
         <div className="relative flex-1">
           <MagnifyingGlassIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
@@ -849,6 +993,48 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({
                 className="px-3 py-1.5 text-xs rounded-lg btn-idchat-primary-filled transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {installingSkillName === communitySkillPendingDownload.name ? i18nService.t('skillOfficialLoading') : i18nService.t('communitySkillConfirm')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {missingSkillPendingForget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick={handleCancelForgetMissingSkill}
+        >
+          <div
+            className="w-full max-w-sm mx-4 rounded-2xl dark:bg-claude-darkSurface bg-claude-surface border dark:border-claude-darkBorder border-claude-border shadow-2xl p-5"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="text-lg font-semibold dark:text-claude-darkText text-claude-text">
+              {i18nService.t('missingSkillForgetTitle')}
+            </div>
+            <p className="mt-2 text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('missingSkillForgetConfirm').replace('{name}', missingSkillPendingForget.id)}
+            </p>
+            {skillActionError && (
+              <div className="mt-3 text-xs text-red-500">
+                {skillActionError}
+              </div>
+            )}
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleCancelForgetMissingSkill}
+                disabled={isForgettingMissingSkill}
+                className="px-3 py-1.5 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {i18nService.t('cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmForgetMissingSkill}
+                disabled={isForgettingMissingSkill}
+                className="px-3 py-1.5 text-xs rounded-lg bg-red-500 text-gray-900 hover:bg-red-600 dark:bg-red-500 dark:hover:bg-red-400 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {i18nService.t('confirmDelete')}
               </button>
             </div>
           </div>

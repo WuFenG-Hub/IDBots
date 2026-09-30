@@ -840,6 +840,17 @@ interface IElectronAPI {
       metabots?: Array<{ id: number; name: string; metabotType: string }>;
       error?: string;
     }>;
+    listMissing: () => Promise<{
+      success: boolean;
+      missing?: Array<{
+        id: string;
+        scope: 'library' | 'global';
+        assignedMetabotIds: number[];
+        sourceUri: string | null;
+      }>;
+      error?: string;
+    }>;
+    forgetMissing: (id: string) => Promise<{ success: boolean; error?: string }>;
     setScope: (options: { id: string; scope: 'library' | 'global' | 'bots'; metabotIds?: number[] }) => Promise<{
       success: boolean;
       info?: Record<string, { scope: 'library' | 'global'; assignedMetabotIds: number[] }>;

@@ -35,3 +35,15 @@ export interface SkillWithAssignment extends Skill {
   scope?: SkillScopeLabel;
   assignedMetabotIds?: number[];
 }
+
+/**
+ * One entry of the Skills page "missing from disk" banner: the skill is still
+ * authorized (global scope and/or assigned to bots) but its directory is gone.
+ * `sourceUri` (when recorded at install time) enables one-click reinstall.
+ */
+export interface MissingSkillEntry {
+  id: string;
+  scope: 'library' | 'global';
+  assignedMetabotIds: number[];
+  sourceUri: string | null;
+}
