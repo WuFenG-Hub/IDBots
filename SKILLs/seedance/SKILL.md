@@ -240,18 +240,17 @@ node "$SKILLS_ROOT/seedance/scripts/generate_video.js" \
 - **特点**: 更快速度，支持多参考图
 - **限流**: RPM 300，并发5
 
-### Seedance 2.0（即将支持）
+### Seedance 2.0
 
 - **模型ID**: `doubao-seedance-2-0-260128`
 - **特点**: 下一代视频生成模型，质量和性能全面提升
-- **可用性**: ⏰ 预计 **2026年2月24日18点** 开放 API 调用
-- **当前状态**: 仅在 [控制台体验中心](https://console.volcengine.com/ark/region:ark+cn-beijing/experience/vision?modelId=doubao-seedance-2-0-260128&tab=GenVideo) 可用
+- **可用性**: 取决于账号是否已在火山引擎控制台开通该模型；未开通时调用会返回权限类错误，退回 1.0 系列即可
 
-**使用方式（2月24日后）：**
+**使用方式：**
 
 ```bash
 # 命令行方式
-python3 "$SKILLS_ROOT/seedance/scripts/generate_video.py" \
+node "$SKILLS_ROOT/seedance/scripts/generate_video.js" \
   --prompt "你的提示词" \
   --model "doubao-seedance-2-0-260128" \
   --duration 5
@@ -264,7 +263,7 @@ python3 "$SKILLS_ROOT/seedance/scripts/generate_video.py" \
 - 标准高质量视频 → 1.0 pro
 - 快速生成预览 → 1.0 pro fast
 - 多参考图融合 → 1.0 lite
-- 下一代最新模型（2月24日后）→ 2.0
+- 下一代最新模型 → 2.0（需账号已开通）
 
 ## 高级选项
 
@@ -412,7 +411,7 @@ python3 "$SKILLS_ROOT/seedance/scripts/generate_video.py" \
 
 ### 短视频创作
 ```bash
-node scripts/generate_video.js \
+node "$SKILLS_ROOT/seedance/scripts/generate_video.js" \
   --prompt "产品展示：智能手表从不同角度旋转展示" \
   --ratio "9:16" \
   --duration 5
@@ -420,7 +419,7 @@ node scripts/generate_video.js \
 
 ### 动画短片
 ```bash
-node scripts/generate_video.js \
+node "$SKILLS_ROOT/seedance/scripts/generate_video.js" \
   --prompt "卡通风格，小兔子在森林里蹦蹦跳跳" \
   --ratio "16:9" \
   --duration 8 \
@@ -429,7 +428,7 @@ node scripts/generate_video.js \
 
 ### 社交媒体内容
 ```bash
-node scripts/generate_video.js \
+node "$SKILLS_ROOT/seedance/scripts/generate_video.js" \
   --prompt "美食特写：热气腾腾的拉面，筷子夹起面条" \
   --ratio "1:1" \
   --duration 3
@@ -437,7 +436,7 @@ node scripts/generate_video.js \
 
 ### 教学演示
 ```bash
-node scripts/generate_video.js \
+node "$SKILLS_ROOT/seedance/scripts/generate_video.js" \
   --prompt "科普动画：地球自转，太阳光照射地球表面" \
   --ratio "16:9" \
   --duration 10
