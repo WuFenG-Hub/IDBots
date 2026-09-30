@@ -29,6 +29,23 @@ import type { LongTermSubtask, LongTermTaskDetail } from '../../renderer/types/l
  * task, at most one escalation per `nudgeThrottleMs` UNLESS the event journal
  * moved or a timed wait expired. Sessions are created once per sub-project
  * and reused afterwards — never a session per heartbeat.
+ *
+ * Owner engagement (P2): the journal is blind to the owner typing. The live
+ * conversation about a task can drift to ANY session the task was ever
+ * discussed in (the definition session, a previous sub-project's session),
+ * while the heartbeat only watched the bound one — so reminders fired into a
+ * folded session the owner never read, while the owner was actively
+ * responding elsewhere. Every sweep therefore scans the task's RELATED
+ * sessions for owner messages and twin activity, and:
+ *  - suppresses every owner-facing reminder while the owner is actively
+ *    responding in a related session (the conversation itself is handling
+ *    the decision — the secretary stops nagging once you are talking);
+ *  - suppresses work pushes while the twin is already driving the task in a
+ *    related session (never grow a second, conflicting work line);
+ *  - silently rebinds the sub-project to the owner's live venue, so whatever
+ *    does escalate lands where the owner actually is — hot delivery (short,
+ *    conversational) when engaged, cold delivery (full self-contained brief)
+ *    otherwise.
  */
 
 export const LONGTERM_ADVANCE_INTERVAL_MS = 5 * 60_000;
@@ -46,6 +63,14 @@ const DEFAULT_WAITING_OWNER_REMINDER_MS = 2 * 3_600_000;
 const DEFAULT_EXTERNAL_REMINDER_MS = 4 * 3_600_000;
 const DEFAULT_FAILURE_STREAK_THRESHOLD = 2;
 const DEFAULT_EXPECTED_MINUTES = 240;
+/**
+ * Recency window for "the owner is actively engaged in a related session"
+ * (default 60 min). Inside the window, owner-facing reminders are suppressed
+ * and escalations are delivered hot into the owner's live session. Real
+ * page-by-page feedback sessions show owner gaps up to ~45 min mid-discussion,
+ * so anything shorter would leak reminders into live conversations.
+ */
+export const DEFAULT_OWNER_ENGAGEMENT_WINDOW_MS = 60 * 60_000;
 /**
  * Bound-session budget before the heartbeat rotates to a fresh session.
  *
@@ -72,6 +97,21 @@ const CONVERGENCE_CHURN_LIMIT = 3;
 const CONVERGENCE_CHURN_WINDOW_MS = 2 * 3_600_000;
 /** Reason prefixes that mark a convergence-family escalation (stale wait / churn). */
 const CONVERGENCE_REASON_PREFIXES = ['stale owner wait', 'convergence churn'];
+/**
+ * Owner-facing escalation families: they exist ONLY to get the owner's
+ * attention, so an actively-engaged owner must never receive them, and they
+ * are delivered wherever the owner last spoke. Everything else (begin/quiet
+ * pushes, supervision, stale-wait convergence, timed waits) is a WORK turn —
+ * suppressed instead by twin activity elsewhere. ('convergence churn' appears
+ * in both lists: it is a convergence-family escalation AND an owner-facing
+ * one — the churn breaker's whole point is bringing the loop to the owner.)
+ */
+const OWNER_FACING_REASON_PREFIXES = [
+  'acceptance proposal awaiting',
+  'owner decision still pending',
+  'owner quiet window ended',
+  'convergence churn',
+];
 
 /** Worker-dispatch telemetry used by supervision (P1) — one row per orchestration attempt tied to the task. */
 export interface LongTermWorkerAttemptSummary {
@@ -81,6 +121,28 @@ export interface LongTermWorkerAttemptSummary {
   status: 'queued' | 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled';
   startedAtMs: number | null;
   finishedAtMs: number | null;
+}
+
+/** Engagement probe result for one session (CoworkStore.getSessionEngagement). */
+export interface LongTermSessionEngagement {
+  /** Newest owner-typed message (heartbeat prompts and bot relays excluded). */
+  lastOwnerMessageAtMs: number | null;
+  /** Newest assistant message. */
+  lastAssistantMessageAtMs: number | null;
+}
+
+/** Engagement snapshot across a task's related sessions (cheap local probes). */
+export interface LongTermTaskEngagement {
+  /** Newest owner message across all related sessions. */
+  lastOwnerAtMs: number | null;
+  /** Session holding the newest owner message (no recency filter). */
+  lastOwnerSessionId: string | null;
+  /** lastOwnerSessionId, but only while the newest owner message is inside the engagement window — the owner's LIVE venue. */
+  ownerVenueSessionId: string | null;
+  /** Newest assistant message across the TWIN's related sessions. */
+  lastTwinActivityAtMs: number | null;
+  /** A turn is executing right now in one of the TWIN's related sessions. */
+  twinSessionActive: boolean;
 }
 
 /** Minimal session-store shape (satisfied by CoworkStore). */
@@ -101,6 +163,10 @@ export interface LongTermAdvanceSessionStore {
   getSession(id: string): unknown;
   /** Message count of a session — the rotation budget check (optional). */
   countSessionMessages?(id: string): number;
+  /** Owner/twin message recency probe — the engagement signal (optional). */
+  getSessionEngagement?(id: string): LongTermSessionEngagement;
+  /** The bot a session belongs to — twin-activity suppression is scoped to the twin's own sessions (optional). */
+  getSessionMetabotId?(id: string): number | null;
 }
 
 /** Minimal runner shape (satisfied by CoworkRunner). */
@@ -137,6 +203,8 @@ export interface LongTermAdvanceDeps {
   defaultExpectedMinutes?: number;
   /** Session rotation: message budget for the bound session (default 180 — see DEFAULT_SESSION_ROTATION_MESSAGES for what is counted). */
   sessionRotationThreshold?: number;
+  /** Recency window for owner engagement across related sessions (default 60 min — see DEFAULT_OWNER_ENGAGEMENT_WINDOW_MS). */
+  ownerEngagementWindowMs?: number;
 }
 
 /**
@@ -179,10 +247,24 @@ export interface LongTermAdvanceReport {
  * owner (P0 contract): the reply must re-present the pending decision in
  * full — never a bare "no change" line — and converge a stale wait first.
  * Empty string for every other status.
+ *
+ * HOT delivery (the owner is actively engaged in the target session): the
+ * six-section brief is forbidden — reading a template at someone mid-
+ * conversation is an interruption, not a reminder. The turn blends in.
  */
-function buildOwnerWaitBlock(current: LongTermSubtask, language: string): string {
+function buildOwnerWaitBlock(current: LongTermSubtask, language: string, delivery: 'cold' | 'hot' = 'cold'): string {
   if (current.status !== 'waiting_owner') return '';
   if (language === 'zh') {
+    if (delivery === 'hot') {
+      return [
+        '',
+        '特别要求（当前子项目正在等待主人拍板——而主人此刻就在本会话中参与讨论）：',
+        '- 禁止六段简报式的「待拍板重申」——主人在线且拥有完整上下文，模板复读是打扰，不是提醒。',
+        '- 如果当前讨论本身就是在这个决策上，顺着讨论推进即可，不要额外重申。',
+        '- 如果讨论已经偏向别的事，用一两句话自然收回到待拍板项：是什么问题、你的推荐是什么——像秘书在对话间隙轻声确认。',
+        `- 等待备注：${current.waitNote || '(无记录——先用 longterm_subtask_wait 补上)'}`,
+      ].join('\n');
+    }
     return [
       '',
       '特别要求（当前子项目正在等待主人拍板——这是本轮最重要的义务）：',
@@ -192,6 +274,16 @@ function buildOwnerWaitBlock(current: LongTermSubtask, language: string): string
       `- 等待备注：${current.waitNote || '(无记录——先用 longterm_subtask_wait 补上)'}${current.waitUntil ? `；承诺的静默窗口至 ${current.waitUntil}（本轮在窗口之后）` : ''}`,
       '- 先核对这条等待是否仍然成立：如果 journal 显示挂起等待之后你又推进过工作（等待已过时），先用 longterm_subtask_unblock 解除等待再继续推进；若等待仍成立但备注需要更新，用 longterm_subtask_wait 重新记录（会刷新等待锚点）——重记时同样按上面的六段结构重写 note。',
       '- 重申之后，若还有不依赖这个决策的推进空间，可以继续推进——但重申必须是回复的第一部分。',
+    ].join('\n');
+  }
+  if (delivery === 'hot') {
+    return [
+      '',
+      'SPECIAL REQUIREMENT (this sub-project is waiting on the owner\'s decision — and the owner is RIGHT HERE in this session):',
+      '- The six-section re-presentation is FORBIDDEN — the owner is online with full context; reading a template at them is an interruption, not a reminder.',
+      '- If the current discussion is already about this decision, simply move with it — no extra re-presentation.',
+      '- If the discussion has drifted elsewhere, guide it back to the pending decision in one or two sentences: what the question is and what you recommend — like a secretary checking in between exchanges.',
+      `- Wait note: ${current.waitNote || '(none recorded — record one with longterm_subtask_wait first)'}`,
     ].join('\n');
   }
   return [
@@ -253,6 +345,7 @@ function buildNudgePrompt(
   language: string,
   supervisionAttempts: LongTermWorkerAttemptSummary[] | null = null,
   rotation: { messages: number } | null = null,
+  delivery: 'cold' | 'hot' = 'cold',
 ): string {
   const criteria = current.acceptanceCriteria.length > 0
     ? current.acceptanceCriteria.map((criterion, index) => `   ${index + 1}. ${criterion}`).join('\n')
@@ -265,7 +358,9 @@ function buildNudgePrompt(
             '',
           ]
         : []),
-      '你是正在为主人推进长期任务的 TwinBot。这个回合由心跳自动开启（不是主人发起的），因为任务看起来可以继续推进。',
+      delivery === 'hot'
+        ? '你是正在为主人推进长期任务的 TwinBot。这是心跳自动开启的 check-in 回合——注意：主人此刻就在本会话中参与讨论，你拥有完整的对话上下文。按对话节奏自然回应，禁止一次性倾倒模板化内容。'
+        : '你是正在为主人推进长期任务的 TwinBot。这个回合由心跳自动开启（不是主人发起的），因为任务看起来可以继续推进。',
       '',
       `任务：「${detail.title}」（taskId: ${detail.id}）`,
       `目标（done-ness 定义）：${detail.goal}`,
@@ -274,19 +369,28 @@ function buildNudgePrompt(
       criteria,
       `开启原因：${reasons.join('；')}。`,
       '',
-      '要求：',
-      '1. 先用 longterm_task_get 读取完整状态简报——不要凭记忆推进。',
-      '2. 先用 2–3 句话向主人复述你对该子项目的理解（它要达成什么、验收看什么），再继续——锚定不对就停下来问，不要带着错误理解开工。',
-      '3. 然后按 longterm-task-exec 的纪律行动：',
-      '   - 如果现在能推进，就推进（begin/继续，走约定好的通道）。',
-      '   - 若需委派：先用 longterm_delegation_anchor 生成锚点块并原样放进委派简报——委派不带锚点就是有损中继，worker 会按"合理"而非"正确"去做。',
-      '   - 如果下一步要引入目标或事件流里没有的假设、基建或配置（新配置面、新通道、新依赖），先停下来问主人——这是提问，不是你可以自行拍板的事。',
-      '   - 如果需要主人决策，就问他——恰好一个问题，选择题形式、你的推荐项放最前；始终允许他用文字给出自己的答案。',
-      '   - 如果被外部条件卡住，用 longterm_subtask_wait 记录等待（精确的备注 + 知道日期就写 waitUntil；waitUntil 一律换算成主人本地时区、带时区偏移的完整 ISO 时间戳——不要写裸 UTC，除非主人明确用 UTC）。',
-      '   - 如果交付物可验证地满足全部验收标准，带上证据提请验收。',
-      '4. 用主人的语言回复。',
+      ...(delivery === 'hot'
+        ? [
+            '要求（主人在线——全部按当前对话节奏自然执行）：',
+            '1. 先用 longterm_task_get 读取完整状态简报——不要凭记忆推进。',
+            '2. 然后按 longterm-task-exec 的纪律行动：能推进就推进（begin/继续，走约定好的通道）；需要主人决策就顺着对话问他——恰好一个问题、你的推荐项放最前；被外部条件卡住就用 longterm_subtask_wait 记录等待；交付物可验证地满足全部验收标准就带证据提请验收。',
+            '3. 用主人的语言回复。',
+          ]
+        : [
+            '要求：',
+            '1. 先用 longterm_task_get 读取完整状态简报——不要凭记忆推进。',
+            '2. 先用 2–3 句话向主人复述你对该子项目的理解（它要达成什么、验收看什么），再继续——锚定不对就停下来问，不要带着错误理解开工。',
+            '3. 然后按 longterm-task-exec 的纪律行动：',
+            '   - 如果现在能推进，就推进（begin/继续，走约定好的通道）。',
+            '   - 若需委派：先用 longterm_delegation_anchor 生成锚点块并原样放进委派简报——委派不带锚点就是有损中继，worker 会按"合理"而非"正确"去做。',
+            '   - 如果下一步要引入目标或事件流里没有的假设、基建或配置（新配置面、新通道、新依赖），先停下来问主人——这是提问，不是你可以自行拍板的事。',
+            '   - 如果需要主人决策，就问他——恰好一个问题，选择题形式、你的推荐项放最前；始终允许他用文字给出自己的答案。',
+            '   - 如果被外部条件卡住，用 longterm_subtask_wait 记录等待（精确的备注 + 知道日期就写 waitUntil；waitUntil 一律换算成主人本地时区、带时区偏移的完整 ISO 时间戳——不要写裸 UTC，除非主人明确用 UTC）。',
+            '   - 如果交付物可验证地满足全部验收标准，带上证据提请验收。',
+            '4. 用主人的语言回复。',
+          ]),
     ];
-    const ownerWaitBlock = buildOwnerWaitBlock(current, language);
+    const ownerWaitBlock = buildOwnerWaitBlock(current, language, delivery);
     if (ownerWaitBlock) lines.push(ownerWaitBlock);
     const supervisionBlock = buildSupervisionBlock(supervisionAttempts, language);
     if (supervisionBlock) lines.push(supervisionBlock);
@@ -299,7 +403,9 @@ function buildNudgePrompt(
           '',
         ]
       : []),
-    'You are the TwinBot driving the owner\'s long-term task. This turn was opened by the heartbeat (not by the owner) because the task looks advanceable.',
+    delivery === 'hot'
+      ? 'You are the TwinBot driving the owner\'s long-term task. This is a heartbeat check-in turn — note: the owner is RIGHT HERE in this session, actively discussing; you have the full conversation context. Blend into the conversation naturally — never dump templated content.'
+      : 'You are the TwinBot driving the owner\'s long-term task. This turn was opened by the heartbeat (not by the owner) because the task looks advanceable.',
     '',
     `Task: "${detail.title}" (taskId: ${detail.id})`,
     `Goal (done-ness definition): ${detail.goal}`,
@@ -308,19 +414,28 @@ function buildNudgePrompt(
     criteria,
     `Why this turn was opened: ${reasons.join('; ')}.`,
     '',
-    'Required:',
-    '1. Read the full state brief with longterm_task_get first — never push from memory.',
-    '2. Restate your understanding of this sub-project to the owner in 2-3 sentences (what it must achieve, what acceptance looks like) before continuing — if the anchor is wrong, stop and ask; never build on a misunderstood requirement.',
-    '3. Then act per the longterm-task-exec discipline:',
-    '   - If the sub-project can advance now, advance it (begin/continue via the agreed channel).',
-    '   - If you delegate: first build the anchor with longterm_delegation_anchor and paste it into the delegation brief verbatim — a delegation without the anchor is a lossy relay, and the worker will build the plausible thing instead of the right thing.',
-    '   - If the next step introduces any assumption, infrastructure, or config not present in the goal or the journal (a new config surface, channel, or dependency), stop and ask the owner first — that is a question, never your call alone.',
-    '   - If you need the owner, ask — exactly ONE question, multiple choice with your recommended option first; free-text answers always allowed.',
-    '   - If blocked externally, record the wait with longterm_subtask_wait (precise note + waitUntil when known; ALWAYS convert waitUntil to a full ISO timestamp WITH timezone offset in the owner\'s local timezone — never bare UTC unless the owner explicitly uses UTC).',
-    '   - If the deliverable verifiably meets every acceptance criterion, propose acceptance with evidence.',
-    '4. Reply in the owner\'s language.',
+    ...(delivery === 'hot'
+      ? [
+          'Required (the owner is online — do everything at the pace of the live conversation):',
+          '1. Read the full state brief with longterm_task_get first — never push from memory.',
+          '2. Then act per the longterm-task-exec discipline: advance what can advance (begin/continue via the agreed channel); if you need the owner, ask within the conversation — exactly ONE question, your recommended option first; if blocked externally, record the wait with longterm_subtask_wait; if the deliverable verifiably meets every acceptance criterion, propose acceptance with evidence.',
+          '3. Reply in the owner\'s language.',
+        ]
+      : [
+          'Required:',
+          '1. Read the full state brief with longterm_task_get first — never push from memory.',
+          '2. Restate your understanding of this sub-project to the owner in 2-3 sentences (what it must achieve, what acceptance looks like) before continuing — if the anchor is wrong, stop and ask; never build on a misunderstood requirement.',
+          '3. Then act per the longterm-task-exec discipline:',
+          '   - If the sub-project can advance now, advance it (begin/continue via the agreed channel).',
+          '   - If you delegate: first build the anchor with longterm_delegation_anchor and paste it into the delegation brief verbatim — a delegation without the anchor is a lossy relay, and the worker will build the plausible thing instead of the right thing.',
+          '   - If the next step introduces any assumption, infrastructure, or config not present in the goal or the journal (a new config surface, channel, or dependency), stop and ask the owner first — that is a question, never your call alone.',
+          '   - If you need the owner, ask — exactly ONE question, multiple choice with your recommended option first; free-text answers always allowed.',
+          '   - If blocked externally, record the wait with longterm_subtask_wait (precise note + waitUntil when known; ALWAYS convert waitUntil to a full ISO timestamp WITH timezone offset in the owner\'s local timezone — never bare UTC unless the owner explicitly uses UTC).',
+          '   - If the deliverable verifiably meets every acceptance criterion, propose acceptance with evidence.',
+          '4. Reply in the owner\'s language.',
+        ]),
   ];
-  const ownerWaitBlock = buildOwnerWaitBlock(current, language);
+  const ownerWaitBlock = buildOwnerWaitBlock(current, language, delivery);
   if (ownerWaitBlock) lines.push(ownerWaitBlock);
   const supervisionBlock = buildSupervisionBlock(supervisionAttempts, language);
   if (supervisionBlock) lines.push(supervisionBlock);
@@ -336,6 +451,7 @@ export class LongTermAdvanceService {
   private readonly failureStreakThreshold: number;
   private readonly defaultExpectedMinutes: number;
   private readonly sessionRotationThreshold: number;
+  private readonly ownerEngagementWindowMs: number;
   private readonly emitLog: (line: string) => void;
 
   constructor(deps: LongTermAdvanceDeps) {
@@ -347,6 +463,7 @@ export class LongTermAdvanceService {
     this.failureStreakThreshold = Math.max(1, Math.trunc(deps.failureStreakThreshold ?? DEFAULT_FAILURE_STREAK_THRESHOLD));
     this.defaultExpectedMinutes = Math.max(1, Math.trunc(deps.defaultExpectedMinutes ?? DEFAULT_EXPECTED_MINUTES));
     this.sessionRotationThreshold = Math.max(10, Math.trunc(deps.sessionRotationThreshold ?? DEFAULT_SESSION_ROTATION_MESSAGES));
+    this.ownerEngagementWindowMs = Math.max(60_000, Math.trunc(deps.ownerEngagementWindowMs ?? DEFAULT_OWNER_ENGAGEMENT_WINDOW_MS));
     this.emitLog = deps.emitLog ?? ((line: string) => console.log(line));
   }
 
@@ -367,15 +484,53 @@ export class LongTermAdvanceService {
       report.checkedTasks += 1;
       const detail = store.getTask(card.id);
       if (!detail) continue;
-      const current = detail.subtasks.find((sub) => sub.id === detail.currentSubtaskId) ?? null;
+      let current = detail.subtasks.find((sub) => sub.id === detail.currentSubtaskId) ?? null;
       if (!current) {
         report.skipped.push({ taskId: card.id, reason: 'no open sub-project' });
         continue;
       }
       const latestEventId = detail.events[0]?.id ?? 0;
-      const nudgeState = store.getNudgeState(card.id);
+      let nudgeState = store.getNudgeState(card.id);
       const supervision = this.supervisionSignal(detail, current, nowMs);
-      const reasons = this.collectReasons(detail, current, nowMs, nudgeState?.lastEventId ?? 0, supervision);
+      // Engagement across the task's related sessions: who is talking, where,
+      // and how recently (owner presence + twin activity). The journal alone
+      // is blind to the owner typing in a drifted session.
+      const engagement = this.computeEngagement(card.id, nowMs);
+      // Persist the owner-activity anchor: owner-facing reminders measure
+      // quiet from the END of the discussion, not from the last journal event.
+      if (engagement.lastOwnerAtMs !== null && engagement.lastOwnerAtMs > (nudgeState?.lastOwnerActivityAtMs ?? 0)) {
+        store.setNudgeState(card.id, {
+          lastNudgeAtMs: nudgeState?.lastNudgeAtMs ?? 0,
+          lastEventId: nudgeState?.lastEventId ?? 0,
+          lastOwnerActivityAtMs: engagement.lastOwnerAtMs,
+        });
+        nudgeState = store.getNudgeState(card.id);
+      }
+      // The binding silently follows the owner's live venue: the owner is
+      // actively driving this task from a related session that is not the
+      // bound one — rebind (no turn), or every later escalation keeps landing
+      // in a session the owner is not watching. The rebind's own journal note
+      // is bookkeeping, not new information, so the event anchor moves with it.
+      if (
+        engagement.ownerVenueSessionId &&
+        engagement.ownerVenueSessionId !== (current.sessionId ?? '') &&
+        this.deps.coworkStore().getSession(engagement.ownerVenueSessionId)
+      ) {
+        const venue = engagement.ownerVenueSessionId;
+        store.bindSession(current.id, venue, 'system');
+        const postRebindEventId = store.getTask(card.id)?.events[0]?.id ?? latestEventId;
+        store.setNudgeState(card.id, {
+          lastNudgeAtMs: nudgeState?.lastNudgeAtMs ?? 0,
+          lastEventId: postRebindEventId,
+          ...(engagement.lastOwnerAtMs !== null ? { lastOwnerActivityAtMs: engagement.lastOwnerAtMs } : {}),
+        });
+        nudgeState = store.getNudgeState(card.id);
+        current = { ...current, sessionId: venue };
+        this.emitLog(
+          `[LongTermAdvance] rebound task "${detail.title}" sub-project #${current.ordinal} to the owner's live session ${venue}`,
+        );
+      }
+      const reasons = this.collectReasons(detail, current, nowMs, nudgeState?.lastEventId ?? 0, supervision, engagement.lastOwnerAtMs);
       if (reasons.length === 0) {
         report.skipped.push({ taskId: card.id, reason: `current sub-project is ${current.status}, nothing due` });
         continue;
@@ -397,9 +552,31 @@ export class LongTermAdvanceService {
         report.skipped.push({ taskId: card.id, reason: 'nudge throttled (no new events since last escalation)' });
         continue;
       }
-      // Never stack a second turn onto a session that is already executing one.
-      if (current.sessionId && this.deps.coworkRunner().isSessionActive?.(current.sessionId)) {
-        report.skipped.push({ taskId: card.id, reason: 'a turn is already running in the bound session' });
+      const ownerFacing = this.isOwnerFacing(reasons);
+      // Never stack a second turn onto a task the twin is already executing
+      // one for — in ANY related session, not just the bound one (the live
+      // conversation may have drifted to a previous sub-project's session).
+      if (engagement.twinSessionActive) {
+        report.skipped.push({ taskId: card.id, reason: 'a turn is already running in a related session' });
+        continue;
+      }
+      // The owner is actively responding in a related session: every
+      // owner-facing reminder is redundant — the conversation itself is
+      // handling the decision. The secretary stops nagging once you reply.
+      if (engagement.ownerVenueSessionId && ownerFacing) {
+        report.skipped.push({ taskId: card.id, reason: 'owner is actively engaged in a related session — owner-facing reminder suppressed' });
+        continue;
+      }
+      // The twin drove this task moments ago in a related session: firing a
+      // work turn now would grow a second, conflicting work line. Clock
+      // conditions (timed waits) and owner-facing turns are exempt.
+      if (
+        !ownerFacing &&
+        !waitDue &&
+        engagement.lastTwinActivityAtMs !== null &&
+        nowMs - engagement.lastTwinActivityAtMs < this.ownerEngagementWindowMs
+      ) {
+        report.skipped.push({ taskId: card.id, reason: 'twin recently active in a related session — work push suppressed' });
         continue;
       }
       try {
@@ -408,6 +585,7 @@ export class LongTermAdvanceService {
           current,
           reasons,
           supervision ? (this.deps.listWorkerAttempts?.(detail.id, current.id) ?? []) : null,
+          engagement,
         );
         report.escalated.push({
           taskId: card.id,
@@ -461,6 +639,7 @@ export class LongTermAdvanceService {
     nowMs: number,
     nudgeLastEventId: number,
     supervision: { reasons: string[]; failureSignature: string | null } | null,
+    ownerActivityAtMs: number | null = null,
   ): string[] {
     const lastActivityAtMs = detail.events[0] ? Date.parse(detail.events[0].createdAt) : Date.parse(detail.updatedAt);
     const quietMs = nowMs - lastActivityAtMs;
@@ -508,7 +687,12 @@ export class LongTermAdvanceService {
         // 40h for a wait the TwinBot had already worked past).
         const staleReason = this.staleWaitReason(detail, current, nowMs);
         if (staleReason) return [staleReason];
-        if (quietMs > this.waitingOwnerReminderMs) {
+        // Quiet is measured from the LATER of the last journal event and the
+        // owner's last message anywhere in the task's related sessions: an
+        // owner who stopped typing 10 minutes ago must not get a reminder
+        // whose 2h journal-quiet happened to expire mid-discussion.
+        const ownerQuietMs = nowMs - Math.max(lastActivityAtMs, ownerActivityAtMs ?? 0);
+        if (ownerQuietMs > this.waitingOwnerReminderMs) {
           if (current.waitUntil !== null) {
             return [`owner quiet window ended (${current.waitUntil}) — re-present the pending decision in full (${current.waitNote})`];
           }
@@ -519,6 +703,54 @@ export class LongTermAdvanceService {
       default:
         return [];
     }
+  }
+
+  /**
+   * Engagement snapshot across the task's RELATED sessions (definition
+   * session + every session ever bound to any of its sub-projects). Cheap
+   * local probes only — one indexed message query plus in-memory checks per
+   * session, run once per task per sweep.
+   *
+   * Twin-activity suppression is scoped to the twin's OWN sessions: a
+   * delegated worker running for hours must not silence the heartbeat that
+   * supervises it. Without a metabot probe (test stubs), every related
+   * session counts as the twin's — binds only ever point at twin sessions.
+   */
+  private computeEngagement(taskId: string, nowMs: number): LongTermTaskEngagement {
+    const coworkStore = this.deps.coworkStore();
+    const runner = this.deps.coworkRunner();
+    const twinId = this.deps.resolveTwinMetabotId();
+    let lastOwnerAtMs: number | null = null;
+    let lastOwnerSessionId: string | null = null;
+    let lastTwinActivityAtMs: number | null = null;
+    let twinSessionActive = false;
+    for (const sessionId of this.deps.store().listRelatedSessionIds(taskId)) {
+      if (!coworkStore.getSession(sessionId)) continue;
+      const probe = coworkStore.getSessionEngagement?.(sessionId);
+      const ownerAtMs = probe?.lastOwnerMessageAtMs ?? null;
+      if (ownerAtMs !== null && (lastOwnerAtMs === null || ownerAtMs > lastOwnerAtMs)) {
+        lastOwnerAtMs = ownerAtMs;
+        lastOwnerSessionId = sessionId;
+      }
+      const metabotId = coworkStore.getSessionMetabotId?.(sessionId) ?? null;
+      const isTwinSession = metabotId === null || twinId === null || metabotId === twinId;
+      if (!isTwinSession) continue;
+      const assistantAtMs = probe?.lastAssistantMessageAtMs ?? null;
+      if (assistantAtMs !== null && (lastTwinActivityAtMs === null || assistantAtMs > lastTwinActivityAtMs)) {
+        lastTwinActivityAtMs = assistantAtMs;
+      }
+      if (!twinSessionActive && runner.isSessionActive?.(sessionId)) twinSessionActive = true;
+    }
+    const ownerVenueSessionId =
+      lastOwnerSessionId !== null && lastOwnerAtMs !== null && nowMs - lastOwnerAtMs < this.ownerEngagementWindowMs
+        ? lastOwnerSessionId
+        : null;
+    return { lastOwnerAtMs, lastOwnerSessionId, ownerVenueSessionId, lastTwinActivityAtMs, twinSessionActive };
+  }
+
+  /** True when every reason is an owner-facing reminder family (attention, not work). */
+  private isOwnerFacing(reasons: string[]): boolean {
+    return reasons.every((reason) => OWNER_FACING_REASON_PREFIXES.some((prefix) => reason.startsWith(prefix)));
   }
 
   /**
@@ -622,6 +854,13 @@ export class LongTermAdvanceService {
     current: LongTermSubtask,
     reasons: string[],
     supervisionAttempts: LongTermWorkerAttemptSummary[] | null = null,
+    engagement: LongTermTaskEngagement = {
+      lastOwnerAtMs: null,
+      lastOwnerSessionId: null,
+      ownerVenueSessionId: null,
+      lastTwinActivityAtMs: null,
+      twinSessionActive: false,
+    },
   ): Promise<{ sessionId: string; reusedSession: boolean }> {
     const coworkStore = this.deps.coworkStore();
     const runner = this.deps.coworkRunner();
@@ -634,7 +873,21 @@ export class LongTermAdvanceService {
     let rotation: { from: string; messages: number } | null = null;
     if (boundSessionId && coworkStore.getSession(boundSessionId)) {
       const messageCount = coworkStore.countSessionMessages?.(boundSessionId) ?? 0;
-      if (messageCount < this.sessionRotationThreshold) {
+      // Rotation is skipped in two owner-presence cases — splitting the
+      // heartbeat line away from the owner is the exact failure this fixes:
+      //  - the bound session IS the owner's live venue (rotating away would
+      //    abandon the conversation the owner is sitting in);
+      //  - an owner-facing turn whose bound session holds the owner's most
+      //    recent word (a reminder's only job is to be seen — it belongs
+      //    where the owner last spoke, budget or not).
+      // Work turns with no owner presence rotate on budget as before.
+      const boundIsLiveVenue = engagement.ownerVenueSessionId === boundSessionId;
+      const boundHasOwnersLatestWord = engagement.lastOwnerSessionId === boundSessionId;
+      if (
+        messageCount < this.sessionRotationThreshold ||
+        boundIsLiveVenue ||
+        (this.isOwnerFacing(reasons) && boundHasOwnersLatestWord)
+      ) {
         sessionId = boundSessionId;
         reusedSession = true;
       } else {
@@ -676,12 +929,27 @@ export class LongTermAdvanceService {
           `session rotated: ${rotation.from} → ${sessionId} (${rotation.messages} messages; continuity via journal)`,
           'system',
         );
+        // A visible pointer in the old session: an owner returning to it
+        // learns where the conversation moved — the fresh session is folded
+        // away in the sidebar, so without the pointer the move is invisible.
+        coworkStore.addMessage(rotation.from, {
+          type: 'system',
+          content:
+            language === 'zh'
+              ? `【长期任务】本会话已达消息预算上限（${rotation.messages} 条），「${detail.title} · #${current.ordinal} ${current.title}」的后续推进已转移到新接续会话继续；本会话保持可读归档。`
+              : `[Long-term task] This session reached its message budget (${rotation.messages} messages). Work on "${detail.title} · #${current.ordinal} ${current.title}" continues in a fresh continuation session; this one stays readable as an archive.`,
+          metadata: { origin: 'heartbeat' },
+        });
         this.emitLog(
           `[LongTermAdvance] rotated session for task "${detail.title}" sub-project #${current.ordinal}: ${rotation.from} → ${sessionId} (${rotation.messages} messages)`,
         );
       }
     }
-    const prompt = buildNudgePrompt(detail, current, reasons, language, supervisionAttempts, rotation);
+    // Hot delivery: the owner is actively engaged in THIS session — the turn
+    // blends into the live conversation instead of reading out a full brief.
+    const delivery: 'cold' | 'hot' =
+      engagement.ownerVenueSessionId !== null && engagement.ownerVenueSessionId === sessionId ? 'hot' : 'cold';
+    const prompt = buildNudgePrompt(detail, current, reasons, language, supervisionAttempts, rotation, delivery);
 
     coworkStore.updateSession(sessionId, { status: 'running' });
     coworkStore.addMessage(sessionId, {
@@ -694,7 +962,11 @@ export class LongTermAdvanceService {
     if (supervisionAttempts !== null) {
       this.deps.store().recordSupervision(detail.id, current.id, `supervision escalation (${reasons.join('; ')}) → session ${sessionId}`);
     } else {
-      this.deps.store().recordNudge(detail.id, current.id, `heartbeat escalation (${reasons.join('; ')}) → session ${sessionId}`);
+      this.deps.store().recordNudge(
+        detail.id,
+        current.id,
+        `heartbeat escalation (${reasons.join('; ')}) → session ${sessionId}${delivery === 'hot' ? " (owner's live session)" : ''}`,
+      );
     }
     await runner.startSession(sessionId, prompt, { skipInitialUserMessage: true, confirmationMode: 'text' });
     return { sessionId, reusedSession };

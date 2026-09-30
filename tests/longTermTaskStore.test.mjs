@@ -416,3 +416,45 @@ test('supervision re-arm state: set and read back per task', async () => {
   store.setSuperviseState(taskId, { lastSuperviseAtMs: 7000 });
   assert.deepEqual(store.getSuperviseState(taskId).convergenceAtMs, [100, 200], 'omitted field keeps the existing trail');
 });
+
+test('listRelatedSessionIds unions the definition session and every sub-project session history', async () => {
+  const { store } = await openStore();
+  const created = store.createTask({ ...SPEC, definitionSessionId: 'def-sess' }, 'owner');
+  assert.ok(created.ok, JSON.stringify(created));
+  const taskId = created.value.id;
+  assert.ok(store.activateTask(taskId, 'owner').ok);
+  const [first, second] = store.getTask(taskId).subtasks;
+
+  assert.deepEqual(store.listRelatedSessionIds(taskId), ['def-sess']);
+
+  // Sub-project #1 binds 'a', rotates to 'b' (history spans both); #2 binds 'c'.
+  assert.ok(store.bindSession(first.id, 'a', 'system').ok);
+  assert.ok(store.bindSession(first.id, 'b', 'system').ok);
+  assert.ok(store.bindSession(second.id, 'c', 'system').ok);
+  assert.deepEqual(
+    [...store.listRelatedSessionIds(taskId)].sort(),
+    ['a', 'b', 'c', 'def-sess'],
+    'the engagement scan set covers every session the task was ever discussed in',
+  );
+});
+
+test('nudge state preserves the owner-activity anchor across partial writes', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  assert.equal(store.getNudgeState(taskId), null);
+
+  // A sweep records the owner-activity anchor.
+  store.setNudgeState(taskId, { lastNudgeAtMs: 0, lastEventId: 0, lastOwnerActivityAtMs: 999 });
+  assert.equal(store.getNudgeState(taskId).lastOwnerActivityAtMs, 999);
+
+  // An escalation write (no anchor field) must NOT wipe it.
+  store.setNudgeState(taskId, { lastNudgeAtMs: 1234, lastEventId: 42 });
+  const state = store.getNudgeState(taskId);
+  assert.equal(state.lastNudgeAtMs, 1234);
+  assert.equal(state.lastEventId, 42);
+  assert.equal(state.lastOwnerActivityAtMs, 999, 'escalation write preserves the engagement anchor');
+
+  // A newer anchor overwrites.
+  store.setNudgeState(taskId, { lastNudgeAtMs: 1234, lastEventId: 42, lastOwnerActivityAtMs: 2000 });
+  assert.equal(store.getNudgeState(taskId).lastOwnerActivityAtMs, 2000);
+});
