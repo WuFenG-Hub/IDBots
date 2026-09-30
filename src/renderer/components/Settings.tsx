@@ -1074,6 +1074,10 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         if (remaining.length === 0 && archivedChatsPage > 0) {
           setArchivedChatsPage((page) => Math.max(0, page - 1));
         }
+        // The sidebar reads the shared cowork store's session list, which only
+        // reloads on init / stream events — without this refresh the restored
+        // chat stays invisible until the next app launch.
+        await coworkService.loadSessions();
         setArchivedChatsNotice(i18nService.t('archivedChatsRestored'));
       }
     } catch (unarchiveError) {
@@ -1117,6 +1121,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
       if (remaining.length === 0 && archivedGroupTasksPage > 0) {
         setArchivedGroupTasksPage((page) => Math.max(0, page - 1));
       }
+      // Same staleness as restored chats: the sidebar's group tab renders the
+      // redux task list, which only reloads on tab entry — refresh it now.
+      await groupTaskService.loadTasks();
       setArchivedGroupTasksNotice(i18nService.t('archivedGroupTasksRestored'));
     } catch (unarchiveError) {
       console.error('Failed to unarchive group task:', unarchiveError);
@@ -1161,6 +1168,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         if (remaining.length === 0 && archivedA2AChatsPage > 0) {
           setArchivedA2AChatsPage((page) => Math.max(0, page - 1));
         }
+        // See handleUnarchiveChat: the sidebar's a2a tab renders the same
+        // redux session list, so it needs the same explicit refresh.
+        await coworkService.loadSessions();
         setArchivedA2AChatsNotice(i18nService.t('archivedChatsRestored'));
       }
     } catch (unarchiveError) {
