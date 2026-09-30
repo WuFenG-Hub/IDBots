@@ -148,3 +148,19 @@ test('retireLegacySkillsFromUserData removes the retired upload skills (largefil
   assert.equal('metabot-upload-largefile' in config.defaults, false);
   assert.equal('metabot-upload-file' in config.defaults, false);
 });
+
+test('findBundledSkillsMissingDependencies flags package.json skills without node_modules (web-search excluded)', () => {
+  const { findBundledSkillsMissingDependencies } = require('../dist-electron/main/skillManager.js');
+  const userRoot = makeTempDir('idbots-skill-deps-');
+  writeFile(userRoot, 'pptx/package.json', '{"dependencies":{"pptxgenjs":"^4.0.1"}}');
+  writeFile(userRoot, 'pptx/SKILL.md', '---\nname: pptx\n---\n');
+  writeFile(userRoot, 'imap-smtp-email/package.json', '{"dependencies":{"imapflow":"^1"}}');
+  writeFile(userRoot, 'imap-smtp-email/node_modules/.keep', '');
+  writeFile(userRoot, 'web-search/package.json', '{"dependencies":{"x":"1"}}');
+  writeFile(userRoot, 'plain-skill/SKILL.md', '---\nname: plain-skill\n---\n');
+
+  assert.deepEqual(
+    findBundledSkillsMissingDependencies(['pptx', 'imap-smtp-email', 'web-search', 'plain-skill', 'not-on-disk'], userRoot),
+    ['pptx']
+  );
+});

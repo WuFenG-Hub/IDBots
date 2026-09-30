@@ -477,7 +477,7 @@ Required dependencies (should already be installed):
 
 - **markitdown**: `pip install "markitdown[pptx]"` (for text extraction from presentations)
 
-  Note: none of these are bundled with the app. Detect first (`command -v`, `python3 -c "import ..."`, `npm ls -g`), install only what is missing, and tell the user when an install is not possible (e.g. no Node/npm on the machine) instead of failing mid-workflow.
+  Note: none of these are bundled with the app. The host auto-installs this skill's npm dependencies (pptxgenjs, sharp, playwright) into the skill directory in the background after an app update — if `node_modules` is missing (e.g. that install failed or has not finished), run `npm install --omit=dev` in the skill directory once. html2pptx rendering also needs a Chromium build: the first render may require `npx playwright install chromium` (one-time download, needs network). pip packages (markitdown, defusedxml) are never auto-installed: detect first (`python3 -c "import ..."`), install only what is missing, and tell the user when an install is not possible (e.g. no Python on the machine) instead of failing mid-workflow.
 - **pptxgenjs**: `npm install -g pptxgenjs` (for creating presentations via html2pptx)
 - **playwright**: `npm install -g playwright` (for HTML rendering in html2pptx)
 - **react-icons**: `npm install -g react-icons react react-dom` (for icons)

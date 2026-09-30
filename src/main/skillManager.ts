@@ -446,6 +446,23 @@ const listSkillDirs = (root: string): string[] => {
     });
 };
 
+/**
+ * Bundled-skill ids whose userData copy declares npm dependencies
+ * (package.json) but has no node_modules yet — candidates for the background
+ * first-use dependency install. web-search is excluded: SkillServices owns
+ * its dedicated runtime repair flow. Pure/fs-only; exported for tests.
+ */
+export const findBundledSkillsMissingDependencies = (
+  bundledIds: readonly string[],
+  userRoot: string
+): string[] => {
+  return bundledIds.filter((id) => {
+    if (id === 'web-search') return false;
+    const dir = path.join(userRoot, id);
+    return fs.existsSync(path.join(dir, 'package.json')) && !fs.existsSync(path.join(dir, 'node_modules'));
+  });
+};
+
 const collectSkillDirsFromSource = (source: string): string[] => {
   const resolved = path.resolve(source);
   if (fs.existsSync(path.join(resolved, SKILL_FILE_NAME))) {
@@ -969,9 +986,92 @@ export class SkillManager {
       // Retire legacy skill directories that were renamed in the bundled set,
       // so upgraded users do not end up with two competing skills.
       this.retireLegacySkillsFromUserData(userRoot);
+
+      // Bundled skills with npm dependencies (pptx, imap-smtp-email, ...)
+      // ship without node_modules; install them in the background so the
+      // skill works on first use after an upgrade.
+      this.ensureBundledSkillDependencies();
     } catch (error) {
       console.warn('[skills] Failed to sync bundled skills:', error);
     }
+  }
+
+  private skillDependencyInstallRunning = false;
+
+  private hasNpm(): boolean {    try {
+      const result = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['--version'], {
+        stdio: 'ignore',
+        windowsHide: true,
+        shell: process.platform === 'win32',
+      });
+      return !result.error && result.status === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  private runNpmInstall(dir: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
+        cwd: dir,
+        windowsHide: true,
+        shell: process.platform === 'win32',
+      });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+      child.on('error', reject);
+      child.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`npm install exited ${code}: ${stderr.trim().slice(-500)}`));
+        }
+      });
+    });
+  }
+
+  /**
+   * Bundled skills with npm dependencies (pptx, imap-smtp-email, ...) are
+   * copied into user data without node_modules; install them in the
+   * background so the skill works on first use after an upgrade. web-search
+   * is owned by SkillServices' dedicated repair flow and is skipped here.
+   * Best-effort: failures are logged and the skill needs a manual install.
+   * Runs against the userData copy only — the repo tree stays pnpm-managed.
+   */
+  ensureBundledSkillDependencies(): void {
+    if (this.skillDependencyInstallRunning) return;
+    let ids: string[];
+    try {
+      ids = findBundledSkillsMissingDependencies(
+        Array.from(this.listBuiltInSkillIds()),
+        this.ensureSkillsRoot()
+      );
+    } catch {
+      return;
+    }
+    if (ids.length === 0) return;
+    if (!this.hasNpm()) {
+      console.warn(`[skills] Bundled skill dependencies pending but npm is unavailable on this machine: ${ids.join(', ')}`);
+      return;
+    }
+    this.skillDependencyInstallRunning = true;
+    void (async () => {
+      for (const id of ids) {
+        const dir = path.join(this.ensureSkillsRoot(), id);
+        try {
+          console.log(`[skills] Installing dependencies for bundled skill "${id}" (first-use preparation)…`);
+          await this.runNpmInstall(dir);
+          console.log(`[skills] Dependencies ready for bundled skill "${id}"`);
+        } catch (error) {
+          console.warn(
+            `[skills] Dependency install failed for bundled skill "${id}" (the skill needs a manual npm install in its directory):`,
+            error instanceof Error ? error.message : error
+          );
+        }
+      }
+    })().finally(() => {
+      this.skillDependencyInstallRunning = false;
+    });
   }
 
   private retireLegacySkillsFromUserData(userRoot: string): void {
