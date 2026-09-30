@@ -26,9 +26,9 @@ test('safety prompt tells agents about the auto-confirm marker under full trust'
   assert.match(runnerSource, /Under bypassPermissions only, low-risk confirmations/);
   assert.match(runnerSource, /header "auto-confirm" to auto-approve/);
   assert.match(runnerSource, /keep high-risk confirmations unmarked/);
-  // The unanswered-question fallback must be announced so models always
-  // mark a recommended option.
-  assert.match(runnerSource, /auto-answers with the recommended option/);
+  // The unanswered-question semantics must be announced so models never treat
+  // a timed-out (pending) ask as consent.
+  assert.match(runnerSource, /pending is never approval and never an auto-picked option/);
   assert.match(runnerSource, /mark one option "\(Recommended\)" and put it first/);
 });
 

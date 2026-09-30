@@ -153,6 +153,11 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('CALL_BROWSER_READ') ? 'mcp__playwright-mcp__browser_network_requests'
         : cuaCall ? `cua_driver_native__${cuaCall[1]}`
         : lastUserText.includes('CALL_WEB_SEARCH_FAIL') ? 'web_search'
+        // CALL_ASK_TOOL_TIMED:<seconds> — the ask carries an explicit per-call
+        // timeout so the test can watch the timed-mode deadline go pending
+        // without waiting out the 300s row default. Must precede the plain
+        // CALL_ASK_TOOL match (its trigger is a substring of this one).
+        : /CALL_ASK_TOOL_TIMED:\d+/.test(lastUserText) ? 'ask_user_question'
         : lastUserText.includes('CALL_ASK_TOOL') ? 'ask_user_question'
         : lastUserText.includes('CALL_WEB_SEARCH') ? 'web_search'
         : lastUserText.includes('LOOP_GREP') ? 'grep'
@@ -191,7 +196,13 @@ export function startMockServer(port = 48787) {
         const followupMatch = /FOLLOWUP_AGENT:([A-Za-z0-9-]+)/.exec(lastUserText)
         const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__playwright-mcp__browser_navigate' ? { url: 'data:text/html,<h1>BROWSER_SMOKE_OK</h1>' } : toolCallFor === 'mcp__playwright-mcp__browser_network_requests' ? {} : cuaFgCall ? { delivery_mode: 'foreground' } : toolCallFor?.startsWith('cua_driver_native__') ? {} : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' }
           : toolCallFor === 'send_message' ? { agent_id: followupMatch?.[1] ?? 'unknown-agent', message: 'FOLLOWUP_PING please answer this' }
-          : toolCallFor === 'ask_user_question' ? { questions: [{ id: 'q1', question: 'Pick a color', header: 'auto-confirm', detail: 'Picking a color refreshes the theme; Red is warm, Blue is calm.', options: [{ label: 'Red' }, { label: 'Blue' }] }] }
+          : toolCallFor === 'ask_user_question' ? (() => {
+            const timedMatch = /CALL_ASK_TOOL_TIMED:(\d+)/.exec(lastUserText)
+            return {
+              questions: [{ id: 'q1', question: 'Pick a color', header: 'auto-confirm', detail: 'Picking a color refreshes the theme; Red is warm, Blue is calm.', options: [{ label: 'Red' }, { label: 'Blue' }] }],
+              ...timedMatch ? { timeout: Number(timedMatch[1]) } : {},
+            }
+          })()
           : toolCallFor === 'web_search' ? { queries: [lastUserText.includes('CALL_WEB_SEARCH_FAIL') ? 'fail please' : 'latest stable Node.js version'] }
           : toolCallFor === 'read' ? { file_path: 'readable.txt' } : toolCallFor === 'glob' ? { pattern: '**/*.marker.txt' } : toolCallFor === 'grep' ? { pattern: 'NEEDLE_ALPHA' } : toolCallFor === 'exit_plan_mode' ? { plan: '# Test Plan\n\nDo the thing.' } : toolCallFor === 'bash' ? (lastUserText.includes('RUN_LONG_BASH')
             ? { command: 'sleep 5 && echo LONG_BASH_DONE', description: 'long-running foreground command for the stall-watchdog test' }

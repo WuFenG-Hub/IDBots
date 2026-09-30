@@ -4,6 +4,14 @@
 // had no timeout (approvals got one in waitForPermissionResponse), the hub
 // dropped controller-less asks silently, and the question wizard could render
 // null while holding the pending-permission queue.
+//
+// Ownership changed with the kernel 0.2.0-rc.2 timed ask mode: the KERNEL
+// deadline now unwinds unanswered asks (the tool returns
+// { pending: true, callId } and the model continues independent work) instead
+// of the host auto-picking the recommended option after 120s — pending never
+// fabricates an answer the user did not give. The bridge's abort closes the
+// modal via onAskCancelled. The runtime-side E2E for the deadline path lives
+// in dsh-runtime/test/ask-bridge.test.mjs (turn 3).
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,6 +24,7 @@ const readSource = (...segments) => fs.readFileSync(path.join(projectRoot, ...se
 const runnerSource = readSource('src', 'main', 'libs', 'coworkRunner.ts');
 const hubSource = readSource('src', 'main', 'libs', 'coworkDshTurn.ts');
 const kernelSource = readSource('src', 'main', 'libs', 'dshKernel', 'dshKernel.ts');
+const generatorSource = readSource('dsh-runtime', 'lib', 'generate-runtime-config.mjs');
 const panelSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkPermissionPanel.tsx');
 const overlaySource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkPermissionOverlay.tsx');
 const sessionDetailSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkSessionDetail.tsx');
@@ -30,57 +39,47 @@ const onAskRequestBody = (() => {
   return runnerSource.slice(start, end);
 })();
 
-test('ask_user_question modal path auto-answers with the recommended option after the per-question backstop', () => {
-  // Per-question pacing: the renderer wizard owns a 120s window per displayed
-  // step; the main-process watchdog is a backstop scaled by question count so
-  // it never fires before the last step's window.
-  assert.match(runnerSource, /const ASK_PER_QUESTION_TIMEOUT_MS = 120_000;/);
-  assert.match(onAskRequestBody, /const backstopMs = ASK_PER_QUESTION_TIMEOUT_MS \* Math\.max\(1, \(ask\.questions \?\? \[\]\)\.length\);/);
-  assert.match(onAskRequestBody, /setTimeout\(\(\) => \{[\s\S]*?\}, backstopMs\)/);
-  assert.match(onAskRequestBody, /backstop elapsed \(120s per question\); auto-answering with the recommended option where one exists/);
-  assert.match(onAskRequestBody, /pickRecommendedOptionLabel\(q\.options\)/);
-  // The model must be able to tell the pick was automatic, not the user's.
-  assert.match(onAskRequestBody, /Auto-selected the recommended option because the user did not answer within the 120s per-question window\./);
-  // Questions without options still count as unanswered rather than hanging.
-  assert.match(onAskRequestBody, /The user did not answer within the 120s per-question window\./);
-  assert.match(onAskRequestBody, /hub\.respondAsk\(ask\.id, timeoutAnswers\)/);
+const onAskCancelledBody = (() => {
+  const start = runnerSource.indexOf('onAskCancelled: (askId) => {');
+  assert.notEqual(start, -1, 'coworkRunner must register onAskCancelled');
+  return runnerSource.slice(start, start + 1200);
+})();
+
+test('timed ask mode: the kernel deadline owns unanswered asks — no host auto-answer', () => {
+  // The runtime composition mounts tool-ask-user in timed mode with the 300s
+  // row default; the model can still override per call (timeout: -1 blocks).
+  assert.match(generatorSource, /name: '@deepseek-ai\/dsh-tool-ask-user'/);
+  assert.match(generatorSource, /config: \{ mode: 'timed', timeout: 300 \}/);
+  // The retired host policy is gone: no 120s constant, no backstop timer, and
+  // no recommended-option auto-pick — a timeout must never fabricate an answer
+  // the user did not give.
+  assert.doesNotMatch(runnerSource, /ASK_PER_QUESTION_TIMEOUT_MS/);
+  assert.doesNotMatch(onAskRequestBody, /setTimeout/);
+  assert.doesNotMatch(onAskRequestBody, /pickRecommendedOptionLabel/);
+  // The renderer wizard never arms its own countdown for DSH asks; the modal
+  // stays open until the user answers or the kernel deadline closes it.
+  assert.match(onAskRequestBody, /perQuestionTimeoutMs: null/);
 });
 
-test('plan reviews and long-term-task defining sessions are exempt from the ask timeout', () => {
-  assert.match(onAskRequestBody, /kind === 'plan-review'/);
-  // Defining-phase detection: reverse-lookup the session in the long-term
-  // task store; only the definition chat of a task still in 'defining' stage
-  // counts (subtask execution sessions keep the normal timeout).
-  assert.match(onAskRequestBody, /findBySessionId\(sessionId\)/);
-  assert.match(onAskRequestBody, /hit\.subtask === null && hit\.task\.stage === 'defining'/);
-  assert.match(onAskRequestBody, /const timeoutExempt = isPlanReviewAsk \|\| isLongTermDefiningSession;/);
-  assert.match(onAskRequestBody, /perQuestionTimeoutMs: timeoutExempt \? null : ASK_PER_QUESTION_TIMEOUT_MS/);
-  assert.match(onAskRequestBody, /if \(!timeoutExempt\) \{/);
+test('plan-mode reviews bypass the timed tool schema and stay blocking', () => {
+  // dsh-plan-mode asks through ctx.userQuestions.ask() directly (intent
+  // 'plan-review'), never through the timed ask_user_question tool definition,
+  // so reviews still wait for a human decision or a session cancel.
+  assert.match(generatorSource, /dsh-plan-mode calls/);
+  assert.match(generatorSource, /plan-review/);
 });
 
-test('the question wizard arms a fresh per-question timer as each step is displayed', () => {
-  // The renderer owns the real per-question pacing: one timer per step,
-  // keyed on currentStep, auto-picking the recommended option when the step
-  // lapses unanswered, and submitting everything when the last step lapses.
-  assert.match(panelSource, /permission\.perQuestionTimeoutMs/);
-  assert.match(panelSource, /window\.setTimeout\(\(\) => \{[\s\S]*?\}, timeoutMs\)/);
-  assert.match(panelSource, /if \(alreadyAnswered\) return;/);
-  assert.match(panelSource, /pickRecommendedOptionLabel\(question\.options\)/);
-  // Auto-picks are reported to main so the wire answers carry the
-  // "auto-selected" note the model sees.
-  assert.match(panelSource, /autoAnswered: Array\.from\(autoAnsweredRef\.current\)/);
-  assert.match(onAskRequestBody, /\?\.autoAnswered/);
+test('a cancelled ask (kernel deadline or turn abort) settles the pending entry', () => {
+  // The bridge rejects the ask promise and notifies idbots/ask/cancelled when
+  // the kernel deadline (or a turn cancel) aborts the wait; the host must
+  // delete the pending entry and resolve the modal so nothing strands.
+  assert.match(onAskCancelledBody, /this\.pendingPermissions\.delete\(askId\)/);
+  assert.match(onAskCancelledBody, /pending\.resolve\(\{ behavior: 'deny'/);
+  assert.match(onAskCancelledBody, /activeSession\.pendingPermission = null/);
 });
 
-test('ask timeout is cleared when the question settles through any path', () => {
-  assert.match(onAskRequestBody, /clearTimeout\(askTimeout\)/);
-  // The timeout settles by deleting the pending entry, so a question already
-  // answered/cancelled/aborted (entry gone) is a silent no-op.
-  assert.match(onAskRequestBody, /if \(!this\.pendingPermissions\.delete\(ask\.id\)\) return;/);
-  assert.match(onAskRequestBody, /askTimeout\.unref\?\.\(\)/);
-});
-
-test('raising an ask leaves a forensics trail in cowork.log', () => {
+test('the ask handler registers a pending entry and logs a forensics trail', () => {
+  assert.match(onAskRequestBody, /this\.pendingPermissions\.set\(ask\.id, \{/);
   assert.match(onAskRequestBody, /ask_user_question awaiting user answer/);
 });
 
