@@ -9,6 +9,7 @@ const require = createRequire(import.meta.url);
 const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { LongTermTaskStore } = require('../dist-electron/main/longTermTaskStore.js');
 const { OrchestrationStore } = require('../dist-electron/main/orchestrationStore.js');
+const { CoworkStore } = require('../dist-electron/main/coworkStore.js');
 const { LongTermAdvanceService, DEFAULT_SESSION_ROTATION_MESSAGES } = require('../dist-electron/main/services/longTermAdvanceService.js');
 
 /**
@@ -21,13 +22,18 @@ const HOUR = 3_600_000;
 function makeStubCowork() {
   const sessions = new Map();
   const counts = new Map();
+  const engagement = new Map();
+  const metabots = new Map();
   const calls = { create: [], update: [], message: [], autoOrigin: [] };
   return {
     calls,
     counts,
+    engagement,
+    metabots,
     createSession(title, cwd, systemPrompt, mode, skills, metabotId, sessionType) {
       const id = `sess-${sessions.size + 1}`;
       sessions.set(id, { id, title, sessionType, skills: [...(skills ?? [])] });
+      metabots.set(id, metabotId ?? null);
       calls.create.push({ title, sessionType, skills: [...(skills ?? [])], metabotId });
       return { id };
     },
@@ -36,6 +42,15 @@ function makeStubCowork() {
     addMessage(id, msg) { counts.set(id, (counts.get(id) ?? 0) + 1); calls.message.push({ id, msg }); },
     getSession(id) { return sessions.get(id) ?? null; },
     countSessionMessages(id) { return counts.get(id) ?? 0; },
+    getSessionEngagement(id) {
+      return engagement.get(id) ?? { lastOwnerMessageAtMs: null, lastAssistantMessageAtMs: null };
+    },
+    getSessionMetabotId(id) { return metabots.has(id) ? metabots.get(id) : null; },
+    /** Test helper: a session that exists outside createSession (e.g. a previous sub-project's). */
+    registerSession(id, metabotId) {
+      sessions.set(id, { id, title: id, sessionType: 'longterm', skills: [] });
+      metabots.set(id, metabotId ?? null);
+    },
   };
 }
 
@@ -809,4 +824,236 @@ test('non-waiting nudge prompts carry no restatement contract', async () => {
   await createActive(store);
   await advance.run(Date.now());
   assert.doesNotMatch(runner.starts[0].prompt, /SPECIAL REQUIREMENT/);
+});
+
+// ── P2 owner engagement: related-session awareness, suppression, venue convergence ──
+
+test('owner actively engaged in a related session: the acceptance-proposal call is suppressed, then fires into the venue after disengagement', async () => {
+  const { store, cowork, runner, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  // Run #1: pending → escalation opens + binds the session.
+  await new LongTermAdvanceService(deps).run(now);
+  const boundId = store.getTask(taskId).subtasks[0].sessionId;
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+
+  // The conversation drifts to a history session; run #2 rebinds silently
+  // (owner engaged there) without firing a turn.
+  cowork.registerSession('venue', 7);
+  assert.ok(store.bindSession(subtask.id, 'venue', 'system').ok);
+  assert.ok(store.bindSession(subtask.id, boundId, 'system').ok);
+  cowork.engagement.set('venue', { lastOwnerMessageAtMs: now + 4 * 60_000, lastAssistantMessageAtMs: null });
+  const second = await new LongTermAdvanceService(deps).run(now + 5 * 60_000);
+  assert.equal(second.escalated.length, 0, JSON.stringify(second));
+  assert.equal(store.getTask(taskId).subtasks[0].sessionId, 'venue', 'the binding silently followed the owner');
+
+  // The twin proposes acceptance; the owner is STILL online in the venue. The
+  // proposal fast-path (一提请就叫你) is owner-facing — an engaged owner must
+  // not get a second, parallel call.
+  assert.ok(store.proposeSubtask(subtask.id, { evidence: [{ kind: 'dir', uri: '/tmp/deliverable' }], summary: 'criteria met' }, 'twin').ok);
+  cowork.engagement.set('venue', { lastOwnerMessageAtMs: now + 7 * 60_000, lastAssistantMessageAtMs: null });
+  const third = await new LongTermAdvanceService(deps).run(now + 8 * 60_000);
+  assert.equal(third.escalated.length, 0, JSON.stringify(third));
+  assert.match(third.skipped.find((s) => s.taskId === taskId)?.reason ?? '', /actively engaged/);
+  assert.equal(runner.starts.length, 1, 'no parallel turn fired while the owner is mid-conversation');
+  assert.equal(store.getNudgeState(taskId).lastOwnerActivityAtMs, now + 7 * 60_000, 'owner-activity anchor persisted');
+
+  // Once the owner has been quiet past the engagement window, the proposal
+  // call fires — into the venue where the owner last spoke.
+  const fourth = await new LongTermAdvanceService(deps).run(now + 8 * 60_000 + 2 * HOUR + 5 * 60_000);
+  assert.equal(fourth.escalated.length, 1, JSON.stringify(fourth));
+  assert.match(fourth.escalated[0].reasons[0], /acceptance proposal awaiting/);
+  assert.equal(fourth.escalated[0].sessionId, 'venue');
+  assert.equal(fourth.escalated[0].reusedSession, true);
+});
+
+test('after the owner disengages, the reminder measures quiet from their last message and lands in the venue without rotating', async () => {
+  const { store, cowork, runner, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'pick A or B' }, 'twin').ok);
+  const first = await new LongTermAdvanceService(deps).run(now + 5 * HOUR);
+  const boundId = first.escalated[0].sessionId;
+  cowork.registerSession('venue', 7);
+  assert.ok(store.bindSession(subtask.id, 'venue', 'system').ok);
+  assert.ok(store.bindSession(subtask.id, boundId, 'system').ok);
+  // Engaged sweep: rebind + suppress + anchor.
+  const tEngaged = now + 6 * HOUR;
+  cowork.engagement.set('venue', { lastOwnerMessageAtMs: tEngaged - 5 * 60_000, lastAssistantMessageAtMs: null });
+  await new LongTermAdvanceService(deps).run(tEngaged);
+  assert.equal(store.getTask(taskId).subtasks[0].sessionId, 'venue', 'binding followed the owner');
+
+  // The owner kept talking until tTalk, then went quiet. 90 minutes later the
+  // journal has been silent for >2h (last journal write was the rebind at
+  // tEngaged) — WITHOUT the owner anchor a reminder would fire here.
+  const tTalk = tEngaged + 60 * 60_000;
+  cowork.engagement.set('venue', { lastOwnerMessageAtMs: tTalk, lastAssistantMessageAtMs: null });
+  const mid = await new LongTermAdvanceService(deps).run(tTalk + 90 * 60_000);
+  assert.equal(mid.escalated.length, 0, `quiet measured from the owner's last word: ${JSON.stringify(mid)}`);
+
+  // Past the owner-anchored 2h the reminder fires — into the venue, even over
+  // the rotation budget: owner-facing turns never rotate away from the owner.
+  cowork.counts.set('venue', 10_000);
+  const due = await new LongTermAdvanceService(deps).run(tTalk + 2 * HOUR + 5 * 60_000);
+  assert.equal(due.escalated.length, 1, JSON.stringify(due));
+  assert.match(due.escalated[0].reasons[0], /owner decision still pending/);
+  assert.equal(due.escalated[0].sessionId, 'venue');
+  assert.equal(due.escalated[0].reusedSession, true, 'venue reused, not rotated');
+  const lastPrompt = runner.starts[runner.starts.length - 1].prompt;
+  assert.match(lastPrompt, /full re-presentation/, 'cold delivery keeps the self-contained brief');
+});
+
+test('hot delivery: a due work push lands in the owner\'s live session with the conversational prompt', async () => {
+  const { store, cowork, runner, deps } = await openWorld();
+  deps.getAppLanguage = () => 'zh';
+  const taskId = await createActive(store);
+  const now = Date.now();
+  const first = await new LongTermAdvanceService(deps).run(now);
+  const boundId = first.escalated[0].sessionId;
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  cowork.registerSession('venue', 7);
+  assert.ok(store.bindSession(subtask.id, 'venue', 'system').ok);
+  assert.ok(store.bindSession(subtask.id, boundId, 'system').ok);
+  // 45 minutes of journal quiet (> the 30-min push window), owner active 10
+  // minutes ago in the drifted venue, twin idle for 2h.
+  const t2 = now + 45 * 60_000;
+  cowork.engagement.set('venue', { lastOwnerMessageAtMs: t2 - 10 * 60_000, lastAssistantMessageAtMs: t2 - 2 * HOUR });
+
+  const report = await new LongTermAdvanceService(deps).run(t2);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  const hit = report.escalated[0];
+  assert.match(hit.reasons[0], /gone quiet/);
+  assert.equal(hit.sessionId, 'venue', 'the turn was delivered into the owner\'s live session');
+  const prompt = runner.starts[runner.starts.length - 1].prompt;
+  assert.match(prompt, /主人此刻就在本会话中/, 'hot intro');
+  assert.doesNotMatch(prompt, /复述你对该子项目的理解/, 'hot mode drops the cold-template restatement');
+  assert.match(store.getTask(taskId).events[0].detail, /owner's live session/, 'journal marks the hot delivery');
+});
+
+test('hot delivery for a waiting-owner turn forbids the six-section brief', async () => {
+  const { store, cowork, runner, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'pick A or B' }, 'twin').ok);
+  const first = await new LongTermAdvanceService(deps).run(now + 5 * HOUR);
+  const boundId = first.escalated[0].sessionId;
+  // The owner is engaged in the BOUND session itself; a stale-wait convergence
+  // (work family) is due, so a turn fires while the owner is online.
+  assert.ok(store.addNote(taskId, subtask.id, 'worked past the wait', 'twin').ok);
+  const t2 = now + 6 * HOUR;
+  cowork.engagement.set(boundId, { lastOwnerMessageAtMs: t2 - 3 * 60_000, lastAssistantMessageAtMs: t2 - 2 * HOUR });
+
+  const report = await new LongTermAdvanceService(deps).run(t2);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.match(report.escalated[0].reasons[0], /stale owner wait/);
+  const prompt = runner.starts[runner.starts.length - 1].prompt;
+  assert.match(prompt, /RIGHT HERE in this session/);
+  assert.match(prompt, /six-section re-presentation is FORBIDDEN/);
+});
+
+test('twin recently active in a related session: the quiet work push is suppressed', async () => {
+  const { store, cowork, runner, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  await new LongTermAdvanceService(deps).run(now);
+  const boundId = store.getTask(taskId).subtasks[0].sessionId;
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  const t2 = now + 3 * HOUR;
+  // The twin turned 10 minutes ago (no journal write) — a journal-quiet push
+  // would double the work line.
+  cowork.engagement.set(boundId, { lastOwnerMessageAtMs: null, lastAssistantMessageAtMs: t2 - 10 * 60_000 });
+  const report = await new LongTermAdvanceService(deps).run(t2);
+  assert.equal(report.escalated.length, 0, JSON.stringify(report));
+  assert.match(report.skipped.find((s) => s.taskId === taskId)?.reason ?? '', /twin recently active/);
+  assert.equal(runner.starts.length, 1);
+});
+
+test('a delegated worker\'s session activity neither suppresses nor blocks the twin\'s escalations', async () => {
+  const { store, cowork, runner, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  await new LongTermAdvanceService(deps).run(now);
+  const boundId = store.getTask(taskId).subtasks[0].sessionId;
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  // A worker session (metabot 15 ≠ twin 7) in the task's history, mid-turn.
+  cowork.registerSession('worker-sess', 15);
+  assert.ok(store.bindSession(subtask.id, 'worker-sess', 'system').ok);
+  assert.ok(store.bindSession(subtask.id, boundId, 'system').ok);
+  const t2 = now + 3 * HOUR;
+  cowork.engagement.set('worker-sess', { lastOwnerMessageAtMs: null, lastAssistantMessageAtMs: t2 - 5 * 60_000 });
+  runner.active.add('worker-sess');
+  const report = await new LongTermAdvanceService(deps).run(t2);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report), 'worker activity must not silence the heartbeat that supervises it');
+  assert.match(report.escalated[0].reasons[0], /gone quiet/);
+});
+
+test('session rotation leaves a visible pointer message in the old session', async () => {
+  const { store, cowork, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  await new LongTermAdvanceService(deps).run(now);
+  const firstSessionId = store.getTask(taskId).subtasks[0].sessionId;
+  cowork.counts.set(firstSessionId, DEFAULT_SESSION_ROTATION_MESSAGES);
+  const report = await new LongTermAdvanceService(deps).run(now + 2 * HOUR);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.notEqual(report.escalated[0].sessionId, firstSessionId);
+  const pointer = cowork.calls.message.find((call) => call.id === firstSessionId && call.msg.type === 'system');
+  assert.ok(pointer, 'a system pointer message was posted to the old session');
+  assert.match(pointer.msg.content, /message budget/);
+});
+
+test('an over-budget bound session that is the owner\'s live venue is reused, not rotated', async () => {
+  const { store, cowork, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  await new LongTermAdvanceService(deps).run(now);
+  const boundId = store.getTask(taskId).subtasks[0].sessionId;
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  const t2 = now + 3 * HOUR;
+  cowork.counts.set(boundId, 10_000); // way over the rotation budget
+  cowork.engagement.set(boundId, { lastOwnerMessageAtMs: t2 - 5 * 60_000, lastAssistantMessageAtMs: t2 - 2 * HOUR });
+  const report = await new LongTermAdvanceService(deps).run(t2);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.equal(report.escalated[0].sessionId, boundId, 'the owner\'s live session is kept');
+  assert.equal(report.escalated[0].reusedSession, true);
+  assert.equal(cowork.calls.create.length, 1, 'no fresh session was opened');
+});
+
+test('getSessionEngagement: heartbeat prompts and cross-session bot relays are not the owner', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-lt-engage-'));
+  const sqliteStore = await SqliteStore.create(dir);
+  const cowork = new CoworkStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  const session = cowork.createSession('t', '/tmp', '', 'local', [], 7, 'longterm');
+  assert.deepEqual(cowork.getSessionEngagement(session.id), {
+    lastOwnerMessageAtMs: null,
+    lastAssistantMessageAtMs: null,
+  });
+
+  cowork.addMessage(session.id, { type: 'user', content: 'real owner words', metadata: { submissionId: 's1' } });
+  const ownerAt = cowork.getSessionEngagement(session.id).lastOwnerMessageAtMs;
+  assert.ok(ownerAt !== null, 'a typed owner message registers');
+
+  // Later infrastructure messages must not move the owner stamp.
+  cowork.addMessage(session.id, { type: 'user', content: 'heartbeat prompt', metadata: { origin: 'heartbeat' } });
+  cowork.addMessage(session.id, {
+    type: 'user',
+    content: '来自某 session 的信息：<cross_session_message>',
+    metadata: { sourceChannel: 'idbots_cross_session', sourceSessionId: 'z' },
+  });
+  assert.equal(cowork.getSessionEngagement(session.id).lastOwnerMessageAtMs, ownerAt);
+
+  cowork.addMessage(session.id, { type: 'assistant', content: 'twin reply' });
+  const after = cowork.getSessionEngagement(session.id);
+  assert.equal(after.lastOwnerMessageAtMs, ownerAt);
+  assert.ok(after.lastAssistantMessageAtMs !== null && after.lastAssistantMessageAtMs >= ownerAt);
+  assert.equal(cowork.getSessionMetabotId(session.id), 7);
 });

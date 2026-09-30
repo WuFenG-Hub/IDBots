@@ -3995,6 +3995,39 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Engagement signals for one session — the long-term heartbeat's
+   * owner-presence / twin-activity probe over the task's related sessions.
+   * "Owner" rows are user-typed messages: heartbeat escalation prompts
+   * (metadata.origin="heartbeat") and bot-to-bot cross-session relays
+   * (metadata.sourceChannel="idbots_cross_session") are both excluded —
+   * neither is the owner talking.
+   */
+  getSessionEngagement(sessionId: string): { lastOwnerMessageAtMs: number | null; lastAssistantMessageAtMs: number | null } {
+    const row = this.getOne<{ last_owner: number | null; last_assistant: number | null }>(
+      `SELECT
+         MAX(CASE WHEN type = 'user' AND (
+           metadata IS NULL OR (
+             instr(metadata, '"origin":"heartbeat"') = 0
+             AND instr(metadata, '"sourceChannel":"idbots_cross_session"') = 0
+           )
+         ) THEN created_at END) AS last_owner,
+         MAX(CASE WHEN type = 'assistant' THEN created_at END) AS last_assistant
+       FROM cowork_messages WHERE session_id = ?`,
+      [sessionId],
+    );
+    return {
+      lastOwnerMessageAtMs: row?.last_owner != null ? Number(row.last_owner) : null,
+      lastAssistantMessageAtMs: row?.last_assistant != null ? Number(row.last_assistant) : null,
+    };
+  }
+
+  /** The bot a session belongs to (null = none/unknown) — the heartbeat scopes twin-activity suppression to the twin's own sessions. */
+  getSessionMetabotId(sessionId: string): number | null {
+    const row = this.getOne<{ metabot_id: number | null }>('SELECT metabot_id FROM cowork_sessions WHERE id = ?', [sessionId]);
+    return row?.metabot_id != null ? Number(row.metabot_id) : null;
+  }
+
+  /**
    * Archived conversations for the Settings "Archived Chats" panel: sessions
    * put away by the user (records preserved), newest archive first. Separate
    * from listSessions, which deliberately excludes archived rows.

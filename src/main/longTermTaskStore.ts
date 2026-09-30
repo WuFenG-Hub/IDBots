@@ -63,6 +63,13 @@ export interface LongTermNudgeState {
   lastNudgeAtMs: number;
   /** Event-journal id at the last nudge — anything newer counts as "changed". */
   lastEventId: number;
+  /**
+   * Newest owner message observed across the task's related sessions (advance
+   * service). Owner chat activity is engagement evidence that never becomes a
+   * journal event: owner-facing reminders measure quiet from this anchor too,
+   * so a reminder cannot fire minutes after an active discussion ended.
+   */
+  lastOwnerActivityAtMs?: number;
 }
 
 /** kv key of the per-task supervision re-arm map (advance service, P1). */
@@ -1143,12 +1150,26 @@ export class LongTermTaskStore {
     const lastNudgeAtMs = Number((entry as LongTermNudgeState).lastNudgeAtMs);
     const lastEventId = Number((entry as LongTermNudgeState).lastEventId);
     if (!Number.isFinite(lastNudgeAtMs)) return null;
-    return { lastNudgeAtMs, lastEventId: Number.isFinite(lastEventId) ? lastEventId : 0 };
+    const lastOwnerActivityAtMs = Number((entry as LongTermNudgeState).lastOwnerActivityAtMs);
+    return {
+      lastNudgeAtMs,
+      lastEventId: Number.isFinite(lastEventId) ? lastEventId : 0,
+      ...(Number.isFinite(lastOwnerActivityAtMs) && lastOwnerActivityAtMs > 0 ? { lastOwnerActivityAtMs } : {}),
+    };
   }
 
   setNudgeState(taskId: string, state: LongTermNudgeState): void {
     const map = this.readNudgeStateMap();
-    map[taskId] = { lastNudgeAtMs: Math.trunc(state.lastNudgeAtMs), lastEventId: Math.trunc(state.lastEventId) };
+    // An omitted owner-activity anchor preserves the existing one: an
+    // escalation-turn write must not wipe the engagement anchor a sweep wrote.
+    const lastOwnerActivityAtMs = state.lastOwnerActivityAtMs ?? map[taskId]?.lastOwnerActivityAtMs;
+    map[taskId] = {
+      lastNudgeAtMs: Math.trunc(state.lastNudgeAtMs),
+      lastEventId: Math.trunc(state.lastEventId),
+      ...(typeof lastOwnerActivityAtMs === 'number' && Number.isFinite(lastOwnerActivityAtMs) && lastOwnerActivityAtMs > 0
+        ? { lastOwnerActivityAtMs: Math.trunc(lastOwnerActivityAtMs) }
+        : {}),
+    };
     this.db.run(
       'INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
       [LONGTERM_NUDGE_STATE_KV_KEY, JSON.stringify(map), Date.now()],
@@ -1228,6 +1249,28 @@ export class LongTermTaskStore {
     if (!taskRow) return null;
     const subtasks = this.listSubtaskRows(taskRow.id).map((row) => this.mapSubtask(row));
     return { task: this.toSummary(taskRow, subtasks), subtask: null };
+  }
+
+  /**
+   * Every session this task has ever been discussed in: the definition
+   * session plus each sub-project's full session history (binds + rotations).
+   * The advance service scans this set for owner engagement — the live
+   * conversation about a task can drift away from the currently bound session
+   * (the owner keeps talking in the session they are used to), and heartbeat
+   * decisions must follow the owner, not the binding alone.
+   */
+  listRelatedSessionIds(taskId: string): string[] {
+    const row = this.getTaskRow(taskId);
+    if (!row) return [];
+    const ids = new Set<string>();
+    if (row.definition_session_id) ids.add(row.definition_session_id);
+    for (const subRow of this.listSubtaskRows(taskId)) {
+      for (const id of parseJsonArray<string>(subRow.session_history_json)) {
+        if (id) ids.add(id);
+      }
+      if (subRow.session_id) ids.add(subRow.session_id);
+    }
+    return [...ids];
   }
 
   /** Sub-project ids involved in any dependency edge (has deps OR is depended on). */
