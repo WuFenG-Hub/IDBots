@@ -16,13 +16,6 @@
       "installedAt": 1740969600000,
       "enabled": true
     },
-    "metabot-trade-metaidmarket": {
-      "order": 17,
-      "version": "1.0.1",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
     "metabot-group-task": {
       "order": 18,
       "version": "1.0.0",

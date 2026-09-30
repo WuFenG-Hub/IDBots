@@ -990,6 +990,12 @@ export class SkillManager {
     // search) were ecosystem imports overlapping built-in tools or marginal
     // for the product. Existing installs drop them on upgrade; owners who
     // still want one can reinstall it from the skill market.
+    //
+    // The 2026-09-30 prune drops the two on-chain trading skills from the
+    // default bundle on owner request: metabot-trade-metaidmarket was bundled,
+    // metabot-trade-mvcswap was never bundled in current builds but exists in
+    // older installs (seeded scope=global by the assignment migration) — both
+    // are retired here so existing installs drop them too.
     const retiredSkillIds = [
       'metabot-upload-largefile',
       'metabot-upload-file',
@@ -1009,6 +1015,8 @@ export class SkillManager {
       'remotion',
       'find-skills-0.1.0',
       'technology-news-search',
+      'metabot-trade-metaidmarket',
+      'metabot-trade-mvcswap',
     ];
     for (const retiredId of retiredSkillIds) {
       const legacyDir = path.join(userRoot, retiredId);
@@ -1019,6 +1027,25 @@ export class SkillManager {
         }
       } catch (error) {
         console.warn(`[skills] Failed to remove retired skill "${retiredId}":`, error);
+      }
+      // Purge the authorization trail too (assignment rows + global scope):
+      // retired means gone, and dangling authorization would otherwise surface
+      // in the missing-skills detector as a reinstallable ghost. Reinstalling
+      // from the market starts library-scoped, same as deleteSkill.
+      try {
+        this.ensureAssignmentSchema();
+        const store = this.getStore();
+        const db = store.getDatabase();
+        const affectedBots = listAssignmentMetabotIds(db, retiredId);
+        removeSkillFromAssignmentStore(db, store.getSaveFunction(), store, retiredId);
+        if (affectedBots.length > 0) {
+          console.log(
+            `[skills-audit] retired skill "${retiredId}" un-assigned from metabot(s): ${affectedBots.join(', ')}`
+          );
+          this.syncAllowChatSkillsColumns(affectedBots);
+        }
+      } catch (error) {
+        console.warn(`[skills] Failed to purge authorization for retired skill "${retiredId}":`, error);
       }
     }
 
