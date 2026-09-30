@@ -473,12 +473,13 @@ const CoworkView: React.FC<CoworkViewProps> = ({
 
       const combinedSystemPrompt = await buildCombinedSystemPrompt(skillPrompt);
 
-      // Session titles are kernel-owned (dsh-session-title, 0.1.5): the DSH
-      // runtime logs a deterministic fallback from the first human message and
-      // refines it with an auxiliary LLM call, and the main process mirrors
-      // those session/title events into the store + sidebar. Start with the
-      // placeholder title; pre-generating one app-side would double the LLM
-      // call and be overwritten by the kernel's refinement anyway.
+      // Session titles: start with the placeholder (first line of the prompt);
+      // the DSH runtime's dsh-session-title fallback refines it from the first
+      // human message, and the host's summary refinement
+      // (coworkRunner.scheduleHostSessionTitleRefinement, system brain) lands
+      // the final natural-language title — both mirrored into the store +
+      // sidebar by the main process. Pre-generating one renderer-side would
+      // double the LLM call and be overwritten by the refinement anyway.
       await new Promise(resolve => setTimeout(resolve, 0));
 
       if (isPendingStartCancelled()) {

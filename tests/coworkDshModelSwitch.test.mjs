@@ -160,9 +160,9 @@ test('live DSH session switches provider/model on the next turn', {
 
     const completionCalls = seen.filter((r) => r.method === 'POST' && r.url.endsWith('/chat/completions'))
     assert.ok(completionCalls.length >= 3, `expected >=3 completion calls, got ${completionCalls.length}`)
-    // The kernel fires an auxiliary title-generation completion
-    // (dsh-session-title-first-prompt-llm, 77fed06c) on the first prompt; it
-    // rides the same route, so pick the actual turns by their prompt tokens.
+    // Auxiliary completions (none by default since the kernel title provider
+    // was unmounted) share the route, so pick the actual turns by their prompt
+    // tokens.
     const turnTokens = ['TOKEN_TURN_ONE', 'TOKEN_TURN_TWO', 'TOKEN_TURN_THREE']
     const turnCalls = turnTokens.map((token) =>
       completionCalls.find((r) => JSON.stringify(r.body?.messages ?? []).includes(token)))

@@ -7,6 +7,12 @@
 // provider/model in config), so the mock gateway serves both the main turn
 // and the title call.
 //
+// Note: IDBots' DEFAULT composition mounts only the service (fallback) — the
+// provider is appended explicitly below because the host owns LLM refinement
+// itself (coworkRunner.scheduleHostSessionTitleRefinement; IDBots' context-
+// wrapped first message exceeds the provider's maxInputBytes cap). This test
+// keeps the package pair covered for any host that opts back in.
+//
 // Run: node test/session-title.test.mjs   (from dsh-runtime/)
 
 import assert from 'node:assert/strict'
@@ -31,6 +37,13 @@ const main = async () => {
       models: [{ id: 'mock-1', contextWindow: 32000 }],
     }],
     sections: [],
+  })
+  // The default composition no longer mounts the LLM title provider (IDBots
+  // titles host-side); mount it here explicitly to keep the pair covered.
+  config.push({
+    id: 'session-title-first-prompt-llm',
+    name: '@deepseek-ai/dsh-session-title-first-prompt-llm',
+    config: { targetWords: 5, targetCjkCharacters: 10, maxInputBytes: 4096, maxOutputTokens: 64, timeoutMs: 60000 },
   })
   const configPath = path.join(os.tmpdir(), `dsh-title-${Date.now()}.json`)
   fs.writeFileSync(configPath, JSON.stringify(config))

@@ -312,12 +312,15 @@ export interface DshKernelHandlers {
   onToolRequest: (request: DshHostToolRequest) => void
   onPolicyRequest?: (request: { id: string; sessionId: string; name: string; arguments: Record<string, unknown> }) => void
   /**
-   * Log-only `session/title` events from dsh-session-title (0.1.5): a
-   * deterministic fallback on the first human message, then the first-prompt
-   * provider's LLM refinement ('user' only if the runtime itself renames —
-   * the app never routes renames through the kernel). The mapper ignores
-   * these events (not model-facing); the kernel surfaces them raw so the host
-   * can mirror the title into the cowork store and the sidebar.
+   * Log-only `session/title` events from dsh-session-title (0.1.5): the
+   * deterministic fallback on the first human message ('user' only if the
+   * runtime itself renames — the app never routes renames through the
+   * kernel). The LLM summary refinement is host-owned (coworkRunner's
+   * scheduleHostSessionTitleRefinement); the kernel first-prompt provider is
+   * not mounted because IDBots' context-wrapped first message exceeds its
+   * input cap. The mapper ignores these events (not model-facing); the kernel
+   * surfaces them raw so the host can mirror the title into the cowork store
+   * and the sidebar.
    */
   onSessionTitle?: (sessionId: string, title: string, source: 'fallback' | 'provider' | 'user') => void
   onStatus?: (sessionId: string, status: 'idle' | 'running') => void

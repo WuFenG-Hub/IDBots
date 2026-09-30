@@ -394,21 +394,21 @@ export function generateRuntimeConfig(input) {
     // idbots/usage alongside the token-meter values.
     { id: 'session-stats', name: '@deepseek-ai/dsh-session-stats' },
     { id: 'session-turn-outline', name: '@deepseek-ai/dsh-session-turn-outline' },
-    // 0.1.5 session titles (stock harness pair, stock config): a deterministic
-    // fallback lands on the first human message, then the first-prompt provider
-    // refines it through an auxiliary LLM call that inherits the session's own
-    // logged request route (provider/model omitted on purpose). The resulting
-    // log-only session/title events ride the stock session.event mirror; the
-    // host applies them to the sidebar title (guarded against manual renames).
+    // 0.1.5 session titles: the service mounts for its deterministic fallback
+    // (lands on the first human message) and its user-rename pinning inside
+    // the session log; the host mirrors those events into the sidebar title.
+    // The first-prompt LLM provider is deliberately NOT mounted: IDBots'
+    // first kernel user/message carries the host-injected context blocks
+    // (remote-services catalog, memory, workspace notes — tens of KB), which
+    // exceed the provider's maxInputBytes cap, so it would throw before its
+    // request is even logged and the truncation fallback would stay forever.
+    // Summary refinement is host-owned instead (coworkRunner
+    // .scheduleHostSessionTitleRefinement), which titles from the RAW first
+    // user message through the system brain.
     {
       id: 'session-title',
       name: '@deepseek-ai/dsh-session-title',
       config: { fallbackMaxWords: 5, fallbackMaxBytes: 40, maxTitleBytes: 80 },
-    },
-    {
-      id: 'session-title-first-prompt-llm',
-      name: '@deepseek-ai/dsh-session-title-first-prompt-llm',
-      config: { targetWords: 5, targetCjkCharacters: 10, maxInputBytes: 4096, maxOutputTokens: 64, timeoutMs: 60000 },
     },
     // 0.1.5 plan mode (stock section text, copied verbatim from the stock
     // cordis.patch.yml mount): a plan:policy prompt section plus a persistent

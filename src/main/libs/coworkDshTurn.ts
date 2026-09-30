@@ -342,10 +342,11 @@ export interface DshHubOptions {
    *  kernel-initiated turns too, so hosts can hold queue gates closed while
    *  a controller-less kernel turn runs and release them when it settles. */
   onSessionStatusChange?: (coworkSessionId: string, status: 'idle' | 'running') => void
-  /** Kernel-owned session titles (dsh-session-title, 0.1.5): fallback on the
-   *  first human message, then the first-prompt LLM refinement. Fires for live
+  /** Automatic session titles: the kernel's dsh-session-title fallback lands
+   *  on the first human message; the LLM summary refinement is host-owned
+   *  (coworkRunner.scheduleHostSessionTitleRefinement). Fires for live
    *  appends only; the host decides whether the sidebar title may follow. */
-  onSessionTitle?: (coworkSessionId: string, title: string) => void
+  onSessionTitle?: (coworkSessionId: string, title: string, source: 'fallback' | 'provider' | 'user') => void
   /** Global skill-script host env (IDBOTS_API_BASE_URL, SKILLS_ROOT, BASH_ENV, …).
    *  Re-read every ensure. Per-session identity cannot live here (shared
    *  runtime); those values are written to a DSH_SESSION_ID-keyed env file
@@ -1585,14 +1586,14 @@ export class DshTurnHub {
         }
         controllerOf(event.sessionId)?.cb.onSubagentEvent?.(event)
       },
-      onSessionTitle: (sessionId, title) => {
+      onSessionTitle: (sessionId, title, kind) => {
         // Title events arrive outside the turn-controller lifecycle (the
         // provider's auxiliary LLM call can settle after turn end), so resolve
         // through the pinned mapping rather than the live controller.
         // Strictly-owned: a continuable child's title must not rename its
         // parent's cowork session.
         const coworkId = this.ownedCoworkOfDsh(sessionId)
-        if (coworkId) this.opts.onSessionTitle?.(coworkId, title)
+        if (coworkId) this.opts.onSessionTitle?.(coworkId, title, kind)
       },
       onError: (error) => {
         this.opts.log?.('error', 'dshTurnHub.pump', { message: error.message, runtime: slot.key })
