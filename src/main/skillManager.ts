@@ -998,7 +998,8 @@ export class SkillManager {
 
   private skillDependencyInstallRunning = false;
 
-  private hasNpm(): boolean {    try {
+  private hasNpm(): boolean {
+    try {
       const result = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['--version'], {
         stdio: 'ignore',
         windowsHide: true,
@@ -1096,6 +1097,10 @@ export class SkillManager {
     // metabot-trade-mvcswap was never bundled in current builds but exists in
     // older installs (seeded scope=global by the assignment migration) — both
     // are retired here so existing installs drop them too.
+    // metabot-chat was once bundled (still carries official: true) and is fully
+    // superseded by the built-in group_chat tool's orchestrate action; it was
+    // dropped from the bundle without a retire entry, so existing installs
+    // kept it — retire it now.
     const retiredSkillIds = [
       'metabot-upload-largefile',
       'metabot-upload-file',
@@ -1117,6 +1122,7 @@ export class SkillManager {
       'technology-news-search',
       'metabot-trade-metaidmarket',
       'metabot-trade-mvcswap',
+      'metabot-chat',
     ];
     for (const retiredId of retiredSkillIds) {
       const legacyDir = path.join(userRoot, retiredId);
