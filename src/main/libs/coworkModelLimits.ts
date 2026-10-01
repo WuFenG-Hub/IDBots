@@ -2,10 +2,62 @@ export const DEFAULT_COWORK_CONTEXT_WINDOW = 128_000;
 // Uncatalogued-model output ceiling. Current mainstream models cap output far
 // above 32K, and thinking-mode reasoning shares the output budget — the old
 // 32K default truncated long-thinking steps on uncatalogued SKUs and forced
-// the paid truncated-turn auto-continue. 128K keeps headroom without
-// over-declaring for exotic small models (billing is by actual tokens used,
-// so a higher declared ceiling costs nothing for short replies).
+// the paid truncated-turn auto-continue. Billing is by actual tokens used, so
+// a generous DECLARED ceiling costs nothing for short replies — but the
+// resolved value is still clamped against the context window at resolution
+// time (see clampCoworkMaxOutputTokens) so small-window models keep a viable
+// compaction pressure budget.
 export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 128_000;
+
+/**
+ * Effective output-ceiling clamp, applied at resolution time to every source
+ * (explicit provider rows included). The DSH kernel's proactive compaction
+ * computes its pressure budget as
+ * `contextWindow - reservedOutput - headroomTokens` and silently disables
+ * itself for a route when that goes non-positive (TargetPressureConfigError:
+ * one suppressed warning, then the turn continues with compaction OFF). The
+ * 128K default output ceiling does exactly that to every model whose window
+ * is ≤192K — the 2026-09-30 space-bunny-free incident: a real-128K model
+ * never compacted proactively, overflowed at its true window, and the
+ * reactive summarize request (full history, same model) overflowed again.
+ *
+ * The cap is tiered by window size so the compaction threshold (ratio×window,
+ * further capped by window − output − headroom) can sit at 90% for small
+ * windows and 80% for large ones (see compactionModelPolicies in
+ * dsh-runtime/lib/generate-runtime-config.mjs — keep the tiers in sync):
+ *
+ * - Small windows (<256K): output ≤ 6% of the window. A small-window model
+ *   burns a noticeable share of its context on the very first prompt (~8K
+ *   against 128K), so the threshold must sit high (90%) to keep usable
+ *   context; that only works if output + headroom stay within the remaining
+ *   10%. A 128K model lands at the 8K floor — 6.4% of its window.
+ * - Large windows (≥256K): output ≤ 32% of the window. Long-form / thinking
+ *   workloads need the generous completion budget, and the threshold cap is
+ *   dominated by ratio×window (80%) anyway, so reserving a third of the
+ *   window for output costs no usable context.
+ *
+ * The 8K floor keeps a viable thinking budget on tiny windows either way.
+ * The tier boundary is intentionally discontinuous (262143 → ~15.4K cap vs
+ * 262144 → ~81.9K): crossing into the ≥256K tier drops the compaction
+ * threshold to 80%, which funds the larger output reserve.
+ */
+export const COWORK_SMALL_WINDOW_TOKENS = 262_144;
+export const COWORK_MAX_OUTPUT_SMALL_WINDOW_RATIO = 0.06;
+export const COWORK_MAX_OUTPUT_WINDOW_RATIO = 0.32;
+export const COWORK_MAX_OUTPUT_FLOOR_TOKENS = 8_192;
+
+export function clampCoworkMaxOutputTokens(maxOutputTokens: number, contextWindow: number): number {
+  if (!Number.isFinite(maxOutputTokens) || maxOutputTokens <= 0) return maxOutputTokens;
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return maxOutputTokens;
+  const ratio = contextWindow < COWORK_SMALL_WINDOW_TOKENS
+    ? COWORK_MAX_OUTPUT_SMALL_WINDOW_RATIO
+    : COWORK_MAX_OUTPUT_WINDOW_RATIO;
+  const windowCap = Math.max(
+    COWORK_MAX_OUTPUT_FLOOR_TOKENS,
+    Math.floor(contextWindow * ratio),
+  );
+  return Math.min(Math.floor(maxOutputTokens), windowCap);
+}
 // The whole DeepSeek V4 family shares the same 1M context window. The flash
 // variant powers cowork/A2A automation sessions (via resolveAutomationModelOverride),
 // so it must carry the same window as v4-pro or the context ring wrongly falls back
@@ -308,10 +360,16 @@ function buildLimits(
   explicit?: Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>>,
 ): CoworkModelLimits {
   const known = KNOWN_MODEL_LIMITS[modelId] ?? deepseekV4FamilyLimits(modelId) ?? glmFamilyLimits(modelId);
+  const contextWindow = explicit?.contextWindow ?? known?.contextWindow ?? DEFAULT_COWORK_CONTEXT_WINDOW;
+  const configuredMaxOutputTokens = explicit?.maxOutputTokens ?? known?.maxOutputTokens ?? DEFAULT_COWORK_MAX_OUTPUT_TOKENS;
   return {
     modelId,
-    contextWindow: explicit?.contextWindow ?? known?.contextWindow ?? DEFAULT_COWORK_CONTEXT_WINDOW,
-    maxOutputTokens: explicit?.maxOutputTokens ?? known?.maxOutputTokens ?? DEFAULT_COWORK_MAX_OUTPUT_TOKENS,
+    contextWindow,
+    // The resolved ceiling is EFFECTIVE, not stored: clamped under the window
+    // so the kernel's proactive compaction always has a positive pressure
+    // budget (see clampCoworkMaxOutputTokens). Stored provider rows keep the
+    // user-entered value; only the resolved view is capped.
+    maxOutputTokens: clampCoworkMaxOutputTokens(configuredMaxOutputTokens, contextWindow),
     // Fail-safe default: uncatalogued models are treated as text-only. A
     // wrong "true" silently drops image pixels on a model that cannot read
     // them (and, while describe_image was gated by this flag, removed the

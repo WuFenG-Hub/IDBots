@@ -2222,6 +2222,9 @@ export class CoworkRunner extends EventEmitter {
   });
   /** Cowork session ids with an active DSH turn (native steer path). */
   private dshActiveTurns = new Set<string>();
+  /** `provider|model` routes already warned about a window too small for
+   *  kernel proactive compaction (warn-once guard, see dshTurnProviderFromRoute). */
+  private compactionBudgetWarnedRoutes = new Set<string>();
   /**
    * Auto-title guard: cowork session id → the title the automatic flow last
    * saw on the row — the start-time placeholder at seed time, then each
@@ -7814,6 +7817,31 @@ export class CoworkRunner extends EventEmitter {
           apiFormat,
           effort: reasoningEffort,
         });
+      }
+    }
+    // Degenerate-window surfacing: resolveCoworkModelLimits already clamps the
+    // output ceiling under the window (clampCoworkMaxOutputTokens), so the
+    // kernel's proactive compaction stays enabled for any realistic window.
+    // What remains unfixable at this layer is a window so small that even the
+    // clamped ceiling leaves no usable message budget (≤16K — below that the
+    // kernel throws TargetPressureConfigError and silently runs without
+    // compaction). Warn once per route so the user knows to pick a
+    // bigger-window model instead of discovering it via overflow failures.
+    if (
+      modelLimits
+      && modelLimits.contextWindow - modelLimits.maxOutputTokens < 16_384
+    ) {
+      const warnKey = `${route.provider}|${route.model}`;
+      if (!this.compactionBudgetWarnedRoutes.has(warnKey)) {
+        this.compactionBudgetWarnedRoutes.add(warnKey);
+        coworkLog('WARN', 'dshTurnProviderFromRoute',
+          'Model window is too small for proactive compaction to work — expect context-overflow failures; use a larger-window model',
+          {
+            provider: route.provider,
+            model: route.model,
+            contextWindow: modelLimits.contextWindow,
+            maxOutputTokens: modelLimits.maxOutputTokens,
+          });
       }
     }
     return {

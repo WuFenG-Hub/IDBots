@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { formatContextWindowSize, parseContextWindowSizeInput } from './contextWindowSize';
+import { effectiveMaxOutputForWindow, formatContextWindowSize, NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS, parseContextWindowSizeInput } from './contextWindowSize';
 
 test('parseContextWindowSizeInput accepts raw token counts', () => {
   assert.equal(parseContextWindowSizeInput('128000'), 128000);
@@ -36,4 +36,17 @@ test('formatContextWindowSize renders compact forms', () => {
   assert.equal(formatContextWindowSize(1_234_567), '1234567');
   assert.equal(formatContextWindowSize(0), '');
   assert.equal(formatContextWindowSize(-5), '');
+});
+
+test('effectiveMaxOutputForWindow caps the output ceiling per window tier (6% below 256K, 32% above; floor 8K)', () => {
+  // Mirror of the main-process clamp (coworkModelLimits) that the model form
+  // surfaces: small windows must leave the kernel a viable compaction budget
+  // while keeping the 90% threshold tier reachable.
+  assert.equal(effectiveMaxOutputForWindow(128_000), 8_192);
+  assert.equal(effectiveMaxOutputForWindow(16_000), 8_192);
+  assert.equal(effectiveMaxOutputForWindow(262_143), Math.floor(262_143 * 0.06));
+  assert.equal(effectiveMaxOutputForWindow(262_144), Math.floor(262_144 * 0.32));
+  assert.equal(effectiveMaxOutputForWindow(1_000_000), 128_000);
+  assert.equal(effectiveMaxOutputForWindow(1_000_000, 256_000), 256_000);
+  assert.equal(effectiveMaxOutputForWindow(0), NEW_MODEL_DEFAULT_MAX_OUTPUT_TOKENS);
 });
