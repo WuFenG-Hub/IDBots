@@ -214,3 +214,23 @@ Builder阿码 处理「快捷入口重构」单（task e15778fe）时，会话�
 
 <!-- 后续问题在此追加 -->
 ## 问题 6 · 保留位
+
+---
+
+## 修复记录 — 2026-09-29 跨会话消息打断内核回合（两条分支）
+
+> 对应 Owner 在 twinbot 会话 `df7d89d3` 的实测反馈：worker 的 `[ORCH-NOTIFY]` 汇报在 Twin 输出到一半时抢占了回合，半截回复被封存，Twin 自以为说完了但 Owner 看不全。
+
+### 机器消息打断内核回合 — 已修复（fix/notify-turn-interrupt，已并入 main）
+- 根因：内核发起的回合（subagent 完成唤醒、定时 nudge）没有宿主 turn controller，`controllersByDsh`/`activeSessions`/`crossSessionRunningTurns` 全都看不见它 → 所有忙闲闸门失效，跨会话消息在回合中途 drain 并封存仍在流式输出的回复。
+- 修法：`DshKernel.busySessions` 按 `session.status` 通知逐会话跟踪忙闲（restart/pump 死亡时清空）；`DshTurnHub.isKernelSessionBusy` 严格归属映射后扫 slots+drainingKernels；接入 `isCrossSessionTurnRunning` 与 `isSessionActive`；新增 `onSessionStatusChange` hub 回调，idle 边沿触发 drain。机器消息一律排队等回合落定，打断权只归人类 steer。
+- 验证：`tests/coworkDshKernelBusyGate.test.mjs`（新）、`tests/coworkCrossSessionRunner.test.mjs` 扩展。
+
+### 遗留边界：人类插话无法打断内核回合 — 已修复（fix/kernel-turn-steer）
+- 根因：内核回合期间 `getSteerCapability` 返回 `'inactive'`（无宿主回合可 steer），人类消息直接走 Continue 路径，`continueSession→startSession` 叠在仍在运行的内核回合之上 —— 同一 agent 两个回合并发，与问题 1 同类损坏。
+- 修法：人类插话 = 先在内核侧中止该回合，再把人类消息作为正规宿主回合跑（完整流式/controller/UI 跟踪）。
+  - `DshTurnHub.cancelKernelTurn(coworkSessionId, cause)`：无 controller 的内核回合取消；在报告该会话忙的那个 kernel 上发 cancel（与 `isKernelSessionBusy` 同一扫描），并按 `cancel()` 同款模式 arm abort 收敛闩锁，保证后续 `runTurn` 等到被中止回合的 turn-end 边界，杜绝幻影 settle。
+  - `CoworkRunner.interruptKernelTurnForHumanInput(sessionId)`：先 `markCrossSessionTurnRunning` 占位闸门（排队中的机器消息不得插队到人类回合前），再调 hub 取消；竞态/失败路径立即释放闸门并降级为普通 Continue。
+  - `coworkTurnSubmission.submitOnce`：`capability === 'inactive'` 分支先执行上述打断再走既有 Continue 流程；Continue 失败时由 `releaseKernelTurnInterrupt` 显式释放闸门。
+  - 机器消息（cross_session_message / ORCH-NOTIFY / 心跳）永不走此路径 —— 它们在上一条分支修复后一律排队。
+- 验证：三个测试文件扩展（hub 取消矩阵、runner 闸门占位/竞态/失败/活跃回合 no-op、submission 打断+Continue+失败释放），`pnpm run test:dsh` 全绿。

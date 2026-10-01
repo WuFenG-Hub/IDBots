@@ -74,6 +74,8 @@ interface SubmissionRunner {
     | { accepted: true; delivered: Promise<void> }
     | { accepted: false; reason: 'inactive' | 'closing' | 'sandbox' };
   waitForActiveTurnSettlement(sessionId: string): Promise<void>;
+  interruptKernelTurnForHumanInput(sessionId: string): Promise<boolean>;
+  releaseKernelTurnInterrupt(sessionId: string): void;
   wasSessionStopped(sessionId: string): boolean;
   continueSession(
     sessionId: string,
@@ -376,6 +378,10 @@ export class CoworkTurnSubmissionController {
 
     // An idempotency retry keeps the originally persisted visible text.
     const text = message.content;
+    // Set when a human message interrupted a kernel-initiated turn below; the
+    // follow-up Continue owns the gate once startSession begins, so only a
+    // failed Continue must release it.
+    let interruptedKernelTurn = false;
     if (steerAdmission) {
       const admission = this.runner.trySubmitSteer(sessionId, submissionId, text);
       if (admission.accepted) {
@@ -461,6 +467,13 @@ export class CoworkTurnSubmissionController {
       }
     } else if (capability === 'closing-local') {
       await this.runner.waitForActiveTurnSettlement(sessionId);
+    } else if (capability === 'inactive') {
+      // Kernel-initiated turns (subagent wakes, scheduled nudges) have no
+      // host turn to steer, but a human interjection still interrupts: abort
+      // at the kernel, then the Continue flow below starts the human's turn.
+      // Machine-originated messages never reach this path (they queue behind
+      // the cross-session gate).
+      interruptedKernelTurn = await this.runner.interruptKernelTurnForHumanInput(sessionId);
     }
 
     if (interactionKind === 'steer' && this.runner.wasSessionStopped(sessionId)) {
@@ -507,6 +520,10 @@ export class CoworkTurnSubmissionController {
         skillIds: requestedSkillIds,
       });
     } catch (error) {
+      // The Continue never started its turn, so it cannot release the gate
+      // held since the kernel-turn interrupt — release it here or queued
+      // cross-session messages would stay parked forever.
+      if (interruptedKernelTurn) this.runner.releaseKernelTurnInterrupt(sessionId);
       const reason = error instanceof Error ? error.message : 'Failed to continue Cowork session';
       this.markSubmissionFailed(sessionId, message, 'delivery_failed', reason);
       return errorResult('delivery_failed', reason);

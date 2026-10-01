@@ -63,6 +63,9 @@ class FakeRunner extends EventEmitter {
     this.continueDelivery = Promise.resolve();
     this.continueError = null;
     this.sessionStopped = false;
+    this.interruptKernelTurn = false;
+    this.interruptCalls = [];
+    this.releaseCalls = [];
   }
 
   getSteerCapability() {
@@ -79,6 +82,15 @@ class FakeRunner extends EventEmitter {
     this.waitCalls += 1;
     this.waitedSessionId = sessionId;
     return this.turnSettlement;
+  }
+
+  async interruptKernelTurnForHumanInput(sessionId) {
+    this.interruptCalls.push(sessionId);
+    return this.interruptKernelTurn;
+  }
+
+  releaseKernelTurnInterrupt(sessionId) {
+    this.releaseCalls.push(sessionId);
   }
 
   wasSessionStopped() {
@@ -156,6 +168,52 @@ test('inactive sessions continue once with the requested system prompt and skill
   }]);
   assert.equal(result.message.metadata.interactionKind, undefined);
   assert.equal(result.message.metadata.submissionMode, 'continue');
+});
+
+test('human input during a kernel-initiated turn interrupts at the kernel, then continues', async () => {
+  const harness = createHarness({
+    capability: 'inactive',
+    configureRunner: (runner) => { runner.interruptKernelTurn = true; },
+  });
+  const result = await harness.controller.submit(input());
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'continue');
+  // The kernel turn was aborted before the Continue flow started the human's
+  // turn; the gate stays held (no release) because startSession owns it now.
+  assert.deepEqual(harness.runner.interruptCalls, ['session-1']);
+  assert.equal(harness.runner.continueCalls.length, 1);
+  assert.equal(harness.runner.releaseCalls.length, 0);
+  assert.equal(result.message.metadata.submissionMode, 'continue');
+  assert.equal(result.message.metadata.submissionResult, 'completed');
+});
+
+test('a failed Continue after a kernel-turn interrupt releases the held gate', async () => {
+  const harness = createHarness({
+    capability: 'inactive',
+    configureRunner: (runner) => {
+      runner.interruptKernelTurn = true;
+      runner.continueError = new Error('start failed');
+    },
+  });
+  const result = await harness.controller.submit(input());
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'delivery_failed');
+  assert.deepEqual(harness.runner.interruptCalls, ['session-1']);
+  // The Continue never started its turn, so the submission controller must
+  // release the interrupt gate itself or queued machine messages park forever.
+  assert.deepEqual(harness.runner.releaseCalls, ['session-1']);
+});
+
+test('inactive sessions without a kernel turn attempt no interrupt and hold no gate', async () => {
+  const harness = createHarness();
+  const result = await harness.controller.submit(input());
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'continue');
+  assert.deepEqual(harness.runner.interruptCalls, ['session-1']);
+  assert.equal(harness.runner.releaseCalls.length, 0);
 });
 
 test('continue submissions persist origin and originLabel on the user message', async () => {
@@ -411,6 +469,10 @@ test('coalesces concurrent ordinary continues and concurrent delivery failures',
   });
   const firstContinue = continuing.controller.submit(input());
   const secondContinue = continuing.controller.submit(input());
+  // The 'inactive' branch awaits the kernel-turn interrupt probe before
+  // Continue, so the single coalesced continueSession lands one microtask
+  // later than the submit calls.
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(continuing.runner.continueCalls.length, 1);
   continueTurn();
   const continueResults = await Promise.all([firstContinue, secondContinue]);

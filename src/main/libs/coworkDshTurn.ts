@@ -913,6 +913,54 @@ export class DshTurnHub {
     }
   }
 
+  /**
+   * Cancel a turn that has no host controller — kernel-initiated turns
+   * (subagent-finished wakes, scheduled nudges) run straight on the runtime,
+   * so controllerOfCowork-based cancel() cannot reach them. Used when a human
+   * message arrives mid kernel turn: the kernel turn is aborted and the human
+   * input then starts as a regular hosted turn. Returns false when nothing
+   * was interrupted (no mapping, no runtime, or the turn already ended).
+   */
+  async cancelKernelTurn(coworkSessionId: string, cause: string): Promise<boolean> {
+    const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
+    if (!dshId) return false
+    // Cancel on the process that actually reports the session busy — the
+    // same scan isKernelSessionBusy uses — so a stale holder map cannot
+    // route the cancel to the wrong runtime.
+    let kernel: DshKernel | null = null
+    for (const slot of this.slots.values()) {
+      if (slot.kernel.isSessionBusy(dshId)) {
+        kernel = slot.kernel
+        break
+      }
+      const draining = slot.drainingKernels.find((k) => k.isSessionBusy(dshId))
+      if (draining) {
+        kernel = draining
+        break
+      }
+    }
+    kernel ??= this.kernelForDsh(dshId)
+    if (!kernel) return false
+    // Arm BEFORE issuing the RPC (same pattern as cancel()): the abort's
+    // turn-end boundary can arrive ahead of the ack, and the follow-up human
+    // turn's runTurn must wait for that boundary or it would catch it as a
+    // phantom settle.
+    this.armAbortConvergence(dshId)
+    try {
+      const result = await kernel.cancel(dshId, cause)
+      if (result.cancelled === false) {
+        // Already idle (the kernel turn ended in the race): no boundary is
+        // coming — disarm so the follow-up turn is not held to the backstop.
+        this.pendingAbortByDsh.get(dshId)?.settle()
+        return false
+      }
+      return true
+    } catch (error) {
+      this.pendingAbortByDsh.get(dshId)?.settle()
+      throw error
+    }
+  }
+
   /** Backstop for the abort-convergence guard: a cancel against an already
    *  idle agent never emits a turn-end boundary, so the wait must be bounded. */
   private static readonly ABORT_CONVERGENCE_BACKSTOP_MS = 2000
