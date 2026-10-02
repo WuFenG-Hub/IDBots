@@ -101,7 +101,7 @@ const fromSocialPost = (item: import('../services/socialRecallService').SocialPo
   createdAt: item.createdAt,
   likeCount: item.likeCount,
   commentCount: item.commentCount,
-  extra: item.quoteCount > 0 ? `${item.quoteCount} quotes` : null,
+  extra: item.quoteCount != null && item.quoteCount > 0 ? `${item.quoteCount} quotes` : null,
 });
 
 const fromSearchItem = (item: MetawebSearchItem, protocolKey: string): SurfItem => ({

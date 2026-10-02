@@ -41,10 +41,16 @@ export type SocialPostItem = {
   payload: SocialPostPayload;
   createdAt: number;
   updatedAt: number;
-  likeCount: number;
-  commentCount: number;
-  donateCount: number;
-  quoteCount: number;
+  /**
+   * Engagement counts. `null` means the source offered no count for this pin —
+   * the index is buzz-only, so metaTask roots, metaapp pins and witness
+   * submissions come back without counts. Never coerce a missing count to 0:
+   * "unreadable" and a real 0 are different facts downstream.
+   */
+  likeCount: number | null;
+  commentCount: number | null;
+  donateCount: number | null;
+  quoteCount: number | null;
   /** Present only for sort=hot; raw engagement total. */
   hotScore?: number;
 };
@@ -111,6 +117,24 @@ function textList(value: unknown): string[] {
   return value.map((item) => String(item ?? '').trim()).filter(Boolean);
 }
 
+/**
+ * Engagement count from a Social Recall payload, or `null` when the source
+ * offered nothing. A present finite number — including an explicit 0 — is a
+ * real count; an absent/null/empty/non-numeric field is unreadable and stays
+ * `null`. The distinction matters because the index is buzz-only: pins
+ * outside its coverage (metaTask roots, metaapp pins, witness submissions)
+ * legitimately carry no counts, and collapsing that into 0 fabricates
+ * engagement that does not exist.
+ */
+function countOrNull(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 function normalizePayload(raw: unknown): SocialPostPayload {
   if (typeof raw === 'string') {
     const content = raw.trim();
@@ -149,10 +173,10 @@ function normalizePost(raw: unknown): SocialPostItem {
     payload: normalizePayload(record.payload),
     createdAt: Number(record.createdAt) || 0,
     updatedAt: Number(record.updatedAt) || 0,
-    likeCount: Number(record.likeCount) || 0,
-    commentCount: Number(record.commentCount) || 0,
-    donateCount: Number(record.donateCount) || 0,
-    quoteCount: Number(record.quoteCount) || 0,
+    likeCount: countOrNull(record.likeCount),
+    commentCount: countOrNull(record.commentCount),
+    donateCount: countOrNull(record.donateCount),
+    quoteCount: countOrNull(record.quoteCount),
     hotScore: typeof record.hotScore === 'number' ? record.hotScore : undefined,
   };
 }
