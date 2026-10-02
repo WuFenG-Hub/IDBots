@@ -1,6 +1,6 @@
 ---
 name: metabot-metaapp
-description: 统一的 MetaApp 技能。用于指导和执行 Bot Browser 里的静态 MetaApp 开发、Agent Internet 协议链接接入、MetaID PIN 写链、MetaFile 上传，以及 MetaApp 的发布、修改、删除、分享和 Bot homepage/Bot Page 制作。只要用户提到 MetaApp、静态网站上链、Bot Page/homepage、metaid://、pin://、metafile://、metaapp://、map://、MetaApp 发布/修改/分享，就使用这个技能。
+description: 统一的 MetaApp 技能。用于指导和执行 Bot Browser 里的静态 MetaApp 开发、Agent Internet 协议链接接入、MetaID PIN 写链、MetaFile 上传，以及 MetaApp 的发布、修改、删除、分享和 Bot homepage/Bot Page 制作。只要用户提到 MetaApp、静态网站上链、Bot Page/homepage、metaid://、pin://、metafile://、metaapp://、map://、MetaApp 发布/修改/分享，或要求操控（播放、暂停、点击、读取）当前打开的 MetaApp，就使用这个技能。
 official: true
 ---
 
@@ -18,6 +18,7 @@ MetaApp 现在的主模型很简单：它就是一个能在 Bot Browser 里运�
 - 制作 Bot homepage / Bot Page 类 MetaApp
 - 解释和接入 `metaid://`、`pin://`、`metafile://`、`metaapp://`、`map://`
 - 指导 MetaApp 内如何使用 `window.AgentBrowser.navigate(...)` 和 `window.AgentBrowser.request(...)`
+- 操控用户正在查看的 MetaApp：播放、暂停、点击页内控件、读取实时内容（`bot_browser_act`）
 
 ## 路由方式
 
@@ -33,6 +34,18 @@ MetaApp 现在的主模型很简单：它就是一个能在 Bot Browser 里运�
    先读 `references/agent-browser-metaapp.md`，再补读 `references/bot-homepage-v3.md`
 5. 用户问的是旧的 IDFramework MetaApp：
    按 IDFramework 项目自带的代码与文档维护即可（专用技能已从默认包移除）；普通 MetaApp 工作一律走本技能
+6. 用户要操控（播放/暂停/点击/读取）当前在 Bot Browser 里打开的 MetaApp：
+   用 `bot_browser_act`，见下方「操控正在查看的 MetaApp」
+
+## 操控正在查看的 MetaApp（bot_browser_act）
+
+用户说"播放这首音乐""点一下这个按钮""这个应用现在显示什么"时，用 `bot_browser_act` 直接操作活动标签页的 MetaApp 预览帧，不需要用户动手：
+
+- `action:"click"` + CSS `selector`：点击帧内元素（如音乐播放器的 `#btn-main`）。宿主已放行无手势播放，页内播放键点击即生效。
+- `action:"read"`：读取帧内实时可见文本（可带 `selector`），适用于 `bot_browser_read_page` 读不到的 MetaApp 帧。
+- `action:"state"`：返回帧内 audio/video 清单（paused / currentTime / src）和页面标题。点击播放后用它验证 `paused:false` 且 currentTime 在推进；没生效就再点一次或换 selector。
+
+边界：只作用于**活动标签页**的本地预览帧；一方页面（Bot homepage、pin inspector）和普通网页不可操作；`selector` 只在预览帧内匹配。能力对本地预览（`preview-metaapp://`）同样有效，开发自测时可直接驱动自己的应用。
 
 ## 开发规则
 
