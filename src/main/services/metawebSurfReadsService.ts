@@ -34,8 +34,12 @@ export const METAWEB_PINS_BATCH_MAX = 50;
 const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
 
 const numOrNull = (value: unknown): number | null => {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
 };
 
 export class MetawebPinVersionsNotFoundError extends Error {

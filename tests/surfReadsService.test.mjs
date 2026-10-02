@@ -74,6 +74,35 @@ test('metawebFresh builds the query and normalizes the page', async () => {
   assert.deepEqual(page.suppressed, { duplicates: 7, throttled: 2 });
 });
 
+test('metawebFresh keeps unreadable engagement counts null instead of zero', async () => {
+  const fetchImpl = makeFetch({
+    code: 0,
+    message: '',
+    data: {
+      items: [
+        { pinId: 'pin-null', likeCount: null, commentCount: null },
+        { pinId: 'pin-empty', likeCount: '', commentCount: '' },
+        { pinId: 'pin-missing' },
+        { pinId: 'pin-zero', likeCount: 0, commentCount: 0 },
+        { pinId: 'pin-numeric-string', likeCount: '5', commentCount: '2' },
+        { pinId: 'pin-junk', likeCount: 'n/a', commentCount: {} },
+      ],
+      hasMore: false,
+    },
+  });
+  const page = await metawebFresh({ protocols: ['simplebuzz'] }, { fetchImpl });
+  const byPin = new Map(page.items.map((item) => [item.pinId, item]));
+  assert.equal(byPin.get('pin-null').likeCount, null, 'explicit null stays null, not 0');
+  assert.equal(byPin.get('pin-null').commentCount, null);
+  assert.equal(byPin.get('pin-empty').likeCount, null, 'empty string stays null, not 0');
+  assert.equal(byPin.get('pin-missing').likeCount, null, 'missing key stays null, not 0');
+  assert.equal(byPin.get('pin-zero').likeCount, 0, 'a real 0 is preserved as 0');
+  assert.equal(byPin.get('pin-zero').commentCount, 0);
+  assert.equal(byPin.get('pin-numeric-string').likeCount, 5, 'numeric strings still parse');
+  assert.equal(byPin.get('pin-junk').likeCount, null, 'non-numeric values stay null');
+  assert.equal(byPin.get('pin-junk').commentCount, null);
+});
+
 test('metawebFresh validates input and maps envelope errors', async () => {
   await assert.rejects(() => metawebFresh({ protocols: [] }, { fetchImpl: makeFetch({ code: 0, data: {} }) }), /at least one protocol/);
   await assert.rejects(
