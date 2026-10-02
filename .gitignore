@@ -565,3 +565,4 @@ man_base_data_pebble/
 !tests/scheduledTaskSkipLedger.test.mjs
 !tests/settingsUnarchiveRefreshStatic.test.mjs
 !tests/coworkDshSessionTitle.test.mjs
+!tests/botBrowserPreviewAct.test.ts

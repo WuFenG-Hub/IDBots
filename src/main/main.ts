@@ -360,6 +360,10 @@ import {
   type BotBrowserTabCommandResponse,
 } from './services/botBrowserTabBridge';
 import {
+  executeBotBrowserPreviewAct,
+  type BotBrowserPreviewActRequest,
+} from './services/botBrowserPreviewAct';
+import {
   createBotBrowserCaptureBridge,
   type BotBrowserCaptureBridge,
   type BotBrowserCaptureResponse,
@@ -5796,6 +5800,7 @@ const getCoworkRunner = () => {
         openUri: (input) => sendBotBrowserOpenUri(input),
         execute: (command) => getBotBrowserTabBridge().execute(command),
         screenshot: (input) => getBotBrowserCaptureBridge().capture(input ?? {}),
+        act: (input) => executeBotBrowserAct(input),
         forkMetaApp: async ({ sessionId, uri }) => {
           const session = getCoworkStore().getSession(sessionId);
           if (!session?.cwd) throw new Error('Session workspace is not available.');
@@ -6978,6 +6983,18 @@ const getBotBrowserTabBridge = () => {
   }
   return botBrowserTabBridge;
 };
+
+// Shared act executor for the agent tool and the RPC gateway route: resolves
+// the active tab's renderer envelope via the tab bridge, then reaches into the
+// matching locally served preview frame from this privileged process.
+const executeBotBrowserAct = (input: BotBrowserPreviewActRequest) =>
+  executeBotBrowserPreviewAct(
+    {
+      getWindows: () => BrowserWindow.getAllWindows(),
+      executeTabCommand: (command) => getBotBrowserTabBridge().execute(command),
+    },
+    input,
+  );
 
 const getBotBrowserCaptureBridge = () => {
   if (!botBrowserCaptureBridge) {
@@ -17183,6 +17200,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('metaid rpc server start begin');
     metaidRpcServer = startMetaidRpcServer(getMetabotStore, getStore, getCoworkStore, {
       controlBotBrowserTabs: (command) => getBotBrowserTabBridge().execute(command),
+      controlBotBrowserAct: (input) => executeBotBrowserAct(input),
       // Agent-Game bot channel: same browser.app.session.* surface the MetaApp
       // bridge uses, reached over RPC by local bot sessions (auto-approved for
       // local bots host-side; startAgentGameHost() is idempotent).
