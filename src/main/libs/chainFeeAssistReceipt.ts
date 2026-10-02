@@ -25,6 +25,11 @@ function readFeeAssistRecord(feeAssist: unknown): Record<string, unknown> | null
  * back …") so every chain-write tool reads the same way. Returns [] when the
  * write never touched the sponsor path (plain self-paid mode) — receipts of
  * non-sponsored writes stay unchanged.
+ *
+ * Every fallback-to-self-paid outcome is additionally prefixed with a
+ * machine-readable `- WARN sponsor_fallback: true (…)` marker line so budget
+ * monitors can alert on the WARN level instead of parsing the prose line
+ * (GitHub issue #61).
  */
 export function feeAssistReceiptLines(feeAssist: unknown): string[] {
   const fa = readFeeAssistRecord(feeAssist);
@@ -43,10 +48,17 @@ export function feeAssistReceiptLines(feeAssist: unknown): string[] {
       `- sponsor: applied (MVC fee sponsor covered this write${orderId ? `, order ${orderId}` : ''}${recovered ? '; commit response was lost but the order broadcast' : ''})`,
     ];
   }
+  const warnMarker =
+    `- WARN sponsor_fallback: true (reason=${reason}` +
+    `${stage ? ` stage=${stage}` : ''}${orderId ? ` order=${orderId}` : ''}${outcome ? ` outcome=${outcome}` : ''})`;
   if (reason === 'circuit_open') {
-    return ["- sponsor: skipped — circuit breaker open after repeated broadcast failures, paid by the bot's own wallet"];
+    return [
+      warnMarker,
+      "- sponsor: skipped — circuit breaker open after repeated broadcast failures, paid by the bot's own wallet",
+    ];
   }
   return [
+    warnMarker,
     `- sponsor: unavailable, fell back to the bot's own wallet (reason: ${reason}${stage ? ` at ${stage}` : ''}${orderSuffix})`,
   ];
 }

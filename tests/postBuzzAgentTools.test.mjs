@@ -252,6 +252,10 @@ test('post_buzz receipt surfaces the fee channel for sponsored and fallback writ
     fb.content[0].text,
     /sponsor: unavailable, fell back to the bot's own wallet \(reason: commit_failed at commit, order order-8: failed\)/,
   );
+  assert.match(
+    fb.content[0].text,
+    /WARN sponsor_fallback: true \(reason=commit_failed stage=commit order=order-8 outcome=failed\)/,
+  );
 
   // Plain self-paid write (no sponsor involvement): receipt stays unchanged.
   const plain = makeHarness();
