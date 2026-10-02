@@ -49,7 +49,6 @@ const MetaTaskBoard: React.FC = () => {
   useEffect(() => {
     void metaTaskService.init();
     return () => metaTaskService.destroy();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const tasks = board?.tasks ?? [];
