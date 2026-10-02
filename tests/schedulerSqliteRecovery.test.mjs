@@ -85,6 +85,7 @@ function createScheduler({
     scheduledTaskStore: {
       getNextDueTimeMs: () => Date.now(),
       getDueTasks: () => [],
+      getRunningTasks: () => [],
       getTask: () => null,
       createRun: () => ({ id: 'run-1' }),
       markTaskRunning: () => {},

@@ -55,17 +55,25 @@ export interface ScheduledTask {
   updatedAt: string;
 }
 
+// Skip reason codes (mirrors the main-process SCHEDULED_TASK_SKIP_REASONS)
+export type ScheduledTaskSkipReason =
+  | 'already_running'
+  | 'expired'
+  | 'disabled'
+  | 'stuck_running';
+
 // 运行记录
 export interface ScheduledTaskRun {
   id: string;
   taskId: string;
   sessionId: string | null;
-  status: 'running' | 'success' | 'error';
+  status: 'running' | 'success' | 'error' | 'skipped';
   startedAt: string;
   finishedAt: string | null;
   durationMs: number | null;
   error: string | null;
   trigger: 'scheduled' | 'manual';
+  skipReason: ScheduledTaskSkipReason | null;
 }
 
 // 带任务名称的运行记录（用于全局历史列表）

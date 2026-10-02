@@ -813,6 +813,7 @@ export class SqliteStore {
         duration_ms INTEGER,
         error TEXT,
         trigger_type TEXT NOT NULL DEFAULT 'scheduled',
+        skip_reason TEXT,
         FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
       );
     `);
@@ -2290,6 +2291,21 @@ export class SqliteStore {
 
         if (!stColumns.includes('target_session_id')) {
           this.db.run('ALTER TABLE scheduled_tasks ADD COLUMN target_session_id TEXT');
+          this.save();
+        }
+      }
+    } catch {
+      // Migration not needed or table doesn't exist yet.
+    }
+
+    // Migration: the run ledger's skip reason column (issue #60). Existing runs
+    // keep NULL (they were real runs); only new skipped rows carry a reason.
+    try {
+      const runColsResult = this.db.exec('PRAGMA table_info(scheduled_task_runs);');
+      if (runColsResult[0]) {
+        const runColumns = runColsResult[0].values.map((row) => row[1]) || [];
+        if (!runColumns.includes('skip_reason')) {
+          this.db.run('ALTER TABLE scheduled_task_runs ADD COLUMN skip_reason TEXT');
           this.save();
         }
       }

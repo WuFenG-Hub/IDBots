@@ -562,5 +562,6 @@ man_base_data_pebble/
 !tests/scheduledTaskTargetSession.test.mjs
 !tests/scheduledTaskCreateDefaultBinding.test.mjs
 !tests/schedulerTargetSession.test.mjs
+!tests/scheduledTaskSkipLedger.test.mjs
 !tests/settingsUnarchiveRefreshStatic.test.mjs
 !tests/coworkDshSessionTitle.test.mjs
