@@ -70,6 +70,8 @@ function createHarness({
   sessions = {},
   archived = [],
   submitToSession,
+  startSessionGate,
+  runningTasks = () => [],
 } = {}) {
   const { Scheduler } = loadSchedulerWithElectronStub();
   const recording = {
@@ -77,6 +79,8 @@ function createHarness({
     runnerCalls: [],
     submitCalls: [],
     completedRuns: [],
+    skippedRuns: [],
+    releasedTaskIds: [],
   };
   const runs = new Map();
   let runIndex = 0;
@@ -86,6 +90,7 @@ function createHarness({
     scheduledTaskStore: {
       getNextDueTimeMs: () => null,
       getDueTasks: () => [],
+      getRunningTasks: () => runningTasks(),
       getTask: () => task,
       createRun: (taskId, trigger) => {
         const run = {
@@ -103,6 +108,26 @@ function createHarness({
         return run;
       },
       markTaskRunning: () => {},
+      recordSkippedRun: (taskId, reason, trigger) => {
+        const now = new Date().toISOString();
+        const run = {
+          id: `skip-${recording.skippedRuns.length + 1}`,
+          taskId,
+          sessionId: null,
+          status: 'skipped',
+          startedAt: now,
+          finishedAt: now,
+          durationMs: 0,
+          error: null,
+          trigger,
+          skipReason: reason,
+        };
+        recording.skippedRuns.push(run);
+        return run;
+      },
+      releaseStuckRunningTask: (taskId) => {
+        recording.releasedTaskIds.push(taskId);
+      },
       completeRun: (runId, status, sessionId, durationMs, error) => {
         const completed = { ...runs.get(runId), status, sessionId, durationMs, error };
         runs.set(runId, completed);
@@ -136,6 +161,7 @@ function createHarness({
     getCoworkRunner: () => ({
       startSession: async (sessionId, prompt, options) => {
         recording.runnerCalls.push({ sessionId, prompt, options });
+        if (startSessionGate) await startSessionGate;
       },
       stopSession: () => {},
     }),
@@ -356,4 +382,101 @@ test('Scheduler still creates a fresh session when the task has no bound session
   assert.equal(recording.createdSessions.length, 1);
   assert.deepEqual(recording.runnerCalls.map((call) => call.sessionId), ['session-1']);
   assert.equal(recording.completedRuns[0].sessionId, 'session-1');
+});
+
+test('Scheduler ledgers an already_running skip when a second fire arrives for a live task', async () => {
+  const task = createTask({ id: 'busy-task' });
+  let releaseSession;
+  const gate = new Promise((resolve) => {
+    releaseSession = resolve;
+  });
+  const { scheduler, recording } = createHarness({ task, startSessionGate: gate });
+
+  const live = scheduler.executeTask(task, 'manual');
+  await scheduler.executeTask(task, 'manual');
+
+  assert.deepEqual(recording.skippedRuns.map((run) => run.skipReason), ['already_running']);
+  assert.equal(recording.skippedRuns[0].status, 'skipped');
+  assert.equal(recording.skippedRuns[0].taskId, task.id);
+  assert.equal(recording.skippedRuns[0].trigger, 'manual');
+  // The skip must not start a second execution nor fake a completion.
+  assert.equal(recording.createdSessions.length, 1);
+  assert.equal(recording.completedRuns.length, 0);
+
+  releaseSession();
+  await live;
+
+  assert.equal(recording.completedRuns.length, 1);
+  assert.equal(recording.completedRuns[0].status, 'success');
+});
+
+test('Scheduler ledgers an expired skip for a due task whose expiry day has passed', async () => {
+  const task = createTask({ id: 'expired-task', expiresAt: '2000-01-01' });
+  const { scheduler, recording } = createHarness({ task });
+
+  scheduler.start();
+  try {
+    await scheduler.executeTask(task, 'scheduled');
+  } finally {
+    scheduler.stop();
+  }
+
+  assert.deepEqual(recording.skippedRuns.map((run) => run.skipReason), ['expired']);
+  assert.equal(recording.skippedRuns[0].status, 'skipped');
+  assert.equal(recording.skippedRuns[0].trigger, 'scheduled');
+  assert.equal(recording.createdSessions.length, 0);
+  assert.equal(recording.runnerCalls.length, 0);
+  assert.equal(recording.completedRuns.length, 0);
+});
+
+test('Scheduler ledgers an orphaned running marker as stuck_running and releases it', async () => {
+  const orphan = createTask({ id: 'orphan-task' });
+  const { scheduler, recording } = createHarness({
+    task: orphan,
+    runningTasks: () => [orphan],
+  });
+
+  scheduler.start();
+  try {
+    await scheduler.tick(0);
+  } finally {
+    scheduler.stop();
+  }
+
+  assert.deepEqual(
+    recording.skippedRuns.map((run) => ({ reason: run.skipReason, trigger: run.trigger })),
+    [{ reason: 'stuck_running', trigger: 'scheduled' }],
+  );
+  assert.deepEqual(recording.releasedTaskIds, ['orphan-task']);
+  assert.equal(recording.completedRuns.length, 0);
+});
+
+test('Scheduler does not ledger a stuck skip for a task with a live execution', async () => {
+  const task = createTask({ id: 'live-task' });
+  let releaseSession;
+  const gate = new Promise((resolve) => {
+    releaseSession = resolve;
+  });
+  const { scheduler, recording } = createHarness({
+    task,
+    runningTasks: () => [task],
+    startSessionGate: gate,
+  });
+
+  scheduler.start();
+  try {
+    const live = scheduler.executeTask(task, 'manual');
+    await scheduler.tick(0);
+
+    assert.deepEqual(recording.skippedRuns, []);
+    assert.deepEqual(recording.releasedTaskIds, []);
+
+    releaseSession();
+    await live;
+  } finally {
+    scheduler.stop();
+  }
+
+  assert.equal(recording.completedRuns.length, 1);
+  assert.equal(recording.completedRuns[0].status, 'success');
 });

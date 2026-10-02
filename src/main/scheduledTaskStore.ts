@@ -47,16 +47,39 @@ export interface ScheduledTask {
   updatedAt: string;
 }
 
+/**
+ * Why an execution was decided NOT to run. Enumerated so the ledger can be
+ * queried by reason instead of by parsing prose (issue #60):
+ * - `already_running`: the previous run of the same task is still executing.
+ * - `expired`: the task's `expiresAt` day is over.
+ * - `disabled`: reserved for a fire attempt on a disabled task. Disabling nulls
+ *   `next_run_at_ms`, so no due-set entry exists to skip; the code is kept in
+ *   the enumeration as the vocabulary for that state.
+ * - `stuck_running`: `running_at_ms` was left set with no live execution behind
+ *   it (scheduler stopped mid-run, lost run) — the task was wedged out of the
+ *   due set and the marker was released.
+ */
+export const SCHEDULED_TASK_SKIP_REASONS = [
+  'already_running',
+  'expired',
+  'disabled',
+  'stuck_running',
+] as const;
+
+export type ScheduledTaskSkipReason = (typeof SCHEDULED_TASK_SKIP_REASONS)[number];
+
 export interface ScheduledTaskRun {
   id: string;
   taskId: string;
   sessionId: string | null;
-  status: 'running' | 'success' | 'error';
+  status: 'running' | 'success' | 'error' | 'skipped';
   startedAt: string;
   finishedAt: string | null;
   durationMs: number | null;
   error: string | null;
   trigger: 'scheduled' | 'manual';
+  /** Set only for `status = 'skipped'`; null on every real run. */
+  skipReason: ScheduledTaskSkipReason | null;
 }
 
 export interface ScheduledTaskInput {
@@ -111,6 +134,7 @@ interface RunRow {
   duration_ms: number | null;
   error: string | null;
   trigger_type: string;
+  skip_reason: string | null;
 }
 
 /**
@@ -131,6 +155,7 @@ export class ScheduledTaskStore {
     this.saveDb = saveDb;
     this.ensureTaskSessionColumn();
     this.ensureTargetSessionColumn();
+    this.ensureRunSkipReasonColumn();
     this.ensureMigrationColumns();
     this.unmigrateLegacySdkCronTasks();
     this.resetStuckRunningTasks();
@@ -215,6 +240,28 @@ export class ScheduledTaskStore {
       }
     } catch (error) {
       console.warn('Failed to ensure scheduled task target session column:', error);
+    }
+  }
+
+  /**
+   * `skip_reason` carries the enumerated reason for a `status = 'skipped'` run
+   * (see SCHEDULED_TASK_SKIP_REASONS), so skipped executions are distinguishable
+   * from success/error in the run ledger. Legacy rows keep NULL. Idempotent:
+   * repeated startup never errors.
+   */
+  private ensureRunSkipReasonColumn(): void {
+    try {
+      if (!this.tableExists('scheduled_task_runs')) return;
+
+      const columnsResult = this.db.exec('PRAGMA table_info(scheduled_task_runs);');
+      const columns = columnsResult[0]?.values.map((row) => String(row[1])) ?? [];
+
+      if (!columns.includes('skip_reason')) {
+        this.db.run('ALTER TABLE scheduled_task_runs ADD COLUMN skip_reason TEXT');
+        this.saveDb();
+      }
+    } catch (error) {
+      console.warn('Failed to ensure scheduled task run skip reason column:', error);
     }
   }
 
@@ -549,6 +596,30 @@ export class ScheduledTaskStore {
     return this.getRun(id)!;
   }
 
+  /**
+   * Ledger entry for an execution the scheduler decided NOT to run. A skipped
+   * run is terminal the moment it is written (finished_at = started_at, zero
+   * duration, no session): it never touched the task's success/error
+   * bookkeeping, so this row is the only trace of the decision. `reason` is
+   * required and enumerated, which is what makes skips queryable and
+   * distinguishable from real runs (issue #60).
+   */
+  recordSkippedRun(
+    taskId: string,
+    reason: ScheduledTaskSkipReason,
+    trigger: 'scheduled' | 'manual'
+  ): ScheduledTaskRun {
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    this.db.run(`
+      INSERT INTO scheduled_task_runs
+        (id, task_id, status, started_at, finished_at, duration_ms, error, trigger_type, skip_reason)
+      VALUES (?, ?, 'skipped', ?, ?, 0, NULL, ?, ?)
+    `, [id, taskId, now, now, trigger, reason]);
+    this.saveDb();
+    return this.getRun(id)!;
+  }
+
   getTaskSessionId(taskId: string): string | null {
     const row = this.getOne<{ cowork_session_id: string | null }>(
       'SELECT cowork_session_id FROM scheduled_tasks WHERE id = ?',
@@ -657,6 +728,33 @@ export class ScheduledTaskStore {
     return rows.map((row) => this.rowToTask(row));
   }
 
+  /**
+   * Tasks whose `running_at_ms` marker is still set. The scheduler cross-checks
+   * this against its in-memory active-task registry: a marker with no live
+   * execution behind it is an orphaned run that `getDueTasks` would otherwise
+   * filter out silently forever.
+   */
+  getRunningTasks(): ScheduledTask[] {
+    const rows = this.getAll<TaskRow>(
+      'SELECT * FROM scheduled_tasks WHERE running_at_ms IS NOT NULL ORDER BY running_at_ms ASC'
+    );
+    return rows.map((row) => this.rowToTask(row));
+  }
+
+  /**
+   * Releases an orphaned `running_at_ms` marker so the task can fire again.
+   * Deliberately leaves last_status / last_error / consecutive_errors alone: a
+   * released skip is a ledger event, not a task failure.
+   */
+  releaseStuckRunningTask(id: string): void {
+    this.db.run(`
+      UPDATE scheduled_tasks
+      SET running_at_ms = NULL, updated_at = ?
+      WHERE id = ? AND running_at_ms IS NOT NULL
+    `, [new Date().toISOString(), id]);
+    this.saveDb();
+  }
+
   getNextDueTimeMs(): number | null {
     const todayStr = new Date().toISOString().slice(0, 10);
     const row = this.getOne<{ min_time: number | null }>(
@@ -756,6 +854,7 @@ export class ScheduledTaskStore {
       durationMs: row.duration_ms,
       error: row.error,
       trigger: row.trigger_type as 'scheduled' | 'manual',
+      skipReason: (row.skip_reason as ScheduledTaskSkipReason | null) ?? null,
     };
   }
 }

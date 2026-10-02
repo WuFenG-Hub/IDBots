@@ -19,6 +19,14 @@ const statusIcons: Record<string, { icon: string; color: string }> = {
   success: { icon: '✓', color: 'text-green-500' },
   error: { icon: '✗', color: 'text-red-500' },
   running: { icon: '●', color: 'text-blue-500' },
+  skipped: { icon: '⊘', color: 'text-amber-500' },
+};
+
+const skipReasonLabels: Record<string, string> = {
+  already_running: 'scheduledTasksSkipReasonAlreadyRunning',
+  expired: 'scheduledTasksSkipReasonExpired',
+  disabled: 'scheduledTasksSkipReasonDisabled',
+  stuck_running: 'scheduledTasksSkipReasonStuckRunning',
 };
 
 const TaskRunHistory: React.FC<TaskRunHistoryProps> = ({ taskId, runs }) => {
@@ -66,6 +74,11 @@ const TaskRunHistory: React.FC<TaskRunHistoryProps> = ({ taskId, runs }) => {
                     title={run.error}
                   >
                     {run.error}
+                  </span>
+                )}
+                {run.status === 'skipped' && run.skipReason && (
+                  <span className="text-xs text-amber-500">
+                    {i18nService.t(skipReasonLabels[run.skipReason] || run.skipReason)}
                   </span>
                 )}
                 {run.sessionId && (

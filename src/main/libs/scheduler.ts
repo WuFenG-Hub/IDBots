@@ -169,7 +169,20 @@ export class Scheduler {
       });
   }
 
+  /**
+   * One pass over the due set. A fire can be dropped silently by the store's
+   * `running_at_ms IS NULL` / `expires_at` filters or by the guards inside
+   * executeTask, so the tick also sweeps orphaned running markers into the
+   * ledger. Disabled and expired tasks are deliberately NOT ledgered per tick:
+   * a disabled task has no pending fire (disabling nulls `next_run_at_ms`), and
+   * an expired one would otherwise write a skip on every tick for as long as it
+   * stays expired — pure noise. Their reason codes remain available for the
+   * moment a fire does reach the scheduler.
+   */
   private async tick(tickGeneration: number): Promise<void> {
+    if (!this.running || tickGeneration !== this.stopGeneration) return;
+
+    this.ledgerStuckRunningTasks();
     if (!this.running || tickGeneration !== this.stopGeneration) return;
 
     const now = Date.now();
@@ -178,6 +191,30 @@ export class Scheduler {
 
     const executions = dueTasks.map((task) => this.executeTask(task, 'scheduled', tickGeneration));
     await Promise.all(executions);
+  }
+
+  /**
+   * Ledger orphaned runs as `stuck_running` skips. `getDueTasks` filters on
+   * `running_at_ms IS NULL`, so a marker left behind by a run that no longer
+   * has a live execution (scheduler stopped mid-run, lost run) silently wedges
+   * the task out of the due set — nothing in the store can tell a slow-but-live
+   * run from an abandoned one (there is no heartbeat), so `activeTasks` is the
+   * authoritative liveness signal and an orphan is detected as soon as it
+   * exists, not after a fixed timeout. Recording the skip puts the dropped
+   * execution in the ledger; releasing the marker lets the task fire again.
+   * Errors propagate so the tick's recovery path still sees them.
+   */
+  private ledgerStuckRunningTasks(): void {
+    for (const task of this.store.getRunningTasks()) {
+      if (this.activeTasks.has(task.id)) continue;
+
+      const run = this.store.recordSkippedRun(task.id, 'stuck_running', 'scheduled');
+      this.store.releaseStuckRunningTask(task.id);
+      this.emitRunUpdate(run);
+      console.warn(
+        `[Scheduler] Task ${task.id} had an orphaned running marker; recorded a stuck_running skip`
+      );
+    }
   }
 
   private isRecoverableSqliteFailure(error: unknown): boolean {
@@ -216,6 +253,7 @@ export class Scheduler {
     }
     if (this.activeTasks.has(task.id)) {
       console.log(`[Scheduler] Task ${task.id} already running, skipping`);
+      this.emitRunUpdate(this.store.recordSkippedRun(task.id, 'already_running', trigger));
       return;
     }
 
@@ -224,6 +262,7 @@ export class Scheduler {
       const todayStr = new Date().toISOString().slice(0, 10);
       if (task.expiresAt <= todayStr) {
         console.log(`[Scheduler] Task ${task.id} expired (${task.expiresAt}), skipping`);
+        this.emitRunUpdate(this.store.recordSkippedRun(task.id, 'expired', trigger));
         return;
       }
     }
