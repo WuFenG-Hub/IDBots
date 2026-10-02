@@ -248,6 +248,7 @@ test('Scheduler wired to the real turn-submission controller persists the prompt
       getSteerCapability: () => 'inactive',
       trySubmitSteer: () => ({ accepted: false, reason: 'inactive' }),
       waitForActiveTurnSettlement: async () => {},
+      interruptKernelTurnForHumanInput: async () => false,
       wasSessionStopped: () => false,
       continueSession: async (sessionId, text, options) => {
         continueCalls.push({ sessionId, text, options });
