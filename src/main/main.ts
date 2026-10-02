@@ -16701,7 +16701,16 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
         devTools: isDev,
         spellcheck: false,
         enableWebSQL: false,
-        autoplayPolicy: 'document-user-activation-required',
+        // Gesture-free autoplay in MetaApp preview frames (delegated via
+        // allow="autoplay" since ABC 0.6.3) requires the host webContents to
+        // relax its autoplay policy; delegation does not take effect under
+        // the document-user-activation-required dialect (measured
+        // NotAllowedError). Ordinary external http/https pages never render
+        // inside this webContents (will-navigate / setWindowOpenHandler hand
+        // them to the system browser, and CSP frame-src only allows the local
+        // preview server), so their audio stays under the system browser's
+        // own gesture policy.
+        autoplayPolicy: 'no-user-gesture-required',
         disableDialogs: true,
         navigateOnDragDrop: false
       },
