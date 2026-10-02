@@ -1,5 +1,5 @@
 diff --git a/dist/browser/app.js b/dist/browser/app.js
-index 0dba61f728442513ff212ed463511c82a7a27c37..20d2914b465a96df537b453843cb391dc93b77b1 100644
+index c718fdadb43b4ef668e690746d9397fba98c8ba0..4d5829514eaf99d34f3adc2b58b329c59ace9adb 100644
 --- a/dist/browser/app.js
 +++ b/dist/browser/app.js
 @@ -7675,12 +7675,12 @@ function htmlFrameSandbox(url) {
@@ -37,10 +37,10 @@ index a47038833ba822f62dd4871b5428d67d4da16a1f..69faaf5600a390a14303aeccf13df0b9
        return base;
      }
 diff --git a/dist/renderers.js b/dist/renderers.js
-index 0d633eb6f62aa34f4b5e94efbcdaf63d4ff7c334..06b89ec8a9e17f5453272d47c8788c0e0d3db1ee 100644
+index 425639da3c5ef82b534e2dfee41d840016866bca..b231cfbbfdbdf99d9aa3e9024c0f9e1b0cfe9e7d 100644
 --- a/dist/renderers.js
 +++ b/dist/renderers.js
-@@ -90,8 +90,8 @@ export function renderBotPageHtml(resource) {
+@@ -93,8 +93,8 @@ export function renderBotPageHtml(resource) {
  // frame served from its own real origin (different from the Browser page
  // origin) keeps allow-same-origin — it still cannot script the page or call
  // its same-origin API. Frames that resolve to the page origin stay opaque.
@@ -52,7 +52,7 @@ index 0d633eb6f62aa34f4b5e94efbcdaf63d4ff7c334..06b89ec8a9e17f5453272d47c8788c0e
      const origin = text(pageOrigin);
      if (!origin)
 diff --git a/dist-cjs/browser/app.js b/dist-cjs/browser/app.js
-index 55db8ed718066de7ed6129f1692649d070676c2e..d84ca304c4cfaaf351c4be18e2d856f5f31e344a 100644
+index a37c5a6643c6a5689b8f1620692c6dbd57df0a2a..6327e2ff4501f96173c864e88facfcddbdef2331 100644
 --- a/dist-cjs/browser/app.js
 +++ b/dist-cjs/browser/app.js
 @@ -7678,12 +7678,12 @@ function htmlFrameSandbox(url) {
@@ -90,10 +90,10 @@ index 8a43c7fc12ff45b60315c40bc57cd555b8c87c13..f7d2d1697123775ac5e1d25a0e478e96
        return base;
      }
 diff --git a/dist-cjs/renderers.js b/dist-cjs/renderers.js
-index 4c833a7b968094fc5bf8751b3ca311cca62c6805..1d4874c725f0fb963938dfc9955e49372e3efbed 100644
+index c5d63259917a72c5e72c8644dff0a88dea1f808a..832520ea3c85e0f5c2c80b1c734d05f3dcf4e06e 100644
 --- a/dist-cjs/renderers.js
 +++ b/dist-cjs/renderers.js
-@@ -98,8 +98,8 @@ function renderBotPageHtml(resource) {
+@@ -101,8 +101,8 @@ function renderBotPageHtml(resource) {
  // frame served from its own real origin (different from the Browser page
  // origin) keeps allow-same-origin — it still cannot script the page or call
  // its same-origin API. Frames that resolve to the page origin stay opaque.
