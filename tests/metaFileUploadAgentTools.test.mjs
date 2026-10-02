@@ -141,6 +141,7 @@ test('formatUploadResult marks the sponsor path and reports verification outcome
     feeAssist: { attempted: true, used: false, mode: 'self_paid', reason: 'insufficient_quota', stage: 'pre' },
   });
   assert.match(fellBack, /sponsor: unavailable, fell back to the bot's own wallet \(reason: insufficient_quota at pre\)/);
+  assert.match(fellBack, /WARN sponsor_fallback: true \(reason=insufficient_quota stage=pre\)/);
 
   const verified = formatUploadResult({
     ...SAMPLE_RESULT,

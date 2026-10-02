@@ -119,4 +119,5 @@ test('private chat success receipt surfaces the fee channel when the write ran s
   assert.equal(result.isError, undefined);
   assert.match(result.content[0].text, /Private message sent\./);
   assert.match(result.content[0].text, /sponsor: skipped — circuit breaker open after repeated broadcast failures, paid by the bot's own wallet/);
+  assert.match(result.content[0].text, /WARN sponsor_fallback: true \(reason=circuit_open stage=address_info\)/);
 });
