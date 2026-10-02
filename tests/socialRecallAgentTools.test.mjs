@@ -4,6 +4,7 @@ import Module from 'node:module';
 
 const require = Module.createRequire(import.meta.url);
 const { buildSocialRecallAgentTools, formatSocialPostBullets, formatSocialPostDetail, formatSocialComments } = require('../dist-electron/main/libs/socialRecallAgentTools.js');
+const { getSocialPost, getSocialFeed } = require('../dist-electron/main/services/socialRecallService.js');
 
 const SAMPLE_POST = {
   pinId: 'b6b9449bi0',
@@ -194,4 +195,128 @@ test('formatters keep author links clickable and skip empty payloads gracefully'
 
   const comments = formatSocialComments([SAMPLE_COMMENT]);
   assert.match(comments, /\[idq1bob456\]\(metaid:\/\/idq1bob456\)/);
+});
+
+test('social post normalization keeps unreadable counts null and a real 0 numeric', async () => {
+  const fetchImpl = async () => ({
+    status: 200,
+    json: async () => ({
+      code: 0,
+      data: {
+        pinId: 'metatask-root-1',
+        sourcePinId: 'metatask-root-1',
+        currentPinId: 'metatask-root-1',
+        chainName: 'mvc',
+        protocolPath: '/protocols/metatask',
+        author: { globalMetaId: 'idq1alice123' },
+        payload: { content: 'metaTask root' },
+        createdAt: 1786122527,
+        updatedAt: 1786122527,
+        likeCount: 0,
+        // commentCount / donateCount / quoteCount are absent: the buzz-only
+        // index has no record for this pin, which is NOT the same as 0.
+      },
+    }),
+  });
+  const post = await getSocialPost('metatask-root-1', { fetchImpl });
+  assert.equal(post.likeCount, 0);
+  assert.equal(post.commentCount, null);
+  assert.equal(post.donateCount, null);
+  assert.equal(post.quoteCount, null);
+
+  const explicitNulls = await getSocialPost('metatask-root-1', {
+    fetchImpl: async () => ({
+      status: 200,
+      json: async () => ({
+        code: 0,
+        data: { pinId: 'metatask-root-1', likeCount: null, commentCount: '', donateCount: 'x', quoteCount: '2' },
+      }),
+    }),
+  });
+  assert.equal(explicitNulls.likeCount, null);
+  assert.equal(explicitNulls.commentCount, null);
+  assert.equal(explicitNulls.donateCount, null);
+  assert.equal(explicitNulls.quoteCount, 2);
+});
+
+test('social feed page keeps per-item missing counts null', async () => {
+  const fetchImpl = async () => ({
+    status: 200,
+    json: async () => ({
+      code: 0,
+      data: {
+        items: [
+          { pinId: 'buzz-1', likeCount: 0, commentCount: 4, quoteCount: 0, donateCount: 0 },
+          { pinId: 'metaapp-pin-1' },
+        ],
+        hasMore: false,
+        nextCursor: null,
+      },
+    }),
+  });
+  const page = await getSocialFeed({ keyword: 'x' }, { fetchImpl });
+  assert.equal(page.items[0].likeCount, 0);
+  assert.equal(page.items[0].commentCount, 4);
+  assert.equal(page.items[1].likeCount, null);
+  assert.equal(page.items[1].commentCount, null);
+  assert.equal(page.items[1].donateCount, null);
+  assert.equal(page.items[1].quoteCount, null);
+});
+
+test('social_post_detail renders unreadable counts as unavailable, never 0', async () => {
+  const { byName } = makeHarness({
+    postResult: {
+      ...SAMPLE_POST,
+      protocolPath: '/protocols/metatask',
+      likeCount: null,
+      commentCount: null,
+      donateCount: null,
+      quoteCount: null,
+    },
+  });
+  const result = await byName.social_post_detail.handler({ pinId: 'metatask-root-1' });
+  const text = result.content[0].text;
+  assert.match(text, /- engagement: unavailable \(source: metaso-p2p social\/post, buzz-only coverage\)/);
+  assert.doesNotMatch(text, /likes 0/);
+  assert.doesNotMatch(text, /comments 0/);
+});
+
+test('social_post_detail keeps a real 0 and marks only the unreadable fields', () => {
+  const detail = formatSocialPostDetail({
+    ...SAMPLE_POST,
+    isOwn: false,
+    likeCount: 0,
+    commentCount: null,
+    donateCount: 0,
+    quoteCount: 3,
+  });
+  assert.match(detail, /- engagement: likes 0 \| comments unavailable \| quotes 3 \| donates 0/);
+  assert.match(detail, /engagement note: "unavailable" = count not offered by the index/);
+});
+
+test('feed bullets mark unreadable counts as unavailable and keep a real 0', () => {
+  const missing = formatSocialPostBullets([{
+    ...SAMPLE_POST,
+    likeCount: null,
+    commentCount: null,
+    quoteCount: null,
+  }]);
+  assert.match(missing, /counts unavailable \(source: metaso-p2p social\/post, buzz-only coverage\)/);
+  assert.doesNotMatch(missing, /likes 0/);
+
+  const zeros = formatSocialPostBullets([{
+    ...SAMPLE_POST,
+    likeCount: 0,
+    commentCount: 0,
+    quoteCount: 0,
+  }]);
+  assert.match(zeros, /likes 0 \| comments 0 \| quotes 0/);
+
+  const partial = formatSocialPostBullets([{
+    ...SAMPLE_POST,
+    likeCount: 5,
+    commentCount: null,
+    quoteCount: 1,
+  }]);
+  assert.match(partial, /likes 5 \| comments unavailable \| quotes 1/);
 });

@@ -78,6 +78,22 @@ function authorName(post: SocialPostItem): string {
   return post.author.globalMetaId || post.author.address || post.author.metaId || 'unknown';
 }
 
+/**
+ * Coverage note for counts the index cannot read. The Social Recall index is
+ * buzz-only: a pin outside its coverage comes back with no engagement fields
+ * at all, which must be surfaced as `unavailable`, never as 0.
+ */
+const COUNTS_SOURCE_NOTE = 'source: metaso-p2p social/post, buzz-only coverage';
+
+/** One engagement field; a missing count renders as `unavailable`, a real 0 as `0`. */
+function countField(label: string, value: number | null): string {
+  return value === null ? `${label} unavailable` : `${label} ${value}`;
+}
+
+function allCountsMissing(values: Array<number | null>): boolean {
+  return values.every((value) => value === null);
+}
+
 /** Ready-to-quote markdown bullets for social feed candidates. Post snippets are pin:// links, author names metaid:// links. */
 export function formatSocialPostBullets(items: SocialPostItem[]): string {
   return items.map((item) => {
@@ -92,10 +108,18 @@ export function formatSocialPostBullets(items: SocialPostItem[]): string {
       ? `[${snippet}](${buildPinBrowserUri({ pinId: item.pinId, path: item.protocolPath })})`
       : snippet;
     const head = `- **${snippetPart}** — by ${namePart} · ${formatTime(item.createdAt)}${own}`;
+    // A pin the buzz-only index does not cover comes back with all counts
+    // missing; collapse those three fields into one explicit marker instead of
+    // repeating "unavailable" (never render them as 0).
+    const counts = allCountsMissing([item.likeCount, item.commentCount, item.quoteCount])
+      ? [`counts unavailable (${COUNTS_SOURCE_NOTE})`]
+      : [
+          countField('likes', item.likeCount),
+          countField('comments', item.commentCount),
+          countField('quotes', item.quoteCount),
+        ];
     const meta = [
-      `likes ${item.likeCount}`,
-      `comments ${item.commentCount}`,
-      `quotes ${item.quoteCount}`,
+      ...counts,
       item.hotScore != null ? `hot ${item.hotScore}` : '',
       item.chainName ? `chain: ${item.chainName}` : '',
       item.pinId ? `pin: ${item.pinId}` : '',
@@ -123,7 +147,20 @@ export function formatSocialPostDetail(post: SocialPostCandidate): string {
     const updated = post.updatedAt && post.updatedAt !== post.createdAt ? formatTime(post.updatedAt) : '';
     lines.push(`- ${[`created: ${created}`, updated ? `updated: ${updated}` : ''].filter(Boolean).join(' | ')}`);
   }
-  lines.push(`- engagement: likes ${post.likeCount} | comments ${post.commentCount} | quotes ${post.quoteCount} | donates ${post.donateCount}`);
+  const values = [post.likeCount, post.commentCount, post.quoteCount, post.donateCount];
+  if (allCountsMissing(values)) {
+    lines.push(`- engagement: unavailable (${COUNTS_SOURCE_NOTE})`);
+  } else {
+    lines.push(`- engagement: ${[
+      countField('likes', post.likeCount),
+      countField('comments', post.commentCount),
+      countField('quotes', post.quoteCount),
+      countField('donates', post.donateCount),
+    ].join(' | ')}`);
+    if (values.some((value) => value === null)) {
+      lines.push(`- engagement note: "unavailable" = count not offered by the index (${COUNTS_SOURCE_NOTE})`);
+    }
+  }
   const content = post.payload?.content?.trim();
   if (content) lines.push(`- content: ${truncate(content, 1500)}`);
   if (post.payload?.attachments?.length) lines.push(`- attachments: ${post.payload.attachments.join(', ')}`);
@@ -197,16 +234,16 @@ export function buildSocialRecallAgentTools(deps: {
   const { tool, socialRecall, openBestMatchInBrowser, sessionId, resolveMetabotId } = deps;
 
   const candidatesGuidance = openBestMatchInBrowser
-    ? 'Pick the 3-5 posts most relevant to the user and rank them by the user\'s interest — the list above is an unranked coarse candidate set. In your reply, REUSE the bullet lines above verbatim: post snippets MUST remain pin:// links, author names MUST remain metaid:// links, and pinIds must stay intact (they are needed for social_post_detail / social_post_comments). When the user wants to view an author, open their page with bot_browser_open_uri on the metaid:// URI (prefer newTab=true). Never invent posts, authors, or engagement numbers, and never turn an on-chain pin into a Web2 URL.'
-    : 'Pick the 3-5 posts most relevant to the user and rank them by the user\'s interest — the list above is an unranked coarse candidate set. In your reply, REUSE the bullet lines above verbatim: post snippets MUST remain clickable pin:// links, author names MUST remain clickable metaid:// links, and pinIds must stay intact; never invent posts, authors, or engagement numbers, and never turn an on-chain pin into a Web2 URL. Do NOT open anything in the Bot Browser yourself: the user works in this chat view and will click links. For a post\'s aggregated engagement (likes/comments/quotes) use social_post_detail; for its replies use social_post_comments.';
+    ? 'Pick the 3-5 posts most relevant to the user and rank them by the user\'s interest — the list above is an unranked coarse candidate set. In your reply, REUSE the bullet lines above verbatim: post snippets MUST remain pin:// links, author names MUST remain metaid:// links, and pinIds must stay intact (they are needed for social_post_detail / social_post_comments). When the user wants to view an author, open their page with bot_browser_open_uri on the metaid:// URI (prefer newTab=true). Never invent posts, authors, or engagement numbers, and never turn an on-chain pin into a Web2 URL. A count shown as `unavailable` means the buzz-only social index has no count for that pin — report it as unknown (likely a non-buzz protocol pin), NEVER as 0.'
+    : 'Pick the 3-5 posts most relevant to the user and rank them by the user\'s interest — the list above is an unranked coarse candidate set. In your reply, REUSE the bullet lines above verbatim: post snippets MUST remain clickable pin:// links, author names MUST remain clickable metaid:// links, and pinIds must stay intact; never invent posts, authors, or engagement numbers, and never turn an on-chain pin into a Web2 URL. A count shown as `unavailable` means the buzz-only social index has no count for that pin — report it as unknown (likely a non-buzz protocol pin), NEVER as 0. Do NOT open anything in the Bot Browser yourself: the user works in this chat view and will click links. For a post\'s aggregated engagement (likes/comments/quotes) use social_post_detail; for its replies use social_post_comments.';
 
   const detailGuidance = openBestMatchInBrowser
-    ? 'Present these fields to the user with the author name kept as a clickable metaid:// link, and open the author\'s bot page with bot_browser_open_uri on that URI when the user asks to view them. For the post\'s replies use social_post_comments.'
-    : 'Present these fields to the user with the author name kept as a clickable metaid:// link and the post cited via its pin:// view link. Do NOT open the Bot Browser yourself — the user clicks the links to view. For the post\'s replies use social_post_comments.';
+    ? 'Present these fields to the user with the author name kept as a clickable metaid:// link, and open the author\'s bot page with bot_browser_open_uri on that URI when the user asks to view them. Counts marked `unavailable` are pins the buzz-only index does not cover (e.g. metaTask roots, metaapp pins, witness submissions) — say the count is unknown, NEVER 0. For the post\'s replies use social_post_comments.'
+    : 'Present these fields to the user with the author name kept as a clickable metaid:// link and the post cited via its pin:// view link. Do NOT open the Bot Browser yourself — the user clicks the links to view. Counts marked `unavailable` are pins the buzz-only index does not cover (e.g. metaTask roots, metaapp pins, witness submissions) — say the count is unknown, NEVER 0. For the post\'s replies use social_post_comments.';
 
   const searchSocialPosts = tool(
     'search_social_posts',
-    'Search on-chain social posts (simplebuzz) — trigger liberally for post/buzz questions: topic, author, time window, hot, or following feed. Returns up to `size` coarse candidates newest-first (sort=hot: hot-ranked); you pick/rank the top 3-5. Filters AND-combine; multiple keywords/publishers match OR. Time via sinceDays (today=1) or since/until Unix seconds; publisher takes GlobalMetaID/MetaID/address (resolve names via search_metaids first). Engagement: social_post_detail; replies: social_post_comments. Not identity lookup (search_metaids) or apps (search_metaapps).',
+    'Search on-chain social posts (simplebuzz) — trigger liberally for post/buzz questions: topic, author, time window, hot, or following feed. Returns up to `size` coarse candidates newest-first (sort=hot: hot-ranked); you pick/rank the top 3-5. Filters AND-combine; multiple keywords/publishers match OR. Time via sinceDays (today=1) or since/until Unix seconds; publisher takes GlobalMetaID/MetaID/address (resolve names via search_metaids first). Counts marked `unavailable` are outside the buzz-only index — report unknown, never 0. Engagement: social_post_detail; replies: social_post_comments. Not identity lookup (search_metaids) or apps (search_metaapps).',
     {
       query: z.string().optional(),
       keywords: z.array(z.string()).optional(),
@@ -282,7 +319,7 @@ export function buildSocialRecallAgentTools(deps: {
 
   const socialPostDetail = tool(
     'social_post_detail',
-    'Get one on-chain post by pinId: full content, author, timestamps, attachments, engagement (likes, comments, quotes, donates). For questions about a concrete post; find posts first with search_social_posts (your own latest: publisher=your identity, then detail its pinId). Reply thread: social_post_comments. Missing/hidden posts are reported honestly.',
+    'Get one on-chain post by pinId: full content, author, timestamps, attachments, engagement (likes, comments, quotes, donates). A count the buzz-only index cannot read comes back as `unavailable` (the pin is outside its coverage, e.g. a metaTask root, metaapp pin, or witness submission) — report it as unknown, never as 0; a real 0 is rendered as 0. For questions about a concrete post; find posts first with search_social_posts (your own latest: publisher=your identity, then detail its pinId). Reply thread: social_post_comments. Missing/hidden posts are reported honestly.',
     {
       pinId: z.string().min(1),
     },
