@@ -6,6 +6,8 @@ const require = createRequire(import.meta.url);
 const {
   buildMetawebLearningAgentTools,
   formatMetawebPinDetail,
+  METAWEB_BATCH_READ_CALIBER,
+  METAWEB_BATCH_RECEIPT_MAX_LIST,
   METAWEB_BATCH_RESULT_CHAR_BUDGET,
 } = require('../dist-electron/main/libs/metawebLearningAgentTools.js');
 
@@ -175,4 +177,147 @@ test('degenerate batch (skeletons alone over budget) fails loudly with a split s
 test('budget constant sits safely under the 20k shaping cap', () => {
   assert.ok(METAWEB_BATCH_RESULT_CHAR_BUDGET < 20_000);
   assert.ok(METAWEB_BATCH_RESULT_CHAR_BUDGET >= 15_000, 'budget should stay generous for real batches');
+});
+
+const RECEIPT_PREFIX = '- RECEIPT read_metaweb_pins_batch: ';
+
+/** Parse the machine-readable receipt line (issue #57) out of a batch result. */
+function receiptOf(text) {
+  const line = text.split('\n').find((entry) => entry.startsWith(RECEIPT_PREFIX));
+  assert.ok(line, 'machine-readable receipt line missing');
+  return JSON.parse(line.slice(RECEIPT_PREFIX.length));
+}
+
+/** The rendered section for one pin, up to the next section boundary. */
+function sectionOf(text, pinId) {
+  const start = text.indexOf(`Pin ${pinId}:`);
+  assert.ok(start >= 0, `no rendered section for ${pinId}`);
+  const next = text.indexOf('\n\nPin ', start + 1);
+  return text.slice(start, next === -1 ? undefined : next);
+}
+
+test('batch receipt carries a machine-readable summary that a hand audit reproduces', async () => {
+  const entries = {};
+  for (let index = 0; index < 12; index += 1) {
+    const pinId = pinIdFor(index, 'm');
+    entries[pinId] = makePin(pinId, { text: `Body ${index} — ` + 'w'.repeat(1500) });
+  }
+  const { batch } = makeHarness(entries);
+  const text = resultText(await batch.handler({ pinIds: Object.keys(entries) }));
+  const receipt = receiptOf(text);
+
+  assert.equal(receipt.requested, 12);
+  assert.equal(receipt.readable_upstream, 12);
+  assert.equal(receipt.caliber, METAWEB_BATCH_READ_CALIBER);
+  // bytes_written is the real delivered byte count, not a decoration.
+  assert.equal(receipt.bytes_written, Buffer.byteLength(text, 'utf8'));
+  // The machine-readable line is part of the delivered bytes, so the render
+  // budget must still hold with it included.
+  assert.ok(text.length <= METAWEB_BATCH_RESULT_CHAR_BUDGET, `rendered ${text.length} chars`);
+
+  // Every count is reproducible by parsing the receipt text itself.
+  assert.equal(receipt.readable_upstream, (text.match(/^Pin .+:$/gm) ?? []).length);
+  assert.equal(receipt.returned, (text.match(/<metaweb_pin_content>/g) ?? []).length);
+  assert.equal(receipt.omitted, (text.match(/content omitted to fit this batch's result budget/g) ?? []).length);
+
+  // Per-cut detail agrees with the per-pin human trim label.
+  assert.ok(receipt.truncation_points.length > 0);
+  assert.equal(receipt.truncation_point_count, receipt.truncation_points.length);
+  for (const point of receipt.truncation_points.slice(0, 3)) {
+    const label = sectionOf(text, point.pin_id).match(/showing first (\d+) of (\d+) chars/);
+    assert.ok(label, `no trim label for ${point.pin_id}`);
+    assert.equal(Number(label[1]), point.kept_chars);
+    assert.equal(Number(label[2]), point.total_chars);
+    assert.equal(point.reason, 'trimmed');
+    assert.equal(point.unit, 'utf16-char');
+    assert.ok(point.cut_at_bytes > 0 && point.cut_at_bytes < point.total_bytes);
+  }
+});
+
+test('receipt fields are identical across two calls with the same pin list', async () => {
+  const entries = {};
+  for (let index = 0; index < 8; index += 1) {
+    const pinId = pinIdFor(index, 'd');
+    entries[pinId] = makePin(pinId, { text: `D ${index} ` + 'v'.repeat(3000) });
+  }
+  const { batch } = makeHarness(entries);
+  const ids = Object.keys(entries);
+  const first = resultText(await batch.handler({ pinIds: ids }));
+  const second = resultText(await batch.handler({ pinIds: ids }));
+  assert.equal(first, second, 'receipt text must be byte-identical across calls');
+  assert.deepEqual(receiptOf(first), receiptOf(second));
+});
+
+test('receipt separates upstream-readable from actually-delivered and lists omissions', async () => {
+  const entries = {};
+  for (let index = 0; index < 20; index += 1) {
+    const pinId = pinIdFor(index, 'o');
+    entries[pinId] = makePin(pinId, { text: `Body ${index} — ` + 'y'.repeat(8000) });
+  }
+  const { batch } = makeHarness(entries);
+  const text = resultText(await batch.handler({ pinIds: Object.keys(entries) }));
+  const receipt = receiptOf(text);
+
+  // Upstream reported every pin readable; the bodies were NOT delivered. The
+  // ticket's core lesson is that these two numbers must not be conflated.
+  assert.equal(receipt.readable_upstream, 20);
+  assert.equal(receipt.returned, (text.match(/<metaweb_pin_content>/g) ?? []).length);
+  assert.equal(receipt.omitted, 20);
+  assert.equal(receipt.omitted, (text.match(/content omitted to fit this batch's result budget/g) ?? []).length);
+  assert.equal(receipt.truncated, true);
+  // Counts stay exact even when the id/point lists are capped for size.
+  assert.ok(receipt.omitted_ids.length <= METAWEB_BATCH_RECEIPT_MAX_LIST);
+  assert.equal(receipt.truncation_point_count, 20);
+  assert.ok(receipt.truncation_points.length <= METAWEB_BATCH_RECEIPT_MAX_LIST);
+  for (const point of receipt.truncation_points) {
+    assert.equal(point.reason, 'omitted');
+    assert.equal(point.kept_chars, 0);
+    assert.equal(point.cut_at_bytes, 0);
+  }
+  assert.equal(receipt.bytes_written, Buffer.byteLength(text, 'utf8'));
+  assert.ok(text.length <= METAWEB_BATCH_RESULT_CHAR_BUDGET, `rendered ${text.length} chars`);
+});
+
+test('receipt records unreadable ids and an upstream server cap', async () => {
+  const goodId = pinIdFor(0, 'g');
+  const capId = pinIdFor(1, 'c');
+  const errId = pinIdFor(2, 'e');
+  const nullId = pinIdFor(3, 'n');
+  const entries = {
+    [goodId]: makePin(goodId, { text: 'g'.repeat(4000) }),
+    [capId]: makePin(capId, { text: 'C'.repeat(8000), truncated: true, totalLength: 12345 }),
+    [errId]: { pinId: errId, error: 'indexer gap' },
+    [nullId]: makePin(nullId, { text: null, truncated: null, totalLength: null }),
+  };
+  const { batch } = makeHarness(entries);
+  const text = resultText(await batch.handler({ pinIds: [goodId, capId, errId, nullId] }));
+  const receipt = receiptOf(text);
+
+  assert.equal(receipt.requested, 4);
+  assert.equal(receipt.readable_upstream, 2);
+  assert.equal(receipt.returned, 2);
+  assert.equal(receipt.unreadable, 2);
+  assert.deepEqual(receipt.unreadable_ids, [errId, nullId]);
+  const cap = receipt.truncation_points.find((point) => point.pin_id === capId);
+  assert.equal(cap.reason, 'server_cap');
+  assert.equal(cap.kept_chars, 8000); // runes delivered
+  assert.equal(cap.total_chars, 12345); // full-body rune count the server reported
+  assert.equal(cap.total_bytes, null); // full-body bytes are unknown after a server cap
+  assert.equal(cap.unit, 'rune');
+  assert.equal(receipt.bytes_written, Buffer.byteLength(text, 'utf8'));
+});
+
+test('a batch with no readable body still carries the machine-readable receipt', async () => {
+  const errId = pinIdFor(0, 'z');
+  const entries = { [errId]: { pinId: errId, error: 'gone' } };
+  const { batch } = makeHarness(entries);
+  const text = resultText(await batch.handler({ pinIds: [errId] }));
+  const receipt = receiptOf(text);
+  assert.equal(receipt.requested, 1);
+  assert.equal(receipt.readable_upstream, 0);
+  assert.equal(receipt.returned, 0);
+  assert.equal(receipt.truncated, false);
+  assert.equal(receipt.unreadable, 1);
+  assert.deepEqual(receipt.unreadable_ids, [errId]);
+  assert.equal(receipt.bytes_written, Buffer.byteLength(text, 'utf8'));
 });

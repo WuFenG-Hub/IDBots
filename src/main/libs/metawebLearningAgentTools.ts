@@ -193,6 +193,110 @@ export function formatMetawebPinDetail(
 }
 
 /**
+ * Reading caliber (口径) tag for read_metaweb_pins_batch receipts: it names the
+ * channel a batch body arrived through, because the same pin can legitimately
+ * measure different lengths through different channels (the batch endpoint caps
+ * each pin's text at 8000 runes server-side; a single read through another
+ * channel may not). A constant on purpose — the field must be identical across
+ * two calls with the same pin list.
+ */
+export const METAWEB_BATCH_READ_CALIBER =
+  `api/metaweb/pins:batch;text-cap=8000runes;host-budget=${METAWEB_BATCH_RESULT_CHAR_BUDGET}chars`;
+
+/** One cut in a delivered batch receipt: which pin, and how far its body got. */
+export type MetawebBatchTruncationPoint = {
+  /** The id printed in that pin's receipt section (`Pin <id>:`). */
+  pin_id: string;
+  /** `trimmed` = host budget cut the body; `omitted` = host budget dropped it whole; `server_cap` = the batch API's own 8000-rune cap. */
+  reason: 'trimmed' | 'omitted' | 'server_cap';
+  kept_chars: number;
+  /** The full body's length in `unit`; null when only the capped text is known (server_cap). */
+  total_chars: number | null;
+  /** UTF-8 byte offset into the full body where delivery stopped (0 for a whole-body omission). */
+  cut_at_bytes: number;
+  /** The full body's UTF-8 bytes; null when only the capped text is known (server_cap). */
+  total_bytes: number | null;
+  /** Unit of kept_chars/total_chars: UTF-16 units for host cuts, runes for the upstream cap. */
+  unit: 'utf16-char' | 'rune';
+};
+
+/**
+ * Machine-readable summary of one read_metaweb_pins_batch receipt (GitHub issue
+ * #57). The human header reports upstream fetch outcomes ("N readable"); this
+ * block keeps that number AND the number of bodies actually delivered, because
+ * the ticket's core lesson is that those two are different questions. Nothing
+ * here is a decoration: every field is recomputed from the same values the
+ * renderer used, so a hand audit of the receipt text can reproduce it.
+ */
+export type MetawebBatchReadReceipt = {
+  /** pinIds asked for in this call. */
+  requested: number;
+  /** Pins whose upstream fetch returned a body — the header's first number. */
+  readable_upstream: number;
+  /** Bodies actually present in the delivered receipt (whole + trimmed). Aligns with omni_read's `returned`. */
+  returned: number;
+  /** True when any body was cut or dropped (aligns with omni_read's `truncated`). */
+  truncated: boolean;
+  /** UTF-8 byte length of the delivered receipt text, THIS marker line included (the spill/`wc -c` figure). */
+  bytes_written: number;
+  /** Readable pins whose whole body was dropped to fit the render budget (exact count). */
+  omitted: number;
+  /** Omitted pin ids, capped at METAWEB_BATCH_RECEIPT_MAX_LIST — `omitted` stays exact. */
+  omitted_ids: string[];
+  /** Requested ids that produced no usable body at all (error / no entry / encrypted-or-empty); exact count. */
+  unreadable: number;
+  /** Unreadable ids, capped like the omitted list. */
+  unreadable_ids: string[];
+  /** Exact number of cuts (trimmed + omitted + upstream-capped); `truncation_points` is capped. */
+  truncation_point_count: number;
+  /** Per-cut detail, capped at METAWEB_BATCH_RECEIPT_MAX_LIST. */
+  truncation_points: MetawebBatchTruncationPoint[];
+  caliber: string;
+};
+
+/**
+ * Cap on the id/point lists in the machine-readable line. The marker is part of
+ * the delivered receipt, so an uncapped per-pin list would push large batches
+ * back over the runtime's result cap — the very failure this tool guards
+ * against. Counts stay exact; the human per-pin labels carry every cut. Same
+ * shape as the runtime shaping marker's capped `trims[]` + exact `trimCount`.
+ */
+export const METAWEB_BATCH_RECEIPT_MAX_LIST = 12;
+
+export const METAWEB_BATCH_RECEIPT_MARKER = '- RECEIPT read_metaweb_pins_batch: ';
+
+/**
+ * Assemble the batch receipt with its machine-readable marker line and solve
+ * `bytes_written` to a fixed point: the marker's own digits change the text
+ * length it reports, so the value is measured on the assembled receipt and
+ * re-embedded until stable (converges within a couple of passes; a digit-count
+ * change at a power of ten is the only reason for another pass).
+ */
+export function buildMetawebBatchReadReceipt(args: {
+  header: string;
+  sections: string[];
+  citation: string;
+  receipt: Omit<MetawebBatchReadReceipt, 'bytes_written'>;
+}): string {
+  const { header, sections, citation, receipt } = args;
+  const assemble = (bytesWritten: number): string => [
+    header,
+    `${METAWEB_BATCH_RECEIPT_MARKER}${JSON.stringify({ ...receipt, bytes_written: bytesWritten })}`,
+    ...sections,
+    citation,
+  ].join('\n\n');
+  let bytesWritten = 0;
+  let text = assemble(bytesWritten);
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const measured = Buffer.byteLength(text, 'utf8');
+    if (measured === bytesWritten) break;
+    bytesWritten = measured;
+    text = assemble(bytesWritten);
+  }
+  return text;
+}
+
+/**
  * Inline MCP tools that let any cowork session search MetaWeb knowledge and
  * read pins — same always-on posture as search_social_posts (see
  * coworkRunner). search_metaweb is the search engine; read_metaweb_pin is
@@ -318,7 +422,7 @@ export function buildMetawebLearningAgentTools(deps: {
 
   const readMetawebPinsBatch = tool(
     'read_metaweb_pins_batch',
-    'Read up to 50 MetaWeb pins in ONE call — prefer over looping read_metaweb_pin for a shortlist to deep-read. Returns each pinId mapped to its sheet (protocol, title/meta, author, body) or an isolated per-pin error — single failures never fail the batch. Output is budget-capped: long bodies are trimmed or omitted (labeled per-pin) while every meta block stays complete — a missing body does NOT mean unreadable; follow up with read_metaweb_pin on trimmed/omitted pins you need in full. ~10-15 pins per call keeps bodies mostly whole; null content means encrypted/empty — skip.',
+    'Read up to 50 MetaWeb pins in ONE call — prefer over looping read_metaweb_pin for a shortlist to deep-read. Returns each pinId mapped to its sheet (protocol, title/meta, author, body) or an isolated per-pin error — single failures never fail the batch. Output is budget-capped: long bodies are trimmed or omitted (labeled per-pin) while every meta block stays complete — a missing body does NOT mean unreadable; follow up with read_metaweb_pin on trimmed/omitted pins you need in full. The receipt carries a one-line machine-readable summary (`- RECEIPT read_metaweb_pins_batch: {…}`) with requested/readable_upstream/returned/omitted/truncation_points/bytes_written/caliber, so "read out" and "delivered" are separately checkable. ~10-15 pins per call keeps bodies mostly whole; null content means encrypted/empty — skip.',
     {
       pinIds: z.array(z.string().min(1)).min(1).max(50),
     },
@@ -347,18 +451,24 @@ export function buildMetawebLearningAgentTools(deps: {
         const slots: Array<string | ReadableSlot> = [];
         const readableSlots: ReadableSlot[] = [];
         let firstReadable: ReadableSlot | null = null;
+        // Requested ids that produced no usable body upstream — carried into the
+        // machine-readable receipt as `unreadable_ids`.
+        const unreadableIds: string[] = [];
         for (const requestedId of pinIds) {
           const entry: MetawebBatchEntry | undefined = entries[requestedId];
           if (!entry) {
+            unreadableIds.push(requestedId);
             slots.push(`## ${requestedId}\n(no entry returned for this pinId — treat it as unreadable and move on)`);
             continue;
           }
           if (isBatchErrorEntry(entry)) {
+            unreadableIds.push(requestedId);
             slots.push(`## ${requestedId}\n- error: ${entry.error}`);
             continue;
           }
           const pin = entry as MetawebBatchPin;
           if (pin.text == null) {
+            unreadableIds.push(requestedId);
             slots.push(`## ${requestedId}\n- (${pin.protocol || 'unknown protocol'}) has no readable text content (encrypted, binary, or empty) — skip it; do NOT invent its content.`);
             continue;
           }
@@ -369,7 +479,24 @@ export function buildMetawebLearningAgentTools(deps: {
         }
         if (readableSlots.length === 0) {
           const header = `0/${pinIds.length} pin(s) readable in this batch:`;
-          return textResult([header, ...slots.filter((slot) => typeof slot === 'string'), METAWEB_CITATION_RULE].join('\n\n'));
+          return textResult(buildMetawebBatchReadReceipt({
+            header,
+            sections: slots.filter((slot): slot is string => typeof slot === 'string'),
+            citation: METAWEB_CITATION_RULE,
+            receipt: {
+              requested: pinIds.length,
+              readable_upstream: 0,
+              returned: 0,
+              truncated: false,
+              omitted: 0,
+              omitted_ids: [],
+              unreadable: unreadableIds.length,
+              unreadable_ids: unreadableIds.slice(0, METAWEB_BATCH_RECEIPT_MAX_LIST),
+              truncation_point_count: 0,
+              truncation_points: [],
+              caliber: METAWEB_BATCH_READ_CALIBER,
+            },
+          }));
         }
         // Measured per-body overhead (content-block wrapper, notes, trim
         // label allowance) — exact for this batch's shapes instead of a guess.
@@ -395,51 +522,150 @@ export function buildMetawebLearningAgentTools(deps: {
             true,
           );
         }
+        const baseBodyBudget = METAWEB_BATCH_RESULT_CHAR_BUDGET - fixedTotal - skeletonTotal;
         // Water-filling: pins whose whole body fits under the running equal
         // share take it whole, shrinking the denominator for the rest.
-        const bodyBudget = METAWEB_BATCH_RESULT_CHAR_BUDGET - fixedTotal - skeletonTotal;
-        const keptChars = new Array<number>(readableSlots.length).fill(0);
-        const allocationOrder = readableSlots
-          .map((slot, index) => ({ need: slot.pin.text.length, index }))
-          .sort((a, b) => a.need - b.need);
-        let remaining = bodyBudget;
-        let pending = allocationOrder.length;
-        for (const { need, index } of allocationOrder) {
-          const cap = Math.floor(remaining / pending);
-          const keep = Math.min(need, cap);
-          keptChars[index] = keep;
-          remaining -= keep;
-          pending -= 1;
-        }
-        const sections: string[] = [];
-        let trimmedCount = 0;
-        let readableSeen = 0;
-        for (const slot of slots) {
-          if (typeof slot === 'string') {
-            sections.push(slot);
-            continue;
+        const allocateBodies = (bodyBudget: number): number[] => {
+          const kept = new Array<number>(readableSlots.length).fill(0);
+          const allocationOrder = readableSlots
+            .map((slot, index) => ({ need: slot.pin.text.length, index }))
+            .sort((a, b) => a.need - b.need);
+          let remaining = bodyBudget;
+          let pending = allocationOrder.length;
+          for (const { need, index } of allocationOrder) {
+            const cap = Math.floor(remaining / pending);
+            const keep = Math.min(need, cap);
+            kept[index] = keep;
+            remaining -= keep;
+            pending -= 1;
           }
-          const { pin } = slot;
-          const keep = keptChars[readableSeen];
-          readableSeen += 1;
-          const whole = keep >= pin.text.length;
-          const omit = !whole && keep < METAWEB_BATCH_BODY_FLOOR_CHARS;
-          if (!whole) trimmedCount += 1;
-          // Same fire-and-forget chain-read ledger as the single-read tool,
-          // but only when a body actually rendered: a pin whose body was
-          // omitted for budget was fetched, not read.
+          return kept;
+        };
+        const renderReceipt = (keptChars: number[]): string => {
+          const sections: string[] = [];
+          let trimmedCount = 0;
+          let readableSeen = 0;
+          // Delivery accounting for the machine-readable receipt: what actually
+          // landed in this output, per pin (issue #57 — the header counts
+          // upstream fetch outcomes, which is a different question).
+          let returnedCount = 0;
+          const omittedIds: string[] = [];
+          const truncationPoints: MetawebBatchTruncationPoint[] = [];
+          for (const slot of slots) {
+            if (typeof slot === 'string') {
+              sections.push(slot);
+              continue;
+            }
+            const { pin } = slot;
+            const keep = keptChars[readableSeen];
+            readableSeen += 1;
+            const whole = keep >= pin.text.length;
+            const omit = !whole && keep < METAWEB_BATCH_BODY_FLOOR_CHARS;
+            if (!whole) trimmedCount += 1;
+            if (omit) {
+              omittedIds.push(pin.pinId);
+              truncationPoints.push({
+                pin_id: pin.pinId,
+                reason: 'omitted',
+                kept_chars: 0,
+                total_chars: pin.text.length,
+                cut_at_bytes: 0,
+                total_bytes: Buffer.byteLength(pin.text, 'utf8'),
+                unit: 'utf16-char',
+              });
+            } else {
+              returnedCount += 1;
+              if (!whole) {
+                const delivered = pin.text.slice(0, keep);
+                truncationPoints.push({
+                  pin_id: pin.pinId,
+                  reason: 'trimmed',
+                  kept_chars: keep,
+                  total_chars: pin.text.length,
+                  cut_at_bytes: Buffer.byteLength(delivered, 'utf8'),
+                  total_bytes: Buffer.byteLength(pin.text, 'utf8'),
+                  unit: 'utf16-char',
+                });
+              } else if (pin.truncated === true) {
+                // The batch API capped this body at 8000 runes before we ever
+                // saw it — a real cut upstream, so it belongs in
+                // truncation_points.
+                truncationPoints.push({
+                  pin_id: pin.pinId,
+                  reason: 'server_cap',
+                  kept_chars: Array.from(pin.text).length,
+                  total_chars: pin.totalLength,
+                  cut_at_bytes: Buffer.byteLength(pin.text, 'utf8'),
+                  total_bytes: null,
+                  unit: 'rune',
+                });
+              }
+            }
+            sections.push(omit
+              ? formatMetawebPinDetail(pin, { omitBody: true })
+              : formatMetawebPinDetail(pin, whole ? undefined : { bodyCharCap: keep }));
+          }
+          const budgetNote = trimmedCount > 0
+            ? `; ${trimmedCount} body(ies) trimmed or omitted to fit the result budget — read_metaweb_pin any of them you need in full`
+            : '';
+          const header = `${readableSlots.length}/${pinIds.length} pin(s) readable in this batch${budgetNote}:`;
+          return buildMetawebBatchReadReceipt({
+            header,
+            sections,
+            citation: METAWEB_CITATION_RULE,
+            receipt: {
+              requested: pinIds.length,
+              readable_upstream: readableSlots.length,
+              returned: returnedCount,
+              truncated: truncationPoints.length > 0,
+              omitted: omittedIds.length,
+              omitted_ids: omittedIds.slice(0, METAWEB_BATCH_RECEIPT_MAX_LIST),
+              unreadable: unreadableIds.length,
+              unreadable_ids: unreadableIds.slice(0, METAWEB_BATCH_RECEIPT_MAX_LIST),
+              truncation_point_count: truncationPoints.length,
+              truncation_points: truncationPoints.slice(0, METAWEB_BATCH_RECEIPT_MAX_LIST),
+              caliber: METAWEB_BATCH_READ_CALIBER,
+            },
+          });
+        };
+        let renderBudget = baseBodyBudget;
+        let receiptText = renderReceipt(allocateBodies(renderBudget));
+        // The machine-readable line is part of the delivered bytes too, so a
+        // batch that filled its content budget would overflow it once the line
+        // is added. Claw the overflow back from the body budget and re-render;
+        // trimming bodies can add marker entries, so a couple of passes
+        // converge (the budget only shrinks, so this terminates).
+        for (let attempt = 0; attempt < 3 && receiptText.length > METAWEB_BATCH_RESULT_CHAR_BUDGET; attempt += 1) {
+          const nextBudget = renderBudget - (receiptText.length - METAWEB_BATCH_RESULT_CHAR_BUDGET) - 16;
+          if (nextBudget < 0) break;
+          renderBudget = nextBudget;
+          receiptText = renderReceipt(allocateBodies(renderBudget));
+        }
+        if (receiptText.length > METAWEB_BATCH_RESULT_CHAR_BUDGET) {
+          // Bodies are already dropped and it still does not fit (only possible
+          // when the meta blocks plus the machine-readable line alone bust the
+          // budget): fail loudly instead of emitting a result the runtime would
+          // head+tail cut.
+          const splitHint = `Split it into batches of at most ~${Math.max(1, Math.floor((METAWEB_BATCH_RESULT_CHAR_BUDGET - joinsAndFooter) / Math.max(1, Math.ceil(skeletonTotal / pinIds.length))))} pinIds and retry.`;
+          return textResult(
+            `This batch (${pinIds.length} pins) cannot render within the result budget — the meta blocks plus the machine-readable receipt alone are over budget. ${splitHint}`,
+            true,
+          );
+        }
+        // Same fire-and-forget chain-read ledger as the single-read tool, but
+        // only for pins whose body actually rendered in the FINAL allocation
+        // (recorded once, after the render settles, so the re-render passes
+        // above cannot double-record): a pin whose body was omitted for budget
+        // was fetched, not read.
+        const finalKept = allocateBodies(renderBudget);
+        readableSlots.forEach((slot, index) => {
+          const keep = finalKept[index];
+          const omit = keep < slot.pin.text.length && keep < METAWEB_BATCH_BODY_FLOOR_CHARS;
           if (!omit) {
-            recordChainReadSafe(readInputFromMetawebPin(pin, resolveMetabotId?.(sessionId ?? ''), 'read_metaweb_pins_batch'));
+            recordChainReadSafe(readInputFromMetawebPin(slot.pin, resolveMetabotId?.(sessionId ?? ''), 'read_metaweb_pins_batch'));
           }
-          sections.push(omit
-            ? formatMetawebPinDetail(pin, { omitBody: true })
-            : formatMetawebPinDetail(pin, whole ? undefined : { bodyCharCap: keep }));
-        }
-        const budgetNote = trimmedCount > 0
-          ? `; ${trimmedCount} body(ies) trimmed or omitted to fit the result budget — read_metaweb_pin any of them you need in full`
-          : '';
-        const header = `${readableSlots.length}/${pinIds.length} pin(s) readable in this batch${budgetNote}:`;
-        return textResult([header, ...sections, METAWEB_CITATION_RULE].join('\n\n'));
+        });
+        return textResult(receiptText);
       } catch (error) {
         return textResult(`Failed to read the MetaWeb pin batch: ${error instanceof Error ? error.message : String(error)}. You can retry with fewer pinIds or fall back to single read_metaweb_pin calls.`, true);
       }
