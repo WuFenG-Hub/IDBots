@@ -125,6 +125,7 @@ import type {
   TwinTaskStatusResult,
 } from '../services/twinOrchestrationService';
 import {
+  buildBotBrowserActTool,
   buildBotBrowserAgentTools,
   buildBotBrowserScreenshotTool,
   buildSearchMetaAppsAgentTools,
@@ -10420,6 +10421,16 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         ...buildBotBrowserScreenshotTool({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
       );
+      // Bot Browser act is registered for EVERY cowork surface too: a MetaBot
+      // in any chat must be able to operate the MetaApp the user is looking at
+      // (press play, read the live frame, check playback state). Execution is
+      // scoped to the active tab's locally served preview frame; the tool
+      // errors honestly when that surface does not exist.
+      if (this.controlBotBrowser.act) {
+        memoryTools.push(
+          ...buildBotBrowserActTool({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
+        );
+      }
     }
     // MetaID search is registered for every cowork surface: browser sessions
     // open the best match in the Bot Browser directly; other sessions only

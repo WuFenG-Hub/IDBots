@@ -100,6 +100,11 @@ import type {
   BotBrowserTabCommand,
   BotBrowserTabCommandResult,
 } from './botBrowserTabBridge';
+import type {
+  BotBrowserPreviewActAction,
+  BotBrowserPreviewActOutcome,
+  BotBrowserPreviewActRequest,
+} from './botBrowserPreviewAct';
 
 const RPC_HOST = DEFAULT_METAID_RPC_HOST;
 
@@ -122,6 +127,7 @@ const WALLET_MVC_TRANSFER_PATH = '/api/idbots/wallet/mvc/transfer';
 const WALLET_TRANSFER_RECORDS_PATH = '/api/idbots/wallet/transfer/records';
 const BOT_BROWSER_OPEN_PATH = '/api/idbots/bot-browser/open';
 const BOT_BROWSER_TABS_PATH = '/api/idbots/bot-browser/tabs';
+const BOT_BROWSER_ACT_PATH = '/api/idbots/bot-browser/act';
 const SET_METABOT_HOMEPAGE_METAAPP_PATH = '/api/idbots/metabot/homepage/set-metaapp';
 const GROUP_TASK_CREATE_PATH = '/api/idbots/group-task/create';
 const GROUP_TASK_PROPOSE_STAFFING_PATH = '/api/idbots/group-task/propose-staffing';
@@ -201,6 +207,10 @@ export type MetaidRpcServerOptions = {
   controlBotBrowserTabs?: (
     command: BotBrowserTabCommand,
   ) => Promise<BotBrowserTabCommandResult> | BotBrowserTabCommandResult;
+  /** Gesture-free act executor for the active tab's MetaApp preview frame
+   *  (botBrowserPreviewAct). Backs POST /api/idbots/bot-browser/act for local
+   *  bot sessions, mirroring the tabs route. */
+  controlBotBrowserAct?: (input: BotBrowserPreviewActRequest) => Promise<BotBrowserPreviewActOutcome>;
   /** Agent-Game bot channel backend: dispatch a browser.app.session.*-aligned
    *  method (docs/09 §4) for a local bot actor. Returns the same envelope
    *  shape as the agentGame:session IPC entry ({ __error } on failure). */
@@ -245,6 +255,37 @@ function normalizeBotBrowserTabCommand(value: unknown): BotBrowserTabCommand {
   }
 
   return { action };
+}
+
+const BOT_BROWSER_ACT_ACTIONS = new Set<BotBrowserPreviewActAction>(['click', 'read', 'state']);
+
+function normalizeBotBrowserActRequest(value: unknown): BotBrowserPreviewActRequest {
+  const input = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const action = String(input.action || '').trim() as BotBrowserPreviewActAction;
+  if (!BOT_BROWSER_ACT_ACTIONS.has(action)) {
+    throw new Error('action must be one of: click, read, state');
+  }
+  const tabIdRaw = input.tabId;
+  const tabId = tabIdRaw === undefined || tabIdRaw === null
+    ? undefined
+    : Number(tabIdRaw);
+  if (tabId !== undefined && (!Number.isInteger(tabId) || tabId <= 0)) {
+    throw new Error('tabId must be a positive integer');
+  }
+  const selectorRaw = input.selector;
+  if (selectorRaw !== undefined && selectorRaw !== null) {
+    const selector = String(selectorRaw).trim();
+    if (!selector) {
+      throw new Error('selector must be a non-empty CSS selector when provided');
+    }
+    return { action, selector, tabId };
+  }
+  if (action === 'click') {
+    throw new Error('action "click" requires a CSS selector');
+  }
+  return { action, tabId };
 }
 
 function normalizeBotBrowserUri(value: unknown): string {
@@ -337,6 +378,7 @@ export function startMetaidRpcServer(
   setMetaidCoreStore(getStore);
   const openBotBrowserUri = options.openBotBrowserUri ?? defaultOpenBotBrowserUri;
   const controlBotBrowserTabs = options.controlBotBrowserTabs;
+  const controlBotBrowserAct = options.controlBotBrowserAct;
 
   // Audit ledger for wallet transfers; created lazily once per server so the
   // idempotent schema ensure does not run on every request.
@@ -448,6 +490,28 @@ export function startMetaidRpcServer(
         const parsed = JSON.parse(body || '{}') as unknown;
         const command = normalizeBotBrowserTabCommand(parsed);
         const result = await controlBotBrowserTabs(command);
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, result }));
+      } catch (err) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === BOT_BROWSER_ACT_PATH) {
+      const body = await readRpcJsonObjectBody(req, res, pathname, { emptyBody: 'object' });
+      if (body === null) {
+        return;
+      }
+
+      try {
+        if (!controlBotBrowserAct) {
+          throw new Error('Bot Browser preview act is unavailable');
+        }
+        const parsed = JSON.parse(body || '{}') as unknown;
+        const request = normalizeBotBrowserActRequest(parsed);
+        const result = await controlBotBrowserAct(request);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, result }));
       } catch (err) {

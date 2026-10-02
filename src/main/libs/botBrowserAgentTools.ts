@@ -9,6 +9,10 @@ import type {
   BotBrowserTabCommand,
   BotBrowserTabCommandResult,
 } from '../services/botBrowserTabBridge';
+import type {
+  BotBrowserPreviewActOutcome,
+  BotBrowserPreviewActRequest,
+} from '../services/botBrowserPreviewAct';
 
 /** A search candidate from the MetaApp aggregation API, marked when published by the user's own MetaBot. */
 export type MetaAppSearchCandidate = MetaAppSearchItem & { isOwn?: boolean };
@@ -49,6 +53,12 @@ export type BotBrowserControl = {
    * renderer reports an error) when the Bot Browser surface is not visible.
    */
   screenshot(input?: BotBrowserScreenshotInput): Promise<BotBrowserScreenshotResult>;
+  /**
+   * Act inside the ACTIVE tab's MetaApp preview frame (click/read/state) via
+   * the main-process privileged frame executor. Optional: hosts without it
+   * keep every other tool; bot_browser_act reports the gap honestly.
+   */
+  act?(input: BotBrowserPreviewActRequest): Promise<BotBrowserPreviewActOutcome>;
   forkMetaApp?(input: { sessionId: string; uri?: string | null }): Promise<{
     dir: string;
     indexFile: string;
@@ -660,6 +670,93 @@ export function buildBotBrowserScreenshotTool(deps: {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           return textResult(`Failed to capture Bot Browser screenshot: ${message}. ${SURFACE_HINT}`, true);
+        }
+      },
+    ),
+  ];
+}
+
+/**
+ * Always-on act tool, registered for EVERY cowork surface like
+ * bot_browser_screenshot: a MetaBot in any chat must be able to operate the
+ * MetaApp the user is looking at (press its play button, read its live text,
+ * check whether its media is actually playing). The execution surface is
+ * deliberately narrow — the ACTIVE tab's locally served preview frame only,
+ * via controlBotBrowser.act (see botBrowserPreviewAct.ts). When the surface is
+ * not open, or the active tab is not a MetaApp preview, the tool errors
+ * honestly instead of guessing.
+ */
+export function buildBotBrowserActTool(deps: {
+  tool: SdkToolFactory;
+  controlBotBrowser: BotBrowserControl;
+  sessionId: string;
+}): unknown[] {
+  const { tool, controlBotBrowser } = deps;
+
+  return [
+    tool(
+      'bot_browser_act',
+      [
+        'Act inside the ACTIVE Bot Browser tab\'s MetaApp preview frame (the locally served sandboxed app the user is looking at).',
+        'action "click" presses the element matched by CSS `selector` (required) — in-page controls start without any user gesture, e.g. click "#btn-main" to start a paused music player.',
+        'action "read" returns the frame\'s live visible text (optionally of `selector`) — use it when bot_browser_read_page cannot read a MetaApp frame.',
+        'action "state" reports the frame\'s audio/video elements (paused, currentTime, src) plus the page title — use it to verify media actually started playing after a click, and again a few seconds later to confirm currentTime advances.',
+        'Operates ONLY on the active tab\'s MetaApp preview: first-party pages (bot homepages, pin inspectors) and ordinary web pages are not actable, and `selector` must match elements inside the preview frame. When NOT to use: tab management (bot_browser_tabs), navigation (bot_browser_open_uri), or visual checks (bot_browser_screenshot).',
+      ].join(' '),
+      {
+        action: z.enum(['click', 'read', 'state']),
+        selector: z.string().optional(),
+        tabId: z.number().optional(),
+      },
+      async (args: {
+        action: 'click' | 'read' | 'state';
+        selector?: string;
+        tabId?: number;
+      }) => {
+        if (!controlBotBrowser.act) {
+          return textResult('bot_browser_act is not supported by this host.', true);
+        }
+        const selector = args.selector?.trim();
+        if (args.action === 'click' && !selector) {
+          return textResult('bot_browser_act: action "click" requires a CSS selector (e.g. "#btn-main").', true);
+        }
+        if (args.action === 'read' && args.selector !== undefined && !selector) {
+          return textResult('bot_browser_act: selector must be a non-empty CSS selector when provided.', true);
+        }
+        try {
+          const outcome = await controlBotBrowser.act({
+            action: args.action,
+            selector,
+            tabId: args.tabId,
+          });
+          if (args.action === 'click' && outcome.clicked) {
+            const clicked = outcome.clicked;
+            const label = [clicked.tag + (clicked.id ? `#${clicked.id}` : ''), clicked.text].filter(Boolean).join(' — ');
+            return textResult(`Clicked ${label || 'element'} in the MetaApp preview. Use action "state" to verify the effect (e.g. that playback started).`);
+          }
+          if (args.action === 'read') {
+            const text = (outcome.text || '').length > 12000
+              ? `${truncateUtf16Units(outcome.text || '', 12000)}\n…(truncated)`
+              : (outcome.text || '');
+            return textResult(`MetaApp preview text${args.tabId !== undefined ? ` (tab ${outcome.tabId})` : ''}:\n${text || '(empty)'}`);
+          }
+          const media = outcome.media ?? [];
+          if (!media.length) {
+            return textResult(`MetaApp preview "${outcome.pageTitle ?? '(untitled)'}" has no audio/video elements.`);
+          }
+          const lines = media.map((m) => {
+            const playback = m.paused ? 'PAUSED' : 'PLAYING';
+            return `- ${m.tag} ${playback} at ${m.currentTime}s (readyState ${m.readyState}${m.muted ? ', muted' : ''}) src: ${m.src || '(none)'}`;
+          });
+          return textResult([
+            `MetaApp preview "${outcome.pageTitle ?? '(untitled)'}" media state:`,
+            ...lines,
+            media.some((m) => !m.paused)
+              ? 'Media is playing. Sample "state" again in a few seconds to confirm currentTime advances.'
+              : 'Media is paused. Click its play control with action "click" to start it.',
+          ].join('\n'));
+        } catch (error) {
+          return textResult(`Failed to act on the MetaApp preview: ${error instanceof Error ? error.message : String(error)}. ${SURFACE_HINT}`, true);
         }
       },
     ),
