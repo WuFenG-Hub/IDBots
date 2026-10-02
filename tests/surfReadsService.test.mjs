@@ -362,8 +362,8 @@ test('learning tools register the batch reader and the versions tool', () => {
   const names = tools.map((tool) => tool.name);
   assert.deepEqual(names, ['search_metaweb', 'read_metaweb_pin', 'read_metaweb_pins_batch', 'metaweb_pin_versions']);
   const batchTool = tools.find((tool) => tool.name === 'read_metaweb_pins_batch');
-  assert.match(batchTool.description, /prefer this over looping read_metaweb_pin/i);
-  assert.match(batchTool.description, /payload field is NEVER truncated/i);
+  assert.match(batchTool.description, /prefer over looping read_metaweb_pin/i);
+  assert.match(batchTool.description, /RECEIPT read_metaweb_pins_batch/);
   const versionsTool = tools.find((tool) => tool.name === 'metaweb_pin_versions');
   assert.match(versionsTool.description, /"chain" is evidence-grade/i);
   assert.match(versionsTool.description, /may be partial after indexer gaps/i);
