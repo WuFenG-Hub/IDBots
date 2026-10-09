@@ -1789,6 +1789,67 @@ interface IElectronAPI {
       error?: string;
     }>;
   };
+  chainBackup: {
+    backup: () => Promise<{
+      success: boolean;
+      bots: Array<{
+        globalMetaId: string;
+        name: string;
+        uploadedObjects: number;
+        skippedObjects: number;
+        segments: number;
+        bytes: number;
+        costSats: number;
+        manifestPinId?: string;
+        error?: string;
+      }>;
+      totalBytes: number;
+      totalCostSats: number;
+      error?: string;
+    }>;
+    restore: () => Promise<{
+      success: boolean;
+      bots: Array<{
+        globalMetaId: string;
+        name: string;
+        restored: boolean;
+        imported: number;
+        skipped: number;
+        error?: string;
+      }>;
+      error?: string;
+    }>;
+    getState: () => Promise<{
+      success: boolean;
+      states: Array<{
+        bot_globalmetaid: string;
+        manifest_pinid: string | null;
+        segments_json: string;
+        uploaded_object_ids_json: string;
+        last_backup_at: number | null;
+        updated_at: number;
+      }>;
+      error?: string;
+    }>;
+    onProgress: (callback: (data: {
+      phase: string;
+      botName?: string;
+      botIndex?: number;
+      botCount?: number;
+      segmentsDone?: number;
+      segmentsTotal?: number;
+      message?: string;
+    }) => void) => () => void;
+    onRestoreProgress: (callback: (data: {
+      phase: string;
+      botName?: string;
+      botIndex?: number;
+      botCount?: number;
+      segmentsDone?: number;
+      segmentsTotal?: number;
+      message?: string;
+    }) => void) => () => void;
+  };
   metaWebListener: {
     getListenerConfig: () => Promise<{ success: boolean; config?: { enabled: boolean; groupChats: boolean; privateChats: boolean; serviceRequests: boolean; respondToStrangerPrivateChats: boolean }; error?: string }>;
     getListenerStatus: () => Promise<{ success: boolean; running?: boolean; error?: string }>;

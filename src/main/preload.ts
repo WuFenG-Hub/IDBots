@@ -1120,6 +1120,21 @@ contextBridge.exposeInMainWorld('electron', {
     retryChainSync: () => ipcRenderer.invoke('userIdentity:retryChainSync'),
     syncToMobile: () => ipcRenderer.invoke('userIdentity:syncToMobile'),
   },
+  chainBackup: {
+    backup: () => ipcRenderer.invoke('chainBackup:backup'),
+    restore: () => ipcRenderer.invoke('chainBackup:restore'),
+    getState: () => ipcRenderer.invoke('chainBackup:getState'),
+    onProgress: (callback: (data: unknown) => void) => {
+      const handler = (_event: unknown, data: unknown) => callback(data);
+      ipcRenderer.on('chainBackup:progress', handler);
+      return () => ipcRenderer.removeListener('chainBackup:progress', handler);
+    },
+    onRestoreProgress: (callback: (data: unknown) => void) => {
+      const handler = (_event: unknown, data: unknown) => callback(data);
+      ipcRenderer.on('chainBackup:restoreProgress', handler);
+      return () => ipcRenderer.removeListener('chainBackup:restoreProgress', handler);
+    },
+  },
   metaWebListener: {
     getListenerConfig: () => ipcRenderer.invoke('idbots:getListenerConfig'),
     getListenerStatus: () => ipcRenderer.invoke('idbots:getListenerStatus'),
