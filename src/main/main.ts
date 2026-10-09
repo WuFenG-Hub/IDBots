@@ -2,8 +2,6 @@ import { app, BrowserWindow, ipcMain, session, nativeTheme, dialog, shell, nativ
 import type { FileFilter, MessageBoxOptions, OpenDialogOptions, Session, WebContents } from 'electron';
 import path from 'path';
 import fs from 'fs';
-import * as bip39 from '@scure/bip39';
-import { wordlist } from '@scure/bip39/wordlists/english';
 import os from 'os';
 import { SqliteStore } from './sqliteStore';
 import { isSqliteWasmBoundsError } from './sqliteRecovery';
@@ -578,7 +576,6 @@ const MIME_EXTENSION_MAP: Record<string, string> = {
   'application/json': '.json',
   'text/csv': '.csv',
 };
-const RESTORE_MNEMONIC_WORDS = 12;
 const SERVICE_ORDER_TIMEOUT_SCAN_INTERVAL_MS = 60_000;
 const SERVICE_ORDER_REFUND_SYNC_INTERVAL_MS = 60_000;
 const GIG_SQUARE_SYNC_INTERVAL_MS = 10 * 60 * 1000;
