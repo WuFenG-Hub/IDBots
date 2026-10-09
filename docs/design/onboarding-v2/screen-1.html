@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>IDBots Onboarding — Screen 1</title>
+<style>
+  :root {
+    --bg-main: #142030;
+    --bg-sidebar: #0b1323;
+    --bg-panel: #1f2937;
+    --color-primary: #FFDC51;
+    --color-accent: #22D3EE;
+    --text-primary: #ffffff;
+    --text-secondary: #94A3B8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1200px; height: 800px; overflow: hidden; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 15px;
+    background: var(--bg-main);
+    color: var(--text-primary);
+    position: relative;
+  }
+  .bg-glow {
+    position: absolute; inset: 0; pointer-events: none;
+    background:
+      radial-gradient(760px 520px at 76% 46%, rgba(255, 170, 60, 0.14), transparent 65%),
+      radial-gradient(560px 420px at 10% 90%, rgba(34, 211, 238, 0.05), transparent 60%);
+  }
+  .bg-pixel { position: absolute; width: 6px; height: 6px; opacity: .45; }
+  .shell {
+    position: relative; z-index: 1;
+    height: 100%;
+    display: flex; flex-direction: column;
+    padding: 36px 56px 36px;
+  }
+  .topbar { display: flex; align-items: center; gap: 12px; }
+  .topbar img { width: 36px; height: 36px; border-radius: 9px; image-rendering: pixelated; }
+  .topbar .wordmark { font-size: 17px; font-weight: 700; letter-spacing: .02em; }
+  .topbar .wordmark span { color: var(--color-primary); }
+
+  .main { flex: 1; display: flex; align-items: center; gap: 72px; min-height: 0; }
+  .left { width: 480px; flex-shrink: 0; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 11.5px; font-weight: 600; letter-spacing: .14em;
+    color: var(--color-accent);
+    border: 1px solid rgba(34, 211, 238, .45);
+    background: rgba(34, 211, 238, .08);
+    padding: 5px 12px; border-radius: 999px;
+    margin-bottom: 26px;
+  }
+  .badge .dot { width: 6px; height: 6px; background: var(--color-accent); border-radius: 1px; }
+  h1 {
+    font-size: 48px; line-height: 1.1; font-weight: 800; letter-spacing: -0.015em;
+    margin-bottom: 20px;
+  }
+  h1 .hl { color: var(--color-primary); }
+  .sub {
+    color: var(--text-secondary); font-size: 16.5px; line-height: 1.6;
+    max-width: 420px;
+  }
+
+  .right { flex: 1; display: flex; align-items: center; justify-content: center; min-width: 0; }
+  .hero {
+    width: 500px; height: 500px;
+    border-radius: 28px; overflow: hidden;
+    box-shadow:
+      0 0 0 1px rgba(255, 220, 81, .22),
+      0 0 0 8px rgba(255, 190, 80, .06),
+      0 28px 72px rgba(0, 0, 0, .5),
+      0 0 110px rgba(255, 170, 60, .16);
+  }
+  .hero img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .footer { display: flex; align-items: center; justify-content: space-between; }
+  .dots { display: flex; align-items: center; gap: 8px; }
+  .dots .d { width: 8px; height: 8px; border-radius: 999px; background: rgba(148, 163, 184, .35); }
+  .dots .d.on { width: 26px; background: var(--color-primary); }
+  .btn-primary {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--color-primary); color: #142030;
+    font-size: 15px; font-weight: 700;
+    border: 2px solid #0b1323; border-radius: 12px;
+    padding: 12px 28px;
+    box-shadow: 4px 4px 0 rgba(11, 19, 35, .9);
+  }
+  .btn-primary svg { width: 17px; height: 17px; }
+</style>
+</head>
+<body>
+  <div class="bg-glow"></div>
+  <div class="bg-pixel" style="top:120px;left:44%;background:#FFDC51;"></div>
+  <div class="bg-pixel" style="top:80px;left:50%;background:#22D3EE;"></div>
+  <div class="bg-pixel" style="top:680px;left:42%;background:#22D3EE;opacity:.25"></div>
+
+  <div class="shell">
+    <div class="topbar">
+      <img src="../../../public/logo.png" alt="IDBots">
+      <div class="wordmark">ID<span>Bots</span></div>
+    </div>
+
+    <div class="main">
+      <div class="left">
+        <div class="badge"><span class="dot"></span>WELCOME · STEP 1 OF 2</div>
+        <h1>Your gateway to<br>the <span class="hl">AI Internet</span></h1>
+        <p class="sub">Create on-chain AI bots, give them skills, and explore a whole internet of bots, apps and services.</p>
+      </div>
+
+      <div class="right">
+        <div class="hero"><img src="assets/hero-welcome-v2.png" alt="IDBots character at the gateway to the AI Internet"></div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div class="dots"><span class="d on"></span><span class="d"></span></div>
+      <button class="btn-primary">Next
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+  </div>
+</body>
+</html>
