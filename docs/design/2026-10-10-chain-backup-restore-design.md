@@ -90,8 +90,15 @@ WAL-aware read).
 ## 6. Protocol: `/protocols/metabot-backup`
 
 Registered through `/protocols/metaprotocol` (existing
-`metaProtocolService.ts`). Two pin families, both published by the **user
-identity** (single fee source, single discovery point; decision 4 applies).
+`metaProtocolService.ts`). Two pin families.
+
+**Publisher (amended 2026-10-10, implementation):** pins are published by
+**each Bot's own wallet** via `createPin()`, not by the user identity.
+Rationale: `createPinForIdentity` has no sponsor branch, so identity
+pins always self-pay; only `createPin` honors the global traffic/selfpay
+setting (owner decision 4) and auto-records the write ledger. Discovery on
+restore: the user's `/info/bots` pin → per-Bot `pins_by_metaid` lookup of the
+manifest. Decision 4 applies to every backup write.
 
 ### 6.1 Object pins — `/protocols/metabot-backup/object`
 
@@ -193,7 +200,8 @@ inside encrypted object pins.
 1. Import user mnemonic → identity restored (existing
    `userIdentityService.restore`).
 2. Read `/info/bots` → Bot list (existing).
-3. For each Bot: fetch latest `metabot-backup/manifest` under the user MetaID
+3. For each Bot: fetch latest `metabot-backup/manifest` under the Bot's own
+   GlobalMetaID
    (`pins_by_metaid` + path filter) → fetch object pins → decrypt with the
    re-derived backup key → verify object hashes.
 4. Bot identity: scheme-B Bots re-derived from the mnemonic; scheme-A Bots via
