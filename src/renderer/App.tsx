@@ -28,7 +28,7 @@ import {
 } from './services/appUpdateUi';
 import { defaultConfig, type ModelOptions } from './config';
 import { setAvailableModels, setSelectedModel } from './store/slices/modelSlice';
-import { setDraftPrompt, setPreferredMetabotId } from './store/slices/coworkSlice';
+import { setDraftPrompt } from './store/slices/coworkSlice';
 import { clearSelection } from './store/slices/quickActionSlice';
 import { setActiveSkillIds } from './store/slices/skillSlice';
 import { selectTask as selectLongTermTask } from './store/slices/longTermTaskSlice';
@@ -62,9 +62,9 @@ import { FREE_PROVIDER_DISPLAY_NAME, LLM_FREE_PROVIDER_KEY } from './services/ll
 /**
  * Everything the user cannot see on first paint is split into its own chunk:
  * Settings (a 200 kB settings shell behind a click), the non-Co-Work main
- * views, the onboarding flow, the new-group-task modal, and — the heaviest of
- * them — the Bot Browser surface, which drags in the ABC browser UI + core
- * (~1.5 MB of vendor code) that nothing else in the app imports.
+ * views, the first-run welcome flow, the new-group-task modal, and — the
+ * heaviest of them — the Bot Browser surface, which drags in the ABC browser
+ * UI + core (~1.5 MB of vendor code) that nothing else in the app imports.
  *
  * Co-Work, the Sidebar and the shell stay in the startup chunk. Each lazy
  * binding keeps the identifier its import used to have, so every JSX call site
@@ -81,7 +81,7 @@ const NewGroupTaskModal = React.lazy(() =>
   import('./components/groupTasks').then((module) => ({ default: module.NewGroupTaskModal })));
 const MetabotsView = React.lazy(() => import('./components/metabots/MetabotsView'));
 const GigSquareView = React.lazy(() => import('./components/gigSquare/GigSquareView'));
-const Onboarding = React.lazy(() => import('./components/onboarding/Onboarding'));
+const WelcomeFlow = React.lazy(() => import('./components/onboarding/WelcomeFlow'));
 const BotBrowserSurface = React.lazy(() =>
   import('./features/botBrowser/BotBrowserSurface').then((module) => ({ default: module.BotBrowserSurface })));
 
@@ -131,7 +131,8 @@ const App: React.FC = () => {
   const [mainView, setMainView] = useState<'cowork' | 'skills' | 'scheduledTasks' | 'groupTasks' | 'metabots'>('cowork');
   const [isInitialized, setIsInitialized] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
-  const [showOnboarding, setShowOnboarding] = useState(false);
+  // First-run welcome flow: set during boot when the machine holds no Twin Bot.
+  const [showWelcomeFlow, setShowWelcomeFlow] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isNewGroupTaskOpen, setIsNewGroupTaskOpen] = useState(false);
   const [, forceLanguageRefresh] = useState(0);
@@ -274,11 +275,11 @@ const App: React.FC = () => {
         themeService.initialize();
 
         // First-run free-quota bootstrap: provisions the built-in metaid-free
-        // provider (identity-signed relay key) and the welcome bot before the
-        // model list / onboarding decision, so a fresh install lands directly
-        // in the welcome chat. Never throws; any failure keeps the classic
-        // onboarding path as fallback.
-        const freeQuotaProvision = await ensureFreeQuotaProvisioning();
+        // provider (identity-signed relay key) before the welcome flow can
+        // create any bot, so a fresh install gets a working brain. Never
+        // throws; on failure the welcome flow falls back to the configured
+        // default model or reports the failure in its own retry UI.
+        await ensureFreeQuotaProvisioning();
 
         // 初始化语言
         // Stays strictly AFTER provisioning: initialize() captures the whole
@@ -326,8 +327,9 @@ const App: React.FC = () => {
         const resolvedModels = providerModels.length > 0 ? providerModels : fallbackModels;
         if (resolvedModels.length > 0) {
           dispatch(setAvailableModels(resolvedModels));
-          // Same defaultProvider-aware selection as handleOnboardingComplete:
-          // keep the stored provider preference across restarts.
+          // Prefer the model the stored defaultProvider points to: a restart
+          // must not silently switch a chosen provider's model to another
+          // provider that happens to offer the same model id.
           const preferredModel = resolvedModels.find(
             (model) => model.id === config.model.defaultModel && model.providerKey === config.model.defaultProvider
           ) ?? resolvedModels.find(model => model.id === config.model.defaultModel) ?? resolvedModels[0];
@@ -350,13 +352,17 @@ const App: React.FC = () => {
           longTermTaskService.init(),
         ]);
 
-        // Onboarding is no longer shown to first-run users: fresh installs are
-        // provisioned with the free-quota welcome bot and land directly in the
-        // cowork chat. Deep-link into the welcome chat only on the run that
-        // actually provisioned it; later launches leave the user's bot
-        // selection alone.
-        if (freeQuotaProvision.justProvisioned && freeQuotaProvision.welcomeBotId != null) {
-          dispatch(setPreferredMetabotId(freeQuotaProvision.welcomeBotId));
+        // First-run gate: a machine with no Twin Bot gets the two-screen
+        // welcome flow instead of the app shell. Keying off the Twin rather
+        // than a persisted "onboarding done" flag also covers installs that
+        // only have the legacy welcome bot. A roster read that fails leaves
+        // the app usable (no welcome flow) rather than trapping the user in it.
+        try {
+          const roster = await window.electron.metabot.list();
+          const bots = roster?.success && Array.isArray(roster.list) ? roster.list : [];
+          setShowWelcomeFlow(!bots.some((bot) => bot.metabot_type === 'twin'));
+        } catch {
+          setShowWelcomeFlow(false);
         }
         setIsInitialized(true);
         void reportRendererStartupComplete();
@@ -399,48 +405,26 @@ const App: React.FC = () => {
     };
   }, []);
 
-  const handleOnboardingComplete = useCallback(() => {
-    const config = configService.getConfig();
-    apiService.setConfig({ apiKey: config.api.key, baseUrl: config.api.baseUrl });
-    if (config.providers) {
-      const allModels: { id: string; name: string; provider?: string; providerKey?: string; supportsImage?: boolean; options?: ModelOptions }[] = [];
-      Object.entries(config.providers).forEach(([providerName, providerConfig]) => {
-        if (providerConfig.enabled && providerConfig.models) {
-          providerConfig.models.forEach((model: { id: string; name: string; supportsImage?: boolean; options?: ModelOptions }) => {
-            allModels.push({
-              id: model.id,
-              name: model.name,
-              provider: providerDisplayLabel(providerName),
-              providerKey: providerName,
-              supportsImage: model.supportsImage ?? false,
-              options: model.options,
-            });
-          });
-        }
-      });
-      if (allModels.length > 0) {
-        dispatch(setAvailableModels(allModels));
-        // Prefer the model the user's stored defaultProvider points to, so a
-        // restart cannot silently switch an opencode default back to the
-        // first provider that happens to offer the same model id.
-        const preferred = allModels.find(
-          (m) => m.id === config.model.defaultModel && m.providerKey === config.model.defaultProvider
-        ) ?? allModels.find((m) => m.id === config.model.defaultModel) ?? allModels[0];
-        dispatch(setSelectedModel(preferred));
-      }
+  // The Twin Bot chat already exists (one seeded greeting): land in it. The
+  // session is pulled into the store before the flag flips, so the shell never
+  // paints the New Task page for a frame; the session list is reloaded so the
+  // sidebar shows the new chat.
+  const handleWelcomeFlowEnter = useCallback(async (sessionId: string) => {
+    try {
+      await coworkService.loadSessions();
+      await coworkService.loadSession(sessionId);
+    } finally {
+      setMainView('cowork');
+      setShowWelcomeFlow(false);
     }
-    setMainView('cowork');
-    setShowOnboarding(false);
-  }, [dispatch]);
-
-  const handleOpenOnboarding = useCallback(() => {
-    setMainView('cowork');
-    setShowOnboarding(true);
   }, []);
 
-  const handleCloseOnboarding = useCallback(() => {
+  // Escape hatch: the user entered without creating a bot (creation failed or
+  // they chose to skip). The welcome flow shows again on the next launch
+  // because the Twin still does not exist.
+  const handleWelcomeFlowSkip = useCallback(() => {
     setMainView('cowork');
-    setShowOnboarding(false);
+    setShowWelcomeFlow(false);
   }, []);
 
   useEffect(() => {
@@ -1259,10 +1243,10 @@ const App: React.FC = () => {
     );
   }
 
-  if (showOnboarding) {
+  if (showWelcomeFlow) {
     return (
       <Suspense fallback={<AppLoadingIndicator />}>
-        <Onboarding onComplete={handleOnboardingComplete} onClose={handleCloseOnboarding} />
+        <WelcomeFlow onEnterWithBot={handleWelcomeFlowEnter} onEnterWithoutBot={handleWelcomeFlowSkip} />
       </Suspense>
     );
   }
@@ -1289,7 +1273,6 @@ const App: React.FC = () => {
       onNewChat={handleBlankNewChat}
       updateBadge={isSidebarCollapsed ? updateBadge : null}
       onRequestModelSettings={() => handleShowSettings({ initialTab: 'model' })}
-      onRequestOnboarding={handleOpenOnboarding}
       onOpenMetabotInBrowser={botBrowserShell.openLocalMetabot}
       onPreviewMetaAppHomepage={botBrowserShell.openMetaAppByPin}
       onRequestMetaApps={handleShowMetaApps}
@@ -1302,7 +1285,6 @@ const App: React.FC = () => {
       onToggleSidebar={handleToggleSidebar}
       onNewChat={handleBlankNewChat}
       updateBadge={isSidebarCollapsed ? updateBadge : null}
-      onRequestOnboarding={handleOpenOnboarding}
       focusedOrderTxid={focusedOrderTxid}
       onFocusedOrderConsumed={handleFocusedOrderConsumed}
       onOpenBotInBrowser={botBrowserShell.openRemoteBot}

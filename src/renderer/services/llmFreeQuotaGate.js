@@ -2,8 +2,9 @@
  * Free-quota first-run provisioning gates (pure logic, node-test friendly).
  *
  * The built-in `metaid-free` provider is provisioned silently on fresh
- * installs so new users can chat with the welcome bot without configuring an
- * LLM API key. Existing installs (already have MetaBots) are never touched.
+ * installs so new users can chat with the Twin Bot they create during the
+ * welcome flow without configuring an LLM API key. Existing installs (already
+ * have MetaBots) are never touched.
  */
 
 export const LLM_FREE_PROVIDER_KEY = 'metaid-free';
@@ -14,8 +15,6 @@ export const LLM_FREE_PROVIDER_KEY = 'metaid-free';
  * provisioned before the rename never show the legacy "MetaID Free" name.
  */
 export const FREE_PROVIDER_DISPLAY_NAME = 'IDBots-Free';
-/** kvStore key holding the provisioned welcome bot's id (deletion-respecting). */
-export const LLM_RELAY_WELCOME_BOT_ID_KEY = 'llmRelay.welcomeBotId';
 
 /**
  * User-facing display names for free-relay model ids. Relay ids are internal
@@ -143,18 +142,19 @@ export function isFreeProviderConfigured(provider) {
 /**
  * Decide the first-run provisioning action.
  *
- * - 'none':                    already provisioned (welcomeBotId persisted) or
- *                              an existing install (has MetaBots). A deleted
- *                              welcome bot is never recreated: the persisted
- *                              id stays authoritative.
- * - 'create-bot-only':         a previous run provisioned the provider but
- *                              died before creating the welcome bot.
- * - 'bootstrap-and-create-bot': fresh install, nothing provisioned yet.
+ * - 'none':      the free provider is already usable, or this is an existing
+ *                install (has MetaBots) whose configuration must stay
+ *                untouched.
+ * - 'bootstrap': fresh install — claim the relay key and write it into the
+ *                `metaid-free` provider before the Twin Bot is created, so the
+ *                new bot has a brain to run on.
+ *
+ * No bot is ever created here: the user's Twin Bot comes from the welcome
+ * flow's "Enter IDBots" click (see components/onboarding/WelcomeFlow.tsx).
  */
 export function planFreeQuotaProvisioning(input) {
   const metabotCount = Number.isFinite(input?.metabotCount) ? Math.floor(input.metabotCount) : 0;
-  const welcomeBotId = Number.isFinite(input?.welcomeBotId) ? Math.floor(input.welcomeBotId) : null;
-  if (welcomeBotId != null && welcomeBotId > 0) return 'none';
+  if (input?.providerConfigured) return 'none';
   if (metabotCount > 0) return 'none';
-  return input?.providerConfigured ? 'create-bot-only' : 'bootstrap-and-create-bot';
+  return 'bootstrap';
 }

@@ -396,6 +396,44 @@ select::-ms-expand {
   opacity: 0.6;
 }
 
+/* First-run welcome flow primary button: the same yellow-fill / border /
+   offset-shadow identity as .btn-idchat-primary-filled, at the larger hero
+   size the welcome screens use (4px offset per the approved design).
+   A standalone rule because the .btn-idchat-* block sits after
+   @tailwind utilities in this file, so padding utilities cannot override it. */
+.btn-welcome-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background-color: var(--color-primary);
+  color: #303133;
+  border: 2px solid var(--btn-primary-edge);
+  box-shadow: 4px 4px 0 var(--btn-primary-edge);
+  border-radius: var(--rounded);
+  padding: 0.8125rem 1.875rem;
+  font-size: 15px;
+  font-weight: 700;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+  user-select: none;
+}
+
+@media (min-width: 1024px) {
+  .btn-welcome-primary:hover:not(:active):not(:disabled) {
+    box-shadow: 6px 6px 0 var(--btn-primary-edge);
+    transform: translate(-1px, -1px);
+  }
+}
+
+.btn-welcome-primary:active:not(:disabled) {
+  box-shadow: 1px 1px 0 var(--btn-primary-edge);
+  transform: translate(3px, 3px);
+}
+
+.btn-welcome-primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 /* Sidebar width transition - instant toggle, no animation */
 .sidebar-transition {
   transition: none;

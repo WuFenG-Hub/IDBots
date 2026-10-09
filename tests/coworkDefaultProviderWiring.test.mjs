@@ -62,13 +62,15 @@ test('renderer model selection records the provider key as defaultProvider', () 
     selectionEffect.includes("config.model.defaultProvider === wantsProvider"),
     'provider change alone must trigger a config write'
   );
-  // Every available-models builder carries the raw provider key.
+  // Every available-models builder carries the raw provider key (startup boot
+  // and the Settings-close refresh; the onboarding-complete builder was
+  // removed with the onboarding wizard).
   const providerKeyOccurrences = (appSource.match(/providerKey: providerName/g) || []).length;
-  assert.ok(providerKeyOccurrences >= 3, `App.tsx must attach providerKey in all builders (found ${providerKeyOccurrences})`);
+  assert.ok(providerKeyOccurrences >= 2, `App.tsx must attach providerKey in all builders (found ${providerKeyOccurrences})`);
   // Restart safety: the preferred-model selection honors the stored
   // defaultProvider before falling back to the config-order scan.
   assert.ok(
-    appSource.includes('m.providerKey === config.model.defaultProvider'),
+    /\.providerKey === config\.model\.defaultProvider/.test(appSource),
     'preferred model selection must prefer the stored defaultProvider'
   );
 });

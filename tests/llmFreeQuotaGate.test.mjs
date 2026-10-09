@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 
 import {
   LLM_FREE_PROVIDER_KEY,
-  LLM_RELAY_WELCOME_BOT_ID_KEY,
   getFreeProviderModelCanonical,
   getFreeProviderModelDisplayName,
   getFreeProviderModelLegacyLimitRewrites,
@@ -12,9 +11,8 @@ import {
 } from '../src/renderer/services/llmFreeQuotaGate.js';
 import { getDefaultOnboardingProvider } from '../src/renderer/components/onboarding/onboardingDefaults.js';
 
-test('constants stay stable (backend + kv contracts)', () => {
+test('constants stay stable (backend contract)', () => {
   assert.equal(LLM_FREE_PROVIDER_KEY, 'metaid-free');
-  assert.equal(LLM_RELAY_WELCOME_BOT_ID_KEY, 'llmRelay.welcomeBotId');
 });
 
 test('getFreeProviderModelDisplayName maps relay wire ids to product names', () => {
@@ -100,45 +98,40 @@ test('isFreeProviderConfigured requires credentials and models', () => {
   assert.equal(isFreeProviderConfigured({ enabled: true, apiKey: 'k', baseUrl: 'u', models: [{ id: 'm' }] }), true);
 });
 
-test('plan: already provisioned => none (deletion-respecting)', () => {
+test('plan: an already provisioned provider needs nothing', () => {
   assert.equal(
-    planFreeQuotaProvisioning({ metabotCount: 0, welcomeBotId: 7, providerConfigured: true }),
+    planFreeQuotaProvisioning({ metabotCount: 0, providerConfigured: true }),
     'none',
   );
-  // Even if the user deleted the bot (count back to 0), the persisted id wins.
   assert.equal(
-    planFreeQuotaProvisioning({ metabotCount: 0, welcomeBotId: 7, providerConfigured: false }),
+    planFreeQuotaProvisioning({ metabotCount: 5, providerConfigured: true }),
     'none',
   );
 });
 
 test('plan: existing installs are never touched', () => {
   assert.equal(
-    planFreeQuotaProvisioning({ metabotCount: 3, welcomeBotId: null, providerConfigured: false }),
+    planFreeQuotaProvisioning({ metabotCount: 3, providerConfigured: false }),
     'none',
   );
   assert.equal(
-    planFreeQuotaProvisioning({ metabotCount: 1, welcomeBotId: null, providerConfigured: true }),
+    planFreeQuotaProvisioning({ metabotCount: 1, providerConfigured: false }),
     'none',
   );
 });
 
-test('plan: fresh install bootstraps; partial state only creates the bot', () => {
+test('plan: only a fresh install with no free provider bootstraps', () => {
   assert.equal(
-    planFreeQuotaProvisioning({ metabotCount: 0, welcomeBotId: null, providerConfigured: false }),
-    'bootstrap-and-create-bot',
-  );
-  assert.equal(
-    planFreeQuotaProvisioning({ metabotCount: 0, welcomeBotId: null, providerConfigured: true }),
-    'create-bot-only',
+    planFreeQuotaProvisioning({ metabotCount: 0, providerConfigured: false }),
+    'bootstrap',
   );
 });
 
 test('plan: degenerate inputs fall back safely', () => {
-  assert.equal(planFreeQuotaProvisioning({}), 'bootstrap-and-create-bot');
+  assert.equal(planFreeQuotaProvisioning({}), 'bootstrap');
   assert.equal(
-    planFreeQuotaProvisioning({ metabotCount: Number.NaN, welcomeBotId: Number.NaN }),
-    'bootstrap-and-create-bot',
+    planFreeQuotaProvisioning({ metabotCount: Number.NaN }),
+    'bootstrap',
   );
 });
 
