@@ -84,7 +84,9 @@ import {
 } from './services/userIdentityService';
 import { signOwnerBinding } from './services/ownerBindingService';
 import { syncUserBotsToMobile } from './services/userBotsPinService';
-import { fetchMetaidInfoByAddress, fetchMetaidInfoByMetaid, fetchMetaidRestoreProfile, type MetaidAddressInfo } from './services/metabotRestoreService';
+import { listChainBackupStates, runChainBackup } from './services/chainBackupService';
+import { runChainBackupRestore } from './services/chainBackupRestoreService';
+import { fetchMetaidInfoByAddress, fetchMetaidInfoByMetaid, fetchMetaidRestoreProfile, restoreMetabotFromMnemonicCore, type MetaidAddressInfo } from './services/metabotRestoreService';
 import { fetchDeepSeekBalance } from './services/deepseekBalanceService';
 import { requestMvcGasSubsidy } from './services/mvcSubsidyService';
 import { getAddressBalance } from './services/addressBalanceService';
@@ -14156,127 +14158,69 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('idbots:restoreMetaBotFromMnemonic', async (_event, input: { mnemonic: string; path?: string; boss_global_metaid?: string | null }) => {
+  const broadcastChainBackupProgress = (channel: string, progress: unknown) => {
+    BrowserWindow.getAllWindows().forEach((win) => {
+      win.webContents.send(channel, progress);
+    });
+  };
+
+  ipcMain.handle('chainBackup:backup', async () => {
     try {
-      const mnemonic = (input?.mnemonic ?? '').trim().toLowerCase();
-      const pathInput = (input?.path ?? "m/44'/10001'/0'/0/0").trim();
-      const path = pathInput || "m/44'/10001'/0'/0/0";
-      const words = mnemonic.split(/\s+/).filter(Boolean);
-
-      console.log('[MetaBot] restore requested', { path, wordCount: words.length });
-
-      if (words.length !== RESTORE_MNEMONIC_WORDS) {
-        return { success: false, error: 'MNEMONIC_INVALID' };
-      }
-      if (!bip39.validateMnemonic(mnemonic, wordlist)) {
-        return { success: false, error: 'MNEMONIC_INVALID' };
-      }
-      if (!path) {
-        return { success: false, error: 'PATH_INVALID' };
-      }
-
-      const store = getMetabotStore();
-      const existingWallet = store.getMetabotWalletByMnemonicNormalized(mnemonic);
-      const effectivePath = existingWallet?.path?.trim() || path;
-      if (existingWallet) {
-        const linked = store.getMetabotByWalletId(existingWallet.id);
-        if (linked) {
-          return { success: false, error: 'METABOT_WALLET_IN_USE' };
-        }
-        if (pathInput !== existingWallet.path?.trim()) {
-          console.log('[MetaBot] restore: reusing existing wallet row; using stored derivation path', {
-            storedPath: existingWallet.path,
-            requestedPath: pathInput,
-          });
-        }
-      }
-      assertCanCreateMetabot(store);
-
-      const walletResult = await createMetaBotWallet({
-        mnemonic: existingWallet?.mnemonic ?? mnemonic,
-        path: effectivePath,
+      const result = await runChainBackup({
+        db: getStore().getDatabase(),
+        metabotStore: getMetabotStore(),
+        userStore: getUserIdentityStore(),
+        onProgress: (progress) => broadcastChainBackupProgress('chainBackup:progress', progress),
       });
-      console.log('[MetaBot] restore wallet derived', {
-        mvc: walletResult.mvc_address,
-        globalmetaid: walletResult.globalmetaid,
-        reusedWalletRow: Boolean(existingWallet),
+      console.log('[ChainBackup] backup result', {
+        success: result.success,
+        bots: result.bots.length,
+        totalBytes: result.totalBytes,
+        totalCostSats: result.totalCostSats,
       });
-
-      const profile = await fetchMetaidRestoreProfile(walletResult.mvc_address);
-      const name = profile.name.trim();
-      if (!name) {
-        return { success: false, error: 'NAME_EMPTY' };
-      }
-
-      const exists = store.listMetabots().some((m) => m.name.trim().toLowerCase() === name.toLowerCase());
-      if (exists) {
-        return { success: false, error: 'NAME_DUPLICATE' };
-      }
-
-      const wallet =
-        existingWallet ??
-        store.insertMetabotWallet({
-          mnemonic: walletResult.mnemonic,
-          path: walletResult.path,
-        });
-
-      const metabot = store.createMetabot({
-        wallet_id: wallet.id,
-        mvc_address: walletResult.mvc_address,
-        btc_address: walletResult.btc_address,
-        doge_address: walletResult.doge_address,
-        public_key: walletResult.public_key,
-        chat_public_key: walletResult.chat_public_key,
-        chat_public_key_pin_id: profile.chatpubkeyPinId ?? null,
-        name,
-        avatar: profile.avatarDataUrl ?? null,
-        enabled: true,
-        metaid: walletResult.metaid,
-        globalmetaid: walletResult.globalmetaid,
-        metabot_info_pinid: profile.metabotInfoPinId ?? null,
-        metabot_type: 'worker',
-        created_by: profile.bio.created_by || '0000',
-        role: profile.bio.role || '',
-        soul: profile.bio.soul || '',
-        goal: profile.bio.goal ?? null,
-        bio: profile.bio.bio ?? null,
-        boss_id: profile.bio.boss_id ?? null,
-        boss_global_metaid: (input?.boss_global_metaid ?? '').trim() || (profile.bio.boss_global_metaid ?? null),
-        llm_id: profile.bio.llm_id ?? null,
-        llm_provider: profile.bio.llm_provider ?? null,
-        llm_effort: normalizeMetabotLlmEffort(profile.bio.llm_effort),
-        tools: profile.bio.tools ?? [],
-        skills: profile.bio.skills ?? [],
-        allow_chat_skills: profile.bio.allowChatSkills ?? [],
-      });
-
-      // Assignment-model backfill: the restored row's allow_chat_skills column
-      // is the on-chain projection — mirror it into the assignment table (the
-      // local authorization source of truth) or the bot silently loses every
-      // chat skill (IM baseline = assigned-only). Best-effort: restore has no
-      // rollback, and a retried restore would duplicate the bot row.
-      try {
-        getSkillManager().applyMetabotAssignedSkills(
-          metabot.id,
-          profile.bio.allowChatSkills ?? [],
-          'migration'
-        );
-      } catch (assignmentError) {
-        console.warn(
-          '[MetaBot] restore: chat-skill assignment backfill failed (re-save the bot\'s skills in My Bots to heal):',
-          assignmentError instanceof Error ? assignmentError.message : String(assignmentError)
-        );
-      }
-      console.log('[MetaBot] restore success', { id: metabot.id, name: metabot.name });
-      // Restore hardcodes 'worker'; heal the zero-Twin edge (e.g. first-ever bot).
-      store.ensureTwinExists();
-      // Re-read: ensureTwinExists may have promoted this bot to twin.
-      return { success: true, metabot: store.getMetabotById(metabot.id) ?? metabot };
+      return result;
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
-      console.error('[MetaBot] restore failed:', errMsg);
-      return { success: false, error: errMsg };
+      console.error('[ChainBackup] backup failed:', errMsg);
+      return { success: false, bots: [], totalBytes: 0, totalCostSats: 0, error: errMsg };
     }
+  });
+
+  ipcMain.handle('chainBackup:restore', async () => {
+    try {
+      const result = await runChainBackupRestore({
+        db: getStore().getDatabase(),
+        metabotStore: getMetabotStore(),
+        userStore: getUserIdentityStore(),
+        onProgress: (progress) => broadcastChainBackupProgress('chainBackup:restoreProgress', progress),
+        applyAssignedSkills: (metabotId, skills) => {
+          getSkillManager().applyMetabotAssignedSkills(metabotId, skills, 'migration');
+        },
+      });
+      console.log('[ChainBackup] restore result', { success: result.success, bots: result.bots.length });
+      return result;
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[ChainBackup] restore failed:', errMsg);
+      return { success: false, bots: [], error: errMsg };
+    }
+  });
+
+  ipcMain.handle('chainBackup:getState', async () => {
+    try {
+      return { success: true, states: listChainBackupStates(getStore().getDatabase()) };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      return { success: false, states: [], error: errMsg };
+    }
+  });
+
+  ipcMain.handle('idbots:restoreMetaBotFromMnemonic', async (_event, input: { mnemonic: string; path?: string; boss_global_metaid?: string | null }) => {
+    return restoreMetabotFromMnemonicCore(getMetabotStore(), input ?? { mnemonic: '' }, {
+      applyAssignedSkills: (metabotId, skills) => {
+        getSkillManager().applyMetabotAssignedSkills(metabotId, skills, 'migration');
+      },
+    });
   });
 
   ipcMain.handle('idbots:syncMetaBot', async (_event, metabotId: number) => {
