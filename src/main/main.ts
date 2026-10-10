@@ -397,7 +397,8 @@ import {
   getSocialPostComments as getSocialPostCommentsRemote,
 } from './services/socialRecallService';
 import { searchMetaweb as searchMetawebRemote } from './services/metawebSearchService';
-import { readMetawebPin as readMetawebPinRemote } from './services/metawebPinService';
+import { readMetawebPin as readMetawebPinRemote, MetawebPinNotFoundError } from './services/metawebPinService';
+import { fetchRawTxHexFromMetalet } from './services/txTransferVerification';
 import {
   metawebPinsBatch as metawebPinsBatchRemote,
   metawebPinVersions as metawebPinVersionsRemote,
@@ -4511,6 +4512,35 @@ const startStartupNightlyServices = (): void => {
       }
       getScheduler().reschedule();
       return { id: task.id };
+    },
+    // Chain-grounded verification for the replay gate (design §5.2): all
+    // reads are read-only; every failure degrades to UNVERIFIED inside the
+    // digest builder. metatask node-level verification is deferred — a
+    // metatask root pin id still resolves through readPin (existence).
+    chainEvidence: {
+      readPin: async (pinId) => {
+        const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+        const pin = await readMetawebPinRemote(pinId, baseUrl ? { baseUrl } : undefined);
+        return { path: pin.path, protocol: pin.protocol, createdAt: pin.createdAt };
+      },
+      fetchRawTx: async (txid) => {
+        // The txid's chain is unknown from the reference alone — try the
+        // chains in fleet-usage order, first hit wins.
+        for (const chain of ['mvc', 'btc', 'doge'] as const) {
+          try {
+            const hex = await fetchRawTxHexFromMetalet(chain, txid);
+            if (hex) return hex;
+          } catch {
+            // Try the next chain.
+          }
+        }
+        return '';
+      },
+      findOrdersByPaymentTxid: (txid) =>
+        getServiceOrderStore()
+          .listOrdersByPaymentTxid(txid)
+          .map((order) => ({ id: order.id, status: order.status })),
+      isPinNotFound: (error) => error instanceof MetawebPinNotFoundError,
     },
   });
 

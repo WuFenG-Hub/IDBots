@@ -53,6 +53,9 @@ export interface CapabilityValidationDraftInput {
    * reconciliation pass suspended this draft; rendered so tonight's panel
    * judges WITH the conflict in view. */
   conflictNote?: string | null;
+  /** Chain refs this draft's text cites (design §5.3): only these drafts get
+   * the chain-grounded judging rules. */
+  chainRefs?: string[];
 }
 
 export type CapabilityValidationVerdict = 'validated' | 'rejected' | 'keep_draft';
@@ -80,6 +83,9 @@ export function buildCapabilityValidationPrompt(input: {
   recentSummaries: Array<{ summaryDate: string; summaryText: string }>;
   /** One-line digest of today's activity stats (session/order/task counts). */
   todayDigest?: string;
+  /** Chain-grounded evidence digest (design §5.2, host-rendered). Present only
+   * when tonight's refs were verified; the chain judging rules ride along. */
+  chainEvidence?: string | null;
 }): { system: string; user: string } {
   const system = [
     `你是 ${input.botName},一个生活在 MetaWeb 上的 MetaBot(类人智能体)。`,
@@ -99,6 +105,11 @@ export function buildCapabilityValidationPrompt(input: {
     draft.conflictNote?.trim()
       ? `存疑待裁决:${truncate(draft.conflictNote.trim().replace(/\s+/g, ' '), SUMMARY_EVIDENCE_MAX_CHARS)}`
       : '',
+    // The chain-ref mark exists to scope the chain judging rules — without a
+    // digest there are no rules in play, so the mark stays out.
+    (input.chainEvidence?.trim() && (draft.chainRefs ?? []).length > 0)
+      ? `链上引用:${draft.chainRefs!.join(', ')}`
+      : '',
   ].filter(Boolean).join('\n'));
 
   const summaryLines = input.recentSummaries.map((summary) =>
@@ -114,6 +125,17 @@ export function buildCapabilityValidationPrompt(input: {
     '## 可重放的历史(近期梦境日记,新→旧)',
     summaryLines.length > 0 ? summaryLines.join('\n') : '(暂无历史日记)',
     ...(input.todayDigest ? ['', '## 当日活动概况', input.todayDigest] : []),
+    ...(input.chainEvidence?.trim()
+      ? [
+        '',
+        '## 链上证据(宿主在裁决前已核验,链上事实,比日记更硬)',
+        input.chainEvidence.trim(),
+        '涉链裁决规则(只对标注了「链上引用」的草案适用):',
+        '- 草案的声明与链上证据矛盾(引用的 pin/txid 是 NOT FOUND,或关联订单处于失败终态) ⇒ 该草案 rejected,无论日记如何支持。',
+        '- 涉链声明但证据缺失或未核验成功(UNVERIFIED,或未出现在证据列表) ⇒ 该草案至多 keep_draft,不得 validated。',
+        '- rationale 中引用任何 pin id / txid 前,必须确认它出现在上方证据列表中。',
+      ]
+      : []),
     '',
     '## 输出契约(严格只输出一个 JSON 对象,不要输出任何其他文字)',
     '{',

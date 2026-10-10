@@ -44,6 +44,14 @@ import {
 } from '../libs/capabilityReconciliationPrompt';
 import { tokenizeKnowledgeBaseText } from '../libs/knowledgeBaseText';
 import {
+  buildChainEvidenceDigest,
+  chainRefKeysOf,
+  collectChainEvidenceRefs,
+  renderChainEvidenceDigest,
+  type ChainEvidenceDigest,
+  type ChainEvidenceVerifierDeps,
+} from '../libs/chainEvidence';
+import {
   buildCounterfactualReplayPrompt,
   extractNegativeDecisionPoints,
   hasExplicitHumanFeedback,
@@ -249,6 +257,14 @@ export interface DreamServiceDeps {
     prompt: string;
     scheduleAtMs: number;
   }) => { id: string };
+  /**
+   * Chain-grounded verification for the replay gate (design 2026-10-10 §5.2):
+   * read-only verifiers behind the evidence digest. Entirely optional — with
+   * no dep wired, no digest is built and the gate judges exactly as before;
+   * individual verifier failures degrade the ref to UNVERIFIED, never to a
+   * dream-run failure.
+   */
+  chainEvidence?: ChainEvidenceVerifierDeps;
   tickIntervalMs?: number;
   llmTimeoutMs?: number;
   /**
@@ -996,7 +1012,7 @@ export class DreamService {
         this.deps.dreamStore.finishRun(metabotId, date, 'completed');
         // Pending capability drafts can still be validated against older
         // diaries even when today added no new activity.
-        const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
+        const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date, activity);
         // Memory reconciliation (design §4.2) sits between validation and
         // promotion on every path — a just-validated draft must survive the
         // memory-bank check before it can harden.
@@ -1019,6 +1035,7 @@ export class DreamService {
           promotedCount: promotion.promoted,
           hasExplicitFeedback: hasExplicitHumanFeedback(activity),
           reconciliation,
+          chainEvidence: validation.chainEvidence,
           practiceProposals: this.buildPracticeProposalTelemetry(metabotId, {
             proposed: 0,
             autoApproved: practicePipeline.autoApproved,
@@ -1060,7 +1077,7 @@ export class DreamService {
       const writeResult = this.writeDreamResults(metabotId, date, output, activity, brain.llmId, isRepair, impressionSubjects, metabot.globalmetaid);
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
       console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}${isRepair ? ' (version repair)' : ''}`);
-      const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
+      const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date, activity);
       // P1 periodic re-review runs between the fresh-draft gate and the
       // promotion pass: a just-demoted draft must not harden tonight.
       const reReview = await this.reReviewValidatedCapabilityDrafts(metabot, brain, date);
@@ -1106,6 +1123,9 @@ export class DreamService {
         // §6 memory reconciliation funnel: how tonight's newly validated
         // drafts survived the memory-bank check.
         reconciliation,
+        // §6 chain-grounded verification: the digest's fact counts (null when
+        // no chain refs were collected or no verifier deps are wired).
+        chainEvidence: validation.chainEvidence,
         // §6 self-curriculum telemetry: tonight's proposal funnel + the
         // practice runs consumed from the dreamed day.
         practiceProposals: this.buildPracticeProposalTelemetry(metabotId, {
@@ -1235,8 +1255,16 @@ export class DreamService {
     metabot: DreamMetabotLike,
     brain: DreamBrainPair,
     date: string,
-  ): Promise<{ checked: number; validated: number; rejected: number; validatedIds: number[] }> {
-    const zero = { checked: 0, validated: 0, rejected: 0, validatedIds: [] as number[] };
+    /** Day activity: the chain writes/reads whose pin ids join the digest. */
+    activity?: DreamDayActivity,
+  ): Promise<{
+    checked: number;
+    validated: number;
+    rejected: number;
+    validatedIds: number[];
+    chainEvidence: ChainEvidenceDigest['counts'] | null;
+  }> {
+    const zero = { checked: 0, validated: 0, rejected: 0, validatedIds: [] as number[], chainEvidence: null };
     try {
       // Disputed-timeout sweep (design §4.4): an unresolved dispute older than
       // the auto-reject window demotes to 'rejected'; the existing purge
@@ -1267,6 +1295,40 @@ export class DreamService {
         metabot.id,
         CAPABILITY_VALIDATION_SUMMARY_DAYS,
       );
+
+      // Chain-grounded evidence digest (design §5.2): the host collects the
+      // pin/txid refs from tonight's drafts and the day's chain activity and
+      // verifies each against chain state. Built once per pass (cached for
+      // the night); absent deps or per-ref failures degrade to UNVERIFIED,
+      // never to a dream-run failure.
+      let chainDigest: ChainEvidenceDigest | null = null;
+      const chainRefs = collectChainEvidenceRefs({
+        chainWrites: activity?.chainWrites ?? [],
+        chainReads: activity?.chainReads ?? [],
+        drafts: pending.map((draft) => ({
+          id: draft.id,
+          text: `${draft.title}\n${draft.description}\n${draft.validationNotes ?? ''}`,
+        })),
+      });
+      if (chainRefs.length > 0 && this.deps.chainEvidence) {
+        try {
+          chainDigest = await buildChainEvidenceDigest(chainRefs, this.deps.chainEvidence);
+        } catch (error) {
+          console.warn(
+            `[DreamService] Chain evidence digest failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          chainDigest = null;
+        }
+      }
+      const chainRefsByDraftId = new Map<number, string[]>();
+      for (const ref of chainRefs) {
+        for (const draftId of ref.sourceDraftIds) {
+          const list = chainRefsByDraftId.get(draftId) ?? [];
+          list.push(ref.kind === 'pin' ? `pin://${ref.id}` : `txid:${ref.id}`);
+          chainRefsByDraftId.set(draftId, list);
+        }
+      }
+
       const prompt = buildCapabilityValidationPrompt({
         botName: metabot.name,
         date,
@@ -1277,17 +1339,19 @@ export class DreamService {
           description: draft.description,
           capabilityType: draft.capabilityType,
           conflictNote: draft.status === 'disputed' ? draft.validationNotes : null,
+          chainRefs: chainRefsByDraftId.get(draft.id) ?? [],
         })),
         recentSummaries: recentSummaries.map((summary) => ({
           summaryDate: summary.summaryDate,
           summaryText: summary.summaryText,
         })),
+        chainEvidence: chainDigest ? renderChainEvidenceDigest(chainDigest) : null,
       });
       const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
       const parsed = parseCapabilityValidationOutput(raw, new Set(pending.map((draft) => draft.id)));
       if (!parsed.ok) {
         console.warn(`[DreamService] Capability validation parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
-        return { ...zero, checked: pending.length };
+        return { ...zero, checked: pending.length, chainEvidence: chainDigest ? chainDigest.counts : null };
       }
       // Grounding gate: a verdict whose rationale cites a diary date that was
       // never provided as evidence is a hallucinated citation — drop it.
@@ -1302,10 +1366,27 @@ export class DreamService {
           `[DreamService] Dropped ${droppedUngrounded} capability verdict(s) citing unrecorded diary dates for metabot ${metabot.id}`,
         );
       }
+      // Chain grounding gate (design §5.2): with a digest in play, a rationale
+      // citing a pin id / txid that was never collected tonight is a
+      // hallucinated citation — discard the verdict.
+      let chainGroundedVerdicts = groundedVerdicts;
+      if (chainDigest) {
+        const knownRefs = new Set(chainDigest.knownRefIds);
+        chainGroundedVerdicts = groundedVerdicts.filter((verdict) => {
+          const citedRefs = chainRefKeysOf(verdict.rationale);
+          return citedRefs.every((cited) => knownRefs.has(cited));
+        });
+        const droppedChain = groundedVerdicts.length - chainGroundedVerdicts.length;
+        if (droppedChain > 0) {
+          console.warn(
+            `[DreamService] Dropped ${droppedChain} capability verdict(s) citing unverified pin/txid refs for metabot ${metabot.id}`,
+          );
+        }
+      }
       let validated = 0;
       let rejected = 0;
       const validatedIds: number[] = [];
-      for (const verdict of groundedVerdicts) {
+      for (const verdict of chainGroundedVerdicts) {
         const promote = verdict.verdict === 'validated' && verdict.score >= CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE;
         const demote = verdict.verdict === 'rejected';
         if (!promote && !demote) continue;
@@ -1328,7 +1409,13 @@ export class DreamService {
           `[DreamService] Capability validation for metabot ${metabot.id}: validated=${validated}, rejected=${rejected}, checked=${pending.length}`,
         );
       }
-      return { checked: pending.length, validated, rejected, validatedIds };
+      return {
+        checked: pending.length,
+        validated,
+        rejected,
+        validatedIds,
+        chainEvidence: chainDigest ? chainDigest.counts : null,
+      };
     } catch (error) {
       console.warn(
         `[DreamService] Capability validation failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
