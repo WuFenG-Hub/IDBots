@@ -134,6 +134,7 @@ import {
   updateMetaBotCore,
   type MetabotManageDeps,
 } from './services/metabotManageService';
+import { seedGreetingFallbackIfMissing } from './services/onboardingGreeting';
 import { deleteBootstrapDoc } from './libs/welcomeBootstrap';
 import { migrateLegacyLlmBrainValues } from './services/llmBrainMigration';
 import { reconcileStaleModelBindings } from './services/staleModelBindingReconcile';
@@ -10249,25 +10250,33 @@ if (!gotTheLock) {
     });
   });
 
-  // Create a session that already contains one assistant message and no turn
-  // behind it (first-run onboarding: the freshly created Twin Bot "says hello"
-  // before the user types anything). The session stays 'idle' — a 'running'
-  // row would render a permanent typing indicator — and the single assistant
-  // message renders as an ordinary bubble (buildConversationTurns gives it an
-  // orphan turn; see CoworkSessionDetail).
+  // First-run onboarding greeting: create the Twin Bot's first chat session and
+  // immediately run its first turn, so the bot greets the user live instead of
+  // reading a canned line. The instruction prompt drives that turn but is NOT
+  // persisted (skipInitialUserMessage) — the transcript opens with the bot's
+  // assistant turn alone, and the user's first real message follows it.
+  //
+  // If the turn cannot start, or dies before producing any assistant text
+  // (offline, free quota exhausted, model misconfigured), the fallbackGreeting
+  // is seeded so the chat never opens empty.
   ipcMain.handle('cowork:session:createGreeting', async (_event, options: {
     title?: string;
     cwd?: string;
     systemPrompt?: string;
-    /** The assistant message to seed. Required — an empty greeting would render as nothing. */
-    greeting: string;
+    /**
+     * Assistant message seeded when the first turn cannot greet
+     * (offline / quota exhausted / no model). Required.
+     */
+    fallbackGreeting: string;
     metabotId?: number | null;
   }) => {
     return withSqliteRecovery('cowork:session:createGreeting', async () => {
       try {
-        const greeting = typeof options?.greeting === 'string' ? options.greeting.trim() : '';
-        if (!greeting) {
-          return { success: false, error: 'A greeting message is required.' };
+        const fallbackGreeting = typeof options?.fallbackGreeting === 'string'
+          ? options.fallbackGreeting.trim()
+          : '';
+        if (!fallbackGreeting) {
+          return { success: false, error: 'A fallback greeting message is required.' };
         }
         const coworkStoreInstance = getCoworkStore();
         const config = coworkStoreInstance.getConfig();
@@ -10306,13 +10315,49 @@ if (!gotTheLock) {
           null,
           null,
         );
-        coworkStoreInstance.addMessage(session.id, {
-          type: 'assistant',
-          content: greeting,
-          metadata: { hostGreeting: true },
-        });
+
+        // Fire the greeting turn. Same runner options as cowork:session:start
+        // minus the renderer-supplied bits; the session's own systemPrompt (the
+        // onboarding prompt) is picked up from the row by the runner.
+        const runner = getCoworkRunner();
+        const greetingPrompt = tApp(
+          '用户刚刚第一次进入 IDBots。现在向他问好，并按照你的新手引导说明行动。',
+          'The user just opened IDBots for the very first time. Greet them now, following your onboarding instructions.',
+        );
+        void runner.startSession(session.id, greetingPrompt, {
+          skipInitialUserMessage: true,
+          workspaceRoot: baseCwd,
+          confirmationMode: 'modal',
+          permissionMode: getPersistedCoworkPermissionMode(),
+          autoApproveTools: getPersistedAutoApproveTools(),
+        })
+          .catch((error) => {
+            console.warn(
+              `[cowork] greeting turn failed for session ${session.id}; seeding the fallback greeting:`,
+              error instanceof Error ? error.message : String(error),
+            );
+          })
+          .finally(() => {
+            try {
+              seedGreetingFallbackIfMissing({
+                store: coworkStoreInstance,
+                sessionId: session.id,
+                fallbackGreeting,
+                isSessionActive: (id) => runner.isSessionActive(id),
+                emitMessage: (id, message) => emitCoworkStreamMessage(id, message),
+              });
+            } catch (error) {
+              console.warn(
+                `[cowork] failed to seed the fallback greeting for session ${session.id}:`,
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+          });
+
         return {
           success: true,
+          // Read back after the turn starts: its status is already 'running',
+          // so the renderer shows the bot typing instead of an empty chat.
           session: coworkStoreInstance.getSession(session.id) ?? session,
         };
       } catch (error) {
