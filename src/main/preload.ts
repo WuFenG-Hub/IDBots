@@ -601,6 +601,8 @@ contextBridge.exposeInMainWorld('electron', {
       memoryUserMemoriesMaxItems?: number;
       dreamEnabled?: boolean;
       hygieneEnabled?: boolean;
+      practiceTasksEnabled?: boolean;
+      practiceAutoApproveReadOnly?: boolean;
     }) =>
       ipcRenderer.invoke('cowork:memory:setPolicy', input),
     getMemoryHygiene: () =>

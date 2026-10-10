@@ -1,10 +1,11 @@
 import { BrowserWindow } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { ScheduledTaskStore, ScheduledTask, ScheduledTaskRun, Schedule, NotifyPlatform } from '../scheduledTaskStore';
-import type { CoworkStore } from '../coworkStore';
+import type { CoworkStore, DreamPracticeProposalRecord } from '../coworkStore';
 import type { CoworkRunner } from './coworkRunner';
 import { resolveSessionWorkingDirectory } from './botWorkspace';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
+import { createPracticeSessionState, PRACTICE_RUN_WATCHDOG_MS } from './practiceInteractionGuard';
 import type { IMGatewayManager } from '../im/imGatewayManager';
 import type { CoworkSubmitInput, CoworkSubmitInputResult } from '../services/coworkTurnSubmission';
 
@@ -25,6 +26,8 @@ interface SchedulerDeps {
   getSkillsPrompt?: () => Promise<string | null>;
   isRecoverableSqliteError?: (error: unknown) => boolean;
   recoverSqlite?: (error: unknown, operationName: string) => void | Promise<void>;
+  /** Wall-clock budget for a practice run; tests shrink it. Defaults to PRACTICE_RUN_WATCHDOG_MS. */
+  practiceRunWatchdogMs?: number;
   /**
    * Injects a prompt into an existing cowork session (the same seam the
    * renderer's submit-input IPC uses). Enables scheduled tasks bound to a
@@ -50,6 +53,7 @@ export class Scheduler {
   private isRecoverableSqliteError: ((error: unknown) => boolean) | null;
   private recoverSqlite: ((error: unknown, operationName: string) => void | Promise<void>) | null;
   private submitToSession: ((input: CoworkSubmitInput) => Promise<SubmitToSessionResult>) | null;
+  private readonly practiceRunWatchdogMs: number;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private activeTasks: Map<string, AbortController> = new Map();
@@ -69,6 +73,7 @@ export class Scheduler {
     this.isRecoverableSqliteError = deps.isRecoverableSqliteError ?? null;
     this.recoverSqlite = deps.recoverSqlite ?? null;
     this.submitToSession = deps.submitToSession ?? null;
+    this.practiceRunWatchdogMs = deps.practiceRunWatchdogMs ?? PRACTICE_RUN_WATCHDOG_MS;
   }
 
   // --- Lifecycle ---
@@ -211,9 +216,42 @@ export class Scheduler {
       const run = this.store.recordSkippedRun(task.id, 'stuck_running', 'scheduled');
       this.store.releaseStuckRunningTask(task.id);
       this.emitRunUpdate(run);
+      // Practice loop closure for abandoned runs: the proposal must not stay
+      // 'scheduled' forever — record the dropped execution as failed.
+      try {
+        const practiceProposal = this.resolvePracticeProposal(task);
+        if (practiceProposal) {
+          this.coworkStore.markDreamPracticeProposalFailed?.({
+            id: practiceProposal.id,
+            metabotId: practiceProposal.metabotId,
+            runId: run.id,
+            outcomeSummary: 'practice run abandoned (stuck running marker released)',
+          });
+        }
+      } catch {
+        // Best effort — the run ledger entry above is the authoritative record.
+      }
       console.warn(
         `[Scheduler] Task ${task.id} had an orphaned running marker; recorded a stuck_running skip`
       );
+    }
+  }
+
+  /**
+   * The dream practice proposal this task was materialized from (linked via
+   * dream_practice_proposals.scheduled_task_id), or null for ordinary
+   * scheduled tasks. Only a proposal still in 'scheduled' state activates the
+   * practice policy — a proposal rejected after approval must not run under
+   * it. Optional-call style keeps partial CoworkStore stubs (tests) safe.
+   */
+  private resolvePracticeProposal(task: ScheduledTask): DreamPracticeProposalRecord | null {
+    try {
+      const lookup = this.coworkStore.getDreamPracticeProposalByScheduledTaskId;
+      if (typeof lookup !== 'function') return null;
+      const proposal = lookup.call(this.coworkStore, task.id);
+      return proposal && proposal.status === 'scheduled' ? proposal : null;
+    } catch {
+      return null;
     }
   }
 
@@ -307,6 +345,31 @@ export class Scheduler {
             durationMs,
             error
           );
+
+          // Practice loop closure (design 2026-10-10 §3.4): the proposal the
+          // task was materialized from takes the run's outcome
+          // (scheduled → completed | failed); the next dream consumes it.
+          try {
+            const practiceProposal = this.resolvePracticeProposal(task);
+            if (practiceProposal) {
+              if (success) {
+                this.coworkStore.markDreamPracticeProposalCompleted?.({
+                  id: practiceProposal.id,
+                  metabotId: practiceProposal.metabotId,
+                  runId: run.id,
+                });
+              } else {
+                this.coworkStore.markDreamPracticeProposalFailed?.({
+                  id: practiceProposal.id,
+                  metabotId: practiceProposal.metabotId,
+                  runId: run.id,
+                  outcomeSummary: error,
+                });
+              }
+            }
+          } catch (practiceError) {
+            console.warn('[Scheduler] Practice proposal writeback failed:', practiceError);
+          }
 
           // Update task state
           this.store.markTaskCompleted(
@@ -409,11 +472,48 @@ export class Scheduler {
     this.taskSessionIds.set(task.id, sessionId);
     const runner = this.getCoworkRunner();
     this.assertExecutionCurrent(executionGeneration);
-    await runner.startSession(sessionId, task.prompt, {
-      skipInitialUserMessage: true,
-      disableMemoryUpdates: true,
-      confirmationMode: 'text',
-    });
+    // Dream-RSI practice run (design 2026-10-10 §3.4/§3.5): a task
+    // materialized from a dream practice proposal runs unattended on the
+    // practice tool policy — restricted inline surface by risk class, counted
+    // side effects, a wall-clock watchdog — and reads but never writes memory
+    // (learning from the outcome happens in the next dream: single writer).
+    const practiceProposal = this.resolvePracticeProposal(task);
+    let practiceWatchdog: ReturnType<typeof setTimeout> | null = null;
+    let practiceWatchdogFired = false;
+    if (practiceProposal) {
+      const watchdogMs = this.practiceRunWatchdogMs;
+      practiceWatchdog = setTimeout(() => {
+        practiceWatchdogFired = true;
+        try {
+          this.getCoworkRunner().stopSession(sessionId, {
+            finalStatus: 'error',
+            reason: `Practice run exceeded its ${Math.round(watchdogMs / 60000)}-minute wall-clock budget`,
+          });
+        } catch {
+          // The session already settled between the watchdog and the stop.
+        }
+      }, watchdogMs);
+    }
+    try {
+      await runner.startSession(sessionId, task.prompt, {
+        skipInitialUserMessage: true,
+        ...(practiceProposal
+          ? {
+              memoryReadOnly: true,
+              autoApprove: true,
+              practiceSession: createPracticeSessionState(practiceProposal.riskClass),
+            }
+          : { disableMemoryUpdates: true }),
+        confirmationMode: 'text',
+      });
+      if (practiceWatchdogFired) {
+        throw new Error(
+          `Practice run exceeded its ${Math.round(this.practiceRunWatchdogMs / 60000)}-minute wall-clock budget`,
+        );
+      }
+    } finally {
+      if (practiceWatchdog) clearTimeout(practiceWatchdog);
+    }
     this.assertExecutionCurrent(executionGeneration);
 
     return sessionId;

@@ -4486,6 +4486,32 @@ const startStartupNightlyServices = (): void => {
         }
       });
     },
+    // Self-curriculum materialization (design 2026-10-10 §3.4): the same host
+    // path as ScheduledTaskAgentControl.createTask — a one-shot 'at' task in
+    // the night window; a schedule that never fires rolls back and throws.
+    createPracticeScheduledTask: (input) => {
+      const store = getScheduledTaskStore();
+      const task = store.createTask({
+        name: input.name,
+        description: input.description,
+        schedule: { type: 'at', datetime: new Date(input.scheduleAtMs).toISOString() },
+        prompt: input.prompt,
+        workingDirectory: resolveExistingTaskWorkingDirectory(getCoworkStore().getConfig().workingDirectory),
+        systemPrompt: '',
+        executionMode: 'auto',
+        metabotId: input.metabotId,
+        targetSessionId: null,
+        expiresAt: null,
+        notifyPlatforms: [],
+        enabled: true,
+      });
+      if (task.state.nextRunAtMs == null) {
+        store.deleteTask(task.id);
+        throw new Error('The practice task schedule never fires — not materializing the proposal.');
+      }
+      getScheduler().reschedule();
+      return { id: task.id };
+    },
   });
 
   // Memory hygiene ("记忆整理"): the deterministic compression stroke that
@@ -12460,6 +12486,8 @@ if (!gotTheLock) {
     memoryUserMemoriesMaxItems?: number;
     dreamEnabled?: boolean;
     hygieneEnabled?: boolean;
+    practiceTasksEnabled?: boolean;
+    practiceAutoApproveReadOnly?: boolean;
   }) => {
     try {
       const store = getCoworkStore();
@@ -12486,6 +12514,10 @@ if (!gotTheLock) {
             : undefined,
         hygieneEnabled: typeof input?.hygieneEnabled === 'boolean' ? input.hygieneEnabled : undefined,
         dreamEnabled: typeof input?.dreamEnabled === 'boolean' ? input.dreamEnabled : undefined,
+        practiceTasksEnabled:
+          typeof input?.practiceTasksEnabled === 'boolean' ? input.practiceTasksEnabled : undefined,
+        practiceAutoApproveReadOnly:
+          typeof input?.practiceAutoApproveReadOnly === 'boolean' ? input.practiceAutoApproveReadOnly : undefined,
       });
       return { success: true, policy };
     } catch (error) {

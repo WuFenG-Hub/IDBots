@@ -209,6 +209,12 @@ import { buildPostSimpleQaAgentTools } from './postSimpleQaAgentTools';
 import { buildLikePinAgentTools } from './likePinAgentTools';
 import { buildCommentPinAgentTools } from './commentPinAgentTools';
 import { createSurfCreatePinGuard, recordSurfDeepRead, type SurfSessionWriteState } from './surfInteractionGuard';
+import {
+  PRACTICE_INTERACT_LOCAL_INLINE_TOOLS,
+  PRACTICE_READ_ONLY_INLINE_TOOLS,
+  evaluatePracticeToolCall,
+  type PracticeSessionState,
+} from './practiceInteractionGuard';
 import { buildScheduledTaskAgentTools, type ScheduledTaskAgentControl } from './scheduledTaskAgentTools';
 import { buildLongTermTaskAgentTools, type LongTermTaskAgentControl } from './longTermTaskAgentTools';
 import { buildMetataskAgentTools, type MetaTaskAgentControl } from './metataskAgentTools';
@@ -1343,6 +1349,14 @@ interface ActiveSession {
    * reset mid-run (review P2.1).
    */
   metawebSurfSession?: SurfSessionWriteState;
+  /**
+   * Dream-RSI practice session marker (design 2026-10-10 §3.5): when set, the
+   * inline tool surface is restricted to the practice allowlist for the risk
+   * class and every tool call funnels through the practice interaction guard
+   * (side-effect budget per class, iteration cap per run). Counters live ON
+   * this marker object, same reason as metawebSurfSession.
+   */
+  practiceSession?: PracticeSessionState;
   /** Permission mode controlling tool gating (default/plan/acceptEdits/bypassPermissions). */
   permissionMode: CoworkPermissionMode;
   /** Runtime effort override from the UI picker; a canonical rung, the 'default' sentinel (model default, skipping brain/global), or null = tiered defaults (brain → global → per-model). */
@@ -6752,6 +6766,10 @@ export class CoworkRunner extends EventEmitter {
    * reset mid-run (review P2.1).
    */
   metawebSurfSession?: SurfSessionWriteState;
+      /** Dream-RSI practice session marker (design §3.5): restricted inline
+       * tool surface by risk class + the practice interaction guard on every
+       * tool call. Materialized by the scheduler from a dream practice proposal. */
+      practiceSession?: PracticeSessionState;
       disableRemoteServicesPrompt?: boolean;
       workspaceRoot?: string;
       confirmationMode?: 'modal' | 'text';
@@ -6863,6 +6881,7 @@ export class CoworkRunner extends EventEmitter {
       memoryReadOnly: Boolean(options.memoryReadOnly),
       metawebStudySession: options.metawebStudySession,
       metawebSurfSession: options.metawebSurfSession,
+      practiceSession: options.practiceSession,
       permissionMode: options.permissionMode ?? session.permissionMode ?? 'default',
       // Caller-provided seed (picker pick / global default) wins; otherwise
       // hydrate the session's persisted effort so restarts keep the choice.
@@ -9583,6 +9602,36 @@ export class CoworkRunner extends EventEmitter {
           reason: `Tool "${toolName}" is blocked in plan mode (read-only). Switch to default or acceptEdits mode to execute it.`,
         }
       }
+      // Dream-RSI practice sessions (design §3.5): every tool call passes the
+      // practice guard — reads are free, side effects count against the risk
+      // class's budget (0 for read_only), the run caps at
+      // PRACTICE_MAX_TOOL_CALLS_PER_RUN evaluated calls.
+      if (activeSession?.practiceSession) {
+        const verdict = evaluatePracticeToolCall(activeSession.practiceSession, normalized, {
+          kernelReadOnly: this.isReadOnlyTool(normalized),
+        });
+        // electron-tsconfig runs with strictNullChecks off, where a
+        // boolean-literal discriminant does not narrow — branch on property
+        // presence instead.
+        if ('reason' in verdict) {
+          coworkLog('INFO', 'evaluateDshToolPolicy', 'Practice guard denied a tool call', {
+            sessionId,
+            toolName,
+            riskClass: activeSession.practiceSession.riskClass,
+            sideEffectsUsed: activeSession.practiceSession.sideEffectsUsed,
+            toolCallsUsed: activeSession.practiceSession.toolCallsUsed,
+          });
+          return { decision: 'deny', reason: verdict.reason };
+        }
+        if (verdict.countedSideEffect) {
+          coworkLog('INFO', 'evaluateDshToolPolicy', 'Practice guard counted a side-effecting call', {
+            sessionId,
+            toolName,
+            sideEffectsUsed: activeSession.practiceSession.sideEffectsUsed,
+            sideEffectBudget: activeSession.practiceSession.sideEffectBudget,
+          });
+        }
+      }
       // Read guards (GT#12 parity with the Claude path's canUseTool block):
       // N1 a non-vision model never reads image files; N2 the SAME unchanged
       // image/large file is not re-read within one session. The pure decision
@@ -10976,6 +11025,17 @@ export class CoworkRunner extends EventEmitter {
     // plus the budget-wrapped interaction tools, nothing else.
     if (this.activeSessions.get(sessionId)?.metawebSurfSession) {
       return memoryTools.filter((item) => METAWEB_SURF_TOOL_ALLOWLIST.has(String(item?.name ?? '')));
+    }
+    // Dream-RSI practice sessions: the risk-class allowlist — chain writes,
+    // wallet, purchases and scheduled-task creation are never registered;
+    // side-effecting survivors are still counted by the practice guard at
+    // call time (evaluateDshToolPolicy).
+    const practiceSession = this.activeSessions.get(sessionId)?.practiceSession;
+    if (practiceSession) {
+      const allowlist = practiceSession.riskClass === 'interact_local'
+        ? PRACTICE_INTERACT_LOCAL_INLINE_TOOLS
+        : PRACTICE_READ_ONLY_INLINE_TOOLS;
+      return memoryTools.filter((item) => allowlist.has(String(item?.name ?? '')));
     }
     return memoryTools;
   }

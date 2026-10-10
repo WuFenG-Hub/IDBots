@@ -1048,6 +1048,10 @@ export interface CoworkMemoryPolicy {
   memoryUserMemoriesMaxItems: number;
   dreamEnabled: boolean;
   hygieneEnabled: boolean;
+  /** Self-curriculum practice tasks (design 2026-10-10 §3.4); default off. */
+  practiceTasksEnabled: boolean;
+  /** Auto-approve read_only practice proposals (only effective with practiceTasksEnabled). */
+  practiceAutoApproveReadOnly: boolean;
   updatedAt: number;
 }
 
@@ -1061,6 +1065,10 @@ export interface CoworkEffectiveMemoryPolicy {
   memoryPromptMaxChars: number;
   dreamEnabled: boolean;
   hygieneEnabled: boolean;
+  /** Self-curriculum practice tasks (design 2026-10-10 §3.4); default off. */
+  practiceTasksEnabled: boolean;
+  /** Auto-approve read_only practice proposals (only effective with practiceTasksEnabled). */
+  practiceAutoApproveReadOnly: boolean;
   source: 'global' | 'metabot';
 }
 
@@ -1243,6 +1251,8 @@ interface CoworkMemoryPolicyRow {
   memory_user_memories_max_items: number | string | null;
   dream_enabled?: number | string | null;
   hygiene_enabled?: number | string | null;
+  practice_tasks_enabled?: number | string | null;
+  practice_auto_approve_read_only?: number | string | null;
   updated_at: number | string | null;
 }
 
@@ -1878,6 +1888,17 @@ export class CoworkStore implements MemoryBackend {
       }
       if (!columns.includes('hygiene_enabled')) {
         this.db.run('ALTER TABLE metabot_memory_policies ADD COLUMN hygiene_enabled INTEGER NOT NULL DEFAULT 1');
+        changed = true;
+      }
+      // Self-curriculum practice tasks (design 2026-10-10 §3.4): opt-in per
+      // bot (default off); the auto-approve knob only matters when the feature
+      // is on and defaults to on so enabling the feature is one switch.
+      if (!columns.includes('practice_tasks_enabled')) {
+        this.db.run('ALTER TABLE metabot_memory_policies ADD COLUMN practice_tasks_enabled INTEGER NOT NULL DEFAULT 0');
+        changed = true;
+      }
+      if (!columns.includes('practice_auto_approve_read_only')) {
+        this.db.run('ALTER TABLE metabot_memory_policies ADD COLUMN practice_auto_approve_read_only INTEGER NOT NULL DEFAULT 1');
         changed = true;
       }
       if (!columns.includes('updated_at')) {
@@ -2632,13 +2653,16 @@ export class CoworkStore implements MemoryBackend {
         memoryPromptMaxChars: config.memoryPromptMaxChars,
         dreamEnabled: true,
         hygieneEnabled: true,
+        practiceTasksEnabled: false,
+        practiceAutoApproveReadOnly: true,
         source: 'global',
       };
     }
 
     const row = this.getOne<CoworkMemoryPolicyRow>(`
       SELECT metabot_id, memory_enabled, memory_implicit_update_enabled, memory_llm_judge_enabled,
-             memory_guard_level, memory_user_memories_max_items, dream_enabled, hygiene_enabled, updated_at
+             memory_guard_level, memory_user_memories_max_items, dream_enabled, hygiene_enabled,
+             practice_tasks_enabled, practice_auto_approve_read_only, updated_at
       FROM metabot_memory_policies
       WHERE metabot_id = ?
       LIMIT 1
@@ -2655,6 +2679,8 @@ export class CoworkStore implements MemoryBackend {
         memoryPromptMaxChars: config.memoryPromptMaxChars,
         dreamEnabled: true,
         hygieneEnabled: true,
+        practiceTasksEnabled: false,
+        practiceAutoApproveReadOnly: true,
         source: 'global',
       };
     }
@@ -2676,6 +2702,8 @@ export class CoworkStore implements MemoryBackend {
       memoryPromptMaxChars: config.memoryPromptMaxChars,
       dreamEnabled: normalizeDbBoolean(row.dream_enabled, true),
       hygieneEnabled: normalizeDbBoolean(row.hygiene_enabled, true),
+      practiceTasksEnabled: normalizeDbBoolean(row.practice_tasks_enabled, false),
+      practiceAutoApproveReadOnly: normalizeDbBoolean(row.practice_auto_approve_read_only, true),
       source: 'metabot',
     };
   }
@@ -2696,6 +2724,8 @@ export class CoworkStore implements MemoryBackend {
       | 'memoryUserMemoriesMaxItems'
       | 'dreamEnabled'
       | 'hygieneEnabled'
+      | 'practiceTasksEnabled'
+      | 'practiceAutoApproveReadOnly'
     >>
   ): CoworkMemoryPolicy {
     const resolvedMetabotId = parseIdNumber(metabotId);
@@ -2732,13 +2762,20 @@ export class CoworkStore implements MemoryBackend {
     const nextHygieneEnabled = updates.hygieneEnabled !== undefined
       ? Boolean(updates.hygieneEnabled)
       : base.hygieneEnabled;
+    const nextPracticeTasksEnabled = updates.practiceTasksEnabled !== undefined
+      ? Boolean(updates.practiceTasksEnabled)
+      : base.practiceTasksEnabled;
+    const nextPracticeAutoApproveReadOnly = updates.practiceAutoApproveReadOnly !== undefined
+      ? Boolean(updates.practiceAutoApproveReadOnly)
+      : base.practiceAutoApproveReadOnly;
     const now = Date.now();
 
     this.db.run(`
       INSERT INTO metabot_memory_policies (
         metabot_id, memory_enabled, memory_implicit_update_enabled, memory_llm_judge_enabled,
-        memory_guard_level, memory_user_memories_max_items, dream_enabled, hygiene_enabled, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        memory_guard_level, memory_user_memories_max_items, dream_enabled, hygiene_enabled,
+        practice_tasks_enabled, practice_auto_approve_read_only, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(metabot_id) DO UPDATE SET
         memory_enabled = excluded.memory_enabled,
         memory_implicit_update_enabled = excluded.memory_implicit_update_enabled,
@@ -2747,6 +2784,8 @@ export class CoworkStore implements MemoryBackend {
         memory_user_memories_max_items = excluded.memory_user_memories_max_items,
         dream_enabled = excluded.dream_enabled,
         hygiene_enabled = excluded.hygiene_enabled,
+        practice_tasks_enabled = excluded.practice_tasks_enabled,
+        practice_auto_approve_read_only = excluded.practice_auto_approve_read_only,
         updated_at = excluded.updated_at
     `, [
       resolvedMetabotId,
@@ -2757,6 +2796,8 @@ export class CoworkStore implements MemoryBackend {
       nextMaxItems,
       nextDreamEnabled ? 1 : 0,
       nextHygieneEnabled ? 1 : 0,
+      nextPracticeTasksEnabled ? 1 : 0,
+      nextPracticeAutoApproveReadOnly ? 1 : 0,
       now,
     ]);
     this.saveDb();
@@ -2770,6 +2811,8 @@ export class CoworkStore implements MemoryBackend {
       memoryUserMemoriesMaxItems: nextMaxItems,
       dreamEnabled: nextDreamEnabled,
       hygieneEnabled: nextHygieneEnabled,
+      practiceTasksEnabled: nextPracticeTasksEnabled,
+      practiceAutoApproveReadOnly: nextPracticeAutoApproveReadOnly,
       updatedAt: now,
     };
   }
@@ -7843,6 +7886,82 @@ export class CoworkStore implements MemoryBackend {
       this.saveDb();
     }
     return deleted;
+  }
+
+  /**
+   * Reverse lookup: the practice proposal a ScheduledTask was materialized
+   * from (dream_practice_proposals.scheduled_task_id). The scheduler uses it
+   * to activate the practice tool policy and to write the run outcome back.
+   */
+  getDreamPracticeProposalByScheduledTaskId(scheduledTaskId: string): DreamPracticeProposalRecord | null {
+    const id = String(scheduledTaskId ?? '').trim();
+    if (!id) return null;
+    const row = this.getOne<DreamPracticeProposalRow>(`
+      SELECT id, metabot_id, dream_date, title, prompt, rationale, target_refs_json,
+             expected_evidence, risk_class, status, scheduled_task_id, run_id,
+             outcome_summary, created_at, updated_at
+      FROM dream_practice_proposals
+      WHERE scheduled_task_id = ?
+      LIMIT 1
+    `, [id]);
+    return row ? this.mapDreamPracticeProposalRow(row) : null;
+  }
+
+  /**
+   * Backfill the outcome summary of a completed/failed proposal from the
+   * practice session's final report. First writer wins (outcome_summary IS
+   * NULL) so the nightly consumption pass is idempotent.
+   */
+  updateDreamPracticeProposalOutcome(input: { id: number; metabotId: number; outcomeSummary: string }): boolean {
+    const id = Number(input.id);
+    const metabotId = Number(input.metabotId);
+    const summary = String(input.outcomeSummary ?? '').trim();
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(metabotId) || metabotId <= 0 || !summary) {
+      return false;
+    }
+    this.db.run(
+      `UPDATE dream_practice_proposals
+       SET outcome_summary = ?, updated_at = ?
+       WHERE id = ? AND metabot_id = ?
+         AND status IN ('completed', 'failed')
+         AND outcome_summary IS NULL`,
+      [summary.slice(0, 2000), Date.now(), id, metabotId],
+    );
+    const updated = (this.db.getRowsModified?.() || 0) > 0;
+    if (updated) {
+      this.saveDb();
+    }
+    return updated;
+  }
+
+  /**
+   * Practice runs that executed during [dayStartMs, dayEndMs): proposals in a
+   * terminal run state joined to their scheduled_task_runs row (run_id is
+   * written at run completion by the scheduler). Feeds the dream prompt's
+   * practice-outcomes section and its outcome_summary backfill.
+   */
+  listDreamPracticeOutcomesForDay(
+    metabotId: number,
+    dayStartMs: number,
+    dayEndMs: number,
+  ): Array<DreamPracticeProposalRecord & { runSessionId: string | null }> {
+    if (!Number.isInteger(metabotId) || metabotId <= 0) return [];
+    const rows = this.getAll<DreamPracticeProposalRow & { run_session_id: string | null }>(`
+      SELECT p.id, p.metabot_id, p.dream_date, p.title, p.prompt, p.rationale, p.target_refs_json,
+             p.expected_evidence, p.risk_class, p.status, p.scheduled_task_id, p.run_id,
+             p.outcome_summary, p.created_at, p.updated_at,
+             r.session_id AS run_session_id
+      FROM dream_practice_proposals p
+      JOIN scheduled_task_runs r ON r.id = p.run_id
+      WHERE p.metabot_id = ?
+        AND p.status IN ('completed', 'failed')
+        AND r.started_at >= ? AND r.started_at < ?
+      ORDER BY r.started_at ASC, p.id ASC
+    `, [metabotId, new Date(dayStartMs).toISOString(), new Date(dayEndMs).toISOString()]);
+    return rows.map((row) => ({
+      ...this.mapDreamPracticeProposalRow(row),
+      runSessionId: row.run_session_id ?? null,
+    }));
   }
 
   updateUserMemory(input: MemoryUpdateUserMemoryInput): CoworkUserMemory | null {

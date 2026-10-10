@@ -490,6 +490,8 @@ interface CoworkMemoryPolicy {
   memoryPromptMaxChars: number;
   dreamEnabled: boolean;
   hygieneEnabled: boolean;
+  practiceTasksEnabled: boolean;
+  practiceAutoApproveReadOnly: boolean;
   source: 'global' | 'metabot';
 }
 
@@ -1239,6 +1241,8 @@ interface IElectronAPI {
       memoryUserMemoriesMaxItems?: number;
       dreamEnabled?: boolean;
       hygieneEnabled?: boolean;
+      practiceTasksEnabled?: boolean;
+      practiceAutoApproveReadOnly?: boolean;
     }) => Promise<{ success: boolean; policy?: CoworkMemoryPolicy; error?: string }>;
     getMemoryHygiene: () => Promise<{
       success: boolean;

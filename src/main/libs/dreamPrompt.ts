@@ -49,7 +49,7 @@ export const PRACTICE_PROPOSALS_MAX_PER_NIGHT = 2;
  * prompt, budgeting, stats or write semantics — completed in-window dates with
  * an older version are then re-dreamed automatically (limited per night).
  * Rows written before versioning existed read as 0. */
-export const DREAM_VERSION = 14;
+export const DREAM_VERSION = 15;
 
 const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks', 'group_tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];
@@ -172,6 +172,18 @@ export interface DreamPracticeProposal {
   targetRefs: string[];
   expectedEvidence: string;
   riskClass: DreamPracticeRiskClass;
+}
+
+/**
+ * One executed practice run as consumed by the next dream (design §3.4):
+ * proposal title + the expected evidence it was designed to produce + the
+ * outcome summary backfilled from the practice session's final report.
+ */
+export interface DreamPracticeOutcome {
+  title: string;
+  status: 'completed' | 'failed';
+  expectedEvidence: string | null;
+  outcomeSummary: string | null;
 }
 
 export interface DreamOutput {
@@ -460,6 +472,8 @@ export function buildDreamPrompt(input: {
   surfReport?: string | null;
   /** P2b: latest weekly long-dream review, rendered as cross-day context. */
   weeklyReview?: string | null;
+  /** P0 self-curriculum: practice runs executed during the dreamed day (design §3.4). */
+  practiceOutcomes?: DreamPracticeOutcome[];
 }): { system: string; user: string } {
   const sourceMode = input.sourceMode ?? 'raw_activity';
   const activityTokenBudget = Math.max(
@@ -558,6 +572,17 @@ export function buildDreamPrompt(input: {
       .map((run) => `- ${truncateText(run.taskName, 80)}(结果:${run.status})`)
       .join('\n');
     sections.push(`## 定时任务\n${taskLines}`);
+  }
+  // Self-curriculum loop closure (design §3.4): the practice runs that
+  // executed during the dreamed day, each with the evidence it was designed
+  // to produce — the next curriculum decision must see verified results.
+  if (sourceMode !== 'fragment' && (input.practiceOutcomes ?? []).length > 0) {
+    const outcomeLines = (input.practiceOutcomes ?? []).map((outcome) => [
+      `- 【${outcome.status === 'completed' ? '已完成' : '失败'}】${truncateText(outcome.title, 80)}`,
+      outcome.expectedEvidence ? `  期望证据:${truncateText(outcome.expectedEvidence, 300)}` : '',
+      outcome.outcomeSummary ? `  结果:${truncateText(outcome.outcomeSummary, 1500)}` : '  结果:(练习会话没有留下可读报告)',
+    ].filter(Boolean).join('\n'));
+    sections.push(`## 当天执行的针对性练习结果(你之前给自己布置的薄弱点练习,已在夜间自习窗口真实执行;把它们当作今晚蒸馏与出题的第一手输入,练习的失败尤其要重视)\n${outcomeLines.join('\n')}`);
   }
   // Implicit signals: mechanical facts only (no sentiment). The dream judges
   // what they mean with full context; they never carry a verdict of their own.

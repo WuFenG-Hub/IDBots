@@ -13,9 +13,16 @@ import {
   getDayBoundsMs,
   parseDreamOutput,
   validateSelfIdentity,
+  PRACTICE_PROPOSALS_MAX_PER_NIGHT,
   type DreamKnowledgeExisting,
   type DreamOutput,
+  type DreamPracticeOutcome,
 } from '../libs/dreamPrompt';
+import {
+  buildPracticeRunPrompt,
+  computePracticeRunAtMs,
+  PRACTICE_OUTCOME_MAX_CHARS,
+} from '../libs/practiceInteractionGuard';
 import {
   CAPABILITY_VALIDATION_MAX_DRAFTS,
   CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE,
@@ -54,6 +61,8 @@ import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../li
 import { budgetAssumesThinking } from '../libs/modelThinking';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import { metabotBrainOptions } from './llmFallback';
+import { extractFinalAssistantReply } from './orchestratorCoworkBridge';
+import { truncateUtf16Units } from '../libs/llmSafeText';
 import {
   classifyDreamError,
   DREAM_RETRY_MAX_ATTEMPTS,
@@ -218,6 +227,19 @@ export interface DreamServiceDeps {
    * folded into the dream prompt as its own section.
    */
   surfBeforeDream?: (metabotId: number) => Promise<{ reportMarkdown: string | null } | null>;
+  /**
+   * Self-curriculum materialization (design 2026-10-10 §3.4): creates the
+   * one-shot ScheduledTask for an approved practice proposal (main.ts wires
+   * ScheduledTaskStore.createTask + Scheduler.reschedule). Optional: without
+   * it, approved proposals simply stay approved (tests, headless runs).
+   */
+  createPracticeScheduledTask?: (input: {
+    metabotId: number;
+    name: string;
+    description: string;
+    prompt: string;
+    scheduleAtMs: number;
+  }) => { id: string };
   tickIntervalMs?: number;
   llmTimeoutMs?: number;
   /**
@@ -790,6 +812,9 @@ export class DreamService {
      * run's attempt count (resolveDreamAttemptTimeoutMs); the fixed constant
      * remains the default anchor for tests/legacy callers. */
     attemptTimeoutMs: number = DREAM_SYNTHESIS_TIMEOUT_MS,
+    /** Practice runs executed during the dreamed day (design §3.4), rendered
+     * as the prompt's practice-outcomes section. */
+    practiceOutcomes?: DreamPracticeOutcome[],
   ): Promise<{
     prompt: { system: string; user: string };
     output: DreamOutput;
@@ -812,6 +837,7 @@ export class DreamService {
         existingKnowledge,
         surfReport,
         weeklyReview,
+        practiceOutcomes,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -836,6 +862,7 @@ export class DreamService {
         existingKnowledge,
         surfReport,
         weeklyReview,
+        practiceOutcomes,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -878,6 +905,7 @@ export class DreamService {
       existingKnowledge,
       surfReport,
       weeklyReview,
+      practiceOutcomes,
     });
     const output = await this.generateAndParse(
       prompt.system,
@@ -964,6 +992,9 @@ export class DreamService {
         // Empty days have no negative decision points, so the replay no-ops.
         const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
         const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
+        // Self-curriculum (design §3.4): pending read_only proposals from
+        // earlier nights still approve + materialize on an empty day.
+        const practicePipeline = this.processPracticeProposalsAfterDream(metabot);
         this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
           emptyDay: true,
           estimatedActivityTokens: 0,
@@ -974,11 +1005,20 @@ export class DreamService {
           capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
           promotedCount: promotion.promoted,
           hasExplicitFeedback: hasExplicitHumanFeedback(activity),
+          practiceProposals: this.buildPracticeProposalTelemetry(metabotId, {
+            proposed: 0,
+            autoApproved: practicePipeline.autoApproved,
+          }),
+          practiceRuns: { completed: 0, failed: 0 },
           durationMs: Date.now() - runStartedAtMs,
         });
         return;
       }
 
+      // Self-curriculum loop closure (design §3.4): collect the practice runs
+      // executed during the dreamed day (and backfill their outcome summaries)
+      // before the prompt is built, so tonight's curriculum sees them.
+      const practiceOutcomes = this.collectPracticeOutcomesForDream(metabotId, startMs, endMs);
       const prepared = await this.prepareDreamPromptAndOutput(
         metabot,
         date,
@@ -988,6 +1028,7 @@ export class DreamService {
         existingKnowledge,
         surfReport,
         this.resolveSynthesisTimeoutMs(runStartedAtMs, currentRun.attemptCount),
+        practiceOutcomes.outcomes,
       );
       let output = prepared.output;
       // Repair runs discard selfIdentity in writeDreamResults, so skip the
@@ -1012,6 +1053,9 @@ export class DreamService {
       const promotion = this.promoteCapabilityDraftsToProcedures(metabot, date);
       const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
       const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
+      // Self-curriculum (design §3.4, after the replay per §3.1): auto-approve
+      // + materialize tonight's pending read_only practice proposals.
+      const practicePipeline = this.processPracticeProposalsAfterDream(metabot);
       const diaryRefs = this.auditDiaryRefs(output.dailySummary, activity, surfReport);
       // P2a telemetry: the dream policy becomes tunable once it is measurable.
       this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
@@ -1042,6 +1086,13 @@ export class DreamService {
         // P1: any explicit human feedback today (thumbs up/down, acceptance
         // rating) — separates "zero negative because good" from "no data".
         hasExplicitFeedback: hasExplicitHumanFeedback(activity),
+        // §6 self-curriculum telemetry: tonight's proposal funnel + the
+        // practice runs consumed from the dreamed day.
+        practiceProposals: this.buildPracticeProposalTelemetry(metabotId, {
+          proposed: output.practiceProposals?.length ?? 0,
+          autoApproved: practicePipeline.autoApproved,
+        }),
+        practiceRuns: { completed: practiceOutcomes.completed, failed: practiceOutcomes.failed },
         durationMs: Date.now() - runStartedAtMs,
       });
     } catch (error) {
@@ -1411,6 +1462,165 @@ export class DreamService {
         `[DreamService] Capability promotion pass failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return zero;
+    }
+  }
+
+  /**
+   * Self-curriculum consumption pass (design 2026-10-10 §3.4): the practice
+   * runs that executed during the dreamed day, each proposal's outcome_summary
+   * backfilled from the practice session's final report (minimal version: the
+   * last assistant message, truncated). Runs BEFORE prompt building so the
+   * outcomes ride tonight's curriculum decision; never fails the dream run.
+   */
+  private collectPracticeOutcomesForDream(
+    metabotId: number,
+    dayStartMs: number,
+    dayEndMs: number,
+  ): { outcomes: DreamPracticeOutcome[]; completed: number; failed: number } {
+    const zero = { outcomes: [] as DreamPracticeOutcome[], completed: 0, failed: 0 };
+    try {
+      const rows = this.deps.coworkStore.listDreamPracticeOutcomesForDay(metabotId, dayStartMs, dayEndMs);
+      const outcomes: DreamPracticeOutcome[] = [];
+      for (const row of rows) {
+        let summary = row.outcomeSummary;
+        if (!summary && row.runSessionId) {
+          try {
+            const session = this.deps.coworkStore.getSession(row.runSessionId);
+            const reply = session ? extractFinalAssistantReply(session.messages).replyText : '';
+            if (reply.trim()) {
+              summary = truncateUtf16Units(reply.trim(), PRACTICE_OUTCOME_MAX_CHARS);
+              this.deps.coworkStore.updateDreamPracticeProposalOutcome({
+                id: row.id,
+                metabotId,
+                outcomeSummary: summary,
+              });
+            }
+          } catch (error) {
+            console.warn(
+              `[DreamService] Practice outcome backfill failed for proposal #${row.id}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        outcomes.push({
+          title: row.title,
+          status: row.status === 'completed' ? 'completed' : 'failed',
+          expectedEvidence: row.expectedEvidence,
+          outcomeSummary: summary,
+        });
+      }
+      return {
+        outcomes,
+        completed: outcomes.filter((outcome) => outcome.status === 'completed').length,
+        failed: outcomes.filter((outcome) => outcome.status === 'failed').length,
+      };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Practice outcome collection failed for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * Self-curriculum approval + materialization (design §3.4, owner decisions
+   * §8): with the per-bot practiceTasksEnabled flag ON and
+   * practiceAutoApproveReadOnly on, pending read_only proposals auto-approve
+   * (oldest first, capped at the same 2/night as generation) and materialize
+   * into one-shot ScheduledTasks inside the night study window.
+   * interact_local / chain_write proposals stay pending for the owner —
+   * chain_write never executes in this iteration. Feature OFF (the default)
+   * is a zero-side-effect no-op. Never fails the dream run.
+   */
+  private processPracticeProposalsAfterDream(
+    metabot: DreamMetabotLike,
+  ): { autoApproved: number; materialized: number } {
+    const zero = { autoApproved: 0, materialized: 0 };
+    try {
+      const policy = this.deps.coworkStore.getEffectiveMemoryPolicyForMetabot(metabot.id);
+      if (!policy.practiceTasksEnabled || !policy.practiceAutoApproveReadOnly) return zero;
+      const createTask = this.deps.createPracticeScheduledTask;
+      if (!createTask) return zero;
+      const pending = this.deps.coworkStore.listDreamPracticeProposals(metabot.id, { status: 'pending' })
+        // Oldest first: the backlog drains before fresh proposals. The 2/night
+        // cap counts auto-approvals, so non-read_only rows are filtered out
+        // before slicing instead of consuming slots.
+        .reverse()
+        .filter((proposal) => proposal.riskClass === 'read_only')
+        .slice(0, PRACTICE_PROPOSALS_MAX_PER_NIGHT);
+      let autoApproved = 0;
+      let materialized = 0;
+      for (const proposal of pending) {
+        if (!this.deps.coworkStore.approveDreamPracticeProposal({ id: proposal.id, metabotId: metabot.id })) {
+          continue;
+        }
+        autoApproved += 1;
+        try {
+          const task = createTask({
+            metabotId: metabot.id,
+            name: `[Practice] ${proposal.title}`.slice(0, 80),
+            description: proposal.rationale ?? '',
+            prompt: buildPracticeRunPrompt(proposal),
+            scheduleAtMs: computePracticeRunAtMs({
+              nowMs: Date.now(),
+              metabotId: metabot.id,
+              proposalId: proposal.id,
+            }),
+          });
+          const marked = this.deps.coworkStore.markDreamPracticeProposalScheduled({
+            id: proposal.id,
+            metabotId: metabot.id,
+            scheduledTaskId: task.id,
+          });
+          if (marked) {
+            materialized += 1;
+          }
+        } catch (error) {
+          // A single bad proposal never aborts the rest of the batch; the row
+          // stays approved and can be retried by a later pass.
+          console.warn(
+            `[DreamService] Practice proposal #${proposal.id} materialization failed for metabot ${metabot.id}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      if (autoApproved > 0 || materialized > 0) {
+        console.log(
+          `[DreamService] Practice proposals for metabot ${metabot.id}: autoApproved=${autoApproved}, materialized=${materialized}`,
+        );
+      }
+      return { autoApproved, materialized };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Practice proposal pipeline failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * §6 telemetry snapshot for the practice pipeline: tonight's proposed /
+   * auto-approved counts plus the current status totals. Reads trigger the
+   * lazy TTL sweep, so `expired` reflects tonight's expirations.
+   */
+  private buildPracticeProposalTelemetry(
+    metabotId: number,
+    counts: { proposed: number; autoApproved: number },
+  ): { proposed: number; autoApproved: number; pendingOwner: number; rejected: number; expired: number } | null {
+    try {
+      const countByStatus = (status: 'pending' | 'rejected' | 'expired') =>
+        this.deps.coworkStore.listDreamPracticeProposals(metabotId, { status }).length;
+      return {
+        proposed: counts.proposed,
+        autoApproved: counts.autoApproved,
+        pendingOwner: countByStatus('pending'),
+        rejected: countByStatus('rejected'),
+        expired: countByStatus('expired'),
+      };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Practice proposal telemetry unavailable for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
     }
   }
 
