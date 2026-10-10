@@ -130,6 +130,10 @@ const SCOPED_USER_MEMORIES_BACKFILL_KEY = 'userMemories.scopeBackfill.v1.complet
 const METAWEB_ORDER_SESSION_MIGRATION_KEY = 'cowork.metawebOrderSessionsToPeerConversations.v1.completed';
 const METAWEB_ORDER_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebOrderSimplemsgMetadata.v1.completed';
 const METAWEB_PRIVATE_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebPrivateSimplemsgMetadata.v1.completed';
+/** Self-curriculum practice proposals (design 2026-10-10 §3.3): a 'pending'
+ * proposal the owner never acted on expires after this many days. The sweep is
+ * lazy — it runs inside every read/transition of the table. */
+export const PRACTICE_PROPOSAL_TTL_DAYS = 3;
 /**
  * Canonical JSON.stringify spelling of the metaweb-private sourceChannel flag.
  * Every metadata write goes through this store's stringify, so a LIKE on this
@@ -234,6 +238,10 @@ function parseCoworkTranscriptCursor(raw: unknown): CoworkTranscriptCursor | nul
 function normalizeMemoryGuardLevel(value: string | undefined): CoworkMemoryGuardLevel {
   if (value === 'strict' || value === 'standard' || value === 'relaxed') return value;
   return DEFAULT_MEMORY_GUARD_LEVEL;
+}
+
+function normalizeDreamPracticeProposalRiskClass(value?: string | null): DreamPracticeProposalRiskClass {
+  return value === 'interact_local' || value === 'chain_write' ? value : 'read_only';
 }
 
 function parseBooleanConfig(value: string | undefined, fallback: boolean): boolean {
@@ -931,6 +939,65 @@ interface CapabilityDraftRow {
   promoted_at?: number | string | null;
   promoted_procedure_id?: string | null;
   last_reviewed_at?: number | string | null;
+}
+
+/** Risk class of a dream-proposed practice task (design 2026-10-10 §3.2). */
+export type DreamPracticeProposalRiskClass = 'read_only' | 'interact_local' | 'chain_write';
+
+/**
+ * Lifecycle of one dream_practice_proposals row (design 2026-10-10 §3.3):
+ * pending → approved → scheduled → completed|failed; pending → expired (lazy
+ * TTL); pending|approved → rejected (owner, any point before scheduled).
+ */
+export type DreamPracticeProposalStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'scheduled'
+  | 'completed'
+  | 'failed'
+  | 'expired';
+
+/** One dream_practice_proposals row (self-curriculum, design 2026-10-10 §3.3). */
+export interface DreamPracticeProposalRecord {
+  id: number;
+  metabotId: number;
+  dreamDate: string;
+  title: string;
+  /** Full self-contained task prompt for the practice cowork session. */
+  prompt: string;
+  rationale: string | null;
+  /** Recorded-weakness citations (draft:<id>, procedure:<id>, surf:<runId>, date:<YYYY-MM-DD>). */
+  targetRefs: string[];
+  expectedEvidence: string | null;
+  riskClass: DreamPracticeProposalRiskClass;
+  status: DreamPracticeProposalStatus;
+  /** Link to the materialized scheduled task (scheduled_tasks.id), NULL until scheduled. */
+  scheduledTaskId: string | null;
+  /** Link to the executed run (scheduled_task_runs.id), NULL until executed. */
+  runId: string | null;
+  /** Filled by the next dream's consumption pass. */
+  outcomeSummary: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface DreamPracticeProposalRow {
+  id: number | string;
+  metabot_id: number | string;
+  dream_date: string;
+  title: string;
+  prompt: string;
+  rationale?: string | null;
+  target_refs_json?: string | null;
+  expected_evidence?: string | null;
+  risk_class?: string | null;
+  status: string;
+  scheduled_task_id?: string | null;
+  run_id?: string | null;
+  outcome_summary?: string | null;
+  created_at: number | string;
+  updated_at: number | string;
 }
 
 export interface CoworkUserMemoryStats {
@@ -7503,6 +7570,272 @@ export class CoworkStore implements MemoryBackend {
     this.db.run(
       `DELETE FROM capability_drafts
        WHERE status IN ('rejected', 'draft') AND created_at < ?${exclusion}`,
+      [cutoff, ...excluded],
+    );
+    const deleted = this.db.getRowsModified?.() || 0;
+    if (deleted > 0) {
+      this.saveDb();
+    }
+    return deleted;
+  }
+
+  private mapDreamPracticeProposalRow(row: DreamPracticeProposalRow): DreamPracticeProposalRecord {
+    let targetRefs: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(row.target_refs_json ?? '[]');
+      if (Array.isArray(parsed)) {
+        targetRefs = parsed.filter((ref): ref is string => typeof ref === 'string');
+      }
+    } catch {
+      targetRefs = [];
+    }
+    return {
+      id: Number(row.id),
+      metabotId: Number(row.metabot_id),
+      dreamDate: String(row.dream_date),
+      title: String(row.title),
+      prompt: String(row.prompt),
+      rationale: row.rationale == null ? null : String(row.rationale),
+      targetRefs,
+      expectedEvidence: row.expected_evidence == null ? null : String(row.expected_evidence),
+      riskClass: normalizeDreamPracticeProposalRiskClass(row.risk_class),
+      status: String(row.status) as DreamPracticeProposalStatus,
+      scheduledTaskId: row.scheduled_task_id == null ? null : String(row.scheduled_task_id),
+      runId: row.run_id == null ? null : String(row.run_id),
+      outcomeSummary: row.outcome_summary == null ? null : String(row.outcome_summary),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  /**
+   * Insert dream-proposed practice tasks into `dream_practice_proposals`
+   * (self-curriculum, design 2026-10-10 §3.3). Every row lands as 'pending';
+   * approval and scheduling are separate, deliberate transitions. Entries with
+   * an empty title/prompt are skipped; an unknown risk class falls back to
+   * 'read_only'. Returns the number of rows inserted.
+   */
+  insertDreamPracticeProposals(
+    metabotId: number,
+    dreamDate: string,
+    proposals: Array<{
+      title?: string | null;
+      prompt?: string | null;
+      rationale?: string | null;
+      targetRefs?: string[] | null;
+      expectedEvidence?: string | null;
+      riskClass?: string | null;
+    }>,
+  ): number {
+    const now = Date.now();
+    let inserted = 0;
+    for (const proposal of Array.isArray(proposals) ? proposals : []) {
+      const title = String(proposal?.title ?? '').trim();
+      const prompt = String(proposal?.prompt ?? '').trim();
+      if (!title || !prompt || !Number.isInteger(metabotId) || metabotId <= 0) {
+        continue;
+      }
+      const rationale = String(proposal?.rationale ?? '').trim() || null;
+      const expectedEvidence = String(proposal?.expectedEvidence ?? '').trim() || null;
+      const targetRefs = Array.isArray(proposal?.targetRefs)
+        ? [...new Set(proposal.targetRefs.map((ref) => String(ref ?? '').trim()).filter(Boolean))]
+        : [];
+      this.db.run(`
+        INSERT INTO dream_practice_proposals (
+          metabot_id, dream_date, title, prompt, rationale, target_refs_json,
+          expected_evidence, risk_class, status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+      `, [
+        metabotId,
+        dreamDate,
+        title,
+        prompt,
+        rationale,
+        JSON.stringify(targetRefs),
+        expectedEvidence,
+        normalizeDreamPracticeProposalRiskClass(proposal?.riskClass),
+        now,
+        now,
+      ]);
+      inserted += 1;
+    }
+    if (inserted > 0) {
+      this.saveDb();
+    }
+    return inserted;
+  }
+
+  /**
+   * Read practice proposals, newest first; scoped to one MetaBot when
+   * `metabotId` is given, optionally filtered by status. Runs the lazy TTL
+   * sweep first so a stale 'pending' row never surfaces as actionable.
+   */
+  listDreamPracticeProposals(
+    metabotId?: number,
+    options?: { status?: DreamPracticeProposalStatus; limit?: number },
+  ): DreamPracticeProposalRecord[] {
+    this.expireStaleDreamPracticeProposals();
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (metabotId !== undefined && Number.isInteger(metabotId)) {
+      where.push('metabot_id = ?');
+      params.push(metabotId);
+    }
+    if (typeof options?.status === 'string' && options.status.trim()) {
+      where.push('status = ?');
+      params.push(options.status.trim());
+    }
+    const limit = Number.isInteger(options?.limit) && (options?.limit ?? 0) > 0
+      ? Math.floor(options!.limit!)
+      : null;
+    const rows = this.getAll<DreamPracticeProposalRow>(`
+      SELECT id, metabot_id, dream_date, title, prompt, rationale, target_refs_json,
+             expected_evidence, risk_class, status, scheduled_task_id, run_id,
+             outcome_summary, created_at, updated_at
+      FROM dream_practice_proposals
+      ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY created_at DESC, id DESC
+      ${limit != null ? `LIMIT ${limit}` : ''}
+    `, params);
+    return rows.map((row) => this.mapDreamPracticeProposalRow(row));
+  }
+
+  /** One proposal by id (optionally ownership-scoped), after the TTL sweep. */
+  getDreamPracticeProposal(id: number, metabotId?: number): DreamPracticeProposalRecord | null {
+    this.expireStaleDreamPracticeProposals();
+    const numericId = Number(id);
+    if (!Number.isInteger(numericId) || numericId <= 0) return null;
+    const scoped = metabotId !== undefined && Number.isInteger(metabotId);
+    const row = this.getOne<DreamPracticeProposalRow>(`
+      SELECT id, metabot_id, dream_date, title, prompt, rationale, target_refs_json,
+             expected_evidence, risk_class, status, scheduled_task_id, run_id,
+             outcome_summary, created_at, updated_at
+      FROM dream_practice_proposals
+      WHERE id = ?${scoped ? ' AND metabot_id = ?' : ''}
+      LIMIT 1
+    `, scoped ? [numericId, Number(metabotId)] : [numericId]);
+    return row ? this.mapDreamPracticeProposalRow(row) : null;
+  }
+
+  /**
+   * Shared guarded status transition: the UPDATE carries the expected current
+   * statuses in its WHERE clause, so an illegal transition — or one lost to a
+   * concurrent write — is a no-op returning false.
+   */
+  private transitionDreamPracticeProposal(input: {
+    id: number;
+    metabotId: number;
+    from: readonly DreamPracticeProposalStatus[];
+    to: DreamPracticeProposalStatus;
+    scheduledTaskId?: string | null;
+    runId?: string | null;
+    outcomeSummary?: string | null;
+  }): boolean {
+    const id = Number(input.id);
+    const metabotId = Number(input.metabotId);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(metabotId) || metabotId <= 0) {
+      return false;
+    }
+    const sets: string[] = ['status = ?', 'updated_at = ?'];
+    const params: Array<string | number | null> = [input.to, Date.now()];
+    if (input.scheduledTaskId !== undefined) {
+      sets.push('scheduled_task_id = ?');
+      params.push(input.scheduledTaskId);
+    }
+    if (input.runId !== undefined) {
+      sets.push('run_id = ?');
+      params.push(input.runId);
+    }
+    if (input.outcomeSummary !== undefined) {
+      sets.push('outcome_summary = ?');
+      params.push(input.outcomeSummary);
+    }
+    const placeholders = input.from.map(() => '?').join(', ');
+    params.push(id, metabotId, ...input.from);
+    this.db.run(
+      `UPDATE dream_practice_proposals
+       SET ${sets.join(', ')}
+       WHERE id = ? AND metabot_id = ? AND status IN (${placeholders})`,
+      params,
+    );
+    const updated = (this.db.getRowsModified?.() || 0) > 0;
+    if (updated) {
+      this.saveDb();
+    }
+    return updated;
+  }
+
+  /** pending → approved (owner UI action, or the auto-approve policy). */
+  approveDreamPracticeProposal(input: { id: number; metabotId: number }): boolean {
+    // TTL sweep first: a stale pending proposal reads as expired and refuses.
+    this.expireStaleDreamPracticeProposals();
+    return this.transitionDreamPracticeProposal({ ...input, from: ['pending'], to: 'approved' });
+  }
+
+  /** pending|approved → rejected: the owner may reject at any point before scheduled. */
+  rejectDreamPracticeProposal(input: { id: number; metabotId: number; outcomeSummary?: string | null }): boolean {
+    this.expireStaleDreamPracticeProposals();
+    return this.transitionDreamPracticeProposal({ ...input, from: ['pending', 'approved'], to: 'rejected' });
+  }
+
+  /** approved → scheduled: the host materialized the proposal into a ScheduledTask. */
+  markDreamPracticeProposalScheduled(input: { id: number; metabotId: number; scheduledTaskId: string }): boolean {
+    const scheduledTaskId = String(input.scheduledTaskId ?? '').trim();
+    if (!scheduledTaskId) return false;
+    return this.transitionDreamPracticeProposal({ ...input, scheduledTaskId, from: ['approved'], to: 'scheduled' });
+  }
+
+  /** scheduled → completed (from the scheduled_task_runs outcome). */
+  markDreamPracticeProposalCompleted(input: { id: number; metabotId: number; runId?: string | null; outcomeSummary?: string | null }): boolean {
+    return this.transitionDreamPracticeProposal({ ...input, from: ['scheduled'], to: 'completed' });
+  }
+
+  /** scheduled → failed (from the scheduled_task_runs outcome). */
+  markDreamPracticeProposalFailed(input: { id: number; metabotId: number; runId?: string | null; outcomeSummary?: string | null }): boolean {
+    return this.transitionDreamPracticeProposal({ ...input, from: ['scheduled'], to: 'failed' });
+  }
+
+  /**
+   * Lazy TTL (design §3.3): 'pending' proposals not acted on within
+   * PRACTICE_PROPOSAL_TTL_DAYS become 'expired'. Runs inside every read/
+   * transition of this table; also safe to call standalone from a nightly
+   * sweep. Returns the number of rows expired.
+   */
+  expireStaleDreamPracticeProposals(input?: { cutoffMs?: number }): number {
+    const cutoff = Number.isFinite(input?.cutoffMs)
+      ? Math.floor(Number(input!.cutoffMs))
+      : Date.now() - PRACTICE_PROPOSAL_TTL_DAYS * 86_400_000;
+    this.db.run(
+      `UPDATE dream_practice_proposals
+       SET status = 'expired', updated_at = ?
+       WHERE status = 'pending' AND created_at < ?`,
+      [Date.now(), cutoff],
+    );
+    const expired = this.db.getRowsModified?.() || 0;
+    if (expired > 0) {
+      this.saveDb();
+    }
+    return expired;
+  }
+
+  /**
+   * Retention cleanup: physically delete 'rejected'/'expired' proposal rows
+   * whose last update is older than the cutoff. 'completed'/'failed' rows stay
+   * — their outcome_summary is the loop-closure evidence later dreams read.
+   */
+  purgeDreamPracticeProposals(input: {
+    cutoffMs: number;
+    excludeMetabotIds?: ReadonlySet<number>;
+  }): number {
+    const cutoff = Math.floor(Number(input.cutoffMs) || 0);
+    const excluded = input.excludeMetabotIds ? [...input.excludeMetabotIds] : [];
+    const exclusion = excluded.length > 0
+      ? ` AND metabot_id NOT IN (${excluded.map(() => '?').join(', ')})`
+      : '';
+    this.db.run(
+      `DELETE FROM dream_practice_proposals
+       WHERE status IN ('rejected', 'expired') AND updated_at < ?${exclusion}`,
       [cutoff, ...excluded],
     );
     const deleted = this.db.getRowsModified?.() || 0;

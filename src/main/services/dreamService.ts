@@ -1882,6 +1882,31 @@ export class DreamService {
       }
     }
 
+    // Self-curriculum (Dream-RSI exploration P0, design 2026-10-10 §3.2): each
+    // practice proposal becomes a 'pending' dream_practice_proposals row;
+    // approval and materialization are a separate pipeline stage. A failure
+    // here must not fail the dream run.
+    const practiceProposals = Array.isArray(output.practiceProposals) ? output.practiceProposals : [];
+    if (practiceProposals.length > 0) {
+      try {
+        const inserted = this.deps.coworkStore.insertDreamPracticeProposals(
+          metabotId,
+          date,
+          practiceProposals,
+        );
+        if (inserted > 0) {
+          console.log(
+            `[DreamService] Practice proposals for metabot ${metabotId} date ${date}: inserted=${inserted}`,
+          );
+        }
+      } catch (error) {
+        console.warn(
+          `[DreamService] Practice proposal persistence failed for metabot ${metabotId} date ${date}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
     return { dedupMerged };
   }
 }
