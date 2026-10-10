@@ -287,3 +287,40 @@ Each commit keeps `pnpm run check:dsh-deps` green and adds its own focused tests
 - **Budget creep**: unattended sessions burn tokens. Mitigation: hard caps (2/night, 60 iterations, 20 min), policy default-off, telemetry on cost per practice run.
 - **Verifier still an LLM**: chain grounding only covers chain claims; diary-based judging can still be wrong. Mitigation: contradiction catches are logged loudly; the 30-day re-review remains the backstop.
 - **Memory bloat via annotations**: `narrow` appends text. Mitigation: `conditions`/`uncertainty` fields capped (300 chars each) at parse time.
+
+## 10. Future iterations (deferred — with activation triggers)
+
+Discussed and deliberately deferred on 2026-10-11. The governing discipline: **merge and observe §6 telemetry for ~2 weeks before funding any of these** — each item below lists the telemetry signal that would activate it.
+
+### 10.1 Owner approval UI for practice proposals (most urgent follow-up)
+
+This iteration shipped the data and IPC surface only. `interact_local` proposals and any proposal beyond the auto-approve cap sit in `pending` with **no owner-visible surface**, so they silently expire after 3 days. Until a Practice tab lands (candidate home: `CapabilityDraftsPanel`, `src/renderer/components/settings/CapabilityDraftsPanel.tsx`), the self-curriculum loop effectively runs read-only-only.
+
+- Scope: list pending/approved/completed proposals per bot, approve/reject actions, run outcome view, policy toggles (`practiceTasksEnabled`, `practiceAutoApproveReadOnly`).
+- Activation: none needed — this completes P0 rather than extending it.
+
+### 10.2 P2 residue: explicit broad-then-deep staging
+
+The P0 practice pipeline already subsumes most of the original P2 idea: `target_refs` accepts `surf:<runId>`, the practice session is the deep-dive container, and the curriculum guidance already prefers contrast/stress variants. What remains unbuilt:
+
+1. A structured **"hard cases" field in the surf report** (today: free-text `notes` only) so surf findings become machine-targetable practice fodder.
+2. A **depth marker on procedures** (e.g. `deep_validated` tag) distinguishing lessons validated by targeted practice from single-observation lessons.
+3. **Multi-cycle DRS loops** (practice → outcome → harder follow-up practice within one lineage) — a non-goal this iteration and still the most complex piece; needs curriculum quality evidence first.
+
+- Activation: telemetry shows proposals genuinely citing `surf:` refs (loop closes from breadth), and reconciliation/dispute rates show single-shot practice leaving uncertainty unresolved.
+
+### 10.3 P2.5: frozen-memory capability evaluation
+
+Periodic fixed-exam scoring against a hash-frozen memory copy (writeback disabled), giving per-bot comparable growth curves.
+
+Open design questions that need their own document:
+
+- Exam bank provenance: replay historical MetaTask nodes? owner-authored tasks? on-chain shared exam sets?
+- Scoring: who judges — replay-gate LLM, MetaTask reviewer quorum, or deterministic checkers?
+- Budget policy: exams burn tokens; cadence and cost caps are an owner decision.
+
+- Activation: at least 2 weeks of loop telemetry exist (a baseline to measure against), and capability utilization numbers (`times_injected`, procedure `use_count`) are moving — otherwise there is nothing to measure.
+
+### 10.4 Population-level evolution (the documented next frontier)
+
+On-chain skill fitness signals (installs × validation pass rate feeding reputation), and a practice-task exchange where one bot's hard-won DRS exercise becomes the fleet's curriculum. Requires a stronger on-chain verification bar than local promotion — most mutations are harmful, so selection pressure must be front-loaded. Design only after §6 metrics show the single-bot loop producing durable capability gains.
