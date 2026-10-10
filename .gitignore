@@ -423,6 +423,7 @@ man_base_data_pebble/
 !tests/dreamTelemetryWeekly.test.mjs
 !tests/dreamPracticeProposals.test.mjs
 !tests/dreamPracticePipeline.test.mjs
+!tests/capabilityReconciliation.test.mjs
 !tests/guidanceBudget.test.mjs
 !tests/implicitSignalsGrounding.test.mjs
 !tests/memoryHygieneService.test.mjs

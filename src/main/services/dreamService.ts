@@ -31,9 +31,18 @@ import {
   CAPABILITY_PROMOTION_MIN_SCORE,
   CAPABILITY_REVIEW_INTERVAL_DAYS,
   CAPABILITY_REVIEW_MAX_PER_NIGHT,
+  DISPUTED_AUTO_REJECT_DAYS,
   buildCapabilityValidationPrompt,
   parseCapabilityValidationOutput,
 } from '../libs/capabilityValidationPrompt';
+import {
+  RECONCILE_MAX_CONFLICT_CANDIDATES,
+  RECONCILE_MAX_DRAFTS_PER_NIGHT,
+  buildCapabilityReconciliationPrompt,
+  parseCapabilityReconciliationOutput,
+  type ReconciliationConflictCandidate,
+} from '../libs/capabilityReconciliationPrompt';
+import { tokenizeKnowledgeBaseText } from '../libs/knowledgeBaseText';
 import {
   buildCounterfactualReplayPrompt,
   extractNegativeDecisionPoints,
@@ -988,6 +997,10 @@ export class DreamService {
         // Pending capability drafts can still be validated against older
         // diaries even when today added no new activity.
         const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
+        // Memory reconciliation (design §4.2) sits between validation and
+        // promotion on every path — a just-validated draft must survive the
+        // memory-bank check before it can harden.
+        const reconciliation = await this.reconcileValidatedCapabilityDrafts(metabot, brain, date, validation.validatedIds);
         const promotion = this.promoteCapabilityDraftsToProcedures(metabot, date);
         // Empty days have no negative decision points, so the replay no-ops.
         const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
@@ -1005,6 +1018,7 @@ export class DreamService {
           capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
           promotedCount: promotion.promoted,
           hasExplicitFeedback: hasExplicitHumanFeedback(activity),
+          reconciliation,
           practiceProposals: this.buildPracticeProposalTelemetry(metabotId, {
             proposed: 0,
             autoApproved: practicePipeline.autoApproved,
@@ -1050,6 +1064,9 @@ export class DreamService {
       // P1 periodic re-review runs between the fresh-draft gate and the
       // promotion pass: a just-demoted draft must not harden tonight.
       const reReview = await this.reReviewValidatedCapabilityDrafts(metabot, brain, date);
+      // P1 memory reconciliation (design §4.2): tonight's newly validated
+      // drafts face the whole memory bank before any promotion can harden.
+      const reconciliation = await this.reconcileValidatedCapabilityDrafts(metabot, brain, date, validation.validatedIds);
       const promotion = this.promoteCapabilityDraftsToProcedures(metabot, date);
       const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
       const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
@@ -1086,6 +1103,9 @@ export class DreamService {
         // P1: any explicit human feedback today (thumbs up/down, acceptance
         // rating) — separates "zero negative because good" from "no data".
         hasExplicitFeedback: hasExplicitHumanFeedback(activity),
+        // §6 memory reconciliation funnel: how tonight's newly validated
+        // drafts survived the memory-bank check.
+        reconciliation,
         // §6 self-curriculum telemetry: tonight's proposal funnel + the
         // practice runs consumed from the dreamed day.
         practiceProposals: this.buildPracticeProposalTelemetry(metabotId, {
@@ -1204,18 +1224,44 @@ export class DreamService {
    * verdict must also clear the score threshold, and a weak or unparseable
    * verdict leaves the draft untouched. Runs after finishRun and never
    * affects the dream run's recorded outcome.
+   *
+   * Disputed drafts (design §4.3) re-enter here with their conflict evidence
+   * attached (rendered as 存疑待裁决); the disputed-timeout sweep runs first,
+   * auto-rejecting anything stale past DISPUTED_AUTO_REJECT_DAYS.
+   * Returns the ids of tonight's newly validated drafts — the reconciliation
+   * pass consumes exactly that set.
    */
   private async validateCapabilityDraftsAfterDream(
     metabot: DreamMetabotLike,
     brain: DreamBrainPair,
     date: string,
-  ): Promise<{ checked: number; validated: number; rejected: number }> {
-    const zero = { checked: 0, validated: 0, rejected: 0 };
+  ): Promise<{ checked: number; validated: number; rejected: number; validatedIds: number[] }> {
+    const zero = { checked: 0, validated: 0, rejected: 0, validatedIds: [] as number[] };
     try {
-      const pending = this.deps.coworkStore.listCapabilityDrafts(metabot.id, {
-        status: 'draft',
-        limit: CAPABILITY_VALIDATION_MAX_DRAFTS,
+      // Disputed-timeout sweep (design §4.4): an unresolved dispute older than
+      // the auto-reject window demotes to 'rejected'; the existing purge
+      // (rejected + old) removes the corpse later.
+      const staleDisputed = this.deps.coworkStore.listStaleDisputedCapabilityDrafts(metabot.id, {
+        olderThanMs: Date.now() - DISPUTED_AUTO_REJECT_DAYS * 86_400_000,
       });
+      for (const stale of staleDisputed) {
+        this.deps.coworkStore.updateCapabilityDraftValidation({
+          id: stale.id,
+          metabotId: metabot.id,
+          status: 'rejected',
+          validationScore: stale.validationScore,
+          validationNotes: `disputed ${DISPUTED_AUTO_REJECT_DAYS} nights without resolution — auto-rejected (reconciliation timeout)`,
+        });
+      }
+      if (staleDisputed.length > 0) {
+        console.warn(
+          `[DreamService] Auto-rejected ${staleDisputed.length} stale disputed capability draft(s) for metabot ${metabot.id}`,
+        );
+      }
+
+      const disputed = this.deps.coworkStore.listCapabilityDrafts(metabot.id, { status: 'disputed' });
+      const fresh = this.deps.coworkStore.listCapabilityDrafts(metabot.id, { status: 'draft' });
+      const pending = [...disputed, ...fresh].slice(0, CAPABILITY_VALIDATION_MAX_DRAFTS);
       if (pending.length === 0) return zero;
       const recentSummaries = this.deps.dreamStore.listDailySummaries(
         metabot.id,
@@ -1230,6 +1276,7 @@ export class DreamService {
           title: draft.title,
           description: draft.description,
           capabilityType: draft.capabilityType,
+          conflictNote: draft.status === 'disputed' ? draft.validationNotes : null,
         })),
         recentSummaries: recentSummaries.map((summary) => ({
           summaryDate: summary.summaryDate,
@@ -1257,6 +1304,7 @@ export class DreamService {
       }
       let validated = 0;
       let rejected = 0;
+      const validatedIds: number[] = [];
       for (const verdict of groundedVerdicts) {
         const promote = verdict.verdict === 'validated' && verdict.score >= CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE;
         const demote = verdict.verdict === 'rejected';
@@ -1268,15 +1316,19 @@ export class DreamService {
           validationScore: verdict.score,
           validationNotes: verdict.rationale,
         });
-        if (promote) validated += 1;
-        else rejected += 1;
+        if (promote) {
+          validated += 1;
+          validatedIds.push(verdict.id);
+        } else {
+          rejected += 1;
+        }
       }
       if (validated > 0 || rejected > 0) {
         console.log(
           `[DreamService] Capability validation for metabot ${metabot.id}: validated=${validated}, rejected=${rejected}, checked=${pending.length}`,
         );
       }
-      return { checked: pending.length, validated, rejected };
+      return { checked: pending.length, validated, rejected, validatedIds };
     } catch (error) {
       console.warn(
         `[DreamService] Capability validation failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1432,11 +1484,18 @@ export class DreamService {
       let promoted = 0;
       for (const draft of candidates) {
         try {
+          // Design §4.4: a reconciled draft carries its applicability
+          // conditions into the procedure's trigger and its residual
+          // uncertainty into the pitfalls — the conditions under which the
+          // lesson was observed survive the hardening.
           const result = this.deps.metaidKnowledgeStore.upsertProcedure({
             metabotId: metabot.id,
             title: draft.title,
-            triggerText: draft.title,
+            triggerText: draft.conditionsText
+              ? truncateUtf16Units(`${draft.title}(适用条件:${draft.conditionsText})`, 500)
+              : draft.title,
             steps: [draft.description],
+            pitfalls: draft.uncertaintyText ? [`Untested: ${draft.uncertaintyText}`] : [],
             tags: ['capability-draft', draft.capabilityType],
             origin: 'dream',
           });
@@ -1463,6 +1522,208 @@ export class DreamService {
       );
       return zero;
     }
+  }
+
+  /**
+   * Memory reconciliation pass (design 2026-10-10 §4.2/§4.3): between
+   * validation and promotion, tonight's newly validated drafts are checked
+   * against the WHOLE memory bank. The host computes conflict candidates
+   * (token overlap against active procedures and other validated drafts); the
+   * LLM judges keep/narrow/merge/dispute; the host executes the verdicts by
+   * fixed template (annotate / template-narrow / merge-by-reference /
+   * suspend) — the model never edits the store directly.
+   */
+  private async reconcileValidatedCapabilityDrafts(
+    metabot: DreamMetabotLike,
+    brain: DreamBrainPair,
+    date: string,
+    validatedIds: number[],
+  ): Promise<{ considered: number; kept: number; narrowed: number; merged: number; disputed: number }> {
+    const zero = { considered: 0, kept: 0, narrowed: 0, merged: 0, disputed: 0 };
+    try {
+      if (validatedIds.length === 0) return zero;
+      // Re-read the rows: only still-validated drafts reconcile (a demotion
+      // between the gate and this pass drops the draft out).
+      const tonight = this.deps.coworkStore.listCapabilityDrafts(metabot.id, { status: 'validated' })
+        .filter((draft) => validatedIds.includes(draft.id))
+        .sort((left, right) => (right.validationScore ?? 0) - (left.validationScore ?? 0))
+        .slice(0, RECONCILE_MAX_DRAFTS_PER_NIGHT);
+      if (tonight.length === 0) return zero;
+      const recentSummaries = this.deps.dreamStore.listDailySummaries(
+        metabot.id,
+        CAPABILITY_VALIDATION_SUMMARY_DAYS,
+      );
+      const conflictsByDraftId = new Map<number, ReconciliationConflictCandidate[]>();
+      for (const draft of tonight) {
+        conflictsByDraftId.set(draft.id, this.buildReconciliationConflictCandidates(metabot.id, draft));
+      }
+      const prompt = buildCapabilityReconciliationPrompt({
+        botName: metabot.name,
+        date,
+        drafts: tonight.map((draft) => ({
+          id: draft.id,
+          dreamDate: draft.dreamDate,
+          title: draft.title,
+          description: draft.description,
+          capabilityType: draft.capabilityType,
+          validationScore: draft.validationScore,
+        })),
+        conflictsByDraftId,
+        recentSummaries: recentSummaries.map((summary) => ({
+          summaryDate: summary.summaryDate,
+          summaryText: summary.summaryText,
+        })),
+      });
+      const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
+      const parsed = parseCapabilityReconciliationOutput(raw, new Set(tonight.map((draft) => draft.id)));
+      if (!parsed.ok) {
+        console.warn(`[DreamService] Reconciliation parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
+        return { ...zero, considered: tonight.length };
+      }
+      const byId = new Map(tonight.map((draft) => [draft.id, draft]));
+      const counts = { ...zero, considered: tonight.length };
+      for (const verdict of parsed.verdicts) {
+        const draft = byId.get(verdict.id);
+        if (!draft) continue;
+        switch (verdict.action) {
+          case 'keep':
+            this.deps.coworkStore.setCapabilityDraftConditions({
+              id: draft.id,
+              metabotId: metabot.id,
+              conditionsText: verdict.conditions,
+              uncertaintyText: verdict.uncertainty,
+            });
+            counts.kept += 1;
+            break;
+          case 'narrow':
+            this.deps.coworkStore.narrowCapabilityDraft({
+              id: draft.id,
+              metabotId: metabot.id,
+              conditionsText: verdict.conditions,
+              uncertaintyText: verdict.uncertainty,
+            });
+            counts.narrowed += 1;
+            break;
+          case 'merge': {
+            // Grounding gate: the merge target must come from the candidates
+            // the host actually presented to the model.
+            const targetRef = verdict.conflictsWith.find((ref) => ref.startsWith('procedure:')) ?? '';
+            const candidateRefs = new Set((conflictsByDraftId.get(draft.id) ?? []).map((candidate) => candidate.ref));
+            const targetId = targetRef.slice('procedure:'.length);
+            if (!targetRef || !targetId || !candidateRefs.has(targetRef)) {
+              console.warn(
+                `[DreamService] Dropped merge verdict for draft #${draft.id}: target ${targetRef || '(none)'} was not a presented candidate`,
+              );
+              continue;
+            }
+            if (this.deps.metaidKnowledgeStore) {
+              const appended = this.deps.metaidKnowledgeStore.appendProcedurePitfall(
+                targetId,
+                `Merged dream draft #${draft.id} (${draft.dreamDate}): ${draft.title}`,
+              );
+              if (!appended) {
+                console.warn(
+                  `[DreamService] Merge verdict for draft #${draft.id}: pitfall append on ${targetRef} failed (missing/archived/full)`,
+                );
+              }
+            }
+            this.deps.coworkStore.updateCapabilityDraftValidation({
+              id: draft.id,
+              metabotId: metabot.id,
+              status: 'rejected',
+              validationScore: draft.validationScore,
+              validationNotes: `merged into ${targetRef}${verdict.note ? ` — ${verdict.note}` : ''}`,
+            });
+            counts.merged += 1;
+            break;
+          }
+          case 'dispute':
+            this.deps.coworkStore.updateCapabilityDraftValidation({
+              id: draft.id,
+              metabotId: metabot.id,
+              status: 'disputed',
+              validationScore: draft.validationScore,
+              validationNotes: [
+                `reconciliation dispute ${date}`,
+                verdict.note || '',
+                verdict.conflictsWith.length > 0 ? `conflicts: ${verdict.conflictsWith.join(', ')}` : '',
+              ].filter(Boolean).join(' — '),
+            });
+            counts.disputed += 1;
+            break;
+        }
+      }
+      if (counts.kept + counts.narrowed + counts.merged + counts.disputed > 0) {
+        console.log(
+          `[DreamService] Reconciliation for metabot ${metabot.id}: considered=${counts.considered}, kept=${counts.kept}, narrowed=${counts.narrowed}, merged=${counts.merged}, disputed=${counts.disputed}`,
+        );
+      }
+      return counts;
+    } catch (error) {
+      console.warn(
+        `[DreamService] Reconciliation failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * Host-computed conflict candidates for one draft (design §4.3): active
+   * procedures via the store's own tokenized coverage scoring (the
+   * listProcedures query path), plus other validated drafts whose
+   * title/description shares a precision token with the draft title. Top
+   * RECONCILE_MAX_CONFLICT_CANDIDATES, procedures first.
+   */
+  private buildReconciliationConflictCandidates(
+    metabotId: number,
+    draft: { id: number; title: string },
+  ): ReconciliationConflictCandidate[] {
+    const candidates: ReconciliationConflictCandidate[] = [];
+    if (this.deps.metaidKnowledgeStore) {
+      try {
+        const procedures = this.deps.metaidKnowledgeStore.listProcedures({
+          metabotId,
+          status: 'active',
+          query: draft.title,
+          limit: RECONCILE_MAX_CONFLICT_CANDIDATES,
+        });
+        for (const procedure of procedures) {
+          candidates.push({
+            ref: `procedure:${procedure.id}`,
+            kind: 'procedure',
+            title: procedure.title,
+            excerpt: [procedure.triggerText, ...procedure.steps].filter(Boolean).join(' / '),
+          });
+        }
+      } catch (error) {
+        console.warn(
+          `[DreamService] Reconciliation procedure candidates failed for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    try {
+      const terms = [...new Set(tokenizeKnowledgeBaseText(draft.title))].filter((term) => term.length >= 2);
+      if (terms.length > 0) {
+        const others = this.deps.coworkStore.listCapabilityDrafts(metabotId, { status: 'validated' })
+          .filter((other) => other.id !== draft.id);
+        for (const other of others) {
+          const haystack = `${other.title}\n${other.description}`.toLowerCase();
+          if (terms.some((term) => haystack.includes(term))) {
+            candidates.push({
+              ref: `draft:${other.id}`,
+              kind: 'draft',
+              title: other.title,
+              excerpt: other.description,
+            });
+          }
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[DreamService] Reconciliation draft candidates failed for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return candidates.slice(0, RECONCILE_MAX_CONFLICT_CANDIDATES);
   }
 
   /**

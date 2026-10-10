@@ -283,6 +283,14 @@ test('dream run validates pending capability drafts against recorded history', a
         }));
         return JSON.stringify({ verdicts });
       }
+      // The reconciliation pass (记忆核对) runs for tonight's newly validated
+      // drafts between validation and promotion.
+      if (system.includes('记忆核对')) {
+        const ids = [...user.matchAll(/草案 #(\d+)/g)].map((match) => Number(match[1]));
+        return JSON.stringify({
+          verdicts: ids.map((id) => ({ id, action: 'keep', conditions: '交付前', uncertainty: '', conflicts_with: [], note: 'n' })),
+        });
+      }
       return JSON.stringify({
         daily_summary: '今天交付了视频。',
         sections: {},
@@ -300,16 +308,18 @@ test('dream run validates pending capability drafts against recorded history', a
   try {
     await service.runNow(5, DAY);
 
-    // Dream call + validation call.
-    assert.equal(calls.length, 2);
+    // Dream call + validation call + reconciliation call (one draft validated).
+    assert.equal(calls.length, 3);
     assert.ok(calls[1].system.includes('能力验证'));
     // The validation prompt embeds tonight's freshly written diary as history.
     assert.ok(calls[1].user.includes('今天交付了视频。'));
+    assert.ok(calls[2].system.includes('记忆核对'), 'newly validated drafts face the memory-bank check');
 
     const validated = coworkStore.listCapabilityDrafts(5, { status: 'validated' });
     assert.equal(validated.length, 1);
     assert.equal(validated[0].title, '先验证再交付');
     assert.equal(validated[0].validationScore, 0.9);
+    assert.equal(validated[0].conditionsText, '交付前', 'the keep verdict records conditions');
     const rejected = coworkStore.listCapabilityDrafts(5, { status: 'rejected' });
     assert.equal(rejected.length, 1);
     assert.equal(rejected[0].title, '深夜连环追问');

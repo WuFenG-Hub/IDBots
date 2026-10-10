@@ -35,6 +35,12 @@ export const CAPABILITY_PROMOTION_MAX_PER_NIGHT = 3;
 export const CAPABILITY_REVIEW_INTERVAL_DAYS = 30;
 /** Per-bot per-night re-review cap; runs after the fresh-draft batch. */
 export const CAPABILITY_REVIEW_MAX_PER_NIGHT = 5;
+/**
+ * Disputed drafts (design 2026-10-10 §4.4) re-enter the nightly validation
+ * gate with their conflict evidence attached; a draft that stays unresolved
+ * this many days is auto-rejected (the existing purge removes the corpse).
+ */
+export const DISPUTED_AUTO_REJECT_DAYS = 7;
 const SUMMARY_EVIDENCE_MAX_CHARS = 400;
 
 export interface CapabilityValidationDraftInput {
@@ -43,6 +49,10 @@ export interface CapabilityValidationDraftInput {
   title: string;
   description: string;
   capabilityType: string;
+  /** Disputed re-entry (design §4.3): the conflict evidence recorded when the
+   * reconciliation pass suspended this draft; rendered so tonight's panel
+   * judges WITH the conflict in view. */
+  conflictNote?: string | null;
 }
 
 export type CapabilityValidationVerdict = 'validated' | 'rejected' | 'keep_draft';
@@ -86,7 +96,10 @@ export function buildCapabilityValidationPrompt(input: {
     `### 草案 #${draft.id}(${draft.dreamDate} 梦中提炼,类型:${draft.capabilityType})`,
     `标题:${draft.title}`,
     `描述:${draft.description}`,
-  ].join('\n'));
+    draft.conflictNote?.trim()
+      ? `存疑待裁决:${truncate(draft.conflictNote.trim().replace(/\s+/g, ' '), SUMMARY_EVIDENCE_MAX_CHARS)}`
+      : '',
+  ].filter(Boolean).join('\n'));
 
   const summaryLines = input.recentSummaries.map((summary) =>
     `- [${summary.summaryDate}] ${truncate(summary.summaryText.replace(/\s+/g, ' ').trim(), SUMMARY_EVIDENCE_MAX_CHARS)}`,

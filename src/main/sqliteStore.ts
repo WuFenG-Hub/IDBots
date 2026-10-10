@@ -648,6 +648,16 @@ export class SqliteStore {
       if (!draftCols.includes('last_reviewed_at')) {
         this.db.run('ALTER TABLE capability_drafts ADD COLUMN last_reviewed_at INTEGER');
       }
+      // P1 memory reconciliation (design 2026-10-10 §4.4): the applicability
+      // conditions / residual uncertainty recorded at reconciliation time.
+      // NULL = never reconciled; both are host-written (never free-form LLM
+      // edits) and capped at 300 chars at parse time.
+      if (!draftCols.includes('conditions_text')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN conditions_text TEXT');
+      }
+      if (!draftCols.includes('uncertainty_text')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN uncertainty_text TEXT');
+      }
     } catch (error) {
       console.warn('migrate capability_drafts validation columns:', error);
     }

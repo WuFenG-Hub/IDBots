@@ -920,6 +920,10 @@ export interface CapabilityDraft {
   promotedProcedureId: string | null;
   /** P1 re-review: the last time the verdict panel looked at this draft (NULL = never). */
   lastReviewedAt: number | null;
+  /** Memory reconciliation (design 2026-10-10 §4.4): recorded applicability
+   * conditions / residual uncertainty (NULL = never reconciled). */
+  conditionsText: string | null;
+  uncertaintyText: string | null;
 }
 
 interface CapabilityDraftRow {
@@ -939,6 +943,8 @@ interface CapabilityDraftRow {
   promoted_at?: number | string | null;
   promoted_procedure_id?: string | null;
   last_reviewed_at?: number | string | null;
+  conditions_text?: string | null;
+  uncertainty_text?: string | null;
 }
 
 /** Risk class of a dream-proposed practice task (design 2026-10-10 §3.2). */
@@ -7308,7 +7314,7 @@ export class CoworkStore implements MemoryBackend {
     const sql = `
       SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
              validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at
+             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
       FROM capability_drafts
       ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY created_at DESC, id DESC
@@ -7332,6 +7338,8 @@ export class CoworkStore implements MemoryBackend {
       promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
       promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
       lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
+      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
+      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
     }));
   }
 
@@ -7405,7 +7413,7 @@ export class CoworkStore implements MemoryBackend {
     const rows = this.getAll<CapabilityDraftRow>(`
       SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
              validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at
+             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
       FROM capability_drafts
       WHERE metabot_id = ?
         AND status = 'validated'
@@ -7433,6 +7441,8 @@ export class CoworkStore implements MemoryBackend {
       promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
       promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
       lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
+      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
+      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
     }));
   }
 
@@ -7472,7 +7482,10 @@ export class CoworkStore implements MemoryBackend {
   updateCapabilityDraftValidation(input: {
     id: number;
     metabotId: number;
-    status: 'draft' | 'validated' | 'rejected';
+    /** 'disputed' (design §4.3): neither validated nor rejected — a claim the
+     * reconciliation pass could not resolve; it re-enters validation the next
+     * night and auto-rejects after DISPUTED_AUTO_REJECT_DAYS. */
+    status: 'draft' | 'validated' | 'rejected' | 'disputed';
     validationScore?: number | null;
     validationNotes?: string | null;
   }): boolean {
@@ -7508,6 +7521,130 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Memory reconciliation, `keep` action (design 2026-10-10 §4.3): record the
+   * rule's applicability conditions and residual uncertainty on the draft —
+   * the paper's "preserve the conditions and uncertainty of an experience".
+   * Status and score stay untouched.
+   */
+  setCapabilityDraftConditions(input: {
+    id: number;
+    metabotId: number;
+    conditionsText?: string | null;
+    uncertaintyText?: string | null;
+  }): boolean {
+    const id = Number(input.id);
+    const metabotId = Number(input.metabotId);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(metabotId) || metabotId <= 0) {
+      return false;
+    }
+    this.db.run(`
+      UPDATE capability_drafts
+      SET conditions_text = ?, uncertainty_text = ?
+      WHERE id = ? AND metabot_id = ?
+    `, [
+      typeof input.conditionsText === 'string' && input.conditionsText.trim()
+        ? input.conditionsText.trim()
+        : null,
+      typeof input.uncertaintyText === 'string' && input.uncertaintyText.trim()
+        ? input.uncertaintyText.trim()
+        : null,
+      id,
+      metabotId,
+    ]);
+    const updated = (this.db.getRowsModified?.() || 0) > 0;
+    if (updated) {
+      this.saveDb();
+    }
+    return updated;
+  }
+
+  /**
+   * Memory reconciliation, `narrow` action (design §4.3): the draft text is
+   * rewritten by the HOST TEMPLATE — original text + "Applies when:" +
+   * "Untested:" — never free-form LLM output; the validation score is
+   * unchanged. The conditions/uncertainty columns are set alongside.
+   */
+  narrowCapabilityDraft(input: {
+    id: number;
+    metabotId: number;
+    conditionsText: string;
+    uncertaintyText?: string | null;
+  }): boolean {
+    const id = Number(input.id);
+    const metabotId = Number(input.metabotId);
+    const conditions = String(input.conditionsText ?? '').trim();
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(metabotId) || metabotId <= 0 || !conditions) {
+      return false;
+    }
+    const existing = this.getOne<{ description: string }>(
+      'SELECT description FROM capability_drafts WHERE id = ? AND metabot_id = ? LIMIT 1',
+      [id, metabotId],
+    );
+    if (!existing) return false;
+    const uncertainty = typeof input.uncertaintyText === 'string' ? input.uncertaintyText.trim() : '';
+    const narrowed = [
+      existing.description,
+      `Applies when: ${conditions}`,
+      uncertainty ? `Untested: ${uncertainty}` : '',
+    ].filter(Boolean).join('\n');
+    this.db.run(`
+      UPDATE capability_drafts
+      SET description = ?, conditions_text = ?, uncertainty_text = ?
+      WHERE id = ? AND metabot_id = ?
+    `, [narrowed, conditions, uncertainty || null, id, metabotId]);
+    const updated = (this.db.getRowsModified?.() || 0) > 0;
+    if (updated) {
+      this.saveDb();
+    }
+    return updated;
+  }
+
+  /**
+   * Disputed drafts whose last verdict-panel contact is older than
+   * `olderThanMs` (design §4.4: unresolved claims auto-reject after 7 nights).
+   * last_reviewed_at (falling back to validated_at, then created_at) is the
+   * "disputed since" anchor — entering disputed stamps it, and only a real
+   * verdict moves it.
+   */
+  listStaleDisputedCapabilityDrafts(
+    metabotId: number,
+    options: { olderThanMs: number; limit?: number },
+  ): CapabilityDraft[] {
+    const limit = Math.max(1, Math.floor(options.limit ?? 10));
+    const rows = this.getAll<CapabilityDraftRow>(`
+      SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
+             validation_score, validation_notes, validated_at, times_injected, last_injected_at,
+             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
+      FROM capability_drafts
+      WHERE metabot_id = ?
+        AND status = 'disputed'
+        AND COALESCE(last_reviewed_at, validated_at, created_at) < ?
+      ORDER BY COALESCE(last_reviewed_at, validated_at, created_at) ASC, id ASC
+      LIMIT ?
+    `, [metabotId, Math.floor(Number(options.olderThanMs) || 0), limit]);
+    return rows.map((row) => ({
+      id: Number(row.id),
+      metabotId: Number(row.metabot_id),
+      dreamDate: String(row.dream_date),
+      title: String(row.title),
+      description: String(row.description),
+      capabilityType: String(row.capability_type),
+      status: String(row.status),
+      createdAt: Number(row.created_at),
+      validationScore: row.validation_score == null ? null : Number(row.validation_score),
+      validationNotes: row.validation_notes == null ? null : String(row.validation_notes),
+      validatedAt: row.validated_at == null ? null : Number(row.validated_at),
+      timesInjected: Math.max(0, Math.floor(Number(row.times_injected) || 0)),
+      lastInjectedAt: row.last_injected_at == null ? null : Number(row.last_injected_at),
+      promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
+      promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
+      lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
+      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
+      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
+    }));
+  }
+
+  /**
    * Candidates for the nightly periodic re-review (Dream-RSI P1): VALIDATED
    * drafts whose last verdict-panel contact (last_reviewed_at, falling back
    * to validated_at for pre-migration rows) is older than `olderThanMs`,
@@ -7523,7 +7660,7 @@ export class CoworkStore implements MemoryBackend {
     const rows = this.getAll<CapabilityDraftRow>(`
       SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
              validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at
+             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
       FROM capability_drafts
       WHERE metabot_id = ?
         AND status = 'validated'
@@ -7549,6 +7686,8 @@ export class CoworkStore implements MemoryBackend {
       promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
       promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
       lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
+      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
+      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
     }));
   }
 
