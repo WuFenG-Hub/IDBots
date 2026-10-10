@@ -161,7 +161,6 @@ const resolveMetabotActionError = (error?: string): string => {
 
 interface MetabotsManagerProps {
   onRequestModelSettings?: () => void;
-  onRequestOnboarding?: () => void;
   onOpenMetabotInBrowser?: (metabot: Metabot) => void;
   onPreviewMetaAppHomepage?: (pin: string) => Promise<boolean> | boolean;
   onRequestMetaApps?: () => void;

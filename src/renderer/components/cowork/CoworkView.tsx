@@ -28,7 +28,6 @@ import MetaBotSelector, { type MetaBotForSelector } from './MetaBotSelector';
 
 export interface CoworkViewProps {
   onRequestAppSettings?: (options?: SettingsOpenOptions) => void;
-  onRequestOnboarding?: () => void;
   onShowSkills?: () => void;
   onOpenBotInBrowser?: (input: {
     globalMetaId: string;

@@ -388,6 +388,9 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:start', options),
     continueSession: (options: { sessionId: string; prompt: string; systemPrompt?: string; activeSkillIds?: string[] }) =>
       ipcRenderer.invoke('cowork:session:continue', options),
+    /** First-run onboarding: a session seeded with one assistant greeting and no turn behind it. */
+    createGreetingSession: (options: { title?: string; cwd?: string; systemPrompt?: string; greeting: string; metabotId?: number | null }) =>
+      ipcRenderer.invoke('cowork:session:createGreeting', options),
     submitInput: (input: CoworkSubmitInput): Promise<CoworkSubmitInputResult> =>
       ipcRenderer.invoke('cowork:session:submitInput', input),
     stopSession: (sessionId: string) =>

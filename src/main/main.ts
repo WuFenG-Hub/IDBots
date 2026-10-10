@@ -10249,6 +10249,82 @@ if (!gotTheLock) {
     });
   });
 
+  // Create a session that already contains one assistant message and no turn
+  // behind it (first-run onboarding: the freshly created Twin Bot "says hello"
+  // before the user types anything). The session stays 'idle' — a 'running'
+  // row would render a permanent typing indicator — and the single assistant
+  // message renders as an ordinary bubble (buildConversationTurns gives it an
+  // orphan turn; see CoworkSessionDetail).
+  ipcMain.handle('cowork:session:createGreeting', async (_event, options: {
+    title?: string;
+    cwd?: string;
+    systemPrompt?: string;
+    /** The assistant message to seed. Required — an empty greeting would render as nothing. */
+    greeting: string;
+    metabotId?: number | null;
+  }) => {
+    return withSqliteRecovery('cowork:session:createGreeting', async () => {
+      try {
+        const greeting = typeof options?.greeting === 'string' ? options.greeting.trim() : '';
+        if (!greeting) {
+          return { success: false, error: 'A greeting message is required.' };
+        }
+        const coworkStoreInstance = getCoworkStore();
+        const config = coworkStoreInstance.getConfig();
+        const baseCwd = (options.cwd || config.workingDirectory || '').trim();
+        if (!baseCwd) {
+          return { success: false, error: 'Please select a task folder before submitting.' };
+        }
+        // Same workspace rule as cowork:session:start, so the greeting session
+        // is the session a bot-bound chat would have opened anyway.
+        const sessionMetabotId = isWorkspaceMetabotId(options.metabotId) ? options.metabotId : null;
+        const taskWorkingDirectory = sessionMetabotId != null
+          && shouldUseBotWorkspaceCwd({
+            explicitCwd: options.cwd,
+            defaultWorkingDirectory: config.workingDirectory,
+            metabotId: sessionMetabotId,
+          })
+          ? resolveBotWorkspaceCwd(baseCwd, sessionMetabotId)
+          : resolveTaskWorkingDirectory(baseCwd);
+
+        const title = options.title?.trim() || 'Welcome';
+        const session = coworkStoreInstance.createSession(
+          title,
+          taskWorkingDirectory,
+          options.systemPrompt ?? '',
+          config.executionMode || 'local',
+          [],
+          sessionMetabotId,
+          'standard',
+          null,
+          null,
+          null,
+          'default',
+          null,
+          null,
+          null,
+          null,
+          null,
+        );
+        coworkStoreInstance.addMessage(session.id, {
+          type: 'assistant',
+          content: greeting,
+          metadata: { hostGreeting: true },
+        });
+        return {
+          success: true,
+          session: coworkStoreInstance.getSession(session.id) ?? session,
+        };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to create the greeting session',
+        };
+      }
+    });
+  });
+
   ipcMain.handle('cowork:session:ensureA2A', async (_event, input: {
     actorId?: unknown;
     localMetabotId?: unknown;

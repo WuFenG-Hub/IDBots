@@ -12,7 +12,6 @@ interface MetabotsViewProps {
   onNewChat?: () => void;
   updateBadge?: React.ReactNode;
   onRequestModelSettings?: () => void;
-  onRequestOnboarding?: () => void;
   onOpenMetabotInBrowser?: (metabot: Metabot) => void;
   onPreviewMetaAppHomepage?: (pin: string) => Promise<boolean> | boolean;
   onRequestMetaApps?: () => void;
@@ -24,7 +23,6 @@ const MetabotsView: React.FC<MetabotsViewProps> = ({
   onNewChat,
   updateBadge,
   onRequestModelSettings,
-  onRequestOnboarding,
   onOpenMetabotInBrowser,
   onPreviewMetaAppHomepage,
   onRequestMetaApps,
@@ -64,7 +62,6 @@ const MetabotsView: React.FC<MetabotsViewProps> = ({
         <div className="max-w-3xl mx-auto px-4 py-6">
           <MetabotsManager
             onRequestModelSettings={onRequestModelSettings}
-            onRequestOnboarding={onRequestOnboarding}
             onOpenMetabotInBrowser={onOpenMetabotInBrowser}
             onPreviewMetaAppHomepage={onPreviewMetaAppHomepage}
             onRequestMetaApps={onRequestMetaApps}

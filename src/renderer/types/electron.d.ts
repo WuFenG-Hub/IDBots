@@ -1104,6 +1104,7 @@ interface IElectronAPI {
   cowork: {
     startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser'; model?: string | null; modelProvider?: string | null; effort?: string | null; source?: 'quick_action'; goal?: string }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     continueSession: (options: { sessionId: string; prompt: string; systemPrompt?: string; activeSkillIds?: string[] }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
+    createGreetingSession: (options: { title?: string; cwd?: string; systemPrompt?: string; greeting: string; metabotId?: number | null }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     submitInput: (input: CoworkSubmitInput) => Promise<CoworkSubmitInputResult>;
     setSessionGoal: (sessionId: string, goal: { text: string; status: 'active' | 'paused' } | null) => Promise<{ success: boolean; goal?: { text: string; status: 'active' | 'paused'; updatedAt: number } | null; error?: string }>;
     stopSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
