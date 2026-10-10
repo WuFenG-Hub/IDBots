@@ -98,6 +98,91 @@ export function extractBackupObjects(
 }
 
 // ---------------------------------------------------------------------------
+// local backup journal (chain_backup_state)
+// ---------------------------------------------------------------------------
+
+export interface ChainBackupSegmentRef {
+  pinId: string;
+  segment: string;
+  bytes: number;
+  kinds: string[];
+  objectIds: string[];
+}
+
+export interface ChainBackupStateRow {
+  bot_globalmetaid: string;
+  manifest_pinid: string | null;
+  segments_json: string;
+  uploaded_object_ids_json: string;
+  last_backup_at: number | null;
+  updated_at: number;
+}
+
+export function readChainBackupState(db: SqliteDatabase, botGlobalMetaId: string): ChainBackupStateRow | null {
+  const rows = queryRows(db, `SELECT * FROM chain_backup_state WHERE bot_globalmetaid = ?`, [botGlobalMetaId]);
+  return (rows[0] as unknown as ChainBackupStateRow) ?? null;
+}
+
+export function writeChainBackupState(
+  db: SqliteDatabase,
+  input: {
+    botGlobalMetaId: string;
+    manifestPinId: string | null;
+    segments: ChainBackupSegmentRef[];
+    uploadedObjectIds: string[];
+    lastBackupAt: number;
+  },
+): void {
+  db.run(
+    `INSERT INTO chain_backup_state
+       (bot_globalmetaid, manifest_pinid, segments_json, uploaded_object_ids_json, last_backup_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(bot_globalmetaid) DO UPDATE SET
+       manifest_pinid = excluded.manifest_pinid,
+       segments_json = excluded.segments_json,
+       uploaded_object_ids_json = excluded.uploaded_object_ids_json,
+       last_backup_at = excluded.last_backup_at,
+       updated_at = excluded.updated_at`,
+    [
+      input.botGlobalMetaId,
+      input.manifestPinId,
+      JSON.stringify(input.segments),
+      JSON.stringify(input.uploadedObjectIds),
+      input.lastBackupAt,
+      Date.now(),
+    ],
+  );
+}
+
+/** Per-Bot last-backup summary for the settings UI. */
+export function listChainBackupStates(db: SqliteDatabase): ChainBackupStateRow[] {
+  return queryRows(db, `SELECT * FROM chain_backup_state ORDER BY updated_at DESC`) as unknown as ChainBackupStateRow[];
+}
+
+/**
+ * Rebuild the local journal from an on-chain manifest after a restore, so the
+ * next backup on this device diffs against what is already on-chain instead
+ * of re-uploading everything. `manifestUpdatedAt` is unix seconds.
+ */
+export function rebuildChainBackupStateFromManifest(
+  db: SqliteDatabase,
+  input: {
+    botGlobalMetaId: string;
+    manifestPinId: string;
+    segments: ChainBackupSegmentRef[];
+    manifestUpdatedAt: number;
+  },
+): void {
+  writeChainBackupState(db, {
+    botGlobalMetaId: input.botGlobalMetaId,
+    manifestPinId: input.manifestPinId,
+    segments: input.segments,
+    uploadedObjectIds: input.segments.flatMap((s) => s.objectIds),
+    lastBackupAt: input.manifestUpdatedAt * 1000,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // import
 // ---------------------------------------------------------------------------
 

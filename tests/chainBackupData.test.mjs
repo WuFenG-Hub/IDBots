@@ -147,3 +147,55 @@ test('extract → encrypt → decrypt → import round-trip with metabot_id rema
   const memoriesAfter = target.db.exec(`SELECT COUNT(*) FROM user_memories WHERE metabot_id = ?`, [restoredBot.id]);
   assert.equal(memoriesAfter[0].values[0][0], 2);
 });
+
+test('journal rebuild from manifest: post-restore backup diffs to zero', async () => {
+  const { readChainBackupState, rebuildChainBackupStateFromManifest } =
+    require('../dist-electron/main/services/chainBackupData.js');
+
+  const source = await openStore('idbots-journal-src-');
+  const bot = createBot(source.metabotStore, 'journal-bot', TEST_GID);
+  source.db.run(
+    `INSERT INTO user_memories (id, metabot_id, text, fingerprint, confidence, is_explicit, status, scope_kind, scope_key, usage_class, visibility, origin, importance, created_at, updated_at)
+     VALUES ('mem-j1', ?, 'journal memory', 'fp-journal', 0.9, 1, 'created', 'owner', 'owner:self', 'profile_fact', 'local_only', 'conversation', 0.9, 1, 1)`,
+    [bot.id],
+  );
+  const wallet = source.metabotStore.getMetabotWalletByMetabotId(bot.id);
+  const objects = extractBackupObjects(source.db, bot.id, wallet);
+
+  // Pretend these were published on-chain in one segment.
+  const manifest = {
+    pinId: 'fakepinid' + '0'.repeat(56) + 'i0',
+    segments: [{
+      pinId: 'segpin' + '0'.repeat(58) + 'i0',
+      segment: 'seg-hash',
+      bytes: 1234,
+      kinds: ['memory', 'key_envelope'],
+      objectIds: objects.map((o) => o.id),
+    }],
+    updatedAt: 1760000000,
+  };
+
+  // Fresh device: restore imports the rows, then rebuilds the journal.
+  const target = await openStore('idbots-journal-dst-');
+  const restoredBot = createBot(target.metabotStore, 'journal-bot-re', TEST_GID);
+  importBackupObjects(target.db, restoredBot.id, objects);
+  rebuildChainBackupStateFromManifest(target.db, {
+    botGlobalMetaId: TEST_GID,
+    manifestPinId: manifest.pinId,
+    segments: manifest.segments,
+    manifestUpdatedAt: manifest.updatedAt,
+  });
+
+  const state = readChainBackupState(target.db, TEST_GID);
+  assert.ok(state);
+  assert.equal(state.manifest_pinid, manifest.pinId);
+  assert.equal(state.last_backup_at, 1760000000 * 1000);
+  const uploaded = new Set(JSON.parse(state.uploaded_object_ids_json));
+  assert.equal(uploaded.size, objects.length);
+
+  // The next backup's diff: re-extract on this device, drop already-uploaded
+  // ids — nothing should remain (the restored rows hash to the same ids).
+  const reExtracted = extractBackupObjects(target.db, restoredBot.id, null);
+  const pending = reExtracted.filter((o) => !uploaded.has(o.id));
+  assert.deepEqual(pending, []);
+});

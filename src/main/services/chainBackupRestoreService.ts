@@ -15,7 +15,7 @@
 import { listPinsByPath, DEFAULT_MANAPI_BASE_URL } from './manapiPinService';
 import { restoreMetabotFromMnemonicCore } from './metabotRestoreService';
 import { decryptJson, deriveBackupKey, objectId } from './chainBackupCrypto';
-import { importBackupObjects, type ChainBackupObject } from './chainBackupData';
+import { importBackupObjects, rebuildChainBackupStateFromManifest, type ChainBackupObject } from './chainBackupData';
 import {
   CHAIN_BACKUP_CIPHER,
   CHAIN_BACKUP_KDF,
@@ -159,20 +159,21 @@ async function fetchUserBotsEntries(
 interface BackupManifest {
   bot: string;
   botName: string;
+  updatedAt?: number;
   segments: ChainBackupSegmentRef[];
 }
 
 async function fetchLatestBackupManifest(
   botGlobalMetaId: string,
   options?: { baseUrl?: string },
-): Promise<BackupManifest | null> {
+): Promise<{ pinId: string; manifest: BackupManifest } | null> {
   const pins = await listPinsByMetaid(botGlobalMetaId, CHAIN_BACKUP_MANIFEST_PATH, options);
   for (const pin of pins) {
     try {
       const text = await fetchPinContentText(pin.pinId, options);
       const parsed = JSON.parse(text) as BackupManifest;
       if (parsed && Array.isArray(parsed.segments)) {
-        return parsed;
+        return { pinId: pin.pinId, manifest: parsed };
       }
     } catch {
       // fall through to the next (older) manifest candidate
@@ -241,11 +242,12 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
     result.bots.push(botResult);
     try {
       emit({ phase: 'manifest', botName: entry.name, botIndex: i, botCount: entries.length });
-      const manifest = await fetchLatestBackupManifest(entry.globalMetaId, fetchOptions);
-      if (!manifest) {
+      const manifestHit = await fetchLatestBackupManifest(entry.globalMetaId, fetchOptions);
+      if (!manifestHit) {
         botResult.error = 'NO_BACKUP_MANIFEST';
         continue;
       }
+      const { manifest } = manifestHit;
 
       // Decrypt + verify every segment.
       const objects: ChainBackupObject[] = [];
@@ -303,6 +305,16 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
       const { imported, skipped } = importBackupObjects(db, metabot.id, objects);
       botResult.imported = imported;
       botResult.skipped = skipped;
+
+      // Rebuild the local backup journal from the on-chain manifest so the
+      // next backup on this device diffs against what is already on-chain
+      // instead of re-uploading the restored objects as duplicates.
+      rebuildChainBackupStateFromManifest(db, {
+        botGlobalMetaId: entry.globalMetaId,
+        manifestPinId: manifestHit.pinId,
+        segments: manifest.segments,
+        manifestUpdatedAt: manifest.updatedAt ?? Math.floor(Date.now() / 1000),
+      });
     } catch (error) {
       botResult.error = error instanceof Error ? error.message : String(error);
       result.success = false;

@@ -24,9 +24,14 @@ import { getRate as getGlobalFeeRate } from './feeRateStore';
 import { canonicalJson, deriveBackupKey, encryptJson, objectId } from './chainBackupCrypto';
 import {
   extractBackupObjects,
-  queryRows,
+  readChainBackupState,
+  writeChainBackupState,
   type ChainBackupObject,
+  type ChainBackupSegmentRef,
 } from './chainBackupData';
+
+export { listChainBackupStates, type ChainBackupStateRow } from './chainBackupData';
+export type { ChainBackupSegmentRef } from './chainBackupData';
 import type { SqliteDatabase } from '../sqliteTypes';
 import type { MetabotStore } from '../metabotStore';
 import type { UserIdentityStore } from '../userIdentityStore';
@@ -40,14 +45,6 @@ export const CHAIN_BACKUP_KDF = 'hkdf-sha256:user-globalmetaid';
 
 /** Plaintext budget per segment pin; keeps single pins well under the 5 MiB /file ceiling. */
 export const CHAIN_BACKUP_SEGMENT_PLAINTEXT_LIMIT = 256 * 1024;
-
-export interface ChainBackupSegmentRef {
-  pinId: string;
-  segment: string;
-  bytes: number;
-  kinds: string[];
-  objectIds: string[];
-}
 
 export interface ChainBackupProgress {
   phase: 'extract' | 'publish' | 'manifest' | 'done' | 'error';
@@ -77,60 +74,6 @@ export interface ChainBackupResult {
   totalBytes: number;
   totalCostSats: number;
   error?: string;
-}
-
-export interface ChainBackupStateRow {
-  bot_globalmetaid: string;
-  manifest_pinid: string | null;
-  segments_json: string;
-  uploaded_object_ids_json: string;
-  last_backup_at: number | null;
-  updated_at: number;
-}
-
-// ---------------------------------------------------------------------------
-// local state (chain_backup_state)
-// ---------------------------------------------------------------------------
-
-export function readChainBackupState(db: SqliteDatabase, botGlobalMetaId: string): ChainBackupStateRow | null {
-  const rows = queryRows(db, `SELECT * FROM chain_backup_state WHERE bot_globalmetaid = ?`, [botGlobalMetaId]);
-  return (rows[0] as unknown as ChainBackupStateRow) ?? null;
-}
-
-function writeChainBackupState(
-  db: SqliteDatabase,
-  input: {
-    botGlobalMetaId: string;
-    manifestPinId: string | null;
-    segments: ChainBackupSegmentRef[];
-    uploadedObjectIds: string[];
-    lastBackupAt: number;
-  },
-): void {
-  db.run(
-    `INSERT INTO chain_backup_state
-       (bot_globalmetaid, manifest_pinid, segments_json, uploaded_object_ids_json, last_backup_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(bot_globalmetaid) DO UPDATE SET
-       manifest_pinid = excluded.manifest_pinid,
-       segments_json = excluded.segments_json,
-       uploaded_object_ids_json = excluded.uploaded_object_ids_json,
-       last_backup_at = excluded.last_backup_at,
-       updated_at = excluded.updated_at`,
-    [
-      input.botGlobalMetaId,
-      input.manifestPinId,
-      JSON.stringify(input.segments),
-      JSON.stringify(input.uploadedObjectIds),
-      input.lastBackupAt,
-      Date.now(),
-    ],
-  );
-}
-
-/** Per-Bot last-backup summary for the settings UI. */
-export function listChainBackupStates(db: SqliteDatabase): ChainBackupStateRow[] {
-  return queryRows(db, `SELECT * FROM chain_backup_state ORDER BY updated_at DESC`) as unknown as ChainBackupStateRow[];
 }
 
 // ---------------------------------------------------------------------------
