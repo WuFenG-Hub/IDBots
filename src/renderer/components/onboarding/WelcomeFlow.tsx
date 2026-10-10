@@ -252,7 +252,7 @@ const WelcomeFlow: React.FC<WelcomeFlowProps> = ({ onEnterWithBot, onEnterWithou
         <div key={step} className="animate-fade-in-up flex min-h-0 flex-1 items-center gap-[clamp(32px,6vw,72px)]">
           {step === 1 ? (
             <>
-              <div className="w-[480px] shrink-0">
+              <div className="min-w-0 flex-1">
                 <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-[rgba(34,211,238,0.45)] bg-[rgba(34,211,238,0.08)] px-3 py-[5px] text-[11.5px] font-semibold tracking-[0.14em] text-accent">
                   <span className="h-1.5 w-1.5 rounded-[1px] bg-accent" />
                   {i18nService.t('welcomeStep1Badge')}
@@ -274,7 +274,7 @@ const WelcomeFlow: React.FC<WelcomeFlowProps> = ({ onEnterWithBot, onEnterWithou
               <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center">
                 <Hero src={heroTwinBotImage} alt={i18nService.t('welcomeStep2HeroAlt')} />
               </div>
-              <div className="w-[480px] shrink-0">
+              <div className="min-w-0 flex-1">
                 <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-[rgb(var(--color-accent-text)/0.45)] bg-[rgb(var(--color-accent-text)/0.08)] px-3 py-[5px] text-[11.5px] font-semibold tracking-[0.14em] text-claude-accent">
                   <span className={`h-1.5 w-1.5 rounded-[1px] ${ACCENT_INK_BG}`} />
                   {i18nService.t('welcomeStep2Badge')}
