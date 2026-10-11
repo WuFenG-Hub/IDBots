@@ -1299,7 +1299,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
       personaLines,
       'You just completed a paid service order. Write a short, natural message in your own voice inviting the client to rate your service.',
       'The message should reflect your personality and reference the service you just delivered.',
-      'Use the same language as the client\'s original request whenever its language is clear from the service-order context.',
+      'Use the same language as the client\'s original request whenever its language is clear from the service-order context; if it is unclear, use English.',
       'Keep it to 1-2 sentences. Be genuine, not robotic.',
       request?.prompt ? `Original service-order context: "${truncateUtf16Units(stripLoneSurrogates(request.prompt), 500)}"` : '',
       `The service result you delivered: "${truncateUtf16Units(stripLoneSurrogates(serviceReply), 200)}"`,
