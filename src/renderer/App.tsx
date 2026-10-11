@@ -10,6 +10,12 @@ import CoworkPermissionOverlay from './components/cowork/CoworkPermissionOverlay
 import AgentGameConsentCard from './components/agentGame/AgentGameConsentCard';
 import { configService } from './services/config';
 import { ensureFreeQuotaProvisioning } from './services/llmFreeQuotaBootstrap';
+import {
+  clearPersistedSession,
+  isOnboardingEnterPending,
+  loadPersistedViewState,
+  savePersistedViewState,
+} from './services/viewState';
 import { apiService } from './services/api';
 import { themeService } from './services/theme';
 import { coworkService } from './services/cowork';
@@ -128,7 +134,12 @@ const providerDisplayLabel = (providerKey: string): string => (
 const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [settingsOptions, setSettingsOptions] = useState<SettingsOpenOptions>({});
-  const [mainView, setMainView] = useState<'cowork' | 'skills' | 'scheduledTasks' | 'groupTasks' | 'metabots'>('cowork');
+  // Restored from the persisted view state so a renderer reload (dev HMR,
+  // crash recovery, auto-update) does not bounce the user back to the New Task
+  // home; the boot effect restores this view's conversation too.
+  const [mainView, setMainView] = useState<'cowork' | 'skills' | 'scheduledTasks' | 'groupTasks' | 'metabots'>(
+    () => loadPersistedViewState()?.mainView ?? 'cowork',
+  );
   const [isInitialized, setIsInitialized] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   // First-run welcome flow: set during boot when the machine holds no Twin Bot.
@@ -357,12 +368,32 @@ const App: React.FC = () => {
         // than a persisted "onboarding done" flag also covers installs that
         // only have the legacy welcome bot. A roster read that fails leaves
         // the app usable (no welcome flow) rather than trapping the user in it.
+        // An unfinished "Enter IDBots" click also re-offers the flow: the Twin
+        // was created but the greeting chat never was (the renderer reloaded in
+        // between), and the flow's Enter adopts that Twin instead of making
+        // another one.
+        let hasTwin = true;
         try {
           const roster = await window.electron.metabot.list();
           const bots = roster?.success && Array.isArray(roster.list) ? roster.list : [];
-          setShowWelcomeFlow(!bots.some((bot) => bot.metabot_type === 'twin'));
+          hasTwin = bots.some((bot) => bot.metabot_type === 'twin');
         } catch {
-          setShowWelcomeFlow(false);
+          hasTwin = true;
+        }
+        const needsWelcomeFlow = !hasTwin || isOnboardingEnterPending();
+        setShowWelcomeFlow(needsWelcomeFlow);
+
+        // Bring back the conversation the persisted view state points at, so a
+        // renderer reload lands on the chat the user was in instead of the New
+        // Task home. The welcome flow owns the screen on a first-run machine,
+        // and a stored id that no longer loads (archived / deleted / stale
+        // `temp-…`) is dropped rather than retried on every reload.
+        const storedSessionId = needsWelcomeFlow ? null : loadPersistedViewState()?.sessionId ?? null;
+        if (storedSessionId) {
+          const restored = await coworkService.loadSession(storedSessionId).catch(() => null);
+          if (!restored) {
+            clearPersistedSession();
+          }
         }
         setIsInitialized(true);
         void reportRendererStartupComplete();
@@ -405,7 +436,19 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // The Twin Bot chat already exists (one seeded greeting): land in it. The
+  // Persist the active view + open conversation so a renderer reload returns
+  // the user where they were (see services/viewState). Skipped until boot has
+  // settled and while the welcome flow owns the screen: the stored value is
+  // only ever written from a state the user actually reached.
+  useEffect(() => {
+    if (!isInitialized || showWelcomeFlow) return;
+    savePersistedViewState({
+      mainView: mainView === 'skills' ? 'cowork' : mainView,
+      sessionId: currentSessionId,
+    });
+  }, [isInitialized, showWelcomeFlow, mainView, currentSessionId]);
+
+  // The Twin Bot chat already exists (one generated greeting): land in it. The
   // session is pulled into the store before the flag flips, so the shell never
   // paints the New Task page for a frame; the session list is reloaded so the
   // sidebar shows the new chat.

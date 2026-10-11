@@ -10,13 +10,15 @@
 import React, { useCallback, useState } from 'react';
 import { i18nService } from '../../services/i18n';
 import { configService } from '../../services/config';
+import { coworkService } from '../../services/cowork';
+import { pickTwinBotName } from './twinBotNames.js';
+import { clearOnboardingEnterPending, markOnboardingEnterPending } from '../../services/viewState';
 import { LLM_FREE_PROVIDER_KEY } from '../../services/llmFreeQuotaGate.js';
 import type { Metabot } from '../../types/metabot';
 import { twinBotAvatarUrl } from '../../assets/twinBotAvatar';
 import heroWelcomeImage from '../../assets/onboarding/hero-welcome-v2.png';
 import heroTwinBotImage from '../../assets/onboarding/hero-twinbot-v4.png';
 
-const TWIN_BOT_NAME = 'Twin Bot';
 const TWIN_BOT_ROLE = 'On-chain AI companion';
 const TWIN_BOT_SOUL =
   'You are the user\'s Twin Bot on IDBots, their on-chain AI companion and primary assistant. '
@@ -41,7 +43,13 @@ const ArrowIcon: React.FC = () => (
   </svg>
 );
 
-/** The i18n title strings carry the line break as '\n' and mark the brand-highlighted tail. */
+/**
+ * The i18n title strings carry the line break as '\n' and mark the
+ * brand-highlighted tail. The tail uses `text-claude-accent`, the codebase's
+ * theme-aware accent-text class (golden yellow on light, brand yellow on dark)
+ * — plain `text-brand` is the flat #FFDC51 fill color and is unreadable on the
+ * light background.
+ */
 const WelcomeTitle: React.FC<{ lead: string; highlight: string }> = ({ lead, highlight }) => (
   <h1 className="mb-5 text-[clamp(34px,3.6vw,48px)] font-extrabold leading-[1.1] tracking-[-0.015em]">
     {lead.split('\n').map((line, index) => (
@@ -50,13 +58,16 @@ const WelcomeTitle: React.FC<{ lead: string; highlight: string }> = ({ lead, hig
         {line}
       </React.Fragment>
     ))}
-    <span className="text-brand">{highlight}</span>
+    <span className="text-claude-accent">{highlight}</span>
   </h1>
 );
 
+/** Accent-colored ink/shape that must stay legible on both themes. */
+const ACCENT_INK_BG = 'bg-[rgb(var(--color-accent-text))]';
+
 const Dot: React.FC<{ active: boolean }> = ({ active }) => (
   <span
-    className={`h-2 rounded-full ${active ? 'w-[26px] bg-brand' : 'w-2 bg-[rgba(148,163,184,0.35)]'}`}
+    className={`h-2 rounded-full ${active ? `w-[26px] ${ACCENT_INK_BG}` : 'w-2 bg-[rgba(148,163,184,0.35)]'}`}
   />
 );
 
@@ -128,8 +139,12 @@ async function ensureTwinBot(): Promise<Metabot> {
   const ownerGlobalMetaId = identityResult?.success
     ? (identityResult.identity?.globalmetaid ?? '').trim()
     : '';
+  // The pool name is a placeholder the first chat asks the user to replace, so
+  // a fresh pick per attempt is fine — and it keeps a retry after a failed
+  // creation from colliding with the name it already reserved.
+  const name = pickTwinBotName();
   const result = await window.electron.idbots.createMetaBotOnChain({
-    name: TWIN_BOT_NAME,
+    name,
     avatar: twinBotAvatarUrl,
     role: TWIN_BOT_ROLE,
     soul: TWIN_BOT_SOUL,
@@ -148,13 +163,19 @@ async function ensureTwinBot(): Promise<Metabot> {
   throw new Error(messageFromError(result?.error) || i18nService.t('welcomeSetupFailed'));
 }
 
-/** Seed the first chat with the Twin: one assistant greeting, no turn behind it. */
-async function createTwinGreetingSession(metabotId: number): Promise<string> {
+/**
+ * Create the Twin's first chat and let it greet the user live: the main process
+ * runs one agent turn (not persisted as a user message) driven by the
+ * onboarding system prompt, and seeds `fallbackGreeting` if that turn cannot
+ * greet. The name is interpolated so the bot knows the placeholder it must ask
+ * the user to replace.
+ */
+async function createTwinGreetingSession(twin: Metabot): Promise<string> {
   const result = await window.electron.cowork.createGreetingSession({
     title: i18nService.t('welcomeSessionTitle'),
-    systemPrompt: i18nService.t('welcomeFirstSessionSystemPrompt'),
-    greeting: i18nService.t('welcomeGreeting'),
-    metabotId,
+    systemPrompt: i18nService.t('welcomeFirstSessionSystemPrompt').replace('{name}', twin.name),
+    fallbackGreeting: i18nService.t('welcomeGreeting'),
+    metabotId: twin.id,
   });
   const sessionId = result?.session?.id;
   if (!result?.success || !sessionId) {
@@ -181,15 +202,30 @@ const WelcomeFlow: React.FC<WelcomeFlowProps> = ({ onEnterWithBot, onEnterWithou
     if (isWorking) return;
     setStatus('working');
     setErrorDetail('');
+    // Recorded before the Twin is created: if the renderer reloads mid-flow,
+    // the next launch re-offers this flow (and adopts the Twin that now
+    // exists) instead of dropping the user on the New Task home.
+    markOnboardingEnterPending();
     try {
       const twin = await ensureTwinBot();
-      const sessionId = await createTwinGreetingSession(twin.id);
+      // The greeting is now a real agent turn: its stream events must reach the
+      // store from the first delta, and the shell only mounts after this
+      // handler returns. init() is idempotent and registers the listeners
+      // app-wide, so CoworkView's own init() call later is a no-op.
+      await coworkService.init();
+      const sessionId = await createTwinGreetingSession(twin);
+      clearOnboardingEnterPending();
       onEnterWithBot(sessionId);
     } catch (error) {
       setErrorDetail(messageFromError(error));
       setStatus('error');
     }
   }, [isWorking, onEnterWithBot]);
+
+  const handleEnterWithoutBot = useCallback(() => {
+    clearOnboardingEnterPending();
+    onEnterWithoutBot();
+  }, [onEnterWithoutBot]);
 
   return (
     <div className="relative h-screen w-full overflow-hidden bg-main text-content-primary">
@@ -201,7 +237,7 @@ const WelcomeFlow: React.FC<WelcomeFlowProps> = ({ onEnterWithBot, onEnterWithou
             : 'radial-gradient(760px 520px at 24% 44%, rgba(255, 170, 60, 0.14), transparent 65%), radial-gradient(560px 420px at 92% 88%, rgba(34, 211, 238, 0.05), transparent 60%)',
         }}
       />
-      <span className="absolute left-[44%] top-[120px] h-1.5 w-1.5 bg-brand opacity-[0.45]" />
+      <span className={`absolute left-[44%] top-[120px] h-1.5 w-1.5 ${ACCENT_INK_BG} opacity-[0.45]`} />
       <span className="absolute left-1/2 top-[80px] h-1.5 w-1.5 bg-accent opacity-[0.45]" />
       <span className="absolute left-[42%] top-[680px] h-1.5 w-1.5 bg-accent opacity-25" />
 
@@ -209,14 +245,14 @@ const WelcomeFlow: React.FC<WelcomeFlowProps> = ({ onEnterWithBot, onEnterWithou
         <div className="draggable flex items-center gap-3">
           <img src="logo.png" alt="IDBots" className="h-9 w-9 rounded-[9px]" style={{ imageRendering: 'pixelated' }} />
           <div className="text-[17px] font-bold tracking-[0.02em]">
-            ID<span className="text-brand">Bots</span>
+            ID<span className="text-claude-accent">Bots</span>
           </div>
         </div>
 
         <div key={step} className="animate-fade-in-up flex min-h-0 flex-1 items-center gap-[clamp(32px,6vw,72px)]">
           {step === 1 ? (
             <>
-              <div className="w-[480px] shrink-0">
+              <div className="min-w-0 flex-1">
                 <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-[rgba(34,211,238,0.45)] bg-[rgba(34,211,238,0.08)] px-3 py-[5px] text-[11.5px] font-semibold tracking-[0.14em] text-accent">
                   <span className="h-1.5 w-1.5 rounded-[1px] bg-accent" />
                   {i18nService.t('welcomeStep1Badge')}
@@ -238,9 +274,9 @@ const WelcomeFlow: React.FC<WelcomeFlowProps> = ({ onEnterWithBot, onEnterWithou
               <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center">
                 <Hero src={heroTwinBotImage} alt={i18nService.t('welcomeStep2HeroAlt')} />
               </div>
-              <div className="w-[480px] shrink-0">
-                <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-[rgba(255,220,81,0.45)] bg-[rgba(255,220,81,0.08)] px-3 py-[5px] text-[11.5px] font-semibold tracking-[0.14em] text-brand">
-                  <span className="h-1.5 w-1.5 rounded-[1px] bg-brand" />
+              <div className="min-w-0 flex-1">
+                <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-[rgb(var(--color-accent-text)/0.45)] bg-[rgb(var(--color-accent-text)/0.08)] px-3 py-[5px] text-[11.5px] font-semibold tracking-[0.14em] text-claude-accent">
+                  <span className={`h-1.5 w-1.5 rounded-[1px] ${ACCENT_INK_BG}`} />
                   {i18nService.t('welcomeStep2Badge')}
                 </div>
                 <WelcomeTitle
@@ -260,7 +296,7 @@ const WelcomeFlow: React.FC<WelcomeFlowProps> = ({ onEnterWithBot, onEnterWithou
           <div className="flex flex-col items-end gap-2">
             {status === 'working' && (
               <div className="flex items-center gap-2 text-sm text-content-secondary">
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-brand border-t-transparent" />
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-[rgb(var(--color-accent-text))] border-t-transparent" />
                 {i18nService.t('welcomeSettingUp')}
               </div>
             )}
@@ -302,7 +338,7 @@ const WelcomeFlow: React.FC<WelcomeFlowProps> = ({ onEnterWithBot, onEnterWithou
               <button
                 type="button"
                 className="text-xs text-content-secondary underline underline-offset-2 transition-colors hover:text-content-primary"
-                onClick={onEnterWithoutBot}
+                onClick={handleEnterWithoutBot}
               >
                 {i18nService.t('welcomeEnterWithoutBot')}
               </button>
