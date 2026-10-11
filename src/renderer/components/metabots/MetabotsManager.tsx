@@ -308,10 +308,15 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     setPendingCreateValues(values);
     setCreateChainStatus('publishing');
     setCreateChainError('');
-    // Minimal creation: only name + primary/fallback LLM go on-chain now;
-    // the remaining profile fields are filled in later via the edit view.
+    // Minimal creation: name + primary/fallback LLM go on-chain now; an
+    // archetype preseed (P1d) additionally publishes role/soul/goal in the
+    // same create call — everything else is filled in later via the edit view.
+    const hasPersonaPreseed = Boolean(values.role.trim() || values.soul.trim() || values.goal.trim());
     const result = await window.electron.idbots.createMetaBotOnChain({
       name: values.name.trim(),
+      role: values.role.trim() || null,
+      soul: values.soul.trim() || null,
+      goal: values.goal.trim() || null,
       llm_id: values.llm_id.trim() || null,
       llm_provider: values.llm_provider.trim() || null,
       llm_effort: values.llm_effort.trim() || null,
@@ -334,8 +339,9 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       subsidyError: result.subsidy?.error,
       mode: 'create',
       // Only the steps a minimal creation actually publishes (empty profile
-      // steps are skipped by the full sync plan).
-      syncStepKeys: ['name', 'chatpubkey', 'llm'],
+      // steps are skipped by the full sync plan); the archetype preseed adds
+      // the persona step.
+      syncStepKeys: hasPersonaPreseed ? ['name', 'persona', 'chatpubkey', 'llm'] : ['name', 'chatpubkey', 'llm'],
       showSubsidyStatus: true,
       // Create-fallback: nothing landed on-chain (e.g. subsidy service down);
       // the modal offers retry-subsidy / self-funded broadcast instead of a

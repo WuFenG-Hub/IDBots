@@ -80,6 +80,7 @@ tests/*
 !tests/metataskRefresher.test.mjs
 !tests/metataskCompetitive.test.mjs
 !tests/quotaRendererSync.test.mjs
+!tests/metabotArchetypesStatic.test.mjs
 !tests/surfHostStatsFold.test.mjs
 !tests/rsiLadderCompute.test.ts
 !tests/rsiLadderIndex.test.ts
