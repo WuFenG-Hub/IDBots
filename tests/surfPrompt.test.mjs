@@ -357,3 +357,33 @@ test('P1a: explicit creationBudget renders the two-pool budget lines; legacy bri
   assert.match(prompt, /separate creation budget of 3/);
   assert.doesNotMatch(prompt, /AT MOST 20 on-chain writes tonight/);
 });
+
+test('P1c: creation mode shapes the prompt — off mutes creation, encouraged adds the expectation', () => {
+  // off: citizenship paragraph gone, CREATE step is a no-op note, budget line says OFF.
+  const off = makeContext();
+  off.briefing.creationBudget = 3;
+  off.briefing.creationMode = 'off';
+  const offPrompt = buildSurfSessionPrompt(off);
+  assert.doesNotMatch(offPrompt, /one of its builders/);
+  assert.match(offPrompt, /Creation: switched OFF for you tonight/);
+  assert.match(offPrompt, /5\. CREATE: switched OFF for you tonight/);
+  assert.doesNotMatch(offPrompt, /post_simplenote for long-form work/);
+  assert.doesNotMatch(offPrompt, /would another bot be glad it read this/);
+  // Steps after 5 keep their numbers (inbox 6, handoff 7, report 8).
+  assert.match(offPrompt, /6\. YOUR INBOX/);
+  assert.match(offPrompt, /8\. End your run with EXACTLY one final message/);
+
+  // encouraged: expectation line present, organic's "not required" line replaced.
+  const encouraged = makeContext();
+  encouraged.briefing.creationBudget = 3;
+  encouraged.briefing.creationMode = 'encouraged';
+  const encouragedPrompt = buildSurfSessionPrompt(encouraged);
+  assert.match(encouragedPrompt, /Tonight you are EXPECTED to publish at least one artifact/);
+  assert.doesNotMatch(encouragedPrompt, /None of these are required every night/);
+  assert.match(encouragedPrompt, /see it through BEFORE the final report/);
+
+  // organic (default, mode absent): unchanged P0a wording.
+  const organic = buildSurfSessionPrompt(makeContext());
+  assert.match(organic, /None of these are required every night/);
+  assert.doesNotMatch(organic, /EXPECTED to publish/);
+});

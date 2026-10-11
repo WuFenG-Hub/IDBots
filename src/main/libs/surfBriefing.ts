@@ -18,6 +18,7 @@
  */
 
 import type { MetawebSurfStore } from '../metawebSurfStore';
+import type { SurfCreationMode } from '../services/surfSettings';
 import {
   DEFAULT_SURF_PROTOCOLS,
   type SurfItem,
@@ -160,6 +161,8 @@ export interface SurfBriefing {
   interactionBudget: number;
   /** Original posts allowed for this run (P1a separate pool); absent = legacy shared pool. */
   creationBudget?: number;
+  /** How strongly the prompt invites creation (P1c); absent = organic default. */
+  creationMode?: SurfCreationMode;
 }
 
 export async function buildSurfBriefing(input: {
@@ -168,6 +171,8 @@ export async function buildSurfBriefing(input: {
   interactionBudget: number;
   /** Original-post budget (P1a); omitted for legacy shared-pool hosts. */
   creationBudget?: number;
+  /** Creation mode (P1c); omitted for legacy hosts (organic wording). */
+  creationMode?: SurfCreationMode;
   registry?: SurfProtocolDescriptor[];
   nowMs?: number;
   /**
@@ -398,6 +403,7 @@ export async function buildSurfBriefing(input: {
     protocolRadar,
     interactionBudget: input.interactionBudget,
     creationBudget: input.creationBudget,
+    creationMode: input.creationMode,
   };
 }
 

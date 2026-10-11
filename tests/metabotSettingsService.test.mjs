@@ -27,6 +27,7 @@ const {
   SURF_BEFORE_DREAM_ENABLED_KEY,
   SURF_INTERACTION_BUDGET_KEY,
   SURF_CREATION_BUDGET_KEY,
+  SURF_CREATION_MODE_KEY,
 } = require('../dist-electron/main/services/surfSettings.js');
 
 function makeTempDir() {
@@ -71,6 +72,7 @@ test('whitelist exposes the OpenTeam remote-collab, cowork MCP-mount, automation
     SURF_BEFORE_DREAM_ENABLED_KEY,
     SURF_INTERACTION_BUDGET_KEY,
     SURF_CREATION_BUDGET_KEY,
+    SURF_CREATION_MODE_KEY,
   ]);
 });
 

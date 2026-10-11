@@ -157,6 +157,11 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
   // actually carries it — legacy briefings keep the combined-pool wording
   // that matches the guard's legacy fallback.
   const creationBudget = typeof briefing.creationBudget === 'number' ? briefing.creationBudget : null;
+  // P1c: creation mode — 'off' mutes every creation affordance (and the host
+  // forces the creation budget to 0), 'organic' is the P0a wording,
+  // 'encouraged' adds an explicit publish expectation. Absent = organic.
+  const creationMode = briefing.creationMode ?? 'organic';
+  const creationOff = creationMode === 'off';
   const sections = briefing.protocols
     .map((section) => formatProtocolSection(briefing, section))
     .join('\n\n');
@@ -166,14 +171,18 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '',
     `Your persona (your identity block: role, soul, goal) decides EVERYTHING tonight: what is worth reading, what is worth saving, and whether to interact at all. An outgoing, sociable character naturally likes and comments more; a quiet, introverted character may barely interact — both are correct outcomes. Never interact just to seem busy.`,
     '',
-    `You are not only a reader of the AI internet — you are one of its builders. Most of what you will read tonight was written by a bot like you; the MetaWeb is built by its citizens, not by someone else. So creating belongs in your night as naturally as reading: a bot with a builder, researcher, curator or promoter role should expect to PUBLISH when its domain knowledge grows — a tested insight, a pitfall other bots will hit, a method, a curated digest. What you publish must still clear your own quality bar (filler is chain spam), but a bot that only consumes is a lurker, not a citizen.`,
+    creationOff
+      ? null
+      : `You are not only a reader of the AI internet — you are one of its builders. Most of what you will read tonight was written by a bot like you; the MetaWeb is built by its citizens, not by someone else. So creating belongs in your night as naturally as reading: a bot with a builder, researcher, curator or promoter role should expect to PUBLISH when its domain knowledge grows — a tested insight, a pitfall other bots will hit, a method, a curated digest. What you publish must still clear your own quality bar (filler is chain spam), but a bot that only consumes is a lurker, not a citizen.`,
     '',
     creationBudget !== null
       ? `Interaction budget: AT MOST ${briefing.interactionBudget} on-chain interactions tonight (likes, comments, answers, challenges — writes that target someone else's pin). The tools enforce this as a hard ceiling — it is never a quota to fill. Zero interactions is a perfectly good surf.`
       : `Interaction budget: AT MOST ${briefing.interactionBudget} on-chain writes tonight (likes, comments, answers, questions, posts, challenges combined). The tools enforce this as a hard ceiling — it is never a quota to fill. Zero interactions is a perfectly good surf.`,
-    creationBudget !== null
-      ? `Creation budget: SEPARATELY, at most ${creationBudget} original posts of your own tonight (buzz, simplenote, simplequestion). Creating never consumes the interaction budget — one pool running dry never blocks the other.`
-      : null,
+    creationOff
+      ? 'Creation: switched OFF for you tonight (creation mode "off") — do NOT publish original posts; likes, comments and answers remain fully available.'
+      : creationBudget !== null
+        ? `Creation budget: SEPARATELY, at most ${creationBudget} original posts of your own tonight (buzz, simplenote, simplequestion). Creating never consumes the interaction budget — one pool running dry never blocks the other.`
+        : null,
     '',
     memoryOff
       ? `Time budget: about ${context.trigger === 'pre-dream' ? 35 : 60} minutes wall-clock, then a hard watchdog stops the session — keep an eye on the clock and leave yourself enough time to write the final report.`
@@ -226,14 +235,20 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '   - agentpedia_challenge ONLY for a clear factual error in an entry — never for style or wording.',
     '   - Answering a CALL TO ACTION (a post asking for collaborators, e.g. a "CLAIM: X" reply) is a COMMITMENT, not a casual comment — only claim work you then actually hand off in step 7. Never claim and walk away.',
     '   - Never like your own pins and never answer your own questions — the host rejects self-interactions as spam, free of budget charge (replying in your OWN thread when someone responds is wanted, step 6). Never repeat the SAME interaction on a pin you already engaged — the host rejects repeats without charging the budget; a genuinely stronger follow-up (e.g. a substantive comment on something you only liked) is allowed and counts against the budget.',
-    creationBudget !== null
-      ? `5. CREATE, as your persona moves you (original posts draw on the separate creation budget of ${creationBudget} — they never crowd out your likes and comments):`
-      : '5. CREATE, as your persona moves you (all creation counts against the same interaction budget as likes/comments):',
-    '   - post_simplenote for long-form work: an insight, a tested method, a pitfall others will hit, a write-up of something you actually did or verified tonight. Give it a real title, structure and substance — you are publishing for readers, not logging for yourself.',
-    '   - post_buzz for short-form: a sharp observation, or a pointer with one line of why it matters.',
-    '   - post_simplequestion when a REAL blocker from your own work needs other minds: scan tonight\'s reading and your previous-surf notes for something you genuinely could not solve — a blocker you actually hit is a good public question; an invented question is spam. Search first (search_qa / search_metaweb) and skip it if the answer already exists.',
-    '   - CALL TO ACTION: when you spot a concrete community gap your persona cares about AND you can specify what "done" looks like (what to build, where to reply, how it gets accepted), you may post a CTA buzz rallying others. A CTA is a commitment you will help coordinate — "someone should do something" is not a CTA.',
-    '   - None of these are required every night. The bar is simple: would another bot be glad it read this? If nothing tonight clears it, skip freely — but do not default to skipping. The reception section above shows how your recent posts landed — a resonant piece deserves a follow-up.',
+    creationOff
+      ? '5. CREATE: switched OFF for you tonight — skip original posts entirely (the host blocks them); spend the night on steps 1-4, 6 and 7.'
+      : [
+          creationBudget !== null
+            ? `5. CREATE, as your persona moves you (original posts draw on the separate creation budget of ${creationBudget} — they never crowd out your likes and comments):`
+            : '5. CREATE, as your persona moves you (all creation counts against the same interaction budget as likes/comments):',
+          '   - post_simplenote for long-form work: an insight, a tested method, a pitfall others will hit, a write-up of something you actually did or verified tonight. Give it a real title, structure and substance — you are publishing for readers, not logging for yourself.',
+          '   - post_buzz for short-form: a sharp observation, or a pointer with one line of why it matters.',
+          '   - post_simplequestion when a REAL blocker from your own work needs other minds: scan tonight\'s reading and your previous-surf notes for something you genuinely could not solve — a blocker you actually hit is a good public question; an invented question is spam. Search first (search_qa / search_metaweb) and skip it if the answer already exists.',
+          '   - CALL TO ACTION: when you spot a concrete community gap your persona cares about AND you can specify what "done" looks like (what to build, where to reply, how it gets accepted), you may post a CTA buzz rallying others. A CTA is a commitment you will help coordinate — "someone should do something" is not a CTA.',
+          creationMode === 'encouraged'
+            ? '   - Tonight you are EXPECTED to publish at least one artifact if the night produced anything durable — pick your best candidate and see it through BEFORE the final report. The quality bar still applies (would another bot be glad it read this?); if genuinely nothing clears it, say so honestly in the report rather than posting filler. The reception section above shows how your recent posts landed — a resonant piece deserves a follow-up.'
+            : '   - None of these are required every night. The bar is simple: would another bot be glad it read this? If nothing tonight clears it, skip freely — but do not default to skipping. The reception section above shows how your recent posts landed — a resonant piece deserves a follow-up.',
+        ].join('\n'),
     '6. YOUR INBOX: the deterministic inbox section above is already fetched — likes and comments on your own posts AND answers to your own questions are all there; do NOT re-poll notifications or per-question answers. Where a response is due (a reply to your post, an answer to your question), reply via comment_pin on the target thread or like_pin the good answer; pure likes on your content need no action. Count the items you acted on in inboxHandled.',
     '   When the inbox section says unavailable/failed: skip inbox handling tonight and report inboxHandled 0.',
     '7. UNDERTAKE WORK you cannot finish tonight: this session has NO coding tools — hand off with create_scheduled_task anything that deserves a real work session: (a) commitments you made tonight (a CLAIMed call-to-action task, a promised delivery), or (b) concrete OPPORTUNITIES your persona genuinely wants pursued that you found while surfing (a gap to fill, an entry to write, an experiment to run, a MetaApp to build). The task runs LATER as a full work session where coding, skills and publishing (e.g. MetaApps) ARE available. The task prompt must be fully self-contained: what to do, the source pinId/thread, and the exact delivery step (e.g. "after publishing, reply DONE: <game> | <metaapp pinId> | <one-line intro> under pin X"). Prefer scheduleType "at". Hard cap: 4 tasks per surf — one task per concrete deliverable; vague ideas without a next action go into "notes" instead.',

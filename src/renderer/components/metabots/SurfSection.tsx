@@ -22,6 +22,13 @@ const SURF_INTERACTION_BUDGET_KEY = 'surf_interaction_budget';
 const DEFAULT_SURF_INTERACTION_BUDGET = 50;
 const MAX_SURF_INTERACTION_BUDGET = 500;
 const MIN_SURF_INTERACTION_BUDGET = 0;
+const SURF_CREATION_BUDGET_KEY = 'surf_creation_budget';
+const SURF_CREATION_MODE_KEY = 'surf_creation_mode';
+const DEFAULT_SURF_CREATION_BUDGET = 3;
+const MAX_SURF_CREATION_BUDGET = 20;
+const MIN_SURF_CREATION_BUDGET = 0;
+const SURF_CREATION_MODES = ['off', 'organic', 'encouraged'] as const;
+const DEFAULT_SURF_CREATION_MODE: (typeof SURF_CREATION_MODES)[number] = 'organic';
 
 // Same row/label/input chrome the edit form uses, so the section blends in
 // (replicated from MetaBotHomepageSection / MetaBotEditTabs).
@@ -37,6 +44,18 @@ const clampBudget = (raw: string): number | null => {
   return Math.min(MAX_SURF_INTERACTION_BUDGET, Math.max(MIN_SURF_INTERACTION_BUDGET, Math.round(num)));
 };
 
+const clampCreationBudget = (raw: string): number | null => {
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return null;
+  return Math.min(MAX_SURF_CREATION_BUDGET, Math.max(MIN_SURF_CREATION_BUDGET, Math.round(num)));
+};
+
+const creationModeI18nKey: Record<(typeof SURF_CREATION_MODES)[number], string> = {
+  off: 'surfCreationModeOff',
+  organic: 'surfCreationModeOrganic',
+  encouraged: 'surfCreationModeEncouraged',
+};
+
 interface SurfSectionProps {
   metabotId: number;
 }
@@ -49,6 +68,9 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
   const [surfBeforeDreamLoaded, setSurfBeforeDreamLoaded] = useState(false);
   // Interaction budget, kept as the raw input string while typing.
   const [surfBudget, setSurfBudget] = useState(String(DEFAULT_SURF_INTERACTION_BUDGET));
+  // Creation budget + mode (P1c), same immediate-effect kv pattern.
+  const [creationBudget, setCreationBudget] = useState(String(DEFAULT_SURF_CREATION_BUDGET));
+  const [creationMode, setCreationMode] = useState<(typeof SURF_CREATION_MODES)[number]>(DEFAULT_SURF_CREATION_MODE);
   // Inline error for the kv-setting writes (toggle / budget).
   const [settingsError, setSettingsError] = useState('');
   // Inline error for the surf:runNow invoke.
@@ -67,6 +89,8 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
     setSurfBeforeDream(true);
     setSurfBeforeDreamLoaded(false);
     setSurfBudget(String(DEFAULT_SURF_INTERACTION_BUDGET));
+    setCreationBudget(String(DEFAULT_SURF_CREATION_BUDGET));
+    setCreationMode(DEFAULT_SURF_CREATION_MODE);
     setSettingsError('');
     setSurfNowError('');
     window.electron.metabot.getSetting(metabotId, SURF_BEFORE_DREAM_ENABLED_KEY)
@@ -90,6 +114,27 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
         if (cancelled) return;
         setSurfBudget(String(DEFAULT_SURF_INTERACTION_BUDGET));
       });
+    window.electron.metabot.getSetting(metabotId, SURF_CREATION_BUDGET_KEY)
+      .then((result) => {
+        if (cancelled) return;
+        const clamped = result.success && result.value != null ? clampCreationBudget(result.value) : null;
+        setCreationBudget(clamped === null ? String(DEFAULT_SURF_CREATION_BUDGET) : String(clamped));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCreationBudget(String(DEFAULT_SURF_CREATION_BUDGET));
+      });
+    window.electron.metabot.getSetting(metabotId, SURF_CREATION_MODE_KEY)
+      .then((result) => {
+        if (cancelled) return;
+        const raw = result.success ? result.value : null;
+        setCreationMode(
+          raw && (SURF_CREATION_MODES as readonly string[]).includes(raw)
+            ? (raw as (typeof SURF_CREATION_MODES)[number])
+            : DEFAULT_SURF_CREATION_MODE,
+        );
+      })
+      .catch(() => undefined);
     return () => { cancelled = true; };
   }, [metabotId]);
 
@@ -155,6 +200,37 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
         if (!result.success) setSettingsError(result.error || i18nService.t('surfSettingSaveFailed'));
       })
       .catch(() => setSettingsError(i18nService.t('surfSettingSaveFailed')));
+  };
+
+  // Creation budget: same clamp-on-blur persistence as the interaction budget.
+  const handleCreationBudgetCommit = () => {
+    const clamped = clampCreationBudget(creationBudget);
+    const next = clamped === null ? String(DEFAULT_SURF_CREATION_BUDGET) : String(clamped);
+    setCreationBudget(next);
+    setSettingsError('');
+    window.electron.metabot.setSetting(metabotId, SURF_CREATION_BUDGET_KEY, next)
+      .then((result) => {
+        if (!result.success) setSettingsError(result.error || i18nService.t('surfSettingSaveFailed'));
+      })
+      .catch(() => setSettingsError(i18nService.t('surfSettingSaveFailed')));
+  };
+
+  // Creation mode: immediate-effect select, optimistic set + revert on failure.
+  const handleCreationModeChange = (next: (typeof SURF_CREATION_MODES)[number]) => {
+    const prev = creationMode;
+    setCreationMode(next);
+    setSettingsError('');
+    window.electron.metabot.setSetting(metabotId, SURF_CREATION_MODE_KEY, next)
+      .then((result) => {
+        if (!result.success) {
+          setCreationMode(prev);
+          setSettingsError(result.error || i18nService.t('surfSettingSaveFailed'));
+        }
+      })
+      .catch(() => {
+        setCreationMode(prev);
+        setSettingsError(i18nService.t('surfSettingSaveFailed'));
+      });
   };
 
   const handleSurfNow = () => {
@@ -235,6 +311,57 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
           />
           <p className={hintClass}>
             {i18nService.t('surfInteractionBudgetHint')}
+          </p>
+        </div>
+      </div>
+
+      {/* Creation budget per surf (P1a): own pool, never competes with interactions. */}
+      <div className={rowClass} data-slot="metabot-surf-creation-budget-row">
+        <label htmlFor="metabot-surf-creation-budget" className={labelClass}>
+          {i18nService.t('surfCreationBudgetLabel')}
+        </label>
+        <div className="min-w-0">
+          <input
+            id="metabot-surf-creation-budget"
+            type="number"
+            min={MIN_SURF_CREATION_BUDGET}
+            max={MAX_SURF_CREATION_BUDGET}
+            step={1}
+            value={creationBudget}
+            onChange={(e) => setCreationBudget(e.target.value)}
+            onBlur={handleCreationBudgetCommit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+            className={`w-24 ${inputChromeClass}`}
+          />
+          <p className={hintClass}>
+            {i18nService.t('surfCreationBudgetHint')}
+          </p>
+        </div>
+      </div>
+
+      {/* Creation mode (P1c): off / organic / encouraged. */}
+      <div className={rowClass} data-slot="metabot-surf-creation-mode-row">
+        <label htmlFor="metabot-surf-creation-mode" className={labelClass}>
+          {i18nService.t('surfCreationModeLabel')}
+        </label>
+        <div className="min-w-0">
+          <select
+            id="metabot-surf-creation-mode"
+            value={creationMode}
+            onChange={(e) => handleCreationModeChange(e.target.value as (typeof SURF_CREATION_MODES)[number])}
+            className={`w-56 ${inputChromeClass}`}
+            data-slot="metabot-surf-creation-mode-select"
+          >
+            {SURF_CREATION_MODES.map((mode) => (
+              <option key={mode} value={mode}>
+                {i18nService.t(creationModeI18nKey[mode])}
+              </option>
+            ))}
+          </select>
+          <p className={hintClass}>
+            {i18nService.t('surfCreationModeHint')}
           </p>
         </div>
       </div>

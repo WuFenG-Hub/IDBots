@@ -78,5 +78,29 @@ export const normalizeSurfCreationBudgetValue = (value: unknown): string | null 
   return String(int);
 };
 
+/**
+ * P1c: how strongly the surf prompt invites creation. 'organic' (default) is
+ * the P0a wording — creation is a natural, quality-gated act of citizenship.
+ * 'encouraged' adds an expectation line (publish at least one artifact when
+ * the night produced anything durable). 'off' restores pre-P0a restraint —
+ * no original posts tonight, interactions only. Per bot, so an owner can
+ * dial one noisy bot back without a code change.
+ */
+export type SurfCreationMode = 'off' | 'organic' | 'encouraged';
+export const SURF_CREATION_MODE_KEY = 'surf_creation_mode';
+export const DEFAULT_SURF_CREATION_MODE: SurfCreationMode = 'organic';
+export const SURF_CREATION_MODES: readonly SurfCreationMode[] = ['off', 'organic', 'encouraged'];
+
+export const normalizeSurfCreationModeValue = (value: unknown): string | null => {
+  const mode = typeof value === 'string' ? value.trim() : '';
+  return (SURF_CREATION_MODES as readonly string[]).includes(mode) ? mode : null;
+};
+
+export const getSurfCreationMode = (reader: SurfSettingsReader, metabotId: number): SurfCreationMode => {
+  const raw = reader.getMetabotSetting(metabotId, SURF_CREATION_MODE_KEY);
+  const normalized = raw === null ? null : normalizeSurfCreationModeValue(raw);
+  return (normalized as SurfCreationMode | null) ?? DEFAULT_SURF_CREATION_MODE;
+};
+
 /** Compile-time check: the real store satisfies the structural reader. */
 export const __metabotStoreIsSurfSettingsReader = (store: MetabotStore): SurfSettingsReader => store;
