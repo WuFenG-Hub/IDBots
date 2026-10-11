@@ -629,3 +629,29 @@ test('buildDreamPrompt renders chain sections in the fragment_summaries synthesi
   assert.ok(user.includes('写入链上内容 1 条'), 'inventory counts writes in synthesis mode');
   assert.ok(user.includes('阅读链上内容 1 条'), 'inventory counts reads in synthesis mode');
 });
+
+test('P2a: a surf report triggers the creation-reflection questions; no report means no questions', () => {
+  const baseActivity = {
+    sessions: [],
+    taskRuns: [],
+    orderCount: 0,
+  };
+  const withSurf = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-10-11',
+    activity: baseActivity,
+    surfReport: '# Surf report\n\n今夜最大收获:读到一篇好文章。',
+  });
+  assert.ok(withSurf.user.includes('做梦前的 AI 互联网冲浪报告'), 'surf report section renders');
+  assert.ok(withSurf.user.includes('创作反思'), 'P2a creation reflection rides with the surf report');
+  assert.ok(withSurf.user.includes('今晚我创造了什么'), 'question 1: what did I create');
+  assert.ok(withSurf.user.includes('值得写成一篇有见解的文章'), 'question 2: what deserved writing');
+  assert.ok(withSurf.user.includes('如果明天冲浪只能创造一件东西'), 'question 3: the one thing to create next');
+
+  const withoutSurf = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-10-11',
+    activity: baseActivity,
+  });
+  assert.ok(!withoutSurf.user.includes('创作反思'), 'no surf report → no creation questions');
+});

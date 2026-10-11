@@ -387,3 +387,12 @@ test('P1c: creation mode shapes the prompt — off mutes creation, encouraged ad
   assert.match(organic, /None of these are required every night/);
   assert.doesNotMatch(organic, /EXPECTED to publish/);
 });
+
+test('P2a: the latest dream diary rides into the surf prompt as a creation handoff', () => {
+  const withDream = buildSurfSessionPrompt(makeContext({ dreamDigest: '梦里我把 Karpathy 四原则的实测整理成了提纲,值得写成一篇 simplenote。' }));
+  assert.match(withDream, /## What you dreamt after your last surf/);
+  assert.match(withDream, /tonight's CREATE step \(5\) is where it becomes real/);
+  assert.match(withDream, /Karpathy 四原则/);
+  // Absent digest renders no dream section.
+  assert.doesNotMatch(buildSurfSessionPrompt(makeContext()), /## What you dreamt after your last surf/);
+});

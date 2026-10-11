@@ -29,6 +29,8 @@ import { getSurfCreationBudget, getSurfCreationMode, getSurfInteractionBudget, i
 export const SURF_STATUS_CHANNEL = 'metabot:surfStatusChanged';
 /** A finished surf younger than this makes the pre-dream surf redundant. */
 export const PRE_DREAM_SURF_RECENCY_MS = 20 * 60 * 60 * 1000;
+/** Longest dream-diary excerpt carried into a surf prompt (P2a bloat cap). */
+export const SURF_DREAM_DIGEST_MAX_CHARS = 1200;
 
 export interface SurfStatusEvent {
   metabotId: number;
@@ -60,6 +62,12 @@ export interface SurfSessionContext {
    * Absent/null → no notes section in the prompt.
    */
   previousNotes?: string | null;
+  /**
+   * P2a: the bot's latest dream diary (daily_summary) — the overnight
+   * reflection that may already contain a creative agenda from the last
+   * surf+dream cycle. Absent/null → no dream section in the prompt.
+   */
+  dreamDigest?: string | null;
 }
 
 export interface SurfSessionResult {
@@ -123,6 +131,12 @@ export interface SurfServiceDeps {
   fetchSurfReception?: (input: { owner: string; sinceTs: number; pinIds: string[] }) => Promise<Array<{ pinId: string; interactions: number }>>;
   /** Protocol radar fetcher (R6): newest registered /protocols/* declarations. */
   fetchProtocolRadar?: () => Promise<SurfProtocolRadarFetchResult>;
+  /**
+   * P2a: the bot's latest dream diary (daily_summary text), feeding the
+   * dream→create handoff — the overnight reflection rides into the next surf
+   * prompt. Absent → no dream section.
+   */
+  getLatestDreamDigest?: (metabotId: number) => string | null;
 }
 
 export class SurfService {
@@ -139,6 +153,7 @@ export class SurfService {
   private readonly listOwnPostsForSurfReception?: SurfServiceDeps['listOwnPostsForSurfReception'];
   private readonly fetchSurfReception?: SurfServiceDeps['fetchSurfReception'];
   private readonly fetchProtocolRadar?: SurfServiceDeps['fetchProtocolRadar'];
+  private readonly getLatestDreamDigest?: SurfServiceDeps['getLatestDreamDigest'];
   private readonly runningByMetabot = new Map<number, string>();
 
   constructor(deps: SurfServiceDeps) {
@@ -155,6 +170,7 @@ export class SurfService {
     this.listOwnPostsForSurfReception = deps.listOwnPostsForSurfReception;
     this.fetchSurfReception = deps.fetchSurfReception;
     this.fetchProtocolRadar = deps.fetchProtocolRadar;
+    this.getLatestDreamDigest = deps.getLatestDreamDigest;
   }
 
   /** Crash recovery at startup: runs orphaned by a killed process become failed. */
@@ -179,6 +195,17 @@ export class SurfService {
     try {
       const latest = this.store.getLatestFinishedRun(metabotId);
       return extractSurfNotesFromReportJson(latest?.reportJson ?? null);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Longest dream-diary excerpt carried into the prompt (prompt-bloat cap). */
+  private latestDreamDigest(metabotId: number): string | null {
+    try {
+      const text = this.getLatestDreamDigest?.(metabotId) ?? null;
+      const trimmed = (text ?? '').trim();
+      return trimmed ? trimmed.slice(0, SURF_DREAM_DIGEST_MAX_CHARS) : null;
     } catch {
       return null;
     }
@@ -340,6 +367,7 @@ export class SurfService {
           trigger,
           briefing,
           previousNotes: this.latestSurfNotes(metabotId),
+          dreamDigest: this.latestDreamDigest(metabotId),
         });
         Object.assign(stats, session.stats ?? {});
         reportMarkdown = session.reportMarkdown ?? null;

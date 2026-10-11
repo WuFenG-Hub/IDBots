@@ -210,6 +210,16 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
           '',
         ].join('\n')
       : null,
+    context.dreamDigest
+      ? [
+          '## What you dreamt after your last surf',
+          '',
+          'Your own overnight reflection (dream diary) from after your last surf. If it sketched something worth creating — an article, a question, a call to action — tonight\'s CREATE step (5) is where it becomes real:',
+          '',
+          context.dreamDigest,
+          '',
+        ].join('\n')
+      : null,
     '## Tonight\'s fresh digest (new since your last surf; you have NOT seen these yet)',
     '',
     sections,

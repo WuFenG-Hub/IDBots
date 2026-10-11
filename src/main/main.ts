@@ -8089,6 +8089,16 @@ const getSurfService = (): SurfService => {
           rejectedCount: page.rejected.length,
         };
       },
+      // P2a dream→create handoff: the bot's latest dream diary rides into the
+      // next surf prompt (a pre-dream surf reads the PREVIOUS night's dream).
+      getLatestDreamDigest: (metabotId) => {
+        try {
+          const latest = getDreamStore().listDailySummaries(metabotId, 1, 0)[0];
+          return latest?.summaryText ?? null;
+        } catch {
+          return null;
+        }
+      },
       broadcast: (payload) => {
         BrowserWindow.getAllWindows().forEach(win => {
           if (!win.isDestroyed()) {
