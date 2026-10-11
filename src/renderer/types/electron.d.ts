@@ -1805,6 +1805,8 @@ interface IElectronAPI {
       }>;
       totalBytes: number;
       totalCostSats: number;
+      botsManifestSynced?: boolean;
+      botsManifestError?: string;
       error?: string;
     }>;
     restore: () => Promise<{

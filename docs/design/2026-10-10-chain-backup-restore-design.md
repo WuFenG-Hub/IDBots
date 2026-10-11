@@ -186,14 +186,19 @@ inside encrypted object pins.
 1. User panel button **"一键备份 / Backup to chain"** (plus an opt-in nightly
    auto-backup right after the dream window, reusing the hygiene scheduler's
    time slot discipline).
-2. Pre-flight: identity present, subsidy/fee mode per global setting
+2. **Refresh the public `/info/bots` discovery manifest first** (reusing
+   `syncUserBotsToMobile`): without it a new device cannot find the per-Bot
+   backup manifests at restore time. A refresh failure does not abort the
+   backup (an older manifest pin may still exist) but is flagged in the
+   result so the UI can warn.
+3. Pre-flight: identity present, subsidy/fee mode per global setting
    (decision 4), indexer reachable.
-3. For each enabled Bot (skip `welcome`): extract whitelist rows → build
-   objects → diff against the last local manifest state
-   (`metabot_chain_writes` ledger doubles as the upload journal for resume) →
-   pack segments → encrypt → `createPin` per segment (serialized through the
-   existing spend coordinator) → publish manifest modify.
-4. Progress + cost report in the UI (objects uploaded, bytes, SPACE spent).
+4. For each enabled Bot (skip `welcome`): extract whitelist rows → build
+   objects → diff against the local journal (`chain_backup_state`) →
+   pack segments → encrypt → `createPin` per segment (published by each Bot's
+   own wallet, serialized through the existing spend coordinator) → publish
+   manifest modify.
+5. Progress + cost report in the UI (objects uploaded, bytes, SPACE spent).
 
 ## 8. Restore flow (new device / cloud)
 

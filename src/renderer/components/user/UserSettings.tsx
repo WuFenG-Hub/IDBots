@@ -1087,6 +1087,11 @@ const UserSettings: React.FC = () => {
                   : (chainBackupResult.error ?? chainBackupResult.bots.find((b) => b.error)?.error ?? '')}
               </p>
             )}
+            {chainBackupResult?.botsManifestError && (
+              <p className="mt-1 text-xs text-amber-600 dark:text-amber-400 break-all">
+                {i18nService.t('userSettingsChainBackupManifestFailed').replace('{error}', chainBackupResult.botsManifestError)}
+              </p>
+            )}
             {chainRestoreResult && (
               <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary break-all">
                 {chainRestoreResult.success

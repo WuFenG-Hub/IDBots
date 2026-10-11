@@ -199,3 +199,81 @@ test('journal rebuild from manifest: post-restore backup diffs to zero', async (
   const pending = reExtracted.filter((o) => !uploaded.has(o.id));
   assert.deepEqual(pending, []);
 });
+
+test('runChainBackup: publishes encrypted segments + manifest, incremental second run', async () => {
+  const { runChainBackup, CHAIN_BACKUP_OBJECT_PATH, CHAIN_BACKUP_MANIFEST_PATH } =
+    require('../dist-electron/main/services/chainBackupService.js');
+  const { readChainBackupState } = require('../dist-electron/main/services/chainBackupData.js');
+
+  const source = await openStore('idbots-svc-src-');
+  const bot = createBot(source.metabotStore, 'svc-bot', TEST_GID);
+  source.db.run(
+    `INSERT INTO user_memories (id, metabot_id, text, fingerprint, confidence, is_explicit, status, scope_kind, scope_key, usage_class, visibility, origin, importance, created_at, updated_at)
+     VALUES ('mem-svc1', ?, 'service memory', 'fp-svc', 0.9, 1, 'created', 'owner', 'owner:self', 'profile_fact', 'local_only', 'conversation', 0.9, 1, 1)`,
+    [bot.id],
+  );
+
+  const userStore = { get: () => ({ mnemonic: TEST_MNEMONIC, globalmetaid: TEST_GID }) };
+  const published = []; // {metaidData, pinId}
+  let pinCounter = 0;
+  const createPinImpl = async (_store, _botId, metaidData) => {
+    pinCounter += 1;
+    const pinId = `pin${String(pinCounter).padStart(4, '0')}` + '0'.repeat(55) + 'i0';
+    published.push({ metaidData, pinId });
+    return { txids: ['tx' + pinCounter], pinId, totalCost: 100 };
+  };
+  let manifestSyncs = 0;
+  const syncBotsManifestImpl = async () => {
+    manifestSyncs += 1;
+    return { success: true, botCount: 1, boundCount: 1, newlyBound: 0, skippedUnbound: [], txids: [] };
+  };
+
+  const deps = {
+    db: source.db,
+    metabotStore: source.metabotStore,
+    userStore,
+    createPinImpl,
+    syncBotsManifestImpl,
+    sleep: async () => {},
+  };
+
+  const first = await runChainBackup(deps);
+  assert.equal(first.success, true);
+  assert.equal(first.botsManifestSynced, true);
+  assert.equal(manifestSyncs, 1);
+  assert.equal(first.bots.length, 1);
+  assert.equal(first.bots[0].uploadedObjects, 2); // memory + key_envelope
+  assert.equal(first.bots[0].segments, 1);
+
+  // One object pin (create) + one manifest pin (create).
+  const objectPins = published.filter((p) => p.metaidData.path === CHAIN_BACKUP_OBJECT_PATH);
+  const manifestPins = published.filter((p) => p.metaidData.path === CHAIN_BACKUP_MANIFEST_PATH);
+  assert.equal(objectPins.length, 1);
+  assert.equal(manifestPins.length, 1);
+  assert.equal(manifestPins[0].metaidData.operation, 'create');
+
+  // The object pin decrypts with the mnemonic-derived key and hashes correctly.
+  const envelope = JSON.parse(objectPins[0].metaidData.payload);
+  assert.equal(envelope.cipher, 'aes-256-gcm');
+  const key = deriveBackupKey(TEST_MNEMONIC, TEST_GID);
+  const segment = decryptJson(key, Buffer.from(envelope.payload, 'base64'));
+  assert.equal(objectId(segment), envelope.segment);
+  assert.equal(segment.objects.length, 2);
+
+  // State journal written.
+  const state = readChainBackupState(source.db, TEST_GID);
+  assert.ok(state);
+  assert.equal(state.manifest_pinid, manifestPins[0].pinId);
+
+  // Second run: nothing new → no object pin; manifest refreshed via modify.
+  const second = await runChainBackup(deps);
+  assert.equal(second.success, true);
+  assert.equal(second.bots[0].uploadedObjects, 0);
+  assert.equal(second.bots[0].skippedObjects, 2);
+  assert.equal(manifestSyncs, 2);
+  const secondObjectPins = published.slice(objectPins.length).filter((p) => p.metaidData.path === CHAIN_BACKUP_OBJECT_PATH);
+  assert.equal(secondObjectPins.length, 0);
+  const modifyPins = published.filter((p) => p.metaidData.operation === 'modify');
+  assert.equal(modifyPins.length, 1);
+  assert.equal(modifyPins[0].metaidData.path, `@${manifestPins[0].pinId}`);
+});

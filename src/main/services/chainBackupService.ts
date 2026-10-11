@@ -21,6 +21,7 @@
 import { createPin } from './metaidCore';
 import { buildModifyMetaidPayload } from './metaidPinMutationService';
 import { getRate as getGlobalFeeRate } from './feeRateStore';
+import { syncUserBotsToMobile } from './userBotsPinService';
 import { canonicalJson, deriveBackupKey, encryptJson, objectId } from './chainBackupCrypto';
 import {
   extractBackupObjects,
@@ -73,6 +74,9 @@ export interface ChainBackupResult {
   bots: ChainBackupBotResult[];
   totalBytes: number;
   totalCostSats: number;
+  /** Whether the /info/bots discovery manifest was refreshed before backing up. */
+  botsManifestSynced?: boolean;
+  botsManifestError?: string;
   error?: string;
 }
 
@@ -165,6 +169,8 @@ export interface RunChainBackupDeps {
   onProgress?: (progress: ChainBackupProgress) => void;
   /** Test hook. */
   createPinImpl?: typeof createPin;
+  /** Test hook. */
+  syncBotsManifestImpl?: typeof syncUserBotsToMobile;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -175,6 +181,7 @@ function defaultSleep(ms: number): Promise<void> {
 export async function runChainBackup(deps: RunChainBackupDeps): Promise<ChainBackupResult> {
   const { db, metabotStore, userStore } = deps;
   const createPinFn = deps.createPinImpl ?? createPin;
+  const syncBotsManifest = deps.syncBotsManifestImpl ?? syncUserBotsToMobile;
   const sleep = deps.sleep ?? defaultSleep;
   const emit = (p: ChainBackupProgress) => deps.onProgress?.(p);
 
@@ -183,6 +190,20 @@ export async function runChainBackup(deps: RunChainBackupDeps): Promise<ChainBac
     return { success: false, bots: [], totalBytes: 0, totalCostSats: 0, error: 'USER_IDENTITY_MISSING' };
   }
   const backupKey = deriveBackupKey(identity.mnemonic, identity.globalmetaid.trim());
+
+  // Refresh the public /info/bots discovery manifest first — without it a new
+  // device cannot find the per-Bot backup manifests at restore time. Failure
+  // here does not abort the backup (an older manifest pin may still exist);
+  // the result flags it so the UI can warn.
+  let botsManifestSynced = false;
+  let botsManifestError: string | undefined;
+  try {
+    const sync = await syncBotsManifest(userStore, metabotStore);
+    botsManifestSynced = sync.success;
+    if (!sync.success) botsManifestError = sync.error ?? 'BOTS_MANIFEST_SYNC_FAILED';
+  } catch (error) {
+    botsManifestError = error instanceof Error ? error.message : String(error);
+  }
 
   const bots = metabotStore
     .listMetabots()
@@ -306,6 +327,8 @@ export async function runChainBackup(deps: RunChainBackupDeps): Promise<ChainBac
     }
   }
 
+  result.botsManifestSynced = botsManifestSynced;
+  result.botsManifestError = botsManifestError;
   emit({ phase: 'done', botCount: bots.length });
   return result;
 }
