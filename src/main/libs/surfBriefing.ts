@@ -141,6 +141,29 @@ export interface SurfProtocolRadar {
   error: string | null;
 }
 
+/**
+ * P2b: one "what's hot" post for the engagement strip — the momentum signal
+ * that shows creators what resonates and refills the engagement pond with
+ * content other bots are actually gathering around.
+ */
+export interface SurfHotPostItem {
+  pinId: string;
+  title: string;
+  authorName: string;
+  likes: number | null;
+  comments: number | null;
+  /** Raw engagement total when the source offers one (sort=hot). */
+  hotScore: number | null;
+}
+
+export interface SurfHotPosts {
+  items: SurfHotPostItem[];
+  error: string | null;
+}
+
+/** Hot posts presented per run (top engagement, newest window per the backend). */
+export const SURF_HOT_POSTS_PRESENT_LIMIT = 10;
+
 /** What buildSurfBriefing expects from a radar fetcher (isNew is annotated in-house). */
 export type SurfProtocolRadarFetchResult = {
   items: Array<Omit<SurfProtocolRadarItem, 'isNew'>>;
@@ -157,6 +180,8 @@ export interface SurfBriefing {
   reception?: SurfBriefingReception;
   /** Registered-protocol radar (R6); absent when the host passed no fetcher. */
   protocolRadar?: SurfProtocolRadar;
+  /** Engagement-ranked hot posts (P2b); absent when the host passed no fetcher. */
+  hotPosts?: SurfHotPosts;
   /** Chain-writing interactions allowed for this run (from bot settings). */
   interactionBudget: number;
   /** Original posts allowed for this run (P1a separate pool); absent = legacy shared pool. */
@@ -191,6 +216,8 @@ export async function buildSurfBriefing(input: {
   inboxBaselineTs?: number;
   /** Protocol radar fetcher (R6); errors land in protocolRadar.error. */
   fetchProtocolRadar?: () => Promise<SurfProtocolRadarFetchResult>;
+  /** Hot posts fetcher (P2b): engagement-ranked items; errors land in hotPosts.error. */
+  fetchHotPosts?: () => Promise<SurfHotPostItem[]>;
   /**
    * Reception fetcher (P0b): counts recent interactions (likes/comments/
    * answers) targeting the given own-post pinIds since `sinceTs`. Returns a
@@ -394,6 +421,24 @@ export async function buildSurfBriefing(input: {
     }
   }
 
+  // Hot posts (P2b): engagement-ranked items, render-only — they are NOT
+  // ledger-marked (a still-hot post may legitimately appear again next run)
+  // and never gate interactions (the guard's own rules apply as usual).
+  let hotPosts: SurfHotPosts | undefined;
+  if (input.fetchHotPosts) {
+    try {
+      const fetchedHot = await input.fetchHotPosts();
+      hotPosts = {
+        items: fetchedHot
+          .filter((item) => item.pinId)
+          .slice(0, SURF_HOT_POSTS_PRESENT_LIMIT),
+        error: null,
+      };
+    } catch (error) {
+      hotPosts = { items: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   return {
     generatedAtIso: nowIso,
     items,
@@ -401,6 +446,7 @@ export async function buildSurfBriefing(input: {
     inbox,
     reception,
     protocolRadar,
+    hotPosts,
     interactionBudget: input.interactionBudget,
     creationBudget: input.creationBudget,
     creationMode: input.creationMode,
@@ -529,6 +575,24 @@ export function renderSurfBriefingMarkdown(briefing: SurfBriefing): string {
     }
     if (!briefing.protocolRadar.error && briefing.protocolRadar.items.length === 0) {
       lines.push('- (none registered)');
+    }
+    lines.push('');
+  }
+  if (briefing.hotPosts) {
+    lines.push(`## What's hot — top engagement (last 48h)`);
+    if (briefing.hotPosts.error) {
+      lines.push(`(hot-posts fetch failed: ${briefing.hotPosts.error})`);
+    }
+    for (const item of briefing.hotPosts.items) {
+      const stats = [
+        item.likes !== null ? `${item.likes} likes` : null,
+        item.comments !== null ? `${item.comments} comments` : null,
+        item.hotScore !== null ? `score ${item.hotScore}` : null,
+      ].filter(Boolean).join(', ');
+      lines.push(`- [${item.pinId}] ${item.title}${item.authorName ? ` by ${item.authorName}` : ''}${stats ? ` (${stats})` : ''}`);
+    }
+    if (!briefing.hotPosts.error && briefing.hotPosts.items.length === 0) {
+      lines.push('- (nothing hot right now)');
     }
     lines.push('');
   }

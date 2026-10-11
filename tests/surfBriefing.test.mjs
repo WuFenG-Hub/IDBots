@@ -523,3 +523,30 @@ test('P0b reception: fetch error lands in the section, empty posts stay empty, a
   const absent = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry: [], nowMs: NOW_MS });
   assert.equal(absent.reception, undefined, 'no ownPosts/fetcher deps → no reception section at all');
 });
+
+test('P2b: hot posts cap at the present limit and a fetch error degrades the section', async () => {
+  const store = setup();
+  const eleven = Array.from({ length: 11 }, (_, index) => ({
+    pinId: `hot-${index}`, title: `Hot ${index}`, authorName: 'A', likes: index, comments: 0, hotScore: index * 10,
+  }));
+  const briefing = await buildSurfBriefing({
+    store, metabotId: 7, interactionBudget: 20, registry: [], nowMs: NOW_MS,
+    fetchHotPosts: async () => eleven,
+  });
+  assert.equal(briefing.hotPosts.error, null);
+  assert.equal(briefing.hotPosts.items.length, 10, 'capped at SURF_HOT_POSTS_PRESENT_LIMIT');
+  assert.equal(briefing.hotPosts.items[0].pinId, 'hot-0');
+  const md = renderSurfBriefingMarkdown(briefing);
+  assert.match(md, /## What's hot — top engagement \(last 48h\)/);
+  assert.match(md, /\[hot-3\] Hot 3 by A \(3 likes, 0 comments, score 30\)/);
+
+  const errored = await buildSurfBriefing({
+    store, metabotId: 7, interactionBudget: 20, registry: [], nowMs: NOW_MS,
+    fetchHotPosts: async () => { throw new Error('index down'); },
+  });
+  assert.equal(errored.hotPosts.error, 'index down');
+  assert.deepEqual(errored.hotPosts.items, []);
+
+  const absent = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry: [], nowMs: NOW_MS });
+  assert.equal(absent.hotPosts, undefined, 'no fetcher → no hot section');
+});

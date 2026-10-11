@@ -396,3 +396,19 @@ test('P2a: the latest dream diary rides into the surf prompt as a creation hando
   // Absent digest renders no dream section.
   assert.doesNotMatch(buildSurfSessionPrompt(makeContext()), /## What you dreamt after your last surf/);
 });
+
+test('P2b: the hot-posts strip renders engagement exemplars; absent host renders no section', () => {
+  const withHot = makeContext();
+  withHot.briefing.hotPosts = {
+    error: null,
+    items: [
+      { pinId: 'hot-1', title: '共建号召：联机游戏中心招募', authorName: 'idq1w8ye…', likes: 12, comments: 7, hotScore: 40 },
+      { pinId: 'hot-2', title: 'Karpathy 四原则实测报告', authorName: '', likes: 8, comments: 2, hotScore: 15 },
+    ],
+  };
+  const prompt = buildSurfSessionPrompt(withHot);
+  assert.match(prompt, /### What's hot on the AI internet \(top engagement, last 48h\)/);
+  assert.match(prompt, /\[hot-1\] 共建号召：联机游戏中心招募 by idq1w8ye… \(12↑ 7💬\)/);
+  assert.match(prompt, /a still-hot thread you have not engaged is a natural place to add your perspective/);
+  assert.doesNotMatch(buildSurfSessionPrompt(makeContext()), /### What's hot/);
+});

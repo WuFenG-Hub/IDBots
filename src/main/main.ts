@@ -8099,6 +8099,21 @@ const getSurfService = (): SurfService => {
           return null;
         }
       },
+      // P2b engagement strip: the buzz index's sort=hot feed (top engagement
+      // in the last 48h, no pagination per the backend contract).
+      fetchHotPosts: async () => {
+        const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+        const options = baseUrl ? { baseUrl } : undefined;
+        const page = await getSocialFeedRemote({ sort: 'hot', size: 10 }, options);
+        return page.items.map((item) => ({
+          pinId: item.currentPinId || item.pinId,
+          title: (item.payload?.content ?? '').slice(0, 100).trim() || '(untitled)',
+          authorName: item.author?.globalMetaId ? `${item.author.globalMetaId.slice(0, 12)}…` : '',
+          likes: item.likeCount,
+          comments: item.commentCount,
+          hotScore: item.hotScore ?? null,
+        }));
+      },
       broadcast: (payload) => {
         BrowserWindow.getAllWindows().forEach(win => {
           if (!win.isDestroyed()) {

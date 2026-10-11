@@ -20,7 +20,7 @@ import {
   type MetawebSurfStore,
   type MetawebSurfTrigger,
 } from '../metawebSurfStore';
-import { buildSurfBriefing, renderSurfBriefingMarkdown, type SurfBriefing, type SurfInboxItem, type SurfProtocolRadarFetchResult } from '../libs/surfBriefing';
+import { buildSurfBriefing, renderSurfBriefingMarkdown, type SurfBriefing, type SurfHotPostItem, type SurfInboxItem, type SurfProtocolRadarFetchResult } from '../libs/surfBriefing';
 import { extractSurfNotesFromReportJson } from '../libs/surfPrompt';
 import { surfReceiptsFromChainWriteRecord } from '../libs/surfInteractionGuard';
 import { DEFAULT_SURF_PROTOCOLS, type SurfProtocolDescriptor } from '../libs/surfProtocols';
@@ -131,6 +131,8 @@ export interface SurfServiceDeps {
   fetchSurfReception?: (input: { owner: string; sinceTs: number; pinIds: string[] }) => Promise<Array<{ pinId: string; interactions: number }>>;
   /** Protocol radar fetcher (R6): newest registered /protocols/* declarations. */
   fetchProtocolRadar?: () => Promise<SurfProtocolRadarFetchResult>;
+  /** Hot posts fetcher (P2b): engagement-ranked items; errors land in hotPosts.error. */
+  fetchHotPosts?: () => Promise<SurfHotPostItem[]>;
   /**
    * P2a: the bot's latest dream diary (daily_summary text), feeding the
    * dream→create handoff — the overnight reflection rides into the next surf
@@ -153,6 +155,7 @@ export class SurfService {
   private readonly listOwnPostsForSurfReception?: SurfServiceDeps['listOwnPostsForSurfReception'];
   private readonly fetchSurfReception?: SurfServiceDeps['fetchSurfReception'];
   private readonly fetchProtocolRadar?: SurfServiceDeps['fetchProtocolRadar'];
+  private readonly fetchHotPosts?: SurfServiceDeps['fetchHotPosts'];
   private readonly getLatestDreamDigest?: SurfServiceDeps['getLatestDreamDigest'];
   private readonly runningByMetabot = new Map<number, string>();
 
@@ -170,6 +173,7 @@ export class SurfService {
     this.listOwnPostsForSurfReception = deps.listOwnPostsForSurfReception;
     this.fetchSurfReception = deps.fetchSurfReception;
     this.fetchProtocolRadar = deps.fetchProtocolRadar;
+    this.fetchHotPosts = deps.fetchHotPosts;
     this.getLatestDreamDigest = deps.getLatestDreamDigest;
   }
 
@@ -352,6 +356,7 @@ export class SurfService {
           ? ({ sinceTs, pinIds }) => this.fetchSurfReception!({ owner: receptionOwner, sinceTs, pinIds })
           : undefined,
         fetchProtocolRadar: this.fetchProtocolRadar,
+        fetchHotPosts: this.fetchHotPosts,
       });
       fetchedCount = briefing.items.length;
 

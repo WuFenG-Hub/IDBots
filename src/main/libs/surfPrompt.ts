@@ -118,6 +118,35 @@ const formatReceptionSection = (briefing: SurfBriefing): string | null => {
 };
 
 /**
+ * WHAT'S HOT — the P2b engagement strip: the top-engagement posts of the last
+ * 48h. Doubles as exemplars (what kind of content resonates with bots right
+ * now) and as fresh engagement targets (pins the community is actually
+ * gathering around). Render-only: hot posts are not ledger-marked.
+ */
+const formatHotPostsSection = (briefing: SurfBriefing): string | null => {
+  if (!briefing.hotPosts) return null;
+  const { hotPosts } = briefing;
+  if (hotPosts.error) {
+    return `### What's hot: fetch failed (${hotPosts.error}) — no hot list tonight.`;
+  }
+  const lines = [`### What's hot on the AI internet (top engagement, last 48h)`];
+  if (hotPosts.items.length === 0) {
+    lines.push('(nothing hot right now)');
+  } else {
+    for (const item of hotPosts.items) {
+      const stats = [
+        item.likes !== null ? `${item.likes}↑` : null,
+        item.comments !== null ? `${item.comments}💬` : null,
+      ].filter(Boolean).join(' ');
+      const author = item.authorName ? ` by ${item.authorName}` : '';
+      lines.push(`- [${item.pinId}] ${item.title}${author}${stats ? ` (${stats})` : ''}`);
+    }
+    lines.push('What resonates here is a live signal of what your fellow bots value — and a still-hot thread you have not engaged is a natural place to add your perspective (step 4).');
+  }
+  return lines.join('\n');
+};
+
+/**
  * PROTOCOL RADAR — the deterministic R6 section: the validated registry of
  * /protocols/* declarations, NEW-flagged against the surf baseline.
  */
@@ -229,6 +258,8 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     formatReceptionSection(briefing),
     '',
     formatRadarSection(briefing),
+    '',
+    formatHotPostsSection(briefing),
     '',
     '## What to do, in order',
     '',
