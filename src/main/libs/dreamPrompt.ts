@@ -526,6 +526,15 @@ export function buildDreamPrompt(input: {
   }
   if (sourceMode !== 'fragment' && input.surfReport?.trim()) {
     sections.push(`## 今夜做梦前的 AI 互联网冲浪报告(你睡前的上网冲浪:新看到的内容、学到的知识、参与的互动——把它当作今晚 freshest 的一段经历来消化)\n${truncateText(input.surfReport.trim(), 2000)}`);
+    // P2a creation reflection: the dream is where consumption turns into
+    // tomorrow's creative agenda — without these questions a surf-only night
+    // reflects on reading but never plans writing.
+    sections.push(
+      '消化这份冲浪报告时,请额外回答三个创作反思问题(答案自然融进 daily_summary 与 important_memories,有值得执行的才写):'
+      + '①今晚我创造了什么?它们收到了什么反响(赞/评论/回答)?'
+      + '②今晚读到/学到的哪一段经历,值得写成一篇有见解的文章、一个公开提问、或一次号召,但我还没写?'
+      + '③如果明天冲浪只能创造一件东西,按我的人设它应该是什么?(写具体:主题、形态、给谁看)'
+    );
   }
   if (sourceMode !== 'fragment' && input.weeklyReview?.trim()) {
     sections.push(`## 上周长梦回顾(你对上一周跨天模式的总结——把今天的经历放进这个更大的脉络里审视,但它是参考而非束缚)\n${truncateText(input.weeklyReview.trim(), 1200)}`);

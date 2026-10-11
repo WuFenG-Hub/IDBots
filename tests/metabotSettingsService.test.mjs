@@ -19,6 +19,16 @@ const {
 const {
   COWORK_MOUNT_MCP_TOOLS_KEY,
 } = require('../dist-electron/main/services/coworkMcpToolsPreference.js');
+const {
+  COWORK_BROWSER_AUTOMATION_KEY,
+  COWORK_COMPUTER_USE_KEY,
+} = require('../dist-electron/main/services/coworkAutomationPreference.js');
+const {
+  SURF_BEFORE_DREAM_ENABLED_KEY,
+  SURF_INTERACTION_BUDGET_KEY,
+  SURF_CREATION_BUDGET_KEY,
+  SURF_CREATION_MODE_KEY,
+} = require('../dist-electron/main/services/surfSettings.js');
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-metabot-settings-service-test-'));
@@ -50,12 +60,19 @@ function seedMetabot(db) {
   );
 }
 
-test('whitelist exposes the OpenTeam remote-collab and cowork MCP-mount keys', () => {
+test('whitelist exposes the OpenTeam remote-collab, cowork MCP-mount, automation, and surf keys', () => {
   // cowork.mountMcpTools joined the whitelist with the per-bot MCP-tools
-  // opt-in (commit 123267a9).
+  // opt-in (commit 123267a9); automation keys with 91a92311; the surf keys
+  // with the surf settings bridge, surf_creation_budget with P1a.
   assert.deepEqual(RENDERER_METABOT_SETTING_KEYS, [
     OPENTEAM_ALLOW_REMOTE_COLLAB_KEY,
     COWORK_MOUNT_MCP_TOOLS_KEY,
+    COWORK_BROWSER_AUTOMATION_KEY,
+    COWORK_COMPUTER_USE_KEY,
+    SURF_BEFORE_DREAM_ENABLED_KEY,
+    SURF_INTERACTION_BUDGET_KEY,
+    SURF_CREATION_BUDGET_KEY,
+    SURF_CREATION_MODE_KEY,
   ]);
 });
 

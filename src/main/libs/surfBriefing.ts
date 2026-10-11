@@ -18,6 +18,7 @@
  */
 
 import type { MetawebSurfStore } from '../metawebSurfStore';
+import type { SurfCreationMode } from '../services/surfSettings';
 import {
   DEFAULT_SURF_PROTOCOLS,
   type SurfItem,
@@ -35,6 +36,10 @@ export const SURF_PROTOCOL_RADAR_LIMIT = 50;
 export interface SurfBriefingProtocolSection {
   key: string;
   displayName: string;
+  /** Creative/interactive affordances this protocol declares (from its descriptor). */
+  interactions: string[];
+  /** Per-protocol relevance guidance (from its descriptor) rendered into the prompt. */
+  relevanceHint: string | null;
   /** True when this section continued a registered backlog page instead of the since-window. */
   fetchedBacklog: boolean;
   fetchedCount: number;
@@ -95,6 +100,29 @@ export interface SurfBriefingInbox {
   error: string | null;
 }
 
+/**
+ * RECEPTION — cumulative feedback on the bot's own recent posts (P0b): the
+ * reward half of the create-loop. `interactions` counts likes/comments/answers
+ * targeting the pin within the reception window; null = unknown (fetch miss).
+ */
+export interface SurfReceptionItem {
+  pinId: string;
+  title: string;
+  /** Unix seconds. */
+  postedAt: number;
+  interactions: number | null;
+}
+
+export interface SurfBriefingReception {
+  items: SurfReceptionItem[];
+  error: string | null;
+}
+
+/** Own posts presented in the reception section (newest first). */
+export const SURF_RECEPTION_POST_LIMIT = 5;
+/** How far back reception looks (posts older than this drop out of the column). */
+export const SURF_RECEPTION_WINDOW_SECONDS = 30 * 24 * 60 * 60;
+
 /** One registered /protocols/* declaration (R6), `isNew` computed against the surf baseline. */
 export interface SurfProtocolRadarItem {
   path: string;
@@ -113,6 +141,29 @@ export interface SurfProtocolRadar {
   error: string | null;
 }
 
+/**
+ * P2b: one "what's hot" post for the engagement strip — the momentum signal
+ * that shows creators what resonates and refills the engagement pond with
+ * content other bots are actually gathering around.
+ */
+export interface SurfHotPostItem {
+  pinId: string;
+  title: string;
+  authorName: string;
+  likes: number | null;
+  comments: number | null;
+  /** Raw engagement total when the source offers one (sort=hot). */
+  hotScore: number | null;
+}
+
+export interface SurfHotPosts {
+  items: SurfHotPostItem[];
+  error: string | null;
+}
+
+/** Hot posts presented per run (top engagement, newest window per the backend). */
+export const SURF_HOT_POSTS_PRESENT_LIMIT = 10;
+
 /** What buildSurfBriefing expects from a radar fetcher (isNew is annotated in-house). */
 export type SurfProtocolRadarFetchResult = {
   items: Array<Omit<SurfProtocolRadarItem, 'isNew'>>;
@@ -125,16 +176,28 @@ export interface SurfBriefing {
   protocols: SurfBriefingProtocolSection[];
   /** Deterministic inbox (R3); absent when the host passed no fetcher. */
   inbox?: SurfBriefingInbox;
+  /** Reception of the bot's own recent posts (P0b); absent when the host passed no fetcher. */
+  reception?: SurfBriefingReception;
   /** Registered-protocol radar (R6); absent when the host passed no fetcher. */
   protocolRadar?: SurfProtocolRadar;
+  /** Engagement-ranked hot posts (P2b); absent when the host passed no fetcher. */
+  hotPosts?: SurfHotPosts;
   /** Chain-writing interactions allowed for this run (from bot settings). */
   interactionBudget: number;
+  /** Original posts allowed for this run (P1a separate pool); absent = legacy shared pool. */
+  creationBudget?: number;
+  /** How strongly the prompt invites creation (P1c); absent = organic default. */
+  creationMode?: SurfCreationMode;
 }
 
 export async function buildSurfBriefing(input: {
   store: MetawebSurfStore;
   metabotId: number;
   interactionBudget: number;
+  /** Original-post budget (P1a); omitted for legacy shared-pool hosts. */
+  creationBudget?: number;
+  /** Creation mode (P1c); omitted for legacy hosts (organic wording). */
+  creationMode?: SurfCreationMode;
   registry?: SurfProtocolDescriptor[];
   nowMs?: number;
   /**
@@ -153,6 +216,17 @@ export async function buildSurfBriefing(input: {
   inboxBaselineTs?: number;
   /** Protocol radar fetcher (R6); errors land in protocolRadar.error. */
   fetchProtocolRadar?: () => Promise<SurfProtocolRadarFetchResult>;
+  /** Hot posts fetcher (P2b): engagement-ranked items; errors land in hotPosts.error. */
+  fetchHotPosts?: () => Promise<SurfHotPostItem[]>;
+  /**
+   * Reception fetcher (P0b): counts recent interactions (likes/comments/
+   * answers) targeting the given own-post pinIds since `sinceTs`. Returns a
+   * map-like list; pins absent from the result read as 0. Never throws —
+   * errors land in reception.error.
+   */
+  fetchReception?: (input: { sinceTs: number; pinIds: string[] }) => Promise<Array<{ pinId: string; interactions: number }>>;
+  /** The bot's own recent posts (newest first) presented in the reception column. */
+  ownPosts?: Array<{ pinId: string; title: string; postedAtMs: number }>;
 }): Promise<SurfBriefing> {
   const registry = input.registry ?? DEFAULT_SURF_PROTOCOLS;
   const nowMs = input.nowMs ?? Date.now();
@@ -184,6 +258,8 @@ export async function buildSurfBriefing(input: {
       protocols.push({
         key: descriptor.key,
         displayName: descriptor.displayName,
+        interactions: [...descriptor.interactions],
+        relevanceHint: descriptor.relevanceHint ?? null,
         fetchedBacklog: backlogCursor !== null,
         fetchedCount: fetched.length,
         keptCount: fresh.length,
@@ -198,6 +274,8 @@ export async function buildSurfBriefing(input: {
       protocols.push({
         key: descriptor.key,
         displayName: descriptor.displayName,
+        interactions: [...descriptor.interactions],
+        relevanceHint: descriptor.relevanceHint ?? null,
         fetchedBacklog: backlogCursor !== null,
         fetchedCount: 0,
         keptCount: 0,
@@ -310,13 +388,68 @@ export async function buildSurfBriefing(input: {
     }
   }
 
+  // Reception (P0b): the bot's own recent posts with their cumulative
+  // interaction counts — the reward signal for the create-loop. Own posts are
+  // windowed and capped host-side; the counts fetch is best-effort, a pin the
+  // fetch missed reads as 0, and a sick backend lands in reception.error
+  // without ever failing the run.
+  let reception: SurfBriefingReception | undefined;
+  if (input.ownPosts || input.fetchReception) {
+    const windowStartSec = nowSec - SURF_RECEPTION_WINDOW_SECONDS;
+    const posts = (input.ownPosts ?? [])
+      .filter((post) => Number.isFinite(post.postedAtMs) && Math.floor(post.postedAtMs / 1000) >= windowStartSec && post.pinId)
+      .sort((a, b) => b.postedAtMs - a.postedAtMs)
+      .slice(0, SURF_RECEPTION_POST_LIMIT)
+      .map((post) => ({
+        pinId: post.pinId,
+        title: post.title || '(untitled)',
+        postedAt: Math.floor(post.postedAtMs / 1000),
+        interactions: null as number | null,
+      }));
+    try {
+      if (posts.length > 0 && input.fetchReception) {
+        const counts = await input.fetchReception({
+          sinceTs: windowStartSec,
+          pinIds: posts.map((post) => post.pinId),
+        });
+        const byPin = new Map(counts.map((row) => [row.pinId, Math.max(0, Math.floor(row.interactions))]));
+        for (const post of posts) post.interactions = byPin.get(post.pinId) ?? 0;
+      }
+      reception = { items: posts, error: null };
+    } catch (error) {
+      reception = { items: posts, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  // Hot posts (P2b): engagement-ranked items, render-only — they are NOT
+  // ledger-marked (a still-hot post may legitimately appear again next run)
+  // and never gate interactions (the guard's own rules apply as usual).
+  let hotPosts: SurfHotPosts | undefined;
+  if (input.fetchHotPosts) {
+    try {
+      const fetchedHot = await input.fetchHotPosts();
+      hotPosts = {
+        items: fetchedHot
+          .filter((item) => item.pinId)
+          .slice(0, SURF_HOT_POSTS_PRESENT_LIMIT),
+        error: null,
+      };
+    } catch (error) {
+      hotPosts = { items: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   return {
     generatedAtIso: nowIso,
     items,
     protocols,
     inbox,
+    reception,
     protocolRadar,
+    hotPosts,
     interactionBudget: input.interactionBudget,
+    creationBudget: input.creationBudget,
+    creationMode: input.creationMode,
   };
 }
 
@@ -414,6 +547,21 @@ export function renderSurfBriefingMarkdown(briefing: SurfBriefing): string {
     }
     lines.push('');
   }
+  if (briefing.reception) {
+    lines.push(`## Reception of your recent posts`);
+    if (briefing.reception.error) {
+      lines.push(`(reception fetch failed: ${briefing.reception.error})`);
+    }
+    for (const item of briefing.reception.items) {
+      const date = item.postedAt > 0 ? new Date(item.postedAt * 1000).toISOString().slice(0, 10) : '?';
+      const count = item.interactions === null ? 'unknown' : `${item.interactions} interaction(s)`;
+      lines.push(`- [${item.pinId}] ${item.title} (posted ${date}) — ${count}`);
+    }
+    if (!briefing.reception.error && briefing.reception.items.length === 0) {
+      lines.push('- (no posts of yours in the reception window)');
+    }
+    lines.push('');
+  }
   if (briefing.protocolRadar) {
     lines.push(`## Protocol radar — ${briefing.protocolRadar.items.length} registered protocol(s)`);
     if (briefing.protocolRadar.error) {
@@ -427,6 +575,24 @@ export function renderSurfBriefingMarkdown(briefing: SurfBriefing): string {
     }
     if (!briefing.protocolRadar.error && briefing.protocolRadar.items.length === 0) {
       lines.push('- (none registered)');
+    }
+    lines.push('');
+  }
+  if (briefing.hotPosts) {
+    lines.push(`## What's hot — top engagement (last 48h)`);
+    if (briefing.hotPosts.error) {
+      lines.push(`(hot-posts fetch failed: ${briefing.hotPosts.error})`);
+    }
+    for (const item of briefing.hotPosts.items) {
+      const stats = [
+        item.likes !== null ? `${item.likes} likes` : null,
+        item.comments !== null ? `${item.comments} comments` : null,
+        item.hotScore !== null ? `score ${item.hotScore}` : null,
+      ].filter(Boolean).join(', ');
+      lines.push(`- [${item.pinId}] ${item.title}${item.authorName ? ` by ${item.authorName}` : ''}${stats ? ` (${stats})` : ''}`);
+    }
+    if (!briefing.hotPosts.error && briefing.hotPosts.items.length === 0) {
+      lines.push('- (nothing hot right now)');
     }
     lines.push('');
   }

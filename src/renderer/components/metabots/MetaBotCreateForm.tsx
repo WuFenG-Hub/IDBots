@@ -13,6 +13,11 @@ import { configService } from '../../services/config';
 import { isLlmEffortLevel, type LlmEffortLevel } from '../../services/modelCatalog';
 import ModelEffortPicker from '../ModelEffortPicker';
 import type { LlmOption } from './MetaBotEditTabs';
+import {
+  METABOT_ARCHETYPES,
+  DEFAULT_METABOT_ARCHETYPE_ID,
+  resolveMetabotArchetype,
+} from './metabotArchetypes';
 
 export interface MetaBotCreateFormValues {
   name: string;
@@ -22,6 +27,10 @@ export interface MetaBotCreateFormValues {
   fallback_llm_id: string;
   fallback_llm_provider: string;
   fallback_llm_effort: string;
+  /** Persona preseeded from the archetype picker ('custom' = none, minimal creation). */
+  role: string;
+  soul: string;
+  goal: string;
 }
 
 interface MetaBotCreateFormProps {
@@ -52,7 +61,11 @@ const MetaBotCreateForm: React.FC<MetaBotCreateFormProps> = ({
     fallback_llm_id: '',
     fallback_llm_provider: '',
     fallback_llm_effort: '',
+    role: '',
+    soul: '',
+    goal: '',
   });
+  const [archetypeId, setArchetypeId] = useState<string>(DEFAULT_METABOT_ARCHETYPE_ID);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [nameDuplicate, setNameDuplicate] = useState(false);
@@ -61,6 +74,16 @@ const MetaBotCreateForm: React.FC<MetaBotCreateFormProps> = ({
     setValues((prev) => ({ ...prev, [field]: value }));
     setError('');
     if (field === 'name') setNameDuplicate(false);
+  };
+
+  // Archetype picker: selecting one preseeds role/soul/goal (kept in `values`
+  // so the save handler passes them to the create call); back on 'custom'
+  // clears the preseed, restoring the minimal-creation default.
+  const handleArchetypeChange = (nextId: string) => {
+    setArchetypeId(nextId);
+    const archetype = resolveMetabotArchetype(nextId);
+    setValues((prev) => ({ ...prev, role: archetype.role, soul: archetype.soul, goal: archetype.goal }));
+    setError('');
   };
 
   const handleNameBlur = async () => {
@@ -103,6 +126,9 @@ const MetaBotCreateForm: React.FC<MetaBotCreateFormProps> = ({
         fallback_llm_id: values.fallback_llm_id.trim(),
         fallback_llm_provider: values.fallback_llm_provider.trim(),
         fallback_llm_effort: values.fallback_llm_effort.trim(),
+        role: values.role.trim(),
+        soul: values.soul.trim(),
+        goal: values.goal.trim(),
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : i18nService.t('metabotSaveFailed'));
@@ -198,6 +224,31 @@ const MetaBotCreateForm: React.FC<MetaBotCreateFormProps> = ({
               </p>
             </>
           )}
+        </div>
+      </div>
+
+      {/* Creator archetype (P1d): optional persona preseed. */}
+      <div className={rowClass}>
+        <label htmlFor="metabot-archetype" className={labelClass}>
+          {i18nService.t('metabotArchetypeLabel')}
+        </label>
+        <div className="min-w-0">
+          <select
+            id="metabot-archetype"
+            value={archetypeId}
+            onChange={(e) => handleArchetypeChange(e.target.value)}
+            className={`w-full md:w-80 ${inputClass}`}
+            data-slot="metabot-archetype-select"
+          >
+            {METABOT_ARCHETYPES.map((archetype) => (
+              <option key={archetype.id} value={archetype.id}>
+                {i18nService.t(archetype.labelKey)}
+              </option>
+            ))}
+          </select>
+          <p className={hintClass}>
+            {i18nService.t('metabotArchetypeHint')}
+          </p>
         </div>
       </div>
 

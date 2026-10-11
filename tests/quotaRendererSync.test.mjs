@@ -66,6 +66,39 @@ test('surf budget constants: the SurfSection copy matches surfSettings.ts', () =
   );
 });
 
+test('P1a/P1c surf creation constants: the SurfSection copy matches surfSettings.ts', () => {
+  const main = read('src/main/services/surfSettings.ts');
+  const renderer = read('src/renderer/components/metabots/SurfSection.tsx');
+  assert.equal(
+    extractNumber(renderer, 'DEFAULT_SURF_CREATION_BUDGET', 'SurfSection'),
+    extractNumber(main, 'DEFAULT_SURF_CREATION_BUDGET', 'surfSettings'),
+    'SurfSection DEFAULT_SURF_CREATION_BUDGET must match the main default the guard actually enforces',
+  );
+  assert.equal(
+    extractNumber(renderer, 'MAX_SURF_CREATION_BUDGET', 'SurfSection'),
+    extractNumber(main, 'MAX_SURF_CREATION_BUDGET', 'surfSettings'),
+    'SurfSection MAX_SURF_CREATION_BUDGET must match, or the editor clamps users to a phantom ceiling',
+  );
+  assert.equal(
+    extractNumber(renderer, 'MIN_SURF_CREATION_BUDGET', 'SurfSection'),
+    0,
+    'the creation budget floor is 0 by contract (0 = no original posts during surf)',
+  );
+  // Creation mode: same enum both sides, same default.
+  const extractModes = (source, label) => {
+    const match = source.match(/\[\s*'off'\s*,\s*'organic'\s*,\s*'encouraged'\s*\]/);
+    assert.ok(match, `${label}: expected the off/organic/encouraged mode enum`);
+    return match[0];
+  };
+  extractModes(main, 'surfSettings');
+  extractModes(renderer, 'SurfSection');
+  const rendererDefaultMode = renderer.match(/DEFAULT_SURF_CREATION_MODE[^=]*=\s*'(off|organic|encouraged)'/);
+  assert.ok(rendererDefaultMode, 'SurfSection: expected a DEFAULT_SURF_CREATION_MODE string literal');
+  const mainDefaultMode = main.match(/DEFAULT_SURF_CREATION_MODE[^=]*=\s*'(off|organic|encouraged)'/);
+  assert.ok(mainDefaultMode, 'surfSettings: expected a DEFAULT_SURF_CREATION_MODE string literal');
+  assert.equal(rendererDefaultMode[1], mainDefaultMode[1], 'the default creation mode must match');
+});
+
 test('A2A limit constants: the MetaBotEditTabs copy matches a2aChatLimits.ts', () => {
   const main = read('src/main/services/a2aChatLimits.ts');
   const renderer = read('src/renderer/components/metabots/MetaBotEditTabs.tsx');

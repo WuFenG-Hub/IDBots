@@ -15,7 +15,11 @@ import { COWORK_BROWSER_AUTOMATION_KEY, COWORK_COMPUTER_USE_KEY } from './cowork
 import {
   SURF_BEFORE_DREAM_ENABLED_KEY,
   SURF_INTERACTION_BUDGET_KEY,
+  SURF_CREATION_BUDGET_KEY,
+  SURF_CREATION_MODE_KEY,
   normalizeSurfBudgetValue,
+  normalizeSurfCreationBudgetValue,
+  normalizeSurfCreationModeValue,
 } from './surfSettings';
 
 /** Boolean toggle settings are persisted as '1' (on) / '0' (off). */
@@ -38,6 +42,8 @@ const RENDERER_SETTING_DEFS: Record<string, RendererSettingDef> = {
   [COWORK_COMPUTER_USE_KEY]: { normalizeValue: normalizeToggleValue },
   [SURF_BEFORE_DREAM_ENABLED_KEY]: { normalizeValue: normalizeToggleValue },
   [SURF_INTERACTION_BUDGET_KEY]: { normalizeValue: normalizeSurfBudgetValue },
+  [SURF_CREATION_BUDGET_KEY]: { normalizeValue: normalizeSurfCreationBudgetValue },
+  [SURF_CREATION_MODE_KEY]: { normalizeValue: normalizeSurfCreationModeValue },
 };
 
 export const RENDERER_METABOT_SETTING_KEYS: readonly string[] = Object.keys(RENDERER_SETTING_DEFS);

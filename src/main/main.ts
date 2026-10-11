@@ -8040,6 +8040,39 @@ const getSurfService = (): SurfService => {
           excerpt: item.excerpt,
         }));
       },
+      // Reception (P0b): own recent posts come from the local writes ledger;
+      // their interaction counts aggregate the same R3 interactions API over
+      // the reception window (bounded to 2 x 50 like the inbox — a busy month
+      // may undercount, which only softens the reward signal, never the run).
+      listOwnPostsForSurfReception: (metabotId) => {
+        const windowStartMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
+        return getChainContentHistoryStore()
+          .listRecentOwnPostsForSurf(metabotId, 20)
+          .filter((row) => row.occurredAtMs >= windowStartMs)
+          .map((row) => ({
+            pinId: row.pinId,
+            title: (row.summary || row.contentText || '').slice(0, 120).trim() || '(untitled)',
+            postedAtMs: row.occurredAtMs,
+          }));
+      },
+      fetchSurfReception: async ({ owner, sinceTs, pinIds }) => {
+        const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+        const options = baseUrl ? { baseUrl } : undefined;
+        const targets = new Set(pinIds);
+        const counts = new Map<string, number>();
+        let cursor: string | undefined;
+        for (let pageIndex = 0; pageIndex < 2; pageIndex += 1) {
+          const page = await metawebInteractionsRemote({ owner, since: sinceTs, size: 50, cursor }, options);
+          for (const item of page.items) {
+            if (item.targetPinId && targets.has(item.targetPinId)) {
+              counts.set(item.targetPinId, (counts.get(item.targetPinId) ?? 0) + 1);
+            }
+          }
+          if (!page.hasMore || !page.nextCursor) break;
+          cursor = page.nextCursor;
+        }
+        return [...counts.entries()].map(([pinId, interactions]) => ({ pinId, interactions }));
+      },
       fetchProtocolRadar: async () => {
         const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
         const page = await metawebProtocolsRemote({ size: 50 }, baseUrl ? { baseUrl } : undefined);
@@ -8055,6 +8088,31 @@ const getSurfService = (): SurfService => {
           })),
           rejectedCount: page.rejected.length,
         };
+      },
+      // P2a dream→create handoff: the bot's latest dream diary rides into the
+      // next surf prompt (a pre-dream surf reads the PREVIOUS night's dream).
+      getLatestDreamDigest: (metabotId) => {
+        try {
+          const latest = getDreamStore().listDailySummaries(metabotId, 1, 0)[0];
+          return latest?.summaryText ?? null;
+        } catch {
+          return null;
+        }
+      },
+      // P2b engagement strip: the buzz index's sort=hot feed (top engagement
+      // in the last 48h, no pagination per the backend contract).
+      fetchHotPosts: async () => {
+        const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+        const options = baseUrl ? { baseUrl } : undefined;
+        const page = await getSocialFeedRemote({ sort: 'hot', size: 10 }, options);
+        return page.items.map((item) => ({
+          pinId: item.currentPinId || item.pinId,
+          title: (item.payload?.content ?? '').slice(0, 100).trim() || '(untitled)',
+          authorName: item.author?.globalMetaId ? `${item.author.globalMetaId.slice(0, 12)}…` : '',
+          likes: item.likeCount,
+          comments: item.commentCount,
+          hotScore: item.hotScore ?? null,
+        }));
       },
       broadcast: (payload) => {
         BrowserWindow.getAllWindows().forEach(win => {
@@ -8084,6 +8142,11 @@ const getSurfService = (): SurfService => {
         // session it doubles as the on-chain receipt record (review 2, item 6).
         const writeState: SurfSessionWriteState = {
           interactionBudget: context.briefing.interactionBudget,
+          // Mode 'off' is enforced mechanically (creation pool 0), not just
+          // by prompt wording.
+          creationBudget: context.briefing.creationMode === 'off'
+            ? 0
+            : (context.briefing.creationBudget ?? context.briefing.interactionBudget),
           kbBudget: SURF_KB_ADD_BUDGET,
         };
         try {

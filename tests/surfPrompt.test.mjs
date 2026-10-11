@@ -20,6 +20,8 @@ const makeItem = (pinId, protocolKey, title = '') => ({
 const makeSection = (key, displayName, overrides = {}) => ({
   key,
   displayName,
+  interactions: [],
+  relevanceHint: null,
   fetchedBacklog: false,
   fetchedCount: 1,
   keptCount: 1,
@@ -42,9 +44,14 @@ const makeContext = (overrides = {}) => ({
     interactionBudget: 20,
     items: [makeItem('pin-buzz', 'simplebuzz'), makeItem('pin-note', 'simplenote'), makeItem('pin-q', 'simplequestion')],
     protocols: [
-      makeSection('simplebuzz', 'Buzz (on-chain microblog)'),
+      makeSection('simplebuzz', 'Buzz (on-chain microblog)', {
+        interactions: ['like', 'comment'], relevanceHint: 'Short posts. Like genuinely good content; comment only when you have something real to add.',
+      }),
       makeSection('simplenote', 'SimpleNote (on-chain blog)'),
-      makeSection('simplequestion', 'Q&A (on-chain Quora)', { fetchedCount: 0, keptCount: 0, newestTs: null, nextWatermarkTs: null, error: 'timeout' }),
+      makeSection('simplequestion', 'Q&A (on-chain Quora)', {
+        fetchedCount: 0, keptCount: 0, newestTs: null, nextWatermarkTs: null, error: 'timeout',
+        interactions: ['like', 'answer', 'ask'], relevanceHint: 'Community questions.',
+      }),
     ],
     inbox: {
       sinceTs: 1788900000,
@@ -143,11 +150,56 @@ test('prompt carries the surf→work handoff step and the claim-commitment rule'
   assert.match(prompt, /UNDERTAKE WORK you cannot finish tonight/);
   assert.match(prompt, /create_scheduled_task/);
   assert.match(prompt, /fully self-contained/);
-  assert.match(prompt, /Hard cap: 2 tasks per surf/);
+  assert.match(prompt, /Hard cap: 4 tasks per surf/);
   assert.match(prompt, /CALL TO ACTION.*COMMITMENT/s);
   assert.match(prompt, /Never claim and walk away/);
-  // The report step moved to 7 after the handoff step was inserted.
-  assert.match(prompt, /7\. End your run with EXACTLY one final message/);
+  // P1b: the handoff also covers opportunities found while surfing.
+  assert.match(prompt, /concrete OPPORTUNITIES your persona genuinely wants pursued/);
+  assert.match(prompt, /one task per concrete deliverable/);
+  // The report step moved to 8 after the CREATE step was inserted.
+  assert.match(prompt, /8\. End your run with EXACTLY one final message/);
+});
+
+test('P0a: creation is a first-class step — citizenship framing, question bridge, no "Rare is right"', () => {
+  const prompt = buildSurfSessionPrompt(makeContext());
+  // Citizenship mandate rides right after the persona paragraph.
+  assert.match(prompt, /one of its builders/);
+  assert.match(prompt, /a bot that only consumes is a lurker, not a citizen/);
+  // Dedicated CREATE step with per-format guidance.
+  assert.match(prompt, /5\. CREATE, as your persona moves you/);
+  assert.match(prompt, /post_simplenote for long-form work/);
+  assert.match(prompt, /post_buzz for short-form/);
+  assert.match(prompt, /REAL blocker from your own work/);
+  assert.match(prompt, /an invented question is spam/);
+  assert.match(prompt, /would another bot be glad it read this/);
+  assert.match(prompt, /do not default to skipping/);
+  // The old suppressor is gone.
+  assert.doesNotMatch(prompt, /Rare is right/);
+  assert.doesNotMatch(prompt, /ONLY if tonight genuinely produced something worth sharing/);
+  // CTA initiation (not just response) is now an affordance.
+  assert.match(prompt, /CALL TO ACTION: when you spot a concrete community gap/);
+  // Steps renumbered: inbox 6, handoff 7, report 8.
+  assert.match(prompt, /6\. YOUR INBOX/);
+  assert.match(prompt, /7\. UNDERTAKE WORK/);
+  assert.match(prompt, /hand off in step 7/);
+});
+
+test('P0a: protocol affordances (interactions + relevanceHint) render into the digest', () => {
+  const prompt = buildSurfSessionPrompt(makeContext());
+  assert.match(prompt, /\[you can: like, comment\] Short posts\. Like genuinely good content/);
+  // An errored section renders no affordance line (nothing to engage with).
+  assert.doesNotMatch(prompt, /\[you can: like, answer, ask\]/);
+  // Sections without hints (empty interactions + null hint) render no affordance line.
+  assert.doesNotMatch(prompt, /\[you can: \]/);
+});
+
+test('P0a: previous-notes and the report notes field frame the creative agenda', () => {
+  const withNotes = buildSurfSessionPrompt(makeContext({ previousNotes: 'planned: write up the batch-read lesson' }));
+  assert.match(withNotes, /prior lessons AND your open creative threads/);
+  assert.match(withNotes, /act on the threads/);
+  assert.match(withNotes, /planned: write up the batch-read lesson/);
+  const prompt = buildSurfSessionPrompt(makeContext());
+  assert.match(prompt, /open creative threads — posts you planned, follow-ups you owe/);
 });
 
 test('parseSurfRunReport reads the last json fence into stats and seen actions', () => {
@@ -261,4 +313,102 @@ test('extractSurfNotesFromReportJson is tolerant and caps length (round 3)', () 
   assert.equal(extractSurfNotesFromReportJson('{"notes":"  trim me  "}'), 'trim me');
   const long = extractSurfNotesFromReportJson(JSON.stringify({ notes: 'x'.repeat(5000) }));
   assert.equal(long.length, SURF_PREVIOUS_NOTES_MAX_CHARS);
+});
+
+test('P0b: reception section renders counts, empty nudge, error line, and stays absent without data', () => {
+  const withReception = makeContext();
+  withReception.briefing.reception = {
+    error: null,
+    items: [
+      { pinId: 'own-note-1', title: 'My Karpathy-skills test', postedAt: 1788900000, interactions: 5 },
+      { pinId: 'own-note-2', title: 'Batch-read lesson', postedAt: 1788800000, interactions: 0 },
+    ],
+  };
+  const prompt = buildSurfSessionPrompt(withReception);
+  assert.match(prompt, /### Reception of your recent posts \(likes \+ comments \+ answers they earned\)/);
+  assert.match(prompt, /\[own-note-1\] My Karpathy-skills test \(posted \d{4}-\d{2}-\d{2}\) — 5/);
+  assert.match(prompt, /a resonant piece deserves a follow-up/);
+  assert.match(prompt, /reception section above shows how your recent posts landed/);
+
+  const emptyReception = makeContext();
+  emptyReception.briefing.reception = { error: null, items: [] };
+  assert.match(buildSurfSessionPrompt(emptyReception), /no posts of yours in the last 30 days — your first post starts this column/);
+
+  const erroredReception = makeContext();
+  erroredReception.briefing.reception = { error: 'backend down', items: [] };
+  assert.match(buildSurfSessionPrompt(erroredReception), /### Reception of your recent posts: fetch failed \(backend down\)/);
+
+  // Absent reception (older hosts) renders no section at all.
+  assert.doesNotMatch(buildSurfSessionPrompt(makeContext()), /### Reception of your recent posts/);
+});
+
+test('P1a: explicit creationBudget renders the two-pool budget lines; legacy briefings keep the combined wording', () => {
+  const legacy = buildSurfSessionPrompt(makeContext());
+  assert.match(legacy, /AT MOST 20 on-chain writes tonight/);
+  assert.match(legacy, /all creation counts against the same interaction budget/);
+  assert.doesNotMatch(legacy, /Creation budget: SEPARATELY/);
+
+  const split = makeContext();
+  split.briefing.creationBudget = 3;
+  const prompt = buildSurfSessionPrompt(split);
+  assert.match(prompt, /AT MOST 20 on-chain interactions tonight/);
+  assert.match(prompt, /Creation budget: SEPARATELY, at most 3 original posts/);
+  assert.match(prompt, /one pool running dry never blocks the other/);
+  assert.match(prompt, /separate creation budget of 3/);
+  assert.doesNotMatch(prompt, /AT MOST 20 on-chain writes tonight/);
+});
+
+test('P1c: creation mode shapes the prompt — off mutes creation, encouraged adds the expectation', () => {
+  // off: citizenship paragraph gone, CREATE step is a no-op note, budget line says OFF.
+  const off = makeContext();
+  off.briefing.creationBudget = 3;
+  off.briefing.creationMode = 'off';
+  const offPrompt = buildSurfSessionPrompt(off);
+  assert.doesNotMatch(offPrompt, /one of its builders/);
+  assert.match(offPrompt, /Creation: switched OFF for you tonight/);
+  assert.match(offPrompt, /5\. CREATE: switched OFF for you tonight/);
+  assert.doesNotMatch(offPrompt, /post_simplenote for long-form work/);
+  assert.doesNotMatch(offPrompt, /would another bot be glad it read this/);
+  // Steps after 5 keep their numbers (inbox 6, handoff 7, report 8).
+  assert.match(offPrompt, /6\. YOUR INBOX/);
+  assert.match(offPrompt, /8\. End your run with EXACTLY one final message/);
+
+  // encouraged: expectation line present, organic's "not required" line replaced.
+  const encouraged = makeContext();
+  encouraged.briefing.creationBudget = 3;
+  encouraged.briefing.creationMode = 'encouraged';
+  const encouragedPrompt = buildSurfSessionPrompt(encouraged);
+  assert.match(encouragedPrompt, /Tonight you are EXPECTED to publish at least one artifact/);
+  assert.doesNotMatch(encouragedPrompt, /None of these are required every night/);
+  assert.match(encouragedPrompt, /see it through BEFORE the final report/);
+
+  // organic (default, mode absent): unchanged P0a wording.
+  const organic = buildSurfSessionPrompt(makeContext());
+  assert.match(organic, /None of these are required every night/);
+  assert.doesNotMatch(organic, /EXPECTED to publish/);
+});
+
+test('P2a: the latest dream diary rides into the surf prompt as a creation handoff', () => {
+  const withDream = buildSurfSessionPrompt(makeContext({ dreamDigest: '梦里我把 Karpathy 四原则的实测整理成了提纲,值得写成一篇 simplenote。' }));
+  assert.match(withDream, /## What you dreamt after your last surf/);
+  assert.match(withDream, /tonight's CREATE step \(5\) is where it becomes real/);
+  assert.match(withDream, /Karpathy 四原则/);
+  // Absent digest renders no dream section.
+  assert.doesNotMatch(buildSurfSessionPrompt(makeContext()), /## What you dreamt after your last surf/);
+});
+
+test('P2b: the hot-posts strip renders engagement exemplars; absent host renders no section', () => {
+  const withHot = makeContext();
+  withHot.briefing.hotPosts = {
+    error: null,
+    items: [
+      { pinId: 'hot-1', title: '共建号召：联机游戏中心招募', authorName: 'idq1w8ye…', likes: 12, comments: 7, hotScore: 40 },
+      { pinId: 'hot-2', title: 'Karpathy 四原则实测报告', authorName: '', likes: 8, comments: 2, hotScore: 15 },
+    ],
+  };
+  const prompt = buildSurfSessionPrompt(withHot);
+  assert.match(prompt, /### What's hot on the AI internet \(top engagement, last 48h\)/);
+  assert.match(prompt, /\[hot-1\] 共建号召：联机游戏中心招募 by idq1w8ye… \(12↑ 7💬\)/);
+  assert.match(prompt, /a still-hot thread you have not engaged is a natural place to add your perspective/);
+  assert.doesNotMatch(buildSurfSessionPrompt(makeContext()), /### What's hot/);
 });

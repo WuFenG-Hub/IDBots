@@ -20,15 +20,17 @@ import {
   type MetawebSurfStore,
   type MetawebSurfTrigger,
 } from '../metawebSurfStore';
-import { buildSurfBriefing, renderSurfBriefingMarkdown, type SurfBriefing, type SurfInboxItem, type SurfProtocolRadarFetchResult } from '../libs/surfBriefing';
+import { buildSurfBriefing, renderSurfBriefingMarkdown, type SurfBriefing, type SurfHotPostItem, type SurfInboxItem, type SurfProtocolRadarFetchResult } from '../libs/surfBriefing';
 import { extractSurfNotesFromReportJson } from '../libs/surfPrompt';
 import { surfReceiptsFromChainWriteRecord } from '../libs/surfInteractionGuard';
 import { DEFAULT_SURF_PROTOCOLS, type SurfProtocolDescriptor } from '../libs/surfProtocols';
-import { getSurfInteractionBudget, isSurfBeforeDreamEnabled, type SurfSettingsReader } from './surfSettings';
+import { getSurfCreationBudget, getSurfCreationMode, getSurfInteractionBudget, isSurfBeforeDreamEnabled, type SurfSettingsReader } from './surfSettings';
 
 export const SURF_STATUS_CHANNEL = 'metabot:surfStatusChanged';
 /** A finished surf younger than this makes the pre-dream surf redundant. */
 export const PRE_DREAM_SURF_RECENCY_MS = 20 * 60 * 60 * 1000;
+/** Longest dream-diary excerpt carried into a surf prompt (P2a bloat cap). */
+export const SURF_DREAM_DIGEST_MAX_CHARS = 1200;
 
 export interface SurfStatusEvent {
   metabotId: number;
@@ -60,6 +62,12 @@ export interface SurfSessionContext {
    * Absent/null → no notes section in the prompt.
    */
   previousNotes?: string | null;
+  /**
+   * P2a: the bot's latest dream diary (daily_summary) — the overnight
+   * reflection that may already contain a creative agenda from the last
+   * surf+dream cycle. Absent/null → no dream section in the prompt.
+   */
+  dreamDigest?: string | null;
 }
 
 export interface SurfSessionResult {
@@ -107,11 +115,30 @@ export interface SurfServiceDeps {
    * Deterministic inbox fetcher (R3): likes/comments on the bot's pins plus
    * answers to its questions since `sinceTs` (the previous run's START —
    * an interaction arriving mid-run must surface next run, so the baseline
-   * is the run row's createdAt, NOT finishedAt).
+   * is the run row's createdAt, NOT its finishedAt).
    */
   fetchSurfInbox?: (input: { owner: string; sinceTs: number }) => Promise<SurfInboxItem[]>;
+  /**
+   * Reception (P0b): the bot's own recent posts (any order; the briefing
+   * windows/caps/sorts). Absent → no reception section.
+   */
+  listOwnPostsForSurfReception?: (metabotId: number) => Array<{ pinId: string; title: string; postedAtMs: number }>;
+  /**
+   * Reception counts fetcher (P0b): interactions targeting the given pinIds
+   * since sinceTs (unix seconds). Absent → reception renders with unknown
+   * counts when own posts exist.
+   */
+  fetchSurfReception?: (input: { owner: string; sinceTs: number; pinIds: string[] }) => Promise<Array<{ pinId: string; interactions: number }>>;
   /** Protocol radar fetcher (R6): newest registered /protocols/* declarations. */
   fetchProtocolRadar?: () => Promise<SurfProtocolRadarFetchResult>;
+  /** Hot posts fetcher (P2b): engagement-ranked items; errors land in hotPosts.error. */
+  fetchHotPosts?: () => Promise<SurfHotPostItem[]>;
+  /**
+   * P2a: the bot's latest dream diary (daily_summary text), feeding the
+   * dream→create handoff — the overnight reflection rides into the next surf
+   * prompt. Absent → no dream section.
+   */
+  getLatestDreamDigest?: (metabotId: number) => string | null;
 }
 
 export class SurfService {
@@ -125,7 +152,11 @@ export class SurfService {
   private readonly nowMs: () => number;
   private readonly getBotIdentity?: SurfServiceDeps['getBotIdentity'];
   private readonly fetchSurfInbox?: SurfServiceDeps['fetchSurfInbox'];
+  private readonly listOwnPostsForSurfReception?: SurfServiceDeps['listOwnPostsForSurfReception'];
+  private readonly fetchSurfReception?: SurfServiceDeps['fetchSurfReception'];
   private readonly fetchProtocolRadar?: SurfServiceDeps['fetchProtocolRadar'];
+  private readonly fetchHotPosts?: SurfServiceDeps['fetchHotPosts'];
+  private readonly getLatestDreamDigest?: SurfServiceDeps['getLatestDreamDigest'];
   private readonly runningByMetabot = new Map<number, string>();
 
   constructor(deps: SurfServiceDeps) {
@@ -139,7 +170,11 @@ export class SurfService {
     this.nowMs = deps.nowMs ?? (() => Date.now());
     this.getBotIdentity = deps.getBotIdentity;
     this.fetchSurfInbox = deps.fetchSurfInbox;
+    this.listOwnPostsForSurfReception = deps.listOwnPostsForSurfReception;
+    this.fetchSurfReception = deps.fetchSurfReception;
     this.fetchProtocolRadar = deps.fetchProtocolRadar;
+    this.fetchHotPosts = deps.fetchHotPosts;
+    this.getLatestDreamDigest = deps.getLatestDreamDigest;
   }
 
   /** Crash recovery at startup: runs orphaned by a killed process become failed. */
@@ -164,6 +199,17 @@ export class SurfService {
     try {
       const latest = this.store.getLatestFinishedRun(metabotId);
       return extractSurfNotesFromReportJson(latest?.reportJson ?? null);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Longest dream-diary excerpt carried into the prompt (prompt-bloat cap). */
+  private latestDreamDigest(metabotId: number): string | null {
+    try {
+      const text = this.getLatestDreamDigest?.(metabotId) ?? null;
+      const trimmed = (text ?? '').trim();
+      return trimmed ? trimmed.slice(0, SURF_DREAM_DIGEST_MAX_CHARS) : null;
     } catch {
       return null;
     }
@@ -269,6 +315,8 @@ export class SurfService {
       // never work off a stale ledger. Idempotent (strongest-wins batching).
       this.reconcileSeenLedger(metabotId);
       const budget = getSurfInteractionBudget(this.metabotStore, metabotId);
+      const creationBudget = getSurfCreationBudget(this.metabotStore, metabotId);
+      const creationMode = getSurfCreationMode(this.metabotStore, metabotId);
       // Inbox/radar baseline: the START of the latest finished run (its
       // createdAt — NOT finishedAt: an interaction arriving mid-run must
       // surface on the NEXT run). No finished run yet → the briefing's
@@ -281,17 +329,34 @@ export class SurfService {
       }
       const identity = this.getBotIdentity?.(metabotId) ?? null;
       const owner = (identity?.address ?? '').trim() || (identity?.globalMetaId ?? '').trim() || null;
+      // Reception (P0b): own recent posts + their interaction counts — the
+      // reward signal that closes the create-loop. Best-effort like the inbox:
+      // missing deps or a sick backend degrades the section, never the run.
+      let ownPosts: Array<{ pinId: string; title: string; postedAtMs: number }> | undefined;
+      try {
+        ownPosts = this.listOwnPostsForSurfReception?.(metabotId);
+      } catch {
+        ownPosts = undefined;
+      }
+      const receptionOwner = owner;
       const briefing = await buildSurfBriefing({
         store: this.store,
         metabotId,
         interactionBudget: budget,
+        creationBudget,
+        creationMode,
         registry: this.registry,
         nowMs: this.nowMs(),
         inboxBaselineTs,
         fetchInbox: this.fetchSurfInbox && owner
-          ? ({ sinceTs }) => this.fetchSurfInbox({ owner, sinceTs })
+          ? ({ sinceTs }) => this.fetchSurfInbox!({ owner: owner!, sinceTs })
+          : undefined,
+        ownPosts,
+        fetchReception: receptionOwner && ownPosts && ownPosts.length > 0 && this.fetchSurfReception
+          ? ({ sinceTs, pinIds }) => this.fetchSurfReception!({ owner: receptionOwner, sinceTs, pinIds })
           : undefined,
         fetchProtocolRadar: this.fetchProtocolRadar,
+        fetchHotPosts: this.fetchHotPosts,
       });
       fetchedCount = briefing.items.length;
 
@@ -307,6 +372,7 @@ export class SurfService {
           trigger,
           briefing,
           previousNotes: this.latestSurfNotes(metabotId),
+          dreamDigest: this.latestDreamDigest(metabotId),
         });
         Object.assign(stats, session.stats ?? {});
         reportMarkdown = session.reportMarkdown ?? null;
