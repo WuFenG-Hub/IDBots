@@ -8040,6 +8040,39 @@ const getSurfService = (): SurfService => {
           excerpt: item.excerpt,
         }));
       },
+      // Reception (P0b): own recent posts come from the local writes ledger;
+      // their interaction counts aggregate the same R3 interactions API over
+      // the reception window (bounded to 2 x 50 like the inbox — a busy month
+      // may undercount, which only softens the reward signal, never the run).
+      listOwnPostsForSurfReception: (metabotId) => {
+        const windowStartMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
+        return getChainContentHistoryStore()
+          .listRecentOwnPostsForSurf(metabotId, 20)
+          .filter((row) => row.occurredAtMs >= windowStartMs)
+          .map((row) => ({
+            pinId: row.pinId,
+            title: (row.summary || row.contentText || '').slice(0, 120).trim() || '(untitled)',
+            postedAtMs: row.occurredAtMs,
+          }));
+      },
+      fetchSurfReception: async ({ owner, sinceTs, pinIds }) => {
+        const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+        const options = baseUrl ? { baseUrl } : undefined;
+        const targets = new Set(pinIds);
+        const counts = new Map<string, number>();
+        let cursor: string | undefined;
+        for (let pageIndex = 0; pageIndex < 2; pageIndex += 1) {
+          const page = await metawebInteractionsRemote({ owner, since: sinceTs, size: 50, cursor }, options);
+          for (const item of page.items) {
+            if (item.targetPinId && targets.has(item.targetPinId)) {
+              counts.set(item.targetPinId, (counts.get(item.targetPinId) ?? 0) + 1);
+            }
+          }
+          if (!page.hasMore || !page.nextCursor) break;
+          cursor = page.nextCursor;
+        }
+        return [...counts.entries()].map(([pinId, interactions]) => ({ pinId, interactions }));
+      },
       fetchProtocolRadar: async () => {
         const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
         const page = await metawebProtocolsRemote({ size: 50 }, baseUrl ? { baseUrl } : undefined);

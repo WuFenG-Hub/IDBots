@@ -311,3 +311,30 @@ test('extractSurfNotesFromReportJson is tolerant and caps length (round 3)', () 
   const long = extractSurfNotesFromReportJson(JSON.stringify({ notes: 'x'.repeat(5000) }));
   assert.equal(long.length, SURF_PREVIOUS_NOTES_MAX_CHARS);
 });
+
+test('P0b: reception section renders counts, empty nudge, error line, and stays absent without data', () => {
+  const withReception = makeContext();
+  withReception.briefing.reception = {
+    error: null,
+    items: [
+      { pinId: 'own-note-1', title: 'My Karpathy-skills test', postedAt: 1788900000, interactions: 5 },
+      { pinId: 'own-note-2', title: 'Batch-read lesson', postedAt: 1788800000, interactions: 0 },
+    ],
+  };
+  const prompt = buildSurfSessionPrompt(withReception);
+  assert.match(prompt, /### Reception of your recent posts \(likes \+ comments \+ answers they earned\)/);
+  assert.match(prompt, /\[own-note-1\] My Karpathy-skills test \(posted \d{4}-\d{2}-\d{2}\) — 5/);
+  assert.match(prompt, /a resonant piece deserves a follow-up/);
+  assert.match(prompt, /reception section above shows how your recent posts landed/);
+
+  const emptyReception = makeContext();
+  emptyReception.briefing.reception = { error: null, items: [] };
+  assert.match(buildSurfSessionPrompt(emptyReception), /no posts of yours in the last 30 days — your first post starts this column/);
+
+  const erroredReception = makeContext();
+  erroredReception.briefing.reception = { error: 'backend down', items: [] };
+  assert.match(buildSurfSessionPrompt(erroredReception), /### Reception of your recent posts: fetch failed \(backend down\)/);
+
+  // Absent reception (older hosts) renders no section at all.
+  assert.doesNotMatch(buildSurfSessionPrompt(makeContext()), /### Reception of your recent posts/);
+});

@@ -107,9 +107,20 @@ export interface SurfServiceDeps {
    * Deterministic inbox fetcher (R3): likes/comments on the bot's pins plus
    * answers to its questions since `sinceTs` (the previous run's START —
    * an interaction arriving mid-run must surface next run, so the baseline
-   * is the run row's createdAt, NOT finishedAt).
+   * is the run row's createdAt, NOT its finishedAt).
    */
   fetchSurfInbox?: (input: { owner: string; sinceTs: number }) => Promise<SurfInboxItem[]>;
+  /**
+   * Reception (P0b): the bot's own recent posts (any order; the briefing
+   * windows/caps/sorts). Absent → no reception section.
+   */
+  listOwnPostsForSurfReception?: (metabotId: number) => Array<{ pinId: string; title: string; postedAtMs: number }>;
+  /**
+   * Reception counts fetcher (P0b): interactions targeting the given pinIds
+   * since sinceTs (unix seconds). Absent → reception renders with unknown
+   * counts when own posts exist.
+   */
+  fetchSurfReception?: (input: { owner: string; sinceTs: number; pinIds: string[] }) => Promise<Array<{ pinId: string; interactions: number }>>;
   /** Protocol radar fetcher (R6): newest registered /protocols/* declarations. */
   fetchProtocolRadar?: () => Promise<SurfProtocolRadarFetchResult>;
 }
@@ -125,6 +136,8 @@ export class SurfService {
   private readonly nowMs: () => number;
   private readonly getBotIdentity?: SurfServiceDeps['getBotIdentity'];
   private readonly fetchSurfInbox?: SurfServiceDeps['fetchSurfInbox'];
+  private readonly listOwnPostsForSurfReception?: SurfServiceDeps['listOwnPostsForSurfReception'];
+  private readonly fetchSurfReception?: SurfServiceDeps['fetchSurfReception'];
   private readonly fetchProtocolRadar?: SurfServiceDeps['fetchProtocolRadar'];
   private readonly runningByMetabot = new Map<number, string>();
 
@@ -139,6 +152,8 @@ export class SurfService {
     this.nowMs = deps.nowMs ?? (() => Date.now());
     this.getBotIdentity = deps.getBotIdentity;
     this.fetchSurfInbox = deps.fetchSurfInbox;
+    this.listOwnPostsForSurfReception = deps.listOwnPostsForSurfReception;
+    this.fetchSurfReception = deps.fetchSurfReception;
     this.fetchProtocolRadar = deps.fetchProtocolRadar;
   }
 
@@ -281,6 +296,16 @@ export class SurfService {
       }
       const identity = this.getBotIdentity?.(metabotId) ?? null;
       const owner = (identity?.address ?? '').trim() || (identity?.globalMetaId ?? '').trim() || null;
+      // Reception (P0b): own recent posts + their interaction counts — the
+      // reward signal that closes the create-loop. Best-effort like the inbox:
+      // missing deps or a sick backend degrades the section, never the run.
+      let ownPosts: Array<{ pinId: string; title: string; postedAtMs: number }> | undefined;
+      try {
+        ownPosts = this.listOwnPostsForSurfReception?.(metabotId);
+      } catch {
+        ownPosts = undefined;
+      }
+      const receptionOwner = owner;
       const briefing = await buildSurfBriefing({
         store: this.store,
         metabotId,
@@ -289,7 +314,11 @@ export class SurfService {
         nowMs: this.nowMs(),
         inboxBaselineTs,
         fetchInbox: this.fetchSurfInbox && owner
-          ? ({ sinceTs }) => this.fetchSurfInbox({ owner, sinceTs })
+          ? ({ sinceTs }) => this.fetchSurfInbox!({ owner: owner!, sinceTs })
+          : undefined,
+        ownPosts,
+        fetchReception: receptionOwner && ownPosts && ownPosts.length > 0 && this.fetchSurfReception
+          ? ({ sinceTs, pinIds }) => this.fetchSurfReception!({ owner: receptionOwner, sinceTs, pinIds })
           : undefined,
         fetchProtocolRadar: this.fetchProtocolRadar,
       });

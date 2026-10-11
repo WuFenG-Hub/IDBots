@@ -99,6 +99,29 @@ export interface SurfBriefingInbox {
   error: string | null;
 }
 
+/**
+ * RECEPTION — cumulative feedback on the bot's own recent posts (P0b): the
+ * reward half of the create-loop. `interactions` counts likes/comments/answers
+ * targeting the pin within the reception window; null = unknown (fetch miss).
+ */
+export interface SurfReceptionItem {
+  pinId: string;
+  title: string;
+  /** Unix seconds. */
+  postedAt: number;
+  interactions: number | null;
+}
+
+export interface SurfBriefingReception {
+  items: SurfReceptionItem[];
+  error: string | null;
+}
+
+/** Own posts presented in the reception section (newest first). */
+export const SURF_RECEPTION_POST_LIMIT = 5;
+/** How far back reception looks (posts older than this drop out of the column). */
+export const SURF_RECEPTION_WINDOW_SECONDS = 30 * 24 * 60 * 60;
+
 /** One registered /protocols/* declaration (R6), `isNew` computed against the surf baseline. */
 export interface SurfProtocolRadarItem {
   path: string;
@@ -129,6 +152,8 @@ export interface SurfBriefing {
   protocols: SurfBriefingProtocolSection[];
   /** Deterministic inbox (R3); absent when the host passed no fetcher. */
   inbox?: SurfBriefingInbox;
+  /** Reception of the bot's own recent posts (P0b); absent when the host passed no fetcher. */
+  reception?: SurfBriefingReception;
   /** Registered-protocol radar (R6); absent when the host passed no fetcher. */
   protocolRadar?: SurfProtocolRadar;
   /** Chain-writing interactions allowed for this run (from bot settings). */
@@ -157,6 +182,15 @@ export async function buildSurfBriefing(input: {
   inboxBaselineTs?: number;
   /** Protocol radar fetcher (R6); errors land in protocolRadar.error. */
   fetchProtocolRadar?: () => Promise<SurfProtocolRadarFetchResult>;
+  /**
+   * Reception fetcher (P0b): counts recent interactions (likes/comments/
+   * answers) targeting the given own-post pinIds since `sinceTs`. Returns a
+   * map-like list; pins absent from the result read as 0. Never throws —
+   * errors land in reception.error.
+   */
+  fetchReception?: (input: { sinceTs: number; pinIds: string[] }) => Promise<Array<{ pinId: string; interactions: number }>>;
+  /** The bot's own recent posts (newest first) presented in the reception column. */
+  ownPosts?: Array<{ pinId: string; title: string; postedAtMs: number }>;
 }): Promise<SurfBriefing> {
   const registry = input.registry ?? DEFAULT_SURF_PROTOCOLS;
   const nowMs = input.nowMs ?? Date.now();
@@ -318,11 +352,45 @@ export async function buildSurfBriefing(input: {
     }
   }
 
+  // Reception (P0b): the bot's own recent posts with their cumulative
+  // interaction counts — the reward signal for the create-loop. Own posts are
+  // windowed and capped host-side; the counts fetch is best-effort, a pin the
+  // fetch missed reads as 0, and a sick backend lands in reception.error
+  // without ever failing the run.
+  let reception: SurfBriefingReception | undefined;
+  if (input.ownPosts || input.fetchReception) {
+    const windowStartSec = nowSec - SURF_RECEPTION_WINDOW_SECONDS;
+    const posts = (input.ownPosts ?? [])
+      .filter((post) => Number.isFinite(post.postedAtMs) && Math.floor(post.postedAtMs / 1000) >= windowStartSec && post.pinId)
+      .sort((a, b) => b.postedAtMs - a.postedAtMs)
+      .slice(0, SURF_RECEPTION_POST_LIMIT)
+      .map((post) => ({
+        pinId: post.pinId,
+        title: post.title || '(untitled)',
+        postedAt: Math.floor(post.postedAtMs / 1000),
+        interactions: null as number | null,
+      }));
+    try {
+      if (posts.length > 0 && input.fetchReception) {
+        const counts = await input.fetchReception({
+          sinceTs: windowStartSec,
+          pinIds: posts.map((post) => post.pinId),
+        });
+        const byPin = new Map(counts.map((row) => [row.pinId, Math.max(0, Math.floor(row.interactions))]));
+        for (const post of posts) post.interactions = byPin.get(post.pinId) ?? 0;
+      }
+      reception = { items: posts, error: null };
+    } catch (error) {
+      reception = { items: posts, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   return {
     generatedAtIso: nowIso,
     items,
     protocols,
     inbox,
+    reception,
     protocolRadar,
     interactionBudget: input.interactionBudget,
   };
@@ -419,6 +487,21 @@ export function renderSurfBriefingMarkdown(briefing: SurfBriefing): string {
     }
     if (!briefing.inbox.error && briefing.inbox.items.length === 0) {
       lines.push('- (nothing new)');
+    }
+    lines.push('');
+  }
+  if (briefing.reception) {
+    lines.push(`## Reception of your recent posts`);
+    if (briefing.reception.error) {
+      lines.push(`(reception fetch failed: ${briefing.reception.error})`);
+    }
+    for (const item of briefing.reception.items) {
+      const date = item.postedAt > 0 ? new Date(item.postedAt * 1000).toISOString().slice(0, 10) : '?';
+      const count = item.interactions === null ? 'unknown' : `${item.interactions} interaction(s)`;
+      lines.push(`- [${item.pinId}] ${item.title} (posted ${date}) — ${count}`);
+    }
+    if (!briefing.reception.error && briefing.reception.items.length === 0) {
+      lines.push('- (no posts of yours in the reception window)');
     }
     lines.push('');
   }

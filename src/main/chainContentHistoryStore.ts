@@ -519,6 +519,23 @@ export class ChainContentHistoryStore {
     ).map(writeRowToRecord);
   }
 
+  /**
+   * The bot's own PUBLISHED posts (buzz / simplenote / simplequestion — not
+   * likes, comments or answers), newest first, for the surf reception section
+   * (P0b). The local ledger is the source of truth for what this device
+   * published; the briefing windows/caps the list.
+   */
+  listRecentOwnPostsForSurf(metabotId: number, limit = 20): MetabotChainWriteRecord[] {
+    const capped = Math.max(1, Math.min(50, Math.floor(limit)));
+    return this.getAll<ChainWriteRow>(
+      `SELECT * FROM metabot_chain_writes
+       WHERE metabot_id = ?
+         AND origin IN ('tool:post_buzz', 'tool:post_simplenote', 'tool:post_simplequestion')
+       ORDER BY occurred_at_ms DESC LIMIT ?`,
+      [metabotId, capped],
+    ).map(writeRowToRecord);
+  }
+
   /** Oldest first across ALL bots — the summary service drains this queue. */
   listPendingSummaries(kind: 'write' | 'read', limit: number): Array<MetabotChainWriteRecord | MetabotChainReadRecord> {
     const capped = Math.max(1, Math.min(200, Math.floor(limit)));

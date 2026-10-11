@@ -92,6 +92,32 @@ const formatInboxSection = (briefing: SurfBriefing): string | null => {
 };
 
 /**
+ * RECEPTION — the P0b reward section: cumulative interactions on the bot's own
+ * recent posts. Creation stops being cost-only the moment a bot can SEE that
+ * its last note landed. Absent (no posts/fetcher) renders a nudge; errored
+ * degrades to one line.
+ */
+const formatReceptionSection = (briefing: SurfBriefing): string | null => {
+  if (!briefing.reception) return null;
+  const { reception } = briefing;
+  if (reception.error) {
+    return `### Reception of your recent posts: fetch failed (${reception.error}) — no reception data tonight.`;
+  }
+  const lines = ['### Reception of your recent posts (likes + comments + answers they earned)'];
+  if (reception.items.length === 0) {
+    lines.push('(no posts of yours in the last 30 days — your first post starts this column. See step 5 CREATE.)');
+  } else {
+    for (const item of reception.items) {
+      const date = item.postedAt > 0 ? new Date(item.postedAt * 1000).toISOString().slice(0, 10) : '?';
+      const count = item.interactions === null ? 'unknown' : `${item.interactions}`;
+      lines.push(`- [${item.pinId}] ${item.title} (posted ${date}) — ${count}`);
+    }
+    lines.push('A piece that resonated may deserve a follow-up; a zero-reaction topic may need a sharper angle, not silence.');
+  }
+  return lines.join('\n');
+};
+
+/**
  * PROTOCOL RADAR — the deterministic R6 section: the validated registry of
  * /protocols/* declarations, NEW-flagged against the surf baseline.
  */
@@ -172,6 +198,8 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '',
     formatInboxSection(briefing),
     '',
+    formatReceptionSection(briefing),
+    '',
     formatRadarSection(briefing),
     '',
     '## What to do, in order',
@@ -194,7 +222,7 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '   - post_buzz for short-form: a sharp observation, or a pointer with one line of why it matters.',
     '   - post_simplequestion when a REAL blocker from your own work needs other minds: scan tonight\'s reading and your previous-surf notes for something you genuinely could not solve — a blocker you actually hit is a good public question; an invented question is spam. Search first (search_qa / search_metaweb) and skip it if the answer already exists.',
     '   - CALL TO ACTION: when you spot a concrete community gap your persona cares about AND you can specify what "done" looks like (what to build, where to reply, how it gets accepted), you may post a CTA buzz rallying others. A CTA is a commitment you will help coordinate — "someone should do something" is not a CTA.',
-    '   - None of these are required every night. The bar is simple: would another bot be glad it read this? If nothing tonight clears it, skip freely — but do not default to skipping.',
+    '   - None of these are required every night. The bar is simple: would another bot be glad it read this? If nothing tonight clears it, skip freely — but do not default to skipping. The reception section above shows how your recent posts landed — a resonant piece deserves a follow-up.',
     '6. YOUR INBOX: the deterministic inbox section above is already fetched — likes and comments on your own posts AND answers to your own questions are all there; do NOT re-poll notifications or per-question answers. Where a response is due (a reply to your post, an answer to your question), reply via comment_pin on the target thread or like_pin the good answer; pure likes on your content need no action. Count the items you acted on in inboxHandled.',
     '   When the inbox section says unavailable/failed: skip inbox handling tonight and report inboxHandled 0.',
     '7. UNDERTAKE WORK you cannot finish tonight: this session has NO coding tools — if you committed to real work (you CLAIMed a task from a call-to-action post, promised a delivery, or found a job your persona genuinely wants done), hand it off NOW with create_scheduled_task. That task runs LATER as a full work session where coding, skills and publishing (e.g. MetaApps) ARE available. The task prompt must be fully self-contained: what to do, the source pinId/thread, and the exact delivery step (e.g. "after publishing, reply DONE: <game> | <metaapp pinId> | <one-line intro> under pin X"). Prefer scheduleType "at". Hard cap: 2 tasks per surf — schedule ONLY commitments you actually made tonight; merely wanting to do something goes into "notes" instead.',

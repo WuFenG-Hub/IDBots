@@ -468,3 +468,58 @@ test('digest markdown renders inbox and radar appendix sections', async () => {
   assert.match(md, /\[NEW\] newproto \(\/protocols\/newproto/);
   assert.match(md, /1 declaration\(s\) rejected by validation/);
 });
+
+test('P0b reception: own posts are windowed, capped, newest-first, with merged counts', async () => {
+  const store = setup();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const ownPosts = [
+    // Newest first input, one outside the 30-day window, one beyond the 5-post cap.
+    { pinId: 'post-new', title: 'Newest post', postedAtMs: NOW_MS - dayMs },
+    { pinId: 'post-mid', title: 'Middle post', postedAtMs: NOW_MS - 3 * dayMs },
+    { pinId: 'post-old', title: 'Still in window', postedAtMs: NOW_MS - 29 * dayMs },
+    { pinId: 'post-out', title: 'Outside window', postedAtMs: NOW_MS - 31 * dayMs },
+  ];
+  const briefing = await buildSurfBriefing({
+    store, metabotId: 7, interactionBudget: 20,
+    registry: [],
+    nowMs: NOW_MS,
+    ownPosts,
+    fetchReception: async ({ sinceTs, pinIds }) => {
+      assert.ok(pinIds.every((id) => !id.includes('out')), 'windowed-out posts are not fetched');
+      assert.ok(sinceTs <= Math.floor((NOW_MS - 29 * dayMs) / 1000), 'reception window start covers the oldest in-window post');
+      return [
+        { pinId: 'post-new', interactions: 4 },
+        { pinId: 'post-mid', interactions: 0 },
+        // post-old absent from the result → reads as 0
+      ];
+    },
+  });
+  assert.deepEqual(briefing.reception.items.map((item) => item.pinId), ['post-new', 'post-mid', 'post-old']);
+  assert.equal(briefing.reception.items[0].interactions, 4);
+  assert.equal(briefing.reception.items[1].interactions, 0);
+  assert.equal(briefing.reception.items[2].interactions, 0, 'pins missing from the counts result read as 0');
+  assert.equal(briefing.reception.error, null);
+  const md = renderSurfBriefingMarkdown(briefing);
+  assert.match(md, /## Reception of your recent posts/);
+  assert.match(md, /\[post-new\] Newest post \(posted /);
+  assert.match(md, /— 4 interaction\(s\)/);
+});
+
+test('P0b reception: fetch error lands in the section, empty posts stay empty, absent deps omit the section', async () => {
+  const store = setup();
+  const errored = await buildSurfBriefing({
+    store, metabotId: 7, interactionBudget: 20, registry: [], nowMs: NOW_MS,
+    ownPosts: [{ pinId: 'post-a', title: 'A', postedAtMs: NOW_MS }],
+    fetchReception: async () => { throw new Error('backend down'); },
+  });
+  assert.equal(errored.reception.error, 'backend down');
+  assert.deepEqual(errored.reception.items.map((item) => item.pinId), ['post-a'], 'posts survive a counts-fetch error');
+  assert.equal(errored.reception.items[0].interactions, null, 'counts unknown after the error');
+
+  const noPosts = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry: [], nowMs: NOW_MS, ownPosts: [] });
+  assert.deepEqual(noPosts.reception.items, []);
+  assert.equal(noPosts.reception.error, null);
+
+  const absent = await buildSurfBriefing({ store, metabotId: 7, interactionBudget: 20, registry: [], nowMs: NOW_MS });
+  assert.equal(absent.reception, undefined, 'no ownPosts/fetcher deps → no reception section at all');
+});
