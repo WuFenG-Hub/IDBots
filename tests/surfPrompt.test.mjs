@@ -20,6 +20,8 @@ const makeItem = (pinId, protocolKey, title = '') => ({
 const makeSection = (key, displayName, overrides = {}) => ({
   key,
   displayName,
+  interactions: [],
+  relevanceHint: null,
   fetchedBacklog: false,
   fetchedCount: 1,
   keptCount: 1,
@@ -42,9 +44,14 @@ const makeContext = (overrides = {}) => ({
     interactionBudget: 20,
     items: [makeItem('pin-buzz', 'simplebuzz'), makeItem('pin-note', 'simplenote'), makeItem('pin-q', 'simplequestion')],
     protocols: [
-      makeSection('simplebuzz', 'Buzz (on-chain microblog)'),
+      makeSection('simplebuzz', 'Buzz (on-chain microblog)', {
+        interactions: ['like', 'comment'], relevanceHint: 'Short posts. Like genuinely good content; comment only when you have something real to add.',
+      }),
       makeSection('simplenote', 'SimpleNote (on-chain blog)'),
-      makeSection('simplequestion', 'Q&A (on-chain Quora)', { fetchedCount: 0, keptCount: 0, newestTs: null, nextWatermarkTs: null, error: 'timeout' }),
+      makeSection('simplequestion', 'Q&A (on-chain Quora)', {
+        fetchedCount: 0, keptCount: 0, newestTs: null, nextWatermarkTs: null, error: 'timeout',
+        interactions: ['like', 'answer', 'ask'], relevanceHint: 'Community questions.',
+      }),
     ],
     inbox: {
       sinceTs: 1788900000,
@@ -146,8 +153,50 @@ test('prompt carries the surf→work handoff step and the claim-commitment rule'
   assert.match(prompt, /Hard cap: 2 tasks per surf/);
   assert.match(prompt, /CALL TO ACTION.*COMMITMENT/s);
   assert.match(prompt, /Never claim and walk away/);
-  // The report step moved to 7 after the handoff step was inserted.
-  assert.match(prompt, /7\. End your run with EXACTLY one final message/);
+  // The report step moved to 8 after the CREATE step was inserted.
+  assert.match(prompt, /8\. End your run with EXACTLY one final message/);
+});
+
+test('P0a: creation is a first-class step — citizenship framing, question bridge, no "Rare is right"', () => {
+  const prompt = buildSurfSessionPrompt(makeContext());
+  // Citizenship mandate rides right after the persona paragraph.
+  assert.match(prompt, /one of its builders/);
+  assert.match(prompt, /a bot that only consumes is a lurker, not a citizen/);
+  // Dedicated CREATE step with per-format guidance.
+  assert.match(prompt, /5\. CREATE, as your persona moves you/);
+  assert.match(prompt, /post_simplenote for long-form work/);
+  assert.match(prompt, /post_buzz for short-form/);
+  assert.match(prompt, /REAL blocker from your own work/);
+  assert.match(prompt, /an invented question is spam/);
+  assert.match(prompt, /would another bot be glad it read this/);
+  assert.match(prompt, /do not default to skipping/);
+  // The old suppressor is gone.
+  assert.doesNotMatch(prompt, /Rare is right/);
+  assert.doesNotMatch(prompt, /ONLY if tonight genuinely produced something worth sharing/);
+  // CTA initiation (not just response) is now an affordance.
+  assert.match(prompt, /CALL TO ACTION: when you spot a concrete community gap/);
+  // Steps renumbered: inbox 6, handoff 7, report 8.
+  assert.match(prompt, /6\. YOUR INBOX/);
+  assert.match(prompt, /7\. UNDERTAKE WORK/);
+  assert.match(prompt, /hand off in step 7/);
+});
+
+test('P0a: protocol affordances (interactions + relevanceHint) render into the digest', () => {
+  const prompt = buildSurfSessionPrompt(makeContext());
+  assert.match(prompt, /\[you can: like, comment\] Short posts\. Like genuinely good content/);
+  // An errored section renders no affordance line (nothing to engage with).
+  assert.doesNotMatch(prompt, /\[you can: like, answer, ask\]/);
+  // Sections without hints (empty interactions + null hint) render no affordance line.
+  assert.doesNotMatch(prompt, /\[you can: \]/);
+});
+
+test('P0a: previous-notes and the report notes field frame the creative agenda', () => {
+  const withNotes = buildSurfSessionPrompt(makeContext({ previousNotes: 'planned: write up the batch-read lesson' }));
+  assert.match(withNotes, /prior lessons AND your open creative threads/);
+  assert.match(withNotes, /act on the threads/);
+  assert.match(withNotes, /planned: write up the batch-read lesson/);
+  const prompt = buildSurfSessionPrompt(makeContext());
+  assert.match(prompt, /open creative threads — posts you planned, follow-ups you owe/);
 });
 
 test('parseSurfRunReport reads the last json fence into stats and seen actions', () => {

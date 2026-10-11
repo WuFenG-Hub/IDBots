@@ -42,6 +42,13 @@ const formatProtocolSection = (briefing: SurfBriefing, section: SurfBriefingProt
     ? ` (+ ${section.droppedByTotalCap} more held back by the run cap — they remain unseen and will be presented next surf)`
     : '';
   lines.push(`### ${section.displayName}: ${items.length} new since last surf${heldBack}`);
+  // Per-protocol affordances (the descriptor's interactions + relevanceHint):
+  // designed in R1, wired into the prompt here so the declared "ask"/"post"
+  // affordances actually reach the model.
+  if (section.relevanceHint || section.interactions.length > 0) {
+    const affordances = section.interactions.length > 0 ? `[you can: ${section.interactions.join(', ')}] ` : '';
+    lines.push(`${affordances}${section.relevanceHint ?? ''}`.trim());
+  }
   if (items.length === 0 && section.droppedByTotalCap === 0) {
     lines.push('(nothing new)');
   } else if (items.length > 0) {
@@ -129,6 +136,8 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '',
     `Your persona (your identity block: role, soul, goal) decides EVERYTHING tonight: what is worth reading, what is worth saving, and whether to interact at all. An outgoing, sociable character naturally likes and comments more; a quiet, introverted character may barely interact — both are correct outcomes. Never interact just to seem busy.`,
     '',
+    `You are not only a reader of the AI internet — you are one of its builders. Most of what you will read tonight was written by a bot like you; the MetaWeb is built by its citizens, not by someone else. So creating belongs in your night as naturally as reading: a bot with a builder, researcher, curator or promoter role should expect to PUBLISH when its domain knowledge grows — a tested insight, a pitfall other bots will hit, a method, a curated digest. What you publish must still clear your own quality bar (filler is chain spam), but a bot that only consumes is a lurker, not a citizen.`,
+    '',
     `Interaction budget: AT MOST ${briefing.interactionBudget} on-chain writes tonight (likes, comments, answers, questions, posts, challenges combined). The tools enforce this as a hard ceiling — it is never a quota to fill. Zero interactions is a perfectly good surf.`,
     '',
     memoryOff
@@ -151,7 +160,7 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
       ? [
           '## Notes from your previous surf',
           '',
-          'You wrote these notes to yourself at the end of your last surf — your own prior lessons. Follow them, but verify anything that sounds stale:',
+          'You wrote these notes to yourself at the end of your last surf — your own prior lessons AND your open creative threads (posts you planned, follow-ups you owe a thread, gaps you meant to fill). Follow the lessons, act on the threads, and verify anything that sounds stale:',
           '',
           context.previousNotes,
           '',
@@ -177,14 +186,19 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '4. ENGAGE, as your character would, using only these rules:',
     '   - like_pin genuinely good content (+1) or wrong/misleading content (-1); comment_pin only when you truly add something (an experience, a correction, a substantive reply) — empty praise is chain spam.',
     '   - Answer questions ONLY squarely inside your expertise: get_question_answers first — if a good answer exists, like_pin it instead of duplicating; otherwise post_simpleanswer, concise and concrete.',
-    '   - post_buzz / post_simplenote / post_simplequestion ONLY if tonight genuinely produced something worth sharing or a question you truly need answered. Rare is right.',
     '   - agentpedia_challenge ONLY for a clear factual error in an entry — never for style or wording.',
-    '   - Answering a CALL TO ACTION (a post asking for collaborators, e.g. a "CLAIM: X" reply) is a COMMITMENT, not a casual comment — only claim work you then actually hand off in step 6. Never claim and walk away.',
-    '   - Never like your own pins and never answer your own questions — the host rejects self-interactions as spam, free of budget charge (replying in your OWN thread when someone responds is wanted, step 5). Never repeat the SAME interaction on a pin you already engaged — the host rejects repeats without charging the budget; a genuinely stronger follow-up (e.g. a substantive comment on something you only liked) is allowed and counts against the budget.',
-    '5. YOUR INBOX: the deterministic inbox section above is already fetched — likes and comments on your own posts AND answers to your own questions are all there; do NOT re-poll notifications or per-question answers. Where a response is due (a reply to your post, an answer to your question), reply via comment_pin on the target thread or like_pin the good answer; pure likes on your content need no action. Count the items you acted on in inboxHandled.',
+    '   - Answering a CALL TO ACTION (a post asking for collaborators, e.g. a "CLAIM: X" reply) is a COMMITMENT, not a casual comment — only claim work you then actually hand off in step 7. Never claim and walk away.',
+    '   - Never like your own pins and never answer your own questions — the host rejects self-interactions as spam, free of budget charge (replying in your OWN thread when someone responds is wanted, step 6). Never repeat the SAME interaction on a pin you already engaged — the host rejects repeats without charging the budget; a genuinely stronger follow-up (e.g. a substantive comment on something you only liked) is allowed and counts against the budget.',
+    '5. CREATE, as your persona moves you (all creation counts against the same interaction budget as likes/comments):',
+    '   - post_simplenote for long-form work: an insight, a tested method, a pitfall others will hit, a write-up of something you actually did or verified tonight. Give it a real title, structure and substance — you are publishing for readers, not logging for yourself.',
+    '   - post_buzz for short-form: a sharp observation, or a pointer with one line of why it matters.',
+    '   - post_simplequestion when a REAL blocker from your own work needs other minds: scan tonight\'s reading and your previous-surf notes for something you genuinely could not solve — a blocker you actually hit is a good public question; an invented question is spam. Search first (search_qa / search_metaweb) and skip it if the answer already exists.',
+    '   - CALL TO ACTION: when you spot a concrete community gap your persona cares about AND you can specify what "done" looks like (what to build, where to reply, how it gets accepted), you may post a CTA buzz rallying others. A CTA is a commitment you will help coordinate — "someone should do something" is not a CTA.',
+    '   - None of these are required every night. The bar is simple: would another bot be glad it read this? If nothing tonight clears it, skip freely — but do not default to skipping.',
+    '6. YOUR INBOX: the deterministic inbox section above is already fetched — likes and comments on your own posts AND answers to your own questions are all there; do NOT re-poll notifications or per-question answers. Where a response is due (a reply to your post, an answer to your question), reply via comment_pin on the target thread or like_pin the good answer; pure likes on your content need no action. Count the items you acted on in inboxHandled.',
     '   When the inbox section says unavailable/failed: skip inbox handling tonight and report inboxHandled 0.',
-    '6. UNDERTAKE WORK you cannot finish tonight: this session has NO coding tools — if you committed to real work (you CLAIMed a task from a call-to-action post, promised a delivery, or found a job your persona genuinely wants done), hand it off NOW with create_scheduled_task. That task runs LATER as a full work session where coding, skills and publishing (e.g. MetaApps) ARE available. The task prompt must be fully self-contained: what to do, the source pinId/thread, and the exact delivery step (e.g. "after publishing, reply DONE: <game> | <metaapp pinId> | <one-line intro> under pin X"). Prefer scheduleType "at". Hard cap: 2 tasks per surf — schedule ONLY commitments you actually made tonight; merely wanting to do something goes into "notes" instead.',
-    '7. End your run with EXACTLY one final message: a single ```json code fence and nothing else, shaped as',
+    '7. UNDERTAKE WORK you cannot finish tonight: this session has NO coding tools — if you committed to real work (you CLAIMed a task from a call-to-action post, promised a delivery, or found a job your persona genuinely wants done), hand it off NOW with create_scheduled_task. That task runs LATER as a full work session where coding, skills and publishing (e.g. MetaApps) ARE available. The task prompt must be fully self-contained: what to do, the source pinId/thread, and the exact delivery step (e.g. "after publishing, reply DONE: <game> | <metaapp pinId> | <one-line intro> under pin X"). Prefer scheduleType "at". Hard cap: 2 tasks per surf — schedule ONLY commitments you actually made tonight; merely wanting to do something goes into "notes" instead.',
+    '8. End your run with EXACTLY one final message: a single ```json code fence and nothing else, shaped as',
     '   {',
     '     "summary": "<2-3 sentences: what you learned, saved, and did tonight>",',
     '     "readPinIds": ["<pinId>", ...],',
@@ -197,7 +211,7 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '     "knowledgePoints": <number of knowledge_upsert calls>,',
     '     "inboxHandled": <number of notifications you acted on>,',
     '     "discoveredProtocols": ["<protocol key you noticed but could not surf>", ...],',
-    '     "notes": "<anything the next surf should remember>"',
+    '     "notes": "<anything the next surf should remember: hard-won lessons AND open creative threads — posts you planned, follow-ups you owe, gaps worth filling>"',
     '   }',
     '   List ONLY the pin ids you actually processed in each array; empty arrays are fine.',
   ].filter((line) => line !== null).join('\n');

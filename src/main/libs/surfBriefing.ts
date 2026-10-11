@@ -35,6 +35,10 @@ export const SURF_PROTOCOL_RADAR_LIMIT = 50;
 export interface SurfBriefingProtocolSection {
   key: string;
   displayName: string;
+  /** Creative/interactive affordances this protocol declares (from its descriptor). */
+  interactions: string[];
+  /** Per-protocol relevance guidance (from its descriptor) rendered into the prompt. */
+  relevanceHint: string | null;
   /** True when this section continued a registered backlog page instead of the since-window. */
   fetchedBacklog: boolean;
   fetchedCount: number;
@@ -184,6 +188,8 @@ export async function buildSurfBriefing(input: {
       protocols.push({
         key: descriptor.key,
         displayName: descriptor.displayName,
+        interactions: [...descriptor.interactions],
+        relevanceHint: descriptor.relevanceHint ?? null,
         fetchedBacklog: backlogCursor !== null,
         fetchedCount: fetched.length,
         keptCount: fresh.length,
@@ -198,6 +204,8 @@ export async function buildSurfBriefing(input: {
       protocols.push({
         key: descriptor.key,
         displayName: descriptor.displayName,
+        interactions: [...descriptor.interactions],
+        relevanceHint: descriptor.relevanceHint ?? null,
         fetchedBacklog: backlogCursor !== null,
         fetchedCount: 0,
         keptCount: 0,
