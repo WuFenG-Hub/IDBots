@@ -8117,6 +8117,7 @@ const getSurfService = (): SurfService => {
         // session it doubles as the on-chain receipt record (review 2, item 6).
         const writeState: SurfSessionWriteState = {
           interactionBudget: context.briefing.interactionBudget,
+          creationBudget: context.briefing.creationBudget ?? context.briefing.interactionBudget,
           kbBudget: SURF_KB_ADD_BUDGET,
         };
         try {

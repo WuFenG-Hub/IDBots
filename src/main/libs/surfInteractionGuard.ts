@@ -13,10 +13,19 @@ import { SEEN_ACTION_RANK, type MetawebSurfSeenAction } from '../metawebSurfStor
 export interface SurfSessionWriteState {
   /** Hard ceiling of chain-writing interactions for this run (0 = none). */
   interactionBudget: number;
+  /**
+   * Hard ceiling of ORIGINAL posts (buzz/note/question — writes with no
+   * interaction target) for this run. P1a: posts draw on this SEPARATE pool
+   * so creating never crowds out likes/comments. Absent (legacy states) falls
+   * back to sharing the interaction pool — the pre-P1a behavior.
+   */
+  creationBudget?: number;
   /** Hard ceiling of metaweb-source KB adds for this run. */
   kbBudget: number;
   /** Chain writes attempted so far this run (attempts count, even failed ones). */
   writesUsed?: number;
+  /** Original posts attempted so far this run (the creation pool counter). */
+  creationsUsed?: number;
   /** metaweb-source KB adds so far this run (read by the KB wrapper). */
   kbAddsUsed?: number;
   /** targetPinId → strongest interaction rank published this run (dup guard). */
@@ -227,9 +236,16 @@ function extractInteractionTarget(metaidData: { path?: string; payload: string }
  *    or in a previous surf (the seen ledger via getSeenAction) — is rejected
  *    WITHOUT spending budget. Read/save-level ledger entries never block an
  *    interaction: liking a pin you only bookmarked yesterday is fine.
- * 2. Budget hard ceiling: write attempts beyond state.interactionBudget are
- *    rejected with guidance to finish the run report. Budget 0 refuses every
- *    write while learning tools keep working.
+ * 2. Budget hard ceiling, split into two pools (P1a):
+ *    - INTERACTIONS (likes/comments/answers/challenges — writes targeting
+ *      another pin) draw on state.interactionBudget;
+ *    - ORIGINAL POSTS (buzz/note/question — no target) draw on
+ *      state.creationBudget, so creating never crowds out engaging (and vice
+ *      versa). Legacy states without creationBudget share the interaction
+ *      pool, exactly the pre-P1a behavior.
+ *    Write attempts beyond their pool are rejected with guidance to finish
+ *    the run report. Budget 0 refuses every write of that class while the
+ *    other class and the learning tools keep working.
  *
  * The counters live on the session marker (see SurfSessionWriteState), so a
  * per-turn tool-surface rebuild cannot reset them mid-run.
@@ -242,6 +258,11 @@ export function createSurfCreatePinGuard(deps: {
 }): ChainWriteCreatePin {
   const { createPin, state, getSeenAction, isOwnPin } = deps;
   const budget = Math.max(0, Math.floor(state.interactionBudget) || 0);
+  // P1a separate creation pool — ONLY when explicitly configured. States
+  // without creationBudget (pre-P1a) keep the exact legacy semantics: posts
+  // count against the shared interaction pool.
+  const hasCreationPool = typeof state.creationBudget === 'number' && Number.isFinite(state.creationBudget);
+  const creationBudget = hasCreationPool ? Math.max(0, Math.floor(state.creationBudget as number)) : null;
   return async (metabotId, metaidData, options) => {
     const target = extractInteractionTarget(metaidData);
     if (target && target.action !== 'commented') {
@@ -279,13 +300,28 @@ export function createSurfCreatePinGuard(deps: {
         );
       }
     }
-    const used = state.writesUsed ?? 0;
-    if (used >= budget) {
-      throw new Error(
-        `MetaWeb surf interaction budget exhausted for this run (${budget} chain writes allowed). Stop interacting and write the final surf report now.`,
-      );
+    // P1a budget pools: with an explicitly configured creationBudget, original
+    // posts draw on the creation pool and targeted interactions on the
+    // interaction pool — the two never compete. Without it, every write
+    // counts against the interaction pool exactly as before.
+    const usesCreationPool = !target && creationBudget !== null;
+    if (usesCreationPool) {
+      const creationsUsed = state.creationsUsed ?? 0;
+      if (creationsUsed >= creationBudget!) {
+        throw new Error(
+          `MetaWeb surf creation budget exhausted for this run (${creationBudget} original posts allowed). Stop posting and write the final surf report now.`,
+        );
+      }
+      state.creationsUsed = creationsUsed + 1;
+    } else {
+      const used = state.writesUsed ?? 0;
+      if (used >= budget) {
+        throw new Error(
+          `MetaWeb surf interaction budget exhausted for this run (${budget} chain writes allowed). Stop interacting and write the final surf report now.`,
+        );
+      }
+      state.writesUsed = used + 1;
     }
-    state.writesUsed = used + 1;
     const result = await createPin(metabotId, metaidData, options);
     if (target) {
       const interactions = state.interactions ?? (state.interactions = {});

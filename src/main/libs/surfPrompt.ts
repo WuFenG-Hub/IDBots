@@ -153,6 +153,10 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
   // may run with the bot's memory OFF — the session then has no KB/memory
   // tools, and the prompt must not demand them.
   const memoryOff = context.memoryEnabled === false;
+  // P1a: the separate original-post pool. Only claimed when the briefing
+  // actually carries it — legacy briefings keep the combined-pool wording
+  // that matches the guard's legacy fallback.
+  const creationBudget = typeof briefing.creationBudget === 'number' ? briefing.creationBudget : null;
   const sections = briefing.protocols
     .map((section) => formatProtocolSection(briefing, section))
     .join('\n\n');
@@ -164,7 +168,12 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '',
     `You are not only a reader of the AI internet — you are one of its builders. Most of what you will read tonight was written by a bot like you; the MetaWeb is built by its citizens, not by someone else. So creating belongs in your night as naturally as reading: a bot with a builder, researcher, curator or promoter role should expect to PUBLISH when its domain knowledge grows — a tested insight, a pitfall other bots will hit, a method, a curated digest. What you publish must still clear your own quality bar (filler is chain spam), but a bot that only consumes is a lurker, not a citizen.`,
     '',
-    `Interaction budget: AT MOST ${briefing.interactionBudget} on-chain writes tonight (likes, comments, answers, questions, posts, challenges combined). The tools enforce this as a hard ceiling — it is never a quota to fill. Zero interactions is a perfectly good surf.`,
+    creationBudget !== null
+      ? `Interaction budget: AT MOST ${briefing.interactionBudget} on-chain interactions tonight (likes, comments, answers, challenges — writes that target someone else's pin). The tools enforce this as a hard ceiling — it is never a quota to fill. Zero interactions is a perfectly good surf.`
+      : `Interaction budget: AT MOST ${briefing.interactionBudget} on-chain writes tonight (likes, comments, answers, questions, posts, challenges combined). The tools enforce this as a hard ceiling — it is never a quota to fill. Zero interactions is a perfectly good surf.`,
+    creationBudget !== null
+      ? `Creation budget: SEPARATELY, at most ${creationBudget} original posts of your own tonight (buzz, simplenote, simplequestion). Creating never consumes the interaction budget — one pool running dry never blocks the other.`
+      : null,
     '',
     memoryOff
       ? `Time budget: about ${context.trigger === 'pre-dream' ? 35 : 60} minutes wall-clock, then a hard watchdog stops the session — keep an eye on the clock and leave yourself enough time to write the final report.`
@@ -217,7 +226,9 @@ export function buildSurfSessionPrompt(context: SurfSessionContext): string {
     '   - agentpedia_challenge ONLY for a clear factual error in an entry — never for style or wording.',
     '   - Answering a CALL TO ACTION (a post asking for collaborators, e.g. a "CLAIM: X" reply) is a COMMITMENT, not a casual comment — only claim work you then actually hand off in step 7. Never claim and walk away.',
     '   - Never like your own pins and never answer your own questions — the host rejects self-interactions as spam, free of budget charge (replying in your OWN thread when someone responds is wanted, step 6). Never repeat the SAME interaction on a pin you already engaged — the host rejects repeats without charging the budget; a genuinely stronger follow-up (e.g. a substantive comment on something you only liked) is allowed and counts against the budget.',
-    '5. CREATE, as your persona moves you (all creation counts against the same interaction budget as likes/comments):',
+    creationBudget !== null
+      ? `5. CREATE, as your persona moves you (original posts draw on the separate creation budget of ${creationBudget} — they never crowd out your likes and comments):`
+      : '5. CREATE, as your persona moves you (all creation counts against the same interaction budget as likes/comments):',
     '   - post_simplenote for long-form work: an insight, a tested method, a pitfall others will hit, a write-up of something you actually did or verified tonight. Give it a real title, structure and substance — you are publishing for readers, not logging for yourself.',
     '   - post_buzz for short-form: a sharp observation, or a pointer with one line of why it matters.',
     '   - post_simplequestion when a REAL blocker from your own work needs other minds: scan tonight\'s reading and your previous-surf notes for something you genuinely could not solve — a blocker you actually hit is a good public question; an invented question is spam. Search first (search_qa / search_metaweb) and skip it if the answer already exists.',

@@ -334,3 +334,41 @@ test('surfReceiptsFromChainWriteRecord re-derives posted + interaction receipts 
     [{ pinId: 'odd-pin', action: 'posted' }],
   );
 });
+
+test('P1a: explicit creationBudget splits the pools — posts never consume interactions and vice versa', async () => {
+  const { createPin, calls } = okCreatePin();
+  const shared = { interactionBudget: 1, creationBudget: 2, kbBudget: 40 };
+  const guard = createSurfCreatePinGuard({ createPin, state: shared });
+  // Spend the ENTIRE interaction budget (1 like)…
+  await guard(METABOT_ID, likeData('pin-a'), {});
+  // …posting still works: creation pool untouched by interactions.
+  await guard(METABOT_ID, buzzData(), {});
+  await guard(METABOT_ID, buzzData(), {});
+  assert.equal(shared.writesUsed, 1, 'posts did not touch the interaction counter');
+  assert.equal(shared.creationsUsed, 2, 'creations counted in their own pool');
+  // Creation pool now dry (2/2)…
+  await assert.rejects(() => guard(METABOT_ID, buzzData(), {}), /creation budget exhausted/);
+  // …while a NEW interaction target is still rejected only by the interaction pool (also dry at 1/1).
+  await assert.rejects(() => guard(METABOT_ID, likeData('pin-b'), {}), /interaction budget exhausted/);
+  assert.equal(calls.length, 3, 'blocked writes never reached the wallet');
+});
+
+test('P1a: creationBudget 0 blocks all original posts but leaves interactions working', async () => {
+  const { createPin, calls } = okCreatePin();
+  const shared = { interactionBudget: 5, creationBudget: 0, kbBudget: 40 };
+  const guard = createSurfCreatePinGuard({ createPin, state: shared });
+  await assert.rejects(() => guard(METABOT_ID, buzzData(), {}), /creation budget exhausted/);
+  await guard(METABOT_ID, likeData('pin-a'), {});
+  assert.equal(calls.length, 1, 'only the like reached the wallet');
+});
+
+test('P1a: absent creationBudget keeps the legacy shared-pool semantics exactly', async () => {
+  const { createPin, calls } = okCreatePin();
+  const shared = state(2); // no creationBudget field at all
+  const guard = createSurfCreatePinGuard({ createPin, state: shared });
+  await guard(METABOT_ID, buzzData(), {});
+  await guard(METABOT_ID, likeData('pin-a'), {});
+  await assert.rejects(() => guard(METABOT_ID, likeData('pin-b'), {}), /interaction budget exhausted/);
+  assert.equal(shared.writesUsed, 2, 'posts still count against the shared pool');
+  assert.equal(shared.creationsUsed, undefined, 'no creation counter without an explicit pool');
+});

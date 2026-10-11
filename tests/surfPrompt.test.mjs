@@ -338,3 +338,19 @@ test('P0b: reception section renders counts, empty nudge, error line, and stays 
   // Absent reception (older hosts) renders no section at all.
   assert.doesNotMatch(buildSurfSessionPrompt(makeContext()), /### Reception of your recent posts/);
 });
+
+test('P1a: explicit creationBudget renders the two-pool budget lines; legacy briefings keep the combined wording', () => {
+  const legacy = buildSurfSessionPrompt(makeContext());
+  assert.match(legacy, /AT MOST 20 on-chain writes tonight/);
+  assert.match(legacy, /all creation counts against the same interaction budget/);
+  assert.doesNotMatch(legacy, /Creation budget: SEPARATELY/);
+
+  const split = makeContext();
+  split.briefing.creationBudget = 3;
+  const prompt = buildSurfSessionPrompt(split);
+  assert.match(prompt, /AT MOST 20 on-chain interactions tonight/);
+  assert.match(prompt, /Creation budget: SEPARATELY, at most 3 original posts/);
+  assert.match(prompt, /one pool running dry never blocks the other/);
+  assert.match(prompt, /separate creation budget of 3/);
+  assert.doesNotMatch(prompt, /AT MOST 20 on-chain writes tonight/);
+});

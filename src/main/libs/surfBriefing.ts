@@ -158,12 +158,16 @@ export interface SurfBriefing {
   protocolRadar?: SurfProtocolRadar;
   /** Chain-writing interactions allowed for this run (from bot settings). */
   interactionBudget: number;
+  /** Original posts allowed for this run (P1a separate pool); absent = legacy shared pool. */
+  creationBudget?: number;
 }
 
 export async function buildSurfBriefing(input: {
   store: MetawebSurfStore;
   metabotId: number;
   interactionBudget: number;
+  /** Original-post budget (P1a); omitted for legacy shared-pool hosts. */
+  creationBudget?: number;
   registry?: SurfProtocolDescriptor[];
   nowMs?: number;
   /**
@@ -393,6 +397,7 @@ export async function buildSurfBriefing(input: {
     reception,
     protocolRadar,
     interactionBudget: input.interactionBudget,
+    creationBudget: input.creationBudget,
   };
 }
 

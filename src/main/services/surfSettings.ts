@@ -24,6 +24,18 @@ export const SURF_INTERACTION_BUDGET_KEY = 'surf_interaction_budget';
 export const DEFAULT_SURF_INTERACTION_BUDGET = 50; // quota audit 2026-09-17 (F1): autonomous-bots baseline, was 20
 export const MAX_SURF_INTERACTION_BUDGET = 500; // ceiling raised with the default; was 100
 
+/**
+ * P1a (2026-10-11): ORIGINAL posts (buzz / simplenote / simplequestion —
+ * writes that target no other pin) draw on their OWN per-run budget instead
+ * of competing with likes/comments/answers for the interaction pool. Default
+ * 3: enough for a note + a buzz + a question on a productive night, small
+ * enough that an idle-posting bot still gets stopped early. 0 = no original
+ * posts during surf (pure consumer); max 20.
+ */
+export const SURF_CREATION_BUDGET_KEY = 'surf_creation_budget';
+export const DEFAULT_SURF_CREATION_BUDGET = 3;
+export const MAX_SURF_CREATION_BUDGET = 20;
+
 export const normalizeSurfBudgetValue = (value: unknown): string | null => {
   const num = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
   if (typeof num !== 'number' || !Number.isFinite(num)) return null;
@@ -45,6 +57,25 @@ export const getSurfInteractionBudget = (reader: SurfSettingsReader, metabotId: 
   const raw = reader.getMetabotSetting(metabotId, SURF_INTERACTION_BUDGET_KEY);
   const normalized = raw === null ? null : normalizeSurfBudgetValue(raw);
   return normalized === null ? DEFAULT_SURF_INTERACTION_BUDGET : Number(normalized);
+};
+
+/** Per-run original-post budget; invalid or unset values fall back to the default. */
+export const getSurfCreationBudget = (reader: SurfSettingsReader, metabotId: number): number => {
+  const raw = reader.getMetabotSetting(metabotId, SURF_CREATION_BUDGET_KEY);
+  const num = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : raw;
+  if (typeof num !== 'number' || !Number.isFinite(num)) return DEFAULT_SURF_CREATION_BUDGET;
+  const int = Math.round(num);
+  if (int < 0 || int > MAX_SURF_CREATION_BUDGET) return DEFAULT_SURF_CREATION_BUDGET;
+  return int;
+};
+
+/** Renderer-input normalizer for the creation budget (0..MAX, else rejected). */
+export const normalizeSurfCreationBudgetValue = (value: unknown): string | null => {
+  const num = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  if (typeof num !== 'number' || !Number.isFinite(num)) return null;
+  const int = Math.round(num);
+  if (int < 0 || int > MAX_SURF_CREATION_BUDGET) return null;
+  return String(int);
 };
 
 /** Compile-time check: the real store satisfies the structural reader. */

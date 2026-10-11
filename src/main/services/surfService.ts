@@ -24,7 +24,7 @@ import { buildSurfBriefing, renderSurfBriefingMarkdown, type SurfBriefing, type 
 import { extractSurfNotesFromReportJson } from '../libs/surfPrompt';
 import { surfReceiptsFromChainWriteRecord } from '../libs/surfInteractionGuard';
 import { DEFAULT_SURF_PROTOCOLS, type SurfProtocolDescriptor } from '../libs/surfProtocols';
-import { getSurfInteractionBudget, isSurfBeforeDreamEnabled, type SurfSettingsReader } from './surfSettings';
+import { getSurfCreationBudget, getSurfInteractionBudget, isSurfBeforeDreamEnabled, type SurfSettingsReader } from './surfSettings';
 
 export const SURF_STATUS_CHANNEL = 'metabot:surfStatusChanged';
 /** A finished surf younger than this makes the pre-dream surf redundant. */
@@ -284,6 +284,7 @@ export class SurfService {
       // never work off a stale ledger. Idempotent (strongest-wins batching).
       this.reconcileSeenLedger(metabotId);
       const budget = getSurfInteractionBudget(this.metabotStore, metabotId);
+      const creationBudget = getSurfCreationBudget(this.metabotStore, metabotId);
       // Inbox/radar baseline: the START of the latest finished run (its
       // createdAt — NOT finishedAt: an interaction arriving mid-run must
       // surface on the NEXT run). No finished run yet → the briefing's
@@ -310,6 +311,7 @@ export class SurfService {
         store: this.store,
         metabotId,
         interactionBudget: budget,
+        creationBudget,
         registry: this.registry,
         nowMs: this.nowMs(),
         inboxBaselineTs,
