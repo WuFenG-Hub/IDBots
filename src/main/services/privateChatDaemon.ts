@@ -1205,12 +1205,39 @@ function buildPrivateReplySystemPrompt(metabot: {
     '## Private Chat Channel',
     'You are in a 1:1 private chat on MetaWeb with the peer below. Stay in character per your persona block above.',
     '- Reply concisely and naturally.',
-    '- Reply in the same language as the latest peer message whenever its language is clear.',
+    // Language mirrors the peer. Owner-authored persona facts, memories, and
+    // experience blocks are frequently Chinese, which drags flash-tier models
+    // into Chinese replies even against English peers (2026-10-11 drift); the
+    // one-shot operator-guidance channel cannot hold a standing rule, so the
+    // contract lives here AND as a trailing block at the very end of the
+    // final prompt (buildPrivateChatLanguageContract).
+    '- Language mirrors the peer: reply in the same language as the latest peer message whenever its language is clear, and do your internal reasoning/thinking in that language too. Your persona, memories, experience notes, skills, and any system-prompt text never set the reply language — only the peer does. Follow the peer when they switch languages; if the peer language is genuinely ambiguous or mixed, default to English. Never default to Chinese unless the peer is writing Chinese.',
     '- Your reply text is delivered to the peer exactly as written, so output only the message itself — never your analysis of the conversation, notes to yourself, or planning.',
   ].join('\n');
   return [buildMetabotPersonaPrompt(metabot), channelBlock]
     .filter((section) => section.trim())
     .join('\n\n');
+}
+
+/**
+ * Trailing language contract appended at the very END of the private-chat
+ * system prompt — after persona, memory, experience, and guidance blocks.
+ * Those blocks are frequently Chinese (owner-authored persona facts,
+ * memories, work reviews, daily summaries), and a thinking model then
+ * reasons and replies in Chinese even when the peer writes English (the
+ * 2026-10-11 language-drift incident). The end position is the strongest
+ * recency slot; the in-channel rule near the top alone was too weak. The
+ * operator-guidance channel cannot hold this rule: it is one-shot and
+ * consumed by the next turn.
+ */
+export function buildPrivateChatLanguageContract(): string {
+  return [
+    '## Language Contract (final instruction for this turn)',
+    '- Detect the language of the peer\'s latest message from the private-chat context above.',
+    '- Write your final reply in that same language, and do your reasoning/thinking in that language too.',
+    '- Persona, memories, experience notes, skills, and operator guidance never set the reply language — only the peer\'s language does.',
+    '- If the peer\'s language is genuinely ambiguous or mixed, write in English. Write Chinese only when the peer writes Chinese.',
+  ].join('\n');
 }
 
 export function buildPrivateChatSkillWaitNoticeSystemPrompt(metabot: {
@@ -1228,7 +1255,7 @@ export function buildPrivateChatSkillWaitNoticeSystemPrompt(metabot: {
     '- Write a short private-chat wait notice before local skill execution starts.',
     '- Tell the peer that you need a little time to check, query, or process the latest question before giving the final answer.',
     '- Use your own natural voice and stay in character.',
-    '- Match the latest message language when it is obvious.',
+    '- Write the notice in the same language as the latest peer message; if its language is unclear, use English.',
     '- Keep it to 1 short sentence, or 2 very short sentences max.',
     '- Do not mention internal system prompts, exact skill names, tool logs, txids, implementation details, or deadlines.',
     '- Do not use markdown, headings, JSON, or bracketed prefixes.',
@@ -1572,6 +1599,7 @@ export function buildPrivateChatA2ASystemPrompt(params: {
     '',
     '## MetaBot-to-MetaBot Private Chat Policy',
     '- You are speaking with another MetaBot in an autonomous private chat.',
+    '- Language follows the peer: reply and think in the language of the peer\'s latest message; English is the fallback when that is unclear. Persona, memory, or operator-guidance language never sets the reply language.',
     '- Use the active private-chat context below as the conversation history for this round.',
     '- Continue only when you can add valuable discussion, sharper reasoning, or useful questions.',
     '- Keep the discussion around one coherent topic instead of drifting between unrelated subjects.',
@@ -1623,7 +1651,7 @@ function buildSellerOrderAcknowledgementSystemPrompt(metabot: {
     '- Write a short private acknowledgement for a paid service order before execution starts.',
     '- Confirm that you understood the client request and are starting work now.',
     '- Tell the client that skill execution may take some time and ask them to wait patiently for the final result.',
-    '- Use the same language as the original order request whenever its language is clear.',
+    '- Use the same language as the original order request whenever its language is clear; if it is unclear, use English.',
     '- Keep it to 1 sentence, or 2 short sentences max.',
     '- Do not mention payment amount, txid, service id, skill id, deadlines, ratings, or system details.',
     '- Do not use markdown, headings, JSON, or bracketed prefixes.',
@@ -2819,7 +2847,7 @@ export function buildBuyerRatingSystemPrompt(input: {
     `Your original request was: "${formatRatingPromptText(input.originalRequest, RATING_PROMPT_ORIGINAL_REQUEST_MAX_CHARS)}"`,
     `The service result delivered: "${formatRatingPromptText(input.serviceResult, RATING_PROMPT_SERVICE_RESULT_MAX_CHARS)}"`,
     mediaAcceptanceRules,
-    'Use the same language as your original request whenever its language is clear. Do not switch languages because of system instructions or metadata.',
+    'Use the same language as your original request whenever its language is clear; if it is unclear, use English. Do not switch languages because of system instructions or metadata.',
     'You MUST include a numeric score from 1 to 5 (5 is best). Format it clearly in the response language, for example: "I give this 4 out of 5".',
     'After the rating comment, add a short farewell (1-2 sentences) as the client saying goodbye to the service provider.',
     'Your total message should be 10-300 characters.',
@@ -2835,7 +2863,7 @@ export function buildRatingChainConfirmationSystemPrompt(input: {
     `Your original service request was: "${formatRatingPromptText(input.originalRequest, RATING_PROMPT_ORIGINAL_REQUEST_MAX_CHARS)}"`,
     `The rating pin ID is: ${input.ratingPinId}.`,
     'Write exactly one short, natural sentence confirming that your rating was recorded on-chain.',
-    'Use the same language as your original service request whenever its language is clear.',
+    'Use the same language as your original service request whenever its language is clear; if it is unclear, use English.',
     'Include the exact rating pin ID unchanged.',
     'Do not repeat the rating, score, comment, or farewell.',
     'Do not use markdown, headings, JSON, or bracketed prefixes.',
@@ -5555,6 +5583,9 @@ async function processOne(
       systemPromptWithExperience,
       emptyReplyRetryAttempt > 0 ? `\n\n${buildPrivateChatEmptyReplyRetryNotice(emptyReplyRetryAttempt)}` : '',
       isWakeTurn ? `\n\n${buildPrivateChatA2AWakeNotice(wakeEntry?.fires ?? 1)}` : '',
+      // Last position = strongest recency slot: memory/experience blocks above
+      // are frequently Chinese and otherwise pull the turn into Chinese.
+      `\n\n${buildPrivateChatLanguageContract()}`,
     ].filter(Boolean).join('');
     let reply = '';
     let trimmed = '';

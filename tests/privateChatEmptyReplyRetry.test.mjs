@@ -6,12 +6,14 @@ let startPrivateChatDaemon;
 let stopPrivateChatDaemon;
 let buildPrivateChatEmptyReplyRetryNotice;
 let buildPrivateChatA2ASystemPrompt;
+let buildPrivateChatLanguageContract;
 try {
   ({
     startPrivateChatDaemon,
     stopPrivateChatDaemon,
     buildPrivateChatEmptyReplyRetryNotice,
     buildPrivateChatA2ASystemPrompt,
+    buildPrivateChatLanguageContract,
   } = await import('../dist-electron/main/services/privateChatDaemon.js'));
 } catch {
   ({
@@ -19,6 +21,7 @@ try {
     stopPrivateChatDaemon,
     buildPrivateChatEmptyReplyRetryNotice,
     buildPrivateChatA2ASystemPrompt,
+    buildPrivateChatLanguageContract,
   } = await import('../dist-electron/main/services/privateChatDaemon.js'));
 }
 
@@ -328,6 +331,18 @@ test('daemon retries a reasoning-only turn and delivers the retried reply', asyn
   assert.ok(!seenSystemPrompts[0].includes('Host Retry Notice'), 'first attempt uses the plain prompt');
   assert.ok(seenSystemPrompts[1].includes('Host Retry Notice'), 'retry appends the host protocol notice');
   assert.ok(seenSystemPrompts[1].includes('outside any thinking block'));
+  // The language contract must CLOSE every A2A turn prompt: the memory and
+  // experience blocks above it are frequently Chinese and otherwise win the
+  // recency battle (2026-10-11 reply-language drift).
+  const contractTail = buildPrivateChatLanguageContract().trimEnd();
+  assert.ok(
+    seenSystemPrompts[0].trimEnd().endsWith(contractTail),
+    'first attempt prompt ends with the language contract'
+  );
+  assert.ok(
+    seenSystemPrompts[1].trimEnd().endsWith(contractTail),
+    'retried prompt still ends with the language contract (after the retry notice)'
+  );
   assert.equal(row.is_processed, 1);
   assert.equal(createPinCount, 1);
   const delivered = session.messages.find((message) => message.content === 'Confirmed: all six tallies check out.');
