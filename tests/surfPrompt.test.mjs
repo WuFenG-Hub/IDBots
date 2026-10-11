@@ -150,9 +150,12 @@ test('prompt carries the surf→work handoff step and the claim-commitment rule'
   assert.match(prompt, /UNDERTAKE WORK you cannot finish tonight/);
   assert.match(prompt, /create_scheduled_task/);
   assert.match(prompt, /fully self-contained/);
-  assert.match(prompt, /Hard cap: 2 tasks per surf/);
+  assert.match(prompt, /Hard cap: 4 tasks per surf/);
   assert.match(prompt, /CALL TO ACTION.*COMMITMENT/s);
   assert.match(prompt, /Never claim and walk away/);
+  // P1b: the handoff also covers opportunities found while surfing.
+  assert.match(prompt, /concrete OPPORTUNITIES your persona genuinely wants pursued/);
+  assert.match(prompt, /one task per concrete deliverable/);
   // The report step moved to 8 after the CREATE step was inserted.
   assert.match(prompt, /8\. End your run with EXACTLY one final message/);
 });

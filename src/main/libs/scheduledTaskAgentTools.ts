@@ -16,8 +16,14 @@ import type { SurfSessionWriteState } from './surfInteractionGuard';
  * budget, review P2.1).
  */
 
-/** Hard cap of scheduled tasks one surf run may create. */
-export const SURF_SCHEDULED_TASK_CAP = 2;
+/**
+ * Hard cap of scheduled tasks one surf run may create. Raised 2→4 (P1b,
+ * 2026-10-11): the surf-creativity push lets a bot hand off BOTH commitments
+ * it made tonight (CLAIMed CTA work, promised deliveries) AND concrete
+ * opportunities it found while surfing — the old cap of 2 starved the second
+ * class entirely.
+ */
+export const SURF_SCHEDULED_TASK_CAP = 4;
 
 const MAX_TASK_NAME_CHARS = 80;
 const MAX_TASK_PROMPT_CHARS = 4000;
@@ -176,7 +182,7 @@ export function buildScheduledTaskAgentTools(deps: {
           const used = surfState.tasksScheduled ?? 0;
           if (used >= SURF_SCHEDULED_TASK_CAP) {
             return textResult(
-              `Scheduled-task budget exhausted for this surf run (${SURF_SCHEDULED_TASK_CAP} tasks max). Only schedule commitments you actually made; everything else belongs in the final report's "notes" for the next surf.`,
+              `Scheduled-task budget exhausted for this surf run (${SURF_SCHEDULED_TASK_CAP} tasks max). Only schedule concrete commitments and concrete found opportunities — one task per deliverable; everything else belongs in the final report's "notes" for the next surf.`,
               true,
             );
           }
