@@ -3947,30 +3947,30 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               className={`${getCoworkSessionTitleClassName({
                 sessionType: currentSession.sessionType,
                 serviceOrderStatus: currentSession.serviceOrderSummary?.status,
-              })} max-w-[360px]`}
+              })} min-w-0 max-w-[360px]`}
             >
               {currentSession.title || i18nService.t('coworkNewSession')}
             </h1>
           )}
           {currentSession.executionMode === 'sandbox' && (
-            <span className="inline-flex items-center rounded-full bg-emerald-500/10 text-emerald-500 dark:text-emerald-400 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
+            <span className="shrink-0 whitespace-nowrap inline-flex items-center rounded-full bg-emerald-500/10 text-emerald-500 dark:text-emerald-400 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
               {i18nService.t('coworkSandboxBadge')}
             </span>
           )}
           {currentSession.executionMode === 'local' && !isA2ASession && (
-            <span className="inline-flex items-center rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
+            <span className="shrink-0 whitespace-nowrap inline-flex items-center rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
               {i18nService.t('coworkLocalBadge')}
             </span>
           )}
           {isA2ASession && (
-            <span className="inline-flex items-center rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
+            <span className="shrink-0 whitespace-nowrap inline-flex items-center rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
               {i18nService.t('coworkOnChainBadge')}
             </span>
           )}
           {/* 会话 → 所属长期任务（新一等实体看板）；0 关联时该组件不渲染任何东西 */}
           <LongTermTaskOriginChip sessionId={currentSession.id} />
           {normalizedFocusedOrderTxid && (
-            <span className="non-draggable inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] font-medium text-amber-700 dark:text-amber-300">
+            <span className="non-draggable shrink-0 whitespace-nowrap inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] font-medium text-amber-700 dark:text-amber-300">
               order {normalizedFocusedOrderTxid.slice(0, 8)}
             </span>
           )}
