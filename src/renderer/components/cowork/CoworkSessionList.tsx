@@ -3,20 +3,18 @@ import { useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import type { CoworkSessionSummary } from '../../types/cowork';
 import CoworkSessionItem, { SessionAvatarCircle, formatRelativeTime } from './CoworkSessionItem';
-import BotSelectorPopover from './BotSelectorPopover';
+import MetaBotSelector, {
+  ALL_METABOTS_SELECTOR_ID,
+  type MetaBotForSelector,
+} from './MetaBotSelector';
 import { i18nService } from '../../services/i18n';
 import { useStableCallback } from '../../utils/useStableCallback';
 import { useProgressiveRowReveal } from './sessionListRevealBudget';
 import {
-  ALL_BOTS_OPTION_KEY,
-  buildBotSelectorOptions,
-  defaultBotSelectorKey,
+  buildBotSessionCounts,
   groupSessionsByProject,
   groupSessionsByTimeline,
-  sessionBotKey,
-  shouldShowBotSelector,
   sortSessionsByMode,
-  unreadOutsideBotSelection,
   type SessionSortMode,
   type SessionViewMode,
 } from '../../utils/sessionViewGrouping';
@@ -65,19 +63,17 @@ interface CoworkSessionListProps {
    * the caller decides the next override without re-deriving it.
    */
   onToggleAutonomousFold?: (sessionId: string, currentlyFolded: boolean) => void;
-  /** Online-chats (A2A) Bot selector — that list's ONLY selector. When on, one
-   * avatar-led control renders above the flat list (BotSelectorPopover: avatar +
-   * current value + ▾, no "Bot:" label), listing 全部 and one entry per local bot
-   * in a self-drawn 我的 Bot popover. It opens on the Twin (the
-   * bot you converse with; workers are picked on purpose), and picking an entry
-   * scopes the flat list to that bot while 全部 restores it. The control carries
-   * the unread count of the bots that are NOT selected, so focusing one bot can
-   * never hide work waiting under another. There is no grouping header and no
-   * view mode behind it, and a lone local bot gets no control (a single option
-   * would only repeat the list). The control is demoted to the host's "row above
-   * the list" weight — left aligned, width fitted to its content, background
-   * only on hover — and a hairline separates the control area from the rows.
-   * Every other caller leaves it off, so their output is unchanged. */
+  /** Online-chats (A2A) Bot selector — that list's ONLY selector. When on, the
+   * list reuses the shared MetaBotSelector (the same component the cowork home
+   * and Bot Internet composer use) above the flat list, with `allowAll` adding
+   * the leading 全部 Bot entry. The bots come from the live metabot list
+   * (enabled bots, Twin first), so a deleted bot never reappears; it opens on
+   * the Twin (the bot you converse with; workers are picked on purpose), and
+   * picking an entry scopes the flat list to that bot while 全部 Bot restores
+   * it. Each option row carries the bot's conversation count on its right.
+   * There is no grouping header and no view mode behind it, and a lone local
+   * bot gets no control (a single option would only repeat the list). Every
+   * other caller leaves it off, so their output is unchanged. */
   botSelector?: boolean;
   /**
    * i18n generation marker. The rows and the group headers read their copy from
@@ -253,71 +249,69 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
       return next;
     });
   };
-  const [pickedBotKey, setPickedBotKey] = useState<string | null>(null);
-  // undefined = the Twin lookup has not settled yet, null = no Twin on this
-  // install. The control waits for the answer: while it is pending the row is
-  // held open by a value-less placeholder (same boxes as the trigger), so the
-  // control never paints 全部 and then jumps to the Twin a frame later — the
-  // default-Twin promise is kept on the very first painted frame.
-  const [twinMetabotId, setTwinMetabotId] = useState<number | null | undefined>(undefined);
-  const twinSettled = twinMetabotId !== undefined;
+  const [pickedBotId, setPickedBotId] = useState<number | null>(null);
+  // null = the live bot list has not settled yet. The control waits for it:
+  // while it is pending the row is held open by a value-less placeholder (same
+  // boxes as the trigger), so the control never paints a bot and then jumps to
+  // the Twin default a frame later — the default-Twin promise is kept on the
+  // very first painted frame.
+  const [selectorBots, setSelectorBots] = useState<MetaBotForSelector[] | null>(null);
   // The caller's language, with a standalone fallback (see the prop's docs).
   const language = languageProp ?? i18nService.getLanguage();
 
-  // Which local bot is the Twin comes from the same read-only IPC the rest of
-  // the renderer uses. Best effort: any failure leaves the selector on 全部.
+  // The selector's bots come from the same read-only IPC the composers use
+  // (enabled bots only, Twin first) — NOT from the sessions, so a deleted or
+  // disabled bot can never reappear as a filter option. Best effort: any
+  // failure leaves the selector off (empty list).
   useEffect(() => {
     if (!botSelector) return;
     let cancelled = false;
     window.electron?.idbots
       ?.getMetaBots?.()
       .then((result) => {
-        if (cancelled) return;
-        const twin = result?.success
-          ? result.list?.find((bot) => bot.metabot_type === 'twin')
-          : undefined;
-        setTwinMetabotId(twin?.id ?? null);
+        if (!cancelled) setSelectorBots(result?.success && result.list ? result.list : []);
       })
       .catch(() => {
-        if (!cancelled) setTwinMetabotId(null);
+        if (!cancelled) setSelectorBots([]);
       });
     return () => {
       cancelled = true;
     };
   }, [botSelector]);
 
-  // Selector options. Built from the sessions the list already has plus the
-  // existing redux unread ids — no new store, no new data source. They exist
-  // only for the online list; for every other caller the array stays empty and
-  // nothing below changes.
-  const botSelectorOptions = useMemo(
-    () => (botSelector ? buildBotSelectorOptions(sessions, unreadSessionIds) : []),
-    [botSelector, sessions, unreadSessionIds],
+  // Per-bot conversation counts for the selector's option rows (each live bot
+  // pre-seeded at 0, 'all' carrying the total). They exist only for the online
+  // list; every other caller computes nothing.
+  const sessionCounts = useMemo(
+    () => (botSelector ? buildBotSessionCounts(sessions, (selectorBots ?? []).map((bot) => bot.id)) : undefined),
+    [botSelector, sessions, selectorBots],
   );
   // A lone local bot needs no selector (the same "zero noise" rule as the
   // single-group degradation), so the control stays off below two local bots.
-  const showBotSelector = shouldShowBotSelector(botSelectorOptions);
-  // The filter only ever engages behind the control: with no control the list
-  // is the plain flat list, so a single-bot install (and every other caller)
-  // keeps rendering exactly the rows it rendered before.
-  const defaultBotKey = showBotSelector
-    ? defaultBotSelectorKey(botSelectorOptions, twinMetabotId)
-    : ALL_BOTS_OPTION_KEY;
-  // An explicit pick wins while its option still exists; otherwise the list
-  // falls back to the default, so the filtered state cannot get stuck.
-  const activeBotKey =
-    showBotSelector && pickedBotKey && botSelectorOptions.some((option) => option.key === pickedBotKey)
-      ? pickedBotKey
-      : defaultBotKey;
-  // Unread under the bots that are NOT selected: the one signal the control
-  // itself has to carry (see unreadOutsideBotSelection).
-  const unreadElsewhere = unreadOutsideBotSelection(botSelectorOptions, activeBotKey);
+  const showBotSelector = (selectorBots?.length ?? 0) > 1;
+  // The selector opens on the Twin — the bot you converse with — falling back
+  // to 全部 Bot when there is no Twin or it has no online sessions yet, so the
+  // list never opens scoped to an empty selection.
+  const twinMetabotId = selectorBots?.find((bot) => bot.metabot_type === 'twin')?.id ?? null;
+  const defaultBotId =
+    twinMetabotId != null && (sessionCounts?.[twinMetabotId] ?? 0) > 0
+      ? twinMetabotId
+      : ALL_METABOTS_SELECTOR_ID;
+  // An explicit pick wins while its bot still exists; otherwise the list falls
+  // back to the default, so the filtered state cannot get stuck (e.g. on a bot
+  // deleted after the pick).
+  const activeBotId =
+    showBotSelector
+      && pickedBotId != null
+      && (pickedBotId === ALL_METABOTS_SELECTOR_ID || selectorBots?.some((bot) => bot.id === pickedBotId))
+      ? pickedBotId
+      : defaultBotId;
   const visibleSessions = useMemo(
     () =>
-      activeBotKey === ALL_BOTS_OPTION_KEY
+      activeBotId === ALL_METABOTS_SELECTOR_ID
         ? sessions
-        : sessions.filter((session) => sessionBotKey(session) === activeBotKey),
-    [sessions, activeBotKey],
+        : sessions.filter((session) => session.metabotId === activeBotId),
+    [sessions, activeBotId],
   );
 
   const sortedSessions = useMemo(() => {
@@ -490,38 +484,44 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
       </section>
     );
 
-  // The online list's only selector: ONE self-drawn control holding 全部 and
-  // every local bot, so the whole picker is a single line at any bot count. The
-  // control carries the current bot's avatar instead of a "Bot:" label, its
-  // popover lists each bot with avatar / name / session count / unread dot, and
-  // the badge beside it carries the unread of the bots that are NOT selected — a
-  // closed picker must never be the reason pending work is invisible.
+  // The online list's only selector: the SAME MetaBotSelector the composers
+  // use (cowork home, Bot Internet panel), so the two surfaces can never drift
+  // apart again. allowAll adds the leading 全部 Bot entry, the option rows
+  // carry each bot's conversation count on their right, and the dropdown
+  // floats fixed so the sidebar's scroll container cannot clip it.
   const botSelectorRow = showBotSelector ? (
-    twinSettled ? (
-      <BotSelectorPopover
-        options={botSelectorOptions}
-        activeKey={activeBotKey}
-        onPick={setPickedBotKey}
-        unreadElsewhere={unreadElsewhere}
-      />
+    selectorBots ? (
+      <div data-testid="bot-selector-row" className="px-2.5 pb-1.5 pt-0.5">
+        <MetaBotSelector
+          metabots={selectorBots}
+          selectedId={activeBotId}
+          onSelect={(id) => setPickedBotId(id ?? ALL_METABOTS_SELECTOR_ID)}
+          label={i18nService.t('coworkMetaBotLabel')}
+          placeholder={i18nService.t('coworkMetaBotPlaceholder')}
+          compact
+          allowAll
+          sessionCounts={sessionCounts}
+          useFixedDropdown
+        />
+      </div>
     ) : (
-      /* Twin pending: hold the control's row open with an inert placeholder
-       * instead of painting it as 全部. The boxes (row padding, 16px avatar,
-       * 24px label slot, 12px chevron) mirror the real trigger, so settling
-       * swaps the content in place — nothing below the row moves, and no value
-       * the Twin lookup has not confirmed is ever shown. aria-hidden: a
+      /* Bot list pending: hold the control's row open with an inert
+       * placeholder instead of painting a value. The boxes (row padding, 20px
+       * avatar, label slot, 12px chevron) mirror the real compact trigger, so
+       * settling swaps the content in place — nothing below the row moves, and
+       * no value the lookup has not confirmed is ever shown. aria-hidden: a
        * loading shell must not enter the accessibility tree as a fake value;
        * the real control arrives with its own name one tick later. */
       <div
         data-testid="bot-selector-row"
         data-pending="true"
         aria-hidden="true"
-        className="flex items-center gap-1.5 px-2.5 pb-1 pt-0.5"
+        className="px-2.5 pb-1.5 pt-0.5"
       >
-        <span className="flex w-fit items-center gap-1.5 rounded-md py-0.5 pl-0 pr-1.5">
-          <span className="h-4 w-4 flex-shrink-0 animate-pulse rounded dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover" />
-          <span className="h-3 w-6 flex-shrink-0 animate-pulse rounded-sm dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover" />
-          <span className="h-3 w-3 flex-shrink-0 animate-pulse rounded-sm dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover" />
+        <span className="flex w-full items-center gap-1.5 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-2 py-1 text-xs">
+          <span className="h-5 w-5 flex-shrink-0 animate-pulse rounded-md dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover" />
+          <span className="h-3 w-16 flex-shrink-0 animate-pulse rounded-sm dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover" />
+          <span className="ml-auto h-3 w-3 flex-shrink-0 animate-pulse rounded-sm dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover" />
         </span>
       </div>
     )
@@ -625,9 +625,9 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
 
   // Flat list — what the online-chats (A2A) tab renders: no grouping header and
   // no view mode. When the selector is shown it sits directly above the list and
-  // is its sole selector: 全部 renders every session, an entry narrows the list
-  // to that bot. A lone local bot gets no control at all (see
-  // shouldShowBotSelector), and the list is then simply flat.
+  // is its sole selector: 全部 Bot renders every session, an entry narrows the
+  // list to that bot. A lone local bot gets no control at all (the live-list
+  // length rule in showBotSelector), and the list is then simply flat.
   if (botSelectorRow) {
     return (
       <div ref={rootRef}>

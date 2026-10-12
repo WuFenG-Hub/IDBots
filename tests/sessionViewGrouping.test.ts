@@ -4,14 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  ALL_BOTS_OPTION_KEY,
-  buildBotSelectorOptions,
-  defaultBotSelectorKey,
+  buildBotSessionCounts,
   formatMonthLabel,
   groupSessionsByProject,
   groupSessionsByTimeline,
-  shouldShowBotSelector,
-  unreadOutsideBotSelection,
 } from '../src/renderer/utils/sessionViewGrouping';
 import type { CoworkSessionSummary } from '../src/renderer/types/cowork';
 
@@ -223,7 +219,7 @@ test('project grouping keeps pinned sessions out of the groups', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Round 4: the online-chats card strip became ONE "Bot: [...]" selector.
+// Round 4: the online-chats Bot selector reuses the shared MetaBotSelector.
 // ---------------------------------------------------------------------------
 
 const selectorSessions = (): CoworkSessionSummary[] => [
@@ -233,61 +229,13 @@ const selectorSessions = (): CoworkSessionSummary[] => [
   mkSession({ id: 'legacy-d', createdAt: 500, updatedAt: 500 }),
 ];
 
-test('selector options list 全部 first, then one entry per local bot, newest-first', () => {
-  const options = buildBotSelectorOptions(selectorSessions(), ['twin-b', 'worker-c']);
-  assert.deepEqual(
-    options.map((option) => option.key),
-    [ALL_BOTS_OPTION_KEY, 'bot:unknown', 'bot:2', 'bot:1'],
-  );
-  assert.equal(options[0].bot, undefined, '全部 carries no bot identity');
-  assert.deepEqual(
-    options.map((option) => option.sessionCount),
-    [4, 1, 1, 2],
-  );
-  assert.deepEqual(
-    options.map((option) => option.unreadCount),
-    [2, 0, 1, 1],
-  );
-  const byKey = new Map(options.map((option) => [option.key, option]));
-  assert.equal(byKey.get('bot:1')?.bot?.name, '小峰');
-  assert.equal(byKey.get('bot:2')?.bot?.name, '小红');
-  assert.equal(byKey.get('bot:unknown')?.bot, undefined, 'legacy rows still get an option');
-});
-
-test('the selector appears from two local bots up, and never from legacy rows alone', () => {
-  const one = buildBotSelectorOptions(
-    [mkSession({ id: 'a', metabotId: 1 }), mkSession({ id: 'b', metabotId: 1 })],
-    [],
-  );
-  assert.equal(shouldShowBotSelector(one), false, 'single-bot install shows no control');
-  const two = buildBotSelectorOptions(
-    [mkSession({ id: 'a', metabotId: 1 }), mkSession({ id: 'b', metabotId: 2 })],
-    [],
-  );
-  assert.equal(shouldShowBotSelector(two), true);
-  const legacyOnly = buildBotSelectorOptions([mkSession({ id: 'a' }), mkSession({ id: 'b' })], []);
-  assert.equal(shouldShowBotSelector(legacyOnly), false, 'no local bot -> no control');
-});
-
-test('the selector opens on the Twin, and on 全部 when the Twin has no A2A sessions', () => {
-  const options = buildBotSelectorOptions(selectorSessions(), []);
-  assert.equal(defaultBotSelectorKey(options, 1), 'bot:1');
-  assert.equal(defaultBotSelectorKey(options, 2), 'bot:2');
-  assert.equal(defaultBotSelectorKey(options, 99), ALL_BOTS_OPTION_KEY, 'unknown twin id falls back');
-  assert.equal(defaultBotSelectorKey(options, null), ALL_BOTS_OPTION_KEY);
-  assert.equal(defaultBotSelectorKey(options, undefined), ALL_BOTS_OPTION_KEY);
-});
-
-test('the control carries exactly the unread of the bots the selection hides', () => {
-  const options = buildBotSelectorOptions(selectorSessions(), ['twin-b', 'worker-c']);
-  assert.equal(unreadOutsideBotSelection(options, ALL_BOTS_OPTION_KEY), 0, '全部 hides nothing');
-  assert.equal(unreadOutsideBotSelection(options, 'bot:1'), 1, "worker's unread is the signal");
-  assert.equal(unreadOutsideBotSelection(options, 'bot:2'), 1, "twin's unread is the signal");
-  assert.equal(
-    unreadOutsideBotSelection(options, 'bot:unknown'),
-    2,
-    'the legacy bucket hides both bots',
-  );
+test('bot session counts seed every live bot and total every row under 全部 Bot', () => {
+  const counts = buildBotSessionCounts(selectorSessions(), [1, 2, 7]);
+  assert.equal(counts.all, 4, 'All Bots carries every row, legacy ones included');
+  assert.equal(counts[1], 2);
+  assert.equal(counts[2], 1);
+  assert.equal(counts[7], 0, 'a live bot with no sessions still shows a 0');
+  assert.equal(counts[3], undefined, 'a bot that is not in the live list gets no entry');
 });
 
 test('the card strip is gone: no dead symbol survives anywhere in src', () => {
@@ -306,6 +254,22 @@ test('the card strip is gone: no dead symbol survives anywhere in src', () => {
     // The "Bot:" caption was dropped when the native <select> became the
     // avatar-led popover; its i18n key must not come back.
     'sessionBotSelectorCaption',
+    // The self-drawn popover was replaced by the shared MetaBotSelector, so
+    // its component and its session-derived option builder are gone for good.
+    'BotSelectorPopover',
+    'buildBotSelectorOptions',
+    'ALL_BOTS_OPTION_KEY',
+    'sessionBotKey',
+    'shouldShowBotSelector',
+    'defaultBotSelectorKey',
+    'unreadOutsideBotSelection',
+    'BotSelectorOption',
+    // Dead i18n keys (colon-terminated so the live sessionBotFilterAllBots
+    // key does not match the dead sessionBotFilterAll one).
+    'sessionBotFilterAll:',
+    'sessionBotFilterLabel:',
+    'sessionBotFilterUnread:',
+    'sessionBotSelectorTitle:',
   ];
   const hits: string[] = [];
   for (const file of listSourceFiles(SRC_DIR)) {
@@ -317,31 +281,24 @@ test('the card strip is gone: no dead symbol survives anywhere in src', () => {
   assert.deepEqual(hits, []);
 });
 
-test('the online list renders the self-drawn popover as its only selector', () => {
+test('the online list reuses the shared MetaBotSelector as its only selector', () => {
   const list = readSource('renderer/components/cowork/CoworkSessionList.tsx');
-  const popover = readSource('renderer/components/cowork/BotSelectorPopover.tsx');
-  // The control moved out of the list into its own component when the native
-  // <select> was replaced, so the trigger's testid is asserted on the component
-  // that actually renders it — and the native <select> must be gone for good.
-  assert.equal(/<select\b/.test(list), false, 'the native select it replaced is gone');
-  assert.ok(list.includes('<BotSelectorPopover'), 'the control component is rendered by the list');
-  assert.ok(popover.includes('data-testid="bot-selector"'), 'the trigger carries the control testid');
-  assert.ok(popover.includes('role="listbox"'), 'the popover is the listbox the trigger points at');
+  const selector = readSource('renderer/components/cowork/MetaBotSelector.tsx');
+  // The online-chats tab renders the SAME component the composers use, with
+  // the All Bots entry, the per-bot conversation counts, and the fixed
+  // dropdown mode the sidebar's scroll container requires.
+  assert.ok(list.includes('<MetaBotSelector'), 'the shared selector is rendered by the list');
+  assert.ok(list.includes('allowAll'), 'the list turns on the All Bots entry');
+  assert.ok(list.includes('sessionCounts='), 'the list feeds the per-bot conversation counts');
+  assert.ok(list.includes('useFixedDropdown'), 'the dropdown escapes the sidebar scroll container');
   assert.ok(list.includes('{botSelectorRow}'), 'the control sits above the flat list');
-  assert.equal(
-    list.includes("t('sessionBotSelectorCaption')"),
-    false,
-    'the dead "Bot:" caption is not rendered by the control row',
-  );
-  assert.ok(list.includes('data-testid="bot-selector-unread"') || popover.includes('data-testid="bot-selector-unread"'),
-    'the aggregate badge is present');
-  assert.ok(
-    list.includes('defaultBotSelectorKey(botSelectorOptions, twinMetabotId)'),
-    'the default is the Twin, resolved from getMetaBots',
-  );
-  // The old card bar rendered one BUTTON per bot inside a wrapping row; the
-  // selector must not contain a per-bot button any more.
-  assert.equal(/\{botSelectorOptions\.map[\s\S]*?<button/.test(list), false);
+  assert.equal(/<select\b/.test(list), false, 'no native select came back');
+  // The bots come from the live metabot list (enabled bots, Twin first), so a
+  // deleted bot can never linger as an option, and the default is the Twin.
+  assert.ok(list.includes('getMetaBots'), 'the bot options come from the live metabot list');
+  assert.ok(list.includes("metabot_type === 'twin'"), 'the default selection is the Twin');
+  assert.ok(selector.includes('allowAll'), 'the shared component owns the All Bots entry');
+  assert.ok(selector.includes('ALL_METABOTS_SELECTOR_ID'), 'the All entry reports its sentinel id');
   // A2A stays flat: the selector branch renders rows straight, with no group
   // header and no collapse control.
   const flatBranch = list.slice(list.indexOf('if (botSelectorRow)'));
