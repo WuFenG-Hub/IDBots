@@ -34,6 +34,8 @@
  *   --model <id>       default jev-latest
  *   --threshold <f>    noul selection threshold, default 0.5
  *   --max-memories <n> cap the candidate pool, default 100
+ *   --dry-run          load data and print the pool/queries WITHOUT any API call
+ *                      (preview exactly what would leave this machine first)
  *   --verbose          dump raw API responses
  *
  * Privacy: whatever dataset you point this at IS sent to the configured
@@ -290,12 +292,25 @@ async function runEval(opts) {
     const loaded = JSON.parse(await (await import('node:fs/promises')).readFile(opts.queries, 'utf8'));
     queries = loaded.map((item) => ({ q: item.q, relevant: item.relevant ?? [] }));
   }
+  const memoriesById = new Map(memories.map((m) => [m.id, m.text]));
+  const TOP_K = 5;
+
+  if (opts.dryRun) {
+    console.log(`dry-run: ${memories.length} memories, ${queries.length} queries — no API calls made.\n`);
+    for (const m of memories) {
+      console.log(`  ${m.id.padEnd(40)} ${m.text.slice(0, 60)}`);
+    }
+    console.log('');
+    for (const { q, relevant } of queries) {
+      console.log(`  Q: ${q}${relevant?.length ? `   (relevant: ${relevant.join(', ')})` : ''}`);
+    }
+    return;
+  }
+
   if (queries.length === 0) {
     console.error('no queries to run (provide --queries with --db)');
     exit(2);
   }
-  const memoriesById = new Map(memories.map((m) => [m.id, m.text]));
-  const TOP_K = 5;
 
   console.log(`\nmodel=${model}  memories=${memories.length}  queries=${queries.length}  ` +
     `threshold=${threshold}  topK=${TOP_K}\n`);
@@ -357,6 +372,7 @@ function parseArgs(args) {
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === '--verbose') opts.verbose = true;
+    else if (arg === '--dry-run') opts.dryRun = true;
     else if (arg === '--key') opts.apiKey = args[++i];
     else if (arg === '--base-url') opts.baseUrl = args[++i];
     else if (arg === '--model') opts.model = args[++i];
@@ -376,7 +392,7 @@ const apiKey = opts.apiKey ?? env.TYPESAFE_API_KEY;
 const baseUrl = (opts.baseUrl ?? env.TYPESAFE_BASE_URL ?? 'https://api.typesafe.ai').replace(/\/+$/, '');
 const model = opts.model ?? 'jev-latest';
 
-if (!apiKey) {
+if (!apiKey && !opts.dryRun) {
   console.error('missing API key: pass --key or set TYPESAFE_API_KEY');
   exit(2);
 }
