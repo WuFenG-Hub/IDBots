@@ -4123,6 +4123,10 @@ const startStartupMessageTier = (): void => {
         offset: 0,
         touchLastUsed: input.touchLastUsed === true,
       }),
+    // The daemon touches only the memory rows that actually rendered into the
+    // prompt (pooling alone is not a usage event).
+    touchUserMemoriesLastUsed: (metabotId, memoryIds) =>
+      getCoworkStore().getMemoryBackend().touchUserMemoriesLastUsed(metabotId, memoryIds),
     getEffectiveMemoryPolicy: (metabotId) => {
       const policy = getCoworkStore().getMemoryBackend().getEffectiveMemoryPolicyForMetabot(metabotId);
       return {

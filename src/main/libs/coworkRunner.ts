@@ -100,7 +100,7 @@ import {
 import { z } from 'zod';
 import { ensureSandboxReady, getSandboxRuntimeInfoIfReady, type SandboxRuntimeInfo } from './coworkSandboxRuntime';
 import { isPathWithin } from './runtimePaths';
-import { buildScopedMemoryPromptBlocks } from '../memory/memoryPromptBlocks';
+import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import {
   applyVolatileDedup,
@@ -1685,6 +1685,13 @@ export interface CoworkKnowledgeStore {
     status: 'active' | 'superseded' | 'archived';
     updatedAt: number;
   }>;
+  /**
+   * Bump last_used_at for exactly the given knowledge entries. Recall paths
+   * that post-filter the pool (e.g. the category filter in knowledge_recall)
+   * must pass touchLastUsed: false to listKnowledge and touch only the rows
+   * that actually render. Optional on this DI seam.
+   */
+  touchKnowledgeLastUsed?(metabotId: number, knowledgeIds: string[]): void;
   upsertKnowledge(input: {
     metabotId: number;
     topic: string;
@@ -3351,7 +3358,11 @@ export class CoworkRunner extends EventEmitter {
     // The candidate pool is deliberately wider than the injection quota: the
     // policy maxItems still governs how many entries finally render, while the
     // keyword scorer and the guaranteed-importance tier need a deep enough
-    // pool to pick from (200 = the store's own list limit cap).
+    // pool to pick from (200 = the store's own list limit cap). Pooling alone
+    // is NOT a usage event — the pool stays untouched (touchLastUsed: false)
+    // and only the entries that survive ranking + the char budget and actually
+    // render into the prompt get last_used_at bumped (below), so the pool
+    // ordering and the hygiene decay clock measure real injection.
     const candidatePoolLimit = Math.min(200, Math.max(memoryPolicy.memoryUserMemoriesMaxItems, 120));
     const ownerEntries = resolvedScopes.ownerReadPolicy === 'none'
       ? []
@@ -3362,10 +3373,7 @@ export class CoworkRunner extends EventEmitter {
           includeDeleted: false,
           limit: candidatePoolLimit,
           offset: 0,
-          // Injection IS the usage event for the decay clock: rows surfaced
-          // here keep last_used_at fresh so hygiene never archives memories
-          // the bot still relies on daily.
-          touchLastUsed: true,
+          touchLastUsed: false,
         });
     const contactEntries = resolvedScopes.writeScope.kind === 'contact'
       ? this.getMemoryBackend().listUserMemories({
@@ -3375,7 +3383,7 @@ export class CoworkRunner extends EventEmitter {
           includeDeleted: false,
           limit: candidatePoolLimit,
           offset: 0,
-          touchLastUsed: true,
+          touchLastUsed: false,
         })
       : [];
     const conversationEntries = resolvedScopes.writeScope.kind === 'conversation'
@@ -3386,10 +3394,10 @@ export class CoworkRunner extends EventEmitter {
           includeDeleted: false,
           limit: candidatePoolLimit,
           offset: 0,
-          touchLastUsed: true,
+          touchLastUsed: false,
         })
       : [];
-    const promptBlocksXml = buildScopedMemoryPromptBlocks({
+    const { xml: promptBlocksXml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
       channel: sourceContext.sourceChannel,
       currentUserText,
       ownerEntries,
@@ -3400,6 +3408,13 @@ export class CoworkRunner extends EventEmitter {
       maxOwnerOperationalPreferences: Math.min(3, memoryPolicy.memoryUserMemoriesMaxItems),
       maxTotalChars: memoryPolicy.memoryPromptMaxChars,
     });
+    // Injection IS the usage event for the decay clock: only rows that
+    // rendered into this turn's prompt keep last_used_at fresh, so hygiene
+    // never archives memories the bot still relies on daily — and rows that
+    // merely sat in the candidate pool age normally.
+    if (injectedIds.length > 0) {
+      this.getMemoryBackend().touchUserMemoriesLastUsed(metabotId, injectedIds);
+    }
 
     coworkLog('INFO', 'memory:promptBlocks', 'Built scoped memory prompt blocks', {
       sessionId,
@@ -3410,6 +3425,7 @@ export class CoworkRunner extends EventEmitter {
       ownerEntries: ownerEntries.length,
       contactEntries: contactEntries.length,
       conversationEntries: conversationEntries.length,
+      injectedEntries: injectedIds.length,
       includedOwnerBlock: promptBlocksXml.includes('<ownerMemories>'),
       includedContactBlock: promptBlocksXml.includes('<contactMemories>'),
       includedConversationBlock: promptBlocksXml.includes('<conversationMemories>'),
@@ -3735,11 +3751,18 @@ export class CoworkRunner extends EventEmitter {
         query: typeof args.query === 'string' ? args.query.trim() || undefined : undefined,
         limit,
         includeArchived: args.include_archived === true,
-        touchLastUsed: true,
+        // The category filter below narrows the pool after the query returns,
+        // so pool-wide touching would credit rows the model never sees.
+        touchLastUsed: false,
       });
       const filtered = typeof args.category === 'string' && args.category.trim()
         ? results.filter((entry) => (entry.category ?? '') === args.category!.trim())
         : results;
+      // Only the rows that render into the tool result count as usage.
+      const injectedIds = filtered.map((entry) => entry.id).filter(Boolean);
+      if (injectedIds.length > 0) {
+        this.knowledgeStore.touchKnowledgeLastUsed?.(metabotId, injectedIds);
+      }
       const entries: KnowledgePromptEntry[] = filtered.map((entry) => ({
         topic: entry.topic,
         summary: entry.summary,
