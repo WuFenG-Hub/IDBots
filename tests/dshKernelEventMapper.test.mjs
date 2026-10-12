@@ -1220,3 +1220,78 @@ test('the assistant-mode getter is evaluated per decision (a mid-turn flip degra
   assert.equal(finalize.metadata.isThinking, true, 'professional mode keeps the fold')
   assert.equal(finalize.metadata.narration, undefined)
 })
+
+test('assistant mode: accumulated narration bubbles are never rewritten by later rounds or the final answer', () => {
+  // Regression for the acceptance report "earlier narration bubbles disappear
+  // when the final report streams in": every round's commentary must mint and
+  // keep its own message, and no later finalize may rewrite an earlier
+  // narration's content. Simulates the kernel's slot bookkeeping so each
+  // message action gets a distinct id, exactly like DshKernel.applyAction.
+  const mapper = new DshEventMapper({ assistantMode: () => true })
+  const messages = new Map()
+  const slotIds = {}
+  let nextId = 1
+  const rewrites = []
+  const apply = (action) => {
+    if (action.kind === 'message') {
+      const id = `m${nextId++}`
+      messages.set(id, { content: action.message.content, metadata: { ...(action.message.metadata ?? {}) } })
+      if (action.slot) slotIds[action.slot] = id
+      return
+    }
+    if (action.kind === 'messageUpdate' || action.kind === 'messageFinalize') {
+      const id = slotIds[action.slot]
+      if (!id) return
+      const msg = messages.get(id)
+      if (msg && action.kind === 'messageFinalize' && msg.content && action.content !== msg.content) {
+        rewrites.push({ id, before: msg.content, after: action.content })
+      }
+      if (msg) {
+        msg.content = action.content
+        if (action.metadata) msg.metadata = { ...msg.metadata, ...action.metadata }
+      }
+    }
+  }
+  const consume = (envelope) => { for (const action of mapper.consume(envelope)) apply(action) }
+
+  // Two commentary rounds with live-streamed text (the effort-off shape:
+  // no reasoning block, text streams, the tool-call block-start marks it).
+  for (const [step, text] of [[1, '好的，我这就动手。'], [2, '初步检索到三笔记录。']]) {
+    consume({ type: 'assistant/chunk', data: { turn: 1, step, chunk: { type: 'text-delta', index: 0, text } } })
+    consume({ type: 'assistant/chunk', data: { turn: 1, step, chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } } })
+    consume({ type: 'tool/call', data: { callId: `c${step}`, name: 'bash', arguments: '{}' } })
+    consume({ type: 'tool/result', data: { message: { toolCallId: `c${step}`, isError: false, content: [{ type: 'text', text: 'ok' }] } } })
+    consume({
+      type: 'assistant/message',
+      data: {
+        turn: 1, step,
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text },
+            { type: 'tool-call', id: `c${step}`, name: 'bash', arguments: '{}' },
+          ],
+        },
+      },
+    })
+  }
+
+  // The final answer streams and settles.
+  consume({ type: 'assistant/chunk', data: { turn: 1, step: 3, chunk: { type: 'text-delta', index: 0, text: '## 汇总' } } })
+  consume({
+    type: 'assistant/message',
+    data: { turn: 1, step: 3, message: { role: 'assistant', content: [{ type: 'text', text: '## 汇总' }] } },
+  })
+  consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
+
+  const narrations = [...messages.values()].filter((m) => m.metadata.narration === true)
+  assert.deepEqual(
+    narrations.map((m) => m.content),
+    ['好的，我这就动手。', '初步检索到三笔记录。'],
+    'each round keeps its own narration message',
+  )
+  assert.deepEqual(rewrites, [], 'no finalize may rewrite an already-settled narration')
+  const reply = [...messages.values()].find((m) => m.content === '## 汇总')
+  assert.ok(reply, 'the final answer is its own message')
+  assert.equal(reply.metadata.narration, undefined)
+})
