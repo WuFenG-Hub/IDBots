@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { CoworkStore } from '../coworkStore';
-import type { DreamDayActivity, DreamStore } from '../dreamStore';
+import type { DreamDayActivity, DreamStore, MetabotPrediction, PromptLayerSnapshot } from '../dreamStore';
 import type { MetaIDExperienceStore } from '../metaidExperienceStore';
 import type { MetaIDImpressionStore } from '../metaidImpressionStore';
 import type { MetaIDKnowledgeStore } from '../metaidKnowledgeStore';
@@ -59,6 +59,18 @@ import {
   pickCounterfactualLesson,
 } from '../libs/counterfactualReplayPrompt';
 import { extractImplicitSignals } from '../libs/implicitSignals';
+import {
+  PREDICTION_CALIBRATION_WINDOW_DAYS,
+  judgeNumericExpectation,
+  renderPredictionCalibrationDigest,
+} from '../libs/predictionLedger';
+import {
+  ROLLBACK_BASELINE_DAYS,
+  ROLLBACK_NEGATIVE_FLOOR,
+  buildRollbackNotice,
+  countNegativeSignalsForDay,
+  evaluatePromptLayerRollback,
+} from '../libs/promptLayerRollback';
 import {
   WEEKLY_DREAM_MIN_DAYS,
   buildWeeklyDreamPrompt,
@@ -169,6 +181,51 @@ const DREAM_FAST_PATH_MAX_TOKENS = 96_000;
 const DREAM_CHUNK_MAX_TOKENS = 64_000;
 const DREAM_STATUS_CHANNEL = 'metabot:dreamStatusChanged';
 
+/**
+ * RSI P0 retention-gate result for one run (telemetry + prompt notice).
+ * `rolledBackDate` is the dream date whose prompt layer was rolled back.
+ */
+interface RetentionGateResult {
+  evaluated: boolean;
+  rolledBack: boolean;
+  rolledBackDate: string | null;
+  negativeSignals: number;
+  baselineMedian: number | null;
+  baselineDays: number;
+  reason: string | null;
+  notice: string | null;
+}
+
+const EMPTY_RETENTION_GATE_RESULT: RetentionGateResult = {
+  evaluated: false,
+  rolledBack: false,
+  rolledBackDate: null,
+  negativeSignals: 0,
+  baselineMedian: null,
+  baselineDays: 0,
+  reason: null,
+  notice: null,
+};
+
+/** RSI P0 prediction reconciliation counters for one run. */
+interface PredictionReconciliationResult {
+  checked: number;
+  resolved: number;
+  hit: number;
+  miss: number;
+  partial: number;
+  expired: number;
+}
+
+const EMPTY_PREDICTION_RECONCILIATION: PredictionReconciliationResult = {
+  checked: 0,
+  resolved: 0,
+  hit: 0,
+  miss: 0,
+  partial: 0,
+  expired: 0,
+};
+
 const EVALUATION_LABELS: Record<string, string> = {
   warming: '升温',
   stable: '持平',
@@ -272,6 +329,27 @@ export interface DreamServiceDeps {
    * dream-run failure.
    */
   chainEvidence?: ChainEvidenceVerifierDeps;
+  /**
+   * RSI P0 prediction reconciliation: reception counts (likes/comments) for
+   * the bot's own pins, batched per run. Wire it to the same R3 interactions
+   * aggregation the surf reception column uses. Absent/throwing → reception
+   * predictions stay pending (and expire past their deadline).
+   */
+  fetchPredictionReception?: (input: {
+    metabotId: number;
+    pinIds: string[];
+    /** Unix seconds lower bound for the interactions scan. */
+    sinceTs: number;
+  }) => Promise<Array<{ pinId: string; likes: number; comments: number }> | null>;
+  /**
+   * RSI P0 prediction reconciliation: review outcome of the bot's own MetaTask
+   * submission on subjectRef "rootPinId:nodeId" from the local projection.
+   * Absent/null → not observable (stays pending).
+   */
+  getMetataskSubmissionOutcome?: (input: {
+    metabotId: number;
+    subjectRef: string;
+  }) => { outcome: 'pass' | 'fail' | 'pending'; detail?: string } | null;
   tickIntervalMs?: number;
   llmTimeoutMs?: number;
   /**
@@ -862,6 +940,9 @@ export class DreamService {
     /** Practice runs executed during the dreamed day (design §3.4), rendered
      * as the prompt's practice-outcomes section. */
     practiceOutcomes?: DreamPracticeOutcome[],
+    /** RSI P0 prompt inputs: prediction calibration digest + retention-gate
+     * rollback notice (both rendered as their own sections when non-empty). */
+    dreamExtras?: { predictionCalibration?: string | null; rollbackNotice?: string | null },
   ): Promise<{
     prompt: { system: string; user: string };
     output: DreamOutput;
@@ -885,6 +966,8 @@ export class DreamService {
         surfReport,
         weeklyReview,
         practiceOutcomes,
+        predictionCalibration: dreamExtras?.predictionCalibration,
+        rollbackNotice: dreamExtras?.rollbackNotice,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -910,6 +993,8 @@ export class DreamService {
         surfReport,
         weeklyReview,
         practiceOutcomes,
+        predictionCalibration: dreamExtras?.predictionCalibration,
+        rollbackNotice: dreamExtras?.rollbackNotice,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -953,6 +1038,8 @@ export class DreamService {
       surfReport,
       weeklyReview,
       practiceOutcomes,
+      predictionCalibration: dreamExtras?.predictionCalibration,
+      rollbackNotice: dreamExtras?.rollbackNotice,
     });
     const output = await this.generateAndParse(
       prompt.system,
@@ -1018,6 +1105,18 @@ export class DreamService {
       // Mechanical implicit-signal collection: structural facts only, attached
       // before prompt building so the dream itself judges what they mean.
       activity.implicitSignals = extractImplicitSignals(activity);
+      // RSI P0 retention gate: if yesterday (the dreamed date) carried a
+      // negative-feedback spike, deterministically roll back the previous
+      // dream night's prompt layer BEFORE tonight's snapshot/synthesis. Repair
+      // runs never roll back (their date is not "yesterday's" evidence).
+      const retentionGate = isRepair
+        ? EMPTY_RETENTION_GATE_RESULT
+        : this.evaluatePromptLayerRetentionGate(metabot, date, activity);
+      // RSI P0 prediction reconciliation: resolve pending predictions against
+      // observed outcomes BEFORE synthesis, so the calibration digest is part
+      // of tonight's prompt input.
+      const predictions = await this.reconcilePredictionsBeforeDream(metabot, date);
+      const predictionCalibration = this.buildPredictionCalibrationDigest(metabotId);
       const impressionSubjects = this.buildDreamImpressionSubjects(metabot, date);
       const existingKnowledge = this.buildExistingKnowledge(metabot);
       if (
@@ -1063,6 +1162,8 @@ export class DreamService {
             autoApproved: practicePipeline.autoApproved,
           }),
           practiceRuns: { completed: 0, failed: 0 },
+          predictions,
+          promptLayerRollback: retentionGate,
           durationMs: Date.now() - runStartedAtMs,
         });
         return;
@@ -1082,6 +1183,7 @@ export class DreamService {
         surfReport,
         this.resolveSynthesisTimeoutMs(runStartedAtMs, currentRun.attemptCount),
         practiceOutcomes.outcomes,
+        { predictionCalibration, rollbackNotice: retentionGate.notice },
       );
       let output = prepared.output;
       // Repair runs discard selfIdentity in writeDreamResults, so skip the
@@ -1155,6 +1257,8 @@ export class DreamService {
           autoApproved: practicePipeline.autoApproved,
         }),
         practiceRuns: { completed: practiceOutcomes.completed, failed: practiceOutcomes.failed },
+        predictions,
+        promptLayerRollback: retentionGate,
         durationMs: Date.now() - runStartedAtMs,
       });
     } catch (error) {
@@ -2062,6 +2166,351 @@ export class DreamService {
   }
 
   /**
+   * RSI P0 retention gate, evaluated at the START of a normal dream run
+   * (before tonight's snapshot and synthesis): yesterday's negative-signal
+   * count (thumbs-down + accepted tasks rated ≤2 + reask/unanswered_burst
+   * implicit signals) is compared against the trailing baseline; only when the
+   * absolute floor AND the baseline comparison both hold — and an 'active'
+   * snapshot of a strictly earlier dream date exists (never rolled back) — is
+   * that night's prompt layer deterministically rolled back. At most one date
+   * per run; self_identity is never part of a snapshot, so it can never roll.
+   */
+  private evaluatePromptLayerRetentionGate(
+    metabot: DreamMetabotLike,
+    date: string,
+    activity: DreamDayActivity,
+  ): RetentionGateResult {
+    try {
+      const negativeToday = countNegativeSignalsForDay(activity);
+      const snapshot = this.deps.dreamStore.getActivePromptLayerSnapshot(metabot.id);
+      const base: RetentionGateResult = { ...EMPTY_RETENTION_GATE_RESULT, evaluated: true, negativeSignals: negativeToday };
+      // The snapshot must predate the dreamed date — otherwise the write it
+      // covers is tonight's own rewrite, which replaces the layer anyway.
+      if (!snapshot || snapshot.dreamDate >= date || negativeToday < ROLLBACK_NEGATIVE_FLOOR) {
+        return base;
+      }
+      // Baseline: daily negative counts over the trailing window, counted only
+      // for days with any activity (an idle day carries no signal opportunity).
+      const [year, month, day] = date.split('-').map((part) => Number(part));
+      const baselineDailyNegatives: number[] = [];
+      for (let daysAgo = 1; daysAgo <= ROLLBACK_BASELINE_DAYS; daysAgo += 1) {
+        const dayKey = formatBotWorkspaceDate(new Date(year, (month || 1) - 1, (day || 1) - daysAgo));
+        const bounds = getDayBoundsMs(dayKey);
+        const dayActivity = this.deps.dreamStore.getActivityForDate(metabot.id, bounds.startMs, bounds.endMs);
+        const hasActivity =
+          dayActivity.sessions.length > 0
+          || dayActivity.taskRuns.length > 0
+          || dayActivity.groupTasks.length > 0
+          || (dayActivity.groupChats?.length ?? 0) > 0
+          || (dayActivity.chainWrites?.length ?? 0) > 0
+          || (dayActivity.chainReads?.length ?? 0) > 0;
+        if (!hasActivity) continue;
+        dayActivity.implicitSignals = extractImplicitSignals(dayActivity);
+        baselineDailyNegatives.push(countNegativeSignalsForDay(dayActivity));
+      }
+      const verdict = evaluatePromptLayerRollback({
+        negativeToday,
+        baselineDailyNegatives,
+      });
+      if (!verdict.triggered) {
+        return { ...base, baselineMedian: verdict.baselineMedian, baselineDays: baselineDailyNegatives.length };
+      }
+      const applied = this.applyPromptLayerRollback(metabot, snapshot, verdict.reason ?? 'negative-feedback spike');
+      return {
+        ...base,
+        rolledBack: applied,
+        rolledBackDate: applied ? snapshot.dreamDate : null,
+        baselineMedian: verdict.baselineMedian,
+        baselineDays: baselineDailyNegatives.length,
+        reason: verdict.reason,
+        notice: applied ? buildRollbackNotice(snapshot.dreamDate) : null,
+      };
+    } catch (error) {
+      // The retention gate must never fail a dream run.
+      console.warn(
+        `[DreamService] Prompt-layer retention gate failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { ...EMPTY_RETENTION_GATE_RESULT };
+    }
+  }
+
+  /**
+   * The deterministic rollback itself (no LLM): tombstone the rolled-back
+   * date's dream-memory batch and restore the snapshotted prior rows
+   * (coworkStore.rollbackDreamMemoriesForDate), archive the procedures that
+   * night promoted into the active set (the diff against the snapshot's
+   * promoted ids — mirroring the capability re-review's archive path), reject
+   * that date's capability drafts so tonight's validation/promotion skips
+   * them, then mark the snapshot rolled_back. Returns false when the snapshot
+   * state changed underfoot (already superseded/rolled back).
+   */
+  private applyPromptLayerRollback(
+    metabot: DreamMetabotLike,
+    snapshot: PromptLayerSnapshot,
+    reason: string,
+  ): boolean {
+    try {
+      const rollback = this.deps.coworkStore.rollbackDreamMemoriesForDate(
+        metabot.id,
+        snapshot.dreamDate,
+        snapshot.payload.memories,
+      );
+      // Procedures promoted by the rolled-back night: active now but absent
+      // from the snapshot's promoted set. Defensive union: procedures whose
+      // source draft was created on the rolled-back date.
+      const archivedProcedures = new Set<string>();
+      if (this.deps.metaidKnowledgeStore) {
+        const snapshotIds = new Set(snapshot.payload.promotedProcedureIds);
+        const promotedSince = this.deps.dreamStore
+          .listActivePromotedProcedureIds(metabot.id)
+          .filter((id) => !snapshotIds.has(id));
+        const draftPromotedIds = this.deps.coworkStore
+          .listCapabilityDrafts(metabot.id)
+          .filter((draft) => draft.dreamDate === snapshot.dreamDate && draft.promotedProcedureId)
+          .map((draft) => draft.promotedProcedureId as string);
+        for (const procedureId of [...new Set([...promotedSince, ...draftPromotedIds])]) {
+          try {
+            const entry = this.deps.metaidKnowledgeStore.getProcedure(procedureId);
+            if (entry && entry.status === 'active'
+              && this.deps.metaidKnowledgeStore.archiveProcedureByTitle(metabot.id, entry.title)) {
+              archivedProcedures.add(procedureId);
+            }
+          } catch (error) {
+            console.warn(
+              `[DreamService] Rollback procedure archive failed for metabot ${metabot.id} procedure ${procedureId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      }
+      // Drafts created on the rolled-back date must not face tonight's
+      // validation/promotion: reject them with the rollback note.
+      let rejectedDrafts = 0;
+      for (const draft of this.deps.coworkStore.listCapabilityDrafts(metabot.id)) {
+        if (draft.dreamDate !== snapshot.dreamDate) continue;
+        if (draft.status !== 'draft' && draft.status !== 'disputed' && draft.status !== 'validated') continue;
+        if (this.deps.coworkStore.updateCapabilityDraftValidation({
+          id: draft.id,
+          metabotId: metabot.id,
+          status: 'rejected',
+          validationScore: draft.validationScore,
+          validationNotes: `prompt layer ${snapshot.dreamDate} rolled back (negative-feedback spike) — treat that day's lessons with suspicion`,
+        })) {
+          rejectedDrafts += 1;
+        }
+      }
+      const marked = this.deps.dreamStore.markPromptLayerSnapshotRolledBack(
+        snapshot.id,
+        `${reason}; restored ${rollback.restored}/${snapshot.payload.memories.length} memories, removed ${rollback.removed}, archived ${archivedProcedures.size} procedures, rejected ${rejectedDrafts} drafts`,
+      );
+      if (!marked) {
+        console.warn(`[DreamService] Prompt-layer rollback for metabot ${metabot.id} snapshot ${snapshot.id} lost the status race; store already moved on`);
+        return false;
+      }
+      console.log(
+        `[DreamService] Rolled back the ${snapshot.dreamDate} prompt layer for metabot ${metabot.id}: ${reason} `
+        + `(memories restored=${rollback.restored} removed=${rollback.removed} skippedMissing=${rollback.skippedMissing}, `
+        + `procedures archived=${archivedProcedures.size}, drafts rejected=${rejectedDrafts})`,
+      );
+      return true;
+    } catch (error) {
+      console.warn(
+        `[DreamService] Prompt-layer rollback failed for metabot ${metabot.id} date ${snapshot.dreamDate}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * RSI P0 prediction reconciliation, run BEFORE synthesis so the calibration
+   * digest is prompt input. Deterministic resolution per action type:
+   *  - buzz_post / metaweb_comment: reception counts (likes/comments) on the
+   *    bot's own pin via fetchPredictionReception; an early hit resolves
+   *    immediately (reception only grows), otherwise the verdict waits for the
+   *    deadline and lands as partial/miss on the final tally.
+   *  - metatask_submission: the local projection's review outcome for
+   *    "rootPinId:nodeId" (pass → hit, fail → miss).
+   *  - service_delivery: the order's final status (completed → hit;
+   *    failed/refunded → miss).
+   * Not-yet-observable stays pending; past resolve_deadline without an
+   * observable outcome is expired. Never fails the dream run.
+   */
+  private async reconcilePredictionsBeforeDream(
+    metabot: DreamMetabotLike,
+    date: string,
+  ): Promise<PredictionReconciliationResult> {
+    const counters = { ...EMPTY_PREDICTION_RECONCILIATION };
+    try {
+      const pending = this.deps.dreamStore.listPendingPredictions(metabot.id);
+      if (pending.length === 0) return counters;
+      counters.checked = pending.length;
+      const nowMs = Date.now();
+
+      // Reception predictions share one batched interactions fetch (the same
+      // R3 aggregation that feeds the surf reception column).
+      const receptionPinByPrediction = new Map<string, string>();
+      for (const prediction of pending) {
+        if (prediction.actionType !== 'buzz_post' && prediction.actionType !== 'metaweb_comment') continue;
+        let pinId = prediction.subjectRef;
+        if (!pinId) {
+          const ownWrite = this.deps.dreamStore.findOwnChainWriteForPrediction(metabot.id, prediction.actionType, prediction.createdAt);
+          pinId = ownWrite?.pinId ?? null;
+        }
+        if (pinId) receptionPinByPrediction.set(prediction.id, pinId);
+      }
+      let receptionByPinId: Map<string, { likes: number; comments: number }> | null = null;
+      if (receptionPinByPrediction.size > 0 && this.deps.fetchPredictionReception) {
+        try {
+          const rows = await this.deps.fetchPredictionReception({
+            metabotId: metabot.id,
+            pinIds: [...new Set(receptionPinByPrediction.values())],
+            sinceTs: Math.floor(Math.min(...pending.map((prediction) => prediction.createdAt)) / 1000),
+          });
+          receptionByPinId = new Map((rows ?? []).map((row) => [row.pinId, { likes: row.likes, comments: row.comments }]));
+        } catch (error) {
+          console.warn(
+            `[DreamService] Prediction reception fetch failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          receptionByPinId = null;
+        }
+      }
+
+      for (const prediction of pending) {
+        try {
+          this.reconcileOnePrediction(metabot, prediction, {
+            nowMs,
+            receptionPinByPrediction,
+            receptionByPinId,
+            counters,
+          });
+        } catch (error) {
+          // One bad row never aborts the rest of the ledger.
+          console.warn(
+            `[DreamService] Prediction ${prediction.id} reconciliation failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      // Ledger hygiene: resolved rows older than 90 days are bookkeeping dead
+      // weight (the calibration window reads only the trailing 30).
+      try {
+        this.deps.dreamStore.pruneResolvedPredictions({ cutoffMs: nowMs - 90 * 86_400_000 });
+      } catch (error) {
+        console.warn(
+          `[DreamService] Prediction ledger prune failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (counters.resolved > 0) {
+        console.log(
+          `[DreamService] Prediction reconciliation for metabot ${metabot.id} date ${date}: `
+          + `checked=${counters.checked}, resolved=${counters.resolved} (hit=${counters.hit}, partial=${counters.partial}, miss=${counters.miss}, expired=${counters.expired})`,
+        );
+      }
+      return counters;
+    } catch (error) {
+      console.warn(
+        `[DreamService] Prediction reconciliation failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { ...EMPTY_PREDICTION_RECONCILIATION };
+    }
+  }
+
+  private reconcileOnePrediction(
+    metabot: DreamMetabotLike,
+    prediction: MetabotPrediction,
+    context: {
+      nowMs: number;
+      receptionPinByPrediction: Map<string, string>;
+      receptionByPinId: Map<string, { likes: number; comments: number }> | null;
+      counters: PredictionReconciliationResult;
+    },
+  ): void {
+    const pastDeadline = context.nowMs >= getDayBoundsMs(prediction.resolveDeadline).endMs;
+    const expire = (why: string) => this.settlePrediction(prediction, 'expired',
+      `deadline ${prediction.resolveDeadline} passed with no observable outcome (${why})`, null, context.counters);
+
+    if (prediction.actionType === 'buzz_post' || prediction.actionType === 'metaweb_comment') {
+      const pinId = context.receptionPinByPrediction.get(prediction.id) ?? null;
+      if (!pinId || !context.receptionByPinId) {
+        if (pastDeadline) expire(pinId ? 'reception fetch unavailable' : 'no matching own chain write found');
+        return;
+      }
+      const counts = context.receptionByPinId.get(pinId) ?? { likes: 0, comments: 0 };
+      const metric = String(prediction.expectation.metric ?? 'interactions');
+      const observed = metric === 'likes' ? counts.likes : metric === 'comments' ? counts.comments : counts.likes + counts.comments;
+      const outcomeText = `observed ${observed} ${metric} on ${pinId} (expected >= ${String(prediction.expectation.value)})`;
+      const outcomeJson = { metric, observed, likes: counts.likes, comments: counts.comments, resolvedSubjectRef: pinId };
+      if (judgeNumericExpectation(prediction.expectation, observed) === 'hit') {
+        this.settlePrediction(prediction, 'hit', outcomeText, outcomeJson, context.counters);
+      } else if (pastDeadline) {
+        this.settlePrediction(prediction, judgeNumericExpectation(prediction.expectation, observed), outcomeText, outcomeJson, context.counters);
+      }
+      return;
+    }
+
+    if (prediction.actionType === 'metatask_submission') {
+      if (!prediction.subjectRef || !this.deps.getMetataskSubmissionOutcome) {
+        if (pastDeadline) expire(prediction.subjectRef ? 'projection unavailable' : 'no subject_ref');
+        return;
+      }
+      const outcome = this.deps.getMetataskSubmissionOutcome({ metabotId: metabot.id, subjectRef: prediction.subjectRef });
+      if (!outcome || outcome.outcome === 'pending') {
+        if (pastDeadline) expire('submission still unreviewed in the local projection');
+        return;
+      }
+      const status = outcome.outcome === 'pass' ? 'hit' : 'miss';
+      this.settlePrediction(prediction, status,
+        `submission review outcome: ${outcome.outcome}${outcome.detail ? ` (${outcome.detail})` : ''}`,
+        { outcome: outcome.outcome }, context.counters);
+      return;
+    }
+
+    if (prediction.actionType === 'service_delivery') {
+      const status = prediction.subjectRef ? this.deps.dreamStore.getServiceOrderStatus(prediction.subjectRef) : null;
+      if (!status) {
+        if (pastDeadline) expire(prediction.subjectRef ? 'order not found' : 'no subject_ref');
+        return;
+      }
+      if (status === 'completed') {
+        this.settlePrediction(prediction, 'hit', `order ${prediction.subjectRef} final status: completed`, { orderStatus: status }, context.counters);
+      } else if (status === 'failed' || status === 'refunded') {
+        this.settlePrediction(prediction, 'miss', `order ${prediction.subjectRef} final status: ${status}`, { orderStatus: status }, context.counters);
+      } else if (pastDeadline) {
+        expire(`order still ${status}`);
+      }
+    }
+  }
+
+  private settlePrediction(
+    prediction: MetabotPrediction,
+    status: 'hit' | 'miss' | 'partial' | 'expired',
+    outcomeText: string,
+    outcomeJson: Record<string, unknown> | null,
+    counters: PredictionReconciliationResult,
+  ): void {
+    const updated = this.deps.dreamStore.resolvePrediction(prediction.id, {
+      status,
+      resolvedBy: 'dream',
+      outcomeText,
+      outcomeJson,
+    });
+    if (!updated) return;
+    counters.resolved += 1;
+    counters[status] += 1;
+  }
+
+  /** The trailing-window calibration digest for tonight's dream prompt ('' when empty). */
+  private buildPredictionCalibrationDigest(metabotId: number): string {
+    try {
+      const calibration = this.deps.dreamStore.listPredictionCalibration(metabotId, PREDICTION_CALIBRATION_WINDOW_DAYS);
+      return renderPredictionCalibrationDigest(calibration);
+    } catch (error) {
+      console.warn(
+        `[DreamService] Prediction calibration digest unavailable for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return '';
+    }
+  }
+
+  /**
    * P2b weekly "long dream": once per closed ISO week, replay the week's daily
    * diaries plus the week's run telemetry as one history pool and distill
    * cross-day patterns. Runs at most once per week (UNIQUE(metabot_id,
@@ -2218,6 +2667,16 @@ export class DreamService {
     impressionSubjects: ReturnType<DreamService['buildDreamImpressionSubjects']>,
     observerGlobalMetaID?: string | null,
   ): { dedupMerged: number } {
+    // RSI P0 retention gate: snapshot the CURRENT dream-origin prompt layer
+    // immediately before tonight's writes, so a later negative-feedback spike
+    // can deterministically restore exactly this state. Never fails the write.
+    try {
+      this.deps.dreamStore.capturePromptLayerSnapshot(metabotId, date);
+    } catch (error) {
+      console.warn(
+        `[DreamService] Prompt-layer snapshot failed for metabot ${metabotId} date ${date}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     this.deps.dreamStore.upsertDailySummary({
       metabotId,
       summaryDate: date,

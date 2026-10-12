@@ -48,8 +48,10 @@ export const PRACTICE_PROPOSALS_MAX_PER_NIGHT = 2;
 /** Dream algorithm version, recorded on every run. Bump it on any change to the
  * prompt, budgeting, stats or write semantics — completed in-window dates with
  * an older version are then re-dreamed automatically (limited per night).
- * Rows written before versioning existed read as 0. */
-export const DREAM_VERSION = 15;
+ * Rows written before versioning existed read as 0.
+ * v16: RSI P0 — prediction calibration digest + prompt-layer rollback notice
+ * ride the prompt as new input sections; dream writes are now snapshotted. */
+export const DREAM_VERSION = 16;
 
 const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks', 'group_tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];
@@ -474,6 +476,10 @@ export function buildDreamPrompt(input: {
   weeklyReview?: string | null;
   /** P0 self-curriculum: practice runs executed during the dreamed day (design §3.4). */
   practiceOutcomes?: DreamPracticeOutcome[];
+  /** RSI P0: prediction calibration digest (trailing 30d reconciliation rollup). */
+  predictionCalibration?: string | null;
+  /** RSI P0 retention gate: notice that a previous night's prompt layer was rolled back. */
+  rollbackNotice?: string | null;
 }): { system: string; user: string } {
   const sourceMode = input.sourceMode ?? 'raw_activity';
   const activityTokenBudget = Math.max(
@@ -600,6 +606,17 @@ export function buildDreamPrompt(input: {
       .map((signal) => `- ${truncateText(signal.text, 200)}`)
       .join('\n');
     sections.push(`## 当日隐式信号(以下只是结构化事实,不代表负面,请结合上方对话上下文自行判断它们意味着什么)\n${signalLines}`);
+  }
+  // RSI P0 retention gate: tonight's prompt carries the rollback notice so the
+  // dream treats the disavowed day's lessons with suspicion instead of
+  // re-distilling them.
+  if (sourceMode !== 'fragment' && input.rollbackNotice?.trim()) {
+    sections.push(`## 提示层回滚通知(昨晚自动回滚,请警觉)\n${truncateText(input.rollbackNotice.trim(), 400)}`);
+  }
+  // RSI P0 prediction calibration: the ledger's reconciliation rollup rides the
+  // dream so value_lessons / important_memories can absorb the misses.
+  if (sourceMode !== 'fragment' && input.predictionCalibration?.trim()) {
+    sections.push(`## 预测校准对账(你事前记录的可验证预测与昨夜对账结果;蒸馏教训时优先反思落空的预测)\n${input.predictionCalibration.trim()}`);
   }
   const groupTaskItems = sourceMode === 'fragment' ? [] : (input.activity.groupTasks ?? []);
   const acceptedGroupTasks = groupTaskItems.filter((task) => !isActiveGroupTask(task));

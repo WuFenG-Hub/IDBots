@@ -426,6 +426,8 @@ man_base_data_pebble/
 !tests/dreamPracticePipeline.test.mjs
 !tests/capabilityReconciliation.test.mjs
 !tests/chainEvidenceValidation.test.mjs
+!tests/predictionLedger.test.mjs
+!tests/promptLayerRollback.test.mjs
 !tests/guidanceBudget.test.mjs
 !tests/implicitSignalsGrounding.test.mjs
 !tests/memoryHygieneService.test.mjs
