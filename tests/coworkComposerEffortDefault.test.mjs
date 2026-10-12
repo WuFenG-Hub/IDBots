@@ -75,3 +75,20 @@ test('a configured bot brain outranks the persisted global effort', () => {
     'CoworkSessionDetail: the global effort display fallback must be gated on the bot having no configured brain',
   );
 });
+
+test('assistant chat-experience mode falls back to low instead of the persisted/model default', () => {
+  // Both per-turn chains (primary route and GT-02 fallback-brain route)
+  // replace the persisted-global / per-model default tail with 'low' when the
+  // owner picked the assistant chat experience; the session override and the
+  // bot brain effort rungs still win ahead of it, and the professional-mode
+  // chain (asserted above) stays intact.
+  assert.ok(
+    coworkRunnerSource.includes('getPersistedChatExperienceMode'),
+    'coworkRunner: effort resolution must read the persisted chat experience mode',
+  );
+  const assistantRungs = coworkRunnerSource.match(/assistantMode\s*\?\s*'low'/g) ?? [];
+  assert.ok(
+    assistantRungs.length >= 2,
+    'coworkRunner: primary and fallback effort chains must both fall back to low in assistant mode',
+  );
+});

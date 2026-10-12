@@ -120,7 +120,9 @@ export interface CoworkMessageMetadata {
 }
 
 // Ephemeral SDK runtime status carried on `type: 'system'` messages.
-// Surfaced in StreamingActivityBar (transient, not a persisted bubble).
+// Surfaced in the streaming activity indicator (StreamingActivityBar in
+// professional mode, AssistantActivityIndicator in assistant mode) —
+// transient, not a persisted bubble.
 export type CoworkSdkRuntimeStatus = 'requesting' | 'api_retry';
 
 export interface CoworkSdkRuntimeStatusPayload {

@@ -27,6 +27,8 @@ import A2AMessageItem from './A2AMessageItem';
 import UserMessageOriginBadge from './UserMessageOriginBadge';
 import MessageFeedbackControls from './MessageFeedbackControls';
 import { ThinkingBlock, splitThinkTaggedContent } from './ThinkingBlock';
+import { AssistantProgressNote } from './AssistantProgressNote';
+import { AssistantActivityIndicator } from './AssistantActivityIndicator';
 import { shouldHideA2AInternalMessage, lastA2AErrorDetail } from './a2aInternalMessageFilter';
 import {
   getTodoListSummaryText,
@@ -64,6 +66,8 @@ import {
 import { FolderIcon } from '@heroicons/react/24/solid';
 import { coworkService } from '../../services/cowork';
 import { configService } from '../../services/config';
+import { localStore } from '../../services/store';
+import { CONFIG_KEYS, type AppConfig, type ChatExperienceMode } from '../../config';
 import { projectsService } from '../../services/projects';
 import { fetchMetaidInfoByGlobalId, resolveMetaidAvatarSource } from '../../services/metabotInfoService';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
@@ -806,7 +810,9 @@ const shouldHideControlMessage = (message: CoworkMessage): boolean => {
     return true;
   }
   // Ephemeral SDK runtime-status signals (api_retry / requesting) are surfaced
-  // in StreamingActivityBar, not as persisted message bubbles.
+  // in the streaming activity indicator (StreamingActivityBar in professional
+  // mode, AssistantActivityIndicator in assistant mode), not as persisted
+  // message bubbles.
   if (typeof message.metadata?.sdkRuntimeStatus === 'string') {
     return true;
   }
@@ -1024,7 +1030,13 @@ export const buildConversationTurns = (items: DisplayItem[]): ConversationTurn[]
   return turns;
 };
 
-const isVisibleAssistantTurnItem = (item: AssistantTurnItem): boolean => {
+const isVisibleAssistantTurnItem = (item: AssistantTurnItem, isAssistantMode = false): boolean => {
+  // Assistant mode hides all tool-call chrome (render-only filtering — the
+  // underlying messages stay intact, so switching back to professional mode
+  // restores the full transcript).
+  if (isAssistantMode && (item.type === 'tool_group' || item.type === 'tool_result')) {
+    return false;
+  }
   if (item.type === 'assistant' || item.type === 'system') {
     return isRenderableAssistantOrSystemMessage(item.message);
   }
@@ -1034,11 +1046,11 @@ const isVisibleAssistantTurnItem = (item: AssistantTurnItem): boolean => {
   return true;
 };
 
-const getVisibleAssistantItems = (assistantItems: AssistantTurnItem[]): AssistantTurnItem[] =>
-  assistantItems.filter(isVisibleAssistantTurnItem);
+const getVisibleAssistantItems = (assistantItems: AssistantTurnItem[], isAssistantMode = false): AssistantTurnItem[] =>
+  assistantItems.filter((item) => isVisibleAssistantTurnItem(item, isAssistantMode));
 
-const hasRenderableAssistantContent = (turn: ConversationTurn): boolean => (
-  getVisibleAssistantItems(turn.assistantItems).length > 0
+const hasRenderableAssistantContent = (turn: ConversationTurn, isAssistantMode = false): boolean => (
+  getVisibleAssistantItems(turn.assistantItems, isAssistantMode).length > 0
 );
 
 const formatCompactTokens = (value: number): string => {
@@ -1653,6 +1665,8 @@ const AssistantMessageItem: React.FC<{
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   /** Copies the conversation up to and including this message into a new session. */
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
+  /** Assistant mode renders the embedded thinking segment as a progress note. */
+  isAssistantMode?: boolean;
 }> = ({
   message,
   resolveLocalFilePath,
@@ -1660,6 +1674,7 @@ const AssistantMessageItem: React.FC<{
   showCopyButton = false,
   onOpenLocalFile,
   onBranch,
+  isAssistantMode = false,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
   const displayContent = mapDisplayText ? mapDisplayText(message.content) : message.content;
@@ -1676,6 +1691,15 @@ const AssistantMessageItem: React.FC<{
   }
 
   const replyContent = thinkSplit.thinking ? thinkSplit.text : displayContent;
+  const thinkingMessage: CoworkMessage = {
+    ...message,
+    content: thinkSplit.thinking,
+    metadata: {
+      ...message.metadata,
+      isThinking: true,
+      isStreaming: Boolean(message.metadata?.isStreaming) && !thinkSplit.text,
+    },
+  };
 
   return (
     <div
@@ -1684,20 +1708,21 @@ const AssistantMessageItem: React.FC<{
       onMouseLeave={() => setIsHovered(false)}
     >
       {thinkSplit.thinking ? (
-        <div className="mb-3">
-          <ThinkingBlock
-            message={{
-              ...message,
-              content: thinkSplit.thinking,
-              metadata: {
-                ...message.metadata,
-                isThinking: true,
-                isStreaming: Boolean(message.metadata?.isStreaming) && !thinkSplit.text,
-              },
-            }}
-            mapDisplayText={mapDisplayText}
-          />
-        </div>
+        isAssistantMode ? (
+          <div className="mb-2">
+            <AssistantProgressNote
+              message={thinkingMessage}
+              mapDisplayText={mapDisplayText}
+            />
+          </div>
+        ) : (
+          <div className="mb-3">
+            <ThinkingBlock
+              message={thinkingMessage}
+              mapDisplayText={mapDisplayText}
+            />
+          </div>
+        )
       ) : null}
       {replyContent ? (
         <div className="dark:text-claude-darkText text-claude-text">
@@ -2052,6 +2077,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   isActiveTurn = false,
   onOpenLocalFile,
   onBranch,
+  isAssistantMode = false,
 }: {
   turn: ConversationTurn;
   resolveLocalFilePath?: (href: string, text: string) => string | null;
@@ -2064,8 +2090,11 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   isActiveTurn?: boolean;
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
+  /** Assistant mode: thinking renders as one-line progress notes and the
+   * "Worked for" collapse stays open so the notes remain visible inline. */
+  isAssistantMode?: boolean;
 }) {
-  const visibleAssistantItems = getVisibleAssistantItems(turn.assistantItems);
+  const visibleAssistantItems = getVisibleAssistantItems(turn.assistantItems, isAssistantMode);
   // Collapsed by default once a turn completes; the header expands to reveal
   // the working process (thinking, tool calls, intermediate notes).
   const [processExpanded, setProcessExpanded] = useState(false);
@@ -2230,6 +2259,16 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
           });
           return interrupted ? <div key={item.message.id}>{interrupted}</div> : null;
         }
+        if (isAssistantMode) {
+          return (
+            <AssistantProgressNote
+              key={item.message.id}
+              message={item.message}
+              mapDisplayText={mapDisplayText}
+              live={sessionLive && Boolean(item.message.metadata?.isStreaming)}
+            />
+          );
+        }
         return (
           <ThinkingBlock
             key={item.message.id}
@@ -2253,6 +2292,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
           showCopyButton={showCopyButtons && !hasToolGroupAfter}
           onOpenLocalFile={onOpenLocalFile}
           onBranch={onBranch}
+          isAssistantMode={isAssistantMode}
         />
       );
     }
@@ -2282,6 +2322,13 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
           {systemMessage}
         </div>
       );
+    }
+
+    // Orphan tool_result: already filtered out of assistant-mode turns by
+    // isVisibleAssistantTurnItem; guard here as well so the tool UI can never
+    // leak back in through a direct renderVisibleItem call.
+    if (isAssistantMode) {
+      return null;
     }
 
     return (
@@ -2329,8 +2376,12 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   const workedForMs = deliveryMessage && turn.userMessage
     ? Math.max(0, deliveryMessage.timestamp - turn.userMessage.timestamp)
     : 0;
+  // Assistant mode never collapses the process: the progress notes (thinking
+  // rendered as one-liners) must stay visible inline, so there is no "Worked
+  // for X" header to expand — the full visible list renders in order.
   const showWorkedHeader = Boolean(
-    isTurnComplete
+    !isAssistantMode
+    && isTurnComplete
     && deliveryMessage
     && processItems.length > 0
     && turn.userMessage
@@ -2375,6 +2426,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
                   showCopyButton={showCopyButtons}
                   onOpenLocalFile={onOpenLocalFile}
                   onBranch={onBranch}
+                  isAssistantMode={isAssistantMode}
                 />
               </>
             ) : (
@@ -2456,6 +2508,26 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     const success = await coworkService.respondToPermission(pendingPermission.requestId, result);
     if (!success) setIsRespondingToPermission(false);
   }, [pendingPermission, isRespondingToPermission]);
+  // Chat experience mode (Settings > General). 'assistant' renders thinking as
+  // compact progress notes; 'professional' keeps the full transcript chrome.
+  // Kept reactive through the app_config store-changed broadcast (fired for
+  // every store:set, including writes from the Settings window) so flipping
+  // the mode re-renders the live transcript without a reload.
+  const [chatExperienceMode, setChatExperienceMode] = useState<ChatExperienceMode>(
+    () => configService.getConfig().chatExperienceMode ?? 'assistant',
+  );
+  useEffect(() => {
+    const unsubscribe = localStore.onChanged(({ key }) => {
+      if (key !== CONFIG_KEYS.APP_CONFIG) return;
+      // The write may come from another window, so re-read the persisted
+      // config instead of trusting this window's in-memory copy.
+      void localStore.getItem<AppConfig>(CONFIG_KEYS.APP_CONFIG).then((stored) => {
+        setChatExperienceMode(stored?.chatExperienceMode ?? 'assistant');
+      });
+    });
+    return unsubscribe;
+  }, []);
+  const isAssistantMode = chatExperienceMode === 'assistant';
   const isA2ASession = currentSession?.sessionType === 'a2a';
   const isPrivateA2ASession = useMemo(() => (
     currentSession?.sessionType === 'a2a'
@@ -3821,6 +3893,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             sessionLive={isStreaming || currentSession?.status === 'running'}
             isActiveTurn={currentSession?.status === 'running'}
             onOpenLocalFile={handleOpenLocalFile}
+            isAssistantMode={isAssistantMode}
           />
         </div>
       );
@@ -3828,8 +3901,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
     return turns.map((turn, index) => {
       const isLastTurn = index === turns.length - 1;
-      const showTypingIndicator = isStreaming && isLastTurn && !hasRenderableAssistantContent(turn);
-      const showAssistantBlock = turn.assistantItems.length > 0 || showTypingIndicator;
+      const showTypingIndicator = isStreaming && isLastTurn && !hasRenderableAssistantContent(turn, isAssistantMode);
+      // Assistant mode filters tool UI out of the transcript, so a turn whose
+      // items all filtered out must not leave an empty padded block behind.
+      const showAssistantBlock = (isAssistantMode
+        ? hasRenderableAssistantContent(turn, true)
+        : turn.assistantItems.length > 0) || showTypingIndicator;
 
       return (
         <React.Fragment key={turn.id}>
@@ -3856,10 +3933,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 isActiveTurn={currentSession?.status === 'running' && isLastTurn}
                 onOpenLocalFile={handleOpenLocalFile}
                 onBranch={handleBranchFromMessage}
+                isAssistantMode={isAssistantMode}
               />
             </div>
           )}
-          {showWelcomeHandoff && hasRenderableAssistantContent(turn) && (
+          {showWelcomeHandoff && hasRenderableAssistantContent(turn, isAssistantMode) && (
             <div className="px-4 pb-2">
               <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
                 <div className="flex items-start gap-2.5 rounded-xl border border-claude-accent/20 bg-claude-accent/5 px-3.5 py-2.5">
@@ -4203,6 +4281,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                   canResendDigitalDelivery={canResendDigitalDelivery}
                   isResendingDigitalDelivery={Boolean(resendingDeliveryOrderTxid)}
                   onResendDigitalDelivery={handleResendDigitalDelivery}
+                  isAssistantMode={isAssistantMode}
                 />
               </div>
             );
@@ -4241,12 +4320,22 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         />
       )}
 
-      {/* Streaming Activity Bar */}
+      {/* Streaming Activity Bar — assistant mode swaps the professional
+          sliding bar for a friendlier bot-avatar indicator; professional
+          mode stays exactly as before. */}
       {(isStreaming || currentSession.status === 'running') && (
-        <StreamingActivityBar
-          messages={currentSession.messages}
-          fallbackText={isA2ASession ? i18nService.t('coworkA2ABackgroundWorking') : undefined}
-        />
+        isAssistantMode ? (
+          <AssistantActivityIndicator
+            messages={currentSession.messages}
+            avatar={sessionMetabot?.avatar ?? currentSession.metabotAvatar ?? null}
+            fallbackText={isA2ASession ? i18nService.t('coworkA2ABackgroundWorking') : undefined}
+          />
+        ) : (
+          <StreamingActivityBar
+            messages={currentSession.messages}
+            fallbackText={isA2ASession ? i18nService.t('coworkA2ABackgroundWorking') : undefined}
+          />
+        )
       )}
 
       {freeQuotaExhausted && (

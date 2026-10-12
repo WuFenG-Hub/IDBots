@@ -7,6 +7,13 @@ export type ModelOptions = {
   };
 };
 
+/**
+ * Chat experience mode: 'professional' shows full reasoning and tool calls,
+ * 'assistant' shows brief progress notes and results only. Persisted in
+ * app_config; defaults to 'assistant'.
+ */
+export type ChatExperienceMode = 'professional' | 'assistant';
+
 type ConfiguredModel = {
   id: string;
   name: string;
@@ -175,6 +182,12 @@ export interface AppConfig {
    */
   coworkPermissionMode?: CoworkPermissionMode;
   coworkEffortLevel?: string | null;
+  /**
+   * User-facing chat experience mode. Absent on legacy configs — readers
+   * default to 'assistant' (see defaultConfig and
+   * getPersistedChatExperienceMode in main).
+   */
+  chatExperienceMode?: ChatExperienceMode;
   /**
    * Phase 1 M5 rollout flag: run cowork sessions on the DSH kernel when the
    * resolved provider route is OpenAI-compatible. Opt-in; sessions that have
@@ -745,6 +758,7 @@ export const defaultConfig: AppConfig = {
   },
   theme: 'system',
   language: 'zh',
+  chatExperienceMode: 'assistant',
   app: {
     port: 3000,
     isDevelopment: process.env.NODE_ENV === 'development',

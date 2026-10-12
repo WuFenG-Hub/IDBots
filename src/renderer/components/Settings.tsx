@@ -10,7 +10,7 @@ import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
 import FreeQuotaCard from './FreeQuotaCard';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon, ArrowPathIcon, WrenchScrewdriverIcon, SparklesIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { CustomProviderIcon, CommandCodeIcon, OpenCodeIcon } from './icons/providers';
 import { fetchProviderModelList, providerSupportsModelListSync } from '../services/providerModels';
@@ -36,7 +36,7 @@ import SkillMcpManager from './skills/SkillMcpManager';
 import ProjectsManager from './projects/ProjectsManager';
 import UserSettings from './user/UserSettings';
 import TrafficSettings from './traffic/TrafficSettings';
-import { defaultConfig, type AppConfig, getVisibleProviders } from '../config';
+import { defaultConfig, type AppConfig, type ChatExperienceMode, getVisibleProviders } from '../config';
 import { LLM_FREE_PROVIDER_KEY, FREE_PROVIDER_DISPLAY_NAME, getFreeProviderModelDisplayName } from '../services/llmFreeQuotaGate.js';
 
 type TabType = 'user' | 'general' | 'model' | 'skills' | 'projects' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'traffic';
@@ -495,6 +495,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
   const [activeTab, setActiveTab] = useState<TabType>(resolvedInitialTab);
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
   const [language, setLanguage] = useState<LanguageType>(i18nService.getLanguage());
+  const [chatExperienceMode, setChatExperienceMode] = useState<ChatExperienceMode>('assistant');
   const [autoLaunch, setAutoLaunchState] = useState(false);
   const [isUpdatingAutoLaunch, setIsUpdatingAutoLaunch] = useState(false);
   const [experimentalAutomation, setExperimentalAutomationState] = useState(true);
@@ -685,6 +686,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
       initialLanguageRef.current = config.language;
       setTheme(config.theme);
       setLanguage(config.language);
+      setChatExperienceMode(config.chatExperienceMode ?? 'assistant');
 
       // Load auto-launch setting
       window.electron.autoLaunch.get().then(({ enabled }) => {
@@ -1428,6 +1430,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     }));
   };
 
+  // Chat experience mode persists immediately on selection (same pattern as
+  // CoworkView's coworkPermissionMode), not on the form's Save button.
+  const handleChatExperienceModeChange = (mode: ChatExperienceMode) => {
+    setChatExperienceMode(mode);
+    void configService.updateConfig({ chatExperienceMode: mode });
+  };
+
   // 阻止点击设置窗口时事件传播到背景
   const handleSettingsClick = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -2152,6 +2161,63 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
       case 'general':
         return (
           <div className="space-y-8">
+            {/* Chat Experience Mode Section */}
+            <div>
+              <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mb-1">
+                {i18nService.t('chatExperienceMode')}
+              </h4>
+              <p className="text-xs dark:text-claude-darkSecondaryText text-claude-secondaryText mb-3">
+                {i18nService.t('chatExperienceModeDesc')}
+              </p>
+              <div className="grid grid-cols-2 gap-4">
+                {([
+                  {
+                    value: 'professional' as const,
+                    label: i18nService.t('chatModeProfessional'),
+                    desc: i18nService.t('chatModeProfessionalDesc'),
+                    icon: WrenchScrewdriverIcon,
+                  },
+                  {
+                    value: 'assistant' as const,
+                    label: i18nService.t('chatModeAssistant'),
+                    desc: i18nService.t('chatModeAssistantDesc'),
+                    icon: SparklesIcon,
+                  },
+                ]).map((option) => {
+                  const isSelected = chatExperienceMode === option.value;
+                  const OptionIcon = option.icon;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => handleChatExperienceModeChange(option.value)}
+                      className={`flex flex-col items-start rounded-xl border-2 p-3 transition-colors cursor-pointer ${
+                        isSelected
+                          ? 'border-claude-accent bg-claude-accent/5 dark:bg-claude-accent/10'
+                          : 'dark:border-claude-darkBorder border-claude-border hover:border-claude-accent/50 dark:hover:border-claude-accent/50'
+                      }`}
+                    >
+                      <OptionIcon className={`h-5 w-5 mb-2 ${
+                        isSelected
+                          ? 'text-claude-accent'
+                          : 'dark:text-claude-darkText text-claude-text'
+                      }`} />
+                      <span className={`text-sm font-medium ${
+                        isSelected
+                          ? 'text-claude-accent'
+                          : 'dark:text-claude-darkText text-claude-text'
+                      }`}>
+                        {option.label}
+                      </span>
+                      <span className="text-xs dark:text-claude-darkSecondaryText text-claude-secondaryText mt-1 text-left">
+                        {option.desc}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Language Section */}
             <div className="flex items-center justify-between">
               <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text">

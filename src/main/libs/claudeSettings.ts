@@ -660,6 +660,18 @@ export function getPersistedCoworkEffortLevel(): string | null {
 }
 
 /**
+ * Chat experience mode ('professional' | 'assistant'), persisted in
+ * app_config by the renderer's configService. Unknown/missing values fall
+ * back to 'assistant'.
+ */
+export function getPersistedChatExperienceMode(): 'professional' | 'assistant' {
+  const sqliteStore = getStore();
+  const appConfig = sqliteStore?.get<{ chatExperienceMode?: unknown }>('app_config');
+  const mode = appConfig?.chatExperienceMode;
+  return (mode === 'professional' || mode === 'assistant') ? mode : 'assistant';
+}
+
+/**
  * Persists a global cowork preference (permission mode / effort level) to
  * app_config. The renderer also writes these via configService.updateConfig,
  * but the main process persists them here on mid-session switches so the
