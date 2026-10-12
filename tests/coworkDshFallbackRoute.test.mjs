@@ -602,12 +602,14 @@ test('an exhausted RATE_LIMIT (transient) ladder with no fallback brain rescues 
   await result.completed
 })
 
-test('when the degrade ladder has NO valid target the error reads 未配置可用模型 (config error), not the raw 429', async () => {
-  // Boss ruling ring ④: 全环查遍确无可用配置 → 报错语义 = 配置错误. The
-  // default IS the dead route itself (no rescue loop possible) and no
-  // fallback brain exists — the user-visible error must be the config
-  // semantics with the raw GoUsageLimitError body stripped (full raw outcome
-  // stays in the cowork.log ERROR line for diagnosis).
+test('a quota death with no valid ladder target names the exhausted provider, never a config error', async () => {
+  // 2026-10-12 correction of the ring-④ wording: 全环查遍确无可用配置 is only
+  // a CONFIGURATION error when the cause is config-shaped (stale/missing model
+  // id, dead key). When the cause is an exhausted allowance the model IS
+  // configured and worked until its quota ran out, so the terminal copy must
+  // name the exhausted route instead of telling the user to go fix a
+  // misconfiguration. The raw GoUsageLimitError body stays stripped (full raw
+  // outcome in the cowork.log ERROR line) and the normalized code is kept.
   const result = await driveTurn({
     sessionId: 'stale-binding-no-op-rescue',
     metabot: BOT_WITHOUT_FALLBACK,
@@ -619,7 +621,10 @@ test('when the degrade ladder has NO valid target the error reads 未配置可�
   assert.equal(result.sessionRow?.status, 'error')
   assert.equal(result.errors.length, 1)
   const errorText = String(result.errors[0].error)
-  assert.match(errorText, /未配置可用模型/, 'the terminal error carries the no-usable-model-configured semantics')
+  assert.match(errorText, /gw-a/, 'the terminal error names the exhausted provider')
+  assert.match(errorText, /mock-a1/, 'and the exhausted model')
+  assert.doesNotMatch(errorText, /未配置可用模型/, 'quota exhaustion is not reported as a missing configuration')
+  assert.doesNotMatch(errorText, /配置错误/, 'and specifically not as a configuration error')
   assert.doesNotMatch(errorText, /GoUsageLimitError/, 'the native 429 body is not retained in the user-visible error')
   assert.match(errorText, /QUOTA/, 'the normalized error code stays for diagnosis')
 
@@ -628,5 +633,56 @@ test('when the degrade ladder has NO valid target the error reads 未配置可�
     logText.includes('GoUsageLimitError'),
     'the full raw provider body is preserved in the cowork.log ERROR line',
   )
+})
+
+test('a quota death on the FREE relay tells the user to bring their own key (banner code included)', async () => {
+  // 2026-10-12 fresh-install report: the free starter allowance is the only
+  // route a new install has, so its 429 free_quota_exhausted produced
+  // "未配置可用模型 … 这是配置错误而非临时限流" — actively misleading.
+  // The free-relay death gets its own copy, and the literal
+  // `free_quota_exhausted` token rides along so the renderer's quota banner
+  // (CoworkSessionDetail, which keys off that code) appears with its
+  // Settings > Model shortcut.
+  const result = await driveTurn({
+    sessionId: 'fresh-install-free-quota-death',
+    metabot: { ...BOT_WITHOUT_FALLBACK, id: 3, name: 'Fresh Twin', llm_id: 'free-m1', llm_provider: 'metaid-free' },
+    configOverrides: FREE_RELAY_OVERRIDES,
+    script: () => ({
+      kind: 'error',
+      error: {
+        code: 'QUOTA',
+        message: '429 {"type":"error","error":{"type":"api_error","message":"free_quota_exhausted: free quota exhausted"}}',
+      },
+    }),
+  })
+
+  assert.equal(result.runTurnCalls.length, 1, 'the free relay has no ladder target to rescue onto')
+  assert.equal(result.sessionRow?.status, 'error')
+  const errorText = String(result.errors[0].error)
+  assert.match(errorText, /免费额度已用完|Free starter quota exhausted/, 'the copy names the exhausted free allowance')
+  assert.match(errorText, /free_quota_exhausted/, 'the renderer banner code is present')
+  assert.doesNotMatch(errorText, /未配置可用模型/, 'not the misleading no-usable-model wording')
+  assert.doesNotMatch(errorText, /配置错误而非临时限流/, 'and not the configuration-error explanation')
+})
+
+test('a genuinely misconfigured route still reports the configuration error', async () => {
+  // The other half of the correction: a config-shaped death (the bound model
+  // does not exist on the route, no fallback, no other default) keeps the
+  // ring-④ configuration semantics — quota wording must never mask it.
+  const result = await driveTurn({
+    sessionId: 'stale-binding-model-missing',
+    metabot: BOT_WITHOUT_FALLBACK,
+    script: (_input, callNo) => (
+      callNo === 1
+        ? { kind: 'error', error: { code: 'MODEL_NOT_FOUND', message: '404 model mock-a1 does not exist' } }
+        : { kind: 'completed' }
+    ),
+  })
+
+  assert.equal(result.sessionRow?.status, 'error')
+  const errorText = String(result.errors[0].error)
+  assert.match(errorText, /未配置可用模型/, 'a real config hole keeps the configuration-error wording')
+  assert.match(errorText, /配置错误/, 'including the explicit "not a rate limit" clarification')
+  assert.doesNotMatch(errorText, /免费额度|free_quota_exhausted/, 'and never claims a quota problem')
 })
 
