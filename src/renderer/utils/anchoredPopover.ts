@@ -91,6 +91,52 @@ export function placePopoverAbove(
 }
 
 /**
+ * Compute a placement for a "below the anchor" popover — the mirror of
+ * placePopoverAbove for controls that sit at the TOP of a list (e.g. the
+ * online-chats Bot selector above the session rows). Same horizontal rule;
+ * vertically the popover's top edge sits a small gap under the anchor's bottom
+ * edge, clamped so the popover stays inside the viewport.
+ */
+export function placePopoverBelow(
+  anchorRect: DOMRect | null,
+  popoverSize: { width: number; height?: number },
+  desiredWidth: number,
+): PopoverPlacement {
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const anchorRight = anchorRect ? anchorRect.right : viewportWidth;
+  const anchorLeft = anchorRect ? anchorRect.left : 0;
+  const anchorBottom = anchorRect ? anchorRect.bottom : 0;
+
+  const maxWidth = Math.max(0, viewportWidth - MARGIN * 2);
+  const width = Math.min(desiredWidth, maxWidth);
+
+  const spaceOnLeft = anchorRight - MARGIN;
+  const spaceOnRight = viewportWidth - anchorLeft - MARGIN;
+  const growLeft = spaceOnLeft >= width || spaceOnLeft >= spaceOnRight;
+
+  let left: number;
+  if (growLeft) {
+    left = Math.min(
+      Math.max(anchorRight - width, MARGIN),
+      viewportWidth - width - MARGIN,
+    );
+  } else {
+    left = Math.min(
+      Math.max(anchorLeft, MARGIN),
+      viewportWidth - width - MARGIN,
+    );
+  }
+
+  const gap = 8;
+  const unclampedTop = anchorBottom + gap;
+  const height = popoverSize.height ?? 200;
+  const top = Math.max(MARGIN, Math.min(unclampedTop, viewportHeight - height - MARGIN));
+
+  return { top: Math.round(top), left: Math.round(left), width: Math.round(width) };
+}
+
+/**
  * Decide whether a capture-phase scroll event should dismiss a fixed-position
  * menu anchored to `anchor`.
  *
