@@ -1123,7 +1123,6 @@ contextBridge.exposeInMainWorld('electron', {
     revealMnemonic: () => ipcRenderer.invoke('userIdentity:revealMnemonic'),
     retrySubsidy: () => ipcRenderer.invoke('userIdentity:retrySubsidy'),
     retryChainSync: () => ipcRenderer.invoke('userIdentity:retryChainSync'),
-    syncToMobile: () => ipcRenderer.invoke('userIdentity:syncToMobile'),
   },
   chainBackup: {
     backup: () => ipcRenderer.invoke('chainBackup:backup'),
