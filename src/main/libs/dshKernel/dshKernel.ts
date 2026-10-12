@@ -67,6 +67,13 @@ export interface DshKernelOptions {
   nodePath?: string
   handlers: DshKernelHandlers
   log?: (level: 'info' | 'warn' | 'error', message: string, detail?: unknown) => void
+  /**
+   * Assistant chat-experience mode getter, handed to every session's
+   * DshEventMapper and evaluated per fold decision — the mode can flip
+   * mid-session while mappers stay alive. Absent means professional behavior
+   * (commentary folds into the thinking slot).
+   */
+  assistantModeProvider?: () => boolean
 }
 
 export class DshKernel {
@@ -597,7 +604,8 @@ export class DshKernel {
 
   private applyEvent(sessionId: string, envelope: DshSessionEventEnvelope): void {
     if (!sessionId) return
-    const mapper = this.mappers.get(sessionId) ?? new DshEventMapper()
+    const mapper = this.mappers.get(sessionId)
+      ?? new DshEventMapper({ assistantMode: this.opts.assistantModeProvider })
     this.mappers.set(sessionId, mapper)
     for (const action of mapper.consume(envelope)) {
       this.applyAction(sessionId, action)
