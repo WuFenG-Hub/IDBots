@@ -27,6 +27,7 @@ import A2AMessageItem from './A2AMessageItem';
 import UserMessageOriginBadge from './UserMessageOriginBadge';
 import MessageFeedbackControls from './MessageFeedbackControls';
 import { ThinkingBlock, splitThinkTaggedContent } from './ThinkingBlock';
+import { AssistantProgressNote } from './AssistantProgressNote';
 import { shouldHideA2AInternalMessage, lastA2AErrorDetail } from './a2aInternalMessageFilter';
 import {
   getTodoListSummaryText,
@@ -64,6 +65,8 @@ import {
 import { FolderIcon } from '@heroicons/react/24/solid';
 import { coworkService } from '../../services/cowork';
 import { configService } from '../../services/config';
+import { localStore } from '../../services/store';
+import { CONFIG_KEYS, type AppConfig, type ChatExperienceMode } from '../../config';
 import { projectsService } from '../../services/projects';
 import { fetchMetaidInfoByGlobalId, resolveMetaidAvatarSource } from '../../services/metabotInfoService';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
@@ -1653,6 +1656,8 @@ const AssistantMessageItem: React.FC<{
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   /** Copies the conversation up to and including this message into a new session. */
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
+  /** Assistant mode renders the embedded thinking segment as a progress note. */
+  isAssistantMode?: boolean;
 }> = ({
   message,
   resolveLocalFilePath,
@@ -1660,6 +1665,7 @@ const AssistantMessageItem: React.FC<{
   showCopyButton = false,
   onOpenLocalFile,
   onBranch,
+  isAssistantMode = false,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
   const displayContent = mapDisplayText ? mapDisplayText(message.content) : message.content;
@@ -1676,6 +1682,15 @@ const AssistantMessageItem: React.FC<{
   }
 
   const replyContent = thinkSplit.thinking ? thinkSplit.text : displayContent;
+  const thinkingMessage: CoworkMessage = {
+    ...message,
+    content: thinkSplit.thinking,
+    metadata: {
+      ...message.metadata,
+      isThinking: true,
+      isStreaming: Boolean(message.metadata?.isStreaming) && !thinkSplit.text,
+    },
+  };
 
   return (
     <div
@@ -1684,20 +1699,21 @@ const AssistantMessageItem: React.FC<{
       onMouseLeave={() => setIsHovered(false)}
     >
       {thinkSplit.thinking ? (
-        <div className="mb-3">
-          <ThinkingBlock
-            message={{
-              ...message,
-              content: thinkSplit.thinking,
-              metadata: {
-                ...message.metadata,
-                isThinking: true,
-                isStreaming: Boolean(message.metadata?.isStreaming) && !thinkSplit.text,
-              },
-            }}
-            mapDisplayText={mapDisplayText}
-          />
-        </div>
+        isAssistantMode ? (
+          <div className="mb-2">
+            <AssistantProgressNote
+              message={thinkingMessage}
+              mapDisplayText={mapDisplayText}
+            />
+          </div>
+        ) : (
+          <div className="mb-3">
+            <ThinkingBlock
+              message={thinkingMessage}
+              mapDisplayText={mapDisplayText}
+            />
+          </div>
+        )
       ) : null}
       {replyContent ? (
         <div className="dark:text-claude-darkText text-claude-text">
@@ -2052,6 +2068,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   isActiveTurn = false,
   onOpenLocalFile,
   onBranch,
+  isAssistantMode = false,
 }: {
   turn: ConversationTurn;
   resolveLocalFilePath?: (href: string, text: string) => string | null;
@@ -2064,6 +2081,9 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   isActiveTurn?: boolean;
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
+  /** Assistant mode: thinking renders as one-line progress notes and the
+   * "Worked for" collapse stays open so the notes remain visible inline. */
+  isAssistantMode?: boolean;
 }) {
   const visibleAssistantItems = getVisibleAssistantItems(turn.assistantItems);
   // Collapsed by default once a turn completes; the header expands to reveal
@@ -2230,6 +2250,16 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
           });
           return interrupted ? <div key={item.message.id}>{interrupted}</div> : null;
         }
+        if (isAssistantMode) {
+          return (
+            <AssistantProgressNote
+              key={item.message.id}
+              message={item.message}
+              mapDisplayText={mapDisplayText}
+              live={sessionLive && Boolean(item.message.metadata?.isStreaming)}
+            />
+          );
+        }
         return (
           <ThinkingBlock
             key={item.message.id}
@@ -2253,6 +2283,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
           showCopyButton={showCopyButtons && !hasToolGroupAfter}
           onOpenLocalFile={onOpenLocalFile}
           onBranch={onBranch}
+          isAssistantMode={isAssistantMode}
         />
       );
     }
@@ -2329,8 +2360,12 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   const workedForMs = deliveryMessage && turn.userMessage
     ? Math.max(0, deliveryMessage.timestamp - turn.userMessage.timestamp)
     : 0;
+  // Assistant mode never collapses the process: the progress notes (thinking
+  // rendered as one-liners) must stay visible inline, so there is no "Worked
+  // for X" header to expand — the full visible list renders in order.
   const showWorkedHeader = Boolean(
-    isTurnComplete
+    !isAssistantMode
+    && isTurnComplete
     && deliveryMessage
     && processItems.length > 0
     && turn.userMessage
@@ -2375,6 +2410,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
                   showCopyButton={showCopyButtons}
                   onOpenLocalFile={onOpenLocalFile}
                   onBranch={onBranch}
+                  isAssistantMode={isAssistantMode}
                 />
               </>
             ) : (
@@ -2456,6 +2492,26 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     const success = await coworkService.respondToPermission(pendingPermission.requestId, result);
     if (!success) setIsRespondingToPermission(false);
   }, [pendingPermission, isRespondingToPermission]);
+  // Chat experience mode (Settings > General). 'assistant' renders thinking as
+  // compact progress notes; 'professional' keeps the full transcript chrome.
+  // Kept reactive through the app_config store-changed broadcast (fired for
+  // every store:set, including writes from the Settings window) so flipping
+  // the mode re-renders the live transcript without a reload.
+  const [chatExperienceMode, setChatExperienceMode] = useState<ChatExperienceMode>(
+    () => configService.getConfig().chatExperienceMode ?? 'assistant',
+  );
+  useEffect(() => {
+    const unsubscribe = localStore.onChanged(({ key }) => {
+      if (key !== CONFIG_KEYS.APP_CONFIG) return;
+      // The write may come from another window, so re-read the persisted
+      // config instead of trusting this window's in-memory copy.
+      void localStore.getItem<AppConfig>(CONFIG_KEYS.APP_CONFIG).then((stored) => {
+        setChatExperienceMode(stored?.chatExperienceMode ?? 'assistant');
+      });
+    });
+    return unsubscribe;
+  }, []);
+  const isAssistantMode = chatExperienceMode === 'assistant';
   const isA2ASession = currentSession?.sessionType === 'a2a';
   const isPrivateA2ASession = useMemo(() => (
     currentSession?.sessionType === 'a2a'
@@ -3821,6 +3877,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             sessionLive={isStreaming || currentSession?.status === 'running'}
             isActiveTurn={currentSession?.status === 'running'}
             onOpenLocalFile={handleOpenLocalFile}
+            isAssistantMode={isAssistantMode}
           />
         </div>
       );
@@ -3856,6 +3913,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 isActiveTurn={currentSession?.status === 'running' && isLastTurn}
                 onOpenLocalFile={handleOpenLocalFile}
                 onBranch={handleBranchFromMessage}
+                isAssistantMode={isAssistantMode}
               />
             </div>
           )}
@@ -4203,6 +4261,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                   canResendDigitalDelivery={canResendDigitalDelivery}
                   isResendingDigitalDelivery={Boolean(resendingDeliveryOrderTxid)}
                   onResendDigitalDelivery={handleResendDigitalDelivery}
+                  isAssistantMode={isAssistantMode}
                 />
               </div>
             );

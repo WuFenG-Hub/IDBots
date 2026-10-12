@@ -5,6 +5,7 @@ import { i18nService } from '../../services/i18n';
 import { getDefaultMetabotAvatarUrl } from '../../utils/rendererAssetPaths';
 import { pickRenderableAvatarSource as pickSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import MarkdownContent from '../MarkdownContent';
+import { AssistantProgressNote } from './AssistantProgressNote';
 import {
   messengerBubbleClassName,
   messengerColumnClassName,
@@ -43,6 +44,8 @@ interface A2AMessageItemProps {
   canResendDigitalDelivery?: boolean;
   isResendingDigitalDelivery?: boolean;
   onResendDigitalDelivery?: (orderTxid: string) => void;
+  /** Assistant mode: thinking renders as a compact one-line progress note. */
+  isAssistantMode?: boolean;
 }
 
 const formatTime = (timestamp: number): string => {
@@ -695,6 +698,7 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
   canResendDigitalDelivery = false,
   isResendingDigitalDelivery = false,
   onResendDigitalDelivery,
+  isAssistantMode = false,
 }) => {
   // tool_use / tool_result: compact collapsible block (collapsed by default)
   if (message.type === 'tool_use' || message.type === 'tool_result') {
@@ -720,6 +724,16 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
   // Shown as a subtle indented block (no avatar, no bubble) so observers can
   // distinguish it from the actual on-chain reply.
   if (message.metadata?.isThinking) {
+    if (isAssistantMode) {
+      // Assistant mode: same alignment, but a single quiet status line.
+      return (
+        <div className="px-4 py-1">
+          <div className="ml-10">
+            <AssistantProgressNote message={message} />
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="px-4 py-1">
         <div className="ml-10 rounded-lg px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words italic dark:text-claude-darkTextSecondary text-claude-textSecondary dark:bg-claude-darkSurface bg-claude-surface border dark:border-claude-darkBorder border-claude-border">
