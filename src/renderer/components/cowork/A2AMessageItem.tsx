@@ -5,7 +5,6 @@ import { i18nService } from '../../services/i18n';
 import { getDefaultMetabotAvatarUrl } from '../../utils/rendererAssetPaths';
 import { pickRenderableAvatarSource as pickSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import MarkdownContent from '../MarkdownContent';
-import { AssistantProgressNote } from './AssistantProgressNote';
 import {
   messengerBubbleClassName,
   messengerColumnClassName,
@@ -44,7 +43,7 @@ interface A2AMessageItemProps {
   canResendDigitalDelivery?: boolean;
   isResendingDigitalDelivery?: boolean;
   onResendDigitalDelivery?: (orderTxid: string) => void;
-  /** Assistant mode: thinking renders as a compact one-line progress note. */
+  /** Assistant mode hides raw thinking and tool-call chrome entirely. */
   isAssistantMode?: boolean;
 }
 
@@ -724,18 +723,10 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
 
   // Thinking messages: internal reasoning, not sent on-chain.
   // Shown as a subtle indented block (no avatar, no bubble) so observers can
-  // distinguish it from the actual on-chain reply.
+  // distinguish it from the actual on-chain reply. Assistant mode hides raw
+  // reasoning entirely.
   if (message.metadata?.isThinking) {
-    if (isAssistantMode) {
-      // Assistant mode: same alignment, but a single quiet status line.
-      return (
-        <div className="px-4 py-1">
-          <div className="ml-10">
-            <AssistantProgressNote message={message} />
-          </div>
-        </div>
-      );
-    }
+    if (isAssistantMode) return null;
     return (
       <div className="px-4 py-1">
         <div className="ml-10 rounded-lg px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words italic dark:text-claude-darkTextSecondary text-claude-textSecondary dark:bg-claude-darkSurface bg-claude-surface border dark:border-claude-darkBorder border-claude-border">

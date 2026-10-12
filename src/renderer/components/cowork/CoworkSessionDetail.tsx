@@ -27,7 +27,6 @@ import A2AMessageItem from './A2AMessageItem';
 import UserMessageOriginBadge from './UserMessageOriginBadge';
 import MessageFeedbackControls from './MessageFeedbackControls';
 import { ThinkingBlock, splitThinkTaggedContent } from './ThinkingBlock';
-import { AssistantProgressNote } from './AssistantProgressNote';
 import { AssistantActivityIndicator } from './AssistantActivityIndicator';
 import { shouldHideA2AInternalMessage, lastA2AErrorDetail } from './a2aInternalMessageFilter';
 import {
@@ -1037,6 +1036,12 @@ const isVisibleAssistantTurnItem = (item: AssistantTurnItem, isAssistantMode = f
   if (isAssistantMode && (item.type === 'tool_group' || item.type === 'tool_result')) {
     return false;
   }
+  // Assistant mode never surfaces raw reasoning: thinking items stay out of
+  // the transcript entirely. The model's user-facing narration arrives as
+  // ordinary chat messages (metadata.narration) instead.
+  if (isAssistantMode && item.type === 'assistant' && item.message.metadata?.isThinking) {
+    return false;
+  }
   if (item.type === 'assistant' || item.type === 'system') {
     return isRenderableAssistantOrSystemMessage(item.message);
   }
@@ -1665,7 +1670,8 @@ const AssistantMessageItem: React.FC<{
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   /** Copies the conversation up to and including this message into a new session. */
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
-  /** Assistant mode renders the embedded thinking segment as a progress note. */
+  /** Assistant mode drops the embedded thinking segment (raw reasoning is
+   * never shown) and renders only the visible reply text. */
   isAssistantMode?: boolean;
 }> = ({
   message,
@@ -1707,22 +1713,13 @@ const AssistantMessageItem: React.FC<{
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
-      {thinkSplit.thinking ? (
-        isAssistantMode ? (
-          <div className="mb-2">
-            <AssistantProgressNote
-              message={thinkingMessage}
-              mapDisplayText={mapDisplayText}
-            />
-          </div>
-        ) : (
-          <div className="mb-3">
-            <ThinkingBlock
-              message={thinkingMessage}
-              mapDisplayText={mapDisplayText}
-            />
-          </div>
-        )
+      {thinkSplit.thinking && !isAssistantMode ? (
+        <div className="mb-3">
+          <ThinkingBlock
+            message={thinkingMessage}
+            mapDisplayText={mapDisplayText}
+          />
+        </div>
       ) : null}
       {replyContent ? (
         <div className="dark:text-claude-darkText text-claude-text">
@@ -2078,6 +2075,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   onOpenLocalFile,
   onBranch,
   isAssistantMode = false,
+  activityAvatar = null,
 }: {
   turn: ConversationTurn;
   resolveLocalFilePath?: (href: string, text: string) => string | null;
@@ -2090,11 +2088,26 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   isActiveTurn?: boolean;
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
-  /** Assistant mode: thinking renders as one-line progress notes and the
-   * "Worked for" collapse stays open so the notes remain visible inline. */
+  /** Assistant mode: raw thinking and tool-call chrome are hidden entirely
+   * (model narration arrives as ordinary chat bubbles), and the "Worked for"
+   * collapse stays disabled so the visible list renders in order. */
   isAssistantMode?: boolean;
+  /** Session bot avatar for the inline assistant-mode activity indicator. */
+  activityAvatar?: string | null;
 }) {
   const visibleAssistantItems = getVisibleAssistantItems(turn.assistantItems, isAssistantMode);
+  // This turn's messages feed the inline assistant-mode activity indicator's
+  // status derivation (an unresolved tool call reads as "working on it").
+  // Derived from the turn itself so memoized older turns keep stable props.
+  const activityMessages: CoworkMessage[] = [];
+  for (const item of turn.assistantItems) {
+    if (item.type === 'tool_group') {
+      activityMessages.push(item.group.toolUse);
+      if (item.group.toolResult) activityMessages.push(item.group.toolResult);
+    } else {
+      activityMessages.push(item.message);
+    }
+  }
   // Collapsed by default once a turn completes; the header expands to reveal
   // the working process (thinking, tool calls, intermediate notes).
   const [processExpanded, setProcessExpanded] = useState(false);
@@ -2260,14 +2273,10 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
           return interrupted ? <div key={item.message.id}>{interrupted}</div> : null;
         }
         if (isAssistantMode) {
-          return (
-            <AssistantProgressNote
-              key={item.message.id}
-              message={item.message}
-              mapDisplayText={mapDisplayText}
-              live={sessionLive && Boolean(item.message.metadata?.isStreaming)}
-            />
-          );
+          // Assistant mode filters thinking items out upstream
+          // (isVisibleAssistantTurnItem); this guard covers direct renders so
+          // raw reasoning can never leak back in.
+          return null;
         }
         return (
           <ThinkingBlock
@@ -2376,9 +2385,9 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   const workedForMs = deliveryMessage && turn.userMessage
     ? Math.max(0, deliveryMessage.timestamp - turn.userMessage.timestamp)
     : 0;
-  // Assistant mode never collapses the process: the progress notes (thinking
-  // rendered as one-liners) must stay visible inline, so there is no "Worked
-  // for X" header to expand — the full visible list renders in order.
+  // Assistant mode never collapses the process: raw thinking and tool calls
+  // are hidden entirely, so there is no "Worked for X" header to expand — the
+  // visible list (narration bubbles and replies) renders in order.
   const showWorkedHeader = Boolean(
     !isAssistantMode
     && isTurnComplete
@@ -2432,7 +2441,20 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
             ) : (
               visibleAssistantItems.map((item, index) => renderVisibleItem(item, index, visibleAssistantItems))
             )}
-            {showTypingIndicator && <TypingDots />}
+            {showTypingIndicator && (
+              // Assistant mode: the bot-avatar activity indicator sits inline
+              // at the reply position instead of the three dots; the
+              // above-composer bar still covers the whole running state.
+              isAssistantMode ? (
+                <AssistantActivityIndicator
+                  inline
+                  messages={activityMessages}
+                  avatar={activityAvatar}
+                />
+              ) : (
+                <TypingDots />
+              )
+            )}
             {showWorkedHeader && showInterruptedBanner && (
               renderSystemMessage({
                 id: 'dsh-turn-interrupted',
@@ -2508,8 +2530,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     const success = await coworkService.respondToPermission(pendingPermission.requestId, result);
     if (!success) setIsRespondingToPermission(false);
   }, [pendingPermission, isRespondingToPermission]);
-  // Chat experience mode (Settings > General). 'assistant' renders thinking as
-  // compact progress notes; 'professional' keeps the full transcript chrome.
+  // Chat experience mode (Settings > General). 'assistant' hides raw thinking
+  // and tool-call chrome (the model's narration arrives as ordinary chat
+  // bubbles); 'professional' keeps the full transcript chrome.
   // Kept reactive through the app_config store-changed broadcast (fired for
   // every store:set, including writes from the Settings window) so flipping
   // the mode re-renders the live transcript without a reload.
@@ -3894,6 +3917,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             isActiveTurn={currentSession?.status === 'running'}
             onOpenLocalFile={handleOpenLocalFile}
             isAssistantMode={isAssistantMode}
+            activityAvatar={sessionMetabot?.avatar ?? currentSession.metabotAvatar ?? null}
           />
         </div>
       );
@@ -3934,6 +3958,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 onOpenLocalFile={handleOpenLocalFile}
                 onBranch={handleBranchFromMessage}
                 isAssistantMode={isAssistantMode}
+                activityAvatar={sessionMetabot?.avatar ?? currentSession.metabotAvatar ?? null}
               />
             </div>
           )}
