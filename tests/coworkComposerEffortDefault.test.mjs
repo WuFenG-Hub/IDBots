@@ -76,13 +76,13 @@ test('a configured bot brain outranks the persisted global effort', () => {
   );
 });
 
-test('assistant chat-experience mode falls back to off instead of the persisted/model default', () => {
+test('assistant chat-experience mode forces reasoning off, ignoring session/brain/global rungs', () => {
   // Both per-turn chains (primary route and GT-02 fallback-brain route)
-  // replace the persisted-global / per-model default tail with 'off' when the
-  // owner picked the assistant chat experience — any reasoning pass runs
-  // before the first text token and would delay the opening sentence the mode
-  // promises. The session override and the bot brain effort rungs still win
-  // ahead of it, and the professional-mode chain (asserted above) stays
+  // force 'off' when the owner picked the assistant chat experience — any
+  // reasoning pass runs before the first text token and would delay the
+  // opening sentence the mode promises. The session override, the bot brain
+  // effort, and the persisted-global / per-model defaults are all ignored in
+  // assistant mode; the professional-mode chain (asserted above) stays
   // intact.
   assert.ok(
     coworkRunnerSource.includes('getPersistedChatExperienceMode'),
@@ -91,6 +91,14 @@ test('assistant chat-experience mode falls back to off instead of the persisted/
   const assistantRungs = coworkRunnerSource.match(/assistantMode\s*\?\s*'off'/g) ?? [];
   assert.ok(
     assistantRungs.length >= 2,
-    'coworkRunner: primary and fallback effort chains must both fall back to off in assistant mode',
+    'coworkRunner: primary and fallback effort chains must both force off in assistant mode',
+  );
+  // The force must short-circuit BEFORE the session/brain rungs, not sit
+  // behind them: neither chain may read effortOverride/brain effort ahead of
+  // the assistant-mode 'off'.
+  const leak = /effortOverride\s*\?\?[\s\S]{0,160}assistantMode\s*\?\s*'off'/;
+  assert.ok(
+    !leak.test(coworkRunnerSource),
+    'coworkRunner: assistant mode must not leave effortOverride/brain effort ahead of the off rung',
   );
 });

@@ -8731,23 +8731,21 @@ export class CoworkRunner extends EventEmitter {
       // (a null brain effort means "model default"); the persisted global
       // effort only fills in for sessions without any bot brain.
       const automationBrain = this.getSessionAutomationBrain(sessionId);
-      // Assistant chat-experience mode favors the fastest possible first
-      // visible token: it skips the persisted-global / per-model default tail
-      // on purpose, so a session with no explicit effort pick runs with
-      // reasoning 'off' — any reasoning pass runs before the first text token
-      // and would delay the opening sentence the mode promises. The session
-      // override and the bot brain effort still win; professional mode keeps
-      // the full chain unchanged.
+      // Assistant chat-experience mode forces reasoning fully off — no
+      // fallback chain at all: any reasoning pass runs before the first
+      // visible text token and would delay the opening sentence the mode
+      // promises, so the session override, the bot brain effort, and the
+      // persisted-global / per-model defaults are ALL ignored here.
+      // Professional mode keeps the full chain unchanged.
       const assistantMode = getPersistedChatExperienceMode() === 'assistant';
       const dshReasoningEffort = mapDshReasoningEffort(
-        toLlmEffortLevel(
-          activeSession.effortOverride
-            ?? automationBrain?.effort
-            ?? (assistantMode
-              ? 'off'
-              : (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? modelOptions?.reasoningEffort),
-        ),
-        activeSession.thinkingOverride ?? modelOptions?.thinking,
+        assistantMode
+          ? 'off'
+          : toLlmEffortLevel(
+            activeSession.effortOverride
+              ?? automationBrain?.effort
+              ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? modelOptions?.reasoningEffort),
+        assistantMode ? undefined : activeSession.thinkingOverride ?? modelOptions?.thinking,
         dshEffortDialect,
       );
       coworkLog('INFO', 'runDshSessionLocal', 'DSH reasoning effort for turn', {
@@ -8895,19 +8893,18 @@ export class CoworkRunner extends EventEmitter {
           turnOfficialDeepSeekNative = isNativeDeepSeekChatRoute(routeOverride);
           // Same effort chain as the primary route above, except the bot-brain
           // rung reads the FALLBACK brain's effort (that brain's model is the
-          // one now running the turn). The assistant-mode tail stays 'off'
-          // here too — a fallback resume must not re-introduce a reasoning
-          // pass ahead of the first visible token.
+          // one now running the turn). Assistant mode forces 'off' here too —
+          // a fallback resume must not re-introduce a reasoning pass ahead of
+          // the first visible token.
           const fallbackModelOptions = resolveModelOptions(routeOverride.model);
           turnReasoningEffort = mapDshReasoningEffort(
-            toLlmEffortLevel(
-              activeSession.effortOverride
-                ?? automationBrain?.fallbackEffort
-                ?? (assistantMode
-                  ? 'off'
-                  : (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? fallbackModelOptions?.reasoningEffort),
-            ),
-            activeSession.thinkingOverride ?? fallbackModelOptions?.thinking,
+            assistantMode
+              ? 'off'
+              : toLlmEffortLevel(
+                activeSession.effortOverride
+                  ?? automationBrain?.fallbackEffort
+                  ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? fallbackModelOptions?.reasoningEffort),
+            assistantMode ? undefined : activeSession.thinkingOverride ?? fallbackModelOptions?.thinking,
             turnOfficialDeepSeekNative ? 'deepseek-native' : 'generic',
           );
         }
