@@ -659,8 +659,70 @@ export class SqliteStore {
       if (!draftCols.includes('last_reviewed_at')) {
         this.db.run('ALTER TABLE capability_drafts ADD COLUMN last_reviewed_at INTEGER');
       }
+      // P1 memory reconciliation (design 2026-10-10 §4.4): the applicability
+      // conditions / residual uncertainty recorded at reconciliation time.
+      // NULL = never reconciled; both are host-written (never free-form LLM
+      // edits) and capped at 300 chars at parse time.
+      if (!draftCols.includes('conditions_text')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN conditions_text TEXT');
+      }
+      if (!draftCols.includes('uncertainty_text')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN uncertainty_text TEXT');
+      }
     } catch (error) {
       console.warn('migrate capability_drafts validation columns:', error);
+    }
+
+    // Dream-RSI self-curriculum (P0, design 2026-10-10 §3.3): targeted
+    // practice tasks proposed by the nightly dream. A proposal lands as
+    // 'pending' and only leaves that state through an explicit transition
+    // (approve/reject) or the lazy TTL expiry. CREATE TABLE IF NOT EXISTS is
+    // the idempotent first-run migration; every reader filters on explicit
+    // status values, so older builds simply never see this table's rows.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS dream_practice_proposals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        metabot_id INTEGER NOT NULL,
+        dream_date TEXT NOT NULL,
+        title TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        rationale TEXT,
+        target_refs_json TEXT NOT NULL DEFAULT '[]',
+        expected_evidence TEXT,
+        risk_class TEXT NOT NULL DEFAULT 'read_only',
+        status TEXT NOT NULL DEFAULT 'pending',
+        scheduled_task_id TEXT,
+        run_id TEXT,
+        outcome_summary TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_dream_practice_proposals_metabot_status
+      ON dream_practice_proposals(metabot_id, status, created_at DESC);
+    `);
+    // PRAGMA-guarded column heal, same pattern as capability_drafts above: a
+    // partial table left behind by an interrupted dev build self-repairs here.
+    try {
+      const proposalCols = (this.db.exec('PRAGMA table_info(dream_practice_proposals)')[0]?.values?.map((row) => row[1]) || []) as string[];
+      const addProposalColumn = (name: string, ddl: string) => {
+        if (!proposalCols.includes(name)) {
+          this.db.run(`ALTER TABLE dream_practice_proposals ADD COLUMN ${ddl}`);
+        }
+      };
+      addProposalColumn('target_refs_json', `target_refs_json TEXT NOT NULL DEFAULT '[]'`);
+      addProposalColumn('risk_class', `risk_class TEXT NOT NULL DEFAULT 'read_only'`);
+      addProposalColumn('status', `status TEXT NOT NULL DEFAULT 'pending'`);
+      addProposalColumn('rationale', 'rationale TEXT');
+      addProposalColumn('expected_evidence', 'expected_evidence TEXT');
+      addProposalColumn('scheduled_task_id', 'scheduled_task_id TEXT');
+      addProposalColumn('run_id', 'run_id TEXT');
+      addProposalColumn('outcome_summary', 'outcome_summary TEXT');
+      addProposalColumn('created_at', 'created_at INTEGER NOT NULL DEFAULT 0');
+      addProposalColumn('updated_at', 'updated_at INTEGER NOT NULL DEFAULT 0');
+    } catch (error) {
+      console.warn('migrate dream_practice_proposals columns:', error);
     }
 
     this.db.run(`

@@ -1183,6 +1183,32 @@ export class MetaIDKnowledgeStore {
   }
 
   /**
+   * Memory reconciliation `merge` action (design 2026-10-10 §4.3): append ONE
+   * host-templated pitfall line referencing a merged draft to an active
+   * procedure. No free-form edit of the procedure body; the pitfalls cap
+   * applies (a full list refuses the append instead of silently dropping an
+   * existing entry).
+   */
+  appendProcedurePitfall(id: string, line: string): boolean {
+    const text = asText(line).trim();
+    if (!text) return false;
+    const row = this.getOne<ProcedureRow>(
+      `SELECT * FROM metaid_knowledge_procedures WHERE id = ? AND status = 'active' LIMIT 1`,
+      [asText(id)],
+    );
+    if (!row) return false;
+    const pitfalls = parseTags(row.pitfalls_json);
+    if (pitfalls.length >= MAX_PROCEDURE_PITFALLS) return false;
+    pitfalls.push(text.length > MAX_PROCEDURE_PITFALL_LEN ? `${text.slice(0, MAX_PROCEDURE_PITFALL_LEN - 1)}…` : text);
+    this.db.run(
+      `UPDATE metaid_knowledge_procedures SET pitfalls_json = ?, updated_at = ? WHERE id = ?`,
+      [serializeTags(pitfalls), this.now(), row.id],
+    );
+    this.saveDb();
+    return true;
+  }
+
+  /**
    * Retire an active procedure by exact title (fingerprint match). The record
    * is kept (status='archived') so recall/hot layers stop surfacing it while
    * history stays inspectable — the lifecycle counterpart to upsert.

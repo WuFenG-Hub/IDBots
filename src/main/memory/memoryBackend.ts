@@ -123,6 +123,10 @@ export interface MemoryPolicy {
   memoryUserMemoriesMaxItems: number;
   dreamEnabled: boolean;
   hygieneEnabled: boolean;
+  /** Self-curriculum practice tasks (design 2026-10-10 §3.4); default off. */
+  practiceTasksEnabled: boolean;
+  /** Auto-approve read_only practice proposals (only effective with practiceTasksEnabled). */
+  practiceAutoApproveReadOnly: boolean;
   updatedAt: number;
 }
 
@@ -138,6 +142,10 @@ export interface MemoryEffectivePolicy {
   dreamEnabled: boolean;
   /** Whether the nightly hygiene (active-forgetting) pass covers this bot. */
   hygieneEnabled: boolean;
+  /** Self-curriculum practice tasks (design 2026-10-10 §3.4); default off. */
+  practiceTasksEnabled: boolean;
+  /** Auto-approve read_only practice proposals (only effective with practiceTasksEnabled). */
+  practiceAutoApproveReadOnly: boolean;
   source: 'global' | 'metabot';
 }
 
@@ -150,6 +158,8 @@ export type MemoryPolicyUpdates = Partial<Pick<
   | 'memoryUserMemoriesMaxItems'
   | 'dreamEnabled'
   | 'hygieneEnabled'
+  | 'practiceTasksEnabled'
+  | 'practiceAutoApproveReadOnly'
 >>;
 
 export interface ApplyTurnMemoryUpdatesOptions {

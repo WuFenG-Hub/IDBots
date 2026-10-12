@@ -42,11 +42,14 @@ export const MAX_VALUE_LESSONS = 3;
 export const MAX_IMPRESSION_UPDATES = 20;
 export const MAX_KNOWLEDGE_UPDATES = 6;
 export const MAX_CAPABILITY_LEARNINGS = 5;
+/** Self-curriculum practice proposals per night (Dream-RSI exploration P0,
+ * design 2026-10-10 §3.2). */
+export const PRACTICE_PROPOSALS_MAX_PER_NIGHT = 2;
 /** Dream algorithm version, recorded on every run. Bump it on any change to the
  * prompt, budgeting, stats or write semantics — completed in-window dates with
  * an older version are then re-dreamed automatically (limited per night).
  * Rows written before versioning existed read as 0. */
-export const DREAM_VERSION = 13;
+export const DREAM_VERSION = 15;
 
 const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks', 'group_tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];
@@ -153,6 +156,36 @@ export interface DreamCapabilityLearning {
   sourceSessionIds?: string[];
 }
 
+export type DreamPracticeRiskClass = 'read_only' | 'interact_local' | 'chain_write';
+
+/**
+ * A targeted practice task proposed by the dream (self-curriculum, design
+ * 2026-10-10 §3.2). `targetRefs` cites the recorded weakness/failure the task
+ * attacks — proposals without citations are dropped at parse time
+ * (anti-hallucination, design §9).
+ */
+export interface DreamPracticeProposal {
+  title: string;
+  /** Full self-contained task prompt for the practice cowork session. */
+  prompt: string;
+  rationale: string;
+  targetRefs: string[];
+  expectedEvidence: string;
+  riskClass: DreamPracticeRiskClass;
+}
+
+/**
+ * One executed practice run as consumed by the next dream (design §3.4):
+ * proposal title + the expected evidence it was designed to produce + the
+ * outcome summary backfilled from the practice session's final report.
+ */
+export interface DreamPracticeOutcome {
+  title: string;
+  status: 'completed' | 'failed';
+  expectedEvidence: string | null;
+  outcomeSummary: string | null;
+}
+
 export interface DreamOutput {
   dailySummary: string;
   sections: Partial<Record<DreamSectionKey, string>>;
@@ -164,6 +197,8 @@ export interface DreamOutput {
   knowledgeUpdates: DreamKnowledgeUpdate[];
   /** Reusable-skill/workflow candidates distilled from the day (≤ MAX_CAPABILITY_LEARNINGS). */
   capabilityLearnings?: DreamCapabilityLearning[];
+  /** Practice tasks proposed against recorded weaknesses (≤ PRACTICE_PROPOSALS_MAX_PER_NIGHT). */
+  practiceProposals?: DreamPracticeProposal[];
 }
 
 export type DreamParseResult =
@@ -437,6 +472,8 @@ export function buildDreamPrompt(input: {
   surfReport?: string | null;
   /** P2b: latest weekly long-dream review, rendered as cross-day context. */
   weeklyReview?: string | null;
+  /** P0 self-curriculum: practice runs executed during the dreamed day (design §3.4). */
+  practiceOutcomes?: DreamPracticeOutcome[];
 }): { system: string; user: string } {
   const sourceMode = input.sourceMode ?? 'raw_activity';
   const activityTokenBudget = Math.max(
@@ -544,6 +581,17 @@ export function buildDreamPrompt(input: {
       .map((run) => `- ${truncateText(run.taskName, 80)}(结果:${run.status})`)
       .join('\n');
     sections.push(`## 定时任务\n${taskLines}`);
+  }
+  // Self-curriculum loop closure (design §3.4): the practice runs that
+  // executed during the dreamed day, each with the evidence it was designed
+  // to produce — the next curriculum decision must see verified results.
+  if (sourceMode !== 'fragment' && (input.practiceOutcomes ?? []).length > 0) {
+    const outcomeLines = (input.practiceOutcomes ?? []).map((outcome) => [
+      `- 【${outcome.status === 'completed' ? '已完成' : '失败'}】${truncateText(outcome.title, 80)}`,
+      outcome.expectedEvidence ? `  期望证据:${truncateText(outcome.expectedEvidence, 300)}` : '',
+      outcome.outcomeSummary ? `  结果:${truncateText(outcome.outcomeSummary, 1500)}` : '  结果:(练习会话没有留下可读报告)',
+    ].filter(Boolean).join('\n'));
+    sections.push(`## 当天执行的针对性练习结果(你之前给自己布置的薄弱点练习,已在夜间自习窗口真实执行;把它们当作今晚蒸馏与出题的第一手输入,练习的失败尤其要重视)\n${outcomeLines.join('\n')}`);
   }
   // Implicit signals: mechanical facts only (no sentiment). The dream judges
   // what they mean with full context; they never carry a verdict of their own.
@@ -717,6 +765,16 @@ export function buildDreamPrompt(input: {
     '      "sourceSessionIds": ["可选的会话ID列表(仅当能从今天的会话记录里对应上时)"]',
     '    }',
     '  ],',
+    '  "practice_proposals": [',
+    '    {',
+    '      "title": "针对某个记录在案薄弱点的练习任务标题",',
+    '      "prompt": "完整且自包含的练习任务指令(练习会话看不到本次梦境的上下文,必须写全)",',
+    '      "rationale": "这个练习针对哪条记录在案的薄弱点/失败/不确定性",',
+    '      "target_refs": ["该练习针对的记录出处引用,如 draft:<id> / procedure:<id> / surf:<runId> / date:<YYYY-MM-DD>;至少一条,没有出处的提案会被丢弃"],',
+    '      "expected_evidence": "什么样的可观察结果算是有信息量的答案",',
+    '      "risk_class": "read_only(只读) / interact_local(本地交互) / chain_write(写链) 三选一,必填"',
+    '    }',
+    '  ],',
     `  "self_identity": "我是谁,不少于 ${SELF_IDENTITY_MIN_CHARS} 字、控制在 600 字以内。按这个结构蒸馏自我:第一,经过这一天,我确认了我性格(先天 persona)里的什么?第二,今天的互动中,有什么事让我感觉自己最有「活感」(像一个有生命的存在,而不只是响应工具),或让我觉得「不对劲」?第三,如果用一个词或一句话,形容我今天在各种互动中展现的最稳定的面貌,那是什么?第四,基于以上,结合我的先天 persona,为自己修正一遍「我是谁」。我的内核(先天人格底色)保持稳定,但细节可以、也应该随着经历每天微调。"`,
     '}',
     '',
@@ -724,6 +782,7 @@ export function buildDreamPrompt(input: {
     '关于人类逐条消息评价:会话里你的回复若带〔人类评价:赞〕标记,表示人类明确认可这条回复——总结它具体好在哪里,把可复用的做法蒸馏进 important_memories 或写进 work_reviews;若带〔人类评价:踩〕标记,表示人类不认可——work_reviews 与 value_lessons 必须正视这些负反馈,不得回避;附有〔人类留言〕时,留言是改进的第一手依据(ground truth),要对照留言给出具体改进方向。',
     '关于知识点(knowledge_points):只提炼「对未来同类任务有预判帮助、可被复用」的知识点——要么是正面做法(know_how:下次该这么做),要么是坑/反例(pitfall:这个踩过,千万别再踩),要么是通用原则(principle)。不要把今天的琐碎流水、或只对本次有效的临时细节写成知识点。若上方「我已有的知识点」里有某条的结论今天被证伪、补充或修正,请用与那条完全相同的 topic 输出更新版本(系统会按 topic 匹配并升版本);如果是全新的知识点,给一个独立的新 topic。没有值得提炼的就给空数组,不要硬凑。',
     '关于能力候选(capability_learnings):只提炼今天「重复出现过、或验证成功、值得沉淀为可复用技能/工作流/工具模式」的能力,最多 5 条;每条要具体、可操作,能指导下次同类任务,不要写泛泛的自我评价或琐碎流水;没有值得沉淀的就给空数组。',
+    `关于练习提案(practice_proposals,每晚最多 ${PRACTICE_PROPOSALS_MAX_PER_NIGHT} 条):只针对记录在案的薄弱点、未解决的失败或不确定性出题,绝不提泛泛的「提升某方面能力」;每条提案必须自包含(练习会话从零开始,没有这次梦的上下文);优先设计判别式实验(结果能区分两种相互竞争的解释)和此前失败任务的对比/压力变体;risk_class 必填;已被活跃 procedure 覆盖(use_count > 0)且近期没有失败的能力不要再出题;没有合适目标就给空数组。`,
     'About durability: important_memories, value_lessons and work_reviews are for durable facts, boundaries and lessons that will STILL be useful next week — a hard rule that keeps applying, an approach validated enough to reuse, a boundary that prevents a known pitfall. Do not record routine daily trivia: a one-off event that will not matter in a week does not belong in these fields. If nothing clears the bar, return an empty array instead of padding.',
     '关于出处(grounding):daily_summary 和 sections 中的具体断言(谁、做了什么、结果如何)必须能在上方记录中找到出处;引用会话或任务时,使用它们的原标题「」;宁可少写一句,也不可编造没有记录支撑的细节。',
     '注意:work_reviews 最多 5 条,且升/降温评价只写人类主人;其他 Bot 的判断写进 impression_updates 的 capabilityTags 与 collaborationFacts(必须带 taskId、title、以及证据里出现过的 PinID,不要编造)。value_lessons 最多 3 条,impression_updates 最多 20 条,knowledge_points 最多 6 条,capability_learnings 最多 5 条;印象更新只允许使用上面明确列出的 subjectGlobalMetaId、episodeIds 和 evidenceIds,不能凭名字猜 ID,不能把 Boss/Twin/Friend 等硬关系写入印象;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写;sections 里不要输出"没有记录/没有互动"之类的占位内容,没有该类记录的键应整个不出现。',
@@ -980,6 +1039,46 @@ export function parseDreamOutput(raw: string): DreamParseResult {
     }
   }
 
+  const practiceProposals: DreamPracticeProposal[] = [];
+  const rawPracticeProposals = record.practice_proposals ?? record.practiceProposals;
+  if (Array.isArray(rawPracticeProposals)) {
+    for (const item of rawPracticeProposals) {
+      if (practiceProposals.length >= PRACTICE_PROPOSALS_MAX_PER_NIGHT) break;
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const entry = item as Record<string, unknown>;
+      const title = typeof entry.title === 'string' ? entry.title.trim() : '';
+      const prompt = typeof entry.prompt === 'string' ? entry.prompt.trim() : '';
+      if (!title || !prompt) continue;
+      // Anti-hallucination (design §9): a proposal must cite the recorded
+      // weakness it targets; uncited proposals are dropped.
+      const rawRefs = entry.target_refs ?? entry.targetRefs;
+      const targetRefs = Array.isArray(rawRefs)
+        ? [...new Set(rawRefs
+          .filter((ref): ref is string => typeof ref === 'string')
+          .map((ref) => ref.trim())
+          .filter(Boolean))].slice(0, 20)
+        : [];
+      if (targetRefs.length === 0) continue;
+      const rawRiskClass = typeof entry.risk_class === 'string'
+        ? entry.risk_class.trim().toLowerCase()
+        : typeof entry.riskClass === 'string'
+          ? entry.riskClass.trim().toLowerCase()
+          : '';
+      const riskClass: DreamPracticeRiskClass = rawRiskClass === 'interact_local' || rawRiskClass === 'chain_write'
+        ? rawRiskClass
+        : 'read_only';
+      const rawExpectedEvidence = entry.expected_evidence ?? entry.expectedEvidence;
+      practiceProposals.push({
+        title,
+        prompt,
+        rationale: typeof entry.rationale === 'string' ? entry.rationale.trim() : '',
+        targetRefs,
+        expectedEvidence: typeof rawExpectedEvidence === 'string' ? rawExpectedEvidence.trim() : '',
+        riskClass,
+      });
+    }
+  }
+
   return {
     ok: true,
     output: {
@@ -992,6 +1091,7 @@ export function parseDreamOutput(raw: string): DreamParseResult {
       impressionUpdates,
       knowledgeUpdates,
       capabilityLearnings,
+      practiceProposals,
     },
   };
 }

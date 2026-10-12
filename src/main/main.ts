@@ -399,7 +399,8 @@ import {
   getSocialPostComments as getSocialPostCommentsRemote,
 } from './services/socialRecallService';
 import { searchMetaweb as searchMetawebRemote } from './services/metawebSearchService';
-import { readMetawebPin as readMetawebPinRemote } from './services/metawebPinService';
+import { readMetawebPin as readMetawebPinRemote, MetawebPinNotFoundError } from './services/metawebPinService';
+import { fetchRawTxHexFromMetalet } from './services/txTransferVerification';
 import {
   metawebPinsBatch as metawebPinsBatchRemote,
   metawebPinVersions as metawebPinVersionsRemote,
@@ -4543,6 +4544,61 @@ const startStartupNightlyServices = (): void => {
           try { win.webContents.send(channel as string, data); } catch { /* ignore */ }
         }
       });
+    },
+    // Self-curriculum materialization (design 2026-10-10 §3.4): the same host
+    // path as ScheduledTaskAgentControl.createTask — a one-shot 'at' task in
+    // the night window; a schedule that never fires rolls back and throws.
+    createPracticeScheduledTask: (input) => {
+      const store = getScheduledTaskStore();
+      const task = store.createTask({
+        name: input.name,
+        description: input.description,
+        schedule: { type: 'at', datetime: new Date(input.scheduleAtMs).toISOString() },
+        prompt: input.prompt,
+        workingDirectory: resolveExistingTaskWorkingDirectory(getCoworkStore().getConfig().workingDirectory),
+        systemPrompt: '',
+        executionMode: 'auto',
+        metabotId: input.metabotId,
+        targetSessionId: null,
+        expiresAt: null,
+        notifyPlatforms: [],
+        enabled: true,
+      });
+      if (task.state.nextRunAtMs == null) {
+        store.deleteTask(task.id);
+        throw new Error('The practice task schedule never fires — not materializing the proposal.');
+      }
+      getScheduler().reschedule();
+      return { id: task.id };
+    },
+    // Chain-grounded verification for the replay gate (design §5.2): all
+    // reads are read-only; every failure degrades to UNVERIFIED inside the
+    // digest builder. metatask node-level verification is deferred — a
+    // metatask root pin id still resolves through readPin (existence).
+    chainEvidence: {
+      readPin: async (pinId) => {
+        const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+        const pin = await readMetawebPinRemote(pinId, baseUrl ? { baseUrl } : undefined);
+        return { path: pin.path, protocol: pin.protocol, createdAt: pin.createdAt };
+      },
+      fetchRawTx: async (txid) => {
+        // The txid's chain is unknown from the reference alone — try the
+        // chains in fleet-usage order, first hit wins.
+        for (const chain of ['mvc', 'btc', 'doge'] as const) {
+          try {
+            const hex = await fetchRawTxHexFromMetalet(chain, txid);
+            if (hex) return hex;
+          } catch {
+            // Try the next chain.
+          }
+        }
+        return '';
+      },
+      findOrdersByPaymentTxid: (txid) =>
+        getServiceOrderStore()
+          .listOrdersByPaymentTxid(txid)
+          .map((order) => ({ id: order.id, status: order.status })),
+      isPinNotFound: (error) => error instanceof MetawebPinNotFoundError,
     },
   });
 
@@ -12631,6 +12687,8 @@ if (!gotTheLock) {
     memoryUserMemoriesMaxItems?: number;
     dreamEnabled?: boolean;
     hygieneEnabled?: boolean;
+    practiceTasksEnabled?: boolean;
+    practiceAutoApproveReadOnly?: boolean;
   }) => {
     try {
       const store = getCoworkStore();
@@ -12657,6 +12715,10 @@ if (!gotTheLock) {
             : undefined,
         hygieneEnabled: typeof input?.hygieneEnabled === 'boolean' ? input.hygieneEnabled : undefined,
         dreamEnabled: typeof input?.dreamEnabled === 'boolean' ? input.dreamEnabled : undefined,
+        practiceTasksEnabled:
+          typeof input?.practiceTasksEnabled === 'boolean' ? input.practiceTasksEnabled : undefined,
+        practiceAutoApproveReadOnly:
+          typeof input?.practiceAutoApproveReadOnly === 'boolean' ? input.practiceAutoApproveReadOnly : undefined,
       });
       return { success: true, policy };
     } catch (error) {

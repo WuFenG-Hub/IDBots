@@ -130,6 +130,10 @@ const SCOPED_USER_MEMORIES_BACKFILL_KEY = 'userMemories.scopeBackfill.v1.complet
 const METAWEB_ORDER_SESSION_MIGRATION_KEY = 'cowork.metawebOrderSessionsToPeerConversations.v1.completed';
 const METAWEB_ORDER_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebOrderSimplemsgMetadata.v1.completed';
 const METAWEB_PRIVATE_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebPrivateSimplemsgMetadata.v1.completed';
+/** Self-curriculum practice proposals (design 2026-10-10 §3.3): a 'pending'
+ * proposal the owner never acted on expires after this many days. The sweep is
+ * lazy — it runs inside every read/transition of the table. */
+export const PRACTICE_PROPOSAL_TTL_DAYS = 3;
 /**
  * Canonical JSON.stringify spelling of the metaweb-private sourceChannel flag.
  * Every metadata write goes through this store's stringify, so a LIKE on this
@@ -234,6 +238,10 @@ function parseCoworkTranscriptCursor(raw: unknown): CoworkTranscriptCursor | nul
 function normalizeMemoryGuardLevel(value: string | undefined): CoworkMemoryGuardLevel {
   if (value === 'strict' || value === 'standard' || value === 'relaxed') return value;
   return DEFAULT_MEMORY_GUARD_LEVEL;
+}
+
+function normalizeDreamPracticeProposalRiskClass(value?: string | null): DreamPracticeProposalRiskClass {
+  return value === 'interact_local' || value === 'chain_write' ? value : 'read_only';
 }
 
 function parseBooleanConfig(value: string | undefined, fallback: boolean): boolean {
@@ -912,6 +920,10 @@ export interface CapabilityDraft {
   promotedProcedureId: string | null;
   /** P1 re-review: the last time the verdict panel looked at this draft (NULL = never). */
   lastReviewedAt: number | null;
+  /** Memory reconciliation (design 2026-10-10 §4.4): recorded applicability
+   * conditions / residual uncertainty (NULL = never reconciled). */
+  conditionsText: string | null;
+  uncertaintyText: string | null;
 }
 
 interface CapabilityDraftRow {
@@ -931,6 +943,67 @@ interface CapabilityDraftRow {
   promoted_at?: number | string | null;
   promoted_procedure_id?: string | null;
   last_reviewed_at?: number | string | null;
+  conditions_text?: string | null;
+  uncertainty_text?: string | null;
+}
+
+/** Risk class of a dream-proposed practice task (design 2026-10-10 §3.2). */
+export type DreamPracticeProposalRiskClass = 'read_only' | 'interact_local' | 'chain_write';
+
+/**
+ * Lifecycle of one dream_practice_proposals row (design 2026-10-10 §3.3):
+ * pending → approved → scheduled → completed|failed; pending → expired (lazy
+ * TTL); pending|approved → rejected (owner, any point before scheduled).
+ */
+export type DreamPracticeProposalStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'scheduled'
+  | 'completed'
+  | 'failed'
+  | 'expired';
+
+/** One dream_practice_proposals row (self-curriculum, design 2026-10-10 §3.3). */
+export interface DreamPracticeProposalRecord {
+  id: number;
+  metabotId: number;
+  dreamDate: string;
+  title: string;
+  /** Full self-contained task prompt for the practice cowork session. */
+  prompt: string;
+  rationale: string | null;
+  /** Recorded-weakness citations (draft:<id>, procedure:<id>, surf:<runId>, date:<YYYY-MM-DD>). */
+  targetRefs: string[];
+  expectedEvidence: string | null;
+  riskClass: DreamPracticeProposalRiskClass;
+  status: DreamPracticeProposalStatus;
+  /** Link to the materialized scheduled task (scheduled_tasks.id), NULL until scheduled. */
+  scheduledTaskId: string | null;
+  /** Link to the executed run (scheduled_task_runs.id), NULL until executed. */
+  runId: string | null;
+  /** Filled by the next dream's consumption pass. */
+  outcomeSummary: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface DreamPracticeProposalRow {
+  id: number | string;
+  metabot_id: number | string;
+  dream_date: string;
+  title: string;
+  prompt: string;
+  rationale?: string | null;
+  target_refs_json?: string | null;
+  expected_evidence?: string | null;
+  risk_class?: string | null;
+  status: string;
+  scheduled_task_id?: string | null;
+  run_id?: string | null;
+  outcome_summary?: string | null;
+  created_at: number | string;
+  updated_at: number | string;
 }
 
 export interface CoworkUserMemoryStats {
@@ -981,6 +1054,10 @@ export interface CoworkMemoryPolicy {
   memoryUserMemoriesMaxItems: number;
   dreamEnabled: boolean;
   hygieneEnabled: boolean;
+  /** Self-curriculum practice tasks (design 2026-10-10 §3.4); default off. */
+  practiceTasksEnabled: boolean;
+  /** Auto-approve read_only practice proposals (only effective with practiceTasksEnabled). */
+  practiceAutoApproveReadOnly: boolean;
   updatedAt: number;
 }
 
@@ -994,6 +1071,10 @@ export interface CoworkEffectiveMemoryPolicy {
   memoryPromptMaxChars: number;
   dreamEnabled: boolean;
   hygieneEnabled: boolean;
+  /** Self-curriculum practice tasks (design 2026-10-10 §3.4); default off. */
+  practiceTasksEnabled: boolean;
+  /** Auto-approve read_only practice proposals (only effective with practiceTasksEnabled). */
+  practiceAutoApproveReadOnly: boolean;
   source: 'global' | 'metabot';
 }
 
@@ -1176,6 +1257,8 @@ interface CoworkMemoryPolicyRow {
   memory_user_memories_max_items: number | string | null;
   dream_enabled?: number | string | null;
   hygiene_enabled?: number | string | null;
+  practice_tasks_enabled?: number | string | null;
+  practice_auto_approve_read_only?: number | string | null;
   updated_at: number | string | null;
 }
 
@@ -1811,6 +1894,17 @@ export class CoworkStore implements MemoryBackend {
       }
       if (!columns.includes('hygiene_enabled')) {
         this.db.run('ALTER TABLE metabot_memory_policies ADD COLUMN hygiene_enabled INTEGER NOT NULL DEFAULT 1');
+        changed = true;
+      }
+      // Self-curriculum practice tasks (design 2026-10-10 §3.4): opt-in per
+      // bot (default off); the auto-approve knob only matters when the feature
+      // is on and defaults to on so enabling the feature is one switch.
+      if (!columns.includes('practice_tasks_enabled')) {
+        this.db.run('ALTER TABLE metabot_memory_policies ADD COLUMN practice_tasks_enabled INTEGER NOT NULL DEFAULT 0');
+        changed = true;
+      }
+      if (!columns.includes('practice_auto_approve_read_only')) {
+        this.db.run('ALTER TABLE metabot_memory_policies ADD COLUMN practice_auto_approve_read_only INTEGER NOT NULL DEFAULT 1');
         changed = true;
       }
       if (!columns.includes('updated_at')) {
@@ -2565,13 +2659,16 @@ export class CoworkStore implements MemoryBackend {
         memoryPromptMaxChars: config.memoryPromptMaxChars,
         dreamEnabled: true,
         hygieneEnabled: true,
+        practiceTasksEnabled: false,
+        practiceAutoApproveReadOnly: true,
         source: 'global',
       };
     }
 
     const row = this.getOne<CoworkMemoryPolicyRow>(`
       SELECT metabot_id, memory_enabled, memory_implicit_update_enabled, memory_llm_judge_enabled,
-             memory_guard_level, memory_user_memories_max_items, dream_enabled, hygiene_enabled, updated_at
+             memory_guard_level, memory_user_memories_max_items, dream_enabled, hygiene_enabled,
+             practice_tasks_enabled, practice_auto_approve_read_only, updated_at
       FROM metabot_memory_policies
       WHERE metabot_id = ?
       LIMIT 1
@@ -2588,6 +2685,8 @@ export class CoworkStore implements MemoryBackend {
         memoryPromptMaxChars: config.memoryPromptMaxChars,
         dreamEnabled: true,
         hygieneEnabled: true,
+        practiceTasksEnabled: false,
+        practiceAutoApproveReadOnly: true,
         source: 'global',
       };
     }
@@ -2609,6 +2708,8 @@ export class CoworkStore implements MemoryBackend {
       memoryPromptMaxChars: config.memoryPromptMaxChars,
       dreamEnabled: normalizeDbBoolean(row.dream_enabled, true),
       hygieneEnabled: normalizeDbBoolean(row.hygiene_enabled, true),
+      practiceTasksEnabled: normalizeDbBoolean(row.practice_tasks_enabled, false),
+      practiceAutoApproveReadOnly: normalizeDbBoolean(row.practice_auto_approve_read_only, true),
       source: 'metabot',
     };
   }
@@ -2629,6 +2730,8 @@ export class CoworkStore implements MemoryBackend {
       | 'memoryUserMemoriesMaxItems'
       | 'dreamEnabled'
       | 'hygieneEnabled'
+      | 'practiceTasksEnabled'
+      | 'practiceAutoApproveReadOnly'
     >>
   ): CoworkMemoryPolicy {
     const resolvedMetabotId = parseIdNumber(metabotId);
@@ -2665,13 +2768,20 @@ export class CoworkStore implements MemoryBackend {
     const nextHygieneEnabled = updates.hygieneEnabled !== undefined
       ? Boolean(updates.hygieneEnabled)
       : base.hygieneEnabled;
+    const nextPracticeTasksEnabled = updates.practiceTasksEnabled !== undefined
+      ? Boolean(updates.practiceTasksEnabled)
+      : base.practiceTasksEnabled;
+    const nextPracticeAutoApproveReadOnly = updates.practiceAutoApproveReadOnly !== undefined
+      ? Boolean(updates.practiceAutoApproveReadOnly)
+      : base.practiceAutoApproveReadOnly;
     const now = Date.now();
 
     this.db.run(`
       INSERT INTO metabot_memory_policies (
         metabot_id, memory_enabled, memory_implicit_update_enabled, memory_llm_judge_enabled,
-        memory_guard_level, memory_user_memories_max_items, dream_enabled, hygiene_enabled, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        memory_guard_level, memory_user_memories_max_items, dream_enabled, hygiene_enabled,
+        practice_tasks_enabled, practice_auto_approve_read_only, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(metabot_id) DO UPDATE SET
         memory_enabled = excluded.memory_enabled,
         memory_implicit_update_enabled = excluded.memory_implicit_update_enabled,
@@ -2680,6 +2790,8 @@ export class CoworkStore implements MemoryBackend {
         memory_user_memories_max_items = excluded.memory_user_memories_max_items,
         dream_enabled = excluded.dream_enabled,
         hygiene_enabled = excluded.hygiene_enabled,
+        practice_tasks_enabled = excluded.practice_tasks_enabled,
+        practice_auto_approve_read_only = excluded.practice_auto_approve_read_only,
         updated_at = excluded.updated_at
     `, [
       resolvedMetabotId,
@@ -2690,6 +2802,8 @@ export class CoworkStore implements MemoryBackend {
       nextMaxItems,
       nextDreamEnabled ? 1 : 0,
       nextHygieneEnabled ? 1 : 0,
+      nextPracticeTasksEnabled ? 1 : 0,
+      nextPracticeAutoApproveReadOnly ? 1 : 0,
       now,
     ]);
     this.saveDb();
@@ -2703,6 +2817,8 @@ export class CoworkStore implements MemoryBackend {
       memoryUserMemoriesMaxItems: nextMaxItems,
       dreamEnabled: nextDreamEnabled,
       hygieneEnabled: nextHygieneEnabled,
+      practiceTasksEnabled: nextPracticeTasksEnabled,
+      practiceAutoApproveReadOnly: nextPracticeAutoApproveReadOnly,
       updatedAt: now,
     };
   }
@@ -7198,7 +7314,7 @@ export class CoworkStore implements MemoryBackend {
     const sql = `
       SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
              validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at
+             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
       FROM capability_drafts
       ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY created_at DESC, id DESC
@@ -7222,6 +7338,8 @@ export class CoworkStore implements MemoryBackend {
       promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
       promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
       lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
+      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
+      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
     }));
   }
 
@@ -7295,7 +7413,7 @@ export class CoworkStore implements MemoryBackend {
     const rows = this.getAll<CapabilityDraftRow>(`
       SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
              validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at
+             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
       FROM capability_drafts
       WHERE metabot_id = ?
         AND status = 'validated'
@@ -7323,6 +7441,8 @@ export class CoworkStore implements MemoryBackend {
       promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
       promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
       lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
+      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
+      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
     }));
   }
 
@@ -7362,7 +7482,10 @@ export class CoworkStore implements MemoryBackend {
   updateCapabilityDraftValidation(input: {
     id: number;
     metabotId: number;
-    status: 'draft' | 'validated' | 'rejected';
+    /** 'disputed' (design §4.3): neither validated nor rejected — a claim the
+     * reconciliation pass could not resolve; it re-enters validation the next
+     * night and auto-rejects after DISPUTED_AUTO_REJECT_DAYS. */
+    status: 'draft' | 'validated' | 'rejected' | 'disputed';
     validationScore?: number | null;
     validationNotes?: string | null;
   }): boolean {
@@ -7398,6 +7521,130 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Memory reconciliation, `keep` action (design 2026-10-10 §4.3): record the
+   * rule's applicability conditions and residual uncertainty on the draft —
+   * the paper's "preserve the conditions and uncertainty of an experience".
+   * Status and score stay untouched.
+   */
+  setCapabilityDraftConditions(input: {
+    id: number;
+    metabotId: number;
+    conditionsText?: string | null;
+    uncertaintyText?: string | null;
+  }): boolean {
+    const id = Number(input.id);
+    const metabotId = Number(input.metabotId);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(metabotId) || metabotId <= 0) {
+      return false;
+    }
+    this.db.run(`
+      UPDATE capability_drafts
+      SET conditions_text = ?, uncertainty_text = ?
+      WHERE id = ? AND metabot_id = ?
+    `, [
+      typeof input.conditionsText === 'string' && input.conditionsText.trim()
+        ? input.conditionsText.trim()
+        : null,
+      typeof input.uncertaintyText === 'string' && input.uncertaintyText.trim()
+        ? input.uncertaintyText.trim()
+        : null,
+      id,
+      metabotId,
+    ]);
+    const updated = (this.db.getRowsModified?.() || 0) > 0;
+    if (updated) {
+      this.saveDb();
+    }
+    return updated;
+  }
+
+  /**
+   * Memory reconciliation, `narrow` action (design §4.3): the draft text is
+   * rewritten by the HOST TEMPLATE — original text + "Applies when:" +
+   * "Untested:" — never free-form LLM output; the validation score is
+   * unchanged. The conditions/uncertainty columns are set alongside.
+   */
+  narrowCapabilityDraft(input: {
+    id: number;
+    metabotId: number;
+    conditionsText: string;
+    uncertaintyText?: string | null;
+  }): boolean {
+    const id = Number(input.id);
+    const metabotId = Number(input.metabotId);
+    const conditions = String(input.conditionsText ?? '').trim();
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(metabotId) || metabotId <= 0 || !conditions) {
+      return false;
+    }
+    const existing = this.getOne<{ description: string }>(
+      'SELECT description FROM capability_drafts WHERE id = ? AND metabot_id = ? LIMIT 1',
+      [id, metabotId],
+    );
+    if (!existing) return false;
+    const uncertainty = typeof input.uncertaintyText === 'string' ? input.uncertaintyText.trim() : '';
+    const narrowed = [
+      existing.description,
+      `Applies when: ${conditions}`,
+      uncertainty ? `Untested: ${uncertainty}` : '',
+    ].filter(Boolean).join('\n');
+    this.db.run(`
+      UPDATE capability_drafts
+      SET description = ?, conditions_text = ?, uncertainty_text = ?
+      WHERE id = ? AND metabot_id = ?
+    `, [narrowed, conditions, uncertainty || null, id, metabotId]);
+    const updated = (this.db.getRowsModified?.() || 0) > 0;
+    if (updated) {
+      this.saveDb();
+    }
+    return updated;
+  }
+
+  /**
+   * Disputed drafts whose last verdict-panel contact is older than
+   * `olderThanMs` (design §4.4: unresolved claims auto-reject after 7 nights).
+   * last_reviewed_at (falling back to validated_at, then created_at) is the
+   * "disputed since" anchor — entering disputed stamps it, and only a real
+   * verdict moves it.
+   */
+  listStaleDisputedCapabilityDrafts(
+    metabotId: number,
+    options: { olderThanMs: number; limit?: number },
+  ): CapabilityDraft[] {
+    const limit = Math.max(1, Math.floor(options.limit ?? 10));
+    const rows = this.getAll<CapabilityDraftRow>(`
+      SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
+             validation_score, validation_notes, validated_at, times_injected, last_injected_at,
+             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
+      FROM capability_drafts
+      WHERE metabot_id = ?
+        AND status = 'disputed'
+        AND COALESCE(last_reviewed_at, validated_at, created_at) < ?
+      ORDER BY COALESCE(last_reviewed_at, validated_at, created_at) ASC, id ASC
+      LIMIT ?
+    `, [metabotId, Math.floor(Number(options.olderThanMs) || 0), limit]);
+    return rows.map((row) => ({
+      id: Number(row.id),
+      metabotId: Number(row.metabot_id),
+      dreamDate: String(row.dream_date),
+      title: String(row.title),
+      description: String(row.description),
+      capabilityType: String(row.capability_type),
+      status: String(row.status),
+      createdAt: Number(row.created_at),
+      validationScore: row.validation_score == null ? null : Number(row.validation_score),
+      validationNotes: row.validation_notes == null ? null : String(row.validation_notes),
+      validatedAt: row.validated_at == null ? null : Number(row.validated_at),
+      timesInjected: Math.max(0, Math.floor(Number(row.times_injected) || 0)),
+      lastInjectedAt: row.last_injected_at == null ? null : Number(row.last_injected_at),
+      promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
+      promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
+      lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
+      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
+      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
+    }));
+  }
+
+  /**
    * Candidates for the nightly periodic re-review (Dream-RSI P1): VALIDATED
    * drafts whose last verdict-panel contact (last_reviewed_at, falling back
    * to validated_at for pre-migration rows) is older than `olderThanMs`,
@@ -7413,7 +7660,7 @@ export class CoworkStore implements MemoryBackend {
     const rows = this.getAll<CapabilityDraftRow>(`
       SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
              validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at
+             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
       FROM capability_drafts
       WHERE metabot_id = ?
         AND status = 'validated'
@@ -7439,6 +7686,8 @@ export class CoworkStore implements MemoryBackend {
       promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
       promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
       lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
+      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
+      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
     }));
   }
 
@@ -7510,6 +7759,348 @@ export class CoworkStore implements MemoryBackend {
       this.saveDb();
     }
     return deleted;
+  }
+
+  private mapDreamPracticeProposalRow(row: DreamPracticeProposalRow): DreamPracticeProposalRecord {
+    let targetRefs: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(row.target_refs_json ?? '[]');
+      if (Array.isArray(parsed)) {
+        targetRefs = parsed.filter((ref): ref is string => typeof ref === 'string');
+      }
+    } catch {
+      targetRefs = [];
+    }
+    return {
+      id: Number(row.id),
+      metabotId: Number(row.metabot_id),
+      dreamDate: String(row.dream_date),
+      title: String(row.title),
+      prompt: String(row.prompt),
+      rationale: row.rationale == null ? null : String(row.rationale),
+      targetRefs,
+      expectedEvidence: row.expected_evidence == null ? null : String(row.expected_evidence),
+      riskClass: normalizeDreamPracticeProposalRiskClass(row.risk_class),
+      status: String(row.status) as DreamPracticeProposalStatus,
+      scheduledTaskId: row.scheduled_task_id == null ? null : String(row.scheduled_task_id),
+      runId: row.run_id == null ? null : String(row.run_id),
+      outcomeSummary: row.outcome_summary == null ? null : String(row.outcome_summary),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  /**
+   * Insert dream-proposed practice tasks into `dream_practice_proposals`
+   * (self-curriculum, design 2026-10-10 §3.3). Every row lands as 'pending';
+   * approval and scheduling are separate, deliberate transitions. Entries with
+   * an empty title/prompt are skipped; an unknown risk class falls back to
+   * 'read_only'. Returns the number of rows inserted.
+   */
+  insertDreamPracticeProposals(
+    metabotId: number,
+    dreamDate: string,
+    proposals: Array<{
+      title?: string | null;
+      prompt?: string | null;
+      rationale?: string | null;
+      targetRefs?: string[] | null;
+      expectedEvidence?: string | null;
+      riskClass?: string | null;
+    }>,
+  ): number {
+    const now = Date.now();
+    let inserted = 0;
+    for (const proposal of Array.isArray(proposals) ? proposals : []) {
+      const title = String(proposal?.title ?? '').trim();
+      const prompt = String(proposal?.prompt ?? '').trim();
+      if (!title || !prompt || !Number.isInteger(metabotId) || metabotId <= 0) {
+        continue;
+      }
+      const rationale = String(proposal?.rationale ?? '').trim() || null;
+      const expectedEvidence = String(proposal?.expectedEvidence ?? '').trim() || null;
+      const targetRefs = Array.isArray(proposal?.targetRefs)
+        ? [...new Set(proposal.targetRefs.map((ref) => String(ref ?? '').trim()).filter(Boolean))]
+        : [];
+      this.db.run(`
+        INSERT INTO dream_practice_proposals (
+          metabot_id, dream_date, title, prompt, rationale, target_refs_json,
+          expected_evidence, risk_class, status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+      `, [
+        metabotId,
+        dreamDate,
+        title,
+        prompt,
+        rationale,
+        JSON.stringify(targetRefs),
+        expectedEvidence,
+        normalizeDreamPracticeProposalRiskClass(proposal?.riskClass),
+        now,
+        now,
+      ]);
+      inserted += 1;
+    }
+    if (inserted > 0) {
+      this.saveDb();
+    }
+    return inserted;
+  }
+
+  /**
+   * Read practice proposals, newest first; scoped to one MetaBot when
+   * `metabotId` is given, optionally filtered by status. Runs the lazy TTL
+   * sweep first so a stale 'pending' row never surfaces as actionable.
+   */
+  listDreamPracticeProposals(
+    metabotId?: number,
+    options?: { status?: DreamPracticeProposalStatus; limit?: number },
+  ): DreamPracticeProposalRecord[] {
+    this.expireStaleDreamPracticeProposals();
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (metabotId !== undefined && Number.isInteger(metabotId)) {
+      where.push('metabot_id = ?');
+      params.push(metabotId);
+    }
+    if (typeof options?.status === 'string' && options.status.trim()) {
+      where.push('status = ?');
+      params.push(options.status.trim());
+    }
+    const limit = Number.isInteger(options?.limit) && (options?.limit ?? 0) > 0
+      ? Math.floor(options!.limit!)
+      : null;
+    const rows = this.getAll<DreamPracticeProposalRow>(`
+      SELECT id, metabot_id, dream_date, title, prompt, rationale, target_refs_json,
+             expected_evidence, risk_class, status, scheduled_task_id, run_id,
+             outcome_summary, created_at, updated_at
+      FROM dream_practice_proposals
+      ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY created_at DESC, id DESC
+      ${limit != null ? `LIMIT ${limit}` : ''}
+    `, params);
+    return rows.map((row) => this.mapDreamPracticeProposalRow(row));
+  }
+
+  /** One proposal by id (optionally ownership-scoped), after the TTL sweep. */
+  getDreamPracticeProposal(id: number, metabotId?: number): DreamPracticeProposalRecord | null {
+    this.expireStaleDreamPracticeProposals();
+    const numericId = Number(id);
+    if (!Number.isInteger(numericId) || numericId <= 0) return null;
+    const scoped = metabotId !== undefined && Number.isInteger(metabotId);
+    const row = this.getOne<DreamPracticeProposalRow>(`
+      SELECT id, metabot_id, dream_date, title, prompt, rationale, target_refs_json,
+             expected_evidence, risk_class, status, scheduled_task_id, run_id,
+             outcome_summary, created_at, updated_at
+      FROM dream_practice_proposals
+      WHERE id = ?${scoped ? ' AND metabot_id = ?' : ''}
+      LIMIT 1
+    `, scoped ? [numericId, Number(metabotId)] : [numericId]);
+    return row ? this.mapDreamPracticeProposalRow(row) : null;
+  }
+
+  /**
+   * Shared guarded status transition: the UPDATE carries the expected current
+   * statuses in its WHERE clause, so an illegal transition — or one lost to a
+   * concurrent write — is a no-op returning false.
+   */
+  private transitionDreamPracticeProposal(input: {
+    id: number;
+    metabotId: number;
+    from: readonly DreamPracticeProposalStatus[];
+    to: DreamPracticeProposalStatus;
+    scheduledTaskId?: string | null;
+    runId?: string | null;
+    outcomeSummary?: string | null;
+  }): boolean {
+    const id = Number(input.id);
+    const metabotId = Number(input.metabotId);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(metabotId) || metabotId <= 0) {
+      return false;
+    }
+    const sets: string[] = ['status = ?', 'updated_at = ?'];
+    const params: Array<string | number | null> = [input.to, Date.now()];
+    if (input.scheduledTaskId !== undefined) {
+      sets.push('scheduled_task_id = ?');
+      params.push(input.scheduledTaskId);
+    }
+    if (input.runId !== undefined) {
+      sets.push('run_id = ?');
+      params.push(input.runId);
+    }
+    if (input.outcomeSummary !== undefined) {
+      sets.push('outcome_summary = ?');
+      params.push(input.outcomeSummary);
+    }
+    const placeholders = input.from.map(() => '?').join(', ');
+    params.push(id, metabotId, ...input.from);
+    this.db.run(
+      `UPDATE dream_practice_proposals
+       SET ${sets.join(', ')}
+       WHERE id = ? AND metabot_id = ? AND status IN (${placeholders})`,
+      params,
+    );
+    const updated = (this.db.getRowsModified?.() || 0) > 0;
+    if (updated) {
+      this.saveDb();
+    }
+    return updated;
+  }
+
+  /** pending → approved (owner UI action, or the auto-approve policy). */
+  approveDreamPracticeProposal(input: { id: number; metabotId: number }): boolean {
+    // TTL sweep first: a stale pending proposal reads as expired and refuses.
+    this.expireStaleDreamPracticeProposals();
+    return this.transitionDreamPracticeProposal({ ...input, from: ['pending'], to: 'approved' });
+  }
+
+  /** pending|approved → rejected: the owner may reject at any point before scheduled. */
+  rejectDreamPracticeProposal(input: { id: number; metabotId: number; outcomeSummary?: string | null }): boolean {
+    this.expireStaleDreamPracticeProposals();
+    return this.transitionDreamPracticeProposal({ ...input, from: ['pending', 'approved'], to: 'rejected' });
+  }
+
+  /** approved → scheduled: the host materialized the proposal into a ScheduledTask. */
+  markDreamPracticeProposalScheduled(input: { id: number; metabotId: number; scheduledTaskId: string }): boolean {
+    const scheduledTaskId = String(input.scheduledTaskId ?? '').trim();
+    if (!scheduledTaskId) return false;
+    return this.transitionDreamPracticeProposal({ ...input, scheduledTaskId, from: ['approved'], to: 'scheduled' });
+  }
+
+  /** scheduled → completed (from the scheduled_task_runs outcome). */
+  markDreamPracticeProposalCompleted(input: { id: number; metabotId: number; runId?: string | null; outcomeSummary?: string | null }): boolean {
+    return this.transitionDreamPracticeProposal({ ...input, from: ['scheduled'], to: 'completed' });
+  }
+
+  /** scheduled → failed (from the scheduled_task_runs outcome). */
+  markDreamPracticeProposalFailed(input: { id: number; metabotId: number; runId?: string | null; outcomeSummary?: string | null }): boolean {
+    return this.transitionDreamPracticeProposal({ ...input, from: ['scheduled'], to: 'failed' });
+  }
+
+  /**
+   * Lazy TTL (design §3.3): 'pending' proposals not acted on within
+   * PRACTICE_PROPOSAL_TTL_DAYS become 'expired'. Runs inside every read/
+   * transition of this table; also safe to call standalone from a nightly
+   * sweep. Returns the number of rows expired.
+   */
+  expireStaleDreamPracticeProposals(input?: { cutoffMs?: number }): number {
+    const cutoff = Number.isFinite(input?.cutoffMs)
+      ? Math.floor(Number(input!.cutoffMs))
+      : Date.now() - PRACTICE_PROPOSAL_TTL_DAYS * 86_400_000;
+    this.db.run(
+      `UPDATE dream_practice_proposals
+       SET status = 'expired', updated_at = ?
+       WHERE status = 'pending' AND created_at < ?`,
+      [Date.now(), cutoff],
+    );
+    const expired = this.db.getRowsModified?.() || 0;
+    if (expired > 0) {
+      this.saveDb();
+    }
+    return expired;
+  }
+
+  /**
+   * Retention cleanup: physically delete 'rejected'/'expired' proposal rows
+   * whose last update is older than the cutoff. 'completed'/'failed' rows stay
+   * — their outcome_summary is the loop-closure evidence later dreams read.
+   */
+  purgeDreamPracticeProposals(input: {
+    cutoffMs: number;
+    excludeMetabotIds?: ReadonlySet<number>;
+  }): number {
+    const cutoff = Math.floor(Number(input.cutoffMs) || 0);
+    const excluded = input.excludeMetabotIds ? [...input.excludeMetabotIds] : [];
+    const exclusion = excluded.length > 0
+      ? ` AND metabot_id NOT IN (${excluded.map(() => '?').join(', ')})`
+      : '';
+    this.db.run(
+      `DELETE FROM dream_practice_proposals
+       WHERE status IN ('rejected', 'expired') AND updated_at < ?${exclusion}`,
+      [cutoff, ...excluded],
+    );
+    const deleted = this.db.getRowsModified?.() || 0;
+    if (deleted > 0) {
+      this.saveDb();
+    }
+    return deleted;
+  }
+
+  /**
+   * Reverse lookup: the practice proposal a ScheduledTask was materialized
+   * from (dream_practice_proposals.scheduled_task_id). The scheduler uses it
+   * to activate the practice tool policy and to write the run outcome back.
+   */
+  getDreamPracticeProposalByScheduledTaskId(scheduledTaskId: string): DreamPracticeProposalRecord | null {
+    const id = String(scheduledTaskId ?? '').trim();
+    if (!id) return null;
+    const row = this.getOne<DreamPracticeProposalRow>(`
+      SELECT id, metabot_id, dream_date, title, prompt, rationale, target_refs_json,
+             expected_evidence, risk_class, status, scheduled_task_id, run_id,
+             outcome_summary, created_at, updated_at
+      FROM dream_practice_proposals
+      WHERE scheduled_task_id = ?
+      LIMIT 1
+    `, [id]);
+    return row ? this.mapDreamPracticeProposalRow(row) : null;
+  }
+
+  /**
+   * Backfill the outcome summary of a completed/failed proposal from the
+   * practice session's final report. First writer wins (outcome_summary IS
+   * NULL) so the nightly consumption pass is idempotent.
+   */
+  updateDreamPracticeProposalOutcome(input: { id: number; metabotId: number; outcomeSummary: string }): boolean {
+    const id = Number(input.id);
+    const metabotId = Number(input.metabotId);
+    const summary = String(input.outcomeSummary ?? '').trim();
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(metabotId) || metabotId <= 0 || !summary) {
+      return false;
+    }
+    this.db.run(
+      `UPDATE dream_practice_proposals
+       SET outcome_summary = ?, updated_at = ?
+       WHERE id = ? AND metabot_id = ?
+         AND status IN ('completed', 'failed')
+         AND outcome_summary IS NULL`,
+      [summary.slice(0, 2000), Date.now(), id, metabotId],
+    );
+    const updated = (this.db.getRowsModified?.() || 0) > 0;
+    if (updated) {
+      this.saveDb();
+    }
+    return updated;
+  }
+
+  /**
+   * Practice runs that executed during [dayStartMs, dayEndMs): proposals in a
+   * terminal run state joined to their scheduled_task_runs row (run_id is
+   * written at run completion by the scheduler). Feeds the dream prompt's
+   * practice-outcomes section and its outcome_summary backfill.
+   */
+  listDreamPracticeOutcomesForDay(
+    metabotId: number,
+    dayStartMs: number,
+    dayEndMs: number,
+  ): Array<DreamPracticeProposalRecord & { runSessionId: string | null }> {
+    if (!Number.isInteger(metabotId) || metabotId <= 0) return [];
+    const rows = this.getAll<DreamPracticeProposalRow & { run_session_id: string | null }>(`
+      SELECT p.id, p.metabot_id, p.dream_date, p.title, p.prompt, p.rationale, p.target_refs_json,
+             p.expected_evidence, p.risk_class, p.status, p.scheduled_task_id, p.run_id,
+             p.outcome_summary, p.created_at, p.updated_at,
+             r.session_id AS run_session_id
+      FROM dream_practice_proposals p
+      JOIN scheduled_task_runs r ON r.id = p.run_id
+      WHERE p.metabot_id = ?
+        AND p.status IN ('completed', 'failed')
+        AND r.started_at >= ? AND r.started_at < ?
+      ORDER BY r.started_at ASC, p.id ASC
+    `, [metabotId, new Date(dayStartMs).toISOString(), new Date(dayEndMs).toISOString()]);
+    return rows.map((row) => ({
+      ...this.mapDreamPracticeProposalRow(row),
+      runSessionId: row.run_session_id ?? null,
+    }));
   }
 
   updateUserMemory(input: MemoryUpdateUserMemoryInput): CoworkUserMemory | null {

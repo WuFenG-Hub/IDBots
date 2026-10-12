@@ -13,9 +13,16 @@ import {
   getDayBoundsMs,
   parseDreamOutput,
   validateSelfIdentity,
+  PRACTICE_PROPOSALS_MAX_PER_NIGHT,
   type DreamKnowledgeExisting,
   type DreamOutput,
+  type DreamPracticeOutcome,
 } from '../libs/dreamPrompt';
+import {
+  buildPracticeRunPrompt,
+  computePracticeRunAtMs,
+  PRACTICE_OUTCOME_MAX_CHARS,
+} from '../libs/practiceInteractionGuard';
 import {
   CAPABILITY_VALIDATION_MAX_DRAFTS,
   CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE,
@@ -24,9 +31,26 @@ import {
   CAPABILITY_PROMOTION_MIN_SCORE,
   CAPABILITY_REVIEW_INTERVAL_DAYS,
   CAPABILITY_REVIEW_MAX_PER_NIGHT,
+  DISPUTED_AUTO_REJECT_DAYS,
   buildCapabilityValidationPrompt,
   parseCapabilityValidationOutput,
 } from '../libs/capabilityValidationPrompt';
+import {
+  RECONCILE_MAX_CONFLICT_CANDIDATES,
+  RECONCILE_MAX_DRAFTS_PER_NIGHT,
+  buildCapabilityReconciliationPrompt,
+  parseCapabilityReconciliationOutput,
+  type ReconciliationConflictCandidate,
+} from '../libs/capabilityReconciliationPrompt';
+import { tokenizeKnowledgeBaseText } from '../libs/knowledgeBaseText';
+import {
+  buildChainEvidenceDigest,
+  chainRefKeysOf,
+  collectChainEvidenceRefs,
+  renderChainEvidenceDigest,
+  type ChainEvidenceDigest,
+  type ChainEvidenceVerifierDeps,
+} from '../libs/chainEvidence';
 import {
   buildCounterfactualReplayPrompt,
   extractNegativeDecisionPoints,
@@ -54,6 +78,8 @@ import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../li
 import { budgetAssumesThinking } from '../libs/modelThinking';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import { metabotBrainOptions } from './llmFallback';
+import { extractFinalAssistantReply } from './orchestratorCoworkBridge';
+import { truncateUtf16Units } from '../libs/llmSafeText';
 import {
   classifyDreamError,
   DREAM_RETRY_MAX_ATTEMPTS,
@@ -225,6 +251,27 @@ export interface DreamServiceDeps {
    * date is retried in a loop while the window lasts. Absent → never deferred.
    */
   backgroundDeferral?: () => string | null;
+  /**
+   * Self-curriculum materialization (design 2026-10-10 §3.4): creates the
+   * one-shot ScheduledTask for an approved practice proposal (main.ts wires
+   * ScheduledTaskStore.createTask + Scheduler.reschedule). Optional: without
+   * it, approved proposals simply stay approved (tests, headless runs).
+   */
+  createPracticeScheduledTask?: (input: {
+    metabotId: number;
+    name: string;
+    description: string;
+    prompt: string;
+    scheduleAtMs: number;
+  }) => { id: string };
+  /**
+   * Chain-grounded verification for the replay gate (design 2026-10-10 §5.2):
+   * read-only verifiers behind the evidence digest. Entirely optional — with
+   * no dep wired, no digest is built and the gate judges exactly as before;
+   * individual verifier failures degrade the ref to UNVERIFIED, never to a
+   * dream-run failure.
+   */
+  chainEvidence?: ChainEvidenceVerifierDeps;
   tickIntervalMs?: number;
   llmTimeoutMs?: number;
   /**
@@ -812,6 +859,9 @@ export class DreamService {
      * run's attempt count (resolveDreamAttemptTimeoutMs); the fixed constant
      * remains the default anchor for tests/legacy callers. */
     attemptTimeoutMs: number = DREAM_SYNTHESIS_TIMEOUT_MS,
+    /** Practice runs executed during the dreamed day (design §3.4), rendered
+     * as the prompt's practice-outcomes section. */
+    practiceOutcomes?: DreamPracticeOutcome[],
   ): Promise<{
     prompt: { system: string; user: string };
     output: DreamOutput;
@@ -834,6 +884,7 @@ export class DreamService {
         existingKnowledge,
         surfReport,
         weeklyReview,
+        practiceOutcomes,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -858,6 +909,7 @@ export class DreamService {
         existingKnowledge,
         surfReport,
         weeklyReview,
+        practiceOutcomes,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -900,6 +952,7 @@ export class DreamService {
       existingKnowledge,
       surfReport,
       weeklyReview,
+      practiceOutcomes,
     });
     const output = await this.generateAndParse(
       prompt.system,
@@ -981,11 +1034,18 @@ export class DreamService {
         this.deps.dreamStore.finishRun(metabotId, date, 'completed');
         // Pending capability drafts can still be validated against older
         // diaries even when today added no new activity.
-        const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
+        const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date, activity);
+        // Memory reconciliation (design §4.2) sits between validation and
+        // promotion on every path — a just-validated draft must survive the
+        // memory-bank check before it can harden.
+        const reconciliation = await this.reconcileValidatedCapabilityDrafts(metabot, brain, date, validation.validatedIds);
         const promotion = this.promoteCapabilityDraftsToProcedures(metabot, date);
         // Empty days have no negative decision points, so the replay no-ops.
         const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
         const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
+        // Self-curriculum (design §3.4): pending read_only proposals from
+        // earlier nights still approve + materialize on an empty day.
+        const practicePipeline = this.processPracticeProposalsAfterDream(metabot);
         this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
           emptyDay: true,
           estimatedActivityTokens: 0,
@@ -996,11 +1056,22 @@ export class DreamService {
           capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
           promotedCount: promotion.promoted,
           hasExplicitFeedback: hasExplicitHumanFeedback(activity),
+          reconciliation,
+          chainEvidence: validation.chainEvidence,
+          practiceProposals: this.buildPracticeProposalTelemetry(metabotId, {
+            proposed: 0,
+            autoApproved: practicePipeline.autoApproved,
+          }),
+          practiceRuns: { completed: 0, failed: 0 },
           durationMs: Date.now() - runStartedAtMs,
         });
         return;
       }
 
+      // Self-curriculum loop closure (design §3.4): collect the practice runs
+      // executed during the dreamed day (and backfill their outcome summaries)
+      // before the prompt is built, so tonight's curriculum sees them.
+      const practiceOutcomes = this.collectPracticeOutcomesForDream(metabotId, startMs, endMs);
       const prepared = await this.prepareDreamPromptAndOutput(
         metabot,
         date,
@@ -1010,6 +1081,7 @@ export class DreamService {
         existingKnowledge,
         surfReport,
         this.resolveSynthesisTimeoutMs(runStartedAtMs, currentRun.attemptCount),
+        practiceOutcomes.outcomes,
       );
       let output = prepared.output;
       // Repair runs discard selfIdentity in writeDreamResults, so skip the
@@ -1027,13 +1099,19 @@ export class DreamService {
       const writeResult = this.writeDreamResults(metabotId, date, output, activity, brain.llmId, isRepair, impressionSubjects, metabot.globalmetaid);
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
       console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}${isRepair ? ' (version repair)' : ''}`);
-      const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date);
+      const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date, activity);
       // P1 periodic re-review runs between the fresh-draft gate and the
       // promotion pass: a just-demoted draft must not harden tonight.
       const reReview = await this.reReviewValidatedCapabilityDrafts(metabot, brain, date);
+      // P1 memory reconciliation (design §4.2): tonight's newly validated
+      // drafts face the whole memory bank before any promotion can harden.
+      const reconciliation = await this.reconcileValidatedCapabilityDrafts(metabot, brain, date, validation.validatedIds);
       const promotion = this.promoteCapabilityDraftsToProcedures(metabot, date);
       const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
       const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
+      // Self-curriculum (design §3.4, after the replay per §3.1): auto-approve
+      // + materialize tonight's pending read_only practice proposals.
+      const practicePipeline = this.processPracticeProposalsAfterDream(metabot);
       const diaryRefs = this.auditDiaryRefs(output.dailySummary, activity, surfReport);
       // P2a telemetry: the dream policy becomes tunable once it is measurable.
       this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
@@ -1064,6 +1142,19 @@ export class DreamService {
         // P1: any explicit human feedback today (thumbs up/down, acceptance
         // rating) — separates "zero negative because good" from "no data".
         hasExplicitFeedback: hasExplicitHumanFeedback(activity),
+        // §6 memory reconciliation funnel: how tonight's newly validated
+        // drafts survived the memory-bank check.
+        reconciliation,
+        // §6 chain-grounded verification: the digest's fact counts (null when
+        // no chain refs were collected or no verifier deps are wired).
+        chainEvidence: validation.chainEvidence,
+        // §6 self-curriculum telemetry: tonight's proposal funnel + the
+        // practice runs consumed from the dreamed day.
+        practiceProposals: this.buildPracticeProposalTelemetry(metabotId, {
+          proposed: output.practiceProposals?.length ?? 0,
+          autoApproved: practicePipeline.autoApproved,
+        }),
+        practiceRuns: { completed: practiceOutcomes.completed, failed: practiceOutcomes.failed },
         durationMs: Date.now() - runStartedAtMs,
       });
     } catch (error) {
@@ -1175,23 +1266,91 @@ export class DreamService {
    * verdict must also clear the score threshold, and a weak or unparseable
    * verdict leaves the draft untouched. Runs after finishRun and never
    * affects the dream run's recorded outcome.
+   *
+   * Disputed drafts (design §4.3) re-enter here with their conflict evidence
+   * attached (rendered as 存疑待裁决); the disputed-timeout sweep runs first,
+   * auto-rejecting anything stale past DISPUTED_AUTO_REJECT_DAYS.
+   * Returns the ids of tonight's newly validated drafts — the reconciliation
+   * pass consumes exactly that set.
    */
   private async validateCapabilityDraftsAfterDream(
     metabot: DreamMetabotLike,
     brain: DreamBrainPair,
     date: string,
-  ): Promise<{ checked: number; validated: number; rejected: number }> {
-    const zero = { checked: 0, validated: 0, rejected: 0 };
+    /** Day activity: the chain writes/reads whose pin ids join the digest. */
+    activity?: DreamDayActivity,
+  ): Promise<{
+    checked: number;
+    validated: number;
+    rejected: number;
+    validatedIds: number[];
+    chainEvidence: ChainEvidenceDigest['counts'] | null;
+  }> {
+    const zero = { checked: 0, validated: 0, rejected: 0, validatedIds: [] as number[], chainEvidence: null };
     try {
-      const pending = this.deps.coworkStore.listCapabilityDrafts(metabot.id, {
-        status: 'draft',
-        limit: CAPABILITY_VALIDATION_MAX_DRAFTS,
+      // Disputed-timeout sweep (design §4.4): an unresolved dispute older than
+      // the auto-reject window demotes to 'rejected'; the existing purge
+      // (rejected + old) removes the corpse later.
+      const staleDisputed = this.deps.coworkStore.listStaleDisputedCapabilityDrafts(metabot.id, {
+        olderThanMs: Date.now() - DISPUTED_AUTO_REJECT_DAYS * 86_400_000,
       });
+      for (const stale of staleDisputed) {
+        this.deps.coworkStore.updateCapabilityDraftValidation({
+          id: stale.id,
+          metabotId: metabot.id,
+          status: 'rejected',
+          validationScore: stale.validationScore,
+          validationNotes: `disputed ${DISPUTED_AUTO_REJECT_DAYS} nights without resolution — auto-rejected (reconciliation timeout)`,
+        });
+      }
+      if (staleDisputed.length > 0) {
+        console.warn(
+          `[DreamService] Auto-rejected ${staleDisputed.length} stale disputed capability draft(s) for metabot ${metabot.id}`,
+        );
+      }
+
+      const disputed = this.deps.coworkStore.listCapabilityDrafts(metabot.id, { status: 'disputed' });
+      const fresh = this.deps.coworkStore.listCapabilityDrafts(metabot.id, { status: 'draft' });
+      const pending = [...disputed, ...fresh].slice(0, CAPABILITY_VALIDATION_MAX_DRAFTS);
       if (pending.length === 0) return zero;
       const recentSummaries = this.deps.dreamStore.listDailySummaries(
         metabot.id,
         CAPABILITY_VALIDATION_SUMMARY_DAYS,
       );
+
+      // Chain-grounded evidence digest (design §5.2): the host collects the
+      // pin/txid refs from tonight's drafts and the day's chain activity and
+      // verifies each against chain state. Built once per pass (cached for
+      // the night); absent deps or per-ref failures degrade to UNVERIFIED,
+      // never to a dream-run failure.
+      let chainDigest: ChainEvidenceDigest | null = null;
+      const chainRefs = collectChainEvidenceRefs({
+        chainWrites: activity?.chainWrites ?? [],
+        chainReads: activity?.chainReads ?? [],
+        drafts: pending.map((draft) => ({
+          id: draft.id,
+          text: `${draft.title}\n${draft.description}\n${draft.validationNotes ?? ''}`,
+        })),
+      });
+      if (chainRefs.length > 0 && this.deps.chainEvidence) {
+        try {
+          chainDigest = await buildChainEvidenceDigest(chainRefs, this.deps.chainEvidence);
+        } catch (error) {
+          console.warn(
+            `[DreamService] Chain evidence digest failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          chainDigest = null;
+        }
+      }
+      const chainRefsByDraftId = new Map<number, string[]>();
+      for (const ref of chainRefs) {
+        for (const draftId of ref.sourceDraftIds) {
+          const list = chainRefsByDraftId.get(draftId) ?? [];
+          list.push(ref.kind === 'pin' ? `pin://${ref.id}` : `txid:${ref.id}`);
+          chainRefsByDraftId.set(draftId, list);
+        }
+      }
+
       const prompt = buildCapabilityValidationPrompt({
         botName: metabot.name,
         date,
@@ -1201,17 +1360,20 @@ export class DreamService {
           title: draft.title,
           description: draft.description,
           capabilityType: draft.capabilityType,
+          conflictNote: draft.status === 'disputed' ? draft.validationNotes : null,
+          chainRefs: chainRefsByDraftId.get(draft.id) ?? [],
         })),
         recentSummaries: recentSummaries.map((summary) => ({
           summaryDate: summary.summaryDate,
           summaryText: summary.summaryText,
         })),
+        chainEvidence: chainDigest ? renderChainEvidenceDigest(chainDigest) : null,
       });
       const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
       const parsed = parseCapabilityValidationOutput(raw, new Set(pending.map((draft) => draft.id)));
       if (!parsed.ok) {
         console.warn(`[DreamService] Capability validation parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
-        return { ...zero, checked: pending.length };
+        return { ...zero, checked: pending.length, chainEvidence: chainDigest ? chainDigest.counts : null };
       }
       // Grounding gate: a verdict whose rationale cites a diary date that was
       // never provided as evidence is a hallucinated citation — drop it.
@@ -1226,9 +1388,27 @@ export class DreamService {
           `[DreamService] Dropped ${droppedUngrounded} capability verdict(s) citing unrecorded diary dates for metabot ${metabot.id}`,
         );
       }
+      // Chain grounding gate (design §5.2): with a digest in play, a rationale
+      // citing a pin id / txid that was never collected tonight is a
+      // hallucinated citation — discard the verdict.
+      let chainGroundedVerdicts = groundedVerdicts;
+      if (chainDigest) {
+        const knownRefs = new Set(chainDigest.knownRefIds);
+        chainGroundedVerdicts = groundedVerdicts.filter((verdict) => {
+          const citedRefs = chainRefKeysOf(verdict.rationale);
+          return citedRefs.every((cited) => knownRefs.has(cited));
+        });
+        const droppedChain = groundedVerdicts.length - chainGroundedVerdicts.length;
+        if (droppedChain > 0) {
+          console.warn(
+            `[DreamService] Dropped ${droppedChain} capability verdict(s) citing unverified pin/txid refs for metabot ${metabot.id}`,
+          );
+        }
+      }
       let validated = 0;
       let rejected = 0;
-      for (const verdict of groundedVerdicts) {
+      const validatedIds: number[] = [];
+      for (const verdict of chainGroundedVerdicts) {
         const promote = verdict.verdict === 'validated' && verdict.score >= CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE;
         const demote = verdict.verdict === 'rejected';
         if (!promote && !demote) continue;
@@ -1239,15 +1419,25 @@ export class DreamService {
           validationScore: verdict.score,
           validationNotes: verdict.rationale,
         });
-        if (promote) validated += 1;
-        else rejected += 1;
+        if (promote) {
+          validated += 1;
+          validatedIds.push(verdict.id);
+        } else {
+          rejected += 1;
+        }
       }
       if (validated > 0 || rejected > 0) {
         console.log(
           `[DreamService] Capability validation for metabot ${metabot.id}: validated=${validated}, rejected=${rejected}, checked=${pending.length}`,
         );
       }
-      return { checked: pending.length, validated, rejected };
+      return {
+        checked: pending.length,
+        validated,
+        rejected,
+        validatedIds,
+        chainEvidence: chainDigest ? chainDigest.counts : null,
+      };
     } catch (error) {
       console.warn(
         `[DreamService] Capability validation failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1403,11 +1593,18 @@ export class DreamService {
       let promoted = 0;
       for (const draft of candidates) {
         try {
+          // Design §4.4: a reconciled draft carries its applicability
+          // conditions into the procedure's trigger and its residual
+          // uncertainty into the pitfalls — the conditions under which the
+          // lesson was observed survive the hardening.
           const result = this.deps.metaidKnowledgeStore.upsertProcedure({
             metabotId: metabot.id,
             title: draft.title,
-            triggerText: draft.title,
+            triggerText: draft.conditionsText
+              ? truncateUtf16Units(`${draft.title}(适用条件:${draft.conditionsText})`, 500)
+              : draft.title,
             steps: [draft.description],
+            pitfalls: draft.uncertaintyText ? [`Untested: ${draft.uncertaintyText}`] : [],
             tags: ['capability-draft', draft.capabilityType],
             origin: 'dream',
           });
@@ -1433,6 +1630,367 @@ export class DreamService {
         `[DreamService] Capability promotion pass failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return zero;
+    }
+  }
+
+  /**
+   * Memory reconciliation pass (design 2026-10-10 §4.2/§4.3): between
+   * validation and promotion, tonight's newly validated drafts are checked
+   * against the WHOLE memory bank. The host computes conflict candidates
+   * (token overlap against active procedures and other validated drafts); the
+   * LLM judges keep/narrow/merge/dispute; the host executes the verdicts by
+   * fixed template (annotate / template-narrow / merge-by-reference /
+   * suspend) — the model never edits the store directly.
+   */
+  private async reconcileValidatedCapabilityDrafts(
+    metabot: DreamMetabotLike,
+    brain: DreamBrainPair,
+    date: string,
+    validatedIds: number[],
+  ): Promise<{ considered: number; kept: number; narrowed: number; merged: number; disputed: number }> {
+    const zero = { considered: 0, kept: 0, narrowed: 0, merged: 0, disputed: 0 };
+    try {
+      if (validatedIds.length === 0) return zero;
+      // Re-read the rows: only still-validated drafts reconcile (a demotion
+      // between the gate and this pass drops the draft out).
+      const tonight = this.deps.coworkStore.listCapabilityDrafts(metabot.id, { status: 'validated' })
+        .filter((draft) => validatedIds.includes(draft.id))
+        .sort((left, right) => (right.validationScore ?? 0) - (left.validationScore ?? 0))
+        .slice(0, RECONCILE_MAX_DRAFTS_PER_NIGHT);
+      if (tonight.length === 0) return zero;
+      const recentSummaries = this.deps.dreamStore.listDailySummaries(
+        metabot.id,
+        CAPABILITY_VALIDATION_SUMMARY_DAYS,
+      );
+      const conflictsByDraftId = new Map<number, ReconciliationConflictCandidate[]>();
+      for (const draft of tonight) {
+        conflictsByDraftId.set(draft.id, this.buildReconciliationConflictCandidates(metabot.id, draft));
+      }
+      const prompt = buildCapabilityReconciliationPrompt({
+        botName: metabot.name,
+        date,
+        drafts: tonight.map((draft) => ({
+          id: draft.id,
+          dreamDate: draft.dreamDate,
+          title: draft.title,
+          description: draft.description,
+          capabilityType: draft.capabilityType,
+          validationScore: draft.validationScore,
+        })),
+        conflictsByDraftId,
+        recentSummaries: recentSummaries.map((summary) => ({
+          summaryDate: summary.summaryDate,
+          summaryText: summary.summaryText,
+        })),
+      });
+      const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
+      const parsed = parseCapabilityReconciliationOutput(raw, new Set(tonight.map((draft) => draft.id)));
+      if (!parsed.ok) {
+        console.warn(`[DreamService] Reconciliation parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
+        return { ...zero, considered: tonight.length };
+      }
+      const byId = new Map(tonight.map((draft) => [draft.id, draft]));
+      const counts = { ...zero, considered: tonight.length };
+      for (const verdict of parsed.verdicts) {
+        const draft = byId.get(verdict.id);
+        if (!draft) continue;
+        switch (verdict.action) {
+          case 'keep':
+            this.deps.coworkStore.setCapabilityDraftConditions({
+              id: draft.id,
+              metabotId: metabot.id,
+              conditionsText: verdict.conditions,
+              uncertaintyText: verdict.uncertainty,
+            });
+            counts.kept += 1;
+            break;
+          case 'narrow':
+            this.deps.coworkStore.narrowCapabilityDraft({
+              id: draft.id,
+              metabotId: metabot.id,
+              conditionsText: verdict.conditions,
+              uncertaintyText: verdict.uncertainty,
+            });
+            counts.narrowed += 1;
+            break;
+          case 'merge': {
+            // Grounding gate: the merge target must come from the candidates
+            // the host actually presented to the model.
+            const targetRef = verdict.conflictsWith.find((ref) => ref.startsWith('procedure:')) ?? '';
+            const candidateRefs = new Set((conflictsByDraftId.get(draft.id) ?? []).map((candidate) => candidate.ref));
+            const targetId = targetRef.slice('procedure:'.length);
+            if (!targetRef || !targetId || !candidateRefs.has(targetRef)) {
+              console.warn(
+                `[DreamService] Dropped merge verdict for draft #${draft.id}: target ${targetRef || '(none)'} was not a presented candidate`,
+              );
+              continue;
+            }
+            if (this.deps.metaidKnowledgeStore) {
+              const appended = this.deps.metaidKnowledgeStore.appendProcedurePitfall(
+                targetId,
+                `Merged dream draft #${draft.id} (${draft.dreamDate}): ${draft.title}`,
+              );
+              if (!appended) {
+                console.warn(
+                  `[DreamService] Merge verdict for draft #${draft.id}: pitfall append on ${targetRef} failed (missing/archived/full)`,
+                );
+              }
+            }
+            this.deps.coworkStore.updateCapabilityDraftValidation({
+              id: draft.id,
+              metabotId: metabot.id,
+              status: 'rejected',
+              validationScore: draft.validationScore,
+              validationNotes: `merged into ${targetRef}${verdict.note ? ` — ${verdict.note}` : ''}`,
+            });
+            counts.merged += 1;
+            break;
+          }
+          case 'dispute':
+            this.deps.coworkStore.updateCapabilityDraftValidation({
+              id: draft.id,
+              metabotId: metabot.id,
+              status: 'disputed',
+              validationScore: draft.validationScore,
+              validationNotes: [
+                `reconciliation dispute ${date}`,
+                verdict.note || '',
+                verdict.conflictsWith.length > 0 ? `conflicts: ${verdict.conflictsWith.join(', ')}` : '',
+              ].filter(Boolean).join(' — '),
+            });
+            counts.disputed += 1;
+            break;
+        }
+      }
+      if (counts.kept + counts.narrowed + counts.merged + counts.disputed > 0) {
+        console.log(
+          `[DreamService] Reconciliation for metabot ${metabot.id}: considered=${counts.considered}, kept=${counts.kept}, narrowed=${counts.narrowed}, merged=${counts.merged}, disputed=${counts.disputed}`,
+        );
+      }
+      return counts;
+    } catch (error) {
+      console.warn(
+        `[DreamService] Reconciliation failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * Host-computed conflict candidates for one draft (design §4.3): active
+   * procedures via the store's own tokenized coverage scoring (the
+   * listProcedures query path), plus other validated drafts whose
+   * title/description shares a precision token with the draft title. Top
+   * RECONCILE_MAX_CONFLICT_CANDIDATES, procedures first.
+   */
+  private buildReconciliationConflictCandidates(
+    metabotId: number,
+    draft: { id: number; title: string },
+  ): ReconciliationConflictCandidate[] {
+    const candidates: ReconciliationConflictCandidate[] = [];
+    if (this.deps.metaidKnowledgeStore) {
+      try {
+        const procedures = this.deps.metaidKnowledgeStore.listProcedures({
+          metabotId,
+          status: 'active',
+          query: draft.title,
+          limit: RECONCILE_MAX_CONFLICT_CANDIDATES,
+        });
+        for (const procedure of procedures) {
+          candidates.push({
+            ref: `procedure:${procedure.id}`,
+            kind: 'procedure',
+            title: procedure.title,
+            excerpt: [procedure.triggerText, ...procedure.steps].filter(Boolean).join(' / '),
+          });
+        }
+      } catch (error) {
+        console.warn(
+          `[DreamService] Reconciliation procedure candidates failed for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    try {
+      const terms = [...new Set(tokenizeKnowledgeBaseText(draft.title))].filter((term) => term.length >= 2);
+      if (terms.length > 0) {
+        const others = this.deps.coworkStore.listCapabilityDrafts(metabotId, { status: 'validated' })
+          .filter((other) => other.id !== draft.id);
+        for (const other of others) {
+          const haystack = `${other.title}\n${other.description}`.toLowerCase();
+          if (terms.some((term) => haystack.includes(term))) {
+            candidates.push({
+              ref: `draft:${other.id}`,
+              kind: 'draft',
+              title: other.title,
+              excerpt: other.description,
+            });
+          }
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[DreamService] Reconciliation draft candidates failed for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return candidates.slice(0, RECONCILE_MAX_CONFLICT_CANDIDATES);
+  }
+
+  /**
+   * Self-curriculum consumption pass (design 2026-10-10 §3.4): the practice
+   * runs that executed during the dreamed day, each proposal's outcome_summary
+   * backfilled from the practice session's final report (minimal version: the
+   * last assistant message, truncated). Runs BEFORE prompt building so the
+   * outcomes ride tonight's curriculum decision; never fails the dream run.
+   */
+  private collectPracticeOutcomesForDream(
+    metabotId: number,
+    dayStartMs: number,
+    dayEndMs: number,
+  ): { outcomes: DreamPracticeOutcome[]; completed: number; failed: number } {
+    const zero = { outcomes: [] as DreamPracticeOutcome[], completed: 0, failed: 0 };
+    try {
+      const rows = this.deps.coworkStore.listDreamPracticeOutcomesForDay(metabotId, dayStartMs, dayEndMs);
+      const outcomes: DreamPracticeOutcome[] = [];
+      for (const row of rows) {
+        let summary = row.outcomeSummary;
+        if (!summary && row.runSessionId) {
+          try {
+            const session = this.deps.coworkStore.getSession(row.runSessionId);
+            const reply = session ? extractFinalAssistantReply(session.messages).replyText : '';
+            if (reply.trim()) {
+              summary = truncateUtf16Units(reply.trim(), PRACTICE_OUTCOME_MAX_CHARS);
+              this.deps.coworkStore.updateDreamPracticeProposalOutcome({
+                id: row.id,
+                metabotId,
+                outcomeSummary: summary,
+              });
+            }
+          } catch (error) {
+            console.warn(
+              `[DreamService] Practice outcome backfill failed for proposal #${row.id}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        outcomes.push({
+          title: row.title,
+          status: row.status === 'completed' ? 'completed' : 'failed',
+          expectedEvidence: row.expectedEvidence,
+          outcomeSummary: summary,
+        });
+      }
+      return {
+        outcomes,
+        completed: outcomes.filter((outcome) => outcome.status === 'completed').length,
+        failed: outcomes.filter((outcome) => outcome.status === 'failed').length,
+      };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Practice outcome collection failed for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * Self-curriculum approval + materialization (design §3.4, owner decisions
+   * §8): with the per-bot practiceTasksEnabled flag ON and
+   * practiceAutoApproveReadOnly on, pending read_only proposals auto-approve
+   * (oldest first, capped at the same 2/night as generation) and materialize
+   * into one-shot ScheduledTasks inside the night study window.
+   * interact_local / chain_write proposals stay pending for the owner —
+   * chain_write never executes in this iteration. Feature OFF (the default)
+   * is a zero-side-effect no-op. Never fails the dream run.
+   */
+  private processPracticeProposalsAfterDream(
+    metabot: DreamMetabotLike,
+  ): { autoApproved: number; materialized: number } {
+    const zero = { autoApproved: 0, materialized: 0 };
+    try {
+      const policy = this.deps.coworkStore.getEffectiveMemoryPolicyForMetabot(metabot.id);
+      if (!policy.practiceTasksEnabled || !policy.practiceAutoApproveReadOnly) return zero;
+      const createTask = this.deps.createPracticeScheduledTask;
+      if (!createTask) return zero;
+      const pending = this.deps.coworkStore.listDreamPracticeProposals(metabot.id, { status: 'pending' })
+        // Oldest first: the backlog drains before fresh proposals. The 2/night
+        // cap counts auto-approvals, so non-read_only rows are filtered out
+        // before slicing instead of consuming slots.
+        .reverse()
+        .filter((proposal) => proposal.riskClass === 'read_only')
+        .slice(0, PRACTICE_PROPOSALS_MAX_PER_NIGHT);
+      let autoApproved = 0;
+      let materialized = 0;
+      for (const proposal of pending) {
+        if (!this.deps.coworkStore.approveDreamPracticeProposal({ id: proposal.id, metabotId: metabot.id })) {
+          continue;
+        }
+        autoApproved += 1;
+        try {
+          const task = createTask({
+            metabotId: metabot.id,
+            name: `[Practice] ${proposal.title}`.slice(0, 80),
+            description: proposal.rationale ?? '',
+            prompt: buildPracticeRunPrompt(proposal),
+            scheduleAtMs: computePracticeRunAtMs({
+              nowMs: Date.now(),
+              metabotId: metabot.id,
+              proposalId: proposal.id,
+            }),
+          });
+          const marked = this.deps.coworkStore.markDreamPracticeProposalScheduled({
+            id: proposal.id,
+            metabotId: metabot.id,
+            scheduledTaskId: task.id,
+          });
+          if (marked) {
+            materialized += 1;
+          }
+        } catch (error) {
+          // A single bad proposal never aborts the rest of the batch; the row
+          // stays approved and can be retried by a later pass.
+          console.warn(
+            `[DreamService] Practice proposal #${proposal.id} materialization failed for metabot ${metabot.id}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      if (autoApproved > 0 || materialized > 0) {
+        console.log(
+          `[DreamService] Practice proposals for metabot ${metabot.id}: autoApproved=${autoApproved}, materialized=${materialized}`,
+        );
+      }
+      return { autoApproved, materialized };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Practice proposal pipeline failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * §6 telemetry snapshot for the practice pipeline: tonight's proposed /
+   * auto-approved counts plus the current status totals. Reads trigger the
+   * lazy TTL sweep, so `expired` reflects tonight's expirations.
+   */
+  private buildPracticeProposalTelemetry(
+    metabotId: number,
+    counts: { proposed: number; autoApproved: number },
+  ): { proposed: number; autoApproved: number; pendingOwner: number; rejected: number; expired: number } | null {
+    try {
+      const countByStatus = (status: 'pending' | 'rejected' | 'expired') =>
+        this.deps.coworkStore.listDreamPracticeProposals(metabotId, { status }).length;
+      return {
+        proposed: counts.proposed,
+        autoApproved: counts.autoApproved,
+        pendingOwner: countByStatus('pending'),
+        rejected: countByStatus('rejected'),
+        expired: countByStatus('expired'),
+      };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Practice proposal telemetry unavailable for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
     }
   }
 
@@ -1899,6 +2457,31 @@ export class DreamService {
       } catch (error) {
         console.warn(
           `[DreamService] Capability draft persistence failed for metabot ${metabotId} date ${date}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    // Self-curriculum (Dream-RSI exploration P0, design 2026-10-10 §3.2): each
+    // practice proposal becomes a 'pending' dream_practice_proposals row;
+    // approval and materialization are a separate pipeline stage. A failure
+    // here must not fail the dream run.
+    const practiceProposals = Array.isArray(output.practiceProposals) ? output.practiceProposals : [];
+    if (practiceProposals.length > 0) {
+      try {
+        const inserted = this.deps.coworkStore.insertDreamPracticeProposals(
+          metabotId,
+          date,
+          practiceProposals,
+        );
+        if (inserted > 0) {
+          console.log(
+            `[DreamService] Practice proposals for metabot ${metabotId} date ${date}: inserted=${inserted}`,
+          );
+        }
+      } catch (error) {
+        console.warn(
+          `[DreamService] Practice proposal persistence failed for metabot ${metabotId} date ${date}: ` +
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }

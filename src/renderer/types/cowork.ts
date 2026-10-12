@@ -658,6 +658,10 @@ export interface CoworkMemoryPolicy {
   memoryUserMemoriesMaxItems: number;
   dreamEnabled: boolean;
   hygieneEnabled: boolean;
+  /** Self-curriculum practice tasks (design 2026-10-10 §3.4); default off. */
+  practiceTasksEnabled: boolean;
+  /** Auto-approve read_only practice proposals (only effective with practiceTasksEnabled). */
+  practiceAutoApproveReadOnly: boolean;
   source: 'global' | 'metabot';
 }
 

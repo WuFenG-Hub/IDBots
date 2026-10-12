@@ -178,6 +178,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   });
   const [dreamRunning, setDreamRunning] = useState(false);
   const [dreamNotice, setDreamNotice] = useState<string | null>(null);
+  const [practiceSaving, setPracticeSaving] = useState(false);
 
   // --- Memory entry editor modal ---
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -796,6 +797,42 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     }
   };
 
+  // Self-curriculum practice tasks (design 2026-10-10 §3.4): same per-bot
+  // policy row, surfaced next to the dream toggle — practice is a dream
+  // pipeline product. The auto-approve subordinate toggle only matters while
+  // the feature is on.
+  const handleToggleBotPracticeTasks = async (next: boolean) => {
+    if (metabotId == null) return;
+    setPracticeSaving(true);
+    setDreamNotice(null);
+    try {
+      const saved = await coworkService.setMemoryPolicy({ metabotId, practiceTasksEnabled: next });
+      if (!saved) throw new Error(i18nService.t('coworkMemoryMetabotPolicySaveFailed'));
+      setPolicy(saved);
+      setDreamNotice(i18nService.t(next ? 'memoryPracticeBotEnabled' : 'memoryPracticeBotDisabled'));
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : i18nService.t('coworkMemoryMetabotPolicySaveFailed'));
+    } finally {
+      setPracticeSaving(false);
+    }
+  };
+
+  const handleToggleBotPracticeAutoApprove = async (next: boolean) => {
+    if (metabotId == null) return;
+    setPracticeSaving(true);
+    setDreamNotice(null);
+    try {
+      const saved = await coworkService.setMemoryPolicy({ metabotId, practiceAutoApproveReadOnly: next });
+      if (!saved) throw new Error(i18nService.t('coworkMemoryMetabotPolicySaveFailed'));
+      setPolicy(saved);
+      setDreamNotice(i18nService.t(next ? 'memoryPracticeAutoApproveEnabled' : 'memoryPracticeAutoApproveDisabled'));
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : i18nService.t('coworkMemoryMetabotPolicySaveFailed'));
+    } finally {
+      setPracticeSaving(false);
+    }
+  };
+
   const handleRunHygieneNow = async () => {
     setHygieneRunning(true);
     setHygieneNotice(null);
@@ -1344,6 +1381,20 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         checked={policy?.dreamEnabled ?? true}
         onChange={(value) => { void handleToggleBotDream(value); }}
         disabled={metabotId == null || dreamRunning}
+      />
+      <ToggleRow
+        label={i18nService.t('memoryPracticeBotToggle')}
+        hint={i18nService.t('memoryPracticeBotToggleHint')}
+        checked={policy?.practiceTasksEnabled ?? false}
+        onChange={(value) => { void handleToggleBotPracticeTasks(value); }}
+        disabled={metabotId == null || practiceSaving}
+      />
+      <ToggleRow
+        label={i18nService.t('memoryPracticeAutoApproveToggle')}
+        hint={i18nService.t('memoryPracticeAutoApproveToggleHint')}
+        checked={policy?.practiceAutoApproveReadOnly ?? true}
+        onChange={(value) => { void handleToggleBotPracticeAutoApprove(value); }}
+        disabled={metabotId == null || practiceSaving || !(policy?.practiceTasksEnabled ?? false)}
       />
       <div className="flex items-center justify-between gap-2">
         <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
