@@ -10,7 +10,7 @@ import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { PermissionResult } from './coworkPermissionTypes';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
-import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, resolveDshProviderRoute, isFreeQuotaProvider, ModelProviderSelectionError, type DshProviderRouteInfo } from './claudeSettings';
+import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, getPersistedChatExperienceMode, resolveDshProviderRoute, isFreeQuotaProvider, ModelProviderSelectionError, type DshProviderRouteInfo } from './claudeSettings';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { buildGoalPromptSection, type CoworkSessionGoal } from './coworkSessionGoal';
 import { DshTurnHub, dshSessionRootFor, isNativeDeepSeekChatRoute, type DshTurnProviderRoute } from './coworkDshTurn';
@@ -82,6 +82,7 @@ import { isContextWindowExceededError } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
+import { ASSISTANT_MODE_PROMPT } from './assistantModePrompt';
 import { CHAIN_IDENTIFIER_VERBATIM_RULE } from './chainIdentifierPrompt';
 import { QA_BEHAVIOR_RULE } from './qaBehaviorPrompt';
 import { hasEmbeddedSkillCatalog } from './skillPromptMarkers';
@@ -5275,6 +5276,23 @@ export class CoworkRunner extends EventEmitter {
     return DEFAULT_SYSTEM_PROMPT_PROFILE;
   }
 
+  /**
+   * Whether the assistant chat-experience mode applies to this session: the
+   * global mode flag is on AND the session is a regular interactive owner
+   * chat — standard type, human-initiated (no autoOrigin), created from the
+   * cowork UI. Group tasks, A2A/IM conversations, Bot Browser pages,
+   * long-term sessions, and auto-created orchestration/schedule runs all
+   * serve other audiences or run unattended, so they keep the professional
+   * prompt.
+   */
+  private isAssistantModeOwnerChatSession(sessionId: string): boolean {
+    if (getPersistedChatExperienceMode() !== 'assistant') return false;
+    const session = this.store.getSession(sessionId);
+    if (!session) return false;
+    if ((session.sessionType ?? 'standard') !== 'standard' || session.autoOrigin) return false;
+    return this.store.getConversationSourceContextBySession(sessionId).sourceChannel === 'cowork_ui';
+  }
+
   private buildMemoryStrategyPrompt(memoryEnabled: boolean, includeMemoryStrategy: boolean, implicitUpdateEnabled = false): string | null {
     if (!includeMemoryStrategy) {
       return null;
@@ -5651,7 +5669,8 @@ export class CoworkRunner extends EventEmitter {
     profile: SystemPromptProfile = DEFAULT_SYSTEM_PROMPT_PROFILE,
     implicitMemoryUpdateEnabled = false,
     skillsSection?: string | null,
-    metawebDeepSections = true
+    metawebDeepSections = true,
+    assistantMode = false
   ): string {
     return composePromptSections([
       { name: 'persona:metabot', order: PROMPT_SECTION_ORDER.PERSONA, text: personaBlock },
@@ -5708,6 +5727,13 @@ export class CoworkRunner extends EventEmitter {
       // caller passes the full catalog-inline section instead.
       { name: 'idbots:skills', order: PROMPT_SECTION_ORDER.SKILLS, text: skillsSection ?? '' },
       { name: 'idbots:base', order: PROMPT_SECTION_ORDER.BASE, text: baseSystemPrompt?.trim() },
+      // Assistant chat-experience mode: mounted AFTER idbots:base so its
+      // personal-assistant reporting rules read as an override of the base
+      // prompt's User Update Protocol. Gated by the caller to regular
+      // interactive owner chats (see isAssistantModeOwnerChatSession).
+      ...(assistantMode
+        ? [{ name: 'idbots:assistant-mode', order: PROMPT_SECTION_ORDER.ASSISTANT_MODE, text: ASSISTANT_MODE_PROMPT }]
+        : []),
     ]);
   }
 
@@ -6920,7 +6946,8 @@ export class CoworkRunner extends EventEmitter {
         shouldIncludeMetawebDeepSections(
           systemPromptProfile.metawebMode,
           this.getMetawebPromptTier(sessionId, activeSession),
-        )
+        ),
+        this.isAssistantModeOwnerChatSession(sessionId)
       );
       this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
@@ -7051,7 +7078,8 @@ export class CoworkRunner extends EventEmitter {
         shouldIncludeMetawebDeepSections(
           systemPromptProfile.metawebMode,
           this.getMetawebPromptTier(sessionId, activeSession),
-        )
+        ),
+        this.isAssistantModeOwnerChatSession(sessionId)
       );
       this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 

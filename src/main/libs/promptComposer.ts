@@ -89,6 +89,14 @@ export const PROMPT_SECTION_ORDER = {
   SKILLS: 46,
   /** Caller-provided base prompt (renderer-combined routing + user config). */
   BASE: 50,
+  /**
+   * Assistant chat-experience mode: the personal-assistant style override for
+   * non-technical owners. Renders right after BASE so its rules read as an
+   * override of the base prompt's User Update Protocol. Only mounted for
+   * regular interactive owner chats (see isAssistantModeOwnerChatSession in
+   * coworkRunner).
+   */
+  ASSISTANT_MODE: 55,
   /** Tail guard rails that must stay last (e.g. cron user-priority guard). */
   TAIL_GUARD: 900,
 } as const;
