@@ -166,6 +166,12 @@ const UserSettings: React.FC = () => {
   const [retryingSync, setRetryingSync] = useState(false);
   const [mobileSyncing, setMobileSyncing] = useState(false);
   const [mobileSyncResult, setMobileSyncResult] = useState<Awaited<ReturnType<typeof window.electron.userIdentity.syncToMobile>> | null>(null);
+  const [chainBackupRunning, setChainBackupRunning] = useState(false);
+  const [chainBackupRestoring, setChainBackupRestoring] = useState(false);
+  const [chainBackupResult, setChainBackupResult] = useState<Awaited<ReturnType<typeof window.electron.chainBackup.backup>> | null>(null);
+  const [chainRestoreResult, setChainRestoreResult] = useState<Awaited<ReturnType<typeof window.electron.chainBackup.restore>> | null>(null);
+  const [chainBackupProgressText, setChainBackupProgressText] = useState('');
+  const [chainBackupLastRun, setChainBackupLastRun] = useState<number | null>(null);
   const [subsidyRetrying, setSubsidyRetrying] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [nameSaving, setNameSaving] = useState(false);
@@ -439,6 +445,71 @@ const UserSettings: React.FC = () => {
       showToast(`${i18nService.t('userSettingsMobileSyncFailed')}: ${error?.message || ''}`);
     } finally {
       setMobileSyncing(false);
+    }
+  };
+
+  useEffect(() => {
+    const formatProgress = (p: { phase: string; botName?: string; segmentsDone?: number; segmentsTotal?: number }) => {
+      const seg = typeof p.segmentsDone === 'number' && typeof p.segmentsTotal === 'number'
+        ? ` ${p.segmentsDone}/${p.segmentsTotal}`
+        : '';
+      return p.botName ? `${p.phase}: ${p.botName}${seg}` : p.phase;
+    };
+    const unsubBackup = window.electron.chainBackup.onProgress((p) => setChainBackupProgressText(formatProgress(p)));
+    const unsubRestore = window.electron.chainBackup.onRestoreProgress((p) => setChainBackupProgressText(formatProgress(p)));
+    void window.electron.chainBackup.getState().then((res) => {
+      if (res?.success && res.states.length > 0) {
+        const latest = res.states.reduce((acc, s) => Math.max(acc, s.last_backup_at ?? 0), 0);
+        if (latest > 0) setChainBackupLastRun(latest);
+      }
+    }).catch(() => undefined);
+    return () => {
+      unsubBackup();
+      unsubRestore();
+    };
+  }, []);
+
+  const handleChainBackup = async () => {
+    if (chainBackupRunning || chainBackupRestoring) return;
+    setChainBackupRunning(true);
+    setChainBackupResult(null);
+    setChainBackupProgressText('');
+    try {
+      const result = await window.electron.chainBackup.backup();
+      setChainBackupResult(result);
+      if (result.success) {
+        setChainBackupLastRun(Date.now());
+        showToast(i18nService.t('userSettingsChainBackupSuccess'));
+      } else {
+        showToast(`${i18nService.t('userSettingsChainBackupFailed')}: ${result.error ?? ''}`);
+      }
+    } catch (error: any) {
+      showToast(`${i18nService.t('userSettingsChainBackupFailed')}: ${error?.message || ''}`);
+    } finally {
+      setChainBackupRunning(false);
+      setChainBackupProgressText('');
+    }
+  };
+
+  const handleChainRestore = async () => {
+    if (chainBackupRunning || chainBackupRestoring) return;
+    if (!window.confirm(i18nService.t('userSettingsChainBackupRestoreConfirm'))) return;
+    setChainBackupRestoring(true);
+    setChainRestoreResult(null);
+    setChainBackupProgressText('');
+    try {
+      const result = await window.electron.chainBackup.restore();
+      setChainRestoreResult(result);
+      if (result.success) {
+        showToast(i18nService.t('userSettingsChainBackupRestoreSuccess'));
+      } else {
+        showToast(`${i18nService.t('userSettingsChainBackupRestoreFailed')}: ${result.error ?? ''}`);
+      }
+    } catch (error: any) {
+      showToast(`${i18nService.t('userSettingsChainBackupRestoreFailed')}: ${error?.message || ''}`);
+    } finally {
+      setChainBackupRestoring(false);
+      setChainBackupProgressText('');
     }
   };
 
@@ -984,6 +1055,73 @@ const UserSettings: React.FC = () => {
             <ArrowPathIcon className={`h-3.5 w-3.5 mr-1.5 inline ${mobileSyncing ? 'animate-spin' : ''}`} />
             {mobileSyncing ? i18nService.t('userSettingsMobileSyncing') : i18nService.t('userSettingsMobileSyncButton')}
           </button>
+        </div>
+
+        {/* Chain backup & restore: encrypted soul data to /protocols/metabot-backup */}
+        <div className="flex items-start justify-between gap-3 rounded-xl border dark:border-claude-darkBorder border-claude-border px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+              {i18nService.t('userSettingsChainBackupTitle')}
+            </p>
+            <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('userSettingsChainBackupDescription')}
+            </p>
+            <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {chainBackupLastRun
+                ? i18nService.t('userSettingsChainBackupLastRun').replace('{time}', new Date(chainBackupLastRun).toLocaleString())
+                : i18nService.t('userSettingsChainBackupNever')}
+            </p>
+            {chainBackupProgressText && (
+              <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {chainBackupProgressText}
+              </p>
+            )}
+            {chainBackupResult && (
+              <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary break-all">
+                {chainBackupResult.success
+                  ? i18nService.t('userSettingsChainBackupStats')
+                      .replace('{uploaded}', String(chainBackupResult.bots.reduce((n, b) => n + b.uploadedObjects, 0)))
+                      .replace('{skipped}', String(chainBackupResult.bots.reduce((n, b) => n + b.skippedObjects, 0)))
+                      .replace('{segments}', String(chainBackupResult.bots.reduce((n, b) => n + b.segments, 0)))
+                      .replace('{cost}', String(chainBackupResult.totalCostSats))
+                  : (chainBackupResult.error ?? chainBackupResult.bots.find((b) => b.error)?.error ?? '')}
+              </p>
+            )}
+            {chainBackupResult?.botsManifestError && (
+              <p className="mt-1 text-xs text-amber-600 dark:text-amber-400 break-all">
+                {i18nService.t('userSettingsChainBackupManifestFailed').replace('{error}', chainBackupResult.botsManifestError)}
+              </p>
+            )}
+            {chainRestoreResult && (
+              <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary break-all">
+                {chainRestoreResult.success
+                  ? i18nService.t('userSettingsChainBackupRestoreStats')
+                      .replace('{restored}', String(chainRestoreResult.bots.filter((b) => b.restored).length))
+                      .replace('{imported}', String(chainRestoreResult.bots.reduce((n, b) => n + b.imported, 0)))
+                  : (chainRestoreResult.error ?? chainRestoreResult.bots.find((b) => b.error)?.error ?? '')}
+              </p>
+            )}
+          </div>
+          <div className="flex shrink-0 flex-col gap-2">
+            <button
+              type="button"
+              onClick={() => { void handleChainBackup(); }}
+              disabled={chainBackupRunning || chainBackupRestoring}
+              className="btn-idchat-primary-filled px-3 py-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <ArrowPathIcon className={`h-3.5 w-3.5 mr-1.5 inline ${chainBackupRunning ? 'animate-spin' : ''}`} />
+              {chainBackupRunning ? i18nService.t('userSettingsChainBackupRunning') : i18nService.t('userSettingsChainBackupButton')}
+            </button>
+            <button
+              type="button"
+              onClick={() => { void handleChainRestore(); }}
+              disabled={chainBackupRunning || chainBackupRestoring}
+              className="inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-black/5 dark:hover:bg-white/5 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <ArrowPathIcon className={`h-3.5 w-3.5 mr-1.5 inline ${chainBackupRestoring ? 'animate-spin' : ''}`} />
+              {chainBackupRestoring ? i18nService.t('userSettingsChainBackupRestoreRunning') : i18nService.t('userSettingsChainBackupRestoreButton')}
+            </button>
+          </div>
         </div>
 
         {/* Logout confirmation modal */}

@@ -385,6 +385,17 @@ export class SqliteStore {
       );
     `);
 
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS chain_backup_state (
+        bot_globalmetaid TEXT PRIMARY KEY,
+        manifest_pinid TEXT,
+        segments_json TEXT NOT NULL DEFAULT '[]',
+        uploaded_object_ids_json TEXT NOT NULL DEFAULT '[]',
+        last_backup_at INTEGER,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+
     // Create cowork tables
     this.db.run(`
       CREATE TABLE IF NOT EXISTS cowork_sessions (
