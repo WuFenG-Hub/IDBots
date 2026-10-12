@@ -44,7 +44,13 @@ const translations: Record<LanguageType, Record<string, string>> = {
     system: '跟随系统',
     chinese: '中文',
     english: 'English',
-    
+    chatExperienceMode: '对话模式',
+    chatExperienceModeDesc: '选择适合你习惯的对话体验，可随时切换',
+    chatModeProfessional: '专业模式',
+    chatModeProfessionalDesc: '显示完整的思考过程与工具调用，适合开发者',
+    chatModeAssistant: '助理模式',
+    chatModeAssistantDesc: '只看简报与结果，响应更快，适合日常使用',
+
     // API设置
     apiKey: 'API Key',
     apiKeyPlaceholder: '输入你的 API Key',
@@ -2950,7 +2956,13 @@ const translations: Record<LanguageType, Record<string, string>> = {
     system: 'System',
     chinese: 'Chinese',
     english: 'English',
-    
+    chatExperienceMode: 'Chat mode',
+    chatExperienceModeDesc: 'Choose the chat experience that fits you. You can switch anytime.',
+    chatModeProfessional: 'Professional',
+    chatModeProfessionalDesc: 'Shows full reasoning and tool calls. For developers.',
+    chatModeAssistant: 'Assistant',
+    chatModeAssistantDesc: 'Brief progress notes and results only, faster replies. For everyday use.',
+
     // API Settings
     apiKey: 'API Key',
     apiKeyPlaceholder: 'Enter your API Key',
