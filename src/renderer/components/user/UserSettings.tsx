@@ -164,8 +164,6 @@ const UserSettings: React.FC = () => {
 
   // Profile
   const [retryingSync, setRetryingSync] = useState(false);
-  const [mobileSyncing, setMobileSyncing] = useState(false);
-  const [mobileSyncResult, setMobileSyncResult] = useState<Awaited<ReturnType<typeof window.electron.userIdentity.syncToMobile>> | null>(null);
   const [chainBackupRunning, setChainBackupRunning] = useState(false);
   const [chainBackupRestoring, setChainBackupRestoring] = useState(false);
   const [chainBackupResult, setChainBackupResult] = useState<Awaited<ReturnType<typeof window.electron.chainBackup.backup>> | null>(null);
@@ -427,24 +425,6 @@ const UserSettings: React.FC = () => {
       showToast(`${i18nService.t('userSettingsSubsidyFailed')}: ${error?.message || ''}`);
     } finally {
       setSubsidyRetrying(false);
-    }
-  };
-
-  const handleSyncToMobile = async () => {
-    if (mobileSyncing) return;
-    setMobileSyncing(true);
-    try {
-      const result = await window.electron.userIdentity.syncToMobile();
-      setMobileSyncResult(result);
-      if (result.success) {
-        showToast(i18nService.t('userSettingsMobileSyncSuccess'));
-      } else {
-        showToast(`${i18nService.t('userSettingsMobileSyncFailed')}: ${result.error ?? ''}`);
-      }
-    } catch (error: any) {
-      showToast(`${i18nService.t('userSettingsMobileSyncFailed')}: ${error?.message || ''}`);
-    } finally {
-      setMobileSyncing(false);
     }
   };
 
@@ -1023,41 +1003,9 @@ const UserSettings: React.FC = () => {
           </div>
         )}
 
-        {/* Mobile companion sync: publish the bot manifest as /info/bots */}
-        <div className="flex items-start justify-between gap-3 rounded-xl border dark:border-claude-darkBorder border-claude-border px-4 py-3">
-          <div className="min-w-0">
-            <p className="text-sm font-medium dark:text-claude-darkText text-claude-text">
-              {i18nService.t('userSettingsMobileSyncTitle')}
-            </p>
-            <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-              {i18nService.t('userSettingsMobileSyncDescription')}
-            </p>
-            {mobileSyncResult && (
-              <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary break-all">
-                {mobileSyncResult.success
-                  ? i18nService.t('userSettingsMobileSyncStats')
-                      .replace('{bound}', String(mobileSyncResult.boundCount))
-                      .replace('{total}', String(mobileSyncResult.botCount))
-                      .replace('{newly}', String(mobileSyncResult.newlyBound))
-                      + (mobileSyncResult.skippedUnbound.length > 0
-                        ? ` · ${i18nService.t('userSettingsMobileSyncSkipped')}: ${mobileSyncResult.skippedUnbound.join(', ')}`
-                        : '')
-                  : (mobileSyncResult.error ?? '')}
-              </p>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={() => { void handleSyncToMobile(); }}
-            disabled={mobileSyncing}
-            className="btn-idchat-primary-filled shrink-0 px-3 py-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <ArrowPathIcon className={`h-3.5 w-3.5 mr-1.5 inline ${mobileSyncing ? 'animate-spin' : ''}`} />
-            {mobileSyncing ? i18nService.t('userSettingsMobileSyncing') : i18nService.t('userSettingsMobileSyncButton')}
-          </button>
-        </div>
-
-        {/* Chain backup & restore: encrypted soul data to /protocols/metabot-backup */}
+        {/* Chain backup & restore: encrypted soul data to /protocols/metabot-backup.
+            Also refreshes the public /info/bots discovery manifest, replacing the
+            old standalone "sync bots to mobile" card. */}
         <div className="flex items-start justify-between gap-3 rounded-xl border dark:border-claude-darkBorder border-claude-border px-4 py-3">
           <div className="min-w-0">
             <p className="text-sm font-medium dark:text-claude-darkText text-claude-text">
@@ -1090,6 +1038,11 @@ const UserSettings: React.FC = () => {
             {chainBackupResult?.botsManifestError && (
               <p className="mt-1 text-xs text-amber-600 dark:text-amber-400 break-all">
                 {i18nService.t('userSettingsChainBackupManifestFailed').replace('{error}', chainBackupResult.botsManifestError)}
+              </p>
+            )}
+            {chainBackupResult?.success && chainBackupResult.botsManifestSynced && (
+              <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('userSettingsChainBackupManifestSynced')}
               </p>
             )}
             {chainRestoreResult && (

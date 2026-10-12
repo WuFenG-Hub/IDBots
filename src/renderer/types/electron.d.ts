@@ -1783,16 +1783,6 @@ interface IElectronAPI {
     revealMnemonic: () => Promise<{ success: boolean; mnemonic?: string; error?: string }>;
     retrySubsidy: () => Promise<{ success: boolean; identity?: PublicUserIdentity | null; subsidy?: UserIdentitySubsidyResult; error?: string }>;
     retryChainSync: () => Promise<{ success: boolean; identity?: PublicUserIdentity | null; subsidy?: UserIdentitySubsidyResult; chainSync?: UserIdentityChainSyncResult; error?: string }>;
-    syncToMobile: () => Promise<{
-      success: boolean;
-      botCount: number;
-      boundCount: number;
-      newlyBound: number;
-      skippedUnbound: string[];
-      pinId?: string;
-      txids: string[];
-      error?: string;
-    }>;
   };
   chainBackup: {
     backup: () => Promise<{

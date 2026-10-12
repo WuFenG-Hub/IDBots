@@ -81,7 +81,6 @@ import {
   updateUserIdentityName,
 } from './services/userIdentityService';
 import { signOwnerBinding } from './services/ownerBindingService';
-import { syncUserBotsToMobile } from './services/userBotsPinService';
 import { listChainBackupStates, runChainBackup } from './services/chainBackupService';
 import { runChainBackupRestore } from './services/chainBackupRestoreService';
 import { fetchMetaidInfoByAddress, fetchMetaidInfoByMetaid, fetchMetaidRestoreProfile, restoreMetabotFromMnemonicCore, type MetaidAddressInfo } from './services/metabotRestoreService';
@@ -14444,26 +14443,9 @@ if (!gotTheLock) {
     }
   });
 
-  // One-click bot manifest sync for the mobile companion: completes missing
-  // owner bindings, then publishes the /info/bots discovery pin.
-  ipcMain.handle('userIdentity:syncToMobile', async () => {
-    try {
-      const result = await syncUserBotsToMobile(getUserIdentityStore(), getMetabotStore());
-      console.log('[UserIdentity] userIdentity:syncToMobile result', {
-        success: result.success,
-        botCount: result.botCount,
-        boundCount: result.boundCount,
-        newlyBound: result.newlyBound,
-        skippedUnbound: result.skippedUnbound.length,
-        pinId: result.pinId,
-      });
-      return result;
-    } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
-      console.error('[UserIdentity] userIdentity:syncToMobile failed:', errMsg);
-      return { success: false, botCount: 0, boundCount: 0, newlyBound: 0, skippedUnbound: [], txids: [], error: errMsg };
-    }
-  });
+  // The /info/bots discovery manifest is refreshed automatically at the start
+  // of every chain backup (runChainBackup), so there is no standalone
+  // renderer-facing sync entry point anymore.
 
   const broadcastChainBackupProgress = (channel: string, progress: unknown) => {
     BrowserWindow.getAllWindows().forEach((win) => {
