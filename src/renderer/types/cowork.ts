@@ -76,6 +76,13 @@ export interface CoworkMessageMetadata {
   isStreaming?: boolean;
   isFinal?: boolean;
   isThinking?: boolean;
+  /**
+   * Assistant chat-experience mode: this ordinary assistant text is model
+   * narration — the commentary professional mode folds into the Think row
+   * ("好的，我这就动手…") — surfaced as a normal chat bubble instead. The tag
+   * records the origin only; rendering is the standard assistant bubble.
+   */
+  narration?: boolean;
   isDelegationInternal?: boolean;
   skillIds?: string[];
   /**

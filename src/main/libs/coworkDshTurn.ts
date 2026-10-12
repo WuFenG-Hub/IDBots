@@ -51,6 +51,7 @@ import type {
   DshMcpServerDefinition,
   DshUsageProjectionResult,
   DshUserQuestionAsk,
+  DshFinalizeMetadata,
   DshPromptSectionInput,
   DshProviderRoute,
   DshRuntimeConfigInput,
@@ -181,7 +182,7 @@ export interface DshTurnCallbacks {
     slot?: DshStreamSlot
   ) => string
   onMessageUpdate: (messageId: string, content: string) => void
-  onMessageFinalize: (messageId: string, content: string, metadata?: { isThinking?: boolean }) => void
+  onMessageFinalize: (messageId: string, content: string, metadata?: DshFinalizeMetadata) => void
   onUsage: (usage: DshUsageSnapshot) => void
   onApprovalRequest: (ask: DshApprovalAsk) => void
   onApprovalCancelled: (askId: string) => void
@@ -316,6 +317,13 @@ export interface DshHubOptions {
   /** User-configured MCP servers, read fresh each turn (additions mount on the
    * next turn; the config union never removes until restart, same as providers). */
   mcpServersProvider?: (coworkSessionId: string) => DshMcpServerDefinition[]
+  /**
+   * Assistant chat-experience mode getter (global setting; may flip
+   * mid-session). Forwarded to every kernel so the event mapper surfaces
+   * model narration as tagged chat text instead of folding it into the
+   * thinking slot.
+   */
+  assistantModeProvider?: () => boolean
   /** 0.1.7 experimental browser automation (dsh-browser-use + Playwright MCP),
    *  per-bot opt-in. One headless Chromium per session. The provider mounts at
    *  composition scope, so opted-in sessions are routed onto their own
@@ -1293,6 +1301,7 @@ export class DshTurnHub {
       runtimeDir: this.opts.runtimeDir,
       handlers: this.hubHandlers(slot, () => kernel),
       log: this.opts.log,
+      assistantModeProvider: this.opts.assistantModeProvider,
     })
     slot.kernel = kernel
     return kernel

@@ -8224,6 +8224,11 @@ export class CoworkRunner extends EventEmitter {
           // that finally's markCrossSessionTurnSettled.
           if (status === 'idle') this.scheduleCrossSessionContinuationDrain(coworkSessionId);
         },
+        // Assistant chat-experience mode: model narration (commentary that
+        // professional mode folds into Think rows) surfaces as ordinary chat
+        // bubbles tagged metadata.narration. Read per fold decision — the
+        // setting can flip while per-session mappers stay alive.
+        assistantModeProvider: () => getPersistedChatExperienceMode() === 'assistant',
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
       });
     }

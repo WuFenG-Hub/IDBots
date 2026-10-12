@@ -22,12 +22,18 @@ const IDLE_PHRASE_INTERVAL_MS = 3000;
  * runtime signals (api_retry / requesting / unpaired tool_use) still take
  * precedence over the rotating idle phrases, mirroring the professional bar's
  * precedence so the text never contradicts the actual state.
+ *
+ * Two placements: above the composer for the whole running state (default),
+ * and `inline` inside the transcript at the reply position while the turn has
+ * no visible content yet (replacing the professional TypingDots).
  */
 export const AssistantActivityIndicator: React.FC<{
   messages: CoworkMessage[];
   avatar?: string | null;
   fallbackText?: string;
-}> = ({ messages, avatar, fallbackText }) => {
+  /** Drop the page-level gutter/max-width wrapper for inline transcript use. */
+  inline?: boolean;
+}> = ({ messages, avatar, fallbackText, inline = false }) => {
   const [idlePhraseIndex, setIdlePhraseIndex] = useState(0);
 
   useEffect(() => {
@@ -77,22 +83,30 @@ export const AssistantActivityIndicator: React.FC<{
 
   const avatarSrc = isRenderableAvatarSource(avatar) ? avatar! : DEFAULT_BOT_AVATAR;
 
+  const row = (
+    <div className="flex items-center gap-2.5 py-2">
+      <div className="assistant-activity-avatar-ring relative h-8 w-8 shrink-0">
+        <img
+          src={avatarSrc}
+          alt=""
+          className="h-8 w-8 rounded-full object-cover border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+          onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_BOT_AVATAR; }}
+        />
+      </div>
+      <span className="min-w-0 truncate text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
+        {getStatusText()}
+      </span>
+    </div>
+  );
+
+  if (inline) {
+    return row;
+  }
+
   return (
     <div className="shrink-0 animate-fade-in px-4">
       <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
-        <div className="flex items-center gap-2.5 py-2">
-          <div className="assistant-activity-avatar-ring relative h-8 w-8 shrink-0">
-            <img
-              src={avatarSrc}
-              alt=""
-              className="h-8 w-8 rounded-full object-cover border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-              onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_BOT_AVATAR; }}
-            />
-          </div>
-          <span className="min-w-0 truncate text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
-            {getStatusText()}
-          </span>
-        </div>
+        {row}
       </div>
     </div>
   );
