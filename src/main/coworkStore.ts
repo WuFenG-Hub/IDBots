@@ -7768,6 +7768,55 @@ export class CoworkStore implements MemoryBackend {
     this.saveDb();
   }
 
+  // Deep-consolidation attempt ladder: metabot id -> consecutive failing
+  // passes. Mirrors a dream run's attempt_count: a failed pass leaves the
+  // cadence unstamped, so the next pass is attempt+1 and resolves a wider
+  // per-attempt LLM window from it; a clean pass clears the entry.
+  getDeepConsolidationAttempts(metabotId: number): number {
+    const row = this.getOne<{ value: string }>(
+      'SELECT value FROM cowork_config WHERE key = ?',
+      ['memoryHygieneDeepConsolidationAttempts'],
+    );
+    if (!row?.value) return 0;
+    try {
+      const parsed = JSON.parse(row.value) as Record<string, number>;
+      const value = parsed[String(metabotId)];
+      return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  setDeepConsolidationAttempts(metabotId: number, attempts: number): void {
+    let parsed: Record<string, number> = {};
+    const row = this.getOne<{ value: string }>(
+      'SELECT value FROM cowork_config WHERE key = ?',
+      ['memoryHygieneDeepConsolidationAttempts'],
+    );
+    if (row?.value) {
+      try {
+        parsed = JSON.parse(row.value) as Record<string, number>;
+      } catch {
+        parsed = {};
+      }
+    }
+    const normalized = Math.max(0, Math.floor(Number(attempts) || 0));
+    if (normalized > 0) {
+      parsed[String(metabotId)] = normalized;
+    } else {
+      // Zero is the default: keep the map empty for bots that never failed.
+      delete parsed[String(metabotId)];
+    }
+    this.db.run(`
+      INSERT INTO cowork_config (key, value, updated_at)
+      VALUES ('memoryHygieneDeepConsolidationAttempts', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `, [JSON.stringify(parsed), Date.now()]);
+    this.saveDb();
+  }
+
   /**
    * The one low-risk physical delete in the memory layer: tombstones
    * (status='deleted') older than the grace period are removed together with
