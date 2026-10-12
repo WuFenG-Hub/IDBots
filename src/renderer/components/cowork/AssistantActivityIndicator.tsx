@@ -23,9 +23,12 @@ const IDLE_PHRASE_INTERVAL_MS = 3000;
  * precedence over the rotating idle phrases, mirroring the professional bar's
  * precedence so the text never contradicts the actual state.
  *
- * Two placements: above the composer for the whole running state (default),
- * and `inline` inside the transcript at the reply position while the turn has
- * no visible content yet (replacing the professional TypingDots).
+ * Single placement: `inline` inside the transcript at the reply position,
+ * where it is assistant mode's only activity indicator — the render gate in
+ * CoworkSessionDetail covers the whole running state (tool runs, the
+ * pre-first-token wait, hidden thinking) and steps aside while visible reply
+ * text streams. Professional mode keeps the above-composer
+ * StreamingActivityBar.
  */
 export const AssistantActivityIndicator: React.FC<{
   messages: CoworkMessage[];

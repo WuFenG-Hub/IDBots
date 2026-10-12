@@ -809,9 +809,9 @@ const shouldHideControlMessage = (message: CoworkMessage): boolean => {
     return true;
   }
   // Ephemeral SDK runtime-status signals (api_retry / requesting) are surfaced
-  // in the streaming activity indicator (StreamingActivityBar in professional
-  // mode, AssistantActivityIndicator in assistant mode), not as persisted
-  // message bubbles.
+  // in professional mode's above-composer StreamingActivityBar, not as
+  // persisted message bubbles. Assistant mode hides them here too; its single
+  // inline activity indicator derives status from the turn's own messages.
   if (typeof message.metadata?.sdkRuntimeStatus === 'string') {
     return true;
   }
@@ -1057,6 +1057,22 @@ const getVisibleAssistantItems = (assistantItems: AssistantTurnItem[], isAssista
 const hasRenderableAssistantContent = (turn: ConversationTurn, isAssistantMode = false): boolean => (
   getVisibleAssistantItems(turn.assistantItems, isAssistantMode).length > 0
 );
+
+// Assistant mode's inline activity indicator covers the whole running state
+// and steps aside only while visible reply text (narration or the final
+// answer) is actively streaming: during tool runs, the pre-first-token wait,
+// and hidden thinking, the last visible item is not streaming text.
+const hasActivelyStreamingVisibleText = (turn: ConversationTurn): boolean => {
+  const visibleItems = getVisibleAssistantItems(turn.assistantItems, true);
+  const lastItem = visibleItems[visibleItems.length - 1];
+  if (!lastItem || lastItem.type !== 'assistant' || !lastItem.message.metadata?.isStreaming) {
+    return false;
+  }
+  // A stream that so far carries only a think-tag body renders nothing in
+  // assistant mode — that is not yet visible reply text.
+  const split = splitThinkTaggedContent(lastItem.message.content);
+  return Boolean((split.thinking ? split.text : lastItem.message.content).trim());
+};
 
 const formatCompactTokens = (value: number): string => {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -2443,8 +2459,9 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
             )}
             {showTypingIndicator && (
               // Assistant mode: the bot-avatar activity indicator sits inline
-              // at the reply position instead of the three dots; the
-              // above-composer bar still covers the whole running state.
+              // at the reply position and is the mode's ONLY activity
+              // indicator — the gate at the call site already covers the
+              // whole running state and steps aside while reply text streams.
               isAssistantMode ? (
                 <AssistantActivityIndicator
                   inline
@@ -3899,8 +3916,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   );
 
   const renderConversationTurns = () => {
+    // Assistant mode's inline indicator covers the whole running state, not
+    // just the streaming window — an empty transcript of a running session
+    // still shows the reply-position indicator.
+    const sessionRunning = isStreaming || currentSession?.status === 'running';
     if (turns.length === 0) {
-      if (!isStreaming) return null;
+      if (isAssistantMode ? !sessionRunning : !isStreaming) return null;
       return (
         <div data-export-role="assistant-block">
           <AssistantTurnBlock
@@ -3925,7 +3946,13 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
     return turns.map((turn, index) => {
       const isLastTurn = index === turns.length - 1;
-      const showTypingIndicator = isStreaming && isLastTurn && !hasRenderableAssistantContent(turn, isAssistantMode);
+      // Assistant mode: the inline indicator covers the whole running state
+      // (tool runs, the pre-first-token wait, hidden thinking) and steps
+      // aside only while visible reply text is actively streaming.
+      // Professional mode keeps the original TypingDots gate byte-identical.
+      const showTypingIndicator = isLastTurn && (isAssistantMode
+        ? sessionRunning && !hasActivelyStreamingVisibleText(turn)
+        : isStreaming && !hasRenderableAssistantContent(turn, isAssistantMode));
       // Assistant mode filters tool UI out of the transcript, so a turn whose
       // items all filtered out must not leave an empty padded block behind.
       const showAssistantBlock = (isAssistantMode
@@ -4345,22 +4372,14 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         />
       )}
 
-      {/* Streaming Activity Bar — assistant mode swaps the professional
-          sliding bar for a friendlier bot-avatar indicator; professional
-          mode stays exactly as before. */}
-      {(isStreaming || currentSession.status === 'running') && (
-        isAssistantMode ? (
-          <AssistantActivityIndicator
-            messages={currentSession.messages}
-            avatar={sessionMetabot?.avatar ?? currentSession.metabotAvatar ?? null}
-            fallbackText={isA2ASession ? i18nService.t('coworkA2ABackgroundWorking') : undefined}
-          />
-        ) : (
-          <StreamingActivityBar
-            messages={currentSession.messages}
-            fallbackText={isA2ASession ? i18nService.t('coworkA2ABackgroundWorking') : undefined}
-          />
-        )
+      {/* Streaming Activity Bar — professional mode only. Assistant mode's
+          single activity indicator lives inline at the reply position (see
+          AssistantTurnBlock), so nothing renders here in that mode. */}
+      {!isAssistantMode && (isStreaming || currentSession.status === 'running') && (
+        <StreamingActivityBar
+          messages={currentSession.messages}
+          fallbackText={isA2ASession ? i18nService.t('coworkA2ABackgroundWorking') : undefined}
+        />
       )}
 
       {freeQuotaExhausted && (
