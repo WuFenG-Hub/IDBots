@@ -902,18 +902,35 @@ export class MetaIDKnowledgeStore {
     ).map(rowToEntry);
 
     if (options.touchLastUsed && rows.length > 0) {
-      const now = this.now();
-      const ids = rows.map((row) => row.id);
-      this.db.run(
-        `UPDATE metaid_knowledge_entries SET last_used_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`,
-        [now, ...ids],
-      );
-      this.saveDb();
-      for (const row of rows) {
-        row.lastUsedAt = now;
+      const touchedAt = this.touchKnowledgeLastUsed(metabotId, rows.map((row) => row.id));
+      if (touchedAt != null) {
+        for (const row of rows) {
+          row.lastUsedAt = touchedAt;
+        }
       }
     }
     return rows;
+  }
+
+  /**
+   * Bump last_used_at on the given knowledge entries (recall reuse signal).
+   * Callers that post-filter a listKnowledge pool must touch only the rows
+   * that actually render. Returns the touch timestamp, or null for a no-op.
+   */
+  touchKnowledgeLastUsed(metabotId: number, knowledgeIds: string[]): number | null {
+    const ownerId = asInteger(metabotId);
+    if (!ownerId) return null;
+    const ids = Array.from(new Set(
+      knowledgeIds.map((id) => asText(id)).filter((id) => id.length > 0),
+    ));
+    if (ids.length === 0) return null;
+    const now = this.now();
+    this.db.run(
+      `UPDATE metaid_knowledge_entries SET last_used_at = ? WHERE metabot_id = ? AND id IN (${ids.map(() => '?').join(',')})`,
+      [now, ownerId, ...ids],
+    );
+    this.saveDb();
+    return now;
   }
 
   /** Keyword search across topic + summary for the recall tool. */

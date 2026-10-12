@@ -7117,7 +7117,7 @@ export class CoworkStore implements MemoryBackend {
     return entries;
   }
 
-  private touchUserMemoriesLastUsed(metabotId: number, memoryIds: string[]): void {
+  touchUserMemoriesLastUsed(metabotId: number, memoryIds: string[]): void {
     const uniqueIds = Array.from(new Set(memoryIds.map((id) => id.trim()).filter(Boolean)));
     if (uniqueIds.length === 0) return;
     const placeholders = uniqueIds.map(() => '?').join(', ');

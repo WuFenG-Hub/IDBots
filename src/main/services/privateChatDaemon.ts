@@ -42,7 +42,7 @@ import type { CoworkConversationMapping, CoworkMessage, CoworkMessageMetadata, C
 import type { MemoryBackend } from '../memory/memoryBackend';
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { recordMetaIDPrivateA2AExperience } from './metaidExperienceRecorder';
-import { buildScopedMemoryPromptBlocks } from '../memory/memoryPromptBlocks';
+import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
 import type { MetaidDataPayload } from './metaidCore';
@@ -1949,7 +1949,7 @@ export async function sendSellerOrderImmediateAcknowledgement(params: {
 }
 
 export function buildPrivateReplyMemoryPromptBlocks(params: {
-  memoryBackend: Pick<MemoryBackend, 'listUserMemories'>;
+  memoryBackend: Pick<MemoryBackend, 'listUserMemories' | 'touchUserMemoriesLastUsed'>;
   metabotId: number;
   sourceChannel: string;
   externalConversationId: string;
@@ -1965,6 +1965,9 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
     sessionType: 'a2a',
   });
 
+  // The pools are wider than the injection quota, so pooling alone must not
+  // count as usage (touchLastUsed: false); only the entries that survive
+  // ranking + the char budget and render into the prompt get touched below.
   const ownerEntries = resolved.ownerReadPolicy === 'none'
     ? []
     : params.memoryBackend.listUserMemories({
@@ -1974,8 +1977,7 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
         includeDeleted: false,
         limit: Math.max(params.limit, 12),
         offset: 0,
-        // Injection IS the usage event for the hygiene decay clock.
-        touchLastUsed: true,
+        touchLastUsed: false,
       });
   const contactEntries = resolved.writeScope.kind === 'contact'
     ? params.memoryBackend.listUserMemories({
@@ -1985,7 +1987,7 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
         includeDeleted: false,
         limit: params.limit,
         offset: 0,
-        touchLastUsed: true,
+        touchLastUsed: false,
       })
     : [];
   const conversationEntries = resolved.writeScope.kind === 'conversation'
@@ -1996,11 +1998,11 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
         includeDeleted: false,
         limit: params.limit,
         offset: 0,
-        touchLastUsed: true,
+        touchLastUsed: false,
       })
     : [];
 
-  return buildScopedMemoryPromptBlocks({
+  const { xml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
     channel: params.sourceChannel,
     currentUserText: params.currentUserText,
     ownerEntries,
@@ -2010,6 +2012,11 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
     maxScopedEntries: params.limit,
     maxOwnerOperationalPreferences: Math.min(3, params.limit),
   });
+  // Injection IS the usage event for the hygiene decay clock.
+  if (injectedIds.length > 0) {
+    params.memoryBackend.touchUserMemoriesLastUsed(params.metabotId, injectedIds);
+  }
+  return xml;
 }
 
 function normalizePrivateConversationPeerId(row: PrivateChatMessageRow): string {
