@@ -574,3 +574,4 @@ man_base_data_pebble/
 !tests/orderMemoryReadOnly.test.mjs
 !tests/capabilityDraftsPanel.test.tsx
 !tests/dreamTelemetryPanel.test.tsx
+!tests/installAgeGate.test.mjs

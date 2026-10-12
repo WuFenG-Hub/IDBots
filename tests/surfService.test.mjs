@@ -140,6 +140,41 @@ test('pre-dream surf toggle is default-on: unset means ON, explicit 0 opts out, 
   assert.equal(service.shouldPreDreamSurf(7), false, 'explicit 0 opts out');
 });
 
+test('fresh-install deferral: pre-dream surf is skipped while the gate reports a reason', async () => {
+  // 2026-10-12 fresh-install incident: the nightly pre-dream surf is part of
+  // the background pipeline and must wait out the deferral window; a MANUAL
+  // surf stays available (it is a user action, not background automation).
+  let deferredReason = 'install is 0h old; 24h0m left of the 24h fresh-install window';
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const service = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
+    backgroundDeferral: () => deferredReason,
+    nowMs: () => NOW_MS,
+  });
+
+  assert.equal(service.shouldPreDreamSurf(7), false, 'pre-dream surf is deferred');
+  assert.equal(store.listRunsByMetabot(7).length, 0, 'the deferred pre-dream trigger left no run row');
+
+  // Manual triggers are user actions: they run even inside the window.
+  const manual = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(manual.status, 'done', 'a manual trigger still runs while deferred');
+
+  // Once the window elapses the pre-dream gate reopens — the deferral is a
+  // wait, not a permanent opt-out. (The manual run above then suppresses it
+  // via the normal 20h recency dedupe, so this asserts the gate itself by
+  // reading it with the recency anchor still in place.)
+  deferredReason = null;
+  assert.equal(service.shouldPreDreamSurf(7), false, 'the manual run keeps the pre-dream dedupe');
+  assert.equal(service.shouldPreDreamSurf(8), true, 'a bot with no recent run is surfable again');
+});
+
 test('memory-disabled bot: manual surf runs degraded, pre-dream stays gated (review 2, item 9B)', async () => {
   const db = createNativeSqliteDatabase(':memory:');
   const store = new MetawebSurfStore(db, () => {});

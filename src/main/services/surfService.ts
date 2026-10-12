@@ -106,6 +106,13 @@ export interface SurfServiceDeps {
   registry?: SurfProtocolDescriptor[];
   nowMs?: () => number;
   /**
+   * Fresh-install deferral (see libs/installAgeGate): returns a one-line
+   * reason while background automation must stay off (a brand-new install's
+   * first 24h), else null. Only the PRE-DREAM path consults it — a manual
+   * surf is a user action. Absent → never deferred.
+   */
+  backgroundDeferral?: () => string | null;
+  /**
    * Bot identity for the deterministic inbox (R3): the interactions API
    * accepts an address, metaId or globalMetaId as owner. Absent → no inbox
    * section (the prompt degrades to one line).
@@ -158,6 +165,9 @@ export class SurfService {
   private readonly fetchHotPosts?: SurfServiceDeps['fetchHotPosts'];
   private readonly getLatestDreamDigest?: SurfServiceDeps['getLatestDreamDigest'];
   private readonly runningByMetabot = new Map<number, string>();
+  private readonly backgroundDeferral?: SurfServiceDeps['backgroundDeferral'];
+  /** One-line "deferred" log latch (see shouldPreDreamSurf). */
+  private deferralLogged = false;
 
   constructor(deps: SurfServiceDeps) {
     this.store = deps.store;
@@ -166,6 +176,7 @@ export class SurfService {
     this.runSurfSession = deps.runSurfSession;
     this.isMemoryEnabled = deps.isMemoryEnabled;
     this.listChainWritesForSurf = deps.listChainWritesForSurf;
+    this.backgroundDeferral = deps.backgroundDeferral;
     this.registry = deps.registry ?? DEFAULT_SURF_PROTOCOLS;
     this.nowMs = deps.nowMs ?? (() => Date.now());
     this.getBotIdentity = deps.getBotIdentity;
@@ -244,6 +255,19 @@ export class SurfService {
   shouldPreDreamSurf(metabotId: number): boolean {
     if (!isSurfBeforeDreamEnabled(this.metabotStore, metabotId)) return false;
     if (this.isRunning(metabotId)) return false;
+    // Fresh-install deferral: the pre-dream surf is part of the nightly
+    // pipeline, so it waits out the window with the dream it belongs to.
+    // Checked here (not only in the dream tick) so no future caller can
+    // bypass the gate.
+    const deferredReason = this.backgroundDeferral?.() ?? null;
+    if (deferredReason) {
+      if (!this.deferralLogged) {
+        this.deferralLogged = true;
+        console.log(`[SurfService] Pre-dream surf deferred: ${deferredReason}`);
+      }
+      return false;
+    }
+    this.deferralLogged = false;
     try {
       // A bot without memory learns nothing from surfing — skip quietly here
       // (the dream proceeds either way); manual triggers fail loudly instead.

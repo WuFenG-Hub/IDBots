@@ -591,6 +591,35 @@ test('a completed run that started mid-day is re-dreamed in the next nightly win
   }
 });
 
+test('fresh-install deferral: a deferred tick dreams nothing and leaves the dates due', async () => {
+  // 2026-10-12 fresh-install incident: the nightly pipeline (every catch-up
+  // date, each with its own pre-dream surf) burned a new user's whole starter
+  // allowance before they typed anything. While the gate reports a reason the
+  // tick must not enqueue or run anything — and it must not consume the date
+  // either, so the catch-up happens normally once the window elapses.
+  let deferredReason = 'install is 0h old; 24h0m left of the 24h fresh-install window';
+  const calls = [];
+  const ctx = await setup(
+    async (system, user) => { calls.push(user); return makePayload(); },
+    { backgroundDeferral: () => deferredReason },
+  );
+  try {
+    const { service, dreamStore } = ctx;
+
+    await service.tick();
+    assert.equal(calls.length, 0, 'no dream LLM call while deferred');
+    assert.equal(dreamStore.getRunStates(5, [DAY]).size, 0, 'nothing was run for the due date');
+
+    // Window over: the still-due date dreams on the next tick.
+    deferredReason = null;
+    await service.tick();
+    assert.equal(calls.length, 1, 'the deferred date runs once the window elapses');
+    assert.equal(dreamStore.getRun(5, DAY).status, 'completed');
+  } finally {
+    ctx.cleanup();
+  }
+});
+
 test('nightly tick repairs stale-version dates one per night, never touching identity', async () => {
   const { db, cleanup } = await createSqliteStore();
   try {

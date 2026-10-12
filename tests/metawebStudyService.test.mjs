@@ -29,6 +29,7 @@ const setup = (overrides = {}) => {
     store,
     now: () => nowValue,
     isMemoryEnabled: overrides.isMemoryEnabled,
+    backgroundDeferral: overrides.backgroundDeferral,
     runStudyJob: overrides.runStudyJob ?? (async (job) => {
       runs.push(job.id);
       return { newPinIds: [`pin-${job.runCount + 1}i0`], summary: 'saved one pin' };
@@ -80,6 +81,27 @@ test('runTick does nothing outside the nightly window', async () => {
   const result = await service.runTick();
   assert.equal(result.ran, 0);
   assert.deepEqual(runs, []);
+});
+
+test('fresh-install deferral: queued jobs wait for the window instead of running', async () => {
+  // 2026-10-12 fresh-install incident: background LLM sessions must not spend
+  // the new user's starter allowance on day one. While the gate reports a
+  // reason the tick launches nothing and the job STAYS pending, so it is
+  // picked up once the window elapses (never failed, never re-tried in a loop).
+  let deferredReason = 'install is 0h old; 24h0m left of the 24h fresh-install window';
+  const { service, store, runs } = setup({ backgroundDeferral: () => deferredReason });
+  const job = service.enqueueStudyJob(7, { topic: 'video' }).job;
+
+  const deferred = await service.runTick();
+  assert.equal(deferred.ran, 0, 'no session is launched while deferred');
+  assert.deepEqual(runs, []);
+  assert.equal(store.getById(job.id).status, 'pending', 'the job is not consumed or failed');
+
+  // Window over: the same job runs on the next tick.
+  deferredReason = null;
+  const resumed = await service.runTick();
+  assert.equal(resumed.ran, 1);
+  assert.deepEqual(runs, [job.id]);
 });
 
 test('a run saving new pins keeps the job pending for the next night', async () => {

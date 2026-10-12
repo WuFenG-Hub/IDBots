@@ -9344,17 +9344,38 @@ export class CoworkRunner extends EventEmitter {
         coworkLog('ERROR', 'runDshSessionLocal', 'DSH turn failed', { outcome });
         // Ring-④ terminal semantics (2026-10-08 Boss ruling): when the degrade
         // ladder had NO valid target anywhere (no fallback brain, no
-        // free-relay default), the failure is a CONFIGURATION error, not a
-        // rate limit — the user-visible message must read "未配置可用模型"
-        // and must NOT carry the native 429/limit body (the full raw outcome
-        // stays in the ERROR log line above for diagnosis). Conversely, when
-        // the ladder DID have a target and that target also died, the
-        // route-naming quota notice below stays: a configured-but-exhausted
-        // route is a "top up" problem, not a "nothing configured" problem.
-        const noModelConfiguredNotice = ladderNoTargetKind === 'no-alternative'
+        // free-relay default), the failure used to read as a CONFIGURATION
+        // error. That is right for a genuine config hole (a stale/missing
+        // model id, a dead key) and wrong for an exhausted allowance: the
+        // model IS configured and worked until its quota ran out. The free
+        // starter relay is exactly that case — it is the only route a fresh
+        // install has, so its 429 `free_quota_exhausted` produced "no usable
+        // model configured … this is a configuration error, not a transient
+        // rate limit", which sent the user hunting for a misconfiguration
+        // instead of adding their own key (2026-10-12 fresh-install report).
+        // Quota deaths therefore get their own accurate copy; only a
+        // non-quota no-alternative death keeps the configuration wording. The
+        // raw 429/limit body stays in the ERROR log line above either way.
+        const quotaTerminalDeath = ladderNoTargetKind === 'no-alternative' && isQuotaDshTurnError(outcome);
+        const freeRelayQuotaDeath = quotaTerminalDeath
+          && (isFreeQuotaProvider(lastAttemptRoute.provider)
+            || /free_quota_exhausted/i.test(String(outcome.error?.message ?? '')));
+        const noModelConfiguredNotice = ladderNoTargetKind === 'no-alternative' && !quotaTerminalDeath
           ? ` ${tApp(
               `（未配置可用模型：会话绑定的模型已不可用，备用模型与当前默认降级链上没有任何有效目标——这是配置错误而非临时限流。请到 设置 > 模型 配置一个可用的默认模型，或为现有供应商充值。）`,
               ` (No usable model configured: the session's bound model is unavailable and neither the bot fallback nor the current-default ladder has a valid target — this is a configuration error, not a transient rate limit. Configure a usable default model in Settings > Models, or top up the provider.)`
+            )}`
+          : '';
+        // Free starter allowance exhausted: the actionable fix is the user's
+        // own provider, not a top-up of a relay they cannot pay into. The
+        // notice carries the literal `free_quota_exhausted` code on purpose:
+        // the renderer's quota banner (CoworkSessionDetail) keys off it and
+        // offers the Settings > Model shortcut, so the message and the banner
+        // agree instead of contradicting each other.
+        const freeRelayQuotaNotice = freeRelayQuotaDeath
+          ? ` ${tApp(
+              `（这不是配置错误：IDBots-Free 免费体验额度已用完。请到 设置 > 模型 添加一个自己的模型服务商 API Key 即可继续对话。错误代码：free_quota_exhausted。）`,
+              ` (This is not a configuration error: the IDBots-Free starter allowance is used up. Add your own model provider API key in Settings > Models to keep chatting. Error code: free_quota_exhausted.)`
             )}`
           : '';
         // Quota death is not retryable on the same route and the raw provider
@@ -9407,11 +9428,23 @@ export class CoworkRunner extends EventEmitter {
           : '';
         // Ring-④ rewrites strip the native 429/limit body from the
         // user-visible detail (the raw outcome stays in the ERROR log line
-        // above); the notices carry the config semantics instead.
+        // above); the notices carry the semantics of the actual cause: an
+        // exhausted allowance for quota deaths, the configuration wording only
+        // for a genuine config hole.
         const ladderSemantics = ladderNoTargetKind === 'no-alternative'
-          ? `未配置可用模型（配置错误：绑定模型与备用/默认降级链均无效；最后错误码 ${outcome.error?.code ?? 'UNKNOWN'}）`
+          ? (quotaTerminalDeath
+              ? (freeRelayQuotaDeath
+                  ? tApp(
+                      `免费额度已用完（IDBots-Free 体验额度耗尽；最后错误码 ${outcome.error?.code ?? 'QUOTA'}）`,
+                      `Free starter quota exhausted (the IDBots-Free allowance is used up; last error code ${outcome.error?.code ?? 'QUOTA'})`
+                    )
+                  : tApp(
+                      `模型供应商 ${lastAttemptRoute.provider} 的 ${lastAttemptRoute.model} 额度不足，本轮已终止（最后错误码 ${outcome.error?.code ?? 'QUOTA'}）`,
+                      `Provider ${lastAttemptRoute.provider} model ${lastAttemptRoute.model} is out of credits and the turn was aborted (last error code ${outcome.error?.code ?? 'QUOTA'})`
+                    ))
+              : `未配置可用模型（配置错误：绑定模型与备用/默认降级链均无效；最后错误码 ${outcome.error?.code ?? 'UNKNOWN'}）`)
           : failureDetail;
-        this.handleError(sessionId, `DSH turn failed: ${ladderSemantics}${quotaNotice}${noModelConfiguredNotice}${bodyLimitNotice}${overflowNotice}${authNotice}`);
+        this.handleError(sessionId, `DSH turn failed: ${ladderSemantics}${quotaNotice}${noModelConfiguredNotice}${freeRelayQuotaNotice}${bodyLimitNotice}${overflowNotice}${authNotice}`);
         this.clearPendingPermissions(sessionId);
         this.settleDshSteerSubmissions(activeSession, 'failed', `DSH turn failed: ${ladderSemantics}`);
         this.removeActiveSession(sessionId, activeSession);
