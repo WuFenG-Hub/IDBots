@@ -8631,12 +8631,19 @@ export class CoworkRunner extends EventEmitter {
       // (a null brain effort means "model default"); the persisted global
       // effort only fills in for sessions without any bot brain.
       const automationBrain = this.getSessionAutomationBrain(sessionId);
+      // Assistant chat-experience mode favors fast replies: it skips the
+      // persisted-global / per-model default tail on purpose, so a session
+      // with no explicit effort pick runs at 'low'. The session override and
+      // the bot brain effort still win; professional mode keeps the full
+      // chain unchanged.
+      const assistantMode = getPersistedChatExperienceMode() === 'assistant';
       const dshReasoningEffort = mapDshReasoningEffort(
         toLlmEffortLevel(
           activeSession.effortOverride
             ?? automationBrain?.effort
-            ?? (automationBrain ? null : getPersistedCoworkEffortLevel())
-            ?? modelOptions?.reasoningEffort,
+            ?? (assistantMode
+              ? 'low'
+              : (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? modelOptions?.reasoningEffort),
         ),
         activeSession.thinkingOverride ?? modelOptions?.thinking,
         dshEffortDialect,
@@ -8646,6 +8653,7 @@ export class CoworkRunner extends EventEmitter {
         dialect: dshEffortDialect,
         uiOverride: activeSession.effortOverride ?? null,
         brainEffort: automationBrain?.effort ?? null,
+        assistantMode,
         modelDefault: modelOptions?.reasoningEffort ?? null,
         mapped: dshReasoningEffort ?? null,
       });
@@ -8791,8 +8799,9 @@ export class CoworkRunner extends EventEmitter {
             toLlmEffortLevel(
               activeSession.effortOverride
                 ?? automationBrain?.fallbackEffort
-                ?? (automationBrain ? null : getPersistedCoworkEffortLevel())
-                ?? fallbackModelOptions?.reasoningEffort,
+                ?? (assistantMode
+                  ? 'low'
+                  : (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? fallbackModelOptions?.reasoningEffort),
             ),
             activeSession.thinkingOverride ?? fallbackModelOptions?.thinking,
             turnOfficialDeepSeekNative ? 'deepseek-native' : 'generic',
