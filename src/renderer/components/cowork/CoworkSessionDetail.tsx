@@ -1027,7 +1027,13 @@ export const buildConversationTurns = (items: DisplayItem[]): ConversationTurn[]
   return turns;
 };
 
-const isVisibleAssistantTurnItem = (item: AssistantTurnItem): boolean => {
+const isVisibleAssistantTurnItem = (item: AssistantTurnItem, isAssistantMode = false): boolean => {
+  // Assistant mode hides all tool-call chrome (render-only filtering — the
+  // underlying messages stay intact, so switching back to professional mode
+  // restores the full transcript).
+  if (isAssistantMode && (item.type === 'tool_group' || item.type === 'tool_result')) {
+    return false;
+  }
   if (item.type === 'assistant' || item.type === 'system') {
     return isRenderableAssistantOrSystemMessage(item.message);
   }
@@ -1037,11 +1043,11 @@ const isVisibleAssistantTurnItem = (item: AssistantTurnItem): boolean => {
   return true;
 };
 
-const getVisibleAssistantItems = (assistantItems: AssistantTurnItem[]): AssistantTurnItem[] =>
-  assistantItems.filter(isVisibleAssistantTurnItem);
+const getVisibleAssistantItems = (assistantItems: AssistantTurnItem[], isAssistantMode = false): AssistantTurnItem[] =>
+  assistantItems.filter((item) => isVisibleAssistantTurnItem(item, isAssistantMode));
 
-const hasRenderableAssistantContent = (turn: ConversationTurn): boolean => (
-  getVisibleAssistantItems(turn.assistantItems).length > 0
+const hasRenderableAssistantContent = (turn: ConversationTurn, isAssistantMode = false): boolean => (
+  getVisibleAssistantItems(turn.assistantItems, isAssistantMode).length > 0
 );
 
 const formatCompactTokens = (value: number): string => {
@@ -2085,7 +2091,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
    * "Worked for" collapse stays open so the notes remain visible inline. */
   isAssistantMode?: boolean;
 }) {
-  const visibleAssistantItems = getVisibleAssistantItems(turn.assistantItems);
+  const visibleAssistantItems = getVisibleAssistantItems(turn.assistantItems, isAssistantMode);
   // Collapsed by default once a turn completes; the header expands to reveal
   // the working process (thinking, tool calls, intermediate notes).
   const [processExpanded, setProcessExpanded] = useState(false);
@@ -2313,6 +2319,13 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
           {systemMessage}
         </div>
       );
+    }
+
+    // Orphan tool_result: already filtered out of assistant-mode turns by
+    // isVisibleAssistantTurnItem; guard here as well so the tool UI can never
+    // leak back in through a direct renderVisibleItem call.
+    if (isAssistantMode) {
+      return null;
     }
 
     return (
@@ -3885,8 +3898,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
     return turns.map((turn, index) => {
       const isLastTurn = index === turns.length - 1;
-      const showTypingIndicator = isStreaming && isLastTurn && !hasRenderableAssistantContent(turn);
-      const showAssistantBlock = turn.assistantItems.length > 0 || showTypingIndicator;
+      const showTypingIndicator = isStreaming && isLastTurn && !hasRenderableAssistantContent(turn, isAssistantMode);
+      // Assistant mode filters tool UI out of the transcript, so a turn whose
+      // items all filtered out must not leave an empty padded block behind.
+      const showAssistantBlock = (isAssistantMode
+        ? hasRenderableAssistantContent(turn, true)
+        : turn.assistantItems.length > 0) || showTypingIndicator;
 
       return (
         <React.Fragment key={turn.id}>
@@ -3917,7 +3934,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               />
             </div>
           )}
-          {showWelcomeHandoff && hasRenderableAssistantContent(turn) && (
+          {showWelcomeHandoff && hasRenderableAssistantContent(turn, isAssistantMode) && (
             <div className="px-4 pb-2">
               <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
                 <div className="flex items-start gap-2.5 rounded-xl border border-claude-accent/20 bg-claude-accent/5 px-3.5 py-2.5">

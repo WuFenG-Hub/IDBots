@@ -702,6 +702,8 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
 }) => {
   // tool_use / tool_result: compact collapsible block (collapsed by default)
   if (message.type === 'tool_use' || message.type === 'tool_result') {
+    // Assistant mode hides tool-call chrome entirely (render-only filtering).
+    if (isAssistantMode) return null;
     return (
       <div className="px-4 py-0.5">
         <ToolCallBlock message={message} />
