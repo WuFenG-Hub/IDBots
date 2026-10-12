@@ -5,7 +5,7 @@ import {
   MEMORY_IMPORTANCE_GUARANTEED_THRESHOLD,
 } from './memoryImportance';
 
-export type MemoryPromptEntryLike = Pick<MemoryUserMemory, 'text' | 'usageClass' | 'visibility' | 'updatedAt' | 'lastUsedAt' | 'importance'>;
+export type MemoryPromptEntryLike = Pick<MemoryUserMemory, 'id' | 'text' | 'usageClass' | 'visibility' | 'updatedAt' | 'lastUsedAt' | 'importance'>;
 
 /**
  * Byte budget for the whole rendered memory injection (all scoped blocks
@@ -248,13 +248,26 @@ function renderPromptBlock(tagName: string, entries: RankedScopedMemoryEntry[]):
   return `<${tagName}>\n${lines.join('\n')}\n</${tagName}>`;
 }
 
-export function buildScopedMemoryPromptBlocks(input: BuildScopedMemoryPromptBlocksInput): string {
+export interface ScopedMemoryPromptBlocksDetailed {
+  xml: string;
+  /**
+   * Deduped ids of every entry that survived selection + the char budget —
+   * i.e. the rows that actually rendered into the prompt. Rendering IS the
+   * usage event for the hygiene decay clock: callers use these ids to touch
+   * last_used_at, while the wider candidate pool stays untouched.
+   */
+  injectedIds: string[];
+}
+
+export function buildScopedMemoryPromptBlocksDetailed(
+  input: BuildScopedMemoryPromptBlocksInput
+): ScopedMemoryPromptBlocksDetailed {
   const selection = selectScopedMemoryPromptEntries({
     ...input,
     requestChannel: input.channel ?? input.requestChannel,
   });
 
-  return [
+  const xml = [
     renderPromptBlock('ownerMemories', selection.ownerMemories),
     renderPromptBlock('contactMemories', selection.contactMemories),
     renderPromptBlock('conversationMemories', selection.conversationMemories),
@@ -262,4 +275,27 @@ export function buildScopedMemoryPromptBlocks(input: BuildScopedMemoryPromptBloc
   ]
     .filter(Boolean)
     .join('\n');
+
+  const seen = new Set<string>();
+  const injectedIds: string[] = [];
+  for (const entry of [
+    ...selection.ownerMemories,
+    ...selection.contactMemories,
+    ...selection.conversationMemories,
+    ...selection.ownerOperationalPreferences,
+  ]) {
+    // Entries arriving without an id (test fixtures, hand-mapped rows) still
+    // render but can never be touched, so they drop out of the id list.
+    const id = typeof entry.id === 'string' ? entry.id : '';
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      injectedIds.push(id);
+    }
+  }
+
+  return { xml, injectedIds };
+}
+
+export function buildScopedMemoryPromptBlocks(input: BuildScopedMemoryPromptBlocksInput): string {
+  return buildScopedMemoryPromptBlocksDetailed(input).xml;
 }

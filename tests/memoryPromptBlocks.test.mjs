@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 let buildScopedMemoryPromptBlocks;
+let buildScopedMemoryPromptBlocksDetailed;
 try {
-  ({ buildScopedMemoryPromptBlocks } = await import('../dist-electron/main/memory/memoryPromptBlocks.js'));
+  ({ buildScopedMemoryPromptBlocks, buildScopedMemoryPromptBlocksDetailed } = await import('../dist-electron/main/memory/memoryPromptBlocks.js'));
 } catch {
-  ({ buildScopedMemoryPromptBlocks } = await import('../dist-electron/main/memory/memoryPromptBlocks.js'));
+  ({ buildScopedMemoryPromptBlocks, buildScopedMemoryPromptBlocksDetailed } = await import('../dist-electron/main/memory/memoryPromptBlocks.js'));
 }
 
 test('external sessions do not include owner profile facts', () => {
@@ -146,4 +147,100 @@ test('over-budget eviction drops the lowest importance first, not the oldest', (
   assert.match(xml, /old-high:/, 'high-importance entry survives despite being the oldest');
   assert.match(xml, /new-low:/);
   assert.doesNotMatch(xml, /mid-low:/, 'lowest importance evicts first, oldest-among-low goes first');
+});
+
+test('detailed builder renders the same xml as the wrapper and reports exactly the rendered ids', () => {
+  const input = {
+    channel: 'cowork_ui',
+    ownerEntries: [
+      { id: 'mem-1', text: 'My name is Alice', usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 100, lastUsedAt: null },
+      { id: 'mem-2', text: 'I prefer tea over coffee', usageClass: 'preference', visibility: 'local_only', updatedAt: 200, lastUsedAt: null },
+    ],
+  };
+
+  const detailed = buildScopedMemoryPromptBlocksDetailed(input);
+
+  assert.equal(detailed.xml, buildScopedMemoryPromptBlocks(input), 'wrapper output is byte-identical');
+  // injectedIds follow the ranked render order (relevance score, then text),
+  // not insertion order.
+  assert.deepEqual([...detailed.injectedIds].sort(), ['mem-1', 'mem-2']);
+});
+
+test('detailed builder dedupes ids and skips entries without an id', () => {
+  const { xml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    ownerEntries: [
+      { id: 'mem-1', text: 'My name is Alice', usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 100, lastUsedAt: null },
+      { id: 'mem-1', text: 'My name is Alice', usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 100, lastUsedAt: null },
+      { text: 'id-less fixture row', usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 300, lastUsedAt: null },
+    ],
+  });
+
+  assert.deepEqual(injectedIds, ['mem-1'], 'same id twice collapses to one touch');
+  assert.match(xml, /id-less fixture row/, 'id-less entries still render — they just cannot be touched');
+});
+
+test('detailed builder excludes char-budget-evicted ids from injectedIds', () => {
+  const entry = (id, text, updatedAt) => ({
+    id,
+    text,
+    usageClass: 'profile_fact',
+    visibility: 'local_only',
+    updatedAt,
+    lastUsedAt: null,
+  });
+  // ~900 chars each (2712 total) vs the 2000 clamp floor: exactly one eviction.
+  const pad = (label) => label + 'x'.repeat(900 - label.length);
+  const { xml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    ownerEntries: [
+      entry('mem-c', pad('c-oldest:'), 1000),
+      entry('mem-a', pad('a-newest:'), 3000),
+      entry('mem-b', pad('b-mid:'), 2000),
+    ],
+    maxTotalChars: 50, // below the 2000 clamp floor → budget is 2000
+  });
+
+  assert.match(xml, /a-newest:/);
+  assert.match(xml, /b-mid:/);
+  assert.doesNotMatch(xml, /c-oldest:/);
+  assert.deepEqual([...injectedIds].sort(), ['mem-a', 'mem-b']);
+  assert.ok(!injectedIds.includes('mem-c'), 'the evicted row must NOT be reported as injected');
+});
+
+test('detailed builder reports the guaranteed-importance tier entry as injected', () => {
+  const filler = Array.from({ length: 35 }, (_, index) => ({
+    id: `filler-${index}`,
+    text: `aaa-filler-${String(index).padStart(2, '0')}`,
+    usageClass: 'profile_fact',
+    visibility: 'local_only',
+    updatedAt: 5000 + index,
+    lastUsedAt: null,
+    importance: 0.5,
+  }));
+  const { xml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    ownerEntries: [
+      ...filler,
+      // Ranks dead last by relevance (text tie-break) and by recency — only
+      // the guaranteed importance tier can surface it.
+      {
+        id: 'guaranteed-1',
+        text: 'zzz-old-explicit-instruction',
+        usageClass: 'profile_fact',
+        visibility: 'local_only',
+        updatedAt: 100,
+        lastUsedAt: null,
+        importance: 0.95,
+      },
+    ],
+    maxOwnerEntries: 12,
+  });
+
+  const lines = xml.split('\n').filter((line) => line.startsWith('- '));
+  assert.equal(lines.length, 12, 'policy maxItems still caps the final injection count');
+  assert.equal(lines[0], '- zzz-old-explicit-instruction', 'guaranteed tier renders first');
+  assert.equal(injectedIds.length, 12, 'injectedIds mirror the rendered entries exactly');
+  assert.ok(injectedIds.includes('guaranteed-1'), 'guaranteed tier entry is reported as injected');
+  assert.ok(!injectedIds.includes('filler-34'), 'the filler that ranked out of the final 12 is not reported');
 });

@@ -73,6 +73,11 @@ export interface MemoryListUserMemoriesOptions extends MemoryScopeSelectorInput 
   includeDeleted?: boolean;
   /** Include hygiene-archived rows (admin/stats surfaces); default hides them. */
   includeArchived?: boolean;
+  /**
+   * Bump last_used_at on EVERY returned row. Only correct when the caller
+   * renders the whole result set; prompt-injection paths (which rank + evict)
+   * must pass false and touch the rendered ids via touchUserMemoriesLastUsed.
+   */
   touchLastUsed?: boolean;
 }
 
@@ -213,6 +218,13 @@ export interface MemoryBackend {
   setMemoryPolicyForMetabot(metabotId: number, updates: MemoryPolicyUpdates): MemoryPolicy;
   deleteMemoryPolicyForMetabot(metabotId: number): boolean;
   listUserMemories(options: MemoryListUserMemoriesOptions): MemoryUserMemory[];
+  /**
+   * Bump last_used_at for exactly the given rows — the usage event behind the
+   * hygiene decay clock. Prompt-injection paths must call this with ONLY the
+   * ids that actually rendered (see buildScopedMemoryPromptBlocksDetailed);
+   * pooling a row without injecting it is not usage.
+   */
+  touchUserMemoriesLastUsed(metabotId: number, memoryIds: string[]): void;
   createUserMemory(input: MemoryCreateUserMemoryInput): MemoryUserMemory;
   updateUserMemory(input: MemoryUpdateUserMemoryInput): MemoryUserMemory | null;
   deleteUserMemory(input: MemoryDeleteUserMemoryInput): boolean;

@@ -90,7 +90,7 @@ import {
   RECENT_SUMMARIES_PROMPT_DAYS,
 } from '../libs/experiencePromptBlocks';
 import { truncateUtf16Units } from '../libs/llmSafeText';
-import { buildScopedMemoryPromptBlocks } from '../memory/memoryPromptBlocks';
+import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
 import type { MemoryUsageClass, MemoryVisibility } from '../memory/memoryScope';
 import {
   parseDeliverableLines,
@@ -1999,6 +1999,7 @@ export type GroupTaskDaemonSendOwnerReportFn = (params: {
 
 /** One owner-scope memory row as the group-task prompt blocks consume it. */
 export interface GroupTaskDaemonMemoryEntry {
+  id?: string;
   text: string;
   usageClass?: MemoryUsageClass;
   visibility?: MemoryVisibility;
@@ -2014,7 +2015,11 @@ export type GroupTaskDaemonListUserMemoriesFn = (
     /** Omit to list every usage class (the scoped-memory block); the experience block queries one class at a time. */
     usageClass?: MemoryUsageClass;
     limit: number;
-    /** Group-task injection is a usage event for the hygiene decay clock. */
+    /**
+     * Bump last_used_at on EVERY returned row. Prompt-injection paths must
+     * pass false here and touch only the rendered ids through the
+     * touchUserMemoriesLastUsed dep — pooling a row is not a usage event.
+     */
     touchLastUsed?: boolean;
   },
 ) => GroupTaskDaemonMemoryEntry[];
@@ -2153,6 +2158,13 @@ export interface GroupTaskDaemonDeps {
   /** Task #51: chair-response redrive window (default 4 min). */
   chairResponseRedriveMs?: number;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
+  /**
+   * Bump last_used_at for exactly the memory rows that rendered into the
+   * prompt (the usage event for the hygiene decay clock). The daemon calls
+   * this with the injected ids after building the scoped-memory block; unwired
+   * = no touch signal is recorded.
+   */
+  touchUserMemoriesLastUsed?: (metabotId: number, memoryIds: string[]) => void;
   listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
   /**
    * Per-bot memory policy (G8 parity with the private-chat path): gates the
@@ -4058,20 +4070,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const maxItems = Math.max(1, Math.floor(policy?.memoryUserMemoriesMaxItems ?? 30));
       // Wide candidate pool (same contract as the cowork runner): the policy
       // caps the final rendered count; the keyword scorer and the guaranteed
-      // importance tier pick from a deeper pool.
+      // importance tier pick from a deeper pool. Pooling alone is not a usage
+      // event — the pool stays untouched and only the rendered ids (returned
+      // by the detailed builder) get last_used_at bumped below.
       const candidatePoolLimit = Math.min(200, Math.max(maxItems, 120));
-      const entries = (deps.listUserMemories(bot.id, { limit: candidatePoolLimit, touchLastUsed: true }) ?? [])
+      const entries = (deps.listUserMemories(bot.id, { limit: candidatePoolLimit, touchLastUsed: false }) ?? [])
         .filter((entry) =>
           entry.usageClass !== 'self_identity'
           && entry.usageClass !== 'value_boundary'
           && entry.usageClass !== 'work_review');
-      return buildScopedMemoryPromptBlocks({
+      const { xml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
         // A group task is the owner's own fleet working on the owner's behalf:
         // the explicit LOCAL channel renders the owner block (a null channel
         // would fall back to the trigger text and read as external).
         channel: 'cowork_ui',
         currentUserText,
         ownerEntries: entries.map((entry) => ({
+          id: entry.id ?? '',
           text: entry.text,
           usageClass: entry.usageClass,
           visibility: entry.visibility,
@@ -4081,7 +4096,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         })),
         maxOwnerEntries: maxItems,
         maxTotalChars: GROUP_MEMORY_BLOCK_MAX_CHARS,
-      }).trim();
+      });
+      // Injection IS the usage event for the hygiene decay clock: touch only
+      // the rows that actually rendered into the block.
+      if (injectedIds.length > 0) {
+        deps.touchUserMemoriesLastUsed?.(bot.id, injectedIds);
+      }
+      return xml.trim();
     } catch {
       return '';
     }

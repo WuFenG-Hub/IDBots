@@ -80,6 +80,8 @@ function createCoworkRunnerPromptHarness({
 }
 
 test('private chat prompt does not inject owner profile facts', () => {
+  const touchCalls = [];
+  const listFlags = [];
   const xml = buildPrivateReplyMemoryPromptBlocks({
     metabotId: 1,
     sourceChannel: 'metaweb_private',
@@ -89,19 +91,23 @@ test('private chat prompt does not inject owner profile facts', () => {
     currentUserText: 'The client prefers English',
     memoryBackend: {
       listUserMemories(input) {
+        listFlags.push(input.touchLastUsed);
         const scopeKind = input.scope?.kind ?? input.scopeKind;
         if (scopeKind === 'owner') {
           return [
-            { text: 'My name is Alice', usageClass: 'profile_fact', visibility: 'local_only' },
-            { text: 'Reply in concise bullet points', usageClass: 'operational_preference', visibility: 'external_safe' },
+            { id: 'owner-alice', text: 'My name is Alice', usageClass: 'profile_fact', visibility: 'local_only' },
+            { id: 'owner-op-1', text: 'Reply in concise bullet points', usageClass: 'operational_preference', visibility: 'external_safe' },
           ];
         }
         if (scopeKind === 'contact') {
           return [
-            { text: 'The client prefers English', usageClass: 'preference', visibility: 'local_only' },
+            { id: 'contact-1', text: 'The client prefers English', usageClass: 'preference', visibility: 'local_only' },
           ];
         }
         return [];
+      },
+      touchUserMemoriesLastUsed(metabotId, memoryIds) {
+        touchCalls.push({ metabotId, memoryIds });
       },
     },
   });
@@ -109,6 +115,10 @@ test('private chat prompt does not inject owner profile facts', () => {
   assert.match(xml, /<contactMemories>/);
   assert.match(xml, /<ownerOperationalPreferences>/);
   assert.doesNotMatch(xml, /Alice/);
+  assert.ok(listFlags.length > 0 && listFlags.every((flag) => flag === false), 'pooling must not touch last_used_at');
+  assert.deepEqual(touchCalls, [
+    { metabotId: 1, memoryIds: ['contact-1', 'owner-op-1'] },
+  ], 'only the entries that actually rendered count as used (Alice never injected)');
 });
 
 test('order prompt keeps the owner-vs-client memory boundary without generic userMemories wording', () => {
