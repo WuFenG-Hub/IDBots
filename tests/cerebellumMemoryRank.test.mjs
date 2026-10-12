@@ -188,6 +188,35 @@ test('rankMemoriesWithCerebellum returns null on network errors and malformed pa
   );
 });
 
+test('rankMemoriesWithCerebellum returns null when answer coverage is incomplete', async () => {
+  // 5 memories, only 3 answered (60% < 80%): the partial map would let
+  // unscored lexical entries (>= 1) outrank every noul (<= 1) downstream, so
+  // the whole ranking must fall back to lexical instead of mixing scales.
+  const memories = Array.from({ length: 5 }, (_, i) => ({ id: `m${i}`, text: `memory ${i}` }));
+  const partial = { answers: { mem_0: { noul: 0.9 }, mem_1: { noul: 0.1 }, mem_2: { noul: 0.4 } } };
+  const scores = await rankMemoriesWithCerebellum({
+    config: TEST_CONFIG,
+    fetchImpl: okFetch(partial),
+    currentUserText: 'hello',
+    memories,
+  });
+  assert.equal(scores, null);
+
+  // 4 of 5 answered (80%) meets the coverage floor.
+  const adequate = {
+    answers: {
+      mem_0: { noul: 0.9 }, mem_1: { noul: 0.1 }, mem_2: { noul: 0.4 }, mem_3: { noul: 0.2 },
+    },
+  };
+  const covered = await rankMemoriesWithCerebellum({
+    config: TEST_CONFIG,
+    fetchImpl: okFetch(adequate),
+    currentUserText: 'hello',
+    memories,
+  });
+  assert.deepEqual([...covered.entries()], [['m0', 0.9], ['m1', 0.1], ['m2', 0.4], ['m3', 0.2]]);
+});
+
 test('rankMemoriesWithCerebellum aborts past the timeout and returns null', async () => {
   let abortSeen = false;
   const fetchImpl = (url, init) => new Promise((_, reject) => {

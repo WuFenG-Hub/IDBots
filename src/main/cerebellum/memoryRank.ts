@@ -14,8 +14,11 @@
  * proxy, while bare Node fetch is region-blocked (HTTP 451) for some users.
  *
  * Failure contract: rankMemoriesWithCerebellum NEVER throws and returns null
- * on HTTP errors, network errors, abort/timeout, and malformed payloads, so
- * the recall path always falls back to the lexical ranker silently.
+ * on HTTP errors, network errors, abort/timeout, malformed payloads, and
+ * INCOMPLETE answer coverage (below CEREBELLUM_MEMORY_MIN_ANSWER_COVERAGE) —
+ * a partial score map would rank unscored entries' lexical scores (>= 1)
+ * above every scored entry's noul (<= 1), so an incomplete answer set falls
+ * back to lexical as a whole instead of mixing scales.
  */
 
 import type { ResolvedCerebellumConfig } from '../libs/cerebellumConfig';
@@ -57,6 +60,13 @@ export const CEREBELLUM_MEMORY_MAX_CANDIDATES = 200;
  * cerebellum round-trip is not worth its latency — skip the call entirely.
  */
 export const CEREBELLUM_MEMORY_MIN_POOL = 12;
+
+/**
+ * Minimum share of asked questions that must come back with a usable noul.
+ * Below this the whole ranking is discarded (null) rather than mixed with
+ * lexical scores, whose scale (>= 1) sits above every noul (<= 1).
+ */
+export const CEREBELLUM_MEMORY_MIN_ANSWER_COVERAGE = 0.8;
 
 export interface CerebellumMemoryCandidate {
   id: string;
@@ -198,7 +208,16 @@ export async function rankMemoriesWithCerebellum(input: {
     if (!response.ok) {
       return null;
     }
-    return parseMemoryRankAnswers(await response.json(), memories);
+    const scores = parseMemoryRankAnswers(await response.json(), memories);
+    if (scores === null) {
+      return null;
+    }
+    // Incomplete coverage must not reach the merger: unscored entries would
+    // keep lexical scores (>= 1) and outrank every noul (<= 1).
+    if (scores.size < memories.length * CEREBELLUM_MEMORY_MIN_ANSWER_COVERAGE) {
+      return null;
+    }
+    return scores;
   } catch {
     // Network errors, aborts/timeouts and JSON parse failures all land here:
     // the caller falls back to lexical ranking silently.
