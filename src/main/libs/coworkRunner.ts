@@ -101,6 +101,7 @@ import { z } from 'zod';
 import { ensureSandboxReady, getSandboxRuntimeInfoIfReady, type SandboxRuntimeInfo } from './coworkSandboxRuntime';
 import { isPathWithin } from './runtimePaths';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
+import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import {
   applyVolatileDedup,
@@ -2042,6 +2043,19 @@ export interface CoworkRunnerOptions {
    */
   locationHost?: LocationHost;
   /**
+   * Optional cerebellum (小脑) memory re-ranker for the per-turn recall path.
+   * When set, the runner asks it to score the combined memory candidate pool
+   * against the current user text; a returned score map overrides the lexical
+   * relevance rank for the scored ids. null (unconfigured, timeout, error)
+   * means "fall back to lexical" — the callback must never throw. main.ts
+   * resolves the cerebellum config lazily inside the callback so Settings
+   * edits apply on the next turn without a restart.
+   */
+  cerebellumMemoryRanker?: (input: {
+    currentUserText: string;
+    memories: Array<{ id: string; text: string }>;
+  }) => Promise<ReadonlyMap<string, number> | null>;
+  /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
    * turn ended without terminal events) and settled so the query can close.
@@ -2197,6 +2211,7 @@ export class CoworkRunner extends EventEmitter {
   private omniReader?: OmniReaderControl;
   private screenshotHost?: ScreenshotHost;
   private locationHost?: LocationHost;
+  private cerebellumMemoryRanker?: CoworkRunnerOptions['cerebellumMemoryRanker'];
   /**
    * Per-session precise-location consent memory: the owner is asked at most
    * once per session (first precise request) and the approval sticks for the
@@ -2354,6 +2369,7 @@ export class CoworkRunner extends EventEmitter {
     this.omniReader = options?.omniReader;
     this.screenshotHost = options?.screenshotHost;
     this.locationHost = options?.locationHost;
+    this.cerebellumMemoryRanker = options?.cerebellumMemoryRanker;
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
@@ -3329,11 +3345,11 @@ export class CoworkRunner extends EventEmitter {
       .replace(/'/g, '&apos;');
   }
 
-  private buildScopedMemoryPromptBlocksXml(
+  private async buildScopedMemoryPromptBlocksXml(
     sessionId: string,
     currentUserText: string,
     options?: { enabled?: boolean }
-  ): string {
+  ): Promise<string> {
     const session = this.store.getSession(sessionId);
     const memoryPolicy = this.getSessionMemoryPolicy(sessionId);
     const memoryEnabled = options?.enabled ?? this.isSessionMemoryReadEnabled(sessionId);
@@ -3397,12 +3413,49 @@ export class CoworkRunner extends EventEmitter {
           touchLastUsed: false,
         })
       : [];
+    // Cerebellum (小脑) semantic re-rank of the combined pool: one fast
+    // decision-model call scores each candidate against the current user text,
+    // and scored ids replace their lexical rank key downstream. Any failure
+    // (unconfigured, timeout, HTTP/network error, malformed payload) resolves
+    // to null and the lexical ranking runs unchanged — the fallback is silent
+    // by design so a slow or absent cerebellum never stalls prompt assembly.
+    let relevanceScoreById: ReadonlyMap<string, number> | null = null;
+    if (this.cerebellumMemoryRanker && currentUserText.trim()) {
+      const pooledById = new Map<string, { id: string; text: string }>();
+      for (const entry of [...ownerEntries, ...contactEntries, ...conversationEntries]) {
+        if (typeof entry.id === 'string' && entry.id && !pooledById.has(entry.id)) {
+          pooledById.set(entry.id, { id: entry.id, text: entry.text });
+        }
+      }
+      if (pooledById.size >= CEREBELLUM_MEMORY_MIN_POOL) {
+        const rankStartedAt = Date.now();
+        try {
+          relevanceScoreById = await this.cerebellumMemoryRanker({
+            currentUserText,
+            memories: [...pooledById.values()],
+          });
+        } catch {
+          // The ranker contract is null-on-failure; the catch is belt and
+          // braces so a throwing callback can never break the turn.
+          relevanceScoreById = null;
+        }
+        // Never log memory text or the API key — counts and timing only.
+        coworkLog('INFO', 'memory:cerebellumRank', 'Cerebellum memory re-rank finished', {
+          sessionId,
+          pooled: pooledById.size,
+          ranked: relevanceScoreById?.size ?? 0,
+          latencyMs: Date.now() - rankStartedAt,
+          used: relevanceScoreById != null,
+        });
+      }
+    }
     const { xml: promptBlocksXml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
       channel: sourceContext.sourceChannel,
       currentUserText,
       ownerEntries,
       contactEntries,
       conversationEntries,
+      relevanceScoreById: relevanceScoreById ?? undefined,
       maxOwnerEntries: memoryPolicy.memoryUserMemoriesMaxItems,
       maxScopedEntries: memoryPolicy.memoryUserMemoriesMaxItems,
       maxOwnerOperationalPreferences: Math.min(3, memoryPolicy.memoryUserMemoriesMaxItems),
@@ -5914,7 +5967,7 @@ export class CoworkRunner extends EventEmitter {
     if (profile.includeMemoryPromptBlocks) {
       sections.push({
         key: 'memory',
-        text: this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled }),
+        text: await this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled }),
         alwaysInject: true,
       });
       // Hot-layer experience injection (self-identity + recent dream summaries).

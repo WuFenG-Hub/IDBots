@@ -49,6 +49,14 @@ export interface RankScopedMemoryEntriesInput {
   maxScopedEntries?: number;
   maxOwnerOperationalPreferences?: number;
   /**
+   * Optional semantic relevance scores (e.g. cerebellum noul probabilities)
+   * keyed by entry id. An entry whose id is present uses the map score AS its
+   * relevance rank key (it replaces the lexical score — the value is a rank
+   * key, not a summand); entries absent from the map keep the lexical score.
+   * The guaranteed-importance tier is unaffected.
+   */
+  relevanceScoreById?: ReadonlyMap<string, number>;
+  /**
    * Combined char budget across all rendered memory blocks. Over budget,
    * entries are evicted lowest-importance-first (ties: oldest
    * lastUsedAt ?? updatedAt), never below the single top-ranked entry.
@@ -110,15 +118,22 @@ function rankEntries(
   entries: MemoryPromptEntryLike[] | undefined,
   block: RankedScopedMemoryEntry['block'],
   currentUserText?: string,
-  limit = 12
+  limit = 12,
+  relevanceScoreById?: ReadonlyMap<string, number>
 ): RankedScopedMemoryEntry[] {
   const scored = [...(entries ?? [])]
     .filter((entry) => normalizePromptText(entry.text))
-    .map((entry) => ({
-      ...entry,
-      block,
-      relevanceScore: scoreEntryForPrompt(entry, currentUserText),
-    }))
+    .map((entry) => {
+      const id = typeof entry.id === 'string' ? entry.id : '';
+      const mapScore = id ? relevanceScoreById?.get(id) : undefined;
+      return {
+        ...entry,
+        block,
+        // A cerebellum score replaces the lexical score outright (it is a rank
+        // key, not a summand); ids the cerebellum never scored keep lexical.
+        relevanceScore: mapScore ?? scoreEntryForPrompt(entry, currentUserText),
+      };
+    })
     .sort((left, right) => {
       if (right.relevanceScore !== left.relevanceScore) {
         return right.relevanceScore - left.relevanceScore;
@@ -202,7 +217,7 @@ export function selectScopedMemoryPromptEntries(input: RankScopedMemoryEntriesIn
 
   if (!isExternalChannel(channel)) {
     return applyPromptCharBudget({
-      ownerMemories: rankEntries(input.ownerEntries, 'owner', input.currentUserText, ownerLimit),
+      ownerMemories: rankEntries(input.ownerEntries, 'owner', input.currentUserText, ownerLimit, input.relevanceScoreById),
       contactMemories: [],
       conversationMemories: [],
       ownerOperationalPreferences: [],
@@ -212,10 +227,10 @@ export function selectScopedMemoryPromptEntries(input: RankScopedMemoryEntriesIn
   const safeOwnerOperationalEntries = (input.ownerEntries ?? []).filter((entry) =>
     entry.usageClass === 'operational_preference' && entry.visibility === 'external_safe'
   );
-  const contactMemories = rankEntries(input.contactEntries, 'contact', input.currentUserText, scopedLimit);
+  const contactMemories = rankEntries(input.contactEntries, 'contact', input.currentUserText, scopedLimit, input.relevanceScoreById);
   const conversationMemories = contactMemories.length > 0
     ? []
-    : rankEntries(input.conversationEntries, 'conversation', input.currentUserText, scopedLimit);
+    : rankEntries(input.conversationEntries, 'conversation', input.currentUserText, scopedLimit, input.relevanceScoreById);
 
   return applyPromptCharBudget({
     ownerMemories: [],
@@ -225,7 +240,8 @@ export function selectScopedMemoryPromptEntries(input: RankScopedMemoryEntriesIn
       safeOwnerOperationalEntries,
       'ownerOperationalPreference',
       input.currentUserText,
-      ownerOperationalLimit
+      ownerOperationalLimit,
+      input.relevanceScoreById
     ),
   }, maxTotalChars);
 }

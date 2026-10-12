@@ -244,3 +244,91 @@ test('detailed builder reports the guaranteed-importance tier entry as injected'
   assert.ok(injectedIds.includes('guaranteed-1'), 'guaranteed tier entry is reported as injected');
   assert.ok(!injectedIds.includes('filler-34'), 'the filler that ranked out of the final 12 is not reported');
 });
+
+test('relevanceScoreById overrides the lexical order for scored ids', () => {
+  const entry = (id, text) => ({
+    id,
+    text,
+    usageClass: 'profile_fact',
+    visibility: 'local_only',
+    updatedAt: 100,
+    lastUsedAt: null,
+  });
+  const { xml } = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    // Lexically, the tea entry (token match on "tea") beats the cat entry.
+    currentUserText: 'tell me about tea',
+    ownerEntries: [
+      entry('mem-cat', 'the owner has a ragdoll cat'),
+      entry('mem-tea', 'the owner drinks tea every morning'),
+    ],
+    relevanceScoreById: new Map([
+      ['mem-cat', 0.95],
+      ['mem-tea', 0.02],
+    ]),
+  });
+
+  const lines = xml.split('\n').filter((line) => line.startsWith('- '));
+  assert.equal(lines[0], '- the owner has a ragdoll cat', 'the cerebellum top score renders first');
+  assert.equal(lines[1], '- the owner drinks tea every morning');
+});
+
+test('entries absent from relevanceScoreById keep their lexical score', () => {
+  const entry = (id, text) => ({
+    id,
+    text,
+    usageClass: 'profile_fact',
+    visibility: 'local_only',
+    updatedAt: 100,
+    lastUsedAt: null,
+  });
+  const { xml } = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    currentUserText: 'tell me about tea',
+    ownerEntries: [
+      entry('mem-cat', 'the owner has a ragdoll cat'),
+      entry('mem-tea', 'the owner drinks tea every morning'),
+      entry('mem-dog', 'the owner walks his dog at dawn'),
+    ],
+    // Only the cat entry is cerebellum-scored; the tea entry keeps its lexical
+    // token-match score (1 + 3) and still outranks a 0.95 noul, while the
+    // unscored dog entry (lexical 1) lands between the two scored ones.
+    relevanceScoreById: new Map([['mem-cat', 0.95]]),
+  });
+
+  const lines = xml.split('\n').filter((line) => line.startsWith('- '));
+  assert.equal(lines[0], '- the owner drinks tea every morning', 'unscored ids keep the full lexical score');
+  assert.equal(lines[1], '- the owner walks his dog at dawn', 'unscored no-match ids keep lexical 1');
+  assert.equal(lines[2], '- the owner has a ragdoll cat', 'the scored entry ranks by its noul alone');
+});
+
+test('the guaranteed-importance tier floats to the front regardless of relevanceScoreById', () => {
+  const entry = (id, text, importance) => ({
+    id,
+    text,
+    usageClass: 'profile_fact',
+    visibility: 'local_only',
+    updatedAt: 100,
+    lastUsedAt: null,
+    importance,
+  });
+  const { xml } = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    currentUserText: 'tell me about tea',
+    ownerEntries: [
+      entry('mem-low-scored', 'the owner has a ragdoll cat', 0.5),
+      entry('mem-guaranteed', 'never mention the birthday', 0.95),
+      entry('mem-high-scored', 'the owner drinks tea every morning', 0.5),
+    ],
+    relevanceScoreById: new Map([
+      ['mem-low-scored', 0.01],
+      ['mem-guaranteed', 0.01], // even the lowest noul cannot sink the guaranteed tier
+      ['mem-high-scored', 0.99],
+    ]),
+  });
+
+  const lines = xml.split('\n').filter((line) => line.startsWith('- '));
+  assert.equal(lines[0], '- never mention the birthday', 'guaranteed tier renders first regardless of scores');
+  assert.equal(lines[1], '- the owner drinks tea every morning');
+  assert.equal(lines[2], '- the owner has a ragdoll cat');
+});
