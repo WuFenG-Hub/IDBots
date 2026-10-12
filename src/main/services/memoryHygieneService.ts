@@ -18,6 +18,7 @@ import {
   shouldRunDeepConsolidation,
   type DeepConsolidationInventoryItem,
 } from '../libs/deepConsolidationPrompt';
+import { resolveDreamAttemptTimeoutMs } from '../libs/dreamRetryPolicy';
 import { metabotBrainOptions } from './llmFallback';
 
 /**
@@ -38,17 +39,19 @@ import { metabotBrainOptions } from './llmFallback';
 
 const HYGIENE_TICK_INTERVAL_MS = 60_000;
 const HYGIENE_STATUS_CHANNEL = 'memoryHygiene:statusChanged';
-// Aligned with the dream synthesis budget (DREAM_SYNTHESIS_TIMEOUT_MS):
-// consolidation prompts carry up to ~160 belief-layer rows + 60 knowledge
-// entries and emit up to a 12K-token JSON at flash-tier generation speed.
-// The 2026-09-23 04:00 run timed out on bots 22 and 10 (both glm-5.3-flash,
-// last successful consolidations 09-13/09-15 — persistent failures) under
-// the pre-fix build where the GLM thinking toggle was dropped upstream; the
-// low-effort mapping (a5681845) shrinks the output but heavily-throttled
-// generation of a full inventory JSON still legitimately runs 8-10 minutes,
-// so 180s had the same squeeze as the dream synthesis before 600s. Only a
-// genuinely stalled call exceeds 10 minutes and should abort to the fallback.
-const DEEP_CONSOLIDATION_LLM_TIMEOUT_MS = 600_000;
+// The per-attempt LLM window rides the shared dream attempt-timeout ladder
+// (resolveDreamAttemptTimeoutMs): consolidation prompts carry up to ~160
+// belief-layer rows + 60 knowledge entries and emit up to a 12K-token JSON
+// at flash-tier generation speed, so legitimate calls run 8-38 minutes. The
+// 2026-09-23 04:00 run timed out on bots 22 and 10 under the pre-fix build
+// (GLM thinking toggle dropped upstream; the low-effort mapping a5681845
+// shrinks the output, but throttled generation still exceeded the old fixed
+// 180s/600s walls). A failed pass leaves the cadence unstamped, so the bot
+// retries on the next pass — that pass is attempt+1 and resolves the next
+// tier, exactly like a retried dream run. Tiers: 10 / 20 / 38 minutes by
+// consecutive failing passes; the top tier is sized from the worst measured
+// legitimate call, so only a genuinely stalled call aborts to the fallback.
+
 // Explicit output budget for the consolidation JSON. The transport default
 // for thinking-disabled calls (4_096) truncated real inventories mid-JSON
 // (bots with 150+ belief-layer rows hit "unparseable output" on 2026-09-02);
@@ -329,6 +332,11 @@ export class MemoryHygieneService {
           if (!shouldRunDeepConsolidation(items.length)) continue;
           botsConsidered += 1;
 
+          // Consecutive failing passes for this bot — the hygiene analog of a
+          // dream run's attemptCount (see the ladder note above); a clean pass
+          // clears it.
+          const attempts = context.coworkStore.getDeepConsolidationAttempts(bot.id);
+
           let raw: string;
           // The bot's full brain pair (provider hint + fallback brain), same
           // as every other per-bot automation path (dreams, A2A, group tasks).
@@ -346,9 +354,9 @@ export class MemoryHygieneService {
               brain.llmId,
               {
                 thinking: 'disabled',
-                // Per-attempt window: the fallback brain gets its own fresh
-                // 180s instead of inheriting the primary's spent signal.
-                attemptTimeoutMs: DEEP_CONSOLIDATION_LLM_TIMEOUT_MS,
+                // Per-attempt window: each brain gets its own fresh window,
+                // escalating with the bot's consecutive failing passes.
+                attemptTimeoutMs: resolveDreamAttemptTimeoutMs(attempts + 1),
                 maxTokens: DEEP_CONSOLIDATION_MAX_OUTPUT_TOKENS,
                 // The Responses-path default web_search injection turns this
                 // into a search-plus-prose answer that blows the JSON budget.
@@ -363,6 +371,9 @@ export class MemoryHygieneService {
             // (upstream 400) is only actionable when the settings page shows
             // WHICH configured brain the endpoint rejected.
             errors.push(`deep-consolidation bot ${bot.id}${brainLabel}: ${error instanceof Error ? error.message : String(error)}`);
+            // A failed pass bumps the attempt ladder so the next pass resolves
+            // a wider window instead of re-hitting the same wall.
+            context.coworkStore.setDeepConsolidationAttempts(bot.id, attempts + 1);
             continue;
           }
           const output = parseDeepConsolidationOutput(raw);
@@ -370,6 +381,7 @@ export class MemoryHygieneService {
             errors.push(
               `deep-consolidation bot ${bot.id}: unparseable output (${describeDeepConsolidationParseFailure(raw)})`
             );
+            context.coworkStore.setDeepConsolidationAttempts(bot.id, attempts + 1);
             continue;
           }
           const errorsBeforeApply = errors.length;
@@ -399,6 +411,7 @@ export class MemoryHygieneService {
               `deep-consolidation bot ${bot.id}: retire list exceeds guardrail` +
                 ` (${retireMemories.length + retireKnowledge.length} > ${retireCap}); refusing`
             );
+            context.coworkStore.setDeepConsolidationAttempts(bot.id, attempts + 1);
             continue;
           }
           void memoryIds;
@@ -443,9 +456,11 @@ export class MemoryHygieneService {
             }
           }
           // Stamp the cadence only for clean runs: a bot with errors retries
-          // on the next pass instead of waiting out the whole interval.
+          // on the next pass instead of waiting out the whole interval. A
+          // clean pass also clears the attempt ladder.
           if (errors.length === errorsBeforeApply) {
             context.coworkStore.setDeepConsolidationLastRunAt(bot.id, context.nowMs);
+            context.coworkStore.setDeepConsolidationAttempts(bot.id, 0);
           }
         }
         void errors;

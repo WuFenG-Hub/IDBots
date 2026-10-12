@@ -650,6 +650,7 @@ test('deep consolidation retires listed beliefs only, stamps cadence, skips with
     assert.equal(callOptions[0]?.webSearch, false);
     assert.equal(callOptions[0]?.maxTokens, 12_288);
     assert.equal(callOptions[0]?.thinking, 'disabled');
+    assert.equal(callOptions[0]?.attemptTimeoutMs, 600_000, 'a first pass rides the first tier of the ladder');
 
     const visibleBoundaries = coworkStore.listUserMemories({
       metabotId: 9,
@@ -707,6 +708,7 @@ test('deep consolidation reports why the output was unparseable', async () => {
       `diagnostic missing from errors: ${JSON.stringify(stats.errors)}`
     );
     assert.equal(coworkStore.getDeepConsolidationLastRunAt(9), null, 'failed parse never stamps the cadence');
+    assert.equal(coworkStore.getDeepConsolidationAttempts(9), 1, 'a failed pass bumps the attempt ladder');
   } finally {
     cleanup();
   }
@@ -764,6 +766,7 @@ test('deep consolidation rides the bot brain pair and names the brain on request
       `brain attribution missing from errors: ${JSON.stringify(stats.errors)}`
     );
     assert.equal(coworkStore.getDeepConsolidationLastRunAt(9), null, 'failed request never stamps the cadence');
+    assert.equal(coworkStore.getDeepConsolidationAttempts(9), 1, 'a failed request bumps the attempt ladder');
   } finally {
     cleanup();
   }
@@ -818,6 +821,7 @@ test('deep consolidation refuses retire lists that exceed the guardrail and skip
     assert.equal(stats.counts.deepRetiredMemories, 0, 'a retire list eating the whole layer is refused');
     assert.ok(stats.errors.some((line) => line.includes('guardrail')));
     assert.equal(coworkStore.getDeepConsolidationLastRunAt(9), null, 'no cadence stamp on a refused run');
+    assert.equal(coworkStore.getDeepConsolidationAttempts(9), 1, 'a refused run also counts as a failed pass');
     assert.equal(calls.length, 1, 'the disabled bot never reaches the LLM');
     const visible = coworkStore.listUserMemories({
       metabotId: 9,
@@ -828,6 +832,79 @@ test('deep consolidation refuses retire lists that exceed the guardrail and skip
       limit: 50,
     });
     assert.equal(visible.length, 8);
+  } finally {
+    cleanup();
+  }
+});
+
+test('deep consolidation escalates the per-attempt window across failing passes and resets on a clean pass', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  for (let index = 0; index < 8; index += 1) {
+    coworkStore.createUserMemory({
+      metabotId: 9,
+      text: `boundary rule ${index}`,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      origin: 'dream',
+      forceNew: true,
+    });
+  }
+  // Burst-day shape: the first two passes time out (each leaves the cadence
+  // unstamped, so the bot retries on the next pass); the third pass succeeds
+  // on the top tier and resets the ladder; a later due pass is back on tier 1.
+  let nowValue = new Date(2026, 7, 25, 10, 0);
+  const windows = [];
+  let outcome = 'timeout';
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: { listMetabots: () => [{ id: 9, name: 'Twin', llm_id: null, globalmetaid: 'metaid://stub-owner' }] },
+    performChat: async (_system, _user, _llmId, options) => {
+      windows.push(options?.attemptTimeoutMs);
+      if (outcome === 'timeout') {
+        throw new Error('The operation was aborted due to timeout');
+      }
+      return '```json\n' + JSON.stringify({
+        retire_memory_ids: [],
+        retire_knowledge_ids: [],
+        rewrite_knowledge: [],
+        notes: 'nothing to retire',
+      }) + '\n```';
+    },
+    now: () => nowValue,
+  });
+  try {
+    await service.runNow();
+    assert.equal(windows[0], 600_000, 'first pass = first tier');
+    await service.runNow();
+    assert.equal(windows[1], 1_200_000, 'a retried pass escalates to the second tier');
+    assert.equal(coworkStore.getDeepConsolidationAttempts(9), 2, 'two failing passes are on record');
+    outcome = 'ok';
+    await service.runNow();
+    assert.equal(windows[2], 2_280_000, 'a third attempt rides the top tier');
+    assert.equal(coworkStore.getDeepConsolidationAttempts(9), 0, 'a clean pass resets the ladder');
+    assert.notEqual(coworkStore.getDeepConsolidationLastRunAt(9), null, 'a clean pass stamps the cadence');
+    nowValue = new Date(2026, 9, 25, 10, 0);
+    await service.runNow();
+    assert.equal(windows[3], 600_000, 'after the reset the next due pass starts back on tier 1');
+  } finally {
+    cleanup();
+  }
+});
+
+test('deep-consolidation attempt ladder persists per bot and clears at zero', async () => {
+  const { cleanup, coworkStore } = await setup(new Date(2026, 7, 25, 10, 0));
+  try {
+    assert.equal(coworkStore.getDeepConsolidationAttempts(9), 0, 'missing rows default to zero');
+    coworkStore.setDeepConsolidationAttempts(9, 2);
+    coworkStore.setDeepConsolidationAttempts(10, 1);
+    assert.equal(coworkStore.getDeepConsolidationAttempts(9), 2);
+    assert.equal(coworkStore.getDeepConsolidationAttempts(10), 1);
+    coworkStore.setDeepConsolidationAttempts(9, 0);
+    assert.equal(coworkStore.getDeepConsolidationAttempts(9), 0, 'zero clears the ladder');
+    assert.equal(coworkStore.getDeepConsolidationAttempts(10), 1, 'other bots keep their own ladder');
   } finally {
     cleanup();
   }
