@@ -119,6 +119,18 @@ const translations: Record<LanguageType, Record<string, string>> = {
     decryptProvidersFailed: '密钥解密失败，请确认文件由当前设备导出',
     decryptProvidersPartial: '部分密钥无法解密，已保留本地密钥或留空，请手动检查',
 
+    // 小脑（Cerebellum）设置
+    modelBrainTab: '大脑',
+    modelCerebellumTab: '小脑',
+    cerebellumExplainer: '小脑是可选的快速决策模型，负责记忆筛选、意图分流等"直觉层"判断；大脑（LLM）仍负责所有生成与推理。',
+    cerebellumEnabled: '启用小脑',
+    cerebellumPrivacyNotice: '启用小脑后，Bot 的记忆、对话片段等内容可能被发送给小脑模型的云服务商（如 TypeSafe）用于决策评估。是否启用完全由您决定——不启用不影响任何主体功能。',
+    cerebellumProvider: '服务商',
+    cerebellumModel: '模型',
+    cerebellumConnectionSuccess: '连接成功（{count} 个模型）：{models}',
+    cerebellumInvalidApiKey: 'API Key 无效（401 Unauthorized）',
+    cerebellumConnectionUnreachable: '无法连接到小脑服务，请检查 Base URL 与网络连接',
+
     // 密码相关
     password: '密码',
     confirmPassword: '确认密码',
@@ -3051,6 +3063,18 @@ const translations: Record<LanguageType, Record<string, string>> = {
     invalidProvidersFile: 'Invalid providers file',
     decryptProvidersFailed: 'Failed to decrypt API key. Make sure the file was exported on this device.',
     decryptProvidersPartial: 'Some keys could not be decrypted. Existing keys were kept or left blank.',
+
+    // Cerebellum settings
+    modelBrainTab: 'Brain',
+    modelCerebellumTab: 'Cerebellum',
+    cerebellumExplainer: 'The cerebellum is an optional fast decision model for "intuition-layer" judgments like memory filtering and intent routing; the brain (LLM) still does all generation and reasoning.',
+    cerebellumEnabled: 'Enable Cerebellum',
+    cerebellumPrivacyNotice: 'When Cerebellum is enabled, content such as the bot\'s memories and conversation excerpts may be sent to the cerebellum model\'s cloud provider (e.g. TypeSafe) for decision evaluation. It is entirely optional — every core feature works without it.',
+    cerebellumProvider: 'Provider',
+    cerebellumModel: 'Model',
+    cerebellumConnectionSuccess: 'Connection successful ({count} models): {models}',
+    cerebellumInvalidApiKey: 'Invalid API key (401 Unauthorized)',
+    cerebellumConnectionUnreachable: 'Could not reach the cerebellum endpoint. Check the Base URL and your network connection',
 
     // Password related
     password: 'Password',

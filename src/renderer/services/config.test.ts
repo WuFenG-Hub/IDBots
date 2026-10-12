@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import type { AppConfig } from '../config';
 import {
   applyProviderApiFormatMigrations,
+  configService,
   mergeProvidersConfig,
   PROVIDER_API_FORMAT_MIGRATION_VERSION,
 } from './config';
@@ -292,4 +293,43 @@ test('mergeProvidersConfig rewrites the legacy free-provider name to the canonic
   // built-in provider types don't declare name; read through the index view).
   const deepseekEntry = merged!['deepseek'] as { name?: string };
   assert.equal(deepseekEntry.name, 'DeepSeek');
+});
+
+test('configService.init fills the cerebellum default for stored configs that predate it', async () => {
+  // A stored app_config written before the cerebellum key exists must merge
+  // with defaultConfig so the new top-level key is present (and disabled).
+  const storedConfig = {
+    ...makeConfig({}),
+    theme: 'dark',
+    cerebellum: undefined,
+  };
+  delete (storedConfig as Record<string, unknown>).cerebellum;
+  const persisted: Record<string, unknown> = {};
+  (globalThis as { window?: unknown }).window = {
+    electron: {
+      store: {
+        get: async () => storedConfig,
+        set: async (_key: string, value: unknown) => {
+          persisted.value = value;
+        },
+        remove: async () => {},
+        onChanged: () => () => {},
+      },
+    },
+  };
+  try {
+    await configService.init();
+    const merged = configService.getConfig();
+    // Proof the merge ran on the stored config, not just the fallback default.
+    assert.equal(merged.theme, 'dark');
+    assert.deepEqual(merged.cerebellum, {
+      enabled: false,
+      provider: 'typesafe-jev',
+      apiKey: '',
+      baseUrl: 'https://api.typesafe.ai',
+      model: 'jev-latest',
+    });
+  } finally {
+    delete (globalThis as { window?: unknown }).window;
+  }
 });
