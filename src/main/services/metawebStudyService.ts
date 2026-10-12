@@ -71,6 +71,14 @@ export interface MetawebStudyServiceDeps {
    * no-op. Omitting it preserves the previous behavior (always run).
    */
   isMemoryEnabled?: (metabotId: number) => boolean;
+  /**
+   * Fresh-install deferral (see libs/installAgeGate): returns a one-line
+   * reason while background automation must stay off (a brand-new install's
+   * first 24h), else null. Deferred jobs stay pending — no session is
+   * launched and nothing retries until the window elapses. Absent → never
+   * deferred.
+   */
+  backgroundDeferral?: () => string | null;
 }
 
 function inStudyWindow(date: Date): boolean {
@@ -158,6 +166,9 @@ export class MetawebStudyService {
   private readonly runStudyJob: MetawebStudyRunHook;
   private readonly now: () => Date;
   private readonly isMemoryEnabled?: (metabotId: number) => boolean;
+  private readonly backgroundDeferral?: () => string | null;
+  /** One-line "deferred" log latch (see runTick). */
+  private deferralLogged = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Runs are serialized globally — one background study session at a time. */
   private running = false;
@@ -169,6 +180,7 @@ export class MetawebStudyService {
     this.runStudyJob = deps.runStudyJob;
     this.now = deps.now ?? (() => new Date());
     this.isMemoryEnabled = deps.isMemoryEnabled;
+    this.backgroundDeferral = deps.backgroundDeferral;
   }
 
   enqueueStudyJob(
@@ -262,6 +274,18 @@ export class MetawebStudyService {
   async runTick(): Promise<{ ran: number }> {
     if (this.running) return { ran: 0 };
     if (!inStudyWindow(this.now())) return { ran: 0 };
+    // Fresh-install deferral: the overnight study queue is a background LLM
+    // session, so it waits out the window with the dream/surf pipeline.
+    // Jobs stay pending (never failed) and are picked up on a later tick.
+    const deferredReason = this.backgroundDeferral?.() ?? null;
+    if (deferredReason) {
+      if (!this.deferralLogged) {
+        this.deferralLogged = true;
+        console.log(`[MetawebStudy] Study runs deferred: ${deferredReason}`);
+      }
+      return { ran: 0 };
+    }
+    this.deferralLogged = false;
     let ran = 0;
     for (const job of this.store.listPending()) {
       if (!inStudyWindow(this.now())) break;

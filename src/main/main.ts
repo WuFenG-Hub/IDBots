@@ -287,6 +287,7 @@ import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
 import { DREAM_RETRY_MAX_ATTEMPTS } from './libs/dreamRetryPolicy';
+import { evaluateInstallAgeGate, pickInstallAnchorMs } from './libs/installAgeGate';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession, SkillTurnTimeoutError } from './services/orchestratorCoworkBridge';
 import { withChainWriteBudget } from './libs/chainWriteBudget';
 import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
@@ -4401,6 +4402,61 @@ const startStartupIdleTier = (): void => {
 };
 
 /**
+ * Fresh-install deferral for background LLM automation (2026-10-12 incident,
+ * see libs/installAgeGate): the 2M-token starter allowance used to be spent by
+ * the nightly pipeline before a new user typed anything. The anchor is the
+ * machine's earliest durable install signal — the local user identity's
+ * createdAt, else the oldest bot's — so an upgraded install (identity and bots
+ * created long ago) is never deferred.
+ *
+ * Consumers call this at their scheduler's decision point and skip when it
+ * returns a reason. The skip is logged once per window (and the resume once),
+ * so a 30-minute tick does not flood the log. Any read failure fails open.
+ */
+let backgroundDeferralLogged = false;
+const resolveBackgroundAutomationDeferral = (): string | null => {
+  try {
+    let identityCreatedAtMs: number | null = null;
+    try {
+      identityCreatedAtMs = getUserIdentityStore().get()?.created_at ?? null;
+    } catch {
+      identityCreatedAtMs = null;
+    }
+    let metabotCreatedAtMs: number[] = [];
+    try {
+      metabotCreatedAtMs = getMetabotStore().listMetabots().map((bot) => bot.created_at);
+    } catch {
+      metabotCreatedAtMs = [];
+    }
+    const anchorMs = pickInstallAnchorMs({ identityCreatedAtMs, metabotCreatedAtMs });
+    const state = evaluateInstallAgeGate({
+      anchorMs,
+      hasExistingBots: metabotCreatedAtMs.length > 0,
+    });
+    if (!state.deferred) {
+      if (backgroundDeferralLogged) {
+        backgroundDeferralLogged = false;
+        console.log('[BackgroundDeferral] Fresh-install window elapsed; dream/surf/study automation resumes.');
+      }
+      return null;
+    }
+    if (!backgroundDeferralLogged) {
+      backgroundDeferralLogged = true;
+      console.log(`[BackgroundDeferral] Fresh install — deferring dream/surf/study automation: ${state.reason}.`);
+    }
+    return state.reason;
+  } catch (error) {
+    // Fail open: a store read failure must never stop an existing user's
+    // nightly work.
+    console.warn(
+      '[BackgroundDeferral] gate check failed; allowing background automation:',
+      error instanceof Error ? error.message : String(error),
+    );
+    return null;
+  }
+};
+
+/**
  * Nightly / idle background services, in the order the pre-tier code started
  * them: heartbeat, dream consolidation, memory hygiene, knowledge-base
  * auto-learn, MetaWeb study, surf crash recovery, chain content summaries and
@@ -4438,6 +4494,8 @@ const startStartupNightlyServices = (): void => {
     metaidExperienceStore: dreamExperienceStore,
     metaidImpressionStore: dreamImpressionStore,
     metaidKnowledgeStore: dreamKnowledgeStore,
+    // Fresh-install deferral: no dreaming (and no catch-up) on day one.
+    backgroundDeferral: resolveBackgroundAutomationDeferral,
     // Pre-dream surf ("做梦前自动冲浪"): default OFF per bot (opt-in — every
     // surf spends LLM tokens and gas); skipped when a surf finished within
     // the recency window. Hard-capped so an overrunning surf can never stall
@@ -7935,6 +7993,9 @@ const getMetawebStudyService = (): MetawebStudyService => {
   if (!metawebStudyService) {
     metawebStudyService = new MetawebStudyService({
       store: getMetawebStudyJobStore(),
+      // Fresh-install deferral: the overnight study queue is a background LLM
+      // session; queued topics simply wait for the window to elapse.
+      backgroundDeferral: resolveBackgroundAutomationDeferral,
       // Mirror of the coworkRunner memory gate on knowledge-base tools: with
       // memory disabled for the bot a study session could search/read but save
       // nothing, and the empty run would be misrecorded as 'done'. Fail the
@@ -7996,6 +8057,9 @@ const getSurfService = (): SurfService => {
     surfService = new SurfService({
       store: getMetawebSurfStore(),
       metabotStore: getMetabotStore(),
+      // Fresh-install deferral: the pre-dream surf is part of the nightly
+      // pipeline and stays off on day one (manual triggers are unaffected).
+      backgroundDeferral: resolveBackgroundAutomationDeferral,
       // Same memory gate as the study service (review P2.2): with memory
       // disabled the surf session has no KB/memory tools to learn into —
       // manual triggers fail loudly, the pre-dream path skips quietly.

@@ -218,6 +218,13 @@ export interface DreamServiceDeps {
    * folded into the dream prompt as its own section.
    */
   surfBeforeDream?: (metabotId: number) => Promise<{ reportMarkdown: string | null } | null>;
+  /**
+   * Fresh-install deferral (see libs/installAgeGate): returns a one-line
+   * reason while background automation must stay off (a brand-new install's
+   * first 24h), else null. Deferred ticks do not enqueue anything, so no due
+   * date is retried in a loop while the window lasts. Absent → never deferred.
+   */
+  backgroundDeferral?: () => string | null;
   tickIntervalMs?: number;
   llmTimeoutMs?: number;
   /**
@@ -289,6 +296,8 @@ export class DreamService {
   private dreamingBots = new Set<number>();
   /** botId → local date key of the night a version repair was last scheduled. */
   private lastRepairNight = new Map<number, string>();
+  /** One-line "deferred" log latch (see tick); reset once the window elapses. */
+  private deferralLogged = false;
 
   constructor(private deps: DreamServiceDeps) {
     this.performChat = deps.performChat ?? performChatCompletionForOrchestrator;
@@ -343,6 +352,19 @@ export class DreamService {
   /** Scan all enabled bots for due dream dates and drain the queue. */
   async tick(): Promise<void> {
     if (this.stopped) return;
+    // Fresh-install deferral: skip the whole scan on a machine whose install
+    // is younger than the window. Skipping before the due-date scan is what
+    // keeps a deferred night from re-enqueueing (and re-surfing) on every
+    // tick: nothing is queued, so nothing retries.
+    const deferredReason = this.deps.backgroundDeferral?.() ?? null;
+    if (deferredReason) {
+      if (!this.deferralLogged) {
+        this.deferralLogged = true;
+        console.log(`[DreamService] Dreaming deferred: ${deferredReason}`);
+      }
+      return;
+    }
+    this.deferralLogged = false;
     const now = this.now();
     let bots: DreamMetabotLike[] = [];
     try {
