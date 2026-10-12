@@ -145,6 +145,20 @@ export interface AppConfig {
   };
   // 主题配置
   theme: 'light' | 'dark' | 'system';
+  /**
+   * Cerebellum (小脑): optional fast decision-model configuration, kept as a
+   * top-level key OUTSIDE `providers` on purpose — provider migrations only
+   * touch the providers map, so this shape needs no migration registry. Absent
+   * on legacy configs; the init-time merge fills it from defaultConfig, and
+   * every reader (resolveCerebellumConfig in main) tolerates it missing.
+   */
+  cerebellum?: {
+    enabled: boolean;
+    provider: 'typesafe-jev';
+    apiKey: string;
+    baseUrl: string;
+    model: string;
+  };
   // 语言配置
   language: 'zh' | 'en';
   // 语言初始化标记 (用于判断是否是首次启动)
@@ -758,6 +772,15 @@ export const defaultConfig: AppConfig = {
   },
   theme: 'system',
   language: 'zh',
+  // Cerebellum is strictly opt-in: disabled with empty credentials by default,
+  // so every existing behavior stays identical until the user configures it.
+  cerebellum: {
+    enabled: false,
+    provider: 'typesafe-jev',
+    apiKey: '',
+    baseUrl: 'https://api.typesafe.ai',
+    model: 'jev-latest',
+  },
   chatExperienceMode: 'assistant',
   app: {
     port: 3000,

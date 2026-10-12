@@ -14,6 +14,7 @@ import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, Signal
 import BrainIcon from './icons/BrainIcon';
 import { CustomProviderIcon, CommandCodeIcon, OpenCodeIcon } from './icons/providers';
 import { fetchProviderModelList, providerSupportsModelListSync } from '../services/providerModels';
+import { testCerebellumConnection } from '../services/cerebellumConnection';
 import { useDispatch, useSelector } from 'react-redux';
 import { setAvailableModels, setSelectedModel } from '../store/slices/modelSlice';
 import { RootState } from '../store';
@@ -80,6 +81,20 @@ type ProvidersConfig = NonNullable<AppConfig['providers']>;
 // 命名的内置供应商成员类型不含该字段，这里显式补上以便统一访问。
 type ProviderConfig = ProvidersConfig[string] & { name?: string };
 type Model = NonNullable<ProviderConfig['models']>[number];
+type CerebellumConfig = NonNullable<AppConfig['cerebellum']>;
+
+// Cerebellum provider options: single entry until more decision-model providers land.
+const CEREBELLUM_PROVIDER_OPTIONS = [
+  { value: 'typesafe-jev', label: 'TypeSafe JEV' },
+];
+
+const DEFAULT_CEREBELLUM_CONFIG: CerebellumConfig = {
+  enabled: false,
+  provider: 'typesafe-jev',
+  apiKey: '',
+  baseUrl: 'https://api.typesafe.ai',
+  model: 'jev-latest',
+};
 type MemoryMetabotOption = {
   id: number;
   name: string;
@@ -521,6 +536,16 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
 
   // Add state for providers configuration
   const [providers, setProviders] = useState<ProvidersConfig>(() => getInitialProviders());
+
+  // Model tab sub-section: 'brain' = existing LLM provider UI, 'cerebellum' = decision model.
+  const [modelSubTab, setModelSubTab] = useState<'brain' | 'cerebellum'>('brain');
+  // Cerebellum edits are local until the shared Save button persists them.
+  const [cerebellum, setCerebellum] = useState<CerebellumConfig>(() => ({
+    ...DEFAULT_CEREBELLUM_CONFIG,
+    ...(configService.getConfig().cerebellum ?? {}),
+  }));
+  const [cerebellumTestResult, setCerebellumTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [isTestingCerebellum, setIsTestingCerebellum] = useState(false);
   
   // 创建引用来确保内容区域的滚动
   const contentRef = useRef<HTMLDivElement>(null);
@@ -1326,6 +1351,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         theme,
         language,
         shortcuts,
+        cerebellum,
         ...(reconciledDefault
           ? {
               model: {
@@ -1805,6 +1831,28 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
       });
     } finally {
       setIsTesting(false);
+    }
+  };
+
+  const handleCerebellumConfigChange = <K extends keyof CerebellumConfig>(field: K, value: CerebellumConfig[K]) => {
+    setCerebellum(prev => ({ ...prev, [field]: value }));
+    setCerebellumTestResult(null);
+  };
+
+  const handleTestCerebellumConnection = async () => {
+    if (isTestingCerebellum) {
+      return;
+    }
+    setIsTestingCerebellum(true);
+    setCerebellumTestResult(null);
+    try {
+      const result = await testCerebellumConnection(
+        { baseUrl: cerebellum.baseUrl, apiKey: cerebellum.apiKey },
+        i18nService,
+      );
+      setCerebellumTestResult(result);
+    } finally {
+      setIsTestingCerebellum(false);
     }
   };
 
@@ -2948,9 +2996,36 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         );
       }
 
-      case 'model':
+      case 'model': {
+        // Sub-tab segmented control: Brain keeps the existing provider UI
+        // untouched; Cerebellum hosts the optional decision-model config.
+        const modelSubTabButtonClass = (active: boolean) =>
+          `rounded-lg border px-3 py-1.5 text-xs transition-colors ${
+            active
+              ? 'border-claude-accent bg-claude-accent/5 dark:bg-claude-accent/10 text-claude-accent dark:text-claude-darkAccent'
+              : 'dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover'
+          }`;
         return (
-          <div className="flex h-full">
+          <div className="flex flex-col h-full">
+            <div className="flex items-center gap-2 pb-3 shrink-0">
+              <button
+                type="button"
+                onClick={() => setModelSubTab('brain')}
+                className={modelSubTabButtonClass(modelSubTab === 'brain')}
+              >
+                {i18nService.t('modelBrainTab')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setModelSubTab('cerebellum')}
+                className={modelSubTabButtonClass(modelSubTab === 'cerebellum')}
+              >
+                {i18nService.t('modelCerebellumTab')}
+              </button>
+            </div>
+
+            {modelSubTab === 'brain' ? (
+            <div className="flex flex-1 min-h-0">
             {/* Provider List - Left Side */}
             <div className="w-2/5 border-r dark:border-claude-darkBorder border-claude-border pr-3 space-y-1.5 overflow-y-auto">
               <div className="mb-1.5 px-1">
@@ -3341,8 +3416,127 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                 </div>
               </div>
             </div>
+            </div>
+            ) : (
+            <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pr-1">
+              {/* Cerebellum panel: optional fast decision model config */}
+              <p className="text-xs leading-relaxed dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('cerebellumExplainer')}
+              </p>
+
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                  {i18nService.t('cerebellumEnabled')}
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={cerebellum.enabled}
+                  onClick={() => handleCerebellumConfigChange('enabled', !cerebellum.enabled)}
+                  className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors ${
+                    cerebellum.enabled
+                      ? 'bg-claude-accent'
+                      : 'bg-gray-300 dark:bg-gray-600'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      cerebellum.enabled ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+                <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+                  {i18nService.t('cerebellumPrivacyNotice')}
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                  {i18nService.t('cerebellumProvider')}
+                </h4>
+                <div className="w-[180px] shrink-0">
+                  <ThemedSelect
+                    id="cerebellum-provider"
+                    value={cerebellum.provider}
+                    onChange={(value) => handleCerebellumConfigChange('provider', value as CerebellumConfig['provider'])}
+                    options={CEREBELLUM_PROVIDER_OPTIONS}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="cerebellum-apiKey" className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
+                  {i18nService.t('apiKey')}
+                </label>
+                <input
+                  type="password"
+                  id="cerebellum-apiKey"
+                  value={cerebellum.apiKey}
+                  onChange={(e) => handleCerebellumConfigChange('apiKey', e.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs font-mono"
+                  placeholder={i18nService.t('apiKeyPlaceholder')}
+                />
+              </div>
+
+              <div>
+                <label htmlFor="cerebellum-baseUrl" className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
+                  {i18nService.t('baseUrl')}
+                </label>
+                <input
+                  type="text"
+                  id="cerebellum-baseUrl"
+                  value={cerebellum.baseUrl}
+                  onChange={(e) => handleCerebellumConfigChange('baseUrl', e.target.value)}
+                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                  placeholder="https://api.typesafe.ai"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="cerebellum-model" className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
+                  {i18nService.t('cerebellumModel')}
+                </label>
+                <input
+                  type="text"
+                  id="cerebellum-model"
+                  value={cerebellum.model}
+                  onChange={(e) => handleCerebellumConfigChange('model', e.target.value)}
+                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                  placeholder="jev-latest"
+                />
+              </div>
+
+              <div className="flex items-center space-x-3">
+                <button
+                  type="button"
+                  onClick={handleTestCerebellumConnection}
+                  disabled={isTestingCerebellum || !cerebellum.apiKey.trim()}
+                  className="inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors active:scale-[0.98]"
+                >
+                  <SignalIcon className="h-3.5 w-3.5 mr-1.5" />
+                  {isTestingCerebellum ? i18nService.t('testing') : i18nService.t('testConnection')}
+                </button>
+                {cerebellumTestResult && (
+                  <div className={`flex items-center text-xs ${cerebellumTestResult.success ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                    {cerebellumTestResult.success ? (
+                      <CheckCircleIcon className="h-4 w-4 mr-1" />
+                    ) : (
+                      <XCircleIcon className="h-4 w-4 mr-1" />
+                    )}
+                    <span className="truncate max-w-[200px]">{cerebellumTestResult.message}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+            )}
           </div>
         );
+      }
 
       case 'shortcuts':
         return (

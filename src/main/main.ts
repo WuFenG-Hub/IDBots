@@ -20,6 +20,8 @@ import { McpStore, type McpServerFormData } from './mcpStore';
 import { ProjectStore, type ProjectFormData } from './projectStore';
 import type { MemoryBackend } from './memory/memoryBackend';
 import { createOwnerMemoryScope } from './memory/memoryScope';
+import { resolveCerebellumConfig } from './libs/cerebellumConfig';
+import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
 import {
   CoworkRunner,
   isDelegationPriceNumeric,
@@ -5812,6 +5814,24 @@ const getCoworkRunner = () => {
       experienceStore: getDreamStore(),
       knowledgeStore: getMetaIDKnowledgeStore(),
       episodeTimelineProvider: getMetaIDExperienceStore(),
+      // Cerebellum (小脑) memory re-rank: the config is re-resolved lazily on
+      // every call, so Settings edits apply on the next turn without an app
+      // restart; null config (disabled/no key) silently keeps lexical ranking.
+      // The fetch MUST ride the Electron net stack (session.defaultSession) —
+      // it follows the system proxy, while bare Node fetch is region-blocked
+      // (HTTP 451) for some users.
+      cerebellumMemoryRanker: async ({ currentUserText, memories }) => {
+        const config = resolveCerebellumConfig(getStore().get('app_config'));
+        if (!config) {
+          return null;
+        }
+        return rankMemoriesWithCerebellum({
+          config,
+          fetchImpl: session.defaultSession.fetch.bind(session.defaultSession),
+          currentUserText,
+          memories,
+        });
+      },
       // Per-bot opt-in (default off): mounted MCP tool schemas ride every
       // LLM request, so only sessions whose bot explicitly enables MCP pay
       // the cost. See services/coworkMcpToolsPreference.ts.
