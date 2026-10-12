@@ -28,6 +28,7 @@ import UserMessageOriginBadge from './UserMessageOriginBadge';
 import MessageFeedbackControls from './MessageFeedbackControls';
 import { ThinkingBlock, splitThinkTaggedContent } from './ThinkingBlock';
 import { AssistantProgressNote } from './AssistantProgressNote';
+import { AssistantActivityIndicator } from './AssistantActivityIndicator';
 import { shouldHideA2AInternalMessage, lastA2AErrorDetail } from './a2aInternalMessageFilter';
 import {
   getTodoListSummaryText,
@@ -809,7 +810,9 @@ const shouldHideControlMessage = (message: CoworkMessage): boolean => {
     return true;
   }
   // Ephemeral SDK runtime-status signals (api_retry / requesting) are surfaced
-  // in StreamingActivityBar, not as persisted message bubbles.
+  // in the streaming activity indicator (StreamingActivityBar in professional
+  // mode, AssistantActivityIndicator in assistant mode), not as persisted
+  // message bubbles.
   if (typeof message.metadata?.sdkRuntimeStatus === 'string') {
     return true;
   }
@@ -4317,12 +4320,22 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         />
       )}
 
-      {/* Streaming Activity Bar */}
+      {/* Streaming Activity Bar — assistant mode swaps the professional
+          sliding bar for a friendlier bot-avatar indicator; professional
+          mode stays exactly as before. */}
       {(isStreaming || currentSession.status === 'running') && (
-        <StreamingActivityBar
-          messages={currentSession.messages}
-          fallbackText={isA2ASession ? i18nService.t('coworkA2ABackgroundWorking') : undefined}
-        />
+        isAssistantMode ? (
+          <AssistantActivityIndicator
+            messages={currentSession.messages}
+            avatar={sessionMetabot?.avatar ?? currentSession.metabotAvatar ?? null}
+            fallbackText={isA2ASession ? i18nService.t('coworkA2ABackgroundWorking') : undefined}
+          />
+        ) : (
+          <StreamingActivityBar
+            messages={currentSession.messages}
+            fallbackText={isA2ASession ? i18nService.t('coworkA2ABackgroundWorking') : undefined}
+          />
+        )
       )}
 
       {freeQuotaExhausted && (
