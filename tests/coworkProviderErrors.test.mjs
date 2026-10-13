@@ -187,3 +187,90 @@ test('HTTP 413 body-limit deaths classify as body-limit, never as context overfl
   assert.equal(isBodyLimitDshTurnError({ kind: 'completed' }), false);
   assert.equal(isBodyLimitDshTurnError(null), false);
 });
+
+// 2026-10-13 session 38c18094: a native DeepSeek turn died with
+// MALFORMED_RESPONSE "DeepSeek Messages stream: tool input is invalid JSON"
+// (the model streamed tool-call arguments that never parsed). The kernel
+// discards the malformed step before any assistant message enters history,
+// so the runner auto-continues ONCE with MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT.
+test('isMalformedToolCallDshTurnError classifies only the invalid-tool-JSON fingerprint', async () => {
+  const { isMalformedToolCallDshTurnError } = await import('../dist-electron/main/libs/coworkAssistantReply.js');
+
+  // The exact incident shape (kernel-normalized code + adapter detail).
+  assert.equal(
+    isMalformedToolCallDshTurnError({
+      kind: 'error',
+      error: { code: 'MALFORMED_RESPONSE', message: 'DeepSeek Messages stream: tool input is invalid JSON' },
+    }),
+    true,
+  );
+  // Code lower-cased by a relay still classifies on the message fingerprint.
+  assert.equal(
+    isMalformedToolCallDshTurnError({
+      kind: 'error',
+      error: { code: 'malformed_response', message: 'DeepSeek Messages stream: tool input is invalid JSON' },
+    }),
+    true,
+  );
+  // Other MALFORMED_RESPONSE details (SSE corruption, schema mismatches) can
+  // be persistent provider/adapter defects — never auto-continued.
+  assert.equal(
+    isMalformedToolCallDshTurnError({
+      kind: 'error',
+      error: { code: 'MALFORMED_RESPONSE', message: 'DeepSeek Messages SSE contains invalid JSON' },
+    }),
+    false,
+  );
+  assert.equal(
+    isMalformedToolCallDshTurnError({
+      kind: 'error',
+      error: { code: 'MALFORMED_RESPONSE', message: 'DeepSeek Messages expected a string field' },
+    }),
+    false,
+  );
+  // The fingerprint without the kernel code is not enough (a user-visible
+  // message quoting the error must not classify).
+  assert.equal(
+    isMalformedToolCallDshTurnError({ kind: 'error', error: { message: 'tool input is invalid JSON' } }),
+    false,
+  );
+  // Non-error outcomes never classify.
+  assert.equal(isMalformedToolCallDshTurnError({ kind: 'completed' }), false);
+  assert.equal(isMalformedToolCallDshTurnError(null), false);
+});
+
+test('coworkRunner auto-continues a malformed-tool-call turn exactly once, before the transient ladder', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const runnerSource = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '../src/main/libs/coworkRunner.ts'),
+    'utf8',
+  );
+
+  assert.ok(
+    runnerSource.includes('MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT'),
+    'coworkRunner must import and use MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT',
+  );
+  const useIdx = runnerSource.indexOf('runGuardedTurn(MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT)');
+  assert.ok(useIdx > 0, 'the continue prompt must be fed through runGuardedTurn');
+  // One-shot (an if, not the resume loop) and gated on the classifier + not aborted.
+  const window = runnerSource.slice(Math.max(0, useIdx - 600), useIdx);
+  assert.ok(
+    window.includes('isMalformedToolCallDshTurnError(outcome)'),
+    `the continue must be gated on the classifier: ${window}`,
+  );
+  assert.ok(
+    window.includes("outcome.kind === 'error'"),
+    'the continue only fires on error outcomes',
+  );
+  assert.ok(
+    window.includes('!activeSession.abortController.signal.aborted'),
+    'the continue must not fire after a user abort',
+  );
+  // Placement: after the initial turn, before the transient-resume loop.
+  const firstTurnIdx = runnerSource.indexOf('let outcome = await runGuardedTurn(effectiveDshPrompt, promptImages)');
+  const transientIdx = runnerSource.indexOf('for (let resumeAttempt = 1; resumeAttempt <= DSH_TRANSIENT_TURN_MAX_RESUMES');
+  assert.ok(firstTurnIdx > 0 && useIdx > firstTurnIdx, 'the continue runs after the initial turn');
+  assert.ok(transientIdx > useIdx, 'the continue runs before the transient-resume ladder');
+});

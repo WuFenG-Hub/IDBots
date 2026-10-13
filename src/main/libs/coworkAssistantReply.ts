@@ -80,6 +80,31 @@ export const TRANSIENT_TURN_RESUME_PROMPT =
 export const OVERFLOW_TURN_RESUME_PROMPT =
   'The previous turn failed because it exceeded the previous model\'s context window; this turn continues on a fallback model with the full preserved history. Continue the task from where you left off, working from what is already in the conversation without re-reading files or repeating large tool calls.';
 
+/**
+ * Cue fed back to the model when a DSH turn died because the provider streamed
+ * a tool call whose accumulated arguments never parsed as JSON (kernel code
+ * MALFORMED_RESPONSE, "DeepSeek Messages stream: tool input is invalid JSON";
+ * 2026-10-13 session 38c18094 on the native DeepSeek route). The kernel
+ * discards the malformed step BEFORE any assistant message enters the session
+ * history (only an assistant/attempt telemetry record is appended) and no tool
+ * call from it ever dispatched, so the preserved history is consistent and the
+ * model can simply re-issue the step — no side effects replay.
+ */
+export const MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT =
+  'The previous response was interrupted: a tool call was emitted with corrupted arguments that could not be parsed. Continue the task from where you left off and re-issue that step.';
+
+/** True when a DSH turn outcome failed because the provider streamed tool-call
+ *  arguments that never parsed as JSON — a stochastic model-side emission
+ *  glitch on the DeepSeek Messages route, worth ONE automatic continue.
+ *  Deliberately scoped to this exact fingerprint: other MALFORMED_RESPONSE
+ *  details (SSE frame corruption, schema mismatches) can be persistent
+ *  provider/adapter defects and never enter the auto-continue path. */
+export function isMalformedToolCallDshTurnError(outcome: { kind?: string; error?: { code?: string; message?: string } }): boolean {
+  if (outcome?.kind !== 'error') return false;
+  if (String(outcome.error?.code ?? '').toUpperCase() !== 'MALFORMED_RESPONSE') return false;
+  return /tool input is invalid JSON/i.test(String(outcome.error?.message ?? ''));
+}
+
 /** True when a DSH turn outcome is an error whose failure code is transient
  *  (environmental) and therefore worth an automatic turn-level resume. */
 export function isTransientDshTurnError(outcome: { kind?: string; error?: { code?: string } }): boolean {

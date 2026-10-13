@@ -52,3 +52,35 @@ test('the gate reads the persisted mode fresh and restricts to interactive owner
     'the gate must restrict to sessions created from the cowork UI',
   );
 });
+
+// 2026-10-13 DeepSeek acceptance findings: with reasoning off, the model
+// leaked English internal monologue as narration ("Good. Now let me build…")
+// and emitted one bubble per tool round. The prompt must carry the three
+// fixes as explicit prohibitions, not soft suggestions.
+test('the assistant-mode prompt hard-pins narration language, sparseness, and tone', () => {
+  const promptSource = readFileSync(join(here, '../src/main/libs/assistantModePrompt.ts'), 'utf8');
+  assert.ok(
+    promptSource.includes('NEVER narrate in English'),
+    'the language rule must be a hard prohibition (English narration only when the user writes English)',
+  );
+  assert.ok(
+    promptSource.includes('中文 →'),
+    'the language rule must carry an explicit Chinese example',
+  );
+  assert.ok(
+    promptSource.includes('NEVER write one line per tool call'),
+    'narration must be sparse milestone-only, never one bubble per tool call',
+  );
+  assert.ok(
+    promptSource.includes('2-4 narrations'),
+    'the prompt must state the expected total narration budget',
+  );
+  assert.ok(
+    promptSource.includes('NEVER self-talk'),
+    'the tone rule must ban internal monologue ("let me check", "I miscounted")',
+  );
+  assert.ok(
+    promptSource.includes('已找到中文版的文件'),
+    'the tone rule must carry the user-facing status example',
+  );
+});
