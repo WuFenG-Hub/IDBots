@@ -23,6 +23,7 @@ import { createOwnerMemoryScope } from './memory/memoryScope';
 import { resolveCerebellumConfig } from './libs/cerebellumConfig';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
 import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
+import { gateVolatileBlocksWithCerebellum } from './cerebellum/volatileBlockGate';
 import {
   CoworkRunner,
   isDelegationPriceNumeric,
@@ -3201,6 +3202,38 @@ const createCerebellumMemoryWriteGate = () =>
   };
 
 /**
+ * Cerebellum (小脑) volatile block gate (roadmap #3): one JEV request with
+ * one Noul per gateable background block (experience / twin-impression /
+ * knowledge-bases / remote-services) decides which blocks ride this turn's
+ * user-message tail. Same lazy shape as the factories above — config
+ * re-resolved per call (Settings edits apply next turn), fetch on the
+ * Electron net stack (system proxy). null on any failure injects every
+ * block exactly as before. Never logs turn text — only verdicts, latency,
+ * and how many blocks the gate trimmed.
+ */
+const createCerebellumVolatileBlockGate = () =>
+  async ({ currentUserText }: {
+    currentUserText: string;
+  }): Promise<Record<string, boolean> | null> => {
+    const config = resolveCerebellumConfig(getStore().get('app_config'));
+    if (!config) {
+      return null;
+    }
+    const startedAt = Date.now();
+    const verdicts = await gateVolatileBlocksWithCerebellum({
+      config,
+      fetchImpl: session.defaultSession.fetch.bind(session.defaultSession),
+      currentUserText,
+    });
+    coworkLog('INFO', 'volatileBlocks:cerebellumGate', 'volatile block gate evaluated', {
+      used: verdicts !== null,
+      skipped: verdicts ? Object.entries(verdicts).filter(([, inject]) => !inject).map(([key]) => key) : [],
+      latencyMs: Date.now() - startedAt,
+    });
+    return verdicts;
+  };
+
+/**
  * R3: rough upper-bound MVC fee estimate for a typical pin (funding + payload
  * outputs, ~600 vB at the resolved fee rate) — feeds the `need ~N sats` part
  * of balance-hint error messages. Marked as an estimate everywhere it shows.
@@ -5956,6 +5989,10 @@ const getCoworkRunner = () => {
       // Cerebellum (小脑) memory re-rank: shared factory with the group-task
       // daemon's memory block (see createCerebellumMemoryRanker).
       cerebellumMemoryRanker: createCerebellumMemoryRanker(),
+      // Cerebellum (小脑) volatile block gate (roadmap #3): per-turn Noul
+      // verdicts for the background tail blocks (see
+      // createCerebellumVolatileBlockGate).
+      cerebellumVolatileBlockGate: createCerebellumVolatileBlockGate(),
       // Per-bot opt-in (default off): mounted MCP tool schemas ride every
       // LLM request, so only sessions whose bot explicitly enables MCP pay
       // the cost. See services/coworkMcpToolsPreference.ts.
