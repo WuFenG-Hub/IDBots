@@ -104,6 +104,7 @@ import { isPathWithin } from './runtimePaths';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
 import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
 import { buildSkillShortlistBlock } from '../cerebellum/skillShortlist';
+import { CEREBELLUM_VOLATILE_GATE_SECTION_KEYS } from '../cerebellum/volatileBlockGate';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import {
   applyVolatileDedup,
@@ -2096,6 +2097,19 @@ export interface CoworkRunnerOptions {
     metabotId: number | null;
   }) => Promise<Array<{ id: string; name: string; description: string; probability: number }> | null>;
   /**
+   * Optional cerebellum (小脑) volatile block gate for the per-turn tail: one
+   * Noul per gateable block ("does this turn need block X?") decides which
+   * background blocks (experience / twin-impression / knowledge-bases /
+   * remote-services) ride this turn. The map's keys mirror the runner's
+   * section keys; true = inject, false = skip. null (unconfigured, timeout,
+   * error) means "inject everything" — the callback must never throw.
+   * main.ts resolves the cerebellum config lazily inside the callback so
+   * Settings edits apply on the next turn without a restart.
+   */
+  cerebellumVolatileBlockGate?: (input: {
+    currentUserText: string;
+  }) => Promise<Record<string, boolean> | null>;
+  /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
    * turn ended without terminal events) and settled so the query can close.
@@ -2255,6 +2269,7 @@ export class CoworkRunner extends EventEmitter {
   private locationHost?: LocationHost;
   private cerebellumMemoryRanker?: CoworkRunnerOptions['cerebellumMemoryRanker'];
   private cerebellumSkillRanker?: CoworkRunnerOptions['cerebellumSkillRanker'];
+  private cerebellumVolatileBlockGate?: CoworkRunnerOptions['cerebellumVolatileBlockGate'];
   /**
    * Per-session precise-location consent memory: the owner is asked at most
    * once per session (first precise request) and the approval sticks for the
@@ -2418,6 +2433,7 @@ export class CoworkRunner extends EventEmitter {
     this.locationHost = options?.locationHost;
     this.cerebellumMemoryRanker = options?.cerebellumMemoryRanker;
     this.cerebellumSkillRanker = options?.cerebellumSkillRanker;
+    this.cerebellumVolatileBlockGate = options?.cerebellumVolatileBlockGate;
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
@@ -6035,30 +6051,61 @@ export class CoworkRunner extends EventEmitter {
           metabotId: this.store.getMetabotIdForSession(sessionId),
         }).catch(() => null)
       : null;
+    // Cerebellum volatile block gate (roadmap #3): one Noul per gateable
+    // background block decides whether it rides this turn's tail. The call
+    // starts here so it overlaps the memory re-ranker's own cerebellum
+    // round-trip (worst case stays one 1.5s budget, not two); it is awaited
+    // after the memory section below. null/throw injects everything —
+    // fail-open, byte-identical to the ungated behavior.
+    const volatileGatePromise = this.cerebellumVolatileBlockGate && prompt.trim()
+      ? this.cerebellumVolatileBlockGate({ currentUserText: prompt }).catch(() => null)
+      : null;
+    let blockGateVerdicts: Record<string, boolean> | null = null;
+    const shouldInjectVolatile = (key: string): boolean =>
+      !(CEREBELLUM_VOLATILE_GATE_SECTION_KEYS as readonly string[]).includes(key)
+      || blockGateVerdicts?.[key] !== false;
+    const awaitVolatileGate = async (): Promise<void> => {
+      if (!volatileGatePromise || blockGateVerdicts !== null) return;
+      blockGateVerdicts = await volatileGatePromise;
+      if (blockGateVerdicts !== null) {
+        coworkLog('INFO', 'volatileBlocks:cerebellumGate', 'volatile block gate verdicts', {
+          sessionId,
+          verdicts: blockGateVerdicts,
+        });
+      }
+    };
     if (profile.includeMemoryPromptBlocks) {
       sections.push({
         key: 'memory',
         text: await this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled }),
         alwaysInject: true,
       });
+      // Gate verdicts land after the memory section: by then the parallel
+      // gate call has usually resolved. Ungateable keys and missing verdicts
+      // always inject — only an explicit false for a gateable key skips.
+      await awaitVolatileGate();
       // Hot-layer experience injection (self-identity + recent dream summaries).
       // The dream service rewrites these nightly and the summary window rolls
       // daily, so they can never live in the system prompt — they belong here
       // in the request tail with the other volatile blocks.
-      if (sessionMemoryEnabled) {
+      if (sessionMemoryEnabled && shouldInjectVolatile('experience')) {
         sections.push({
           key: 'experience',
           text: this.buildExperiencePromptBlocksXml(sessionId),
         });
-        // Twin-side distilled impressions of local Workers also ride the
-        // per-turn tail: the dream layer rewrites them nightly, so they must
-        // never enter the cached system-prompt prefix.
+      }
+      // Twin-side distilled impressions of local Workers also ride the
+      // per-turn tail: the dream layer rewrites them nightly, so they must
+      // never enter the cached system-prompt prefix.
+      if (sessionMemoryEnabled && shouldInjectVolatile('twin-impression')) {
         sections.push({
           key: 'twin-impression',
           text: await this.buildTwinLocalImpressionPrompt(sessionId),
         });
-        // Per-bot knowledge bases: doc counts shift on every learn run, so
-        // the listing is volatile and content-deduped like the other blocks.
+      }
+      // Per-bot knowledge bases: doc counts shift on every learn run, so
+      // the listing is volatile and content-deduped like the other blocks.
+      if (sessionMemoryEnabled && shouldInjectVolatile('knowledge-bases')) {
         sections.push({
           key: 'knowledge-bases',
           text: this.buildKnowledgeBasesPromptXml(sessionId),
@@ -6083,10 +6130,16 @@ export class CoworkRunner extends EventEmitter {
       });
     }
     if (!disableRemoteServicesPrompt) {
-      sections.push({
-        key: 'remote-services',
-        text: this.getRemoteServicesPrompt?.() ?? '',
-      });
+      // Memory-disabled profiles reach the gate's first consumer here; the
+      // call itself already started at function entry, so the await only
+      // waits out whatever remains of the shared 1.5s budget.
+      await awaitVolatileGate();
+      if (shouldInjectVolatile('remote-services')) {
+        sections.push({
+          key: 'remote-services',
+          text: this.getRemoteServicesPrompt?.() ?? '',
+        });
+      }
     }
     // Skill catalog: the per-turn tail counterpart of the 'idbots:skills'
     // rules section. Deduped by content hash, so a stable catalog costs
