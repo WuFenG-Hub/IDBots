@@ -425,6 +425,31 @@ export function setTurnMemoryExtractionRunner(runner: TurnMemoryExtractionRunner
   turnMemoryExtractionRunner = runner;
 }
 
+/**
+ * Cerebellum (小脑) memory write gate — optional cheap pre-filter (roadmap #1)
+ * in front of the turn-level brain extraction. Returns true when the turn is
+ * worth a brain extraction pass, false when the cerebellum confidently says
+ * nothing in the turn is memory-worthy (the brain call is skipped), and null
+ * when there is no verdict (disabled, timeout, HTTP/network error, malformed
+ * answer) — null and true BOTH proceed to the brain call, so the gate is
+ * fail-open and can never lose memories by failing. main.ts wires the real
+ * JEV-backed gate once at startup (lazy per-call config, like the memory
+ * re-ranker); unit tests inject deterministic fakes.
+ */
+export type CerebellumMemoryWriteGate = (input: {
+  userText: string;
+  assistantText: string;
+  guardLevel: CoworkMemoryGuardLevel;
+  implicitEnabled: boolean;
+}) => Promise<boolean | null>;
+
+let cerebellumMemoryWriteGate: CerebellumMemoryWriteGate | null = null;
+
+/** Test seam + main.ts wiring: inject the gate (null restores the ungated path). */
+export function setCerebellumMemoryWriteGate(gate: CerebellumMemoryWriteGate | null): void {
+  cerebellumMemoryWriteGate = gate;
+}
+
 const TURN_EXTRACTION_MAX_USER_CHARS = 1200;
 const TURN_EXTRACTION_MAX_ASSISTANT_CHARS = 400;
 const TURN_EXTRACTION_MAX_TEXT_CHARS = 500;
@@ -572,6 +597,23 @@ export async function judgeTurnMemoryExtraction(input: {
       extractionCache.delete(cacheKey);
     } else {
       return cached.value;
+    }
+  }
+  // Cerebellum write gate (roadmap #1): one cheap JEV Noul in front of the
+  // brain extraction call. false skips the brain call for this turn; null
+  // (disabled/timeout/failure) and true both fall through, so a broken gate
+  // can only cost money, never memories. The skip verdict is deliberately
+  // NOT cached — the gate is cheap and must re-evaluate promptly after
+  // Settings changes.
+  if (cerebellumMemoryWriteGate) {
+    let gateVerdict: boolean | null = null;
+    try {
+      gateVerdict = await cerebellumMemoryWriteGate(input);
+    } catch {
+      gateVerdict = null;
+    }
+    if (gateVerdict === false) {
+      return [];
     }
   }
   const result = await runTurnMemoryExtractionDefault(input);
