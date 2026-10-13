@@ -92,6 +92,7 @@ import {
 import { truncateUtf16Units } from '../libs/llmSafeText';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
 import { buildGroupTaskWorkingStateBlock } from './groupTaskWorkingState';
+import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
 import type { MemoryUsageClass, MemoryVisibility } from '../memory/memoryScope';
 import {
   parseDeliverableLines,
@@ -2162,6 +2163,18 @@ export interface GroupTaskDaemonDeps {
   chairResponseRedriveMs?: number;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
   /**
+   * Optional cerebellum (小脑) semantic re-ranker for the owner-scope memory
+   * pool: when wired and the pool reaches CEREBELLUM_MEMORY_MIN_POOL, the
+   * scoped-memory block ranks candidates by the returned noul scores instead
+   * of the lexical keyword score. null (unconfigured, timeout, error) falls
+   * back to lexical silently — the callback must never throw; the daemon also
+   * guards with try/catch. Same contract as CoworkRunnerOptions' ranker.
+   */
+  cerebellumMemoryRanker?: (input: {
+    currentUserText: string;
+    memories: Array<{ id: string; text: string }>;
+  }) => Promise<ReadonlyMap<string, number> | null>;
+  /**
    * Bump last_used_at for exactly the memory rows that rendered into the
    * prompt (the usage event for the hygiene decay clock). The daemon calls
    * this with the injected ids after building the scoped-memory block; unwired
@@ -4067,7 +4080,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * so owner-scope content exists only here. Gated on the bot's memory policy
    * (G8).
    */
-  const buildScopedMemoryBlockFor = (bot: GroupTaskDaemonBotFull, currentUserText?: string): string => {
+  /**
+   * Owner-scope scoped-memory block (profile facts, preferences, operational
+   * preferences) for group-task turns, built with the SAME importance-aware
+   * builder the cowork runner and the private-chat path use. self_identity /
+   * value_boundary / work_review stay in the experience block above — never
+   * double-injected. Callers mount this block on BOTH paths: the skill path's
+   * coworkRunner (memoryReadOnly) injects only conversation-scope memories and
+   * external_safe operational preferences for the metaweb_group_task channel,
+   * so owner-scope content exists only here. Gated on the bot's memory policy
+   * (G8).
+   *
+   * Returns a PLAIN STRING whenever the cerebellum ranker is unwired / the
+   * pool is too small / there is no trigger text — the sync path adds zero
+   * microtask hops to buildTurnSystemPrompt, and several daemon tick
+   * interleavings (detached turn jobs vs. per-tick watchdogs) are sensitive
+   * to an extra hop. Only an actually-engaged ranker call returns a Promise.
+   */
+  const buildScopedMemoryBlockFor = (
+    bot: GroupTaskDaemonBotFull,
+    currentUserText?: string,
+  ): string | Promise<string> => {
     if (!deps.listUserMemories) return '';
     const policy = deps.getEffectiveMemoryPolicy?.(bot.id);
     if (policy?.memoryEnabled === false) return '';
@@ -4084,30 +4117,52 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           entry.usageClass !== 'self_identity'
           && entry.usageClass !== 'value_boundary'
           && entry.usageClass !== 'work_review');
-      const { xml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
-        // A group task is the owner's own fleet working on the owner's behalf:
-        // the explicit LOCAL channel renders the owner block (a null channel
-        // would fall back to the trigger text and read as external).
-        channel: 'cowork_ui',
-        currentUserText,
-        ownerEntries: entries.map((entry) => ({
-          id: entry.id ?? '',
-          text: entry.text,
-          usageClass: entry.usageClass,
-          visibility: entry.visibility,
-          updatedAt: entry.updatedAt ?? 0,
-          lastUsedAt: entry.lastUsedAt ?? null,
-          importance: entry.importance,
-        })),
-        maxOwnerEntries: maxItems,
-        maxTotalChars: GROUP_MEMORY_BLOCK_MAX_CHARS,
-      });
-      // Injection IS the usage event for the hygiene decay clock: touch only
-      // the rows that actually rendered into the block.
-      if (injectedIds.length > 0) {
-        deps.touchUserMemoriesLastUsed?.(bot.id, injectedIds);
+      const renderBlock = (relevanceScoreById: ReadonlyMap<string, number> | null): string => {
+        const { xml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
+          // A group task is the owner's own fleet working on the owner's behalf:
+          // the explicit LOCAL channel renders the owner block (a null channel
+          // would fall back to the trigger text and read as external).
+          channel: 'cowork_ui',
+          currentUserText,
+          ownerEntries: entries.map((entry) => ({
+            id: entry.id ?? '',
+            text: entry.text,
+            usageClass: entry.usageClass,
+            visibility: entry.visibility,
+            updatedAt: entry.updatedAt ?? 0,
+            lastUsedAt: entry.lastUsedAt ?? null,
+            importance: entry.importance,
+          })),
+          relevanceScoreById: relevanceScoreById ?? undefined,
+          maxOwnerEntries: maxItems,
+          maxTotalChars: GROUP_MEMORY_BLOCK_MAX_CHARS,
+        });
+        // Injection IS the usage event for the hygiene decay clock: touch only
+        // the rows that actually rendered into the block.
+        if (injectedIds.length > 0) {
+          deps.touchUserMemoriesLastUsed?.(bot.id, injectedIds);
+        }
+        return xml.trim();
+      };
+      // Cerebellum (小脑) semantic re-rank of the pool: one fast decision-model
+      // call scores each candidate against the trigger text, and scored ids
+      // replace their lexical rank key downstream. Any failure (unwired,
+      // null map, throw) keeps the lexical ranking — the fallback is silent by
+      // design so a slow or absent cerebellum never stalls a group turn.
+      const ranker = deps.cerebellumMemoryRanker;
+      const triggerText = (currentUserText ?? '').trim();
+      const pooled = ranker && triggerText
+        ? entries
+            .map((entry) => ({ id: typeof entry.id === 'string' ? entry.id : '', text: entry.text }))
+            .filter((entry) => entry.id)
+        : [];
+      if (pooled.length < CEREBELLUM_MEMORY_MIN_POOL) {
+        return renderBlock(null);
       }
-      return xml.trim();
+      return ranker!({ currentUserText: triggerText, memories: pooled }).then(
+        (scores) => renderBlock(scores ?? null),
+        () => renderBlock(null),
+      );
     } catch {
       return '';
     }
@@ -4291,8 +4346,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // Scoped owner memories ride BOTH paths (callers prepend this to the turn's
     // user message): the plain path has no other memory source, and the skill
     // path's runner only injects conversation-scope + external_safe operational
-    // preferences for this channel — owner-scope facts exist only here.
-    const memoryContext = buildScopedMemoryBlockFor(bot, options?.currentUserText);
+    // preferences for this channel — owner-scope facts exist only here. The
+    // builder is sync whenever the cerebellum ranker is idle; await only the
+    // ranked path so unwired turns keep their exact microtask timing.
+    const memoryContextOrPromise = buildScopedMemoryBlockFor(bot, options?.currentUserText);
+    const memoryContext = typeof memoryContextOrPromise === 'string'
+      ? memoryContextOrPromise
+      : await memoryContextOrPromise;
     // Entropy P1 (narrow specific heat): a worker's collaboration partner is
     // the chair — dispatch, verification and arbitration all flow through it —
     // so peer impressions are loaded history the worker never acts on. Workers
