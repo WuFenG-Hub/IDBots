@@ -194,3 +194,67 @@ test('generated runtime config: gateway GLM materializes without the zai thinkin
   assert.equal(model.reasoningEfforts?.max, 'max')
   assert.equal(model.reasoningEfforts?.off, null, 'off stays the send-nothing shape')
 })
+
+// Dual-wire coexistence regression (2026-10-14 incident): glm-5.3-flash
+// (corrected to chat completions, completions-only compat) and deepseek
+// (responses default) share ONE configured provider. The runtime's provider
+// table unions models by key with a single apiFormat per entry — under the
+// bare 'opencode' key the union mixed GLM's compat into the responses entry
+// and the whole runtime failed to boot ("model glm-5.3-flash sets compat
+// supportsStore, but its api is openai-responses"), killing deepseek turns
+// too. The wire-suffixed route key ('opencode.oc') keeps each wire in its own
+// provider entry; this test regenerates the exact config the hub would build
+// for both sessions and asserts the entries stay separate and consistent.
+test('dual-wire opencode routes materialize as separate single-wire provider entries', async (t) => {
+  const { existsSync } = await import('node:fs')
+  const worktreeRoot = path.resolve(here, '..')
+  if (!existsSync(path.join(worktreeRoot, 'dsh-runtime', 'node_modules', '@deepseek-ai', 'dsh-llm-pi-ai'))) {
+    t.skip('dsh-runtime dependencies not installed')
+    return
+  }
+  const { pathToFileURL } = await import('node:url')
+  const { generateRuntimeConfig } = await import(pathToFileURL(
+    path.join(worktreeRoot, 'dsh-runtime', 'lib', 'generate-runtime-config.mjs')).href)
+  const reasoningPath = path.resolve(here, '..', 'dist-electron', 'main', 'libs', 'dshModelReasoning.js')
+  const { dshModelReasoningDeclaration } = require(reasoningPath)
+
+  // What providerRouteOf produces for each session's composed route.
+  const glmDeclaration = dshModelReasoningDeclaration('glm-5.3-flash', 'openai', GATEWAY)
+  const config = generateRuntimeConfig({
+    sessionRoot: '/tmp/dsh-opencode-dual-wire-test',
+    providers: [
+      { // deepseek session: configured format, bare key
+        key: 'opencode',
+        apiFormat: 'responses',
+        baseUrl: GATEWAY,
+        apiKeyEnv: 'IDBOTS_DSH_KEY_OPENCODE',
+        models: [{ id: 'deepseek-v4.1-flash', contextWindow: 1_000_000 }],
+      },
+      { // glm session: wire-corrected, suffixed key
+        key: 'opencode.oc',
+        apiFormat: 'openai',
+        baseUrl: GATEWAY,
+        apiKeyEnv: 'IDBOTS_DSH_KEY_OPENCODE_OC',
+        models: [{
+          id: 'glm-5.3-flash',
+          contextWindow: 1_048_576,
+          ...(glmDeclaration ? { reasoningEfforts: glmDeclaration.reasoningEfforts, compat: glmDeclaration.compat } : {}),
+        }],
+      },
+    ],
+  })
+  const providers = config.find((e) => e.id === 'llm-pi-ai').config.providers
+  // sanitizeRouteKey folds the dot: 'opencode.oc' -> 'opencode-oc'.
+  assert.ok(providers['opencode'], 'bare-key responses entry present')
+  assert.ok(providers['opencode-oc'], 'suffixed chat-completions entry present')
+  assert.equal(providers['opencode'].api, 'openai-responses')
+  assert.equal(providers['opencode'].models.map((m) => m.id).join(','), 'deepseek-v4.1-flash')
+  const glmEntry = providers['opencode-oc'].models.find((m) => m.id === 'glm-5.3-flash')
+  assert.ok(glmEntry, 'glm model present on the completions entry')
+  assert.equal(providers['opencode-oc'].api, 'openai-completions')
+  assert.equal(glmEntry.compat?.thinkingFormat, undefined)
+  assert.equal(glmEntry.compat?.supportsReasoningEffort, true)
+  // Each entry is internally single-wire: the completions-only compat never
+  // rides the responses entry (the exact boot failure).
+  assert.equal(providers['opencode'].models.some((m) => 'compat' in m && m.compat?.supportsStore !== undefined), false)
+})

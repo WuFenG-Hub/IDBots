@@ -100,6 +100,11 @@ test('opencode glm-5.3-flash rides chat completions with the effort still attach
   // The incident: the provider-level 'responses' default must not reach the
   // gateway for GLM.
   assert.equal(turnRoute.apiFormat, 'openai')
+  // Wire-corrected routes ride a suffixed key: the runtime unions models by
+  // provider key with ONE apiFormat per entry, so GLM's chat-completions
+  // entry must never share a bucket with deepseek's responses entry (the
+  // 2026-10-14 runtime-boot failure).
+  assert.equal(turnRoute.key, 'opencode.oc')
   // Effort rides the corrected route: the GLM chat-completions declaration
   // (zai thinking dialect) keys off the corrected apiFormat.
   assert.equal(turnRoute.reasoningEffort, 'max')
@@ -111,14 +116,32 @@ test('opencode deepseek keeps the responses default on the same provider', () =>
   const route = runner.resolveSessionDshRoute('s2')
   const turnRoute = runner.dshTurnProviderFromRoute(route, { reasoningEffort: 'high' })
   // Verified-working route (the reporter's control case): the provider-level
-  // 'responses' default must survive the correction untouched.
+  // 'responses' default must survive the correction untouched — including the
+  // route key, so deepseek keeps riding the plain 'opencode' runtime slot.
   assert.equal(turnRoute.apiFormat, 'responses')
+  assert.equal(turnRoute.key, 'opencode')
 })
 
 test('opencode responses-only model is corrected up to the Responses wire', () => {
   const { claudeSettings } = loadModules()
-  const runner = runnerForSession(claudeSettings, { id: 's3', model: 'gpt-5.6-luna', modelProvider: 'opencode' })
+  // Provider CONFIGURED as openai (chat completions) with a responses-only
+  // model: corrects up to responses and rides the suffixed '.rs' key.
+  installApiConfig(claudeSettings, { providers: { opencode: {
+    enabled: true,
+    apiKey: 'sk-oc',
+    baseUrl: 'https://opencode.ai/zen/go/v1',
+    apiFormat: 'openai',
+    models: [
+      { id: 'z-ai/glm-5.3-flash', name: 'GLM-5.3 Flash' },
+      { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash' },
+      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
+    ],
+  } } })
+  const { runner: runnerModule } = loadModules()
+  const { CoworkRunner } = runnerModule
+  const runner = new CoworkRunner({ getSession: () => ({ id: 's3', model: 'gpt-5.6-luna', modelProvider: 'opencode' }) }, { getMetabotById: () => null })
   const route = runner.resolveSessionDshRoute('s3')
   const turnRoute = runner.dshTurnProviderFromRoute(route, {})
   assert.equal(turnRoute.apiFormat, 'responses')
+  assert.equal(turnRoute.key, 'opencode.rs')
 })
