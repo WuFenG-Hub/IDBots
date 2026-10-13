@@ -102,6 +102,7 @@ import { ensureSandboxReady, getSandboxRuntimeInfoIfReady, type SandboxRuntimeIn
 import { isPathWithin } from './runtimePaths';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
 import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
+import { buildSkillShortlistBlock } from '../cerebellum/skillShortlist';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import {
   applyVolatileDedup,
@@ -2080,6 +2081,20 @@ export interface CoworkRunnerOptions {
     memories: Array<{ id: string; text: string }>;
   }) => Promise<ReadonlyMap<string, number> | null>;
   /**
+   * Optional cerebellum (小脑) skill shortlist for the volatile skills-catalog
+   * block. When set, the runner asks it to rank the session's visible skill
+   * catalog against the current user text; the returned top entries ride the
+   * per-turn tail as a separate <skill_shortlist> block (the full catalog
+   * block stays byte-stable for its content-hash dedup). null (unconfigured,
+   * small pool, timeout, error) means "no shortlist" — the callback must
+   * never throw. main.ts resolves the cerebellum config and the skill list
+   * lazily inside the callback so Settings/skill changes apply next turn.
+   */
+  cerebellumSkillRanker?: (input: {
+    currentUserText: string;
+    metabotId: number | null;
+  }) => Promise<Array<{ id: string; name: string; description: string; probability: number }> | null>;
+  /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
    * turn ended without terminal events) and settled so the query can close.
@@ -2238,6 +2253,7 @@ export class CoworkRunner extends EventEmitter {
   private screenshotHost?: ScreenshotHost;
   private locationHost?: LocationHost;
   private cerebellumMemoryRanker?: CoworkRunnerOptions['cerebellumMemoryRanker'];
+  private cerebellumSkillRanker?: CoworkRunnerOptions['cerebellumSkillRanker'];
   /**
    * Per-session precise-location consent memory: the owner is asked at most
    * once per session (first precise request) and the approval sticks for the
@@ -2397,6 +2413,7 @@ export class CoworkRunner extends EventEmitter {
     this.screenshotHost = options?.screenshotHost;
     this.locationHost = options?.locationHost;
     this.cerebellumMemoryRanker = options?.cerebellumMemoryRanker;
+    this.cerebellumSkillRanker = options?.cerebellumSkillRanker;
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
@@ -6000,6 +6017,20 @@ export class CoworkRunner extends EventEmitter {
     disableRemoteServicesPrompt: boolean
   ): Promise<string> {
     const sections: VolatileSection[] = [];
+    // Cerebellum skill shortlist (roadmap #2): the rank call starts BEFORE
+    // the memory sections so it overlaps the memory re-ranker's own
+    // cerebellum round-trip (worst case stays one 1.5s budget, not two).
+    // Only 'volatile' sessions have a catalog in the tail (inline/legacy
+    // carry theirs in the system prompt), so those skip the call entirely.
+    // It is awaited at the skills-catalog section below; null/throw degrades
+    // to "no shortlist", byte-identical to the ungated behavior.
+    const skillShortlistPromise = this.cerebellumSkillRanker && prompt.trim()
+      && this.activeSessions.get(sessionId)?.skillsCatalogMode === 'volatile'
+      ? this.cerebellumSkillRanker({
+          currentUserText: prompt,
+          metabotId: this.store.getMetabotIdForSession(sessionId),
+        }).catch(() => null)
+      : null;
     if (profile.includeMemoryPromptBlocks) {
       sections.push({
         key: 'memory',
@@ -6064,6 +6095,21 @@ export class CoworkRunner extends EventEmitter {
         key: 'skills-catalog',
         text: this.coworkSkillPromptsProvider?.(this.store.getMetabotIdForSession(sessionId))?.catalog ?? '',
       });
+      // Cerebellum shortlist rides next to the untouched catalog: top-3
+      // re-read + a one-line suggestion. The catalog block itself stays
+      // byte-stable so its content-hash dedup keeps working.
+      const shortlistEntries = skillShortlistPromise ? await skillShortlistPromise : null;
+      if (shortlistEntries && shortlistEntries.length > 0) {
+        coworkLog('INFO', 'skills:cerebellumShortlist', 'turn skill shortlist', {
+          sessionId,
+          used: true,
+          skillIds: shortlistEntries.slice(0, 3).map((entry) => entry.id),
+        });
+        sections.push({
+          key: 'skills-shortlist',
+          text: buildSkillShortlistBlock(shortlistEntries),
+        });
+      }
     }
 
     const activeForDedup = this.activeSessions.get(sessionId);
