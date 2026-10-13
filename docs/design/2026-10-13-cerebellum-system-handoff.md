@@ -112,6 +112,7 @@ Ranked by expected value. Each row names the concrete seam.
 | 8 | **Dream triage** | `dreamService.ts` fragment pre-filter; `memoryHygieneService` deep-consolidation proposals (JEV proposes, LLM confirms) | Nightly/batch — latency-insensitive, cost-sensitive |
 | 9 | **Task-done verification** | scheduled-task output / group-task deliverable checks | "Did this actually happen?" Noul on evidence |
 | 10 | **Surf path selection** | `surfService.ts` candidate pins/links scoring | Nightly, batch |
+| 11 | **Reasoning-effort auto selection** — Phase 0 eval shipped (`feat/cerebellum-effort-auto`) | `scripts/cerebellum-effort-eval.mjs` → `src/main/cerebellum/effortSelector.ts` (Phase 1) | One Choice question {off, low, high, max} over `state.user_message`; assistant-mode policy escalates only when P(high)+P(max) ≥ 0.5, else off (fallback chain on any failure). Live eval (jev-1.13.0, 30 labeled Chinese cases): exact-match 28/30 — the two misses are off→low (caption, one-line translation; harmless under the two-level policy), escalation sweep 30/30 at EVERY threshold 0.3–0.8 (casual ≤0.02 vs complex ≥0.81 — a clean cliff), ~600 input tokens ≈ $0.000025/turn, 200–665 ms latency |
 
 Cross-cutting: validate every new question on real Chinese data first (Playground → `cerebellum-memory-eval.mjs` pattern); prefer top-k ranking over absolute thresholds (observed inflation of "generally useful" memories); tune thresholds per action risk; rate limits (80 rps, dynamic) are a non-issue for desktop use but batch pipelines need backoff.
 
