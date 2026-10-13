@@ -3,6 +3,7 @@ import { i18nService } from '../../services/i18n';
 import type { CoworkMessage } from '../../types/cowork';
 import { getDefaultMetabotAvatarUrl } from '../../utils/rendererAssetPaths';
 import { isRenderableAvatarSource } from '../../utils/avatarSource';
+import { splitThinkTaggedContent } from './ThinkingBlock';
 
 const DEFAULT_BOT_AVATAR = getDefaultMetabotAvatarUrl();
 
@@ -11,6 +12,9 @@ const IDLE_PHRASE_KEYS = [
   'assistantStatusIdleLookingUp',
   'assistantStatusIdleOrganizing',
   'assistantStatusIdleAlmostThere',
+  'assistantStatusIdleMoment',
+  'assistantStatusIdleLeads',
+  'assistantStatusIdleSorting',
 ] as const;
 
 const IDLE_PHRASE_INTERVAL_MS = 3000;
@@ -63,6 +67,21 @@ export const AssistantActivityIndicator: React.FC<{
       break;
     }
 
+    // Visible reply text actively streaming (narration or the final answer):
+    // the newest streaming non-thinking assistant message is the live one. A
+    // stream carrying only think-tag content so far renders nothing in
+    // assistant mode, so that still reads as "thinking".
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.type !== 'assistant' || !msg.metadata?.isStreaming || msg.metadata?.isThinking) {
+        continue;
+      }
+      const content = typeof msg.content === 'string' ? msg.content : '';
+      const split = splitThinkTaggedContent(content);
+      const visibleText = split.thinking ? split.text : content;
+      return i18nService.t(visibleText.trim() ? 'assistantStatusWriting' : 'assistantStatusThinking');
+    }
+
     const toolResultIds = new Set<string>();
     for (const msg of messages) {
       const id = msg.metadata?.toolUseId;
@@ -96,7 +115,10 @@ export const AssistantActivityIndicator: React.FC<{
           onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_BOT_AVATAR; }}
         />
       </div>
-      <span className="min-w-0 truncate text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
+      {/* The status line gets a calm light-sweep shimmer (CSS class in
+          index.css, gated on prefers-reduced-motion: no-preference); the
+          glyphs themselves never move. */}
+      <span className="assistant-status-shimmer min-w-0 truncate text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
         {getStatusText()}
       </span>
     </div>
