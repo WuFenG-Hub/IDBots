@@ -42,7 +42,7 @@ import { rewriteWin32McpStdioServer } from './win32StdioCommand';
 import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
-import { CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isAuthDshTurnError, isBodyLimitDshTurnError, isConfigModelMissingDshTurnError, isOverflowDshTurnError, isQuotaDshTurnError, isTransientDshTurnError, OVERFLOW_TURN_RESUME_PROMPT, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
+import { CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isAuthDshTurnError, isBodyLimitDshTurnError, isConfigModelMissingDshTurnError, isMalformedToolCallDshTurnError, isOverflowDshTurnError, isQuotaDshTurnError, isTransientDshTurnError, MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT, OVERFLOW_TURN_RESUME_PROMPT, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
 import {
   filterSdkInternalDiagnostics,
   isSdkInternalDiagnostic,
@@ -9177,6 +9177,30 @@ export class CoworkRunner extends EventEmitter {
           undefined,
           { reasoningEffort: CONTINUE_TURN_REASONING_EFFORT },
         );
+      }
+
+      // Malformed streamed tool-call (kernel MALFORMED_RESPONSE, "DeepSeek
+      // Messages stream: tool input is invalid JSON" — the 2026-10-13 session
+      // 38c18094 death on the native DeepSeek route): a stochastic model-side
+      // emission glitch, not an environmental or configuration failure. The
+      // kernel discarded the malformed step before any assistant message or
+      // tool side effect entered the session history, so the preserved
+      // history is consistent and the model can simply re-issue the step.
+      // Auto-continue ONCE (like the empty-terminal/truncation continues): a
+      // second failure with the same fingerprint falls through to the regular
+      // error settlement below instead of looping.
+      if (
+        outcome.kind === 'error'
+        && !activeSession.abortController.signal.aborted
+        && isMalformedToolCallDshTurnError(outcome)
+      ) {
+        coworkLog(
+          'WARN',
+          'runDshSessionLocal',
+          'Turn died on malformed streamed tool-call JSON — auto-continuing once',
+          { sessionId, code: outcome.error?.code, message: outcome.error?.message }
+        );
+        outcome = await runGuardedTurn(MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT);
       }
 
       // Transient environmental failure (TRANSPORT/TIMEOUT/RATE_LIMIT/SERVER/
