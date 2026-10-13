@@ -1740,14 +1740,16 @@ const AssistantMessageItem: React.FC<{
       {replyContent ? (
         // Assistant mode wraps the reply (narration and final answer alike) in
         // a chat bubble shaped like the user bubble so the transcript reads as
-        // a conversation. The background is a light accent wash plus a hairline
-        // accent border — clearly visible on both themes (accent/10 on the
-        // near-white chat bg, accent/15 on the dark navy bg) yet distinct from
-        // the user bubble's neutral surface; w-fit + max-w-full hugs short
-        // messages while long reports still fill the reading column.
-        // Professional mode keeps bare full-width text.
+        // a conversation. Differentiation is purely background-color contrast
+        // (no border — exactly how the user bubble works): accent/10 ≈ #DDF0F5
+        // on the near-white chat bg (#F5F7F9) in light mode, accent/20 ≈
+        // #174456 on the dark navy chat bg (#142030) in dark mode — both
+        // clearly distinct from the user bubble's neutral surface (#FFFFFF /
+        // #1F2937). w-fit + max-w-full hugs short messages while long reports
+        // still fill the reading column. Professional mode keeps bare
+        // full-width text.
         <div className={isAssistantMode
-          ? 'w-fit max-w-full rounded-[22px] px-[16px] py-[10px] border dark:border-claude-accent/25 border-claude-accent/20 dark:bg-claude-accent/15 bg-claude-accent/10 dark:text-claude-darkText text-claude-text shadow-subtle'
+          ? 'w-fit max-w-full rounded-[22px] px-[16px] py-[10px] dark:bg-claude-accent/20 bg-claude-accent/10 dark:text-claude-darkText text-claude-text shadow-subtle'
           : 'dark:text-claude-darkText text-claude-text'
         }>
           <MarkdownContent
@@ -2428,13 +2430,14 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
     <div className="px-4 py-2">
       <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
         <div className="flex items-start gap-3">
-          {/* Assistant mode tightens the inter-item rhythm (space-y-1.5): a
-              turn's consecutive bot bubbles (narration + final reply) read as
-              one compact sequence. The inline activity indicator keeps its own
-              py-2, so it still gets comfortable breathing room. Professional
-              mode keeps space-y-3 (thinking blocks, tool groups, worked
-              header). */}
-          <div className={`flex-1 min-w-0 px-4 py-3 ${isAssistantMode ? 'space-y-1.5' : 'space-y-3'}`}>
+          {/* Assistant mode tightens the inter-item rhythm (space-y-1 = 4px,
+              the effective gap — AssistantMessageItem's root carries no extra
+              padding): a turn's consecutive bot bubbles (narration + final
+              reply) read as one compact sequence. The inline activity
+              indicator keeps its own py-2, so it still gets comfortable
+              breathing room. Professional mode keeps space-y-3 (thinking
+              blocks, tool groups, worked header). */}
+          <div className={`flex-1 min-w-0 px-4 py-3 ${isAssistantMode ? 'space-y-1' : 'space-y-3'}`}>
             {showWorkedHeader ? (
               <>
                 <button
