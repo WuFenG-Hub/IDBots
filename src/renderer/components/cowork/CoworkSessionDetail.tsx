@@ -1767,6 +1767,7 @@ const AssistantMessageItem: React.FC<{
                 className="prose dark:prose-invert max-w-none"
                 resolveLocalFilePath={resolveLocalFilePath}
                 onOpenLocalFile={onOpenLocalFile}
+                chatExperienceMode={isAssistantMode ? 'assistant' : 'professional'}
               />
             </div>
             {showCopyButton && isFinalReply && !isNarration && (
@@ -1816,6 +1817,7 @@ const AssistantMessageItem: React.FC<{
               className="prose dark:prose-invert max-w-none"
               resolveLocalFilePath={resolveLocalFilePath}
               onOpenLocalFile={onOpenLocalFile}
+              chatExperienceMode={isAssistantMode ? 'assistant' : 'professional'}
             />
           </div>
         )
