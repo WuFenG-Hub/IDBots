@@ -1,0 +1,256 @@
+--- a/dsh-runtime/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js
++++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js
+@@ -1905,14 +1905,209 @@
+ 		case "tool_use": return { kind: "tool-calls" };
+ 		case "max_tokens": return { kind: "max-tokens" };
+ 		default: return malformed(`unsupported stop reason ${String(raw)}`);
++	}
++}
++/** Best-effort structural repair for a truncated JSON text.
++* Conservative on purpose: scanning keeps every fully-read value, drops the
++* single member that owns the truncation, and closes only the containers still
++* open at that point. A scalar cut mid-token (string, number, literal) is
++* never completed — its streamed prefix may be the wrong value, and running a
++* tool with semantically wrong arguments is worse than failing. Never invents
++* content; returns undefined unless the repaired prefix parses cleanly.
++* @param raw - tool input text that already failed JSON.parse.
++* @returns repaired JSON text, or undefined when no safe object prefix exists.
++*/
++function repairTruncatedJson(raw) {
++	let at = 0;
++	const end = raw.length;
++	const stack = [];
++	let lastSafeEnd = -1;
++	let lastSafeStack = null;
++	const skipWs = () => {
++		while (at < end) {
++			const ch = raw[at];
++			if (ch !== " " && ch !== "\t" && ch !== "\n" && ch !== "\r") break;
++			at++;
++		}
++	};
++	const markSafe = () => {
++		lastSafeEnd = at;
++		lastSafeStack = stack.slice();
++	};
++	// Returns "closed" or "truncated"; on "closed" `at` sits past the quote.
++	const scanString = () => {
++		at++;
++		while (at < end) {
++			const ch = raw[at];
++			if (ch === "\\") {
++				at += 2;
++				continue;
++			}
++			at++;
++			if (ch === "\"") return "closed";
++		}
++		return "truncated";
++	};
++	// A number cut at end-of-input may continue, so it never counts as safe.
++	const scanNumber = () => {
++		while (at < end && /[-+.0-9eE]/.test(raw[at])) at++;
++		if (at === end) return "truncated";
++		const ch = raw[at];
++		return ch === "," || ch === "}" || ch === "]" || ch === " " || ch === "\t" || ch === "\n" || ch === "\r" ? "closed" : "invalid";
++	};
++	const scanLiteral = () => {
++		for (const word of ["true", "false", "null"]) {
++			let matched = 0;
++			while (matched < word.length && at + matched < end && raw[at + matched] === word[matched]) matched++;
++			if (matched < word.length) {
++				if (at + matched === end) return "truncated";
++				continue;
++			}
++			at += word.length;
++			// A literal that consumed its whole word is complete even at
++			// end-of-input — unlike a number it cannot extend further.
++			if (at === end) return "closed";
++			const ch = raw[at];
++			return ch === "," || ch === "}" || ch === "]" || ch === " " || ch === "\t" || ch === "\n" || ch === "\r" ? "closed" : "invalid";
++		}
++		return "invalid";
++	};
++	// Returns "ok" | "truncated" | "invalid"; on "ok" `at` sits past the value.
++	// Depth is capped so adversarial nesting degrades to "invalid" instead of
++	// overflowing the stack; legitimate tool inputs never nest this deep.
++	const scanValue = (depth) => {
++		if (depth > 100) return "invalid";
++		skipWs();
++		if (at >= end) return "truncated";
++		const ch = raw[at];
++		if (ch === "\"") return scanString() === "closed" ? "ok" : "truncated";
++		if (ch === "{") return scanObject(depth);
++		if (ch === "[") return scanArray(depth);
++		if (ch === "-" || ch >= "0" && ch <= "9") {
++			const status = scanNumber();
++			return status === "closed" ? "ok" : status;
++		}
++		if (ch === "t" || ch === "f" || ch === "n") {
++			const status = scanLiteral();
++			return status === "closed" ? "ok" : status;
++		}
++		return "invalid";
++	};
++	const scanObject = (depth) => {
++		stack.push("{");
++		at++;
++		skipWs();
++		if (at >= end) return "truncated";
++		if (raw[at] === "}") {
++			at++;
++			stack.pop();
++			return "ok";
++		}
++		for (;;) {
++			skipWs();
++			if (at >= end) return "truncated";
++			if (raw[at] !== "\"") return "invalid";
++			if (scanString() !== "closed") return "truncated";
++			skipWs();
++			if (at >= end) return "truncated";
++			if (raw[at] !== ":") return "invalid";
++			at++;
++			const status = scanValue(depth + 1);
++			if (status !== "ok") return status;
++			markSafe();
++			skipWs();
++			if (at >= end) return "truncated";
++			if (raw[at] === ",") {
++				at++;
++				continue;
++			}
++			if (raw[at] === "}") {
++				at++;
++				stack.pop();
++				return "ok";
++			}
++			return "invalid";
++		}
++	};
++	const scanArray = (depth) => {
++		stack.push("[");
++		at++;
++		skipWs();
++		if (at >= end) return "truncated";
++		if (raw[at] === "]") {
++			at++;
++			stack.pop();
++			return "ok";
++		}
++		for (;;) {
++			const status = scanValue(depth + 1);
++			if (status !== "ok") return status;
++			markSafe();
++			skipWs();
++			if (at >= end) return "truncated";
++			if (raw[at] === ",") {
++				at++;
++				continue;
++			}
++			if (raw[at] === "]") {
++				at++;
++				stack.pop();
++				return "ok";
++			}
++			return "invalid";
++		}
++	};
++	const status = scanValue(0);
++	// "ok" means the scanner read to a complete value — either the text is
++	// fully valid (JSON.parse said otherwise, so trust it, not this scanner;
++	// the scanner is deliberately more permissive than JSON) or there is
++	// trailing garbage; both decline. Only a genuine truncation repairs, and
++	// only when at least one member completed before the cut.
++	if (status !== "truncated" || lastSafeEnd < 0) return void 0;
++	const closers = lastSafeStack.map((opener) => opener === "{" ? "}" : "]").reverse().join("");
++	const repaired = raw.slice(0, lastSafeEnd).replace(/[ \t\n\r]+$/u, "") + closers;
++	try {
++		JSON.parse(repaired);
++	} catch (_unrepairedPrefix) {
++		return void 0;
++	}
++	return repaired;
++}
++/** Settle one tool-call block's arguments JSON when the block closes.
++* Provider streams occasionally truncate tool input JSON mid-token; the
++* kernel deliberately does not step-retry MALFORMED_RESPONSE, so an
++* unrecovered parse failure aborts the whole turn. Attempt a conservative
++* structural repair first; when even that cannot produce a valid JSON object,
++* keep the historical MALFORMED_RESPONSE so host-level fallbacks still apply.
++* @param raw - accumulated input_json_delta text.
++* @param model - requested model id for diagnostics.
++* @param content - settled tool-call block carrying id and name.
++* @param onRepaired - optional repair reporter for telemetry and logs.
++* @returns arguments JSON text safe to hand to the harness.
++*/
++function settleToolArguments(raw, model, content, onRepaired) {
++	try {
++		JSON.parse(raw);
++		return raw;
++	} catch (_invalidProviderToolJson) {
++		const repaired = repairTruncatedJson(raw);
++		if (repaired === void 0) return malformed("tool input is invalid JSON");
++		const parsed = object(JSON.parse(repaired));
++		onRepaired?.({
++			model,
++			toolCallId: content.id,
++			toolName: content.name
++		});
++		return JSON.stringify(parsed);
+ 	}
+ }
+ /** Translate decoded SSE data into the Harness stream protocol.
+ * @param events - framed, decoded provider events in arrival order.
+ * @param model - requested model id stored in durable replay state.
++* @param onToolInputRepaired - optional reporter for conservative tool-input repairs.
+ * @returns blocks, one final usage value, and exactly one terminal finish.
+ */
+-async function* translate(events, model) {
++async function* translate(events, model, onToolInputRepaired) {
+ 	const blocks = /* @__PURE__ */ new Map();
+ 	const usage = {
+ 		inputTokens: 0,
+@@ -1966,7 +2161,7 @@
+ 				if (chunk !== void 0) yield chunk;
+ 			} else {
+ 				block.closed = true;
+-				if (block.content.type === "tool-call" && block.json.length > 0) block.content.arguments = block.json;
++				if (block.content.type === "tool-call" && block.json.length > 0) block.content.arguments = settleToolArguments(block.json, model, block.content, onToolInputRepaired);
+ 				yield {
+ 					type: "block-end",
+ 					index: block.index,
+@@ -2218,7 +2413,7 @@
+ 				}
+ 				await extensions.accept();
+ 				if (response.body === null) throw new LlmError("DeepSeek Messages returned no response body", "EMPTY_RESPONSE");
+-				yield* translate(parseSse(response.body, activity), options.model);
++				yield* translate(parseSse(response.body, activity), options.model, this.dependencies.onToolInputRepaired);
+ 				return;
+ 			}
+ 		} catch (error) {
+@@ -2257,6 +2452,9 @@
+ 		onExtensionsOmitted: ({ provider, model, fields, error }) => {
+ 			ctx.logger.warn(`llm-deepseek: sending route "${provider}/${model}" without request extension fields ${fields.join(", ")} because they failed to serialize: %o`, error);
+ 		},
++		onToolInputRepaired: ({ model, toolCallId, toolName }) => {
++			ctx.logger.warn(`llm-deepseek: tool input JSON for "${toolName}" (${toolCallId}) arrived truncated on route "${provider}/${model}"; applied structural close-only repair`);
++		},
+ 		resolveAttachments: () => ctx.get("attachments"),
+ 		resolveImageAccess: (attachments, ref) => resolveImageAttachmentAccess(attachments, (hostPath) => ctx.get("fs")?.processPathFromHostPath(hostPath), ref),
+ 		prepareExtensions: (request) => ctx.get("deepseekLlmApiExtensions")?.prepare(request) ?? Promise.resolve({
+--- a/dsh-runtime/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/types/types.d.ts
++++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/types/types.d.ts
+@@ -100,6 +100,12 @@
+         fields: readonly string[];
+         error: unknown;
+     }) => void;
++    /** Report a conservative structural repair applied to tool input JSON that arrived truncated. */
++    onToolInputRepaired?: (detail: {
++        model: string;
++        toolCallId: string;
++        toolName: string;
++    }) => void;
+     /** Provider label for selectors; omission uses the protocol family name. */
+     providerName?: string;
+     /** Provider-owned catalog availability; omission exposes no discovery entries. */

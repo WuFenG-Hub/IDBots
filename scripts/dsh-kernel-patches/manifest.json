@@ -78,6 +78,17 @@
           "count": 1
         }
       ]
+    },
+    {
+      "patch": "@deepseek-ai+dsh-llm-deepseek+0.2.0-rc.2.patch",
+      "why": "truncated tool-call input JSON: conservative structural repair at tool-call settle (drop the incomplete tail member, close open containers, never complete a cut scalar) instead of a turn-fatal MALFORMED_RESPONSE; unrepairable input still throws so the host one-shot continue fallback applies, and every repair is reported through onToolInputRepaired",
+      "targets": [
+        {
+          "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js",
+          "match": "settleToolArguments(block.json",
+          "count": 1
+        }
+      ]
     }
   ]
 }

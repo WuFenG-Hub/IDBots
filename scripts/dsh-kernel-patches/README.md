@@ -143,6 +143,32 @@ listener, fail-closed on any non-grant. The tool-name prefix is extracted
 to a `TOOL_PREFIX` constant so the gate's bare-name lookup cannot drift
 from the registration.
 
+### `@deepseek-ai+dsh-llm-deepseek+0.2.0-rc.2.patch`
+
+Truncated tool-call input JSON no longer fails the whole agent turn. The
+Messages adapter settles each tool-call block's accumulated `input_json_delta`
+with a bare `JSON.parse`; when a gateway truncates the JSON mid-token the
+parse throws `MALFORMED_RESPONSE`, which the kernel deliberately excludes
+from step-level retry (`DEFAULT_RETRYABLE_CODES`) — every affected turn died
+with "DeepSeek Messages stream: tool input is invalid JSON" and only a
+host-side one-shot continue (coworkRunner `isMalformedToolCallDshTurnError`)
+could rescue it.
+
+The patch settles tool arguments at `content_block_stop` through
+`settleToolArguments`: on parse failure a conservative structural repair
+(`repairTruncatedJson`) first cuts the text back to the last fully-read
+value, drops the incomplete member that owns the truncation, and closes only
+the containers still open at that point. Scalars cut mid-token are never
+completed — a truncated string/number prefix may be the wrong value, and
+running a tool with semantically wrong arguments is worse than failing —
+and the repaired text must re-parse to a JSON object before it is used.
+Unrepairable input still throws `MALFORMED_RESPONSE`, preserving the host
+fallback semantics. Every successful repair is reported through the new
+optional `onToolInputRepaired` dependency (wired to `ctx.logger.warn` in
+`registerDeepSeekProvider`) so the repair rate stays observable, and the
+adapter's public types declare the new optional dependency. Regression
+test: `tests/dshDeepseekToolInputRepair.test.mjs`.
+
 ## Adding / rebasing a patch
 
 1. Edit the installed file under `dsh-runtime/node_modules/<pkg>/` directly.
