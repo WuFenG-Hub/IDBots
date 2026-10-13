@@ -1986,6 +1986,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     markdownViewerLoadFailed: '文档加载失败。',
     markdownViewerFileMissing: '文件不存在或已被移动。',
     markdownViewerTooLarge: '文档过大（超过 {limit}），请用外部应用打开。',
+    htmlReportHint: 'HTML 报告',
 
     // IM Bot
     imBot: 'IM 机器人',
@@ -4935,6 +4936,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     markdownViewerLoadFailed: 'Failed to load the document.',
     markdownViewerFileMissing: 'The file does not exist or has been moved.',
     markdownViewerTooLarge: 'The document is too large (over {limit}); open it externally.',
+    htmlReportHint: 'HTML report',
 
     // IM Bot
     imBot: 'IM Bot',

@@ -1,14 +1,14 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowTopRightOnSquareIcon, DocumentIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import MarkdownContent from '../MarkdownContent';
 import { i18nService } from '../../services/i18n';
 import { formatBytes } from '../update/format';
 
 interface MarkdownViewerPanelProps {
-  /** Absolute path of the markdown document to render. */
+  /** Absolute path of the document to render (markdown or HTML). */
   filePath: string;
   onClose: () => void;
-  /** Open another markdown document in this same panel (chained .md links). */
+  /** Open another previewable document in this same panel (chained links). */
   onOpenFile: (filePath: string) => void;
 }
 
@@ -30,6 +30,24 @@ const getDirName = (filePath: string): string => {
 // Mirrors the TLD exclusion in MarkdownContent's isLikelyLocalFilePath so a
 // bare `[x](example.com)` keeps rendering as a plain link, not a file path.
 const COMMON_TLDS = new Set(['com', 'net', 'org', 'io', 'cn', 'co', 'ai', 'app', 'dev', 'gov', 'edu']);
+
+// Extensions the panel renders as a live HTML preview instead of markdown.
+const HTML_FILE_RE = /\.html?$/i;
+
+/**
+ * srcdoc documents have no URL of their own, so a relative asset reference
+ * (img/css/js) inside a report would resolve nowhere. Point <base> at the
+ * file's directory on a best-effort basis — assistant reports are single-file
+ * by prompt design, so a still-broken relative path is acceptable.
+ */
+const injectHtmlBaseHref = (html: string, filePath: string): string => {
+  const dirName = getDirName(filePath).replace(/\\/g, '/');
+  const baseHref = `file://${/^[A-Za-z]:/.test(dirName) ? '/' : ''}${encodeURI(dirName)}/`;
+  const baseTag = `<base href="${baseHref}">`;
+  return /<head[^>]*>/i.test(html)
+    ? html.replace(/<head[^>]*>/i, (match) => `${match}${baseTag}`)
+    : `${baseTag}${html}`;
+};
 
 /**
  * Resolve a markdown link target against the directory of the document shown
@@ -78,20 +96,22 @@ const showToast = (message: string): void => {
 };
 
 /**
- * Right-hand sidebar that renders a local markdown document inside the app,
- * so users without a markdown-capable external editor can still read files
- * the Agent produced. Content is loaded through the main process
- * (`fs:readTextFile`, utf8, size-capped) and rendered with the shared
- * MarkdownContent component.
+ * Right-hand sidebar that renders a local document inside the app, so users
+ * without a markdown-capable external editor (or to avoid leaving the chat)
+ * can still read files the Agent produced. Markdown documents render with the
+ * shared MarkdownContent component; .html/.htm files (the assistant's final
+ * reports) render in a sandboxed iframe. Content is loaded through the main
+ * process (`fs:readTextFile`, utf8, size-capped) either way.
  */
 const MarkdownViewerPanel: React.FC<MarkdownViewerPanelProps> = ({ filePath, onClose, onOpenFile }) => {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
+  const isHtmlFile = HTML_FILE_RE.test(filePath);
   const resolveLocalFilePath = useCallback(
     (href: string) => resolveRelativeToDocument(filePath, href),
     [filePath]
   );
   const handleOpenLocalFile = useCallback((path: string): boolean => {
-    if (/\.(md|markdown)$/i.test(path)) {
+    if (/\.(md|markdown|html?)$/i.test(path)) {
       onOpenFile(path);
       return true;
     }
@@ -125,6 +145,13 @@ const MarkdownViewerPanel: React.FC<MarkdownViewerPanelProps> = ({ filePath, onC
       cancelled = true;
     };
   }, [filePath]);
+
+  // HTML reports render through srcdoc (Bot Browser precedent: the app CSP
+  // already permits inline scripts/styles, and React attribute-escapes the
+  // document). A <base> tag points relative assets at the file's directory.
+  const htmlSrcDoc = useMemo(() => (
+    state.status === 'loaded' && isHtmlFile ? injectHtmlBaseHref(state.content, filePath) : ''
+  ), [state, isHtmlFile, filePath]);
 
   const openExternally = () => {
     void (async () => {
@@ -198,6 +225,17 @@ const MarkdownViewerPanel: React.FC<MarkdownViewerPanelProps> = ({ filePath, onC
             {i18nService.t('markdownViewerOpenExternal')}
           </button>
         </div>
+      ) : isHtmlFile ? (
+        // Sandboxed preview: report scripts may run (charts, collapsibles)
+        // but the document stays an opaque origin — no same-origin access, no
+        // popups, no top navigation. The open-externally button above is the
+        // escape hatch for anything the sandbox blocks.
+        <iframe
+          title={getFileName(filePath)}
+          sandbox="allow-scripts"
+          srcDoc={htmlSrcDoc}
+          className="min-h-0 flex-1 border-0 bg-white"
+        />
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-2">
           <MarkdownContent

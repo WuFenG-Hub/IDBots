@@ -44,8 +44,9 @@ import prismC from 'react-syntax-highlighter/dist/esm/languages/prism/c';
 import prismCpp from 'react-syntax-highlighter/dist/esm/languages/prism/cpp';
 // @ts-ignore
 import prismDiff from 'react-syntax-highlighter/dist/esm/languages/prism/diff';
-import { ClipboardDocumentIcon, CheckIcon } from '@heroicons/react/24/outline';
+import { ArrowTopRightOnSquareIcon, CheckIcon, ClipboardDocumentIcon, DocumentChartBarIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../services/i18n';
+import type { ChatExperienceMode } from '../config';
 import LocalFileLink from './ui/LocalFileLink';
 
 /**
@@ -135,6 +136,9 @@ const SYNTAX_HIGHLIGHTER_STYLE = {
   lineHeight: '19px',
 };
 const SAFE_URL_PROTOCOLS = new Set(['http', 'https', 'mailto', 'tel', 'file', 'metaid', 'metaapp', 'map', 'metafile', 'pin', 'preview-metaapp']);
+
+/** Local .html/.htm links render as report cards in assistant chat mode. */
+const HTML_FILE_RE = /\.html?$/i;
 
 const BOT_BROWSER_URI_PROTOCOL_RE = /^(metaid|metaapp|map|metafile|pin|preview-metaapp):/i;
 
@@ -585,7 +589,8 @@ const findFallbackPathFromContext = (
 const createMarkdownComponents = (
   resolveLocalFilePath?: (href: string, text: string) => string | null,
   onOpenBotBrowserUri?: (uri: string) => void,
-  onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void
+  onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void,
+  chatExperienceMode: ChatExperienceMode = 'professional'
 ) => ({
   p: ({ node, className, children, ...props }: any) => (
     <p className="my-[16px] first:mt-0 last:mb-0 leading-[24px] dark:text-claude-darkText text-claude-text" {...props}>
@@ -747,6 +752,35 @@ const createMarkdownComponents = (
         }
       };
 
+      // Assistant mode: a link to a local HTML report is the turn's
+      // deliverable, not an ordinary file reference — render it as a
+      // full-width card so it is visually unmistakable next to plain inline
+      // file links. Clicking flows through the same onOpenLocalFile path
+      // (in-app sandboxed preview). Professional mode keeps the inline link.
+      if (chatExperienceMode === 'assistant' && HTML_FILE_RE.test(filePath)) {
+        return (
+          <a
+            href={toFileHref(filePath)}
+            onClick={handleClick}
+            title={filePath}
+            className="group my-1 flex w-full items-center gap-3 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3.5 py-2.5 shadow-subtle transition-colors hover:border-claude-accent/60 dark:hover:border-claude-accent/60 cursor-pointer no-underline"
+          >
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-claude-accent/10">
+              <DocumentChartBarIcon className="h-5 w-5 text-claude-accent" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-medium dark:text-claude-darkText text-claude-text">
+                {children}
+              </span>
+              <span className="mt-0.5 block text-[11px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('htmlReportHint')}
+              </span>
+            </span>
+            <ArrowTopRightOnSquareIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary transition-colors group-hover:text-claude-accent" />
+          </a>
+        );
+      }
+
       return (
         <LocalFileLink
           filePath={filePath}
@@ -813,6 +847,9 @@ interface MarkdownContentProps {
   resolveLocalFilePath?: (href: string, text: string) => string | null;
   /** Intercept local file link clicks; return true to suppress the default shell.openPath. */
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
+  /** Chat surface mode; 'assistant' renders local HTML report links as cards.
+   * Defaults to 'professional' (plain inline links). */
+  chatExperienceMode?: ChatExperienceMode;
 }
 
 const MarkdownContent = React.memo(({
@@ -822,10 +859,11 @@ const MarkdownContent = React.memo(({
   onOpenBotBrowserUri,
   resolveLocalFilePath,
   onOpenLocalFile,
+  chatExperienceMode = 'professional',
 }: MarkdownContentProps) => {
   const components = useMemo(
-    () => createMarkdownComponents(resolveLocalFilePath, onOpenBotBrowserUri, onOpenLocalFile),
-    [resolveLocalFilePath, onOpenBotBrowserUri, onOpenLocalFile]
+    () => createMarkdownComponents(resolveLocalFilePath, onOpenBotBrowserUri, onOpenLocalFile, chatExperienceMode),
+    [resolveLocalFilePath, onOpenBotBrowserUri, onOpenLocalFile, chatExperienceMode]
   );
   const normalizedContent = useMemo(
     () => encodeFileUrlsInMarkdown(linkifyAgentInternetUris(content)),

@@ -81,7 +81,7 @@ import {
   getCoworkSessionTitleClassName,
   shouldShowA2AServiceSessionId,
 } from './coworkSessionPresentation.js';
-import { isAssistantTurnComplete } from './assistantTurnPresentation.js';
+import { isAssistantTurnComplete, findDeliveryAssistantIndex } from './assistantTurnPresentation.js';
 import { reuseStableTurns } from './conversationTurnReuse.js';
 import {
   buildRefundStatusDismissKey,
@@ -119,6 +119,8 @@ const MARKDOWN_VIEWER_DEFAULT_FRACTION = 0.25;
 const MARKDOWN_VIEWER_MAX_FRACTION = 0.5;
 const MARKDOWN_VIEWER_MIN_WIDTH_PX = 280;
 const MARKDOWN_FILE_RE = /\.(md|markdown)$/i;
+// .html/.htm reports open in the same sidebar as a sandboxed iframe preview.
+const HTML_FILE_RE = /\.html?$/i;
 
 const clampMarkdownViewerWidth = (width: number, containerWidth: number): number => {
   const maxWidth = Math.max(MARKDOWN_VIEWER_MIN_WIDTH_PX, containerWidth * MARKDOWN_VIEWER_MAX_FRACTION);
@@ -1689,6 +1691,10 @@ const AssistantMessageItem: React.FC<{
   /** Assistant mode drops the embedded thinking segment (raw reasoning is
    * never shown) and renders only the visible reply text. */
   isAssistantMode?: boolean;
+  /** Assistant mode shows its hover-action toolbar on the turn's final reply
+   * bubble only; narration and process bubbles render without one. Ignored in
+   * professional mode. */
+  isFinalReply?: boolean;
 }> = ({
   message,
   resolveLocalFilePath,
@@ -1697,9 +1703,11 @@ const AssistantMessageItem: React.FC<{
   onOpenLocalFile,
   onBranch,
   isAssistantMode = false,
+  isFinalReply = false,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
   const displayContent = mapDisplayText ? mapDisplayText(message.content) : message.content;
+  const isNarration = message.metadata?.narration === true;
   const gigSquareCard = renderGigSquareCard(message.content);
   const thinkSplit = splitThinkTaggedContent(displayContent);
   const renderExtension = React.useContext(MessageExtensionContext);
@@ -1744,11 +1752,14 @@ const AssistantMessageItem: React.FC<{
           // purely by background color (no border) via the theme-adaptive
           // neutral-gray .assistant-bubble fill. The w-fit wrapper shares the
           // user bubble's max width (max-w-[min(646px,82%)]) so the bubble
-          // hugs short messages and never stretches to the full column. Hover
-          // actions float over the bubble's bottom-right corner instead of
-          // occupying flow height, so consecutive bubbles keep the container's
-          // uniform space-y-1 gap in every state (a flow row used to add ~32px
-          // under each bubble once the turn completed).
+          // hugs short messages and never stretches to the full column. One
+          // hover-action toolbar per turn hangs below the final reply bubble's
+          // bottom edge (never overlapping its text); narration and process
+          // bubbles render without one. The strip overlays the inter-bubble
+          // gap, so consecutive bubbles keep the container's uniform
+          // space-y-1 rhythm in every state (an in-flow row used to add ~32px
+          // under each bubble once the turn completed, and the old in-bubble
+          // overlay covered reply text).
           <div className="relative w-fit max-w-[min(646px,82%)]">
             <div className="assistant-bubble rounded-[22px] px-[16px] py-[10px] dark:text-claude-darkText text-claude-text shadow-subtle">
               <MarkdownContent
@@ -1756,39 +1767,45 @@ const AssistantMessageItem: React.FC<{
                 className="prose dark:prose-invert max-w-none"
                 resolveLocalFilePath={resolveLocalFilePath}
                 onOpenLocalFile={onOpenLocalFile}
+                chatExperienceMode={isAssistantMode ? 'assistant' : 'professional'}
               />
             </div>
-            {showCopyButton && (
+            {showCopyButton && isFinalReply && !isNarration && (
+              // The pt-0.5 bridge keeps the pointer over a DOM descendant of
+              // the hover-tracked root while crossing the bubble→strip seam,
+              // so the toolbar does not flicker when the mouse slides down.
               <div
-                className={`absolute bottom-1 right-1 flex items-center gap-1 rounded-lg px-1 py-0.5 dark:bg-claude-darkSurface/90 bg-claude-surface/90 shadow-subtle transition-all duration-200 ${
+                className={`absolute right-1 top-full flex items-center gap-1 pt-0.5 transition-all duration-200 ${
                   isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
                 }`}
               >
-                <CopyButton
-                  content={replyContent || displayContent}
-                  visible={isHovered}
-                />
-                <MessageFeedbackControls
-                  messageId={message.id}
-                  visible={isHovered}
-                />
-                <MessageTimestamp
-                  timestamp={message.timestamp}
-                  visible={isHovered}
-                />
-                {onBranch && (
-                  <button
-                    type="button"
-                    onClick={() => void onBranch(message)}
-                    className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-all duration-200 ${
-                      isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                    }`}
-                    title={i18nService.t('coworkBranchNewChatTitle')}
-                  >
-                    <DocumentDuplicateIcon className="h-3 w-3" />
-                    {i18nService.t('coworkBranchNewChatLabel')}
-                  </button>
-                )}
+                <div className="flex items-center gap-1 rounded-lg px-1 py-0.5 dark:bg-claude-darkSurface/90 bg-claude-surface/90 shadow-subtle">
+                  <CopyButton
+                    content={replyContent || displayContent}
+                    visible={isHovered}
+                  />
+                  <MessageFeedbackControls
+                    messageId={message.id}
+                    visible={isHovered}
+                  />
+                  <MessageTimestamp
+                    timestamp={message.timestamp}
+                    visible={isHovered}
+                  />
+                  {onBranch && (
+                    <button
+                      type="button"
+                      onClick={() => void onBranch(message)}
+                      className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-all duration-200 ${
+                        isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                      }`}
+                      title={i18nService.t('coworkBranchNewChatTitle')}
+                    >
+                      <DocumentDuplicateIcon className="h-3 w-3" />
+                      {i18nService.t('coworkBranchNewChatLabel')}
+                    </button>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -1800,6 +1817,7 @@ const AssistantMessageItem: React.FC<{
               className="prose dark:prose-invert max-w-none"
               resolveLocalFilePath={resolveLocalFilePath}
               onOpenLocalFile={onOpenLocalFile}
+              chatExperienceMode={isAssistantMode ? 'assistant' : 'professional'}
             />
           </div>
         )
@@ -2375,6 +2393,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
           onOpenLocalFile={onOpenLocalFile}
           onBranch={onBranch}
           isAssistantMode={isAssistantMode}
+          isFinalReply={isAssistantMode && index === deliveryIndex}
         />
       );
     }
@@ -2442,14 +2461,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
         && !item.message.content?.trim();
     })
   );
-  let deliveryIndex = -1;
-  for (let i = visibleAssistantItems.length - 1; i >= 0; i--) {
-    const item = visibleAssistantItems[i];
-    if (item.type === 'assistant' && !item.message.metadata?.isThinking) {
-      deliveryIndex = i;
-      break;
-    }
-  }
+  const deliveryIndex = findDeliveryAssistantIndex(visibleAssistantItems);
   const deliveryItem = deliveryIndex >= 0 ? visibleAssistantItems[deliveryIndex] : null;
   const deliveryMessage = deliveryItem && deliveryItem.type === 'assistant' ? deliveryItem.message : null;
   const processItems = deliveryMessage
@@ -2846,10 +2858,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
   }, []);
   const detailRootRef = useRef<HTMLDivElement>(null);
-  // Markdown viewer sidebar: .md/.markdown file links in assistant messages
-  // open in this right-hand panel instead of an external app. The width is a
-  // fraction of the session area (default 1/4, clamped to at most 1/2) and is
-  // persisted across sessions.
+  // In-app document viewer sidebar: .md/.markdown and .html/.htm file links
+  // in assistant messages open in this right-hand panel instead of an
+  // external app (markdown renders as text, HTML as a sandboxed preview).
+  // The width is a fraction of the session area (default 1/4, clamped to at
+  // most 1/2) and is persisted across sessions.
   const [markdownViewerPath, setMarkdownViewerPath] = useState<string | null>(null);
   const [markdownViewerFraction, setMarkdownViewerFraction] = useState<number>(loadPersistedMarkdownViewerFraction);
   const markdownViewerFractionRef = useRef(markdownViewerFraction);
@@ -2857,7 +2870,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const [isMarkdownViewerResizing, setIsMarkdownViewerResizing] = useState(false);
 
   const handleOpenLocalFile = useCallback((filePath: string): boolean => {
-    if (!MARKDOWN_FILE_RE.test(filePath)) return false;
+    if (!MARKDOWN_FILE_RE.test(filePath) && !HTML_FILE_RE.test(filePath)) return false;
     setMarkdownViewerPath(filePath);
     return true;
   }, []);

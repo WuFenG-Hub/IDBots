@@ -583,3 +583,5 @@ man_base_data_pebble/
 !tests/cerebellumMemoryRank.test.mjs
 !tests/coworkAssistantNarrationSurvival.test.ts
 !tests/coworkAssistantModePromptGate.test.mjs
+!tests/coworkAssistantDeliveryIndex.test.mjs
+!tests/markdownContentHtmlReportCard.test.tsx
