@@ -301,8 +301,13 @@ export function getDefaultDeepSeekModels(): ModelDefinition[] {
 // one key serves three protocol endpoints — Anthropic Messages
 // (https://open.bigmodel.cn/api/anthropic), OpenAI Chat Completions
 // (https://open.bigmodel.cn/api/coding/paas/v4) and OpenAI Responses
-// (https://open.bigmodel.cn/api/v1). Default to Responses: the GLM-5.3 family
-// runs there with reasoning summaries and a live catalog (GET /api/v1/models).
+// (https://open.bigmodel.cn/api/v1). Default to Chat Completions: it is the
+// only wire where GLM thinking can be explicitly DISABLED
+// (thinking:{type:'disabled'}); on Responses there is no disable parameter,
+// so the server-side default decides and assistant mode's effort "off" is a
+// silent no-op — GLM then deliberates hidden before its first visible
+// sentence. Responses keeps its perks (reasoning summaries, live catalog via
+// GET /api/v1/models) for users who explicitly pick it.
 // The whole GLM-5.3 family shares a 1M context window (1048576 per the live
 // catalog, 2026-09-18). Only glm-5.3-flash reads images — the flagship is
 // text-only per the official docs ("目前仅支持处理文本模态信息") and a live
@@ -701,10 +706,11 @@ export const defaultConfig: AppConfig = {
     zhipu: {
       enabled: false,
       apiKey: '',
-      // Zhipu GLM coding plan, OpenAI Responses protocol — see the
+      // Zhipu GLM coding plan, OpenAI Chat Completions protocol — the only
+      // wire where GLM thinking can be explicitly disabled; see the
       // ZHIPU_DEFAULT_MODELS notes above for the three endpoint options.
-      baseUrl: 'https://open.bigmodel.cn/api/v1',
-      apiFormat: 'responses',
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+      apiFormat: 'openai',
       models: getDefaultZhipuModels()
     },
     minimax: {

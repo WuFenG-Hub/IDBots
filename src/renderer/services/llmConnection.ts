@@ -37,7 +37,8 @@ export function shouldShowApiFormatSelector(provider: string): boolean {
 const PROVIDER_DEFAULT_BASE_URLS: Record<string, { anthropic: string; openai: string; responses?: string }> = {
   deepseek: { anthropic: 'https://api.deepseek.com/anthropic', openai: 'https://api.deepseek.com' },
   moonshot: { anthropic: 'https://api.moonshot.cn/anthropic', openai: 'https://api.moonshot.cn/v1' },
-  // Zhipu GLM coding plan: Responses is the default protocol (same as Settings).
+  // Zhipu GLM coding plan: Chat Completions is the default protocol (same as
+  // Settings — the only wire where GLM thinking can be explicitly disabled).
   zhipu: {
     anthropic: 'https://open.bigmodel.cn/api/anthropic',
     openai: 'https://open.bigmodel.cn/api/coding/paas/v4',

@@ -440,7 +440,7 @@ export const applyProviderModelMigrations = (config: AppConfig): AppConfig => {
 // （apiKey 为空）的 provider，已自定义配置（填了 key 或改过格式）的用户保持不动。
 // ---------------------------------------------------------------------------
 
-export const PROVIDER_API_FORMAT_MIGRATION_VERSION = 3;
+export const PROVIDER_API_FORMAT_MIGRATION_VERSION = 4;
 
 type ProviderApiFormatValue = 'anthropic' | 'openai' | 'responses';
 
@@ -529,6 +529,39 @@ const migrateZhipuApiFormatToResponses = (
   };
 };
 
+/**
+ * v4：Zhipu 默认 API 形态切换到 OpenAI Chat Completions
+ * （https://open.bigmodel.cn/api/coding/paas/v4）。Responses 线上没有
+ * “禁用思考”参数：effort 'off' 只能什么都不发，服务端默认（思考开）说了算，
+ * 助理模式默认关闭推理的意图在 GLM 上静默失效，首句要等模型隐藏思考完才出现。
+ * Chat Completions 线（Z.AI thinking 方言）上 off 会显式发送
+ * thinking:{type:'disabled'}。把仍停留在 v3 出厂默认（responses +
+ * https://open.bigmodel.cn/api/v1）的配置一次性迁到 openai + coding paas v4；
+ * 自定义 Base URL（代理等）或已显式选择其他格式的保持不动。
+ */
+const ZHIPU_RESPONSES_FACTORY_BASE_URL = 'https://open.bigmodel.cn/api/v1';
+const ZHIPU_CHAT_COMPLETIONS_BASE_URL = 'https://open.bigmodel.cn/api/coding/paas/v4';
+
+const migrateZhipuApiFormatToChatCompletions = (
+  providers: NonNullable<AppConfig['providers']>,
+): NonNullable<AppConfig['providers']> => {
+  const zhipu = providers.zhipu;
+  if (!zhipu) {
+    return providers;
+  }
+  if ((zhipu.apiFormat as ProviderApiFormatValue | undefined) !== 'responses') {
+    return providers;
+  }
+  const baseUrl = String(zhipu.baseUrl ?? '').trim().replace(/\/+$/, '').toLowerCase();
+  if (baseUrl !== ZHIPU_RESPONSES_FACTORY_BASE_URL) {
+    return providers;
+  }
+  return {
+    ...providers,
+    zhipu: { ...zhipu, apiFormat: 'openai', baseUrl: ZHIPU_CHAT_COMPLETIONS_BASE_URL },
+  };
+};
+
 export const applyProviderApiFormatMigrations = (config: AppConfig): AppConfig => {
   const currentVersion = config.providerApiFormatMigrationVersion ?? 0;
   if (currentVersion >= PROVIDER_API_FORMAT_MIGRATION_VERSION) {
@@ -551,6 +584,11 @@ export const applyProviderApiFormatMigrations = (config: AppConfig): AppConfig =
     if (version === 3) {
       nextProviders = nextProviders
         ? migrateZhipuApiFormatToResponses(nextProviders as NonNullable<AppConfig['providers']>)
+        : nextProviders;
+    }
+    if (version === 4) {
+      nextProviders = nextProviders
+        ? migrateZhipuApiFormatToChatCompletions(nextProviders as NonNullable<AppConfig['providers']>)
         : nextProviders;
     }
   }
