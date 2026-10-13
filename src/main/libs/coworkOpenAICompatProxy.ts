@@ -14,6 +14,7 @@ import { DeepSeekReasoningStore } from './deepseekReasoningStore';
 import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER } from './coworkAssistantReply';
 import { coworkLog } from './coworkLogger';
 import { buildOpenCodeGoHeaders } from './opencodeGatewayHeaders';
+import { resolveOpenCodeGoApiFormat } from './opencodeGoProtocol';
 import { writeFileAtomicSync } from './atomicFile';
 import { snipStaleToolResultBlocks } from './coworkToolResultSnip';
 import { foldLowValueToolResults } from './coworkToolResultFold';
@@ -1043,7 +1044,19 @@ function extractUpstreamErrorCode(raw: string): string {
   return '';
 }
 
-function resolveUpstreamAPIType(provider?: string, model?: string, apiFormat?: string): UpstreamAPIType {
+function resolveUpstreamAPIType(provider?: string, model?: string, apiFormat?: string, baseURL?: string): UpstreamAPIType {
+  // Per-model protocol correction for the OpenCode Go gateway (see
+  // opencodeGoProtocol.ts): the gateway serves GLM over chat completions only
+  // and answers /responses with 400 ModelProtocolUnsupported, so this wins
+  // over the explicit-format returns below — for THIS gateway the per-model
+  // wire is not a preference, it is what the upstream serves. Non-gateway
+  // routes are passed through untouched.
+  const configured: 'openai' | 'responses' | 'anthropic' =
+    apiFormat === 'responses' ? 'responses' : apiFormat === 'anthropic' ? 'anthropic' : 'openai';
+  const openCodeGoCorrected = resolveOpenCodeGoApiFormat({ baseUrl: baseURL, model, apiFormat: configured });
+  if (openCodeGoCorrected !== configured) {
+    return openCodeGoCorrected === 'responses' ? 'responses' : 'chat_completions';
+  }
   // An explicit user-selected 'responses' format always wins so custom
   // providers pointing at Responses-only endpoints work.
   if (apiFormat === 'responses') {
@@ -4038,7 +4051,7 @@ async function handleRequest(
   );
   // Resolve the upstream API type from the EFFECTIVE model so that a request
   // body overriding the model (e.g. deepseek-v4-pro) still routes correctly.
-  const upstreamAPIType = resolveUpstreamAPIType(upstream.provider, toString(openAIRequest.model), upstream.apiFormat);
+  const upstreamAPIType = resolveUpstreamAPIType(upstream.provider, toString(openAIRequest.model), upstream.apiFormat, upstream.baseURL);
   filterOpenAIToolsForProvider(openAIRequest, upstream.provider);
   hydrateOpenAIRequestToolCalls(openAIRequest, upstream.provider, upstream.baseURL);
   const deepSeekReasoningHydrateResult = hydrateDeepSeekReasoningForRequest(

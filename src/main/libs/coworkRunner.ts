@@ -30,6 +30,7 @@ import {
 import { mapDshReasoningEffort } from './dshReasoningEffort';
 import { shouldIncludeMetawebDeepSections, nextMetawebPromptTier, type MetawebPromptMode, type MetawebPromptTier } from './metawebPromptTier';
 import { dshModelReasoningDeclaration, undeclaredReasoningRouteWarning } from './dshModelReasoning';
+import { resolveOpenCodeGoApiFormat } from './opencodeGoProtocol';
 import { toLlmEffortLevel, type LlmEffortLevel } from './llmEffort';
 import {
   CoworkDshSteerWindowClosedError,
@@ -2309,6 +2310,9 @@ export class CoworkRunner extends EventEmitter {
   /** `provider|model` routes already warned about a window too small for
    *  kernel proactive compaction (warn-once guard, see dshTurnProviderFromRoute). */
   private compactionBudgetWarnedRoutes = new Set<string>();
+  /** `provider|model|from->to` routes already warned about an OpenCode Go
+   *  per-model protocol correction (warn-once guard, see dshTurnProviderFromRoute). */
+  private openCodeGoProtocolWarnedRoutes = new Set<string>();
   /**
    * Auto-title guard: cowork session id → the title the automatic flow last
    * saw on the row — the start-time placeholder at seed time, then each
@@ -8127,7 +8131,35 @@ export class CoworkRunner extends EventEmitter {
     route: DshProviderRouteInfo,
     extras?: { reasoningEffort?: string | null }
   ): DshTurnProviderRoute {
-    const apiFormat = dshApiFormatOf(route.apiFormat);
+    const configuredApiFormat = dshApiFormatOf(route.apiFormat);
+    // The OpenCode Go gateway serves each model over exactly one protocol and
+    // 400s ModelProtocolUnsupported on the others: the provider-level
+    // 'responses' default works for deepseek but sends GLM to /v1/responses,
+    // which the gateway does not serve for that family (2026-10-13 glm-5.3-flash
+    // turn failures — every effort level, the protocol was the failure). Correct
+    // per model BEFORE anything downstream: the effort-rides-route declaration
+    // lookup and the runtime route both key off apiFormat, so the GLM chat-
+    // completions declaration (explicit zai thinking enable/disable) follows
+    // automatically.
+    const apiFormat = resolveOpenCodeGoApiFormat({
+      baseUrl: route.baseUrl,
+      model: route.model,
+      apiFormat: configuredApiFormat,
+    });
+    if (apiFormat !== configuredApiFormat) {
+      const warnKey = `${route.provider}|${route.model}|${configuredApiFormat}->${apiFormat}`;
+      if (!this.openCodeGoProtocolWarnedRoutes.has(warnKey)) {
+        this.openCodeGoProtocolWarnedRoutes.add(warnKey);
+        coworkLog('WARN', 'dshTurnProviderFromRoute',
+          'OpenCode Go gateway does not serve this model over the configured apiFormat; riding the model-supported protocol instead',
+          {
+            provider: route.provider,
+            model: route.model,
+            configured: configuredApiFormat,
+            riding: apiFormat,
+          });
+      }
+    }
     const modelLimits = resolveCurrentModelLimits(route.model, route.provider);
     // Official DeepSeek rides the first-party dsh-llm-deepseek adapter under
     // its own route key — but ONLY on the official api.deepseek.com host: a
@@ -8598,7 +8630,14 @@ export class CoworkRunner extends EventEmitter {
       this.removeActiveSession(sessionId, activeSession);
       return;
     }
-    const apiFormat = dshApiFormatOf(route.apiFormat);
+    // Same per-model OpenCode Go protocol correction dshTurnProviderFromRoute
+    // applies — this copy only feeds the "Resolved API config" log line, and it
+    // must not name a protocol the turn will not actually ride.
+    const apiFormat = resolveOpenCodeGoApiFormat({
+      baseUrl: route.baseUrl,
+      model: route.model,
+      apiFormat: dshApiFormatOf(route.apiFormat),
+    });
     const modelLimits = resolveCurrentModelLimits(route.model, route.provider);
     let dshUserPrompt = prompt;
     const sessionRecord = this.store.getSession(sessionId);

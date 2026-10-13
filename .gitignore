@@ -110,6 +110,8 @@ tests/*
 !tests/dshRuntimeConfigEfforts.test.mjs
 !tests/dshRuntimeGlmResponsesBoot.test.mjs
 !tests/dshRuntimeOpencodeSessionHeaders.test.mjs
+!tests/opencodeGoProtocol.test.mjs
+!tests/coworkDshOpencodeProtocol.test.mjs
 !tests/dshKernelBootFailure.test.mjs
 !tests/botActionModel.test.ts
 !tests/proposalDecision.test.ts

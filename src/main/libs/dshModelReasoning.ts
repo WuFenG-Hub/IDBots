@@ -174,6 +174,18 @@ export function foldsToolRideTextIntoThinking(modelId: string | undefined | null
   return !GLM_PATTERN.test(bareModelIdOf(modelId));
 }
 
+/**
+ * True when the model id (vendor prefixes stripped) is the GLM family this
+ * file declares reasoning for. Shared with the gateway protocol resolution
+ * (opencodeGoProtocol.ts): the OpenCode Go gateway serves the GLM line over
+ * chat completions only, so a route-level 'responses' apiFormat must be
+ * corrected before the declaration lookup — otherwise the lookup itself is
+ * keyed on a wire the gateway refuses.
+ */
+export function isGlmFamilyModelId(modelId: string): boolean {
+  return GLM_PATTERN.test(bareModelIdOf(modelId));
+}
+
 const undeclaredEffortWarnedRoutes = new Set<string>();
 
 /**
