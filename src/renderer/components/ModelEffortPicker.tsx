@@ -166,6 +166,10 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
     ? `${currentModelName} · ${currentProviderName}`
     : currentModelName;
   const currentEffort = value.effort ?? null;
+  // An 'off' rung glued to the model name on the collapsed trigger reads like
+  // the model itself is switched off, so the trigger shows no effort text for
+  // it; the open popover still surfaces the rung for editing.
+  const showEffortOnTrigger = currentEffort !== 'off';
 
   React.useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -247,7 +251,7 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
         onClick={openPicker}
         disabled={disabled}
         className={triggerClassName}
-        title={`${currentModelLabel} · ${effortLabel(currentEffort)}`}
+        title={showEffortOnTrigger ? `${currentModelLabel} · ${effortLabel(currentEffort)}` : currentModelLabel}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
         aria-label={`${i18nService.t('modelPickerModelLabel')}: ${currentModelLabel}, ${i18nService.t('modelPickerEffortLabel')}: ${effortLabel(currentEffort)}`}
@@ -260,9 +264,11 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
             {!resolved && value.modelId && (
               <span className="text-xs dark:text-red-400 text-red-500 shrink-0">{i18nService.t('modelPickerUnavailable')}</span>
             )}
-            <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary border dark:border-claude-darkBorder border-claude-border rounded-md px-1.5 py-0.5 shrink-0">
-              {effortLabel(currentEffort)}
-            </span>
+            {showEffortOnTrigger && (
+              <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary border dark:border-claude-darkBorder border-claude-border rounded-md px-1.5 py-0.5 shrink-0">
+                {effortLabel(currentEffort)}
+              </span>
+            )}
             <ChevronDownIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
           </>
         ) : (
@@ -271,9 +277,11 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
             {!resolved && value.modelId && (
               <span className="text-xs dark:text-red-400 text-red-500">{i18nService.t('modelPickerUnavailable')}</span>
             )}
-            <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary border dark:border-claude-darkBorder border-claude-border rounded-md px-1.5 py-0.5">
-              {effortLabel(currentEffort)}
-            </span>
+            {showEffortOnTrigger && (
+              <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary border dark:border-claude-darkBorder border-claude-border rounded-md px-1.5 py-0.5">
+                {effortLabel(currentEffort)}
+              </span>
+            )}
             <ChevronDownIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
           </>
         )}
