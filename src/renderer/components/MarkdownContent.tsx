@@ -872,7 +872,10 @@ const MarkdownContent = React.memo(({
   return (
     <div className={`markdown-content ${compact ? 'text-[13px] leading-5' : 'text-[14px] leading-[24px]'} ${className}`}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        // singleTilde: false — bot output uses `~` as a range separator
+        // ("一周 1~3 次，单次 100~300 元"), which GFM would otherwise pair into
+        // a false strikethrough. Real strikethrough (~~text~~) keeps working.
+        remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
         urlTransform={safeUrlTransform}
         components={components}
       >
