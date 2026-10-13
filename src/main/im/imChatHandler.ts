@@ -9,6 +9,7 @@ import {
   IMSettings,
 } from './types';
 import { buildOpenCodeGoHeaders } from '../libs/opencodeGatewayHeaders';
+import { resolveOpenCodeGoApiFormat } from '../libs/opencodeGoProtocol';
 
 // LLM Configuration interface (mirrors app_config structure)
 interface LLMConfig {
@@ -144,9 +145,16 @@ export class IMChatHandler {
   }
 
   private shouldUseOpenAIResponsesApi(config: LLMConfig): boolean {
-    // A user-selected 'responses' apiFormat wins (same rule as
-    // llmConnection.testProviderConnection and the Settings test handler).
-    return config.apiFormat === 'responses'
+    // Per-model protocol correction for the OpenCode Go gateway (see
+    // opencodeGoProtocol.ts): the gateway serves GLM over chat completions
+    // only, so a provider-level 'responses' apiFormat must not send it to
+    // /v1/responses (400 ModelProtocolUnsupported).
+    const corrected = resolveOpenCodeGoApiFormat({
+      baseUrl: config.baseUrl,
+      model: config.model,
+      apiFormat: config.apiFormat === 'responses' ? 'responses' : config.apiFormat === 'anthropic' ? 'anthropic' : 'openai',
+    });
+    return corrected === 'responses'
       || config.provider?.toLowerCase() === 'openai';
   }
 

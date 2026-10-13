@@ -8,6 +8,7 @@ import {
   buildOpenAICompatibleModelRequestOptions,
 } from './modelRequestOptions';
 import { buildOpenCodeGoSessionHeaders } from './opencodeGatewayHeaders';
+import { resolveOpenCodeGoApiFormat } from './opencodeGoProtocol';
 
 const CONNECTIVITY_TEST_TOKEN_BUDGET = 64;
 
@@ -189,9 +190,18 @@ export async function testProviderConnection(
       });
     } else {
       // Responses API when the provider defaults to it (openai / deepseek flash)
-      // or the user-selected API format is 'responses'.
-      const useResponsesApi = providerConfig.apiFormat === 'responses'
-        || shouldUseOpenAIResponsesForProvider(providerKey, firstModel.id);
+      // or the user-selected API format is 'responses' — then corrected per
+      // model for the OpenCode Go gateway (resolveOpenCodeGoApiFormat): the
+      // gateway serves GLM over chat completions only, so the 'responses'
+      // default must not send glm-5.3-flash to /v1/responses (400
+      // ModelProtocolUnsupported, 2026-10-13 incident).
+      const useResponsesApi = resolveOpenCodeGoApiFormat({
+        baseUrl: normalizedBaseUrl,
+        model: firstModel.id,
+        apiFormat: providerConfig.apiFormat === 'responses' || shouldUseOpenAIResponsesForProvider(providerKey, firstModel.id)
+          ? 'responses'
+          : 'openai',
+      }) === 'responses';
       const openaiUrl = useResponsesApi
         ? buildOpenAIResponsesUrl(normalizedBaseUrl, providerKey)
         : buildOpenAICompatibleChatCompletionsUrl(normalizedBaseUrl, providerKey);

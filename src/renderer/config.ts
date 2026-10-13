@@ -558,7 +558,10 @@ export const defaultConfig: AppConfig = {
       // OpenCode Go 网关（https://opencode.ai/docs/zh-cn/go），统一走 /v1 前缀，
       // Messages / Chat Completions / Responses 三个端点都挂在同一 Base URL 下。
       // Default to the Responses endpoint: DeepSeek Flash carries reasoning there and
-      // the gateway serves pro/flash alike on /v1/responses.
+      // the gateway serves pro/flash alike on /v1/responses. The gateway enforces
+      // per-model protocols on top of this (glm rides chat completions only;
+      // ModelProtocolUnsupported otherwise) — routes are corrected per model in
+      // opencodeGoProtocol.ts, so this default stays deepseek-shaped.
       baseUrl: 'https://opencode.ai/zen/go/v1',
       apiFormat: 'responses',
       models: [
