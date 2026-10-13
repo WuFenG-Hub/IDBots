@@ -29,6 +29,15 @@ import type { MetaTaskChainEvent } from './types';
 
 /** manapi silently falls back to 20 rows/page for size > 100. */
 const DEFAULT_PAGE_SIZE = 100;
+/**
+ * Page the walk to the EMPTY cursor page. The indexer caps each page by
+ * response bytes (~19KB), so a pool carrying giant payloads yields only a few
+ * rows per page regardless of `size` — a 281-row pool can then need hundreds
+ * of pages. The cap below is a runaway guard, not a budget: live cursors are
+ * surfaced through onTruncated instead of silently dropped (deep-event loss,
+ * 2026-10-13 RSI case).
+ */
+const DEFAULT_MAX_PAGES = 1000;
 
 /** Extra content downloads per sweep (rows needing recovery only). */
 const CONTENT_RECOVERY_CONCURRENCY = 4;
@@ -227,10 +236,13 @@ export async function collectMetaTaskEvents(
     try {
       pins = await fetchProtocolPinsFromIndexer(metataskPoolPath(segment), {
         pageSize: options.pageSize ?? DEFAULT_PAGE_SIZE,
-        maxPages: options.maxPages ?? 100,
+        maxPages: options.maxPages ?? DEFAULT_MAX_PAGES,
         timeoutMs: options.timeoutMs ?? 8_000,
         fetchImpl: options.fetchImpl,
         selectContent: keepRaw,
+        onTruncated: (info) => {
+          console.warn('[metatask/collector] pool walk truncated, deep events missing:', info);
+        },
       });
     } catch {
       pins = []; // a failed path must not fail the whole sweep

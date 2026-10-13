@@ -17,6 +17,14 @@ export interface FetchProtocolPinsOptions {
   remoteBaseUrl?: string;
   fetchImpl?: FetchLike;
   selectContent?: (item: Record<string, unknown>) => unknown;
+  /**
+   * Invoked when the page walk stopped at `maxPages` with a non-empty cursor
+   * (i.e. deeper rows exist but were not fetched). The indexer caps each page
+   * by response bytes, so giant payloads can shrink a page to a handful of
+   * rows; callers that must reach the empty page (metaTask sweeps) need to
+   * know the walk fell short instead of silently losing deep events.
+   */
+  onTruncated?: (info: { baseUrl: string; protocolPath: string; pages: number; rows: number }) => void;
 }
 
 interface ProtocolPinRecordWithOrder extends ProtocolPinRecord {
@@ -81,10 +89,11 @@ async function fetchProtocolPinPages(input: {
   selectContent: (item: Record<string, unknown>) => unknown;
   requireEnvelopeHit: boolean;
   sourceOrderStart: number;
-}): Promise<ProtocolPinRecordWithOrder[]> {
+}): Promise<{ pins: ProtocolPinRecordWithOrder[]; hasMore: boolean }> {
   const pins: ProtocolPinRecordWithOrder[] = [];
   let cursor: string | undefined;
   let sourceOrder = input.sourceOrderStart;
+  let stoppedAtMaxPages = false;
 
   for (let page = 0; page < input.maxPages; page += 1) {
     const url = buildPathListUrl(
@@ -145,9 +154,14 @@ async function fetchProtocolPinPages(input: {
     if (!cursor) {
       break;
     }
+    if (page + 1 >= input.maxPages) {
+      // Stop only via the natural loop bound; remember that the cursor was
+      // still live so the caller can tell truncation from completion.
+      stoppedAtMaxPages = true;
+    }
   }
 
-  return pins;
+  return { pins, hasMore: stoppedAtMaxPages && Boolean(cursor) };
 }
 
 export async function fetchProtocolPinsFromIndexer(
@@ -166,7 +180,7 @@ export async function fetchProtocolPinsFromIndexer(
   const selectContent = options.selectContent ?? defaultSelectContent;
 
   const localBase = options.localBaseUrl ?? getConfiguredP2PLocalBase();
-  const localPins = localBase
+  const localWalk = localBase
     ? await fetchProtocolPinPages({
         baseUrl: localBase,
         pathname: '/api/pin/path/list',
@@ -179,8 +193,8 @@ export async function fetchProtocolPinsFromIndexer(
         requireEnvelopeHit: true,
         sourceOrderStart: 0,
       })
-    : [];
-  const remotePins = await fetchProtocolPinPages({
+    : { pins: [], hasMore: false };
+  const remoteWalk = await fetchProtocolPinPages({
     baseUrl: options.remoteBaseUrl ?? DEFAULT_REMOTE_BASE_URL,
     pathname: '/pin/path/list',
     protocolPath: normalizedProtocolPath,
@@ -192,6 +206,24 @@ export async function fetchProtocolPinsFromIndexer(
     requireEnvelopeHit: false,
     sourceOrderStart: 1_000_000,
   });
+  const localPins = localWalk.pins;
+  const remotePins = remoteWalk.pins;
+
+  for (const walk of [
+    { baseUrl: localBase ?? '', walk: localWalk },
+    { baseUrl: options.remoteBaseUrl ?? DEFAULT_REMOTE_BASE_URL, walk: remoteWalk },
+  ]) {
+    if (walk.walk.hasMore) {
+      const info = {
+        baseUrl: walk.baseUrl,
+        protocolPath: normalizedProtocolPath,
+        pages: maxPages,
+        rows: walk.walk.pins.length,
+      };
+      console.warn('[protocolPinFetch] pagination truncated before the empty page:', info);
+      options.onTruncated?.(info);
+    }
+  }
 
   const mergedByPinId = new Map<string, ProtocolPinRecordWithOrder>();
   for (const pin of [...localPins, ...remotePins]) {
