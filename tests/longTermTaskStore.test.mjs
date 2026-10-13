@@ -438,6 +438,37 @@ test('listRelatedSessionIds unions the definition session and every sub-project 
   );
 });
 
+test('board summaries carry the waiting_owner sessions as decisionSessionIds', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  const [first, , third] = store.getTask(taskId).subtasks;
+  store.beginSubtask(first.id, 'twin');
+  store.bindSession(first.id, 'sess-s1', 'system');
+  store.bindSession(third.id, 'sess-s2', 'system');
+
+  // Nothing owed yet: no decision sessions.
+  let card = store.listBoard().cards.find((c) => c.id === taskId);
+  assert.deepEqual(card.decisionSessionIds, []);
+
+  // A parked owner decision and an acceptance proposal both surface their
+  // bound sessions — both are decision surfaces the sidebar must lift out of
+  // the autonomous fold.
+  assert.ok(store.proposeSubtask(first.id, { evidence: [{ kind: 'pin', uri: 'pin://x' }], summary: 's' }, 'twin').ok);
+  assert.ok(store.beginSubtask(third.id, 'twin').ok);
+  assert.ok(store.waitSubtask(third.id, { kind: 'owner', note: 'need a call' }, 'twin').ok);
+  card = store.listBoard().cards.find((c) => c.id === taskId);
+  assert.deepEqual([...card.decisionSessionIds].sort(), ['sess-s1', 'sess-s2']);
+
+  // The verdict lands on #1: its session drops out; #3's stays until decided.
+  store.acceptSubtask(first.id, 'owner');
+  card = store.listBoard().cards.find((c) => c.id === taskId);
+  assert.deepEqual(card.decisionSessionIds, ['sess-s2']);
+
+  store.unblockSubtask(third.id, 'owner');
+  card = store.listBoard().cards.find((c) => c.id === taskId);
+  assert.deepEqual(card.decisionSessionIds, [], 'folds back once no verdict is owed');
+});
+
 test('completeTask: owner one-click closure skips open sub-projects and lands the task in done', async () => {
   const { store } = await openStore();
   const taskId = await createActive(store);

@@ -63,6 +63,32 @@ test('a manual fold placement wins over the auto-origin policy in both direction
     'the creation fact survives the move');
 });
 
+test('a session owed an owner verdict leaves the fold — manual placement still wins', () => {
+  const owed = new Set(['lt-owed', 'orch-owed']);
+
+  // A waiting_owner long-term run renders on the MAIN timeline: the decision
+  // surface must be seen, not buried in the collapsed folder.
+  assert.equal(isInAutonomousFold(mkSession('lt-owed', 'longterm'), owed), false);
+  assert.equal(isInAutonomousFold(mkSession('orch-owed', 'orchestration'), owed), false);
+  // Sessions without a pending verdict keep the plain policy.
+  assert.equal(isInAutonomousFold(mkSession('lt-quiet', 'longterm'), owed), true);
+  assert.equal(isInAutonomousFold(mkSession('human-quiet'), owed), false);
+  // A manual placement outranks the promotion in both directions.
+  assert.equal(isInAutonomousFold(mkSession('lt-owed-in', 'longterm', 'in'), owed), true,
+    'the owner can fold a decision session back in by hand');
+  assert.equal(isInAutonomousFold(mkSession('lt-owed-out', 'longterm', 'out'), owed), false);
+  // Without the set, the same owed session folds (legacy callers unchanged).
+  assert.equal(isInAutonomousFold(mkSession('lt-owed', 'longterm')), true);
+
+  const { humanSessions, autoSessions } = splitSessionsByAutonomousFold(
+    [mkSession('human-1'), mkSession('lt-owed', 'longterm'), mkSession('lt-quiet', 'longterm')],
+    owed,
+  );
+  assert.deepEqual(humanSessions.map((session) => session.id), ['human-1', 'lt-owed'],
+    'the decision surface rides the main list, in place');
+  assert.deepEqual(autoSessions.map((session) => session.id), ['lt-quiet']);
+});
+
 test('the split honours overrides: moved rows land on the other side, in order', () => {
   const sessions = [
     mkSession('human-1'),
@@ -135,9 +161,11 @@ test('sidebar feeds the list with the split halves and keeps search over every s
   const src = readSource('src/renderer/components/Sidebar.tsx');
 
   // The visible local list gets the human half; the auto half rides alongside.
+  // The split takes the decision set (waiting_owner sessions stay visible).
   assert.match(src, /sessions=\{localListSessions\}/);
   assert.match(src, /autoSessions=\{taskRecordTab === 'local' \? localAutoSessions : undefined\}/);
-  assert.match(src, /splitSessionsByAutonomousFold\(sessionGroups\.local\)/);
+  assert.match(src, /decisionSessionIds=\{taskRecordTab === 'local' \? decisionSessionIds : undefined\}/);
+  assert.match(src, /splitSessionsByAutonomousFold\(sessionGroups\.local, decisionSessionIds\)/);
   // The local tab's count + red unread dot ignore the folded rows — the fold
   // carries its own red dot + unread count on its header row.
   assert.match(src, /local: \{ count: localHumanSessions\.length, unread: unreadOf\(localHumanSessions\) \}/);
@@ -208,7 +236,8 @@ test('the row menu offers the fold move, labels it by current membership, and on
     /\{ key: 'pin'[\s\S]{0,600}\{ key: 'autonomous-fold'[\s\S]{0,400}\{ key: 'archive'/,
     'between pin and archive',
   );
-  assert.match(item, /onToggleAutonomousFold\?\.\(session\.id, isInAutonomousFold\(session\)\)/);
+  assert.match(item, /onToggleAutonomousFold\?\.\(session\.id, isInAutonomousFoldWithDecision\(session, decisionPending \?\? false\)\)/);
+  assert.match(item, /inAutonomousFold = isInAutonomousFoldWithDecision\(session, decisionPending \?\? false\)/);
   assert.match(item, /inAutonomousFold \? 'coworkMoveOutOfAutonomous' : 'coworkMoveToAutonomous'/);
   // Optional prop: hidden, not dead, when the host does not offer the move.
   assert.match(item, /onToggleAutonomousFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);

@@ -5,7 +5,7 @@ import { i18nService } from '../../services/i18n';
 import { getCoworkSessionTitleClassName, shouldShowCoworkA2ADot } from './coworkSessionPresentation.js';
 import { copyCoworkSessionLinkToClipboard } from './coworkSessionLink.js';
 import { isRenderableAvatarSource } from '../../utils/avatarSource';
-import { isInAutonomousFold } from '../../utils/sessionAutoGrouping';
+import { isInAutonomousFoldWithDecision } from '../../utils/sessionAutoGrouping';
 import { scrollEventMovesAnchor } from '../../utils/anchoredPopover';
 
 interface CoworkSessionItemProps {
@@ -50,6 +50,14 @@ interface CoworkSessionItemProps {
    * body; the memo comparator is what consumes it.
    */
   language?: string;
+  /**
+   * This session currently owes the owner a verdict (a long-term sub-project
+   * parked in waiting_owner): with no manual placement the row sits in the MAIN
+   * list even though its auto-origin would fold it. Boolean (not the board's
+   * decision set) so the shallow memo compares cleanly; the list resolves the
+   * set lookup once per render.
+   */
+  decisionPending?: boolean;
 }
 
 const statusLabels: Record<CoworkSessionStatus, string> = {
@@ -257,6 +265,7 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   isSelected = false,
   onToggleSelected,
   nowMs,
+  decisionPending = false,
 }) => {
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(session.title);
@@ -342,7 +351,7 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
     e.stopPropagation();
     // The row tells the handler where it is NOW; the caller turns that into the
     // next override ('in' when moving in, 'out'/null when moving out).
-    onToggleAutonomousFold?.(session.id, isInAutonomousFold(session));
+    onToggleAutonomousFold?.(session.id, isInAutonomousFoldWithDecision(session, decisionPending ?? false));
     closeMenu();
   };
 
@@ -461,7 +470,7 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   const archiveLabel = i18nService.t('archiveSession');
   // The label mirrors where the row sits right now, so the menu always reads as
   // the action it will perform.
-  const inAutonomousFold = isInAutonomousFold(session);
+  const inAutonomousFold = isInAutonomousFoldWithDecision(session, decisionPending ?? false);
   const autonomousFoldLabel = i18nService.t(
     inAutonomousFold ? 'coworkMoveOutOfAutonomous' : 'coworkMoveToAutonomous',
   );

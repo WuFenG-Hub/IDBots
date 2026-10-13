@@ -501,6 +501,14 @@ export class LongTermTaskStore {
       currentExpectedMinutes: current?.expectedMinutes ?? null,
       progress: deriveProgress(subtasks),
       counts,
+      // Sessions currently owed an owner verdict (every waiting_owner
+      // sub-project's bound session). The sidebar lifts these OUT of the
+      // collapsed autonomous fold: a decision the owner must make belongs on
+      // the main timeline, derived live — folds back automatically the moment
+      // the verdict lands.
+      decisionSessionIds: subtasks
+        .filter((sub) => sub.status === 'waiting_owner' && sub.sessionId)
+        .map((sub) => sub.sessionId as string),
       participants: this.resolveParticipants(this.listParticipantIds(taskRow, subtasks)),
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,

@@ -56,6 +56,13 @@ interface CoworkSessionListProps {
    */
   autoSessions?: CoworkSessionSummary[];
   /**
+   * Sessions owed an owner verdict right now (long-term sub-projects parked in
+   * waiting_owner, board-derived): each matching row carries
+   * decisionPending so its fold menu reflects where it actually renders (the
+   * main list). Only the local tab passes this, mirroring autoSessions.
+   */
+  decisionSessionIds?: ReadonlySet<string>;
+  /**
    * Move one session in or out of the Autonomous Tasks fold (the row menu's
    * 移入自主任务 / 移出自主任务 entry). Optional: callers that do not offer the
    * move (and every non-local list) simply leave it off, and the row then hides
@@ -189,6 +196,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   sortMode = 'updatedAt',
   botSelector = false,
   autoSessions: incomingAutoSessions,
+  decisionSessionIds,
   onToggleAutonomousFold,
   language: languageProp,
 }) => {
@@ -416,6 +424,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
         onRename={renameSession}
         onToggleSelected={toggleSessionSelected}
         onToggleAutonomousFold={onToggleAutonomousFold ? toggleAutonomousFold : undefined}
+        decisionPending={decisionSessionIds?.has(session.id)}
       />
     );
   };

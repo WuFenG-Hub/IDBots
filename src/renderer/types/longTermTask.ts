@@ -169,6 +169,10 @@ export interface LongTermTaskSummary {
   currentExpectedMinutes: number | null;
   progress: LongTermProgress;
   counts: Record<LongTermSubtaskStatus, number>;
+  /** Bound sessions of sub-projects currently waiting on the owner's verdict —
+   *  the sidebar unpins these from the autonomous fold onto the main list
+   *  (derived live; re-folds the moment the verdict lands). */
+  decisionSessionIds: string[];
   /** Participating bots: twin + delegated workers + group-task members (derived read-time). */
   participants: LongTermParticipant[];
   createdAt: string;

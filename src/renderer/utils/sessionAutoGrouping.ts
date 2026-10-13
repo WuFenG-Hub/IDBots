@@ -51,18 +51,38 @@ export const shouldFoldIntoAutonomousTasks = (
 ): boolean => session.autoOrigin != null && FOLDED_AUTO_ORIGINS.has(session.autoOrigin);
 
 /**
+ * Per-row fold membership. `decisionPending` is the caller-resolved answer of
+ * "is this session currently owed an owner verdict" (the list looks the row up
+ * in its decision set once and hands the row a plain boolean, so memoized rows
+ * compare cheap). Same precedence as isInAutonomousFold.
+ */
+export const isInAutonomousFoldWithDecision = (
+  session: Pick<CoworkSessionSummary, 'autoOrigin' | 'foldOverride'>,
+  decisionPending: boolean,
+): boolean => {
+  if (session.foldOverride === 'in') return true;
+  if (session.foldOverride === 'out') return false;
+  if (decisionPending) return false;
+  return shouldFoldIntoAutonomousTasks(session);
+};
+
+/**
  * Fold MEMBERSHIP: a manual placement wins over the policy — 'in' parks the row
  * in the fold whatever its origin, 'out' keeps an auto-created run in the main
  * list. With no manual placement (null/undefined, the state of every row that
  * the user never moved) the auto-origin policy decides.
+ *
+ * `decisionSessionIds` (optional) holds the sessions currently owed an owner
+ * verdict — long-term sub-projects parked in waiting_owner. Those sessions are
+ * the DECISION SURFACE: with no manual placement they leave the fold and show
+ * on the main timeline (a verdict buried in the collapsed folder is how a
+ * finished task nags for days). Derived live from the board, so the row folds
+ * back the moment the verdict lands; a manual placement still wins over it.
  */
 export const isInAutonomousFold = (
-  session: Pick<CoworkSessionSummary, 'autoOrigin' | 'foldOverride'>,
-): boolean => {
-  if (session.foldOverride === 'in') return true;
-  if (session.foldOverride === 'out') return false;
-  return shouldFoldIntoAutonomousTasks(session);
-};
+  session: Pick<CoworkSessionSummary, 'id' | 'autoOrigin' | 'foldOverride'>,
+  decisionSessionIds?: ReadonlySet<string>,
+): boolean => isInAutonomousFoldWithDecision(session, decisionSessionIds?.has(session.id) ?? false);
 
 /**
  * Split sessions into the main list and the autonomous fold, preserving input
@@ -70,11 +90,12 @@ export const isInAutonomousFold = (
  */
 export const splitSessionsByAutonomousFold = (
   sessions: readonly CoworkSessionSummary[],
+  decisionSessionIds?: ReadonlySet<string>,
 ): SessionsByAutonomousFold => {
   const humanSessions: CoworkSessionSummary[] = [];
   const autoSessions: CoworkSessionSummary[] = [];
   for (const session of sessions) {
-    (isInAutonomousFold(session) ? autoSessions : humanSessions).push(session);
+    (isInAutonomousFold(session, decisionSessionIds) ? autoSessions : humanSessions).push(session);
   }
   return { humanSessions, autoSessions };
 };
