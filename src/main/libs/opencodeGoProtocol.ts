@@ -95,3 +95,28 @@ export function resolveOpenCodeGoApiFormat(input: OpenCodeGoApiFormatInput): Ope
   if (input.apiFormat !== 'responses' && isResponsesOnlyModelId(model)) return 'responses';
   return input.apiFormat;
 }
+
+// Route-key suffix per corrected wire. The DSH runtime's route table is a
+// cross-session UNION keyed by provider key (mergeProviderRoute), and one
+// provider entry carries exactly ONE apiFormat — so once the per-model
+// correction puts model A on wire X and model B on wire Y under the same
+// provider, the union mixes them and plugin validation fails the whole
+// runtime boot (2026-10-14 incident: glm-5.3-flash's completions-only compat
+// `supportsStore` landed on the deepseek 'responses' provider entry →
+// "sets compat supportsStore, but its api is openai-responses" → every
+// opencode turn, deepseek included, died at boot). A corrected route therefore
+// rides a suffixed key ('opencode.oc'), giving each wire its own provider
+// entry, credential env var (dshProviderApiKeyEnv), and runtime slot. The dot
+// separator matches the automation-slot precedent ('.auto-bc'); the runtime
+// config's sanitizeRouteKey folds it to a dash ('opencode-oc'), which cannot
+// collide with the bare provider key.
+const WIRE_ROUTE_KEY_SUFFIX: Record<OpenCodeGoApiFormat, string> = {
+  openai: 'oc',
+  responses: 'rs',
+  anthropic: 'am',
+};
+
+/** Runtime route key for a wire-corrected OpenCode Go gateway route. */
+export function openCodeGoWireRouteKey(providerKey: string, ridingApiFormat: OpenCodeGoApiFormat): string {
+  return `${providerKey}.${WIRE_ROUTE_KEY_SUFFIX[ridingApiFormat]}`;
+}

@@ -30,7 +30,7 @@ import {
 import { mapDshReasoningEffort } from './dshReasoningEffort';
 import { shouldIncludeMetawebDeepSections, nextMetawebPromptTier, type MetawebPromptMode, type MetawebPromptTier } from './metawebPromptTier';
 import { dshModelReasoningDeclaration, undeclaredReasoningRouteWarning } from './dshModelReasoning';
-import { resolveOpenCodeGoApiFormat } from './opencodeGoProtocol';
+import { resolveOpenCodeGoApiFormat, openCodeGoWireRouteKey } from './opencodeGoProtocol';
 import { toLlmEffortLevel, type LlmEffortLevel } from './llmEffort';
 import {
   CoworkDshSteerWindowClosedError,
@@ -8245,7 +8245,8 @@ export class CoworkRunner extends EventEmitter {
       model: route.model,
       apiFormat: configuredApiFormat,
     });
-    if (apiFormat !== configuredApiFormat) {
+    const wireCorrected = apiFormat !== configuredApiFormat;
+    if (wireCorrected) {
       const warnKey = `${route.provider}|${route.model}|${configuredApiFormat}->${apiFormat}`;
       if (!this.openCodeGoProtocolWarnedRoutes.has(warnKey)) {
         this.openCodeGoProtocolWarnedRoutes.add(warnKey);
@@ -8319,7 +8320,18 @@ export class CoworkRunner extends EventEmitter {
       }
     }
     return {
-      key: officialDeepSeekNative ? 'deepseek-official' : route.provider,
+      // A wire-corrected route rides a suffixed key ('opencode.oc'): the
+      // runtime's provider table unions models by key with ONE apiFormat per
+      // entry, so an uncorrected key would mix GLM's chat-completions entry
+      // into deepseek's 'responses' provider and fail the whole runtime boot
+      // (see openCodeGoWireRouteKey). The suffixed key gets its own provider
+      // entry, credential env var, and runtime slot; sessions re-pin across
+      // keys with their JSONL history intact.
+      key: officialDeepSeekNative
+        ? 'deepseek-official'
+        : wireCorrected
+          ? openCodeGoWireRouteKey(route.provider, apiFormat)
+          : route.provider,
       apiFormat,
       baseUrl: route.baseUrl,
       apiKey: route.apiKey,
