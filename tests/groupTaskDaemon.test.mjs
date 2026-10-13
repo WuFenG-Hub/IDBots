@@ -4025,7 +4025,7 @@ test('authoritative constraints block renders the [POSITION] ledger, newest line
   assert.match(over, /oldest line\(s\) omitted/);
 });
 
-test('scoped owner memories inject into plain-path group turns, skip the skill path, and respect memoryEnabled (G8)', async () => {
+test('scoped owner memories inject into plain-path AND skill-path group turns, and respect memoryEnabled (G8)', async () => {
   const memoryEntries = [
     { text: 'The owner prefers weekly Friday releases', usageClass: 'preference', visibility: 'local_only', updatedAt: 100, lastUsedAt: null, importance: 0.9 },
     { text: 'I am the twin.', usageClass: 'self_identity', visibility: 'local_only', updatedAt: 90, lastUsedAt: null, importance: 1.0 },
@@ -4054,8 +4054,10 @@ test('scoped owner memories inject into plain-path group turns, skip the skill p
     plain.cleanup();
   }
 
-  // Skill path: coworkRunner injects its own scoped memory blocks, so the
-  // daemon-side block must NOT duplicate into the skill turn's user message.
+  // Skill path: the runner (memoryReadOnly) injects only conversation-scope +
+  // external_safe operational preferences for the metaweb_group_task channel,
+  // so the daemon-side owner-scope block MUST ride the skill turn too — owner
+  // profile facts exist nowhere else on that path.
   const skill = await createHarness({
     listUserMemories: memoryDep,
     routing: { prompt: 'skill routing prompt', activeSkillIds: ['skill-x'] },
@@ -4069,7 +4071,8 @@ test('scoped owner memories inject into plain-path group turns, skip the skill p
     await skill.loop.runTick();
     assert.ok(skill.skillTurnCalls.length >= 1, 'routing hit runs the skill turn');
     for (const call of skill.skillTurnCalls) {
-      assert.ok(!call.userMessage.includes('<ownerMemories>'), 'no double injection on the skill path');
+      assert.match(call.userMessage, /<ownerMemories>/, 'owner-scope memory block rides the skill path');
+      assert.match(call.userMessage, /weekly Friday releases/);
     }
     assert.equal(skill.chatCalls.length, 0, 'plain completion never ran');
   } finally {

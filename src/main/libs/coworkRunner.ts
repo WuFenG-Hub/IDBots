@@ -1515,7 +1515,7 @@ interface PendingPermission {
   resolve: (result: PermissionResult) => void;
 }
 
-type SystemPromptProfileId = 'default' | 'service_order_a2a';
+type SystemPromptProfileId = 'default' | 'service_order_a2a' | 'memory_read_only_automation';
 type SystemPromptBlockMode = 'full' | 'compact';
 
 interface SystemPromptProfile {
@@ -1551,6 +1551,23 @@ const SERVICE_ORDER_A2A_SYSTEM_PROMPT_PROFILE: SystemPromptProfile = {
   includeMemoryPromptBlocks: true,
   includeMemoryStrategy: false,
   metawebMode: 'compact',
+};
+
+/**
+ * Memory-read-only automated sessions (group-task skill turns): the volatile
+ * memory READ blocks mount so the worker keeps its durable context, but the
+ * Memory STRATEGY section stays off — it carries the write invitations, and a
+ * session whose write gate is closed must never be told to persist facts it
+ * cannot persist (same split as the paid-order profile above, keeping the
+ * default full workspace/time/MetaWeb blocks these worker turns rely on).
+ */
+const MEMORY_READ_ONLY_AUTOMATION_SYSTEM_PROMPT_PROFILE: SystemPromptProfile = {
+  id: 'memory_read_only_automation',
+  workspaceSafetyMode: 'full',
+  localTimeMode: 'full',
+  includeMemoryPromptBlocks: true,
+  includeMemoryStrategy: false,
+  metawebMode: 'tiered',
 };
 
 interface SandboxPendingPermission {
@@ -5362,6 +5379,12 @@ export class CoworkRunner extends EventEmitter {
       && (sourceContext.sourceChannel === 'metaweb_order' || session.hiddenFromSessionList)
     ) {
       return SERVICE_ORDER_A2A_SYSTEM_PROMPT_PROFILE;
+    }
+    // Any other memory-read-only automated session (group-task skill turns via
+    // the orchestrator bridge) keeps memory reads but drops the write-inviting
+    // Memory STRATEGY section.
+    if (this.activeSessions.get(sessionId)?.memoryReadOnly === true) {
+      return MEMORY_READ_ONLY_AUTOMATION_SYSTEM_PROMPT_PROFILE;
     }
     return DEFAULT_SYSTEM_PROMPT_PROFILE;
   }

@@ -3986,6 +3986,11 @@ const startStartupMessageTier = (): void => {
         userMessage: params.userMessage,
         cwd,
         activeSkillIds: params.activeSkillIds,
+        // Group-task skill turns read memory (volatile injection + read-only
+        // recall tools) but never write it — read-only mode instead of the
+        // legacy full blackout, which left worker turns with zero memory
+        // context (they forgot their assignments overnight).
+        memoryReadOnly: true,
         // Group-task turns run real pipelines that routinely exceed the 300s
         // delegation default (task #41: 5-min watchdog fired mid-work, message
         // retries then re-ran the turn five times and dropped the trigger).

@@ -106,6 +106,15 @@ export interface RunExistingSessionSkillTurnParams {
   cwd: string;
   activeSkillIds?: string[];
   disableRemoteServicesPrompt?: boolean;
+  /**
+   * Group-task skill turns: start the session in READ-ONLY memory mode
+   * (volatile memory read injection + read-only recall tools stay on, every
+   * write stays off) INSTEAD of the legacy disableMemoryUpdates blackout,
+   * which suppressed reads too and left worker turns with no memory context
+   * at all. Only the group-task binding in main.ts sets this; other callers
+   * keep the blackout default.
+   */
+  memoryReadOnly?: boolean;
   onSkillExecutionStart?: () => Promise<void> | void;
   /**
    * Overrides the skill-turn watchdog timeout (ms). Defaults to 300s.
@@ -641,7 +650,11 @@ export async function runSkillTurnInExistingSession(
         skillIds: activeSkillIds,
         systemPrompt,
         autoApprove: true,
-        disableMemoryUpdates: true,
+        // Read-only memory mode for group-task skill turns (volatile reads +
+        // recall tools stay, every write stays off); the legacy full blackout
+        // remains the default for every other caller.
+        disableMemoryUpdates: params.memoryReadOnly === true ? false : true,
+        memoryReadOnly: params.memoryReadOnly === true,
         disableRemoteServicesPrompt,
         confirmationMode: 'text',
         workspaceRoot: cwd,

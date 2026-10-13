@@ -39,6 +39,9 @@ test('runOrchestratorSkillTurn persists active skill ids and disables remote ser
     updateSession(sessionId, patch) {
       calls.push({ type: 'updateSession', sessionId, patch });
     },
+    setSessionAutoOrigin(sessionId, origin) {
+      calls.push({ type: 'setSessionAutoOrigin', sessionId, origin });
+    },
   };
 
   runner.startSession = async (sessionId, userMessage, options) => {
@@ -102,6 +105,9 @@ test('runOrchestratorSkillTurn tags private chat turns with metaweb_private and 
     },
     upsertConversationMapping() {
       calls.push({ type: 'upsertConversationMapping' });
+    },
+    setSessionAutoOrigin(sessionId, origin) {
+      calls.push({ type: 'setSessionAutoOrigin', sessionId, origin });
     },
   };
 
@@ -414,4 +420,53 @@ test('runSkillTurnInExistingSession keeps the 300s watchdog default when no over
   t.mock.timers.tick(300_000); // default watchdog
   t.mock.timers.tick(30_000); // late-completion window expiry settles the timeout
   await rejection;
+});
+
+test('runSkillTurnInExistingSession memoryReadOnly swaps the blackout for read-only mode', async () => {
+  const buildHarness = () => {
+    const runner = new EventEmitter();
+    const calls = [];
+    const session = { id: 'group-task-worker-session-memory', cwd: '/tmp/group-task-workspace', messages: [] };
+    const store = {
+      getAppLanguage() { return 'en'; },
+      getSession(sessionId) {
+        assert.equal(sessionId, session.id);
+        return session;
+      },
+      updateSession() {},
+    };
+    runner.startSession = async (sessionId, userMessage, options) => {
+      calls.push({ type: 'startSession', sessionId, userMessage, options });
+      session.messages.push({ id: 'assistant-1', type: 'assistant', content: 'done', timestamp: Date.now() });
+      queueMicrotask(() => runner.emit('complete', sessionId));
+    };
+    return { runner, calls, session, store };
+  };
+
+  // Group-task binding (main.ts): memory reads restored, writes still off.
+  const readOnly = buildHarness();
+  await runSkillTurnInExistingSession(readOnly.runner, readOnly.store, {
+    sessionId: readOnly.session.id,
+    systemPrompt: 'system',
+    userMessage: 'work the assignment',
+    cwd: readOnly.session.cwd,
+    activeSkillIds: ['skill-x'],
+    memoryReadOnly: true,
+  });
+  const readOnlyStart = readOnly.calls.find((call) => call.type === 'startSession');
+  assert.equal(readOnlyStart.options.memoryReadOnly, true, 'read-only mode starts the session');
+  assert.equal(readOnlyStart.options.disableMemoryUpdates, false, 'the full blackout is OFF');
+
+  // Default (private-chat / guest callers): legacy blackout unchanged.
+  const blackout = buildHarness();
+  await runSkillTurnInExistingSession(blackout.runner, blackout.store, {
+    sessionId: blackout.session.id,
+    systemPrompt: 'system',
+    userMessage: 'work the assignment',
+    cwd: blackout.session.cwd,
+    activeSkillIds: ['skill-x'],
+  });
+  const blackoutStart = blackout.calls.find((call) => call.type === 'startSession');
+  assert.equal(blackoutStart.options.disableMemoryUpdates, true, 'legacy blackout stays the default');
+  assert.equal(blackoutStart.options.memoryReadOnly, false);
 });

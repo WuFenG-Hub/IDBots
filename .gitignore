@@ -584,3 +584,4 @@ man_base_data_pebble/
 !tests/coworkAssistantNarrationSurvival.test.ts
 !tests/coworkAssistantModePromptGate.test.mjs
 !tests/groupTaskWorkingState.test.mjs
+!tests/groupTaskSkillTurnMemoryReadOnly.test.mjs

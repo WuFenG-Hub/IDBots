@@ -4061,9 +4061,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * preferences) for group-task turns, built with the SAME importance-aware
    * builder the cowork runner and the private-chat path use. self_identity /
    * value_boundary / work_review stay in the experience block above — never
-   * double-injected. Callers mount this block on the PLAIN path only: a skill
-   * turn goes through coworkRunner, which already injects its own scoped
-   * memory blocks into the turn tail. Gated on the bot's memory policy (G8).
+   * double-injected. Callers mount this block on BOTH paths: the skill path's
+   * coworkRunner (memoryReadOnly) injects only conversation-scope memories and
+   * external_safe operational preferences for the metaweb_group_task channel,
+   * so owner-scope content exists only here. Gated on the bot's memory policy
+   * (G8).
    */
   const buildScopedMemoryBlockFor = (bot: GroupTaskDaemonBotFull, currentUserText?: string): string => {
     if (!deps.listUserMemories) return '';
@@ -4286,9 +4288,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const experienceBlock = buildExperienceBlockFor(bot);
     const constraintsBlock = buildAuthoritativeConstraintsBlockFor(task);
     const workingStateBlock = buildWorkingStateBlockFor(task);
-    // Scoped owner memories ride ONLY the plain path (callers prepend this to
-    // the stateless completion's user turn): a skill turn goes through
-    // coworkRunner, which already injects its own scoped memory blocks.
+    // Scoped owner memories ride BOTH paths (callers prepend this to the turn's
+    // user message): the plain path has no other memory source, and the skill
+    // path's runner only injects conversation-scope + external_safe operational
+    // preferences for this channel — owner-scope facts exist only here.
     const memoryContext = buildScopedMemoryBlockFor(bot, options?.currentUserText);
     // Entropy P1 (narrow specific heat): a worker's collaboration partner is
     // the chair — dispatch, verification and arbitration all flow through it —
@@ -6653,12 +6656,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const canRunSkillTurn = Boolean(
         routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
       );
-      // Plain path only: a skill turn goes through coworkRunner, which already
-      // injects its own scoped memory blocks into the turn tail — the
-      // daemon-side memory block would duplicate them there.
-      const fullUserTurn = canRunSkillTurn
-        ? userTurn
-        : [systemPromptParts.memoryContext, userTurn].filter(Boolean).join('\n\n');
+      // Both paths: the runner's memoryReadOnly injection covers only
+      // conversation-scope + external_safe operational preferences for this
+      // channel — the daemon's owner-scope block exists nowhere else.
+      const fullUserTurn = [systemPromptParts.memoryContext, userTurn].filter(Boolean).join('\n\n');
       const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: fullUserTurn, metadata: { origin: 'group_task' } });
       let reply = '';
       if (canRunSkillTurn) {
@@ -6960,12 +6961,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const canRunSkillTurn = Boolean(
         routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
       );
-      // Plain path only: a skill turn goes through coworkRunner, which already
-      // injects its own scoped memory blocks into the turn tail — the
-      // daemon-side memory block would duplicate them there.
-      const fullUserTurn = canRunSkillTurn
-        ? userTurn
-        : [systemPromptParts.memoryContext, userTurn].filter(Boolean).join('\n\n');
+      // Both paths: the runner's memoryReadOnly injection covers only
+      // conversation-scope + external_safe operational preferences for this
+      // channel — the daemon's owner-scope block exists nowhere else.
+      const fullUserTurn = [systemPromptParts.memoryContext, userTurn].filter(Boolean).join('\n\n');
       const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: fullUserTurn, metadata: { origin: 'group_task' } });
       let reply = '';
       if (canRunSkillTurn) {
@@ -7179,10 +7178,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         error instanceof Error ? error.message : String(error),
       );
     };
-    // Plain path only: a skill turn goes through coworkRunner, which already
-    // injects its own scoped memory blocks into the turn tail — the
-    // daemon-side memory block would duplicate them there.
-    if (!canRunSkillTurn && memoryContext) {
+    // Both paths carry the daemon's owner-scope memory block. The skill path
+    // runs through coworkRunner in memoryReadOnly mode, whose volatile
+    // injection covers only the CONVERSATION scope + external_safe operational
+    // preferences for the metaweb_group_task channel (memoryScopeResolver) —
+    // the owner-scope profile facts/preferences below exist nowhere else, and
+    // the runner's earlier disableMemoryUpdates blackout meant skill turns saw
+    // no memory content at all (the old "runner injects it" premise was false).
+    if (memoryContext) {
       userMessage = [memoryContext, userMessage].filter(Boolean).join('\n\n');
     }
     const turnUserMessage = coworkStore.addMessage(session.id, { type: 'user', content: userMessage, metadata: { origin: 'group_task' } });
