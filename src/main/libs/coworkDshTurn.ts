@@ -573,13 +573,17 @@ export class DshTurnHub {
   /**
    * Spawn (or reuse) the shared runtime without opening a session or sending
    * a prompt. Used at app-ready so the first cowork turn does not pay process
-   * boot + plugin load. Workspace is mounted for bash/fs plugin load but not
-   * pinned — execution cwd is per-session on session/ensure, and the first
-   * real turn still owns the composition plugin-default lock.
+   * boot + plugin load. `pinWorkspace` (default false) additionally claims the
+   * composition workspace pin at warmup — execution cwd stays per-session on
+   * session/ensure, but a first real turn in the same directory then produces
+   * no workspace config diff (and no synchronous runtime restart inside that
+   * turn). MCP servers and automation opt-ins are never accumulated here: a
+   * synthetic warmup session must not claim per-bot mounts.
    */
   async prewarm(input: {
     provider: DshTurnProviderRoute
     workspace?: { cwd: string }
+    pinWorkspace?: boolean
   }): Promise<void> {
     await this.ensureKernel({
       sessionId: DSH_WARMUP_SESSION_ID,
@@ -589,7 +593,7 @@ export class DshTurnHub {
       sections: [],
       workspace: input.workspace,
       callbacks: DSH_WARMUP_CALLBACKS,
-    }, { pinWorkspace: false, accumulateMcp: false })
+    }, { pinWorkspace: input.pinWorkspace === true, accumulateMcp: false })
   }
 
   /** Start (or reuse) the runtime and run one turn to completion. */

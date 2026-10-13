@@ -59,7 +59,8 @@ function loadModules() {
 }
 
 // Mirrors coworkStore.listSessions(): the returned array is already ordered
-// `pinned DESC, activity_at DESC, ...`, so [0] is the warmed session.
+// `pinned DESC, activity_at DESC, ...`; the warmup walks it top-down and warms
+// the FIRST resolvable session route (then the app-global default route).
 class RecordingStore {
   constructor(sessions) {
     this.sessions = sessions
@@ -173,7 +174,7 @@ test('prewarm falls back to the default route when the pinned session model was 
 
   const delta = readLogDelta(before)
   assert.ok(
-    delta.includes('Pinned session route did not resolve'),
+    delta.includes('Session route did not resolve'),
     'the degradation must be observable in cowork.log',
   )
   assert.ok(delta.includes(pinnedId), 'the degradation log line must name the pinned session')
@@ -198,13 +199,59 @@ test('prewarm still prefers the pinned session route when that route resolves', 
 
   await runner.prewarmDshRuntime()
 
-  assert.equal(prewarmCalls.length, 1)
+  // Session route FIRST (the likeliest immediate turn), then the app-global
+  // default route — a new chat's first message lands on an already-warm
+  // runtime either way instead of restarting it inside the turn.
+  assert.equal(prewarmCalls.length, 2)
   assert.equal(
     prewarmCalls[0]?.provider?.key,
     'gw-sess',
     'the session route still wins over the app-global default route',
   )
   assert.equal(prewarmCalls[0]?.provider?.model, 'sess-model-1')
+  assert.equal(prewarmCalls[1]?.provider?.key, 'gw-default')
+  assert.equal(prewarmCalls[1]?.provider?.model, 'default-model-1')
+})
+
+// ---- a session already riding the default route warms ONE process ---------
+
+test('prewarm dedupes the session route and the default route onto one warm', async () => {
+  const { runner: runnerModule, claudeSettings } = loadModules()
+  installApiConfig(claudeSettings)
+
+  const { runner, prewarmCalls } = makeRunner({
+    runnerModule,
+    sessions: [
+      { id: 'prewarm-default-riding-session', model: 'default-model-1', modelProvider: 'gw-default', cwd: process.cwd() },
+    ],
+  })
+
+  await runner.prewarmDshRuntime()
+
+  assert.equal(prewarmCalls.length, 1, 'identical route identities must not warm twice')
+  assert.equal(prewarmCalls[0]?.provider?.key, 'gw-default')
+  assert.equal(prewarmCalls[0]?.provider?.model, 'default-model-1')
+})
+
+// ---- a stale top row falls through to the next resolvable session row ------
+
+test('prewarm skips a stale top session and warms the next resolvable row plus the default', async () => {
+  const { runner: runnerModule, claudeSettings } = loadModules()
+  installApiConfig(claudeSettings)
+
+  const { runner, prewarmCalls } = makeRunner({
+    runnerModule,
+    sessions: [
+      { id: 'prewarm-stale-top', model: 'stale-model-1', modelProvider: 'gw-stale', cwd: process.cwd() },
+      { id: 'prewarm-live-second', model: 'sess-model-1', modelProvider: 'gw-sess', cwd: process.cwd() },
+    ],
+  })
+
+  await runner.prewarmDshRuntime()
+
+  assert.equal(prewarmCalls.length, 2)
+  assert.equal(prewarmCalls[0]?.provider?.key, 'gw-sess', 'the first RESOLVABLE row wins, not blindly [0]')
+  assert.equal(prewarmCalls[1]?.provider?.key, 'gw-default')
 })
 
 // ---- no pinned session at all: default route (unchanged behaviour) ---------

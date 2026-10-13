@@ -8238,6 +8238,12 @@ export class CoworkRunner extends EventEmitter {
    * Best-effort DSH runtime spawn after app-ready. Mirrors the retired Claude
    * SDK module pre-warm: overlap window-load with process boot + plugin load
    * so the first cowork turn only pays session/ensure + the LLM round-trip.
+   * Warms BOTH routes the first turns typically use — the most recent
+   * session's route (continuation) and the app-global default route (a new
+   * chat) — because a first turn whose model/provider is not in the warmed
+   * runtime's composition restarts the process synchronously inside that
+   * turn (the 2026-10 first-sentence latency report: cowork.log showed the
+   * dominant restart diff was `providers`). Duplicate routes warm once.
    * Skips when no provider/key is configured. Never throws.
    */
   prewarmDshRuntime(): Promise<void> {
@@ -8256,58 +8262,84 @@ export class CoworkRunner extends EventEmitter {
           }
         }).catch(() => undefined);
       }
-      const recent = this.store.listSessions?.()?.[0];
-      // The warmed row is whatever listSessions() ranks first — and that is
-      // always a PINNED session (ORDER BY s.pinned DESC, activity_at DESC, ...).
-      // Its STORED model/provider can outlive the provider catalog: once the
+      // Session-route warmup: the first row listSessions() ranks (pinned /
+      // most recent activity — possibly a background orchestration row whose
+      // model resolves through its bot brain or the global default). Its
+      // STORED model/provider can outlive the provider catalog: once the
       // provider drops that model id (or the provider itself is disabled),
       // resolveSessionDshRoute rethrows the `... provider selection is
-      // required.` ModelProviderSelectionError. Letting that escape voided the
-      // entire warmup even though the app-global default route was healthy, so
-      // every startup cold-started. Isolate the session resolution: a dead
-      // pinned route degrades to the default route (session route still wins
-      // whenever it does resolve).
+      // required.` ModelProviderSelectionError. Each session resolution is
+      // isolated — a dead route degrades out of the list (next row), never
+      // voids the warmup.
+      const rows = this.store.listSessions?.() ?? [];
       let sessionRoute: ReturnType<typeof resolveDshProviderRoute> = null;
-      if (recent?.id) {
+      let sessionRow: { id: string; cwd?: string | null } | null = null;
+      for (const row of rows) {
+        if (!row?.id) continue;
         try {
-          sessionRoute = this.resolveSessionDshRoute(recent.id);
+          const route = this.resolveSessionDshRoute(row.id);
+          if (route?.baseUrl && route.apiKey) {
+            sessionRoute = route;
+            sessionRow = row;
+            break;
+          }
         } catch (error) {
-          coworkLog('WARN', 'prewarmDshRuntime', 'Pinned session route did not resolve; warming the default route', {
-            sessionId: recent.id,
+          coworkLog('WARN', 'prewarmDshRuntime', 'Session route did not resolve; skipping it in warmup', {
+            sessionId: row.id,
             error: error instanceof Error ? error.message : String(error),
           });
         }
       }
       const defaultRoute = resolveDshProviderRoute();
-      const route = (sessionRoute?.baseUrl && sessionRoute.apiKey) ? sessionRoute : defaultRoute;
-      if (!route?.baseUrl || !route.apiKey) {
-        coworkLog('INFO', 'prewarmDshRuntime', 'Skipped: no configured DSH provider');
-        return;
-      }
-      let cwd = '';
+      // Session route first (the likeliest immediate turn), then the
+      // app-global default (a brand-new chat). Identity dedupe keeps a
+      // session already riding the default at one process.
+      const warmRoutes: Array<{ route: ReturnType<typeof resolveDshProviderRoute>; cwd: string }> = [];
+      const seen = new Set<string>();
+      const pushRoute = (route: ReturnType<typeof resolveDshProviderRoute>, cwd: string): void => {
+        if (!route?.baseUrl || !route.apiKey) return;
+        const identity = `${route.provider}|${route.baseUrl}|${route.model}`;
+        if (seen.has(identity)) return;
+        seen.add(identity);
+        warmRoutes.push({ route, cwd });
+      };
+      let configCwd = '';
       try {
-        cwd = (this.store.getConfig?.()?.workingDirectory ?? '').trim();
+        configCwd = (this.store.getConfig?.()?.workingDirectory ?? '').trim();
       } catch {
-        cwd = '';
+        configCwd = '';
       }
-      if (recent?.id) {
+      if (sessionRoute) {
+        let sessionCwd = configCwd;
         try {
-          const row = this.store.getSessionWithoutMessages?.(recent.id) ?? this.store.getSession(recent.id);
-          if (row?.cwd?.trim()) cwd = row.cwd.trim();
+          const row = this.store.getSessionWithoutMessages?.(sessionRow!.id) ?? this.store.getSession(sessionRow!.id);
+          if (row?.cwd?.trim()) sessionCwd = row.cwd.trim();
         } catch {
           // Test fakes and partial stores still warm the default cwd.
         }
+        pushRoute(sessionRoute, sessionCwd);
+      }
+      pushRoute(defaultRoute, configCwd);
+      if (warmRoutes.length === 0) {
+        coworkLog('INFO', 'prewarmDshRuntime', 'Skipped: no configured DSH provider');
+        return;
       }
       const hub = this.ensureDshTurnHub();
-      await hub.prewarm({
-        provider: this.dshTurnProviderFromRoute(route),
-        ...(cwd ? { workspace: { cwd } } : {}),
-      });
-      coworkLog('INFO', 'prewarmDshRuntime', 'DSH runtime ready', {
-        provider: route.provider,
-        model: route.model,
-        cwd: cwd || null,
-      });
+      for (const { route, cwd } of warmRoutes) {
+        await hub.prewarm({
+          provider: this.dshTurnProviderFromRoute(route),
+          ...(cwd ? { workspace: { cwd } } : {}),
+          // Pin the composition workspace at warmup so a first real turn in
+          // the same directory produces no workspace config diff (and hence
+          // no synchronous runtime restart inside that turn).
+          pinWorkspace: true,
+        });
+        coworkLog('INFO', 'prewarmDshRuntime', 'DSH runtime ready', {
+          provider: route.provider,
+          model: route.model,
+          cwd: cwd || null,
+        });
+      }
     } catch (error) {
       coworkLog('WARN', 'prewarmDshRuntime', 'Warmup failed; first turn will cold-start', {
         error: error instanceof Error ? error.message : String(error),
