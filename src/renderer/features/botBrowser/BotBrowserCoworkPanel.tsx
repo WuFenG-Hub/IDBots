@@ -13,9 +13,8 @@ import { ActiveSkillBadge } from '../../components/skills';
 import { RootState } from '../../store';
 import { clearActiveSkills } from '../../store/slices/skillSlice';
 import { browserCoworkService } from '../../services/browserCowork';
-import { configService } from '../../services/config';
-import { localStore } from '../../services/store';
-import { CONFIG_KEYS, type AppConfig, type ChatExperienceMode } from '../../config';
+import { useChatExperienceMode } from '../../hooks/useChatExperienceMode';
+import { AssistantActivityIndicator } from '../../components/cowork/AssistantActivityIndicator';
 import { projectsService } from '../../services/projects';
 import { i18nService } from '../../services/i18n';
 import { getCompactFolderName } from '../../utils/path';
@@ -48,7 +47,11 @@ export function filterVisiblePanelMessages(messages: CoworkMessage[]): CoworkMes
   });
 }
 
-const PanelMessage: React.FC<{ message: CoworkMessage; onOpenUri: (uri: string) => void }> = ({ message, onOpenUri }) => {
+const PanelMessage: React.FC<{
+  message: CoworkMessage;
+  onOpenUri: (uri: string) => void;
+  isAssistantMode?: boolean;
+}> = ({ message, onOpenUri, isAssistantMode = false }) => {
   if (message.type === 'user') {
     return (
       <div className="flex justify-end">
@@ -59,6 +62,18 @@ const PanelMessage: React.FC<{ message: CoworkMessage; onOpenUri: (uri: string) 
     );
   }
   if (message.type !== 'assistant' || !message.content.trim()) return null;
+  if (isAssistantMode) {
+    // Assistant mode aligns the panel with the main cowork chat: bot answers
+    // (narration and final alike) sit in the neutral-gray .assistant-bubble
+    // instead of bare full-width text, so both surfaces read the same way.
+    return (
+      <div className="min-w-0">
+        <div className="assistant-bubble w-fit max-w-[92%] rounded-[22px] px-[16px] py-[10px] text-[13px] leading-5 dark:text-claude-darkText text-claude-text shadow-subtle [&_h1]:text-sm [&_h1]:mt-3 [&_h1]:mb-1.5 [&_h2]:text-[13px] [&_h2]:mt-2.5 [&_h2]:mb-1 [&_h3]:text-[13px] [&_h3]:mt-2 [&_h3]:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:text-xs [&_code]:break-all [&_a]:break-all">
+          <MarkdownContent content={message.content} compact onOpenBotBrowserUri={onOpenUri} />
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="min-w-0 text-[13px] leading-5 dark:text-claude-darkText text-claude-text [&_h1]:text-sm [&_h1]:mt-3 [&_h1]:mb-1.5 [&_h2]:text-[13px] [&_h2]:mt-2.5 [&_h2]:mb-1 [&_h3]:text-[13px] [&_h3]:mt-2 [&_h3]:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:text-xs [&_code]:break-all [&_a]:break-all">
       <MarkdownContent content={message.content} compact onOpenBotBrowserUri={onOpenUri} />
@@ -212,21 +227,10 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
   const [pendingModelEffort, setPendingModelEffort] = useState<ComposerModelEffortPick | null>(null);
   // Chat experience mode (Settings > General). Assistant mode defaults
   // reasoning effort to off, so the panel's effort chip displays 'off' when no
-  // explicit pick exists. Same app_config store-changed subscription as
-  // CoworkSessionDetail, so flipping the mode re-renders without a reload.
-  const [chatExperienceMode, setChatExperienceMode] = useState<ChatExperienceMode>(
-    () => configService.getConfig().chatExperienceMode ?? 'assistant',
-  );
-  useEffect(() => {
-    const unsubscribe = localStore.onChanged(({ key }) => {
-      if (key !== CONFIG_KEYS.APP_CONFIG) return;
-      void localStore.getItem<AppConfig>(CONFIG_KEYS.APP_CONFIG).then((stored) => {
-        setChatExperienceMode(stored?.chatExperienceMode ?? 'assistant');
-      });
-    });
-    return unsubscribe;
-  }, []);
-  const isAssistantMode = chatExperienceMode === 'assistant';
+  // explicit pick exists, and assistant mode also restyles the panel's bot
+  // answers and streaming indicator (see useChatExperienceMode for the
+  // cross-window reactivity contract).
+  const isAssistantMode = useChatExperienceMode() === 'assistant';
 
   // Slash commands for the '+' menu: browser sessions are regular cowork
   // sessions, so once one is live the full session command set applies; in
@@ -297,7 +301,7 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
   }, []);
 
   const renderMessage = (message: CoworkMessage) => (
-    <PanelMessage key={message.id} message={message} onOpenUri={handleOpenUri} />
+    <PanelMessage key={message.id} message={message} onOpenUri={handleOpenUri} isAssistantMode={isAssistantMode} />
   );
 
   const workspaceLabel = workspaceSelection
@@ -362,11 +366,24 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
           visibleMessages.map(renderMessage)
         )}
         {isStreaming ? (
-          <div className="flex items-center gap-1 px-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
-            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:150ms]" />
-            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:300ms]" />
-          </div>
+          // Assistant mode uses the same bot-avatar activity indicator as the
+          // main cowork chat (avatar + breathing ring + status line); the
+          // panel is a side surface, so the indicator's compact inline form
+          // fits without the transcript's gutter wrapper. Professional mode
+          // keeps the original pulse dots.
+          isAssistantMode ? (
+            <AssistantActivityIndicator
+              inline
+              messages={messages}
+              avatar={currentSession?.metabotAvatar ?? selectedMetabot?.avatar ?? null}
+            />
+          ) : (
+            <div className="flex items-center gap-1 px-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:150ms]" />
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:300ms]" />
+            </div>
+          )
         ) : null}
       </div>
 

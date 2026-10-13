@@ -1081,10 +1081,12 @@ test('assistant mode: unassembled mixed commentary + final_answer split into nar
   assert.equal(textFinal.metadata, undefined, 'the reply is plain visible text')
 })
 
-test('assistant mode: a streamed mixed step settles the stream as narration and mints the reply bubble', () => {
+test('assistant mode: a streamed mixed step keeps the streamed bubble verbatim and does not duplicate the reply', () => {
   const mapper = assistantMapper()
   // Mid-stream the wire carries no phase: commentary and the final answer
-  // share one text stream.
+  // share one text stream. The immutability contract keeps the streamed
+  // bubble exactly as the user watched it (both parts); the classified
+  // final_answer tail must not be re-emitted as a duplicate reply bubble.
   mapper.consume({
     type: 'assistant/chunk',
     data: { chunk: { type: 'text-delta', index: 0, text: 'First, deliberation.' } },
@@ -1111,11 +1113,53 @@ test('assistant mode: a streamed mixed step settles the stream as narration and 
     },
   })
   const settles = done.filter((a) => a.kind === 'messageFinalize' && a.slot === 'text')
-  assert.equal(settles.length, 2, 'the streamed bubble settles as narration, then the reply bubble settles')
-  assert.equal(settles[0].content, 'First, deliberation.')
+  assert.equal(settles.length, 1, 'the streamed bubble settles once, as narration')
+  assert.equal(settles[0].content, 'First, deliberation.The final answer.', 'the bubble keeps the text the user watched stream')
   assert.equal(settles[0].metadata.narration, true)
-  assert.equal(settles[1].content, 'The final answer.')
-  assert.equal(settles[1].metadata, undefined)
+  assert.equal(
+    done.some((a) => a.kind === 'messageFinalize' && a.slot === 'text' && a.metadata === undefined),
+    false,
+    'the contained final tail is not re-emitted as a duplicate reply bubble',
+  )
+})
+
+test('assistant mode: assembled commentary diverging from the stream never rewrites the streamed narration', () => {
+  const mapper = assistantMapper()
+  // The streamed text is what the user watched appear; the assembled message
+  // (phase reclassification, provider quirks) may classify or serialize
+  // differently. The settle must keep the streamed buffer verbatim — a
+  // bubble's text may never change after it appeared (2026-10-13 twinbot
+  // acceptance report).
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 0, text: '好，方案 A——我这就重写草案。' } },
+  })
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } },
+  })
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 2, step: 1,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '好，按方案 A 走——机制说明写好后我再重写草案。' },
+          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+        ],
+        source: { kind: 'model', replayState: { blocks: [
+          { type: 'text', textSignature: sig('commentary') },
+          { type: 'tool-call' },
+        ] } },
+      },
+    },
+  })
+  const finalize = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(finalize.content, '好，方案 A——我这就重写草案。', 'the streamed text wins, not the assembled rewrite')
+  assert.equal(finalize.metadata.narration, true)
+  assert.equal(done.some((a) => a.kind === 'message' && a.message.metadata?.narration === true), false,
+    'the diverging assembled commentary is not re-emitted as an extra bubble either')
 })
 
 test('assistant mode: a turn whose only output is commentary is still an empty terminal turn', () => {

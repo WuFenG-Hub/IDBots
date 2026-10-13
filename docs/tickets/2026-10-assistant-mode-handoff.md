@@ -3,6 +3,13 @@
 Date: 2026-10-13
 Status: Phase 1 + first polish round shipped to `main`. This document hands off the remaining work to the next dev agent.
 
+> **2026-10-13 update (branch `feat/assistant-phase2-ux`)** — the following landed on that branch (not yet merged):
+> - Acceptance-report UX fixes: the inline activity indicator is now visible through the ENTIRE running turn (it used to step aside while reply text streamed, leaving multi-minute tool windows looking idle), narration bubbles settle verbatim (a bubble's text never rewrites after it appeared — streamed buffer wins over the assembled message text), and the indicator reflects api_retry/requesting transport status (runtime-status messages are merged into its activity list by timestamp).
+> - Phase 2 item 1 (delegation copy): assistant-mode wording for the delegation-blocking banner + disabled composer, and sidebar rows strip the `[编排任务] `/`[Orchestration Task] ` prefix (render-only; stored titles untouched). `useChatExperienceMode` hook extracted for reuse.
+> - Phase 2 item 2 (Bot Browser panel): panel bot answers render in `.assistant-bubble` and streaming shows the inline AssistantActivityIndicator. Decision: A2A chat keeps its own IM-style bubbles (its thinking/tool gating was already in place); a full A2A restyle is deferred pending acceptance feedback.
+> - Cosmetic nit 4b: light-mode user bubble gains a hairline inset ring (`.cowork-user-bubble`) against the neutral chat background.
+> - Remaining from the list below: item 3 (per-model narration safeguard — only if acceptance shows it's needed) and nit 4c (effort 'off' quality).
+
 ## 1. What "assistant mode" is
 
 A chat experience mode switch in **Settings → General** (`chatExperienceMode`: `'professional' | 'assistant'`, default `'assistant'`). Target: non-technical users — the bot should feel like a living personal assistant, not an engineering console.
