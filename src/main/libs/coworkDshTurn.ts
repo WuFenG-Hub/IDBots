@@ -1801,9 +1801,12 @@ function providerRouteOf(provider: DshTurnProviderRoute): DshProviderRoute {
   // provider: a catalog-unknown gateway serving a reasoning-capable model
   // would otherwise materialize reasoning:false and lose all effort control.
   // The native route is exempt — the first-party adapter owns its own ladder.
+  // baseUrl disambiguates same-family dialects: GLM speaks the z.ai thinking
+  // object on zhipu/z.ai endpoints but plain reasoning_effort on the OpenCode
+  // Go gateway (which 400s unknown field "thinking").
   const reasoning = provider.key === 'deepseek-official'
     ? null
-    : dshModelReasoningDeclaration(provider.model, provider.apiFormat);
+    : dshModelReasoningDeclaration(provider.model, provider.apiFormat, provider.baseUrl);
   return {
     key: provider.key,
     apiFormat: provider.apiFormat,

@@ -43,9 +43,12 @@ test('glm rides chat completions even under the responses provider default', () 
   }
 })
 
-test('glm keeps a deliberately configured openai/anthropic format', () => {
+test('glm keeps a deliberately configured openai format; anthropic corrects to openai too', () => {
+  // The gateway's anthropic /v1/messages wire serves only minimax-m3 and
+  // qwen3.8-flash (pi-ai catalog) — glm on it is ModelProtocolUnsupported,
+  // same as the responses wire.
   assert.equal(resolveOpenCodeGoApiFormat({ baseUrl: GATEWAY, model: 'z-ai/glm-5.3-flash', apiFormat: 'openai' }), 'openai')
-  assert.equal(resolveOpenCodeGoApiFormat({ baseUrl: GATEWAY, model: 'z-ai/glm-5.3-flash', apiFormat: 'anthropic' }), 'anthropic')
+  assert.equal(resolveOpenCodeGoApiFormat({ baseUrl: GATEWAY, model: 'z-ai/glm-5.3-flash', apiFormat: 'anthropic' }), 'openai')
 })
 
 test('deepseek keeps the responses default — the verified-working route', () => {
@@ -103,4 +106,91 @@ test('proxy resolveUpstreamAPIType: gateway correction wins over the explicit re
   assert.equal(resolveUpstreamAPIType('openai', 'gpt-x', 'openai', undefined), 'responses')
   // Non-gateway route with glm: unchanged legacy behavior.
   assert.equal(resolveUpstreamAPIType('zhipu', 'glm-5.3', 'responses', 'https://open.bigmodel.cn/api/v1'), 'responses')
+})
+
+// Thinking-dialect fork: the same GLM family speaks the z.ai `thinking` object
+// on zhipu/z.ai OpenAI-compatible endpoints but the standard `reasoning_effort`
+// field on the OpenCode Go gateway (2026-10-13 continuation: after the protocol
+// correction, the zai declaration produced `400 ... unknown field "thinking"`).
+test('dshModelReasoningDeclaration: GLM chat-completions dialect forks by gateway', () => {
+  const reasoningPath = path.resolve(here, '..', 'dist-electron', 'main', 'libs', 'dshModelReasoning.js')
+  const { dshModelReasoningDeclaration } = require(reasoningPath)
+
+  // OpenCode gateway: plain reasoning_effort ladder, no thinkingFormat — the
+  // `thinking` object is an unknown parameter there.
+  const gateway = dshModelReasoningDeclaration('z-ai/glm-5.3-flash', 'openai', GATEWAY)
+  assert.ok(gateway, 'gateway declaration present')
+  assert.equal(gateway.compat.thinkingFormat, undefined)
+  assert.equal(gateway.compat.supportsReasoningEffort, true)
+  assert.deepEqual(gateway.reasoningEfforts, { off: null, low: 'low', high: 'high', max: 'max' })
+
+  // zhipu/z.ai endpoints keep the zai thinking dialect (explicit enable/disable).
+  const zai = dshModelReasoningDeclaration('glm-5.3-flash', 'openai', 'https://open.bigmodel.cn/api/coding/paas/v4')
+  assert.equal(zai.compat.thinkingFormat, 'zai')
+  assert.equal(zai.compat.supportsReasoningEffort, false)
+  assert.deepEqual(zai.reasoningEfforts, { off: null, low: 'enabled', high: 'enabled', max: 'enabled' })
+
+  // Unknown/absent baseUrl keeps the family default (the zai dialect) — a
+  // custom relay serving GLM speaks the family's own wire, not the gateway's.
+  assert.equal(
+    dshModelReasoningDeclaration('glm-5.3-flash', 'openai', undefined)?.compat.thinkingFormat,
+    'zai',
+  )
+  assert.equal(
+    dshModelReasoningDeclaration('glm-5.3-flash', 'openai', null)?.compat.thinkingFormat,
+    'zai',
+  )
+
+  // Other wires and families are untouched by the fork.
+  assert.equal(dshModelReasoningDeclaration('glm-5.3-flash', 'responses', GATEWAY)?.compat.supportsDeveloperRole, false)
+  assert.equal(dshModelReasoningDeclaration('glm-5.3-flash', 'anthropic', GATEWAY)?.compat.forceAdaptiveThinking, true)
+  assert.equal(dshModelReasoningDeclaration('deepseek-v4.1-flash', 'openai', GATEWAY)?.compat.thinkingFormat, 'deepseek')
+})
+
+// End-to-end through the runtime config generator: the gateway GLM declaration
+// must materialize as a plain reasoning_effort model — no thinkingFormat: 'zai'
+// can reach the wire or the gateway 400s `unknown field "thinking"` again.
+// Skips when dsh-runtime/node_modules is absent (same guard as
+// dshRuntimeOpencodeSessionHeaders).
+test('generated runtime config: gateway GLM materializes without the zai thinking dialect', async (t) => {
+  const { existsSync } = await import('node:fs')
+  const worktreeRoot = path.resolve(here, '..')
+  if (!existsSync(path.join(worktreeRoot, 'dsh-runtime', 'node_modules', '@deepseek-ai', 'dsh-llm-pi-ai'))) {
+    t.skip('dsh-runtime dependencies not installed')
+    return
+  }
+  const { pathToFileURL } = await import('node:url')
+  const { generateRuntimeConfig } = await import(pathToFileURL(
+    path.join(worktreeRoot, 'dsh-runtime', 'lib', 'generate-runtime-config.mjs')).href)
+  const reasoningPath = path.resolve(here, '..', 'dist-electron', 'main', 'libs', 'dshModelReasoning.js')
+  const { dshModelReasoningDeclaration } = require(reasoningPath)
+
+  const declaration = dshModelReasoningDeclaration('z-ai/glm-5.3-flash', 'openai', GATEWAY)
+  const routeModel = {
+    id: 'z-ai/glm-5.3-flash',
+    contextWindow: 1_048_576,
+    ...(declaration ? { reasoningEfforts: declaration.reasoningEfforts, compat: declaration.compat } : {}),
+  }
+  const config = generateRuntimeConfig({
+    sessionRoot: '/tmp/dsh-opencode-glm-dialect-test',
+    providers: [{
+      key: 'opencode',
+      apiFormat: 'openai',
+      baseUrl: GATEWAY,
+      apiKeyEnv: 'IDBOTS_DSH_KEY_OPENCODE',
+      models: [routeModel],
+    }],
+  })
+  const provider = config.find((e) => e.id === 'llm-pi-ai').config.providers.opencode
+  const model = provider.models.find((m) => m.id === 'z-ai/glm-5.3-flash')
+  assert.ok(model, 'route model present in the pi-ai providers dict')
+  // The generated config forwards the declaration verbatim; dsh-llm-pi-ai
+  // materializes it into thinkingLevelMap at plugin load (resolveModelReasoning:
+  // off:null stays absent from the map = "supported, send nothing").
+  assert.equal(model.compat?.thinkingFormat, undefined, 'no zai thinkingFormat on the gateway wire')
+  assert.equal(model.compat?.supportsReasoningEffort, true)
+  assert.equal(model.reasoningEfforts?.low, 'low')
+  assert.equal(model.reasoningEfforts?.high, 'high')
+  assert.equal(model.reasoningEfforts?.max, 'max')
+  assert.equal(model.reasoningEfforts?.off, null, 'off stays the send-nothing shape')
 })
