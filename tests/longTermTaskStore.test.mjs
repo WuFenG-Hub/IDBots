@@ -438,6 +438,153 @@ test('listRelatedSessionIds unions the definition session and every sub-project 
   );
 });
 
+test('board summaries carry the waiting_owner sessions as decisionSessionIds', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  const [first, , third] = store.getTask(taskId).subtasks;
+  store.beginSubtask(first.id, 'twin');
+  store.bindSession(first.id, 'sess-s1', 'system');
+  store.bindSession(third.id, 'sess-s2', 'system');
+
+  // Nothing owed yet: no decision sessions.
+  let card = store.listBoard().cards.find((c) => c.id === taskId);
+  assert.deepEqual(card.decisionSessionIds, []);
+
+  // A parked owner decision and an acceptance proposal both surface their
+  // bound sessions — both are decision surfaces the sidebar must lift out of
+  // the autonomous fold.
+  assert.ok(store.proposeSubtask(first.id, { evidence: [{ kind: 'pin', uri: 'pin://x' }], summary: 's' }, 'twin').ok);
+  assert.ok(store.beginSubtask(third.id, 'twin').ok);
+  assert.ok(store.waitSubtask(third.id, { kind: 'owner', note: 'need a call' }, 'twin').ok);
+  card = store.listBoard().cards.find((c) => c.id === taskId);
+  assert.deepEqual([...card.decisionSessionIds].sort(), ['sess-s1', 'sess-s2']);
+
+  // The verdict lands on #1: its session drops out; #3's stays until decided.
+  store.acceptSubtask(first.id, 'owner');
+  card = store.listBoard().cards.find((c) => c.id === taskId);
+  assert.deepEqual(card.decisionSessionIds, ['sess-s2']);
+
+  store.unblockSubtask(third.id, 'owner');
+  card = store.listBoard().cards.find((c) => c.id === taskId);
+  assert.deepEqual(card.decisionSessionIds, [], 'folds back once no verdict is owed');
+});
+
+test('completeTask: owner one-click closure skips open sub-projects and lands the task in done', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  const [first, second] = store.getTask(taskId).subtasks;
+  store.beginSubtask(first.id, 'twin');
+  store.proposeSubtask(first.id, { evidence: [{ kind: 'pin', uri: 'pin://x' }], summary: 's' }, 'twin');
+
+  const closed = store.completeTask(taskId, 'owner', { note: 'goal met in one session' });
+  assert.ok(closed.ok, JSON.stringify(closed));
+  assert.equal(closed.value.stage, 'done');
+  assert.equal(closed.value.column, 'done');
+  assert.equal(closed.value.currentSubtaskId, null, 'focus pin cleared');
+  const after = store.getTask(taskId);
+  // Every open sub-project (waiting_owner #1, pending #2/#3) is skipped — never accepted.
+  assert.ok(after.subtasks.every((sub) => sub.status === 'skipped'));
+  assert.equal(after.progress.total, 0, 'skipped rows leave the progress math entirely');
+  assert.equal(after.events[0].kind, 'completed');
+  assert.match(after.events[0].detail, /goal closed at task level by owner; 3 open sub-project\(s\) skipped/);
+  assert.match(after.events[0].detail, /goal met in one session/);
+  // Per-subtask skip events are journalled for the audit trail.
+  assert.ok(after.subtasks.every((sub) => after.events.some((event) => event.kind === 'skipped' && event.subtaskId === sub.id)));
+
+  // Closing again, or from a terminal stage, is refused.
+  const again = store.completeTask(taskId, 'owner');
+  assert.equal(again.ok, false);
+  assert.equal(again.code, 'VALIDATION');
+});
+
+test('completeTask authority: twin refused without the delegate switch, allowed with it; evidence validated', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+
+  const refused = store.completeTask(taskId, 'twin', { note: 'all shipped' });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, 'FORBIDDEN');
+
+  assert.ok(store.updateTask({ taskId, acceptanceDelegate: true }, 'owner').ok);
+  const badEvidence = store.completeTask(taskId, 'twin', {
+    note: 'all shipped',
+    evidence: [{ kind: 'pin', uri: 'https://not-a-pin' }],
+  });
+  assert.equal(badEvidence.ok, false);
+  assert.equal(badEvidence.code, 'VALIDATION');
+  assert.match(badEvidence.error, /malformed evidence/);
+
+  const allowed = store.completeTask(taskId, 'twin', {
+    note: 'all shipped',
+    evidence: [{ kind: 'url', uri: 'https://x.example/post', note: 'published thread' }],
+  });
+  assert.ok(allowed.ok, JSON.stringify(allowed));
+  assert.equal(allowed.value.stage, 'done');
+  const events = store.getTask(taskId).events;
+  assert.equal(events[0].kind, 'completed');
+  assert.match(events[0].detail, /url: https:\/\/x\.example\/post/);
+});
+
+test('completeTask is allowed from paused but refused from defining (a draft is cancelled, not completed)', async () => {
+  const { store } = await openStore();
+  const created = store.createTask(SPEC, 'owner');
+  assert.ok(created.ok);
+  const draftClose = store.completeTask(created.value.id, 'owner');
+  assert.equal(draftClose.ok, false);
+  assert.equal(draftClose.code, 'VALIDATION');
+  assert.match(draftClose.error, /cannot complete from stage defining/);
+
+  const taskId = await createActive(store);
+  assert.ok(store.pauseTask(taskId, 'owner').ok);
+  const pausedClose = store.completeTask(taskId, 'owner', { note: 'wrapped while paused' });
+  assert.ok(pausedClose.ok, JSON.stringify(pausedClose));
+  assert.equal(pausedClose.value.stage, 'done');
+});
+
+test('skipSubtask: verdict on the plan, not the work — reason journalled, status change emitted', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  const [first, second] = store.getTask(taskId).subtasks;
+
+  const seen = [];
+  store.onSubtaskStatusChange((change) => seen.push(`${change.subtaskId}:${change.reason}`));
+
+  const skipped = store.skipSubtask(second.id, 'owner', 'covered by the launch thread already');
+  assert.ok(skipped.ok, JSON.stringify(skipped));
+  assert.equal(skipped.value.status, 'skipped');
+  const after = store.getTask(taskId);
+  assert.equal(after.events[0].kind, 'skipped');
+  assert.match(after.events[0].detail, /covered by the launch thread/);
+  assert.equal(after.stage, 'active', 'task keeps running while live sub-projects remain');
+  assert.equal(after.currentSubtaskTitle, first.title, 'focus moves to the next open sub-project');
+  assert.ok(seen.includes(`${second.id}:skipped`), 'status-change listeners heard the skip');
+
+  // Terminal statuses are not skippable.
+  assert.equal(store.skipSubtask(second.id, 'owner', 'again').ok, false);
+});
+
+test('skipSubtask closing the last open sub-project carries acceptance authority', async () => {
+  const { store } = await openStore();
+  const taskId = await createActive(store);
+  const subs = store.getTask(taskId).subtasks;
+  for (const sub of subs.slice(0, 2)) {
+    assert.ok(store.skipSubtask(sub.id, 'owner', 'not needed').ok);
+  }
+  // Task is still active with one open sub-project; a twin closing it via skip
+  // is a goal-level completion claim — refused without the delegate switch.
+  const refused = store.skipSubtask(subs[2].id, 'twin', 'last one');
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, 'FORBIDDEN');
+
+  assert.ok(store.updateTask({ taskId, acceptanceDelegate: true }, 'owner').ok);
+  const closed = store.skipSubtask(subs[2].id, 'twin', 'goal met elsewhere');
+  assert.ok(closed.ok, JSON.stringify(closed));
+  assert.equal(store.getTask(taskId).stage, 'done');
+  const events = store.getTask(taskId).events;
+  assert.equal(events[0].kind, 'completed');
+  assert.match(events[0].detail, /accepted or skipped/);
+});
+
 test('nudge state preserves the owner-activity anchor across partial writes', async () => {
   const { store } = await openStore();
   const taskId = await createActive(store);

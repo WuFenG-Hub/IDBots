@@ -33,7 +33,7 @@ async function openWorld(language = 'en') {
   assert.ok(tools.length > 0);
   const anchor = captured.get('longterm_delegation_anchor');
   assert.ok(anchor, 'longterm_delegation_anchor tool missing');
-  return { store, anchor };
+  return { store, captured, anchor };
 }
 
 const SPEC = {
@@ -97,4 +97,62 @@ test('anchor refuses unknown task / subtask', async () => {
   const missingSub = await anchor2.handler({ taskId: created.value.id, subtaskId: 'lts_nope' });
   assert.equal(missingSub.isError, true);
   void store;
+});
+
+test('longterm_task_complete tool: delegate gate + goal-level closure through the twin channel', async () => {
+  const { store, captured } = await openWorld('en');
+  const complete = captured.get('longterm_task_complete');
+  assert.ok(complete, 'longterm_task_complete tool missing');
+  assert.match(complete.description, /GOAL met/i, 'description must frame this as a goal-level verdict');
+  const created = store.createTask(SPEC, 'owner');
+  assert.ok(created.ok);
+  const taskId = created.value.id;
+  assert.ok(store.activateTask(taskId, 'owner').ok);
+
+  const refused = await complete.handler({
+    taskId,
+    summary: 'hub shipped and live',
+    evidence: [{ kind: 'url', uri: 'https://x.example/hub' }],
+  });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /FORBIDDEN/);
+
+  assert.ok(store.updateTask({ taskId, acceptanceDelegate: true }, 'owner').ok);
+  const closed = await complete.handler({
+    taskId,
+    summary: 'hub shipped and live; spectate deferred',
+    evidence: [{ kind: 'url', uri: 'https://x.example/hub', note: 'live hub' }],
+  });
+  assert.equal(closed.isError, undefined);
+  const after = store.getTask(taskId);
+  assert.equal(after.stage, 'done');
+  assert.ok(after.subtasks.every((sub) => sub.status === 'skipped'));
+});
+
+test('longterm_subtask_skip tool: plan verdict with reason; last-open skip keeps the delegate gate', async () => {
+  const { store, captured } = await openWorld('en');
+  const skip = captured.get('longterm_subtask_skip');
+  assert.ok(skip, 'longterm_subtask_skip tool missing');
+  const created = store.createTask(SPEC, 'owner');
+  assert.ok(created.ok);
+  const taskId = created.value.id;
+  assert.ok(store.activateTask(taskId, 'owner').ok);
+  const [first, second] = store.getTask(taskId).subtasks;
+
+  const skipped = await skip.handler({ subtaskId: second.id, reason: 'spectate covered by the replay page' });
+  assert.equal(skipped.isError, undefined);
+  assert.equal(store.getSubtask(second.id).status, 'skipped');
+  assert.match(store.getTask(taskId).events[0].detail, /replay page/);
+
+  // Skipping the now-last open sub-project completes the task — acceptance
+  // authority, so the twin channel is refused without the delegate switch.
+  const closing = await skip.handler({ subtaskId: first.id, reason: 'goal met' });
+  assert.equal(closing.isError, true);
+  assert.match(closing.content[0].text, /FORBIDDEN/);
+  assert.equal(store.getTask(taskId).stage, 'active');
+
+  assert.ok(store.updateTask({ taskId, acceptanceDelegate: true }, 'owner').ok);
+  const closingOk = await skip.handler({ subtaskId: first.id, reason: 'goal met' });
+  assert.equal(closingOk.isError, undefined);
+  assert.equal(store.getTask(taskId).stage, 'done');
 });

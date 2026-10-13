@@ -501,6 +501,14 @@ export class LongTermTaskStore {
       currentExpectedMinutes: current?.expectedMinutes ?? null,
       progress: deriveProgress(subtasks),
       counts,
+      // Sessions currently owed an owner verdict (every waiting_owner
+      // sub-project's bound session). The sidebar lifts these OUT of the
+      // collapsed autonomous fold: a decision the owner must make belongs on
+      // the main timeline, derived live — folds back automatically the moment
+      // the verdict lands.
+      decisionSessionIds: subtasks
+        .filter((sub) => sub.status === 'waiting_owner' && sub.sessionId)
+        .map((sub) => sub.sessionId as string),
       participants: this.resolveParticipants(this.listParticipantIds(taskRow, subtasks)),
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
@@ -633,6 +641,70 @@ export class LongTermTaskStore {
     this.addEvent(taskId, null, 'note', actor, `cancelled${note ? `: ${note}` : ''}`);
     this.saveDb();
     return { ok: true, value: null };
+  }
+
+  /**
+   * Close the whole task as done at the GOAL level ("the outcome is already
+   * met, stop driving the plan"). Every remaining open sub-project is skipped
+   * — not accepted, closing is not a verdict on work never proposed — the
+   * focus pin clears, and the task lands in 'done' with one goal-level
+   * 'completed' journal event. This is the one-click exit for the "work
+   * finished inside one session while the board still shows N open
+   * sub-projects" situation; it is NOT for abandoning a task (use cancel).
+   *
+   * Actor 'twin' requires the task's acceptance_delegate switch — declaring
+   * the goal met carries the same authority as accepting a sub-project, and
+   * the optional evidence is validated with the same URI shape rules.
+   */
+  completeTask(
+    taskId: string,
+    actor: LongTermActor,
+    input: { note?: string; evidence?: LongTermEvidence[] } = {},
+  ): LongTermResult<LongTermTaskSummary> {
+    const row = this.getTaskRow(taskId);
+    if (!row) return { ok: false, code: 'NOT_FOUND', error: 'task not found' };
+    if (row.stage !== 'active' && row.stage !== 'paused') {
+      return { ok: false, code: 'VALIDATION', error: `cannot complete from stage ${row.stage}` };
+    }
+    if (actor === 'twin' && row.acceptance_delegate !== 1) {
+      return { ok: false, code: 'FORBIDDEN', error: 'task completion is owner-only for this task (delegate switch is off)' };
+    }
+    const evidence = (input.evidence ?? []).filter((entry) => entry && asText(entry.uri).trim());
+    if (evidence.length > 0) {
+      const evidenceError = this.validateEvidenceInput(evidence);
+      if (evidenceError) return { ok: false, code: 'VALIDATION', error: evidenceError };
+    }
+    const now = nowIso();
+    const open = this.listSubtaskRows(taskId)
+      .map((sub) => this.mapSubtask(sub))
+      .filter((sub) => sub.status !== 'accepted' && sub.status !== 'skipped');
+    for (const sub of open) {
+      this.db.run(
+        "UPDATE long_term_subtasks SET status = 'skipped', wait_note = '', wait_until = NULL, updated_at = ? WHERE id = ?",
+        [now, sub.id],
+      );
+      this.addEvent(taskId, sub.id, 'skipped', actor, `closed with task completion (was ${sub.status})`);
+      this.emitStatusChange(sub, this.getSubtask(sub.id), 'skipped');
+    }
+    this.db.run(
+      "UPDATE long_term_tasks SET stage = 'done', done_at = ?, current_subtask_id = NULL, updated_at = ? WHERE id = ?",
+      [now, now, taskId],
+    );
+    const evidenceLines = evidence
+      .map((entry) => `${asText(entry.kind).trim()}: ${asText(entry.uri).trim()}${entry.note ? ` (${asText(entry.note)})` : ''}`)
+      .join(' | ');
+    const note = asText(input.note).trim();
+    const detail = [
+      `goal closed at task level by ${actor}; ${open.length} open sub-project(s) skipped`,
+      note,
+      evidenceLines,
+    ]
+      .filter(Boolean)
+      .join(' — ');
+    this.addEvent(taskId, null, 'completed', actor, detail);
+    this.saveDb();
+    const detailTask = this.getTask(taskId);
+    return detailTask ? { ok: true, value: detailTask } : { ok: false, code: 'NOT_FOUND', error: 'task not found' };
   }
 
   updateTask(input: LongTermTaskUpdateInput, actor: LongTermActor): LongTermResult<LongTermTaskSummary> {
@@ -949,26 +1021,18 @@ export class LongTermTaskStore {
     return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
   }
 
-  /** Twin presents evidence against the acceptance criteria and asks the owner to accept. */
-  proposeSubtask(subtaskId: string, input: { evidence: LongTermEvidence[]; summary: string }, actor: LongTermActor): LongTermResult<LongTermSubtask> {
-    const current = this.getSubtask(subtaskId);
-    if (!current) return { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
-    if (current.status !== 'in_progress' && current.status !== 'waiting_external') {
-      return { ok: false, code: 'VALIDATION', error: `cannot propose acceptance from status ${current.status}` };
-    }
-    const evidence = (input.evidence ?? []).filter((entry) => entry && asText(entry.uri).trim());
-    if (evidence.length === 0) return { ok: false, code: 'VALIDATION', error: 'at least one evidence URI is required' };
-    // Kind gate first: an unknown kind would bypass every per-kind URI check.
+  /**
+   * Validate evidence entries (kind gate + per-kind URI shape); null = valid.
+   * Shared by every evidence-bearing path (proposal, task-level completion) —
+   * the acceptance chain is only as good as its evidence, and a criterion
+   * "proven" by a malformed URI was never proven.
+   */
+  private validateEvidenceInput(evidence: LongTermEvidence[]): string | null {
+    if (evidence.length === 0) return 'at least one evidence URI is required';
     const unknownKind = evidence.find((entry) => !EVIDENCE_KINDS.includes(asText(entry.kind).trim()));
     if (unknownKind) {
-      return {
-        ok: false,
-        code: 'VALIDATION',
-        error: `unknown evidence kind "${asText(unknownKind.kind)}" — allowed: ${EVIDENCE_KINDS.join(' | ')}`,
-      };
+      return `unknown evidence kind "${asText(unknownKind.kind)}" — allowed: ${EVIDENCE_KINDS.join(' | ')}`;
     }
-    // Shape validation: the acceptance chain is only as good as its evidence
-    // — a criterion "proven" by a malformed URI was never proven.
     const malformed = evidence.filter((entry) => {
       const uri = asText(entry.uri).trim();
       const kind = asText(entry.kind).trim();
@@ -980,12 +1044,21 @@ export class LongTermTaskStore {
       return false;
     });
     if (malformed.length > 0) {
-      return {
-        ok: false,
-        code: 'VALIDATION',
-        error: `malformed evidence URI(s): ${malformed.map((entry) => `${asText(entry.kind) || 'untyped'} ${asText(entry.uri).slice(0, 80)}`).join('; ')}`,
-      };
+      return `malformed evidence URI(s): ${malformed.map((entry) => `${asText(entry.kind) || 'untyped'} ${asText(entry.uri).slice(0, 80)}`).join('; ')}`;
     }
+    return null;
+  }
+
+  /** Twin presents evidence against the acceptance criteria and asks the owner to accept. */
+  proposeSubtask(subtaskId: string, input: { evidence: LongTermEvidence[]; summary: string }, actor: LongTermActor): LongTermResult<LongTermSubtask> {
+    const current = this.getSubtask(subtaskId);
+    if (!current) return { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
+    if (current.status !== 'in_progress' && current.status !== 'waiting_external') {
+      return { ok: false, code: 'VALIDATION', error: `cannot propose acceptance from status ${current.status}` };
+    }
+    const evidence = (input.evidence ?? []).filter((entry) => entry && asText(entry.uri).trim());
+    const evidenceError = this.validateEvidenceInput(evidence);
+    if (evidenceError) return { ok: false, code: 'VALIDATION', error: evidenceError };
     this.db.run(
       "UPDATE long_term_subtasks SET status = 'waiting_owner', evidence_json = ?, wait_note = ?, wait_until = NULL, updated_at = ? WHERE id = ?",
       [
@@ -1043,6 +1116,58 @@ export class LongTermTaskStore {
     this.saveDb();
     const updated = this.getSubtask(subtaskId);
     this.emitStatusChange(current, updated, 'accepted');
+    return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
+  }
+
+  /**
+   * Skip one open sub-project: "this sub-project is no longer needed". The
+   * skip is a verdict on the PLAN, not the work — it never fakes acceptance,
+   * so progress math stays honest. Twin may skip freely (same replanning
+   * authority as updateSubtask), EXCEPT when the skip would close the last
+   * open sub-project of an active task — that carries acceptance authority
+   * and requires the delegate switch.
+   */
+  skipSubtask(subtaskId: string, actor: LongTermActor, reason = ''): LongTermResult<LongTermSubtask> {
+    const current = this.getSubtask(subtaskId);
+    if (!current) return { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
+    const task = this.getTaskRow(current.taskId);
+    if (!task) return { ok: false, code: 'NOT_FOUND', error: 'task not found' };
+    if (current.status === 'accepted' || current.status === 'skipped') {
+      return { ok: false, code: 'VALIDATION', error: `cannot skip a ${current.status} sub-project` };
+    }
+    if (task.stage === 'done' || task.stage === 'cancelled') {
+      return { ok: false, code: 'VALIDATION', error: `task is ${task.stage}` };
+    }
+    const remainingAfter = this.listSubtaskRows(task.id)
+      .map((row) => this.mapSubtask(row))
+      .filter((sub) => sub.id !== subtaskId && sub.status !== 'accepted' && sub.status !== 'skipped');
+    const closesTask = remainingAfter.length === 0 && task.stage === 'active';
+    if (actor === 'twin' && closesTask && task.acceptance_delegate !== 1) {
+      return {
+        ok: false,
+        code: 'FORBIDDEN',
+        error: 'skipping the last open sub-project completes the task — acceptance is owner-only for this task (delegate switch is off)',
+      };
+    }
+    const now = nowIso();
+    this.db.run(
+      "UPDATE long_term_subtasks SET status = 'skipped', wait_note = '', wait_until = NULL, updated_at = ? WHERE id = ?",
+      [now, subtaskId],
+    );
+    if (task.current_subtask_id === subtaskId) {
+      this.db.run('UPDATE long_term_tasks SET current_subtask_id = NULL WHERE id = ?', [task.id]);
+    }
+    const reasonText = asText(reason).trim().slice(0, 1000);
+    this.addEvent(task.id, subtaskId, 'skipped', actor, reasonText || `skipped by ${actor}`);
+    if (closesTask) {
+      this.db.run("UPDATE long_term_tasks SET stage = 'done', done_at = ?, updated_at = ? WHERE id = ?", [now, now, task.id]);
+      this.addEvent(task.id, null, 'completed', actor, 'all sub-projects accepted or skipped — task complete');
+    } else {
+      this.touch(task.id);
+    }
+    this.saveDb();
+    const updated = this.getSubtask(subtaskId);
+    this.emitStatusChange(current, updated, 'skipped');
     return updated ? { ok: true, value: updated } : { ok: false, code: 'NOT_FOUND', error: 'sub-project not found' };
   }
 

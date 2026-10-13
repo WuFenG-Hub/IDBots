@@ -3,6 +3,7 @@ import type { ProjectFormData, ProjectRecord } from './project';
 import type { GroupChatTranscriptMessage } from './groupTask';
 import type {
   LongTermBoard,
+  LongTermEvidence,
   LongTermResult,
   LongTermSubtask,
   LongTermSubtaskDraft,
@@ -1479,6 +1480,9 @@ interface IElectronAPI {
     get: (input: { taskId: string }) => Promise<{ success: boolean; detail?: LongTermTaskDetail; error?: string }>;
     update: (input: LongTermTaskUpdateInput) => Promise<LongTermResult<LongTermTaskDetail>>;
     setStage: (input: { taskId: string; action: 'pause' | 'resume' | 'cancel'; note?: string }) => Promise<LongTermResult<LongTermTaskDetail | null>>;
+    /** Goal-level closure: remaining open sub-projects are skipped, task lands in 'done'. */
+    complete: (input: { taskId: string; note?: string; evidence?: LongTermEvidence[] }) => Promise<LongTermResult<LongTermTaskDetail>>;
+    subtaskSkip: (input: { subtaskId: string; reason?: string }) => Promise<LongTermResult<LongTermSubtask>>;
     subtaskAdd: (input: { taskId: string } & LongTermSubtaskDraft) => Promise<LongTermResult<LongTermSubtask>>;
     subtaskUpdate: (input: LongTermSubtaskUpdateInput) => Promise<LongTermResult<LongTermSubtask>>;
     begin: (input: { subtaskId: string; channel?: LongTermSubtask['preferredChannel'] }) => Promise<LongTermResult<LongTermSubtask>>;

@@ -158,6 +158,29 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
     },
   );
 
+  const completeTask = tool(
+    'longterm_task_complete',
+    `Declare the TASK'S GOAL met and close the whole task — the one-call exit when the outcome the task existed for is already achieved (typically the owner just said so in chat; their goal-level verdict outranks the sub-project state machine) or the remaining sub-projects became moot. Every remaining open sub-project is marked SKIPPED (never fake-accepted), the task lands in done, and the heartbeat stops driving it. Requires: the task's acceptance-delegate switch on (owner granted it), at least one goal-level evidence URI, and a summary that passes the two-level check — re-read the task goal, show WHICH evidence proves it, and say why each remaining open sub-project is moot. Do NOT use this to abandon a task that is simply stale (use longterm_task_update action=cancel) or to rubber-stamp sub-projects whose work you never verified.`,
+    {
+      taskId: z.string().min(1),
+      summary: z.string().min(1).describe('Goal-level closure verdict in the owner\'s language: how the goal is met (quote it), which evidence proves it, and why the remaining open sub-projects are moot.'),
+      evidence: z.array(z.object({ kind: z.enum(['dir', 'metaapp', 'pin', 'url', 'other']), uri: z.string().min(1), note: z.string().optional() })).min(1).describe('Goal-level proof: local dir, metaapp:// URI, pin:// id, or URL.'),
+    },
+    async (args: { taskId?: string; summary?: string; evidence?: unknown[] }) => {
+      try {
+        const result = store().completeTask(
+          String(args.taskId ?? ''),
+          'twin',
+          { note: String(args.summary ?? ''), evidence: (args.evidence ?? []) as never[] },
+        );
+        if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
+        return jsonResult(result.value);
+      } catch (error) {
+        return textResult(`Failed to complete: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
   const addSubtask = tool(
     'longterm_subtask_add',
     'Add a sub-project to an existing task (requirements grow). Journalled as a replan.',
@@ -325,6 +348,24 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
     },
   );
 
+  const skipSubtask = tool(
+    'longterm_subtask_skip',
+    'Mark an open sub-project as no longer needed ("skipped" — a verdict on the PLAN, not the work; it never counts as accepted). Use when the owner ruled it out, it became redundant, or its purpose is already served elsewhere. Carries a reason for the journal. Skipping the LAST open sub-project of an active task completes the task and therefore requires the acceptance-delegate switch.',
+    {
+      subtaskId: z.string().min(1),
+      reason: z.string().min(1).describe('Why this sub-project is no longer needed (journalled for the audit trail).'),
+    },
+    async (args: { subtaskId?: string; reason?: string }) => {
+      try {
+        const result = store().skipSubtask(String(args.subtaskId ?? ''), 'twin', String(args.reason ?? ''));
+        if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
+        return jsonResult(result.value);
+      } catch (error) {
+        return textResult(`Failed to skip: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
   const addNote = tool(
     'longterm_event_note',
     'Journal a note on a task (or one sub-project): decisions made in chat, context worth surviving a restart, why something is where it is. Cheap and append-only — prefer one precise note over re-explaining later.',
@@ -366,6 +407,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
     listTasks,
     getTask,
     updateTask,
+    completeTask,
     addSubtask,
     updateSubtask,
     beginSubtask,
@@ -374,6 +416,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
     proposeSubtask,
     acceptSubtask,
     rejectSubtask,
+    skipSubtask,
     addNote,
     delegationAnchor,
   ];

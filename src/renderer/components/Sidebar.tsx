@@ -212,6 +212,18 @@ const Sidebar: React.FC<SidebarProps> = ({
       group: homeSessions.filter((session) => session.sessionType === 'group_task'),
     };
   }, [homeSessions]);
+  // The 跟踪任务 nav entry's dot: a parked owner decision (waiting_owner) is the
+  // stronger signal, and the board behind it is kept live app-wide (App.tsx
+  // init) so the dot is correct even if the 长期任务 tab was never opened.
+  const longTermBoard = useSelector((state: RootState) => state.longTermTask.board);
+  // Sessions currently owed an owner verdict (waiting_owner sub-projects' bound
+  // sessions, board-derived): they leave the autonomous fold and show on the
+  // main timeline — the owner must SEE the decision, not find it buried in the
+  // collapsed folder. Folds back automatically once the verdict lands.
+  const decisionSessionIds = useMemo(
+    () => new Set((longTermBoard?.cards ?? []).flatMap((card) => card.decisionSessionIds ?? [])),
+    [longTermBoard],
+  );
   // The local tab's list is split in two: the human's own conversations stay in
   // the main list, while long-term task runs and orchestration delegations
   // (shouldFoldIntoAutonomousTasks) fold into the collapsed "Autonomous Tasks"
@@ -219,8 +231,8 @@ const Sidebar: React.FC<SidebarProps> = ({
   // purpose — they are the user's own automations. Search still sees every
   // session, folded or not.
   const { humanSessions: localHumanSessions, autoSessions: localAutoSessions } = useMemo(
-    () => splitSessionsByAutonomousFold(sessionGroups.local),
-    [sessionGroups.local],
+    () => splitSessionsByAutonomousFold(sessionGroups.local, decisionSessionIds),
+    [sessionGroups.local, decisionSessionIds],
   );
   const localListSessions = taskRecordTab === 'local' ? localHumanSessions : sessionGroups[taskRecordTab];
   // The tab-scoped list the search modal searches: intentionally the WHOLE
@@ -254,7 +266,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   // The 跟踪任务 nav entry's dot: a parked owner decision (waiting_owner) is the
   // stronger signal, and the board behind it is kept live app-wide (App.tsx
   // init) so the dot is correct even if the 长期任务 tab was never opened.
-  const longTermBoard = useSelector((state: RootState) => state.longTermTask.board);
+  // (longTermBoard itself is selected above, where the fold split needs it.)
   const trackedTaskAttention = useMemo(
     () => selectTrackedTasksNeedingAttention({ longTermTask: { board: longTermBoard } }),
     [longTermBoard],
@@ -823,6 +835,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                  * orchestration, scheduled) fold into one collapsed folder at
                  * the bottom instead of mixing into the human list. */
                 autoSessions={taskRecordTab === 'local' ? localAutoSessions : undefined}
+                decisionSessionIds={taskRecordTab === 'local' ? decisionSessionIds : undefined}
                 /** Online chats: the Bot selector is this list's only
                  * selector, so it is switched on here — nothing else changes. */
                 botSelector={taskRecordTab === 'a2a'}
