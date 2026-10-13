@@ -7,6 +7,8 @@ import { clearActiveSkills, setActiveSkillIds } from '../../store/slices/skillSl
 import { setActions, selectAction, clearSelection } from '../../store/slices/quickActionSlice';
 import { coworkService } from '../../services/cowork';
 import { configService } from '../../services/config';
+import { localStore } from '../../services/store';
+import { CONFIG_KEYS, type AppConfig, type ChatExperienceMode } from '../../config';
 import { projectsService } from '../../services/projects';
 import { metaAppService } from '../../services/metaApp';
 import { quickActionService } from '../../services/quickAction';
@@ -83,6 +85,24 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   // choice (model default wins over brain/global) — it must not fall through
   // to the brain/global rungs the way a missing pick does.
   const [pendingModelEffort, setPendingModelEffort] = useState<ComposerModelEffortPick | null>(null);
+  // Chat experience mode (Settings > General). Assistant mode defaults
+  // reasoning effort to off, so the composer effort chip displays 'off' for a
+  // session with no explicit pick (mirrors the runtime chain). Kept reactive
+  // through the app_config store-changed broadcast, same as
+  // CoworkSessionDetail, so flipping the mode re-renders without a reload.
+  const [chatExperienceMode, setChatExperienceMode] = useState<ChatExperienceMode>(
+    () => configService.getConfig().chatExperienceMode ?? 'assistant',
+  );
+  useEffect(() => {
+    const unsubscribe = localStore.onChanged(({ key }) => {
+      if (key !== CONFIG_KEYS.APP_CONFIG) return;
+      void localStore.getItem<AppConfig>(CONFIG_KEYS.APP_CONFIG).then((stored) => {
+        setChatExperienceMode(stored?.chatExperienceMode ?? 'assistant');
+      });
+    });
+    return unsubscribe;
+  }, []);
+  const isAssistantMode = chatExperienceMode === 'assistant';
   // Permission mode is a global preference persisted in app_config; the new
   // task composer shows and updates the same value every session/Bot uses.
   const [permissionMode, setPermissionModeState] = useState<CoworkPermissionMode>(
@@ -838,12 +858,14 @@ const CoworkView: React.FC<CoworkViewProps> = ({
               // missing pick resolves the fallback chain. A bot with a
               // configured brain (primary or fallback model) is authoritative —
               // the persisted global effort only fills in when no brain exists.
+              // Assistant mode displays 'off' for a missing pick: that is the
+              // rung the new session will actually run at.
               effort: effortDisplayForPick(pendingModelEffort, [
                 selectedMetabotBrain?.llm_effort ?? null,
                 ...(selectedMetabotBrain?.llm_id || selectedMetabotBrain?.fallback_llm_id
                   ? []
                   : [configService.getConfig().coworkEffortLevel ?? null]),
-              ]),
+              ], { assistantMode: isAssistantMode }),
             }}
             onModelEffortChange={(value) => {
               setPendingModelEffort({

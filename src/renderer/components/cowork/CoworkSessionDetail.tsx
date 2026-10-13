@@ -1738,7 +1738,16 @@ const AssistantMessageItem: React.FC<{
         </div>
       ) : null}
       {replyContent ? (
-        <div className="dark:text-claude-darkText text-claude-text">
+        // Assistant mode wraps the reply (narration and final answer alike) in
+        // a chat bubble shaped like the user bubble so the transcript reads as
+        // a conversation. The background is a very light accent tint — calm,
+        // and distinct from the user bubble's neutral surface in both themes;
+        // w-fit + max-w-full hugs short messages while long reports still fill
+        // the reading column. Professional mode keeps bare full-width text.
+        <div className={isAssistantMode
+          ? 'w-fit max-w-full rounded-[22px] px-[16px] py-[10px] dark:bg-claude-accent/10 bg-claude-accent/5 dark:text-claude-darkText text-claude-text shadow-subtle'
+          : 'dark:text-claude-darkText text-claude-text'
+        }>
           <MarkdownContent
             content={replyContent}
             className="prose dark:prose-invert max-w-none"
@@ -2884,6 +2893,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   // effort only fills in when the session has no bot brain at all. A
   // persisted 'default' sentinel (explicit Default pick) converts to null and
   // displays as Default instead of snapping to a fallback rung.
+  // Assistant mode displays 'off' when the session carries no explicit pick:
+  // that is the rung the runtime will actually use (session override wins,
+  // otherwise reasoning is off — the brain/global rungs are skipped).
   const sessionUsesBrainModel = sessionModelId == null && Boolean(sessionMetabot?.llm_id);
   const sessionModelEffortValue: ModelEffortValue = {
     modelId: sessionModelId ?? sessionMetabot?.llm_id ?? null,
@@ -2893,6 +2905,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     effort: (() => {
       if (sessionEffortOverride != null) return convertLegacyEffortLevel(sessionEffortOverride);
       if (currentSession?.effort) return convertLegacyEffortLevel(currentSession.effort);
+      if (isAssistantMode) return 'off';
       if (sessionMetabot?.llm_effort) return convertLegacyEffortLevel(sessionMetabot.llm_effort);
       if (sessionMetabot?.llm_id || sessionMetabot?.fallback_llm_id) return null;
       return convertLegacyEffortLevel(configService.getConfig().coworkEffortLevel ?? null);
