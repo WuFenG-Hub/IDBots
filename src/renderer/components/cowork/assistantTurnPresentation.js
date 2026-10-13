@@ -25,3 +25,21 @@ export const isAssistantTurnComplete = ({ sessionLive, isActiveTurn, hasStreamin
   if (isActiveTurn) return false;
   return !hasStreamingItem;
 };
+
+/**
+ * Index of the turn's delivery message within the VISIBLE assistant items:
+ * the last assistant text message (thinking rows never deliver). Assistant
+ * mode hangs its single hover-action toolbar off this one message — narration
+ * and other process bubbles render without a toolbar — and the "Worked for"
+ * collapse uses the same message as the always-visible delivery.
+ * Returns -1 when no delivery candidate exists.
+ */
+export const findDeliveryAssistantIndex = (visibleAssistantItems) => {
+  for (let i = visibleAssistantItems.length - 1; i >= 0; i--) {
+    const item = visibleAssistantItems[i];
+    if (item && item.type === 'assistant' && !item.message?.metadata?.isThinking) {
+      return i;
+    }
+  }
+  return -1;
+};
