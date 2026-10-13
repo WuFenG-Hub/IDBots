@@ -28,11 +28,12 @@ const IDLE_PHRASE_INTERVAL_MS = 3000;
  * precedence so the text never contradicts the actual state.
  *
  * Single placement: `inline` inside the transcript at the reply position,
- * where it is assistant mode's only activity indicator — the render gate in
- * CoworkSessionDetail covers the whole running state (tool runs, the
- * pre-first-token wait, hidden thinking) and steps aside while visible reply
- * text streams. Professional mode keeps the above-composer
- * StreamingActivityBar.
+ * where it is assistant mode's only activity indicator. It stays visible
+ * through the ENTIRE running state — pre-first-token wait, narration and
+ * reply streaming, tool runs, hidden thinking — and only its status line
+ * differentiates the phases; stepping aside while text streamed left
+ * multi-minute tool windows looking idle. Professional mode keeps the
+ * above-composer StreamingActivityBar.
  */
 export const AssistantActivityIndicator: React.FC<{
   messages: CoworkMessage[];
