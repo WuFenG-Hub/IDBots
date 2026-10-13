@@ -693,7 +693,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
 
   if (!isInitialized) {
     return (
-      <div className="flex-1 h-full flex flex-col dark:bg-claude-darkBg bg-claude-bg">
+      <div className="flex-1 h-full flex flex-col cowork-chat-surface">
         <div className="draggable flex h-12 items-center justify-end px-4 border-b dark:border-claude-darkBorder border-claude-border shrink-0">
           <WindowTitleBar inline />
         </div>
@@ -731,7 +731,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
 
   // Home view - no current session
   return (
-    <div className="flex-1 flex flex-col dark:bg-claude-darkBg bg-claude-bg h-full">
+    <div className="flex-1 flex flex-col cowork-chat-surface h-full">
       {/* Header */}
       <div className="draggable flex h-12 items-center justify-between px-4 border-b dark:border-claude-darkBorder border-claude-border shrink-0">
         <div className="non-draggable h-8 flex items-center">
