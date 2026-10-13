@@ -8174,7 +8174,7 @@ export class CoworkRunner extends EventEmitter {
     // provider default: an undeclared model materializes reasoning:false, and
     // any non-off effort would fail the turn outright.
     const effortRidesRoute = officialDeepSeekNative
-      || dshModelReasoningDeclaration(route.model, apiFormat) !== null;
+      || dshModelReasoningDeclaration(route.model, apiFormat, route.baseUrl) !== null;
     if (!effortRidesRoute && reasoningEffort != null && reasoningEffort !== '') {
       // Undeclared family + configured effort = the effort silently drops and
       // the provider's server default decides thinking. Warn once per route

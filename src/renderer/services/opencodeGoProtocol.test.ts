@@ -15,6 +15,18 @@ test('resolveOpenCodeGoApiFormat: glm rides chat completions under the responses
   }
 });
 
+test('resolveOpenCodeGoApiFormat: glm on anthropic corrects to openai as well', () => {
+  // The gateway's /v1/messages wire does not serve GLM either.
+  assert.equal(
+    resolveOpenCodeGoApiFormat({ baseUrl: GATEWAY, model: 'z-ai/glm-5.3-flash', apiFormat: 'anthropic' }),
+    'openai',
+  );
+  assert.equal(
+    resolveOpenCodeGoApiFormat({ baseUrl: GATEWAY, model: 'z-ai/glm-5.3-flash', apiFormat: 'openai' }),
+    'openai',
+  );
+});
+
 test('resolveOpenCodeGoApiFormat: deepseek keeps the responses default', () => {
   assert.equal(resolveOpenCodeGoApiFormat({ baseUrl: GATEWAY, model: 'deepseek-flash', apiFormat: 'responses' }), 'responses');
   assert.equal(resolveOpenCodeGoApiFormat({ baseUrl: GATEWAY, model: 'deepseek-v4.1-flash', apiFormat: 'responses' }), 'responses');

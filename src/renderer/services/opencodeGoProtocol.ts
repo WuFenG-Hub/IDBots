@@ -64,7 +64,9 @@ export function resolveOpenCodeGoApiFormat(input: OpenCodeGoApiFormatInput): Ope
   if (!isOpenCodeGoBaseUrl(input.baseUrl)) return input.apiFormat;
   const model = String(input.model ?? '').trim();
   if (!model) return input.apiFormat;
-  if (input.apiFormat === 'responses' && isGlmFamilyModelId(model)) return 'openai';
+  // GLM is completions-only on this gateway (responses AND the anthropic
+  // /v1/messages wire both answer ModelProtocolUnsupported for the family).
+  if (input.apiFormat !== 'openai' && isGlmFamilyModelId(model)) return 'openai';
   if (input.apiFormat !== 'responses' && isResponsesOnlyModelId(model)) return 'responses';
   return input.apiFormat;
 }

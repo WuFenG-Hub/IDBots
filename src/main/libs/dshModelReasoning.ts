@@ -11,7 +11,11 @@
 // control at all: the effort selector's "off" sends nothing and the upstream
 // default (thinking on) applies. The declaration must therefore ride the
 // MODEL's identity — its family's own wire dialect — not the provider that
-// happens to serve it.
+// happens to serve it. (One family can still speak two dialects: GLM on the
+// OpenCode Go gateway uses reasoning_effort, not the z.ai thinking object —
+// see GLM_OPENCODE_GO_CHAT_COMPLETIONS_DECLARATION.)
+
+import { isOpenCodeGoBaseUrl } from './opencodeGatewayHeaders';
 //
 // Scope: chat-completions and responses routes. Chat-completions carries the
 // family's own wire dialect (deepseek thinking, zai thinking). The Responses
@@ -107,6 +111,27 @@ const GLM_RESPONSES_DECLARATION: DshModelReasoningDeclaration = {
   },
 };
 
+// GLM on the OpenCode Go gateway's chat-completions wire. The gateway does
+// NOT speak Z.AI's `thinking: {type}` object — it rejects the body outright
+// (2026-10-13 continuation of the glm-5.3-flash incident: after the protocol
+// correction moved GLM onto /v1/chat/completions, the zai-dialect declaration
+// above produced `400 {"param":"thinking","message":"Upstream request failed:
+// [unknown_parameter] json: unknown field \"thinking\""}`). pi-ai's own
+// opencode-go catalog declares these models with a plain low/high/max ladder
+// and its default compat for opencode.ai hosts (supportsReasoningEffort:
+// true, no thinkingFormat) — i.e. the standard `reasoning_effort` field. This
+// variant mirrors exactly that; `off` keeps the send-nothing shape (gateway
+// default decides). Compat fields match the catalog's opencode-go GLM entries.
+const GLM_OPENCODE_GO_CHAT_COMPLETIONS_DECLARATION: DshModelReasoningDeclaration = {
+  reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'max' },
+  compat: {
+    supportsReasoningEffort: true,
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+  },
+};
+
 // GLM behind an Anthropic-Messages-compatible gateway (Volcengine Ark's
 // coding/agent plans serve the GLM line over /v1/messages). The wire dialect
 // is Claude's adaptive thinking: enabled rungs send
@@ -139,10 +164,17 @@ const bareModelIdOf = (modelId: string): string => {
  * the family is unknown — the model then keeps the provider default, and the
  * turn layer must NOT send effort (an undeclared reasoning:false model would
  * reject any non-off effort outright).
+ *
+ * `baseUrl` (optional) disambiguates the wire dialect per gateway: the same
+ * GLM family speaks Z.AI's `thinking` object on z.ai/zhipu OpenAI-compatible
+ * endpoints but the standard `reasoning_effort` field on the OpenCode Go
+ * gateway (GLM_OPENCODE_GO_CHAT_COMPLETIONS_DECLARATION). Omit it only when
+ * the route's base URL is genuinely unknown.
  */
 export function dshModelReasoningDeclaration(
   modelId: string,
   apiFormat: 'openai' | 'responses' | 'anthropic',
+  baseUrl?: string | null,
 ): DshModelReasoningDeclaration | null {
   const bare = bareModelIdOf(modelId);
   if (DEEPSEEK_V4_PATTERN.test(bare) || bare.toLowerCase() === DEEPSEEK_V4_LEGACY_CHAT_ID) {
@@ -150,7 +182,11 @@ export function dshModelReasoningDeclaration(
     return DEEPSEEK_V4_CHAT_COMPLETIONS_DECLARATION;
   }
   if (GLM_PATTERN.test(bare)) {
-    if (apiFormat === 'openai') return GLM_CHAT_COMPLETIONS_DECLARATION;
+    if (apiFormat === 'openai') {
+      return isOpenCodeGoBaseUrl(baseUrl)
+        ? GLM_OPENCODE_GO_CHAT_COMPLETIONS_DECLARATION
+        : GLM_CHAT_COMPLETIONS_DECLARATION;
+    }
     if (apiFormat === 'responses') return GLM_RESPONSES_DECLARATION;
     return GLM_ANTHROPIC_DECLARATION;
   }
