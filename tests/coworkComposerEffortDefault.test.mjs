@@ -16,6 +16,7 @@ const readSource = (relative) => readFileSync(join(here, relative), 'utf8');
 const coworkViewSource = readSource('../src/renderer/components/cowork/CoworkView.tsx');
 const botBrowserPanelSource = readSource('../src/renderer/features/botBrowser/BotBrowserCoworkPanel.tsx');
 const sessionDetailSource = readSource('../src/renderer/components/cowork/CoworkSessionDetail.tsx');
+const modelCatalogSource = readSource('../src/renderer/services/modelCatalog.ts');
 const mainSource = readSource('../src/main/main.ts');
 const coworkRunnerSource = readSource('../src/main/libs/coworkRunner.ts');
 
@@ -76,29 +77,50 @@ test('a configured bot brain outranks the persisted global effort', () => {
   );
 });
 
-test('assistant chat-experience mode forces reasoning off, ignoring session/brain/global rungs', () => {
-  // Both per-turn chains (primary route and GT-02 fallback-brain route)
-  // force 'off' when the owner picked the assistant chat experience — any
-  // reasoning pass runs before the first text token and would delay the
-  // opening sentence the mode promises. The session override, the bot brain
-  // effort, and the persisted-global / per-model defaults are all ignored in
-  // assistant mode; the professional-mode chain (asserted above) stays
-  // intact.
+test('assistant chat-experience mode defaults reasoning off; a session override wins', () => {
+  // Both per-turn chains (primary route and GT-02 fallback-brain route) hoist
+  // the explicit session override AHEAD of the assistant-mode 'off' rung — a
+  // user pick in the session picker must stick at runtime. Without an
+  // override, assistant mode pins 'off' and skips the bot brain / persisted
+  // global / per-model tail (any reasoning pass would delay the first visible
+  // token the mode promises). The professional-mode chain (asserted above)
+  // stays intact behind the same expression.
   assert.ok(
     coworkRunnerSource.includes('getPersistedChatExperienceMode'),
     'coworkRunner: effort resolution must read the persisted chat experience mode',
   );
-  const assistantRungs = coworkRunnerSource.match(/assistantMode\s*\?\s*'off'/g) ?? [];
+  const overrideFirstChains = coworkRunnerSource.match(
+    /sessionEffortPicked\s*\?\s*toLlmEffortLevel\(activeSession\.effortOverride\)\s*:\s*assistantMode\s*\?\s*'off'/g,
+  ) ?? [];
   assert.ok(
-    assistantRungs.length >= 2,
-    'coworkRunner: primary and fallback effort chains must both force off in assistant mode',
+    overrideFirstChains.length >= 2,
+    'coworkRunner: primary and fallback effort chains must hoist the session override ahead of the assistant-mode off rung',
   );
-  // The force must short-circuit BEFORE the session/brain rungs, not sit
-  // behind them: neither chain may read effortOverride/brain effort ahead of
-  // the assistant-mode 'off'.
-  const leak = /effortOverride\s*\?\?[\s\S]{0,160}assistantMode\s*\?\s*'off'/;
+  const assistantSkipsTail = coworkRunnerSource.match(
+    /assistantMode\s*\?\s*'off'\s*:\s*toLlmEffortLevel\(\s*automationBrain/g,
+  ) ?? [];
   assert.ok(
-    !leak.test(coworkRunnerSource),
-    'coworkRunner: assistant mode must not leave effortOverride/brain effort ahead of the off rung',
+    assistantSkipsTail.length >= 2,
+    'coworkRunner: without a session override, assistant mode must skip the brain/global/model tail',
+  );
+});
+
+test('assistant mode displays the effort chip as off when the session has no explicit pick', () => {
+  assert.ok(
+    modelCatalogSource.includes("if (options?.assistantMode) return 'off';"),
+    'modelCatalog: effortDisplayForPick must display off for a missing pick in assistant mode',
+  );
+  assert.ok(
+    sessionDetailSource.includes("if (isAssistantMode) return 'off';"),
+    'CoworkSessionDetail: the session picker must display off in assistant mode when no override exists',
+  );
+  // The composer display chains must receive the mode flag.
+  assert.ok(
+    coworkViewSource.includes('{ assistantMode: isAssistantMode }'),
+    'CoworkView: the composer display chain must receive the assistant-mode flag',
+  );
+  assert.ok(
+    botBrowserPanelSource.includes('{ assistantMode: isAssistantMode }'),
+    'BotBrowserCoworkPanel: the panel display chain must receive the assistant-mode flag',
   );
 });

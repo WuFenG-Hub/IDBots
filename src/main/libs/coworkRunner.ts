@@ -8636,21 +8636,24 @@ export class CoworkRunner extends EventEmitter {
       // (a null brain effort means "model default"); the persisted global
       // effort only fills in for sessions without any bot brain.
       const automationBrain = this.getSessionAutomationBrain(sessionId);
-      // Assistant chat-experience mode forces reasoning fully off — no
-      // fallback chain at all: any reasoning pass runs before the first
-      // visible text token and would delay the opening sentence the mode
-      // promises, so the session override, the bot brain effort, and the
-      // persisted-global / per-model defaults are ALL ignored here.
+      // Assistant chat-experience mode defaults reasoning to off — any
+      // reasoning pass runs before the first visible text token and would
+      // delay the opening sentence the mode promises — but an explicit
+      // session picker override always wins (the user asked for that effort on
+      // THIS session). Without an override, assistant mode skips the bot
+      // brain effort, the persisted global, and the per-model default.
       // Professional mode keeps the full chain unchanged.
       const assistantMode = getPersistedChatExperienceMode() === 'assistant';
+      const sessionEffortPicked = activeSession.effortOverride != null;
       const dshReasoningEffort = mapDshReasoningEffort(
-        assistantMode
-          ? 'off'
-          : toLlmEffortLevel(
-            activeSession.effortOverride
-              ?? automationBrain?.effort
-              ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? modelOptions?.reasoningEffort),
-        assistantMode ? undefined : activeSession.thinkingOverride ?? modelOptions?.thinking,
+        sessionEffortPicked
+          ? toLlmEffortLevel(activeSession.effortOverride)
+          : assistantMode
+            ? 'off'
+            : toLlmEffortLevel(
+              automationBrain?.effort
+                ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? modelOptions?.reasoningEffort),
+        sessionEffortPicked || !assistantMode ? activeSession.thinkingOverride ?? modelOptions?.thinking : undefined,
         dshEffortDialect,
       );
       coworkLog('INFO', 'runDshSessionLocal', 'DSH reasoning effort for turn', {
@@ -8798,18 +8801,20 @@ export class CoworkRunner extends EventEmitter {
           turnOfficialDeepSeekNative = isNativeDeepSeekChatRoute(routeOverride);
           // Same effort chain as the primary route above, except the bot-brain
           // rung reads the FALLBACK brain's effort (that brain's model is the
-          // one now running the turn). Assistant mode forces 'off' here too —
+          // one now running the turn). The session override still wins in
+          // assistant mode; without one, assistant mode pins 'off' here too —
           // a fallback resume must not re-introduce a reasoning pass ahead of
           // the first visible token.
           const fallbackModelOptions = resolveModelOptions(routeOverride.model);
           turnReasoningEffort = mapDshReasoningEffort(
-            assistantMode
-              ? 'off'
-              : toLlmEffortLevel(
-                activeSession.effortOverride
-                  ?? automationBrain?.fallbackEffort
-                  ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? fallbackModelOptions?.reasoningEffort),
-            assistantMode ? undefined : activeSession.thinkingOverride ?? fallbackModelOptions?.thinking,
+            sessionEffortPicked
+              ? toLlmEffortLevel(activeSession.effortOverride)
+              : assistantMode
+                ? 'off'
+                : toLlmEffortLevel(
+                  automationBrain?.fallbackEffort
+                    ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? fallbackModelOptions?.reasoningEffort),
+            sessionEffortPicked || !assistantMode ? activeSession.thinkingOverride ?? fallbackModelOptions?.thinking : undefined,
             turnOfficialDeepSeekNative ? 'deepseek-native' : 'generic',
           );
         }

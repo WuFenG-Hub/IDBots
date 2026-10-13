@@ -13,6 +13,9 @@ import { ActiveSkillBadge } from '../../components/skills';
 import { RootState } from '../../store';
 import { clearActiveSkills } from '../../store/slices/skillSlice';
 import { browserCoworkService } from '../../services/browserCowork';
+import { configService } from '../../services/config';
+import { localStore } from '../../services/store';
+import { CONFIG_KEYS, type AppConfig, type ChatExperienceMode } from '../../config';
 import { projectsService } from '../../services/projects';
 import { i18nService } from '../../services/i18n';
 import { getCompactFolderName } from '../../utils/path';
@@ -207,6 +210,23 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
   // whole state being null = follow the selected bot's brain (its model and
   // effort); inside a pick, effort null is an EXPLICIT "Default" choice.
   const [pendingModelEffort, setPendingModelEffort] = useState<ComposerModelEffortPick | null>(null);
+  // Chat experience mode (Settings > General). Assistant mode defaults
+  // reasoning effort to off, so the panel's effort chip displays 'off' when no
+  // explicit pick exists. Same app_config store-changed subscription as
+  // CoworkSessionDetail, so flipping the mode re-renders without a reload.
+  const [chatExperienceMode, setChatExperienceMode] = useState<ChatExperienceMode>(
+    () => configService.getConfig().chatExperienceMode ?? 'assistant',
+  );
+  useEffect(() => {
+    const unsubscribe = localStore.onChanged(({ key }) => {
+      if (key !== CONFIG_KEYS.APP_CONFIG) return;
+      void localStore.getItem<AppConfig>(CONFIG_KEYS.APP_CONFIG).then((stored) => {
+        setChatExperienceMode(stored?.chatExperienceMode ?? 'assistant');
+      });
+    });
+    return unsubscribe;
+  }, []);
+  const isAssistantMode = chatExperienceMode === 'assistant';
 
   // Slash commands for the '+' menu: browser sessions are regular cowork
   // sessions, so once one is live the full session command set applies; in
@@ -375,8 +395,10 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
                 ? (selectedMetabot?.llm_provider ?? null)
                 : (pendingModelEffort?.providerKey ?? null),
               // An explicit pick sticks as chosen (null = Default); only a
-              // missing pick resolves the bot brain fallback.
-              effort: effortDisplayForPick(pendingModelEffort, [selectedMetabot?.llm_effort ?? null]),
+              // missing pick resolves the bot brain fallback. Assistant mode
+              // displays 'off' for a missing pick: that is the rung the new
+              // session will actually run at.
+              effort: effortDisplayForPick(pendingModelEffort, [selectedMetabot?.llm_effort ?? null], { assistantMode: isAssistantMode }),
             }}
             onChange={(value) => {
               setPendingModelEffort({
