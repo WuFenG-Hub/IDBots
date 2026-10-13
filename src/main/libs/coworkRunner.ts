@@ -220,6 +220,7 @@ import {
 import { buildScheduledTaskAgentTools, type ScheduledTaskAgentControl } from './scheduledTaskAgentTools';
 import { buildLongTermTaskAgentTools, type LongTermTaskAgentControl } from './longTermTaskAgentTools';
 import { buildMetataskAgentTools, type MetaTaskAgentControl } from './metataskAgentTools';
+import { buildPredictionAgentTools, type PredictionAgentControl } from './predictionAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import { buildPostSimpleLogAgentTools } from './postSimpleLogAgentTools';
@@ -1968,6 +1969,12 @@ export interface CoworkRunnerOptions {
    *  / submit / verify / publish / amend) over the local projection + chain writes. */
   metataskTools?: MetaTaskAgentControl;
   /**
+   * RSI P0 prediction ledger: when set, every cowork surface (and the surf
+   * allowlist) gets prediction_record — one machine-checkable prediction
+   * before a consequential on-chain action, reconciled by the nightly dream.
+   */
+  predictionTools?: PredictionAgentControl;
+  /**
    * When set, every cowork session gets the upload_file tool backed by
    * uploadMetaFile() (services/metaFileUploadService.ts). The service owns the
    * on-chain semantics: direct vs chunked mode, MVC sponsor-first direct upload
@@ -2170,6 +2177,7 @@ const METAWEB_SURF_TOOL_ALLOWLIST = new Set([
   'agentpedia_challenge',
   'metaprotocol_registry',
   'create_scheduled_task',
+  'prediction_record',
 ]);
 
 export class CoworkRunner extends EventEmitter {
@@ -2216,6 +2224,7 @@ export class CoworkRunner extends EventEmitter {
   private scheduledTaskTools?: ScheduledTaskAgentControl;
   private longTermTaskTools?: LongTermTaskAgentControl;
   private metataskTools?: MetaTaskAgentControl;
+  private predictionTools?: PredictionAgentControl;
   private metaFileUpload?: MetaFileUploadControl;
   private walletTools?: WalletToolsControl;
   private visionRelay?: VisionRelayControl;
@@ -2374,6 +2383,7 @@ export class CoworkRunner extends EventEmitter {
     this.scheduledTaskTools = options?.scheduledTaskTools;
     this.longTermTaskTools = options?.longTermTaskTools;
     this.metataskTools = options?.metataskTools;
+    this.predictionTools = options?.predictionTools;
     this.metaFileUpload = options?.metaFileUpload;
     this.walletTools = options?.walletTools;
     this.visionRelay = options?.visionRelay;
@@ -5439,6 +5449,9 @@ export class CoworkRunner extends EventEmitter {
         '- Use `experience_recall` to look up your own past days: a bare call returns the last 30 days of your daily summaries, `query` searches your full history, and `date_from`/`date_to` (YYYY-MM-DD) pin a range.',
         '- Use `chain_history_recall` to look up the exact pins you published to the chain or fully read from it (buzz/notes/articles): `query` keyword search, `kind` write/read, `date_from`/`date_to` pin a range — a returned pinId can be re-opened with `read_metaweb_pin` for the full text.',
         '- When a task resembles something you have done before, first search it with `experience_recall` (keyword), then read the referenced IDBots:// session with `idbots_session_read_all`: reuse the approaches that worked last time and avoid the pitfalls you already hit.',
+        // RSI P0 prediction ledger: cheap guidance, never a forced call — the
+        // nightly reconciliation only sees what was actually recorded.
+        '- Before a consequential on-chain action (post_buzz / comment_pin, metatask_submit, or completing a service delivery), record one specific, verifiable prediction with `prediction_record` (expected reception or review outcome + a deadline). Your nightly dream reconciles it against the observed outcome, and the calibration history sharpens your future judgment.',
         '- When <recent_daily_summaries> is present, those summaries are your own nightly dreams (做梦): questions like "did you dream / what did you dream about / do you remember that day" should be answered from them first.',
         '- Never write transient conversation facts, news content, or source citations into user memory unless the user explicitly asks.'
       );
@@ -10859,6 +10872,21 @@ export class CoworkRunner extends EventEmitter {
           createPin: this.metabotChainWrite.createPin,
           sessionId,
           resolveMetabotId: (sid: string) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined,
+        })
+      );
+    }
+    // RSI P0 prediction ledger: prediction_record rides every cowork surface,
+    // including the surf allowlist (a surf that posts/engages predicts its
+    // reception first). The tool writes a local ledger row — no chain spend —
+    // and the nightly dream reconciles it.
+    if (this.predictionTools) {
+      memoryTools.push(
+        ...buildPredictionAgentTools({
+          tool,
+          predictions: this.predictionTools,
+          sessionId,
+          resolveMetabotId: (sid: string) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined,
+          defaultSource: this.activeSessions.get(sessionId)?.metawebSurfSession ? 'surf' : 'cowork',
         })
       );
     }

@@ -787,6 +787,50 @@ export class SqliteStore {
       );
     `);
 
+    // RSI P0 prediction ledger + prompt-layer snapshots (retention gate).
+    // DreamStore.ensureSchema creates the same tables idempotently; keeping
+    // them here too matches the other dream tables' double-entry convention.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_predictions (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        session_id TEXT,
+        source TEXT NOT NULL CHECK (source IN ('cowork', 'surf', 'metatask', 'service')),
+        action_type TEXT NOT NULL CHECK (action_type IN ('buzz_post', 'metaweb_comment', 'metatask_submission', 'service_delivery')),
+        subject_ref TEXT,
+        prediction_text TEXT NOT NULL,
+        expectation_json TEXT NOT NULL DEFAULT '{}',
+        resolve_deadline TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'hit', 'miss', 'partial', 'expired', 'void')),
+        resolved_at INTEGER,
+        resolved_by TEXT,
+        outcome_text TEXT,
+        outcome_json TEXT
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_metabot_predictions_status_deadline
+      ON metabot_predictions(metabot_id, status, resolve_deadline)
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_prompt_layer_snapshots (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        dream_date TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'rolled_back', 'superseded')),
+        rollback_reason TEXT,
+        rolled_back_at INTEGER,
+        UNIQUE(metabot_id, dream_date)
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_metabot_prompt_layer_snapshots_status
+      ON metabot_prompt_layer_snapshots(metabot_id, status, dream_date DESC)
+    `);
+
     this.db.run(`
       CREATE TABLE IF NOT EXISTS metabot_dream_fragments (
         id TEXT PRIMARY KEY,

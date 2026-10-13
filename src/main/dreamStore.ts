@@ -1,6 +1,19 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { SqliteDatabase as Database } from './sqliteTypes';
 import { formatBotWorkspaceDate } from './libs/botWorkspace';
+import type {
+  PredictionActionType,
+  PredictionCalibrationDigest,
+  PredictionSource,
+  PredictionStatus,
+} from './libs/predictionLedger';
+import {
+  PREDICTION_ACTION_TYPES,
+  PREDICTION_DIGEST_MAX_RECENT_MISSES,
+  PREDICTION_SOURCES,
+  PREDICTION_STATUSES,
+} from './libs/predictionLedger';
+import { ROLLBACK_MAX_SNAPSHOTS_PER_BOT } from './libs/promptLayerRollback';
 
 /**
  * Dream consolidation storage layer.
@@ -10,6 +23,11 @@ import { formatBotWorkspaceDate } from './libs/botWorkspace';
  *   narrative of that day (overall + per-category sections).
  * - metabot_dream_runs: one row per bot per date tracking consolidation runs;
  *   the UNIQUE(metabot_id, dream_date) constraint is the idempotency anchor.
+ * - metabot_predictions: the RSI P0 prediction ledger — explicit pre-action
+ *   predictions the nightly dream reconciles against observed outcomes.
+ * - metabot_prompt_layer_snapshots: the RSI P0 retention gate — one snapshot
+ *   of the dream-origin prompt layer per (bot, dream date), captured before
+ *   that night's writes so a negative-feedback spike can roll them back.
  *
  * Also owns the "what did this bot do on date D" activity query used to build
  * the dream prompt. Raw messages are returned untruncated; budgeting for the
@@ -115,6 +133,67 @@ export interface DailySummarySessionRef {
   title: string;
   sessionType: string;
   isOrder: boolean;
+}
+
+/**
+ * RSI P0 prediction ledger: one explicit, machine-checkable prediction made
+ * BEFORE a consequential on-chain action. The nightly dream reconciles
+ * 'pending' rows against observed outcomes (dreamService) and marks them
+ * hit/miss/partial/expired; 'void' is reserved for manual invalidation.
+ */
+export interface MetabotPrediction {
+  id: string;
+  metabotId: number;
+  createdAt: number;
+  sessionId: string | null;
+  source: PredictionSource;
+  actionType: PredictionActionType;
+  /** pinId / "rootPinId:node" / order id; null when resolvable only after the action. */
+  subjectRef: string | null;
+  predictionText: string;
+  expectation: Record<string, unknown>;
+  /** YYYY-MM-DD local date by which the outcome must be observable. */
+  resolveDeadline: string;
+  status: PredictionStatus;
+  resolvedAt: number | null;
+  resolvedBy: string | null;
+  outcomeText: string | null;
+  outcomeJson: Record<string, unknown> | null;
+}
+
+/** One snapshotted dream-origin memory row (prompt-layer state before a dream write). */
+export interface PromptLayerSnapshotMemory {
+  id: string;
+  text: string;
+  fingerprint: string;
+  status: string;
+  archivedAt: number | null;
+  usageClass: string | null;
+}
+
+/**
+ * What the prompt layer looked like immediately BEFORE one dream night's
+ * writes: every non-deleted dream-origin user_memories row EXCEPT
+ * self_identity (owner-frozen by design, never rolled back), plus the ids of
+ * the then-active procedures previously promoted from capability drafts (the
+ * rollback diff baseline).
+ */
+export interface PromptLayerSnapshotPayload {
+  version: 1;
+  memories: PromptLayerSnapshotMemory[];
+  promotedProcedureIds: string[];
+}
+
+/** One row of metabot_prompt_layer_snapshots — one per (bot, dream date). */
+export interface PromptLayerSnapshot {
+  id: string;
+  metabotId: number;
+  dreamDate: string;
+  createdAt: number;
+  payload: PromptLayerSnapshotPayload;
+  status: 'active' | 'rolled_back' | 'superseded';
+  rollbackReason: string | null;
+  rolledBackAt: number | null;
 }
 
 export interface DailySummary {
@@ -318,6 +397,35 @@ interface DailySummaryRow {
   updated_at: number | string;
 }
 
+interface PredictionRow {
+  id: string;
+  metabot_id: number | string;
+  created_at: number | string;
+  session_id: string | null;
+  source: string;
+  action_type: string;
+  subject_ref: string | null;
+  prediction_text: string;
+  expectation_json: string | null;
+  resolve_deadline: string;
+  status: string;
+  resolved_at: number | string | null;
+  resolved_by: string | null;
+  outcome_text: string | null;
+  outcome_json: string | null;
+}
+
+interface PromptLayerSnapshotRow {
+  id: string;
+  metabot_id: number | string;
+  dream_date: string;
+  created_at: number | string;
+  payload_json: string | null;
+  status: string;
+  rollback_reason: string | null;
+  rolled_back_at: number | string | null;
+}
+
 /** Bound one task's on-chain transcript so a busy group cannot flood the dream. */
 const MAX_GROUP_CHAT_MESSAGES_PER_TASK = 400;
 /** Bound each chain-content-history kind per day so a heavy bot cannot flood the dream. */
@@ -512,6 +620,51 @@ export class DreamStore {
         updated_at INTEGER NOT NULL,
         UNIQUE(metabot_id, dream_date)
       );
+    `);
+    // RSI P0 prediction ledger: explicit pre-action predictions, reconciled
+    // deterministically by the nightly dream (hit/miss/partial/expired).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_predictions (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        session_id TEXT,
+        source TEXT NOT NULL CHECK (source IN ('cowork', 'surf', 'metatask', 'service')),
+        action_type TEXT NOT NULL CHECK (action_type IN ('buzz_post', 'metaweb_comment', 'metatask_submission', 'service_delivery')),
+        subject_ref TEXT,
+        prediction_text TEXT NOT NULL,
+        expectation_json TEXT NOT NULL DEFAULT '{}',
+        resolve_deadline TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'hit', 'miss', 'partial', 'expired', 'void')),
+        resolved_at INTEGER,
+        resolved_by TEXT,
+        outcome_text TEXT,
+        outcome_json TEXT
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_metabot_predictions_status_deadline
+      ON metabot_predictions(metabot_id, status, resolve_deadline)
+    `);
+    // RSI P0 retention gate: one snapshot of the dream-origin prompt layer per
+    // (bot, dream date), captured immediately before that night's writes so a
+    // negative-feedback spike can deterministically roll the layer back.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_prompt_layer_snapshots (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        dream_date TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'rolled_back', 'superseded')),
+        rollback_reason TEXT,
+        rolled_back_at INTEGER,
+        UNIQUE(metabot_id, dream_date)
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_metabot_prompt_layer_snapshots_status
+      ON metabot_prompt_layer_snapshots(metabot_id, status, dream_date DESC)
     `);
     this.backfillLegacyDreamMemoryDates();
   }
@@ -1476,6 +1629,417 @@ export class DreamStore {
       groupChats,
       chainWrites,
       chainReads,
+    };
+  }
+
+  // ── RSI P0: prediction ledger ──────────────────────────────────────────────
+
+  /**
+   * Record one pre-action prediction (the prediction_record tool validates the
+   * expectation schema deterministically; this write normalizes and persists).
+   */
+  recordPrediction(input: {
+    metabotId: number;
+    sessionId?: string | null;
+    source: PredictionSource;
+    actionType: PredictionActionType;
+    subjectRef?: string | null;
+    predictionText: string;
+    expectation: Record<string, unknown>;
+    resolveDeadline: string;
+  }): MetabotPrediction {
+    const id = uuidv4();
+    const now = Date.now();
+    this.db.run(`
+      INSERT INTO metabot_predictions (
+        id, metabot_id, created_at, session_id, source, action_type, subject_ref,
+        prediction_text, expectation_json, resolve_deadline, status, resolved_at,
+        resolved_by, outcome_text, outcome_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL)
+    `, [
+      id,
+      input.metabotId,
+      now,
+      input.sessionId ?? null,
+      PREDICTION_SOURCES.includes(input.source) ? input.source : 'cowork',
+      input.actionType,
+      input.subjectRef?.trim() || null,
+      input.predictionText.trim(),
+      JSON.stringify(input.expectation ?? {}),
+      input.resolveDeadline,
+    ]);
+    this.saveDb();
+    const row = this.getPrediction(id);
+    if (!row) throw new Error('Failed to load prediction after insert');
+    return row;
+  }
+
+  getPrediction(id: string): MetabotPrediction | null {
+    const row = this.getOne<PredictionRow>(
+      'SELECT * FROM metabot_predictions WHERE id = ? LIMIT 1',
+      [id],
+    );
+    return row ? this.mapPredictionRow(row) : null;
+  }
+
+  /** Open predictions for one bot, oldest deadline first (reconciliation order). */
+  listPendingPredictions(metabotId: number, opts: { limit?: number } = {}): MetabotPrediction[] {
+    const limit = Math.max(1, Math.min(200, Math.floor(opts.limit ?? 50)));
+    return this.getAll<PredictionRow>(`
+      SELECT * FROM metabot_predictions
+      WHERE metabot_id = ? AND status = 'pending'
+      ORDER BY resolve_deadline ASC, created_at ASC
+      LIMIT ?
+    `, [metabotId, limit]).map((row) => this.mapPredictionRow(row));
+  }
+
+  /**
+   * Resolve one prediction. Idempotent: only a 'pending' row moves, so a
+   * repeated nightly pass never rewrites a verdict.
+   */
+  resolvePrediction(id: string, input: {
+    status: Exclude<PredictionStatus, 'pending'>;
+    resolvedBy: string;
+    outcomeText?: string | null;
+    outcomeJson?: Record<string, unknown> | null;
+    resolvedAtMs?: number;
+  }): boolean {
+    this.db.run(`
+      UPDATE metabot_predictions
+      SET status = ?, resolved_at = ?, resolved_by = ?, outcome_text = ?, outcome_json = ?
+      WHERE id = ? AND status = 'pending'
+    `, [
+      input.status,
+      Math.floor(input.resolvedAtMs ?? Date.now()),
+      input.resolvedBy,
+      input.outcomeText ?? null,
+      input.outcomeJson ? JSON.stringify(input.outcomeJson) : null,
+      id,
+    ]);
+    const updated = (this.db.getRowsModified?.() || 0) > 0;
+    if (updated) {
+      this.saveDb();
+    }
+    return updated;
+  }
+
+  /**
+   * Calibration aggregate for the dream prompt digest: per action type the
+   * status counts over the trailing `sinceDays` (windowed on created_at), plus
+   * the current pending backlog and the most recent misses/partials.
+   */
+  listPredictionCalibration(metabotId: number, sinceDays = 30): PredictionCalibrationDigest {
+    const windowDays = Math.max(1, Math.floor(sinceDays));
+    const sinceMs = Date.now() - windowDays * 86_400_000;
+    const countRows = this.getAll<{ action_type: string; status: string; n: number | string }>(`
+      SELECT action_type, status, COUNT(*) AS n
+      FROM metabot_predictions
+      WHERE metabot_id = ? AND created_at >= ?
+      GROUP BY action_type, status
+    `, [metabotId, sinceMs]);
+    const pendingRow = this.getOne<{ n: number | string }>(
+      `SELECT COUNT(*) AS n FROM metabot_predictions WHERE metabot_id = ? AND status = 'pending'`,
+      [metabotId],
+    );
+    const missRows = this.getAll<PredictionRow>(`
+      SELECT * FROM metabot_predictions
+      WHERE metabot_id = ? AND status IN ('miss', 'partial') AND resolved_at IS NOT NULL AND resolved_at >= ?
+      ORDER BY resolved_at DESC
+      LIMIT ?
+    `, [metabotId, sinceMs, PREDICTION_DIGEST_MAX_RECENT_MISSES]);
+
+    const byActionType: PredictionCalibrationDigest['byActionType'] = {};
+    for (const actionType of PREDICTION_ACTION_TYPES) {
+      byActionType[actionType] = { hit: 0, miss: 0, partial: 0, expired: 0, resolved: 0, hitRate: null };
+    }
+    for (const row of countRows) {
+      const bucket = byActionType[row.action_type as PredictionActionType];
+      if (!bucket) continue;
+      const n = parseIdNumber(row.n) ?? 0;
+      if (row.status === 'hit') bucket.hit += n;
+      else if (row.status === 'miss') bucket.miss += n;
+      else if (row.status === 'partial') bucket.partial += n;
+      else if (row.status === 'expired') bucket.expired += n;
+    }
+    for (const bucket of Object.values(byActionType)) {
+      bucket.resolved = bucket.hit + bucket.miss + bucket.partial;
+      bucket.hitRate = bucket.resolved > 0 ? bucket.hit / bucket.resolved : null;
+    }
+    return {
+      windowDays,
+      pendingCount: parseIdNumber(pendingRow?.n) ?? 0,
+      byActionType,
+      recentMisses: missRows.map((row) => {
+        const mapped = this.mapPredictionRow(row);
+        return {
+          actionType: mapped.actionType,
+          status: mapped.status === 'partial' ? 'partial' as const : 'miss' as const,
+          predictionText: mapped.predictionText,
+          outcomeText: mapped.outcomeText,
+          resolvedAt: mapped.resolvedAt,
+        };
+      }),
+    };
+  }
+
+  /**
+   * Ledger hygiene: physically remove terminal (resolved) rows older than the
+   * cutoff. Pending rows are never pruned — they are reconciled or expired by
+   * the dream pass, never silently dropped.
+   */
+  pruneResolvedPredictions(input: { cutoffMs: number }): number {
+    const cutoff = Math.floor(input.cutoffMs);
+    if (!Number.isFinite(cutoff)) return 0;
+    this.db.run(`
+      DELETE FROM metabot_predictions
+      WHERE status != 'pending' AND resolved_at IS NOT NULL AND resolved_at < ?
+    `, [cutoff]);
+    const deleted = this.db.getRowsModified?.() || 0;
+    if (deleted > 0) {
+      this.saveDb();
+    }
+    return deleted;
+  }
+
+  /**
+   * Subject fallback for reception predictions recorded BEFORE the write
+   * existed: the bot's earliest own chain write of the matching protocol at or
+   * after the prediction was recorded (the action follows the prediction).
+   */
+  findOwnChainWriteForPrediction(
+    metabotId: number,
+    actionType: 'buzz_post' | 'metaweb_comment',
+    afterMs: number,
+  ): { pinId: string; occurredAtMs: number } | null {
+    const pathPrefix = actionType === 'buzz_post' ? '/protocols/simplebuzz' : '/protocols/paycomment';
+    const row = this.getOne<{ pin_id: string; occurred_at_ms: number | string }>(`
+      SELECT pin_id, occurred_at_ms
+      FROM metabot_chain_writes
+      WHERE metabot_id = ? AND occurred_at_ms >= ? AND path LIKE ?
+      ORDER BY occurred_at_ms ASC
+      LIMIT 1
+    `, [metabotId, Math.floor(afterMs), `${pathPrefix}%`]);
+    return row ? { pinId: row.pin_id, occurredAtMs: Number(row.occurred_at_ms) || 0 } : null;
+  }
+
+  /** Final state read for service_delivery predictions (null = unknown order). */
+  getServiceOrderStatus(orderId: string): string | null {
+    const id = orderId.trim();
+    if (!id) return null;
+    const row = this.getOne<{ status: string }>(
+      'SELECT status FROM service_orders WHERE id = ? LIMIT 1',
+      [id],
+    );
+    return row?.status ?? null;
+  }
+
+  // ── RSI P0: prompt-layer snapshots (retention gate) ─────────────────────────
+
+  /** Ids of the currently-active procedures promoted from capability drafts. */
+  listActivePromotedProcedureIds(metabotId: number): string[] {
+    return this.getAll<{ promoted_procedure_id: string }>(`
+      SELECT d.promoted_procedure_id
+      FROM capability_drafts d
+      JOIN metaid_knowledge_procedures p ON p.id = d.promoted_procedure_id
+      WHERE d.metabot_id = ? AND d.promoted_procedure_id IS NOT NULL AND p.status = 'active'
+    `, [metabotId]).map((row) => row.promoted_procedure_id);
+  }
+
+  /**
+   * Capture the current dream-origin prompt layer (all non-deleted
+   * dream-origin memories EXCEPT self_identity, plus the active promoted
+   * procedure ids) and store it as the snapshot for (metabot, dreamDate).
+   * One snapshot per date (upsert); any previous 'active' snapshot of this bot
+   * is superseded, and the table is pruned to ROLLBACK_MAX_SNAPSHOTS_PER_BOT
+   * rows per bot (oldest superseded/rolled_back first — never the active one).
+   */
+  capturePromptLayerSnapshot(metabotId: number, dreamDate: string): PromptLayerSnapshot {
+    const memories = this.getAll<{
+      id: string;
+      text: string;
+      fingerprint: string | null;
+      status: string;
+      archived_at: number | string | null;
+      usage_class: string | null;
+    }>(`
+      SELECT id, text, fingerprint, status, archived_at, usage_class
+      FROM user_memories
+      WHERE metabot_id = ? AND origin = 'dream' AND status != 'deleted' AND usage_class != 'self_identity'
+      ORDER BY created_at ASC
+    `, [metabotId]).map((row) => ({
+      id: row.id,
+      text: row.text,
+      fingerprint: row.fingerprint ?? '',
+      status: row.status,
+      archivedAt: row.archived_at == null ? null : Number(row.archived_at),
+      usageClass: row.usage_class ?? null,
+    }));
+    return this.savePromptLayerSnapshot({
+      metabotId,
+      dreamDate,
+      payload: {
+        version: 1,
+        memories,
+        promotedProcedureIds: this.listActivePromotedProcedureIds(metabotId),
+      },
+    });
+  }
+
+  savePromptLayerSnapshot(input: {
+    metabotId: number;
+    dreamDate: string;
+    payload: PromptLayerSnapshotPayload;
+  }): PromptLayerSnapshot {
+    const now = Date.now();
+    this.db.run(
+      `UPDATE metabot_prompt_layer_snapshots SET status = 'superseded' WHERE metabot_id = ? AND status = 'active'`,
+      [input.metabotId],
+    );
+    this.db.run(`
+      INSERT INTO metabot_prompt_layer_snapshots (
+        id, metabot_id, dream_date, created_at, payload_json, status, rollback_reason, rolled_back_at
+      ) VALUES (?, ?, ?, ?, ?, 'active', NULL, NULL)
+      ON CONFLICT(metabot_id, dream_date) DO UPDATE SET
+        created_at = excluded.created_at,
+        payload_json = excluded.payload_json,
+        status = 'active',
+        rollback_reason = NULL,
+        rolled_back_at = NULL
+    `, [uuidv4(), input.metabotId, input.dreamDate, now, JSON.stringify(input.payload ?? {})]);
+    // Retention: at most ROLLBACK_MAX_SNAPSHOTS_PER_BOT per bot — prune the
+    // oldest superseded/rolled_back rows first, never the active one.
+    this.db.run(`
+      DELETE FROM metabot_prompt_layer_snapshots
+      WHERE id IN (
+        SELECT id FROM metabot_prompt_layer_snapshots
+        WHERE metabot_id = ? AND status != 'active'
+        ORDER BY dream_date DESC
+        LIMIT -1 OFFSET ?
+      )
+    `, [input.metabotId, ROLLBACK_MAX_SNAPSHOTS_PER_BOT - 1]);
+    this.saveDb();
+    const snapshot = this.getPromptLayerSnapshot(input.metabotId, input.dreamDate);
+    if (!snapshot) throw new Error('Failed to load prompt-layer snapshot after save');
+    return snapshot;
+  }
+
+  getPromptLayerSnapshot(metabotId: number, dreamDate: string): PromptLayerSnapshot | null {
+    const row = this.getOne<PromptLayerSnapshotRow>(
+      'SELECT * FROM metabot_prompt_layer_snapshots WHERE metabot_id = ? AND dream_date = ? LIMIT 1',
+      [metabotId, dreamDate],
+    );
+    return row ? this.mapSnapshotRow(row) : null;
+  }
+
+  /** The newest snapshot still eligible for rollback (status 'active'). */
+  getActivePromptLayerSnapshot(metabotId: number): PromptLayerSnapshot | null {
+    const row = this.getOne<PromptLayerSnapshotRow>(`
+      SELECT * FROM metabot_prompt_layer_snapshots
+      WHERE metabot_id = ? AND status = 'active'
+      ORDER BY dream_date DESC
+      LIMIT 1
+    `, [metabotId]);
+    return row ? this.mapSnapshotRow(row) : null;
+  }
+
+  /** Terminal rollback mark: a rolled-back date can never be rolled back again. */
+  markPromptLayerSnapshotRolledBack(id: string, reason: string): boolean {
+    this.db.run(`
+      UPDATE metabot_prompt_layer_snapshots
+      SET status = 'rolled_back', rollback_reason = ?, rolled_back_at = ?
+      WHERE id = ? AND status = 'active'
+    `, [reason.trim() || null, Date.now(), id]);
+    const updated = (this.db.getRowsModified?.() || 0) > 0;
+    if (updated) {
+      this.saveDb();
+    }
+    return updated;
+  }
+
+  /** Audit/test listing, newest dream date first. */
+  listPromptLayerSnapshots(metabotId: number, limit = 30): PromptLayerSnapshot[] {
+    const clampedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+    return this.getAll<PromptLayerSnapshotRow>(`
+      SELECT * FROM metabot_prompt_layer_snapshots
+      WHERE metabot_id = ?
+      ORDER BY dream_date DESC
+      LIMIT ?
+    `, [metabotId, clampedLimit]).map((row) => this.mapSnapshotRow(row));
+  }
+
+  private mapPredictionRow(row: PredictionRow): MetabotPrediction {
+    const parseJson = (raw: string | null): Record<string, unknown> | null => {
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+      } catch {
+        return null;
+      }
+    };
+    const status = (PREDICTION_STATUSES as readonly string[]).includes(row.status) ? row.status as PredictionStatus : 'pending';
+    return {
+      id: row.id,
+      metabotId: parseIdNumber(row.metabot_id) ?? 0,
+      createdAt: Number(row.created_at),
+      sessionId: row.session_id ?? null,
+      source: (PREDICTION_SOURCES as readonly string[]).includes(row.source) ? row.source as PredictionSource : 'cowork',
+      actionType: (PREDICTION_ACTION_TYPES as readonly string[]).includes(row.action_type)
+        ? row.action_type as PredictionActionType
+        : 'buzz_post',
+      subjectRef: row.subject_ref ?? null,
+      predictionText: row.prediction_text,
+      expectation: parseJson(row.expectation_json) ?? {},
+      resolveDeadline: row.resolve_deadline,
+      status,
+      resolvedAt: row.resolved_at == null ? null : Number(row.resolved_at),
+      resolvedBy: row.resolved_by ?? null,
+      outcomeText: row.outcome_text ?? null,
+      outcomeJson: parseJson(row.outcome_json),
+    };
+  }
+
+  private mapSnapshotRow(row: PromptLayerSnapshotRow): PromptLayerSnapshot {
+    let payload: PromptLayerSnapshotPayload = { version: 1, memories: [], promotedProcedureIds: [] };
+    try {
+      const parsed = JSON.parse(row.payload_json ?? '{}');
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const record = parsed as Record<string, unknown>;
+        payload = {
+          version: 1,
+          memories: Array.isArray(record.memories)
+            ? record.memories
+              .filter((item) => item && typeof item === 'object' && typeof (item as Record<string, unknown>).id === 'string')
+              .map((item) => {
+                const entry = item as Record<string, unknown>;
+                return {
+                  id: String(entry.id),
+                  text: typeof entry.text === 'string' ? entry.text : '',
+                  fingerprint: typeof entry.fingerprint === 'string' ? entry.fingerprint : '',
+                  status: typeof entry.status === 'string' ? entry.status : 'created',
+                  archivedAt: typeof entry.archivedAt === 'number' && Number.isFinite(entry.archivedAt) ? entry.archivedAt : null,
+                  usageClass: typeof entry.usageClass === 'string' ? entry.usageClass : null,
+                };
+              })
+            : [],
+          promotedProcedureIds: Array.isArray(record.promotedProcedureIds)
+            ? record.promotedProcedureIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+            : [],
+        };
+      }
+    } catch {
+      // A corrupt payload reads as an empty layer — rollback then only
+      // tombstones the rolled-back date's batch (the safe half).
+    }
+    return {
+      id: row.id,
+      metabotId: parseIdNumber(row.metabot_id) ?? 0,
+      dreamDate: row.dream_date,
+      createdAt: Number(row.created_at),
+      payload,
+      status: row.status === 'rolled_back' || row.status === 'superseded' ? row.status : 'active',
+      rollbackReason: row.rollback_reason ?? null,
+      rolledBackAt: row.rolled_back_at == null ? null : Number(row.rolled_back_at),
     };
   }
 

@@ -4639,6 +4639,71 @@ const startStartupNightlyServices = (): void => {
           .map((order) => ({ id: order.id, status: order.status })),
       isPinNotFound: (error) => error instanceof MetawebPinNotFoundError,
     },
+    // RSI P0 prediction reconciliation: reception counts reuse the surf R3
+    // interactions aggregation, split into likes/comments so the ledger can
+    // judge per-metric expectations. A missing identity or a sick backend
+    // degrades to null — those predictions stay pending, never fail the dream.
+    fetchPredictionReception: async ({ metabotId, pinIds, sinceTs }) => {
+      const metabot = getMetabotStore().getMetabotById(metabotId);
+      const owner = (metabot?.mvc_address ?? '').trim() || (metabot?.globalmetaid ?? '').trim();
+      if (!owner || pinIds.length === 0) return null;
+      const baseUrl = process.env.IDBOTS_METAWEB_API_BASE_URL?.trim();
+      const options = baseUrl ? { baseUrl } : undefined;
+      const targets = new Set(pinIds);
+      const counts = new Map<string, { likes: number; comments: number }>();
+      let cursor: string | undefined;
+      for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
+        const page = await metawebInteractionsRemote({ owner, since: sinceTs, size: 50, cursor }, options);
+        for (const item of page.items) {
+          if (!item.targetPinId || !targets.has(item.targetPinId)) continue;
+          const entry = counts.get(item.targetPinId) ?? { likes: 0, comments: 0 };
+          if (item.type.includes('like')) entry.likes += 1;
+          else entry.comments += 1;
+          counts.set(item.targetPinId, entry);
+        }
+        if (!page.hasMore || !page.nextCursor) break;
+        cursor = page.nextCursor;
+      }
+      return [...counts.entries()].map(([pinId, entry]) => ({ pinId, likes: entry.likes, comments: entry.comments }));
+    },
+    // RSI P0 prediction reconciliation: the local metatask projection answers
+    // whether the bot's own submission on "rootPinId:nodeId" passed review.
+    getMetataskSubmissionOutcome: ({ metabotId, subjectRef }) => {
+      try {
+        const separator = subjectRef.includes('#') ? '#' : ':';
+        const splitAt = subjectRef.lastIndexOf(separator);
+        if (splitAt <= 0) return null;
+        const rootPinId = subjectRef.slice(0, splitAt).trim();
+        const nodeId = subjectRef.slice(splitAt + 1).trim();
+        if (!rootPinId || !nodeId) return null;
+        const detail = getMetaTaskRefresher().detail(rootPinId);
+        const node = detail?.nodeStates?.[nodeId];
+        if (!node) return null;
+        const globalMetaId = getMetabotStore().getMetabotById(metabotId)?.globalmetaid ?? null;
+        // Competitive mode carries the full candidate set with verified/failed
+        // flags; tree mode exposes only the effective submission + node status.
+        if (Array.isArray(node.submissions)) {
+          const candidates = node.submissions.filter((entry) => !globalMetaId || entry.submitter === globalMetaId);
+          if (candidates.length === 0) {
+            return { outcome: 'pending', detail: 'no submission of yours is visible on that node yet' };
+          }
+          if (candidates.some((entry) => entry.verified)) {
+            return { outcome: 'pass', detail: 'a submission of yours is verified' };
+          }
+          if (candidates.every((entry) => entry.failed)) {
+            return { outcome: 'fail', detail: 'every submission of yours was failed by review' };
+          }
+          return { outcome: 'pending', detail: 'review still open' };
+        }
+        const effective = node.submission;
+        if (effective && (!globalMetaId || effective.submitter === globalMetaId) && node.status === 'verified') {
+          return { outcome: 'pass', detail: 'your submission is the verified one' };
+        }
+        return { outcome: 'pending', detail: 'review still open' };
+      } catch {
+        return null;
+      }
+    },
   });
 
   // Memory hygiene ("记忆整理"): the deterministic compression stroke that
@@ -6407,6 +6472,11 @@ const getCoworkRunner = () => {
         refresher: () => getMetaTaskRefresher(),
         localRosterMetaIds: metaTaskLocalRosterMetaIds,
         resolveGlobalMetaId: (metabotId) => getMetabotStore().getMetabotById(metabotId)?.globalmetaid ?? null,
+      },
+      // RSI P0 prediction ledger: prediction_record writes into the dream
+      // store's ledger; the nightly dream reconciles it (startDreamService).
+      predictionTools: {
+        recordPrediction: (input) => getDreamStore().recordPrediction(input),
       },
       scheduledTaskTools: {
         createTask: (input) => {

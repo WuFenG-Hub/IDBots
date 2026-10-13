@@ -8499,6 +8499,111 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * RSI P0 retention gate: deterministically roll back one dream night's
+   * prompt-layer writes. Two strokes, both following the store's existing
+   * tombstone/revision model (nothing is hard-deleted):
+   *  1. the rolled-back date's dream batch (profile_fact / value_boundary /
+   *     work_review rows tagged with that dream date, self_identity excluded)
+   *     is tombstoned exactly like softDeleteDreamMemoriesForDate does;
+   *  2. every snapshotted prior row that still exists is restored to its
+   *     snapshotted text/fingerprint/status/archived_at — this undoes both the
+   *     tombstone and any cross-night dedup text rewrite the rolled-back night
+   *     applied — and its source rows are reactivated EXCEPT the rolled-back
+   *     date's provenance rows (those stay inactive: the night is disavowed).
+   * Rows physically purged meanwhile cannot be resurrected and are counted as
+   * skipped. self_identity never appears in snapshots and is never touched.
+   */
+  rollbackDreamMemoriesForDate(
+    metabotId: number,
+    dreamDate: string,
+    snapshotMemories: Array<{
+      id: string;
+      text: string;
+      fingerprint: string;
+      status: string;
+      archivedAt: number | null;
+    }>,
+  ): { removed: number; restored: number; skippedMissing: number } {
+    const date = dreamDate.trim();
+    if (!date || !Number.isInteger(metabotId) || metabotId <= 0) {
+      return { removed: 0, restored: 0, skippedMissing: 0 };
+    }
+    const now = Date.now();
+    // Only ACTIVE provenance rows count as the night's batch — a previously
+    // restored row keeps the disavowed night's source inactive and must not be
+    // re-tombstoned by a repeat pass.
+    const targets = this.getAll<{ id: string }>(`
+      SELECT DISTINCT m.id
+      FROM user_memories m
+      JOIN user_memory_sources s ON s.memory_id = m.id
+      WHERE m.metabot_id = ?
+        AND m.origin = 'dream'
+        AND m.usage_class IN ('profile_fact', 'value_boundary', 'work_review')
+        AND m.status != 'deleted'
+        AND s.dream_date = ?
+        AND s.is_active = 1
+    `, [metabotId, date]);
+    let removed = 0;
+    if (targets.length > 0) {
+      const ids = targets.map((row) => row.id);
+      const placeholders = ids.map(() => '?').join(', ');
+      this.db.run(`
+        UPDATE user_memories
+        SET status = 'deleted', updated_at = ?
+        WHERE id IN (${placeholders})
+      `, [now, ...ids]);
+      this.db.run(`
+        UPDATE user_memory_sources
+        SET is_active = 0
+        WHERE memory_id IN (${placeholders})
+      `, [...ids]);
+      removed = ids.length;
+    }
+
+    let restored = 0;
+    let skippedMissing = 0;
+    for (const snap of snapshotMemories) {
+      if (!snap?.id) continue;
+      const existing = this.getOne<{ id: string }>(
+        'SELECT id FROM user_memories WHERE id = ? AND metabot_id = ? LIMIT 1',
+        [snap.id, metabotId],
+      );
+      if (!existing) {
+        skippedMissing += 1;
+        continue;
+      }
+      this.db.run(`
+        UPDATE user_memories
+        SET text = ?, fingerprint = ?, status = ?, archived_at = ?, updated_at = ?
+        WHERE id = ? AND metabot_id = ?
+      `, [
+        snap.text,
+        snap.fingerprint || buildMemoryFingerprint(snap.text),
+        snap.status === 'stale' ? 'stale' : 'created',
+        snap.archivedAt == null ? null : Math.floor(snap.archivedAt),
+        now,
+        snap.id,
+        metabotId,
+      ]);
+      this.db.run(`
+        UPDATE user_memory_sources
+        SET is_active = 1
+        WHERE memory_id = ? AND (dream_date IS NULL OR dream_date != ?)
+      `, [snap.id, date]);
+      this.db.run(`
+        UPDATE user_memory_sources
+        SET is_active = 0
+        WHERE memory_id = ? AND dream_date = ?
+      `, [snap.id, date]);
+      restored += 1;
+    }
+    if (removed > 0 || restored > 0) {
+      this.saveDb();
+    }
+    return { removed, restored, skippedMissing };
+  }
+
+  /**
    * First-run / startup repair: if a bot has no live self-identity but still
    * has a dream-written one that the conversation sweeper soft-deleted, bring
    * the newest deleted copy back. Idempotent — no-op when a live entry exists
