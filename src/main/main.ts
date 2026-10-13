@@ -22,6 +22,7 @@ import type { MemoryBackend } from './memory/memoryBackend';
 import { createOwnerMemoryScope } from './memory/memoryScope';
 import { resolveCerebellumConfig } from './libs/cerebellumConfig';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
+import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
 import {
   CoworkRunner,
   isDelegationPriceNumeric,
@@ -261,7 +262,7 @@ import {
 import { metabotBrainOptions, normalizeMetabotLlmId, resolveSystemBrainOptions } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { startMemoryHygieneService, stopMemoryHygieneService, getMemoryHygieneService } from './services/memoryHygieneService';
-import { setMemoryJudgeBrainResolver } from './libs/coworkMemoryJudge';
+import { setMemoryJudgeBrainResolver, setCerebellumMemoryWriteGate } from './libs/coworkMemoryJudge';
 import { setTeamCultureDistillationDeps } from './services/teamCultureDistillation';
 import { KnowledgeBaseService } from './services/knowledgeBaseService';
 import { KnowledgeBaseStore } from './knowledgeBaseStore';
@@ -3166,6 +3167,40 @@ const createCerebellumMemoryRanker = () =>
   };
 
 /**
+ * Cerebellum (小脑) memory write gate (roadmap #1): one cheap JEV Noul in
+ * front of the turn-level brain memory-extraction call. Same shape as the
+ * ranker above — config re-resolved lazily on every call so Settings edits
+ * apply on the next turn without a restart; null config (disabled/no key)
+ * yields a null verdict and the brain extraction proceeds exactly as before.
+ * The fetch rides the Electron net stack for the same proxy reason. Never
+ * logs turn text — only the verdict and latency.
+ */
+const createCerebellumMemoryWriteGate = () =>
+  async ({ userText, assistantText, implicitEnabled }: {
+    userText: string;
+    assistantText: string;
+    implicitEnabled: boolean;
+  }): Promise<boolean | null> => {
+    const config = resolveCerebellumConfig(getStore().get('app_config'));
+    if (!config) {
+      return null;
+    }
+    const startedAt = Date.now();
+    const verdict = await gateMemoryWriteWithCerebellum({
+      config,
+      fetchImpl: session.defaultSession.fetch.bind(session.defaultSession),
+      userText,
+      assistantText,
+      explicitOnly: !implicitEnabled,
+    });
+    coworkLog('INFO', 'memory:cerebellumWriteGate', 'turn write gate evaluated', {
+      verdict: verdict === null ? 'no-verdict' : verdict ? 'extract' : 'skip',
+      latencyMs: Date.now() - startedAt,
+    });
+    return verdict;
+  };
+
+/**
  * R3: rough upper-bound MVC fee estimate for a typical pin (funding + payload
  * outputs, ~600 vB at the resolved fee rate) — feeds the `need ~N sats` part
  * of balance-hint error messages. Marked as an estimate everywhere it shows.
@@ -3685,6 +3720,11 @@ const startSqliteDaemons = (): void => {
   // Cowork memory judge/extraction: fleet-level automation riding the Twin
   // Bot system brain (primary + fallback), never the bare app default model.
   setMemoryJudgeBrainResolver(() => resolveSystemBrainOptions(getMetabotStore().listMetabots()));
+  // Cerebellum memory write gate (roadmap #1): cheap pre-filter in front of
+  // the turn-level brain extraction. Same lazy-config shape as the ranker —
+  // read on the first memory-update pass, so the immediate startup path
+  // stays untouched.
+  setCerebellumMemoryWriteGate(createCerebellumMemoryWriteGate());
   // Session titling (cowork/private-chat/order sessions): same system-brain
   // rule — the Twin Bot brain pair, app default only during onboarding.
   // These three are pure seam wiring read by the first cowork turn / task

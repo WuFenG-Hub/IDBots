@@ -62,9 +62,17 @@ Diagnosis (see `groupTaskDaemon` internals): assignments were only chat text ins
 
 ### 2.6 Verification toolkit
 
-- Logs: `<userData>/logs/cowork.log`, tags `memory:cerebellumRank` (per-turn activity) and `memory:promptBlocks` (pool/injected counts).
-- Tests: `tests/cerebellumMemoryRank.test.mjs` (16), `tests/cerebellumConfig.test.mjs`, `tests/groupTaskWorkingState.test.mjs`, `tests/groupTaskSkillTurnMemoryReadOnly.test.mjs`, plus renderer suites `cerebellumConnection.test.ts` / `config.test.ts`. Many main-process suites import **compiled** code from `dist-electron/main/` — run `pnpm run compile:electron` after every `src/main` change.
+- Logs: `<userData>/logs/cowork.log`, tags `memory:cerebellumRank` (per-turn activity), `memory:cerebellumWriteGate` (write gate verdicts), and `memory:promptBlocks` (pool/injected counts).
+- Tests: `tests/cerebellumMemoryRank.test.mjs` (16), `tests/cerebellumMemoryWriteGate.test.mjs` (16), `tests/cerebellumConfig.test.mjs`, `tests/groupTaskWorkingState.test.mjs`, `tests/groupTaskSkillTurnMemoryReadOnly.test.mjs`, plus renderer suites `cerebellumConnection.test.ts` / `config.test.ts`. Many main-process suites import **compiled** code from `dist-electron/main/` — run `pnpm run compile:electron` after every `src/main` change.
 - Known pre-existing failures (fail on base commits too, unrelated): `tests/skillTurnTimeoutRecovery.test.mjs`, `tests/privateChatSkillTurnDeliveryInvariant.test.mjs`, `tests/privateChatSkillTurnPolicy.test.mjs` — their mock stores miss `setSessionAutoOrigin` / `getRecentA2AThreadMessages` added by earlier commits.
+
+### 2.7 Memory write gate (roadmap #1 — shipped on `feat/cerebellum-memory-write-gate`)
+
+- `src/main/cerebellum/memoryWriteGate.ts` — pure, Electron-free, same shape as `memoryRank.ts`: `gateMemoryWriteWithCerebellum({ config, fetchImpl, userText, assistantText, explicitOnly, timeoutMs? })` → `boolean | null`. **Never throws.** `true`/`null` = proceed to the brain extraction (fail-open — a broken gate can only cost money, never memories); `false` = skip the brain call for this turn. One Noul question (`worth_remembering`), English instructions with two variants (implicit vs explicit-only mode), state carries the turn's user/assistant excerpts in the original language (capped 1200/400 like the extraction pass). Threshold `CEREBELLUM_MEMORY_WRITE_GATE_THRESHOLD = 0.5` (cookbook gate at P≥0.5); timeout 1500 ms.
+- `src/main/libs/coworkMemoryJudge.ts` — `judgeTurnMemoryExtraction` now consults an injectable gate (`setCerebellumMemoryWriteGate`, same module-setter pattern as `setMemoryJudgeBrainResolver`) between the result cache and `runTurnMemoryExtractionDefault`. `gate === false` returns `[]` (the caller already treats that as "nothing extracted"); the skip verdict is deliberately NOT cached so Settings toggles re-evaluate fast. The injected test runner stays the executor itself (bypasses the gate) — seam ordering is locked by a test.
+- `main.ts` — `createCerebellumMemoryWriteGate()` factory (lazy `resolveCerebellumConfig` per call + `session.defaultSession.fetch`, identical to the ranker), wired once at startup next to `setMemoryJudgeBrainResolver`. Logs `memory:cerebellumWriteGate` with verdict + latency only — never turn text.
+- `judgeMemoryCandidate`'s boundary brain calls are NOT gated (rare, cached, per-candidate) — possible follow-up.
+- `scripts/cerebellum-write-gate-eval.mjs` — offline eval harness (same pattern as the rank eval): embedded 23-case labeled Chinese dataset, confusion matrix with FN (lost memory) called out, threshold sweep, `--explicit-only` mode, `--cases <json>`, `--dry-run`. First live run (implicit mode, jev-1.13.0): **23/23 — memorable noul 0.57–0.98 all proceed, skip 0.03–0.08 all rejected**; explicit-only variant 10/10. Threshold 0.5 sits in the wide gap (0.3–0.5 → FN=0; ≥0.6 starts losing borderline "ongoing interest" turns). ≈$0.00002 per gated turn, ~800 ms latency.
 
 ## 3. Design rules (do not break)
 
@@ -82,7 +90,7 @@ Ranked by expected value. Each row names the concrete seam.
 
 | # | Use case | Seam | Notes |
 |---|---|---|---|
-| 1 | **Memory write gate** | `src/main/libs/coworkMemoryJudge.ts` (`judgeTurnMemoryExtraction` / `judgeMemoryCandidate`) — JEV Noul "is this turn worth remembering?" as a cheap pre-filter; LLM still does extraction (JEV cannot generate) | Directly reduces brain-LLM calls; mirrors TypeSafe's basic-memory cookbook (gate at P≥0.5) |
+| 1 | **Memory write gate** — ✅ **shipped** (see §2.7) | `src/main/cerebellum/memoryWriteGate.ts` + `coworkMemoryJudge.judgeTurnMemoryExtraction` | Live eval 23/23 (implicit) and 10/10 (explicit-only) at threshold 0.5; open follow-up: gate `judgeMemoryCandidate` boundary brain calls too |
 | 2 | **Skill / MetaApp shortlist** | catalog injection at `coworkRunner.ts` `buildVolatileContextPrompt` (`skillsCatalogMode === 'volatile'`, ~line 5950); `skillManager.buildCoworkSkillPromptParts` | Cookbook measured wrong-loads 16.8%→7.3% on a 182-skill roster: wide Choice rank → top-3 re-read → one-line suggestion. Keep the catalog text byte-stable for prefix caching |
 | 3 | **Volatile block gating** | `buildVolatileContextPrompt` — 8 blocks; one request, 8 Nouls "does this turn need block X?" | Cuts per-turn tokens and context rot; system-prompt head stays byte-stable |
 | 4 | **Knowledge hot-layer ranking** | `src/main/metaidKnowledgeStore.ts` (~899) — currently newest-8 by `updated_at DESC`, zero relevance | Same `relevanceScoreById` pattern as memories |
@@ -98,9 +106,9 @@ Cross-cutting: validate every new question on real Chinese data first (Playgroun
 ## 5. Operational quick reference
 
 - Turn it on: `Settings > Model > Cerebellum` → paste key → Test Connection → toggle on. Applies next turn, no restart.
-- Confirm activity: `tail -f "$HOME/Library/Application Support/IDBots/logs/cowork.log" | grep -A 6 cerebellumRank` (`used:true` = ranking engaged; `used:false` with pooled ≥ 12 = fell back).
-- Eval on real data: `NODE_USE_ENV_PROXY=1 HTTPS_PROXY=<proxy> TYPESAFE_API_KEY=<key> node scripts/cerebellum-memory-eval.mjs eval --db <idbots.sqlite> --metabot-id <id> --max-memories 200 --queries q.json` (add `--dry-run` first to preview what leaves the machine).
-- Cost envelope: ~200 candidates ≈ 8K input tokens ≈ **$0.0003 per ranked turn**; output free.
+- Confirm activity: `tail -f "$HOME/Library/Application Support/IDBots/logs/cowork.log" | grep -A 6 cerebellumRank` (`used:true` = ranking engaged; `used:false` with pooled ≥ 12 = fell back). Write gate: `grep cerebellumWriteGate` (`verdict: skip` = brain extraction saved, `extract` = passed the gate, `no-verdict` = gate unavailable, brain ran ungated).
+- Eval on real data: `NODE_USE_ENV_PROXY=1 HTTPS_PROXY=<proxy> TYPESAFE_API_KEY=<key> node scripts/cerebellum-memory-eval.mjs eval --db <idbots.sqlite> --metabot-id <id> --max-memories 200 --queries q.json` (add `--dry-run` first to preview what leaves the machine). Write gate: `node scripts/cerebellum-write-gate-eval.mjs eval` (embedded sample) or `--cases <cases.json>`; `--explicit-only` for the explicit-only question variant.
+- Cost envelope: ~200 candidates ≈ 8K input tokens ≈ **$0.0003 per ranked turn**; write gate ≈ 470 input tokens ≈ **$0.00002 per gated turn**; output free.
 
 ## 6. On-chain dev journals (trace)
 
