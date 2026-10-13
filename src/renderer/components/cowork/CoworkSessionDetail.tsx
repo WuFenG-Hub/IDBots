@@ -1738,30 +1738,75 @@ const AssistantMessageItem: React.FC<{
         </div>
       ) : null}
       {replyContent ? (
-        // Assistant mode wraps the reply (narration and final answer alike) in
-        // a chat bubble shaped like the user bubble so the transcript reads as
-        // a conversation. Differentiation is purely background-color contrast
-        // (no border — exactly how the user bubble works): accent/10 ≈ #DDF0F5
-        // on the near-white chat bg (#F5F7F9) in light mode, accent/20 ≈
-        // #174456 on the dark navy chat bg (#142030) in dark mode — both
-        // clearly distinct from the user bubble's neutral surface (#FFFFFF /
-        // #1F2937). w-fit + max-w-full hugs short messages while long reports
-        // still fill the reading column. Professional mode keeps bare
-        // full-width text.
-        <div className={isAssistantMode
-          ? 'w-fit max-w-full rounded-[22px] px-[16px] py-[10px] dark:bg-claude-accent/20 bg-claude-accent/10 dark:text-claude-darkText text-claude-text shadow-subtle'
-          : 'dark:text-claude-darkText text-claude-text'
-        }>
-          <MarkdownContent
-            content={replyContent}
-            className="prose dark:prose-invert max-w-none"
-            resolveLocalFilePath={resolveLocalFilePath}
-            onOpenLocalFile={onOpenLocalFile}
-          />
-        </div>
+        isAssistantMode ? (
+          // Assistant mode wraps the reply (narration and final answer alike)
+          // in a chat bubble shaped like the user bubble, differentiated
+          // purely by background color (no border) via the theme-adaptive
+          // .assistant-bubble fill — light mode ≈ #D3EEF4 on the #F5F7F9 chat
+          // bg (darker), dark mode ≈ #174456 on #142030 (lighter); both stay
+          // clear of the user bubble's #FFFFFF / #1F2937. The w-fit wrapper
+          // hugs short messages while long reports still fill the reading
+          // column. Hover actions float over the bubble's bottom-right corner
+          // instead of occupying flow height, so consecutive bubbles keep the
+          // container's uniform space-y-1 gap in every state (a flow row used
+          // to add ~32px under each bubble once the turn completed).
+          <div className="relative w-fit max-w-full">
+            <div className="assistant-bubble rounded-[22px] px-[16px] py-[10px] dark:text-claude-darkText text-claude-text shadow-subtle">
+              <MarkdownContent
+                content={replyContent}
+                className="prose dark:prose-invert max-w-none"
+                resolveLocalFilePath={resolveLocalFilePath}
+                onOpenLocalFile={onOpenLocalFile}
+              />
+            </div>
+            {showCopyButton && (
+              <div
+                className={`absolute bottom-1 right-1 flex items-center gap-1 rounded-lg px-1 py-0.5 dark:bg-claude-darkSurface/90 bg-claude-surface/90 shadow-subtle transition-all duration-200 ${
+                  isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                }`}
+              >
+                <CopyButton
+                  content={replyContent || displayContent}
+                  visible={isHovered}
+                />
+                <MessageFeedbackControls
+                  messageId={message.id}
+                  visible={isHovered}
+                />
+                <MessageTimestamp
+                  timestamp={message.timestamp}
+                  visible={isHovered}
+                />
+                {onBranch && (
+                  <button
+                    type="button"
+                    onClick={() => void onBranch(message)}
+                    className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-all duration-200 ${
+                      isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                    }`}
+                    title={i18nService.t('coworkBranchNewChatTitle')}
+                  >
+                    <DocumentDuplicateIcon className="h-3 w-3" />
+                    {i18nService.t('coworkBranchNewChatLabel')}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          // Professional mode: bare full-width text, actions in a flow row.
+          <div className="dark:text-claude-darkText text-claude-text">
+            <MarkdownContent
+              content={replyContent}
+              className="prose dark:prose-invert max-w-none"
+              resolveLocalFilePath={resolveLocalFilePath}
+              onOpenLocalFile={onOpenLocalFile}
+            />
+          </div>
+        )
       ) : null}
       {renderExtension?.(message)}
-      {showCopyButton && (
+      {!isAssistantMode && showCopyButton && (
         <div className="flex items-center gap-1.5 mt-1">
           <CopyButton
             content={replyContent || displayContent}
