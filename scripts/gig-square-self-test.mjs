@@ -34,7 +34,7 @@ if (!mnemonic) {
   process.exit(1);
 }
 
-const workerPath = path.join(root, 'dist-electron', 'libs', 'transferMvcWorker.js');
+const workerPath = path.join(root, 'dist-electron', 'main', 'libs', 'transferMvcWorker.js');
 if (!existsSync(workerPath)) {
   console.error('Worker not found. Run: npm run compile:electron');
   process.exit(1);
