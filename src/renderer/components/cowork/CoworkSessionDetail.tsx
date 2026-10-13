@@ -1612,7 +1612,7 @@ const UserMessageItem: React.FC<{
                 sessionType={sessionType}
                 sessionTitle={sessionTitle}
               />
-              <div className="w-fit max-w-[min(646px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text shadow-subtle">
+              <div className="cowork-user-bubble w-fit max-w-[min(646px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text">
                 <MarkdownContent
                   content={message.content}
                   className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"

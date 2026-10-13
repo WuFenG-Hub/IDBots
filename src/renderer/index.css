@@ -597,6 +597,15 @@ select::-ms-expand {
   background-color: color-mix(in srgb, #ffffff 9%, var(--cowork-chat-bg));
 }
 
+/* Cowork transcript user bubble: light mode keeps its white fill but gains a
+   hairline inset ring — pure #FFFFFF was faint against the neutral #FAFAFA
+   chat surface (the ring plus the original subtle drop shadow, one
+   declaration so it cannot fight the shadow-subtle utility). Dark mode's
+   blue-slate fill already contrasts the #1B1B1D page, so it is untouched. */
+.cowork-user-bubble {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.07), 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
 @keyframes scheduled-task-running-glow {
   0%, 100% {
     opacity: 0.72;
