@@ -170,12 +170,12 @@ test('owner decision quiet beyond the reminder window → reminder escalation', 
   assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
   assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'need a channel decision' }, 'twin').ok);
 
-  const report = await advance.run(Date.now() + 5 * HOUR);
+  const report = await advance.run(Date.now() + 13 * HOUR);
   assert.equal(report.escalated.length, 1, JSON.stringify(report));
   assert.match(report.escalated[0].reasons[0], /owner decision still pending/);
 });
 
-test('owner reminder cadence: silent at 1h, reminding past the relaxed 2h window', async () => {
+test('owner reminder cadence: silent at 6h, reminding past the relaxed 12h window', async () => {
   const { store, deps } = await openWorld();
   const taskId = await createActive(store);
   const subtask = store.getTask(taskId).subtasks[0];
@@ -183,19 +183,20 @@ test('owner reminder cadence: silent at 1h, reminding past the relaxed 2h window
   const now = Date.now();
   assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'need a channel decision' }, 'twin').ok);
 
-  // The amber owner-decision badge (commit 3) carries the attention now; the
-  // heartbeat only re-presents, so one hour in is no longer a reminder.
+  // The pending decision is already permanently visible (main-timeline fold
+  // lift + sidebar/tab badges), so the heartbeat only re-presents as a daily
+  // digest — six hours in is no longer a reminder.
   const advance = new LongTermAdvanceService(deps);
-  const early = await advance.run(now + HOUR);
+  const early = await advance.run(now + 6 * HOUR);
   assert.equal(early.escalated.length, 0, JSON.stringify(early));
 
   // The engine cadence itself is untouched — the sweep still runs and the
-  // reminder lands just past the 2h window (the comparison is strictly
+  // reminder lands just past the 12h window (the comparison is strictly
   // greater-than on the quiet time), quoting the relaxed interval.
-  const due = await advance.run(now + 2 * HOUR + 5 * 60_000);
+  const due = await advance.run(now + 12 * HOUR + 5 * 60_000);
   assert.equal(due.escalated.length, 1, JSON.stringify(due));
   assert.match(due.escalated[0].reasons[0], /owner decision still pending/);
-  assert.match(due.escalated[0].reasons[0], /120min/, 'the relaxed window is what the reason states');
+  assert.match(due.escalated[0].reasons[0], /720min/, 'the relaxed window is what the reason states');
 });
 
 test('owner wait with a future waitUntil stays silent inside the promised quiet window', async () => {
@@ -230,7 +231,7 @@ test('owner wait: the first tick after the quiet window passes re-escalates as a
     }, 'twin').ok,
   );
 
-  const report = await advance.run(now + 5 * HOUR);
+  const report = await advance.run(now + 13 * HOUR);
   assert.equal(report.escalated.length, 1, JSON.stringify(report));
   assert.match(report.escalated[0].reasons[0], /quiet window ended/);
 });
@@ -263,7 +264,7 @@ test('stale owner wait converges: after the Twin re-records the wait, reminders 
     store.waitSubtask(subtask.id, { kind: 'owner', note: 'need a channel decision (re-confirmed)' }, 'twin').ok,
   );
 
-  const report = await advance.run(now + 5 * HOUR);
+  const report = await advance.run(now + 13 * HOUR);
   assert.equal(report.escalated.length, 1, JSON.stringify(report));
   assert.match(report.escalated[0].reasons[0], /owner decision still pending/);
 });
@@ -292,7 +293,7 @@ test('proposing from an external wait leaves reminders un-silenced; the session-
   // Hours later the pending decision still reminds as a plain reminder —
   // the residual external window is gone and the bind note must not trip
   // stale-wait convergence.
-  const later = await advance.run(now + 5 * HOUR);
+  const later = await advance.run(now + 13 * HOUR);
   assert.equal(later.escalated.length, 1, JSON.stringify(later));
   assert.match(later.escalated[0].reasons[0], /owner decision still pending/);
   assert.doesNotMatch(later.escalated[0].reasons[0], /stale owner wait/);
@@ -809,7 +810,7 @@ test('waiting-owner nudge prompt carries the full-restatement contract and the w
   assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'pick channel A or B' }, 'twin').ok);
 
   const advance = new LongTermAdvanceService(deps);
-  const report = await advance.run(Date.now() + 5 * HOUR);
+  const report = await advance.run(Date.now() + 13 * HOUR);
   assert.equal(report.escalated.length, 1, JSON.stringify(report));
   const prompt = runner.starts[0].prompt;
   assert.match(prompt, /waiting on the owner/i);
@@ -875,29 +876,31 @@ test('after the owner disengages, the reminder measures quiet from their last me
   const subtask = store.getTask(taskId).subtasks[0];
   assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
   assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'pick A or B' }, 'twin').ok);
-  const first = await new LongTermAdvanceService(deps).run(now + 5 * HOUR);
+  const first = await new LongTermAdvanceService(deps).run(now + 13 * HOUR);
   const boundId = first.escalated[0].sessionId;
   cowork.registerSession('venue', 7);
   assert.ok(store.bindSession(subtask.id, 'venue', 'system').ok);
   assert.ok(store.bindSession(subtask.id, boundId, 'system').ok);
   // Engaged sweep: rebind + suppress + anchor.
-  const tEngaged = now + 6 * HOUR;
+  const tEngaged = now + 14 * HOUR;
   cowork.engagement.set('venue', { lastOwnerMessageAtMs: tEngaged - 5 * 60_000, lastAssistantMessageAtMs: null });
   await new LongTermAdvanceService(deps).run(tEngaged);
   assert.equal(store.getTask(taskId).subtasks[0].sessionId, 'venue', 'binding followed the owner');
 
-  // The owner kept talking until tTalk, then went quiet. 90 minutes later the
-  // journal has been silent for >2h (last journal write was the rebind at
-  // tEngaged) — WITHOUT the owner anchor a reminder would fire here.
-  const tTalk = tEngaged + 60 * 60_000;
+  // The owner kept talking until tTalk (6h past the rebind), then went quiet.
+  // At mid the journal has been silent for 12.5h — past the 12h reminder
+  // window — but the OWNER has been quiet for only 6.5h: WITHOUT the owner
+  // anchor a reminder would fire here, with it the reminder waits for the
+  // owner's own quiet clock.
+  const tTalk = tEngaged + 6 * HOUR;
   cowork.engagement.set('venue', { lastOwnerMessageAtMs: tTalk, lastAssistantMessageAtMs: null });
-  const mid = await new LongTermAdvanceService(deps).run(tTalk + 90 * 60_000);
+  const mid = await new LongTermAdvanceService(deps).run(tEngaged + 12 * HOUR + 30 * 60_000);
   assert.equal(mid.escalated.length, 0, `quiet measured from the owner's last word: ${JSON.stringify(mid)}`);
 
-  // Past the owner-anchored 2h the reminder fires — into the venue, even over
+  // Past the owner-anchored 12h the reminder fires — into the venue, even over
   // the rotation budget: owner-facing turns never rotate away from the owner.
   cowork.counts.set('venue', 10_000);
-  const due = await new LongTermAdvanceService(deps).run(tTalk + 2 * HOUR + 5 * 60_000);
+  const due = await new LongTermAdvanceService(deps).run(tTalk + 12 * HOUR + 5 * 60_000);
   assert.equal(due.escalated.length, 1, JSON.stringify(due));
   assert.match(due.escalated[0].reasons[0], /owner decision still pending/);
   assert.equal(due.escalated[0].sessionId, 'venue');
@@ -941,12 +944,12 @@ test('hot delivery for a waiting-owner turn forbids the six-section brief', asyn
   const subtask = store.getTask(taskId).subtasks[0];
   assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
   assert.ok(store.waitSubtask(subtask.id, { kind: 'owner', note: 'pick A or B' }, 'twin').ok);
-  const first = await new LongTermAdvanceService(deps).run(now + 5 * HOUR);
+  const first = await new LongTermAdvanceService(deps).run(now + 13 * HOUR);
   const boundId = first.escalated[0].sessionId;
   // The owner is engaged in the BOUND session itself; a stale-wait convergence
   // (work family) is due, so a turn fires while the owner is online.
   assert.ok(store.addNote(taskId, subtask.id, 'worked past the wait', 'twin').ok);
-  const t2 = now + 6 * HOUR;
+  const t2 = now + 14 * HOUR;
   cowork.engagement.set(boundId, { lastOwnerMessageAtMs: t2 - 3 * 60_000, lastAssistantMessageAtMs: t2 - 2 * HOUR });
 
   const report = await new LongTermAdvanceService(deps).run(t2);

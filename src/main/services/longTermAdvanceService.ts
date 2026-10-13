@@ -52,14 +52,18 @@ export const LONGTERM_ADVANCE_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_MAX_ESCALATIONS_PER_RUN = 2;
 const DEFAULT_NUDGE_THROTTLE_MS = 30 * 60_000;
 /**
- * Quiet time before re-presenting a parked owner decision (default 2h).
- * The sidebar's 跟踪任务 dot and the 长期任务 tab badge now carry the "you are
- * the blocker" attention, so the heartbeat only has to re-present the pending
- * decision — every 30 minutes was nagging, not reminding. The sweep cadence
- * (LONGTERM_ADVANCE_INTERVAL_MS) and the nudge throttle are untouched: only the
- * owner-nag interval relaxes.
+ * Quiet time before re-presenting a parked owner decision (default 12h — a
+ * daily digest, not a nag). The decision surface is now permanently visible
+ * without any twin turn: the waiting_owner session rides the MAIN timeline
+ * (board-derived decisionSessionIds, see sessionAutoGrouping) with its unread
+ * dot, plus the 跟踪任务 sidebar badge and the 长期任务 tab badge. A reminder
+ * TURN on top of that at 2h cadence only re-set the quiet clock every time
+ * (each turn writes a journal event) and produced the 1–2 nag sessions a day
+ * the owner complained about. Fresh proposals still reach the owner on the
+ * next tick (一提请就叫你), promised quiet windows are honored, and stale-wait
+ * convergence is unchanged; only the recurring re-present relaxes.
  */
-const DEFAULT_WAITING_OWNER_REMINDER_MS = 2 * 3_600_000;
+const DEFAULT_WAITING_OWNER_REMINDER_MS = 12 * 3_600_000;
 const DEFAULT_EXTERNAL_REMINDER_MS = 4 * 3_600_000;
 const DEFAULT_FAILURE_STREAK_THRESHOLD = 2;
 const DEFAULT_EXPECTED_MINUTES = 240;
