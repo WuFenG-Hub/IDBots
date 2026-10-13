@@ -103,6 +103,7 @@ import { ensureSandboxReady, getSandboxRuntimeInfoIfReady, type SandboxRuntimeIn
 import { isPathWithin } from './runtimePaths';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
 import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
+import { resolveAutoEffortRung, type CerebellumEffortRung } from '../cerebellum/effortSelector';
 import { buildSkillShortlistBlock } from '../cerebellum/skillShortlist';
 import { CEREBELLUM_VOLATILE_GATE_SECTION_KEYS } from '../cerebellum/volatileBlockGate';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
@@ -2110,6 +2111,19 @@ export interface CoworkRunnerOptions {
     currentUserText: string;
   }) => Promise<Record<string, boolean> | null>;
   /**
+   * Optional cerebellum (小脑) reasoning-effort auto selector for the "auto"
+   * effort rung: one JEV Choice question rates how much deliberation the
+   * user's message intrinsically needs ({off, low, high, max} probabilities).
+   * Consulted ONLY for sessions without an explicit effort pick; null
+   * (unconfigured, timeout, error, blank text) means "keep the existing
+   * default chain" — the callback must never throw. main.ts resolves the
+   * cerebellum config lazily inside the callback so Settings edits apply on
+   * the next turn without a restart.
+   */
+  cerebellumEffortSelector?: (input: {
+    currentUserText: string;
+  }) => Promise<Record<'off' | 'low' | 'high' | 'max', number> | null>;
+  /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
    * turn ended without terminal events) and settled so the query can close.
@@ -2270,6 +2284,7 @@ export class CoworkRunner extends EventEmitter {
   private cerebellumMemoryRanker?: CoworkRunnerOptions['cerebellumMemoryRanker'];
   private cerebellumSkillRanker?: CoworkRunnerOptions['cerebellumSkillRanker'];
   private cerebellumVolatileBlockGate?: CoworkRunnerOptions['cerebellumVolatileBlockGate'];
+  private cerebellumEffortSelector?: CoworkRunnerOptions['cerebellumEffortSelector'];
   /**
    * Per-session precise-location consent memory: the owner is asked at most
    * once per session (first precise request) and the approval sticks for the
@@ -2434,6 +2449,7 @@ export class CoworkRunner extends EventEmitter {
     this.cerebellumMemoryRanker = options?.cerebellumMemoryRanker;
     this.cerebellumSkillRanker = options?.cerebellumSkillRanker;
     this.cerebellumVolatileBlockGate = options?.cerebellumVolatileBlockGate;
+    this.cerebellumEffortSelector = options?.cerebellumEffortSelector;
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
@@ -8906,6 +8922,14 @@ export class CoworkRunner extends EventEmitter {
       // default (620d2850), with one first-turn exception below.
       const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId)
       const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode, sessionId)
+      // "Auto" reasoning effort (sessions without an explicit pick, cerebellum
+      // configured): kicked BEFORE the volatile-context build so the JEV
+      // round-trip overlaps that window's own cerebellum calls — by the time
+      // the effort resolution below runs, the verdict is typically already in
+      // hand and the turn start pays no extra latency.
+      const autoEffortPromise = activeSession.effortOverride == null && this.cerebellumEffortSelector
+        ? this.cerebellumEffortSelector({ currentUserText: prompt })
+        : null
       const volatileBlocks = await this.buildVolatileContextPrompt(
         sessionId,
         prompt,
@@ -8958,21 +8982,45 @@ export class CoworkRunner extends EventEmitter {
       // Professional mode keeps the full chain unchanged.
       const assistantMode = getPersistedChatExperienceMode() === 'assistant';
       const sessionEffortPicked = activeSession.effortOverride != null;
+      // "Auto" rung verdict: null (no selector, unconfigured cerebellum,
+      // timeout, malformed verdict) keeps the existing default chain below
+      // byte-identical. Assistant mode resolves through the conservative
+      // two-level policy — casual chat stays off, correctness-risk work
+      // escalates (see resolveAutoEffortRung + the Phase-0 eval).
+      let autoEffortRung: CerebellumEffortRung | null = null;
+      if (!sessionEffortPicked && autoEffortPromise) {
+        const distribution = await autoEffortPromise;
+        if (distribution) {
+          autoEffortRung = resolveAutoEffortRung(distribution, { assistantMode });
+          coworkLog('INFO', 'effort:cerebellumSelect', 'auto effort resolved for turn', {
+            sessionId,
+            assistantMode,
+            effort: autoEffortRung,
+            off: distribution.off,
+            low: distribution.low,
+            high: distribution.high,
+            max: distribution.max,
+          });
+        }
+      }
       const dshReasoningEffort = mapDshReasoningEffort(
         sessionEffortPicked
           ? toLlmEffortLevel(activeSession.effortOverride)
-          : assistantMode
+          : autoEffortRung ?? (assistantMode
             ? 'off'
             : toLlmEffortLevel(
               automationBrain?.effort
-                ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? modelOptions?.reasoningEffort),
-        sessionEffortPicked || !assistantMode ? activeSession.thinkingOverride ?? modelOptions?.thinking : undefined,
+                ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? modelOptions?.reasoningEffort)),
+        sessionEffortPicked || autoEffortRung != null || !assistantMode
+          ? activeSession.thinkingOverride ?? modelOptions?.thinking
+          : undefined,
         dshEffortDialect,
       );
       coworkLog('INFO', 'runDshSessionLocal', 'DSH reasoning effort for turn', {
         sessionId,
         dialect: dshEffortDialect,
         uiOverride: activeSession.effortOverride ?? null,
+        autoEffort: autoEffortRung,
         brainEffort: automationBrain?.effort ?? null,
         assistantMode,
         modelDefault: modelOptions?.reasoningEffort ?? null,
@@ -9122,12 +9170,14 @@ export class CoworkRunner extends EventEmitter {
           turnReasoningEffort = mapDshReasoningEffort(
             sessionEffortPicked
               ? toLlmEffortLevel(activeSession.effortOverride)
-              : assistantMode
+              : autoEffortRung ?? (assistantMode
                 ? 'off'
                 : toLlmEffortLevel(
                   automationBrain?.fallbackEffort
-                    ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? fallbackModelOptions?.reasoningEffort),
-            sessionEffortPicked || !assistantMode ? activeSession.thinkingOverride ?? fallbackModelOptions?.thinking : undefined,
+                    ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? fallbackModelOptions?.reasoningEffort)),
+            sessionEffortPicked || autoEffortRung != null || !assistantMode
+              ? activeSession.thinkingOverride ?? fallbackModelOptions?.thinking
+              : undefined,
             turnOfficialDeepSeekNative ? 'deepseek-native' : 'generic',
           );
         }

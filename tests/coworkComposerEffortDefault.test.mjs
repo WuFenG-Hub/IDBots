@@ -77,24 +77,33 @@ test('a configured bot brain outranks the persisted global effort', () => {
   );
 });
 
-test('assistant chat-experience mode defaults reasoning off; a session override wins', () => {
+test('assistant chat-experience mode defaults reasoning off behind the auto rung; a session override wins', () => {
   // Both per-turn chains (primary route and GT-02 fallback-brain route) hoist
-  // the explicit session override AHEAD of the assistant-mode 'off' rung — a
-  // user pick in the session picker must stick at runtime. Without an
-  // override, assistant mode pins 'off' and skips the bot brain / persisted
-  // global / per-model tail (any reasoning pass would delay the first visible
-  // token the mode promises). The professional-mode chain (asserted above)
-  // stays intact behind the same expression.
+  // the explicit session override AHEAD of everything — a user pick in the
+  // session picker must stick at runtime. Without an override the cerebellum
+  // AUTO rung comes next (autoEffortRung — resolved by the per-turn JEV
+  // selector; null keeps the legacy behavior), then assistant mode pins 'off'
+  // and skips the bot brain / persisted global / per-model tail (any reasoning
+  // pass would delay the first visible token the mode promises). The
+  // professional-mode chain (asserted above) stays intact behind the same
+  // expression.
   assert.ok(
     coworkRunnerSource.includes('getPersistedChatExperienceMode'),
     'coworkRunner: effort resolution must read the persisted chat experience mode',
   );
   const overrideFirstChains = coworkRunnerSource.match(
-    /sessionEffortPicked\s*\?\s*toLlmEffortLevel\(activeSession\.effortOverride\)\s*:\s*assistantMode\s*\?\s*'off'/g,
+    /sessionEffortPicked\s*\?\s*toLlmEffortLevel\(activeSession\.effortOverride\)\s*:\s*autoEffortRung\s*\?\?/g,
   ) ?? [];
   assert.ok(
     overrideFirstChains.length >= 2,
-    'coworkRunner: primary and fallback effort chains must hoist the session override ahead of the assistant-mode off rung',
+    'coworkRunner: primary and fallback effort chains must hoist the session override ahead of the auto rung',
+  );
+  const autoAheadOfOff = coworkRunnerSource.match(
+    /autoEffortRung\s*\?\?\s*\(assistantMode\s*\?\s*'off'/g,
+  ) ?? [];
+  assert.ok(
+    autoAheadOfOff.length >= 2,
+    'coworkRunner: the auto rung must resolve ahead of the assistant-mode off rung on both chains',
   );
   const assistantSkipsTail = coworkRunnerSource.match(
     /assistantMode\s*\?\s*'off'\s*:\s*toLlmEffortLevel\(\s*automationBrain/g,
@@ -105,14 +114,17 @@ test('assistant chat-experience mode defaults reasoning off; a session override 
   );
 });
 
-test('assistant mode displays the effort chip as off when the session has no explicit pick', () => {
+test('assistant mode displays the Auto rung when the session has no explicit pick', () => {
+  // The unpicked display is the Auto rung (null): the turn resolves its effort
+  // through the cerebellum auto selector when configured and falls back to the
+  // legacy default chain (off in assistant mode) otherwise.
   assert.ok(
-    modelCatalogSource.includes("if (options?.assistantMode) return 'off';"),
-    'modelCatalog: effortDisplayForPick must display off for a missing pick in assistant mode',
+    modelCatalogSource.includes('if (options?.assistantMode) return null;'),
+    'modelCatalog: effortDisplayForPick must display the Auto rung for a missing pick in assistant mode',
   );
   assert.ok(
-    sessionDetailSource.includes("if (isAssistantMode) return 'off';"),
-    'CoworkSessionDetail: the session picker must display off in assistant mode when no override exists',
+    sessionDetailSource.includes('if (isAssistantMode) return null;'),
+    'CoworkSessionDetail: the session picker must display the Auto rung in assistant mode when no override exists',
   );
   // The composer display chains must receive the mode flag.
   assert.ok(

@@ -411,10 +411,11 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
               providerKey: pendingModelEffort?.modelId == null
                 ? (selectedMetabot?.llm_provider ?? null)
                 : (pendingModelEffort?.providerKey ?? null),
-              // An explicit pick sticks as chosen (null = Default); only a
+              // An explicit pick sticks as chosen (null = Auto); only a
               // missing pick resolves the bot brain fallback. Assistant mode
-              // displays 'off' for a missing pick: that is the rung the new
-              // session will actually run at.
+              // displays the Auto rung for a missing pick: the session
+              // resolves per turn (cerebellum auto when configured, else the
+              // default chain).
               effort: effortDisplayForPick(pendingModelEffort, [selectedMetabot?.llm_effort ?? null], { assistantMode: isAssistantMode }),
             }}
             onChange={(value) => {
