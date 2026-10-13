@@ -205,6 +205,11 @@ interface LlmRelayQuotaInfo {
   quotaRemaining: number;
 }
 
+interface JevRelayCredentials {
+  apiKey: string;
+  baseUrl: string;
+}
+
 interface ApiStreamResponse {
   ok: boolean;
   status: number;
@@ -1420,7 +1425,10 @@ interface IElectronAPI {
   llmRelay: {
     bootstrap: () => Promise<{ success: boolean; result?: LlmRelayBootstrapInfo; error?: string }>;
     getQuota: (input: { apiKey: string; forceRefresh?: boolean }) => Promise<{ success: boolean; quota?: LlmRelayQuotaInfo; error?: string }>;
-    setApiBase: (input: { apiBase: string }) => Promise<{ success: boolean; apiBase?: string; error?: string }>;
+    setApiBase: (input: { apiBase?: string }) => Promise<{ success: boolean; apiBase?: string; error?: string }>;
+  };
+  jevRelay: {
+    resolveCredentials: () => Promise<{ success: boolean; credentials?: JevRelayCredentials; error?: string }>;
   };
   appInfo: {
     getVersion: () => Promise<string>;

@@ -793,6 +793,9 @@ contextBridge.exposeInMainWorld('electron', {
     getQuota: (input: { apiKey: string; forceRefresh?: boolean }) => ipcRenderer.invoke('llmRelay:getQuota', input),
     setApiBase: (input: { apiBase: string }) => ipcRenderer.invoke('llmRelay:setApiBase', input),
   },
+  jevRelay: {
+    resolveCredentials: () => ipcRenderer.invoke('jevRelay:resolveCredentials'),
+  },
   appInfo: {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
     getSystemLocale: () => ipcRenderer.invoke('app:getSystemLocale'),

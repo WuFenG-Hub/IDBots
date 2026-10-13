@@ -130,6 +130,10 @@ const translations: Record<LanguageType, Record<string, string>> = {
     cerebellumConnectionSuccess: '连接成功（{count} 个模型）：{models}',
     cerebellumInvalidApiKey: 'API Key 无效（401 Unauthorized）',
     cerebellumConnectionUnreachable: '无法连接到小脑服务，请检查 Base URL 与网络连接',
+    cerebellumFreeProviderHint: 'IDBots-JEV-Free 是官方免费中转：无需申请 TypeSafe Key，小脑流量经 IDBots 中转；与 IDBots-Free 聊天共享同一份免费 token 额度（小脑单次约消耗 300~500 tokens）。',
+    cerebellumFreeKeyManaged: '由 IDBots 免费额度自动管理，无需填写',
+    cerebellumFreeQuota: '免费额度剩余 {n} tokens（与 IDBots-Free 聊天共享）',
+    cerebellumFreeQuotaUnavailable: '暂时无法获取免费额度信息',
 
     // 密码相关
     password: '密码',
@@ -3100,6 +3104,10 @@ const translations: Record<LanguageType, Record<string, string>> = {
     cerebellumConnectionSuccess: 'Connection successful ({count} models): {models}',
     cerebellumInvalidApiKey: 'Invalid API key (401 Unauthorized)',
     cerebellumConnectionUnreachable: 'Could not reach the cerebellum endpoint. Check the Base URL and your network connection',
+    cerebellumFreeProviderHint: 'IDBots-JEV-Free is the official free relay: no TypeSafe key needed — cerebellum traffic goes through the IDBots relay and shares the same free token quota with IDBots-Free chat (each cerebellum call uses ~300-500 tokens).',
+    cerebellumFreeKeyManaged: 'Managed automatically by the IDBots free quota — nothing to fill in',
+    cerebellumFreeQuota: 'Free quota remaining: {n} tokens (shared with IDBots-Free chat)',
+    cerebellumFreeQuotaUnavailable: 'Free quota information is unavailable right now',
 
     // Password related
     password: 'Password',

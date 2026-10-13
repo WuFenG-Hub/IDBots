@@ -83,16 +83,25 @@ type ProviderConfig = ProvidersConfig[string] & { name?: string };
 type Model = NonNullable<ProviderConfig['models']>[number];
 type CerebellumConfig = NonNullable<AppConfig['cerebellum']>;
 
-// Cerebellum provider options: single entry until more decision-model providers land.
+// Cerebellum provider options: direct TypeSafe (user-owned key) plus the
+// official free relay (server holds the upstream key; client rides the
+// free-quota relay key shared with IDBots-Free chat).
 const CEREBELLUM_PROVIDER_OPTIONS = [
   { value: 'typesafe-jev', label: 'TypeSafe JEV' },
+  { value: 'idbots-jev-free', label: 'IDBots-JEV-Free' },
 ];
+
+// Mirrors src/main/libs/cerebellumConfig.ts — the free provider pins these.
+const CEREBELLUM_FREE_PROVIDER = 'idbots-jev-free';
+const CEREBELLUM_FREE_RELAY_BASE_URL = 'https://www.metaso.network/assist-open-api/v2/assist/llm/jev';
+const CEREBELLUM_FREE_MODEL = 'jev-latest';
+const TYPESAFE_JEV_BASE_URL = 'https://api.typesafe.ai';
 
 const DEFAULT_CEREBELLUM_CONFIG: CerebellumConfig = {
   enabled: false,
   provider: 'typesafe-jev',
   apiKey: '',
-  baseUrl: 'https://api.typesafe.ai',
+  baseUrl: TYPESAFE_JEV_BASE_URL,
   model: 'jev-latest',
 };
 type MemoryMetabotOption = {
@@ -547,6 +556,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
   }));
   const [cerebellumTestResult, setCerebellumTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isTestingCerebellum, setIsTestingCerebellum] = useState(false);
+  // Free provider quota snapshot (chat + JEV shared total); null = unavailable.
+  const [cerebellumFreeQuota, setCerebellumFreeQuota] = useState<{ loading: boolean; remaining: number | null }>({ loading: false, remaining: null });
   
   // 创建引用来确保内容区域的滚动
   const contentRef = useRef<HTMLDivElement>(null);
@@ -1840,6 +1851,79 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setCerebellumTestResult(null);
   };
 
+  /**
+   * Free provider: the relay key lives in the main-process credential chain
+   * (kv -> metaid-free provider -> identity bootstrap), not in user input.
+   * Always resolve from the chain (fresher than the config snapshot) and
+   * persist it so the pure config path keeps working; an unresolved key is
+   * fine — the cerebellum silently stays off until credentials exist.
+   */
+  const ensureCerebellumFreeApiKey = async (): Promise<string> => {
+    try {
+      const response = await window.electron.jevRelay.resolveCredentials();
+      const apiKey = response?.success ? (response.credentials?.apiKey ?? '').trim() : '';
+      if (apiKey && apiKey !== cerebellum.apiKey.trim()) {
+        setCerebellum(prev => (prev.provider === CEREBELLUM_FREE_PROVIDER ? { ...prev, apiKey } : prev));
+      }
+      return apiKey;
+    } catch {
+      // IPC failure: fall back to whatever was resolved before (may be '').
+      return cerebellum.apiKey.trim();
+    }
+  };
+
+  const loadCerebellumFreeQuota = useCallback(async (apiKey: string) => {
+    if (!apiKey) {
+      setCerebellumFreeQuota({ loading: false, remaining: null });
+      return;
+    }
+    setCerebellumFreeQuota({ loading: true, remaining: null });
+    try {
+      const response = await window.electron.llmRelay.getQuota({ apiKey });
+      setCerebellumFreeQuota({
+        loading: false,
+        remaining: response?.success && response.quota ? response.quota.quotaRemaining : null,
+      });
+    } catch {
+      setCerebellumFreeQuota({ loading: false, remaining: null });
+    }
+  }, []);
+
+  // Free provider selected with a resolved key: keep the shared-quota number
+  // fresh (same snapshot the free-quota card shows, chat + JEV combined).
+  useEffect(() => {
+    if (cerebellum.provider === CEREBELLUM_FREE_PROVIDER && cerebellum.apiKey.trim()) {
+      void loadCerebellumFreeQuota(cerebellum.apiKey.trim());
+    } else if (cerebellum.provider !== CEREBELLUM_FREE_PROVIDER) {
+      setCerebellumFreeQuota({ loading: false, remaining: null });
+    }
+  }, [cerebellum.provider, cerebellum.apiKey, loadCerebellumFreeQuota]);
+
+  const handleCerebellumProviderChange = (provider: CerebellumConfig['provider']) => {
+    setCerebellumTestResult(null);
+    if (provider === CEREBELLUM_FREE_PROVIDER) {
+      // baseUrl/model are pinned by the relay; the key resolves right away
+      // (fire-and-forget — failure just leaves the field empty, and the
+      // cerebellum stays silently off until a key exists).
+      setCerebellum(prev => ({
+        ...prev,
+        provider,
+        apiKey: '',
+        baseUrl: CEREBELLUM_FREE_RELAY_BASE_URL,
+        model: CEREBELLUM_FREE_MODEL,
+      }));
+      void ensureCerebellumFreeApiKey();
+      return;
+    }
+    setCerebellum(prev => ({
+      ...prev,
+      provider,
+      apiKey: '',
+      baseUrl: TYPESAFE_JEV_BASE_URL,
+      model: DEFAULT_CEREBELLUM_CONFIG.model,
+    }));
+  };
+
   const handleTestCerebellumConnection = async () => {
     if (isTestingCerebellum) {
       return;
@@ -1847,8 +1931,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setIsTestingCerebellum(true);
     setCerebellumTestResult(null);
     try {
+      // Free provider: pull the relay key from the credential chain first
+      // (fresh installs may not have bootstrapped the free quota yet).
+      const apiKey = cerebellum.provider === CEREBELLUM_FREE_PROVIDER
+        ? await ensureCerebellumFreeApiKey()
+        : cerebellum.apiKey;
       const result = await testCerebellumConnection(
-        { baseUrl: cerebellum.baseUrl, apiKey: cerebellum.apiKey },
+        { baseUrl: cerebellum.baseUrl, apiKey },
         i18nService,
       );
       setCerebellumTestResult(result);
@@ -3462,11 +3551,26 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                   <ThemedSelect
                     id="cerebellum-provider"
                     value={cerebellum.provider}
-                    onChange={(value) => handleCerebellumConfigChange('provider', value as CerebellumConfig['provider'])}
+                    onChange={(value) => handleCerebellumProviderChange(value as CerebellumConfig['provider'])}
                     options={CEREBELLUM_PROVIDER_OPTIONS}
                   />
                 </div>
               </div>
+
+              {cerebellum.provider === CEREBELLUM_FREE_PROVIDER && (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+                  <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+                    {i18nService.t('cerebellumFreeProviderHint')}
+                  </p>
+                  {cerebellum.apiKey.trim() && !cerebellumFreeQuota.loading && (
+                    <p className="mt-1 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+                      {cerebellumFreeQuota.remaining !== null
+                        ? i18nService.t('cerebellumFreeQuota').replace('{n}', new Intl.NumberFormat().format(cerebellumFreeQuota.remaining))
+                        : i18nService.t('cerebellumFreeQuotaUnavailable')}
+                    </p>
+                  )}
+                </div>
+              )}
 
               <div>
                 <label htmlFor="cerebellum-apiKey" className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
@@ -3477,10 +3581,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                   id="cerebellum-apiKey"
                   value={cerebellum.apiKey}
                   onChange={(e) => handleCerebellumConfigChange('apiKey', e.target.value)}
+                  readOnly={cerebellum.provider === CEREBELLUM_FREE_PROVIDER}
                   autoComplete="off"
                   spellCheck={false}
-                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs font-mono"
-                  placeholder={i18nService.t('apiKeyPlaceholder')}
+                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs font-mono read-only:cursor-not-allowed read-only:opacity-80"
+                  placeholder={cerebellum.provider === CEREBELLUM_FREE_PROVIDER ? i18nService.t('cerebellumFreeKeyManaged') : i18nService.t('apiKeyPlaceholder')}
                 />
               </div>
 
@@ -3493,7 +3598,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                   id="cerebellum-baseUrl"
                   value={cerebellum.baseUrl}
                   onChange={(e) => handleCerebellumConfigChange('baseUrl', e.target.value)}
-                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                  readOnly={cerebellum.provider === CEREBELLUM_FREE_PROVIDER}
+                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs read-only:cursor-not-allowed read-only:opacity-80"
                   placeholder="https://api.typesafe.ai"
                 />
               </div>
@@ -3507,7 +3613,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                   id="cerebellum-model"
                   value={cerebellum.model}
                   onChange={(e) => handleCerebellumConfigChange('model', e.target.value)}
-                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                  readOnly={cerebellum.provider === CEREBELLUM_FREE_PROVIDER}
+                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs read-only:cursor-not-allowed read-only:opacity-80"
                   placeholder="jev-latest"
                 />
               </div>
@@ -3516,7 +3623,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                 <button
                   type="button"
                   onClick={handleTestCerebellumConnection}
-                  disabled={isTestingCerebellum || !cerebellum.apiKey.trim()}
+                  disabled={isTestingCerebellum || (cerebellum.provider !== CEREBELLUM_FREE_PROVIDER && !cerebellum.apiKey.trim())}
                   className="inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors active:scale-[0.98]"
                 >
                   <SignalIcon className="h-3.5 w-3.5 mr-1.5" />
