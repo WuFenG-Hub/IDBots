@@ -107,7 +107,10 @@ export const AssistantActivityIndicator: React.FC<{
   const avatarSrc = isRenderableAvatarSource(avatar) ? avatar! : DEFAULT_BOT_AVATAR;
 
   const row = (
-    <div className="flex items-center gap-2.5 py-2">
+    // pt-2 keeps the ring's breathing room below the bubble above it; the
+    // bottom edge is slimmer (pb-1) because inline placement is always the
+    // transcript's last row and the composer should sit close under it.
+    <div className="flex items-center gap-2.5 pt-2 pb-1">
       <div className="assistant-activity-avatar-ring relative h-8 w-8 shrink-0">
         <img
           src={avatarSrc}

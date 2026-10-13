@@ -4421,7 +4421,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         ) : (
           renderConversationTurns()
         )}
-        <div ref={messagesEndRef} className="h-20" />
+        {/* Scroll anchor. Assistant mode keeps only a hair of runway: the
+            status indicator / last bubble hugs the composer so the visible
+            transcript column is maximized (the turn's own py-2 plus the
+            composer's top padding already provide the breathing room).
+            Professional mode keeps the original 80px scroll runway. */}
+        <div ref={messagesEndRef} className={isAssistantMode ? 'h-2' : 'h-20'} />
         {/* DSH WebUI-style "back to bottom" button: sticky zero-height slot keeps
             the 34px floating button pinned 16px above the scrollport's bottom edge,
             right-aligned with the chat content column. */}
@@ -4541,7 +4546,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           </div>
         </div>
       ) : (
-        <div className="p-4 shrink-0">
+        // Assistant mode halves the composer area's top padding — together
+        // with the slimmed scroll anchor above, the last bubble / status
+        // indicator sits close under the composer instead of behind ~112px of
+        // accumulated gaps. Professional mode keeps p-4 byte-identical.
+        <div className={isAssistantMode ? 'px-4 pb-4 pt-2 shrink-0' : 'p-4 shrink-0'}>
           <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
             <div className="flex items-center justify-end gap-2 mb-2">
               {currentSession.contextUsage && (
