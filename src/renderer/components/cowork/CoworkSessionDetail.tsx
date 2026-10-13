@@ -119,6 +119,8 @@ const MARKDOWN_VIEWER_DEFAULT_FRACTION = 0.25;
 const MARKDOWN_VIEWER_MAX_FRACTION = 0.5;
 const MARKDOWN_VIEWER_MIN_WIDTH_PX = 280;
 const MARKDOWN_FILE_RE = /\.(md|markdown)$/i;
+// .html/.htm reports open in the same sidebar as a sandboxed iframe preview.
+const HTML_FILE_RE = /\.html?$/i;
 
 const clampMarkdownViewerWidth = (width: number, containerWidth: number): number => {
   const maxWidth = Math.max(MARKDOWN_VIEWER_MIN_WIDTH_PX, containerWidth * MARKDOWN_VIEWER_MAX_FRACTION);
@@ -2854,10 +2856,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
   }, []);
   const detailRootRef = useRef<HTMLDivElement>(null);
-  // Markdown viewer sidebar: .md/.markdown file links in assistant messages
-  // open in this right-hand panel instead of an external app. The width is a
-  // fraction of the session area (default 1/4, clamped to at most 1/2) and is
-  // persisted across sessions.
+  // In-app document viewer sidebar: .md/.markdown and .html/.htm file links
+  // in assistant messages open in this right-hand panel instead of an
+  // external app (markdown renders as text, HTML as a sandboxed preview).
+  // The width is a fraction of the session area (default 1/4, clamped to at
+  // most 1/2) and is persisted across sessions.
   const [markdownViewerPath, setMarkdownViewerPath] = useState<string | null>(null);
   const [markdownViewerFraction, setMarkdownViewerFraction] = useState<number>(loadPersistedMarkdownViewerFraction);
   const markdownViewerFractionRef = useRef(markdownViewerFraction);
@@ -2865,7 +2868,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const [isMarkdownViewerResizing, setIsMarkdownViewerResizing] = useState(false);
 
   const handleOpenLocalFile = useCallback((filePath: string): boolean => {
-    if (!MARKDOWN_FILE_RE.test(filePath)) return false;
+    if (!MARKDOWN_FILE_RE.test(filePath) && !HTML_FILE_RE.test(filePath)) return false;
     setMarkdownViewerPath(filePath);
     return true;
   }, []);
