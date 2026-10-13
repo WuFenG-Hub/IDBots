@@ -620,6 +620,14 @@ export class DshEventMapper {
    * slot settles in place (tagged), and commentary that never streamed (held
    * behind live reasoning, or assembled without deltas) materializes as its
    * own settled message ahead of the reply.
+   *
+   * Immutability contract: a bubble's text never rewrites after the user has
+   * watched it appear. A streamed narration bubble therefore settles with the
+   * streamed buffer verbatim — the assembled message text may differ (phase
+   * reclassification, delta quirks) and swapping it in re-wrote the bubble
+   * in place (the 2026-10-13 twinbot acceptance report). The assembled text
+   * is authoritative only for narration that never streamed, which
+   * materializes whole and is immutable by construction.
    */
   private finalizeAssistantModeMessage(
     actions: DshMapperAction[],
@@ -637,16 +645,14 @@ export class DshEventMapper {
       this.thinkingBuf = ''
     }
 
+    const streamedNarration = this.textOpen ? this.textBuf : ''
     const streamedNarrationSettles = this.textOpen && (commentary.length > 0 || this.textMarkedNarration)
     if (streamedNarrationSettles) {
-      // The assembled message text is authoritative when it classified the
-      // stream as commentary; otherwise the live mark settles the streamed
-      // buffer itself.
       this.textOpen = false
       actions.push({
         kind: 'messageFinalize',
         slot: 'text',
-        content: commentary.length > 0 ? commentary : this.textBuf,
+        content: streamedNarration,
         metadata: { narration: true },
       })
       this.textBuf = ''
@@ -657,10 +663,16 @@ export class DshEventMapper {
       })
     }
 
-    // The reply bubble. Skipped only when the narration settle above already
-    // carries exactly this text (a live-marked stream the assembled message
-    // did not classify — re-emitting it would duplicate the bubble).
-    const narrationCarriesReply = streamedNarrationSettles && commentary.length === 0
+    // The reply bubble. Skipped when the narration settle above already
+    // carries this text verbatim: a streamed mixed step (commentary and the
+    // final answer sharing one delta stream — mid-stream the wire carries no
+    // phase tags) keeps both in its immutable narration bubble, and
+    // re-emitting the tail as a new bubble would duplicate what the user
+    // already read. Same for the live-marked stream the assembled message did
+    // not classify as commentary: the streamed buffer IS the reply text.
+    const narrationCarriesReply = streamedNarrationSettles
+      && visibleText.length > 0
+      && streamedNarration.includes(visibleText)
     if (visibleText.length > 0 && !narrationCarriesReply) {
       this.turnSawFinalText = true
       this.openText(actions)
