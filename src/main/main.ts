@@ -24,6 +24,7 @@ import { resolveCerebellumConfig } from './libs/cerebellumConfig';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
 import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
 import { gateVolatileBlocksWithCerebellum } from './cerebellum/volatileBlockGate';
+import { selectEffortWithCerebellum } from './cerebellum/effortSelector';
 import {
   rankSkillsWithCerebellum,
   CEREBELLUM_SKILL_SHORTLIST_MIN_POOL,
@@ -3290,6 +3291,37 @@ const createCerebellumVolatileBlockGate = () =>
   };
 
 /**
+ * Cerebellum (小脑) reasoning-effort auto selector (roadmap #11): one JEV
+ * Choice question rates how much deliberation the user's message intrinsically
+ * needs, and the runner's "auto" rung resolves from that verdict. Same lazy
+ * shape as the factories above — config re-resolved per call (Settings edits
+ * apply on the next turn), fetch on the Electron net stack (system proxy).
+ * null on any failure keeps the existing default effort chain exactly as
+ * before. Never logs user text — only whether the call landed and its latency
+ * (the rung verdict itself is logged by the runner with the session id).
+ */
+const createCerebellumEffortSelector = () =>
+  async ({ currentUserText }: {
+    currentUserText: string;
+  }): Promise<Record<'off' | 'low' | 'high' | 'max', number> | null> => {
+    const config = resolveCerebellumConfig(getStore().get('app_config'));
+    if (!config) {
+      return null;
+    }
+    const startedAt = Date.now();
+    const distribution = await selectEffortWithCerebellum({
+      config,
+      fetchImpl: session.defaultSession.fetch.bind(session.defaultSession),
+      currentUserText,
+    });
+    coworkLog('INFO', 'effort:cerebellumSelect', 'auto effort selector evaluated', {
+      used: distribution !== null,
+      latencyMs: Date.now() - startedAt,
+    });
+    return distribution;
+  };
+
+/**
  * R3: rough upper-bound MVC fee estimate for a typical pin (funding + payload
  * outputs, ~600 vB at the resolved fee rate) — feeds the `need ~N sats` part
  * of balance-hint error messages. Marked as an estimate everywhere it shows.
@@ -6053,6 +6085,10 @@ const getCoworkRunner = () => {
       // verdicts for the background tail blocks (see
       // createCerebellumVolatileBlockGate).
       cerebellumVolatileBlockGate: createCerebellumVolatileBlockGate(),
+      // Cerebellum (小脑) reasoning-effort auto selector (roadmap #11): the
+      // "auto" rung on unpicked sessions resolves from one JEV choice verdict
+      // per turn (see createCerebellumEffortSelector).
+      cerebellumEffortSelector: createCerebellumEffortSelector(),
       // Per-bot opt-in (default off): mounted MCP tool schemas ride every
       // LLM request, so only sessions whose bot explicitly enables MCP pay
       // the cost. See services/coworkMcpToolsPreference.ts.

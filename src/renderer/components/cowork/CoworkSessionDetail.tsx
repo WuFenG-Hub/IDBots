@@ -2949,11 +2949,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   // nothing (global default). Effort mirrors the runtime tiering:
   // session pick > bot brain effort > model default; the persisted global
   // effort only fills in when the session has no bot brain at all. A
-  // persisted 'default' sentinel (explicit Default pick) converts to null and
-  // displays as Default instead of snapping to a fallback rung.
-  // Assistant mode displays 'off' when the session carries no explicit pick:
-  // that is the rung the runtime will actually use (session override wins,
-  // otherwise reasoning is off — the brain/global rungs are skipped).
+  // persisted 'default' sentinel (explicit Auto pick) converts to null and
+  // displays as Auto instead of snapping to a fallback rung.
+  // Assistant mode displays the Auto rung when the session carries no explicit
+  // pick: the turn resolves through the cerebellum auto selector when
+  // configured (casual off, correctness-risk escalates) and falls back to off
+  // otherwise — the brain/global rungs are skipped either way.
   const sessionUsesBrainModel = sessionModelId == null && Boolean(sessionMetabot?.llm_id);
   const sessionModelEffortValue: ModelEffortValue = {
     modelId: sessionModelId ?? sessionMetabot?.llm_id ?? null,
@@ -2963,7 +2964,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     effort: (() => {
       if (sessionEffortOverride != null) return convertLegacyEffortLevel(sessionEffortOverride);
       if (currentSession?.effort) return convertLegacyEffortLevel(currentSession.effort);
-      if (isAssistantMode) return 'off';
+      if (isAssistantMode) return null;
       if (sessionMetabot?.llm_effort) return convertLegacyEffortLevel(sessionMetabot.llm_effort);
       if (sessionMetabot?.llm_id || sessionMetabot?.fallback_llm_id) return null;
       return convertLegacyEffortLevel(configService.getConfig().coworkEffortLevel ?? null);

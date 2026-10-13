@@ -586,6 +586,7 @@ man_base_data_pebble/
 !tests/capabilityDraftsPanel.test.tsx
 !tests/dreamTelemetryPanel.test.tsx
 !tests/installAgeGate.test.mjs
+!tests/cerebellumEffortSelector.test.mjs
 !tests/cerebellumMemoryRank.test.mjs
 !tests/cerebellumMemoryWriteGate.test.mjs
 !tests/cerebellumSkillShortlist.test.mjs

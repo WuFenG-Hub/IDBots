@@ -162,9 +162,11 @@ export interface ComposerModelEffortPick {
  * chain (bot brain effort, then the global default), first valid rung wins.
  * The old `pick?.effort ?? fallbacks` chain conflated "picked Default" with
  * "never picked", so Default snapped back to the highest fallback rung.
- * In assistant chat-experience mode a missing pick displays 'off' instead of
- * the fallback chain: that is the rung the session will actually run at
- * (assistant mode defaults reasoning off unless the session picker overrides).
+ * In assistant chat-experience mode a missing pick displays the "Auto" rung
+ * (null): the turn resolves its effort through the cerebellum auto selector
+ * when configured (casual chat stays off, correctness-risk work escalates)
+ * and falls back to the old default chain — off in assistant mode — when it
+ * is not, so "Auto" is the honest label either way.
  */
 export function effortDisplayForPick(
   pick: ComposerModelEffortPick | null | undefined,
@@ -172,7 +174,7 @@ export function effortDisplayForPick(
   options?: { assistantMode?: boolean },
 ): LlmEffortLevel | null {
   if (pick != null) return pick.effort ?? null;
-  if (options?.assistantMode) return 'off';
+  if (options?.assistantMode) return null;
   for (const fallback of fallbacks) {
     const level = convertLegacyEffortLevel(fallback);
     if (level != null) return level;
