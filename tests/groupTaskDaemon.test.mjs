@@ -4025,7 +4025,7 @@ test('authoritative constraints block renders the [POSITION] ledger, newest line
   assert.match(over, /oldest line\(s\) omitted/);
 });
 
-test('scoped owner memories inject into plain-path group turns, skip the skill path, and respect memoryEnabled (G8)', async () => {
+test('scoped owner memories inject into plain-path AND skill-path group turns, and respect memoryEnabled (G8)', async () => {
   const memoryEntries = [
     { text: 'The owner prefers weekly Friday releases', usageClass: 'preference', visibility: 'local_only', updatedAt: 100, lastUsedAt: null, importance: 0.9 },
     { text: 'I am the twin.', usageClass: 'self_identity', visibility: 'local_only', updatedAt: 90, lastUsedAt: null, importance: 1.0 },
@@ -4054,8 +4054,10 @@ test('scoped owner memories inject into plain-path group turns, skip the skill p
     plain.cleanup();
   }
 
-  // Skill path: coworkRunner injects its own scoped memory blocks, so the
-  // daemon-side block must NOT duplicate into the skill turn's user message.
+  // Skill path: the runner (memoryReadOnly) injects only conversation-scope +
+  // external_safe operational preferences for the metaweb_group_task channel,
+  // so the daemon-side owner-scope block MUST ride the skill turn too — owner
+  // profile facts exist nowhere else on that path.
   const skill = await createHarness({
     listUserMemories: memoryDep,
     routing: { prompt: 'skill routing prompt', activeSkillIds: ['skill-x'] },
@@ -4069,7 +4071,8 @@ test('scoped owner memories inject into plain-path group turns, skip the skill p
     await skill.loop.runTick();
     assert.ok(skill.skillTurnCalls.length >= 1, 'routing hit runs the skill turn');
     for (const call of skill.skillTurnCalls) {
-      assert.ok(!call.userMessage.includes('<ownerMemories>'), 'no double injection on the skill path');
+      assert.match(call.userMessage, /<ownerMemories>/, 'owner-scope memory block rides the skill path');
+      assert.match(call.userMessage, /weekly Friday releases/);
     }
     assert.equal(skill.chatCalls.length, 0, 'plain completion never ran');
   } finally {
@@ -4092,6 +4095,113 @@ test('scoped owner memories inject into plain-path group turns, skip the skill p
     assert.ok(!gated.chatCalls[0].userMessage.includes('weekly Friday releases'));
   } finally {
     gated.cleanup();
+  }
+});
+
+test('cerebellum re-rank reorders the daemon memory block by noul; null/throwing ranker keeps the lexical baseline', async () => {
+  // Pool above CEREBELLUM_MEMORY_MIN_POOL (12) with zero lexical overlap with
+  // the trigger text — every entry scores 1 lexically, so only the cerebellum
+  // map can reorder them.
+  const TRIGGER = 'quantum entanglement lecture notes';
+  const pool = Array.from({ length: 13 }, (_, index) => ({
+    id: `mem-${index}`,
+    text: `owner fact number ${index} about daily life`,
+    usageClass: 'profile_fact',
+    visibility: 'local_only',
+    updatedAt: 1000 + index,
+    lastUsedAt: null,
+    importance: 0.5,
+  }));
+  const memoryDep = () => pool;
+  const winner = pool[pool.length - 1];
+
+  const runTurn = async (ranker) => {
+    const rankerCalls = [];
+    const touchedByBot = new Map();
+    const h = await createHarness({
+      listUserMemories: memoryDep,
+      deps: {
+        ...(ranker
+          ? {
+              cerebellumMemoryRanker: async (input) => {
+                rankerCalls.push(input);
+                return ranker(input);
+              },
+            }
+          : {}),
+        touchUserMemoriesLastUsed: (metabotId, ids) => {
+          touchedByBot.set(metabotId, (touchedByBot.get(metabotId) ?? []).concat(ids));
+        },
+      },
+    });
+    try {
+      h.createTask([2]);
+      insertGroupMessage(h.db, {
+        pinId: `cere-${Math.random()}-i0`, senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-boss',
+        senderName: 'Human', content: `@Coder Bot ${TRIGGER}`,
+      });
+      await h.loop.runTick();
+      // The owner trigger wakes the worker (mention) AND the chair (owner
+      // message); both turns build the block, so the ranker is consulted per
+      // responding bot. Assert on the WORKER's turn (llm-2) specifically.
+      const workerCall = h.chatCalls.find((call) => call.llmId === 'llm-2');
+      assert.ok(workerCall, 'a plain-path worker turn ran');
+      return { userMessage: workerCall.userMessage, rankerCalls, touched: touchedByBot.get(2) ?? [] };
+    } finally {
+      h.cleanup();
+    }
+  };
+
+  const memoryBlockOf = (userMessage) =>
+    userMessage.slice(userMessage.indexOf('<ownerMemories>'), userMessage.indexOf('</ownerMemories>'));
+
+  // Stub ranker: the lexically last entry becomes the cerebellum winner.
+  const ranked = await runTurn(({ memories }) =>
+    new Map(memories.map((memory) => [memory.id, memory.id === winner.id ? 0.99 : 0.05])));
+  assert.ok(ranked.rankerCalls.length >= 1, 'the ranker is consulted for responding-bot turns');
+  for (const call of ranked.rankerCalls) {
+    assert.equal(call.currentUserText, `@Coder Bot ${TRIGGER}`, 'the full trigger message is the ranker query');
+    assert.equal(call.memories.length, pool.length);
+  }
+  const rankedBlock = memoryBlockOf(ranked.userMessage);
+  const rankedLines = rankedBlock.split('\n').filter((line) => line.startsWith('- '));
+  assert.equal(rankedLines[0], `- ${winner.text}`, 'the cerebellum top pick renders first');
+  assert.deepEqual(
+    [...ranked.touched].sort(),
+    pool.map((entry) => entry.id).sort(),
+    'injection still touches exactly the rendered ids (usage-event contract intact)',
+  );
+
+  // Null ranker result and unwired ranker must reproduce the lexical baseline
+  // byte-for-byte.
+  const nullRanked = await runTurn(() => null);
+  const baseline = await runTurn(null);
+  assert.ok(nullRanked.rankerCalls.length >= 1, 'the ranker was consulted');
+  assert.equal(memoryBlockOf(nullRanked.userMessage), memoryBlockOf(baseline.userMessage));
+  assert.ok(memoryBlockOf(baseline.userMessage).includes('<ownerMemories>'), 'baseline block renders');
+
+  // A throwing ranker can never break the turn.
+  const thrown = await runTurn(() => { throw new Error('cerebellum exploded'); });
+  assert.equal(memoryBlockOf(thrown.userMessage), memoryBlockOf(baseline.userMessage));
+
+  // Pools below CEREBELLUM_MEMORY_MIN_POOL skip the ranker entirely.
+  const smallPool = pool.slice(0, 5);
+  const small = await createHarness({
+    listUserMemories: () => smallPool,
+    deps: { cerebellumMemoryRanker: async () => new Map([['mem-0', 0.99]]) },
+  });
+  try {
+    let called = 0;
+    small.deps.cerebellumMemoryRanker = async () => { called += 1; return null; };
+    small.createTask([2]);
+    insertGroupMessage(small.db, {
+      pinId: 'cere-small-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-boss',
+      senderName: 'Human', content: `@Coder Bot ${TRIGGER}`,
+    });
+    await small.loop.runTick();
+    assert.equal(called, 0, 'small pools stay on the lexical ranker');
+  } finally {
+    small.cleanup();
   }
 });
 

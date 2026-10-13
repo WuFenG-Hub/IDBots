@@ -3140,6 +3140,32 @@ const getStoreOrNull = (): SqliteStore | null => {
 };
 
 /**
+ * Cerebellum (小脑) memory re-ranker factory, shared by the cowork runner and
+ * the group-task daemon's owner-scope memory block. The config is re-resolved
+ * lazily on every call, so Settings edits apply on the next turn without an
+ * app restart; null config (disabled/no key) silently keeps lexical ranking.
+ * The fetch MUST ride the Electron net stack (session.defaultSession) — it
+ * follows the system proxy, while bare Node fetch is region-blocked (HTTP 451)
+ * for some users.
+ */
+const createCerebellumMemoryRanker = () =>
+  async ({ currentUserText, memories }: {
+    currentUserText: string;
+    memories: Array<{ id: string; text: string }>;
+  }): Promise<ReadonlyMap<string, number> | null> => {
+    const config = resolveCerebellumConfig(getStore().get('app_config'));
+    if (!config) {
+      return null;
+    }
+    return rankMemoriesWithCerebellum({
+      config,
+      fetchImpl: session.defaultSession.fetch.bind(session.defaultSession),
+      currentUserText,
+      memories,
+    });
+  };
+
+/**
  * R3: rough upper-bound MVC fee estimate for a typical pin (funding + payload
  * outputs, ~600 vB at the resolved fee rate) — feeds the `need ~N sats` part
  * of balance-hint error messages. Marked as an estimate everywhere it shows.
@@ -3986,6 +4012,11 @@ const startStartupMessageTier = (): void => {
         userMessage: params.userMessage,
         cwd,
         activeSkillIds: params.activeSkillIds,
+        // Group-task skill turns read memory (volatile injection + read-only
+        // recall tools) but never write it — read-only mode instead of the
+        // legacy full blackout, which left worker turns with zero memory
+        // context (they forgot their assignments overnight).
+        memoryReadOnly: true,
         // Group-task turns run real pipelines that routinely exceed the 300s
         // delegation default (task #41: 5-min watchdog fired mid-work, message
         // retries then re-ran the turn five times and dropped the trigger).
@@ -4125,6 +4156,9 @@ const startStartupMessageTier = (): void => {
         offset: 0,
         touchLastUsed: input.touchLastUsed === true,
       }),
+    // Cerebellum (小脑) re-rank for the daemon's owner-scope memory block —
+    // the same shared ranker wiring the cowork runner uses.
+    cerebellumMemoryRanker: createCerebellumMemoryRanker(),
     // The daemon touches only the memory rows that actually rendered into the
     // prompt (pooling alone is not a usage event).
     touchUserMemoriesLastUsed: (metabotId, memoryIds) =>
@@ -5814,24 +5848,9 @@ const getCoworkRunner = () => {
       experienceStore: getDreamStore(),
       knowledgeStore: getMetaIDKnowledgeStore(),
       episodeTimelineProvider: getMetaIDExperienceStore(),
-      // Cerebellum (小脑) memory re-rank: the config is re-resolved lazily on
-      // every call, so Settings edits apply on the next turn without an app
-      // restart; null config (disabled/no key) silently keeps lexical ranking.
-      // The fetch MUST ride the Electron net stack (session.defaultSession) —
-      // it follows the system proxy, while bare Node fetch is region-blocked
-      // (HTTP 451) for some users.
-      cerebellumMemoryRanker: async ({ currentUserText, memories }) => {
-        const config = resolveCerebellumConfig(getStore().get('app_config'));
-        if (!config) {
-          return null;
-        }
-        return rankMemoriesWithCerebellum({
-          config,
-          fetchImpl: session.defaultSession.fetch.bind(session.defaultSession),
-          currentUserText,
-          memories,
-        });
-      },
+      // Cerebellum (小脑) memory re-rank: shared factory with the group-task
+      // daemon's memory block (see createCerebellumMemoryRanker).
+      cerebellumMemoryRanker: createCerebellumMemoryRanker(),
       // Per-bot opt-in (default off): mounted MCP tool schemas ride every
       // LLM request, so only sessions whose bot explicitly enables MCP pay
       // the cost. See services/coworkMcpToolsPreference.ts.
