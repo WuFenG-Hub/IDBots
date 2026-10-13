@@ -1738,7 +1738,16 @@ const AssistantMessageItem: React.FC<{
         </div>
       ) : null}
       {replyContent ? (
-        <div className="dark:text-claude-darkText text-claude-text">
+        // Assistant mode wraps the reply (narration and final answer alike) in
+        // a chat bubble shaped like the user bubble so the transcript reads as
+        // a conversation. The background is a very light accent tint — calm,
+        // and distinct from the user bubble's neutral surface in both themes;
+        // w-fit + max-w-full hugs short messages while long reports still fill
+        // the reading column. Professional mode keeps bare full-width text.
+        <div className={isAssistantMode
+          ? 'w-fit max-w-full rounded-[22px] px-[16px] py-[10px] dark:bg-claude-accent/10 bg-claude-accent/5 dark:text-claude-darkText text-claude-text shadow-subtle'
+          : 'dark:text-claude-darkText text-claude-text'
+        }>
           <MarkdownContent
             content={replyContent}
             className="prose dark:prose-invert max-w-none"
