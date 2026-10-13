@@ -543,6 +543,22 @@ select::-ms-expand {
   }
 }
 
+/* Assistant-mode chat bubble fill: differentiation by background color only
+   (no border — the same mechanism as the user bubble's var(--bg-panel)).
+   color-mix blends the accent into the chat background, so one rule adapts to
+   both themes: the accent (#06B6D4) is darker than --bg-main in light mode
+   and the accent (#22D3EE) is lighter than --bg-main in dark mode. Light ≈
+   #D3EEF4 on #F5F7F9 (darker than bg, distinct from the #FFFFFF user bubble);
+   dark ≈ #174456 on #142030 (lighter than bg, distinct from the #1F2937 user
+   bubble). The dark mix is raised (20% vs 14%) for parity of visibility on
+   the dark navy surface. */
+.assistant-bubble {
+  background-color: color-mix(in srgb, var(--color-accent) 14%, var(--bg-main));
+}
+.dark .assistant-bubble {
+  background-color: color-mix(in srgb, var(--color-accent) 20%, var(--bg-main));
+}
+
 @keyframes scheduled-task-running-glow {
   0%, 100% {
     opacity: 0.72;
