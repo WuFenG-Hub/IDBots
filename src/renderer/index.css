@@ -20,6 +20,9 @@
   --text-primary: #303133;
   --text-secondary: #64748B;
   --border-color: #BFC2CC;
+  /* Cowork chat page background: neutral gray, no hue (the app-wide --bg-main
+     keeps its slight blue cast for other views). */
+  --cowork-chat-bg: #FAFAFA;
   --rounded: 12px;
   --rounded-lg: 8px;
   --btn-primary-edge: rgba(0, 0, 0, 0.15);
@@ -37,6 +40,9 @@
   --text-primary: #fff;
   --text-secondary: #94A3B8;
   --border-color: #6b7280;
+  /* Neutral dark gray for the cowork chat page (same lightness neighborhood
+     as --bg-main's #142030, without the blue cast). */
+  --cowork-chat-bg: #1B1B1D;
   --rounded: 12px;
   --rounded-lg: 8px;
   --btn-primary-edge: #6b7280;
@@ -545,17 +551,19 @@ select::-ms-expand {
 
 /* Assistant activity status text: a calm light sweep across the glyphs via a
    background gradient clipped to the text (2.5s loop) — the glyphs never
-   move. Base color is --text-secondary with a --text-primary highlight, so
-   the sweep reads in both themes. Only applied when the user has not
-   requested reduced motion; otherwise the span keeps its plain secondary text
-   color from the Tailwind classes. */
+   move. Base color is --text-secondary with a --color-accent highlight (the
+   same cyan as the breathing avatar ring), with a short highlight plateau
+   (47%–52%) and soft edges so the sweep is clearly visible in both themes.
+   Only applied when the user has not requested reduced motion; otherwise the
+   span keeps its plain secondary text color from the Tailwind classes. */
 @media (prefers-reduced-motion: no-preference) {
   .assistant-status-shimmer {
     background-image: linear-gradient(
       100deg,
-      var(--text-secondary) 40%,
-      var(--text-primary) 50%,
-      var(--text-secondary) 60%
+      var(--text-secondary) 38%,
+      var(--color-accent) 47%,
+      var(--color-accent) 53%,
+      var(--text-secondary) 62%
     );
     background-size: 200% 100%;
     -webkit-background-clip: text;
@@ -569,20 +577,24 @@ select::-ms-expand {
   to { background-position: -200% 0; }
 }
 
+/* Cowork chat page background: neutral gray (--cowork-chat-bg, scoped to the
+   cowork views — the app-wide --bg-main keeps its blue cast elsewhere). */
+.cowork-chat-surface {
+  background-color: var(--cowork-chat-bg);
+}
+
 /* Assistant-mode chat bubble fill: differentiation by background color only
    (no border — the same mechanism as the user bubble's var(--bg-panel)).
-   color-mix blends the accent into the chat background, so one rule adapts to
-   both themes: the accent (#06B6D4) is darker than --bg-main in light mode
-   and the accent (#22D3EE) is lighter than --bg-main in dark mode. Light ≈
-   #D3EEF4 on #F5F7F9 (darker than bg, distinct from the #FFFFFF user bubble);
-   dark ≈ #174456 on #142030 (lighter than bg, distinct from the #1F2937 user
-   bubble). The dark mix is raised (20% vs 14%) for parity of visibility on
-   the dark navy surface. */
+   Neutral gray via color-mix against the cowork chat background, so one rule
+   adapts to both themes: light mixes black in (≈ #EEEEEE on #FAFAFA — darker
+   than the page bg, distinct from the #FFFFFF user bubble); dark mixes white
+   in (≈ #303032 on #1B1B1D — lighter than the page bg, neutral gray vs the
+   user bubble's blue-slate #1F2937). */
 .assistant-bubble {
-  background-color: color-mix(in srgb, var(--color-accent) 14%, var(--bg-main));
+  background-color: color-mix(in srgb, #000000 5%, var(--cowork-chat-bg));
 }
 .dark .assistant-bubble {
-  background-color: color-mix(in srgb, var(--color-accent) 20%, var(--bg-main));
+  background-color: color-mix(in srgb, #ffffff 9%, var(--cowork-chat-bg));
 }
 
 @keyframes scheduled-task-running-glow {

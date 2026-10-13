@@ -1742,15 +1742,14 @@ const AssistantMessageItem: React.FC<{
           // Assistant mode wraps the reply (narration and final answer alike)
           // in a chat bubble shaped like the user bubble, differentiated
           // purely by background color (no border) via the theme-adaptive
-          // .assistant-bubble fill — light mode ≈ #D3EEF4 on the #F5F7F9 chat
-          // bg (darker), dark mode ≈ #174456 on #142030 (lighter); both stay
-          // clear of the user bubble's #FFFFFF / #1F2937. The w-fit wrapper
-          // hugs short messages while long reports still fill the reading
-          // column. Hover actions float over the bubble's bottom-right corner
-          // instead of occupying flow height, so consecutive bubbles keep the
-          // container's uniform space-y-1 gap in every state (a flow row used
-          // to add ~32px under each bubble once the turn completed).
-          <div className="relative w-fit max-w-full">
+          // neutral-gray .assistant-bubble fill. The w-fit wrapper shares the
+          // user bubble's max width (max-w-[min(646px,82%)]) so the bubble
+          // hugs short messages and never stretches to the full column. Hover
+          // actions float over the bubble's bottom-right corner instead of
+          // occupying flow height, so consecutive bubbles keep the container's
+          // uniform space-y-1 gap in every state (a flow row used to add ~32px
+          // under each bubble once the turn completed).
+          <div className="relative w-fit max-w-[min(646px,82%)]">
             <div className="assistant-bubble rounded-[22px] px-[16px] py-[10px] dark:text-claude-darkText text-claude-text shadow-subtle">
               <MarkdownContent
                 content={replyContent}
@@ -4084,7 +4083,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     : Math.max(MARKDOWN_VIEWER_MIN_WIDTH_PX, Math.round(window.innerWidth * markdownViewerFraction));
 
   return (
-    <div ref={detailRootRef} className="flex-1 flex flex-col dark:bg-claude-darkBg bg-claude-bg h-full">
+    <div ref={detailRootRef} className="flex-1 flex flex-col cowork-chat-surface h-full">
       {/* Header */}
       <div className="draggable flex h-12 items-center justify-between px-4 border-b dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface/50 bg-claude-surface/50 shrink-0">
         {/* Left side: Toggle buttons (when collapsed) + Title + Sandbox badge */}
