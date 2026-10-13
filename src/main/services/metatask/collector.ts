@@ -216,7 +216,7 @@ export interface CollectMetaTaskEventsOptions {
 
 export interface CollectMetaTaskEventsResult {
   events: MetaTaskChainEvent[];
-  perPath: { path: MetaTaskCollectedPath; count: number }[];
+  perPath: { path: MetaTaskCollectedPath; count: number; error?: string }[];
 }
 
 export async function collectMetaTaskEvents(
@@ -232,20 +232,35 @@ export async function collectMetaTaskEvents(
   const keepRaw = (item: Record<string, unknown>): unknown => item;
 
   for (const segment of METATASK_COLLECTED_PATHS) {
+    // A single slow page (8s timeout) must not silently zero an entire pool:
+    // one retry, then surface the failure in perPath instead of swallowing it
+    // (2026-10-13: a transient submission-walk timeout starved the health-
+    // metrics task projection while every pin sat readable on chain).
     let pins: ProtocolPinRecord[] = [];
-    try {
-      pins = await fetchProtocolPinsFromIndexer(metataskPoolPath(segment), {
-        pageSize: options.pageSize ?? DEFAULT_PAGE_SIZE,
-        maxPages: options.maxPages ?? DEFAULT_MAX_PAGES,
-        timeoutMs: options.timeoutMs ?? 8_000,
-        fetchImpl: options.fetchImpl,
-        selectContent: keepRaw,
-        onTruncated: (info) => {
-          console.warn('[metatask/collector] pool walk truncated, deep events missing:', info);
-        },
-      });
-    } catch {
-      pins = []; // a failed path must not fail the whole sweep
+    let walkError: string | undefined;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let failed = false;
+      try {
+        pins = await fetchProtocolPinsFromIndexer(metataskPoolPath(segment), {
+          pageSize: options.pageSize ?? DEFAULT_PAGE_SIZE,
+          maxPages: options.maxPages ?? DEFAULT_MAX_PAGES,
+          timeoutMs: options.timeoutMs ?? 8_000,
+          fetchImpl: options.fetchImpl,
+          selectContent: keepRaw,
+          onTruncated: (info) => {
+            console.warn('[metatask/collector] pool walk ended short of the empty page:', info);
+            if (info.reason === 'fetch-error') failed = true;
+          },
+        });
+        walkError = undefined;
+        if (!failed) break;
+        walkError = 'page walk aborted mid-pool (fetch error)';
+      } catch (error) {
+        pins = []; // a failed path must not fail the whole sweep
+        walkError = error instanceof Error ? error.message : String(error);
+      }
+      if (attempt === 0) continue;
+      console.warn(`[metatask/collector] pool walk failed after retry (${segment}):`, walkError);
     }
     let count = 0;
     for (const pin of pins) {
@@ -260,7 +275,7 @@ export async function collectMetaTaskEvents(
         count += 1;
       }
     }
-    perPath.push({ path: segment, count });
+    perPath.push({ path: segment, count, ...(walkError ? { error: walkError } : {}) });
   }
 
   await recoverTruncatedBodies(pendingRecoveries, options.fetchImpl);
