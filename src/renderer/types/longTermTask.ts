@@ -75,6 +75,7 @@ export type LongTermEventKind =
   | 'proposed'
   | 'accepted'
   | 'rejected'
+  | 'skipped'
   | 'waiting'
   | 'unblocked'
   | 'nudged'
