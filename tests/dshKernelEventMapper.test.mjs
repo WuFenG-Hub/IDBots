@@ -555,7 +555,7 @@ test('text-delta after a native reasoning block does not open a body bubble', ()
   assert.equal(leaked.some((a) => a.slot === 'text'), false)
 })
 
-test('compaction/summary maps to a system checkpoint with counts and summary text', () => {
+test('compaction/summary maps to a structured checkpoint stub — summary text stays out of the transcript', () => {
   const mapper = new DshEventMapper()
   const actions = mapper.consume({
     type: 'compaction/summary',
@@ -569,8 +569,11 @@ test('compaction/summary maps to a system checkpoint with counts and summary tex
   assert.equal(actions[0].kind, 'message')
   assert.equal(actions[0].message.type, 'system')
   assert.equal(actions[0].message.metadata.compaction, true)
-  assert.match(actions[0].message.content, /Compacted 3 history items \(~420 tokens\)/)
-  assert.match(actions[0].message.content, /Earlier turns discussed the install path/)
+  assert.equal(actions[0].message.metadata.compactedItems, 3)
+  assert.equal(actions[0].message.metadata.compactedTokens, 420)
+  // The summary is the kernel's LLM context, not chat content — it must not
+  // leak into the stored transcript body.
+  assert.equal(actions[0].message.content, '')
 })
 
 test('compaction/start is silent; compaction/end only reports failures', () => {

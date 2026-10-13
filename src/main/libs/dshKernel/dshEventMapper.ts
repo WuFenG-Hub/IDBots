@@ -342,17 +342,18 @@ export class DshEventMapper {
       }
 
       case 'compaction/summary': {
-        const summaryBlocks = Array.isArray(data.summary) ? data.summary : []
-        const summaryText = textOf(summaryBlocks).trim()
+        // The summary text is the kernel's new LLM context, not chat content —
+        // storing it in the transcript leaked internal state into the UI. Keep
+        // a structured stub instead (parity with the Claude route's
+        // compact_boundary); the renderer renders one brief localized line.
         const items = Array.isArray(data.shadowedSeqs) ? data.shadowedSeqs.length : 0
         const tokens = typeof data.shadowedTokenCount === 'number' ? data.shadowedTokenCount : 0
-        const header = `Compacted ${items} history items (~${tokens} tokens).`
         actions.push({
           kind: 'message',
           message: {
             type: 'system',
-            content: summaryText.length > 0 ? `${header}\n\n${summaryText}` : header,
-            metadata: { compaction: true },
+            content: '',
+            metadata: { compaction: true, compactedItems: items, compactedTokens: tokens },
           },
         })
         break

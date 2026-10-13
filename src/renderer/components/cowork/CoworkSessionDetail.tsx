@@ -72,6 +72,7 @@ import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
 import { getCompactFolderName } from '../../utils/path';
+import { buildCompactedNoticeText, extractCompactedCounts, formatCompactTokens } from './compactedNotice';
 import { isRenderableAvatarSource as isSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import { isRenderableAssistantOrSystemMessage } from '../../utils/coworkMessageVisibility';
 import { scrollEventMovesAnchor } from '../../utils/anchoredPopover';
@@ -1058,12 +1059,6 @@ const getVisibleAssistantItems = (assistantItems: AssistantTurnItem[], isAssista
 const hasRenderableAssistantContent = (turn: ConversationTurn, isAssistantMode = false): boolean => (
   getVisibleAssistantItems(turn.assistantItems, isAssistantMode).length > 0
 );
-
-const formatCompactTokens = (value: number): string => {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
-  return String(value);
-};
 
 const getToolResultLineCount = (result: string): number => {
   if (!result) return 0;
@@ -2211,6 +2206,10 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
     let sdkIcon: string | null = null;
     let sdkTint = 'dark:text-claude-darkTextSecondary text-claude-textSecondary';
     let sdkContent = '';
+    // Set by branches whose localized line must win over the stored body —
+    // e.g. compaction checkpoints, where old transcripts still carry the full
+    // internal summary blob in `content`.
+    let sdkOverridesContent = false;
 
     if (meta.sdkNotification && typeof meta.sdkNotification === 'object') {
       sdkIcon = '🔔';
@@ -2235,6 +2234,13 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
         text += ` (${triggerLabel})`;
       }
       sdkContent = text;
+    } else if (meta.compaction === true && meta.isError !== true) {
+      // DSH-route compaction checkpoint. The kernel's summary is LLM context,
+      // not chat content — render one brief localized line and never fall back
+      // to the stored body (old transcripts keep the full blob there).
+      sdkIcon = '🧹';
+      sdkOverridesContent = true;
+      sdkContent = buildCompactedNoticeText(extractCompactedCounts(meta, message.content));
     } else if (meta.sdkPermissionDenied && typeof meta.sdkPermissionDenied === 'object') {
       const denied = meta.sdkPermissionDenied as Record<string, unknown>;
       sdkIcon = '🚫';
@@ -2283,7 +2289,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
       );
     }
 
-    const rawContent = hasText(message.content)
+    const rawContent = !sdkOverridesContent && hasText(message.content)
       ? message.content
       : (sdkContent || (typeof message.metadata?.error === 'string' ? message.metadata.error : ''));
     const content = mapDisplayText ? mapDisplayText(rawContent) : rawContent;
