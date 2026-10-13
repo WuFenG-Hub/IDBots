@@ -1,6 +1,6 @@
 ---
 name: long-term-task-exec
-description: Drive an ACTIVE long-term task forward — begin/push the current sub-project, ask the owner when blocked on a decision, record external waits, collect evidence and propose acceptance. Use inside longterm sessions (heartbeat-opened or owner-opened) bound to a long-term task, or whenever the owner asks to continue/progress/push a long-term task. Not for creating tasks (use long-term-task) or one-session work.
+description: Drive an ACTIVE long-term task forward — begin/push the current sub-project, ask the owner when blocked on a decision, record external waits, collect evidence and propose acceptance, and close the whole task at goal level when the outcome is met (including batch-verdict sessions that covered several sub-projects). Use inside longterm sessions (heartbeat-opened or owner-opened) bound to a long-term task, or whenever the owner asks to continue/progress/push a long-term task. Not for creating tasks (use long-term-task) or one-session work.
 official: true
 ---
 
@@ -199,6 +199,51 @@ proposal summary:
   yourself with the reason.
 - `longterm_subtask_accept` is yours ONLY when the task's delegate switch is
   on and every criterion is verifiably met. Otherwise it belongs to the owner.
+- Several proposals can be parked at once; the owner can accept them in one
+  click (Accept-all on the board). Batch proposals are fine — one parked
+  proposal per heartbeat reminder is not.
+
+## Goal-level closure (the owner's verdict outranks the state machine)
+
+The board is a means; the goal is the end. Two situations demand closure
+thinking, and mishandling either is how a FINISHED task keeps nagging the
+owner for days:
+
+**1. The owner states a goal-level verdict in ANY session** — "this task is
+done", "帖子都发完了，事情已经过了", "不用再推了". That verdict is about the
+GOAL, not about whichever proposal happens to be pending. Consume it as
+closure, never as implicit approval of a pending proposal, and never as a
+mandate to redefine surviving sub-projects into new work:
+
+- Delegate switch ON and you can attach goal-level evidence: call
+  `longterm_task_complete` with the two-level verdict (how the goal is met,
+  which evidence proves it, why the remaining open sub-projects are moot).
+  Remaining open sub-projects are skipped — never fake-accepted.
+- Switch OFF or evidence is thin: journal the owner's verdict
+  (`longterm_event_note`), say plainly that the task can be closed with the
+  **Complete task** button on the board (one click, remaining sub-projects
+  marked skipped), and STOP advancing. If genuinely useful evidence exists
+  for pending sub-projects, batch-propose them in one consolidated brief so
+  the owner can Accept-all — but do not hold the task hostage to N clicks.
+- Never respond to a goal-level verdict by re-planning, redefining
+  sub-projects, or scheduling follow-up work. The task existed to reach the
+  goal; the goal is reached; your job is to land the board on `done` quietly.
+
+**2. One session's real output covers SEVERAL sub-projects** (typical when
+the owner works directly with you and the plan was overtaken by events).
+Register it instead of leaving the plan as a zombie checklist:
+
+- Organize the evidence PER sub-project and batch-propose each
+  (`longterm_subtask_propose`), so every verdict is still evidence-backed.
+  Present ONE consolidated cross-sub-project brief in the session: which
+  sub-projects are proposed, one evidence line each, what (if anything)
+  genuinely remains. The owner accepts with one Accept-all.
+- With the delegate switch on: accept each proposal yourself, then complete
+  the task if nothing live remains.
+- Sub-projects that became moot (superseded, no longer wanted): mark them
+  `longterm_subtask_skip` with the reason. A skipped row is an honest plan
+  verdict; a pending row nobody will ever push is noise the heartbeat keeps
+  prodding.
 
 ## Redefinition mid-flight
 
