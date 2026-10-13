@@ -73,7 +73,7 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
   const [rejectText, setRejectText] = useState('');
   const [skippingId, setSkippingId] = useState<string | null>(null);
   const [skipReason, setSkipReason] = useState('');
-  const [confirming, setConfirming] = useState<'complete' | 'cancelTask' | null>(null);
+  const [confirming, setConfirming] = useState<'complete' | 'cancelTask' | 'acceptAll' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -95,6 +95,12 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
     }
     return linked;
   }, [detail?.subtasks]);
+
+  /** Sub-projects parked on an acceptance proposal — the batch-verdict crowd. */
+  const waitingOwnerIds = useMemo(
+    () => (detail?.subtasks ?? []).filter((sub) => sub.status === 'waiting_owner').map((sub) => sub.id),
+    [detail?.subtasks],
+  );
 
   if (!detail) {
     return (
@@ -208,7 +214,7 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
       {confirming && (
         <div
           className={`mt-2 rounded-lg border p-3 ${
-            confirming === 'complete' ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-red-500/30 bg-red-500/5'
+            confirming === 'cancelTask' ? 'border-red-500/30 bg-red-500/5' : 'border-emerald-500/40 bg-emerald-500/5'
           }`}
         >
           <div className="text-xs leading-5 dark:text-claude-darkText text-claude-text">
@@ -216,7 +222,9 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
               ? i18nService
                   .t('longTermTask.completeConfirmBody')
                   .replace('{count}', String(detail.subtasks.filter((sub) => sub.status !== 'accepted' && sub.status !== 'skipped').length))
-              : i18nService.t('longTermTask.cancelConfirmBody')}
+              : confirming === 'acceptAll'
+                ? i18nService.t('longTermTask.acceptAllConfirmBody').replace('{count}', String(waitingOwnerIds.length))
+                : i18nService.t('longTermTask.cancelConfirmBody')}
           </div>
           <div className="mt-2 flex gap-2">
             <button
@@ -227,16 +235,24 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
                 void runAction(() =>
                   kind === 'complete'
                     ? longTermTaskService.completeTask(detail.id)
-                    : longTermTaskService.setStage({ taskId: detail.id, action: 'cancel' }),
+                    : kind === 'acceptAll'
+                      ? longTermTaskService.acceptAllProposals(detail.id, waitingOwnerIds)
+                      : longTermTaskService.setStage({ taskId: detail.id, action: 'cancel' }),
                 );
               }}
               className={
-                confirming === 'complete'
-                  ? 'rounded-lg bg-emerald-600/90 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600'
-                  : 'rounded-lg bg-red-500/90 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500'
+                confirming === 'cancelTask'
+                  ? 'rounded-lg bg-red-500/90 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500'
+                  : 'rounded-lg bg-emerald-600/90 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600'
               }
             >
-              {i18nService.t(confirming === 'complete' ? 'longTermTask.completeConfirmOk' : 'longTermTask.cancelConfirmOk')}
+              {i18nService.t(
+                confirming === 'complete'
+                  ? 'longTermTask.completeConfirmOk'
+                  : confirming === 'acceptAll'
+                    ? 'longTermTask.acceptAllConfirmOk'
+                    : 'longTermTask.cancelConfirmOk',
+              )}
             </button>
             <button
               type="button"
@@ -276,8 +292,20 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-5">
         {/* Sub-project checklist */}
         <div className="min-w-0 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface p-3 lg:col-span-2">
-          <div className="px-1 pb-2 text-[11px] font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
-            {i18nService.t('longTermTask.subtasks')}
+          <div className="flex items-center justify-between gap-2 px-1 pb-2">
+            <div className="text-[11px] font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('longTermTask.subtasks')}
+            </div>
+            {waitingOwnerIds.length >= 2 && (
+              <button
+                type="button"
+                onClick={() => setConfirming('acceptAll')}
+                className="rounded-lg bg-emerald-600/90 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-600"
+                title={i18nService.t('longTermTask.acceptAllHint')}
+              >
+                {i18nService.t('longTermTask.action.acceptAll').replace('{count}', String(waitingOwnerIds.length))}
+              </button>
+            )}
           </div>
           <div className="space-y-1">
             {detail.subtasks.map((subtask, index) => {

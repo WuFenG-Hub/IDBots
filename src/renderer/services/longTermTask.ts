@@ -165,6 +165,17 @@ class LongTermTaskService {
     return this.runAction(taskId, () => this.api()!.accept({ subtaskId, note }));
   }
 
+  /** One owner verdict for every parked acceptance proposal: accept in order,
+   *  sequentially (each accept can re-derive the board); first refusal wins. */
+  async acceptAllProposals(taskId: string, subtaskIds: string[]): Promise<{ error: string | null }> {
+    let firstError: string | null = null;
+    for (const subtaskId of subtaskIds) {
+      const { error } = await this.acceptSubtask(taskId, subtaskId);
+      if (error && !firstError) firstError = error;
+    }
+    return { error: firstError };
+  }
+
   async rejectSubtask(taskId: string, subtaskId: string, feedback: string) {
     return this.runAction(taskId, () => this.api()!.reject({ subtaskId, feedback }));
   }
