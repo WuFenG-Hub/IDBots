@@ -588,6 +588,7 @@ man_base_data_pebble/
 !tests/installAgeGate.test.mjs
 !tests/cerebellumMemoryRank.test.mjs
 !tests/cerebellumMemoryWriteGate.test.mjs
+!tests/cerebellumSkillShortlist.test.mjs
 !tests/coworkAssistantNarrationSurvival.test.ts
 !tests/coworkAssistantModePromptGate.test.mjs
 !tests/coworkAssistantDeliveryIndex.test.mjs

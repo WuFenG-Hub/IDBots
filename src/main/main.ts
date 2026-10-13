@@ -24,6 +24,11 @@ import { resolveCerebellumConfig } from './libs/cerebellumConfig';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
 import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
 import {
+  rankSkillsWithCerebellum,
+  CEREBELLUM_SKILL_SHORTLIST_MIN_POOL,
+  CEREBELLUM_SKILL_SHORTLIST_TOP_K,
+} from './cerebellum/skillShortlist';
+import {
   CoworkRunner,
   isDelegationPriceNumeric,
   type DelegationRequest,
@@ -3201,6 +3206,57 @@ const createCerebellumMemoryWriteGate = () =>
   };
 
 /**
+ * Cerebellum (小脑) skill shortlist (roadmap #2): one JEV Choice question
+ * ranks the session's whole visible skill catalog against the current user
+ * message; the top-K entries ride the volatile tail next to the untouched
+ * catalog block. Same lazy shape as the rankers above — config re-resolved
+ * per call (Settings/skill installs apply next turn), fetch on the Electron
+ * net stack (system proxy). Returns null on small pools / any failure: no
+ * shortlist, behavior identical to before. Never logs user text.
+ */
+const createCerebellumSkillRanker = () =>
+  async ({ currentUserText, metabotId }: {
+    currentUserText: string;
+    metabotId: number | null;
+  }): Promise<Array<{ id: string; name: string; description: string; probability: number }> | null> => {
+    const config = resolveCerebellumConfig(getStore().get('app_config'));
+    if (!config) {
+      return null;
+    }
+    // The catalog's own visible set (bundled + global + assigned, enabled
+    // only) — the shortlist must never mention a skill the catalog omits.
+    const skills = getSkillManager()
+      .listSkillsForMetabot(metabotId)
+      .map((skill) => ({ id: String(skill.id), name: skill.name, description: String(skill.description ?? '') }));
+    if (skills.length < CEREBELLUM_SKILL_SHORTLIST_MIN_POOL) {
+      return null;
+    }
+    const startedAt = Date.now();
+    const ranking = await rankSkillsWithCerebellum({
+      config,
+      fetchImpl: session.defaultSession.fetch.bind(session.defaultSession),
+      currentUserText,
+      skills,
+    });
+    coworkLog('INFO', 'skills:cerebellumShortlist', 'catalog ranked for turn', {
+      pool: skills.length,
+      ranked: ranking?.length ?? 0,
+      latencyMs: Date.now() - startedAt,
+      used: ranking !== null,
+    });
+    if (!ranking) {
+      return null;
+    }
+    const skillsById = new Map(skills.map((skill) => [skill.id, skill]));
+    return ranking
+      .slice(0, CEREBELLUM_SKILL_SHORTLIST_TOP_K)
+      .flatMap((entry) => {
+        const skill = skillsById.get(entry.id);
+        return skill ? [{ ...skill, probability: entry.probability }] : [];
+      });
+  };
+
+/**
  * R3: rough upper-bound MVC fee estimate for a typical pin (funding + payload
  * outputs, ~600 vB at the resolved fee rate) — feeds the `need ~N sats` part
  * of balance-hint error messages. Marked as an estimate everywhere it shows.
@@ -5956,6 +6012,10 @@ const getCoworkRunner = () => {
       // Cerebellum (小脑) memory re-rank: shared factory with the group-task
       // daemon's memory block (see createCerebellumMemoryRanker).
       cerebellumMemoryRanker: createCerebellumMemoryRanker(),
+      // Cerebellum (小脑) skill shortlist (roadmap #2): ranks the session's
+      // visible skill catalog per turn; top-3 ride the volatile tail next to
+      // the untouched catalog block (see createCerebellumSkillRanker).
+      cerebellumSkillRanker: createCerebellumSkillRanker(),
       // Per-bot opt-in (default off): mounted MCP tool schemas ride every
       // LLM request, so only sessions whose bot explicitly enables MCP pay
       // the cost. See services/coworkMcpToolsPreference.ts.
