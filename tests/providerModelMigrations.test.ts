@@ -98,16 +98,77 @@ test('model migrations from version 0 chain v1 then v2: v1-injected glm-5.1 is r
   assert.equal(migrated.providerModelMigrationVersion, PROVIDER_MODEL_MIGRATION_VERSION);
 });
 
-test('api-format migration v3 moves the factory-default anthropic zhipu config to responses', () => {
+test('api-format migrations carry the factory-default anthropic zhipu config to chat completions', () => {
+  // v3 anthropic → responses, then v4 responses → openai chat completions:
+  // the factory default is now the wire where GLM thinking can be disabled.
   const migrated = applyProviderApiFormatMigrations(asConfig(legacyZhipuConfig()));
 
   const zhipu = migrated.providers.zhipu!;
-  assert.equal(zhipu.apiFormat, 'responses');
-  assert.equal(zhipu.baseUrl, 'https://open.bigmodel.cn/api/v1');
-  assert.equal(migrated.providerApiFormatMigrationVersion, 3);
+  assert.equal(zhipu.apiFormat, 'openai');
+  assert.equal(zhipu.baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
+  assert.equal(migrated.providerApiFormatMigrationVersion, 4);
   // Already-migrated configs stay put on a second pass.
   const twice = applyProviderApiFormatMigrations(migrated);
   assert.deepEqual(twice.providers.zhipu, zhipu);
+});
+
+test('api-format migration v4 moves the v3 factory-default responses zhipu config to chat completions', () => {
+  const migrated = applyProviderApiFormatMigrations(asConfig({
+    providerApiFormatMigrationVersion: 3,
+    providers: {
+      zhipu: {
+        enabled: true,
+        apiKey: 'sk-zhipu',
+        baseUrl: 'https://open.bigmodel.cn/api/v1',
+        apiFormat: 'responses',
+        models: [],
+      },
+    },
+  }));
+
+  const zhipu = migrated.providers.zhipu!;
+  assert.equal(zhipu.apiFormat, 'openai');
+  assert.equal(zhipu.baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
+  assert.equal(migrated.providerApiFormatMigrationVersion, 4);
+});
+
+test('api-format migration v4 never touches custom responses proxies or explicit other formats', () => {
+  const custom = applyProviderApiFormatMigrations(asConfig({
+    providerApiFormatMigrationVersion: 3,
+    providers: {
+      zhipu: {
+        enabled: true,
+        apiKey: 'sk-zhipu',
+        baseUrl: 'https://my-relay.example.com/api/v1',
+        apiFormat: 'responses',
+        models: [],
+      },
+    },
+  }));
+  assert.equal(custom.providers.zhipu!.apiFormat, 'responses');
+  assert.equal(custom.providers.zhipu!.baseUrl, 'https://my-relay.example.com/api/v1');
+
+  const explicit = applyProviderApiFormatMigrations(asConfig({
+    providerApiFormatMigrationVersion: 3,
+    providers: {
+      zhipu: {
+        enabled: true,
+        apiKey: 'sk-zhipu',
+        baseUrl: 'https://open.bigmodel.cn/api/v1',
+        apiFormat: 'responses',
+        models: [],
+      },
+      deepseek: {
+        enabled: true,
+        apiKey: 'sk-ds',
+        baseUrl: 'https://api.deepseek.com',
+        apiFormat: 'openai',
+        models: [],
+      },
+    },
+  }));
+  assert.equal(explicit.providers.deepseek!.apiFormat, 'openai');
+  assert.equal(explicit.providers.deepseek!.baseUrl, 'https://api.deepseek.com');
 });
 
 test('api-format migration v3 never touches custom base URLs or other formats', () => {

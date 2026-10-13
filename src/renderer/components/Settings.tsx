@@ -247,7 +247,8 @@ const providerSwitchableDefaultBaseUrls: Partial<Record<ProviderType, { anthropi
     openai: 'https://api.moonshot.cn/v1',
   },
   // Zhipu GLM coding plan (https://docs.bigmodel.cn/cn/coding-plan/quick-start):
-  // one key, three protocol endpoints. Responses is the default.
+  // one key, three protocol endpoints. Chat Completions is the default — the
+  // only wire where GLM thinking can be explicitly disabled.
   zhipu: {
     anthropic: 'https://open.bigmodel.cn/api/anthropic',
     openai: 'https://open.bigmodel.cn/api/coding/paas/v4',
