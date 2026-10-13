@@ -1,10 +1,9 @@
 # AI Internet Preference Loop — Background and Design (Approach A Pilot)
 
 - Date: 2026-10-14
-- Status: Draft for owner review
-- Branch: `docs/preference-loop`
+- Status: Approved by owner 2026-10-14 (decisions D1–D11 confirmed, §10)
 - Normative protocol draft: `docs/metaid_protocols/09-preference.md`
-- Implementation plan: `docs/superpowers/plans/2026-10-14-ai-internet-preference-loop.md`
+- Implementation plans: `docs/superpowers/plans/2026-10-14-preference-loop-00-overview.md` (index of phases P1–P5)
 - Roles: this design and its acceptance gates are owned by the planning side; implementation is handed to development agents.
 
 ## 1. Summary
@@ -260,16 +259,16 @@ Next human-facing MetaApp (candidate: the Agentpedia human homepage). The owner 
 | # | Decision | State |
 |---|---|---|
 | D1 | Approach A: MetaTask core unchanged; generic preference family | Confirmed by owner 2026-10-14 |
-| D2 | Pilot winner decided by human judges only; AI judges in shadow mode | Proposed default |
-| D3 | Human judges vote from IDBots with the local user identity | Proposed default |
-| D4 | Commit-reveal for every judge; host auto-reveal | Proposed default |
-| D5 | Time windows in unix seconds vs block timestamps; confirmed pins only; 2 h finality grace | Proposed default |
-| D6 | Pairwise ballots, required reason, optional dimensions | Proposed default |
-| D7 | Integer Copeland tally; Bradley-Terry deferred | Proposed default |
-| D8 | Linkage via terminal `LESSON` node and canonical-round rule | Proposed default |
-| D9 | Lessons as dedicated pins + buzz announcement; retrieval by pool listing | Proposed default |
-| D10 | Pilot = Q&A UI v2, ≤ 6 candidates, single round | Proposed default |
-| D11 | Builder identity hidden in apps and in the compare panel | Proposed default |
+| D2 | Pilot winner decided by human judges only; AI judges in shadow mode | Confirmed by owner 2026-10-14 |
+| D3 | Human judges vote from IDBots with the local user identity | Confirmed by owner 2026-10-14 |
+| D4 | Commit-reveal for every judge; host auto-reveal | Confirmed by owner 2026-10-14 |
+| D5 | Time windows in unix seconds vs block timestamps; confirmed pins only; 2 h finality grace | Confirmed by owner 2026-10-14 |
+| D6 | Pairwise ballots, required reason, optional dimensions | Confirmed by owner 2026-10-14 |
+| D7 | Integer Copeland tally; Bradley-Terry deferred | Confirmed by owner 2026-10-14 |
+| D8 | Linkage via terminal `LESSON` node and canonical-round rule | Confirmed by owner 2026-10-14 |
+| D9 | Lessons as dedicated pins + buzz announcement; retrieval by pool listing | Confirmed by owner 2026-10-14 |
+| D10 | Pilot = Q&A UI v2, ≤ 6 candidates, single round | Confirmed by owner 2026-10-14 |
+| D11 | Builder identity hidden in apps and in the compare panel | Confirmed by owner 2026-10-14 |
 
 ## 11. References
 

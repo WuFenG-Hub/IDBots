@@ -23,7 +23,7 @@
 - User-facing strings: English + Chinese keys in `src/renderer/services/i18n.ts`. Theme via CSS variables (`var(--bg-main)`, `var(--bg-panel)`, `var(--text-primary)`, `var(--color-primary)`); no new `dark:` utilities. No `window.confirm` / `window.alert`.
 - Database: new tables only, `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`, idempotent on every start. Never delete or reset user data. The sealed-ballot table is a record of user data, not a cache.
 - Commits: one commit per task, message `<type>: <short description>` (`feat|fix|refactor|docs|chore`). Before each commit run the task's tests plus `pnpm run compile:electron` (0 errors) and `pnpm run lint` (0 errors/warnings). After each commit post an English development-journal buzz with Codex's `metabot-post-buzz` skill (not `SKILLs/metabot-post-buzz`).
-- Before handing a phase back: `pnpm run compile:electron`, `pnpm run build:skills`, `pnpm run lint`, `node --test tests/*.test.mjs`, and `pnpm run test:preference` all green (P4 also `pnpm run build`, the renderer type check); paste the tail of each output into the handoff note.
+- Before handing a phase back: `pnpm run compile:electron`, `pnpm run build:skills`, `pnpm run lint`, `node --test tests/*.test.mjs`, and `pnpm run test:preference` all green (P4 also `pnpm run build`, the renderer type check; P5 runs `test:preference` only if P1 has merged, since P1 adds that script, and runs its own handoff checklist); paste the tail of each output into the handoff note.
 
 ---
 
@@ -191,4 +191,4 @@ At the end of a phase, reply with: branch name and head commit; one line per com
 
 ## Decisions that block phases
 
-Design §10 lists D2–D11 as proposed defaults. The plans implement those defaults. If the owner changes one, the planner updates the affected plan before the phase starts: D2/D3 → P2 writers + P4; D4/D5 → P1 engine + P2 reveal timing; D6/D7 → P1; D8 → P3 tools + P5 rubrics; D9 → P3 lesson tools; D10 → P5; D11 → P4 + P5 rubric.
+The owner confirmed D2–D11 (design §10) on 2026-10-14, and the plans implement them. If the owner later changes one, the planner updates the affected plan before the phase starts: D2/D3 → P2 writers + P4; D4/D5 → P1 engine + P2 reveal timing; D6/D7 → P1; D8 → P3 tools + P5 rubrics; D9 → P3 lesson tools; D10 → P5; D11 → P4 + P5 rubric.

@@ -1,6 +1,6 @@
 # MetaID Protocols: Preference Rounds (round / commit / reveal / lesson)
 
-> Status: **IDBots-authored draft v1.0.0** (branch `docs/preference-loop`), not yet registered.
+> Status: **IDBots-authored draft v1.0.0**, not yet registered.
 > Companion design: `docs/superpowers/specs/2026-10-14-ai-internet-preference-loop-design.md`.
 > Source of truth for MetaID protocol docs is `open-agent-connect/docs/metaid_protocols`; sync this file upstream once the pilot confirms the mechanics.
 
