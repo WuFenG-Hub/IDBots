@@ -198,6 +198,67 @@ export function resolveAutoEffortRung(
 }
 
 /**
+ * How long an escalated rung sticks around a session. Single-message
+ * classification misses conversation context: a bare "继续" during a coding
+ * session classifies off, yet it IS part of the complex work. Stickiness
+ * holds the last escalated rung so follow-ups within the window keep it; the
+ * window refreshes only on a FRESH escalation (a sticky-sustained turn does
+ * not extend it), so a casual interlude rides high for at most this long
+ * even if the conversation never pauses.
+ */
+export const CEREBELLUM_EFFORT_STICKY_WINDOW_MS = 10 * 60_000;
+
+const EFFORT_RUNG_ORDER: Record<CerebellumEffortRung, number> = { off: 0, low: 1, high: 2, max: 3 };
+
+/** Per-session sticky state held by the caller (the cowork runner). */
+export interface CerebellumEffortSticky {
+  rung: CerebellumEffortRung;
+  at: number;
+}
+
+export interface ResolvedStickyAutoEffort {
+  rung: CerebellumEffortRung;
+  /** True when a fresh sticky entry overrode this turn's base verdict. */
+  stickyUsed: boolean;
+  /** Next sticky state to store, or null to clear. */
+  nextSticky: CerebellumEffortSticky | null;
+}
+
+/**
+ * Session-sticky wrapper around resolveAutoEffortRung. The effective rung is
+ * the heavier of the base verdict and a still-fresh sticky entry; only a
+ * fresh ESCALATED base verdict (or a sticky-sustained escalated turn, see
+ * below) refreshes the entry:
+ *  - escalated base → nextSticky = { rung, at: now } (window restarts);
+ *  - sticky-sustained escalated turn → the entry is kept AS IS (at unchanged)
+ *    so the window still expires 10 min after the last genuine escalation;
+ *  - anything at/below low with no fresh entry → cleared.
+ */
+export function resolveStickyAutoEffortRung(
+  distribution: CerebellumEffortDistribution,
+  options: {
+    assistantMode: boolean;
+    sticky?: CerebellumEffortSticky | null;
+    nowMs?: number;
+  },
+): ResolvedStickyAutoEffort {
+  const now = options.nowMs ?? Date.now();
+  const base = resolveAutoEffortRung(distribution, { assistantMode: options.assistantMode });
+  const stickyFresh = options.sticky != null && now - options.sticky.at <= CEREBELLUM_EFFORT_STICKY_WINDOW_MS;
+  const stickyRung = stickyFresh ? options.sticky!.rung : null;
+  const rung = stickyRung && EFFORT_RUNG_ORDER[stickyRung] > EFFORT_RUNG_ORDER[base] ? stickyRung : base;
+  const stickyUsed = rung !== base;
+  const escalated = EFFORT_RUNG_ORDER[rung] >= EFFORT_RUNG_ORDER.high;
+  let nextSticky: CerebellumEffortSticky | null = null;
+  if (escalated) {
+    nextSticky = EFFORT_RUNG_ORDER[base] >= EFFORT_RUNG_ORDER.high
+      ? { rung, at: now }
+      : (stickyFresh ? options.sticky! : null);
+  }
+  return { rung, stickyUsed, nextSticky };
+}
+
+/**
  * Ask the cerebellum how much reasoning effort the current user message
  * needs. Returns the probability distribution, or null on any failure
  * (blank text, HTTP/network errors, abort/timeout, malformed payloads).

@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import {
   CEREBELLUM_EFFORT_TIMEOUT_MS,
   CEREBELLUM_EFFORT_ESCALATION_THRESHOLD,
+  CEREBELLUM_EFFORT_STICKY_WINDOW_MS,
+  resolveStickyAutoEffortRung,
   CEREBELLUM_EFFORT_QUESTION_ID,
   CEREBELLUM_EFFORT_INSTRUCTIONS,
   CEREBELLUM_EFFORT_RUNG_CRITERIA,
@@ -159,4 +161,85 @@ test('selectEffortWithCerebellum aborts at the timeout and returns null', async 
 
 test('selectEffortWithCerebellum default timeout is the solo-call budget', () => {
   assert.equal(CEREBELLUM_EFFORT_TIMEOUT_MS, 1000);
+});
+
+// ---- session stickiness ------------------------------------------------------
+
+test('stickiness holds an escalated rung across off-classified follow-ups without extending the window', () => {
+  const T0 = 1_000_000;
+  // A complex message escalates and arms the sticky entry.
+  const escalated = resolveStickyAutoEffortRung(DIST(0, 0, 0.95, 0.05), {
+    assistantMode: true,
+    sticky: null,
+    nowMs: T0,
+  });
+  assert.equal(escalated.rung, 'high');
+  assert.equal(escalated.stickyUsed, false);
+  assert.deepEqual(escalated.nextSticky, { rung: 'high', at: T0 });
+
+  // A bare "继续" 2 minutes later classifies off on its own but rides high.
+  const followUp = resolveStickyAutoEffortRung(DIST(1.0, 0, 0, 0), {
+    assistantMode: true,
+    sticky: escalated.nextSticky,
+    nowMs: T0 + 2 * 60_000,
+  });
+  assert.equal(followUp.rung, 'high');
+  assert.equal(followUp.stickyUsed, true);
+  // Sticky-sustained turns do NOT refresh the window.
+  assert.deepEqual(followUp.nextSticky, { rung: 'high', at: T0 });
+
+  // 11 minutes after the last genuine escalation, the window has expired.
+  const expired = resolveStickyAutoEffortRung(DIST(1.0, 0, 0, 0), {
+    assistantMode: true,
+    sticky: escalated.nextSticky,
+    nowMs: T0 + CEREBELLUM_EFFORT_STICKY_WINDOW_MS + 60_000,
+  });
+  assert.equal(expired.rung, 'off');
+  assert.equal(expired.stickyUsed, false);
+  assert.equal(expired.nextSticky, null);
+});
+
+test('a fresh escalation restarts the window; casual-only traffic clears the entry', () => {
+  const T0 = 5_000_000;
+  const first = resolveStickyAutoEffortRung(DIST(0, 0, 0, 1), {
+    assistantMode: true,
+    sticky: null,
+    nowMs: T0,
+  });
+  assert.deepEqual(first.nextSticky, { rung: 'max', at: T0 });
+
+  // 9 minutes later another genuinely complex message re-escalates: the
+  // window restarts from NOW, not from the original escalation.
+  const second = resolveStickyAutoEffortRung(DIST(0, 0, 0.9, 0.1), {
+    assistantMode: true,
+    sticky: first.nextSticky,
+    nowMs: T0 + 9 * 60_000,
+  });
+  assert.equal(second.rung, 'max');
+  assert.deepEqual(second.nextSticky, { rung: 'max', at: T0 + 9 * 60_000 });
+
+  // With no sticky entry armed, casual traffic resolves off and stays clear.
+  const casual = resolveStickyAutoEffortRung(DIST(0.99, 0.01, 0, 0), {
+    assistantMode: true,
+    sticky: null,
+    nowMs: T0,
+  });
+  assert.equal(casual.rung, 'off');
+  assert.equal(casual.nextSticky, null);
+});
+
+test('stickiness applies in professional mode too, heavier rung wins', () => {
+  const T0 = 9_000_000;
+  const armed = resolveStickyAutoEffortRung(DIST(0, 0, 0, 1), {
+    assistantMode: false,
+    sticky: null,
+    nowMs: T0,
+  });
+  const lowTurn = resolveStickyAutoEffortRung(DIST(0, 0.9, 0.1, 0), {
+    assistantMode: false,
+    sticky: armed.nextSticky,
+    nowMs: T0 + 60_000,
+  });
+  assert.equal(lowTurn.rung, 'max');
+  assert.equal(lowTurn.stickyUsed, true);
 });

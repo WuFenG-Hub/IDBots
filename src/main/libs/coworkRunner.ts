@@ -103,7 +103,12 @@ import { ensureSandboxReady, getSandboxRuntimeInfoIfReady, type SandboxRuntimeIn
 import { isPathWithin } from './runtimePaths';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
 import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
-import { resolveAutoEffortRung, type CerebellumEffortRung } from '../cerebellum/effortSelector';
+import {
+  CEREBELLUM_EFFORT_STICKY_WINDOW_MS,
+  resolveStickyAutoEffortRung,
+  type CerebellumEffortRung,
+  type CerebellumEffortSticky,
+} from '../cerebellum/effortSelector';
 import { buildSkillShortlistBlock } from '../cerebellum/skillShortlist';
 import { CEREBELLUM_VOLATILE_GATE_SECTION_KEYS } from '../cerebellum/volatileBlockGate';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
@@ -2285,6 +2290,14 @@ export class CoworkRunner extends EventEmitter {
   private cerebellumSkillRanker?: CoworkRunnerOptions['cerebellumSkillRanker'];
   private cerebellumVolatileBlockGate?: CoworkRunnerOptions['cerebellumVolatileBlockGate'];
   private cerebellumEffortSelector?: CoworkRunnerOptions['cerebellumEffortSelector'];
+  /**
+   * Per-session sticky state for the auto effort rung: the last escalated
+   * verdict with its timestamp. Follow-ups within the sticky window keep the
+   * escalated rung (a bare "继续" mid-coding-session classifies off on its
+   * own); the window refreshes only on a fresh escalation, so a casual
+   * interlude rides high for at most CEREBELLUM_EFFORT_STICKY_WINDOW_MS.
+   */
+  private autoEffortStickyBySession = new Map<string, CerebellumEffortSticky>();
   /**
    * Per-session precise-location consent memory: the owner is asked at most
    * once per session (first precise request) and the approval sticks for the
@@ -8991,11 +9004,33 @@ export class CoworkRunner extends EventEmitter {
       if (!sessionEffortPicked && autoEffortPromise) {
         const distribution = await autoEffortPromise;
         if (distribution) {
-          autoEffortRung = resolveAutoEffortRung(distribution, { assistantMode });
+          const stickyBefore = this.autoEffortStickyBySession.get(sessionId) ?? null;
+          const resolved = resolveStickyAutoEffortRung(distribution, {
+            assistantMode,
+            sticky: stickyBefore,
+          });
+          autoEffortRung = resolved.rung;
+          if (resolved.nextSticky) {
+            this.autoEffortStickyBySession.set(sessionId, resolved.nextSticky);
+          } else {
+            this.autoEffortStickyBySession.delete(sessionId);
+          }
+          // Bounded map: prune expired entries once it grows past idle-session
+          // scale (sticky entries expire by time anyway; dead sessions would
+          // otherwise linger forever).
+          if (this.autoEffortStickyBySession.size > 128) {
+            const nowMs = Date.now();
+            for (const [key, entry] of [...this.autoEffortStickyBySession]) {
+              if (nowMs - entry.at > CEREBELLUM_EFFORT_STICKY_WINDOW_MS) {
+                this.autoEffortStickyBySession.delete(key);
+              }
+            }
+          }
           coworkLog('INFO', 'effort:cerebellumSelect', 'auto effort resolved for turn', {
             sessionId,
             assistantMode,
             effort: autoEffortRung,
+            sticky: resolved.stickyUsed,
             off: distribution.off,
             low: distribution.low,
             high: distribution.high,
