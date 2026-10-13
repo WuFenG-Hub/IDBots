@@ -91,6 +91,7 @@ import {
 } from '../libs/experiencePromptBlocks';
 import { truncateUtf16Units } from '../libs/llmSafeText';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
+import { buildGroupTaskWorkingStateBlock } from './groupTaskWorkingState';
 import type { MemoryUsageClass, MemoryVisibility } from '../memory/memoryScope';
 import {
   parseDeliverableLines,
@@ -1886,6 +1887,8 @@ export interface GroupTaskDaemonSqliteStoreLike {
   get<T = unknown>(key: string): T | undefined;
   set<T = unknown>(key: string, value: T): void;
   delete(key: string): void;
+  /** Prefix scan over kv keys (SqliteStore.keysWithPrefix in production). */
+  keysWithPrefix(prefix: string): string[];
 }
 
 export type GroupTaskDaemonPerformChatFn = (
@@ -4123,6 +4126,72 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * Durable working state as a per-turn block: the canonical orchestration
+   * steps/attempts (who owns which objective, with its status and deadline)
+   * plus the armed per-member delivery clocks. Neither lives in the group-log
+   * window, so without this block a worker whose assignment survived an
+   * overnight restart had nothing in context telling it what it still owes.
+   * '' when nothing is open or any read fails — never throws.
+   */
+  const buildWorkingStateBlockFor = (task: GroupTask): string => {
+    try {
+      const members = deps.getGroupTaskStore().listMembers(task.id, { includeRemoved: true });
+      const nameForMetabotId = (metabotId: number | null | undefined): string | null => {
+        if (metabotId == null) return null;
+        const member = members.find((candidate) => candidate.metabotId === metabotId);
+        const name = (member?.name ?? member?.displayName ?? '').trim();
+        return name || `bot-${metabotId}`;
+      };
+      const stepsWithAttempts = deps.orchestrationBridge?.listStepsWithAttempts(task.id) ?? [];
+      const sqlite = deps.getStore();
+      const expectedDeliveries = sqlite
+        .keysWithPrefix(`${EXPECTED_DELIVERY_PREFIX}${task.id}:`)
+        .flatMap((key) => {
+          const metabotId = Number(key.slice(`${EXPECTED_DELIVERY_PREFIX}${task.id}:`.length));
+          const raw = sqlite.get<string>(key);
+          if (!raw) return [];
+          try {
+            const entry = JSON.parse(raw) as { dueAt?: unknown; taskDescription?: unknown };
+            if (typeof entry.dueAt !== 'number' || !Number.isFinite(entry.dueAt)) return [];
+            const memberName = nameForMetabotId(
+              Number.isInteger(metabotId) && metabotId > 0 ? metabotId : null,
+            );
+            if (!memberName) return [];
+            return [{
+              memberName,
+              dueAtMs: entry.dueAt,
+              taskDescription: typeof entry.taskDescription === 'string' ? entry.taskDescription : null,
+            }];
+          } catch {
+            return [];
+          }
+        });
+      return buildGroupTaskWorkingStateBlock({
+        nowMs: now(),
+        steps: stepsWithAttempts.map(({ step }) => ({
+          ordinal: step.ordinal,
+          title: step.title,
+          objective: step.objective,
+          status: step.status,
+          assigneeName: nameForMetabotId(step.assigneeMetabotId),
+          deadlineAt: step.deadlineAt,
+        })),
+        attempts: stepsWithAttempts.flatMap(({ step, attempts }) =>
+          attempts.map((attempt) => ({
+            status: attempt.status,
+            stepOrdinal: step.ordinal,
+            workerName: nameForMetabotId(attempt.workerMetabotId),
+            startedAt: attempt.startedAt,
+            queuedAt: attempt.queuedAt,
+          }))),
+        expectedDeliveries,
+      });
+    } catch {
+      return '';
+    }
+  };
+
+  /**
    * Observer-relative MetaID impression summaries for the group roster, built
    * by the shared cognition service and capped defensively. Failure omits the
    * block without blocking the group turn.
@@ -4216,6 +4285,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   ): Promise<{ systemPrompt: string; volatileContext: string; memoryContext: string }> => {
     const experienceBlock = buildExperienceBlockFor(bot);
     const constraintsBlock = buildAuthoritativeConstraintsBlockFor(task);
+    const workingStateBlock = buildWorkingStateBlockFor(task);
     // Scoped owner memories ride ONLY the plain path (callers prepend this to
     // the stateless completion's user turn): a skill turn goes through
     // coworkRunner, which already injects its own scoped memory blocks.
@@ -4248,7 +4318,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       botRole,
       ownerGlobalMetaId: ownerGlobalMetaId || null,
     });
-    const volatileContext = [formatTurnTimeText(), cultureBlock, experienceBlock, constraintsBlock, cognitionBlock]
+    const volatileContext = [formatTurnTimeText(), cultureBlock, experienceBlock, constraintsBlock, workingStateBlock, cognitionBlock]
       .filter((section) => section?.trim())
       .join('\n\n');
     return { systemPrompt, volatileContext, memoryContext };

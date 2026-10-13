@@ -88,6 +88,20 @@ export class GroupTaskOrchestrationBridge {
     return canonical;
   }
 
+  /**
+   * Read-only working-state snapshot for the daemon's per-turn prompt block:
+   * every step of the task's canonical orchestration card together with its
+   * attempts. A group task with no canonical card yet returns [] — this is a
+   * pure read and must never create the card (that is ensureCanonicalTask's
+   * job on the write paths).
+   */
+  listStepsWithAttempts(groupTaskId: number): Array<{ step: OrchestrationStep; attempts: OrchestrationAttempt[] }> {
+    const groupTask = this.deps.groupTaskStore.getTaskById(groupTaskId);
+    if (!groupTask?.orchestrationTaskId) return [];
+    return this.deps.orchestrationStore.listSteps(groupTask.orchestrationTaskId)
+      .map((step) => ({ step, attempts: this.deps.orchestrationStore.listAttempts(step.id) }));
+  }
+
   syncStatus(groupTaskId: number): OrchestrationTask {
     const groupTask = this.deps.groupTaskStore.getTaskById(groupTaskId);
     if (!groupTask) throw new Error(`Group task ${groupTaskId} not found`);

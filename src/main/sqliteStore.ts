@@ -4088,6 +4088,20 @@ export class SqliteStore {
     this.emitter.emit('change', { key, newValue: undefined, oldValue } as ChangePayload);
   }
 
+  /**
+   * List every kv key carrying the given prefix (e.g. the per-task delivery
+   * clocks under `group_task_expected_delivery:<taskId>:`). substr matching,
+   * not LIKE — prefixes with `%`/`_` stay literal. Read-only; no change event.
+   */
+  keysWithPrefix(prefix: string): string[] {
+    this.assertOpen();
+    const result = this.db.exec('SELECT key FROM kv WHERE substr(key, 1, ?) = ? ORDER BY key ASC', [
+      prefix.length,
+      prefix,
+    ]);
+    return (result[0]?.values ?? []).map((row) => String(row[0]));
+  }
+
   // Expose database for cowork operations
   getDatabase(): SqliteDatabase {
     this.assertOpen();
