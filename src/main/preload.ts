@@ -889,6 +889,10 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('longtermTask:update', input),
     setStage: (input: { taskId: string; action: 'pause' | 'resume' | 'cancel'; note?: string }) =>
       ipcRenderer.invoke('longtermTask:setStage', input),
+    complete: (input: { taskId: string; note?: string; evidence?: Array<{ kind: string; uri: string; note?: string }> }) =>
+      ipcRenderer.invoke('longtermTask:complete', input),
+    subtaskSkip: (input: { subtaskId: string; reason?: string }) =>
+      ipcRenderer.invoke('longtermTask:subtaskSkip', input),
     subtaskAdd: (input: {
       taskId: string;
       title: string;

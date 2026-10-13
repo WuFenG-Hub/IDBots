@@ -141,6 +141,14 @@ class LongTermTaskService {
     return this.runAction(input.taskId, () => this.api()!.setStage(input));
   }
 
+  async completeTask(taskId: string, note?: string) {
+    return this.runAction(taskId, () => this.api()!.complete({ taskId, note }));
+  }
+
+  async skipSubtask(taskId: string, subtaskId: string, reason?: string) {
+    return this.runAction(taskId, () => this.api()!.subtaskSkip({ subtaskId, reason }));
+  }
+
   async subtaskAdd(taskId: string, draft: LongTermSubtaskDraft) {
     return this.runAction(taskId, () => this.api()!.subtaskAdd({ taskId, ...draft }));
   }

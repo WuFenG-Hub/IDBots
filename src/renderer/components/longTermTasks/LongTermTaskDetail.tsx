@@ -23,8 +23,8 @@ import ParticipantAvatars from './ParticipantAvatars';
  * Interaction ruling (owner 2026-09-22): decisions happen in prose, in chat.
  * "Discuss" / "edit definition" buttons only deep-link into a cowork session
  * with a prefilled draft — they never write a decision themselves. The only
- * writing buttons here are the owner's own verdicts (accept / reject) and the
- * pause/resume/delegate switches.
+ * writing buttons here are the owner's own verdicts (accept / reject / skip /
+ * complete-task / cancel-task) and the pause/resume/delegate switches.
  */
 
 const SUBTASK_ICON: Record<LongTermSubtaskStatus, { glyph: string; className: string }> = {
@@ -71,6 +71,9 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
   const [selectedSubtaskId, setSelectedSubtaskId] = useState<string | null>(null);
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [rejectText, setRejectText] = useState('');
+  const [skippingId, setSkippingId] = useState<string | null>(null);
+  const [skipReason, setSkipReason] = useState('');
+  const [confirming, setConfirming] = useState<'complete' | 'cancelTask' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -174,10 +177,76 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
             {i18nService.t('longTermTask.action.resume')}
           </button>
         )}
+        {(detail.stage === 'active' || detail.stage === 'paused') && (
+          <button
+            type="button"
+            onClick={() => setConfirming('complete')}
+            className="rounded-lg bg-emerald-600/90 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600"
+            title={i18nService.t('longTermTask.action.completeHint')}
+          >
+            {i18nService.t('longTermTask.action.complete')}
+          </button>
+        )}
+        {detail.stage !== 'done' && detail.stage !== 'cancelled' && (
+          <button
+            type="button"
+            onClick={() => setConfirming('cancelTask')}
+            className="rounded-lg border border-red-500/30 px-3 py-1 text-xs text-red-500 hover:bg-red-500/10"
+          >
+            {i18nService.t('longTermTask.action.cancelTask')}
+          </button>
+        )}
       </div>
 
       {actionError && (
         <div className="mt-2 rounded-lg bg-red-500/10 px-3 py-1.5 text-xs text-red-500">{actionError}</div>
+      )}
+
+      {/* Task-level closure confirmation — one goal-level verdict instead of
+          clicking the remaining sub-projects one by one (each accept would
+          re-ignite the heartbeat onto the next sub-project). */}
+      {confirming && (
+        <div
+          className={`mt-2 rounded-lg border p-3 ${
+            confirming === 'complete' ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-red-500/30 bg-red-500/5'
+          }`}
+        >
+          <div className="text-xs leading-5 dark:text-claude-darkText text-claude-text">
+            {confirming === 'complete'
+              ? i18nService
+                  .t('longTermTask.completeConfirmBody')
+                  .replace('{count}', String(detail.subtasks.filter((sub) => sub.status !== 'accepted' && sub.status !== 'skipped').length))
+              : i18nService.t('longTermTask.cancelConfirmBody')}
+          </div>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                const kind = confirming;
+                setConfirming(null);
+                void runAction(() =>
+                  kind === 'complete'
+                    ? longTermTaskService.completeTask(detail.id)
+                    : longTermTaskService.setStage({ taskId: detail.id, action: 'cancel' }),
+                );
+              }}
+              className={
+                confirming === 'complete'
+                  ? 'rounded-lg bg-emerald-600/90 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600'
+                  : 'rounded-lg bg-red-500/90 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500'
+              }
+            >
+              {i18nService.t(confirming === 'complete' ? 'longTermTask.completeConfirmOk' : 'longTermTask.cancelConfirmOk')}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(null)}
+              className="rounded-lg border dark:border-claude-darkBorder border-claude-border px-3 py-1.5 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary"
+            >
+              {i18nService.t('cancel')}
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Goal + progress */}
@@ -463,7 +532,53 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
                     </button>
                   </>
                 )}
+                {selectedSubtask.status !== 'accepted' && selectedSubtask.status !== 'skipped' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSkippingId(selectedSubtask.id);
+                      setSkipReason('');
+                    }}
+                    className="rounded-lg border dark:border-claude-darkBorder border-claude-border px-3 py-1.5 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover"
+                    title={i18nService.t('longTermTask.action.skipHint')}
+                  >
+                    {i18nService.t('longTermTask.action.skip')}
+                  </button>
+                )}
               </div>
+
+              {skippingId === selectedSubtask.id && (
+                <div className="mt-3 rounded-lg border dark:border-claude-darkBorder border-claude-border p-3">
+                  <div className="text-xs leading-5 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('longTermTask.skipConfirmBody')}
+                  </div>
+                  <textarea
+                    value={skipReason}
+                    onChange={(event) => setSkipReason(event.target.value)}
+                    placeholder={i18nService.t('longTermTask.skipPlaceholder')}
+                    className="mt-2 w-full rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurfaceInset bg-claude-surfaceInset px-2.5 py-2 text-xs dark:text-claude-darkText text-claude-text"
+                    rows={2}
+                  />
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void runAction(() => longTermTaskService.skipSubtask(detail.id, selectedSubtask.id, skipReason.trim())).then(() => setSkippingId(null))
+                      }
+                      className="rounded-lg border dark:border-claude-darkBorder border-claude-border px-3 py-1.5 text-xs font-medium dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover"
+                    >
+                      {i18nService.t('longTermTask.skipConfirm')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSkippingId(null)}
+                      className="rounded-lg border dark:border-claude-darkBorder border-claude-border px-3 py-1.5 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary"
+                    >
+                      {i18nService.t('cancel')}
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {rejectingId === selectedSubtask.id && (
                 <div className="mt-3 rounded-lg border border-red-500/30 p-3">

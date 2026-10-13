@@ -13257,6 +13257,33 @@ if (!gotTheLock) {
     }
   });
 
+  // Goal-level closure: remaining open sub-projects are skipped, the task
+  // lands in 'done', and the heartbeat stops driving it. Owner channel only —
+  // the Twin reaches the same store method through the longterm_task_complete
+  // agent tool (with the delegate-switch gate).
+  ipcMain.handle('longtermTask:complete', async (_event, input: {
+    taskId: string; note?: string; evidence?: Array<{ kind: string; uri: string; note?: string }>;
+  }) => {
+    try {
+      const result = getLongTermTaskStore().completeTask(input?.taskId, 'owner', { note: input?.note, evidence: input?.evidence });
+      if (result.ok) broadcastLongTermTaskUpdate([input.taskId], 'stage_completed');
+      return result;
+    } catch (error) {
+      return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to complete the task' };
+    }
+  });
+
+  ipcMain.handle('longtermTask:subtaskSkip', async (_event, input: { subtaskId: string; reason?: string }) => {
+    try {
+      const store = getLongTermTaskStore();
+      const result = store.skipSubtask(input?.subtaskId, 'owner', input?.reason ?? '');
+      if (result.ok) broadcastLongTermTaskUpdate([result.value?.taskId ?? ''], 'subtask_skipped');
+      return result;
+    } catch (error) {
+      return { ok: false, code: 'VALIDATION', error: error instanceof Error ? error.message : 'Failed to skip the sub-project' };
+    }
+  });
+
   ipcMain.handle('longtermTask:subtaskAdd', async (_event, input: { taskId: string } & Record<string, unknown>) => {
     try {
       const result = getLongTermTaskStore().addSubtask(input?.taskId, input as never, 'owner');
