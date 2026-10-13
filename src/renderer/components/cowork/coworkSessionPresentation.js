@@ -34,3 +34,19 @@ export function buildPrivateA2ASessionDisplayId(localGlobalMetaId, peerGlobalMet
   if (!localPrefix || !peerPrefix) return '';
   return `${localPrefix}-${peerPrefix}`;
 }
+
+/**
+ * Assistant-mode display title for a session row: strips the localized
+ * orchestration prefix ("[编排任务] " / "[Orchestration Task] ") that
+ * orchestrator-delegated worker sessions carry. The prefix doubles as a
+ * grouping key for auto-grouping and store queries, so this is render-only —
+ * the stored title (rename flow, grouping, LIKE queries) is untouched, and
+ * professional mode keeps showing it. The row already lives in the
+ * autonomous-tasks fold, so for a non-technical reader the prefix carries no
+ * information beyond engineering flavor.
+ */
+export function getAssistantSessionDisplayTitle(title, enabled) {
+  if (!enabled || typeof title !== 'string') return title;
+  const stripped = title.replace(/^(\[(?:编排任务|Orchestration Task)\])\s+/, '');
+  return stripped || title;
+}

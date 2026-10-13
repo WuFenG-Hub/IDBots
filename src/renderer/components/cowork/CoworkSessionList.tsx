@@ -9,6 +9,7 @@ import MetaBotSelector, {
 } from './MetaBotSelector';
 import { i18nService } from '../../services/i18n';
 import { useStableCallback } from '../../utils/useStableCallback';
+import { useChatExperienceMode } from '../../hooks/useChatExperienceMode';
 import { useProgressiveRowReveal } from './sessionListRevealBudget';
 import {
   buildBotSessionCounts,
@@ -405,6 +406,9 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   // budget cannot leave a header with no rows under it.
   let remainingRows = revealedRows;
   const revealBudgetLeft = () => remainingRows > 0;
+  // One mode subscription for the whole list (rows stay memoized; a plain
+  // boolean prop keeps referential equality across renders).
+  const isAssistantMode = useChatExperienceMode() === 'assistant';
   const renderItem = (session: CoworkSessionSummary) => {
     if (remainingRows <= 0) return null;
     remainingRows -= 1;
@@ -418,6 +422,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
         isSelected={selectedSessionIdSet.has(session.id)}
         nowMs={nowMs}
         language={language}
+        assistantMode={isAssistantMode}
         onSelect={selectSession}
         onDelete={deleteSession}
         onTogglePin={togglePin}

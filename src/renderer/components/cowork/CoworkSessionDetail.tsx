@@ -65,8 +65,7 @@ import {
 import { FolderIcon } from '@heroicons/react/24/solid';
 import { coworkService } from '../../services/cowork';
 import { configService } from '../../services/config';
-import { localStore } from '../../services/store';
-import { CONFIG_KEYS, type AppConfig, type ChatExperienceMode } from '../../config';
+import { useChatExperienceMode } from '../../hooks/useChatExperienceMode';
 import { projectsService } from '../../services/projects';
 import { fetchMetaidInfoByGlobalId, resolveMetaidAvatarSource } from '../../services/metabotInfoService';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
@@ -2625,24 +2624,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   }, [pendingPermission, isRespondingToPermission]);
   // Chat experience mode (Settings > General). 'assistant' hides raw thinking
   // and tool-call chrome (the model's narration arrives as ordinary chat
-  // bubbles); 'professional' keeps the full transcript chrome.
-  // Kept reactive through the app_config store-changed broadcast (fired for
-  // every store:set, including writes from the Settings window) so flipping
-  // the mode re-renders the live transcript without a reload.
-  const [chatExperienceMode, setChatExperienceMode] = useState<ChatExperienceMode>(
-    () => configService.getConfig().chatExperienceMode ?? 'assistant',
-  );
-  useEffect(() => {
-    const unsubscribe = localStore.onChanged(({ key }) => {
-      if (key !== CONFIG_KEYS.APP_CONFIG) return;
-      // The write may come from another window, so re-read the persisted
-      // config instead of trusting this window's in-memory copy.
-      void localStore.getItem<AppConfig>(CONFIG_KEYS.APP_CONFIG).then((stored) => {
-        setChatExperienceMode(stored?.chatExperienceMode ?? 'assistant');
-      });
-    });
-    return unsubscribe;
-  }, []);
+  // bubbles); 'professional' keeps the full transcript chrome. See
+  // useChatExperienceMode for the cross-window reactivity contract.
+  const chatExperienceMode = useChatExperienceMode();
   const isAssistantMode = chatExperienceMode === 'assistant';
   const isA2ASession = currentSession?.sessionType === 'a2a';
   const isPrivateA2ASession = useMemo(() => (
@@ -4620,7 +4604,10 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                 </svg>
                 <span className="text-xs text-amber-700 dark:text-amber-300">
-                  {i18nService.t('delegationWaitingForResult')}
+                  {/* Assistant mode keeps delegation jargon out of the copy:
+                      the handoff reads as the assistant passing the task on,
+                      not as a remote-service transport state. */}
+                  {i18nService.t(isAssistantMode ? 'assistantDelegationWaiting' : 'delegationWaitingForResult')}
                 </span>
               </div>
             </div>
@@ -4668,7 +4655,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 onStop={onStop}
                 isStreaming={isStreaming}
                 steerDisabled={steerDisabled}
-                placeholder={delegationBlocking ? i18nService.t('delegationInputDisabledPlaceholder') : i18nService.t('coworkContinuePlaceholder')}
+                placeholder={delegationBlocking
+                  ? i18nService.t(isAssistantMode ? 'assistantDelegationInputPlaceholder' : 'delegationInputDisabledPlaceholder')
+                  : i18nService.t('coworkContinuePlaceholder')}
                 disabled={delegationBlocking}
                 onManageSkills={onManageSkills}
                 size="large"

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CoworkSessionSummary, CoworkSessionStatus } from '../../types/cowork';
 import { ArchiveBoxIcon, ArrowRightOnRectangleIcon, ClipboardDocumentIcon, EllipsisHorizontalIcon, PencilSquareIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
-import { getCoworkSessionTitleClassName, shouldShowCoworkA2ADot } from './coworkSessionPresentation.js';
+import { getCoworkSessionTitleClassName, getAssistantSessionDisplayTitle, shouldShowCoworkA2ADot } from './coworkSessionPresentation.js';
 import { copyCoworkSessionLinkToClipboard } from './coworkSessionLink.js';
 import { isRenderableAvatarSource } from '../../utils/avatarSource';
 import { isInAutonomousFoldWithDecision } from '../../utils/sessionAutoGrouping';
@@ -58,6 +58,13 @@ interface CoworkSessionItemProps {
    * set lookup once per render.
    */
   decisionPending?: boolean;
+  /**
+   * Assistant chat-experience mode: the display title strips engineering
+   * prefixes (see getAssistantSessionDisplayTitle) while the stored title —
+   * rename flow, auto-grouping, store queries — stays untouched. Boolean so
+   * the shallow memo compares cleanly; the list subscribes to the mode once.
+   */
+  assistantMode?: boolean;
 }
 
 const statusLabels: Record<CoworkSessionStatus, string> = {
@@ -266,6 +273,7 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   onToggleSelected,
   nowMs,
   decisionPending = false,
+  assistantMode = false,
 }) => {
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(session.title);
@@ -493,7 +501,9 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   const isPrivatePlaceholderTitle = isA2A && /^Private-[A-Za-z0-9]{6,12}$/.test(storedTitle);
   const displayTitle = isPrivatePlaceholderTitle && session.peerName?.trim()
     ? session.peerName.trim()
-    : storedTitle || session.peerName || i18nService.t('coworkNewSession');
+    : getAssistantSessionDisplayTitle(storedTitle, assistantMode)
+      || session.peerName
+      || i18nService.t('coworkNewSession');
   const menuItems = useMemo(() => {
     return [
       { key: 'copy-session-id', label: copySessionIdLabel, onClick: handleCopySessionIdClick },
