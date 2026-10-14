@@ -56,6 +56,12 @@ export interface CapabilityValidationDraftInput {
   /** Chain refs this draft's text cites (design §5.3): only these drafts get
    * the chain-grounded judging rules. */
   chainRefs?: string[];
+  /**
+   * RRSI P1 falsified-history line (design §6.1 P1.3): the most similar
+   * ledger entry for this draft's title, when one exists — the panel judges
+   * with the prior falsification in view.
+   */
+  similarFalsified?: { title: string; reason: string; falsifiedDate: string } | null;
 }
 
 export type CapabilityValidationVerdict = 'validated' | 'rejected' | 'keep_draft';
@@ -86,6 +92,12 @@ export function buildCapabilityValidationPrompt(input: {
   /** Chain-grounded evidence digest (design §5.2, host-rendered). Present only
    * when tonight's refs were verified; the chain judging rules ride along. */
   chainEvidence?: string | null;
+  /**
+   * RRSI P1 prospective rule (design §6.1 P1.1): when true, the prompt tells
+   * the panel that the draft's origin-day diary is not independent evidence.
+   * Default false — existing callers and tests keep the unchanged prompt.
+   */
+  prospective?: boolean;
 }): { system: string; user: string } {
   const system = [
     `你是 ${input.botName},一个生活在 MetaWeb 上的 MetaBot(类人智能体)。`,
@@ -96,12 +108,18 @@ export function buildCapabilityValidationPrompt(input: {
     '- rejected:草案与记录的事实矛盾,或照着做曾导致差评/失败/返工。',
     '- keep_draft:证据不足,无法判定——既不晋升也不否决,留待以后的梦继续观察。',
     '不要为草案辩护,不要因为"听起来有用"就判 validated。宁可 keep_draft,不可错判。',
+    ...(input.prospective === true
+      ? ['独立证据规则:草案提炼当天的日记是它的来源,不算独立证据。判 validated 时,rationale 必须至少引用一篇日期晚于该草案提炼日期、且出现在下方日记列表中的日记;做不到就判 keep_draft。']
+      : []),
   ].join('\n');
 
   const draftLines = input.drafts.map((draft) => [
     `### 草案 #${draft.id}(${draft.dreamDate} 梦中提炼,类型:${draft.capabilityType})`,
     `标题:${draft.title}`,
     `描述:${draft.description}`,
+    draft.similarFalsified
+      ? `曾被证伪的相似做法:「${draft.similarFalsified.title}」(${draft.similarFalsified.falsifiedDate} 否决:${truncate(draft.similarFalsified.reason, 120)})`
+      : '',
     draft.conflictNote?.trim()
       ? `存疑待裁决:${truncate(draft.conflictNote.trim().replace(/\s+/g, ' '), SUMMARY_EVIDENCE_MAX_CHARS)}`
       : '',
@@ -116,6 +134,7 @@ export function buildCapabilityValidationPrompt(input: {
     `- [${summary.summaryDate}] ${truncate(summary.summaryText.replace(/\s+/g, ' ').trim(), SUMMARY_EVIDENCE_MAX_CHARS)}`,
   );
 
+  const hasFalsifiedMark = input.drafts.some((draft) => draft.similarFalsified);
   const user = [
     `今天是 ${input.date}。请验证以下 ${input.drafts.length} 条能力草案。`,
     '',
@@ -136,7 +155,12 @@ export function buildCapabilityValidationPrompt(input: {
         '- rationale 中引用任何 pin id / txid 前,必须确认它出现在上方证据列表中。',
       ]
       : []),
-    '',
+    ...(hasFalsifiedMark
+      ? [
+        '标注了「曾被证伪的相似做法」的草案:除非日记里出现了那次否决日期之后的新证据,否则不得判 validated。',
+        '',
+      ]
+      : []),
     '## 输出契约(严格只输出一个 JSON 对象,不要输出任何其他文字)',
     '{',
     '  "verdicts": [',
@@ -149,6 +173,9 @@ export function buildCapabilityValidationPrompt(input: {
     '  ]',
     '}',
     '每条草案都必须有且仅有一条 verdict;id 必须来自上方草案列表。',
+    ...(input.prospective === true
+      ? ['validated 的 rationale 里必须写出那篇较晚日记的日期(YYYY-MM-DD)。']
+      : []),
   ].join('\n');
 
   return { system, user };
