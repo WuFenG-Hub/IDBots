@@ -431,6 +431,10 @@ man_base_data_pebble/
 !tests/chainEvidenceValidation.test.mjs
 !tests/predictionLedger.test.mjs
 !tests/promptLayerRollback.test.mjs
+!tests/capabilityGateRegularizers.test.mjs
+!tests/capabilityFalsifiedLedger.test.mjs
+!tests/capabilityProspectiveGate.test.mjs
+!tests/rrsiEvolutionReport.test.mjs
 !tests/guidanceBudget.test.mjs
 !tests/implicitSignalsGrounding.test.mjs
 !tests/memoryHygieneService.test.mjs
