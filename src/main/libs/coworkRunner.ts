@@ -646,6 +646,22 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * The effort picker stores the "Auto" rung as the literal string 'default'
+ * (not null), and any other unknown value also means "no explicit pick".
+ * Normalize ONCE at every consumer: a real rung ('off'|'low'|'high'|'max')
+ * or null (= auto — the cerebellum effort selector runs). Before this
+ * normalization, a user who picked "Auto" in the picker silently disabled
+ * BOTH the #11 auto selection and the turn-ack tiering, because a bare
+ * null-check on the override read 'default' as an explicit pick.
+ */
+function resolveEffectiveEffortRung(override: string | null | undefined): CerebellumEffortRung | null {
+  return override === 'off' || override === 'low' || override === 'high' || override === 'max'
+    ? override
+    : null;
+}
+export { resolveEffectiveEffortRung };
+
 function findSkillsMarkerIndex(value: string): number {
   return value.toLowerCase().lastIndexOf(SKILLS_MARKER);
 }
@@ -9190,7 +9206,26 @@ export class CoworkRunner extends EventEmitter {
       // round-trip overlaps that window's own cerebellum calls — by the time
       // the effort resolution below runs, the verdict is typically already in
       // hand and the turn start pays no extra latency.
-      const autoEffortPromise = activeSession.effortOverride == null && this.cerebellumEffortSelector
+      // resolveEffectiveEffortRung: the picker's "Auto" is stored as the
+      // string 'default' — that IS the auto path, not an explicit pick.
+      const effectiveEffortRung = resolveEffectiveEffortRung(activeSession.effortOverride)
+      // Turn acknowledgment fires EARLY with the best tier known without any
+      // round-trip: the explicit pick's tier when set, else generic. This
+      // covers cold-start windows (the free relay's first key bootstrap has
+      // been observed taking 15s+) with an instant acknowledgment; the
+      // calibrated tier supersedes it below once the effort verdict lands (a
+      // newer turnAck message wins the renderer's tail scan by construction).
+      try {
+        const ackSourceChannel = this.store.getConversationSourceContextBySession(sessionId)?.sourceChannel
+        if (ackSourceChannel === 'cowork_ui') {
+          const earlyAckTier = effectiveEffortRung != null
+            ? mapCerebellumEffortRungToTurnAckTier(effectiveEffortRung)
+            : 'generic'
+          this.emitTurnAck(sessionId, earlyAckTier)
+          coworkLog('INFO', 'turn:ack', 'turn acknowledgment emitted', { sessionId, tier: earlyAckTier })
+        }
+      } catch { /* best-effort: the ack must never break a turn */ }
+      const autoEffortPromise = effectiveEffortRung == null && this.cerebellumEffortSelector
         ? this.cerebellumEffortSelector({ currentUserText: prompt })
         : null
       const volatileBlocks = await this.buildVolatileContextPrompt(
@@ -9244,7 +9279,7 @@ export class CoworkRunner extends EventEmitter {
       // brain effort, the persisted global, and the per-model default.
       // Professional mode keeps the full chain unchanged.
       const assistantMode = getPersistedChatExperienceMode() === 'assistant';
-      const sessionEffortPicked = activeSession.effortOverride != null;
+      const sessionEffortPicked = effectiveEffortRung != null;
       // "Auto" rung verdict: null (no selector, unconfigured cerebellum,
       // timeout, malformed verdict) keeps the existing default chain below
       // byte-identical. Assistant mode resolves through the conservative
@@ -9290,12 +9325,12 @@ export class CoworkRunner extends EventEmitter {
       }
       const dshReasoningEffort = mapDshReasoningEffort(
         sessionEffortPicked
-          ? toLlmEffortLevel(activeSession.effortOverride)
+          ? toLlmEffortLevel(effectiveEffortRung)
           : autoEffortRung ?? (assistantMode
             ? 'off'
             : toLlmEffortLevel(
               automationBrain?.effort
-                ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? modelOptions?.reasoningEffort)),
+              ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? modelOptions?.reasoningEffort)),
         sessionEffortPicked || autoEffortRung != null || !assistantMode
           ? activeSession.thinkingOverride ?? modelOptions?.thinking
           : undefined,
@@ -9311,30 +9346,25 @@ export class CoworkRunner extends EventEmitter {
         modelDefault: modelOptions?.reasoningEffort ?? null,
         mapped: dshReasoningEffort ?? null,
       });
-      // Turn acknowledgment (owner-endorsed 2026-10-14): the #11 effort
-      // verdict doubles as the difficulty signal — the renderer's activity
-      // indicators draw a tier phrase ("on it right away" / "needs a moment"
-      // / "complex, may take a few minutes") while the user waits for the
-      // first visible token, instead of a generic rotating status. Emitted
-      // BEFORE the brain call, once per interactive turn; external-facing
-      // surfaces keep their established posture. Best-effort — a failed ack
-      // must never break the turn.
+      // Turn acknowledgment, tier upgrade (owner-endorsed 2026-10-14): the
+      // early generic emission above already covered the turn's opening
+      // window; once the #11 effort verdict lands, supersede it with the
+      // calibrated tier phrase when it differs (a newer turnAck message wins
+      // the renderer's tail scan by construction — no flicker on equal tiers).
+      // External-facing surfaces keep their established posture. Best-effort —
+      // a failed ack must never break the turn.
       try {
         const sourceChannel = this.store.getConversationSourceContextBySession(sessionId)?.sourceChannel;
         if (sourceChannel === 'cowork_ui') {
-          const overrideRung = activeSession.effortOverride === 'off'
-            || activeSession.effortOverride === 'low'
-            || activeSession.effortOverride === 'high'
-            || activeSession.effortOverride === 'max'
-            ? (activeSession.effortOverride as CerebellumEffortRung)
+          // Explicit picks already carried their tier in the early emission;
+          // only an auto verdict can upgrade generic -> fast/moderate/heavy.
+          const turnAckTier = effectiveEffortRung == null && autoEffortRung != null
+            ? mapCerebellumEffortRungToTurnAckTier(autoEffortRung)
             : null;
-          const turnAckTier = overrideRung != null
-            ? mapCerebellumEffortRungToTurnAckTier(overrideRung)
-            : autoEffortRung != null
-              ? mapCerebellumEffortRungToTurnAckTier(autoEffortRung)
-              : 'generic';
-          this.emitTurnAck(sessionId, turnAckTier);
-          coworkLog('INFO', 'turn:ack', 'turn acknowledgment emitted', { sessionId, tier: turnAckTier });
+          if (turnAckTier) {
+            this.emitTurnAck(sessionId, turnAckTier);
+            coworkLog('INFO', 'turn:ack', 'turn acknowledgment tier upgraded', { sessionId, tier: turnAckTier });
+          }
         }
       } catch { /* best-effort: the ack must never break a turn */ }
       // Turn-level stall watchdog: cancel a turn that made no progress for
@@ -9480,7 +9510,7 @@ export class CoworkRunner extends EventEmitter {
           const fallbackModelOptions = resolveModelOptions(routeOverride.model);
           turnReasoningEffort = mapDshReasoningEffort(
             sessionEffortPicked
-              ? toLlmEffortLevel(activeSession.effortOverride)
+              ? toLlmEffortLevel(effectiveEffortRung)
               : autoEffortRung ?? (assistantMode
                 ? 'off'
                 : toLlmEffortLevel(

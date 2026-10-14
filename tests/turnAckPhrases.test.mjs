@@ -137,17 +137,46 @@ test('mapCerebellumEffortRungToTurnAckTier: off/low→fast, high→moderate, max
 test('runner: turnAck is emitted after the effort verdict, before the brain call, gated to cowork_ui', () => {
   const source = read('src/main/libs/coworkRunner.ts');
 
-  const emissionSite = source.indexOf('this.emitTurnAck(sessionId, turnAckTier)');
-  assert.ok(emissionSite > 0, 'the turn emits the ack signal');
+  // Early emission: fires at turn entry — BEFORE the volatile-context build —
+  // so cold-start windows (15s+ relay key bootstrap) still get an instant
+  // "on it" instead of the old generic spinner copy.
+  const earlyEmission = source.indexOf('this.emitTurnAck(sessionId, earlyAckTier)');
+  const volatileSite = source.indexOf('await this.buildVolatileContextPrompt(');
+  assert.ok(earlyEmission > 0, 'the turn emits the early ack at entry');
+  assert.ok(volatileSite > earlyEmission,
+    'the early ack precedes the volatile build (covers its whole window)');
+  // Tier upgrade: after the effort verdict, only an auto verdict that beats
+  // generic supersedes the early emission (a newer turnAck wins the tail scan).
+  const upgradeEmission = source.indexOf("'turn acknowledgment tier upgraded'");
   const effortSite = source.indexOf("'auto effort resolved for turn'");
   const brainSite = source.indexOf('await hub.runTurn(');
-  assert.ok(effortSite > 0 && emissionSite > effortSite,
-    'the ack waits for the effort verdict (the tier source)');
-  assert.ok(brainSite > emissionSite,
-    'the ack fires before the brain call (it covers the first-token wait)');
-  const gate = source.slice(emissionSite - 1600, emissionSite);
+  assert.ok(upgradeEmission > effortSite,
+    'the tier upgrade waits for the effort verdict');
+  assert.ok(brainSite > upgradeEmission,
+    'both emissions fire before the brain call (they cover the first-token wait)');
+  const gate = source.slice(earlyEmission - 900, upgradeEmission + 400);
   assert.ok(gate.includes("sourceChannel === 'cowork_ui'"),
     'external-facing surfaces keep their established posture (cowork_ui only)');
+});
+
+test('runner: the picker "Auto" (stored as the string \'default\') is the auto path, not an explicit pick', async () => {
+  const { resolveEffectiveEffortRung } = await import('../dist-electron/main/libs/coworkRunner.js');
+  assert.equal(resolveEffectiveEffortRung('default'), null,
+    "the picker's Auto rung must re-enable the cerebellum effort selector and the ack tiering");
+  assert.equal(resolveEffectiveEffortRung(null), null);
+  assert.equal(resolveEffectiveEffortRung(undefined), null);
+  assert.equal(resolveEffectiveEffortRung('bogus'), null);
+  assert.equal(resolveEffectiveEffortRung('off'), 'off');
+  assert.equal(resolveEffectiveEffortRung('low'), 'low');
+  assert.equal(resolveEffectiveEffortRung('high'), 'high');
+  assert.equal(resolveEffectiveEffortRung('max'), 'max');
+
+  // And every consumer reads through the normalization — no decision site
+  // may compare effortOverride against null directly anymore.
+  const source = read('src/main/libs/coworkRunner.ts');
+  const consumers = source.match(/effortOverride (==|!=) null/g) ?? [];
+  assert.deepEqual(consumers, [],
+    'all effort decisions must go through resolveEffectiveEffortRung');
 });
 
 test('runner: the ack emitter bypasses the runtime-status dedup key (once per turn by construction)', () => {
