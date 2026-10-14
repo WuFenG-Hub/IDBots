@@ -1,0 +1,23 @@
+{
+  "note": "Q&A UI v2 pilot launch record. The owner fills it during the runbook (README.md); every pinId is the FULL 66-char id. metrics feed the design §4 success metrics.",
+  "builderPack": { "uri": null, "sha256": null, "uploadedAt": null },
+  "lessonSpecPinId": null,
+  "taskRootPinId": null,
+  "discoveryBuzzPinId": null,
+  "roundPinId": null,
+  "roundAnnouncementPinId": null,
+  "lessonPinId": null,
+  "lessonSubmissionPinId": null,
+  "metrics": {
+    "verifiedUiSubmissions": null,
+    "candidates": null,
+    "ballots": { "deciding": null, "shadow": null, "public": null },
+    "winner": null,
+    "winnerArtifact": null,
+    "tallyHash": null,
+    "shadowAgreementBP": {},
+    "medianBallotMinutes": null,
+    "ownerHoursOnUiFixes": null,
+    "ownerPreferredWinner": null
+  }
+}
