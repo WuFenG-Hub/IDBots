@@ -54,7 +54,7 @@ All configuration comes from environment variables (WS-C provides an env file):
 | `CP_DOCKER_URL` | Docker Engine API through the socket proxy, for example `http://docker-proxy:2375` |
 | `CP_TENANT_IMAGE` | Default tenant image tag for new tenants |
 | `CP_TENANT_NETWORK` | Docker network for tenants (from WS-C) |
-| `CP_TENANT_MEMORY_MB`, `CP_TENANT_CPUS` | From Phase 0 (C1 resources) |
+| `CP_TENANT_MEMORY_MB`, `CP_TENANT_CPUS` | `2560` and `2` (C1 resources; the memory value is provisional until the Phase 0 S05b re-run) |
 | `CP_TENANT_ENV_*` | Extra env passed to every tenant, for example `CP_TENANT_ENV_IDBOTS_METASO_API_BASE` |
 | `CP_SMS_MODE` | `aliyun` or `fake` |
 | `CP_SMS_ACCESS_KEY_ID`, `CP_SMS_ACCESS_KEY_SECRET`, `CP_SMS_SIGN_NAME`, `CP_SMS_TEMPLATE_LOGIN`, `CP_SMS_TEMPLATE_REVERIFY` | Alibaba Cloud SMS |

@@ -99,7 +99,9 @@ request; the phone never talks to `assist-base-service` directly.
   partner key sent as a header and stored in the tenant's
   `IDBOTS_METASO_PARTNER_KEY`, or both), write it into C4 by M1, and show the
   daily count of new identities per partner IP in the admin console with an
-  alert above 200 per day.
+  alert above 200 per day. Phase 0 observed no limit at 7 new identities from
+  one Hong Kong IP; the requirement is about the 50-per-day scale, so state
+  the current per-IP limits in the delivery note.
 - **REQ-D-7 Status.** `GET /v1/bundle/orders/{orderId}` as C4 (no signature,
   like the recharge order status). It may run `alipay.trade.query` for a
   created Alipay order before answering, as the recharge status does.
@@ -126,21 +128,26 @@ request; the phone never talks to `assist-base-service` directly.
   identity address. Every relay key issued by `bootstrap` for that identity
   draws from the same pool; a new bootstrap (for example after a tenant is
   restored from backup, or a key is revoked) returns access to the same
-  pool, never a fresh one and never a loss of purchased quota. Confirm in the
-  delivery note whether this already holds today and what changed.
+  pool, never a fresh one and never a loss of purchased quota. Phase 0
+  confirmed this already holds for the free allowance (a second bootstrap of
+  an exhausted identity returned `quotaRemaining: 0`, while a new identity
+  on the same IP got a full allowance of about 4.8 million units); purchased
+  quota must follow the same rule.
 - **REQ-D-11 Consumption order.** Usage draws from the free part first, then
   the purchased part. Token counting stays as it is today.
 - **REQ-D-12 Quota fields.** `GET /v2/assist/llm/quota` and the `bootstrap`
   response add `quotaFree`, `quotaPurchased`, and `unit: "tokens"`. Existing
   fields keep their meaning with `quotaTotal = quotaFree + quotaPurchased`
   (granted totals) and `quotaRemaining = quotaTotal - quotaUsed`.
-- **REQ-D-13 Exhaustion signal.** When the pool is empty, the chat, JEV, and
-  vision routes answer HTTP `402` with
-  `{ "error": { "type": "quota_exhausted", "code": "QUOTA_EXHAUSTED", "message": "…" } }`
-  before any streamed bytes. A request already streaming when the pool runs
-  out finishes normally (the pool may go slightly negative); the next request
-  gets `402`. A purchase that brings the pool back above zero makes the next
-  request succeed without a new key.
+- **REQ-D-13 Exhaustion signal.** Keep today's signal so desktop builds in
+  the field keep working: when the pool is empty, the chat, JEV, and vision
+  routes answer HTTP `429` with an OpenAI-style error body before any
+  streamed bytes. The code stays `free_quota_exhausted` for an identity that
+  has never had purchased quota, and is `quota_exhausted` once purchased
+  quota is used up. A request already streaming when the pool runs out
+  finishes normally (the pool may go slightly negative); the next request
+  gets the `429`. A purchase that brings the pool back above zero makes the
+  next request succeed without a new key.
 - **REQ-D-14 LLM ledger.** `GET /v2/assist/llm/ledger` as C4, authenticated by
   the relay key or by identity headers over
   `llm-relay-ledger:{identityAddress}:{timestamp}`. `usage` items may be
@@ -216,8 +223,10 @@ Run on staging first, then on production with the ¥0.01 acceptance plan.
   keys report the same quota; after a purchase both see it; revoking one key
   and bootstrapping again keeps the purchased quota.
 - **AC-D-8 Exhaustion.** Drain a test identity with the admin adjustment:
-  the next chat, JEV, and vision requests return `402 QUOTA_EXHAUSTED`; a mock
-  purchase restores service on the next request with the same key.
+  the next chat, JEV, and vision requests return `429` with code
+  `free_quota_exhausted`; after a mock purchase is used up they return code
+  `quota_exhausted`; a purchase restores service on the next request with the
+  same key.
 - **AC-D-9 Ledger.** The LLM ledger shows the free grant, the purchase (with
   `orderId`), and usage, with working pagination and both auth methods.
 - **AC-D-10 Partner policy.** A script creates 60 new identities in one day
@@ -241,7 +250,7 @@ Run on staging first, then on production with the ¥0.01 acceptance plan.
 | Decision | Needed by |
 |----------|-----------|
 | Bundle plan names, prices, `trafficBytes`, and `llmQuota` | M1 (staging can start with placeholders) |
-| Free LLM grant size for new identities in the mobile release | M1 |
+| Free LLM grant size for new identities in the mobile release (Phase 0: the current allowance of about 4.8 million units lasted about 17 turns including heavy skills; the free traffic grant is 60 MB per identity and one test Buzz used 616 bytes) | M1 |
 | Redeem code value for invites | M2 |
 | Fallback if 当面付 cannot be paid on the same phone (ICP filing for 手机网站支付) | M3 |
 

@@ -20,9 +20,34 @@ that serves the gateway protocol. Desktop behavior does not change.
 - Read the design spec sections "Tenant Server Mode and Remote Gateway" and
   "Security and Custody"
   (`docs/superpowers/specs/2026-10-14-mobile-cloud-design.md`).
-- Read the Phase 0 report (`spikes/linux-headless/PHASE0_REPORT.md` once
-  delivered). Its "Required App Changes" and "Tenant Image Requirements"
-  sections are inputs to REQ-A-6 and REQ-A-26.
+- Read the Phase 0 report (`spikes/linux-headless/PHASE0_REPORT.md` on branch
+  `spike/linux-headless`; the owner provides the branch or the files). Its
+  "Tenant Image Requirements" section is an input to REQ-A-6 and REQ-A-26;
+  "Required App Changes" was empty.
+
+Phase 0 results (2026-10-14, commit `e8653bac`, stock app with its normal
+window, one Hong Kong `ecs.g8i.2xlarge` host):
+
+- The unmodified app boots in a container in 2 s (3 s with existing data)
+  under Xvfb and under `--ozone-platform=headless`; first-run onboarding,
+  including the twin MetaBot on-chain, takes about 24 s.
+- Idle memory 463 MB after ten turns (renderer about 118 MB, Xvfb about
+  49 MB, DSH runtime about 229 MB, Electron main about 199 MB); heavy skills
+  peak at 1.6 to 1.8 GB and the memory does not fully return afterwards.
+- `--no-sandbox` must be on the Electron command line; the app's
+  `IDBOTS_DISABLE_LINUX_SANDBOX` switch is applied too late to stop
+  Chromium's setuid sandbox check from aborting the process.
+- After `docker stop` and `docker start`, stale Xvfb lock files make the app
+  die with "Missing X server or $DISPLAY" unless the entrypoint removes them.
+- The web-search skill launches its own Chromium with
+  `--remote-debugging-port=9222` and connects to whatever answers on that
+  port. The spike opened the app's own debugging port on 9222, so web-search
+  drove the app's window instead; anything listening on 9222 breaks it.
+- The free LLM relay answers HTTP 429 with code `free_quota_exhausted` when an
+  identity's free allowance (about 4.8 million units) is used up; the app
+  already detects this (`coworkRunner.ts`, `CoworkSessionDetail.tsx`).
+- Shortly after onboarding, two of five tenants used about 80% CPU for a while
+  (background jobs).
 
 Current facts:
 
@@ -63,9 +88,9 @@ Current facts:
   (`docs/cloud-mobile/audits/renderer-side-effects.md`) of every startup or
   periodic side effect that today runs in the renderer (for example free-quota
   provisioning) and state for each whether server mode must run it main-side.
-  Each "must" becomes part of REQ-A-8. If Phase 0 shows Electron cannot run
-  without a window in the chosen display mode, use one hidden window that
-  loads nothing and record why.
+  Each "must" becomes part of REQ-A-8. Phase 0 ran the stock app with its
+  window, so running without one is new; if Electron cannot run without a
+  window under Xvfb, use one hidden window that loads nothing and record why.
 - **REQ-A-3 Graceful shutdown.** On `SIGTERM` and `SIGINT`: close gateway
   sockets with code 4012, stop accepting invokes, let running turns reach a
   checkpoint or stop them through the existing stop path, flush SQLite, stop
@@ -77,10 +102,13 @@ Current facts:
   MetaApps local open, calendar tools, local project folders, MCP local
   servers, and the Docker sandbox execution mode are disabled. Agent tools
   that depend on them are not offered to the model in server mode.
-- **REQ-A-6 Linux display strategy.** Use the display mode Phase 0
-  recommends (Xvfb or `--ozone-platform=headless`) and apply every item in the
-  report's "Required App Changes" as proper, tested code (not the spike
-  patches).
+- **REQ-A-6 Linux display strategy.** Xvfb, as Phase 0 recommends: it used
+  less memory than Ozone headless, and web-search's own Chromium runs with a
+  visible window by default, which needs a display. The tenant entrypoint
+  removes `/tmp/.X99-lock` and `/tmp/.X11-unix/X99` before starting Xvfb on
+  `:99`, starts D-Bus, and launches Electron with `--no-sandbox` on the
+  command line (the container runs with `no-new-privileges`, so the setuid
+  sandbox cannot work there anyway).
 - **REQ-A-7 Paths.** Data paths come from C1 (`/data/userdata`,
   `/data/appdata`, `/data/workspace`). The cowork working directory defaults to
   `/data/workspace` and every R-cwd and R-path rule in `02` is enforced in the
@@ -178,10 +206,16 @@ Current facts:
   `trafficAccountService.ts`). Add the matching preload methods so desktop can
   use them too. `bundle:*` works against a local C4 stub until WS-D staging is
   available.
-- **REQ-A-25 Quota exhausted.** When the relay returns `QUOTA_EXHAUSTED`
-  (C4), the cowork stream error carries a stable code
-  (`metadata.errorCode = 'LLM_QUOTA_EXHAUSTED'`) so desktop and mobile can show
-  a recharge action instead of a raw error.
+- **REQ-A-25 Quota exhausted.** The relay answers HTTP 429 with code
+  `free_quota_exhausted` (free allowance used up, existing behavior) or
+  `quota_exhausted` (purchased quota used up, new in C4). Extend every place
+  that matches the existing code to both codes: `libs/coworkRunner.ts`,
+  `CoworkSessionDetail.tsx`, `services/privateChatSkillTurnPolicy.ts`, and
+  `libs/dreamRetryPolicy.ts` (its `"code":"quota"` entry does not match the
+  new code). Give the cowork stream error a stable code
+  (`metadata.errorCode = 'LLM_QUOTA_EXHAUSTED'`). In server mode the notice
+  offers recharge instead of "add your own API key in Settings > Models";
+  desktop wording stays as it is.
 
 ### Tenant Image
 
@@ -189,9 +223,13 @@ Current facts:
   build stage (pnpm install with the frozen lockfile, renderer build, Electron
   compile, skills build, and `pnpm run build:mobile` once WS-E has added that
   script) and a runtime stage without compilers.
-  Runtime contains the dependencies from the Phase 0 report, the pptx skill's
-  npm dependencies, the Playwright Chromium build, and CJK fonts. Runs as uid
-  1000, `HEALTHCHECK` on `/healthz`, labels from C1. The kernel-patch check
+  The runtime stage contains the apt packages and the Python venv
+  (`/opt/skills-venv`, on `PATH`) listed in the Phase 0 report's "Tenant
+  Image Requirements", including LibreOffice, pandoc, poppler, tesseract with
+  Simplified Chinese, ffmpeg, `fonts-noto-cjk`, and Debian's `chromium`
+  (web-search uses it; no Playwright browser download is needed). The pptx
+  skill works through `python-pptx`. Runs as uid 1000, `HEALTHCHECK` on
+  `/healthz`, labels from C1, and the REQ-A-6 entrypoint. The kernel-patch check
   (`node scripts/apply-dsh-kernel-patches.cjs --check`) and
   `pnpm run check:dsh-deps` run during the build and fail it on error.
 - **REQ-A-27 Versioning.** Image tag `{appVersion}-{commit7}`; `/readyz` and
@@ -200,6 +238,24 @@ Current facts:
 - **REQ-A-28 Migrations.** No change in this workstream deletes or resets user
   data. Any schema change ships with an idempotent first-run migration, as for
   desktop auto-updates.
+
+### Phase 0 Follow-Ups
+
+- **REQ-A-31 Reclaim skill memory.** In server mode, processes a skill starts
+  (LibreOffice, Python helpers, web-search's Chromium) do not stay resident
+  after the work is done: within 10 minutes of the last turn, tenant memory
+  is back within 150 MB of its idle value. Find what holds memory after the
+  pptx and pdf skills in Phase 0 (per-process data in the spike results) and
+  stop or reap it; do not change skill behavior on desktop. This
+  requirement decides how many users fit on a host (WS-C REQ-C-19).
+- **REQ-A-32 No debugging port.** Server mode never opens a remote debugging
+  port, and nothing in the tenant listens on 9222 except web-search's own
+  Chromium (the port is fixed in `SKILLs/web-search/server/config.ts`, and
+  the skill attaches to whatever answers on it).
+- **REQ-A-33 Background jobs after boot.** Identify the background jobs that
+  used about 80% CPU after onboarding in Phase 0 and spread them out (jitter
+  or a delayed start) so a host restart that starts every tenant at once does
+  not run them all together.
 
 ### Tests and Tooling
 
@@ -223,8 +279,8 @@ Current facts:
    - `feat/ipc-registry` (REQ-A-12 to A-14) — lands first; it is a pure
      refactor and is verified on desktop.
    - `feat/gateway` (REQ-A-15 to A-25, A-29, A-30) — includes desktop dev mode.
-   - `feat/server-mode` (REQ-A-1 to A-11) and `feat/tenant-image`
-     (REQ-A-26 to A-28).
+   - `feat/server-mode` (REQ-A-1 to A-11, A-31 to A-33) and
+     `feat/tenant-image` (REQ-A-26 to A-28).
 2. The two audit documents named in REQ-A-2 and REQ-A-13.
 3. Tenant image pushed to the staging registry by WS-C's CI.
 4. A delivery note per branch listing each requirement with evidence.
@@ -243,9 +299,12 @@ Current facts:
   MetaBot.
 - **AC-A-4** `docker stop -t 30` exits in under 20 s with SQLite
   `PRAGMA integrity_check` returning `ok`.
-- **AC-A-5** Idle memory of a server-mode tenant is at or below the Phase 0
-  idle number (no renderer window should make it lower); peak during the
-  docx skill stays under `tenantMemoryLimitMB`.
+- **AC-A-5** Measured with the Phase 0 harness and sampler on the tenant
+  image: idle memory at or below 463 MB (no renderer window should make it
+  lower); the docx, xlsx, pptx, pdf, web-search, and weather skills all pass
+  (web-search with its own Chromium, weather on an identity with quota), each
+  peak stays under the C1 memory limit, and 10 minutes after the last skill
+  memory is within 150 MB of idle (REQ-A-31).
 - **AC-A-6** Security tests: a call to every N channel returns
   `CHANNEL_NOT_ALLOWED`; R-path and R-cwd negatives return `ARG_RESTRICTED`;
   a file token from tenant A fails on tenant B; a reused reverify nonce fails;

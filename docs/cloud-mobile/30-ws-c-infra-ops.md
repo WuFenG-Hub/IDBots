@@ -18,8 +18,12 @@ restorable, and failures raise alerts.
 - `00-program-plan.md` (environments, procurement, secrets register),
   `01-interface-contracts.md` C1 (tenant settings) and C3 (public origin),
   `20-ws-b-control-plane.md` (configuration variables).
-- Phase 0 report: `tenantMemoryLimitMB`, `usersPerHost`, image size, network
-  findings.
+- Phase 0 report (2026-10-14, on `ecs.g8i.2xlarge`, 8 vCPU / 31.4 GB):
+  tenant memory limit 2560 MB, about 429 MB of host memory per idle tenant,
+  image about 2.1 GB with a 28-minute build, and a host link of 10 Mbps that
+  made npm downloads retry. Memory is not yet given back after heavy skills
+  (WS-A REQ-A-31), so this document uses a provisional capacity (REQ-C-19)
+  until the S05b re-run and REQ-A-31 prove the formula value.
 - The repository's `AGENTS.md`: anything committed to the IDBots repository
   follows its branch, commit, and pnpm rules; no secrets in git.
 
@@ -50,9 +54,11 @@ flowchart TB
 
 ### Hosts
 
-- **REQ-C-1** Staging: about 4 vCPU / 16 GB. Production: size from Phase 0
-  (`usersPerHost` for the first 50 users plus 30% headroom), starting at
-  8 vCPU / 32 GB. Region `cn-hongkong`. Ubuntu 24.04 LTS or Alibaba Cloud
+- **REQ-C-1** Staging: about 4 vCPU / 16 GB. Production: 8 vCPU / 32 GB
+  (the Phase 0 host type, `ecs.g8i.2xlarge` or equivalent) for the first 29
+  users (REQ-C-19); add a second host of the same size before user 30 unless
+  REQ-A-31 has raised capacity. Region `cn-hongkong`. Ubuntu 24.04 LTS (the
+  Phase 0 system, with cgroup v2 and Docker 29) or Alibaba Cloud
   Linux 3. Encrypted ESSD data disk mounted at `/var/lib/docker`. cgroup v2.
   Docker CE stable with the `overlay2` driver and the `json-file` log driver
   defaults from C1.
@@ -62,8 +68,10 @@ flowchart TB
 - **REQ-C-3** Security group: inbound 80 and 443 from anywhere; 22 only from
   the owner's listed IPs; nothing else. SSH keys only, no password or root
   login, `fail2ban`, automatic security updates, `auditd` for sudo.
-- **REQ-C-4** A fixed Elastic IP per host for outbound traffic. Publish the
-  production and staging egress IPs to WS-D (C4 partner policy) before M2.
+- **REQ-C-4** A fixed Elastic IP per host for outbound traffic, billed by
+  traffic with a peak bandwidth of at least 100 Mbps (Phase 0's 10 Mbps link
+  was too slow for image pulls and file transfers). Publish the production and
+  staging egress IPs to WS-D (C4 partner policy) before M2.
 
 ### Edge and TLS
 
@@ -178,6 +186,8 @@ flowchart TB
   `/metrics`, collected by Prometheus with Alertmanager or by Alibaba Cloud
   CloudMonitor. Alerts go to the Feishu or DingTalk webhook:
   - host memory above 85% for 10 minutes, disk above 80%;
+  - host CPU above 85% for 10 minutes, or one tenant at its full 2 CPUs for
+    15 minutes (Phase 0 saw tenants near 80% after onboarding);
   - a tenant restarting more than 3 times in 15 minutes, any tenant in
     `failed`, any OOM kill;
   - control-plane `/health` failing for 2 minutes; 5xx above 2% for 5 minutes;
@@ -191,9 +201,15 @@ flowchart TB
 
 ### Capacity
 
-- **REQ-C-19** Set each host's `capacity` in the control-plane `hosts` table
-  to the Phase 0 `usersPerHost` for that host size. Provisioning beyond
-  capacity is refused by the control plane and raises the 80% alert first.
+- **REQ-C-19** Set each host's `capacity` in the control-plane `hosts` table.
+  Phase 0's formula, `floor((H − 3072) / (idleMb + 0.2 × (chatPeakMb − idleMb)))`
+  with idle 462.6 MB and chat peak 565.8 MB, gives 58 on the 31.4 GB
+  production host and 27 on 16 GB. Because memory is not yet given back after
+  heavy skills (a tenant can stay near 1.8 GB), start at half of that: 29 in
+  production and 13 in staging. Raise capacity to the formula value only after
+  the WS-A REQ-A-31 acceptance run and a production-size soak test pass.
+  Provisioning beyond capacity is refused by the control plane and raises the
+  80% alert first.
 
 ### Security Operations
 
@@ -245,8 +261,10 @@ operator can follow without help:
   minutes with keepalive; a 25 MB upload passes and a 27 MB upload is refused.
 - **AC-C-3 CI.** Pushing a `cloud-v*` tag produces both images, scanned and
   pushed, with the conformance kit passing.
-- **AC-C-4 Reboot.** A host reboot brings back Caddy, the control plane, the
-  firewall rules, and every tenant without manual steps within 10 minutes.
+- **AC-C-4 Reboot.** With the staging host filled to its `capacity` of
+  tenants, a host reboot brings back Caddy, the control plane, the firewall
+  rules, and every tenant without manual steps within 10 minutes, and host
+  CPU is back under 85% within 15 minutes of the last tenant starting.
 - **AC-C-5 Backup and restore.** The nightly job completes for every tenant;
   a restore drill of one staging tenant into a new container lets that user
   log in and see their MetaBots, sessions, and files, with

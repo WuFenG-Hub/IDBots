@@ -74,5 +74,5 @@ starts) has its own executable plan:
 | Item | Status |
 |------|--------|
 | Design spec | Approved by the owner on 2026-10-14 |
-| Phase 0 plan | Ready for the external agent |
-| Handoff package | Draft v1, to be frozen at M1 after Phase 0 numbers are folded in |
+| Phase 0 spike | Report delivered on 2026-10-14 (commit `e8653bac`); the stock app runs headless on Linux with no app patches. The S05b re-run of web-search and weather, plus memory after skills, is pending |
+| Handoff package | Draft v1 with the Phase 0 numbers folded in; values marked provisional are confirmed by S05b, then the package is frozen at M1 |

@@ -37,7 +37,7 @@ the screen is off.
 | A-01 | Sign up with an invite: phone, SMS code, invite code, display name, consents | The Bot is ready within 5 minutes (P95 over 5 runs); the display name appears on-chain; the traffic balance shows the redeem-code grant | M2 |
 | A-02 | Log in again on the same phone and on a second phone at the same time | No invite asked; both devices show the same sessions and Bots; logout on one does not affect the other | M2 |
 | A-03 | Chat: send a message, watch it stream, stop a reply, switch MetaBot, open an older session | Streaming is smooth; stop works within 2 s; history is complete | M2 |
-| A-04 | Ask for a document (docx, pdf, xlsx, pptx, one each) through a skill | Each file is created and opens on the phone through its link | M2 |
+| A-04 | Ask for a document (docx, pdf, xlsx, pptx, one each) through a skill; ask one question that needs a web search | Each file is created and opens on the phone through its link; the answer cites web results and the chat stays open (no page reload) | M2 |
 | A-05 | Attach a camera photo and a PDF, ask about them | The answer refers to their content | M2 |
 | A-06 | A tool permission request with two phones connected | Both see the sheet; the first answer wins; the other closes it | M2 |
 | A-07 | Create a scheduled task due in 5 minutes, close the phone | It runs on time; on reopening, the run and its result are visible | M2 |
@@ -53,7 +53,7 @@ the screen is off.
 |----|----------|-----------|-----------|
 | A-13 | Hire a remote service in Gig Square and pay for it | The order is placed, paid, and the delivery arrives in the chat | M4 |
 | A-14 | Another user hires one of this user's MetaBots while the phone is closed | The Bot accepts and delivers; on reopening the order shows as delivered | M4 |
-| A-15 | Post a Buzz with a photo | The post is on-chain and visible in the feed and on another client | M4 |
+| A-15 | Post a Buzz with a photo | The post is on-chain and visible in the feed and on another client within 5 minutes (Phase 0: about 3 minutes through the indexer) | M4 |
 | A-16 | Private chat between this user's MetaBot and another user's MetaBot | Messages arrive both ways, also while the phone is closed | M4 |
 | A-17 | Create a group task with two MetaBots | Status and checkpoints update live; the owner report is delivered | M4 |
 | A-18 | Export the user mnemonic and a MetaBot mnemonic | Works only after SMS re-verification; reusing the verification fails; nothing appears in logs or the database; Android blocks screenshots | M4 |
@@ -72,7 +72,8 @@ the screen is off.
 | Added latency to first token compared with desktop | At most 500 ms | Same prompt, desktop and phone |
 | Reconnect after network returns | At most 30 s; immediate on foreground | A-08 |
 | Availability (production) | 99% per month during the demo period | External uptime check |
-| Capacity | `usersPerHost` from Phase 0 with host memory under 85% | WS-C metrics |
+| Capacity | 29 tenants on a 32 GB host (provisional, WS-C REQ-C-19) with host memory and CPU under 85%; the formula value of 58 only after REQ-A-31 passes | WS-C metrics, soak test |
+| Memory after skills | A tenant is back within 150 MB of its idle memory 10 minutes after its last skill run (Phase 0 idle: 463 MB) | WS-A AC-A-5 |
 | Backups | RPO 24 h; one tenant restored within 30 minutes; whole host within 4 h | A-21, WS-C drill |
 | Upgrades | No data loss; failed upgrades roll back | A-22 |
 
@@ -117,7 +118,8 @@ Items marked P1 must pass for M3; P2 for M4.
 
 **Platform**
 
-- [ ] Production host sized for the first invite batch; monitoring, alerts,
+- [ ] Production host sized for the first invite batch (29 tenants per
+      32 GB host unless REQ-A-31 has raised it); monitoring, alerts,
       and the external uptime check live; every alert tested once.
 - [ ] Nightly backups ran at least three nights; a restore drill passed.
 - [ ] Runbooks in `deploy/runbooks/` complete and tried once by someone other
@@ -159,6 +161,10 @@ systems already hold (no new tracking SDK):
 
 ## Investor Demo Script (10 Minutes)
 
+Prepare the demo account the day before: grant it LLM quota from the Metaso
+admin console (the free allowance lasts only about 17 turns with heavy
+skills) and run the script once end to end.
+
 1. Open the app on a fresh phone, sign up with an invite (A-01); while the Bot
    is prepared, explain that each user gets a private cloud computer.
 2. Ask the Bot for a short report as a Word or PDF file and open it (A-04).
@@ -174,7 +180,7 @@ systems already hold (no new tracking SDK):
 
 | Milestone | Scope | Evidence | Result | Signed by | Date |
 |-----------|-------|----------|--------|-----------|------|
-| M0 | Phase 0 report and verdict | | | Owner | |
+| M0 | Phase 0 report and verdict | `PHASE0_REPORT.md`, `results.json` (commit `e8653bac`), S05b addendum | Pending S05b re-run | Owner | |
 | M1 | `01` and `02` at 1.0.0 | | | Owner and every party | |
 | M2 | A-01 to A-08, A-11 on staging | | | Acceptance | |
 | M3 | A-01 to A-12 on staging, security P1 | | | Owner | |

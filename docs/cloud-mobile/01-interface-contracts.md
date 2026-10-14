@@ -10,8 +10,9 @@ change-control process in `00-program-plan.md`).
 | C3 Control-plane public API | WS-B | WS-E |
 | C4 Metaso bundle API | WS-D | WS-A (calls it), WS-E (shows it through IPC) |
 
-Values marked "from Phase 0" are filled in at M1 from the spike's
-`results.json`.
+Phase 0 values come from the spike report of 2026-10-14 (commit `e8653bac`).
+Values marked "provisional" are confirmed by the Phase 0 skill re-run (S05b)
+before M1.
 
 ---
 
@@ -29,10 +30,13 @@ One container per user runs the IDBots backend in server mode.
   - `org.idbots.contract` — the C2 contract version, for example `1.0.0`.
   - `org.idbots.rollback-safe-to` — the oldest app version this image's data
     can be rolled back to without a database downgrade (empty if none).
-- Runs as uid 1000, non-root. The entrypoint starts the display layer chosen in
-  Phase 0 and then the app. Must be run with `--init`.
-- Contains every system dependency the bundled skills need (list from Phase 0),
-  including the pptx skill's npm dependencies and the Playwright Chromium build.
+- Runs as uid 1000, non-root. The entrypoint removes stale Xvfb locks, starts
+  Xvfb on `:99` and D-Bus, then starts Electron with `--no-sandbox` on its
+  command line. No remote debugging port is opened. Must be run with `--init`.
+- Contains every system dependency the bundled skills need (the Phase 0
+  report's "Tenant Image Requirements": LibreOffice, pandoc, poppler,
+  tesseract, ffmpeg, CJK fonts, Debian `chromium`, and the skills Python venv).
+  Phase 0's image was about 2.1 GB.
 
 ### Environment
 
@@ -81,10 +85,10 @@ of data.
 
 | Setting | Value |
 |---------|-------|
-| `--memory` and `--memory-swap` | `tenantMemoryLimitMB` from Phase 0 (no swap) |
+| `--memory` and `--memory-swap` | `2560m` (no swap; provisional: Phase 0 skill peak 1785 MB × 1.3, rounded up to a multiple of 256) |
 | `--cpus` | `2` |
 | `--pids-limit` | `2048` |
-| `--shm-size` | `512m` |
+| `--shm-size` | `1g` (the value Phase 0 ran with) |
 | `--cap-drop` | `ALL` |
 | `--security-opt` | `no-new-privileges` |
 | `--restart` | `unless-stopped` |
@@ -516,9 +520,11 @@ mock-confirm.
   backup) never loses purchased quota.
 - `GET /v2/assist/llm/quota` adds fields:
   `{ quotaTotal, quotaUsed, quotaRemaining, quotaFree, quotaPurchased, unit: "tokens" }`.
-- When the pool is empty the relay answers chat requests with HTTP `402` and an
-  OpenAI-style body
-  `{ "error": { "type": "quota_exhausted", "code": "QUOTA_EXHAUSTED", "message": "…" } }`.
+- When the pool is empty the relay keeps today's signal, HTTP `429` with an
+  OpenAI-style error body, so desktop builds already in the field keep
+  working: code `free_quota_exhausted` when the identity has never had
+  purchased quota (unchanged), and code `quota_exhausted` when purchased quota
+  is used up (new).
 - New `GET /v2/assist/llm/ledger?limit=50&cursor=…` (Bearer relay key, or
   identity headers signing `llm-relay-ledger:{identityAddress}:{timestamp}`)
   returns `{ items: [{ at, kind: 'grant' | 'purchase' | 'usage', amount, model?, orderId? }], nextCursor }`;
