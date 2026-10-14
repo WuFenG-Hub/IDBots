@@ -311,6 +311,11 @@ import { MetaTaskProjectionStore } from './services/metatask/projectionStore';
 import { MetaTaskRefresher } from './services/metatask/refresher';
 import { estimateMetaTaskShares } from './services/metatask/estimate';
 import { MetaTaskWatchService } from './services/metatask/watchService';
+import { collectPreferenceEvents } from './services/preference/collector';
+import { PREFERENCE_PIN_VERSION, preferencePoolPath } from './services/preference/constants';
+import { PreferenceService, type PreferenceSigner, type PreferenceWriterResolution } from './services/preference/service';
+import { PreferenceStore } from './services/preference/store';
+import { createUserPreferenceWriter } from './services/preference/userWriter';
 import { HeartbeatService } from './services/heartbeatService';
 import { LongTermAdvanceService, LONGTERM_ADVANCE_INTERVAL_MS } from './services/longTermAdvanceService';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
@@ -3763,6 +3768,20 @@ const startSqliteDaemons = (): void => {
     jitterMs: 90_000,
     run: (nowMs) => {
       getMetaTaskWatchService().run(nowMs);
+    },
+  });
+  // Preference rounds: auto-reveal sealed local ballots after the commit
+  // window closes. No network work unless a local ballot is still active.
+  getHeartbeatService().registerHandler({
+    name: 'preference.reveal',
+    intervalMs: 10 * 60_000,
+    jitterMs: 60_000,
+    run: async () => {
+      const service = getPreferenceService();
+      if (!service.hasActiveBallots()) return;
+      await service.refresh('heartbeat-reveal');
+      const result = await service.revealDue();
+      if (result.attempted > 0 || result.expired > 0) console.log('[preference] reveal sweep', result);
     },
   });
   // No start() here: the idle tier starts the heartbeat once the window is
@@ -7877,6 +7896,71 @@ const getMetaTaskProjectionStore = () => {
     );
   }
   return metaTaskProjectionStore;
+};
+
+let preferenceStore: PreferenceStore | null = null;
+let preferenceService: PreferenceService | null = null;
+let preferenceUpdateSeq = 0;
+
+const getPreferenceStore = (): PreferenceStore => {
+  if (!preferenceStore) {
+    const sqliteStore = getStore();
+    preferenceStore = new PreferenceStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return preferenceStore;
+};
+
+const broadcastPreferenceUpdate = (reason: string): void => {
+  preferenceUpdateSeq += 1;
+  const payload = { seq: preferenceUpdateSeq, reason };
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win.isDestroyed()) {
+      try {
+        win.webContents.send('preference:update', payload);
+      } catch { /* ignore */ }
+    }
+  });
+};
+
+const preferenceBotWriter = (metabotId: number): PreferenceWriterResolution => {
+  const globalMetaId = getMetabotStore().getMetabotById(metabotId)?.globalmetaid;
+  if (!globalMetaId) return { error: 'METABOT_IDENTITY_MISSING' };
+  return {
+    globalMetaId,
+    write: async (segment, payload) => {
+      const result = await createPin(
+        getMetabotStore(),
+        metabotId,
+        {
+          operation: 'create',
+          path: preferencePoolPath(segment),
+          encryption: '0',
+          version: PREFERENCE_PIN_VERSION,
+          contentType: 'application/json',
+          payload: JSON.stringify(payload),
+        },
+        { feeRate: resolveCreatePinFeeRate('mvc'), origin: 'tool:preference' },
+      );
+      return { pinId: result.pinId || `${result.txids[0] ?? ''}i0`, txids: result.txids };
+    },
+  };
+};
+
+const getPreferenceService = (): PreferenceService => {
+  if (!preferenceService) {
+    const userWriter = createUserPreferenceWriter(getUserIdentityStore(), {
+      createPin: createPinForIdentity,
+      feeRate: () => getGlobalFeeRate('mvc'),
+    });
+    preferenceService = new PreferenceService({
+      store: getPreferenceStore(),
+      collect: () => collectPreferenceEvents(),
+      resolveWriter: (signer: PreferenceSigner) =>
+        signer.type === 'user' ? userWriter() : preferenceBotWriter(signer.metabotId),
+      onUpdate: broadcastPreferenceUpdate,
+    });
+  }
+  return preferenceService;
 };
 
 const metaTaskLocalRosterMetaIds = (): string[] =>
