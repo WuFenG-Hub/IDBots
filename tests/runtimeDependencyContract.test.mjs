@@ -364,8 +364,13 @@ test('DSH per-session skill env rides BASH_ENV after KEY/TOKEN scrub', () => {
   );
   assert.match(
     coworkDshTurnSource,
-    /pinWorkspace: false/,
-    'Warmup must not pin the shared runtime cwd to a guessed workspace',
+    /pinWorkspace: input\.pinWorkspace === true/,
+    'Warmup workspace pin must stay opt-in (default off) so incidental prewarms cannot claim the composition cwd',
+  );
+  assert.match(
+    coworkRunnerSource,
+    /\.\.\.\(cwd \? \{ workspace: \{ cwd \} \} : \{\}\),[\s\S]*?pinWorkspace: true/,
+    'App-ready warmup may pin the workspace, but only with the resolved session/config cwd — never a guess',
   );
   assert.match(
     coworkDshTurnSource,
