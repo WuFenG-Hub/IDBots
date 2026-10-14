@@ -944,6 +944,20 @@ contextBridge.exposeInMainWorld('electron', {
       return () => ipcRenderer.removeListener('metatask:update', handler);
     },
   },
+  preference: {
+    // Preference rounds (/protocols/preference): human judging over IPC.
+    listRounds: (input?: { mine?: boolean; taskid?: string }) => ipcRenderer.invoke('preference:listRounds', input ?? {}),
+    roundStatus: (input: { roundPinId: string }) => ipcRenderer.invoke('preference:roundStatus', input),
+    commit: (input: { roundPinId: string; ballot: unknown }) => ipcRenderer.invoke('preference:commit', input),
+    telemetry: (input: { roundPinId: string; pairKey: string; seconds: number }) =>
+      ipcRenderer.invoke('preference:telemetry', input),
+    refresh: () => ipcRenderer.invoke('preference:refresh'),
+    onUpdate: (callback: (data: { seq: number; reason: string }) => void) => {
+      const handler = (_event: any, data: any) => callback(data);
+      ipcRenderer.on('preference:update', handler);
+      return () => ipcRenderer.removeListener('preference:update', handler);
+    },
+  },
   groupTask: {
     create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[]; mode?: 'task' | 'chat' }) =>
       ipcRenderer.invoke('groupTask:create', input),
