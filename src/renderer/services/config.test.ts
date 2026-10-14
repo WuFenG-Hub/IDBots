@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { AppConfig } from '../config';
 import {
+  applyCerebellumFreeDefaultMigration,
   applyProviderApiFormatMigrations,
   configService,
   mergeProvidersConfig,
@@ -323,13 +324,92 @@ test('configService.init fills the cerebellum default for stored configs that pr
     // Proof the merge ran on the stored config, not just the fallback default.
     assert.equal(merged.theme, 'dark');
     assert.deepEqual(merged.cerebellum, {
-      enabled: false,
-      provider: 'typesafe-jev',
+      enabled: true,
+      provider: 'idbots-jev-free',
       apiKey: '',
-      baseUrl: 'https://api.typesafe.ai',
+      baseUrl: 'https://www.metaso.network/assist-open-api/v2/assist/llm/jev',
       model: 'jev-latest',
     });
   } finally {
     delete (globalThis as { window?: unknown }).window;
   }
+});
+
+// --- cerebellum free-default migration (campaign: defaults ON via relay) ---
+
+const LEGACY_CEREBELLUM_DEFAULT = {
+  enabled: false,
+  provider: 'typesafe-jev' as const,
+  apiKey: '',
+  baseUrl: 'https://api.typesafe.ai',
+  model: 'jev-latest',
+};
+
+test('applyCerebellumFreeDefaultMigration flips the untouched legacy default to the free relay', () => {
+  const migrated = applyCerebellumFreeDefaultMigration({
+    ...makeConfig({}),
+    cerebellum: { ...LEGACY_CEREBELLUM_DEFAULT },
+  });
+  assert.deepEqual(migrated.cerebellum, {
+    enabled: true,
+    provider: 'idbots-jev-free',
+    apiKey: '',
+    baseUrl: 'https://www.metaso.network/assist-open-api/v2/assist/llm/jev',
+    model: 'jev-latest',
+  });
+  assert.equal(migrated.cerebellumFreeDefaultMigrationVersion, 1);
+});
+
+test('applyCerebellumFreeDefaultMigration fills a default when cerebellum is absent', () => {
+  const migrated = applyCerebellumFreeDefaultMigration(makeConfig({}));
+  assert.equal(migrated.cerebellum?.provider, 'idbots-jev-free');
+  assert.equal(migrated.cerebellum?.enabled, true);
+  assert.equal(migrated.cerebellumFreeDefaultMigrationVersion, 1);
+});
+
+test('applyCerebellumFreeDefaultMigration never touches user-configured cerebellums', () => {
+  // Own TypeSafe key, disabled: respect the explicit setup.
+  const withKey = applyCerebellumFreeDefaultMigration({
+    ...makeConfig({}),
+    cerebellum: { ...LEGACY_CEREBELLUM_DEFAULT, apiKey: 'sk-mine' },
+  });
+  assert.deepEqual(withKey.cerebellum, { ...LEGACY_CEREBELLUM_DEFAULT, apiKey: 'sk-mine' });
+  assert.equal(withKey.cerebellumFreeDefaultMigrationVersion, 1);
+
+  // Enabled typesafe without a key: user turned it on deliberately.
+  const enabledTypesafe = applyCerebellumFreeDefaultMigration({
+    ...makeConfig({}),
+    cerebellum: { ...LEGACY_CEREBELLUM_DEFAULT, enabled: true },
+  });
+  assert.equal(enabledTypesafe.cerebellum?.enabled, true);
+  assert.equal(enabledTypesafe.cerebellum?.provider, 'typesafe-jev');
+
+  // Deliberately disabled free provider (post-campaign opt-out): stays off.
+  const optedOut = applyCerebellumFreeDefaultMigration({
+    ...makeConfig({}),
+    cerebellum: {
+      enabled: false,
+      provider: 'idbots-jev-free',
+      apiKey: '',
+      baseUrl: 'https://www.metaso.network/assist-open-api/v2/assist/llm/jev',
+      model: 'jev-latest',
+    },
+  });
+  assert.equal(optedOut.cerebellum?.enabled, false);
+  assert.equal(optedOut.cerebellum?.provider, 'idbots-jev-free');
+});
+
+test('applyCerebellumFreeDefaultMigration is strictly once per install', () => {
+  // Already stamped: a config that still looks like the legacy default (user
+  // deliberately went back to disabled typesafe) must NOT be re-flipped.
+  const config = applyCerebellumFreeDefaultMigration({
+    ...makeConfig({}),
+    cerebellum: { ...LEGACY_CEREBELLUM_DEFAULT },
+  });
+  const again = applyCerebellumFreeDefaultMigration({
+    ...config,
+    cerebellum: { ...LEGACY_CEREBELLUM_DEFAULT },
+  });
+  assert.deepEqual(again.cerebellum, { ...LEGACY_CEREBELLUM_DEFAULT });
+  assert.equal(again.cerebellumFreeDefaultMigrationVersion, 1);
 });

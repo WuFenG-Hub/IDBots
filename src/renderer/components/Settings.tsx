@@ -91,18 +91,19 @@ const CEREBELLUM_PROVIDER_OPTIONS = [
   { value: 'idbots-jev-free', label: 'IDBots-JEV-Free' },
 ];
 
-// Mirrors src/main/libs/cerebellumConfig.ts — the free provider pins these.
+// Mirrors src/main/libs/cerebellumConfig.ts + defaultConfig — the free
+// provider is the campaign default: enabled, no key, relay-pinned.
 const CEREBELLUM_FREE_PROVIDER = 'idbots-jev-free';
 const CEREBELLUM_FREE_RELAY_BASE_URL = 'https://www.metaso.network/assist-open-api/v2/assist/llm/jev';
 const CEREBELLUM_FREE_MODEL = 'jev-latest';
 const TYPESAFE_JEV_BASE_URL = 'https://api.typesafe.ai';
 
 const DEFAULT_CEREBELLUM_CONFIG: CerebellumConfig = {
-  enabled: false,
-  provider: 'typesafe-jev',
+  enabled: true,
+  provider: CEREBELLUM_FREE_PROVIDER,
   apiKey: '',
-  baseUrl: TYPESAFE_JEV_BASE_URL,
-  model: 'jev-latest',
+  baseUrl: CEREBELLUM_FREE_RELAY_BASE_URL,
+  model: CEREBELLUM_FREE_MODEL,
 };
 type MemoryMetabotOption = {
   id: number;
@@ -1899,6 +1900,16 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     }
   }, [cerebellum.provider, cerebellum.apiKey, loadCerebellumFreeQuota]);
 
+  // Free provider without a key yet (panel open, default selection): resolve
+  // it once in the background so the shared-quota line can render without
+  // waiting for a connection test. Failure is silent — no key, no quota line;
+  // deps gate re-runs (a resolved key flips the condition off).
+  useEffect(() => {
+    if (cerebellum.provider === CEREBELLUM_FREE_PROVIDER && !cerebellum.apiKey.trim()) {
+      void ensureCerebellumFreeApiKey();
+    }
+  }, [cerebellum.provider, cerebellum.apiKey]);
+
   const handleCerebellumProviderChange = (provider: CerebellumConfig['provider']) => {
     setCerebellumTestResult(null);
     if (provider === CEREBELLUM_FREE_PROVIDER) {
@@ -3572,52 +3583,56 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                 </div>
               )}
 
-              <div>
-                <label htmlFor="cerebellum-apiKey" className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
-                  {i18nService.t('apiKey')}
-                </label>
-                <input
-                  type="password"
-                  id="cerebellum-apiKey"
-                  value={cerebellum.apiKey}
-                  onChange={(e) => handleCerebellumConfigChange('apiKey', e.target.value)}
-                  readOnly={cerebellum.provider === CEREBELLUM_FREE_PROVIDER}
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs font-mono read-only:cursor-not-allowed read-only:opacity-80"
-                  placeholder={cerebellum.provider === CEREBELLUM_FREE_PROVIDER ? i18nService.t('cerebellumFreeKeyManaged') : i18nService.t('apiKeyPlaceholder')}
-                />
-              </div>
+              {/* Direct TypeSafe only: the free relay pins everything
+                  (key resolved from the credential chain, relay baseUrl,
+                  jev-latest), so only the test button is offered there. */}
+              {cerebellum.provider !== CEREBELLUM_FREE_PROVIDER && (
+                <>
+                  <div>
+                    <label htmlFor="cerebellum-apiKey" className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
+                      {i18nService.t('apiKey')}
+                    </label>
+                    <input
+                      type="password"
+                      id="cerebellum-apiKey"
+                      value={cerebellum.apiKey}
+                      onChange={(e) => handleCerebellumConfigChange('apiKey', e.target.value)}
+                      autoComplete="off"
+                      spellCheck={false}
+                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs font-mono"
+                      placeholder={i18nService.t('apiKeyPlaceholder')}
+                    />
+                  </div>
 
-              <div>
-                <label htmlFor="cerebellum-baseUrl" className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
-                  {i18nService.t('baseUrl')}
-                </label>
-                <input
-                  type="text"
-                  id="cerebellum-baseUrl"
-                  value={cerebellum.baseUrl}
-                  onChange={(e) => handleCerebellumConfigChange('baseUrl', e.target.value)}
-                  readOnly={cerebellum.provider === CEREBELLUM_FREE_PROVIDER}
-                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs read-only:cursor-not-allowed read-only:opacity-80"
-                  placeholder="https://api.typesafe.ai"
-                />
-              </div>
+                  <div>
+                    <label htmlFor="cerebellum-baseUrl" className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
+                      {i18nService.t('baseUrl')}
+                    </label>
+                    <input
+                      type="text"
+                      id="cerebellum-baseUrl"
+                      value={cerebellum.baseUrl}
+                      onChange={(e) => handleCerebellumConfigChange('baseUrl', e.target.value)}
+                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                      placeholder="https://api.typesafe.ai"
+                    />
+                  </div>
 
-              <div>
-                <label htmlFor="cerebellum-model" className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
-                  {i18nService.t('cerebellumModel')}
-                </label>
-                <input
-                  type="text"
-                  id="cerebellum-model"
-                  value={cerebellum.model}
-                  onChange={(e) => handleCerebellumConfigChange('model', e.target.value)}
-                  readOnly={cerebellum.provider === CEREBELLUM_FREE_PROVIDER}
-                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs read-only:cursor-not-allowed read-only:opacity-80"
-                  placeholder="jev-latest"
-                />
-              </div>
+                  <div>
+                    <label htmlFor="cerebellum-model" className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
+                      {i18nService.t('cerebellumModel')}
+                    </label>
+                    <input
+                      type="text"
+                      id="cerebellum-model"
+                      value={cerebellum.model}
+                      onChange={(e) => handleCerebellumConfigChange('model', e.target.value)}
+                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                      placeholder="jev-latest"
+                    />
+                  </div>
+                </>
+              )}
 
               <div className="flex items-center space-x-3">
                 <button
