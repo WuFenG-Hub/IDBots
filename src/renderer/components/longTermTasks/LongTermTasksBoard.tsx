@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { selectTask } from '../../store/slices/longTermTaskSlice';
@@ -7,6 +7,8 @@ import { i18nService } from '../../services/i18n';
 import { LONG_TERM_COLUMN_LABEL_KEYS, LONG_TERM_COLUMN_ORDER, type LongTermColumn, type LongTermTaskSummary } from '../../types/longTermTask';
 import LongTermTaskCard from './LongTermTaskCard';
 import LongTermTaskDetail from './LongTermTaskDetail';
+import { loadOwnerAgentBots } from './ownerAgentBots';
+import type { MetaBotForSelector } from '../cowork/MetaBotSelector';
 
 /**
  * Long-term task board (redesign) — status-column kanban, one page, all tasks.
@@ -38,14 +40,32 @@ const LongTermTasksBoard: React.FC = () => {
   const { available, bridgeMissingReason, board, loading, selectedTaskId } = useSelector(
     (state: RootState) => state.longTermTask,
   );
+  const [creationBots, setCreationBots] = useState<MetaBotForSelector[]>([]);
+  // Which bot the creation discussion opens on (default Twin). The chosen id
+  // rides the newChatWithDraft detail so the composer lands on this bot.
+  const [creationBotId, setCreationBotId] = useState<number | null>(null);
 
   useEffect(() => {
     void longTermTaskService.init();
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void loadOwnerAgentBots().then(({ bots, twinId }) => {
+      if (cancelled) return;
+      setCreationBots(bots);
+      setCreationBotId((current) => current ?? twinId ?? bots[0]?.id ?? null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const openCreationSession = () => {
     window.dispatchEvent(
-      new CustomEvent('cowork:newChatWithDraft', { detail: { text: i18nService.t('longTermTask.newTaskDraft') } }),
+      new CustomEvent('cowork:newChatWithDraft', {
+        detail: { text: i18nService.t('longTermTask.newTaskDraft'), metabotId: creationBotId },
+      }),
     );
   };
 
@@ -60,6 +80,22 @@ const LongTermTasksBoard: React.FC = () => {
     <div className="flex h-full flex-col">
       {/* Toolbar: creation entry + hint */}
       <div className="flex shrink-0 items-center gap-3 px-4 pt-3">
+        {creationBots.length > 0 && (
+          <label className="flex items-center gap-1.5 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('longTermTask.ownerAgent')}
+            <select
+              className="rounded-lg border dark:border-claude-darkBorder border-claude-border bg-transparent px-2 py-1 text-xs dark:text-claude-darkText text-claude-text"
+              value={creationBotId ?? ''}
+              onChange={(event) => setCreationBotId(Number(event.target.value))}
+            >
+              {creationBots.map((bot) => (
+                <option key={bot.id} value={bot.id}>
+                  {bot.name}{bot.metabot_type === 'twin' ? ` (${i18nService.t('longTermTask.ownerAgentTwin')})` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <button type="button" onClick={openCreationSession} className="btn-idchat-primary-filled px-3 py-1.5 text-sm font-medium">
           {i18nService.t('longTermTask.newTask')}
         </button>

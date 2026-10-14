@@ -138,6 +138,15 @@ function asExpectedMinutes(value: unknown): number | null {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
 }
 
+/**
+ * Normalize an owner-Agent binding input: a positive integer metabot id, or
+ * null (explicit "revert to the default Twin"). Anything else = no change on
+ * update, default Twin on create.
+ */
+function asOwnerMetabotId(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}
+
 function parseJsonArray<T>(raw: unknown): T[] {
   if (typeof raw !== 'string' || !raw.trim()) return [];
   try {
@@ -199,6 +208,7 @@ interface TaskRow {
   goal: string;
   stage: LongTermTaskStage;
   acceptance_delegate: number;
+  owner_metabot_id: number | null;
   current_subtask_id: string | null;
   definition_session_id: string | null;
   created_at: string;
@@ -369,6 +379,12 @@ export class LongTermTaskStore {
     if (!subtaskColumns.includes('metatask_root')) {
       this.db.run('ALTER TABLE long_term_subtasks ADD COLUMN metatask_root TEXT');
     }
+    // Owner Agent binding: which local metabot "继续讨论" routes new sessions
+    // to. NULL = legacy task → default Twin (the renderer labels it explicitly).
+    const taskColumns = this.getAll<{ name: unknown }>('PRAGMA table_info(long_term_tasks)').map((row) => String(row.name));
+    if (!taskColumns.includes('owner_metabot_id')) {
+      this.db.run('ALTER TABLE long_term_tasks ADD COLUMN owner_metabot_id INTEGER');
+    }
     this.saveDb();
   }
 
@@ -402,6 +418,7 @@ export class LongTermTaskStore {
       goal: row.goal,
       stage: row.stage,
       acceptanceDelegate: row.acceptance_delegate === 1,
+      ownerMetabotId: typeof row.owner_metabot_id === 'number' ? row.owner_metabot_id : null,
       currentSubtaskIdPinned: row.current_subtask_id ?? null,
       definitionSessionId: row.definition_session_id ?? null,
       createdAt: row.created_at,
@@ -494,6 +511,7 @@ export class LongTermTaskStore {
       stage: task.stage,
       column: column ?? 'done',
       acceptanceDelegate: task.acceptanceDelegate,
+      ownerMetabotId: task.ownerMetabotId,
       currentSubtaskId: current?.id ?? null,
       currentSubtaskTitle: current?.title ?? null,
       currentSubtaskStatus: current?.status ?? null,
@@ -573,9 +591,9 @@ export class LongTermTaskStore {
       void subtaskIds;
     }
     this.db.run(
-      `INSERT INTO long_term_tasks (id, title, goal, stage, acceptance_delegate, definition_session_id, created_at, updated_at)
-       VALUES (?, ?, ?, 'defining', 0, ?, ?, ?)`,
-      [taskId, title, goal, input.definitionSessionId ?? null, now, now],
+      `INSERT INTO long_term_tasks (id, title, goal, stage, acceptance_delegate, owner_metabot_id, definition_session_id, created_at, updated_at)
+       VALUES (?, ?, ?, 'defining', 0, ?, ?, ?, ?)`,
+      [taskId, title, goal, asOwnerMetabotId(input.ownerMetabotId), input.definitionSessionId ?? null, now, now],
     );
     drafts.forEach((draft, index) => {
       const dependsOn = (draft.dependsOnOrdinals ?? []).map((ordinal) => subtaskIds[ordinal - 1]);
@@ -724,6 +742,15 @@ export class LongTermTaskStore {
       if (next !== row.acceptance_delegate) {
         this.db.run('UPDATE long_term_tasks SET acceptance_delegate = ? WHERE id = ?', [next, row.id]);
         changes.push(`acceptance_delegate=${next === 1 ? 'on' : 'off'}`);
+      }
+    }
+    // Owner Agent binding: `ownerMetabotId` present (including null) is an
+    // explicit write; null reverts the task to the default-Twin routing.
+    if (input.ownerMetabotId !== undefined) {
+      const next = asOwnerMetabotId(input.ownerMetabotId);
+      if (next !== row.owner_metabot_id) {
+        this.db.run('UPDATE long_term_tasks SET owner_metabot_id = ? WHERE id = ?', [next, row.id]);
+        changes.push(`owner_metabot_id=${next ?? 'null'}`);
       }
     }
     if (changes.length === 0) return { ok: false, code: 'VALIDATION', error: 'nothing to update' };

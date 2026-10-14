@@ -888,7 +888,7 @@ contextBridge.exposeInMainWorld('electron', {
     // The Twin's channel is the longterm_* agent tools; these are the owner's.
     board: () => ipcRenderer.invoke('longtermTask:board'),
     get: (input: { taskId: string }) => ipcRenderer.invoke('longtermTask:get', input),
-    update: (input: { taskId: string; title?: string; goal?: string; acceptanceDelegate?: boolean }) =>
+    update: (input: { taskId: string; title?: string; goal?: string; acceptanceDelegate?: boolean; ownerMetabotId?: number | null }) =>
       ipcRenderer.invoke('longtermTask:update', input),
     setStage: (input: { taskId: string; action: 'pause' | 'resume' | 'cancel'; note?: string }) =>
       ipcRenderer.invoke('longtermTask:setStage', input),

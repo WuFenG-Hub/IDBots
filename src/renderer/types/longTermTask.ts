@@ -173,6 +173,9 @@ export interface LongTermTaskSummary {
    *  the sidebar unpins these from the autonomous fold onto the main list
    *  (derived live; re-folds the moment the verdict lands). */
   decisionSessionIds: string[];
+  /** Task-level owner Agent binding: the metabot "继续讨论" opens sessions on.
+   *  null = legacy task with no explicit owner → routes to the Twin. */
+  ownerMetabotId: number | null;
   /** Participating bots: twin + delegated workers + group-task members (derived read-time). */
   participants: LongTermParticipant[];
   createdAt: string;
@@ -210,6 +213,8 @@ export interface LongTermTaskCreateInput {
   goal: string;
   subtasks: LongTermSubtaskDraft[];
   definitionSessionId?: string | null;
+  /** Optional owner Agent binding at creation (null = default Twin). */
+  ownerMetabotId?: number | null;
 }
 
 export interface LongTermTaskUpdateInput {
@@ -217,6 +222,8 @@ export interface LongTermTaskUpdateInput {
   title?: string;
   goal?: string;
   acceptanceDelegate?: boolean;
+  /** Select/change the owner Agent binding; null reverts to the default Twin. */
+  ownerMetabotId?: number | null;
 }
 
 export interface LongTermSubtaskUpdateInput {
