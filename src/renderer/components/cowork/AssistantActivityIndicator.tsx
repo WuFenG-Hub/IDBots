@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { i18nService } from '../../services/i18n';
 import type { CoworkMessage } from '../../types/cowork';
 import { getDefaultMetabotAvatarUrl } from '../../utils/rendererAssetPaths';
 import { isRenderableAvatarSource } from '../../utils/avatarSource';
 import { splitThinkTaggedContent } from './ThinkingBlock';
+import { drawTurnAckPhrase, findTailTurnAck } from './turnAckPhrases';
 
 const DEFAULT_BOT_AVATAR = getDefaultMetabotAvatarUrl();
 
@@ -27,6 +28,14 @@ const IDLE_PHRASE_INTERVAL_MS = 3000;
  * precedence over the rotating idle phrases, mirroring the professional bar's
  * precedence so the text never contradicts the actual state.
  *
+ * Turn acknowledgment: a `sdkRuntimeStatus: 'turnAck'` signal in the tail
+ * run (emitted by the main process before the brain call, tier derived from
+ * the #11 effort verdict) replaces the generic wait copy with a tier phrase
+ * — "on it right away" / "needs a moment" / "complex, may take a few
+ * minutes" — drawn from a per-session shuffle bag so consecutive turns never
+ * repeat the same line. The draw is memoized per ack message id, so React
+ * re-renders never re-roll the wording mid-turn.
+ *
  * Single placement: `inline` inside the transcript at the reply position,
  * where it is assistant mode's only activity indicator. It stays visible
  * through the ENTIRE running state — pre-first-token wait, narration and
@@ -41,7 +50,9 @@ export const AssistantActivityIndicator: React.FC<{
   fallbackText?: string;
   /** Drop the page-level gutter/max-width wrapper for inline transcript use. */
   inline?: boolean;
-}> = ({ messages, avatar, fallbackText, inline = false }) => {
+  /** Shuffle-bag scope: phrases rotate without repeats per session. */
+  sessionId?: string | null;
+}> = ({ messages, avatar, fallbackText, inline = false, sessionId = null }) => {
   const [idlePhraseIndex, setIdlePhraseIndex] = useState(0);
 
   useEffect(() => {
@@ -51,21 +62,46 @@ export const AssistantActivityIndicator: React.FC<{
     return () => window.clearInterval(timer);
   }, []);
 
+  // Turn-ack scan over the CONTIGUOUS tail run of runtime-status messages:
+  // once real content streams, the run ends and the ack stops applying.
+  const tailTurnAck = useMemo(() => findTailTurnAck(messages), [messages]);
+
+  const ackPhrase = useMemo(
+    () => tailTurnAck
+      ? drawTurnAckPhrase({
+          sessionId,
+          tier: tailTurnAck.tier,
+          language: i18nService.getLanguage(),
+          ackMessageId: tailTurnAck.messageId,
+        })
+      : null,
+    // Draw once per ack message; language flips only re-draw for NEW acks
+    // (remembered phrases stay in their drawn language), the right trade.
+    [tailTurnAck?.messageId, tailTurnAck?.tier, sessionId],
+  );
+
   const getStatusText = (): string => {
-    // SDK runtime-status signals (api_retry / requesting) take precedence —
-    // they describe the transport layer, not the agent loop.
+    // SDK runtime-status signals (api_retry / requesting / turnAck) take
+    // precedence — they describe the transport layer, not the agent loop.
+    // Within the tail run a retry always wins; otherwise the turnAck phrase
+    // beats the generic "thinking" (the calibrated promise is the point).
+    let sawRequesting = false;
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       const status = msg.metadata?.sdkRuntimeStatus;
+      if (typeof status !== 'string') break;
       if (status === 'api_retry') {
         return i18nService.t('assistantStatusRetrying');
       }
       if (status === 'requesting') {
-        return i18nService.t('assistantStatusThinking');
+        sawRequesting = true;
       }
-      // Stop scanning once we hit a non-runtime-status message — only the most
-      // recent SDK status applies.
-      break;
+    }
+    if (ackPhrase && tailTurnAck) {
+      return ackPhrase;
+    }
+    if (sawRequesting) {
+      return i18nService.t('assistantStatusThinking');
     }
 
     // Visible reply text actively streaming (narration or the final answer):

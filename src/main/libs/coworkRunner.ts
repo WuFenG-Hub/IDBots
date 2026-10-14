@@ -115,6 +115,7 @@ import {
 } from '../cerebellum/knowledgeHotRank';
 import {
   CEREBELLUM_EFFORT_STICKY_WINDOW_MS,
+  mapCerebellumEffortRungToTurnAckTier,
   resolveStickyAutoEffortRung,
   type CerebellumEffortRung,
   type CerebellumEffortSticky,
@@ -9305,6 +9306,32 @@ export class CoworkRunner extends EventEmitter {
         modelDefault: modelOptions?.reasoningEffort ?? null,
         mapped: dshReasoningEffort ?? null,
       });
+      // Turn acknowledgment (owner-endorsed 2026-10-14): the #11 effort
+      // verdict doubles as the difficulty signal — the renderer's activity
+      // indicators draw a tier phrase ("on it right away" / "needs a moment"
+      // / "complex, may take a few minutes") while the user waits for the
+      // first visible token, instead of a generic rotating status. Emitted
+      // BEFORE the brain call, once per interactive turn; external-facing
+      // surfaces keep their established posture. Best-effort — a failed ack
+      // must never break the turn.
+      try {
+        const sourceChannel = this.store.getConversationSourceContextBySession(sessionId)?.sourceChannel;
+        if (sourceChannel === 'cowork_ui') {
+          const overrideRung = activeSession.effortOverride === 'off'
+            || activeSession.effortOverride === 'low'
+            || activeSession.effortOverride === 'high'
+            || activeSession.effortOverride === 'max'
+            ? (activeSession.effortOverride as CerebellumEffortRung)
+            : null;
+          const turnAckTier = overrideRung != null
+            ? mapCerebellumEffortRungToTurnAckTier(overrideRung)
+            : autoEffortRung != null
+              ? mapCerebellumEffortRungToTurnAckTier(autoEffortRung)
+              : 'generic';
+          this.emitTurnAck(sessionId, turnAckTier);
+          coworkLog('INFO', 'turn:ack', 'turn acknowledgment emitted', { sessionId, tier: turnAckTier });
+        }
+      } catch { /* best-effort: the ack must never break a turn */ }
       // Turn-level stall watchdog: cancel a turn that made no progress for
       // the adaptive stall deadline (runtime wedge, provider hang past every
       // tool's own timeout). Progress is re-armed on every LLM-side event
@@ -14333,6 +14360,28 @@ export class CoworkRunner extends EventEmitter {
         onLine(buffer);
       }
     }
+  }
+
+  /**
+   * Emits one turn-acknowledgment signal as a `type: 'system'` message
+   * carrying `metadata.sdkRuntimeStatus: 'turnAck'` + the difficulty tier.
+   * Fired once per interactive turn right after the effort verdict resolves
+   * and BEFORE the brain call: the renderer's activity indicators draw a
+   * tier-appropriate phrase from their shuffle bags while the user waits for
+   * the first visible token. Unlike emitSdkRuntimeStatus there is no dedup —
+   * turnAck is once-per-turn by construction, and a session-scoped key would
+   * suppress the second turn's ack after a fast first reply.
+   */
+  private emitTurnAck(
+    sessionId: string,
+    tier: 'fast' | 'moderate' | 'heavy' | 'generic',
+  ): void {
+    const message = this.store.addMessage(sessionId, {
+      type: 'system',
+      content: '',
+      metadata: { sdkRuntimeStatus: 'turnAck', turnAckTier: tier },
+    });
+    this.emit('message', sessionId, message);
   }
 
   /**

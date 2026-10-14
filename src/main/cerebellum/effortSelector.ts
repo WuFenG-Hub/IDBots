@@ -198,6 +198,25 @@ export function resolveAutoEffortRung(
 }
 
 /**
+ * Turn-acknowledgment tiers (renderer-side phrase pools live in
+ * src/renderer/components/cowork/turnAckPhrases.ts; this mapping is the
+ * single difficulty source of truth shared by both halves):
+ * off/low → 'fast' ("on it right away"), high → 'moderate' ("needs a
+ * moment"), max → 'heavy' ("complex, may take a few minutes"). The same
+ * judgment that makes the model think longer tells the user to wait longer,
+ * so the promised expectation always matches the actual effort.
+ */
+export type TurnAckDifficultyTier = 'fast' | 'moderate' | 'heavy';
+
+export function mapCerebellumEffortRungToTurnAckTier(
+  rung: CerebellumEffortRung,
+): TurnAckDifficultyTier {
+  if (rung === 'max') return 'heavy';
+  if (rung === 'high') return 'moderate';
+  return 'fast';
+}
+
+/**
  * How long an escalated rung sticks around a session. Single-message
  * classification misses conversation context: a bare "继续" during a coding
  * session classifies off, yet it IS part of the complex work. Stickiness
