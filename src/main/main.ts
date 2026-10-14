@@ -20,12 +20,13 @@ import { McpStore, type McpServerFormData } from './mcpStore';
 import { ProjectStore, type ProjectFormData } from './projectStore';
 import type { MemoryBackend } from './memory/memoryBackend';
 import { createOwnerMemoryScope } from './memory/memoryScope';
-import { CEREBELLUM_FREE_PROVIDER, type ResolvedCerebellumConfig } from './libs/cerebellumConfig';
+import { CEREBELLUM_FREE_PROVIDER, resolveCerebellumConfig, type ResolvedCerebellumConfig } from './libs/cerebellumConfig';
 import { createJevRelayFetchWithKeyRetry, initJevRelayService, registerJevRelayIpcHandlers, resolveCerebellumRuntimeConfig } from './services/jevRelayService';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
 import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
 import { gateVolatileBlocksWithCerebellum } from './cerebellum/volatileBlockGate';
 import { selectEffortWithCerebellum } from './cerebellum/effortSelector';
+import { askCerebellumIntuition } from './cerebellum/intuitionTool';
 import {
   rankSkillsWithCerebellum,
   CEREBELLUM_SKILL_SHORTLIST_MIN_POOL,
@@ -6110,6 +6111,33 @@ const getCoworkRunner = () => {
       // verdicts for the background tail blocks (see
       // createCerebellumVolatileBlockGate).
       cerebellumVolatileBlockGate: createCerebellumVolatileBlockGate(),
+      // Cerebellum (小脑) intuition tool: exposes the fast decision model to
+      // the brain itself as the `intuition` inline tool (cowork_ui sessions,
+      // cerebellum configured). The mount probe is the sync config resolver
+      // (best-effort — a free-relay outage degrades to "no verdict" at call
+      // time, not to a missing tool); the executor resolves the full runtime
+      // context (relay key retry included) lazily per call.
+      cerebellumIntuitionAvailable: () => resolveCerebellumConfig(getStore().get('app_config')) !== null,
+      cerebellumIntuition: async ({ context, questions }) => {
+        const callContext = await resolveCerebellumCallContext();
+        if (!callContext) {
+          return null;
+        }
+        const startedAt = Date.now();
+        const result = await askCerebellumIntuition({
+          config: callContext.config,
+          fetchImpl: callContext.fetchImpl,
+          context,
+          questions,
+        });
+        coworkLog('INFO', 'cerebellum:intuition', 'intuition call evaluated', {
+          used: result !== null,
+          questionCount: questions.length,
+          inputTokens: result?.inputTokens ?? 0,
+          latencyMs: Date.now() - startedAt,
+        });
+        return result;
+      },
       // Cerebellum (小脑) reasoning-effort auto selector (roadmap #11): the
       // "auto" rung on unpicked sessions resolves from one JEV choice verdict
       // per turn (see createCerebellumEffortSelector).
