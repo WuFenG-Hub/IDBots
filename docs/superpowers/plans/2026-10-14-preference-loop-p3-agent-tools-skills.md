@@ -561,7 +561,7 @@ const revealReasons = (events: readonly PreferenceChainEvent[], view: Preference
     const judge = byReveal.get(revealPinId);
     if (!event || !judge) return [];
     const parsed = checkBallot(event.body.ballot, view.round);
-    if (!parsed.ok) return [];
+    if (parsed.ok === false) return [];
     return [
       {
         reveal: revealPinId,
@@ -1134,7 +1134,7 @@ Insert the three tools inside `buildPreferenceAgentTools`, before the `return`:
             .find((entry) => !entry.confirmed && entry.author === bot.globalMetaId && entry.subject?.node === node);
           if (unconfirmed) return refuse(`preference:subject-round-unconfirmed:${unconfirmed.pinId}`);
           const derived = candidatesFromMetaTaskNode(detail, node);
-          if (!derived.ok) return refuse(derived.reason);
+          if (derived.ok === false) return refuse(derived.reason);
           candidates = derived.candidates;
           subject = { taskid, node };
         } else {
