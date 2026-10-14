@@ -600,6 +600,37 @@ export const applyProviderApiFormatMigrations = (config: AppConfig): AppConfig =
   };
 };
 
+// ---------------------------------------------------------------------------
+// 小脑免费默认迁移 (campaign: cerebellum defaults ON via the free relay)
+// ---------------------------------------------------------------------------
+
+export const CEREBELLUM_FREE_DEFAULT_MIGRATION_VERSION = 1;
+
+/**
+ * One-time flip to the free-relay cerebellum default. Only installs still
+ * sitting on the untouched legacy default (disabled `typesafe-jev` with no
+ * key) are migrated; anything the user actually configured — own TypeSafe
+ * key, cerebellum enabled, custom fields — passes through unchanged. The
+ * version stamp makes the flip strictly once, so a user who later opts out
+ * (disables it, or picks typesafe-jev again) is never re-enabled.
+ */
+export const applyCerebellumFreeDefaultMigration = (config: AppConfig): AppConfig => {
+  const currentVersion = config.cerebellumFreeDefaultMigrationVersion ?? 0;
+  if (currentVersion >= CEREBELLUM_FREE_DEFAULT_MIGRATION_VERSION) {
+    return config;
+  }
+  const cerebellum = config.cerebellum;
+  const isUntouchedLegacyDefault = !cerebellum
+    || (cerebellum.enabled === false
+      && cerebellum.provider === 'typesafe-jev'
+      && !(cerebellum.apiKey ?? '').trim());
+  return {
+    ...config,
+    cerebellum: isUntouchedLegacyDefault ? { ...defaultConfig.cerebellum } : cerebellum,
+    cerebellumFreeDefaultMigrationVersion: CEREBELLUM_FREE_DEFAULT_MIGRATION_VERSION,
+  };
+};
+
 class ConfigService {
   private config: AppConfig = defaultConfig;
 
@@ -632,7 +663,9 @@ class ConfigService {
         };
 
         const normalizedConfig = normalizeDeepSeekAppConfig(
-          applyProviderModelMigrations(applyProviderApiFormatMigrations(mergedConfig)),
+          applyCerebellumFreeDefaultMigration(
+            applyProviderModelMigrations(applyProviderApiFormatMigrations(mergedConfig)),
+          ),
         );
         this.config = normalizedConfig;
 

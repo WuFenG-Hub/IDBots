@@ -173,6 +173,8 @@ export interface AppConfig {
   providerModelMigrationVersion?: number;
   // Provider API 格式语义迁移版本号 (升级后自动纠正出厂默认 apiFormat，详见 services/config.ts)
   providerApiFormatMigrationVersion?: number;
+  // 小脑免费默认迁移版本号 (一次性把"未动过的旧默认 typesafe+关闭"翻成新的免费默认，详见 services/config.ts)
+  cerebellumFreeDefaultMigrationVersion?: number;
   // 应用配置
   app: {
     port: number;
@@ -787,13 +789,17 @@ export const defaultConfig: AppConfig = {
   },
   theme: 'system',
   language: 'zh',
-  // Cerebellum is strictly opt-in: disabled with empty credentials by default,
-  // so every existing behavior stays identical until the user configures it.
+  // Cerebellum defaults ON with the official free relay (campaign: free for
+  // everyone) — no key needed, the relay key resolves from the free-quota
+  // credential chain and the feature silently stays off until one exists.
+  // Legacy installs sitting on the untouched old default are flipped by the
+  // one-time cerebellumFreeDefaultMigration (services/config.ts); anything a
+  // user actually configured is never touched.
   cerebellum: {
-    enabled: false,
-    provider: 'typesafe-jev',
+    enabled: true,
+    provider: 'idbots-jev-free',
     apiKey: '',
-    baseUrl: 'https://api.typesafe.ai',
+    baseUrl: 'https://www.metaso.network/assist-open-api/v2/assist/llm/jev',
     model: 'jev-latest',
   },
   chatExperienceMode: 'assistant',
