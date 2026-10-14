@@ -43,6 +43,7 @@ import type { MemoryBackend } from '../memory/memoryBackend';
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { recordMetaIDPrivateA2AExperience } from './metaidExperienceRecorder';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
+import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
 import type { MetaidDataPayload } from './metaidCore';
@@ -230,6 +231,17 @@ type GetMetaIDCognitionPromptBlockFn = (input: {
   subjectGlobalMetaID: string;
   excludeEvidenceIds?: string[];
 }) => string | Promise<string>;
+/**
+ * Optional cerebellum (小脑) semantic re-ranker for the private-reply memory
+ * pools: same contract as the cowork runner's and the group-task daemon's
+ * ranker — the callback must never throw and resolves to null on any failure
+ * (unconfigured, timeout, HTTP/network error), which keeps the lexical
+ * ranking unchanged.
+ */
+export type PrivateChatCerebellumMemoryRankerFn = (input: {
+  currentUserText: string;
+  memories: Array<{ id: string; text: string }>;
+}) => Promise<ReadonlyMap<string, number> | null>;
 
 export interface PrivateChatA2AContextMessage {
   speaker: string;
@@ -1948,6 +1960,22 @@ export async function sendSellerOrderImmediateAcknowledgement(params: {
   };
 }
 
+/**
+ * Scoped memory blocks for a private-chat reply turn: contact/conversation
+ * memories plus external_safe owner operational preferences — owner profile
+ * facts never render (external channel). Pooling alone is not a usage event;
+ * only the entries that survive ranking + the char budget and render into the
+ * prompt get last_used_at touched.
+ *
+ * Cerebellum (小脑) semantic re-rank (roadmap #6): when a ranker is wired and
+ * the combined deduped pool reaches CEREBELLUM_MEMORY_MIN_POOL with non-blank
+ * trigger text, one fast decision-model call scores the candidates and scored
+ * ids replace their lexical rank key downstream. Returns a PLAIN STRING
+ * whenever the ranker is unwired / the pool is too small / there is no trigger
+ * text — that path adds zero microtask hops (same shape as the group-task
+ * daemon's block builder); only an actually-engaged ranker call returns a
+ * Promise. null/throw falls back to lexical silently.
+ */
 export function buildPrivateReplyMemoryPromptBlocks(params: {
   memoryBackend: Pick<MemoryBackend, 'listUserMemories' | 'touchUserMemoriesLastUsed'>;
   metabotId: number;
@@ -1956,7 +1984,8 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
   peerGlobalMetaId?: string | null;
   limit: number;
   currentUserText?: string;
-}): string {
+  cerebellumMemoryRanker?: PrivateChatCerebellumMemoryRankerFn;
+}): string | Promise<string> {
   const resolved = resolveMemoryScopes({
     metabotId: params.metabotId,
     sourceChannel: params.sourceChannel,
@@ -2002,21 +2031,47 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
       })
     : [];
 
-  const { xml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
-    channel: params.sourceChannel,
-    currentUserText: params.currentUserText,
-    ownerEntries,
-    contactEntries,
-    conversationEntries,
-    maxOwnerEntries: params.limit,
-    maxScopedEntries: params.limit,
-    maxOwnerOperationalPreferences: Math.min(3, params.limit),
-  });
-  // Injection IS the usage event for the hygiene decay clock.
-  if (injectedIds.length > 0) {
-    params.memoryBackend.touchUserMemoriesLastUsed(params.metabotId, injectedIds);
+  const renderBlocks = (relevanceScoreById: ReadonlyMap<string, number> | null): string => {
+    const { xml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
+      channel: params.sourceChannel,
+      currentUserText: params.currentUserText,
+      ownerEntries,
+      contactEntries,
+      conversationEntries,
+      relevanceScoreById: relevanceScoreById ?? undefined,
+      maxOwnerEntries: params.limit,
+      maxScopedEntries: params.limit,
+      maxOwnerOperationalPreferences: Math.min(3, params.limit),
+    });
+    // Injection IS the usage event for the hygiene decay clock.
+    if (injectedIds.length > 0) {
+      params.memoryBackend.touchUserMemoriesLastUsed(params.metabotId, injectedIds);
+    }
+    return xml;
+  };
+
+  // Cerebellum (小脑) semantic re-rank of the combined pool (deduped by id
+  // across the three scope reads, same as the cowork runner): any failure
+  // (unwired, blank trigger, small pool, null map, throw) keeps the lexical
+  // ranking — silent by design so a slow or absent cerebellum never stalls a
+  // reply.
+  const ranker = params.cerebellumMemoryRanker;
+  const triggerText = (params.currentUserText ?? '').trim();
+  const pooledById = new Map<string, { id: string; text: string }>();
+  if (ranker && triggerText) {
+    for (const entry of [...ownerEntries, ...contactEntries, ...conversationEntries]) {
+      if (typeof entry.id === 'string' && entry.id && !pooledById.has(entry.id)) {
+        pooledById.set(entry.id, { id: entry.id, text: entry.text });
+      }
+    }
   }
-  return xml;
+  if (pooledById.size < CEREBELLUM_MEMORY_MIN_POOL) {
+    return renderBlocks(null);
+  }
+  return ranker!({ currentUserText: triggerText, memories: [...pooledById.values()] }).then(
+    (scores) => renderBlocks(scores ?? null),
+    () => renderBlocks(null),
+  );
 }
 
 function normalizePrivateConversationPeerId(row: PrivateChatMessageRow): string {
@@ -3830,6 +3885,8 @@ async function processOne(
   isSessionTurnActive?: (sessionId: string) => boolean,
   /** Written by the wake dispatch point at throw time (H-64 leg B). */
   wakeDisposition?: PrivateChatWakeReDriveDisposition,
+  /** Optional cerebellum (小脑) re-ranker for the reply-turn memory blocks. */
+  cerebellumMemoryRanker?: PrivateChatCerebellumMemoryRankerFn,
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
@@ -5355,7 +5412,9 @@ async function processOne(
 
     const memoryBackend = coworkStore.getMemoryBackend();
     const memoryPolicy = memoryBackend.getEffectiveMemoryPolicyForMetabot(metabot.id);
-    const memoryContext = memoryPolicy.memoryEnabled
+    // The block builder is sync whenever the cerebellum ranker is idle; await
+    // only the ranked path so unranked turns keep their exact microtask timing.
+    const memoryContextOrPromise = memoryPolicy.memoryEnabled
       ? buildPrivateReplyMemoryPromptBlocks({
           memoryBackend,
           metabotId: metabot.id,
@@ -5364,8 +5423,12 @@ async function processOne(
           peerGlobalMetaId: fromGlobalMetaId,
           limit: memoryPolicy.memoryUserMemoriesMaxItems,
           currentUserText: plaintext,
+          cerebellumMemoryRanker,
         })
       : '';
+    const memoryContext = typeof memoryContextOrPromise === 'string'
+      ? memoryContextOrPromise
+      : await memoryContextOrPromise;
 
     let cognitionContext = '';
     if (memoryPolicy.memoryEnabled && getMetaIDCognitionPromptBlock && metabot.globalmetaid && fromGlobalMetaId) {
@@ -6057,6 +6120,8 @@ export function startPrivateChatDaemon(
   getRecentDailySummaries?: (metabotId: number, limit: number) => Array<{ summaryDate: string; summaryText: string }>,
   refreshA2APeerProfile?: (sessionId: string) => void,
   getMetaIDCognitionPromptBlock?: GetMetaIDCognitionPromptBlockFn,
+  /** Optional cerebellum (小脑) re-ranker for the reply-turn memory blocks. */
+  cerebellumMemoryRanker?: PrivateChatCerebellumMemoryRankerFn,
 ): void {
   void stopPrivateChatDaemon();
   const daemonGeneration = ++privateChatDaemonGeneration;
@@ -6143,6 +6208,7 @@ export function startPrivateChatDaemon(
               getMetaIDCognitionPromptBlock,
               isSessionTurnActive,
               reDrivenWakeDispositions.get(row.id),
+              cerebellumMemoryRanker,
             );
           } catch (e) {
             console.error('[PrivateChat] processOne error:', e);

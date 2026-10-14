@@ -121,6 +121,110 @@ test('private chat prompt does not inject owner profile facts', () => {
   ], 'only the entries that actually rendered count as used (Alice never injected)');
 });
 
+test('private reply memory blocks re-rank by cerebellum noul; unwired/null/throw keeps the lexical baseline byte-for-byte', async () => {
+  // Pool at CEREBELLUM_MEMORY_MIN_POOL (12) in the contact scope with zero
+  // lexical overlap with the trigger text — every entry scores 1 lexically, so
+  // only the cerebellum map can reorder them.
+  const TRIGGER = 'quantum entanglement lecture notes';
+  const contactPool = Array.from({ length: 12 }, (_, index) => ({
+    id: `contact-${index}`,
+    text: `peer fact number ${index} about daily life`,
+    usageClass: 'preference',
+    visibility: 'local_only',
+  }));
+  const winner = contactPool[3];
+
+  const memoryBackendFor = (touched, pool = contactPool) => ({
+    listUserMemories(input) {
+      const scopeKind = input.scope?.kind ?? input.scopeKind;
+      if (scopeKind === 'owner') return [];
+      if (scopeKind === 'contact') return pool;
+      return [];
+    },
+    touchUserMemoriesLastUsed(metabotId, memoryIds) {
+      touched.push({ metabotId, memoryIds });
+    },
+  });
+
+  const baseParams = {
+    metabotId: 1,
+    sourceChannel: 'metaweb_private',
+    externalConversationId: 'metaweb-private:peer-123',
+    peerGlobalMetaId: 'peer-123',
+    limit: 12,
+    currentUserText: TRIGGER,
+  };
+
+  const buildWith = (ranker, pool) => {
+    const touched = [];
+    const result = buildPrivateReplyMemoryPromptBlocks({
+      ...baseParams,
+      memoryBackend: memoryBackendFor(touched, pool),
+      ...(ranker ? { cerebellumMemoryRanker: ranker } : {}),
+    });
+    return { result, touched };
+  };
+
+  // Engaged ranker: returns a Promise; scored ids replace the lexical rank
+  // key, so the cerebellum winner renders first and the deterministic scores
+  // fix the whole order. Touch still records exactly the rendered ids in
+  // render order (the usage-event contract).
+  const rankerCalls = [];
+  const ranked = buildWith((input) => {
+    rankerCalls.push(input);
+    return Promise.resolve(new Map(input.memories.map((memory) => [
+      memory.id,
+      memory.id === winner.id ? 0.99 : 0.9 - Number(memory.id.slice('contact-'.length)) * 0.01,
+    ])));
+  });
+  assert.ok(ranked.result instanceof Promise, 'an engaged ranker returns a Promise');
+  const rankedXml = await ranked.result;
+  assert.equal(rankerCalls.length, 1, 'one rank call per turn');
+  assert.equal(rankerCalls[0].currentUserText, TRIGGER, 'the trigger message is the ranker query');
+  assert.equal(rankerCalls[0].memories.length, contactPool.length, 'the whole deduped pool is scored');
+  const rankedLines = rankedXml
+    .slice(rankedXml.indexOf('<contactMemories>'), rankedXml.indexOf('</contactMemories>'))
+    .split('\n')
+    .filter((line) => line.startsWith('- '));
+  assert.equal(rankedLines[0], `- ${winner.text}`, 'the cerebellum top pick renders first');
+  assert.equal(rankedLines[1], `- ${contactPool[0].text}`, 'the deterministic scores fix the rest of the order');
+  assert.deepEqual(ranked.touched, [
+    {
+      metabotId: 1,
+      memoryIds: ['contact-3', 'contact-0', 'contact-1', 'contact-2', 'contact-4', 'contact-5', 'contact-6', 'contact-7', 'contact-8', 'contact-9', 'contact-10', 'contact-11'],
+    },
+  ], 'injection still touches exactly the rendered ids in render order');
+
+  // Unwired ranker: plain string, byte-identical to today's lexical behavior.
+  const baseline = buildWith(null);
+  assert.equal(typeof baseline.result, 'string', 'the unwired path returns a plain string (zero microtask hops)');
+  assert.match(baseline.result, /<contactMemories>/);
+  assert.deepEqual(baseline.touched[0].memoryIds.slice().sort(), contactPool.map((entry) => entry.id).sort());
+
+  // Null ranker result and a throwing ranker reproduce the baseline
+  // byte-for-byte (fail-open to lexical).
+  const nullRanked = buildWith(() => Promise.resolve(null));
+  assert.equal(await nullRanked.result, baseline.result);
+  const thrown = buildWith(() => Promise.reject(new Error('cerebellum exploded')));
+  assert.equal(await thrown.result, baseline.result);
+
+  // Blank trigger text skips the ranker entirely — plain string, no call.
+  let called = 0;
+  const blank = buildPrivateReplyMemoryPromptBlocks({
+    ...baseParams,
+    currentUserText: '   ',
+    memoryBackend: memoryBackendFor([]),
+    cerebellumMemoryRanker: () => { called += 1; return Promise.resolve(new Map()); },
+  });
+  assert.equal(typeof blank, 'string');
+  assert.equal(called, 0, 'blank trigger text never calls the ranker');
+
+  // Pools below CEREBELLUM_MEMORY_MIN_POOL skip the ranker entirely.
+  const small = buildWith(() => { called += 1; return Promise.resolve(new Map()); }, contactPool.slice(0, 5));
+  assert.equal(typeof small.result, 'string');
+  assert.equal(called, 0, 'small pools stay on the lexical ranker');
+});
+
 test('order prompt keeps the owner-vs-client memory boundary without generic userMemories wording', () => {
   const { systemPrompt } = buildOrderPrompts({
     plaintext: 'Please deliver the result',

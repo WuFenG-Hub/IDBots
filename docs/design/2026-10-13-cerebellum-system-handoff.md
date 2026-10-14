@@ -1,10 +1,10 @@
 # Cerebellum System — Architecture & Handoff
 
-Date: 2026-10-13 (roadmap expanded 2026-10-14; handoff refreshed 2026-10-14 evening) · Status: 10 integrations live on `main` at `c53ab0a0` — memory re-rank, write gate (#1), skill shortlist (#2), volatile block gate (#3), knowledge hot-layer rank (#4), group-chat reply gate (#5), effort auto (#11), intuition tool (#12), worker fit hint (#13), conversation-search re-rank (#15). Agreed backlog in §4. Owner-facing docs live in `Settings > Model > Cerebellum`. Default provider is the free relay and the enable switch defaults ON (`feat/jev-free-defaults`).
+Date: 2026-10-13 (roadmap expanded 2026-10-14; handoff refreshed 2026-10-14 evening, #6 added later the same day) · Status: 11 integrations live — on `main` at `61fb9d5a`: memory re-rank, write gate (#1), skill shortlist (#2), volatile block gate (#3), knowledge hot-layer rank (#4), group-chat reply gate (#5), effort auto (#11), intuition tool (#12), worker fit hint (#13), conversation-search re-rank (#15); on `feat/cerebellum-privatechat-rank` (pending merge): private-chat reply re-rank (#6). Agreed backlog in §4. Owner-facing docs live in `Settings > Model > Cerebellum`. Default provider is the free relay and the enable switch defaults ON (`feat/jev-free-defaults`).
 
 This document is the handoff for the next development agent. It explains what the "cerebellum" (小脑) system is, what has been built, the design rules that must not be broken, and where it goes next.
 
-**Read this first (2026-10-14 closeout).** Sections §2.7–§2.16 and §4 are current. A few early bullets (§2.1 default-off, §2.3 bare `session.fetch`) describe the original MVP and are superseded by §2.12: every executor goes through `resolveCerebellumCallContext()`. #4, #5, #13, and #15 landed in one session and were merged to `main`; their eval scripts were `--dry-run` only (no API key on that machine). On-chain journals for those merges failed with `SPONSOR_BROADCAST_PENDING` / `Missing inputs` — do not block on amending old commits to add pin ids. Recommended next feature is **#6**. #13 ranks the whole task goal at chair-planning time, not one question per already-split subtask.
+**Read this first (2026-10-14 late refresh).** Sections §2.7–§2.17 and §4 are current. A few early bullets (§2.1 default-off, §2.3 bare `session.fetch`) describe the original MVP and are superseded by §2.12: every executor goes through `resolveCerebellumCallContext()`. #4, #5, #13, and #15 landed in one session and were merged to `main`; their eval scripts were `--dry-run` only (no API key on that machine). On-chain journals for those merges failed with `SPONSOR_BROADCAST_PENDING` / `Missing inputs` — do not block on amending old commits to add pin ids. #6 shipped on `feat/cerebellum-privatechat-rank` (same session as this refresh; merge separately). Recommended next feature is **#16** (remote-service shortlist — isomorphic to the shipped #2), with **#8** (dream triage, the JEV cost sweet spot) after it. #13 ranks the whole task goal at chair-planning time, not one question per already-split subtask.
 
 ---
 
@@ -166,6 +166,14 @@ Live-eval note: the relay is quota-metered; when exhausted, live evals and smoke
 - Privacy: the existing notice already lists conversation excerpts. Snippets sent here are that category. The notice was not widened.
 - `scripts/cerebellum-conversation-rank-eval.mjs` — 5 chats, 4 Chinese queries, recall@1 versus newest-first. `--dry-run` prints the request.
 
+### 2.17 Private-chat reply memory re-rank (roadmap #6 — shipped on `feat/cerebellum-privatechat-rank`)
+
+- `privateChatDaemon.ts` `buildPrivateReplyMemoryPromptBlocks` takes an optional `cerebellumMemoryRanker` (`PrivateChatCerebellumMemoryRankerFn` — same contract as the runner's and the group-task daemon's ranker) and returns `string | Promise<string>`: **fully synchronous when the ranker is unwired / the trigger text is blank / the deduped pool (owner + contact/conversation combined, reads unchanged) is under `CEREBELLUM_MEMORY_MIN_POOL`** — the same zero-microtask-hop shape §2.4 locked for the group-task daemon; the `processOne` call site awaits only the Promise branch (`typeof x === 'string' ? x : await x`). Candidate-pool widths are deliberately UNCHANGED (owner `max(limit, 12)`, scoped `limit` — unlike the runner's 120–200 pool), so null/throw reproduces today's lexical output **byte-for-byte**. Touch semantics unchanged: pooling never touches; exactly the rendered ids get `last_used_at` bumped, after the rank resolves.
+- `startPrivateChatDaemon` takes the ranker as a trailing optional param (threaded through `processOne`); `main.ts` passes the shared `createCerebellumMemoryRanker()` factory — lazy `resolveCerebellumConfig` per call (§2.12), so Settings edits apply on the next reply.
+- Privacy: sends memory texts (listed) and the peer's incoming message as the rank query — the conversation-excerpts category #15 already covers; **notice not widened**. The private path's skill-turn memory blackout is deliberately untouched — reopening it stays behind its own privacy review (explicitly out of scope for #6).
+- No new log tag (like the group-task daemon path, the daemon does not log this call; `memory:cerebellumRank` remains the cowork-session surface) and no new eval script — this reuses `memoryRank.ts`'s live-validated question wholesale; `scripts/cerebellum-memory-eval.mjs` stays the calibration harness for it.
+- Tests: extended `tests/privateChatScopedMemory.test.mjs` — engaged ranker reorders the block by noul with exact touch order; unwired returns a plain string (zero hops); null/throwing ranker byte-identical to the lexical baseline; blank trigger text and sub-`MIN_POOL` pools never call the ranker.
+
 ## 3. Design rules (do not break)
 
 1. **Never block a turn on the cerebellum.** 1.5 s hard timeout, null on any failure, silent lexical/code fallback. The cerebellum must be droppable mid-flight with zero user-visible effect.
@@ -180,7 +188,7 @@ Live-eval note: the relay is quota-metered; when exhausted, live evals and smoke
 
 ## 3.5 How to add a new cerebellum integration — the recipe
 
-Every shipped integration (§2.7–§2.11 and §2.13–§2.16; §2.12 is the shared call context, not a feature) follows the same shape; copy it:
+Every shipped integration (§2.7–§2.11 and §2.13–§2.17; §2.12 is the shared call context, not a feature) follows the same shape; copy it:
 
 1. **Pure module** `src/main/cerebellum/<feature>.ts` — Electron-free, `fetchImpl`-injected, never throws, returns the verdict or `null` on any failure (fail-open: null always means "behave exactly as before"). English question instructions; original-language user text in `state`; hard caps on every caller-authored dimension. No runtime imports (rule 9).
 2. **DI seam** — coworkRunner option (or a module setter like `setCerebellumMemoryWriteGate` for libs). Fire the JEV promise as early as possible (parallel with the other per-turn cerebellum calls — the shared budget stays one 1.5s window) and await at the first consumer.
@@ -193,9 +201,9 @@ Every shipped integration (§2.7–§2.11 and §2.13–§2.16; §2.12 is the sha
 
 ## 4. Roadmap — where the cerebellum goes next
 
-Ranked by expected value. Each row names the concrete seam. Rows 1-5, 11-13, and 15 shipped; the rest is the agreed backlog (owner-endorsed 2026-10-14: implement all of it over time).
+Ranked by expected value. Each row names the concrete seam. Rows 1-6, 11-13, and 15 shipped; the rest is the agreed backlog (owner-endorsed 2026-10-14: implement all of it over time).
 
-**Recommended next (2026-10-14, #15 done):** #6 (privateChatDaemon re-rank — the memory ranker is already wired for the group-task daemon). The calibration feedback loop below is an ongoing practice, not a row.
+**Recommended next (2026-10-14, #6 done):** #16 (remote-service candidate shortlist — isomorphic to the shipped skill shortlist #2), then #8 (dream triage — nightly, latency-insensitive, the JEV cost sweet spot). The calibration feedback loop below is an ongoing practice, not a row.
 
 | # | Use case | Seam | Notes |
 |---|---|---|---|
@@ -204,7 +212,7 @@ Ranked by expected value. Each row names the concrete seam. Rows 1-5, 11-13, and
 | 3 | **Volatile block gating** — ✅ **shipped** (see §2.9) | `src/main/cerebellum/volatileBlockGate.ts` + `coworkRunner.buildVolatileContextPrompt` (`cerebellumVolatileBlockGate` DI) | One request, 4 Nouls for the 4 gateable background blocks (memory/browser/goal/skills-catalog deliberately ungated); live eval FN=0, 78% of block injections saved; system-prompt head stays byte-stable |
 | 4 | **Knowledge hot-layer ranking** — ✅ **shipped** (see §2.13) | `src/main/cerebellum/knowledgeHotRank.ts` + `coworkRunner.buildVolatileContextPrompt` (`cerebellumKnowledgeRanker` DI) | Newest-40 pool, one Noul per point, top 8 by noul replace `updated_at DESC`. Pools under 9 stay newest-8 with no call. Null/throw is byte-identical to the old hot layer |
 | 5 | **Group-chat reply decision** — ✅ **shipped** (see §2.14) | `src/main/cerebellum/groupReplyGate.ts` + `cognitiveOrchestrator.ts` (`cerebellumGroupReplyGate`) | Mentions stay a hard yes. Unsolicited replies: one Noul, threshold 0.35, false skips the whole turn, null keeps the coin flip |
-| 6 | **privateChatDaemon re-rank** | `privateChatDaemon.ts` `buildPrivateReplyMemoryPromptBlocks` (~1960) — same DI dep as groupTaskDaemon | Wiring exists (`createCerebellumMemoryRanker`); also reconsider its blackout flag per privacy review |
+| 6 | **privateChatDaemon re-rank** — ✅ **shipped** (see §2.17) | `privateChatDaemon.ts` `buildPrivateReplyMemoryPromptBlocks` + `startPrivateChatDaemon` trailing param | Same `createCerebellumMemoryRanker` DI as groupTaskDaemon; pool widths unchanged so null/throw is byte-identical; sync-when-unwired shape preserved; skill-turn blackout untouched (separate privacy review) |
 | 7 | **MetaWeb two-layer refinement** (owner's idea) | backend returns coarse-grained candidates → bot-side cerebellum picks precise answers | Cloud-side first pass could also be JEV; design for provider swap from day one; needs cloud coordination — separate design doc |
 | 8 | **Dream triage** | `dreamService.ts` fragment pre-filter; `memoryHygieneService` deep-consolidation proposals (JEV proposes, LLM confirms) | Nightly/batch — latency-insensitive, cost-sensitive; sweet spot for JEV pricing |
 | 9 | **Task-done verification** | scheduled-task output / group-task deliverable checks | "Did this actually happen?" Noul on evidence; pairs with the daemons (unattended contexts) |
@@ -229,4 +237,4 @@ Cross-cutting: validate every new question on real Chinese data first (Playgroun
 - Cost envelope: ~200 candidates ≈ 8K input tokens ≈ **$0.0003 per ranked turn**; write gate ≈ 470 input tokens ≈ **$0.00002 per gated turn**; skill shortlist ≈ 2.2K input tokens (48-skill catalog) ≈ **$0.0001 per ranked turn**, scaling with roster size; block gate ≈ 690 input tokens ≈ **$0.00003 per gated turn**; output free.
 ## 6. On-chain dev journals (trace)
 
-Merge journals: cerebellum MVP `0cba64a9…i0`; group-task working memory `937ad63c…i0`. Per-commit journals were posted for the early feature lines. The 2026-10-14 merges of #4 (`9ffacc23`), #5 (`f3a722b1`), #13 (`ccd6094d`), and #15 (`c53ab0a0`) did **not** get a Buzz pin: `metabot buzz post` returned `buzz_post_failed` / `SPONSOR_BROADCAST_PENDING` / `Missing inputs`. Retry the journal only when the chain broadcast works; do not amend those merge commits just to attach a pin id.
+Merge journals: cerebellum MVP `0cba64a9…i0`; group-task working memory `937ad63c…i0`. Per-commit journals were posted for the early feature lines. The 2026-10-14 merges of #4 (`9ffacc23`), #5 (`f3a722b1`), #13 (`ccd6094d`), and #15 (`c53ab0a0`) did **not** get a Buzz pin: `metabot buzz post` returned `buzz_post_failed` / `SPONSOR_BROADCAST_PENDING` / `Missing inputs`. Retry the journal only when the chain broadcast works; do not amend those merge commits just to attach a pin id. #6's commit journal (2026-10-14, branch commit): `4bc71f8b…i0`.

@@ -3183,8 +3183,9 @@ const cerebellumFetchFor = (config: ResolvedCerebellumConfig) => {
 };
 
 /**
- * Cerebellum (小脑) memory re-ranker factory, shared by the cowork runner and
- * the group-task daemon's owner-scope memory block. The config is re-resolved
+ * Cerebellum (小脑) memory re-ranker factory, shared by the cowork runner, the
+ * group-task daemon's owner-scope memory block, and the private-chat daemon's
+ * reply memory blocks. The config is re-resolved
  * lazily on every call, so Settings edits apply on the next turn without an
  * app restart; null config (disabled/no key) silently keeps lexical ranking.
  * The fetch MUST ride the Electron net stack (session.defaultSession) — it
@@ -4165,6 +4166,10 @@ const startStartupMessageTier = (): void => {
     (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
     (sessionId) => scheduleA2APeerProfileRefresh(sessionId),
     getMetaIDCognitionPromptBlock,
+    // Cerebellum (小脑) re-rank for the private-chat reply memory blocks
+    // (roadmap #6) — the same shared ranker the cowork runner and the
+    // group-task daemon use (see createCerebellumMemoryRanker).
+    createCerebellumMemoryRanker(),
   );
 
   // Periodically reconcile private chat history with the MetaSO API so
