@@ -1,9 +1,13 @@
 # Mobile Access via Cloud-Hosted IDBots — Design
 
 Date: 2026-10-14
-Status: Approved direction (owner decisions recorded below), pending spec review
+Status: Approved by the owner on 2026-10-14
 Scope: First invite-only release that lets a user install a phone app and use
 IDBots without owning an always-on computer
+Handoff: the per-party requirement documents are in
+[`docs/cloud-mobile/`](../../cloud-mobile/README.md); the Phase 0 spike plan is
+[`docs/superpowers/plans/2026-10-14-phase0-linux-headless-spike.md`](../plans/2026-10-14-phase0-linux-headless-spike.md).
+Where this spec and those documents differ, the documents are newer and win.
 
 ## Summary
 
@@ -112,9 +116,10 @@ All four keep the agent in the cloud and treat the phone as a client. Cue's
   `preload.ts` is a thin method-to-channel mapping. A WebSocket implementation
   of the same interface lets most renderer logic run unchanged.
 - **Desktop-only subsystems:** tray, auto-update, auto-launch, sleep guard,
-  screenshots (`desktopCapturer`), Bot Browser webviews, and the bundled
-  `man-p2p` subprocess. Bundled ffmpeg exists only for darwin-arm64 and
-  win32-x64.
+  screenshots (`desktopCapturer`), and Bot Browser webviews. Bundled ffmpeg
+  exists only for darwin-arm64 and win32-x64. The bundled `man-p2p` indexer
+  has already been removed; indexer reads go to the remote indexer unless
+  `IDBOTS_MAN_P2P_LOCAL_BASE` points at a self-hosted one.
 
 ## Approaches Considered
 
@@ -163,9 +168,9 @@ flowchart LR
   policy restarts crashed containers.
 - **Always on:** all tenant containers stay running in this release because
   background work needs them.
-- **Shared services:** indexer reads go through the existing remote fallback
-  in `localIndexerProxy.ts`; no per-tenant `man-p2p`. LLM, traffic, and fee
-  sponsorship go through Metaso.
+- **Shared services:** indexer reads go to the remote indexer, as on desktop
+  since `man-p2p` was removed. LLM, traffic, and fee sponsorship go through
+  Metaso.
 - **Upgrade:** the control plane restarts a tenant on a new image tag; the
   data volume persists, and the existing idempotent first-run migrations run
   exactly as they do after a desktop auto-update.
@@ -191,8 +196,9 @@ own pnpm package (same pattern as `dsh-runtime/`), with SQLite storage.
 
 1. After the invite code validates, the control plane creates a container
    from `idbots-server:<version>` through the Docker Engine API, mounts the
-   user's volume, and injects `IDBOTS_SERVER_MODE=1`,
-   `IDBOTS_USER_DATA_PATH=/data`, and a per-container gateway secret.
+   user's volume at `/data`, and injects `IDBOTS_SERVER_MODE=1`,
+   `IDBOTS_USER_DATA_PATH=/data/userdata`, and a per-container gateway secret
+   (full list in `docs/cloud-mobile/01-interface-contracts.md`, C1).
 2. On first boot, server mode runs the onboarding a desktop user does by
    hand: create the user identity, create the first twin MetaBot (reusing
    `welcomeBootstrap.ts`), select the Metaso relay as the LLM provider, and
@@ -240,7 +246,7 @@ release.
 
 - Creates no window, and the process does not quit when no windows exist.
 - Skips tray, auto-update, auto-launch, and sleep guard.
-- Disables Bot Browser, screenshot tools, and the local `man-p2p` subprocess.
+- Disables Bot Browser and screenshot tools.
 - Linux display strategy (Xvfb or Chromium's headless Ozone platform) is
   decided in Phase 0.
 - Desktop builds do not set the flag and behave exactly as today.
@@ -248,11 +254,12 @@ release.
 **IPC registry**
 
 - Add `registerIpcHandler(channel, fn)`, which calls `ipcMain.handle` and
-  records `fn` in a registry map. Replace the 341 registrations in `main.ts`
-  and the four service files that register handlers.
-- The 22 `event.sender` / `BrowserWindow.fromWebContents` uses in `main.ts`
-  are reviewed individually; most are window controls that never enter the
-  allowlist.
+  records `fn` in a registry map. Replace the 342 `ipcMain.handle`
+  registrations: 312 in `main.ts` and 30 in five service modules
+  (`trafficAccountService`, `metabotWalletIpc`, `feeRateStore`,
+  `llmRelayService`, `jevRelayService`).
+- The 24 `event.sender` / `BrowserWindow.fromWebContents` uses are reviewed
+  individually; most are window controls that never enter the allowlist.
 
 **Event broadcast**
 
@@ -266,7 +273,8 @@ release.
   server mode.
 - Client to server: `{ type: 'invoke', id, channel, args }`. Server to client:
   `{ type: 'result', id, ok, value | error }` and
-  `{ type: 'event', channel, payload }`.
+  `{ type: 'event', channel, args }`. The full protocol (welcome frame, error
+  and close codes, limits) is C2 in `docs/cloud-mobile/01-interface-contracts.md`.
 - Payloads pass through the existing `sanitizeIpcPayload` limits.
 - Reconnects reuse the existing stream resync path
   (`readCoworkStreamLiveContent`), so a reply that was streaming when the
@@ -305,8 +313,10 @@ release.
   the tenant's volume, stored on the cloud provider's encrypted disks.
 - Fees go through traffic sponsorship, so Bot wallets do not need to hold
   funds; balances stay small.
-- Mnemonic export is a dedicated allowlisted channel gated by a fresh SMS
-  verification at the control plane. The exported mnemonic can be imported
+- Mnemonic export is a dedicated HTTP route, never a WebSocket channel: the
+  control plane requires a fresh SMS verification and then calls the tenant's
+  sensitive route with a short-lived, single-use token. The exported mnemonic
+  can be imported
   into desktop IDBots and restored through the chain backup design, which is
   the self-custody exit.
 - Operator access to tenant volumes is restricted and logged. The privacy
@@ -323,9 +333,10 @@ release.
 
 **`window.electron` shim**
 
-- Extract the method-to-channel mapping from `preload.ts` into a shared
-  contract table. Both the desktop preload and the mobile WebSocket shim are
-  generated from it, so the two cannot drift.
+- The desktop preload runs sandboxed and cannot import shared modules, so it
+  stays the source of truth: a script parses `preload.ts` into a contract
+  file (method path, channel, kind) that the mobile shim is built from, and a
+  test fails when the file is stale, so the two cannot drift.
 - The shim handles reconnects and request timeouts and shows a reconnecting
   banner.
 - Add `resolveLocalFileUrl()`: `file://` on desktop, signed gateway URL on
@@ -449,8 +460,8 @@ encryption, mainland hosting and public listing compliance.
 
 ## Testing
 
-- **Unit:** gateway auth and allowlist; parity between preload and shim
-  generated from the shared contract table; signed file URLs cannot escape
+- **Unit:** gateway auth and allowlist; the contract file generated from the
+  preload is current and the shim covers it; signed file URLs cannot escape
   the tenant data directory (path traversal).
 - **Integration:** docker-compose with the control plane and two tenants; a
   script runs sign-up, provisioning, a chat turn, a scheduled task firing,
