@@ -1,5 +1,5 @@
 import type { CollectPreferenceEventsResult } from './collector';
-import { COMMIT_CUTOFF_SEC, type PreferenceSegment } from './constants';
+import { COMMIT_CUTOFF_SEC, REVEAL_DELAY_SEC, type PreferenceSegment } from './constants';
 import { compareOrderKey, tallyRound } from './engine';
 import { canonicalRoundForSubject, checkLesson, verifyLessonPin, type CanonicalRoundResolution } from './lesson';
 import { checkBallot, parseLesson, parseRound } from './schemas';
@@ -88,6 +88,8 @@ type ErrorResult = { error: string };
 const errorOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 const tagMatches = (query: string, tag: string): boolean => tag === query || tag.startsWith(`${query}:`);
+
+const STALE_COMMITTING_MS = 120_000;
 
 export class PreferenceService {
   private readonly deps: PreferenceServiceDeps;
@@ -344,5 +346,63 @@ export class PreferenceService {
   recordTelemetry(roundPinId: string, pairKey: string, seconds: number): void {
     if (!Number.isInteger(seconds) || seconds < 0 || seconds > 3600) return;
     this.deps.store.recordTelemetry(roundPinId, pairKey, seconds, this.nowMs());
+  }
+
+  hasActiveBallots(): boolean {
+    return this.deps.store.countActive(this.nowSec()) > 0;
+  }
+
+  async revealDue(): Promise<{ attempted: number; revealed: number; failed: number; expired: number }> {
+    const nowSec = this.nowSec();
+    const expired = this.deps.store.expireStale(nowSec, this.nowMs());
+    this.reconcile(this.events(), nowSec);
+    const counts = { attempted: 0, revealed: 0, failed: 0, expired };
+    for (const row of this.deps.store.listBallots({ statuses: ['committed'] })) {
+      if (!row.commitPinId || nowSec < row.commitCloseAt + REVEAL_DELAY_SEC || nowSec > row.revealCloseAt) continue;
+      counts.attempted += 1;
+      const signer: PreferenceSigner = row.signerType === 'user'
+        ? { type: 'user' }
+        : { type: 'metabot', metabotId: row.metabotId ?? -1 };
+      const writer = this.deps.resolveWriter(signer);
+      if ('error' in writer || writer.globalMetaId !== row.judgeGlobalMetaId) {
+        this.deps.store.markRevealFailed(row.id, 'error' in writer ? writer.error : 'preference:signer-changed', this.nowMs());
+        counts.failed += 1;
+        continue;
+      }
+      const payload = { round: row.roundPinId, commit: row.commitPinId, salt: row.salt, ballot: row.ballot };
+      try {
+        const written = await writer.write('reveal', payload);
+        this.deps.store.markRevealed(row.id, written.pinId, this.nowMs());
+        this.cacheOwnPin(written.pinId, 'reveal', writer.globalMetaId, payload);
+        counts.revealed += 1;
+      } catch (error) {
+        this.deps.store.markRevealFailed(row.id, errorOf(error), this.nowMs());
+        counts.failed += 1;
+      }
+    }
+    if (counts.revealed > 0 || counts.expired > 0) this.deps.onUpdate?.('preference-reveal');
+    return counts;
+  }
+
+  private reconcile(events: readonly PreferenceChainEvent[], nowSec: number): void {
+    const nowMs = this.nowMs();
+    for (const row of this.deps.store.listBallots({ statuses: ['committing', 'revealed'] })) {
+      if (row.status === 'committing') {
+        if (nowMs - row.createdAtMs < STALE_COMMITTING_MS) continue;
+        const onChain = events.find(
+          (event) => event.path === 'commit'
+            && event.author === row.judgeGlobalMetaId
+            && event.body.round === row.roundPinId
+            && event.body.hash === row.commitHash,
+        );
+        if (onChain) this.deps.store.markCommitted(row.id, onChain.pinId, nowMs);
+        continue;
+      }
+      if (!row.revealPinId || nowSec > row.revealCloseAt) continue;
+      const reveal = events.find((event) => event.pinId === row.revealPinId);
+      if (reveal && reveal.height >= 0 && Math.floor(reveal.timestampMs / 1000) <= row.commitCloseAt) {
+        this.deps.store.markRevealRetry(row.id, nowMs);
+      }
+    }
   }
 }

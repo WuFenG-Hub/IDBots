@@ -255,3 +255,91 @@ test('telemetry ignores out-of-range values', async () => {
   service.recordTelemetry(pid(1), 'c1|c2', 1.5);
   assert.deepEqual(store.telemetryForRound(pid(1)), [{ pairKey: 'c1|c2', seconds: 30 }]);
 });
+
+const commitAsUser = async (nowSec = COMMIT_CLOSE - 7_200) => {
+  const { c, round } = openChain();
+  const h = await harness({ nowSec, events: c.events });
+  await h.service.refresh('seed');
+  await h.service.commitBallot({ type: 'user' }, round, C3_BEST);
+  confirm(h.state, h.state.writes[0], nowSec + 200);
+  await h.service.refresh('confirm-commit');
+  return { ...h, round };
+};
+
+test('reveals only after commitCloseAt + delay, once, and the engine counts it', async () => {
+  const { service, state, store, round } = await commitAsUser();
+  state.nowSec = COMMIT_CLOSE + 100;
+  assert.equal((await service.revealDue()).attempted, 0);
+  state.nowSec = COMMIT_CLOSE + 1_800;
+  assert.deepEqual(await service.revealDue(), { attempted: 1, revealed: 1, failed: 0, expired: 0 });
+  const [row] = store.listBallots({ roundPinId: round });
+  assert.equal(row.status, 'revealed');
+  assert.deepEqual(state.writes[1].payload, { round, commit: row.commitPinId, salt: row.salt, ballot: C3_BEST });
+  assert.equal((await service.revealDue()).attempted, 0);
+
+  confirm(state, state.writes[1], COMMIT_CLOSE + 1_900);
+  state.nowSec = FINAL_NOW;
+  await service.refresh('confirm-reveal');
+  const judge = service.roundStatus(round).tally.output.judges.find((entry) => entry.id === H1);
+  assert.equal(judge.class, 'deciding');
+  assert.equal(judge.pairs, 3);
+});
+
+test('reveal retries up to five times, then gives up', async () => {
+  const { service, state, store } = await commitAsUser();
+  state.nowSec = COMMIT_CLOSE + 1_800;
+  state.failNext = 5;
+  for (let attempt = 1; attempt <= 5; attempt += 1) await service.revealDue();
+  const [row] = store.listBallots();
+  assert.equal(row.status, 'reveal_failed');
+  assert.equal(row.revealAttempts, 5);
+  assert.equal((await service.revealDue()).attempted, 0);
+});
+
+test('a reveal mined at or before commitCloseAt is published again', async () => {
+  const { service, state, store } = await commitAsUser();
+  state.nowSec = COMMIT_CLOSE + 1_800;
+  await service.revealDue();
+  confirm(state, state.writes[1], COMMIT_CLOSE);
+  await service.refresh('lagging-block-time');
+  const again = await service.revealDue();
+  assert.equal(again.revealed, 1);
+  assert.deepEqual(state.writes.map((write) => write.segment), ['commit', 'reveal', 'reveal']);
+  assert.equal(store.listBallots()[0].revealPinId, state.writes[2].pinId);
+});
+
+test('unrevealed ballots expire after revealCloseAt', async () => {
+  const { service, state, store } = await commitAsUser();
+  assert.equal(service.hasActiveBallots(), true);
+  state.nowSec = REVEAL_CLOSE + 1;
+  assert.deepEqual(await service.revealDue(), { attempted: 0, revealed: 0, failed: 0, expired: 1 });
+  assert.equal(store.listBallots()[0].status, 'expired');
+  assert.equal(service.hasActiveBallots(), false);
+});
+
+test('a commit broadcast whose bookkeeping was lost is reconciled from chain', async () => {
+  const { c, round } = openChain();
+  const nowSec = COMMIT_CLOSE - 7_200;
+  const { service, state, store } = await harness({ nowSec, events: c.events });
+  const salt = 'a1'.repeat(32);
+  const commitHash = ballotCommitHash({ round, judge: H1, salt, ballot: C3_BEST });
+  const row = store.insertBallot({
+    roundPinId: round,
+    signerType: 'user',
+    metabotId: null,
+    judgeGlobalMetaId: H1,
+    ballot: C3_BEST,
+    salt,
+    commitHash,
+    commitCloseAt: COMMIT_CLOSE,
+    revealCloseAt: REVEAL_CLOSE,
+    nowMs: nowSec * 1000,
+  });
+  confirm(state, { pinId: pid(8888), segment: 'commit', author: H1, payload: { round, hash: commitHash } }, nowSec + 60);
+  state.nowSec = nowSec + 300;
+  await service.refresh('recover');
+  await service.revealDue();
+  const recovered = store.getBallot(row.id);
+  assert.equal(recovered.status, 'committed');
+  assert.equal(recovered.commitPinId, pid(8888));
+});
