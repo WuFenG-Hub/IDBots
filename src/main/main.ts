@@ -37,6 +37,11 @@ import {
   CEREBELLUM_SKILL_SHORTLIST_TOP_K,
 } from './cerebellum/skillShortlist';
 import {
+  rankRemoteServicesWithCerebellum,
+  CEREBELLUM_REMOTE_SERVICE_SHORTLIST_MIN_POOL,
+  CEREBELLUM_REMOTE_SERVICE_SHORTLIST_TOP_K,
+} from './cerebellum/remoteServiceShortlist';
+import {
   CoworkRunner,
   isDelegationPriceNumeric,
   type DelegationRequest,
@@ -3403,6 +3408,76 @@ const createCerebellumSkillRanker = () =>
   };
 
 /**
+ * Cerebellum (小脑) remote-service shortlist (roadmap #16): one JEV Choice
+ * question ranks the discovered on-chain service directory against the
+ * current user message; the top-3 ride the per-turn tail next to the
+ * untouched <available_remote_services> block. The directory comes from the
+ * SAME discovery snapshot the block renders (normalized with the same
+ * id/name fallback chains buildRemoteServicesPrompt uses), so the shortlist
+ * can never mention a service the block omits. Pools under
+ * CEREBELLUM_REMOTE_SERVICE_SHORTLIST_MIN_POOL stay model-scannable and make
+ * no call. Same lazy shape as the factories above — config re-resolved per
+ * call (Settings edits apply next turn), fetch from
+ * resolveCerebellumCallContext. null on any failure injects nothing. Never
+ * logs service names or the user text — ids, counts, and latency only.
+ */
+const createCerebellumRemoteServiceRanker = () =>
+  async ({ currentUserText }: {
+    currentUserText: string;
+  }): Promise<Array<{ id: string; name: string; description: string; probability: number }> | null> => {
+    const context = await resolveCerebellumCallContext();
+    if (!context) {
+      return null;
+    }
+    let directory: any[] = [];
+    try {
+      directory = getProviderDiscoveryService().getDiscoverySnapshot().availableServices ?? [];
+    } catch {
+      return null;
+    }
+    const seen = new Set<string>();
+    const services: Array<{ id: string; name: string; description: string }> = [];
+    for (const service of directory) {
+      // Same fallback chain as buildRemoteServicesPrompt — the shortlist's
+      // ids and names must match what the rendered block carries.
+      const id = String(service?.currentPinId ?? service?.id ?? service?.pinId ?? service?.servicePinId ?? '').trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      services.push({
+        id,
+        name: String(service?.displayName ?? service?.serviceName ?? id),
+        description: String(service?.description ?? ''),
+      });
+    }
+    if (services.length < CEREBELLUM_REMOTE_SERVICE_SHORTLIST_MIN_POOL) {
+      return null;
+    }
+    const startedAt = Date.now();
+    const ranking = await rankRemoteServicesWithCerebellum({
+      config: context.config,
+      fetchImpl: context.fetchImpl,
+      currentUserText,
+      services,
+    });
+    coworkLog('INFO', 'remoteServices:cerebellumShortlist', 'directory ranked for turn', {
+      pool: services.length,
+      ranked: ranking?.length ?? 0,
+      latencyMs: Date.now() - startedAt,
+      used: ranking !== null,
+    });
+    if (!ranking) {
+      return null;
+    }
+    const servicesById = new Map(services.map((service) => [service.id, service]));
+    return ranking
+      .slice(0, CEREBELLUM_REMOTE_SERVICE_SHORTLIST_TOP_K)
+      .flatMap((entry) => {
+        const service = servicesById.get(entry.id);
+        return service ? [{ ...service, probability: entry.probability }] : [];
+      });
+  };
+
+/**
  * Cerebellum (小脑) volatile block gate (roadmap #3): one JEV request with
  * one Noul per gateable background block (experience / twin-impression /
  * knowledge-bases / remote-services) decides which blocks ride this turn's
@@ -6261,6 +6336,10 @@ const getCoworkRunner = () => {
       // visible skill catalog per turn; top-3 ride the volatile tail next to
       // the untouched catalog block (see createCerebellumSkillRanker).
       cerebellumSkillRanker: createCerebellumSkillRanker(),
+      // Cerebellum (小脑) remote-service shortlist (roadmap #16): ranks the
+      // discovery directory per turn; top-3 ride the volatile tail next to
+      // the untouched directory block (see createCerebellumRemoteServiceRanker).
+      cerebellumRemoteServiceRanker: createCerebellumRemoteServiceRanker(),
       // Cerebellum (小脑) volatile block gate (roadmap #3): per-turn Noul
       // verdicts for the background tail blocks (see
       // createCerebellumVolatileBlockGate).

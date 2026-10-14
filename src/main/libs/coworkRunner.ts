@@ -120,6 +120,7 @@ import {
   type CerebellumEffortSticky,
 } from '../cerebellum/effortSelector';
 import { buildSkillShortlistBlock } from '../cerebellum/skillShortlist';
+import { buildRemoteServiceShortlistBlock } from '../cerebellum/remoteServiceShortlist';
 import { CEREBELLUM_VOLATILE_GATE_SECTION_KEYS } from '../cerebellum/volatileBlockGate';
 import {
   CEREBELLUM_INTUITION_WINDOW_MAX_CALLS,
@@ -2146,6 +2147,21 @@ export interface CoworkRunnerOptions {
     metabotId: number | null;
   }) => Promise<Array<{ id: string; name: string; description: string; probability: number }> | null>;
   /**
+   * Optional cerebellum (小脑) shortlist for the volatile remote-services
+   * directory block (roadmap #16). When set, the runner asks it to rank the
+   * discovered on-chain service directory against the current user text; the
+   * returned top entries ride the per-turn tail as a separate
+   * <remote_service_shortlist> block next to the untouched directory block —
+   * and only on turns where the directory block itself rides (the volatile
+   * block gate owns that surface). null (unconfigured, small pool, timeout,
+   * error) means "no shortlist" — the callback must never throw. main.ts
+   * resolves the cerebellum config and the discovery directory lazily inside
+   * the callback so Settings/discovery changes apply next turn.
+   */
+  cerebellumRemoteServiceRanker?: (input: {
+    currentUserText: string;
+  }) => Promise<Array<{ id: string; name: string; description: string; probability: number }> | null>;
+  /**
    * Optional cerebellum (小脑) volatile block gate for the per-turn tail: one
    * Noul per gateable block ("does this turn need block X?") decides which
    * background blocks (experience / twin-impression / knowledge-bases /
@@ -2351,6 +2367,7 @@ export class CoworkRunner extends EventEmitter {
   private cerebellumKnowledgeRanker?: CoworkRunnerOptions['cerebellumKnowledgeRanker'];
   private cerebellumConversationRanker?: CoworkRunnerOptions['cerebellumConversationRanker'];
   private cerebellumSkillRanker?: CoworkRunnerOptions['cerebellumSkillRanker'];
+  private cerebellumRemoteServiceRanker?: CoworkRunnerOptions['cerebellumRemoteServiceRanker'];
   private cerebellumVolatileBlockGate?: CoworkRunnerOptions['cerebellumVolatileBlockGate'];
   private cerebellumIntuitionAvailable?: CoworkRunnerOptions['cerebellumIntuitionAvailable'];
   private cerebellumIntuition?: CoworkRunnerOptions['cerebellumIntuition'];
@@ -2528,6 +2545,7 @@ export class CoworkRunner extends EventEmitter {
     this.cerebellumKnowledgeRanker = options?.cerebellumKnowledgeRanker;
     this.cerebellumConversationRanker = options?.cerebellumConversationRanker;
     this.cerebellumSkillRanker = options?.cerebellumSkillRanker;
+    this.cerebellumRemoteServiceRanker = options?.cerebellumRemoteServiceRanker;
     this.cerebellumVolatileBlockGate = options?.cerebellumVolatileBlockGate;
     this.cerebellumIntuitionAvailable = options?.cerebellumIntuitionAvailable;
     this.cerebellumIntuition = options?.cerebellumIntuition;
@@ -6266,6 +6284,17 @@ export class CoworkRunner extends EventEmitter {
           metabotId: this.store.getMetabotIdForSession(sessionId),
         }).catch(() => null)
       : null;
+    // Cerebellum remote-service shortlist (roadmap #16): same fire-early
+    // shape — the rank call overlaps the memory re-ranker, the skill
+    // shortlist, and the block gate (worst case stays one 1.5s budget, not
+    // four). Only sessions that render the remote-services directory at all
+    // start the call; it is awaited inside the directory section below, and
+    // only when the block gate lets that section ride. null/throw degrades
+    // to "no shortlist", byte-identical to the ungated behavior.
+    const remoteServiceShortlistPromise = this.cerebellumRemoteServiceRanker && prompt.trim()
+      && !disableRemoteServicesPrompt
+      ? this.cerebellumRemoteServiceRanker({ currentUserText: prompt }).catch(() => null)
+      : null;
     // Cerebellum volatile block gate (roadmap #3): one Noul per gateable
     // background block decides whether it rides this turn's tail. The call
     // starts here so it overlaps the memory re-ranker's own cerebellum
@@ -6366,6 +6395,23 @@ export class CoworkRunner extends EventEmitter {
           key: 'remote-services',
           text: this.getRemoteServicesPrompt?.() ?? '',
         });
+        // Cerebellum shortlist rides next to the untouched directory: top-3
+        // re-read + a one-line suggestion. The directory block itself stays
+        // byte-stable; the shortlist never rides on turns the gate just
+        // skipped. The rank promise started at function entry, so this await
+        // usually resolves immediately.
+        const serviceEntries = remoteServiceShortlistPromise ? await remoteServiceShortlistPromise : null;
+        if (serviceEntries && serviceEntries.length > 0) {
+          coworkLog('INFO', 'remoteServices:cerebellumShortlist', 'turn remote-service shortlist', {
+            sessionId,
+            used: true,
+            serviceIds: serviceEntries.slice(0, 3).map((entry) => entry.id),
+          });
+          sections.push({
+            key: 'remote-services-shortlist',
+            text: buildRemoteServiceShortlistBlock(serviceEntries),
+          });
+        }
       }
     }
     // Skill catalog: the per-turn tail counterpart of the 'idbots:skills'

@@ -592,6 +592,7 @@ man_base_data_pebble/
 !tests/cerebellumMemoryRank.test.mjs
 !tests/cerebellumMemoryWriteGate.test.mjs
 !tests/cerebellumSkillShortlist.test.mjs
+!tests/cerebellumRemoteServiceShortlist.test.mjs
 !tests/cerebellumVolatileBlockGate.test.mjs
 !tests/cerebellumIntuitionTool.test.mjs
 !tests/cerebellumKnowledgeHotRank.test.mjs

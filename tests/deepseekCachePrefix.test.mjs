@@ -38,11 +38,17 @@ test('experience/dream blocks are injected via the volatile user-message path', 
 
   const volatileStart = source.indexOf('private async buildVolatileContextPrompt');
   assert.ok(volatileStart > 0, 'buildVolatileContextPrompt must exist');
-  const volatileBody = source.slice(volatileStart, volatileStart + 3000);
+  // Slice to the next method boundary rather than a fixed char window: the
+  // function's entry block grows with each cerebellum call site that fires
+  // early (skill shortlist, block gate, knowledge rank, remote-service
+  // shortlist), and a fixed window would silently push these contract
+  // matches out of range.
+  const nextMethod = source.indexOf('\n  private ', volatileStart + 1);
+  const volatileBody = source.slice(volatileStart, nextMethod > 0 ? nextMethod : undefined);
   assert.match(volatileBody, /this\.buildExperiencePromptBlocksXml\(sessionId\)/,
     'experience blocks must be pushed into the volatile per-turn user-message context');
-  assert.match(volatileBody, /if \(sessionMemoryEnabled\)/,
-    'experience injection stays gated on the session memory switch');
+  assert.match(volatileBody, /if \(sessionMemoryEnabled && shouldInjectVolatile\('experience'\)\)/,
+    'experience injection stays gated on the session memory switch (and the volatile block gate)');
 });
 
 test('persona block is frozen per active session instead of re-read per turn', () => {
