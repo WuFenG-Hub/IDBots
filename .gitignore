@@ -595,6 +595,7 @@ man_base_data_pebble/
 !tests/cerebellumVolatileBlockGate.test.mjs
 !tests/cerebellumIntuitionTool.test.mjs
 !tests/cerebellumKnowledgeHotRank.test.mjs
+!tests/cerebellumGroupReplyGate.test.mjs
 !tests/coworkAssistantNarrationSurvival.test.ts
 !tests/coworkAssistantModePromptGate.test.mjs
 !tests/coworkAssistantDeliveryIndex.test.mjs
