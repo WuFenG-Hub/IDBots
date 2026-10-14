@@ -111,6 +111,11 @@ import {
 } from '../cerebellum/effortSelector';
 import { buildSkillShortlistBlock } from '../cerebellum/skillShortlist';
 import { CEREBELLUM_VOLATILE_GATE_SECTION_KEYS } from '../cerebellum/volatileBlockGate';
+import {
+  CEREBELLUM_INTUITION_WINDOW_MAX_CALLS,
+  CEREBELLUM_INTUITION_WINDOW_MS,
+  validateIntuitionInput,
+} from '../cerebellum/intuitionTool';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import {
   applyVolatileDedup,
@@ -1282,6 +1287,13 @@ interface ActiveSession {
    * startSession/continueSession.
    */
   skillsCatalogMode?: 'volatile' | 'inline' | 'legacy';
+  /**
+   * Cerebellum intuition tool guardrail: calls used inside the current
+   * rolling window (see CEREBELLUM_INTUITION_WINDOW_MS). The window resets
+   * lazily on the next call after it expires — no per-turn hooks needed.
+   */
+  cerebellumIntuitionCallsInWindow?: number;
+  cerebellumIntuitionWindowStartAt?: number;
   /** Latest DSH usage snapshot for context reporting (DSH-kernel turns). */
   lastDshUsage?: DshUsageSnapshot;
   localInputChannel?: CoworkSteerChannel;
@@ -2116,6 +2128,24 @@ export interface CoworkRunnerOptions {
     currentUserText: string;
   }) => Promise<Record<string, boolean> | null>;
   /**
+   * Cerebellum (小脑) intuition tool availability: when this sync probe
+   * returns true, the `intuition` inline tool mounts for cowork_ui sessions,
+   * letting the brain itself ask the fast decision model for calibrated
+   * judgments (noul/choice/score). Re-checked on every tool-surface rebuild
+   * so toggling the cerebellum in Settings applies without a restart.
+   */
+  cerebellumIntuitionAvailable?: () => boolean;
+  /**
+   * The `intuition` tool's executor: validated questions + the judged
+   * context in, parsed answers out. null (unconfigured, timeout, error)
+   * becomes an honest "no verdict" tool result the model can act on. The
+   * callback must never throw.
+   */
+  cerebellumIntuition?: (input: {
+    context: string;
+    questions: Array<{ id: string; type: 'noul' | 'choice' | 'score'; instructions: string; criteria?: { true: string; false: string }; options?: Record<string, string>; levels?: string[] }>;
+  }) => Promise<{ answers: Record<string, unknown>; inputTokens: number } | null>;
+  /**
    * Optional cerebellum (小脑) reasoning-effort auto selector for the "auto"
    * effort rung: one JEV Choice question rates how much deliberation the
    * user's message intrinsically needs ({off, low, high, max} probabilities).
@@ -2289,6 +2319,8 @@ export class CoworkRunner extends EventEmitter {
   private cerebellumMemoryRanker?: CoworkRunnerOptions['cerebellumMemoryRanker'];
   private cerebellumSkillRanker?: CoworkRunnerOptions['cerebellumSkillRanker'];
   private cerebellumVolatileBlockGate?: CoworkRunnerOptions['cerebellumVolatileBlockGate'];
+  private cerebellumIntuitionAvailable?: CoworkRunnerOptions['cerebellumIntuitionAvailable'];
+  private cerebellumIntuition?: CoworkRunnerOptions['cerebellumIntuition'];
   private cerebellumEffortSelector?: CoworkRunnerOptions['cerebellumEffortSelector'];
   /**
    * Per-session sticky state for the auto effort rung: the last escalated
@@ -2462,6 +2494,8 @@ export class CoworkRunner extends EventEmitter {
     this.cerebellumMemoryRanker = options?.cerebellumMemoryRanker;
     this.cerebellumSkillRanker = options?.cerebellumSkillRanker;
     this.cerebellumVolatileBlockGate = options?.cerebellumVolatileBlockGate;
+    this.cerebellumIntuitionAvailable = options?.cerebellumIntuitionAvailable;
+    this.cerebellumIntuition = options?.cerebellumIntuition;
     this.cerebellumEffortSelector = options?.cerebellumEffortSelector;
     this.localTurnStallTimeoutMs = Math.max(
       0,
@@ -11483,6 +11517,104 @@ export class CoworkRunner extends EventEmitter {
     memoryTools.push(
       ...buildMetafileRouteAgentTools({ tool })
     );
+    // Cerebellum (小脑) intuition tool — the brain-callable fast-decision
+    // primitive. Phase 1 scope: the owner's own cowork_ui sessions only
+    // (external-facing sessions keep the established privacy posture), the
+    // cerebellum configured (probe re-runs on every tool-surface rebuild so
+    // Settings toggles apply without a restart), and a rolling 3-calls-per-
+    // minute guardrail against runaway judgment loops. The tool description
+    // below IS the teaching text — keep the WHEN/WHEN-NOT sections when
+    // editing.
+    const intuitionSourceOk =
+      this.cerebellumIntuitionAvailable?.() === true
+      && this.store.getConversationSourceContextBySession?.(sessionId)?.sourceChannel === 'cowork_ui';
+    if (this.cerebellumIntuition && intuitionSourceOk) {
+      memoryTools.push(
+        tool(
+          'intuition',
+          [
+            'Your built-in fast "intuition" module: a lightweight decision model that returns calibrated probabilities for judgments you choose to delegate.',
+            'It only judges the `context` you provide — it never generates text.',
+            'Question types: "noul" = yes/no likelihood (0-1 probability); "choice" = pick among named options (probability distribution); "score" = rate on an ordered scale of level descriptions.',
+            '',
+            'WHEN to use:',
+            '1. Choosing between candidates by soft fit — "which draft best matches this user\'s tone preference", "which title would this user click".',
+            '2. Judging likelihood from context — "is this claim consistent with what I know about this user".',
+            '3. Calibrated quality/fit ratings when a trustworthy number beats a gut guess.',
+            'Up to 6 questions about the SAME context are evaluated in parallel per call.',
+            '',
+            'WHEN NOT to use:',
+            '- Never for anything computable (counting, dates, arithmetic) or facts you can look up with other tools.',
+            '- Never for generating, rewriting, or summarizing text.',
+            '- Not a substitute for your own reasoning on every turn — call it only when a probability you can trust beats guessing.',
+            '',
+            'How to ask well: keep each question atomic and self-contained; English wording works best while `context` can stay in the user\'s language; give each choice option a one-line description; order score levels from the low end to the high end.',
+            'Output: answers keyed by question id with probabilities/confidence. They are calibrated across groups, NOT per-case guarantees — weigh them as evidence, not truth.',
+          ].join('\n'),
+          {
+            context: z.string().min(1).describe('The single shared text to judge — quote the user\'s original words or the content itself; any language.'),
+            questions: z.array(z.object({
+              id: z.string().regex(/^[a-zA-Z0-9_-]{1,32}$/).optional().describe('Short unique answer key (defaults to q1, q2, ...).'),
+              type: z.enum(['noul', 'choice', 'score']).describe('noul = yes/no probability; choice = pick among options; score = rate on ordered levels.'),
+              question: z.string().min(1).describe('One atomic judgment, English wording works best; it is evaluated against `context`.'),
+              options: z.record(z.string(), z.string()).optional().describe('choice only: { option_id: one-line description }, 2-24 options.'),
+              levels: z.array(z.string()).optional().describe('score only: 2-10 descriptions ordered from the low end to the high end of the scale.'),
+            })).min(1).max(6).describe('Questions evaluated in parallel against the same context.'),
+          },
+          async (args: {
+            context: string;
+            questions: Array<{ id?: string; type: string; question: string; options?: Record<string, string>; levels?: string[] }>;
+          }) => {
+            const validation = validateIntuitionInput(args);
+            if (!validation.questions) {
+              return { content: [{ type: 'text', text: validation.error ?? 'intuition: invalid input.' }] } as any;
+            }
+            const activeSession = this.activeSessions.get(sessionId);
+            if (activeSession) {
+              const now = Date.now();
+              if (now - (activeSession.cerebellumIntuitionWindowStartAt ?? 0) > CEREBELLUM_INTUITION_WINDOW_MS) {
+                activeSession.cerebellumIntuitionWindowStartAt = now;
+                activeSession.cerebellumIntuitionCallsInWindow = 0;
+              }
+              const used = activeSession.cerebellumIntuitionCallsInWindow ?? 0;
+              if (used >= CEREBELLUM_INTUITION_WINDOW_MAX_CALLS) {
+                return {
+                  content: [{
+                    type: 'text',
+                    text: `intuition: rate limit — at most ${CEREBELLUM_INTUITION_WINDOW_MAX_CALLS} calls per minute on this session. Decide with your own judgment for now.`,
+                  }],
+                } as any;
+              }
+              activeSession.cerebellumIntuitionCallsInWindow = used + 1;
+            }
+            coworkLog('INFO', 'cerebellum:intuition', 'intuition tool invoked', {
+              sessionId,
+              questionCount: validation.questions.length,
+              types: validation.questions.map((question) => question.type),
+            });
+            const result = await this.cerebellumIntuition?.({
+              context: args.context,
+              questions: validation.questions,
+            });
+            if (!result) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: 'intuition: no verdict (the fast-decision model is unavailable or timed out). Proceed with your own judgment — do not retry immediately.',
+                }],
+              } as any;
+            }
+            return {
+              content: [{
+                type: 'text',
+                text: 'intuition result (probabilities are calibrated across groups, NOT per-case guarantees — weigh them as a signal, not truth):\n'
+                  + JSON.stringify(result.answers, null, 2),
+              }],
+            } as any;
+          }
+        )
+      );
+    }
     // MetaBot management tools:
     // - Twin: full list/create/update/delete + metabot_getinfo
     // - Welcome Bot (initial setup): list/create only
