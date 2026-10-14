@@ -158,3 +158,100 @@ test('canonicalRound and searchLessons', async () => {
   assert.equal(found[0].decidingBallots, 2);
   assert.equal(service.searchLessons({ category: ['wiki'] }).length, 0);
 });
+
+const openChain = (over = {}) => {
+  const c = chain();
+  const round = c.openRound(over);
+  return { c, round };
+};
+
+test('commitBallot seals the ballot, stores the salt, and publishes only the hash', async () => {
+  const { c, round } = openChain();
+  const { service, state, store } = await harness({ nowSec: COMMIT_CLOSE - 7_200, events: c.events });
+  await service.refresh('seed');
+  const result = await service.commitBallot({ type: 'user' }, round, C3_BEST);
+  assert.equal(typeof result.pinId, 'string');
+  const [row] = store.listBallots({ roundPinId: round });
+  assert.equal(row.status, 'committed');
+  assert.equal(row.commitPinId, result.pinId);
+  assert.deepEqual(state.writes.map((write) => write.segment), ['commit']);
+  assert.deepEqual(state.writes[0].payload, {
+    round,
+    hash: ballotCommitHash({ round, judge: H1, salt: row.salt, ballot: C3_BEST }),
+  });
+  assert.equal(JSON.stringify(state.writes[0].payload).includes(row.salt), false);
+  assert.equal('salt' in service.roundStatus(round).localBallots[0], false);
+});
+
+test('commitBallot refusals happen before any write', async () => {
+  const own = openChain({ candidates: [{ ...CANDIDATES[0], author: H1 }, CANDIDATES[1], CANDIDATES[2]] });
+  const ownHarness = await harness({ nowSec: COMMIT_CLOSE - 7_200, events: own.c.events });
+  await ownHarness.service.refresh('seed');
+  assert.deepEqual(await ownHarness.service.commitBallot({ type: 'user' }, own.round, C3_BEST), {
+    error: 'preference:own-candidate-in-ballot',
+  });
+  assert.deepEqual(await ownHarness.service.commitBallot({ type: 'user' }, own.round, ballot(pair('c1', 'c9', 'a'))), {
+    error: 'ballot:pair-candidates',
+  });
+  assert.deepEqual(await ownHarness.service.commitBallot({ type: 'metabot', metabotId: 9 }, own.round, ballot(pair('c2', 'c3', 'a'))), {
+    error: 'METABOT_IDENTITY_MISSING',
+  });
+  assert.equal(ownHarness.state.writes.length, 0);
+
+  const late = openChain();
+  const lateHarness = await harness({ nowSec: COMMIT_CLOSE - 1_000, events: late.c.events });
+  await lateHarness.service.refresh('seed');
+  assert.deepEqual(await lateHarness.service.commitBallot({ type: 'user' }, late.round, C3_BEST), {
+    error: 'preference:commit-window-closing',
+  });
+  assert.equal(lateHarness.store.listBallots().length, 0);
+});
+
+test('a failed broadcast leaves a commit_failed record; a re-commit supersedes the earlier one', async () => {
+  const { c, round } = openChain();
+  const { service, state, store } = await harness({ nowSec: COMMIT_CLOSE - 7_200, events: c.events });
+  await service.refresh('seed');
+  state.failNext = 1;
+  assert.deepEqual(await service.commitBallot({ type: 'user' }, round, C3_BEST), { error: 'broadcast failed' });
+  assert.equal(store.listBallots()[0].status, 'commit_failed');
+  await service.commitBallot({ type: 'user' }, round, C3_BEST);
+  await service.commitBallot({ type: 'user' }, round, ballot(pair('c1', 'c2', 'a')));
+  assert.deepEqual(store.listBallots().map((row) => row.status), ['commit_failed', 'superseded', 'committed']);
+});
+
+test('openRound validates with a confirmation margin and shows the round as pending', async () => {
+  const nowSec = ROUND_AT + 1000;
+  const { service, state } = await harness({ nowSec });
+  assert.deepEqual(
+    await service.openRound({ type: 'metabot', metabotId: 7 }, roundBody({ commitCloseAt: nowSec + 3_600, revealCloseAt: nowSec + 7_200 })),
+    { error: 'round:windows' },
+  );
+  const opened = await service.openRound({ type: 'metabot', metabotId: 7 }, roundBody());
+  assert.equal(state.writes[0].segment, 'round');
+  const [summary] = service.listRounds();
+  assert.equal(summary.pinId, opened.pinId);
+  assert.equal(summary.confirmed, false);
+  assert.equal(summary.status, 'pending');
+});
+
+test('publishLesson checks the final tally before writing', async () => {
+  const { c, round, h1 } = decidedChain();
+  const { service, state } = await harness({ nowSec: FINAL_NOW, events: c.events });
+  await service.refresh('seed');
+  const tallyHash = service.roundStatus(round).tally.tallyHash;
+  const wrong = { ...lessonFor(round, tallyHash, [h1.reveal.pinId]), exemplars: { preferred: 'c2', rejected: [] } };
+  assert.deepEqual(await service.publishLesson({ type: 'user' }, wrong), { error: 'lesson:preferred-not-winner' });
+  assert.equal(state.writes.length, 0);
+  const ok = await service.publishLesson({ type: 'user' }, lessonFor(round, tallyHash, [h1.reveal.pinId]));
+  assert.equal(typeof ok.pinId, 'string');
+  assert.equal(state.writes[0].segment, 'lesson');
+});
+
+test('telemetry ignores out-of-range values', async () => {
+  const { service, store } = await harness();
+  service.recordTelemetry(pid(1), 'c1|c2', 30);
+  service.recordTelemetry(pid(1), 'c1|c2', -5);
+  service.recordTelemetry(pid(1), 'c1|c2', 4_000);
+  service.recordTelemetry(pid(1), 'c1|c2', 1.5);
+  assert.deepEqual(store.telemetryForRound(pid(1)), [{ pairKey: 'c1|c2', seconds: 30 }]);
+});

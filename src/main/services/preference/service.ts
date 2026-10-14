@@ -1,8 +1,9 @@
 import type { CollectPreferenceEventsResult } from './collector';
-import type { PreferenceSegment } from './constants';
+import { COMMIT_CUTOFF_SEC, type PreferenceSegment } from './constants';
 import { compareOrderKey, tallyRound } from './engine';
 import { canonicalRoundForSubject, checkLesson, verifyLessonPin, type CanonicalRoundResolution } from './lesson';
-import { parseRound } from './schemas';
+import { checkBallot, parseLesson, parseRound } from './schemas';
+import { ballotCommitHash, newBallotSalt } from './sealing';
 import { toBallotView, type PreferenceBallotView, type PreferenceStore } from './store';
 import type {
   LessonPrinciple,
@@ -250,5 +251,98 @@ export class PreferenceService {
       if (out.length >= limit) break;
     }
     return out;
+  }
+
+  private cacheOwnPin(pinId: string, segment: PreferenceSegment, author: string, payload: object): void {
+    const body = JSON.parse(JSON.stringify(payload)) as Record<string, unknown>;
+    this.deps.store.upsertEvents(
+      [{ pinId, path: segment, author, height: -1, txIndex: 0, timestampMs: this.nowMs(), body }],
+      this.nowMs(),
+    );
+    this.deps.onUpdate?.(`local-${segment}`);
+  }
+
+  async openRound(signer: PreferenceSigner, body: unknown): Promise<{ pinId: string } | ErrorResult> {
+    const parsed = parseRound(body, this.nowSec() + COMMIT_CUTOFF_SEC);
+    if (parsed.ok === false) return { error: parsed.reason };
+    const writer = this.deps.resolveWriter(signer);
+    if ('error' in writer) return writer;
+    try {
+      const written = await writer.write('round', parsed.value);
+      this.cacheOwnPin(written.pinId, 'round', writer.globalMetaId, parsed.value);
+      return { pinId: written.pinId };
+    } catch (error) {
+      return { error: errorOf(error) };
+    }
+  }
+
+  async commitBallot(
+    signer: PreferenceSigner,
+    roundPinId: string,
+    rawBallot: unknown,
+  ): Promise<{ pinId: string; ballotId: string } | ErrorResult> {
+    let located = this.locateRound(this.events(), roundPinId);
+    if ('error' in located && located.error === 'round:not-found') {
+      await this.refresh('commit-lookup');
+      located = this.locateRound(this.events(), roundPinId);
+    }
+    if ('error' in located) return located;
+    const { round } = located;
+    if (this.nowSec() > round.commitCloseAt - COMMIT_CUTOFF_SEC) return { error: 'preference:commit-window-closing' };
+    const checked = checkBallot(rawBallot, round);
+    if (checked.ok === false) return { error: checked.reason };
+    const writer = this.deps.resolveWriter(signer);
+    if ('error' in writer) return writer;
+    const ownIds = new Set(round.candidates.filter((candidate) => candidate.author === writer.globalMetaId).map((candidate) => candidate.id));
+    if (checked.value.pairs.some((pair) => ownIds.has(pair.a) || ownIds.has(pair.b))) {
+      return { error: 'preference:own-candidate-in-ballot' };
+    }
+    const salt = newBallotSalt();
+    const commitHash = ballotCommitHash({ round: roundPinId, judge: writer.globalMetaId, salt, ballot: checked.value });
+    const row = this.deps.store.insertBallot({
+      roundPinId,
+      signerType: signer.type,
+      metabotId: signer.type === 'metabot' ? signer.metabotId : null,
+      judgeGlobalMetaId: writer.globalMetaId,
+      ballot: checked.value,
+      salt,
+      commitHash,
+      commitCloseAt: round.commitCloseAt,
+      revealCloseAt: round.revealCloseAt,
+      nowMs: this.nowMs(),
+    });
+    try {
+      const payload = { round: roundPinId, hash: commitHash };
+      const written = await writer.write('commit', payload);
+      this.deps.store.markCommitted(row.id, written.pinId, this.nowMs());
+      this.cacheOwnPin(written.pinId, 'commit', writer.globalMetaId, payload);
+      return { pinId: written.pinId, ballotId: row.id };
+    } catch (error) {
+      this.deps.store.markCommitFailed(row.id, errorOf(error), this.nowMs());
+      return { error: errorOf(error) };
+    }
+  }
+
+  async publishLesson(signer: PreferenceSigner, body: unknown): Promise<{ pinId: string } | ErrorResult> {
+    const parsed = parseLesson(body);
+    if (parsed.ok === false) return { error: parsed.reason };
+    const tally = tallyRound(this.events(), parsed.value.round, { nowSec: this.nowSec() });
+    if (tally.ok === false) return { error: tally.reason };
+    const verdict = checkLesson(parsed.value, tally.result);
+    if (verdict.ok === false) return { error: verdict.reason };
+    const writer = this.deps.resolveWriter(signer);
+    if ('error' in writer) return writer;
+    try {
+      const written = await writer.write('lesson', verdict.lesson);
+      this.cacheOwnPin(written.pinId, 'lesson', writer.globalMetaId, verdict.lesson);
+      return { pinId: written.pinId };
+    } catch (error) {
+      return { error: errorOf(error) };
+    }
+  }
+
+  recordTelemetry(roundPinId: string, pairKey: string, seconds: number): void {
+    if (!Number.isInteger(seconds) || seconds < 0 || seconds > 3600) return;
+    this.deps.store.recordTelemetry(roundPinId, pairKey, seconds, this.nowMs());
   }
 }
