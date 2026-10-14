@@ -1,6 +1,6 @@
 # Cerebellum System — Architecture & Handoff
 
-Date: 2026-10-13 · Status: MVP live on `main` (merged, not pushed) · Owner-facing docs live in `Settings > Model > Cerebellum`
+Date: 2026-10-13 (roadmap expanded 2026-10-14) · Status: 6 shipped integrations live on `main` (memory re-rank, write gate, skill shortlist, block gate, effort auto, intuition tool); agreed backlog in §4 · Owner-facing docs live in `Settings > Model > Cerebellum`
 
 This document is the handoff for the next development agent. It explains what the "cerebellum" (小脑) system is, what has been built, the design rules that must not be broken, and where it goes next.
 
@@ -109,35 +109,79 @@ The first cerebellum surface the MetaBot itself controls: the `intuition` inline
 - Live validation note: the three question shapes are each proven against the real API by the earlier feature evals (noul: write-gate eval; choice: shortlist + effort evals; score: docs-verified shape used by effortSelector). A full live smoke of THIS module was attempted but the free relay returned 429 `free_quota_exhausted` — the fail-open null path is exactly what shipped. Re-run the smoke (scripts pattern: require dist module, relay baseUrl + mrk_ key from app config) once quota resets.
 - Follow-ups: observe `cerebellum:intuition` logs for the models' real question quality before widening past cowork_ui; consider a small vetted question-pattern library in the tool description if quality is erratic.
 
+
+### 2.12 Free relay provider & the shared call context (`services/jevRelayService.ts`)
+
+The provider landscape grew past §1's original single provider:
+
+- **`typesafe-jev`** — the paid TypeSafe API (`https://api.typesafe.ai`), user-supplied key.
+- **`idbots-jev-free`** (`CEREBELLUM_FREE_PROVIDER`) — the official free relay at `https://www.metaso.network/assist-open-api/v2/assist/llm/jev`, key bootstrap via `resolveJevRelayCredentials()` (relay `mrk_` keys), quota-limited (HTTP 429 `free_quota_exhausted` when spent). The DEFAULT since `feat/jev-free-defaults` — assume most users ride it.
+
+Both speak the same `/v1/systemone` wire format. The seam that matters for every NEW call site in `main.ts`:
+
+- `resolveCerebellumRuntimeConfig(appConfig)` — async; the sync `resolveCerebellumConfig` plus relay-key resolution for the free provider (bootstrap failure → null → feature off for that call).
+- `resolveCerebellumCallContext()` — the one-liner every executor uses: returns `{ config, fetchImpl }` where `fetchImpl` is the raw Electron net fetch for `typesafe-jev`, or `createJevRelayFetchWithKeyRetry(...)` for the free relay (re-bootstraps once on a 401, no retry storms).
+- Sync mount probes (e.g. tool registration) may use the sync `resolveCerebellumConfig` — best-effort only; a relay outage then degrades to "no verdict" at call time, which is the correct fail-open.
+
+**The pre-relay pattern (`resolveCerebellumConfig` + bare `session.defaultSession.fetch`) is now WRONG for executors** — a free-relay config authenticated that way gets 401. Pure modules stay fetchImpl-injected and provider-agnostic; only the main.ts wiring changes.
+
+Live-eval note: the relay is quota-metered; when exhausted, live evals and smokes return 429 and every call site's fail-open path is what ships. The metaso relay does not need the local proxy (the §5 proxy note applies to `api.typesafe.ai` only).
+
+
 ## 3. Design rules (do not break)
 
 1. **Never block a turn on the cerebellum.** 1.5 s hard timeout, null on any failure, silent lexical/code fallback. The cerebellum must be droppable mid-flight with zero user-visible effect.
-2. **Never call JEV without `resolveCerebellumConfig`** and never log memory text or the API key.
-3. **`fetchImpl` must be `session.defaultSession.fetch`** (system proxy). Bare Node fetch is region-blocked (HTTP 451).
+2. **Never call JEV without resolved config** and never log memory text or the API key. Executors go through `resolveCerebellumCallContext()` (§2.12); only sync mount probes may use the sync `resolveCerebellumConfig`.
+3. **`fetchImpl` comes from `resolveCerebellumCallContext()`** — the raw Electron net fetch for the paid provider, the key-retry relay wrapper for the free provider (§2.12). Binding bare `session.defaultSession.fetch` to a free-provider config 401s. Bare Node fetch is additionally region-blocked for `api.typesafe.ai` (HTTP 451).
 4. Keep question instructions in **English**; keep the user's original-language text in `state`.
 5. Don't ask JEV what code can compute (counting, dates, thresholds) — compose atomic judgments in code instead.
 6. The `enabled` toggle is the user's global consent for sending memory content to the provider; new call sites must not widen what is sent beyond what the notice describes without a new notice.
 7. Repo conventions (AGENTS.md): pnpm only (Node 24 via nvm: `export PATH="$HOME/.nvm/versions/node/v24.13.1/bin:$PATH"`); worktree-per-branch from `main`; `git merge --no-ff` into main; dev journal on-chain via the `metabot-post-buzz` skill after every commit; never push unless asked.
+8. **New test files under `tests/` are git-ignored by default** — `tests/*` is ignored and each suite is allowlisted individually; add `!tests/<name>.test.mjs` next to the other cerebellum entries or your file will silently never be committed.
+9. **Pure cerebellum modules carry no runtime imports** (type-only imports are fine — they are erased): unit tests load `src/main/cerebellum/*.ts` directly with Node type stripping, which requires extension-ful ESM specifiers. Inline tiny helpers instead of importing them (see `truncateUtf16Prefix` in `skillShortlist.ts`).
+
+## 3.5 How to add a new cerebellum integration — the recipe
+
+Every shipped integration (§2.7-§2.11) follows the same shape; copy it:
+
+1. **Pure module** `src/main/cerebellum/<feature>.ts` — Electron-free, `fetchImpl`-injected, never throws, returns the verdict or `null` on any failure (fail-open: null always means "behave exactly as before"). English question instructions; original-language user text in `state`; hard caps on every caller-authored dimension. No runtime imports (rule 9).
+2. **DI seam** — coworkRunner option (or a module setter like `setCerebellumMemoryWriteGate` for libs). Fire the JEV promise as early as possible (parallel with the other per-turn cerebellum calls — the shared budget stays one 1.5s window) and await at the first consumer.
+3. **main.ts wiring** — executor via `resolveCerebellumCallContext()` (§2.12); log a new `xxx:cerebellumYyy` tag with verdict/latency/ids only — never content.
+4. **Privacy check** — does the call send any content category the notice doesn't list? If yes, widen `i18n.ts cerebellumPrivacyNotice` (zh+en) in the same change.
+5. **Tests** `tests/cerebellum<Feature>.test.mjs` — pure-module contract (request shape, parse, every failure mode, caps) + compiled-DI integration (null/throw reproduces the ungated baseline byte-for-byte; mount gating). Add the file to the `.gitignore` allowlist (rule 8). Run `pnpm run compile:electron` first — suites import compiled code.
+6. **Offline eval** `scripts/cerebellum-<feature>-eval.mjs` — labeled real-shaped Chinese dataset, the metric that matters for THIS feature (FN/lost-X for gates, recall@k for rankings), threshold sweep, `--dry-run`. Run it LIVE before shipping thresholds; keep the script's question wording byte-synced with the module.
+7. **Docs** — new §2.x subsection + roadmap row update in this file.
+8. **Journal** — commit (`feat: ...`), then post the on-chain dev journal via the `metabot-post-buzz` skill and reference the pinId in the commit message.
 
 ## 4. Roadmap — where the cerebellum goes next
 
-Ranked by expected value. Each row names the concrete seam.
+Ranked by expected value. Each row names the concrete seam. Rows 1-3 and 11-12 shipped; the rest is the agreed backlog (owner-endorsed 2026-10-14: implement all of it over time).
+
+**Recommended next three (2026-10-14):** #4 (cheapest, pattern reuse) → #5 (biggest per-turn token save + chat-noise control) → #13 (first "smarter-delegation" play). The calibration feedback loop below is an ongoing practice, not a row.
 
 | # | Use case | Seam | Notes |
 |---|---|---|---|
-| 1 | **Memory write gate** — ✅ **shipped** (see §2.7) | `src/main/cerebellum/memoryWriteGate.ts` + `coworkMemoryJudge.judgeTurnMemoryExtraction` | Live eval 23/23 (implicit) and 10/10 (explicit-only) at threshold 0.5; open follow-up: gate `judgeMemoryCandidate` boundary brain calls too |
-| 2 | **Skill / MetaApp shortlist** — ✅ **shipped** (see §2.8) | `src/main/cerebellum/skillShortlist.ts` + `coworkRunner.buildVolatileContextPrompt` (`cerebellumSkillRanker` DI) | Wide Choice rank → top-3 re-read + one-line suggestion as a separate `<skill_shortlist>` volatile block; catalog stays byte-stable. Live eval 12/12 top-1 on a 48-skill roster. MetaApp half not yet wired — reuse the same module when a MetaApp catalog seam exists |
-| 3 | **Volatile block gating** — ✅ **shipped** (see §2.9) | `src/main/cerebellum/volatileBlockGate.ts` + `coworkRunner.buildVolatileContextPrompt` (`cerebellumVolatileBlockGate` DI) | One request, 4 Nouls for the 4 gateable background blocks (memory/browser/goal/skills-catalog deliberately ungated); live eval FN=0, 78% of block injections saved. Cuts per-turn tokens and context rot; system-prompt head stays byte-stable || 4 | **Knowledge hot-layer ranking** | `src/main/metaidKnowledgeStore.ts` (~899) — currently newest-8 by `updated_at DESC`, zero relevance | Same `relevanceScoreById` pattern as memories |
-| 5 | **Group-chat reply decision** | `src/main/services/cognitiveOrchestrator.ts` (~1087–1136) — today mention + random probability | Cheap relevance Noul; watch false-positive chattiness, tune with the gate nouls pattern |
+| 1 | **Memory write gate** — ✅ **shipped** (see §2.7) | `src/main/cerebellum/memoryWriteGate.ts` + `coworkMemoryJudge.judgeTurnMemoryExtraction` | Live eval 23/23 (implicit) and 10/10 (explicit-only) at threshold 0.5; open follow-up (data-driven): gate `judgeMemoryCandidate` boundary brain calls too |
+| 2 | **Skill / MetaApp shortlist** — ✅ **shipped** (see §2.8) | `src/main/cerebellum/skillShortlist.ts` + `coworkRunner.buildVolatileContextPrompt` (`cerebellumSkillRanker` DI) | Wide Choice rank → top-3 re-read + one-line suggestion as a separate `<skill_shortlist>` volatile block; catalog stays byte-stable. Live eval 12/12 top-1 on a 48-skill roster. MetaApp half deferred until a MetaApp catalog seam exists — reuse the same module then |
+| 3 | **Volatile block gating** — ✅ **shipped** (see §2.9) | `src/main/cerebellum/volatileBlockGate.ts` + `coworkRunner.buildVolatileContextPrompt` (`cerebellumVolatileBlockGate` DI) | One request, 4 Nouls for the 4 gateable background blocks (memory/browser/goal/skills-catalog deliberately ungated); live eval FN=0, 78% of block injections saved; system-prompt head stays byte-stable |
+| 4 | **Knowledge hot-layer ranking** — 🔜 next | `src/main/metaidKnowledgeStore.ts` (~899) — currently newest-8 by `updated_at DESC`, zero relevance | Same `relevanceScoreById` pattern as memories; half a day of work |
+| 5 | **Group-chat reply decision** — 🔜 next | `src/main/services/cognitiveOrchestrator.ts` (~1087–1136) — today mention + random probability | One relevance Noul decides whether the bot replies at all — skips a WHOLE turn, the single biggest per-turn save. Tune "rather over-reply than miss"; validate offline on real group logs first |
 | 6 | **privateChatDaemon re-rank** | `privateChatDaemon.ts` `buildPrivateReplyMemoryPromptBlocks` (~1960) — same DI dep as groupTaskDaemon | Wiring exists (`createCerebellumMemoryRanker`); also reconsider its blackout flag per privacy review |
-| 7 | **MetaWeb two-layer refinement** (owner's idea) | backend returns coarse-grained candidates → bot-side cerebellum picks precise answers | Cloud-side first pass could also be JEV; design for provider swap from day one |
-| 8 | **Dream triage** | `dreamService.ts` fragment pre-filter; `memoryHygieneService` deep-consolidation proposals (JEV proposes, LLM confirms) | Nightly/batch — latency-insensitive, cost-sensitive |
-| 9 | **Task-done verification** | scheduled-task output / group-task deliverable checks | "Did this actually happen?" Noul on evidence |
-| 11 | **Intuition tool — brain-callable cerebellum** — ✅ **shipped** (see §2.11, owner's initiative) | `src/main/cerebellum/intuitionTool.ts` + `coworkRunner.buildSessionInlineTools` (`intuition` inline tool) | Phase 1: cowork_ui sessions, 3 calls/min rolling cap, teaching description with WHEN/WHEN-NOT/HOW + calibration caveat; widen after observing `cerebellum:intuition` logs |
+| 7 | **MetaWeb two-layer refinement** (owner's idea) | backend returns coarse-grained candidates → bot-side cerebellum picks precise answers | Cloud-side first pass could also be JEV; design for provider swap from day one; needs cloud coordination — separate design doc |
+| 8 | **Dream triage** | `dreamService.ts` fragment pre-filter; `memoryHygieneService` deep-consolidation proposals (JEV proposes, LLM confirms) | Nightly/batch — latency-insensitive, cost-sensitive; sweet spot for JEV pricing |
+| 9 | **Task-done verification** | scheduled-task output / group-task deliverable checks | "Did this actually happen?" Noul on evidence; pairs with the daemons (unattended contexts) |
 | 10 | **Surf path selection** | `surfService.ts` candidate pins/links scoring | Nightly, batch |
-| 11 | **Reasoning-effort auto selection** — ✅ **shipped** (see §2.10) | `scripts/cerebellum-effort-eval.mjs` → `src/main/cerebellum/effortSelector.ts` (Phase 1) | One Choice question {off, low, high, max} over `state.user_message`; assistant-mode policy escalates only when P(high)+P(max) ≥ 0.5, else off (fallback chain on any failure). Live eval (jev-1.13.0, 30 labeled Chinese cases): exact-match 28/30 — the two misses are off→low (caption, one-line translation; harmless under the two-level policy), escalation sweep 30/30 at EVERY threshold 0.3–0.8 (casual ≤0.02 vs complex ≥0.81 — a clean cliff), ~600 input tokens ≈ $0.000025/turn, 200–665 ms latency |
+| 11 | **Reasoning-effort auto selection** — ✅ **shipped** (see §2.10) | `src/main/cerebellum/effortSelector.ts` | One Choice question {off, low, high, max} over `state.user_message`; assistant-mode policy escalates only when P(high)+P(max) ≥ 0.5. Live eval: exact-match 28/30 (the two misses are off→low, harmless under the two-level policy); escalation cliff: casual ≤0.02 vs complex ≥0.81; ~600 input tokens ≈ $0.000025/turn |
+| 12 | **Intuition tool — brain-callable cerebellum** — ✅ **shipped** (see §2.11, owner's initiative) | `src/main/cerebellum/intuitionTool.ts` + `coworkRunner.buildSessionInlineTools` (`intuition` inline tool) | Phase 1: cowork_ui sessions, 3 calls/min rolling cap, teaching description with WHEN/WHEN-NOT/HOW + calibration caveat. Phase 2 (data-driven): widen surfaces after observing `cerebellum:intuition` logs; add a vetted question-pattern library to the description if quality is erratic |
+| 13 | **Worker assignment ranking** — 🔜 next (new, 2026-10-14) | `orchestratorCoworkBridge.ts` — subtask→worker dispatch in group tasks | The skill shortlist mirrored onto delegation: one Choice question per subtask ("which worker fits best"), candidates = worker roster + their `twin-impression` distilled impressions (dream layer rewrites nightly). First integration where the cerebellum makes the bot SMARTER rather than leaner |
+| 14 | **Dual-brain complexity routing** (new, 2026-10-14) | the GT-02 fallback chain / per-turn model dispatch | JEV judges intrinsic task complexity; simple turns route to the cheaper brain. Phase 1 observe-only (log verdict vs actual model), Phase 2 route. Saves unit-price difference per turn — coordinate with the fallback-chain design before enabling |
+| 15 | **conversation_search result re-rank** (new, 2026-10-14) | the `conversation_search` inline tool result path | Keyword top-N → one JEV re-rank against the current need; same pattern as the memory re-rank, improves recall quality of the brain's own tool |
+| 16 | **Remote-service candidate shortlist** (new, 2026-10-14) | `buildRemoteServicesPrompt` consumers | Choice rank of discovered on-chain services per turn + top-3; isomorphic to the skill shortlist once the directory grows |
+| 17 | **Compaction preservation scoring** (new, long-term, 2026-10-14) | the compaction / context-overflow path | JEV scores history segments' continuing relevance to steer what compaction KEEPS (today it is length-driven). Big quality lever for long sessions, but touches context-management core — design review first |
 
 Cross-cutting: validate every new question on real Chinese data first (Playground → `cerebellum-memory-eval.mjs` pattern); prefer top-k ranking over absolute thresholds (observed inflation of "generally useful" memories); tune thresholds per action risk; rate limits (80 rps, dynamic) are a non-issue for desktop use but batch pipelines need backoff.
+
+**Calibration feedback loop (ongoing practice, owner-endorsed 2026-10-14):** JEV probabilities are calibrated across groups, not per-case — they drift as question context and user populations shift, so one-shot offline validation is not enough. Establish a periodic (≈monthly) re-validation routine: (1) sample real verdicts from `cowork.log` per call site and join them with downstream outcomes where observable (block-gate skips later referenced in the turn? write-gate passes later used by recall? shortlist top-1 actually loaded?); (2) rerun every `scripts/cerebellum-*-eval.mjs` on refreshed labeled data; (3) adjust the per-feature thresholds when drift shows. This is an operations habit, not code — it is what keeps the whole layer actually calibrated months from now.
 
 ## 5. Operational quick reference
 
