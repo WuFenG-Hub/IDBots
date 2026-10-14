@@ -92,7 +92,7 @@ test('assistant chat-experience mode defaults reasoning off behind the auto rung
     'coworkRunner: effort resolution must read the persisted chat experience mode',
   );
   const overrideFirstChains = coworkRunnerSource.match(
-    /sessionEffortPicked\s*\?\s*toLlmEffortLevel\(activeSession\.effortOverride\)\s*:\s*autoEffortRung\s*\?\?/g,
+    /sessionEffortPicked\s*\?\s*toLlmEffortLevel\(effectiveEffortRung\)\s*:\s*autoEffortRung\s*\?\?/g,
   ) ?? [];
   assert.ok(
     overrideFirstChains.length >= 2,
