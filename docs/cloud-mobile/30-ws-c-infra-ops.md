@@ -18,12 +18,12 @@ restorable, and failures raise alerts.
 - `00-program-plan.md` (environments, procurement, secrets register),
   `01-interface-contracts.md` C1 (tenant settings) and C3 (public origin),
   `20-ws-b-control-plane.md` (configuration variables).
-- Phase 0 report (2026-10-14, on `ecs.g8i.2xlarge`, 8 vCPU / 31.4 GB):
-  tenant memory limit 2560 MB, about 429 MB of host memory per idle tenant,
-  image about 2.1 GB with a 28-minute build, and a host link of 10 Mbps that
-  made npm downloads retry. Memory is not yet given back after heavy skills
-  (WS-A REQ-A-31), so this document uses a provisional capacity (REQ-C-19)
-  until the S05b re-run and REQ-A-31 prove the formula value.
+- Phase 0 report (2026-10-14, on `ecs.g8i.2xlarge`, 8 vCPU / 31.4 GB) and the
+  S05b re-run (2026-10-15): tenant memory limit 2304 MB, about 429 MB of host
+  memory per idle tenant, image about 2.1 GB with a 28-minute build, and a
+  host link of 10 Mbps that made npm downloads retry. After a heavy turn a
+  tenant stays near 810 MB for about 10 minutes and is back near 390 MB by
+  30 minutes (WS-A REQ-A-31). Capacity uses the Phase 0 formula (REQ-C-19).
 - The repository's `AGENTS.md`: anything committed to the IDBots repository
   follows its branch, commit, and pnpm rules; no secrets in git.
 
@@ -54,10 +54,10 @@ flowchart TB
 
 ### Hosts
 
-- **REQ-C-1** Staging: about 4 vCPU / 16 GB. Production: 8 vCPU / 32 GB
-  (the Phase 0 host type, `ecs.g8i.2xlarge` or equivalent) for the first 29
-  users (REQ-C-19); add a second host of the same size before user 30 unless
-  REQ-A-31 has raised capacity. Region `cn-hongkong`. Ubuntu 24.04 LTS (the
+- **REQ-C-1** Staging: about 4 vCPU / 16 GB, capacity 27. Production: 8 vCPU /
+  32 GB (the Phase 0 host type, `ecs.g8i.2xlarge` or equivalent) for the first
+  58 users (REQ-C-19); add a second host of the same size before user 59.
+  Region `cn-hongkong`. Ubuntu 24.04 LTS (the
   Phase 0 system, with cgroup v2 and Docker 29) or Alibaba Cloud
   Linux 3. Encrypted ESSD data disk mounted at `/var/lib/docker`. cgroup v2.
   Docker CE stable with the `overlay2` driver and the `json-file` log driver
@@ -201,15 +201,17 @@ flowchart TB
 
 ### Capacity
 
-- **REQ-C-19** Set each host's `capacity` in the control-plane `hosts` table.
-  Phase 0's formula, `floor((H − 3072) / (idleMb + 0.2 × (chatPeakMb − idleMb)))`
-  with idle 462.6 MB and chat peak 565.8 MB, gives 58 on the 31.4 GB
-  production host and 27 on 16 GB. Because memory is not yet given back after
-  heavy skills (a tenant can stay near 1.8 GB), start at half of that: 29 in
-  production and 13 in staging. Raise capacity to the formula value only after
-  the WS-A REQ-A-31 acceptance run and a production-size soak test pass.
-  Provisioning beyond capacity is refused by the control plane and raises the
-  80% alert first.
+- **REQ-C-19** Set each host's `capacity` in the control-plane `hosts` table
+  to the Phase 0 formula,
+  `floor((H − 3072) / (idleMb + 0.2 × (chatPeakMb − idleMb)))`,
+  with idle 462.6 MB and chat peak 565.8 MB: 58 on the 31.4 GB production
+  host, 61 on a full 32 GB host, and 27 on 16 GB staging. S05b removed the
+  reason for the earlier half-capacity cap: the 1.8 GB figure was the voided
+  web-search peak, and memory does return (about 391 MB by 30 minutes).
+  REQ-A-31 shortens that tail to 10 minutes so the idle term in the formula
+  stays honest. Provisioning beyond capacity is refused by the control plane
+  and raises the 80% alert first. A full-host soak test still has to show
+  host memory under 85% before go-live.
 
 ### Security Operations
 

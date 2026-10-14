@@ -76,7 +76,7 @@ to two engineers plus AI per party and are recalibrated at M0 and M2.
 
 | Milestone | Target | Exit criteria | Accepted by |
 |-----------|--------|---------------|-------------|
-| M0 Go / no-go | End of week 1 | Phase 0 report delivered; verdict GO or GO_WITH_CONDITIONS; `tenantMemoryLimitMB` and `usersPerHost` measured. Status 2026-10-14: report delivered (agent verdict GO); acceptance reads it as GO_WITH_CONDITIONS until the S05b skill re-run proves web-search and weather | Owner |
+| M0 Go / no-go | End of week 1 | Phase 0 report delivered; verdict GO or GO_WITH_CONDITIONS; `tenantMemoryLimitMB` and `usersPerHost` measured. Status 2026-10-15: S05b re-run done; acceptance recommends GO (`tenantMemoryLimitMB` 2304, 58 tenants on the 31.4 GB host). Owner signature is still open | Owner |
 | M1 Contracts frozen | End of week 2 | `01` and `02` updated with Phase 0 numbers, reviewed by WS-A, WS-B, WS-D, WS-E; version 1.0.0 tagged in the document header | Owner plus every party |
 | M2 Staging minimum loop | End of week 4 | On staging: invite sign-up, provisioning, chat with a skill, scheduled task with the phone closed, bundle purchase through the mock gateway (scenarios A-01 to A-08 and A-11 with mock payment in `60`) | Acceptance |
 | M3 Phase 1 accepted | End of week 5 | Phase 1 scenarios pass on staging with real Alipay; security checklist items marked Phase 1 pass; ten seed users invited | Owner |
@@ -94,7 +94,7 @@ backups (tier P2).
 |-------------|---------|-------|------|
 | Local | Development | Developer machines; desktop IDBots with the gateway in dev mode (`IDBOTS_GATEWAY_DEV=1`) | Developer test identities |
 | Staging | Integration and acceptance | Hong Kong host, about 4 vCPU / 16 GB; `staging.{APP_DOMAIN}`; Metaso staging; mock and real Alipay (real only with a ¥0.01 test plan) | Test identities only; may be wiped by the owner's decision |
-| Production | Users | Hong Kong host, 8 vCPU / 32 GB (`ecs.g8i.2xlarge`, as in Phase 0), 29 tenants until memory reclamation is proven (WS-C REQ-C-19); `app.{APP_DOMAIN}`; Metaso production | User data; never wiped |
+| Production | Users | Hong Kong host, 8 vCPU / 32 GB (`ecs.g8i.2xlarge`, as in Phase 0), 58 tenants (WS-C REQ-C-19); `app.{APP_DOMAIN}`; Metaso production | User data; never wiped |
 
 `{APP_DOMAIN}` is the domain the owner chooses (see Owner Decisions).
 
@@ -177,13 +177,14 @@ acceptance criteria (`AC-<ws>-<n>`). A delivery is accepted when:
 
 | Risk | Likelihood | Impact | Mitigation | Owner |
 |------|------------|--------|------------|-------|
-| Electron headless or skills fail on Linux | Low (Phase 0: stock app runs under Xvfb with no app patches) | High | S05b re-run of web-search and weather before M1; WS-A REQ-A-32 removes the debugging-port clash | WS-0, WS-A |
-| Memory stays high after heavy skills (Phase 0: up to 1.8 GB per tenant against 463 MB idle) | High | Medium | Capacity held at half the formula value (WS-C REQ-C-19); WS-A REQ-A-31 reclaims skill memory; 2560 MB limit per tenant | WS-A, WS-C |
+| Electron headless or skills fail on Linux | Low (Phase 0 and S05b: stock app, no app patches; docx, xlsx, pptx, pdf, web-search, and weather all passed) | High | WS-A REQ-A-32 keeps port 9222 free; one forced browser-mode web-search remains for WS-A (AC-A-5), because S05b took the script path | WS-A |
+| Post-turn memory tail (S05b: about 810 MB for 10 minutes, back to about 390 MB by 30 minutes) | Medium | Low | The holder is the idle DSH session and its playwright MCP, not a leak; WS-A REQ-A-31 shortens that timeout to 10 minutes. Skill child processes were already gone | WS-A |
 | Background jobs load the CPU after onboarding (Phase 0: 2 of 5 tenants near 80%) | Medium | Medium | WS-A REQ-A-33 staggers start-up jobs; WS-C CPU alerts | WS-A, WS-C |
 | Host bandwidth too low (Phase 0 host had 10 Mbps) | Medium | Medium | Elastic IP with at least 100 Mbps peak (WS-C REQ-C-4) | WS-C |
 | `api.idchat.io` unavailable (502 during Phase 0), breaking group and private chat | Medium | Medium | Recheck before M4; the P2 chat features depend on it | WS-A, Owner |
 | Metaso per-IP limits block onboarding from the shared egress IP | Medium (Phase 0: no limit hit at 7 identities from one IP) | High | Partner IP policy in C4 (REQ-D-6) agreed before M2 | WS-D |
-| The free LLM allowance runs out quickly (Phase 0: about 17 turns including heavy skills) | High | Medium | Recharge offered at exhaustion (WS-A REQ-A-25); invite trial amounts set by the owner; demo accounts get granted quota | Owner, WS-D |
+| The free LLM allowance runs out quickly (Phase 0: about 17 turns; S05b: a fresh identity was exhausted after web-search, weather, docx, and xlsx) | High | Medium | Recharge offered at exhaustion (WS-A REQ-A-25); invite trial amounts set by the owner; demo accounts get granted quota | Owner, WS-D |
+| Gas sponsor down during onboarding (S05b: chain setup stayed pending, and the empty wallet could not self-pay) | Medium | High | Server bootstrap retries a pending chain setup (WS-A REQ-A-8) and becomes ready on its own once the sponsor is back; no second sign-up | WS-A, WS-D |
 | SMS signature approval delayed | Medium | High | Apply in week 1; staging can use a fixed test code for allowlisted test numbers | Owner, WS-C |
 | Apple rejects a thin wrapper later | Medium | Low for this release | TestFlight only; native features before any App Store submission | WS-E |
 | App Store rules on paying for digital goods outside in-app purchase | High for iOS shells | Medium | The iOS shell hides recharge; iPhone users recharge in the web app (WS-E REQ-E-15) | WS-E |

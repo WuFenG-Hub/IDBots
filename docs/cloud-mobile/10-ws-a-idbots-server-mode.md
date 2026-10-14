@@ -32,8 +32,9 @@ window, one Hong Kong `ecs.g8i.2xlarge` host):
   under Xvfb and under `--ozone-platform=headless`; first-run onboarding,
   including the twin MetaBot on-chain, takes about 24 s.
 - Idle memory 463 MB after ten turns (renderer about 118 MB, Xvfb about
-  49 MB, DSH runtime about 229 MB, Electron main about 199 MB); heavy skills
-  peak at 1.6 to 1.8 GB and the memory does not fully return afterwards.
+  49 MB, DSH runtime about 229 MB, Electron main about 199 MB). The pptx
+  skill peaked at 1630 MB. This run's 1785 MB web-search peak is void; S05b
+  below replaces it.
 - `--no-sandbox` must be on the Electron command line; the app's
   `IDBOTS_DISABLE_LINUX_SANDBOX` switch is applied too late to stop
   Chromium's setuid sandbox check from aborting the process.
@@ -48,6 +49,29 @@ window, one Hong Kong `ecs.g8i.2xlarge` host):
   already detects this (`coworkRunner.ts`, `CoworkSessionDetail.tsx`).
 - Shortly after onboarding, two of five tenants used about 80% CPU for a while
   (background jobs).
+
+S05b re-run (2026-10-15, same image, app debugging port moved to 9333, fresh
+identity, production limits including `--cap-drop=ALL` and
+`no-new-privileges`):
+
+- web-search passed by its own `search.sh` HTTP path (3 linked results, 70 s,
+  window peak 508 MB). Port 9222 stayed silent and the app page stayed on
+  `dist/index.html`. The skill's browser-launch path was not used, so it is
+  still unproven under these limits.
+- weather passed (Hong Kong, 27°C, source wttr.in, 7 s). docx and xlsx passed.
+  pptx and pdf stopped at `free_quota_exhausted` before any model output; their
+  original S05 passes stand. The fresh allowance ran out after those four
+  skills.
+- Memory after the skills: 848 MB at 1 minute, 810 MB at 10 minutes, 391 MB at
+  30 minutes. Anonymous memory fell from 642 MB to 208 MB when the idle DSH
+  session and its playwright MCP exited. No LibreOffice, Python, Chromium, or
+  Node helper was still running. The earlier 1785 MB web-search peak is void.
+- Nothing failed under the production limits, and there was no OOM. The highest
+  corrected skill peak is pptx at 1630 MB, so the memory limit is 2304 MB.
+- Onboarding paused with chain setup pending while the gas sponsor was
+  unreachable; the empty wallet could not pay for itself. After the sponsor
+  recovered, the existing subsidy and chain-sync retry finished and the twin
+  reached `synced`.
 
 Current facts:
 
@@ -131,7 +155,11 @@ Current facts:
      received while no phone is connected.
   Failures in steps 1–4 set phase `failed` (retried with backoff, at most
   every 5 minutes); failures in 5–6 set `degraded`. Locale comes from
-  `IDBOTS_BOOTSTRAP_LOCALE`.
+  `IDBOTS_BOOTSTRAP_LOCALE`. S05b hit step 3 with the gas sponsor
+  unreachable: chain setup stayed pending and self-pay failed on an empty
+  wallet. The retry of a pending chain setup must repeat the subsidy request
+  and the chain sync, and must reach `synced` by itself once the sponsor
+  answers. A sponsor outage never requires the user to sign up again.
 - **REQ-A-9 Health endpoints.** `/healthz` and `/readyz` exactly as C1.
 - **REQ-A-10 Logging.** In server mode, logs go to stdout as JSON lines (C1),
   with secrets, mnemonics, phone numbers, and message contents removed.
@@ -241,17 +269,19 @@ Current facts:
 
 ### Phase 0 Follow-Ups
 
-- **REQ-A-31 Reclaim skill memory.** In server mode, processes a skill starts
-  (LibreOffice, Python helpers, web-search's Chromium) do not stay resident
-  after the work is done: within 10 minutes of the last turn, tenant memory
-  is back within 150 MB of its idle value. Find what holds memory after the
-  pptx and pdf skills in Phase 0 (per-process data in the spike results) and
-  stop or reap it; do not change skill behavior on desktop. This
-  requirement decides how many users fit on a host (WS-C REQ-C-19).
+- **REQ-A-31 Reclaim the post-turn tail.** Skill child processes already
+  exit: S05b found no LibreOffice, Python, Chromium, or Node helper one
+  minute after the last skill. What stays is the idle DSH session and the
+  playwright MCP it pre-starts (about 810 MB at 10 minutes, about 391 MB at
+  30 minutes, anonymous memory 642 MB down to 208 MB). In server mode, end
+  that idle session within 10 minutes of the last turn so tenant memory is
+  back within 150 MB of its idle value. Leave the desktop timeout unchanged.
 - **REQ-A-32 No debugging port.** Server mode never opens a remote debugging
   port, and nothing in the tenant listens on 9222 except web-search's own
   Chromium (the port is fixed in `SKILLs/web-search/server/config.ts`, and
-  the skill attaches to whatever answers on it).
+  the skill attaches to whatever answers on it). S05b confirmed the failure
+  mode: with the app on 9333, port 9222 stayed silent and the app page was
+  not navigated.
 - **REQ-A-33 Background jobs after boot.** Identify the background jobs that
   used about 80% CPU after onboarding in Phase 0 and spread them out (jitter
   or a delayed start) so a host restart that starts every tenant at once does
@@ -300,11 +330,15 @@ Current facts:
 - **AC-A-4** `docker stop -t 30` exits in under 20 s with SQLite
   `PRAGMA integrity_check` returning `ok`.
 - **AC-A-5** Measured with the Phase 0 harness and sampler on the tenant
-  image: idle memory at or below 463 MB (no renderer window should make it
-  lower); the docx, xlsx, pptx, pdf, web-search, and weather skills all pass
-  (web-search with its own Chromium, weather on an identity with quota), each
-  peak stays under the C1 memory limit, and 10 minutes after the last skill
-  memory is within 150 MB of idle (REQ-A-31).
+  image: idle memory at or below 463 MB; docx, xlsx, pptx, pdf, web-search,
+  and weather all pass, and each peak stays under the 2304 MB limit. S05b
+  already passed web-search (script path, 508 MB), weather, docx, and xlsx,
+  and the original pptx (1630 MB) and pdf passes stand. One more web-search
+  turn must force the browser path: Chromium is `/usr/bin/chromium` with its
+  own user-data directory, port 9222 is that Chromium and not Electron, and
+  the app page stays on `dist/index.html`. Within 10 minutes of the last
+  turn, memory is within 150 MB of idle (REQ-A-31). S05b's baseline for that
+  last check is 810 MB at 10 minutes and 391 MB at 30 minutes.
 - **AC-A-6** Security tests: a call to every N channel returns
   `CHANNEL_NOT_ALLOWED`; R-path and R-cwd negatives return `ARG_RESTRICTED`;
   a file token from tenant A fails on tenant B; a reused reverify nonce fails;

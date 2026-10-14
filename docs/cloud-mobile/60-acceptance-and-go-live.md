@@ -72,8 +72,8 @@ the screen is off.
 | Added latency to first token compared with desktop | At most 500 ms | Same prompt, desktop and phone |
 | Reconnect after network returns | At most 30 s; immediate on foreground | A-08 |
 | Availability (production) | 99% per month during the demo period | External uptime check |
-| Capacity | 29 tenants on a 32 GB host (provisional, WS-C REQ-C-19) with host memory and CPU under 85%; the formula value of 58 only after REQ-A-31 passes | WS-C metrics, soak test |
-| Memory after skills | A tenant is back within 150 MB of its idle memory 10 minutes after its last skill run (Phase 0 idle: 463 MB) | WS-A AC-A-5 |
+| Capacity | 58 tenants on the 31.4 GB host, 27 on the 16 GB staging host (WS-C REQ-C-19), with host memory and CPU under 85% at that fill | WS-C metrics, full-host soak test |
+| Memory after a turn | Back within 150 MB of idle within 10 minutes (WS-A REQ-A-31). S05b measured 810 MB at 10 minutes and 391 MB at 30 minutes, against a 463 MB idle | WS-A AC-A-5 |
 | Backups | RPO 24 h; one tenant restored within 30 minutes; whole host within 4 h | A-21, WS-C drill |
 | Upgrades | No data loss; failed upgrades roll back | A-22 |
 
@@ -118,8 +118,8 @@ Items marked P1 must pass for M3; P2 for M4.
 
 **Platform**
 
-- [ ] Production host sized for the first invite batch (29 tenants per
-      32 GB host unless REQ-A-31 has raised it); monitoring, alerts,
+- [ ] Production host sized for the first invite batch (58 tenants on the
+      31.4 GB host); monitoring, alerts,
       and the external uptime check live; every alert tested once.
 - [ ] Nightly backups ran at least three nights; a restore drill passed.
 - [ ] Runbooks in `deploy/runbooks/` complete and tried once by someone other
@@ -180,7 +180,7 @@ skills) and run the script once end to end.
 
 | Milestone | Scope | Evidence | Result | Signed by | Date |
 |-----------|-------|----------|--------|-----------|------|
-| M0 | Phase 0 report and verdict | `PHASE0_REPORT.md`, `results.json` (commit `e8653bac`), S05b addendum | Pending S05b re-run | Owner | |
+| M0 | Phase 0 report and verdict | `PHASE0_REPORT.md` and `results.json` (commit `e8653bac`), S05b addendum, tarball sha256 `ec684f1ce37e77e2ab38a3e9950347f8606f7950649ef5faffa48fef60c1088b` | Acceptance recommends GO on 2026-10-15; owner signature open | Owner | |
 | M1 | `01` and `02` at 1.0.0 | | | Owner and every party | |
 | M2 | A-01 to A-08, A-11 on staging | | | Acceptance | |
 | M3 | A-01 to A-12 on staging, security P1 | | | Owner | |

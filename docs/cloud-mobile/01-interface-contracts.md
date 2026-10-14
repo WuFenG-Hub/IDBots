@@ -10,9 +10,10 @@ change-control process in `00-program-plan.md`).
 | C3 Control-plane public API | WS-B | WS-E |
 | C4 Metaso bundle API | WS-D | WS-A (calls it), WS-E (shows it through IPC) |
 
-Phase 0 values come from the spike report of 2026-10-14 (commit `e8653bac`).
-Values marked "provisional" are confirmed by the Phase 0 skill re-run (S05b)
-before M1.
+Phase 0 values come from the spike report of 2026-10-14 (commit `e8653bac`)
+and the S05b re-run of 2026-10-15. The S05b tarball is
+`phase0-linux-headless-results.tgz`, sha256
+`ec684f1ce37e77e2ab38a3e9950347f8606f7950649ef5faffa48fef60c1088b`.
 
 ---
 
@@ -85,7 +86,7 @@ of data.
 
 | Setting | Value |
 |---------|-------|
-| `--memory` and `--memory-swap` | `2560m` (no swap; provisional: Phase 0 skill peak 1785 MB × 1.3, rounded up to a multiple of 256) |
+| `--memory` and `--memory-swap` | `2304m` (no swap; pptx peak 1630 MB × 1.3, rounded up to a multiple of 256. S05b's corrected web-search peak was 508 MB) |
 | `--cpus` | `2` |
 | `--pids-limit` | `2048` |
 | `--shm-size` | `1g` (the value Phase 0 ran with) |

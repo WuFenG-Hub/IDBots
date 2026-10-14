@@ -32,6 +32,16 @@ headers `X-Identity-Address`, `X-Timestamp` (unix seconds, ±300 s),
 `X-Signature` (Bitcoin signed message, base64), canonical messages in
 `service/traffic_service/message.go`, idempotent `sql/update.sql` migrations.
 
+Phase 0 observations for this team:
+
+- The free LLM allowance is per identity, about 4.8 million units. S05b used
+  one up with four skills (web-search, weather, docx, xlsx). A second
+  bootstrap of an exhausted identity returns the same empty pool.
+- Onboarding writes the twin on-chain through the gas sponsor. While the
+  sponsor was unreachable, chain setup stayed pending and the empty wallet
+  could not pay on its own. IDBots retries (WS-A REQ-A-8); the sponsor side
+  needs to accept that retry when it recovers, without a new identity.
+
 ## How the Pieces Fit
 
 ```mermaid
