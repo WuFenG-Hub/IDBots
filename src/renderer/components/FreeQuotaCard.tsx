@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { i18nService } from '../services/i18n';
 import { enableFreeQuotaManually } from '../services/llmFreeQuotaBootstrap';
 import { isFreeProviderConfigured, LLM_FREE_PROVIDER_KEY } from '../services/llmFreeQuotaGate.js';
+import { formatQuotaResetSuffix, quotaResetDaysLeft } from '../services/quotaResetCountdown';
 import type { AppConfig } from '../config';
 
 interface FreeQuotaCardProps {
@@ -15,6 +16,8 @@ interface QuotaState {
   quotaTotal: number;
   quotaUsed: number;
   quotaRemaining: number;
+  /** Weekly cycle end (ms epoch); 0 = backend runs lifetime quotas (no countdown). */
+  quotaCycleResetAt: number;
   unavailable: boolean;
 }
 
@@ -23,6 +26,7 @@ const INITIAL_QUOTA: QuotaState = {
   quotaTotal: 0,
   quotaUsed: 0,
   quotaRemaining: 0,
+  quotaCycleResetAt: 0,
   unavailable: false,
 };
 
@@ -50,6 +54,7 @@ const FreeQuotaCard: React.FC<FreeQuotaCardProps> = ({ providers, onProvisioned 
           quotaTotal: response.quota.quotaTotal,
           quotaUsed: response.quota.quotaUsed,
           quotaRemaining: response.quota.quotaRemaining,
+          quotaCycleResetAt: response.quota.quotaCycleResetAt,
           unavailable: false,
         });
       } else {
@@ -81,6 +86,15 @@ const FreeQuotaCard: React.FC<FreeQuotaCardProps> = ({ providers, onProvisioned 
   const remainingRatio = quota.quotaTotal > 0 ? quota.quotaRemaining / quota.quotaTotal : 0;
   const exhausted = configured && !quota.loading && !quota.unavailable && quota.quotaRemaining <= 0;
   const runningLow = configured && !quota.loading && !quota.unavailable && !exhausted && remainingRatio < 0.1;
+  const weeklyCycle = quota.quotaCycleResetAt > 0;
+  const resetDaysLeft = quotaResetDaysLeft(quota.quotaCycleResetAt);
+  const exhaustedLine = exhausted
+    ? (weeklyCycle
+        ? (resetDaysLeft > 0
+            ? i18nService.t('freeQuotaExhaustedWeekly').replace('{n}', String(resetDaysLeft))
+            : i18nService.t('freeQuotaExhaustedWeeklySoon'))
+        : i18nService.t('freeQuotaExhausted'))
+    : '';
 
   return (
     <div className="mb-2 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface/50 bg-claude-surface p-2.5">
@@ -115,12 +129,11 @@ const FreeQuotaCard: React.FC<FreeQuotaCardProps> = ({ providers, onProvisioned 
                 />
               </div>
               <p className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {i18nService.t('freeQuotaUsedOf')
-                  .replace('{used}', formatTokenCount(quota.quotaUsed))
-                  .replace('{total}', formatTokenCount(quota.quotaTotal))}
+                {i18nService.t('freeQuotaRemaining').replace('{n}', formatTokenCount(quota.quotaRemaining))}
+                {formatQuotaResetSuffix(quota.quotaCycleResetAt, (key) => i18nService.t(key))}
               </p>
               {exhausted && (
-                <p className="text-[11px] text-red-500">{i18nService.t('freeQuotaExhausted')}</p>
+                <p className="text-[11px] text-red-500">{exhaustedLine}</p>
               )}
               {runningLow && (
                 <p className="text-[11px] text-amber-500">{i18nService.t('freeQuotaLowWarning')}</p>

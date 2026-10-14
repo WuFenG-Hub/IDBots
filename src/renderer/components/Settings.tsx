@@ -39,6 +39,7 @@ import UserSettings from './user/UserSettings';
 import TrafficSettings from './traffic/TrafficSettings';
 import { defaultConfig, type AppConfig, type ChatExperienceMode, getVisibleProviders } from '../config';
 import { LLM_FREE_PROVIDER_KEY, FREE_PROVIDER_DISPLAY_NAME, getFreeProviderModelDisplayName } from '../services/llmFreeQuotaGate.js';
+import { formatQuotaResetSuffix } from '../services/quotaResetCountdown';
 
 type TabType = 'user' | 'general' | 'model' | 'skills' | 'projects' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'traffic';
 
@@ -558,7 +559,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
   const [cerebellumTestResult, setCerebellumTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isTestingCerebellum, setIsTestingCerebellum] = useState(false);
   // Free provider quota snapshot (chat + JEV shared total); null = unavailable.
-  const [cerebellumFreeQuota, setCerebellumFreeQuota] = useState<{ loading: boolean; remaining: number | null }>({ loading: false, remaining: null });
+  // quotaCycleResetAt feeds the same weekly countdown the free-quota card shows.
+  const [cerebellumFreeQuota, setCerebellumFreeQuota] = useState<{ loading: boolean; remaining: number | null; quotaCycleResetAt: number }>({ loading: false, remaining: null, quotaCycleResetAt: 0 });
   
   // 创建引用来确保内容区域的滚动
   const contentRef = useRef<HTMLDivElement>(null);
@@ -1875,18 +1877,19 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
 
   const loadCerebellumFreeQuota = useCallback(async (apiKey: string) => {
     if (!apiKey) {
-      setCerebellumFreeQuota({ loading: false, remaining: null });
+      setCerebellumFreeQuota({ loading: false, remaining: null, quotaCycleResetAt: 0 });
       return;
     }
-    setCerebellumFreeQuota({ loading: true, remaining: null });
+    setCerebellumFreeQuota({ loading: true, remaining: null, quotaCycleResetAt: 0 });
     try {
       const response = await window.electron.llmRelay.getQuota({ apiKey });
       setCerebellumFreeQuota({
         loading: false,
         remaining: response?.success && response.quota ? response.quota.quotaRemaining : null,
+        quotaCycleResetAt: response?.success && response.quota ? response.quota.quotaCycleResetAt : 0,
       });
     } catch {
-      setCerebellumFreeQuota({ loading: false, remaining: null });
+      setCerebellumFreeQuota({ loading: false, remaining: null, quotaCycleResetAt: 0 });
     }
   }, []);
 
@@ -1896,7 +1899,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     if (cerebellum.provider === CEREBELLUM_FREE_PROVIDER && cerebellum.apiKey.trim()) {
       void loadCerebellumFreeQuota(cerebellum.apiKey.trim());
     } else if (cerebellum.provider !== CEREBELLUM_FREE_PROVIDER) {
-      setCerebellumFreeQuota({ loading: false, remaining: null });
+      setCerebellumFreeQuota({ loading: false, remaining: null, quotaCycleResetAt: 0 });
     }
   }, [cerebellum.provider, cerebellum.apiKey, loadCerebellumFreeQuota]);
 
@@ -3576,7 +3579,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                   {cerebellum.apiKey.trim() && !cerebellumFreeQuota.loading && (
                     <p className="mt-1 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
                       {cerebellumFreeQuota.remaining !== null
-                        ? i18nService.t('cerebellumFreeQuota').replace('{n}', new Intl.NumberFormat().format(cerebellumFreeQuota.remaining))
+                        ? `${i18nService.t('cerebellumFreeQuota').replace('{n}', new Intl.NumberFormat().format(cerebellumFreeQuota.remaining))}${formatQuotaResetSuffix(cerebellumFreeQuota.quotaCycleResetAt, (key) => i18nService.t(key))}`
                         : i18nService.t('cerebellumFreeQuotaUnavailable')}
                     </p>
                   )}

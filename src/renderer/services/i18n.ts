@@ -131,7 +131,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     cerebellumInvalidApiKey: 'API Key 无效（401 Unauthorized）',
     cerebellumConnectionUnreachable: '无法连接到小脑服务，请检查 Base URL 与网络连接',
     cerebellumFreeProviderHint: 'IDBots-JEV-Free 是 IDBots 官方的免费小脑服务，活动期间对所有用户免费开放：',
-    cerebellumFreeQuota: '免费额度剩余 {n} tokens',
+    cerebellumFreeQuota: '本周剩余 {n} tokens',
     cerebellumFreeQuotaUnavailable: '暂时无法获取免费额度信息',
 
     // 密码相关
@@ -2897,10 +2897,13 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // 免费 LLM 额度（IDBots-Free 内置供应商）
     freeQuotaTitle: '免费模型额度',
     freeQuotaRefresh: '刷新',
-    freeQuotaUsedOf: '已用 {used} / 共 {total} tokens',
-    freeQuotaRemaining: '剩余 {n} tokens',
+    freeQuotaRemaining: '本周剩余 {n} tokens',
+    freeQuotaResetCountdown: '· {n} 天后重置',
+    freeQuotaResetImminent: '· 即将重置',
     freeQuotaLowWarning: '免费额度即将用完。建议在下方配置自己的模型服务商 API Key，以免对话中断。',
     freeQuotaExhausted: '免费额度已用完。在下方配置自己的模型服务商 API Key 即可继续对话。',
+    freeQuotaExhaustedWeekly: '本周额度已用完，将于 {n} 天后自动重置。在下方配置自己的模型服务商 API Key 即可继续对话。',
+    freeQuotaExhaustedWeeklySoon: '本周额度已用完，即将自动重置。在下方配置自己的模型服务商 API Key 即可继续对话。',
     freeQuotaUnavailable: '暂时无法获取额度信息',
     freeQuotaEnable: '启用免费额度',
     freeQuotaEnabling: '正在启用…',
@@ -3104,7 +3107,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     cerebellumInvalidApiKey: 'Invalid API key (401 Unauthorized)',
     cerebellumConnectionUnreachable: 'Could not reach the cerebellum endpoint. Check the Base URL and your network connection',
     cerebellumFreeProviderHint: 'IDBots-JEV-Free is IDBots\' official free cerebellum service, open to all users at no charge during the campaign:',
-    cerebellumFreeQuota: 'Free quota remaining: {n} tokens',
+    cerebellumFreeQuota: '{n} tokens left this week',
     cerebellumFreeQuotaUnavailable: 'Free quota information is unavailable right now',
 
     // Password related
@@ -5871,10 +5874,13 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // Free LLM quota (built-in IDBots-Free provider)
     freeQuotaTitle: 'Free LLM Quota',
     freeQuotaRefresh: 'Refresh',
-    freeQuotaUsedOf: 'Used {used} of {total} tokens',
-    freeQuotaRemaining: '{n} tokens left',
+    freeQuotaRemaining: '{n} tokens left this week',
+    freeQuotaResetCountdown: '· resets in {n} d',
+    freeQuotaResetImminent: '· resets soon',
     freeQuotaLowWarning: 'Free quota is running low. Add your own provider API key below to avoid interruption.',
     freeQuotaExhausted: 'Free quota exhausted. Add your own provider API key below to keep chatting.',
+    freeQuotaExhaustedWeekly: 'This week\'s quota is exhausted and resets automatically in {n} d. Add your own provider API key below to keep chatting.',
+    freeQuotaExhaustedWeeklySoon: 'This week\'s quota is exhausted and resets very soon. Add your own provider API key below to keep chatting.',
     freeQuotaUnavailable: 'Quota info is unavailable right now',
     freeQuotaEnable: 'Enable free quota',
     freeQuotaEnabling: 'Enabling…',
