@@ -24,6 +24,7 @@ import { CEREBELLUM_FREE_PROVIDER, resolveCerebellumConfig, type ResolvedCerebel
 import { createJevRelayFetchWithKeyRetry, initJevRelayService, registerJevRelayIpcHandlers, resolveCerebellumRuntimeConfig } from './services/jevRelayService';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
 import { rankKnowledgeWithCerebellum } from './cerebellum/knowledgeHotRank';
+import { rankConversationsWithCerebellum } from './cerebellum/conversationSearchRank';
 import { decideGroupReplyWithCerebellum } from './cerebellum/groupReplyGate';
 import { rankWorkersWithCerebellum, CEREBELLUM_WORKER_RANK_TOP_K } from './cerebellum/workerRank';
 import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
@@ -3232,6 +3233,25 @@ const createCerebellumKnowledgeRanker = () =>
   };
 
 /**
+ * Cerebellum (小脑) conversation-search re-rank (roadmap #15). One Noul per
+ * keyword hit. null keeps updated_at order. Never logs the query or snippets.
+ */
+const createCerebellumConversationRanker = () =>
+  async ({ searchQuery, chats }: {
+    searchQuery: string;
+    chats: Array<{ id: string; text: string }>;
+  }): Promise<ReadonlyMap<string, number> | null> => {
+    const context = await resolveCerebellumCallContext();
+    if (!context) return null;
+    return rankConversationsWithCerebellum({
+      config: context.config,
+      fetchImpl: context.fetchImpl,
+      searchQuery,
+      chats,
+    });
+  };
+
+/**
  * Cerebellum (小脑) group-chat reply gate (roadmap #5). One Noul on an
  * unsolicited group message: true replies, false skips the whole turn,
  * null keeps the coin flip. Mentions never reach this callback. Never
@@ -6231,6 +6251,7 @@ const getCoworkRunner = () => {
       // wider newest-N pool so the 8 injected points are the relevant ones,
       // not merely the newest. Null keeps newest-8.
       cerebellumKnowledgeRanker: createCerebellumKnowledgeRanker(),
+      cerebellumConversationRanker: createCerebellumConversationRanker(),
       // Cerebellum (小脑) skill shortlist (roadmap #2): ranks the session's
       // visible skill catalog per turn; top-3 ride the volatile tail next to
       // the untouched catalog block (see createCerebellumSkillRanker).

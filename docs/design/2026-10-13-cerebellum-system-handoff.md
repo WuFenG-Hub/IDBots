@@ -155,6 +155,15 @@ Live-eval note: the relay is quota-metered; when exhausted, live evals and smoke
 - Privacy notice widened (zh+en): worker roster profiles and the twin's distilled impressions of those workers.
 - `scripts/cerebellum-worker-rank-eval.mjs` — 4-worker roster, 6 labeled Chinese goals, top-1 and recall@3. `--dry-run` prints the request. Live run still needs an API key.
 
+### 2.16 conversation_search re-rank (roadmap #15 — shipped on `feat/cerebellum-conversation-rerank`)
+
+- `src/main/cerebellum/conversationSearchRank.ts` — pure, Electron-free: `rankConversationsWithCerebellum(...)` → `Map<sessionId, noul> | null`. **Never throws.** One Noul per keyword hit (`chat_i`) against `state = { search_query, chats }`. Chat text is title + human snippet + assistant snippet, capped at 700 chars. Coverage under 80% discards the map. Timeout 1500 ms. Blank query skips the call.
+- `orderConversationHits` — a score replaces recency; missing ids sink; no map leaves the array untouched.
+- `coworkRunner.ts` — `cerebellumConversationRanker` DI on `runConversationSearchTool`. The keyword result set is unchanged (still the store's top-N). Two or more hits are reordered. Null/throw keeps `updated_at` order, byte-identical to no ranker. Logs `conversation:cerebellumRank` with pooled / ranked / latency / used only.
+- `main.ts` — `createCerebellumConversationRanker()` via `resolveCerebellumCallContext()`.
+- Privacy: the existing notice already lists conversation excerpts. Snippets sent here are that category. The notice was not widened.
+- `scripts/cerebellum-conversation-rank-eval.mjs` — 5 chats, 4 Chinese queries, recall@1 versus newest-first. `--dry-run` prints the request.
+
 ## 3. Design rules (do not break)
 
 1. **Never block a turn on the cerebellum.** 1.5 s hard timeout, null on any failure, silent lexical/code fallback. The cerebellum must be droppable mid-flight with zero user-visible effect.
@@ -182,9 +191,9 @@ Every shipped integration (§2.7-§2.11) follows the same shape; copy it:
 
 ## 4. Roadmap — where the cerebellum goes next
 
-Ranked by expected value. Each row names the concrete seam. Rows 1-5, 11-13 shipped; the rest is the agreed backlog (owner-endorsed 2026-10-14: implement all of it over time).
+Ranked by expected value. Each row names the concrete seam. Rows 1-5, 11-13, and 15 shipped; the rest is the agreed backlog (owner-endorsed 2026-10-14: implement all of it over time).
 
-**Recommended next (2026-10-14, #13 done):** #15 (conversation_search re-rank — same pattern as memory re-rank). The calibration feedback loop below is an ongoing practice, not a row.
+**Recommended next (2026-10-14, #15 done):** #6 (privateChatDaemon re-rank — the memory ranker is already wired for the group-task daemon). The calibration feedback loop below is an ongoing practice, not a row.
 
 | # | Use case | Seam | Notes |
 |---|---|---|---|
@@ -202,7 +211,7 @@ Ranked by expected value. Each row names the concrete seam. Rows 1-5, 11-13 ship
 | 12 | **Intuition tool — brain-callable cerebellum** — ✅ **shipped** (see §2.11, owner's initiative) | `src/main/cerebellum/intuitionTool.ts` + `coworkRunner.buildSessionInlineTools` (`intuition` inline tool) | Phase 1: cowork_ui sessions, 3 calls/min rolling cap, teaching description with WHEN/WHEN-NOT/HOW + calibration caveat. Phase 2 (data-driven): widen surfaces after observing `cerebellum:intuition` logs; add a vetted question-pattern library to the description if quality is erratic |
 | 13 | **Worker assignment ranking** — ✅ **shipped** (see §2.15) | `src/main/cerebellum/workerRank.ts` + chair planning turn in `groupTaskDaemon.ts` | One Choice over the worker roster (bio/role/goal + twin impression). Fit order is a hint in the planning directive; null leaves that directive unchanged. Chair still writes the plan |
 | 14 | **Dual-brain complexity routing** (new, 2026-10-14) | the GT-02 fallback chain / per-turn model dispatch | JEV judges intrinsic task complexity; simple turns route to the cheaper brain. Phase 1 observe-only (log verdict vs actual model), Phase 2 route. Saves unit-price difference per turn — coordinate with the fallback-chain design before enabling |
-| 15 | **conversation_search result re-rank** (new, 2026-10-14) | the `conversation_search` inline tool result path | Keyword top-N → one JEV re-rank against the current need; same pattern as the memory re-rank, improves recall quality of the brain's own tool |
+| 15 | **conversation_search result re-rank** — ✅ **shipped** (see §2.16) | `src/main/cerebellum/conversationSearchRank.ts` + `coworkRunner.runConversationSearchTool` | Keyword hits stay the candidate set. One Noul per hit replaces `updated_at` order. Null keeps that order. Pools under 2 skip the call |
 | 16 | **Remote-service candidate shortlist** (new, 2026-10-14) | `buildRemoteServicesPrompt` consumers | Choice rank of discovered on-chain services per turn + top-3; isomorphic to the skill shortlist once the directory grows |
 | 17 | **Compaction preservation scoring** (new, long-term, 2026-10-14) | the compaction / context-overflow path | JEV scores history segments' continuing relevance to steer what compaction KEEPS (today it is length-driven). Big quality lever for long sessions, but touches context-management core — design review first |
 
