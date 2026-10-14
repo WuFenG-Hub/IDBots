@@ -239,6 +239,7 @@ import {
 import { buildScheduledTaskAgentTools, type ScheduledTaskAgentControl } from './scheduledTaskAgentTools';
 import { buildLongTermTaskAgentTools, type LongTermTaskAgentControl } from './longTermTaskAgentTools';
 import { buildMetataskAgentTools, type MetaTaskAgentControl } from './metataskAgentTools';
+import { buildPreferenceAgentTools, type PreferenceAgentControl } from './preferenceAgentTools';
 import { buildPredictionAgentTools, type PredictionAgentControl } from './predictionAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
@@ -1994,6 +1995,8 @@ export interface CoworkRunnerOptions {
   /** MetaTask (chain-side quadrant four): participation tools (claim-with-guard
    *  / submit / verify / publish / amend) over the local projection + chain writes. */
   metataskTools?: MetaTaskAgentControl;
+  /** Preference rounds: open / judge / tally / lesson tools over PreferenceService. */
+  preferenceTools?: PreferenceAgentControl;
   /**
    * RSI P0 prediction ledger: when set, every cowork surface (and the surf
    * allowlist) gets prediction_record — one machine-checkable prediction
@@ -2320,6 +2323,7 @@ export class CoworkRunner extends EventEmitter {
   private scheduledTaskTools?: ScheduledTaskAgentControl;
   private longTermTaskTools?: LongTermTaskAgentControl;
   private metataskTools?: MetaTaskAgentControl;
+  private preferenceTools?: PreferenceAgentControl;
   private predictionTools?: PredictionAgentControl;
   private metaFileUpload?: MetaFileUploadControl;
   private walletTools?: WalletToolsControl;
@@ -2496,6 +2500,7 @@ export class CoworkRunner extends EventEmitter {
     this.scheduledTaskTools = options?.scheduledTaskTools;
     this.longTermTaskTools = options?.longTermTaskTools;
     this.metataskTools = options?.metataskTools;
+    this.preferenceTools = options?.preferenceTools;
     this.predictionTools = options?.predictionTools;
     this.metaFileUpload = options?.metaFileUpload;
     this.walletTools = options?.walletTools;
@@ -11292,6 +11297,16 @@ export class CoworkRunner extends EventEmitter {
           tool,
           control: this.metataskTools,
           createPin: this.metabotChainWrite.createPin,
+          sessionId,
+          resolveMetabotId: (sid: string) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined,
+        })
+      );
+    }
+    if (this.preferenceTools) {
+      memoryTools.push(
+        ...buildPreferenceAgentTools({
+          tool,
+          control: this.preferenceTools,
           sessionId,
           resolveMetabotId: (sid: string) => this.getMemoryBackend().resolveMetabotIdForMemory(sid) ?? undefined,
         })
