@@ -782,7 +782,7 @@ test('nightly re-review demotes stale validated drafts (archiving promoted proce
   });
   try {
     await service.runNow(5, DAY);
-    assert.equal(panelCalls, 1, 'one panel covers the due re-review batch (no fresh drafts pending)');
+    assert.equal(panelCalls, 2, 'the dual-panel re-review covers the due batch (no fresh drafts pending)');
 
     const demoted = byTitle('过期硬技巧');
     assert.equal(demoted.status, 'rejected', 'rejected below the promotion line demotes');

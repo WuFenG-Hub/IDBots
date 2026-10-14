@@ -392,3 +392,124 @@ test('flow: legacy single-panel configuration validates the same night', async (
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Re-review flows (RRSI P1 Task 6)
+// ---------------------------------------------------------------------------
+
+const seedReReviewableDraft = (h) => {
+  h.coworkStore.insertCapabilityDrafts(5, '2026-06-01', [
+    { title: '过期硬技巧', description: '曾经有效的做法', capabilityType: 'skill' },
+  ]);
+  const draft = h.coworkStore.listCapabilityDrafts(5)[0];
+  h.coworkStore.updateCapabilityDraftValidation({
+    id: draft.id, metabotId: 5, status: 'validated', validationScore: 0.9,
+  });
+  h.db.run(
+    'UPDATE capability_drafts SET validated_at = ?, last_reviewed_at = NULL, dream_date = ? WHERE id = ?',
+    [Date.now() - 40 * DAYMS, '2026-06-01', draft.id],
+  );
+  return draft;
+};
+
+test('re-review: an agreed demotion writes a re_review ledger row', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({ daily_summary: '普通的一天。' }));
+    const seeded = seedReReviewableDraft(h);
+    await h.runNight(D1);
+
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '这个技巧不好用' },
+      { type: 'assistant', content: '收到' },
+    ]);
+    // Night D1 already ran this draft's re-review (unparseable fallback, no
+    // writes) — count only night D2's calls.
+    const callsBeforeD2 = h.router.calls.length;
+    h.router.on(MARKERS.validation, ({ user }) => validationVerdicts(user, () => ({
+      verdict: 'rejected', score: 0.5, rationale: '2026-08-03 照做后被差评',
+    })));
+    await h.runNight(D2);
+
+    const calls = h.router.calls.slice(callsBeforeD2).filter((call) => call.system.includes(MARKERS.validation));
+    assert.equal(calls.length, 2, 're-review panels A and B');
+    assert.ok(calls.every((call) => call.user.includes(`### 草案 #${seeded.id}`)), 'both prompts carry the seeded draft');
+    const draft = h.coworkStore.listCapabilityDrafts(5).find((entry) => entry.id === seeded.id);
+    assert.equal(draft.status, 'rejected');
+    const ledger = h.coworkStore.listFalsifiedHypotheses(5);
+    assert.equal(ledger.length, 1);
+    assert.equal(ledger[0].source, 're_review');
+    assert.equal(ledger[0].sourceDraftId, seeded.id);
+    assert.equal(h.telemetry(D2)?.demoted, 1);
+    assert.equal(h.telemetry(D2)?.reReviewPanels?.agreed, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('re-review: disagreement refreshes the review clock with a note', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({ daily_summary: '普通的一天。' }));
+    const seeded = seedReReviewableDraft(h);
+    await h.runNight(D1);
+
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '还行' },
+      { type: 'assistant', content: '好' },
+    ]);
+    h.router.on(MARKERS.validation, ({ user, nth }) => validationVerdicts(user, () => (
+      nth === 1
+        ? { verdict: 'rejected', score: 0.5, rationale: '2026-08-03 照做后被差评' }
+        : { verdict: 'validated', score: 0.9, rationale: '2026-08-03 日记显示仍然有效' }
+    )));
+    await h.runNight(D2);
+
+    const draft = h.coworkStore.listCapabilityDrafts(5).find((entry) => entry.id === seeded.id);
+    assert.equal(draft.status, 'validated', 'a disagreement never demotes');
+    assert.ok(draft.lastReviewedAt !== null, 'the review clock refreshes');
+    assert.match(draft.validationNotes, /^panels disagreed — /);
+    assert.equal(h.telemetry(D2)?.reReviewPanels?.disagreed, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('re-review: an incomplete panel retries next night without touching the clock', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({ daily_summary: '普通的一天。' }));
+    const seeded = seedReReviewableDraft(h);
+    await h.runNight(D1);
+
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '还行' },
+      { type: 'assistant', content: '好' },
+    ]);
+    h.router.on(MARKERS.validation, ({ user, nth }) => (
+      nth === 1
+        ? validationVerdicts(user, () => ({ verdict: 'validated', score: 0.9, rationale: '2026-08-03 日记显示仍然有效' }))
+        : 'not json'
+    ));
+    await h.runNight(D2);
+
+    const draft = h.coworkStore.listCapabilityDrafts(5).find((entry) => entry.id === seeded.id);
+    assert.equal(draft.status, 'validated');
+    assert.equal(draft.lastReviewedAt, null, 'incomplete never refreshes the clock');
+    assert.equal(h.telemetry(D2)?.reReviewPanels?.incomplete, 1);
+  } finally {
+    h.cleanup();
+  }
+});

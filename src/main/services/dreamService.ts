@@ -404,6 +404,18 @@ function classifyGateVerdict(verdict: { verdict: string; score: number } | null)
   return 'hold';
 }
 
+/**
+ * Re-review panel classification (RRI P1, design §6.1 P1.2): validated is a
+ * score refresh ('promote'); only a rejected verdict BELOW the promotion line
+ * demotes — everything else (and a missing verdict) holds.
+ */
+function classifyReReviewVerdict(verdict: { verdict: string; score: number } | null): GateOutcome | null {
+  if (!verdict) return null;
+  if (verdict.verdict === 'validated') return 'promote';
+  if (verdict.verdict === 'rejected' && verdict.score < CAPABILITY_PROMOTION_MIN_SCORE) return 'demote';
+  return 'hold';
+}
+
 /** Separator set the diary uses inside composite references (「A=B」「甲→乙」). */
 const DIARY_REF_SPLIT_RE = /[·→+=|/\\、，,。：:；;！!？?（）()\[\]【】""'']+\s*|\s+/;
 
@@ -1273,6 +1285,9 @@ export class DreamService {
         // injection roster (promoted procedures archived alongside).
         reReviewed: reReview.reReviewed,
         demoted: reReview.demoted,
+        // RRSI P1: the re-review's own panel-agreement counters (design
+        // §6.1 P1.2 — the empty-day path never runs the re-review).
+        reReviewPanels: reReview.panels,
         // Cross-night semantic dedup (audit P1): how many of tonight's memory
         // writes merged into an older row instead of inserting a variant.
         dedupMerged: writeResult.dedupMerged,
@@ -1753,9 +1768,10 @@ export class DreamService {
     metabot: DreamMetabotLike,
     brain: DreamBrainPair,
     date: string,
-  ): Promise<{ reReviewed: number; demoted: number }> {
-    const zero = { reReviewed: 0, demoted: 0 };
+  ): Promise<{ reReviewed: number; demoted: number; panels: { agreed: number; disagreed: number; incomplete: number } }> {
+    const zero = { reReviewed: 0, demoted: 0, panels: { agreed: 0, disagreed: 0, incomplete: 0 } };
     try {
+      const gate = this.capabilityGate;
       const pending = this.deps.coworkStore.listReReviewableCapabilityDrafts(metabot.id, {
         olderThanMs: Date.now() - CAPABILITY_REVIEW_INTERVAL_DAYS * 86_400_000,
         limit: CAPABILITY_REVIEW_MAX_PER_NIGHT,
@@ -1765,52 +1781,84 @@ export class DreamService {
         metabot.id,
         CAPABILITY_VALIDATION_SUMMARY_DAYS,
       );
-      const prompt = buildCapabilityValidationPrompt({
+      // Same grounding set as the fresh gate: the diary dates actually shown.
+      const evidenceDates = new Set(recentSummaries.map((summary) => summary.summaryDate));
+      const draftInputs = (drafts: typeof pending) => drafts.map((draft) => ({
+        id: draft.id,
+        dreamDate: draft.dreamDate,
+        title: draft.title,
+        description: draft.description,
+        capabilityType: draft.capabilityType,
+      }));
+      const summaryInputs = recentSummaries.map((summary) => ({
+        summaryDate: summary.summaryDate,
+        summaryText: summary.summaryText,
+      }));
+      const promptA = buildCapabilityValidationPrompt({
         botName: metabot.name,
         date,
-        drafts: pending.map((draft) => ({
-          id: draft.id,
-          dreamDate: draft.dreamDate,
-          title: draft.title,
-          description: draft.description,
-          capabilityType: draft.capabilityType,
-        })),
-        recentSummaries: recentSummaries.map((summary) => ({
-          summaryDate: summary.summaryDate,
-          summaryText: summary.summaryText,
-        })),
+        drafts: draftInputs(pending),
+        recentSummaries: summaryInputs,
+        prospective: gate.prospective,
       });
-      const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
-      const parsed = parseCapabilityValidationOutput(raw, new Set(pending.map((draft) => draft.id)));
-      if (!parsed.ok) {
-        console.warn(`[DreamService] Capability re-review parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
-        return { ...zero, reReviewed: pending.length };
+      const rawA = await this.callDreamLlm(promptA.system, promptA.user, brain, 4096);
+      const parsedA = parseCapabilityValidationOutput(rawA, new Set(pending.map((draft) => draft.id)));
+      if (parsedA.ok === false) {
+        console.warn(`[DreamService] Capability re-review parse failed for metabot ${metabot.id}: ${parsedA.error}`);
+        return {
+          reReviewed: pending.length,
+          demoted: 0,
+          panels: { agreed: 0, disagreed: 0, incomplete: pending.length },
+        };
       }
-      // Same grounding gate as the fresh-draft validation pass.
-      const evidenceDates = new Set([date, ...recentSummaries.map((summary) => summary.summaryDate)]);
-      const groundedVerdicts = parsed.verdicts.filter((verdict) => {
-        const citedDates = verdict.rationale.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-        return citedDates.every((cited) => evidenceDates.has(cited));
-      });
-      const droppedUngrounded = parsed.verdicts.length - groundedVerdicts.length;
-      if (droppedUngrounded > 0) {
-        console.warn(
-          `[DreamService] Dropped ${droppedUngrounded} capability re-review verdict(s) citing unrecorded diary dates for metabot ${metabot.id}`,
-        );
+      // Panel B mirrors the fresh gate: drafts reversed, failures degrade to
+      // an empty verdict list, single-panel configs reuse panel A.
+      let verdictsB: typeof parsedA.verdicts = gate.panels === 1 ? parsedA.verdicts : [];
+      if (gate.panels === 2) {
+        const promptB = buildCapabilityValidationPrompt({
+          botName: metabot.name,
+          date,
+          drafts: draftInputs([...pending].reverse()),
+          recentSummaries: summaryInputs,
+          prospective: gate.prospective,
+        });
+        try {
+          const rawB = await this.callDreamLlm(promptB.system, promptB.user, brain, 4096);
+          const parsedB = parseCapabilityValidationOutput(rawB, new Set(pending.map((draft) => draft.id)));
+          verdictsB = parsedB.ok ? parsedB.verdicts : [];
+        } catch (error) {
+          console.warn(
+            `[DreamService] Capability re-review panel B failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          verdictsB = [];
+        }
       }
-      const byId = new Map(pending.map((draft) => [draft.id, draft]));
+
+      const draftById = new Map(pending.map((draft) => [draft.id, draft]));
+      const downgradedIds = new Set<number>();
+      const panelA = this.groundPanelVerdicts(parsedA.verdicts, draftById, evidenceDates, null, downgradedIds);
+      const panelB = this.groundPanelVerdicts(verdictsB, draftById, evidenceDates, null, downgradedIds);
+
+      const panels = { agreed: 0, disagreed: 0, incomplete: 0 };
       let demoted = 0;
-      for (const verdict of groundedVerdicts) {
-        const draft = byId.get(verdict.id);
-        if (!draft) continue;
-        const demote = verdict.verdict === 'rejected' && verdict.score < CAPABILITY_PROMOTION_MIN_SCORE;
-        if (demote) {
+      for (const draft of pending) {
+        const verdictA = panelA.get(draft.id) ?? null;
+        const verdictB = panelB.get(draft.id) ?? null;
+        const { outcome, agreement } = combinePanelOutcomes(classifyReReviewVerdict(verdictA), classifyReReviewVerdict(verdictB));
+        panels[agreement] += 1;
+        // Incomplete: a transient failure retries the next night — the review
+        // clock is NOT refreshed, so the draft stays selected.
+        if (agreement === 'incomplete') continue;
+        const scoreA = verdictA?.score ?? 0;
+        const scoreB = verdictB?.score ?? 0;
+        const joinedNotes = joinPanelRationales(verdictA?.rationale ?? '', verdictB?.rationale ?? '');
+        if (outcome === 'demote') {
           this.deps.coworkStore.updateCapabilityDraftValidation({
-            id: verdict.id,
+            id: draft.id,
             metabotId: metabot.id,
             status: 'rejected',
-            validationScore: verdict.score,
-            validationNotes: verdict.rationale,
+            validationScore: Math.min(scoreA, scoreB),
+            validationNotes: joinedNotes,
           });
           demoted += 1;
           // Loop closure: a demoted technique must not survive as hardened
@@ -1825,21 +1873,38 @@ export class DreamService {
               );
             }
           }
+          // An AGREED demotion also lands in the falsified ledger (design
+          // §6.1 P1.3); a ledger failure never undoes the demotion.
+          try {
+            this.deps.coworkStore.recordFalsifiedHypothesis({
+              metabotId: metabot.id,
+              title: draft.title,
+              description: draft.description,
+              reason: verdictA?.rationale ?? '',
+              source: 're_review',
+              sourceDraftId: draft.id,
+            });
+          } catch (error) {
+            console.warn(
+              `[DreamService] Falsified ledger write failed for metabot ${metabot.id} draft #${draft.id}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
           continue;
         }
-        // The row survives the panel: refresh the review bookkeeping (a
-        // maintained validated verdict also takes the fresh score).
+        // The row survives the panel: refresh the review bookkeeping (an
+        // agreed maintained verdict also takes the panels' fresh score; a
+        // disagreement records itself in the notes).
         this.deps.coworkStore.markCapabilityDraftReviewed({
-          id: verdict.id,
+          id: draft.id,
           metabotId: metabot.id,
-          validationScore: verdict.verdict === 'validated' ? verdict.score : null,
-          validationNotes: verdict.rationale,
+          validationScore: outcome === 'promote' ? Math.min(scoreA, scoreB) : null,
+          validationNotes: agreement === 'disagreed' ? `panels disagreed — ${joinedNotes}` : joinedNotes,
         });
       }
       console.log(
-        `[DreamService] Capability re-review for metabot ${metabot.id}: reReviewed=${pending.length}, demoted=${demoted}`,
+        `[DreamService] Capability re-review for metabot ${metabot.id}: reReviewed=${pending.length}, demoted=${demoted}, agreed/disagreed/incomplete=${panels.agreed}/${panels.disagreed}/${panels.incomplete}`,
       );
-      return { reReviewed: pending.length, demoted };
+      return { reReviewed: pending.length, demoted, panels };
     } catch (error) {
       console.warn(
         `[DreamService] Capability re-review failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
