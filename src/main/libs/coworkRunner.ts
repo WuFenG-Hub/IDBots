@@ -68,6 +68,7 @@ import {
   buildKnowledgeBlock,
   formatKnowledgeRecallResults,
   formatKnowledgeUpsertResult,
+  KNOWLEDGE_PROMPT_MAX_CHARS,
   KNOWLEDGE_PROMPT_MAX_ITEMS,
   type KnowledgePromptEntry,
 } from './knowledgePromptBlocks';
@@ -103,6 +104,10 @@ import { ensureSandboxReady, getSandboxRuntimeInfoIfReady, type SandboxRuntimeIn
 import { isPathWithin } from './runtimePaths';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
 import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
+import {
+  CEREBELLUM_KNOWLEDGE_MAX_CANDIDATES,
+  CEREBELLUM_KNOWLEDGE_MIN_POOL,
+} from '../cerebellum/knowledgeHotRank';
 import {
   CEREBELLUM_EFFORT_STICKY_WINDOW_MS,
   resolveStickyAutoEffortRung,
@@ -2101,6 +2106,18 @@ export interface CoworkRunnerOptions {
     memories: Array<{ id: string; text: string }>;
   }) => Promise<ReadonlyMap<string, number> | null>;
   /**
+   * Optional cerebellum (小脑) re-ranker for the knowledge hot layer. When
+   * set, the runner scores a wider newest-N pool against the current user
+   * text and the returned noul map replaces recency order before the 8-item
+   * cap. null (unconfigured, small pool, timeout, error) means "newest 8" —
+   * the callback must never throw. main.ts resolves the cerebellum config
+   * lazily inside the callback so Settings edits apply on the next turn.
+   */
+  cerebellumKnowledgeRanker?: (input: {
+    currentUserText: string;
+    entries: Array<{ id: string; topic: string; summary: string; kind: string }>;
+  }) => Promise<ReadonlyMap<string, number> | null>;
+  /**
    * Optional cerebellum (小脑) skill shortlist for the volatile skills-catalog
    * block. When set, the runner asks it to rank the session's visible skill
    * catalog against the current user text; the returned top entries ride the
@@ -2317,6 +2334,7 @@ export class CoworkRunner extends EventEmitter {
   private screenshotHost?: ScreenshotHost;
   private locationHost?: LocationHost;
   private cerebellumMemoryRanker?: CoworkRunnerOptions['cerebellumMemoryRanker'];
+  private cerebellumKnowledgeRanker?: CoworkRunnerOptions['cerebellumKnowledgeRanker'];
   private cerebellumSkillRanker?: CoworkRunnerOptions['cerebellumSkillRanker'];
   private cerebellumVolatileBlockGate?: CoworkRunnerOptions['cerebellumVolatileBlockGate'];
   private cerebellumIntuitionAvailable?: CoworkRunnerOptions['cerebellumIntuitionAvailable'];
@@ -2492,6 +2510,7 @@ export class CoworkRunner extends EventEmitter {
     this.screenshotHost = options?.screenshotHost;
     this.locationHost = options?.locationHost;
     this.cerebellumMemoryRanker = options?.cerebellumMemoryRanker;
+    this.cerebellumKnowledgeRanker = options?.cerebellumKnowledgeRanker;
     this.cerebellumSkillRanker = options?.cerebellumSkillRanker;
     this.cerebellumVolatileBlockGate = options?.cerebellumVolatileBlockGate;
     this.cerebellumIntuitionAvailable = options?.cerebellumIntuitionAvailable;
@@ -5683,6 +5702,80 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Kick the knowledge hot-layer rank at volatile-prompt entry so it overlaps
+   * the memory re-ranker's own JEV round-trip (one 1.5s budget, not two).
+   * Returns null — and makes no call — when the ranker is unwired, the
+   * prompt is blank, memory blocks are off, or the active pool is smaller
+   * than the hot-layer cap (newest-8 already shows everything).
+   */
+  private beginKnowledgeHotRank(
+    sessionId: string,
+    currentUserText: string,
+    sessionMemoryEnabled: boolean,
+    includeMemoryPromptBlocks: boolean,
+  ): {
+    entries: KnowledgePromptEntry[];
+    scores: Promise<ReadonlyMap<string, number> | null>;
+    startedAt: number;
+  } | null {
+    if (
+      !this.cerebellumKnowledgeRanker
+      || !currentUserText.trim()
+      || !sessionMemoryEnabled
+      || !includeMemoryPromptBlocks
+      || !this.knowledgeStore
+    ) {
+      return null;
+    }
+    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) return null;
+    const entries = this.knowledgeStore.listKnowledge({
+      metabotId,
+      status: 'active',
+      limit: CEREBELLUM_KNOWLEDGE_MAX_CANDIDATES,
+    });
+    if (entries.length < CEREBELLUM_KNOWLEDGE_MIN_POOL) return null;
+    const startedAt = Date.now();
+    const scores = this.cerebellumKnowledgeRanker({
+      currentUserText,
+      entries: entries.map((entry) => ({
+        id: entry.id,
+        topic: entry.topic,
+        summary: entry.summary,
+        kind: entry.kind,
+      })),
+    }).catch(() => null);
+    return { entries, scores, startedAt };
+  }
+
+  private async composeExperiencePromptWithKnowledgeRank(
+    sessionId: string,
+    flight: {
+      entries: KnowledgePromptEntry[];
+      scores: Promise<ReadonlyMap<string, number> | null>;
+      startedAt: number;
+    },
+  ): Promise<string> {
+    let relevanceScoreById: ReadonlyMap<string, number> | null = null;
+    try {
+      relevanceScoreById = await flight.scores;
+    } catch {
+      relevanceScoreById = null;
+    }
+    coworkLog('INFO', 'knowledge:cerebellumRank', 'Cerebellum knowledge hot-layer re-rank finished', {
+      sessionId,
+      pooled: flight.entries.length,
+      ranked: relevanceScoreById?.size ?? 0,
+      latencyMs: Date.now() - flight.startedAt,
+      used: relevanceScoreById != null,
+    });
+    return this.buildExperiencePromptBlocksXml(sessionId, {
+      entries: flight.entries,
+      relevanceScoreById,
+    });
+  }
+
+  /**
    * Hot-layer experience injection: the bot's protected self-identity entry
    * plus its last few days of dream summaries. Returns '' when the session
    * has no attributed bot (strict, no cross-bot guessing) or no experience
@@ -5693,7 +5786,13 @@ export class CoworkRunner extends EventEmitter {
    * user message via buildVolatileContextPrompt — never into the system
    * prompt, where any change would wipe DeepSeek's cached prefix.
    */
-  private buildExperiencePromptBlocksXml(sessionId: string): string {
+  private buildExperiencePromptBlocksXml(
+    sessionId: string,
+    knowledgeHot?: {
+      entries: KnowledgePromptEntry[];
+      relevanceScoreById: ReadonlyMap<string, number> | null;
+    } | null,
+  ): string {
     const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
     if (metabotId == null) return '';
 
@@ -5752,7 +5851,17 @@ export class CoworkRunner extends EventEmitter {
     // with the experience blocks rather than injected separately, to keep the
     // memory prompt cohesive.
     let knowledgeBlock = '';
-    if (this.knowledgeStore) {
+    if (knowledgeHot) {
+      // The wide pool was already loaded for the rank call. A null score map
+      // keeps recency order, and buildKnowledgeBlock then slices the newest 8
+      // — the same rows a limit-8 query would have returned.
+      knowledgeBlock = buildKnowledgeBlock(
+        knowledgeHot.entries,
+        KNOWLEDGE_PROMPT_MAX_ITEMS,
+        KNOWLEDGE_PROMPT_MAX_CHARS,
+        knowledgeHot.relevanceScoreById,
+      );
+    } else if (this.knowledgeStore) {
       const knowledgeEntries = this.knowledgeStore.listKnowledge({
         metabotId,
         status: 'active',
@@ -6123,6 +6232,16 @@ export class CoworkRunner extends EventEmitter {
     const volatileGatePromise = this.cerebellumVolatileBlockGate && prompt.trim()
       ? this.cerebellumVolatileBlockGate({ currentUserText: prompt }).catch(() => null)
       : null;
+    // Knowledge hot-layer rank (roadmap #4): starts here so it overlaps the
+    // memory re-ranker and the block gate. Awaited only when the experience
+    // section actually renders — a gate that skips experience does not wait
+    // on this call. null flight = newest-8, synchronous, byte-identical.
+    const knowledgeHotRank = this.beginKnowledgeHotRank(
+      sessionId,
+      prompt,
+      sessionMemoryEnabled,
+      profile.includeMemoryPromptBlocks,
+    );
     let blockGateVerdicts: Record<string, boolean> | null = null;
     const shouldInjectVolatile = (key: string): boolean =>
       !(CEREBELLUM_VOLATILE_GATE_SECTION_KEYS as readonly string[]).includes(key)
@@ -6154,7 +6273,9 @@ export class CoworkRunner extends EventEmitter {
       if (sessionMemoryEnabled && shouldInjectVolatile('experience')) {
         sections.push({
           key: 'experience',
-          text: this.buildExperiencePromptBlocksXml(sessionId),
+          text: knowledgeHotRank
+            ? await this.composeExperiencePromptWithKnowledgeRank(sessionId, knowledgeHotRank)
+            : this.buildExperiencePromptBlocksXml(sessionId),
         });
       }
       // Twin-side distilled impressions of local Workers also ride the

@@ -20,6 +20,8 @@ const KNOWLEDGE_TOPIC_MAX_CHARS = 120;
 const RECALL_ENTRY_MAX_CHARS = 600;
 
 export interface KnowledgePromptEntry {
+  /** Present on store rows. The hot-layer relevance map keys off this. */
+  id?: string;
   topic: string;
   summary: string;
   kind: 'know_how' | 'pitfall' | 'principle';
@@ -51,17 +53,50 @@ function truncate(value: unknown, maxLength: number): string {
 }
 
 /**
+ * Recency order (the array the caller passed, newest-first) unless a
+ * relevance map is present. A score replaces recency for that id; ids the
+ * map does not mention sink below every scored id and keep their relative
+ * order. An empty or missing map leaves the array untouched — the newest-8
+ * slice stays byte-identical to the pre-ranker hot layer.
+ */
+export function orderKnowledgeEntriesForPrompt<T extends { id?: string }>(
+  entries: readonly T[],
+  relevanceScoreById?: ReadonlyMap<string, number> | null,
+): readonly T[] {
+  if (!relevanceScoreById || relevanceScoreById.size === 0) return entries;
+  return entries
+    .map((entry, index) => ({
+      entry,
+      index,
+      score: entry.id ? relevanceScoreById.get(entry.id) : undefined,
+    }))
+    .sort((left, right) => {
+      const leftScore = typeof left.score === 'number' && Number.isFinite(left.score)
+        ? left.score
+        : Number.NEGATIVE_INFINITY;
+      const rightScore = typeof right.score === 'number' && Number.isFinite(right.score)
+        ? right.score
+        : Number.NEGATIVE_INFINITY;
+      if (leftScore !== rightScore) return rightScore - leftScore;
+      return left.index - right.index;
+    })
+    .map((row) => row.entry);
+}
+
+/**
  * Hot layer: a bounded slice of the bot's reusable knowledge points (mix of
- * know-how and pitfalls), newest-first, dropped when over the char budget.
- * Injected so prior knowledge actively constrains new work instead of sitting
- * in storage.
+ * know-how and pitfalls). Callers pass newest-first. An optional relevance
+ * map (cerebellum noul, keyed by id) reorders before the item cap so an
+ * older point that applies to this turn can outrank a newer unrelated one.
+ * Dropped when over the char budget.
  */
 export function buildKnowledgeBlock(
   entries: KnowledgePromptEntry[],
   maxItems: number = KNOWLEDGE_PROMPT_MAX_ITEMS,
   maxChars: number = KNOWLEDGE_PROMPT_MAX_CHARS,
+  relevanceScoreById?: ReadonlyMap<string, number> | null,
 ): string {
-  const items = (entries ?? [])
+  const items = orderKnowledgeEntriesForPrompt(entries ?? [], relevanceScoreById)
     .slice(0, Math.max(1, maxItems))
     .map((entry) => ({
       topic: truncate(entry.topic, KNOWLEDGE_TOPIC_MAX_CHARS),

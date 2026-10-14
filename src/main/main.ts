@@ -23,6 +23,7 @@ import { createOwnerMemoryScope } from './memory/memoryScope';
 import { CEREBELLUM_FREE_PROVIDER, resolveCerebellumConfig, type ResolvedCerebellumConfig } from './libs/cerebellumConfig';
 import { createJevRelayFetchWithKeyRetry, initJevRelayService, registerJevRelayIpcHandlers, resolveCerebellumRuntimeConfig } from './services/jevRelayService';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
+import { rankKnowledgeWithCerebellum } from './cerebellum/knowledgeHotRank';
 import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
 import { gateVolatileBlocksWithCerebellum } from './cerebellum/volatileBlockGate';
 import { selectEffortWithCerebellum } from './cerebellum/effortSelector';
@@ -3200,6 +3201,30 @@ const createCerebellumMemoryRanker = () =>
   };
 
 /**
+ * Cerebellum (小脑) knowledge hot-layer re-ranker (roadmap #4). Same lazy
+ * shape as the memory ranker: config re-resolved per call, fetch from
+ * resolveCerebellumCallContext (paid provider uses the Electron net stack,
+ * the free relay uses the key-retry wrapper). null keeps the newest-8 hot
+ * layer. Never logs knowledge text.
+ */
+const createCerebellumKnowledgeRanker = () =>
+  async ({ currentUserText, entries }: {
+    currentUserText: string;
+    entries: Array<{ id: string; topic: string; summary: string; kind: string }>;
+  }): Promise<ReadonlyMap<string, number> | null> => {
+    const context = await resolveCerebellumCallContext();
+    if (!context) {
+      return null;
+    }
+    return rankKnowledgeWithCerebellum({
+      config: context.config,
+      fetchImpl: context.fetchImpl,
+      currentUserText,
+      entries,
+    });
+  };
+
+/**
  * Cerebellum (小脑) memory write gate (roadmap #1): one cheap JEV Noul in
  * front of the turn-level brain memory-extraction call. Same shape as the
  * ranker above — config re-resolved lazily on every call so Settings edits
@@ -6103,6 +6128,10 @@ const getCoworkRunner = () => {
       // Cerebellum (小脑) memory re-rank: shared factory with the group-task
       // daemon's memory block (see createCerebellumMemoryRanker).
       cerebellumMemoryRanker: createCerebellumMemoryRanker(),
+      // Cerebellum (小脑) knowledge hot-layer rank (roadmap #4): scores a
+      // wider newest-N pool so the 8 injected points are the relevant ones,
+      // not merely the newest. Null keeps newest-8.
+      cerebellumKnowledgeRanker: createCerebellumKnowledgeRanker(),
       // Cerebellum (小脑) skill shortlist (roadmap #2): ranks the session's
       // visible skill catalog per turn; top-3 ride the volatile tail next to
       // the untouched catalog block (see createCerebellumSkillRanker).
