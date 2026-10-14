@@ -265,13 +265,26 @@ test('dream run validates pending capability drafts against recorded history', a
   const coworkStore = createCoworkStore(db);
   const dreamStore = new DreamStore(db, () => {});
   seedActivity(coworkStore, db);
+  // RRSI P1: the gate is prospective — night 1 only distills the drafts; the
+  // panel judges them on night 2 against night 2's later diary.
+  const session2 = coworkStore.createSession('和用户聊反馈', '/tmp/b', '', 'local', [], 5);
+  const DAY2 = '2026-08-03';
+  const DAY2_START = new Date(2026, 7, 3).getTime();
+  db.run(
+    'INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ['m3', session2.id, 'user', '按那个流程交付的成品很棒', '{}', DAY2_START + 1000, 1]
+  );
+  db.run(
+    'INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ['m4', session2.id, 'assistant', '谢谢', '{}', DAY2_START + 2000, 2]
+  );
   const calls = [];
   const service = new DreamService({
     coworkStore,
     metabotStore: metabotStoreStub(),
     dreamStore,
     llmTimeoutMs: 5000,
-    now: () => new Date(2026, 7, 3, 3, 0),
+    now: () => new Date(2026, 7, 4, 3, 0),
     performChat: async (system, user) => {
       calls.push({ system, user });
       if (system.includes('能力验证')) {
@@ -279,7 +292,7 @@ test('dream run validates pending capability drafts against recorded history', a
           id: Number(match[1]),
           verdict: match[2].includes('先验证') ? 'validated' : 'rejected',
           score: match[2].includes('先验证') ? 0.9 : 0.8,
-          rationale: match[2].includes('先验证') ? '日记显示该做法屡获好评' : '照做后被差评',
+          rationale: match[2].includes('先验证') ? '2026-08-03 日记显示该做法屡获好评' : '2026-08-03 照做后被差评',
         }));
         return JSON.stringify({ verdicts });
       }
@@ -291,14 +304,15 @@ test('dream run validates pending capability drafts against recorded history', a
           verdicts: ids.map((id) => ({ id, action: 'keep', conditions: '交付前', uncertainty: '', conflicts_with: [], note: 'n' })),
         });
       }
+      const isNight2Dream = user.includes('按那个流程交付的成品很棒');
       return JSON.stringify({
-        daily_summary: '今天交付了视频。',
+        daily_summary: isNight2Dream ? '第二天用户专门来夸了交付流程。' : '今天交付了视频。',
         sections: {},
         work_reviews: [],
         important_memories: [],
         value_lessons: [],
         self_identity: LONG_IDENTITY,
-        capability_learnings: [
+        capability_learnings: isNight2Dream ? [] : [
           { title: '先验证再交付', description: '交付前自己验证一遍', capability_type: 'workflow' },
           { title: '深夜连环追问', description: '深夜连续追问进度', capability_type: 'skill' },
         ],
@@ -306,14 +320,25 @@ test('dream run validates pending capability drafts against recorded history', a
     },
   });
   try {
+    // Night 1: the dream distills the drafts; the prospective gate defers them.
     await service.runNow(5, DAY);
+    assert.equal(
+      calls.filter((call) => call.system.includes('能力验证')).length,
+      0,
+      'the distill night makes no validation call',
+    );
+    assert.equal(coworkStore.listCapabilityDrafts(5, { status: 'draft' }).length, 2);
 
-    // Dream call + validation call + reconciliation call (one draft validated).
-    assert.equal(calls.length, 3);
-    assert.ok(calls[1].system.includes('能力验证'));
-    // The validation prompt embeds tonight's freshly written diary as history.
-    assert.ok(calls[1].user.includes('今天交付了视频。'));
-    assert.ok(calls[2].system.includes('记忆核对'), 'newly validated drafts face the memory-bank check');
+    // Night 2: both drafts face the dual-panel gate with night 2's diary as
+    // the later evidence; the validated one then faces reconciliation.
+    await service.runNow(5, DAY2);
+    const validationCalls = calls.filter((call) => call.system.includes('能力验证'));
+    assert.equal(validationCalls.length, 2, 'panel A and panel B');
+    assert.ok(validationCalls[0].user.includes('第二天用户专门来夸了交付流程。'), 'the night-2 validation prompt contains night 2\'s diary');
+    assert.ok(
+      calls.some((call) => call.system.includes('记忆核对')),
+      'newly validated drafts face the memory-bank check',
+    );
 
     const validated = coworkStore.listCapabilityDrafts(5, { status: 'validated' });
     assert.equal(validated.length, 1);
@@ -514,7 +539,7 @@ test('a low-score validated verdict stays a draft; validation failure never fail
   });
   try {
     await service.runNow(5, DAY);
-    assert.equal(validationCalls, 1);
+    assert.equal(validationCalls, 2, 'the dual-panel gate calls twice');
     // Below the promote threshold: still a draft, dream run unaffected.
     assert.equal(coworkStore.listCapabilityDrafts(5, { status: 'draft' }).length, 1);
     assert.equal(coworkStore.listCapabilityDrafts(5, { status: 'validated' }).length, 0);
@@ -539,6 +564,10 @@ test('validation runs even on an empty day when drafts are pending', async () =>
     dreamStore,
     llmTimeoutMs: 5000,
     now: () => new Date(2026, 7, 3, 3, 0),
+    // Subject is the empty-day scheduling path (the gate still runs), not the
+    // verdict semantics — pin the legacy gate; a diary-less night can never
+    // land a prospective validation.
+    capabilityGate: { panels: 1, prospective: false },
     performChat: async (system, user) => {
       if (system.includes('能力验证')) {
         validationCalls += 1;

@@ -360,6 +360,8 @@ test('three-night loop: validate → dispute → re-enter with evidence → keep
     metaidKnowledgeStore: knowledgeStore,
     llmTimeoutMs: 5000,
     now: () => new Date(2026, 7, 3, 3, 0),
+    // Subject is the reconciliation loop, not the gate — pin the legacy gate.
+    capabilityGate: { panels: 1, prospective: false },
     performChat: async (system, user) => {
       calls.push({ system, user });
       if (system.includes('记忆核对')) {
@@ -459,6 +461,8 @@ test('merge: draft rejects with a merge note; the target procedure gains a refer
     metaidKnowledgeStore: knowledgeStore,
     llmTimeoutMs: 5000,
     now: () => new Date(2026, 7, 3, 3, 0),
+    // Subject is the merge semantics, not the gate — pin the legacy gate.
+    capabilityGate: { panels: 1, prospective: false },
     performChat: async (system) => {
       if (system.includes('记忆核对')) {
         return JSON.stringify({
@@ -521,6 +525,8 @@ test('reconciliation considers at most RECONCILE_MAX_DRAFTS_PER_NIGHT drafts, hi
     dreamStore,
     llmTimeoutMs: 5000,
     now: () => new Date(2026, 7, 3, 3, 0),
+    // Subject is the per-night reconciliation cap, not the gate.
+    capabilityGate: { panels: 1, prospective: false },
     performChat: async (system, user) => {
       if (system.includes('记忆核对')) {
         reconcileCalls.push(user);
@@ -573,6 +579,8 @@ test('an unparseable reconciliation output leaves the drafts validated and the r
     dreamStore,
     llmTimeoutMs: 5000,
     now: () => new Date(2026, 7, 3, 3, 0),
+    // Subject is the reconciliation parse failure, not the gate.
+    capabilityGate: { panels: 1, prospective: false },
     performChat: async (system) => {
       if (system.includes('记忆核对')) return 'not json at all';
       if (system.includes('能力验证')) {

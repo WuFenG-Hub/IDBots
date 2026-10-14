@@ -2,8 +2,31 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
+import {
+  MARKERS,
+  createDreamHarness,
+  dreamJson,
+  seedSession,
+  validationVerdicts,
+} from './fixtures/rrsiDreamHarness.mjs';
+
 const require = createRequire(import.meta.url);
 const { buildCapabilityValidationPrompt } = require('../dist-electron/main/libs/capabilityValidationPrompt.js');
+const { DISPUTED_AUTO_REJECT_DAYS } = require('../dist-electron/main/libs/capabilityValidationPrompt.js');
+
+const D1 = '2026-08-02';
+const D2 = '2026-08-03';
+const D3 = '2026-08-04';
+const DAYMS = 86_400_000;
+
+const draftIdsIn = (user) => [...user.matchAll(/### 草案 #(\d+)/g)].map((match) => Number(match[1]));
+const validationCallsOf = (router) => router.calls.filter((call) => call.system.includes(MARKERS.validation));
+const reconciliationKeep = (user) => {
+  const ids = [...user.matchAll(/草案 #(\d+)/g)].map((match) => Number(match[1]));
+  return {
+    verdicts: ids.map((id) => ({ id, action: 'keep', conditions: '交付前', uncertainty: '', conflicts_with: [], note: 'n' })),
+  };
+};
 
 test('prospective rule lines ride the prompt only when requested', () => {
   const base = {
@@ -54,4 +77,318 @@ test('similar falsified hypotheses render per draft plus the judging rule', () =
   });
   assert.ok(!withoutFalsified.user.includes('曾被证伪的相似做法'));
   assert.ok(!withoutFalsified.user.includes('标注了「曾被证伪的相似做法」'));
+});
+
+// ---------------------------------------------------------------------------
+// Fresh-draft gate flows (RRSI P1 Task 5)
+// ---------------------------------------------------------------------------
+
+test('flow: a draft distilled tonight is not judged tonight', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({
+      capability_learnings: [
+        { title: '先验证再交付', description: '交付前自检一遍', capability_type: 'workflow' },
+      ],
+    }));
+    await h.runNight(D1);
+    assert.equal(validationCallsOf(h.router).length, 0, 'no validation call on the distill night');
+    const drafts = h.coworkStore.listCapabilityDrafts(5, { status: 'draft' });
+    assert.equal(drafts.length, 1);
+    assert.equal(drafts[0].title, '先验证再交付');
+    assert.equal(h.telemetry(D1)?.validation?.deferredSameNight, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: next-night validation requires a later citation on both panels', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({
+      capability_learnings: [
+        { title: '先验证再交付', description: '交付前自检一遍', capability_type: 'workflow' },
+        { title: '交付前列清单', description: '列一张交付前检查清单', capability_type: 'workflow' },
+      ],
+    }));
+    await h.runNight(D1);
+
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '上次那样交付很棒' },
+      { type: 'assistant', content: '谢谢' },
+    ]);
+    h.router.setFallback(() => dreamJson({ daily_summary: '交付后用户点赞。' }));
+    h.router.on(MARKERS.validation, ({ user }) => validationVerdicts(user, () => ({
+      verdict: 'validated', score: 0.9, rationale: '2026-08-03 日记显示照做后获赞',
+    })));
+    h.router.on(MARKERS.reconciliation, ({ user }) => reconciliationKeep(user));
+    await h.runNight(D2);
+
+    const calls = validationCallsOf(h.router);
+    assert.equal(calls.length, 2, 'panel A and panel B each call once');
+    assert.deepEqual(draftIdsIn(calls[0].user), [...draftIdsIn(calls[1].user)].reverse(), 'panel B sees the drafts reversed');
+
+    const validated = h.coworkStore.listCapabilityDrafts(5, { status: 'validated' });
+    assert.equal(validated.length, 2);
+    for (const draft of validated) {
+      assert.equal(draft.validationScore, 0.9, 'agreed score is the minimum of both panels');
+      assert.equal(draft.validationNotes, '2026-08-03 日记显示照做后获赞', 'identical rationales collapse');
+    }
+    assert.deepEqual(
+      h.telemetry(D2)?.validation?.panels,
+      { agreed: 2, disagreed: 0, incomplete: 0 },
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: an own-date citation is downgraded before any state change', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({
+      capability_learnings: [
+        { title: '先验证再交付', description: '交付前自检一遍', capability_type: 'workflow' },
+      ],
+    }));
+    await h.runNight(D1);
+
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '继续' },
+      { type: 'assistant', content: '好' },
+    ]);
+    h.router.setFallback(() => dreamJson({ daily_summary: '普通的一天。' }));
+    h.router.on(MARKERS.validation, ({ user }) => validationVerdicts(user, () => ({
+      verdict: 'validated', score: 0.9, rationale: '2026-08-02 当天就做成了',
+    })));
+    await h.runNight(D2);
+
+    assert.equal(h.coworkStore.listCapabilityDrafts(5, { status: 'draft' }).length, 1, 'the draft stays a draft');
+    assert.equal(h.coworkStore.listCapabilityDrafts(5, { status: 'validated' }).length, 0);
+    assert.equal(h.telemetry(D2)?.validation?.prospectiveDowngraded, 1);
+    assert.equal(h.telemetry(D2)?.validation?.panels?.agreed, 1, 'both panels hold after the downgrade');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: panel disagreement holds the draft', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({
+      capability_learnings: [
+        { title: '先验证再交付', description: '交付前自检一遍', capability_type: 'workflow' },
+      ],
+    }));
+    await h.runNight(D1);
+
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '继续' },
+      { type: 'assistant', content: '好' },
+    ]);
+    h.router.setFallback(() => dreamJson({ daily_summary: '普通的一天。' }));
+    h.router.on(MARKERS.validation, ({ user, nth }) => validationVerdicts(user, () => (
+      nth === 1
+        ? { verdict: 'validated', score: 0.9, rationale: '2026-08-03 日记显示照做后获赞' }
+        : { verdict: 'keep_draft', score: 0.4, rationale: '证据不足' }
+    )));
+    await h.runNight(D2);
+
+    assert.equal(h.coworkStore.listCapabilityDrafts(5, { status: 'draft' }).length, 1, 'disagreement changes nothing');
+    assert.equal(h.telemetry(D2)?.validation?.panels?.disagreed, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: a panel-B failure is incomplete and never fails the run', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({
+      capability_learnings: [
+        { title: '先验证再交付', description: '交付前自检一遍', capability_type: 'workflow' },
+      ],
+    }));
+    await h.runNight(D1);
+
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '继续' },
+      { type: 'assistant', content: '好' },
+    ]);
+    h.router.setFallback(() => dreamJson({ daily_summary: '普通的一天。' }));
+    h.router.on(MARKERS.validation, ({ user, nth }) => (
+      nth === 1
+        ? validationVerdicts(user, () => ({ verdict: 'validated', score: 0.9, rationale: '2026-08-03 日记显示照做后获赞' }))
+        : 'not json'
+    ));
+    await h.runNight(D2);
+
+    assert.equal(h.coworkStore.listCapabilityDrafts(5, { status: 'draft' }).length, 1, 'incomplete changes nothing');
+    assert.equal(h.telemetry(D2)?.validation?.panels?.incomplete, 1);
+    assert.equal(h.dreamStore.getRun(5, D2)?.status, 'completed', 'the dream run still completes');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: an agreed rejection writes exactly one ledger row', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({
+      capability_learnings: [
+        { title: '深夜连环追问', description: '深夜连续追问进度', capability_type: 'skill' },
+      ],
+    }));
+    await h.runNight(D1);
+    const draftId = h.coworkStore.listCapabilityDrafts(5, { status: 'draft' })[0].id;
+
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '别问了' },
+      { type: 'assistant', content: '好' },
+    ]);
+    h.router.setFallback(() => dreamJson({ daily_summary: '普通的一天。' }));
+    h.router.on(MARKERS.validation, ({ user }) => validationVerdicts(user, () => ({
+      verdict: 'rejected', score: 0.8, rationale: '2026-08-03 照做后被差评',
+    })));
+    await h.runNight(D2);
+
+    assert.equal(h.coworkStore.listCapabilityDrafts(5, { status: 'rejected' }).length, 1);
+    const ledger = h.coworkStore.listFalsifiedHypotheses(5);
+    assert.equal(ledger.length, 1);
+    assert.equal(ledger[0].source, 'validation');
+    assert.equal(ledger[0].sourceDraftId, draftId);
+    assert.equal(ledger[0].title, '深夜连环追问');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: a rejected re-proposal is skipped against the ledger', { todo: 'enabled in Task 7' }, async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({
+      capability_learnings: [
+        { title: '深夜连环追问', description: '深夜连续追问进度', capability_type: 'skill' },
+      ],
+    }));
+    await h.runNight(D1);
+
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '别问了' },
+      { type: 'assistant', content: '好' },
+    ]);
+    h.router.setFallback(() => dreamJson({ daily_summary: '普通的一天。' }));
+    h.router.on(MARKERS.validation, ({ user }) => validationVerdicts(user, () => ({
+      verdict: 'rejected', score: 0.8, rationale: '2026-08-03 照做后被差评',
+    })));
+    await h.runNight(D2);
+
+    seedSession(h.coworkStore, h.db, D3, [
+      { type: 'user', content: '继续' },
+      { type: 'assistant', content: '好' },
+    ]);
+    h.router.setFallback(() => dreamJson({
+      capability_learnings: [
+        { title: '深夜连环追问', description: '换个说法再提一次', capability_type: 'skill' },
+      ],
+    }));
+    h.router.on(MARKERS.validation, () => JSON.stringify({ verdicts: [] }));
+    await h.runNight(D3);
+
+    assert.equal(h.telemetry(D3)?.capabilityDraftInsert?.skippedFalsified, 1);
+    const ledger = h.coworkStore.listFalsifiedHypotheses(5);
+    assert.equal(ledger.length, 1);
+    assert.equal(ledger[0].hitCount, 1);
+    assert.equal(
+      h.coworkStore.listCapabilityDrafts(5).filter((draft) => draft.title === '深夜连环追问' && draft.status === 'draft').length,
+      0,
+      'no new draft row with the falsified title',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: the disputed-timeout sweep writes no ledger row', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.coworkStore.insertCapabilityDrafts(5, '2026-08-01', [
+      { title: '超期存疑', description: 'd', capabilityType: 'skill' },
+    ]);
+    const draft = h.coworkStore.listCapabilityDrafts(5)[0];
+    h.coworkStore.updateCapabilityDraftValidation({
+      id: draft.id, metabotId: 5, status: 'disputed', validationNotes: 'n',
+    });
+    h.db.run(
+      'UPDATE capability_drafts SET last_reviewed_at = ? WHERE id = ?',
+      [Date.now() - (DISPUTED_AUTO_REJECT_DAYS + 1) * DAYMS, draft.id],
+    );
+
+    h.router.setFallback(() => dreamJson({ daily_summary: '普通的一天。' }));
+    await h.runNight(D1);
+
+    assert.equal(h.coworkStore.listCapabilityDrafts(5, { status: 'rejected' })[0]?.title, '超期存疑');
+    assert.equal(h.coworkStore.listFalsifiedHypotheses(5).length, 0, 'the timeout sweep never writes the ledger');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: legacy single-panel configuration validates the same night', async () => {
+  const h = await createDreamHarness({ capabilityGate: { panels: 1, prospective: false } });
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({
+      capability_learnings: [
+        { title: '先验证再交付', description: '交付前自检一遍', capability_type: 'workflow' },
+      ],
+    }));
+    h.router.on(MARKERS.validation, ({ user }) => validationVerdicts(user, () => ({
+      verdict: 'validated', score: 0.9, rationale: '2026-08-02 日记显示屡获好评',
+    })));
+    h.router.on(MARKERS.reconciliation, ({ user }) => reconciliationKeep(user));
+    await h.runNight(D1);
+
+    assert.equal(validationCallsOf(h.router).length, 1, 'the pre-P1 behavior: one panel, same night');
+    const validated = h.coworkStore.listCapabilityDrafts(5, { status: 'validated' });
+    assert.equal(validated.length, 1);
+    assert.equal(validated[0].validationScore, 0.9);
+  } finally {
+    h.cleanup();
+  }
 });
