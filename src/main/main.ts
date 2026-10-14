@@ -25,6 +25,7 @@ import { createJevRelayFetchWithKeyRetry, initJevRelayService, registerJevRelayI
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
 import { rankKnowledgeWithCerebellum } from './cerebellum/knowledgeHotRank';
 import { decideGroupReplyWithCerebellum } from './cerebellum/groupReplyGate';
+import { rankWorkersWithCerebellum, CEREBELLUM_WORKER_RANK_TOP_K } from './cerebellum/workerRank';
 import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
 import { gateVolatileBlocksWithCerebellum } from './cerebellum/volatileBlockGate';
 import { selectEffortWithCerebellum } from './cerebellum/effortSelector';
@@ -3262,6 +3263,40 @@ const createCerebellumGroupReplyGate = () =>
   };
 
 /**
+ * Cerebellum (小脑) worker fit ranking (roadmap #13). One Choice question
+ * over the planning-turn roster. null = no hint. Never logs task text or
+ * worker descriptions.
+ */
+const createCerebellumWorkerRanker = () =>
+  async ({ taskText, workers }: {
+    taskText: string;
+    workers: Array<{ id: string; name: string; description: string }>;
+  }): Promise<Array<{ id: string; name: string; description: string; probability: number }> | null> => {
+    const context = await resolveCerebellumCallContext();
+    if (!context) return null;
+    const startedAt = Date.now();
+    const ranking = await rankWorkersWithCerebellum({
+      config: context.config,
+      fetchImpl: context.fetchImpl,
+      taskText,
+      workers,
+    });
+    coworkLog('INFO', 'workers:cerebellumRank', 'worker fit ranking evaluated', {
+      pool: workers.length,
+      ranked: ranking?.length ?? 0,
+      used: ranking !== null,
+      workerIds: ranking?.slice(0, CEREBELLUM_WORKER_RANK_TOP_K).map((entry) => entry.id) ?? [],
+      latencyMs: Date.now() - startedAt,
+    });
+    if (!ranking) return null;
+    const byId = new Map(workers.map((worker) => [worker.id, worker]));
+    return ranking.flatMap((entry) => {
+      const worker = byId.get(entry.id);
+      return worker ? [{ ...worker, probability: entry.probability }] : [];
+    });
+  };
+
+/**
  * Cerebellum (小脑) memory write gate (roadmap #1): one cheap JEV Noul in
  * front of the turn-level brain memory-extraction call. Same shape as the
  * ranker above — config re-resolved lazily on every call so Settings edits
@@ -4423,6 +4458,18 @@ const startStartupMessageTier = (): void => {
     // Cerebellum (小脑) re-rank for the daemon's owner-scope memory block —
     // the same shared ranker wiring the cowork runner uses.
     cerebellumMemoryRanker: createCerebellumMemoryRanker(),
+    cerebellumWorkerRanker: createCerebellumWorkerRanker(),
+    listWorkerImpressions: (observerGlobalMetaId) => {
+      try {
+        return getMetaIDImpressionStore().listSnapshots(observerGlobalMetaId, 100).map((snapshot) => ({
+          subjectGlobalMetaID: snapshot.subjectGlobalMetaID,
+          summaryText: snapshot.summaryText,
+          capabilityTags: snapshot.capabilityTags,
+        }));
+      } catch {
+        return [];
+      }
+    },
     // The daemon touches only the memory rows that actually rendered into the
     // prompt (pooling alone is not a usage event).
     touchUserMemoriesLastUsed: (metabotId, memoryIds) =>
