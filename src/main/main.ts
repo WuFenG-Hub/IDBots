@@ -6932,6 +6932,14 @@ const getCoworkRunner = () => {
         localRosterMetaIds: metaTaskLocalRosterMetaIds,
         resolveGlobalMetaId: (metabotId) => getMetabotStore().getMetabotById(metabotId)?.globalmetaid ?? null,
       },
+      // Preference rounds (/protocols/preference): bot-signed writes go through
+      // PreferenceService; MetaTask detail feeds subject-mode candidate derivation.
+      preferenceTools: {
+        service: () => getPreferenceService(),
+        resolveGlobalMetaId: (metabotId) => getMetabotStore().getMetabotById(metabotId)?.globalmetaid ?? null,
+        metataskDetail: (rootPinId) => getMetaTaskRefresher().detail(rootPinId),
+        refreshMetaTask: (reason) => getMetaTaskRefresher().refreshOnce(reason),
+      },
       // RSI P0 prediction ledger: prediction_record writes into the dream
       // store's ledger; the nightly dream reconciles it (startDreamService).
       predictionTools: {

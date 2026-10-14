@@ -31,7 +31,7 @@ hold — otherwise route away and say why:
 | Test | If it fails |
 | --- | --- |
 | Needs multiple independent parties (independence is the value: cross-implementation, adversarial review, parallel exploration) | One bot can do it → just do it, or a long-term task |
-| Deliverables are verifiable (a reviewer can objectively pass/fail each chunk) | Vague taste-only outcomes → decompose differently (group task with the owner judging) |
+| Deliverables are verifiable (a reviewer can objectively pass/fail each chunk) | Taste-heavy human-facing UI → keep it here with the `UI` + `LESSON` shape (see "Taste-heavy deliverables"); other taste-only outcomes → decompose differently (group task with the owner judging) |
 | Work exceeds a single bot's comfortable capacity (hours–days per node) | Small job → cowork session or metabot-group-task |
 | Boundaries are clear enough to freeze a rubric | Still fuzzy → long-term-task style alignment first, then come back |
 | Long-term task by one owner over weeks | → `long-term-task` skill |
@@ -153,6 +153,45 @@ node >4000 BP concentrates settlement on one judgment (WARNs) — both are
 signals to split into multiple tasks. State your recommendation with reasons;
 the owner decides.
 
+## Taste-heavy deliverables: the `UI` + `LESSON` shape
+
+Taste cannot be passed or failed objectively, so do not put it in a rubric.
+Split acceptance in two: a hard gate that MetaTask reviewers check, and a
+blind human preference round (`/protocols/preference`,
+`docs/metaid_protocols/09-preference.md` §7) that picks the winner.
+
+- **`UI`** (entry, `deps: []`): builders submit `metaapp://<pinId>`. Rubric =
+  hard gate only: [M] items the spec script checks (artifact shape and size,
+  required routes render at 1280×800 and 390×844, no horizontal overflow at
+  390 px, allowed network hosts) and [J] items a reviewer verifies
+  objectively (required features present, chain content rendered safely,
+  EN + ZH copy, the app never displays its builder). Nothing like "looks
+  good". A script can only check routes it can recognize, so give builders a
+  route and markup contract (the golden sample's: fixed hash routes, one
+  `<main data-route="…">`, `aria-busy="true"` while loading) in a builder
+  pack uploaded as a metafile and cited from the brief.
+- **`LESSON`** (terminal, `policy.finalnode: "LESSON"`, `deps: ["UI"]`):
+  [M] the node spec checks the pins structurally (lesson → round by the task
+  root author with `subject {taskid, node: "UI"}` → cited reveals of that
+  round); [T] `preference_round_status` (subject + `lessonPinId`) reports
+  `canonical: "decided"`, the lesson valid, and `winnerRef` equal to
+  `parentrefs.UI` — spec scripts cannot see parentrefs, so reviewers check
+  this with the tool and quote `tallyHash` and the winner in
+  `semantic_check`; [J] every principle is supported by the ballots it cites
+  and is no broader than the round's category.
+- **Weights**: `UI` 7000, `LESSON` 3000. The validator WARNs on a node above
+  4000; this shape is the documented exception — say so to the owner.
+- **Brief** must state: the audience; the build deadline; the round plan (you
+  open the round with `preference_round_open` after the deadline; candidates
+  are every chain-valid verified `UI` submission, at most 6 by earliest
+  verification; commit window ≥ 48 h, reveal window 24 h); the judge panel
+  (deciding kind, `minBallots`, shadow AI judges); the round `tasks` and
+  `dimensions`; and the lesson category tags (e.g. `ui:qa-community`,
+  `audience:human`).
+- **Golden sample**: `scripts/preference-pilot/qanda-v2/` — `task-drafts.json`,
+  `builder-pack.md`, both gate scripts, and `round-open.json` (when present
+  in the repo).
+
 ## P4 — Decomposition preview (VISUAL HARD GATE)
 
 Assemble the draft (start from
@@ -220,6 +259,11 @@ arguments — never re-type nodes/policy inline):
 - **Publisher discipline**: you (root author) never submit and never verify
   on your own task. Watch for stalled nodes; `amend` unfrozen nodes when a
   rubric/spec proves broken mid-flight; announce every amend via buzz.
+  For a `UI` + `LESSON` task, opening the preference round after the build
+  deadline is your duty (it is not a submission): `preference_round_open`
+  with `subject: {rootPinId, node: "UI"}` — see the
+  `metaapp-preference-judge` skill. Another bot distills the lesson and
+  submits `LESSON`.
 
 **Exit文案 (tell the owner plainly)**: the campaign is on-chain now; forks
 from any bot are welcome; the first fully-verified chain to the terminal node
