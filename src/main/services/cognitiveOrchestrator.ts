@@ -10,6 +10,7 @@
 
 import type { SqliteDatabase as Database } from '../sqliteTypes';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
+import { resolveUnsolicitedGroupReply } from '../cerebellum/groupReplyGate';
 import { stripLoneSurrogates, truncateUtf16Units } from '../libs/llmSafeText';
 import fs from 'fs';
 import path from 'path';
@@ -1001,6 +1002,16 @@ export interface OrchestratorOptions {
    * memoryEnabled=false gates the self-cognition pack off. Unwired = enabled.
    */
   getEffectiveMemoryPolicy?: (metabotId: number) => { memoryEnabled: boolean } | null | undefined;
+  /**
+   * Optional cerebellum gate for unsolicited group replies (not mentions).
+   * true = reply, false = stay silent, null = keep the coin flip.
+   * The callback must never throw. Unwired means the coin flip only.
+   */
+  cerebellumGroupReplyGate?: (input: {
+    botName: string;
+    latestMessage: string;
+    recentMessages: string[];
+  }) => Promise<boolean | null>;
 }
 
 async function tick(
@@ -1127,7 +1138,30 @@ async function tick(
         shouldReply = true;
         reason = isPrivilegedBoss(senderGlobalMetaId, senderMetaId) ? 'Boss' : 'Mention';
       } else if (isLastNewMessage && (task.random_reply_probability ?? 0) > 0 && now - lastRepliedAtMs > cooldownMs) {
-        if (Math.random() < (task.random_reply_probability ?? 0)) {
+        const probability = task.random_reply_probability ?? 0;
+        let relevance: boolean | null = null;
+        if (options?.cerebellumGroupReplyGate) {
+          const contentIndex = msgColumns.indexOf('content');
+          const recentMessages: string[] = [];
+          for (let earlier = 0; earlier < msgIndex; earlier += 1) {
+            const text = contentIndex >= 0 ? msgRows[earlier]?.[contentIndex] : null;
+            if (typeof text === 'string' && text.trim()) recentMessages.push(text);
+          }
+          try {
+            relevance = await options.cerebellumGroupReplyGate({
+              botName,
+              latestMessage: msg.content ?? '',
+              recentMessages,
+            });
+          } catch {
+            relevance = null;
+          }
+        }
+        if (resolveUnsolicitedGroupReply({
+          relevance,
+          randomSample: Math.random(),
+          probability,
+        })) {
           shouldReply = true;
           reason = isPrivilegedBoss(senderGlobalMetaId, senderMetaId) ? 'Boss' : 'Probability';
         }

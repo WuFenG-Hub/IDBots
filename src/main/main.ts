@@ -24,6 +24,7 @@ import { CEREBELLUM_FREE_PROVIDER, resolveCerebellumConfig, type ResolvedCerebel
 import { createJevRelayFetchWithKeyRetry, initJevRelayService, registerJevRelayIpcHandlers, resolveCerebellumRuntimeConfig } from './services/jevRelayService';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
 import { rankKnowledgeWithCerebellum } from './cerebellum/knowledgeHotRank';
+import { decideGroupReplyWithCerebellum } from './cerebellum/groupReplyGate';
 import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
 import { gateVolatileBlocksWithCerebellum } from './cerebellum/volatileBlockGate';
 import { selectEffortWithCerebellum } from './cerebellum/effortSelector';
@@ -3225,6 +3226,37 @@ const createCerebellumKnowledgeRanker = () =>
   };
 
 /**
+ * Cerebellum (小脑) group-chat reply gate (roadmap #5). One Noul on an
+ * unsolicited group message: true replies, false skips the whole turn,
+ * null keeps the coin flip. Mentions never reach this callback. Never
+ * logs message text.
+ */
+const createCerebellumGroupReplyGate = () =>
+  async ({ botName, latestMessage, recentMessages }: {
+    botName: string;
+    latestMessage: string;
+    recentMessages: string[];
+  }): Promise<boolean | null> => {
+    const context = await resolveCerebellumCallContext();
+    if (!context) {
+      return null;
+    }
+    const startedAt = Date.now();
+    const verdict = await decideGroupReplyWithCerebellum({
+      config: context.config,
+      fetchImpl: context.fetchImpl,
+      botName,
+      latestMessage,
+      recentMessages,
+    });
+    coworkLog('INFO', 'groupChat:cerebellumReply', 'group reply gate evaluated', {
+      verdict: verdict === null ? 'no-verdict' : verdict ? 'reply' : 'skip',
+      latencyMs: Date.now() - startedAt,
+    });
+    return verdict;
+  };
+
+/**
  * Cerebellum (小脑) memory write gate (roadmap #1): one cheap JEV Noul in
  * front of the turn-level brain memory-extraction call. Same shape as the
  * ranker above — config re-resolved lazily on every call so Settings edits
@@ -3977,6 +4009,7 @@ const startStartupMessageTier = (): void => {
       getEffectiveMemoryPolicy: (metabotId) => ({
         memoryEnabled: getCoworkStore().getMemoryBackend().getEffectiveMemoryPolicyForMetabot(metabotId).memoryEnabled,
       }),
+      cerebellumGroupReplyGate: createCerebellumGroupReplyGate(),
     },
     () => triggerDaemonWasmRecovery('cognitiveOrchestrator')
   );
