@@ -28,6 +28,7 @@ import UserMessageOriginBadge from './UserMessageOriginBadge';
 import MessageFeedbackControls from './MessageFeedbackControls';
 import { ThinkingBlock, splitThinkTaggedContent } from './ThinkingBlock';
 import { AssistantActivityIndicator } from './AssistantActivityIndicator';
+import { drawTurnAckPhrase, findTailTurnAck } from './turnAckPhrases';
 import { shouldHideA2AInternalMessage, lastA2AErrorDetail } from './a2aInternalMessageFilter';
 import {
   getTodoListSummaryText,
@@ -2055,17 +2056,50 @@ const A2AOwnerComposer = React.memo(({
 });
 
 // Streaming activity bar shown between messages and input
-const StreamingActivityBar: React.FC<{ messages: CoworkMessage[]; fallbackText?: string }> = ({
+
+/**
+ * Turn-ack phrase for the live turn: scans the contiguous tail run of
+ * runtime-status messages for the 'turnAck' signal and draws (memoized per
+ * ack message id) from the per-session shuffle bag. null when no ack applies
+ * — callers keep their existing status copy untouched.
+ */
+const useTurnAckPhrase = (messages: CoworkMessage[], sessionId: string | null): string | null => {
+  const tailTurnAck = React.useMemo(() => findTailTurnAck(messages), [messages]);
+  return React.useMemo(
+    () => tailTurnAck
+      ? drawTurnAckPhrase({
+          sessionId,
+          tier: tailTurnAck.tier,
+          language: i18nService.getLanguage(),
+          ackMessageId: tailTurnAck.messageId,
+        })
+      : null,
+    // Draw once per ack message; language flips only re-draw for NEW acks
+    // (remembered phrases stay in their drawn language), the right trade.
+    [tailTurnAck?.messageId, tailTurnAck?.tier, sessionId],
+  );
+};
+
+const StreamingActivityBar: React.FC<{ messages: CoworkMessage[]; fallbackText?: string; sessionId?: string | null }> = ({
   messages,
   fallbackText,
+  sessionId = null,
 }) => {
+  // Turn acknowledgment (same contract as the assistant-mode indicator): a
+  // 'turnAck' runtime-status signal in the contiguous tail run draws a tier
+  // phrase from the shuffle bag while the first visible token is still
+  // pending; a retry always outranks it, and tool-running text only applies
+  // once the tail run ends.
+  const ackPhrase = useTurnAckPhrase(messages, sessionId);
   // Walk messages backwards to find the latest tool_use without a paired tool_result
   const getStatusText = (): string => {
-    // SDK runtime-status signals (api_retry / requesting) take precedence over
+    // SDK runtime-status signals (api_retry / requesting / turnAck) take precedence over
     // tool-running text — they describe the transport layer, not the agent loop.
+    let sawRequesting = false;
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       const status = msg.metadata?.sdkRuntimeStatus;
+      if (typeof status !== 'string') break;
       if (status === 'api_retry') {
         const attempt = typeof msg.metadata?.retryAttempt === 'number' ? msg.metadata.retryAttempt : null;
         const max = typeof msg.metadata?.retryMax === 'number' ? msg.metadata.retryMax : null;
@@ -2078,11 +2112,16 @@ const StreamingActivityBar: React.FC<{ messages: CoworkMessage[]; fallbackText?:
         return i18nService.t('coworkRetryingGeneric');
       }
       if (status === 'requesting') {
-        return i18nService.t('coworkRequesting');
+        sawRequesting = true;
       }
-      // Stop scanning once we hit a non-runtime-status message — only the most
-      // recent SDK status applies.
-      break;
+    }
+    // A turnAck in the tail run outranks the generic "requesting" copy —
+    // the calibrated tier promise is the point of the acknowledgment.
+    if (ackPhrase) {
+      return ackPhrase;
+    }
+    if (sawRequesting) {
+      return i18nService.t('coworkRequesting');
     }
 
     const toolUseIds = new Set<string>();
@@ -2146,6 +2185,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   isAssistantMode = false,
   activityAvatar = null,
   runtimeStatusMessages = null,
+  sessionId = null,
 }: {
   turn: ConversationTurn;
   resolveLocalFilePath?: (href: string, text: string) => string | null;
@@ -2158,6 +2198,8 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   isActiveTurn?: boolean;
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
+  /** Shuffle-bag scope for the assistant-mode indicator's turn-ack phrases. */
+  sessionId?: string | null;
   /** Assistant mode: raw thinking and tool-call chrome are hidden entirely
    * (model narration arrives as ordinary chat bubbles), and the "Worked for"
    * collapse stays disabled so the visible list renders in order. */
@@ -2548,6 +2590,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
                   inline
                   messages={activityMessages}
                   avatar={activityAvatar}
+                  sessionId={sessionId}
                 />
               ) : (
                 <TypingDots />
@@ -4021,6 +4064,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             isAssistantMode={isAssistantMode}
             activityAvatar={sessionMetabot?.avatar ?? currentSession.metabotAvatar ?? null}
             runtimeStatusMessages={runtimeStatusMessages}
+            sessionId={currentSession?.id ?? null}
           />
         </div>
       );
@@ -4073,6 +4117,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 isAssistantMode={isAssistantMode}
                 activityAvatar={sessionMetabot?.avatar ?? currentSession.metabotAvatar ?? null}
                 runtimeStatusMessages={isLastTurn ? runtimeStatusMessages : null}
+                sessionId={currentSession.id}
               />
             </div>
           )}
@@ -4470,6 +4515,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       {!isAssistantMode && (isStreaming || currentSession.status === 'running') && (
         <StreamingActivityBar
           messages={currentSession.messages}
+          sessionId={currentSession.id}
           fallbackText={isA2ASession ? i18nService.t('coworkA2ABackgroundWorking') : undefined}
         />
       )}
