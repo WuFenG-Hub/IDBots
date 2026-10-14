@@ -146,6 +146,15 @@ Live-eval note: the relay is quota-metered; when exhausted, live evals and smoke
 - Privacy notice widened (zh+en): group-chat messages are now listed. Other people's lines can leave the machine.
 - `scripts/cerebellum-group-reply-eval.mjs` — 10 labeled Chinese cases (reply vs stay silent). Headline metric is LOST (a needed reply skipped). Threshold sweep included. Request body is `buildGroupReplyRequest`.
 
+### 2.15 Worker assignment ranking (roadmap #13 — shipped on `feat/cerebellum-worker-rank`)
+
+- `src/main/cerebellum/workerRank.ts` — pure, Electron-free: `rankWorkersWithCerebellum(...)` → best-first ranking or **null, never throws**. One JEV Choice (`best_worker`) over the worker roster. `state.task_goal` is the original-language title + goal; each option is `name: role / bio / goal / twin impression`, descriptions capped at 320 chars. Pools under 2 skip the call. Timeout 1500 ms.
+- `buildWorkerAssignmentHint` renders the top 3 as a plain-text fit order. Probabilities are not shown. `appendWorkerFitHint` leaves the planning directive byte-identical when the hint is empty.
+- `groupTaskDaemon.ts` — on the chair planning turn only, after the roster has settled. The chair still writes the plan and still must not dump every subtask on the first name. Decomposed subtasks do not exist yet at this point, so the ranking is against the task goal (the assignment the chair is about to split). Null/throw adds nothing.
+- `main.ts` — `createCerebellumWorkerRanker()` via `resolveCerebellumCallContext()`. Impressions come from `listSnapshots` for the chair's globalMetaId (the twin's nightly dream layer). Logs `workers:cerebellumRank` with pool, ranked count, top ids, and latency — never the goal or bios.
+- Privacy notice widened (zh+en): worker roster profiles and the twin's distilled impressions of those workers.
+- `scripts/cerebellum-worker-rank-eval.mjs` — 4-worker roster, 6 labeled Chinese goals, top-1 and recall@3. `--dry-run` prints the request. Live run still needs an API key.
+
 ## 3. Design rules (do not break)
 
 1. **Never block a turn on the cerebellum.** 1.5 s hard timeout, null on any failure, silent lexical/code fallback. The cerebellum must be droppable mid-flight with zero user-visible effect.
@@ -173,9 +182,9 @@ Every shipped integration (§2.7-§2.11) follows the same shape; copy it:
 
 ## 4. Roadmap — where the cerebellum goes next
 
-Ranked by expected value. Each row names the concrete seam. Rows 1-5 and 11-12 shipped; the rest is the agreed backlog (owner-endorsed 2026-10-14: implement all of it over time).
+Ranked by expected value. Each row names the concrete seam. Rows 1-5, 11-13 shipped; the rest is the agreed backlog (owner-endorsed 2026-10-14: implement all of it over time).
 
-**Recommended next (2026-10-14, #5 done):** #13 (first "smarter-delegation" play). The calibration feedback loop below is an ongoing practice, not a row.
+**Recommended next (2026-10-14, #13 done):** #15 (conversation_search re-rank — same pattern as memory re-rank). The calibration feedback loop below is an ongoing practice, not a row.
 
 | # | Use case | Seam | Notes |
 |---|---|---|---|
@@ -191,7 +200,7 @@ Ranked by expected value. Each row names the concrete seam. Rows 1-5 and 11-12 s
 | 10 | **Surf path selection** | `surfService.ts` candidate pins/links scoring | Nightly, batch |
 | 11 | **Reasoning-effort auto selection** — ✅ **shipped** (see §2.10) | `src/main/cerebellum/effortSelector.ts` | One Choice question {off, low, high, max} over `state.user_message`; assistant-mode policy escalates only when P(high)+P(max) ≥ 0.5. Live eval: exact-match 28/30 (the two misses are off→low, harmless under the two-level policy); escalation cliff: casual ≤0.02 vs complex ≥0.81; ~600 input tokens ≈ $0.000025/turn |
 | 12 | **Intuition tool — brain-callable cerebellum** — ✅ **shipped** (see §2.11, owner's initiative) | `src/main/cerebellum/intuitionTool.ts` + `coworkRunner.buildSessionInlineTools` (`intuition` inline tool) | Phase 1: cowork_ui sessions, 3 calls/min rolling cap, teaching description with WHEN/WHEN-NOT/HOW + calibration caveat. Phase 2 (data-driven): widen surfaces after observing `cerebellum:intuition` logs; add a vetted question-pattern library to the description if quality is erratic |
-| 13 | **Worker assignment ranking** — 🔜 next (new, 2026-10-14) | `orchestratorCoworkBridge.ts` — subtask→worker dispatch in group tasks | The skill shortlist mirrored onto delegation: one Choice question per subtask ("which worker fits best"), candidates = worker roster + their `twin-impression` distilled impressions (dream layer rewrites nightly). First integration where the cerebellum makes the bot SMARTER rather than leaner |
+| 13 | **Worker assignment ranking** — ✅ **shipped** (see §2.15) | `src/main/cerebellum/workerRank.ts` + chair planning turn in `groupTaskDaemon.ts` | One Choice over the worker roster (bio/role/goal + twin impression). Fit order is a hint in the planning directive; null leaves that directive unchanged. Chair still writes the plan |
 | 14 | **Dual-brain complexity routing** (new, 2026-10-14) | the GT-02 fallback chain / per-turn model dispatch | JEV judges intrinsic task complexity; simple turns route to the cheaper brain. Phase 1 observe-only (log verdict vs actual model), Phase 2 route. Saves unit-price difference per turn — coordinate with the fallback-chain design before enabling |
 | 15 | **conversation_search result re-rank** (new, 2026-10-14) | the `conversation_search` inline tool result path | Keyword top-N → one JEV re-rank against the current need; same pattern as the memory re-rank, improves recall quality of the brain's own tool |
 | 16 | **Remote-service candidate shortlist** (new, 2026-10-14) | `buildRemoteServicesPrompt` consumers | Choice rank of discovered on-chain services per turn + top-3; isomorphic to the skill shortlist once the directory grows |

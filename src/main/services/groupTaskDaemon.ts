@@ -30,6 +30,12 @@ import type {
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { contentAddressesRosterName, contentMentionsBotName, isMentioned, mentionContainsMetaId } from './groupChatMentionUtils';
+import {
+  appendWorkerFitHint,
+  buildWorkerAssignmentHint,
+  CEREBELLUM_WORKER_RANK_MIN_POOL,
+  CEREBELLUM_WORKER_RANK_TOP_K,
+} from '../cerebellum/workerRank';
 import { isOpenTeamProtocolOnlyContent } from './openTeamGuestDaemon';
 import { parsePositionLines } from '../libs/groupTaskPositions';
 import {
@@ -2174,6 +2180,24 @@ export interface GroupTaskDaemonDeps {
     currentUserText: string;
     memories: Array<{ id: string; text: string }>;
   }) => Promise<ReadonlyMap<string, number> | null>;
+  /**
+   * Optional cerebellum ranking of the worker roster against the task goal,
+   * consulted once on the chair planning turn. null = no fit hint. The
+   * callback must never throw.
+   */
+  cerebellumWorkerRanker?: (input: {
+    taskText: string;
+    workers: Array<{ id: string; name: string; description: string }>;
+  }) => Promise<Array<{ id: string; name: string; description: string; probability: number }> | null>;
+  /**
+   * Twin's distilled impressions of workers, keyed by the observer (chair)
+   * globalMetaId. Unwired or throwing = rank on roster text only.
+   */
+  listWorkerImpressions?: (observerGlobalMetaId: string) => Array<{
+    subjectGlobalMetaID: string;
+    summaryText: string | null;
+    capabilityTags?: string[];
+  }>;
   /**
    * Bump last_used_at for exactly the memory rows that rendered into the
    * prompt (the usage event for the hygiene decay clock). The daemon calls
@@ -6224,6 +6248,62 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * Fit-order hint for the chair planning turn. Empty when the ranker is
+   * unwired, the roster has fewer than two workers, or the call fails.
+   */
+  const buildWorkerFitHint = async (
+    task: GroupTask,
+    promptMembers: DaemonPromptMember[],
+    observerGlobalMetaId: string,
+  ): Promise<string> => {
+    const ranker = deps.cerebellumWorkerRanker;
+    if (!ranker) return '';
+    const workers = promptMembers.filter((member) => member.role === 'worker');
+    if (workers.length < CEREBELLUM_WORKER_RANK_MIN_POOL) return '';
+    const taskText = [task.title, task.goal].map((part) => part?.trim() ?? '').filter(Boolean).join('\n');
+    if (!taskText) return '';
+    let impressions: Array<{ subjectGlobalMetaID: string; summaryText: string | null; capabilityTags?: string[] }> = [];
+    if (deps.listWorkerImpressions && observerGlobalMetaId.trim()) {
+      try {
+        impressions = deps.listWorkerImpressions(observerGlobalMetaId.trim()) ?? [];
+      } catch {
+        impressions = [];
+      }
+    }
+    const impressionBySubject = new Map(impressions.map((entry) => [entry.subjectGlobalMetaID, entry]));
+    const candidates = workers.map((member) => {
+      const id = (member.globalMetaId?.trim() || member.name).trim();
+      const impression = member.globalMetaId ? impressionBySubject.get(member.globalMetaId.trim()) : undefined;
+      const tags = (impression?.capabilityTags ?? []).filter(Boolean).slice(0, 8).join(', ');
+      const description = [
+        member.roleProfile?.trim(),
+        member.bio?.trim(),
+        member.goal?.trim() ? `goal: ${member.goal.trim()}` : '',
+        impression?.summaryText?.trim() ? `impression: ${impression.summaryText.trim()}` : '',
+        tags ? `tags: ${tags}` : '',
+        member.remote ? 'remote teammate' : '',
+      ].filter(Boolean).join(' — ');
+      return { id, name: member.name, description };
+    }).filter((worker) => worker.id);
+    try {
+      const ranking = await ranker({ taskText, workers: candidates });
+      if (!ranking || ranking.length === 0) return '';
+      const byId = new Map(candidates.map((worker) => [worker.id, worker]));
+      const ordered = ranking.slice(0, CEREBELLUM_WORKER_RANK_TOP_K).flatMap((entry) => {
+        const worker = byId.get(entry.id);
+        return worker ? [{ name: worker.name, description: worker.description }] : [];
+      });
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: worker fit hint ` +
+        `${ordered.map((worker) => worker.name).join(', ') || 'empty'}`,
+      );
+      return buildWorkerAssignmentHint(ordered);
+    } catch {
+      return '';
+    }
+  };
+
+  /**
    * System-generated planning directive for the chair planning turn. The full
    * member roster (name, role, bio/role profile, goal) is embedded so the chair
    * LLM assigns work to the right specialist instead of guessing from an empty
@@ -6413,11 +6493,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const ownerGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
       const systemPromptParts = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
       const systemPrompt = systemPromptParts.systemPrompt;
+      const workerFitHint = await buildWorkerFitHint(task, promptMembers, bot.globalmetaid ?? '');
       // Volatile context (time + experience/cognition + remote-teammate facts)
       // rides the user turn.
-      const directive = [systemPromptParts.memoryContext, systemPromptParts.volatileContext, remoteStatusBlock, buildPlanningDirective(db, task, promptMembers)]
-        .filter(Boolean)
-        .join('\n\n');
+      const directive = appendWorkerFitHint(
+        [systemPromptParts.memoryContext, systemPromptParts.volatileContext, remoteStatusBlock, buildPlanningDirective(db, task, promptMembers)]
+          .filter(Boolean)
+          .join('\n\n'),
+        workerFitHint,
+      );
       const brain = metabotBrainOptions(bot);
       const llmId = brain.llmId ?? undefined;
       const fallbackLlmId = brain.fallbackLlmId;
