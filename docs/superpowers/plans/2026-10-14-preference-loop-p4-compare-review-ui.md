@@ -793,7 +793,7 @@ class PreferenceRendererService {
     if (!browser?.resolveMetaAppPin) return { error: 'bot-browser-unavailable' };
     try {
       const result = await browser.resolveMetaAppPin({ pinId });
-      if (!result.ok) return { error: result.message || result.code };
+      if (result.ok === false) return { error: result.message || result.code };
       if (!result.data.runUrl) return { error: 'no-run-url' };
       return { url: result.data.runUrl, resolvedAtMs: Date.now() };
     } catch (error) {

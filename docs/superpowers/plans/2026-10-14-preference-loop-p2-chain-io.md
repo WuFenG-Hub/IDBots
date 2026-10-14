@@ -1141,7 +1141,7 @@ export class PreferenceService {
     const event = events.find((candidate) => candidate.path === 'round' && candidate.pinId === roundPinId);
     if (!event) return { error: 'round:not-found' };
     const parsed = parseRound(event.body, Math.floor(event.timestampMs / 1000));
-    return parsed.ok ? { event, round: parsed.value } : { error: parsed.reason };
+    return parsed.ok === true ? { event, round: parsed.value } : { error: parsed.reason };
   }
 
   listRounds(filter: { judge?: string; taskid?: string } = {}): PreferenceRoundSummary[] {
@@ -1168,8 +1168,8 @@ export class PreferenceService {
         judges: round.judges,
         commitCloseAt: round.commitCloseAt,
         revealCloseAt: round.revealCloseAt,
-        status: tally && tally.ok ? tally.result.output.status : 'pending',
-        winner: tally && tally.ok ? tally.result.output.winner : null,
+        status: tally && tally.ok === true ? tally.result.output.status : 'pending',
+        winner: tally && tally.ok === true ? tally.result.output.winner : null,
       });
     }
     return out;
@@ -1189,7 +1189,7 @@ export class PreferenceService {
       lesson = {
         pinId: options.lessonPinId,
         valid: verdict.ok && sameRound,
-        reason: verdict.ok ? (sameRound ? null : 'lesson:round-mismatch') : verdict.reason,
+        reason: verdict.ok === true ? (sameRound ? null : 'lesson:round-mismatch') : verdict.reason,
       };
     }
     return {
@@ -1197,8 +1197,8 @@ export class PreferenceService {
       author: located.event.author,
       confirmed: located.event.height >= 0,
       round: located.round,
-      tally: tally.ok ? tally.result : null,
-      tallyError: tally.ok ? null : tally.reason,
+      tally: tally.ok === true ? tally.result : null,
+      tallyError: tally.ok === true ? null : tally.reason,
       localBallots: this.deps.store.listBallots({ roundPinId }).map(toBallotView),
       lesson,
     };
@@ -1221,12 +1221,12 @@ export class PreferenceService {
       const roundPinId = typeof event.body.round === 'string' ? event.body.round : '';
       if (!tallies.has(roundPinId)) {
         const tally = tallyRound(events, roundPinId, { nowSec });
-        tallies.set(roundPinId, tally.ok ? tally.result : null);
+        tallies.set(roundPinId, tally.ok === true ? tally.result : null);
       }
       const tally = tallies.get(roundPinId);
       if (!tally) continue;
       const verdict = checkLesson(event.body, tally);
-      if (!verdict.ok) continue;
+      if (verdict.ok === false) continue;
       const { lesson } = verdict;
       const wanted = query.category ?? [];
       if (wanted.length > 0 && !wanted.some((tag) => lesson.category.some((own) => tagMatches(tag, own)))) continue;
@@ -1418,7 +1418,7 @@ import { ballotCommitHash, newBallotSalt } from './sealing';
 
   async openRound(signer: PreferenceSigner, body: unknown): Promise<{ pinId: string } | ErrorResult> {
     const parsed = parseRound(body, this.nowSec() + COMMIT_CUTOFF_SEC);
-    if (!parsed.ok) return { error: parsed.reason };
+    if (parsed.ok === false) return { error: parsed.reason };
     const writer = this.deps.resolveWriter(signer);
     if ('error' in writer) return writer;
     try {
@@ -1444,7 +1444,7 @@ import { ballotCommitHash, newBallotSalt } from './sealing';
     const { round } = located;
     if (this.nowSec() > round.commitCloseAt - COMMIT_CUTOFF_SEC) return { error: 'preference:commit-window-closing' };
     const checked = checkBallot(rawBallot, round);
-    if (!checked.ok) return { error: checked.reason };
+    if (checked.ok === false) return { error: checked.reason };
     const writer = this.deps.resolveWriter(signer);
     if ('error' in writer) return writer;
     const ownIds = new Set(round.candidates.filter((candidate) => candidate.author === writer.globalMetaId).map((candidate) => candidate.id));
@@ -1479,11 +1479,11 @@ import { ballotCommitHash, newBallotSalt } from './sealing';
 
   async publishLesson(signer: PreferenceSigner, body: unknown): Promise<{ pinId: string } | ErrorResult> {
     const parsed = parseLesson(body);
-    if (!parsed.ok) return { error: parsed.reason };
+    if (parsed.ok === false) return { error: parsed.reason };
     const tally = tallyRound(this.events(), parsed.value.round, { nowSec: this.nowSec() });
-    if (!tally.ok) return { error: tally.reason };
+    if (tally.ok === false) return { error: tally.reason };
     const verdict = checkLesson(parsed.value, tally.result);
-    if (!verdict.ok) return { error: verdict.reason };
+    if (verdict.ok === false) return { error: verdict.reason };
     const writer = this.deps.resolveWriter(signer);
     if ('error' in writer) return writer;
     try {
