@@ -194,6 +194,8 @@ interface LlmRelayBootstrapInfo {
   quotaTotal: number;
   quotaUsed: number;
   quotaRemaining: number;
+  /** Weekly cycle end (ms epoch) when both pools refill; 0 = weekly quota disabled. */
+  quotaCycleResetAt: number;
 }
 
 interface LlmRelayQuotaInfo {
@@ -203,6 +205,8 @@ interface LlmRelayQuotaInfo {
   quotaTotal: number;
   quotaUsed: number;
   quotaRemaining: number;
+  /** Weekly cycle end (ms epoch) when both pools refill; 0 = weekly quota disabled. */
+  quotaCycleResetAt: number;
 }
 
 interface JevRelayCredentials {

@@ -11,7 +11,9 @@
  *   X-Timestamp (unix seconds, ±300s) / X-Signature (Bitcoin Signed Message
  *   compact, base64) over "llm-relay-bootstrap:<identityAddress>:<timestamp>".
  *   Envelope {code:0, data:{apiKey, keyPrefix, baseUrl, models, quotaTotal,
- *   quotaUsed, quotaRemaining}}.
+ *   quotaUsed, quotaRemaining, quotaCycleResetAt}}. quotaCycleResetAt (ms
+ *   epoch) is the weekly cycle end when the chat and JEV pools refill
+ *   together; absent/0 means weekly quotas are disabled (lifetime mode).
  * - GET /v2/assist/llm/quota — Authorization: Bearer <relay key>; same data
  *   shape minus apiKey.
  *
@@ -67,6 +69,8 @@ export interface LlmRelayBootstrapInfo {
   quotaTotal: number;
   quotaUsed: number;
   quotaRemaining: number;
+  /** Weekly cycle end (ms epoch) when both pools refill; 0 = weekly quota disabled. */
+  quotaCycleResetAt: number;
 }
 
 export interface LlmRelayQuotaInfo {
@@ -76,6 +80,8 @@ export interface LlmRelayQuotaInfo {
   quotaTotal: number;
   quotaUsed: number;
   quotaRemaining: number;
+  /** Weekly cycle end (ms epoch) when both pools refill; 0 = weekly quota disabled. */
+  quotaCycleResetAt: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +333,7 @@ function normalizeQuotaPayload(data: Record<string, unknown>): Omit<LlmRelayBoot
     quotaTotal: toNumber(data.quotaTotal),
     quotaUsed: toNumber(data.quotaUsed),
     quotaRemaining: toNumber(data.quotaRemaining),
+    quotaCycleResetAt: toNumber(data.quotaCycleResetAt),
   };
 }
 

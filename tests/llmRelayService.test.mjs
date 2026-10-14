@@ -78,6 +78,7 @@ const BOOTSTRAP_DATA = {
   quotaTotal: 1000000,
   quotaUsed: 0,
   quotaRemaining: 1000000,
+  quotaCycleResetAt: 1760486400000,
 };
 
 test('buildLlmRelayBootstrapMessage matches the backend canonical string', () => {
@@ -101,6 +102,7 @@ test('bootstrap signs the canonical message and normalizes the payload', async (
   assert.equal(result.baseUrl, 'https://relay.test/assist-open-api/v2/assist/llm/v1');
   assert.equal(result.quotaTotal, 1000000);
   assert.equal(result.quotaRemaining, 1000000);
+  assert.equal(result.quotaCycleResetAt, 1760486400000);
   assert.deepEqual(result.models, [{ id: 'metaid-free-chat', contextWindow: 64000, maxOutputTokens: 4096 }]);
 
   assert.equal(calls.length, 1);
@@ -206,6 +208,7 @@ test('quota sends the bearer key and caches for 30s unless forceRefresh', async 
   });
   const first = await getLlmRelayQuota({ apiKey: 'mrk_testkey123' });
   assert.equal(first.quotaTotal, 1000000);
+  assert.equal(first.quotaCycleResetAt, 1760486400000);
   const second = await getLlmRelayQuota({ apiKey: 'mrk_testkey123' });
   assert.equal(calls.length, 1, 'second call within 30s must hit the cache');
   assert.equal(second.quotaTotal, 1000000);
@@ -224,6 +227,20 @@ test('quota requires an apiKey', async () => {
     baseUrl: 'https://relay.test',
   });
   await assert.rejects(getLlmRelayQuota({}), /relay apiKey is required/);
+});
+
+test('quota normalizes a missing quotaCycleResetAt to 0 (weekly quota disabled)', async () => {
+  resetLlmRelayServiceForTests();
+  const data = { ...BOOTSTRAP_DATA, apiKey: undefined, quotaCycleResetAt: undefined };
+  const { fetchImpl } = makeFetchStub(() => ({ ok: true, status: 200, body: { code: 0, message: 'success', data } }));
+  initLlmRelayService({
+    getStore: () => makeKvStore(),
+    getUserIdentityStore: () => ({ get: () => makeIdentity() }),
+    fetchImpl,
+    baseUrl: 'https://relay.test',
+  });
+  const quota = await getLlmRelayQuota({ apiKey: 'mrk_testkey123' });
+  assert.equal(quota.quotaCycleResetAt, 0);
 });
 
 test('apiBase normalization and kv override', async () => {
