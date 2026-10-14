@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import {
   CEREBELLUM_DEFAULT_BASE_URL,
   CEREBELLUM_DEFAULT_MODEL,
+  CEREBELLUM_FREE_MODEL,
+  CEREBELLUM_FREE_RELAY_BASE_URL,
   resolveCerebellumConfig,
 } from '../src/main/libs/cerebellumConfig.ts';
 
@@ -97,4 +99,50 @@ test('resolveCerebellumConfig rejects malformed shapes', () => {
     resolveCerebellumConfig({ cerebellum: { enabled: true, provider: 'other', apiKey: 'sk' } }),
     null,
   );
+});
+
+// --- idbots-jev-free (official free relay) branches ---
+
+test('resolveCerebellumConfig resolves the free provider with an empty api key', () => {
+  // The free provider's relay key is injected at call time (credential
+  // chain), so a missing stored key must not disable the feature here.
+  const resolved = resolveCerebellumConfig({
+    cerebellum: {
+      enabled: true,
+      provider: 'idbots-jev-free',
+      apiKey: '',
+      baseUrl: '',
+      model: '',
+    },
+  });
+  assert.deepEqual(resolved, {
+    provider: 'idbots-jev-free',
+    apiKey: '',
+    baseUrl: CEREBELLUM_FREE_RELAY_BASE_URL,
+    model: CEREBELLUM_FREE_MODEL,
+  });
+});
+
+test('resolveCerebellumConfig pins the free provider relay baseUrl and model', () => {
+  // Stored values are ignored: the relay endpoint/model is a fixed contract
+  // (assist-base-service《JEV 小脑模型中转接口.md》§3).
+  const resolved = resolveCerebellumConfig({
+    cerebellum: {
+      enabled: true,
+      provider: 'idbots-jev-free',
+      apiKey: 'mrk_stale',
+      baseUrl: 'https://evil.example.com',
+      model: 'jev-preview',
+    },
+  });
+  assert.equal(resolved?.baseUrl, CEREBELLUM_FREE_RELAY_BASE_URL);
+  assert.equal(resolved?.model, CEREBELLUM_FREE_MODEL);
+  // A stored key passes through; the runtime resolver may override it.
+  assert.equal(resolved?.apiKey, 'mrk_stale');
+});
+
+test('resolveCerebellumConfig keeps the free provider disabled/malformed semantics', () => {
+  assert.equal(resolveCerebellumConfig({ cerebellum: { enabled: false, provider: 'idbots-jev-free' } }), null);
+  assert.equal(resolveCerebellumConfig({ cerebellum: { provider: 'idbots-jev-free', apiKey: 'mrk' } }), null);
+  assert.equal(resolveCerebellumConfig({ cerebellum: { enabled: true, provider: 'idbots-jev-freezz', apiKey: 'mrk' } }), null);
 });

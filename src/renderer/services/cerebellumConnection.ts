@@ -29,13 +29,24 @@ export function buildCerebellumModelsUrl(baseUrl: string): string {
 
 const MODEL_LIST_DISPLAY_LIMIT = 5;
 
-/** Extract displayable model ids from a catalog payload (array or object). */
+/**
+ * Extract displayable model ids from a catalog payload. TypeSafe's native
+ * shape is {"models":[{"name":"jev-latest",...}]} (the free JEV relay
+ * replays it verbatim); OpenAI-style {data:[{id}]} and bare arrays also
+ * stay supported for custom gateways.
+ */
 function extractModelIds(data: unknown): string[] {
-  const entries = Array.isArray(data)
-    ? data
-    : data && typeof data === 'object' && Array.isArray((data as { data?: unknown }).data)
-      ? ((data as { data: unknown[] }).data)
-      : [];
+  let entries: unknown[] = [];
+  if (Array.isArray(data)) {
+    entries = data;
+  } else if (data && typeof data === 'object') {
+    const record = data as { data?: unknown; models?: unknown };
+    if (Array.isArray(record.models)) {
+      entries = record.models;
+    } else if (Array.isArray(record.data)) {
+      entries = record.data;
+    }
+  }
   return entries
     .map((entry) => {
       if (typeof entry === 'string') {

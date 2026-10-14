@@ -154,7 +154,13 @@ export interface AppConfig {
    */
   cerebellum?: {
     enabled: boolean;
-    provider: 'typesafe-jev';
+    /**
+     * 'typesafe-jev' = user-owned TypeSafe key, direct upstream.
+     * 'idbots-jev-free' = official free relay (assist-base-service JEV
+     * proxy): no user key needed, relay key resolved from the free-quota
+     * credential chain, baseUrl/model pinned to the relay values.
+     */
+    provider: 'typesafe-jev' | 'idbots-jev-free';
     apiKey: string;
     baseUrl: string;
     model: string;

@@ -20,7 +20,8 @@ import { McpStore, type McpServerFormData } from './mcpStore';
 import { ProjectStore, type ProjectFormData } from './projectStore';
 import type { MemoryBackend } from './memory/memoryBackend';
 import { createOwnerMemoryScope } from './memory/memoryScope';
-import { resolveCerebellumConfig } from './libs/cerebellumConfig';
+import { CEREBELLUM_FREE_PROVIDER, type ResolvedCerebellumConfig } from './libs/cerebellumConfig';
+import { createJevRelayFetchWithKeyRetry, initJevRelayService, registerJevRelayIpcHandlers, resolveCerebellumRuntimeConfig } from './services/jevRelayService';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
 import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
 import { gateVolatileBlocksWithCerebellum } from './cerebellum/volatileBlockGate';
@@ -3148,6 +3149,30 @@ const getStoreOrNull = (): SqliteStore | null => {
 };
 
 /**
+ * Per-call cerebellum context for the decision factories below: the runtime
+ * config (free provider gets its relay key injected; null = feature silently
+ * off) plus the matching fetch — direct providers ride the raw Electron net
+ * stack, the free relay rides a wrapper that re-bootstraps once on a 401.
+ */
+const resolveCerebellumCallContext = async (): Promise<{
+  config: ResolvedCerebellumConfig;
+  fetchImpl: ReturnType<typeof cerebellumFetchFor>;
+} | null> => {
+  const config = await resolveCerebellumRuntimeConfig(getStore().get('app_config'));
+  if (!config) {
+    return null;
+  }
+  return { config, fetchImpl: cerebellumFetchFor(config) };
+};
+
+const cerebellumFetchFor = (config: ResolvedCerebellumConfig) => {
+  const rawFetch = session.defaultSession.fetch.bind(session.defaultSession);
+  return config.provider === CEREBELLUM_FREE_PROVIDER
+    ? createJevRelayFetchWithKeyRetry(rawFetch)
+    : rawFetch;
+};
+
+/**
  * Cerebellum (小脑) memory re-ranker factory, shared by the cowork runner and
  * the group-task daemon's owner-scope memory block. The config is re-resolved
  * lazily on every call, so Settings edits apply on the next turn without an
@@ -3161,13 +3186,13 @@ const createCerebellumMemoryRanker = () =>
     currentUserText: string;
     memories: Array<{ id: string; text: string }>;
   }): Promise<ReadonlyMap<string, number> | null> => {
-    const config = resolveCerebellumConfig(getStore().get('app_config'));
-    if (!config) {
+    const context = await resolveCerebellumCallContext();
+    if (!context) {
       return null;
     }
     return rankMemoriesWithCerebellum({
-      config,
-      fetchImpl: session.defaultSession.fetch.bind(session.defaultSession),
+      config: context.config,
+      fetchImpl: context.fetchImpl,
       currentUserText,
       memories,
     });
@@ -3188,14 +3213,14 @@ const createCerebellumMemoryWriteGate = () =>
     assistantText: string;
     implicitEnabled: boolean;
   }): Promise<boolean | null> => {
-    const config = resolveCerebellumConfig(getStore().get('app_config'));
-    if (!config) {
+    const context = await resolveCerebellumCallContext();
+    if (!context) {
       return null;
     }
     const startedAt = Date.now();
     const verdict = await gateMemoryWriteWithCerebellum({
-      config,
-      fetchImpl: session.defaultSession.fetch.bind(session.defaultSession),
+      config: context.config,
+      fetchImpl: context.fetchImpl,
       userText,
       assistantText,
       explicitOnly: !implicitEnabled,
@@ -3221,8 +3246,8 @@ const createCerebellumSkillRanker = () =>
     currentUserText: string;
     metabotId: number | null;
   }): Promise<Array<{ id: string; name: string; description: string; probability: number }> | null> => {
-    const config = resolveCerebellumConfig(getStore().get('app_config'));
-    if (!config) {
+    const context = await resolveCerebellumCallContext();
+    if (!context) {
       return null;
     }
     // The catalog's own visible set (bundled + global + assigned, enabled
@@ -3235,8 +3260,8 @@ const createCerebellumSkillRanker = () =>
     }
     const startedAt = Date.now();
     const ranking = await rankSkillsWithCerebellum({
-      config,
-      fetchImpl: session.defaultSession.fetch.bind(session.defaultSession),
+      config: context.config,
+      fetchImpl: context.fetchImpl,
       currentUserText,
       skills,
     });
@@ -3272,14 +3297,14 @@ const createCerebellumVolatileBlockGate = () =>
   async ({ currentUserText }: {
     currentUserText: string;
   }): Promise<Record<string, boolean> | null> => {
-    const config = resolveCerebellumConfig(getStore().get('app_config'));
-    if (!config) {
+    const context = await resolveCerebellumCallContext();
+    if (!context) {
       return null;
     }
     const startedAt = Date.now();
     const verdicts = await gateVolatileBlocksWithCerebellum({
-      config,
-      fetchImpl: session.defaultSession.fetch.bind(session.defaultSession),
+      config: context.config,
+      fetchImpl: context.fetchImpl,
       currentUserText,
     });
     coworkLog('INFO', 'volatileBlocks:cerebellumGate', 'volatile block gate evaluated', {
@@ -3304,14 +3329,14 @@ const createCerebellumEffortSelector = () =>
   async ({ currentUserText }: {
     currentUserText: string;
   }): Promise<Record<'off' | 'low' | 'high' | 'max', number> | null> => {
-    const config = resolveCerebellumConfig(getStore().get('app_config'));
-    if (!config) {
+    const context = await resolveCerebellumCallContext();
+    if (!context) {
       return null;
     }
     const startedAt = Date.now();
     const distribution = await selectEffortWithCerebellum({
-      config,
-      fetchImpl: session.defaultSession.fetch.bind(session.defaultSession),
+      config: context.config,
+      fetchImpl: context.fetchImpl,
       currentUserText,
     });
     coworkLog('INFO', 'effort:cerebellumSelect', 'auto effort selector evaluated', {
@@ -16267,6 +16292,13 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   // credentials (metaid-free provider key, identity-signed bootstrap on
   // demand) and never touches the renderer.
   initVisionRelayService({ getStore });
+
+  // JEV relay (free cerebellum provider idbots-jev-free): same free-quota
+  // relay key as chat, resolved lazily (kv -> metaid-free provider ->
+  // identity-signed bootstrap); the IPC lets the Settings connection test
+  // reuse the cached key instead of minting a fresh bootstrap per click.
+  initJevRelayService({ getStore });
+  registerJevRelayIpcHandlers({ ipcMain });
 
   ipcMain.handle('metabot:setEnabled', async (_event, id: number, enabled: boolean) => {
     try {

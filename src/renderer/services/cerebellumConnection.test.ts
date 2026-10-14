@@ -125,3 +125,38 @@ test('testCerebellumConnection: a thrown network error maps to unreachable', asy
   assert.equal(result.success, false);
   assert.match(result.message, /^cerebellumConnectionUnreachable \(ECONNREFUSED\)$/);
 });
+
+test('buildCerebellumModelsUrl: JEV relay base gains /v1/models (relay path shape)', () => {
+  assert.equal(
+    buildCerebellumModelsUrl('https://www.metaso.network/assist-open-api/v2/assist/llm/jev'),
+    'https://www.metaso.network/assist-open-api/v2/assist/llm/jev/v1/models',
+  );
+});
+
+test('testCerebellumConnection: 200 with the TypeSafe relay {models:[{name}]} shape lists models', async () => {
+  let seenUrl = '';
+  mockFetch((options) => {
+    seenUrl = options.url;
+    return { ok: true, status: 200, data: { models: [{ name: 'jev-latest', description: 'stable' }, { name: 'jev-preview' }] } };
+  });
+  const tReplace = (key: string): string =>
+    key === 'cerebellumConnectionSuccess' ? 'ok {count} [{models}]' : key;
+  const result = await testCerebellumConnection(
+    {
+      baseUrl: 'https://www.metaso.network/assist-open-api/v2/assist/llm/jev',
+      apiKey: 'mrk_test',
+    },
+    { t: tReplace },
+  );
+  assert.equal(seenUrl, 'https://www.metaso.network/assist-open-api/v2/assist/llm/jev/v1/models');
+  assert.deepEqual(result, { success: true, message: 'ok 2 [jev-latest, jev-preview]' });
+});
+
+test('testCerebellumConnection: {models: []} falls back to the generic success message', async () => {
+  mockFetch(() => ({ ok: true, status: 200, data: { models: [] } }));
+  const result = await testCerebellumConnection(
+    { baseUrl: 'https://www.metaso.network/assist-open-api/v2/assist/llm/jev', apiKey: 'mrk_test' },
+    { t },
+  );
+  assert.deepEqual(result, { success: true, message: 'connectionSuccess' });
+});

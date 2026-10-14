@@ -6,9 +6,12 @@
  * "brain" LLM. This resolver is the single seam future decision call sites
  * (memory ranking, intent routing, ...) read; it returns null whenever the
  * feature is off or unusable, so callers need no shape checks of their own.
+ * The second provider, idbots-jev-free, rides the official free relay with
+ * the same wire shape — its relay key is injected at call time (see
+ * services/jevRelayService.ts), so an empty apiKey resolves fine here.
  */
 
-export type CerebellumProvider = 'typesafe-jev';
+export type CerebellumProvider = 'typesafe-jev' | 'idbots-jev-free';
 
 export interface ResolvedCerebellumConfig {
   provider: CerebellumProvider;
@@ -20,7 +23,20 @@ export interface ResolvedCerebellumConfig {
 export const CEREBELLUM_DEFAULT_BASE_URL = 'https://api.typesafe.ai';
 export const CEREBELLUM_DEFAULT_MODEL = 'jev-latest';
 
-const CEREBELLUM_PROVIDERS: readonly string[] = ['typesafe-jev'];
+/**
+ * Official free relay provider: assist-base-service proxies the TypeSafe JEV
+ * upstream and holds the real upstream key server-side, so users need no
+ * TypeSafe key of their own. The wire shape is identical to `typesafe-jev`
+ * (POST {baseUrl}/v1/systemone), only the credentials differ: a free-quota
+ * relay key (mrk_...) resolved at runtime — see resolveCerebellumRuntimeConfig
+ * in services/jevRelayService.ts.
+ */
+export const CEREBELLUM_FREE_PROVIDER = 'idbots-jev-free' as const;
+/** Hardcoded JEV relay base (backend doc《JEV 小脑模型中转接口.md》§3). */
+export const CEREBELLUM_FREE_RELAY_BASE_URL = 'https://www.metaso.network/assist-open-api/v2/assist/llm/jev';
+export const CEREBELLUM_FREE_MODEL = 'jev-latest';
+
+const CEREBELLUM_PROVIDERS: readonly string[] = ['typesafe-jev', 'idbots-jev-free'];
 
 /**
  * Resolve the stored app_config into a ready-to-use cerebellum config, or
@@ -43,20 +59,32 @@ export function resolveCerebellumConfig(appConfig: unknown): ResolvedCerebellumC
   if (typeof candidate.provider !== 'string' || !CEREBELLUM_PROVIDERS.includes(candidate.provider)) {
     return null;
   }
+  const isFreeProvider = candidate.provider === CEREBELLUM_FREE_PROVIDER;
+  // Free provider: the apiKey comes from the relay credential chain at call
+  // time, so an empty stored key is valid here (the runtime resolver injects
+  // it or disables the feature); baseUrl/model are fixed to the relay values
+  // regardless of what is stored. Direct TypeSafe keeps requiring a key.
   const apiKey = typeof candidate.apiKey === 'string' ? candidate.apiKey.trim() : '';
-  if (!apiKey) {
+  if (!apiKey && !isFreeProvider) {
     return null;
   }
 
-  const rawBaseUrl = typeof candidate.baseUrl === 'string' ? candidate.baseUrl.trim() : '';
-  const baseUrl = (rawBaseUrl || CEREBELLUM_DEFAULT_BASE_URL).replace(/\/+$/, '');
+  let baseUrl: string;
+  let model: string;
+  if (isFreeProvider) {
+    baseUrl = CEREBELLUM_FREE_RELAY_BASE_URL;
+    model = CEREBELLUM_FREE_MODEL;
+  } else {
+    const rawBaseUrl = typeof candidate.baseUrl === 'string' ? candidate.baseUrl.trim() : '';
+    baseUrl = (rawBaseUrl || CEREBELLUM_DEFAULT_BASE_URL).replace(/\/+$/, '');
+    model = typeof candidate.model === 'string' && candidate.model.trim()
+      ? candidate.model.trim()
+      : CEREBELLUM_DEFAULT_MODEL;
+  }
+
   if (!baseUrl) {
     return null;
   }
-
-  const model = typeof candidate.model === 'string' && candidate.model.trim()
-    ? candidate.model.trim()
-    : CEREBELLUM_DEFAULT_MODEL;
 
   return {
     provider: candidate.provider as CerebellumProvider,
