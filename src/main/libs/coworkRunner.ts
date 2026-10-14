@@ -105,6 +105,11 @@ import { isPathWithin } from './runtimePaths';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
 import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
 import {
+  CEREBELLUM_CONVERSATION_RANK_MIN_POOL,
+  formatConversationCandidateText,
+  orderConversationHits,
+} from '../cerebellum/conversationSearchRank';
+import {
   CEREBELLUM_KNOWLEDGE_MAX_CANDIDATES,
   CEREBELLUM_KNOWLEDGE_MIN_POOL,
 } from '../cerebellum/knowledgeHotRank';
@@ -2118,6 +2123,15 @@ export interface CoworkRunnerOptions {
     entries: Array<{ id: string; topic: string; summary: string; kind: string }>;
   }) => Promise<ReadonlyMap<string, number> | null>;
   /**
+   * Optional cerebellum re-rank for conversation_search hits. A score map
+   * replaces recency order. null keeps the keyword/updated_at order. The
+   * callback must never throw.
+   */
+  cerebellumConversationRanker?: (input: {
+    searchQuery: string;
+    chats: Array<{ id: string; text: string }>;
+  }) => Promise<ReadonlyMap<string, number> | null>;
+  /**
    * Optional cerebellum (小脑) skill shortlist for the volatile skills-catalog
    * block. When set, the runner asks it to rank the session's visible skill
    * catalog against the current user text; the returned top entries ride the
@@ -2335,6 +2349,7 @@ export class CoworkRunner extends EventEmitter {
   private locationHost?: LocationHost;
   private cerebellumMemoryRanker?: CoworkRunnerOptions['cerebellumMemoryRanker'];
   private cerebellumKnowledgeRanker?: CoworkRunnerOptions['cerebellumKnowledgeRanker'];
+  private cerebellumConversationRanker?: CoworkRunnerOptions['cerebellumConversationRanker'];
   private cerebellumSkillRanker?: CoworkRunnerOptions['cerebellumSkillRanker'];
   private cerebellumVolatileBlockGate?: CoworkRunnerOptions['cerebellumVolatileBlockGate'];
   private cerebellumIntuitionAvailable?: CoworkRunnerOptions['cerebellumIntuitionAvailable'];
@@ -2511,6 +2526,7 @@ export class CoworkRunner extends EventEmitter {
     this.locationHost = options?.locationHost;
     this.cerebellumMemoryRanker = options?.cerebellumMemoryRanker;
     this.cerebellumKnowledgeRanker = options?.cerebellumKnowledgeRanker;
+    this.cerebellumConversationRanker = options?.cerebellumConversationRanker;
     this.cerebellumSkillRanker = options?.cerebellumSkillRanker;
     this.cerebellumVolatileBlockGate = options?.cerebellumVolatileBlockGate;
     this.cerebellumIntuitionAvailable = options?.cerebellumIntuitionAvailable;
@@ -3716,12 +3732,12 @@ export class CoworkRunner extends EventEmitter {
     return { ok: true, text };
   }
 
-  private runConversationSearchTool(args: {
+  private async runConversationSearchTool(args: {
     query: string;
     max_results?: number;
     before?: string;
     after?: string;
-  }, sessionId: string): string {
+  }, sessionId: string): Promise<string> {
     const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
     const chats = this.store.conversationSearch({
       query: args.query,
@@ -3730,7 +3746,34 @@ export class CoworkRunner extends EventEmitter {
       after: args.after,
       metabotId,
     });
-    return this.formatChatSearchOutput(chats);
+    let ordered = chats;
+    if (this.cerebellumConversationRanker && args.query.trim() && chats.length >= CEREBELLUM_CONVERSATION_RANK_MIN_POOL) {
+      const startedAt = Date.now();
+      let scores: ReadonlyMap<string, number> | null = null;
+      try {
+        scores = await this.cerebellumConversationRanker({
+          searchQuery: args.query,
+          chats: chats.map((chat) => ({
+            id: chat.sessionId,
+            text: formatConversationCandidateText(chat),
+          })),
+        });
+      } catch {
+        scores = null;
+      }
+      coworkLog('INFO', 'conversation:cerebellumRank', 'Cerebellum conversation search re-rank finished', {
+        sessionId,
+        pooled: chats.length,
+        ranked: scores?.size ?? 0,
+        latencyMs: Date.now() - startedAt,
+        used: scores != null,
+      });
+      ordered = orderConversationHits(
+        chats.map((chat) => ({ ...chat, id: chat.sessionId })),
+        scores,
+      );
+    }
+    return this.formatChatSearchOutput(ordered);
   }
 
   private runRecentChatsTool(args: {
@@ -7944,7 +7987,7 @@ export class CoworkRunner extends EventEmitter {
 
     try {
       if (toolName === 'conversation_search') {
-        const text = this.runConversationSearchTool({
+        const text = await this.runConversationSearchTool({
           query: String(toolInput.query ?? ''),
           max_results: typeof toolInput.max_results === 'number' ? toolInput.max_results : undefined,
           before: typeof toolInput.before === 'string' ? toolInput.before : undefined,
@@ -10536,7 +10579,7 @@ export class CoworkRunner extends EventEmitter {
           before?: string;
           after?: string;
         }) => {
-          const text = this.runConversationSearchTool(args, sessionId);
+          const text = await this.runConversationSearchTool(args, sessionId);
           return {
             content: [
               {
