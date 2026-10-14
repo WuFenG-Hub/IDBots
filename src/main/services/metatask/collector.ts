@@ -105,7 +105,7 @@ const declaredContentLength = (item: Record<string, unknown>): number | null => 
  *    `contentBody` is the full payload by contract (pre-f23e8ec list format), so
  *    such rows never qualify.
  */
-const contentRecoveryUrl = (
+export const contentRecoveryUrl = (
   item: Record<string, unknown>,
   body: Record<string, unknown>
 ): string | null => {
@@ -149,8 +149,8 @@ const fetchContentBody = async (
 };
 
 /** Refetch the pending rows with bounded concurrency, patching bodies in place. */
-const recoverTruncatedBodies = async (
-  pending: { event: MetaTaskChainEvent; url: string }[],
+export const recoverTruncatedBodies = async (
+  pending: { event: { body: Record<string, unknown> }; url: string }[],
   fetchImpl: ((input: string, init?: RequestInit) => Promise<Response>) | undefined
 ): Promise<void> => {
   if (pending.length === 0) return;
