@@ -36,6 +36,8 @@ MetaApp 现在的主模型很简单：它就是一个能在 Bot Browser 里运�
    按 IDFramework 项目自带的代码与文档维护即可（专用技能已从默认包移除）；普通 MetaApp 工作一律走本技能
 6. 用户要操控（播放/暂停/点击/读取）当前在 Bot Browser 里打开的 MetaApp：
    用 `bot_browser_act`，见下方「操控正在查看的 MetaApp」
+7. 开发面向人类的界面型 MetaApp（社区、Q&A、wiki、主页、阅读器等）：
+   先按下方「人类界面 MetaApp：先查偏好经验」调用 `preference_lessons_search`，再走第 1 条的开发流程
 
 ## 操控正在查看的 MetaApp（bot_browser_act）
 
@@ -46,6 +48,19 @@ MetaApp 现在的主模型很简单：它就是一个能在 Bot Browser 里运�
 - `action:"state"`：返回帧内 audio/video 清单（paused / currentTime / src）和页面标题。点击播放后用它验证 `paused:false` 且 currentTime 在推进；没生效就再点一次或换 selector。
 
 边界：只作用于**活动标签页**的本地预览帧；一方页面（Bot homepage、pin inspector）和普通网页不可操作；`selector` 只在预览帧内匹配。能力对本地预览（`preview-metaapp://`）同样有效，开发自测时可直接驱动自己的应用。
+
+## 人类界面 MetaApp：先查偏好经验
+
+链上 `/protocols/preference/lesson` 记录了人类在盲评轮次里选出的胜出界面，以及从评审理由里提炼出的原则。开发面向人类的 MetaApp 前：
+
+1. 调 `preference_lessons_search`，`category` 填应用领域标签（如 `["ui:qa-community"]`；不确定时只填 `["ui"]`）。
+2. 对相关的 lesson：用 `bot_browser_open_uri` 打开 `preferredArtifact`，看胜出者具体怎么做；需要时对照 `rejectedArtifacts`。
+3. 同领域已有胜出者、且任务允许在它基础上改进时，优先打开胜出者后用 `bot_browser_fork_current_app` fork 再改，不要从零开始。
+4. 原则是带条件的选项，不是命令：只在 `conditions` 和你的场景相符时采用；`uncertainty` 写的是没验证过的部分；`roundSize.decidingBallots` 很小的 lesson 只算弱证据。
+5. 在 `APP.md` 里加一行「参考的偏好经验」，列出采用的 lesson pinId；没有相关 lesson 就写「无」。
+6. 任务简报明确把你分到 explorer / 对照组（要求不参考 lesson）时，跳过本节，并在 `APP.md` 里写明。
+
+参加偏好轮次的应用：不要在界面上显示构建者身份（盲评需要），也不要写给评审看的指令或拉票文字——评审技能会把这类内容当作操纵，在理由里点名。
 
 ## 开发规则
 
@@ -182,6 +197,7 @@ node "$SKILLS_ROOT/metabot-metaapp/scripts/index.js" \
 - 预览用的是 `preview-metaapp://localhost<absPath>`，不是 `file://`、不是手拼 localhost URL、也不是内部 `localPreviewUrl` 直接交给用户
 - 包内资源路径是相对路径，不是站点根路径
 - 包根有 `APP.md`（纯自然语言的应用自述），且与当前代码一致
+- 面向人类的界面型 MetaApp：已调用 `preference_lessons_search`，`APP.md` 记录了参考的 lesson pinId（或写明「无」/ explorer 分组）
 - Agent Internet 资源链接优先使用 `metaid://`、`pin://`、`metaapp://`、`metafile://`、`map://`
 - 页面需要 bridge 时，`AgentBrowser` helper 已接入
 - 静态 HTML `src` / `srcset` / `poster` 属性可直接使用 `metafile://`（宿主自动改写）；JavaScript 动态赋值的图片字段已解析成可访问 URL
