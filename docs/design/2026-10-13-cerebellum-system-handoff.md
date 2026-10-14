@@ -109,15 +109,49 @@ The first cerebellum surface the MetaBot itself controls: the `intuition` inline
 - Live validation note: the three question shapes are each proven against the real API by the earlier feature evals (noul: write-gate eval; choice: shortlist + effort evals; score: docs-verified shape used by effortSelector). A full live smoke of THIS module was attempted but the free relay returned 429 `free_quota_exhausted` — the fail-open null path is exactly what shipped. Re-run the smoke (scripts pattern: require dist module, relay baseUrl + mrk_ key from app config) once quota resets.
 - Follow-ups: observe `cerebellum:intuition` logs for the models' real question quality before widening past cowork_ui; consider a small vetted question-pattern library in the tool description if quality is erratic.
 
+
+### 2.12 Free relay provider & the shared call context (`services/jevRelayService.ts`)
+
+The provider landscape grew past §1's original single provider:
+
+- **`typesafe-jev`** — the paid TypeSafe API (`https://api.typesafe.ai`), user-supplied key.
+- **`idbots-jev-free`** (`CEREBELLUM_FREE_PROVIDER`) — the official free relay at `https://www.metaso.network/assist-open-api/v2/assist/llm/jev`, key bootstrap via `resolveJevRelayCredentials()` (relay `mrk_` keys), quota-limited (HTTP 429 `free_quota_exhausted` when spent). The DEFAULT since `feat/jev-free-defaults` — assume most users ride it.
+
+Both speak the same `/v1/systemone` wire format. The seam that matters for every NEW call site in `main.ts`:
+
+- `resolveCerebellumRuntimeConfig(appConfig)` — async; the sync `resolveCerebellumConfig` plus relay-key resolution for the free provider (bootstrap failure → null → feature off for that call).
+- `resolveCerebellumCallContext()` — the one-liner every executor uses: returns `{ config, fetchImpl }` where `fetchImpl` is the raw Electron net fetch for `typesafe-jev`, or `createJevRelayFetchWithKeyRetry(...)` for the free relay (re-bootstraps once on a 401, no retry storms).
+- Sync mount probes (e.g. tool registration) may use the sync `resolveCerebellumConfig` — best-effort only; a relay outage then degrades to "no verdict" at call time, which is the correct fail-open.
+
+**The pre-relay pattern (`resolveCerebellumConfig` + bare `session.defaultSession.fetch`) is now WRONG for executors** — a free-relay config authenticated that way gets 401. Pure modules stay fetchImpl-injected and provider-agnostic; only the main.ts wiring changes.
+
+Live-eval note: the relay is quota-metered; when exhausted, live evals and smokes return 429 and every call site's fail-open path is what ships. The metaso relay does not need the local proxy (the §5 proxy note applies to `api.typesafe.ai` only).
+
+
 ## 3. Design rules (do not break)
 
 1. **Never block a turn on the cerebellum.** 1.5 s hard timeout, null on any failure, silent lexical/code fallback. The cerebellum must be droppable mid-flight with zero user-visible effect.
-2. **Never call JEV without `resolveCerebellumConfig`** and never log memory text or the API key.
-3. **`fetchImpl` must be `session.defaultSession.fetch`** (system proxy). Bare Node fetch is region-blocked (HTTP 451).
+2. **Never call JEV without resolved config** and never log memory text or the API key. Executors go through `resolveCerebellumCallContext()` (§2.12); only sync mount probes may use the sync `resolveCerebellumConfig`.
+3. **`fetchImpl` comes from `resolveCerebellumCallContext()`** — the raw Electron net fetch for the paid provider, the key-retry relay wrapper for the free provider (§2.12). Binding bare `session.defaultSession.fetch` to a free-provider config 401s. Bare Node fetch is additionally region-blocked for `api.typesafe.ai` (HTTP 451).
 4. Keep question instructions in **English**; keep the user's original-language text in `state`.
 5. Don't ask JEV what code can compute (counting, dates, thresholds) — compose atomic judgments in code instead.
 6. The `enabled` toggle is the user's global consent for sending memory content to the provider; new call sites must not widen what is sent beyond what the notice describes without a new notice.
 7. Repo conventions (AGENTS.md): pnpm only (Node 24 via nvm: `export PATH="$HOME/.nvm/versions/node/v24.13.1/bin:$PATH"`); worktree-per-branch from `main`; `git merge --no-ff` into main; dev journal on-chain via the `metabot-post-buzz` skill after every commit; never push unless asked.
+8. **New test files under `tests/` are git-ignored by default** — `tests/*` is ignored and each suite is allowlisted individually; add `!tests/<name>.test.mjs` next to the other cerebellum entries or your file will silently never be committed.
+9. **Pure cerebellum modules carry no runtime imports** (type-only imports are fine — they are erased): unit tests load `src/main/cerebellum/*.ts` directly with Node type stripping, which requires extension-ful ESM specifiers. Inline tiny helpers instead of importing them (see `truncateUtf16Prefix` in `skillShortlist.ts`).
+
+## 3.5 How to add a new cerebellum integration — the recipe
+
+Every shipped integration (§2.7-§2.11) follows the same shape; copy it:
+
+1. **Pure module** `src/main/cerebellum/<feature>.ts` — Electron-free, `fetchImpl`-injected, never throws, returns the verdict or `null` on any failure (fail-open: null always means "behave exactly as before"). English question instructions; original-language user text in `state`; hard caps on every caller-authored dimension. No runtime imports (rule 9).
+2. **DI seam** — coworkRunner option (or a module setter like `setCerebellumMemoryWriteGate` for libs). Fire the JEV promise as early as possible (parallel with the other per-turn cerebellum calls — the shared budget stays one 1.5s window) and await at the first consumer.
+3. **main.ts wiring** — executor via `resolveCerebellumCallContext()` (§2.12); log a new `xxx:cerebellumYyy` tag with verdict/latency/ids only — never content.
+4. **Privacy check** — does the call send any content category the notice doesn't list? If yes, widen `i18n.ts cerebellumPrivacyNotice` (zh+en) in the same change.
+5. **Tests** `tests/cerebellum<Feature>.test.mjs` — pure-module contract (request shape, parse, every failure mode, caps) + compiled-DI integration (null/throw reproduces the ungated baseline byte-for-byte; mount gating). Add the file to the `.gitignore` allowlist (rule 8). Run `pnpm run compile:electron` first — suites import compiled code.
+6. **Offline eval** `scripts/cerebellum-<feature>-eval.mjs` — labeled real-shaped Chinese dataset, the metric that matters for THIS feature (FN/lost-X for gates, recall@k for rankings), threshold sweep, `--dry-run`. Run it LIVE before shipping thresholds; keep the script's question wording byte-synced with the module.
+7. **Docs** — new §2.x subsection + roadmap row update in this file.
+8. **Journal** — commit (`feat: ...`), then post the on-chain dev journal via the `metabot-post-buzz` skill and reference the pinId in the commit message.
 
 ## 4. Roadmap — where the cerebellum goes next
 
