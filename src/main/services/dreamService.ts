@@ -36,6 +36,7 @@ import {
   parseCapabilityValidationOutput,
 } from '../libs/capabilityValidationPrompt';
 import {
+  FALSIFIED_PROMPT_MAX_ITEMS,
   FALSIFIED_RETENTION_DAYS,
   citedDiaryDates,
   combinePanelOutcomes,
@@ -988,8 +989,13 @@ export class DreamService {
      * as the prompt's practice-outcomes section. */
     practiceOutcomes?: DreamPracticeOutcome[],
     /** RSI P0 prompt inputs: prediction calibration digest + retention-gate
-     * rollback notice (both rendered as their own sections when non-empty). */
-    dreamExtras?: { predictionCalibration?: string | null; rollbackNotice?: string | null },
+     * rollback notice (both rendered as their own sections when non-empty).
+     * RRSI P1 adds the falsified-hypothesis list (design §6.1 P1.3). */
+    dreamExtras?: {
+      predictionCalibration?: string | null;
+      rollbackNotice?: string | null;
+      falsifiedHypotheses?: Array<{ title: string; reason: string }>;
+    },
   ): Promise<{
     prompt: { system: string; user: string };
     output: DreamOutput;
@@ -1015,6 +1021,7 @@ export class DreamService {
         practiceOutcomes,
         predictionCalibration: dreamExtras?.predictionCalibration,
         rollbackNotice: dreamExtras?.rollbackNotice,
+        falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -1042,6 +1049,7 @@ export class DreamService {
         practiceOutcomes,
         predictionCalibration: dreamExtras?.predictionCalibration,
         rollbackNotice: dreamExtras?.rollbackNotice,
+        falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -1087,6 +1095,7 @@ export class DreamService {
       practiceOutcomes,
       predictionCalibration: dreamExtras?.predictionCalibration,
       rollbackNotice: dreamExtras?.rollbackNotice,
+      falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
     });
     const output = await this.generateAndParse(
       prompt.system,
@@ -1220,6 +1229,20 @@ export class DreamService {
       // executed during the dreamed day (and backfill their outcome summaries)
       // before the prompt is built, so tonight's curriculum sees them.
       const practiceOutcomes = this.collectPracticeOutcomesForDream(metabotId, startMs, endMs);
+      // RRSI P1: the falsified-hypothesis section rides the dream prompt
+      // (design §6.1 P1.3); a ledger failure never blocks the dream.
+      let falsifiedHypotheses: Array<{ title: string; reason: string }> = [];
+      try {
+        falsifiedHypotheses = this.deps.coworkStore.listFalsifiedHypotheses(metabotId, {
+          sinceMs: Date.now() - FALSIFIED_RETENTION_DAYS * 86_400_000,
+          limit: FALSIFIED_PROMPT_MAX_ITEMS,
+        }).map(({ title, reason }) => ({ title, reason }));
+      } catch (error) {
+        console.warn(
+          `[DreamService] Falsified ledger read for the dream prompt failed for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        falsifiedHypotheses = [];
+      }
       const prepared = await this.prepareDreamPromptAndOutput(
         metabot,
         date,
@@ -1230,7 +1253,7 @@ export class DreamService {
         surfReport,
         this.resolveSynthesisTimeoutMs(runStartedAtMs, currentRun.attemptCount),
         practiceOutcomes.outcomes,
-        { predictionCalibration, rollbackNotice: retentionGate.notice },
+        { predictionCalibration, rollbackNotice: retentionGate.notice, falsifiedHypotheses },
       );
       let output = prepared.output;
       // Repair runs discard selfIdentity in writeDreamResults, so skip the
@@ -1291,6 +1314,9 @@ export class DreamService {
         // Cross-night semantic dedup (audit P1): how many of tonight's memory
         // writes merged into an older row instead of inserting a variant.
         dedupMerged: writeResult.dedupMerged,
+        // RRSI P1: the checked capability-draft insert funnel (duplicates of
+        // live drafts and re-proposals of recently falsified hypotheses).
+        capabilityDraftInsert: writeResult.capabilityDraftInsert,
         // P1: any explicit human feedback today (thumbs up/down, acceptance
         // rating) — separates "zero negative because good" from "no data".
         hasExplicitFeedback: hasExplicitHumanFeedback(activity),
@@ -2914,7 +2940,10 @@ export class DreamService {
     isRepair: boolean,
     impressionSubjects: ReturnType<DreamService['buildDreamImpressionSubjects']>,
     observerGlobalMetaID?: string | null,
-  ): { dedupMerged: number } {
+  ): {
+    dedupMerged: number;
+    capabilityDraftInsert: { inserted: number; skippedDuplicate: number; skippedFalsified: number };
+  } {
     // RSI P0 retention gate: snapshot the CURRENT dream-origin prompt layer
     // immediately before tonight's writes, so a later negative-feedback spike
     // can deterministically restore exactly this state. Never fails the write.
@@ -3148,17 +3177,23 @@ export class DreamService {
     // the model distilled today becomes a 'draft' row in capability_drafts.
     // This never touches the existing skill tables — validation/promotion into
     // real skills is a later phase. A failure here must not fail the dream run.
+    // RRSI P1: the checked insert also skips duplicates of live drafts and of
+    // hypotheses falsified within FALSIFIED_BLOCK_DAYS (design §6.1 P1.3).
     const capabilityLearnings = Array.isArray(output.capabilityLearnings) ? output.capabilityLearnings : [];
+    const capabilityDraftInsert = { inserted: 0, skippedDuplicate: 0, skippedFalsified: 0 };
     if (capabilityLearnings.length > 0) {
       try {
-        const inserted = this.deps.coworkStore.insertCapabilityDrafts(
+        const result = this.deps.coworkStore.insertCapabilityDraftsChecked(
           metabotId,
           date,
           capabilityLearnings,
         );
-        if (inserted > 0) {
+        capabilityDraftInsert.inserted = result.inserted;
+        capabilityDraftInsert.skippedDuplicate = result.skippedDuplicate;
+        capabilityDraftInsert.skippedFalsified = result.skippedFalsified;
+        if (result.inserted > 0 || result.skippedDuplicate > 0 || result.skippedFalsified > 0) {
           console.log(
-            `[DreamService] Capability drafts for metabot ${metabotId} date ${date}: inserted=${inserted}`,
+            `[DreamService] Capability drafts for metabot ${metabotId} date ${date}: inserted=${result.inserted}, skippedDuplicate=${result.skippedDuplicate}, skippedFalsified=${result.skippedFalsified}`,
           );
         }
       } catch (error) {
@@ -3194,7 +3229,7 @@ export class DreamService {
       }
     }
 
-    return { dedupMerged };
+    return { dedupMerged, capabilityDraftInsert };
   }
 }
 

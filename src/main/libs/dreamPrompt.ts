@@ -9,6 +9,7 @@ import type {
 import { formatBotWorkspaceDate } from './botWorkspace';
 import { estimateCoworkTextTokens } from './coworkContextBudget';
 import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
+import { FALSIFIED_PROMPT_MAX_ITEMS } from './capabilityGateRegularizers';
 import type { DreamActivityChunk } from './dreamFragments';
 import {
   computeDreamBackoffDelayMs,
@@ -50,8 +51,9 @@ export const PRACTICE_PROPOSALS_MAX_PER_NIGHT = 2;
  * an older version are then re-dreamed automatically (limited per night).
  * Rows written before versioning existed read as 0.
  * v16: RSI P0 — prediction calibration digest + prompt-layer rollback notice
- * ride the prompt as new input sections; dream writes are now snapshotted. */
-export const DREAM_VERSION = 16;
+ * ride the prompt as new input sections; dream writes are now snapshotted.
+ * v17: RRSI P1 — falsified-hypothesis section rides the prompt; capability drafts insert with duplicate / falsified checks. */
+export const DREAM_VERSION = 17;
 
 const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks', 'group_tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];
@@ -480,6 +482,9 @@ export function buildDreamPrompt(input: {
   predictionCalibration?: string | null;
   /** RSI P0 retention gate: notice that a previous night's prompt layer was rolled back. */
   rollbackNotice?: string | null;
+  /** RRSI P1: recently falsified hypotheses (design §6.1 P1.3) — the dream's
+   * edit-history block, rendered only outside fragment mode. */
+  falsifiedHypotheses?: Array<{ title: string; reason: string }>;
 }): { system: string; user: string } {
   const sourceMode = input.sourceMode ?? 'raw_activity';
   const activityTokenBudget = Math.max(
@@ -612,6 +617,19 @@ export function buildDreamPrompt(input: {
   // re-distilling them.
   if (sourceMode !== 'fragment' && input.rollbackNotice?.trim()) {
     sections.push(`## 提示层回滚通知(昨晚自动回滚,请警觉)\n${truncateText(input.rollbackNotice.trim(), 400)}`);
+  }
+  // RRSI P1 falsified-hypothesis ledger (design §6.1 P1.3): the bot's own
+  // edit history of falsified ideas rides the dream so they are not
+  // re-distilled (same wording or rephrased) without new counter-evidence.
+  if (sourceMode !== 'fragment' && (input.falsifiedHypotheses ?? []).length > 0) {
+    const falsifiedLines = (input.falsifiedHypotheses ?? [])
+      .slice(0, FALSIFIED_PROMPT_MAX_ITEMS)
+      .map((entry) => `- 「${entry.title}」:${truncateText(entry.reason, 120)}`)
+      .join('\n');
+    sections.push(
+      '## 已被证伪的做法(过去的能力验证已否决;除非今天的记录里出现了新的反证,不要再以相同或换个说法的形式写进 capability_learnings)\n'
+      + falsifiedLines,
+    );
   }
   // RSI P0 prediction calibration: the ledger's reconciliation rollup rides the
   // dream so value_lessons / important_memories can absorb the misses.

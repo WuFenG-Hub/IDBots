@@ -287,7 +287,7 @@ test('flow: an agreed rejection writes exactly one ledger row', async () => {
   }
 });
 
-test('flow: a rejected re-proposal is skipped against the ledger', { todo: 'enabled in Task 7' }, async () => {
+test('flow: a rejected re-proposal is skipped against the ledger', async () => {
   const h = await createDreamHarness();
   try {
     seedSession(h.coworkStore, h.db, D1, [
@@ -332,6 +332,47 @@ test('flow: a rejected re-proposal is skipped against the ledger', { todo: 'enab
       0,
       'no new draft row with the falsified title',
     );
+    // The falsified section rides the D3 dream prompt with the ledger title.
+    const dreamCall = h.router.calls.find(
+      (call) => !call.system.includes(MARKERS.validation) && !call.system.includes(MARKERS.reconciliation) && call.user.includes('2026-08-04'),
+    );
+    assert.ok(dreamCall, 'the D3 dream call exists');
+    assert.ok(dreamCall.user.includes('已被证伪的做法'), 'falsified section rides the dream prompt');
+    assert.ok(dreamCall.user.includes('「深夜连环追问」'), 'the falsified title is listed');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: an empty ledger renders no falsified section; a re-run does not duplicate drafts', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D1, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({
+      capability_learnings: [
+        { title: '先验证再交付', description: '交付前自检一遍', capability_type: 'workflow' },
+      ],
+    }));
+    await h.runNight(D1);
+    const dreamCall = h.router.calls.find(
+      (call) => !call.system.includes(MARKERS.validation) && !call.system.includes(MARKERS.reconciliation),
+    );
+    assert.ok(dreamCall, 'the dream call exists');
+    assert.ok(!dreamCall.user.includes('已被证伪的做法'), 'an empty ledger renders no falsified section');
+
+    // Version-repair style re-run of the same night: the checked insert must
+    // not duplicate the draft.
+    await h.service.runNow(5, D1);
+    assert.equal(
+      h.coworkStore.listCapabilityDrafts(5).filter((draft) => draft.title === '先验证再交付').length,
+      1,
+      'only one draft row exists after the re-run',
+    );
+    assert.equal(h.telemetry(D1)?.capabilityDraftInsert?.skippedDuplicate, 1, 'the re-run reports the duplicate skip');
+    assert.equal(h.telemetry(D1)?.capabilityDraftInsert?.inserted, 0);
   } finally {
     h.cleanup();
   }
