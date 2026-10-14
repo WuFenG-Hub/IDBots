@@ -19,6 +19,7 @@ import {
   type DeepConsolidationInventoryItem,
 } from '../libs/deepConsolidationPrompt';
 import { resolveDreamAttemptTimeoutMs } from '../libs/dreamRetryPolicy';
+import { FALSIFIED_MAX_PER_BOT, FALSIFIED_RETENTION_DAYS } from '../libs/capabilityGateRegularizers';
 import { metabotBrainOptions } from './llmFallback';
 
 /**
@@ -260,6 +261,21 @@ export class MemoryHygieneService {
           excludeMetabotIds: context.disabledMetabotIds,
         });
         return { capabilityDraftsPurged: purged };
+      },
+    });
+    // Falsified-hypothesis ledger (RRSI P1, design §6.1 P1.3): dream
+    // bookkeeping like rejected drafts — rows older than the retention
+    // horizon drain and each bot keeps at most FALSIFIED_MAX_PER_BOT newest
+    // rows. The retention is a constant, not a user setting.
+    this.steps.push({
+      name: 'capability-falsified',
+      run: (context) => {
+        const purged = context.coworkStore.purgeFalsifiedHypotheses({
+          cutoffMs: context.nowMs - FALSIFIED_RETENTION_DAYS * 86_400_000,
+          maxPerBot: FALSIFIED_MAX_PER_BOT,
+          excludeMetabotIds: context.disabledMetabotIds,
+        });
+        return { capabilityFalsifiedPurged: purged };
       },
     });
     // Culture layer: emergent entries that stopped earning injection slots
