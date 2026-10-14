@@ -58,6 +58,13 @@
       "installedAt": 1791094384000,
       "enabled": true
     },
+    "metaapp-preference-judge": {
+      "order": 25,
+      "version": "1.0.0",
+      "creator-metaid": "",
+      "installedAt": 1792022400000,
+      "enabled": true
+    },
     "docx": {
       "order": 50,
       "version": "1.0.0",
