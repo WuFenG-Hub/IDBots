@@ -27,7 +27,6 @@ import {
   CAPABILITY_VALIDATION_MAX_DRAFTS,
   CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE,
   CAPABILITY_VALIDATION_SUMMARY_DAYS,
-  CAPABILITY_PROMOTION_MAX_PER_NIGHT,
   CAPABILITY_PROMOTION_MIN_SCORE,
   CAPABILITY_REVIEW_INTERVAL_DAYS,
   CAPABILITY_REVIEW_MAX_PER_NIGHT,
@@ -35,6 +34,7 @@ import {
   buildCapabilityValidationPrompt,
   parseCapabilityValidationOutput,
 } from '../libs/capabilityValidationPrompt';
+import { promotionBudgetForNight } from '../libs/promotionBudget';
 import {
   FALSIFIED_PROMPT_MAX_ITEMS,
   FALSIFIED_RETENTION_DAYS,
@@ -98,6 +98,8 @@ import {
   type DreamFragmentSummary,
 } from '../libs/dreamFragments';
 import { formatBotWorkspaceDate } from '../libs/botWorkspace';
+import { buildProcedureBlock, PROCEDURE_PROMPT_MAX_ITEMS } from '../libs/procedurePromptBlocks';
+import { buildProvenTechniquesBlock } from '../libs/experiencePromptBlocks';
 import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../libs/claudeSettings';
 import { budgetAssumesThinking } from '../libs/modelThinking';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
@@ -1210,6 +1212,8 @@ export class DreamService {
           weeklyLongDream,
           capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
           promotedCount: promotion.promoted,
+          promotionBudget: { nights: promotion.nights, budget: promotion.budget, candidates: promotion.candidates, promoted: promotion.promoted },
+          hotLayer: this.buildHotLayerTelemetry(metabotId, date),
           hasExplicitFeedback: hasExplicitHumanFeedback(activity),
           reconciliation,
           chainEvidence: validation.chainEvidence,
@@ -1303,6 +1307,8 @@ export class DreamService {
         weeklyLongDream,
         capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
         promotedCount: promotion.promoted,
+        promotionBudget: { nights: promotion.nights, budget: promotion.budget, candidates: promotion.candidates, promoted: promotion.promoted },
+        hotLayer: this.buildHotLayerTelemetry(metabotId, date),
         // P1 periodic re-review (audit): how many validated drafts faced the
         // verdict panel again tonight and how many were demoted off the
         // injection roster (promoted procedures archived alongside).
@@ -1434,6 +1440,47 @@ export class DreamService {
     } catch (error) {
       console.warn(
         `[DreamService] Capability utilization telemetry unavailable for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * RRSI P2 cost telemetry (ΔC, design §6.2 P2.5): render the blocks the host
+   * would inject RIGHT NOW and record their sizes plus the hot-layer counts.
+   * Empty days report it too — the footprint exists whether or not the bot
+   * dreamed. Null on failure so telemetry never breaks the dream run.
+   */
+  private buildHotLayerTelemetry(
+    metabotId: number,
+    date: string,
+  ): {
+    hotProcedures: number;
+    probationProcedures: number;
+    injectableTechniques: number;
+    procedureBlockChars: number;
+    techniqueBlockChars: number;
+    exposedItems: number;
+  } | null {
+    try {
+      const knowledge = this.deps.metaidKnowledgeStore;
+      const hotProcedures = knowledge ? knowledge.listHotProcedures(metabotId, { limit: 200 }).length : 0;
+      const probationProcedures = knowledge
+        ? knowledge.listProcedures({ metabotId, status: 'active', limit: 500 })
+          .filter((entry) => entry.hotEligible === false && entry.hotReason === 'probation').length
+        : 0;
+      const injectableTechniques = this.deps.coworkStore.listInjectableTechniques(metabotId, 50).length;
+      const procedureBlockChars = knowledge
+        ? buildProcedureBlock(knowledge.listHotProcedures(metabotId, { limit: PROCEDURE_PROMPT_MAX_ITEMS })).length
+        : 0;
+      const techniqueBlockChars = buildProvenTechniquesBlock(
+        this.deps.coworkStore.listInjectableTechniques(metabotId, 5),
+      ).length;
+      const exposedItems = this.deps.coworkStore.countHotLayerExposures(metabotId, date);
+      return { hotProcedures, probationProcedures, injectableTechniques, procedureBlockChars, techniqueBlockChars, exposedItems };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Hot-layer telemetry unavailable for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }
@@ -1686,6 +1733,20 @@ export class DreamService {
               `[DreamService] Falsified ledger write failed for metabot ${metabot.id} draft #${draft.id}: ${error instanceof Error ? error.message : String(error)}`,
             );
           }
+          // RRSI P2: an agreed rejection of a probation ticket flips its
+          // procedure out of the hot layer — never archives an agent record.
+          if (draft.sourceProcedureId && this.deps.metaidKnowledgeStore) {
+            try {
+              this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
+                eligible: false,
+                reason: 'gate_rejected',
+              });
+            } catch (error) {
+              console.warn(
+                `[DreamService] Gate-reject flip failed for procedure ${draft.sourceProcedureId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
         }
       }
       if (validated > 0 || rejected > 0 || panels.disagreed > 0 || panels.incomplete > 0) {
@@ -1889,13 +1950,22 @@ export class DreamService {
           demoted += 1;
           // Loop closure: a demoted technique must not survive as hardened
           // procedure memory either. The procedure's title is the draft's
-          // (the promotion pass writes it that way).
+          // (the promotion pass writes it that way). RRSI P2: a probation
+          // procedure (agent-authored) only leaves the hot layer with a
+          // 'demoted' note — it is never archived.
           if (draft.promotedProcedureId && this.deps.metaidKnowledgeStore) {
             try {
-              this.deps.metaidKnowledgeStore.archiveProcedureByTitle(metabot.id, draft.title);
+              if (draft.sourceProcedureId) {
+                this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
+                  eligible: false,
+                  reason: 'demoted',
+                });
+              } else {
+                this.deps.metaidKnowledgeStore.archiveProcedureByTitle(metabot.id, draft.title);
+              }
             } catch (error) {
               console.warn(
-                `[DreamService] Archiving promoted procedure for demoted draft #${draft.id} failed: ${error instanceof Error ? error.message : String(error)}`,
+                `[DreamService] Demoting the promoted procedure for draft #${draft.id} failed: ${error instanceof Error ? error.message : String(error)}`,
               );
             }
           }
@@ -1946,31 +2016,72 @@ export class DreamService {
    * when its verdict is at least one night old (validated_at earlier than the
    * dream date's day start — the pragmatic stand-in for the full P1 re-review
    * mechanism: calendar distance instead of a second validation panel), scores
-   * >= CAPABILITY_PROMOTION_MIN_SCORE, and was never promoted; at most
-   * CAPABILITY_PROMOTION_MAX_PER_NIGHT per night per bot. The procedure keeps
-   * the draft's title as its own (upsert-by-fingerprint dedupes against
-   * existing procedures), the trigger mirrors the title, and the actionable
-   * description becomes the single ordered step; the draft rows back-link to
-   * the procedure id for provenance (procedures have no generic sources
-   * table). Runs synchronously after the validation gate and never affects
-   * the dream run's outcome.
+   * >= CAPABILITY_PROMOTION_MIN_SCORE, and was never promoted. Per-night the
+   * pass promotes at most the annealed budget (RRSI P2, design §6.2 P2.1):
+   * promotionBudgetForNight over the bot's completed non-empty nights — up to
+   * 3 for a fresh bot, annealing to 1 after 60 active nights. The candidate
+   * query reads up to 50 rows so the telemetry can report how many were
+   * actually eligible. The procedure keeps the draft's title as its own
+   * (upsert-by-fingerprint dedupes against existing procedures), the trigger
+   * mirrors the title, and the actionable description becomes the single
+   * ordered step; the draft rows back-link to the procedure id for provenance
+   * (procedures have no generic sources table). Runs synchronously after the
+   * validation gate and never affects the dream run's recorded outcome.
    */
   private promoteCapabilityDraftsToProcedures(
     metabot: DreamMetabotLike,
     date: string,
-  ): { promoted: number } {
-    const zero = { promoted: 0 };
+  ): { promoted: number; nights: number; budget: number; candidates: number } {
+    const zero = { promoted: 0, nights: 0, budget: 0, candidates: 0 };
     try {
       if (!this.deps.metaidKnowledgeStore) return zero;
       const { startMs } = getDayBoundsMs(date);
+      // RRSI P2: the nightly budget anneals with the bot's dream history; a
+      // count failure degrades to "no history" (the max budget), never skips
+      // the pass.
+      let nights = 0;
+      try {
+        nights = this.deps.dreamStore.countNonEmptyDreamNights(metabot.id, date);
+      } catch (error) {
+        console.warn(
+          `[DreamService] Non-empty-night count failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const budget = promotionBudgetForNight(nights);
       const candidates = this.deps.coworkStore.listPromotableCapabilityDrafts(metabot.id, {
         minScore: CAPABILITY_PROMOTION_MIN_SCORE,
         validatedBeforeMs: startMs,
-        limit: CAPABILITY_PROMOTION_MAX_PER_NIGHT,
+        limit: 50,
       });
       let promoted = 0;
-      for (const draft of candidates) {
+      for (const draft of candidates.slice(0, budget)) {
         try {
+          // RRSI P2: promoting a probation ticket only flips its procedure
+          // hot — the agent-authored body is never rewritten, and a missing
+          // or archived source rejects the ticket with a note (no ledger row:
+          // nothing was falsified).
+          if (draft.sourceProcedureId) {
+            const flipped = this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
+              eligible: true,
+              reason: null,
+            });
+            if (!flipped) {
+              this.deps.coworkStore.updateCapabilityDraftValidation({
+                id: draft.id,
+                metabotId: metabot.id,
+                status: 'rejected',
+                validationNotes: 'source procedure no longer active',
+              });
+              continue;
+            }
+            const marked = this.deps.coworkStore.markCapabilityDraftPromoted({
+              id: draft.id,
+              metabotId: metabot.id,
+              procedureId: draft.sourceProcedureId,
+            });
+            if (marked) promoted += 1;
+            continue;
+          }
           // Design §4.4: a reconciled draft carries its applicability
           // conditions into the procedure's trigger and its residual
           // uncertainty into the pitfalls — the conditions under which the
@@ -2002,7 +2113,7 @@ export class DreamService {
       if (promoted > 0) {
         console.log(`[DreamService] Promoted ${promoted} capability draft(s) into procedure memory for metabot ${metabot.id}`);
       }
-      return { promoted };
+      return { promoted, nights, budget, candidates: candidates.length };
     } catch (error) {
       console.warn(
         `[DreamService] Capability promotion pass failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -2163,17 +2274,19 @@ export class DreamService {
    */
   private buildReconciliationConflictCandidates(
     metabotId: number,
-    draft: { id: number; title: string },
+    draft: { id: number; title: string; sourceProcedureId?: string | null },
   ): ReconciliationConflictCandidate[] {
     const candidates: ReconciliationConflictCandidate[] = [];
     if (this.deps.metaidKnowledgeStore) {
       try {
+        // RRSI P2: a probation draft never conflicts with (or merges into)
+        // its own source procedure — same title by construction.
         const procedures = this.deps.metaidKnowledgeStore.listProcedures({
           metabotId,
           status: 'active',
           query: draft.title,
           limit: RECONCILE_MAX_CONFLICT_CANDIDATES,
-        });
+        }).filter((procedure) => procedure.id !== draft.sourceProcedureId);
         for (const procedure of procedures) {
           candidates.push({
             ref: `procedure:${procedure.id}`,
@@ -2531,9 +2644,16 @@ export class DreamService {
       );
       // Procedures promoted by the rolled-back night: active now but absent
       // from the snapshot's promoted set. Defensive union: procedures whose
-      // source draft was created on the rolled-back date.
+      // source draft was created on the rolled-back date. RRSI P2: an
+      // agent-authored procedure only leaves the hot layer with a 'rollback'
+      // note — never archived; dream-origin procedures keep the archive.
       const archivedProcedures = new Set<string>();
       if (this.deps.metaidKnowledgeStore) {
+        const agentSourced = new Set(
+          this.deps.coworkStore.listCapabilityDrafts(metabot.id)
+            .filter((draft) => draft.sourceProcedureId)
+            .map((draft) => draft.sourceProcedureId as string),
+        );
         const snapshotIds = new Set(snapshot.payload.promotedProcedureIds);
         const promotedSince = this.deps.dreamStore
           .listActivePromotedProcedureIds(metabot.id)
@@ -2544,6 +2664,14 @@ export class DreamService {
           .map((draft) => draft.promotedProcedureId as string);
         for (const procedureId of [...new Set([...promotedSince, ...draftPromotedIds])]) {
           try {
+            if (agentSourced.has(procedureId)) {
+              // It left the active hot set, so it counts in the same log and
+              // rollback note as an archive — but the record survives.
+              if (this.deps.metaidKnowledgeStore.setProcedureHotEligibility(procedureId, { eligible: false, reason: 'rollback' })) {
+                archivedProcedures.add(procedureId);
+              }
+              continue;
+            }
             const entry = this.deps.metaidKnowledgeStore.getProcedure(procedureId);
             if (entry && entry.status === 'active'
               && this.deps.metaidKnowledgeStore.archiveProcedureByTitle(metabot.id, entry.title)) {
@@ -2570,6 +2698,21 @@ export class DreamService {
           validationNotes: `prompt layer ${snapshot.dreamDate} rolled back (negative-feedback spike) — treat that day's lessons with suspicion`,
         })) {
           rejectedDrafts += 1;
+        }
+        // RRSI P2: a rejected probation ticket also pulls its procedure out
+        // of the hot layer so the recall status reflects the bad day; a later
+        // agent re-save reopens probation.
+        if (draft.sourceProcedureId && this.deps.metaidKnowledgeStore) {
+          try {
+            this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
+              eligible: false,
+              reason: 'rollback',
+            });
+          } catch (error) {
+            console.warn(
+              `[DreamService] Rollback eligibility flip failed for procedure ${draft.sourceProcedureId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
       }
       const marked = this.deps.dreamStore.markPromptLayerSnapshotRolledBack(

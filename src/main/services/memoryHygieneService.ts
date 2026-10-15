@@ -20,6 +20,7 @@ import {
 } from '../libs/deepConsolidationPrompt';
 import { resolveDreamAttemptTimeoutMs } from '../libs/dreamRetryPolicy';
 import { FALSIFIED_MAX_PER_BOT, FALSIFIED_RETENTION_DAYS } from '../libs/capabilityGateRegularizers';
+import { HOT_LAYER_USAGE_RETENTION_DAYS } from '../coworkStore';
 import { metabotBrainOptions } from './llmFallback';
 
 /**
@@ -276,6 +277,21 @@ export class MemoryHygieneService {
           excludeMetabotIds: context.disabledMetabotIds,
         });
         return { capabilityFalsifiedPurged: purged };
+      },
+    });
+    // Hot-layer exposure ledger (RRSI P2, design §6.2 P2.4): dream
+    // bookkeeping — one row per item per day drains after the retention
+    // horizon. Like the falsified retention, a constant, not a user setting.
+    this.steps.push({
+      name: 'hot-layer-usage',
+      run: (context) => {
+        const purged = context.coworkStore.purgeHotLayerUsage({
+          cutoffDate: formatBotWorkspaceDate(
+            new Date(context.nowMs - HOT_LAYER_USAGE_RETENTION_DAYS * 86_400_000)
+          ),
+          excludeMetabotIds: context.disabledMetabotIds,
+        });
+        return { hotLayerUsagePurged: purged };
       },
     });
     // Culture layer: emergent entries that stopped earning injection slots

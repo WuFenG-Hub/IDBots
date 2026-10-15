@@ -98,6 +98,7 @@ class RecordingStore {
   // Proven-techniques injection (a6f7d570) reads capability drafts every turn;
   // none exist in this fixture.
   listCapabilityDrafts() { return [] }
+  listInjectableTechniques() { return [] }
 }
 
 test('CoworkRunner DSH integration', { skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed' }, async () => {

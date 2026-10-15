@@ -5596,9 +5596,11 @@ async function processOne(
     // memory policy. Work reviews were previously group-task-only; private chats
     // benefit from the same acceptance-rating feedback.
     // Validated capability drafts (Dream-RSI P0): only drafts that survived
-    // the dream-time validation pass are injected.
+    // the dream-time validation pass are injected. RRSI P2 single injection
+    // path: never-promoted validated drafts only (promoted ones hardened
+    // into procedure memory).
     const provenTechniques = memoryPolicy.memoryEnabled
-      ? coworkStore.listCapabilityDrafts(metabot.id, { status: 'validated', limit: 5 })
+      ? coworkStore.listInjectableTechniques(metabot.id, 5)
       : [];
     const experienceContext = memoryPolicy.memoryEnabled
       ? composeExperiencePromptBlocks({

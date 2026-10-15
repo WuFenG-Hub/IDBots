@@ -20,6 +20,9 @@ const PROCEDURE_PITFALL_MAX_CHARS = 120;
 const RECALL_STEP_MAX_CHARS = 200;
 
 export interface ProcedurePromptEntry {
+  /** RRSI P2: the procedure id (used by exposure bookkeeping; optional so
+   * older callers and test stubs keep compiling). */
+  id?: string;
   title: string;
   triggerText: string;
   steps: string[];
@@ -27,6 +30,8 @@ export interface ProcedurePromptEntry {
   sourcePinIds: string[];
   version?: number;
   useCount?: number;
+  /** RRSI P2: trust hint for a recall-only procedure (null = hot/validated). */
+  statusNote?: string | null;
 }
 
 const escapeXml = (value: string): string =>
@@ -46,26 +51,32 @@ function truncate(value: unknown, maxLength: number): string {
  * Hot layer: a bounded slice of the bot's most relevant procedures, injected
  * so a matching past workflow proactively guides the current task instead of
  * the bot re-searching MetaWeb for something it already learned.
+ *
+ * Returns the rendered text plus the ids of the entries actually rendered
+ * (RRSI P2 exposure bookkeeping; entries without an id render but are not
+ * listed). `buildProcedureBlock` is the text-only legacy view of this.
  */
-export function buildProcedureBlock(
+export function renderProcedureBlock(
   entries: ProcedurePromptEntry[],
   maxItems: number = PROCEDURE_PROMPT_MAX_ITEMS,
   maxChars: number = PROCEDURE_PROMPT_MAX_CHARS,
-): string {
+): { text: string; includedIds: string[] } {
   const items = (entries ?? [])
     .slice(0, Math.max(1, maxItems))
     .map((entry) => ({
+      id: typeof entry.id === 'string' && entry.id.trim() ? entry.id : null,
       title: truncate(entry.title, PROCEDURE_TITLE_MAX_CHARS),
       trigger: truncate(entry.triggerText, PROCEDURE_TRIGGER_MAX_CHARS),
       steps: (entry.steps ?? []).slice(0, PROCEDURE_MAX_STEPS_SHOWN).map((step) => truncate(step, PROCEDURE_STEP_MAX_CHARS)),
       pitfalls: (entry.pitfalls ?? []).slice(0, 3).map((pitfall) => truncate(pitfall, PROCEDURE_PITFALL_MAX_CHARS)),
     }))
     .filter((entry) => entry.title && entry.trigger && entry.steps.length > 0);
-  if (items.length === 0) return '';
+  if (items.length === 0) return { text: '', includedIds: [] };
 
   const lines: string[] = ['<procedures>'];
   let used = lines.join('\n').length;
   let included = 0;
+  const includedIds: string[] = [];
   for (const entry of items) {
     const block = [
       `  <procedure title="${escapeXml(entry.title)}">`,
@@ -78,8 +89,9 @@ export function buildProcedureBlock(
     lines.push(block);
     used += 1 + block.length;
     included += 1;
+    if (entry.id) includedIds.push(entry.id);
   }
-  if (included === 0) return '';
+  if (included === 0) return { text: '', includedIds: [] };
   lines.push('</procedures>');
   lines.push(
     '<instruction>',
@@ -90,9 +102,19 @@ export function buildProcedureBlock(
     '</instruction>',
   );
   const rendered = lines.join('\n');
-  return rendered.length <= maxChars
+  const text = rendered.length <= maxChars
     ? rendered
     : `${truncateUtf16Units(rendered, Math.max(0, maxChars - 1)).trim()}…`;
+  return { text, includedIds };
+}
+
+/** Legacy text-only view of {@link renderProcedureBlock}. */
+export function buildProcedureBlock(
+  entries: ProcedurePromptEntry[],
+  maxItems: number = PROCEDURE_PROMPT_MAX_ITEMS,
+  maxChars: number = PROCEDURE_PROMPT_MAX_CHARS,
+): string {
+  return renderProcedureBlock(entries, maxItems, maxChars).text;
 }
 
 /** Plain-text rendering of recall results for the procedure_recall tool response. */
@@ -106,6 +128,7 @@ export function formatProcedureRecallResults(entries: ProcedurePromptEntry[]): s
     const useSuffix = typeof entry.useCount === 'number' && entry.useCount > 0 ? ` · used ${entry.useCount}×` : '';
     lines.push(`- 【经验】${truncate(entry.title, PROCEDURE_TITLE_MAX_CHARS)}${versionSuffix}${useSuffix}`);
     lines.push(`  when: ${truncate(entry.triggerText, PROCEDURE_TRIGGER_MAX_CHARS)}`);
+    if (entry.statusNote) lines.push(`  status: ${entry.statusNote}`);
     const steps = (entry.steps ?? []).map((step, index) => `${index + 1}. ${truncate(step, RECALL_STEP_MAX_CHARS)}`);
     if (steps.length) lines.push(`  steps: ${steps.join(' | ')}`);
     if (entry.pitfalls?.length) lines.push(`  avoid: ${entry.pitfalls.map((p) => truncate(p, PROCEDURE_PITFALL_MAX_CHARS)).join('；')}`);

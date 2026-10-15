@@ -669,6 +669,12 @@ export class SqliteStore {
       if (!draftCols.includes('uncertainty_text')) {
         this.db.run('ALTER TABLE capability_drafts ADD COLUMN uncertainty_text TEXT');
       }
+      // RRSI P2 agent-procedure probation: the capability draft opened for a
+      // procedure the bot saved at runtime. NULL = a dream-distilled draft;
+      // the dream gate judges both the same way.
+      if (!draftCols.includes('source_procedure_id')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN source_procedure_id TEXT');
+      }
     } catch (error) {
       console.warn('migrate capability_drafts validation columns:', error);
     }
@@ -696,6 +702,30 @@ export class SqliteStore {
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_capability_falsified_metabot_time
       ON capability_falsified_hypotheses(metabot_id, falsified_at DESC);
+    `);
+
+    // RRSI P2 exposure ledger (design §6.2 P2.4): dream bookkeeping — one row
+    // per hot-layer item per local day, recording whether it was injected hot
+    // or only recalled. `applied` / `evidence` / `audited_at` are filled by
+    // the P3 usage audit; retention is 120 days (hygiene step).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS hot_layer_usage (
+        metabot_id INTEGER NOT NULL,
+        usage_date TEXT NOT NULL,
+        item_kind TEXT NOT NULL CHECK (item_kind IN ('technique', 'procedure')),
+        item_id TEXT NOT NULL,
+        exposure TEXT NOT NULL CHECK (exposure IN ('hot', 'recall')),
+        first_exposed_at INTEGER NOT NULL,
+        exposure_count INTEGER NOT NULL DEFAULT 1,
+        applied INTEGER CHECK (applied IS NULL OR applied IN (0, 1)),
+        evidence TEXT,
+        audited_at INTEGER,
+        PRIMARY KEY (metabot_id, usage_date, item_kind, item_id)
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_hot_layer_usage_item
+        ON hot_layer_usage(metabot_id, item_kind, item_id, usage_date DESC);
     `);
 
     // Dream-RSI self-curriculum (P0, design 2026-10-10 §3.3): targeted

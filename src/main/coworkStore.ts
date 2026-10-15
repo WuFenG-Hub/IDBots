@@ -59,7 +59,7 @@ import {
   normalizeMemorySemanticKey,
   scoreMemorySimilarity,
 } from './memory/memorySimilarity';
-import { BOT_WORKSPACE_DIR_NAME } from './libs/botWorkspace';
+import { BOT_WORKSPACE_DIR_NAME, formatBotWorkspaceDate } from './libs/botWorkspace';
 import {
   normalizeMemoryHygieneConfig,
   type MemoryHygieneConfig,
@@ -928,6 +928,9 @@ export interface CapabilityDraft {
    * conditions / residual uncertainty (NULL = never reconciled). */
   conditionsText: string | null;
   uncertaintyText: string | null;
+  /** RRSI P2: the procedure this draft is the probation ticket for (NULL =
+   * a dream-distilled draft). */
+  sourceProcedureId: string | null;
 }
 
 interface CapabilityDraftRow {
@@ -949,7 +952,15 @@ interface CapabilityDraftRow {
   last_reviewed_at?: number | string | null;
   conditions_text?: string | null;
   uncertainty_text?: string | null;
+  source_procedure_id?: string | null;
 }
+
+/** Shared column list for every capability-draft SELECT (mapped by
+ * CoworkStore.mapCapabilityDraftRow; new columns are added in one place). */
+const CAPABILITY_DRAFT_COLUMNS = `id, metabot_id, dream_date, title, description, capability_type, status, created_at,
+             validation_score, validation_notes, validated_at, times_injected, last_injected_at,
+             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text,
+             source_procedure_id`;
 
 /** Which gate pass falsified a hypothesis (RRSI P1 ledger provenance). */
 export type CapabilityFalsifiedSource = 'validation' | 're_review';
@@ -969,6 +980,15 @@ export interface CapabilityFalsifiedHypothesis {
   hitCount: number;
   lastHitAt: number | null;
 }
+
+/** Which hot-layer kind an exposure row tracks (RRSI P2, design §6.2 P2.4). */
+export type HotLayerItemKind = 'technique' | 'procedure';
+
+/** How the item reached the model: always-on injection or on-demand recall. */
+export type HotLayerExposure = 'hot' | 'recall';
+
+/** hot_layer_usage retention horizon in days (hygiene step, RRSI P2). */
+export const HOT_LAYER_USAGE_RETENTION_DAYS = 120;
 
 /** Outcome of a checked capability-draft insert (RRSI P1). */
 export interface CapabilityDraftInsertResult {
@@ -7584,16 +7604,38 @@ export class CoworkStore implements MemoryBackend {
       ? Math.floor(options!.limit!)
       : null;
     const sql = `
-      SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
-             validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
+      SELECT ${CAPABILITY_DRAFT_COLUMNS}
       FROM capability_drafts
       ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY created_at DESC, id DESC
       ${limit != null ? `LIMIT ${limit}` : ''}
     `;
     const rows = this.getAll<CapabilityDraftRow>(sql, params);
-    return rows.map((row) => ({
+    return rows.map((row) => this.mapCapabilityDraftRow(row));
+  }
+
+  /**
+   * RRSI P2 single injection path (design §6.2 P2.3): validated drafts that
+   * were NEVER promoted — the only drafts allowed into
+   * <proven_techniques>. A promoted draft hardened into procedure memory and
+   * must not also ride the technique block (double injection). Newest first.
+   */
+  listInjectableTechniques(metabotId: number, limit: number = 5): CapabilityDraft[] {
+    const id = Number(metabotId);
+    if (!Number.isInteger(id) || id <= 0) return [];
+    const clampedLimit = Math.max(1, Math.min(50, Math.floor(limit) || 5));
+    const rows = this.getAll<CapabilityDraftRow>(`
+      SELECT ${CAPABILITY_DRAFT_COLUMNS}
+      FROM capability_drafts
+      WHERE metabot_id = ? AND status = 'validated' AND promoted_at IS NULL
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `, [id, clampedLimit]);
+    return rows.map((row) => this.mapCapabilityDraftRow(row));
+  }
+
+  private mapCapabilityDraftRow(row: CapabilityDraftRow): CapabilityDraft {
+    return {
       id: Number(row.id),
       metabotId: Number(row.metabot_id),
       dreamDate: String(row.dream_date),
@@ -7612,7 +7654,86 @@ export class CoworkStore implements MemoryBackend {
       lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
       conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
       uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
-    }));
+      sourceProcedureId: row.source_procedure_id == null ? null : String(row.source_procedure_id),
+    };
+  }
+
+  /**
+   * Open (or refresh) the probation ticket for a runtime-saved procedure
+   * (RRSI P2, design §6.2 P2.2): one capability_drafts row per procedure that
+   * the existing dream validation gate judges. A pending ticket (draft /
+   * disputed) is refreshed in place — title and description follow the
+   * procedure's latest revision while dream_date, created_at and status stay
+   * (the gate calendar keeps counting from the first save). A VALIDATED but
+   * not-yet-promoted ticket is also reopened in place: the procedure body the
+   * verdict approved is gone, so the verdict is wiped (status back to
+   * 'draft', score/notes/validated_at cleared, dream_date re-anchored) and
+   * the gate re-judges the revision before any promotion can harden it.
+   * Deliberately bypasses the falsified-ledger block of
+   * insertCapabilityDraftsChecked: an explicit agent save is never silently
+   * dropped; the gate still sees the similar-falsified prompt line. Returns
+   * null on invalid input.
+   */
+  ensureProbationDraftForProcedure(input: {
+    metabotId: number;
+    procedureId: string;
+    title: string;
+    description: string;
+    dreamDate: string;
+  }): { draftId: number; created: boolean } | null {
+    const metabotId = Number(input.metabotId);
+    const procedureId = String(input.procedureId ?? '').trim();
+    const title = String(input.title ?? '').trim();
+    const description = String(input.description ?? '').trim();
+    const dreamDate = String(input.dreamDate ?? '').trim();
+    if (!Number.isInteger(metabotId) || metabotId <= 0 || !procedureId || !title || !description || !dreamDate) {
+      return null;
+    }
+    const existing = this.getOne<{ id: number | string }>(
+      `SELECT id FROM capability_drafts
+       WHERE metabot_id = ? AND source_procedure_id = ? AND status IN ('draft', 'disputed')
+       ORDER BY id DESC LIMIT 1`,
+      [metabotId, procedureId],
+    );
+    if (existing) {
+      this.db.run(
+        `UPDATE capability_drafts SET title = ?, description = ? WHERE id = ? AND metabot_id = ?`,
+        [title, description, Number(existing.id), metabotId],
+      );
+      this.saveDb();
+      return { draftId: Number(existing.id), created: false };
+    }
+    // A validated-but-unpromoted ticket whose procedure was revised since the
+    // verdict: reopen it instead of leaving a stale approval in the promotion
+    // queue.
+    const validated = this.getOne<{ id: number | string }>(
+      `SELECT id FROM capability_drafts
+       WHERE metabot_id = ? AND source_procedure_id = ? AND status = 'validated' AND promoted_at IS NULL
+       ORDER BY id DESC LIMIT 1`,
+      [metabotId, procedureId],
+    );
+    if (validated) {
+      this.db.run(
+        `UPDATE capability_drafts
+         SET title = ?, description = ?, dream_date = ?, status = 'draft',
+             validation_score = NULL, validation_notes = NULL, validated_at = NULL
+         WHERE id = ? AND metabot_id = ?`,
+        [title, description, dreamDate, Number(validated.id), metabotId],
+      );
+      this.saveDb();
+      return { draftId: Number(validated.id), created: false };
+    }
+    const now = Date.now();
+    this.db.run(
+      `INSERT INTO capability_drafts (
+         metabot_id, dream_date, title, description, capability_type, status,
+         created_at, source_procedure_id
+       ) VALUES (?, ?, ?, ?, 'workflow', 'draft', ?, ?)`,
+      [metabotId, dreamDate, title, description, now, procedureId],
+    );
+    this.saveDb();
+    const newId = Number(this.getOne<{ id: number | string }>('SELECT last_insert_rowid() AS id', [])?.id);
+    return { draftId: newId, created: true };
   }
 
   /**
@@ -7638,7 +7759,90 @@ export class CoworkStore implements MemoryBackend {
     if (bumped > 0) {
       this.saveDb();
     }
+    // RRSI P2 exposure ledger: today's hot technique exposures for exactly
+    // the injected drafts (INSERT … SELECT; the WHERE clause is required
+    // before ON CONFLICT in this form). Best-effort telemetry — a failure
+    // never undoes the counter bump above.
+    try {
+      this.db.run(
+        `INSERT INTO hot_layer_usage (metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count)
+         SELECT metabot_id, ?, 'technique', CAST(id AS TEXT), 'hot', ?, 1
+         FROM capability_drafts WHERE id IN (${placeholders})
+         ON CONFLICT(metabot_id, usage_date, item_kind, item_id) DO UPDATE SET
+           exposure_count = exposure_count + 1, exposure = 'hot'`,
+        [formatBotWorkspaceDate(new Date(now)), now, ...uniqueIds],
+      );
+      this.saveDb();
+    } catch (error) {
+      console.warn('[CoworkStore] hot_layer_usage technique exposure write failed:', error);
+    }
     return bumped;
+  }
+
+  /**
+   * RRSI P2 exposure ledger (design §6.2 P2.4): one row per item per local
+   * day, counting repeat exposures. Within a day, 'hot' is sticky — an item
+   * that was injected hot and later recalled still counts as hot. Best-effort
+   * telemetry: callers wrap their own failures, and this method throws only
+   * on a genuinely broken database. Returns the number of items written.
+   */
+  recordHotLayerExposures(input: {
+    metabotId: number;
+    usageDate: string;
+    items: Array<{ kind: HotLayerItemKind; id: string; exposure: HotLayerExposure }>;
+    atMs?: number;
+  }): number {
+    const metabotId = Number(input.metabotId);
+    const usageDate = String(input.usageDate ?? '').trim();
+    if (!Number.isInteger(metabotId) || metabotId <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(usageDate)) return 0;
+    const atMs = Math.floor(Number(input.atMs ?? Date.now())) || Date.now();
+    const items = (input.items ?? []).filter((item) =>
+      (item.kind === 'technique' || item.kind === 'procedure')
+      && typeof item.id === 'string' && item.id.trim().length > 0
+      && (item.exposure === 'hot' || item.exposure === 'recall'));
+    if (items.length === 0) return 0;
+    let written = 0;
+    for (const item of items) {
+      this.db.run(
+        `INSERT INTO hot_layer_usage (metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count)
+         VALUES (?, ?, ?, ?, ?, ?, 1)
+         ON CONFLICT(metabot_id, usage_date, item_kind, item_id) DO UPDATE SET
+           exposure_count = exposure_count + 1,
+           exposure = CASE WHEN hot_layer_usage.exposure = 'hot' OR excluded.exposure = 'hot' THEN 'hot' ELSE 'recall' END`,
+        [metabotId, usageDate, item.kind, item.id, item.exposure, atMs],
+      );
+      written += 1;
+    }
+    this.saveDb();
+    return written;
+  }
+
+  /** Retention horizon for hot_layer_usage rows (hygiene step, RRSI P2). */
+  purgeHotLayerUsage(input: { cutoffDate: string; excludeMetabotIds?: ReadonlySet<number> }): number {
+    const cutoff = String(input.cutoffDate ?? '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(cutoff)) return 0;
+    const excluded = input.excludeMetabotIds ? [...input.excludeMetabotIds] : [];
+    const exclusion = excluded.length > 0
+      ? ` AND metabot_id NOT IN (${excluded.map(() => '?').join(', ')})`
+      : '';
+    this.db.run(`DELETE FROM hot_layer_usage WHERE usage_date < ?${exclusion}`, [cutoff, ...excluded]);
+    const deleted = this.db.getRowsModified?.() || 0;
+    if (deleted > 0) {
+      this.saveDb();
+    }
+    return deleted;
+  }
+
+  /** How many hot-layer items were exposed to this bot on one local day. */
+  countHotLayerExposures(metabotId: number, usageDate: string): number {
+    const id = Number(metabotId);
+    const date = String(usageDate ?? '').trim();
+    if (!Number.isInteger(id) || id <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return 0;
+    const row = this.getOne<{ count: number | string }>(
+      'SELECT COUNT(*) AS count FROM hot_layer_usage WHERE metabot_id = ? AND usage_date = ?',
+      [id, date],
+    );
+    return Math.max(0, Math.floor(Number(row?.count) || 0));
   }
 
   /**
@@ -7683,9 +7887,7 @@ export class CoworkStore implements MemoryBackend {
   ): CapabilityDraft[] {
     const limit = Math.max(1, Math.floor(options.limit));
     const rows = this.getAll<CapabilityDraftRow>(`
-      SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
-             validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
+      SELECT ${CAPABILITY_DRAFT_COLUMNS}
       FROM capability_drafts
       WHERE metabot_id = ?
         AND status = 'validated'
@@ -7696,26 +7898,7 @@ export class CoworkStore implements MemoryBackend {
       ORDER BY validation_score DESC, validated_at ASC, id ASC
       LIMIT ?
     `, [metabotId, Number(options.minScore) || 0, Math.floor(Number(options.validatedBeforeMs) || 0), limit]);
-    return rows.map((row) => ({
-      id: Number(row.id),
-      metabotId: Number(row.metabot_id),
-      dreamDate: String(row.dream_date),
-      title: String(row.title),
-      description: String(row.description),
-      capabilityType: String(row.capability_type),
-      status: String(row.status),
-      createdAt: Number(row.created_at),
-      validationScore: row.validation_score == null ? null : Number(row.validation_score),
-      validationNotes: row.validation_notes == null ? null : String(row.validation_notes),
-      validatedAt: row.validated_at == null ? null : Number(row.validated_at),
-      timesInjected: Math.max(0, Math.floor(Number(row.times_injected) || 0)),
-      lastInjectedAt: row.last_injected_at == null ? null : Number(row.last_injected_at),
-      promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
-      promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
-      lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
-      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
-      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
-    }));
+    return rows.map((row) => this.mapCapabilityDraftRow(row));
   }
 
   /**
@@ -7884,9 +8067,7 @@ export class CoworkStore implements MemoryBackend {
   ): CapabilityDraft[] {
     const limit = Math.max(1, Math.floor(options.limit ?? 10));
     const rows = this.getAll<CapabilityDraftRow>(`
-      SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
-             validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
+      SELECT ${CAPABILITY_DRAFT_COLUMNS}
       FROM capability_drafts
       WHERE metabot_id = ?
         AND status = 'disputed'
@@ -7894,26 +8075,7 @@ export class CoworkStore implements MemoryBackend {
       ORDER BY COALESCE(last_reviewed_at, validated_at, created_at) ASC, id ASC
       LIMIT ?
     `, [metabotId, Math.floor(Number(options.olderThanMs) || 0), limit]);
-    return rows.map((row) => ({
-      id: Number(row.id),
-      metabotId: Number(row.metabot_id),
-      dreamDate: String(row.dream_date),
-      title: String(row.title),
-      description: String(row.description),
-      capabilityType: String(row.capability_type),
-      status: String(row.status),
-      createdAt: Number(row.created_at),
-      validationScore: row.validation_score == null ? null : Number(row.validation_score),
-      validationNotes: row.validation_notes == null ? null : String(row.validation_notes),
-      validatedAt: row.validated_at == null ? null : Number(row.validated_at),
-      timesInjected: Math.max(0, Math.floor(Number(row.times_injected) || 0)),
-      lastInjectedAt: row.last_injected_at == null ? null : Number(row.last_injected_at),
-      promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
-      promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
-      lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
-      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
-      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
-    }));
+    return rows.map((row) => this.mapCapabilityDraftRow(row));
   }
 
   /**
@@ -7930,9 +8092,7 @@ export class CoworkStore implements MemoryBackend {
   ): CapabilityDraft[] {
     const limit = Math.max(1, Math.floor(options.limit));
     const rows = this.getAll<CapabilityDraftRow>(`
-      SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
-             validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
+      SELECT ${CAPABILITY_DRAFT_COLUMNS}
       FROM capability_drafts
       WHERE metabot_id = ?
         AND status = 'validated'
@@ -7941,26 +8101,7 @@ export class CoworkStore implements MemoryBackend {
       ORDER BY COALESCE(last_reviewed_at, validated_at) ASC, id ASC
       LIMIT ?
     `, [metabotId, Math.floor(Number(options.olderThanMs) || 0), limit]);
-    return rows.map((row) => ({
-      id: Number(row.id),
-      metabotId: Number(row.metabot_id),
-      dreamDate: String(row.dream_date),
-      title: String(row.title),
-      description: String(row.description),
-      capabilityType: String(row.capability_type),
-      status: String(row.status),
-      createdAt: Number(row.created_at),
-      validationScore: row.validation_score == null ? null : Number(row.validation_score),
-      validationNotes: row.validation_notes == null ? null : String(row.validation_notes),
-      validatedAt: row.validated_at == null ? null : Number(row.validated_at),
-      timesInjected: Math.max(0, Math.floor(Number(row.times_injected) || 0)),
-      lastInjectedAt: row.last_injected_at == null ? null : Number(row.last_injected_at),
-      promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
-      promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
-      lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
-      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
-      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
-    }));
+    return rows.map((row) => this.mapCapabilityDraftRow(row));
   }
 
   /**
@@ -8010,7 +8151,9 @@ export class CoworkStore implements MemoryBackend {
    * BOOKKEEPING (verdict candidates and their corpses), not user memories —
    * the capability they described lives on in the night's diary.
    * 'validated' rows are NEVER deleted here; their quality control is the
-   * periodic re-review's job (dreamService).
+   * periodic re-review's job (dreamService). A pending probation draft
+   * (source_procedure_id set) also never ages out here — its procedure is
+   * still waiting for the gate, so the ticket must survive (RRSI P2).
    */
   purgeExpiredCapabilityDrafts(input: {
     cutoffMs: number;
@@ -8023,7 +8166,8 @@ export class CoworkStore implements MemoryBackend {
       : '';
     this.db.run(
       `DELETE FROM capability_drafts
-       WHERE status IN ('rejected', 'draft') AND created_at < ?${exclusion}`,
+       WHERE status IN ('rejected', 'draft') AND created_at < ?
+         AND NOT (status = 'draft' AND source_procedure_id IS NOT NULL)${exclusion}`,
       [cutoff, ...excluded],
     );
     const deleted = this.db.getRowsModified?.() || 0;

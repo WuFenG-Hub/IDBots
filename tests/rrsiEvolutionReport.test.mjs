@@ -170,3 +170,99 @@ test('CLI smoke: --json prints the report and exits 0', async () => {
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Retention section (RRSI P2 Task 8)
+// ---------------------------------------------------------------------------
+
+test('report retention section: budget mean, hot-layer chars, probation funnel, exposure', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const dreamStore = new DreamStore(db, () => {});
+    insertMetabot(db, 5);
+    for (const [index, date] of DATES.entries()) {
+      dreamStore.beginRun(5, date, null, 17);
+      dreamStore.updateRunTelemetry(5, date, {
+        emptyDay: false,
+        promotionBudget: index === 2
+          ? { nights: 2, budget: 2, candidates: 1, promoted: 1 }
+          : { nights: index, budget: 3, candidates: 2, promoted: 2 },
+        hotLayer: index === 2
+          ? { hotProcedures: 3, probationProcedures: 1, injectableTechniques: 0, procedureBlockChars: 200, techniqueBlockChars: 60, exposedItems: 4 }
+          : { hotProcedures: 1, probationProcedures: 1, injectableTechniques: 1, procedureBlockChars: 100, techniqueBlockChars: 50, exposedItems: 2 },
+      });
+    }
+    // Probation funnel: one promoted (validated), one rejected, one still pending.
+    const tickets = ['proc-a', 'proc-b', 'proc-c'];
+    for (const [index, procedureId] of tickets.entries()) {
+      coworkStore.ensureProbationDraftForProcedure({
+        metabotId: 5, procedureId, title: `试用${index}`, description: 'd', dreamDate: DATES[0],
+      });
+      db.run('UPDATE capability_drafts SET created_at = ? WHERE source_procedure_id = ?', [Date.parse(`${DATES[index]}T00:00:00Z`), procedureId]);
+    }
+    const drafts = coworkStore.listCapabilityDrafts(5);
+    const promotedTicket = drafts.find((draft) => draft.sourceProcedureId === 'proc-a');
+    const rejectedTicket = drafts.find((draft) => draft.sourceProcedureId === 'proc-b');
+    coworkStore.updateCapabilityDraftValidation({ id: promotedTicket.id, metabotId: 5, status: 'validated', validationScore: 0.9 });
+    db.run('UPDATE capability_drafts SET promoted_at = ? WHERE id = ?', [Date.parse(`${DATES[2]}T00:00:00Z`), promotedTicket.id]);
+    coworkStore.updateCapabilityDraftValidation({ id: rejectedTicket.id, metabotId: 5, status: 'rejected' });
+    coworkStore.recordHotLayerExposures({
+      metabotId: 5, usageDate: DATES[1],
+      items: [{ kind: 'procedure', id: 'proc-a', exposure: 'hot' }, { kind: 'technique', id: 't1', exposure: 'hot' }],
+      atMs: 0,
+    });
+    coworkStore.recordHotLayerExposures({
+      metabotId: 5, usageDate: DATES[2],
+      items: [{ kind: 'procedure', id: 'proc-a', exposure: 'hot' }],
+      atMs: 0,
+    });
+
+    const file = exportDbToFile(db, 'retention');
+    const handle = new DatabaseSync(file, { readOnly: true });
+    let retention;
+    try {
+      retention = buildRrsiReport(handle, { days: 3, today: DATES[2], botId: 5 }).bots[0].retention;
+    } finally {
+      handle.close();
+    }
+    assert.equal(retention.promotionsPerNight, 1.6667, '(2 + 2 + 1) / 3 nights, report rounds to 4 decimals');
+    assert.equal(retention.budgetLatest, 2);
+    assert.deepEqual(retention.hotLayerChars, { first: 150, last: 260 });
+    assert.deepEqual(retention.probation, { opened: 3, validated: 1, rejected: 1, promoted: 1 });
+    assert.deepEqual(retention.exposure, { nights: 2, items: 3 });
+  } finally {
+    cleanup();
+  }
+});
+
+test('report retention degrades to nulls without hot_layer_usage or source_procedure_id', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const dreamStore = new DreamStore(db, () => {});
+    insertMetabot(db, 5);
+    dreamStore.beginRun(5, DATES[0], null, 17);
+    dreamStore.updateRunTelemetry(5, DATES[0], {
+      emptyDay: false,
+      promotionBudget: { nights: 0, budget: 3, candidates: 0, promoted: 0 },
+    });
+    db.run('DROP TABLE hot_layer_usage');
+    db.run('ALTER TABLE capability_drafts DROP COLUMN source_procedure_id');
+
+    const file = exportDbToFile(db, 'retention-degrade');
+    const handle = new DatabaseSync(file, { readOnly: true });
+    let retention;
+    try {
+      retention = buildRrsiReport(handle, { days: 1, today: DATES[0], botId: 5 }).bots[0].retention;
+    } finally {
+      handle.close();
+    }
+    assert.equal(retention.promotionsPerNight, 0);
+    assert.equal(retention.budgetLatest, 3);
+    assert.deepEqual(retention.hotLayerChars, { first: null, last: null });
+    assert.equal(retention.probation, null, 'missing column degrades to null');
+    assert.equal(retention.exposure, null, 'missing table degrades to null');
+  } finally {
+    cleanup();
+  }
+});

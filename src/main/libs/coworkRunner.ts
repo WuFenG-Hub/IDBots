@@ -73,12 +73,14 @@ import {
   type KnowledgePromptEntry,
 } from './knowledgePromptBlocks';
 import {
-  buildProcedureBlock,
+  renderProcedureBlock,
   formatProcedureRecallResults,
   formatProcedureSaveResult,
   PROCEDURE_PROMPT_MAX_ITEMS,
   type ProcedurePromptEntry,
 } from './procedurePromptBlocks';
+import { buildProbationDraftDescription } from './procedureProbation';
+import { formatBotWorkspaceDate } from './botWorkspace';
 import { tApp } from './appLanguage';
 import { isContextWindowExceededError } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
@@ -1790,6 +1792,9 @@ export interface CoworkKnowledgeStore {
     version: number;
     useCount: number;
     updatedAt: number;
+    /** RRSI P2: hot-layer state (optional so test stubs keep compiling). */
+    hotEligible?: boolean;
+    hotReason?: string | null;
   }>;
   upsertProcedure(input: {
     metabotId: number;
@@ -1801,9 +1806,42 @@ export interface CoworkKnowledgeStore {
     category?: string | null;
     tags?: string[];
     origin?: 'agent' | 'dream' | 'user';
-  }): { created: boolean; revised: boolean; entry: { id: string; title: string; version: number } };
+  }): {
+    created: boolean;
+    revised: boolean;
+    /** RRSI P2: the procedure entered/stays in agent probation. */
+    needsGate?: boolean;
+    entry: {
+      id: string;
+      title: string;
+      version: number;
+      triggerText?: string;
+      steps?: string[];
+      pitfalls?: string[];
+      sourcePinIds?: string[];
+    };
+  };
   /** Archive an active procedure by exact title; null when no active match. */
   archiveProcedureByTitle(metabotId: number, title: string): { id: string; title: string; version: number } | null;
+  /**
+   * RRSI P2 hot layer: active, hot-eligible procedures (optional DI — when
+   * absent the hot block falls back to listProcedures, e.g. legacy stubs).
+   */
+  listHotProcedures?(metabotId: number, options?: { limit?: number }): Array<{
+    id: string;
+    title: string;
+    triggerText: string;
+    steps: string[];
+    pitfalls: string[];
+    sourcePinIds: string[];
+    category: string | null;
+    tags: string[];
+    version: number;
+    useCount: number;
+    updatedAt: number;
+    hotEligible?: boolean;
+    hotReason?: string | null;
+  }>;
 }
 
 /**
@@ -4142,7 +4180,21 @@ export class CoworkRunner extends EventEmitter {
         limit,
         touchUsed: true,
       });
+      // RRSI P2: recall-only procedures keep answering, with a status line so
+      // the bot knows how much to trust them (design §6.2 P2.2).
+      const statusNoteFor = (entry: { hotEligible?: boolean; hotReason?: string | null }): string | null => {
+        if (entry.hotEligible !== false) return null;
+        if (entry.hotReason === 'probation') return 'not yet validated by a dream — treat as a hypothesis';
+        if (entry.hotReason === 'gate_rejected' || entry.hotReason === 'demoted') {
+          return 'rejected by dream validation — use only if the situation clearly differs';
+        }
+        if (entry.hotReason === 'rollback') return 'withdrawn after a bad day — verify before relying on it';
+        if (entry.hotReason === 'unused') return 'rarely applied — recalled on demand';
+        if (entry.hotReason === 'situational') return 'only held in a specific situation — check the trigger carefully';
+        return null;
+      };
       const entries: ProcedurePromptEntry[] = results.map((entry) => ({
+        id: entry.id,
         title: entry.title,
         triggerText: entry.triggerText,
         steps: entry.steps,
@@ -4150,7 +4202,21 @@ export class CoworkRunner extends EventEmitter {
         sourcePinIds: entry.sourcePinIds,
         version: entry.version,
         useCount: entry.useCount,
+        statusNote: statusNoteFor(entry),
       }));
+      // RRSI P2 exposure ledger: every returned row was exposed by recall.
+      // Best-effort telemetry — a failure never breaks the tool answer.
+      try {
+        this.store.recordHotLayerExposures({
+          metabotId,
+          usageDate: formatBotWorkspaceDate(new Date()),
+          items: entries
+            .filter((entry) => typeof entry.id === 'string' && entry.id)
+            .map((entry) => ({ kind: 'procedure', id: entry.id as string, exposure: 'recall' })),
+        });
+      } catch {
+        // telemetry is best-effort
+      }
       return { text: formatProcedureRecallResults(entries), isError: false };
     } catch (error) {
       return {
@@ -4203,13 +4269,38 @@ export class CoworkRunner extends EventEmitter {
         tags: Array.isArray(args.tags) ? args.tags.filter((t): t is string => typeof t === 'string') : undefined,
         origin: 'agent',
       });
+      // RRSI P2 agent probation (design §6.2 P2.2): a runtime-saved procedure
+      // opens one probation ticket the dream gate judges before it turns hot.
+      // Best-effort — a ticket failure never fails the save itself.
+      if (result.needsGate === true) {
+        try {
+          this.store.ensureProbationDraftForProcedure({
+            metabotId,
+            procedureId: result.entry.id,
+            title: result.entry.title,
+            description: buildProbationDraftDescription({
+              triggerText: result.entry.triggerText ?? result.entry.title,
+              steps: result.entry.steps ?? [],
+              pitfalls: result.entry.pitfalls ?? [],
+              sourcePinIds: result.entry.sourcePinIds ?? [],
+            }),
+            dreamDate: formatBotWorkspaceDate(new Date()),
+          });
+        } catch (error) {
+          console.warn(
+            `[CoworkRunner] Probation draft open failed for procedure ${result.entry.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       return {
         text: formatProcedureSaveResult({
           title,
           created: result.created,
           revised: result.revised,
           version: result.entry.version,
-        }),
+        }) + (result.needsGate === true
+          ? ' It is saved for recall now; it joins your always-on procedures after a later dream validates it.'
+          : ''),
         isError: false,
       };
     } catch (error) {
@@ -5910,8 +6001,10 @@ export class CoworkRunner extends EventEmitter {
     });
     const summaries = this.experienceStore?.listDailySummaries(metabotId, RECENT_SUMMARIES_PROMPT_DAYS) ?? [];
     // Validated capability drafts (Dream-RSI P0): only drafts that survived
-    // the dream-time validation pass are injected as proven techniques.
-    const provenTechniques = this.store.listCapabilityDrafts(metabotId, { status: 'validated', limit: 5 });
+    // the dream-time validation pass are injected as proven techniques. RRSI
+    // P2 single injection path: only drafts that were never promoted — a
+    // promoted draft hardened into procedure memory and rides <procedures>.
+    const provenTechniques = this.store.listInjectableTechniques(metabotId, 5);
     const experienceBlock = composeExperiencePromptBlocks({
       identityText: identityEntry?.text ?? null,
       valueBoundaries: valueBoundaryEntries,
@@ -5954,15 +6047,33 @@ export class CoworkRunner extends EventEmitter {
     }
     // Procedure hot-layer (经验): proven task workflows ride the same block so
     // a matching procedure preempts a fresh MetaWeb search for a task the bot
-    // already learned.
+    // already learned. RRSI P2: only hot-eligible procedures inject — a
+    // recall-only (probation/gated) procedure stays reachable via
+    // procedure_recall instead.
     let procedureBlock = '';
     if (this.knowledgeStore) {
-      const procedureEntries = this.knowledgeStore.listProcedures({
-        metabotId,
-        status: 'active',
-        limit: PROCEDURE_PROMPT_MAX_ITEMS,
-      });
-      procedureBlock = buildProcedureBlock(procedureEntries);
+      const procedureEntries = this.knowledgeStore.listHotProcedures
+        ? this.knowledgeStore.listHotProcedures(metabotId, { limit: PROCEDURE_PROMPT_MAX_ITEMS })
+        : this.knowledgeStore.listProcedures({
+          metabotId,
+          status: 'active',
+          limit: PROCEDURE_PROMPT_MAX_ITEMS,
+        });
+      const renderedProcedures = renderProcedureBlock(procedureEntries);
+      procedureBlock = renderedProcedures.text;
+      // RRSI P2 exposure ledger: record today's hot procedure exposures for
+      // exactly the entries that rendered. Best-effort telemetry.
+      if (renderedProcedures.includedIds.length > 0 && procedureBlock) {
+        try {
+          this.store.recordHotLayerExposures({
+            metabotId,
+            usageDate: formatBotWorkspaceDate(new Date()),
+            items: renderedProcedures.includedIds.map((id) => ({ kind: 'procedure', id, exposure: 'hot' })),
+          });
+        } catch {
+          // telemetry is best-effort
+        }
+      }
     }
     return [experienceBlock, knowledgeBlock, procedureBlock].filter((block) => block.trim()).join('\n\n');
   }
