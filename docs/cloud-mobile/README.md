@@ -1,5 +1,8 @@
 # IDBots Cloud and Mobile — Handoff Package
 
+The continuity note for a new agent is [`HANDOFF.md`](HANDOFF.md). Read that
+first. This file is the index of the package.
+
 This folder turns the approved design
 ([`docs/superpowers/specs/2026-10-14-mobile-cloud-design.md`](../superpowers/specs/2026-10-14-mobile-cloud-design.md))
 into documents that can be handed to separate development parties, an operations
@@ -97,6 +100,6 @@ not in the repository.
 | Item | Status |
 |------|--------|
 | Design spec | Approved by the owner on 2026-10-14 |
-| M0 Phase 0 | GO, signed by the owner on 2026-10-15. Branch `spike/linux-headless` at `956f2b05` (not pushed) |
+| M0 Phase 0 | GO, signed by the owner on 2026-10-15. Results archived outside the repo; see `HANDOFF.md` |
 | M1 contracts | `01` and `02` frozen at 1.0.0 on 2026-10-15. Party findings come back as change requests |
 | Implementation plans | Ready to hand out: WS-A, WS-B, WS-C, WS-D, WS-E, and operations |
