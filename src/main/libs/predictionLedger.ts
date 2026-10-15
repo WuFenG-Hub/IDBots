@@ -19,6 +19,19 @@ import { formatBotWorkspaceDate } from './botWorkspace';
 export const PREDICTION_SOURCES = ['cowork', 'surf', 'metatask', 'service'] as const;
 export type PredictionSource = (typeof PREDICTION_SOURCES)[number];
 
+/**
+ * RRSI P5 OOD split (design §6.5 P5.3): owner-session sources (cowork, surf)
+ * are internal feedback; MetaTask and service-order outcomes are the external
+ * held-out set that reveals scorer fitting.
+ */
+export type PredictionSourceClass = 'internal' | 'external';
+export const PREDICTION_SOURCE_CLASS: Record<PredictionSource, PredictionSourceClass> = {
+  cowork: 'internal',
+  surf: 'internal',
+  metatask: 'external',
+  service: 'external',
+};
+
 export const PREDICTION_ACTION_TYPES = [
   'buzz_post',
   'metaweb_comment',
@@ -238,6 +251,12 @@ export interface PredictionCalibrationDigest {
   windowDays: number;
   pendingCount: number;
   byActionType: Partial<Record<PredictionActionType, PredictionCalibrationBucket>>;
+  /**
+   * RRSI P5 OOD split: the same window folded by source class. Carried for
+   * telemetry/reporting only — renderPredictionCalibrationDigest must not
+   * print it (the dream prompt text is frozen this phase).
+   */
+  bySourceClass: Record<PredictionSourceClass, PredictionCalibrationBucket>;
   /** Recent misses AND partials (a near-miss is calibration signal too), newest first. */
   recentMisses: Array<{
     actionType: PredictionActionType;

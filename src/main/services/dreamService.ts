@@ -1281,6 +1281,9 @@ export class DreamService {
             complied: null,
           },
           predictions,
+          // RRSI P5: the internal vs external prediction split rides the
+          // empty-day telemetry too (design §6.5 P5.3).
+          predictionOod: this.buildPredictionOodTelemetry(metabotId),
           promptLayerRollback: retentionGate,
           durationMs: Date.now() - runStartedAtMs,
         });
@@ -1433,6 +1436,9 @@ export class DreamService {
           complied: explorationCompliance,
         },
         predictions,
+        // RRSI P5: the internal vs external prediction hit-rate gap (design
+        // §6.5 P5.3) — the dream prompt digest text itself is unchanged.
+        predictionOod: this.buildPredictionOodTelemetry(metabotId),
         promptLayerRollback: retentionGate,
         durationMs: Date.now() - runStartedAtMs,
       });
@@ -3368,6 +3374,40 @@ export class DreamService {
         `[DreamService] Prediction calibration digest unavailable for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return '';
+    }
+  }
+
+  /**
+   * RRSI P5 OOD split (design §6.5 P5.3): the internal vs external hit-rate
+   * buckets and their gap over the calibration window. A growing gap is the
+   * local signature of scorer fitting. Null on failure — telemetry writing
+   * never breaks the dream run.
+   */
+  private buildPredictionOodTelemetry(
+    metabotId: number,
+  ): {
+    internal: { resolved: number; hit: number; hitRate: number | null };
+    external: { resolved: number; hit: number; hitRate: number | null };
+    gap: number | null;
+  } | null {
+    try {
+      const calibration = this.deps.dreamStore.listPredictionCalibration(metabotId, PREDICTION_CALIBRATION_WINDOW_DAYS);
+      const toBucket = (bucket: { resolved: number; hit: number; hitRate: number | null }) => ({
+        resolved: bucket.resolved,
+        hit: bucket.hit,
+        hitRate: bucket.hitRate,
+      });
+      const internal = toBucket(calibration.bySourceClass.internal);
+      const external = toBucket(calibration.bySourceClass.external);
+      const gap = internal.hitRate != null && external.hitRate != null
+        ? Math.round((internal.hitRate - external.hitRate) * 10_000) / 10_000
+        : null;
+      return { internal, external, gap };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Prediction OOD telemetry unavailable for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
     }
   }
 

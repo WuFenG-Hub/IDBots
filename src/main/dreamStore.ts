@@ -10,6 +10,7 @@ import type {
 import {
   PREDICTION_ACTION_TYPES,
   PREDICTION_DIGEST_MAX_RECENT_MISSES,
+  PREDICTION_SOURCE_CLASS,
   PREDICTION_SOURCES,
   PREDICTION_STATUSES,
 } from './libs/predictionLedger';
@@ -1768,7 +1769,9 @@ export class DreamStore {
   /**
    * Calibration aggregate for the dream prompt digest: per action type the
    * status counts over the trailing `sinceDays` (windowed on created_at), plus
-   * the current pending backlog and the most recent misses/partials.
+   * the current pending backlog and the most recent misses/partials. RRSI P5
+   * adds the same counts folded by source class (internal vs external) — the
+   * OOD held-out split; unknown sources are skipped.
    */
   listPredictionCalibration(metabotId: number, sinceDays = 30): PredictionCalibrationDigest {
     const windowDays = Math.max(1, Math.floor(sinceDays));
@@ -1778,6 +1781,12 @@ export class DreamStore {
       FROM metabot_predictions
       WHERE metabot_id = ? AND created_at >= ?
       GROUP BY action_type, status
+    `, [metabotId, sinceMs]);
+    const sourceRows = this.getAll<{ source: string; status: string; n: number | string }>(`
+      SELECT source, status, COUNT(*) AS n
+      FROM metabot_predictions
+      WHERE metabot_id = ? AND created_at >= ?
+      GROUP BY source, status
     `, [metabotId, sinceMs]);
     const pendingRow = this.getOne<{ n: number | string }>(
       `SELECT COUNT(*) AS n FROM metabot_predictions WHERE metabot_id = ? AND status = 'pending'`,
@@ -1807,10 +1816,28 @@ export class DreamStore {
       bucket.resolved = bucket.hit + bucket.miss + bucket.partial;
       bucket.hitRate = bucket.resolved > 0 ? bucket.hit / bucket.resolved : null;
     }
+    const bySourceClass: PredictionCalibrationDigest['bySourceClass'] = {
+      internal: { hit: 0, miss: 0, partial: 0, expired: 0, resolved: 0, hitRate: null },
+      external: { hit: 0, miss: 0, partial: 0, expired: 0, resolved: 0, hitRate: null },
+    };
+    for (const row of sourceRows) {
+      const bucket = bySourceClass[PREDICTION_SOURCE_CLASS[row.source as PredictionSource]];
+      if (!bucket) continue;
+      const n = parseIdNumber(row.n) ?? 0;
+      if (row.status === 'hit') bucket.hit += n;
+      else if (row.status === 'miss') bucket.miss += n;
+      else if (row.status === 'partial') bucket.partial += n;
+      else if (row.status === 'expired') bucket.expired += n;
+    }
+    for (const bucket of Object.values(bySourceClass)) {
+      bucket.resolved = bucket.hit + bucket.miss + bucket.partial;
+      bucket.hitRate = bucket.resolved > 0 ? bucket.hit / bucket.resolved : null;
+    }
     return {
       windowDays,
       pendingCount: parseIdNumber(pendingRow?.n) ?? 0,
       byActionType,
+      bySourceClass,
       recentMisses: missRows.map((row) => {
         const mapped = this.mapPredictionRow(row);
         return {

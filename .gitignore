@@ -455,6 +455,7 @@ man_base_data_pebble/
 !tests/experiencePromptInjection.test.mjs
 !tests/evolutionExploration.test.mjs
 !tests/capabilitySpecificity.test.mjs
+!tests/predictionOodSplit.test.mjs
 !tests/experienceRecallTool.test.mjs
 !tests/sessionArchive.test.mjs
 !tests/coworkMessagePagination.test.mjs
