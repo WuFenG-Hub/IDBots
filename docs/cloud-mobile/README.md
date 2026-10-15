@@ -74,5 +74,5 @@ starts) has its own executable plan:
 | Item | Status |
 |------|--------|
 | Design spec | Approved by the owner on 2026-10-14 |
-| Phase 0 spike | GO, recommended by acceptance on 2026-10-15. Stock app, no patches. S05b passed web-search (script path) and weather; memory returns by 30 minutes. One leftover: web-search's browser launch was not exercised |
+| Phase 0 spike | GO, recommended by acceptance on 2026-10-15. Raw tarball checked the same day and replayed on local branch `spike/linux-headless` at `956f2b05` (not pushed). One leftover: web-search's browser launch was not exercised |
 | Handoff package | Draft v1 with the Phase 0 and S05b numbers folded in; frozen at M1 |

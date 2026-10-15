@@ -11,9 +11,12 @@ change-control process in `00-program-plan.md`).
 | C4 Metaso bundle API | WS-D | WS-A (calls it), WS-E (shows it through IPC) |
 
 Phase 0 values come from the spike report of 2026-10-14 (commit `e8653bac`)
-and the S05b re-run of 2026-10-15. The S05b tarball is
-`phase0-linux-headless-results.tgz`, sha256
-`ec684f1ce37e77e2ab38a3e9950347f8606f7950649ef5faffa48fef60c1088b`.
+and the S05b re-run of 2026-10-15. The results tarball
+`phase0-linux-headless-results.tgz` (sha256
+`ec684f1ce37e77e2ab38a3e9950347f8606f7950649ef5faffa48fef60c1088b`) was
+checked locally on 2026-10-15: the hash matches, the secret scan is clean,
+and the 16 patches are replayed on local branch `spike/linux-headless` at
+`956f2b05`. That branch is not pushed.
 
 ---
 
