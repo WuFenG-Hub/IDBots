@@ -8982,11 +8982,17 @@ export class CoworkRunner extends EventEmitter {
           // that finally's markCrossSessionTurnSettled.
           if (status === 'idle') this.scheduleCrossSessionContinuationDrain(coworkSessionId);
         },
-        // Assistant chat-experience mode: model narration (commentary that
-        // professional mode folds into Think rows) surfaces as ordinary chat
-        // bubbles tagged metadata.narration. Read per fold decision — the
-        // setting can flip while per-session mappers stay alive.
-        assistantModeProvider: () => getPersistedChatExperienceMode() === 'assistant',
+        // Narration tagging is an owner-chat experience decision, mirroring
+        // the prompt and effort gates: background sessions (group tasks,
+        // A2A/IM, dreams, warmup, kernel subagents — every non-cw- session
+        // id) keep the professional fold, and their reply extraction must
+        // never see interim narration. Still a live read per fold, so a
+        // mid-session mode flip is honored.
+        assistantModeProvider: (dshSessionId: string) => (
+          dshSessionId.startsWith('cw-')
+            ? this.isAssistantModeOwnerChatSession(dshSessionId.slice('cw-'.length))
+            : false
+        ),
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
       });
     }
@@ -9470,8 +9476,12 @@ export class CoworkRunner extends EventEmitter {
       // session picker override always wins (the user asked for that effort on
       // THIS session). Without an override, assistant mode skips the bot
       // brain effort, the persisted global, and the per-model default.
-      // Professional mode keeps the full chain unchanged.
-      const assistantMode = getPersistedChatExperienceMode() === 'assistant';
+      // Professional mode keeps the full chain unchanged. The mode is an
+      // owner-chat experience decision (mirroring the prompt gate): group
+      // tasks, A2A/IM, long-term and scheduled automation sessions keep the
+      // professional chain even under the global assistant default.
+      const assistantMode = getPersistedChatExperienceMode() === 'assistant'
+        && this.isAssistantModeOwnerChatSession(sessionId);
       const sessionEffortPicked = effectiveEffortRung != null;
       // "Auto" rung verdict: null (no selector, unconfigured cerebellum,
       // timeout, malformed verdict) keeps the existing default chain below
