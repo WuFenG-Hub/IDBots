@@ -396,6 +396,110 @@ function readExplorationSection(db, metabotId, fromDate, toDate) {
   return exploration;
 }
 
+/** RRSI P5 specificity: the window's reconciliation scope verdict mix plus the
+ * drafts' current scope standing (validated or disputed rows only). Null when
+ * the scope column is missing (pre-phase databases). */
+function readScopeSection(db, metabotId, fromDate, toDate) {
+  if (!tableExists(db, 'capability_drafts') || !columnNames(db, 'capability_drafts').includes('scope')) {
+    return null;
+  }
+  const assessed = { general: 0, situational: 0, scorerFitted: 0, hardMarkerOverrides: 0 };
+  if (tableExists(db, 'metabot_dream_telemetry_daily')) {
+    const rows = db
+      .prepare('SELECT extra_json FROM metabot_dream_telemetry_daily WHERE metabot_id = ? AND dream_date >= ? AND dream_date <= ?')
+      .all(metabotId, fromDate, toDate);
+    for (const row of rows) {
+      const extra = parseExtraJson(row.extra_json);
+      const reconciliation = typeof extra.reconciliation === 'object' && extra.reconciliation !== null
+        ? extra.reconciliation
+        : {};
+      const scope = typeof reconciliation.scope === 'object' && reconciliation.scope !== null
+        ? reconciliation.scope
+        : null;
+      if (!scope) continue;
+      assessed.general += nestedNumber(scope, 'general');
+      assessed.situational += nestedNumber(scope, 'situational');
+      assessed.scorerFitted += nestedNumber(scope, 'scorerFitted');
+      assessed.hardMarkerOverrides += nestedNumber(scope, 'hardMarkerOverrides');
+    }
+  }
+  const current = db
+    .prepare(`SELECT
+                 COALESCE(SUM(CASE WHEN scope = 'general' THEN 1 ELSE 0 END), 0) AS general,
+                 COALESCE(SUM(CASE WHEN scope = 'situational' THEN 1 ELSE 0 END), 0) AS situational,
+                 COALESCE(SUM(CASE WHEN scope = 'scorer_fitted' THEN 1 ELSE 0 END), 0) AS scorerFitted,
+                 COALESCE(SUM(CASE WHEN scope IS NULL THEN 1 ELSE 0 END), 0) AS unassessed
+              FROM capability_drafts
+              WHERE metabot_id = ? AND status IN ('validated', 'disputed')`)
+    .get(metabotId);
+  return {
+    assessed,
+    current: {
+      general: toNumber(current?.general),
+      situational: toNumber(current?.situational),
+      scorerFitted: toNumber(current?.scorerFitted),
+      unassessed: toNumber(current?.unassessed),
+    },
+  };
+}
+
+const isOodBucket = (value) => typeof value === 'object' && value !== null
+  && typeof value.resolved === 'number' && typeof value.hit === 'number';
+
+/** RRSI P5 OOD split: the newest predictionOod night in the window plus every
+ * night's non-null gap, ascending. */
+function readOodSection(db, metabotId, fromDate, toDate) {
+  const ood = { latest: null, gapByNight: [] };
+  if (!tableExists(db, 'metabot_dream_telemetry_daily')) return ood;
+  const rows = db
+    .prepare('SELECT dream_date, extra_json FROM metabot_dream_telemetry_daily WHERE metabot_id = ? AND dream_date >= ? AND dream_date <= ? ORDER BY dream_date ASC')
+    .all(metabotId, fromDate, toDate);
+  for (const row of rows) {
+    const extra = parseExtraJson(row.extra_json);
+    const entry = typeof extra.predictionOod === 'object' && extra.predictionOod !== null
+      ? extra.predictionOod
+      : null;
+    if (!entry || !isOodBucket(entry.internal) || !isOodBucket(entry.external)) continue;
+    const date = String(row.dream_date);
+    ood.latest = {
+      date,
+      internal: {
+        resolved: entry.internal.resolved,
+        hit: entry.internal.hit,
+        hitRate: typeof entry.internal.hitRate === 'number' ? entry.internal.hitRate : null,
+      },
+      external: {
+        resolved: entry.external.resolved,
+        hit: entry.external.hit,
+        hitRate: typeof entry.external.hitRate === 'number' ? entry.external.hitRate : null,
+      },
+      gap: typeof entry.gap === 'number' ? entry.gap : null,
+    };
+    if (typeof entry.gap === 'number' && Number.isFinite(entry.gap)) {
+      ood.gapByNight.push({ date, gap: entry.gap });
+    }
+  }
+  return ood;
+}
+
+/** RRSI P5 usage channels: applied hot_layer_usage rows in the window, one
+ * count per channel named in the row's evidence JSON. Null without the table. */
+function readUsageChannelsSection(db, metabotId, fromDate, toDate) {
+  if (!tableExists(db, 'hot_layer_usage')) return null;
+  const rows = db
+    .prepare('SELECT evidence FROM hot_layer_usage WHERE metabot_id = ? AND usage_date >= ? AND usage_date <= ? AND applied = 1')
+    .all(metabotId, fromDate, toDate);
+  let ownerAppliedRows = 0;
+  let externalAppliedRows = 0;
+  for (const row of rows) {
+    const evidence = parseExtraJson(row.evidence);
+    const channels = Array.isArray(evidence.channels) ? evidence.channels : [];
+    if (channels.includes('owner')) ownerAppliedRows += 1;
+    if (channels.includes('external')) externalAppliedRows += 1;
+  }
+  return { ownerAppliedRows, externalAppliedRows };
+}
+
 export function buildRrsiReport(db, options = {}) {
   const days = Number.isInteger(options.days) && options.days > 0 ? options.days : 30;
   const toDate = typeof options.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(options.today)
@@ -427,6 +531,9 @@ export function buildRrsiReport(db, options = {}) {
         retention: readRetentionSection(db, metabotId, fromDate, toDate),
         usage: readUsageSection(db, metabotId, fromDate, toDate),
         exploration: readExplorationSection(db, metabotId, fromDate, toDate),
+        scope: readScopeSection(db, metabotId, fromDate, toDate),
+        ood: readOodSection(db, metabotId, fromDate, toDate),
+        usageChannels: readUsageChannelsSection(db, metabotId, fromDate, toDate),
       });
     }
   }
@@ -523,6 +630,27 @@ export function formatRrsiReport(report) {
       + `directed ${exploration.directedNights ?? 0}, complied ${exploration.compliedNights ?? 0} → ${compliance}`
       + `${mix ? `; mix ${mix}` : ''}${directedRisk ? `; directed risk ${directedRisk}` : ''}`,
     );
+    // RRSI P5: one combined line — the OOD hit-rate gap, the scope verdict
+    // mix, and the applied-evidence channel split (design §6.5 P5.2/P5.3).
+    const ood = bot.ood ?? { latest: null, gapByNight: [] };
+    let oodSegment;
+    if (ood.latest === null) {
+      oodSegment = 'ood: no predictionOod nights in window';
+    } else {
+      const bucketText = (bucket) => ` ${bucket.hit}/${bucket.resolved} (${(bucket.hitRate * 100).toFixed(2)}%)`;
+      const gapText = typeof ood.latest.gap === 'number'
+        ? `→ gap ${ood.latest.gap >= 0 ? '+' : ''}${(ood.latest.gap * 100).toFixed(2)}pt`
+        : '→ gap n/a';
+      oodSegment = `ood: internal${bucketText(ood.latest.internal)} vs external${bucketText(ood.latest.external)} ${gapText}`;
+    }
+    const scopeSegment = bot.scope === null
+      ? 'scope: (column missing)'
+      : `scope assessed G${bot.scope.assessed.general} S${bot.scope.assessed.situational} `
+        + `F${bot.scope.assessed.scorerFitted} (overrides ${bot.scope.assessed.hardMarkerOverrides})`;
+    const appliedSegment = bot.usageChannels === null
+      ? 'applied rows: (table missing)'
+      : `applied rows owner ${bot.usageChannels.ownerAppliedRows} / external ${bot.usageChannels.externalAppliedRows}`;
+    lines.push(`  ${oodSegment}; ${scopeSegment}; ${appliedSegment}`);
   }
   if ((report.missing ?? []).length > 0) {
     lines.push(`missing tables: ${report.missing.join(', ')}`);

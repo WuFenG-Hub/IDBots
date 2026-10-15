@@ -473,3 +473,132 @@ test('report exploration: without the component column every proposal counts as 
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Scope / OOD / usageChannels sections (RRSI P5 Task 5)
+// ---------------------------------------------------------------------------
+
+test('report scope, ood and usageChannels sections', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  let file = null;
+  try {
+    const dreamStore = new DreamStore(db, () => {});
+    insertMetabot(db, 5);
+    dreamStore.beginRun(5, '2026-08-01', null, 18);
+    dreamStore.updateRunTelemetry(5, '2026-08-01', {
+      emptyDay: false,
+      predictionOod: { internal: { resolved: 2, hit: 2, hitRate: 1 }, external: { resolved: 0, hit: 0, hitRate: null }, gap: null },
+      reconciliation: { considered: 1, kept: 1, narrowed: 0, merged: 0, disputed: 0, scope: { general: 1, situational: 0, scorerFitted: 0, hardMarkerOverrides: 0 } },
+    });
+    dreamStore.beginRun(5, '2026-08-02', null, 18);
+    dreamStore.updateRunTelemetry(5, '2026-08-02', {
+      emptyDay: false,
+      predictionOod: { internal: { resolved: 4, hit: 3, hitRate: 0.75 }, external: { resolved: 2, hit: 1, hitRate: 0.5 }, gap: 0.25 },
+      reconciliation: { considered: 2, kept: 2, narrowed: 0, merged: 0, disputed: 0, scope: { general: 2, situational: 0, scorerFitted: 0, hardMarkerOverrides: 1 } },
+    });
+    dreamStore.beginRun(5, '2026-08-03', null, 18);
+    dreamStore.updateRunTelemetry(5, '2026-08-03', {
+      emptyDay: false,
+      predictionOod: { internal: { resolved: 5, hit: 3, hitRate: 0.6 }, external: { resolved: 3, hit: 1, hitRate: 1 / 3 }, gap: 0.2667 },
+      reconciliation: { considered: 2, kept: 0, narrowed: 1, merged: 0, disputed: 1, scope: { general: 1, situational: 2, scorerFitted: 1, hardMarkerOverrides: 0 } },
+    });
+
+    const coworkStore = createCoworkStore(db);
+    coworkStore.insertCapabilityDrafts(5, '2026-08-01', [
+      { title: '通用甲', description: 'd', capabilityType: 'skill' },
+      { title: '通用乙', description: 'd', capabilityType: 'skill' },
+      { title: '特定丙', description: 'd', capabilityType: 'skill' },
+      { title: '讨好丁', description: 'd', capabilityType: 'skill' },
+      { title: '未评估戊', description: 'd', capabilityType: 'skill' },
+    ]);
+    const byTitle = (title) => coworkStore.listCapabilityDrafts(5).find((draft) => draft.title === title);
+    for (const title of ['通用甲', '通用乙', '特定丙']) {
+      coworkStore.updateCapabilityDraftValidation({ id: byTitle(title).id, metabotId: 5, status: 'validated', validationScore: 0.9 });
+    }
+    coworkStore.setCapabilityDraftScope({ id: byTitle('通用甲').id, metabotId: 5, scope: 'general' });
+    coworkStore.setCapabilityDraftScope({ id: byTitle('通用乙').id, metabotId: 5, scope: 'general' });
+    coworkStore.setCapabilityDraftScope({ id: byTitle('特定丙').id, metabotId: 5, scope: 'situational' });
+    coworkStore.updateCapabilityDraftValidation({ id: byTitle('讨好丁').id, metabotId: 5, status: 'disputed' });
+    coworkStore.setCapabilityDraftScope({ id: byTitle('讨好丁').id, metabotId: 5, scope: 'scorer_fitted' });
+    coworkStore.updateCapabilityDraftValidation({ id: byTitle('未评估戊').id, metabotId: 5, status: 'disputed' });
+    db.run("UPDATE capability_drafts SET status = 'rejected' WHERE title = '通用乙' AND id != (SELECT id FROM capability_drafts WHERE title = '通用乙')");
+    // A rejected draft must not count into `current`; keep 通用乙 validated.
+    db.run("UPDATE capability_drafts SET status = 'validated' WHERE title = '通用乙'");
+
+    // Usage rows: 8 owner-only, 1 both-channels, 1 external-only, 1 not applied.
+    const usageRows = [];
+    for (let index = 0; index < 8; index += 1) {
+      usageRows.push(`(5, '2026-08-02', 'technique', 't-owner-${index}', 'hot', 0, 1, 1, '{"labels":["A1"],"channels":["owner"]}', 100)`);
+    }
+    usageRows.push(`(5, '2026-08-02', 'technique', 't-both', 'hot', 0, 1, 1, '{"labels":["A2"],"channels":["owner","external"]}', 100)`);
+    usageRows.push(`(5, '2026-08-03', 'procedure', 'p-ext', 'hot', 0, 1, 1, '{"labels":["A3"],"channels":["external"]}', 100)`);
+    usageRows.push(`(5, '2026-08-03', 'procedure', 'p-unapplied', 'hot', 0, 1, 0, '{"labels":["A4"],"channels":["owner"]}', 100)`);
+    db.run(
+      `INSERT INTO hot_layer_usage (
+         metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count, applied, evidence, audited_at
+       ) VALUES ${usageRows.join(', ')}`,
+    );
+
+    file = exportDbToFile(db, 'p5-sections');
+    const handle = new DatabaseSync(file, { readOnly: true });
+    let bot;
+    let text;
+    try {
+      const report = buildRrsiReport(handle, { days: 3, today: '2026-08-03', botId: 5 });
+      bot = report.bots[0];
+      text = formatRrsiReport(report);
+    } finally {
+      handle.close();
+    }
+    assert.deepEqual(bot.scope.assessed, { general: 4, situational: 2, scorerFitted: 1, hardMarkerOverrides: 1 });
+    assert.deepEqual(bot.scope.current, { general: 2, situational: 1, scorerFitted: 1, unassessed: 1 });
+    assert.equal(bot.ood.latest.date, '2026-08-03');
+    assert.deepEqual(bot.ood.latest.internal, { resolved: 5, hit: 3, hitRate: 0.6 });
+    assert.deepEqual(bot.ood.latest.external, { resolved: 3, hit: 1, hitRate: 1 / 3 });
+    assert.equal(bot.ood.latest.gap, 0.2667);
+    assert.deepEqual(bot.ood.gapByNight, [
+      { date: '2026-08-02', gap: 0.25 },
+      { date: '2026-08-03', gap: 0.2667 },
+    ]);
+    assert.deepEqual(bot.usageChannels, { ownerAppliedRows: 9, externalAppliedRows: 2 });
+    assert.ok(text.includes(
+      '  ood: internal 3/5 (60.00%) vs external 1/3 (33.33%) → gap +26.67pt; '
+      + 'scope assessed G4 S2 F1 (overrides 1); applied rows owner 9 / external 2',
+    ), text);
+  } finally {
+    if (file) fs.rmSync(path.dirname(file), { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test('report scope is null without the scope column; usageChannels null without hot_layer_usage', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  let file = null;
+  try {
+    const dreamStore = new DreamStore(db, () => {});
+    insertMetabot(db, 5);
+    dreamStore.beginRun(5, '2026-08-01', null, 18);
+    dreamStore.updateRunTelemetry(5, '2026-08-01', { emptyDay: false });
+    db.run('ALTER TABLE capability_drafts DROP COLUMN scope');
+    db.run('DROP TABLE hot_layer_usage');
+    file = exportDbToFile(db, 'p5-degrade');
+    const handle = new DatabaseSync(file, { readOnly: true });
+    let bot;
+    let text;
+    try {
+      const report = buildRrsiReport(handle, { days: 1, today: '2026-08-01', botId: 5 });
+      bot = report.bots[0];
+      text = formatRrsiReport(report);
+    } finally {
+      handle.close();
+    }
+    assert.equal(bot.scope, null);
+    assert.equal(bot.usageChannels, null);
+    assert.deepEqual(bot.ood, { latest: null, gapByNight: [] });
+    assert.ok(text.includes('scope: (column missing)'), text);
+    assert.ok(text.includes('applied rows: (table missing)'), text);
+  } finally {
+    if (file) fs.rmSync(path.dirname(file), { recursive: true, force: true });
+    cleanup();
+  }
+});
