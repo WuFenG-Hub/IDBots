@@ -2,13 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  CEREBELLUM_MEMORY_CURRENT_MESSAGE_MAX_CHARS,
   CEREBELLUM_MEMORY_MAX_CANDIDATES,
   CEREBELLUM_MEMORY_MIN_POOL,
+  CEREBELLUM_MEMORY_PREFILTER_WINDOW,
   CEREBELLUM_MEMORY_RANK_INSTRUCTIONS,
+  CEREBELLUM_MEMORY_STATE_MAX_CHARS,
+  CEREBELLUM_MEMORY_TEXT_MAX_CHARS,
   buildMemoryRankQuestions,
   buildMemoryRankRequest,
   parseMemoryRankAnswers,
   rankMemoriesWithCerebellum,
+  selectMemoryRankCandidates,
 } from '../src/main/cerebellum/memoryRank.ts';
 
 const { CoworkRunner } = await import('../dist-electron/main/libs/coworkRunner.js');
@@ -268,6 +273,99 @@ test('rankMemoriesWithCerebellum caps the candidate pool at CEREBELLUM_MEMORY_MA
   assert.equal(Object.keys(captured[0].body.questions).length, CEREBELLUM_MEMORY_MAX_CANDIDATES);
   assert.equal(scores.size, CEREBELLUM_MEMORY_MAX_CANDIDATES);
   assert.ok(!scores.has(`m${CEREBELLUM_MEMORY_MAX_CANDIDATES}`), 'the over-cap tail is never scored');
+});
+
+// ---------------------------------------------------------------------------
+// Payload budget: prefilter, truncation, accounting (requirement: JEV cost)
+// ---------------------------------------------------------------------------
+
+test('selectMemoryRankCandidates returns an empty selection for an empty pool', () => {
+  assert.deepEqual(selectMemoryRankCandidates([], '任意消息'), []);
+});
+
+test('selectMemoryRankCandidates truncates a single overlong memory text', () => {
+  const selected = selectMemoryRankCandidates(
+    [{ id: 'm1', text: '长'.repeat(CEREBELLUM_MEMORY_TEXT_MAX_CHARS + 500) }],
+    '今天吃什么',
+  );
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].text.length, CEREBELLUM_MEMORY_TEXT_MAX_CHARS);
+});
+
+test('selectMemoryRankCandidates stops at the total char budget, dropping the tail', () => {
+  const perEntry = 700;
+  const count = Math.ceil((CEREBELLUM_MEMORY_STATE_MAX_CHARS + perEntry) / perEntry); // overshoots by design
+  const memories = Array.from({ length: count }, (_, index) => ({
+    id: `m${index}`,
+    text: `记录内容片段编号${index}。` + '甲'.repeat(perEntry), // disjoint from the message below
+  }));
+  const selected = selectMemoryRankCandidates(memories, '猫粮优惠券');
+  // Recompute the greedy stop over the same recency order (no overlap hits).
+  let acc = 0;
+  let expected = 0;
+  for (const memory of memories) {
+    if (acc + memory.text.length > CEREBELLUM_MEMORY_STATE_MAX_CHARS) break;
+    acc += memory.text.length;
+    expected += 1;
+  }
+  assert.equal(selected.length, expected);
+  const totalChars = selected.reduce((sum, memory) => sum + memory.text.length, 0);
+  assert.ok(totalChars <= CEREBELLUM_MEMORY_STATE_MAX_CHARS, `total ${totalChars} must stay within budget`);
+});
+
+test('selectMemoryRankCandidates never reaches beyond the recency window', () => {
+  const fillers = Array.from({ length: CEREBELLUM_MEMORY_PREFILTER_WINDOW }, (_, index) => ({
+    id: `f${index}`,
+    text: `普通记忆${index}`,
+  }));
+  const outside = { id: 'outside', text: '关于布丁的最相关记忆' };
+  const selected = selectMemoryRankCandidates([...fillers, outside], '布丁吃什么');
+  assert.ok(!selected.some((memory) => memory.id === 'outside'), 'entries past the window are never selected');
+  assert.equal(selected.length, CEREBELLUM_MEMORY_MAX_CANDIDATES);
+});
+
+test('selectMemoryRankCandidates boosts keyword overlap inside the window', () => {
+  const fillers = Array.from({ length: CEREBELLUM_MEMORY_MAX_CANDIDATES }, (_, index) => ({
+    id: `f${index}`,
+    text: `普通记忆${index}`,
+  }));
+  const match = { id: 'match', text: '猫粮偏好记录：布丁只吃鸡肉味猫粮' };
+  const selected = selectMemoryRankCandidates([...fillers, match], '布丁的猫粮');
+  assert.equal(selected.length, CEREBELLUM_MEMORY_MAX_CANDIDATES, 'the cap still holds');
+  assert.equal(selected[0].id, 'match', 'the overlapping entry outranks the recency-older fillers');
+});
+
+test('buildMemoryRankRequest caps the current message', () => {
+  const request = buildMemoryRankRequest({
+    currentUserText: 'a'.repeat(CEREBELLUM_MEMORY_CURRENT_MESSAGE_MAX_CHARS + 999),
+    memories: [{ id: 'm1', text: 'x' }],
+    model: 'jev-latest',
+  });
+  assert.equal(request.state.current_message.length, CEREBELLUM_MEMORY_CURRENT_MESSAGE_MAX_CHARS);
+});
+
+test('rankMemoriesWithCerebellum reports payload accounting via onPayload', async () => {
+  const memories = [
+    { id: 'm1', text: '主人偏好简洁回答' },
+    { id: 'm2', text: '猫叫布丁' },
+  ];
+  const captured = [];
+  let stats = null;
+  const scores = await rankMemoriesWithCerebellum({
+    config: TEST_CONFIG,
+    fetchImpl: okFetch(noulPayload(memories), captured),
+    currentUserText: '布丁今天状态如何',
+    memories,
+    onPayload: (reported) => { stats = reported; },
+  });
+  assert.equal(scores.size, 2);
+  assert.ok(stats, 'the hook must fire exactly once per call');
+  assert.equal(stats.poolSize, 2);
+  assert.equal(stats.sent, 2);
+  assert.equal(stats.memoriesChars, memories.reduce((sum, memory) => sum + memory.text.length, 0));
+  assert.equal(stats.currentMessageChars, '布丁今天状态如何'.length);
+  assert.ok(stats.questionsChars > 0, 'questions are the second linear term and must be visible');
+  assert.equal(stats.totalChars, captured[0].init.body.length, 'totalChars matches the wire body byte-for-byte');
 });
 
 // ---------------------------------------------------------------------------

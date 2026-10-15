@@ -43,6 +43,27 @@ import type { CerebellumFetchLike } from './memoryRank';
 /** Same hard abort deadline as every other cerebellum call site. */
 export const CEREBELLUM_VOLATILE_GATE_TIMEOUT_MS = 1500;
 
+/**
+ * Cap for `state.user_message`: a single chat message is normally small, but
+ * a huge pasted blob would otherwise ride the gate payload unbounded. Same
+ * defensive spirit as the memoryRank budgets.
+ */
+export const CEREBELLUM_VOLATILE_GATE_MAX_MESSAGE_CHARS = 4000;
+
+/**
+ * Local UTF-16-unit prefix cut (same semantics as truncateUtf16Units in
+ * libs/llmSafeText, inlined so this module stays free of runtime imports —
+ * unit tests load it directly with Node type stripping, which requires
+ * extension-ful ESM specifiers; type-only imports are erased and safe).
+ */
+function truncateUtf16Prefix(text: string, maxUnits: number): string {
+  if (maxUnits <= 0) return '';
+  if (text.length <= maxUnits) return text;
+  const cut = text.slice(0, maxUnits);
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
 /** Section keys the runner consults gate verdicts for (single source). */
 export const CEREBELLUM_VOLATILE_GATE_SECTION_KEYS = [
   'experience',
@@ -134,9 +155,10 @@ export function buildVolatileGateRequest(input: {
   currentUserText: string;
   model: string;
 }): CerebellumVolatileGateRequest {
+  const message = String(input.currentUserText ?? '').replace(/\s+/g, ' ').trim();
   return {
     state: {
-      user_message: String(input.currentUserText ?? '').replace(/\s+/g, ' ').trim(),
+      user_message: truncateUtf16Prefix(message, CEREBELLUM_VOLATILE_GATE_MAX_MESSAGE_CHARS),
     },
     model: input.model,
     questions: buildVolatileGateQuestions(),

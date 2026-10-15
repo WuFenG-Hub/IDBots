@@ -7,6 +7,7 @@ import {
   CEREBELLUM_SKILL_SHORTLIST_MIN_POOL,
   CEREBELLUM_SKILL_MAX_OPTIONS,
   CEREBELLUM_SKILL_OPTION_MAX_DESCRIPTION_CHARS,
+  CEREBELLUM_SKILL_OPTIONS_TOTAL_MAX_CHARS,
   CEREBELLUM_SKILL_RANK_QUESTION_ID,
   buildSkillOptionLabel,
   buildSkillShortlistRequest,
@@ -108,6 +109,26 @@ test('buildSkillShortlistRequest: never carries more than the JEV choice option 
   });
   const count = Object.keys(request.questions[CEREBELLUM_SKILL_RANK_QUESTION_ID].criteria).length;
   assert.equal(count, CEREBELLUM_SKILL_MAX_OPTIONS);
+});
+
+test('buildSkillShortlistRequest: total label budget backstop cuts a pathological catalog', () => {
+  const skills = Array.from({ length: 100 }, (_, index) => ({
+    id: `big-${index}`,
+    name: `big-${index}`,
+    description: 'd'.repeat(CEREBELLUM_SKILL_OPTION_MAX_DESCRIPTION_CHARS),
+  }));
+  const request = buildSkillShortlistRequest({
+    currentUserText: 'query',
+    skills,
+    model: 'jev-latest',
+  });
+  const criteria = request.questions[CEREBELLUM_SKILL_RANK_QUESTION_ID].criteria;
+  const labels = Object.values(criteria);
+  const totalChars = labels.reduce((sum, label) => sum + label.length, 0);
+  assert.ok(labels.length < skills.length, 'the budget must actually cut the catalog');
+  assert.ok(labels.length > 1, 'at least the first option always rides');
+  assert.ok(totalChars <= CEREBELLUM_SKILL_OPTIONS_TOTAL_MAX_CHARS, `total ${totalChars} stays within budget`);
+  assert.equal(labels[0], criteria['big-0'], 'catalog order is preserved, tail options drop');
 });
 
 // ---------------------------------------------------------------------------
