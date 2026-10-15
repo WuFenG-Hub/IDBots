@@ -368,3 +368,108 @@ test('report usage section is null without hot_layer_usage', async () => {
     cleanup();
   }
 });
+// Exploration section (RRSI P4 Task 5)
+// ---------------------------------------------------------------------------
+
+test('report exploration section: stalls, compliance rate, component and directed-risk mix', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const dreamStore = new DreamStore(db, () => {});
+    insertMetabot(db, 5);
+    const nights = [
+      ['2026-08-01', { stalled: true, reason: 'no_acceptance', directed: true, complied: true }],
+      ['2026-08-02', { stalled: true, reason: 'component_collapse', directed: true, complied: false }],
+      ['2026-08-03', { stalled: true, reason: 'no_acceptance', directed: true, complied: true }],
+      ['2026-08-04', { stalled: false, reason: null, directed: false, complied: null }],
+    ];
+    for (const [date, exploration] of nights) {
+      dreamStore.beginRun(5, date, null, 18);
+      dreamStore.updateRunTelemetry(5, date, { emptyDay: false, exploration });
+    }
+    const proposalNights = [
+      ['2026-08-01', 'skill', 'read_only'],
+      ['2026-08-01', 'memory', 'read_only'],
+      ['2026-08-02', 'skill', 'chain_write'],
+      ['2026-08-03', null, 'read_only'],
+      ['2026-08-04', 'memory', 'interact_local'],
+    ];
+    for (const [date, component, riskClass] of proposalNights) {
+      coworkStore.insertDreamPracticeProposals(5, date, [
+        {
+          title: `练习 ${date}`,
+          prompt: 'p',
+          targetRefs: ['draft:1'],
+          riskClass,
+          ...(component !== null ? { component } : {}),
+        },
+      ]);
+      db.run(
+        'UPDATE dream_practice_proposals SET created_at = ? WHERE dream_date = ?',
+        [Date.parse(`${date}T00:00:00Z`), date],
+      );
+    }
+
+    const file = exportDbToFile(db, 'exploration');
+    const handle = new DatabaseSync(file, { readOnly: true });
+    let bot;
+    let text;
+    try {
+      const report = buildRrsiReport(handle, { days: 4, today: '2026-08-04', botId: 5 });
+      bot = report.bots[0];
+      text = formatRrsiReport(report);
+    } finally {
+      handle.close();
+    }
+    assert.equal(bot.exploration.stalledNights, 3);
+    assert.deepEqual(bot.exploration.reasons, { no_acceptance: 2, component_collapse: 1 });
+    assert.equal(bot.exploration.directedNights, 3);
+    assert.equal(bot.exploration.compliedNights, 2);
+    assert.equal(bot.exploration.complianceRate, 0.6667);
+    assert.deepEqual(bot.exploration.componentMix, {
+      memory: 2, procedure: 0, skill: 2, remote_service: 0, collaboration: 0,
+      metaweb: 0, metaapp: 0, unknown: 1,
+    });
+    assert.deepEqual(bot.exploration.directedRiskMix, { read_only: 3, interact_local: 0, chain_write: 1 });
+    assert.ok(text.includes(
+      '  exploration: stalled 3 nights (no_acceptance 2, component_collapse 1), directed 3, complied 2 → 66.67%; '
+      + 'mix memory 2, skill 2, unknown 1; directed risk read_only 3, chain_write 1',
+    ), text);
+  } finally {
+    cleanup();
+  }
+});
+
+test('report exploration: without the component column every proposal counts as unknown', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const dreamStore = new DreamStore(db, () => {});
+    insertMetabot(db, 5);
+    dreamStore.beginRun(5, '2026-08-01', null, 18);
+    dreamStore.updateRunTelemetry(5, '2026-08-01', {
+      emptyDay: false,
+      exploration: { stalled: true, reason: 'no_acceptance', directed: true, complied: true },
+    });
+    coworkStore.insertDreamPracticeProposals(5, '2026-08-01', [
+      { title: '练习', prompt: 'p', targetRefs: ['draft:1'], riskClass: 'read_only', component: 'skill' },
+    ]);
+    db.run('ALTER TABLE dream_practice_proposals DROP COLUMN component');
+
+    const file = exportDbToFile(db, 'exploration-no-column');
+    const handle = new DatabaseSync(file, { readOnly: true });
+    let exploration;
+    try {
+      exploration = buildRrsiReport(handle, { days: 1, today: '2026-08-01', botId: 5 }).bots[0].exploration;
+    } finally {
+      handle.close();
+    }
+    assert.deepEqual(exploration.componentMix, {
+      memory: 0, procedure: 0, skill: 0, remote_service: 0, collaboration: 0,
+      metaweb: 0, metaapp: 0, unknown: 1,
+    });
+    assert.deepEqual(exploration.directedRiskMix, { read_only: 1, interact_local: 0, chain_write: 0 });
+  } finally {
+    cleanup();
+  }
+});

@@ -22,6 +22,7 @@ import {
   serializeSessionGoal,
   type CoworkSessionGoal,
 } from './libs/coworkSessionGoal';
+import { normalizePracticeComponent, type PracticeComponent } from './libs/evolutionExploration';
 import type {
   MemoryBackend,
   MemoryCreateUserMemoryInput,
@@ -1054,6 +1055,8 @@ export interface DreamPracticeProposalRecord {
   targetRefs: string[];
   expectedEvidence: string | null;
   riskClass: DreamPracticeProposalRiskClass;
+  /** Which practice component the proposal exercises (RRSI P4); NULL = unknown / pre-P4. */
+  component: PracticeComponent | null;
   status: DreamPracticeProposalStatus;
   /** Link to the materialized scheduled task (scheduled_tasks.id), NULL until scheduled. */
   scheduledTaskId: string | null;
@@ -1075,6 +1078,7 @@ interface DreamPracticeProposalRow {
   target_refs_json?: string | null;
   expected_evidence?: string | null;
   risk_class?: string | null;
+  component?: string | null;
   status: string;
   scheduled_task_id?: string | null;
   run_id?: string | null;
@@ -8290,6 +8294,7 @@ export class CoworkStore implements MemoryBackend {
       targetRefs,
       expectedEvidence: row.expected_evidence == null ? null : String(row.expected_evidence),
       riskClass: normalizeDreamPracticeProposalRiskClass(row.risk_class),
+      component: normalizePracticeComponent(row.component),
       status: String(row.status) as DreamPracticeProposalStatus,
       scheduledTaskId: row.scheduled_task_id == null ? null : String(row.scheduled_task_id),
       runId: row.run_id == null ? null : String(row.run_id),
@@ -8316,6 +8321,7 @@ export class CoworkStore implements MemoryBackend {
       targetRefs?: string[] | null;
       expectedEvidence?: string | null;
       riskClass?: string | null;
+      component?: string | null;
     }>,
   ): number {
     const now = Date.now();
@@ -8334,9 +8340,9 @@ export class CoworkStore implements MemoryBackend {
       this.db.run(`
         INSERT INTO dream_practice_proposals (
           metabot_id, dream_date, title, prompt, rationale, target_refs_json,
-          expected_evidence, risk_class, status, created_at, updated_at
+          expected_evidence, risk_class, component, status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
       `, [
         metabotId,
         dreamDate,
@@ -8346,6 +8352,7 @@ export class CoworkStore implements MemoryBackend {
         JSON.stringify(targetRefs),
         expectedEvidence,
         normalizeDreamPracticeProposalRiskClass(proposal?.riskClass),
+        normalizePracticeComponent(proposal?.component),
         now,
         now,
       ]);
@@ -8382,7 +8389,7 @@ export class CoworkStore implements MemoryBackend {
       : null;
     const rows = this.getAll<DreamPracticeProposalRow>(`
       SELECT id, metabot_id, dream_date, title, prompt, rationale, target_refs_json,
-             expected_evidence, risk_class, status, scheduled_task_id, run_id,
+             expected_evidence, risk_class, component, status, scheduled_task_id, run_id,
              outcome_summary, created_at, updated_at
       FROM dream_practice_proposals
       ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
@@ -8400,7 +8407,7 @@ export class CoworkStore implements MemoryBackend {
     const scoped = metabotId !== undefined && Number.isInteger(metabotId);
     const row = this.getOne<DreamPracticeProposalRow>(`
       SELECT id, metabot_id, dream_date, title, prompt, rationale, target_refs_json,
-             expected_evidence, risk_class, status, scheduled_task_id, run_id,
+             expected_evidence, risk_class, component, status, scheduled_task_id, run_id,
              outcome_summary, created_at, updated_at
       FROM dream_practice_proposals
       WHERE id = ?${scoped ? ' AND metabot_id = ?' : ''}
@@ -8546,7 +8553,7 @@ export class CoworkStore implements MemoryBackend {
     if (!id) return null;
     const row = this.getOne<DreamPracticeProposalRow>(`
       SELECT id, metabot_id, dream_date, title, prompt, rationale, target_refs_json,
-             expected_evidence, risk_class, status, scheduled_task_id, run_id,
+             expected_evidence, risk_class, component, status, scheduled_task_id, run_id,
              outcome_summary, created_at, updated_at
       FROM dream_practice_proposals
       WHERE scheduled_task_id = ?
@@ -8596,7 +8603,7 @@ export class CoworkStore implements MemoryBackend {
     if (!Number.isInteger(metabotId) || metabotId <= 0) return [];
     const rows = this.getAll<DreamPracticeProposalRow & { run_session_id: string | null }>(`
       SELECT p.id, p.metabot_id, p.dream_date, p.title, p.prompt, p.rationale, p.target_refs_json,
-             p.expected_evidence, p.risk_class, p.status, p.scheduled_task_id, p.run_id,
+             p.expected_evidence, p.risk_class, p.component, p.status, p.scheduled_task_id, p.run_id,
              p.outcome_summary, p.created_at, p.updated_at,
              r.session_id AS run_session_id
       FROM dream_practice_proposals p
