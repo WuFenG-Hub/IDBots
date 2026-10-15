@@ -223,6 +223,9 @@ function createGateHarness({ gate, includeMemoryPromptBlocks = true }) {
     listCapabilityDrafts() {
       return [];
     },
+    listInjectableTechniques() {
+      return [];
+    },
     getSession() {
       return { id: 'session-1', sessionType: 'standard', metabotId: 7, messages: [] };
     },

@@ -1823,6 +1823,25 @@ export interface CoworkKnowledgeStore {
   };
   /** Archive an active procedure by exact title; null when no active match. */
   archiveProcedureByTitle(metabotId: number, title: string): { id: string; title: string; version: number } | null;
+  /**
+   * RRSI P2 hot layer: active, hot-eligible procedures (optional DI — when
+   * absent the hot block falls back to listProcedures, e.g. legacy stubs).
+   */
+  listHotProcedures?(metabotId: number, options?: { limit?: number }): Array<{
+    id: string;
+    title: string;
+    triggerText: string;
+    steps: string[];
+    pitfalls: string[];
+    sourcePinIds: string[];
+    category: string | null;
+    tags: string[];
+    version: number;
+    useCount: number;
+    updatedAt: number;
+    hotEligible?: boolean;
+    hotReason?: string | null;
+  }>;
 }
 
 /**
@@ -5969,8 +5988,10 @@ export class CoworkRunner extends EventEmitter {
     });
     const summaries = this.experienceStore?.listDailySummaries(metabotId, RECENT_SUMMARIES_PROMPT_DAYS) ?? [];
     // Validated capability drafts (Dream-RSI P0): only drafts that survived
-    // the dream-time validation pass are injected as proven techniques.
-    const provenTechniques = this.store.listCapabilityDrafts(metabotId, { status: 'validated', limit: 5 });
+    // the dream-time validation pass are injected as proven techniques. RRSI
+    // P2 single injection path: only drafts that were never promoted — a
+    // promoted draft hardened into procedure memory and rides <procedures>.
+    const provenTechniques = this.store.listInjectableTechniques(metabotId, 5);
     const experienceBlock = composeExperiencePromptBlocks({
       identityText: identityEntry?.text ?? null,
       valueBoundaries: valueBoundaryEntries,
@@ -6013,14 +6034,18 @@ export class CoworkRunner extends EventEmitter {
     }
     // Procedure hot-layer (经验): proven task workflows ride the same block so
     // a matching procedure preempts a fresh MetaWeb search for a task the bot
-    // already learned.
+    // already learned. RRSI P2: only hot-eligible procedures inject — a
+    // recall-only (probation/gated) procedure stays reachable via
+    // procedure_recall instead.
     let procedureBlock = '';
     if (this.knowledgeStore) {
-      const procedureEntries = this.knowledgeStore.listProcedures({
-        metabotId,
-        status: 'active',
-        limit: PROCEDURE_PROMPT_MAX_ITEMS,
-      });
+      const procedureEntries = this.knowledgeStore.listHotProcedures
+        ? this.knowledgeStore.listHotProcedures(metabotId, { limit: PROCEDURE_PROMPT_MAX_ITEMS })
+        : this.knowledgeStore.listProcedures({
+          metabotId,
+          status: 'active',
+          limit: PROCEDURE_PROMPT_MAX_ITEMS,
+        });
       procedureBlock = buildProcedureBlock(procedureEntries);
     }
     return [experienceBlock, knowledgeBlock, procedureBlock].filter((block) => block.trim()).join('\n\n');

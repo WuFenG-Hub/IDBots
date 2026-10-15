@@ -109,6 +109,7 @@ class RecordingStore {
   // Proven-techniques injection (a6f7d570) reads capability drafts every
   // memory-enabled turn; none exist in this fixture.
   listCapabilityDrafts() { return [] }
+  listInjectableTechniques() { return [] }
 }
 
 const fakeStore = {

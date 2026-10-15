@@ -220,6 +220,9 @@ function createIntuitionHarness({ intuition, available = () => true, sourceChann
     listCapabilityDrafts() {
       return [];
     },
+    listInjectableTechniques() {
+      return [];
+    },
     getSession() {
       return { id: 'session-1', sessionType: 'standard', metabotId: 7, messages: [] };
     },

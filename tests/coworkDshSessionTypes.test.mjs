@@ -100,6 +100,7 @@ class RecordingStore {
   // Proven-techniques injection (a6f7d570) reads capability drafts every turn;
   // none exist in this fixture.
   listCapabilityDrafts() { return [] }
+  listInjectableTechniques() { return [] }
 }
 
 const makeFakeStore = (extraProvider) => ({

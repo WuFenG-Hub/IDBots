@@ -7605,6 +7605,26 @@ export class CoworkStore implements MemoryBackend {
     return rows.map((row) => this.mapCapabilityDraftRow(row));
   }
 
+  /**
+   * RRSI P2 single injection path (design §6.2 P2.3): validated drafts that
+   * were NEVER promoted — the only drafts allowed into
+   * <proven_techniques>. A promoted draft hardened into procedure memory and
+   * must not also ride the technique block (double injection). Newest first.
+   */
+  listInjectableTechniques(metabotId: number, limit: number = 5): CapabilityDraft[] {
+    const id = Number(metabotId);
+    if (!Number.isInteger(id) || id <= 0) return [];
+    const clampedLimit = Math.max(1, Math.min(50, Math.floor(limit) || 5));
+    const rows = this.getAll<CapabilityDraftRow>(`
+      SELECT ${CAPABILITY_DRAFT_COLUMNS}
+      FROM capability_drafts
+      WHERE metabot_id = ? AND status = 'validated' AND promoted_at IS NULL
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `, [id, clampedLimit]);
+    return rows.map((row) => this.mapCapabilityDraftRow(row));
+  }
+
   private mapCapabilityDraftRow(row: CapabilityDraftRow): CapabilityDraft {
     return {
       id: Number(row.id),

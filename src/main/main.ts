@@ -4582,8 +4582,9 @@ const startStartupMessageTier = (): void => {
       };
     },
     listDailySummaries: (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
+    // RRSI P2 single injection path: never-promoted validated drafts only.
     listValidatedCapabilityDrafts: (metabotId) =>
-      getCoworkStore().listCapabilityDrafts(metabotId, { status: 'validated', limit: 5 }),
+      getCoworkStore().listInjectableTechniques(metabotId, 5),
     markCapabilityDraftsInjected: (ids) => {
       getCoworkStore().markCapabilityDraftsInjected(ids);
     },

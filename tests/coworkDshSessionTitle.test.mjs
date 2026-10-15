@@ -110,6 +110,7 @@ class RecordingStore {
   }
   getSessionUsageStats() { return null }
   listCapabilityDrafts() { return [] }
+  listInjectableTechniques() { return [] }
 }
 
 test('host summary refinement replaces the placeholder title in store + sidebar event', { skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed' }, async () => {
