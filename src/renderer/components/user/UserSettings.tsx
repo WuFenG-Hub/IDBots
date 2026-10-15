@@ -1054,6 +1054,15 @@ const UserSettings: React.FC = () => {
                   : (chainRestoreResult.error ?? chainRestoreResult.bots.find((b) => b.error)?.error ?? '')}
               </p>
             )}
+            {chainRestoreResult?.success && chainRestoreResult.bots.some((b) => (b.warnings?.length ?? 0) > 0) && (
+              <p className="mt-1 text-xs text-amber-600 dark:text-amber-400 break-all">
+                {i18nService.t('userSettingsChainBackupRestorePartial')
+                  .replace('{details}', chainRestoreResult.bots
+                    .flatMap((b) => (b.warnings ?? []).map((w) => `${b.name}: ${w}`))
+                    .join('; ')
+                    .slice(0, 400))}
+              </p>
+            )}
           </div>
           <div className="flex shrink-0 flex-col gap-2">
             <button
