@@ -398,7 +398,7 @@ test('three-night loop: validate → dispute → re-enter with evidence → keep
     assert.equal(knowledgeStore.listProcedures({ metabotId: 5, status: 'active' }).length, 0, 'nothing hardened');
     assert.deepEqual(
       dreamStore.getRun(5, DAY1).telemetry.reconciliation,
-      { considered: 1, kept: 0, narrowed: 0, merged: 0, disputed: 1 },
+      { considered: 1, kept: 0, narrowed: 0, merged: 0, disputed: 1, scope: { general: 0, situational: 0, scorerFitted: 0, hardMarkerOverrides: 0 } },
     );
 
     // Night 2: the disputed draft re-enters the validation gate WITH its
@@ -412,7 +412,7 @@ test('three-night loop: validate → dispute → re-enter with evidence → keep
     assert.equal(draft().uncertaintyText, '图文流程未验证');
     assert.deepEqual(
       dreamStore.getRun(5, DAY2).telemetry.reconciliation,
-      { considered: 1, kept: 1, narrowed: 0, merged: 0, disputed: 0 },
+      { considered: 1, kept: 1, narrowed: 0, merged: 0, disputed: 0, scope: { general: 1, situational: 0, scorerFitted: 0, hardMarkerOverrides: 0 } },
     );
 
     // Night 3: with the verdict one calendar day old, the draft promotes — and
@@ -498,7 +498,7 @@ test('merge: draft rejects with a merge note; the target procedure gains a refer
     assert.ok(!knowledgeStore.getProcedure(unrelated.id).pitfalls.length, 'the unrelated procedure is untouched');
     assert.deepEqual(
       dreamStore.getRun(5, DAY1).telemetry.reconciliation,
-      { considered: 2, kept: 0, narrowed: 0, merged: 1, disputed: 0 },
+      { considered: 2, kept: 0, narrowed: 0, merged: 1, disputed: 0, scope: { general: 0, situational: 0, scorerFitted: 0, hardMarkerOverrides: 0 } },
     );
   } finally {
     cleanup();
@@ -597,7 +597,7 @@ test('an unparseable reconciliation output leaves the drafts validated and the r
     assert.equal(dreamStore.getRun(5, DAY1).status, 'completed');
     assert.deepEqual(
       dreamStore.getRun(5, DAY1).telemetry.reconciliation,
-      { considered: 1, kept: 0, narrowed: 0, merged: 0, disputed: 0 },
+      { considered: 1, kept: 0, narrowed: 0, merged: 0, disputed: 0, scope: { general: 0, situational: 0, scorerFitted: 0, hardMarkerOverrides: 0 } },
       'considered counts the batch even when nothing parses',
     );
   } finally {
