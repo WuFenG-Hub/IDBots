@@ -81,6 +81,7 @@ import {
   detectEvolutionStall,
   judgeExplorationCompliance,
   listUnderExploredComponents,
+  orderPracticeProposalsForApproval,
   renderExplorationDirective,
   type ExplorationStall,
   type PracticeComponent,
@@ -1219,7 +1220,7 @@ export class DreamService {
         const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
         // Self-curriculum (design §3.4): pending read_only proposals from
         // earlier nights still approve + materialize on an empty day.
-        const practicePipeline = this.processPracticeProposalsAfterDream(metabot);
+        const practicePipeline = this.processPracticeProposalsAfterDream(metabot, { stalled: exploration.stall.stalled, underExplored: exploration.underExplored });
         this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
           emptyDay: true,
           estimatedActivityTokens: 0,
@@ -1318,7 +1319,7 @@ export class DreamService {
       const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
       // Self-curriculum (design §3.4, after the replay per §3.1): auto-approve
       // + materialize tonight's pending read_only practice proposals.
-      const practicePipeline = this.processPracticeProposalsAfterDream(metabot);
+      const practicePipeline = this.processPracticeProposalsAfterDream(metabot, { stalled: exploration.stall.stalled, underExplored: exploration.underExplored });
       // RRSI P4: did tonight's proposals answer the exploration directive?
       // (A directive was sent iff one was rendered for this run.)
       const explorationCompliance = judgeExplorationCompliance({
@@ -2439,9 +2440,14 @@ export class DreamService {
    * interact_local / chain_write proposals stay pending for the owner —
    * chain_write never executes in this iteration. Feature OFF (the default)
    * is a zero-side-effect no-op. Never fails the dream run.
+   *
+   * RRSI P4 (design §6.4): while stalled, the read-only drain puts proposals
+   * in under-explored components first — an ordering-only novelty bonus, no
+   * extra approvals and no loosened risk rules.
    */
   private processPracticeProposalsAfterDream(
     metabot: DreamMetabotLike,
+    exploration: { stalled: boolean; underExplored: readonly PracticeComponent[] },
   ): { autoApproved: number; materialized: number } {
     const zero = { autoApproved: 0, materialized: 0 };
     try {
@@ -2449,13 +2455,15 @@ export class DreamService {
       if (!policy.practiceTasksEnabled || !policy.practiceAutoApproveReadOnly) return zero;
       const createTask = this.deps.createPracticeScheduledTask;
       if (!createTask) return zero;
-      const pending = this.deps.coworkStore.listDreamPracticeProposals(metabot.id, { status: 'pending' })
-        // Oldest first: the backlog drains before fresh proposals. The 2/night
-        // cap counts auto-approvals, so non-read_only rows are filtered out
-        // before slicing instead of consuming slots.
-        .reverse()
-        .filter((proposal) => proposal.riskClass === 'read_only')
-        .slice(0, PRACTICE_PROPOSALS_MAX_PER_NIGHT);
+      const pending = orderPracticeProposalsForApproval(
+        this.deps.coworkStore.listDreamPracticeProposals(metabot.id, { status: 'pending' })
+          // Oldest first: the backlog drains before fresh proposals. The 2/night
+          // cap counts auto-approvals, so non-read_only rows are filtered out
+          // before slicing instead of consuming slots.
+          .reverse()
+          .filter((proposal) => proposal.riskClass === 'read_only'),
+        { stalled: exploration.stalled, underExplored: exploration.underExplored },
+      ).slice(0, PRACTICE_PROPOSALS_MAX_PER_NIGHT);
       let autoApproved = 0;
       let materialized = 0;
       for (const proposal of pending) {

@@ -473,3 +473,140 @@ test('listDreamTelemetryDailyRange is inclusive, ascending, per-bot', async () =
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Flow: under-explored read-only proposals approve first while stalled (P4 Task 4)
+// ---------------------------------------------------------------------------
+
+const {
+  loadDreamServiceModule,
+  metabotStoreStub,
+} = await import('./fixtures/rrsiDreamHarness.mjs');
+const { createCoworkStore, createSqliteStore } = await import('./memoryTestUtils.mjs');
+const { DreamService: DreamServiceCtor } = loadDreamServiceModule();
+
+const insertMetabotRow = (db, id) => {
+  db.run(
+    `INSERT INTO metabots (
+      id, wallet_id, mvc_address, btc_address, doge_address, public_key,
+      chat_public_key, name, metaid, globalmetaid, metabot_type, created_by,
+      role, soul, created_at, updated_at
+    ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'worker', 'test', 'role', 'soul', 1, 1)`,
+    [id, `mvc-${id}`, `btc-${id}`, `doge-${id}`, `pub-${id}`, `chatpub-${id}`, `Bot ${id}`, `metaid-${id}`, null]
+  );
+};
+
+/**
+ * One approval-pipeline night on D: two pending read-only memory proposals in
+ * the backlog (D−2 then D−1, so oldest-first is D−2, D−1), and tonight's dream
+ * proposes skill (read_only) + metaapp (chain_write).
+ */
+async function approvalNight({ stalled }) {
+  const { db, cleanup } = await createSqliteStore();
+  const coworkStore = createCoworkStore(db);
+  const dreamStore = new DreamStoreCtor(db, () => {});
+  insertMetabotRow(db, BOT_ID);
+  if (stalled) seedStalledTelemetry(db, D);
+  coworkStore.setMemoryPolicyForMetabot(BOT_ID, {
+    practiceTasksEnabled: true,
+    practiceAutoApproveReadOnly: true,
+  });
+  coworkStore.insertDreamPracticeProposals(BOT_ID, shiftDateKey(D, -2), [
+    { title: 'memory 练习(旧)', prompt: 'p', targetRefs: ['draft:3'], riskClass: 'read_only', component: 'memory' },
+  ]);
+  coworkStore.insertDreamPracticeProposals(BOT_ID, shiftDateKey(D, -1), [
+    { title: 'memory 练习(新)', prompt: 'p', targetRefs: ['draft:4'], riskClass: 'read_only', component: 'memory' },
+  ]);
+  seedSession(coworkStore, db, D, [
+    { type: 'user', content: '视频做好了吗' },
+    { type: 'assistant', content: '做好了' },
+  ]);
+  const createdTasks = [];
+  const service = new DreamServiceCtor({
+    coworkStore,
+    metabotStore: metabotStoreStub(),
+    dreamStore,
+    llmTimeoutMs: 5000,
+    transientRetryDelaysMs: [],
+    now: () => new Date(dayStartMs(D) + 27 * 60 * 60 * 1000),
+    createPracticeScheduledTask: (input) => {
+      createdTasks.push(input);
+      return { id: `task-${createdTasks.length}` };
+    },
+    performChat: async () => dreamJson({
+      practice_proposals: [
+        {
+          title: 'skill 练习',
+          prompt: '完整指令',
+          rationale: 'r',
+          target_refs: ['draft:1'],
+          expected_evidence: 'e',
+          risk_class: 'read_only',
+          component: 'skill',
+        },
+        {
+          title: 'metaapp 练习',
+          prompt: '完整指令',
+          rationale: 'r',
+          target_refs: ['draft:2'],
+          expected_evidence: 'e',
+          risk_class: 'chain_write',
+          component: 'metaapp',
+        },
+      ],
+    }),
+  });
+  await service.runNow(BOT_ID, D);
+  return {
+    createdTasks,
+    statusOf: (title) => coworkStore.listDreamPracticeProposals(BOT_ID).find((row) => row.title === title)?.status,
+    telemetry: dreamStore.getRun(BOT_ID, D)?.telemetry ?? null,
+    cleanup,
+  };
+}
+
+test('approval ordering: while stalled the under-explored read-only proposal approves first', async () => {
+  const night = await approvalNight({ stalled: true });
+  try {
+    assert.deepEqual(night.createdTasks.map((task) => task.name), [
+      '[Practice] skill 练习',
+      '[Practice] memory 练习(旧)',
+    ]);
+    assert.equal(night.statusOf('memory 练习(新)'), 'pending');
+    assert.equal(night.statusOf('metaapp 练习'), 'pending', 'chain_write never auto-approves');
+    assert.equal(night.telemetry.exploration.stalled, true);
+  } finally {
+    night.cleanup();
+  }
+});
+
+test('approval ordering: not stalled keeps today oldest-first behavior', async () => {
+  const night = await approvalNight({ stalled: false });
+  try {
+    assert.deepEqual(night.createdTasks.map((task) => task.name), [
+      '[Practice] memory 练习(旧)',
+      '[Practice] memory 练习(新)',
+    ]);
+    assert.equal(night.statusOf('skill 练习'), 'pending');
+    assert.equal(night.telemetry.exploration.stalled, false);
+  } finally {
+    night.cleanup();
+  }
+});
+
+test('approval ordering: both cases cap at PRACTICE_PROPOSALS_MAX_PER_NIGHT and stub once per approval', async () => {
+  const stalledNight = await approvalNight({ stalled: true });
+  try {
+    assert.equal(stalledNight.createdTasks.length, 2);
+    assert.equal(stalledNight.telemetry.practiceProposals.autoApproved, 2);
+  } finally {
+    stalledNight.cleanup();
+  }
+  const calmNight = await approvalNight({ stalled: false });
+  try {
+    assert.equal(calmNight.createdTasks.length, 2);
+    assert.equal(calmNight.telemetry.practiceProposals.autoApproved, 2);
+  } finally {
+    calmNight.cleanup();
+  }
+});
