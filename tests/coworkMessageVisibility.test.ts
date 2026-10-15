@@ -28,6 +28,17 @@ test('empty system messages without a diagnostic flag stay hidden', () => {
   assert.equal(isRenderableAssistantOrSystemMessage(msg({ content: '   ' })), false);
 });
 
+test('DSH compaction checkpoints (empty body, metadata-only) stay renderable', () => {
+  // The mapper stores compaction/summary stubs as content:'' plus
+  // { compaction: true, compactedItems, compactedTokens }; the one-line
+  // localized notice renders from metadata alone.
+  assert.equal(
+    isRenderableAssistantOrSystemMessage(msg({ metadata: { compaction: true, compactedItems: 3, compactedTokens: 420 } })),
+    true,
+  );
+  assert.equal(isDiagnosticSystemMetadata({ compaction: true }), true);
+});
+
 test('finalized thinking with body stays renderable so the Think row can collapse', () => {
   assert.equal(
     isRenderableAssistantOrSystemMessage(msg({

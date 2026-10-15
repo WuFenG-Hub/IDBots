@@ -24,6 +24,10 @@ const DIAGNOSTIC_METADATA_FLAGS = [
   'sdkCompactBoundary',
   'steerInterruptAcknowledged',
   'dshRouteFallback',
+  // DSH compaction checkpoints store an empty body plus metadata only —
+  // without this flag the localized one-line notice is filtered out before
+  // its render branch can run.
+  'compaction',
 ] as const;
 
 /** True when metadata carries a localized system diagnostic (content may be empty). */
