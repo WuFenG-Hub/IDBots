@@ -1864,6 +1864,8 @@ interface IElectronAPI {
         imported: number;
         skipped: number;
         error?: string;
+        /** Non-fatal per-segment failures — the restore is partial. */
+        warnings?: string[];
       }>;
       error?: string;
     }>;

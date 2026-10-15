@@ -121,6 +121,19 @@ function rankEntries(
   limit = 12,
   relevanceScoreById?: ReadonlyMap<string, number>
 ): RankedScopedMemoryEntry[] {
+  // Cerebellum nouls (0..1) and lexical scores (base 1, +3 per token hit)
+  // live on incompatible scales: with a plain merge any unscored entry
+  // outranks every scored one, so the semantic re-rank is nullified (or
+  // inverted) whenever the pool exceeds the candidate cap the ranker sent.
+  // The comparator below tiers instead: entries the cerebellum examined
+  // form the top band ordered by noul; ids it never scored sink below all
+  // of them, keeping their own lexical order. Without a live map (ranker
+  // off/failed) the sort is pure lexical.
+  const hasCerebellumScores = (relevanceScoreById?.size ?? 0) > 0;
+  const cerebellumScored = (entry: { id?: unknown }): boolean =>
+    hasCerebellumScores
+    && typeof entry.id === 'string'
+    && (relevanceScoreById?.has(entry.id) ?? false);
   const scored = [...(entries ?? [])]
     .filter((entry) => normalizePromptText(entry.text))
     .map((entry) => {
@@ -129,12 +142,17 @@ function rankEntries(
       return {
         ...entry,
         block,
-        // A cerebellum score replaces the lexical score outright (it is a rank
-        // key, not a summand); ids the cerebellum never scored keep lexical.
+        // A cerebellum score replaces the lexical score outright (it is a
+        // rank key, not a summand); the tier split happens in the sort.
         relevanceScore: mapScore ?? scoreEntryForPrompt(entry, currentUserText),
       };
     })
     .sort((left, right) => {
+      const leftScored = cerebellumScored(left);
+      const rightScored = cerebellumScored(right);
+      if (leftScored !== rightScored) {
+        return leftScored ? -1 : 1;
+      }
       if (right.relevanceScore !== left.relevanceScore) {
         return right.relevanceScore - left.relevanceScore;
       }

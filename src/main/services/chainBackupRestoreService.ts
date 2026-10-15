@@ -47,6 +47,13 @@ export interface ChainBackupRestoreBotResult {
   imported: number;
   skipped: number;
   error?: string;
+  /**
+   * Non-fatal per-segment failures: the bot restored from the segments that
+   * did decrypt, but at least one manifest segment pin could not be fetched
+   * or verified. The restore is partial by design rather than failing the
+   * whole bot; the next full backup re-publishes a complete baseline.
+   */
+  warnings?: string[];
 }
 
 export interface ChainBackupRestoreResult {
@@ -122,8 +129,50 @@ interface UserBotsManifestEntry {
   mvcAddress: string;
 }
 
-/** Locate the owner's newest /info/bots pin and decode the bot list. */
+/** Decode the bot list out of one /info/bots pin text. */
+function parseUserBotsManifest(text: string): UserBotsManifestEntry[] {
+  const parsed = JSON.parse(text) as { bots?: unknown };
+  const bots = Array.isArray(parsed.bots) ? parsed.bots : [];
+  return bots.map((raw) => {
+    const record = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    return {
+      globalMetaId: typeof record.globalMetaId === 'string' ? record.globalMetaId.trim() : '',
+      name: typeof record.name === 'string' ? record.name : '',
+      type: typeof record.type === 'string' ? record.type : 'worker',
+      mvcAddress: typeof record.mvcAddress === 'string' ? record.mvcAddress.trim() : '',
+    };
+  }).filter((entry) => entry.globalMetaId);
+}
+
+/**
+ * Locate the owner's newest /info/bots pin and decode the bot list.
+ *
+ * Primary source is the metaid-scoped pin listing: the platform-global path
+ * feed carries every user's pins newest-first and each backup run publishes
+ * a fresh pin, so a device-loss restore performed after ~1000 newer
+ * platform pins would scan past the owner's manifest and find nothing even
+ * though the data is on-chain. The scoped listing returns the owner's own
+ * pins regardless of global feed depth; the global address scan stays only
+ * as a fallback.
+ */
 async function fetchUserBotsEntries(
+  identity: { globalMetaId: string; mvcAddress: string },
+  options?: { baseUrl?: string },
+): Promise<UserBotsManifestEntry[]> {
+  const scopedPins = await listPinsByMetaid(identity.globalMetaId, USER_BOTS_PATH, options);
+  for (const pin of scopedPins) {
+    try {
+      const entries = parseUserBotsManifest(await fetchPinContentText(pin.pinId, options));
+      if (entries.length > 0) return entries;
+    } catch {
+      // fall through to the next (older) pin
+    }
+  }
+  return fetchUserBotsEntriesByAddress(identity.mvcAddress, options);
+}
+
+/** Legacy discovery: match the owner's address against the global path feed. */
+async function fetchUserBotsEntriesByAddress(
   userMvcAddress: string,
   options?: { baseUrl?: string },
 ): Promise<UserBotsManifestEntry[]> {
@@ -137,18 +186,7 @@ async function fetchUserBotsEntries(
     );
     const mine = result.items.find((item) => item.address.trim().toLowerCase() === address.toLowerCase());
     if (mine) {
-      const text = await fetchPinContentText(mine.pinId, options);
-      const parsed = JSON.parse(text) as { bots?: unknown };
-      const bots = Array.isArray(parsed.bots) ? parsed.bots : [];
-      return bots.map((raw) => {
-        const record = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-        return {
-          globalMetaId: typeof record.globalMetaId === 'string' ? record.globalMetaId.trim() : '',
-          name: typeof record.name === 'string' ? record.name : '',
-          type: typeof record.type === 'string' ? record.type : 'worker',
-          mvcAddress: typeof record.mvcAddress === 'string' ? record.mvcAddress.trim() : '',
-        };
-      }).filter((entry) => entry.globalMetaId);
+      return parseUserBotsManifest(await fetchPinContentText(mine.pinId, options));
     }
     if (!result.hasMore || !result.nextCursor) break;
     cursor = result.nextCursor;
@@ -220,7 +258,10 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
   emit({ phase: 'discover' });
   let entries: UserBotsManifestEntry[];
   try {
-    entries = await fetchUserBotsEntries(identity.mvc_address, fetchOptions);
+    entries = await fetchUserBotsEntries(
+      { globalMetaId: identity.globalmetaid.trim(), mvcAddress: identity.mvc_address },
+      fetchOptions,
+    );
   } catch (error) {
     return { success: false, bots: [], error: error instanceof Error ? error.message : String(error) };
   }
@@ -249,27 +290,48 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
       }
       const { manifest } = manifestHit;
 
-      // Decrypt + verify every segment.
+      // Decrypt + verify each segment. The manifest only ever grows, so any
+      // historical segment pin (expired, pruned, indexer gap) would otherwise
+      // be a single point of failure sinking the whole bot. A failed segment
+      // is recorded as a warning instead; the bot restores from whatever
+      // decrypted, and the next full backup re-publishes a fresh complete
+      // baseline (the journal rebuild below is skipped for partial restores).
       const objects: ChainBackupObject[] = [];
+      const warnings: string[] = [];
       for (let s = 0; s < manifest.segments.length; s += 1) {
         const ref = manifest.segments[s];
-        const text = await fetchPinContentText(ref.pinId, fetchOptions);
-        const envelope = JSON.parse(text) as SegmentEnvelope;
-        if (envelope.cipher !== CHAIN_BACKUP_CIPHER || envelope.kdf !== CHAIN_BACKUP_KDF) {
-          throw new Error(`unsupported backup envelope (cipher=${envelope.cipher}, kdf=${envelope.kdf})`);
-        }
-        const plaintext = decryptJson(backupKey, Buffer.from(envelope.payload, 'base64'));
-        if (objectId(plaintext) !== ref.segment) {
-          throw new Error(`segment hash mismatch for pin ${ref.pinId}`);
-        }
-        const segment = plaintext as { objects?: Array<{ id: string; kind: ChainBackupObject['kind']; data: Record<string, unknown> }> };
-        for (const obj of segment.objects ?? []) {
-          objects.push({ id: obj.id, kind: obj.kind, data: obj.data });
+        try {
+          const text = await fetchPinContentText(ref.pinId, fetchOptions);
+          const envelope = JSON.parse(text) as SegmentEnvelope;
+          if (envelope.cipher !== CHAIN_BACKUP_CIPHER || envelope.kdf !== CHAIN_BACKUP_KDF) {
+            throw new Error(`unsupported backup envelope (cipher=${envelope.cipher}, kdf=${envelope.kdf})`);
+          }
+          const plaintext = decryptJson(backupKey, Buffer.from(envelope.payload, 'base64'));
+          if (objectId(plaintext) !== ref.segment) {
+            throw new Error(`segment hash mismatch for pin ${ref.pinId}`);
+          }
+          const segment = plaintext as { objects?: Array<{ id: string; kind: ChainBackupObject['kind']; data: Record<string, unknown> }> };
+          for (const obj of segment.objects ?? []) {
+            objects.push({ id: obj.id, kind: obj.kind, data: obj.data });
+          }
+        } catch (error) {
+          warnings.push(`segment ${s + 1}/${manifest.segments.length} (${ref.pinId}): ${error instanceof Error ? error.message : String(error)}`);
+          continue;
         }
         emit({
           phase: 'segments', botName: entry.name, botIndex: i, botCount: entries.length,
           segmentsDone: s + 1, segmentsTotal: manifest.segments.length,
         });
+      }
+      if (warnings.length > 0) {
+        botResult.warnings = warnings;
+      }
+      if (objects.length === 0 && warnings.length > 0) {
+        // Every segment failed — there is nothing to import for this bot.
+        botResult.error = warnings[warnings.length - 1] ?? 'ALL_SEGMENTS_FAILED';
+        result.success = false;
+        emit({ phase: 'error', botName: entry.name, botIndex: i, botCount: entries.length, message: botResult.error });
+        continue;
       }
 
       // Skeleton: reuse the local row when the bot already exists here.
@@ -308,13 +370,18 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
 
       // Rebuild the local backup journal from the on-chain manifest so the
       // next backup on this device diffs against what is already on-chain
-      // instead of re-uploading the restored objects as duplicates.
-      rebuildChainBackupStateFromManifest(db, {
-        botGlobalMetaId: entry.globalMetaId,
-        manifestPinId: manifestHit.pinId,
-        segments: manifest.segments,
-        manifestUpdatedAt: manifest.updatedAt ?? Math.floor(Date.now() / 1000),
-      });
+      // instead of re-uploading the restored objects as duplicates — but
+      // only for a fully verified segment set: a partial restore must not
+      // tell the next backup the missing objects are already on-chain, so
+      // the next run re-publishes a complete fresh baseline instead.
+      if (warnings.length === 0) {
+        rebuildChainBackupStateFromManifest(db, {
+          botGlobalMetaId: entry.globalMetaId,
+          manifestPinId: manifestHit.pinId,
+          segments: manifest.segments,
+          manifestUpdatedAt: manifest.updatedAt ?? Math.floor(Date.now() / 1000),
+        });
+      }
     } catch (error) {
       botResult.error = error instanceof Error ? error.message : String(error);
       result.success = false;

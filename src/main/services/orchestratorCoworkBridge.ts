@@ -175,6 +175,11 @@ export function extractFinalAssistantReply(
     if (message.type !== 'assistant') continue;
     if (message.metadata?.privateChatSkillWaitNotice === true) continue;
     if (message.metadata?.isThinking === true) continue;
+    // Assistant-mode narration bubbles are interim commentary, not the
+    // final answer; consumers here (A2A replies, orchestrator workers,
+    // dreams) must skip them exactly like thinking — otherwise a
+    // commentary-only turn gets narrated to the peer as the reply.
+    if (message.metadata?.narration === true) continue;
     const content = String(message.content ?? '');
     if (isNonAnswerAssistantReply(content)) continue;
     if (sawToolAfter) continue; // intermediate text, more tool activity followed

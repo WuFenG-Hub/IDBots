@@ -273,7 +273,7 @@ test('relevanceScoreById overrides the lexical order for scored ids', () => {
   assert.equal(lines[1], '- the owner drinks tea every morning');
 });
 
-test('entries absent from relevanceScoreById keep their lexical score', () => {
+test('entries absent from relevanceScoreById sink below every scored entry', () => {
   const entry = (id, text) => ({
     id,
     text,
@@ -290,16 +290,47 @@ test('entries absent from relevanceScoreById keep their lexical score', () => {
       entry('mem-tea', 'the owner drinks tea every morning'),
       entry('mem-dog', 'the owner walks his dog at dawn'),
     ],
-    // Only the cat entry is cerebellum-scored; the tea entry keeps its lexical
-    // token-match score (1 + 3) and still outranks a 0.95 noul, while the
-    // unscored dog entry (lexical 1) lands between the two scored ones.
+    // Only the cat entry is cerebellum-scored. Noul (0..1) and lexical
+    // (>= 1) are incompatible scales, so with a live score map the unscored
+    // entries must sink to a negative lexical tier below EVERY scored
+    // entry — even a noul of 0.02 beats an unscored lexical 4 — while the
+    // unscored entries keep their relative lexical order (tea 1+3 before
+    // dog 1).
     relevanceScoreById: new Map([['mem-cat', 0.95]]),
   });
 
   const lines = xml.split('\n').filter((line) => line.startsWith('- '));
-  assert.equal(lines[0], '- the owner drinks tea every morning', 'unscored ids keep the full lexical score');
-  assert.equal(lines[1], '- the owner walks his dog at dawn', 'unscored no-match ids keep lexical 1');
-  assert.equal(lines[2], '- the owner has a ragdoll cat', 'the scored entry ranks by its noul alone');
+  assert.equal(lines[0], '- the owner has a ragdoll cat', 'the scored entry outranks all unscored ones');
+  assert.equal(lines[1], '- the owner drinks tea every morning', 'unscored entries keep their relative lexical order');
+  assert.equal(lines[2], '- the owner walks his dog at dawn');
+});
+
+test('a zero noul still outranks unscored entries while a live map is present', () => {
+  const entry = (id, text) => ({
+    id,
+    text,
+    usageClass: 'profile_fact',
+    visibility: 'local_only',
+    updatedAt: 100,
+    lastUsedAt: null,
+  });
+  const { xml } = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    currentUserText: 'tell me about tea',
+    ownerEntries: [
+      entry('mem-tea', 'the owner drinks tea every morning'),
+      entry('mem-cat', 'the owner has a ragdoll cat'),
+    ],
+    // The ranker explicitly called the tea memory useless (noul 0): it ranks
+    // last among scored entries, but the live map still places it above the
+    // lexically-perfect unscored cat entry — an explicit verdict, even a
+    // rejection, always wins over an unexamined entry.
+    relevanceScoreById: new Map([['mem-tea', 0]]),
+  });
+
+  const lines = xml.split('\n').filter((line) => line.startsWith('- '));
+  assert.equal(lines[0], '- the owner drinks tea every morning', 'an explicit 0-noul verdict stays in the scored tier');
+  assert.equal(lines[1], '- the owner has a ragdoll cat');
 });
 
 test('the guaranteed-importance tier floats to the front regardless of relevanceScoreById', () => {

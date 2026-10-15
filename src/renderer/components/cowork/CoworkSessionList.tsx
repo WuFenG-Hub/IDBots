@@ -308,13 +308,15 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
       : ALL_METABOTS_SELECTOR_ID;
   // An explicit pick wins while its bot still exists; otherwise the list falls
   // back to the default, so the filtered state cannot get stuck (e.g. on a bot
-  // deleted after the pick).
-  const activeBotId =
-    showBotSelector
-      && pickedBotId != null
-      && (pickedBotId === ALL_METABOTS_SELECTOR_ID || selectorBots?.some((bot) => bot.id === pickedBotId))
+  // deleted after the pick). With the selector hidden there is no control to
+  // escape a filter, so the list must show everything — legacy A2A rows with
+  // no metabotId and sessions of since-deleted/disabled bots included.
+  const activeBotId = showBotSelector
+    ? (pickedBotId != null
+        && (pickedBotId === ALL_METABOTS_SELECTOR_ID || selectorBots?.some((bot) => bot.id === pickedBotId))
       ? pickedBotId
-      : defaultBotId;
+      : defaultBotId)
+    : ALL_METABOTS_SELECTOR_ID;
   const visibleSessions = useMemo(
     () =>
       activeBotId === ALL_METABOTS_SELECTOR_ID

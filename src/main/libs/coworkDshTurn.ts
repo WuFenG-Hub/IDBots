@@ -318,12 +318,13 @@ export interface DshHubOptions {
    * next turn; the config union never removes until restart, same as providers). */
   mcpServersProvider?: (coworkSessionId: string) => DshMcpServerDefinition[]
   /**
-   * Assistant chat-experience mode getter (global setting; may flip
-   * mid-session). Forwarded to every kernel so the event mapper surfaces
-   * model narration as tagged chat text instead of folding it into the
-   * thinking slot.
+   * Assistant chat-experience mode getter (may flip mid-session). Receives
+   * the DSH session id so the host can scope narration tagging to owner
+   * chats; forwarded to every kernel so the event mapper surfaces model
+   * narration as tagged chat text instead of folding it into the thinking
+   * slot.
    */
-  assistantModeProvider?: () => boolean
+  assistantModeProvider?: (dshSessionId: string) => boolean
   /** 0.1.7 experimental browser automation (dsh-browser-use + Playwright MCP),
    *  per-bot opt-in. One headless Chromium per session. The provider mounts at
    *  composition scope, so opted-in sessions are routed onto their own
