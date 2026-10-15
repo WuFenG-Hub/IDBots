@@ -439,6 +439,7 @@ man_base_data_pebble/
 !tests/procedureProbation.test.mjs
 !tests/hotLayerExposure.test.mjs
 !tests/hotLayerUsageAudit.test.mjs
+!tests/hotLayerPruning.test.mjs
 !tests/guidanceBudget.test.mjs
 !tests/implicitSignalsGrounding.test.mjs
 !tests/memoryHygieneService.test.mjs
