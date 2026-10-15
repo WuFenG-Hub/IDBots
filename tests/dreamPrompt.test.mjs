@@ -565,7 +565,7 @@ test('buildDreamPrompt renders the day\'s chain writes and reads with gists', ()
   assert.ok(user.includes('介绍 MetaWeb 的基本用法'), 'read gist prefers the summary');
   assert.ok(user.includes('写入链上内容 2 条'), 'inventory counts writes');
   assert.ok(user.includes('阅读链上内容 1 条'), 'inventory counts reads');
-  assert.equal(DREAM_VERSION, 16, 'dream algorithm version tracks the latest prompt change');
+  assert.equal(DREAM_VERSION, 17, 'dream algorithm version tracks the latest prompt change');
 });
 
 test('buildDreamPrompt hides chain content sections when empty or in fragment mode', () => {
@@ -654,4 +654,43 @@ test('P2a: a surf report triggers the creation-reflection questions; no report m
     activity: baseActivity,
   });
   assert.ok(!withoutSurf.user.includes('创作反思'), 'no surf report → no creation questions');
+});
+
+test('RRSI P1: falsified hypotheses render as their own section unless fragment mode or empty', () => {
+  const baseActivity = {
+    sessions: [],
+    taskRuns: [],
+    orderCount: 0,
+  };
+  const withFalsified = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-10-11',
+    activity: baseActivity,
+    falsifiedHypotheses: [
+      { title: '先验证再交付', reason: '照做后被差评' },
+      { title: '深夜连环追问', reason: '用户明确反感' },
+    ],
+  });
+  assert.ok(withFalsified.user.includes('## 已被证伪的做法(过去的能力验证已否决;除非今天的记录里出现了新的反证,不要再以相同或换个说法的形式写进 capability_learnings)'));
+  assert.ok(withFalsified.user.includes('- 「先验证再交付」:照做后被差评'));
+  assert.ok(withFalsified.user.includes('- 「深夜连环追问」:用户明确反感'));
+
+  const fragmentMode = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-10-11',
+    activity: baseActivity,
+    sourceMode: 'fragment',
+    falsifiedHypotheses: [
+      { title: '先验证再交付', reason: '照做后被差评' },
+    ],
+  });
+  assert.ok(!fragmentMode.user.includes('已被证伪的做法'), 'fragment prompts never carry the section');
+
+  const emptyList = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-10-11',
+    activity: baseActivity,
+    falsifiedHypotheses: [],
+  });
+  assert.ok(!emptyList.user.includes('已被证伪的做法'), 'an empty ledger renders nothing');
 });

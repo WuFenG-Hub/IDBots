@@ -273,6 +273,9 @@ function buildService(coworkStore, dreamStore, { chainEvidence, verdictsForIds }
     llmTimeoutMs: 5000,
     now: () => new Date(2026, 7, 3, 3, 0),
     chainEvidence,
+    // RRSI P1: the fake answers both panels identically, so dual panels stay
+    // in play; these same-night scenarios pin the legacy prospective rule.
+    capabilityGate: { panels: 2, prospective: false },
     performChat: async (system, user) => {
       calls.push({ system, user });
       if (system.includes('能力验证')) {

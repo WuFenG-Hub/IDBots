@@ -673,6 +673,31 @@ export class SqliteStore {
       console.warn('migrate capability_drafts validation columns:', error);
     }
 
+    // RRSI P1 falsified-hypothesis ledger (design §6.1 P1.3): dream
+    // bookkeeping, not user memory — written only when both gate panels agree
+    // on a demotion, so a falsified idea is not re-proposed next night. Retained
+    // 180 days / 200 rows per bot by the hygiene stroke.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS capability_falsified_hypotheses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        metabot_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        title_key TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        reason TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL CHECK (source IN ('validation', 're_review')),
+        source_draft_id INTEGER,
+        falsified_at INTEGER NOT NULL,
+        hit_count INTEGER NOT NULL DEFAULT 0,
+        last_hit_at INTEGER,
+        UNIQUE (metabot_id, title_key)
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_capability_falsified_metabot_time
+      ON capability_falsified_hypotheses(metabot_id, falsified_at DESC);
+    `);
+
     // Dream-RSI self-curriculum (P0, design 2026-10-10 §3.3): targeted
     // practice tasks proposed by the nightly dream. A proposal lands as
     // 'pending' and only leaves that state through an explicit transition

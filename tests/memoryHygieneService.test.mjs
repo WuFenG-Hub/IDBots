@@ -1014,3 +1014,27 @@ test('capability-drafts hygiene step purges expired rejected/draft rows inside t
     cleanup();
   }
 });
+
+test('capability-falsified retention purges rows older than 180 days and reports the counter', async () => {
+  const now = new Date(2026, 7, 25, 10, 0);
+  const { cleanup, coworkStore, service } = await setup(now);
+  try {
+    const DAYMS = 86_400_000;
+    const nowMs = now.getTime();
+    coworkStore.recordFalsifiedHypothesis({
+      metabotId: 9, title: '过期的证伪', description: 'd', reason: 'r',
+      source: 'validation', sourceDraftId: null, falsifiedAt: nowMs - 181 * DAYMS,
+    });
+    coworkStore.recordFalsifiedHypothesis({
+      metabotId: 9, title: '新鲜的证伪', description: 'd', reason: 'r',
+      source: 're_review', sourceDraftId: null, falsifiedAt: nowMs - 179 * DAYMS,
+    });
+
+    const stats = await service.runNow();
+    assert.equal(stats.counts.capabilityFalsifiedPurged, 1, 'only the row past the retention horizon drains');
+    const remaining = coworkStore.listFalsifiedHypotheses(9).map((row) => row.title);
+    assert.deepEqual(remaining, ['新鲜的证伪']);
+  } finally {
+    cleanup();
+  }
+});

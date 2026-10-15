@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { CoworkStore } from '../coworkStore';
+import type { CapabilityFalsifiedHypothesis, CoworkStore } from '../coworkStore';
 import type { DreamDayActivity, DreamStore, MetabotPrediction, PromptLayerSnapshot } from '../dreamStore';
 import type { MetaIDExperienceStore } from '../metaidExperienceStore';
 import type { MetaIDImpressionStore } from '../metaidImpressionStore';
@@ -35,6 +35,18 @@ import {
   buildCapabilityValidationPrompt,
   parseCapabilityValidationOutput,
 } from '../libs/capabilityValidationPrompt';
+import {
+  FALSIFIED_PROMPT_MAX_ITEMS,
+  FALSIFIED_RETENTION_DAYS,
+  citedDiaryDates,
+  combinePanelOutcomes,
+  findSimilarFalsified,
+  hasPostOriginCitation,
+  joinPanelRationales,
+  resolveCapabilityGateConfig,
+  type CapabilityGateConfig,
+  type GateOutcome,
+} from '../libs/capabilityGateRegularizers';
 import {
   RECONCILE_MAX_CONFLICT_CANDIDATES,
   RECONCILE_MAX_DRAFTS_PER_NIGHT,
@@ -353,6 +365,13 @@ export interface DreamServiceDeps {
   tickIntervalMs?: number;
   llmTimeoutMs?: number;
   /**
+   * RRSI P1 gate regularizers (design §6.1): dual-panel agreement and the
+   * prospective rule default to ON; this override exists so tests whose
+   * subject is downstream of the gate can pin the legacy single-panel
+   * behavior. Production wiring never sets it.
+   */
+  capabilityGate?: Partial<CapabilityGateConfig>;
+  /**
    * Delays before each in-run transient LLM re-drive (default
    * DREAM_TRANSIENT_LLM_RETRY_DELAYS_MS). Tests inject tiny values; pass an
    * empty array to disable in-run retries entirely.
@@ -370,6 +389,32 @@ interface DreamQueueItem {
 
 function dreamRunKey(metabotId: number, date: string): string {
   return `${metabotId}:${date}`;
+}
+
+/**
+ * Fresh-gate panel classification (RRI P1, design §6.1 P1.2): a validated
+ * verdict above the promote threshold is 'promote', a rejected verdict is
+ * 'demote', everything else (and a missing verdict) degrades toward 'hold'.
+ */
+function classifyGateVerdict(verdict: { verdict: string; score: number } | null): GateOutcome | null {
+  if (!verdict) return null;
+  if (verdict.verdict === 'validated' && verdict.score >= CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE) {
+    return 'promote';
+  }
+  if (verdict.verdict === 'rejected') return 'demote';
+  return 'hold';
+}
+
+/**
+ * Re-review panel classification (RRI P1, design §6.1 P1.2): validated is a
+ * score refresh ('promote'); only a rejected verdict BELOW the promotion line
+ * demotes — everything else (and a missing verdict) holds.
+ */
+function classifyReReviewVerdict(verdict: { verdict: string; score: number } | null): GateOutcome | null {
+  if (!verdict) return null;
+  if (verdict.verdict === 'validated') return 'promote';
+  if (verdict.verdict === 'rejected' && verdict.score < CAPABILITY_PROMOTION_MIN_SCORE) return 'demote';
+  return 'hold';
 }
 
 /** Separator set the diary uses inside composite references (「A=B」「甲→乙」). */
@@ -409,6 +454,8 @@ function diarySpanAnchoredInText(span: string, rawText: string): boolean {
 
 export class DreamService {
   private readonly performChat: DreamPerformChat;
+  /** RRSI P1: resolved once — { panels: 2, prospective: true } unless pinned. */
+  private readonly capabilityGate: CapabilityGateConfig;
   private timer: ReturnType<typeof setInterval> | null = null;
   private queue: DreamQueueItem[] = [];
   private processing = false;
@@ -426,6 +473,7 @@ export class DreamService {
 
   constructor(private deps: DreamServiceDeps) {
     this.performChat = deps.performChat ?? performChatCompletionForOrchestrator;
+    this.capabilityGate = resolveCapabilityGateConfig(deps.capabilityGate);
   }
 
   start(): void {
@@ -941,8 +989,13 @@ export class DreamService {
      * as the prompt's practice-outcomes section. */
     practiceOutcomes?: DreamPracticeOutcome[],
     /** RSI P0 prompt inputs: prediction calibration digest + retention-gate
-     * rollback notice (both rendered as their own sections when non-empty). */
-    dreamExtras?: { predictionCalibration?: string | null; rollbackNotice?: string | null },
+     * rollback notice (both rendered as their own sections when non-empty).
+     * RRSI P1 adds the falsified-hypothesis list (design §6.1 P1.3). */
+    dreamExtras?: {
+      predictionCalibration?: string | null;
+      rollbackNotice?: string | null;
+      falsifiedHypotheses?: Array<{ title: string; reason: string }>;
+    },
   ): Promise<{
     prompt: { system: string; user: string };
     output: DreamOutput;
@@ -968,6 +1021,7 @@ export class DreamService {
         practiceOutcomes,
         predictionCalibration: dreamExtras?.predictionCalibration,
         rollbackNotice: dreamExtras?.rollbackNotice,
+        falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -995,6 +1049,7 @@ export class DreamService {
         practiceOutcomes,
         predictionCalibration: dreamExtras?.predictionCalibration,
         rollbackNotice: dreamExtras?.rollbackNotice,
+        falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -1040,6 +1095,7 @@ export class DreamService {
       practiceOutcomes,
       predictionCalibration: dreamExtras?.predictionCalibration,
       rollbackNotice: dreamExtras?.rollbackNotice,
+      falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
     });
     const output = await this.generateAndParse(
       prompt.system,
@@ -1173,6 +1229,20 @@ export class DreamService {
       // executed during the dreamed day (and backfill their outcome summaries)
       // before the prompt is built, so tonight's curriculum sees them.
       const practiceOutcomes = this.collectPracticeOutcomesForDream(metabotId, startMs, endMs);
+      // RRSI P1: the falsified-hypothesis section rides the dream prompt
+      // (design §6.1 P1.3); a ledger failure never blocks the dream.
+      let falsifiedHypotheses: Array<{ title: string; reason: string }> = [];
+      try {
+        falsifiedHypotheses = this.deps.coworkStore.listFalsifiedHypotheses(metabotId, {
+          sinceMs: Date.now() - FALSIFIED_RETENTION_DAYS * 86_400_000,
+          limit: FALSIFIED_PROMPT_MAX_ITEMS,
+        }).map(({ title, reason }) => ({ title, reason }));
+      } catch (error) {
+        console.warn(
+          `[DreamService] Falsified ledger read for the dream prompt failed for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        falsifiedHypotheses = [];
+      }
       const prepared = await this.prepareDreamPromptAndOutput(
         metabot,
         date,
@@ -1183,7 +1253,7 @@ export class DreamService {
         surfReport,
         this.resolveSynthesisTimeoutMs(runStartedAtMs, currentRun.attemptCount),
         practiceOutcomes.outcomes,
-        { predictionCalibration, rollbackNotice: retentionGate.notice },
+        { predictionCalibration, rollbackNotice: retentionGate.notice, falsifiedHypotheses },
       );
       let output = prepared.output;
       // Repair runs discard selfIdentity in writeDreamResults, so skip the
@@ -1238,9 +1308,15 @@ export class DreamService {
         // injection roster (promoted procedures archived alongside).
         reReviewed: reReview.reReviewed,
         demoted: reReview.demoted,
+        // RRSI P1: the re-review's own panel-agreement counters (design
+        // §6.1 P1.2 — the empty-day path never runs the re-review).
+        reReviewPanels: reReview.panels,
         // Cross-night semantic dedup (audit P1): how many of tonight's memory
         // writes merged into an older row instead of inserting a variant.
         dedupMerged: writeResult.dedupMerged,
+        // RRSI P1: the checked capability-draft insert funnel (duplicates of
+        // live drafts and re-proposals of recently falsified hypotheses).
+        capabilityDraftInsert: writeResult.capabilityDraftInsert,
         // P1: any explicit human feedback today (thumbs up/down, acceptance
         // rating) — separates "zero negative because good" from "no data".
         hasExplicitFeedback: hasExplicitHumanFeedback(activity),
@@ -1389,9 +1465,22 @@ export class DreamService {
     rejected: number;
     validatedIds: number[];
     chainEvidence: ChainEvidenceDigest['counts'] | null;
+    deferredSameNight: number;
+    prospectiveDowngraded: number;
+    panels: { agreed: number; disagreed: number; incomplete: number };
   }> {
-    const zero = { checked: 0, validated: 0, rejected: 0, validatedIds: [] as number[], chainEvidence: null };
+    const zero = {
+      checked: 0,
+      validated: 0,
+      rejected: 0,
+      validatedIds: [] as number[],
+      chainEvidence: null,
+      deferredSameNight: 0,
+      prospectiveDowngraded: 0,
+      panels: { agreed: 0, disagreed: 0, incomplete: 0 },
+    };
     try {
+      const gate = this.capabilityGate;
       // Disputed-timeout sweep (design §4.4): an unresolved dispute older than
       // the auto-reject window demotes to 'rejected'; the existing purge
       // (rejected + old) removes the corpse later.
@@ -1413,14 +1502,24 @@ export class DreamService {
         );
       }
 
+      // Prospective selection (design §6.1 P1.1): tonight's own distillations
+      // wait until a later diary exists; only older drafts (plus disputed
+      // re-entries) face the panel.
       const disputed = this.deps.coworkStore.listCapabilityDrafts(metabot.id, { status: 'disputed' });
-      const fresh = this.deps.coworkStore.listCapabilityDrafts(metabot.id, { status: 'draft' });
+      const freshAll = this.deps.coworkStore.listCapabilityDrafts(metabot.id, { status: 'draft' });
+      const fresh = gate.prospective ? freshAll.filter((draft) => draft.dreamDate < date) : freshAll;
+      const deferredSameNight = freshAll.length - fresh.length;
       const pending = [...disputed, ...fresh].slice(0, CAPABILITY_VALIDATION_MAX_DRAFTS);
-      if (pending.length === 0) return zero;
+      if (pending.length === 0) {
+        return deferredSameNight > 0 ? { ...zero, deferredSameNight } : zero;
+      }
       const recentSummaries = this.deps.dreamStore.listDailySummaries(
         metabot.id,
         CAPABILITY_VALIDATION_SUMMARY_DAYS,
       );
+      // Grounding set = the diary dates actually shown to the panel (the bare
+      // dreamed date is deliberately absent: an empty day has no diary to cite).
+      const evidenceDates = new Set(recentSummaries.map((summary) => summary.summaryDate));
 
       // Chain-grounded evidence digest (design §5.2): the host collects the
       // pin/txid refs from tonight's drafts and the day's chain activity and
@@ -1455,84 +1554,143 @@ export class DreamService {
         }
       }
 
-      const prompt = buildCapabilityValidationPrompt({
-        botName: metabot.name,
-        date,
-        drafts: pending.map((draft) => ({
-          id: draft.id,
-          dreamDate: draft.dreamDate,
-          title: draft.title,
-          description: draft.description,
-          capabilityType: draft.capabilityType,
-          conflictNote: draft.status === 'disputed' ? draft.validationNotes : null,
-          chainRefs: chainRefsByDraftId.get(draft.id) ?? [],
-        })),
-        recentSummaries: recentSummaries.map((summary) => ({
-          summaryDate: summary.summaryDate,
-          summaryText: summary.summaryText,
-        })),
-        chainEvidence: chainDigest ? renderChainEvidenceDigest(chainDigest) : null,
-      });
-      const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
-      const parsed = parseCapabilityValidationOutput(raw, new Set(pending.map((draft) => draft.id)));
-      if (!parsed.ok) {
-        console.warn(`[DreamService] Capability validation parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
-        return { ...zero, checked: pending.length, chainEvidence: chainDigest ? chainDigest.counts : null };
-      }
-      // Grounding gate: a verdict whose rationale cites a diary date that was
-      // never provided as evidence is a hallucinated citation — drop it.
-      const evidenceDates = new Set([date, ...recentSummaries.map((summary) => summary.summaryDate)]);
-      const groundedVerdicts = parsed.verdicts.filter((verdict) => {
-        const citedDates = verdict.rationale.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-        return citedDates.every((cited) => evidenceDates.has(cited));
-      });
-      const droppedUngrounded = parsed.verdicts.length - groundedVerdicts.length;
-      if (droppedUngrounded > 0) {
+      // Falsified-history context (design §6.1 P1.3): each pending draft shows
+      // its most similar ledger entry so the panel judges with it in view.
+      let ledger: CapabilityFalsifiedHypothesis[] = [];
+      try {
+        ledger = this.deps.coworkStore.listFalsifiedHypotheses(metabot.id, {
+          sinceMs: Date.now() - FALSIFIED_RETENTION_DAYS * 86_400_000,
+        });
+      } catch (error) {
         console.warn(
-          `[DreamService] Dropped ${droppedUngrounded} capability verdict(s) citing unrecorded diary dates for metabot ${metabot.id}`,
+          `[DreamService] Falsified ledger unavailable for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      // Chain grounding gate (design §5.2): with a digest in play, a rationale
-      // citing a pin id / txid that was never collected tonight is a
-      // hallucinated citation — discard the verdict.
-      let chainGroundedVerdicts = groundedVerdicts;
-      if (chainDigest) {
-        const knownRefs = new Set(chainDigest.knownRefIds);
-        chainGroundedVerdicts = groundedVerdicts.filter((verdict) => {
-          const citedRefs = chainRefKeysOf(verdict.rationale);
-          return citedRefs.every((cited) => knownRefs.has(cited));
-        });
-        const droppedChain = groundedVerdicts.length - chainGroundedVerdicts.length;
-        if (droppedChain > 0) {
-          console.warn(
-            `[DreamService] Dropped ${droppedChain} capability verdict(s) citing unverified pin/txid refs for metabot ${metabot.id}`,
-          );
+      const similarByDraftId = new Map<number, { title: string; reason: string; falsifiedDate: string }>();
+      for (const draft of pending) {
+        const similar = findSimilarFalsified(draft.title, ledger);
+        if (similar) {
+          similarByDraftId.set(draft.id, {
+            title: similar.title,
+            reason: similar.reason,
+            falsifiedDate: formatBotWorkspaceDate(new Date(similar.falsifiedAt)),
+          });
         }
       }
+
+      const draftInputs = (drafts: typeof pending) => drafts.map((draft) => ({
+        id: draft.id,
+        dreamDate: draft.dreamDate,
+        title: draft.title,
+        description: draft.description,
+        capabilityType: draft.capabilityType,
+        conflictNote: draft.status === 'disputed' ? draft.validationNotes : null,
+        chainRefs: chainRefsByDraftId.get(draft.id) ?? [],
+        similarFalsified: similarByDraftId.get(draft.id) ?? null,
+      }));
+      const summaryInputs = recentSummaries.map((summary) => ({
+        summaryDate: summary.summaryDate,
+        summaryText: summary.summaryText,
+      }));
+      const promptA = buildCapabilityValidationPrompt({
+        botName: metabot.name,
+        date,
+        drafts: draftInputs(pending),
+        recentSummaries: summaryInputs,
+        chainEvidence: chainDigest ? renderChainEvidenceDigest(chainDigest) : null,
+        prospective: gate.prospective,
+      });
+      const rawA = await this.callDreamLlm(promptA.system, promptA.user, brain, 4096);
+      const parsedA = parseCapabilityValidationOutput(rawA, new Set(pending.map((draft) => draft.id)));
+      if (parsedA.ok === false) {
+        console.warn(`[DreamService] Capability validation parse failed for metabot ${metabot.id}: ${parsedA.error}`);
+        return {
+          ...zero,
+          checked: pending.length,
+          deferredSameNight,
+          chainEvidence: chainDigest ? chainDigest.counts : null,
+          panels: { agreed: 0, disagreed: 0, incomplete: pending.length },
+        };
+      }
+
+      // Panel B (design §6.1 P1.2): the same call with the drafts reversed —
+      // a throw or parse failure degrades to an empty verdict list (every
+      // draft becomes incomplete), never to a dream-run failure. With a
+      // single panel, panel B is panel A.
+      let verdictsB: typeof parsedA.verdicts = gate.panels === 1 ? parsedA.verdicts : [];
+      if (gate.panels === 2) {
+        const promptB = buildCapabilityValidationPrompt({
+          botName: metabot.name,
+          date,
+          drafts: draftInputs([...pending].reverse()),
+          recentSummaries: summaryInputs,
+          chainEvidence: chainDigest ? renderChainEvidenceDigest(chainDigest) : null,
+          prospective: gate.prospective,
+        });
+        try {
+          const rawB = await this.callDreamLlm(promptB.system, promptB.user, brain, 4096);
+          const parsedB = parseCapabilityValidationOutput(rawB, new Set(pending.map((draft) => draft.id)));
+          verdictsB = parsedB.ok ? parsedB.verdicts : [];
+        } catch (error) {
+          console.warn(
+            `[DreamService] Capability validation panel B failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          verdictsB = [];
+        }
+      }
+
+      const draftById = new Map(pending.map((draft) => [draft.id, draft]));
+      const knownChainRefs = chainDigest ? new Set(chainDigest.knownRefIds) : null;
+      const downgradedIds = new Set<number>();
+      const panelA = this.groundPanelVerdicts(parsedA.verdicts, draftById, evidenceDates, knownChainRefs, downgradedIds);
+      const panelB = this.groundPanelVerdicts(verdictsB, draftById, evidenceDates, knownChainRefs, downgradedIds);
+
+      const panels = { agreed: 0, disagreed: 0, incomplete: 0 };
       let validated = 0;
       let rejected = 0;
       const validatedIds: number[] = [];
-      for (const verdict of chainGroundedVerdicts) {
-        const promote = verdict.verdict === 'validated' && verdict.score >= CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE;
-        const demote = verdict.verdict === 'rejected';
-        if (!promote && !demote) continue;
+      for (const draft of pending) {
+        const verdictA = panelA.get(draft.id) ?? null;
+        const verdictB = panelB.get(draft.id) ?? null;
+        const { outcome, agreement } = combinePanelOutcomes(classifyGateVerdict(verdictA), classifyGateVerdict(verdictB));
+        panels[agreement] += 1;
+        if (outcome === 'hold') continue;
+        const scoreA = verdictA?.score ?? 0;
+        const scoreB = verdictB?.score ?? 0;
+        const joinedNotes = joinPanelRationales(verdictA?.rationale ?? '', verdictB?.rationale ?? '');
         this.deps.coworkStore.updateCapabilityDraftValidation({
-          id: verdict.id,
+          id: draft.id,
           metabotId: metabot.id,
-          status: promote ? 'validated' : 'rejected',
-          validationScore: verdict.score,
-          validationNotes: verdict.rationale,
+          status: outcome === 'promote' ? 'validated' : 'rejected',
+          validationScore: Math.min(scoreA, scoreB),
+          validationNotes: joinedNotes,
         });
-        if (promote) {
+        if (outcome === 'promote') {
           validated += 1;
-          validatedIds.push(verdict.id);
+          validatedIds.push(draft.id);
         } else {
           rejected += 1;
+          // Agreed demotion closes the loop into the falsified ledger (design
+          // §6.1 P1.3); a ledger failure never undoes the verdict.
+          try {
+            this.deps.coworkStore.recordFalsifiedHypothesis({
+              metabotId: metabot.id,
+              title: draft.title,
+              description: draft.description,
+              reason: verdictA?.rationale ?? '',
+              source: 'validation',
+              sourceDraftId: draft.id,
+            });
+          } catch (error) {
+            console.warn(
+              `[DreamService] Falsified ledger write failed for metabot ${metabot.id} draft #${draft.id}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
       }
-      if (validated > 0 || rejected > 0) {
+      if (validated > 0 || rejected > 0 || panels.disagreed > 0 || panels.incomplete > 0) {
         console.log(
-          `[DreamService] Capability validation for metabot ${metabot.id}: validated=${validated}, rejected=${rejected}, checked=${pending.length}`,
+          `[DreamService] Capability validation for metabot ${metabot.id}: validated=${validated}, rejected=${rejected}, checked=${pending.length}, agreed/disagreed/incomplete=${panels.agreed}/${panels.disagreed}/${panels.incomplete}`,
         );
       }
       return {
@@ -1541,6 +1699,9 @@ export class DreamService {
         rejected,
         validatedIds,
         chainEvidence: chainDigest ? chainDigest.counts : null,
+        deferredSameNight,
+        prospectiveDowngraded: downgradedIds.size,
+        panels,
       };
     } catch (error) {
       console.warn(
@@ -1548,6 +1709,69 @@ export class DreamService {
       );
       return zero;
     }
+  }
+
+  /**
+   * Shared per-panel verdict grounding (RRSI P1, design §6.1): the date
+   * filter, the chain filter, then the prospective downgrade of validated
+   * verdicts lacking a post-origin diary citation. Surviving (possibly
+   * downgraded) verdicts are keyed by draft id; downgraded ids are recorded
+   * in `downgradedIds` for telemetry.
+   */
+  private groundPanelVerdicts(
+    verdicts: Array<{ id: number; verdict: string; score: number; rationale: string }>,
+    draftById: Map<number, { id: number; dreamDate: string }>,
+    evidenceDates: ReadonlySet<string>,
+    knownChainRefs: ReadonlySet<string> | null,
+    downgradedIds: Set<number>,
+  ): Map<number, { id: number; verdict: string; score: number; rationale: string }> {
+    const grounded = new Map<number, { id: number; verdict: string; score: number; rationale: string }>();
+    let droppedUngrounded = 0;
+    let droppedChain = 0;
+    for (const verdict of verdicts) {
+      // Date grounding: a rationale citing a diary date that was never
+      // provided as evidence is a hallucinated citation — drop it.
+      if (!citedDiaryDates(verdict.rationale).every((cited) => evidenceDates.has(cited))) {
+        droppedUngrounded += 1;
+        continue;
+      }
+      // Chain grounding: with a digest in play, a rationale citing a pin id /
+      // txid that was never collected tonight is a hallucinated citation.
+      if (knownChainRefs) {
+        const citedRefs = chainRefKeysOf(verdict.rationale);
+        if (!citedRefs.every((cited) => knownChainRefs.has(cited))) {
+          droppedChain += 1;
+          continue;
+        }
+      }
+      // Prospective downgrade: a validated verdict must cite a diary date
+      // strictly later than the draft's origin date.
+      if (
+        this.capabilityGate.prospective
+        && verdict.verdict === 'validated'
+      ) {
+        const draft = draftById.get(verdict.id);
+        if (
+          draft
+          && !hasPostOriginCitation({
+            rationale: verdict.rationale,
+            draftDreamDate: draft.dreamDate,
+            evidenceDates,
+          })
+        ) {
+          downgradedIds.add(verdict.id);
+          grounded.set(verdict.id, { ...verdict, verdict: 'keep_draft' });
+          continue;
+        }
+      }
+      grounded.set(verdict.id, verdict);
+    }
+    if (droppedUngrounded > 0 || droppedChain > 0) {
+      console.warn(
+        `[DreamService] Dropped ${droppedUngrounded} ungrounded + ${droppedChain} chain-ungrounded capability verdict(s)`,
+      );
+    }
+    return grounded;
   }
 
   /**
@@ -1570,9 +1794,10 @@ export class DreamService {
     metabot: DreamMetabotLike,
     brain: DreamBrainPair,
     date: string,
-  ): Promise<{ reReviewed: number; demoted: number }> {
-    const zero = { reReviewed: 0, demoted: 0 };
+  ): Promise<{ reReviewed: number; demoted: number; panels: { agreed: number; disagreed: number; incomplete: number } }> {
+    const zero = { reReviewed: 0, demoted: 0, panels: { agreed: 0, disagreed: 0, incomplete: 0 } };
     try {
+      const gate = this.capabilityGate;
       const pending = this.deps.coworkStore.listReReviewableCapabilityDrafts(metabot.id, {
         olderThanMs: Date.now() - CAPABILITY_REVIEW_INTERVAL_DAYS * 86_400_000,
         limit: CAPABILITY_REVIEW_MAX_PER_NIGHT,
@@ -1582,52 +1807,84 @@ export class DreamService {
         metabot.id,
         CAPABILITY_VALIDATION_SUMMARY_DAYS,
       );
-      const prompt = buildCapabilityValidationPrompt({
+      // Same grounding set as the fresh gate: the diary dates actually shown.
+      const evidenceDates = new Set(recentSummaries.map((summary) => summary.summaryDate));
+      const draftInputs = (drafts: typeof pending) => drafts.map((draft) => ({
+        id: draft.id,
+        dreamDate: draft.dreamDate,
+        title: draft.title,
+        description: draft.description,
+        capabilityType: draft.capabilityType,
+      }));
+      const summaryInputs = recentSummaries.map((summary) => ({
+        summaryDate: summary.summaryDate,
+        summaryText: summary.summaryText,
+      }));
+      const promptA = buildCapabilityValidationPrompt({
         botName: metabot.name,
         date,
-        drafts: pending.map((draft) => ({
-          id: draft.id,
-          dreamDate: draft.dreamDate,
-          title: draft.title,
-          description: draft.description,
-          capabilityType: draft.capabilityType,
-        })),
-        recentSummaries: recentSummaries.map((summary) => ({
-          summaryDate: summary.summaryDate,
-          summaryText: summary.summaryText,
-        })),
+        drafts: draftInputs(pending),
+        recentSummaries: summaryInputs,
+        prospective: gate.prospective,
       });
-      const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
-      const parsed = parseCapabilityValidationOutput(raw, new Set(pending.map((draft) => draft.id)));
-      if (!parsed.ok) {
-        console.warn(`[DreamService] Capability re-review parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
-        return { ...zero, reReviewed: pending.length };
+      const rawA = await this.callDreamLlm(promptA.system, promptA.user, brain, 4096);
+      const parsedA = parseCapabilityValidationOutput(rawA, new Set(pending.map((draft) => draft.id)));
+      if (parsedA.ok === false) {
+        console.warn(`[DreamService] Capability re-review parse failed for metabot ${metabot.id}: ${parsedA.error}`);
+        return {
+          reReviewed: pending.length,
+          demoted: 0,
+          panels: { agreed: 0, disagreed: 0, incomplete: pending.length },
+        };
       }
-      // Same grounding gate as the fresh-draft validation pass.
-      const evidenceDates = new Set([date, ...recentSummaries.map((summary) => summary.summaryDate)]);
-      const groundedVerdicts = parsed.verdicts.filter((verdict) => {
-        const citedDates = verdict.rationale.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-        return citedDates.every((cited) => evidenceDates.has(cited));
-      });
-      const droppedUngrounded = parsed.verdicts.length - groundedVerdicts.length;
-      if (droppedUngrounded > 0) {
-        console.warn(
-          `[DreamService] Dropped ${droppedUngrounded} capability re-review verdict(s) citing unrecorded diary dates for metabot ${metabot.id}`,
-        );
+      // Panel B mirrors the fresh gate: drafts reversed, failures degrade to
+      // an empty verdict list, single-panel configs reuse panel A.
+      let verdictsB: typeof parsedA.verdicts = gate.panels === 1 ? parsedA.verdicts : [];
+      if (gate.panels === 2) {
+        const promptB = buildCapabilityValidationPrompt({
+          botName: metabot.name,
+          date,
+          drafts: draftInputs([...pending].reverse()),
+          recentSummaries: summaryInputs,
+          prospective: gate.prospective,
+        });
+        try {
+          const rawB = await this.callDreamLlm(promptB.system, promptB.user, brain, 4096);
+          const parsedB = parseCapabilityValidationOutput(rawB, new Set(pending.map((draft) => draft.id)));
+          verdictsB = parsedB.ok ? parsedB.verdicts : [];
+        } catch (error) {
+          console.warn(
+            `[DreamService] Capability re-review panel B failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          verdictsB = [];
+        }
       }
-      const byId = new Map(pending.map((draft) => [draft.id, draft]));
+
+      const draftById = new Map(pending.map((draft) => [draft.id, draft]));
+      const downgradedIds = new Set<number>();
+      const panelA = this.groundPanelVerdicts(parsedA.verdicts, draftById, evidenceDates, null, downgradedIds);
+      const panelB = this.groundPanelVerdicts(verdictsB, draftById, evidenceDates, null, downgradedIds);
+
+      const panels = { agreed: 0, disagreed: 0, incomplete: 0 };
       let demoted = 0;
-      for (const verdict of groundedVerdicts) {
-        const draft = byId.get(verdict.id);
-        if (!draft) continue;
-        const demote = verdict.verdict === 'rejected' && verdict.score < CAPABILITY_PROMOTION_MIN_SCORE;
-        if (demote) {
+      for (const draft of pending) {
+        const verdictA = panelA.get(draft.id) ?? null;
+        const verdictB = panelB.get(draft.id) ?? null;
+        const { outcome, agreement } = combinePanelOutcomes(classifyReReviewVerdict(verdictA), classifyReReviewVerdict(verdictB));
+        panels[agreement] += 1;
+        // Incomplete: a transient failure retries the next night — the review
+        // clock is NOT refreshed, so the draft stays selected.
+        if (agreement === 'incomplete') continue;
+        const scoreA = verdictA?.score ?? 0;
+        const scoreB = verdictB?.score ?? 0;
+        const joinedNotes = joinPanelRationales(verdictA?.rationale ?? '', verdictB?.rationale ?? '');
+        if (outcome === 'demote') {
           this.deps.coworkStore.updateCapabilityDraftValidation({
-            id: verdict.id,
+            id: draft.id,
             metabotId: metabot.id,
             status: 'rejected',
-            validationScore: verdict.score,
-            validationNotes: verdict.rationale,
+            validationScore: Math.min(scoreA, scoreB),
+            validationNotes: joinedNotes,
           });
           demoted += 1;
           // Loop closure: a demoted technique must not survive as hardened
@@ -1642,21 +1899,38 @@ export class DreamService {
               );
             }
           }
+          // An AGREED demotion also lands in the falsified ledger (design
+          // §6.1 P1.3); a ledger failure never undoes the demotion.
+          try {
+            this.deps.coworkStore.recordFalsifiedHypothesis({
+              metabotId: metabot.id,
+              title: draft.title,
+              description: draft.description,
+              reason: verdictA?.rationale ?? '',
+              source: 're_review',
+              sourceDraftId: draft.id,
+            });
+          } catch (error) {
+            console.warn(
+              `[DreamService] Falsified ledger write failed for metabot ${metabot.id} draft #${draft.id}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
           continue;
         }
-        // The row survives the panel: refresh the review bookkeeping (a
-        // maintained validated verdict also takes the fresh score).
+        // The row survives the panel: refresh the review bookkeeping (an
+        // agreed maintained verdict also takes the panels' fresh score; a
+        // disagreement records itself in the notes).
         this.deps.coworkStore.markCapabilityDraftReviewed({
-          id: verdict.id,
+          id: draft.id,
           metabotId: metabot.id,
-          validationScore: verdict.verdict === 'validated' ? verdict.score : null,
-          validationNotes: verdict.rationale,
+          validationScore: outcome === 'promote' ? Math.min(scoreA, scoreB) : null,
+          validationNotes: agreement === 'disagreed' ? `panels disagreed — ${joinedNotes}` : joinedNotes,
         });
       }
       console.log(
-        `[DreamService] Capability re-review for metabot ${metabot.id}: reReviewed=${pending.length}, demoted=${demoted}`,
+        `[DreamService] Capability re-review for metabot ${metabot.id}: reReviewed=${pending.length}, demoted=${demoted}, agreed/disagreed/incomplete=${panels.agreed}/${panels.disagreed}/${panels.incomplete}`,
       );
-      return { reReviewed: pending.length, demoted };
+      return { reReviewed: pending.length, demoted, panels };
     } catch (error) {
       console.warn(
         `[DreamService] Capability re-review failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -2666,7 +2940,10 @@ export class DreamService {
     isRepair: boolean,
     impressionSubjects: ReturnType<DreamService['buildDreamImpressionSubjects']>,
     observerGlobalMetaID?: string | null,
-  ): { dedupMerged: number } {
+  ): {
+    dedupMerged: number;
+    capabilityDraftInsert: { inserted: number; skippedDuplicate: number; skippedFalsified: number };
+  } {
     // RSI P0 retention gate: snapshot the CURRENT dream-origin prompt layer
     // immediately before tonight's writes, so a later negative-feedback spike
     // can deterministically restore exactly this state. Never fails the write.
@@ -2900,17 +3177,23 @@ export class DreamService {
     // the model distilled today becomes a 'draft' row in capability_drafts.
     // This never touches the existing skill tables — validation/promotion into
     // real skills is a later phase. A failure here must not fail the dream run.
+    // RRSI P1: the checked insert also skips duplicates of live drafts and of
+    // hypotheses falsified within FALSIFIED_BLOCK_DAYS (design §6.1 P1.3).
     const capabilityLearnings = Array.isArray(output.capabilityLearnings) ? output.capabilityLearnings : [];
+    const capabilityDraftInsert = { inserted: 0, skippedDuplicate: 0, skippedFalsified: 0 };
     if (capabilityLearnings.length > 0) {
       try {
-        const inserted = this.deps.coworkStore.insertCapabilityDrafts(
+        const result = this.deps.coworkStore.insertCapabilityDraftsChecked(
           metabotId,
           date,
           capabilityLearnings,
         );
-        if (inserted > 0) {
+        capabilityDraftInsert.inserted = result.inserted;
+        capabilityDraftInsert.skippedDuplicate = result.skippedDuplicate;
+        capabilityDraftInsert.skippedFalsified = result.skippedFalsified;
+        if (result.inserted > 0 || result.skippedDuplicate > 0 || result.skippedFalsified > 0) {
           console.log(
-            `[DreamService] Capability drafts for metabot ${metabotId} date ${date}: inserted=${inserted}`,
+            `[DreamService] Capability drafts for metabot ${metabotId} date ${date}: inserted=${result.inserted}, skippedDuplicate=${result.skippedDuplicate}, skippedFalsified=${result.skippedFalsified}`,
           );
         }
       } catch (error) {
@@ -2946,7 +3229,7 @@ export class DreamService {
       }
     }
 
-    return { dedupMerged };
+    return { dedupMerged, capabilityDraftInsert };
   }
 }
 

@@ -49,6 +49,10 @@ import {
 } from './memory/memoryScope';
 import { resolveMemoryScopes, type ResolveMemoryScopesInput } from './memory/memoryScopeResolver';
 import { clampMemoryPromptMaxChars } from './memory/memoryPromptBlocks';
+import {
+  FALSIFIED_BLOCK_DAYS,
+  hypothesisTitleKey,
+} from './libs/capabilityGateRegularizers';
 import { clampMemoryImportance, deriveMemoryImportance } from './memory/memoryImportance';
 import {
   normalizeMemoryMatchKey,
@@ -945,6 +949,47 @@ interface CapabilityDraftRow {
   last_reviewed_at?: number | string | null;
   conditions_text?: string | null;
   uncertainty_text?: string | null;
+}
+
+/** Which gate pass falsified a hypothesis (RRSI P1 ledger provenance). */
+export type CapabilityFalsifiedSource = 'validation' | 're_review';
+
+/** One `capability_falsified_hypotheses` row — the bot's edit history of
+ * falsified ideas (design §6.1 P1.3); re-falsification upserts the row. */
+export interface CapabilityFalsifiedHypothesis {
+  id: number;
+  metabotId: number;
+  title: string;
+  titleKey: string;
+  description: string;
+  reason: string;
+  source: CapabilityFalsifiedSource;
+  sourceDraftId: number | null;
+  falsifiedAt: number;
+  hitCount: number;
+  lastHitAt: number | null;
+}
+
+/** Outcome of a checked capability-draft insert (RRSI P1). */
+export interface CapabilityDraftInsertResult {
+  inserted: number;
+  insertedIds: number[];
+  skippedDuplicate: number;
+  skippedFalsified: number;
+}
+
+interface CapabilityFalsifiedRow {
+  id: number | string;
+  metabot_id: number | string;
+  title: string;
+  title_key: string;
+  description: string;
+  reason: string;
+  source: string;
+  source_draft_id: number | string | null;
+  falsified_at: number | string;
+  hit_count: number | string;
+  last_hit_at: number | string | null;
 }
 
 /** Risk class of a dream-proposed practice task (design 2026-10-10 §3.2). */
@@ -7287,6 +7332,233 @@ export class CoworkStore implements MemoryBackend {
       this.saveDb();
     }
     return inserted;
+  }
+
+  /**
+   * Record (or re-falsify) one hypothesis in the falsified ledger (RRSI P1,
+   * design §6.1 P1.3). Rows are keyed by (bot, normalized title key); an
+   * upsert refreshes title/description/reason/source/timestamp but keeps
+   * hit_count. Returns null for an unusable title (empty or keyless).
+   */
+  recordFalsifiedHypothesis(input: {
+    metabotId: number;
+    title: string;
+    description: string;
+    reason: string;
+    source: CapabilityFalsifiedSource;
+    sourceDraftId: number | null;
+    falsifiedAt?: number;
+  }): CapabilityFalsifiedHypothesis | null {
+    const title = String(input?.title ?? '').trim();
+    const titleKey = hypothesisTitleKey(title);
+    if (!title || !titleKey || !Number.isInteger(input.metabotId) || input.metabotId <= 0) {
+      return null;
+    }
+    const description = String(input?.description ?? '').slice(0, 600);
+    const reason = String(input?.reason ?? '').slice(0, 300);
+    const source: CapabilityFalsifiedSource = input.source === 're_review' ? 're_review' : 'validation';
+    const sourceDraftId = Number.isInteger(input?.sourceDraftId) ? Number(input.sourceDraftId) : null;
+    const falsifiedAt = Number.isFinite(input?.falsifiedAt) ? Number(input.falsifiedAt) : Date.now();
+    this.db.run(`
+      INSERT INTO capability_falsified_hypotheses (
+        metabot_id, title, title_key, description, reason, source, source_draft_id, falsified_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(metabot_id, title_key) DO UPDATE SET
+        title = excluded.title,
+        description = excluded.description,
+        reason = excluded.reason,
+        source = excluded.source,
+        source_draft_id = excluded.source_draft_id,
+        falsified_at = excluded.falsified_at
+    `, [input.metabotId, title, titleKey, description, reason, source, sourceDraftId, falsifiedAt]);
+    this.saveDb();
+    return this.listFalsifiedHypotheses(input.metabotId, { limit: 500 })
+      .find((row) => row.titleKey === titleKey) ?? null;
+  }
+
+  /**
+   * Read the bot's falsified-hypothesis ledger, newest falsification first.
+   */
+  listFalsifiedHypotheses(
+    metabotId: number,
+    options?: { sinceMs?: number; limit?: number },
+  ): CapabilityFalsifiedHypothesis[] {
+    const where: string[] = ['metabot_id = ?'];
+    const params: Array<string | number> = [metabotId];
+    if (typeof options?.sinceMs === 'number' && Number.isFinite(options.sinceMs)) {
+      where.push('falsified_at >= ?');
+      params.push(Math.floor(options.sinceMs));
+    }
+    const limit = Number.isInteger(options?.limit)
+      ? Math.min(500, Math.max(1, Math.floor(options!.limit!)))
+      : 200;
+    const rows = this.getAll<CapabilityFalsifiedRow>(`
+      SELECT id, metabot_id, title, title_key, description, reason, source, source_draft_id,
+             falsified_at, hit_count, last_hit_at
+      FROM capability_falsified_hypotheses
+      WHERE ${where.join(' AND ')}
+      ORDER BY falsified_at DESC, id DESC
+      LIMIT ${limit}
+    `, params);
+    return rows.map((row) => this.mapFalsifiedRow(row));
+  }
+
+  /** Bump the ledger row's hit counter — a blocked re-proposal was observed. */
+  markFalsifiedHypothesisHit(id: number, atMs: number = Date.now()): boolean {
+    if (!Number.isInteger(id) || id <= 0) return false;
+    this.db.run(
+      'UPDATE capability_falsified_hypotheses SET hit_count = hit_count + 1, last_hit_at = ? WHERE id = ?',
+      [Math.floor(Number.isFinite(atMs) ? atMs : Date.now()), id],
+    );
+    const bumped = this.db.getRowsModified?.() || 0;
+    if (bumped > 0) {
+      this.saveDb();
+    }
+    return bumped > 0;
+  }
+
+  /**
+   * Retention stroke for the falsified ledger (RRSI P1): delete rows
+   * falsified before `cutoffMs`, then cap every included bot at `maxPerBot`
+   * newest rows. Bots in `excludeMetabotIds` (hygiene opt-out) are untouched.
+   */
+  purgeFalsifiedHypotheses(input: {
+    cutoffMs: number;
+    maxPerBot: number;
+    excludeMetabotIds?: ReadonlySet<number>;
+  }): number {
+    const cutoffMs = Math.floor(Number.isFinite(input?.cutoffMs) ? input.cutoffMs : 0);
+    const maxPerBot = Math.max(0, Math.floor(Number(input?.maxPerBot) || 0));
+    const exclude = input?.excludeMetabotIds instanceof Set ? [...input.excludeMetabotIds] : [];
+    const exclusion = exclude.length > 0
+      ? ` AND metabot_id NOT IN (${exclude.map(() => '?').join(', ')})`
+      : '';
+    let deleted = 0;
+    this.db.run(
+      `DELETE FROM capability_falsified_hypotheses WHERE falsified_at < ?${exclusion}`,
+      [cutoffMs, ...exclude],
+    );
+    deleted += this.db.getRowsModified?.() || 0;
+    if (maxPerBot > 0) {
+      const botRows = this.getAll<{ metabot_id: number | string }>(
+        'SELECT DISTINCT metabot_id FROM capability_falsified_hypotheses',
+        [],
+      );
+      const excludedSet = new Set(exclude);
+      for (const { metabot_id } of botRows) {
+        const metabotId = Number(metabot_id);
+        if (excludedSet.has(metabotId)) continue;
+        this.db.run(
+          `DELETE FROM capability_falsified_hypotheses
+           WHERE metabot_id = ? AND id NOT IN (
+             SELECT id FROM capability_falsified_hypotheses
+             WHERE metabot_id = ?
+             ORDER BY falsified_at DESC, id DESC
+             LIMIT ${maxPerBot}
+           )`,
+          [metabotId, metabotId],
+        );
+        deleted += this.db.getRowsModified?.() || 0;
+      }
+    }
+    if (deleted > 0) {
+      this.saveDb();
+    }
+    return deleted;
+  }
+
+  /**
+   * Checked capability-draft insert (RRSI P1): same entry validation as
+   * insertCapabilityDrafts, plus two pre-insert skips — a title key already
+   * live in a draft / validated / disputed row of this bot (also stops
+   * version-repair runs from duplicating), and a title key falsified within
+   * FALSIFIED_BLOCK_DAYS (bumps the ledger row's hit counter). A batch cannot
+   * insert the same key twice.
+   */
+  insertCapabilityDraftsChecked(
+    metabotId: number,
+    dreamDate: string,
+    learnings: Array<{
+      title?: string | null;
+      description?: string | null;
+      capabilityType?: string | null;
+    }>,
+    options?: { nowMs?: number },
+  ): CapabilityDraftInsertResult {
+    const nowMs = Number.isFinite(options?.nowMs) ? Math.floor(options!.nowMs!) : Date.now();
+    const result: CapabilityDraftInsertResult = {
+      inserted: 0,
+      insertedIds: [],
+      skippedDuplicate: 0,
+      skippedFalsified: 0,
+    };
+    if (!Number.isInteger(metabotId) || metabotId <= 0) return result;
+    const liveKeys = new Set<string>();
+    for (const draft of this.listCapabilityDrafts(metabotId)) {
+      if (draft.status === 'draft' || draft.status === 'validated' || draft.status === 'disputed') {
+        const key = hypothesisTitleKey(draft.title);
+        if (key) liveKeys.add(key);
+      }
+    }
+    const ledgerByKey = new Map<string, CapabilityFalsifiedHypothesis>();
+    for (const row of this.listFalsifiedHypotheses(metabotId, {
+      sinceMs: nowMs - FALSIFIED_BLOCK_DAYS * 86_400_000,
+      limit: 500,
+    })) {
+      ledgerByKey.set(row.titleKey, row);
+    }
+    let changed = false;
+    for (const learning of Array.isArray(learnings) ? learnings : []) {
+      const title = String(learning?.title ?? '').trim();
+      const description = String(learning?.description ?? '').trim();
+      const capabilityType = String(learning?.capabilityType ?? 'skill').trim() || 'skill';
+      if (!title || !description) continue;
+      const key = hypothesisTitleKey(title);
+      if (!key) continue;
+      if (liveKeys.has(key)) {
+        result.skippedDuplicate += 1;
+        continue;
+      }
+      const falsified = ledgerByKey.get(key);
+      if (falsified) {
+        this.markFalsifiedHypothesisHit(falsified.id, nowMs);
+        result.skippedFalsified += 1;
+        changed = true;
+        continue;
+      }
+      this.db.run(`
+        INSERT INTO capability_drafts (
+          metabot_id, dream_date, title, description, capability_type, status, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'draft', ?)
+      `, [metabotId, dreamDate, title, description, capabilityType, nowMs]);
+      const newId = Number(this.getOne<{ id: number | string }>('SELECT last_insert_rowid() AS id', [])?.id);
+      result.inserted += 1;
+      result.insertedIds.push(newId);
+      liveKeys.add(key);
+      changed = true;
+    }
+    if (changed) {
+      this.saveDb();
+    }
+    return result;
+  }
+
+  private mapFalsifiedRow(row: CapabilityFalsifiedRow): CapabilityFalsifiedHypothesis {
+    return {
+      id: Number(row.id),
+      metabotId: Number(row.metabot_id),
+      title: String(row.title),
+      titleKey: String(row.title_key),
+      description: String(row.description ?? ''),
+      reason: String(row.reason ?? ''),
+      source: row.source === 're_review' ? 're_review' : 'validation',
+      sourceDraftId: row.source_draft_id == null ? null : Number(row.source_draft_id),
+      falsifiedAt: Number(row.falsified_at),
+      hitCount: Math.max(0, Math.floor(Number(row.hit_count) || 0)),
+      lastHitAt: row.last_hit_at == null ? null : Number(row.last_hit_at),
+    };
   }
 
   /**
