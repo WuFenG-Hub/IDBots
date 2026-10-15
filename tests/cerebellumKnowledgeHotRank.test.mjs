@@ -370,14 +370,27 @@ function createKnowledgeRankHarness({
         return [];
       },
     },
-    cerebellumKnowledgeRanker: ranker
+    // Merged turn-decision bundle (mock of the main.ts caller): the
+    // knowledge ranking rides the single per-turn callback together with the
+    // block gate, exactly like the real caller.
+    cerebellumTurnDecisions: ranker || gate
       ? async (input) => {
-          rankerCalls.push(input);
-          return ranker(input);
+          let knowledgeScores = null;
+          // Mirrors the real bundle: the knowledge questions ride only when
+          // the runner gathered an eligible pool (>= CEREBELLUM_KNOWLEDGE_MIN_POOL,
+          // memory blocks on) — otherwise this decision contributes nothing.
+          if (ranker && input.knowledge.length > 0) {
+            rankerCalls.push(input);
+            knowledgeScores = await ranker(input);
+          }
+          return {
+            memoryScores: null,
+            knowledgeScores,
+            skillRanking: null,
+            serviceRanking: null,
+            gateVerdicts: gate ? await gate(input) : null,
+          };
         }
-      : undefined,
-    cerebellumVolatileBlockGate: gate
-      ? async (input) => gate(input)
       : undefined,
   });
   const buildVolatile = (prompt) => runner.buildVolatileContextPrompt(
@@ -397,13 +410,13 @@ test('runner: a score map promotes an older knowledge point into the hot layer',
   const winner = entries[entries.length - 1];
   const { rankerCalls, buildVolatile } = createKnowledgeRankHarness({
     entries,
-    ranker: ({ entries: pool }) => new Map(pool.map((entry) => [entry.id, entry.id === winner.id ? 0.99 : 0.05])),
+    ranker: ({ knowledge: pool }) => new Map(pool.map((entry) => [entry.id, entry.id === winner.id ? 0.99 : 0.05])),
   });
   const output = await buildVolatile(RANK_QUERY);
   assert.equal(rankerCalls.length, 1);
   assert.equal(rankerCalls[0].currentUserText, RANK_QUERY);
-  assert.equal(rankerCalls[0].entries.length, entries.length);
-  assert.equal(rankerCalls[0].entries[0].topic, 'topic-0');
+  assert.equal(rankerCalls[0].knowledge.length, entries.length);
+  assert.equal(rankerCalls[0].knowledge[0].topic, 'topic-0');
   assert.match(output, new RegExp(`topic="${winner.topic}"`));
   assert.equal(output.includes('topic="topic-7"'), false, 'a low-scoring recent point yields its slot');
   assert.ok(output.indexOf(`topic="${winner.topic}"`) < output.indexOf('topic="topic-0"'));
@@ -487,11 +500,14 @@ test('runner: the rank call starts before the experience section is awaited', as
   assert.equal(events[events.length - 1], 'rank-end');
 });
 
-test('runner: a skipped experience block does not wait on the knowledge rank', async () => {
+test('runner: a gated-out experience block drops the knowledge block entirely', async () => {
   const entries = Array.from({ length: CEREBELLUM_KNOWLEDGE_MIN_POOL + 3 }, (_, index) => knowledgeEntry(index));
   const { buildVolatile } = createKnowledgeRankHarness({
     entries,
-    ranker: () => new Promise(() => {}),
+    // The merged bundle always settles (its fetch rides a hard 1.5s abort
+    // budget), so a slow — not never-ending — ranker is the honest shape of
+    // "the verdict is not in yet".
+    ranker: () => new Promise((resolve) => setTimeout(() => resolve(new Map([['k11', 0.99]])), 30)),
     gate: () => ({ experience: false }),
   });
   let timer;
@@ -502,5 +518,5 @@ test('runner: a skipped experience block does not wait on the knowledge rank', a
     }),
   ]);
   clearTimeout(timer);
-  assert.equal(output.includes('<knowledge>'), false);
+  assert.equal(output.includes('<knowledge>'), false, 'a skipped experience section renders no knowledge points');
 });

@@ -317,10 +317,23 @@ function createShortlistHarness({ ranker, catalogMode = 'volatile' }) {
   };
   const runner = new CoworkRunner(store, {
     coworkSkillPromptsProvider: () => ({ catalog: CATALOG_TEXT, rules: null, sandboxSection: null }),
-    cerebellumSkillRanker: ranker
+    // Merged turn-decision bundle (mock of the main.ts caller): the skill
+    // ranking is consulted only when the session's catalog rides the tail,
+    // exactly like the real caller honors skillsCatalogVolatile.
+    cerebellumTurnDecisions: ranker
       ? async (input) => {
-          rankerCalls.push(input);
-          return ranker(input);
+          let skillRanking = null;
+          if (input.skillsCatalogVolatile) {
+            rankerCalls.push(input);
+            skillRanking = await ranker(input);
+          }
+          return {
+            memoryScores: null,
+            knowledgeScores: null,
+            skillRanking,
+            serviceRanking: null,
+            gateVerdicts: null,
+          };
         }
       : undefined,
   });

@@ -251,10 +251,18 @@ function createGateHarness({ gate, includeMemoryPromptBlocks = true }) {
   const runner = new CoworkRunner(store, {
     getRemoteServicesPrompt: () => REMOTE_BLOCK_TEXT,
     getBrowserContextPrompt: async () => BROWSER_BLOCK_TEXT,
-    cerebellumVolatileBlockGate: gate
+    // Merged turn-decision bundle (mock of the main.ts caller): only the
+    // gate verdicts matter here; every other decision degrades to null.
+    cerebellumTurnDecisions: gate
       ? async (input) => {
           gateCalls.push(input);
-          return gate(input);
+          return {
+            memoryScores: null,
+            knowledgeScores: null,
+            skillRanking: null,
+            serviceRanking: null,
+            gateVerdicts: await gate(input),
+          };
         }
       : undefined,
   });

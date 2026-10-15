@@ -320,20 +320,29 @@ function createShortlistHarness({
   };
   const runner = new CoworkRunner(store, {
     getRemoteServicesPrompt: () => DIRECTORY_TEXT,
-    cerebellumRemoteServiceRanker: ranker
+    // Merged turn-decision bundle (mock of the main.ts caller): the service
+    // ranking is consulted only when the directory rides this turn, exactly
+    // like the real caller honors remoteServicesEnabled; the block gate
+    // verdicts ride the same single callback.
+    cerebellumTurnDecisions: ranker || gate
       ? async (input) => {
-          rankerCalls.push(input);
-          return ranker(input);
+          if (gate) {
+            gateCalls.push(input);
+          }
+          let serviceRanking = null;
+          if (ranker && input.remoteServicesEnabled) {
+            rankerCalls.push(input);
+            serviceRanking = await ranker(input);
+          }
+          return {
+            memoryScores: null,
+            knowledgeScores: null,
+            skillRanking: null,
+            serviceRanking,
+            gateVerdicts: gate ? await gate(input) : null,
+          };
         }
       : undefined,
-    ...(gate
-      ? {
-          cerebellumVolatileBlockGate: async (input) => {
-            gateCalls.push(input);
-            return gate(input);
-          },
-        }
-      : {}),
   });
   runner.activeSessions.set('session-1', {
     skillsCatalogMode: 'volatile',
