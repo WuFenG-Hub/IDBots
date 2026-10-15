@@ -11,9 +11,11 @@
  *   X-Timestamp (unix seconds, ±300s) / X-Signature (Bitcoin Signed Message
  *   compact, base64) over "llm-relay-bootstrap:<identityAddress>:<timestamp>".
  *   Envelope {code:0, data:{apiKey, keyPrefix, baseUrl, models, quotaTotal,
- *   quotaUsed, quotaRemaining, quotaCycleResetAt}}. quotaCycleResetAt (ms
- *   epoch) is the weekly cycle end when the chat and JEV pools refill
- *   together; absent/0 means weekly quotas are disabled (lifetime mode).
+ *   quotaUsed, quotaRemaining, quotaCycleResetAt, jevQuotaTotal, jevQuotaUsed,
+ *   jevQuotaRemaining}}. quotaCycleResetAt (ms epoch) is the weekly cycle end
+ *   when the chat and JEV pools refill together; absent/0 means weekly quotas
+ *   are disabled (lifetime mode). The jevQuota* triple is the separate
+ *   cerebellum (JEV) pool; absent/0 means the backend reports one shared pool.
  * - GET /v2/assist/llm/quota — Authorization: Bearer <relay key>; same data
  *   shape minus apiKey.
  *
@@ -71,6 +73,10 @@ export interface LlmRelayBootstrapInfo {
   quotaRemaining: number;
   /** Weekly cycle end (ms epoch) when both pools refill; 0 = weekly quota disabled. */
   quotaCycleResetAt: number;
+  /** JEV (cerebellum) pool snapshot; 0s = backend not reporting a separate pool. */
+  jevQuotaTotal: number;
+  jevQuotaUsed: number;
+  jevQuotaRemaining: number;
 }
 
 export interface LlmRelayQuotaInfo {
@@ -82,6 +88,10 @@ export interface LlmRelayQuotaInfo {
   quotaRemaining: number;
   /** Weekly cycle end (ms epoch) when both pools refill; 0 = weekly quota disabled. */
   quotaCycleResetAt: number;
+  /** JEV (cerebellum) pool snapshot; 0s = backend not reporting a separate pool. */
+  jevQuotaTotal: number;
+  jevQuotaUsed: number;
+  jevQuotaRemaining: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +344,9 @@ function normalizeQuotaPayload(data: Record<string, unknown>): Omit<LlmRelayBoot
     quotaUsed: toNumber(data.quotaUsed),
     quotaRemaining: toNumber(data.quotaRemaining),
     quotaCycleResetAt: toNumber(data.quotaCycleResetAt),
+    jevQuotaTotal: toNumber(data.jevQuotaTotal),
+    jevQuotaUsed: toNumber(data.jevQuotaUsed),
+    jevQuotaRemaining: toNumber(data.jevQuotaRemaining),
   };
 }
 

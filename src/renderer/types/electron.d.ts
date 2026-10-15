@@ -196,6 +196,10 @@ interface LlmRelayBootstrapInfo {
   quotaRemaining: number;
   /** Weekly cycle end (ms epoch) when both pools refill; 0 = weekly quota disabled. */
   quotaCycleResetAt: number;
+  /** JEV (cerebellum) pool snapshot; 0s = backend not reporting a separate pool. */
+  jevQuotaTotal: number;
+  jevQuotaUsed: number;
+  jevQuotaRemaining: number;
 }
 
 interface LlmRelayQuotaInfo {
@@ -207,6 +211,10 @@ interface LlmRelayQuotaInfo {
   quotaRemaining: number;
   /** Weekly cycle end (ms epoch) when both pools refill; 0 = weekly quota disabled. */
   quotaCycleResetAt: number;
+  /** JEV (cerebellum) pool snapshot; 0s = backend not reporting a separate pool. */
+  jevQuotaTotal: number;
+  jevQuotaUsed: number;
+  jevQuotaRemaining: number;
 }
 
 interface JevRelayCredentials {
