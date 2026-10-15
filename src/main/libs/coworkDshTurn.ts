@@ -596,6 +596,53 @@ export class DshTurnHub {
     }, { pinWorkspace: input.pinWorkspace === true, accumulateMcp: false })
   }
 
+  /**
+   * Pre-boot the runtime slot this session's NEXT turn will actually run on —
+   * provider route, automation combo, MCP union and workspace pin resolved
+   * exactly like the real turn (real session id, default accumulation), but
+   * with no session opened and no prompt sent. Two call sites:
+   *  - TURN ENTRY (coworkRunner.runDshSessionLocal): a cold slot's boot
+   *    (process spawn + plugin load; automation slots mount Playwright/cua
+   *    and have been measured at ~11s) then overlaps the volatile-context
+   *    build instead of stacking after it. The follow-up runTurn's
+   *    ensureKernel joins the same kernelEnsureChain, finds the config
+   *    unchanged, and reuses the booted process.
+   *  - APP-START WARMUP (runDshRuntimeWarmup): browser/computer automation is
+   *    default-ON for bots, so bot chats land on the .auto-* slots the clean
+   *    prewarm() above never touches — warming the most-recent session's real
+   *    combo moves that boot out of the first turn after app start. The idle
+   *    reap retires the slot if no turn ever arrives.
+   */
+  async prewarmTurnSlot(input: {
+    sessionId: string
+    provider: DshTurnProviderRoute
+    workspace?: { cwd: string }
+  }): Promise<void> {
+    if (this.closed) return
+    const automation = this.automationSlotStateOf(input.sessionId)
+    const slotKey = dshRuntimeKeyOf(input.provider, automationSlotFlagsOf(automation))
+    const alreadyRunning = this.slots.get(slotKey)?.kernel.running === true
+    await this.ensureKernel({
+      sessionId: input.sessionId,
+      dshSessionId: `cw-${input.sessionId}`,
+      prompt: '',
+      provider: input.provider,
+      sections: [],
+      workspace: input.workspace,
+      callbacks: DSH_WARMUP_CALLBACKS,
+    }, { automation })
+    this.opts.log?.(
+      'info',
+      alreadyRunning ? 'dshTurnHub.prewarmTurnSlot.reuse' : 'dshTurnHub.prewarmTurnSlot.boot',
+      {
+        runtime: slotKey,
+        sessionId: input.sessionId,
+        browser: automation.browserUse !== undefined,
+        computer: automation.computerUse === true,
+      },
+    )
+  }
+
   /** Start (or reuse) the runtime and run one turn to completion. */
   async runTurn(input: DshTurnInput): Promise<DshTurnOutcome> {
     if (this.closed) throw new DshShutdownError()

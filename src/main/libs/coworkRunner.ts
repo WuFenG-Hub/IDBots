@@ -8826,8 +8826,9 @@ export class CoworkRunner extends EventEmitter {
       } catch {
         configCwd = '';
       }
+      let sessionCwd = '';
       if (sessionRoute) {
-        let sessionCwd = configCwd;
+        sessionCwd = configCwd;
         try {
           const row = this.store.getSessionWithoutMessages?.(sessionRow!.id) ?? this.store.getSession(sessionRow!.id);
           if (row?.cwd?.trim()) sessionCwd = row.cwd.trim();
@@ -8856,6 +8857,30 @@ export class CoworkRunner extends EventEmitter {
           model: route.model,
           cwd: cwd || null,
         });
+      }
+      // Automation-slot warm (first-sentence latency work, 2026-10-15):
+      // browser/computer automation is default-ON for bots, so bot chats ride
+      // the .auto-* runtime slots the clean prewarm above never touches, and
+      // their first turn after app start paid the full slot boot (process +
+      // Playwright/cua plugin load, ~11s measured) before the first token.
+      // Warm the most-recent session's REAL slot (its route + automation
+      // combo + MCP union) so its next turn reuses a booted process; the
+      // idle reap retires the slot if the user never returns to that bot.
+      // Clean-combo sessions reuse the process warmed above — this is a
+      // no-op ensure for them.
+      if (sessionRoute && sessionRow?.id) {
+        try {
+          await hub.prewarmTurnSlot({
+            sessionId: sessionRow.id,
+            provider: this.dshTurnProviderFromRoute(sessionRoute),
+            ...(sessionCwd ? { workspace: { cwd: sessionCwd } } : {}),
+          });
+        } catch (error) {
+          coworkLog('WARN', 'prewarmDshRuntime', 'Automation-slot warmup failed; that slot cold-starts on its next turn', {
+            sessionId: sessionRow.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
     } catch (error) {
       coworkLog('WARN', 'prewarmDshRuntime', 'Warmup failed; first turn will cold-start', {
@@ -9238,6 +9263,23 @@ export class CoworkRunner extends EventEmitter {
     }
     const dshSessionId = dshSessionIdOf(activeSession.claudeSessionId) ?? `cw-${sessionId}`;
     const hub = this.ensureDshTurnHub();
+    // Kick the runtime-slot ensure NOW, fire-and-forget: a cold slot's boot
+    // (process spawn + plugin load, ~11s measured on automation slots) then
+    // overlaps the volatile-context build below instead of stacking after it.
+    // runTurn's own ensureKernel joins the same kernelEnsureChain and finds
+    // the config unchanged (same session id → same provider/MCP/automation
+    // accumulation), so this only ever removes wait, never adds a restart.
+    // First-sentence latency work, 2026-10-15.
+    void hub.prewarmTurnSlot({
+      sessionId,
+      provider: this.dshTurnProviderFromRoute(route),
+      ...(cwd ? { workspace: { cwd } } : {}),
+    }).catch((prewarmError) => {
+      coworkLog('WARN', 'runDshSessionLocal', 'Turn-slot prewarm failed; the turn will ensure the runtime itself', {
+        sessionId,
+        error: prewarmError instanceof Error ? prewarmError.message : String(prewarmError),
+      });
+    });
     activeSession.sdkTaskControl = {
       stopTask: async (taskId: string) => {
         await hub.cancelAgent(taskId, 'subagent-stop');

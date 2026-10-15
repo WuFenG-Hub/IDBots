@@ -42,6 +42,14 @@ export interface JevRelayServiceDeps {
 
 let depsRef: JevRelayServiceDeps | null = null;
 let cachedCredentials: JevRelayCredentials | null = null;
+/**
+ * Shared in-flight bootstrap. A revoked relay key surfaces as 401 on EVERY
+ * decision call site of one turn (memory rank, skill shortlist, block gate,
+ * …) at once; without sharing, each site fired its OWN identity-signed
+ * bootstrap (2026-10-15 first-sentence latency report: five parallel
+ * bootstraps, each 15s+). One flight, everyone awaits it.
+ */
+let bootstrapInFlight: Promise<JevRelayCredentials> | null = null;
 
 export function initJevRelayService(deps: JevRelayServiceDeps): void {
   depsRef = deps;
@@ -50,6 +58,7 @@ export function initJevRelayService(deps: JevRelayServiceDeps): void {
 export function resetJevRelayServiceForTests(): void {
   depsRef = null;
   cachedCredentials = null;
+  bootstrapInFlight = null;
 }
 
 function getDeps(): JevRelayServiceDeps {
@@ -134,17 +143,34 @@ export async function resolveJevRelayCredentials(): Promise<JevRelayCredentials>
     persistCredentials(fromProvider);
     return fromProvider;
   }
-  const bootstrap = getDeps().bootstrapImpl
-    ? getDeps().bootstrapImpl!()
-    : import('./llmRelayService').then((m) => m.bootstrapLlmRelay());
-  const info = await bootstrap;
-  const credentials = { apiKey: info.apiKey.trim(), baseUrl: info.baseUrl.trim() };
-  if (!credentials.apiKey || !credentials.baseUrl) {
-    throw new Error('JEV relay bootstrap returned no apiKey/baseUrl');
+  // One shared flight for concurrent resolvers (see bootstrapInFlight);
+  // losers await the winner's result. A failed flight unshares in the
+  // finally below so the next caller retries instead of latching the
+  // rejection; a resolver that lost to an invalidated cache still returns
+  // the freshest credentials any flight produced.
+  if (!bootstrapInFlight) {
+    bootstrapInFlight = (async () => {
+      const bootstrap = getDeps().bootstrapImpl
+        ? getDeps().bootstrapImpl!()
+        : import('./llmRelayService').then((m) => m.bootstrapLlmRelay());
+      const info = await bootstrap;
+      const credentials = { apiKey: info.apiKey.trim(), baseUrl: info.baseUrl.trim() };
+      if (!credentials.apiKey || !credentials.baseUrl) {
+        throw new Error('JEV relay bootstrap returned no apiKey/baseUrl');
+      }
+      cachedCredentials = credentials;
+      persistCredentials(credentials);
+      return credentials;
+    })().finally(() => {
+      bootstrapInFlight = null;
+    });
   }
-  cachedCredentials = credentials;
-  persistCredentials(credentials);
-  return credentials;
+  try {
+    return await bootstrapInFlight;
+  } catch (error) {
+    if (cachedCredentials) return cachedCredentials;
+    throw error;
+  }
 }
 
 /**
@@ -178,6 +204,14 @@ export async function resolveCerebellumRuntimeConfig(appConfig: unknown): Promis
  * Any failure (including a second 401) returns the last response unchanged —
  * the decision call sites keep their fail-to-null semantics, so no retry
  * storm is possible: at most 2 requests and 1 bootstrap per call.
+ *
+ * The caller's AbortSignal bounds the WHOLE wrapper, bootstrap included. The
+ * decision call sites run 1.5s budgets; the identity-signed bootstrap has
+ * been observed taking 15s+ and used to blow straight through that budget
+ * (2026-10-15 first-sentence latency report: first chat turns stalled 15-25s
+ * on volatile-block JEV calls whose deadline had already fired). On abort the
+ * stale 401 returns immediately and the shared bootstrap keeps running in the
+ * background — the next turn finds the fresh key cached.
  */
 export function createJevRelayFetchWithKeyRetry<R extends { ok: boolean; status: number }>(
   fetchImpl: (url: string, init: Record<string, unknown>) => Promise<R>,
@@ -187,9 +221,13 @@ export function createJevRelayFetchWithKeyRetry<R extends { ok: boolean; status:
     if (first.status !== 401) {
       return first;
     }
+    const signal = (init as { signal?: AbortSignal | null }).signal ?? null;
+    if (signal?.aborted) {
+      return first;
+    }
     try {
       invalidateCredentials();
-      const { apiKey } = await resolveJevRelayCredentials();
+      const { apiKey } = await raceAbortSignal(resolveJevRelayCredentials(), signal);
       const headers = {
         ...(init.headers as Record<string, string> | undefined),
         Authorization: `Bearer ${apiKey}`,
@@ -199,6 +237,26 @@ export function createJevRelayFetchWithKeyRetry<R extends { ok: boolean; status:
       return first;
     }
   };
+}
+
+/** Resolve with `promise`, or reject with an AbortError the moment `signal`
+ *  fires. The underlying promise is left running (callers use this to stop
+ *  WAITING, not to cancel the work — shared bootstraps must complete so later
+ *  callers find the cached result). Listener-safe on both paths. */
+function raceAbortSignal<T>(promise: Promise<T>, signal: AbortSignal | null): Promise<T> {
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('The JEV relay re-bootstrap was aborted', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    const settle = (fn: () => void) => {
+      signal.removeEventListener('abort', onAbort);
+      fn();
+    };
+    promise.then(
+      (value) => settle(() => resolve(value)),
+      (error) => settle(() => reject(error)),
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
