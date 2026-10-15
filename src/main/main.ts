@@ -3212,6 +3212,19 @@ const createCerebellumMemoryRanker = () =>
       fetchImpl: context.fetchImpl,
       currentUserText,
       memories,
+      // Payload accounting for the JEV cost budget: counts and chars only,
+      // never memory text. Paired with the runner's memory:cerebellumRank
+      // line to watch the per-call payload after the prefilter rollout.
+      onPayload: (stats) => {
+        coworkLog('INFO', 'memory:cerebellumPayload', 'Cerebellum memory rank payload', {
+          pool: stats.poolSize,
+          sent: stats.sent,
+          memoriesChars: stats.memoriesChars,
+          currentMessageChars: stats.currentMessageChars,
+          questionsChars: stats.questionsChars,
+          totalChars: stats.totalChars,
+        });
+      },
     });
   };
 

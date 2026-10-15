@@ -5,6 +5,7 @@ import {
   CEREBELLUM_VOLATILE_GATE_TIMEOUT_MS,
   CEREBELLUM_VOLATILE_GATE_SECTION_KEYS,
   CEREBELLUM_VOLATILE_GATE_THRESHOLDS,
+  CEREBELLUM_VOLATILE_GATE_MAX_MESSAGE_CHARS,
   buildVolatileGateQuestions,
   buildVolatileGateRequest,
   parseVolatileGateAnswers,
@@ -75,6 +76,14 @@ test('buildVolatileGateRequest: state carries only the collapsed user message', 
   assert.deepEqual(request.state, { user_message: '帮我 查一下知识库' });
   assert.equal(request.model, 'jev-fast');
   assert.equal(Object.keys(request.questions).length, CEREBELLUM_VOLATILE_GATE_SECTION_KEYS.length);
+});
+
+test('buildVolatileGateRequest: caps a huge pasted message before it rides the payload', () => {
+  const request = buildVolatileGateRequest({
+    currentUserText: 'a'.repeat(CEREBELLUM_VOLATILE_GATE_MAX_MESSAGE_CHARS + 999),
+    model: 'jev-fast',
+  });
+  assert.equal(request.state.user_message.length, CEREBELLUM_VOLATILE_GATE_MAX_MESSAGE_CHARS);
 });
 
 // ---------------------------------------------------------------------------

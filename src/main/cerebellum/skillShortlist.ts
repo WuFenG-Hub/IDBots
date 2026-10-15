@@ -49,6 +49,14 @@ export const CEREBELLUM_SKILL_SHORTLIST_MIN_POOL = 12;
 /** Per-option description cap inside the choice `criteria` map (tokens). */
 export const CEREBELLUM_SKILL_OPTION_MAX_DESCRIPTION_CHARS = 320;
 
+/**
+ * Total char budget across ALL option labels in the criteria map. Typical
+ * rosters (dozens of skills × ~350 chars) never reach it; this is a
+ * protective backstop for pathological catalogs, in the same spirit as the
+ * memoryRank state budget.
+ */
+export const CEREBELLUM_SKILL_OPTIONS_TOTAL_MAX_CHARS = 24000;
+
 export interface CerebellumSkillCandidate {
   id: string;
   name: string;
@@ -115,8 +123,17 @@ export function buildSkillShortlistRequest(input: {
 }): CerebellumSkillShortlistRequest {
   const skills = input.skills.slice(0, CEREBELLUM_SKILL_MAX_OPTIONS);
   const criteria: Record<string, string> = {};
+  let totalLabelChars = 0;
   for (const skill of skills) {
-    criteria[String(skill.id)] = buildSkillOptionLabel(skill);
+    const label = buildSkillOptionLabel(skill);
+    // Total-payload backstop: typical rosters never reach it; a pathological
+    // catalog must not push one Choice question past the JEV cost budget.
+    // Catalog order stays intact — overflowing tail options are simply absent.
+    if (Object.keys(criteria).length > 0 && totalLabelChars + label.length > CEREBELLUM_SKILL_OPTIONS_TOTAL_MAX_CHARS) {
+      break;
+    }
+    criteria[String(skill.id)] = label;
+    totalLabelChars += label.length;
   }
   return {
     state: {
