@@ -41,7 +41,7 @@ test('defaultConfig uses DeepSeek V4.1 Flash and V4 Pro as the built-in DeepSeek
   );
   assert.equal(
     defaultConfig.model.availableModels.find(({ id }) => id === 'deepseek-v4-pro')?.maxOutputTokens,
-    32_768,
+    256_000,
   );
   assert.deepEqual(
     defaultConfig.providers?.deepseek.models?.map(({ id, name }) => ({ id, name })),
@@ -67,7 +67,7 @@ test('defaultConfig uses DeepSeek V4.1 Flash and V4 Pro as the built-in DeepSeek
   );
   assert.equal(
     defaultConfig.providers?.deepseek.models?.find(({ id }) => id === 'deepseek-v4-pro')?.maxOutputTokens,
-    32_768,
+    256_000,
   );
 });
 
@@ -106,7 +106,7 @@ test('normalizeDeepSeekAppConfig migrates legacy DeepSeek defaults in stored con
   );
   assert.equal(
     normalized.model.availableModels.find(({ id }) => id === 'deepseek-v4-pro')?.maxOutputTokens,
-    32_768,
+    256_000,
   );
   assert.deepEqual(
     normalized.providers?.deepseek.models?.map(({ id }) => id),
@@ -129,7 +129,7 @@ test('normalizeDeepSeekAppConfig migrates legacy DeepSeek defaults in stored con
   );
   assert.equal(
     normalized.providers?.deepseek.models?.find(({ id }) => id === 'deepseek-v4-pro')?.maxOutputTokens,
-    32_768,
+    256_000,
   );
 });
 

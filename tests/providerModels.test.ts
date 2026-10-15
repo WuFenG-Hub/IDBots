@@ -157,7 +157,7 @@ test('mergeSyncedProviderModels applies the DeepSeek canonical preset over bare 
       name: 'DeepSeek V4.1 Flash',
       supportsImage: true,
       contextWindow: 1_000_000,
-      maxOutputTokens: 32_768,
+      maxOutputTokens: 256_000,
       options: { reasoningEffort: 'max', thinking: { type: 'enabled' } },
     },
     {
@@ -165,7 +165,7 @@ test('mergeSyncedProviderModels applies the DeepSeek canonical preset over bare 
       name: 'DeepSeek V4 Pro',
       supportsImage: false,
       contextWindow: 1_000_000,
-      maxOutputTokens: 32_768,
+      maxOutputTokens: 256_000,
       options: { reasoningEffort: 'max', thinking: { type: 'enabled' } },
     },
   ]);
@@ -253,7 +253,7 @@ test('mergeSyncedProviderModels applies the Zhipu canonical preset and honors ca
       name: 'GLM-5.3',
       supportsImage: false,
       contextWindow: 1_048_576,
-      maxOutputTokens: 32_768,
+      maxOutputTokens: 128_000,
       options: undefined,
     },
     {
@@ -261,7 +261,7 @@ test('mergeSyncedProviderModels applies the Zhipu canonical preset and honors ca
       name: 'GLM-5.3 Flash',
       supportsImage: true,
       contextWindow: 1_048_576,
-      maxOutputTokens: 32_768,
+      maxOutputTokens: 128_000,
       options: undefined,
     },
     {
