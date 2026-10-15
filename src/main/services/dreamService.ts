@@ -27,7 +27,6 @@ import {
   CAPABILITY_VALIDATION_MAX_DRAFTS,
   CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE,
   CAPABILITY_VALIDATION_SUMMARY_DAYS,
-  CAPABILITY_PROMOTION_MAX_PER_NIGHT,
   CAPABILITY_PROMOTION_MIN_SCORE,
   CAPABILITY_REVIEW_INTERVAL_DAYS,
   CAPABILITY_REVIEW_MAX_PER_NIGHT,
@@ -35,6 +34,7 @@ import {
   buildCapabilityValidationPrompt,
   parseCapabilityValidationOutput,
 } from '../libs/capabilityValidationPrompt';
+import { promotionBudgetForNight } from '../libs/promotionBudget';
 import {
   FALSIFIED_PROMPT_MAX_ITEMS,
   FALSIFIED_RETENTION_DAYS,
@@ -1210,6 +1210,7 @@ export class DreamService {
           weeklyLongDream,
           capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
           promotedCount: promotion.promoted,
+          promotionBudget: { nights: promotion.nights, budget: promotion.budget, candidates: promotion.candidates, promoted: promotion.promoted },
           hasExplicitFeedback: hasExplicitHumanFeedback(activity),
           reconciliation,
           chainEvidence: validation.chainEvidence,
@@ -1303,6 +1304,7 @@ export class DreamService {
         weeklyLongDream,
         capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
         promotedCount: promotion.promoted,
+        promotionBudget: { nights: promotion.nights, budget: promotion.budget, candidates: promotion.candidates, promoted: promotion.promoted },
         // P1 periodic re-review (audit): how many validated drafts faced the
         // verdict panel again tonight and how many were demoted off the
         // injection roster (promoted procedures archived alongside).
@@ -1946,30 +1948,45 @@ export class DreamService {
    * when its verdict is at least one night old (validated_at earlier than the
    * dream date's day start — the pragmatic stand-in for the full P1 re-review
    * mechanism: calendar distance instead of a second validation panel), scores
-   * >= CAPABILITY_PROMOTION_MIN_SCORE, and was never promoted; at most
-   * CAPABILITY_PROMOTION_MAX_PER_NIGHT per night per bot. The procedure keeps
-   * the draft's title as its own (upsert-by-fingerprint dedupes against
-   * existing procedures), the trigger mirrors the title, and the actionable
-   * description becomes the single ordered step; the draft rows back-link to
-   * the procedure id for provenance (procedures have no generic sources
-   * table). Runs synchronously after the validation gate and never affects
-   * the dream run's outcome.
+   * >= CAPABILITY_PROMOTION_MIN_SCORE, and was never promoted. Per-night the
+   * pass promotes at most the annealed budget (RRSI P2, design §6.2 P2.1):
+   * promotionBudgetForNight over the bot's completed non-empty nights — up to
+   * 3 for a fresh bot, annealing to 1 after 60 active nights. The candidate
+   * query reads up to 50 rows so the telemetry can report how many were
+   * actually eligible. The procedure keeps the draft's title as its own
+   * (upsert-by-fingerprint dedupes against existing procedures), the trigger
+   * mirrors the title, and the actionable description becomes the single
+   * ordered step; the draft rows back-link to the procedure id for provenance
+   * (procedures have no generic sources table). Runs synchronously after the
+   * validation gate and never affects the dream run's recorded outcome.
    */
   private promoteCapabilityDraftsToProcedures(
     metabot: DreamMetabotLike,
     date: string,
-  ): { promoted: number } {
-    const zero = { promoted: 0 };
+  ): { promoted: number; nights: number; budget: number; candidates: number } {
+    const zero = { promoted: 0, nights: 0, budget: 0, candidates: 0 };
     try {
       if (!this.deps.metaidKnowledgeStore) return zero;
       const { startMs } = getDayBoundsMs(date);
+      // RRSI P2: the nightly budget anneals with the bot's dream history; a
+      // count failure degrades to "no history" (the max budget), never skips
+      // the pass.
+      let nights = 0;
+      try {
+        nights = this.deps.dreamStore.countNonEmptyDreamNights(metabot.id, date);
+      } catch (error) {
+        console.warn(
+          `[DreamService] Non-empty-night count failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const budget = promotionBudgetForNight(nights);
       const candidates = this.deps.coworkStore.listPromotableCapabilityDrafts(metabot.id, {
         minScore: CAPABILITY_PROMOTION_MIN_SCORE,
         validatedBeforeMs: startMs,
-        limit: CAPABILITY_PROMOTION_MAX_PER_NIGHT,
+        limit: 50,
       });
       let promoted = 0;
-      for (const draft of candidates) {
+      for (const draft of candidates.slice(0, budget)) {
         try {
           // Design §4.4: a reconciled draft carries its applicability
           // conditions into the procedure's trigger and its residual
@@ -2002,7 +2019,7 @@ export class DreamService {
       if (promoted > 0) {
         console.log(`[DreamService] Promoted ${promoted} capability draft(s) into procedure memory for metabot ${metabot.id}`);
       }
-      return { promoted };
+      return { promoted, nights, budget, candidates: candidates.length };
     } catch (error) {
       console.warn(
         `[DreamService] Capability promotion pass failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,

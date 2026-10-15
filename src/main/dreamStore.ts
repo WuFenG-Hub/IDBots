@@ -1092,6 +1092,20 @@ export class DreamStore {
     return rows.map((row) => this.mapRunRow(row));
   }
 
+  /**
+   * How many non-empty dream nights the bot completed strictly before
+   * `beforeDate` (RRSI P2 promotion-budget input, design §6.2 P2.1). The
+   * telemetry rollup is the source of truth: re-dreamed dates overwrite in
+   * place, so the count can never double-book a night.
+   */
+  countNonEmptyDreamNights(metabotId: number, beforeDate: string): number {
+    const row = this.getOne<{ count: number | string }>(
+      'SELECT COUNT(*) AS count FROM metabot_dream_telemetry_daily WHERE metabot_id = ? AND empty_day = 0 AND dream_date < ?',
+      [metabotId, beforeDate],
+    );
+    return Math.max(0, Math.floor(Number(row?.count) || 0));
+  }
+
   getDreamFragment(metabotId: number, dreamDate: string, fragmentKey: string): DreamFragment | null {
     const row = this.getOne<DreamFragmentRow>(
       `SELECT * FROM metabot_dream_fragments
