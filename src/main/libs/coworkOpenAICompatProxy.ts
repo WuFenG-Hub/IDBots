@@ -782,10 +782,11 @@ function isDeepSeekThinkingRequest(
   const resolvedModel = toString(body.model).toLowerCase();
   // Any DeepSeek thinking-capable model (flash defaults to thinking ON, like
   // pro/reasoner/r1) needs reasoning pass-back; plain `deepseek-chat` does not.
-  // The renamed V4.1 id `deepseek-flash` is matched literally so other
-  // vendors' `flash` models (gemini-3-flash, …) stay out.
+  // The renamed V4.1 ids — `deepseek-flash` and the free relay's 2026-10-16
+  // `deepseek-4.1-flash` — are matched literally so other vendors' `flash`
+  // models (gemini-3-flash, …) stay out.
   return /\b(?:deepseek-)?(?:v4-flash|v4-pro|reasoner|r1)\b/.test(resolvedModel)
-    || /\bdeepseek-flash\b/.test(resolvedModel);
+    || /\bdeepseek-(?:flash|4\.1-flash)\b/.test(resolvedModel);
 }
 
 type DeepSeekReasoningHydrateResult = {

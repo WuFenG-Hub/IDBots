@@ -303,6 +303,46 @@ test('normalizeDeepSeekAppConfig backfills legacy DeepSeek api config into provi
   assert.equal(normalized.providers?.deepseek.apiFormat, 'anthropic');
 });
 
+test('normalizeDeepSeekAppConfig falls a vanished metaid-free default back to the synced catalog\'s first model', () => {
+  // 2026-10-16 relay catalog expansion: a provisioned install synced its
+  // provider.models to the 8-model directory (quota-driven catalog sync), which
+  // drops the hidden `deepseek-chat` alias. The stored default pointed at that
+  // alias — the cross-provider migration map first moves it to the deepseek
+  // official `deepseek-flash`, but the default-provider catalog check then
+  // rejects it and the default lands on the free catalog's first model.
+  const syncedFreeModels = [
+    { id: 'deepseek-4.1-flash', name: 'deepseek-flash', supportsImage: false, contextWindow: 1_000_000, maxOutputTokens: 100_000 },
+    { id: 'glm-5.3-flash', name: 'glm-5.3-flash', contextWindow: 1_048_576, maxOutputTokens: 128_000 },
+    { id: 'cat-jam-free', name: 'cat-jam-free' },
+  ];
+  const normalized = normalizeDeepSeekAppConfig({
+    ...defaultConfig,
+    model: {
+      ...defaultConfig.model,
+      defaultModel: 'deepseek-chat',
+      defaultProvider: 'metaid-free',
+    },
+    providers: {
+      ...defaultConfig.providers!,
+      'metaid-free': {
+        enabled: true,
+        apiKey: 'mrk_legacy-install',
+        baseUrl: 'https://www.metaso.network/assist-open-api/v2/assist/llm/v1',
+        apiFormat: 'openai',
+        models: syncedFreeModels,
+      },
+    },
+  });
+
+  assert.equal(normalized.model.defaultModel, 'deepseek-4.1-flash');
+  // The free provider's catalog itself is untouched by the deepseek
+  // normalization (cross-provider migration never rewrites metaid-free rows).
+  assert.deepEqual(
+    normalized.providers?.['metaid-free']?.models?.map(({ id }) => id),
+    ['deepseek-4.1-flash', 'glm-5.3-flash', 'cat-jam-free'],
+  );
+});
+
 test('mergeProvidersConfig preserves existing provider credentials when incoming config is only the default empty template', () => {
   const currentProviders = {
     ...defaultConfig.providers!,
