@@ -523,7 +523,7 @@ test('a low-score validated verdict stays a draft; validation failure never fail
         validationCalls += 1;
         const ids = [...user.matchAll(/草案 #(\d+)/g)].map((match) => Number(match[1]));
         return JSON.stringify({
-          verdicts: ids.map((id) => ({ id, verdict: 'validated', score: CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE - 0.2, rationale: '证据偏弱' })),
+          verdicts: ids.map((id) => ({ id, verdict: 'validated', score: CAPABILITY_VALIDATION_PROMOTE_MIN_SCORE - 0.2, rationale: '2026-08-02 日记只有单次记录,证据仍偏弱' })),
         });
       }
       return JSON.stringify({

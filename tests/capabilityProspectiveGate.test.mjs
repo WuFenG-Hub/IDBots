@@ -44,6 +44,13 @@ test('prospective rule lines ride the prompt only when requested', () => {
   const legacy = buildCapabilityValidationPrompt(base);
   assert.ok(!legacy.system.includes('独立证据规则'), 'old callers keep the unchanged prompt');
   assert.ok(!legacy.user.includes('较晚日记的日期'), 'old callers keep the unchanged prompt');
+  // Regression: the blank line separating the last section from the output
+  // contract is unconditional (branch-point shape), never folded into the
+  // falsified-marks branch.
+  assert.ok(
+    legacy.user.includes('\n\n## 输出契约(严格只输出一个 JSON 对象,不要输出任何其他文字)'),
+    'the output contract is always preceded by a blank line',
+  );
 });
 
 test('similar falsified hypotheses render per draft plus the judging rule', () => {

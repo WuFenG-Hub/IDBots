@@ -156,11 +156,9 @@ export function buildCapabilityValidationPrompt(input: {
       ]
       : []),
     ...(hasFalsifiedMark
-      ? [
-        '标注了「曾被证伪的相似做法」的草案:除非日记里出现了那次否决日期之后的新证据,否则不得判 validated。',
-        '',
-      ]
+      ? ['标注了「曾被证伪的相似做法」的草案:除非日记里出现了那次否决日期之后的新证据,否则不得判 validated。']
       : []),
+    '',
     '## 输出契约(严格只输出一个 JSON 对象,不要输出任何其他文字)',
     '{',
     '  "verdicts": [',
