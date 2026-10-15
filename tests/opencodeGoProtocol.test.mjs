@@ -202,9 +202,13 @@ test('generated runtime config: gateway GLM materializes without the zai thinkin
 // bare 'opencode' key the union mixed GLM's compat into the responses entry
 // and the whole runtime failed to boot ("model glm-5.3-flash sets compat
 // supportsStore, but its api is openai-responses"), killing deepseek turns
-// too. The wire-suffixed route key ('opencode.oc') keeps each wire in its own
+// too. The wire-suffixed route key ('opencode-oc') keeps each wire in its own
 // provider entry; this test regenerates the exact config the hub would build
-// for both sessions and asserts the entries stay separate and consistent.
+// for both sessions and asserts the entries stay separate and consistent —
+// AND that the suffixed key survives sanitizeRouteKey unchanged (the registry
+// keys adapters by the sanitized route while the host passes the key raw, so
+// a folding key can never boot: the 2026-10-16 `no adapter registered for
+// provider "opencode.oc"` incident with the old dot separator).
 test('dual-wire opencode routes materialize as separate single-wire provider entries', async (t) => {
   const { existsSync } = await import('node:fs')
   const worktreeRoot = path.resolve(here, '..')
@@ -218,7 +222,10 @@ test('dual-wire opencode routes materialize as separate single-wire provider ent
   const reasoningPath = path.resolve(here, '..', 'dist-electron', 'main', 'libs', 'dshModelReasoning.js')
   const { dshModelReasoningDeclaration } = require(reasoningPath)
 
-  // What providerRouteOf produces for each session's composed route.
+  // What providerRouteOf produces for each session's composed route. The
+  // suffixed key must be its own sanitize output (no folding).
+  const suffixedKey = 'opencode-oc'
+  assert.match(suffixedKey, /^[a-zA-Z0-9_-]+$/, 'wire route keys are sanitize-stable')
   const glmDeclaration = dshModelReasoningDeclaration('glm-5.3-flash', 'openai', GATEWAY)
   const config = generateRuntimeConfig({
     sessionRoot: '/tmp/dsh-opencode-dual-wire-test',
@@ -231,7 +238,7 @@ test('dual-wire opencode routes materialize as separate single-wire provider ent
         models: [{ id: 'deepseek-v4.1-flash', contextWindow: 1_000_000 }],
       },
       { // glm session: wire-corrected, suffixed key
-        key: 'opencode.oc',
+        key: suffixedKey,
         apiFormat: 'openai',
         baseUrl: GATEWAY,
         apiKeyEnv: 'IDBOTS_DSH_KEY_OPENCODE_OC',
@@ -244,14 +251,13 @@ test('dual-wire opencode routes materialize as separate single-wire provider ent
     ],
   })
   const providers = config.find((e) => e.id === 'llm-pi-ai').config.providers
-  // sanitizeRouteKey folds the dot: 'opencode.oc' -> 'opencode-oc'.
   assert.ok(providers['opencode'], 'bare-key responses entry present')
-  assert.ok(providers['opencode-oc'], 'suffixed chat-completions entry present')
+  assert.ok(providers[suffixedKey], 'suffixed chat-completions entry present under the raw key (no folding)')
   assert.equal(providers['opencode'].api, 'openai-responses')
   assert.equal(providers['opencode'].models.map((m) => m.id).join(','), 'deepseek-v4.1-flash')
-  const glmEntry = providers['opencode-oc'].models.find((m) => m.id === 'glm-5.3-flash')
+  const glmEntry = providers[suffixedKey].models.find((m) => m.id === 'glm-5.3-flash')
   assert.ok(glmEntry, 'glm model present on the completions entry')
-  assert.equal(providers['opencode-oc'].api, 'openai-completions')
+  assert.equal(providers[suffixedKey].api, 'openai-completions')
   assert.equal(glmEntry.compat?.thinkingFormat, undefined)
   assert.equal(glmEntry.compat?.supportsReasoningEffort, true)
   // Each entry is internally single-wire: the completions-only compat never

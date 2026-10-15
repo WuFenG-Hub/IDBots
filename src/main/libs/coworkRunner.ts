@@ -8755,13 +8755,15 @@ export class CoworkRunner extends EventEmitter {
       }
     }
     return {
-      // A wire-corrected route rides a suffixed key ('opencode.oc'): the
+      // A wire-corrected route rides a suffixed key ('opencode-oc'): the
       // runtime's provider table unions models by key with ONE apiFormat per
       // entry, so an uncorrected key would mix GLM's chat-completions entry
       // into deepseek's 'responses' provider and fail the whole runtime boot
-      // (see openCodeGoWireRouteKey). The suffixed key gets its own provider
-      // entry, credential env var, and runtime slot; sessions re-pin across
-      // keys with their JSONL history intact.
+      // (see openCodeGoWireRouteKey — the dash separator keeps the key
+      // sanitize-stable, matching the runtime's adapter registry). The
+      // suffixed key gets its own provider entry, credential env var, and
+      // runtime slot; sessions re-pin across keys with their JSONL history
+      // intact.
       key: officialDeepSeekNative
         ? 'deepseek-official'
         : wireCorrected
