@@ -951,6 +951,12 @@ interface CapabilityDraftRow {
   uncertainty_text?: string | null;
 }
 
+/** Shared column list for every capability-draft SELECT (mapped by
+ * CoworkStore.mapCapabilityDraftRow; new columns are added in one place). */
+const CAPABILITY_DRAFT_COLUMNS = `id, metabot_id, dream_date, title, description, capability_type, status, created_at,
+             validation_score, validation_notes, validated_at, times_injected, last_injected_at,
+             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text`;
+
 /** Which gate pass falsified a hypothesis (RRSI P1 ledger provenance). */
 export type CapabilityFalsifiedSource = 'validation' | 're_review';
 
@@ -7584,16 +7590,18 @@ export class CoworkStore implements MemoryBackend {
       ? Math.floor(options!.limit!)
       : null;
     const sql = `
-      SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
-             validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
+      SELECT ${CAPABILITY_DRAFT_COLUMNS}
       FROM capability_drafts
       ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY created_at DESC, id DESC
       ${limit != null ? `LIMIT ${limit}` : ''}
     `;
     const rows = this.getAll<CapabilityDraftRow>(sql, params);
-    return rows.map((row) => ({
+    return rows.map((row) => this.mapCapabilityDraftRow(row));
+  }
+
+  private mapCapabilityDraftRow(row: CapabilityDraftRow): CapabilityDraft {
+    return {
       id: Number(row.id),
       metabotId: Number(row.metabot_id),
       dreamDate: String(row.dream_date),
@@ -7612,7 +7620,7 @@ export class CoworkStore implements MemoryBackend {
       lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
       conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
       uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
-    }));
+    };
   }
 
   /**
@@ -7683,9 +7691,7 @@ export class CoworkStore implements MemoryBackend {
   ): CapabilityDraft[] {
     const limit = Math.max(1, Math.floor(options.limit));
     const rows = this.getAll<CapabilityDraftRow>(`
-      SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
-             validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
+      SELECT ${CAPABILITY_DRAFT_COLUMNS}
       FROM capability_drafts
       WHERE metabot_id = ?
         AND status = 'validated'
@@ -7696,26 +7702,7 @@ export class CoworkStore implements MemoryBackend {
       ORDER BY validation_score DESC, validated_at ASC, id ASC
       LIMIT ?
     `, [metabotId, Number(options.minScore) || 0, Math.floor(Number(options.validatedBeforeMs) || 0), limit]);
-    return rows.map((row) => ({
-      id: Number(row.id),
-      metabotId: Number(row.metabot_id),
-      dreamDate: String(row.dream_date),
-      title: String(row.title),
-      description: String(row.description),
-      capabilityType: String(row.capability_type),
-      status: String(row.status),
-      createdAt: Number(row.created_at),
-      validationScore: row.validation_score == null ? null : Number(row.validation_score),
-      validationNotes: row.validation_notes == null ? null : String(row.validation_notes),
-      validatedAt: row.validated_at == null ? null : Number(row.validated_at),
-      timesInjected: Math.max(0, Math.floor(Number(row.times_injected) || 0)),
-      lastInjectedAt: row.last_injected_at == null ? null : Number(row.last_injected_at),
-      promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
-      promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
-      lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
-      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
-      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
-    }));
+    return rows.map((row) => this.mapCapabilityDraftRow(row));
   }
 
   /**
@@ -7884,9 +7871,7 @@ export class CoworkStore implements MemoryBackend {
   ): CapabilityDraft[] {
     const limit = Math.max(1, Math.floor(options.limit ?? 10));
     const rows = this.getAll<CapabilityDraftRow>(`
-      SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
-             validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
+      SELECT ${CAPABILITY_DRAFT_COLUMNS}
       FROM capability_drafts
       WHERE metabot_id = ?
         AND status = 'disputed'
@@ -7894,26 +7879,7 @@ export class CoworkStore implements MemoryBackend {
       ORDER BY COALESCE(last_reviewed_at, validated_at, created_at) ASC, id ASC
       LIMIT ?
     `, [metabotId, Math.floor(Number(options.olderThanMs) || 0), limit]);
-    return rows.map((row) => ({
-      id: Number(row.id),
-      metabotId: Number(row.metabot_id),
-      dreamDate: String(row.dream_date),
-      title: String(row.title),
-      description: String(row.description),
-      capabilityType: String(row.capability_type),
-      status: String(row.status),
-      createdAt: Number(row.created_at),
-      validationScore: row.validation_score == null ? null : Number(row.validation_score),
-      validationNotes: row.validation_notes == null ? null : String(row.validation_notes),
-      validatedAt: row.validated_at == null ? null : Number(row.validated_at),
-      timesInjected: Math.max(0, Math.floor(Number(row.times_injected) || 0)),
-      lastInjectedAt: row.last_injected_at == null ? null : Number(row.last_injected_at),
-      promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
-      promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
-      lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
-      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
-      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
-    }));
+    return rows.map((row) => this.mapCapabilityDraftRow(row));
   }
 
   /**
@@ -7930,9 +7896,7 @@ export class CoworkStore implements MemoryBackend {
   ): CapabilityDraft[] {
     const limit = Math.max(1, Math.floor(options.limit));
     const rows = this.getAll<CapabilityDraftRow>(`
-      SELECT id, metabot_id, dream_date, title, description, capability_type, status, created_at,
-             validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text
+      SELECT ${CAPABILITY_DRAFT_COLUMNS}
       FROM capability_drafts
       WHERE metabot_id = ?
         AND status = 'validated'
@@ -7941,26 +7905,7 @@ export class CoworkStore implements MemoryBackend {
       ORDER BY COALESCE(last_reviewed_at, validated_at) ASC, id ASC
       LIMIT ?
     `, [metabotId, Math.floor(Number(options.olderThanMs) || 0), limit]);
-    return rows.map((row) => ({
-      id: Number(row.id),
-      metabotId: Number(row.metabot_id),
-      dreamDate: String(row.dream_date),
-      title: String(row.title),
-      description: String(row.description),
-      capabilityType: String(row.capability_type),
-      status: String(row.status),
-      createdAt: Number(row.created_at),
-      validationScore: row.validation_score == null ? null : Number(row.validation_score),
-      validationNotes: row.validation_notes == null ? null : String(row.validation_notes),
-      validatedAt: row.validated_at == null ? null : Number(row.validated_at),
-      timesInjected: Math.max(0, Math.floor(Number(row.times_injected) || 0)),
-      lastInjectedAt: row.last_injected_at == null ? null : Number(row.last_injected_at),
-      promotedAt: row.promoted_at == null ? null : Number(row.promoted_at),
-      promotedProcedureId: row.promoted_procedure_id == null ? null : String(row.promoted_procedure_id),
-      lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
-      conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
-      uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
-    }));
+    return rows.map((row) => this.mapCapabilityDraftRow(row));
   }
 
   /**
