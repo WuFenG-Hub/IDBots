@@ -213,8 +213,8 @@ origin.
 
 ## Deliverables
 
-1. Branch `feat/control-plane` (and follow-ups) in the IDBots repository,
-   merged on the owner's instruction.
+1. Branches in the order in `21-ws-b-implementation-plan.md`, merged on the
+   owner's instruction.
 2. Control-plane image in the registry (built by WS-C's CI).
 3. `cloud/control-plane/README.md`: configuration, running locally with the
    fake tenant, admin CLI reference.

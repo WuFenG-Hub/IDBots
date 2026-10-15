@@ -278,9 +278,9 @@ offline states.
 
 ## Deliverables
 
-1. Branches following `AGENTS.md`, for example `feat/mobile-bridge`
-   (REQ-E-1 to E-9 and E-25), `feat/mobile-p1-screens`, `feat/mobile-p2`, and
-   `feat/mobile-shell`, merged on the owner's instruction.
+1. Branches in the order in `51-ws-e-implementation-plan.md`
+   (`feat/mobile-bridge`, `feat/mobile-p1-screens`, `feat/mobile-p2`,
+   `feat/mobile-shell`), merged on the owner's instruction.
 2. `pnpm run build:mobile` output consumed by WS-A's image build and WS-B's
    image (login bundle).
 3. Signed APK and TestFlight build for M4.

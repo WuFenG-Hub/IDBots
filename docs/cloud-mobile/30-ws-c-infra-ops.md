@@ -244,7 +244,8 @@ operator can follow without help:
 ## Deliverables
 
 1. Staging environment live by M2, production by M3 (empty) and ready for
-   users by M5.
+   users by M5. Task order is `31-ws-c-implementation-plan.md`. Buying the
+   accounts and the hosts is `15-ops-procurement.md`, not this document.
 2. `deploy/` contents (compose file, env example, Caddyfile, firewall unit,
    backup and restore scripts) and the runbooks, on a branch following
    `AGENTS.md`.

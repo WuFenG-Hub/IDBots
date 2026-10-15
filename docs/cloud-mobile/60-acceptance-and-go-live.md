@@ -180,8 +180,8 @@ skills) and run the script once end to end.
 
 | Milestone | Scope | Evidence | Result | Signed by | Date |
 |-----------|-------|----------|--------|-----------|------|
-| M0 | Phase 0 report and verdict | `PHASE0_REPORT.md` and `results.json` (app commit `e8653bac`); tarball sha256 `ec684f1ce37e77e2ab38a3e9950347f8606f7950649ef5faffa48fef60c1088b`, checked locally 2026-10-15; replayed as `spike/linux-headless` `956f2b05` | Acceptance recommends GO on 2026-10-15; owner signature open | Owner | |
-| M1 | `01` and `02` at 1.0.0 | | | Owner and every party | |
+| M0 | Phase 0 report and verdict | `PHASE0_REPORT.md` and `results.json` (app commit `e8653bac`); tarball sha256 `ec684f1ce37e77e2ab38a3e9950347f8606f7950649ef5faffa48fef60c1088b`, checked locally 2026-10-15; replayed as `spike/linux-headless` `956f2b05` | GO | Owner | 2026-10-15 |
+| M1 | `01` and `02` at 1.0.0 | Document headers | Frozen; party reviews arrive as change requests | Owner | 2026-10-15 |
 | M2 | A-01 to A-08, A-11 on staging | | | Acceptance | |
 | M3 | A-01 to A-12 on staging, security P1 | | | Owner | |
 | M4 | A-13 to A-23, security P2 | | | Acceptance | |

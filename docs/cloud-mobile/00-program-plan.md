@@ -76,8 +76,8 @@ to two engineers plus AI per party and are recalibrated at M0 and M2.
 
 | Milestone | Target | Exit criteria | Accepted by |
 |-----------|--------|---------------|-------------|
-| M0 Go / no-go | End of week 1 | Phase 0 report delivered; verdict GO or GO_WITH_CONDITIONS; `tenantMemoryLimitMB` and `usersPerHost` measured. Status 2026-10-15: S05b re-run done; acceptance recommends GO (`tenantMemoryLimitMB` 2304, 58 tenants on the 31.4 GB host). Owner signature is still open | Owner |
-| M1 Contracts frozen | End of week 2 | `01` and `02` updated with Phase 0 numbers, reviewed by WS-A, WS-B, WS-D, WS-E; version 1.0.0 tagged in the document header | Owner plus every party |
+| M0 Go / no-go | End of week 1 | Phase 0 report delivered; verdict GO or GO_WITH_CONDITIONS; `tenantMemoryLimitMB` and `usersPerHost` measured. **Passed 2026-10-15: GO**, signed by the owner (`tenantMemoryLimitMB` 2304, 58 tenants on the 31.4 GB host) | Owner |
+| M1 Contracts frozen | End of week 2 | `01` and `02` updated with Phase 0 numbers; version 1.0.0 in the document header. **Passed 2026-10-15**: frozen by the owner ahead of the party reviews, so each party reviews `01` and `02` in its first task and raises findings as change requests | Owner plus every party |
 | M2 Staging minimum loop | End of week 4 | On staging: invite sign-up, provisioning, chat with a skill, scheduled task with the phone closed, bundle purchase through the mock gateway (scenarios A-01 to A-08 and A-11 with mock payment in `60`) | Acceptance |
 | M3 Phase 1 accepted | End of week 5 | Phase 1 scenarios pass on staging with real Alipay; security checklist items marked Phase 1 pass; ten seed users invited | Owner |
 | M4 Phase 2 accepted | End of week 7 | Gig Square, group tasks, private chat, mnemonic export, Android APK, iPhone TestFlight, daily backups with a restore drill (scenarios A-13 to A-23) | Acceptance |
@@ -100,7 +100,8 @@ backups (tier P2).
 
 ## Procurement and Accounts
 
-Owner (or WS-C on the owner's behalf) opens these. Lead times are typical.
+The working checklist, with what blocks whom, is
+`15-ops-procurement.md`. This table is the register. Lead times are typical.
 
 | Item | Needed by | Lead time | Notes |
 |------|-----------|-----------|-------|

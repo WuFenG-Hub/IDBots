@@ -107,7 +107,8 @@ request; the phone never talks to `assist-base-service` directly.
   50 new identities per day and 500 in total from those IPs. Per-identity
   limits stay in force. Choose the mechanism (a configured IP allowlist, a
   partner key sent as a header and stored in the tenant's
-  `IDBOTS_METASO_PARTNER_KEY`, or both), write it into C4 by M1, and show the
+  `IDBOTS_METASO_PARTNER_KEY`, or both), write it into C4 as change request
+  CR-1 before M2 (C4 is frozen at 1.0.0; CR-1 makes it 1.1.0), and show the
   daily count of new identities per partner IP in the admin console with an
   alert above 200 per day. Phase 0 observed no limit at 7 new identities from
   one Hong Kong IP; the requirement is about the 50-per-day scale, so state
@@ -180,7 +181,8 @@ request; the phone never talks to `assist-base-service` directly.
   Most staging tests use the mock gateway; M3 needs real payments on staging,
   so staging also uses the live Alipay merchant (its own `notify_url`), with
   the ¥0.01 acceptance plan only. The Alipay sandbox stays available for
-  development. Give WS-A and WS-B its base URL by M1.
+  development. Give WS-A and WS-B its base URL within the first week of
+  WS-D work (target 2026-10-23; see `41`).
   Mock payments are impossible on production.
 - **REQ-D-17 Admin console.** Bundle plan CRUD; bundle order list with
   filters (status, account, date) and the Alipay `trade_no`; revenue by day in
@@ -203,8 +205,9 @@ request; the phone never talks to `assist-base-service` directly.
 
 ## Deliverables
 
-1. Code in `assist-base-service`, deployed to staging by M1 (with the mock
-   gateway and the Alipay sandbox) and to production by M3.
+1. Code in `assist-base-service`, deployed to staging before M2 (with the mock
+   gateway and the Alipay sandbox; dates in
+   `41-ws-d-implementation-plan.md`) and to production by M3.
 2. Swagger or Markdown API documentation for every new or changed endpoint,
    including the REQ-D-6 mechanism, also copied into C4.
 3. Seeded plans on staging; the production plans once the owner sets values.

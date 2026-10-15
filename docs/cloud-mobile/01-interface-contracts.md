@@ -1,7 +1,9 @@
 # 01 — Interface Contracts
 
-Contract version: **1.0.0-draft** (frozen as 1.0.0 at M1; changes follow the
-change-control process in `00-program-plan.md`).
+Contract version: **1.0.0**, frozen by the owner on 2026-10-15 (M1). Every
+change from here on, including review findings from the parties, follows the
+change-request process in `00-program-plan.md`. One item is known to come as
+a minor change: WS-D's partner-policy mechanism (end of C4), version 1.1.0.
 
 | Contract | Provider | Consumers |
 |----------|----------|-----------|
@@ -540,5 +542,5 @@ All tenants reach Metaso from one or two egress IP addresses (published by
 WS-C). Per-IP limits on bootstrap, free grants, and gas subsidy must not block
 at least 50 new identities per day and 500 in total from those addresses.
 Per-identity limits stay in force. WS-D chooses the mechanism (IP allowlist,
-partner key in `IDBOTS_METASO_PARTNER_KEY`, or both) and documents it here at
-M1.
+partner key in `IDBOTS_METASO_PARTNER_KEY`, or both) and documents it here
+through change request CR-1 (contract version 1.1.0) before M2.

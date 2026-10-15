@@ -305,12 +305,16 @@ Current facts:
 
 ## Deliverables
 
-1. Branches following `AGENTS.md`, merged only on the owner's instruction:
-   - `feat/ipc-registry` (REQ-A-12 to A-14) — lands first; it is a pure
-     refactor and is verified on desktop.
-   - `feat/gateway` (REQ-A-15 to A-25, A-29, A-30) — includes desktop dev mode.
+1. Branches following `AGENTS.md`, merged only on the owner's instruction
+   (order and tasks in `11-ws-a-implementation-plan.md`):
+   - `feat/ipc-registry` (REQ-A-12 to A-14) — a pure refactor, verified on
+     desktop.
+   - `feat/ipc-contract` (REQ-A-17 allowlist data, REQ-A-23) — runs in
+     parallel with `feat/ipc-registry` so WS-E gets the contract file early.
+   - `feat/gateway` (REQ-A-15, A-16, A-17 enforcement, A-18 to A-22, A-24,
+     A-25, A-29, A-30) — includes desktop dev mode.
    - `feat/server-mode` (REQ-A-1 to A-11, A-31 to A-33) and
-     `feat/tenant-image` (REQ-A-26 to A-28).
+     `feat/tenant-image` (REQ-A-6 entrypoint, REQ-A-26 to A-28).
 2. The two audit documents named in REQ-A-2 and REQ-A-13.
 3. Tenant image pushed to the staging registry by WS-C's CI.
 4. A delivery note per branch listing each requirement with evidence.

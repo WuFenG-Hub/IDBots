@@ -1,6 +1,7 @@
 # 02 — IPC Allowlist v1 (Mobile API v1)
 
-Allowlist version: **1.0.0-draft** (frozen at M1). This is the complete list
+Allowlist version: **1.0.0**, frozen by the owner on 2026-10-15 (M1); changes
+follow the change-request process in `00`. This is the complete list
 of IPC channels a gateway client may invoke and the main-process events it
 receives. Everything not listed as allowed is denied
 (`CHANNEL_NOT_ALLOWED`). WS-A implements it in `src/main/gateway/allowlist.ts`;

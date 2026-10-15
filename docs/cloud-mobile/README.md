@@ -26,31 +26,51 @@ flowchart LR
   Tenant --> LLM["DeepSeek and other models"]
 ```
 
+## How This Desk Works
+
+The planning desk writes and accepts these documents. It does not implement
+them. Each party below takes one implementation plan, works on its own
+branch, and sends back a delivery note. Acceptance is against that party's
+workstream criteria and `60-acceptance-and-go-live.md`.
+
+M0 (GO) and M1 (contracts 1.0.0) were signed by the owner on 2026-10-15.
+A party that cannot implement a frozen sentence files a change request; it
+does not edit `01` or `02` on its own.
+
 ## Documents and Who Gets Them
+
+Shared documents go to every party. The implementation plan is the document
+that party starts from. The matching `10`–`50` file is the requirement spec
+it has to satisfy.
 
 | Document | Content | Give to |
 |----------|---------|---------|
-| [`00-program-plan.md`](00-program-plan.md) | Workstreams, dependencies, milestones, environments, procurement, change control, risks, owner decisions | Everyone |
-| [`01-interface-contracts.md`](01-interface-contracts.md) | C1 tenant runtime, C2 gateway protocol, C3 control-plane public API, C4 Metaso bundle API | Everyone |
-| [`02-ipc-allowlist-v1.md`](02-ipc-allowlist-v1.md) | Which IPC channels and events the phone may use (mobile API v1) | WS-A, WS-E, acceptance |
-| [`10-ws-a-idbots-server-mode.md`](10-ws-a-idbots-server-mode.md) | IDBots server mode, IPC registry, gateway, tenant image | IDBots development party |
-| [`20-ws-b-control-plane.md`](20-ws-b-control-plane.md) | Invites, SMS login, provisioning, proxy, admin CLI | Control-plane development party |
-| [`30-ws-c-infra-ops.md`](30-ws-c-infra-ops.md) | Hosts, network isolation, TLS, registry, CI, backups, monitoring, runbooks | Operations agent |
-| [`40-ws-d-metaso-bundle.md`](40-ws-d-metaso-bundle.md) | Bundle product, identity-bound LLM quota, partner IP policy | Metaso team |
-| [`50-ws-e-mobile-client.md`](50-ws-e-mobile-client.md) | Mobile web app, `window.electron` shim, Capacitor shells | Mobile development party |
-| [`60-acceptance-and-go-live.md`](60-acceptance-and-go-live.md) | End-to-end scenarios, non-functional targets, security and go-live checklists, sign-off | Owner, acceptance reviewer, every party |
+| [`00-program-plan.md`](00-program-plan.md) | Workstreams, dependencies, milestones, environments, change control, risks, owner decisions | Everyone |
+| [`01-interface-contracts.md`](01-interface-contracts.md) | C1–C4, frozen at 1.0.0 | Everyone |
+| [`02-ipc-allowlist-v1.md`](02-ipc-allowlist-v1.md) | Mobile API v1 allowlist, frozen at 1.0.0 | WS-A, WS-E, acceptance |
+| [`15-ops-procurement.md`](15-ops-procurement.md) | Domain, SMS, hosts, registry, Apple, keystore, legal texts | Owner / operations |
+| [`11-ws-a-implementation-plan.md`](11-ws-a-implementation-plan.md) | IDBots server mode, in branch order | IDBots development |
+| [`10-ws-a-idbots-server-mode.md`](10-ws-a-idbots-server-mode.md) | WS-A requirements and acceptance | IDBots development |
+| [`21-ws-b-implementation-plan.md`](21-ws-b-implementation-plan.md) | Control plane, in branch order | Control-plane development |
+| [`20-ws-b-control-plane.md`](20-ws-b-control-plane.md) | WS-B requirements and acceptance | Control-plane development |
+| [`31-ws-c-implementation-plan.md`](31-ws-c-implementation-plan.md) | Deploy assets and host setup, in stage order | Infrastructure engineering |
+| [`30-ws-c-infra-ops.md`](30-ws-c-infra-ops.md) | WS-C requirements and acceptance | Infrastructure engineering |
+| [`41-ws-d-implementation-plan.md`](41-ws-d-implementation-plan.md) | Bundle API, in stage order | Metaso team |
+| [`40-ws-d-metaso-bundle.md`](40-ws-d-metaso-bundle.md) | WS-D requirements and acceptance | Metaso team |
+| [`51-ws-e-implementation-plan.md`](51-ws-e-implementation-plan.md) | Mobile client, in branch order | Mobile development |
+| [`50-ws-e-mobile-client.md`](50-ws-e-mobile-client.md) | WS-E requirements and acceptance | Mobile development |
+| [`60-acceptance-and-go-live.md`](60-acceptance-and-go-live.md) | End-to-end scenarios, security, go-live, sign-off | Owner, acceptance, every party |
 
-Phase 0 (the Linux headless spike that must pass before any of the above
-starts) has its own executable plan:
-[`docs/superpowers/plans/2026-10-14-phase0-linux-headless-spike.md`](../superpowers/plans/2026-10-14-phase0-linux-headless-spike.md).
+Phase 0 has passed (GO, signed 2026-10-15). Its plan and results stay at
+[`docs/superpowers/plans/2026-10-14-phase0-linux-headless-spike.md`](../superpowers/plans/2026-10-14-phase0-linux-headless-spike.md)
+and branch `spike/linux-headless`.
 
 ## Reading Order for a New Party
 
-1. This README and `00-program-plan.md` (who depends on whom, what "done" means).
-2. `01-interface-contracts.md` sections relevant to you (every party implements
-   or consumes at least one contract).
-3. Your workstream document.
-4. `60-acceptance-and-go-live.md` (the scenarios your work will be tested by).
+1. This README and `00-program-plan.md`.
+2. Your implementation plan (`11`, `15`, `21`, `31`, `41`, or `51`).
+3. `01-interface-contracts.md`, the sections your plan names.
+4. Your requirements file (`10` to `50`) and `60-acceptance-and-go-live.md`.
 
 ## Rules That Apply to Every Party
 
@@ -74,5 +94,6 @@ starts) has its own executable plan:
 | Item | Status |
 |------|--------|
 | Design spec | Approved by the owner on 2026-10-14 |
-| Phase 0 spike | GO, recommended by acceptance on 2026-10-15. Raw tarball checked the same day and replayed on local branch `spike/linux-headless` at `956f2b05` (not pushed). One leftover: web-search's browser launch was not exercised |
-| Handoff package | Draft v1 with the Phase 0 and S05b numbers folded in; frozen at M1 |
+| M0 Phase 0 | GO, signed by the owner on 2026-10-15. Branch `spike/linux-headless` at `956f2b05` (not pushed) |
+| M1 contracts | `01` and `02` frozen at 1.0.0 on 2026-10-15. Party findings come back as change requests |
+| Implementation plans | Ready to hand out: WS-A, WS-B, WS-C, WS-D, WS-E, and operations |
