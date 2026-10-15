@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import Module from 'node:module';
 import { createRequire } from 'node:module';
 
-import { getSqlJs } from './memoryTestUtils.mjs';
+import { getSqlJs, createCoworkStore, createSqliteStore } from './memoryTestUtils.mjs';
 
 const require = createRequire(import.meta.url);
 const {
@@ -12,6 +13,28 @@ const {
 } = require('../dist-electron/main/libs/procedureProbation.js');
 const { MetaIDKnowledgeStore, ensureMetaIDKnowledgeSchema } =
   require('../dist-electron/main/metaidKnowledgeStore.js');
+
+function loadRunnerModule() {
+  const originalLoad = Module._load;
+  Module._load = function patchedLoad(request, ...rest) {
+    if (request === 'electron') {
+      return {
+        app: {
+          isPackaged: false,
+          getAppPath: () => process.cwd(),
+          getPath: () => process.cwd(),
+        },
+        BrowserWindow: { getAllWindows: () => [] },
+      };
+    }
+    return originalLoad.call(this, request, ...rest);
+  };
+  try {
+    return require('../dist-electron/main/libs/coworkRunner.js');
+  } finally {
+    Module._load = originalLoad;
+  }
+}
 
 const CLOCK = 1_700_000_000_000;
 
@@ -264,4 +287,105 @@ test('buildProbationDraftDescription caps at 1200 chars', () => {
   });
   assert.equal(description.length, 1200);
   assert.ok(description.endsWith('…'));
+});
+
+// ---------------------------------------------------------------------------
+// Probation drafts from procedure_save (RRSI P2 Task 4)
+// ---------------------------------------------------------------------------
+
+test('ensureProbationDraftForProcedure creates once, refreshes, and reopens after rejection', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const first = coworkStore.ensureProbationDraftForProcedure({
+      metabotId: 5, procedureId: 'proc-1', title: '新学规程', description: '第一版描述', dreamDate: '2026-08-02',
+    });
+    assert.equal(first.created, true);
+    const refreshed = coworkStore.ensureProbationDraftForProcedure({
+      metabotId: 5, procedureId: 'proc-1', title: '新学规程', description: '第二版描述', dreamDate: '2026-08-03',
+    });
+    assert.equal(refreshed.created, false);
+    assert.equal(refreshed.draftId, first.draftId);
+    const drafts = coworkStore.listCapabilityDrafts(5);
+    assert.equal(drafts.length, 1);
+    assert.equal(drafts[0].description, '第二版描述');
+    assert.equal(drafts[0].dreamDate, '2026-08-02', 'refresh keeps the original dream_date');
+    assert.equal(drafts[0].capabilityType, 'workflow');
+    assert.equal(drafts[0].sourceProcedureId, 'proc-1');
+
+    coworkStore.updateCapabilityDraftValidation({ id: first.draftId, metabotId: 5, status: 'rejected' });
+    const reopened = coworkStore.ensureProbationDraftForProcedure({
+      metabotId: 5, procedureId: 'proc-1', title: '新学规程', description: '第三版描述', dreamDate: '2026-08-04',
+    });
+    assert.equal(reopened.created, true);
+    assert.notEqual(reopened.draftId, first.draftId);
+
+    assert.equal(
+      coworkStore.ensureProbationDraftForProcedure({ metabotId: 5, procedureId: '', title: 'x', description: 'd', dreamDate: '2026-08-02' }),
+      null,
+      'invalid input returns null',
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('hygiene purge keeps an old probation draft while deleting old plain drafts', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    coworkStore.insertCapabilityDrafts(5, '2026-01-01', [
+      { title: '普通草案', description: 'd', capabilityType: 'workflow' },
+    ]);
+    coworkStore.ensureProbationDraftForProcedure({
+      metabotId: 5, procedureId: 'proc-keep', title: '试用草案', description: 'd', dreamDate: '2026-01-01',
+    });
+    const purged = coworkStore.purgeExpiredCapabilityDrafts({ cutoffMs: Date.now() + 86_400_000 });
+    assert.equal(purged, 1, 'only the plain draft ages out');
+    const remaining = coworkStore.listCapabilityDrafts(5);
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].sourceProcedureId, 'proc-keep');
+  } finally {
+    cleanup();
+  }
+});
+
+test('runner: procedure_save opens one probation draft and recall shows the status line', async () => {
+  const { CoworkRunner } = loadRunnerModule();
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const knowledgeStore = new MetaIDKnowledgeStore(db, () => {}, () => CLOCK);
+    const runner = new CoworkRunner(coworkStore, { knowledgeStore });
+    const session = coworkStore.createSession('和用户聊发布', '/tmp/a', '', 'local', [], 5);
+
+    const saved = runner.runProcedureSaveTool({
+      title: '发布前查重规程',
+      trigger: '当用户要求发布内容时',
+      steps: ['先查重', '再发布'],
+      sourcePinIds: ['pin-xyz'],
+    }, session.id);
+    assert.equal(saved.isError, false);
+    assert.ok(saved.text.includes('joins your always-on procedures'), saved.text);
+
+    const drafts = coworkStore.listCapabilityDrafts(5);
+    assert.equal(drafts.length, 1);
+    assert.ok(drafts[0].description.includes('触发:'));
+    assert.ok(drafts[0].description.includes('pin-xyz'));
+
+    const again = runner.runProcedureSaveTool({
+      title: '发布前查重规程',
+      trigger: '当用户要求发布内容时',
+      steps: ['先查重', '再发布'],
+      sourcePinIds: ['pin-xyz'],
+    }, session.id);
+    assert.equal(again.isError, false);
+    assert.equal(coworkStore.listCapabilityDrafts(5).length, 1, 're-save keeps one draft');
+
+    const recalled = runner.runProcedureRecallTool({ query: '查重' }, session.id);
+    assert.equal(recalled.isError, false);
+    assert.ok(recalled.text.includes('status: not yet validated by a dream'), recalled.text);
+  } finally {
+    cleanup();
+  }
 });

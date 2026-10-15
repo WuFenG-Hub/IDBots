@@ -928,6 +928,9 @@ export interface CapabilityDraft {
    * conditions / residual uncertainty (NULL = never reconciled). */
   conditionsText: string | null;
   uncertaintyText: string | null;
+  /** RRSI P2: the procedure this draft is the probation ticket for (NULL =
+   * a dream-distilled draft). */
+  sourceProcedureId: string | null;
 }
 
 interface CapabilityDraftRow {
@@ -949,13 +952,15 @@ interface CapabilityDraftRow {
   last_reviewed_at?: number | string | null;
   conditions_text?: string | null;
   uncertainty_text?: string | null;
+  source_procedure_id?: string | null;
 }
 
 /** Shared column list for every capability-draft SELECT (mapped by
  * CoworkStore.mapCapabilityDraftRow; new columns are added in one place). */
 const CAPABILITY_DRAFT_COLUMNS = `id, metabot_id, dream_date, title, description, capability_type, status, created_at,
              validation_score, validation_notes, validated_at, times_injected, last_injected_at,
-             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text`;
+             promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text,
+             source_procedure_id`;
 
 /** Which gate pass falsified a hypothesis (RRSI P1 ledger provenance). */
 export type CapabilityFalsifiedSource = 'validation' | 're_review';
@@ -7620,7 +7625,61 @@ export class CoworkStore implements MemoryBackend {
       lastReviewedAt: row.last_reviewed_at == null ? null : Number(row.last_reviewed_at),
       conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
       uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
+      sourceProcedureId: row.source_procedure_id == null ? null : String(row.source_procedure_id),
     };
+  }
+
+  /**
+   * Open (or refresh) the probation ticket for a runtime-saved procedure
+   * (RRSI P2, design §6.2 P2.2): one capability_drafts row per procedure that
+   * the existing dream validation gate judges. A pending ticket (draft /
+   * disputed) is refreshed in place — title and description follow the
+   * procedure's latest revision while dream_date, created_at and status stay
+   * (the gate calendar keeps counting from the first save). Deliberately
+   * bypasses the falsified-ledger block of insertCapabilityDraftsChecked: an
+   * explicit agent save is never silently dropped; the gate still sees the
+   * similar-falsified prompt line. Returns null on invalid input.
+   */
+  ensureProbationDraftForProcedure(input: {
+    metabotId: number;
+    procedureId: string;
+    title: string;
+    description: string;
+    dreamDate: string;
+  }): { draftId: number; created: boolean } | null {
+    const metabotId = Number(input.metabotId);
+    const procedureId = String(input.procedureId ?? '').trim();
+    const title = String(input.title ?? '').trim();
+    const description = String(input.description ?? '').trim();
+    const dreamDate = String(input.dreamDate ?? '').trim();
+    if (!Number.isInteger(metabotId) || metabotId <= 0 || !procedureId || !title || !description || !dreamDate) {
+      return null;
+    }
+    const existing = this.getOne<{ id: number | string }>(
+      `SELECT id FROM capability_drafts
+       WHERE metabot_id = ? AND source_procedure_id = ? AND status IN ('draft', 'disputed')
+       ORDER BY id DESC LIMIT 1`,
+      [metabotId, procedureId],
+    );
+    if (existing) {
+      this.db.run(
+        `UPDATE capability_drafts SET title = ?, description = ? WHERE id = ? AND metabot_id = ?`,
+        [title, description, Number(existing.id), metabotId],
+      );
+      this.saveDb();
+      return { draftId: Number(existing.id), created: false };
+    }
+    const now = Date.now();
+    this.db.run(
+      `INSERT INTO capability_drafts (
+         metabot_id, dream_date, title, description, capability_type, status,
+         created_at, source_procedure_id
+       ) VALUES (?, ?, ?, ?, 'workflow', 'draft', ?, ?)`,
+      [metabotId, dreamDate, title, description, now, procedureId],
+    );
+    this.saveDb();
+    const newId = Number(this.getOne<{ id: number | string }>('SELECT last_insert_rowid() AS id', [])?.id);
+    return { draftId: newId, created: true };
   }
 
   /**
@@ -7955,7 +8014,9 @@ export class CoworkStore implements MemoryBackend {
    * BOOKKEEPING (verdict candidates and their corpses), not user memories —
    * the capability they described lives on in the night's diary.
    * 'validated' rows are NEVER deleted here; their quality control is the
-   * periodic re-review's job (dreamService).
+   * periodic re-review's job (dreamService). A pending probation draft
+   * (source_procedure_id set) also never ages out here — its procedure is
+   * still waiting for the gate, so the ticket must survive (RRSI P2).
    */
   purgeExpiredCapabilityDrafts(input: {
     cutoffMs: number;
@@ -7968,7 +8029,8 @@ export class CoworkStore implements MemoryBackend {
       : '';
     this.db.run(
       `DELETE FROM capability_drafts
-       WHERE status IN ('rejected', 'draft') AND created_at < ?${exclusion}`,
+       WHERE status IN ('rejected', 'draft') AND created_at < ?
+         AND NOT (status = 'draft' AND source_procedure_id IS NOT NULL)${exclusion}`,
       [cutoff, ...excluded],
     );
     const deleted = this.db.getRowsModified?.() || 0;

@@ -20,6 +20,9 @@ const PROCEDURE_PITFALL_MAX_CHARS = 120;
 const RECALL_STEP_MAX_CHARS = 200;
 
 export interface ProcedurePromptEntry {
+  /** RRSI P2: the procedure id (used by exposure bookkeeping; optional so
+   * older callers and test stubs keep compiling). */
+  id?: string;
   title: string;
   triggerText: string;
   steps: string[];
@@ -27,6 +30,8 @@ export interface ProcedurePromptEntry {
   sourcePinIds: string[];
   version?: number;
   useCount?: number;
+  /** RRSI P2: trust hint for a recall-only procedure (null = hot/validated). */
+  statusNote?: string | null;
 }
 
 const escapeXml = (value: string): string =>
@@ -106,6 +111,7 @@ export function formatProcedureRecallResults(entries: ProcedurePromptEntry[]): s
     const useSuffix = typeof entry.useCount === 'number' && entry.useCount > 0 ? ` · used ${entry.useCount}×` : '';
     lines.push(`- 【经验】${truncate(entry.title, PROCEDURE_TITLE_MAX_CHARS)}${versionSuffix}${useSuffix}`);
     lines.push(`  when: ${truncate(entry.triggerText, PROCEDURE_TRIGGER_MAX_CHARS)}`);
+    if (entry.statusNote) lines.push(`  status: ${entry.statusNote}`);
     const steps = (entry.steps ?? []).map((step, index) => `${index + 1}. ${truncate(step, RECALL_STEP_MAX_CHARS)}`);
     if (steps.length) lines.push(`  steps: ${steps.join(' | ')}`);
     if (entry.pitfalls?.length) lines.push(`  avoid: ${entry.pitfalls.map((p) => truncate(p, PROCEDURE_PITFALL_MAX_CHARS)).join('；')}`);

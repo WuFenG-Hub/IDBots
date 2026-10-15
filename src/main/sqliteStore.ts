@@ -669,6 +669,12 @@ export class SqliteStore {
       if (!draftCols.includes('uncertainty_text')) {
         this.db.run('ALTER TABLE capability_drafts ADD COLUMN uncertainty_text TEXT');
       }
+      // RRSI P2 agent-procedure probation: the capability draft opened for a
+      // procedure the bot saved at runtime. NULL = a dream-distilled draft;
+      // the dream gate judges both the same way.
+      if (!draftCols.includes('source_procedure_id')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN source_procedure_id TEXT');
+      }
     } catch (error) {
       console.warn('migrate capability_drafts validation columns:', error);
     }

@@ -79,6 +79,8 @@ import {
   PROCEDURE_PROMPT_MAX_ITEMS,
   type ProcedurePromptEntry,
 } from './procedurePromptBlocks';
+import { buildProbationDraftDescription } from './procedureProbation';
+import { formatBotWorkspaceDate } from './botWorkspace';
 import { tApp } from './appLanguage';
 import { isContextWindowExceededError } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
@@ -1790,6 +1792,9 @@ export interface CoworkKnowledgeStore {
     version: number;
     useCount: number;
     updatedAt: number;
+    /** RRSI P2: hot-layer state (optional so test stubs keep compiling). */
+    hotEligible?: boolean;
+    hotReason?: string | null;
   }>;
   upsertProcedure(input: {
     metabotId: number;
@@ -1801,7 +1806,21 @@ export interface CoworkKnowledgeStore {
     category?: string | null;
     tags?: string[];
     origin?: 'agent' | 'dream' | 'user';
-  }): { created: boolean; revised: boolean; entry: { id: string; title: string; version: number } };
+  }): {
+    created: boolean;
+    revised: boolean;
+    /** RRSI P2: the procedure entered/stays in agent probation. */
+    needsGate?: boolean;
+    entry: {
+      id: string;
+      title: string;
+      version: number;
+      triggerText?: string;
+      steps?: string[];
+      pitfalls?: string[];
+      sourcePinIds?: string[];
+    };
+  };
   /** Archive an active procedure by exact title; null when no active match. */
   archiveProcedureByTitle(metabotId: number, title: string): { id: string; title: string; version: number } | null;
 }
@@ -4142,7 +4161,21 @@ export class CoworkRunner extends EventEmitter {
         limit,
         touchUsed: true,
       });
+      // RRSI P2: recall-only procedures keep answering, with a status line so
+      // the bot knows how much to trust them (design §6.2 P2.2).
+      const statusNoteFor = (entry: { hotEligible?: boolean; hotReason?: string | null }): string | null => {
+        if (entry.hotEligible !== false) return null;
+        if (entry.hotReason === 'probation') return 'not yet validated by a dream — treat as a hypothesis';
+        if (entry.hotReason === 'gate_rejected' || entry.hotReason === 'demoted') {
+          return 'rejected by dream validation — use only if the situation clearly differs';
+        }
+        if (entry.hotReason === 'rollback') return 'withdrawn after a bad day — verify before relying on it';
+        if (entry.hotReason === 'unused') return 'rarely applied — recalled on demand';
+        if (entry.hotReason === 'situational') return 'only held in a specific situation — check the trigger carefully';
+        return null;
+      };
       const entries: ProcedurePromptEntry[] = results.map((entry) => ({
+        id: entry.id,
         title: entry.title,
         triggerText: entry.triggerText,
         steps: entry.steps,
@@ -4150,6 +4183,7 @@ export class CoworkRunner extends EventEmitter {
         sourcePinIds: entry.sourcePinIds,
         version: entry.version,
         useCount: entry.useCount,
+        statusNote: statusNoteFor(entry),
       }));
       return { text: formatProcedureRecallResults(entries), isError: false };
     } catch (error) {
@@ -4203,13 +4237,38 @@ export class CoworkRunner extends EventEmitter {
         tags: Array.isArray(args.tags) ? args.tags.filter((t): t is string => typeof t === 'string') : undefined,
         origin: 'agent',
       });
+      // RRSI P2 agent probation (design §6.2 P2.2): a runtime-saved procedure
+      // opens one probation ticket the dream gate judges before it turns hot.
+      // Best-effort — a ticket failure never fails the save itself.
+      if (result.needsGate === true) {
+        try {
+          this.store.ensureProbationDraftForProcedure({
+            metabotId,
+            procedureId: result.entry.id,
+            title: result.entry.title,
+            description: buildProbationDraftDescription({
+              triggerText: result.entry.triggerText ?? result.entry.title,
+              steps: result.entry.steps ?? [],
+              pitfalls: result.entry.pitfalls ?? [],
+              sourcePinIds: result.entry.sourcePinIds ?? [],
+            }),
+            dreamDate: formatBotWorkspaceDate(new Date()),
+          });
+        } catch (error) {
+          console.warn(
+            `[CoworkRunner] Probation draft open failed for procedure ${result.entry.id}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       return {
         text: formatProcedureSaveResult({
           title,
           created: result.created,
           revised: result.revised,
           version: result.entry.version,
-        }),
+        }) + (result.needsGate === true
+          ? ' It is saved for recall now; it joins your always-on procedures after a later dream validates it.'
+          : ''),
         isError: false,
       };
     } catch (error) {
