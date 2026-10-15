@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Module from 'node:module';
 import { createRequire } from 'node:module';
 
-import { createCoworkStore, createSqliteStore } from './memoryTestUtils.mjs';
+import { createCoworkStore, createSqliteStore, getRow } from './memoryTestUtils.mjs';
 
 const require = createRequire(import.meta.url);
 const {
@@ -11,6 +11,17 @@ const {
   buildProcedureBlock,
 } = require('../dist-electron/main/libs/procedurePromptBlocks.js');
 const { MetaIDKnowledgeStore } = require('../dist-electron/main/metaidKnowledgeStore.js');
+const { MemoryHygieneService } = require('../dist-electron/main/services/memoryHygieneService.js');
+const {
+  HOT_LAYER_USAGE_RETENTION_DAYS,
+} = require('../dist-electron/main/coworkStore.js');
+
+const localDateKey = (date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 function loadRunnerModule() {
   const originalLoad = Module._load;
@@ -139,4 +150,159 @@ test('renderProcedureBlock reports included ids and buildProcedureBlock matches 
   const full = renderProcedureBlock(entries);
   assert.equal(full.text, buildProcedureBlock(entries, 5, 1800));
   assert.deepEqual(full.includedIds.filter(Boolean), ['p1', 'p2', 'p3']);
+});
+
+// ---------------------------------------------------------------------------
+// Exposure ledger (RRSI P2 Task 7)
+// ---------------------------------------------------------------------------
+
+const usageRow = (db, where, params = []) => {
+  const result = db.exec(`SELECT item_kind, item_id, exposure, exposure_count FROM hot_layer_usage WHERE ${where}`, params);
+  const values = result[0]?.values?.[0];
+  return values ? { kind: values[0], id: values[1], exposure: values[2], count: values[3] } : null;
+};
+
+const usageCount = (db) => Number(db.exec('SELECT COUNT(*) FROM hot_layer_usage')[0].values[0][0]);
+
+test('markCapabilityDraftsInjected writes one hot technique row per day, bumping the count', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    coworkStore.insertCapabilityDrafts(5, '2026-08-01', [
+      { title: '技巧一', description: 'd', capabilityType: 'workflow' },
+    ]);
+    const draft = coworkStore.listCapabilityDrafts(5)[0];
+    const today = localDateKey(new Date());
+    assert.equal(coworkStore.markCapabilityDraftsInjected([draft.id]), 1);
+    assert.equal(coworkStore.markCapabilityDraftsInjected([draft.id]), 1);
+    const row = usageRow(db, 'metabot_id = 5 AND usage_date = ? AND item_kind = ?', [today, 'technique']);
+    assert.deepEqual(row, { kind: 'technique', id: String(draft.id), exposure: 'hot', count: 2 });
+    assert.equal(coworkStore.listCapabilityDrafts(5)[0].timesInjected, 2, 'the counter still bumps');
+  } finally {
+    cleanup();
+  }
+});
+
+test('recordHotLayerExposures: hot wins over recall within a day', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const today = localDateKey(new Date());
+    const written = coworkStore.recordHotLayerExposures({
+      metabotId: 5,
+      usageDate: today,
+      items: [
+        { kind: 'procedure', id: 'p-recall-then-hot', exposure: 'recall' },
+        { kind: 'procedure', id: 'p-hot-then-recall', exposure: 'hot' },
+        { kind: 'procedure', id: 'p-recall-only', exposure: 'recall' },
+      ],
+    });
+    assert.equal(written, 3);
+    coworkStore.recordHotLayerExposures({
+      metabotId: 5,
+      usageDate: today,
+      items: [
+        { kind: 'procedure', id: 'p-recall-then-hot', exposure: 'hot' },
+        { kind: 'procedure', id: 'p-hot-then-recall', exposure: 'recall' },
+      ],
+    });
+    assert.equal(usageRow(db, "item_id = 'p-recall-then-hot'").exposure, 'hot');
+    assert.equal(usageRow(db, "item_id = 'p-hot-then-recall'").exposure, 'hot', 'hot is sticky once set');
+    assert.equal(usageRow(db, "item_id = 'p-recall-only'").exposure, 'recall');
+  } finally {
+    cleanup();
+  }
+});
+
+test('runner: the hot block and the recall tool write exposure rows', async () => {
+  const { CoworkRunner } = loadRunnerModule();
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const knowledgeStore = new MetaIDKnowledgeStore(db, () => {}, () => 1_700_000_000_000);
+    const runner = new CoworkRunner(coworkStore, { knowledgeStore });
+    const session = coworkStore.createSession('和用户聊发布', '/tmp/a', '', 'local', [], 5);
+
+    for (const title of ['热规程甲', '热规程乙']) {
+      knowledgeStore.upsertProcedure({
+        metabotId: 5, title, triggerText: `当用户要求${title}`, steps: ['一步'], origin: 'dream',
+      });
+    }
+    const recallOnly = knowledgeStore.upsertProcedure({
+      metabotId: 5, title: '查重专用规程', triggerText: '当用户要求查重', steps: ['先查重'], origin: 'agent',
+    });
+
+    const block = runner.buildExperiencePromptBlocksXml(session.id);
+    assert.ok(block.includes('热规程甲'));
+    const today = localDateKey(new Date());
+    const hotRows = db.exec(
+      "SELECT item_id FROM hot_layer_usage WHERE metabot_id = 5 AND usage_date = ? AND item_kind = 'procedure' AND exposure = 'hot'",
+      [today],
+    )[0].values.flat();
+    assert.equal(hotRows.length, 2, 'each rendered hot procedure writes one row');
+
+    const recalled = runner.runProcedureRecallTool({ query: '查重' }, session.id);
+    assert.equal(recalled.isError, false);
+    const recallRow = usageRow(db, "item_id = ?", [recallOnly.entry.id]);
+    assert.equal(recallRow.exposure, 'recall');
+    assert.equal(recallRow.kind, 'procedure');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a failing exposure write never breaks markCapabilityDraftsInjected', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    coworkStore.insertCapabilityDrafts(5, '2026-08-01', [
+      { title: '技巧二', description: 'd', capabilityType: 'workflow' },
+    ]);
+    const draft = coworkStore.listCapabilityDrafts(5)[0];
+    db.run('DROP TABLE hot_layer_usage');
+    assert.doesNotThrow(() => coworkStore.markCapabilityDraftsInjected([draft.id]));
+    assert.equal(coworkStore.listCapabilityDrafts(5)[0].timesInjected, 1, 'times_injected still bumped');
+  } finally {
+    cleanup();
+  }
+});
+
+test('hygiene purges hot-layer usage rows past the 120-day retention', async () => {
+  const now = new Date(2026, 7, 25, 10, 0);
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    db.run(
+      `INSERT INTO metabots (
+        id, wallet_id, mvc_address, btc_address, doge_address, public_key,
+        chat_public_key, name, metaid, globalmetaid, metabot_type, created_by,
+        role, soul, created_at, updated_at
+      ) VALUES (9, 1, 'mvc-9', 'btc-9', 'doge-9', 'pub-9', 'chatpub-9', 'Bot 9', 'metaid-9', 'metaid://stub-owner', 'worker', 'test', 'role', 'soul', 1, 1)`,
+    );
+    const coworkStore = createCoworkStore(db);
+    const DAYMS = 86_400_000;
+    assert.equal(HOT_LAYER_USAGE_RETENTION_DAYS, 120);
+    const oldDate = localDateKey(new Date(now.getTime() - 121 * DAYMS));
+    const freshDate = localDateKey(new Date(now.getTime() - 119 * DAYMS));
+    coworkStore.recordHotLayerExposures({
+      metabotId: 9, usageDate: oldDate, items: [{ kind: 'technique', id: 't-old', exposure: 'hot' }],
+      atMs: now.getTime() - 121 * DAYMS,
+    });
+    coworkStore.recordHotLayerExposures({
+      metabotId: 9, usageDate: freshDate, items: [{ kind: 'technique', id: 't-fresh', exposure: 'hot' }],
+      atMs: now.getTime() - 119 * DAYMS,
+    });
+    assert.equal(usageCount(db), 2);
+
+    const service = new MemoryHygieneService({
+      coworkStore,
+      metabotStore: { listMetabots: () => [{ id: 9, globalmetaid: 'metaid://stub-owner' }] },
+      now: () => new Date(now),
+    });
+    const stats = await service.runNow();
+    assert.equal(stats.counts.hotLayerUsagePurged, 1);
+    assert.equal(usageCount(db), 1);
+    assert.ok(getRow(db, 'SELECT item_id FROM hot_layer_usage WHERE item_id = ?', ['t-fresh']));
+  } finally {
+    cleanup();
+  }
 });

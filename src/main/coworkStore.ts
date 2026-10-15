@@ -59,7 +59,7 @@ import {
   normalizeMemorySemanticKey,
   scoreMemorySimilarity,
 } from './memory/memorySimilarity';
-import { BOT_WORKSPACE_DIR_NAME } from './libs/botWorkspace';
+import { BOT_WORKSPACE_DIR_NAME, formatBotWorkspaceDate } from './libs/botWorkspace';
 import {
   normalizeMemoryHygieneConfig,
   type MemoryHygieneConfig,
@@ -980,6 +980,15 @@ export interface CapabilityFalsifiedHypothesis {
   hitCount: number;
   lastHitAt: number | null;
 }
+
+/** Which hot-layer kind an exposure row tracks (RRSI P2, design §6.2 P2.4). */
+export type HotLayerItemKind = 'technique' | 'procedure';
+
+/** How the item reached the model: always-on injection or on-demand recall. */
+export type HotLayerExposure = 'hot' | 'recall';
+
+/** hot_layer_usage retention horizon in days (hygiene step, RRSI P2). */
+export const HOT_LAYER_USAGE_RETENTION_DAYS = 120;
 
 /** Outcome of a checked capability-draft insert (RRSI P1). */
 export interface CapabilityDraftInsertResult {
@@ -7725,7 +7734,78 @@ export class CoworkStore implements MemoryBackend {
     if (bumped > 0) {
       this.saveDb();
     }
+    // RRSI P2 exposure ledger: today's hot technique exposures for exactly
+    // the injected drafts (INSERT … SELECT; the WHERE clause is required
+    // before ON CONFLICT in this form). Best-effort telemetry — a failure
+    // never undoes the counter bump above.
+    try {
+      this.db.run(
+        `INSERT INTO hot_layer_usage (metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count)
+         SELECT metabot_id, ?, 'technique', CAST(id AS TEXT), 'hot', ?, 1
+         FROM capability_drafts WHERE id IN (${placeholders})
+         ON CONFLICT(metabot_id, usage_date, item_kind, item_id) DO UPDATE SET
+           exposure_count = exposure_count + 1, exposure = 'hot'`,
+        [formatBotWorkspaceDate(new Date(now)), now, ...uniqueIds],
+      );
+      this.saveDb();
+    } catch (error) {
+      console.warn('[CoworkStore] hot_layer_usage technique exposure write failed:', error);
+    }
     return bumped;
+  }
+
+  /**
+   * RRSI P2 exposure ledger (design §6.2 P2.4): one row per item per local
+   * day, counting repeat exposures. Within a day, 'hot' is sticky — an item
+   * that was injected hot and later recalled still counts as hot. Best-effort
+   * telemetry: callers wrap their own failures, and this method throws only
+   * on a genuinely broken database. Returns the number of items written.
+   */
+  recordHotLayerExposures(input: {
+    metabotId: number;
+    usageDate: string;
+    items: Array<{ kind: HotLayerItemKind; id: string; exposure: HotLayerExposure }>;
+    atMs?: number;
+  }): number {
+    const metabotId = Number(input.metabotId);
+    const usageDate = String(input.usageDate ?? '').trim();
+    if (!Number.isInteger(metabotId) || metabotId <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(usageDate)) return 0;
+    const atMs = Math.floor(Number(input.atMs ?? Date.now())) || Date.now();
+    const items = (input.items ?? []).filter((item) =>
+      (item.kind === 'technique' || item.kind === 'procedure')
+      && typeof item.id === 'string' && item.id.trim().length > 0
+      && (item.exposure === 'hot' || item.exposure === 'recall'));
+    if (items.length === 0) return 0;
+    let written = 0;
+    for (const item of items) {
+      this.db.run(
+        `INSERT INTO hot_layer_usage (metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count)
+         VALUES (?, ?, ?, ?, ?, ?, 1)
+         ON CONFLICT(metabot_id, usage_date, item_kind, item_id) DO UPDATE SET
+           exposure_count = exposure_count + 1,
+           exposure = CASE WHEN hot_layer_usage.exposure = 'hot' OR excluded.exposure = 'hot' THEN 'hot' ELSE 'recall' END`,
+        [metabotId, usageDate, item.kind, item.id, item.exposure, atMs],
+      );
+      written += 1;
+    }
+    this.saveDb();
+    return written;
+  }
+
+  /** Retention horizon for hot_layer_usage rows (hygiene step, RRSI P2). */
+  purgeHotLayerUsage(input: { cutoffDate: string; excludeMetabotIds?: ReadonlySet<number> }): number {
+    const cutoff = String(input.cutoffDate ?? '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(cutoff)) return 0;
+    const excluded = input.excludeMetabotIds ? [...input.excludeMetabotIds] : [];
+    const exclusion = excluded.length > 0
+      ? ` AND metabot_id NOT IN (${excluded.map(() => '?').join(', ')})`
+      : '';
+    this.db.run(`DELETE FROM hot_layer_usage WHERE usage_date < ?${exclusion}`, [cutoff, ...excluded]);
+    const deleted = this.db.getRowsModified?.() || 0;
+    if (deleted > 0) {
+      this.saveDb();
+    }
+    return deleted;
   }
 
   /**

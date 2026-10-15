@@ -73,7 +73,7 @@ import {
   type KnowledgePromptEntry,
 } from './knowledgePromptBlocks';
 import {
-  buildProcedureBlock,
+  renderProcedureBlock,
   formatProcedureRecallResults,
   formatProcedureSaveResult,
   PROCEDURE_PROMPT_MAX_ITEMS,
@@ -4204,6 +4204,19 @@ export class CoworkRunner extends EventEmitter {
         useCount: entry.useCount,
         statusNote: statusNoteFor(entry),
       }));
+      // RRSI P2 exposure ledger: every returned row was exposed by recall.
+      // Best-effort telemetry — a failure never breaks the tool answer.
+      try {
+        this.store.recordHotLayerExposures({
+          metabotId,
+          usageDate: formatBotWorkspaceDate(new Date()),
+          items: entries
+            .filter((entry) => typeof entry.id === 'string' && entry.id)
+            .map((entry) => ({ kind: 'procedure', id: entry.id as string, exposure: 'recall' })),
+        });
+      } catch {
+        // telemetry is best-effort
+      }
       return { text: formatProcedureRecallResults(entries), isError: false };
     } catch (error) {
       return {
@@ -6046,7 +6059,21 @@ export class CoworkRunner extends EventEmitter {
           status: 'active',
           limit: PROCEDURE_PROMPT_MAX_ITEMS,
         });
-      procedureBlock = buildProcedureBlock(procedureEntries);
+      const renderedProcedures = renderProcedureBlock(procedureEntries);
+      procedureBlock = renderedProcedures.text;
+      // RRSI P2 exposure ledger: record today's hot procedure exposures for
+      // exactly the entries that rendered. Best-effort telemetry.
+      if (renderedProcedures.includedIds.length > 0 && procedureBlock) {
+        try {
+          this.store.recordHotLayerExposures({
+            metabotId,
+            usageDate: formatBotWorkspaceDate(new Date()),
+            items: renderedProcedures.includedIds.map((id) => ({ kind: 'procedure', id, exposure: 'hot' })),
+          });
+        } catch {
+          // telemetry is best-effort
+        }
+      }
     }
     return [experienceBlock, knowledgeBlock, procedureBlock].filter((block) => block.trim()).join('\n\n');
   }
