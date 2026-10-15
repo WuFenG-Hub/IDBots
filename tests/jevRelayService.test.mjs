@@ -51,13 +51,13 @@ function setupDeps(overrides = {}) {
   const calls = { bootstrap: 0 };
   const deps = {
     getStore: () => overrides.store ?? makeStore(),
-    bootstrapImpl: async () => {
+    bootstrapImpl: overrides.bootstrapImpl ?? (async () => {
       calls.bootstrap += 1;
       if (overrides.bootstrapError) {
         throw new Error(overrides.bootstrapError);
       }
       return { apiKey: `mrk_boot${calls.bootstrap}`, baseUrl: CHAT_BASE };
-    },
+    }),
   };
   initJevRelayService(deps);
   return calls;
@@ -250,4 +250,100 @@ test('createJevRelayFetchWithKeyRetry: bootstrap failure during retry returns th
   });
   assert.equal(response.status, 401);
   assert.equal(fetches.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// First-sentence latency (2026-10-15): the caller's AbortSignal must bound
+// the whole wrapper, re-bootstrap included. The decision call sites run 1.5s
+// budgets; an identity-signed bootstrap took 15s+ and used to blow through
+// the deadline because nothing raced the signal on that path.
+// ---------------------------------------------------------------------------
+
+test('createJevRelayFetchWithKeyRetry: already-aborted signal skips the re-bootstrap entirely', async () => {
+  const calls = setupDeps({ store: makeStore() });
+  const fetches = [];
+  const wrapped = createJevRelayFetchWithKeyRetry(async (url, init) => {
+    fetches.push(init);
+    return makeResponse(401);
+  });
+  const controller = new AbortController();
+  controller.abort();
+  const response = await wrapped('https://relay.example/v1/systemone', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer mrk_revoked' },
+    signal: controller.signal,
+  });
+  assert.equal(response.status, 401);
+  assert.equal(fetches.length, 1);
+  assert.equal(calls.bootstrap, 0);
+});
+
+test('createJevRelayFetchWithKeyRetry: a signal firing mid-bootstrap returns the 401 promptly and the shared bootstrap still lands', async () => {
+  let releaseBootstrap;
+  const bootstrapGate = new Promise((resolve) => { releaseBootstrap = resolve; });
+  const calls = setupDeps({
+    store: makeStore(),
+    bootstrapImpl: async () => {
+      calls.bootstrap += 1;
+      await bootstrapGate;
+      return { apiKey: 'mrk_boot1', baseUrl: CHAT_BASE };
+    },
+  });
+  const fetches = [];
+  const wrapped = createJevRelayFetchWithKeyRetry(async (url, init) => {
+    fetches.push(init);
+    return makeResponse(401);
+  });
+  const controller = new AbortController();
+  const pending = wrapped('https://relay.example/v1/systemone', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer mrk_revoked' },
+    signal: controller.signal,
+  });
+  // Abort while the bootstrap is still in flight: the wrapper must settle
+  // with the original 401 instead of waiting the bootstrap out.
+  setTimeout(() => controller.abort(), 10);
+  const settledAt = Date.now();
+  const response = await pending;
+  assert.equal(response.status, 401);
+  assert.ok(Date.now() - settledAt < 5000, 'wrapper settles shortly after the abort, not after the bootstrap');
+  assert.equal(fetches.length, 1);
+  // The shared bootstrap keeps running and caches the fresh key for the
+  // NEXT turn — no second bootstrap, no lost credentials.
+  releaseBootstrap();
+  const credentials = await resolveJevRelayCredentials();
+  assert.equal(credentials.apiKey, 'mrk_boot1');
+  assert.equal(calls.bootstrap, 1);
+});
+
+test('resolveJevRelayCredentials: concurrent cold resolves share one bootstrap flight', async () => {
+  const calls = setupDeps({ store: makeStore() });
+  const [a, b, c] = await Promise.all([
+    resolveJevRelayCredentials(),
+    resolveJevRelayCredentials(),
+    resolveJevRelayCredentials(),
+  ]);
+  assert.equal(a.apiKey, 'mrk_boot1');
+  assert.equal(b.apiKey, 'mrk_boot1');
+  assert.equal(c.apiKey, 'mrk_boot1');
+  assert.equal(calls.bootstrap, 1);
+});
+
+test('resolveJevRelayCredentials: a failed bootstrap flight does not latch — the next call retries', async () => {
+  let failFirst = true;
+  const calls = setupDeps({
+    store: makeStore(),
+    bootstrapImpl: async () => {
+      calls.bootstrap += 1;
+      if (failFirst) {
+        failFirst = false;
+        throw new Error('relay unreachable');
+      }
+      return { apiKey: 'mrk_boot2', baseUrl: CHAT_BASE };
+    },
+  });
+  await assert.rejects(() => resolveJevRelayCredentials(), /relay unreachable/);
+  const credentials = await resolveJevRelayCredentials();
+  assert.equal(credentials.apiKey, 'mrk_boot2');
+  assert.equal(calls.bootstrap, 2);
 });

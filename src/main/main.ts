@@ -18420,6 +18420,15 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('dsh runtime warmup begin');
     void getCoworkRunner().prewarmDshRuntime();
 
+    // Pre-resolve the free JEV relay key beside the DSH warmup. Relay keys
+    // expire server-side after an idle window, and the first cerebellum call
+    // of the next chat then paid an identity-signed re-bootstrap (15s+
+    // observed) inside the turn's volatile-context build — the 2026-10-15
+    // first-sentence latency report. Fire-and-forget: the resolver never
+    // throws, and a warm key simply makes the first turn's 1.5s-bounded JEV
+    // calls answer from cache.
+    void resolveCerebellumRuntimeConfig(getStore().get('app_config'));
+
     await startSqliteBackgroundJobs();
     startSqliteDaemons();
 
