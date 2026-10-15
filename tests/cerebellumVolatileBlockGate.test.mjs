@@ -58,7 +58,7 @@ test('buildVolatileGateQuestions: one English noul per gateable block', () => {
   for (const key of CEREBELLUM_VOLATILE_GATE_SECTION_KEYS) {
     const question = questions[key];
     assert.equal(question.type, 'noul');
-    assert.match(question.instructions, /`user_message`/);
+    assert.match(question.instructions, /`current_message`/);
     assert.match(question.instructions, /Needed only when/i);
     assert.equal(typeof question.criteria.true, 'string');
   }
@@ -73,7 +73,7 @@ test('buildVolatileGateRequest: state carries only the collapsed user message', 
     currentUserText: '帮我\n\n查一下知识库',
     model: 'jev-fast',
   });
-  assert.deepEqual(request.state, { user_message: '帮我 查一下知识库' });
+  assert.deepEqual(request.state, { current_message: '帮我 查一下知识库' });
   assert.equal(request.model, 'jev-fast');
   assert.equal(Object.keys(request.questions).length, CEREBELLUM_VOLATILE_GATE_SECTION_KEYS.length);
 });
@@ -83,7 +83,7 @@ test('buildVolatileGateRequest: caps a huge pasted message before it rides the p
     currentUserText: 'a'.repeat(CEREBELLUM_VOLATILE_GATE_MAX_MESSAGE_CHARS + 999),
     model: 'jev-fast',
   });
-  assert.equal(request.state.user_message.length, CEREBELLUM_VOLATILE_GATE_MAX_MESSAGE_CHARS);
+  assert.equal(request.state.current_message.length, CEREBELLUM_VOLATILE_GATE_MAX_MESSAGE_CHARS);
 });
 
 // ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ test('gate: request shape hits /v1/systemone with one noul per block', async () 
   assert.equal(captured.length, 1);
   assert.equal(captured[0].url, 'https://jev.example.com/v1/systemone');
   assert.equal(captured[0].init.headers.Authorization, 'Bearer sk-jev-test');
-  assert.equal(captured[0].body.state.user_message, GATE_INPUT.currentUserText);
+  assert.equal(captured[0].body.state.current_message, GATE_INPUT.currentUserText);
   assert.deepEqual(
     Object.keys(captured[0].body.questions).sort(),
     [...CEREBELLUM_VOLATILE_GATE_SECTION_KEYS].sort(),
