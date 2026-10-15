@@ -639,10 +639,21 @@ export const applyCerebellumFreeDefaultMigration = (config: AppConfig): AppConfi
 
 class ConfigService {
   private config: AppConfig = defaultConfig;
+  /**
+   * False until the stored app_config has actually been read (a verified
+   * absent key counts — that is a fresh install). When the read fails,
+   * `this.config` is still the default template, and persisting it would
+   * silently replace stored provider credentials with presets (the
+   * 2026-10-16 missing-models incident: everything but app_config survived
+   * because only this kv row was reset). updateConfig therefore refuses to
+   * write until a read succeeds.
+   */
+  private loadedFromStore = false;
 
   async init() {
     try {
-      const storedConfig = await localStore.getItem<AppConfig>(CONFIG_KEYS.APP_CONFIG);
+      const storedConfig = await localStore.getItemStrict<AppConfig>(CONFIG_KEYS.APP_CONFIG);
+      this.loadedFromStore = true;
       if (storedConfig) {
         const mergedProviders = mergeProvidersConfig(undefined, storedConfig.providers);
 
@@ -681,6 +692,9 @@ class ConfigService {
       }
     } catch (error) {
       console.error('Failed to load config:', error);
+      // The store could not be read: the in-memory config is unverifiable, so
+      // updateConfig must refuse to persist until a read succeeds.
+      this.loadedFromStore = false;
     }
   }
 
@@ -689,6 +703,17 @@ class ConfigService {
   }
 
   async updateConfig(newConfig: Partial<AppConfig>) {
+    if (!this.loadedFromStore) {
+      // A never-loaded config is the default template, not the user's data;
+      // merging into it and persisting would wipe stored providers. Retry the
+      // read once — if the store is still unreadable, drop the write rather
+      // than destroy the stored config.
+      await this.init();
+      if (!this.loadedFromStore) {
+        console.error('[config] updateConfig dropped: stored app_config could not be read; refusing to persist the default template over it');
+        return;
+      }
+    }
     const normalizedProviders = newConfig.providers
       ? mergeProvidersConfig(this.config.providers, newConfig.providers as AppConfig['providers'])
       : undefined;
@@ -709,13 +734,20 @@ class ConfigService {
    * inputs hid which key each provider really holds).
    */
   async reloadFromStore(): Promise<AppConfig> {
-    const storedConfig = await localStore.getItem<AppConfig>(CONFIG_KEYS.APP_CONFIG);
-    if (storedConfig) {
-      this.config = normalizeDeepSeekAppConfig({
-        ...defaultConfig,
-        ...storedConfig,
-        providers: mergeProvidersConfig(undefined, storedConfig.providers) as AppConfig['providers'],
-      });
+    try {
+      const storedConfig = await localStore.getItemStrict<AppConfig>(CONFIG_KEYS.APP_CONFIG);
+      if (storedConfig) {
+        this.config = normalizeDeepSeekAppConfig({
+          ...defaultConfig,
+          ...storedConfig,
+          providers: mergeProvidersConfig(undefined, storedConfig.providers) as AppConfig['providers'],
+        });
+        this.loadedFromStore = true;
+      }
+    } catch (error) {
+      // Read failure keeps the last in-memory config (and does NOT mark the
+      // store as loaded), matching the historical graceful reload.
+      console.error('Failed to reload config from store:', error);
     }
     return this.config;
   }

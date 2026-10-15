@@ -1,6 +1,14 @@
 // 删除重复的类型声明，使用全局类型定义
 export interface LocalStore {
   getItem<T>(key: string): Promise<T | null>;
+  /**
+   * Like getItem, but a store/IPC failure REJECTS instead of collapsing to
+   * null. Callers that must distinguish "key absent" (null) from "read
+   * failed" (reject) — e.g. the config service deciding whether persisting a
+   * defaults-based in-memory config would wipe stored user data — use this
+   * variant.
+   */
+  getItemStrict<T>(key: string): Promise<T | null>;
   setItem<T>(key: string, value: T): Promise<void>;
   removeItem(key: string): Promise<void>;
 }
@@ -17,6 +25,13 @@ class LocalStoreService implements LocalStore {
       console.error('Failed to get item from store:', error);
       return null;
     }
+  }
+
+  async getItemStrict<T>(key: string): Promise<T | null> {
+    // No swallow: null means the main process answered "absent"; a store or
+    // IPC error rejects so callers can refuse destructive defaults writes.
+    const value = await window.electron.store.get(key);
+    return value || null;
   }
 
   async setItem<T>(key: string, value: T): Promise<void> {

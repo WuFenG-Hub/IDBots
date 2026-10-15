@@ -413,3 +413,36 @@ test('applyCerebellumFreeDefaultMigration is strictly once per install', () => {
   assert.deepEqual(again.cerebellum, { ...LEGACY_CEREBELLUM_DEFAULT });
   assert.equal(again.cerebellumFreeDefaultMigrationVersion, 1);
 });
+
+test('configService.updateConfig refuses to persist when the stored config cannot be read', async () => {
+  // The 2026-10-16 missing-models incident: a failed app_config read left the
+  // service silently on the default template, and the next write persisted
+  // defaults over the stored provider credentials (everything else survived
+  // because only the app_config kv row was reset). A failing store read must
+  // demote the service to not-loaded, and updateConfig must then drop the
+  // write instead of merging it into the default template.
+  const persisted: unknown[] = [];
+  (globalThis as { window?: unknown }).window = {
+    electron: {
+      store: {
+        get: async () => { throw new Error('store unavailable'); },
+        set: async (_key: string, value: unknown) => { persisted.push(value); },
+        remove: async () => {},
+        onChanged: () => () => {},
+      },
+    },
+  };
+  try {
+    const before = JSON.stringify(configService.getConfig());
+    await configService.init();
+    await configService.updateConfig({ theme: 'dark' } as Partial<AppConfig>);
+    assert.equal(persisted.length, 0, 'no write may reach the store while the stored config is unreadable');
+    assert.equal(
+      JSON.stringify(configService.getConfig()),
+      before,
+      'the in-memory config must stay untouched instead of merging into the default template',
+    );
+  } finally {
+    delete (globalThis as { window?: unknown }).window;
+  }
+});
