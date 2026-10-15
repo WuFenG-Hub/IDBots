@@ -192,17 +192,21 @@ test('onboarding default: provisioned free provider wins, else legacy defaults',
 });
 
 // The 2026-10-16 production relay directory every quota/bootstrap response
-// now reports (assist-base-service, live 2026-10-16, round-2 recalibrated
-// context windows; the two flagship models accept vision input).
+// now reports (assist-base-service, live 2026-10-16): round-2 recalibrated
+// context windows, the two flagship models accept vision input, and — after
+// the same-day server fix — per-model max_output_tokens matching the upstream
+// official ceilings (previously a 4096 global placeholder; that placeholder
+// never persisted client-side, the fix landed first). Values below verified
+// against the live quota endpoint 2026-10-16.
 const RELAY_CATALOG_2026_10_16 = [
-  { id: 'deepseek-4.1-flash', contextWindow: 1_000_000, maxOutputTokens: 100_000 },
-  { id: 'glm-5.3-flash', contextWindow: 1_048_576, maxOutputTokens: 128_000 },
-  { id: 'longcat-2.5-preview-free', contextWindow: 1_000_000, maxOutputTokens: 32_768 },
-  { id: 'step-5-preview-free', contextWindow: 1_000_000, maxOutputTokens: 32_768 },
-  { id: 'cat-jam-free', contextWindow: 1_000_000, maxOutputTokens: 32_768 },
-  { id: 'glyph-cluster-free', contextWindow: 256_000, maxOutputTokens: 32_768 },
-  { id: 'laguna-s-2.1-free', contextWindow: 256_000, maxOutputTokens: 32_768 },
-  { id: 'ling-3.0-flash-sante-free', contextWindow: 262_144, maxOutputTokens: 16_384 },
+  { id: 'deepseek-4.1-flash', contextWindow: 1_000_000, maxOutputTokens: 393_216 },
+  { id: 'glm-5.3-flash', contextWindow: 1_048_576, maxOutputTokens: 131_072 },
+  { id: 'longcat-2.5-preview-free', contextWindow: 1_000_000, maxOutputTokens: 131_072 },
+  { id: 'step-5-preview-free', contextWindow: 1_000_000, maxOutputTokens: 65_536 },
+  { id: 'cat-jam-free', contextWindow: 1_000_000, maxOutputTokens: 8_192 },
+  { id: 'glyph-cluster-free', contextWindow: 256_000, maxOutputTokens: 8_192 },
+  { id: 'laguna-s-2.1-free', contextWindow: 256_000, maxOutputTokens: 8_192 },
+  { id: 'ling-3.0-flash-sante-free', contextWindow: 262_144, maxOutputTokens: 8_192 },
 ];
 
 const storedLegacyProvider = () => ({
@@ -231,7 +235,10 @@ test('catalog sync: quota directory change refreshes provider.models', () => {
   // The relay list IS the directory: legacy alias dropped, new ids in relay order.
   assert.deepEqual(next.map((model) => model.id), RELAY_CATALOG_2026_10_16.map((model) => model.id));
   // Known id gets the canonical client profile over the relay-reported limits,
-  // vision included (api.ts gates image_url content arrays on this flag).
+  // vision included (api.ts gates image_url content arrays on this flag). The
+  // output ceiling stays the 100K canonical pin even though the server now
+  // reports the official 393216 — the pin wins on NEW rows by design; the
+  // next sync's drift detection then reconciles the surviving row.
   const flagship = next[0];
   assert.equal(flagship.name, 'deepseek-flash');
   assert.equal(flagship.contextWindow, 1_000_000);
@@ -243,7 +250,7 @@ test('catalog sync: quota directory change refreshes provider.models', () => {
   const glm = next[1];
   assert.equal(glm.name, 'glm-5.3-flash');
   assert.equal(glm.contextWindow, 1_048_576);
-  assert.equal(glm.maxOutputTokens, 128_000);
+  assert.equal(glm.maxOutputTokens, 131_072);
   assert.equal('options' in glm, false);
   assert.equal('supportsImage' in glm, false);
   // The stored provider object itself is never mutated.
@@ -252,15 +259,17 @@ test('catalog sync: quota directory change refreshes provider.models', () => {
 });
 
 test('catalog sync: conf-only recalibration refreshes stored windows without id changes', () => {
-  // The round-2 server pass corrected contextWindow values while keeping the
-  // id set identical. An install that synced round-1 values (e.g. the stale
-  // 131072-era windows) must pick the recalibrated numbers up on the next
-  // quota fetch — drift in relay-reported limits alone is a rewrite.
+  // The round-2 server passes corrected contextWindow values and (same day)
+  // replaced the 4096 global maxOutputTokens placeholder with per-model
+  // official ceilings — both while keeping the id set identical. An install
+  // that synced the older numbers must pick the recalibrated values up on
+  // the next quota fetch: drift in relay-reported limits alone is a rewrite.
   const syncedRound1 = RELAY_CATALOG_2026_10_16.map((entry) => ({
     id: entry.id,
     name: entry.id,
     ...entry,
   }));
+  syncedRound1[2].maxOutputTokens = 4_096; // longcat: the pre-fix server placeholder
   syncedRound1[4].contextWindow = 131_072; // cat-jam-free stale round-1 value
   syncedRound1[5].contextWindow = 131_072; // glyph-cluster-free stale round-1 value
   const provider = { ...storedLegacyProvider(), models: syncedRound1 };
@@ -268,6 +277,7 @@ test('catalog sync: conf-only recalibration refreshes stored windows without id 
   const next = planFreeProviderCatalogSync(provider, RELAY_CATALOG_2026_10_16);
   assert.ok(next, 'value drift alone must trigger the rewrite');
   assert.deepEqual(next.map((model) => model.id), RELAY_CATALOG_2026_10_16.map((model) => model.id));
+  assert.equal(next[2].maxOutputTokens, 131_072, 'longcat adopts the per-model official ceiling');
   assert.equal(next[4].contextWindow, 1_000_000, 'cat-jam-free adopts the recalibrated window');
   assert.equal(next[5].contextWindow, 256_000, 'glyph-cluster-free adopts the recalibrated window');
   // Options and other row fields survive the limit refresh.

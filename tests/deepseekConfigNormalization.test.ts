@@ -312,7 +312,7 @@ test('normalizeDeepSeekAppConfig falls a vanished metaid-free default back to th
   // rejects it and the default lands on the free catalog's first model.
   const syncedFreeModels = [
     { id: 'deepseek-4.1-flash', name: 'deepseek-flash', supportsImage: false, contextWindow: 1_000_000, maxOutputTokens: 100_000 },
-    { id: 'glm-5.3-flash', name: 'glm-5.3-flash', contextWindow: 1_048_576, maxOutputTokens: 128_000 },
+    { id: 'glm-5.3-flash', name: 'glm-5.3-flash', contextWindow: 1_048_576, maxOutputTokens: 131_072 },
     { id: 'cat-jam-free', name: 'cat-jam-free' },
   ];
   const normalized = normalizeDeepSeekAppConfig({
@@ -527,7 +527,7 @@ test('mergeProvidersConfig flips the round-1 supportsImage:false era on deepseek
           id: 'glm-5.3-flash',
           name: 'glm-5.3-flash',
           contextWindow: 1_048_576,
-          maxOutputTokens: 128_000,
+          maxOutputTokens: 131_072,
           supportsImage: true,
         },
       ],
