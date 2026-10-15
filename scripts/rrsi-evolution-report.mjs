@@ -191,6 +191,72 @@ function readFalsifiedLedger(db, metabotId, fromDate, toDate) {
   return { size, hitsInWindow, newestTitles };
 }
 
+/** RRSI P2 retention metrics: budget annealing, hot-layer footprint (ΔC),
+ * the probation funnel, and exposure coverage. Missing tables/columns degrade
+ * to null instead of crashing (first run doubles as the pre-phase baseline). */
+function readRetentionSection(db, metabotId, fromDate, toDate) {
+  const retention = {
+    promotionsPerNight: null,
+    budgetLatest: null,
+    hotLayerChars: { first: null, last: null },
+    probation: null,
+    exposure: null,
+  };
+  if (tableExists(db, 'metabot_dream_telemetry_daily')) {
+    const rows = db
+      .prepare('SELECT extra_json FROM metabot_dream_telemetry_daily WHERE metabot_id = ? AND dream_date >= ? AND dream_date <= ? ORDER BY dream_date ASC')
+      .all(metabotId, fromDate, toDate);
+    let promotedSum = 0;
+    let budgetNights = 0;
+    let firstChars = null;
+    let lastChars = null;
+    for (const row of rows) {
+      const extra = parseExtraJson(row.extra_json);
+      const budget = typeof extra.promotionBudget === 'object' && extra.promotionBudget !== null
+        ? extra.promotionBudget
+        : null;
+      if (budget) {
+        promotedSum += nestedNumber(budget, 'promoted');
+        budgetNights += 1;
+        retention.budgetLatest = nestedNumber(budget, 'budget');
+      }
+      const hotLayer = typeof extra.hotLayer === 'object' && extra.hotLayer !== null
+        ? extra.hotLayer
+        : null;
+      if (hotLayer) {
+        const chars = nestedNumber(hotLayer, 'procedureBlockChars') + nestedNumber(hotLayer, 'techniqueBlockChars');
+        if (firstChars === null) firstChars = chars;
+        lastChars = chars;
+      }
+    }
+    if (budgetNights > 0) retention.promotionsPerNight = round4(promotedSum / budgetNights);
+    retention.hotLayerChars = { first: firstChars, last: lastChars };
+  }
+  if (tableExists(db, 'capability_drafts') && columnNames(db, 'capability_drafts').includes('source_procedure_id')) {
+    const funnel = db
+      .prepare(`SELECT COUNT(*) AS opened,
+                       COALESCE(SUM(CASE WHEN status = 'validated' THEN 1 ELSE 0 END), 0) AS validated,
+                       COALESCE(SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END), 0) AS rejected,
+                       COALESCE(SUM(CASE WHEN promoted_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS promoted
+                FROM capability_drafts
+                WHERE metabot_id = ? AND source_procedure_id IS NOT NULL AND created_at >= ? AND created_at < ?`)
+      .get(metabotId, dateKeyStartMs(fromDate), dateKeyStartMs(toDate) + DAY_MS);
+    retention.probation = {
+      opened: toNumber(funnel?.opened),
+      validated: toNumber(funnel?.validated),
+      rejected: toNumber(funnel?.rejected),
+      promoted: toNumber(funnel?.promoted),
+    };
+  }
+  if (tableExists(db, 'hot_layer_usage')) {
+    const exposure = db
+      .prepare('SELECT COUNT(DISTINCT usage_date) AS nights, COUNT(*) AS items FROM hot_layer_usage WHERE metabot_id = ? AND usage_date >= ? AND usage_date <= ?')
+      .get(metabotId, fromDate, toDate);
+    retention.exposure = { nights: toNumber(exposure?.nights), items: toNumber(exposure?.items) };
+  }
+  return retention;
+}
+
 export function buildRrsiReport(db, options = {}) {
   const days = Number.isInteger(options.days) && options.days > 0 ? options.days : 30;
   const toDate = typeof options.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(options.today)
@@ -219,6 +285,7 @@ export function buildRrsiReport(db, options = {}) {
         nights: readNights(db, metabotId, fromDate, toDate),
         gate: readGateSection(db, metabotId, fromDate, toDate),
         falsifiedLedger: readFalsifiedLedger(db, metabotId, fromDate, toDate),
+        retention: readRetentionSection(db, metabotId, fromDate, toDate),
       });
     }
   }
@@ -263,6 +330,26 @@ export function formatRrsiReport(report) {
       lines.push(
         `  falsified ledger: ${ledger.size} rows, ${ledger.hitsInWindow} hit in window; newest: ${newest}${ledger.size > ledger.newestTitles.length ? ', …' : ''}`,
       );
+    }
+    const retention = bot.retention ?? {};
+    const promotions = typeof retention.promotionsPerNight === 'number'
+      ? retention.promotionsPerNight.toFixed(2)
+      : 'n/a';
+    const hotLayerChars = retention.hotLayerChars ?? { first: null, last: null };
+    lines.push(
+      `  retention: promotions/night ${promotions}, latest budget ${retention.budgetLatest ?? 'n/a'}, hot-layer chars ${hotLayerChars.first ?? '-'} → ${hotLayerChars.last ?? '-'}`,
+    );
+    if (retention.probation === null) {
+      lines.push('  probation: (column missing)');
+    } else {
+      lines.push(
+        `  probation: opened ${retention.probation.opened}, validated ${retention.probation.validated}, rejected ${retention.probation.rejected}, promoted ${retention.probation.promoted}`,
+      );
+    }
+    if (retention.exposure === null) {
+      lines.push('  exposure: (table missing)');
+    } else {
+      lines.push(`  exposure: ${retention.exposure.items} items over ${retention.exposure.nights} night(s)`);
     }
   }
   if ((report.missing ?? []).length > 0) {

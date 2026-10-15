@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import Module from 'node:module';
 import { createRequire } from 'node:module';
 
-import { createCoworkStore, createSqliteStore, getRow } from './memoryTestUtils.mjs';
+import { getSqlJs, createCoworkStore, createSqliteStore, getRow } from './memoryTestUtils.mjs';
+import {
+  createDreamHarness,
+  dreamJson,
+  seedSession,
+} from './fixtures/rrsiDreamHarness.mjs';
 
 const require = createRequire(import.meta.url);
 const {
@@ -304,5 +309,58 @@ test('hygiene purges hot-layer usage rows past the 120-day retention', async () 
     assert.ok(getRow(db, 'SELECT item_id FROM hot_layer_usage WHERE item_id = ?', ['t-fresh']));
   } finally {
     cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Footprint telemetry (RRSI P2 Task 8)
+// ---------------------------------------------------------------------------
+
+const NIGHT = '2026-08-02';
+
+test('a night with one hot procedure reports a positive procedureBlockChars', async () => {
+  const h = await createDreamHarness();
+  try {
+    h.knowledgeStore.upsertProcedure({
+      metabotId: 5, title: '热规程丙', triggerText: '当用户要求丙', steps: ['一步'], origin: 'dream',
+    });
+    h.knowledgeStore.upsertProcedure({
+      metabotId: 5, title: '试用规程丁', triggerText: '当用户要求丁', steps: ['两步'], origin: 'agent',
+    });
+    seedSession(h.coworkStore, h.db, NIGHT, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({ daily_summary: '普通的一天。' }));
+    await h.runNight(NIGHT);
+    const hotLayer = h.telemetry(NIGHT)?.hotLayer;
+    assert.ok(hotLayer, 'hotLayer telemetry present on the non-empty path');
+    assert.equal(hotLayer.hotProcedures, 1);
+    assert.equal(hotLayer.probationProcedures, 1);
+    assert.equal(hotLayer.injectableTechniques, 0);
+    assert.ok(hotLayer.procedureBlockChars > 0, 'one hot procedure renders a non-empty block');
+    assert.equal(hotLayer.techniqueBlockChars, 0);
+    assert.equal(hotLayer.exposedItems, 0, 'the dream itself does not inject');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a night with no hot procedures reports zero procedureBlockChars', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, NIGHT, [
+      { type: 'user', content: '视频好了吗' },
+      { type: 'assistant', content: '好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({ daily_summary: '普通的一天。' }));
+    await h.runNight(NIGHT);
+    const hotLayer = h.telemetry(NIGHT)?.hotLayer;
+    assert.ok(hotLayer, 'empty days still report the current footprint');
+    assert.equal(hotLayer.hotProcedures, 0);
+    assert.equal(hotLayer.procedureBlockChars, 0);
+    assert.equal(hotLayer.exposedItems, 0);
+  } finally {
+    h.cleanup();
   }
 });

@@ -98,6 +98,8 @@ import {
   type DreamFragmentSummary,
 } from '../libs/dreamFragments';
 import { formatBotWorkspaceDate } from '../libs/botWorkspace';
+import { buildProcedureBlock, PROCEDURE_PROMPT_MAX_ITEMS } from '../libs/procedurePromptBlocks';
+import { buildProvenTechniquesBlock } from '../libs/experiencePromptBlocks';
 import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../libs/claudeSettings';
 import { budgetAssumesThinking } from '../libs/modelThinking';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
@@ -1211,6 +1213,7 @@ export class DreamService {
           capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
           promotedCount: promotion.promoted,
           promotionBudget: { nights: promotion.nights, budget: promotion.budget, candidates: promotion.candidates, promoted: promotion.promoted },
+          hotLayer: this.buildHotLayerTelemetry(metabotId, date),
           hasExplicitFeedback: hasExplicitHumanFeedback(activity),
           reconciliation,
           chainEvidence: validation.chainEvidence,
@@ -1305,6 +1308,7 @@ export class DreamService {
         capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
         promotedCount: promotion.promoted,
         promotionBudget: { nights: promotion.nights, budget: promotion.budget, candidates: promotion.candidates, promoted: promotion.promoted },
+        hotLayer: this.buildHotLayerTelemetry(metabotId, date),
         // P1 periodic re-review (audit): how many validated drafts faced the
         // verdict panel again tonight and how many were demoted off the
         // injection roster (promoted procedures archived alongside).
@@ -1436,6 +1440,47 @@ export class DreamService {
     } catch (error) {
       console.warn(
         `[DreamService] Capability utilization telemetry unavailable for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * RRSI P2 cost telemetry (ΔC, design §6.2 P2.5): render the blocks the host
+   * would inject RIGHT NOW and record their sizes plus the hot-layer counts.
+   * Empty days report it too — the footprint exists whether or not the bot
+   * dreamed. Null on failure so telemetry never breaks the dream run.
+   */
+  private buildHotLayerTelemetry(
+    metabotId: number,
+    date: string,
+  ): {
+    hotProcedures: number;
+    probationProcedures: number;
+    injectableTechniques: number;
+    procedureBlockChars: number;
+    techniqueBlockChars: number;
+    exposedItems: number;
+  } | null {
+    try {
+      const knowledge = this.deps.metaidKnowledgeStore;
+      const hotProcedures = knowledge ? knowledge.listHotProcedures(metabotId, { limit: 200 }).length : 0;
+      const probationProcedures = knowledge
+        ? knowledge.listProcedures({ metabotId, status: 'active', limit: 500 })
+          .filter((entry) => entry.hotEligible === false && entry.hotReason === 'probation').length
+        : 0;
+      const injectableTechniques = this.deps.coworkStore.listInjectableTechniques(metabotId, 50).length;
+      const procedureBlockChars = knowledge
+        ? buildProcedureBlock(knowledge.listHotProcedures(metabotId, { limit: PROCEDURE_PROMPT_MAX_ITEMS })).length
+        : 0;
+      const techniqueBlockChars = buildProvenTechniquesBlock(
+        this.deps.coworkStore.listInjectableTechniques(metabotId, 5),
+      ).length;
+      const exposedItems = this.deps.coworkStore.countHotLayerExposures(metabotId, date);
+      return { hotProcedures, probationProcedures, injectableTechniques, procedureBlockChars, techniqueBlockChars, exposedItems };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Hot-layer telemetry unavailable for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }

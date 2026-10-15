@@ -7808,6 +7808,18 @@ export class CoworkStore implements MemoryBackend {
     return deleted;
   }
 
+  /** How many hot-layer items were exposed to this bot on one local day. */
+  countHotLayerExposures(metabotId: number, usageDate: string): number {
+    const id = Number(metabotId);
+    const date = String(usageDate ?? '').trim();
+    if (!Number.isInteger(id) || id <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return 0;
+    const row = this.getOne<{ count: number | string }>(
+      'SELECT COUNT(*) AS count FROM hot_layer_usage WHERE metabot_id = ? AND usage_date = ?',
+      [id, date],
+    );
+    return Math.max(0, Math.floor(Number(row?.count) || 0));
+  }
+
   /**
    * Utilization rollup for the nightly dream telemetry: how many validated
    * drafts the bot has, their cumulative injection count, and how many were
