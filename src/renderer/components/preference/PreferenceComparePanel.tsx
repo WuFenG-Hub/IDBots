@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ArrowPathIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { preferenceService, type PreferencePreview } from '../../services/preference';
@@ -180,6 +181,7 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
   const [sealing, setSealing] = useState(false);
   const [sealError, setSealError] = useState<string | null>(null);
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  const [sealedSignature, setSealedSignature] = useState<string | null>(null);
   const restoredBallotId = useRef<string | null>(null);
   const previewsRef = useRef(previews);
   previewsRef.current = previews;
@@ -203,6 +205,18 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
     };
   }, [load]);
 
+  // Escape is the always-available exit: docked DevTools (dev builds) covers the
+  // top-right close button, so the keyboard must be able to dismiss the overlay.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || sealing) return;
+      if (confirmOpen) setConfirmOpen(false);
+      else onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [confirmOpen, sealing, onClose]);
+
   const schedule = useMemo(
     () => (view ? buildPairSchedule(view.me.globalMetaId ?? '', view.pinId, view.candidates) : []),
     [view],
@@ -215,6 +229,7 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
     restoredBallotId.current = latestBallot.id;
     setAnswers(ballotToAnswers(schedule, latestBallot.ballot));
     setNote(latestBallot.ballot.note ?? '');
+    setSealedSignature(latestBallot.commitPinId ? JSON.stringify(latestBallot.ballot) : null);
   }, [latestBallot, schedule]);
 
   const judging = Boolean(view && view.me.listed && view.status === 'collecting' && nowSec < view.commitCutoffAt);
@@ -257,6 +272,10 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
   const answer = currentKey ? answers[currentKey] ?? EMPTY_ANSWER : EMPTY_ANSWER;
   const answerError = pairAnswerError(answer);
   const progress = scheduleProgress(schedule, answers);
+  const ballotSignature = useMemo(
+    () => (view ? JSON.stringify(answersToBallot(schedule, answers, note)) : ''),
+    [view, schedule, answers, note],
+  );
 
   const updateAnswer = (patch: Partial<PreferencePairAnswer>) => {
     if (!currentKey) return;
@@ -268,7 +287,9 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
     setSealing(true);
     setSealError(null);
     try {
-      await preferenceService.commit(view.pinId, answersToBallot(schedule, answers, note));
+      const ballot = answersToBallot(schedule, answers, note);
+      await preferenceService.commit(view.pinId, ballot);
+      setSealedSignature(JSON.stringify(ballot));
       setConfirmOpen(false);
       await load();
     } catch (error) {
@@ -278,7 +299,7 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
     }
   };
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-[9000] flex flex-col bg-[var(--bg-main)] text-[var(--text-primary)]">
       <header className="flex items-center justify-between gap-3 border-b border-[var(--border-color)] px-4 py-2">
         <div className="min-w-0">
@@ -460,7 +481,7 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
                 </span>
                 <button
                   type="button"
-                  disabled={!progress.complete}
+                  disabled={!progress.complete || (sealedSignature !== null && sealedSignature === ballotSignature)}
                   onClick={() => {
                     setSealError(null);
                     setConfirmOpen(true);
@@ -486,7 +507,8 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
           onCancel={() => setConfirmOpen(false)}
         />
       )}
-    </div>
+    </div>,
+    document.body,
   );
 };
 

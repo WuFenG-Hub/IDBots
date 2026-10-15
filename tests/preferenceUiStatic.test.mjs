@@ -43,3 +43,15 @@ test('preference components follow the theme and privacy rules', () => {
     assert.equal(/allow-popups|allow-top-navigation/.test(text), false, `${name} loosens the iframe sandbox`);
   }
 });
+
+test('compare panel is escapable, portaled, and guards duplicate seals', () => {
+  const panel = components.find(({ name }) => name === 'PreferenceComparePanel.tsx');
+  assert.ok(panel, 'PreferenceComparePanel.tsx not found');
+  // Docked DevTools covers the overlay's top-right close button in dev builds;
+  // Escape must dismiss the modal first, then the panel.
+  assert.ok(/'Escape'/.test(panel.text), 'panel lacks an Escape key handler');
+  // The overlay must escape any ancestor stacking context.
+  assert.ok(/createPortal/.test(panel.text) && /document\.body/.test(panel.text), 'panel is not portaled to document.body');
+  // After a successful seal the review button stays disabled until the ballot changes.
+  assert.ok(/sealedSignature/.test(panel.text), 'panel lacks the sealed-signature guard');
+});
