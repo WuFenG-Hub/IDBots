@@ -21,6 +21,7 @@ const {
   resolveJevRelayCredentials,
   resolveCerebellumRuntimeConfig,
   createJevRelayFetchWithKeyRetry,
+  createSignalBoundedFetch,
   JEV_RELAY_API_KEY_KV,
   JEV_RELAY_BASE_URL_KV,
 } = service;
@@ -346,4 +347,67 @@ test('resolveJevRelayCredentials: a failed bootstrap flight does not latch — t
   const credentials = await resolveJevRelayCredentials();
   assert.equal(credentials.apiKey, 'mrk_boot2');
   assert.equal(calls.bootstrap, 2);
+});
+
+// ---------------------------------------------------------------------------
+// createSignalBoundedFetch (2026-10-16 follow-up): enforce the caller's
+// AbortSignal in OUR code. Electron's session.fetch rejected on abort within
+// ~1s on a healthy network, but a stalled proxy/upstream (session 70fa10aa,
+// five cerebellum calls hung 17s past their deadlines) never surfaced the
+// abort. The wrapper must reject the caller at the abort edge regardless.
+// ---------------------------------------------------------------------------
+
+test('createSignalBoundedFetch: rejects promptly when the underlying fetch hangs past the abort', async () => {
+  setupDeps({ store: makeStore() });
+  let resolveFetch;
+  const never = new Promise(() => {}); // never settles by itself
+  const bounded = createSignalBoundedFetch(async () => {
+    resolveFetch = () => {}; // record that the fetch was dispatched
+    return never;
+  });
+  const controller = new AbortController();
+  const pending = bounded('https://relay.example/v1/systemone', {
+    method: 'POST',
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 20);
+  const startedAt = Date.now();
+  await assert.rejects(() => pending, (error) => error?.name === 'AbortError');
+  assert.ok(Date.now() - startedAt < 2000, 'rejection lands at the abort edge, not when the upstream recovers');
+  void resolveFetch;
+});
+
+test('createSignalBoundedFetch: an already-aborted signal rejects before dispatching', async () => {
+  setupDeps({ store: makeStore() });
+  let dispatched = 0;
+  const bounded = createSignalBoundedFetch(async () => {
+    dispatched += 1;
+    return makeResponse(200);
+  });
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    () => bounded('https://relay.example/v1/systemone', { method: 'POST', signal: controller.signal }),
+    (error) => error?.name === 'AbortError',
+  );
+  assert.equal(dispatched, 0);
+});
+
+test('createSignalBoundedFetch: a fetch that settles before the abort passes through untouched', async () => {
+  setupDeps({ store: makeStore() });
+  const bounded = createSignalBoundedFetch(async () => makeResponse(200));
+  const controller = new AbortController();
+  const response = await bounded('https://relay.example/v1/systemone', {
+    method: 'POST',
+    signal: controller.signal,
+  });
+  assert.equal(response.status, 200);
+  controller.abort();
+});
+
+test('createSignalBoundedFetch: no signal means plain passthrough', async () => {
+  setupDeps({ store: makeStore() });
+  const bounded = createSignalBoundedFetch(async () => makeResponse(200));
+  const response = await bounded('https://relay.example/v1/systemone', { method: 'POST' });
+  assert.equal(response.status, 200);
 });
