@@ -605,3 +605,30 @@ test('nudge state preserves the owner-activity anchor across partial writes', as
   store.setNudgeState(taskId, { lastNudgeAtMs: 1234, lastEventId: 42, lastOwnerActivityAtMs: 2000 });
   assert.equal(store.getNudgeState(taskId).lastOwnerActivityAtMs, 2000);
 });
+
+test('owner metabot binding: persisted at creation, changeable, null reverts to default Twin', async () => {
+  const { store } = await openStore();
+  // Create without a binding → legacy default Twin (null), board + detail carry it.
+  const plain = store.createTask(SPEC, 'twin');
+  assert.ok(plain.ok, JSON.stringify(plain));
+  assert.equal(store.getTask(plain.value.id).ownerMetabotId, null);
+  assert.equal(plain.value.ownerMetabotId, null);
+
+  // Create WITH a binding → persisted.
+  const bound = store.createTask({ ...SPEC, ownerMetabotId: 42 }, 'twin');
+  assert.ok(bound.ok, JSON.stringify(bound));
+  assert.equal(store.getTask(bound.value.id).ownerMetabotId, 42);
+
+  // Change the owner; invalid values collapse to the default Twin (null).
+  assert.ok(store.updateTask({ taskId: bound.value.id, ownerMetabotId: 7 }, 'owner').ok);
+  assert.equal(store.getTask(bound.value.id).ownerMetabotId, 7);
+  assert.ok(store.updateTask({ taskId: bound.value.id, ownerMetabotId: null }, 'owner').ok);
+  assert.equal(store.getTask(bound.value.id).ownerMetabotId, null);
+  // Invalid values collapse to null; from an already-null state that is a
+  // no-op ('nothing to update'), from a bound state it is a real revert write.
+  assert.equal(store.updateTask({ taskId: bound.value.id, ownerMetabotId: 9.5 }, 'owner').ok, false);
+  assert.equal(store.getTask(bound.value.id).ownerMetabotId, null);
+  assert.ok(store.updateTask({ taskId: bound.value.id, ownerMetabotId: 7 }, 'owner').ok);
+  assert.ok(store.updateTask({ taskId: bound.value.id, ownerMetabotId: -1 }, 'owner').ok);
+  assert.equal(store.getTask(bound.value.id).ownerMetabotId, null);
+});

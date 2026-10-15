@@ -66,8 +66,9 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       goal: z.string().min(1).describe('The full goal statement, including the done-ness definition of the whole task.'),
       subtasks: z.array(subtaskDraftSchema).min(1).describe('Ordered sub-projects. Order should respect dependencies.'),
       definitionSessionId: z.string().optional().describe('The session where the definition was discussed (for traceability).'),
+      ownerMetabotId: z.number().int().positive().optional().describe('Owner Agent binding: the local metabot id whose sessions "continue discussion" opens on. Omit or null = default Twin; the owner can change it later in the task detail UI.'),
     },
-    async (args: { title?: string; goal?: string; subtasks?: unknown[]; definitionSessionId?: string }) => {
+    async (args: { title?: string; goal?: string; subtasks?: unknown[]; definitionSessionId?: string; ownerMetabotId?: number }) => {
       try {
         const result = store().createTask(
           {
@@ -75,6 +76,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
             goal: String(args.goal ?? ''),
             subtasks: (args.subtasks ?? []) as never[],
             definitionSessionId: args.definitionSessionId ?? null,
+            ownerMetabotId: args.ownerMetabotId ?? null,
           },
           'twin',
         );

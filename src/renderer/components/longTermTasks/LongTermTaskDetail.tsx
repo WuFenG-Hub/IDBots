@@ -14,6 +14,8 @@ import {
 import { formatRelativeTime } from './LongTermTaskCard';
 import CopyIdChip from './CopyIdChip';
 import ParticipantAvatars from './ParticipantAvatars';
+import { loadOwnerAgentBots } from './ownerAgentBots';
+import type { MetaBotForSelector } from '../cowork/MetaBotSelector';
 
 /**
  * Long-term task detail page (frozen prototype screen 2): goal + progress on
@@ -75,10 +77,26 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
   const [skipReason, setSkipReason] = useState('');
   const [confirming, setConfirming] = useState<'complete' | 'cancelTask' | 'acceptAll' | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [ownerBots, setOwnerBots] = useState<MetaBotForSelector[]>([]);
 
   useEffect(() => {
     void longTermTaskService.loadTask(taskId);
   }, [taskId]);
+
+  // Owner-Agent roster for the binding selector (local, enabled, LLM-configured
+  // bots — same rule as the cowork New Task composer). Refreshed per mount.
+  useEffect(() => {
+    let cancelled = false;
+    void loadOwnerAgentBots().then(({ bots }) => {
+      if (!cancelled) setOwnerBots(bots);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** Resolved owner metabot id: explicit binding, else the Twin (legacy default). */
+  const ownerMetabotId = detail?.ownerMetabotId ?? ownerBots.find((bot) => bot.metabot_type === 'twin')?.id ?? null;
 
   const selectedSubtask: LongTermSubtask | null = useMemo(() => {
     if (!detail) return null;
@@ -120,7 +138,7 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
       .replace('{subtask}', subtask?.title ?? '')
       .replace('{taskId}', detail.id)
       .replace('{subtaskId}', subtask?.id ?? '');
-    window.dispatchEvent(new CustomEvent('cowork:newChatWithDraft', { detail: { text } }));
+    window.dispatchEvent(new CustomEvent('cowork:newChatWithDraft', { detail: { text, metabotId: ownerMetabotId } }));
   };
 
   const runAction = async (action: () => Promise<{ error: string | null }>) => {
@@ -504,6 +522,39 @@ const LongTermTaskDetail: React.FC<{ taskId: string }> = ({ taskId }) => {
                   {selectedSubtask.notes}
                 </div>
               )}
+
+              {/* Owner-Agent binding: which bot "continue discussion" opens on.
+                  Legacy tasks (ownerMetabotId null) route to the Twin and say
+                  so explicitly instead of silently landing on the wrong bot. */}
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                <span className="text-[11px] font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('longTermTask.ownerAgent')}
+                </span>
+                {ownerBots.length > 0 && (
+                  <select
+                    className="rounded-lg border dark:border-claude-darkBorder border-claude-border bg-transparent px-2 py-1 text-xs dark:text-claude-darkText text-claude-text"
+                    value={ownerMetabotId ?? ''}
+                    onChange={(event) => {
+                      const id = Number(event.target.value);
+                      if (!Number.isInteger(id) || id <= 0) return;
+                      void runAction(() =>
+                        longTermTaskService.updateTask({ taskId: detail.id, ownerMetabotId: id }),
+                      );
+                    }}
+                  >
+                    {ownerBots.map((bot) => (
+                      <option key={bot.id} value={bot.id}>
+                        {bot.name}{bot.metabot_type === 'twin' ? ` (${i18nService.t('longTermTask.ownerAgentTwin')})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <span className="rounded-full px-2 py-0.5 text-[11px] font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                  {detail.ownerMetabotId == null
+                    ? i18nService.t('longTermTask.twinSessionBadge')
+                    : i18nService.t('longTermTask.ownerSessionBadge')}
+                </span>
+              </div>
 
               {/* Owner actions */}
               <div className="mt-4 flex flex-wrap gap-2 border-t dark:border-claude-darkBorder/30 border-claude-border/30 pt-3">
