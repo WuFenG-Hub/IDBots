@@ -60,6 +60,14 @@ import {
   scoreMemorySimilarity,
 } from './memory/memorySimilarity';
 import { BOT_WORKSPACE_DIR_NAME, formatBotWorkspaceDate } from './libs/botWorkspace';
+import { queryHotLayerUsageStats } from './libs/hotLayerUsageQueries';
+import {
+  HOT_LAYER_FRESH_SLOTS,
+  HOT_LAYER_GRACE_DAYS,
+  HOT_LAYER_UTILITY_WINDOW_DAYS,
+  rankHotLayerItems,
+} from './libs/hotLayerPruning';
+import { shiftDateKey } from './libs/predictionLedger';
 import {
   normalizeMemoryHygieneConfig,
   type MemoryHygieneConfig,
@@ -7622,9 +7630,12 @@ export class CoworkStore implements MemoryBackend {
    * RRSI P2 single injection path (design §6.2 P2.3): validated drafts that
    * were NEVER promoted — the only drafts allowed into
    * <proven_techniques>. A promoted draft hardened into procedure memory and
-   * must not also ride the technique block (double injection). Newest first.
+   * must not also ride the technique block (double injection).
+   * RRSI P3 utility ordering (design §6.3 P3.2): the roster is ranked by
+   * applied nights in the trailing 30 days, then recency, with one slot
+   * reserved for a newcomer still inside the 14-day grace period.
    */
-  listInjectableTechniques(metabotId: number, limit: number = 5): CapabilityDraft[] {
+  listInjectableTechniques(metabotId: number, limit: number = 5, options?: { nowMs?: number }): CapabilityDraft[] {
     const id = Number(metabotId);
     if (!Number.isInteger(id) || id <= 0) return [];
     const clampedLimit = Math.max(1, Math.min(50, Math.floor(limit) || 5));
@@ -7633,9 +7644,68 @@ export class CoworkStore implements MemoryBackend {
       FROM capability_drafts
       WHERE metabot_id = ? AND status = 'validated' AND promoted_at IS NULL
       ORDER BY created_at DESC, id DESC
-      LIMIT ?
-    `, [id, clampedLimit]);
-    return rows.map((row) => this.mapCapabilityDraftRow(row));
+      LIMIT 100
+    `, [id]);
+    if (rows.length === 0) return [];
+    const drafts = rows.map((row) => this.mapCapabilityDraftRow(row));
+    const nowMs = options?.nowMs ?? Date.now();
+    const today = formatBotWorkspaceDate(new Date(nowMs));
+    const stats = queryHotLayerUsageStats(this.db, {
+      metabotId: id,
+      kind: 'technique',
+      sinceDate: shiftDateKey(today, -(HOT_LAYER_UTILITY_WINDOW_DAYS - 1)),
+      untilDate: today,
+      itemIds: drafts.map((draft) => String(draft.id)),
+    });
+    return rankHotLayerItems(
+      drafts.map((draft) => ({
+        draft,
+        key: String(draft.id),
+        kind: 'technique' as const,
+        hotSinceMs: draft.validatedAt ?? draft.createdAt,
+        appliedNights: stats.get(String(draft.id))?.appliedNights ?? 0,
+        exposedNights: stats.get(String(draft.id))?.exposedNights ?? 0,
+      })),
+      { cap: clampedLimit, nowMs, freshSlots: HOT_LAYER_FRESH_SLOTS, graceDays: HOT_LAYER_GRACE_DAYS },
+    ).map((candidate) => candidate.draft);
+  }
+
+  /**
+   * RRSI P3 L1 demotion (design §6.3 P3.3): a validated, never-promoted draft
+   * that kept being shown but never applied moves to 'dormant' — kept as
+   * history, never injected / re-reviewed / promoted / purged; a later dream
+   * re-proposal of the same title is a new draft. The note appends to the
+   * existing validation notes (capped). Returns whether a row changed.
+   */
+  markCapabilityDraftDormant(input: { id: number; metabotId: number; atMs: number; note: string }): boolean {
+    const id = Number(input.id);
+    const metabotId = Number(input.metabotId);
+    const atMs = Math.floor(Number(input.atMs));
+    const note = String(input.note ?? '').trim();
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(metabotId) || metabotId <= 0
+      || !Number.isFinite(atMs) || !note) {
+      return false;
+    }
+    const existing = this.getOne<{ validation_notes: string | null }>(
+      `SELECT validation_notes FROM capability_drafts
+       WHERE id = ? AND metabot_id = ? AND status = 'validated' AND promoted_at IS NULL
+       LIMIT 1`,
+      [id, metabotId],
+    );
+    if (!existing) return false;
+    const currentNotes = existing.validation_notes == null ? '' : String(existing.validation_notes);
+    const notes = truncateUtf16Units(currentNotes ? `${currentNotes} — ${note}` : note, 1000);
+    this.db.run(
+      `UPDATE capability_drafts
+       SET status = 'dormant', dormant_at = ?, validation_notes = ?
+       WHERE id = ? AND metabot_id = ? AND status = 'validated' AND promoted_at IS NULL`,
+      [atMs, notes, id, metabotId],
+    );
+    const changed = (this.db.getRowsModified?.() || 0) > 0;
+    if (changed) {
+      this.saveDb();
+    }
+    return changed;
   }
 
   private mapCapabilityDraftRow(row: CapabilityDraftRow): CapabilityDraft {

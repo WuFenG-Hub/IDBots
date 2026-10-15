@@ -75,6 +75,7 @@ import {
   PREDICTION_CALIBRATION_WINDOW_DAYS,
   judgeNumericExpectation,
   renderPredictionCalibrationDigest,
+  shiftDateKey,
 } from '../libs/predictionLedger';
 import {
   ROLLBACK_BASELINE_DAYS,
@@ -106,6 +107,10 @@ import {
   selectUsageAuditItems,
   USAGE_AUDIT_ITEM_GIST_CHARS,
 } from '../libs/hotLayerUsageAudit';
+import {
+  HOT_LAYER_UTILITY_WINDOW_DAYS,
+  selectHotLayerDemotions,
+} from '../libs/hotLayerPruning';
 import { buildProvenTechniquesBlock } from '../libs/experiencePromptBlocks';
 import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../libs/claudeSettings';
 import { budgetAssumesThinking } from '../libs/modelThinking';
@@ -1293,6 +1298,9 @@ export class DreamService {
       // RRSI P3: the usage audit compares the day's exposed hot-layer items
       // with sampled assistant replies and fills hot_layer_usage verdicts.
       const usageAudit = await this.runHotLayerUsageAudit(metabot, brain, date, activity);
+      // RRSI P3: prune hot-layer items that keep being shown but never used.
+      // Runs even when the audit was skipped — older audited nights still count.
+      const hotLayerPruning = this.pruneHotLayerAfterDream(metabot, date);
       const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
       const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
       // Self-curriculum (design §3.4, after the replay per §3.1): auto-approve
@@ -1322,6 +1330,9 @@ export class DreamService {
         // (design §6.3 P3.1). Non-empty path only — an empty day has no
         // replies to judge against.
         usageAudit,
+        // RRSI P3: L1 pruning outcome (design §6.3 P3.3) — never deletes
+        // anything; demotion changes a status or an eligibility flag only.
+        hotLayerPruning,
         hotLayer: this.buildHotLayerTelemetry(metabotId, date),
         // P1 periodic re-review (audit): how many validated drafts faced the
         // verdict panel again tonight and how many were demoted off the
@@ -2218,6 +2229,91 @@ export class DreamService {
     } catch (error) {
       console.warn(
         `[DreamService] Usage audit failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * RRSI P3 L1 pruning (design §6.3 P3.3): after the usage audit, demote the
+   * worst-earning hot-layer items — past their 14-day grace, ≥5 audited hot
+   * nights in the trailing 30 days, applied on none. A technique moves to the
+   * 'dormant' draft status; a procedure becomes recall-only with
+   * hot_reason 'unused'. At most 2 demotions per night across BOTH kinds
+   * (one shared candidate list). Nothing is deleted. The reference clock is
+   * the dreamed date's day end, so a repair re-run judges identically.
+   * Best-effort: any failure returns the zero result.
+   */
+  private pruneHotLayerAfterDream(
+    metabot: DreamMetabotLike,
+    date: string,
+  ): { demotedTechniques: number; demotedProcedures: number; reentered: number } {
+    const zero = { demotedTechniques: 0, demotedProcedures: 0, reentered: 0 };
+    try {
+      const refMs = getDayBoundsMs(date).endMs;
+      const sinceDate = shiftDateKey(date, -(HOT_LAYER_UTILITY_WINDOW_DAYS - 1));
+      const techniqueCandidates = this.deps.coworkStore
+        .listCapabilityDrafts(metabot.id, { status: 'validated' })
+        .filter((draft) => draft.promotedAt === null)
+        .map((draft) => ({
+          draft,
+          key: `technique:${draft.id}`,
+          kind: 'technique' as const,
+          hotSinceMs: draft.validatedAt ?? draft.createdAt,
+          appliedNights: 0,
+          exposedNights: 0,
+        }));
+      const techniqueStats = this.deps.dreamStore.listHotLayerUsageStats(metabot.id, {
+        kind: 'technique', sinceDate, untilDate: date,
+      });
+      for (const candidate of techniqueCandidates) {
+        const stats = techniqueStats.get(String(candidate.draft.id));
+        candidate.appliedNights = stats?.appliedNights ?? 0;
+        candidate.exposedNights = stats?.exposedNights ?? 0;
+      }
+      const procedureCandidates = (this.deps.metaidKnowledgeStore
+        ? this.deps.metaidKnowledgeStore.listHotProcedures(metabot.id, { limit: 200, nowMs: refMs })
+        : []
+      ).map((entry) => ({
+        entry,
+        key: `procedure:${entry.id}`,
+        kind: 'procedure' as const,
+        hotSinceMs: entry.hotSince ?? entry.createdAt,
+        appliedNights: 0,
+        exposedNights: 0,
+      }));
+      const procedureStats = this.deps.dreamStore.listHotLayerUsageStats(metabot.id, {
+        kind: 'procedure', sinceDate, untilDate: date,
+      });
+      for (const candidate of procedureCandidates) {
+        const stats = procedureStats.get(candidate.entry.id);
+        candidate.appliedNights = stats?.appliedNights ?? 0;
+        candidate.exposedNights = stats?.exposedNights ?? 0;
+      }
+      const demotions = selectHotLayerDemotions([...techniqueCandidates, ...procedureCandidates], { nowMs: refMs });
+      let demotedTechniques = 0;
+      let demotedProcedures = 0;
+      for (const candidate of demotions) {
+        if (candidate.kind === 'technique') {
+          const marked = this.deps.coworkStore.markCapabilityDraftDormant({
+            id: candidate.draft.id,
+            metabotId: metabot.id,
+            atMs: this.now().getTime(),
+            note: `dormant ${date}: shown on ${candidate.exposedNights} audited nights, applied on none`,
+          });
+          if (marked) demotedTechniques += 1;
+        } else {
+          const flipped = this.deps.metaidKnowledgeStore?.setProcedureHotEligibility(candidate.entry.id, {
+            eligible: false,
+            reason: 'unused',
+          });
+          if (flipped) demotedProcedures += 1;
+        }
+      }
+      return { demotedTechniques, demotedProcedures, reentered: 0 };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Hot-layer pruning failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return zero;
     }
