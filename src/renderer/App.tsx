@@ -34,7 +34,7 @@ import {
 } from './services/appUpdateUi';
 import { defaultConfig, type ModelOptions } from './config';
 import { setAvailableModels, setSelectedModel } from './store/slices/modelSlice';
-import { setDraftPrompt, setNewTaskMetabotId, setPreferredMetabotId } from './store/slices/coworkSlice';
+import { setDraftPrompt } from './store/slices/coworkSlice';
 import { clearSelection } from './store/slices/quickActionSlice';
 import { setActiveSkillIds } from './store/slices/skillSlice';
 import { selectTask as selectLongTermTask } from './store/slices/longTermTaskSlice';
@@ -669,29 +669,18 @@ const App: React.FC = () => {
     return () => window.removeEventListener('botBrowser:openUri', handler);
   }, [botBrowserShell.openUri]);
 
-  // 「长期任务 → 新建任务」等入口：切到 cowork 新对话并预填 composer 草稿。
-  // 草稿文本只走 focus-input 的 detail，由 CoworkPromptInput 在清空逻辑之后经
-  // 版本化草稿字段写入并落回 setDraftPrompt。
-  // detail.metabotId（可选，向后兼容）是目标 owner Agent：有值时先把 cowork 的
-  // 新会话 MetaBot 选到该 bot（preferredMetabotId 让 CoworkView 重拉名单并选中，
-  // setNewTaskMetabotId 让已挂载的视图立即切换），再开新对话——owner 变更后
-  // 每次派发都重新生效，不留旧选中缓存。
+  // 「长期任务 → 新建任务」：切到 cowork 新对话并预填 composer 草稿。草稿文本
+  // 只走 focus-input 的 detail，由 CoworkPromptInput 在清空逻辑之后经版本化
+  // 草稿字段写入并落回 setDraftPrompt。
   useEffect(() => {
     const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ text?: unknown; metabotId?: unknown }>).detail;
+      const detail = (event as CustomEvent<{ text?: unknown }>).detail;
       const text = typeof detail?.text === 'string' && detail.text.trim() ? detail.text : undefined;
-      const metabotId = typeof detail?.metabotId === 'number' && Number.isInteger(detail.metabotId) && detail.metabotId > 0
-        ? detail.metabotId
-        : null;
-      if (metabotId != null) {
-        dispatch(setNewTaskMetabotId(metabotId));
-        dispatch(setPreferredMetabotId(metabotId));
-      }
       handleNewChat(undefined, text);
     };
     window.addEventListener('cowork:newChatWithDraft', handler);
     return () => window.removeEventListener('cowork:newChatWithDraft', handler);
-  }, [dispatch, handleNewChat]);
+  }, [handleNewChat]);
 
   useEffect(() => {
     return window.electron.botBrowser.onTabCommand(({ requestId, command }) => {
