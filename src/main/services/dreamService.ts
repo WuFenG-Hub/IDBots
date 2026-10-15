@@ -99,6 +99,13 @@ import {
 } from '../libs/dreamFragments';
 import { formatBotWorkspaceDate } from '../libs/botWorkspace';
 import { buildProcedureBlock, PROCEDURE_PROMPT_MAX_ITEMS } from '../libs/procedurePromptBlocks';
+import {
+  buildHotLayerUsageAuditPrompt,
+  parseHotLayerUsageAuditOutput,
+  sampleUsageAuditExcerpts,
+  selectUsageAuditItems,
+  USAGE_AUDIT_ITEM_GIST_CHARS,
+} from '../libs/hotLayerUsageAudit';
 import { buildProvenTechniquesBlock } from '../libs/experiencePromptBlocks';
 import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../libs/claudeSettings';
 import { budgetAssumesThinking } from '../libs/modelThinking';
@@ -1283,6 +1290,9 @@ export class DreamService {
       // drafts face the whole memory bank before any promotion can harden.
       const reconciliation = await this.reconcileValidatedCapabilityDrafts(metabot, brain, date, validation.validatedIds);
       const promotion = this.promoteCapabilityDraftsToProcedures(metabot, date);
+      // RRSI P3: the usage audit compares the day's exposed hot-layer items
+      // with sampled assistant replies and fills hot_layer_usage verdicts.
+      const usageAudit = await this.runHotLayerUsageAudit(metabot, brain, date, activity);
       const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
       const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
       // Self-curriculum (design §3.4, after the replay per §3.1): auto-approve
@@ -1308,6 +1318,10 @@ export class DreamService {
         capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
         promotedCount: promotion.promoted,
         promotionBudget: { nights: promotion.nights, budget: promotion.budget, candidates: promotion.candidates, promoted: promotion.promoted },
+        // RRSI P3: which exposed items the bot actually applied that day
+        // (design §6.3 P3.1). Non-empty path only — an empty day has no
+        // replies to judge against.
+        usageAudit,
         hotLayer: this.buildHotLayerTelemetry(metabotId, date),
         // P1 periodic re-review (audit): how many validated drafts faced the
         // verdict panel again tonight and how many were demoted off the
@@ -2117,6 +2131,93 @@ export class DreamService {
     } catch (error) {
       console.warn(
         `[DreamService] Capability promotion pass failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * RRSI P3 usage audit (design §6.3 P3.1): after promotion, one bounded LLM
+   * call compares the day's exposed hot-layer items with sampled assistant
+   * replies and writes applied/evidence verdicts into hot_layer_usage. Only
+   * audited rows count as evidence — an exposure never judged (no replies to
+   * sample, item source gone, parse failure, item missing from the verdict
+   * list) neither earns nor loses standing. Best-effort: any failure returns
+   * the zero result and never fails the dream run.
+   */
+  private async runHotLayerUsageAudit(
+    metabot: DreamMetabotLike,
+    brain: DreamBrainPair,
+    date: string,
+    activity: DreamDayActivity,
+  ): Promise<{ ran: boolean; items: number; applied: number; excerpts: number; parseFailed: boolean }> {
+    const zero = { ran: false, items: 0, applied: 0, excerpts: 0, parseFailed: false };
+    try {
+      const exposures = this.deps.dreamStore.listHotLayerExposures(metabot.id, date);
+      if (exposures.length === 0) return zero;
+      const excerpts = sampleUsageAuditExcerpts(activity.sessions ?? []);
+      if (excerpts.length === 0) return zero;
+      const items: Array<{ ref: string; kind: 'technique' | 'procedure'; itemId: string; title: string; gist: string }> = [];
+      for (const exposure of selectUsageAuditItems(exposures)) {
+        if (exposure.kind === 'technique') {
+          const draft = this.deps.coworkStore.getCapabilityDraft(metabot.id, Number(exposure.itemId));
+          if (!draft) continue;
+          items.push({
+            ref: `technique:${exposure.itemId}`,
+            kind: 'technique',
+            itemId: exposure.itemId,
+            title: draft.title,
+            gist: truncateUtf16Units(draft.description, USAGE_AUDIT_ITEM_GIST_CHARS),
+          });
+        } else {
+          const procedure = this.deps.metaidKnowledgeStore?.getProcedure(exposure.itemId) ?? null;
+          if (!procedure) continue;
+          items.push({
+            ref: `procedure:${exposure.itemId}`,
+            kind: 'procedure',
+            itemId: exposure.itemId,
+            title: procedure.title,
+            gist: truncateUtf16Units(`${procedure.triggerText};${procedure.steps[0] ?? ''}`, USAGE_AUDIT_ITEM_GIST_CHARS),
+          });
+        }
+      }
+      if (items.length === 0) return zero;
+      const prompt = buildHotLayerUsageAuditPrompt({ date, items, excerpts });
+      const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 2048);
+      const parsed = parseHotLayerUsageAuditOutput(
+        raw,
+        new Set(items.map((item) => item.ref)),
+        new Set(excerpts.map((excerpt) => excerpt.label)),
+      );
+      if (parsed.ok === false) {
+        return { ran: true, items: items.length, applied: 0, excerpts: excerpts.length, parseFailed: true };
+      }
+      const channelByLabel = new Map(excerpts.map((excerpt) => [excerpt.label, excerpt.channel]));
+      const mapped: Array<{
+        kind: 'technique' | 'procedure';
+        itemId: string;
+        applied: boolean;
+        evidence: { labels: string[]; channels: Array<'owner' | 'external'> };
+      }> = [];
+      let applied = 0;
+      for (const verdict of parsed.verdicts) {
+        const item = items.find((entry) => entry.ref === verdict.ref);
+        if (!item) continue;
+        const channels: Array<'owner' | 'external'> = [];
+        for (const label of verdict.labels) {
+          const channel = channelByLabel.get(label);
+          if ((channel === 'owner' || channel === 'external') && !channels.includes(channel)) {
+            channels.push(channel);
+          }
+        }
+        if (verdict.applied) applied += 1;
+        mapped.push({ kind: item.kind, itemId: item.itemId, applied: verdict.applied, evidence: { labels: verdict.labels, channels } });
+      }
+      this.deps.dreamStore.recordHotLayerUsageVerdicts(metabot.id, date, mapped, this.now().getTime());
+      return { ran: true, items: items.length, applied, excerpts: excerpts.length, parseFailed: false };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Usage audit failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return zero;
     }
