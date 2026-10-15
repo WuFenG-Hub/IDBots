@@ -956,45 +956,61 @@ export class DreamStore {
       WHERE ${where}
       ORDER BY dream_date ASC
     `, params);
-    return rows.map((row) => {
-      let extraJson: Record<string, unknown> = {};
-      try {
-        const parsed = JSON.parse(String(row.extra_json ?? '{}'));
-        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-          extraJson = parsed as Record<string, unknown>;
-        }
-      } catch {
-        extraJson = {};
+    return rows.map((row) => this.mapTelemetryDailyRow(row));
+  }
+
+  /**
+   * Inclusive [fromDate, toDate] read of the rollup, ascending (RRSI P4): the
+   * exploration stall detector needs the exact 21 nights before a dreamed
+   * date without depending on wall-clock lookbacks.
+   */
+  listDreamTelemetryDailyRange(metabotId: number, fromDate: string, toDate: string): DreamTelemetryDaily[] {
+    const rows = this.getAll<Record<string, unknown>>(`
+      SELECT * FROM metabot_dream_telemetry_daily
+      WHERE metabot_id = ? AND dream_date >= ? AND dream_date <= ?
+      ORDER BY dream_date ASC
+    `, [metabotId, fromDate, toDate]);
+    return rows.map((row) => this.mapTelemetryDailyRow(row));
+  }
+
+  private mapTelemetryDailyRow(row: Record<string, unknown>): DreamTelemetryDaily {
+    let extraJson: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(String(row.extra_json ?? '{}'));
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        extraJson = parsed as Record<string, unknown>;
       }
-      const numOrNull = (value: unknown): number | null => (value == null ? null : Number(value));
-      return {
-        metabotId: Number(row.metabot_id),
-        dreamDate: String(row.dream_date),
-        emptyDay: Number(row.empty_day) !== 0,
-        fragmentCount: numOrNull(row.fragment_count),
-        estimatedActivityTokens: numOrNull(row.estimated_activity_tokens),
-        outputChars: numOrNull(row.output_chars),
-        durationMs: numOrNull(row.duration_ms),
-        implicitSignals: numOrNull(row.implicit_signals),
-        diaryTotalRefs: numOrNull(row.diary_total_refs),
-        diaryUnmatchedRefs: numOrNull(row.diary_unmatched_refs),
-        validationChecked: numOrNull(row.validation_checked),
-        validationValidated: numOrNull(row.validation_validated),
-        validationRejected: numOrNull(row.validation_rejected),
-        replayPoints: numOrNull(row.replay_points),
-        replayLessons: numOrNull(row.replay_lessons),
-        capabilityValidatedDrafts: numOrNull(row.capability_validated_drafts),
-        capabilityTotalInjections: numOrNull(row.capability_total_injections),
-        capabilityActiveDraftsLast24h: numOrNull(row.capability_active_drafts_last24h),
-        promotedCount: numOrNull(row.promoted_count),
-        reReviewed: numOrNull(row.re_reviewed),
-        demoted: numOrNull(row.demoted),
-        dedupMerged: numOrNull(row.dedup_merged),
-        hasExplicitFeedback: Number(row.has_explicit_feedback) !== 0,
-        extraJson,
-        updatedAt: Number(row.updated_at),
-      };
-    });
+    } catch {
+      extraJson = {};
+    }
+    const numOrNull = (value: unknown): number | null => (value == null ? null : Number(value));
+    return {
+      metabotId: Number(row.metabot_id),
+      dreamDate: String(row.dream_date),
+      emptyDay: Number(row.empty_day) !== 0,
+      fragmentCount: numOrNull(row.fragment_count),
+      estimatedActivityTokens: numOrNull(row.estimated_activity_tokens),
+      outputChars: numOrNull(row.output_chars),
+      durationMs: numOrNull(row.duration_ms),
+      implicitSignals: numOrNull(row.implicit_signals),
+      diaryTotalRefs: numOrNull(row.diary_total_refs),
+      diaryUnmatchedRefs: numOrNull(row.diary_unmatched_refs),
+      validationChecked: numOrNull(row.validation_checked),
+      validationValidated: numOrNull(row.validation_validated),
+      validationRejected: numOrNull(row.validation_rejected),
+      replayPoints: numOrNull(row.replay_points),
+      replayLessons: numOrNull(row.replay_lessons),
+      capabilityValidatedDrafts: numOrNull(row.capability_validated_drafts),
+      capabilityTotalInjections: numOrNull(row.capability_total_injections),
+      capabilityActiveDraftsLast24h: numOrNull(row.capability_active_drafts_last24h),
+      promotedCount: numOrNull(row.promoted_count),
+      reReviewed: numOrNull(row.re_reviewed),
+      demoted: numOrNull(row.demoted),
+      dedupMerged: numOrNull(row.dedup_merged),
+      hasExplicitFeedback: Number(row.has_explicit_feedback) !== 0,
+      extraJson,
+      updatedAt: Number(row.updated_at),
+    };
   }
 
   /** Newest-first weekly summaries within [dateFrom, dateTo] (YYYY-MM-DD, inclusive). */

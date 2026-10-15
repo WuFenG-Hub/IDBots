@@ -75,7 +75,16 @@ import {
   PREDICTION_CALIBRATION_WINDOW_DAYS,
   judgeNumericExpectation,
   renderPredictionCalibrationDigest,
+  shiftDateKey,
 } from '../libs/predictionLedger';
+import {
+  detectEvolutionStall,
+  judgeExplorationCompliance,
+  listUnderExploredComponents,
+  renderExplorationDirective,
+  type ExplorationStall,
+  type PracticeComponent,
+} from '../libs/evolutionExploration';
 import {
   ROLLBACK_BASELINE_DAYS,
   ROLLBACK_NEGATIVE_FLOOR,
@@ -992,11 +1001,13 @@ export class DreamService {
     practiceOutcomes?: DreamPracticeOutcome[],
     /** RSI P0 prompt inputs: prediction calibration digest + retention-gate
      * rollback notice (both rendered as their own sections when non-empty).
-     * RRSI P1 adds the falsified-hypothesis list (design §6.1 P1.3). */
+     * RRSI P1 adds the falsified-hypothesis list (design §6.1 P1.3); P4 adds
+     * the exploration directive for stalled bots (design §6.4). */
     dreamExtras?: {
       predictionCalibration?: string | null;
       rollbackNotice?: string | null;
       falsifiedHypotheses?: Array<{ title: string; reason: string }>;
+      explorationDirective?: string | null;
     },
   ): Promise<{
     prompt: { system: string; user: string };
@@ -1024,6 +1035,7 @@ export class DreamService {
         predictionCalibration: dreamExtras?.predictionCalibration,
         rollbackNotice: dreamExtras?.rollbackNotice,
         falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
+        explorationDirective: dreamExtras?.explorationDirective,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -1052,6 +1064,7 @@ export class DreamService {
         predictionCalibration: dreamExtras?.predictionCalibration,
         rollbackNotice: dreamExtras?.rollbackNotice,
         falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
+        explorationDirective: dreamExtras?.explorationDirective,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -1098,6 +1111,7 @@ export class DreamService {
       predictionCalibration: dreamExtras?.predictionCalibration,
       rollbackNotice: dreamExtras?.rollbackNotice,
       falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
+      explorationDirective: dreamExtras?.explorationDirective,
     });
     const output = await this.generateAndParse(
       prompt.system,
@@ -1175,6 +1189,9 @@ export class DreamService {
       // of tonight's prompt input.
       const predictions = await this.reconcilePredictionsBeforeDream(metabot, date);
       const predictionCalibration = this.buildPredictionCalibrationDigest(metabotId);
+      // RRSI P4: evaluate the exploration stall once per run, before the
+      // empty-day branch, so both paths share the same verdict.
+      const exploration = this.evaluateExplorationState(metabotId, date);
       const impressionSubjects = this.buildDreamImpressionSubjects(metabot, date);
       const existingKnowledge = this.buildExistingKnowledge(metabot);
       if (
@@ -1222,6 +1239,15 @@ export class DreamService {
             autoApproved: practicePipeline.autoApproved,
           }),
           practiceRuns: { completed: 0, failed: 0 },
+          // RRSI P4: no dream prompt was sent, so nothing was directed at or
+          // complied with — but the stall verdict itself is still recorded.
+          exploration: {
+            stalled: exploration.stall.stalled,
+            reason: exploration.stall.reason,
+            underExplored: exploration.underExplored,
+            directed: false,
+            complied: null,
+          },
           predictions,
           promptLayerRollback: retentionGate,
           durationMs: Date.now() - runStartedAtMs,
@@ -1257,7 +1283,12 @@ export class DreamService {
         surfReport,
         this.resolveSynthesisTimeoutMs(runStartedAtMs, currentRun.attemptCount),
         practiceOutcomes.outcomes,
-        { predictionCalibration, rollbackNotice: retentionGate.notice, falsifiedHypotheses },
+        {
+          predictionCalibration,
+          rollbackNotice: retentionGate.notice,
+          falsifiedHypotheses,
+          explorationDirective: exploration.directive,
+        },
       );
       let output = prepared.output;
       // Repair runs discard selfIdentity in writeDreamResults, so skip the
@@ -1288,6 +1319,13 @@ export class DreamService {
       // Self-curriculum (design §3.4, after the replay per §3.1): auto-approve
       // + materialize tonight's pending read_only practice proposals.
       const practicePipeline = this.processPracticeProposalsAfterDream(metabot);
+      // RRSI P4: did tonight's proposals answer the exploration directive?
+      // (A directive was sent iff one was rendered for this run.)
+      const explorationCompliance = judgeExplorationCompliance({
+        directed: exploration.directive != null,
+        underExplored: exploration.underExplored,
+        proposals: output.practiceProposals ?? [],
+      });
       const diaryRefs = this.auditDiaryRefs(output.dailySummary, activity, surfReport);
       // P2a telemetry: the dream policy becomes tunable once it is measurable.
       this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
@@ -1339,6 +1377,16 @@ export class DreamService {
           autoApproved: practicePipeline.autoApproved,
         }),
         practiceRuns: { completed: practiceOutcomes.completed, failed: practiceOutcomes.failed },
+        // RRSI P4 structured exploration (design §6.4): stall verdict, the
+        // directive's under-explored targets, and whether tonight's proposals
+        // actually answered it.
+        exploration: {
+          stalled: exploration.stall.stalled,
+          reason: exploration.stall.reason,
+          underExplored: exploration.underExplored,
+          directed: exploration.directive != null,
+          complied: explorationCompliance,
+        },
         predictions,
         promptLayerRollback: retentionGate,
         durationMs: Date.now() - runStartedAtMs,
@@ -2924,6 +2972,47 @@ export class DreamService {
         `[DreamService] Prediction calibration digest unavailable for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return '';
+    }
+  }
+
+  /**
+   * RRSI P4 structured exploration (design §6.4): decide from the telemetry
+   * rollup and recent proposals whether the bot's self-improvement stalled,
+   * and render the directive that steers tonight's practice toward the
+   * under-explored components. Reads only nights strictly before `date`, so
+   * re-running the same night is deterministic; a failure never blocks the
+   * dream (falls back to not-stalled).
+   */
+  private evaluateExplorationState(
+    metabotId: number,
+    date: string,
+  ): { stall: ExplorationStall; underExplored: PracticeComponent[]; directive: string | null } {
+    const notStalled: ExplorationStall = { stalled: false, reason: null, dominantComponent: null };
+    try {
+      const nights = this.deps.dreamStore
+        .listDreamTelemetryDailyRange(metabotId, shiftDateKey(date, -21), shiftDateKey(date, -1))
+        .map((row) => ({
+          dreamDate: row.dreamDate,
+          emptyDay: row.emptyDay,
+          validated: row.validationValidated ?? 0,
+          promoted: row.promotedCount ?? 0,
+        }));
+      const proposals = this.deps.coworkStore
+        .listDreamPracticeProposals(metabotId, { limit: 200 })
+        .map((row) => ({ dreamDate: row.dreamDate, component: row.component }));
+      const stall = detectEvolutionStall({ date, nights, proposals });
+      const underExplored = stall.stalled
+        ? listUnderExploredComponents({ date, proposals, dominantComponent: stall.dominantComponent })
+        : [];
+      const directive = stall.stalled
+        ? renderExplorationDirective({ reason: stall.reason ?? 'no_acceptance', underExplored, dominantComponent: stall.dominantComponent })
+        : null;
+      return { stall, underExplored, directive };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Exploration evaluation failed for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { stall: notStalled, underExplored: [], directive: null };
     }
   }
 

@@ -328,3 +328,148 @@ test('store: component persists normalized; unknown and legacy rows read null', 
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Flow: exploration directive in the dream + compliance telemetry (RRSI P4 Task 3)
+// ---------------------------------------------------------------------------
+
+const {
+  createDreamHarness,
+  dayStartMs,
+  dreamJson,
+  seedSession,
+  BOT_ID,
+} = await import('./fixtures/rrsiDreamHarness.mjs');
+const { DreamStore: DreamStoreCtor } = require('../dist-electron/main/dreamStore.js');
+
+/** 21 non-empty zero-acceptance telemetry rows for the 21 nights before D. */
+function seedStalledTelemetry(db, dateKey) {
+  for (let offset = 21; offset >= 1; offset -= 1) {
+    const dreamDate = shiftDateKey(dateKey, -offset);
+    db.run(
+      `INSERT INTO metabot_dream_telemetry_daily (
+         metabot_id, dream_date, empty_day, validation_validated, promoted_count,
+         extra_json, created_at, updated_at
+       ) VALUES (?, ?, 0, 0, 0, '{}', ?, ?)`,
+      [BOT_ID, dreamDate, dayStartMs(dreamDate), dayStartMs(dreamDate)],
+    );
+  }
+}
+
+const skillProposal = (component) => [{
+  title: '对比实验:技能组合练习',
+  prompt: '完整且自包含的练习指令',
+  rationale: '组合调用失败过',
+  target_refs: ['draft:1'],
+  expected_evidence: '两种组合的结果差异',
+  risk_class: 'read_only',
+  component,
+}];
+
+test('flow: not stalled — no directive section, exploration telemetry zeros out', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedSession(h.coworkStore, h.db, D, [
+      { type: 'user', content: '视频做好了吗' },
+      { type: 'assistant', content: '做好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({}));
+    await h.runNight(D);
+    const lastCall = h.router.calls[h.router.calls.length - 1];
+    assert.ok(!`${lastCall.system}\n${lastCall.user}`.includes('## 探索提示'));
+    assert.deepEqual(h.telemetry(D).exploration, {
+      stalled: false,
+      reason: null,
+      underExplored: [],
+      directed: false,
+      complied: null,
+    });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: stalled — directive rides the prompt and a directed proposal complies', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedStalledTelemetry(h.db, D);
+    seedSession(h.coworkStore, h.db, D, [
+      { type: 'user', content: '视频做好了吗' },
+      { type: 'assistant', content: '做好了' },
+    ]);
+    h.router.setFallback(() => dreamJson({ practice_proposals: skillProposal('skill') }));
+    await h.runNight(D);
+    const lastCall = h.router.calls[h.router.calls.length - 1];
+    assert.ok(lastCall.user.includes('## 探索提示'), lastCall.user.slice(0, 200));
+    assert.ok(lastCall.user.includes('连续三周有活动'));
+    const exploration = h.telemetry(D).exploration;
+    assert.equal(exploration.directed, true);
+    assert.equal(exploration.complied, true);
+    assert.equal(exploration.reason, 'no_acceptance');
+    assert.equal(exploration.stalled, true);
+    const stored = h.coworkStore.listDreamPracticeProposals(BOT_ID);
+    assert.equal(stored.find((row) => row.title === '对比实验:技能组合练习').component, 'skill');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: stalled — an already-practiced component does not comply', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedStalledTelemetry(h.db, D);
+    seedSession(h.coworkStore, h.db, D, [
+      { type: 'user', content: '视频做好了吗' },
+      { type: 'assistant', content: '做好了' },
+    ]);
+    // memory was used inside the trailing 30 days, so it is not under-explored.
+    h.coworkStore.insertDreamPracticeProposals(BOT_ID, shiftDateKey(D, -10), [
+      { title: '旧的 memory 练习', prompt: '指令', targetRefs: ['draft:9'], component: 'memory' },
+    ]);
+    h.router.setFallback(() => dreamJson({ practice_proposals: skillProposal('memory') }));
+    await h.runNight(D);
+    const exploration = h.telemetry(D).exploration;
+    assert.equal(exploration.stalled, true);
+    assert.equal(exploration.directed, true);
+    assert.equal(exploration.complied, false);
+    assert.ok(!exploration.underExplored.includes('memory'));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: empty day while stalled — directed false, complied null', async () => {
+  const h = await createDreamHarness();
+  try {
+    seedStalledTelemetry(h.db, D);
+    await h.runNight(D);
+    const exploration = h.telemetry(D).exploration;
+    assert.equal(exploration.stalled, true);
+    assert.equal(exploration.reason, 'no_acceptance');
+    assert.equal(exploration.directed, false);
+    assert.equal(exploration.complied, null);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('listDreamTelemetryDailyRange is inclusive, ascending, per-bot', async () => {
+  const { createSqliteStore } = await import('./memoryTestUtils.mjs');
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const dreamStore = new DreamStoreCtor(db, () => {});
+    dreamStore.beginRun(BOT_ID, '2026-08-10', null, 18);
+    dreamStore.updateRunTelemetry(BOT_ID, '2026-08-10', { emptyDay: true });
+    dreamStore.beginRun(BOT_ID, '2026-08-12', null, 18);
+    dreamStore.updateRunTelemetry(BOT_ID, '2026-08-12', { emptyDay: false });
+    dreamStore.beginRun(BOT_ID, '2026-08-14', null, 18);
+    dreamStore.updateRunTelemetry(BOT_ID, '2026-08-14', { emptyDay: true });
+    dreamStore.beginRun(99, '2026-08-13', null, 18);
+    dreamStore.updateRunTelemetry(99, '2026-08-13', { emptyDay: true });
+    const rows = dreamStore.listDreamTelemetryDailyRange(BOT_ID, '2026-08-10', '2026-08-14');
+    assert.deepEqual(rows.map((row) => row.dreamDate), ['2026-08-10', '2026-08-12', '2026-08-14']);
+    assert.ok(rows.every((row) => row.metabotId === BOT_ID), 'other bots are excluded');
+  } finally {
+    cleanup();
+  }
+});

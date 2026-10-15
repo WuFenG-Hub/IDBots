@@ -489,6 +489,9 @@ export function buildDreamPrompt(input: {
   /** RRSI P1: recently falsified hypotheses (design §6.1 P1.3) — the dream's
    * edit-history block, rendered only outside fragment mode. */
   falsifiedHypotheses?: Array<{ title: string; reason: string }>;
+  /** RRSI P4: exploration directive for a stalled bot (design §6.4), rendered
+   * verbatim as its own section only outside fragment mode. */
+  explorationDirective?: string | null;
 }): { system: string; user: string } {
   const sourceMode = input.sourceMode ?? 'raw_activity';
   const activityTokenBudget = Math.max(
@@ -639,6 +642,12 @@ export function buildDreamPrompt(input: {
   // dream so value_lessons / important_memories can absorb the misses.
   if (sourceMode !== 'fragment' && input.predictionCalibration?.trim()) {
     sections.push(`## 预测校准对账(你事前记录的可验证预测与昨夜对账结果;蒸馏教训时优先反思落空的预测)\n${input.predictionCalibration.trim()}`);
+  }
+  // RRSI P4 structured exploration (design §6.4): a stalled bot gets a
+  // directive steering one of tonight's practice proposals toward an
+  // under-explored component; rendered verbatim, never in fragment mode.
+  if (sourceMode !== 'fragment' && input.explorationDirective?.trim()) {
+    sections.push(input.explorationDirective.trim());
   }
   const groupTaskItems = sourceMode === 'fragment' ? [] : (input.activity.groupTasks ?? []);
   const acceptedGroupTasks = groupTaskItems.filter((task) => !isActiveGroupTask(task));
