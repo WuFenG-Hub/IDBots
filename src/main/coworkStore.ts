@@ -23,6 +23,7 @@ import {
   type CoworkSessionGoal,
 } from './libs/coworkSessionGoal';
 import { normalizePracticeComponent, type PracticeComponent } from './libs/evolutionExploration';
+import { normalizeCapabilityScope, type CapabilityScope } from './libs/capabilitySpecificity';
 import type {
   MemoryBackend,
   MemoryCreateUserMemoryInput,
@@ -943,6 +944,9 @@ export interface CapabilityDraft {
   /** RRSI P3: when a validated draft was demoted to 'dormant' for never
    * being applied (NULL = not dormant). */
   dormantAt: number | null;
+  /** RRSI P5 specificity verdict from reconciliation (NULL = not assessed,
+   * behaves exactly like general). */
+  scope: CapabilityScope | null;
 }
 
 interface CapabilityDraftRow {
@@ -966,6 +970,7 @@ interface CapabilityDraftRow {
   uncertainty_text?: string | null;
   source_procedure_id?: string | null;
   dormant_at?: number | string | null;
+  scope?: string | null;
 }
 
 /** Shared column list for every capability-draft SELECT (mapped by
@@ -973,7 +978,7 @@ interface CapabilityDraftRow {
 const CAPABILITY_DRAFT_COLUMNS = `id, metabot_id, dream_date, title, description, capability_type, status, created_at,
              validation_score, validation_notes, validated_at, times_injected, last_injected_at,
              promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text,
-             source_procedure_id, dormant_at`;
+             source_procedure_id, dormant_at, scope`;
 
 /** Which gate pass falsified a hypothesis (RRSI P1 ledger provenance). */
 export type CapabilityFalsifiedSource = 'validation' | 're_review';
@@ -7647,6 +7652,7 @@ export class CoworkStore implements MemoryBackend {
       SELECT ${CAPABILITY_DRAFT_COLUMNS}
       FROM capability_drafts
       WHERE metabot_id = ? AND status = 'validated' AND promoted_at IS NULL
+        AND COALESCE(scope, 'general') != 'situational'
       ORDER BY created_at DESC, id DESC
       LIMIT 100
     `, [id]);
@@ -7734,6 +7740,7 @@ export class CoworkStore implements MemoryBackend {
       uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
       sourceProcedureId: row.source_procedure_id == null ? null : String(row.source_procedure_id),
       dormantAt: row.dormant_at == null ? null : Number(row.dormant_at),
+      scope: normalizeCapabilityScope(row.scope),
     };
   }
 
@@ -8070,6 +8077,30 @@ export class CoworkStore implements MemoryBackend {
     ]);
     this.saveDb();
     return true;
+  }
+
+  /**
+   * RRSI P5 specificity critic: persist the reconciliation scope verdict (or
+   * the host marker rule's situational override). Scope never changes status
+   * or content — it only steers roster eligibility and promotion shape.
+   * Returns whether a row changed.
+   */
+  setCapabilityDraftScope(input: { id: number; metabotId: number; scope: CapabilityScope }): boolean {
+    const id = Number(input.id);
+    const metabotId = Number(input.metabotId);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(metabotId) || metabotId <= 0
+      || normalizeCapabilityScope(input.scope) == null) {
+      return false;
+    }
+    this.db.run(
+      'UPDATE capability_drafts SET scope = ? WHERE id = ? AND metabot_id = ?',
+      [input.scope, id, metabotId],
+    );
+    const updated = (this.db.getRowsModified?.() || 0) > 0;
+    if (updated) {
+      this.saveDb();
+    }
+    return updated;
   }
 
   /**

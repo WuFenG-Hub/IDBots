@@ -54,6 +54,7 @@ import {
   parseCapabilityReconciliationOutput,
   type ReconciliationConflictCandidate,
 } from '../libs/capabilityReconciliationPrompt';
+import { titleHasHardInstanceMarker, type CapabilityScope } from '../libs/capabilitySpecificity';
 import { tokenizeKnowledgeBaseText } from '../libs/knowledgeBaseText';
 import {
   buildChainEvidenceDigest,
@@ -262,6 +263,22 @@ const EMPTY_PREDICTION_RECONCILIATION: PredictionReconciliationResult = {
   miss: 0,
   partial: 0,
   expired: 0,
+};
+
+/** RRSI P5 scope telemetry (design §6.5 P5.2): verdict mix over tonight's
+ * reconciled drafts plus the host hard-marker overrides. */
+interface ReconciliationScopeCounts {
+  general: number;
+  situational: number;
+  scorerFitted: number;
+  hardMarkerOverrides: number;
+}
+
+const ZERO_RECONCILIATION_SCOPE: ReconciliationScopeCounts = {
+  general: 0,
+  situational: 0,
+  scorerFitted: 0,
+  hardMarkerOverrides: 0,
 };
 
 const EVALUATION_LABELS: Record<string, string> = {
@@ -1264,6 +1281,9 @@ export class DreamService {
             complied: null,
           },
           predictions,
+          // RRSI P5: the internal vs external prediction split rides the
+          // empty-day telemetry too (design §6.5 P5.3).
+          predictionOod: this.buildPredictionOodTelemetry(metabotId),
           promptLayerRollback: retentionGate,
           durationMs: Date.now() - runStartedAtMs,
         });
@@ -1416,6 +1436,9 @@ export class DreamService {
           complied: explorationCompliance,
         },
         predictions,
+        // RRSI P5: the internal vs external prediction hit-rate gap (design
+        // §6.5 P5.3) — the dream prompt digest text itself is unchanged.
+        predictionOod: this.buildPredictionOodTelemetry(metabotId),
         promptLayerRollback: retentionGate,
         durationMs: Date.now() - runStartedAtMs,
       });
@@ -2137,9 +2160,12 @@ export class DreamService {
           // or archived source rejects the ticket with a note (no ledger row:
           // nothing was falsified).
           if (draft.sourceProcedureId) {
+            // RRSI P5: a situational probation verdict never hardens its
+            // source hot — the procedure becomes recall-only instead (design
+            // §6.5 P5.2), still counted against the night's budget.
             const flipped = this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
-              eligible: true,
-              reason: null,
+              eligible: draft.scope !== 'situational',
+              reason: draft.scope === 'situational' ? 'situational' : null,
             });
             if (!flipped) {
               this.deps.coworkStore.updateCapabilityDraftValidation({
@@ -2173,6 +2199,17 @@ export class DreamService {
             tags: ['capability-draft', draft.capabilityType],
             origin: 'dream',
           });
+          // RRSI P5: a newly created situational procedure hardens
+          // recall-only (hot_reason = 'situational'); when the upsert merged
+          // into an existing same-title procedure, its hot standing stays
+          // untouched — a situational lesson must not demote a general
+          // procedure that shares its title (plan P5 Task 3).
+          if (draft.scope === 'situational' && result.created) {
+            this.deps.metaidKnowledgeStore.setProcedureHotEligibility(result.entry.id, {
+              eligible: false,
+              reason: 'situational',
+            });
+          }
           const marked = this.deps.coworkStore.markCapabilityDraftPromoted({
             id: draft.id,
             metabotId: metabot.id,
@@ -2424,13 +2461,29 @@ export class DreamService {
     brain: DreamBrainPair,
     date: string,
     validatedIds: number[],
-  ): Promise<{ considered: number; kept: number; narrowed: number; merged: number; disputed: number }> {
-    const zero = { considered: 0, kept: 0, narrowed: 0, merged: 0, disputed: 0 };
+  ): Promise<{
+    considered: number;
+    kept: number;
+    narrowed: number;
+    merged: number;
+    disputed: number;
+    scope: { general: number; situational: number; scorerFitted: number; hardMarkerOverrides: number };
+  }> {
+    const zero = { considered: 0, kept: 0, narrowed: 0, merged: 0, disputed: 0, scope: ZERO_RECONCILIATION_SCOPE };
+    let tonight: Array<{
+      id: number;
+      dreamDate: string;
+      title: string;
+      description: string;
+      capabilityType: string;
+      validationScore: number | null;
+      scope: CapabilityScope | null;
+    }> = [];
     try {
       if (validatedIds.length === 0) return zero;
       // Re-read the rows: only still-validated drafts reconcile (a demotion
       // between the gate and this pass drops the draft out).
-      const tonight = this.deps.coworkStore.listCapabilityDrafts(metabot.id, { status: 'validated' })
+      tonight = this.deps.coworkStore.listCapabilityDrafts(metabot.id, { status: 'validated' })
         .filter((draft) => validatedIds.includes(draft.id))
         .sort((left, right) => (right.validationScore ?? 0) - (left.validationScore ?? 0))
         .slice(0, RECONCILE_MAX_DRAFTS_PER_NIGHT);
@@ -2464,13 +2517,45 @@ export class DreamService {
       const parsed = parseCapabilityReconciliationOutput(raw, new Set(tonight.map((draft) => draft.id)));
       if (!parsed.ok) {
         console.warn(`[DreamService] Reconciliation parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
-        return { ...zero, considered: tonight.length };
+        // The host marker rule still runs — a parse failure never shields a
+        // marker-titled draft from becoming situational (plan P5 Task 3).
+        return {
+          ...zero,
+          considered: tonight.length,
+          scope: this.applyHardMarkerScopeRule(
+            metabot.id,
+            tonight.map((draft) => ({ id: draft.id, title: draft.title, stillValidated: true, verdictScope: null, storedScope: draft.scope })),
+          ),
+        };
       }
       const byId = new Map(tonight.map((draft) => [draft.id, draft]));
       const counts = { ...zero, considered: tonight.length };
+      // RRSI P5: per-draft effective state for the host marker rule and the
+      // scope telemetry — verdictScope is written only by keep/narrow.
+      const scopeState = new Map<number, { stillValidated: boolean; verdictScope: CapabilityScope | null; storedScope: CapabilityScope | null }>();
+      for (const draft of tonight) {
+        scopeState.set(draft.id, { stillValidated: true, verdictScope: null, storedScope: draft.scope });
+      }
       for (const verdict of parsed.verdicts) {
         const draft = byId.get(verdict.id);
         if (!draft) continue;
+        // RRSI P5 scorer_fitted (design §6.5 P5.2): a lesson that only
+        // restates how to get a good rating never keeps/narrows — it moves to
+        // disputed and the existing disputed flow re-judges it the next night.
+        // No falsified-ledger row: nothing was falsified, only reclassified.
+        if ((verdict.action === 'keep' || verdict.action === 'narrow') && verdict.scope === 'scorer_fitted') {
+          this.deps.coworkStore.updateCapabilityDraftValidation({
+            id: draft.id,
+            metabotId: metabot.id,
+            status: 'disputed',
+            validationScore: draft.validationScore,
+            validationNotes: `reconciliation scorer_fitted ${date}${verdict.note ? ` — ${verdict.note}` : ''}`,
+          });
+          this.deps.coworkStore.setCapabilityDraftScope({ id: draft.id, metabotId: metabot.id, scope: 'scorer_fitted' });
+          scopeState.set(draft.id, { stillValidated: false, verdictScope: 'scorer_fitted', storedScope: 'scorer_fitted' });
+          counts.disputed += 1;
+          continue;
+        }
         switch (verdict.action) {
           case 'keep':
             this.deps.coworkStore.setCapabilityDraftConditions({
@@ -2479,6 +2564,8 @@ export class DreamService {
               conditionsText: verdict.conditions,
               uncertaintyText: verdict.uncertainty,
             });
+            this.deps.coworkStore.setCapabilityDraftScope({ id: draft.id, metabotId: metabot.id, scope: verdict.scope });
+            scopeState.set(draft.id, { stillValidated: true, verdictScope: verdict.scope, storedScope: verdict.scope });
             counts.kept += 1;
             break;
           case 'narrow':
@@ -2488,6 +2575,8 @@ export class DreamService {
               conditionsText: verdict.conditions,
               uncertaintyText: verdict.uncertainty,
             });
+            this.deps.coworkStore.setCapabilityDraftScope({ id: draft.id, metabotId: metabot.id, scope: verdict.scope });
+            scopeState.set(draft.id, { stillValidated: true, verdictScope: verdict.scope, storedScope: verdict.scope });
             counts.narrowed += 1;
             break;
           case 'merge': {
@@ -2520,6 +2609,7 @@ export class DreamService {
               validationScore: draft.validationScore,
               validationNotes: `merged into ${targetRef}${verdict.note ? ` — ${verdict.note}` : ''}`,
             });
+            scopeState.set(draft.id, { stillValidated: false, verdictScope: null, storedScope: draft.scope });
             counts.merged += 1;
             break;
           }
@@ -2535,21 +2625,86 @@ export class DreamService {
                 verdict.conflictsWith.length > 0 ? `conflicts: ${verdict.conflictsWith.join(', ')}` : '',
               ].filter(Boolean).join(' — '),
             });
+            scopeState.set(draft.id, { stillValidated: false, verdictScope: null, storedScope: draft.scope });
             counts.disputed += 1;
             break;
         }
       }
+      // RRSI P5: run the host marker rule over tonight's drafts (after the
+      // verdict loop) and fold its counts into the telemetry.
+      const scope = this.applyHardMarkerScopeRule(
+        metabot.id,
+        tonight.map((draft) => ({
+          id: draft.id,
+          title: draft.title,
+          stillValidated: scopeState.get(draft.id)?.stillValidated ?? true,
+          verdictScope: scopeState.get(draft.id)?.verdictScope ?? null,
+          storedScope: scopeState.get(draft.id)?.storedScope ?? draft.scope,
+        })),
+      );
       if (counts.kept + counts.narrowed + counts.merged + counts.disputed > 0) {
         console.log(
           `[DreamService] Reconciliation for metabot ${metabot.id}: considered=${counts.considered}, kept=${counts.kept}, narrowed=${counts.narrowed}, merged=${counts.merged}, disputed=${counts.disputed}`,
         );
       }
-      return counts;
+      return { ...counts, scope };
     } catch (error) {
       console.warn(
         `[DreamService] Reconciliation failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return zero;
+      return {
+        ...zero,
+        scope: this.applyHardMarkerScopeRule(
+          metabot.id,
+          tonight.map((draft) => ({ id: draft.id, title: draft.title, stillValidated: true, verdictScope: null, storedScope: draft.scope })),
+        ),
+      };
+    }
+  }
+
+  /**
+   * RRSI P5 host marker rule (design §6.5 P5.1): any tonight draft that is
+   * still validated and whose stored scope is not already situational /
+   * scorer_fitted becomes situational when its TITLE carries a hard instance
+   * marker — even when the panel said general, and even when the LLM call or
+   * its parse failed. Also produces the scope telemetry counts over tonight's
+   * drafts after the rule ran (drafts without a scope verdict are not
+   * counted). Best-effort: never throws.
+   */
+  private applyHardMarkerScopeRule(
+    metabotId: number,
+    drafts: ReadonlyArray<{
+      id: number;
+      title: string;
+      stillValidated: boolean;
+      verdictScope: CapabilityScope | null;
+      storedScope: CapabilityScope | null;
+    }>,
+  ): { general: number; situational: number; scorerFitted: number; hardMarkerOverrides: number } {
+    const counts = { ...ZERO_RECONCILIATION_SCOPE };
+    try {
+      for (const draft of drafts) {
+        if (
+          draft.stillValidated
+          && draft.storedScope !== 'situational'
+          && draft.storedScope !== 'scorer_fitted'
+          && titleHasHardInstanceMarker(draft.title)
+        ) {
+          this.deps.coworkStore.setCapabilityDraftScope({ id: draft.id, metabotId, scope: 'situational' });
+          counts.situational += 1;
+          counts.hardMarkerOverrides += 1;
+          continue;
+        }
+        if (draft.verdictScope === 'general') counts.general += 1;
+        else if (draft.verdictScope === 'situational') counts.situational += 1;
+        else if (draft.verdictScope === 'scorer_fitted') counts.scorerFitted += 1;
+      }
+      return counts;
+    } catch (error) {
+      console.warn(
+        `[DreamService] Hard marker scope rule failed for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { ...ZERO_RECONCILIATION_SCOPE };
     }
   }
 
@@ -3219,6 +3374,40 @@ export class DreamService {
         `[DreamService] Prediction calibration digest unavailable for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return '';
+    }
+  }
+
+  /**
+   * RRSI P5 OOD split (design §6.5 P5.3): the internal vs external hit-rate
+   * buckets and their gap over the calibration window. A growing gap is the
+   * local signature of scorer fitting. Null on failure — telemetry writing
+   * never breaks the dream run.
+   */
+  private buildPredictionOodTelemetry(
+    metabotId: number,
+  ): {
+    internal: { resolved: number; hit: number; hitRate: number | null };
+    external: { resolved: number; hit: number; hitRate: number | null };
+    gap: number | null;
+  } | null {
+    try {
+      const calibration = this.deps.dreamStore.listPredictionCalibration(metabotId, PREDICTION_CALIBRATION_WINDOW_DAYS);
+      const toBucket = (bucket: { resolved: number; hit: number; hitRate: number | null }) => ({
+        resolved: bucket.resolved,
+        hit: bucket.hit,
+        hitRate: bucket.hitRate,
+      });
+      const internal = toBucket(calibration.bySourceClass.internal);
+      const external = toBucket(calibration.bySourceClass.external);
+      const gap = internal.hitRate != null && external.hitRate != null
+        ? Math.round((internal.hitRate - external.hitRate) * 10_000) / 10_000
+        : null;
+      return { internal, external, gap };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Prediction OOD telemetry unavailable for metabot ${metabotId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
     }
   }
 

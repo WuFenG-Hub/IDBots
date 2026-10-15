@@ -9,9 +9,21 @@
  * the evidence (conflict candidates by token overlap) and executes the
  * verdicts by fixed template — the LLM never edits the store directly.
  *
+ * RRSI P5 (design §6.5 P5.2): the same pass also returns a scope verdict —
+ * general / situational / scorer_fitted — with the host-detected instance
+ * markers shown per draft as mechanical evidence.
+ *
  * Pure prompt builder + tolerant output parser, mirroring
  * capabilityValidationPrompt.ts conventions.
  */
+
+import {
+  detectInstanceMarkers,
+  formatInstanceMarkers,
+  normalizeCapabilityScope,
+  type CapabilityScope,
+  type InstanceMarker,
+} from './capabilitySpecificity';
 
 export const RECONCILE_MAX_DRAFTS_PER_NIGHT = 5;
 export const RECONCILE_MAX_CONFLICT_CANDIDATES = 10;
@@ -27,6 +39,9 @@ export interface ReconciliationDraftInput {
   description: string;
   capabilityType: string;
   validationScore: number | null;
+  /** RRSI P5: host-detected instance markers; derived from title+description
+   * when the caller does not precompute them. */
+  markers?: InstanceMarker[];
 }
 
 /** One host-computed candidate conflict for a draft (procedures + drafts). */
@@ -43,6 +58,8 @@ export type ReconciliationAction = 'keep' | 'narrow' | 'merge' | 'dispute';
 export interface ReconciliationVerdict {
   id: number;
   action: ReconciliationAction;
+  /** RRSI P5 scope verdict; missing/unknown values parse as 'general'. */
+  scope: CapabilityScope;
   /** Required unless action=dispute; '' when the model broke the contract. */
   conditions: string;
   /** May be '' only when the evidence is exhaustive. */
@@ -78,6 +95,11 @@ export function buildCapabilityReconciliationPrompt(input: {
     '- merge:草案的内容已被某条既有 procedure 覆盖。conflicts_with 里必须给出该 procedure 的引用(procedure:<id>)。',
     '- dispute:草案与既有记忆存在真实冲突,你无法裁决。该草案会被挂起(disputed),明晚带着冲突证据重审;不要强行给结论。',
     '除了 dispute,conditions 必填;uncertainty 只有在证据已经足够完备时才允许留空。宁可 dispute,不可硬判。',
+    '另外,逐条判断草案的适用范围 scope:',
+    '- general:换一个任务、换一个对象也成立的做法;',
+    '- situational:只对某个具体的人、订单、pin、日期或对端 Bot 成立;',
+    '- scorer_fitted:只是在复述「怎样拿到好评、点赞或高分」,并没有改变工作本身该怎么做。',
+    '每条草案下方的「实例标记」是宿主从文本里机械找出的具体 ID 和日期,只作参考:有标记不等于一定是 situational,没有标记也可能是 situational。',
   ].join('\n');
 
   const draftLines = input.drafts.map((draft) => {
@@ -91,6 +113,7 @@ export function buildCapabilityReconciliationPrompt(input: {
       `### 草案 #${draft.id}(${draft.dreamDate} 梦中提炼,类型:${draft.capabilityType},验证分:${draft.validationScore ?? '无'})`,
       `标题:${draft.title}`,
       `描述:${draft.description}`,
+      `实例标记:${formatInstanceMarkers(draft.markers ?? detectInstanceMarkers(`${draft.title}\n${draft.description}`))}`,
       '可能冲突的既有记忆:',
       candidateLines,
     ].join('\n');
@@ -115,6 +138,7 @@ export function buildCapabilityReconciliationPrompt(input: {
     '    {',
     '      "id": 草案数字id,',
     '      "action": "keep" | "narrow" | "merge" | "dispute",',
+    '      "scope": "general" | "situational" | "scorer_fitted",',
     '      "conditions": "该规则被观察到成立的适用条件(dispute 时可为空字符串)",',
     '      "uncertainty": "尚未验证的地方(证据完备时可留空字符串)",',
     '      "conflicts_with": ["只许引用上方候选列表里出现的 procedure:<id> 或 draft:<id>,没有就给空数组"],',
@@ -183,6 +207,7 @@ export function parseCapabilityReconciliationOutput(
     verdicts.push({
       id,
       action,
+      scope: normalizeCapabilityScope(entry?.scope) ?? 'general',
       conditions,
       uncertainty,
       conflictsWith,
