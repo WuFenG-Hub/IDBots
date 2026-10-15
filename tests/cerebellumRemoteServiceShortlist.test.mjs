@@ -75,7 +75,7 @@ test('buildRemoteServiceShortlistRequest: user message in state, services as cho
     services: SERVICES,
     model: 'jev-fast',
   });
-  assert.deepEqual(request.state, { user_message: '帮我查上海天气' });
+  assert.deepEqual(request.state, { current_message: '帮我查上海天气' });
   assert.equal(request.model, 'jev-fast');
   assert.deepEqual(Object.keys(request.questions), [CEREBELLUM_REMOTE_SERVICE_RANK_QUESTION_ID]);
   const question = request.questions[CEREBELLUM_REMOTE_SERVICE_RANK_QUESTION_ID];
@@ -90,7 +90,7 @@ test('buildRemoteServiceShortlistRequest: blank user text still builds (module-l
     services: SERVICES,
     model: 'jev-latest',
   });
-  assert.equal(request.state.user_message, '');
+  assert.equal(request.state.current_message, '');
 });
 
 test('buildRemoteServiceShortlistRequest: criteria label collapses description whitespace', () => {
@@ -320,20 +320,29 @@ function createShortlistHarness({
   };
   const runner = new CoworkRunner(store, {
     getRemoteServicesPrompt: () => DIRECTORY_TEXT,
-    cerebellumRemoteServiceRanker: ranker
+    // Merged turn-decision bundle (mock of the main.ts caller): the service
+    // ranking is consulted only when the directory rides this turn, exactly
+    // like the real caller honors remoteServicesEnabled; the block gate
+    // verdicts ride the same single callback.
+    cerebellumTurnDecisions: ranker || gate
       ? async (input) => {
-          rankerCalls.push(input);
-          return ranker(input);
+          if (gate) {
+            gateCalls.push(input);
+          }
+          let serviceRanking = null;
+          if (ranker && input.remoteServicesEnabled) {
+            rankerCalls.push(input);
+            serviceRanking = await ranker(input);
+          }
+          return {
+            memoryScores: null,
+            knowledgeScores: null,
+            skillRanking: null,
+            serviceRanking,
+            gateVerdicts: gate ? await gate(input) : null,
+          };
         }
       : undefined,
-    ...(gate
-      ? {
-          cerebellumVolatileBlockGate: async (input) => {
-            gateCalls.push(input);
-            return gate(input);
-          },
-        }
-      : {}),
   });
   runner.activeSessions.set('session-1', {
     skillsCatalogMode: 'volatile',

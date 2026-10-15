@@ -76,13 +76,13 @@ test('buildSkillShortlistRequest: user message in state, skills as choice criter
     skills: SKILLS,
     model: 'jev-fast',
   });
-  assert.deepEqual(request.state, { user_message: '帮我做一份演示文稿' });
+  assert.deepEqual(request.state, { current_message: '帮我做一份演示文稿' });
   assert.equal(request.model, 'jev-fast');
   assert.deepEqual(Object.keys(request.questions), [CEREBELLUM_SKILL_RANK_QUESTION_ID]);
   const question = request.questions[CEREBELLUM_SKILL_RANK_QUESTION_ID];
   assert.equal(question.type, 'choice');
   assert.match(question.instructions, /Which ONE skill/);
-  assert.match(question.instructions, /`user_message`/);
+  assert.match(question.instructions, /`current_message`/);
   assert.match(question.instructions, /any language/);
   assert.deepEqual(Object.keys(question.criteria), ['web-search', 'ppt-maker', 'cat-care']);
   assert.match(question.criteria['ppt-maker'], /^ppt-maker: 生成演示文稿/);
@@ -209,7 +209,7 @@ test('rank: request shape hits /v1/systemone with bearer auth, state and criteri
   assert.equal(captured.length, 1);
   assert.equal(captured[0].url, 'https://jev.example.com/v1/systemone');
   assert.equal(captured[0].init.headers.Authorization, 'Bearer sk-jev-test');
-  assert.equal(captured[0].body.state.user_message, RANK_INPUT.currentUserText);
+  assert.equal(captured[0].body.state.current_message, RANK_INPUT.currentUserText);
   const question = captured[0].body.questions[CEREBELLUM_SKILL_RANK_QUESTION_ID];
   assert.equal(question.type, 'choice');
   assert.deepEqual(Object.keys(question.criteria), skills.map((skill) => skill.id));
@@ -317,10 +317,23 @@ function createShortlistHarness({ ranker, catalogMode = 'volatile' }) {
   };
   const runner = new CoworkRunner(store, {
     coworkSkillPromptsProvider: () => ({ catalog: CATALOG_TEXT, rules: null, sandboxSection: null }),
-    cerebellumSkillRanker: ranker
+    // Merged turn-decision bundle (mock of the main.ts caller): the skill
+    // ranking is consulted only when the session's catalog rides the tail,
+    // exactly like the real caller honors skillsCatalogVolatile.
+    cerebellumTurnDecisions: ranker
       ? async (input) => {
-          rankerCalls.push(input);
-          return ranker(input);
+          let skillRanking = null;
+          if (input.skillsCatalogVolatile) {
+            rankerCalls.push(input);
+            skillRanking = await ranker(input);
+          }
+          return {
+            memoryScores: null,
+            knowledgeScores: null,
+            skillRanking,
+            serviceRanking: null,
+            gateVerdicts: null,
+          };
         }
       : undefined,
   });

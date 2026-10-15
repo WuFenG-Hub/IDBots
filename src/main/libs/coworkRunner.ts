@@ -105,6 +105,7 @@ import { z } from 'zod';
 import { ensureSandboxReady, getSandboxRuntimeInfoIfReady, type SandboxRuntimeInfo } from './coworkSandboxRuntime';
 import { isPathWithin } from './runtimePaths';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
+import type { MemoryUserMemory } from '../memory/memoryBackend';
 import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
 import {
   CEREBELLUM_CONVERSATION_RANK_MIN_POOL,
@@ -1869,6 +1870,31 @@ export interface CoworkEpisodeTimeline {
   }): Array<{ startedAt: number; sourceChannel: string; episodeType: string; sessionId?: string | null; archived?: boolean }>;
 }
 
+/**
+ * Per-turn scoped-memory gather result: everything the memory section (and
+ * the cerebellum turn-decision bundle, which ranks the same pool) needs from
+ * one SQLite sweep — scopes, the three scope-sliced entry lists, and the
+ * deduped combined candidate pool.
+ */
+export interface ScopedMemoryTurnContext {
+  sessionId: string;
+  memoryPolicy: {
+    memoryEnabled: boolean;
+    memoryImplicitUpdateEnabled: boolean;
+    memoryLlmJudgeEnabled: boolean;
+    memoryGuardLevel: 'strict' | 'standard' | 'relaxed';
+    memoryUserMemoriesMaxItems: number;
+    memoryPromptMaxChars: number;
+  };
+  metabotId: number;
+  sourceChannel: string;
+  resolvedScopes: ReturnType<typeof resolveMemoryScopes>;
+  ownerEntries: MemoryUserMemory[];
+  contactEntries: MemoryUserMemory[];
+  conversationEntries: MemoryUserMemory[];
+  pooledCandidates: Array<{ id: string; text: string }>;
+}
+
 export interface CoworkRunnerOptions {
   /** When set, env overrides (e.g. Twin wallet for metabot-basic) are merged into session env for tool execution. */
   getSkillSessionEnvOverrides?: (sessionId: string) => Promise<Record<string, string>>;
@@ -2166,30 +2192,47 @@ export interface CoworkRunnerOptions {
    */
   locationHost?: LocationHost;
   /**
-   * Optional cerebellum (小脑) memory re-ranker for the per-turn recall path.
-   * When set, the runner asks it to score the combined memory candidate pool
-   * against the current user text; a returned score map overrides the lexical
-   * relevance rank for the scored ids. null (unconfigured, timeout, error)
-   * means "fall back to lexical" — the callback must never throw. main.ts
-   * resolves the cerebellum config lazily inside the callback so Settings
-   * edits apply on the next turn without a restart.
+   * Optional cerebellum (小脑) per-turn decision bundle: ONE /v1/systemone
+   * call per turn covering what used to be five parallel requests — the
+   * memory re-rank, the knowledge hot-layer rank, the skill shortlist, the
+   * remote-service shortlist, and the volatile block gate. The runner
+   * gathers the memory pool and the knowledge entries (the stores it owns)
+   * and hands them over with the turn's eligibility flags; main.ts resolves
+   * the cerebellum config, the skill catalog, and the discovery directory
+   * lazily inside the callback so Settings/skill/discovery edits apply on
+   * the next turn without a restart. Every result field degrades to null
+   * independently (lexical ranking, newest-8, no shortlist, inject every
+   * block); null overall means the whole bundle failed. The callback must
+   * never throw — the runner also catches defensively.
    */
-  cerebellumMemoryRanker?: (input: {
+  cerebellumTurnDecisions?: (input: {
     currentUserText: string;
-    memories: Array<{ id: string; text: string }>;
-  }) => Promise<ReadonlyMap<string, number> | null>;
-  /**
-   * Optional cerebellum (小脑) re-ranker for the knowledge hot layer. When
-   * set, the runner scores a wider newest-N pool against the current user
-   * text and the returned noul map replaces recency order before the 8-item
-   * cap. null (unconfigured, small pool, timeout, error) means "newest 8" —
-   * the callback must never throw. main.ts resolves the cerebellum config
-   * lazily inside the callback so Settings edits apply on the next turn.
-   */
-  cerebellumKnowledgeRanker?: (input: {
-    currentUserText: string;
-    entries: Array<{ id: string; topic: string; summary: string; kind: string }>;
-  }) => Promise<ReadonlyMap<string, number> | null>;
+    metabotId: number | null;
+    /** Whether the session renders its skill catalog in the volatile tail. */
+    skillsCatalogVolatile: boolean;
+    /** Whether the remote-services directory rides this turn at all. */
+    remoteServicesEnabled: boolean;
+    /** Deduped scoped memory pool (empty = decision off for this turn). */
+    memories: ReadonlyArray<{ id: string; text: string }>;
+    /** Newest-first knowledge pool (empty = decision off for this turn). */
+    knowledge: ReadonlyArray<{ id: string; topic: string; summary: string; kind: string }>;
+  }) => Promise<{
+    memoryScores: ReadonlyMap<string, number> | null;
+    knowledgeScores: ReadonlyMap<string, number> | null;
+    skillRanking: ReadonlyArray<{
+      id: string;
+      name: string;
+      description: string;
+      probability: number;
+    }> | null;
+    serviceRanking: ReadonlyArray<{
+      id: string;
+      name: string;
+      description: string;
+      probability: number;
+    }> | null;
+    gateVerdicts: Record<string, boolean> | null;
+  } | null>;
   /**
    * Optional cerebellum re-rank for conversation_search hits. A score map
    * replaces recency order. null keeps the keyword/updated_at order. The
@@ -2199,48 +2242,6 @@ export interface CoworkRunnerOptions {
     searchQuery: string;
     chats: Array<{ id: string; text: string }>;
   }) => Promise<ReadonlyMap<string, number> | null>;
-  /**
-   * Optional cerebellum (小脑) skill shortlist for the volatile skills-catalog
-   * block. When set, the runner asks it to rank the session's visible skill
-   * catalog against the current user text; the returned top entries ride the
-   * per-turn tail as a separate <skill_shortlist> block (the full catalog
-   * block stays byte-stable for its content-hash dedup). null (unconfigured,
-   * small pool, timeout, error) means "no shortlist" — the callback must
-   * never throw. main.ts resolves the cerebellum config and the skill list
-   * lazily inside the callback so Settings/skill changes apply next turn.
-   */
-  cerebellumSkillRanker?: (input: {
-    currentUserText: string;
-    metabotId: number | null;
-  }) => Promise<Array<{ id: string; name: string; description: string; probability: number }> | null>;
-  /**
-   * Optional cerebellum (小脑) shortlist for the volatile remote-services
-   * directory block (roadmap #16). When set, the runner asks it to rank the
-   * discovered on-chain service directory against the current user text; the
-   * returned top entries ride the per-turn tail as a separate
-   * <remote_service_shortlist> block next to the untouched directory block —
-   * and only on turns where the directory block itself rides (the volatile
-   * block gate owns that surface). null (unconfigured, small pool, timeout,
-   * error) means "no shortlist" — the callback must never throw. main.ts
-   * resolves the cerebellum config and the discovery directory lazily inside
-   * the callback so Settings/discovery changes apply next turn.
-   */
-  cerebellumRemoteServiceRanker?: (input: {
-    currentUserText: string;
-  }) => Promise<Array<{ id: string; name: string; description: string; probability: number }> | null>;
-  /**
-   * Optional cerebellum (小脑) volatile block gate for the per-turn tail: one
-   * Noul per gateable block ("does this turn need block X?") decides which
-   * background blocks (experience / twin-impression / knowledge-bases /
-   * remote-services) ride this turn. The map's keys mirror the runner's
-   * section keys; true = inject, false = skip. null (unconfigured, timeout,
-   * error) means "inject everything" — the callback must never throw.
-   * main.ts resolves the cerebellum config lazily inside the callback so
-   * Settings edits apply on the next turn without a restart.
-   */
-  cerebellumVolatileBlockGate?: (input: {
-    currentUserText: string;
-  }) => Promise<Record<string, boolean> | null>;
   /**
    * Cerebellum (小脑) intuition tool availability: when this sync probe
    * returns true, the `intuition` inline tool mounts for cowork_ui sessions,
@@ -2431,12 +2432,8 @@ export class CoworkRunner extends EventEmitter {
   private omniReader?: OmniReaderControl;
   private screenshotHost?: ScreenshotHost;
   private locationHost?: LocationHost;
-  private cerebellumMemoryRanker?: CoworkRunnerOptions['cerebellumMemoryRanker'];
-  private cerebellumKnowledgeRanker?: CoworkRunnerOptions['cerebellumKnowledgeRanker'];
+  private cerebellumTurnDecisions?: CoworkRunnerOptions['cerebellumTurnDecisions'];
   private cerebellumConversationRanker?: CoworkRunnerOptions['cerebellumConversationRanker'];
-  private cerebellumSkillRanker?: CoworkRunnerOptions['cerebellumSkillRanker'];
-  private cerebellumRemoteServiceRanker?: CoworkRunnerOptions['cerebellumRemoteServiceRanker'];
-  private cerebellumVolatileBlockGate?: CoworkRunnerOptions['cerebellumVolatileBlockGate'];
   private cerebellumIntuitionAvailable?: CoworkRunnerOptions['cerebellumIntuitionAvailable'];
   private cerebellumIntuition?: CoworkRunnerOptions['cerebellumIntuition'];
   private cerebellumEffortSelector?: CoworkRunnerOptions['cerebellumEffortSelector'];
@@ -2610,12 +2607,8 @@ export class CoworkRunner extends EventEmitter {
     this.omniReader = options?.omniReader;
     this.screenshotHost = options?.screenshotHost;
     this.locationHost = options?.locationHost;
-    this.cerebellumMemoryRanker = options?.cerebellumMemoryRanker;
-    this.cerebellumKnowledgeRanker = options?.cerebellumKnowledgeRanker;
+    this.cerebellumTurnDecisions = options?.cerebellumTurnDecisions;
     this.cerebellumConversationRanker = options?.cerebellumConversationRanker;
-    this.cerebellumSkillRanker = options?.cerebellumSkillRanker;
-    this.cerebellumRemoteServiceRanker = options?.cerebellumRemoteServiceRanker;
-    this.cerebellumVolatileBlockGate = options?.cerebellumVolatileBlockGate;
     this.cerebellumIntuitionAvailable = options?.cerebellumIntuitionAvailable;
     this.cerebellumIntuition = options?.cerebellumIntuition;
     this.cerebellumEffortSelector = options?.cerebellumEffortSelector;
@@ -3594,21 +3587,25 @@ export class CoworkRunner extends EventEmitter {
       .replace(/'/g, '&apos;');
   }
 
-  private async buildScopedMemoryPromptBlocksXml(
+  /**
+   * Everything the scoped memory section needs, gathered ONCE per turn so the
+   * cerebellum turn-decision bundle can ride the SAME pool the renderer uses
+   * (no duplicate SQLite round, no pool drift between ranking and rendering).
+   */
+  private collectScopedMemoryContext(
     sessionId: string,
-    currentUserText: string,
-    options?: { enabled?: boolean }
-  ): Promise<string> {
+    options?: { enabled?: boolean },
+  ): ScopedMemoryTurnContext | null {
     const session = this.store.getSession(sessionId);
     const memoryPolicy = this.getSessionMemoryPolicy(sessionId);
     const memoryEnabled = options?.enabled ?? this.isSessionMemoryReadEnabled(sessionId);
     if (!memoryEnabled) {
-      return '';
+      return null;
     }
 
     const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
     if (metabotId == null) {
-      return '';
+      return null;
     }
 
     const sourceContext = this.store.getConversationSourceContextBySession(sessionId);
@@ -3662,71 +3659,66 @@ export class CoworkRunner extends EventEmitter {
           touchLastUsed: false,
         })
       : [];
-    // Cerebellum (小脑) semantic re-rank of the combined pool: one fast
-    // decision-model call scores each candidate against the current user text,
-    // and scored ids replace their lexical rank key downstream. Any failure
-    // (unconfigured, timeout, HTTP/network error, malformed payload) resolves
-    // to null and the lexical ranking runs unchanged — the fallback is silent
-    // by design so a slow or absent cerebellum never stalls prompt assembly.
-    let relevanceScoreById: ReadonlyMap<string, number> | null = null;
-    if (this.cerebellumMemoryRanker && currentUserText.trim()) {
-      const pooledById = new Map<string, { id: string; text: string }>();
-      for (const entry of [...ownerEntries, ...contactEntries, ...conversationEntries]) {
-        if (typeof entry.id === 'string' && entry.id && !pooledById.has(entry.id)) {
-          pooledById.set(entry.id, { id: entry.id, text: entry.text });
-        }
-      }
-      if (pooledById.size >= CEREBELLUM_MEMORY_MIN_POOL) {
-        const rankStartedAt = Date.now();
-        try {
-          relevanceScoreById = await this.cerebellumMemoryRanker({
-            currentUserText,
-            memories: [...pooledById.values()],
-          });
-        } catch {
-          // The ranker contract is null-on-failure; the catch is belt and
-          // braces so a throwing callback can never break the turn.
-          relevanceScoreById = null;
-        }
-        // Never log memory text or the API key — counts and timing only.
-        coworkLog('INFO', 'memory:cerebellumRank', 'Cerebellum memory re-rank finished', {
-          sessionId,
-          pooled: pooledById.size,
-          ranked: relevanceScoreById?.size ?? 0,
-          latencyMs: Date.now() - rankStartedAt,
-          used: relevanceScoreById != null,
-        });
+    // The deduped combined pool is the cerebellum re-rank input (same shape
+    // the old in-place ranker consumed).
+    const pooledCandidates: Array<{ id: string; text: string }> = [];
+    const pooledById = new Set<string>();
+    for (const entry of [...ownerEntries, ...contactEntries, ...conversationEntries]) {
+      if (typeof entry.id === 'string' && entry.id && !pooledById.has(entry.id)) {
+        pooledById.add(entry.id);
+        pooledCandidates.push({ id: entry.id, text: entry.text });
       }
     }
-    const { xml: promptBlocksXml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
-      channel: sourceContext.sourceChannel,
-      currentUserText,
+    return {
+      sessionId,
+      memoryPolicy,
+      metabotId,
+      sourceChannel: sourceContext.sourceChannel,
+      resolvedScopes,
       ownerEntries,
       contactEntries,
       conversationEntries,
+      pooledCandidates,
+    };
+  }
+
+  /**
+   * Render the scoped memory blocks from a pre-gathered context plus the
+   * cerebellum score map (null = lexical ranking). Injection is still the
+   * usage event for the decay clock: only rows that rendered into this turn's
+   * prompt keep last_used_at fresh.
+   */
+  private renderScopedMemoryPromptBlocks(
+    context: ScopedMemoryTurnContext,
+    currentUserText: string,
+    relevanceScoreById: ReadonlyMap<string, number> | null,
+  ): string {
+    const { sessionId, memoryPolicy, metabotId, sourceChannel, resolvedScopes } = context;
+    const { xml: promptBlocksXml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
+      channel: sourceChannel,
+      currentUserText,
+      ownerEntries: context.ownerEntries,
+      contactEntries: context.contactEntries,
+      conversationEntries: context.conversationEntries,
       relevanceScoreById: relevanceScoreById ?? undefined,
       maxOwnerEntries: memoryPolicy.memoryUserMemoriesMaxItems,
       maxScopedEntries: memoryPolicy.memoryUserMemoriesMaxItems,
       maxOwnerOperationalPreferences: Math.min(3, memoryPolicy.memoryUserMemoriesMaxItems),
       maxTotalChars: memoryPolicy.memoryPromptMaxChars,
     });
-    // Injection IS the usage event for the decay clock: only rows that
-    // rendered into this turn's prompt keep last_used_at fresh, so hygiene
-    // never archives memories the bot still relies on daily — and rows that
-    // merely sat in the candidate pool age normally.
     if (injectedIds.length > 0) {
       this.getMemoryBackend().touchUserMemoriesLastUsed(metabotId, injectedIds);
     }
 
     coworkLog('INFO', 'memory:promptBlocks', 'Built scoped memory prompt blocks', {
       sessionId,
-      sourceChannel: sourceContext.sourceChannel,
+      sourceChannel,
       writeScopeKind: resolvedScopes.writeScope.kind,
       writeScopeKey: resolvedScopes.writeScope.key,
       ownerReadPolicy: resolvedScopes.ownerReadPolicy,
-      ownerEntries: ownerEntries.length,
-      contactEntries: contactEntries.length,
-      conversationEntries: conversationEntries.length,
+      ownerEntries: context.ownerEntries.length,
+      contactEntries: context.contactEntries.length,
+      conversationEntries: context.conversationEntries.length,
       injectedEntries: injectedIds.length,
       includedOwnerBlock: promptBlocksXml.includes('<ownerMemories>'),
       includedContactBlock: promptBlocksXml.includes('<contactMemories>'),
@@ -3735,6 +3727,32 @@ export class CoworkRunner extends EventEmitter {
     });
 
     return promptBlocksXml;
+  }
+
+  /**
+   * Scoped memory blocks for the per-turn tail. Gathers the context (or reuses
+   * a pre-gathered one, when the volatile-prompt assembly already collected it
+   * for the cerebellum bundle) and renders with the given score map. Never
+   * throws; a null context renders ''.
+   */
+  private buildScopedMemoryPromptBlocksXml(
+    sessionId: string,
+    currentUserText: string,
+    options?: {
+      enabled?: boolean;
+      context?: ScopedMemoryTurnContext | null;
+      relevanceScoreById?: ReadonlyMap<string, number> | null;
+    },
+  ): Promise<string> {
+    const context = options?.context !== undefined
+      ? options.context
+      : this.collectScopedMemoryContext(sessionId, { enabled: options?.enabled });
+    if (!context) {
+      return Promise.resolve('');
+    }
+    return Promise.resolve(
+      this.renderScopedMemoryPromptBlocks(context, currentUserText, options?.relevanceScoreById ?? null),
+    );
   }
 
   private formatChatSearchOutput(records: Array<{
@@ -5885,25 +5903,21 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
-   * Kick the knowledge hot-layer rank at volatile-prompt entry so it overlaps
-   * the memory re-ranker's own JEV round-trip (one 1.5s budget, not two).
-   * Returns null — and makes no call — when the ranker is unwired, the
-   * prompt is blank, memory blocks are off, or the active pool is smaller
-   * than the hot-layer cap (newest-8 already shows everything).
+   * Gather the knowledge hot-layer pool for the per-turn decision bundle:
+   * the widest active pool the ranker may promote from (newest-first, capped
+   * at CEREBELLUM_KNOWLEDGE_MAX_CANDIDATES). Returns null — and the bundle
+   * then carries no knowledge questions — when the prompt is blank, memory
+   * blocks are off, or the active pool is smaller than the hot-layer cap
+   * (newest-8 already shows everything).
    */
-  private beginKnowledgeHotRank(
+  private gatherKnowledgeHotEntries(
     sessionId: string,
     currentUserText: string,
     sessionMemoryEnabled: boolean,
     includeMemoryPromptBlocks: boolean,
-  ): {
-    entries: KnowledgePromptEntry[];
-    scores: Promise<ReadonlyMap<string, number> | null>;
-    startedAt: number;
-  } | null {
+  ): KnowledgePromptEntry[] | null {
     if (
-      !this.cerebellumKnowledgeRanker
-      || !currentUserText.trim()
+      !currentUserText.trim()
       || !sessionMemoryEnabled
       || !includeMemoryPromptBlocks
       || !this.knowledgeStore
@@ -5918,44 +5932,7 @@ export class CoworkRunner extends EventEmitter {
       limit: CEREBELLUM_KNOWLEDGE_MAX_CANDIDATES,
     });
     if (entries.length < CEREBELLUM_KNOWLEDGE_MIN_POOL) return null;
-    const startedAt = Date.now();
-    const scores = this.cerebellumKnowledgeRanker({
-      currentUserText,
-      entries: entries.map((entry) => ({
-        id: entry.id,
-        topic: entry.topic,
-        summary: entry.summary,
-        kind: entry.kind,
-      })),
-    }).catch(() => null);
-    return { entries, scores, startedAt };
-  }
-
-  private async composeExperiencePromptWithKnowledgeRank(
-    sessionId: string,
-    flight: {
-      entries: KnowledgePromptEntry[];
-      scores: Promise<ReadonlyMap<string, number> | null>;
-      startedAt: number;
-    },
-  ): Promise<string> {
-    let relevanceScoreById: ReadonlyMap<string, number> | null = null;
-    try {
-      relevanceScoreById = await flight.scores;
-    } catch {
-      relevanceScoreById = null;
-    }
-    coworkLog('INFO', 'knowledge:cerebellumRank', 'Cerebellum knowledge hot-layer re-rank finished', {
-      sessionId,
-      pooled: flight.entries.length,
-      ranked: relevanceScoreById?.size ?? 0,
-      latencyMs: Date.now() - flight.startedAt,
-      used: relevanceScoreById != null,
-    });
-    return this.buildExperiencePromptBlocksXml(sessionId, {
-      entries: flight.entries,
-      relevanceScoreById,
-    });
+    return entries;
   }
 
   /**
@@ -6412,57 +6389,68 @@ export class CoworkRunner extends EventEmitter {
     disableRemoteServicesPrompt: boolean
   ): Promise<string> {
     const sections: VolatileSection[] = [];
-    // Cerebellum skill shortlist (roadmap #2): the rank call starts BEFORE
-    // the memory sections so it overlaps the memory re-ranker's own
-    // cerebellum round-trip (worst case stays one 1.5s budget, not two).
-    // Only 'volatile' sessions have a catalog in the tail (inline/legacy
-    // carry theirs in the system prompt), so those skip the call entirely.
-    // It is awaited at the skills-catalog section below; null/throw degrades
-    // to "no shortlist", byte-identical to the ungated behavior.
-    const skillShortlistPromise = this.cerebellumSkillRanker && prompt.trim()
-      && this.activeSessions.get(sessionId)?.skillsCatalogMode === 'volatile'
-      ? this.cerebellumSkillRanker({
-          currentUserText: prompt,
-          metabotId: this.store.getMetabotIdForSession(sessionId),
-        }).catch(() => null)
+    // Cerebellum (小脑) per-turn decision bundle (2026-10-16 merge): the
+    // memory re-rank, skill shortlist, remote-service shortlist, volatile
+    // block gate, and knowledge hot rank used to fire FIVE parallel
+    // /v1/systemone requests, each serializing its own state copy (the
+    // memory ranker's alone was ~20KB). They now ride ONE request: gather
+    // the runner-owned inputs synchronously (SQLite + local stores — cheap),
+    // start the single bundled call, and await it once at the first consumer
+    // (the memory section) — every later consumer reads the settled result.
+    // null/throw degrades each decision to its pre-cerebellum behavior,
+    // byte-identical. The effort selector deliberately stays a separate call
+    // (own 1s budget, different semantics).
+    const memoryContext = profile.includeMemoryPromptBlocks
+      ? this.collectScopedMemoryContext(sessionId, { enabled: sessionMemoryEnabled })
       : null;
-    // Cerebellum remote-service shortlist (roadmap #16): same fire-early
-    // shape — the rank call overlaps the memory re-ranker, the skill
-    // shortlist, and the block gate (worst case stays one 1.5s budget, not
-    // four). Only sessions that render the remote-services directory at all
-    // start the call; it is awaited inside the directory section below, and
-    // only when the block gate lets that section ride. null/throw degrades
-    // to "no shortlist", byte-identical to the ungated behavior.
-    const remoteServiceShortlistPromise = this.cerebellumRemoteServiceRanker && prompt.trim()
-      && !disableRemoteServicesPrompt
-      ? this.cerebellumRemoteServiceRanker({ currentUserText: prompt }).catch(() => null)
-      : null;
-    // Cerebellum volatile block gate (roadmap #3): one Noul per gateable
-    // background block decides whether it rides this turn's tail. The call
-    // starts here so it overlaps the memory re-ranker's own cerebellum
-    // round-trip (worst case stays one 1.5s budget, not two); it is awaited
-    // after the memory section below. null/throw injects everything —
-    // fail-open, byte-identical to the ungated behavior.
-    const volatileGatePromise = this.cerebellumVolatileBlockGate && prompt.trim()
-      ? this.cerebellumVolatileBlockGate({ currentUserText: prompt }).catch(() => null)
-      : null;
-    // Knowledge hot-layer rank (roadmap #4): starts here so it overlaps the
-    // memory re-ranker and the block gate. Awaited only when the experience
-    // section actually renders — a gate that skips experience does not wait
-    // on this call. null flight = newest-8, synchronous, byte-identical.
-    const knowledgeHotRank = this.beginKnowledgeHotRank(
+    const knowledgeEntries = this.gatherKnowledgeHotEntries(
       sessionId,
       prompt,
       sessionMemoryEnabled,
       profile.includeMemoryPromptBlocks,
     );
+    const decisionsStartedAt = Date.now();
+    const decisionsPromise = this.cerebellumTurnDecisions && prompt.trim()
+      ? this.cerebellumTurnDecisions({
+          currentUserText: prompt,
+          metabotId: this.store.getMetabotIdForSession(sessionId),
+          // Only 'volatile' sessions have a catalog in the tail (inline/
+          // legacy carry theirs in the system prompt), so those skip the
+          // skill questions entirely.
+          skillsCatalogVolatile: this.activeSessions.get(sessionId)?.skillsCatalogMode === 'volatile',
+          remoteServicesEnabled: !disableRemoteServicesPrompt,
+          memories: memoryContext?.pooledCandidates ?? [],
+          knowledge: (knowledgeEntries ?? []).map((entry) => ({
+            id: entry.id,
+            topic: entry.topic,
+            summary: entry.summary,
+            kind: entry.kind,
+          })),
+        }).catch(() => null)
+      : null;
+    let turnDecisions: Awaited<ReturnType<NonNullable<CoworkRunnerOptions['cerebellumTurnDecisions']>>> = null;
+    let decisionsSettled = false;
+    const awaitTurnDecisions = async () => {
+      if (!decisionsSettled) {
+        decisionsSettled = true;
+        try {
+          turnDecisions = decisionsPromise ? await decisionsPromise : null;
+        } catch {
+          // The callback contract is null-on-failure; the catch is belt and
+          // braces so a throwing callback can never break the turn.
+          turnDecisions = null;
+        }
+      }
+      return turnDecisions;
+    };
     let blockGateVerdicts: Record<string, boolean> | null = null;
     const shouldInjectVolatile = (key: string): boolean =>
       !(CEREBELLUM_VOLATILE_GATE_SECTION_KEYS as readonly string[]).includes(key)
       || blockGateVerdicts?.[key] !== false;
     const awaitVolatileGate = async (): Promise<void> => {
-      if (!volatileGatePromise || blockGateVerdicts !== null) return;
-      blockGateVerdicts = await volatileGatePromise;
+      if (blockGateVerdicts !== null) return;
+      const decisions = await awaitTurnDecisions();
+      blockGateVerdicts = decisions?.gateVerdicts ?? null;
       if (blockGateVerdicts !== null) {
         coworkLog('INFO', 'volatileBlocks:cerebellumGate', 'volatile block gate verdicts', {
           sessionId,
@@ -6471,13 +6459,28 @@ export class CoworkRunner extends EventEmitter {
       }
     };
     if (profile.includeMemoryPromptBlocks) {
+      const decisions = await awaitTurnDecisions();
+      if (memoryContext && decisionsPromise && memoryContext.pooledCandidates.length >= CEREBELLUM_MEMORY_MIN_POOL) {
+        // Never log memory text or the API key — counts and timing only.
+        coworkLog('INFO', 'memory:cerebellumRank', 'Cerebellum memory re-rank finished', {
+          sessionId,
+          pooled: memoryContext.pooledCandidates.length,
+          ranked: decisions?.memoryScores?.size ?? 0,
+          latencyMs: Date.now() - decisionsStartedAt,
+          used: decisions?.memoryScores != null,
+        });
+      }
       sections.push({
         key: 'memory',
-        text: await this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled }),
+        text: await this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, {
+          enabled: sessionMemoryEnabled,
+          context: memoryContext,
+          relevanceScoreById: decisions?.memoryScores ?? null,
+        }),
         alwaysInject: true,
       });
-      // Gate verdicts land after the memory section: by then the parallel
-      // gate call has usually resolved. Ungateable keys and missing verdicts
+      // Gate verdicts land after the memory section: by then the bundled
+      // call has usually resolved. Ungateable keys and missing verdicts
       // always inject — only an explicit false for a gateable key skips.
       await awaitVolatileGate();
       // Hot-layer experience injection (self-identity + recent dream summaries).
@@ -6485,12 +6488,30 @@ export class CoworkRunner extends EventEmitter {
       // daily, so they can never live in the system prompt — they belong here
       // in the request tail with the other volatile blocks.
       if (sessionMemoryEnabled && shouldInjectVolatile('experience')) {
-        sections.push({
-          key: 'experience',
-          text: knowledgeHotRank
-            ? await this.composeExperiencePromptWithKnowledgeRank(sessionId, knowledgeHotRank)
-            : this.buildExperiencePromptBlocksXml(sessionId),
-        });
+        if (knowledgeEntries) {
+          const knowledgeScores = (await awaitTurnDecisions())?.knowledgeScores ?? null;
+          if (decisionsPromise) {
+            coworkLog('INFO', 'knowledge:cerebellumRank', 'Cerebellum knowledge hot-layer re-rank finished', {
+              sessionId,
+              pooled: knowledgeEntries.length,
+              ranked: knowledgeScores?.size ?? 0,
+              latencyMs: Date.now() - decisionsStartedAt,
+              used: knowledgeScores != null,
+            });
+          }
+          sections.push({
+            key: 'experience',
+            text: this.buildExperiencePromptBlocksXml(sessionId, {
+              entries: knowledgeEntries,
+              relevanceScoreById: knowledgeScores,
+            }),
+          });
+        } else {
+          sections.push({
+            key: 'experience',
+            text: this.buildExperiencePromptBlocksXml(sessionId),
+          });
+        }
       }
       // Twin-side distilled impressions of local Workers also ride the
       // per-turn tail: the dream layer rewrites them nightly, so they must
@@ -6529,8 +6550,8 @@ export class CoworkRunner extends EventEmitter {
     }
     if (!disableRemoteServicesPrompt) {
       // Memory-disabled profiles reach the gate's first consumer here; the
-      // call itself already started at function entry, so the await only
-      // waits out whatever remains of the shared 1.5s budget.
+      // bundled call itself already started at function entry, so the await
+      // only waits out whatever remains of the shared 1.5s budget.
       await awaitVolatileGate();
       if (shouldInjectVolatile('remote-services')) {
         sections.push({
@@ -6540,9 +6561,8 @@ export class CoworkRunner extends EventEmitter {
         // Cerebellum shortlist rides next to the untouched directory: top-3
         // re-read + a one-line suggestion. The directory block itself stays
         // byte-stable; the shortlist never rides on turns the gate just
-        // skipped. The rank promise started at function entry, so this await
-        // usually resolves immediately.
-        const serviceEntries = remoteServiceShortlistPromise ? await remoteServiceShortlistPromise : null;
+        // skipped.
+        const serviceEntries = (await awaitTurnDecisions())?.serviceRanking ?? null;
         if (serviceEntries && serviceEntries.length > 0) {
           coworkLog('INFO', 'remoteServices:cerebellumShortlist', 'turn remote-service shortlist', {
             sessionId,
@@ -6570,7 +6590,7 @@ export class CoworkRunner extends EventEmitter {
       // Cerebellum shortlist rides next to the untouched catalog: top-3
       // re-read + a one-line suggestion. The catalog block itself stays
       // byte-stable so its content-hash dedup keeps working.
-      const shortlistEntries = skillShortlistPromise ? await skillShortlistPromise : null;
+      const shortlistEntries = (await awaitTurnDecisions())?.skillRanking ?? null;
       if (shortlistEntries && shortlistEntries.length > 0) {
         coworkLog('INFO', 'skills:cerebellumShortlist', 'turn skill shortlist', {
           sessionId,

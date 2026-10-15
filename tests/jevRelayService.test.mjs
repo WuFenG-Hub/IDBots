@@ -4,8 +4,10 @@
  * Covers the free-provider credential chain (in-memory cache -> jevRelay kv
  * -> metaid-free provider -> identity bootstrap), the runtime cerebellum
  * config injection (typesafe passthrough / free key injection / silent off),
- * and the one-shot 401 re-bootstrap retry wrapper. All externals
- * (store/bootstrap) are injected; no network, no DB, no Electron.
+ * the one-shot 401 re-bootstrap retry wrapper, and the result-code layer
+ * (classification, the recording fetch wrapper, the quota breaker, and the
+ * per-day aggregate lines). All externals (store/bootstrap) are injected; no
+ * network, no DB, no Electron.
  */
 
 import test, { beforeEach } from 'node:test';
@@ -22,6 +24,15 @@ const {
   resolveCerebellumRuntimeConfig,
   createJevRelayFetchWithKeyRetry,
   createSignalBoundedFetch,
+  parseJevRelayErrorCode,
+  classifyJevRelayHttpStatus,
+  classifyJevRelayThrownError,
+  createJevRelayCallRecorder,
+  isJevRelayQuotaExhausted,
+  noteJevRelayQuotaExhaustion,
+  flushJevRelayCallStats,
+  JEV_RELAY_QUOTA_BREAKER_MS,
+  JEV_FREE_QUOTA_EXHAUSTED_CODE,
   JEV_RELAY_API_KEY_KV,
   JEV_RELAY_BASE_URL_KV,
 } = service;
@@ -410,4 +421,183 @@ test('createSignalBoundedFetch: no signal means plain passthrough', async () => 
   const bounded = createSignalBoundedFetch(async () => makeResponse(200));
   const response = await bounded('https://relay.example/v1/systemone', { method: 'POST' });
   assert.equal(response.status, 200);
+});
+
+// ---------------------------------------------------------------------------
+// Result-code classification (2026-10-16 availability work)
+// ---------------------------------------------------------------------------
+
+test('parseJevRelayErrorCode: extracts the OpenAI envelope code, tolerates junk', () => {
+  assert.equal(parseJevRelayErrorCode({ error: { code: 'jev_free_quota_exhausted' } }), 'jev_free_quota_exhausted');
+  assert.equal(parseJevRelayErrorCode({ error: { code: '  spaced  ' } }), 'spaced');
+  assert.equal(parseJevRelayErrorCode({ error: { message: 'no code' } }), null);
+  assert.equal(parseJevRelayErrorCode({ error: null }), null);
+  assert.equal(parseJevRelayErrorCode('not an object'), null);
+  assert.equal(parseJevRelayErrorCode(null), null);
+});
+
+test('classifyJevRelayHttpStatus: full status table including the 429 split', () => {
+  assert.equal(classifyJevRelayHttpStatus(200), 'ok');
+  assert.equal(classifyJevRelayHttpStatus(204), 'ok');
+  assert.equal(classifyJevRelayHttpStatus(401), 'http_401');
+  // The 429 split: ONLY the JEV pool code is quota; the chat pool code and
+  // unknown envelopes stay rate-limited.
+  assert.equal(classifyJevRelayHttpStatus(429, 'jev_free_quota_exhausted'), 'http_429_quota');
+  assert.equal(classifyJevRelayHttpStatus(429, 'free_quota_exhausted'), 'http_429_rate');
+  assert.equal(classifyJevRelayHttpStatus(429, null), 'http_429_rate');
+  assert.equal(classifyJevRelayHttpStatus(404), 'http_4xx');
+  assert.equal(classifyJevRelayHttpStatus(451), 'http_4xx');
+  assert.equal(classifyJevRelayHttpStatus(500), 'http_5xx');
+  assert.equal(classifyJevRelayHttpStatus(503), 'http_5xx');
+  // A redirect/1xx leaking out of the net stack is a transport anomaly.
+  assert.equal(classifyJevRelayHttpStatus(302), 'network');
+});
+
+test('classifyJevRelayThrownError: aborts are timeouts, everything else is network', () => {
+  assert.equal(classifyJevRelayThrownError(new DOMException('aborted', 'AbortError')), 'timeout');
+  assert.equal(classifyJevRelayThrownError(new DOMException('timed out', 'TimeoutError')), 'timeout');
+  assert.equal(classifyJevRelayThrownError(new Error('socket hang up')), 'network');
+  assert.equal(classifyJevRelayThrownError(undefined), 'network');
+});
+
+// ---------------------------------------------------------------------------
+// Recording wrapper: per-call lines, 429 body replay, breaker maintenance
+// ---------------------------------------------------------------------------
+
+function captureSink() {
+  const lines = [];
+  const sink = (level, tag, message, extra) => lines.push({ level, tag, message, extra });
+  return { lines, sink };
+}
+
+function jsonResponse(status, body) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  };
+}
+
+test('createJevRelayCallRecorder: ok responses pass through unchanged and log their code', async () => {
+  const { lines, sink } = captureSink();
+  const inner = async () => jsonResponse(200, { answers: {} });
+  const recorded = createJevRelayCallRecorder(inner, { sink });
+  const response = await recorded('https://relay.example/v1/systemone', { method: 'POST' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { answers: {} });
+  const callLines = lines.filter((line) => line.tag === 'jevRelay:call');
+  assert.equal(callLines.length, 1);
+  assert.equal(callLines[0].extra.result, 'ok');
+  assert.equal(callLines[0].extra.endpoint, '/v1/systemone');
+});
+
+test('createJevRelayCallRecorder: a quota 429 classifies via the envelope and opens the breaker', async () => {
+  const { lines, sink } = captureSink();
+  const inner = async () => jsonResponse(429, { error: { code: 'jev_free_quota_exhausted' } });
+  const recorded = createJevRelayCallRecorder(inner, { sink });
+  const response = await recorded('https://relay.example/v1/systemone', { method: 'POST' });
+  assert.equal(response.status, 429);
+  assert.equal(isJevRelayQuotaExhausted(), true);
+  const callLine = lines.find((line) => line.tag === 'jevRelay:call');
+  assert.equal(callLine.extra.result, 'http_429_quota');
+  assert.equal(callLine.extra.errorCode, 'jev_free_quota_exhausted');
+  // The reconstructed response still replays the parsed error envelope.
+  assert.deepEqual(await response.json(), { error: { code: 'jev_free_quota_exhausted' } });
+});
+
+test('createJevRelayCallRecorder: a rate 429 (chat-pool code) does NOT open the breaker', async () => {
+  const { sink } = captureSink();
+  const inner = async () => jsonResponse(429, { error: { code: 'free_quota_exhausted' } });
+  const recorded = createJevRelayCallRecorder(inner, { sink });
+  await recorded('https://relay.example/v1/systemone', { method: 'POST' });
+  assert.equal(isJevRelayQuotaExhausted(), false);
+});
+
+test('createJevRelayCallRecorder: an ok call closes an open breaker', async () => {
+  noteJevRelayQuotaExhaustion();
+  assert.equal(isJevRelayQuotaExhausted(), true);
+  const { sink } = captureSink();
+  const recorded = createJevRelayCallRecorder(async () => jsonResponse(200, {}), { sink });
+  await recorded('https://relay.example/v1/systemone', { method: 'POST' });
+  assert.equal(isJevRelayQuotaExhausted(), false);
+});
+
+test('createJevRelayCallRecorder: thrown aborts are re-thrown and recorded as timeout', async () => {
+  const { lines, sink } = captureSink();
+  const inner = async () => {
+    throw new DOMException('The operation was aborted', 'AbortError');
+  };
+  const recorded = createJevRelayCallRecorder(inner, { sink });
+  await assert.rejects(() => recorded('https://relay.example/v1/systemone', { method: 'POST' }), /aborted/i);
+  const callLine = lines.find((line) => line.tag === 'jevRelay:call');
+  assert.equal(callLine.extra.result, 'timeout');
+  assert.equal(callLine.extra.status, null);
+});
+
+test('quota breaker: expires after the backoff window without an app restart', () => {
+  noteJevRelayQuotaExhaustion(Date.now() - JEV_RELAY_QUOTA_BREAKER_MS - 1);
+  assert.equal(isJevRelayQuotaExhausted(), false);
+});
+
+test('resolveCerebellumRuntimeConfig: an open breaker silently disables the free relay', async () => {
+  setupDeps({
+    store: makeStore(new Map([
+      [JEV_RELAY_API_KEY_KV, 'mrk_live'],
+      [JEV_RELAY_BASE_URL_KV, CHAT_BASE],
+    ])),
+  });
+  noteJevRelayQuotaExhaustion();
+  assert.equal(await resolveCerebellumRuntimeConfig(FREE_CEREBELLUM_CONFIG), null);
+});
+
+// ---------------------------------------------------------------------------
+// Daily aggregate lines
+// ---------------------------------------------------------------------------
+
+test('flushJevRelayCallStats: emits one aggregate line with per-code counts and latency percentiles', async () => {
+  const { lines, sink } = captureSink();
+  const latencies = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000];
+  let index = 0;
+  const inner = async () => {
+    const status = index === 0 ? 500 : index === 1 ? 429 : 200;
+    const body = index === 1 ? { error: { code: 'rate_limited' } } : {};
+    index += 1;
+    return jsonResponse(status, body);
+  };
+  const recorded = createJevRelayCallRecorder(inner, {
+    sink,
+    now: () => 1000 + latencies[Math.min(index, latencies.length - 1)],
+  });
+  // Drive 10 calls; the injected clock also fixes every latency deterministically.
+  for (let call = 0; call < 10; call += 1) {
+    await recorded('https://relay.example/v1/systemone', { method: 'POST' });
+  }
+  flushJevRelayCallStats(sink);
+  const daily = lines.find((line) => line.tag === 'jevRelay:daily');
+  assert.ok(daily, 'the daily aggregate line exists');
+  assert.equal(daily.extra.calls, 10);
+  assert.equal(daily.extra.counts.ok, 8);
+  assert.equal(daily.extra.counts.http_5xx, 1);
+  assert.equal(daily.extra.counts.http_429_rate, 1);
+  assert.equal(daily.extra.okRate, 0.8);
+  assert.ok(daily.extra.p50Ms > 0 && daily.extra.p90Ms >= daily.extra.p50Ms, 'percentiles are ordered and present');
+});
+
+test('daily rollover: the first call of a new local day emits the previous day line', async () => {
+  const { lines, sink } = captureSink();
+  // A fixed base timestamp mid-day, so +24h deterministically crosses midnight.
+  const base = new Date();
+  base.setHours(12, 0, 0, 0);
+  let clock = base.getTime();
+  const recorded = createJevRelayCallRecorder(
+    async () => jsonResponse(200, {}),
+    { sink, now: () => clock },
+  );
+  await recorded('https://relay.example/v1/systemone', { method: 'POST' });
+  clock += 24 * 60 * 60 * 1000;
+  await recorded('https://relay.example/v1/systemone', { method: 'POST' });
+  const dailyLines = lines.filter((line) => line.tag === 'jevRelay:daily');
+  assert.equal(dailyLines.length, 1, 'crossing midnight emits exactly the previous day line');
+  assert.equal(dailyLines[0].extra.calls, 1);
+  assert.equal(dailyLines[0].extra.counts.ok, 1);
 });

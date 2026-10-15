@@ -91,27 +91,28 @@ export const CEREBELLUM_VOLATILE_GATE_THRESHOLDS: Record<CerebellumVolatileGateS
 /**
  * Noul instruction per gateable block (ONE tunable place). English per
  * TypeSafe's English-primary guidance; the user's original (often Chinese)
- * message stays in `state.user_message`. Each question describes its block
- * CATEGORY so the model can judge relevance without the block's content —
- * the content is exactly what a skip avoids sending.
+ * message stays in `state.current_message` (the shared turn-bundle state
+ * field). Each question describes its block CATEGORY so the model can judge
+ * relevance without the block's content — the content is exactly what a
+ * skip avoids sending.
  */
 export const CEREBELLUM_VOLATILE_GATE_INSTRUCTIONS: Record<CerebellumVolatileGateSectionKey, string> = {
   experience:
-    'Does replying to the user\'s message at `user_message` need the assistant\'s own ' +
+    'Does replying to the user\'s message at `current_message` need the assistant\'s own ' +
     'self-identity, nightly dream reflections, or lessons learned from past interactions? ' +
     'Needed only when the message is about who the assistant is, what it has learned or ' +
     'reflects on, or explicitly references its past behavior; ordinary task requests do not need it.',
   'twin-impression':
-    'Does replying to the user\'s message at `user_message` need the assistant\'s stored ' +
+    'Does replying to the user\'s message at `current_message` need the assistant\'s stored ' +
     'impressions of its local worker bots (their strengths, habits, reliability)? Needed ' +
     'only when the message involves those worker bots, delegating work to them, or team ' +
     'composition questions.',
   'knowledge-bases':
-    'Does replying to the user\'s message at `user_message` need the listing of the ' +
+    'Does replying to the user\'s message at `current_message` need the listing of the ' +
     'assistant\'s knowledge bases (their names and document counts)? Needed only when the ' +
     'message asks to search, store into, or consult a knowledge base or its documents.',
   'remote-services':
-    'Does replying to the user\'s message at `user_message` need the directory of remote ' +
+    'Does replying to the user\'s message at `current_message` need the directory of remote ' +
     'on-chain services offered by other bots? Needed only when the message seeks a ' +
     'capability the assistant itself lacks and might delegate or purchase externally; ' +
     'ordinary self-served requests do not need it.',
@@ -130,7 +131,7 @@ export interface CerebellumVolatileGateNoulQuestion {
 
 export interface CerebellumVolatileGateRequest {
   state: {
-    user_message: string;
+    current_message: string;
   };
   model: string;
   questions: Record<string, CerebellumVolatileGateNoulQuestion>;
@@ -158,7 +159,7 @@ export function buildVolatileGateRequest(input: {
   const message = String(input.currentUserText ?? '').replace(/\s+/g, ' ').trim();
   return {
     state: {
-      user_message: truncateUtf16Prefix(message, CEREBELLUM_VOLATILE_GATE_MAX_MESSAGE_CHARS),
+      current_message: truncateUtf16Prefix(message, CEREBELLUM_VOLATILE_GATE_MAX_MESSAGE_CHARS),
     },
     model: input.model,
     questions: buildVolatileGateQuestions(),

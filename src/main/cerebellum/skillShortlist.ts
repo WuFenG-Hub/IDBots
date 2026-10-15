@@ -71,12 +71,13 @@ export interface CerebellumSkillRankEntry {
 /**
  * Choice instructions (ONE tunable place). English per TypeSafe's
  * English-primary guidance; the user's original (often Chinese) message
- * stays in `state.user_message`. Options live in the question's `criteria`
- * map (JEV choice shape: option name -> description), keyed by skill id.
+ * stays in `state.current_message` (the shared turn-bundle state field).
+ * Options live in the question's `criteria` map (JEV choice shape: option
+ * name -> description), keyed by skill id.
  */
 export const CEREBELLUM_SKILL_RANK_INSTRUCTIONS =
   'Which ONE skill listed in `criteria` is the best match for handling the user\'s request at ' +
-  '`user_message`? Judge by the capability and trigger conditions each option describes — not by ' +
+  '`current_message`? Judge by the capability and trigger conditions each option describes — not by ' +
   'shared keywords or name similarity. The user may write in any language. If no skill truly ' +
   'fits, still pick the closest one: only the ranking order is used downstream.';
 
@@ -90,7 +91,7 @@ export interface CerebellumSkillChoiceQuestion {
 
 export interface CerebellumSkillShortlistRequest {
   state: {
-    user_message: string;
+    current_message: string;
   };
   model: string;
   questions: Record<string, CerebellumSkillChoiceQuestion>;
@@ -116,12 +117,15 @@ export function buildSkillOptionLabel(skill: CerebellumSkillCandidate): string {
   return capped ? `${skill.name}: ${capped}` : skill.name;
 }
 
-export function buildSkillShortlistRequest(input: {
-  currentUserText: string;
-  skills: CerebellumSkillCandidate[];
-  model: string;
-}): CerebellumSkillShortlistRequest {
-  const skills = input.skills.slice(0, CEREBELLUM_SKILL_MAX_OPTIONS);
+/**
+ * The Choice question alone, reusable by the per-turn decision bundle: the
+ * bundle merges this question with the other turn-scoped decisions (memory
+ * rank, remote-service rank, block gate, knowledge rank) into ONE
+ * /v1/systemone request keyed by disjoint question ids.
+ */
+export function buildSkillChoiceQuestions(
+  skills: readonly CerebellumSkillCandidate[],
+): Record<string, CerebellumSkillChoiceQuestion> {
   const criteria: Record<string, string> = {};
   let totalLabelChars = 0;
   for (const skill of skills) {
@@ -136,17 +140,25 @@ export function buildSkillShortlistRequest(input: {
     totalLabelChars += label.length;
   }
   return {
+    [CEREBELLUM_SKILL_RANK_QUESTION_ID]: {
+      type: 'choice',
+      instructions: CEREBELLUM_SKILL_RANK_INSTRUCTIONS,
+      criteria,
+    },
+  };
+}
+
+export function buildSkillShortlistRequest(input: {
+  currentUserText: string;
+  skills: CerebellumSkillCandidate[];
+  model: string;
+}): CerebellumSkillShortlistRequest {
+  return {
     state: {
-      user_message: String(input.currentUserText ?? '').replace(/\s+/g, ' ').trim(),
+      current_message: String(input.currentUserText ?? '').replace(/\s+/g, ' ').trim(),
     },
     model: input.model,
-    questions: {
-      [CEREBELLUM_SKILL_RANK_QUESTION_ID]: {
-        type: 'choice',
-        instructions: CEREBELLUM_SKILL_RANK_INSTRUCTIONS,
-        criteria,
-      },
-    },
+    questions: buildSkillChoiceQuestions(input.skills.slice(0, CEREBELLUM_SKILL_MAX_OPTIONS)),
   };
 }
 

@@ -21,23 +21,29 @@ import { ProjectStore, type ProjectFormData } from './projectStore';
 import type { MemoryBackend } from './memory/memoryBackend';
 import { createOwnerMemoryScope } from './memory/memoryScope';
 import { CEREBELLUM_FREE_PROVIDER, resolveCerebellumConfig, type ResolvedCerebellumConfig } from './libs/cerebellumConfig';
-import { createJevRelayFetchWithKeyRetry, createSignalBoundedFetch, initJevRelayService, registerJevRelayIpcHandlers, resolveCerebellumRuntimeConfig } from './services/jevRelayService';
+import {
+  createJevRelayCallRecorder,
+  createJevRelayFetchWithKeyRetry,
+  createSignalBoundedFetch,
+  flushJevRelayCallStats,
+  initJevRelayService,
+  registerJevRelayIpcHandlers,
+  resolveCerebellumRuntimeConfig,
+  setJevRelayCallStatsSink,
+} from './services/jevRelayService';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
-import { rankKnowledgeWithCerebellum } from './cerebellum/knowledgeHotRank';
 import { rankConversationsWithCerebellum } from './cerebellum/conversationSearchRank';
 import { decideGroupReplyWithCerebellum } from './cerebellum/groupReplyGate';
 import { rankWorkersWithCerebellum, CEREBELLUM_WORKER_RANK_TOP_K } from './cerebellum/workerRank';
 import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
-import { gateVolatileBlocksWithCerebellum } from './cerebellum/volatileBlockGate';
 import { selectEffortWithCerebellum } from './cerebellum/effortSelector';
 import { askCerebellumIntuition } from './cerebellum/intuitionTool';
+import { runCerebellumTurnDecisions } from './cerebellum/turnDecisionBundle';
 import {
-  rankSkillsWithCerebellum,
   CEREBELLUM_SKILL_SHORTLIST_MIN_POOL,
   CEREBELLUM_SKILL_SHORTLIST_TOP_K,
 } from './cerebellum/skillShortlist';
 import {
-  rankRemoteServicesWithCerebellum,
   CEREBELLUM_REMOTE_SERVICE_SHORTLIST_MIN_POOL,
   CEREBELLUM_REMOTE_SERVICE_SHORTLIST_TOP_K,
 } from './cerebellum/remoteServiceShortlist';
@@ -3168,7 +3174,9 @@ const getStoreOrNull = (): SqliteStore | null => {
  * Per-call cerebellum context for the decision factories below: the runtime
  * config (free provider gets its relay key injected; null = feature silently
  * off) plus the matching fetch — direct providers ride the raw Electron net
- * stack, the free relay rides a wrapper that re-bootstraps once on a 401.
+ * stack, the free relay rides a wrapper that re-bootstraps once on a 401,
+ * wrapped in turn by the result-code recorder (per-call codes + the daily
+ * aggregate land in cowork.log; a quota 429 opens the 5-minute breaker).
  */
 const resolveCerebellumCallContext = async (): Promise<{
   config: ResolvedCerebellumConfig;
@@ -3187,14 +3195,21 @@ const cerebellumFetchFor = (config: ResolvedCerebellumConfig) => {
   // hang on session 70fa10aa, 2026-10-16) never surfaced the abort and blew
   // every call-site budget. Our own race enforces the deadline; the relay
   // 401-retry wrapper layers on top and stays deadline-bounded too (its retry
-  // rides this same bounded fetch).
+  // rides this same bounded fetch). The result-code recorder rides OUTERMOST
+  // so one recorded outcome covers the whole logical call, bootstrap retry
+  // included. The bind's overloaded signature defeats the wrappers' generic
+  // inference, so pin the shape every cerebellum call site consumes
+  // (ok/status/json).
   const rawFetch = createSignalBoundedFetch(
-    session.defaultSession.fetch.bind(session.defaultSession) as unknown as
-      (url: string, init: Record<string, unknown>) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>,
+    session.defaultSession.fetch.bind(session.defaultSession) as unknown as (
+      url: string,
+      init: Record<string, unknown>,
+    ) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>,
   );
-  return config.provider === CEREBELLUM_FREE_PROVIDER
-    ? createJevRelayFetchWithKeyRetry(rawFetch)
-    : rawFetch;
+  if (config.provider !== CEREBELLUM_FREE_PROVIDER) {
+    return rawFetch;
+  }
+  return createJevRelayCallRecorder(createJevRelayFetchWithKeyRetry(rawFetch));
 };
 
 /**
@@ -3234,30 +3249,6 @@ const createCerebellumMemoryRanker = () =>
           totalChars: stats.totalChars,
         });
       },
-    });
-  };
-
-/**
- * Cerebellum (小脑) knowledge hot-layer re-ranker (roadmap #4). Same lazy
- * shape as the memory ranker: config re-resolved per call, fetch from
- * resolveCerebellumCallContext (paid provider uses the Electron net stack,
- * the free relay uses the key-retry wrapper). null keeps the newest-8 hot
- * layer. Never logs knowledge text.
- */
-const createCerebellumKnowledgeRanker = () =>
-  async ({ currentUserText, entries }: {
-    currentUserText: string;
-    entries: Array<{ id: string; topic: string; summary: string; kind: string }>;
-  }): Promise<ReadonlyMap<string, number> | null> => {
-    const context = await resolveCerebellumCallContext();
-    if (!context) {
-      return null;
-    }
-    return rankKnowledgeWithCerebellum({
-      config: context.config,
-      fetchImpl: context.fetchImpl,
-      currentUserText,
-      entries,
     });
   };
 
@@ -3380,89 +3371,60 @@ const createCerebellumMemoryWriteGate = () =>
   };
 
 /**
- * Cerebellum (小脑) skill shortlist (roadmap #2): one JEV Choice question
- * ranks the session's whole visible skill catalog against the current user
- * message; the top-K entries ride the volatile tail next to the untouched
- * catalog block. Same lazy shape as the rankers above — config re-resolved
- * per call (Settings/skill installs apply next turn), fetch on the Electron
- * net stack (system proxy). Returns null on small pools / any failure: no
- * shortlist, behavior identical to before. Never logs user text.
+ * Cerebellum (小脑) per-turn decision bundle (2026-10-16 merge): ONE
+ * /v1/systemone request per cowork turn covering the memory re-rank, the
+ * knowledge hot rank, the skill shortlist, the remote-service shortlist, and
+ * the volatile block gate — what used to be five parallel requests, each
+ * serializing its own state copy. The runner hands over the turn text, the
+ * eligibility flags, and the memory/knowledge pools it already gathered;
+ * this factory resolves the cerebellum config lazily (Settings/skill/
+ * discovery edits apply next turn, no restart), gathers the skill catalog
+ * and the discovery directory the same way the old standalone factories
+ * did, runs the bundled call, and maps each decision's raw ranking back
+ * onto its metadata. null on any failure degrades every decision exactly
+ * as the split call sites did. Never logs user text, memory text, or
+ * service names — ids, counts, and latency only.
  */
-const createCerebellumSkillRanker = () =>
-  async ({ currentUserText, metabotId }: {
+const createCerebellumTurnDecisionCaller = () =>
+  async (input: {
     currentUserText: string;
     metabotId: number | null;
-  }): Promise<Array<{ id: string; name: string; description: string; probability: number }> | null> => {
+    skillsCatalogVolatile: boolean;
+    remoteServicesEnabled: boolean;
+    memories: ReadonlyArray<{ id: string; text: string }>;
+    knowledge: ReadonlyArray<{ id: string; topic: string; summary: string; kind: string }>;
+  }): Promise<{
+    memoryScores: ReadonlyMap<string, number> | null;
+    knowledgeScores: ReadonlyMap<string, number> | null;
+    skillRanking: Array<{ id: string; name: string; description: string; probability: number }> | null;
+    serviceRanking: Array<{ id: string; name: string; description: string; probability: number }> | null;
+    gateVerdicts: Record<string, boolean> | null;
+  } | null> => {
     const context = await resolveCerebellumCallContext();
     if (!context) {
       return null;
     }
     // The catalog's own visible set (bundled + global + assigned, enabled
     // only) — the shortlist must never mention a skill the catalog omits.
-    const skills = getSkillManager()
-      .listSkillsForMetabot(metabotId)
-      .map((skill) => ({ id: String(skill.id), name: skill.name, description: String(skill.description ?? '') }));
-    if (skills.length < CEREBELLUM_SKILL_SHORTLIST_MIN_POOL) {
-      return null;
-    }
-    const startedAt = Date.now();
-    const ranking = await rankSkillsWithCerebellum({
-      config: context.config,
-      fetchImpl: context.fetchImpl,
-      currentUserText,
-      skills,
-    });
-    coworkLog('INFO', 'skills:cerebellumShortlist', 'catalog ranked for turn', {
-      pool: skills.length,
-      ranked: ranking?.length ?? 0,
-      latencyMs: Date.now() - startedAt,
-      used: ranking !== null,
-    });
-    if (!ranking) {
-      return null;
-    }
-    const skillsById = new Map(skills.map((skill) => [skill.id, skill]));
-    return ranking
-      .slice(0, CEREBELLUM_SKILL_SHORTLIST_TOP_K)
-      .flatMap((entry) => {
-        const skill = skillsById.get(entry.id);
-        return skill ? [{ ...skill, probability: entry.probability }] : [];
-      });
-  };
-
-/**
- * Cerebellum (小脑) remote-service shortlist (roadmap #16): one JEV Choice
- * question ranks the discovered on-chain service directory against the
- * current user message; the top-3 ride the per-turn tail next to the
- * untouched <available_remote_services> block. The directory comes from the
- * SAME discovery snapshot the block renders (normalized with the same
- * id/name fallback chains buildRemoteServicesPrompt uses), so the shortlist
- * can never mention a service the block omits. Pools under
- * CEREBELLUM_REMOTE_SERVICE_SHORTLIST_MIN_POOL stay model-scannable and make
- * no call. Same lazy shape as the factories above — config re-resolved per
- * call (Settings edits apply next turn), fetch from
- * resolveCerebellumCallContext. null on any failure injects nothing. Never
- * logs service names or the user text — ids, counts, and latency only.
- */
-const createCerebellumRemoteServiceRanker = () =>
-  async ({ currentUserText }: {
-    currentUserText: string;
-  }): Promise<Array<{ id: string; name: string; description: string; probability: number }> | null> => {
-    const context = await resolveCerebellumCallContext();
-    if (!context) {
-      return null;
-    }
+    const skills = input.skillsCatalogVolatile
+      ? getSkillManager()
+        .listSkillsForMetabot(input.metabotId)
+        .map((skill) => ({ id: String(skill.id), name: skill.name, description: String(skill.description ?? '') }))
+      : [];
+    // Same discovery snapshot + fallback chain the rendered directory block
+    // uses (buildRemoteServicesPrompt) — the shortlist's ids and names must
+    // match what the block carries.
     let directory: any[] = [];
-    try {
-      directory = getProviderDiscoveryService().getDiscoverySnapshot().availableServices ?? [];
-    } catch {
-      return null;
+    if (input.remoteServicesEnabled) {
+      try {
+        directory = getProviderDiscoveryService().getDiscoverySnapshot().availableServices ?? [];
+      } catch {
+        directory = [];
+      }
     }
     const seen = new Set<string>();
     const services: Array<{ id: string; name: string; description: string }> = [];
     for (const service of directory) {
-      // Same fallback chain as buildRemoteServicesPrompt — the shortlist's
-      // ids and names must match what the rendered block carries.
       const id = String(service?.currentPinId ?? service?.id ?? service?.pinId ?? service?.servicePinId ?? '').trim();
       if (!id || seen.has(id)) continue;
       seen.add(id);
@@ -3472,64 +3434,66 @@ const createCerebellumRemoteServiceRanker = () =>
         description: String(service?.description ?? ''),
       });
     }
-    if (services.length < CEREBELLUM_REMOTE_SERVICE_SHORTLIST_MIN_POOL) {
-      return null;
-    }
     const startedAt = Date.now();
-    const ranking = await rankRemoteServicesWithCerebellum({
+    const outcome = await runCerebellumTurnDecisions({
       config: context.config,
       fetchImpl: context.fetchImpl,
-      currentUserText,
-      services,
+      decisions: {
+        currentUserText: input.currentUserText,
+        memories: input.memories,
+        knowledge: input.knowledge,
+        skills: skills.length >= CEREBELLUM_SKILL_SHORTLIST_MIN_POOL ? skills : [],
+        services: services.length >= CEREBELLUM_REMOTE_SERVICE_SHORTLIST_MIN_POOL ? services : [],
+        includeGate: true,
+      },
+      onPayload: (stats) => {
+        coworkLog('INFO', 'cerebellum:turnPayload', 'Cerebellum turn decision bundle payload', {
+          memoriesSent: stats.memoriesSent,
+          knowledgeSent: stats.knowledgeSent,
+          skillsSent: stats.skillsSent,
+          servicesSent: stats.servicesSent,
+          gateQuestions: stats.gateQuestions,
+          totalQuestions: stats.totalQuestions,
+          currentMessageChars: stats.currentMessageChars,
+          totalChars: stats.totalChars,
+        });
+      },
     });
-    coworkLog('INFO', 'remoteServices:cerebellumShortlist', 'directory ranked for turn', {
-      pool: services.length,
-      ranked: ranking?.length ?? 0,
+    coworkLog('INFO', 'cerebellum:turnDecisions', 'Cerebellum turn decision bundle finished', {
+      memoryPool: input.memories.length,
+      knowledgePool: input.knowledge.length,
+      skillPool: skills.length,
+      servicePool: services.length,
+      memoryUsed: outcome?.memoryScores != null,
+      knowledgeUsed: outcome?.knowledgeScores != null,
+      skillsUsed: outcome?.skillRanking != null,
+      servicesUsed: outcome?.serviceRanking != null,
+      gateUsed: outcome?.gateVerdicts != null,
       latencyMs: Date.now() - startedAt,
-      used: ranking !== null,
+      outcome: outcome === null ? 'degraded' : 'ok',
     });
-    if (!ranking) {
+    if (!outcome) {
       return null;
     }
+    const skillsById = new Map(skills.map((skill) => [skill.id, skill]));
     const servicesById = new Map(services.map((service) => [service.id, service]));
-    return ranking
-      .slice(0, CEREBELLUM_REMOTE_SERVICE_SHORTLIST_TOP_K)
-      .flatMap((entry) => {
-        const service = servicesById.get(entry.id);
-        return service ? [{ ...service, probability: entry.probability }] : [];
-      });
-  };
-
-/**
- * Cerebellum (小脑) volatile block gate (roadmap #3): one JEV request with
- * one Noul per gateable background block (experience / twin-impression /
- * knowledge-bases / remote-services) decides which blocks ride this turn's
- * user-message tail. Same lazy shape as the factories above — config
- * re-resolved per call (Settings edits apply next turn), fetch on the
- * Electron net stack (system proxy). null on any failure injects every
- * block exactly as before. Never logs turn text — only verdicts, latency,
- * and how many blocks the gate trimmed.
- */
-const createCerebellumVolatileBlockGate = () =>
-  async ({ currentUserText }: {
-    currentUserText: string;
-  }): Promise<Record<string, boolean> | null> => {
-    const context = await resolveCerebellumCallContext();
-    if (!context) {
-      return null;
-    }
-    const startedAt = Date.now();
-    const verdicts = await gateVolatileBlocksWithCerebellum({
-      config: context.config,
-      fetchImpl: context.fetchImpl,
-      currentUserText,
-    });
-    coworkLog('INFO', 'volatileBlocks:cerebellumGate', 'volatile block gate evaluated', {
-      used: verdicts !== null,
-      skipped: verdicts ? Object.entries(verdicts).filter(([, inject]) => !inject).map(([key]) => key) : [],
-      latencyMs: Date.now() - startedAt,
-    });
-    return verdicts;
+    return {
+      memoryScores: outcome.memoryScores,
+      knowledgeScores: outcome.knowledgeScores,
+      skillRanking: outcome.skillRanking
+        ?.slice(0, CEREBELLUM_SKILL_SHORTLIST_TOP_K)
+        .flatMap((entry) => {
+          const skill = skillsById.get(entry.id);
+          return skill ? [{ ...skill, probability: entry.probability }] : [];
+        }) ?? null,
+      serviceRanking: outcome.serviceRanking
+        ?.slice(0, CEREBELLUM_REMOTE_SERVICE_SHORTLIST_TOP_K)
+        .flatMap((entry) => {
+          const service = servicesById.get(entry.id);
+          return service ? [{ ...service, probability: entry.probability }] : [];
+        }) ?? null,
+      gateVerdicts: outcome.gateVerdicts,
+    };
   };
 
 /**
@@ -6348,26 +6312,12 @@ const getCoworkRunner = () => {
       experienceStore: getDreamStore(),
       knowledgeStore: getMetaIDKnowledgeStore(),
       episodeTimelineProvider: getMetaIDExperienceStore(),
-      // Cerebellum (小脑) memory re-rank: shared factory with the group-task
-      // daemon's memory block (see createCerebellumMemoryRanker).
-      cerebellumMemoryRanker: createCerebellumMemoryRanker(),
-      // Cerebellum (小脑) knowledge hot-layer rank (roadmap #4): scores a
-      // wider newest-N pool so the 8 injected points are the relevant ones,
-      // not merely the newest. Null keeps newest-8.
-      cerebellumKnowledgeRanker: createCerebellumKnowledgeRanker(),
+      // Cerebellum (小脑) per-turn decision bundle (2026-10-16 merge): ONE
+      // /v1/systemone request per turn covers the memory re-rank, knowledge
+      // hot rank, skill shortlist, remote-service shortlist, and the
+      // volatile block gate (see createCerebellumTurnDecisionCaller).
+      cerebellumTurnDecisions: createCerebellumTurnDecisionCaller(),
       cerebellumConversationRanker: createCerebellumConversationRanker(),
-      // Cerebellum (小脑) skill shortlist (roadmap #2): ranks the session's
-      // visible skill catalog per turn; top-3 ride the volatile tail next to
-      // the untouched catalog block (see createCerebellumSkillRanker).
-      cerebellumSkillRanker: createCerebellumSkillRanker(),
-      // Cerebellum (小脑) remote-service shortlist (roadmap #16): ranks the
-      // discovery directory per turn; top-3 ride the volatile tail next to
-      // the untouched directory block (see createCerebellumRemoteServiceRanker).
-      cerebellumRemoteServiceRanker: createCerebellumRemoteServiceRanker(),
-      // Cerebellum (小脑) volatile block gate (roadmap #3): per-turn Noul
-      // verdicts for the background tail blocks (see
-      // createCerebellumVolatileBlockGate).
-      cerebellumVolatileBlockGate: createCerebellumVolatileBlockGate(),
       // Cerebellum (小脑) intuition tool: exposes the fast decision model to
       // the brain itself as the `intuition` inline tool (cowork_ui sessions,
       // cerebellum configured). The mount probe is the sync config resolver
@@ -16668,6 +16618,10 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   // relay key as chat, resolved lazily (kv -> metaid-free provider ->
   // identity-signed bootstrap); the IPC lets the Settings connection test
   // reuse the cached key instead of minting a fresh bootstrap per click.
+  // Result-code recording rides the same sink as every other cowork log
+  // line: per-call codes plus a per-day aggregate (counts + latency
+  // P50/P90) land in cowork.log, and the last partial day flushes at quit.
+  setJevRelayCallStatsSink(coworkLog);
   initJevRelayService({ getStore });
   registerJevRelayIpcHandlers({ ipcMain });
 
@@ -18150,6 +18104,10 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
 
     isCleanupInProgress = true;
     isQuitting = true;
+
+    // Emit the JEV relay's last partial result-code day now (the rollover
+    // only fires on the next day's first call, which never comes at quit).
+    flushJevRelayCallStats();
 
     void runAppCleanup()
       .catch((error) => {

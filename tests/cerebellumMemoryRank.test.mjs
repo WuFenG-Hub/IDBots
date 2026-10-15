@@ -406,15 +406,41 @@ function createMemoryRankRunnerHarness({ memories, ranker }) {
     getSession() {
       return session;
     },
+    getSessionWithoutMessages() {
+      return {};
+    },
     getConversationSourceContextBySession() {
       return { sourceChannel: 'cowork_ui', externalConversationId: null };
     },
+    getMetabotIdForSession() {
+      return 7;
+    },
+    listCapabilityDrafts() {
+      return [];
+    },
+    listInjectableTechniques() {
+      return [];
+    },
   };
   const runner = new CoworkRunner(store, {
-    cerebellumMemoryRanker: ranker
+    // Merged turn-decision bundle (mock of the main.ts caller): memory
+    // ranking rides the single per-turn callback; pools below
+    // CEREBELLUM_MEMORY_MIN_POOL carry no memory questions, exactly like the
+    // real bundle's floor.
+    cerebellumTurnDecisions: ranker
       ? async (input) => {
-          rankerCalls.push(input);
-          return ranker(input);
+          let memoryScores = null;
+          if (input.memories.length >= CEREBELLUM_MEMORY_MIN_POOL) {
+            rankerCalls.push(input);
+            memoryScores = await ranker(input);
+          }
+          return {
+            memoryScores,
+            knowledgeScores: null,
+            skillRanking: null,
+            serviceRanking: null,
+            gateVerdicts: null,
+          };
         }
       : undefined,
   });
@@ -446,7 +472,7 @@ test('runner: cerebellum score map overrides the lexical memory order', async ()
       new Map(pool.map((memory) => [memory.id, memory.id === winner.id ? 0.99 : 0.05])),
   });
 
-  const xml = await runner.buildScopedMemoryPromptBlocksXml('session-1', RANK_QUERY, { enabled: true });
+  const xml = await runner.buildVolatileContextPrompt('session-1', RANK_QUERY, true, { includeMemoryPromptBlocks: true }, true);
 
   assert.equal(rankerCalls.length, 1, 'the ranker is consulted once per turn');
   assert.equal(rankerCalls[0].currentUserText, RANK_QUERY);
@@ -460,8 +486,8 @@ test('runner: a null ranker result falls back to the lexical order silently', as
   const withNullRanker = createMemoryRankRunnerHarness({ memories, ranker: () => null });
   const withoutRanker = createMemoryRankRunnerHarness({ memories, ranker: null });
 
-  const xmlNull = await withNullRanker.runner.buildScopedMemoryPromptBlocksXml('session-1', RANK_QUERY, { enabled: true });
-  const xmlNone = await withoutRanker.runner.buildScopedMemoryPromptBlocksXml('session-1', RANK_QUERY, { enabled: true });
+  const xmlNull = await withNullRanker.runner.buildVolatileContextPrompt('session-1', RANK_QUERY, true, { includeMemoryPromptBlocks: true }, true);
+  const xmlNone = await withoutRanker.runner.buildVolatileContextPrompt('session-1', RANK_QUERY, true, { includeMemoryPromptBlocks: true }, true);
 
   assert.equal(xmlNull, xmlNone, 'null scores must reproduce the lexical baseline exactly');
 });
@@ -474,8 +500,8 @@ test('runner: a throwing ranker falls back to the lexical order silently', async
   });
   const baseline = createMemoryRankRunnerHarness({ memories, ranker: null });
 
-  const xml = await runner.buildScopedMemoryPromptBlocksXml('session-1', RANK_QUERY, { enabled: true });
-  const xmlBaseline = await baseline.runner.buildScopedMemoryPromptBlocksXml('session-1', RANK_QUERY, { enabled: true });
+  const xml = await runner.buildVolatileContextPrompt('session-1', RANK_QUERY, true, { includeMemoryPromptBlocks: true }, true);
+  const xmlBaseline = await baseline.runner.buildVolatileContextPrompt('session-1', RANK_QUERY, true, { includeMemoryPromptBlocks: true }, true);
 
   assert.equal(rankerCalls.length, 1);
   assert.equal(xml, xmlBaseline, 'a throwing callback must never break the turn');
@@ -488,7 +514,7 @@ test('runner: pools below CEREBELLUM_MEMORY_MIN_POOL skip the ranker entirely', 
     ranker: () => new Map([['mem-0', 0.99]]),
   });
 
-  const xml = await runner.buildScopedMemoryPromptBlocksXml('session-1', RANK_QUERY, { enabled: true });
+  const xml = await runner.buildVolatileContextPrompt('session-1', RANK_QUERY, true, { includeMemoryPromptBlocks: true }, true);
 
   assert.equal(rankerCalls.length, 0, 'small pools stay on the lexical ranker (no cerebellum round-trip)');
   assert.match(xml, /<ownerMemories>/);
@@ -501,7 +527,7 @@ test('runner: a blank user text skips the ranker entirely', async () => {
     ranker: () => new Map([['mem-0', 0.99]]),
   });
 
-  await runner.buildScopedMemoryPromptBlocksXml('session-1', '   ', { enabled: true });
+  await runner.buildVolatileContextPrompt('session-1', '   ', true, { includeMemoryPromptBlocks: true }, true);
 
   assert.equal(rankerCalls.length, 0);
 });

@@ -71,14 +71,14 @@ export interface CerebellumRemoteServiceRankEntry {
 /**
  * Choice instructions (ONE tunable place). English per TypeSafe's
  * English-primary guidance; the user's original (often Chinese) message
- * stays in `state.user_message`. Options live in the question's `criteria`
- * map (JEV choice shape: option name -> description), keyed by service pin
- * id. Kept wording-close to CEREBELLUM_SKILL_RANK_INSTRUCTIONS so the two
- * shortlists tune together.
+ * stays in `state.current_message` (the shared turn-bundle state field).
+ * Options live in the question's `criteria` map (JEV choice shape: option
+ * name -> description), keyed by service pin id. Kept wording-close to
+ * CEREBELLUM_SKILL_RANK_INSTRUCTIONS so the two shortlists tune together.
  */
 export const CEREBELLUM_REMOTE_SERVICE_RANK_INSTRUCTIONS =
   'Which ONE on-chain service listed in `criteria` is the best match for fulfilling the user\'s ' +
-  'request at `user_message`? Judge by the capability each option\'s description declares — not ' +
+  'request at `current_message`? Judge by the capability each option\'s description declares — not ' +
   'by shared keywords or name similarity. The user may write in any language. If no service ' +
   'truly fits, still pick the closest one: only the ranking order is used downstream.';
 
@@ -92,7 +92,7 @@ export interface CerebellumRemoteServiceChoiceQuestion {
 
 export interface CerebellumRemoteServiceShortlistRequest {
   state: {
-    user_message: string;
+    current_message: string;
   };
   model: string;
   questions: Record<string, CerebellumRemoteServiceChoiceQuestion>;
@@ -118,28 +118,39 @@ export function buildRemoteServiceOptionLabel(service: CerebellumRemoteServiceCa
   return capped ? `${service.name}: ${capped}` : service.name;
 }
 
-export function buildRemoteServiceShortlistRequest(input: {
-  currentUserText: string;
-  services: CerebellumRemoteServiceCandidate[];
-  model: string;
-}): CerebellumRemoteServiceShortlistRequest {
-  const services = input.services.slice(0, CEREBELLUM_REMOTE_SERVICE_MAX_OPTIONS);
+/**
+ * The Choice question alone, reusable by the per-turn decision bundle: the
+ * bundle merges this question with the other turn-scoped decisions (memory
+ * rank, skill rank, block gate, knowledge rank) into ONE /v1/systemone
+ * request keyed by disjoint question ids.
+ */
+export function buildRemoteServiceChoiceQuestions(
+  services: readonly CerebellumRemoteServiceCandidate[],
+): Record<string, CerebellumRemoteServiceChoiceQuestion> {
   const criteria: Record<string, string> = {};
   for (const service of services) {
     criteria[String(service.id)] = buildRemoteServiceOptionLabel(service);
   }
   return {
+    [CEREBELLUM_REMOTE_SERVICE_RANK_QUESTION_ID]: {
+      type: 'choice',
+      instructions: CEREBELLUM_REMOTE_SERVICE_RANK_INSTRUCTIONS,
+      criteria,
+    },
+  };
+}
+
+export function buildRemoteServiceShortlistRequest(input: {
+  currentUserText: string;
+  services: CerebellumRemoteServiceCandidate[];
+  model: string;
+}): CerebellumRemoteServiceShortlistRequest {
+  return {
     state: {
-      user_message: String(input.currentUserText ?? '').replace(/\s+/g, ' ').trim(),
+      current_message: String(input.currentUserText ?? '').replace(/\s+/g, ' ').trim(),
     },
     model: input.model,
-    questions: {
-      [CEREBELLUM_REMOTE_SERVICE_RANK_QUESTION_ID]: {
-        type: 'choice',
-        instructions: CEREBELLUM_REMOTE_SERVICE_RANK_INSTRUCTIONS,
-        criteria,
-      },
-    },
+    questions: buildRemoteServiceChoiceQuestions(input.services.slice(0, CEREBELLUM_REMOTE_SERVICE_MAX_OPTIONS)),
   };
 }
 
