@@ -1849,13 +1849,16 @@ export class DreamStore {
 
   // ── RSI P0: prompt-layer snapshots (retention gate) ─────────────────────────
 
-  /** Ids of the currently-active procedures promoted from capability drafts. */
+  /** Ids of the currently-active, hot-eligible procedures promoted from
+   * capability drafts (RRSI P2: a demoted/rollback probation procedure left
+   * the hot set but stays active for recall). */
   listActivePromotedProcedureIds(metabotId: number): string[] {
     return this.getAll<{ promoted_procedure_id: string }>(`
       SELECT d.promoted_procedure_id
       FROM capability_drafts d
       JOIN metaid_knowledge_procedures p ON p.id = d.promoted_procedure_id
       WHERE d.metabot_id = ? AND d.promoted_procedure_id IS NOT NULL AND p.status = 'active'
+        AND COALESCE(p.hot_eligible, 1) = 1
     `, [metabotId]).map((row) => row.promoted_procedure_id);
   }
 

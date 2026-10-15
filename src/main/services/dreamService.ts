@@ -1688,6 +1688,20 @@ export class DreamService {
               `[DreamService] Falsified ledger write failed for metabot ${metabot.id} draft #${draft.id}: ${error instanceof Error ? error.message : String(error)}`,
             );
           }
+          // RRSI P2: an agreed rejection of a probation ticket flips its
+          // procedure out of the hot layer — never archives an agent record.
+          if (draft.sourceProcedureId && this.deps.metaidKnowledgeStore) {
+            try {
+              this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
+                eligible: false,
+                reason: 'gate_rejected',
+              });
+            } catch (error) {
+              console.warn(
+                `[DreamService] Gate-reject flip failed for procedure ${draft.sourceProcedureId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
         }
       }
       if (validated > 0 || rejected > 0 || panels.disagreed > 0 || panels.incomplete > 0) {
@@ -1891,13 +1905,22 @@ export class DreamService {
           demoted += 1;
           // Loop closure: a demoted technique must not survive as hardened
           // procedure memory either. The procedure's title is the draft's
-          // (the promotion pass writes it that way).
+          // (the promotion pass writes it that way). RRSI P2: a probation
+          // procedure (agent-authored) only leaves the hot layer with a
+          // 'demoted' note — it is never archived.
           if (draft.promotedProcedureId && this.deps.metaidKnowledgeStore) {
             try {
-              this.deps.metaidKnowledgeStore.archiveProcedureByTitle(metabot.id, draft.title);
+              if (draft.sourceProcedureId) {
+                this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
+                  eligible: false,
+                  reason: 'demoted',
+                });
+              } else {
+                this.deps.metaidKnowledgeStore.archiveProcedureByTitle(metabot.id, draft.title);
+              }
             } catch (error) {
               console.warn(
-                `[DreamService] Archiving promoted procedure for demoted draft #${draft.id} failed: ${error instanceof Error ? error.message : String(error)}`,
+                `[DreamService] Demoting the promoted procedure for draft #${draft.id} failed: ${error instanceof Error ? error.message : String(error)}`,
               );
             }
           }
@@ -1988,6 +2011,32 @@ export class DreamService {
       let promoted = 0;
       for (const draft of candidates.slice(0, budget)) {
         try {
+          // RRSI P2: promoting a probation ticket only flips its procedure
+          // hot — the agent-authored body is never rewritten, and a missing
+          // or archived source rejects the ticket with a note (no ledger row:
+          // nothing was falsified).
+          if (draft.sourceProcedureId) {
+            const flipped = this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
+              eligible: true,
+              reason: null,
+            });
+            if (!flipped) {
+              this.deps.coworkStore.updateCapabilityDraftValidation({
+                id: draft.id,
+                metabotId: metabot.id,
+                status: 'rejected',
+                validationNotes: 'source procedure no longer active',
+              });
+              continue;
+            }
+            const marked = this.deps.coworkStore.markCapabilityDraftPromoted({
+              id: draft.id,
+              metabotId: metabot.id,
+              procedureId: draft.sourceProcedureId,
+            });
+            if (marked) promoted += 1;
+            continue;
+          }
           // Design §4.4: a reconciled draft carries its applicability
           // conditions into the procedure's trigger and its residual
           // uncertainty into the pitfalls — the conditions under which the
@@ -2180,17 +2229,19 @@ export class DreamService {
    */
   private buildReconciliationConflictCandidates(
     metabotId: number,
-    draft: { id: number; title: string },
+    draft: { id: number; title: string; sourceProcedureId?: string | null },
   ): ReconciliationConflictCandidate[] {
     const candidates: ReconciliationConflictCandidate[] = [];
     if (this.deps.metaidKnowledgeStore) {
       try {
+        // RRSI P2: a probation draft never conflicts with (or merges into)
+        // its own source procedure — same title by construction.
         const procedures = this.deps.metaidKnowledgeStore.listProcedures({
           metabotId,
           status: 'active',
           query: draft.title,
           limit: RECONCILE_MAX_CONFLICT_CANDIDATES,
-        });
+        }).filter((procedure) => procedure.id !== draft.sourceProcedureId);
         for (const procedure of procedures) {
           candidates.push({
             ref: `procedure:${procedure.id}`,
@@ -2548,9 +2599,16 @@ export class DreamService {
       );
       // Procedures promoted by the rolled-back night: active now but absent
       // from the snapshot's promoted set. Defensive union: procedures whose
-      // source draft was created on the rolled-back date.
+      // source draft was created on the rolled-back date. RRSI P2: an
+      // agent-authored procedure only leaves the hot layer with a 'rollback'
+      // note — never archived; dream-origin procedures keep the archive.
       const archivedProcedures = new Set<string>();
       if (this.deps.metaidKnowledgeStore) {
+        const agentSourced = new Set(
+          this.deps.coworkStore.listCapabilityDrafts(metabot.id)
+            .filter((draft) => draft.sourceProcedureId)
+            .map((draft) => draft.sourceProcedureId as string),
+        );
         const snapshotIds = new Set(snapshot.payload.promotedProcedureIds);
         const promotedSince = this.deps.dreamStore
           .listActivePromotedProcedureIds(metabot.id)
@@ -2561,6 +2619,14 @@ export class DreamService {
           .map((draft) => draft.promotedProcedureId as string);
         for (const procedureId of [...new Set([...promotedSince, ...draftPromotedIds])]) {
           try {
+            if (agentSourced.has(procedureId)) {
+              // It left the active hot set, so it counts in the same log and
+              // rollback note as an archive — but the record survives.
+              if (this.deps.metaidKnowledgeStore.setProcedureHotEligibility(procedureId, { eligible: false, reason: 'rollback' })) {
+                archivedProcedures.add(procedureId);
+              }
+              continue;
+            }
             const entry = this.deps.metaidKnowledgeStore.getProcedure(procedureId);
             if (entry && entry.status === 'active'
               && this.deps.metaidKnowledgeStore.archiveProcedureByTitle(metabot.id, entry.title)) {
@@ -2587,6 +2653,21 @@ export class DreamService {
           validationNotes: `prompt layer ${snapshot.dreamDate} rolled back (negative-feedback spike) — treat that day's lessons with suspicion`,
         })) {
           rejectedDrafts += 1;
+        }
+        // RRSI P2: a rejected probation ticket also pulls its procedure out
+        // of the hot layer so the recall status reflects the bad day; a later
+        // agent re-save reopens probation.
+        if (draft.sourceProcedureId && this.deps.metaidKnowledgeStore) {
+          try {
+            this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
+              eligible: false,
+              reason: 'rollback',
+            });
+          } catch (error) {
+            console.warn(
+              `[DreamService] Rollback eligibility flip failed for procedure ${draft.sourceProcedureId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
       }
       const marked = this.deps.dreamStore.markPromptLayerSnapshotRolledBack(

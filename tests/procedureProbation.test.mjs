@@ -4,6 +4,14 @@ import Module from 'node:module';
 import { createRequire } from 'node:module';
 
 import { getSqlJs, createCoworkStore, createSqliteStore } from './memoryTestUtils.mjs';
+import {
+  MARKERS,
+  createDreamHarness,
+  dayStartMs,
+  dreamJson,
+  seedSession,
+  validationVerdicts,
+} from './fixtures/rrsiDreamHarness.mjs';
 
 const require = createRequire(import.meta.url);
 const {
@@ -387,5 +395,234 @@ test('runner: procedure_save opens one probation draft and recall shows the stat
     assert.ok(recalled.text.includes('status: not yet validated by a dream'), recalled.text);
   } finally {
     cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Gate flows for probation drafts (RRSI P2 Task 5)
+// ---------------------------------------------------------------------------
+
+const D1 = '2026-08-02';
+const D2 = '2026-08-03';
+const D3 = '2026-08-04';
+const ROLLBACK_DAY0 = '2026-07-29';
+const ROLLBACK_DAY1 = '2026-07-30';
+const ROLLBACK_DAY2 = '2026-07-31';
+
+const reconciliationKeep = (user) => {
+  const ids = [...user.matchAll(/草案 #(\d+)/g)].map((match) => Number(match[1]));
+  return {
+    verdicts: ids.map((id) => ({ id, action: 'keep', conditions: '交付前', uncertainty: '', conflicts_with: [], note: 'n' })),
+  };
+};
+
+const seedProbation = (h, title, dreamDate, overrides = {}) => {
+  const saved = h.knowledgeStore.upsertProcedure({
+    metabotId: 5,
+    title,
+    triggerText: `当用户要求${title}`,
+    steps: ['先自检', '再交付'],
+    sourcePinIds: [],
+    origin: 'agent',
+    ...overrides,
+  });
+  assert.equal(saved.needsGate, true);
+  const ticket = h.coworkStore.ensureProbationDraftForProcedure({
+    metabotId: 5,
+    procedureId: saved.entry.id,
+    title,
+    description: `触发:当用户要求${title}\n步骤:先自检 → 再交付`,
+    dreamDate,
+  });
+  return { procedureId: saved.entry.id, draftId: ticket.draftId };
+};
+
+const quietNight = (h) => {
+  h.router.setFallback(() => dreamJson({ daily_summary: '普通的一天。' }));
+};
+
+test('flow: probation to hot — promotion flips eligibility, never rewrites the body', async () => {
+  const h = await createDreamHarness();
+  try {
+    const seeded = seedProbation(h, '发布前查重流程', D1);
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '上次先查重很棒' },
+      { type: 'assistant', content: '谢谢' },
+    ]);
+    quietNight(h);
+    h.router.on(MARKERS.validation, ({ user }) => validationVerdicts(user, () => ({
+      verdict: 'validated', score: 0.9, rationale: `${D2} 日记显示照做后获赞`,
+    })));
+    h.router.on(MARKERS.reconciliation, ({ user }) => reconciliationKeep(user));
+    await h.runNight(D2);
+    const draftAfterGate = h.coworkStore.listCapabilityDrafts(5).find((draft) => draft.id === seeded.draftId);
+    assert.equal(draftAfterGate.status, 'validated');
+    h.db.run('UPDATE capability_drafts SET validated_at = ? WHERE id = ?', [dayStartMs(D2), seeded.draftId]);
+
+    seedSession(h.coworkStore, h.db, D3, [
+      { type: 'user', content: '继续' },
+      { type: 'assistant', content: '好' },
+    ]);
+    await h.runNight(D3);
+
+    const procedure = h.knowledgeStore.getProcedure(seeded.procedureId);
+    assert.equal(procedure.status, 'active');
+    assert.equal(procedure.hotEligible, true);
+    assert.equal(procedure.hotReason, null);
+    assert.deepEqual(procedure.steps, ['先自检', '再交付'], 'the agent body is never rewritten');
+    assert.equal(procedure.version, 1, 'promotion is not a content revision');
+    const draft = h.coworkStore.listCapabilityDrafts(5).find((row) => row.id === seeded.draftId);
+    assert.equal(draft.promotedProcedureId, seeded.procedureId);
+    assert.ok(draft.promotedAt != null);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: agreed rejection flips the procedure to gate_rejected, one ledger row', async () => {
+  const h = await createDreamHarness();
+  try {
+    const seeded = seedProbation(h, '未经验证的流程', D1);
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '照做后翻车了' },
+      { type: 'assistant', content: '抱歉' },
+    ]);
+    quietNight(h);
+    h.router.on(MARKERS.validation, ({ user }) => validationVerdicts(user, () => ({
+      verdict: 'rejected', score: 0.3, rationale: `${D2} 日记显示照做后被差评`,
+    })));
+    await h.runNight(D2);
+
+    const procedure = h.knowledgeStore.getProcedure(seeded.procedureId);
+    assert.equal(procedure.status, 'active', 'an agent record is never archived by the gate');
+    assert.equal(procedure.hotEligible, false);
+    assert.equal(procedure.hotReason, 'gate_rejected');
+    assert.equal(h.coworkStore.listFalsifiedHypotheses(5).length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: rollback keeps the agent record, archives the dream-origin procedure', async () => {
+  const h = await createDreamHarness();
+  try {
+    // A promotable probation ticket plus a promotable plain dream draft,
+    // both validated before night 1 (promptLayerRollback setup).
+    const seeded = seedProbation(h, '回滚夜之前学的规程', ROLLBACK_DAY0);
+    h.coworkStore.updateCapabilityDraftValidation({
+      id: seeded.draftId, metabotId: 5, status: 'validated', validationScore: 0.95,
+    });
+    h.db.run('UPDATE capability_drafts SET validated_at = ? WHERE id = ?', [dayStartMs(ROLLBACK_DAY0), seeded.draftId]);
+    h.coworkStore.insertCapabilityDrafts(5, ROLLBACK_DAY0, [
+      { title: '普通晋升技巧', description: 'd', capabilityType: 'workflow' },
+    ]);
+    const plainDraft = h.coworkStore.listCapabilityDrafts(5).find((draft) => draft.sourceProcedureId == null);
+    h.coworkStore.updateCapabilityDraftValidation({
+      id: plainDraft.id, metabotId: 5, status: 'validated', validationScore: 0.95,
+    });
+    h.db.run('UPDATE capability_drafts SET validated_at = ? WHERE id = ?', [dayStartMs(ROLLBACK_DAY0), plainDraft.id]);
+
+    seedSession(h.coworkStore, h.db, ROLLBACK_DAY1, [
+      { type: 'user', content: '视频做好了吗' },
+      { type: 'assistant', content: '做好了' },
+    ]);
+    quietNight(h);
+    await h.runNight(ROLLBACK_DAY1);
+    const agentProc = h.knowledgeStore.getProcedure(seeded.procedureId);
+    assert.equal(agentProc.hotEligible, true, 'night 1 promoted the probation procedure');
+    const dreamProcTitle = '普通晋升技巧';
+    assert.ok(h.knowledgeStore.listProcedures({ metabotId: 5, status: 'active' }).some((entry) => entry.title === dreamProcTitle));
+
+    // Day 2 carries a negative-feedback spike (two thumbs-down + one re-ask).
+    const session = h.coworkStore.createSession('改视频的回合', '/tmp/b', '', 'local', [], 5);
+    const base = dayStartMs(ROLLBACK_DAY2);
+    const insertMessage = (id, type, content, createdAt, sequence) => h.db.run(
+      'INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, session.id, type, content, '{}', createdAt, sequence],
+    );
+    insertMessage('rb-m1', 'user', '请换成轻快的风格', base + 1000, 1);
+    insertMessage('rb-m2', 'assistant', '已换成古典钢琴', base + 2000, 2);
+    insertMessage('rb-m3', 'user', '请换成轻快一点的风格', base + 320_000, 3);
+    insertMessage('rb-m4', 'assistant', '这次是爵士鼓点', base + 400_000, 4);
+    h.db.run(
+      'INSERT INTO message_feedback (message_id, session_id, rating, comment, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ['rb-m2', session.id, 'down', '不是我要的风格', base + 500_000, base + 500_000],
+    );
+    h.db.run(
+      'INSERT INTO message_feedback (message_id, session_id, rating, comment, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ['rb-m4', session.id, 'down', null, base + 600_000, base + 600_000],
+    );
+    await h.runNight(ROLLBACK_DAY2);
+
+    const agentAfter = h.knowledgeStore.getProcedure(seeded.procedureId);
+    assert.equal(agentAfter.status, 'active', 'rollback never archives an agent record');
+    assert.equal(agentAfter.hotEligible, false);
+    assert.equal(agentAfter.hotReason, 'rollback');
+    const dreamAfter = h.knowledgeStore.listProcedures({ metabotId: 5, status: 'all' })
+      .find((entry) => entry.title === dreamProcTitle);
+    assert.equal(dreamAfter.status, 'archived', 'dream-origin procedures keep the archive behavior');
+    assert.equal(h.coworkStore.listFalsifiedHypotheses(5).length, 0, 'rollback rejections never write the ledger');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: missing source procedure rejects the ticket without a ledger row', async () => {
+  const h = await createDreamHarness();
+  try {
+    const seeded = seedProbation(h, '来源已归档的规程', D1);
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '继续' },
+      { type: 'assistant', content: '好' },
+    ]);
+    quietNight(h);
+    h.router.on(MARKERS.validation, ({ user }) => validationVerdicts(user, () => ({
+      verdict: 'validated', score: 0.9, rationale: `${D2} 日记显示照做后获赞`,
+    })));
+    h.router.on(MARKERS.reconciliation, ({ user }) => reconciliationKeep(user));
+    await h.runNight(D2);
+    h.db.run('UPDATE capability_drafts SET validated_at = ? WHERE id = ?', [dayStartMs(D2), seeded.draftId]);
+    assert.ok(h.knowledgeStore.archiveProcedureByTitle(5, '来源已归档的规程'));
+
+    seedSession(h.coworkStore, h.db, D3, [
+      { type: 'user', content: '继续' },
+      { type: 'assistant', content: '好' },
+    ]);
+    await h.runNight(D3);
+
+    const draft = h.coworkStore.listCapabilityDrafts(5).find((row) => row.id === seeded.draftId);
+    assert.equal(draft.status, 'rejected');
+    assert.equal(draft.validationNotes, 'source procedure no longer active');
+    assert.equal(h.coworkStore.listFalsifiedHypotheses(5).length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('flow: the reconciliation prompt never offers the ticket\'s own procedure', async () => {
+  const h = await createDreamHarness();
+  try {
+    const seeded = seedProbation(h, '先验证再交付流程', D1);
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '上次那样交付很棒' },
+      { type: 'assistant', content: '谢谢' },
+    ]);
+    quietNight(h);
+    h.router.on(MARKERS.validation, ({ user }) => validationVerdicts(user, () => ({
+      verdict: 'validated', score: 0.9, rationale: `${D2} 日记显示照做后获赞`,
+    })));
+    let reconciliationPrompt = null;
+    h.router.on(MARKERS.reconciliation, ({ user }) => {
+      reconciliationPrompt = user;
+      return reconciliationKeep(user);
+    });
+    await h.runNight(D2);
+    assert.ok(reconciliationPrompt, 'the reconciliation pass ran');
+    assert.ok(
+      !reconciliationPrompt.includes(`procedure:${seeded.procedureId}`),
+      'a probation draft never conflicts with (or merges into) its own procedure',
+    );
+  } finally {
+    h.cleanup();
   }
 });
