@@ -13824,7 +13824,7 @@ if (!gotTheLock) {
   });
 
   ipcMain.handle('longtermTask:update', async (_event, input: {
-    taskId: string; title?: string; goal?: string; acceptanceDelegate?: boolean; ownerMetabotId?: number | null;
+    taskId: string; title?: string; goal?: string; acceptanceDelegate?: boolean;
   }) => {
     try {
       const result = getLongTermTaskStore().updateTask(input, 'owner');
