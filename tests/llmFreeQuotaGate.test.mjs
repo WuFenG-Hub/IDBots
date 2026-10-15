@@ -57,34 +57,56 @@ test('getFreeProviderModelLegacyLimitRewrites flags only machine-pinned legacy s
     getFreeProviderModelLegacyLimitRewrites({
       id: 'deepseek-chat', contextWindow: 1_000_000, maxOutputTokens: 32_768,
     }),
-    { contextWindow: false, maxOutputTokens: true },
+    { contextWindow: false, maxOutputTokens: true, supportsImage: false },
   );
   assert.deepEqual(
     getFreeProviderModelLegacyLimitRewrites({
       id: 'deepseek-chat', contextWindow: 64_000, maxOutputTokens: 4_096,
     }),
-    { contextWindow: true, maxOutputTokens: true },
+    { contextWindow: true, maxOutputTokens: true, supportsImage: false },
   );
   // User-tuned values (manual 100K window edit, custom output ceiling) stay.
   assert.deepEqual(
     getFreeProviderModelLegacyLimitRewrites({
       id: 'deepseek-chat', contextWindow: 100_000, maxOutputTokens: 100_000,
     }),
-    { contextWindow: false, maxOutputTokens: false },
+    { contextWindow: false, maxOutputTokens: false, supportsImage: false },
   );
   // Unknown relay ids have no legacy table.
   assert.deepEqual(
     getFreeProviderModelLegacyLimitRewrites({ id: 'future-relay-model', contextWindow: 1_000_000 }),
-    { contextWindow: false, maxOutputTokens: false },
+    { contextWindow: false, maxOutputTokens: false, supportsImage: false },
   );
   // Degenerate rows never throw.
   assert.deepEqual(getFreeProviderModelLegacyLimitRewrites(undefined), {
     contextWindow: false,
     maxOutputTokens: false,
+    supportsImage: false,
   });
   assert.deepEqual(
     getFreeProviderModelLegacyLimitRewrites({ id: 'deepseek-chat' }),
-    { contextWindow: false, maxOutputTokens: false },
+    { contextWindow: false, maxOutputTokens: false, supportsImage: false },
+  );
+});
+
+test('legacy rewrites flag the round-1 supportsImage:false era on deepseek-4.1-flash only', () => {
+  // Round-1 catalog machinery pinned supportsImage:false on every
+  // deepseek-4.1-flash row it wrote (the id did not exist before, and every
+  // writer used the then-canonical false); the 2026-10-16 round-2 server
+  // confirmation flipped the canonical to true, so explicit-false rows are
+  // the machine era to rewrite. A true row (round-2+ or a user toggle) and
+  // the legacy deepseek-chat alias (canonical stays false) are not flagged.
+  assert.deepEqual(
+    getFreeProviderModelLegacyLimitRewrites({ id: 'deepseek-4.1-flash', supportsImage: false }),
+    { contextWindow: false, maxOutputTokens: false, supportsImage: true },
+  );
+  assert.deepEqual(
+    getFreeProviderModelLegacyLimitRewrites({ id: 'deepseek-4.1-flash', supportsImage: true }),
+    { contextWindow: false, maxOutputTokens: false, supportsImage: false },
+  );
+  assert.deepEqual(
+    getFreeProviderModelLegacyLimitRewrites({ id: 'deepseek-chat', supportsImage: false }),
+    { contextWindow: false, maxOutputTokens: false, supportsImage: false },
   );
 });
 
@@ -93,15 +115,23 @@ test('getFreeProviderModelCanonical returns null for unknown relay ids', () => {
   assert.equal(getFreeProviderModelCanonical(undefined), null);
 });
 
-test('getFreeProviderModelCanonical gives deepseek-4.1-flash the same profile as the legacy alias', () => {
-  // The 2026-10-16 relay catalog rename kept the wire family, so the new
-  // flagship id inherits the exact deepseek-chat client profile.
+test('getFreeProviderModelCanonical gives deepseek-4.1-flash the flagship profile with vision on', () => {
+  // The 2026-10-16 relay catalog rename kept the wire family (same limits and
+  // effort-max thinking as the legacy alias); the round-2 conf-only pass
+  // (2026-10-16) confirmed the upstream V4.1 Flash reads image_url parts
+  // through the relay, so the catalog id declares vision while the hidden
+  // deepseek-chat alias entry keeps false.
   const canonical = getFreeProviderModelCanonical('deepseek-4.1-flash');
   assert.ok(canonical);
   assert.equal(canonical.contextWindow, 1_000_000);
   assert.equal(canonical.maxOutputTokens, 100_000);
-  assert.equal(canonical.supportsImage, false);
+  assert.equal(canonical.supportsImage, true);
   assert.deepEqual(canonical.options, { reasoningEffort: 'max', thinking: { type: 'enabled' } });
+  // No mirror entries for the other relay models: their parameters come from
+  // the (now accurate) server directory, not a second client-side table.
+  for (const id of ['glm-5.3-flash', 'longcat-2.5-preview-free', 'step-5-preview-free', 'cat-jam-free', 'glyph-cluster-free', 'laguna-s-2.1-free', 'ling-3.0-flash-sante-free']) {
+    assert.equal(getFreeProviderModelCanonical(id), null, id);
+  }
 });
 
 test('isFreeProviderConfigured requires credentials and models', () => {
@@ -162,16 +192,17 @@ test('onboarding default: provisioned free provider wins, else legacy defaults',
 });
 
 // The 2026-10-16 production relay directory every quota/bootstrap response
-// now reports (assist-base-service, live 2026-10-16).
+// now reports (assist-base-service, live 2026-10-16, round-2 recalibrated
+// context windows; the two flagship models accept vision input).
 const RELAY_CATALOG_2026_10_16 = [
   { id: 'deepseek-4.1-flash', contextWindow: 1_000_000, maxOutputTokens: 100_000 },
   { id: 'glm-5.3-flash', contextWindow: 1_048_576, maxOutputTokens: 128_000 },
-  { id: 'longcat-2.5-preview-free', contextWindow: 262_144, maxOutputTokens: 32_768 },
-  { id: 'step-5-preview-free', contextWindow: 262_144, maxOutputTokens: 32_768 },
-  { id: 'cat-jam-free', contextWindow: 131_072, maxOutputTokens: 16_384 },
-  { id: 'glyph-cluster-free', contextWindow: 131_072, maxOutputTokens: 16_384 },
-  { id: 'laguna-s-2.1-free', contextWindow: 131_072, maxOutputTokens: 16_384 },
-  { id: 'ling-3.0-flash-sante-free', contextWindow: 131_072, maxOutputTokens: 16_384 },
+  { id: 'longcat-2.5-preview-free', contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+  { id: 'step-5-preview-free', contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+  { id: 'cat-jam-free', contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+  { id: 'glyph-cluster-free', contextWindow: 256_000, maxOutputTokens: 32_768 },
+  { id: 'laguna-s-2.1-free', contextWindow: 256_000, maxOutputTokens: 32_768 },
+  { id: 'ling-3.0-flash-sante-free', contextWindow: 262_144, maxOutputTokens: 16_384 },
 ];
 
 const storedLegacyProvider = () => ({
@@ -199,22 +230,51 @@ test('catalog sync: quota directory change refreshes provider.models', () => {
   assert.ok(next, 'the frozen single-model catalog must be rewritten');
   // The relay list IS the directory: legacy alias dropped, new ids in relay order.
   assert.deepEqual(next.map((model) => model.id), RELAY_CATALOG_2026_10_16.map((model) => model.id));
-  // Known id gets the canonical client profile over the relay-reported limits.
+  // Known id gets the canonical client profile over the relay-reported limits,
+  // vision included (api.ts gates image_url content arrays on this flag).
   const flagship = next[0];
   assert.equal(flagship.name, 'deepseek-flash');
   assert.equal(flagship.contextWindow, 1_000_000);
   assert.equal(flagship.maxOutputTokens, 100_000);
-  assert.equal(flagship.supportsImage, false);
+  assert.equal(flagship.supportsImage, true);
   assert.deepEqual(flagship.options, { reasoningEffort: 'max', thinking: { type: 'enabled' } });
-  // Unknown ids keep the relay-reported values bare (id is the display name).
+  // Unknown ids keep the relay-reported values bare (id is the display name,
+  // no client-side pin to drift from the server directory).
   const glm = next[1];
   assert.equal(glm.name, 'glm-5.3-flash');
   assert.equal(glm.contextWindow, 1_048_576);
   assert.equal(glm.maxOutputTokens, 128_000);
   assert.equal('options' in glm, false);
+  assert.equal('supportsImage' in glm, false);
   // The stored provider object itself is never mutated.
   assert.equal(provider.models.length, 1);
   assert.equal(provider.models[0].id, 'deepseek-chat');
+});
+
+test('catalog sync: conf-only recalibration refreshes stored windows without id changes', () => {
+  // The round-2 server pass corrected contextWindow values while keeping the
+  // id set identical. An install that synced round-1 values (e.g. the stale
+  // 131072-era windows) must pick the recalibrated numbers up on the next
+  // quota fetch — drift in relay-reported limits alone is a rewrite.
+  const syncedRound1 = RELAY_CATALOG_2026_10_16.map((entry) => ({
+    id: entry.id,
+    name: entry.id,
+    ...entry,
+  }));
+  syncedRound1[4].contextWindow = 131_072; // cat-jam-free stale round-1 value
+  syncedRound1[5].contextWindow = 131_072; // glyph-cluster-free stale round-1 value
+  const provider = { ...storedLegacyProvider(), models: syncedRound1 };
+
+  const next = planFreeProviderCatalogSync(provider, RELAY_CATALOG_2026_10_16);
+  assert.ok(next, 'value drift alone must trigger the rewrite');
+  assert.deepEqual(next.map((model) => model.id), RELAY_CATALOG_2026_10_16.map((model) => model.id));
+  assert.equal(next[4].contextWindow, 1_000_000, 'cat-jam-free adopts the recalibrated window');
+  assert.equal(next[5].contextWindow, 256_000, 'glyph-cluster-free adopts the recalibrated window');
+  // Options and other row fields survive the limit refresh.
+  assert.equal(next[4].name, 'cat-jam-free');
+
+  // Once stored values match the directory, the sync is a no-op again.
+  assert.equal(planFreeProviderCatalogSync({ ...storedLegacyProvider(), models: next }, RELAY_CATALOG_2026_10_16), null);
 });
 
 test('catalog sync: matching directory is a no-op, unusable inputs never empty-replace', () => {
@@ -242,18 +302,22 @@ test('catalog sync: matching directory is a no-op, unusable inputs never empty-r
   assert.deepEqual(next[0].options, { reasoningEffort: 'max', thinking: { type: 'enabled' } });
 });
 
-test('catalog sync: surviving ids keep user-tuned rows, removals drop silently', () => {
+test('catalog sync: relay-reported limits win on surviving ids, options and vision flag survive', () => {
   const provider = storedLegacyProvider();
-  // A user downgraded the stored row's thinking: it must survive a sync that
-  // only adds another relay id (mirror of mergeSyncedProviderModels semantics).
+  // A user downgraded the stored row's thinking: options survive a sync, but
+  // the relay directory owns the numeric limits (mergeSyncedProviderModels
+  // convention — endpoint values win over stored rows).
   provider.models[0].options = { reasoningEffort: 'low', thinking: { type: 'enabled' } };
+  provider.models[0].supportsImage = true; // user-enabled vision stays on
   const next = planFreeProviderCatalogSync(provider, [
     { id: 'deepseek-chat', contextWindow: 999, maxOutputTokens: 999 },
     { id: 'cat-jam-free' },
   ]);
   assert.deepEqual(next.map((model) => model.id), ['deepseek-chat', 'cat-jam-free']);
   assert.deepEqual(next[0].options, { reasoningEffort: 'low', thinking: { type: 'enabled' } });
-  // Relay-reported limits do not overwrite the surviving row.
-  assert.equal(next[0].contextWindow, 1_000_000);
-  assert.equal(next[0].maxOutputTokens, 100_000);
+  assert.equal(next[0].supportsImage, true);
+  assert.equal(next[0].contextWindow, 999);
+  assert.equal(next[0].maxOutputTokens, 999);
+  // Relay entries without reported limits keep the stored numbers.
+  assert.equal(next[1].contextWindow, undefined);
 });

@@ -498,6 +498,72 @@ test('mergeProvidersConfig bumps the 2026-10-04 64000/4096 pin to 1M/100K but ke
   assert.deepEqual(unknown.options, { reasoningEffort: 'high', thinking: { type: 'disabled' } });
 });
 
+test('mergeProvidersConfig flips the round-1 supportsImage:false era on deepseek-4.1-flash to vision-capable', () => {
+  // The client-side gate for sending images over chat (api.ts
+  // formatOpenAIMessage) reads selectedModel.supportsImage, so the stored row
+  // must carry true for the image entry to light up. Round-1 catalog
+  // machinery wrote explicit false on every deepseek-4.1-flash row; the
+  // round-2 server confirmation (2026-10-16) flipped the canonical to true,
+  // and load-time normalization rewrites that machine era. A user-enabled
+  // true and the hidden deepseek-chat alias (canonical stays false) are
+  // untouched.
+  const stored = {
+    'metaid-free': {
+      enabled: true,
+      apiKey: 'mrk_x',
+      baseUrl: 'https://relay.example',
+      apiFormat: 'openai' as const,
+      name: 'IDBots-Free',
+      models: [
+        {
+          id: 'deepseek-4.1-flash',
+          name: 'deepseek-flash',
+          contextWindow: 1_000_000,
+          maxOutputTokens: 100_000,
+          supportsImage: false,
+          options: { reasoningEffort: 'max', thinking: { type: 'enabled' } },
+        },
+        {
+          id: 'glm-5.3-flash',
+          name: 'glm-5.3-flash',
+          contextWindow: 1_048_576,
+          maxOutputTokens: 128_000,
+          supportsImage: true,
+        },
+      ],
+    },
+  };
+
+  const merged = mergeProvidersConfig(undefined, stored);
+
+  const models = merged?.['metaid-free']?.models ?? [];
+  const flagship = models.find(({ id }) => id === 'deepseek-4.1-flash');
+  assert.ok(flagship);
+  assert.equal(flagship.supportsImage, true, 'round-1 machine era flips to the verified vision flag');
+  // The rest of the profile stays exactly as stored.
+  assert.equal(flagship.contextWindow, 1_000_000);
+  assert.equal(flagship.maxOutputTokens, 100_000);
+  assert.deepEqual(flagship.options, { reasoningEffort: 'max', thinking: { type: 'enabled' } });
+  // A non-canonical relay id keeps its stored (server-reported) row bare.
+  const glm = models.find(({ id }) => id === 'glm-5.3-flash');
+  assert.ok(glm);
+  assert.equal(glm.supportsImage, true);
+  assert.equal(glm.contextWindow, 1_048_576);
+
+  // The hidden deepseek-chat alias and any id the table does not track are
+  // never vision-flipped by the era rewrite.
+  const aliasStored = {
+    'metaid-free': {
+      ...stored['metaid-free'],
+      models: [
+        { id: 'deepseek-chat', name: 'deepseek-flash', contextWindow: 1_000_000, maxOutputTokens: 100_000, supportsImage: false },
+      ],
+    },
+  };
+  const aliasMerged = mergeProvidersConfig(undefined, aliasStored);
+  assert.equal(aliasMerged?.['metaid-free']?.models?.[0]?.supportsImage, false);
+});
+
 test('mergeProvidersConfig keeps user-tuned limits on the known free-relay id untouched', () => {
   // The known id with NON-legacy stored values: normalization fills nothing
   // and rewrites nothing — manual edits must survive load/save cycles (the

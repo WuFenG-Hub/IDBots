@@ -109,7 +109,13 @@ const normalizeFreeProviderModels = (
     maxOutputTokens: legacy.maxOutputTokens || model.maxOutputTokens === undefined
       ? canonical.maxOutputTokens
       : model.maxOutputTokens,
-    supportsImage: model.supportsImage ?? canonical.supportsImage,
+    // The round-1 machine era pinned supportsImage:false on deepseek-4.1-flash
+    // rows; the 2026-10-16 round-2 server confirmation flipped the canonical to
+    // true, so explicit-false rows rewrite to it. Explicit non-era values
+    // (user toggles included) survive untouched.
+    supportsImage: legacy.supportsImage || model.supportsImage === undefined
+      ? canonical.supportsImage
+      : model.supportsImage,
     options: model.options
       ? {
           ...model.options,

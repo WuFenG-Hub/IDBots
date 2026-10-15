@@ -55,8 +55,14 @@ export function getFreeProviderModelDisplayName(modelId) {
  * leaves the full 100K effective per turn. Billing is by actual tokens
  * used, so a generous declared ceiling costs nothing for short replies.
  *
- * supportsImage stays false because the relay's image support is unverified.
- * Ids absent from this table keep whatever the relay reported.
+ * supportsImage is verified per id: the upstream DeepSeek V4.1 Flash family
+ * is natively multimodal and the relay forwards standard OpenAI image_url
+ * content arrays to the upstream verbatim (server-confirmed 2026-10-16), so
+ * the catalog flagship id declares vision; the legacy `deepseek-chat` alias
+ * entry keeps false (hidden alias with no catalog row to flip). Ids absent
+ * from this table keep whatever the relay reported — the 2026-10-16
+ * recalibrated directory (glm-5.3-flash included) reports accurate
+ * parameters itself, so no mirror entries are maintained for them.
  */
 const FREE_PROVIDER_MODEL_CANONICAL = {
   'deepseek-chat': {
@@ -66,12 +72,14 @@ const FREE_PROVIDER_MODEL_CANONICAL = {
     options: { reasoningEffort: 'max', thinking: { type: 'enabled' } },
   },
   // The 2026-10-16 relay catalog flagship (rename of the deepseek-chat alias):
-  // same wire family, so it inherits the exact same client profile — the 1M
-  // window, the 100K declared output ceiling, and effort-max thinking.
+  // same wire family, so it inherits the same limits and effort-max thinking;
+  // vision is ON — the relay transparently passes image_url parts through and
+  // the upstream V4.1 Flash reads them natively (round-2 server confirmation,
+  // 2026-10-16).
   'deepseek-4.1-flash': {
     contextWindow: 1_000_000,
     maxOutputTokens: 100_000,
-    supportsImage: false,
+    supportsImage: true,
     options: { reasoningEffort: 'max', thinking: { type: 'enabled' } },
   },
 };
@@ -90,6 +98,12 @@ const FREE_PROVIDER_MODEL_CANONICAL = {
  * - contextWindow 64_000: the 2026-10-04 server-enforced pin; superseded on
  *   2026-10-09 when the owner confirmed the upstream upgrade past 64K, so
  *   those rows bump to the canonical 1M window.
+ * - supportsImage false on 'deepseek-4.1-flash': written by the round-1
+ *   catalog machinery (bootstrap provision, quota-driven sync, or the
+ *   load-time canonical fill) before the 2026-10-16 round-2 vision
+ *   confirmation flipped the canonical to true. The id did not exist before
+ *   round 1 and every writer pinned false, so an explicit false identifies
+ *   that era — those rows flip to the canonical true at load time.
  * Anything else a row stores (user-tuned values included) is kept untouched.
  */
 const FREE_PROVIDER_MODEL_LEGACY_STORED_LIMITS = {
@@ -97,19 +111,23 @@ const FREE_PROVIDER_MODEL_LEGACY_STORED_LIMITS = {
     contextWindow: new Set([64_000]),
     maxOutputTokens: new Set([32_768, 4_096]),
   },
+  'deepseek-4.1-flash': {
+    supportsImage: new Set([false]),
+  },
 };
 
 /**
- * Which of the given stored model row's limit fields hold a machine-pinned
- * legacy value and must be rewritten to the current canonical value at load
- * time. Flags only — the caller resolves the replacement from
+ * Which of the given stored model row's fields hold a machine-pinned legacy
+ * value and must be rewritten to the current canonical value at load time.
+ * Flags only — the caller resolves the replacement from
  * getFreeProviderModelCanonical so the two tables cannot drift apart.
  */
 export function getFreeProviderModelLegacyLimitRewrites(model) {
   const table = model ? FREE_PROVIDER_MODEL_LEGACY_STORED_LIMITS[model.id] : undefined;
   return {
-    contextWindow: table ? table.contextWindow.has(model.contextWindow) : false,
-    maxOutputTokens: table ? table.maxOutputTokens.has(model.maxOutputTokens) : false,
+    contextWindow: table?.contextWindow ? table.contextWindow.has(model.contextWindow) : false,
+    maxOutputTokens: table?.maxOutputTokens ? table.maxOutputTokens.has(model.maxOutputTokens) : false,
+    supportsImage: table?.supportsImage ? table.supportsImage.has(model.supportsImage ?? false) : false,
   };
 }
 
@@ -182,14 +200,21 @@ export function planFreeQuotaProvisioning(input) {
  * them forward, without a new bootstrap that would reissue the relay key).
  *
  * Returns the next `models` array, or null when nothing should be written:
- * - null when the id sets already match, the relay list is empty/unusable
- *   (never an empty replace — same convention as mergeSyncedProviderModels),
- *   or the provider has no stored catalog to compare against.
+ * - null when the id sets match AND every relay-reported limit matches the
+ *   stored row, the relay list is empty/unusable (never an empty replace —
+ *   same convention as mergeSyncedProviderModels), or the provider has no
+ *   stored catalog to compare against.
  * - The relay list IS the directory: ids it dropped disappear, new ids appear
- *   in relay order. Surviving ids keep their stored row untouched (user-tuned
- *   limits/options survive, mirroring mergeSyncedProviderModels); new ids get
- *   the bootstrap merge semantics — relay-reported limits with the canonical
- *   client profile overriding known ids (getFreeProviderModelCanonical).
+ *   in relay order. Surviving ids keep their stored row except that
+ *   relay-reported contextWindow/maxOutputTokens win (the 2026-10-16 round-2
+ *   conf-only recalibration changed window values without touching the id
+ *   set; the server directory is the single source of truth for the
+ *   non-canonical ids — same convention as mergeSyncedProviderModels, where
+ *   the endpoint-reported context wins over the stored row). User-tuned
+ *   `options` (thinking/effort picks) and the vision flag survive untouched.
+ * - New ids get the bootstrap merge semantics — relay-reported limits with
+ *   the canonical client profile overriding known ids
+ *   (getFreeProviderModelCanonical).
  */
 export function planFreeProviderCatalogSync(provider, relayModels) {
   if (!provider || !Array.isArray(provider.models)) {
@@ -214,17 +239,29 @@ export function planFreeProviderCatalogSync(provider, relayModels) {
       .map((model) => (typeof model?.id === 'string' ? model.id.trim() : ''))
       .filter(Boolean),
   );
-  const changed = catalog.some((entry) => !currentIds.has(entry.id.trim()))
+  const storedById = new Map(provider.models.map((model) => [model.id, model]));
+  const changed = catalog.some((entry) => {
+    const id = entry.id.trim();
+    if (!currentIds.has(id) || !seen.has(id)) {
+      return true;
+    }
+    const stored = storedById.get(id);
+    return (entry.contextWindow !== undefined && entry.contextWindow !== stored?.contextWindow)
+      || (entry.maxOutputTokens !== undefined && entry.maxOutputTokens !== stored?.maxOutputTokens);
+  })
     || [...currentIds].some((id) => !seen.has(id));
   if (!changed) {
     return null;
   }
-  const storedById = new Map(provider.models.map((model) => [model.id, model]));
   return catalog.map((entry) => {
     const id = entry.id.trim();
     const stored = storedById.get(id);
     if (stored) {
-      return { ...stored };
+      return {
+        ...stored,
+        contextWindow: entry.contextWindow ?? stored.contextWindow,
+        maxOutputTokens: entry.maxOutputTokens ?? stored.maxOutputTokens,
+      };
     }
     return {
       id,
