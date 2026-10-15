@@ -20,8 +20,9 @@ that serves the gateway protocol. Desktop behavior does not change.
 - Read the design spec sections "Tenant Server Mode and Remote Gateway" and
   "Security and Custody"
   (`docs/superpowers/specs/2026-10-14-mobile-cloud-design.md`).
-- Read the Phase 0 report (`spikes/linux-headless/PHASE0_REPORT.md` on branch
-  `spike/linux-headless`; the owner provides the branch or the files). Its
+- Read the Phase 0 report (`spikes/linux-headless/PHASE0_REPORT.md` on the
+  archived branch `spike/linux-headless`, restored from the owner's git
+  bundle or patch-series tarball). Its
   "Tenant Image Requirements" section is an input to REQ-A-6 and REQ-A-26;
   "Required App Changes" was empty.
 

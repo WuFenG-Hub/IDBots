@@ -61,9 +61,12 @@ it has to satisfy.
 | [`50-ws-e-mobile-client.md`](50-ws-e-mobile-client.md) | WS-E requirements and acceptance | Mobile development |
 | [`60-acceptance-and-go-live.md`](60-acceptance-and-go-live.md) | End-to-end scenarios, security, go-live, sign-off | Owner, acceptance, every party |
 
-Phase 0 has passed (GO, signed 2026-10-15). Its plan and results stay at
-[`docs/superpowers/plans/2026-10-14-phase0-linux-headless-spike.md`](../superpowers/plans/2026-10-14-phase0-linux-headless-spike.md)
-and branch `spike/linux-headless`.
+Phase 0 has passed (GO, signed 2026-10-15). Its plan stays at
+[`docs/superpowers/plans/2026-10-14-phase0-linux-headless-spike.md`](../superpowers/plans/2026-10-14-phase0-linux-headless-spike.md).
+The results branch `spike/linux-headless` was archived by the owner on
+2026-10-16 (git bundle plus the patch-series tarball, sha256
+`ec684f1ce37e77e2ab38a3e9950347f8606f7950649ef5faffa48fef60c1088b`); it is
+not in the repository.
 
 ## Reading Order for a New Party
 

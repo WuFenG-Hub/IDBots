@@ -10,9 +10,10 @@ worktree from `main`, per `AGENTS.md`. Do not push or merge until the owner
 says so. The first task of every branch is to read `01` and `02` and file a
 change request for anything that cannot be implemented as written.
 
-Phase 0 reference, read-only: branch `spike/linux-headless` at `956f2b05`
-(`spikes/linux-headless/`). No file under `src/`, `dsh-runtime/`, `SKILLs/`,
-or `scripts/` was changed there.
+Phase 0 reference, read-only: the archived branch `spike/linux-headless` at
+`956f2b05` (`spikes/linux-headless/`), restored from the owner's git bundle or
+patch-series tarball when needed. No file under `src/`, `dsh-runtime/`,
+`SKILLs/`, or `scripts/` was changed there.
 
 ## Start now
 
