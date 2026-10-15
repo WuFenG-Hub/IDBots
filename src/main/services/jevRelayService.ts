@@ -243,10 +243,14 @@ export function createJevRelayFetchWithKeyRetry<R extends { ok: boolean; status:
  *  fires. The underlying promise is left running (callers use this to stop
  *  WAITING, not to cancel the work — shared bootstraps must complete so later
  *  callers find the cached result). Listener-safe on both paths. */
-function raceAbortSignal<T>(promise: Promise<T>, signal: AbortSignal | null): Promise<T> {
+function raceAbortSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | null,
+  abortMessage = 'The JEV relay re-bootstrap was aborted',
+): Promise<T> {
   if (!signal) return promise;
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(new DOMException('The JEV relay re-bootstrap was aborted', 'AbortError'));
+    const onAbort = () => reject(new DOMException(abortMessage, 'AbortError'));
     signal.addEventListener('abort', onAbort, { once: true });
     const settle = (fn: () => void) => {
       signal.removeEventListener('abort', onAbort);
@@ -257,6 +261,38 @@ function raceAbortSignal<T>(promise: Promise<T>, signal: AbortSignal | null): Pr
       (error) => settle(() => reject(error)),
     );
   });
+}
+
+/**
+ * fetch wrapper that enforces the caller's AbortSignal IN OUR CODE instead of
+ * trusting the underlying fetch to honor it. Empirically (2026-10-16
+ * follow-up on session 70fa10aa): Electron's session.fetch rejects on abort
+ * on a healthy network within ~1s, but when the connection stalls behind a
+ * proxy/upstream (the free relay hung five cerebellum calls for 17s) the
+ * abort never surfaced — every 1s/1.5s call budget blew past its deadline and
+ * the turn's first sentence waited out the upstream recovery. This wrapper
+ * rejects the CALLER at the abort edge regardless; the abandoned socket is
+ * left to settle on its own (the decision call sites are fail-to-null, so a
+ * late response is simply dropped).
+ *
+ * Applies to the response HEADERS arriving; body reading stays with the
+ * caller's own signal handling (the observed stall was pre-headers).
+ */
+export function createSignalBoundedFetch<R>(
+  fetchImpl: (url: string, init: Record<string, unknown>) => Promise<R>,
+): (url: string, init: Record<string, unknown>) => Promise<R> {
+  return (url, init) => {
+    const signal = (init as { signal?: AbortSignal | null }).signal ?? null;
+    if (!signal) return fetchImpl(url, init);
+    if (signal.aborted) {
+      return Promise.reject(new DOMException('The cerebellum call was aborted before dispatch', 'AbortError'));
+    }
+    return raceAbortSignal(
+      fetchImpl(url, init),
+      signal,
+      'The cerebellum call was aborted while awaiting the upstream response',
+    ) as Promise<R>;
+  };
 }
 
 // ---------------------------------------------------------------------------

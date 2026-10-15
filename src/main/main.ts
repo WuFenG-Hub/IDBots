@@ -21,7 +21,7 @@ import { ProjectStore, type ProjectFormData } from './projectStore';
 import type { MemoryBackend } from './memory/memoryBackend';
 import { createOwnerMemoryScope } from './memory/memoryScope';
 import { CEREBELLUM_FREE_PROVIDER, resolveCerebellumConfig, type ResolvedCerebellumConfig } from './libs/cerebellumConfig';
-import { createJevRelayFetchWithKeyRetry, initJevRelayService, registerJevRelayIpcHandlers, resolveCerebellumRuntimeConfig } from './services/jevRelayService';
+import { createJevRelayFetchWithKeyRetry, createSignalBoundedFetch, initJevRelayService, registerJevRelayIpcHandlers, resolveCerebellumRuntimeConfig } from './services/jevRelayService';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
 import { rankKnowledgeWithCerebellum } from './cerebellum/knowledgeHotRank';
 import { rankConversationsWithCerebellum } from './cerebellum/conversationSearchRank';
@@ -3182,7 +3182,16 @@ const resolveCerebellumCallContext = async (): Promise<{
 };
 
 const cerebellumFetchFor = (config: ResolvedCerebellumConfig) => {
-  const rawFetch = session.defaultSession.fetch.bind(session.defaultSession);
+  // Signal-bounded FIRST: Electron's session.fetch only rejects on abort when
+  // its network stack feels like it — a stalled proxy/upstream (the 17s JEV
+  // hang on session 70fa10aa, 2026-10-16) never surfaced the abort and blew
+  // every call-site budget. Our own race enforces the deadline; the relay
+  // 401-retry wrapper layers on top and stays deadline-bounded too (its retry
+  // rides this same bounded fetch).
+  const rawFetch = createSignalBoundedFetch(
+    session.defaultSession.fetch.bind(session.defaultSession) as unknown as
+      (url: string, init: Record<string, unknown>) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>,
+  );
   return config.provider === CEREBELLUM_FREE_PROVIDER
     ? createJevRelayFetchWithKeyRetry(rawFetch)
     : rawFetch;

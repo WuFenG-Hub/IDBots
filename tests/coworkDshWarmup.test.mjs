@@ -292,3 +292,112 @@ test('prewarmTurnSlot resolves the session automation combo onto its .auto-* slo
     fs.rmSync(sessionRoot, { recursive: true, force: true })
   }
 })
+
+// ---------------------------------------------------------------------------
+// Multi-combo app-start warm (2026-10-16 follow-up): warming only the
+// MOST-recent session's slot left every other bot cold — session 70fa10aa
+// (warmup warmed zhipu.auto-bc; the user's next chat was a deepseek bot whose
+// slot booted for 38s inside the turn). prewarmDshRuntime must warm the top
+// few DISTINCT (route × automation combo) slots from recent sessions.
+// ---------------------------------------------------------------------------
+
+test('prewarmDshRuntime warms distinct recent bot combos, not just the most recent', {
+  skip: !runtimeReady
+    ? 'dsh-runtime node_modules not installed'
+    : (!['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser']
+      .some((p) => p && fs.existsSync(p)))
+      ? 'no Chrome/Chromium found for the automation composition'
+      : false,
+}, async (t) => {
+  const { coworkRunner, claudeSettings } = (() => {
+    const originalLoad = Module._load
+    Module._load = function patchedLoad(request, parent, isMain) {
+      if (request === 'electron') {
+        return {
+          app: {
+            isPackaged: false,
+            getAppPath: () => process.cwd(),
+            getPath: (name) => path.join(process.cwd(), '.cowork-temp', `dsh-warmup-${name}`),
+          },
+        }
+      }
+      return originalLoad.apply(this, arguments)
+    }
+    try {
+      return {
+        coworkRunner: require('../dist-electron/main/libs/coworkRunner.js'),
+        claudeSettings: require('../dist-electron/main/libs/claudeSettings.js'),
+      }
+    } finally {
+      Module._load = originalLoad
+    }
+  })()
+  const { startMockServer } = await import(path.join(runtimeDir, 'test', 'fixtures', 'mock-openai.mjs'))
+  const { server } = await startMockServer(48825)
+
+  const fakeConfigStore = {
+    get: (key) => {
+      if (key !== 'app_config') return undefined
+      return {
+        api: { key: 'sk-a', baseUrl: 'http://127.0.0.1:48825/v1' },
+        model: { availableModels: [{ id: 'mock-1', name: 'mock-1' }], defaultModel: 'mock-1', defaultProvider: 'mockgw' },
+        providers: {
+          mockgw: { enabled: true, apiKey: 'sk-a', baseUrl: 'http://127.0.0.1:48825/v1', apiFormat: 'openai', models: [{ id: 'mock-1', name: 'mock-1', contextWindow: 32768 }] },
+        },
+        dshKernelEnabled: true,
+      }
+    },
+  }
+  claudeSettings.setStoreGetter(() => fakeConfigStore)
+
+  const store = {
+    listSessions: () => [
+      { id: 'warm-combo-clean-a' },
+      { id: 'warm-combo-auto' },
+      { id: 'warm-combo-clean-b' },
+    ],
+    getSession: (id) => ({
+      id,
+      executionMode: 'local',
+      model: 'mock-1',
+      modelProvider: 'mockgw',
+      cwd: process.cwd(),
+      messages: [],
+    }),
+    getSessionWithoutMessages: (id) => store.getSession(id),
+    getConfig: () => ({ workingDirectory: process.cwd() }),
+  }
+  const runner = new coworkRunner.CoworkRunner(store, {
+    // Only the second-most-recent session's bot opted into browser automation:
+    // its .auto-b slot must be warmed even though the MOST-recent session is a
+    // clean-combo bot (the 70fa10aa gap).
+    browserAutomationProvider: (sessionId) => sessionId === 'warm-combo-auto'
+      ? { mode: 'launch', headless: true }
+      : undefined,
+    computerUseProvider: () => false,
+  })
+  t.after(async () => {
+    await runner.dshTurnHub?.close().catch(() => undefined)
+    server.close()
+    claudeSettings.setStoreGetter(() => null)
+  })
+
+  await runner.prewarmDshRuntime()
+  const hub = runner.dshTurnHub
+  assert.ok(hub, 'warmup spawned the hub')
+  assert.equal(hub.running, true, 'runtime(s) left running after warmup')
+  // Clean combos share the bare provider slot; the automation opt-in rides
+  // its own .auto-b slot — two slots total, both prewarmed.
+  assert.equal(hub.runtimeSlotCount, 2, `expected clean + auto-b slots, got ${hub.runtimeSlotCount}`)
+  const comboLog = fs.readFileSync(
+    path.join(process.cwd(), '.cowork-temp', 'dsh-warmup-userData', 'logs', 'cowork.log'),
+    'utf8',
+  )
+  const boots = [...comboLog.matchAll(/prewarmTurnSlot\.boot\n  runtime: ([^\n]+)\n  sessionId: ([^\n]+)/g)]
+    .map((m) => ({ runtime: m[1].trim(), sessionId: m[2].trim() }))
+  assert.ok(
+    boots.some((entry) => entry.sessionId === 'warm-combo-auto' && entry.runtime === 'mockgw.auto-b'),
+    `the automation bot's slot was prewarmed under its own .auto-b runtime (boots: ${JSON.stringify(boots)})`,
+  )
+})

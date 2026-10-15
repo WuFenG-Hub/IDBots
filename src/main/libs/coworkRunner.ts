@@ -496,6 +496,15 @@ const MEMORY_ASSISTANT_STYLE_TEXT_RE = /^(?:使用|use)\s+[A-Za-z0-9._-]+\s*(?:�
 export const COWORK_LOCAL_TURN_STALL_TIMEOUT_MS = 180_000;
 
 /**
+ * App-start combo-slot warm cap: how many DISTINCT (provider route ×
+ * automation combo) runtime slots the DSH warmup pre-boots from recent
+ * sessions (see runDshRuntimeWarmup). Each automation slot keeps a headless
+ * Chromium mounted, so the cap bounds launch-time resource spend while still
+ * covering the realistic "open a new task with one of my usual bots" set.
+ */
+export const COWORK_WARMUP_COMBO_LIMIT = 3;
+
+/**
  * Turn-level stall deadline for DSH sessions: when a turn makes no progress
  * for this long (runtime wedged, provider hang beyond every tool's own
  * timeout), the watchdog cancels it so the session cannot sit in "running"
@@ -8858,26 +8867,57 @@ export class CoworkRunner extends EventEmitter {
           cwd: cwd || null,
         });
       }
-      // Automation-slot warm (first-sentence latency work, 2026-10-15):
-      // browser/computer automation is default-ON for bots, so bot chats ride
-      // the .auto-* runtime slots the clean prewarm above never touches, and
-      // their first turn after app start paid the full slot boot (process +
-      // Playwright/cua plugin load, ~11s measured) before the first token.
-      // Warm the most-recent session's REAL slot (its route + automation
-      // combo + MCP union) so its next turn reuses a booted process; the
-      // idle reap retires the slot if the user never returns to that bot.
-      // Clean-combo sessions reuse the process warmed above — this is a
-      // no-op ensure for them.
-      if (sessionRoute && sessionRow?.id) {
+      // Automation-slot warm (first-sentence latency work, 2026-10-15 +
+      // 2026-10-16 follow-up): browser/computer automation is default-ON for
+      // bots, so bot chats ride the .auto-* runtime slots the clean prewarm
+      // above never touches, and their first turn after app start paid the
+      // full slot boot (process + Playwright/cua plugin load, ~11-38s
+      // measured) before the first token. Warming only the MOST-recent
+      // session's combo still left every other bot cold (session 70fa10aa:
+      // warmup warmed zhipu.auto-bc; the user's next chat was a deepseek bot
+      // whose slot booted for 38s inside the turn). Warm the top few DISTINCT
+      // (provider route × automation combo) slots from recent sessions — the
+      // realistic "open a new task with bot X" set — capped so a long session
+      // history cannot pin a Chromium per bot at every launch; the idle reap
+      // retires whatever the user never returns to.
+      const comboSeen = new Set<string>();
+      const comboWarm: Array<{
+        row: { id: string; cwd?: string | null };
+        route: ReturnType<typeof resolveDshProviderRoute>;
+      }> = [];
+      for (const row of rows) {
+        if (comboWarm.length >= COWORK_WARMUP_COMBO_LIMIT) break;
+        if (!row?.id) continue;
+        try {
+          const route = this.resolveSessionDshRoute(row.id);
+          if (!route?.baseUrl || !route.apiKey) continue;
+          const browser = this.browserAutomationProvider?.(row.id) !== undefined;
+          const computer = this.computerUseProvider?.(row.id) === true;
+          const identity = `${route.provider}|${route.baseUrl}|${route.model}|${browser ? 'b' : ''}${computer ? 'c' : ''}`;
+          if (comboSeen.has(identity)) continue;
+          comboSeen.add(identity);
+          comboWarm.push({ row, route });
+        } catch {
+          // Unresolvable rows degrade out of the combo list.
+        }
+      }
+      for (const { row, route } of comboWarm) {
+        let comboCwd = configCwd;
+        try {
+          const record = this.store.getSessionWithoutMessages?.(row.id) ?? this.store.getSession(row.id);
+          if (record?.cwd?.trim()) comboCwd = record.cwd.trim();
+        } catch {
+          // Test fakes and partial stores fall back to the default cwd.
+        }
         try {
           await hub.prewarmTurnSlot({
-            sessionId: sessionRow.id,
-            provider: this.dshTurnProviderFromRoute(sessionRoute),
-            ...(sessionCwd ? { workspace: { cwd: sessionCwd } } : {}),
+            sessionId: row.id,
+            provider: this.dshTurnProviderFromRoute(route),
+            ...(comboCwd ? { workspace: { cwd: comboCwd } } : {}),
           });
         } catch (error) {
-          coworkLog('WARN', 'prewarmDshRuntime', 'Automation-slot warmup failed; that slot cold-starts on its next turn', {
-            sessionId: sessionRow.id,
+          coworkLog('WARN', 'prewarmDshRuntime', 'Combo-slot warmup failed; that slot cold-starts on its next turn', {
+            sessionId: row.id,
             error: error instanceof Error ? error.message : String(error),
           });
         }
