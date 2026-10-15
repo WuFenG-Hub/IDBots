@@ -59,6 +59,7 @@ export function resetJevRelayServiceForTests(): void {
   depsRef = null;
   cachedCredentials = null;
   bootstrapInFlight = null;
+  resetJevRelayCallStatsForTests();
 }
 
 function getDeps(): JevRelayServiceDeps {
@@ -180,11 +181,21 @@ export async function resolveJevRelayCredentials(): Promise<JevRelayCredentials>
  * model are already pinned by the resolver). Never throws — a free provider
  * with no obtainable key maps to null so the cerebellum silently stays off,
  * exactly like enabled=false.
+ *
+ * While the quota breaker is open (a recent http_429_quota, see
+ * noteJevRelayQuotaExhaustion) the free provider maps to null WITHOUT a key
+ * resolution: the relay fails quota checks in <50ms before touching the
+ * upstream, but skipping the call entirely keeps per-turn logs clean and
+ * avoids burning the 1.5s budget on a known-dead path. The breaker expires
+ * on its own so a reset cycle (or a server-side fix) self-heals.
  */
 export async function resolveCerebellumRuntimeConfig(appConfig: unknown): Promise<ResolvedCerebellumConfig | null> {
   const config = resolveCerebellumConfig(appConfig);
   if (!config || config.provider !== CEREBELLUM_FREE_PROVIDER) {
     return config;
+  }
+  if (isJevRelayQuotaExhausted()) {
+    return null;
   }
   try {
     const { apiKey } = await resolveJevRelayCredentials();
@@ -257,6 +268,294 @@ function raceAbortSignal<T>(promise: Promise<T>, signal: AbortSignal | null): Pr
       (error) => settle(() => reject(error)),
     );
   });
+}
+
+// ---------------------------------------------------------------------------
+// Result-code recording (2026-10-16 availability work)
+//
+// Every free-relay /v1/systemone call is classified into one result code,
+// logged per call, and folded into a per-day aggregate that rides cowork.log
+// (counts per code + latency P50/P90). This is the observation surface the
+// post-fix triage depends on: ok rate, whether timeouts correlate with
+// 401/500, and whether P90 stays high against the new server baseline
+// (P50 217ms / P99 412ms / max 452ms).
+// ---------------------------------------------------------------------------
+
+/** One code per relay call; the union of HTTP outcome and thrown outcome. */
+export type JevRelayCallResultCode =
+  | 'ok'
+  | 'timeout'
+  | 'http_401'
+  | 'http_429_quota'
+  | 'http_429_rate'
+  | 'http_4xx'
+  | 'http_5xx'
+  | 'network';
+
+/**
+ * Error envelope code the relay returns on an exhausted JEV pool. The CHAT
+ * pool's code is plain `free_quota_exhausted` — deliberately NOT matched
+ * here, so a chat-pool 429 (wrong route) classifies as http_429_rate.
+ */
+export const JEV_FREE_QUOTA_EXHAUSTED_CODE = 'jev_free_quota_exhausted';
+
+/** Log sink shape shared by coworkLog (levels kept identical). */
+export type JevRelayLogSink = (
+  level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR',
+  tag: string,
+  message: string,
+  extra?: Record<string, unknown>,
+) => void;
+
+/**
+ * Extract `error.code` from an OpenAI-style error envelope. Tolerates missing
+ * or non-string codes; returns null for anything unparsable (the caller then
+ * keeps the generic rate-limit classification).
+ */
+export function parseJevRelayErrorCode(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const error = (payload as { error?: unknown }).error;
+  if (!error || typeof error !== 'object') {
+    return null;
+  }
+  const code = (error as { code?: unknown }).code;
+  if (typeof code !== 'string' || !code.trim()) {
+    return null;
+  }
+  return code.trim();
+}
+
+/**
+ * Classify an HTTP outcome. 429 splits by the envelope code (quota vs rate);
+ * non-2xx/non-4xx/non-5xx statuses (a redirect or 1xx leaking out of the
+ * net stack) fall to `network` — they are transport anomalies, not relay
+ * verdicts.
+ */
+export function classifyJevRelayHttpStatus(status: number, errorCode?: string | null): JevRelayCallResultCode {
+  if (status >= 200 && status < 300) {
+    return 'ok';
+  }
+  if (status === 401) {
+    return 'http_401';
+  }
+  if (status === 429) {
+    return errorCode === JEV_FREE_QUOTA_EXHAUSTED_CODE ? 'http_429_quota' : 'http_429_rate';
+  }
+  if (status >= 400 && status < 500) {
+    return 'http_4xx';
+  }
+  if (status >= 500 && status < 600) {
+    return 'http_5xx';
+  }
+  return 'network';
+}
+
+/** Classify a thrown outcome: abort/timeout vs everything else. */
+export function classifyJevRelayThrownError(error: unknown): JevRelayCallResultCode {
+  const name = (error as { name?: unknown } | null | undefined)?.name;
+  if (name === 'AbortError' || name === 'TimeoutError') {
+    return 'timeout';
+  }
+  return 'network';
+}
+
+/**
+ * How long a http_429_quota verdict keeps the free-relay cerebellum off.
+ * The quota cycle resets weekly, but probing every few minutes is free (the
+ * relay rejects in <50ms) and self-heals both a reset AND a misclassified 429
+ * without an app restart.
+ */
+export const JEV_RELAY_QUOTA_BREAKER_MS = 5 * 60 * 1000;
+
+let quotaExhaustedUntil = 0;
+
+/** Opens the breaker; exposed for the recorder and future IPC surfacing. */
+export function noteJevRelayQuotaExhaustion(nowMs: number = Date.now()): void {
+  quotaExhaustedUntil = nowMs + JEV_RELAY_QUOTA_BREAKER_MS;
+}
+
+/** True while the breaker is open — the free relay should be skipped. */
+export function isJevRelayQuotaExhausted(nowMs: number = Date.now()): boolean {
+  return nowMs < quotaExhaustedUntil;
+}
+
+/** Testing hook: close the breaker and clear the accumulators. */
+export function resetJevRelayCallStatsForTests(): void {
+  quotaExhaustedUntil = 0;
+  activeDayStats = null;
+  statsSink = null;
+}
+
+interface JevRelayDayAccumulator {
+  counts: Partial<Record<JevRelayCallResultCode, number>>;
+  latencies: number[];
+}
+
+let activeDayStats: { dayKey: string; acc: JevRelayDayAccumulator } | null = null;
+let statsSink: JevRelayLogSink | null = null;
+
+/**
+ * Bind the sink that per-call lines and the daily aggregate ride on (in the
+ * app: coworkLog, so everything lands in cowork.log). Call once at startup;
+ * recorders created without their own sink fall back to this one.
+ */
+export function setJevRelayCallStatsSink(sink: JevRelayLogSink): void {
+  statsSink = sink;
+}
+
+function localDayKey(nowMs: number): string {
+  const date = new Date(nowMs);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function percentileNearestRank(latencies: number[], share: number): number | null {
+  if (latencies.length === 0) {
+    return null;
+  }
+  const sorted = [...latencies].sort((a, b) => a - b);
+  const rank = Math.min(sorted.length, Math.max(1, Math.ceil((share * sorted.length) / 100)));
+  return Math.round(sorted[rank - 1]);
+}
+
+function emitJevRelayDailyLine(day: { dayKey: string; acc: JevRelayDayAccumulator }, sink: JevRelayLogSink): void {
+  const calls = day.acc.latencies.length;
+  if (calls === 0) {
+    return;
+  }
+  const counts: Record<string, number> = {};
+  for (const [code, count] of Object.entries(day.acc.counts)) {
+    if (count) {
+      counts[code] = count;
+    }
+  }
+  sink('INFO', 'jevRelay:daily', 'JEV relay daily result-code report', {
+    date: day.dayKey,
+    calls,
+    okRate: Number(((day.acc.counts.ok ?? 0) / calls).toFixed(4)),
+    counts,
+    p50Ms: percentileNearestRank(day.acc.latencies, 50),
+    p90Ms: percentileNearestRank(day.acc.latencies, 90),
+  });
+}
+
+/**
+ * Fold one classified outcome into the active day. The first call of a NEW
+ * local day emits the previous day's aggregate line first, so exactly one
+ * report per day lands in the log. Breaker maintenance rides along: quota
+ * 429s open it, ok calls close it.
+ */
+function recordJevRelayCallResult(
+  code: JevRelayCallResultCode,
+  latencyMs: number,
+  sink: JevRelayLogSink,
+  nowMs: number,
+): void {
+  const dayKey = localDayKey(nowMs);
+  if (!activeDayStats || activeDayStats.dayKey !== dayKey) {
+    if (activeDayStats) {
+      emitJevRelayDailyLine(activeDayStats, sink);
+    }
+    activeDayStats = { dayKey, acc: { counts: {}, latencies: [] } };
+  }
+  activeDayStats.acc.counts[code] = (activeDayStats.acc.counts[code] ?? 0) + 1;
+  activeDayStats.acc.latencies.push(Math.max(0, Math.round(latencyMs)));
+  if (code === 'http_429_quota') {
+    noteJevRelayQuotaExhaustion(nowMs);
+  } else if (code === 'ok') {
+    quotaExhaustedUntil = 0;
+  }
+}
+
+/**
+ * Emit the active day's aggregate now (app quit) and clear it, so the last
+ * partial day of a session is not lost waiting for a rollover that never
+ * comes. Safe to call with nothing accumulated.
+ */
+export function flushJevRelayCallStats(sink: JevRelayLogSink | null = statsSink): void {
+  if (!sink || !activeDayStats) {
+    return;
+  }
+  emitJevRelayDailyLine(activeDayStats, sink);
+  activeDayStats = null;
+}
+
+/**
+ * Result-code recorder for free-relay calls. Wraps the key-retry wrapper
+ * (order: raw fetch -> key retry -> recorder) so ONE recorder entry covers
+ * the whole logical call, bootstrap retry included: a first-401-then-200
+ * sequence records `ok`, and the recorded latency includes the re-bootstrap.
+ *
+ * 429 responses are the only ones whose BODY matters downstream of
+ * classification: the recorder reads the JSON once to split quota vs rate
+ * and hands callers a reconstructed response whose json() replays the SAME
+ * parsed body — no call site can consume the stream twice. All other
+ * responses pass through untouched. Thrown errors are classified, recorded,
+ * and re-thrown so the decision call sites keep their catch-to-null paths
+ * (an AbortError classifies as `timeout`).
+ */
+export function createJevRelayCallRecorder<R extends { ok: boolean; status: number; json: () => Promise<unknown> }>(
+  fetchImpl: (url: string, init: Record<string, unknown>) => Promise<R>,
+  options?: { sink?: JevRelayLogSink; now?: () => number },
+): (url: string, init: Record<string, unknown>) => Promise<R> {
+  const sink: JevRelayLogSink = options?.sink ?? statsSink ?? (() => {});
+  const now: () => number = options?.now ?? Date.now;
+  return async (url, init) => {
+    const startedAt = now();
+    let response: R;
+    try {
+      response = await fetchImpl(url, init);
+      if (response.status === 429) {
+        let parsed: unknown = null;
+        let parsedOk = false;
+        try {
+          parsed = await response.json();
+          parsedOk = true;
+        } catch {
+          // Non-JSON 429 body: rate-limit classification stands.
+        }
+        const errorCode = parsedOk ? parseJevRelayErrorCode(parsed) : null;
+        const result = classifyJevRelayHttpStatus(response.status, errorCode);
+        const latencyMs = now() - startedAt;
+        recordJevRelayCallResult(result, latencyMs, sink, now());
+        sink('INFO', 'jevRelay:call', 'JEV relay call finished', {
+          endpoint: url.endsWith('/v1/systemone') ? '/v1/systemone' : url.endsWith('/v1/models') ? '/v1/models' : url,
+          result,
+          status: response.status,
+          errorCode,
+          latencyMs,
+        });
+        if (parsedOk) {
+          const body = parsed;
+          return { ok: response.ok, status: response.status, json: async () => body } as unknown as R;
+        }
+        return response;
+      }
+      const result = classifyJevRelayHttpStatus(response.status);
+      const latencyMs = now() - startedAt;
+      recordJevRelayCallResult(result, latencyMs, sink, now());
+      sink('INFO', 'jevRelay:call', 'JEV relay call finished', {
+        endpoint: url.endsWith('/v1/systemone') ? '/v1/systemone' : url.endsWith('/v1/models') ? '/v1/models' : url,
+        result,
+        status: response.status,
+        latencyMs,
+      });
+      return response;
+    } catch (error) {
+      const result = classifyJevRelayThrownError(error);
+      const latencyMs = now() - startedAt;
+      recordJevRelayCallResult(result, latencyMs, sink, now());
+      sink('INFO', 'jevRelay:call', 'JEV relay call finished', {
+        endpoint: url.endsWith('/v1/systemone') ? '/v1/systemone' : url.endsWith('/v1/models') ? '/v1/models' : url,
+        result,
+        status: null,
+        latencyMs,
+      });
+      throw error;
+    }
+  };
 }
 
 // ---------------------------------------------------------------------------
