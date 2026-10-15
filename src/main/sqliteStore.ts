@@ -681,6 +681,11 @@ export class SqliteStore {
       if (!draftCols.includes('dormant_at')) {
         this.db.run('ALTER TABLE capability_drafts ADD COLUMN dormant_at INTEGER');
       }
+      // RRSI P5 specificity critic: the reconciliation scope verdict. NULL =
+      // not assessed; every read path treats it exactly like 'general'.
+      if (!draftCols.includes('scope')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN scope TEXT');
+      }
     } catch (error) {
       console.warn('migrate capability_drafts validation columns:', error);
     }

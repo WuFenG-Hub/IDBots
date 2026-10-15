@@ -15,6 +15,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';
 
+import { createCoworkStore, createSqliteStore, getColumns } from './memoryTestUtils.mjs';
+
 const require = Module.createRequire(import.meta.url);
 
 const {
@@ -99,4 +101,83 @@ test('normalizeCapabilityScope: trims, lowercases, maps dashes to underscores', 
   assert.equal(normalizeCapabilityScope('local'), null);
   assert.equal(normalizeCapabilityScope(''), null);
   assert.equal(normalizeCapabilityScope(null), null);
+});
+
+// ---------------------------------------------------------------------------
+// Store: the scope column and the technique-roster exclusion (RRSI P5 Task 2)
+// ---------------------------------------------------------------------------
+
+test('store: scope column migrates idempotently and legacy rows read scope null', async () => {
+  const { db, store, userDataPath, cleanup } = await createSqliteStore();
+  const coworkStore = createCoworkStore(db);
+  try {
+    assert.ok(getColumns(db, 'capability_drafts').includes('scope'));
+    coworkStore.insertCapabilityDrafts(5, '2026-08-01', [
+      { title: '旧草案', description: 'd', capabilityType: 'skill' },
+    ]);
+    // Running the whole schema pass again is a no-op; legacy rows keep NULL.
+    store.initializeTables(userDataPath);
+    store.initializeTables(userDataPath);
+    const draft = coworkStore.listCapabilityDrafts(5)[0];
+    assert.equal(draft.scope, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test('store: setCapabilityDraftScope round-trips; unknown ids refuse', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  const coworkStore = createCoworkStore(db);
+  try {
+    coworkStore.insertCapabilityDrafts(5, '2026-08-01', [
+      { title: '范围草案', description: 'd', capabilityType: 'skill' },
+    ]);
+    const draft = () => coworkStore.listCapabilityDrafts(5)[0];
+    assert.equal(
+      coworkStore.setCapabilityDraftScope({ id: draft().id, metabotId: 5, scope: 'situational' }),
+      true,
+    );
+    assert.equal(draft().scope, 'situational');
+    assert.equal(
+      coworkStore.setCapabilityDraftScope({ id: draft().id, metabotId: 5, scope: 'scorer_fitted' }),
+      true,
+    );
+    assert.equal(draft().scope, 'scorer_fitted');
+    assert.equal(coworkStore.setCapabilityDraftScope({ id: draft().id, metabotId: 5, scope: 'general' }), true);
+    assert.equal(draft().scope, 'general');
+    // Wrong bot / missing row refuse (no row changes).
+    assert.equal(coworkStore.setCapabilityDraftScope({ id: draft().id, metabotId: 999, scope: 'general' }), false);
+    assert.equal(coworkStore.setCapabilityDraftScope({ id: 99999, metabotId: 5, scope: 'general' }), false);
+    // An unknown stored scope text reads back as null (mapper normalizes).
+    db.run("UPDATE capability_drafts SET scope = 'weird' WHERE id = ?", [draft().id]);
+    assert.equal(draft().scope, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test('store: listInjectableTechniques excludes situational drafts, keeps general and unassessed', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  const coworkStore = createCoworkStore(db);
+  try {
+    coworkStore.insertCapabilityDrafts(5, '2026-08-01', [
+      { title: '通用技巧', description: 'd', capabilityType: 'skill' },
+      { title: '特定对象技巧', description: 'd', capabilityType: 'skill' },
+      { title: '未评估技巧', description: 'd', capabilityType: 'skill' },
+    ]);
+    const byTitle = (title) => coworkStore.listCapabilityDrafts(5).find((entry) => entry.title === title);
+    for (const title of ['通用技巧', '特定对象技巧', '未评估技巧']) {
+      coworkStore.updateCapabilityDraftValidation({ id: byTitle(title).id, metabotId: 5, status: 'validated', validationScore: 0.9 });
+    }
+    coworkStore.setCapabilityDraftScope({ id: byTitle('通用技巧').id, metabotId: 5, scope: 'general' });
+    coworkStore.setCapabilityDraftScope({ id: byTitle('特定对象技巧').id, metabotId: 5, scope: 'situational' });
+
+    const roster = coworkStore.listInjectableTechniques(5, 10);
+    const titles = roster.map((entry) => entry.title);
+    assert.ok(!titles.includes('特定对象技巧'), 'situational never rides <proven_techniques>');
+    assert.ok(titles.includes('通用技巧'));
+    assert.ok(titles.includes('未评估技巧'), 'scope NULL behaves exactly like general');
+  } finally {
+    cleanup();
+  }
 });
