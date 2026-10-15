@@ -1225,7 +1225,9 @@ export class MetaIDKnowledgeStore {
     if (origin !== 'agent') {
       nextHotEligible = 1;
       nextHotReason = null;
-      nextHotSince = existingHotSince ?? now;
+      // An ARCHIVED dream/user procedure re-activates as a fresh hot stint
+      // (hot_since = now); a still-active revision keeps its original stamp.
+      nextHotSince = existing.status === 'archived' ? now : (existingHotSince ?? now);
     } else if (existing.status === 'archived') {
       nextHotEligible = 0;
       nextHotReason = 'probation';

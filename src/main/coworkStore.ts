@@ -7664,10 +7664,15 @@ export class CoworkStore implements MemoryBackend {
    * the existing dream validation gate judges. A pending ticket (draft /
    * disputed) is refreshed in place — title and description follow the
    * procedure's latest revision while dream_date, created_at and status stay
-   * (the gate calendar keeps counting from the first save). Deliberately
-   * bypasses the falsified-ledger block of insertCapabilityDraftsChecked: an
-   * explicit agent save is never silently dropped; the gate still sees the
-   * similar-falsified prompt line. Returns null on invalid input.
+   * (the gate calendar keeps counting from the first save). A VALIDATED but
+   * not-yet-promoted ticket is also reopened in place: the procedure body the
+   * verdict approved is gone, so the verdict is wiped (status back to
+   * 'draft', score/notes/validated_at cleared, dream_date re-anchored) and
+   * the gate re-judges the revision before any promotion can harden it.
+   * Deliberately bypasses the falsified-ledger block of
+   * insertCapabilityDraftsChecked: an explicit agent save is never silently
+   * dropped; the gate still sees the similar-falsified prompt line. Returns
+   * null on invalid input.
    */
   ensureProbationDraftForProcedure(input: {
     metabotId: number;
@@ -7697,6 +7702,26 @@ export class CoworkStore implements MemoryBackend {
       );
       this.saveDb();
       return { draftId: Number(existing.id), created: false };
+    }
+    // A validated-but-unpromoted ticket whose procedure was revised since the
+    // verdict: reopen it instead of leaving a stale approval in the promotion
+    // queue.
+    const validated = this.getOne<{ id: number | string }>(
+      `SELECT id FROM capability_drafts
+       WHERE metabot_id = ? AND source_procedure_id = ? AND status = 'validated' AND promoted_at IS NULL
+       ORDER BY id DESC LIMIT 1`,
+      [metabotId, procedureId],
+    );
+    if (validated) {
+      this.db.run(
+        `UPDATE capability_drafts
+         SET title = ?, description = ?, dream_date = ?, status = 'draft',
+             validation_score = NULL, validation_notes = NULL, validated_at = NULL
+         WHERE id = ? AND metabot_id = ?`,
+        [title, description, dreamDate, Number(validated.id), metabotId],
+      );
+      this.saveDb();
+      return { draftId: Number(validated.id), created: false };
     }
     const now = Date.now();
     this.db.run(

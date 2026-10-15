@@ -626,3 +626,85 @@ test('flow: the reconciliation prompt never offers the ticket\'s own procedure',
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// P2 acceptance repairs: ticket reopen on revision, archived re-activation stamp
+// ---------------------------------------------------------------------------
+
+test('a validated-but-unpromoted ticket reopens in place; the promotion night cannot promote it', async () => {
+  const h = await createDreamHarness();
+  try {
+    const seeded = seedProbation(h, '修改后再学的流程', D1);
+    seedSession(h.coworkStore, h.db, D2, [
+      { type: 'user', content: '上次那样很棒' },
+      { type: 'assistant', content: '谢谢' },
+    ]);
+    quietNight(h);
+    h.router.on(MARKERS.validation, ({ user }) => validationVerdicts(user, () => ({
+      verdict: 'validated', score: 0.9, rationale: `${D2} 日记显示照做后获赞`,
+    })));
+    h.router.on(MARKERS.reconciliation, ({ user }) => reconciliationKeep(user));
+    await h.runNight(D2);
+    const validated = h.coworkStore.listCapabilityDrafts(5).find((draft) => draft.id === seeded.draftId);
+    assert.equal(validated.status, 'validated');
+    assert.equal(validated.promotedAt, null, 'validated but not yet promoted');
+
+    // The agent revises the procedure: new body, new ticket description/date.
+    const revised = h.knowledgeStore.upsertProcedure({
+      metabotId: 5, title: '修改后再学的流程', triggerText: '当用户要求修改后的流程', steps: ['新步骤'],
+      sourcePinIds: [], origin: 'agent',
+    });
+    assert.equal(revised.needsGate, true);
+    const reopened = h.coworkStore.ensureProbationDraftForProcedure({
+      metabotId: 5,
+      procedureId: seeded.procedureId,
+      title: '修改后再学的流程',
+      description: '触发:当用户要求修改后的流程\n步骤:新步骤',
+      dreamDate: D2,
+    });
+    assert.equal(reopened.created, false, 'the stale ticket is reopened, not duplicated');
+    assert.equal(reopened.draftId, seeded.draftId);
+    const rows = h.coworkStore.listCapabilityDrafts(5).filter((draft) => draft.sourceProcedureId === seeded.procedureId);
+    assert.equal(rows.length, 1, 'still exactly one ticket for the procedure');
+    assert.equal(rows[0].status, 'draft', 'the verdict is wiped — the gate re-judges the revision');
+    assert.equal(rows[0].description, '触发:当用户要求修改后的流程\n步骤:新步骤');
+    assert.equal(rows[0].dreamDate, D2);
+    assert.equal(rows[0].validatedAt, null);
+    assert.equal(rows[0].validationScore, null);
+    assert.equal(rows[0].validationNotes, null);
+
+    // The next promotion night must not harden the revised procedure.
+    seedSession(h.coworkStore, h.db, D3, [
+      { type: 'user', content: '继续' },
+      { type: 'assistant', content: '好' },
+    ]);
+    await h.runNight(D3);
+    assert.equal(h.knowledgeStore.getProcedure(seeded.procedureId).hotEligible, false);
+    assert.equal(h.telemetry(D3)?.promotionBudget?.candidates, 0);
+    assert.equal(h.telemetry(D3)?.promotionBudget?.promoted, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('an archived dream-origin procedure re-activates with a fresh hot_since', async () => {
+  const SQL = await getSqlJs();
+  const db = new SQL.Database();
+  db.run('CREATE TABLE metabots (id INTEGER PRIMARY KEY, name TEXT)');
+  db.run("INSERT INTO metabots (id, name) VALUES (5, '小火')");
+  let clock = CLOCK;
+  const store = new MetaIDKnowledgeStore(db, () => {}, () => clock);
+  const saved = store.upsertProcedure({
+    metabotId: 5, title: '归档后复活的梦境规程', triggerText: '当…', steps: ['一步'], origin: 'dream',
+  });
+  assert.equal(saved.entry.hotSince, CLOCK, 'first hot stint stamped at the original clock');
+  clock += 5000;
+  assert.ok(store.archiveProcedureByTitle(5, '归档后复活的梦境规程'));
+  assert.equal(store.getProcedure(saved.entry.id).hotSince, CLOCK, 'archiving keeps the old stamp');
+  const revived = store.upsertProcedure({
+    metabotId: 5, title: '归档后复活的梦境规程', triggerText: '当…', steps: ['新一步'], origin: 'dream',
+  });
+  assert.equal(revived.entry.hotEligible, true);
+  assert.equal(revived.entry.status, 'active');
+  assert.equal(revived.entry.hotSince, clock, 're-activation starts a fresh hot stint at the current clock');
+});
