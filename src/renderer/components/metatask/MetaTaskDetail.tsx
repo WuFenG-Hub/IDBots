@@ -4,6 +4,7 @@ import { ArrowLeftIcon, BoltIcon, ChevronDownIcon, ChevronRightIcon, ChevronUpIc
 import { RootState } from '../../store';
 import { metaTaskService } from '../../services/metatask';
 import { i18nService } from '../../services/i18n';
+import { PreferenceTaskRoundButtons } from '../preference/PreferenceRoundsSection';
 import MetaIdBadge from './MetaIdBadge';
 import MetaTaskCandidateDrawer from './MetaTaskCandidateDrawer';
 import MetaTaskChainView from './MetaTaskChainView';
@@ -350,16 +351,19 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
               <span>{i18nService.t('metatask.events').replace('{count}', String(detail.freshness.eventCount))}</span>
             </div>
           </div>
-          {!detail.taskComplete && (
-            <button
-              type="button"
-              onClick={() => participateDraft(detail.title, detail.rootPinId, openNodes[0]?.id ?? null, isCompetitive)}
-              className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium rounded-lg btn-idchat-primary-filled"
-            >
-              <BoltIcon className="h-4 w-4" />
-              {i18nService.t('metatask.participateNow')}
-            </button>
-          )}
+          <div className="flex shrink-0 items-center gap-2">
+            <PreferenceTaskRoundButtons rootPinId={detail.rootPinId} />
+            {!detail.taskComplete && (
+              <button
+                type="button"
+                onClick={() => participateDraft(detail.title, detail.rootPinId, openNodes[0]?.id ?? null, isCompetitive)}
+                className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium rounded-lg btn-idchat-primary-filled"
+              >
+                <BoltIcon className="h-4 w-4" />
+                {i18nService.t('metatask.participateNow')}
+              </button>
+            )}
+          </div>
         </div>
         <p className="mt-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
           {i18nService.t('metatask.detail.explainer')}

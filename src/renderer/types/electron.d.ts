@@ -1529,6 +1529,33 @@ interface IElectronAPI {
     /** seq is monotonic per process: drop frames with seq <= lastSeenSeq and refetch. */
     onUpdate: (callback: (data: { seq: number; reason: string }) => void) => () => void;
   };
+  /**
+   * Preference rounds (/protocols/preference): blind human judging.
+   * Main-process implementation: src/main/services/preference/ipc.ts.
+   */
+  preference: {
+    listRounds: (input?: { mine?: boolean; taskid?: string }) => Promise<{
+      success: boolean;
+      rounds?: import('./preference').PreferenceUserRoundSummary[];
+      userGlobalMetaId?: string | null;
+      error?: string;
+    }>;
+    roundStatus: (input: { roundPinId: string }) => Promise<{
+      success: boolean;
+      view?: import('./preference').PreferenceHumanRoundView;
+      error?: string;
+    }>;
+    commit: (input: { roundPinId: string; ballot: import('./preference').PreferenceBallot }) => Promise<{
+      success: boolean;
+      pinId?: string;
+      ballotId?: string;
+      error?: string;
+    }>;
+    telemetry: (input: { roundPinId: string; pairKey: string; seconds: number }) => Promise<{ success: boolean; error?: string }>;
+    refresh: () => Promise<{ success: boolean; eventCount?: number; error?: string }>;
+    /** seq is monotonic per process: drop frames with seq <= lastSeenSeq and refetch. */
+    onUpdate: (callback: (data: { seq: number; reason: string }) => void) => () => void;
+  };
   groupTask: {
     create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[] }) => Promise<any>;
     list: (filter?: { status?: string }) => Promise<any>;

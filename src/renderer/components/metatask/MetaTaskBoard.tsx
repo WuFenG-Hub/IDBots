@@ -6,6 +6,7 @@ import { metaTaskService } from '../../services/metatask';
 import { setView } from '../../store/slices/metataskSlice';
 import { store } from '../../store';
 import { i18nService } from '../../services/i18n';
+import PreferenceRoundsSection from '../preference/PreferenceRoundsSection';
 import MetaTaskDetail from './MetaTaskDetail';
 import MetaIdBadge from './MetaIdBadge';
 import Tooltip from '../ui/Tooltip';
@@ -215,6 +216,7 @@ const MetaTaskBoard: React.FC = () => {
 
       {/* Task cards */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
+        <PreferenceRoundsSection />
         {loading && !board ? (
           <div className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary py-8 text-center">
             {i18nService.t('metatask.loading')}

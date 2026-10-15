@@ -320,6 +320,7 @@ import { estimateMetaTaskShares } from './services/metatask/estimate';
 import { MetaTaskWatchService } from './services/metatask/watchService';
 import { collectPreferenceEvents } from './services/preference/collector';
 import { PREFERENCE_PIN_VERSION, preferencePoolPath } from './services/preference/constants';
+import { createPreferenceIpcHandlers } from './services/preference/ipc';
 import { PreferenceService, type PreferenceSigner, type PreferenceWriterResolution } from './services/preference/service';
 import { PreferenceStore } from './services/preference/store';
 import { createUserPreferenceWriter } from './services/preference/userWriter';
@@ -14044,6 +14045,19 @@ if (!gotTheLock) {
       return { success: false, error: error instanceof Error ? error.message : 'MetaTask refresh failed' };
     }
   });
+
+  // ==================== Preference IPC (compare review panel) ====================
+  // Human-signed ballots only; the view strips candidate authors, salts, and
+  // every MetaBot-signed sealed ballot (judge independence).
+  const preferenceIpc = createPreferenceIpcHandlers({
+    service: () => getPreferenceService(),
+    userGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
+  });
+  ipcMain.handle('preference:listRounds', (_event, input: unknown) => preferenceIpc.listRounds(input));
+  ipcMain.handle('preference:roundStatus', (_event, input: unknown) => preferenceIpc.roundStatus(input));
+  ipcMain.handle('preference:commit', (_event, input: unknown) => preferenceIpc.commit(input));
+  ipcMain.handle('preference:telemetry', (_event, input: unknown) => preferenceIpc.telemetry(input));
+  ipcMain.handle('preference:refresh', () => preferenceIpc.refresh());
 
   // ==================== Scheduled Task IPC Handlers ====================
 
