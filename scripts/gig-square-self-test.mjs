@@ -1,10 +1,14 @@
 /**
- * Self-test for Gig Square step 2: transfer worker + optional broadcast.
+ * Self-test for Gig Square step 2: transfer worker + broadcast.
+ *
+ * The worker broadcasts a REAL MVC transfer from the provided wallet and returns
+ * the txId (there is no dry-run mode), so this script refuses to run unless
+ * --broadcast is passed explicitly. Use a dedicated test wallet and a small amount.
+ *
  * 1. Compile: npm run compile:electron
  * 2. Set env: IDBOTS_METABOT_MNEMONIC, IDBOTS_METABOT_PATH (optional, default m/44'/10001'/0'/0/0)
- * 3. Run: node scripts/gig-square-self-test.mjs [toAddress] [amountSPACE]
- *    Example: node scripts/gig-square-self-test.mjs 1GrqX7K9jdnUor8hAoAfDx99uFH2tT75Za 0.001
- * If --broadcast is passed, the built tx is broadcast (use with care).
+ * 3. Run: node scripts/gig-square-self-test.mjs [toAddress] [amountSPACE] --broadcast
+ *    Example: node scripts/gig-square-self-test.mjs 1GrqX7K9jdnUor8hAoAfDx99uFH2tT75Za 0.001 --broadcast
  */
 
 import { spawn } from 'child_process';
@@ -15,14 +19,22 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
 
-const toAddress = process.argv[2] || '1GrqX7K9jdnUor8hAoAfDx99uFH2tT75Za';
-const amountSpace = process.argv[3] || '0.001';
+const positionals = process.argv.slice(2).filter((arg) => !arg.startsWith('--'));
+const toAddress = positionals[0] || '1GrqX7K9jdnUor8hAoAfDx99uFH2tT75Za';
+const amountSpace = positionals[1] || '0.001';
 const doBroadcast = process.argv.includes('--broadcast');
 
 // 0.001 SPACE = 100000 sats (1 SPACE = 10^8 sats)
 const amountSats = Math.floor(parseFloat(amountSpace) * 1e8);
 if (!Number.isFinite(amountSats) || amountSats < 600) {
   console.error('Invalid amount (min 600 sats). Use e.g. 0.001');
+  process.exit(1);
+}
+
+if (!doBroadcast) {
+  console.error(
+    '[GigSquare self-test] Refusing to run: the transfer worker broadcasts a REAL transaction from the provided wallet. Pass --broadcast to proceed.',
+  );
   process.exit(1);
 }
 
@@ -34,7 +46,7 @@ if (!mnemonic) {
   process.exit(1);
 }
 
-const workerPath = path.join(root, 'dist-electron', 'libs', 'transferMvcWorker.js');
+const workerPath = path.join(root, 'dist-electron', 'main', 'libs', 'transferMvcWorker.js');
 if (!existsSync(workerPath)) {
   console.error('Worker not found. Run: npm run compile:electron');
   process.exit(1);
@@ -46,7 +58,7 @@ const payload = JSON.stringify({
   feeRate: 1,
 });
 
-console.log('[GigSquare self-test] Running MVC worker', { toAddress, amountSats, feeRate: 1 });
+console.log('[GigSquare self-test] Running MVC worker (REAL MVC broadcast)', { toAddress, amountSats, feeRate: 1 });
 console.log('[GigSquare self-test] Worker path:', workerPath);
 
 const electronPath = getElectronPath();
@@ -87,21 +99,11 @@ child.on('close', (code) => {
   }
   try {
     const result = JSON.parse(stdout.trim());
-    if (!result.success || !result.txHex) {
-      console.error('[GigSquare self-test] worker returned error:', result.error || 'no txHex');
+    if (!result.success || !result.txId) {
+      console.error('[GigSquare self-test] worker returned error:', result.error || 'no txId');
       process.exit(1);
     }
-    console.log('[GigSquare self-test] Worker built tx, txHex length:', result.txHex.length);
-    if (doBroadcast) {
-      broadcastMvc(result.txHex).then((txId) => {
-        console.log('[GigSquare self-test] Broadcast success txId:', txId);
-      }).catch((err) => {
-        console.error('[GigSquare self-test] Broadcast failed:', err.message);
-        process.exit(1);
-      });
-    } else {
-      console.log('[GigSquare self-test] OK (no broadcast). Use --broadcast to send.');
-    }
+    console.log('[GigSquare self-test] OK — worker broadcast MVC transfer, txId:', result.txId);
   } catch (e) {
     console.error('[GigSquare self-test] parse error:', e.message);
     console.error(stdout);
@@ -119,15 +121,4 @@ function getElectronPath() {
   } catch {
     return null;
   }
-}
-
-async function broadcastMvc(rawTx) {
-  const res = await fetch('https://www.metalet.space/wallet-api/v3/tx/broadcast', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chain: 'mvc', net: 'livenet', rawTx }),
-  });
-  const data = await res.json();
-  if (data?.code !== 0 && data?.code != null) throw new Error(data?.message || 'Broadcast failed');
-  return data?.txid ?? data?.txId ?? data?.data ?? '';
 }
