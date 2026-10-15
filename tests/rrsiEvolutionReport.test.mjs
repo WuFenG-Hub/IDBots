@@ -266,3 +266,105 @@ test('report retention degrades to nulls without hot_layer_usage or source_proce
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Usage section (RRSI P3 Task 6)
+// ---------------------------------------------------------------------------
+
+test('report usage section: audit coverage, applied rate, pruning sums', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  let file = null;
+  try {
+    const dreamStore = new DreamStore(db, () => {});
+    insertMetabot(db, 5);
+    dreamStore.beginRun(5, DATES[0], null, 17);
+    dreamStore.updateRunTelemetry(5, DATES[0], {
+      emptyDay: false,
+      usageAudit: { ran: true, items: 2, applied: 1, excerpts: 3, parseFailed: false },
+      hotLayerPruning: { demotedTechniques: 1, demotedProcedures: 0, reentered: 0 },
+    });
+    dreamStore.beginRun(5, DATES[1], null, 17);
+    dreamStore.updateRunTelemetry(5, DATES[1], {
+      emptyDay: false,
+      usageAudit: { ran: true, items: 0, applied: 0, excerpts: 0, parseFailed: true },
+      hotLayerPruning: { demotedTechniques: 0, demotedProcedures: 1, reentered: 0 },
+    });
+    db.run(
+      `INSERT INTO hot_layer_usage (
+         metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count, applied, evidence, audited_at
+       ) VALUES
+         (5, ?, 'technique', 't1', 'hot', 0, 1, 1, '{}', 100),
+         (5, ?, 'technique', 't2', 'hot', 0, 1, 0, '{}', 100),
+         (5, ?, 'procedure', 'p1', 'recall', 0, 1, NULL, NULL, NULL)`,
+      [DATES[0], DATES[0], DATES[1]],
+    );
+    // Dormant drafts (all time) and one active unused procedure.
+    const coworkStore = createCoworkStore(db);
+    coworkStore.insertCapabilityDrafts(5, DATES[0], [
+      { title: '休眠甲', description: 'd', capabilityType: 'workflow' },
+      { title: '休眠乙', description: 'd', capabilityType: 'workflow' },
+    ]);
+    db.run("UPDATE capability_drafts SET status = 'dormant', dormant_at = 100");
+    const { MetaIDKnowledgeStore } = require('../dist-electron/main/metaidKnowledgeStore.js');
+    const knowledgeStore = new MetaIDKnowledgeStore(db, () => {}, () => 1);
+    const unused = knowledgeStore.upsertProcedure({
+      metabotId: 5, title: '闲置规程', triggerText: '当', steps: ['一步'], origin: 'dream',
+    });
+    knowledgeStore.setProcedureHotEligibility(unused.entry.id, { eligible: false, reason: 'unused' });
+
+    file = exportDbToFile(db, 'usage');
+    const handle = new DatabaseSync(file, { readOnly: true });
+    let usage;
+    let text;
+    try {
+      const report = buildRrsiReport(handle, { days: 3, today: DATES[2], botId: 5 });
+      usage = report.bots[0].usage;
+      text = formatRrsiReport(report);
+    } finally {
+      handle.close();
+    }
+    assert.equal(usage.auditedNights, 2);
+    assert.equal(usage.parseFailures, 1);
+    assert.equal(usage.exposedItems, 3);
+    assert.equal(usage.auditedItems, 2);
+    assert.equal(usage.appliedItems, 1);
+    assert.equal(usage.appliedRate, 0.5);
+    assert.equal(usage.demotedTechniques, 1);
+    assert.equal(usage.demotedProcedures, 1);
+    assert.equal(usage.reentered, 0);
+    assert.equal(usage.dormantTotal, 2);
+    assert.equal(usage.unusedProcedures, 1);
+    assert.ok(text.includes('usage: audited 2 nights (1 parse fail), items 3 exposed / 2 audited / 1 applied → 50.00%; demoted 1T+1P, re-entered 0; dormant 2, unused 1'), text);
+  } finally {
+    if (file) fs.rmSync(path.dirname(file), { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test('report usage section is null without hot_layer_usage', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  let file = null;
+  try {
+    const dreamStore = new DreamStore(db, () => {});
+    insertMetabot(db, 5);
+    dreamStore.beginRun(5, DATES[0], null, 17);
+    dreamStore.updateRunTelemetry(5, DATES[0], { emptyDay: false });
+    db.run('DROP TABLE hot_layer_usage');
+    file = exportDbToFile(db, 'usage-missing');
+    const handle = new DatabaseSync(file, { readOnly: true });
+    let usage;
+    let text;
+    try {
+      const report = buildRrsiReport(handle, { days: 1, today: DATES[0], botId: 5 });
+      usage = report.bots[0].usage;
+      text = formatRrsiReport(report);
+    } finally {
+      handle.close();
+    }
+    assert.equal(usage, null);
+    assert.ok(text.includes('usage: (table missing)'), text);
+  } finally {
+    if (file) fs.rmSync(path.dirname(file), { recursive: true, force: true });
+    cleanup();
+  }
+});

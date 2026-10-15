@@ -257,6 +257,76 @@ function readRetentionSection(db, metabotId, fromDate, toDate) {
   return retention;
 }
 
+/** RRSI P3 usage evidence: audit coverage over the window, the applied rate,
+ * pruning sums, and the dormant / unused standing pools. Missing table
+ * degrades to null; missing columns (pre-phase databases) count as 0. */
+function readUsageSection(db, metabotId, fromDate, toDate) {
+  if (!tableExists(db, 'hot_layer_usage')) return null;
+  const usage = {
+    auditedNights: 0,
+    parseFailures: 0,
+    exposedItems: 0,
+    auditedItems: 0,
+    appliedItems: 0,
+    appliedRate: null,
+    demotedTechniques: 0,
+    demotedProcedures: 0,
+    reentered: 0,
+    dormantTotal: 0,
+    unusedProcedures: 0,
+  };
+  const counts = db
+    .prepare(`SELECT COUNT(DISTINCT item_kind || ':' || item_id) AS exposed,
+                     COUNT(DISTINCT CASE WHEN audited_at IS NOT NULL THEN item_kind || ':' || item_id END) AS audited,
+                     COUNT(DISTINCT CASE WHEN applied = 1 THEN item_kind || ':' || item_id END) AS applied
+              FROM hot_layer_usage
+              WHERE metabot_id = ? AND usage_date >= ? AND usage_date <= ?`)
+    .get(metabotId, fromDate, toDate);
+  usage.exposedItems = toNumber(counts?.exposed);
+  usage.auditedItems = toNumber(counts?.audited);
+  usage.appliedItems = toNumber(counts?.applied);
+  if (usage.auditedItems > 0) {
+    usage.appliedRate = round4(usage.appliedItems / usage.auditedItems);
+  }
+  if (tableExists(db, 'metabot_dream_telemetry_daily')) {
+    const rows = db
+      .prepare('SELECT extra_json FROM metabot_dream_telemetry_daily WHERE metabot_id = ? AND dream_date >= ? AND dream_date <= ?')
+      .all(metabotId, fromDate, toDate);
+    for (const row of rows) {
+      const extra = parseExtraJson(row.extra_json);
+      const audit = typeof extra.usageAudit === 'object' && extra.usageAudit !== null
+        ? extra.usageAudit
+        : null;
+      if (audit) {
+        if (audit.ran === true) usage.auditedNights += 1;
+        if (audit.parseFailed === true) usage.parseFailures += 1;
+      }
+      const pruning = typeof extra.hotLayerPruning === 'object' && extra.hotLayerPruning !== null
+        ? extra.hotLayerPruning
+        : null;
+      if (pruning) {
+        usage.demotedTechniques += nestedNumber(pruning, 'demotedTechniques');
+        usage.demotedProcedures += nestedNumber(pruning, 'demotedProcedures');
+        usage.reentered += nestedNumber(pruning, 'reentered');
+      }
+    }
+  }
+  if (tableExists(db, 'capability_drafts') && columnNames(db, 'capability_drafts').includes('dormant_at')) {
+    usage.dormantTotal = toNumber(
+      db.prepare("SELECT COUNT(*) AS n FROM capability_drafts WHERE metabot_id = ? AND status = 'dormant'").get(metabotId)?.n,
+    );
+  }
+  if (tableExists(db, 'metaid_knowledge_procedures')
+    && columnNames(db, 'metaid_knowledge_procedures').includes('hot_reason')) {
+    usage.unusedProcedures = toNumber(
+      db
+        .prepare("SELECT COUNT(*) AS n FROM metaid_knowledge_procedures WHERE metabot_id = ? AND status = 'active' AND hot_reason = 'unused'")
+        .get(metabotId)?.n,
+    );
+  }
+  return usage;
+}
+
 export function buildRrsiReport(db, options = {}) {
   const days = Number.isInteger(options.days) && options.days > 0 ? options.days : 30;
   const toDate = typeof options.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(options.today)
@@ -286,6 +356,7 @@ export function buildRrsiReport(db, options = {}) {
         gate: readGateSection(db, metabotId, fromDate, toDate),
         falsifiedLedger: readFalsifiedLedger(db, metabotId, fromDate, toDate),
         retention: readRetentionSection(db, metabotId, fromDate, toDate),
+        usage: readUsageSection(db, metabotId, fromDate, toDate),
       });
     }
   }
@@ -350,6 +421,15 @@ export function formatRrsiReport(report) {
       lines.push('  exposure: (table missing)');
     } else {
       lines.push(`  exposure: ${retention.exposure.items} items over ${retention.exposure.nights} night(s)`);
+    }
+    if (bot.usage === null) {
+      lines.push('  usage: (table missing)');
+    } else {
+      const usage = bot.usage;
+      const rate = typeof usage.appliedRate === 'number' ? `${(usage.appliedRate * 100).toFixed(2)}%` : 'n/a';
+      lines.push(
+        `  usage: audited ${usage.auditedNights} nights (${usage.parseFailures} parse fail), items ${usage.exposedItems} exposed / ${usage.auditedItems} audited / ${usage.appliedItems} applied → ${rate}; demoted ${usage.demotedTechniques}T+${usage.demotedProcedures}P, re-entered ${usage.reentered}; dormant ${usage.dormantTotal}, unused ${usage.unusedProcedures}`,
+      );
     }
   }
   if ((report.missing ?? []).length > 0) {
