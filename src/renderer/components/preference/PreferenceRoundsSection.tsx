@@ -24,6 +24,9 @@ const useRounds = (filter: { mine?: boolean; taskid?: string }) => {
     }
   }, [mine, taskid]);
   useEffect(() => {
+    // Cache-first render; the refresh broadcasts preference:update, which the
+    // subscription turns into a re-list, so the board picks up new chain events.
+    preferenceService.refresh().catch(() => undefined);
     void load();
     return preferenceService.subscribe(() => void load());
   }, [load]);

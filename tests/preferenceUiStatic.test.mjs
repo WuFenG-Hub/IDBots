@@ -55,3 +55,21 @@ test('compare panel is escapable, portaled, and guards duplicate seals', () => {
   // After a successful seal the review button stays disabled until the ballot changes.
   assert.ok(/sealedSignature/.test(panel.text), 'panel lacks the sealed-signature guard');
 });
+
+test('opening a preference surface refreshes the event cache', () => {
+  const panel = components.find(({ name }) => name === 'PreferenceComparePanel.tsx');
+  const section = components.find(({ name }) => name === 'PreferenceRoundsSection.tsx');
+  assert.ok(panel && section, 'preference components not found');
+  // Without a refresh trigger the local cache can lag the chain by a whole
+  // window (the reveal heartbeat only refreshes while ballots are active), so
+  // both surfaces fire a background refresh on mount and upgrade via the
+  // preference:update push.
+  assert.ok(
+    /preferenceService\.refresh\(\)\.catch/.test(panel.text),
+    'compare panel does not refresh the event cache on open',
+  );
+  assert.ok(
+    /preferenceService\.refresh\(\)\.catch/.test(section.text),
+    'rounds section does not refresh the event cache on mount',
+  );
+});

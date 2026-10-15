@@ -167,3 +167,19 @@ test('roundStatus refreshes once for an unknown round and reports invalid ids', 
   assert.deepEqual(await h.ipc.roundStatus({ roundPinId: 42 }), { success: false, error: 'preference:invalid-round' });
   assert.deepEqual(await h.ipc.roundStatus({ roundPinId: pid(9999) }), { success: false, error: 'round:not-found' });
 });
+
+test('refresh reports the collected event count', async () => {
+  const { c, round } = mixedRound();
+  const h = await ipcHarness({ events: c.events });
+  assert.deepEqual(await h.ipc.refresh(), { success: true, eventCount: c.events.length });
+  h.state.chainEvents.push({
+    pinId: pid(9500),
+    path: 'commit',
+    author: H2,
+    height: 200_000,
+    txIndex: 0,
+    timestampMs: (COMMIT_CLOSE - 7_000) * 1000,
+    body: { round },
+  });
+  assert.deepEqual(await h.ipc.refresh(), { success: true, eventCount: c.events.length + 1 });
+});
