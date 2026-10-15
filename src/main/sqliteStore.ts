@@ -675,6 +675,12 @@ export class SqliteStore {
       if (!draftCols.includes('source_procedure_id')) {
         this.db.run('ALTER TABLE capability_drafts ADD COLUMN source_procedure_id TEXT');
       }
+      // RRSI P3 L1 pruning: when a validated draft was demoted to 'dormant'
+      // for never being applied. Kept as history — never injected, never
+      // re-reviewed, never promoted, never purged.
+      if (!draftCols.includes('dormant_at')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN dormant_at INTEGER');
+      }
     } catch (error) {
       console.warn('migrate capability_drafts validation columns:', error);
     }

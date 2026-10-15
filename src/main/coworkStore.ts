@@ -931,6 +931,9 @@ export interface CapabilityDraft {
   /** RRSI P2: the procedure this draft is the probation ticket for (NULL =
    * a dream-distilled draft). */
   sourceProcedureId: string | null;
+  /** RRSI P3: when a validated draft was demoted to 'dormant' for never
+   * being applied (NULL = not dormant). */
+  dormantAt: number | null;
 }
 
 interface CapabilityDraftRow {
@@ -953,6 +956,7 @@ interface CapabilityDraftRow {
   conditions_text?: string | null;
   uncertainty_text?: string | null;
   source_procedure_id?: string | null;
+  dormant_at?: number | string | null;
 }
 
 /** Shared column list for every capability-draft SELECT (mapped by
@@ -960,7 +964,7 @@ interface CapabilityDraftRow {
 const CAPABILITY_DRAFT_COLUMNS = `id, metabot_id, dream_date, title, description, capability_type, status, created_at,
              validation_score, validation_notes, validated_at, times_injected, last_injected_at,
              promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text,
-             source_procedure_id`;
+             source_procedure_id, dormant_at`;
 
 /** Which gate pass falsified a hypothesis (RRSI P1 ledger provenance). */
 export type CapabilityFalsifiedSource = 'validation' | 're_review';
@@ -7655,7 +7659,26 @@ export class CoworkStore implements MemoryBackend {
       conditionsText: row.conditions_text == null ? null : String(row.conditions_text),
       uncertaintyText: row.uncertainty_text == null ? null : String(row.uncertainty_text),
       sourceProcedureId: row.source_procedure_id == null ? null : String(row.source_procedure_id),
+      dormantAt: row.dormant_at == null ? null : Number(row.dormant_at),
     };
+  }
+
+  /**
+   * RRSI P3: one capability draft by id, through the shared column list and
+   * mapper. Null when the row does not exist or belongs to another bot.
+   */
+  getCapabilityDraft(metabotId: number, id: number): CapabilityDraft | null {
+    const botId = Number(metabotId);
+    const draftId = Number(id);
+    if (!Number.isInteger(botId) || botId <= 0 || !Number.isInteger(draftId) || draftId <= 0) return null;
+    const row = this.getOne<CapabilityDraftRow>(
+      `SELECT ${CAPABILITY_DRAFT_COLUMNS}
+       FROM capability_drafts
+       WHERE id = ? AND metabot_id = ?
+       LIMIT 1`,
+      [draftId, botId],
+    );
+    return row ? this.mapCapabilityDraftRow(row) : null;
   }
 
   /**
