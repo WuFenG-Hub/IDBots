@@ -307,6 +307,22 @@ test('the online list reuses the shared MetaBotSelector as its only selector', (
   assert.equal(flatBranch.includes('aria-expanded'), false);
 });
 
+test('a hidden bot selector never leaves the online list filtered', () => {
+  const list = readSource('renderer/components/cowork/CoworkSessionList.tsx');
+  // Below two enabled bots the selector is hidden — with no control on
+  // screen there is no way to escape a filter, so the list must fall back
+  // to All Bots (legacy A2A rows with no metabotId and sessions of
+  // since-disabled bots included) instead of silently scoping to the Twin.
+  const fallback = list.slice(
+    list.indexOf('const activeBotId'),
+    list.indexOf('const visibleSessions'),
+  );
+  assert.ok(
+    fallback.includes(': ALL_METABOTS_SELECTOR_ID'),
+    'a hidden selector forces the All Bots selection',
+  );
+});
+
 test('the A2A title fallback is untouched by the selector change', () => {
   const item = readSource('renderer/components/cowork/CoworkSessionItem.tsx');
   assert.ok(item.includes('isPrivatePlaceholderTitle'));
