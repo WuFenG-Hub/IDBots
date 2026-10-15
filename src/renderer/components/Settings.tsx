@@ -558,8 +558,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
   }));
   const [cerebellumTestResult, setCerebellumTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isTestingCerebellum, setIsTestingCerebellum] = useState(false);
-  // Free provider quota snapshot (chat + JEV shared total); null = unavailable.
-  // quotaCycleResetAt feeds the same weekly countdown the free-quota card shows.
+  // Free provider quota snapshot for the CEREBELLUM side; null = unavailable.
+  // Binds the JEV pool numbers; quotaCycleResetAt feeds the same weekly
+  // countdown the free-quota card shows (both pools share one cycle).
   const [cerebellumFreeQuota, setCerebellumFreeQuota] = useState<{ loading: boolean; remaining: number | null; quotaCycleResetAt: number }>({ loading: false, remaining: null, quotaCycleResetAt: 0 });
   
   // 创建引用来确保内容区域的滚动
@@ -1883,18 +1884,23 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
     setCerebellumFreeQuota({ loading: true, remaining: null, quotaCycleResetAt: 0 });
     try {
       const response = await window.electron.llmRelay.getQuota({ apiKey });
+      const quota = response?.success ? response.quota : undefined;
       setCerebellumFreeQuota({
         loading: false,
-        remaining: response?.success && response.quota ? response.quota.quotaRemaining : null,
-        quotaCycleResetAt: response?.success && response.quota ? response.quota.quotaCycleResetAt : 0,
+        // The cerebellum burns the JEV pool; fall back to the shared chat
+        // number only when the backend reports no separate pool (legacy mode).
+        remaining: quota
+          ? (quota.jevQuotaTotal > 0 ? quota.jevQuotaRemaining : quota.quotaRemaining)
+          : null,
+        quotaCycleResetAt: quota ? quota.quotaCycleResetAt : 0,
       });
     } catch {
       setCerebellumFreeQuota({ loading: false, remaining: null, quotaCycleResetAt: 0 });
     }
   }, []);
 
-  // Free provider selected with a resolved key: keep the shared-quota number
-  // fresh (same snapshot the free-quota card shows, chat + JEV combined).
+  // Free provider selected with a resolved key: keep the JEV-pool number
+  // fresh (same snapshot the free-quota card reads, each pool its own line).
   useEffect(() => {
     if (cerebellum.provider === CEREBELLUM_FREE_PROVIDER && cerebellum.apiKey.trim()) {
       void loadCerebellumFreeQuota(cerebellum.apiKey.trim());

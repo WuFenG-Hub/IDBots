@@ -75,10 +75,13 @@ const BOOTSTRAP_DATA = {
   keyPrefix: 'mrk_testke',
   baseUrl: 'https://relay.test/assist-open-api/v2/assist/llm/v1',
   models: [{ id: 'metaid-free-chat', contextWindow: 64000, maxOutputTokens: 4096 }],
-  quotaTotal: 1000000,
-  quotaUsed: 0,
-  quotaRemaining: 1000000,
+  quotaTotal: 5000000,
+  quotaUsed: 1000,
+  quotaRemaining: 4999000,
   quotaCycleResetAt: 1760486400000,
+  jevQuotaTotal: 2500000,
+  jevQuotaUsed: 62323,
+  jevQuotaRemaining: 2437677,
 };
 
 test('buildLlmRelayBootstrapMessage matches the backend canonical string', () => {
@@ -100,9 +103,12 @@ test('bootstrap signs the canonical message and normalizes the payload', async (
   const result = await bootstrapLlmRelay();
   assert.equal(result.apiKey, 'mrk_testkey123');
   assert.equal(result.baseUrl, 'https://relay.test/assist-open-api/v2/assist/llm/v1');
-  assert.equal(result.quotaTotal, 1000000);
-  assert.equal(result.quotaRemaining, 1000000);
+  assert.equal(result.quotaTotal, 5000000);
+  assert.equal(result.quotaRemaining, 4999000);
   assert.equal(result.quotaCycleResetAt, 1760486400000);
+  assert.equal(result.jevQuotaTotal, 2500000);
+  assert.equal(result.jevQuotaUsed, 62323);
+  assert.equal(result.jevQuotaRemaining, 2437677);
   assert.deepEqual(result.models, [{ id: 'metaid-free-chat', contextWindow: 64000, maxOutputTokens: 4096 }]);
 
   assert.equal(calls.length, 1);
@@ -207,11 +213,13 @@ test('quota sends the bearer key and caches for 30s unless forceRefresh', async 
     baseUrl: 'https://relay.test',
   });
   const first = await getLlmRelayQuota({ apiKey: 'mrk_testkey123' });
-  assert.equal(first.quotaTotal, 1000000);
+  assert.equal(first.quotaTotal, 5000000);
   assert.equal(first.quotaCycleResetAt, 1760486400000);
+  assert.equal(first.jevQuotaTotal, 2500000);
+  assert.equal(first.jevQuotaRemaining, 2437677);
   const second = await getLlmRelayQuota({ apiKey: 'mrk_testkey123' });
   assert.equal(calls.length, 1, 'second call within 30s must hit the cache');
-  assert.equal(second.quotaTotal, 1000000);
+  assert.equal(second.quotaTotal, 5000000);
   await getLlmRelayQuota({ apiKey: 'mrk_testkey123', forceRefresh: true });
   assert.equal(calls.length, 2, 'forceRefresh bypasses the cache');
   assert.equal(calls[0].url, 'https://relay.test/v2/assist/llm/quota');
@@ -229,9 +237,16 @@ test('quota requires an apiKey', async () => {
   await assert.rejects(getLlmRelayQuota({}), /relay apiKey is required/);
 });
 
-test('quota normalizes a missing quotaCycleResetAt to 0 (weekly quota disabled)', async () => {
+test('quota normalizes absent weekly/jev fields to 0 (legacy single-pool backend)', async () => {
   resetLlmRelayServiceForTests();
-  const data = { ...BOOTSTRAP_DATA, apiKey: undefined, quotaCycleResetAt: undefined };
+  const data = {
+    ...BOOTSTRAP_DATA,
+    apiKey: undefined,
+    quotaCycleResetAt: undefined,
+    jevQuotaTotal: undefined,
+    jevQuotaUsed: undefined,
+    jevQuotaRemaining: undefined,
+  };
   const { fetchImpl } = makeFetchStub(() => ({ ok: true, status: 200, body: { code: 0, message: 'success', data } }));
   initLlmRelayService({
     getStore: () => makeKvStore(),
@@ -241,6 +256,9 @@ test('quota normalizes a missing quotaCycleResetAt to 0 (weekly quota disabled)'
   });
   const quota = await getLlmRelayQuota({ apiKey: 'mrk_testkey123' });
   assert.equal(quota.quotaCycleResetAt, 0);
+  assert.equal(quota.jevQuotaTotal, 0);
+  assert.equal(quota.jevQuotaUsed, 0);
+  assert.equal(quota.jevQuotaRemaining, 0);
 });
 
 test('apiBase normalization and kv override', async () => {
