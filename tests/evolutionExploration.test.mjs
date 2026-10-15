@@ -1,0 +1,241 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const R = require('../dist-electron/main/libs/evolutionExploration.js');
+const { shiftDateKey } = require('../dist-electron/main/libs/predictionLedger.js');
+
+// ---------------------------------------------------------------------------
+// Pure vectors (RRSI P4 Task 1)
+// ---------------------------------------------------------------------------
+
+const D = '2026-09-01';
+
+/**
+ * One ExplorationNight per calendar day from fromDate through toDate
+ * (inclusive). `emptyEvery` (when > 0) keeps only every Nth night non-empty
+ * (1-based); `validatedOn` maps a date key to that night's validated count.
+ */
+function nights(fromDate, toDate, options = {}) {
+  const { emptyEvery = 0, validatedOn = {} } = options;
+  const out = [];
+  for (let date = fromDate; date <= toDate; date = shiftDateKey(date, 1)) {
+    const index = out.length;
+    out.push({
+      dreamDate: date,
+      emptyDay: emptyEvery > 0 ? (index + 1) % emptyEvery !== 1 : false,
+      validated: validatedOn[date] ?? 0,
+      promoted: 0,
+    });
+  }
+  return out;
+}
+
+const proposals = (entries) => entries.map(([dreamDate, component]) => ({ dreamDate, component }));
+
+test('practice component vocabulary and normalization', () => {
+  assert.deepEqual(R.PRACTICE_COMPONENTS, [
+    'memory', 'procedure', 'skill', 'remote_service', 'collaboration', 'metaweb', 'metaapp',
+  ]);
+  assert.deepEqual(R.STRUCTURAL_PRACTICE_COMPONENTS, ['skill', 'remote_service', 'collaboration', 'metaapp']);
+  assert.equal(R.normalizePracticeComponent('Remote-Service'), 'remote_service');
+  assert.equal(R.normalizePracticeComponent(' metaapp '), 'metaapp');
+  assert.equal(R.normalizePracticeComponent('wallet'), null);
+  assert.equal(R.normalizePracticeComponent(7), null);
+});
+
+test('stall: three active windows with zero acceptance', () => {
+  const activeNights = nights('2026-08-11', '2026-08-31');
+  assert.equal(activeNights.length, 21);
+  assert.deepEqual(
+    R.detectEvolutionStall({ date: D, nights: activeNights, proposals: [] }),
+    { stalled: true, reason: 'no_acceptance', dominantComponent: null },
+  );
+});
+
+test('stall: one acceptance in the windows breaks it', () => {
+  const withAcceptance = nights('2026-08-11', '2026-08-31', { validatedOn: { '2026-08-20': 1 } });
+  assert.equal(
+    R.detectEvolutionStall({ date: D, nights: withAcceptance, proposals: [] }).stalled,
+    false,
+  );
+});
+
+test('stall: a window with fewer than three non-empty nights is not active enough', () => {
+  // W3 (2026-08-11..2026-08-17) keeps only every 4th night non-empty → 2 of 7.
+  const thinW3 = [
+    ...nights('2026-08-11', '2026-08-17', { emptyEvery: 4 }),
+    ...nights('2026-08-18', '2026-08-31'),
+  ];
+  assert.equal(thinW3.filter((night) => !night.emptyDay && night.dreamDate <= '2026-08-17').length, 2);
+  assert.equal(R.detectEvolutionStall({ date: D, nights: thinW3, proposals: [] }).stalled, false);
+  // Exactly 3 non-empty nights in W3 → active again → stalled.
+  const activeW3 = [
+    ...nights('2026-08-11', '2026-08-17', { emptyEvery: 3 }),
+    ...nights('2026-08-18', '2026-08-31'),
+  ];
+  assert.equal(activeW3.filter((night) => !night.emptyDay && night.dreamDate <= '2026-08-17').length, 3);
+  assert.deepEqual(
+    R.detectEvolutionStall({ date: D, nights: activeW3, proposals: [] }),
+    { stalled: true, reason: 'no_acceptance', dominantComponent: null },
+  );
+});
+
+test('stall: nights on the dreamed date itself are ignored', () => {
+  const withToday = [
+    ...nights('2026-08-11', '2026-08-31'),
+    { dreamDate: '2026-09-01', emptyDay: false, validated: 1, promoted: 0 },
+  ];
+  assert.deepEqual(
+    R.detectEvolutionStall({ date: D, nights: withToday, proposals: [] }),
+    { stalled: true, reason: 'no_acceptance', dominantComponent: null },
+  );
+});
+
+test('stall: component collapse over the trailing 14 days', () => {
+  const collapse = R.detectEvolutionStall({
+    date: D,
+    nights: [],
+    proposals: proposals([
+      ['2026-08-18', 'memory'],
+      ['2026-08-21', 'memory'],
+      ['2026-08-25', 'memory'],
+      ['2026-08-31', 'memory'],
+    ]),
+  });
+  assert.deepEqual(collapse, { stalled: true, reason: 'component_collapse', dominantComponent: 'memory' });
+  // Three proposals stay below the threshold.
+  assert.equal(R.detectEvolutionStall({
+    date: D,
+    nights: [],
+    proposals: proposals([
+      ['2026-08-18', 'memory'],
+      ['2026-08-21', 'memory'],
+      ['2026-08-25', 'memory'],
+    ]),
+  }).stalled, false);
+  // Four proposals but two distinct components → no collapse.
+  assert.equal(R.detectEvolutionStall({
+    date: D,
+    nights: [],
+    proposals: proposals([
+      ['2026-08-18', 'memory'],
+      ['2026-08-21', 'memory'],
+      ['2026-08-25', 'memory'],
+      ['2026-08-31', 'skill'],
+    ]),
+  }).stalled, false);
+  // Null components are ignored: 4 memory + 2 null still collapses.
+  assert.deepEqual(R.detectEvolutionStall({
+    date: D,
+    nights: [],
+    proposals: proposals([
+      ['2026-08-18', 'memory'],
+      ['2026-08-21', 'memory'],
+      ['2026-08-25', 'memory'],
+      ['2026-08-31', 'memory'],
+      ['2026-08-22', null],
+      ['2026-08-28', null],
+    ]),
+  }), { stalled: true, reason: 'component_collapse', dominantComponent: 'memory' });
+});
+
+test('stall: no_acceptance outranks component_collapse but still reports the dominant component', () => {
+  const result = R.detectEvolutionStall({
+    date: D,
+    nights: nights('2026-08-11', '2026-08-31'),
+    proposals: proposals([
+      ['2026-08-18', 'memory'],
+      ['2026-08-21', 'memory'],
+      ['2026-08-25', 'memory'],
+      ['2026-08-31', 'memory'],
+    ]),
+  });
+  assert.deepEqual(result, { stalled: true, reason: 'no_acceptance', dominantComponent: 'memory' });
+});
+
+test('under-explored components exclude the recently practiced and the dominant one', () => {
+  const recent = proposals([
+    ['2026-08-10', 'memory'],
+    ['2026-08-15', 'skill'],
+  ]);
+  assert.deepEqual(
+    R.listUnderExploredComponents({ date: D, proposals: recent }),
+    ['procedure', 'remote_service', 'collaboration', 'metaweb', 'metaapp'],
+  );
+  assert.deepEqual(
+    R.listUnderExploredComponents({ date: D, proposals: recent, dominantComponent: 'memory' }),
+    ['procedure', 'remote_service', 'collaboration', 'metaweb', 'metaapp'],
+  );
+  // 31 days before D — outside the 30-day lookback.
+  assert.deepEqual(
+    R.listUnderExploredComponents({ date: D, proposals: [...recent, ...proposals([['2026-08-01', 'metaapp']])] }),
+    ['procedure', 'remote_service', 'collaboration', 'metaweb', 'metaapp'],
+  );
+  // All seven used in-window → fall back to the structural list.
+  const allSeven = proposals([
+    ['2026-08-05', 'memory'],
+    ['2026-08-08', 'procedure'],
+    ['2026-08-11', 'skill'],
+    ['2026-08-14', 'remote_service'],
+    ['2026-08-17', 'collaboration'],
+    ['2026-08-20', 'metaweb'],
+    ['2026-08-23', 'metaapp'],
+  ]);
+  assert.deepEqual(
+    R.listUnderExploredComponents({ date: D, proposals: allSeven }),
+    ['skill', 'remote_service', 'collaboration', 'metaapp'],
+  );
+});
+
+test('exploration directive renders the exact no_acceptance text', () => {
+  const directive = R.renderExplorationDirective({
+    reason: 'no_acceptance',
+    underExplored: ['skill', 'metaapp'],
+  });
+  assert.equal(directive, [
+    '## 探索提示(你的自我进化最近停滞了:连续三周有活动,但没有新的能力通过验证或固化)',
+    '最近 30 天里你还没有在这些方向上出过练习:skill(调用或组合技能)、metaapp(使用或发布 MetaApp)…',
+    '今晚的 practice_proposals 里,至少一条的 component 要从上面这些方向里选;另一条照常针对记录在案的薄弱点。',
+    '出处规则不变:每条提案仍然必须有 target_refs,risk_class 照实填写;找不到有出处的目标时,宁可少出一条,也不要编造。',
+  ].join('\n'));
+});
+
+test('exploration directive names the dominant component for a collapse', () => {
+  const directive = R.renderExplorationDirective({
+    reason: 'component_collapse',
+    underExplored: ['skill', 'metaapp'],
+    dominantComponent: 'memory',
+  });
+  assert.ok(
+    directive.startsWith('## 探索提示(你的自我进化最近停滞了:最近两周的练习都集中在 memory(整理与运用记忆))'),
+    directive,
+  );
+});
+
+test('compliance is null when not directed, else follows the proposals', () => {
+  const directed = { directed: true, underExplored: ['skill'] };
+  assert.equal(R.judgeExplorationCompliance({ ...directed, directed: false, proposals: [{ component: 'skill' }] }), null);
+  assert.equal(R.judgeExplorationCompliance({ ...directed, proposals: [{ component: 'skill' }] }), true);
+  assert.equal(R.judgeExplorationCompliance({ ...directed, proposals: [{ component: 'memory' }] }), false);
+  assert.equal(R.judgeExplorationCompliance({ ...directed, proposals: [] }), false);
+});
+
+test('approval ordering partitions under-explored first only while stalled', () => {
+  const m1 = { id: 'm1', component: 'memory' };
+  const s1 = { id: 's1', component: 'skill' };
+  const m2 = { id: 'm2', component: 'memory' };
+  const r1 = { id: 'r1', component: 'remote_service' };
+  const input = [m1, s1, m2, r1];
+  assert.deepEqual(
+    R.orderPracticeProposalsForApproval(input, { stalled: true, underExplored: ['skill', 'remote_service'] })
+      .map((item) => item.id),
+    ['s1', 'r1', 'm1', 'm2'],
+  );
+  assert.deepEqual(
+    R.orderPracticeProposalsForApproval(input, { stalled: false, underExplored: ['skill', 'remote_service'] })
+      .map((item) => item.id),
+    ['m1', 's1', 'm2', 'r1'],
+  );
+});
