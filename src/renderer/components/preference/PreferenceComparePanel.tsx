@@ -196,6 +196,11 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
   }, [roundPinId]);
 
   useEffect(() => {
+    // Cache-first render; the refresh broadcasts preference:update, which the
+    // subscription turns into a re-load, so an open panel catches up to the
+    // chain (e.g. a reveal confirming or the round settling) without a manual
+    // refresh action.
+    preferenceService.refresh().catch(() => undefined);
     void load();
     const unsubscribe = preferenceService.subscribe(() => void load());
     const timer = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 30_000);
