@@ -771,6 +771,9 @@ export class SqliteStore {
       addProposalColumn('status', `status TEXT NOT NULL DEFAULT 'pending'`);
       addProposalColumn('rationale', 'rationale TEXT');
       addProposalColumn('expected_evidence', 'expected_evidence TEXT');
+      // RRSI P4: which practice component the proposal exercises; unknown
+      // values store NULL (nullable, no default — pre-P4 rows read null).
+      addProposalColumn('component', 'component TEXT');
       addProposalColumn('scheduled_task_id', 'scheduled_task_id TEXT');
       addProposalColumn('run_id', 'run_id TEXT');
       addProposalColumn('outcome_summary', 'outcome_summary TEXT');

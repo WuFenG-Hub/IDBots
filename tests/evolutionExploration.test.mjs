@@ -239,3 +239,92 @@ test('approval ordering partitions under-explored first only while stalled', () 
     ['m1', 's1', 'm2', 'r1'],
   );
 });
+
+// ---------------------------------------------------------------------------
+// component on practice proposals: parse, prompt schema, store (RRSI P4 Task 2)
+// ---------------------------------------------------------------------------
+
+const DREAM_VERSION_BEFORE = 17;
+const LONG_IDENTITY = `我是一个认真严谨的 MetaBot。${'我先验证再交付。'.repeat(30)}`;
+
+const proposalPayload = (component) => JSON.stringify({
+  daily_summary: '今天复盘了自己的薄弱点。',
+  sections: {},
+  work_reviews: [],
+  important_memories: [],
+  value_lessons: [],
+  self_identity: LONG_IDENTITY,
+  practice_proposals: [
+    {
+      title: '对比实验:技能组合练习',
+      prompt: '完整且自包含的练习指令',
+      rationale: '上周组合调用失败',
+      target_refs: ['draft:1'],
+      expected_evidence: '两种组合方式的结果差异',
+      risk_class: 'read_only',
+      ...(component !== undefined ? { component } : {}),
+    },
+  ],
+});
+
+test('parseDreamOutput normalizes the proposal component', () => {
+  const { parseDreamOutput } = require('../dist-electron/main/libs/dreamPrompt.js');
+  const componentOf = (payload) => {
+    const result = parseDreamOutput(payload);
+    assert.equal(result.ok, true);
+    return result.output.practiceProposals[0].component;
+  };
+  assert.equal(componentOf(proposalPayload('Skill')), 'skill');
+  assert.equal(componentOf(proposalPayload('wallet')), null);
+  assert.equal(componentOf(proposalPayload(undefined)), null);
+});
+
+test('buildDreamPrompt carries the component field and the guidance sentence', () => {
+  const { buildDreamPrompt } = require('../dist-electron/main/libs/dreamPrompt.js');
+  const { user } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    activity: { sessions: [], taskRuns: [], orderCount: 0 },
+  });
+  assert.ok(user.includes('"component": "这条练习锻炼的方向'), user);
+  assert.ok(user.includes('每条提案都要填写 component(七选一),写出它实际锻炼的方向;'), user);
+});
+
+test('DREAM_VERSION bumped exactly once for P4', () => {
+  const { DREAM_VERSION } = require('../dist-electron/main/libs/dreamPrompt.js');
+  assert.equal(DREAM_VERSION, DREAM_VERSION_BEFORE + 1);
+});
+
+test('store: component persists normalized; unknown and legacy rows read null', async () => {
+  const { createCoworkStore, createSqliteStore } = await import('./memoryTestUtils.mjs');
+  const { db, store, userDataPath, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    coworkStore.insertDreamPracticeProposals(5, '2026-08-02', [
+      { title: '练习远程服务', prompt: '指令', targetRefs: ['draft:1'], component: 'remote_service' },
+      { title: '练习未知方向', prompt: '指令', targetRefs: ['draft:2'], component: 'nope' },
+      { title: '缺省方向', prompt: '指令', targetRefs: ['draft:3'] },
+    ]);
+    // A row written by an older build (raw SQL, no component value).
+    db.run(
+      `INSERT INTO dream_practice_proposals (metabot_id, dream_date, title, prompt, created_at, updated_at)
+       VALUES (5, '2026-08-01', '旧行', '指令', 1, 1)`,
+    );
+
+    const rows = coworkStore.listDreamPracticeProposals(5);
+    const byTitle = new Map(rows.map((row) => [row.title, row]));
+    assert.equal(byTitle.get('练习远程服务').component, 'remote_service');
+    assert.equal(byTitle.get('练习未知方向').component, null);
+    assert.equal(byTitle.get('缺省方向').component, null);
+    assert.equal(byTitle.get('旧行').component, null, 'rows written before the column existed read null');
+
+    // Re-running the whole schema pass keeps the column exactly once.
+    store.initializeTables(userDataPath);
+    store.initializeTables(userDataPath);
+    const after = coworkStore.listDreamPracticeProposals(5);
+    assert.equal(after.length, 4);
+    assert.equal(after.find((row) => row.title === '练习远程服务').component, 'remote_service');
+  } finally {
+    cleanup();
+  }
+});

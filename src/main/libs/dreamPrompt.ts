@@ -10,6 +10,7 @@ import { formatBotWorkspaceDate } from './botWorkspace';
 import { estimateCoworkTextTokens } from './coworkContextBudget';
 import { stripLoneSurrogates, truncateUtf16Units } from './llmSafeText';
 import { FALSIFIED_PROMPT_MAX_ITEMS } from './capabilityGateRegularizers';
+import { normalizePracticeComponent, type PracticeComponent } from './evolutionExploration';
 import type { DreamActivityChunk } from './dreamFragments';
 import {
   computeDreamBackoffDelayMs,
@@ -52,8 +53,9 @@ export const PRACTICE_PROPOSALS_MAX_PER_NIGHT = 2;
  * Rows written before versioning existed read as 0.
  * v16: RSI P0 — prediction calibration digest + prompt-layer rollback notice
  * ride the prompt as new input sections; dream writes are now snapshotted.
- * v17: RRSI P1 — falsified-hypothesis section rides the prompt; capability drafts insert with duplicate / falsified checks. */
-export const DREAM_VERSION = 17;
+ * v17: RRSI P1 — falsified-hypothesis section rides the prompt; capability drafts insert with duplicate / falsified checks.
+ * v18: RRSI P4 — practice proposals carry a component; stalled bots get an exploration directive section. */
+export const DREAM_VERSION = 18;
 
 const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks', 'group_tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];
@@ -176,6 +178,8 @@ export interface DreamPracticeProposal {
   targetRefs: string[];
   expectedEvidence: string;
   riskClass: DreamPracticeRiskClass;
+  /** Which practice component the task exercises (RRSI P4); unknown values parse to null. */
+  component: PracticeComponent | null;
 }
 
 /**
@@ -807,6 +811,7 @@ export function buildDreamPrompt(input: {
     '      "rationale": "这个练习针对哪条记录在案的薄弱点/失败/不确定性",',
     '      "target_refs": ["该练习针对的记录出处引用,如 draft:<id> / procedure:<id> / surf:<runId> / date:<YYYY-MM-DD>;至少一条,没有出处的提案会被丢弃"],',
     '      "expected_evidence": "什么样的可观察结果算是有信息量的答案",',
+    '      "component": "这条练习锻炼的方向,七选一:memory / procedure / skill / remote_service / collaboration / metaweb / metaapp",',
     '      "risk_class": "read_only(只读) / interact_local(本地交互) / chain_write(写链) 三选一,必填"',
     '    }',
     '  ],',
@@ -817,7 +822,7 @@ export function buildDreamPrompt(input: {
     '关于人类逐条消息评价:会话里你的回复若带〔人类评价:赞〕标记,表示人类明确认可这条回复——总结它具体好在哪里,把可复用的做法蒸馏进 important_memories 或写进 work_reviews;若带〔人类评价:踩〕标记,表示人类不认可——work_reviews 与 value_lessons 必须正视这些负反馈,不得回避;附有〔人类留言〕时,留言是改进的第一手依据(ground truth),要对照留言给出具体改进方向。',
     '关于知识点(knowledge_points):只提炼「对未来同类任务有预判帮助、可被复用」的知识点——要么是正面做法(know_how:下次该这么做),要么是坑/反例(pitfall:这个踩过,千万别再踩),要么是通用原则(principle)。不要把今天的琐碎流水、或只对本次有效的临时细节写成知识点。若上方「我已有的知识点」里有某条的结论今天被证伪、补充或修正,请用与那条完全相同的 topic 输出更新版本(系统会按 topic 匹配并升版本);如果是全新的知识点,给一个独立的新 topic。没有值得提炼的就给空数组,不要硬凑。',
     '关于能力候选(capability_learnings):只提炼今天「重复出现过、或验证成功、值得沉淀为可复用技能/工作流/工具模式」的能力,最多 5 条;每条要具体、可操作,能指导下次同类任务,不要写泛泛的自我评价或琐碎流水;没有值得沉淀的就给空数组。',
-    `关于练习提案(practice_proposals,每晚最多 ${PRACTICE_PROPOSALS_MAX_PER_NIGHT} 条):只针对记录在案的薄弱点、未解决的失败或不确定性出题,绝不提泛泛的「提升某方面能力」;每条提案必须自包含(练习会话从零开始,没有这次梦的上下文);优先设计判别式实验(结果能区分两种相互竞争的解释)和此前失败任务的对比/压力变体;risk_class 必填;已被活跃 procedure 覆盖(use_count > 0)且近期没有失败的能力不要再出题;没有合适目标就给空数组。`,
+    `关于练习提案(practice_proposals,每晚最多 ${PRACTICE_PROPOSALS_MAX_PER_NIGHT} 条):只针对记录在案的薄弱点、未解决的失败或不确定性出题,绝不提泛泛的「提升某方面能力」;每条提案必须自包含(练习会话从零开始,没有这次梦的上下文);优先设计判别式实验(结果能区分两种相互竞争的解释)和此前失败任务的对比/压力变体;risk_class 必填;已被活跃 procedure 覆盖(use_count > 0)且近期没有失败的能力不要再出题;每条提案都要填写 component(七选一),写出它实际锻炼的方向;没有合适目标就给空数组。`,
     'About durability: important_memories, value_lessons and work_reviews are for durable facts, boundaries and lessons that will STILL be useful next week — a hard rule that keeps applying, an approach validated enough to reuse, a boundary that prevents a known pitfall. Do not record routine daily trivia: a one-off event that will not matter in a week does not belong in these fields. If nothing clears the bar, return an empty array instead of padding.',
     '关于出处(grounding):daily_summary 和 sections 中的具体断言(谁、做了什么、结果如何)必须能在上方记录中找到出处;引用会话或任务时,使用它们的原标题「」;宁可少写一句,也不可编造没有记录支撑的细节。',
     '注意:work_reviews 最多 5 条,且升/降温评价只写人类主人;其他 Bot 的判断写进 impression_updates 的 capabilityTags 与 collaborationFacts(必须带 taskId、title、以及证据里出现过的 PinID,不要编造)。value_lessons 最多 3 条,impression_updates 最多 20 条,knowledge_points 最多 6 条,capability_learnings 最多 5 条;印象更新只允许使用上面明确列出的 subjectGlobalMetaId、episodeIds 和 evidenceIds,不能凭名字猜 ID,不能把 Boss/Twin/Friend 等硬关系写入印象;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写;sections 里不要输出"没有记录/没有互动"之类的占位内容,没有该类记录的键应整个不出现。',
@@ -1103,6 +1108,7 @@ export function parseDreamOutput(raw: string): DreamParseResult {
         ? rawRiskClass
         : 'read_only';
       const rawExpectedEvidence = entry.expected_evidence ?? entry.expectedEvidence;
+      const rawComponent = entry.component;
       practiceProposals.push({
         title,
         prompt,
@@ -1110,6 +1116,7 @@ export function parseDreamOutput(raw: string): DreamParseResult {
         targetRefs,
         expectedEvidence: typeof rawExpectedEvidence === 'string' ? rawExpectedEvidence.trim() : '',
         riskClass,
+        component: normalizePracticeComponent(rawComponent),
       });
     }
   }
