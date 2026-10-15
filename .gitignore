@@ -436,6 +436,7 @@ man_base_data_pebble/
 !tests/capabilityProspectiveGate.test.mjs
 !tests/rrsiEvolutionReport.test.mjs
 !tests/promotionBudget.test.mjs
+!tests/procedureProbation.test.mjs
 !tests/guidanceBudget.test.mjs
 !tests/implicitSignalsGrounding.test.mjs
 !tests/memoryHygieneService.test.mjs

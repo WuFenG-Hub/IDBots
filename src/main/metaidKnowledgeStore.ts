@@ -3,6 +3,8 @@ import { v4 as uuidv4 } from 'uuid';
 import type { SqliteDatabase as Database } from './sqliteTypes';
 import { tokenizeKnowledgeBaseText } from './libs/knowledgeBaseText';
 import { truncateUtf16Units } from './libs/llmSafeText';
+import { normalizeProcedureHotReason, type ProcedureHotReason } from './libs/procedureProbation';
+import { PROCEDURE_PROMPT_MAX_ITEMS } from './libs/procedurePromptBlocks';
 
 /**
  * Knowledge-point anchored memory ("经验/知识点").
@@ -136,6 +138,12 @@ export interface MetaIDProcedureEntry {
   version: number;
   createdAt: number;
   updatedAt: number;
+  /** RRSI P2: false = recall-only (probation / gated out of the hot layer). */
+  hotEligible: boolean;
+  /** When the procedure last became hot (null = never hot). */
+  hotSince: number | null;
+  /** Why a recall-only procedure is not hot (null while hot). */
+  hotReason: ProcedureHotReason | null;
 }
 
 export interface UpsertMetaIDProcedureInput {
@@ -155,6 +163,9 @@ export interface UpsertMetaIDProcedureResult {
   entry: MetaIDProcedureEntry;
   created: boolean;
   revised: boolean;
+  /** RRSI P2: the procedure entered (or stays in) agent probation — open a
+   * probation draft so the dream gate judges it before it turns hot. */
+  needsGate: boolean;
 }
 
 export interface ListMetaIDProcedureOptions {
@@ -351,6 +362,17 @@ export function ensureMetaIDKnowledgeSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_metaid_knowledge_procedures_metabot_updated
       ON metaid_knowledge_procedures(metabot_id, status, updated_at DESC);
   `);
+
+  // RRSI P2 hot-layer columns (design §6.2 P2.2): PRAGMA-guarded and additive;
+  // the DEFAULT 1 grandfathers every pre-migration procedure as hot-eligible.
+  try {
+    const procedureCols = (db.exec('PRAGMA table_info(metaid_knowledge_procedures)')[0]?.values?.map((row) => row[1]) || []) as string[];
+    if (!procedureCols.includes('hot_eligible')) db.run('ALTER TABLE metaid_knowledge_procedures ADD COLUMN hot_eligible INTEGER NOT NULL DEFAULT 1');
+    if (!procedureCols.includes('hot_since')) db.run('ALTER TABLE metaid_knowledge_procedures ADD COLUMN hot_since INTEGER');
+    if (!procedureCols.includes('hot_reason')) db.run('ALTER TABLE metaid_knowledge_procedures ADD COLUMN hot_reason TEXT');
+  } catch (error) {
+    console.warn('migrate metaid_knowledge_procedures hot columns:', error);
+  }
 }
 
 const asText = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
@@ -522,6 +544,9 @@ interface ProcedureRow {
   version: number | string;
   created_at: number | string;
   updated_at: number | string;
+  hot_eligible?: number | string | null;
+  hot_since?: number | string | null;
+  hot_reason?: string | null;
 }
 
 const MAX_PROCEDURE_TITLE = 300;
@@ -568,6 +593,9 @@ function rowToProcedure(row: ProcedureRow): MetaIDProcedureEntry {
     version: Math.max(1, asInteger(row.version, 1)),
     createdAt: asInteger(row.created_at),
     updatedAt: asInteger(row.updated_at),
+    hotEligible: Number(row.hot_eligible ?? 1) !== 0,
+    hotSince: row.hot_since == null ? null : asInteger(row.hot_since),
+    hotReason: normalizeProcedureHotReason(row.hot_reason),
   };
 }
 
@@ -1130,6 +1158,14 @@ export class MetaIDKnowledgeStore {
    * Upsert a procedure ("经验") by title fingerprint: a fresh title inserts,
    * an existing title rewrites in place (version bump) — that dedupe keeps
    * the dream/runtime paths from stacking near-duplicates.
+   *
+   * RRSI P2 hot-layer semantics by origin (design §6.2 P2.2): an `agent`
+   * insert or a revision of an ARCHIVED row re-activates recall-only on
+   * probation (closes the resurrection hole); an agent revision of a hot
+   * procedure stays hot; an agent revision of a non-hot procedure goes back
+   * to probation unless its reason is `unused` / `situational` (those states
+   * are P3/P5 lifecycle verdicts, not gate tickets); `dream` / `user` writes
+   * are always hot. `needsGate` on the result flags probation entry.
    */
   upsertProcedure(input: UpsertMetaIDProcedureInput): UpsertMetaIDProcedureResult {
     const metabotId = asInteger(input.metabotId);
@@ -1155,40 +1191,77 @@ export class MetaIDKnowledgeStore {
 
     if (!existing) {
       const id = uuidv4();
+      const agentProbation = origin === 'agent';
       this.db.run(
         `INSERT INTO metaid_knowledge_procedures (
            id, metabot_id, title, title_fingerprint, trigger_text, steps_json,
            pitfalls_json, source_pin_ids_json, category, tags_json, confidence,
-           status, origin, use_count, last_used_at, version, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, NULL, 1, ?, ?)`,
+           status, origin, use_count, last_used_at, version, created_at, updated_at,
+           hot_eligible, hot_since, hot_reason
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, NULL, 1, ?, ?, ?, ?, ?)`,
         [
           id, metabotId, title, titleFingerprint, triggerText, serializeTags(steps),
           serializeTags(pitfalls), serializeTags(sourcePinIds), category, serializeTags(tags),
           confidence, origin, now, now,
+          agentProbation ? 0 : 1,
+          agentProbation ? null : now,
+          agentProbation ? 'probation' : null,
         ],
       );
       this.saveDb();
       const entry = this.getProcedure(id);
       if (!entry) throw new Error('failed to load the procedure after insert');
-      return { entry, created: true, revised: false };
+      return { entry, created: true, revised: false, needsGate: entry.hotEligible === false && entry.hotReason === 'probation' };
+    }
+
+    // Hot-column bookkeeping per the P2 semantics table; computed in JS so
+    // every branch is explicit about what it preserves.
+    const existingHot = Number(existing.hot_eligible ?? 1) !== 0;
+    const existingReason = normalizeProcedureHotReason(existing.hot_reason);
+    const existingHotSince = existing.hot_since == null ? null : asInteger(existing.hot_since);
+    let nextHotEligible: 0 | 1;
+    let nextHotReason: string | null;
+    let nextHotSince: number | null;
+    if (origin !== 'agent') {
+      nextHotEligible = 1;
+      nextHotReason = null;
+      nextHotSince = existingHotSince ?? now;
+    } else if (existing.status === 'archived') {
+      nextHotEligible = 0;
+      nextHotReason = 'probation';
+      nextHotSince = null;
+    } else if (existingHot) {
+      nextHotEligible = 1;
+      nextHotReason = null;
+      nextHotSince = existingHotSince;
+    } else if (existingReason === 'unused' || existingReason === 'situational') {
+      nextHotEligible = 0;
+      nextHotReason = existingReason;
+      nextHotSince = existingHotSince;
+    } else {
+      nextHotEligible = 0;
+      nextHotReason = 'probation';
+      nextHotSince = null;
     }
 
     this.db.run(
       `UPDATE metaid_knowledge_procedures
        SET title = ?, trigger_text = ?, steps_json = ?, pitfalls_json = ?, source_pin_ids_json = ?,
            category = ?, tags_json = ?, confidence = ?, origin = ?, status = 'active',
-           version = ?, updated_at = ?
+           version = ?, updated_at = ?,
+           hot_eligible = ?, hot_reason = ?, hot_since = ?
        WHERE id = ?`,
       [
         title, triggerText, serializeTags(steps), serializeTags(pitfalls), serializeTags(sourcePinIds),
         category, serializeTags(tags), confidence, origin,
-        asInteger(existing.version, 1) + 1, now, existing.id,
+        asInteger(existing.version, 1) + 1, now,
+        nextHotEligible, nextHotReason, nextHotSince, existing.id,
       ],
     );
     this.saveDb();
     const entry = this.getProcedure(existing.id);
     if (!entry) throw new Error('failed to load the procedure after update');
-    return { entry, created: false, revised: true };
+    return { entry, created: false, revised: true, needsGate: entry.hotEligible === false && entry.hotReason === 'probation' };
   }
 
   getProcedure(id: string): MetaIDProcedureEntry | null {
@@ -1246,6 +1319,68 @@ export class MetaIDKnowledgeStore {
     );
     this.saveDb();
     return this.getProcedure(row.id);
+  }
+
+  /**
+   * RRSI P2 hot-eligibility switch (design §6.2 P2.2): the gate, re-review,
+   * and rollback flip eligibility on ACTIVE procedures only — an
+   * agent-authored procedure is never archived by a gate outcome. Eligibility
+   * is not a content revision, so `updated_at` stays untouched. Turning hot
+   * stamps `hot_since` (first time or fresh re-entry); turning cold records
+   * the reason. Returns whether a row changed.
+   */
+  setProcedureHotEligibility(
+    id: string,
+    input: { eligible: boolean; reason: ProcedureHotReason | null; atMs?: number },
+  ): boolean {
+    const procedureId = asText(id);
+    if (!procedureId) return false;
+    const atMs = asInteger(input.atMs ?? this.now());
+    const row = this.getOne<ProcedureRow>(
+      `SELECT * FROM metaid_knowledge_procedures WHERE id = ? AND status = 'active' LIMIT 1`,
+      [procedureId],
+    );
+    if (!row) return false;
+    if (input.eligible) {
+      const wasHot = Number(row.hot_eligible ?? 1) !== 0;
+      const existingHotSince = row.hot_since == null ? null : asInteger(row.hot_since);
+      this.db.run(
+        `UPDATE metaid_knowledge_procedures
+         SET hot_eligible = 1, hot_reason = NULL, hot_since = ?
+         WHERE id = ? AND status = 'active'`,
+        [wasHot ? (existingHotSince ?? atMs) : atMs, procedureId],
+      );
+    } else {
+      this.db.run(
+        `UPDATE metaid_knowledge_procedures
+         SET hot_eligible = 0, hot_reason = ?
+         WHERE id = ? AND status = 'active'`,
+        [normalizeProcedureHotReason(input.reason), procedureId],
+      );
+    }
+    const changed = (this.db.getRowsModified?.() || 0) > 0;
+    if (changed) {
+      this.saveDb();
+    }
+    return changed;
+  }
+
+  /**
+   * RRSI P2 hot layer (design §6.2 P2.3): active, hot-eligible procedures —
+   * the only ones injected as always-on. Recall-only rows stay reachable
+   * through listProcedures (the procedure_recall tool).
+   */
+  listHotProcedures(metabotId: number, options?: { limit?: number }): MetaIDProcedureEntry[] {
+    const id = asInteger(metabotId);
+    if (!id) return [];
+    const limit = Math.min(200, Math.max(1, asInteger(options?.limit, PROCEDURE_PROMPT_MAX_ITEMS)));
+    return this.getAll<ProcedureRow>(
+      `SELECT * FROM metaid_knowledge_procedures
+       WHERE metabot_id = ? AND status = 'active' AND hot_eligible = 1
+       ORDER BY updated_at DESC, id DESC
+       LIMIT ?`,
+      [id, limit],
+    ).map(rowToProcedure);
   }
 
   /** Keyword search across title + trigger + steps for the recall tool / hot layer. */
