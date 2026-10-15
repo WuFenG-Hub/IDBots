@@ -5,6 +5,15 @@ import { tokenizeKnowledgeBaseText } from './libs/knowledgeBaseText';
 import { truncateUtf16Units } from './libs/llmSafeText';
 import { normalizeProcedureHotReason, type ProcedureHotReason } from './libs/procedureProbation';
 import { PROCEDURE_PROMPT_MAX_ITEMS } from './libs/procedurePromptBlocks';
+import { queryHotLayerUsageStats } from './libs/hotLayerUsageQueries';
+import {
+  HOT_LAYER_FRESH_SLOTS,
+  HOT_LAYER_GRACE_DAYS,
+  HOT_LAYER_UTILITY_WINDOW_DAYS,
+  rankHotLayerItems,
+} from './libs/hotLayerPruning';
+import { shiftDateKey } from './libs/predictionLedger';
+import { formatBotWorkspaceDate } from './libs/botWorkspace';
 
 /**
  * Knowledge-point anchored memory ("经验/知识点").
@@ -1371,14 +1380,57 @@ export class MetaIDKnowledgeStore {
    * RRSI P2 hot layer (design §6.2 P2.3): active, hot-eligible procedures —
    * the only ones injected as always-on. Recall-only rows stay reachable
    * through listProcedures (the procedure_recall tool).
+   * RRSI P3 utility ordering (design §6.3 P3.2): ranked by applied nights in
+   * the trailing 30 days, then recency, with one slot reserved for a newcomer
+   * still inside the 14-day grace period.
    */
-  listHotProcedures(metabotId: number, options?: { limit?: number }): MetaIDProcedureEntry[] {
+  listHotProcedures(metabotId: number, options?: { limit?: number; nowMs?: number }): MetaIDProcedureEntry[] {
     const id = asInteger(metabotId);
     if (!id) return [];
     const limit = Math.min(200, Math.max(1, asInteger(options?.limit, PROCEDURE_PROMPT_MAX_ITEMS)));
-    return this.getAll<ProcedureRow>(
+    const pool = this.getAll<ProcedureRow>(
       `SELECT * FROM metaid_knowledge_procedures
        WHERE metabot_id = ? AND status = 'active' AND hot_eligible = 1
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 200`,
+      [id],
+    ).map(rowToProcedure);
+    if (pool.length === 0) return [];
+    const nowMs = options?.nowMs ?? this.now();
+    const today = formatBotWorkspaceDate(new Date(nowMs));
+    const stats = queryHotLayerUsageStats(this.db, {
+      metabotId: id,
+      kind: 'procedure',
+      sinceDate: shiftDateKey(today, -(HOT_LAYER_UTILITY_WINDOW_DAYS - 1)),
+      untilDate: today,
+      itemIds: pool.map((entry) => entry.id),
+    });
+    return rankHotLayerItems(
+      pool.map((entry) => ({
+        entry,
+        key: entry.id,
+        kind: 'procedure' as const,
+        hotSinceMs: entry.hotSince ?? entry.createdAt,
+        appliedNights: stats.get(entry.id)?.appliedNights ?? 0,
+        exposedNights: stats.get(entry.id)?.exposedNights ?? 0,
+      })),
+      { cap: limit, nowMs, freshSlots: HOT_LAYER_FRESH_SLOTS, graceDays: HOT_LAYER_GRACE_DAYS },
+    ).map((candidate) => candidate.entry);
+  }
+
+  /**
+   * RRSI P3 re-entry pool (design §6.3 P3.3): active procedures demoted for
+   * never being applied — the ONLY hot_reason that usage evidence can make
+   * hot again. gate_rejected / demoted / rollback / situational / probation
+   * never re-enter through this path.
+   */
+  listUnusedProcedures(metabotId: number, options?: { limit?: number }): MetaIDProcedureEntry[] {
+    const id = asInteger(metabotId);
+    if (!id) return [];
+    const limit = Math.min(200, Math.max(1, asInteger(options?.limit, 200)));
+    return this.getAll<ProcedureRow>(
+      `SELECT * FROM metaid_knowledge_procedures
+       WHERE metabot_id = ? AND status = 'active' AND hot_eligible = 0 AND hot_reason = 'unused'
        ORDER BY updated_at DESC, id DESC
        LIMIT ?`,
       [id, limit],

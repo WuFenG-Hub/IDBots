@@ -15,6 +15,7 @@ export const LONG_IDENTITY = `我是一个认真严谨的 MetaBot。${'我先验
 export const MARKERS = {
   validation: '能力验证',
   reconciliation: '记忆核对',
+  usageAudit: '使用核查',
 };
 
 export function loadDreamServiceModule() {
@@ -120,6 +121,13 @@ export function createChatRouter() {
   return {
     calls,
     on(marker, responder) {
+      // Re-registering a marker replaces its responder in place (registration
+      // order unchanged) so a test can override the harness defaults.
+      const existing = responders.find((candidate) => candidate.marker === marker);
+      if (existing) {
+        existing.responder = responder;
+        return;
+      }
       responders.push({ marker, responder });
     },
     setFallback(responder) {
@@ -190,6 +198,10 @@ export async function createDreamHarness(options = {}) {
     deps.capabilityGate = options.capabilityGate;
   }
   const service = new DreamService(deps);
+  // RRSI P3: the usage-audit pass fires on nights with exposures — answer it
+  // with an empty verdict list by default so the fallback never serves dream
+  // JSON to the audit parser; tests override via router.on(MARKERS.usageAudit).
+  router.on(MARKERS.usageAudit, () => ({ items: [] }));
   return {
     db,
     coworkStore,

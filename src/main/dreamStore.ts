@@ -14,6 +14,7 @@ import {
   PREDICTION_STATUSES,
 } from './libs/predictionLedger';
 import { ROLLBACK_MAX_SNAPSHOTS_PER_BOT } from './libs/promptLayerRollback';
+import { queryHotLayerUsageStats, type HotLayerUsageStats } from './libs/hotLayerUsageQueries';
 
 /**
  * Dream consolidation storage layer.
@@ -463,6 +464,17 @@ const parseSessionRefs = (raw: string | null | undefined): DailySummarySessionRe
     return [];
   }
 };
+
+/** One hot_layer_usage row for a (bot, date): how the item reached the model
+ * and whether the P3 usage audit judged it applied (null = unaudited). */
+export interface HotLayerExposureRow {
+  kind: 'technique' | 'procedure';
+  itemId: string;
+  exposure: 'hot' | 'recall';
+  exposureCount: number;
+  applied: boolean | null;
+  auditedAt: number | null;
+}
 
 export class DreamStore {
   constructor(
@@ -1860,6 +1872,95 @@ export class DreamStore {
       WHERE d.metabot_id = ? AND d.promoted_procedure_id IS NOT NULL AND p.status = 'active'
         AND COALESCE(p.hot_eligible, 1) = 1
     `, [metabotId]).map((row) => row.promoted_procedure_id);
+  }
+
+  // ── RRSI P3: usage evidence over hot_layer_usage (design §6.3) ────────────
+
+  /**
+   * The bot's exposure rows for one local date, hot injections first, then
+   * repeat count, kind, id — the usage-audit pass reads its item list here.
+   */
+  listHotLayerExposures(metabotId: number, usageDate: string): HotLayerExposureRow[] {
+    const id = Number(metabotId);
+    const date = String(usageDate ?? '').trim();
+    if (!Number.isInteger(id) || id <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
+    try {
+      return this.getAll<{
+        item_kind: 'technique' | 'procedure';
+        item_id: string;
+        exposure: 'hot' | 'recall';
+        exposure_count: number | string;
+        applied: number | null;
+        audited_at: number | string | null;
+      }>(`
+        SELECT item_kind, item_id, exposure, exposure_count, applied, audited_at
+        FROM hot_layer_usage
+        WHERE metabot_id = ? AND usage_date = ?
+        ORDER BY exposure = 'hot' DESC, exposure_count DESC, item_kind ASC, item_id ASC
+      `, [id, date]).map((row) => ({
+        kind: row.item_kind,
+        itemId: String(row.item_id),
+        exposure: row.exposure,
+        exposureCount: Math.max(0, Math.floor(Number(row.exposure_count) || 0)),
+        applied: row.applied == null ? null : Number(row.applied) === 1,
+        auditedAt: row.audited_at == null ? null : Number(row.audited_at),
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('no such table')) return [];
+      throw error;
+    }
+  }
+
+  /**
+   * Write the usage-audit verdicts back into the day's exposure rows
+   * (applied / evidence / audited_at). Re-auditing the same date overwrites,
+   * so a version-repair re-run is idempotent. Returns rows changed.
+   */
+  recordHotLayerUsageVerdicts(
+    metabotId: number,
+    usageDate: string,
+    verdicts: Array<{
+      kind: 'technique' | 'procedure';
+      itemId: string;
+      applied: boolean;
+      evidence: { labels: string[]; channels: Array<'owner' | 'external'> };
+    }>,
+    atMs: number,
+  ): number {
+    const id = Number(metabotId);
+    const date = String(usageDate ?? '').trim();
+    const stamp = Math.floor(Number(atMs));
+    if (!Number.isInteger(id) || id <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(stamp)) return 0;
+    const rows = (verdicts ?? []).filter((verdict) =>
+      (verdict?.kind === 'technique' || verdict?.kind === 'procedure')
+      && typeof verdict?.itemId === 'string' && verdict.itemId.length > 0);
+    if (rows.length === 0) return 0;
+    let changed = 0;
+    for (const verdict of rows) {
+      this.db.run(
+        `UPDATE hot_layer_usage
+         SET applied = ?, evidence = ?, audited_at = ?
+         WHERE metabot_id = ? AND usage_date = ? AND item_kind = ? AND item_id = ?`,
+        [
+          verdict.applied ? 1 : 0,
+          JSON.stringify({ labels: verdict.evidence?.labels ?? [], channels: verdict.evidence?.channels ?? [] }),
+          stamp,
+          id, date, verdict.kind, verdict.itemId,
+        ],
+      );
+      changed += this.db.getRowsModified?.() || 0;
+    }
+    this.saveDb();
+    return changed;
+  }
+
+  /** Trailing-window usage stats per item (shared aggregation helper). */
+  listHotLayerUsageStats(
+    metabotId: number,
+    input: { kind: 'technique' | 'procedure'; sinceDate: string; untilDate: string; itemIds?: readonly string[] },
+  ): Map<string, HotLayerUsageStats> {
+    return queryHotLayerUsageStats(this.db, { metabotId, ...input });
   }
 
   /**

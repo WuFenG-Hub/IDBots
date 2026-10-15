@@ -72,7 +72,7 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
 
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-const shiftDateKey = (todayKey: string, days: number): string => {
+export const shiftDateKey = (todayKey: string, days: number): string => {
   const [year, month, day] = todayKey.split('-').map((part) => Number(part));
   return formatBotWorkspaceDate(new Date(year, (month || 1) - 1, (day || 1) + days));
 };
