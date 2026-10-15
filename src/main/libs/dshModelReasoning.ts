@@ -55,13 +55,17 @@ export interface DshModelReasoningDeclaration {
 // dialect, so both id shapes match.
 const DEEPSEEK_V4_PATTERN = /deepseek-(?:v4|flash)(?:[.\-_]|$)/i;
 
-// `deepseek-chat` is the free-quota relay's (metaid-free) wire id for
+// `deepseek-chat` is the free-quota relay's (metaid-free) legacy wire id for
 // deepseek-v4-flash — the app's own legacy-model migration already treats it
 // as the v4-flash alias (DEEPSEEK_LEGACY_MODEL_MIGRATION_MAP), and pi-ai's
 // installed catalog only lists the v4 ids, so without this alias a relay
 // route would materialize reasoning:false and the effort selector would be
 // dead on the free model.
-const DEEPSEEK_V4_LEGACY_CHAT_ID = 'deepseek-chat';
+// `deepseek-4.1-flash` is the 2026-10-16 relay catalog rename of that same
+// model (chat still routes the old alias server-side). The version segment
+// "4.1" precedes "flash", so DEEPSEEK_V4_PATTERN does not match it — it rides
+// this explicit-id list to keep the same V4 chat-completions dialect.
+const DEEPSEEK_V4_EXPLICIT_IDS = new Set(['deepseek-chat', 'deepseek-4.1-flash']);
 
 const DEEPSEEK_V4_CHAT_COMPLETIONS_DECLARATION: DshModelReasoningDeclaration = {
   reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'max' },
@@ -177,7 +181,7 @@ export function dshModelReasoningDeclaration(
   baseUrl?: string | null,
 ): DshModelReasoningDeclaration | null {
   const bare = bareModelIdOf(modelId);
-  if (DEEPSEEK_V4_PATTERN.test(bare) || bare.toLowerCase() === DEEPSEEK_V4_LEGACY_CHAT_ID) {
+  if (DEEPSEEK_V4_PATTERN.test(bare) || DEEPSEEK_V4_EXPLICIT_IDS.has(bare.toLowerCase())) {
     if (apiFormat !== 'openai') return null;
     return DEEPSEEK_V4_CHAT_COMPLETIONS_DECLARATION;
   }

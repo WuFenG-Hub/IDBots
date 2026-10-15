@@ -155,6 +155,45 @@ test('hydration is skipped for non-DeepSeek models on the same gateway', async (
   assert.equal(request.messages[0].reasoning_content, undefined);
 });
 
+test('hydration applies to the free relay serving deepseek-4.1-flash (2026-10-16 catalog rename)', async () => {
+  // The metaid-free relay's new flagship id carries no thinking field on the
+  // wire when the session runs at the model default, but flash thinks ON by
+  // default — the literal id match (not the v4 pattern) is what qualifies the
+  // request for reasoning pass-back on this provider-name/base-URL-clean
+  // upstream. gemini-3-flash on the same relay must stay excluded.
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { hydrateDeepSeekReasoningForRequest, resetDeepSeekReasoningCache } = __openAICompatProxyTestUtils;
+  resetDeepSeekReasoningCache();
+
+  const relayArgs = ['metaid-free', 'https://www.metaso.network/assist-open-api/v2/assist/llm/v1'];
+  const makeRequest = (model) => ({
+    model,
+    messages: [{
+      role: 'assistant',
+      content: null,
+      tool_calls: [{
+        id: `call_${model.replace(/[^a-z0-9]/g, '_')}`,
+        type: 'function',
+        function: { name: 'Bash', arguments: '{}' },
+      }],
+    }],
+  });
+
+  const flagship = makeRequest('deepseek-4.1-flash');
+  assert.deepEqual(
+    hydrateDeepSeekReasoningForRequest(flagship, ...relayArgs),
+    { ok: true, hydratedCount: 0, placeholderCount: 1 },
+  );
+  assert.equal(flagship.messages[0].reasoning_content, '');
+
+  const otherVendorFlash = makeRequest('gemini-3-flash');
+  assert.deepEqual(
+    hydrateDeepSeekReasoningForRequest(otherVendorFlash, ...relayArgs),
+    { ok: true, hydratedCount: 0, placeholderCount: 0 },
+  );
+  assert.equal(otherVendorFlash.messages[0].reasoning_content, undefined);
+});
+
 // ---------------------------------------------------------------------------
 // Responses API: `reasoning` input items must be emitted for DeepSeek thinking
 // turns (the upstream rejects requests whose tool-call turns lack reasoning).

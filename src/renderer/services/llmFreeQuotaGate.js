@@ -22,6 +22,11 @@ export const FREE_PROVIDER_DISPLAY_NAME = 'IDBots-Free';
  */
 const FREE_PROVIDER_MODEL_DISPLAY_NAMES = {
   'deepseek-chat': 'deepseek-flash',
+  // The 2026-10-16 relay catalog rename: `deepseek-chat` became the public
+  // `deepseek-4.1-flash` (chat still routes the old alias server-side, but the
+  // models list no longer shows it). Same display name as the legacy id — the
+  // two never coexist in one catalog, so no ambiguity in the picker.
+  'deepseek-4.1-flash': 'deepseek-flash',
 };
 
 export function getFreeProviderModelDisplayName(modelId) {
@@ -55,6 +60,15 @@ export function getFreeProviderModelDisplayName(modelId) {
  */
 const FREE_PROVIDER_MODEL_CANONICAL = {
   'deepseek-chat': {
+    contextWindow: 1_000_000,
+    maxOutputTokens: 100_000,
+    supportsImage: false,
+    options: { reasoningEffort: 'max', thinking: { type: 'enabled' } },
+  },
+  // The 2026-10-16 relay catalog flagship (rename of the deepseek-chat alias):
+  // same wire family, so it inherits the exact same client profile — the 1M
+  // window, the 100K declared output ceiling, and effort-max thinking.
+  'deepseek-4.1-flash': {
     contextWindow: 1_000_000,
     maxOutputTokens: 100_000,
     supportsImage: false,
@@ -157,4 +171,67 @@ export function planFreeQuotaProvisioning(input) {
   if (input?.providerConfigured) return 'none';
   if (metabotCount > 0) return 'none';
   return 'bootstrap';
+}
+
+/**
+ * Plan a catalog sync for an already-provisioned free provider from the relay
+ * catalog a quota/bootstrap response reported (2026-10-16: the server grew
+ * from the single `deepseek-chat` to a public multi-model directory, but
+ * existing installs have provider.models frozen at their bootstrap-era list
+ * and planFreeQuotaProvisioning says 'none' for them — only this sync moves
+ * them forward, without a new bootstrap that would reissue the relay key).
+ *
+ * Returns the next `models` array, or null when nothing should be written:
+ * - null when the id sets already match, the relay list is empty/unusable
+ *   (never an empty replace — same convention as mergeSyncedProviderModels),
+ *   or the provider has no stored catalog to compare against.
+ * - The relay list IS the directory: ids it dropped disappear, new ids appear
+ *   in relay order. Surviving ids keep their stored row untouched (user-tuned
+ *   limits/options survive, mirroring mergeSyncedProviderModels); new ids get
+ *   the bootstrap merge semantics — relay-reported limits with the canonical
+ *   client profile overriding known ids (getFreeProviderModelCanonical).
+ */
+export function planFreeProviderCatalogSync(provider, relayModels) {
+  if (!provider || !Array.isArray(provider.models)) {
+    return null;
+  }
+  if (!Array.isArray(relayModels)) {
+    return null;
+  }
+  const seen = new Set();
+  const catalog = [];
+  for (const entry of relayModels) {
+    const id = typeof entry?.id === 'string' ? entry.id.trim() : '';
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    catalog.push(entry);
+  }
+  if (catalog.length === 0) {
+    return null;
+  }
+  const currentIds = new Set(
+    provider.models
+      .map((model) => (typeof model?.id === 'string' ? model.id.trim() : ''))
+      .filter(Boolean),
+  );
+  const changed = catalog.some((entry) => !currentIds.has(entry.id.trim()))
+    || [...currentIds].some((id) => !seen.has(id));
+  if (!changed) {
+    return null;
+  }
+  const storedById = new Map(provider.models.map((model) => [model.id, model]));
+  return catalog.map((entry) => {
+    const id = entry.id.trim();
+    const stored = storedById.get(id);
+    if (stored) {
+      return { ...stored };
+    }
+    return {
+      id,
+      name: getFreeProviderModelDisplayName(id),
+      contextWindow: entry.contextWindow,
+      maxOutputTokens: entry.maxOutputTokens,
+      ...getFreeProviderModelCanonical(id),
+    };
+  });
 }

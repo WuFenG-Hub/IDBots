@@ -21,6 +21,11 @@ test('deepseek-v4 family declares the official chat-completions dialect, vendor 
     // absent from pi-ai's installed catalog, so the declaration is what keeps
     // the effort selector alive on the free model.
     'deepseek-chat',
+    // The 2026-10-16 relay catalog rename of that same model: the version
+    // segment "4.1" precedes "flash", so DEEPSEEK_V4_PATTERN alone misses it —
+    // the explicit-id list carries the declaration.
+    'deepseek-4.1-flash',
+    'deepseek/deepseek-4.1-flash',
   ]) {
     const declaration = dshModelReasoningDeclaration(id, 'openai');
     assert.ok(declaration, id);
@@ -43,6 +48,8 @@ test('deepseek stays chat-completions-only; anthropic declares GLM only', () => 
   assert.equal(dshModelReasoningDeclaration('deepseek-v4-flash', 'anthropic'), null);
   assert.equal(dshModelReasoningDeclaration('deepseek-chat', 'responses'), null);
   assert.equal(dshModelReasoningDeclaration('deepseek-chat', 'anthropic'), null);
+  assert.equal(dshModelReasoningDeclaration('deepseek-4.1-flash', 'responses'), null);
+  assert.equal(dshModelReasoningDeclaration('deepseek-4.1-flash', 'anthropic'), null);
   assert.ok(dshModelReasoningDeclaration('glm-5.3-flash', 'anthropic'));
 })
 
@@ -51,6 +58,11 @@ test('other families stay undeclared — no capability guessing', () => {
   assert.equal(dshModelReasoningDeclaration('deepseek-v3.2', 'openai'), null);
   assert.equal(dshModelReasoningDeclaration('moonshotai/Kimi-K3', 'openai'), null);
   assert.equal(dshModelReasoningDeclaration('', 'openai'), null);
+  // Other vendors' flash models never ride the explicit deepseek id list.
+  assert.equal(dshModelReasoningDeclaration('gemini-3-flash', 'openai'), null);
+  // The other 2026-10-16 free-relay ids are unknown families — no guessing.
+  assert.equal(dshModelReasoningDeclaration('longcat-2.5-preview-free', 'openai'), null);
+  assert.equal(dshModelReasoningDeclaration('laguna-s-2.1-free', 'openai'), null);
 })
 
 test('GLM models use the Z.AI thinking wire without reasoning_effort', () => {

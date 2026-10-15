@@ -21,8 +21,57 @@ import {
   getFreeProviderModelCanonical,
   getFreeProviderModelDisplayName,
   isFreeProviderConfigured,
+  planFreeProviderCatalogSync,
   planFreeQuotaProvisioning,
 } from './llmFreeQuotaGate.js';
+
+/** Relay catalog entry as the quota/bootstrap responses report it. */
+interface RelayCatalogModel {
+  id: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+}
+
+/**
+ * Sync an already-provisioned free provider's model catalog with the relay
+ * directory a quota response carried (2026-10-16: the server catalog grew
+ * from the single `deepseek-chat` to a public multi-model directory, and
+ * GET /v2/assist/llm/quota returns the full current list on every call).
+ * planFreeQuotaProvisioning stays 'none' for provisioned installs, so this
+ * quota-driven sync is the only path that moves their frozen catalog forward
+ * — without a new bootstrap, which would reissue the relay key. The stored
+ * defaultModel is reconciled by updateConfig's normalization: when it points
+ * at an id the directory dropped (e.g. the hidden `deepseek-chat` alias), it
+ * falls back to the new catalog's first model.
+ *
+ * Never throws; returns true only when the stored catalog was rewritten.
+ */
+export async function syncFreeProviderCatalogFromQuota(
+  quota: { models?: RelayCatalogModel[] } | null | undefined,
+): Promise<boolean> {
+  try {
+    const provider = configService.getConfig().providers?.[LLM_FREE_PROVIDER_KEY];
+    if (!isFreeProviderConfigured(provider)) {
+      return false;
+    }
+    const models = planFreeProviderCatalogSync(provider, quota?.models);
+    if (!models) {
+      return false;
+    }
+    await configService.updateConfig({
+      providers: {
+        [LLM_FREE_PROVIDER_KEY]: {
+          ...provider,
+          models,
+        },
+      } as AppConfig['providers'],
+    });
+    return true;
+  } catch (error) {
+    console.warn('[llm-free-quota] catalog sync failed:', error);
+    return false;
+  }
+}
 
 /**
  * Manual opt-in path (Settings card): bootstrap and provision the free
@@ -51,10 +100,10 @@ async function provisionProviderConfig(result: LlmRelayBootstrapResult): Promise
     name: getFreeProviderModelDisplayName(model.id),
     contextWindow: model.contextWindow,
     maxOutputTokens: model.maxOutputTokens,
-    // Known relay ids (deepseek-chat) pin the canonical limits: the 1M
-    // context window (upstream upgraded past the old 64K cap, owner-confirmed
-    // 2026-10-09) plus the 100K declared output ceiling; unknown ids keep
-    // the relay-reported fields untouched.
+    // Known relay ids (deepseek-chat, deepseek-4.1-flash) pin the canonical
+    // limits: the 1M context window (upstream upgraded past the old 64K cap,
+    // owner-confirmed 2026-10-09) plus the 100K declared output ceiling;
+    // unknown ids keep the relay-reported fields untouched.
     ...getFreeProviderModelCanonical(model.id),
   }));
   await configService.updateConfig({

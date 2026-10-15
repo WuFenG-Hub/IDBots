@@ -1,13 +1,18 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { i18nService } from '../services/i18n';
-import { enableFreeQuotaManually } from '../services/llmFreeQuotaBootstrap';
+import { enableFreeQuotaManually, syncFreeProviderCatalogFromQuota } from '../services/llmFreeQuotaBootstrap';
 import { isFreeProviderConfigured, LLM_FREE_PROVIDER_KEY } from '../services/llmFreeQuotaGate.js';
 import { formatQuotaResetSuffix, quotaResetDaysLeft } from '../services/quotaResetCountdown';
 import type { AppConfig } from '../config';
 
 interface FreeQuotaCardProps {
   providers: NonNullable<AppConfig['providers']>;
-  /** Called after a successful manual enable so the parent can reload config/redux. */
+  /**
+   * Called after the stored config changed underneath the card — a successful
+   * manual enable, or a background catalog sync that refreshed provider.models
+   * from the quota response's relay directory — so the parent can reload
+   * config/redux.
+   */
   onProvisioned: () => void;
 }
 
@@ -57,13 +62,22 @@ const FreeQuotaCard: React.FC<FreeQuotaCardProps> = ({ providers, onProvisioned 
           quotaCycleResetAt: response.quota.quotaCycleResetAt,
           unavailable: false,
         });
+        // Quota responses carry the relay's full current model directory
+        // (2026-10-16 server catalog expansion); provisioned installs whose
+        // provider.models froze at their bootstrap-era list pick up additions
+        // and removals here. Silent on failure — the quota display above is
+        // unaffected — and never re-bootstraps (that would reissue the key).
+        // The main-process quota cache (30s TTL) keeps repeated opens cheap.
+        if (await syncFreeProviderCatalogFromQuota(response.quota)) {
+          onProvisioned();
+        }
       } else {
         setQuota({ ...INITIAL_QUOTA, loading: false, unavailable: true });
       }
     } catch {
       setQuota({ ...INITIAL_QUOTA, loading: false, unavailable: true });
     }
-  }, []);
+  }, [onProvisioned]);
 
   useEffect(() => {
     if (configured && provider.apiKey) {

@@ -2901,7 +2901,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // 免费 LLM 额度（IDBots-Free 内置供应商）
     freeQuotaTitle: '免费模型额度',
     freeQuotaRefresh: '刷新',
-    freeQuotaRemaining: '本周剩余 {n} tokens',
+    freeQuotaRemaining: '本周剩余 {n} 积分',
     freeQuotaResetCountdown: '· {n} 天后重置',
     freeQuotaResetImminent: '· 即将重置',
     freeQuotaLowWarning: '免费额度即将用完。建议在下方配置自己的模型服务商 API Key，以免对话中断。',
@@ -5952,7 +5952,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // Free LLM quota (built-in IDBots-Free provider)
     freeQuotaTitle: 'Free LLM Quota',
     freeQuotaRefresh: 'Refresh',
-    freeQuotaRemaining: '{n} tokens left this week',
+    freeQuotaRemaining: '{n} points left this week',
     freeQuotaResetCountdown: '· resets in {n} d',
     freeQuotaResetImminent: '· resets soon',
     freeQuotaLowWarning: 'Free quota is running low. Add your own provider API key below to avoid interruption.',
@@ -5962,7 +5962,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     freeQuotaUnavailable: 'Quota info is unavailable right now',
     freeQuotaEnable: 'Enable free quota',
     freeQuotaEnabling: 'Enabling…',
-    freeQuotaEnableHint: 'No API key needed — claim a free token quota and start chatting.',
+    freeQuotaEnableHint: 'No API key needed — claim a free model quota and start chatting.',
     freeQuotaNotice: 'IDBots-Free is a zero-setup starter quota IDBots offers to new users — you can start chatting without any configuration. The quota is limited, so set up your own LLM provider soon to keep your bots running.',
     freeQuotaEnableFailed: 'Failed to enable: {error}',
     freeQuotaExhaustedBanner: 'Free quota exhausted. Add your own model API key to keep chatting.',
