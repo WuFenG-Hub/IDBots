@@ -257,6 +257,75 @@ function readRetentionSection(db, metabotId, fromDate, toDate) {
   return retention;
 }
 
+/** RRSI P4 structured exploration: stall nights, directive compliance, and
+ * the component / risk mix of the window's practice proposals. Missing tables
+ * or columns degrade to zeros (first run doubles as the pre-phase baseline). */
+function readExplorationSection(db, metabotId, fromDate, toDate) {
+  const exploration = {
+    stalledNights: 0,
+    reasons: { no_acceptance: 0, component_collapse: 0 },
+    directedNights: 0,
+    compliedNights: 0,
+    complianceRate: null,
+    componentMix: {
+      memory: 0, procedure: 0, skill: 0, remote_service: 0,
+      collaboration: 0, metaweb: 0, metaapp: 0, unknown: 0,
+    },
+    directedRiskMix: { read_only: 0, interact_local: 0, chain_write: 0 },
+  };
+  const directedDates = new Set();
+  if (tableExists(db, 'metabot_dream_telemetry_daily')) {
+    const rows = db
+      .prepare('SELECT dream_date, extra_json FROM metabot_dream_telemetry_daily WHERE metabot_id = ? AND dream_date >= ? AND dream_date <= ?')
+      .all(metabotId, fromDate, toDate);
+    for (const row of rows) {
+      const extra = parseExtraJson(row.extra_json);
+      const entry = typeof extra.exploration === 'object' && extra.exploration !== null
+        ? extra.exploration
+        : null;
+      if (!entry) continue;
+      if (entry.stalled === true) {
+        exploration.stalledNights += 1;
+        if (entry.reason === 'no_acceptance' || entry.reason === 'component_collapse') {
+          exploration.reasons[entry.reason] += 1;
+        }
+      }
+      if (entry.directed === true) {
+        exploration.directedNights += 1;
+        directedDates.add(String(row.dream_date));
+        if (entry.complied === true) exploration.compliedNights += 1;
+      }
+    }
+  }
+  if (exploration.directedNights > 0) {
+    exploration.complianceRate = round4(exploration.compliedNights / exploration.directedNights);
+  }
+  if (tableExists(db, 'dream_practice_proposals')) {
+    const hasComponent = columnNames(db, 'dream_practice_proposals').includes('component');
+    const selected = [
+      'dream_date',
+      'risk_class',
+      hasComponent ? 'component' : 'NULL AS component',
+    ].join(', ');
+    const rows = db
+      .prepare(`SELECT ${selected} FROM dream_practice_proposals WHERE metabot_id = ? AND dream_date >= ? AND dream_date <= ?`)
+      .all(metabotId, fromDate, toDate);
+    for (const row of rows) {
+      const component = row.component == null ? 'unknown' : String(row.component);
+      if (component in exploration.componentMix) {
+        exploration.componentMix[component] += 1;
+      } else {
+        exploration.componentMix.unknown += 1;
+      }
+      const riskClass = row.risk_class == null ? null : String(row.risk_class);
+      if (directedDates.has(String(row.dream_date)) && riskClass in exploration.directedRiskMix) {
+        exploration.directedRiskMix[riskClass] += 1;
+      }
+    }
+  }
+  return exploration;
+}
+
 export function buildRrsiReport(db, options = {}) {
   const days = Number.isInteger(options.days) && options.days > 0 ? options.days : 30;
   const toDate = typeof options.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(options.today)
@@ -286,6 +355,7 @@ export function buildRrsiReport(db, options = {}) {
         gate: readGateSection(db, metabotId, fromDate, toDate),
         falsifiedLedger: readFalsifiedLedger(db, metabotId, fromDate, toDate),
         retention: readRetentionSection(db, metabotId, fromDate, toDate),
+        exploration: readExplorationSection(db, metabotId, fromDate, toDate),
       });
     }
   }
@@ -351,6 +421,28 @@ export function formatRrsiReport(report) {
     } else {
       lines.push(`  exposure: ${retention.exposure.items} items over ${retention.exposure.nights} night(s)`);
     }
+    const exploration = bot.exploration ?? {};
+    const reasons = exploration.reasons ?? { no_acceptance: 0, component_collapse: 0 };
+    const reasonText = Object.entries(reasons)
+      .filter(([, count]) => count > 0)
+      .map(([reason, count]) => `${reason} ${count}`)
+      .join(', ');
+    const compliance = typeof exploration.complianceRate === 'number'
+      ? `${(exploration.complianceRate * 100).toFixed(2)}%`
+      : 'n/a';
+    const mix = Object.entries(exploration.componentMix ?? {})
+      .filter(([, count]) => count > 0)
+      .map(([component, count]) => `${component} ${count}`)
+      .join(', ');
+    const directedRisk = Object.entries(exploration.directedRiskMix ?? {})
+      .filter(([, count]) => count > 0)
+      .map(([riskClass, count]) => `${riskClass} ${count}`)
+      .join(', ');
+    lines.push(
+      `  exploration: stalled ${exploration.stalledNights ?? 0} nights${reasonText ? ` (${reasonText})` : ''}, `
+      + `directed ${exploration.directedNights ?? 0}, complied ${exploration.compliedNights ?? 0} → ${compliance}`
+      + `${mix ? `; mix ${mix}` : ''}${directedRisk ? `; directed risk ${directedRisk}` : ''}`,
+    );
   }
   if ((report.missing ?? []).length > 0) {
     lines.push(`missing tables: ${report.missing.join(', ')}`);
