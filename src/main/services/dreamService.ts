@@ -108,8 +108,11 @@ import {
   USAGE_AUDIT_ITEM_GIST_CHARS,
 } from '../libs/hotLayerUsageAudit';
 import {
+  HOT_LAYER_REENTRY_MIN_APPLIED_NIGHTS,
+  HOT_LAYER_REENTRY_WINDOW_DAYS,
   HOT_LAYER_UTILITY_WINDOW_DAYS,
   selectHotLayerDemotions,
+  selectHotLayerReentries,
 } from '../libs/hotLayerPruning';
 import { buildProvenTechniquesBlock } from '../libs/experiencePromptBlocks';
 import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../libs/claudeSettings';
@@ -2252,6 +2255,44 @@ export class DreamService {
     try {
       const refMs = getDayBoundsMs(date).endMs;
       const sinceDate = shiftDateKey(date, -(HOT_LAYER_UTILITY_WINDOW_DAYS - 1));
+      // RRSI P3 re-entry (design §6.3 P3.3), before demotion: an `unused`
+      // procedure applied again on ≥2 audited nights within the re-entry
+      // window turns hot with a fresh hot_since (the grace period restarts).
+      // Only hot_reason 'unused' ever re-enters through usage evidence.
+      const reenteredIds = new Set<string>();
+      let reentered = 0;
+      const reentryCandidates = this.deps.metaidKnowledgeStore
+        ? this.deps.metaidKnowledgeStore.listUnusedProcedures(metabot.id)
+        : [];
+      if (reentryCandidates.length > 0) {
+        const reentryStats = this.deps.dreamStore.listHotLayerUsageStats(metabot.id, {
+          kind: 'procedure',
+          sinceDate: shiftDateKey(date, -(HOT_LAYER_REENTRY_WINDOW_DAYS - 1)),
+          untilDate: date,
+        });
+        const reentries = selectHotLayerReentries(
+          reentryCandidates.map((entry) => ({
+            entry,
+            key: entry.id,
+            kind: 'procedure' as const,
+            hotSinceMs: entry.hotSince ?? entry.createdAt,
+            appliedNights: reentryStats.get(entry.id)?.appliedNights ?? 0,
+            exposedNights: reentryStats.get(entry.id)?.exposedNights ?? 0,
+          })),
+          { minAppliedNights: HOT_LAYER_REENTRY_MIN_APPLIED_NIGHTS },
+        );
+        for (const candidate of reentries) {
+          const flipped = this.deps.metaidKnowledgeStore?.setProcedureHotEligibility(candidate.entry.id, {
+            eligible: true,
+            reason: null,
+            atMs: this.now().getTime(),
+          });
+          if (flipped) {
+            reentered += 1;
+            reenteredIds.add(candidate.entry.id);
+          }
+        }
+      }
       const techniqueCandidates = this.deps.coworkStore
         .listCapabilityDrafts(metabot.id, { status: 'validated' })
         .filter((draft) => draft.promotedAt === null)
@@ -2274,14 +2315,16 @@ export class DreamService {
       const procedureCandidates = (this.deps.metaidKnowledgeStore
         ? this.deps.metaidKnowledgeStore.listHotProcedures(metabot.id, { limit: 200, nowMs: refMs })
         : []
-      ).map((entry) => ({
-        entry,
-        key: `procedure:${entry.id}`,
-        kind: 'procedure' as const,
-        hotSinceMs: entry.hotSince ?? entry.createdAt,
-        appliedNights: 0,
-        exposedNights: 0,
-      }));
+      )
+        .filter((entry) => !reenteredIds.has(entry.id))
+        .map((entry) => ({
+          entry,
+          key: `procedure:${entry.id}`,
+          kind: 'procedure' as const,
+          hotSinceMs: entry.hotSince ?? entry.createdAt,
+          appliedNights: 0,
+          exposedNights: 0,
+        }));
       const procedureStats = this.deps.dreamStore.listHotLayerUsageStats(metabot.id, {
         kind: 'procedure', sinceDate, untilDate: date,
       });
@@ -2310,7 +2353,7 @@ export class DreamService {
           if (flipped) demotedProcedures += 1;
         }
       }
-      return { demotedTechniques, demotedProcedures, reentered: 0 };
+      return { demotedTechniques, demotedProcedures, reentered };
     } catch (error) {
       console.warn(
         `[DreamService] Hot-layer pruning failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,

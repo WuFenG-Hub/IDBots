@@ -1418,6 +1418,25 @@ export class MetaIDKnowledgeStore {
     ).map((candidate) => candidate.entry);
   }
 
+  /**
+   * RRSI P3 re-entry pool (design §6.3 P3.3): active procedures demoted for
+   * never being applied — the ONLY hot_reason that usage evidence can make
+   * hot again. gate_rejected / demoted / rollback / situational / probation
+   * never re-enter through this path.
+   */
+  listUnusedProcedures(metabotId: number, options?: { limit?: number }): MetaIDProcedureEntry[] {
+    const id = asInteger(metabotId);
+    if (!id) return [];
+    const limit = Math.min(200, Math.max(1, asInteger(options?.limit, 200)));
+    return this.getAll<ProcedureRow>(
+      `SELECT * FROM metaid_knowledge_procedures
+       WHERE metabot_id = ? AND status = 'active' AND hot_eligible = 0 AND hot_reason = 'unused'
+       ORDER BY updated_at DESC, id DESC
+       LIMIT ?`,
+      [id, limit],
+    ).map(rowToProcedure);
+  }
+
   /** Keyword search across title + trigger + steps for the recall tool / hot layer. */
   listProcedures(options: ListMetaIDProcedureOptions): MetaIDProcedureEntry[] {
     const metabotId = asInteger(options.metabotId);

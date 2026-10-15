@@ -288,3 +288,98 @@ test('prune: a demoted procedure stays recallable with the rarely-applied status
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Re-entry of unused procedures (RRSI P3 Task 5)
+// ---------------------------------------------------------------------------
+
+/** Audited recall nights applied (or not) before night D; daysBefore counts
+ * down toward D so rows stay inside the caller's window. */
+function seedRecallNight(db, itemId, daysBefore, applied) {
+  db.run(
+    `INSERT INTO hot_layer_usage (
+       metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count, applied, evidence, audited_at
+     ) VALUES (?, ?, 'procedure', ?, 'recall', ?, 1, ?, ?, ?)`,
+    [5, nightDateDaysAgo(NIGHT_D, daysBefore), itemId, D_START - daysBefore * P_DAY,
+      applied ? 1 : 0, applied ? '{"labels":["S1.M1"],"channels":["owner"]}' : '{"labels":[],"channels":[]}',
+      D_START - daysBefore * P_DAY],
+  );
+}
+
+test('re-entry: 2 audited applied nights within 14 days make an unused procedure hot again', async () => {
+  const h = await createDreamHarness();
+  try {
+    const pId = seedHotProcedure(h, '热规程R', 40);
+    h.knowledgeStore.setProcedureHotEligibility(pId, { eligible: false, reason: 'unused' });
+    seedRecallNight(h.db, pId, 5, true);
+    seedRecallNight(h.db, pId, 9, true);
+    seedNightSession(h, NIGHT_D);
+    await h.runNight(NIGHT_D);
+    const procedure = h.knowledgeStore.getProcedure(pId);
+    assert.equal(procedure.hotEligible, true);
+    assert.equal(procedure.hotReason, null);
+    assert.equal(procedure.hotSince, dayStartMs(NIGHT_D) + 27 * 60 * 60 * 1000, 'hot_since restarts at the injected clock');
+    assert.deepEqual(h.telemetry(NIGHT_D)?.hotLayerPruning, { demotedTechniques: 0, demotedProcedures: 0, reentered: 1 });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('re-entry: 1 applied night, or evidence 20 days old, is not enough', async () => {
+  const h = await createDreamHarness();
+  try {
+    const oneNight = seedHotProcedure(h, '热规程S', 40);
+    h.knowledgeStore.setProcedureHotEligibility(oneNight, { eligible: false, reason: 'unused' });
+    seedRecallNight(h.db, oneNight, 5, true);
+    const staleNight = seedHotProcedure(h, '热规程T', 40);
+    h.knowledgeStore.setProcedureHotEligibility(staleNight, { eligible: false, reason: 'unused' });
+    seedRecallNight(h.db, staleNight, 5, true);
+    seedRecallNight(h.db, staleNight, 20, true);
+    seedNightSession(h, NIGHT_D);
+    await h.runNight(NIGHT_D);
+    assert.equal(h.knowledgeStore.getProcedure(oneNight).hotEligible, false, 'one night stays unused');
+    assert.equal(h.knowledgeStore.getProcedure(oneNight).hotReason, 'unused');
+    assert.equal(h.knowledgeStore.getProcedure(staleNight).hotEligible, false, 'the 20-day-old night falls outside the window');
+    assert.equal(h.telemetry(NIGHT_D)?.hotLayerPruning?.reentered, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('re-entry: a gate_rejected procedure never re-enters through usage evidence', async () => {
+  const h = await createDreamHarness();
+  try {
+    const pId = seedHotProcedure(h, '热规程U', 40);
+    h.knowledgeStore.setProcedureHotEligibility(pId, { eligible: false, reason: 'gate_rejected' });
+    seedRecallNight(h.db, pId, 5, true);
+    seedRecallNight(h.db, pId, 9, true);
+    seedNightSession(h, NIGHT_D);
+    await h.runNight(NIGHT_D);
+    const procedure = h.knowledgeStore.getProcedure(pId);
+    assert.equal(procedure.hotEligible, false, 'unchanged');
+    assert.equal(procedure.hotReason, 'gate_rejected');
+    assert.equal(h.telemetry(NIGHT_D)?.hotLayerPruning?.reentered, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('re-entry: a procedure re-entered tonight is not demoted tonight', async () => {
+  const h = await createDreamHarness();
+  try {
+    const pId = seedHotProcedure(h, '热规程V', 40);
+    h.knowledgeStore.setProcedureHotEligibility(pId, { eligible: false, reason: 'unused' });
+    // 30-day history would otherwise read as five audited hot nights.
+    seedAuditedNightsBefore(h.db, pId, 'procedure', 5, 28);
+    seedRecallNight(h.db, pId, 5, true);
+    seedRecallNight(h.db, pId, 9, true);
+    seedNightSession(h, NIGHT_D);
+    await h.runNight(NIGHT_D);
+    const procedure = h.knowledgeStore.getProcedure(pId);
+    assert.equal(procedure.hotEligible, true, 're-entered');
+    assert.equal(procedure.hotReason, null, 'not demoted back');
+    assert.deepEqual(h.telemetry(NIGHT_D)?.hotLayerPruning, { demotedTechniques: 0, demotedProcedures: 0, reentered: 1 });
+  } finally {
+    h.cleanup();
+  }
+});
