@@ -291,7 +291,12 @@ export async function runChainBackup(deps: RunChainBackupDeps): Promise<ChainBac
           buildModifyMetaidPayload({ targetPinId: state.manifest_pinid, payload: manifestContent }),
           { feeRate, origin: 'internal:chain-backup' },
         );
-        manifestPinId = state.manifest_pinid;
+        // Advance the modify target to the newest revision each run — the
+        // gig-square / MetaApp convention (target the chain head) — instead of
+        // re-modifying the original create pin forever, which forks the
+        // revision chain at the root on every backup after the first.
+        const nextPinId = typeof modify.pinId === 'string' ? modify.pinId.trim() : '';
+        manifestPinId = nextPinId || state.manifest_pinid;
         botResult.costSats += modify.totalCost || 0;
       } else {
         const created = await createPinFn(metabotStore, bot.id, {

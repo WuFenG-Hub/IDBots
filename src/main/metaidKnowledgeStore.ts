@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { SqliteDatabase as Database } from './sqliteTypes';
 import { tokenizeKnowledgeBaseText } from './libs/knowledgeBaseText';
 import { truncateUtf16Units } from './libs/llmSafeText';
+import { recordChainBackupTombstones } from './libs/chainBackupTombstones';
 import { normalizeProcedureHotReason, type ProcedureHotReason } from './libs/procedureProbation';
 import { PROCEDURE_PROMPT_MAX_ITEMS } from './libs/procedurePromptBlocks';
 import { queryHotLayerUsageStats } from './libs/hotLayerUsageQueries';
@@ -1066,13 +1067,16 @@ export class MetaIDKnowledgeStore {
    * Hard-delete a knowledge point and its sources/revisions (FK ON DELETE
    * CASCADE handles the children). Returns true when a row was removed.
    * Note: the nightly dream may regenerate a similar point afterwards — use
-   * archiveKnowledge instead when the goal is "keep this out of recall".
+   * archiveKnowledge instead when the goal is "keep this out of recall". The
+   * deletion is recorded in the chain-backup tombstone ledger so a chain
+   * restore does not resurrect the entry from an older backup segment.
    */
   deleteKnowledge(input: { id: string; metabotId: number }): boolean {
     const id = asText(input.id);
     const metabotId = asInteger(input.metabotId);
     const existing = this.getKnowledge(id);
     if (!existing || existing.metabotId !== metabotId) return false;
+    recordChainBackupTombstones(this.db, [{ kind: 'knowledge', ref: id, metabotId }]);
     this.db.run('DELETE FROM metaid_knowledge_entries WHERE id = ?', [id]);
     this.saveDb();
     return true;

@@ -148,6 +148,7 @@ async function driveTurn({ sessionId, metabot, script, sessionRow = {}, configOv
       runTurnCalls.push(input)
       return script(input, runTurnCalls.length)
     },
+    prewarmTurnSlot: async () => undefined,
     cancel: async () => undefined,
     cancelAgent: async () => undefined,
     forceSettle: () => undefined,

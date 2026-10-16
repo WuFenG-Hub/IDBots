@@ -295,3 +295,100 @@ test('a fully verified restore rebuilds the journal baseline', async () => {
     stub.restore();
   }
 });
+
+test('restore applies the newest segment version and never resurrects deleted rows', async () => {
+  // Two backup runs, two segments: run 1 published memory v1 + a knowledge
+  // entry; run 2 re-published the memory after an in-place edit (same row id)
+  // and tombstoned the knowledge entry (hard delete). The manifest carries
+  // both segments oldest-first.
+  const source = await openStore('idbots-restore-src3-');
+  const { bot, objects: botObjects } = await seedSourceBot(source, BOT_GID, 'gamma');
+  const envelopeObj = botObjects.find((o) => o.kind === 'key_envelope');
+  const memoryV1 = botObjects.find((o) => o.kind === 'memory');
+  const memoryV2 = {
+    id: 'obj-gamma-mem-v2',
+    kind: 'memory',
+    data: { ...memoryV1.data, text: 'user fact for gamma (edited)', updated_at: Date.now() + 1000 },
+  };
+  const knowledgeV1 = {
+    id: 'obj-gamma-kn-v1',
+    kind: 'knowledge',
+    data: {
+      id: 'kn-gamma', metabot_id: bot.id, topic: 'stale topic', summary: 'later deleted',
+      kind: 'know_how', confidence: 0.5, status: 'active', origin: 'dream', version: 1,
+      created_at: Date.now(), updated_at: Date.now(), revisions: [],
+    },
+  };
+  const knowledgeTombstone = {
+    id: 'obj-gamma-kn-tomb',
+    kind: 'knowledge_tombstone',
+    data: { ref: 'kn-gamma', deleted_at: Date.now() + 2000 },
+  };
+  const memoryTombstone = {
+    id: 'obj-gamma-mem-tomb',
+    kind: 'memory_tombstone',
+    data: { ref: 'mem-gone', deleted_at: Date.now() + 2000 },
+  };
+  const memoryGoneV1 = {
+    id: 'obj-gamma-gone-v1',
+    kind: 'memory',
+    data: {
+      id: 'mem-gone', metabot_id: bot.id, text: 'deleted after backup', fingerprint: 'fp-gone',
+      confidence: 0.5, is_explicit: 0, status: 'created', scope_kind: 'owner', scope_key: 'owner:self',
+      usage_class: 'profile_fact', visibility: 'local_only', origin: 'conversation', importance: 0.5,
+      created_at: Date.now(), updated_at: Date.now(), sources: [],
+    },
+  };
+
+  const backupKey = deriveBackupKey(USER_MNEMONIC, USER_GID);
+  const seg1 = buildSegmentEnvelope(backupKey, BOT_GID, [envelopeObj, memoryV1, knowledgeV1, memoryGoneV1]);
+  const seg2 = buildSegmentEnvelope(backupKey, BOT_GID, [memoryV2, knowledgeTombstone, memoryTombstone]);
+  const manifest = {
+    bot: BOT_GID,
+    botName: 'gamma',
+    updatedAt: Math.floor(Date.now() / 1000),
+    segments: [seg1.ref('pin-seg-gamma-1'), seg2.ref('pin-seg-gamma-2')],
+  };
+
+  const stub = stubIndexer(
+    {
+      'pin-bots': JSON.stringify({ bots: [{ globalMetaId: BOT_GID, name: 'gamma', type: 'worker', mvcAddress: 'mvc-gamma' }] }),
+      'pin-manifest-gamma': JSON.stringify(manifest),
+      'pin-seg-gamma-1': seg1.envelopeText,
+      'pin-seg-gamma-2': seg2.envelopeText,
+    },
+    {
+      [`${USER_GID}|/info/bots`]: ['pin-bots'],
+      [`${BOT_GID}|${CHAIN_BACKUP_MANIFEST_PATH}`]: ['pin-manifest-gamma'],
+    },
+  );
+
+  try {
+    const target = await openStore('idbots-restore-dst3-');
+    const userStore = insertUserIdentity(target.db, target.sqliteStore.getSaveFunction());
+    const result = await runChainBackupRestore({
+      db: target.db,
+      metabotStore: target.metabotStore,
+      userStore,
+      baseUrl: 'http://stub.test',
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.bots[0].error, undefined);
+
+    // The edited memory restores at its NEWEST version, not the first segment's.
+    const memory = target.db.exec(`SELECT text FROM user_memories WHERE fingerprint = ?`, ['fp-gamma']);
+    assert.equal(memory[0].values.length, 1);
+    assert.equal(memory[0].values[0][0], 'user fact for gamma (edited)');
+
+    // The tombstoned memory never comes back.
+    const gone = target.db.exec(`SELECT COUNT(*) FROM user_memories WHERE fingerprint = ?`, ['fp-gone']);
+    assert.equal(gone[0].values[0][0], 0);
+
+    // The hard-deleted knowledge entry stays deleted.
+    const knowledge = target.db.exec(`SELECT COUNT(*) FROM metaid_knowledge_entries WHERE id = ?`, ['kn-gamma']);
+    assert.equal(knowledge[0].values[0][0], 0);
+  } finally {
+    stub.restore();
+  }
+});

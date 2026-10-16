@@ -11,7 +11,8 @@ const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
 const { MetaIDKnowledgeStore } = require('../dist-electron/main/metaidKnowledgeStore.js');
 const { DreamStore } = require('../dist-electron/main/dreamStore.js');
 const { deriveBackupKey, encryptJson, decryptJson, objectId } = require('../dist-electron/main/services/chainBackupCrypto.js');
-const { extractBackupObjects, importBackupObjects } = require('../dist-electron/main/services/chainBackupData.js');
+const { extractBackupObjects, importBackupObjects, selectLatestBackupObjects } = require('../dist-electron/main/services/chainBackupData.js');
+const { recordChainBackupTombstones, listChainBackupTombstones } = require('../dist-electron/main/libs/chainBackupTombstones.js');
 
 /**
  * Chain-backup data round-trip: extract from a source DB, encrypt/decrypt like
@@ -98,8 +99,11 @@ test('extract → encrypt → decrypt → import round-trip with metabot_id rema
   const objects = extractBackupObjects(db, bot.id, wallet);
 
   const kinds = objects.map((o) => o.kind).sort();
-  assert.deepEqual(kinds, ['dream_daily', 'key_envelope', 'knowledge', 'memory', 'memory']);
+  assert.deepEqual(kinds, ['dream_daily', 'key_envelope', 'knowledge', 'memory', 'memory', 'memory_tombstone']);
+  // The deleted row never ships as a live object — only as a minimal tombstone.
   assert.ok(!objects.some((o) => o.data.text === 'forgotten'));
+  const tombstone = objects.find((o) => o.kind === 'memory_tombstone');
+  assert.equal(tombstone.data.ref, 'mem-del');
   const envelope = objects.find((o) => o.kind === 'key_envelope');
   assert.equal(envelope.data.mnemonic, TEST_MNEMONIC);
 
@@ -122,7 +126,9 @@ test('extract → encrypt → decrypt → import round-trip with metabot_id rema
   const restoredBot = createBot(target.metabotStore, 'src-bot-re', TEST_GID);
   assert.notEqual(restoredBot.id, bot.id);
 
-  const importedObjects = decrypted.objects.map((o) => ({ id: o.id, kind: o.kind, data: o.data }));
+  const importedObjects = selectLatestBackupObjects(
+    decrypted.objects.map((o) => ({ id: o.id, kind: o.kind, data: o.data })),
+  );
   const first = importBackupObjects(target.db, restoredBot.id, importedObjects);
   assert.equal(first.imported, 5); // 2 memories + 1 source + 1 daily + 1 knowledge
   assert.equal(first.skipped, 1); // key_envelope is never imported as a row
@@ -276,4 +282,126 @@ test('runChainBackup: publishes encrypted segments + manifest, incremental secon
   const modifyPins = published.filter((p) => p.metaidData.operation === 'modify');
   assert.equal(modifyPins.length, 1);
   assert.equal(modifyPins[0].metaidData.path, `@${manifestPins[0].pinId}`);
+
+  // Third run: the modify target ADVANCES to the previous modify pin (chain
+  // head) instead of re-modifying the original create pin — the gig-square /
+  // MetaApp convention.
+  const third = await runChainBackup(deps);
+  assert.equal(third.success, true);
+  const modifyPinsAfterThird = published.filter((p) => p.metaidData.operation === 'modify');
+  assert.equal(modifyPinsAfterThird.length, 2);
+  assert.equal(modifyPinsAfterThird[1].metaidData.path, `@${modifyPinsAfterThird[0].pinId}`);
+});
+
+test('selectLatestBackupObjects: newest version wins, tombstones suppress, re-created rows survive', () => {
+  const live = (id, text, n) => ({ id: `obj-${id}-${n}`, kind: 'memory', data: { id, text } });
+  const tomb = (id, n) => ({ id: `tomb-${id}-${n}`, kind: 'memory_tombstone', data: { ref: id, deleted_at: n } });
+
+  // Edited row: two live versions of mem-1 → the newest (last) one wins.
+  const edited = selectLatestBackupObjects([live('mem-1', 'v1', 1), live('mem-1', 'v2', 2)]);
+  assert.equal(edited.length, 1);
+  assert.equal(edited[0].data.text, 'v2');
+
+  // Deleted row: live snapshot then tombstone → the row is suppressed.
+  const deleted = selectLatestBackupObjects([live('mem-2', 'v1', 1), tomb('mem-2', 2)]);
+  assert.equal(deleted.length, 0);
+
+  // Re-created after deletion: tombstone then a newer live version → kept.
+  const recreated = selectLatestBackupObjects([live('mem-3', 'v1', 1), tomb('mem-3', 2), live('mem-3', 'v2', 3)]);
+  assert.equal(recreated.length, 1);
+  assert.equal(recreated[0].data.text, 'v2');
+
+  // Knowledge rows dedupe by id and ride knowledge_tombstones.
+  const knowledge = selectLatestBackupObjects([
+    { id: 'k1', kind: 'knowledge', data: { id: 'kn-1', summary: 'old' } },
+    { id: 'k2', kind: 'knowledge', data: { id: 'kn-1', summary: 'new' } },
+    { id: 'k4', kind: 'knowledge', data: { id: 'kn-2', summary: 'gone' } },
+    { id: 'k3', kind: 'knowledge_tombstone', data: { ref: 'kn-2', deleted_at: 3 } },
+    { id: 'k5', kind: 'key_envelope', data: { mnemonic: 'x', path: 'p' } },
+  ]);
+  assert.deepEqual(
+    knowledge.map((o) => `${o.kind}:${o.data.summary ?? ''}`).sort(),
+    ['key_envelope:', 'knowledge:new'],
+  );
+
+  // Rows without a stable id never collapse into each other.
+  const noIds = selectLatestBackupObjects([
+    { id: 'a', kind: 'memory', data: { text: 'one' } },
+    { id: 'b', kind: 'memory', data: { text: 'two' } },
+  ]);
+  assert.equal(noIds.length, 2);
+});
+
+test('extraction emits tombstones for soft-deleted memories and ledgered hard deletes', async () => {
+  const source = await openStore('idbots-tomb-src-');
+  const bot = createBot(source.metabotStore, 'tomb-bot', TEST_GID);
+  const now = Date.now();
+  source.db.run(
+    `INSERT INTO user_memories (id, metabot_id, text, fingerprint, confidence, is_explicit, status, scope_kind, scope_key, usage_class, visibility, origin, importance, created_at, updated_at)
+     VALUES ('mem-live', ?, 'kept', 'fp-live', 0.9, 1, 'created', 'owner', 'owner:self', 'profile_fact', 'local_only', 'conversation', 0.9, ?, ?)`,
+    [bot.id, now, now],
+  );
+  source.db.run(
+    `INSERT INTO user_memories (id, metabot_id, text, fingerprint, confidence, is_explicit, status, scope_kind, scope_key, usage_class, visibility, origin, importance, created_at, updated_at)
+     VALUES ('mem-soft', ?, 'soft deleted', 'fp-soft', 0.5, 0, 'deleted', 'owner', 'owner:self', 'profile_fact', 'local_only', 'conversation', 0.5, ?, ?)`,
+    [bot.id, now - 5000, now - 1000],
+  );
+  // A hard-deleted row only exists in the ledger now.
+  recordChainBackupTombstones(source.db, [
+    { kind: 'memory', ref: 'mem-purged', metabotId: bot.id, deletedAt: now - 500 },
+    { kind: 'knowledge', ref: 'kn-purged', metabotId: bot.id, deletedAt: now - 400 },
+  ]);
+
+  const objects = extractBackupObjects(source.db, bot.id, null);
+  const tombstones = objects.filter((o) => o.kind.endsWith('_tombstone'));
+  assert.deepEqual(
+    tombstones.map((o) => `${o.kind}:${o.data.ref}`).sort(),
+    ['knowledge_tombstone:kn-purged', 'memory_tombstone:mem-purged', 'memory_tombstone:mem-soft'],
+  );
+  const softTomb = tombstones.find((o) => o.data.ref === 'mem-soft');
+  assert.equal(softTomb.data.deleted_at, now - 1000);
+  // Live rows are unaffected.
+  assert.ok(objects.some((o) => o.kind === 'memory' && o.data.id === 'mem-live'));
+
+  // Re-delete ordering: a row restored then deleted again yields a NEW
+  // tombstone object id (deleted_at rides the object hash), so the backup
+  // journal re-uploads it instead of diffing it away.
+  const firstPass = extractBackupObjects(source.db, bot.id, null).filter((o) => o.kind === 'memory_tombstone' && o.data.ref === 'mem-soft');
+  source.db.run(`UPDATE user_memories SET updated_at = ? WHERE id = 'mem-soft'`, [now]);
+  const secondPass = extractBackupObjects(source.db, bot.id, null).filter((o) => o.kind === 'memory_tombstone' && o.data.ref === 'mem-soft');
+  assert.notEqual(secondPass[0].id, firstPass[0].id);
+
+  // The ledger is per-bot: another bot's extraction sees none of these.
+  const otherBot = createBot(source.metabotStore, 'tomb-bot-2', 'idqtestglobalmetaid00000000000000000000002', MNEMONIC_B);
+  const otherObjects = extractBackupObjects(source.db, otherBot.id, null);
+  assert.equal(otherObjects.filter((o) => o.kind.endsWith('_tombstone')).length, 0);
+});
+
+test('deleteKnowledge records a chain-backup tombstone that extraction ships', async () => {
+  const source = await openStore('idbots-kndel-src-');
+  const bot = createBot(source.metabotStore, 'kndel-bot', TEST_GID);
+  const knowledgeStore = new MetaIDKnowledgeStore(source.db, source.sqliteStore.getSaveFunction());
+  const now = Date.now();
+  source.db.run(
+    `INSERT INTO metaid_knowledge_entries (id, metabot_id, topic, topic_fingerprint, summary, kind, confidence, status, origin, version, created_at, updated_at)
+     VALUES ('kn-del', ?, 'obsolete fact', 'tfp-obs', 'no longer true', 'know_how', 0.6, 'active', 'dream', 1, ?, ?)`,
+    [bot.id, now, now],
+  );
+
+  assert.equal(knowledgeStore.deleteKnowledge({ id: 'kn-del', metabotId: bot.id }), true);
+  const ledger = listChainBackupTombstones(source.db, bot.id);
+  assert.deepEqual(ledger.map((row) => `${row.kind}:${row.ref}`), ['knowledge:kn-del']);
+
+  const objects = extractBackupObjects(source.db, bot.id, null);
+  const tombstone = objects.find((o) => o.kind === 'knowledge_tombstone');
+  assert.ok(tombstone, 'extraction ships the hard-deleted knowledge tombstone');
+  assert.equal(tombstone.data.ref, 'kn-del');
+  assert.ok(!objects.some((o) => o.kind === 'knowledge'));
+
+  // And on the restore side the tombstone suppresses the stale live snapshot.
+  const resolved = selectLatestBackupObjects([
+    { id: 'old-kn', kind: 'knowledge', data: { id: 'kn-del', summary: 'no longer true' } },
+    tombstone,
+  ]);
+  assert.equal(resolved.length, 0);
 });
