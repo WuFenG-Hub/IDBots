@@ -981,3 +981,29 @@ export interface CoworkStreamEvent {
     claudeSessionId?: string;
   };
 }
+
+/**
+ * Which side of the conversation a quoted excerpt came from. Resolved from
+ * the transcript block that contained the selection ('user-message' /
+ * 'assistant-block' export roles), so the quote can name its own source in
+ * both the composer tile and the submitted prompt body.
+ */
+export type CoworkQuotedSelectionRole = 'user' | 'assistant' | 'other';
+
+/**
+ * One excerpt the owner selected inside the transcript and attached to the
+ * next message ("reply to this specific part"). Deliberately separate from
+ * CoworkAttachment: a file attachment is a host path the runtime opens, a
+ * quoted excerpt is conversation text that must be written into the prompt
+ * body — the model reads the transcript as plain text, so visual highlighting
+ * alone would reach nothing.
+ */
+export interface CoworkQuotedSelection {
+  /** Stable id so one fragment can be removed without touching its siblings. */
+  id: string;
+  role: CoworkQuotedSelectionRole;
+  /** The selected text, newline-normalized and trimmed (never empty). */
+  text: string;
+  /** True when the excerpt had to be cut down to the per-fragment cap. */
+  truncated: boolean;
+}
