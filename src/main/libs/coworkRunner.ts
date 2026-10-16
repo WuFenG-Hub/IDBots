@@ -9207,22 +9207,19 @@ export class CoworkRunner extends EventEmitter {
           });
         }
       };
-      // Boot order decides whose cold start the user feels (2026-10-16
-      // follow-up): the TOP combo — the most-recent session's real route ×
-      // automation combo, the likeliest next turn — boots FIRST with the
-      // machine to itself. The remaining clean slots and combos boot
-      // STRICTLY SERIALLY behind it: the earlier parallel fan-out spawned
-      // 4-6 Electron-as-node runtimes in one window and starved the main
-      // process (eventloop:lag 12-16s); the hub's boot queue is the global
-      // backstop, and this loop keeps warmup itself orderly too.
-      const [topCombo, ...restCombos] = comboWarm;
+      // Boot order decides whose cold start the user feels — and HOW MANY
+      // heavy processes stay resident (2026-10-16 boot-storm + memory rounds):
+      // app start warms exactly the top combo (the most-recent session's real
+      // route × automation combo — the likeliest next turn) plus the first
+      // clean route, one at a time. The earlier top-3-combos breadth kept
+      // 4-5 Electron-as-node runtimes resident; on a 16GB host already deep
+      // in swap that baseline pressure is what let one Chromium spawn freeze
+      // the main process 12-16s (sessions 8d797eb5/c562e576). Everything else
+      // boots on composer intent or on demand and rides the hub's serialized
+      // boot queue.
+      const [topCombo] = comboWarm;
       if (topCombo) await bootComboSlot(topCombo);
-      for (const warm of warmRoutes) {
-        await bootCleanSlot(warm);
-      }
-      for (const combo of restCombos) {
-        await bootComboSlot(combo);
-      }
+      if (warmRoutes[0]) await bootCleanSlot(warmRoutes[0]);
     } catch (error) {
       coworkLog('WARN', 'prewarmDshRuntime', 'Warmup failed; first turn will cold-start', {
         error: error instanceof Error ? error.message : String(error),
