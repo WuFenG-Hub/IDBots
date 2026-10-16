@@ -286,8 +286,11 @@ function raceAbortSignal<T>(
  * left to settle on its own (the decision call sites are fail-to-null, so a
  * late response is simply dropped).
  *
- * Applies to the response HEADERS arriving; body reading stays with the
- * caller's own signal handling (the observed stall was pre-headers).
+ * The resolved response's json() read rides the same race (2026-10-16 second
+ * round): a headers-fast/body-stalled response used to slip past the bounded
+ * window, since only the headers await was covered. If the response object
+ * rejects the shadow property (frozen/exotic), the body read stays unbounded
+ * — no regression, just the old behavior.
  */
 export function createSignalBoundedFetch<R>(
   fetchImpl: (url: string, init: Record<string, unknown>) => Promise<R>,
@@ -302,7 +305,23 @@ export function createSignalBoundedFetch<R>(
       fetchImpl(url, init),
       signal,
       'The cerebellum call was aborted while awaiting the upstream response',
-    ) as Promise<R>;
+    ).then((response) => {
+      try {
+        const jsonRead = (response as { json?: unknown } | null | undefined)?.json;
+        if (typeof jsonRead === 'function') {
+          const boundRead = jsonRead.bind(response) as () => Promise<unknown>;
+          (response as { json: () => Promise<unknown> }).json = () =>
+            raceAbortSignal(
+              boundRead(),
+              signal,
+              'The cerebellum call was aborted while reading the response body',
+            );
+        }
+      } catch {
+        // Non-extensible response: body reads stay on the caller's own handling.
+      }
+      return response;
+    }) as Promise<R>;
   };
 }
 

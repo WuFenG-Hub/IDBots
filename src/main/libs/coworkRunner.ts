@@ -293,6 +293,48 @@ import {
   VirtioSerialBridge,
 } from './coworkVmRunner';
 
+// First-sentence latency (2026-10-16, deepseek-desktop borrowing round): the
+// cerebellum turn-decision bundle and the effort selector ride the turn path
+// as RACES, never hard awaits. Their round-trip is an enhancement (better
+// memory/knowledge ranking, shortlists, calibrated effort) — the DSH desktop
+// profile proves a first turn needs no pre-turn network at all — so a slow
+// relay must degrade to the lexical/default path inside a small budget
+// instead of holding the opening sentence (the 15.4s stall on sessions
+// bd646510/c3419940, where both bounded calls outlasted every abort budget
+// while the process was starved). The underlying calls keep their own abort
+// budgets and settle in the background; only the WAITING stops early.
+const CEREBELLUM_TURN_DECISION_RACE_BUDGET_MS = 600;
+const CEREBELLUM_EFFORT_RACE_BUDGET_MS = 400;
+
+/** Sentinel resolved by raceTurnEnhancementBudget when the budget lapses. */
+const TURN_ENHANCEMENT_RACE_LAPSED: unique symbol = Symbol('turnEnhancementRaceLapsed');
+
+/**
+ * Resolve `promise` when it settles, or TURN_ENHANCEMENT_RACE_LAPSED once
+ * `budgetMs` elapses — whichever comes first. A rejected promise resolves to
+ * null (callers degrade on null already). Never rejects and never cancels
+ * the underlying promise: the background call settles on its own (its
+ * module-level abort budget still bounds the HTTP), only the turn stops
+ * waiting.
+ */
+const raceTurnEnhancementBudget = <T>(
+  promise: Promise<T>,
+  budgetMs: number,
+): Promise<T | null | typeof TURN_ENHANCEMENT_RACE_LAPSED> =>
+  new Promise<T | null | typeof TURN_ENHANCEMENT_RACE_LAPSED>((resolve) => {
+    const timer = setTimeout(() => resolve(TURN_ENHANCEMENT_RACE_LAPSED), Math.max(1, budgetMs));
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(null);
+      },
+    );
+  });
+
 const SANDBOX_ALLOWED_ENV_KEYS = [
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_API_KEY',
@@ -6491,9 +6533,13 @@ export class CoworkRunner extends EventEmitter {
     // the runner-owned inputs synchronously (SQLite + local stores — cheap),
     // start the single bundled call, and await it once at the first consumer
     // (the memory section) — every later consumer reads the settled result.
-    // null/throw degrades each decision to its pre-cerebellum behavior,
-    // byte-identical. The effort selector deliberately stays a separate call
-    // (own 1s budget, different semantics).
+    // The await is a hard race against CEREBELLUM_TURN_DECISION_RACE_BUDGET_MS
+    // (2026-10-16 second round): an enhancement round-trip must never hold
+    // the opening sentence hostage, so a slow relay degrades every decision
+    // to its pre-cerebellum behavior (lexical ranking, no shortlists, inject
+    // every block) the moment the budget lapses — byte-identical to a
+    // null/throw. The effort selector deliberately stays a separate call
+    // (own race budget, different semantics).
     const memoryContext = profile.includeMemoryPromptBlocks
       ? this.collectScopedMemoryContext(sessionId, { enabled: sessionMemoryEnabled })
       : null;
@@ -6528,7 +6574,16 @@ export class CoworkRunner extends EventEmitter {
       if (!decisionsSettled) {
         decisionsSettled = true;
         try {
-          turnDecisions = decisionsPromise ? await decisionsPromise : null;
+          const raced = decisionsPromise
+            ? await raceTurnEnhancementBudget(decisionsPromise, CEREBELLUM_TURN_DECISION_RACE_BUDGET_MS)
+            : null;
+          turnDecisions = raced === TURN_ENHANCEMENT_RACE_LAPSED ? null : raced;
+          if (raced === TURN_ENHANCEMENT_RACE_LAPSED) {
+            coworkLog('INFO', 'cerebellum:turnRace', 'Turn decision race budget lapsed; proceeding with fallback ranking', {
+              sessionId,
+              budgetMs: CEREBELLUM_TURN_DECISION_RACE_BUDGET_MS,
+            });
+          }
         } catch {
           // The callback contract is null-on-failure; the catch is belt and
           // braces so a throwing callback can never break the turn.
@@ -6645,7 +6700,7 @@ export class CoworkRunner extends EventEmitter {
     if (!disableRemoteServicesPrompt) {
       // Memory-disabled profiles reach the gate's first consumer here; the
       // bundled call itself already started at function entry, so the await
-      // only waits out whatever remains of the shared 1.5s budget.
+      // only waits out whatever remains of the shared race budget.
       await awaitVolatileGate();
       if (shouldInjectVolatile('remote-services')) {
         sections.push({
@@ -9769,7 +9824,17 @@ export class CoworkRunner extends EventEmitter {
       // escalates (see resolveAutoEffortRung + the Phase-0 eval).
       let autoEffortRung: CerebellumEffortRung | null = null;
       if (!sessionEffortPicked && autoEffortPromise) {
-        const distribution = await autoEffortPromise;
+        // Hard race (2026-10-16 second round): the verdict overlaps the whole
+        // volatile build already; a slow relay gets CEREBELLUM_EFFORT_RACE_
+        // BUDGET_MS more, then the default chain proceeds without it.
+        const racedDistribution = await raceTurnEnhancementBudget(autoEffortPromise, CEREBELLUM_EFFORT_RACE_BUDGET_MS);
+        if (racedDistribution === TURN_ENHANCEMENT_RACE_LAPSED) {
+          coworkLog('INFO', 'effort:selectRace', 'Auto effort race budget lapsed; using the default effort chain', {
+            sessionId,
+            budgetMs: CEREBELLUM_EFFORT_RACE_BUDGET_MS,
+          });
+        }
+        const distribution = racedDistribution === TURN_ENHANCEMENT_RACE_LAPSED ? null : racedDistribution;
         if (distribution) {
           const stickyBefore = this.autoEffortStickyBySession.get(sessionId) ?? null;
           const resolved = resolveStickyAutoEffortRung(distribution, {
