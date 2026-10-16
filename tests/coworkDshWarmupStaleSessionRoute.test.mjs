@@ -199,18 +199,17 @@ test('prewarm still prefers the pinned session route when that route resolves', 
 
   await runner.prewarmDshRuntime()
 
-  // Session route FIRST (the likeliest immediate turn), then the app-global
-  // default route — a new chat's first message lands on an already-warm
-  // runtime either way instead of restarting it inside the turn.
-  assert.equal(prewarmCalls.length, 2)
+  // Memory-pressure contract (2026-10-16): app start warms ONLY the top
+  // combo + the first clean route — one resident runtime, not two. The
+  // session route is warmRoutes[0], so the pinned session wins and the
+  // app-global default boots on demand (or via composer-intent prewarm).
+  assert.equal(prewarmCalls.length, 1)
   assert.equal(
     prewarmCalls[0]?.provider?.key,
     'gw-sess',
     'the session route still wins over the app-global default route',
   )
   assert.equal(prewarmCalls[0]?.provider?.model, 'sess-model-1')
-  assert.equal(prewarmCalls[1]?.provider?.key, 'gw-default')
-  assert.equal(prewarmCalls[1]?.provider?.model, 'default-model-1')
 })
 
 // ---- a session already riding the default route warms ONE process ---------
@@ -235,7 +234,7 @@ test('prewarm dedupes the session route and the default route onto one warm', as
 
 // ---- a stale top row falls through to the next resolvable session row ------
 
-test('prewarm skips a stale top session and warms the next resolvable row plus the default', async () => {
+test('prewarm skips a stale top session and warms the next resolvable row', async () => {
   const { runner: runnerModule, claudeSettings } = loadModules()
   installApiConfig(claudeSettings)
 
@@ -249,9 +248,10 @@ test('prewarm skips a stale top session and warms the next resolvable row plus t
 
   await runner.prewarmDshRuntime()
 
-  assert.equal(prewarmCalls.length, 2)
+  // Same memory-pressure contract: the first RESOLVABLE row wins (not
+  // blindly [0]) and is the only warm — the default route boots on demand.
+  assert.equal(prewarmCalls.length, 1)
   assert.equal(prewarmCalls[0]?.provider?.key, 'gw-sess', 'the first RESOLVABLE row wins, not blindly [0]')
-  assert.equal(prewarmCalls[1]?.provider?.key, 'gw-default')
 })
 
 // ---- no pinned session at all: default route (unchanged behaviour) ---------

@@ -10,7 +10,54 @@
      let stopping = false;
      let refreshingMasks = false;
      const refreshBlockedMasks = () => {
-@@ -151,6 +154,23 @@
+@@ -126,9 +129,12 @@
+             clients.clear();
+         };
+     }, `${options.name}.sessions`);
+-    ctx.on('agent/created', async ({ agent, signal }) => {
++    ctx.on('agent/created', async ({ agent }) => {
+         const state = { status: resources.available(agent) ? 'ready' : 'blocked' };
+         agent.ctx.effect(() => async () => {
++            // IDBots patch (lazy-browser-mount): cancel a pending delayed
++            // mount so a disposed agent never spawns a browser.
++            clearTimeout(state.mountTimer);
+             clients.delete(agent);
+             await state.mask?.dispose();
+         }, `${options.name}.activation`);
+@@ -137,7 +143,31 @@
+             refreshBlockedMasks();
+             return;
+         }
+-        await resources.get(agent, signal);
++        // IDBots patch (lazy-browser-mount): defer even the BACKGROUND mount
++        // past the opening window of a chat turn. Agent creation used to
++        // await the Playwright MCP spawn + headless Chromium (~1-4s plus a
++        // several-hundred-MB process); the fire-and-forget variant removed
++        // the wait but the spawn still fired at creation time — on a
++        // memory-exhausted host the allocation spike alone swap-storms the
++        // whole app for ~15s (IDBots sessions 8d797eb5/c562e576, main-process
++        // event-loop freezes during every new session's first turn). Now the
++        // mount starts MOUNT_DELAY_MS after creation: a chat turn's first
++        // sentence never pays the spike, while a turn that actually calls a
++        // browser tool still spawns on demand — tools/execute dispatches
++        // through resources.run, whose entry(agent) acquires the resource
++        // lazily and awaits entry.ready, so browser turns work with the
++        // spawn cost paid at the call site. A background spawn failure marks
++        // the client blocked instead of failing agent creation. Accepted
++        // trade-off: an agent disposed before the delay elapses never spawns
++        // (a win), and a first turn that browses inside the delay window
++        // pays spawn+sync at its first tool call (same total as upstream).
++        state.mountTimer = setTimeout(() => {
++            state.mountTimer = undefined;
++            void resources.get(agent).catch((error) => {
++                state.status = 'blocked';
++                ctx.logger?.warn?.(`${options.name}: background browser mount failed: ${String(error)}`);
++            });
++        }, 8000);
+         clients.set(agent, state);
+     }, { prepend: true });
+     ctx.on('tools/change', refreshBlockedMasks);
+@@ -151,6 +181,23 @@
          if (agent === undefined || clients.get(agent)?.status !== 'ready') {
              throw new Error(`${options.name}: browser tool belongs to another Session`);
          }

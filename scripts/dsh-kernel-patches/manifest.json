@@ -4,7 +4,9 @@
     {
       "patch": "@deepseek-ai+dsh-win32-process+0.2.0-rc.2.patch",
       "why": "CREATE_NO_WINDOW on all three raw CreateProcess spawn sites — a dropped patch silently brings back the Windows bash.exe console flash",
-      "platforms": ["win32"],
+      "platforms": [
+        "win32"
+      ],
       "targets": [
         {
           "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-win32-process/lib/index.js",
@@ -59,12 +61,17 @@
     },
     {
       "patch": "@deepseek-ai+dsh-experimental-browser-use-runtime+0.2.0-rc.2.patch",
-      "why": "automation approval (TICKET-2026-09-04): mutating Playwright-MCP browser tools ask through ctx.approval, fail-closed — the provider ships zero approval logic and browser actions are irreversible on public websites",
+      "why": "automation approval (TICKET-2026-09-04): mutating Playwright-MCP browser tools ask through ctx.approval, fail-closed; lazy-browser-mount v2 (2026-10-16): agent/created defers the Playwright MCP spawn + Chromium to 8s after creation (background, Session-owned) — the memory spike of the spawn used to swap-stall memory-exhausted hosts for ~15s inside every new session's first turn; tools/execute still acquires on demand via resources.run(entry.ready)",
       "targets": [
         {
           "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-experimental-browser-use-runtime/lib/types/mcp.js",
           "match": "mutating browser tools need the approval service",
           "count": 1
+        },
+        {
+          "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-experimental-browser-use-runtime/lib/types/mcp.js",
+          "match": "IDBots patch (lazy-browser-mount)",
+          "count": 2
         }
       ]
     },

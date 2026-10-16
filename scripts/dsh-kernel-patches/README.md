@@ -132,6 +132,24 @@ and session `autoApproveTools` / permission modes short-circuit repeats —
 identical semantics to the bash tool. Regression test:
 `dsh-runtime/test/automation-approval.test.mjs`.
 
+The same file carries a second, independent fix (2026-10-16,
+**lazy-browser-mount**): upstream `agent/created` awaits
+`resources.get(agent, signal)`, so every new session's agent creation
+blocks on the Playwright MCP spawn + headless Chromium (~1-4s plus a
+several-hundred-MB process). Await-less mounting alone is not enough on a
+memory-exhausted host — the spawn's allocation spike still fires at
+creation time and swap-stalled the whole app ~15s inside every new
+session's first turn (IDBots sessions 8d797eb5/c562e576). The patch
+therefore DEFERS the background mount to 8s after creation (cancelled on
+agent dispose): a chat turn's first sentence never pays the spike, while a
+turn that calls a browser tool spawns on demand — `tools/execute`
+dispatches through `resources.run`, whose `entry(agent)` acquires the
+resource lazily and awaits `entry.ready`, so browser turns pay the spawn at
+the call site. A background spawn failure marks the client blocked instead
+of failing agent creation. Browser E2E
+(`dsh-runtime/test/browser-use.test.mjs`, which navigates on the first
+turn) passes unchanged, proving the execute-side wait works.
+
 ### `@deepseek-ai+dsh-experimental-computer-use-cua-driver-native+0.2.0-rc.1.patch`
 
 Same ticket, same seam, higher stakes: cua-driver tools inject real input

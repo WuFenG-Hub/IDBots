@@ -171,8 +171,8 @@ test('bundle race: a hung bundle lapses inside the budget and the volatile promp
   const elapsedMs = Date.now() - startedAt
   assert.ok(prompt.includes('CATALOG_BLOCK_X1'), 'the skill catalog still rides')
   assert.ok(!prompt.includes('Skill One'), 'no shortlist without a verdict')
-  assert.ok(elapsedMs >= 600, `the race waits out its budget (${elapsedMs}ms)`)
-  assert.ok(elapsedMs < 600 + 1500, `the lapsed race frees the turn inside the budget, took ${elapsedMs}ms`)
+  assert.ok(elapsedMs >= 1000, `the race waits out its budget (${elapsedMs}ms)`)
+  assert.ok(elapsedMs < 1000 + 1500, `the lapsed race frees the turn inside the budget, took ${elapsedMs}ms`)
   assert.ok(
     readCoworkLog().includes('cerebellum:turnRace'),
     'the lapsed race lands in cowork.log for triage',

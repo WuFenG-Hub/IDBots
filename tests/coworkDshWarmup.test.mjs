@@ -294,14 +294,18 @@ test('prewarmTurnSlot resolves the session automation combo onto its .auto-* slo
 })
 
 // ---------------------------------------------------------------------------
-// Multi-combo app-start warm (2026-10-16 follow-up): warming only the
-// MOST-recent session's slot left every other bot cold — session 70fa10aa
-// (warmup warmed zhipu.auto-bc; the user's next chat was a deepseek bot whose
-// slot booted for 38s inside the turn). prewarmDshRuntime must warm the top
-// few DISTINCT (route × automation combo) slots from recent sessions.
+// App-start warm breadth (2026-10-16 memory-pressure round): warming the top
+// few distinct combos kept 4-5 Electron-as-node runtimes resident — on a
+// 16GB host already deep in swap, that baseline pressure let one Chromium
+// spawn freeze the main process 12-16s (sessions 8d797eb5/c562e576).
+// prewarmDshRuntime now warms ONLY the top combo (most-recent session's real
+// route × automation combo) plus the first clean route; every other combo
+// boots on composer intent (prewarmSessionTurnSlot) or on demand. The
+// 70fa10aa gap (next chat on a different bot's cold slot) is covered by that
+// intent prewarm, not by app-start breadth.
 // ---------------------------------------------------------------------------
 
-test('prewarmDshRuntime warms distinct recent bot combos, not just the most recent', {
+test('prewarmDshRuntime warms only the top combo at app start; other combos defer to intent prewarm', {
   skip: !runtimeReady
     ? 'dsh-runtime node_modules not installed'
     : (!['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium',
@@ -369,9 +373,9 @@ test('prewarmDshRuntime warms distinct recent bot combos, not just the most rece
     getConfig: () => ({ workingDirectory: process.cwd() }),
   }
   const runner = new coworkRunner.CoworkRunner(store, {
-    // Only the second-most-recent session's bot opted into browser automation:
-    // its .auto-b slot must be warmed even though the MOST-recent session is a
-    // clean-combo bot (the 70fa10aa gap).
+    // The second-most-recent session's bot opted into browser automation:
+    // under the new memory-pressure contract its .auto-b slot must stay COLD
+    // at app start (composer intent prewarms it when the user picks that bot).
     browserAutomationProvider: (sessionId) => sessionId === 'warm-combo-auto'
       ? { mode: 'launch', headless: true }
       : undefined,
@@ -383,21 +387,33 @@ test('prewarmDshRuntime warms distinct recent bot combos, not just the most rece
     claudeSettings.setStoreGetter(() => null)
   })
 
+  const comboLogPath = path.join(process.cwd(), '.cowork-temp', 'dsh-warmup-userData', 'logs', 'cowork.log')
+  // The log file is shared across this file's tests (and across reruns), so
+  // assertions below only read the bytes THIS run appends.
+  const logSizeBefore = fs.existsSync(comboLogPath) ? fs.statSync(comboLogPath).size : 0
+
   await runner.prewarmDshRuntime()
   const hub = runner.dshTurnHub
   assert.ok(hub, 'warmup spawned the hub')
   assert.equal(hub.running, true, 'runtime(s) left running after warmup')
-  // Clean combos share the bare provider slot; the automation opt-in rides
-  // its own .auto-b slot — two slots total, both prewarmed.
-  assert.equal(hub.runtimeSlotCount, 2, `expected clean + auto-b slots, got ${hub.runtimeSlotCount}`)
-  const comboLog = fs.readFileSync(
-    path.join(process.cwd(), '.cowork-temp', 'dsh-warmup-userData', 'logs', 'cowork.log'),
-    'utf8',
-  )
+  // New contract: the top combo (most-recent session, clean) shares the bare
+  // provider slot with the clean route — ONE slot warmed at app start. The
+  // second session's automation combo deliberately stays cold; its boot is
+  // the composer-intent prewarm's job now.
+  assert.equal(hub.runtimeSlotCount, 1, `expected only the top clean slot, got ${hub.runtimeSlotCount}`)
+  const fd = fs.openSync(comboLogPath, 'r')
+  const tail = Buffer.alloc(Math.max(0, fs.statSync(comboLogPath).size - logSizeBefore))
+  fs.readSync(fd, tail, 0, tail.length, logSizeBefore)
+  fs.closeSync(fd)
+  const comboLog = tail.toString('utf8')
   const boots = [...comboLog.matchAll(/prewarmTurnSlot\.boot\n  runtime: ([^\n]+)\n  sessionId: ([^\n]+)/g)]
     .map((m) => ({ runtime: m[1].trim(), sessionId: m[2].trim() }))
   assert.ok(
-    boots.some((entry) => entry.sessionId === 'warm-combo-auto' && entry.runtime === 'mockgw.auto-b'),
-    `the automation bot's slot was prewarmed under its own .auto-b runtime (boots: ${JSON.stringify(boots)})`,
+    boots.some((entry) => entry.sessionId === 'warm-combo-clean-a' && entry.runtime === 'mockgw'),
+    `the top combo's slot was prewarmed (boots: ${JSON.stringify(boots)})`,
+  )
+  assert.ok(
+    !boots.some((entry) => entry.runtime === 'mockgw.auto-b'),
+    `the non-top automation combo must NOT boot at app start (boots: ${JSON.stringify(boots)})`,
   )
 })
