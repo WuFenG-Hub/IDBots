@@ -676,6 +676,15 @@ export function getPersistedChatExperienceMode(): 'professional' | 'assistant' {
  * app_config. The renderer also writes these via configService.updateConfig,
  * but the main process persists them here on mid-session switches so the
  * choice is global regardless of which UI path changed it.
+ *
+ * The read is load-bearing: `?? {}` on a MISSING row would be fine, but
+ * sqliteStore.get also returns undefined when the stored JSON fails to parse
+ * (transient corruption / mid-write read). Writing back a `{preference-only}`
+ * object in that state replaces the whole config — every provider credential
+ * gone, providers reset to defaults on the next load (the 2026-10-16
+ * missing-models incident class). So when the read yields no usable object,
+ * the write is skipped outright: the renderer path still persists the
+ * preference, and a skipped write can never destroy stored config.
  */
 export function setPersistedCoworkPreference(updates: {
   permissionMode?: CoworkPermissionMode;
@@ -683,7 +692,11 @@ export function setPersistedCoworkPreference(updates: {
 }): void {
   const sqliteStore = getStore();
   if (!sqliteStore) return;
-  const appConfig = sqliteStore.get<Record<string, unknown>>('app_config') ?? {};
+  const appConfig = sqliteStore.get<Record<string, unknown>>('app_config');
+  if (!appConfig || typeof appConfig !== 'object') {
+    console.warn('[claudeSettings] cowork preference not persisted: app_config unreadable (refusing to write a partial config over it)');
+    return;
+  }
   if (updates.permissionMode !== undefined) {
     appConfig.coworkPermissionMode = updates.permissionMode;
   }

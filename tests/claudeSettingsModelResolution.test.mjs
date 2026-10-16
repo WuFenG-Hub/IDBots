@@ -8,7 +8,7 @@ try {
   claudeSettings = await import('../dist-electron/main/libs/claudeSettings.js');
 }
 
-const { resolveApiConfigForModel, resolveDshProviderRoute, setStoreGetter } = claudeSettings;
+const { resolveApiConfigForModel, resolveDshProviderRoute, setPersistedCoworkPreference, setStoreGetter } = claudeSettings;
 
 function withAppConfig(appConfig, fn) {
   setStoreGetter(() => ({
@@ -457,5 +457,36 @@ test('proxy-routed resolution pins the session upstream and scopes the base URL'
     clearCoworkSessionUpstream('oneshot-test-pin');
   } finally {
     await stopCoworkOpenAICompatProxy();
+  }
+});
+
+test('setPersistedCoworkPreference refuses to write when app_config is unreadable', () => {
+  // The 2026-10-16 missing-models incident class: sqliteStore.get returns
+  // undefined when the stored JSON fails to parse, and the old `?? {}` shape
+  // then persisted a preference-only object — every provider credential
+  // replaced, providers reset to defaults on the next load. With an
+  // unreadable config the write must be skipped; with a healthy config the
+  // FULL object goes back with the preference applied.
+  const writes = [];
+  const useStore = (appConfig) => {
+    setStoreGetter(() => ({
+      get: (key) => (key === 'app_config' ? appConfig : null),
+      set: (key, value) => writes.push({ key, value }),
+    }));
+  };
+  try {
+    useStore(undefined);
+    setPersistedCoworkPreference({ effortLevel: 'max' });
+    assert.equal(writes.length, 0, 'no write may reach the store while app_config is unreadable');
+
+    const config = { providers: { deepseek: { enabled: true, apiKey: 'sk-keep' } } };
+    useStore(config);
+    setPersistedCoworkPreference({ effortLevel: 'max' });
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].key, 'app_config');
+    assert.equal(writes[0].value.providers.deepseek.apiKey, 'sk-keep', 'the full config is written back, credentials intact');
+    assert.equal(writes[0].value.coworkEffortLevel, 'max');
+  } finally {
+    setStoreGetter(() => null);
   }
 });
