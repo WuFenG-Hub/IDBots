@@ -3159,6 +3159,30 @@ const getStore = (): SqliteStore => {
   return store;
 };
 
+/**
+ * Store access for IPC handlers: WAIT for the (memoized) init instead of
+ * failing fast. The renderer boots in parallel with the sqlite store's
+ * first-time open (migrations on a multi-GB database can take a while), and
+ * a first-read race used to make configService treat the whole app_config
+ * as unreadable — the user-visible symptom was a session with default
+ * (empty) model settings even though the stored config was intact. Bounded
+ * by a timeout so a wedged init still surfaces as an error the strict-read
+ * guards can act on.
+ */
+const waitForStore = (timeoutMs = 10_000): Promise<SqliteStore> => {
+  const init = initStore();
+  return Promise.race([
+    init,
+    new Promise<SqliteStore>((_, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`Store init did not complete within ${timeoutMs}ms`)),
+        timeoutMs,
+      );
+      timer.unref?.();
+    }),
+  ]);
+};
+
 /** Store access that tolerates early-boot callers (runtime providers fire
  *  before every init path has settled; a missing store must read as
  *  "no override recorded", never as a turn-breaking exception). */
@@ -10009,16 +10033,21 @@ if (!gotTheLock) {
     console.log('[Main] Single-instance lock disabled by runtime override');
   }
 
-  // IPC 处理程序
-  ipcMain.handle('store:get', (_event, key) => {
-    return getStore().get(key);
+  // IPC 处理程序. All store IPC waits for the store to finish initializing
+  // (waitForStore) — a first-read race against the sqlite open otherwise
+  // surfaces as "key absent" to tolerant readers and as a spurious failure
+  // to strict ones.
+  ipcMain.handle('store:get', async (_event, key) => {
+    const storeRef = await waitForStore();
+    return storeRef.get(key);
   });
 
   // Strict variant for callers that must distinguish "key absent" (null)
   // from "stored value unreadable" (rejects — e.g. a corrupt app_config row
   // must never be mistaken for a fresh install by the config service).
-  ipcMain.handle('store:getStrict', (_event, key) => {
-    return getStore().getStrict(key);
+  ipcMain.handle('store:getStrict', async (_event, key) => {
+    const storeRef = await waitForStore();
+    return storeRef.getStrict(key);
   });
 
   // 广播 store 键变更到所有窗口，供多窗口之间实时同步（配置机器人信息等场景）
@@ -10058,13 +10087,15 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('store:set', (_event, key, value) => {
-    getStore().set(key, value);
+  ipcMain.handle('store:set', async (_event, key, value) => {
+    const storeRef = await waitForStore();
+    storeRef.set(key, value);
     broadcastStoreChanged(key);
   });
 
-  ipcMain.handle('store:remove', (_event, key) => {
-    getStore().delete(key);
+  ipcMain.handle('store:remove', async (_event, key) => {
+    const storeRef = await waitForStore();
+    storeRef.delete(key);
     broadcastStoreChanged(key);
   });
 
