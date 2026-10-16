@@ -46,6 +46,7 @@ import {
   createVersionedComposerField,
   runComposerSubmission,
 } from '../src/renderer/components/cowork/coworkPromptSubmission';
+import { deriveCoworkPromptInputState } from '../src/renderer/components/cowork/CoworkPromptInput';
 
 type ReadLocalImageOptions = { path: string; maxBytes?: number };
 type ReadLocalImageResult = { success: boolean; dataUrl?: string; error?: string };
@@ -538,4 +539,22 @@ test('the idle branch keeps its own guard and the streaming one never decides fo
     false,
     'an idle submit never hits the streaming guard, attachment or not',
   );
+});
+
+// Part 3 fixed the *guard* so an image-only steer is admitted; the send/stop
+// *affordance* still keyed off text alone, so the same composer rendered a Stop
+// button — reaching for Send while the turn streamed actually cancelled it. The
+// derived state now counts attachments as submit content on the streaming
+// branch too, so the button is Send.
+test('a running turn with an image but no text offers Send, not Stop', () => {
+  const state = deriveCoworkPromptInputState({
+    value: '',
+    isStreaming: true,
+    disabled: false,
+    steerDisabled: false,
+    attachmentCount: 1,
+  });
+  assert.equal(state.canSubmit, true, 'an image-only steer is clickable while the turn streams');
+  assert.equal(state.showStopButton, false, 'the button is Send, not Stop — clicking it must not cancel the run');
+  assert.equal(state.isSteerSubmit, true);
 });

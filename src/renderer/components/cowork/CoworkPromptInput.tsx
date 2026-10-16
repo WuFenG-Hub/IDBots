@@ -66,11 +66,18 @@ export const deriveCoworkPromptInputState = ({
   attachmentCount,
 }: CoworkPromptInputStateOptions) => {
   const hasTextInput = Boolean(value.trim());
-  const isSteerSubmit = isStreaming && hasTextInput && !steerDisabled;
-  const showStopButton = isStreaming && (!hasTextInput || steerDisabled);
-  const canSubmit = !disabled && (!isStreaming
-    ? hasTextInput || attachmentCount > 0
-    : isSteerSubmit);
+  // ONE content verdict for BOTH branches: text OR attachments. The idle branch
+  // always counted attachments; the streaming branch used to key off text alone,
+  // so while a turn streamed an image-only composer had no content and the
+  // button rendered as Stop — a user who pasted a picture mid-run and reached
+  // for Send hit Stop, cancelling the very turn they were steering. So the
+  // boundary and the affordance are fixed together, never the boundary alone:
+  // the attachment already rides the same submit as text (see
+  // composeCoworkSubmitPrompt), and only `steerDisabled` closes the door.
+  const hasSubmitContent = hasTextInput || attachmentCount > 0;
+  const isSteerSubmit = isStreaming && hasSubmitContent && !steerDisabled;
+  const showStopButton = isStreaming && (!hasSubmitContent || steerDisabled);
+  const canSubmit = !disabled && (isStreaming ? isSteerSubmit : hasSubmitContent);
   return { hasTextInput, isSteerSubmit, showStopButton, canSubmit };
 };
 
