@@ -3980,7 +3980,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     modelPickerModelLabel: 'Model',
     modelPickerEffortLabel: 'Effort',
     modelPickerEffortDefault: 'Auto',
-    modelPickerEffortDefaultDesc: 'The cerebellum picks the effort per message (falls back to the default chain when unavailable)',
+    modelPickerEffortDefaultDesc: 'The cerebellum picks the effort per message (falls back to the model default when unavailable)',
     modelPickerEffortOff: 'Off',
     modelPickerEffortOffDesc: 'No thinking, answer directly',
     modelPickerEffortLow: 'Low',

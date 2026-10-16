@@ -2840,8 +2840,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   // Per-session effort picked in the composer's model+effort picker. Optimistic
   // local state on top of the persisted currentSession.effort; reset when
   // switching sessions. Holds the wire vocabulary: a canonical rung, or the
-  // 'default' sentinel for an explicit "Default" pick (model default wins over
-  // the bot brain / global rungs — a plain null would fall back to them).
+  // 'default' sentinel for the "Auto" rung (cerebellum picks per message,
+  // degrading to the model default when no verdict lands — never the brain /
+  // global rungs a plain null falls back to).
   const [sessionEffortOverride, setSessionEffortOverride] = useState<string | null>(null);
   useEffect(() => {
     setSessionEffortOverride(null);

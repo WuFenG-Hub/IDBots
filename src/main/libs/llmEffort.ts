@@ -6,8 +6,10 @@
 // this vocabulary; `null` means "follow the model default".
 //
 // One non-ladder token is legal on the cowork session effort column:
-// LLM_EFFORT_DEFAULT_SENTINEL records an explicit "Default" pick from a
-// composer picker. See its doc below for why it must stay a truthy string.
+// LLM_EFFORT_DEFAULT_SENTINEL records the composer/session picker's top
+// rung ("Auto" today; historically the explicit "Default" pick). See its
+// doc below for the current contract and the read-boundary compatibility
+// with rows written under the old meaning.
 //
 // The renderer mirror of the vocabulary lives in
 // src/renderer/services/modelCatalog.ts (LlmEffortLevel) — keep the two in
@@ -25,14 +27,21 @@ export const LLM_EFFORT_LEVELS: readonly LlmEffortLevel[] = ['off', 'low', 'high
 
 /**
  * Marker stored on cowork_sessions.effort (and passed as the session
- * effortOverride) when the user explicitly picks the "Default" rung in a
- * composer/session picker. It must be a TRUTHY string that is NOT a canonical
- * level: the per-turn resolution chain is
- * `effortOverride ?? brainEffort ?? globalEffort ?? modelDefault`, so a truthy
- * sentinel stops the chain before the bot brain / global rungs, while
- * toLlmEffortLevel maps it to null — i.e. the model's own default. A plain
- * null cannot express that: it falls through to the brain/global defaults,
- * which is what made the Default rung snap to the highest tier before.
+ * effortOverride) by the composer/session pickers for the top "Auto" rung.
+ * It must be a TRUTHY string that is NOT a canonical level, so "picked
+ * Auto" stays distinguishable from "never picked" (plain null).
+ *
+ * Contract history (compat lives at the runner's read boundary — see
+ * resolveEffectiveEffort / resolveAutoEffortFallback in coworkRunner):
+ * - Pre-auto rows: an explicit "Default" pick whose promise was "model
+ *   default, NEVER the bot-brain/global rungs" — the sentinel was created
+ *   to stop the old `effortOverride ?? brain ?? global ?? model` chain
+ *   before a brain pinned to high.
+ * - Effort-auto rows (2026-10+): the "Auto" rung — the cerebellum effort
+ *   selector resolves per message; when no verdict lands, the fallback
+ *   honors the old promise by degrading to the MODEL DEFAULT, never the
+ *   brain/global chain (plain-null sessions keep that chain).
+ * toLlmEffortLevel maps the sentinel to null (the model's own default).
  */
 export const LLM_EFFORT_DEFAULT_SENTINEL = 'default';
 

@@ -81,9 +81,10 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   } | null>(null);
   // Pending model+effort for the session about to be started from this home
   // view. The whole state being null = follow the selected bot's brain (its
-  // model and effort). Inside a pick, effort null is an EXPLICIT "Default"
-  // choice (model default wins over brain/global) — it must not fall through
-  // to the brain/global rungs the way a missing pick does.
+  // model and effort). Inside a pick, effort null is an explicit "Auto"
+  // choice (stored as the 'default' sentinel: cerebellum picks per message,
+  // degrading to the model default — never brain/global) — it must not fall
+  // through to the brain/global rungs the way a missing pick does.
   const [pendingModelEffort, setPendingModelEffort] = useState<ComposerModelEffortPick | null>(null);
   // Chat experience mode (Settings > General). Assistant mode defaults
   // reasoning effort to off, so the composer effort chip displays 'off' for a
@@ -518,8 +519,9 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         permissionMode,
         // Pending picker selection from the home composer; empty pick falls
         // back to the selected bot's brain (its model and effort). An explicit
-        // pick with effort null carries the 'default' sentinel so the session
-        // runs at the model default instead of the brain/global rungs.
+        // pick with effort null carries the 'default' sentinel (the "Auto"
+        // rung): the cerebellum picks per message, degrading to the model
+        // default when no verdict lands — never the brain/global rungs.
         model: pendingPick?.modelId ?? undefined,
         modelProvider: pendingPick?.providerKey ?? undefined,
         effort: effortForSessionStart(pendingPick),
