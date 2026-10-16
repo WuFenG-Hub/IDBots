@@ -107,6 +107,23 @@ test('a selection floats an action item that offers the targeted reply', () => {
   assert.match(detailSource, /promptInputRef\.current\?\.addQuotedSelection\(fragment\)/);
 });
 
+test('the action item follows the app language', () => {
+  const renderBar = () => renderToStaticMarkup(
+    <CoworkQuoteActionBar placement={{ top: 10, left: 10, width: 176 }} onAdd={() => {}} />,
+  );
+  const original = i18nService.getLanguage();
+  try {
+    i18nService.setLanguage('zh', { persist: false });
+    assert.ok(renderBar().includes('添加到对话'), 'the zh dictionary drives the rendered label');
+    i18nService.setLanguage('en', { persist: false });
+    assert.ok(renderBar().includes('Add to conversation'), 'the en dictionary drives the rendered label');
+  } finally {
+    // Shared singleton: leave the language as the rest of the suite found it.
+    i18nService.setLanguage(original, { persist: false });
+  }
+  assert.equal(i18nService.getLanguage(), original);
+});
+
 test('the selected passage is only quotable when the selection resolves to text', () => {
   assert.deepEqual(createPendingQuotedSelection('  quote me  ', 'assistant-block'), {
     text: 'quote me',
