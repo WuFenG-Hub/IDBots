@@ -10,10 +10,10 @@ import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { PermissionResult } from './coworkPermissionTypes';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
-import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, getPersistedChatExperienceMode, resolveDshProviderRoute, isFreeQuotaProvider, ModelProviderSelectionError, type DshProviderRouteInfo } from './claudeSettings';
+import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, getPersistedChatExperienceMode, resolveDshProviderRoute, getAppConfigProviders, isFreeQuotaProvider, ModelProviderSelectionError, type DshProviderRouteInfo } from './claudeSettings';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { buildGoalPromptSection, type CoworkSessionGoal } from './coworkSessionGoal';
-import { DshTurnHub, dshSessionRootFor, isNativeDeepSeekChatRoute, type DshTurnProviderRoute } from './coworkDshTurn';
+import { DshTurnHub, dshSessionRootFor, dshWebSearchSeedFromProviders, isNativeDeepSeekChatRoute, type DshTurnProviderRoute } from './coworkDshTurn';
 import { isDshShutdownError } from './dshShutdownError';
 import { truncateUtf16Units } from './llmSafeText';
 import { DshStreamUiGate } from './dshStreamUiGate';
@@ -9205,16 +9205,19 @@ export class CoworkRunner extends EventEmitter {
       // Boot order decides whose cold start the user feels (2026-10-16
       // follow-up): the TOP combo — the most-recent session's real route ×
       // automation combo, the likeliest next turn — boots FIRST with the
-      // machine to itself. The previous serial order queued it behind both
-      // clean slots and its sibling combos, so an immediate first message
-      // still paid a full ~18s boot inside the turn. The remaining clean
-      // slots and combos are speculative and boot concurrently behind it.
+      // machine to itself. The remaining clean slots and combos boot
+      // STRICTLY SERIALLY behind it: the earlier parallel fan-out spawned
+      // 4-6 Electron-as-node runtimes in one window and starved the main
+      // process (eventloop:lag 12-16s); the hub's boot queue is the global
+      // backstop, and this loop keeps warmup itself orderly too.
       const [topCombo, ...restCombos] = comboWarm;
       if (topCombo) await bootComboSlot(topCombo);
-      await Promise.allSettled([
-        ...warmRoutes.map((warm) => bootCleanSlot(warm)),
-        ...restCombos.map((combo) => bootComboSlot(combo)),
-      ]);
+      for (const warm of warmRoutes) {
+        await bootCleanSlot(warm);
+      }
+      for (const combo of restCombos) {
+        await bootComboSlot(combo);
+      }
     } catch (error) {
       coworkLog('WARN', 'prewarmDshRuntime', 'Warmup failed; first turn will cold-start', {
         error: error instanceof Error ? error.message : String(error),
@@ -9228,6 +9231,11 @@ export class CoworkRunner extends EventEmitter {
         sessionRoot: dshSessionRootFor(app.getPath('userData')),
         extraEntries: this.dshRuntimeExtraEntries,
         extraEntriesProvider: this.dshExtraEntriesProvider,
+        // Web-search credential seeded from the provider catalog NOW: without
+        // it the first official-DeepSeek turn flips the hub-global webSearch
+        // block on mid-flight and every older slot successor-boots in the
+        // same window (the 2026-10-16 boot storm).
+        webSearchSeed: dshWebSearchSeedFromProviders(getAppConfigProviders()),
         // Shared DSH runtime: bash skill scripts never see Claude's
         // per-session env. Inject the global host channels (proxy URL,
         // SKILLS_ROOT, RPC authfile) plus the BASH_ENV loader so each turn's

@@ -176,6 +176,29 @@ export function deepSeekWebSearchBaseURL(baseUrl: string): string {
   return `${base}/anthropic/v1`
 }
 
+/**
+ * Scan the provider catalog for the official DeepSeek entry and return the
+ * web-search seed the DSH hub carries from construction (see
+ * DshHubOptions.webSearchSeed). null when no enabled official-DeepSeek
+ * provider with a key exists — the hub then behaves exactly as before (the
+ * block appears with the first official turn, acceptable when the user has
+ * no such provider at all).
+ */
+export function dshWebSearchSeedFromProviders(
+  providers: Record<string, { enabled?: boolean; apiKey?: string | null; baseUrl?: string | null } | undefined>,
+): { apiKey: string; baseURL: string } | null {
+  for (const [key, cfg] of Object.entries(providers ?? {})) {
+    if (!cfg || cfg.enabled === false) continue
+    const apiKey = String(cfg.apiKey ?? '').trim()
+    const baseUrl = String(cfg.baseUrl ?? '').trim()
+    if (!apiKey || !baseUrl) continue
+    if (isOfficialDeepSeekRoute({ key, baseUrl })) {
+      return { apiKey, baseURL: deepSeekWebSearchBaseURL(baseUrl) }
+    }
+  }
+  return null
+}
+
 export interface DshTurnCallbacks {
   onMessage: (
     message: { type: string; content: string; metadata?: Record<string, unknown> },
@@ -385,6 +408,17 @@ export interface DshHubOptions {
    * tests that need deterministic retirement).
    */
   kernelActivityGraceMs?: number
+  /**
+   * DeepSeek web-search credential resolved from the provider catalog at hub
+   * construction (dshWebSearchSeedFromProviders). Without it the first
+   * official-DeepSeek turn of an app run flips webSearchSeen ON mid-flight —
+   * a hub-global config change that restarted EVERY slot booted earlier
+   * (the 2026-10-16 [env, webSearch] successor-boot storm behind the 12-16s
+   * main-process stalls). Seeding puts the block in every slot's config from
+   * boot #1, so the appearance flap never happens; per-turn reassignment in
+   * rememberTurnInputs still picks up later key rotations.
+   */
+  webSearchSeed?: { apiKey: string; baseURL: string } | null
 }
 
 /** Child-env map for the shared DSH runtime. Route credentials and the RPC
@@ -547,10 +581,23 @@ export class DshTurnHub {
   /** Set the moment close() begins: turns submitted afterwards fail soft
    *  (DshShutdownError) instead of booting orphan runtimes during shutdown. */
   private closed = false
+  /** Hub-wide FIFO for process spawns (2026-10-16 boot-storm fix): app start
+   *  plus webSearch/MCP config flaps used to boot 4-6 Electron-as-node
+   *  runtimes (each ~250 plugins) CONCURRENTLY, starving the main process
+   *  (eventloop:lag 12-16s on sessions bd646510/c3419940/63e14cfb) so every
+   *  in-process budget — cerebellum aborts, turn races — fired late and the
+   *  first sentence waited out the storm. One boot at a time keeps the host
+   *  responsive; boots are rare enough that FIFO ordering costs nothing in
+   *  the common case. */
+  private kernelBootChain: Promise<void> = Promise.resolve()
   private readonly opts: DshHubOptions
 
   constructor(opts: DshHubOptions) {
     this.opts = opts
+    // See DshHubOptions.webSearchSeed: the web-search block must exist in
+    // every slot's config from boot #1, or its mid-flight appearance flaps
+    // every older slot into a successor boot.
+    this.webSearchSeen = opts.webSearchSeed ?? null
   }
 
   get running(): boolean {
@@ -1614,6 +1661,22 @@ export class DshTurnHub {
     return run
   }
 
+  /** Chain a process spawn behind every other slot's pending boot (see
+   *  kernelBootChain). Reuse/no-op ensures never ride this — only branches
+   *  that actually start a process. */
+  private queueKernelBoot<T>(slotKey: string, work: () => Promise<T>): Promise<T> {
+    const queuedAt = Date.now()
+    const run = this.kernelBootChain.then(() => {
+      const waitMs = Date.now() - queuedAt
+      if (waitMs >= 250) {
+        this.opts.log?.('info', 'dshTurnHub.bootQueueWait', { runtime: slotKey, waitMs })
+      }
+      return work()
+    })
+    this.kernelBootChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
   private async spawnOrReuseFromSeenState(slot: DshRuntimeSlot, input: DshTurnInput): Promise<DshKernel> {
     const config = this.buildRuntimeConfig(slot, input)
     // A config change restarts THIS slot's runtime only. Other providers
@@ -1654,7 +1717,7 @@ export class DshTurnHub {
           'config change with live activity; booting a successor runtime and draining the old one',
           { runtime: slot.key, changed: changedKeys, inFlight, kernelSideBusy })
         const successor = this.supersedeKernel(slot)
-        await successor.ensureRuntime(config)
+        await this.queueKernelBoot(slot.key, () => successor.ensureRuntime(config))
         slot.lastConfigJson = nextJson
         return successor
       }
@@ -1670,7 +1733,7 @@ export class DshTurnHub {
           changed: changedKeys,
           idleForMs: Date.now() - (slot.kernel.lastNotificationAt || Date.now()),
         })
-        await slot.kernel.restart(config)
+        await this.queueKernelBoot(slot.key, () => slot.kernel.restart(config))
         slot.lastConfigJson = nextJson
         return slot.kernel
       }
@@ -1679,7 +1742,13 @@ export class DshTurnHub {
       await slot.kernel.ensureRuntime(config)
       return slot.kernel
     }
-    await slot.kernel.ensureRuntime(config)
+    // First ensure for this slot: a real process spawn unless another boot
+    // already revived it — either way the boot queue serializes the start.
+    if (slot.kernel.running) {
+      await slot.kernel.ensureRuntime(config)
+    } else {
+      await this.queueKernelBoot(slot.key, () => slot.kernel.ensureRuntime(config))
+    }
     slot.lastConfigJson = JSON.stringify(config)
     return slot.kernel
   }
