@@ -87,6 +87,35 @@ export const deriveCoworkPromptInputState = ({
   return { hasTextInput, isSteerSubmit, showStopButton, canSubmit };
 };
 
+export interface CoworkComposerPlaceholderInput {
+  isStreaming: boolean;
+  steerDisabled: boolean;
+  /** The quote slot holds a fragment: the composer is in reply mode. */
+  hasQuotedSelections: boolean;
+  /** Fallback shown when idle with an empty quote slot. */
+  idlePlaceholder: string;
+}
+
+/**
+ * Effective placeholder of the composer. A filled quote slot is a reply, so
+ * its copy wins over every other hint — including the steer copy while a turn
+ * streams, since the slot can be filled by replying to a streaming message.
+ */
+export const deriveCoworkComposerPlaceholder = ({
+  isStreaming,
+  steerDisabled,
+  hasQuotedSelections,
+  idlePlaceholder,
+}: CoworkComposerPlaceholderInput): string => {
+  if (hasQuotedSelections) return i18nService.t('coworkQuoteReplyPlaceholder');
+  if (isStreaming) {
+    return i18nService.t(steerDisabled
+      ? 'coworkSteerSandboxUnavailablePlaceholder'
+      : 'coworkSteerPlaceholder');
+  }
+  return idlePlaceholder;
+};
+
 export interface CoworkContextMenuDerivedState {
   canCut: boolean;
   canCopy: boolean;
@@ -284,8 +313,11 @@ export interface CoworkPromptInputRef {
   /** 从外部（如宿主面板自带的附件按钮）追加附件 */
   addAttachments: (paths: string[]) => void;
   /**
-   * Append one quoted transcript excerpt (the transcript's selection action
-   * bar calls this). It is tracked separately from file attachments.
+   * Put one quoted transcript fragment into the composer's quote slot (the
+   * transcript's selection action bar and the per-message reply entry both
+   * call this). The slot is single-target: a new quote replaces the previous
+   * one, so the two entries never keep two parallel slots. Tracked separately
+   * from file attachments.
    */
   addQuotedSelection: (selection: CoworkQuotedSelection) => void;
 }
@@ -610,9 +642,10 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     addQuotedSelection: (selection: CoworkQuotedSelection) => {
       const field = quotedSelectionFieldRef.current;
       if (!field || !selection || !selection.text.trim()) return;
-      const next = field.get();
-      if (next.some((quoted) => quoted.id === selection.id)) return;
-      field.set([...next, selection]);
+      // Single-target slot: the newest quote (a hand-picked passage or a
+      // message reply) replaces the previous one instead of stacking up; the
+      // fragment model still supports N for a future multi-select.
+      field.set([selection]);
     },
   }));
 
@@ -918,6 +951,17 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
           assistant: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.assistant),
           other: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.other),
         },
+        // Whole-message replies label themselves with role + position (and a
+        // generating mark) instead of the passage template.
+        replyBlockHeader: i18nService.t('coworkQuoteReplyBlockHeader'),
+        replyBlockItem: i18nService.t('coworkQuoteReplyBlockItem'),
+        replyStreamingMark: i18nService.t('coworkQuoteReplyStreamingMark'),
+        replySourceLabel: {
+          user: i18nService.t('coworkQuoteReplySourceUser'),
+          assistant: i18nService.t('coworkQuoteReplySourceAssistant'),
+          other: i18nService.t('coworkQuoteReplySourceOther'),
+        },
+        truncatedNote: i18nService.t('coworkQuoteTruncatedNote'),
       },
     });
 
@@ -1384,11 +1428,12 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     attachmentCount: attachments.length,
     quotedSelectionCount: quotedSelections.length,
   });
-  const effectivePlaceholder = isStreaming
-    ? i18nService.t(steerDisabled
-      ? 'coworkSteerSandboxUnavailablePlaceholder'
-      : 'coworkSteerPlaceholder')
-    : placeholder;
+  const effectivePlaceholder = deriveCoworkComposerPlaceholder({
+    isStreaming,
+    steerDisabled,
+    hasQuotedSelections: quotedSelections.length > 0,
+    idlePlaceholder: placeholder,
+  });
   const enhancedContainerClass = isDraggingFiles
     ? `${containerClass} ring-2 ring-claude-accent/50 border-claude-accent/60`
     : containerClass;

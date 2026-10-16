@@ -19,7 +19,10 @@ import CoworkQuoteActionBar, {
   QUOTE_ACTION_BAR_HEIGHT,
   QUOTE_ACTION_BAR_WIDTH,
 } from './CoworkQuoteActionBar';
+import CoworkMessageReplyAction from './CoworkMessageReplyAction';
 import {
+  buildTranscriptMessagePositions,
+  createMessageQuotedSelection,
   createPendingQuotedSelection,
   createQuotedSelection,
   resolveQuoteActionBarAnchorRect,
@@ -1576,7 +1579,9 @@ const UserMessageItem: React.FC<{
   skills: Skill[];
   sessionType?: string;
   sessionTitle?: string;
-}> = ({ message, skills, sessionType, sessionTitle }) => {
+  /** Quotes this whole message into the composer slot (the reply entry). */
+  onQuoteReply?: (message: CoworkMessage, text: string) => void;
+}> = ({ message, skills, sessionType, sessionTitle, onQuoteReply }) => {
   const [isHovered, setIsHovered] = useState(false);
   const isSteerMessage = message.metadata?.interactionKind === 'steer';
   const steerStatusKey = isSteerMessage
@@ -1674,6 +1679,13 @@ const UserMessageItem: React.FC<{
                   content={message.content}
                   visible={isHovered}
                 />
+                {onQuoteReply && (
+                  <CoworkMessageReplyAction
+                    text={message.content}
+                    visible={isHovered}
+                    onReply={() => onQuoteReply(message, message.content)}
+                  />
+                )}
               </div>
             </div>
           </div>
@@ -1691,6 +1703,8 @@ const AssistantMessageItem: React.FC<{
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   /** Copies the conversation up to and including this message into a new session. */
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
+  /** Quotes this whole message into the composer slot (the reply entry). */
+  onQuoteReply?: (message: CoworkMessage, text: string) => void;
   /** Assistant mode drops the embedded thinking segment (raw reasoning is
    * never shown) and renders only the visible reply text. */
   isAssistantMode?: boolean;
@@ -1705,6 +1719,7 @@ const AssistantMessageItem: React.FC<{
   showCopyButton = false,
   onOpenLocalFile,
   onBranch,
+  onQuoteReply,
   isAssistantMode = false,
   isFinalReply = false,
 }) => {
@@ -1791,6 +1806,13 @@ const AssistantMessageItem: React.FC<{
                     messageId={message.id}
                     visible={isHovered}
                   />
+                  {onQuoteReply && (
+                    <CoworkMessageReplyAction
+                      text={replyContent}
+                      visible={isHovered}
+                      onReply={() => onQuoteReply(message, replyContent)}
+                    />
+                  )}
                   <MessageTimestamp
                     timestamp={message.timestamp}
                     visible={isHovered}
@@ -1836,6 +1858,13 @@ const AssistantMessageItem: React.FC<{
             messageId={message.id}
             visible={isHovered}
           />
+          {onQuoteReply && (
+            <CoworkMessageReplyAction
+              text={replyContent}
+              visible={isHovered}
+              onReply={() => onQuoteReply(message, replyContent)}
+            />
+          )}
           <MessageTimestamp
             timestamp={message.timestamp}
             visible={isHovered}
@@ -2206,6 +2235,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   isActiveTurn = false,
   onOpenLocalFile,
   onBranch,
+  onQuoteReply,
   isAssistantMode = false,
   activityAvatar = null,
   runtimeStatusMessages = null,
@@ -2222,6 +2252,8 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   isActiveTurn?: boolean;
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
+  /** Quotes one whole message into the composer slot (the reply entry). */
+  onQuoteReply?: (message: CoworkMessage, text: string) => void;
   /** Shuffle-bag scope for the assistant-mode indicator's turn-ack phrases. */
   sessionId?: string | null;
   /** Assistant mode: raw thinking and tool-call chrome are hidden entirely
@@ -2463,6 +2495,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
           showCopyButton={showCopyButtons && !hasToolGroupAfter}
           onOpenLocalFile={onOpenLocalFile}
           onBranch={onBranch}
+          onQuoteReply={onQuoteReply}
           isAssistantMode={isAssistantMode}
           isFinalReply={isAssistantMode && index === deliveryIndex}
         />
@@ -2598,6 +2631,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
                   showCopyButton={showCopyButtons}
                   onOpenLocalFile={onOpenLocalFile}
                   onBranch={onBranch}
+                  onQuoteReply={onQuoteReply}
                   isAssistantMode={isAssistantMode}
                 />
               </>
@@ -4132,6 +4166,33 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     return stable;
   }, [sessionMessages, sessionId]);
 
+  // The per-message reply entry needs its target's transcript position at
+  // click time. Kept in a ref (refreshed whenever the turns rebuild) so the
+  // handler stays stable and never breaks AssistantTurnBlock's memo for the
+  // whole transcript — same pattern as handleBranchFromMessage.
+  const transcriptMessagePositionsRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    transcriptMessagePositionsRef.current = buildTranscriptMessagePositions(turns);
+  }, [turns]);
+
+  const handleQuoteReplyMessage = useCallback((message: CoworkMessage, text: string) => {
+    const ordinal = transcriptMessagePositionsRef.current.get(message.id);
+    // The entry only renders on messages the transcript's turns carry, so the
+    // lookup resolves for every real click.
+    if (!ordinal) return;
+    const fragment = createMessageQuotedSelection({
+      content: text,
+      role: message.type === 'user' ? 'user' : message.type === 'assistant' ? 'assistant' : 'other',
+      ordinal,
+      streaming: message.metadata?.isStreaming === true,
+    });
+    if (!fragment) return;
+    // Same slot as the "add to conversation" path: a reply replaces whatever
+    // quote the composer held.
+    promptInputRef.current?.addQuotedSelection(fragment);
+    promptInputRef.current?.focus();
+  }, []);
+
   // A window whose messages all render as nothing (the transcript hides control
   // and internal-signal messages) would strand the history: there is nothing to
   // scroll up, so the scroll handler never asks for the page below. Same safety
@@ -4237,6 +4298,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 skills={skills}
                 sessionType={currentSession?.sessionType}
                 sessionTitle={currentSession?.title}
+                onQuoteReply={handleQuoteReplyMessage}
               />
             </div>
           )}
@@ -4253,6 +4315,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 isActiveTurn={currentSession?.status === 'running' && isLastTurn}
                 onOpenLocalFile={handleOpenLocalFile}
                 onBranch={handleBranchFromMessage}
+                onQuoteReply={handleQuoteReplyMessage}
                 isAssistantMode={isAssistantMode}
                 activityAvatar={sessionMetabot?.avatar ?? currentSession.metabotAvatar ?? null}
                 runtimeStatusMessages={isLastTurn ? runtimeStatusMessages : null}
