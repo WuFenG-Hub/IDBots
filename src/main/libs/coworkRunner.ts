@@ -9337,17 +9337,21 @@ export class CoworkRunner extends EventEmitter {
     // runTurn's own ensureKernel joins the same kernelEnsureChain and finds
     // the config unchanged (same session id → same provider/MCP/automation
     // accumulation), so this only ever removes wait, never adds a restart.
-    // First-sentence latency work, 2026-10-15.
-    void hub.prewarmTurnSlot({
-      sessionId,
-      provider: this.dshTurnProviderFromRoute(route),
-      ...(cwd ? { workspace: { cwd } } : {}),
-    }).catch((prewarmError) => {
-      coworkLog('WARN', 'runDshSessionLocal', 'Turn-slot prewarm failed; the turn will ensure the runtime itself', {
+    // First-sentence latency work, 2026-10-15. The typeof guard keeps partial
+    // test fakes (and any future hub without prewarm) alive — the turn's own
+    // ensureKernel covers a skipped prewarm.
+    if (typeof hub.prewarmTurnSlot === 'function') {
+      void hub.prewarmTurnSlot({
         sessionId,
-        error: prewarmError instanceof Error ? prewarmError.message : String(prewarmError),
+        provider: this.dshTurnProviderFromRoute(route),
+        ...(cwd ? { workspace: { cwd } } : {}),
+      }).catch((prewarmError) => {
+        coworkLog('WARN', 'runDshSessionLocal', 'Turn-slot prewarm failed; the turn will ensure the runtime itself', {
+          sessionId,
+          error: prewarmError instanceof Error ? prewarmError.message : String(prewarmError),
+        });
       });
-    });
+    }
     activeSession.sdkTaskControl = {
       stopTask: async (taskId: string) => {
         await hub.cancelAgent(taskId, 'subagent-stop');
