@@ -75,8 +75,12 @@ export const deriveCoworkPromptInputState = ({
   quotedSelectionCount = 0,
 }: CoworkPromptInputStateOptions) => {
   const hasTextInput = Boolean(value.trim());
-  const isSteerSubmit = isStreaming && hasTextInput && !steerDisabled;
-  const showStopButton = isStreaming && (!hasTextInput || steerDisabled);
+  // A steer can carry typed text and/or quoted transcript excerpts (they ride
+  // into the steer prompt body). File attachments are a disabled semantic
+  // while a turn streams, so they never make a steer sendable.
+  const hasSteerContent = hasTextInput || quotedSelectionCount > 0;
+  const isSteerSubmit = isStreaming && hasSteerContent && !steerDisabled;
+  const showStopButton = isStreaming && (!hasSteerContent || steerDisabled);
   const canSubmit = !disabled && (!isStreaming
     ? hasTextInput || attachmentCount > 0 || quotedSelectionCount > 0
     : isSteerSubmit);
@@ -855,7 +859,9 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const submittedAttachments = attachmentField.get();
     const submittedQuotedSelections = quotedSelectionField.get();
     const trimmedValue = submittedValue.trim();
-    if (isStreaming && !trimmedValue) return;
+    // A steer is sendable when it carries text or quoted excerpts. An empty
+    // steer returns before anything is composed or consumed.
+    if (isStreaming && !trimmedValue && submittedQuotedSelections.length === 0) return;
     // Slash-command adjudication (DSH port): a live claim, a bare `/name`
     // line, or a manually typed `/name <args>` executes the command instead
     // of sending a message; unknown /-leading text falls through as a
@@ -895,30 +901,33 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     ).join('\n');
     // Quoted excerpts are written into the prompt BODY, not merely rendered
     // next to it: the bot re-reads the conversation as plain text each turn, so
-    // a highlight alone would never reach it.
-    const finalPrompt = isStreaming
-      ? trimmedValue
-      : composeSubmittedCoworkPrompt({
-        value: trimmedValue,
-        quotedSelections: submittedQuotedSelections,
-        attachmentLines,
-        labels: {
-          header: i18nService.t('coworkQuoteBlockHeader'),
-          item: i18nService.t('coworkQuoteBlockItem'),
-          sourceLabel: {
-            user: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.user),
-            assistant: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.assistant),
-            other: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.other),
-          },
+    // a highlight alone would never reach it. A steer (mid-turn correction)
+    // composes through this same path — replying to a selected passage while
+    // the turn runs must carry the excerpt too. Attachment lines stay idle-only:
+    // attachments are a disabled semantic while a turn streams and never ride
+    // into a steer.
+    const finalPrompt = composeSubmittedCoworkPrompt({
+      value: trimmedValue,
+      quotedSelections: submittedQuotedSelections,
+      attachmentLines: isStreaming ? undefined : attachmentLines,
+      labels: {
+        header: i18nService.t('coworkQuoteBlockHeader'),
+        item: i18nService.t('coworkQuoteBlockItem'),
+        sourceLabel: {
+          user: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.user),
+          assistant: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.assistant),
+          other: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.other),
         },
-      });
+      },
+    });
 
     const draftSnapshot = draftField.takeAndClear();
     let attachmentSnapshot: VersionedComposerSnapshot<CoworkAttachment[]> | null = null;
-    let quotedSelectionSnapshot: VersionedComposerSnapshot<CoworkQuotedSelection[]> | null = null;
+    // Excerpts are consumed on every submit path (steer included); only the
+    // attachment list stays idle-only.
+    const quotedSelectionSnapshot = quotedSelectionField.takeAndClear();
     if (!isStreaming) {
       attachmentSnapshot = attachmentField.takeAndClear();
-      quotedSelectionSnapshot = quotedSelectionField.takeAndClear();
     }
     try {
       const accepted = await runComposerSubmission(
@@ -930,17 +939,13 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
         if (attachmentSnapshot) {
           attachmentField.restoreIfUnchanged(attachmentSnapshot);
         }
-        if (quotedSelectionSnapshot) {
-          quotedSelectionField.restoreIfUnchanged(quotedSelectionSnapshot);
-        }
+        quotedSelectionField.restoreIfUnchanged(quotedSelectionSnapshot);
       }
     } catch (error) {
       if (attachmentSnapshot) {
         attachmentField.restoreIfUnchanged(attachmentSnapshot);
       }
-      if (quotedSelectionSnapshot) {
-        quotedSelectionField.restoreIfUnchanged(quotedSelectionSnapshot);
-      }
+      quotedSelectionField.restoreIfUnchanged(quotedSelectionSnapshot);
       console.error('Cowork prompt submission failed:', error);
     }
   }, [isStreaming, disabled, steerDisabled, onSubmit, activeSkillIds, skills, inputFileLabel, showFolderSelector, workingDirectory, workspaceSelection, commandsEnabled, claim, commands, runCommand]);

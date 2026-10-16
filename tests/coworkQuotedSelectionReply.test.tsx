@@ -14,10 +14,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { build } from 'esbuild';
 
 import {
   QUOTED_SELECTION_MAX_CHARS,
@@ -33,6 +35,10 @@ import {
   resolveQuotedSelectionRole,
   summarizeQuotedSelectionText,
 } from '../src/renderer/components/cowork/coworkQuotedSelections';
+import {
+  createVersionedComposerField,
+  runComposerSubmission,
+} from '../src/renderer/components/cowork/coworkPromptSubmission';
 import CoworkQuotedSelectionTiles from '../src/renderer/components/cowork/CoworkQuotedSelectionTiles';
 import CoworkQuoteActionBar from '../src/renderer/components/cowork/CoworkQuoteActionBar';
 import { i18nService } from '../src/renderer/services/i18n';
@@ -310,6 +316,154 @@ test('the composer writes quoted fragments through the real submit path and roll
   // Negative guard: the composed-prompt helper of an unmerged branch must not
   // be referenced on this baseline (this baseline has no such symbol).
   assert.doesNotMatch(inputSource, new RegExp(['compose', 'Cowork', 'SubmitPrompt'].join('')));
+});
+
+test('a steer that carries only quoted excerpts offers send, not stop, and stays sendable', async (t) => {
+  // Real behaviour of the composer's derived state, loaded through the
+  // repository's esbuild bundle trick (the component itself is SSR-only, so
+  // events cannot be mounted here).
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cowork-quote-steer-'));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  const outputFile = path.join(tempDir, 'prompt-state.mjs');
+  await build({
+    absWorkingDir: projectRoot,
+    stdin: {
+      contents: `export { deriveCoworkPromptInputState } from './src/renderer/components/cowork/CoworkPromptInput.tsx';`,
+      resolveDir: projectRoot,
+      sourcefile: 'prompt-state-entry.ts',
+      loader: 'ts',
+    },
+    outfile: outputFile,
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    logLevel: 'silent',
+  });
+  const { deriveCoworkPromptInputState } = await import(`${pathToFileURL(outputFile).href}?test=${Date.now()}`);
+
+  // Quote-only steer (the defect): send, enabled — not stop.
+  assert.deepEqual(
+    deriveCoworkPromptInputState({ value: '', isStreaming: true, disabled: false, steerDisabled: false, attachmentCount: 0, quotedSelectionCount: 1 }),
+    { hasTextInput: false, isSteerSubmit: true, showStopButton: false, canSubmit: true },
+  );
+  // Typed text still steers exactly as before.
+  assert.deepEqual(
+    deriveCoworkPromptInputState({ value: 'focus on point two', isStreaming: true, disabled: false, steerDisabled: false, attachmentCount: 0, quotedSelectionCount: 1 }),
+    { hasTextInput: true, isSteerSubmit: true, showStopButton: false, canSubmit: true },
+  );
+  // steerDisabled keeps its meaning: stop stays, nothing submits.
+  assert.deepEqual(
+    deriveCoworkPromptInputState({ value: '', isStreaming: true, disabled: false, steerDisabled: true, attachmentCount: 0, quotedSelectionCount: 1 }),
+    { hasTextInput: false, isSteerSubmit: false, showStopButton: true, canSubmit: false },
+  );
+  // Attachments are a disabled semantic while a turn streams: they never make
+  // a steer sendable.
+  assert.deepEqual(
+    deriveCoworkPromptInputState({ value: '', isStreaming: true, disabled: false, steerDisabled: false, attachmentCount: 2, quotedSelectionCount: 0 }),
+    { hasTextInput: false, isSteerSubmit: false, showStopButton: true, canSubmit: false },
+  );
+  // Idle quote-only composers stay sendable too (unchanged).
+  assert.deepEqual(
+    deriveCoworkPromptInputState({ value: '', isStreaming: false, disabled: false, steerDisabled: false, attachmentCount: 0, quotedSelectionCount: 1 }),
+    { hasTextInput: false, isSteerSubmit: false, showStopButton: false, canSubmit: true },
+  );
+});
+
+test('a steer composed from quoted excerpts alone carries the excerpt and is never empty', () => {
+  const fragment = selection(QUOTE_TEXT, 'assistant', 'q-steer');
+  const quoteOnlySteer = composeSubmittedCoworkPrompt({ value: '', quotedSelections: [fragment], labels });
+  assert.notEqual(quoteOnlySteer, '', 'a quote-only steer must not compose an empty prompt');
+  assert.ok(quoteOnlySteer.includes(QUOTE_TEXT), 'the quoted original rides in the steer prompt body');
+  assert.ok(quoteOnlySteer.includes(labels.header), 'the same blockquote header as an idle submit');
+
+  const steerWithText = composeSubmittedCoworkPrompt({
+    value: 'answer only about that part',
+    quotedSelections: [fragment],
+    labels,
+  });
+  assert.ok(steerWithText.includes(QUOTE_TEXT) && steerWithText.includes('answer only about that part'));
+  assert.ok(
+    steerWithText.indexOf(labels.header) < steerWithText.indexOf('answer only about that part'),
+    'the excerpt still reads before the instruction',
+  );
+  // Nothing quoted and nothing typed composes to an empty string; the submit
+  // guard (asserted below at source level) is what keeps it from being sent.
+  assert.equal(composeSubmittedCoworkPrompt({ value: '', quotedSelections: [], labels }), '');
+});
+
+test('the steer branch composes, consumes and restores quoted fragments through the shared submit path', () => {
+  // The defect: a steer composed `trimmedValue` alone, dropping the excerpts.
+  assert.doesNotMatch(inputSource, /isStreaming\s*\?\s*trimmedValue/);
+  assert.match(inputSource, /const finalPrompt = composeSubmittedCoworkPrompt\(\{/);
+  assert.match(inputSource, /quotedSelections: submittedQuotedSelections/);
+  // Attachments stay idle-only: a disabled semantic while a turn streams.
+  assert.match(inputSource, /attachmentLines: isStreaming \? undefined : attachmentLines/);
+
+  // A steer needs text or excerpts; only an empty steer returns early, and it
+  // does so before anything is composed or consumed — so click and Enter can
+  // never submit an empty steer prompt.
+  assert.match(inputSource, /if \(isStreaming && !trimmedValue && submittedQuotedSelections\.length === 0\) return;/);
+  assert.match(inputSource, /event\.key === 'Enter' && !event\.shiftKey && !isComposing && !disabled/);
+
+  // Excerpts are consumed on every submit path, not only when idle...
+  assert.match(inputSource, /const quotedSelectionSnapshot = quotedSelectionField\.takeAndClear\(\);/);
+  assert.doesNotMatch(inputSource, /if \(!isStreaming\) \{[^}]*quotedSelectionField\.takeAndClear/);
+  // ...and both rejection arms (accepted===false / thrown) roll them back.
+  assert.equal(
+    (inputSource.match(/quotedSelectionField\.restoreIfUnchanged\(quotedSelectionSnapshot\)/g) ?? []).length,
+    2,
+    'both the accepted===false arm and the catch arm restore the fragments',
+  );
+});
+
+test('a steer submit consumes quoted fragments and restores them only when it is rejected', async () => {
+  // Mirrors the steer branch's sequence (source-asserted above) with the same
+  // primitives it calls: takeAndClear at submit time, restoreIfUnchanged on
+  // rejection, nothing on acceptance.
+  const fragment = selection(QUOTE_TEXT, 'assistant', 'q-steer');
+  const runSteer = async (outcome) => {
+    const quotedField = createVersionedComposerField([fragment], () => [], () => {});
+    const draftField = createVersionedComposerField('', () => '', () => {});
+    const quotedSnapshot = quotedField.takeAndClear();
+    const draftSnapshot = draftField.takeAndClear();
+    assert.deepEqual(quotedField.get(), [], 'consumed at submit time');
+    const result = await runComposerSubmission(draftField, draftSnapshot, () => outcome);
+    if (result === false) {
+      quotedField.restoreIfUnchanged(quotedSnapshot);
+    }
+    return quotedField;
+  };
+
+  assert.deepEqual(
+    (await runSteer(false)).get().map((entry) => entry.text),
+    [QUOTE_TEXT],
+    'a rejected steer restores the fragments',
+  );
+  assert.deepEqual(
+    (await runSteer(true)).get(),
+    [],
+    'an accepted steer leaves the fragments cleared',
+  );
+
+  // Thrown submission: the catch arm restores too.
+  const quotedField = createVersionedComposerField([fragment], () => [], () => {});
+  const draftField = createVersionedComposerField('', () => '', () => {});
+  const quotedSnapshot = quotedField.takeAndClear();
+  const draftSnapshot = draftField.takeAndClear();
+  await assert.rejects(
+    runComposerSubmission(draftField, draftSnapshot, () => { throw new Error('steer failed'); }),
+    /steer failed/,
+  );
+  quotedField.restoreIfUnchanged(quotedSnapshot);
+  assert.deepEqual(quotedField.get().map((entry) => entry.text), [QUOTE_TEXT], 'a thrown steer restores the fragments');
+
+  // A fragment added while the steer was in flight is newer state: the stale
+  // snapshot restore is refused, so a rejected submit never clobbers it.
+  const inFlightField = createVersionedComposerField([fragment], () => [], () => {});
+  const inFlightSnapshot = inFlightField.takeAndClear();
+  inFlightField.set([selection('newer excerpt', 'user', 'q-later')]);
+  assert.equal(inFlightField.restoreIfUnchanged(inFlightSnapshot), false);
+  assert.deepEqual(inFlightField.get().map((entry) => entry.text), ['newer excerpt']);
 });
 
 test('quoted-selection copy lives in both i18n dictionaries', () => {
