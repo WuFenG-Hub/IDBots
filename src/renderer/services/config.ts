@@ -641,7 +641,8 @@ class ConfigService {
   private config: AppConfig = defaultConfig;
   /**
    * False until the stored app_config has actually been read (a verified
-   * absent key counts — that is a fresh install). When the read fails,
+   * absent key counts — that is a fresh install; a row whose JSON is CORRUPT
+   * does not — getItemStrict rejects on it). When the read fails,
    * `this.config` is still the default template, and persisting it would
    * silently replace stored provider credentials with presets (the
    * 2026-10-16 missing-models incident: everything but app_config survived

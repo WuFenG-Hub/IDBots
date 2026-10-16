@@ -4190,6 +4190,28 @@ export class SqliteStore {
     }
   }
 
+  /**
+   * Like get, but a row whose stored JSON fails to parse THROWS instead of
+   * collapsing to undefined. `get`'s silent-undefined is fine for tolerant
+   * readers, but it erases the difference between "key absent" and "key
+   * corrupt" — and destructive-write guards downstream (configService's
+   * refuse-to-persist-defaults path) must treat a corrupt app_config row as
+   * "unreadable", never as "fresh install" (a defaults write over a corrupt
+   * row is exactly the 2026-10-16 missing-models reset). Absent key still
+   * returns undefined: that is a verified fresh install.
+   */
+  getStrict<T = unknown>(key: string): T | undefined {
+    this.assertOpen();
+    const result = this.db.exec('SELECT value FROM kv WHERE key = ?', [key]);
+    if (!result[0]?.values[0]) return undefined;
+    const value = result[0].values[0][0] as string;
+    try {
+      return JSON.parse(value) as T;
+    } catch (error) {
+      throw new Error(`kv value for "${key}" failed to parse: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   set<T = unknown>(key: string, value: T): void {
     this.assertOpen();
     const oldValue = this.get<T>(key);

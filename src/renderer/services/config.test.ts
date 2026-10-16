@@ -310,6 +310,7 @@ test('configService.init fills the cerebellum default for stored configs that pr
     electron: {
       store: {
         get: async () => storedConfig,
+        getStrict: async () => storedConfig,
         set: async (_key: string, value: unknown) => {
           persisted.value = value;
         },
@@ -442,6 +443,36 @@ test('configService.updateConfig refuses to persist when the stored config canno
       before,
       'the in-memory config must stay untouched instead of merging into the default template',
     );
+  } finally {
+    delete (globalThis as { window?: unknown }).window;
+  }
+});
+
+test('configService.updateConfig refuses to persist when the stored app_config row is corrupt', async () => {
+  // Reviewer-flagged hole in the write guard: a row whose JSON fails to
+  // parse used to surface as null (indistinguishable from a fresh install),
+  // so the guard marked the store loaded and the next write persisted the
+  // default template over the corrupt row. getItemStrict now routes through
+  // store:getStrict, which rejects on corruption — init must fail, and the
+  // write must be dropped instead of resetting the config.
+  const persisted: unknown[] = [];
+  (globalThis as { window?: unknown }).window = {
+    electron: {
+      store: {
+        getStrict: async () => { throw new Error('kv value for "app_config" failed to parse'); },
+        get: async () => null,
+        set: async (_key: string, value: unknown) => { persisted.push(value); },
+        remove: async () => {},
+        onChanged: () => () => {},
+      },
+    },
+  };
+  try {
+    const before = JSON.stringify(configService.getConfig());
+    await configService.init();
+    await configService.updateConfig({ theme: 'dark' } as Partial<AppConfig>);
+    assert.equal(persisted.length, 0, 'a corrupt app_config row must never be treated as a fresh install');
+    assert.equal(JSON.stringify(configService.getConfig()), before);
   } finally {
     delete (globalThis as { window?: unknown }).window;
   }

@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('electron', {
   arch: process.arch,
   store: {
     get: (key: string) => ipcRenderer.invoke('store:get', key),
+    getStrict: (key: string) => ipcRenderer.invoke('store:getStrict', key),
     set: (key: string, value: any) => ipcRenderer.invoke('store:set', key, value),
     remove: (key: string) => ipcRenderer.invoke('store:remove', key),
     onChanged: (callback: (payload: { key: string }) => void) => {

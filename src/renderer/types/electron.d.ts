@@ -823,6 +823,8 @@ interface IElectronAPI {
   arch: string;
   store: {
     get: (key: string) => Promise<any>;
+    /** Strict read: rejects when the stored JSON is corrupt (vs null for an absent key). */
+    getStrict: (key: string) => Promise<any>;
     set: (key: string, value: any) => Promise<void>;
     remove: (key: string) => Promise<void>;
     onChanged: (callback: (payload: { key: string }) => void) => () => void;

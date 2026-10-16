@@ -27,11 +27,17 @@ class LocalStoreService implements LocalStore {
     }
   }
 
+  /**
+   * Like getItem, but never collapses an unreadable value to null: an absent
+   * key resolves to null (verified fresh), while a store/IPC failure OR a
+   * row whose stored JSON fails to parse REJECTS (store:getStrict). Callers
+   * that must refuse destructive defaults writes on unreadable data — the
+   * config service deciding whether persisting a defaults-based config
+   * would wipe stored credentials — use this variant.
+   */
   async getItemStrict<T>(key: string): Promise<T | null> {
-    // No swallow: null means the main process answered "absent"; a store or
-    // IPC error rejects so callers can refuse destructive defaults writes.
-    const value = await window.electron.store.get(key);
-    return value || null;
+    const value = await window.electron.store.getStrict(key);
+    return value ?? null;
   }
 
   async setItem<T>(key: string, value: T): Promise<void> {

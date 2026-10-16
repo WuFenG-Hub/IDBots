@@ -10014,6 +10014,13 @@ if (!gotTheLock) {
     return getStore().get(key);
   });
 
+  // Strict variant for callers that must distinguish "key absent" (null)
+  // from "stored value unreadable" (rejects — e.g. a corrupt app_config row
+  // must never be mistaken for a fresh install by the config service).
+  ipcMain.handle('store:getStrict', (_event, key) => {
+    return getStore().getStrict(key);
+  });
+
   // 广播 store 键变更到所有窗口，供多窗口之间实时同步（配置机器人信息等场景）
   const broadcastStoreChanged = (key: string): void => {
     BrowserWindow.getAllWindows().forEach((win) => {
