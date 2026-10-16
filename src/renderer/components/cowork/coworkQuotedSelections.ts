@@ -9,7 +9,8 @@
  * to `onSubmit`.
  *
  * Pure module (no React, no DOM): the transcript view creates fragments from a
- * live selection, the composer owns them, both go through these helpers.
+ * live selection OR from one whole message (the per-message reply entry), the
+ * composer owns them, both go through these helpers.
  */
 
 import type { CoworkQuotedSelection, CoworkQuotedSelectionRole } from '../../types/cowork';
@@ -62,6 +63,41 @@ export const createQuotedSelection = (
     truncated,
   };
 };
+
+/** What the per-message reply entry knows about its target message. */
+export interface QuotedMessageTarget {
+  /** The message body as it reads at capture time (the excerpt snapshot). */
+  content: string;
+  role: CoworkQuotedSelectionRole;
+  /** 1-based position among the transcript's rendered messages. */
+  ordinal: number;
+  /** Whether the message was still being generated at capture time. */
+  streaming: boolean;
+}
+
+/**
+ * Build a fragment that quotes one whole transcript message (the reply entry
+ * on each message's action bar). The body is a snapshot taken at click time:
+ * a still-generating message contributes what it has written so far, together
+ * with a frozen `streaming` mark, so the excerpt can never change under the
+ * owner's eyes afterwards. Returns null when the message carries no text.
+ */
+export const createMessageQuotedSelection = (
+  target: QuotedMessageTarget,
+  id: string = nextQuotedSelectionId(),
+): CoworkQuotedSelection | null => {
+  const fragment = createQuotedSelection(target.content, target.role, id);
+  if (!fragment) return null;
+  return {
+    ...fragment,
+    messageRef: { ordinal: target.ordinal, streaming: target.streaming },
+  };
+};
+
+/** Whether a message carries text the reply entry could quote. */
+export const hasQuotableText = (raw: string): boolean => (
+  normalizeQuotedSelectionText(raw).length > 0
+);
 
 /** Which side of the transcript a selected block belongs to. */
 export const resolveQuotedSelectionRole = (
@@ -136,12 +172,48 @@ export interface QuotedSelectionBlockLabels {
   item: string;
   /** Localized name of each side of the conversation. */
   sourceLabel: Record<CoworkQuotedSelectionRole, string>;
+  /**
+   * Reply copy, used when a fragment quotes one whole message. `replyBlockItem`
+   * is the per-message line — role, position and an optional generating mark,
+   * e.g. "Reply to {source} (message #{ordinal}{streaming}):". A block that
+   * quotes exactly one message is led by its own item line; `replyBlockHeader`
+   * opens a block that quotes several. `replyStreamingMark` fills the
+   * `{streaming}` slot (a " · " joiner is prepended), and `replySourceLabel`
+   * supersedes `sourceLabel` for reply fragments when provided.
+   */
+  replyBlockHeader?: string;
+  replyBlockItem?: string;
+  replyStreamingMark?: string;
+  replySourceLabel?: Partial<Record<CoworkQuotedSelectionRole, string>>;
+  /**
+   * Note appended at the excerpt's tail when the text had to be capped:
+   * contains `{max}` (the per-fragment cap). Truncation must never be silent
+   * in the prompt body.
+   */
+  truncatedNote?: string;
 }
+
+/** Fill the reply item template for one quoted message. */
+const buildReplyItemLabel = (
+  template: string,
+  source: string,
+  ref: NonNullable<CoworkQuotedSelection['messageRef']>,
+  streamingMark: string | undefined,
+): string => template
+  .replace('{source}', source)
+  .replace('{ordinal}', String(ref.ordinal))
+  .replace('{streaming}', ref.streaming && streamingMark ? ` · ${streamingMark}` : '');
 
 /**
  * Render the excerpt block that is prepended to the submitted prompt. A
  * blockquote keeps each excerpt visibly distinct from the owner's own
  * instruction while staying plain text for the model.
+ *
+ * Reply fragments (whole-message quotes) label themselves with the message's
+ * role + position; a block that quotes exactly one message is led by that
+ * label line alone, while multi-message blocks (the model supports N even
+ * though the composer slot is single-target today) open with the reply
+ * header so every item line stays a per-message label.
  */
 export const buildQuotedSelectionsBlock = (
   selections: readonly CoworkQuotedSelection[],
@@ -149,15 +221,25 @@ export const buildQuotedSelectionsBlock = (
 ): string => {
   if (selections.length === 0) return '';
   const parts = selections.map((selection) => {
-    const source = labels.sourceLabel[selection.role] ?? labels.sourceLabel.other;
-    const label = labels.item.replace('{source}', source);
-    const body = selection.text
+    const ref = selection.messageRef;
+    const source = (ref && labels.replySourceLabel?.[selection.role])
+      ?? labels.sourceLabel[selection.role]
+      ?? labels.sourceLabel.other;
+    const label = ref && labels.replyBlockItem
+      ? buildReplyItemLabel(labels.replyBlockItem, source, ref, labels.replyStreamingMark)
+      : labels.item.replace('{source}', source);
+    const lines = selection.text
       .split('\n')
-      .map((line) => (line ? `> ${line}` : '>'))
-      .join('\n');
-    return `> ${label}\n${body}`;
+      .map((line) => (line ? `> ${line}` : '>'));
+    if (selection.truncated && labels.truncatedNote) {
+      lines.push(`> ${labels.truncatedNote.replace('{max}', String(QUOTED_SELECTION_MAX_CHARS))}`);
+    }
+    return `> ${label}\n${lines.join('\n')}`;
   });
-  return `> ${labels.header}\n>\n${parts.join('\n>\n')}`;
+  const replyOnly = selections.every((selection) => Boolean(selection.messageRef));
+  if (replyOnly && selections.length === 1) return parts[0];
+  const header = replyOnly && labels.replyBlockHeader ? labels.replyBlockHeader : labels.header;
+  return `> ${header}\n>\n${parts.join('\n>\n')}`;
 };
 
 export interface CoworkPromptBodyParts {
@@ -209,3 +291,40 @@ export const composeSubmittedCoworkPrompt = ({
   quotedBlock: buildQuotedSelectionsBlock(quotedSelections, labels),
   attachmentLines,
 });
+
+/**
+ * Structural shape of the rendered turns the transcript passes in (the
+ * ConversationTurn[] of CoworkSessionDetail, kept structural so this module
+ * stays import-free).
+ */
+export interface TranscriptTurnLike {
+  userMessage: { id: string } | null;
+  assistantItems: ReadonlyArray<{ type: string; message?: { id: string } }>;
+}
+
+/**
+ * 1-based positions of the transcript's conversational messages — user and
+ * assistant messages in rendered order; tool chrome and system notices do not
+ * count — keyed by message id. The reply entry writes the target's position
+ * into the quoted fragment's label, so "第 N 条" always matches what the
+ * transcript rendered at capture time.
+ */
+export const buildTranscriptMessagePositions = (
+  turns: readonly TranscriptTurnLike[],
+): Map<string, number> => {
+  const positions = new Map<string, number>();
+  let position = 0;
+  for (const turn of turns) {
+    if (turn.userMessage) {
+      position += 1;
+      positions.set(turn.userMessage.id, position);
+    }
+    for (const item of turn.assistantItems) {
+      if (item.type === 'assistant' && item.message) {
+        position += 1;
+        positions.set(item.message.id, position);
+      }
+    }
+  }
+  return positions;
+};
