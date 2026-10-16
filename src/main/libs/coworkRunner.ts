@@ -786,6 +786,46 @@ function resolveAutoEffortFallback(input: AutoEffortFallbackInput): LlmEffortLev
 }
 export { resolveAutoEffortFallback };
 
+export interface UnattendedAutoEffortInput {
+  /** Bot brain effort (primary brain for the main route, fallback brain's
+   * effort on a fallback-route resume). */
+  brainEffort: unknown;
+  /** Whether the session has a configured bot brain (the global rung only
+   * fills in for brain-less sessions). */
+  hasBrain: boolean;
+  /** Persisted global cowork effort. */
+  globalEffort: unknown;
+}
+
+/**
+ * "Auto" effort resolution for unattended automation turns — every LLM call
+ * no human is waiting on (delegated/scheduled/long-term tasks, group tasks,
+ * Meta-to-Meta A2A chats, orchestration runs). These turns NEVER consult the
+ * cerebellum per-message effort selector: the assistant trade (less reasoning
+ * for a faster first token) only pays off when a human watches the reply, and
+ * here the work product is the only output that matters.
+ *
+ * Resolution: an explicit bot-brain pick from the bot edit page is
+ * authoritative (a bot pinned to 'high' runs 'high' on every unattended
+ * call); a brain left on Auto (model default) resolves to 'max' — the
+ * auto-means-max policy for machine-driven calls; brain-less sessions honor
+ * an explicit persisted global pick and default to 'max' otherwise. The
+ * session-level 'default' sentinel keeps meaning "auto": its legacy
+ * "model default, never the brain rungs" promise was an interactive-picker
+ * compat and auto-created unattended sessions never carry it.
+ */
+function resolveUnattendedAutoEffort(input: UnattendedAutoEffortInput): LlmEffortLevel {
+  const brainEffort = toLlmEffortLevel(input.brainEffort);
+  if (brainEffort != null) {
+    return brainEffort;
+  }
+  if (input.hasBrain) {
+    return 'max';
+  }
+  return toLlmEffortLevel(input.globalEffort) ?? 'max';
+}
+export { resolveUnattendedAutoEffort };
+
 function findSkillsMarkerIndex(value: string): number {
   return value.toLowerCase().lastIndexOf(SKILLS_MARKER);
 }
@@ -5861,6 +5901,35 @@ export class CoworkRunner extends EventEmitter {
     return this.store.getConversationSourceContextBySession(sessionId).sourceChannel === 'cowork_ui';
   }
 
+  /**
+   * Whether this session's turns are machine-driven rather than a human
+   * waiting on the reply: auto-created runs (schedule/longterm/orchestration),
+   * Meta-to-Meta A2A and MetaWeb group/order conversations, group tasks, and
+   * Bot Browser pages are unattended; regular cowork UI chats and human IM
+   * (Telegram etc.) conversations are not. The "auto" reasoning-effort rung
+   * keys off this split: human-sent messages classify per message through the
+   * cerebellum effort selector (dialogue latency is the scarce resource),
+   * unattended turns resolve straight to the bot brain pick / max (see
+   * resolveUnattendedAutoEffort — the work product is the only output that
+   * matters). Mirrors the assistant-mode gate's session read, including its
+   * cowork_ui→metaweb_private episode flip, so the two postures never
+   * disagree about the same session.
+   */
+  private isUnattendedAutomationSession(sessionId: string): boolean {
+    const session = this.store.getSession(sessionId);
+    if (!session) return false;
+    if (session.autoOrigin) return true;
+    const sourceChannel = this.store.getConversationSourceContextBySession(sessionId).sourceChannel;
+    // IM conversations (im:<platform>[:direct|:group]) carry human messages —
+    // including direct chats, which the IM gateway stores under the 'a2a'
+    // session type; check the channel BEFORE the session type.
+    if (typeof sourceChannel === 'string' && sourceChannel.startsWith('im:')) return false;
+    if ((session.sessionType ?? 'standard') !== 'standard') return true;
+    // getConversationSourceContextBySession defaults to 'cowork_ui' when no
+    // mapping row exists (pre-mapping legacy sessions are UI-created chats).
+    return sourceChannel !== 'cowork_ui';
+  }
+
   private buildMemoryStrategyPrompt(memoryEnabled: boolean, includeMemoryStrategy: boolean, implicitUpdateEnabled = false): string | null {
     if (!includeMemoryStrategy) {
       return null;
@@ -9765,7 +9834,13 @@ export class CoworkRunner extends EventEmitter {
           coworkLog('INFO', 'turn:ack', 'turn acknowledgment emitted', { sessionId, tier: earlyAckTier })
         }
       } catch { /* best-effort: the ack must never break a turn */ }
-      const autoEffortPromise = effectiveEffortRung == null && this.cerebellumEffortSelector
+      // Unattended automation turns (see isUnattendedAutomationSession) never
+      // fire the effort selector: their "auto" rung resolves locally through
+      // resolveUnattendedAutoEffort (bot brain pick, else max) — only
+      // human-sent messages rate the per-message JEV classification, where
+      // conversational latency is the scarce resource.
+      const unattendedTurn = this.isUnattendedAutomationSession(sessionId);
+      const autoEffortPromise = effectiveEffortRung == null && !unattendedTurn && this.cerebellumEffortSelector
         ? this.cerebellumEffortSelector({ currentUserText: prompt })
         : null
       const volatileBlocks = await this.buildVolatileContextPrompt(
@@ -9802,7 +9877,10 @@ export class CoworkRunner extends EventEmitter {
       // reasoning_effort). The auto rung's no-verdict fallback carves out one
       // exception: a 'default'-sentinel session degrades to the MODEL DEFAULT,
       // never the brain/global rungs (resolveAutoEffortFallback — compat with
-      // the pre-auto "Default" pick's promise).
+      // the pre-auto "Default" pick's promise). Unattended automation turns
+      // take a separate branch entirely (resolveUnattendedAutoEffort): no
+      // cerebellum round-trip, bot brain pick first, auto → max — machine-
+      // driven calls trade nothing away for latency.
       const modelOptions = resolveModelOptions(route.model);
       // Official DeepSeek rides the first-party dsh-llm-deepseek adapter under
       // its own route key; everything else — anthropic-format deepseek relays
@@ -9883,14 +9961,20 @@ export class CoworkRunner extends EventEmitter {
       const dshReasoningEffort = mapDshReasoningEffort(
         sessionEffortPicked
           ? toLlmEffortLevel(effectiveEffortRung)
-          : autoEffortRung ?? resolveAutoEffortFallback({
-            sentinelDefault: effortSentinelDefault,
-            assistantMode,
-            brainEffort: automationBrain?.effort,
-            hasBrain: automationBrain != null,
-            globalEffort: getPersistedCoworkEffortLevel(),
-            modelDefault: modelOptions?.reasoningEffort,
-          }),
+          : unattendedTurn
+            ? resolveUnattendedAutoEffort({
+              brainEffort: automationBrain?.effort,
+              hasBrain: automationBrain != null,
+              globalEffort: getPersistedCoworkEffortLevel(),
+            })
+            : autoEffortRung ?? resolveAutoEffortFallback({
+              sentinelDefault: effortSentinelDefault,
+              assistantMode,
+              brainEffort: automationBrain?.effort,
+              hasBrain: automationBrain != null,
+              globalEffort: getPersistedCoworkEffortLevel(),
+              modelDefault: modelOptions?.reasoningEffort,
+            }),
         sessionEffortPicked || autoEffortRung != null || !assistantMode
           ? activeSession.thinkingOverride ?? modelOptions?.thinking
           : undefined,
@@ -9900,6 +9984,7 @@ export class CoworkRunner extends EventEmitter {
         sessionId,
         dialect: dshEffortDialect,
         uiOverride: activeSession.effortOverride ?? null,
+        unattended: unattendedTurn,
         autoEffort: autoEffortRung,
         brainEffort: automationBrain?.effort ?? null,
         assistantMode,
@@ -10071,14 +10156,20 @@ export class CoworkRunner extends EventEmitter {
           turnReasoningEffort = mapDshReasoningEffort(
             sessionEffortPicked
               ? toLlmEffortLevel(effectiveEffortRung)
-              : autoEffortRung ?? resolveAutoEffortFallback({
-                sentinelDefault: effortSentinelDefault,
-                assistantMode,
-                brainEffort: automationBrain?.fallbackEffort,
-                hasBrain: automationBrain != null,
-                globalEffort: getPersistedCoworkEffortLevel(),
-                modelDefault: fallbackModelOptions?.reasoningEffort,
-              }),
+              : unattendedTurn
+                ? resolveUnattendedAutoEffort({
+                  brainEffort: automationBrain?.fallbackEffort,
+                  hasBrain: automationBrain != null,
+                  globalEffort: getPersistedCoworkEffortLevel(),
+                })
+                : autoEffortRung ?? resolveAutoEffortFallback({
+                  sentinelDefault: effortSentinelDefault,
+                  assistantMode,
+                  brainEffort: automationBrain?.fallbackEffort,
+                  hasBrain: automationBrain != null,
+                  globalEffort: getPersistedCoworkEffortLevel(),
+                  modelDefault: fallbackModelOptions?.reasoningEffort,
+                }),
             sessionEffortPicked || autoEffortRung != null || !assistantMode
               ? activeSession.thinkingOverride ?? fallbackModelOptions?.thinking
               : undefined,

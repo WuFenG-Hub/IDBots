@@ -471,6 +471,7 @@ man_base_data_pebble/
 !tests/llmEffort.test.mjs
 !tests/modelCatalog.test.ts
 !tests/coworkComposerEffortDefault.test.mjs
+!tests/coworkUnattendedEffort.test.mjs
 !tests/groupTaskComposerEnterSend.test.mjs
 !tests/accentInkButtonText.test.mjs
 !tests/avatarSource.test.mjs
