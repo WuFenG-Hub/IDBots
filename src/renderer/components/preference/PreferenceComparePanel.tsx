@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { ArrowPathIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, ArrowPathIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { preferenceService, type PreferencePreview } from '../../services/preference';
 import type {
@@ -169,6 +168,9 @@ interface PreferenceComparePanelProps {
   onClose: () => void;
 }
 
+// In-flow panel: fills the nearest flex-column container (the MetaTask board
+// or detail page swaps it in for its scroll area), so it never blocks the rest
+// of the app the way the old fullscreen overlay did.
 const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPinId, onClose }) => {
   const [view, setView] = useState<PreferenceHumanRoundView | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -210,8 +212,9 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
     };
   }, [load]);
 
-  // Escape is the always-available exit: docked DevTools (dev builds) covers the
-  // top-right close button, so the keyboard must be able to dismiss the overlay.
+  // Keyboard exit for judging mode: once an iframe takes focus, keydown events
+  // no longer reach this window, so the header/footer back buttons remain the
+  // reliable exits there.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || sealing) return;
@@ -304,22 +307,32 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
     }
   };
 
-  return createPortal(
-    <div className="fixed inset-0 z-[9000] flex flex-col bg-[var(--bg-main)] text-[var(--text-primary)]">
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden border-t border-[var(--border-color)] bg-[var(--bg-main)] text-[var(--text-primary)]">
       <header className="flex items-center justify-between gap-3 border-b border-[var(--border-color)] px-4 py-2">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-semibold">{view?.title ?? t('preference.panel.loading')}</div>
-          {view && (
-            <div className="text-xs text-[var(--text-secondary)]">
-              {t(`preference.status.${view.status}`)}
-              {judging && ` · ${t('preference.panel.commitClosesIn').replace('{time}', formatRemaining(view.commitCutoffAt - nowSec))}`}
-              {judging &&
-                current &&
-                ` · ${t('preference.panel.pairProgress')
-                  .replace('{index}', String(Math.min(index, schedule.length - 1) + 1))
-                  .replace('{total}', String(schedule.length))}`}
-            </div>
-          )}
+        <div className="flex min-w-0 items-center gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex shrink-0 items-center gap-1 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+          >
+            <ArrowLeftIcon className="h-4 w-4" />
+            {t('back')}
+          </button>
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold">{view?.title ?? t('preference.panel.loading')}</div>
+            {view && (
+              <div className="text-xs text-[var(--text-secondary)]">
+                {t(`preference.status.${view.status}`)}
+                {judging && ` · ${t('preference.panel.commitClosesIn').replace('{time}', formatRemaining(view.commitCutoffAt - nowSec))}`}
+                {judging &&
+                  current &&
+                  ` · ${t('preference.panel.pairProgress')
+                    .replace('{index}', String(Math.min(index, schedule.length - 1) + 1))
+                    .replace('{total}', String(schedule.length))}`}
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {judging && (
@@ -501,6 +514,17 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
         </>
       )}
 
+      <div className="flex shrink-0 items-center border-t border-[var(--border-color)] px-4 py-2">
+        <button
+          type="button"
+          onClick={onClose}
+          className="inline-flex items-center gap-1 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+        >
+          <ArrowLeftIcon className="h-4 w-4" />
+          {t('back')}
+        </button>
+      </div>
+
       {confirmOpen && view && (
         <PreferenceSealConfirmModal
           pairCount={progress.total}
@@ -512,8 +536,7 @@ const PreferenceComparePanel: React.FC<PreferenceComparePanelProps> = ({ roundPi
           onCancel={() => setConfirmOpen(false)}
         />
       )}
-    </div>,
-    document.body,
+    </div>
   );
 };
 

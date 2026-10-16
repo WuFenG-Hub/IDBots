@@ -19,6 +19,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { setAvailableModels, setSelectedModel } from '../store/slices/modelSlice';
 import { RootState } from '../store';
 import ThemedSelect from './ui/ThemedSelect';
+import SecretInput from './ui/SecretInput';
 import type {
   CoworkExecutionMode,
   CoworkSandboxProgress,
@@ -3283,14 +3284,10 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                   <label htmlFor={`${activeProvider}-apiKey`} className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
                     {i18nService.t('apiKey')}
                   </label>
-                  <input
-                    type="text"
+                  <SecretInput
                     id={`${activeProvider}-apiKey`}
                     value={providers[activeProvider].apiKey}
-                    onChange={(e) => handleProviderConfigChange(activeProvider, 'apiKey', e.target.value)}
-                    autoComplete="off"
-                    spellCheck={false}
-                    className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs font-mono"
+                    onChange={(value) => handleProviderConfigChange(activeProvider, 'apiKey', value)}
                     placeholder={i18nService.t('apiKeyPlaceholder')}
                   />
                   {activeProvider === 'deepseek' && (
@@ -3601,14 +3598,10 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                     <label htmlFor="cerebellum-apiKey" className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
                       {i18nService.t('apiKey')}
                     </label>
-                    <input
-                      type="password"
+                    <SecretInput
                       id="cerebellum-apiKey"
                       value={cerebellum.apiKey}
-                      onChange={(e) => handleCerebellumConfigChange('apiKey', e.target.value)}
-                      autoComplete="off"
-                      spellCheck={false}
-                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs font-mono"
+                      onChange={(value) => handleCerebellumConfigChange('apiKey', value)}
                       placeholder={i18nService.t('apiKeyPlaceholder')}
                     />
                   </div>
@@ -4112,18 +4105,15 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                     <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
                       {i18nService.t('apiKey')}
                     </label>
-                    <input
-                      type="text"
+                    <SecretInput
+                      id="custom-provider-apiKey"
                       value={customProviderApiKey}
-                      onChange={(e) => {
-                        setCustomProviderApiKey(e.target.value);
+                      onChange={(value) => {
+                        setCustomProviderApiKey(value);
                         if (customProviderError) {
                           setCustomProviderError(null);
                         }
                       }}
-                      autoComplete="off"
-                      spellCheck={false}
-                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs font-mono"
                       placeholder={i18nService.t('apiKeyPlaceholder')}
                     />
                   </div>

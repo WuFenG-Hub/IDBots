@@ -5,6 +5,7 @@ import { RootState } from '../../store';
 import { metaTaskService } from '../../services/metatask';
 import { i18nService } from '../../services/i18n';
 import { PreferenceTaskRoundButtons } from '../preference/PreferenceRoundsSection';
+import PreferenceComparePanel from '../preference/PreferenceComparePanel';
 import MetaIdBadge from './MetaIdBadge';
 import MetaTaskCandidateDrawer from './MetaTaskCandidateDrawer';
 import MetaTaskChainView from './MetaTaskChainView';
@@ -112,6 +113,9 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   /** Competitive v2: the candidate currently shown in the drawer (null = closed). */
   const [selectedCand, setSelectedCand] = useState<{ nodeId: string; pinId: string } | null>(null);
+  // Open preference round: the compare panel takes over this detail page's
+  // content area instead of covering the whole window.
+  const [openRoundPinId, setOpenRoundPinId] = useState<string | null>(null);
   const groupsInitForRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -352,7 +356,7 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <PreferenceTaskRoundButtons rootPinId={detail.rootPinId} />
+            <PreferenceTaskRoundButtons rootPinId={detail.rootPinId} onOpenRound={setOpenRoundPinId} />
             {!detail.taskComplete && (
               <button
                 type="button"
@@ -373,6 +377,9 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
         )}
       </div>
 
+      {openRoundPinId ? (
+        <PreferenceComparePanel roundPinId={openRoundPinId} onClose={() => setOpenRoundPinId(null)} />
+      ) : (
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-4">
         {/* Deliverables (competitive v2): final artifact hero + per-node
             artifact rows; renders nothing while there is no artifact yet */}
@@ -630,6 +637,7 @@ const MetaTaskDetail: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
           )}
         </section>
       </div>
+      )}
 
       {/* Candidate drawer (competitive v2): opened from chain cards, node
           sections and parentref chips; parentref navigation swaps the

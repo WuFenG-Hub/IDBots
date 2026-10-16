@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { ArrowPathIcon, BoltIcon, QuestionMarkCircleIcon } from '@heroicons/react/24/outline';
 import { RootState } from '../../store';
@@ -6,6 +6,7 @@ import { metaTaskService } from '../../services/metatask';
 import { setView } from '../../store/slices/metataskSlice';
 import { store } from '../../store';
 import { i18nService } from '../../services/i18n';
+import PreferenceComparePanel from '../preference/PreferenceComparePanel';
 import PreferenceRoundsSection from '../preference/PreferenceRoundsSection';
 import MetaTaskDetail from './MetaTaskDetail';
 import MetaIdBadge from './MetaIdBadge';
@@ -48,6 +49,9 @@ const MetaTaskBoard: React.FC = () => {
   const error = useSelector((state: RootState) => state.metatask.error);
   const bridgeMissingReason = useSelector((state: RootState) => state.metatask.bridgeMissingReason);
   const selectedRootPinId = useSelector((state: RootState) => state.metatask.selectedRootPinId);
+  // Open preference round lives at board level so the compare panel can take
+  // over this tab's content area instead of covering the whole window.
+  const [openRoundPinId, setOpenRoundPinId] = useState<string | null>(null);
 
   useEffect(() => {
     void metaTaskService.init();
@@ -136,6 +140,10 @@ const MetaTaskBoard: React.FC = () => {
         </div>
       </div>
 
+      {openRoundPinId ? (
+        <PreferenceComparePanel roundPinId={openRoundPinId} onClose={() => setOpenRoundPinId(null)} />
+      ) : (
+        <>
       {(error || bridgeMissingReason) && (
         <div className="mx-4 mt-3 px-3 py-2 text-sm rounded-lg bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400">
           {bridgeMissingReason ?? error}
@@ -216,7 +224,7 @@ const MetaTaskBoard: React.FC = () => {
 
       {/* Task cards */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
-        <PreferenceRoundsSection />
+        <PreferenceRoundsSection onOpenRound={setOpenRoundPinId} />
         {loading && !board ? (
           <div className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary py-8 text-center">
             {i18nService.t('metatask.loading')}
@@ -236,6 +244,8 @@ const MetaTaskBoard: React.FC = () => {
           {i18nService.t('metatask.indexLagNote')}
         </p>
       </div>
+        </>
+      )}
     </div>
   );
 };
