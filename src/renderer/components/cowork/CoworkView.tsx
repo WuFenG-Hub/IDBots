@@ -320,6 +320,35 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     return () => { cancelled = true; };
   }, [selectedMetabotId]);
 
+  // Intent prewarm (first-sentence latency, 2026-10-16): boot the picked
+  // bot's runtime slot — process spawn + plugin tree, ~11-18s cold on
+  // automation slots — while the user is still typing, instead of inside the
+  // first turn. Debounced to coalesce rapid selector churn; the main side
+  // dedupes repeats and the hub coalesces per-slot boots.
+  useEffect(() => {
+    if (selectedMetabotId == null) return;
+    const timer = setTimeout(() => {
+      coworkService.prewarmTurnSlot({
+        metabotId: selectedMetabotId,
+        model: pendingModelEffort?.modelId ?? null,
+        modelProvider: pendingModelEffort?.providerKey ?? null,
+        cwd: workspaceSelection?.kind === 'project' || workspaceSelection?.kind === 'folder'
+          ? workspaceSelection.cwd
+          : (config.workingDirectory || null),
+      });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [selectedMetabotId, pendingModelEffort, workspaceSelection, config.workingDirectory]);
+
+  // Same prewarm when an existing session opens: a session whose slot was
+  // reaped (idle > 30min) or never warmed re-boots while the user reads the
+  // transcript, so the next message starts fast too.
+  const currentSessionId = currentSession?.id ?? null;
+  useEffect(() => {
+    if (!currentSessionId || currentSessionId.startsWith('temp-')) return;
+    coworkService.prewarmTurnSlot({ sessionId: currentSessionId });
+  }, [currentSessionId]);
+
   // Returning from a session to the New Task home: the session may have
   // changed the roster (e.g. the Welcome Bot created the user's first Twin Bot
   // mid-chat), so reload instead of showing a stale bootstrap state.

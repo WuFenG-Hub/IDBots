@@ -387,6 +387,10 @@ contextBridge.exposeInMainWorld('electron', {
     // Session management
     startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser'; model?: string | null; modelProvider?: string | null; effort?: string | null; source?: 'quick_action'; projectId?: string | null; goal?: string }) =>
       ipcRenderer.invoke('cowork:session:start', options),
+    /** Fire-and-forget runtime-slot prewarm on composer/session-open intent —
+     *  the slot boot overlaps typing instead of stacking inside the first turn. */
+    prewarmTurnSlot: (input: { sessionId?: string; metabotId?: number | null; model?: string | null; modelProvider?: string | null; cwd?: string | null }) =>
+      ipcRenderer.invoke('cowork:session:prewarmTurnSlot', input),
     continueSession: (options: { sessionId: string; prompt: string; systemPrompt?: string; activeSkillIds?: string[] }) =>
       ipcRenderer.invoke('cowork:session:continue', options),
     /** First-run onboarding: the Twin Bot's first chat session + its generated greeting turn. */

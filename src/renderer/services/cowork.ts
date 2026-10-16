@@ -688,6 +688,24 @@ class CoworkService {
     return null;
   }
 
+  /**
+   * Fire-and-forget runtime-slot prewarm fired on user intent — the home
+   * composer's bot/model pick (no session exists yet) or an existing session
+   * being opened. The slot boot then overlaps the user's typing instead of
+   * stacking inside the first turn (first-sentence latency, 2026-10-16).
+   */
+  prewarmTurnSlot(input: {
+    sessionId?: string;
+    metabotId?: number | null;
+    model?: string | null;
+    modelProvider?: string | null;
+    cwd?: string | null;
+  }): void {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.prewarmTurnSlot) return;
+    void cowork.prewarmTurnSlot(input).catch(() => undefined);
+  }
+
   async continueSession(options: CoworkContinueOptions): Promise<boolean> {
     const cowork = window.electron?.cowork;
     if (!cowork) {

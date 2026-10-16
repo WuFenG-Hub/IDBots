@@ -1990,6 +1990,13 @@ export interface CoworkRunnerOptions {
   /** Per-bot opt-in for the 0.1.7 experimental desktop computer-use backend
    * (cua-driver native). The host app must hold the OS desktop grants. */
   computerUseProvider?: (coworkSessionId: string) => boolean;
+  /** Metabot-keyed variants of the session-keyed automation/MCP providers
+   * above, for intent prewarms that fire before any session record exists
+   * (the home composer's bot pick). Same opt-in semantics keyed on the bot
+   * directly; null metabotId mirrors a bot-less session. */
+  browserAutomationForMetabot?: (metabotId: number | null) => DshRuntimeConfigInput['browserUse'] | undefined;
+  computerUseForMetabot?: (metabotId: number | null) => boolean;
+  mcpServersForMetabot?: (metabotId: number | null) => UserConfiguredMcpServerDefinition[];
   /**
    * Cowork skill prompt parts (rules section / volatile catalog / sandbox
    * inline section), composed main-side so the live skill catalog never gets
@@ -2453,6 +2460,9 @@ export class CoworkRunner extends EventEmitter {
   private mcpServerProvider?: (coworkSessionId: string) => UserConfiguredMcpServerDefinition[];
   private browserAutomationProvider?: (coworkSessionId: string) => DshRuntimeConfigInput['browserUse'] | undefined;
   private computerUseProvider?: (coworkSessionId: string) => boolean;
+  private browserAutomationForMetabot?: (metabotId: number | null) => DshRuntimeConfigInput['browserUse'] | undefined;
+  private computerUseForMetabot?: (metabotId: number | null) => boolean;
+  private mcpServersForMetabot?: (metabotId: number | null) => UserConfiguredMcpServerDefinition[];
   private coworkSkillPromptsProvider?: (metabotId: number | null) => {
     rules: string | null;
     catalog: string | null;
@@ -2626,6 +2636,9 @@ export class CoworkRunner extends EventEmitter {
     this.mcpServerProvider = options?.mcpServerProvider;
     this.browserAutomationProvider = options?.browserAutomationProvider;
     this.computerUseProvider = options?.computerUseProvider;
+    this.browserAutomationForMetabot = options?.browserAutomationForMetabot;
+    this.computerUseForMetabot = options?.computerUseForMetabot;
+    this.mcpServersForMetabot = options?.mcpServersForMetabot;
     this.coworkSkillPromptsProvider = options?.coworkSkillPromptsProvider;
     // Optional-chained like every other option — a bare `new CoworkRunner(store)`
     // (tests, minimal embedders) used to crash here on the missing `?.`.
@@ -6172,10 +6185,26 @@ export class CoworkRunner extends EventEmitter {
     fallbackProviderKey: string | null;
     fallbackEffort: LlmEffortLevel | null;
   } | null {
-    if (!this.getMetabotById) return null;
     const session = this.store.getSession(sessionId);
     const metabotId = session?.metabotId;
     if (metabotId == null || typeof metabotId !== 'number') return null;
+    return this.automationBrainForMetabot(metabotId);
+  }
+
+  /** The bot brain straight from a metabot id — the same resolution
+   *  getSessionAutomationBrain performs after its session→bot lookup, reused
+   *  by intent prewarms that fire before any session record exists. */
+  private automationBrainForMetabot(metabotId: number): {
+    metabotId: number;
+    botName: string | null;
+    modelId: string | null;
+    providerKey: string | null;
+    effort: LlmEffortLevel | null;
+    fallbackModelId: string | null;
+    fallbackProviderKey: string | null;
+    fallbackEffort: LlmEffortLevel | null;
+  } | null {
+    if (!this.getMetabotById) return null;
     const metabot = this.getMetabotById(metabotId);
     const modelId = metabot?.llm_id?.trim() || null;
     const fallbackModelId = metabot?.fallback_llm_id?.trim() || null;
@@ -8581,6 +8610,25 @@ export class CoworkRunner extends EventEmitter {
     const sessionModel = sessionRow?.model?.trim() || null
     const sessionModelProvider = sessionRow?.modelProvider?.trim() || null
     const brain = sessionModel ? null : this.getSessionAutomationBrain(sessionId)
+    return this.resolveBrainDshRoute({ sessionModel, sessionModelProvider, brain, logKey: sessionId })
+  }
+
+  /**
+   * Shared three-tier route resolution — the session/composer model pick,
+   * then the metabot's llm_id, then the global default, with the fallback
+   * brain ahead of the default and the free-quota relay never substituted for
+   * a non-free bot brain. Used by live turns (session record) and by intent
+   * prewarms (composer pick + metabot id, no session yet) alike. `logKey`
+   * labels warnings: a session id for turns, the synthetic intent id for
+   * prewarms.
+   */
+  private resolveBrainDshRoute(input: {
+    sessionModel: string | null
+    sessionModelProvider: string | null
+    brain: ReturnType<CoworkRunner['automationBrainForMetabot']>
+    logKey: string
+  }): ReturnType<typeof resolveDshProviderRoute> {
+    const { sessionModel, sessionModelProvider, brain, logKey } = input
     const automationModelOverride = sessionModel || brain?.modelId || null
     const requestedProvider = sessionModel ? sessionModelProvider : (brain?.providerKey ?? null)
     // Bot context lets the resolution last-resort warning name the offending bot.
@@ -8602,7 +8650,7 @@ export class CoworkRunner extends EventEmitter {
         : null
       if (fallbackRoute) {
         coworkLog('INFO', 'resolveSessionDshRoute', 'Primary brain did not resolve; using the fallback brain', {
-          sessionId,
+          sessionId: logKey,
           primary: automationModelOverride ?? '<default>',
           fallback: brain?.fallbackModelId,
         })
@@ -8616,7 +8664,7 @@ export class CoworkRunner extends EventEmitter {
           && !isFreeQuotaProvider(automationModelOverride)
         ) {
           coworkLog('WARN', 'resolveSessionDshRoute', 'Refusing to bill the free-quota relay for a non-free bot brain', {
-            sessionId,
+            sessionId: logKey,
             override: automationModelOverride,
             requestedProvider,
             defaultProvider: defaultRoute.provider,
@@ -8625,7 +8673,7 @@ export class CoworkRunner extends EventEmitter {
           route = null
         } else {
           coworkLog('WARN', 'resolveSessionDshRoute', 'Model override did not resolve to an enabled provider; falling back to the default route', {
-            sessionId,
+            sessionId: logKey,
             override: automationModelOverride,
           })
           route = defaultRoute
@@ -8866,6 +8914,86 @@ export class CoworkRunner extends EventEmitter {
     return this.dshWarmupPromise;
   }
 
+  /** Dedupe for intent prewarms: the renderer fires on every composer pick /
+   *  session-open effect run; identical intents inside this window coalesce. */
+  private lastIntentPrewarm: { key: string; at: number } | null = null;
+
+  /**
+   * Best-effort runtime-slot prewarm fired on USER INTENT — the home
+   * composer's bot/model pick (no session record exists yet) or an existing
+   * session being opened — seconds-to-minutes before the first send. A cold
+   * slot boot (process spawn + plugin tree, ~11-18s measured on automation
+   * slots) then overlaps the user's typing/reading instead of the first turn.
+   * Resolves the exact route + automation + MCP combo the turn would use;
+   * the hub's per-slot ensure chain coalesces repeats, and a wrong guess
+   * simply idles out under the normal reap. Never throws.
+   */
+  async prewarmSessionTurnSlot(input: {
+    sessionId?: string;
+    metabotId?: number | null;
+    model?: string | null;
+    modelProvider?: string | null;
+    cwd?: string | null;
+  }): Promise<void> {
+    const sessionId = typeof input.sessionId === 'string' && input.sessionId.trim() ? input.sessionId.trim() : null;
+    const metabotId = typeof input.metabotId === 'number' ? input.metabotId : null;
+    if (!sessionId && metabotId == null) return;
+    const dedupeKey = sessionId
+      ? `s:${sessionId}`
+      : `b:${metabotId}|${input.model ?? ''}|${input.modelProvider ?? ''}`;
+    const now = Date.now();
+    if (this.lastIntentPrewarm?.key === dedupeKey && now - this.lastIntentPrewarm.at < 60_000) return;
+    this.lastIntentPrewarm = { key: dedupeKey, at: now };
+    try {
+      let route: DshProviderRouteInfo | null = null;
+      let prewarmSessionId: string;
+      let automation: { browserUse: DshRuntimeConfigInput['browserUse'] | undefined; computerUse: boolean } | undefined;
+      let mcpServers: UserConfiguredMcpServerDefinition[] | undefined;
+      let cwd = (input.cwd ?? '').trim();
+      if (sessionId) {
+        prewarmSessionId = sessionId;
+        route = this.resolveSessionDshRoute(sessionId);
+        if (!cwd) {
+          try {
+            cwd = (this.store.getSessionWithoutMessages?.(sessionId)?.cwd ?? this.store.getSession(sessionId)?.cwd ?? '').trim();
+          } catch { /* partial stores fall back to no workspace pin */ }
+        }
+      } else {
+        prewarmSessionId = `intent-bot-${metabotId}`;
+        route = this.resolveBrainDshRoute({
+          sessionModel: input.model?.trim() || null,
+          sessionModelProvider: input.modelProvider?.trim() || null,
+          brain: this.automationBrainForMetabot(metabotId!),
+          logKey: prewarmSessionId,
+        });
+        // No session record exists for the hub's session-keyed providers to
+        // consult — resolve the bot's opt-ins directly instead.
+        automation = {
+          browserUse: this.browserAutomationForMetabot?.(metabotId) ?? undefined,
+          computerUse: this.computerUseForMetabot?.(metabotId) === true,
+        };
+        mcpServers = this.mcpServersForMetabot?.(metabotId) ?? [];
+      }
+      if (!route?.baseUrl || !route.apiKey) return;
+      const hub = this.ensureDshTurnHub();
+      await hub.prewarmTurnSlot?.({
+        sessionId: prewarmSessionId,
+        provider: this.dshTurnProviderFromRoute(route),
+        ...(cwd ? { workspace: { cwd } } : {}),
+        ...(automation ? { automation } : {}),
+        ...(mcpServers !== undefined
+          ? { mcpServers: mcpServers.map((server) => rewriteWin32McpStdioServer(server)) }
+          : {}),
+      });
+    } catch (error) {
+      coworkLog('WARN', 'prewarmSessionTurnSlot', 'Intent prewarm failed; the turn will cold-start', {
+        sessionId: sessionId ?? undefined,
+        metabotId: metabotId ?? undefined,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private async runDshRuntimeWarmup(): Promise<void> {
     try {
       if (process.platform === 'win32') {
@@ -8939,34 +9067,19 @@ export class CoworkRunner extends EventEmitter {
         return;
       }
       const hub = this.ensureDshTurnHub();
-      for (const { route, cwd } of warmRoutes) {
-        await hub.prewarm({
-          provider: this.dshTurnProviderFromRoute(route),
-          ...(cwd ? { workspace: { cwd } } : {}),
-          // Pin the composition workspace at warmup so a first real turn in
-          // the same directory produces no workspace config diff (and hence
-          // no synchronous runtime restart inside that turn).
-          pinWorkspace: true,
-        });
-        coworkLog('INFO', 'prewarmDshRuntime', 'DSH runtime ready', {
-          provider: route.provider,
-          model: route.model,
-          cwd: cwd || null,
-        });
-      }
       // Automation-slot warm (first-sentence latency work, 2026-10-15 +
       // 2026-10-16 follow-up): browser/computer automation is default-ON for
       // bots, so bot chats ride the .auto-* runtime slots the clean prewarm
-      // above never touches, and their first turn after app start paid the
-      // full slot boot (process + Playwright/cua plugin load, ~11-38s
-      // measured) before the first token. Warming only the MOST-recent
-      // session's combo still left every other bot cold (session 70fa10aa:
-      // warmup warmed zhipu.auto-bc; the user's next chat was a deepseek bot
-      // whose slot booted for 38s inside the turn). Warm the top few DISTINCT
-      // (provider route × automation combo) slots from recent sessions — the
-      // realistic "open a new task with bot X" set — capped so a long session
-      // history cannot pin a Chromium per bot at every launch; the idle reap
-      // retires whatever the user never returns to.
+      // never touches, and their first turn after app start paid the full
+      // slot boot (process + Playwright/cua plugin load, ~11-38s measured)
+      // before the first token. Warming only the MOST-recent session's combo
+      // still left every other bot cold (session 70fa10aa: warmup warmed
+      // zhipu.auto-bc; the user's next chat was a deepseek bot whose slot
+      // booted for 38s inside the turn). Warm the top few DISTINCT (provider
+      // route × automation combo) slots from recent sessions — the realistic
+      // "open a new task with bot X" set — capped so a long session history
+      // cannot pin a Chromium per bot at every launch; the idle reap retires
+      // whatever the user never returns to.
       const comboSeen = new Set<string>();
       const comboWarm: Array<{
         row: { id: string; cwd?: string | null };
@@ -8988,7 +9101,8 @@ export class CoworkRunner extends EventEmitter {
           // Unresolvable rows degrade out of the combo list.
         }
       }
-      for (const { row, route } of comboWarm) {
+      const bootComboSlot = async (combo: (typeof comboWarm)[number]): Promise<void> => {
+        const { row, route } = combo;
         let comboCwd = configCwd;
         try {
           const record = this.store.getSessionWithoutMessages?.(row.id) ?? this.store.getSession(row.id);
@@ -8997,7 +9111,7 @@ export class CoworkRunner extends EventEmitter {
           // Test fakes and partial stores fall back to the default cwd.
         }
         try {
-          await hub.prewarmTurnSlot({
+          await hub.prewarmTurnSlot?.({
             sessionId: row.id,
             provider: this.dshTurnProviderFromRoute(route),
             ...(comboCwd ? { workspace: { cwd: comboCwd } } : {}),
@@ -9008,7 +9122,44 @@ export class CoworkRunner extends EventEmitter {
             error: error instanceof Error ? error.message : String(error),
           });
         }
-      }
+      };
+      const bootCleanSlot = async ({ route, cwd }: (typeof warmRoutes)[number]): Promise<void> => {
+        if (!route) return;
+        try {
+          await hub.prewarm({
+            provider: this.dshTurnProviderFromRoute(route),
+            ...(cwd ? { workspace: { cwd } } : {}),
+            // Pin the composition workspace at warmup so a first real turn in
+            // the same directory produces no workspace config diff (and hence
+            // no synchronous runtime restart inside that turn).
+            pinWorkspace: true,
+          });
+          coworkLog('INFO', 'prewarmDshRuntime', 'DSH runtime ready', {
+            provider: route.provider,
+            model: route.model,
+            cwd: cwd || null,
+          });
+        } catch (error) {
+          coworkLog('WARN', 'prewarmDshRuntime', 'Clean-slot warmup failed; that slot cold-starts on its next turn', {
+            provider: route.provider,
+            model: route.model,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      };
+      // Boot order decides whose cold start the user feels (2026-10-16
+      // follow-up): the TOP combo — the most-recent session's real route ×
+      // automation combo, the likeliest next turn — boots FIRST with the
+      // machine to itself. The previous serial order queued it behind both
+      // clean slots and its sibling combos, so an immediate first message
+      // still paid a full ~18s boot inside the turn. The remaining clean
+      // slots and combos are speculative and boot concurrently behind it.
+      const [topCombo, ...restCombos] = comboWarm;
+      if (topCombo) await bootComboSlot(topCombo);
+      await Promise.allSettled([
+        ...warmRoutes.map((warm) => bootCleanSlot(warm)),
+        ...restCombos.map((combo) => bootComboSlot(combo)),
+      ]);
     } catch (error) {
       coworkLog('WARN', 'prewarmDshRuntime', 'Warmup failed; first turn will cold-start', {
         error: error instanceof Error ? error.message : String(error),
@@ -9294,6 +9445,11 @@ export class CoworkRunner extends EventEmitter {
     systemPrompt: string
   ): Promise<void> {
     const { sessionId } = activeSession;
+    // First-sentence latency marker: the first model event of this turn logs
+    // its elapsed time since turn entry (turn:firstChunk), so cowork.log can
+    // split slot boot vs provider prefill when the opening sentence is slow.
+    const turnStartedAt = Date.now();
+    let firstChunkLogged = false;
     // Direct upstream route: the DSH runtime speaks the provider's native
     // protocol (pi-ai) and bypasses the OpenAI-compat proxy entirely.
     let route: DshProviderRouteInfo | null = null;
@@ -9403,7 +9559,7 @@ export class CoworkRunner extends EventEmitter {
     // the config unchanged (same session id → same provider/MCP/automation
     // accumulation), so this only ever removes wait, never adds a restart.
     // First-sentence latency work, 2026-10-15.
-    void hub.prewarmTurnSlot({
+    void hub.prewarmTurnSlot?.({
       sessionId,
       provider: this.dshTurnProviderFromRoute(route),
       ...(cwd ? { workspace: { cwd } } : {}),
@@ -9482,6 +9638,36 @@ export class CoworkRunner extends EventEmitter {
       // clobber this session's tool set (Twin-only tools would intermittently
       // go missing while a worker turn ran, and vice versa).
       this.dshHostToolRegistry.set(sessionId, new Map(hostTools.map((tool) => [tool.name, tool])))
+      // Agent pre-create, fire-and-forget (first-sentence latency, 2026-10-16):
+      // the per-session agent materialization — Playwright MCP + Chromium
+      // launch for automation bots, ~1-4s — overlaps the volatile-context
+      // build below instead of stacking behind the slot boot inside runTurn.
+      // Sections/hostTools are the REAL ones the turn passes (the runtime
+      // registers prompt sections at agent creation only, never on a
+      // re-ensure); the per-turn reasoning effort lands on the turn's own
+      // ensureSession re-bind, so it can wait for the effort verdict.
+      try {
+        const prewarmGoal = this.store.getSessionWithoutMessages(sessionId)?.goal ?? null;
+        void hub.prewarmTurnAgent?.({
+          sessionId,
+          dshSessionId,
+          provider: this.dshTurnProviderFromRoute(route),
+          sections: [
+            { name: 'idbots:base', order: 0, text: systemPrompt },
+            ...(prewarmGoal && prewarmGoal.status === 'active'
+              ? [{ name: 'idbots:goal', order: 10, text: buildGoalPromptSection(prewarmGoal) }]
+              : []),
+            { name: 'idbots:tool-use', order: 150, text: CoworkRunner.DSH_TOOL_USE_GUIDANCE },
+          ],
+          hostTools,
+          workspace: { cwd },
+        }).catch((prewarmError) => {
+          coworkLog('WARN', 'runDshSessionLocal', 'Turn-agent pre-create failed; the turn will ensure it itself', {
+            sessionId,
+            error: prewarmError instanceof Error ? prewarmError.message : String(prewarmError),
+          });
+        });
+      } catch { /* best-effort: the pre-create must never break the turn */ }
       // Volatile context (memory projections, time, browser tabs, remote
       // services) rides inside the user message on DSH turns — at the head by
       // default (620d2850), with one first-turn exception below.
@@ -9875,6 +10061,10 @@ export class CoworkRunner extends EventEmitter {
         }),
         callbacks: {
           onMessage: (message, slot) => {
+            if (!firstChunkLogged) {
+              firstChunkLogged = true;
+              coworkLog('INFO', 'turn:firstChunk', 'first model event for turn', { sessionId, kind: 'message', elapsedMs: Date.now() - turnStartedAt });
+            }
             // Every message is progress; tool_use/tool_result also maintain
             // the in-flight ledger that extends the watchdog while a tool
             // executes (long bash renders emit nothing until they finish).
@@ -9891,6 +10081,10 @@ export class CoworkRunner extends EventEmitter {
             return stored.id;
           },
           onMessageUpdate: (messageId, content) => {
+            if (!firstChunkLogged) {
+              firstChunkLogged = true;
+              coworkLog('INFO', 'turn:firstChunk', 'first model event for turn', { sessionId, kind: 'update', elapsedMs: Date.now() - turnStartedAt });
+            }
             // Match the Claude path: renderer updates are throttled, SQLite
             // writes wait for finalize. Per-chunk persist starved the shared
             // DSH notification pump and made session switching stall.

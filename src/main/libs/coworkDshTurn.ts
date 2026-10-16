@@ -455,6 +455,10 @@ interface DshEnsureKernelOptions {
   /** Pre-resolved by runTurn (it needs the flags for the re-pin decision
    *  before ensureKernel runs); ensureKernel resolves them itself otherwise. */
   automation?: DshAutomationSlotState
+  /** Explicit MCP union for intent prewarms that have no session record yet
+   *  (composer bot pick): presence is authoritative — an empty array mounts
+   *  nothing and the session-keyed provider is never consulted. */
+  mcpServers?: DshMcpServerDefinition[]
 }
 
 /** One DSH subprocess and the composition state it was last spawned with. */
@@ -618,9 +622,15 @@ export class DshTurnHub {
     sessionId: string
     provider: DshTurnProviderRoute
     workspace?: { cwd: string }
+    /** Explicit automation state for intent prewarms that have no session
+     *  record yet (composer bot pick): skips the session-keyed host providers. */
+    automation?: DshAutomationSlotState
+    /** Explicit MCP union for the same no-session case (presence authoritative
+     *  — an empty array mounts nothing). */
+    mcpServers?: DshMcpServerDefinition[]
   }): Promise<void> {
     if (this.closed) return
-    const automation = this.automationSlotStateOf(input.sessionId)
+    const automation = input.automation ?? this.automationSlotStateOf(input.sessionId)
     const slotKey = dshRuntimeKeyOf(input.provider, automationSlotFlagsOf(automation))
     const alreadyRunning = this.slots.get(slotKey)?.kernel.running === true
     await this.ensureKernel({
@@ -631,7 +641,10 @@ export class DshTurnHub {
       sections: [],
       workspace: input.workspace,
       callbacks: DSH_WARMUP_CALLBACKS,
-    }, { automation })
+    }, {
+      automation,
+      ...(input.mcpServers !== undefined ? { mcpServers: input.mcpServers } : {}),
+    })
     this.opts.log?.(
       'info',
       alreadyRunning ? 'dshTurnHub.prewarmTurnSlot.reuse' : 'dshTurnHub.prewarmTurnSlot.boot',
@@ -642,6 +655,75 @@ export class DshTurnHub {
         computer: automation.computerUse === true,
       },
     )
+  }
+
+  /**
+   * Pre-create the session's runtime AGENT on its turn slot — one step beyond
+   * prewarmTurnSlot's process boot. Sections/hostTools are registered at agent
+   * creation (the runtime never re-registers them on a re-ensure), so the
+   * caller must pass the SAME prompt sections the turn will; the per-turn
+   * reasoning effort is deliberately omitted here and re-binds on the turn's
+   * own ensureSession (a re-ensure re-binds the route without touching
+   * sections). For automation bots this is where the per-session Playwright
+   * MCP + Chromium launch (~1-4s) happens — kicked fire-and-forget at turn
+   * entry, it overlaps the volatile-context build instead of stacking behind
+   * the slot boot inside runTurn.
+   *
+   * Mirrors runTurnExclusive's slot pinning (runtimeKeyByDsh / kernelByDsh /
+   * cross-slot dispose) WITHOUT registering a turn controller, so a later
+   * route change disposes this agent exactly like a turn-pinned one (the
+   * session write-lock moves with it) and runTurn's own ensureSession then
+   * hits the runtime's live-agent fast path.
+   */
+  async prewarmTurnAgent(input: {
+    sessionId: string
+    dshSessionId: string
+    provider: DshTurnProviderRoute
+    sections: DshPromptSectionInput[]
+    hostTools?: DshTurnInput['hostTools']
+    workspace?: { cwd: string }
+  }): Promise<void> {
+    if (this.closed) return
+    const automation = this.automationSlotStateOf(input.sessionId)
+    const nextKey = dshRuntimeKeyOf(input.provider, automationSlotFlagsOf(automation))
+    const prevKey = this.runtimeKeyByDsh.get(input.dshSessionId)
+    if (prevKey && prevKey !== nextKey) {
+      await this.disposeSessionOnSlot(prevKey, input.dshSessionId)
+    }
+    this.runtimeKeyByDsh.set(input.dshSessionId, nextKey)
+    const kernel = await this.ensureKernel({
+      sessionId: input.sessionId,
+      dshSessionId: input.dshSessionId,
+      prompt: '',
+      provider: input.provider,
+      sections: input.sections,
+      workspace: input.workspace,
+      callbacks: DSH_WARMUP_CALLBACKS,
+    }, { automation })
+    if (this.closed) return
+    // Never re-bind a session whose agent is mid-turn (host turn queued behind
+    // a kernel-initiated one, scheduled nudge): the route bind applies to the
+    // agent's next request, so it must wait for the turn's own ensureSession.
+    if (this.controllersByDsh.has(input.dshSessionId) || kernel.isSessionBusy(input.dshSessionId)) return
+    const holder = this.kernelByDsh.get(input.dshSessionId)
+    if (holder && holder !== kernel && holder.running) {
+      await holder.disposeSession(input.dshSessionId).catch(() => undefined)
+    }
+    this.kernelByDsh.set(input.dshSessionId, kernel)
+    const ensured = await kernel.ensureSession({
+      sessionId: input.dshSessionId,
+      provider: input.provider.key,
+      model: input.provider.model,
+      ...Number.isFinite(input.provider.maxOutputTokens) ? { maxTokens: input.provider.maxOutputTokens } : {},
+      sections: input.sections,
+      hostTools: input.hostTools,
+      ...(input.workspace?.cwd ? { cwd: input.workspace.cwd } : {}),
+    })
+    this.opts.log?.('info', 'dshTurnHub.prewarmTurnAgent', {
+      runtime: nextKey,
+      sessionId: input.sessionId,
+      resumed: ensured?.resumed === true,
+    })
   }
 
   /** Start (or reuse) the runtime and run one turn to completion. */
@@ -1437,7 +1519,14 @@ export class DshTurnHub {
       envName: dshProviderApiKeyEnv(input.provider.key),
       apiKey: input.provider.apiKey,
     })
-    if (options?.accumulateMcp !== false) {
+    if (options?.mcpServers !== undefined) {
+      // Explicit union from an intent prewarm (no session record exists yet,
+      // so the session-keyed provider could not answer anyway).
+      for (const server of options.mcpServers) {
+        const name = String(server?.name ?? '').trim()
+        if (name) slot.mcpServersSeen.set(name, server)
+      }
+    } else if (options?.accumulateMcp !== false) {
       for (const server of this.opts.mcpServersProvider?.(input.sessionId) ?? []) {
         const name = String(server?.name ?? '').trim()
         if (name) slot.mcpServersSeen.set(name, server)

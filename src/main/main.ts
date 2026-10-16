@@ -6206,6 +6206,20 @@ const getCoworkRunner = () => {
         getPreviewSessionArtifactDir: (id) => getBotBrowserMetaAppCacheService().getPreviewSessionArtifactDir(id),
       });
     };
+    // Shared per-bot automation opt-in resolution: the session-keyed runner
+    // providers below and the metabot-keyed intent-prewarm variants must agree
+    // on a bot's combo, or the prewarmed slot would differ from the turn's.
+    const metabotAutomationProviders = {
+      browser: (metabotId: number | null) => {
+        if (!isExperimentalAutomationAllowed(getStoreOrNull())) return undefined;
+        if (!isCoworkBrowserAutomationEnabled(getMetabotStore(), metabotId)) return undefined;
+        return { mode: 'launch' as const, headless: true, ...detectSystemChromium() };
+      },
+      computer: (metabotId: number | null) => {
+        if (!isExperimentalAutomationAllowed(getStoreOrNull())) return false;
+        return isCoworkComputerUseEnabled(getMetabotStore(), metabotId);
+      },
+    };
     coworkRunner = new CoworkRunner(getCoworkStore(), {
       getSkillSessionEnvOverrides: async (sessionId: string): Promise<Record<string, string>> => {
         const session = getCoworkStore().getSession(sessionId);
@@ -6364,19 +6378,25 @@ const getCoworkRunner = () => {
       // installed Chrome over a Playwright-managed download. See
       // services/coworkAutomationPreference.ts.
       browserAutomationProvider: (coworkSessionId: string) => {
-        if (!isExperimentalAutomationAllowed(getStoreOrNull())) return undefined;
         const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
-        if (!isCoworkBrowserAutomationEnabled(getMetabotStore(), metabotId)) return undefined;
-        return { mode: 'launch' as const, headless: true, ...detectSystemChromium() };
+        return metabotAutomationProviders.browser(metabotId ?? null);
       },
       // Per-bot switch (default ON since 2026-09-28, explicit '0' opts out):
       // 0.1.7 experimental desktop computer use (cua-driver native,
       // in-process). Requires the app to hold the macOS Accessibility/Screen
       // Recording grants — the OS prompts on first use.
       computerUseProvider: (coworkSessionId: string) => {
-        if (!isExperimentalAutomationAllowed(getStoreOrNull())) return false;
         const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
-        return isCoworkComputerUseEnabled(getMetabotStore(), metabotId);
+        return metabotAutomationProviders.computer(metabotId ?? null);
+      },
+      // Metabot-keyed variants for intent prewarms that fire before any
+      // session record exists (the home composer's bot pick) — same opt-in
+      // semantics, keyed on the bot directly.
+      browserAutomationForMetabot: (metabotId: number | null) => metabotAutomationProviders.browser(metabotId),
+      computerUseForMetabot: (metabotId: number | null) => metabotAutomationProviders.computer(metabotId),
+      mcpServersForMetabot: (metabotId: number | null) => {
+        if (!isCoworkMcpMountEnabled(getMetabotStore(), metabotId)) return [];
+        return getMcpStore().getEnabledServers();
       },
       // Skill prompt parts are composed main-side: rules join the system
       // prompt's SKILLS section, the live catalog rides the volatile tail,
@@ -11055,6 +11075,55 @@ if (!gotTheLock) {
       };
     }
     });
+  });
+
+  // Intent prewarm (first-sentence latency, 2026-10-16): the renderer fires
+  // this when the home composer has a bot/model picked — seconds before the
+  // first send — or when an existing session opens, so the runtime slot boot
+  // (process spawn + plugin tree, ~11-18s cold on automation slots) overlaps
+  // the user's typing/reading instead of stacking inside the first turn.
+  // Fire-and-forget: the handler returns immediately and the boot proceeds in
+  // the background; a wrong guess idles out under the normal reap.
+  ipcMain.handle('cowork:session:prewarmTurnSlot', async (_event, input: {
+    sessionId?: string;
+    metabotId?: number | null;
+    model?: string | null;
+    modelProvider?: string | null;
+    cwd?: string | null;
+  }) => {
+    try {
+      const metabotId = typeof input?.metabotId === 'number' ? input.metabotId : null;
+      const sessionId = typeof input?.sessionId === 'string' && input.sessionId.trim() ? input.sessionId.trim() : undefined;
+      // Mirror the session:start cwd chain for bot intents (default root →
+      // per-bot dated workspace) so the prewarmed slot's workspace pin matches
+      // the turn's and no config diff appears inside it.
+      let cwd = (input?.cwd ?? '').trim();
+      if (!sessionId && metabotId != null) {
+        const config = getCoworkStore().getConfig();
+        const root = cwd || (config.workingDirectory || '').trim();
+        if (root) {
+          cwd = shouldUseBotWorkspaceCwd({
+            explicitCwd: input?.cwd ?? undefined,
+            defaultWorkingDirectory: config.workingDirectory,
+            metabotId,
+          })
+            ? resolveBotWorkspaceCwd(root, metabotId)
+            : resolveTaskWorkingDirectory(root);
+        }
+      }
+      void getCoworkRunner().prewarmSessionTurnSlot({
+        sessionId,
+        metabotId,
+        model: typeof input?.model === 'string' ? input.model : null,
+        modelProvider: typeof input?.modelProvider === 'string' ? input.modelProvider : null,
+        cwd: cwd || null,
+      }).catch(() => undefined);
+      return { success: true };
+    } catch {
+      // Prewarm is best-effort by design; a failure here must never surface in
+      // the composer — the turn itself cold-starts as before.
+      return { success: false };
+    }
   });
 
   // First-run onboarding greeting: create the Twin Bot's first chat session and
