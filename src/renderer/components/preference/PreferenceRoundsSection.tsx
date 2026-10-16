@@ -3,7 +3,6 @@ import { ScaleIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { preferenceService } from '../../services/preference';
 import type { PreferenceUserRoundSummary } from '../../types/preference';
-import PreferenceComparePanel from './PreferenceComparePanel';
 
 const t = (key: string): string => i18nService.t(key);
 
@@ -33,10 +32,10 @@ const useRounds = (filter: { mine?: boolean; taskid?: string }) => {
   return rounds;
 };
 
-/** "Preference rounds" on the MetaTask board: rounds that list the user as a judge. */
-const PreferenceRoundsSection: React.FC = () => {
+/** "Preference rounds" on the MetaTask board: rounds that list the user as a judge.
+ *  The hosting page renders PreferenceComparePanel in its own container. */
+const PreferenceRoundsSection: React.FC<{ onOpenRound: (pinId: string) => void }> = ({ onOpenRound }) => {
   const rounds = useRounds({ mine: true });
-  const [openRound, setOpenRound] = useState<string | null>(null);
   const nowSec = Math.floor(Date.now() / 1000);
   return (
     <>
@@ -62,7 +61,7 @@ const PreferenceRoundsSection: React.FC = () => {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setOpenRound(round.pinId)}
+                  onClick={() => onOpenRound(round.pinId)}
                   className={
                     canJudge(round, nowSec)
                       ? 'btn-idchat-primary-filled shrink-0 rounded-lg px-3 py-1 text-xs font-medium'
@@ -76,15 +75,17 @@ const PreferenceRoundsSection: React.FC = () => {
           </ul>
         </section>
       )}
-      {openRound && <PreferenceComparePanel roundPinId={openRound} onClose={() => setOpenRound(null)} />}
     </>
   );
 };
 
-/** Round buttons on a MetaTask detail page (rounds whose subject is this task). */
-export const PreferenceTaskRoundButtons: React.FC<{ rootPinId: string }> = ({ rootPinId }) => {
+/** Round buttons on a MetaTask detail page (rounds whose subject is this task).
+ *  The hosting page renders PreferenceComparePanel in its own container. */
+export const PreferenceTaskRoundButtons: React.FC<{ rootPinId: string; onOpenRound: (pinId: string) => void }> = ({
+  rootPinId,
+  onOpenRound,
+}) => {
   const rounds = useRounds({ taskid: rootPinId });
-  const [openRound, setOpenRound] = useState<string | null>(null);
   const nowSec = Math.floor(Date.now() / 1000);
   if (rounds.length === 0) return null;
   return (
@@ -93,7 +94,7 @@ export const PreferenceTaskRoundButtons: React.FC<{ rootPinId: string }> = ({ ro
         <button
           key={round.pinId}
           type="button"
-          onClick={() => setOpenRound(round.pinId)}
+          onClick={() => onOpenRound(round.pinId)}
           className={
             canJudge(round, nowSec)
               ? 'btn-idchat-primary-filled inline-flex shrink-0 items-center gap-1 rounded-lg px-3 py-1.5 text-sm font-medium'
@@ -106,7 +107,6 @@ export const PreferenceTaskRoundButtons: React.FC<{ rootPinId: string }> = ({ ro
             : t('preference.detail.viewRound').replace('{status}', t(`preference.status.${round.status}`))}
         </button>
       ))}
-      {openRound && <PreferenceComparePanel roundPinId={openRound} onClose={() => setOpenRound(null)} />}
     </>
   );
 };
