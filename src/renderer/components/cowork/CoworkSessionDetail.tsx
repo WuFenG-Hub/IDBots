@@ -14,7 +14,17 @@ import type {
 } from '../../types/cowork';
 import type { Skill } from '../../types/skill';
 import type { SettingsOpenOptions } from '../Settings';
-import CoworkPromptInput from './CoworkPromptInput';
+import CoworkPromptInput, { type CoworkPromptInputRef } from './CoworkPromptInput';
+import CoworkQuoteActionBar, {
+  QUOTE_ACTION_BAR_HEIGHT,
+  QUOTE_ACTION_BAR_WIDTH,
+} from './CoworkQuoteActionBar';
+import {
+  createPendingQuotedSelection,
+  createQuotedSelection,
+  resolveQuoteActionBarAnchorRect,
+  type PendingQuotedSelection,
+} from './coworkQuotedSelections';
 import CoworkPermissionPanel from './CoworkPermissionPanel';
 import { buildSessionComposerCommands } from './composerCommandCatalog';
 import PermissionModeSelector from './PermissionModeSelector';
@@ -76,7 +86,7 @@ import { getCompactFolderName } from '../../utils/path';
 import { buildCompactedNoticeText, extractCompactedCounts, formatCompactTokens } from './compactedNotice';
 import { isRenderableAvatarSource as isSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import { isRenderableAssistantOrSystemMessage } from '../../utils/coworkMessageVisibility';
-import { scrollEventMovesAnchor } from '../../utils/anchoredPopover';
+import { scrollEventMovesAnchor, placePopoverAbove, useAnchorMoveWatcher, type PopoverPlacement } from '../../utils/anchoredPopover';
 import {
   buildPrivateA2ASessionDisplayId,
   getCoworkSessionTitleClassName,
@@ -284,6 +294,20 @@ const formatShortHash = (value: string): string => {
   if (!value) return '';
   if (value.length <= 20) return value;
   return `${value.slice(0, 8)}...${value.slice(-8)}`;
+};
+
+/**
+ * Nearest transcript block around a selected node. Message turns already carry
+ * `data-export-role` ('user-message' / 'assistant-block'), so the quote can
+ * name its own source and hang its action bar off a real, moving element —
+ * without injecting any marker node into the transcript.
+ */
+const quoteTranscriptBlockOf = (node: Node | null | undefined): HTMLElement | null => {
+  if (!node) return null;
+  const element = node.nodeType === Node.ELEMENT_NODE
+    ? (node as HTMLElement)
+    : node.parentElement;
+  return element?.closest('[data-export-role]') ?? null;
 };
 
 const formatMessageTimestamp = (timestamp: number): string => {
@@ -2961,6 +2985,15 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  // Quoted-selection state: the pending selection (before it is added), the
+  // element the floating bar hangs off, the live range it follows, and the
+  // composer it is handed to.
+  const promptInputRef = useRef<CoworkPromptInputRef>(null);
+  const quoteActionBarRef = useRef<HTMLDivElement>(null);
+  const quoteAnchorRef = useRef<HTMLElement | null>(null);
+  const quoteLiveRangeRef = useRef<Range | null>(null);
+  const [pendingQuoteSelection, setPendingQuoteSelection] = useState<PendingQuotedSelection | null>(null);
+  const [quoteActionPlacement, setQuoteActionPlacement] = useState<PopoverPlacement | null>(null);
   const messageElementRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const consumedOrderFocusKeyRef = useRef<string | null>(null);
   const lastAutoScrollSessionIdRef = useRef<string | null>(null);
@@ -3508,6 +3541,111 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const closeMenu = () => {
     setMenuPosition(null);
   };
+
+  // ----- Quoted transcript selections ("reply to this specific part") -----
+  //
+  // Selecting text in the transcript floats a one-item bar ("add to
+  // conversation"); adding the selection hands it to the composer as a
+  // removable fragment, which then rides into the prompt body of the next
+  // message. Placement reuses the repository's shared anchored-popover
+  // helpers instead of hand-rolled positioning.
+  const updateQuoteActionPlacement = useCallback(() => {
+    const anchorRect = quoteAnchorRef.current?.getBoundingClientRect() ?? null;
+    const liveRect = quoteLiveRangeRef.current?.getBoundingClientRect() ?? null;
+    const rect = resolveQuoteActionBarAnchorRect(liveRect, anchorRect);
+    if (!rect) return;
+    const barRect = quoteActionBarRef.current?.getBoundingClientRect() ?? null;
+    setQuoteActionPlacement(placePopoverAbove(
+      rect,
+      { width: barRect?.width ?? QUOTE_ACTION_BAR_WIDTH, height: barRect?.height ?? QUOTE_ACTION_BAR_HEIGHT },
+      QUOTE_ACTION_BAR_WIDTH,
+    ));
+  }, []);
+
+  // The bar is rendered before it can be measured, so re-place once it is in
+  // the DOM and its real size is known. Keyed on the pending selection, not on
+  // the placement itself (that state object is replaced by every placement,
+  // which would make this effect its own trigger).
+  useLayoutEffect(() => {
+    if (!pendingQuoteSelection) return;
+    updateQuoteActionPlacement();
+  }, [pendingQuoteSelection, updateQuoteActionPlacement]);
+
+  useAnchorMoveWatcher(quoteAnchorRef, pendingQuoteSelection !== null, updateQuoteActionPlacement);
+
+  const captureQuoteSelection = useCallback(() => {
+    const container = scrollContainerRef.current;
+    const selection = typeof window === 'undefined' ? null : window.getSelection();
+    if (!container || !selection || selection.isCollapsed || selection.rangeCount === 0) {
+      setPendingQuoteSelection(null);
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    if (!container.contains(range.commonAncestorContainer)) {
+      setPendingQuoteSelection(null);
+      return;
+    }
+    const block = quoteTranscriptBlockOf(range.commonAncestorContainer);
+    // A whitespace-only selection is not a selection: it produces nothing.
+    const pending = createPendingQuotedSelection(
+      selection.toString(),
+      block?.getAttribute('data-export-role') ?? null,
+    );
+    if (!pending) {
+      setPendingQuoteSelection(null);
+      return;
+    }
+    quoteLiveRangeRef.current = range;
+    quoteAnchorRef.current = block ?? container;
+    setPendingQuoteSelection(pending);
+    updateQuoteActionPlacement();
+  }, [updateQuoteActionPlacement]);
+
+  const handleTranscriptSelectionEnd = useCallback(() => {
+    captureQuoteSelection();
+  }, [captureQuoteSelection]);
+
+  const handleTranscriptSelectionKeyUp = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    // Shift+arrow selections extend a selection without any mouse event.
+    if (event.shiftKey) captureQuoteSelection();
+  }, [captureQuoteSelection]);
+
+  const handleAddQuoteToConversation = useCallback(() => {
+    const pending = pendingQuoteSelection;
+    setPendingQuoteSelection(null);
+    quoteLiveRangeRef.current = null;
+    quoteAnchorRef.current = null;
+    if (!pending) return;
+    const fragment = createQuotedSelection(pending.text, pending.role);
+    if (!fragment) return;
+    promptInputRef.current?.addQuotedSelection(fragment);
+    promptInputRef.current?.focus();
+    // The passage now lives in the composer; drop the browser selection so the
+    // transcript does not keep showing a highlight for text that is already in.
+    if (typeof window !== 'undefined') window.getSelection()?.removeAllRanges();
+  }, [pendingQuoteSelection]);
+
+  // Dismiss the bar on Escape, and on a click that starts somewhere else (a
+  // click INSIDE the transcript is followed by a fresh selection, which
+  // re-captures on mouseup — dismissing first would only flicker).
+  useEffect(() => {
+    if (!pendingQuoteSelection) return;
+    const handleMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && quoteActionBarRef.current?.contains(target)) return;
+      if (target && scrollContainerRef.current?.contains(target)) return;
+      setPendingQuoteSelection(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPendingQuoteSelection(null);
+    };
+    document.addEventListener('mousedown', handleMouseDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [pendingQuoteSelection]);
 
   // Open folder in Finder/Explorer
   const handleOpenFolder = useCallback(async () => {
@@ -4365,6 +4503,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       <div
         ref={scrollContainerRef}
         onScroll={handleMessagesScroll}
+        onMouseUp={handleTranscriptSelectionEnd}
+        onKeyUp={handleTranscriptSelectionKeyUp}
         className="flex-1 overflow-y-auto overflow-anchor-none min-h-0 pt-3"
       >
         {isLoadingEarlierMessages && (
@@ -4713,6 +4853,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             ) : (
               <CoworkPromptInput
                 key={currentSession.id}
+                ref={promptInputRef}
                 scopeKey={currentSession.id}
                 onSubmit={onContinue}
                 onStop={onStop}
@@ -4771,6 +4912,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         </>
       )}
       </div>
+
+      {/* Floating "add to conversation" bar for the pending transcript
+          selection. Rendered only while a non-empty selection exists. */}
+      {pendingQuoteSelection && quoteActionPlacement && (
+        <CoworkQuoteActionBar
+          ref={quoteActionBarRef}
+          placement={quoteActionPlacement}
+          onAdd={handleAddQuoteToConversation}
+        />
+      )}
 
       {/* Drag overlay so mouse events are not swallowed mid-resize */}
       {isMarkdownViewerResizing && (
