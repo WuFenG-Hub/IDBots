@@ -32,6 +32,7 @@ import {
   setJevRelayCallStatsSink,
 } from './services/jevRelayService';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
+import { startEventLoopLagMonitor } from './libs/eventLoopLagMonitor';
 import { rankConversationsWithCerebellum } from './cerebellum/conversationSearchRank';
 import { decideGroupReplyWithCerebellum } from './cerebellum/groupReplyGate';
 import { rankWorkersWithCerebellum, CEREBELLUM_WORKER_RANK_TOP_K } from './cerebellum/workerRank';
@@ -16731,6 +16732,11 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   setJevRelayCallStatsSink(coworkLog);
   initJevRelayService({ getStore });
   registerJevRelayIpcHandlers({ ipcMain });
+
+  // Event-loop liveness timeline: a stalled main process fires every
+  // in-process timer late (the 2026-10-16 15.4s first-sentence stall), so
+  // bracket future stalls with an explicit WARN instead of a silent log gap.
+  startEventLoopLagMonitor();
 
   ipcMain.handle('metabot:setEnabled', async (_event, id: number, enabled: boolean) => {
     try {
