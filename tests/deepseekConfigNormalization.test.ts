@@ -311,7 +311,7 @@ test('normalizeDeepSeekAppConfig falls a vanished metaid-free default back to th
   // official `deepseek-flash`, but the default-provider catalog check then
   // rejects it and the default lands on the free catalog's first model.
   const syncedFreeModels = [
-    { id: 'deepseek-4.1-flash', name: 'deepseek-flash', supportsImage: false, contextWindow: 1_000_000, maxOutputTokens: 100_000 },
+    { id: 'deepseek-4.1-flash', name: 'deepseek-flash', supportsImage: false, contextWindow: 1_000_000, maxOutputTokens: 393_216 },
     { id: 'glm-5.3-flash', name: 'glm-5.3-flash', contextWindow: 1_048_576, maxOutputTokens: 131_072 },
     { id: 'cat-jam-free', name: 'cat-jam-free' },
   ];

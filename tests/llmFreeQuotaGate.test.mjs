@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   LLM_FREE_PROVIDER_KEY,
+  buildFreeProviderRelayModelRow,
   getFreeProviderModelCanonical,
   getFreeProviderModelDisplayName,
   getFreeProviderModelLegacyLimitRewrites,
@@ -116,11 +117,12 @@ test('getFreeProviderModelCanonical returns null for unknown relay ids', () => {
 });
 
 test('getFreeProviderModelCanonical gives deepseek-4.1-flash the flagship profile with vision on', () => {
-  // The 2026-10-16 relay catalog rename kept the wire family (same limits and
-  // effort-max thinking as the legacy alias); the round-2 conf-only pass
+  // The 2026-10-16 relay catalog rename kept the wire family (same 1M window
+  // and effort-max thinking as the legacy alias); the round-2 conf-only pass
   // (2026-10-16) confirmed the upstream V4.1 Flash reads image_url parts
   // through the relay, so the catalog id declares vision while the hidden
-  // deepseek-chat alias entry keeps false.
+  // deepseek-chat alias entry keeps false. maxOutputTokens is the FALLBACK
+  // default (relay-reported official ceilings win on every write path).
   const canonical = getFreeProviderModelCanonical('deepseek-4.1-flash');
   assert.ok(canonical);
   assert.equal(canonical.contextWindow, 1_000_000);
@@ -132,6 +134,32 @@ test('getFreeProviderModelCanonical gives deepseek-4.1-flash the flagship profil
   for (const id of ['glm-5.3-flash', 'longcat-2.5-preview-free', 'step-5-preview-free', 'cat-jam-free', 'glyph-cluster-free', 'laguna-s-2.1-free', 'ling-3.0-flash-sante-free']) {
     assert.equal(getFreeProviderModelCanonical(id), null, id);
   }
+});
+
+test('relay-row merge: relay-reported limits win, canonical 100K output is only the fallback', () => {
+  // Server reports the official ceiling → it wins, no matter the canonical.
+  const flagship = buildFreeProviderRelayModelRow({ id: 'deepseek-4.1-flash', contextWindow: 1_000_000, maxOutputTokens: 393_216 });
+  assert.equal(flagship.maxOutputTokens, 393_216);
+  assert.equal(flagship.contextWindow, 1_000_000);
+  assert.equal(flagship.supportsImage, true);
+  assert.deepEqual(flagship.options, { reasoningEffort: 'max', thinking: { type: 'enabled' } });
+
+  // Directory omits the ceiling → the canonical 100K default fills in.
+  const bare = buildFreeProviderRelayModelRow({ id: 'deepseek-4.1-flash', contextWindow: 1_000_000 });
+  assert.equal(bare.maxOutputTokens, 100_000);
+
+  // The hidden alias (never in the directory) fills its whole profile.
+  const alias = buildFreeProviderRelayModelRow({ id: 'deepseek-chat' });
+  assert.equal(alias.contextWindow, 1_000_000);
+  assert.equal(alias.maxOutputTokens, 100_000);
+  assert.equal(alias.supportsImage, false);
+
+  // Unknown ids stay bare: relay values only, no canonical fields at all.
+  const unknown = buildFreeProviderRelayModelRow({ id: 'glm-5.3-flash', contextWindow: 1_048_576, maxOutputTokens: 131_072 });
+  assert.equal(unknown.name, 'glm-5.3-flash');
+  assert.equal(unknown.maxOutputTokens, 131_072);
+  assert.equal('supportsImage' in unknown, false);
+  assert.equal('options' in unknown, false);
 });
 
 test('isFreeProviderConfigured requires credentials and models', () => {
@@ -234,15 +262,14 @@ test('catalog sync: quota directory change refreshes provider.models', () => {
   assert.ok(next, 'the frozen single-model catalog must be rewritten');
   // The relay list IS the directory: legacy alias dropped, new ids in relay order.
   assert.deepEqual(next.map((model) => model.id), RELAY_CATALOG_2026_10_16.map((model) => model.id));
-  // Known id gets the canonical client profile over the relay-reported limits,
-  // vision included (api.ts gates image_url content arrays on this flag). The
-  // output ceiling stays the 100K canonical pin even though the server now
-  // reports the official 393216 — the pin wins on NEW rows by design; the
-  // next sync's drift detection then reconciles the surviving row.
+  // Known id keeps the canonical vision flag + thinking options, but the
+  // RELAY-REPORTED limits now win (per-model official ceilings, 2026-10-16
+  // server fix) — the canonical 100K output value is only the fallback for
+  // rows where neither the directory nor a stored/user value provides one.
   const flagship = next[0];
   assert.equal(flagship.name, 'deepseek-flash');
   assert.equal(flagship.contextWindow, 1_000_000);
-  assert.equal(flagship.maxOutputTokens, 100_000);
+  assert.equal(flagship.maxOutputTokens, 393_216);
   assert.equal(flagship.supportsImage, true);
   assert.deepEqual(flagship.options, { reasoningEffort: 'max', thinking: { type: 'enabled' } });
   // Unknown ids keep the relay-reported values bare (id is the display name,

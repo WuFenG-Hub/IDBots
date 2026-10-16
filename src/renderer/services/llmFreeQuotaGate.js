@@ -48,12 +48,13 @@ export function getFreeProviderModelDisplayName(modelId) {
  * src/main/libs/coworkModelLimits.ts). Auto-compaction re-arms accordingly
  * at min(0.8*1M, 1M-100K-40K) = 800K tokens.
  *
- * max_output_tokens is a DECLARED ceiling of 100K (owner decision
- * 2026-10-09): thinking shares the output budget, and the previously pinned
- * 4096 truncated effort-max turns after a couple of sentences. At the 1M
- * window the resolution-time clamp (clampCoworkMaxOutputTokens: 32% tier)
- * leaves the full 100K effective per turn. Billing is by actual tokens
- * used, so a generous declared ceiling costs nothing for short replies.
+ * max_output_tokens: the canonical value is the FALLBACK default of 100K
+ * (owner decision 2026-10-09; re-scoped 2026-10-16) — it applies only when
+ * neither the relay directory nor a stored/user value provides a ceiling.
+ * The relay's per-model official ceilings (reported since the 2026-10-16
+ * server fix) are authoritative and WIN over the fallback on every write
+ * path; thinking shares the output budget, so a generous default ceiling
+ * costs nothing for short replies (billing is by actual tokens used).
  *
  * supportsImage is verified per id: the upstream DeepSeek V4.1 Flash family
  * is natively multimodal and the relay forwards standard OpenAI image_url
@@ -65,6 +66,8 @@ export function getFreeProviderModelDisplayName(modelId) {
  * parameters itself, so no mirror entries are maintained for them.
  */
 const FREE_PROVIDER_MODEL_CANONICAL = {
+  // The hidden wire alias: absent from the relay directory (server routes
+  // chat to it), so its numbers only ever act as load-time fills.
   'deepseek-chat': {
     contextWindow: 1_000_000,
     maxOutputTokens: 100_000,
@@ -72,10 +75,11 @@ const FREE_PROVIDER_MODEL_CANONICAL = {
     options: { reasoningEffort: 'max', thinking: { type: 'enabled' } },
   },
   // The 2026-10-16 relay catalog flagship (rename of the deepseek-chat alias):
-  // same wire family, so it inherits the same limits and effort-max thinking;
-  // vision is ON — the relay transparently passes image_url parts through and
-  // the upstream V4.1 Flash reads them natively (round-2 server confirmation,
-  // 2026-10-16).
+  // same wire family — 1M window, effort-max thinking, vision ON (the relay
+  // transparently passes image_url parts through and the upstream V4.1 Flash
+  // reads them natively). Its 100K output ceiling is the fallback default;
+  // the directory's per-model official ceiling (393216) wins whenever
+  // reported.
   'deepseek-4.1-flash': {
     contextWindow: 1_000_000,
     maxOutputTokens: 100_000,
@@ -158,6 +162,31 @@ export function getFreeProviderModelCanonical(modelId) {
 }
 
 /**
+ * Build a NEW stored row from one relay catalog entry (bootstrap provisioning
+ * and catalog sync share this merge). Precedence for the numeric limits: the
+ * relay-reported values win — the directory has carried per-model official
+ * ceilings since the 2026-10-16 server fix — and the canonical table only
+ * FILLS what the directory omits (the 100K output default included). The
+ * canonical-only fields (verified vision flag, thinking options) apply to
+ * known ids as before; unknown ids keep the bare relay-reported shape.
+ */
+export function buildFreeProviderRelayModelRow(entry) {
+  const id = typeof entry?.id === 'string' ? entry.id.trim() : '';
+  const canonical = getFreeProviderModelCanonical(id);
+  const row = {
+    id,
+    name: getFreeProviderModelDisplayName(id),
+    contextWindow: entry?.contextWindow ?? canonical?.contextWindow,
+    maxOutputTokens: entry?.maxOutputTokens ?? canonical?.maxOutputTokens,
+  };
+  if (canonical) {
+    row.supportsImage = canonical.supportsImage;
+    row.options = canonical.options;
+  }
+  return row;
+}
+
+/**
  * A provider entry counts as provisioned only when bootstrap has filled in
  * connection credentials AND at least one model.
  */
@@ -212,9 +241,10 @@ export function planFreeQuotaProvisioning(input) {
  *   non-canonical ids — same convention as mergeSyncedProviderModels, where
  *   the endpoint-reported context wins over the stored row). User-tuned
  *   `options` (thinking/effort picks) and the vision flag survive untouched.
- * - New ids get the bootstrap merge semantics — relay-reported limits with
- *   the canonical client profile overriding known ids
- *   (getFreeProviderModelCanonical).
+ * - New ids get the shared relay-row merge (buildFreeProviderRelayModelRow):
+ *   relay-reported limits first, canonical fills for what the directory
+ *   omits (100K output default), canonical vision flag and thinking options
+ *   for known ids.
  */
 export function planFreeProviderCatalogSync(provider, relayModels) {
   if (!provider || !Array.isArray(provider.models)) {
@@ -263,12 +293,6 @@ export function planFreeProviderCatalogSync(provider, relayModels) {
         maxOutputTokens: entry.maxOutputTokens ?? stored.maxOutputTokens,
       };
     }
-    return {
-      id,
-      name: getFreeProviderModelDisplayName(id),
-      contextWindow: entry.contextWindow,
-      maxOutputTokens: entry.maxOutputTokens,
-      ...getFreeProviderModelCanonical(id),
-    };
+    return buildFreeProviderRelayModelRow(entry);
   });
 }

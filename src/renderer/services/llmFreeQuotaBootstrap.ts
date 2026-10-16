@@ -18,8 +18,7 @@ import type { AppConfig } from '../config';
 import {
   LLM_FREE_PROVIDER_KEY,
   FREE_PROVIDER_DISPLAY_NAME,
-  getFreeProviderModelCanonical,
-  getFreeProviderModelDisplayName,
+  buildFreeProviderRelayModelRow,
   isFreeProviderConfigured,
   planFreeProviderCatalogSync,
   planFreeQuotaProvisioning,
@@ -95,17 +94,11 @@ type LlmRelayBootstrapResult = NonNullable<Awaited<ReturnType<typeof window.elec
 
 async function provisionProviderConfig(result: LlmRelayBootstrapResult): Promise<void> {
   const config = configService.getConfig();
-  const models = (result.models ?? []).map((model) => ({
-    id: model.id,
-    name: getFreeProviderModelDisplayName(model.id),
-    contextWindow: model.contextWindow,
-    maxOutputTokens: model.maxOutputTokens,
-    // Known relay ids (deepseek-chat, deepseek-4.1-flash) pin the canonical
-    // limits: the 1M context window (upstream upgraded past the old 64K cap,
-    // owner-confirmed 2026-10-09) plus the 100K declared output ceiling;
-    // unknown ids keep the relay-reported fields untouched.
-    ...getFreeProviderModelCanonical(model.id),
-  }));
+  // Shared relay-row merge: relay-reported limits win (per-model official
+  // ceilings since the 2026-10-16 server fix), the canonical table fills
+  // what the directory omits (100K output default) and adds the verified
+  // vision flag + thinking options for known ids.
+  const models = (result.models ?? []).map((model) => buildFreeProviderRelayModelRow(model));
   await configService.updateConfig({
     providers: {
       [LLM_FREE_PROVIDER_KEY]: {
