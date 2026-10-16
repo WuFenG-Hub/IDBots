@@ -810,7 +810,17 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       attachments: submittedAttachments,
       inputFileLabel,
     });
-    if (isStreaming && !trimmedValue) return;
+    // The streaming guard is the idle rule below, verbatim: text OR attachments
+    // make a submission. Demanding text alone (`!trimmedValue`) refused an
+    // image-only steer even after the attachment doors had opened — the chip got
+    // in and send then did nothing. Attachments already ride the same submit and
+    // the same snapshot as text (`composeCoworkSubmitPrompt` hands an empty draft
+    // the manifest line), and steering a running turn with a picture is ordinary
+    // in the sibling products (grokbot / codex / dsh), so `length === 0` is the
+    // only condition the empty case still needs. Known boundary, left alone here:
+    // the send/stop affordance still keys off text alone, so an image-only steer
+    // is Enter-reachable rather than button-reachable.
+    if (isStreaming && !trimmedValue && submittedAttachments.length === 0) return;
     // Slash-command adjudication (DSH port): a live claim, a bare `/name`
     // line, or a manually typed `/name <args>` executes the command instead
     // of sending a message; unknown /-leading text falls through as a

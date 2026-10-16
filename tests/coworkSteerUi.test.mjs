@@ -66,7 +66,17 @@ test('running composer keeps dynamic configuration disabled and sends the trimme
   // frozen while a turn streams…
   assert.match(inputSource, /disabled=\{disabled \|\| isStreaming\}/);
   assert.match(inputSource, /coworkSteerPlaceholder/);
-  assert.match(inputSource, /if \(isStreaming && !trimmedValue\) return/);
+  // The streaming guard is the SAME rule as the idle one further down: text OR
+  // attachments make a submission. It used to demand text alone
+  // (`!trimmedValue`), which refused an image-only steer even after the
+  // attachment doors had opened — the chip got in and send silently did
+  // nothing. Product call: steering a running turn with a picture is ordinary
+  // in grokbot / codex / dsh, and an attachment already rides the same submit
+  // and the same snapshot as text (see composeCoworkSubmitPrompt).
+  assert.doesNotMatch(inputSource, /if \(isStreaming && !trimmedValue\) return/);
+  assert.match(inputSource, /if \(isStreaming && !trimmedValue && submittedAttachments\.length === 0\) return/);
+  // …the idle branch keeps its own (already correct) guard, unchanged.
+  assert.match(inputSource, /if \(!isStreaming && !trimmedValue && submittedAttachments\.length === 0\) return/);
   // …while the submitted prompt is composed by ONE rule on both branches. The
   // old `isStreaming ? trimmedValue` fork is gone on purpose: it composed the
   // steering prompt from the text alone, so an attachment inserted mid-run was

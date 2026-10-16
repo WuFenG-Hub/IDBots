@@ -411,3 +411,131 @@ test('every attachment door and the submit path are wired to the one gate', () =
     'the attachment field must be snapshotted for a steering submit too',
   );
 });
+
+// ---------------------------------------------------------------------------
+// Part 3 — a submission needs text OR attachments, streaming as well as idle.
+//
+// The attachment doors opening (Part 2) was only half of "an image can steer a
+// running turn": `handleSubmit` still had a text-only guard — `if (isStreaming
+// && !trimmedValue) return;` — so the chip got in and send then did nothing.
+// The guard is now the idle rule, and these cases pin both halves of it.
+// ---------------------------------------------------------------------------
+
+/**
+ * This harness has no DOM (see the header note), so the composer's inline
+ * submit guard cannot be fired by mounting. Rather than retype the rule here —
+ * a copy would keep passing while the component drifted back — pull the SHIPPED
+ * expression out of the component source and evaluate it. The extraction is
+ * itself asserted, so a reshaped guard fails loudly instead of silently
+ * weakening the test.
+ */
+const streamingSubmitGuardVerdict = (state: {
+  isStreaming: boolean;
+  trimmedValue: string;
+  attachmentCount: number;
+}): boolean => {
+  const guard = /if \((isStreaming && !trimmedValue && submittedAttachments\.length === 0)\) return;/
+    .exec(composerSource);
+  assert.ok(
+    guard,
+    'the streaming guard must stay one expression: `if (isStreaming && !trimmedValue && submittedAttachments.length === 0) return;`',
+  );
+  const evaluate = new Function(
+    'isStreaming',
+    'trimmedValue',
+    'submittedAttachments',
+    `return (${guard[1]});`,
+  ) as (isStreaming: boolean, trimmedValue: string, submittedAttachments: unknown[]) => boolean;
+  return evaluate(state.isStreaming, state.trimmedValue, new Array(state.attachmentCount).fill(null));
+};
+
+const composerSourceIndexOf = (needle: string): number => {
+  const index = composerSource.indexOf(needle);
+  assert.notEqual(index, -1, `the composer source must contain: ${needle}`);
+  return index;
+};
+
+test('a mid-run submission with an image but no text is admitted and reaches onSubmit', async () => {
+  const label = i18nService.t('coworkInputFileLabel');
+  const attachment = { path: STEP_IMAGE_PATH, name: 'step-screenshot.png' };
+
+  // The composer body, in order: snapshot both fields → compose → guard → submit.
+  const submission = composeCoworkSubmitPrompt({
+    submittedValue: '',
+    attachments: [attachment],
+    inputFileLabel: label,
+  });
+  assert.equal(submission.trimmedValue, '', 'the steer carries no text at all');
+  assert.equal(
+    submission.finalPrompt,
+    `${label}: ${STEP_IMAGE_PATH}`,
+    'with no text the composed prompt IS the attachment manifest line',
+  );
+
+  assert.equal(
+    streamingSubmitGuardVerdict({ isStreaming: true, trimmedValue: submission.trimmedValue, attachmentCount: 1 }),
+    false,
+    'an image-only steer must not be early-returned while the turn streams',
+  );
+
+  // Admitted, so it goes out: the same coordinator the composer calls.
+  const run = {
+    draftField: createVersionedComposerField('', () => '', () => {}),
+    attachmentField: createVersionedComposerField([attachment], () => [], () => {}),
+  };
+  const delivered: string[] = [];
+  const accepted = await submitCoworkComposerDraft({
+    ...run,
+    onSubmit: () => {
+      delivered.push(submission.finalPrompt);
+      return true;
+    },
+  });
+  assert.equal(accepted, true);
+  assert.deepEqual(
+    delivered,
+    [`${label}: ${STEP_IMAGE_PATH}`],
+    'onSubmit receives the attachment manifest line, and nothing else',
+  );
+  assert.equal(run.draftField.get(), '');
+  assert.deepEqual(run.attachmentField.get(), [], 'a taken attachment is cleared with the text');
+});
+
+test('a mid-run submission with neither text nor attachment is still refused', () => {
+  const label = i18nService.t('coworkInputFileLabel');
+  const submission = composeCoworkSubmitPrompt({
+    submittedValue: '   ',
+    attachments: [],
+    inputFileLabel: label,
+  });
+  assert.equal(submission.finalPrompt, '', 'an empty steer has nothing to send');
+
+  assert.equal(
+    streamingSubmitGuardVerdict({ isStreaming: true, trimmedValue: submission.trimmedValue, attachmentCount: 0 }),
+    true,
+    'the empty case is still early-returned, exactly like the idle composer',
+  );
+
+  // …and the early return sits between the composition and the handover, so with
+  // that verdict onSubmit is never reached and both fields stay put.
+  assert.ok(
+    composerSourceIndexOf('const { trimmedValue, finalPrompt } = composeCoworkSubmitPrompt({')
+      < composerSourceIndexOf('if (isStreaming && !trimmedValue && submittedAttachments.length === 0) return;')
+    && composerSourceIndexOf('if (isStreaming && !trimmedValue && submittedAttachments.length === 0) return;')
+      < composerSourceIndexOf('await submitCoworkComposerDraft({'),
+    'the guard reads the composed draft and returns before the submission is handed over',
+  );
+});
+
+test('the idle branch keeps its own guard and the streaming one never decides for it', () => {
+  assert.match(
+    composerSource,
+    /if \(!isStreaming && !trimmedValue && submittedAttachments\.length === 0\) return;/,
+    'the idle guard is unchanged',
+  );
+  assert.equal(
+    streamingSubmitGuardVerdict({ isStreaming: false, trimmedValue: '', attachmentCount: 0 }),
+    false,
+    'an idle submit never hits the streaming guard, attachment or not',
+  );
+});
