@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { PaperAirplaneIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
-import { PaperClipIcon, XMarkIcon, SparklesIcon, ChevronDownIcon, PlusIcon, PuzzlePieceIcon, CommandLineIcon } from '@heroicons/react/24/outline';
+import { PaperClipIcon, SparklesIcon, ChevronDownIcon, PlusIcon, PuzzlePieceIcon, CommandLineIcon } from '@heroicons/react/24/outline';
 import { placePopoverAbove, useAnchorMoveWatcher } from '../../utils/anchoredPopover';
 import ModelEffortPicker, { type ModelEffortValue } from '../ModelEffortPicker';
 import ContextUsageRing from '../ContextUsageRing';
@@ -39,6 +39,7 @@ import {
   shouldRemeasureComposerHeight,
   type ComposerHeightMeasurement,
 } from './composerTextareaResize';
+import CoworkAttachmentPreview from './CoworkAttachmentPreview';
 
 type CoworkAttachment = {
   path: string;
@@ -1296,24 +1297,12 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       {attachments.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-2">
           {attachments.map((attachment) => (
-              <div
-                key={attachment.path}
-                className="inline-flex items-center gap-1.5 rounded-full border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-2.5 py-1 text-xs dark:text-claude-darkText text-claude-text max-w-full"
-                title={attachment.path}
-              >
-                <PaperClipIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                <span className="truncate max-w-[180px]">{attachment.name}</span>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveAttachment(attachment.path)}
-                  disabled={disabled || isStreaming}
-                  className="ml-0.5 rounded-full p-0.5 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
-                  aria-label={i18nService.t('coworkAttachmentRemove')}
-                  title={i18nService.t('coworkAttachmentRemove')}
-                >
-                  <XMarkIcon className="h-3 w-3" />
-                </button>
-              </div>
+            <CoworkAttachmentPreview
+              key={attachment.path}
+              attachment={attachment}
+              removeDisabled={disabled || isStreaming}
+              onRemove={handleRemoveAttachment}
+            />
           ))}
         </div>
       )}
