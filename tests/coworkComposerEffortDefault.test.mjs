@@ -1,8 +1,10 @@
-// Static wiring checks for the reasoning-effort "Default" rung fix: an
-// explicit Default pick in a composer/session picker must stick in the
-// display and reach the session as the 'default' sentinel (model default
-// wins over the bot brain / global rungs), instead of snapping back to the
-// highest fallback tier.
+// Static wiring checks + behavioral coverage for the reasoning-effort
+// "Auto"/'default' rung: an explicit pick in a composer/session picker must
+// stick in the display and reach the session as the 'default' sentinel
+// (auto: cerebellum picks per message; the no-verdict fallback degrades to
+// the MODEL DEFAULT, never the bot-brain/global rungs — the compat promise
+// for legacy "Default" rows), instead of snapping back to the highest
+// fallback tier.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -59,12 +61,13 @@ test('a configured bot brain outranks the persisted global effort', () => {
     !mainSource.includes(': getPersistedCoworkEffortLevel(),'),
     'main.ts: startSession must leave effort unset when the composer sent no pick',
   );
-  // The per-turn runtime tiering gates the global rung on brain absence
-  // (primary brain and fallback-brain takeover alike).
-  const gatedRung = 'automationBrain ? null : getPersistedCoworkEffortLevel()';
+  // The per-turn runtime gates the global rung on brain absence inside the
+  // auto-fallback helper (behavioral coverage below; primary brain and
+  // fallback-brain takeover alike route through it).
+  const fallbackCalls = coworkRunnerSource.match(/autoEffortRung\s*\?\?\s*resolveAutoEffortFallback\(\{/g) ?? [];
   assert.ok(
-    coworkRunnerSource.split(gatedRung).length - 1 >= 2,
-    'coworkRunner: primary and fallback effort chains must skip the global rung when a bot brain exists',
+    fallbackCalls.length >= 2,
+    'coworkRunner: primary and fallback effort chains must resolve the no-verdict fallback through resolveAutoEffortFallback',
   );
   // The composer/session pickers mirror the same rule in the display layer.
   assert.ok(
@@ -82,11 +85,10 @@ test('assistant chat-experience mode defaults reasoning off behind the auto rung
   // the explicit session override AHEAD of everything — a user pick in the
   // session picker must stick at runtime. Without an override the cerebellum
   // AUTO rung comes next (autoEffortRung — resolved by the per-turn JEV
-  // selector; null keeps the legacy behavior), then assistant mode pins 'off'
-  // and skips the bot brain / persisted global / per-model tail (any reasoning
-  // pass would delay the first visible token the mode promises). The
-  // professional-mode chain (asserted above) stays intact behind the same
-  // expression.
+  // selector; null hands off to resolveAutoEffortFallback), then assistant
+  // mode pins 'off' and skips the bot brain / persisted global / per-model
+  // tail (any reasoning pass would delay the first visible token the mode
+  // promises). The professional-mode chain stays intact inside the helper.
   assert.ok(
     coworkRunnerSource.includes('getPersistedChatExperienceMode'),
     'coworkRunner: effort resolution must read the persisted chat experience mode',
@@ -98,19 +100,12 @@ test('assistant chat-experience mode defaults reasoning off behind the auto rung
     overrideFirstChains.length >= 2,
     'coworkRunner: primary and fallback effort chains must hoist the session override ahead of the auto rung',
   );
-  const autoAheadOfOff = coworkRunnerSource.match(
-    /autoEffortRung\s*\?\?\s*\(assistantMode\s*\?\s*'off'/g,
-  ) ?? [];
+  // Both chains must feed the sentinel origin into the fallback — that is
+  // what keeps legacy Default rows off the brain/global rung.
+  const sentinelFeeds = coworkRunnerSource.match(/sentinelDefault:\s*effortSentinelDefault/g) ?? [];
   assert.ok(
-    autoAheadOfOff.length >= 2,
-    'coworkRunner: the auto rung must resolve ahead of the assistant-mode off rung on both chains',
-  );
-  const assistantSkipsTail = coworkRunnerSource.match(
-    /assistantMode\s*\?\s*'off'\s*:\s*toLlmEffortLevel\(\s*automationBrain/g,
-  ) ?? [];
-  assert.ok(
-    assistantSkipsTail.length >= 2,
-    'coworkRunner: without a session override, assistant mode must skip the brain/global/model tail',
+    sentinelFeeds.length >= 2,
+    'coworkRunner: primary and fallback chains must pass the sentinel origin into resolveAutoEffortFallback',
   );
 });
 
@@ -134,5 +129,86 @@ test('assistant mode displays the Auto rung when the session has no explicit pic
   assert.ok(
     botBrowserPanelSource.includes('{ assistantMode: isAssistantMode }'),
     'BotBrowserCoworkPanel: the panel display chain must receive the assistant-mode flag',
+  );
+});
+
+// --- behavioral: sentinel read-boundary compatibility (compiled runner) ---
+
+test('resolveEffectiveEffort distinguishes the sentinel from a plain missing pick', async () => {
+  const { resolveEffectiveEffort, resolveEffectiveEffortRung } = await import('../dist-electron/main/libs/coworkRunner.js');
+  // The 'default' token (picker "Auto" rung today, legacy "Default" pick on
+  // old rows) rides the auto path AND flags its origin for the fallback.
+  assert.deepEqual(resolveEffectiveEffort('default'), { rung: null, sentinelDefault: true });
+  // A plain null / unknown token is "never picked" — no sentinel origin.
+  assert.deepEqual(resolveEffectiveEffort(null), { rung: null, sentinelDefault: false });
+  assert.deepEqual(resolveEffectiveEffort(undefined), { rung: null, sentinelDefault: false });
+  assert.deepEqual(resolveEffectiveEffort('bogus'), { rung: null, sentinelDefault: false });
+  // Explicit rungs stay explicit.
+  assert.deepEqual(resolveEffectiveEffort('high'), { rung: 'high', sentinelDefault: false });
+  // Legacy export kept for the turn-ack tiering contract.
+  assert.equal(resolveEffectiveEffortRung('default'), null);
+});
+
+test("resolveAutoEffortFallback keeps legacy Default rows off the bot-brain/global rungs", async () => {
+  const { resolveAutoEffortFallback } = await import('../dist-electron/main/libs/coworkRunner.js');
+  // THE regression case: a session stored 'default' (legacy explicit Default
+  // pick) with a bot brain pinned to 'high' — no verdict may re-inherit the
+  // brain effort the pick was created to suppress; it degrades to the model
+  // default (null).
+  assert.equal(
+    resolveAutoEffortFallback({
+      sentinelDefault: true, assistantMode: false,
+      brainEffort: 'high', hasBrain: true, globalEffort: 'max', modelDefault: 'low',
+    }),
+    null,
+  );
+  // Sentinel origin also skips the global and per-model rungs.
+  assert.equal(
+    resolveAutoEffortFallback({
+      sentinelDefault: true, assistantMode: false,
+      brainEffort: null, hasBrain: false, globalEffort: 'max', modelDefault: 'low',
+    }),
+    null,
+  );
+  // Assistant mode's no-reasoning promise outranks the sentinel origin.
+  assert.equal(
+    resolveAutoEffortFallback({
+      sentinelDefault: true, assistantMode: true,
+      brainEffort: 'high', hasBrain: true, globalEffort: 'max', modelDefault: 'low',
+    }),
+    'off',
+  );
+  // Plain "never picked" sessions keep the historical chain: brain effort...
+  assert.equal(
+    resolveAutoEffortFallback({
+      sentinelDefault: false, assistantMode: false,
+      brainEffort: 'high', hasBrain: true, globalEffort: 'max', modelDefault: 'low',
+    }),
+    'high',
+  );
+  // ...a configured brain's null effort means "model default" (the global
+  // rung is skipped for brain-bound sessions, the per-model default lands)...
+  assert.equal(
+    resolveAutoEffortFallback({
+      sentinelDefault: false, assistantMode: false,
+      brainEffort: null, hasBrain: true, globalEffort: 'max', modelDefault: 'low',
+    }),
+    'low',
+  );
+  // ...the global only fills in for brain-less sessions...
+  assert.equal(
+    resolveAutoEffortFallback({
+      sentinelDefault: false, assistantMode: false,
+      brainEffort: null, hasBrain: false, globalEffort: 'max', modelDefault: 'low',
+    }),
+    'max',
+  );
+  // ...and the per-model default is the last resort.
+  assert.equal(
+    resolveAutoEffortFallback({
+      sentinelDefault: false, assistantMode: false,
+      brainEffort: null, hasBrain: false, globalEffort: null, modelDefault: 'low',
+    }),
+    'low',
   );
 });

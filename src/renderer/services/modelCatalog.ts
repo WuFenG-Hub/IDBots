@@ -20,11 +20,12 @@ export type LlmEffortLevel = 'off' | 'low' | 'high' | 'max';
 export const LLM_EFFORT_LEVELS: readonly LlmEffortLevel[] = ['off', 'low', 'high', 'max'];
 
 /**
- * Wire marker for an explicit "Default" rung pick in a composer/session
- * picker. Persisted as the cowork session's effort so the main-process
- * resolution chain (session ?? bot brain ?? global ?? model default) stops at
- * it and runs at the model's own default. Mirrors
- * llmEffort.LLM_EFFORT_DEFAULT_SENTINEL — keep the two identical.
+ * Wire marker for the picker's top "Auto" rung (historically the explicit
+ * "Default" pick). Persisted as the cowork session's effort; the runner's
+ * auto path resolves it per message via the cerebellum selector, and the
+ * no-verdict fallback degrades to the model's own default — never the bot
+ * brain / global rungs (compat with the old "Default" promise; see
+ * llmEffort.LLM_EFFORT_DEFAULT_SENTINEL). Keep the two identical.
  */
 export const LLM_EFFORT_DEFAULT_SENTINEL = 'default';
 
@@ -184,9 +185,10 @@ export function effortDisplayForPick(
 
 /**
  * Effort to send when starting a session from a composer. An explicit pick
- * always yields a value — a null effort becomes the 'default' sentinel so the
- * session records "model default wins over brain/global". No pick at all
- * yields undefined so the main process keeps the tiered defaults.
+ * always yields a value — a null effort becomes the 'default' sentinel (the
+ * "Auto" rung: cerebellum picks per message, degrading to the model default
+ * when no verdict lands). No pick at all yields undefined so the main
+ * process keeps the tiered defaults (brain ?? global ?? model).
  */
 export function effortForSessionStart(
   pick: ComposerModelEffortPick | null | undefined,

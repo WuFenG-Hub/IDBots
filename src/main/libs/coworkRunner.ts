@@ -674,6 +674,71 @@ function resolveEffectiveEffortRung(override: string | null | undefined): Cerebe
 }
 export { resolveEffectiveEffortRung };
 
+export interface EffectiveEffortResolution {
+  /** Explicit rung, or null = auto (the cerebellum effort selector runs). */
+  rung: CerebellumEffortRung | null;
+  /**
+   * True when the stored override is the 'default' sentinel — an explicit
+   * picker pick (the "Auto" rung today; on rows written before effort-auto
+   * it was the explicit "Default" pick). Distinguishes "user engaged the
+   * picker" from "never picked" for the auto fallback below.
+   */
+  sentinelDefault: boolean;
+}
+
+function resolveEffectiveEffort(override: string | null | undefined): EffectiveEffortResolution {
+  return {
+    rung: resolveEffectiveEffortRung(override),
+    sentinelDefault: override === 'default',
+  };
+}
+export { resolveEffectiveEffort };
+
+export interface AutoEffortFallbackInput {
+  /** Override origin was the 'default' sentinel (see resolveEffectiveEffort). */
+  sentinelDefault: boolean;
+  /** Assistant chat-experience mode pins 'off' — no reasoning may delay the
+   * first visible token, whatever the origin. */
+  assistantMode: boolean;
+  /** Bot brain effort (primary brain for the main route, fallback brain's
+   * effort on a fallback-route resume). */
+  brainEffort: unknown;
+  /** Whether the session has a configured bot brain (the global rung only
+   * fills in for brain-less sessions). */
+  hasBrain: boolean;
+  /** Persisted global cowork effort. */
+  globalEffort: unknown;
+  /** The running model's own default effort. */
+  modelDefault: unknown;
+}
+
+/**
+ * No-verdict fallback for the "Auto" rung (no explicit pick, cerebellum
+ * selector absent/unconfigured/failed). Compatibility contract for the
+ * 'default' sentinel: rows written before effort-auto stored it as an
+ * explicit "Default" pick whose whole point was "model default, NEVER the
+ * bot-brain/global rungs" (it was created to suppress a brain pinned to
+ * high). A sentinel-origin session therefore degrades to the model default,
+ * not the brain/global chain — the brain-high effort those users explicitly
+ * avoided can never silently return. Plain-null sessions (user never picked)
+ * keep the historical chain: brain effort, else global (brain-less only),
+ * else model default. Assistant mode keeps its no-reasoning promise first.
+ */
+function resolveAutoEffortFallback(input: AutoEffortFallbackInput): LlmEffortLevel | null {
+  if (input.assistantMode) {
+    return 'off';
+  }
+  if (input.sentinelDefault) {
+    return null;
+  }
+  return toLlmEffortLevel(
+    input.brainEffort
+    ?? (input.hasBrain ? null : input.globalEffort)
+    ?? input.modelDefault,
+  );
+}
+export { resolveAutoEffortFallback };
+
 function findSkillsMarkerIndex(value: string): number {
   return value.toLowerCase().lastIndexOf(SKILLS_MARKER);
 }
@@ -9427,9 +9492,12 @@ export class CoworkRunner extends EventEmitter {
       // round-trip overlaps that window's own cerebellum calls — by the time
       // the effort resolution below runs, the verdict is typically already in
       // hand and the turn start pays no extra latency.
-      // resolveEffectiveEffortRung: the picker's "Auto" is stored as the
-      // string 'default' — that IS the auto path, not an explicit pick.
-      const effectiveEffortRung = resolveEffectiveEffortRung(activeSession.effortOverride)
+      // resolveEffectiveEffort: the picker's "Auto" is stored as the
+      // string 'default' — that IS the auto path, not an explicit pick. The
+      // sentinelDefault flag distinguishes it from a plain null (never
+      // picked) for the no-verdict fallback below.
+      const { rung: effectiveEffortRung, sentinelDefault: effortSentinelDefault } =
+        resolveEffectiveEffort(activeSession.effortOverride)
       // Turn acknowledgment fires EARLY with the best tier known without any
       // round-trip: the explicit pick's tier when set, else generic. This
       // covers cold-start windows (the free relay's first key bootstrap has
@@ -9480,7 +9548,10 @@ export class CoworkRunner extends EventEmitter {
       // default"), then the persisted global default for brain-less sessions,
       // then the per-model default. DSH previously dropped this, so the
       // runtime always used the provider default (thinking ON, no
-      // reasoning_effort).
+      // reasoning_effort). The auto rung's no-verdict fallback carves out one
+      // exception: a 'default'-sentinel session degrades to the MODEL DEFAULT,
+      // never the brain/global rungs (resolveAutoEffortFallback — compat with
+      // the pre-auto "Default" pick's promise).
       const modelOptions = resolveModelOptions(route.model);
       // Official DeepSeek rides the first-party dsh-llm-deepseek adapter under
       // its own route key; everything else — anthropic-format deepseek relays
@@ -9551,11 +9622,14 @@ export class CoworkRunner extends EventEmitter {
       const dshReasoningEffort = mapDshReasoningEffort(
         sessionEffortPicked
           ? toLlmEffortLevel(effectiveEffortRung)
-          : autoEffortRung ?? (assistantMode
-            ? 'off'
-            : toLlmEffortLevel(
-              automationBrain?.effort
-              ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? modelOptions?.reasoningEffort)),
+          : autoEffortRung ?? resolveAutoEffortFallback({
+            sentinelDefault: effortSentinelDefault,
+            assistantMode,
+            brainEffort: automationBrain?.effort,
+            hasBrain: automationBrain != null,
+            globalEffort: getPersistedCoworkEffortLevel(),
+            modelDefault: modelOptions?.reasoningEffort,
+          }),
         sessionEffortPicked || autoEffortRung != null || !assistantMode
           ? activeSession.thinkingOverride ?? modelOptions?.thinking
           : undefined,
@@ -9736,11 +9810,14 @@ export class CoworkRunner extends EventEmitter {
           turnReasoningEffort = mapDshReasoningEffort(
             sessionEffortPicked
               ? toLlmEffortLevel(effectiveEffortRung)
-              : autoEffortRung ?? (assistantMode
-                ? 'off'
-                : toLlmEffortLevel(
-                  automationBrain?.fallbackEffort
-                    ?? (automationBrain ? null : getPersistedCoworkEffortLevel()) ?? fallbackModelOptions?.reasoningEffort)),
+              : autoEffortRung ?? resolveAutoEffortFallback({
+                sentinelDefault: effortSentinelDefault,
+                assistantMode,
+                brainEffort: automationBrain?.fallbackEffort,
+                hasBrain: automationBrain != null,
+                globalEffort: getPersistedCoworkEffortLevel(),
+                modelDefault: fallbackModelOptions?.reasoningEffort,
+              }),
             sessionEffortPicked || autoEffortRung != null || !assistantMode
               ? activeSession.thinkingOverride ?? fallbackModelOptions?.thinking
               : undefined,
