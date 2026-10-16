@@ -303,7 +303,12 @@ import {
 // bd646510/c3419940, where both bounded calls outlasted every abort budget
 // while the process was starved). The underlying calls keep their own abort
 // budgets and settle in the background; only the WAITING stops early.
-const CEREBELLUM_TURN_DECISION_RACE_BUDGET_MS = 600;
+// Bundle budget 1000ms (owner call, same day): the relay's real-world
+// latency is ~750-1000ms even when healthy (the 217-412ms server baseline
+// excludes the network leg), so a 600ms budget degraded the cerebellum on
+// most healthy turns; 1000ms keeps the enhancement live for them while a
+// genuine stall still degrades inside ~1s.
+const CEREBELLUM_TURN_DECISION_RACE_BUDGET_MS = 1000;
 const CEREBELLUM_EFFORT_RACE_BUDGET_MS = 400;
 
 /** Sentinel resolved by raceTurnEnhancementBudget when the budget lapses. */
