@@ -15,7 +15,7 @@
 import { listPinsByPath, DEFAULT_MANAPI_BASE_URL } from './manapiPinService';
 import { restoreMetabotFromMnemonicCore } from './metabotRestoreService';
 import { decryptJson, deriveBackupKey, objectId } from './chainBackupCrypto';
-import { importBackupObjects, rebuildChainBackupStateFromManifest, type ChainBackupObject } from './chainBackupData';
+import { importBackupObjects, rebuildChainBackupStateFromManifest, selectLatestBackupObjects, type ChainBackupObject } from './chainBackupData';
 import {
   CHAIN_BACKUP_CIPHER,
   CHAIN_BACKUP_KDF,
@@ -334,6 +334,12 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
         continue;
       }
 
+      // One final version per row: segments arrive oldest-first and in-place
+      // edits re-publish the same row id, so without this the import's
+      // first-wins semantics would restore the OLDEST snapshot of every
+      // edited row, and rows deleted after their snapshot would resurrect.
+      const latestObjects = selectLatestBackupObjects(objects);
+
       // Skeleton: reuse the local row when the bot already exists here.
       emit({ phase: 'skeleton', botName: entry.name, botIndex: i, botCount: entries.length });
       let metabot: Metabot | null = metabotStore
@@ -341,7 +347,7 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
         .find((m) => (m.globalmetaid ?? '').trim() === entry.globalMetaId) ?? null;
 
       if (!metabot) {
-        const envelopeObj = objects.find((obj) => obj.kind === 'key_envelope');
+        const envelopeObj = latestObjects.find((obj) => obj.kind === 'key_envelope');
         const mnemonic = typeof envelopeObj?.data?.mnemonic === 'string' ? envelopeObj.data.mnemonic : '';
         if (!mnemonic) {
           botResult.error = 'KEY_ENVELOPE_MISSING';
@@ -364,7 +370,7 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
       }
 
       emit({ phase: 'import', botName: entry.name, botIndex: i, botCount: entries.length });
-      const { imported, skipped } = importBackupObjects(db, metabot.id, objects);
+      const { imported, skipped } = importBackupObjects(db, metabot.id, latestObjects);
       botResult.imported = imported;
       botResult.skipped = skipped;
 

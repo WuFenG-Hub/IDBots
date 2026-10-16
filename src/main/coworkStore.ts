@@ -17,6 +17,7 @@ import {
 } from './libs/coworkMemoryJudge';
 import { evaluateConversationMemoryQuality } from './libs/coworkMemoryQuality';
 import { stripLoneSurrogates, truncateUtf16Units } from './libs/llmSafeText';
+import { recordChainBackupTombstones } from './libs/chainBackupTombstones';
 import {
   parseSessionGoal,
   serializeSessionGoal,
@@ -8959,7 +8960,9 @@ export class CoworkStore implements MemoryBackend {
    * The one low-risk physical delete in the memory layer: tombstones
    * (status='deleted') older than the grace period are removed together with
    * their source rows. They were already deleted content; the grace window
-   * exists only so recent deletions stay undoable.
+   * exists only so recent deletions stay undoable. Each purged id is recorded
+   * in the chain-backup tombstone ledger first so the deletion also propagates
+   * to future restores.
    */
   purgeDeletedMemoryTombstones(input: {
     cutoffMs: number;
@@ -8972,16 +8975,24 @@ export class CoworkStore implements MemoryBackend {
     const metabotExclusion = excluded.length > 0
       ? ` AND metabot_id NOT IN (${excluded.map(() => '?').join(', ')})`
       : '';
-    const ids = this.getAll<{ id: string }>(
-      `SELECT id FROM user_memories
+    const tombstoneRows = this.getAll<{ id: string; metabot_id: number }>(
+      `SELECT id, metabot_id FROM user_memories
        WHERE status = 'deleted' AND updated_at < ?${metabotExclusion}
        ORDER BY updated_at ASC
        LIMIT ?`,
       [cutoff, ...excluded, limit],
-    ).map((row) => row.id);
+    );
+    const ids = tombstoneRows.map((row) => row.id);
     if (ids.length === 0) return 0;
     this.db.run('BEGIN IMMEDIATE');
     try {
+      // Ledger first: a purged row leaves the extraction scan, and only this
+      // record stops its last chain-backup snapshot from resurrecting on a
+      // restore.
+      recordChainBackupTombstones(
+        this.db,
+        tombstoneRows.map((row) => ({ kind: 'memory' as const, ref: row.id, metabotId: row.metabot_id })),
+      );
       for (let offset = 0; offset < ids.length; offset += 500) {
         const chunk = ids.slice(offset, offset + 500);
         this.db.run(

@@ -6,17 +6,23 @@
  * Whitelist (MVP = L0 + L3): user_memories (+sources), metabot_daily_summaries,
  * metabot_weekly_summaries, metaid_knowledge_entries (+revisions),
  * metaid_knowledge_procedures, and the Bot's wallet mnemonic (key envelope).
+ * Deletions ride as minimal tombstone objects (soft-deleted memories from the
+ * table, hard deletes from the chain_backup_tombstones ledger) so restore can
+ * keep the newest version of every row instead of resurrecting old ones.
  * NEVER add user_identity, kv, im_config or raw metabot_wallets rows here.
  */
 
 import { objectId } from './chainBackupCrypto';
+import { listChainBackupTombstones } from '../libs/chainBackupTombstones';
 import type { SqliteDatabase } from '../sqliteTypes';
 
 export type ChainBackupObjectKind =
   | 'memory'
+  | 'memory_tombstone'
   | 'dream_daily'
   | 'dream_weekly'
   | 'knowledge'
+  | 'knowledge_tombstone'
   | 'knowledge_revision'
   | 'knowledge_procedure'
   | 'key_envelope';
@@ -90,11 +96,83 @@ export function extractBackupObjects(
     objects.push(makeObject('knowledge_procedure', row));
   }
 
+  // Deletion tombstones. The manifest only ever grows, so a live snapshot
+  // published earlier never disappears on its own; without a tombstone newer
+  // than it, a restore would resurrect the row. Soft-deleted memories are
+  // read straight from the table (which keeps the deleted→restored rollback
+  // transition correct); rows that left through a hard delete ride the
+  // chain_backup_tombstones ledger.
+  for (const row of queryRows(
+    db,
+    `SELECT id, updated_at FROM user_memories WHERE metabot_id = ? AND status = 'deleted'`,
+    [metabotId],
+  )) {
+    objects.push(makeObject('memory_tombstone', { ref: row.id, deleted_at: row.updated_at ?? 0 }));
+  }
+  for (const tombstone of listChainBackupTombstones(db, metabotId)) {
+    objects.push(makeObject(
+      tombstone.kind === 'knowledge' ? 'knowledge_tombstone' : 'memory_tombstone',
+      { ref: tombstone.ref, deleted_at: tombstone.deleted_at },
+    ));
+  }
+
   if (wallet?.mnemonic?.trim()) {
     objects.push(makeObject('key_envelope', { mnemonic: wallet.mnemonic.trim(), path: wallet.path }));
   }
 
   return objects;
+}
+
+/**
+ * Resolve one final version per logical row from every object ever published
+ * for a Bot. In-place edits keep the row's stable id, so an edited row (or a
+ * re-dreamed summary) exists once per published version across the growing
+ * manifest; a tombstone is the row's deletion marker. Input order is manifest
+ * order (oldest segment first), so the LAST occurrence of each row key is the
+ * newest published version. The newest tombstone suppresses the row; anything
+ * older than the newest live version is dropped. Objects that carry no stable
+ * row id never collapse. This is what stops a restore from resurrecting the
+ * oldest snapshot of every edited row and every deleted row.
+ */
+export function selectLatestBackupObjects(objects: ChainBackupObject[]): ChainBackupObject[] {
+  const rowKeyOf = (obj: ChainBackupObject): string => {
+    const stableId = typeof obj.data?.id === 'string' && obj.data.id.trim() ? obj.data.id.trim() : null;
+    switch (obj.kind) {
+      case 'memory':
+        return stableId ? `memory:${stableId}` : `memory@${obj.id}`;
+      case 'memory_tombstone': {
+        const ref = typeof obj.data?.ref === 'string' && obj.data.ref.trim() ? obj.data.ref.trim() : null;
+        return ref ? `memory:${ref}` : `memory_tombstone@${obj.id}`;
+      }
+      case 'dream_daily':
+        return stableId ? `dream_daily:${stableId}` : `dream_daily@${obj.id}`;
+      case 'dream_weekly':
+        return stableId ? `dream_weekly:${stableId}` : `dream_weekly@${obj.id}`;
+      case 'knowledge':
+        return stableId ? `knowledge:${stableId}` : `knowledge@${obj.id}`;
+      case 'knowledge_tombstone': {
+        const ref = typeof obj.data?.ref === 'string' && obj.data.ref.trim() ? obj.data.ref.trim() : null;
+        return ref ? `knowledge:${ref}` : `knowledge_tombstone@${obj.id}`;
+      }
+      case 'knowledge_procedure':
+        return stableId ? `knowledge_procedure:${stableId}` : `knowledge_procedure@${obj.id}`;
+      case 'key_envelope':
+        return 'key_envelope';
+      default:
+        return `unknown:${obj.kind}:${obj.id}`;
+    }
+  };
+  const lastIndexByKey = new Map<string, number>();
+  objects.forEach((obj, index) => {
+    lastIndexByKey.set(rowKeyOf(obj), index);
+  });
+  const result: ChainBackupObject[] = [];
+  objects.forEach((obj, index) => {
+    if (lastIndexByKey.get(rowKeyOf(obj)) !== index) return;
+    if (obj.kind === 'memory_tombstone' || obj.kind === 'knowledge_tombstone') return;
+    result.push(obj);
+  });
+  return result;
 }
 
 // ---------------------------------------------------------------------------
