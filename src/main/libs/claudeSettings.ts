@@ -553,6 +553,20 @@ export function getCurrentApiConfig(target: OpenAICompatProxyTarget = 'local'): 
 }
 
 /**
+ * Raw provider catalog entries (key → enabled/baseUrl/apiKey), for callers
+ * that must scan the catalog itself rather than resolve one route (e.g. the
+ * DSH hub seeding its web-search credential at construction). Empty object
+ * when the store is not initialized.
+ */
+export function getAppConfigProviders(): Record<
+  string,
+  { enabled?: boolean; apiKey?: string | null; baseUrl?: string | null } | undefined
+> {
+  const appConfig = getStore()?.get<AppConfig>('app_config');
+  return appConfig?.providers ?? {};
+}
+
+/**
  * Direct-upstream provider route for the DSH kernel (Phase 1 M5): same
  * provider matching as the Claude path, but WITHOUT the OpenAI-compat proxy —
  * the DSH runtime speaks the provider's native protocol directly, so this
