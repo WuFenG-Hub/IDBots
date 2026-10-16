@@ -317,6 +317,18 @@ const TWIN_DELEGATED_CARD_IDS: readonly string[] = [
   'a06f8480-ad1a-4ea4-8d3e-bc4f6a490ed2', // 2026-09-19 midday — the backfill-extension card itself, created on the v1.4 binary after the list was first frozen
 ];
 
+/**
+ * kv keys whose every overwrite is snapshotted into rotating backup slots
+ * before the write lands (2026-10-16 missing-models incident class: a
+ * defaults-based overwrite of app_config destroyed every LLM provider
+ * credential, and the previous value survived only as luck-of-the-freelist
+ * page fragments). app_config is the one row whose loss strands the user;
+ * the last KV_ROTATING_BACKUP_SLOTS raw values live under
+ * `<key>.bak.<writtenAtMs>` and are directly restorable from kv.
+ */
+const KV_ROTATING_BACKUP_KEYS = new Set(['app_config']);
+const KV_ROTATING_BACKUP_SLOTS = 5;
+
 export class SqliteStore {
   private db: SqliteDatabase;
   private dbPath: string;
@@ -4182,6 +4194,9 @@ export class SqliteStore {
     this.assertOpen();
     const oldValue = this.get<T>(key);
     const now = Date.now();
+    if (KV_ROTATING_BACKUP_KEYS.has(key)) {
+      this.backupProtectedKeyValue(key, now);
+    }
     this.db.run(`
       INSERT INTO kv (key, value, updated_at)
       VALUES (?, ?, ?)
@@ -4191,6 +4206,38 @@ export class SqliteStore {
     `, [key, JSON.stringify(value), now]);
     this.save();
     this.emitter.emit('change', { key, newValue: value, oldValue } as ChangePayload<T>);
+  }
+
+  /**
+   * Copy the RAW previous value of a protected key into a rotating backup
+   * slot before an overwrite lands. Raw string, not a re-serialization — an
+   * unparseable current value (transient corruption) is preserved verbatim,
+   * which is exactly the state worth keeping for a later restore. Direct
+   * db.run: backups are infrastructure, not change events, and must not
+   * recurse into set().
+   */
+  private backupProtectedKeyValue(key: string, now: number): void {
+    const raw = this.db.exec('SELECT value FROM kv WHERE key = ?', [key]);
+    const rawValue = raw[0]?.values[0]?.[0];
+    if (typeof rawValue !== 'string' || rawValue.length === 0) {
+      return;
+    }
+    this.db.run(`
+      INSERT INTO kv (key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `, [`${key}.bak.${now}`, rawValue, now]);
+    this.db.run(`
+      DELETE FROM kv
+      WHERE key LIKE '${key}.bak.%'
+        AND key NOT IN (
+          SELECT key FROM kv WHERE key LIKE '${key}.bak.%'
+          ORDER BY updated_at DESC, key DESC
+          LIMIT ${KV_ROTATING_BACKUP_SLOTS}
+        )
+    `);
   }
 
   delete(key: string): void {

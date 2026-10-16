@@ -88,6 +88,7 @@ tests/*
 !tests/rsiLadderRegistryCli.test.ts
 !tests/rsiLadderRegistryE2e.test.ts
 !tests/mvcSponsorCircuitBreaker.test.mjs
+!tests/sqliteStoreKvBackup.test.mjs
 !tests/groupTaskChatMode.test.mjs
 !tests/devWindowLoadRetry.test.mjs
 !tests/runtimeDependencyContract.test.mjs
