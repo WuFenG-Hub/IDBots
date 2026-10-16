@@ -54,6 +54,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // API设置
     apiKey: 'API Key',
     apiKeyPlaceholder: '输入你的 API Key',
+    showSecret: '显示',
+    hideSecret: '隐藏',
     providerRecommendedBadge: '推荐',
     deepseekApiKeyHint: '第一次使用?请到 DeepSeek 官网申请 API Key:',
     commandcodeApiKeyHint: '第一次使用?请到 Command Code Studio 创建 API Key:',
@@ -3101,6 +3103,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // API Settings
     apiKey: 'API Key',
     apiKeyPlaceholder: 'Enter your API Key',
+    showSecret: 'Show',
+    hideSecret: 'Hide',
     providerRecommendedBadge: 'Recommended',
     deepseekApiKeyHint: 'First time here? Get your DeepSeek API key from the official website:',
     commandcodeApiKeyHint: 'First time here? Create your API key in Command Code Studio:',
