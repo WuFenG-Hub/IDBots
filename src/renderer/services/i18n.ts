@@ -2066,9 +2066,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     preventDeviceSleepDescription: 'IDBots 工作期间保持设备唤醒',
 
     // 定时任务
-    // Group Tasks (群任务)
-    groupTasks: '群任务',
-    groupTasksTitle: '群任务',
+    // Multi-Bot Tasks (多人任务)
+    groupTasks: '多人任务',
+    groupTasksTitle: '多人任务',
     groupTasksNewTask: '新建群任务',
     groupTasksEmptyState: '暂无群任务',
     groupTasksEmptyHint: '创建群任务，让多个 Bot 在链上群组中协作完成目标',
@@ -2078,6 +2078,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     groupTasksFilterAll: '全部',
     groupTasksModeLocal: '本地群任务',
     groupTasksModeOpenTeam: 'Open Team',
+    groupTasksModeMetaTask: 'MetaTask',
     groupTasksTaskBadgeLocal: '本地',
     groupTasksTaskBadgeOpenTeam: 'Open Team',
     groupTasksOpenTeamInitiated: '发起的 Open Team',
@@ -2266,10 +2267,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     openTeamCollabLeftAt: '退出于',
     openTeamCollabLeftReason: '原因',
     openTeamCollabRemovedNotice: '你的 Bot {bot} 已被移出任务「{title}」{reason}',
-    // 跟踪任务页 L1 Tab 标签
+    // 长期任务页 L1 Tab 标签
     'trackedTask.tab.longTerm': '长期任务',
     'trackedTask.tab.scheduled': '定时任务',
-    'trackedTask.tab.metaTask': 'MetaTask',
     // MetaTask Tab（链上多方协作，P1 只读投影）
     'metatask.view.square': '任务广场',
     'metatask.view.mine': '我的参与',
@@ -2546,8 +2546,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     'longTermTask.collapse': '收起',
     'longTermTask.origin.label': '所属长期任务',
     'longTermTask.origin.open': '打开看板里的这个任务',
-    scheduledTasks: '跟踪任务',
-    scheduledTasksTitle: '跟踪任务',
+    scheduledTasks: '长期任务',
+    scheduledTasksTitle: '长期任务',
     scheduledTasksNewTask: '新建任务',
     scheduledTasksEmptyState: '暂无定时任务',
     scheduledTasksEmptyHint: '创建定时任务，让 AI 按计划自动执行',
@@ -5112,9 +5112,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     preventDeviceSleep: 'Prevent Device Sleep',
     preventDeviceSleepDescription: 'Keep your device awake while IDBots is working',
 
-    // Group Tasks
-    groupTasks: 'Group Tasks',
-    groupTasksTitle: 'Group Tasks',
+    // Multi-Bot Tasks
+    groupTasks: 'Multi-Bot Tasks',
+    groupTasksTitle: 'Multi-Bot Tasks',
     groupTasksNewTask: 'New Group Task',
     groupTasksEmptyState: 'No group tasks',
     groupTasksEmptyHint: 'Create a group task so multiple bots can coordinate in an on-chain group toward a goal',
@@ -5124,6 +5124,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     groupTasksFilterAll: 'All',
     groupTasksModeLocal: 'Local Group Tasks',
     groupTasksModeOpenTeam: 'Open Team',
+    groupTasksModeMetaTask: 'MetaTask',
     groupTasksTaskBadgeLocal: 'Local',
     groupTasksTaskBadgeOpenTeam: 'Open Team',
     groupTasksOpenTeamInitiated: 'Initiated Open Team',
@@ -5313,10 +5314,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     openTeamCollabLeftReason: 'Reason',
     openTeamCollabRemovedNotice: 'Your bot {bot} was removed from "{title}"{reason}',
 
-    // Tracking page L1 tab labels
+    // Long-term tasks page L1 tab labels
     'trackedTask.tab.longTerm': 'Long-term',
     'trackedTask.tab.scheduled': 'Scheduled',
-    'trackedTask.tab.metaTask': 'MetaTask',
     // MetaTask tab (on-chain multi-bot collaboration, P1 read-only projection)
     'metatask.view.square': 'Square',
     'metatask.view.mine': 'My participation',
@@ -5593,9 +5593,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     'longTermTask.collapse': 'Collapse',
     'longTermTask.origin.label': 'Long-term task',
     'longTermTask.origin.open': 'Open this task on the board',
-    // Tracking Tasks (formerly Scheduled Tasks)
-    scheduledTasks: 'Tracking Tasks',
-    scheduledTasksTitle: 'Tracking Tasks',
+    // Long-term Tasks (formerly Scheduled Tasks / Tracking Tasks)
+    scheduledTasks: 'Long-term Tasks',
+    scheduledTasksTitle: 'Long-term Tasks',
     scheduledTasksNewTask: 'New Task',
     scheduledTasksEmptyState: 'No scheduled tasks',
     scheduledTasksEmptyHint: 'Create scheduled tasks to automate AI execution on a schedule',

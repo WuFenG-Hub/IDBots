@@ -32,6 +32,7 @@ import { UserGroupIcon, EllipsisHorizontalIcon } from '@heroicons/react/24/outli
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
+import MetaTaskBoard from '../metatask/MetaTaskBoard';
 
 interface GroupTasksViewProps {
   isSidebarCollapsed?: boolean;
@@ -48,14 +49,15 @@ const FILTER_TABS: Array<{ id: GroupTaskListTab; labelKey: string }> = [
   { id: 'all', labelKey: 'groupTasksFilterAll' },
 ];
 
-/** Home-page mode: tasks whose every seat is a local bot vs OpenTeam tasks. */
-type GroupTaskHomeMode = 'local' | 'openTeam';
+/** Home-page tab: local group tasks, OpenTeam tasks, or the on-chain MetaTask board. */
+type GroupTaskHomeMode = 'local' | 'openTeam' | 'metaTask';
 /** OpenTeam sub-tab: initiated here (remote invitees) vs joined remotely. */
 type OpenTeamListTab = 'initiated' | 'joined';
 
 const MODE_TABS: Array<{ id: GroupTaskHomeMode; labelKey: string }> = [
   { id: 'local', labelKey: 'groupTasksModeLocal' },
   { id: 'openTeam', labelKey: 'groupTasksModeOpenTeam' },
+  { id: 'metaTask', labelKey: 'groupTasksModeMetaTask' },
 ];
 
 const OPEN_TEAM_TABS: Array<{ id: OpenTeamListTab; labelKey: string }> = [
@@ -277,7 +279,7 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
     );
   }
 
-  const subTabs = mode === 'local' ? FILTER_TABS : OPEN_TEAM_TABS;
+  const subTabs = mode === 'local' ? FILTER_TABS : mode === 'openTeam' ? OPEN_TEAM_TABS : [];
   const activeSubTab = mode === 'local' ? activeTab : openTeamTab;
   const setActiveSubTab = (id: string) => {
     if (mode === 'local') {
@@ -330,9 +332,9 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
         <WindowTitleBar inline />
       </div>
 
-      {/* Mode toggle (local vs OpenTeam) + New Group Task button on the same row.
+      {/* Mode tabs: local group tasks | Open Team | MetaTask.
           Segmented-control style mirrors the Settings Skills/MCP toggle. */}
-      <div className="flex items-center justify-between border-b dark:border-claude-darkBorder border-claude-border px-4 py-1.5 shrink-0">
+      <div className="flex items-center border-b dark:border-claude-darkBorder border-claude-border px-4 py-1.5 shrink-0">
         <div className="inline-flex items-center rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface p-1">
           {MODE_TABS.map((tab) => (
             <button
@@ -350,41 +352,51 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
             </button>
           ))}
         </div>
-        {onNewGroupTask && (
-          <button
-            type="button"
-            onClick={onNewGroupTask}
-            className="btn-idchat-primary-filled px-3 py-1 text-sm font-medium"
-          >
-            {i18nService.t('groupTasksNewTask')}
-          </button>
-        )}
       </div>
 
-      {/* Sub tabs: status tabs under Local; initiated/joined under OpenTeam */}
-      <div className="flex items-center border-b dark:border-claude-darkBorder border-claude-border px-4 shrink-0">
-        {subTabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => setActiveSubTab(tab.id)}
-            className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
-              activeSubTab === tab.id
-                ? 'dark:text-claude-darkText text-claude-text'
-                : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
-            }`}
-          >
-            {i18nService.t(tab.labelKey)}
-            {activeSubTab === tab.id && (
-              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
-            )}
-          </button>
-        ))}
-      </div>
+      {/* Per-tab sub row, inside the tab's own container (not on the mode-tab
+          bar): status filters plus the New Group Task button under Local,
+          initiated/joined under OpenTeam; the MetaTask tab brings its own
+          header, so it renders no sub row here. */}
+      {mode !== 'metaTask' && (
+        <div className="flex items-center justify-between border-b dark:border-claude-darkBorder border-claude-border px-4 shrink-0">
+          <div className="flex">
+            {subTabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveSubTab(tab.id)}
+                className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
+                  activeSubTab === tab.id
+                    ? 'dark:text-claude-darkText text-claude-text'
+                    : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
+                }`}
+              >
+                {i18nService.t(tab.labelKey)}
+                {activeSubTab === tab.id && (
+                  <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
+                )}
+              </button>
+            ))}
+          </div>
+          {mode === 'local' && onNewGroupTask && (
+            <button
+              type="button"
+              onClick={onNewGroupTask}
+              className="btn-idchat-primary-filled px-3 py-1 text-sm font-medium"
+            >
+              {i18nService.t('groupTasksNewTask')}
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto">
-        {mode === 'openTeam' && openTeamTab === 'joined' ? (
+      <div className={`flex-1 min-h-0 ${mode === 'metaTask' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+        {mode === 'metaTask' ? (
+          /* On-chain MetaTask board: self-contained (own views, refresh, detail drill-in). */
+          <MetaTaskBoard />
+        ) : mode === 'openTeam' && openTeamTab === 'joined' ? (
           <>
             {/* R4: one-time dismissible notice when a poll observes an active -> left flip. */}
             {removedNotices.map((notice) => {
