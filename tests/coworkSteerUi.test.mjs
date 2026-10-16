@@ -61,11 +61,20 @@ test('streaming composer derives the stop/send-steer truth table from text', asy
   );
 });
 
-test('running composer keeps dynamic configuration disabled and sends trimmed text only', () => {
+test('running composer keeps dynamic configuration disabled and sends the trimmed draft', () => {
+  // Session configuration (folder, permission mode, model/skill chips) stays
+  // frozen while a turn streams…
   assert.match(inputSource, /disabled=\{disabled \|\| isStreaming\}/);
   assert.match(inputSource, /coworkSteerPlaceholder/);
-  assert.match(inputSource, /isStreaming\s*\?\s*trimmedValue/);
   assert.match(inputSource, /if \(isStreaming && !trimmedValue\) return/);
+  // …while the submitted prompt is composed by ONE rule on both branches. The
+  // old `isStreaming ? trimmedValue` fork is gone on purpose: it composed the
+  // steering prompt from the text alone, so an attachment inserted mid-run was
+  // dropped on send. Attachments now ride the same manifest as an idle send,
+  // gated by `steerDisabled` (coworkComposerAttachments.ts) rather than by
+  // `isStreaming`.
+  assert.match(inputSource, /const \{ trimmedValue, finalPrompt \} = composeCoworkSubmitPrompt\(\{/);
+  assert.doesNotMatch(inputSource, /isStreaming\s*\?\s*trimmedValue/);
   assert.match(inputSource, /event\.key === 'Enter'[\s\S]*?handleSubmit\(\)/);
 });
 
