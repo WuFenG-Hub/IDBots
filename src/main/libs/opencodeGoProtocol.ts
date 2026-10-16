@@ -105,11 +105,19 @@ export function resolveOpenCodeGoApiFormat(input: OpenCodeGoApiFormatInput): Ope
 // `supportsStore` landed on the deepseek 'responses' provider entry →
 // "sets compat supportsStore, but its api is openai-responses" → every
 // opencode turn, deepseek included, died at boot). A corrected route therefore
-// rides a suffixed key ('opencode.oc'), giving each wire its own provider
-// entry, credential env var (dshProviderApiKeyEnv), and runtime slot. The dot
-// separator matches the automation-slot precedent ('.auto-bc'); the runtime
-// config's sanitizeRouteKey folds it to a dash ('opencode-oc'), which cannot
-// collide with the bare provider key.
+// rides a suffixed key ('opencode-oc'), giving each wire its own provider
+// entry, credential env var (dshProviderApiKeyEnv), and runtime slot.
+//
+// The separator MUST be sanitize-stable: the runtime config's sanitizeRouteKey
+// folds every char outside [a-zA-Z0-9_-] to '-', and the adapter registry is
+// keyed by the SANITIZED route while the host passes the provider key RAW to
+// runtime initialize and session/ensure. The original '.oc' separator folded
+// to '-oc' on the registry side but stayed '.oc' on the lookup side, so every
+// corrected-route boot died with `no adapter registered for provider
+// "opencode.oc"` (2026-10-16 incident, first real opencode+GLM chat). A dash
+// keeps the key identical on both sides. The credential env var is unchanged
+// (dshProviderApiKeyEnv folds '-' and '.' alike), and the runtime slot key
+// ('opencode-oc.auto-bc') stays filename-safe.
 const WIRE_ROUTE_KEY_SUFFIX: Record<OpenCodeGoApiFormat, string> = {
   openai: 'oc',
   responses: 'rs',
@@ -118,5 +126,5 @@ const WIRE_ROUTE_KEY_SUFFIX: Record<OpenCodeGoApiFormat, string> = {
 
 /** Runtime route key for a wire-corrected OpenCode Go gateway route. */
 export function openCodeGoWireRouteKey(providerKey: string, ridingApiFormat: OpenCodeGoApiFormat): string {
-  return `${providerKey}.${WIRE_ROUTE_KEY_SUFFIX[ridingApiFormat]}`;
+  return `${providerKey}-${WIRE_ROUTE_KEY_SUFFIX[ridingApiFormat]}`;
 }
