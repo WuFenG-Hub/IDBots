@@ -29,11 +29,14 @@
 //   hostTools?: [{ name, description, parameters }], // proxies bridged to the host
 //   mcpServers?: [{ name, transportType: 'stdio'|'sse'|'http', command?, args?, env?, url?, headers? }],
 //                                        // user MCP servers → dsh-mcp-client entries
-//   webSearch?: {                        // DeepSeek server-side web search (dsh-web trio):
-//     apiKeyEnv: string,                 //   env var name the host fills when spawning
-//     baseURL: string,                   //   Anthropic-compatible root incl. /v1 (/messages appended)
-//     model: string,                     //   model for the auxiliary search call
-//   },                                   //   mounted once the host has seen a DeepSeek provider
+//   webSearch?: {                        // DeepSeek web search + fetch. 0.2.1: the direct
+//     apiKeyEnv: string,                 //   Search/Fetch APIs (dsh-web-deepseek-api) are
+//     baseURL: string,                   //   the selected providers; baseURL stays the
+//     model: string,                     //   Anthropic root incl. /v1, the tools base is
+//   },                                   //   derived from it. model serves the legacy
+//                                        //   Messages-turn provider, kept mounted as the
+//                                        //   rollback path. Mounted once the host has
+//                                        //   seen an official DeepSeek provider
 //   workspace?: { cwd: string },       // mounts DSH-native bash/fs tools at cwd
 //   spill?: { maxInlineTokens?: number }, // 0.1.7 spill-policy cap in estimated tokens (default 2048;
 //                                        // workspace compositions only)
@@ -45,8 +48,9 @@
 //                                        //   zstd; the host migrates existing roots first)
 //   workspaceInstructions?: {          // AGENTS.md/CLAUDE.md discovery controls
 //     maxBytes?: number,               //   rendered baseline byte budget (default 65536)
-//     dshHome?: string,                //   user-global AGENTS.md home (default $DSH_HOME/~/.dsh)
-//   },
+//   },                                 //   0.2.1: the global-instruction homes resolve from
+//                                        //   the DSH_HOME / DSH_AGENTS_HOME child env (the
+//                                        //   dshHome config key was removed upstream)
 //   browserUse?: {                     // 0.1.7 experimental browser automation
 //     mode: 'launch'|'attach',         //   (dsh-browser-use + Playwright MCP provider):
 //     headless?: boolean,              //   launch starts one headless Chromium per
@@ -110,6 +114,19 @@ const deepSeekMessagesBaseURL = (baseUrl) => {
   base = base.replace(/\/anthropic$/i, '')
   base = base.replace(/\/v\d+$/i, '')
   return base.length > 0 ? `${base}/anthropic` : undefined
+}
+
+/** Derive the DeepSeek Search/Fetch API base (`<root>/v1/tools`) from the
+ *  Anthropic messages root the host seeds the web-search block with
+ *  (`<root>/anthropic/v1`; dsh-web-deepseek-api appends `/search` | `/fetch`).
+ *  An empty/unrecognized input omits the key so the package default
+ *  (https://api.deepseek.com/v1/tools) applies. */
+const deepSeekWebToolsBaseURL = (messagesBaseURL) => {
+  const root = String(messagesBaseURL ?? '').trim()
+    .replace(/\/+$/, '')
+    .replace(/\/anthropic(\/v\d+)?$/i, '')
+    .replace(/\/v\d+$/i, '')
+  return root.length > 0 ? `${root}/v1/tools` : undefined
 }
 
 /** Official adapter request-image budgets. These are IDBots-pinned caps
@@ -237,11 +254,14 @@ const nativeDeepSeekEntry = (provider) => ({
       // after the cached prefix instead of rewriting the leading system
       // message — keeps our per-turn prompt-sections updates cache-friendly.
       systemPromptUpdate: 'in-history',
-      // rc.2 tool-update mode: tool additions and removals are declared
-      // in history (mid-conversation-tool-changes beta) instead of
-      // rewriting the request header — plan mode toggles exit_plan_mode
-      // per turn, so this is the cache-friendly and removal-capable mode.
-      toolUpdate: 'in-history',
+      // DeepSeek-V4.1-Flash-1017's Messages endpoint accepts `tool_addition`
+      // blocks but REJECTS `tool_removal` (serde "unknown variant" 400) — the
+      // 'in-history' mode we used at 0.2.0-rc.2 emitted both and every turn
+      // with a tool-set change (plan mode toggles exit_plan_mode per turn)
+      // died at the API. 'addition-only' (also upstream's own default for
+      // deepseek-flash) keeps additions in history and handles removals by
+      // omitting the tool from declarations, which the endpoint accepts.
+      toolUpdate: 'addition-only',
       // 0.1.1 rejects image blocks unless the catalog entry lists `image`.
       ...(modelDeclaresImageInput(model) ? {
         inputModalities: model.input,
@@ -593,15 +613,30 @@ export function generateRuntimeConfig(input) {
     // as mcp__<serverName>__<rawName>. A bad entry (missing command/url,
     // unmatchable name) is skipped, not fatal — failOnStartupError stays off.
     ...mcpEntries(input.mcpServers),
-    // DeepSeek server-side web search (official dsh-web trio): the model-facing
-    // web_search tool backed by an auxiliary Anthropic-compatible Messages call
-    // carrying the native web_search_20250305 server tool. This is the one
-    // search path pi-ai cannot serve in the main conversation — its Responses
-    // tool converter only emits function/custom tools, never built-in server
-    // tools — so search rides the dedicated web seam instead. The API key
-    // never enters this file: it rides the child env under apiKeyEnv.
+    // DeepSeek web search + fetch (mounted once the host has seen an official
+    // DeepSeek provider). 0.2.1: the default providers are the direct
+    // Search/Fetch APIs — one plain HTTP call per op, no auxiliary model turn;
+    // the legacy Messages-turn provider (web_search_20250305 server tool) stays
+    // mounted as the rollback path. Either way search rides the dedicated web
+    // seam because pi-ai's Responses converter only emits function tools,
+    // never built-in server tools. The API key never enters this file: it
+    // rides the child env under apiKeyEnv.
     ...(input.webSearch ? [
-      { id: 'web', name: '@deepseek-ai/dsh-web', config: { searchProvider: 'deepseek-official' } },
+      {
+        id: 'web',
+        name: '@deepseek-ai/dsh-web',
+        config: { searchProvider: 'deepseek-search-api', fetchProvider: 'deepseek-fetch-api' },
+      },
+      {
+        id: 'web-deepseek-api',
+        name: '@deepseek-ai/dsh-web-deepseek-api',
+        config: {
+          apiKeyEnv: input.webSearch.apiKeyEnv,
+          ...(deepSeekWebToolsBaseURL(input.webSearch.baseURL) !== undefined
+            ? { baseURL: deepSeekWebToolsBaseURL(input.webSearch.baseURL) }
+            : {}),
+        },
+      },
       {
         id: 'web-search-deepseek',
         name: '@deepseek-ai/dsh-web-search-deepseek',
@@ -611,10 +646,11 @@ export function generateRuntimeConfig(input) {
           model: input.webSearch.model,
         },
       },
-      // fetch stays off (model-chosen URLs are an open SSRF surface upstream),
-      // and the search timeout widens to 60s because one search is a full
-      // model turn plus server-side retrieval — mirrors the official bundle.
-      { id: 'tool-web', name: '@deepseek-ai/dsh-tool-web', config: { fetch: false, searchTimeoutMs: 60000 } },
+      // web_fetch is on now that fetch rides DeepSeek's server-side Fetch API —
+      // its 403 policy rejects unsafe targets server-side, so the old
+      // local-fetch SSRF concern no longer applies. The 60s search timeout
+      // stays for the legacy provider's full-model-turn latency.
+      { id: 'tool-web', name: '@deepseek-ai/dsh-tool-web', config: { fetch: true, searchTimeoutMs: 60000 } },
     ] : []),
     // Model-facing subagent delegation (in-process spawn provider, foreground).
     { id: 'subagent', name: '@deepseek-ai/dsh-subagent' },
@@ -659,6 +695,17 @@ export function generateRuntimeConfig(input) {
         subagentModelSelection: subagentModelSelection.enabled && subagentModelSelection.allowedModels.length > 0,
       },
     },
+    // fs service + 0.2.1 working-directory are UNCONDITIONAL: dsh-subagent now
+    // hard-requires the workingDirectory service (static inject), which in
+    // turn injects fs + sessionProjections + systemPrompt. Without a workspace
+    // the jail root falls back to the session root; model-facing fs/bash tools
+    // stay workspace-gated below.
+    { id: 'fs-local', name: '@deepseek-ai/dsh-fs-local', config: { cwd: input.workspace?.cwd ?? input.sessionRoot } },
+    {
+      id: 'working-directory',
+      name: '@deepseek-ai/dsh-working-directory',
+      config: { defaultDirectory: input.workspace?.cwd ?? input.sessionRoot },
+    },
     ...(input.workspace ? [
       { id: 'shell-env', name: '@deepseek-ai/dsh-shell-env' },
       { id: 'subprocess', name: '@deepseek-ai/dsh-subprocess-local' },
@@ -695,7 +742,6 @@ export function generateRuntimeConfig(input) {
         // execution cwd is session.header.cwd, set by session/ensure.
         config: { cwd: input.workspace.cwd, timeoutMs: 60000 },
       },
-      { id: 'fs-local', name: '@deepseek-ai/dsh-fs-local', config: { cwd: input.workspace.cwd } },
       { id: 'fs-observation-policy', name: '@deepseek-ai/dsh-fs-observation-policy' },
       // Workspace instructions: discovers AGENTS.md/CLAUDE.md from the session
       // cwd (project root markers → root-to-cwd chain) and injects them as a
@@ -706,13 +752,13 @@ export function generateRuntimeConfig(input) {
       {
         id: 'agent-instructions',
         name: '@deepseek-ai/dsh-agent-instructions',
+        // 0.2.1 removed the dshHome config key: the user-global instruction
+        // homes resolve from the DSH_HOME / DSH_AGENTS_HOME child env, both
+        // pinned under userData by the host (see buildDshChildEnv).
         config: {
           maxBytes: Number.isFinite(input.workspaceInstructions?.maxBytes) && input.workspaceInstructions.maxBytes > 0
             ? input.workspaceInstructions.maxBytes
             : 65536,
-          ...(typeof input.workspaceInstructions?.dshHome === 'string' && input.workspaceInstructions.dshHome.length > 0
-            ? { dshHome: input.workspaceInstructions.dshHome }
-            : {}),
         },
       },
       { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' },

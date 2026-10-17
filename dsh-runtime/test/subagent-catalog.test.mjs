@@ -82,10 +82,16 @@ const main = async () => {
   const childId = catalogData.childId
   console.log('PASS  durable subagent/catalog event logged on the parent session')
 
-  // Wait for the child's report round-trip (notice turn) so the child
-  // transcript is complete on disk before runtime A dies.
+  // Wait for the child's report round-trip (notice turn) AND the child's own
+  // turn to settle: 0.2.1 delivers send_message straight into the parent inbox,
+  // so the parent's notice turn no longer implies the child finished — closing
+  // runtime A while the child still runs aborts it (kind:'parent') and its
+  // persisted transcript would lack the final reply.
+  const childSettled = waitFor((n) => n.method === 'session.event' && n.params.sessionId === childId
+    && n.params.event.type === 'turn/end', 40000, 'child turn end')
   await waitFor((n) => n.method === 'session.event' && n.params.sessionId === sessionId
     && n.params.event.type === 'turn/end' && n.params.event.data?.turn === 2, 40000, 'parent notice turn end')
+  await childSettled
 
   // Live list still answers (in-memory rows present on runtime A).
   const liveList = await clientA.request('idbots/subagents/list', { sessionId })

@@ -433,6 +433,8 @@ export function buildDshChildEnv(parts: {
   skillHostEnv?: Record<string, string>
   /** Absolute path used as DSH_HOME for the runtime process. */
   dshHome?: string
+  /** Absolute path used as DSH_AGENTS_HOME (0.2.1 global AGENTS.md home). */
+  dshAgentsHome?: string
 }): Record<string, string> {
   return {
     ...Object.fromEntries(
@@ -445,6 +447,11 @@ export function buildDshChildEnv(parts: {
     // id-reuse cache (llm-deepseek/files-v3.json) and any other kernel home
     // state live in app-managed storage instead of ~/.dsh.
     ...(parts.dshHome ? { DSH_HOME: parts.dshHome } : {}),
+    // 0.2.1: agent-instructions also reads a shared agents home (default
+    // ~/.agents) for global AGENTS.md — pin it under userData too, so an
+    // instruction file left by another harness cannot silently enter every
+    // bot session.
+    ...(parts.dshAgentsHome ? { DSH_AGENTS_HOME: parts.dshAgentsHome } : {}),
     ...(parts.skillHostEnv ?? {}),
   }
 }
@@ -1612,15 +1619,11 @@ export class DshTurnHub {
       // scoped registration) — keeping them out of the config is what stops
       // every new session's prompt from restarting this slot's runtime.
       workspace: slot.workspaceSeen ?? input.workspace,
-      // Pin the user-global AGENTS.md home to a controlled directory under
-      // userData: a global instruction file left over from another harness
-      // cannot silently enter every session. Since 0.1.7 the same directory
-      // is the runtime's real DSH_HOME (see buildDshChildEnv) — kernel home
-      // state like the Files-API image cache lands there too, which is fine:
-      // it stays app-managed either way.
-      ...(slot.workspaceSeen ?? input.workspace) ? {
-        workspaceInstructions: { dshHome: join(app.getPath('userData'), 'dsh-home') },
-      } : {},
+      // 0.2.1 removed the agent-instructions dshHome config key — the
+      // user-global AGENTS.md homes now resolve from the child env, where we
+      // pin both under userData (DSH_HOME + DSH_AGENTS_HOME below), so a
+      // global instruction file left over from another harness cannot
+      // silently enter every session.
       mcpServers: [...slot.mcpServersSeen.values()],
       ...(slot.browserUseSeen !== undefined ? { browserUse: slot.browserUseSeen } : {}),
       ...(slot.computerUseSeen ? { computerUse: true } : {}),
@@ -1644,6 +1647,7 @@ export class DshTurnHub {
         rpcAuthFile: getMetaidRpcTokenFilePath(app.getPath('userData')),
         skillHostEnv: this.opts.skillHostEnvProvider?.(),
         dshHome: join(app.getPath('userData'), 'dsh-home'),
+        dshAgentsHome: join(app.getPath('userData'), 'dsh-home', 'agents'),
       }),
     }
   }

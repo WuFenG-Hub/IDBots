@@ -51,7 +51,10 @@ record('generator: three apiFormats map to three pi-ai protocols',
 // only, so the generator normalizes any DeepSeek base URL onto the Messages
 // root (`<origin>/anthropic`) and declares systemPromptUpdate: in-history on
 // every catalog model (changed system snapshots append after the cached
-// prefix instead of rewriting the leading system message).
+// prefix instead of rewriting the leading system message). Since 0.2.1 the
+// tool-update mode is addition-only: the DeepSeek-V4.1-Flash-1017 endpoint
+// rejects `tool_removal` content blocks (accepting `tool_addition`), so
+// removals are handled by declaration omission instead of in-history blocks.
 // Since d80f0ad5 the DeepSeek V4 default output ceiling is 256K (NATIVE_
 // DEEPSEEK_DEFAULT_MAX_TOKENS), so the catalog entry below — which declares no
 // maxOutputTokens — rides 256000, not the old 32768.
@@ -65,7 +68,7 @@ record('generator: native DeepSeek route rides dsh-llm-deepseek (never pi-ai)',
   && nativeEntry.config.reasoningEffort === 'high'
   && nativeEntry.config.models[0].maxTokens === 256000
   && nativeEntry.config.models[0].systemPromptUpdate === 'in-history'
-  && nativeEntry.config.models[0].toolUpdate === 'in-history'
+  && nativeEntry.config.models[0].toolUpdate === 'addition-only'
   && piEntry.config.providers.opencode.models[0].maxTokens === 8192)
 const visionNative = generateRuntimeConfig({
   sessionRoot: '/tmp/x',
@@ -150,19 +153,36 @@ record('generator: sections config emitted', unit.some((e) => e.config?.sections
 record('generator: plugin paths are absolute (config location-independent)',
   unit.every((e) => !String(e.name).startsWith('./')))
 record('generator: no webSearch input → no web entries mounted',
-  !unit.some((e) => ['@deepseek-ai/dsh-web', '@deepseek-ai/dsh-web-search-deepseek', '@deepseek-ai/dsh-tool-web'].includes(e.name)))
+  !unit.some((e) => ['@deepseek-ai/dsh-web', '@deepseek-ai/dsh-web-deepseek-api', '@deepseek-ai/dsh-web-search-deepseek', '@deepseek-ai/dsh-tool-web'].includes(e.name)))
 const withWeb = generateRuntimeConfig({
   sessionRoot: '/tmp/x',
   providers: [{ key: 'deepseek', apiFormat: 'responses', baseUrl: 'https://api.deepseek.com', apiKeyEnv: 'K', models: [{ id: 'deepseek-v4-pro', contextWindow: 128000 }] }],
   webSearch: { apiKeyEnv: 'IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY', baseURL: 'https://api.deepseek.com/anthropic/v1', model: 'deepseek-v4-flash' },
 })
-record('generator: webSearch mounts the dsh-web trio (provider pinned, key via env name)',
-  withWeb.some((e) => e.id === 'web' && e.name === '@deepseek-ai/dsh-web' && e.config?.searchProvider === 'deepseek-official')
+record('generator: webSearch selects the 0.2.1 Search/Fetch API providers (legacy kept as rollback)',
+  withWeb.some((e) => e.id === 'web' && e.name === '@deepseek-ai/dsh-web'
+    && e.config?.searchProvider === 'deepseek-search-api'
+    && e.config?.fetchProvider === 'deepseek-fetch-api')
+  && withWeb.some((e) => e.id === 'web-deepseek-api' && e.name === '@deepseek-ai/dsh-web-deepseek-api'
+    && e.config?.apiKeyEnv === 'IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'
+    && e.config?.baseURL === 'https://api.deepseek.com/v1/tools')
   && withWeb.some((e) => e.id === 'web-search-deepseek' && e.name === '@deepseek-ai/dsh-web-search-deepseek'
     && e.config?.apiKeyEnv === 'IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'
     && e.config?.baseURL === 'https://api.deepseek.com/anthropic/v1'
     && e.config?.model === 'deepseek-v4-flash')
-  && withWeb.some((e) => e.id === 'tool-web' && e.name === '@deepseek-ai/dsh-tool-web' && e.config?.fetch === false && e.config?.searchTimeoutMs === 60000))
+  && withWeb.some((e) => e.id === 'tool-web' && e.name === '@deepseek-ai/dsh-tool-web' && e.config?.fetch === true && e.config?.searchTimeoutMs === 60000))
+// 0.2.1: the working-directory service is unconditional (dsh-subagent now
+// hard-requires it via static inject); with a workspace it takes the
+// workspace cwd, otherwise the session root.
+const withWorkspace = generateRuntimeConfig({
+  sessionRoot: '/tmp/x',
+  providers: [{ key: 'openai-gw', apiFormat: 'openai', baseUrl: 'https://a.example/v1', apiKeyEnv: 'K1', models: [{ id: 'm1', contextWindow: 64000 }] }],
+  sections: [],
+  workspace: { cwd: '/tmp/ws' },
+})
+record('generator: the 0.2.1 working-directory service is unconditional (subagent hard requirement)',
+  withWorkspace.some((e) => e.id === 'working-directory' && e.name === '@deepseek-ai/dsh-working-directory' && e.config?.defaultDirectory === '/tmp/ws')
+  && unit.some((e) => e.name === '@deepseek-ai/dsh-working-directory' && e.config?.defaultDirectory === '/tmp/x'))
 try {
   generateRuntimeConfig({ sessionRoot: '/tmp/x', providers: [{ key: 'bad', apiFormat: 'grpc', baseUrl: 'x', apiKeyEnv: 'K', models: [{ id: 'm', contextWindow: 1 }] }] })
   record('generator: unsupported apiFormat rejected', false)
@@ -274,14 +294,14 @@ const main = async () => {
     `${toolContent.length} chars`)
   record('E2E: full blob never left the runtime', !toolContent.includes('BIG-BLOB-END') || toolContent.length < 9000)
 
-  // Web-search round trip: the model-facing web_search tool (dsh-web trio)
-  // must reach the gateway's tool list, and executing it must POST the aux
-  // Anthropic-compatible search call (native web_search_20250305 server tool,
-  // key via the dedicated env var) and return formatted sources to the model.
+  // Web-search round trip: the model-facing web_search + web_fetch tools ride
+  // the tool list to the gateway, and executing web_search POSTs the 0.2.1
+  // Search API (direct HTTP, key via the dedicated env var) and returns
+  // formatted sources to the model.
   const firstTools = firstRequest?.body?.tools ?? []
-  record('E2E: web_search rides the tool list to the gateway (web_fetch absent)',
+  record('E2E: web_search + web_fetch ride the tool list to the gateway',
     firstTools.some((t) => t?.function?.name === 'web_search' || t?.name === 'web_search')
-    && !JSON.stringify(firstTools).includes('web_fetch'))
+    && JSON.stringify(firstTools).includes('web_fetch'))
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('timeout waiting for idle after big-tool turn')), 20000)
     const wait = (notification) => {
@@ -296,14 +316,12 @@ const main = async () => {
   const turn3 = waitForEvent((e) => e.type === 'turn/end')
   await client.prompt(sessionId, [{ type: 'text', text: 'CALL_WEB_SEARCH please' }])
   await turn3
-  const auxSearch = seen.find((r) => r.method === 'POST' && String(r.url).endsWith('/messages'))
-  record('E2E: aux search call hit the Anthropic-compat endpoint with the server tool + env key',
-    Boolean(auxSearch)
-    && auxSearch.body?.tools?.[0]?.type === 'web_search_20250305'
-    && auxSearch.body?.tools?.[0]?.max_uses === 5
-    && auxSearch.body?.model === 'mock-1'
-    && auxSearch.auth === 'Bearer sk-web-mock-456',
-    auxSearch ? `${auxSearch.url}` : 'no /messages request seen')
+  const apiSearch = seen.find((r) => r.method === 'POST' && String(r.url).endsWith('/v1/tools/search'))
+  record('E2E: search rides the 0.2.1 Search API endpoint with the env key',
+    Boolean(apiSearch)
+    && typeof apiSearch.body?.query === 'string' && apiSearch.body.query.length > 0
+    && apiSearch.auth === 'Bearer sk-web-mock-456',
+    apiSearch ? `${apiSearch.url}` : 'no /v1/tools/search request seen')
   const webCall = events.find((e) => e.type === 'tool/call' && e.data?.name === 'web_search')
   const webResult = webCall ? events.find((e) => e.type === 'tool/result' && e.data?.message?.toolCallId === webCall.data.callId) : undefined
   const webResultText = JSON.stringify(webResult ?? {})
@@ -314,6 +332,22 @@ const main = async () => {
   const webToolContent = typeof webToolMsg?.content === 'string' ? webToolMsg.content : JSON.stringify(webToolMsg?.content ?? '')
   record('E2E: follow-up request carries the web_search result to the model',
     webToolContent.includes('Sources:') && webToolContent.includes('nodejs.org'))
+
+  // Web-fetch round trip (0.2.1): web_fetch executes against the Fetch API
+  // (one direct POST, same env-carried key) and returns the page markdown.
+  const turnFetch = waitForEvent((e) => e.type === 'turn/end')
+  await client.prompt(sessionId, [{ type: 'text', text: 'CALL_WEB_FETCH please' }])
+  await turnFetch
+  const apiFetch = seen.find((r) => r.method === 'POST' && String(r.url).endsWith('/v1/tools/fetch'))
+  record('E2E: web_fetch rides the 0.2.1 Fetch API endpoint with the env key',
+    Boolean(apiFetch)
+    && apiFetch.body?.url === 'https://example.com/article'
+    && apiFetch.auth === 'Bearer sk-web-mock-456',
+    apiFetch ? `${apiFetch.url}` : 'no /v1/tools/fetch request seen')
+  const fetchCall = events.find((e) => e.type === 'tool/call' && e.data?.name === 'web_fetch')
+  const fetchResult = fetchCall ? events.find((e) => e.type === 'tool/result' && e.data?.message?.toolCallId === fetchCall.data.callId) : undefined
+  record('E2E: web_fetch tool executed with page content',
+    JSON.stringify(fetchResult ?? {}).includes('FETCHED_PAGE_CONTENT_MARKER'))
 
   // Web-search failure diagnostics (0.1.2): when the aux endpoint fails, the
   // tool result error must carry the actual endpoint and recovery guidance
@@ -329,7 +363,7 @@ const main = async () => {
     && e.data?.message?.toolCallId === failCall.data.callId && e.seq > failCall.seq) : undefined
   const failText = JSON.stringify(failResult ?? {})
   record('E2E: web_search failure reports the endpoint and guidance',
-    failText.includes('/anthropic/v1/messages')
+    failText.includes('/v1/tools/search')
       && failText.toLowerCase().includes('endpoint')
       && (failText.includes('overloaded') || failText.includes('503')),
     failText.slice(0, 120))
