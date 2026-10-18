@@ -43,7 +43,7 @@ import { rewriteWin32McpStdioServer } from './win32StdioCommand';
 import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
-import { CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isAuthDshTurnError, isBodyLimitDshTurnError, isConfigModelMissingDshTurnError, isMalformedToolCallDshTurnError, isOverflowDshTurnError, isQuotaDshTurnError, isTransientDshTurnError, MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT, OVERFLOW_TURN_RESUME_PROMPT, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
+import { CONFIG_HARD_FALLBACK_RESUME_PROMPT, CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isAuthDshTurnError, isBodyLimitDshTurnError, isConfigModelMissingDshTurnError, isMalformedToolCallDshTurnError, isOverflowDshTurnError, isQuotaDshTurnError, isTransientDshTurnError, isWontHealDshTurnError, MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT, OVERFLOW_TURN_RESUME_PROMPT, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
 import {
   filterSdkInternalDiagnostics,
   isSdkInternalDiagnostic,
@@ -454,6 +454,17 @@ const DSH_TRANSIENT_TURN_MAX_RESUMES = 3;
 // same dead route. The bot's configured fallback brain (fallback_llm_*) then
 // gets this many resume attempts on its own route before the turn fails.
 const DSH_FALLBACK_TURN_MAX_RESUMES = 2;
+// Route circuit breaker (2026-10-18 session 3144cb1a storm): when EVERY
+// available route keeps dying with won't-heal errors (auth rejected / model
+// not served / deterministic INVALID_REQUEST), each new inbound message still
+// burned a primary attempt plus the fallback attempt — 88 dead turns in 7
+// minutes there. After this many consecutive won't-heal settlements the
+// circuit opens: turns short-circuit without any model call until the
+// cooldown elapses, then one probe runs; a failed probe re-opens with a
+// doubled cooldown (capped). Any live terminal outcome resets the counter.
+const DSH_ROUTE_CIRCUIT_THRESHOLD = 3;
+const DSH_ROUTE_CIRCUIT_INITIAL_COOLDOWN_MS = 60_000;
+const DSH_ROUTE_CIRCUIT_MAX_COOLDOWN_MS = 30 * 60_000;
 const STREAMING_TEXT_MAX_CHARS = 120_000;
 const STREAMING_THINKING_MAX_CHARS = 60_000;
 const TOOL_RESULT_MAX_CHARS = 120_000;
@@ -648,6 +659,12 @@ export function computeDshStallDeadlineMs(input: {
 export function describeDshAbortReason(reason: unknown): string {
   if (typeof reason === 'string' && reason.trim()) return reason;
   if (reason && typeof reason === 'object') {
+    // Hook aborts ({ kind: 'hook', reason: 'user stop' | 'app shutdown' | … })
+    // carry a plain-language inner tag — render THAT, not the wrapper JSON
+    // (the 2026-10-17 app-shutdown abort surfaced to the user as the raw
+    // `{"kind":"hook","reason":"user stop"}` blob).
+    const hook = reason as { kind?: unknown; reason?: unknown };
+    if (hook.kind === 'hook' && typeof hook.reason === 'string' && hook.reason.trim()) return hook.reason;
     try {
       const json = JSON.stringify(reason);
       if (json && json !== '{}') return json;
@@ -2624,6 +2641,12 @@ export class CoworkRunner extends EventEmitter {
    * lifts the next re-send's deadline; cleared when a turn settles normally.
    */
   private dshStallStrikesBySessionId = new Map<string, number>();
+
+  /** Per-session route circuit state (DSH_ROUTE_CIRCUIT_*): consecutive
+   *  won't-heal settlements on the CURRENT route identity. `routeKey`
+   *  re-binds the counter when the user switches models; `cooldownMs` doubles
+   *  on every re-opened probe failure. */
+  private dshRouteCircuits = new Map<string, { routeKey: string; failures: number; openUntil: number; cooldownMs: number }>();
   private activeSessions: Map<string, ActiveSession> = new Map();
   /**
    * Per-session accumulated usage stats, keyed by sessionId. Independent of the
@@ -8301,7 +8324,11 @@ export class CoworkRunner extends EventEmitter {
       this.finalizeStreamingContent(activeSession);
       const stopReason = 'Cowork session stopped';
       this.cancelPendingLocalSteers(activeSession, new Error(stopReason), stopReason);
-      activeSession.abortController.abort();
+      // Carry the caller's reason ('app shutdown', 'Twin requested stop…',
+      // default 'user stop') on the abort signal: the turn pipeline's onAbort
+      // forwards it as the kernel cancel tag, so the transcript stops
+      // labeling an app quit as a manual user stop.
+      activeSession.abortController.abort(reason || 'user stop');
       if (activeSession.ipcBridge) {
         try {
           activeSession.ipcBridge.close();
@@ -9627,6 +9654,36 @@ export class CoworkRunner extends EventEmitter {
       this.removeActiveSession(sessionId, activeSession);
       return;
     }
+    // Route circuit breaker: a session whose current route keeps dying with
+    // won't-heal errors (auth/model-missing/INVALID_REQUEST on every available
+    // rung) stops spending model calls until the cooldown probe is due. A
+    // route change (user picked another model) resets the verdict — the old
+    // failures say nothing about the new route.
+    const circuitRouteKey = `${route.provider}|${route.baseUrl}|${route.model}`;
+    const circuit = this.dshRouteCircuits.get(sessionId);
+    if (circuit) {
+      if (circuit.routeKey !== circuitRouteKey) {
+        this.dshRouteCircuits.delete(sessionId);
+      } else if (circuit.openUntil > Date.now()) {
+        const retryAtLocal = new Date(circuit.openUntil).toLocaleTimeString();
+        coworkLog('WARN', 'runDshSessionLocal', 'Route circuit open — short-circuiting the turn without a model call', {
+          sessionId,
+          route: { provider: route.provider, model: route.model, baseUrl: route.baseUrl },
+          consecutiveFailures: circuit.failures,
+          openUntil: circuit.openUntil,
+        });
+        this.handleError(
+          sessionId,
+          tApp(
+            `模型路由熔断中：该会话的主路由与备用路由已连续 ${circuit.failures} 次因鉴权被拒/请求无效而失败（这类故障重试不会自愈）。在 ${retryAtLocal} 前本会话不再消耗模型调用；请到 设置 > 模型 检查供应商 API key 或更换模型，熔断到期后会自动探测恢复。`,
+            `Model-route circuit breaker is open: this session's primary and fallback routes failed ${circuit.failures} times in a row with auth/invalid-request rejections (retrying cannot heal those). No model calls will be spent until ${retryAtLocal}; check the provider API key under Settings > Models or switch models — a recovery probe runs automatically when the cooldown ends.`
+          )
+        );
+        this.clearPendingPermissions(sessionId);
+        this.removeActiveSession(sessionId, activeSession);
+        return;
+      }
+    }
     // Same per-model OpenCode Go protocol correction dshTurnProviderFromRoute
     // applies — this copy only feeds the "Resolved API config" log line, and it
     // must not name a protocol the turn will not actually ride.
@@ -9756,8 +9813,14 @@ export class CoworkRunner extends EventEmitter {
     this.activeSessions.set(sessionId, activeSession);
     this.dshActiveTurns.add(sessionId);
     // Stop/abort maps to the runtime's native turn cancel; the turn promise
-    // then settles with an aborted reason.
-    const onAbort = () => { void hub.cancel(sessionId, 'user stop').catch(() => undefined); };
+    // then settles with an aborted reason. The cancel tag rides the abort
+    // signal's reason: stopSession passes its caller-supplied reason through
+    // ('app shutdown' on quit, …), defaulting to 'user stop' for bare aborts.
+    const onAbort = () => {
+      const signalReason = activeSession.abortController.signal.reason;
+      const tag = typeof signalReason === 'string' && signalReason.trim().length > 0 ? signalReason : 'user stop';
+      void hub.cancel(sessionId, tag).catch(() => undefined);
+    };
     activeSession.abortController.signal.addEventListener('abort', onAbort, { once: true });
 
     const finish = (status: CoworkSessionStatus) => {
@@ -10748,7 +10811,9 @@ export class CoworkRunner extends EventEmitter {
           if (gateQuota || gateOverflow || gateConfigHard) {
             lastAttemptRoute = fallbackRoute;
             outcome = await runGuardedTurn(
-              gateOverflow ? OVERFLOW_TURN_RESUME_PROMPT : TRANSIENT_TURN_RESUME_PROMPT,
+              gateConfigHard
+                ? CONFIG_HARD_FALLBACK_RESUME_PROMPT
+                : gateOverflow ? OVERFLOW_TURN_RESUME_PROMPT : TRANSIENT_TURN_RESUME_PROMPT,
               undefined,
               fallbackRoute,
             );
@@ -10887,6 +10952,29 @@ export class CoworkRunner extends EventEmitter {
               : `未配置可用模型（配置错误：绑定模型与备用/默认降级链均无效；最后错误码 ${outcome.error?.code ?? 'UNKNOWN'}）`)
           : failureDetail;
         this.handleError(sessionId, `DSH turn failed: ${ladderSemantics}${quotaNotice}${noModelConfiguredNotice}${freeRelayQuotaNotice}${bodyLimitNotice}${overflowNotice}${authNotice}`);
+        // Route circuit breaker: count consecutive won't-heal settlements on
+        // the current route identity; past the threshold the circuit opens
+        // (entry check above) and further turns short-circuit until the probe.
+        if (isWontHealDshTurnError(outcome)) {
+          const prior = this.dshRouteCircuits.get(sessionId);
+          const sameRoute = prior?.routeKey === circuitRouteKey;
+          const failures = (sameRoute ? prior.failures : 0) + 1;
+          if (failures >= DSH_ROUTE_CIRCUIT_THRESHOLD) {
+            const cooldownMs = Math.min(
+              sameRoute ? prior.cooldownMs * 2 : DSH_ROUTE_CIRCUIT_INITIAL_COOLDOWN_MS,
+              DSH_ROUTE_CIRCUIT_MAX_COOLDOWN_MS,
+            );
+            this.dshRouteCircuits.set(sessionId, { routeKey: circuitRouteKey, failures, openUntil: Date.now() + cooldownMs, cooldownMs });
+            coworkLog('WARN', 'runDshSessionLocal', 'Route circuit opened — future turns short-circuit until the cooldown probe', {
+              sessionId,
+              route: { provider: route.provider, model: route.model },
+              consecutiveFailures: failures,
+              cooldownMs,
+            });
+          } else {
+            this.dshRouteCircuits.set(sessionId, { routeKey: circuitRouteKey, failures, openUntil: 0, cooldownMs: sameRoute ? prior.cooldownMs : DSH_ROUTE_CIRCUIT_INITIAL_COOLDOWN_MS });
+          }
+        }
         this.clearPendingPermissions(sessionId);
         this.settleDshSteerSubmissions(activeSession, 'failed', `DSH turn failed: ${ladderSemantics}`);
         this.removeActiveSession(sessionId, activeSession);
@@ -10932,6 +11020,8 @@ export class CoworkRunner extends EventEmitter {
       // proves the provider path is live again — clear the consecutive-stall
       // escalation so the next turn's watchdog returns to its base window.
       this.dshStallStrikesBySessionId.delete(sessionId);
+      // Same for the route circuit breaker: a live terminal outcome closes it.
+      this.dshRouteCircuits.delete(sessionId);
       // Usage stats settle BEFORE emit('complete') — the renderer refreshes the
       // session on streamComplete and must see the folded projection.
       await this.settleDshUsageStats(sessionId, hub);

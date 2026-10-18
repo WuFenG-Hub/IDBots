@@ -93,6 +93,18 @@ export const OVERFLOW_TURN_RESUME_PROMPT =
 export const MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT =
   'The previous response was interrupted: a tool call was emitted with corrupted arguments that could not be parsed. Continue the task from where you left off and re-issue that step.';
 
+/**
+ * Cue fed back to the model when a DSH turn died on a CONFIG-class hard error
+ * (credential rejected / model id not served) and the runner switched to the
+ * fallback route for its single attempt. Naming the real cause matters: the
+ * generic transient-resume cue tells the model a network blip happened, which
+ * invites it to "wait and retry" behavior instead of just continuing the task
+ * on the healthy route (2026-10-18 session 3144cb1a: 44 alternating
+ * auth-failed/tool_removal pairs all read "transient network failure").
+ */
+export const CONFIG_HARD_FALLBACK_RESUME_PROMPT =
+  'The previous turn failed because the primary model route rejected its configuration (credential rejected, or the model id is not served there). This turn continues on a fallback model route with the full preserved history. Continue the task from where you left off.';
+
 /** True when a DSH turn outcome failed because the provider streamed tool-call
  *  arguments that never parsed as JSON — a stochastic model-side emission
  *  glitch on the DeepSeek Messages route, worth ONE automatic continue.
@@ -175,6 +187,18 @@ export function isConfigModelMissingDshTurnError(outcome: { kind?: string; error
   const code = String(outcome.error?.code ?? '').toUpperCase();
   if (code === 'MODEL_NOT_FOUND' || code === 'MODEL_DOES_NOT_EXIST') return true;
   return MODEL_MISSING_ERROR_MESSAGE_FINGERPRINT.test(String(outcome.error?.message ?? ''));
+}
+
+/** True when a DSH turn outcome failed in a way that retrying the SAME route
+ *  cannot heal: the credential was rejected, the model id is not served, or
+ *  the request itself was deterministically refused (INVALID_REQUEST — a 4xx
+ *  schema/serde rejection that repeats byte-identical for the same history).
+ *  Drives the per-session route circuit breaker in runDshSessionLocal;
+ *  transient, quota and overflow deaths keep their own ladders. */
+export function isWontHealDshTurnError(outcome: { kind?: string; error?: { code?: string; message?: string } }): boolean {
+  if (outcome?.kind !== 'error') return false;
+  if (isAuthDshTurnError(outcome) || isConfigModelMissingDshTurnError(outcome)) return true;
+  return String(outcome.error?.code ?? '').toUpperCase() === 'INVALID_REQUEST';
 }
 
 /**
