@@ -1,4 +1,7 @@
 import { getUpdateCheckUrl, getFallbackDownloadUrl } from './endpoints';
+import { compareVersions, toVersionParts } from './versionCompare';
+
+export { compareVersions, toVersionParts };
 
 export const UPDATE_POLL_INTERVAL_MS = 30 * 60 * 1000;
 export const UPDATE_HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000;
@@ -50,30 +53,6 @@ export interface AppUpdateInfo {
   /** Optional payload checksum; verified by the downloader when present. */
   sha256?: string;
 }
-
-const toVersionParts = (version: string): number[] => (
-  version
-    .split('.')
-    .map((part) => {
-      const match = part.trim().match(/^\d+/);
-      return match ? Number.parseInt(match[0], 10) : 0;
-    })
-);
-
-const compareVersions = (a: string, b: string): number => {
-  const aParts = toVersionParts(a);
-  const bParts = toVersionParts(b);
-  const maxLength = Math.max(aParts.length, bParts.length);
-
-  for (let i = 0; i < maxLength; i += 1) {
-    const left = aParts[i] ?? 0;
-    const right = bParts[i] ?? 0;
-    if (left > right) return 1;
-    if (left < right) return -1;
-  }
-
-  return 0;
-};
 
 const isNewerVersion = (latestVersion: string, currentVersion: string): boolean => (
   compareVersions(latestVersion, currentVersion) > 0
