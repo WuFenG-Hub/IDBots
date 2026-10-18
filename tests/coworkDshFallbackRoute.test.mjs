@@ -687,3 +687,151 @@ test('a genuinely misconfigured route still reports the configuration error', as
   assert.doesNotMatch(errorText, /免费额度|free_quota_exhausted/, 'and never claims a quota problem')
 })
 
+
+// ---------------------------------------------------------------------------
+// 2026-10-18 (session 3144cb1a storm: expired OpenCode key on the primary +
+// tool_removal-rejecting fallback = 88 dead turns in 7 minutes): the
+// config-hard degrade attempt now rides its own resume cue, and repeated
+// won't-heal settlements open a per-session route circuit breaker.
+// ---------------------------------------------------------------------------
+
+test('a config-class hard error resumes the fallback attempt with the config-hard cue (not the transient one)', async () => {
+  const { assistantReply } = loadModules()
+  const result = await driveTurn({
+    sessionId: 'gt02-auth-degrade-cue',
+    metabot: BOT_WITH_FALLBACK,
+    script: (_input, callNo) => (callNo === 1
+      ? { kind: 'error', error: { code: 'AUTH_FAILED', message: '401 invalid api key' } }
+      : { kind: 'completed' }),
+  })
+
+  assert.equal(result.runTurnCalls.length, 2, '1 initial auth death + 1 single fallback attempt')
+  assert.equal(
+    result.runTurnCalls[1].prompt,
+    assistantReply.CONFIG_HARD_FALLBACK_RESUME_PROMPT,
+    'the config-hard fallback attempt names the real failure class',
+  )
+  assert.notEqual(result.runTurnCalls[1].prompt, result.TRANSIENT_TURN_RESUME_PROMPT)
+  await result.completed
+})
+
+// Drive N runDshSessionLocal invocations on ONE runner (the circuit map is a
+// per-instance field), each with a fresh activeSession. Pass the returned ctx
+// back in `state` to continue the same runner; swap ctx.metabot (and re-run
+// installApiConfig) to simulate the user changing the model binding.
+async function driveSequence({ sessionId, metabot, script, invocations, configOverrides = {}, state = null }) {
+  const { runner: runnerModule, claudeSettings } = loadModules()
+  const { CoworkRunner } = runnerModule
+  const ctx = state ?? {}
+  if (!state) {
+    ctx.runTurnCalls = []
+    ctx.errors = []
+  }
+  ctx.metabot = metabot ?? ctx.metabot
+  ctx.script = script ?? ctx.script
+  installApiConfig(claudeSettings, configOverrides)
+  if (!state) {
+    ctx.store = new RecordingStore()
+    ctx.runner = new CoworkRunner(ctx.store, {
+      getMetabotById: (id) => (ctx.metabot && id === ctx.metabot.id ? ctx.metabot : null),
+    })
+    ctx.runner.dshTurnHub = {
+      runTurn: async (input) => {
+        ctx.runTurnCalls.push(input)
+        return ctx.script(input, ctx.runTurnCalls.length)
+      },
+      prewarmTurnSlot: async () => undefined,
+      cancel: async () => undefined,
+      cancelAgent: async () => undefined,
+      forceSettle: () => undefined,
+      usageProjection: async () => null,
+      compact: async () => ({ ok: true, compacted: false }),
+    }
+    ctx.runner.on('error', (sid, error) => ctx.errors.push({ sid, error }))
+    ctx.runner.on('permissionRequest', () => undefined)
+  }
+  for (let i = 0; i < invocations; i += 1) {
+    const activeSession = {
+      sessionId,
+      claudeSessionId: null,
+      workspaceRoot: process.cwd(),
+      confirmationMode: 'modal',
+      pendingPermission: null,
+      abortController: new AbortController(),
+      executionMode: 'local',
+      localTurnState: 'none',
+      permissionMode: 'default',
+      readFiles: new Map(),
+    }
+    ctx.runner.activeSessions.set(sessionId, activeSession)
+    ctx.store.sessions.set(sessionId, { id: sessionId, executionMode: 'local', metabotId: ctx.metabot?.id ?? null, messages: [] })
+    // eslint-disable-next-line no-await-in-loop
+    await ctx.runner.runDshSessionLocal(activeSession, `GT02_PROBE invocation ${ctx.runTurnCalls.length + 1}`, process.cwd(), 'You are Alice.')
+  }
+  return ctx
+}
+
+test('route circuit breaker: consecutive wont-heal deaths stop spending model calls until the cooldown probe', async () => {
+  const noFallbackBot = { id: 6, name: 'Circuit Bot', llm_id: 'mock-a1', llm_provider: 'gw-a' }
+  const authDeath = () => ({ kind: 'error', error: { code: 'AUTH_FAILED', message: '401 invalid api key' } })
+
+  // Three inbound messages, three won't-heal settlements (no fallback brain —
+  // each invocation is a single primary attempt).
+  const ctx = await driveSequence({ sessionId: 'gt02-circuit', metabot: noFallbackBot, script: authDeath, invocations: 3 })
+  assert.equal(ctx.runTurnCalls.length, 3, 'each invocation spent its primary attempt')
+  const opened = ctx.runner.dshRouteCircuits.get('gt02-circuit')
+  assert.ok(opened, 'the circuit recorded the failures')
+  assert.ok(opened.openUntil > Date.now(), 'the circuit is open after the threshold')
+
+  // While open, further messages settle WITHOUT any model call, with a notice
+  // naming the breaker.
+  const ctx2 = await driveSequence({ state: ctx, sessionId: 'gt02-circuit', invocations: 2 })
+  assert.equal(ctx2.runTurnCalls.length, 3, 'an open circuit spends no model calls')
+  assert.ok(
+    ctx2.errors.some((entry) => /circuit breaker|熔断/.test(String(entry.error))),
+    'the short-circuit settlement explains the breaker',
+  )
+
+  // The cooldown probe: force the window to expire, then a live outcome
+  // closes the circuit.
+  const circuit = ctx2.runner.dshRouteCircuits.get('gt02-circuit')
+  assert.ok(circuit, 'circuit state still present')
+  circuit.openUntil = 0
+  const ctx3 = await driveSequence({ state: ctx2, sessionId: 'gt02-circuit', script: () => ({ kind: 'completed' }), invocations: 1 })
+  assert.equal(ctx3.runTurnCalls.length, 4, 'the expired circuit lets one probe through')
+  assert.equal(ctx3.runner.dshRouteCircuits.get('gt02-circuit'), undefined, 'a live outcome closes the circuit')
+  assert.equal(ctx3.store.sessions.get('gt02-circuit')?.status, 'completed')
+})
+
+test('route circuit breaker: changing the model binding resets the verdict', async () => {
+  const botV1 = { id: 7, name: 'Circuit Switch Bot', llm_id: 'mock-a1', llm_provider: 'gw-a' }
+  const authDeath = () => ({ kind: 'error', error: { code: 'AUTH_FAILED', message: '401 invalid api key' } })
+  const ctx = await driveSequence({ sessionId: 'gt02-circuit-switch', metabot: botV1, script: authDeath, invocations: 3 })
+  assert.ok((ctx.runner.dshRouteCircuits.get('gt02-circuit-switch')?.openUntil ?? 0) > Date.now(), 'circuit open')
+
+  // The owner rebinds the bot to a different provider/model: the old route's
+  // failures must not suppress turns on the new route.
+  const ctx2 = await driveSequence({
+    state: ctx,
+    sessionId: 'gt02-circuit-switch',
+    metabot: { id: 7, name: 'Circuit Switch Bot', llm_id: 'mock-c1', llm_provider: 'gw-c' },
+    configOverrides: {
+      providers: {
+        'gw-c': {
+          enabled: true,
+          apiKey: 'sk-c',
+          baseUrl: 'http://third.example/v1',
+          apiFormat: 'openai',
+          models: [{ id: 'mock-c1', name: 'mock-c1', contextWindow: 32768, maxOutputTokens: 4096 }],
+        },
+      },
+    },
+    script: () => ({ kind: 'completed' }),
+    invocations: 1,
+  })
+  const probe = ctx2.runTurnCalls[3]
+  assert.ok(probe, 'the rebound route gets a real model call despite the open circuit')
+  assert.equal(probe.provider.key, 'gw-c')
+  assert.equal(ctx2.runner.dshRouteCircuits.get('gt02-circuit-switch'), undefined, 'the live outcome clears the circuit')
+  assert.equal(ctx2.store.sessions.get('gt02-circuit-switch')?.status, 'completed')
+})

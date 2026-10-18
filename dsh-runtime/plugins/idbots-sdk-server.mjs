@@ -160,12 +160,13 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       const subagentMount = Promise.resolve(agent.ctx.plugin(dshToolSubagent, {
         provider: 'spawn',
         toolName: 'subagent',
-        // 0.1.3-alpha.1 continuable delegation: background by default, the
-        // child stays resident with a durable id, and parent↔child exchange
-        // follow-ups through the global send_message / interrupt_agent tools
-        // registered by dsh-tool-subagent-control below.
-        enableRunInBackground: true,
-        backgroundMode: 'continuable',
+        // 0.2.1 managed activations: every delegation returns
+        // { kind:'activation', subagentId } immediately and the child's final
+        // answer arrives as a parent completion notice (the 0.1.3-era
+        // enableRunInBackground/backgroundMode keys were removed upstream).
+        // Spawn children stay continuable — follow-ups ride the global
+        // send_message / interrupt_agent tools registered by
+        // dsh-tool-subagent-control below, including after settlement.
         // 0.1.6 moved depth gating behind user settings (default maxDepth 1,
         // which blocks nested delegation). Pin 3 explicitly to preserve the
         // 0.1.5 tool-level default IDBots shipped with.

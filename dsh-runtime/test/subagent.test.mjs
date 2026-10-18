@@ -192,11 +192,11 @@ const main = async () => {
   assert.ok(events.some((r) => r.includes('not allowed')), 'out-of-allowlist route fails closed')
   console.log('PASS  out-of-allowlist route fails closed')
 
-  // Foreground regression: run_in_background:false restores the one-shot
-  // wait-for-result semantics — the child's final text IS the tool result.
-  // (The send_message reporting instruction is only guaranteed on the
-  // continuable path, which awaits plugin readiness; a foreground start()
-  // races the agent-scoped control mount, so we assert the result channel.)
+  // 0.2.1 managed activations: `run_in_background` was removed from the tool
+  // schema — the legacy argument is stripped, the delegation returns the
+  // activation handle like any other, and the child's final answer arrives as
+  // a completion notice steered into a NEW parent turn (no inline foreground
+  // result exists anymore).
   const fgSeenBefore = seen.length
   await runTurn('DELEGATE_FG wait for the result inline please')
   const waitSeenFrom = (from) => async (pred, timeoutMs = 15000) => {
@@ -209,10 +209,15 @@ const main = async () => {
     }
   }
   const fgChild = await waitSeenFrom(fgSeenBefore)((r) => JSON.stringify(r.body?.messages ?? []).includes('say SUBAGENT_DONE')
-    && JSON.stringify(r.body?.messages ?? []).includes('message delivered') === false)
-  assert.ok(fgChild, 'foreground child request ran and returned through the tool result')
-  assert.ok(events.some((r) => r.includes('mock says: say SUBAGENT_DONE')), 'foreground tool result carries the child final text')
-  console.log('PASS  foreground delegation regression (run_in_background: false)')
+    && JSON.stringify(r.body?.messages ?? []).includes('Your parent agent id is'))
+  assert.ok(fgChild, 'child request ran as a managed activation (legacy run_in_background arg stripped)')
+  // The FG child's send_message report reaches the parent through the
+  // completion-notice turn — a parent request (no parent-id instruction)
+  // recorded after this delegation began.
+  const fgNotice = await waitSeenFrom(fgSeenBefore)((r) => JSON.stringify(r.body?.messages ?? []).includes('CHILD_REPORT_BG_DONE')
+    && JSON.stringify(r.body?.messages ?? []).includes('Your parent agent id is') === false)
+  assert.ok(fgNotice, 'completion notice carried the child report into a parent turn')
+  console.log('PASS  0.2.1 activation semantics (run_in_background stripped, completion-notice delivery)')
 
   subscription.close()
   await client.close()

@@ -16,8 +16,9 @@
 //   C. cwd is a subdirectory under a git root whose AGENTS.md lives at the
 //      root → the root file is still discovered (root-to-cwd ancestor chain).
 //
-// dshHome is pinned to an empty temp dir so the user-global AGENTS.md of the
-// host machine never leaks into the assertions.
+// DSH_HOME (and since 0.2.1 DSH_AGENTS_HOME) are pinned to empty temp dirs so
+// the user-global instruction files of the host machine never leak into the
+// assertions.
 //
 // Run: node test/workspace-instructions.test.mjs   (from dsh-runtime/)
 
@@ -84,6 +85,7 @@ const main = async () => {
   const { server, seen } = await startMockServer(48830)
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-inst-sess-'))
   const dshHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-inst-home-'))
+  const dshAgentsHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-inst-agents-'))
 
   const workspaceA = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ws-inst-a-'))
   fs.mkdirSync(path.join(workspaceA, '.git'), { recursive: true })
@@ -111,14 +113,15 @@ const main = async () => {
     // keep the plaintext encoding instead of the zstd default.
     persistenceCompression: 'none',
     workspace: { cwd: workspaceA },
-    workspaceInstructions: { dshHome },
   })
   const configPath = path.join(os.tmpdir(), `dsh-wsinst-${Date.now()}.json`)
   fs.writeFileSync(configPath, JSON.stringify(config))
 
   const client = runtimeClient({
     args: [path.join(runtimeDir, 'bin.mjs'), configPath],
-    env: { ...process.env, WSINST_KEY: 'sk-wsinst', SPIKE_QUIET: '1' },
+    // 0.2.1: the instruction homes resolve from the process env (the config
+    // key was removed upstream) — pin both to empty temp dirs for hermeticity.
+    env: { ...process.env, WSINST_KEY: 'sk-wsinst', SPIKE_QUIET: '1', DSH_HOME: dshHome, DSH_AGENTS_HOME: dshAgentsHome },
     requestTimeoutMs: 30000,
   })
   client.start()

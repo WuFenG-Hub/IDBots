@@ -28,7 +28,8 @@ export function startMockServer(port = 48787) {
       }
       const record = seen[seen.length - 1]
       res.on('finish', () => { record.finished = true })
-      // Aux Anthropic-compatible endpoint used by dsh-web-search-deepseek: a
+      // Aux Anthropic-compatible endpoint used by dsh-web-search-deepseek (the
+      // LEGACY provider, still mounted but no longer the selected one): a
       // POST ending in /messages must answer with server_tool_use search
       // blocks (plain JSON — the provider does not stream). Served on the same
       // port so one mock gateway covers the main loop AND the search seam.
@@ -61,6 +62,30 @@ export function startMockServer(port = 48787) {
           ],
           usage: { input_tokens: 40, output_tokens: 20 },
         }))
+        return
+      }
+      // 0.2.1 DeepSeek Search/Fetch APIs (dsh-web-deepseek-api, the selected
+      // providers): direct JSON endpoints on the same mock port. The search
+      // response must satisfy the provider's strict mapping (url + title +
+      // snippet strings, date string-or-null).
+      if (req.method === 'POST' && req.url.endsWith('/v1/tools/search')) {
+        if (JSON.stringify(parsed ?? {}).includes('fail please')) {
+          res.writeHead(503, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: { message: 'mock search backend overloaded', type: 'server_error', param: null, code: 'server_error' } }))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          results: [
+            { rerank_score: 2.4, title: 'Node.js — Node.js 26.0.0 (Current)', url: 'https://nodejs.org/en/blog/release/v26.0.0', snippet: 'Node.js 26.0.0 (Current) release notes', summary: 'Node.js 26.0.0 shipped as the Current release.', content: '', site_name: 'Node.js', site_icon: null, date: '2026-05-01T00:00:00+00:00', authority: 3 },
+            { rerank_score: 2.0, title: 'Node.js 24.x LTS releases', url: 'https://nodejs.org/en/blog/release/v24.18.0', snippet: 'Node.js 24.18.0 LTS release', summary: 'The 24.x LTS line continues.', content: '', site_name: 'Node.js', site_icon: null, date: null, authority: 3 },
+          ],
+        }))
+        return
+      }
+      if (req.method === 'POST' && req.url.endsWith('/v1/tools/fetch')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ title: 'Example article', content: '# Example article\n\nFETCHED_PAGE_CONTENT_MARKER' }))
         return
       }
       // Skip runtime-injected user-role messages (they can land before OR
@@ -152,6 +177,7 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('CALL_BROWSER_NAV') ? 'mcp__playwright-mcp__browser_navigate'
         : lastUserText.includes('CALL_BROWSER_READ') ? 'mcp__playwright-mcp__browser_network_requests'
         : cuaCall ? `cua_driver_native__${cuaCall[1]}`
+        : lastUserText.includes('CALL_WEB_FETCH') ? 'web_fetch'
         : lastUserText.includes('CALL_WEB_SEARCH_FAIL') ? 'web_search'
         // CALL_ASK_TOOL_TIMED:<seconds> — the ask carries an explicit per-call
         // timeout so the test can watch the timed-mode deadline go pending
@@ -204,6 +230,7 @@ export function startMockServer(port = 48787) {
             }
           })()
           : toolCallFor === 'web_search' ? { queries: [lastUserText.includes('CALL_WEB_SEARCH_FAIL') ? 'fail please' : 'latest stable Node.js version'] }
+          : toolCallFor === 'web_fetch' ? { url: 'https://example.com/article' }
           : toolCallFor === 'read' ? { file_path: 'readable.txt' } : toolCallFor === 'glob' ? { pattern: '**/*.marker.txt' } : toolCallFor === 'grep' ? { pattern: 'NEEDLE_ALPHA' } : toolCallFor === 'exit_plan_mode' ? { plan: '# Test Plan\n\nDo the thing.' } : toolCallFor === 'bash' ? (lastUserText.includes('RUN_LONG_BASH')
             ? { command: 'sleep 5 && echo LONG_BASH_DONE', description: 'long-running foreground command for the stall-watchdog test' }
             : writeMatch

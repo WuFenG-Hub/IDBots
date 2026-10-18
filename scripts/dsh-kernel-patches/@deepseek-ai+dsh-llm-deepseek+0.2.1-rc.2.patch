@@ -1,6 +1,6 @@
 --- a/dsh-runtime/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js
 +++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js
-@@ -1905,14 +1905,209 @@
+@@ -1918,14 +1918,209 @@
  		case "tool_use": return { kind: "tool-calls" };
  		case "max_tokens": return { kind: "max-tokens" };
  		default: return malformed(`unsupported stop reason ${String(raw)}`);
@@ -211,7 +211,7 @@
  	const blocks = /* @__PURE__ */ new Map();
  	const usage = {
  		inputTokens: 0,
-@@ -1966,7 +2161,7 @@
+@@ -1979,7 +2174,7 @@
  				if (chunk !== void 0) yield chunk;
  			} else {
  				block.closed = true;
@@ -220,7 +220,7 @@
  				yield {
  					type: "block-end",
  					index: block.index,
-@@ -2218,7 +2413,7 @@
+@@ -2247,7 +2442,7 @@
  				}
  				await extensions.accept();
  				if (response.body === null) throw new LlmError("DeepSeek Messages returned no response body", "EMPTY_RESPONSE");
@@ -229,20 +229,20 @@
  				return;
  			}
  		} catch (error) {
-@@ -2257,6 +2452,9 @@
- 		onExtensionsOmitted: ({ provider, model, fields, error }) => {
- 			ctx.logger.warn(`llm-deepseek: sending route "${provider}/${model}" without request extension fields ${fields.join(", ")} because they failed to serialize: %o`, error);
+@@ -2301,6 +2496,9 @@
+ 			unacceptedRoutes.add(route);
+ 			ctx.logger.warn(`llm-deepseek: route "${route}" request extension acceptance failed; contributors resend on a later request: %o`, error);
  		},
 +		onToolInputRepaired: ({ model, toolCallId, toolName }) => {
-+			ctx.logger.warn(`llm-deepseek: tool input JSON for "${toolName}" (${toolCallId}) arrived truncated on route "${provider}/${model}"; applied structural close-only repair`);
++			ctx.logger.warn(`llm-deepseek: tool input JSON for "${toolName}" (${toolCallId}) arrived truncated on model "${model}"; applied structural close-only repair`);
 +		},
  		resolveAttachments: () => ctx.get("attachments"),
  		resolveImageAccess: (attachments, ref) => resolveImageAttachmentAccess(attachments, (hostPath) => ctx.get("fs")?.processPathFromHostPath(hostPath), ref),
  		prepareExtensions: (request) => ctx.get("deepseekLlmApiExtensions")?.prepare(request) ?? Promise.resolve({
 --- a/dsh-runtime/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/types/types.d.ts
 +++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/types/types.d.ts
-@@ -100,6 +100,12 @@
-         fields: readonly string[];
+@@ -106,6 +106,12 @@
+         model: string;
          error: unknown;
      }) => void;
 +    /** Report a conservative structural repair applied to tool input JSON that arrived truncated. */

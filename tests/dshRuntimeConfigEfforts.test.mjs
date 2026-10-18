@@ -48,7 +48,7 @@ test('native deepseek mounts a dedicated llm-deepseek entry, not a pi-ai route',
   assert.equal(native.config.reasoningEffort, 'high')
   assert.equal(native.config.defaultContextWindow, 1_000_000)
   assert.deepEqual(native.config.models, [
-    { id: 'deepseek-v4-pro', name: 'deepseek-v4-pro', contextWindow: 1_000_000, maxTokens: 16_000, systemPromptUpdate: 'in-history', toolUpdate: 'in-history' },
+    { id: 'deepseek-v4-pro', name: 'deepseek-v4-pro', contextWindow: 1_000_000, maxTokens: 16_000, systemPromptUpdate: 'in-history', toolUpdate: 'addition-only' },
   ])
   // Never a pi-ai route for the native provider; other providers unaffected.
   assert.equal(piAiProviders(config).deepseek, undefined)
@@ -104,7 +104,7 @@ test('native vision catalog emits inputModalities and request-image budgets', ()
     contextWindow: 1_000_000,
     maxTokens: 32_768,
     systemPromptUpdate: 'in-history',
-    toolUpdate: 'in-history',
+    toolUpdate: 'addition-only',
     inputModalities: ['text', 'image'],
     imagePixelBudget: 640_000,
     imageMaxBytes: 1_048_576,

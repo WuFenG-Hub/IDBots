@@ -1,10 +1,12 @@
-// Host-side wiring for DeepSeek server-side web search on the DSH kernel: an
-// official-DeepSeek provider route must mount the dsh-web trio into the
-// runtime composition (credential via a dedicated child-env var, never the
-// config file on disk), the model must see the `web_search` tool, and a
-// search round trip must execute against the Anthropic-compatible endpoint.
-// A later non-DeepSeek turn must NOT unmount the trio (sticky, like MCP
-// servers). Requires: npm run compile:electron + dsh-runtime/node_modules.
+// Host-side wiring for DeepSeek web search + fetch on the DSH kernel: an
+// official-DeepSeek provider route must mount the web seam into the runtime
+// composition (credential via a dedicated child-env var, never the config
+// file on disk), with the 0.2.1 direct Search/Fetch API providers selected
+// and the legacy Messages-turn provider kept mounted as rollback; the model
+// must see the `web_search` tool, and a search round trip must execute
+// against the Search API endpoint. A later non-DeepSeek turn must NOT unmount
+// the seam (sticky, like MCP servers).
+// Requires: npm run compile:electron + dsh-runtime/node_modules.
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -93,31 +95,34 @@ test('deepseek web search: hub mounts the dsh-web trio and executes a search rou
       }, 'CALL_WEB_SEARCH please')
       assert.notEqual(outcome.kind, 'error', `turn failed: ${outcome.reason}`)
 
-      // Composition file: the trio is mounted with the env-name indirection —
-      // the key itself must never appear in the DeepSeek runtime config.
+      // Composition file: the web seam is mounted with the env-name
+      // indirection — the key itself must never appear in the runtime config.
       const raw = fs.readFileSync(path.join(sessionRoot, dshRuntimeConfigFileName('deepseek')), 'utf8')
       const cfg = JSON.parse(raw)
       const web = cfg.find((e) => e.name === '@deepseek-ai/dsh-web')
       assert.ok(web, 'dsh-web entry mounted')
-      assert.equal(web.config.searchProvider, 'deepseek-official')
+      assert.equal(web.config.searchProvider, 'deepseek-search-api')
+      assert.equal(web.config.fetchProvider, 'deepseek-fetch-api')
+      const apiProviders = cfg.find((e) => e.name === '@deepseek-ai/dsh-web-deepseek-api')
+      assert.ok(apiProviders, 'web-deepseek-api entry mounted')
+      assert.equal(apiProviders.config.apiKeyEnv, 'IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY')
+      assert.equal(apiProviders.config.baseURL, `http://127.0.0.1:${PORT}/v1/tools`)
       const search = cfg.find((e) => e.name === '@deepseek-ai/dsh-web-search-deepseek')
-      assert.ok(search, 'web-search-deepseek entry mounted')
+      assert.ok(search, 'legacy web-search-deepseek entry kept as rollback')
       assert.equal(search.config.apiKeyEnv, 'IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY')
       assert.equal(search.config.baseURL, `http://127.0.0.1:${PORT}/anthropic/v1`)
       assert.equal(search.config.model, 'deepseek-flash')
       const toolWeb = cfg.find((e) => e.name === '@deepseek-ai/dsh-tool-web')
       assert.ok(toolWeb, 'tool-web entry mounted')
-      assert.equal(toolWeb.config.fetch, false)
+      assert.equal(toolWeb.config.fetch, true)
       assert.ok(!raw.includes('sk-web-test'), 'API key never enters the config file')
 
-      // The aux search call hit the Anthropic-compat endpoint with the native
-      // server tool and the env-carried credential.
-      const aux = seen.find((r) => r.method === 'POST' && String(r.url).endsWith('/messages'))
-      assert.ok(aux, 'aux anthropic search request seen')
-      assert.equal(aux.body?.tools?.[0]?.type, 'web_search_20250305')
-      assert.equal(aux.body?.tools?.[0]?.name, 'web_search')
-      assert.equal(aux.body?.model, 'deepseek-flash')
-      assert.equal(aux.auth, 'Bearer sk-web-test')
+      // The search executed against the 0.2.1 Search API endpoint with the
+      // env-carried credential (no auxiliary Messages turn).
+      const searchReq = seen.find((r) => r.method === 'POST' && String(r.url).endsWith('/v1/tools/search'))
+      assert.ok(searchReq, 'Search API request seen')
+      assert.equal(typeof searchReq.body?.query, 'string')
+      assert.equal(searchReq.auth, 'Bearer sk-web-test')
 
       // The model saw the tool and the formatted sources landed in history.
       assert.ok(messages.some((m) => m.type === 'tool_use' && m.metadata?.toolName === 'web_search'), 'web_search tool_use recorded')
@@ -128,7 +133,7 @@ test('deepseek web search: hub mounts the dsh-web trio and executes a search rou
       assert.match(toolContent, /Sources:/, 'follow-up request carries the search result to the model')
 
       // Shared web search: a later non-DeepSeek provider boots its own
-      // process but still mounts the DeepSeek search trio (hub-level, same
+      // process but still mounts the DeepSeek web seam (hub-level, same
       // as the pre-split single runtime).
       await runOneTurn(`ws2-${Date.now().toString(36)}`, {
         key: 'mockgw',

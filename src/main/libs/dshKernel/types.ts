@@ -193,7 +193,7 @@ export interface DshRuntimeConfigInput {
    * under userData so a user-global `~/.dsh/AGENTS.md` (e.g. left over from a
    * DeepSeek Harness install) never silently leaks into IDBots sessions.
    */
-  workspaceInstructions?: { maxBytes?: number; dshHome?: string }
+  workspaceInstructions?: { maxBytes?: number }
   /** User-configured MCP servers mounted as dsh-mcp-client plugin entries. */
   mcpServers?: DshMcpServerDefinition[]
   /**

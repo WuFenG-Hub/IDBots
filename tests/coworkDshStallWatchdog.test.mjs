@@ -417,7 +417,12 @@ test('computeDshStallDeadlineMs ladder, cap, and disable', { skip: runtimeReady 
 test('describeDshAbortReason renders object causes instead of [object Object]', { skip: runtimeReady ? false : 'dsh-runtime/node_modules not installed' }, () => {
   const { describeDshAbortReason } = loadModules().runner
   assert.equal(describeDshAbortReason('user requested stop'), 'user requested stop')
-  assert.equal(describeDshAbortReason({ kind: 'hook', reason: 'steer' }), '{"kind":"hook","reason":"steer"}')
+  // Hook aborts render their inner plain-language tag (a steer, a manual stop,
+  // an app shutdown) — never the raw wrapper JSON (the 2026-10-17 shutdown
+  // abort showed the user `{"kind":"hook","reason":"user stop"}`).
+  assert.equal(describeDshAbortReason({ kind: 'hook', reason: 'steer' }), 'steer')
+  assert.equal(describeDshAbortReason({ kind: 'hook', reason: 'user stop' }), 'user stop')
+  assert.equal(describeDshAbortReason({ kind: 'hook', reason: 'app shutdown' }), 'app shutdown')
   assert.equal(describeDshAbortReason(new Error('socket hang up')), 'socket hang up')
   assert.equal(describeDshAbortReason(undefined), 'cancelled')
   assert.equal(describeDshAbortReason(''), 'cancelled')
