@@ -19,6 +19,7 @@ import Module from 'node:module'
 import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
+import { pathToFileURL } from 'node:url'
 
 const here = import.meta.dirname
 
@@ -170,7 +171,12 @@ test('a wire-corrected route key boots a real runtime and completes a turn', {
     ? 'dsh-runtime node_modules not installed'
     : false,
 }, async (t) => {
-  const { startMockServer } = await import(path.resolve(here, '..', 'dsh-runtime', 'test', 'fixtures', 'mock-openai.mjs'))
+  // A bare absolute path is not a valid ESM specifier on Windows ("Only URLs
+  // with a scheme in: file, data, and node are supported"); the file: URL form
+  // is the one Node accepts on every platform.
+  const { startMockServer } = await import(
+    pathToFileURL(path.resolve(here, '..', 'dsh-runtime', 'test', 'fixtures', 'mock-openai.mjs')).href
+  )
   const { server } = await startMockServer(48826)
   const { DshTurnHub } = require('../dist-electron/main/libs/coworkDshTurn.js')
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-opencode-wire-key-'))
