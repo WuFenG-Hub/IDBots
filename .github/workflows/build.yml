@@ -402,6 +402,16 @@ jobs:
         # default shell.
         run: node scripts/verify-dsh-kernel-patches.cjs --packaged
 
+      - name: Verify the packaged app reports the release version (macOS)
+        # Clients compare their own bundle version against the update manifest,
+        # so an artifact that reports a different version makes every
+        # installation re-download the same package forever. On 2026-10-19 the
+        # v1.0.1 installer shipped an internal 1.0.0 while the tag, the file
+        # name and the manifest all said 1.0.1, and nothing in the pipeline
+        # looked at the artifact itself.
+        if: runner.os == 'macOS'
+        run: node scripts/verify-release-artifact-version.cjs "release/${{ matrix.mac_dir }}/IDBots.app"
+
       - name: Notarize app (macOS)
         if: runner.os == 'macOS'
         env:
