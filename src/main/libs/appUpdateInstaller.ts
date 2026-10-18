@@ -78,6 +78,28 @@ function execAsync(command: string, timeoutMs = 120_000): Promise<string> {
   });
 }
 
+/**
+ * Sidecar metadata path `downloadUpdate` writes next to an installer: the same
+ * base name in the temp dir with a `.meta.json` suffix
+ * (`idbots-update-<stableId>.meta.json`).
+ */
+export function resolveDownloadMetaPath(installerPath: string): string {
+  return `${installerPath.replace(/\.[^./\\]+$/, '')}.meta.json`;
+}
+
+/** Version a macOS app bundle reports about itself (`CFBundleShortVersionString`). */
+export async function readMacBundleVersion(appPath: string): Promise<string> {
+  const plistPath = path.join(appPath, 'Contents', 'Info.plist');
+  const version = await execAsync(
+    `plutil -extract CFBundleShortVersionString raw ${shellEscape(plistPath)}`,
+    15_000,
+  );
+  if (!version) {
+    throw new Error(`${plistPath} reports no CFBundleShortVersionString`);
+  }
+  return version;
+}
+
 /** Minimum interval between progress IPC events (ms). */
 const PROGRESS_THROTTLE_MS = 200;
 
@@ -112,6 +134,13 @@ async function readDownloadMeta(metaPath: string): Promise<DownloadMeta | null> 
 
 async function writeDownloadMeta(metaPath: string, meta: DownloadMeta): Promise<void> {
   await fs.promises.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+}
+
+/** Version recorded for an installer by its download sidecar, when present. */
+async function readDeclaredInstallerVersion(installerPath: string): Promise<string | null> {
+  const meta = await readDownloadMeta(resolveDownloadMetaPath(installerPath));
+  const version = typeof meta?.version === 'string' ? meta.version.trim() : '';
+  return version === '' ? null : version;
 }
 
 /**
@@ -766,6 +795,28 @@ export async function applyMacUpdateSilently(dmgPath: string): Promise<void> {
       throw new Error('No .app bundle found in DMG');
     }
     const sourceApp = path.join(mountPoint, appBundle);
+
+    // Guard against mislabeled packages: v1.0.1 shipped a bundle whose
+    // Info.plist still said 1.0.0, so the client kept judging itself outdated
+    // and re-downloaded the same installer. Compare the bundle's own version
+    // against the version recorded by the downloader's sidecar metadata and
+    // refuse before touching the installed app.
+    const declaredVersion = await readDeclaredInstallerVersion(dmgPath);
+    if (declaredVersion) {
+      const incomingVersion = await readMacBundleVersion(sourceApp);
+      if (incomingVersion !== declaredVersion) {
+        throw new Error(
+          `Refusing to install a mislabeled update: the bundle reports ${incomingVersion} but the update manifest declares ${declaredVersion}`,
+        );
+      }
+      console.log(
+        `[AppUpdate] Bundle version check passed: ${incomingVersion} matches update manifest ${declaredVersion}`,
+      );
+    } else {
+      // No sidecar (e.g. an installer copied in by hand): keep the legacy
+      // behavior instead of failing hard.
+      console.log('[AppUpdate] No download metadata sidecar; skipping bundle version check');
+    }
 
     const currentAppPath = path.resolve(process.resourcesPath, '..', '..', '..');
     const targetApp = currentAppPath.endsWith('.app') ? currentAppPath : `/Applications/${appBundle}`;
