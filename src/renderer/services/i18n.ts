@@ -1140,13 +1140,27 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkQuoteSourceOther: '对话片段',
     coworkQuoteBlockHeader: '从对话中引用的片段（请针对这些片段回答）：',
     coworkQuoteBlockItem: '引自{source}：',
+    // Display-only source lines for a SENT selection quote: the transcript
+    // strips the generated header and swaps "引自{source}：" for these — the
+    // prompt body itself never changes (the model still reads the generated
+    // block verbatim; see parseSentSelectionQuoteBlock).
+    coworkQuoteSentSourceUser: '回应你的这句：',
+    coworkQuoteSentSourceAssistant: '回应 Bot 的这句：',
+    coworkQuoteSentSourceOther: '回应这段：',
+    // The per-message "⋯" trigger that opens the quote / copy / branch menu
+    coworkMessageActionsMore: '更多操作',
     // Per-message quote reply (the reply entry on a message's action bar)
     coworkQuoteReplyAction: '回复',
+    // Clicking a sent quote block jumps back to the message it answers.
+    coworkQuoteJumpToMessage: '跳到原消息',
+    // Shown beside the composer when the quoted message is not inside the
+    // window of the transcript that is currently rendered.
+    coworkQuoteJumpMissing: '引用的消息不在当前加载的对话中，可向上滚动加载更早的消息后再试',
     coworkQuoteReplyPreviewLabel: '引用消息预览',
     coworkQuoteReplyCancel: '取消回复',
     coworkQuoteReplyPlaceholder: '回复…',
     coworkQuoteReplyBlockHeader: '回复以下消息：',
-    coworkQuoteReplyBlockItem: '回复 {source}（第 {ordinal} 条{streaming}）：',
+    coworkQuoteReplyBlockItem: '#{ordinal} {source}{streaming}：',
     coworkQuoteReplyStreamingMark: '该条仍在生成中',
     coworkQuoteReplySourceUser: '你的消息',
     coworkQuoteReplySourceAssistant: '助手消息',
@@ -4212,13 +4226,24 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkQuoteSourceOther: 'Conversation excerpt',
     coworkQuoteBlockHeader: 'Quoted excerpts from the conversation (reply to these):',
     coworkQuoteBlockItem: 'Quoted from {source}:',
+    // Display-only source lines for a SENT selection quote (see the zh note).
+    coworkQuoteSentSourceUser: 'Replying to your line:',
+    coworkQuoteSentSourceAssistant: 'Replying to the bot\'s line:',
+    coworkQuoteSentSourceOther: 'Replying to this excerpt:',
+    // The per-message "⋯" trigger that opens the quote / copy / branch menu
+    coworkMessageActionsMore: 'More actions',
     // Per-message quote reply (the reply entry on a message's action bar)
     coworkQuoteReplyAction: 'Reply',
+    // Clicking a sent quote block jumps back to the message it answers.
+    coworkQuoteJumpToMessage: 'Jump to the quoted message',
+    // Shown beside the composer when the quoted message is not inside the
+    // window of the transcript that is currently rendered.
+    coworkQuoteJumpMissing: 'The quoted message is not in the loaded conversation — scroll up to load earlier messages and try again',
     coworkQuoteReplyPreviewLabel: 'Quoted message',
     coworkQuoteReplyCancel: 'Cancel reply',
     coworkQuoteReplyPlaceholder: 'Reply…',
     coworkQuoteReplyBlockHeader: 'Replying to the following messages:',
-    coworkQuoteReplyBlockItem: 'Replying to {source} (message #{ordinal}{streaming}):',
+    coworkQuoteReplyBlockItem: '#{ordinal} {source}{streaming}:',
     coworkQuoteReplyStreamingMark: 'still being generated',
     coworkQuoteReplySourceUser: 'your message',
     coworkQuoteReplySourceAssistant: 'the assistant message',
@@ -6299,6 +6324,20 @@ class I18nService {
       return translations.en[key] || key;
     }
     return translation;
+  }
+
+  /**
+   * Translation for a specific language, regardless of the active one.
+   *
+   * The transcript renders a sent quote block in the language it was WRITTEN
+   * in, so the display-side block parsers match the generated form against
+   * every shipped dictionary — not only the one currently active. Same
+   * fallback as `t`: a missing key degrades to English, then to the key.
+   */
+  tIn(language: LanguageType, key: string): string {
+    const translation = translations[language]?.[key];
+    if (translation) return translation;
+    return translations.en[key] ?? key;
   }
 
   subscribe(listener: () => void): () => void {

@@ -21,9 +21,17 @@ interface CoworkQuoteActionBarProps {
   onAdd: () => void;
 }
 
-/** Intrinsic size, used for the first placement before the bar is measured. */
-export const QUOTE_ACTION_BAR_WIDTH = 176;
-export const QUOTE_ACTION_BAR_HEIGHT = 32;
+/**
+ * Intrinsic size, used for the first placement before the bar is measured.
+ *
+ * Width covers the widest label (the English dictionary string measures
+ * ~162px at the text-xs / px-3 sizing below). The bar is right-justified
+ * inside this width, so a narrower label (the zh one, ~107px) keeps its right
+ * edge — the edge pinned to the selection — aligned. Height is the button's
+ * laid-out height (16px line + 2×6px padding + 2×1px border).
+ */
+export const QUOTE_ACTION_BAR_WIDTH = 164;
+export const QUOTE_ACTION_BAR_HEIGHT = 30;
 
 const CoworkQuoteActionBar = React.forwardRef<HTMLDivElement, CoworkQuoteActionBarProps>(
   ({ placement, onAdd }, ref) => (
@@ -32,7 +40,7 @@ const CoworkQuoteActionBar = React.forwardRef<HTMLDivElement, CoworkQuoteActionB
       data-cowork-quote-action="true"
       role="toolbar"
       aria-label={i18nService.t('coworkQuoteActionLabel')}
-      className="z-40"
+      className="z-40 flex justify-end"
       style={{
         position: 'fixed',
         top: placement.top,
@@ -46,9 +54,9 @@ const CoworkQuoteActionBar = React.forwardRef<HTMLDivElement, CoworkQuoteActionB
         // it: pressing the bar must not collapse the selection first.
         onMouseDown={(event) => event.preventDefault()}
         onClick={onAdd}
-        className="flex w-full items-center gap-1.5 rounded-md border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-2.5 py-1.5 text-xs shadow-elevated dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+        className="inline-flex items-center gap-1.5 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3 py-1.5 text-xs font-medium shadow-elevated dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
       >
-        <ChatBubbleBottomCenterTextIcon className="h-3.5 w-3.5 flex-shrink-0 text-claude-accent" />
+        <ChatBubbleBottomCenterTextIcon className="h-3.5 w-3.5 flex-shrink-0" />
         <span className="truncate">{i18nService.t('coworkQuoteAddToConversation')}</span>
       </button>
     </div>

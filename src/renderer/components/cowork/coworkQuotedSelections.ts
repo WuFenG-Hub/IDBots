@@ -19,12 +19,42 @@ import type { CoworkQuotedSelection, CoworkQuotedSelectionRole } from '../../typ
 export const QUOTED_SELECTION_MAX_CHARS = 4000;
 /** Cap for the one-line summary shown on a fragment tile. */
 export const QUOTED_SELECTION_SUMMARY_CHARS = 96;
+/**
+ * Cap for the excerpt that rides into the prompt body itself. A whole-message
+ * reply quotes a *reference*, not a payload: the model already re-reads the
+ * conversation as plain text, so carrying the full message only crowds out the
+ * instruction (and produced a wall of blockquote in the transcript). The block
+ * therefore stays a compact pointer — role, position, and one short excerpt.
+ */
+export const QUOTED_SELECTION_BLOCK_CHARS = 160;
 
 /** i18n keys naming the source side of a quote. */
 export const QUOTED_SELECTION_SOURCE_KEYS: Record<CoworkQuotedSelectionRole, string> = {
   user: 'coworkQuoteSourceUser',
   assistant: 'coworkQuoteSourceAssistant',
   other: 'coworkQuoteSourceOther',
+};
+
+/**
+ * Every transcript element carries `data-message-id`, so a quoted whole-message
+ * fragment found by id. One id can be mounted on several layers (an outer turn
+ * block plus the single message container), so the INNERMOST match is returned
+ * — a jump highlight must wrap the one message, never the whole turn. Returns
+ * null when the target is no longer rendered (the window was trimmed, the
+ * session changed).
+ */
+export const findTranscriptMessageElement = (
+  root: ParentNode | null,
+  messageId: string,
+): HTMLElement | null => {
+  if (!root || !messageId) return null;
+  const selector = `[data-message-id="${CSS.escape(messageId)}"]`;
+  const matches = Array.from(root.querySelectorAll<HTMLElement>(selector));
+  if (matches.length === 0) return null;
+  // Document order runs outermost-first; the innermost match is the one with
+  // no match nested inside it.
+  return matches.find((candidate) => !candidate.querySelector(selector))
+    ?? matches[matches.length - 1];
 };
 
 let quotedSelectionSequence = 0;
@@ -225,9 +255,22 @@ export const buildQuotedSelectionsBlock = (
     const source = (ref && labels.replySourceLabel?.[selection.role])
       ?? labels.sourceLabel[selection.role]
       ?? labels.sourceLabel.other;
-    const label = ref && labels.replyBlockItem
-      ? buildReplyItemLabel(labels.replyBlockItem, source, ref, labels.replyStreamingMark)
-      : labels.item.replace('{source}', source);
+    // Reply fragments collapse to a single pointer line: the bulk of a quoted
+    // message stays out of the prompt (the model re-reads the transcript), so
+    // the block is one short excerpt, never the whole message. A hand-picked
+    // passage keeps its own text — the owner chose those exact words.
+    if (ref && labels.replyBlockItem) {
+      const label = buildReplyItemLabel(labels.replyBlockItem, source, ref, labels.replyStreamingMark);
+      const excerpt = summarizeQuotedSelectionText(selection.text, QUOTED_SELECTION_BLOCK_CHARS);
+      // The excerpt is deliberately short, so say so when it was cut — a silent
+      // cut reads as "the message was this short".
+      const cut = selection.text.trim().length > QUOTED_SELECTION_BLOCK_CHARS
+        && labels.truncatedNote
+        ? `\n> ${labels.truncatedNote.replace('{max}', String(QUOTED_SELECTION_BLOCK_CHARS))}`
+        : '';
+      return `> ${label}\n> ${excerpt}${cut}`;
+    }
+    const label = labels.item.replace('{source}', source);
     const lines = selection.text
       .split('\n')
       .map((line) => (line ? `> ${line}` : '>'));
@@ -327,4 +370,147 @@ export const buildTranscriptMessagePositions = (
     }
   }
   return positions;
+};
+
+/**
+ * The reverse of `buildTranscriptMessagePositions`: ordinal → message id. A
+ * sent reply block only carries the quoted message's position (its label), so
+ * this is the lookup a jump back from the block takes; a position the map does
+ * not hold means the message is not inside the rendered window.
+ */
+export const buildTranscriptMessageIdsByOrdinal = (
+  positions: ReadonlyMap<string, number>,
+): Map<number, string> => {
+  const idsByOrdinal = new Map<number, string>();
+  for (const [id, ordinal] of positions) {
+    idsByOrdinal.set(ordinal, id);
+  }
+  return idsByOrdinal;
+};
+
+/** A sent reply block split off the head of a message body, for its jump control. */
+export interface SentQuoteBlock {
+  /** 1-based position of the quoted message, as written into the block label. */
+  ordinal: number;
+  /** The raw blockquote lines (label + excerpt + optional truncation note). */
+  block: string;
+  /** Everything after the block — the owner's instruction, '' when none. */
+  rest: string;
+}
+
+/**
+ * Split the generated reply block off the head of a sent message body, so the
+ * transcript can render it as a jump control while the rest renders as before.
+ *
+ * Only the exact generated form matches: the body starts with the reply item
+ * line (`> #<ordinal> <side><streaming>：`, either colon) followed by at least
+ * one more blockquote line. A blockquote the owner typed themselves — not at
+ * the body's head, or without the `#<ordinal>` label — never matches, so a
+ * hand-written quote stays plain markdown. Returns null when the body carries
+ * no such block.
+ */
+export const parseSentQuoteBlock = (content: string): SentQuoteBlock | null => {
+  if (typeof content !== 'string' || content.length === 0) return null;
+  const lines = content.replace(/\r\n?/g, '\n').split('\n');
+  const label = /^> #([1-9]\d*)\s.*[：:]\s*$/.exec(lines[0] ?? '');
+  if (!label) return null;
+  let end = 1;
+  while (end < lines.length && lines[end].startsWith('>')) end += 1;
+  // The generated block always carries the excerpt line under its label.
+  if (end < 2) return null;
+  return {
+    ordinal: Number(label[1]),
+    block: lines.slice(0, end).join('\n'),
+    rest: lines.slice(end).join('\n').trim(),
+  };
+};
+
+/** One shipped dictionary's labels for the generated selection block. */
+export interface SentSelectionQuoteLabelSet {
+  /** The block header (coworkQuoteBlockHeader) — stripped from the display. */
+  header: string;
+  /** The per-excerpt template containing `{source}` (coworkQuoteBlockItem). */
+  item: string;
+  /** The source names as written into the block (coworkQuoteSource*). */
+  sourceLabel: Record<CoworkQuotedSelectionRole, string>;
+  /**
+   * Display-only, humanized source lines for the sent block
+   * (coworkQuoteSentSource*). The prompt body keeps the generated form; only
+   * the transcript renders these.
+   */
+  displayLabel: Record<CoworkQuotedSelectionRole, string>;
+}
+
+/** A sent selection block split off the head of a message body, for display. */
+export interface SentSelectionQuoteBlock {
+  /** The display blockquote: header stripped, source lines humanized. */
+  block: string;
+  /** Everything after the block — the owner's instruction, '' when none. */
+  rest: string;
+}
+
+const QUOTED_SELECTION_ROLES: readonly CoworkQuotedSelectionRole[] = ['user', 'assistant', 'other'];
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Match one excerpt label line (`> 引自{source}：` / `> Quoted from {source}:`)
+ * against a dictionary's template, returning the role it names — or null when
+ * the line is not a label of that dictionary.
+ */
+const matchSelectionItemLine = (
+  line: string,
+  set: SentSelectionQuoteLabelSet,
+): CoworkQuotedSelectionRole | null => {
+  const pattern = new RegExp(`^> ${escapeRegExp(set.item).replace('\\{source\\}', '(.+)')}$`);
+  const match = pattern.exec(line.trimEnd());
+  if (!match) return null;
+  return QUOTED_SELECTION_ROLES.find((role) => set.sourceLabel[role] === match[1]) ?? null;
+};
+
+/**
+ * Split the generated selection block off the head of a sent message body and
+ * return it in the transcript's quote-bar language: the header line ("从对话
+ * 中引用的片段…" — a system-prompt voice, not a person talking) is dropped and
+ * each "引自{source}：" line is swapped for its humanized display copy.
+ *
+ * Display-only: the submitted prompt body keeps the generated block verbatim
+ * (the model locates the excerpt by it), so this runs at render time against
+ * the body it was written into. `labelSets` are the shipped dictionaries'
+ * labels — a message written under any of them still matches after a language
+ * switch. Only the exact generated form matches: the body opens with a header
+ * line, its empty `>` separator, then at least one recognizable label line. A
+ * hand-written blockquote never matches and stays plain markdown. Returns null
+ * when the body carries no such block.
+ */
+export const parseSentSelectionQuoteBlock = (
+  content: string,
+  labelSets: readonly SentSelectionQuoteLabelSet[],
+): SentSelectionQuoteBlock | null => {
+  if (typeof content !== 'string' || content.length === 0) return null;
+  const lines = content.replace(/\r\n?/g, '\n').split('\n');
+  const head = (lines[0] ?? '').trimEnd();
+  const set = labelSets.find((candidate) => head === `> ${candidate.header}`);
+  if (!set) return null;
+  // The generated form always separates the header from its items with an
+  // empty blockquote line.
+  if ((lines[1] ?? '') !== '>') return null;
+  let end = 1;
+  while (end < lines.length && lines[end].startsWith('>')) end += 1;
+  // header + separator + at least one item line
+  if (end < 3) return null;
+  let recognized = 0;
+  const body = lines.slice(2, end).map((line) => {
+    const role = matchSelectionItemLine(line, set);
+    if (!role) return line;
+    recognized += 1;
+    return `> ${set.displayLabel[role]}`;
+  });
+  // Not the generated form after all (no label line matched): keep the body
+  // untouched rather than stripping a header off hand-written content.
+  if (recognized === 0) return null;
+  return {
+    block: body.join('\n'),
+    rest: lines.slice(end).join('\n').trim(),
+  };
 };
