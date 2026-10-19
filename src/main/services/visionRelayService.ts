@@ -240,7 +240,13 @@ export async function resolveVisionRelayCredentials(): Promise<{ apiKey: string;
   return credentials;
 }
 
-function invalidateCredentials(): void {
+/**
+ * Drop the vision relay credentials everywhere this service caches them: the
+ * in-memory copy AND the visionRelay kv rows. Used on a rejected key and by
+ * the identity-change closeout (a user_identity import/create leaves the
+ * previous identity's key in both tiers otherwise).
+ */
+export function invalidateVisionRelayCredentials(): void {
   cachedCredentials = null;
   try {
     const store = depsRef?.getStore?.() ?? null;
@@ -474,7 +480,7 @@ async function postRecognizeWithKeyRetry(
     const relayMessage = error instanceof VisionRelayError ? error.relayMessage : null;
     const keyRejected = relayMessage === 'relay key invalid or revoked';
     if (!keyRejected) throw error;
-    invalidateCredentials();
+    invalidateVisionRelayCredentials();
     credentials = await resolveVisionRelayCredentials();
     return postRecognize(credentials, body, emptyContentMessage);
   }

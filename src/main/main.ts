@@ -141,6 +141,7 @@ import {
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
+import { applyRelayIdentityChange, initRelayIdentityCloseoutService } from './services/relayIdentityCloseout';
 import { initVisionRelayService, recognizeAudioViaRelay, recognizeImageViaRelay, recognizeVideoAudioViaRelay, recognizeVideoViaRelay } from './services/visionRelayService';
 import { probeMediaFile, convertMediaFile, grabVideoFrame } from './services/mediaToolsService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
@@ -15079,12 +15080,19 @@ if (!gotTheLock) {
     }
   });
 
+  // Every path that writes a user_identity row (create/import) must run the
+  // relay identity closeout before reporting success: the free-relay
+  // credential caches otherwise keep serving the PREVIOUS identity's key (the
+  // 2026-10 identity-split incident). The closeout clears the caches
+  // synchronously and then re-bootstraps as the new identity; it never
+  // rejects, so an offline relay cannot fail the identity operation.
   ipcMain.handle('userIdentity:create', async (_event, input: { name: string; avatar?: string | null }) => {
     try {
       const result = await createUserIdentity(getUserIdentityStore(), input ?? { name: '' });
       if (!result.success) {
         return { success: false, error: result.error };
       }
+      const relayCloseout = await applyRelayIdentityChange({ reason: 'create' });
       return {
         success: true,
         identity: toPublicUserIdentity(result.identity ?? null),
@@ -15092,6 +15100,7 @@ if (!gotTheLock) {
         mnemonic: result.mnemonic,
         subsidy: result.subsidy,
         chainSync: result.chainSync,
+        relayCloseout,
       };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
@@ -15106,12 +15115,14 @@ if (!gotTheLock) {
       if (!result.success) {
         return { success: false, error: result.error };
       }
+      const relayCloseout = await applyRelayIdentityChange({ reason: 'import' });
       return {
         success: true,
         identity: toPublicUserIdentity(result.identity ?? null),
         profileSource: result.profileSource,
         subsidy: result.subsidy,
         chainSync: result.chainSync,
+        relayCloseout,
       };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
@@ -16732,6 +16743,19 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   setJevRelayCallStatsSink(coworkLog);
   initJevRelayService({ getStore });
   registerJevRelayIpcHandlers({ ipcMain });
+
+  // Identity-change closeout for all three relay credential caches (quota
+  // snapshot, JEV kv+memory, vision kv+memory) plus the metaid-free provider
+  // credentials. userIdentity:create/import await it so a replaced identity
+  // never keeps consuming the previous identity's relay key; it also serves
+  // as the quota-response identity-mismatch repair hook. The app_config
+  // rewrite is broadcast so the renderer configService reloads instead of
+  // writing its stale snapshot (old key) back.
+  initRelayIdentityCloseoutService({
+    getStore,
+    onAppConfigChanged: () => broadcastStoreChanged('app_config'),
+    log: coworkLog,
+  });
 
   // Event-loop liveness timeline: a stalled main process fires every
   // in-process timer late (the 2026-10-16 15.4s first-sentence stall), so

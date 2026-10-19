@@ -9,6 +9,7 @@ import { CoworkView } from './components/cowork';
 import CoworkPermissionOverlay from './components/cowork/CoworkPermissionOverlay';
 import AgentGameConsentCard from './components/agentGame/AgentGameConsentCard';
 import { configService } from './services/config';
+import { localStore } from './services/store';
 import { ensureFreeQuotaProvisioning } from './services/llmFreeQuotaBootstrap';
 import {
   clearPersistedSession,
@@ -263,6 +264,20 @@ const App: React.FC = () => {
     downloadedUpdateFileRef.current = { version: mockInfo.latestVersion, filePath: '/tmp/mock-idbots-update' };
     changeUpdatePhase(window.electron.platform === 'darwin' ? 'restartReady' : 'ready');
   }, [isInitialized, changeUpdatePhase]);
+
+  // Keep the in-memory app_config aligned with main-side rewrites. The relay
+  // identity closeout (user identity import/create) blanks and re-issues the
+  // metaid-free provider key directly in the store; without this reload the
+  // renderer kept the previous identity's key in memory and the next
+  // updateConfig wrote it straight back over the repaired row.
+  useEffect(() => {
+    const unsubscribe = localStore.onChanged(({ key }) => {
+      if (key === 'app_config') {
+        void configService.reloadFromStore();
+      }
+    });
+    return unsubscribe;
+  }, []);
 
   // 初始化应用
   useEffect(() => {

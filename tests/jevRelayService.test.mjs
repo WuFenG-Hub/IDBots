@@ -19,6 +19,7 @@ const require = Module.createRequire(import.meta.url);
 const service = require('../dist-electron/main/services/jevRelayService.js');
 const {
   initJevRelayService,
+  invalidateJevRelayCredentials,
   resetJevRelayServiceForTests,
   resolveJevRelayCredentials,
   resolveCerebellumRuntimeConfig,
@@ -600,4 +601,46 @@ test('daily rollover: the first call of a new local day emits the previous day l
   assert.equal(dailyLines.length, 1, 'crossing midnight emits exactly the previous day line');
   assert.equal(dailyLines[0].extra.calls, 1);
   assert.equal(dailyLines[0].extra.counts.ok, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Identity-change closeout hooks (2026-10 identity-split incident)
+// ---------------------------------------------------------------------------
+
+test('invalidateJevRelayCredentials drops the in-memory copy AND the kv rows', async () => {
+  const kv = new Map([
+    [JEV_RELAY_API_KEY_KV, 'mrk_identityB'],
+    [JEV_RELAY_BASE_URL_KV, CHAT_BASE],
+  ]);
+  const calls = setupDeps({ store: makeStore(kv) });
+  assert.deepEqual(await resolveJevRelayCredentials(), { apiKey: 'mrk_identityB', baseUrl: CHAT_BASE });
+  invalidateJevRelayCredentials();
+  assert.equal(kv.has(JEV_RELAY_API_KEY_KV), false);
+  assert.equal(kv.has(JEV_RELAY_BASE_URL_KV), false);
+  // Memory is gone too: the next resolution falls through to bootstrap.
+  const next = await resolveJevRelayCredentials();
+  assert.equal(next.apiKey, 'mrk_boot1');
+  assert.equal(calls.bootstrap, 1);
+});
+
+test('after an identity change the resolver adopts the re-issued provider key, never the previous identity key', async () => {
+  // Incident shape: kv + memory hold identity B's key while the closeout has
+  // just rewritten the provider entry with identity A's key.
+  const kv = new Map([
+    [JEV_RELAY_API_KEY_KV, 'mrk_identityB'],
+    [JEV_RELAY_BASE_URL_KV, CHAT_BASE],
+  ]);
+  const appConfig = { providers: { 'metaid-free': { apiKey: 'mrk_identityB', baseUrl: CHAT_BASE } } };
+  const calls = setupDeps({ store: makeStore(kv, appConfig) });
+  assert.equal((await resolveJevRelayCredentials()).apiKey, 'mrk_identityB');
+
+  invalidateJevRelayCredentials();
+  appConfig.providers['metaid-free'].apiKey = 'mrk_identityA';
+
+  const credentials = await resolveJevRelayCredentials();
+  assert.equal(credentials.apiKey, 'mrk_identityA', 'the B key must not survive in any tier');
+  assert.equal(kv.get(JEV_RELAY_API_KEY_KV), 'mrk_identityA', 're-persisted from the provider entry');
+  assert.equal(calls.bootstrap, 0, 'no bootstrap needed: the provider entry already carries the new key');
+  const runtime = await resolveCerebellumRuntimeConfig(FREE_CEREBELLUM_CONFIG);
+  assert.equal(runtime.apiKey, 'mrk_identityA');
 });

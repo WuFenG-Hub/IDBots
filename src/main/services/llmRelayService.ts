@@ -18,6 +18,13 @@
  *   cerebellum (JEV) pool; absent/0 means the backend reports one shared pool.
  * - GET /v2/assist/llm/quota — Authorization: Bearer <relay key>; same data
  *   shape minus apiKey.
+ * - Both responses may carry identityAddress/globalMetaId naming the identity
+ *   that owns the account/key. When present, they are compared against the
+ *   local user identity (relayIdentityMatchesLocalIdentity); a mismatch means
+ *   the cached key belongs to a different identity and must be dropped — the
+ *   backstop for any future "key vs identity" drift (the 2026-10 identity-split
+ *   incident: an imported identity kept consuming the silently provisioned
+ *   previous identity's quota because every cache still held its key).
  *
  * The service is Electron-free (store/identity/fetch are injected) so plain
  * node:test coverage works, mirroring trafficAccountService.
@@ -77,6 +84,8 @@ export interface LlmRelayBootstrapInfo {
   jevQuotaTotal: number;
   jevQuotaUsed: number;
   jevQuotaRemaining: number;
+  /** Identity address the relay says owns the account/key; '' when unreported. */
+  identityAddress: string;
 }
 
 export interface LlmRelayQuotaInfo {
@@ -92,6 +101,8 @@ export interface LlmRelayQuotaInfo {
   jevQuotaTotal: number;
   jevQuotaUsed: number;
   jevQuotaRemaining: number;
+  /** Identity address the relay says owns the key; '' when unreported. */
+  identityAddress: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,12 +124,37 @@ export interface LlmRelayServiceDeps {
 let depsRef: LlmRelayServiceDeps | null = null;
 let quotaCache: (LlmRelayQuotaInfo & { fetchedAt: number }) | null = null;
 
+/**
+ * Repair hook for a quota-response identity mismatch: the cached relay key
+ * belongs to a different identity than the local user_identity row, so every
+ * credential cache must be dropped and re-provisioned with a fresh
+ * identity-signed bootstrap. Registered by relayIdentityCloseout at startup
+ * (dependency inversion — this module never imports the orchestrator, so the
+ * node:test harness stays free of production wiring).
+ */
+export type LlmRelayIdentityMismatchHandler = (context: {
+  quota: LlmRelayQuotaInfo;
+  localMvcAddress: string;
+}) => Promise<void>;
+
+let identityMismatchHandler: LlmRelayIdentityMismatchHandler | null = null;
+
+export function setLlmRelayIdentityMismatchHandler(handler: LlmRelayIdentityMismatchHandler | null): void {
+  identityMismatchHandler = handler;
+}
+
 export function initLlmRelayService(deps: LlmRelayServiceDeps): void {
   depsRef = deps;
 }
 
 export function resetLlmRelayServiceForTests(): void {
   depsRef = null;
+  quotaCache = null;
+  identityMismatchHandler = null;
+}
+
+/** Drop the cached quota snapshot (identity change / mismatch closeout). */
+export function clearLlmRelayQuotaCache(): void {
   quotaCache = null;
 }
 
@@ -347,7 +383,39 @@ function normalizeQuotaPayload(data: Record<string, unknown>): Omit<LlmRelayBoot
     jevQuotaTotal: toNumber(data.jevQuotaTotal),
     jevQuotaUsed: toNumber(data.jevQuotaUsed),
     jevQuotaRemaining: toNumber(data.jevQuotaRemaining),
+    identityAddress: pickText(data, 'identityAddress', 'identity_address'),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Identity guard (key-vs-identity mismatch backstop)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare relay-reported identity fields against the local user identity.
+ * Backends that do not report the fields yet (blank on either side) pass —
+ * the guard is additive. Any non-blank reported field that disagrees with the
+ * local identity means the relay key/account belongs to someone else.
+ */
+export function relayIdentityMatchesLocalIdentity(
+  reported: { identityAddress?: unknown; globalMetaId?: unknown },
+  local: { mvc_address?: unknown; globalmetaid?: unknown } | null | undefined,
+): boolean {
+  if (!local) {
+    // No local identity to compare against (logged out / not yet created).
+    return true;
+  }
+  const reportedAddress = normalizeText(reported.identityAddress);
+  const localAddress = normalizeText(local.mvc_address);
+  if (reportedAddress && localAddress && reportedAddress !== localAddress) {
+    return false;
+  }
+  const reportedGlobal = normalizeText(reported.globalMetaId);
+  const localGlobal = normalizeText(local.globalmetaid);
+  if (reportedGlobal && localGlobal && reportedGlobal !== localGlobal) {
+    return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +490,14 @@ export async function bootstrapLlmRelay(): Promise<LlmRelayBootstrapInfo> {
     path: '/v2/assist/llm/bootstrap',
     identity: { address: identity.mvcAddress, timestamp, signature },
   });
+  if (!relayIdentityMatchesLocalIdentity(data, { mvc_address: identity.mvcAddress })) {
+    // The account the server returned is not the one this request signed as —
+    // persisting its key would recreate the identity-split incident.
+    throw new LlmRelayApiError({
+      stage: 'bootstrap',
+      message: `LLM relay bootstrap identity mismatch: signed as ${identity.mvcAddress} but the response belongs to ${normalizeText(data.identityAddress) || 'another identity'}.`,
+    });
+  }
   const quota = normalizeQuotaPayload(data);
   const apiKey = pickText(data, 'apiKey');
   if (!apiKey) {
@@ -431,9 +507,29 @@ export async function bootstrapLlmRelay(): Promise<LlmRelayBootstrapInfo> {
   return { apiKey, ...quota };
 }
 
+/** Relay key currently stored in the metaid-free provider config ('' when absent). */
+function readMetaIdFreeProviderApiKey(): string {
+  try {
+    const appConfig = getKvStore()?.get('app_config') as
+      | { providers?: Record<string, { apiKey?: unknown } | undefined> }
+      | null;
+    const apiKey = appConfig?.providers?.['metaid-free']?.apiKey;
+    return typeof apiKey === 'string' ? apiKey.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
 /**
  * Query the quota snapshot behind a relay key. Results are cached for 30s
  * unless forceRefresh is set.
+ *
+ * When the response reports the key owner's identity and it disagrees with
+ * the local user_identity row, the cached key is stale for this install
+ * (imported identity, split account): the registered mismatch handler drops
+ * every relay credential cache and re-bootstraps with the current identity,
+ * then the quota is re-read behind the repaired provider key. The mismatched
+ * snapshot is never cached.
  */
 export async function getLlmRelayQuota(input: { apiKey?: unknown; forceRefresh?: boolean }): Promise<LlmRelayQuotaInfo> {
   const apiKey = normalizeText(input?.apiKey);
@@ -444,13 +540,38 @@ export async function getLlmRelayQuota(input: { apiKey?: unknown; forceRefresh?:
     const { fetchedAt: _fetchedAt, ...snapshot } = quotaCache;
     return snapshot;
   }
-  const data = await llmRelayRequestJson({
-    stage: 'quota',
-    method: 'GET',
-    path: '/v2/assist/llm/quota',
-    bearer: apiKey,
-  });
-  const quota = normalizeQuotaPayload(data);
+  const fetchQuota = async (bearerKey: string): Promise<{ data: Record<string, unknown>; quota: LlmRelayQuotaInfo }> => {
+    const data = await llmRelayRequestJson({
+      stage: 'quota',
+      method: 'GET',
+      path: '/v2/assist/llm/quota',
+      bearer: bearerKey,
+    });
+    return { data, quota: normalizeQuotaPayload(data) };
+  };
+  let { data, quota } = await fetchQuota(apiKey);
+  let localIdentity: { mvc_address?: unknown; globalmetaid?: unknown } | null = null;
+  try {
+    localIdentity = getDeps().getUserIdentityStore().get() ?? null;
+  } catch {
+    localIdentity = null;
+  }
+  if (!relayIdentityMatchesLocalIdentity(data, localIdentity)) {
+    const localMvcAddress = normalizeText(localIdentity?.mvc_address);
+    if (identityMismatchHandler) {
+      await identityMismatchHandler({ quota, localMvcAddress });
+      const repairedKey = readMetaIdFreeProviderApiKey();
+      if (repairedKey && repairedKey !== apiKey) {
+        ({ quota } = await fetchQuota(repairedKey));
+        quotaCache = { ...quota, fetchedAt: Date.now() };
+        return quota;
+      }
+    }
+    throw new LlmRelayApiError({
+      stage: 'quota',
+      message: `LLM relay key identity mismatch: the key belongs to ${quota.identityAddress || 'another identity'} but the local identity is ${localMvcAddress || 'unknown'}.`,
+    });
+  }
   quotaCache = { ...quota, fetchedAt: Date.now() };
   return quota;
 }
