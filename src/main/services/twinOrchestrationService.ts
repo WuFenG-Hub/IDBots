@@ -123,6 +123,26 @@ function isSkillTurnTimeoutError(error: unknown): error is { sessionId: string; 
     && typeof (error as { sessionId?: unknown }).sessionId === 'string';
 }
 
+/**
+ * Skill-turn budget for one delegated Twin→Worker step.
+ *
+ * The bridge default (SKILL_TURN_TIMEOUT_MS = 5 min) is calibrated for a short
+ * inline turn, not for a delegation that must first read repository context
+ * before it writes anything: a first real delegation burned its whole 300s
+ * budget on reconnaissance and landed an empty worktree. Group-task, A2A,
+ * metaweb-study and surf all pass an explicit budget for exactly this reason
+ * (30/30/30/60 min); the Twin delegation path was the one caller that never
+ * named one and so silently inherited the 5-minute default.
+ *
+ * 30 min matches the group-task and A2A budgets. The value is a CAP, not a
+ * wait — `runSkillTurnInExistingSession` resolves on the session's `complete`
+ * event and only fires this timer when the turn is still running, so a fast
+ * step still returns as soon as it finishes. The late-completion window
+ * (SKILL_TURN_LATE_COMPLETION_WINDOW_MS, 10 min) is unchanged and stays inside
+ * the 45-min daemon watchdog the bridge documents.
+ */
+const TWIN_DELEGATION_SKILL_TURN_TIMEOUT_MS = 30 * 60 * 1000;
+
 function buildWorkerPrompt(input: DelegateLocalWorkerInput, task: OrchestrationTask, step: OrchestrationStep): string {
   return [
     '<twin_delegation>',
@@ -310,6 +330,9 @@ export class TwinOrchestrationService {
         disableMemoryUpdates: false,
         permissionMode: 'acceptEdits',
         sourceChannel: 'orchestrator',
+        // Name the budget explicitly instead of inheriting the bridge's
+        // short-turn 5-minute default (see TWIN_DELEGATION_SKILL_TURN_TIMEOUT_MS).
+        skillTurnTimeoutMs: TWIN_DELEGATION_SKILL_TURN_TIMEOUT_MS,
         onSessionCreated: (sessionId) => {
           this.deps.orchestrationStore.updateStepStatus(step.id, 'running', { activeAttemptId: attempt.id });
           this.deps.orchestrationStore.updateAttempt(attempt.id, 'running', { workerSessionId: sessionId });

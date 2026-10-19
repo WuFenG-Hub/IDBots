@@ -975,3 +975,33 @@ test('v1.5: delegateLocalWorker creates the card with origin=twin_delegate', asy
     sqliteStore.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// fix/twin-delegation-turn-budget: the delegation names its own skill-turn budget
+// ---------------------------------------------------------------------------
+
+test('delegation passes an explicit 30-minute skill-turn budget to the worker turn', async () => {
+  // The bridge default (5 min) is a short inline turn's budget; a delegation
+  // that must read repository context before it writes anything burns it on
+  // reconnaissance. The delegation path must therefore name its own budget —
+  // matching the group-task / A2A 30-minute tier — rather than inherit the
+  // bridge default the way it silently did before this fix.
+  const calls = [];
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    calls.push(params);
+    await params.onSessionCreated('worker-session-budget');
+    return 'Handoff: done.';
+  });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2,
+      objective: 'Fix three UI defects in the DSH plugin',
+      idempotencyKey: 'budget-key-1',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getAttempt(result.attempt.id).status, 'completed'));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].skillTurnTimeoutMs, 30 * 60 * 1000);
+  } finally {
+    sqliteStore.close();
+  }
+});
