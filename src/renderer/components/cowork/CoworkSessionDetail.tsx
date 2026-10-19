@@ -22,6 +22,7 @@ import CoworkQuoteActionBar, {
 } from './CoworkQuoteActionBar';
 import CoworkMessageActionsMenu from './CoworkMessageActionsMenu';
 import CoworkSentQuoteBlock from './CoworkSentQuoteBlock';
+import CoworkImageLightbox from './CoworkImageLightbox';
 import {
   buildTranscriptMessageIdsByOrdinal,
   buildTranscriptMessagePositions,
@@ -65,7 +66,6 @@ import {
 } from './coworkTodoList';
 import MarkdownContent from '../MarkdownContent';
 import MarkdownViewerPanel from './MarkdownViewerPanel';
-import LocalFileLink from '../ui/LocalFileLink';
 import {
   CheckIcon,
   InformationCircleIcon,
@@ -879,6 +879,83 @@ const extractImagePaths = (
   return dedupedPaths;
 };
 
+/**
+ * Split the attachment marker lines out of a user message body so the image
+ * files they name can render as pictures instead of as raw paths.
+ *
+ * The composer writes each attachment as its own `附件路径: <path>` line; the
+ * same text is what reaches the model, so this is a DISPLAY-side split only —
+ * `body` keeps every line that is not an attachment marker, and `imagePaths`
+ * carries the image files those markers named, for ImagePreviewStrip. A marker
+ * whose path is not a readable image stays in `body` as text, so nothing is
+ * silently swallowed.
+ */
+const splitUserAttachmentLines = (
+  content: string,
+  resolveLocalFilePath?: (href: string, text: string) => string | null,
+): { body: string; imagePaths: string[] } => {
+  if (!content) return { body: content, imagePaths: [] };
+  const lines = content.replace(/\r\n?/g, '\n').split('\n');
+  const kept: string[] = [];
+  const imagePaths: string[] = [];
+  for (const line of lines) {
+    const marker = /^\s*(?:[-*]\s*)?(?:附件路径|附件文件|输入文件|input\s*file|attachment\s*(?:path|file))\s*[:：]\s*(.+?)\s*$/i.exec(line);
+    if (!marker) {
+      kept.push(line);
+      continue;
+    }
+    const pathText = marker[1].trim();
+    const normalized = normalizeLocalPath(pathText);
+    const isImage = hasSupportedImageExtension(stripHashAndQuery(pathText))
+      || (normalized !== null && hasSupportedImageExtension(normalized.path));
+    if (!isImage) {
+      kept.push(line);
+      continue;
+    }
+    const resolved = resolveLocalFilePath
+      ? resolveLocalFilePath(pathText, pathText)
+      : null;
+    const absolute = (resolved ?? (normalized?.isAbsolute ? normalized.path : null))?.trim();
+    if (!absolute) {
+      kept.push(line);
+      continue;
+    }
+    imagePaths.push(stripFileProtocol(stripHashAndQuery(absolute)));
+  }
+  // Collapse the blank line that separated the marker block from the rest.
+  return { body: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(), imagePaths };
+};
+
+/**
+ * A user message body, with any attachment marker lines rendered as pictures.
+ *
+ * Every user-message branch (plain, reply-quote, selection-quote) renders its
+ * remaining body through this, so an image attachment shows as a thumbnail no
+ * matter which branch the message takes. Display-only: the submitted prompt
+ * text is untouched.
+ */
+const UserMessageBody: React.FC<{
+  content: string;
+  resolveLocalFilePath?: (href: string, text: string) => string | null;
+}> = ({ content, resolveLocalFilePath }) => {
+  const { body, imagePaths } = useMemo(
+    () => splitUserAttachmentLines(content, resolveLocalFilePath),
+    [content, resolveLocalFilePath],
+  );
+  return (
+    <>
+      {body ? (
+        <MarkdownContent
+          content={body}
+          className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
+        />
+      ) : null}
+      {imagePaths.length > 0 && <ImagePreviewStrip imagePaths={imagePaths} inline />}
+    </>
+  );
+};
+
+
 type ToolGroupItem = {
   type: 'tool_group';
   toolUse: CoworkMessage;
@@ -1229,7 +1306,7 @@ const TodoWriteInputView: React.FC<{ items: TodoListItem[] }> = ({ items }) => {
   );
 };
 
-const ImagePreviewStrip: React.FC<{ imagePaths: string[] }> = ({ imagePaths }) => {
+const ImagePreviewStrip: React.FC<{ imagePaths: string[]; inline?: boolean }> = ({ imagePaths, inline = false }) => {
   const [previewData, setPreviewData] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -1280,39 +1357,44 @@ const ImagePreviewStrip: React.FC<{ imagePaths: string[] }> = ({ imagePaths }) =
   }, [imagePaths]);
 
   const visiblePaths = imagePaths.filter((imagePath) => typeof previewData[imagePath] === 'string');
+
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightboxCaption, setLightboxCaption] = useState<string | undefined>(undefined);
+
   if (visiblePaths.length === 0) return null;
 
-  const handleOpenPath = async (imagePath: string) => {
-    try {
-      await window.electron.shell.openPath(imagePath);
-    } catch (error) {
-      console.error('Failed to open image path:', imagePath, error);
-    }
-  };
-
   return (
-    <div className="ml-4 mt-2 flex flex-wrap gap-2">
-      {visiblePaths.map((imagePath) => (
-        <LocalFileLink
-          key={imagePath}
-          filePath={imagePath}
-          title={imagePath}
-          showTypeIcon={false}
-          onOpen={(path) => { void handleOpenPath(path); }}
-          className="group rounded-lg border dark:border-claude-darkBorder border-claude-border overflow-hidden dark:bg-claude-darkSurface bg-claude-surface hover:border-claude-accent transition-colors"
-        >
-          <img
-            src={previewData[imagePath]}
-            alt={getPathBaseName(imagePath)}
-            className="h-24 w-24 object-cover"
-            loading="lazy"
-          />
-          <div className="px-1.5 py-1 text-[10px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary max-w-24 truncate text-left">
-            {getPathBaseName(imagePath)}
-          </div>
-        </LocalFileLink>
-      ))}
-    </div>
+    <>
+      <div className={inline ? 'mt-2 flex flex-wrap gap-2' : 'ml-4 mt-2 flex flex-wrap gap-2'}>
+        {visiblePaths.map((imagePath) => (
+          <button
+            key={imagePath}
+            type="button"
+            title={getPathBaseName(imagePath)}
+            onClick={() => {
+              setLightboxCaption(getPathBaseName(imagePath));
+              setLightboxSrc(previewData[imagePath]);
+            }}
+            className="group rounded-lg border dark:border-claude-darkBorder border-claude-border overflow-hidden dark:bg-claude-darkSurface bg-claude-surface hover:border-claude-accent transition-colors cursor-zoom-in"
+          >
+            <img
+              src={previewData[imagePath]}
+              alt={getPathBaseName(imagePath)}
+              className="h-24 w-24 object-cover"
+              loading="lazy"
+            />
+            <div className="px-1.5 py-1 text-[10px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary max-w-24 truncate text-left">
+              {getPathBaseName(imagePath)}
+            </div>
+          </button>
+        ))}
+      </div>
+      <CoworkImageLightbox
+        src={lightboxSrc}
+        caption={lightboxCaption}
+        onClose={() => setLightboxSrc(null)}
+      />
+    </>
   );
 };
 
@@ -1615,7 +1697,9 @@ const UserMessageItem: React.FC<{
   onQuoteReply?: (message: CoworkMessage, text: string) => void;
   /** Jumps back to the message a sent quote block answers (its ordinal). */
   onJumpToQuoteBlock?: (ordinal: number) => void;
-}> = ({ message, skills, sessionType, sessionTitle, botName, onQuoteReply, onJumpToQuoteBlock }) => {
+  /** Resolves an attachment path to an absolute one, so images can be read. */
+  resolveLocalFilePath?: (href: string, text: string) => string | null;
+}> = ({ message, skills, sessionType, sessionTitle, botName, onQuoteReply, onJumpToQuoteBlock, resolveLocalFilePath }) => {
   const [isHovered, setIsHovered] = useState(false);
   const isSteerMessage = message.metadata?.interactionKind === 'steer';
   const steerStatusKey = isSteerMessage
@@ -1701,9 +1785,9 @@ const UserMessageItem: React.FC<{
                         : undefined}
                     />
                     {sentQuote.rest ? (
-                      <MarkdownContent
+                      <UserMessageBody
                         content={sentQuote.rest}
-                        className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
+                        resolveLocalFilePath={resolveLocalFilePath}
                       />
                     ) : null}
                   </>
@@ -1714,16 +1798,16 @@ const UserMessageItem: React.FC<{
                   <>
                     <CoworkSentQuoteBlock block={sentSelectionQuote.block} />
                     {sentSelectionQuote.rest ? (
-                      <MarkdownContent
+                      <UserMessageBody
                         content={sentSelectionQuote.rest}
-                        className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
+                        resolveLocalFilePath={resolveLocalFilePath}
                       />
                     ) : null}
                   </>
                 ) : (
-                  <MarkdownContent
+                  <UserMessageBody
                     content={message.content}
-                    className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
+                    resolveLocalFilePath={resolveLocalFilePath}
                   />
                 )}
               </div>
@@ -4449,6 +4533,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 sessionType={currentSession?.sessionType}
                 sessionTitle={currentSession?.title}
                 botName={currentSession?.metabotName}
+                resolveLocalFilePath={resolveLocalFilePath}
                 onQuoteReply={handleQuoteReplyMessage}
                 onJumpToQuoteBlock={handleJumpToSentQuoteBlock}
               />
