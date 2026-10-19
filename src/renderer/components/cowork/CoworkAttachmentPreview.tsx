@@ -7,6 +7,7 @@ import {
   loadLocalImagePreview,
   type LocalImagePreviewEntry,
 } from '../../utils/localImage';
+import CoworkImageLightbox from './CoworkImageLightbox';
 
 /** Structural twin of the composer's local attachment shape (path + name). */
 export type CoworkAttachmentItem = { path: string; name: string };
@@ -36,6 +37,7 @@ const CoworkAttachmentPreview: React.FC<CoworkAttachmentPreviewProps> = ({
   onRemove,
 }) => {
   const isImage = hasSupportedImageExtension(attachment.path);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
   const [preview, setPreview] = useState<LocalImagePreviewEntry | undefined>(
     () => (isImage ? getLocalImagePreviewEntry(attachment.path) : undefined),
   );
@@ -86,15 +88,29 @@ const CoworkAttachmentPreview: React.FC<CoworkAttachmentPreviewProps> = ({
 
   if (preview?.status === 'ready') {
     return (
-      <div
-        className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border dark:border-claude-darkBorder border-claude-border"
-        title={attachment.path}
-      >
-        <img src={preview.dataUrl} alt="" className="h-full w-full object-cover" />
-        <span className="absolute right-0.5 top-0.5">
-          {renderRemoveButton(THUMB_REMOVE_CLASS)}
-        </span>
-      </div>
+      <>
+        <div
+          className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border dark:border-claude-darkBorder border-claude-border"
+          title={attachment.path}
+        >
+          <button
+            type="button"
+            onClick={() => setLightboxOpen(true)}
+            aria-label={attachment.name}
+            className="h-full w-full cursor-zoom-in"
+          >
+            <img src={preview.dataUrl} alt="" className="h-full w-full object-cover" />
+          </button>
+          <span className="absolute right-0.5 top-0.5">
+            {renderRemoveButton(THUMB_REMOVE_CLASS)}
+          </span>
+        </div>
+        <CoworkImageLightbox
+          src={lightboxOpen ? preview.dataUrl : null}
+          caption={attachment.name}
+          onClose={() => setLightboxOpen(false)}
+        />
+      </>
     );
   }
 

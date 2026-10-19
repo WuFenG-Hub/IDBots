@@ -558,3 +558,76 @@ test('a running turn with an image but no text offers Send, not Stop', () => {
   assert.equal(state.showStopButton, false, 'the button is Send, not Stop — clicking it must not cancel the run');
   assert.equal(state.isSteerSubmit, true);
 });
+
+// ---------------------------------------------------------------------------
+// Part 3 — the pending thumbnails live inside the composer card, and a
+// thumbnail opens the picture in-app.
+//
+// The strip used to render as a sibling ABOVE the card, so a pending image
+// floated outside the input box and read as a stray chip. It now renders inside
+// the card, above the text row. Clicking a thumbnail opens an in-app lightbox
+// instead of shelling out to the OS viewer — the same viewer the transcript's
+// sent-image strip uses.
+// ---------------------------------------------------------------------------
+
+const attachmentPreviewSource = fs.readFileSync(
+  path.join(projectRoot, 'src', 'renderer', 'components', 'cowork', 'CoworkAttachmentPreview.tsx'),
+  'utf8',
+);
+const lightboxSource = fs.readFileSync(
+  path.join(projectRoot, 'src', 'renderer', 'components', 'cowork', 'CoworkImageLightbox.tsx'),
+  'utf8',
+);
+
+test('the pending attachment strip renders inside the composer card, not beside it', () => {
+  const cardIndex = composerSource.indexOf('ref={composerCardRef}');
+  const stripIndex = composerSource.indexOf('{attachments.length > 0 && (');
+  const textRowIndex = composerSource.indexOf('{isLarge ? (');
+
+  assert.ok(cardIndex >= 0, 'the composer card ref must exist');
+  assert.ok(stripIndex >= 0, 'the attachment strip must still be rendered');
+  assert.ok(textRowIndex >= 0, 'the text row must still be rendered');
+  assert.ok(
+    cardIndex < stripIndex,
+    'the attachment strip must render inside the card (after the card ref), not above it',
+  );
+  assert.ok(
+    stripIndex < textRowIndex,
+    'the attachment strip must sit above the text row inside the card',
+  );
+  assert.ok(
+    /flex w-full flex-wrap gap-2/.test(composerSource),
+    'the strip must claim a full row so the small (flex-row) composer stacks it above the input',
+  );
+  assert.ok(
+    /relative flex flex-wrap items-end gap-2 p-3/.test(composerSource),
+    'the small composer card must wrap, so a full-width strip can occupy its own row',
+  );
+});
+
+test('a composer thumbnail opens the picture in-app, and Escape closes it', () => {
+  assert.ok(
+    /import CoworkImageLightbox from '\.\/CoworkImageLightbox';/.test(attachmentPreviewSource),
+    'the composer preview must import the in-app lightbox',
+  );
+  assert.ok(
+    /onClick=\{\(\) => setLightboxOpen\(true\)\}/.test(attachmentPreviewSource),
+    'the thumbnail must be clickable to open the lightbox',
+  );
+  assert.ok(
+    /<CoworkImageLightbox/.test(attachmentPreviewSource),
+    'the composer preview must render the lightbox',
+  );
+  assert.ok(
+    !/shell\.openPath/.test(attachmentPreviewSource),
+    'the composer must not hand the image to the OS viewer any more',
+  );
+  assert.ok(
+    /role="dialog"/.test(lightboxSource) && /aria-modal="true"/.test(lightboxSource),
+    'the lightbox must be an accessible modal dialog',
+  );
+  assert.ok(
+    /event\.key === 'Escape'/.test(lightboxSource),
+    'the lightbox must close on Escape',
+  );
+});

@@ -953,7 +953,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
 
   const containerClass = isLarge
     ? 'relative rounded-[22px] border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-card focus-within:shadow-elevated focus-within:ring-1 focus-within:ring-claude-accent/40 focus-within:border-claude-accent'
-    : 'relative flex items-end gap-2 p-3 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface';
+    : 'relative flex flex-wrap items-end gap-2 p-3 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface';
 
   const textareaClass = isLarge
     ? `w-full resize-none bg-transparent px-4 pt-2.5 pb-2 dark:text-claude-darkText text-claude-text placeholder:dark:text-claude-darkTextSecondary/60 placeholder:text-claude-textSecondary/60 focus:outline-none text-[14px] leading-[24px] min-h-[${minHeight}px] max-h-[${maxHeight}px]`
@@ -1305,18 +1305,6 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
 
   return (
     <div className="relative">
-      {attachments.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-2">
-          {attachments.map((attachment) => (
-            <CoworkAttachmentPreview
-              key={attachment.path}
-              attachment={attachment}
-              removeDisabled={!attachmentAdmitted}
-              onRemove={handleRemoveAttachment}
-            />
-          ))}
-        </div>
-      )}
       <div
         ref={composerCardRef}
         className={enhancedContainerClass}
@@ -1339,6 +1327,18 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
             onPick={pickCommand}
             anchorRef={composerCardRef}
           />
+        )}
+        {attachments.length > 0 && (
+          <div className={`relative z-10 flex w-full flex-wrap gap-2 ${isLarge ? 'px-3 pt-3' : ''}`}>
+            {attachments.map((attachment) => (
+              <CoworkAttachmentPreview
+                key={attachment.path}
+                attachment={attachment}
+                removeDisabled={!attachmentAdmitted}
+                onRemove={handleRemoveAttachment}
+              />
+            ))}
+          </div>
         )}
         {isLarge ? (
           <>
