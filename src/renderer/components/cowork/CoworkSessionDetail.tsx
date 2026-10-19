@@ -19,14 +19,20 @@ import CoworkQuoteActionBar, {
   QUOTE_ACTION_BAR_HEIGHT,
   QUOTE_ACTION_BAR_WIDTH,
 } from './CoworkQuoteActionBar';
-import CoworkMessageReplyAction from './CoworkMessageReplyAction';
+import CoworkMessageActionsMenu from './CoworkMessageActionsMenu';
+import CoworkSentQuoteBlock from './CoworkSentQuoteBlock';
 import {
+  buildTranscriptMessageIdsByOrdinal,
   buildTranscriptMessagePositions,
   createMessageQuotedSelection,
   createPendingQuotedSelection,
   createQuotedSelection,
+  findTranscriptMessageElement,
+  parseSentQuoteBlock,
+  parseSentSelectionQuoteBlock,
   resolveQuoteActionBarAnchorRect,
   type PendingQuotedSelection,
+  type SentSelectionQuoteLabelSet,
 } from './coworkQuotedSelections';
 import CoworkPermissionPanel from './CoworkPermissionPanel';
 import { buildSessionComposerCommands } from './composerCommandCatalog';
@@ -95,7 +101,7 @@ import {
   getCoworkSessionTitleClassName,
   shouldShowA2AServiceSessionId,
 } from './coworkSessionPresentation.js';
-import { isAssistantTurnComplete, findDeliveryAssistantIndex } from './assistantTurnPresentation.js';
+import { isAssistantTurnComplete, findDeliveryAssistantIndex, shouldShowAssistantBubbleActions } from './assistantTurnPresentation.js';
 import { reuseStableTurns } from './conversationTurnReuse.js';
 import {
   buildRefundStatusDismissKey,
@@ -164,6 +170,41 @@ const STEER_STATUS_TRANSLATION_KEYS: Record<string, string> = {
   failed: 'coworkSteerStatusFailed',
   cancelled: 'coworkSteerStatusCancelled',
 };
+
+// The quote-jump highlight: the app's own gold accent as a brief ring around
+// the one message that was jumped to — never a background recolour of the
+// transcript.
+//
+// The ring deliberately uses the SOLID accent token: the `/40` opacity
+// modifier does not compile for var()-based claude tokens in this Tailwind
+// build (no <alpha-value> placeholder, so the utility is silently dropped and
+// the ring falls back to Tailwind's default blue). `ring-claude-accent` is the
+// only form that renders the intended colour; same token, no new colour or
+// variable.
+const QUOTE_JUMP_HIGHLIGHT_CLASSES = ['ring-1', 'ring-claude-accent'];
+
+// The label sets the sent-selection-block parser matches against: every
+// shipped dictionary, so a quote block written under one language still gets
+// its clean display after the app language is switched (the transcript renders
+// a sent block in the language it was written in).
+const SENT_QUOTE_LABEL_LANGUAGES = ['zh', 'en'] as const;
+
+export const buildSentSelectionQuoteLabelSets = (): SentSelectionQuoteLabelSet[] => (
+  SENT_QUOTE_LABEL_LANGUAGES.map((language) => ({
+    header: i18nService.tIn(language, 'coworkQuoteBlockHeader'),
+    item: i18nService.tIn(language, 'coworkQuoteBlockItem'),
+    sourceLabel: {
+      user: i18nService.tIn(language, 'coworkQuoteSourceUser'),
+      assistant: i18nService.tIn(language, 'coworkQuoteSourceAssistant'),
+      other: i18nService.tIn(language, 'coworkQuoteSourceOther'),
+    },
+    displayLabel: {
+      user: i18nService.tIn(language, 'coworkQuoteSentSourceUser'),
+      assistant: i18nService.tIn(language, 'coworkQuoteSentSourceAssistant'),
+      other: i18nService.tIn(language, 'coworkQuoteSentSourceOther'),
+    },
+  }))
+);
 
 const readDismissedRefundStatusKeys = (): Set<string> => {
   if (typeof window === 'undefined' || !window.localStorage) {
@@ -931,6 +972,28 @@ export const pinScrollToBottom = (element: HTMLElement | null): void => {
   element.scrollTop = element.scrollHeight;
 };
 
+/**
+ * Whether a follow-effect run is the arrival of the reply a pending quote
+ * reply is waiting for.
+ *
+ * The one-shot flag is set at send time, when the submission carries a quote
+ * block: the owner may be parked at the quoted message on purpose (the
+ * confirmation window), so the follow gate (`shouldAutoScroll`) stays closed
+ * and the "back to bottom" button stays available while the turn runs — but
+ * the reply must still pull the view down once it arrives. "Arrival" is the
+ * transcript's tail turning into an assistant message: the user-message echo
+ * that lands right after the send must not consume the flag, or the view
+ * would leave the quoted message the moment the send goes through.
+ */
+export const shouldFollowPendingQuoteReply = (
+  messages: Array<{ type?: string }> | undefined,
+  pendingQuoteReplyFollow: boolean,
+): boolean => {
+  if (!pendingQuoteReplyFollow) return false;
+  const last = messages?.[messages.length - 1];
+  return last?.type === 'assistant';
+};
+
 export const buildAutoScrollFollowSignal = (
   messages: Array<{ id: string; content: string; metadata?: { isStreaming?: boolean } }> | undefined,
   isStreaming: boolean,
@@ -1400,71 +1463,9 @@ const ToolCallGroup: React.FC<{
   );
 };
 
-// Copy button component
-const CopyButton: React.FC<{
-  content: string;
-  visible: boolean;
-}> = ({ content, visible }) => {
-  const [copied, setCopied] = useState(false);
 
-  const handleCopy = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(content);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error('Failed to copy:', err);
-    }
-  };
-
-  return (
-    <button
-      onClick={handleCopy}
-      className={`p-1.5 rounded-md dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-all duration-200 ${
-        visible ? 'opacity-100' : 'opacity-0 pointer-events-none'
-      }`}
-      title={i18nService.t('copyToClipboard')}
-    >
-      {copied ? (
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="24"
-          height="24"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="w-4 h-4 text-green-500"
-          aria-hidden="true"
-        >
-          <polyline points="20 6 9 17 4 12"></polyline>
-        </svg>
-      ) : (
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="24"
-          height="24"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="w-4 h-4 text-[var(--icon-secondary)]"
-          aria-hidden="true"
-        >
-          <rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect>
-          <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path>
-        </svg>
-      )}
-    </button>
-  );
-};
-
-// Message timestamp shown next to the copy button, sharing its
+// Message timestamp on the turn-end line, sharing the hover-visibility
+// logic and visual style of the action row it sits in.
 // hover-visibility logic and visual style.
 const MessageTimestamp: React.FC<{
   timestamp: number;
@@ -1581,7 +1582,9 @@ const UserMessageItem: React.FC<{
   sessionTitle?: string;
   /** Quotes this whole message into the composer slot (the reply entry). */
   onQuoteReply?: (message: CoworkMessage, text: string) => void;
-}> = ({ message, skills, sessionType, sessionTitle, onQuoteReply }) => {
+  /** Jumps back to the message a sent quote block answers (its ordinal). */
+  onJumpToQuoteBlock?: (ordinal: number) => void;
+}> = ({ message, skills, sessionType, sessionTitle, onQuoteReply, onJumpToQuoteBlock }) => {
   const [isHovered, setIsHovered] = useState(false);
   const isSteerMessage = message.metadata?.interactionKind === 'steer';
   const steerStatusKey = isSteerMessage
@@ -1593,6 +1596,20 @@ const UserMessageItem: React.FC<{
   const messageSkills = messageSkillIds
     .map(id => skills.find(s => s.id === id))
     .filter((s): s is NonNullable<typeof s> => s !== undefined);
+
+  // A sent message body can open with the generated reply block ("#<ordinal>
+  // <side>: …"); split it off so it renders as the jump-back control while the
+  // rest of the body renders exactly as before. Hand-written blockquotes — not
+  // at the body's head, or without the label — never match.
+  const sentQuote = parseSentQuoteBlock(message.content);
+  // A body can also open with the generated selection block ("从对话中引用的
+  // 片段…" header + "引自{source}：" lines): split that off too, so it renders
+  // in the same quote-bar language as the reply block instead of as a wall of
+  // system-prompt-voiced markdown. Display-only — the header and the machine
+  // label stay in the submitted prompt body verbatim (the model reads them).
+  const sentSelectionQuote = sentQuote
+    ? null
+    : parseSentSelectionQuoteBlock(message.content, buildSentSelectionQuoteLabelSets());
 
   const gigSquareCard = renderGigSquareCard(message.content);
   if (gigSquareCard) {
@@ -1637,11 +1654,47 @@ const UserMessageItem: React.FC<{
                 sessionType={sessionType}
                 sessionTitle={sessionTitle}
               />
-              <div className="cowork-user-bubble w-fit max-w-[min(646px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text">
-                <MarkdownContent
-                  content={message.content}
-                  className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
-                />
+              {/* The id also rides the bubble: the quote-jump ring wraps the
+                  innermost data-message-id mount, so it hugs this bubble's
+                  own outline — w-fit width, its 22px radius. */}
+              <div
+                className="cowork-user-bubble w-fit max-w-[min(646px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text"
+                data-message-id={message.id}
+              >
+                {sentQuote ? (
+                  <>
+                    <CoworkSentQuoteBlock
+                      block={sentQuote.block}
+                      onJump={onJumpToQuoteBlock
+                        ? () => onJumpToQuoteBlock(sentQuote.ordinal)
+                        : undefined}
+                    />
+                    {sentQuote.rest ? (
+                      <MarkdownContent
+                        content={sentQuote.rest}
+                        className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
+                      />
+                    ) : null}
+                  </>
+                ) : sentSelectionQuote ? (
+                  // Same quote bar as the reply block — gold rule, source line,
+                  // excerpt — just without a jump target (a hand-picked
+                  // selection carries no message position).
+                  <>
+                    <CoworkSentQuoteBlock block={sentSelectionQuote.block} />
+                    {sentSelectionQuote.rest ? (
+                      <MarkdownContent
+                        content={sentSelectionQuote.rest}
+                        className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
+                      />
+                    ) : null}
+                  </>
+                ) : (
+                  <MarkdownContent
+                    content={message.content}
+                    className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
+                  />
+                )}
               </div>
               <div className="flex items-center justify-end gap-1.5 mt-1">
                 {isSteerMessage && (
@@ -1671,21 +1724,11 @@ const UserMessageItem: React.FC<{
                     </span>
                   </div>
                 ))}
-                <MessageTimestamp
-                  timestamp={message.timestamp}
+                <CoworkMessageActionsMenu
                   visible={isHovered}
+                  text={message.content}
+                  onQuote={() => onQuoteReply?.(message, message.content)}
                 />
-                <CopyButton
-                  content={message.content}
-                  visible={isHovered}
-                />
-                {onQuoteReply && (
-                  <CoworkMessageReplyAction
-                    text={message.content}
-                    visible={isHovered}
-                    onReply={() => onQuoteReply(message, message.content)}
-                  />
-                )}
               </div>
             </div>
           </div>
@@ -1708,10 +1751,10 @@ const AssistantMessageItem: React.FC<{
   /** Assistant mode drops the embedded thinking segment (raw reasoning is
    * never shown) and renders only the visible reply text. */
   isAssistantMode?: boolean;
-  /** Assistant mode shows its hover-action toolbar on the turn's final reply
-   * bubble only; narration and process bubbles render without one. Ignored in
-   * professional mode. */
-  isFinalReply?: boolean;
+  /** True on the turn's last bubble: that is the only place the timestamp and
+   * the feedback thumbs render, so a turn's narration segments do not each
+   * carry a near-duplicate clock. */
+  isTurnEnd?: boolean;
 }> = ({
   message,
   resolveLocalFilePath,
@@ -1721,11 +1764,10 @@ const AssistantMessageItem: React.FC<{
   onBranch,
   onQuoteReply,
   isAssistantMode = false,
-  isFinalReply = false,
+  isTurnEnd = false,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
   const displayContent = mapDisplayText ? mapDisplayText(message.content) : message.content;
-  const isNarration = message.metadata?.narration === true;
   const gigSquareCard = renderGigSquareCard(message.content);
   const thinkSplit = splitThinkTaggedContent(displayContent);
   const renderExtension = React.useContext(MessageExtensionContext);
@@ -1752,6 +1794,7 @@ const AssistantMessageItem: React.FC<{
   return (
     <div
       className="relative"
+      data-message-id={message.id}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
@@ -1770,16 +1813,25 @@ const AssistantMessageItem: React.FC<{
           // purely by background color (no border) via the theme-adaptive
           // neutral-gray .assistant-bubble fill. The w-fit wrapper shares the
           // user bubble's max width (max-w-[min(646px,82%)]) so the bubble
-          // hugs short messages and never stretches to the full column. One
-          // hover-action toolbar per turn hangs below the final reply bubble's
-          // bottom edge (never overlapping its text); narration and process
-          // bubbles render without one. The strip overlays the inter-bubble
-          // gap, so consecutive bubbles keep the container's uniform
-          // space-y-1 rhythm in every state (an in-flow row used to add ~32px
-          // under each bubble once the turn completed, and the old in-bubble
-          // overlay covered reply text).
+          // hugs short messages and never stretches to the full column.
+          // EVERY bubble carries its own hover-action toolbar — narration
+          // bubbles included — so each single message is individually
+          // replyable, the same per-message actions the professional row
+          // gives every assistant message. The toolbar hangs below the
+          // bubble's bottom edge (never overlapping its text) and overlays
+          // the inter-bubble gap instead of adding layout, so consecutive
+          // bubbles keep the container's uniform space-y-1 rhythm in every
+          // state (an in-flow row used to add ~32px under each bubble once
+          // the turn completed, and the old in-bubble overlay covered reply
+          // text); z-10 keeps the strip above the next bubble's rounded top.
           <div className="relative w-fit max-w-[min(646px,82%)]">
-            <div className="assistant-bubble rounded-[22px] px-[16px] py-[10px] dark:text-claude-darkText text-claude-text shadow-subtle">
+            {/* The id also rides the bubble: the quote-jump ring wraps the
+                innermost data-message-id mount, so it hugs this bubble's
+                own outline — w-fit width, its 22px radius. */}
+            <div
+              className="assistant-bubble rounded-[22px] px-[16px] py-[10px] dark:text-claude-darkText text-claude-text shadow-subtle"
+              data-message-id={message.id}
+            >
               <MarkdownContent
                 content={replyContent}
                 className="prose dark:prose-invert max-w-none"
@@ -1788,50 +1840,35 @@ const AssistantMessageItem: React.FC<{
                 chatExperienceMode={isAssistantMode ? 'assistant' : 'professional'}
               />
             </div>
-            {showCopyButton && isFinalReply && !isNarration && (
-              // The pt-0.5 bridge keeps the pointer over a DOM descendant of
-              // the hover-tracked root while crossing the bubble→strip seam,
-              // so the toolbar does not flicker when the mouse slides down.
-              <div
-                className={`absolute right-1 top-full flex items-center gap-1 pt-0.5 transition-all duration-200 ${
-                  isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                }`}
-              >
-                <div className="flex items-center gap-1 rounded-lg px-1 py-0.5 dark:bg-claude-darkSurface/90 bg-claude-surface/90 shadow-subtle">
-                  <CopyButton
-                    content={replyContent || displayContent}
+            {shouldShowAssistantBubbleActions({ isAssistantMode, showCopyButton }) && (
+              // Hover design (owner, 2026-10-19): a single "⋯" beside the bubble
+              // opens quote / copy / branch — the old inline strip is gone, so a
+              // turn split into many narration segments no longer stacks a full
+              // action row under every one of them. The turn-end line keeps only
+              // the timestamp and the feedback thumbs, which is what makes
+              // "did I react to this?" visible without opening a menu.
+              <>
+                <div className="absolute z-10 left-full top-1 ml-1">
+                  <CoworkMessageActionsMenu
                     visible={isHovered}
+                    text={replyContent}
+                    onQuote={() => onQuoteReply?.(message, replyContent)}
+                    onBranch={onBranch ? () => void onBranch(message) : undefined}
                   />
-                  <MessageFeedbackControls
-                    messageId={message.id}
-                    visible={isHovered}
-                  />
-                  {onQuoteReply && (
-                    <CoworkMessageReplyAction
-                      text={replyContent}
-                      visible={isHovered}
-                      onReply={() => onQuoteReply(message, replyContent)}
-                    />
-                  )}
-                  <MessageTimestamp
-                    timestamp={message.timestamp}
-                    visible={isHovered}
-                  />
-                  {onBranch && (
-                    <button
-                      type="button"
-                      onClick={() => void onBranch(message)}
-                      className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-all duration-200 ${
-                        isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                      }`}
-                      title={i18nService.t('coworkBranchNewChatTitle')}
-                    >
-                      <DocumentDuplicateIcon className="h-3 w-3" />
-                      {i18nService.t('coworkBranchNewChatLabel')}
-                    </button>
-                  )}
                 </div>
-              </div>
+                {isTurnEnd && (
+                  <div className="mt-1 flex items-center gap-1.5">
+                    <MessageTimestamp
+                      timestamp={message.timestamp}
+                      visible={isHovered}
+                    />
+                    <MessageFeedbackControls
+                      messageId={message.id}
+                      visible={isHovered}
+                    />
+                  </div>
+                )}
+              </>
             )}
           </div>
         ) : (
@@ -1849,40 +1886,29 @@ const AssistantMessageItem: React.FC<{
       ) : null}
       {renderExtension?.(message)}
       {!isAssistantMode && showCopyButton && (
-        <div className="flex items-center gap-1.5 mt-1">
-          <CopyButton
-            content={replyContent || displayContent}
-            visible={isHovered}
-          />
-          <MessageFeedbackControls
-            messageId={message.id}
-            visible={isHovered}
-          />
-          {onQuoteReply && (
-            <CoworkMessageReplyAction
-              text={replyContent}
+        // Professional mode renders one bubble per turn, so this row IS the
+        // turn end: timestamp + feedback only. The "⋯" rides at the message's
+        // top-right (the item root is the positioning context).
+        <>
+          <div className="absolute z-10 left-full top-1 ml-1">
+            <CoworkMessageActionsMenu
               visible={isHovered}
-              onReply={() => onQuoteReply(message, replyContent)}
+              text={replyContent}
+              onQuote={() => onQuoteReply?.(message, replyContent)}
+              onBranch={onBranch ? () => void onBranch(message) : undefined}
             />
-          )}
-          <MessageTimestamp
-            timestamp={message.timestamp}
-            visible={isHovered}
-          />
-          {onBranch && (
-            <button
-              type="button"
-              onClick={() => void onBranch(message)}
-              className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-all duration-200 ${
-                isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
-              }`}
-              title={i18nService.t('coworkBranchNewChatTitle')}
-            >
-              <DocumentDuplicateIcon className="h-3 w-3" />
-              {i18nService.t('coworkBranchNewChatLabel')}
-            </button>
-          )}
-        </div>
+          </div>
+          <div className="flex items-center gap-1.5 mt-1">
+            <MessageTimestamp
+              timestamp={message.timestamp}
+              visible={isHovered}
+            />
+            <MessageFeedbackControls
+              messageId={message.id}
+              visible={isHovered}
+            />
+          </div>
+        </>
       )}
     </div>
   );
@@ -2497,7 +2523,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
           onBranch={onBranch}
           onQuoteReply={onQuoteReply}
           isAssistantMode={isAssistantMode}
-          isFinalReply={isAssistantMode && index === deliveryIndex}
+          isTurnEnd={!isAssistantMode || index === visibleAssistantItems.length - 1}
         />
       );
     }
@@ -2633,6 +2659,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
                   onBranch={onBranch}
                   onQuoteReply={onQuoteReply}
                   isAssistantMode={isAssistantMode}
+                  isTurnEnd
                 />
               </>
             ) : (
@@ -3032,6 +3059,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const consumedOrderFocusKeyRef = useRef<string | null>(null);
   const lastAutoScrollSessionIdRef = useRef<string | null>(null);
   const skipNextAutoScrollEffectRef = useRef(false);
+  // One-shot: a submission that carries a quote block arms it; the arrival of
+  // the reply consumes it (see the follow effect). `shouldAutoScroll` is never
+  // touched on this path — the "back to bottom" button must stay available
+  // while the owner waits parked at the quoted message.
+  const pendingQuoteReplyFollowRef = useRef(false);
   const pinningScrollRef = useRef(false);
   const focusHighlightTimeoutRef = useRef<number | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
@@ -4065,12 +4097,25 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   // useLayoutEffect runs before paint so the user never sees a frame where
   // the transcript has grown and the viewport has not yet followed.
   useLayoutEffect(() => {
-    if (!shouldAutoScroll) {
+    // A quote reply sent while the owner was parked at the quoted message
+    // (the confirmation window) must still follow when its reply arrives: the
+    // gate is closed on purpose during the wait, so the one-shot flag bypasses
+    // it for exactly this run and is consumed here — the forced scroll lands
+    // near the bottom, and the ordinary near-bottom mechanics take over from
+    // there.
+    const quoteReplyArrived = shouldFollowPendingQuoteReply(
+      currentSession?.messages,
+      pendingQuoteReplyFollowRef.current,
+    );
+    if (!shouldAutoScroll && !quoteReplyArrived) {
       return;
     }
     if (skipNextAutoScrollEffectRef.current) {
       skipNextAutoScrollEffectRef.current = false;
       return;
+    }
+    if (quoteReplyArrived) {
+      pendingQuoteReplyFollowRef.current = false;
     }
     const sessionId = currentSession?.id ?? null;
     if (isStreaming) {
@@ -4090,6 +4135,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       lastAutoScrollSessionIdRef.current = sessionId;
     }
   }, [currentSession?.id, autoScrollFollowSignal, isStreaming, shouldAutoScroll]);
+
+  // Send path for the one-shot follow above: a submission that carries a quote
+  // block — a per-message reply or a hand-picked selection, both of which open
+  // the composed body with their generated block — arms the flag. Every submit
+  // re-decides it, so a later plain message clears a stale one.
+  const handlePromptSubmit = useCallback((prompt: string, skillPrompt?: string) => {
+    pendingQuoteReplyFollowRef.current = parseSentQuoteBlock(prompt) !== null
+      || parseSentSelectionQuoteBlock(prompt, buildSentSelectionQuoteLabelSets()) !== null;
+    return onContinue(prompt, skillPrompt);
+  }, [onContinue]);
 
   useEffect(() => {
     consumedOrderFocusKeyRef.current = null;
@@ -4175,11 +4230,26 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     transcriptMessagePositionsRef.current = buildTranscriptMessagePositions(turns);
   }, [turns]);
 
+  // Readable notice shown beside the composer when a quote-jump target is not
+  // in the rendered window (and the timer that clears the jump flash).
+  const [quoteJumpNotice, setQuoteJumpNotice] = useState<string | null>(null);
+  const quoteJumpHighlightTimerRef = useRef<number | null>(null);
+
   const handleQuoteReplyMessage = useCallback((message: CoworkMessage, text: string) => {
+    // A fresh quote supersedes any "target not loaded" notice from an earlier
+    // jump attempt.
+    setQuoteJumpNotice(null);
     const ordinal = transcriptMessagePositionsRef.current.get(message.id);
-    // The entry only renders on messages the transcript's turns carry, so the
-    // lookup resolves for every real click.
-    if (!ordinal) return;
+    // The entry mounts on exactly the messages `turns` carries — user bubbles
+    // and every assistant bubble (narration included) — and this map is built
+    // from those same turns, so every rendered entry resolves here. A miss
+    // means the mount conditions drifted away from
+    // buildTranscriptMessagePositions: surface it instead of a silent no-op
+    // (the user-visible symptom would be "clicked 回复, nothing happened").
+    if (!ordinal) {
+      console.warn('[cowork] reply entry without a transcript position:', message.id);
+      return;
+    }
     const fragment = createMessageQuotedSelection({
       content: text,
       role: message.type === 'user' ? 'user' : message.type === 'assistant' ? 'assistant' : 'other',
@@ -4192,6 +4262,55 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     promptInputRef.current?.addQuotedSelection(fragment);
     promptInputRef.current?.focus();
   }, []);
+
+  // Jump back to a quoted message: scroll its transcript element into view and
+  // ring it briefly, so "which message was I answering?" is one click, not a
+  // hunt. The sent quote blocks in the transcript are the callers (see
+  // handleJumpToSentQuoteBlock).
+  //
+  // The target can legitimately be outside the rendered window (the transcript
+  // pages older messages in on demand), so a miss is not an error path — but it
+  // must not fail silently either: the composer shows a readable notice beside
+  // the input (same alert style as the submit / branch errors) telling the user
+  // the message is not loaded and how to get it. A hit clears the notice.
+  const handleJumpToQuotedMessage = useCallback((messageId: string) => {
+    const container = scrollContainerRef.current;
+    const element = findTranscriptMessageElement(container, messageId);
+    if (!element) {
+      setQuoteJumpNotice(i18nService.t('coworkQuoteJumpMissing'));
+      console.info('[cowork] quote jump: target message is not in the rendered window; notice shown:', messageId);
+      return;
+    }
+    setQuoteJumpNotice(null);
+    element.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    // Remove-then-add so a repeated jump restarts the full 2.5s window; the
+    // ring is a static style, so no reflow trick is needed.
+    element.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
+    element.classList.add(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
+    if (quoteJumpHighlightTimerRef.current != null) {
+      window.clearTimeout(quoteJumpHighlightTimerRef.current);
+    }
+    quoteJumpHighlightTimerRef.current = window.setTimeout(() => {
+      element.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
+      quoteJumpHighlightTimerRef.current = null;
+    }, 2500);
+  }, []);
+
+  // Jump back from a *sent* quote block (a message body that opens with the
+  // generated reply block). The block only carries the quoted message's
+  // position, so the jump resolves position → id against the transcript's
+  // current map and reuses the scroll + ring path above. A position the map no
+  // longer holds is the same "not in the loaded window" story — the readable
+  // notice, never a silent no-op.
+  const handleJumpToSentQuoteBlock = useCallback((ordinal: number) => {
+    const targetId = buildTranscriptMessageIdsByOrdinal(transcriptMessagePositionsRef.current).get(ordinal);
+    if (!targetId) {
+      setQuoteJumpNotice(i18nService.t('coworkQuoteJumpMissing'));
+      console.info('[cowork] quote jump: quoted position is not in the rendered transcript window; notice shown:', ordinal);
+      return;
+    }
+    handleJumpToQuotedMessage(targetId);
+  }, [handleJumpToQuotedMessage]);
 
   // A window whose messages all render as nothing (the transcript hides control
   // and internal-signal messages) would strand the history: there is nothing to
@@ -4292,13 +4411,14 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       return (
         <React.Fragment key={turn.id}>
           {turn.userMessage && (
-            <div data-export-role="user-message">
+            <div data-export-role="user-message" data-message-id={turn.userMessage.id}>
               <UserMessageItem
                 message={turn.userMessage}
                 skills={skills}
                 sessionType={currentSession?.sessionType}
                 sessionTitle={currentSession?.title}
                 onQuoteReply={handleQuoteReplyMessage}
+                onJumpToQuoteBlock={handleJumpToSentQuoteBlock}
               />
             </div>
           )}
@@ -4918,7 +5038,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 key={currentSession.id}
                 ref={promptInputRef}
                 scopeKey={currentSession.id}
-                onSubmit={onContinue}
+                onSubmit={handlePromptSubmit}
                 onStop={onStop}
                 isStreaming={isStreaming}
                 steerDisabled={steerDisabled}
@@ -4946,6 +5066,14 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             {branchActionError && (
               <div className="mt-2 text-xs text-red-500 dark:text-red-400" role="alert">
                 {branchActionError}
+              </div>
+            )}
+            {quoteJumpNotice && (
+              // "Jump to the quoted message" missed: the message is not in the
+              // rendered window. Readable, beside the input, same style as the
+              // two alerts above — never a silent no-op.
+              <div className="mt-2 text-xs text-red-500 dark:text-red-400" role="alert">
+                {quoteJumpNotice}
               </div>
             )}
           </div>
