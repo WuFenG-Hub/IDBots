@@ -22,6 +22,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { build } from 'esbuild';
 
 import {
+  QUOTED_SELECTION_DISPLAY_CHARS,
   QUOTED_SELECTION_MAX_CHARS,
   buildQuotedSelectionsBlock,
   composeCoworkPromptBody,
@@ -165,8 +166,8 @@ test('added fragments render as tiles with their source and summary, and can be 
   assert.ok(markup.includes(i18nService.t('coworkQuoteSourceUser')), 'user source named');
   assert.ok(markup.includes(i18nService.t('coworkQuoteSelectionsLabel')), 'fragment list labelled');
   assert.ok(
-    markup.includes(summarizeQuotedSelectionText(first.text)),
-    'the tile shows the fragment summary',
+    markup.includes(summarizeQuotedSelectionText(first.text, QUOTED_SELECTION_DISPLAY_CHARS)),
+    'the tile shows the fragment summary under the display cap',
   );
   assert.ok(markup.includes(QUOTE_TEXT), 'the summary is taken from the quoted text itself');
   assert.ok(first.truncated && markup.includes(i18nService.t('coworkQuoteTruncated')), 'truncation is surfaced');
@@ -518,12 +519,15 @@ test('a sent selection block renders in the quote-bar language, while the prompt
     assert.ok(body.startsWith(`> ${i18nService.t('coworkQuoteBlockHeader')}\n>\n`), body);
     assert.ok(body.includes(`> ${i18nService.t('coworkQuoteBlockItem').replace('{source}', i18nService.t('coworkQuoteSourceAssistant'))}`), body);
 
-    // The display split drops the header and humanizes the source line; the
-    // excerpt and the instruction survive intact.
-    const parsed = parseSentSelectionQuoteBlock(body, buildSentSelectionQuoteLabelSets());
+    // The display split drops the header and names the speaker WeChat-style
+    // (`你：` / `<bot 名>：`; this call carries no bot name, so the assistant
+    // line reads with the fallback name); the excerpt and the instruction
+    // survive intact.
+    const displaySets = buildSentSelectionQuoteLabelSets();
+    const parsed = parseSentSelectionQuoteBlock(body, displaySets);
     assert.ok(parsed, body);
     assert.ok(!parsed.block.includes(i18nService.t('coworkQuoteBlockHeader')), 'the system-voiced header never renders');
-    assert.ok(parsed.block.startsWith(`> ${i18nService.t('coworkQuoteSentSourceAssistant')}\n> `), parsed.block);
+    assert.ok(parsed.block.startsWith(`> ${displaySets[0].displayLabel.assistant}\n> `), parsed.block);
     assert.ok(parsed.block.includes(QUOTE_TEXT), 'the excerpt stays');
     assert.equal(parsed.rest, 'Please answer only about that part.');
 
@@ -535,7 +539,7 @@ test('a sent selection block renders in the quote-bar language, while the prompt
       const markup = renderToStaticMarkup(<CoworkSentQuoteBlock block={parsed.block} />);
       assert.ok(markup.includes('data-cowork-sent-quote="true"'));
       assert.match(markup, /<blockquote/);
-      assert.ok(markup.includes(i18nService.t('coworkQuoteSentSourceAssistant')));
+      assert.ok(markup.includes(displaySets[0].displayLabel.assistant));
       assert.ok(markup.includes(QUOTE_TEXT));
       assert.doesNotMatch(markup, /role="button"/, 'no jump target — a hand-picked selection carries no position');
     } finally {
@@ -544,18 +548,26 @@ test('a sent selection block renders in the quote-bar language, while the prompt
     }
   });
 
-  // Several excerpts keep their per-item source lines inside the one block.
+  // Several excerpts: the display shortens the block to the first speaker line
+  // and its excerpt (one short line), while the submitted body still carries
+  // every item's generated source line.
   withLanguage('zh', () => {
     const body = composeSubmittedCoworkPrompt({
       value: 'both please',
       quotedSelections: [selection('first passage', 'assistant', 'q-2a'), selection('second passage', 'user', 'q-2b')],
       labels: buildLabels(),
     });
-    const parsed = parseSentSelectionQuoteBlock(body, buildSentSelectionQuoteLabelSets());
+    const displaySets = buildSentSelectionQuoteLabelSets();
+    const parsed = parseSentSelectionQuoteBlock(body, displaySets);
     assert.ok(parsed, body);
     assert.ok(!parsed.block.includes(i18nService.t('coworkQuoteBlockHeader')));
-    assert.ok(parsed.block.includes(`> ${i18nService.t('coworkQuoteSentSourceAssistant')}`));
-    assert.ok(parsed.block.includes(`> ${i18nService.t('coworkQuoteSentSourceUser')}`));
+    assert.equal(parsed.block.split('\n').length, 2, 'label + first excerpt — the remaining lines are dropped');
+    assert.ok(parsed.block.startsWith(`> ${displaySets[0].displayLabel.assistant}\n> first passage`), parsed.block);
+    assert.ok(
+      body.includes(`> ${i18nService.t('coworkQuoteBlockItem').replace('{source}', i18nService.t('coworkQuoteSourceAssistant'))}`)
+      && body.includes(`> ${i18nService.t('coworkQuoteBlockItem').replace('{source}', i18nService.t('coworkQuoteSourceUser'))}`),
+      'the submitted body still carries every per-item source line',
+    );
     assert.equal(parsed.rest, 'both please');
   });
 
@@ -577,7 +589,7 @@ test('a sent selection block renders in the quote-bar language, while the prompt
   withLanguage('en', () => {
     const parsed = parseSentSelectionQuoteBlock(zhBody, sets);
     assert.ok(parsed, 'the zh-written block still matches while the app runs in en');
-    assert.ok(parsed.block.includes('回应 Bot 的这句：'), 'the display copy follows the block it was written in');
+    assert.ok(parsed.block.includes(sets[0].displayLabel.assistant), 'the display copy follows the block it was written in');
   });
 
   // Only the exact generated form matches; hand-written blockquotes stay
@@ -601,7 +613,7 @@ test('a sent selection block renders in the quote-bar language, while the prompt
 
   // The transcript wires exactly this split for sent bodies and renders the
   // result through the shared block component (no jump target).
-  assert.match(detailSource, /parseSentSelectionQuoteBlock\(message\.content, buildSentSelectionQuoteLabelSets\(\)\)/);
+  assert.match(detailSource, /parseSentSelectionQuoteBlock\(message\.content, buildSentSelectionQuoteLabelSets\(botName\)\)/);
   assert.match(detailSource, /<CoworkSentQuoteBlock block=\{sentSelectionQuote\.block\} \/>/);
   assert.match(detailSource, /SENT_QUOTE_LABEL_LANGUAGES = \['zh', 'en'\]/);
 });
@@ -631,11 +643,11 @@ test('quoted-selection copy lives in both i18n dictionaries', () => {
   }
   assert.match(i18nSource, /coworkQuoteAddToConversation: '添加到对话'/);
   assert.match(i18nSource, /coworkQuoteAddToConversation: 'Add to conversation'/);
-  assert.match(i18nSource, /coworkQuoteSentSourceUser: '回应你的这句：'/);
-  assert.match(i18nSource, /coworkQuoteSentSourceAssistant: '回应 Bot 的这句：'/);
-  assert.match(i18nSource, /coworkQuoteSentSourceOther: '回应这段：'/);
-  assert.match(i18nSource, /coworkQuoteSentSourceUser: 'Replying to your line:'/);
-  assert.match(i18nSource, /coworkQuoteSentSourceAssistant: 'Replying to the bot/);
+  assert.match(i18nSource, /coworkQuoteSentSourceUser: '你：'/);
+  assert.match(i18nSource, /coworkQuoteSentSourceAssistant: '\{name\}：'/);
+  assert.match(i18nSource, /coworkQuoteSentSourceOther: '\{name\}：'/);
+  assert.match(i18nSource, /coworkQuoteSentSourceUser: 'You:'/);
+  assert.match(i18nSource, /coworkQuoteSentSourceAssistant: '\{name\}:'/);
 
   // ...and no component hardcodes that copy.
   for (const source of [inputSource, detailSource, actionBarSource, tilesSource]) {

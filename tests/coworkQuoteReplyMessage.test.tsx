@@ -653,17 +653,24 @@ test('the sent reply block is parsed off the message head, and only the generate
     assert.ok(!parsed.rest.includes('>'), 'the block never swallows the instruction');
   });
 
-  // A capped excerpt keeps its truncation note inside the block; the rest
-  // still starts after the note line.
+  // A capped excerpt's display block keeps the label and the excerpt and drops
+  // the truncation-note line (the rendered row's CSS ellipsis already says the
+  // text continues); the note still rides the submitted body, and the rest
+  // still starts after the block.
   withLanguage('zh', () => {
     const long = reply('y'.repeat(QUOTED_SELECTION_MAX_CHARS + 500), 7, false, 'q-parsed-long');
     const body = composeSubmittedCoworkPrompt({ value: 'summarize this', quotedSelections: [long], labels: labels() });
     const parsed = parseSentQuoteBlock(body);
     assert.ok(parsed, body);
-    assert.equal(parsed.block.split('\n').length, 3, 'label + excerpt + truncation note');
-    assert.ok(parsed.block.includes(
-      i18nService.t('coworkQuoteTruncatedNote').replace('{max}', String(QUOTED_SELECTION_BLOCK_CHARS)),
-    ));
+    assert.equal(parsed.block.split('\n').length, 2, 'label + excerpt — the display block drops the truncation note');
+    assert.ok(
+      !parsed.block.includes(i18nService.t('coworkQuoteTruncatedNote').replace('{max}', String(QUOTED_SELECTION_BLOCK_CHARS))),
+      'the truncation note never renders in the display block',
+    );
+    assert.ok(
+      body.includes(i18nService.t('coworkQuoteTruncatedNote').replace('{max}', String(QUOTED_SELECTION_BLOCK_CHARS))),
+      'the submitted body still carries the note the model reads',
+    );
     assert.equal(parsed.rest, 'summarize this');
   });
 
@@ -770,7 +777,9 @@ test('the sent quote block renders as a clickable control, and the composer-side
   // The transcript splits the sent body and mounts the control only for the
   // parsed block; the click goes through the position → id reverse lookup and
   // reuses the scroll + ring path.
-  assert.match(detailSource, /const sentQuote = parseSentQuoteBlock\(message\.content\);/);
+  // The parse carries the display-source map: the rendered block names the
+  // speaker (你：/ <bot 名>：) while the prompt body keeps the generated label.
+  assert.match(detailSource, /const sentQuote = parseSentQuoteBlock\(message\.content, buildSentQuoteDisplaySources\(botName\)\);/);
   assert.match(detailSource, /<CoworkSentQuoteBlock/);
   assert.match(detailSource, /onJumpToQuoteBlock\(sentQuote\.ordinal\)/);
   assert.match(detailSource, /buildTranscriptMessageIdsByOrdinal\(transcriptMessagePositionsRef\.current\)/);
