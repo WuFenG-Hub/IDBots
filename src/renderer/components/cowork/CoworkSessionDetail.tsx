@@ -11,6 +11,7 @@ import type {
   CoworkExecutionMode,
   CoworkServiceOrderSummary,
   CoworkPermissionResult,
+  CoworkQuotedSelectionRole,
 } from '../../types/cowork';
 import type { Skill } from '../../types/skill';
 import type { SettingsOpenOptions } from '../Settings';
@@ -189,8 +190,15 @@ const QUOTE_JUMP_HIGHLIGHT_CLASSES = ['ring-1', 'ring-claude-accent'];
 // a sent block in the language it was written in).
 const SENT_QUOTE_LABEL_LANGUAGES = ['zh', 'en'] as const;
 
-export const buildSentSelectionQuoteLabelSets = (): SentSelectionQuoteLabelSet[] => (
-  SENT_QUOTE_LABEL_LANGUAGES.map((language) => ({
+export const buildSentSelectionQuoteLabelSets = (botName?: string | null): SentSelectionQuoteLabelSet[] => {
+  const name = (botName ?? '').trim();
+  const fill = (language: (typeof SENT_QUOTE_LABEL_LANGUAGES)[number], key: string): string => {
+    const template = i18nService.tIn(language, key);
+    return name
+      ? template.replace('{name}', name)
+      : template.replace('{name}', i18nService.tIn(language, 'coworkQuoteSentReplySourceAssistantFallback'));
+  };
+  return SENT_QUOTE_LABEL_LANGUAGES.map((language) => ({
     header: i18nService.tIn(language, 'coworkQuoteBlockHeader'),
     item: i18nService.tIn(language, 'coworkQuoteBlockItem'),
     sourceLabel: {
@@ -200,11 +208,32 @@ export const buildSentSelectionQuoteLabelSets = (): SentSelectionQuoteLabelSet[]
     },
     displayLabel: {
       user: i18nService.tIn(language, 'coworkQuoteSentSourceUser'),
-      assistant: i18nService.tIn(language, 'coworkQuoteSentSourceAssistant'),
-      other: i18nService.tIn(language, 'coworkQuoteSentSourceOther'),
+      assistant: fill(language, 'coworkQuoteSentSourceAssistant'),
+      other: fill(language, 'coworkQuoteSentSourceOther'),
     },
-  }))
-);
+  }));
+};
+
+/**
+ * The speaker names a whole-message reply shows in the transcript, WeChat-style
+ * (`你：` / `<bot 名>：`): the assistant speaks in the session bot's own name,
+ * the owner is "你". `{name}` in the labels is filled with `botName`. The
+ * prompt body keeps the generated `#<ordinal> <side>：` label; see
+ * parseSentQuoteBlock.
+ */
+export const buildSentQuoteDisplaySources = (
+  botName?: string | null,
+): Record<CoworkQuotedSelectionRole, string> => {
+  const name = (botName ?? '').trim();
+  const fill = (template: string): string => (
+    name ? template.replace('{name}', name) : template.replace('{name}', i18nService.t('coworkQuoteSentReplySourceAssistantFallback'))
+  );
+  return {
+    user: i18nService.t('coworkQuoteSentReplySourceUser'),
+    assistant: fill(i18nService.t('coworkQuoteSentReplySourceAssistant')),
+    other: fill(i18nService.t('coworkQuoteSentReplySourceOther')),
+  };
+};
 
 const readDismissedRefundStatusKeys = (): Set<string> => {
   if (typeof window === 'undefined' || !window.localStorage) {
@@ -1580,11 +1609,13 @@ const UserMessageItem: React.FC<{
   skills: Skill[];
   sessionType?: string;
   sessionTitle?: string;
+  /** The session bot's name — the speaker a sent quote names for the assistant. */
+  botName?: string | null;
   /** Quotes this whole message into the composer slot (the reply entry). */
   onQuoteReply?: (message: CoworkMessage, text: string) => void;
   /** Jumps back to the message a sent quote block answers (its ordinal). */
   onJumpToQuoteBlock?: (ordinal: number) => void;
-}> = ({ message, skills, sessionType, sessionTitle, onQuoteReply, onJumpToQuoteBlock }) => {
+}> = ({ message, skills, sessionType, sessionTitle, botName, onQuoteReply, onJumpToQuoteBlock }) => {
   const [isHovered, setIsHovered] = useState(false);
   const isSteerMessage = message.metadata?.interactionKind === 'steer';
   const steerStatusKey = isSteerMessage
@@ -1601,7 +1632,7 @@ const UserMessageItem: React.FC<{
   // <side>: …"); split it off so it renders as the jump-back control while the
   // rest of the body renders exactly as before. Hand-written blockquotes — not
   // at the body's head, or without the label — never match.
-  const sentQuote = parseSentQuoteBlock(message.content);
+  const sentQuote = parseSentQuoteBlock(message.content, buildSentQuoteDisplaySources(botName));
   // A body can also open with the generated selection block ("从对话中引用的
   // 片段…" header + "引自{source}：" lines): split that off too, so it renders
   // in the same quote-bar language as the reply block instead of as a wall of
@@ -1609,7 +1640,7 @@ const UserMessageItem: React.FC<{
   // label stay in the submitted prompt body verbatim (the model reads them).
   const sentSelectionQuote = sentQuote
     ? null
-    : parseSentSelectionQuoteBlock(message.content, buildSentSelectionQuoteLabelSets());
+    : parseSentSelectionQuoteBlock(message.content, buildSentSelectionQuoteLabelSets(botName));
 
   const gigSquareCard = renderGigSquareCard(message.content);
   if (gigSquareCard) {
@@ -4417,6 +4448,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 skills={skills}
                 sessionType={currentSession?.sessionType}
                 sessionTitle={currentSession?.title}
+                botName={currentSession?.metabotName}
                 onQuoteReply={handleQuoteReplyMessage}
                 onJumpToQuoteBlock={handleJumpToSentQuoteBlock}
               />
@@ -5056,6 +5088,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 suggestedPrompts={!isStreaming && latestPromptSuggestion ? [latestPromptSuggestion] : undefined}
                 commands={buildSessionComposerCommands({ sessionId: currentSession.id, goal: currentSession.goal ?? null })}
                 sessionMetabotId={currentSession.metabotId ?? null}
+                botName={currentSession.metabotName}
               />
             )}
             {submitError && (

@@ -93,8 +93,29 @@ blockquote {
   color: var(--text-secondary);
   padding-left: 1em;
   font-style: italic;
-  margin: 1em 0;
+  /* Kept tight on purpose: a quoted block sits inside a message bubble, and
+     the former 1em top/bottom pushed the bubble taller than its content. */
+  margin: 0.25em 0;
 }
+
+/* A SENT quote chip reads on one row, whatever the bubble width: the excerpt is
+   kept whole and this clamps the rendered line so a narrow bubble ellipsizes
+   (always with a "…") instead of wrapping to a second row. The vertical padding
+   is what makes the left rule read a touch taller than its text. Scoped to the
+   sent quote only — hand-written blockquotes keep normal wrapping.
+   The ellipsis must sit on the element that actually holds the text (the <p>
+   inside the blockquote), not on the blockquote wrapper. */
+.cowork-sent-quote-line blockquote {
+  overflow: hidden;
+  padding-top: 0.3em;
+  padding-bottom: 0.3em;
+}
+.cowork-sent-quote-line blockquote p {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 
 .chat-message {
   content-visibility: auto;

@@ -28,6 +28,27 @@ export const QUOTED_SELECTION_SUMMARY_CHARS = 96;
  */
 export const QUOTED_SELECTION_BLOCK_CHARS = 160;
 
+/**
+ * Band for the quote excerpt as RENDERED in the transcript (WeChat-style: one
+ * short line, the speaker's name above it). The actual cap follows the owner's
+ * reply length within this band (see adaptQuoteDisplayChars), and CSS clamps
+ * the line to a single row regardless of width. Display-only — the submitted
+ * prompt body keeps the wider QUOTED_SELECTION_BLOCK_CHARS excerpt, so the
+ * model still locates the passage.
+ */
+export const QUOTED_SELECTION_DISPLAY_CHARS_MIN = 12;
+export const QUOTED_SELECTION_DISPLAY_CHARS_MAX = 40;
+/** Default when no instruction is known (tiles without a submitted body yet). */
+export const QUOTED_SELECTION_DISPLAY_CHARS = QUOTED_SELECTION_DISPLAY_CHARS_MAX;
+
+/**
+ * A generated truncation-note blockquote line, e.g. `（已截断：仅保留前 200 字）`
+ * / `(truncated: only the first N characters are kept)`. Matched by FORM (a
+ * parenthesized note carrying "截断"/"truncated"), so it holds for any shipped
+ * dictionary without pinning one literal string.
+ */
+const TRUNCATION_NOTE_LINE_PATTERN = /^>\s*[（(][^）)]*(?:截断|truncated)[^）)]*[）)][。.]?$/i;
+
 /** i18n keys naming the source side of a quote. */
 export const QUOTED_SELECTION_SOURCE_KEYS: Record<CoworkQuotedSelectionRole, string> = {
   user: 'coworkQuoteSourceUser',
@@ -409,10 +430,13 @@ export interface SentQuoteBlock {
  * hand-written quote stays plain markdown. Returns null when the body carries
  * no such block.
  */
-export const parseSentQuoteBlock = (content: string): SentQuoteBlock | null => {
+export const parseSentQuoteBlock = (
+  content: string,
+  displaySources?: Record<CoworkQuotedSelectionRole, string>,
+): SentQuoteBlock | null => {
   if (typeof content !== 'string' || content.length === 0) return null;
   const lines = content.replace(/\r\n?/g, '\n').split('\n');
-  const label = /^> #([1-9]\d*)\s.*[：:]\s*$/.exec(lines[0] ?? '');
+  const label = /^> #([1-9]\d*)\s(.*?)\s*[：:]\s*$/.exec(lines[0] ?? '');
   if (!label) return null;
   let end = 1;
   while (end < lines.length && lines[end].startsWith('>')) end += 1;
@@ -420,9 +444,56 @@ export const parseSentQuoteBlock = (content: string): SentQuoteBlock | null => {
   if (end < 2) return null;
   return {
     ordinal: Number(label[1]),
-    block: lines.slice(0, end).join('\n'),
+    block: shortenSentQuoteBlockForDisplay(lines.slice(0, end), label[2], displaySources),
     rest: lines.slice(end).join('\n').trim(),
   };
+};
+
+/**
+ * Shorten a sent reply block for the transcript, WeChat-style: `> #<ordinal>
+ * <side>：` becomes the speaker's own short name (`你：` / `我：`), and the
+ * excerpt under it is capped to QUOTED_SELECTION_DISPLAY_CHARS with an
+ * ellipsis so the quote reads as one short line. Any truncation-note line is
+ * dropped (the ellipsis already says the text continues). `side` is the label
+ * as generated ("助手消息" / "你的消息"), mapped through `displaySources`.
+ * Display-only — the submitted prompt body keeps the generated label and the
+ * wider excerpt the model needs.
+ */
+const shortenSentQuoteBlockForDisplay = (
+  lines: readonly string[],
+  side: string,
+  displaySources?: Record<CoworkQuotedSelectionRole, string>,
+): string => {
+  let label = lines[0] ?? '';
+  if (displaySources && side) {
+    // Which side the quoted message is on, read from its generated label. The
+    // shipped dictionaries name the sides differently per language and per
+    // label family ("Bot 回复" / "助手消息" / "the assistant message" / …), so
+    // match on the side each family uses for assistant and the user, and treat
+    // anything left as the neutral "other" bucket.
+    const role: CoworkQuotedSelectionRole = /assistant|bot|助手/i.test(side)
+      ? 'assistant'
+      : /对话|conversation|quoted/i.test(side)
+        ? 'other'
+        : 'user';
+    label = `> ${displaySources[role]}`;
+  }
+  const out: string[] = [label];
+  let excerptSeen = false;
+  for (const line of lines.slice(1)) {
+    if (TRUNCATION_NOTE_LINE_PATTERN.test(line.trimEnd())) continue;
+    if (!excerptSeen) {
+      excerptSeen = true;
+      // Keep the whole excerpt here. The rendered line is clamped to ONE row
+      // with a CSS ellipsis (see .cowork-sent-quote-line), which needs the real
+      // text to measure against the real width — truncating here as well cut
+      // the line a second time with no ellipsis, leaving a half character.
+      out.push(`> ${line.replace(/^>\s?/, '')}`);
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join('\n');
 };
 
 /** One shipped dictionary's labels for the generated selection block. */
@@ -510,7 +581,26 @@ export const parseSentSelectionQuoteBlock = (
   // untouched rather than stripping a header off hand-written content.
   if (recognized === 0) return null;
   return {
-    block: body.join('\n'),
+    block: shortenSentSelectionQuoteForDisplay(body),
     rest: lines.slice(end).join('\n').trim(),
   };
+};
+
+/**
+ * Shorten a sent selection block for the transcript, WeChat-style: the
+ * source line (`你：` / `我：`) stays, the excerpt under it is capped to
+ * QUOTED_SELECTION_DISPLAY_CHARS with an ellipsis, and the remaining excerpt
+ * lines are dropped — so a selection quote reads as one short line too. The
+ * full text stays in the prompt body. Display-only.
+ */
+const shortenSentSelectionQuoteForDisplay = (body: readonly string[]): string => {
+  const [label, ...rest] = body;
+  const excerpt = rest.find((line) => !TRUNCATION_NOTE_LINE_PATTERN.test(line.trimEnd()));
+  if (!excerpt) return label ?? '';
+  // Keep the whole excerpt; the rendered row clamps it to one line with a CSS
+  // ellipsis (see .cowork-sent-quote-line).
+  return [
+    label,
+    `> ${excerpt.replace(/^>\s?/, '')}`,
+  ].join('\n');
 };

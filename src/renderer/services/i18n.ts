@@ -1144,9 +1144,23 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // strips the generated header and swaps "引自{source}：" for these — the
     // prompt body itself never changes (the model still reads the generated
     // block verbatim; see parseSentSelectionQuoteBlock).
-    coworkQuoteSentSourceUser: '回应你的这句：',
-    coworkQuoteSentSourceAssistant: '回应 Bot 的这句：',
-    coworkQuoteSentSourceOther: '回应这段：',
+    coworkQuoteSentSourceUser: '你：',
+    coworkQuoteSentSourceAssistant: '{name}：',
+    coworkQuoteSentSourceOther: '{name}：',
+    // Display-only wording for a whole-message reply's label line, used when the
+    // transcript renders the sent block (the prompt body keeps
+    // coworkQuoteReplySource*, which the model reads). `{source}` is the
+    // speaker, WeChat-style — no message number in the transcript. `{name}` is
+    // filled with the session's bot name when the speaker is the assistant.
+    coworkQuoteSentReplyLabel: '{source}',
+    // Display-only speaker names for a whole-message reply label, WeChat-style.
+    // The assistant speaks in the session bot's own name (`{name}`).
+    coworkQuoteSentReplySourceUser: '你：',
+    coworkQuoteSentReplySourceAssistant: '{name}：',
+    coworkQuoteSentReplySourceOther: '{name}：',
+    // Used when the session carries no bot name, so the label still reads as a
+    // person's name rather than leaking the {name} placeholder.
+    coworkQuoteSentReplySourceAssistantFallback: 'Bot',
     // The per-message "⋯" trigger that opens the quote / copy / branch menu
     coworkMessageActionsMore: '更多操作',
     // Per-message quote reply (the reply entry on a message's action bar)
@@ -4227,9 +4241,15 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkQuoteBlockHeader: 'Quoted excerpts from the conversation (reply to these):',
     coworkQuoteBlockItem: 'Quoted from {source}:',
     // Display-only source lines for a SENT selection quote (see the zh note).
-    coworkQuoteSentSourceUser: 'Replying to your line:',
-    coworkQuoteSentSourceAssistant: 'Replying to the bot\'s line:',
-    coworkQuoteSentSourceOther: 'Replying to this excerpt:',
+    coworkQuoteSentSourceUser: 'You:',
+    coworkQuoteSentSourceAssistant: '{name}:',
+    coworkQuoteSentSourceOther: '{name}:',
+    // Display-only whole-message reply label (see the zh note).
+    coworkQuoteSentReplyLabel: '{source}',
+    coworkQuoteSentReplySourceUser: 'You:',
+    coworkQuoteSentReplySourceAssistant: '{name}:',
+    coworkQuoteSentReplySourceOther: '{name}:',
+    coworkQuoteSentReplySourceAssistantFallback: 'Bot',
     // The per-message "⋯" trigger that opens the quote / copy / branch menu
     coworkMessageActionsMore: 'More actions',
     // Per-message quote reply (the reply entry on a message's action bar)

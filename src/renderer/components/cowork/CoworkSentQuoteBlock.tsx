@@ -49,7 +49,7 @@ const CoworkSentQuoteBlock: React.FC<CoworkSentQuoteBlockProps> = ({ block, onJu
     >
       <MarkdownContent
         content={block}
-        className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
+        className="cowork-sent-quote-line max-w-none [overflow-wrap:anywhere]"
       />
     </div>
   );

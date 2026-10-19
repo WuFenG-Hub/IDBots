@@ -15,6 +15,7 @@ import { ChatBubbleBottomCenterTextIcon, XMarkIcon } from '@heroicons/react/24/o
 import { i18nService } from '../../services/i18n';
 import type { CoworkQuotedSelection } from '../../types/cowork';
 import {
+  QUOTED_SELECTION_DISPLAY_CHARS,
   QUOTED_SELECTION_SOURCE_KEYS,
   summarizeQuotedSelectionText,
 } from './coworkQuotedSelections';
@@ -22,20 +23,38 @@ import {
 interface CoworkQuotedSelectionTilesProps {
   selections: readonly CoworkQuotedSelection[];
   onRemove: (id: string) => void;
+  /** The session bot's name — names the speaker for an assistant-side excerpt. */
+  botName?: string | null;
   disabled?: boolean;
 }
+
+/**
+ * The speaker the pending quote shows, mirroring the sent-quote label: the
+ * owner is "你", the assistant speaks in the session bot's own name.
+ */
+const speakerLabelFor = (
+  selection: CoworkQuotedSelection,
+  botName?: string | null,
+): string => {
+  if (selection.role === 'user') return i18nService.t('coworkQuoteSentReplySourceUser');
+  const name = (botName ?? '').trim()
+    || i18nService.t('coworkQuoteSentReplySourceAssistantFallback');
+  return i18nService.t('coworkQuoteSentReplySourceAssistant').replace('{name}', name);
+};
 
 const CoworkQuotedSelectionTiles: React.FC<CoworkQuotedSelectionTilesProps> = ({
   selections,
   onRemove,
+  botName,
   disabled = false,
 }) => {
   if (selections.length === 0) return null;
 
   if (selections.length === 1) {
-    // Single-target slot: one compact bar — quote icon, the excerpt's
-    // one-line summary, and a cancel control (the reference clients' "quoted
-    // message" preview strip).
+    // Single-target slot: one compact bar — quote icon, the speaker, the
+    // excerpt's one-line summary, and a cancel control. The excerpt uses the
+    // same display cap the sent quote uses, so the pending bar and the message
+    // it becomes read the same length.
     const selection = selections[0];
     const cancelLabel = i18nService.t('coworkQuoteReplyCancel');
     return (
@@ -45,7 +64,12 @@ const CoworkQuotedSelectionTiles: React.FC<CoworkQuotedSelectionTilesProps> = ({
         className="mb-2 flex items-center gap-1.5 rounded-lg border border-claude-border border-l-2 border-l-claude-accent dark:border-claude-darkBorder dark:border-l-claude-accent dark:bg-claude-darkSurfaceInset bg-claude-surfaceInset px-2.5 py-1 text-xs dark:text-claude-darkText text-claude-text"
       >
         <ChatBubbleBottomCenterTextIcon className="h-3.5 w-3.5 flex-shrink-0 text-claude-accent" />
-        <span className="min-w-0 flex-1 truncate">{summarizeQuotedSelectionText(selection.text)}</span>
+        <span className="flex-shrink-0 font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {speakerLabelFor(selection, botName)}
+        </span>
+        <span className="min-w-0 flex-1 truncate">
+          {summarizeQuotedSelectionText(selection.text, QUOTED_SELECTION_DISPLAY_CHARS)}
+        </span>
         <button
           type="button"
           onClick={() => onRemove(selection.id)}
@@ -82,7 +106,7 @@ const CoworkQuotedSelectionTiles: React.FC<CoworkQuotedSelectionTilesProps> = ({
             <span className="flex-shrink-0 font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
               {source}
             </span>
-            <span className="truncate max-w-[220px]">{summarizeQuotedSelectionText(selection.text)}</span>
+            <span className="truncate max-w-[220px]">{summarizeQuotedSelectionText(selection.text, QUOTED_SELECTION_DISPLAY_CHARS)}</span>
             {selection.truncated && (
               <span className="flex-shrink-0 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 {i18nService.t('coworkQuoteTruncated')}

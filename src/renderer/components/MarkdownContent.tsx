@@ -633,7 +633,7 @@ const createMarkdownComponents = (
     </li>
   ),
   blockquote: ({ node, className, children, ...props }: any) => (
-    <blockquote className="border-l-2 border-claude-accent pl-[14px] my-[16px] dark:bg-claude-darkSurface/30 bg-claude-surfaceHover/30 rounded-r-lg dark:text-claude-darkText text-claude-text" {...props}>
+    <blockquote className="border-l-2 border-claude-accent pl-[14px] my-1 dark:bg-claude-darkSurface/30 bg-claude-surfaceHover/30 rounded-r-lg dark:text-claude-darkText text-claude-text" {...props}>
       {children}
     </blockquote>
   ),

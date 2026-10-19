@@ -366,6 +366,8 @@ interface CoworkPromptInputProps {
   commands?: ComposerCommand[];
   /** Session's bot binding; narrows the skills picker to that bot's view. */
   sessionMetabotId?: number | null;
+  /** The session bot's name — names the speaker in the pending-quote bar. */
+  botName?: string | null;
 }
 
 const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInputProps>(
@@ -398,6 +400,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       onPermissionModeChange,
       commands,
       sessionMetabotId,
+      botName,
     } = props;
     const isMac = (window as { electron?: { platform?: string } }).electron?.platform === 'darwin';
     const dispatch = useDispatch();
@@ -1443,6 +1446,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       <CoworkQuotedSelectionTiles
         selections={quotedSelections}
         onRemove={handleRemoveQuotedSelection}
+        botName={botName}
         disabled={disabled || isStreaming}
       />
       {attachments.length > 0 && (
