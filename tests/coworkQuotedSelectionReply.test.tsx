@@ -30,6 +30,7 @@ import {
   createQuotedSelection,
   nextQuotedSelectionId,
   normalizeQuotedSelectionText,
+  parseSentSelectionQuoteBlock,
   removeQuotedSelection,
   resolveQuoteActionBarAnchorRect,
   resolveQuotedSelectionRole,
@@ -41,6 +42,8 @@ import {
 } from '../src/renderer/components/cowork/coworkPromptSubmission';
 import CoworkQuotedSelectionTiles from '../src/renderer/components/cowork/CoworkQuotedSelectionTiles';
 import CoworkQuoteActionBar from '../src/renderer/components/cowork/CoworkQuoteActionBar';
+import CoworkSentQuoteBlock from '../src/renderer/components/cowork/CoworkSentQuoteBlock';
+import { buildSentSelectionQuoteLabelSets } from '../src/renderer/components/cowork/CoworkSessionDetail';
 import { i18nService } from '../src/renderer/services/i18n';
 import reducer, { setSessionDraft } from '../src/renderer/store/slices/coworkSlice';
 
@@ -466,6 +469,125 @@ test('a steer submit consumes quoted fragments and restores them only when it is
   assert.deepEqual(inFlightField.get().map((entry) => entry.text), ['newer excerpt']);
 });
 
+test('a sent selection block renders in the quote-bar language, while the prompt body keeps the generated form', () => {
+  const withLanguage = (language, fn) => {
+    const original = i18nService.getLanguage();
+    i18nService.setLanguage(language, { persist: false });
+    try {
+      return fn();
+    } finally {
+      i18nService.setLanguage(original, { persist: false });
+    }
+  };
+  const buildLabels = () => ({
+    header: i18nService.t('coworkQuoteBlockHeader'),
+    item: i18nService.t('coworkQuoteBlockItem'),
+    sourceLabel: {
+      user: i18nService.t('coworkQuoteSourceUser'),
+      assistant: i18nService.t('coworkQuoteSourceAssistant'),
+      other: i18nService.t('coworkQuoteSourceOther'),
+    },
+  });
+
+  withLanguage('zh', () => {
+    const body = composeSubmittedCoworkPrompt({
+      value: 'Please answer only about that part.',
+      quotedSelections: [selection(QUOTE_TEXT, 'assistant', 'q-sent')],
+      labels: buildLabels(),
+    });
+    // The submitted body — what the model reads — keeps the generated block
+    // verbatim: the header and the machine label never move.
+    assert.ok(body.startsWith(`> ${i18nService.t('coworkQuoteBlockHeader')}\n>\n`), body);
+    assert.ok(body.includes(`> ${i18nService.t('coworkQuoteBlockItem').replace('{source}', i18nService.t('coworkQuoteSourceAssistant'))}`), body);
+
+    // The display split drops the header and humanizes the source line; the
+    // excerpt and the instruction survive intact.
+    const parsed = parseSentSelectionQuoteBlock(body, buildSentSelectionQuoteLabelSets());
+    assert.ok(parsed, body);
+    assert.ok(!parsed.block.includes(i18nService.t('coworkQuoteBlockHeader')), 'the system-voiced header never renders');
+    assert.ok(parsed.block.startsWith(`> ${i18nService.t('coworkQuoteSentSourceAssistant')}\n> `), parsed.block);
+    assert.ok(parsed.block.includes(QUOTE_TEXT), 'the excerpt stays');
+    assert.equal(parsed.rest, 'Please answer only about that part.');
+
+    // The display block renders through the same component as a sent reply
+    // block — one quote-bar language (gold rule + source + excerpt).
+    const originalWindow = globalThis.window;
+    globalThis.window = { electron: { platform: 'darwin' } };
+    try {
+      const markup = renderToStaticMarkup(<CoworkSentQuoteBlock block={parsed.block} />);
+      assert.ok(markup.includes('data-cowork-sent-quote="true"'));
+      assert.match(markup, /<blockquote/);
+      assert.ok(markup.includes(i18nService.t('coworkQuoteSentSourceAssistant')));
+      assert.ok(markup.includes(QUOTE_TEXT));
+      assert.doesNotMatch(markup, /role="button"/, 'no jump target — a hand-picked selection carries no position');
+    } finally {
+      if (originalWindow === undefined) delete globalThis.window;
+      else globalThis.window = originalWindow;
+    }
+  });
+
+  // Several excerpts keep their per-item source lines inside the one block.
+  withLanguage('zh', () => {
+    const body = composeSubmittedCoworkPrompt({
+      value: 'both please',
+      quotedSelections: [selection('first passage', 'assistant', 'q-2a'), selection('second passage', 'user', 'q-2b')],
+      labels: buildLabels(),
+    });
+    const parsed = parseSentSelectionQuoteBlock(body, buildSentSelectionQuoteLabelSets());
+    assert.ok(parsed, body);
+    assert.ok(!parsed.block.includes(i18nService.t('coworkQuoteBlockHeader')));
+    assert.ok(parsed.block.includes(`> ${i18nService.t('coworkQuoteSentSourceAssistant')}`));
+    assert.ok(parsed.block.includes(`> ${i18nService.t('coworkQuoteSentSourceUser')}`));
+    assert.equal(parsed.rest, 'both please');
+  });
+
+  // A block written under one dictionary still matches after the app language
+  // switches — the app hands the parser every shipped dictionary's labels.
+  const zhBody = (() => {
+    let body = '';
+    withLanguage('zh', () => {
+      body = composeSubmittedCoworkPrompt({
+        value: 'go on',
+        quotedSelections: [selection(QUOTE_TEXT, 'assistant', 'q-cross')],
+        labels: buildLabels(),
+      });
+    });
+    return body;
+  })();
+  const sets = buildSentSelectionQuoteLabelSets();
+  assert.equal(sets.length, 2, 'both shipped dictionaries are handed to the parser');
+  withLanguage('en', () => {
+    const parsed = parseSentSelectionQuoteBlock(zhBody, sets);
+    assert.ok(parsed, 'the zh-written block still matches while the app runs in en');
+    assert.ok(parsed.block.includes('回应 Bot 的这句：'), 'the display copy follows the block it was written in');
+  });
+
+  // Only the exact generated form matches; hand-written blockquotes stay
+  // plain markdown.
+  withLanguage('zh', () => {
+    const zhSets = buildSentSelectionQuoteLabelSets();
+    assert.equal(parseSentSelectionQuoteBlock('plain text', zhSets), null);
+    assert.equal(parseSentSelectionQuoteBlock('', zhSets), null);
+    assert.equal(parseSentSelectionQuoteBlock('> a hand-written note\n>\n> 引自 Bot 回复：\n> text', zhSets), null, 'no generated header');
+    assert.equal(
+      parseSentSelectionQuoteBlock(`note\n\n> ${i18nService.t('coworkQuoteBlockHeader')}\n>\n> 引自 Bot 回复：\n> text`, zhSets),
+      null,
+      'the block must be at the body head',
+    );
+    assert.equal(
+      parseSentSelectionQuoteBlock(`> ${i18nService.t('coworkQuoteBlockHeader')}\n>\n> an unrecognized line`, zhSets),
+      null,
+      'a header without a recognizable label line never strips',
+    );
+  });
+
+  // The transcript wires exactly this split for sent bodies and renders the
+  // result through the shared block component (no jump target).
+  assert.match(detailSource, /parseSentSelectionQuoteBlock\(message\.content, buildSentSelectionQuoteLabelSets\(\)\)/);
+  assert.match(detailSource, /<CoworkSentQuoteBlock block=\{sentSelectionQuote\.block\} \/>/);
+  assert.match(detailSource, /SENT_QUOTE_LABEL_LANGUAGES = \['zh', 'en'\]/);
+});
+
 test('quoted-selection copy lives in both i18n dictionaries', () => {
   const keys = [
     'coworkQuoteAddToConversation',
@@ -478,6 +600,9 @@ test('quoted-selection copy lives in both i18n dictionaries', () => {
     'coworkQuoteSourceOther',
     'coworkQuoteBlockHeader',
     'coworkQuoteBlockItem',
+    'coworkQuoteSentSourceUser',
+    'coworkQuoteSentSourceAssistant',
+    'coworkQuoteSentSourceOther',
   ];
   for (const key of keys) {
     assert.equal(
@@ -488,6 +613,11 @@ test('quoted-selection copy lives in both i18n dictionaries', () => {
   }
   assert.match(i18nSource, /coworkQuoteAddToConversation: '添加到对话'/);
   assert.match(i18nSource, /coworkQuoteAddToConversation: 'Add to conversation'/);
+  assert.match(i18nSource, /coworkQuoteSentSourceUser: '回应你的这句：'/);
+  assert.match(i18nSource, /coworkQuoteSentSourceAssistant: '回应 Bot 的这句：'/);
+  assert.match(i18nSource, /coworkQuoteSentSourceOther: '回应这段：'/);
+  assert.match(i18nSource, /coworkQuoteSentSourceUser: 'Replying to your line:'/);
+  assert.match(i18nSource, /coworkQuoteSentSourceAssistant: 'Replying to the bot/);
 
   // ...and no component hardcodes that copy.
   for (const source of [inputSource, detailSource, actionBarSource, tilesSource]) {

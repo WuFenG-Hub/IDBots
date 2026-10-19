@@ -6,7 +6,8 @@
 // file pins the acceptance cells of the per-message reply slice: textless
 // messages, the preview bar and its summary, cancel, the submitted body
 // (short and long), the running steer path, restore/clear on submit, the
-// still-generating mark, and the bilingual copy.
+// still-generating mark, the sent block's jump back to its source, and the
+// bilingual copy.
 //
 // The repository's react test stack is SSR-only (react-dom/server, no jsdom),
 // so the evidence is layered: real behaviour of the pure modules the render
@@ -24,13 +25,17 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { build } from 'esbuild';
 
 import {
+  QUOTED_SELECTION_BLOCK_CHARS,
   QUOTED_SELECTION_MAX_CHARS,
   QUOTED_SELECTION_SUMMARY_CHARS,
   buildQuotedSelectionsBlock,
+  buildTranscriptMessageIdsByOrdinal,
   buildTranscriptMessagePositions,
   composeSubmittedCoworkPrompt,
   createMessageQuotedSelection,
+  findTranscriptMessageElement,
   hasQuotableText,
+  parseSentQuoteBlock,
   removeQuotedSelection,
   summarizeQuotedSelectionText,
 } from '../src/renderer/components/cowork/coworkQuotedSelections';
@@ -38,8 +43,11 @@ import {
   createVersionedComposerField,
   runComposerSubmission,
 } from '../src/renderer/components/cowork/coworkPromptSubmission';
+import { shouldShowAssistantBubbleActions } from '../src/renderer/components/cowork/assistantTurnPresentation.js';
+import { shouldFollowPendingQuoteReply } from '../src/renderer/components/cowork/CoworkSessionDetail';
 import CoworkMessageReplyAction from '../src/renderer/components/cowork/CoworkMessageReplyAction';
 import CoworkQuotedSelectionTiles from '../src/renderer/components/cowork/CoworkQuotedSelectionTiles';
+import CoworkSentQuoteBlock from '../src/renderer/components/cowork/CoworkSentQuoteBlock';
 import { i18nService } from '../src/renderer/services/i18n';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -49,7 +57,9 @@ const inputSource = readSource('src', 'renderer', 'components', 'cowork', 'Cowor
 const detailSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkSessionDetail.tsx');
 const tilesSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkQuotedSelectionTiles.tsx');
 const replyActionSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkMessageReplyAction.tsx');
+const sentBlockSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkSentQuoteBlock.tsx');
 const i18nSource = readSource('src', 'renderer', 'services', 'i18n.ts');
+const cssSource = readSource('src', 'renderer', 'index.css');
 
 // Labels as the running app supplies them (never hardcoded in the components).
 const labels = () => ({
@@ -109,13 +119,97 @@ test('messages without text offer no reply entry, and both sides of the conversa
     assert.ok(markup.includes(i18nService.t('coworkQuoteReplyAction')), 'the entry carries its localized label');
   });
 
-  // Both the user action row and the assistant action strips (assistant-mode
-  // toolbar + professional row) mount it.
-  assert.equal((detailSource.match(/<CoworkMessageReplyAction/g) ?? []).length, 3);
+  // The reply entry now lives inside the per-message "⋯" menu (the 2026-10-19
+  // hover redesign retired the inline strips), so the three mount points carry
+  // the action menu rather than CoworkMessageReplyAction. The menu still takes
+  // the message text, and quote is routed through its onQuote callback.
+  assert.equal((detailSource.match(/<CoworkMessageActionsMenu/g) ?? []).length, 3);
+  assert.equal((detailSource.match(/<CoworkMessageReplyAction/g) ?? []).length, 0);
   assert.match(detailSource, /text=\{message\.content\}/);
   assert.match(detailSource, /text=\{replyContent\}/);
   // The gate is the message text itself, never the message type.
   assert.match(replyActionSource, /hasQuotableText\(text\)/);
+});
+
+test('assistant mode mounts the per-bubble toolbar on every bubble, narration included', () => {
+  // Assistant mode gives EVERY assistant bubble its own hover-action toolbar,
+  // so the per-message reply entry is reachable on narration bubbles too —
+  // the same per-message parity the professional row has. The old gates
+  // (final-reply-only `isFinalReply`, narration-exclusion `!isNarration`)
+  // were quirks of the single-toolbar-per-turn layout, not requirements of
+  // the reply feature, and are gone. The decision is a pure predicate shared
+  // with the component:
+  assert.equal(
+    shouldShowAssistantBubbleActions({ isAssistantMode: true, showCopyButton: true }),
+    true,
+    'every settled assistant bubble (narration or final) gets its toolbar',
+  );
+  assert.equal(
+    shouldShowAssistantBubbleActions({ isAssistantMode: true, showCopyButton: false }),
+    false,
+    'a streaming turn still hides action toolbars in both modes',
+  );
+  assert.equal(
+    shouldShowAssistantBubbleActions({ isAssistantMode: false, showCopyButton: true }),
+    false,
+    'professional mode keeps its own in-flow row; this decision is assistant-only',
+  );
+
+  // The component wires exactly this predicate at the assistant-mode
+  // toolbar...
+  assert.match(detailSource, /shouldShowAssistantBubbleActions\(\{ isAssistantMode, showCopyButton \}\)/);
+  // ...and the two old gates no longer appear anywhere in the component.
+  assert.doesNotMatch(detailSource, /isFinalReply/);
+  assert.doesNotMatch(detailSource, /isNarration/);
+});
+
+test('a narration bubble is replyable end-to-end: its position resolves and the quote reaches the body', () => {
+  // handleQuoteReplyMessage used to fall through silently when a clicked
+  // message had no transcript position ("clicked 回复, nothing happened").
+  // Narration bubbles are exactly what the new mount condition adds, so pin
+  // their lookup: the position map is built from the same turns the
+  // transcript renders, and the click path reads it for the ordinal.
+  const turns = [
+    {
+      userMessage: { id: 'u1' },
+      assistantItems: [
+        { type: 'assistant', message: { id: 'n1', metadata: { narration: true } } },
+        { type: 'assistant', message: { id: 'n2', metadata: { narration: true } } },
+        { type: 'assistant', message: { id: 'final' } },
+      ],
+    },
+  ];
+  const positions = buildTranscriptMessagePositions(turns);
+  assert.equal(positions.get('n1'), 2, 'the opening narration is the 2nd conversational message');
+  assert.equal(positions.get('n2'), 3);
+  assert.equal(positions.get('final'), 4);
+  assert.ok(positions.get('n1'), 'the ordinal lookup the click path takes resolves');
+
+  // Click simulation: ordinal + text snapshot → composer fragment → body.
+  const fragment = createMessageQuotedSelection({
+    content: '先看了这两个文件，接下来跑构建。',
+    role: 'assistant',
+    ordinal: positions.get('n1'),
+    streaming: false,
+  }, 'q-narration');
+  assert.ok(fragment, 'a narration with text produces a fragment exactly like a final reply');
+  withLanguage('zh', () => {
+    const body = composeSubmittedCoworkPrompt({
+      value: '就按这条改',
+      quotedSelections: [fragment],
+      labels: labels(),
+    });
+    assert.ok(body.startsWith('> #2 助手消息：\n> '), body);
+    assert.ok(body.includes('先看了这两个文件，接下来跑构建。'), 'the narration text rides into the submitted body');
+    assert.ok(
+      body.indexOf('先看了这两个文件，接下来跑构建。') < body.indexOf('就按这条改'),
+      'the excerpt reads before the instruction',
+    );
+  });
+
+  // The handler this pins is still the ref lookup over turns this test fed.
+  assert.match(detailSource, /transcriptMessagePositionsRef\.current\.get\(message\.id\)/);
+  assert.match(detailSource, /buildTranscriptMessagePositions\(turns\)/);
 });
 
 test('replying to a message fills the single composer slot with a frozen snapshot', () => {
@@ -272,7 +366,7 @@ test('submitting a short message reply carries the full text with role and posit
       labels: labels(),
     });
     // The block leads with the message's role + position, then the original.
-    assert.ok(prompt.startsWith('> 回复 助手消息（第 3 条）：\n> '), prompt);
+    assert.ok(prompt.startsWith('> #3 助手消息：\n> '), prompt);
     assert.ok(prompt.includes(REPLY_TEXT), 'the whole message rides in the body');
     assert.ok(
       prompt.indexOf(REPLY_TEXT) < prompt.indexOf('Please answer only about that part.'),
@@ -306,13 +400,17 @@ test('a long message reply is capped at the excerpt limit with an explicit in-bo
       quotedSelections: [fragment],
       labels: labels(),
     });
-    const note = i18nService.t('coworkQuoteTruncatedNote').replace('{max}', String(QUOTED_SELECTION_MAX_CHARS));
-    assert.ok(prompt.includes(fragment.text), 'the capped excerpt rides in full');
+    // A reply quotes a reference, not a payload: the body carries one short
+    // excerpt, and a cut is stated with the in-body cap that was applied.
+    const note = i18nService.t('coworkQuoteTruncatedNote').replace('{max}', String(QUOTED_SELECTION_BLOCK_CHARS));
+    assert.ok(!prompt.includes(fragment.text), 'the whole 4000-char excerpt does NOT ride into the body');
     assert.ok(!prompt.includes('DROPPED-TAIL'), 'the dropped tail never reaches the body');
     assert.ok(prompt.includes(note), 'the cut is stated explicitly in the body');
+    const excerptLine = prompt.split('\n').find((line) => line.startsWith('> ') && line.includes('y'));
+    assert.ok(excerptLine, prompt);
     assert.ok(
-      prompt.indexOf(note) > prompt.indexOf(fragment.text.slice(0, 40)),
-      'the note sits at the excerpt tail',
+      prompt.indexOf(note) > prompt.indexOf(excerptLine),
+      'the note sits after the excerpt line',
     );
   });
 });
@@ -327,7 +425,7 @@ test('the preview summary and the transmitted excerpt are budgeted independently
   assert.ok(summary.endsWith('…'));
   assert.equal(mediumFragment.truncated, false, 'the fragment is not truncated');
   const mediumPrompt = composeSubmittedCoworkPrompt({ value: 'x', quotedSelections: [mediumFragment], labels: labels() });
-  assert.ok(mediumPrompt.includes(medium), 'the body keeps the full 200 characters');
+  assert.ok(!mediumPrompt.includes(medium), 'a 200-char message does not ride into the body whole');
   assert.ok(
     !mediumPrompt.includes(i18nService.t('coworkQuoteTruncatedNote').replace('{max}', String(QUOTED_SELECTION_MAX_CHARS))),
     'no truncation note under the cap',
@@ -350,7 +448,7 @@ test('a still-generating target is marked in the body, and the excerpt stays fro
       quotedSelections: [frozen],
       labels: labels(),
     });
-    assert.ok(before.includes('回复 助手消息（第 3 条 · 该条仍在生成中）：'), 'the block marks the generating target');
+    assert.ok(before.includes('#3 助手消息 · 该条仍在生成中：'), 'the block marks the generating target');
     assert.ok(before.includes('First sentence so far.'));
 
     // The stream appends tokens to the live message; the quoted excerpt — and
@@ -368,7 +466,7 @@ test('a still-generating target is marked in the body, and the excerpt stays fro
     const settled = reply('Done already.', 4, false, 'q-done');
     const settledPrompt = composeSubmittedCoworkPrompt({ value: 'x', quotedSelections: [settled], labels: labels() });
     assert.ok(!settledPrompt.includes(i18nService.t('coworkQuoteReplyStreamingMark')));
-    assert.ok(settledPrompt.includes('回复 助手消息（第 4 条）：'));
+    assert.ok(settledPrompt.includes('#4 助手消息：'));
   });
 });
 
@@ -425,7 +523,7 @@ test('the new entry reaches the submit truth table in every cell, idle and runni
     const steerBody = composeSubmittedCoworkPrompt({ value: '', quotedSelections: [fragment], labels: labels() });
     assert.notEqual(steerBody, '', 'a quote-only steer must not compose an empty prompt');
     assert.ok(steerBody.includes(REPLY_TEXT), 'the quoted original rides in the steer body');
-    assert.ok(steerBody.includes('回复 助手消息（第 3 条）：'), 'the steer body uses the same reply block');
+    assert.ok(steerBody.includes('#3 助手消息：'), 'the steer body uses the same reply block');
   });
 
   // Both branches consume the same single slot; only an empty steer returns
@@ -521,10 +619,209 @@ test('a reply block that quotes several messages opens with the reply header', (
       block.startsWith(`> ${i18nService.t('coworkQuoteReplyBlockHeader')}\n>\n`),
       block,
     );
-    assert.ok(block.includes('回复 助手消息（第 1 条）：'));
-    assert.ok(block.includes('回复 助手消息（第 2 条 · 该条仍在生成中）：'));
+    // A reply travels as a compact pointer: "#<ordinal> <side>:" plus one short
+    // excerpt line — never the whole message (2026-10-19, owner's call).
+    assert.ok(block.includes('#1 助手消息：'));
+    assert.ok(block.includes('#2 助手消息 · 该条仍在生成中：'));
     assert.ok(block.includes('> first quoted message') && block.includes('> second quoted message'));
   });
+});
+
+test('the sent reply block is parsed off the message head, and only the generated form matches', () => {
+  withLanguage('zh', () => {
+    const fragment = reply(REPLY_TEXT, 3, false, 'q-parsed');
+    const body = composeSubmittedCoworkPrompt({
+      value: 'Please answer only about that part.',
+      quotedSelections: [fragment],
+      labels: labels(),
+    });
+    const parsed = parseSentQuoteBlock(body);
+    assert.ok(parsed, body);
+    assert.equal(parsed.ordinal, 3, 'the label position becomes the jump target');
+    assert.ok(parsed.block.startsWith('> #3 助手消息：\n> '), parsed.block);
+    assert.ok(parsed.block.includes(REPLY_TEXT), 'the excerpt rides inside the block');
+    assert.equal(parsed.rest, 'Please answer only about that part.', 'the instruction is the rest');
+    assert.ok(!parsed.rest.includes('>'), 'the block never swallows the instruction');
+  });
+
+  // A capped excerpt keeps its truncation note inside the block; the rest
+  // still starts after the note line.
+  withLanguage('zh', () => {
+    const long = reply('y'.repeat(QUOTED_SELECTION_MAX_CHARS + 500), 7, false, 'q-parsed-long');
+    const body = composeSubmittedCoworkPrompt({ value: 'summarize this', quotedSelections: [long], labels: labels() });
+    const parsed = parseSentQuoteBlock(body);
+    assert.ok(parsed, body);
+    assert.equal(parsed.block.split('\n').length, 3, 'label + excerpt + truncation note');
+    assert.ok(parsed.block.includes(
+      i18nService.t('coworkQuoteTruncatedNote').replace('{max}', String(QUOTED_SELECTION_BLOCK_CHARS)),
+    ));
+    assert.equal(parsed.rest, 'summarize this');
+  });
+
+  // A still-generating target keeps its mark inside the label; the jump target
+  // still resolves.
+  withLanguage('zh', () => {
+    const streaming = createMessageQuotedSelection(
+      { content: 'partial line', role: 'assistant', ordinal: 4, streaming: true },
+      'q-parsed-stream',
+    );
+    const body = composeSubmittedCoworkPrompt({ value: 'go on', quotedSelections: [streaming], labels: labels() });
+    const parsed = parseSentQuoteBlock(body);
+    assert.ok(parsed, body);
+    assert.equal(parsed.ordinal, 4, 'the generating mark does not break the label match');
+    assert.equal(parsed.rest, 'go on');
+  });
+
+  // The English form uses the half-width colon.
+  withLanguage('en', () => {
+    const fragment = reply('a quoted message', 2, false, 'q-parsed-en');
+    const body = composeSubmittedCoworkPrompt({ value: 'go on', quotedSelections: [fragment], labels: labels() });
+    const parsed = parseSentQuoteBlock(body);
+    assert.ok(parsed, body);
+    assert.equal(parsed.ordinal, 2);
+    assert.equal(parsed.rest, 'go on');
+  });
+
+  // Only the generated form, only at the head: everything else stays plain.
+  assert.equal(parseSentQuoteBlock('just an instruction'), null);
+  assert.equal(parseSentQuoteBlock(''), null);
+  assert.equal(parseSentQuoteBlock('> a hand-written quote\n> second line'), null, 'no #<ordinal> label');
+  assert.equal(parseSentQuoteBlock('> #3 助手消息：'), null, 'a label alone is not the generated form');
+  assert.equal(
+    parseSentQuoteBlock('intro line\n\n> #3 助手消息：\n> excerpt'),
+    null,
+    'the block must be at the head of the body',
+  );
+});
+
+test('a quoted position resolves back to its message id, and the jump prefers the innermost element', () => {
+  // The reverse lookup the sent block's jump takes: position → id.
+  const turns = [
+    {
+      userMessage: { id: 'u1' },
+      assistantItems: [
+        { type: 'assistant', message: { id: 'n1' } },
+        { type: 'tool_group', group: { toolUse: { id: 't1' } } },
+        { type: 'assistant', message: { id: 'final' } },
+      ],
+    },
+    { userMessage: { id: 'u2' }, assistantItems: [] },
+  ];
+  const positions = buildTranscriptMessagePositions(turns);
+  const idsByOrdinal = buildTranscriptMessageIdsByOrdinal(positions);
+  assert.equal(idsByOrdinal.get(1), 'u1');
+  assert.equal(idsByOrdinal.get(2), 'n1');
+  assert.equal(idsByOrdinal.get(3), 'final');
+  assert.equal(idsByOrdinal.get(4), 'u2');
+  assert.equal(idsByOrdinal.get(5), undefined, 'a position the window no longer holds misses');
+  assert.equal(idsByOrdinal.size, positions.size, 'one id per position, and nothing else');
+
+  // The DOM lookup: one id can be mounted on several layers, and the jump
+  // must ring the single message (the innermost match), never the turn block.
+  const originalCss = globalThis.CSS;
+  globalThis.CSS = { escape: (value) => value };
+  try {
+    const inner = { querySelector: () => null };
+    const outer = { querySelector: () => inner };
+    const root = { querySelectorAll: () => [outer, inner] };
+    assert.equal(findTranscriptMessageElement(root, 'n1'), inner, 'the innermost mount wins');
+    assert.equal(findTranscriptMessageElement({ querySelectorAll: () => [] }, 'n1'), null, 'an empty window misses');
+    assert.equal(findTranscriptMessageElement(null, 'n1'), null);
+    assert.equal(findTranscriptMessageElement(root, ''), null);
+  } finally {
+    globalThis.CSS = originalCss;
+  }
+});
+
+test('the sent quote block renders as a clickable control, and the composer-side jump is gone', () => {
+  const block = '> #3 助手消息：\n> quoted excerpt';
+  const originalWindow = globalThis.window;
+  globalThis.window = { electron: { platform: 'darwin' } };
+  try {
+    const interactive = renderToStaticMarkup(
+      <CoworkSentQuoteBlock block={block} onJump={() => {}} />,
+    );
+    assert.ok(interactive.includes('data-cowork-sent-quote="true"'), 'the block is identifiable');
+    assert.ok(interactive.includes('role="button"'), 'the block is a control');
+    assert.ok(interactive.includes('tabindex="0"'), 'the control is keyboard-reachable');
+    assert.ok(interactive.includes('cursor-pointer'), 'the control advertises itself');
+    assert.ok(interactive.includes(i18nService.t('coworkQuoteJumpToMessage')), 'the jump copy labels it');
+    assert.match(interactive, /<blockquote/, 'the blockquote still renders through markdown');
+    assert.ok(interactive.includes('#3 助手消息：') && interactive.includes('quoted excerpt'));
+
+    const plain = renderToStaticMarkup(<CoworkSentQuoteBlock block={block} />);
+    assert.ok(plain.includes('data-cowork-sent-quote="true"'));
+    assert.doesNotMatch(plain, /role="button"/, 'without a handler it stays a plain preview');
+    assert.doesNotMatch(plain, /cursor-pointer/);
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+
+  // The transcript splits the sent body and mounts the control only for the
+  // parsed block; the click goes through the position → id reverse lookup and
+  // reuses the scroll + ring path.
+  assert.match(detailSource, /const sentQuote = parseSentQuoteBlock\(message\.content\);/);
+  assert.match(detailSource, /<CoworkSentQuoteBlock/);
+  assert.match(detailSource, /onJumpToQuoteBlock\(sentQuote\.ordinal\)/);
+  assert.match(detailSource, /buildTranscriptMessageIdsByOrdinal\(transcriptMessagePositionsRef\.current\)/);
+  assert.match(detailSource, /findTranscriptMessageElement\(container, messageId\)/);
+  assert.match(detailSource, /const QUOTE_JUMP_HIGHLIGHT_CLASSES = \['ring-1', 'ring-claude-accent'\]/);
+  assert.match(detailSource, /classList\.add\(\.\.\.QUOTE_JUMP_HIGHLIGHT_CLASSES\)/);
+  assert.match(detailSource, /}, 2500\);/);
+  // The ring must wrap the message's bubble, never the full-width wrapper:
+  // both bubbles carry the id, so the innermost-match lookup lands on the
+  // bubble's own outline (w-fit width, its 22px radius).
+  assert.equal(
+    (detailSource.match(/data-message-id=\{message\.id\}/g) ?? []).length,
+    3,
+    'the assistant message wrapper and both message bubbles carry the id',
+  );
+  assert.match(sentBlockSource, /i18nService\.t\('coworkQuoteJumpToMessage'\)/);
+
+  // The composer-side jump is fully gone: no button branch, no props, no
+  // attribute flash, no leftover CSS animation.
+  assert.doesNotMatch(tilesSource, /onJumpToMessage|canJump/);
+  assert.doesNotMatch(inputSource, /onJumpToQuotedMessage/);
+  assert.doesNotMatch(detailSource, /onJumpToQuotedMessage/);
+  assert.doesNotMatch(detailSource, /data-quote-jump-highlight/);
+  assert.doesNotMatch(cssSource, /quote-jump-flash|data-quote-jump-highlight/);
+});
+
+test('a quote reply sent from away-from-bottom follows once when its reply arrives', () => {
+  // The one-shot decision: armed at send time, consumed only by the reply's
+  // arrival — the transcript tail turning into an assistant message. The
+  // user-message echo that lands right after the send must not consume it, or
+  // the view would leave the quoted message (the confirmation window) the
+  // moment the send goes through.
+  assert.equal(shouldFollowPendingQuoteReply([{ type: 'user' }], true), false);
+  assert.equal(shouldFollowPendingQuoteReply([{ type: 'user' }, { type: 'assistant' }], true), true);
+  assert.equal(shouldFollowPendingQuoteReply([{ type: 'assistant' }], false), false, 'no flag, no forced follow');
+  assert.equal(shouldFollowPendingQuoteReply([], true), false);
+  assert.equal(shouldFollowPendingQuoteReply(undefined, true), false);
+
+  // Armed on the send path from the composed body (both quote kinds ride
+  // there), and never by writing the gate: the "back to bottom" button must
+  // stay available while the owner waits parked at the quoted message.
+  const submitWrapper = /const handlePromptSubmit = useCallback\(\(prompt: string, skillPrompt\?: string\) => \{[\s\S]*?\}, \[onContinue\]\);/.exec(detailSource);
+  assert.ok(submitWrapper, 'the submit wrapper is the flag set path');
+  assert.match(submitWrapper[0], /pendingQuoteReplyFollowRef\.current = parseSentQuoteBlock\(prompt\) !== null/);
+  assert.match(submitWrapper[0], /parseSentSelectionQuoteBlock\(prompt, buildSentSelectionQuoteLabelSets\(\)\) !== null/);
+  assert.doesNotMatch(submitWrapper[0], /setShouldAutoScroll/, 'the gate is not opened at send time');
+  assert.match(detailSource, /onSubmit=\{handlePromptSubmit\}/);
+
+  // Consumed in the follow effect: the closed gate is bypassed for exactly
+  // that run, the effect's own scroll runs, and the flag clears.
+  assert.match(detailSource, /const pendingQuoteReplyFollowRef = useRef\(false\)/);
+  const followEffect = /const quoteReplyArrived = shouldFollowPendingQuoteReply\([\s\S]*?\}, \[currentSession\?\.id, autoScrollFollowSignal, isStreaming, shouldAutoScroll\]\);/.exec(detailSource);
+  assert.ok(followEffect, 'the follow effect reads the flag');
+  assert.match(followEffect[0], /if \(!shouldAutoScroll && !quoteReplyArrived\)/);
+  assert.match(followEffect[0], /if \(quoteReplyArrived\) \{\n      pendingQuoteReplyFollowRef\.current = false;/);
+  assert.doesNotMatch(followEffect[0], /setShouldAutoScroll/, 'the fix never writes the gate');
+
+  // Leg 4 stays: the button still renders on the closed gate and re-opens it.
+  assert.match(detailSource, /\{!shouldAutoScroll && \(/);
+  assert.match(detailSource, /onClick=\{handleScrollToBottomClick\}/);
 });
 
 test('reply copy lives in both i18n dictionaries and follows the language switch', () => {
@@ -540,6 +837,8 @@ test('reply copy lives in both i18n dictionaries and follows the language switch
     'coworkQuoteReplySourceAssistant',
     'coworkQuoteReplySourceOther',
     'coworkQuoteTruncatedNote',
+    'coworkQuoteJumpToMessage',
+    'coworkQuoteJumpMissing',
   ];
   for (const key of keys) {
     assert.equal(
@@ -555,7 +854,7 @@ test('reply copy lives in both i18n dictionaries and follows the language switch
   assert.match(i18nSource, /coworkQuoteReplyPlaceholder: '回复…'/);
   assert.match(i18nSource, /coworkQuoteReplyPlaceholder: 'Reply…'/);
   assert.match(i18nSource, /coworkQuoteReplyStreamingMark: '该条仍在生成中'/);
-  assert.match(i18nSource, /coworkQuoteReplyBlockItem: '回复 \{source\}（第 \{ordinal\} 条\{streaming\}）：'/);
+  assert.match(i18nSource, /coworkQuoteReplyBlockItem: '#\{ordinal\} \{source\}\{streaming\}：'/);
 
   // Rendered labels follow the language.
   const fragment = reply(REPLY_TEXT, 3, false, 'q-i18n');
@@ -577,7 +876,7 @@ test('reply copy lives in both i18n dictionaries and follows the language switch
   });
 
   // ...and no component hardcodes that copy.
-  for (const source of [inputSource, detailSource, tilesSource, replyActionSource]) {
+  for (const source of [inputSource, detailSource, tilesSource, replyActionSource, sentBlockSource]) {
     assert.doesNotMatch(source, /取消回复|引用消息预览|回复…/);
     assert.doesNotMatch(source, /Cancel reply|Quoted message|Reply…/);
   }
