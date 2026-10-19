@@ -83,6 +83,12 @@ test('buildMemoryRankQuestions builds exactly count questions from the shared te
   assert.ok(!questions.mem_1.instructions.includes('{{INDEX}}'), 'the index placeholder is fully substituted');
 });
 
+test('buildMemoryRankQuestions(0) returns an empty map (an empty pool sends no question)', () => {
+  // Pinned for the per-turn decision bundle: an empty memory pool must
+  // contribute zero questions to the merged request, never a malformed one.
+  assert.deepEqual(buildMemoryRankQuestions(0), {});
+});
+
 // ---------------------------------------------------------------------------
 // Answer parsing
 // ---------------------------------------------------------------------------

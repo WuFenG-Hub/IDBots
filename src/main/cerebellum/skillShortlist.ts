@@ -126,6 +126,14 @@ export function buildSkillOptionLabel(skill: CerebellumSkillCandidate): string {
 export function buildSkillChoiceQuestions(
   skills: readonly CerebellumSkillCandidate[],
 ): Record<string, CerebellumSkillChoiceQuestion> {
+  // An empty pool makes NO question: a choice question with zero options in
+  // `criteria` fails the JEV schema outright (422 "Dictionary should have at
+  // least 1 item") and would take the whole merged turn-decision request
+  // down with it. The bundle spreads this builder unconditionally, so an
+  // empty roster must simply contribute nothing here.
+  if (skills.length === 0) {
+    return {};
+  }
   const criteria: Record<string, string> = {};
   let totalLabelChars = 0;
   for (const skill of skills) {

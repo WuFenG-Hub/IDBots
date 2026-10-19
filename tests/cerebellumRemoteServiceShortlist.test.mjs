@@ -8,6 +8,7 @@ import {
   CEREBELLUM_REMOTE_SERVICE_MAX_OPTIONS,
   CEREBELLUM_REMOTE_SERVICE_OPTION_MAX_DESCRIPTION_CHARS,
   CEREBELLUM_REMOTE_SERVICE_RANK_QUESTION_ID,
+  buildRemoteServiceChoiceQuestions,
   buildRemoteServiceOptionLabel,
   buildRemoteServiceShortlistRequest,
   buildRemoteServiceShortlistBlock,
@@ -68,6 +69,14 @@ const RANK_INPUT = {
 // ---------------------------------------------------------------------------
 // Request building
 // ---------------------------------------------------------------------------
+
+test('buildRemoteServiceChoiceQuestions: an empty pool makes NO question (an empty criteria map is a 422)', () => {
+  // The per-turn decision bundle spreads this builder unconditionally, so an
+  // empty directory must contribute nothing — a { type:'choice', criteria:{} }
+  // question fails the JEV schema ("Dictionary should have at least 1 item")
+  // and used to fail the WHOLE merged request (2026-10-19 regression).
+  assert.deepEqual(buildRemoteServiceChoiceQuestions([]), {});
+});
 
 test('buildRemoteServiceShortlistRequest: user message in state, services as choice criteria keyed by pin id', () => {
   const request = buildRemoteServiceShortlistRequest({
