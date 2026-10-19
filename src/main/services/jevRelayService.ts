@@ -382,6 +382,31 @@ export function parseJevRelayErrorCode(payload: unknown): string | null {
   return code.trim();
 }
 
+/** Cap for the logged 4xx `detail` excerpt (Pydantic arrays can be long). */
+export const JEV_RELAY_ERROR_DETAIL_MAX_CHARS = 500;
+
+/**
+ * Extract the `detail` field of a 4xx error body for the result-code log.
+ * The relay passes the upstream Pydantic validation errors through verbatim
+ * on a 400 `upstream_bad_request`, and FastAPI shapes them as a detail ARRAY
+ * — so the value is logged as-is when it is a string and JSON-serialized
+ * otherwise, capped so one malformed bundle cannot flood cowork.log.
+ */
+export function extractJevRelayErrorDetail(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const detail = (payload as { detail?: unknown }).detail;
+  if (detail === undefined || detail === null) {
+    return null;
+  }
+  const rendered = typeof detail === 'string' ? detail : JSON.stringify(detail);
+  if (!rendered || !rendered.trim()) {
+    return null;
+  }
+  return rendered.slice(0, JEV_RELAY_ERROR_DETAIL_MAX_CHARS);
+}
+
 /**
  * Classify an HTTP outcome. 429 splits by the envelope code (quota vs rate);
  * non-2xx/non-4xx/non-5xx statuses (a redirect or 1xx leaking out of the
@@ -543,13 +568,17 @@ export function flushJevRelayCallStats(sink: JevRelayLogSink | null = statsSink)
  * the whole logical call, bootstrap retry included: a first-401-then-200
  * sequence records `ok`, and the recorded latency includes the re-bootstrap.
  *
- * 429 responses are the only ones whose BODY matters downstream of
- * classification: the recorder reads the JSON once to split quota vs rate
- * and hands callers a reconstructed response whose json() replays the SAME
- * parsed body — no call site can consume the stream twice. All other
- * responses pass through untouched. Thrown errors are classified, recorded,
- * and re-thrown so the decision call sites keep their catch-to-null paths
- * (an AbortError classifies as `timeout`).
+ * 4xx responses' BODY matters downstream of classification. A 429 reads the
+ * JSON once to split quota vs rate; every OTHER 4xx (the relay's 400
+ * `upstream_bad_request` passes the upstream Pydantic validation errors
+ * through verbatim — the 2026-10-19 empty-criteria 422 regression was only
+ * diagnosable from that body) reads it once to log the envelope code and the
+ * `detail` excerpt on the per-call line. Both hand callers a reconstructed
+ * response whose json() replays the SAME parsed body — no call site can
+ * consume the stream twice; 2xx/5xx responses pass through untouched.
+ * Thrown errors are classified, recorded, and re-thrown so the decision call
+ * sites keep their catch-to-null paths (an AbortError classifies as
+ * `timeout`).
  */
 export function createJevRelayCallRecorder<R extends { ok: boolean; status: number; json: () => Promise<unknown> }>(
   fetchImpl: (url: string, init: Record<string, unknown>) => Promise<R>,
@@ -580,6 +609,39 @@ export function createJevRelayCallRecorder<R extends { ok: boolean; status: numb
           result,
           status: response.status,
           errorCode,
+          latencyMs,
+        });
+        if (parsedOk) {
+          const body = parsed;
+          return { ok: response.ok, status: response.status, json: async () => body } as unknown as R;
+        }
+        return response;
+      }
+      if (response.status >= 400 && response.status < 500) {
+        // A non-429 4xx verdict: read the JSON body ONCE, log the envelope
+        // code + the `detail` excerpt (the relay forwards the upstream
+        // Pydantic validation info on a 400 upstream_bad_request), and hand
+        // callers the same reconstructed replay-the-body response the 429
+        // path established. A non-JSON body keeps the generic classification.
+        let parsed: unknown = null;
+        let parsedOk = false;
+        try {
+          parsed = await response.json();
+          parsedOk = true;
+        } catch {
+          // Non-JSON 4xx body: the generic classification stands.
+        }
+        const errorCode = parsedOk ? parseJevRelayErrorCode(parsed) : null;
+        const detail = parsedOk ? extractJevRelayErrorDetail(parsed) : null;
+        const result = classifyJevRelayHttpStatus(response.status, errorCode);
+        const latencyMs = now() - startedAt;
+        recordJevRelayCallResult(result, latencyMs, sink, now());
+        sink('INFO', 'jevRelay:call', 'JEV relay call finished', {
+          endpoint: url.endsWith('/v1/systemone') ? '/v1/systemone' : url.endsWith('/v1/models') ? '/v1/models' : url,
+          result,
+          status: response.status,
+          errorCode,
+          detail,
           latencyMs,
         });
         if (parsedOk) {
