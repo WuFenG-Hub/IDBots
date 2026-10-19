@@ -56,6 +56,7 @@ const detailSource = readSource('src', 'renderer', 'components', 'cowork', 'Cowo
 const actionBarSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkQuoteActionBar.tsx');
 const tilesSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkQuotedSelectionTiles.tsx');
 const i18nSource = readSource('src', 'renderer', 'services', 'i18n.ts');
+const composerAttachmentsSource = readSource('src', 'renderer', 'components', 'cowork', 'coworkComposerAttachments.ts');
 
 // Labels as the running app supplies them (never hardcoded in the components).
 const labels = {
@@ -311,11 +312,15 @@ test('the composer writes quoted fragments through the real submit path and roll
   assert.match(inputSource, /quotedSelections: submittedQuotedSelections/);
   // The quoted field is snapshotted and restored by the SHARED submit helper
   // the draft, the attachment manifest AND the quoted fragments together.
-  assert.match(inputSource, /const quotedSelectionSnapshot = quotedSelectionField\.takeAndClear\(\)/);
-  assert.match(inputSource, /quotedSelectionField\.restoreIfUnchanged\(quotedSelectionSnapshot\)/);
+  // Text, attachments and quoted fragments now clear and restore TOGETHER, so
+  // the rollback lives in the shared submit helper; the component only hands
+  // the slot over.
+  assert.match(composerAttachmentsSource, /const quotedSnapshot = quotedSelectionField\?\.takeAndClear\(\)/);
+  assert.match(composerAttachmentsSource, /quotedSelectionField\.restoreIfUnchanged\(quotedSnapshot\)/);
+  assert.match(inputSource, /quotedSelectionField,/);
   assert.match(
     inputSource,
-    /!trimmedValue && submittedQuotedSelections\.length === 0/,
+    /&& submittedQuotedSelections\.length === 0\) return/,
     'a fragment can be sent on its own',
   );
 
@@ -362,15 +367,15 @@ test('a steer that carries only quoted excerpts offers send, not stop, and stays
     deriveCoworkPromptInputState({ value: '', isStreaming: true, disabled: false, steerDisabled: true, attachmentCount: 0, quotedSelectionCount: 1 }),
     { hasTextInput: false, isSteerSubmit: false, showStopButton: true, canSubmit: false },
   );
-  // Attachments are NOT part of this slice's steer rule: on this baseline the
-  // streaming branch keys off text or quoted excerpts alone, and the attachment
-  // lines stay idle-only in the composition. An image making a mid-run steer
-  // sendable is its own change (it also has to move the send/stop affordance);
-  // when it lands it updates this cell. Asserted explicitly so the boundary
-  // between the two slices is visible rather than implied.
+  // This cell used to mark the boundary between the two slices: attachments were
+  // NOT part of the steer rule, so an image-only steer had no submit content and
+  // the button read Stop. The attachment slice has since landed, exactly as the
+  // old note predicted ("when it lands it updates this cell"), so text, quoted
+  // excerpts and attachments are now ONE content verdict on both branches — and
+  // the send/stop affordance moved with it.
   assert.deepEqual(
     deriveCoworkPromptInputState({ value: '', isStreaming: true, disabled: false, steerDisabled: false, attachmentCount: 2, quotedSelectionCount: 0 }),
-    { hasTextInput: false, isSteerSubmit: false, showStopButton: true, canSubmit: false },
+    { hasTextInput: false, isSteerSubmit: true, showStopButton: false, canSubmit: true },
   );
   // Idle quote-only composers stay sendable too (unchanged).
   assert.deepEqual(
@@ -409,32 +414,42 @@ test('the steer branch composes, consumes and restores quoted fragments through 
   // Attachments stay idle-only: a disabled semantic while a turn streams.
   // Attachment lines stay idle-only in this slice: a steering submit carries the
   // text and the quoted excerpts, and the manifest rides only an idle send.
-  assert.match(inputSource, /attachmentLines: isStreaming \? undefined : attachmentLines/);
+  assert.match(inputSource, /attachmentLines,/);
 
   // A steer needs text or excerpts; only an empty steer returns early, and it
   // does so before anything is composed or consumed — so click and Enter can
   // never submit an empty steer prompt.
-  assert.match(inputSource, /if \(isStreaming && !trimmedValue && submittedQuotedSelections\.length === 0\) return;/);
+  assert.match(inputSource, /if \(isStreaming && !trimmedValue && submittedAttachments\.length === 0\s*\n\s*&& submittedQuotedSelections\.length === 0\) return;/);
   assert.match(inputSource, /event\.key === 'Enter' && !event\.shiftKey && !isComposing && !disabled/);
 
   // Excerpts are consumed on every submit path, not only when idle...
   // The snapshot/restore pair is inline on this baseline: the quoted slot is
   // taken and put back right here, not by a shared helper.
-  assert.match(inputSource, /const quotedSelectionSnapshot = quotedSelectionField\.takeAndClear\(\)/);
+  assert.match(composerAttachmentsSource, /const quotedSnapshot = quotedSelectionField\?\.takeAndClear\(\)/);
   assert.doesNotMatch(inputSource, /if \(!isStreaming\) \{[^}]*quotedSelectionField\.takeAndClear/);
   // ...and both rejection arms (accepted===false / thrown) roll them back: one
   // inline restore per arm, so a refused submit puts the fragments back.
   assert.equal(
-    (inputSource.match(/quotedSelectionField\.restoreIfUnchanged\(quotedSelectionSnapshot\)/g) ?? []).length,
+    (composerAttachmentsSource.match(/quotedSelectionField\.restoreIfUnchanged\(quotedSnapshot\)/g) ?? []).length,
+    1,
+    'the shared rollback helper puts the quoted slot back',
+  );
+  assert.equal(
+    (composerAttachmentsSource.match(/\brestore\(\);/g) ?? []).length,
     2,
-    'both the accepted===false arm and the catch arm restore the fragments',
+    'both the accepted===false arm and the catch arm call it',
   );
   // Both rejection arms (accepted===false / thrown) roll the fragments back;
   // the snapshot/restore pair is inline on this baseline — one restore per arm.
   assert.equal(
-    (inputSource.match(/quotedSelectionField\.restoreIfUnchanged\(quotedSelectionSnapshot\)/g) ?? []).length,
+    (composerAttachmentsSource.match(/quotedSelectionField\.restoreIfUnchanged\(quotedSnapshot\)/g) ?? []).length,
+    1,
+    'the shared rollback helper puts the quoted slot back',
+  );
+  assert.equal(
+    (composerAttachmentsSource.match(/\brestore\(\);/g) ?? []).length,
     2,
-    'both the accepted===false arm and the catch arm restore the fragments',
+    'both the accepted===false arm and the catch arm call it',
   );
 });
 

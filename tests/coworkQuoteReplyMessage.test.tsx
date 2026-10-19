@@ -58,6 +58,7 @@ const detailSource = readSource('src', 'renderer', 'components', 'cowork', 'Cowo
 const tilesSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkQuotedSelectionTiles.tsx');
 const sentBlockSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkSentQuoteBlock.tsx');
 const menuSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkMessageActionsMenu.tsx');
+const composerAttachmentsSource = readSource('src', 'renderer', 'components', 'cowork', 'coworkComposerAttachments.ts');
 const i18nSource = readSource('src', 'renderer', 'services', 'i18n.ts');
 const cssSource = readSource('src', 'renderer', 'index.css');
 
@@ -533,10 +534,13 @@ test('the new entry reaches the submit truth table in every cell, idle and runni
 
   // Both branches consume the same single slot; only an empty steer returns
   // early, before anything is composed or consumed.
-  assert.match(inputSource, /if \(isStreaming && !trimmedValue && submittedQuotedSelections\.length === 0\) return;/);
+  assert.match(inputSource, /if \(isStreaming && !trimmedValue && submittedAttachments\.length === 0\s*\n\s*&& submittedQuotedSelections\.length === 0\) return;/);
   // The snapshot/restore pair is inline on this baseline: the quoted slot is
   // taken and put back right here, not by a shared helper.
-  assert.match(inputSource, /const quotedSelectionSnapshot = quotedSelectionField\.takeAndClear\(\)/);
+  // The rollback moved into the shared submit helper so text, attachments and
+// quoted fragments clear and restore together.
+assert.match(composerAttachmentsSource, /const quotedSnapshot = quotedSelectionField\?\.takeAndClear\(\)/);
+assert.match(inputSource, /quotedSelectionField,/);
 });
 
 test('a rejected submission restores the reply quote; an accepted one clears it', async () => {
@@ -572,9 +576,14 @@ test('a rejected submission restores the reply quote; an accepted one clears it'
   // Both rejection arms (accepted===false / thrown) restore the slot, inline:
   // a refused submit puts the quoted fragments back.
   assert.equal(
-    (inputSource.match(/quotedSelectionField\.restoreIfUnchanged\(quotedSelectionSnapshot\)/g) ?? []).length,
+    (composerAttachmentsSource.match(/quotedSelectionField\.restoreIfUnchanged\(quotedSnapshot\)/g) ?? []).length,
+    1,
+    'the shared rollback helper puts the quoted slot back',
+  );
+  assert.equal(
+    (composerAttachmentsSource.match(/\brestore\(\);/g) ?? []).length,
     2,
-    'both rejection arms restore',
+    'both rejection arms call it',
   );
 });
 

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { PaperAirplaneIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
-import { PaperClipIcon, XMarkIcon, SparklesIcon, ChevronDownIcon, PlusIcon, PuzzlePieceIcon, CommandLineIcon } from '@heroicons/react/24/outline';
+import { PaperClipIcon, SparklesIcon, ChevronDownIcon, PlusIcon, PuzzlePieceIcon, CommandLineIcon } from '@heroicons/react/24/outline';
 import { placePopoverAbove, useAnchorMoveWatcher } from '../../utils/anchoredPopover';
 import ModelEffortPicker, { type ModelEffortValue } from '../ModelEffortPicker';
 import ContextUsageRing from '../ContextUsageRing';
@@ -41,20 +41,24 @@ import type { ProjectRecord } from '../../types/project';
 import { getCompactFolderName } from '../../utils/path';
 import {
   createVersionedComposerField,
-  runComposerSubmission,
   type VersionedComposerField,
-  type VersionedComposerSnapshot,
 } from './coworkPromptSubmission';
+import {
+  coworkAttachmentAdmission,
+  forEachIncomingAttachmentPath,
+  submitCoworkComposerDraft,
+  type CoworkComposerAttachment,
+} from './coworkComposerAttachments';
 import {
   composerTextareaHeight,
   shouldRemeasureComposerHeight,
   type ComposerHeightMeasurement,
 } from './composerTextareaResize';
+import CoworkAttachmentPreview from './CoworkAttachmentPreview';
 
-type CoworkAttachment = {
-  path: string;
-  name: string;
-};
+// The attachment chip shape; the gate/composition rules live in
+// coworkComposerAttachments.ts so paste, drop and the '+' picker share one door.
+type CoworkAttachment = CoworkComposerAttachment;
 
 interface CoworkPromptInputStateOptions {
   value: string;
@@ -75,15 +79,14 @@ export const deriveCoworkPromptInputState = ({
   quotedSelectionCount = 0,
 }: CoworkPromptInputStateOptions) => {
   const hasTextInput = Boolean(value.trim());
-  // A steer can carry typed text and/or quoted transcript excerpts (they ride
-  // into the steer prompt body). File attachments are a disabled semantic
-  // while a turn streams, so they never make a steer sendable.
-  const hasSteerContent = hasTextInput || quotedSelectionCount > 0;
-  const isSteerSubmit = isStreaming && hasSteerContent && !steerDisabled;
-  const showStopButton = isStreaming && (!hasSteerContent || steerDisabled);
-  const canSubmit = !disabled && (!isStreaming
-    ? hasTextInput || attachmentCount > 0 || quotedSelectionCount > 0
-    : isSteerSubmit);
+  // ONE content verdict for BOTH branches: text OR attachments OR a quoted
+  // fragment. An image making a mid-run steer sendable is the behaviour the
+  // attachment slice exists to fix (while the button read Stop, reaching for
+  // Send cancelled the very turn being steered); a quoted excerpt steers too.
+  const hasSubmitContent = hasTextInput || attachmentCount > 0 || quotedSelectionCount > 0;
+  const isSteerSubmit = isStreaming && hasSubmitContent && !steerDisabled;
+  const showStopButton = isStreaming && (!hasSubmitContent || steerDisabled);
+  const canSubmit = !disabled && (isStreaming ? isSteerSubmit : hasSubmitContent);
   return { hasTextInput, isSteerSubmit, showStopButton, canSubmit };
 };
 
@@ -181,6 +184,8 @@ interface PlusMenuButtonProps {
   showCommands: boolean;
   buttonRef: React.RefObject<HTMLButtonElement>;
   menuRef: React.RefObject<HTMLDivElement>;
+  /** The '+' door follows the attachment gate (steering-aware), not `isStreaming` alone. */
+  disabled?: boolean;
   onToggle: () => void;
   onAddAttachment: () => void;
   onUseSkill: () => void;
@@ -200,6 +205,7 @@ const PlusMenuButton: React.FC<PlusMenuButtonProps> = ({
   showCommands,
   buttonRef,
   menuRef,
+  disabled = false,
   onToggle,
   onAddAttachment,
   onUseSkill,
@@ -246,9 +252,10 @@ const PlusMenuButton: React.FC<PlusMenuButtonProps> = ({
         ref={buttonRef}
         type="button"
         onClick={onToggle}
+        disabled={disabled}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex items-center justify-center p-1.5 rounded-lg text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
+        className="flex items-center justify-center p-1.5 rounded-lg text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:dark:hover:bg-transparent"
         title={i18nService.t('composerPlusMenuTitle')}
         aria-label={i18nService.t('composerPlusMenuTitle')}
       >
@@ -502,6 +509,11 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   const activeSkillIds = useSelector((state: RootState) => state.skill.activeSkillIds);
   const skills = useSelector((state: RootState) => state.skill.skills);
   const inputFileLabel = i18nService.t('coworkInputFileLabel');
+  // The one attachment gate. Steering already admits plain text mid-run; an
+  // attachment walks through the very same door (`steerDisabled` decides), and
+  // every attachment entry point — paste, drop, the '+' picker, the chip's
+  // remove button — reads this single verdict so they cannot drift apart.
+  const attachmentAdmitted = coworkAttachmentAdmission({ disabled, isStreaming, steerDisabled });
 
   const isLarge = size === 'large';
   const minHeight = isLarge ? (singleLine ? 42 : 60) : 24;
@@ -894,33 +906,18 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const submittedValue = draftField.get();
     const submittedAttachments = attachmentField.get();
     const submittedQuotedSelections = quotedSelectionField.get();
+    // ONE composition for both branches, carrying all three: text, quoted
+    // excerpts and the attachment manifest. A steering submit used to compose
+    // from text alone, which is how a mid-run image vanished between the
+    // composer and onSubmit.
     const trimmedValue = submittedValue.trim();
-    // A steer is sendable when it carries text or quoted excerpts. An empty
-    // steer returns before anything is composed or consumed.
-    if (isStreaming && !trimmedValue && submittedQuotedSelections.length === 0) return;
-    // Slash-command adjudication (DSH port): a live claim, a bare `/name`
-    // line, or a manually typed `/name <args>` executes the command instead
-    // of sending a message; unknown /-leading text falls through as a
-    // normal message.
-    if (!isStreaming && commandsEnabled && trimmedValue.startsWith('/')) {
-      const activeClaim = claim && submittedValue.startsWith(claim.token) ? claim : null;
-      if (activeClaim) {
-        const args = submittedValue.slice(activeClaim.token.length).trimStart();
-        void runCommand(activeClaim.command, args);
-        return;
-      }
-      const leading = parseLeadingCommand(submittedValue, commands ?? []);
-      if (leading && (leading.command.hint || leading.args === '')) {
-        void runCommand(leading.command, leading.args);
-        return;
-      }
-    }
-    if (!isStreaming && showFolderSelector && !workingDirectory?.trim() && !workspaceSelection) {
-      setShowFolderRequiredWarning(true);
-      return;
-    }
-    if (!isStreaming && !trimmedValue && submittedAttachments.length === 0 && submittedQuotedSelections.length === 0) return;
-    setShowFolderRequiredWarning(false);
+    // The streaming guard is the idle rule: text OR attachments OR a quoted
+    // fragment make a submission. Demanding text alone refused an image-only
+    // steer even after the attachment doors had opened — the chip got in and
+    // send then did nothing. Steering a running turn with a picture is ordinary
+    // in the sibling products, and a quote steers too.
+    if (isStreaming && !trimmedValue && submittedAttachments.length === 0
+        && submittedQuotedSelections.length === 0) return;
 
     // Get active skills prompts and combine them
     const activeSkills = isStreaming
@@ -935,17 +932,15 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const attachmentLines = submittedAttachments.map((attachment) =>
       `${inputFileLabel}: ${attachment.path}`
     ).join('\n');
-    // Quoted excerpts are written into the prompt BODY, not merely rendered
-    // next to it: the bot re-reads the conversation as plain text each turn, so
-    // a highlight alone would never reach it. A steer (mid-turn correction)
-    // composes through this same path — replying to a selected passage while
-    // the turn runs must carry the excerpt too. Attachment lines stay idle-only:
-    // attachments are a disabled semantic while a turn streams and never ride
-    // into a steer.
+    // Quoted excerpts are written into the prompt BODY, not merely rendered next
+    // to it: the bot re-reads the conversation as plain text each turn, so a
+    // highlight alone would never reach it. One composition serves both branches
+    // and carries all three parts — text, excerpts, attachment manifest —
+    // because a steering submit carries the same manifest an idle send does.
     const finalPrompt = composeSubmittedCoworkPrompt({
       value: trimmedValue,
       quotedSelections: submittedQuotedSelections,
-      attachmentLines: isStreaming ? undefined : attachmentLines,
+      attachmentLines,
       labels: {
         header: i18nService.t('coworkQuoteBlockHeader'),
         item: i18nService.t('coworkQuoteBlockItem'),
@@ -954,8 +949,6 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
           assistant: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.assistant),
           other: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.other),
         },
-        // Whole-message replies label themselves with role + position (and a
-        // generating mark) instead of the passage template.
         replyBlockHeader: i18nService.t('coworkQuoteReplyBlockHeader'),
         replyBlockItem: i18nService.t('coworkQuoteReplyBlockItem'),
         replyStreamingMark: i18nService.t('coworkQuoteReplyStreamingMark'),
@@ -968,31 +961,17 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       },
     });
 
-    const draftSnapshot = draftField.takeAndClear();
-    let attachmentSnapshot: VersionedComposerSnapshot<CoworkAttachment[]> | null = null;
-    // Excerpts are consumed on every submit path (steer included); only the
-    // attachment list stays idle-only.
-    const quotedSelectionSnapshot = quotedSelectionField.takeAndClear();
-    if (!isStreaming) {
-      attachmentSnapshot = attachmentField.takeAndClear();
-    }
     try {
-      const accepted = await runComposerSubmission(
+      // Text and attachments are ONE submission: both fields are cleared
+      // together, and a refusal (or a throw) puts both back. Steering takes the
+      // attachment snapshot too — skipping it is what lost a mid-run image.
+      await submitCoworkComposerDraft({
         draftField,
-        draftSnapshot,
-        () => onSubmit(finalPrompt, isStreaming ? undefined : skillPrompt),
-      );
-      if (accepted === false) {
-        if (attachmentSnapshot) {
-          attachmentField.restoreIfUnchanged(attachmentSnapshot);
-        }
-        quotedSelectionField.restoreIfUnchanged(quotedSelectionSnapshot);
-      }
+        attachmentField,
+        quotedSelectionField,
+        onSubmit: () => onSubmit(finalPrompt, isStreaming ? undefined : skillPrompt),
+      });
     } catch (error) {
-      if (attachmentSnapshot) {
-        attachmentField.restoreIfUnchanged(attachmentSnapshot);
-      }
-      quotedSelectionField.restoreIfUnchanged(quotedSelectionSnapshot);
       console.error('Cowork prompt submission failed:', error);
     }
   }, [isStreaming, disabled, steerDisabled, onSubmit, activeSkillIds, skills, inputFileLabel, showFolderSelector, workingDirectory, workspaceSelection, commandsEnabled, claim, commands, runCommand]);
@@ -1074,7 +1053,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
 
   const containerClass = isLarge
     ? 'relative rounded-[22px] border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-card focus-within:shadow-elevated focus-within:ring-1 focus-within:ring-claude-accent/40 focus-within:border-claude-accent'
-    : 'relative flex items-end gap-2 p-3 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface';
+    : 'relative flex flex-wrap items-end gap-2 p-3 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface';
 
   const textareaClass = isLarge
     ? `w-full resize-none bg-transparent px-4 pt-2.5 pb-2 dark:text-claude-darkText text-claude-text placeholder:dark:text-claude-darkTextSecondary/60 placeholder:text-claude-textSecondary/60 focus:outline-none text-[14px] leading-[24px] min-h-[${minHeight}px] max-h-[${maxHeight}px]`
@@ -1196,25 +1175,16 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   }, [fileToBase64, workingDirectory]);
 
   const handleIncomingFiles = useCallback(async (fileList: FileList | File[]) => {
-    if (disabled || isStreaming) return;
-    const files = Array.from(fileList ?? []);
-    if (files.length === 0) return;
-
-    for (const file of files) {
-      const nativePath = getNativeFilePath(file);
-      if (nativePath) {
-        addAttachment(nativePath);
-        continue;
-      }
-
-      const stagedPath = await saveInlineFile(file);
-      if (stagedPath) {
-        addAttachment(stagedPath);
-      }
-    }
-  }, [addAttachment, disabled, getNativeFilePath, isStreaming, saveInlineFile]);
+    if (!attachmentAdmitted) return;
+    await forEachIncomingAttachmentPath(fileList ?? [], {
+      getNativeFilePath,
+      saveInlineFile,
+      onAttachment: addAttachment,
+    });
+  }, [addAttachment, attachmentAdmitted, getNativeFilePath, saveInlineFile]);
 
   const handleAddFile = useCallback(async () => {
+    if (!attachmentAdmitted) return;
     try {
       const result = await window.electron.dialog.selectFile({
         title: i18nService.t('coworkAddFile'),
@@ -1225,7 +1195,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     } catch (error) {
       console.error('Failed to select file:', error);
     }
-  }, [addAttachment]);
+  }, [addAttachment, attachmentAdmitted]);
 
   const handleRemoveAttachment = useCallback((path: string) => {
     const field = attachmentFieldRef.current;
@@ -1250,7 +1220,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     event.preventDefault();
     event.stopPropagation();
     dragDepthRef.current += 1;
-    if (!disabled && !isStreaming) {
+    if (attachmentAdmitted) {
       setIsDraggingFiles(true);
     }
   };
@@ -1259,7 +1229,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     if (!hasFileTransfer(event.dataTransfer)) return;
     event.preventDefault();
     event.stopPropagation();
-    event.dataTransfer.dropEffect = disabled || isStreaming ? 'none' : 'copy';
+    event.dataTransfer.dropEffect = attachmentAdmitted ? 'copy' : 'none';
   };
 
   const handleDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
@@ -1278,17 +1248,17 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     event.stopPropagation();
     dragDepthRef.current = 0;
     setIsDraggingFiles(false);
-    if (disabled || isStreaming) return;
+    if (!attachmentAdmitted) return;
     void handleIncomingFiles(event.dataTransfer.files);
   };
 
   const handlePaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (disabled || isStreaming) return;
+    if (!attachmentAdmitted) return;
     const files = Array.from(event.clipboardData?.files ?? []);
     if (files.length === 0) return;
     event.preventDefault();
     void handleIncomingFiles(files);
-  }, [disabled, handleIncomingFiles, isStreaming]);
+  }, [attachmentAdmitted, handleIncomingFiles]);
 
   const closeContextMenu = useCallback(() => {
     setContextMenuPosition(null);
@@ -1449,30 +1419,6 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
         botName={botName}
         disabled={disabled || isStreaming}
       />
-      {attachments.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-2">
-          {attachments.map((attachment) => (
-              <div
-                key={attachment.path}
-                className="inline-flex items-center gap-1.5 rounded-full border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-2.5 py-1 text-xs dark:text-claude-darkText text-claude-text max-w-full"
-                title={attachment.path}
-              >
-                <PaperClipIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                <span className="truncate max-w-[180px]">{attachment.name}</span>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveAttachment(attachment.path)}
-                  disabled={disabled || isStreaming}
-                  className="ml-0.5 rounded-full p-0.5 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
-                  aria-label={i18nService.t('coworkAttachmentRemove')}
-                  title={i18nService.t('coworkAttachmentRemove')}
-                >
-                  <XMarkIcon className="h-3 w-3" />
-                </button>
-              </div>
-          ))}
-        </div>
-      )}
       <div
         ref={composerCardRef}
         className={enhancedContainerClass}
@@ -1495,6 +1441,18 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
             onPick={pickCommand}
             anchorRef={composerCardRef}
           />
+        )}
+        {attachments.length > 0 && (
+          <div className={`relative z-10 flex w-full flex-wrap gap-2 ${isLarge ? 'px-3 pt-3' : ''}`}>
+            {attachments.map((attachment) => (
+              <CoworkAttachmentPreview
+                key={attachment.path}
+                attachment={attachment}
+                removeDisabled={!attachmentAdmitted}
+                onRemove={handleRemoveAttachment}
+              />
+            ))}
+          </div>
         )}
         {isLarge ? (
           <>
@@ -1544,31 +1502,38 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               />
             </div>
             <div className="flex items-center justify-between px-4 pb-2 pt-1.5">
-              <fieldset
-                className="flex items-center gap-2 relative border-0 p-0 m-0 min-w-0"
-                disabled={disabled || isStreaming}
-              >
+              <div className="flex items-center gap-2 relative min-w-0">
                 <PlusMenuButton
                   open={plusMenuOpen}
                   showAttachment={showAttachmentButton}
                   showCommands={commandsEnabled}
                   buttonRef={plusButtonRef}
                   menuRef={plusMenuRef}
+                  disabled={!attachmentAdmitted}
                   onToggle={() => setPlusMenuOpen(!plusMenuOpen)}
                   onAddAttachment={handlePlusMenuAddAttachment}
                   onUseSkill={handlePlusMenuUseSkill}
                   onUseCommand={handlePlusMenuUseCommand}
                 />
-                {showModelSelector && (
-                  <ModelEffortPicker
-                    dropdownDirection="up"
-                    value={modelEffortValue ?? { modelId: null, providerKey: null, effort: null }}
-                    onChange={(value) => onModelEffortChange?.(value)}
-                    globalDefaultModel={configService.getConfig().model?.defaultModel ?? null}
-                  />
-                )}
-                <ActiveSkillBadge />
-              </fieldset>
+                {/* Model/effort + pinned-skill chips are session configuration,
+                    not message content, so they keep freezing while a turn
+                    streams. Only the '+' attachment door follows the steering
+                    gate above. */}
+                <fieldset
+                  className="flex items-center gap-2 relative border-0 p-0 m-0 min-w-0"
+                  disabled={disabled || isStreaming}
+                >
+                  {showModelSelector && (
+                    <ModelEffortPicker
+                      dropdownDirection="up"
+                      value={modelEffortValue ?? { modelId: null, providerKey: null, effort: null }}
+                      onChange={(value) => onModelEffortChange?.(value)}
+                      globalDefaultModel={configService.getConfig().model?.defaultModel ?? null}
+                    />
+                  )}
+                  <ActiveSkillBadge />
+                </fieldset>
+              </div>
               <div className="flex items-center gap-2">
                 {contextUsage && (
                   <ContextUsageRing
@@ -1612,6 +1577,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               showCommands={commandsEnabled}
               buttonRef={plusButtonRef}
               menuRef={plusMenuRef}
+              disabled={!attachmentAdmitted}
               onToggle={() => setPlusMenuOpen(!plusMenuOpen)}
               onAddAttachment={handlePlusMenuAddAttachment}
               onUseSkill={handlePlusMenuUseSkill}
