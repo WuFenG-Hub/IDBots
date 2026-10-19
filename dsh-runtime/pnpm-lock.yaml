@@ -61,6 +61,9 @@ importers:
       '@deepseek-ai/dsh-compaction-basic':
         specifier: 0.2.1-rc.2
         version: 0.2.1-rc.2(4b661657c2422da45fd2ae3c7faf43c4)
+      '@deepseek-ai/dsh-compaction-image-offload':
+        specifier: 0.2.1-rc.2
+        version: 0.2.1-rc.2(039c2842f706927822cb80e77eb503fa)
       '@deepseek-ai/dsh-compaction-tool-result-pruner':
         specifier: 0.2.1-rc.2
         version: 0.2.1-rc.2(cae86992afc859748d3aae1f812c45bd)
