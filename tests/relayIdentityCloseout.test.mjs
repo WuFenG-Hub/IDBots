@@ -23,6 +23,7 @@ const {
   applyRelayIdentityChange,
   clearRelayCredentialCaches,
   initRelayIdentityCloseoutService,
+  reconcileRelayCredentialsWithIdentity,
   resetRelayIdentityCloseoutServiceForTests,
 } = require('../dist-electron/main/services/relayIdentityCloseout.js');
 const {
@@ -40,6 +41,7 @@ const {
   resolveVisionRelayCredentials,
 } = require('../dist-electron/main/services/visionRelayService.js');
 const {
+  LLM_RELAY_KEY_IDENTITY_KV,
   getLlmRelayQuota,
   initLlmRelayService,
   resetLlmRelayServiceForTests,
@@ -100,6 +102,11 @@ function captureLog() {
 
 function setup(store, overrides = {}) {
   const counters = { bootstrap: 0, jevBootstrap: 0, visionBootstrap: 0, appConfigChanged: 0 };
+  // The local user_identity row (null = logged out). Defaults to identity A,
+  // i.e. the incident state once the user has imported their real identity.
+  const identity = overrides.identity === undefined
+    ? { mvc_address: IDENTITY_A, globalmetaid: 'idq1identitya' }
+    : overrides.identity;
   initJevRelayService({
     getStore: () => store,
     bootstrapImpl: async () => {
@@ -117,6 +124,7 @@ function setup(store, overrides = {}) {
   const { lines, log } = captureLog();
   initRelayIdentityCloseoutService({
     getStore: () => store,
+    getUserIdentityStore: () => ({ get: () => identity }),
     bootstrapImpl: overrides.bootstrapImpl ?? (async () => {
       counters.bootstrap += 1;
       return { apiKey: KEY_A, baseUrl: CHAT_BASE };
@@ -146,6 +154,7 @@ beforeEach(() => {
 
 test('clearRelayCredentialCaches empties every tier and blanks only the provider credentials', async () => {
   const store = makeIncidentStore();
+  store.set(LLM_RELAY_KEY_IDENTITY_KV, IDENTITY_B);
   const { counters } = setup(store);
   // Prime the in-memory tiers the way a running app has them.
   assert.equal((await resolveJevRelayCredentials()).apiKey, KEY_B);
@@ -157,6 +166,7 @@ test('clearRelayCredentialCaches empties every tier and blanks only the provider
   assert.equal(store.kv.has(JEV_RELAY_BASE_URL_KV), false);
   assert.equal(store.kv.has(VISION_RELAY_API_KEY_KV), false);
   assert.equal(store.kv.has(VISION_RELAY_BASE_URL_KV), false);
+  assert.equal(store.kv.has(LLM_RELAY_KEY_IDENTITY_KV), false, 'the identity stamp goes with the keys');
   const provider = providerOf(store);
   assert.equal(provider.apiKey, '');
   assert.equal(provider.baseUrl, '');
@@ -207,6 +217,7 @@ test('applyRelayIdentityChange: import replaces B\'s key with a freshly issued A
   assert.equal(store.get(JEV_RELAY_BASE_URL_KV), CHAT_BASE);
   assert.equal(store.get(VISION_RELAY_API_KEY_KV), KEY_A);
   assert.equal(store.get(VISION_RELAY_BASE_URL_KV), CHAT_BASE);
+  assert.equal(store.get(LLM_RELAY_KEY_IDENTITY_KV), IDENTITY_A, 'the re-issued key is stamped with the current identity');
   // Memory tiers serve A now.
   assert.equal((await resolveJevRelayCredentials()).apiKey, KEY_A);
   assert.equal((await resolveVisionRelayCredentials()).apiKey, KEY_A);
@@ -350,4 +361,101 @@ test('a quota response naming the local identity leaves every tier alone', async
   assert.equal(counters.bootstrap, 0);
   assert.equal(providerOf(store).apiKey, KEY_B);
   assert.equal(store.get(JEV_RELAY_API_KEY_KV), KEY_B);
+});
+
+// ---------------------------------------------------------------------------
+// Startup reconciliation (installs that split BEFORE the closeout existed)
+// ---------------------------------------------------------------------------
+
+test('startup reconciliation: a pre-fix un-stamped key is re-issued for the current identity once', async () => {
+  // Upgraded install in the incident state: identity A in user_identity, B's
+  // key in every cache, and no stamp because the old build never wrote one.
+  const store = makeIncidentStore();
+  const { counters, lines } = setup(store);
+  assert.equal(store.kv.has(LLM_RELAY_KEY_IDENTITY_KV), false);
+
+  const result = await reconcileRelayCredentialsWithIdentity();
+
+  assert.equal(result.rebootstrap, 'ok');
+  assert.equal(counters.bootstrap, 1);
+  assert.equal(providerOf(store).apiKey, KEY_A);
+  assert.equal(store.get(JEV_RELAY_API_KEY_KV), KEY_A);
+  assert.equal(store.get(VISION_RELAY_API_KEY_KV), KEY_A);
+  assert.equal(store.get(LLM_RELAY_KEY_IDENTITY_KV), IDENTITY_A);
+  assert.equal(JSON.stringify([...store.kv.entries()]).includes(KEY_B), false, 'B\'s key is gone from every tier');
+  const drift = lines.find((line) => line.message.includes('drift detected'));
+  assert.ok(drift);
+  assert.equal(drift.extra.stampedIdentity, null);
+  assert.equal(drift.extra.currentIdentity, IDENTITY_A);
+  assert.equal(lines.find((line) => line.message.includes('re-issued')).extra.reason, 'startup-reconciliation');
+
+  // The next startup finds the stamp aligned and does nothing.
+  assert.equal(await reconcileRelayCredentialsWithIdentity(), null);
+  assert.equal(counters.bootstrap, 1, 'no second re-issue');
+});
+
+test('startup reconciliation: a stamp matching the current identity is a no-op', async () => {
+  const store = makeIncidentStore();
+  store.set(LLM_RELAY_KEY_IDENTITY_KV, IDENTITY_A);
+  const { counters } = setup(store);
+  assert.equal(await reconcileRelayCredentialsWithIdentity(), null);
+  assert.equal(counters.bootstrap, 0);
+  assert.equal(counters.appConfigChanged, 0);
+  assert.equal(providerOf(store).apiKey, KEY_B, 'aligned caches are left exactly as they were');
+  assert.equal(store.get(JEV_RELAY_API_KEY_KV), KEY_B);
+});
+
+test('startup reconciliation: a stamp naming another identity (restored backup) triggers the closeout', async () => {
+  const store = makeIncidentStore();
+  store.set(LLM_RELAY_KEY_IDENTITY_KV, IDENTITY_B);
+  const { counters, lines } = setup(store);
+  const result = await reconcileRelayCredentialsWithIdentity();
+  assert.equal(result.rebootstrap, 'ok');
+  assert.equal(counters.bootstrap, 1);
+  assert.equal(providerOf(store).apiKey, KEY_A);
+  assert.equal(store.get(LLM_RELAY_KEY_IDENTITY_KV), IDENTITY_A);
+  assert.equal(lines.find((line) => line.message.includes('drift detected')).extra.stampedIdentity, IDENTITY_B);
+});
+
+test('startup reconciliation: a logged-out install is left alone (no silent identity mint)', async () => {
+  const store = makeIncidentStore();
+  const { counters } = setup(store, { identity: null });
+  assert.equal(await reconcileRelayCredentialsWithIdentity(), null);
+  assert.equal(counters.bootstrap, 0);
+  assert.equal(providerOf(store).apiKey, KEY_B, 'stale key stays until the next import/create closeout');
+});
+
+test('startup reconciliation: no cached relay key anywhere is a no-op', async () => {
+  const store = makeStore({ app_config: { providers: { [METAID_FREE_PROVIDER_KEY]: providerEntry('', { baseUrl: '' }) } } });
+  const { counters } = setup(store);
+  assert.equal(await reconcileRelayCredentialsWithIdentity(), null);
+  assert.equal(counters.bootstrap, 0);
+});
+
+test('startup reconciliation: an un-stamped key living only in a relay kv tier is reconciled too', async () => {
+  // Provider never provisioned (or already blanked) but the JEV tier still
+  // carries an old key: the closeout clears it and defers the re-issue to
+  // first use, since there is no provider entry to refresh.
+  const store = makeStore({
+    app_config: { providers: {} },
+    [JEV_RELAY_API_KEY_KV]: KEY_B,
+    [JEV_RELAY_BASE_URL_KV]: CHAT_BASE,
+  });
+  const { counters } = setup(store);
+  const result = await reconcileRelayCredentialsWithIdentity();
+  assert.deepEqual(result, { cleared: true, rebootstrap: 'skipped' });
+  assert.equal(counters.bootstrap, 0);
+  assert.equal(store.kv.has(JEV_RELAY_API_KEY_KV), false);
+  assert.equal(store.kv.has(JEV_RELAY_BASE_URL_KV), false);
+});
+
+test('startup reconciliation shares the closeout flight with a concurrent identity change', async () => {
+  const store = makeIncidentStore();
+  const { counters } = setup(store);
+  const [reconciled, imported] = await Promise.all([
+    reconcileRelayCredentialsWithIdentity(),
+    applyRelayIdentityChange({ reason: 'import' }),
+  ]);
+  assert.deepEqual(reconciled, imported);
+  assert.equal(counters.bootstrap, 1);
 });

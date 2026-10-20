@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url);
 const { mvc } = require('meta-contract');
 
 const {
+  LLM_RELAY_KEY_IDENTITY_KV,
   LlmRelayApiError,
   bootstrapLlmRelay,
   buildLlmRelayBootstrapMessage,
@@ -321,13 +322,14 @@ test('bootstrap accepts a response naming the signing identity and surfaces iden
 
 test('bootstrap rejects a response that belongs to another identity (key never handed out)', async () => {
   resetLlmRelayServiceForTests();
+  const kv = makeKvStore();
   const { fetchImpl } = makeFetchStub(() => ({
     ok: true,
     status: 200,
     body: { code: 0, message: 'success', data: { ...BOOTSTRAP_DATA, identityAddress: '1SomeoneElse' } },
   }));
   initLlmRelayService({
-    getStore: () => makeKvStore(),
+    getStore: () => kv,
     getUserIdentityStore: () => ({ get: () => makeIdentity() }),
     fetchImpl,
     baseUrl: 'https://relay.test',
@@ -339,6 +341,21 @@ test('bootstrap rejects a response that belongs to another identity (key never h
     assert.match(error.message, new RegExp(IDENTITY_ADDRESS));
     return true;
   });
+  assert.equal(kv.get(LLM_RELAY_KEY_IDENTITY_KV), undefined, 'a rejected bootstrap stamps nothing');
+});
+
+test('bootstrap stamps the identity the issued key belongs to', async () => {
+  resetLlmRelayServiceForTests();
+  const kv = makeKvStore();
+  const { fetchImpl } = makeFetchStub(() => ({ ok: true, status: 200, body: { code: 0, message: 'success', data: BOOTSTRAP_DATA } }));
+  initLlmRelayService({
+    getStore: () => kv,
+    getUserIdentityStore: () => ({ get: () => makeIdentity() }),
+    fetchImpl,
+    baseUrl: 'https://relay.test',
+  });
+  await bootstrapLlmRelay();
+  assert.equal(kv.get(LLM_RELAY_KEY_IDENTITY_KV), IDENTITY_ADDRESS);
 });
 
 /** Quota stub whose response names the owner of the presented bearer key. */

@@ -141,7 +141,7 @@ import {
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
-import { applyRelayIdentityChange, initRelayIdentityCloseoutService } from './services/relayIdentityCloseout';
+import { applyRelayIdentityChange, initRelayIdentityCloseoutService, reconcileRelayCredentialsWithIdentity } from './services/relayIdentityCloseout';
 import { initVisionRelayService, recognizeAudioViaRelay, recognizeImageViaRelay, recognizeVideoAudioViaRelay, recognizeVideoViaRelay } from './services/visionRelayService';
 import { probeMediaFile, convertMediaFile, grabVideoFrame } from './services/mediaToolsService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
@@ -16748,11 +16748,13 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   // snapshot, JEV kv+memory, vision kv+memory) plus the metaid-free provider
   // credentials. userIdentity:create/import await it so a replaced identity
   // never keeps consuming the previous identity's relay key; it also serves
-  // as the quota-response identity-mismatch repair hook. The app_config
-  // rewrite is broadcast so the renderer configService reloads instead of
-  // writing its stale snapshot (old key) back.
+  // as the quota-response identity-mismatch repair hook and as the startup
+  // reconciliation for installs that split before the closeout existed. The
+  // app_config rewrite is broadcast so the renderer configService reloads
+  // instead of writing its stale snapshot (old key) back.
   initRelayIdentityCloseoutService({
     getStore,
+    getUserIdentityStore,
     onAppConfigChanged: () => broadcastStoreChanged('app_config'),
     log: coworkLog,
   });
@@ -18524,14 +18526,26 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('dsh runtime warmup begin');
     void getCoworkRunner().prewarmDshRuntime();
 
+    // Relay credential <-> identity reconciliation. Installs that split before
+    // the identity closeout existed hold an un-stamped relay key in the caches
+    // (possibly another identity's), and a restored data backup can carry a
+    // stamp naming a different identity; either runs the closeout (clear +
+    // re-issue as the current identity) exactly once, a clean stamp is a
+    // no-op that settles immediately. Fire-and-forget; never rejects.
+    const relayReconciliation = reconcileRelayCredentialsWithIdentity();
+
     // Pre-resolve the free JEV relay key beside the DSH warmup. Relay keys
     // expire server-side after an idle window, and the first cerebellum call
     // of the next chat then paid an identity-signed re-bootstrap (15s+
     // observed) inside the turn's volatile-context build — the 2026-10-15
     // first-sentence latency report. Fire-and-forget: the resolver never
     // throws, and a warm key simply makes the first turn's 1.5s-bounded JEV
-    // calls answer from cache.
-    void resolveCerebellumRuntimeConfig(getStore().get('app_config'));
+    // calls answer from cache. Chained behind the reconciliation so a drifted
+    // install resolves the re-issued key instead of racing the closeout with
+    // a second bootstrap of its own; the aligned case adds no delay.
+    void relayReconciliation
+      .catch(() => null)
+      .then(() => resolveCerebellumRuntimeConfig(getStore().get('app_config')));
 
     await startSqliteBackgroundJobs();
     startSqliteDaemons();

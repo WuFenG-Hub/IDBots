@@ -44,6 +44,15 @@ const DEFAULT_IDENTITY_NAME = 'User';
 
 /** kvStore key: assist-service base URL override (integration testing). */
 export const LLM_RELAY_API_BASE_KEY = 'llmRelay.apiBase';
+/**
+ * kvStore key: mvc address of the identity the most recently issued relay key
+ * belongs to. Written on every successful bootstrap (the single issuance
+ * funnel for the renderer provisioning, the JEV/vision resolvers and the
+ * identity closeout alike) and compared against user_identity at startup by
+ * relayIdentityCloseout — a missing or foreign stamp beside a cached key means
+ * the key may belong to another identity and must be re-issued.
+ */
+export const LLM_RELAY_KEY_IDENTITY_KV = 'llmRelay.keyIdentity';
 
 // ---------------------------------------------------------------------------
 // Types + typed error
@@ -260,6 +269,19 @@ export function setLlmRelayApiBase(value: unknown): string {
     }
   }
   return next;
+}
+
+/** Best-effort stamp of the identity a freshly issued relay key belongs to. */
+function persistRelayKeyIdentity(identityAddress: string): void {
+  const kv = getKvStore();
+  if (kv && 'set' in kv && typeof (kv as { set?: unknown }).set === 'function') {
+    try {
+      (kv as Pick<SqliteStore, 'set'>).set(LLM_RELAY_KEY_IDENTITY_KV, identityAddress);
+    } catch {
+      // persistence loss is non-fatal: startup reconciliation treats a
+      // missing stamp as drift and simply re-issues the key once
+    }
+  }
 }
 
 // Canonical request string (backend llm_relay_service/message.go — do not change).
@@ -504,6 +526,7 @@ export async function bootstrapLlmRelay(): Promise<LlmRelayBootstrapInfo> {
     throw new LlmRelayApiError({ stage: 'bootstrap', message: 'LLM relay bootstrap returned no apiKey.' });
   }
   quotaCache = { ...quota, fetchedAt: Date.now() };
+  persistRelayKeyIdentity(identity.mvcAddress);
   return { apiKey, ...quota };
 }
 

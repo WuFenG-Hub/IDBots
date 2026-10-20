@@ -17,41 +17,63 @@
  * 3. drops the vision relay credentials (kv + memory),
  * 4. blanks apiKey/baseUrl on the metaid-free provider config, so the renderer
  *    gate and every main-side reader see "unprovisioned" instead of a stale key,
+ * 5. drops the key-identity stamp (LLM_RELAY_KEY_IDENTITY_KV),
  * then re-bootstraps with the CURRENT identity, writes the fresh key back into
- * the provider config and lets the JEV/vision resolvers re-persist it from
- * there (the same startup-prewarm path, so nothing bootstraps twice).
+ * the provider config, lets the JEV/vision resolvers re-persist it from there
+ * (the same startup-prewarm path, so nothing bootstraps twice) and re-stamps
+ * the current identity.
  *
- * Steps 1-4 are synchronous and never throw; the re-bootstrap is best-effort
+ * Steps 1-5 are synchronous and never throw; the re-bootstrap is best-effort
  * (an offline import still succeeds — caches simply stay empty and the next
  * on-demand resolution bootstraps as the new identity). Electron-free
- * (store/bootstrap/log injected) so plain node:test coverage works.
+ * (store/identity/bootstrap/log injected) so plain node:test coverage works.
  *
- * userIdentity:logout deliberately does NOT run this closeout: with no local
- * identity left, empty caches would make the startup JEV prewarm mint a brand
- * new identity through ensureUserIdentity — the very silent provisioning that
- * caused the split. The stale key is replaced at the next import/create.
+ * Startup reconciliation (reconcileRelayCredentialsWithIdentity) covers the
+ * installs that were ALREADY split before this closeout existed: a cached key
+ * without a stamp (pre-fix data) or with a stamp naming another identity (a
+ * restored data backup) runs the same closeout once, so every upgraded install
+ * re-owns its relay key on first launch without user action or server help.
+ *
+ * userIdentity:logout deliberately does NOT run this closeout, and the
+ * reconciliation skips a logged-out install: with no local identity left,
+ * empty caches would make the startup JEV prewarm mint a brand new identity
+ * through ensureUserIdentity — the very silent provisioning that caused the
+ * split. The stale key is replaced at the next import/create.
  */
 
 import type { SqliteStore } from '../sqliteStore';
+import type { UserIdentityStore } from '../userIdentityStore';
 import {
+  LLM_RELAY_KEY_IDENTITY_KV,
   bootstrapLlmRelay,
   clearLlmRelayQuotaCache,
   setLlmRelayIdentityMismatchHandler,
 } from './llmRelayService';
 import {
+  JEV_RELAY_API_KEY_KV,
   invalidateJevRelayCredentials,
   resolveJevRelayCredentials,
   type JevRelayLogSink,
 } from './jevRelayService';
-import { invalidateVisionRelayCredentials, resolveVisionRelayCredentials } from './visionRelayService';
+import {
+  VISION_RELAY_API_KEY_KV,
+  invalidateVisionRelayCredentials,
+  resolveVisionRelayCredentials,
+} from './visionRelayService';
 
 /** Provider key of the built-in free relay provider (renderer: LLM_FREE_PROVIDER_KEY). */
 export const METAID_FREE_PROVIDER_KEY = 'metaid-free';
 
-export type RelayIdentityChangeReason = 'import' | 'create' | 'quota-identity-mismatch';
+export type RelayIdentityChangeReason =
+  | 'import'
+  | 'create'
+  | 'quota-identity-mismatch'
+  | 'startup-reconciliation';
 
 export interface RelayIdentityCloseoutDeps {
   getStore: () => SqliteStore | null;
+  /** Current local user identity; the closeout stamps its address and the reconciliation compares against it. */
+  getUserIdentityStore: () => UserIdentityStore;
   /** Identity-signed relay bootstrap (default: llmRelayService.bootstrapLlmRelay). */
   bootstrapImpl?: () => Promise<{ apiKey: string; baseUrl: string }>;
   /**
@@ -100,10 +122,21 @@ export function resetRelayIdentityCloseoutServiceForTests(): void {
 type ProviderRecord = Record<string, unknown>;
 type AppConfigRecord = { providers?: Record<string, ProviderRecord | undefined> } & Record<string, unknown>;
 
+function normalizeText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function getStoreSafe(): SqliteStore | null {
+  try {
+    return depsRef?.getStore?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function readAppConfig(): AppConfigRecord | null {
   try {
-    const store = depsRef?.getStore?.() ?? null;
-    const appConfig = store?.get('app_config') as AppConfigRecord | null | undefined;
+    const appConfig = getStoreSafe()?.get('app_config') as AppConfigRecord | null | undefined;
     return appConfig && typeof appConfig === 'object' && !Array.isArray(appConfig) ? appConfig : null;
   } catch {
     return null;
@@ -115,6 +148,60 @@ function readMetaIdFreeProviderEntry(appConfig: AppConfigRecord | null): Provide
   return provider && typeof provider === 'object' && !Array.isArray(provider) ? provider : null;
 }
 
+/** mvc address of the local user identity, '' when logged out or unreadable. */
+function currentIdentityAddress(): string {
+  try {
+    return normalizeText(depsRef?.getUserIdentityStore?.().get()?.mvc_address);
+  } catch {
+    return '';
+  }
+}
+
+/** First cached relay key found in any tier (provider entry, JEV kv, vision kv), '' when none. */
+function readCachedRelayKey(): string {
+  try {
+    const store = getStoreSafe();
+    if (!store) return '';
+    const providerKey = normalizeText(readMetaIdFreeProviderEntry(readAppConfig())?.apiKey);
+    if (providerKey) return providerKey;
+    const jevKey = normalizeText(store.get(JEV_RELAY_API_KEY_KV));
+    if (jevKey) return jevKey;
+    return normalizeText(store.get(VISION_RELAY_API_KEY_KV));
+  } catch {
+    return '';
+  }
+}
+
+function readRelayKeyIdentityStamp(): string {
+  try {
+    return normalizeText(getStoreSafe()?.get(LLM_RELAY_KEY_IDENTITY_KV));
+  } catch {
+    return '';
+  }
+}
+
+function writeRelayKeyIdentityStamp(identityAddress: string): void {
+  try {
+    const store = getStoreSafe();
+    if (store && typeof (store as { set?: unknown }).set === 'function') {
+      (store as Pick<SqliteStore, 'set'>).set(LLM_RELAY_KEY_IDENTITY_KV, identityAddress);
+    }
+  } catch {
+    // best-effort: a missing stamp only costs one re-issue at the next startup
+  }
+}
+
+function deleteRelayKeyIdentityStamp(): void {
+  try {
+    const store = getStoreSafe();
+    if (store && typeof (store as { delete?: unknown }).delete === 'function') {
+      (store as { delete: (key: string) => unknown }).delete(LLM_RELAY_KEY_IDENTITY_KV);
+    }
+  } catch {
+    // best-effort
+  }
+}
+
 /**
  * Rewrite only apiKey/baseUrl on the metaid-free provider entry, preserving
  * every other field (enabled, models, name, apiFormat — the model catalog is
@@ -123,7 +210,7 @@ function readMetaIdFreeProviderEntry(appConfig: AppConfigRecord | null): Provide
  */
 function writeMetaIdFreeProviderCredentials(apiKey: string, baseUrl: string): boolean {
   try {
-    const store = depsRef?.getStore?.() ?? null;
+    const store = getStoreSafe();
     if (!store || typeof (store as { set?: unknown }).set !== 'function') return false;
     const appConfig = readAppConfig();
     const provider = readMetaIdFreeProviderEntry(appConfig);
@@ -147,22 +234,25 @@ function writeMetaIdFreeProviderCredentials(apiKey: string, baseUrl: string): bo
 
 /**
  * Synchronously drop every cached relay credential: llmRelay quota snapshot,
- * JEV kv + memory, vision kv + memory, and the metaid-free provider's
- * apiKey/baseUrl. Never throws. Exported for the closeout and for tests; the
- * identity handlers call applyRelayIdentityChange, which runs this first.
+ * JEV kv + memory, vision kv + memory, the metaid-free provider's
+ * apiKey/baseUrl, and the key-identity stamp. Never throws. Exported for the
+ * closeout and for tests; the identity handlers call applyRelayIdentityChange,
+ * which runs this first.
  */
 export function clearRelayCredentialCaches(): void {
   clearLlmRelayQuotaCache();
   invalidateJevRelayCredentials();
   invalidateVisionRelayCredentials();
   writeMetaIdFreeProviderCredentials('', '');
+  deleteRelayKeyIdentityStamp();
 }
 
 /**
  * Full closeout after the user_identity row changed: clear, re-bootstrap as
  * the current identity, land the fresh key in the provider config and the
- * JEV/vision kv tiers. Concurrent callers share one flight. Never rejects —
- * identity import/create must succeed even when the relay is unreachable.
+ * JEV/vision kv tiers, re-stamp. Concurrent callers share one flight. Never
+ * rejects — identity import/create must succeed even when the relay is
+ * unreachable.
  */
 export function applyRelayIdentityChange(input: {
   reason: RelayIdentityChangeReason;
@@ -173,6 +263,38 @@ export function applyRelayIdentityChange(input: {
     inFlight = null;
   });
   return inFlight;
+}
+
+/**
+ * Startup reconciliation between the cached relay credentials and the local
+ * user identity. Every drift check is a synchronous local read and the
+ * closeout's cache clear is synchronous too, so the returned promise settles
+ * immediately in the aligned case; startup cache warmers (the JEV prewarm)
+ * chain behind it so a drifted install resolves the re-issued key instead of
+ * racing the closeout with a bootstrap of their own.
+ *
+ * Resolves null when there is nothing to reconcile:
+ * - no local identity (logged out) — reconciling would bootstrap and silently
+ *   MINT a new identity through ensureUserIdentity;
+ * - no cached relay key in any tier — nothing to re-own;
+ * - the stamp names the current identity — credentials are already aligned.
+ *
+ * Otherwise (pre-fix installs carry an un-stamped key, possibly another
+ * identity's; a restored backup can carry a stamp naming a different
+ * identity) the full closeout runs and the re-issued key is stamped with the
+ * current identity, so the next startup is a no-op. Never rejects.
+ */
+export function reconcileRelayCredentialsWithIdentity(): Promise<RelayIdentityCloseoutResult | null> {
+  const identityAddress = currentIdentityAddress();
+  if (!identityAddress) return Promise.resolve(null);
+  if (!readCachedRelayKey()) return Promise.resolve(null);
+  const stamp = readRelayKeyIdentityStamp();
+  if (stamp === identityAddress) return Promise.resolve(null);
+  depsRef?.log?.('INFO', 'relayIdentity:closeout', 'relay credential identity drift detected at startup', {
+    stampedIdentity: stamp || null,
+    currentIdentity: identityAddress,
+  });
+  return applyRelayIdentityChange({ reason: 'startup-reconciliation', detail: stamp || 'unstamped' });
 }
 
 async function runCloseout(input: {
@@ -198,8 +320,8 @@ async function runCloseout(input: {
     const bootstrap = depsRef?.bootstrapImpl ? depsRef.bootstrapImpl() : bootstrapLlmRelay();
     const info = await bootstrap;
     credentials = {
-      apiKey: typeof info?.apiKey === 'string' ? info.apiKey.trim() : '',
-      baseUrl: typeof info?.baseUrl === 'string' ? info.baseUrl.trim() : '',
+      apiKey: normalizeText(info?.apiKey),
+      baseUrl: normalizeText(info?.baseUrl),
     };
     if (!credentials.apiKey || !credentials.baseUrl) {
       throw new Error('relay bootstrap returned no apiKey/baseUrl');
@@ -223,9 +345,16 @@ async function runCloseout(input: {
     resolveJevRelayCredentials().catch(() => null),
     resolveVisionRelayCredentials().catch(() => null),
   ]);
+  // bootstrapLlmRelay stamps as well; stamping here too keeps the invariant
+  // when an injected bootstrap (tests, future transports) issues the key.
+  const identityAddress = currentIdentityAddress();
+  if (identityAddress) {
+    writeRelayKeyIdentityStamp(identityAddress);
+  }
   log?.('INFO', 'relayIdentity:closeout', 'relay key re-issued for the current identity', {
     reason: input.reason,
     keyPrefix,
+    identity: identityAddress || null,
   });
   return { cleared: true, rebootstrap: 'ok', keyPrefix };
 }
