@@ -129,11 +129,10 @@ test('bootstrap signs the canonical message and normalizes the payload', async (
   );
 });
 
-test('bootstrap silently provisions the identity on first run', async () => {
+test('bootstrap silently provisions the identity on first run with subsidy and pins deferred', async () => {
   resetLlmRelayServiceForTests();
   let identity = null;
   const createCalls = [];
-  const resumeCalls = [];
   const { fetchImpl } = makeFetchStub(() => ({ ok: true, status: 200, body: { code: 0, message: 'success', data: BOOTSTRAP_DATA } }));
   initLlmRelayService({
     getStore: () => makeKvStore(),
@@ -143,10 +142,6 @@ test('bootstrap silently provisions the identity on first run', async () => {
       identity = makeIdentity();
       return { success: true, identity };
     },
-    resumeIdentityImpl: async () => {
-      resumeCalls.push(1);
-      return { success: true };
-    },
     fetchImpl,
     baseUrl: 'https://relay.test',
   });
@@ -155,7 +150,11 @@ test('bootstrap silently provisions the identity on first run', async () => {
   assert.equal(createCalls.length, 1);
   assert.equal(createCalls[0].input.name, 'User');
   assert.equal(createCalls[0].options?.deferChainSync, true, 'first paint must not block on chain pins');
-  assert.equal(resumeCalls.length, 1, 'chain sync resumes in the background');
+  assert.equal(
+    createCalls[0].options?.deferSubsidy,
+    true,
+    'a first-run identity the user may discard for an import must not burn a gas subsidy or leave orphan pins',
+  );
 });
 
 test('bootstrap fails when identity provisioning fails', async () => {

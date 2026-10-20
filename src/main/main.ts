@@ -101,6 +101,7 @@ import { createMetaBotWallet, getPrivateKeyBufferForEcdh } from './services/meta
 import { UserIdentityStore } from './userIdentityStore';
 import type { UserIdentity } from './types/userIdentity';
 import {
+  confirmDeferredUserIdentitySetup,
   createUserIdentity,
   importUserIdentity,
   logoutUserIdentity,
@@ -15033,6 +15034,28 @@ if (!gotTheLock) {
     }
   });
 
+  // Adoption signal for a silently provisioned user identity (first-run free
+  // relay bootstrap defers its gas subsidy and /info pins, see
+  // createUserIdentity deferSubsidy): the user just did something that only
+  // makes sense if they intend to keep this identity, so fund it and publish
+  // its pins in the background. No-op for identities that went through the
+  // regular create/import paths or were already confirmed. Never surfaces a
+  // failure to the triggering action; Settings keeps its retry affordances.
+  const confirmDeferredIdentityInBackground = (signal: string): void => {
+    void confirmDeferredUserIdentitySetup(getUserIdentityStore())
+      .then((result) => {
+        if (result) {
+          console.log(`[UserIdentity] deferred identity setup confirmed via ${signal}:`, {
+            subsidy: result.subsidy?.success ?? null,
+            chainSync: result.chainSync?.success ?? null,
+          });
+        }
+      })
+      .catch((error) => {
+        console.warn(`[UserIdentity] deferred identity setup via ${signal} failed:`, error instanceof Error ? error.message : String(error));
+      });
+  };
+
   // Chain-first MetaBot creation: wallet → subsidy → on-chain PINs → DB save.
   // If chain fails, DB records are rolled back. Returns metabot only on full success.
   ipcMain.handle('idbots:createMetaBotOnChain', async (_event, input: {
@@ -15062,7 +15085,14 @@ if (!gotTheLock) {
     // Thin wrapper over the shared core; the Twin metabot_create tool calls the
     // same function so manual and Twin-assisted creation are identical.
     try {
-      return await createMetaBotOnChainCore(input, getMetabotManageDeps());
+      const result = await createMetaBotOnChainCore(input, getMetabotManageDeps());
+      if (result?.success) {
+        // Creating a bot on this identity (the welcome-flow Twin included) is
+        // the clearest adoption signal; bot creation itself needs no user gas
+        // (the bot wallet publishes), so this runs alongside, not ahead of it.
+        confirmDeferredIdentityInBackground('metabot creation');
+      }
+      return result;
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[MetaBot] idbots:createMetaBotOnChain failed:', errMsg);
@@ -15166,6 +15196,8 @@ if (!gotTheLock) {
       if (!identity) {
         return { success: false, error: 'USER_IDENTITY_MISSING' };
       }
+      // Backing up the mnemonic means keeping this identity.
+      confirmDeferredIdentityInBackground('mnemonic backup');
       return { success: true, mnemonic: identity.mnemonic };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
@@ -15233,6 +15265,13 @@ if (!gotTheLock) {
 
   ipcMain.handle('chainBackup:backup', async () => {
     try {
+      // The backup publishes user-signed pins (bots manifest), so a silently
+      // provisioned identity must be funded first — awaited, unlike the other
+      // adoption signals, because the backup would otherwise fail on gas.
+      await confirmDeferredUserIdentitySetup(getUserIdentityStore()).catch((error) => {
+        console.warn('[ChainBackup] deferred identity setup before backup failed:', error instanceof Error ? error.message : String(error));
+        return null;
+      });
       const result = await runChainBackup({
         db: getStore().getDatabase(),
         metabotStore: getMetabotStore(),
@@ -18549,6 +18588,25 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     void relayReconciliation
       .catch(() => null)
       .then(() => resolveCerebellumRuntimeConfig(getStore().get('app_config')));
+
+    // A silently provisioned identity whose subsidy is still deferred, on an
+    // install that already holds user-created bots, was adopted through a path
+    // that carries no signal (a Twin-tool bot creation, a crash between the
+    // two): fund and publish it now. A claim that already FAILED is not
+    // 'pending' any more and keeps the Settings retry path instead. Installs
+    // without bots stay deferred — the user may still be about to import
+    // their real identity.
+    try {
+      const identity = getUserIdentityStore().get();
+      if (
+        identity?.subsidy_state === 'pending'
+        && getMetabotStore().listMetabots().some((bot) => bot.metabot_type !== 'welcome')
+      ) {
+        confirmDeferredIdentityInBackground('startup with bots');
+      }
+    } catch (error) {
+      console.warn('[UserIdentity] startup deferred identity check skipped:', error instanceof Error ? error.message : String(error));
+    }
 
     await startSqliteBackgroundJobs();
     startSqliteDaemons();
