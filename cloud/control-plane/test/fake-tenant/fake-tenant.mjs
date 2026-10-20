@@ -34,6 +34,16 @@ const HEALTH_AFTER_MS = Number(env.FAKE_TENANT_HEALTH_AFTER_MS ?? 0);
 const EXIT_AFTER_MS = env.FAKE_TENANT_EXIT_AFTER_MS ? Number(env.FAKE_TENANT_EXIT_AFTER_MS) : null;
 const APP_VERSION = env.FAKE_TENANT_APP_VERSION ?? '0.12.0';
 const CONTRACT_VERSION = env.FAKE_TENANT_CONTRACT_VERSION ?? '1.0.0';
+// Test-only knobs (no production counterpart):
+// - FAKE_TENANT_GATE=hold: /healthz answers 503 until the test POSTs
+//   /ctl/gate/release, making "503 before ready" assertions deterministic
+//   instead of racing a millisecond budget.
+// - FAKE_TENANT_PHASES_MODE=manual: /readyz sticks to the current phase until
+//   the test POSTs /ctl/advance, so phase-order assertions need no timing.
+const GATE_MODE = env.FAKE_TENANT_GATE === 'hold' ? 'hold' : 'time';
+const PHASE_MODE = env.FAKE_TENANT_PHASES_MODE === 'manual' ? 'manual' : 'script';
+let gateReleased = GATE_MODE !== 'hold';
+let manualPhaseIndex = 0;
 
 const PHASES = (env.FAKE_TENANT_PHASES ?? 'ready:0')
   .split(',')
@@ -63,6 +73,9 @@ function secretOk(provided) {
 }
 
 function healthUp(now = Date.now()) {
+  if (GATE_MODE === 'hold') {
+    return gateReleased;
+  }
   return now - startedAt >= HEALTH_AFTER_MS;
 }
 
@@ -70,6 +83,9 @@ function healthUp(now = Date.now()) {
 function currentPhase(now = Date.now()) {
   if (!healthUp(now)) {
     return 'starting';
+  }
+  if (PHASE_MODE === 'manual') {
+    return PHASES[Math.min(manualPhaseIndex, PHASES.length - 1)].phase;
   }
   let t = startedAt + HEALTH_AFTER_MS;
   for (const entry of PHASES) {
@@ -133,6 +149,26 @@ const server = http.createServer((req, res) => {
       res.writeHead(503, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false }));
     }
+    return;
+  }
+
+  // Test-only control routes (no gateway secret; only meaningful with the
+  // FAKE_TENANT_GATE / FAKE_TENANT_PHASES_MODE knobs documented at the top).
+  if (req.method === 'POST' && url.pathname === '/ctl/gate/release') {
+    gateReleased = true;
+    log('info', 'lifecycle', 'test control: gate released');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ released: true }));
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/ctl/advance') {
+    if (PHASE_MODE === 'manual' && manualPhaseIndex < PHASES.length - 1) {
+      manualPhaseIndex += 1;
+    }
+    const phase = PHASES[Math.min(manualPhaseIndex, PHASES.length - 1)].phase;
+    log('info', 'lifecycle', 'test control: advanced', { phase });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ phase }));
     return;
   }
 

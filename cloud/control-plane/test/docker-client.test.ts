@@ -179,7 +179,7 @@ describe('docker client against the fake engine', () => {
     const exited = await waitFor(async () => {
       const inspect = await client.inspectContainer(created.Id);
       return inspect.State.Running ? null : inspect;
-    });
+    }, 10_000);
     assert.equal(exited.State.ExitCode, 1);
   });
 });

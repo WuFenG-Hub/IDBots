@@ -144,11 +144,17 @@ const SECRET = 'test-secret';
 
 describe('fake tenant HTTP surface', () => {
   test('/healthz answers 503 until the gate, then 200 {"ok":true}', async () => {
-    const t = await startTenant({ FAKE_TENANT_HEALTH_AFTER_MS: '400', FAKE_TENANT_PHASES: 'ready:0' });
+    // Gate held by the test (FAKE_TENANT_GATE=hold): the 503 assertion is
+    // synchronization-based, not a race against a millisecond budget.
+    const t = await startTenant({ FAKE_TENANT_GATE: 'hold', FAKE_TENANT_PHASES: 'ready:0' });
     try {
       const early = await fetch(`http://127.0.0.1:${t.port}/healthz`);
       assert.equal(early.status, 503);
       assert.deepEqual(await early.json(), { ok: false });
+
+      const release = await fetch(`http://127.0.0.1:${t.port}/ctl/gate/release`, { method: 'POST' });
+      assert.equal(release.status, 200);
+
       const late = await waitFor(async () => {
         const res = await fetch(`http://127.0.0.1:${t.port}/healthz`);
         return res.status === 200 ? res : null;
@@ -160,29 +166,43 @@ describe('fake tenant HTTP surface', () => {
   });
 
   test('/readyz walks the phase script to ready with the full C1 body', async () => {
+    // Manual phase mode: the test drives each phase transition via
+    // /ctl/advance, so ordering assertions need no timing. A time-based walk
+    // is covered by the status-machine, auth-flow, and docker-client suites.
     const t = await startTenant({
-      FAKE_TENANT_HEALTH_AFTER_MS: '60',
+      FAKE_TENANT_GATE: 'hold',
+      FAKE_TENANT_PHASES_MODE: 'manual',
       FAKE_TENANT_PHASES: 'migrating:200,bootstrapping:150,ready:0',
       FAKE_TENANT_APP_VERSION: '0.12.0',
       FAKE_TENANT_CONTRACT_VERSION: '1.0.0',
     });
     try {
+      const gateHeld = await fetch(`http://127.0.0.1:${t.port}/healthz`);
+      assert.equal(gateHeld.status, 503, 'healthz is 503 before the gate opens');
+
+      await fetch(`http://127.0.0.1:${t.port}/ctl/gate/release`, { method: 'POST' });
       await waitFor(async () => {
         const res = await fetch(`http://127.0.0.1:${t.port}/healthz`);
         return res.status === 200 ? true : null;
       });
-      const first = await fetch(`http://127.0.0.1:${t.port}/readyz`, {
-        headers: { 'X-IDBots-Gateway-Secret': SECRET },
-      });
+
+      const secretHeaders = { 'X-IDBots-Gateway-Secret': SECRET };
+      const first = await fetch(`http://127.0.0.1:${t.port}/readyz`, { headers: secretHeaders });
       assert.equal(first.status, 503);
       const firstBody = (await first.json()) as { phase: string; ready: boolean };
       assert.equal(firstBody.ready, false);
-      assert.ok(['migrating', 'bootstrapping'].includes(firstBody.phase));
+      assert.equal(firstBody.phase, 'migrating');
 
+      await fetch(`http://127.0.0.1:${t.port}/ctl/advance`, { method: 'POST' });
+      const second = await fetch(`http://127.0.0.1:${t.port}/readyz`, { headers: secretHeaders });
+      assert.equal(second.status, 503);
+      const secondBody = (await second.json()) as { phase: string; ready: boolean };
+      assert.equal(secondBody.ready, false);
+      assert.equal(secondBody.phase, 'bootstrapping');
+
+      await fetch(`http://127.0.0.1:${t.port}/ctl/advance`, { method: 'POST' });
       const readyRes = await waitFor(async () => {
-        const res = await fetch(`http://127.0.0.1:${t.port}/readyz`, {
-          headers: { 'X-IDBots-Gateway-Secret': SECRET },
-        });
+        const res = await fetch(`http://127.0.0.1:${t.port}/readyz`, { headers: secretHeaders });
         return res.status === 200 ? res : null;
       });
       const body = (await readyRes.json()) as Record<string, unknown>;

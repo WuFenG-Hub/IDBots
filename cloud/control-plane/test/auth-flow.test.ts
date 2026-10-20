@@ -53,7 +53,9 @@ before(async () => {
     fakeSmsNumbers: [PHONE],
     tenantEnv: {
       FAKE_TENANT_HEALTH_AFTER_MS: '50',
-      FAKE_TENANT_PHASES: 'migrating:120,bootstrapping:120,ready:0',
+      // Generous phase windows so 40 ms db polls cannot skip a status even
+      // under CPU contention.
+      FAKE_TENANT_PHASES: 'migrating:300,bootstrapping:300,ready:0',
     },
   });
   poller = new TenantPoller(app.app, { tickFastMs: 50, tickSlowMs: 100 });

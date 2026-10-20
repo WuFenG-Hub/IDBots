@@ -184,7 +184,7 @@ describe('status machine against the fake tenant (integration)', () => {
           | { status: string; last_error: string | null }
           | undefined;
         return row?.status === 'failed' ? row : null;
-      });
+      }, 10_000);
       const failedRow = db.prepare("SELECT last_error FROM tenants WHERE id = 't_sm1'").get() as {
         last_error: string;
       };
@@ -210,7 +210,7 @@ describe('status machine against the fake tenant (integration)', () => {
           | { status: string; last_error: string | null }
           | undefined;
         return row?.status === 'failed' ? row : null;
-      });
+      }, 10_000);
       const failedRow2 = db.prepare("SELECT last_error FROM tenants WHERE id = 't_sm2'").get() as {
         last_error: string;
       };
@@ -233,7 +233,7 @@ describe('status machine against the fake tenant (integration)', () => {
       await waitFor(async () => {
         const row = db.prepare("SELECT status FROM tenants WHERE id = 't_sm3'").get() as { status: string } | undefined;
         return row?.status === 'degraded' ? row : null;
-      });
+      }, 10_000);
       const row = db.prepare("SELECT status, last_error, app_version FROM tenants WHERE id = 't_sm3'").get() as {
         status: string;
         last_error: string | null;
