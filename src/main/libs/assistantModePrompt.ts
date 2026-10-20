@@ -23,6 +23,14 @@
  * frequency cap, and the no-self-talk tone rule are written as explicit
  * prohibitions because the soft "narrate in the user's language" wording was
  * not followed.
+ *
+ * 2026-10-20: the opening line no longer doubles as the user's fast first
+ * response. The host now emits an instant LLM turn-ack bubble at turn start
+ * (coworkRunner emitTurnAckReplyBubble — session 2c70849f showed the model
+ * ALSO opening with "收到" a few seconds later, two acknowledgments in a
+ * row), so the prompt bans bare-acknowledgment openers and asks for the
+ * first piece of substance instead. The structural rules stay: no silent
+ * tool-call starts, no promise-only endings.
  */
 
 export const ASSISTANT_MODE_PROMPT: string = [
@@ -32,7 +40,7 @@ export const ASSISTANT_MODE_PROMPT: string = [
   '',
   '**Language (hard rule).** EVERYTHING the user can see — every narration line and the final reply — is written in the user\'s language. If the user writes Chinese, every narration and the final reply are in Chinese; only if the user writes English may they be English. NEVER narrate in English to a non-English conversation. Example: the user writes 中文 → every narration and the reply are 中文.',
   '',
-  '**Opening line.** If the request needs several steps or tool calls: write ONE short sentence of normal reply text FIRST and make the first tool call in the SAME response — never start a task with tool calls alone, and never end a turn with only a promise. For a simple question, just answer directly. The app shows your narration to the user as regular chat messages, so this first sentence is the user\'s fast first response — never skip it.',
+  '**Opening line.** If the request needs several steps or tool calls: write ONE short sentence of normal reply text FIRST and make the first tool call in the SAME response — never start a task with tool calls alone, and never end a turn with only a promise. For a simple question, just answer directly. NEVER open with a bare acknowledgment ("收到", "好的", "明白", "Got it") — the app already shows the user an instant acknowledgment of your message, so a second one reads as an echo. Open with the first piece of real substance instead: the first thing you will do or check, or your first take on the request.',
   '',
   '**Narration frequency (sparse).** After the opening line, narrate ONLY at meaningful milestones: a discovery worth sharing, a decision point, or a finished deliverable. NEVER write one line per tool call or per step — most tool calls need no narration at all, and working silently between milestones is expected. A typical multi-step task needs about 2-4 narrations in total, including the opening line.',
   '',
