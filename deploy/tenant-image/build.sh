@@ -43,17 +43,33 @@ TAG="${TAG:-${VERSION}-${COMMIT7}}"
 IMAGE="${REGISTRY}/idbots/tenant:${TAG}"
 
 echo "building ${IMAGE} (platform ${PLATFORM}, contract ${CONTRACT_VERSION})"
-docker buildx build \
-  --platform "$PLATFORM" \
-  --build-arg "APP_VERSION=${VERSION}" \
-  --build-arg "APP_COMMIT=${COMMIT_FULL}" \
-  --build-arg "CONTRACT_VERSION=${CONTRACT_VERSION}" \
-  --tag "$IMAGE" \
-  --label "org.idbots.version=${VERSION}" \
-  --label "org.idbots.commit=${COMMIT_FULL}" \
-  --label "org.idbots.contract=${CONTRACT_VERSION}" \
-  --load \
-  "$HERE"
+BUILDER="${IDBOTS_BUILDER:-buildx}"
+if [ "$BUILDER" = buildx ]; then
+  if ! docker buildx build \
+    --platform "$PLATFORM" \
+    --build-arg "APP_VERSION=${VERSION}" \
+    --build-arg "APP_COMMIT=${COMMIT_FULL}" \
+    --build-arg "CONTRACT_VERSION=${CONTRACT_VERSION}" \
+    --tag "$IMAGE" \
+    --label "org.idbots.version=${VERSION}" \
+    --label "org.idbots.commit=${COMMIT_FULL}" \
+    --label "org.idbots.contract=${CONTRACT_VERSION}" \
+    --load \
+    "$HERE"; then
+    echo "buildx failed (often registry reachability on dev machines) — falling back to classic docker build (host platform)" >&2
+    BUILDER=classic
+  else
+    BUILDER=buildx-done
+  fi
+fi
+if [ "$BUILDER" = classic ]; then
+  docker build \
+    --build-arg "APP_VERSION=${VERSION}" \
+    --build-arg "APP_COMMIT=${COMMIT_FULL}" \
+    --build-arg "CONTRACT_VERSION=${CONTRACT_VERSION}" \
+    --tag "$IMAGE" \
+    "$HERE"
+fi
 
 if [ "$SCAN" = 1 ]; then
   echo "scanning ${IMAGE} with trivy (fail on fixed CRITICAL)"
