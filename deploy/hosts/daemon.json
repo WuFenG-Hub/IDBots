@@ -1,0 +1,10 @@
+{
+  "dns": ["223.5.5.5", "223.6.6.6"],
+  "storage-driver": "overlay2",
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "20m",
+    "max-file": "5"
+  },
+  "live-restore": true
+}

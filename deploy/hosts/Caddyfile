@@ -1,0 +1,31 @@
+# WS-C REQ-C-5 — edge TLS termination for {APP_HOST}.
+# APP_HOST is injected from /etc/idbots/deploy.env (app.{APP_DOMAIN} on
+# production, staging.{APP_DOMAIN} on staging). Automatic HTTPS: Caddy obtains
+# and renews certificates itself (ACME) and redirects HTTP to HTTPS by
+# default. Reference configuration frozen in 30-ws-c-infra-ops.md REQ-C-5.
+
+{$APP_HOST} {
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000"
+	request_body {
+		max_size 26MB
+	}
+	reverse_proxy control-plane:8080 {
+		# WebSocket connections stay open without an idle timeout.
+		flush_interval -1
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				# /files/{token} grants short-lived access; never log the token.
+				request>uri regexp ^/files/.* /files/REDACTED
+			}
+		}
+	}
+}

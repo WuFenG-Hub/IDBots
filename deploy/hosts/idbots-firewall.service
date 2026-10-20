@@ -1,0 +1,21 @@
+# WS-C REQ-C-6 — re-apply the tenant isolation rules after Docker starts.
+# Docker recreates its iptables chains on daemon start; without this unit the
+# DOCKER-USER rules from firewall.sh would be lost on every daemon restart or
+# host reboot (AC-C-4). Installed by bootstrap.sh to
+# /etc/systemd/system/idbots-firewall.service.
+[Unit]
+Description=IDBots tenant network isolation rules (DOCKER-USER)
+After=docker.service network-online.target
+Requires=docker.service
+# Docker may rewrite chains slightly after it reports active; the small delay
+# keeps the rules last-write-wins without racing the daemon.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sleep 3
+ExecStart=/opt/idbots/firewall.sh
+
+[Install]
+WantedBy=multi-user.target

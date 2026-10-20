@@ -631,3 +631,11 @@ man_base_data_pebble/
 !tests/coworkAssistantModeSessionGate.test.ts
 !tests/coworkAssistantSessionGate.test.tsx
 !tests/coworkComposerImageAttachment.test.tsx
+
+# WS-C deploy assets: filled env files hold real secrets — only the
+# *.example templates may be committed (REQ-C-21).
+deploy/hosts/deploy.env
+deploy/hosts/cp.env
+deploy/backup/backup.env
+deploy/monitoring/monitoring.env
+deploy/hosts/prometheus.yml

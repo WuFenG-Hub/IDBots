@@ -1,0 +1,164 @@
+# WS-C REQ-C-10/REQ-C-11 — host compose for one IDBots relay host (staging or
+# production). Runs the edge, the control plane, and the Docker socket proxy.
+# Tenant containers are NOT in this file: the control plane creates them.
+#
+# Usage (see deploy/runbooks/host-bootstrap.md):
+#   docker compose --env-file /etc/idbots/deploy.env -f compose.yml up -d
+# Monitoring services live in compose.monitoring.yml (add -f compose.monitoring.yml).
+#
+# Secrets come from /etc/idbots/cp.env (mode 0600, root-owned, never committed).
+
+name: idbots
+
+networks:
+  # Public edge: only caddy publishes host ports (80/443).
+  edge:
+    driver: bridge
+  # Control plane <-> docker-socket-proxy only. No outbound internet.
+  cp-docker:
+    driver: bridge
+    internal: true
+  # All tenant containers plus the control plane at a fixed IP (firewall
+  # anchor for REQ-C-6 rule 2).
+  tenants:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
+  # node-exporter / cAdvisor / control-plane metrics, scraped by Prometheus
+  # (compose.monitoring.yml). No outbound internet.
+  monitoring:
+    driver: bridge
+    internal: true
+
+volumes:
+  # REQ-C-11: named volumes that survive `compose down`.
+  caddy-data:
+  caddy-config:
+  cp-data:
+
+services:
+  caddy:
+    image: caddy:2.8.4
+    restart: unless-stopped
+    depends_on:
+      - control-plane
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      # app.example.com (production) or staging.example.com (staging)
+      APP_HOST: ${APP_HOST:?set APP_HOST in /etc/idbots/deploy.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  control-plane:
+    image: ${REGISTRY:?set REGISTRY in /etc/idbots/deploy.env}/idbots/control-plane:${CP_IMAGE_TAG:?set CP_IMAGE_TAG in /etc/idbots/deploy.env}
+    restart: unless-stopped
+    # /etc/idbots/cp.env — every CP_* variable (see cp.env.example), mode 0600.
+    env_file:
+      - /etc/idbots/cp.env
+    volumes:
+      - cp-data:/var/lib/idbots-cp
+    networks:
+      edge:
+      cp-docker:
+      monitoring:
+      tenants:
+        ipv4_address: 172.30.0.2 # REQ-C-6 firewall rule 2 anchor
+    # No published ports: phones reach the control plane through caddy only.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  docker-socket-proxy:
+    # REQ-C-7: the control plane reaches Docker only through this proxy; the
+    # raw socket is mounted into no other container.
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"
+      IMAGES: "1"
+      NETWORKS: "1"
+      VOLUMES: "1"
+      POST: "1" # required for create/delete/start/stop of containers and volumes
+      ALLOW_START: "1"
+      ALLOW_STOP: "1"
+      ALLOW_RESTARTS: "1"
+      PING: "1"
+      VERSION: "1"
+      EVENTS: "1"
+      # Explicitly disabled per REQ-C-7:
+      EXEC: "0"
+      BUILD: "0"
+      SWARM: "0"
+      SYSTEM: "0"
+      PLUGINS: "0"
+      SECRETS: "0"
+      INFO: "0"
+      NODES: "0"
+      SERVICES: "0"
+      TASKS: "0"
+      CONFIGS: "0"
+      GRPC: "0"
+      SESSION: "0"
+      DISTRIBUTION: "0"
+      COMMIT: "0"
+      AUTH: "0"
+      LOG_LEVEL: notice
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - cp-docker
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    restart: unless-stopped
+    pid: host
+    command:
+      - --path.rootfs=/host
+      - --collector.textfile.directory=/textfile
+    volumes:
+      - /:/host:ro,rslave
+      # Backup jobs write idbots_backup_*.prom here (host path, see backup/lib.sh).
+      - /var/lib/idbots/node-exporter-textfile:/textfile:ro
+    networks:
+      - monitoring
+    # Scraped by Prometheus on the monitoring network only; never published.
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    networks:
+      - monitoring
+
+# Container log rotation follows C1 via the daemon defaults in daemon.json
+# (json-file, max-size 20m, max-file 5) installed by bootstrap.sh.
