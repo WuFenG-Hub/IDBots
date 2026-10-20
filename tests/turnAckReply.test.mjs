@@ -1,0 +1,129 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import {
+  TURN_ACK_REPLY_MAX_CHARS,
+  buildTurnAckReplyMessages,
+  sanitizeTurnAckReply,
+} from '../src/main/libs/turnAckReply.ts';
+
+const repoRoot = path.resolve(import.meta.dirname, '..');
+
+function read(relativePath) {
+  return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers (prompt build + sanitize)
+// ---------------------------------------------------------------------------
+
+test('buildTurnAckReplyMessages: system+user roles, title line optional, user text carried', () => {
+  const withTitle = buildTurnAckReplyMessages({ userText: '帮我看下定时任务', sessionTitle: '定时任务排查' });
+  assert.equal(withTitle.length, 2);
+  assert.equal(withTitle[0].role, 'system');
+  assert.equal(withTitle[1].role, 'user');
+  assert.ok(withTitle[0].content.includes('acknowledgment'));
+  assert.ok(withTitle[1].content.includes('Session title: 定时任务排查'));
+  assert.ok(withTitle[1].content.includes('帮我看下定时任务'));
+
+  const withoutTitle = buildTurnAckReplyMessages({ userText: 'hello', sessionTitle: null });
+  assert.ok(!withoutTitle[1].content.includes('Session title:'));
+  assert.ok(withoutTitle[1].content.includes('hello'));
+
+  // Long input is truncated to the bounded slice, not forwarded wholesale.
+  const long = buildTurnAckReplyMessages({ userText: 'x'.repeat(5000) });
+  assert.ok(long[1].content.length < 1500, 'user text slice stays bounded');
+});
+
+test('sanitizeTurnAckReply: passes clean text through, strips wrapping noise', () => {
+  assert.equal(sanitizeTurnAckReply('收到，我这就去查一下这些定时任务的来源。'), '收到，我这就去查一下这些定时任务的来源。');
+  assert.equal(sanitizeTurnAckReply('"On it right away."'), 'On it right away.');
+  assert.equal(sanitizeTurnAckReply('「好的，马上处理。」'), '好的，马上处理。');
+  assert.equal(sanitizeTurnAckReply('```\nGot it, checking now.\n```'), 'Got it, checking now.');
+  assert.equal(sanitizeTurnAckReply('line one\n   line two\t\ttabbed'), 'line one line two tabbed');
+  assert.equal(sanitizeTurnAckReply('   '), '');
+  assert.equal(sanitizeTurnAckReply('``````'), '');
+});
+
+test('sanitizeTurnAckReply: caps oversized output, preferring a sentence boundary', () => {
+  // First sentence ends well inside the cap; trailing filler pushes past it.
+  const longText = `${'word '.repeat(20)}stop here. ${'more '.repeat(60)}end.`;
+  const capped = sanitizeTurnAckReply(longText);
+  assert.ok(capped.length <= TURN_ACK_REPLY_MAX_CHARS + 1);
+  assert.ok(capped.endsWith('.'), 'keeps the last full sentence when one fits');
+
+  // No sentence boundary in reach: hard cap without breaking the budget.
+  const boundaryless = 'a'.repeat(400);
+  const hard = sanitizeTurnAckReply(boundaryless);
+  assert.ok(hard.length <= TURN_ACK_REPLY_MAX_CHARS);
+});
+
+// ---------------------------------------------------------------------------
+// Source contracts (emission wiring + gates)
+// ---------------------------------------------------------------------------
+
+test('runner: the LLM ack bubble fires at the early-ack site, gated to cowork_ui, fire-and-forget', () => {
+  const source = read('src/main/libs/coworkRunner.ts');
+
+  const templateAck = source.indexOf('this.emitTurnAck(sessionId, earlyAckTier)');
+  const llmAckCall = source.indexOf('void this.emitTurnAckReplyBubble(sessionId, prompt,');
+  const volatileSite = source.indexOf('await this.buildVolatileContextPrompt(');
+  assert.ok(templateAck > 0, 'the template ack still fires first (instant indicator cover)');
+  assert.ok(llmAckCall > templateAck, 'the LLM ack fires right after the template ack');
+  assert.ok(volatileSite > llmAckCall, 'both fire before the volatile build (they cover the whole wait window)');
+  const gateWindow = source.slice(templateAck - 400, llmAckCall + 200);
+  assert.ok(gateWindow.includes("ackSourceChannel === 'cowork_ui'"),
+    'external-facing surfaces keep their established posture (cowork_ui only)');
+});
+
+test('runner: the ack bubble is dropped once the turn delivered visible text or moved on', () => {
+  const source = read('src/main/libs/coworkRunner.ts');
+
+  const emitter = source.indexOf('private async emitTurnAckReplyBubble(');
+  assert.ok(emitter > 0, 'emitTurnAckReplyBubble exists');
+  const body = source.slice(emitter, source.indexOf('private emitSdkRuntimeStatus(', emitter));
+  assert.ok(body.includes('activeSession.dshTurnAckSerial !== turnSerial'),
+    'a stale ack from an older turn is dropped');
+  assert.ok(body.includes('activeSession.dshTurnAckVisibleTextSeen'),
+    'an ack landing after real visible text is dropped');
+  assert.ok(body.includes("metadata: { turnAckReply: true, isFinal: true }"),
+    'the bubble is a final assistant message tagged turnAckReply');
+  assert.ok(body.includes('generateTurnAckReply(userPrompt, sessionTitle)'),
+    'the reply rides the one-shot cognitive path with session-title context');
+
+  // The gate flag is armed by real visible text in the DSH onMessage path.
+  const onMessageSite = source.indexOf('closes the turn\'s acknowledgment');
+  assert.ok(onMessageSite > 0, 'the onMessage callback arms the visible-text gate');
+  const gateSnippet = source.slice(onMessageSite - 100, onMessageSite + 600);
+  assert.ok(gateSnippet.includes("type === 'assistant'"));
+  assert.ok(gateSnippet.includes('isThinking'));
+});
+
+test('coworkUtil: generateTurnAckReply is a title-class call — no thinking, no web search, tight budget', () => {
+  const source = read('src/main/libs/coworkUtil.ts');
+  const start = source.indexOf('export async function generateTurnAckReply(');
+  const body = source.slice(start, source.indexOf('\n}', start) + 2);
+  assert.ok(start > 0, 'generateTurnAckReply exists');
+  assert.ok(body.includes("thinking: 'disabled'"), 'thinking off');
+  assert.ok(body.includes("effort: 'off'"), 'effort off — an ack never waits on reasoning');
+  assert.ok(body.includes('webSearch: false'), 'no server-side web_search detour');
+  assert.ok(body.includes('attemptTimeoutMs: 4_000'), 'per-attempt timeout bounds the ack latency');
+  assert.ok(body.includes('sanitizeTurnAckReply(result.content'), 'output goes through the sanitizer');
+  assert.ok(!body.includes('fallbackLlm'), 'single attempt: latency over robustness');
+});
+
+test('main.ts: the ack brain is wired to the Twin system brain beside the title brain', () => {
+  const source = read('src/main/main.ts');
+  const titleSite = source.indexOf('setSessionTitleBrainProvider(() => resolveSystemBrainOptions(');
+  const ackSite = source.indexOf('setTurnAckReplyBrainProvider(() => resolveSystemBrainOptions(');
+  assert.ok(titleSite > 0 && ackSite > 0, 'both brain providers are wired');
+  assert.ok(Math.abs(ackSite - titleSite) < 400, 'they are wired together at startup');
+});
+
+test('renderer: the turnAckReply origin tag is part of the message metadata contract', () => {
+  const types = read('src/renderer/types/cowork.ts');
+  assert.ok(types.includes('turnAckReply?: boolean'),
+    'the metadata type documents the host-side ack bubble');
+});

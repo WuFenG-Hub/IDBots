@@ -65,7 +65,7 @@ import { buildSessionTranscriptMarkdown, transcriptExportFileName } from './libs
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { computeCoworkContextUsage } from './libs/coworkContextUsage';
 import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
-import { generateSessionTitle, setSessionTitleBrainProvider } from './libs/coworkUtil';
+import { generateSessionTitle, setSessionTitleBrainProvider, setTurnAckReplyBrainProvider } from './libs/coworkUtil';
 import { ensureSandboxReady, getSandboxStatus, onSandboxProgress } from './libs/coworkSandboxRuntime';
 import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps } from './libs/coworkOpenAICompatProxy';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
@@ -4097,6 +4097,9 @@ const startSqliteDaemons = (): void => {
   // close, so they stay on the immediate path even though the services they
   // serve start in the idle tier.
   setSessionTitleBrainProvider(() => resolveSystemBrainOptions(getMetabotStore().listMetabots()));
+  // Turn-ack replies are the same class of system automation as titles: the
+  // Twin system brain answers, never the bare app-default onboarding quota.
+  setTurnAckReplyBrainProvider(() => resolveSystemBrainOptions(getMetabotStore().listMetabots()));
 
   // Everything below is daemon start-up, not wiring, and it is exactly what
   // used to hold the main thread while the renderer waited for its first IPC.

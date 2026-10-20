@@ -83,6 +83,13 @@ export interface CoworkMessageMetadata {
    * records the origin only; rendering is the standard assistant bubble.
    */
   narration?: boolean;
+  /**
+   * LLM-generated turn-acknowledgment bubble (first-response latency): a
+   * short host-side assistant reply emitted before the kernel turn's own
+   * text arrives. Display-only — it never enters the kernel transcript. The
+   * tag records the origin; rendering is the standard assistant bubble.
+   */
+  turnAckReply?: boolean;
   isDelegationInternal?: boolean;
   skillIds?: string[];
   /**
