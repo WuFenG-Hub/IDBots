@@ -12,6 +12,7 @@ import { resolveWritableSkillsRoot } from './skillRoots';
 import { getMetaidRpcBase, getMetaidRpcTokenFilePath, METAID_RPC_AUTHFILE_ENV } from '../services/metaidRpcEndpoint';
 import { chatCompletionWithTools } from '../services/cognitiveChatCompletion';
 import type { MetabotBrainOptions } from '../services/llmFallback';
+import { buildTurnAckReplyMessages, sanitizeTurnAckReply } from './turnAckReply';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 import { assignPathValue, collapseWindowsPathKeys, pathValueOf } from './windowsPathEnv';
 import { appendPythonRuntimeToEnv } from './pythonRuntime';
@@ -1268,5 +1269,54 @@ export async function generateSessionTitle(userIntent: string | null): Promise<s
     }
     console.error('Failed to generate session title:', error);
     return fallback;
+  }
+}
+
+/**
+ * Brain provider for the LLM turn-ack reply — same wiring contract as the
+ * title brain: main.ts sets it to the Twin system brain at startup so ack
+ * replies never depend on the bare app default model.
+ */
+let turnAckReplyBrainProvider: (() => MetabotBrainOptions | null) | null = null;
+
+export function setTurnAckReplyBrainProvider(provider: (() => MetabotBrainOptions | null) | null): void {
+  turnAckReplyBrainProvider = provider;
+}
+
+/**
+ * One-shot LLM acknowledgment for a turn (first-response latency). Mirrors
+ * generateSessionTitle: a direct cognitive-layer call — no kernel spawn, no
+ * agent loop — so it returns in seconds while the DSH turn is still warming
+ * up. Returns '' when the call fails or the output is unusable; the caller
+ * keeps the template phrase already showing in the activity indicator.
+ * Single attempt, no fallback brain: an ack trades robustness for latency.
+ */
+export async function generateTurnAckReply(userText: string, sessionTitle?: string | null): Promise<string> {
+  try {
+    const brain = turnAckReplyBrainProvider?.() ?? null;
+    const result = await chatCompletionWithTools(
+      buildTurnAckReplyMessages({ userText, sessionTitle }),
+      {
+        llmId: brain?.llmId ?? undefined,
+        llmProvider: brain?.llmProvider ?? undefined,
+        thinking: 'disabled',
+        // An ack must never wait on reasoning (same rationale as titles).
+        effort: 'off',
+        maxTokens: 96,
+        temperature: 0.6,
+        throwOnEmptyContent: true,
+        // The Responses path injects server-side web_search by default; a
+        // search detour would defeat the whole point of a fast ack.
+        webSearch: false,
+        attemptTimeoutMs: 4_000,
+      }
+    );
+    return sanitizeTurnAckReply(result.content ?? '');
+  } catch (error) {
+    if (isSqliteWasmBoundsError(error)) {
+      throw error;
+    }
+    console.error('Failed to generate turn ack reply:', error);
+    return '';
   }
 }

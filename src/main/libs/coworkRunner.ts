@@ -38,7 +38,7 @@ import {
   buildCoworkSteerSdkMessage,
   buildCoworkSteerText,
 } from './coworkSteerChannel';
-import { getEnhancedEnv, getSkillHostEnv, getSkillsRoot, ensureCoworkTempDir, generateSessionTitle } from './coworkUtil';
+import { getEnhancedEnv, getSkillHostEnv, getSkillsRoot, ensureCoworkTempDir, generateSessionTitle, generateTurnAckReply } from './coworkUtil';
 import { rewriteWin32McpStdioServer } from './win32StdioCommand';
 import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
@@ -1473,6 +1473,15 @@ interface ActiveSession {
   lastStreamingThinkingUpdateAt: number;
   hasAssistantTextOutput: boolean;
   hasAssistantThinkingOutput: boolean;
+  /**
+   * LLM turn-ack bubble gate (first-response latency): serial of the current
+   * DSH turn, bumped at the early-ack site, plus whether visible assistant
+   * text has landed since. The pending ack bubble emits only while both still
+   * match — a turn that already delivered real text, or moved on to a newer
+   * turn, must not get an acknowledgment appended after the fact.
+   */
+  dshTurnAckSerial?: number;
+  dshTurnAckVisibleTextSeen?: boolean;
   delegationRequestEmitted: boolean;
   staleResumeDetected: boolean;
   staleResumeRetryAllowed: boolean;
@@ -9899,6 +9908,15 @@ export class CoworkRunner extends EventEmitter {
             : 'generic'
           this.emitTurnAck(sessionId, earlyAckTier)
           coworkLog('INFO', 'turn:ack', 'turn acknowledgment emitted', { sessionId, tier: earlyAckTier })
+          // LLM ack bubble: the phrase above is a template in the activity
+          // indicator; this fires a one-shot cognitive call (title-class
+          // latency) in parallel with everything below, so a real
+          // LLM-written bubble can land while the turn is still pre-flight
+          // or mid-reasoning. Fully fire-and-forget — the gates inside drop
+          // it when the turn beats it to visible text.
+          activeSession.dshTurnAckSerial = (activeSession.dshTurnAckSerial ?? 0) + 1
+          activeSession.dshTurnAckVisibleTextSeen = false
+          void this.emitTurnAckReplyBubble(sessionId, prompt, activeSession.dshTurnAckSerial)
         }
       } catch { /* best-effort: the ack must never break a turn */ }
       // Unattended automation turns (see isUnattendedAutomationSession) never
@@ -10309,6 +10327,17 @@ export class CoworkRunner extends EventEmitter {
             // compaction-deadlock incident).
             const messageMeta = (message as { metadata?: Record<string, unknown> } | null)?.metadata;
             if (messageMeta?.compaction === true && messageMeta?.isError === true) compactionFailedThisTurn = true;
+            // LLM ack gate: real visible text (non-thinking assistant
+            // content, narration included) closes the turn's acknowledgment
+            // window — no ack may land after the answer it acknowledges.
+            if (
+              (message as { type?: string } | null)?.type === 'assistant'
+              && messageMeta?.isThinking !== true
+              && typeof (message as { content?: string }).content === 'string'
+              && ((message as { content?: string }).content ?? '').trim().length > 0
+            ) {
+              activeSession.dshTurnAckVisibleTextSeen = true
+            }
             const stored = this.store.addMessage(sessionId, message as Omit<CoworkMessage, 'id' | 'timestamp'>);
             this.emit('message', sessionId, stored);
             return stored.id;
@@ -15183,6 +15212,44 @@ export class CoworkRunner extends EventEmitter {
       metadata: { sdkRuntimeStatus: 'turnAck', turnAckTier: tier },
     });
     this.emit('message', sessionId, message);
+  }
+
+  /**
+   * LLM-generated turn-acknowledgment bubble (first-response latency). The
+   * template phrase in the activity indicators covers the first second; this
+   * call produces the real thing the owner asked for — an assistant bubble,
+   * written by the LLM about THIS message, landing while the kernel turn is
+   * still pre-flight or reasoning. It rides the title-class one-shot
+   * cognitive path (no kernel spawn), fully parallel to the turn. The
+   * serial/visible-text gates drop it when the turn already delivered real
+   * text or moved on to a newer turn, so an acknowledgment can never appear
+   * after the answer it acknowledges. The bubble is host-side only: it lives
+   * in the UI transcript and never enters the kernel session log, so the
+   * model's own context is untouched.
+   */
+  private async emitTurnAckReplyBubble(sessionId: string, userPrompt: string, turnSerial: number): Promise<void> {
+    try {
+      const startedAt = Date.now();
+      const sessionTitle = this.store.getSession(sessionId)?.title ?? null;
+      const reply = await generateTurnAckReply(userPrompt, sessionTitle);
+      if (!reply) return;
+      const activeSession = this.activeSessions.get(sessionId);
+      if (!activeSession || activeSession.dshTurnAckSerial !== turnSerial || activeSession.dshTurnAckVisibleTextSeen) {
+        return;
+      }
+      const message = this.store.addMessage(sessionId, {
+        type: 'assistant',
+        content: reply,
+        metadata: { turnAckReply: true, isFinal: true },
+      });
+      this.emit('message', sessionId, message);
+      coworkLog('INFO', 'turn:ack', 'llm ack bubble emitted', { sessionId, elapsedMs: Date.now() - startedAt });
+    } catch (error) {
+      coworkLog('WARN', 'turn:ack', 'llm ack bubble skipped', {
+        sessionId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
