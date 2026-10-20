@@ -17,7 +17,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runtimeClient } from './helpers/runtime-client.mjs'
-import { generateRuntimeConfig } from '../lib/generate-runtime-config.mjs'
+import { generateRuntimeConfig, dshPiAiRouteKey } from '../lib/generate-runtime-config.mjs'
 import { startMockServer } from './fixtures/mock-openai.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -155,6 +155,37 @@ record('generator: computerUse mounts the service + cua native provider + route 
   && withBrowser.some((e) => e.name === '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native')
   && withBrowser.some((e) => e.id === 'idbots-cu-route-guard' && String(e.name).endsWith('idbots-cu-route-guard.mjs')))
 record('generator: sections config emitted', unit.some((e) => e.config?.sections?.[0]?.name === 'persona:metabot'))
+// pi-ai route key remap (v1.0.2 tool_removal wedge): a vendor-named
+// anthropic-format route on a NON-official endpoint must not keep the
+// catalog vendor's key — pi-ai would inherit supportsMidConvoToolChanges
+// and serialize mid-convo tool changes as tool_addition/tool_removal blocks
+// that third-party gateways reject, wedging the session on every replay.
+const officialAnthropic = generateRuntimeConfig({
+  sessionRoot: '/tmp/x',
+  providers: [{ key: 'anthropic', apiFormat: 'anthropic', baseUrl: 'https://api.anthropic.com', apiKeyEnv: 'K1', models: [{ id: 'claude-sonnet-5', contextWindow: 200000 }] }],
+  sections: [],
+})
+const gatewayAnthropic = generateRuntimeConfig({
+  sessionRoot: '/tmp/x',
+  providers: [{ key: 'anthropic', apiFormat: 'anthropic', baseUrl: 'https://gw.example.com/anthropic', apiKeyEnv: 'K2', models: [{ id: 'claude-sonnet-5', contextWindow: 200000 }] }],
+  sections: [],
+})
+const providersOf = (config) => config.find((e) => e.id === 'llm-pi-ai')?.config?.providers ?? {}
+record('generator: official anthropic endpoint keeps the catalog vendor route key',
+  Object.keys(providersOf(officialAnthropic)).includes('anthropic'))
+record('generator: anthropic-format gateway gets the -gw route key (no catalog compat inheritance)',
+  Object.keys(providersOf(gatewayAnthropic)).includes('anthropic-gw')
+  && !Object.keys(providersOf(gatewayAnthropic)).includes('anthropic'))
+record('generator: the -gw route key mirrors into the subagent model-selection allowlist',
+  gatewayAnthropic.some((e) => e.id === 'subagent-model-selection-settings'
+    && e.config?.allowedModels?.some((m) => m.provider === 'anthropic-gw' && m.model === 'claude-sonnet-5')))
+record('generator: the -gw route key mirrors into compaction modelPolicies',
+  gatewayAnthropic.some((e) => e.id === 'compaction-basic'
+    && e.config?.modelPolicies?.some((p) => p.provider === 'anthropic-gw' && p.model === 'claude-sonnet-5')))
+record('generator: non-catalog vendor keys and non-anthropic formats are untouched',
+  dshPiAiRouteKey({ key: 'moonshot', apiFormat: 'anthropic', baseUrl: 'https://api.moonshot.cn/anthropic' }) === 'moonshot'
+  && dshPiAiRouteKey({ key: 'anthropic', apiFormat: 'openai', baseUrl: 'https://gw.example.com/v1' }) === 'anthropic'
+  && dshPiAiRouteKey({ key: 'my relay!', apiFormat: 'openai', baseUrl: 'https://a.example' }) === 'my-relay-')
 record('generator: plugin paths are absolute (config location-independent)',
   unit.every((e) => !String(e.name).startsWith('./')))
 record('generator: no webSearch input → no web entries mounted',
