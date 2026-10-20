@@ -1,4 +1,5 @@
-import { app, BrowserWindow } from 'electron';
+import { app } from 'electron';
+import { broadcastToRenderers } from './ipc/broadcast';
 import fs from 'fs';
 import path from 'path';
 
@@ -789,10 +790,6 @@ export class MetaAppManager {
   }
 
   private notifyMetaAppsChanged(): void {
-    BrowserWindow.getAllWindows().forEach((win) => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('metaapps:changed');
-      }
-    });
+    broadcastToRenderers('metaapps:changed');
   }
 }
