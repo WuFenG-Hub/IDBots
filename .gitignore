@@ -62,6 +62,8 @@ tests/*
 !tests/bundleService.test.mjs
 !tests/mobileChannels.test.mjs
 !tests/quotaExhaustedStreamError.test.mjs
+!tests/serverMode.test.mjs
+!tests/serverBootstrap.test.mjs
 !tests/fixtures/
 !tests/agentGameConvergence.test.mjs
 !tests/fixtures/longTaskBoardSeed.mjs

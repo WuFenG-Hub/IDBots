@@ -92,10 +92,13 @@ import {
   isA2ASystemErrorMessage,
   shouldHideA2AInternalMessage,
 } from './shared/a2aInternalMessageFilter';
+import { resolveServerWorkspacePath } from './server/serverMode';
 
 // Default working directory for new users
 const getDefaultWorkingDirectory = (): string => {
-  return path.join(os.homedir(), 'idbots', 'project');
+  // REQ-A-7: server mode defaults the cowork workspace to /data/workspace
+  // (C1); desktop keeps ~/idbots/project.
+  return resolveServerWorkspacePath(path.join(os.homedir(), 'idbots', 'project'));
 };
 
 const TASK_WORKSPACE_CONTAINER_DIR = '.idbots-tasks';

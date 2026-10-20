@@ -27,6 +27,8 @@ import type { ReadinessState } from './readiness';
 import type { GatewayPaths } from './restrictions';
 import { invokeRegisteredHandler, hasRegisteredIpcHandler } from '../ipc/registry';
 import { addBroadcastListener } from '../ipc/broadcast';
+import { isServerMode, resolveTenantId } from '../server/serverMode';
+import { makeServerLogger } from '../server/logger';
 
 /** Contract version frozen by the owner in 01-interface-contracts.md (M1). */
 export const GATEWAY_CONTRACT_VERSION = '1.0.0';
@@ -160,11 +162,25 @@ function makeJsonLogger(tenantId: string) {
 }
 
 /**
+ * REQ-A-10: in server mode the gateway logs through the shared server logger
+ * so every line is one redacted JSON object (the console is also wrapped;
+ * logging via console here would double-encode). Desktop dev mode keeps the
+ * plain JSON console logger above.
+ */
+function makeGatewayLogger(serverMode: boolean, tenantId: string) {
+  if (!serverMode) return makeJsonLogger(tenantId);
+  const serverLog = makeServerLogger({ tenantId });
+  return (level: 'info' | 'warn' | 'error', component: string, msg: string, extra?: Record<string, unknown>) => {
+    serverLog(level, component || 'gateway', msg, extra);
+  };
+}
+
+/**
  * Start the mobile gateway from the running Electron app. Call only after
  * `app.whenReady()` and store init, with every IPC handler registered.
  */
 export async function startGatewayFromApp(context: GatewayAppContext): Promise<GatewayHandle> {
-  const serverMode = env('IDBOTS_SERVER_MODE') === '1';
+  const serverMode = isServerMode();
 
   // Desktop dev mode requires the explicit env var and is never enabled in
   // packaged builds (REQ-A-22).
@@ -173,7 +189,7 @@ export async function startGatewayFromApp(context: GatewayAppContext): Promise<G
     throw new Error('Gateway start requested without IDBOTS_GATEWAY_DEV=1 or IDBOTS_SERVER_MODE=1.');
   }
 
-  const tenantId = env('IDBOTS_TENANT_ID') || GATEWAY_DEV_TENANT_ID;
+  const tenantId = resolveTenantId();
 
   let secret = env('IDBOTS_GATEWAY_SECRET');
   if (!secret) {
@@ -259,6 +275,6 @@ export async function startGatewayFromApp(context: GatewayAppContext): Promise<G
       }
       return result.mnemonic;
     },
-    logger: makeJsonLogger(tenantId),
+    logger: makeGatewayLogger(serverMode, tenantId),
   });
 }
