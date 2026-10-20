@@ -554,6 +554,19 @@ export function generateRuntimeConfig(input) {
         ...compactionPolicies.length > 0 ? { modelPolicies: compactionPolicies } : {},
       },
     },
+    // Image offload (stock sdk-minimal mount, right after compaction-basic):
+    // every image in history is re-encoded into every request, so an
+    // image-capable route eventually rejects the request with
+    // IMAGE_OFFLOAD_REQUIRED (pi-ai's per-route maxRequestImageBytes bound —
+    // 20MiB of base64 by default — or the native route's Files-API budget).
+    // This executor answers that failure on the agent/request-error
+    // waterfall: it records one durable image/offload decision marking the
+    // oldest retained occurrences and retries, so later requests send a
+    // placeholder for them. Without it the adapter error reaches the user
+    // verbatim and every follow-up turn ("continue") fails identically,
+    // because nothing ever shrinks the image history — computer-use sessions
+    // hit this after a few dozen screenshots (v1.0.2 user report).
+    { id: 'image-offload', name: '@deepseek-ai/dsh-compaction-image-offload' },
     // 0.1.5 tool-result pruner: model-free head/middle/tail pruning of
     // tool-result surface nodes during compaction (defaults 8192/4096/1024
     // chars). compaction-basic picks the service up via ctx.get when mounted.

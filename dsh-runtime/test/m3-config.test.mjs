@@ -103,9 +103,14 @@ record('generator: legacy DeepSeek base URL shapes migrate to the Messages root'
   && nativeBaseURLFor('') === undefined)
 record('generator: dsh-authorization is never mounted',
   !unit.some((e) => e.name === '@deepseek-ai/dsh-authorization'))
-// 0.1.7 experimental backends: off by default, mounted on demand.
+// 0.1.7 experimental backends: off by default, mounted on demand. Match on
+// the mounted package (or local plugin file) name, never the whole entry:
+// local plugins ride absolute paths, so a checkout living under a directory
+// named after the feature (a `computer-use-*` worktree) would otherwise trip
+// the substring check on every entry.
+const mountedName = (e) => String(e.name).startsWith('@') ? String(e.name) : path.basename(String(e.name))
 record('generator: browser-use + computer-use stay unmounted by default',
-  !unit.some((e) => String(e.name).includes('browser-use') || String(e.name).includes('computer-use')))
+  !unit.some((e) => mountedName(e).includes('browser-use') || mountedName(e).includes('computer-use')))
 const withBrowser = generateRuntimeConfig({
   sessionRoot: '/tmp/x',
   providers: [{ key: 'openai-gw', apiFormat: 'openai', baseUrl: 'https://a.example/v1', apiKeyEnv: 'K1', models: [{ id: 'm1', contextWindow: 64000 }] }],
