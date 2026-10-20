@@ -53,6 +53,35 @@ test('the gate reads the persisted mode fresh and restricts to interactive owner
   );
 });
 
+// 2026-10-20 double-acknowledgment report (session 2c70849f): the host-side
+// LLM turn-ack bubble (coworkRunner emitTurnAckReplyBubble) landed in ~1s,
+// then the model's prompt-mandated opening line opened with "收到" again.
+// The host ack owns the instant acknowledgment now; the model's opener must
+// carry substance instead, while the structural rules stay.
+test('the opening line bans bare-acknowledgment openers — the host ack owns the echo', () => {
+  const promptSource = readFileSync(join(here, '../src/main/libs/assistantModePrompt.ts'), 'utf8');
+  assert.ok(
+    promptSource.includes('NEVER open with a bare acknowledgment'),
+    'the opening line must ban bare acknowledgments (the host ack bubble already delivers one)',
+  );
+  assert.ok(
+    promptSource.includes('"收到"'),
+    'the ban must name the observed Chinese opener',
+  );
+  assert.ok(
+    !promptSource.includes('fast first response'),
+    'the obsolete speed rationale is gone — the host ack owns first-response latency now',
+  );
+  assert.ok(
+    promptSource.includes('never start a task with tool calls alone'),
+    'the structural rules stay: no silent tool-call starts',
+  );
+  assert.ok(
+    promptSource.includes('never end a turn with only a promise'),
+    'the structural rules stay: no promise-only endings',
+  );
+});
+
 // 2026-10-13 DeepSeek acceptance findings: with reasoning off, the model
 // leaked English internal monologue as narration ("Good. Now let me build…")
 // and emitted one bubble per tool round. The prompt must carry the three
