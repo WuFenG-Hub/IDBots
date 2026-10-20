@@ -843,7 +843,7 @@ test('a quote reply sent from away-from-bottom follows once when its reply arriv
   const followEffect = /const quoteReplyArrived = shouldFollowPendingQuoteReply\([\s\S]*?\}, \[currentSession\?\.id, autoScrollFollowSignal, isStreaming, shouldAutoScroll\]\);/.exec(detailSource);
   assert.ok(followEffect, 'the follow effect reads the flag');
   assert.match(followEffect[0], /if \(!shouldAutoScroll && !quoteReplyArrived\)/);
-  assert.match(followEffect[0], /if \(quoteReplyArrived\) \{\n      pendingQuoteReplyFollowRef\.current = false;/);
+  assert.match(followEffect[0], /if \(quoteReplyArrived\) \{\n {6}pendingQuoteReplyFollowRef\.current = false;/);
   assert.doesNotMatch(followEffect[0], /setShouldAutoScroll/, 'the fix never writes the gate');
 
   // Leg 4 stays: the button still renders on the closed gate and re-opens it.
