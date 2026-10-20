@@ -1,0 +1,22 @@
+{
+  "api.onStreamData": {
+    "kind": "on",
+    "channel": "api:stream:{requestId}:data",
+    "note": "Per-request template channel written in the preload as `api:stream:${requestId}:data`. It belongs to the api:stream invoke machinery, which `02` denies at tier N (generic outbound HTTP proxy); the per-request stream events are not listed in `02` v1.0.0 and are covered by the EVENT_ALLOWLIST `api:stream:` prefix at tier N pending a change request."
+  },
+  "api.onStreamDone": {
+    "kind": "on",
+    "channel": "api:stream:{requestId}:done",
+    "note": "Per-request template channel written in the preload as `api:stream:${requestId}:done`. Same provenance and N tier as api.onStreamData; see scripts/ipc-contract-overrides.json and the `api:stream:` event prefix in src/main/gateway/allowlist.ts."
+  },
+  "api.onStreamError": {
+    "kind": "on",
+    "channel": "api:stream:{requestId}:error",
+    "note": "Per-request template channel written in the preload as `api:stream:${requestId}:error`. Same provenance and N tier as api.onStreamData; see scripts/ipc-contract-overrides.json and the `api:stream:` event prefix in src/main/gateway/allowlist.ts."
+  },
+  "api.onStreamAbort": {
+    "kind": "on",
+    "channel": "api:stream:{requestId}:abort",
+    "note": "Per-request template channel written in the preload as `api:stream:${requestId}:abort`. Same provenance and N tier as api.onStreamData; see scripts/ipc-contract-overrides.json and the `api:stream:` event prefix in src/main/gateway/allowlist.ts."
+  }
+}
