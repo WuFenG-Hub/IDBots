@@ -137,14 +137,15 @@ test('mapCerebellumEffortRungToTurnAckTier: off/low→fast, high→moderate, max
 test('runner: turnAck is emitted after the effort verdict, before the brain call, gated to cowork_ui', () => {
   const source = read('src/main/libs/coworkRunner.ts');
 
-  // Early emission: fires at turn entry — BEFORE the volatile-context build —
-  // so cold-start windows (15s+ relay key bootstrap) still get an instant
-  // "on it" instead of the old generic spinner copy.
+  // Early emission: fires at turn entry — before ANY pre-flight await on the
+  // turn path (the volatile build, images, and skill-env sync now run kicked
+  // and overlapped) — so cold-start windows (15s+ relay key bootstrap) still
+  // get an instant "on it" instead of the old generic spinner copy.
   const earlyEmission = source.indexOf('this.emitTurnAck(sessionId, earlyAckTier)');
-  const volatileSite = source.indexOf('await this.buildVolatileContextPrompt(');
+  const envSyncSite = source.indexOf('await this.syncDshSkillSessionEnv(');
   assert.ok(earlyEmission > 0, 'the turn emits the early ack at entry');
-  assert.ok(volatileSite > earlyEmission,
-    'the early ack precedes the volatile build (covers its whole window)');
+  assert.ok(envSyncSite > earlyEmission,
+    'the early ack precedes every pre-flight await on the turn path (covers the whole wait window)');
   // Tier upgrade: after the effort verdict, only an auto verdict that beats
   // generic supersedes the early emission (a newer turnAck wins the tail scan).
   const upgradeEmission = source.indexOf("'turn acknowledgment tier upgraded'");
