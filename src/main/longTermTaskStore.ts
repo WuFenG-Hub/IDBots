@@ -551,7 +551,7 @@ export class LongTermTaskStore {
    * pushed forward until `activateTask` — creation is the grilling skill's
    * output, activation is the owner's sign-off.
    */
-  createTask(input: LongTermTaskCreateInput, actor: LongTermActor): LongTermResult<LongTermTaskSummary> {
+  createTask(input: LongTermTaskCreateInput, actor: LongTermActor): LongTermResult<LongTermTaskDetail> {
     const title = asText(input.title).trim();
     const goal = asText(input.goal).trim();
     if (!title || !goal) return { ok: false, code: 'VALIDATION', error: 'title and goal are required' };
@@ -606,7 +606,7 @@ export class LongTermTaskStore {
   }
 
   /** Owner confirmed the plan in chat → the task goes active. */
-  activateTask(taskId: string, actor: LongTermActor): LongTermResult<LongTermTaskSummary> {
+  activateTask(taskId: string, actor: LongTermActor): LongTermResult<LongTermTaskDetail> {
     const row = this.getTaskRow(taskId);
     if (!row) return { ok: false, code: 'NOT_FOUND', error: 'task not found' };
     if (row.stage !== 'defining' && row.stage !== 'paused') {
@@ -620,7 +620,7 @@ export class LongTermTaskStore {
     return detail ? { ok: true, value: detail } : { ok: false, code: 'NOT_FOUND', error: 'task not found' };
   }
 
-  pauseTask(taskId: string, actor: LongTermActor, note = ''): LongTermResult<LongTermTaskSummary> {
+  pauseTask(taskId: string, actor: LongTermActor, note = ''): LongTermResult<LongTermTaskDetail> {
     const row = this.getTaskRow(taskId);
     if (!row) return { ok: false, code: 'NOT_FOUND', error: 'task not found' };
     if (row.stage !== 'active') return { ok: false, code: 'VALIDATION', error: `cannot pause from stage ${row.stage}` };
@@ -660,7 +660,7 @@ export class LongTermTaskStore {
     taskId: string,
     actor: LongTermActor,
     input: { note?: string; evidence?: LongTermEvidence[] } = {},
-  ): LongTermResult<LongTermTaskSummary> {
+  ): LongTermResult<LongTermTaskDetail> {
     const row = this.getTaskRow(taskId);
     if (!row) return { ok: false, code: 'NOT_FOUND', error: 'task not found' };
     if (row.stage !== 'active' && row.stage !== 'paused') {
@@ -707,7 +707,7 @@ export class LongTermTaskStore {
     return detailTask ? { ok: true, value: detailTask } : { ok: false, code: 'NOT_FOUND', error: 'task not found' };
   }
 
-  updateTask(input: LongTermTaskUpdateInput, actor: LongTermActor): LongTermResult<LongTermTaskSummary> {
+  updateTask(input: LongTermTaskUpdateInput, actor: LongTermActor): LongTermResult<LongTermTaskDetail> {
     const row = this.getTaskRow(input.taskId);
     if (!row) return { ok: false, code: 'NOT_FOUND', error: 'task not found' };
     const changes: string[] = [];

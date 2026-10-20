@@ -324,6 +324,97 @@ const runJsonSafeSuite = async () => {
     assert.equal(sourceContent[0].text, objectPayload)
   })
 
+  // ---- short structural fields survive the proportional pass ---------------
+  // Bug report 2026-10-20 (longterm_task_create echo): a 75K base64 avatar blew
+  // the budget, pass 1 found no single node able to absorb the overflow, and
+  // pass 2's global ratio nibbled EVERY string — the echo came back with
+  // id "lt" and title "I", indistinguishable from corrupted data. Short strings
+  // are no longer trim targets: ids, titles, statuses and timestamps come back
+  // byte-identical under any budget, while the blob and the lists still shrink.
+  // The fixture reproduces the trigger: the non-blob content ALONE exceeds the
+  // budget, so draining the blob cannot fix the document by itself and the plan
+  // falls through to the proportional pass.
+  const recordId = 'ltt_01d8dd57-fe0d-4e48-8905-ad3704ea1d07'
+  const recordTitle = 'IDBots 四周能力提升与长期任务板打磨计划'
+  const recordGoal = '四周内让长期任务板在真实使用中稳定可靠：'.repeat(12)
+  const recordItems = Array.from({ length: 9 }, (_, i) => ({
+    id: `lts_${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`,
+    ordinal: i + 1,
+    title: `子项目 ${i + 1}：完成第 ${i + 1} 阶段的交付物并通过验收`,
+    description: `这一子项目的含义与边界说明，第 ${i + 1} 阶段。`.repeat(10),
+    status: 'pending',
+    criteria: ['交付物已上链并可被第三方读取', '验收人确认无阻塞问题', '相关文档已更新'],
+  }))
+  const recordEvents = Array.from({ length: 30 }, (_, i) => ({
+    id: 30 - i,
+    kind: 'note',
+    actor: 'twin',
+    detail: `journal entry ${30 - i}: ${'progress recorded, nothing blocking. '.repeat(3)}`,
+    createdAt: '2026-10-20T05:12:00.000Z',
+  }))
+  const recordPayload = JSON.stringify({
+    id: recordId,
+    title: recordTitle,
+    goal: recordGoal,
+    stage: 'active',
+    currentSubtaskId: recordItems[0].id,
+    createdAt: '2026-10-20T05:12:00.000Z',
+    participants: [{ id: 1, name: 'AI_Sunny', avatar: 'data:image/png;base64,' + 'A'.repeat(75800) }],
+    subtasks: recordItems,
+    events: recordEvents,
+  }, null, 2)
+  const recordBudget = 6860
+  const recordShaper = harness({ maxChars: recordBudget, tailChars: 1000 })
+  check('short fields fixture: the non-blob content alone overflows the budget (pass 1 cannot absorb it)', () => {
+    const withoutBlob = JSON.stringify({ ...JSON.parse(recordPayload), participants: [{ id: 1, name: 'AI_Sunny', avatar: '' }] })
+    assert.ok(withoutBlob.length > recordBudget, `${withoutBlob.length} chars of non-blob content vs budget ${recordBudget}`)
+  })
+  const shapedRecord = await recordShaper.run([{ type: 'text', text: recordPayload }])
+  // Pass 4 (regrow) used to delete a fully regrown node from the plan WITHOUT
+  // re-checking the fit: the marker's bounded trim list then admitted the next
+  // path in plan order, a longer one cost a few chars, the closing guard
+  // rejected the plan and the whole result fell back to torn head+tail text.
+  // This fixture lands exactly on that boundary (6860 -> 6870 before the fix).
+  check('short fields fixture: the shaped result is still one valid JSON document (regrow never breaks the fit)', () => {
+    assert.ok(parseOk(textOf(shapedRecord)), `legacy head+tail fallback: ${textOf(shapedRecord).slice(0, 60)}...`)
+  })
+  const recordJson = parseOk(textOf(shapedRecord)) ? parseOf(shapedRecord) : {}
+  check('short fields: id / title / stage / timestamp come back byte-identical under a tight budget', () => {
+    assert.ok(textOf(shapedRecord).length <= recordBudget, `${textOf(shapedRecord).length} chars`)
+    assert.equal(recordJson.id, recordId)
+    assert.equal(recordJson.title, recordTitle)
+    assert.equal(recordJson.stage, 'active')
+    assert.equal(recordJson.currentSubtaskId, recordItems[0].id)
+    assert.equal(recordJson.createdAt, '2026-10-20T05:12:00.000Z')
+    assert.equal(recordJson.participants[0].name, 'AI_Sunny')
+  })
+  check('short fields: every kept list element keeps its id / title / status whole', () => {
+    assert.ok(recordJson.subtasks.length >= 1 && recordJson.subtasks.length <= 9, `kept ${recordJson.subtasks.length}/9`)
+    for (const [index, element] of recordJson.subtasks.entries()) {
+      assert.equal(element.id, recordItems[index].id)
+      assert.equal(element.title, recordItems[index].title)
+      assert.equal(element.status, 'pending')
+      assert.equal(element.ordinal, index + 1)
+    }
+    for (const [index, event] of recordJson.events.entries()) {
+      assert.equal(event.kind, 'note')
+      assert.equal(event.actor, 'twin')
+      assert.equal(event.createdAt, recordEvents[index].createdAt)
+    }
+  })
+  check('short fields: the blob and the lists still absorb the overflow, and no trim names a short string', () => {
+    const marker = recordJson[MARKER_KEY]
+    assert.equal(marker.truncated, true)
+    assert.ok(recordJson.participants[0].avatar.length < 75800, `avatar kept ${recordJson.participants[0].avatar.length}`)
+    assert.ok(recordJson.subtasks.length < 9 || recordJson.events.length < 30, 'at least one list lost whole elements')
+    const shortPaths = ['$.id', '$.title', '$.stage', '$.currentSubtaskId', '$.createdAt', '$.participants[0].name']
+    for (const trim of marker.trims) {
+      assert.equal(shortPaths.includes(trim.path), false, `short field trimmed: ${trim.path}`)
+      assert.equal(/\.(id|title|status|kind|actor|createdAt)$/.test(trim.path), false, `short list field trimmed: ${trim.path}`)
+    }
+    assert.ok(marker.trimCount < 30, `trimCount ${marker.trimCount} — short fields must not be counted as trims`)
+  })
+
   // ---- H-81 three-state summary: every emitter carries mode ---------------
   check('H-81: trimmed marker keeps the original note text and mode=trimmed', () => {
     const marker = objectJson[MARKER_KEY]
