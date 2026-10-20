@@ -1,8 +1,10 @@
 // Assistant mode renders a link to a local .html/.htm file as a distinctive
 // full-width report card (icon + title + localized hint + open affordance),
 // so the turn's deliverable is unmistakable next to plain inline file links.
-// Professional mode must keep the plain inline link, and clicking the card
-// flows through the same onOpenLocalFile path as any local file link.
+// The card renders through LocalFileLink (block-level wrapper), so it carries
+// the same right-click menu as every other file link. Professional mode must
+// keep the plain inline link, and clicking the card flows through the same
+// onOpenLocalFile path as any local file link.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,34 +20,65 @@ const sessionDetailSource = fs.readFileSync(
   path.join(projectRoot, 'src', 'renderer', 'components', 'cowork', 'CoworkSessionDetail.tsx'),
   'utf8',
 );
+const markdownSource = fs.readFileSync(
+  path.join(projectRoot, 'src', 'renderer', 'components', 'MarkdownContent.tsx'),
+  'utf8',
+);
 
 const REPORT_LINK = '[季度调研报告](file:///tmp/out/report.html)';
 
+// LocalFileLink reads window.electron.platform while rendering, so SSR needs
+// the same global stub the professional-mode tests set.
+const withWindowStub = (fn: () => void): void => {
+  globalThis.window = { electron: { platform: 'darwin' } } as never;
+  try {
+    fn();
+  } finally {
+    delete (globalThis as Record<string, unknown>).window;
+  }
+};
+
 test('assistant mode renders a local .html link as a report card', () => {
-  const markup = renderToStaticMarkup(
-    <MarkdownContent
-      content={REPORT_LINK}
-      chatExperienceMode="assistant"
-      onOpenLocalFile={() => true}
-    />,
-  );
-  // Block-level card with the localized hint and the file href; not the
-  // inline LocalFileLink pill (that one carries no hint label).
-  assert.match(markup, /href="file:\/\/\/tmp\/out\/report\.html"/);
-  assert.match(markup, /HTML report/);
-  assert.match(markup, /flex w-full items-center gap-3 rounded-xl/);
-  assert.match(markup, /季度调研报告/);
+  withWindowStub(() => {
+    const markup = renderToStaticMarkup(
+      <MarkdownContent
+        content={REPORT_LINK}
+        chatExperienceMode="assistant"
+        onOpenLocalFile={() => true}
+      />,
+    );
+    // Block-level card with the localized hint and the file href, wrapped in
+    // LocalFileLink's block wrapper so the right-click menu applies to it.
+    assert.match(markup, /href="file:\/\/\/tmp\/out\/report\.html"/);
+    assert.match(markup, /HTML report/);
+    assert.match(markup, /flex w-full items-center gap-3 rounded-xl/);
+    assert.match(markup, /季度调研报告/);
+  });
 });
 
 test('assistant mode covers the .htm extension too', () => {
-  const markup = renderToStaticMarkup(
-    <MarkdownContent
-      content={'[r](file:///tmp/out/report.htm)'}
-      chatExperienceMode="assistant"
-      onOpenLocalFile={() => true}
-    />,
+  withWindowStub(() => {
+    const markup = renderToStaticMarkup(
+      <MarkdownContent
+        content={'[r](file:///tmp/out/report.htm)'}
+        chatExperienceMode="assistant"
+        onOpenLocalFile={() => true}
+      />,
+    );
+    assert.match(markup, /HTML report/);
+  });
+});
+
+test('the report card renders through LocalFileLink so it carries the right-click menu', () => {
+  // Right-click consistency: the assistant HTML report card must go through
+  // LocalFileLink (open-with / copy path / copy content / reveal in Finder),
+  // not stay a bare anchor with only a click handler.
+  assert.match(
+    markdownSource,
+    /chatExperienceMode === 'assistant' && HTML_FILE_RE\.test\(filePath\)\) \{\s*return \(\s*<LocalFileLink/,
   );
-  assert.match(markup, /HTML report/);
+  assert.match(markdownSource, /wrapperClassName="block w-full"/);
+  assert.match(markdownSource, /showTypeIcon=\{false\}/);
 });
 
 test('professional mode keeps the plain inline link (no card)', () => {

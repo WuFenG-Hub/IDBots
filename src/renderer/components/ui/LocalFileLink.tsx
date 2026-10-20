@@ -29,6 +29,10 @@ interface LocalFileLinkProps {
   onOpen?: (filePath: string, event: React.MouseEvent) => Promise<void> | void;
   /** Show the document/folder type icon after children (default true). */
   showTypeIcon?: boolean;
+  /** Classes for the wrapper span (default an inline pill). Block-level
+   * children (e.g. the assistant HTML report card) pass a block/full-width
+   * wrapper so the layout stays intact around the context menu. */
+  wrapperClassName?: string;
 }
 
 const showToast = (message: string): void => {
@@ -51,6 +55,7 @@ const LocalFileLink: React.FC<LocalFileLinkProps> = ({
   href,
   onOpen,
   showTypeIcon = true,
+  wrapperClassName = 'inline-flex items-center',
 }) => {
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const [openWithOpen, setOpenWithOpen] = useState(false);
@@ -322,7 +327,7 @@ const LocalFileLink: React.FC<LocalFileLinkProps> = ({
 
   return (
     <span
-      className="inline-flex items-center"
+      className={wrapperClassName}
       onContextMenu={handleContextMenu}
     >
       <a
