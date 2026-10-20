@@ -49,8 +49,6 @@ All constraints in the overview apply. Phase-specific:
 ```bash
 cd /Users/tusm/Documents/MetaID_Projects/IDBots/IDBots
 git worktree add .worktrees/rrsi-p5-scope -b feat/rrsi-p5-scope main
-git config extensions.worktreeConfig true
-git -C .worktrees/rrsi-p5-scope config --worktree core.filemode false
 cd .worktrees/rrsi-p5-scope
 pnpm install
 test -f src/main/libs/hotLayerPruning.ts && echo "P3 present"

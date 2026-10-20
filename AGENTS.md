@@ -45,11 +45,11 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - Regular maintenance entry point: `scripts/prune-worktrees.sh` lists every worktree whose branch is fully merged into `main` and, after confirmation, removes the worktrees and deletes the branches. `--dry-run` only lists; `--force` also removes merged worktrees that have uncommitted changes.
 - A fresh worktree needs `pnpm install` in the root before building (the postinstall covers `dsh-runtime/` and `SKILLs/web-search/`); thanks to the shared pnpm store the install is fast and adds almost no new disk usage.
 
-### Worktrees live on the external SSD
+### Worktrees live on the internal disk
 
-- Worktrees physically live on an external SSD: `.worktrees` is a symlink to `/Volumes/Seagate/MacWork/worktrees/IDBots`. Always create worktrees as `git worktree add .worktrees/<name> ...` — the symlink puts them on the SSD automatically; never invent other temp directories.
-- While the `Seagate` volume is unmounted, every worktree add/remove/status operation over `.worktrees/` fails with a path error. That is expected behavior — remount the same-named volume and everything resumes; no repair is needed.
-- The SSD is exFAT, which needs two accommodations on every fresh worktree: (1) the volume has no POSIX mode bits, so immediately after `git worktree add` run `git config extensions.worktreeConfig true` (once per clone) and `git -C .worktrees/<name> config --worktree core.filemode false` — otherwise every tracked file shows as phantom-modified; (2) macOS writes `._*` AppleDouble sidecar files next to real files — they are git-ignored via `.gitignore` and skipped by the kernel-patch scanner, so do not "clean them up" and never feed them to tools. pnpm installs on the SSD fall back from hard links to copy mode (the pnpm store stays on the internal disk and must NOT be moved) — slower installs are the expected tradeoff for the disk relief.
+- `.worktrees/` is a plain, git-ignored directory in the repository root on the internal disk — not a symlink to an external volume. Always create worktrees as `git worktree add .worktrees/<name> ...`; never invent other temp directories.
+- Worktrees used to live on an external exFAT SSD behind a `.worktrees` symlink (`/Volumes/Seagate/MacWork/worktrees/IDBots`). That setup was abandoned because it hurt performance: pnpm fell back from hard links to copy mode and every build and test ran against slow external I/O, on top of the exFAT workarounds the volume needed (`core.filemode false`, `._*` AppleDouble sidecars). None of that applies to a fresh worktree today: do not set `core.filemode false`, and do not expect a `Seagate` volume to be mounted.
+- A few legacy worktrees may still show up under `/Volumes/Seagate/MacWork/worktrees/IDBots/` in `git worktree list`. Do not create new ones there; close them out with the normal `git worktree remove` flow once their branches are merged.
 
 ## Important Runtime Rules
 

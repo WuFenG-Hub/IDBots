@@ -59,7 +59,7 @@ A chat experience mode switch in **Settings → General** (`chatExperienceMode`:
 
 ## 5. Working rules for the next agent
 
-- Read `AGENTS.md` first. Branch from `main` with a same-named worktree under `.worktrees/<name>` (symlink to the SSD); run `git config extensions.worktreeConfig true` (once per clone) and `git -C .worktrees/<name> config --worktree core.filemode false` right after `git worktree add`; `pnpm install` in the new worktree.
+- Read `AGENTS.md` first. Branch from `main` with a same-named worktree under `.worktrees/<name>` — a plain directory on the internal disk (the former SSD symlink and its `core.filemode false` step no longer apply); `pnpm install` in the new worktree.
 - Node must be **>=24 <25** (`~/.nvm/versions/node/v24.13.1/bin` on PATH works; the default Node 20 crashes pnpm 11).
 - Professional mode must stay pixel-identical; gate everything behind the mode flag; never change message persistence for display purposes (assistant-mode filtering is render-only by design).
 - After touching `dsh-runtime` deps: `pnpm --dir dsh-runtime install` then `node scripts/apply-dsh-kernel-patches.cjs`; gate = `pnpm run check:dsh-deps`.

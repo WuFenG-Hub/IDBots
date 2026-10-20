@@ -57,8 +57,6 @@ All constraints in the overview apply. Phase-specific:
 ```bash
 cd /Users/tusm/Documents/MetaID_Projects/IDBots/IDBots
 git worktree add .worktrees/rrsi-p2-retention -b feat/rrsi-p2-retention main
-git config extensions.worktreeConfig true
-git -C .worktrees/rrsi-p2-retention config --worktree core.filemode false
 cd .worktrees/rrsi-p2-retention
 pnpm install
 test -f src/main/libs/capabilityGateRegularizers.ts && test -f tests/fixtures/rrsiDreamHarness.mjs && echo "P1 present"

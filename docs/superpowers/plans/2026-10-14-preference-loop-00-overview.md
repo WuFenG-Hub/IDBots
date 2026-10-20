@@ -15,7 +15,7 @@
 - The protocol doc `docs/metaid_protocols/09-preference.md` (v1.0.0) is normative. If code and doc disagree, stop and report the conflict to the planner; do not pick one silently.
 - Node `>=24 <25`. pnpm only. Never run `npm install` / `npm ci` anywhere in the repo. Scripts run as `pnpm run <script>`.
 - Every phase runs on its own branch + worktree created from `main` (names in the phase map below). Never branch from another feature branch. Never push. Never merge; the planner merges after acceptance.
-- Worktree setup on the exFAT SSD, immediately after `git worktree add`: `git config extensions.worktreeConfig true` and `git -C .worktrees/<name> config --worktree core.filemode false`; then `pnpm install` inside the worktree. Do not delete `._*` files.
+- Worktree setup: `.worktrees/<name>` is a plain directory on the internal disk (the former exFAT SSD symlink and its `core.filemode false` step no longer apply); run `pnpm install` inside the worktree.
 - `tests/` is gitignored: stage test files with `git add -f`.
 - TypeScript strong typing: no `any` in new code (use `unknown` + narrowing). 2-space indent, single quotes, semicolons. Code comments in English, only for constraints the code cannot show.
 - Both tsconfigs are non-strict (no `strictNullChecks`), so `!x.ok`, `x.ok ? … : …`, and `x !== undefined` do not narrow a discriminated union or an `unknown`. Narrow unions with literal comparisons (`if (x.ok === false) return …;`, `x.ok === true ? … : …`) and `unknown` with positive type predicates (`isText(x) ? x : undefined`). The plan code blocks follow this; do the same in code you write.

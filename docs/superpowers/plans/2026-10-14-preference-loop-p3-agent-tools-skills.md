@@ -39,8 +39,6 @@ cd /Users/tusm/Documents/MetaID_Projects/IDBots/IDBots
 git fetch --all --prune
 git log --oneline -1 main -- src/main/services/preference/service.ts   # must print a commit; otherwise stop: P2 is not merged
 git worktree add .worktrees/preference-p3-tools -b feat/preference-p3-tools main
-git config extensions.worktreeConfig true
-git -C .worktrees/preference-p3-tools config --worktree core.filemode false
 cd .worktrees/preference-p3-tools
 pnpm install
 pnpm run test:preference
