@@ -62,6 +62,11 @@ test("no npm ci or npm install anywhere under deploy/tenant-image", () => {
 
 test("entrypoint launches electron with --no-sandbox via exec and no debugging port", () => {
   assert.match(entrypoint, /exec electron --no-sandbox \/app/);
+  // The tenant's no-new-privileges profile breaks Chromium's sandbox too; the
+  // web-search browser path must opt into --no-sandbox via this env (AC-A-5).
+  // Carried as an image ENV so docker exec sessions inherit it as well.
+  assert.match(entrypoint, /WEB_SEARCH_CHROME_NO_SANDBOX=1/);
+  assert.match(dockerfile, /^ENV WEB_SEARCH_CHROME_NO_SANDBOX=1/m);
   for (const file of allFiles) {
     const text = readFileSync(file, "utf8");
     assert.ok(!text.includes("remote-debugging"), `${file} must not reference remote-debugging`);

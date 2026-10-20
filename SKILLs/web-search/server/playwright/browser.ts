@@ -178,6 +178,14 @@ export async function launchBrowser(config: BrowserConfig): Promise<BrowserInsta
     ...runtimeChromeFlags
   ];
 
+  // Container tenants run with `--cap-drop ALL` + `no-new-privileges`, where
+  // Chromium's setuid/userns sandbox cannot work ("No usable sandbox"). The
+  // tenant entrypoint opts in via WEB_SEARCH_CHROME_NO_SANDBOX=1; desktop is
+  // untouched.
+  if (process.env.WEB_SEARCH_CHROME_NO_SANDBOX === '1' && !args.includes('--no-sandbox')) {
+    args.push('--no-sandbox');
+  }
+
   if (runtimeHeadless) {
     args.push('--headless=new');
   }

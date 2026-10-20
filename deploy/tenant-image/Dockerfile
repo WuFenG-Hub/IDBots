@@ -207,6 +207,10 @@ ENV PATH=/opt/electron:$PATH
 ENV TZ=Asia/Shanghai
 ENV IDBOTS_GATEWAY_PORT=8790
 ENV HOME=/home/idbots
+# The tenant runs with --cap-drop ALL + no-new-privileges: Chromium's sandbox
+# cannot work, so the web-search browser path opts into --no-sandbox. ENV (not
+# only an entrypoint export) so docker exec sessions see it too.
+ENV WEB_SEARCH_CHROME_NO_SANDBOX=1
 
 # Non-root runtime user (C1: uid 1000) and the single state volume.
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin idbots \

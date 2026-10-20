@@ -65,5 +65,9 @@ log "Xvfb ready on :99 (pid ${XVFB_PID}); DISPLAY=${DISPLAY}"
 # sandbox cannot work, and the app's internal switch is applied too late.
 # No debugging port is opened (REQ-A-32); nothing may listen on 9222 except
 # web-search's own Chromium.
+# The same no-new-privileges profile breaks Chromium's sandbox too, so the
+# web-search skill opts into --no-sandbox via this env (see
+# SKILLs/web-search/server/playwright/browser.ts).
+export WEB_SEARCH_CHROME_NO_SANDBOX=1
 log "starting IDBots tenant backend (uid $(id -u), gateway port ${IDBOTS_GATEWAY_PORT})"
 exec electron --no-sandbox /app
