@@ -3,9 +3,21 @@ import type { FileFilter, MessageBoxOptions, OpenDialogOptions, Session, WebCont
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import { startGatewayFromApp, getActiveGatewayContext, getActiveGatewayReadiness } from './gateway/wiring';
+import { createGatewayFileSignHandler } from './gateway/fileSignChannel';
 import { SqliteStore } from './sqliteStore';
 import { registerIpcHandler } from './ipc/registry';
 import { broadcastToRenderers } from './ipc/broadcast';
+import {
+  listPendingPermissions,
+  resolvePendingPermission,
+  trackPendingPermission,
+} from './ipc/pendingPermissions';
+import {
+  IPC_UPDATE_CONTENT_MAX_CHARS,
+  sanitizeIpcPayload,
+  truncateIpcString,
+} from './ipc/sanitize';
 import { isSqliteWasmBoundsError } from './sqliteRecovery';
 import {
   SQLiteRecoveryCoordinator,
@@ -142,6 +154,7 @@ import {
 } from './services/metabotTokenTransferService';
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
+import { initBundleService, registerBundleIpcHandlers } from './services/bundleService';
 import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
 import { initVisionRelayService, recognizeAudioViaRelay, recognizeImageViaRelay, recognizeVideoAudioViaRelay, recognizeVideoViaRelay } from './services/visionRelayService';
 import { probeMediaFile, convertMediaFile, grabVideoFrame } from './services/mediaToolsService';
@@ -584,13 +597,8 @@ const INVALID_FILE_NAME_PATTERN = /[<>:"/\\|?*\u0000-\u001F]/g;
 const MIN_MEMORY_USER_MEMORIES_MAX_ITEMS = 1;
 const MAX_MEMORY_USER_MEMORIES_MAX_ITEMS = 120; // quota audit 2026-09-17 (F1): was 60 (keep in sync with coworkStore.ts)
 const IPC_MESSAGE_CONTENT_MAX_CHARS = 120_000;
-const IPC_UPDATE_CONTENT_MAX_CHARS = 120_000;
-const IPC_STRING_MAX_CHARS = 4_000;
-const IPC_MAX_DEPTH = 5;
 /** /goal objective cap: the goal rides the system-side prompt every turn. */
 const SESSION_GOAL_MAX_CHARS = 4_000;
-const IPC_MAX_KEYS = 80;
-const IPC_MAX_ITEMS = 40;
 const MAX_INLINE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_LOCAL_IMAGE_PREVIEW_BYTES = 10 * 1024 * 1024;
 const LOCAL_IMAGE_PREVIEW_EXTENSION_MIME: Record<string, string> = {
@@ -699,58 +707,6 @@ const resolveInlineAttachmentDir = (cwd?: string): string => {
 
 const ensurePngFileName = (value: string): string => {
   return value.toLowerCase().endsWith('.png') ? value : `${value}.png`;
-};
-
-const truncateIpcString = (value: string, maxChars: number): string => {
-  if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}\n...[truncated in main IPC forwarding]`;
-};
-
-const sanitizeIpcPayload = (value: unknown, depth = 0, seen?: WeakSet<object>): unknown => {
-  const localSeen = seen ?? new WeakSet<object>();
-  if (
-    value === null
-    || typeof value === 'number'
-    || typeof value === 'boolean'
-    || typeof value === 'undefined'
-  ) {
-    return value;
-  }
-  if (typeof value === 'string') {
-    return truncateIpcString(value, IPC_STRING_MAX_CHARS);
-  }
-  if (typeof value === 'bigint') {
-    return value.toString();
-  }
-  if (typeof value === 'function') {
-    return '[function]';
-  }
-  if (depth >= IPC_MAX_DEPTH) {
-    return '[truncated-depth]';
-  }
-  if (Array.isArray(value)) {
-    const result = value.slice(0, IPC_MAX_ITEMS).map((entry) => sanitizeIpcPayload(entry, depth + 1, localSeen));
-    if (value.length > IPC_MAX_ITEMS) {
-      result.push(`[truncated-items:${value.length - IPC_MAX_ITEMS}]`);
-    }
-    return result;
-  }
-  if (typeof value === 'object') {
-    if (localSeen.has(value as object)) {
-      return '[circular]';
-    }
-    localSeen.add(value as object);
-    const entries = Object.entries(value as Record<string, unknown>);
-    const result: Record<string, unknown> = {};
-    for (const [key, entry] of entries.slice(0, IPC_MAX_KEYS)) {
-      result[key] = sanitizeIpcPayload(entry, depth + 1, localSeen);
-    }
-    if (entries.length > IPC_MAX_KEYS) {
-      result.__truncated_keys__ = entries.length - IPC_MAX_KEYS;
-    }
-    return result;
-  }
-  return String(value);
 };
 
 const sanitizeCoworkMessageForIpc = (message: any): any => {
@@ -7367,14 +7323,21 @@ const getCoworkRunner = () => {
       }
       const safeRequest = sanitizePermissionRequestForIpc(request);
       broadcastToRenderers('cowork:stream:permission', { sessionId, request: safeRequest });
+      // Mobile pending mirror (REQ-A-24): record exactly what was broadcast so
+      // `mobile:permission:listPending` can resync a reconnecting client.
+      trackPendingPermission(sessionId, safeRequest);
     });
 
     // A permission finalized on ANY path (renderer reply, text relay,
     // auto-allow, the 60s watchdog, abort, session stop) must dequeue the
     // renderer's pendingPermissions copy — otherwise the global overlay keeps
-    // rendering a stale, unanswerable prompt forever.
+    // rendering a stale, unanswerable prompt forever. Every one of those
+    // paths funnels through this event (the runner's finalize emits it, and
+    // session stop clears the runner's map through the same finalize), so it
+    // also drops the mobile pending mirror's entry.
     coworkRunner.on('permissionResolved', (sessionId: string, requestId: string) => {
       broadcastToRenderers('cowork:stream:permissionResolved', { sessionId, requestId });
+      resolvePendingPermission(sessionId, requestId);
     });
 
     coworkRunner.on('complete', (sessionId: string, claudeSessionId: string | null) => {
@@ -7387,12 +7350,14 @@ const getCoworkRunner = () => {
       broadcastToRenderers('cowork:stream:complete', { sessionId, claudeSessionId });
     });
 
-    coworkRunner.on('error', (sessionId: string, error: string) => {
+    coworkRunner.on('error', (sessionId: string, error: string, metadata?: { errorCode?: string }) => {
       recomputeSleepGuard();
       if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
         return;
       }
-      broadcastToRenderers('cowork:stream:error', { sessionId, error });
+      // REQ-A-25: metadata.errorCode ('LLM_QUOTA_EXHAUSTED') rides along so
+      // the mobile web app can offer recharge without parsing the text.
+      broadcastToRenderers('cowork:stream:error', { sessionId, error, ...(metadata ? { metadata } : {}) });
     });
 
     // Kernel-owned session titles (dsh-session-title): the runner already
@@ -8103,6 +8068,34 @@ const getUserIdentityStore = () => {
     userIdentityStore = new UserIdentityStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   }
   return userIdentityStore;
+};
+
+// Extracted cores shared by the IPC handlers and the C2 sensitive route
+// (src/main/gateway/wiring.ts): the gateway reveals mnemonics through the
+// exact same code path, never through IPC (REQ-A-20).
+const revealUserMnemonicCore = async (): Promise<{ success: boolean; mnemonic?: string; error?: string }> => {
+  try {
+    const identity = getUserIdentityStore().get();
+    if (!identity) {
+      return { success: false, error: 'USER_IDENTITY_MISSING' };
+    }
+    return { success: true, mnemonic: identity.mnemonic };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[UserIdentity] userIdentity:revealMnemonic failed:', errMsg);
+    return { success: false, error: errMsg };
+  }
+};
+
+const revealMetabotMnemonicCore = async (metabotId: number): Promise<{ success: boolean; mnemonic?: string; error?: string }> => {
+  try {
+    const store = getMetabotStore();
+    const wallet = store.getMetabotWalletByMetabotId(metabotId);
+    if (!wallet) return { success: false, error: 'Wallet not found for this MetaBot' };
+    return { success: true, mnemonic: wallet.mnemonic };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : 'Failed to get mnemonic' };
+  }
 };
 
 // Agent-Game-v2 host (docs/14). Lazily created and started; survives MetaApp
@@ -14934,19 +14927,7 @@ if (!gotTheLock) {
     }
   });
 
-  registerIpcHandler('userIdentity:revealMnemonic', async () => {
-    try {
-      const identity = getUserIdentityStore().get();
-      if (!identity) {
-        return { success: false, error: 'USER_IDENTITY_MISSING' };
-      }
-      return { success: true, mnemonic: identity.mnemonic };
-    } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
-      console.error('[UserIdentity] userIdentity:revealMnemonic failed:', errMsg);
-      return { success: false, error: errMsg };
-    }
-  });
+  registerIpcHandler('userIdentity:revealMnemonic', async () => revealUserMnemonicCore());
 
   registerIpcHandler('userIdentity:retrySubsidy', async () => {
     try {
@@ -15212,16 +15193,7 @@ if (!gotTheLock) {
     }
   });
 
-  registerIpcHandler('idbots:getMetaBotMnemonic', async (_event, metabotId: number) => {
-    try {
-      const store = getMetabotStore();
-      const wallet = store.getMetabotWalletByMetabotId(metabotId);
-      if (!wallet) return { success: false, error: 'Wallet not found for this MetaBot' };
-      return { success: true, mnemonic: wallet.mnemonic };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to get mnemonic' };
-    }
-  });
+  registerIpcHandler('idbots:getMetaBotMnemonic', async (_event, metabotId: number) => revealMetabotMnemonicCore(metabotId));
 
   registerIpcHandler('idbots:deleteMetaBot', async (_event, metabotId: number) => {
     // Shared with the Twin metabot_delete tool. Also guards against deleting
@@ -16499,6 +16471,49 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     getUserIdentityStore,
   });
   registerLlmRelayIpcHandlers({ registerIpcHandler });
+
+  // Metaso bundles (REQ-A-24, C4): plan catalog / orders / meters for the
+  // mobile recharge surface. Shares the traffic service's identity-signing
+  // machinery and base-URL resolution; serves the local stub when
+  // IDBOTS_BUNDLE_STUB=1 or the apiBase is stub://local.
+  initBundleService({
+    getStore,
+    getUserIdentityStore,
+  });
+  registerBundleIpcHandlers({ registerIpcHandler });
+
+  // Mobile gateway channels (REQ-A-24). `gateway:file:sign` mints a signed
+  // download token with the RUNNING gateway's secret — on plain desktop it
+  // answers a structured "gateway not running" instead of throwing.
+  registerIpcHandler('gateway:file:sign', createGatewayFileSignHandler(getActiveGatewayContext));
+
+  // Pending tool-permission mirror for reconnecting mobile clients (C2
+  // "Tool Permission Requests"): the tracker records what was broadcast and
+  // drops entries as the runner resolves them. Additive — the renderer keeps
+  // its own path untouched.
+  registerIpcHandler('mobile:permission:listPending', async () => {
+    try {
+      return sanitizeIpcPayload(listPendingPermissions());
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list pending permissions',
+      };
+    }
+  });
+
+  // Bootstrap/onboarding state the mobile client shows during provisioning
+  // (the `onboarding` object of the C1 /readyz readiness provider).
+  registerIpcHandler('mobile:bootstrap:status', async () => {
+    try {
+      return getActiveGatewayReadiness().onboarding;
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to read bootstrap status',
+      };
+    }
+  });
 
   // Vision relay (describe_image backend): reuses the free-quota relay
   // credentials (metaid-free provider key, identity-signed bootstrap on
@@ -18062,6 +18077,31 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
 
     store = await initStore();
     startupLog('store ready');
+
+    // REQ-A-22: mobile gateway (C2). Starts only in desktop dev mode
+    // (IDBOTS_GATEWAY_DEV=1, never in packaged builds) or server mode
+    // (IDBOTS_SERVER_MODE=1); with neither set, desktop behavior is unchanged.
+    // The reveal cores above keep the sensitive route on the exact handler
+    // code paths, without going through IPC.
+    const gatewayDevMode = process.env.IDBOTS_GATEWAY_DEV === '1' && !app.isPackaged;
+    if (gatewayDevMode || process.env.IDBOTS_SERVER_MODE === '1') {
+      try {
+        const gatewayHandle = await startGatewayFromApp({
+          storeGet: (key) => getStore().get(key),
+          getWorkspaceRoot: () => getCoworkStore().getConfig().workingDirectory,
+          revealUserMnemonic: revealUserMnemonicCore,
+          revealMetabotMnemonic: revealMetabotMnemonicCore,
+        });
+        startupLog(`gateway listening on 127.0.0.1:${gatewayHandle.port}`);
+        console.log(`[Gateway] listening on http://127.0.0.1:${gatewayHandle.port}`);
+      } catch (error) {
+        console.error('[Gateway] failed to start:', error);
+        if (process.env.IDBOTS_SERVER_MODE === '1') {
+          // Server mode without a gateway is a failed tenant — fail fast.
+          app.exit(1);
+        }
+      }
+    }
 
     // Chain write ledger: wire the store into the runtime accessor before the
     // RPC server / daemons can broadcast the first pin.

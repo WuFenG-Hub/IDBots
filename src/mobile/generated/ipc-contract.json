@@ -308,6 +308,34 @@
       ]
     },
     {
+      "path": "bundle.createOrder",
+      "kind": "invoke",
+      "channel": "bundle:createOrder",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "bundle.getMeters",
+      "kind": "invoke",
+      "channel": "bundle:getMeters",
+      "args": []
+    },
+    {
+      "path": "bundle.getOrder",
+      "kind": "invoke",
+      "channel": "bundle:getOrder",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "bundle.getPlans",
+      "kind": "invoke",
+      "channel": "bundle:getPlans",
+      "args": []
+    },
+    {
       "path": "chainBackup.backup",
       "kind": "invoke",
       "channel": "chainBackup:backup",
@@ -1216,6 +1244,14 @@
       "args": [
         "filePath",
         "maxBytes"
+      ]
+    },
+    {
+      "path": "gateway.fileSign",
+      "kind": "invoke",
+      "channel": "gateway:file:sign",
+      "args": [
+        "input"
       ]
     },
     {
@@ -2214,6 +2250,18 @@
       "args": [
         "metabotId"
       ]
+    },
+    {
+      "path": "mobile.getBootstrapStatus",
+      "kind": "invoke",
+      "channel": "mobile:bootstrap:status",
+      "args": []
+    },
+    {
+      "path": "mobile.listPendingPermissions",
+      "kind": "invoke",
+      "channel": "mobile:permission:listPending",
+      "args": []
     },
     {
       "path": "networkStatus.send",

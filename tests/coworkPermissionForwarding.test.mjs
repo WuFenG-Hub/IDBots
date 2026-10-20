@@ -45,8 +45,11 @@ test('permissionRequest forwarding ignores session-list visibility', () => {
   assert.match(handler, /request\?\.toolName !== 'AskUserQuestion'/);
   assert.match(handler, /coworkRunner\.hasTextPermissionRelay\(sessionId\)/);
 
-  // Prompts must still reach every window with the session id attached.
-  assert.match(handler, /webContents\.send\('cowork:stream:permission', \{ sessionId, request: safeRequest \}/);
+  // Prompts must still reach every window with the session id attached. The
+  // T1 broadcast refactor routes this through broadcastToRenderers, which
+  // fans out to all live windows exactly like the old webContents.send loop
+  // (and additionally to gateway broadcast listeners, when the gateway runs).
+  assert.match(handler, /broadcastToRenderers\('cowork:stream:permission', \{ sessionId, request: safeRequest \}/);
 });
 
 /**
@@ -59,7 +62,10 @@ test('permissionResolved forwarding reaches every window', () => {
   const source = read('src/main/main.ts');
   const handler = extractRunnerHandler(source, 'permissionResolved');
 
-  assert.match(handler, /webContents\.send\('cowork:stream:permissionResolved', \{ sessionId, requestId \}/);
+  // Same T1 broadcast refactor: broadcastToRenderers replaces the per-window
+  // webContents.send loop (and additionally feeds gateway broadcast
+  // listeners; the mobile pending mirror drops its entry on the same event).
+  assert.match(handler, /broadcastToRenderers\('cowork:stream:permissionResolved', \{ sessionId, requestId \}/);
   // Resolved events must not be gated on session-list visibility either —
   // a hidden session's stale prompt needs clearing just the same.
   assert.equal(
