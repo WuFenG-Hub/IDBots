@@ -1,7 +1,8 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
-import { BrowserWindow, session, app } from 'electron';
+import { session, app } from 'electron';
+import { broadcastToRenderers } from '../ipc/broadcast';
 import {
   anthropicToOpenAI,
   buildOpenAIChatCompletionsURL,
@@ -3582,12 +3583,10 @@ async function handleCreateScheduledTask(
     scheduledTaskDeps.getScheduler().reschedule();
 
     // Notify renderer to refresh task list
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send('scheduledTask:statusUpdate', {
-        taskId: task.id,
-        state: task.state,
-      });
-    }
+    broadcastToRenderers('scheduledTask:statusUpdate', {
+      taskId: task.id,
+      state: task.state,
+    });
 
     console.log(`[CoworkProxy] Scheduled task created via API: ${task.id} "${task.name}"`);
     if (sessionWarning) {
@@ -3611,9 +3610,7 @@ async function handleCreateScheduledTask(
 
 function broadcastScheduledTaskState(taskId: string, state: unknown): void {
   try {
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send('scheduledTask:statusUpdate', { taskId, state });
-    }
+    broadcastToRenderers('scheduledTask:statusUpdate', { taskId, state });
   } catch {
     // Best-effort refresh hint; never fail the API response on it.
   }

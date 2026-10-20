@@ -67,6 +67,7 @@ function buildContextMenu(getWindow: () => BrowserWindow | null, store: SqliteSt
         if (win && !win.isDestroyed()) {
           if (!win.isVisible()) win.show();
           if (!win.isFocused()) win.focus();
+          // desktop-only: addressed to a specific window (not a broadcast)
           win.webContents.send('app:newTask');
         }
       },
@@ -79,6 +80,7 @@ function buildContextMenu(getWindow: () => BrowserWindow | null, store: SqliteSt
         if (win && !win.isDestroyed()) {
           if (!win.isVisible()) win.show();
           if (!win.isFocused()) win.focus();
+          // desktop-only: addressed to a specific window (not a broadcast)
           win.webContents.send('app:openSettings');
         }
       },

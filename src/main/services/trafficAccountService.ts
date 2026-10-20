@@ -1359,9 +1359,7 @@ export async function resolveSponsorTrafficAccount(input: {
 // IPC
 // ---------------------------------------------------------------------------
 
-interface IpcMainLike {
-  handle: (channel: string, listener: (_event: unknown, input: any) => unknown) => void;
-}
+type RegisterIpcHandlerFn = (channel: string, handler: (event: any, ...args: any[]) => any) => void;
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : String(error);
@@ -1373,79 +1371,79 @@ function getErrorPayload(error: unknown): { error: string; errorCode?: string } 
   return { error: getErrorMessage(error), ...(errorCode ? { errorCode } : {}) };
 }
 
-export function registerTrafficAccountIpcHandlers(deps: { ipcMain: IpcMainLike }): void {
-  const { ipcMain } = deps;
-  ipcMain.handle('traffic:ensureAccount', async () => {
+export function registerTrafficAccountIpcHandlers(deps: { registerIpcHandler: RegisterIpcHandlerFn }): void {
+  const { registerIpcHandler } = deps;
+  registerIpcHandler('traffic:ensureAccount', async () => {
     try {
       return { success: true, account: await ensureTrafficAccount() };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:getAccount', async () => {
+  registerIpcHandler('traffic:getAccount', async () => {
     try {
       return { success: true, account: getLocalTrafficAccount() };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:getBalance', async (_event, input: { forceRefresh?: boolean }) => {
+  registerIpcHandler('traffic:getBalance', async (_event, input: { forceRefresh?: boolean }) => {
     try {
       return { success: true, balance: await getTrafficBalance(input ?? {}) };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:getLedger', async (_event, input: { cursor?: number; limit?: number; direction?: number }) => {
+  registerIpcHandler('traffic:getLedger', async (_event, input: { cursor?: number; limit?: number; direction?: number }) => {
     try {
       return { success: true, ...(await getTrafficLedger(input ?? {})) };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:getDailyUsage', async (_event, input: { from?: number; to?: number; botAddress?: string }) => {
+  registerIpcHandler('traffic:getDailyUsage', async (_event, input: { from?: number; to?: number; botAddress?: string }) => {
     try {
       return { success: true, rows: await getTrafficDailyUsage(input ?? {}) };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:getUsageSummary', async () => {
+  registerIpcHandler('traffic:getUsageSummary', async () => {
     try {
       return { success: true, summary: await getTrafficUsageSummary() };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:bindAllBots', async () => {
+  registerIpcHandler('traffic:bindAllBots', async () => {
     try {
       return { success: true, summary: await bindAllLocalBots() };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:getLocalJournal', async (_event, input: { limit?: number; botAddress?: string }) => {
+  registerIpcHandler('traffic:getLocalJournal', async (_event, input: { limit?: number; botAddress?: string }) => {
     try {
       return { success: true, entries: listLocalTrafficJournal(input ?? {}) };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:getPricing', async () => {
+  registerIpcHandler('traffic:getPricing', async () => {
     try {
       return { success: true, plans: await getTrafficPricing() };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:getRechargeGateway', async () => {
+  registerIpcHandler('traffic:getRechargeGateway', async () => {
     try {
       return { success: true, gateway: resolveRechargeGateway(), packaged: isPackagedApp() };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:createRechargeOrder', async (_event, input: { planId?: string; gateway?: unknown }) => {
+  registerIpcHandler('traffic:createRechargeOrder', async (_event, input: { planId?: string; gateway?: unknown }) => {
     try {
       const requested = normalizeText(input?.gateway);
       return {
@@ -1456,49 +1454,49 @@ export function registerTrafficAccountIpcHandlers(deps: { ipcMain: IpcMainLike }
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:getRechargeOrder', async (_event, input: { orderId?: string }) => {
+  registerIpcHandler('traffic:getRechargeOrder', async (_event, input: { orderId?: string }) => {
     try {
       return { success: true, order: await getRechargeOrder(String(input?.orderId ?? '')) };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:mockConfirmRechargeOrder', async (_event, input: { orderId?: string }) => {
+  registerIpcHandler('traffic:mockConfirmRechargeOrder', async (_event, input: { orderId?: string }) => {
     try {
       return { success: true, order: await mockConfirmRechargeOrder(String(input?.orderId ?? '')) };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:getFreeGrantCampaignStatus', async () => {
+  registerIpcHandler('traffic:getFreeGrantCampaignStatus', async () => {
     try {
       return { success: true, campaign: await getFreeGrantCampaignStatus() };
     } catch (error) {
       return { success: false, ...getErrorPayload(error) };
     }
   });
-  ipcMain.handle('traffic:claimFreeGrant', async () => {
+  registerIpcHandler('traffic:claimFreeGrant', async () => {
     try {
       return { success: true, claim: await claimFreeGrant() };
     } catch (error) {
       return { success: false, ...getErrorPayload(error) };
     }
   });
-  ipcMain.handle('traffic:redeemCode', async (_event, input: { code?: string }) => {
+  registerIpcHandler('traffic:redeemCode', async (_event, input: { code?: string }) => {
     try {
       return { success: true, result: await redeemTrafficCode(String(input?.code ?? '')) };
     } catch (error) {
       return { success: false, ...getErrorPayload(error) };
     }
   });
-  ipcMain.handle('traffic:getSettings', async () => {
+  registerIpcHandler('traffic:getSettings', async () => {
     try {
       return { success: true, settings: getTrafficSettingsSnapshot() };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:setSettings', async (_event, input: { mode?: unknown; fallbackPolicy?: unknown; apiBase?: unknown; rechargeGateway?: unknown }) => {
+  registerIpcHandler('traffic:setSettings', async (_event, input: { mode?: unknown; fallbackPolicy?: unknown; apiBase?: unknown; rechargeGateway?: unknown }) => {
     try {
       return { success: true, settings: setTrafficSettingsSnapshot(input ?? {}) };
     } catch (error) {

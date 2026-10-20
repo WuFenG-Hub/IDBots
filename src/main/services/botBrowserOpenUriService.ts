@@ -5,6 +5,7 @@
  */
 
 import { BrowserWindow } from 'electron';
+import { broadcastToRenderers } from '../ipc/broadcast';
 
 export type BotBrowserOpenUriInput = {
   uri: string;
@@ -13,14 +14,11 @@ export type BotBrowserOpenUriInput = {
 
 export function sendBotBrowserOpenUri(input: BotBrowserOpenUriInput): void {
   const windows = BrowserWindow.getAllWindows();
-  let delivered = 0;
+  const liveWindows = windows.filter(
+    (win) => !win.isDestroyed() && !win.webContents.isDestroyed(),
+  );
 
-  for (const win of windows) {
-    if (win.isDestroyed()) continue;
-    if (win.webContents.isDestroyed()) continue;
-    win.webContents.send('botBrowser:openUri', input);
-    delivered += 1;
-  }
+  broadcastToRenderers('botBrowser:openUri', input);
 
   const firstWindow = windows.find((win) => !win.isDestroyed());
   if (firstWindow) {
@@ -29,7 +27,7 @@ export function sendBotBrowserOpenUri(input: BotBrowserOpenUriInput): void {
     firstWindow.focus();
   }
 
-  if (delivered === 0) {
+  if (liveWindows.length === 0) {
     throw new Error('No IDBots window is available to open Bot Browser');
   }
 }

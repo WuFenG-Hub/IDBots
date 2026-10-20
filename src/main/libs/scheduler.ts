@@ -1,5 +1,5 @@
-import { BrowserWindow } from 'electron';
 import { randomUUID } from 'node:crypto';
+import { broadcastToRenderers } from '../ipc/broadcast';
 import { ScheduledTaskStore, ScheduledTask, ScheduledTaskRun, Schedule, NotifyPlatform } from '../scheduledTaskStore';
 import type { CoworkStore, DreamPracticeProposalRecord } from '../coworkStore';
 import type { CoworkRunner } from './coworkRunner';
@@ -647,21 +647,13 @@ export class Scheduler {
     const task = this.store.getTask(taskId);
     if (!task) return;
 
-    BrowserWindow.getAllWindows().forEach((win) => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('scheduledTask:statusUpdate', {
-          taskId: task.id,
-          state: task.state,
-        });
-      }
+    broadcastToRenderers('scheduledTask:statusUpdate', {
+      taskId: task.id,
+      state: task.state,
     });
   }
 
   private emitRunUpdate(run: ScheduledTaskRun): void {
-    BrowserWindow.getAllWindows().forEach((win) => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('scheduledTask:runUpdate', { run });
-      }
-    });
+    broadcastToRenderers('scheduledTask:runUpdate', { run });
   }
 }
