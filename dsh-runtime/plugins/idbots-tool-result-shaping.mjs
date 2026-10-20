@@ -27,6 +27,15 @@
 //   * when no array is worth draining (a single oversized string member, an
 //     array of length 1, or an array whose first element alone overflows) the
 //     oversized string itself is shortened instead (char prefix);
+//   * only LONG strings are ever shortened: a string under
+//     MIN_TRIMMABLE_STRING_CHARS is never a trim target, so ids, titles, status
+//     enums, timestamps and other short structural fields survive every budget
+//     whole. Before this floor, pass 2's global ratio nibbled them too — a
+//     longterm_task_create echo whose 75K base64 avatar blew the budget came
+//     back with id "lt" and title "I" (bug report 2026-10-20), which reads as
+//     corrupted data, not as a trimmed result. Cutting a short string can only
+//     ever save a few dozen chars against any budget this plugin enforces, so
+//     excluding them costs nothing;
 //   * the marker rides a namespaced key, so it can never overwrite a key the
 //     tool wrote itself (a root object already carrying either namespaced key is
 //     left to the head+tail path instead of being overwritten);
@@ -130,6 +139,12 @@ const RATIO_SEARCH_CHAR_BUDGET = 4 * 1024 * 1024
 // field is never emptied for a negligible slice of the overflow, while a result
 // built from many medium members can still be shrunk as a whole.
 const MIN_SAVING_CHARS = 8
+// A string shorter than this is never a trim target (see the header): the
+// shaper exists to bound long text and big lists, and a short field cut to a
+// prefix destroys its meaning (an id, a title, a status) for a saving that can
+// never matter against a budget of hundreds of chars or more. Short strings
+// still get bounded indirectly when the array holding them loses elements.
+const MIN_TRIMMABLE_STRING_CHARS = 200
 // Pass 4 hands capacity back to at most this many (biggest) trimmed nodes.
 const REGROW_MAX_NODES = 8
 // The marker lists at most this many trims (biggest first, plan order) and
@@ -288,12 +303,13 @@ const shapeJsonText = (text, maxChars, ref) => {
   // Arrays worth draining first (largest serialized first, path order breaks
   // ties); an array of one element is not worth draining — its oversized member
   // is a string-trim job. Strings come second so a kept element that is itself
-  // oversized can still be shortened.
+  // oversized can still be shortened — but only long ones: short structural
+  // fields are never candidates (MIN_TRIMMABLE_STRING_CHARS).
   const arrayTargets = arrays
     .filter((target) => target.units >= 2)
     .sort(bySizeDesc)
   const stringTargets = strings
-    .filter((target) => target.units > 0)
+    .filter((target) => target.units >= MIN_TRIMMABLE_STRING_CHARS)
     .sort(bySizeDesc)
   const planOrder = [...arrayTargets, ...stringTargets]
 
@@ -441,7 +457,8 @@ const shapeJsonText = (text, maxChars, ref) => {
     if (fits()) {
       const trimmed = planOrder.filter((target) => trims.has(target.path)).slice(0, REGROW_MAX_NODES)
       for (const target of trimmed) {
-        let bestKept = trims.get(target.path)
+        const before = trims.get(target.path)
+        let bestKept = before
         let growLo = bestKept
         let growHi = target.units
         while (growLo <= growHi) {
@@ -456,6 +473,14 @@ const shapeJsonText = (text, maxChars, ref) => {
         }
         if (bestKept >= target.units) trims.delete(target.path)
         else trims.set(target.path, bestKept)
+        // The search validated `bestKept` with this node still LISTED in the
+        // marker; deleting a fully regrown node lets the next trim in plan
+        // order into the marker's bounded list, and a longer path there can
+        // cost the few chars that tip the document over. Re-check the final
+        // state and keep the pre-regrow value when it does — otherwise the
+        // closing guard rejects the whole plan and the result falls back to
+        // the torn head+tail text this path exists to avoid.
+        if (!fits()) trims.set(target.path, before)
       }
     }
   }
