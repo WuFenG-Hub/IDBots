@@ -20,8 +20,11 @@ repository-root `pnpm install` does not install it.
 - `src/origin.ts` — Origin header checks for state-changing requests
 - `src/sms.ts` — SMS provider interface, fake provider, code hashing
 - `src/services/signup.ts` — invite-consuming sign-up transaction core
-- `src/docker/client.ts` — Docker Engine API client (`ping` wired; rest stubbed)
+- `src/docker/client.ts` — Docker Engine API client (volume/container/image/logs + `tenantBaseUrl`)
 - `src/server.ts`, `src/main.ts` — minimal node:http server and entry point
+- `test/fake-tenant/fake-tenant.mjs` — dependency-free fake tenant (C1/C2 surface)
+- `test/fake-docker/` — in-process fake Docker Engine API backed by child processes
+- `scripts/dev-loop.mjs` — runnable local loop: control plane + fakes, no daemon
 
 ## Requirements
 
@@ -87,12 +90,64 @@ stage with production `node_modules` only, running as uid 1000. It exposes
 8080 (public) and 9100 (internal metrics). Image tagging
 (`{REGISTRY}/idbots/control-plane:{version}-{commit7}`) is WS-C CI's job.
 
-## Local loop with the fake tenant
+## Local loop with the fake tenant (REQ-B-21)
 
-> **TODO (lands with the fake tenant)** — per REQ-B-21, a fake tenant under
-> `test/fake-tenant/` (C1 `/healthz` + `/readyz` with scripted phases, C2
-> server) plus the docker harness will complete the local provisioning loop
-> here. A later phase fills this section.
+Prerequisites: Node `>=24 <25` and `pnpm install` (dev deps include `tsx`,
+which provides `esbuild`). No Docker daemon is needed — the loop runs
+against the in-process fake engine.
+
+```sh
+pnpm build && node scripts/dev-loop.mjs
+```
+
+The script starts the fake Docker engine on an ephemeral port, starts the
+built control plane (`dist/main.js`) with `CP_DOCKER_URL` pointed at it,
+creates a fake tenant container through the docker client (what T2
+provisioning will do), waits for `/readyz` to turn `ready`, prints `GET
+/health` from the control plane, and tears everything down. The step list is
+a `STEPS` array, so T2 can extend it into the full
+register → provision → reconnect loop.
+
+### What the fake docker is and why
+
+`test/fake-docker/index.mjs` implements the subset of the Docker Engine API
+the control plane uses (`/_ping`, volumes, container create/start/stop/
+remove/inspect/list, image labels, logs) over `node:http`, with each
+"container" backed by a child process running `fake-tenant.mjs`. It exists
+because the dev machine has no Docker daemon; integration tests and the dev
+loop get the same control-plane code paths either way. Run it standalone
+with `node test/fake-docker/main.mjs --port 2375`.
+
+### How the real-docker path differs
+
+Real containers publish no ports (C1), so `tenantBaseUrl()` resolves the
+tenant through the container **network IP at 8790** — that branch is the
+production path. The fake engine maps container 8790 to an ephemeral
+`127.0.0.1` port instead, so the host-port-mapping branch is local-only.
+
+### Fake tenant script reference
+
+`test/fake-tenant/fake-tenant.mjs` implements the C1/C2 surface:
+`/healthz`, `/readyz` (full C1 body with scripted phases), the `/gateway/v1/ws`
+socket (welcome/result/event/ping-pong, 1 MiB inbound limit), constant-time
+secret checks, JSON logs, SIGTERM → close 4012 → exit 0. Knobs (env):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `IDBOTS_TENANT_ID` | `t_test` | tenant id in logs and the welcome frame |
+| `IDBOTS_GATEWAY_SECRET` | `test-secret` | required on every route except `/healthz` |
+| `IDBOTS_GATEWAY_PORT` | `8790` | listen port; `0` = ephemeral, reported on the `listening` log line |
+| `FAKE_TENANT_HEALTH_AFTER_MS` | `0` | `/healthz` answers 503 before this |
+| `FAKE_TENANT_PHASES` | `ready:0` | comma list `{phase}:{ms}`; `/readyz` walks it, final phase sticky |
+| `FAKE_TENANT_EXIT_AFTER_MS` | — | exit(1) after this (crash tests) |
+| `FAKE_TENANT_APP_VERSION` | `0.12.0` | reported version |
+| `FAKE_TENANT_CONTRACT_VERSION` | `1.0.0` | reported C2 contract version |
+
+Example: `FAKE_TENANT_HEALTH_AFTER_MS=100 FAKE_TENANT_PHASES=migrating:200,bootstrapping:300,ready:0 node test/fake-tenant/fake-tenant.mjs`.
+
+`test/fake-tenant/Dockerfile` builds the same script as a tiny
+`node:24-alpine` image. It cannot be built on the dev machine (no Docker
+daemon); CI (WS-C) builds it with this directory as the context.
 
 ## Note
 
