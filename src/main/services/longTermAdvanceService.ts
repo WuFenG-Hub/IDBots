@@ -936,12 +936,15 @@ export class LongTermAdvanceService {
         // A visible pointer in the old session: an owner returning to it
         // learns where the conversation moved — the fresh session is folded
         // away in the sidebar, so without the pointer the move is invisible.
+        // Owner-facing wording: this is routine maintenance, not a failure —
+        // no budget numbers here (they live in the journal note + dev log);
+        // say what happened, that nothing is lost, and that no action is due.
         coworkStore.addMessage(rotation.from, {
           type: 'system',
           content:
             language === 'zh'
-              ? `【长期任务】本会话已达消息预算上限（${rotation.messages} 条），「${detail.title} · #${current.ordinal} ${current.title}」的后续推进已转移到新接续会话继续；本会话保持可读归档。`
-              : `[Long-term task] This session reached its message budget (${rotation.messages} messages). Work on "${detail.title} · #${current.ordinal} ${current.title}" continues in a fresh continuation session; this one stays readable as an archive.`,
+              ? `【长期任务】例行轮换：「${detail.title} · #${current.ordinal} ${current.title}」已持续推进一段时间，后续工作已自动转入新的接续会话继续，进度无缝衔接，无需任何操作；本会话转为可读归档，历史内容可随时回看。`
+              : `[Long-term task] Routine rotation: "${detail.title} · #${current.ordinal} ${current.title}" has been running for a while, so its work now continues seamlessly in a fresh continuation session — no action needed. This session stays readable as an archive.`,
           metadata: { origin: 'heartbeat' },
         });
         this.emitLog(
