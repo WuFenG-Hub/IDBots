@@ -18534,15 +18534,18 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     // no-op that settles immediately. Fire-and-forget; never rejects.
     const relayReconciliation = reconcileRelayCredentialsWithIdentity();
 
-    // Pre-resolve the free JEV relay key beside the DSH warmup. Relay keys
-    // expire server-side after an idle window, and the first cerebellum call
-    // of the next chat then paid an identity-signed re-bootstrap (15s+
-    // observed) inside the turn's volatile-context build — the 2026-10-15
-    // first-sentence latency report. Fire-and-forget: the resolver never
-    // throws, and a warm key simply makes the first turn's 1.5s-bounded JEV
-    // calls answer from cache. Chained behind the reconciliation so a drifted
-    // install resolves the re-issued key instead of racing the closeout with
-    // a second bootstrap of its own; the aligned case adds no delay.
+    // Pre-resolve the free JEV relay key beside the DSH warmup. When no key is
+    // cached (fresh launch after a kv loss, or a key revoked past the server's
+    // per-identity cap by a newer bootstrap), the first cerebellum call of the
+    // next chat paid an identity-signed re-bootstrap (15s+ observed) inside
+    // the turn's volatile-context build — the 2026-10-15 first-sentence
+    // latency report. Relay keys do NOT expire on idle (assist-base-service,
+    // 2026-10-20); only revocation or cache loss empties the chain. Fire-and-
+    // forget: the resolver never throws, and a warm key simply makes the
+    // first turn's 1.5s-bounded JEV calls answer from cache. Chained behind
+    // the reconciliation so a drifted install resolves the re-issued key
+    // instead of racing the closeout with a second bootstrap of its own; the
+    // aligned case adds no delay.
     void relayReconciliation
       .catch(() => null)
       .then(() => resolveCerebellumRuntimeConfig(getStore().get('app_config')));
