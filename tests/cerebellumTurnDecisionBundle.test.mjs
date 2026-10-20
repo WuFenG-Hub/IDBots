@@ -195,6 +195,48 @@ test('buildTurnDecisionRequest: pools below their floor contribute no questions 
 });
 
 // ---------------------------------------------------------------------------
+// Empty-pool choice regression (2026-10-19): a below-floor roster made the
+// builders emit { type:'choice', criteria:{} }, and the JEV schema rejected
+// the WHOLE merged request with a 422 ("Dictionary should have at least 1
+// item" on questions.best_service.choice.criteria). An empty pool must send
+// NO question at all.
+// ---------------------------------------------------------------------------
+
+test('buildTurnDecisionRequest: an empty skill pool sends no best_skill question', () => {
+  const selection = selectTurnDecisionCandidates({ ...FULL_DECISIONS, skills: [] });
+  assert.equal(selection.skills.length, 0);
+  const request = buildTurnDecisionRequest({ selection, model: 'jev-latest' });
+  const ids = Object.keys(request.questions);
+  assert.ok(!ids.includes('best_skill'), 'no skill choice question without candidates');
+  assert.ok(ids.includes('best_service'), 'the service choice still rides its own pool');
+});
+
+test('buildTurnDecisionRequest: an empty service pool sends no best_service question', () => {
+  const selection = selectTurnDecisionCandidates({ ...FULL_DECISIONS, services: [] });
+  assert.equal(selection.services.length, 0);
+  const request = buildTurnDecisionRequest({ selection, model: 'jev-latest' });
+  const ids = Object.keys(request.questions);
+  assert.ok(!ids.includes('best_service'), 'no service choice question without candidates');
+  assert.ok(ids.includes('best_skill'), 'the skill choice still rides its own pool');
+});
+
+test('buildTurnDecisionRequest: both choice pools empty send neither question', () => {
+  const selection = selectTurnDecisionCandidates({
+    ...FULL_DECISIONS,
+    skills: [],
+    services: [],
+    includeGate: true,
+  });
+  const request = buildTurnDecisionRequest({ selection, model: 'jev-latest' });
+  const ids = Object.keys(request.questions);
+  assert.ok(!ids.includes('best_skill'));
+  assert.ok(!ids.includes('best_service'));
+  for (const key of CEREBELLUM_VOLATILE_GATE_SECTION_KEYS) {
+    assert.ok(ids.includes(key), `the gate keeps the turn eligible: ${key}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Answer parsing
 // ---------------------------------------------------------------------------
 
@@ -223,6 +265,29 @@ test('parseTurnDecisionAnswers: a missing section degrades that decision alone',
   assert.equal(results.serviceRanking, null);
   assert.ok(results.memoryScores, 'memory scores survive a dead shortlist section');
   assert.ok(results.gateVerdicts, 'gate verdicts survive too');
+});
+
+test('parseTurnDecisionAnswers: empty pools degrade to null rankings even with no answer sent', () => {
+  // Pinned alongside the empty-pool request fix: a turn whose skill and
+  // service pools are below their floors sends no best_skill/best_service
+  // QUESTION, so the answer payload has no such SECTION either — the parsers
+  // must resolve both rankings to null without choking on the absence.
+  const selection = selectTurnDecisionCandidates({
+    ...FULL_DECISIONS,
+    skills: [],
+    services: [],
+    includeGate: true,
+  });
+  const payload = fullAnswerPayload(selection);
+  delete payload.answers.best_skill;
+  delete payload.answers.best_service;
+  const results = parseTurnDecisionAnswers(payload, selection);
+
+  assert.equal(results.skillRanking, null);
+  assert.equal(results.serviceRanking, null);
+  assert.ok(results.memoryScores);
+  assert.ok(results.knowledgeScores);
+  assert.ok(results.gateVerdicts);
 });
 
 test('parseTurnDecisionAnswers: memory coverage floor still rejects partial maps', () => {
@@ -279,6 +344,58 @@ test('runCerebellumTurnDecisions: uneligible input makes no request at all', asy
   });
   assert.equal(results, null);
   assert.equal(fetches.length, 0);
+});
+
+test('runCerebellumTurnDecisions: a gate-only turn sends no choice question and still gets its 200', async () => {
+  // The production 422 shape: every pool below its floor, only the volatile
+  // gate eligible. The bundle must go out (gate questions only), the relay
+  // must answer 200, and every pool decision degrades to null in ONE call.
+  const fetches = [];
+  const gateOnlyDecisions = {
+    currentUserText: FULL_DECISIONS.currentUserText,
+    memories: [],
+    knowledge: [],
+    skills: [],
+    services: [],
+    includeGate: true,
+  };
+  const results = await runCerebellumTurnDecisions({
+    config: TEST_CONFIG,
+    fetchImpl: async (url, init) => {
+      fetches.push({ url, init, body: JSON.parse(init.body) });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => {
+          const answers = {};
+          for (const key of CEREBELLUM_VOLATILE_GATE_SECTION_KEYS) {
+            answers[key] = { noul: key === 'knowledge-bases' ? 0.9 : 0.05 };
+          }
+          return { model: 'jev-latest', answers, usage: { input_tokens: 120 } };
+        },
+      };
+    },
+    decisions: gateOnlyDecisions,
+  });
+
+  assert.equal(fetches.length, 1, 'one request for the eligible gate');
+  const body = fetches[0].body;
+  assert.ok(!('best_skill' in body.questions), 'no skill choice question without candidates');
+  assert.ok(!('best_service' in body.questions), 'no service choice question without candidates');
+  assert.deepEqual(
+    Object.keys(body.questions).sort(),
+    [...CEREBELLUM_VOLATILE_GATE_SECTION_KEYS].sort(),
+    'the gate questions are the whole payload',
+  );
+  // An empty pool's score map is EMPTY, not null (0 >= 0 * coverage holds
+  // vacuously) — the same shape every 200 turn with a below-floor pool has
+  // always carried, and a no-op for the prompt-ordering consumers.
+  assert.equal(results.memoryScores.size, 0);
+  assert.equal(results.knowledgeScores.size, 0);
+  assert.equal(results.skillRanking, null);
+  assert.equal(results.serviceRanking, null);
+  assert.equal(results.gateVerdicts['knowledge-bases'], true);
+  assert.equal(results.gateVerdicts['remote-services'], false);
 });
 
 test('runCerebellumTurnDecisions: HTTP failure degrades the whole bundle to null', async () => {

@@ -120,6 +120,12 @@ test('buildKnowledgeRankQuestions substitutes the index placeholder', () => {
   assert.ok(questions.kn_1.instructions.includes('knowledge[1].text'));
 });
 
+test('buildKnowledgeRankQuestions(0) returns an empty map (an empty pool sends no question)', () => {
+  // Pinned for the per-turn decision bundle: an empty knowledge pool must
+  // contribute zero questions to the merged request, never a malformed one.
+  assert.deepEqual(buildKnowledgeRankQuestions(0), {});
+});
+
 test('parseKnowledgeRankAnswers maps kn_<i> back to ids and skips junk', () => {
   const knowledge = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
   const scores = parseKnowledgeRankAnswers({

@@ -25,6 +25,7 @@ const {
   createJevRelayFetchWithKeyRetry,
   createSignalBoundedFetch,
   parseJevRelayErrorCode,
+  extractJevRelayErrorDetail,
   classifyJevRelayHttpStatus,
   classifyJevRelayThrownError,
   createJevRelayCallRecorder,
@@ -33,6 +34,7 @@ const {
   flushJevRelayCallStats,
   JEV_RELAY_QUOTA_BREAKER_MS,
   JEV_FREE_QUOTA_EXHAUSTED_CODE,
+  JEV_RELAY_ERROR_DETAIL_MAX_CHARS,
   JEV_RELAY_API_KEY_KV,
   JEV_RELAY_BASE_URL_KV,
 } = service;
@@ -460,6 +462,25 @@ test('classifyJevRelayThrownError: aborts are timeouts, everything else is netwo
   assert.equal(classifyJevRelayThrownError(undefined), 'network');
 });
 
+test('extractJevRelayErrorDetail: strings ride as-is, FastAPI arrays serialize, junk returns null', () => {
+  assert.equal(extractJevRelayErrorDetail({ detail: 'Dictionary should have at least 1 item' }),
+    'Dictionary should have at least 1 item');
+  const pydantic = [{ loc: ['questions', 'best_service'], msg: 'Dictionary should have at least 1 item' }];
+  assert.equal(extractJevRelayErrorDetail({ detail: pydantic }), JSON.stringify(pydantic));
+  assert.equal(extractJevRelayErrorDetail({ detail: { nested: true } }), '{"nested":true}');
+  assert.equal(extractJevRelayErrorDetail({ detail: '' }), null);
+  assert.equal(extractJevRelayErrorDetail({ detail: '   ' }), null);
+  assert.equal(extractJevRelayErrorDetail({ error: { code: 'no-detail-here' } }), null);
+  assert.equal(extractJevRelayErrorDetail('plain string body'), null);
+  assert.equal(extractJevRelayErrorDetail(null), null);
+});
+
+test('extractJevRelayErrorDetail: the excerpt is capped so one body cannot flood cowork.log', () => {
+  const huge = 'x'.repeat(JEV_RELAY_ERROR_DETAIL_MAX_CHARS + 5000);
+  const detail = extractJevRelayErrorDetail({ detail: huge });
+  assert.equal(detail.length, JEV_RELAY_ERROR_DETAIL_MAX_CHARS);
+});
+
 // ---------------------------------------------------------------------------
 // Recording wrapper: per-call lines, 429 body replay, breaker maintenance
 // ---------------------------------------------------------------------------
@@ -511,6 +532,54 @@ test('createJevRelayCallRecorder: a rate 429 (chat-pool code) does NOT open the 
   const recorded = createJevRelayCallRecorder(inner, { sink });
   await recorded('https://relay.example/v1/systemone', { method: 'POST' });
   assert.equal(isJevRelayQuotaExhausted(), false);
+});
+
+test('createJevRelayCallRecorder: a 400 upstream_bad_request logs the envelope code and the Pydantic detail', async () => {
+  // The relay passes the upstream validation errors through verbatim — the
+  // empty-criteria 422 regression was only diagnosable from this body.
+  const { lines, sink } = captureSink();
+  const detail = [{
+    loc: ['questions', 'best_service', 'choice', 'criteria'],
+    msg: 'Dictionary should have at least 1 item',
+    type: 'min_length',
+  }];
+  const inner = async () => jsonResponse(400, { error: { code: 'upstream_bad_request' }, detail });
+  const recorded = createJevRelayCallRecorder(inner, { sink });
+  const response = await recorded('https://relay.example/v1/systemone', { method: 'POST' });
+  assert.equal(response.status, 400);
+  const callLine = lines.find((line) => line.tag === 'jevRelay:call');
+  assert.equal(callLine.extra.result, 'http_4xx');
+  assert.equal(callLine.extra.errorCode, 'upstream_bad_request');
+  assert.equal(callLine.extra.detail, JSON.stringify(detail));
+  assert.ok(callLine.extra.detail.includes('Dictionary should have at least 1 item'));
+  // The reconstructed response still replays the parsed body (no double read).
+  assert.deepEqual(await response.json(), { error: { code: 'upstream_bad_request' }, detail });
+  assert.equal(isJevRelayQuotaExhausted(), false, 'plain 4xx never touches the quota breaker');
+});
+
+test('createJevRelayCallRecorder: a 422 string detail rides the call line untouched', async () => {
+  const { lines, sink } = captureSink();
+  const inner = async () => jsonResponse(422, { detail: 'Dictionary should have at least 1 item' });
+  const recorded = createJevRelayCallRecorder(inner, { sink });
+  const response = await recorded('https://relay.example/v1/systemone', { method: 'POST' });
+  assert.equal(response.status, 422);
+  const callLine = lines.find((line) => line.tag === 'jevRelay:call');
+  assert.equal(callLine.extra.result, 'http_4xx');
+  assert.equal(callLine.extra.errorCode, null, 'no envelope code on a bare FastAPI body');
+  assert.equal(callLine.extra.detail, 'Dictionary should have at least 1 item');
+  assert.deepEqual(await response.json(), { detail: 'Dictionary should have at least 1 item' });
+});
+
+test('createJevRelayCallRecorder: a non-JSON 4xx body keeps the generic classification and passes through', async () => {
+  const { lines, sink } = captureSink();
+  const inner = async () => ({ ok: false, status: 400, json: async () => { throw new SyntaxError('not json'); } });
+  const recorded = createJevRelayCallRecorder(inner, { sink });
+  const response = await recorded('https://relay.example/v1/systemone', { method: 'POST' });
+  assert.equal(response.status, 400);
+  const callLine = lines.find((line) => line.tag === 'jevRelay:call');
+  assert.equal(callLine.extra.result, 'http_4xx');
+  assert.equal(callLine.extra.errorCode, null);
+  assert.equal(callLine.extra.detail, null);
 });
 
 test('createJevRelayCallRecorder: an ok call closes an open breaker', async () => {

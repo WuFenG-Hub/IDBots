@@ -127,6 +127,14 @@ export function buildRemoteServiceOptionLabel(service: CerebellumRemoteServiceCa
 export function buildRemoteServiceChoiceQuestions(
   services: readonly CerebellumRemoteServiceCandidate[],
 ): Record<string, CerebellumRemoteServiceChoiceQuestion> {
+  // An empty pool makes NO question: a choice question with zero options in
+  // `criteria` fails the JEV schema outright (422 "Dictionary should have at
+  // least 1 item") and would take the whole merged turn-decision request
+  // down with it. The bundle spreads this builder unconditionally, so an
+  // empty directory must simply contribute nothing here.
+  if (services.length === 0) {
+    return {};
+  }
   const criteria: Record<string, string> = {};
   for (const service of services) {
     criteria[String(service.id)] = buildRemoteServiceOptionLabel(service);

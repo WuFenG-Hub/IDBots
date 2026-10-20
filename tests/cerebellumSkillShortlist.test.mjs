@@ -9,6 +9,7 @@ import {
   CEREBELLUM_SKILL_OPTION_MAX_DESCRIPTION_CHARS,
   CEREBELLUM_SKILL_OPTIONS_TOTAL_MAX_CHARS,
   CEREBELLUM_SKILL_RANK_QUESTION_ID,
+  buildSkillChoiceQuestions,
   buildSkillOptionLabel,
   buildSkillShortlistRequest,
   buildSkillShortlistBlock,
@@ -69,6 +70,14 @@ const RANK_INPUT = {
 // ---------------------------------------------------------------------------
 // Request building
 // ---------------------------------------------------------------------------
+
+test('buildSkillChoiceQuestions: an empty pool makes NO question (an empty criteria map is a 422)', () => {
+  // The per-turn decision bundle spreads this builder unconditionally, so an
+  // empty roster must contribute nothing — a { type:'choice', criteria:{} }
+  // question fails the JEV schema ("Dictionary should have at least 1 item")
+  // and used to fail the WHOLE merged request (2026-10-19 regression).
+  assert.deepEqual(buildSkillChoiceQuestions([]), {});
+});
 
 test('buildSkillShortlistRequest: user message in state, skills as choice criteria keyed by id', () => {
   const request = buildSkillShortlistRequest({
