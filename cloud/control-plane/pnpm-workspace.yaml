@@ -1,0 +1,15 @@
+# pnpm 11 reads pnpm-specific settings only from this file. This package is
+# intentionally its own workspace root (no `packages` key): cloud/control-plane
+# keeps a separate lockfile from the repository root (REQ-B-1), mirroring the
+# dsh-runtime dual-package layout. It is installed with
+# `pnpm --dir cloud/control-plane install --frozen-lockfile`; the root
+# postinstall must NOT install it.
+#
+# nodeLinker hoisted matches the repository convention (see dsh-runtime and the
+# root pnpm-workspace.yaml): the packaged service ships a plain node_modules
+# tree, and the Docker build copies it into the runtime image.
+allowBuilds:
+  'better-sqlite3': true
+  'esbuild': true
+
+nodeLinker: hoisted
