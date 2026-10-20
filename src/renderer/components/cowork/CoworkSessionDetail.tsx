@@ -3,6 +3,7 @@ import { useSelector } from 'react-redux';
 import { MessageExtensionContext } from './MessageExtensionContext';
 import { RootState } from '../../store';
 import { i18nService } from '../../services/i18n';
+import { isMobileRuntime } from '../../services/isMobileRuntime';
 import type { ModelEffortValue } from '../ModelEffortPicker';
 import { convertLegacyEffortLevel, LLM_EFFORT_DEFAULT_SENTINEL } from '../../services/modelCatalog';
 import type {
@@ -137,8 +138,12 @@ interface CoworkSessionDetailProps {
 }
 
 const AUTO_SCROLL_THRESHOLD = 120;
-/** Machine error code of the free-quota relay, preserved in error text by the proxy. */
-const FREE_QUOTA_EXHAUSTED_CODE = 'free_quota_exhausted';
+/**
+ * Machine error codes of the quota relay, preserved in error text by the
+ * proxy (REQ-A-25): free_quota_exhausted = never had purchased quota;
+ * quota_exhausted = purchased pool used up (new C4 code).
+ */
+const QUOTA_EXHAUSTED_CODES = ['free_quota_exhausted', 'quota_exhausted'];
 const REFUND_STATUS_DISMISS_STORAGE_KEY = 'idbots.cowork.dismissedRefundStatusCards.v1';
 /** In-app markdown viewer sidebar: width fraction of the session area. */
 const MARKDOWN_VIEWER_WIDTH_STORAGE_KEY = 'idbots.cowork.markdownViewerWidth';
@@ -2898,20 +2903,27 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
     return ended;
   }, [currentSession?.messages]);
-  // The free-quota relay surfaces 429 + code free_quota_exhausted (annotated
-  // into the error text by the OpenAI-compat proxy). Detect it from persisted
-  // system error messages and guide the user to configure their own key.
-  const freeQuotaExhausted = useMemo(() => {
+  // The free-quota relay surfaces 429 with two machine codes (REQ-A-25):
+  // free_quota_exhausted (the identity never had purchased quota) and the new
+  // C4 quota_exhausted (the purchased pool is used up), annotated into the
+  // error text by the OpenAI-compat proxy. Detect both from persisted system
+  // error messages and guide the user to the right fix.
+  const quotaExhausted = useMemo(() => {
     for (const message of currentSession?.messages ?? []) {
       if (message.type !== 'system') continue;
       const content = typeof message.content === 'string' ? message.content : '';
       const metaError = typeof message.metadata?.error === 'string' ? message.metadata.error : '';
-      if (content.includes(FREE_QUOTA_EXHAUSTED_CODE) || metaError.includes(FREE_QUOTA_EXHAUSTED_CODE)) {
+      if (QUOTA_EXHAUSTED_CODES.some((code) => content.includes(code) || metaError.includes(code))) {
         return true;
       }
     }
     return false;
   }, [currentSession?.messages]);
+  // Runtime split for the banner action (REQ-A-25): desktop keeps the
+  // Settings > Models shortcut; the mobile web app offers recharge instead
+  // (no Settings > Models surface exists there — see
+  // services/isMobileRuntime.ts for the detection seam).
+  const isMobile = useMemo(() => isMobileRuntime(), []);
   // Cause text for the A2A error banner: the newest system error message.
   // System bubbles are hidden in the A2A view, so without this the banner
   // says "something failed" without ever showing what.
@@ -4962,15 +4974,26 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         />
       )}
 
-      {freeQuotaExhausted && (
+      {quotaExhausted && (
         <div className="px-4 pb-2 shrink-0">
           <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
             <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
               <ExclamationTriangleIcon className="h-4 w-4 text-red-500 shrink-0" />
               <span className="text-xs text-red-700 dark:text-red-300">
-                {i18nService.t('freeQuotaExhaustedBanner')}
+                {i18nService.t(isMobile ? 'quotaExhaustedBannerMobile' : 'freeQuotaExhaustedBanner')}
               </span>
-              {onRequestAppSettings && (
+              {isMobile ? (
+                // Mobile web (REQ-A-25): no Settings > Models surface — the
+                // recharge screen lives in the WS-E shell, which listens for
+                // this event (seam documented in services/isMobileRuntime.ts).
+                <button
+                  type="button"
+                  onClick={() => window.dispatchEvent(new CustomEvent('idbots:mobile-recharge'))}
+                  className="text-xs font-medium text-red-700 dark:text-red-300 underline hover:no-underline shrink-0"
+                >
+                  {i18nService.t('quotaExhaustedRechargeMobile')}
+                </button>
+              ) : onRequestAppSettings && (
                 <button
                   type="button"
                   onClick={() => onRequestAppSettings({ initialTab: 'model', notice: i18nService.t('freeQuotaExhaustedNotice') })}
@@ -4984,7 +5007,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         </div>
       )}
 
-      {isA2ASession && currentSession.status === 'error' && !freeQuotaExhausted && (
+      {isA2ASession && currentSession.status === 'error' && !quotaExhausted && (
         <div className="px-4 pb-2 shrink-0">
           <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
             <div className="flex items-start justify-between gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">

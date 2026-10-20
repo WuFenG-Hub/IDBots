@@ -150,6 +150,60 @@ interface TrafficRechargeOrderStatusInfo {
   creditedAt?: number;
 }
 
+/** C4 bundle plan; payAmount is a decimal string. */
+interface BundlePlanInfo {
+  planId: string;
+  name: string;
+  nameEn: string;
+  payCurrency: string;
+  payAmount: string;
+  trafficBytes: number;
+  llmQuota: number;
+  llmQuotaUnit: string;
+  status: number;
+  sort: number;
+  remark: string;
+}
+
+interface BundleOrderInfo {
+  orderId: string;
+  planId: string;
+  payAmount: string;
+  payCurrency: string;
+  trafficBytes: number;
+  llmQuota: number;
+  gatewayParams: { qrCode?: string; alipayOutTradeNo?: string } & Record<string, unknown>;
+  expiresAt: number;
+}
+
+/** status: 1=created, 2=paid, 3=credited, 4=closed. */
+interface BundleOrderStatusInfo {
+  orderId: string;
+  planId: string;
+  status: number;
+  payAmount: string;
+  payCurrency: string;
+  trafficBytes: number;
+  llmQuota: number;
+  paidAt?: number;
+  creditedAt?: number;
+}
+
+/** C4 identity-bound LLM quota; never carries an API key. */
+interface BundleLlmQuotaInfo {
+  quotaTotal: number;
+  quotaUsed: number;
+  quotaRemaining: number;
+  quotaFree: number;
+  quotaPurchased: number;
+  unit: string;
+}
+
+interface BundleMetersInfo {
+  traffic: TrafficAccountInfo | null;
+  llm: BundleLlmQuotaInfo;
+}
+
 /** Free-grant campaign state for the local traffic account. */
 interface TrafficFreeGrantCampaignStatusInfo {
   enabled: boolean;
@@ -1436,6 +1490,22 @@ interface IElectronAPI {
     redeemCode: (input: { code: string }) => Promise<{ success: boolean; result?: TrafficRedeemCodeInfo; error?: string; errorCode?: string }>;
     getSettings: () => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
     setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string; rechargeGateway?: string }) => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
+  };
+  gateway: {
+    fileSign: (input: { path: string; disposition?: 'inline' | 'attachment' }) => Promise<
+      | { url: string; expiresAt: number; size: number; mime: string }
+      | { success: false; error: string; code?: string; retryable?: boolean }
+    >;
+  };
+  mobile: {
+    listPendingPermissions: () => Promise<Array<{ sessionId: string; request: any; createdAt: number }> | { success: false; error: string }>;
+    getBootstrapStatus: () => Promise<Record<string, any> | { success: false; error: string }>;
+  };
+  bundle: {
+    getPlans: () => Promise<{ success: boolean; plans?: BundlePlanInfo[]; error?: string }>;
+    createOrder: (input: { planId: string; gateway?: string }) => Promise<{ success: boolean; order?: BundleOrderInfo; error?: string }>;
+    getOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: BundleOrderStatusInfo; error?: string }>;
+    getMeters: () => Promise<{ success: boolean; meters?: BundleMetersInfo; error?: string }>;
   };
   llmRelay: {
     bootstrap: () => Promise<{ success: boolean; result?: LlmRelayBootstrapInfo; error?: string }>;

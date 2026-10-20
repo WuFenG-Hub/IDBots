@@ -144,6 +144,17 @@ test('non-regression: 429 stays retryable', () => {
   assert.equal(classifyDreamError('LLM request failed: 429 rate limited, retry after 60s'), 'retryable');
 });
 
+test('REQ-A-25: both relay quota codes are terminal, not 429-retryable', () => {
+  // free_quota_exhausted (never had purchased quota) and the new C4
+  // quota_exhausted (purchased pool used up) must classify as the terminal
+  // quota class — the bare "code":"quota" pattern never matched either relay
+  // code, so the explicit code strings carry the mapping.
+  assert.equal(classifyDreamError('LLM request failed: 429 {"error":{"code":"free_quota_exhausted"}}'), 'terminal');
+  assert.equal(classifyDreamError('LLM request failed: 429 {"error":{"code":"quota_exhausted"}}'), 'terminal');
+  assert.equal(classifyDreamError('429: {"code":"free_quota_exhausted"}'), 'terminal');
+  assert.equal(classifyDreamError('429: {"code":"quota_exhausted"}'), 'terminal');
+});
+
 test('non-regression: 408 stays retryable', () => {
   assert.equal(classifyDreamError('LLM request failed: 408 upstream read timeout'), 'retryable');
 });
@@ -255,6 +266,7 @@ test('in-run transient retry: terminal and non-transport errors never qualify', 
   assert.equal(isTransientDreamLlmError('LLM request failed: 401 invalid api key'), false);
   assert.equal(isTransientDreamLlmError('LLM request failed: 403 forbidden'), false);
   assert.equal(isTransientDreamLlmError('LLM request failed: 429 free_quota_exhausted'), false, 'terminal quota class wins over the 429 gateway pattern');
+  assert.equal(isTransientDreamLlmError('LLM request failed: 429 quota_exhausted'), false, 'REQ-A-25: the new C4 purchased-pool code is terminal too');
   // 500s are often request-specific rejections misreported by relays — the
   // proxy makes the same call; the run-level backoff owns them.
   assert.equal(isTransientDreamLlmError('LLM request failed: 500 internal error'), false);
