@@ -297,9 +297,28 @@ test('relayIdentityMatchesLocalIdentity: unreported fields pass, disagreeing fie
   assert.equal(relayIdentityMatchesLocalIdentity({ identityAddress: ` ${IDENTITY_ADDRESS} ` }, local), true, 'whitespace tolerant');
   assert.equal(relayIdentityMatchesLocalIdentity({ identityAddress: '1SomeoneElse' }, local), false);
   assert.equal(relayIdentityMatchesLocalIdentity({ globalMetaId: 'idq1testidentity' }, local), true);
-  assert.equal(relayIdentityMatchesLocalIdentity({ globalMetaId: 'idq1other' }, local), false);
+  assert.equal(relayIdentityMatchesLocalIdentity({ globalMetaId: 'idq1other' }, local), false, 'globalMetaId decides only when no address is reported');
   assert.equal(relayIdentityMatchesLocalIdentity({ identityAddress: '1SomeoneElse' }, null), true, 'no local identity to compare against');
   assert.equal(relayIdentityMatchesLocalIdentity({ identityAddress: '1SomeoneElse' }, { mvc_address: '' }), true, 'blank local address');
+});
+
+test('relayIdentityMatchesLocalIdentity: a reported identityAddress is authoritative over globalMetaId', () => {
+  const local = { mvc_address: IDENTITY_ADDRESS, globalmetaid: 'idq1testidentity' };
+  assert.equal(
+    relayIdentityMatchesLocalIdentity({ identityAddress: IDENTITY_ADDRESS, globalMetaId: 'IDQ1-differently-encoded' }, local),
+    true,
+    'a backend globalMetaId representation that differs from the local derivation must not read as a foreign identity',
+  );
+  assert.equal(
+    relayIdentityMatchesLocalIdentity({ identityAddress: '1SomeoneElse', globalMetaId: 'idq1testidentity' }, local),
+    false,
+    'a matching globalMetaId cannot rescue a foreign address',
+  );
+  assert.equal(
+    relayIdentityMatchesLocalIdentity({ identityAddress: IDENTITY_ADDRESS, globalMetaId: 'idq1other' }, { mvc_address: '', globalmetaid: 'idq1testidentity' }),
+    false,
+    'without a local address the globalMetaId fallback still applies',
+  );
 });
 
 test('bootstrap accepts a response naming the signing identity and surfaces identityAddress', async () => {

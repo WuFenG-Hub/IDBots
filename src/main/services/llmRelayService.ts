@@ -20,11 +20,13 @@
  *   shape minus apiKey.
  * - Both responses may carry identityAddress/globalMetaId naming the identity
  *   that owns the account/key. When present, they are compared against the
- *   local user identity (relayIdentityMatchesLocalIdentity); a mismatch means
- *   the cached key belongs to a different identity and must be dropped — the
- *   backstop for any future "key vs identity" drift (the 2026-10 identity-split
- *   incident: an imported identity kept consuming the silently provisioned
- *   previous identity's quota because every cache still held its key).
+ *   local user identity (relayIdentityMatchesLocalIdentity; identityAddress
+ *   is authoritative, globalMetaId only fills in when no address is reported);
+ *   a mismatch means the cached key belongs to a different identity and must
+ *   be dropped — the backstop for any future "key vs identity" drift (the
+ *   2026-10 identity-split incident: an imported identity kept consuming the
+ *   silently provisioned previous identity's quota because every cache still
+ *   held its key).
  *
  * The service is Electron-free (store/identity/fetch are injected) so plain
  * node:test coverage works, mirroring trafficAccountService.
@@ -416,8 +418,14 @@ function normalizeQuotaPayload(data: Record<string, unknown>): Omit<LlmRelayBoot
 /**
  * Compare relay-reported identity fields against the local user identity.
  * Backends that do not report the fields yet (blank on either side) pass —
- * the guard is additive. Any non-blank reported field that disagrees with the
- * local identity means the relay key/account belongs to someone else.
+ * the guard is additive.
+ *
+ * identityAddress is authoritative: the backend echoes the exact
+ * X-Identity-Address string the account was bound with, so it compares
+ * byte-for-byte with user_identity.mvc_address. globalMetaId is consulted only
+ * when no address was reported — its encoding is produced independently on
+ * both sides, and a representation difference must never read as a foreign
+ * identity (that would re-issue the key on every quota read).
  */
 export function relayIdentityMatchesLocalIdentity(
   reported: { identityAddress?: unknown; globalMetaId?: unknown },
@@ -429,8 +437,8 @@ export function relayIdentityMatchesLocalIdentity(
   }
   const reportedAddress = normalizeText(reported.identityAddress);
   const localAddress = normalizeText(local.mvc_address);
-  if (reportedAddress && localAddress && reportedAddress !== localAddress) {
-    return false;
+  if (reportedAddress && localAddress) {
+    return reportedAddress === localAddress;
   }
   const reportedGlobal = normalizeText(reported.globalMetaId);
   const localGlobal = normalizeText(local.globalmetaid);
