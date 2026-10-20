@@ -94,6 +94,7 @@ import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
 import { getCompactFolderName } from '../../utils/path';
 import { buildCompactedNoticeText, extractCompactedCounts, formatCompactTokens } from './compactedNotice';
+import { isFreeQuotaErrorLive } from './quotaErrorBanner';
 import { isRenderableAvatarSource as isSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import { isRenderableAssistantOrSystemMessage } from '../../utils/coworkMessageVisibility';
 import {
@@ -137,8 +138,6 @@ interface CoworkSessionDetailProps {
 }
 
 const AUTO_SCROLL_THRESHOLD = 120;
-/** Machine error code of the free-quota relay, preserved in error text by the proxy. */
-const FREE_QUOTA_EXHAUSTED_CODE = 'free_quota_exhausted';
 const REFUND_STATUS_DISMISS_STORAGE_KEY = 'idbots.cowork.dismissedRefundStatusCards.v1';
 /** In-app markdown viewer sidebar: width fraction of the session area. */
 const MARKDOWN_VIEWER_WIDTH_STORAGE_KEY = 'idbots.cowork.markdownViewerWidth';
@@ -2898,20 +2897,13 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
     return ended;
   }, [currentSession?.messages]);
-  // The free-quota relay surfaces 429 + code free_quota_exhausted (annotated
-  // into the error text by the OpenAI-compat proxy). Detect it from persisted
-  // system error messages and guide the user to configure their own key.
-  const freeQuotaExhausted = useMemo(() => {
-    for (const message of currentSession?.messages ?? []) {
-      if (message.type !== 'system') continue;
-      const content = typeof message.content === 'string' ? message.content : '';
-      const metaError = typeof message.metadata?.error === 'string' ? message.metadata.error : '';
-      if (content.includes(FREE_QUOTA_EXHAUSTED_CODE) || metaError.includes(FREE_QUOTA_EXHAUSTED_CODE)) {
-        return true;
-      }
-    }
-    return false;
-  }, [currentSession?.messages]);
+  // Free-quota call-to-action banner: follows the LIVE error state (status
+  // 'error' + newest system error carries the quota code), never the whole
+  // transcript — see quotaErrorBanner.ts for why.
+  const freeQuotaExhausted = useMemo(
+    () => isFreeQuotaErrorLive(currentSession?.messages, currentSession?.status),
+    [currentSession?.messages, currentSession?.status],
+  );
   // Cause text for the A2A error banner: the newest system error message.
   // System bubbles are hidden in the A2A view, so without this the banner
   // says "something failed" without ever showing what.
