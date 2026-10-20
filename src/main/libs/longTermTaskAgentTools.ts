@@ -3,7 +3,9 @@ import type { LongTermTaskStore } from '../longTermTaskStore';
 import { WAIT_UNTIL_STRICT_ISO } from '../longTermTaskStore';
 import type {
   LongTermBoard,
+  LongTermEvent,
   LongTermParticipant,
+  LongTermSubtask,
   LongTermTaskDetail,
   LongTermTaskSummary,
 } from '../../renderer/types/longTermTask';
@@ -38,19 +40,84 @@ function textResult(text: string, isError = false) {
   };
 }
 
+/**
+ * Echoes are serialized compact (no indentation). The runtime's spill-policy
+ * caps a tool result at 2048 estimated tokens (chars / 4 ≈ 8.2K chars) and
+ * tears anything larger into head + `[...]` + tail text; a 9-sub-project detail
+ * pretty-printed with two-space indentation is ~10K chars, 23–30% of it
+ * whitespace. Compact serialization is the cheapest lever toward keeping the
+ * whole roster inline (see toAgentTaskDetailView for the rest).
+ */
 function jsonResult(value: unknown) {
-  return textResult(JSON.stringify(value, null, 2));
+  return textResult(JSON.stringify(value));
 }
 
 /**
- * Agent-facing projection of a task row. The store's `participants[]` carry
- * each bot's avatar as a base64 data URL (~75K chars per bot) for the board's
- * participant chips; the model has no use for those bytes, yet every create /
- * activate / get / list echo shipped them — 87% of a 9-sub-project result,
- * which is what pushed the runtime shaper into its proportional pass and tore
- * the identity fields (bug report 2026-10-20: id "lt", title "I"). The Twin's
- * channel drops the avatar here; the owner channel (IPC) keeps the full rows.
+ * Agent-facing projection of the store's rows.
+ *
+ * The store serves two channels from one shape. The owner channel (IPC, board
+ * UI) wants every column — participant avatars for the chips, `evidence: []`
+ * and `waitNote: ''` as stable table cells, the parent id on every nested row.
+ * The Twin's channel reads the echo as text under a 2048-estimated-token spill
+ * cap, where each of those costs context and none of them carries information
+ * the root does not already state:
+ *
+ *  - `participants[].avatar` is a base64 data URL (~75K chars per bot); every
+ *    create / activate / get / list echo shipped it — 87% of a 9-sub-project
+ *    result, which pushed the runtime shaper into tearing id and title (bug
+ *    report 2026-10-20). Dropped; { id, name } stays.
+ *  - null / '' / [] members are the same fact as an absent key for the model
+ *    and are ~23% of a pending sub-project row. Dropped recursively; `false`
+ *    and `0` are values (acceptanceDelegate, counts) and stay.
+ *  - nested rows repeat `taskId` (the echo's root id) and sub-project rows
+ *    carry createdAt / updatedAt the Twin never acts on. Dropped from nested
+ *    rows only; the root keeps its timestamps, events keep createdAt (a journal
+ *    entry's time is its meaning).
+ *  - the detail's journal is capped at 200 events for the UI. The echo puts the
+ *    root and the whole roster in first, then fills what is left of
+ *    AGENT_ECHO_CHAR_BUDGET with journal rows, newest first, and reports
+ *    `eventsOmitted` for the rest of what the detail held. A fixed row count
+ *    is not robust here: a `waiting` event carries the parked decision brief
+ *    (up to 2,000 chars), so the newest rows alone can outweigh the roster.
+ *    Each echoed `detail` keeps its first AGENT_EVENT_DETAIL_CAP chars — the
+ *    full brief lives in the current sub-project's waitNote, which the roster
+ *    carries whole.
+ *
+ * Measured through the compiled tools on a 9-sub-project task: 10,074 → 4,748
+ * chars fresh, 19,383 → 7,426 at 40 events, 58,625 → 7,457 at the 200-event
+ * cap, 7,526 with three 2K-char briefs newest — all under the cap with the full
+ * roster inline, where the raw detail was torn at 4–6 of 9 sub-projects.
+ * Twelve or more sub-projects with long descriptions can still exceed the cap;
+ * that result spills with the policy's notice (labeled, and the full text one
+ * `read` away) — the honest boundary of this projection.
  */
+/** ≈ 1,900 of the policy's 2,048 estimated tokens (chars / 4): headroom for
+ *  the marker a later shaping pass may add and for estimator drift. */
+const AGENT_ECHO_CHAR_BUDGET = 7600;
+const AGENT_EVENT_DETAIL_CAP = 240;
+
+function isEmptyMember(value: unknown): boolean {
+  return value === null || value === '' || (Array.isArray(value) && value.length === 0);
+}
+
+/**
+ * Same shape, minus every null / '' / [] member, recursively. Typed as T for
+ * the callers' convenience — they only serialize it — so a consumer reading a
+ * view programmatically must treat every nullable / list member as optional.
+ */
+function dropEmpty<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((item) => dropEmpty(item)) as unknown as T;
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, member] of Object.entries(value as Record<string, unknown>)) {
+      if (isEmptyMember(member)) continue;
+      out[key] = dropEmpty(member);
+    }
+    return out as T;
+  }
+  return value;
+}
+
 export type LongTermAgentParticipant = Omit<LongTermParticipant, 'avatar'>;
 export type LongTermAgentTaskView<T extends LongTermTaskSummary> = Omit<T, 'participants'> & {
   participants: LongTermAgentParticipant[];
@@ -58,13 +125,58 @@ export type LongTermAgentTaskView<T extends LongTermTaskSummary> = Omit<T, 'part
 
 export function toAgentTaskView<T extends LongTermTaskSummary>(task: T): LongTermAgentTaskView<T> {
   const { participants, ...rest } = task;
-  return {
+  return dropEmpty({
     ...rest,
     participants: participants.map(({ id, name }) => ({ id, name })),
+  });
+}
+
+/** Nested sub-project row: no parent id, no row timestamps, no empty members. */
+export function toAgentSubtaskRow(subtask: LongTermSubtask) {
+  const { taskId: _taskId, createdAt: _createdAt, updatedAt: _updatedAt, ...row } = subtask;
+  return dropEmpty(row);
+}
+
+/** Standalone sub-project echo (begin / wait / propose …): keeps taskId as the link back. */
+export function toAgentSubtaskView(subtask: LongTermSubtask) {
+  return dropEmpty(subtask);
+}
+
+function toAgentEventRow(event: LongTermEvent) {
+  const { taskId: _taskId, detail, ...row } = event;
+  const shownDetail = detail.length > AGENT_EVENT_DETAIL_CAP
+    ? `${detail.slice(0, AGENT_EVENT_DETAIL_CAP)}… (+${detail.length - AGENT_EVENT_DETAIL_CAP} chars)`
+    : detail;
+  return dropEmpty({ ...row, detail: shownDetail });
+}
+
+export function toAgentTaskDetailView(detail: LongTermTaskDetail) {
+  const { subtasks, events, ...summary } = detail;
+  const base = {
+    ...toAgentTaskView(summary),
+    subtasks: subtasks.map((subtask) => toAgentSubtaskRow(subtask)),
+  };
+  // Root + roster go in whole; journal rows (newest first, a contiguous prefix
+  // so the digest never has a gap) fill what is left. The frame allowance
+  // covers `"events":[…]`, the separators, and an `eventsOmitted` member.
+  const frameAllowance = 48;
+  let used = JSON.stringify(base).length + frameAllowance;
+  const shown: ReturnType<typeof toAgentEventRow>[] = [];
+  for (const event of events) {
+    const row = toAgentEventRow(event);
+    const cost = JSON.stringify(row).length + 1;
+    if (used + cost > AGENT_ECHO_CHAR_BUDGET) break;
+    shown.push(row);
+    used += cost;
+  }
+  return {
+    ...base,
+    events: shown,
+    ...(events.length > shown.length ? { eventsOmitted: events.length - shown.length } : {}),
   };
 }
 
-export function toAgentBoardView(board: LongTermBoard): Omit<LongTermBoard, 'cards'> & { cards: LongTermAgentTaskView<LongTermTaskSummary>[] } {
+export function toAgentBoardView(board: LongTermBoard) {
   return { ...board, cards: board.cards.map((card) => toAgentTaskView(card)) };
 }
 
@@ -93,7 +205,8 @@ export function describeActivationNextAction(detail: LongTermTaskDetail): string
 
 function withActivationNextAction(detail: LongTermTaskDetail) {
   const nextAction = describeActivationNextAction(detail);
-  return nextAction ? { ...toAgentTaskView(detail), nextAction } : toAgentTaskView(detail);
+  const view = toAgentTaskDetailView(detail);
+  return nextAction ? { ...view, nextAction } : view;
 }
 
 export interface LongTermTaskAgentControl {
@@ -139,7 +252,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
           'twin',
         );
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(toAgentTaskView(result.value));
+        return jsonResult(toAgentTaskDetailView(result.value));
       } catch (error) {
         return textResult(`Failed to create the long-term task: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -176,13 +289,13 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
 
   const getTask = tool(
     'longterm_task_get',
-    'Get one long-term task\'s full state brief: goal, stage, progress, the current sub-project with its acceptance criteria and evidence, all sub-projects, and the recent event journal (why it is where it is). Read-only. Call this before pushing any task forward so you never lose the thread across sessions.',
+    'Get one long-term task\'s full state brief: goal, stage, progress, the current sub-project with its acceptance criteria and evidence, all sub-projects, and the recent event journal (why it is where it is). Read-only. Call this before pushing any task forward so you never lose the thread across sessions. Echo shape: empty members (null / "" / []) are omitted — an absent waitNote, evidence or dependsOn means empty; sub-project and event rows omit the parent taskId; events are the newest rows that fit the echo (eventsOmitted counts the rest of the journal held by the detail), each detail cut at 240 chars — the full decision brief is in the sub-project\'s waitNote.',
     { taskId: z.string().min(1) },
     async (args: { taskId?: string }) => {
       try {
         const detail = store().getTask(String(args.taskId ?? ''));
         if (!detail) return textResult('Task not found.', true);
-        return jsonResult(toAgentTaskView(detail));
+        return jsonResult(toAgentTaskDetailView(detail));
       } catch (error) {
         return textResult(`Failed to read: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -206,7 +319,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
         if (args.action === 'pause') {
           const paused = store().pauseTask(taskId, 'twin', args.note ?? '');
           if (!paused.ok) return textResult(`Refused (${paused.code}): ${paused.error}`, true);
-          return jsonResult(toAgentTaskView(paused.value));
+          return jsonResult(toAgentTaskDetailView(paused.value));
         }
         if (args.action === 'resume') {
           const resumed = store().activateTask(taskId, 'twin');
@@ -223,7 +336,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
           'twin',
         );
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(toAgentTaskView(result.value));
+        return jsonResult(toAgentTaskDetailView(result.value));
       } catch (error) {
         return textResult(`Failed to update: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -246,7 +359,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
           { note: String(args.summary ?? ''), evidence: (args.evidence ?? []) as never[] },
         );
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(toAgentTaskView(result.value));
+        return jsonResult(toAgentTaskDetailView(result.value));
       } catch (error) {
         return textResult(`Failed to complete: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -270,7 +383,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       try {
         const result = store().addSubtask(String(args.taskId ?? ''), args as never, 'twin');
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentSubtaskView(result.value));
       } catch (error) {
         return textResult(`Failed to add: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -296,7 +409,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       try {
         const result = store().updateSubtask(args as never, 'twin');
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentSubtaskView(result.value));
       } catch (error) {
         return textResult(`Failed to update: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -314,7 +427,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       try {
         const result = store().beginSubtask(String(args.subtaskId ?? ''), 'twin', (args.channel as never) ?? null);
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentSubtaskView(result.value));
       } catch (error) {
         return textResult(`Failed to begin: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -345,7 +458,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
           'twin',
         );
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentSubtaskView(result.value));
       } catch (error) {
         return textResult(`Failed to wait: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -360,7 +473,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       try {
         const result = store().unblockSubtask(String(args.subtaskId ?? ''), 'twin', args.note ?? '');
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentSubtaskView(result.value));
       } catch (error) {
         return textResult(`Failed to unblock: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -383,7 +496,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
           'twin',
         );
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentSubtaskView(result.value));
       } catch (error) {
         return textResult(`Failed to propose: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -398,7 +511,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       try {
         const result = store().acceptSubtask(String(args.subtaskId ?? ''), 'twin', args.note ?? '');
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentSubtaskView(result.value));
       } catch (error) {
         return textResult(`Failed to accept: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -413,7 +526,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       try {
         const result = store().rejectSubtask(String(args.subtaskId ?? ''), 'twin', String(args.feedback ?? ''));
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentSubtaskView(result.value));
       } catch (error) {
         return textResult(`Failed to reject: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -431,7 +544,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       try {
         const result = store().skipSubtask(String(args.subtaskId ?? ''), 'twin', String(args.reason ?? ''));
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentSubtaskView(result.value));
       } catch (error) {
         return textResult(`Failed to skip: ${error instanceof Error ? error.message : String(error)}`, true);
       }
