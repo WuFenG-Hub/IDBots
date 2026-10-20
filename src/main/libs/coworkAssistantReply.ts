@@ -145,6 +145,31 @@ export function isQuotaDshTurnError(outcome: { kind?: string; error?: { code?: s
 }
 
 /**
+ * REQ-A-25: the relay answers an exhausted identity quota with HTTP 429 and
+ * one of two machine codes — free_quota_exhausted (identity never had
+ * purchased quota) and the new C4 quota_exhausted (purchased pool used up).
+ * Returns the matched code in lowercase, or null when the text carries
+ * neither. (quota_exhausted is a substring of free_quota_exhausted, so the
+ * alternation order pins the more specific code first.)
+ */
+export function extractRelayQuotaExhaustedCode(message: unknown): string | null {
+  const match = /(free_quota_exhausted|quota_exhausted)/i.exec(String(message ?? ''));
+  return match ? match[1].toLowerCase() : null;
+}
+
+/** Stable machine code stamped on the cowork stream error for a quota death. */
+export const LLM_QUOTA_EXHAUSTED_ERROR_CODE = 'LLM_QUOTA_EXHAUSTED';
+
+/**
+ * Metadata for the `cowork:stream:error` payload when the turn died on either
+ * relay quota code — undefined for every other failure so the stream error
+ * shape stays unchanged outside the quota case.
+ */
+export function relayQuotaErrorMetadata(message: unknown): { errorCode: string } | undefined {
+  return extractRelayQuotaExhaustedCode(message) ? { errorCode: LLM_QUOTA_EXHAUSTED_ERROR_CODE } : undefined;
+}
+
+/**
  * Upstream "credential rejected" fingerprints mirrored from provider error
  * bodies (OpenAI-compat relays, DeepSeek, aggregator gateways). ASCII upstream
  * fingerprints only — never natural-language intent. A bare `401` never

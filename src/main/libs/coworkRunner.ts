@@ -43,7 +43,7 @@ import { rewriteWin32McpStdioServer } from './win32StdioCommand';
 import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
-import { CONFIG_HARD_FALLBACK_RESUME_PROMPT, CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isAuthDshTurnError, isBodyLimitDshTurnError, isConfigModelMissingDshTurnError, isMalformedToolCallDshTurnError, isOverflowDshTurnError, isQuotaDshTurnError, isTransientDshTurnError, isWontHealDshTurnError, MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT, OVERFLOW_TURN_RESUME_PROMPT, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
+import { CONFIG_HARD_FALLBACK_RESUME_PROMPT, CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isAuthDshTurnError, isBodyLimitDshTurnError, isConfigModelMissingDshTurnError, isMalformedToolCallDshTurnError, isOverflowDshTurnError, isQuotaDshTurnError, isTransientDshTurnError, isWontHealDshTurnError, MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT, OVERFLOW_TURN_RESUME_PROMPT, relayQuotaErrorMetadata, extractRelayQuotaExhaustedCode, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
 import {
   filterSdkInternalDiagnostics,
   isSdkInternalDiagnostic,
@@ -1426,7 +1426,13 @@ export interface CoworkRunnerEvents {
   messageUpdate: (sessionId: string, messageId: string, content: string) => void;
   permissionRequest: (sessionId: string, request: PermissionRequest) => void;
   complete: (sessionId: string, claudeSessionId: string | null) => void;
-  error: (sessionId: string, error: string) => void;
+  /**
+   * Terminal session error. `metadata.errorCode` carries a stable machine
+   * code for known classes (REQ-A-25: 'LLM_QUOTA_EXHAUSTED' for relay
+   * free_quota_exhausted / quota_exhausted deaths) so clients need not parse
+   * the human-readable text.
+   */
+  error: (sessionId: string, error: string, metadata?: { errorCode?: string }) => void;
   steerSettled: (sessionId: string, submissionId: string) => void;
   steerFailed: (sessionId: string, submissionId: string, reason: string) => void;
   steerCancelled: (sessionId: string, submissionId: string, reason: string) => void;
@@ -10920,9 +10926,15 @@ export class CoworkRunner extends EventEmitter {
         // non-quota no-alternative death keeps the configuration wording. The
         // raw 429/limit body stays in the ERROR log line above either way.
         const quotaTerminalDeath = ladderNoTargetKind === 'no-alternative' && isQuotaDshTurnError(outcome);
+        // REQ-A-25: the relay signals an exhausted identity quota with TWO
+        // machine codes — free_quota_exhausted (never had purchased quota)
+        // and the new C4 quota_exhausted (purchased pool used up). Match
+        // both; the wording below stays free-relay specific only when the
+        // failing route is the built-in free provider.
+        const relayQuotaCode = extractRelayQuotaExhaustedCode(outcome.error?.message);
+        const relayQuotaExhausted = relayQuotaCode !== null;
         const freeRelayQuotaDeath = quotaTerminalDeath
-          && (isFreeQuotaProvider(lastAttemptRoute.provider)
-            || /free_quota_exhausted/i.test(String(outcome.error?.message ?? '')));
+          && (isFreeQuotaProvider(lastAttemptRoute.provider) || relayQuotaExhausted);
         const noModelConfiguredNotice = ladderNoTargetKind === 'no-alternative' && !quotaTerminalDeath
           ? ` ${tApp(
               `（未配置可用模型：会话绑定的模型已不可用，备用模型与当前默认降级链上没有任何有效目标——这是配置错误而非临时限流。请到 设置 > 模型 配置一个可用的默认模型，或为现有供应商充值。）`,
@@ -10931,14 +10943,15 @@ export class CoworkRunner extends EventEmitter {
           : '';
         // Free starter allowance exhausted: the actionable fix is the user's
         // own provider, not a top-up of a relay they cannot pay into. The
-        // notice carries the literal `free_quota_exhausted` code on purpose:
-        // the renderer's quota banner (CoworkSessionDetail) keys off it and
-        // offers the Settings > Model shortcut, so the message and the banner
-        // agree instead of contradicting each other.
+        // notice carries the literal upstream quota code on purpose (REQ-A-25:
+        // free_quota_exhausted or the new C4 quota_exhausted — whichever the
+        // relay returned): the renderer's quota banner (CoworkSessionDetail)
+        // keys off it and offers the Settings > Model shortcut, so the
+        // message and the banner agree instead of contradicting each other.
         const freeRelayQuotaNotice = freeRelayQuotaDeath
           ? ` ${tApp(
-              `（这不是配置错误：IDBots-Free 免费体验额度已用完。请到 设置 > 模型 添加一个自己的模型服务商 API Key 即可继续对话。错误代码：free_quota_exhausted。）`,
-              ` (This is not a configuration error: the IDBots-Free starter allowance is used up. Add your own model provider API key in Settings > Models to keep chatting. Error code: free_quota_exhausted.)`
+              `（这不是配置错误：IDBots-Free 免费体验额度已用完。请到 设置 > 模型 添加一个自己的模型服务商 API Key 即可继续对话。错误代码：${relayQuotaCode ?? 'free_quota_exhausted'}。）`,
+              ` (This is not a configuration error: the IDBots-Free starter allowance is used up. Add your own model provider API key in Settings > Models to keep chatting. Error code: ${relayQuotaCode ?? 'free_quota_exhausted'}.)`
             )}`
           : '';
         // Quota death is not retryable on the same route and the raw provider
@@ -11007,7 +11020,14 @@ export class CoworkRunner extends EventEmitter {
                     ))
               : `未配置可用模型（配置错误：绑定模型与备用/默认降级链均无效；最后错误码 ${outcome.error?.code ?? 'UNKNOWN'}）`)
           : failureDetail;
-        this.handleError(sessionId, `DSH turn failed: ${ladderSemantics}${quotaNotice}${noModelConfiguredNotice}${freeRelayQuotaNotice}${bodyLimitNotice}${overflowNotice}${authNotice}`);
+        this.handleError(
+          sessionId,
+          `DSH turn failed: ${ladderSemantics}${quotaNotice}${noModelConfiguredNotice}${freeRelayQuotaNotice}${bodyLimitNotice}${overflowNotice}${authNotice}`,
+          // REQ-A-25: stamp a stable machine code on the stream error for
+          // both relay quota codes so the desktop banner and the mobile
+          // recharge notice can key off it without parsing the text.
+          relayQuotaErrorMetadata(outcome.error?.message),
+        );
         // Route circuit breaker: count consecutive won't-heal settlements on
         // the current route identity; past the threshold the circuit opens
         // (entry check above) and further turns short-circuit until the probe.
@@ -15619,7 +15639,7 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
-  private handleError(sessionId: string, error: string): void {
+  private handleError(sessionId: string, error: string, metadata?: { errorCode?: string }): void {
     if (this.stoppedSessions.has(sessionId)) {
       return;
     }
@@ -15629,7 +15649,7 @@ export class CoworkRunner extends EventEmitter {
     const latest = this.store.getSessionMessagesPage?.(sessionId, { limit: 1 });
     const last = latest?.messages?.[latest.messages.length - 1];
     if (last?.type === 'system' && last.content === content) {
-      this.emit('error', sessionId, error);
+      this.emit('error', sessionId, error, metadata);
       return;
     }
     const message = this.store.addMessage(sessionId, {
@@ -15638,7 +15658,7 @@ export class CoworkRunner extends EventEmitter {
       metadata: { error },
     });
     this.emit('message', sessionId, message);
-    this.emit('error', sessionId, error);
+    this.emit('error', sessionId, error, metadata);
   }
 
   isSessionActive(sessionId: string): boolean {

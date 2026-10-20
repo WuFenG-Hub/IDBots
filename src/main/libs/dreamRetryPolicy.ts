@@ -38,6 +38,10 @@ const LLM_STATUS_PATTERN = /llm request failed:\s*(\d{3})/;
 
 // Deterministic provider rejections without a passthrough status (quota,
 // auth, parameter shape) — mirrors privateChatSkillTurnPolicy's list.
+// REQ-A-25: the relay's new C4 code quota_exhausted (purchased pool used up)
+// joins free_quota_exhausted; the bare "code":"quota" pattern never matched
+// either relay code (a JSON body carries "code":"quota_exhausted", not
+// "code":"quota"), so the explicit code strings are the matching pair.
 const TERMINAL_ERROR_PATTERNS = [
   'invalid_request_error',
   'invalid_api_key',
@@ -45,6 +49,7 @@ const TERMINAL_ERROR_PATTERNS = [
   'model_not_found',
   'unauthorized',
   'free_quota_exhausted',
+  'quota_exhausted',
   'insufficient_quota',
   '"code":"quota"',
   "'code':'quota'",

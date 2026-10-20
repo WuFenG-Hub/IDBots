@@ -57,6 +57,11 @@ docs/*
 !docs/tickets/
 !docs/tickets/**
 tests/*
+!tests/gatewayCore.test.mjs
+!tests/gatewayServer.test.mjs
+!tests/bundleService.test.mjs
+!tests/mobileChannels.test.mjs
+!tests/quotaExhaustedStreamError.test.mjs
 !tests/fixtures/
 !tests/agentGameConvergence.test.mjs
 !tests/fixtures/longTaskBoardSeed.mjs
