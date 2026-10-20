@@ -87,6 +87,11 @@ function makeBridgeFixtures(sessionId) {
     // orchestrator session-title resolution (title feature, 5122b709) reads
     // the app language to localize the `[Orchestrator]` prefix.
     getAppLanguage: () => 'en',
+    // The bridge stamps every orchestrator session with its auto origin
+    // (bad8b550); the fixture missed it, so all bridge-level tests died with
+    // `store.setSessionAutoOrigin is not a function` instead of exercising
+    // the watchdog/recovery flow they exist to cover.
+    setSessionAutoOrigin: () => {},
   };
   runner.startSession = async () => { /* session runs on its own; no auto-complete */ };
   return { runner, store, session, sessionPatches };
