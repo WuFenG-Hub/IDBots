@@ -78,14 +78,17 @@ async function main() {
 
     const extra = [1, 2, 3].map(() => new WebSocket(`${wsBase}/gateway/v1/ws`,
       { headers: { 'x-idbots-gateway-secret': secret } }));
-    const fourth = extra[2];
-    const closeCode = await new Promise((res) => {
-      fourth.onclose = (ev) => res(ev.code);
-      fourth.onerror = () => res(-1);
-      setTimeout(() => res(-2), 5000);
-    });
-    assert(closeCode === 4009, 'fourth concurrent socket closed with 4009', `got ${closeCode}`);
-    extra.slice(0, 2).forEach((s) => s.close());
+    // The server keeps 3 sockets and closes whichever upgrade arrives fourth —
+    // any one of the three extras may be the unlucky one.
+    const closed = await Promise.race([
+      Promise.any(extra.map((s) => new Promise((res) => {
+        s.onclose = (ev) => res(ev.code);
+        s.onerror = () => res(-1);
+      }))),
+      timeout(5000, '4009 close'),
+    ]).catch(() => -2);
+    assert(closed === 4009, 'fourth concurrent socket closed with 4009', `got ${closed}`);
+    extra.forEach((s) => { try { s.close(); } catch { /* already closed */ } });
     ws.close();
   })()]);
 
