@@ -4,6 +4,7 @@ const path = require('path');
 const { existsSync } = require('fs');
 const { spawnSync } = require('child_process');
 const { ensurePortableGit } = require('./setup-mingit.js');
+const { readMacAppVersion } = require('./verify-release-artifact-version.cjs');
 const { ensureFfmpeg } = require('./setup-ffmpeg.js');
 const {
   resolveFfmpegPlatformKey,
@@ -148,6 +149,25 @@ async function afterPack(context) {
 
     if (existsSync(appPath)) {
       applyMacIconFix(appPath);
+
+      // The packaged bundle must report the version this build is released as:
+      // clients compare their own bundle version against the update manifest, so
+      // an artifact reporting a different version makes every installation
+      // re-download the same package forever (2026-10-19: the v1.0.1 installer
+      // shipped an internal 1.0.0 while the tag, the file name and the manifest
+      // all said 1.0.1).
+      const expectedVersion = String(context.packager?.appInfo?.version ?? '').trim();
+      if (!expectedVersion) {
+        throw new Error('[electron-builder-hooks] packager appInfo exposes no version to verify against');
+      }
+      const actualVersion = readMacAppVersion(appPath);
+      if (actualVersion !== expectedVersion) {
+        throw new Error(
+          `[electron-builder-hooks] packaged app reports version ${actualVersion} but this build is ${expectedVersion}; `
+          + 'a published artifact must report its release version.',
+        );
+      }
+      console.log(`[electron-builder-hooks] Verified packaged app version: ${actualVersion}`);
     } else {
       console.warn(`[electron-builder-hooks] App not found at ${appPath}, skipping icon fix`);
     }
