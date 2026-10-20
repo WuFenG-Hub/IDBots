@@ -626,3 +626,4 @@ man_base_data_pebble/
 !tests/groupTaskSkillTurnMemoryReadOnly.test.mjs
 !tests/coworkAssistantModeSessionGate.test.ts
 !tests/coworkAssistantSessionGate.test.tsx
+!tests/coworkComposerImageAttachment.test.tsx
