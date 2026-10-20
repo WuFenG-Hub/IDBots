@@ -1,5 +1,5 @@
 import type { AppContext } from '../context.js';
-import { DockerError } from '../docker/client.js';
+import { DockerError, type CreateContainerOptions } from '../docker/client.js';
 import { decryptSecret, encryptSecret } from '../crypto.js';
 import { newGatewaySecret } from '../ids.js';
 import { sendAlert } from '../alerts.js';
@@ -11,6 +11,12 @@ import { sendAlert } from '../alerts.js';
  * stored encrypted BEFORE any Docker call; only the env passed to the
  * container ever sees the plaintext. Never throws — failures land in
  * tenants.last_error plus an operator alert.
+ *
+ * `buildContainerSpec` is shared with the upgrade/rotate flows, which
+ * recreate containers on the same volume with the same secret. Those pass
+ * `includeRedeemCode: false` — the Metaso redeem code is single-use and was
+ * already consumed on first boot, so re-passing
+ * IDBOTS_BOOTSTRAP_TRAFFIC_REDEEM_CODE would fail the tenant's redeem step.
  */
 
 const MIB = 1024 * 1024;
@@ -30,6 +36,77 @@ interface UserRow {
   id: string;
   display_name: string;
   locale: string;
+}
+
+export interface ContainerSpecInput {
+  tenantId: string;
+  user: Pick<UserRow, 'id' | 'display_name' | 'locale'>;
+  image: string;
+  gatewaySecret: string;
+  /** First boot only: attach the user's assigned Metaso redeem code. */
+  includeRedeemCode: boolean;
+}
+
+/** The full C1 container definition shared by provisioning and recreate flows. */
+export function buildContainerSpec(
+  app: Pick<AppContext, 'config' | 'db'>,
+  input: ContainerSpecInput,
+): CreateContainerOptions {
+  const env: Record<string, string> = {
+    IDBOTS_SERVER_MODE: '1',
+    IDBOTS_TENANT_ID: input.tenantId,
+    IDBOTS_GATEWAY_SECRET: input.gatewaySecret,
+    IDBOTS_GATEWAY_PORT: String(GATEWAY_PORT),
+    IDBOTS_GATEWAY_TIER: 'P1',
+    IDBOTS_USER_DATA_PATH: '/data/userdata',
+    IDBOTS_APP_DATA_PATH: '/data/appdata',
+    IDBOTS_WORKSPACE_PATH: '/data/workspace',
+    IDBOTS_BOOTSTRAP_DISPLAY_NAME: input.user.display_name || 'IDBots User',
+    IDBOTS_BOOTSTRAP_LOCALE: input.user.locale || 'zh',
+    TZ: 'Asia/Shanghai',
+  };
+
+  if (input.includeRedeemCode) {
+    const redeem = app.db
+      .prepare('SELECT code_enc FROM redeem_codes WHERE assigned_user_id = ?')
+      .get(input.user.id) as { code_enc: string } | undefined;
+    if (redeem) {
+      env.IDBOTS_BOOTSTRAP_TRAFFIC_REDEEM_CODE = decryptSecret(
+        app.config.masterKey,
+        redeem.code_enc,
+      );
+    }
+  }
+
+  for (const [key, value] of Object.entries(app.config.tenantEnv)) {
+    env[key] = value;
+  }
+
+  const memoryBytes = app.config.tenantMemoryMb * MIB;
+  return {
+    name: `idb-${input.tenantId}`,
+    image: input.image,
+    env,
+    labels: {
+      'org.idbots.tenant-id': input.tenantId,
+      'org.idbots.user-id': input.user.id,
+    },
+    exposedPorts: [`${GATEWAY_PORT}/tcp`],
+    hostConfig: {
+      Memory: memoryBytes,
+      MemorySwap: memoryBytes,
+      NanoCpus: app.config.tenantCpus * 1e9,
+      PidsLimit: 2048,
+      ShmSize: GIB,
+      CapDrop: ['ALL'],
+      SecurityOpt: ['no-new-privileges'],
+      RestartPolicy: { Name: 'unless-stopped' },
+      LogConfig: { Type: 'json-file', Config: { 'max-size': '20m', 'max-file': '5' } },
+      Binds: [`idb-${input.tenantId}-data:/data`],
+      NetworkMode: app.config.tenantNetwork,
+      Init: true,
+    },
+  };
 }
 
 function markFailed(app: AppContext, tenantId: string, message: string): void {
@@ -85,66 +162,23 @@ export async function provisionTenant(app: AppContext, tenantId: string): Promis
     log('info', 'volume already exists, reusing');
   }
 
-  const env: Record<string, string> = {
-    IDBOTS_SERVER_MODE: '1',
-    IDBOTS_TENANT_ID: tenantId,
-    IDBOTS_GATEWAY_SECRET: gatewaySecret,
-    IDBOTS_GATEWAY_PORT: String(GATEWAY_PORT),
-    IDBOTS_GATEWAY_TIER: 'P1',
-    IDBOTS_USER_DATA_PATH: '/data/userdata',
-    IDBOTS_APP_DATA_PATH: '/data/appdata',
-    IDBOTS_WORKSPACE_PATH: '/data/workspace',
-    IDBOTS_BOOTSTRAP_DISPLAY_NAME: user.display_name || 'IDBots User',
-    IDBOTS_BOOTSTRAP_LOCALE: user.locale || 'zh',
-    TZ: 'Asia/Shanghai',
-  };
-
-  const redeem = app.db
-    .prepare('SELECT code_enc FROM redeem_codes WHERE assigned_user_id = ?')
-    .get(user.id) as { code_enc: string } | undefined;
-  if (redeem) {
-    try {
-      env.IDBOTS_BOOTSTRAP_TRAFFIC_REDEEM_CODE = decryptSecret(app.config.masterKey, redeem.code_enc);
-    } catch (err) {
-      const message = `redeem code decrypt failed: ${err instanceof Error ? err.message : String(err)}`;
-      markFailed(app, tenantId, message);
-      await sendAlert(app.config, `tenant ${tenantId}: ${message}`);
-      return;
-    }
-  } else {
+  const spec = buildContainerSpec(app, {
+    tenantId,
+    user,
+    image: app.config.tenantImage,
+    gatewaySecret,
+    includeRedeemCode: true,
+  });
+  if (!spec.env?.IDBOTS_BOOTSTRAP_TRAFFIC_REDEEM_CODE) {
     log('warn', 'redeem pool empty for this tenant; provisioning without a code');
-    await sendAlert(app.config, `tenant ${tenantId}: redeem code pool empty, tenant provisioning without a code`);
-  }
-  for (const [key, value] of Object.entries(app.config.tenantEnv)) {
-    env[key] = value;
+    await sendAlert(
+      app.config,
+      `tenant ${tenantId}: redeem code pool empty, tenant provisioning without a code`,
+    );
   }
 
-  const memoryBytes = app.config.tenantMemoryMb * MIB;
   try {
-    const created = await app.docker.createContainer({
-      name: tenant.container_name,
-      image: app.config.tenantImage,
-      env,
-      labels: {
-        'org.idbots.tenant-id': tenantId,
-        'org.idbots.user-id': user.id,
-      },
-      exposedPorts: [`${GATEWAY_PORT}/tcp`],
-      hostConfig: {
-        Memory: memoryBytes,
-        MemorySwap: memoryBytes,
-        NanoCpus: app.config.tenantCpus * 1e9,
-        PidsLimit: 2048,
-        ShmSize: GIB,
-        CapDrop: ['ALL'],
-        SecurityOpt: ['no-new-privileges'],
-        RestartPolicy: { Name: 'unless-stopped' },
-        LogConfig: { Type: 'json-file', Config: { 'max-size': '20m', 'max-file': '5' } },
-        Binds: [`${tenant.volume_name}:/data`],
-        NetworkMode: app.config.tenantNetwork,
-        Init: true,
-      },
-    });
+    const created = await app.docker.createContainer(spec);
     await app.docker.startContainer(created.Id);
   } catch (err) {
     const message = `container create/start failed: ${err instanceof Error ? err.message : String(err)}`;

@@ -22,6 +22,8 @@
  */
 import http from 'node:http';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { WebSocketServer } from 'ws';
 
 const env = process.env;
@@ -257,4 +259,16 @@ if (EXIT_AFTER_MS !== null) {
 server.listen(PORT, '127.0.0.1', () => {
   const address = server.address();
   log('info', 'gateway', 'listening', { port: address.port });
+  // Test/export affordance: when the harness hands us a data dir, leave a
+  // small state file in it so the tenant-export archive has real content.
+  if (process.env.FAKE_TENANT_DATA_DIR) {
+    try {
+      fs.writeFileSync(
+        path.join(process.env.FAKE_TENANT_DATA_DIR, 'tenant-state.json'),
+        JSON.stringify({ tenantId: TENANT_ID, appVersion: APP_VERSION, contractVersion: CONTRACT_VERSION }),
+      );
+    } catch (err) {
+      log('warn', 'lifecycle', 'could not write tenant-state.json', { error: String(err) });
+    }
+  }
 });

@@ -142,7 +142,7 @@ export class DockerClient {
     throw new Error(`CP_DOCKER_URL must be http(s):// or http+unix://, got "${url}"`);
   }
 
-  private request(method: string, path: string, body?: string): Promise<DockerRequestResult> {
+  private requestBuffer(method: string, path: string, body?: string): Promise<{ status: number; body: Buffer }> {
     const { options } = this.transport.requestOptions(path);
     return new Promise((resolve, reject) => {
       const client = options.protocol === 'https:' ? https : http;
@@ -156,7 +156,7 @@ export class DockerClient {
           const chunks: Buffer[] = [];
           res.on('data', (chunk: Buffer) => chunks.push(chunk));
           res.on('end', () => {
-            resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') });
+            resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks) });
           });
         },
       );
@@ -183,6 +183,10 @@ export class DockerClient {
     return (result.body ? JSON.parse(result.body) : {}) as T;
   }
 
+  private request(method: string, path: string, body?: string): Promise<DockerRequestResult> {
+    return this.requestBuffer(method, path, body).then((r) => ({ status: r.status, body: r.body.toString('utf8') }));
+  }
+
   /** `GET /_ping` — true when the engine answers 200, false otherwise. */
   async ping(): Promise<boolean> {
     try {
@@ -199,6 +203,10 @@ export class DockerClient {
       Driver: 'local',
       Labels: labels ?? {},
     });
+  }
+
+  async removeVolume(name: string): Promise<void> {
+    await this.requestJson('DELETE', `${API_VERSION}/volumes/${encodeURIComponent(name)}`);
   }
 
   async createContainer(opts: CreateContainerOptions): Promise<ContainerCreateResult> {
@@ -269,6 +277,16 @@ export class DockerClient {
     const result = await this.request('GET', `${API_VERSION}/containers/${id}/logs?${params.toString()}`);
     if (result.status !== 200) {
       throw new DockerError(`logs ${id} failed with ${result.status}: ${result.body}`, result.status);
+    }
+    return result.body;
+  }
+
+  /** `GET /containers/{id}/archive?path=...` — a tar of the container path (tenant export). */
+  async containerArchive(id: string, containerPath: string): Promise<Buffer> {
+    const params = new URLSearchParams({ path: containerPath });
+    const result = await this.requestBuffer('GET', `${API_VERSION}/containers/${id}/archive?${params.toString()}`);
+    if (result.status !== 200) {
+      throw new DockerError(`archive ${id} failed with ${result.status}`, result.status);
     }
     return result.body;
   }

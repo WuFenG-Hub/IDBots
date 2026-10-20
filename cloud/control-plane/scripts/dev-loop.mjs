@@ -1,31 +1,35 @@
 #!/usr/bin/env node
 /**
- * Local dev loop (REQ-B-21): control plane + fake docker + fake tenant,
- * no Docker daemon required.
+ * Local dev loop (REQ-B-21) and T2 acceptance demo — no Docker daemon needed.
  *
- *   pnpm build && node scripts/dev-loop.mjs
+ *   node scripts/dev-loop.mjs          full scripted phone loop (T2 demo)
+ *   node scripts/dev-loop.mjs --quick  old health-check loop (fake docker,
+ *                                      control plane, one fake tenant, /health)
  *
- * Steps: start the fake docker engine, start the control plane against it,
- * create a fake tenant container through the docker client (what T2
- * provisioning will do), wait for the tenant to reach `ready`, print the
- * control plane's GET /health, then tear everything down. T2 extends the
- * `STEPS` list into the full register -> provision -> reconnect loop.
+ * Full loop: fake docker + control plane + admin CLI + a scripted phone:
+ * invite sign-up -> tenant ready -> disconnect -> reconnect without an
+ * invite -> control-plane restart with reconcile (ghost container reported,
+ * never deleted) -> the SAME tenant container still running. Any failed
+ * assertion exits non-zero. Step lines are printed for the delivery note.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import net from 'node:net';
+import http from 'node:http';
 import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
 import { startFakeDocker } from '../test/fake-docker/index.mjs';
 import { DockerClient, tenantBaseUrl } from '../dist/docker/client.js';
 
+const QUICK = process.argv.includes('--quick');
 const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const startedAt = Date.now();
 const elapsed = () => `+${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
 
-if (!existsSync(path.join(pkgRoot, 'dist', 'main.js'))) {
+if (!existsSync(path.join(pkgRoot, 'dist', 'main.js')) || !existsSync(path.join(pkgRoot, 'dist', 'cli.js'))) {
   console.error('[dev-loop] dist/ is missing — run `pnpm build` first.');
   process.exit(1);
 }
@@ -46,13 +50,14 @@ async function cleanup() {
 }
 
 let stepNo = 0;
+let stepTotal = 0;
 const STEPS = [];
 function step(name, fn) {
   STEPS.push({ name, fn });
 }
 function logStep(name, detail = '') {
   stepNo += 1;
-  console.log(`[dev-loop] ${String(stepNo).padStart(2, ' ')}/${STEPS.length} ${name}${detail ? ` — ${detail}` : ''} (${elapsed()})`);
+  console.log(`[dev-loop] ${String(stepNo).padStart(2, ' ')}/${stepTotal} ${name}${detail ? ` — ${detail}` : ''} (${elapsed()})`);
 }
 
 async function waitFor(fn, { timeoutMs = 10_000, intervalMs = 100, label }) {
@@ -60,15 +65,11 @@ async function waitFor(fn, { timeoutMs = 10_000, intervalMs = 100, label }) {
   for (;;) {
     try {
       const value = await fn();
-      if (value) {
-        return value;
-      }
+      if (value) return value;
     } catch {
       // retry
     }
-    if (Date.now() > deadline) {
-      throw new Error(`timeout waiting for: ${label}`);
-    }
+    if (Date.now() > deadline) throw new Error(`timeout waiting for: ${label}`);
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 }
@@ -84,75 +85,136 @@ function freePort() {
   });
 }
 
-const TENANT_ID = 't_devloop';
-const TENANT_SECRET = crypto.randomBytes(32).toString('base64url');
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(`assertion failed: ${message}`);
+  }
+}
 
-// --- step definitions -------------------------------------------------------
+// --- shared step context ----------------------------------------------------
+
+let fake;
+let client;
+let dbPath;
+let dbDir;
+let cpEnv;
+let cpBase;
+let cpChild;
+let cpLog = '';
+const PHONE = '+8613900000000';
+const TENANT_IMAGE_1 = 'tenant:1.0.0';
+
+function spawnControlPlane() {
+  return new Promise((resolve, reject) => {
+    cpLog = '';
+    cpChild = spawn(process.execPath, [path.join(pkgRoot, 'dist', 'main.js')], {
+      env: cpEnv,
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    cpChild.stdout.on('data', (chunk) => {
+      const text = chunk.toString('utf8');
+      cpLog += text;
+      process.stdout.write(`[cp] ${text}`);
+    });
+    cpChild.once('error', reject);
+    cpChild.once('spawn', () => resolve());
+  });
+}
+
+async function stopControlPlane() {
+  if (!cpChild || cpChild.exitCode !== null) return;
+  cpChild.kill('SIGTERM');
+  await new Promise((resolve) => cpChild.once('exit', resolve));
+}
+
+async function cpHealthOk() {
+  const res = await fetch(`${cpBase}/health`);
+  const body = await res.json();
+  return res.status === 200 && body.ok === true && body.docker === true;
+}
+
+async function runCli(...args) {
+  const res = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(pkgRoot, 'dist', 'cli.js'), ...args], {
+      env: cpEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => (stdout += chunk.toString('utf8')));
+    child.stderr.on('data', (chunk) => (stderr += chunk.toString('utf8')));
+    child.on('error', reject);
+    child.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }));
+  });
+  if (res.code !== 0) {
+    throw new Error(`cli "${args.join(' ')}" exited ${res.code}: ${res.stderr.trim()}`);
+  }
+  return res.stdout;
+}
+
+async function api(pathname, { method = 'GET', body, cookie } = {}) {
+  const headers = { Origin: new URL(cpBase).origin };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (cookie) headers['Cookie'] = cookie;
+  const res = await fetch(`${cpBase}${pathname}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const setCookie = res.headers.getSetCookie();
+  const json = res.status === 204 ? null : await res.json().catch(() => null);
+  return { status: res.status, json, setCookie };
+}
+
+// --- quick mode steps (REQ-B-21 smoke) ---------------------------------------
 
 step('start fake docker engine', async () => {
-  const fake = await startFakeDocker();
-  onCleanup(fake.close);
+  fake = await startFakeDocker();
+  client = new DockerClient(fake.url);
   console.log(`[dev-loop]   fake docker at ${fake.url}`);
   return fake;
 });
 
-let cpBase;
-let cpChild;
-
 step('start control plane against the fake docker', async (ctx) => {
-  const dbDir = mkdtempSync(path.join(tmpdir(), 'cp-devloop-'));
+  dbDir = mkdtempSync(path.join(tmpdir(), 'cp-devloop-'));
   onCleanup(() => rmSync(dbDir, { recursive: true, force: true }));
+  dbPath = path.join(dbDir, 'cp.sqlite');
   const publicPort = await freePort();
   const metricsPort = await freePort();
-  const env = {
+  cpEnv = {
     ...process.env,
-    CP_PUBLIC_ORIGIN: `http://localhost:${publicPort}`,
+    CP_PUBLIC_ORIGIN: `http://127.0.0.1:${publicPort}`,
     CP_LISTEN: `127.0.0.1:${publicPort}`,
     CP_METRICS_LISTEN: `127.0.0.1:${metricsPort}`,
-    CP_DB_PATH: path.join(dbDir, 'cp.sqlite'),
+    CP_DB_PATH: dbPath,
     CP_MASTER_KEY: crypto.randomBytes(32).toString('base64'),
     CP_DOCKER_URL: ctx[0].url,
     CP_TENANT_IMAGE: 'fake-tenant:devloop',
     CP_TENANT_NETWORK: 'idbots-devloop',
     CP_SMS_MODE: 'fake',
-    CP_FAKE_SMS_NUMBERS: '+8613900000000',
+    CP_FAKE_SMS_NUMBERS: PHONE,
   };
   cpBase = `http://127.0.0.1:${publicPort}`;
-  cpChild = spawn(process.execPath, [path.join(pkgRoot, 'dist', 'main.js')], { env, stdio: 'inherit' });
-  onCleanup(async () => {
-    if (cpChild.exitCode === null) {
-      cpChild.kill('SIGTERM');
-      await new Promise((resolve) => cpChild.once('exit', resolve));
-    }
-  });
-  await waitFor(async () => {
-    const res = await fetch(`${cpBase}/health`);
-    const body = await res.json();
-    return res.status === 200 && body.ok === true && body.docker === true;
-  }, { label: 'control plane /health ok with docker=true' });
-  console.log(`[dev-loop]   control plane at ${cpBase} (db ${env.CP_DB_PATH})`);
+  await spawnControlPlane();
+  onCleanup(stopControlPlane);
+  await waitFor(cpHealthOk, { label: 'control plane /health ok with docker=true' });
+  console.log(`[dev-loop]   control plane at ${cpBase} (db ${dbPath})`);
 });
 
-let client;
-
-step('seed image + create fake tenant container (T2 will call this provisioning)', async (ctx) => {
-  client = new DockerClient(ctx[0].url);
+step('seed image + create fake tenant container (what provisioning does in T2)', async (ctx) => {
   await fetch(`${ctx[0].url}/fake/images`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ref: 'fake-tenant:devloop',
-      labels: { 'org.idbots.version': '0.12.0', 'org.idbots.rollback-safe-to': '0.11.0' },
-    }),
+    body: JSON.stringify({ ref: 'fake-tenant:devloop', labels: { 'org.idbots.version': '0.12.0' } }),
   });
-  await client.createVolume(`idb-${TENANT_ID}-data`);
+  await client.createVolume('idb-t_devloop-data');
   const created = await client.createContainer({
-    name: `idb-${TENANT_ID}`,
+    name: 'idb-t_devloop',
     image: 'fake-tenant:devloop',
     env: {
       IDBOTS_SERVER_MODE: '1',
-      IDBOTS_TENANT_ID: TENANT_ID,
-      IDBOTS_GATEWAY_SECRET: TENANT_SECRET,
+      IDBOTS_TENANT_ID: 't_devloop',
+      IDBOTS_GATEWAY_SECRET: 'devloop-secret',
       FAKE_TENANT_HEALTH_AFTER_MS: '100',
       FAKE_TENANT_PHASES: 'migrating:150,bootstrapping:150,ready:0',
       FAKE_TENANT_APP_VERSION: '0.12.0',
@@ -161,34 +223,24 @@ step('seed image + create fake tenant container (T2 will call this provisioning)
   });
   await client.startContainer(created.Id);
   const inspect = await client.inspectContainer(created.Id);
-  console.log(
-    `[dev-loop]   container ${inspect.Name} running=${inspect.State.Running} ` +
-      `tenantUrl=${tenantBaseUrl(inspect)}`,
-  );
+  console.log(`[dev-loop]   container ${inspect.Name} running=${inspect.State.Running} tenantUrl=${tenantBaseUrl(inspect)}`);
 });
 
 step('wait for the fake tenant to become ready', async () => {
   const inspect = await waitFor(async () => {
-    const found = (await client.listContainers({ namePrefix: `idb-${TENANT_ID}` }))[0];
-    if (!found) {
-      return null;
-    }
+    const found = (await client.listContainers({ namePrefix: 'idb-t_devloop' }))[0];
+    if (!found) return null;
     const full = await client.inspectContainer(found.Id);
     return full.State.Running ? full : null;
   }, { label: 'fake tenant container running' });
-  const tenantUrl = tenantBaseUrl(inspect);
   const readyBody = await waitFor(async () => {
-    const res = await fetch(`${tenantUrl}/readyz`, {
-      headers: { 'X-IDBots-Gateway-Secret': TENANT_SECRET },
+    const res = await fetch(`${tenantBaseUrl(inspect)}/readyz`, {
+      headers: { 'X-IDBots-Gateway-Secret': 'devloop-secret' },
     });
-    if (res.status !== 200) {
-      return null;
-    }
-    return res.json();
+    return res.status === 200 ? res.json() : null;
   }, { timeoutMs: 15_000, label: 'tenant /readyz ready' });
   console.log(
-    `[dev-loop]   tenant ${TENANT_ID} ready=${readyBody.ready} phase=${readyBody.phase} ` +
-      `version=${readyBody.version} contract=${readyBody.contractVersion}`,
+    `[dev-loop]   tenant t_devloop ready=${readyBody.ready} phase=${readyBody.phase} version=${readyBody.version}`,
   );
 });
 
@@ -196,9 +248,171 @@ step('GET /health on the control plane', async () => {
   const res = await fetch(`${cpBase}/health`);
   const body = await res.json();
   console.log(`[dev-loop]   ${cpBase}/health -> ${res.status} ${JSON.stringify(body)}`);
-  if (res.status !== 200 || body.ok !== true) {
-    throw new Error(`control plane /health not ok: ${JSON.stringify(body)}`);
+  assert(res.status === 200 && body.ok === true, 'control plane /health not ok');
+});
+
+// --- full mode extra steps ---------------------------------------------------
+
+let alertSink;
+let inviteCode;
+let cookie;
+let userId;
+let containerIdBefore;
+
+step('start alert sink + seed versioned images', async () => {
+  const messages = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        messages.push(JSON.parse(Buffer.concat(chunks).toString('utf8')).content?.text ?? '');
+      } catch {
+        messages.push('<unparsable>');
+      }
+      res.writeHead(200);
+      res.end();
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  alertSink = { messages, close: () => new Promise((r) => server.close(r)) };
+  onCleanup(() => alertSink.close());
+  cpEnv.CP_ALERT_WEBHOOK = `http://127.0.0.1:${server.address().port}`;
+  for (const [ref, labels] of Object.entries({
+    [TENANT_IMAGE_1]: { 'org.idbots.version': '1.0.0', 'org.idbots.rollback-safe-to': '' },
+    'tenant:1.1.0': { 'org.idbots.version': '1.1.0', 'org.idbots.rollback-safe-to': '1.0.0' },
+  })) {
+    const res = await fetch(`${fake.url}/fake/images`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref, labels }),
+    });
+    assert(res.status === 201, `seed image ${ref}`);
   }
+  // Fast fake-tenant phases for the demo phone.
+  cpEnv.CP_TENANT_ENV_FAKE_TENANT_HEALTH_AFTER_MS = '80';
+  cpEnv.CP_TENANT_ENV_FAKE_TENANT_PHASES = 'migrating:150,bootstrapping:150,ready:0';
+  cpEnv.CP_TENANT_IMAGE = TENANT_IMAGE_1;
+  console.log(`[dev-loop]   images seeded (${TENANT_IMAGE_1}, tenant:1.1.0), alert sink at ${cpEnv.CP_ALERT_WEBHOOK}`);
+});
+
+step('CLI: import one redeem code, create a with-redeem invite', async () => {
+  const csv = path.join(dbDir, 'codes.csv');
+  writeFileSync(csv, 'LOOP-REDEEM-0001\n');
+  const importOut = await runCli('redeem', 'import', '--file', csv, '--note', 'devloop', '--as', 'loop');
+  console.log(`[dev-loop]   redeem import -> ${importOut.trim()}`);
+  const inviteOut = await runCli('invite', 'create', '--uses', '1', '--with-redeem', '--note', 'devloop', '--as', 'loop');
+  inviteCode = /code:\s*(\S+)/.exec(inviteOut)?.[1];
+  assert(inviteCode, 'invite code captured from CLI output');
+  console.log(`[dev-loop]   invite created: ${inviteCode.slice(0, 2)}… (masked)`);
+});
+
+step('phone: sms/send + verify with the invite -> provisioning', async () => {
+  const send = await api('/api/v1/auth/sms/send', { method: 'POST', body: { phone: PHONE, purpose: 'login' } });
+  assert(send.status === 200, `sms/send -> ${send.status}`);
+  const verify = await api('/api/v1/auth/sms/verify', {
+    method: 'POST',
+    body: { phone: PHONE, code: '246810', inviteCode, displayName: 'Loop Demo' },
+  });
+  assert(verify.status === 200, `sms/verify -> ${verify.status} ${JSON.stringify(verify.json)}`);
+  userId = verify.json.user.id;
+  cookie = verify.setCookie.find((entry) => entry.startsWith('idb_session='))?.split(';')[0];
+  assert(cookie, 'session cookie captured');
+  console.log(
+    `[dev-loop]   verify 200, user ${verify.json.user.phoneMasked}, tenant status ${verify.json.tenant.status}`,
+  );
+});
+
+step('phone: poll /api/v1/me until the tenant is ready', async () => {
+  const seen = [];
+  await waitFor(
+    async () => {
+      const me = await api('/api/v1/me', { cookie });
+      if (me.status !== 200) return null;
+      const status = me.json?.tenant?.status;
+      if (seen[seen.length - 1] !== status) {
+        seen.push(status);
+        console.log(`[dev-loop]   /me tenant status: ${status}`);
+      }
+      return status === 'ready' ? true : null;
+    },
+    { timeoutMs: 30_000, intervalMs: 1000, label: 'tenant ready via /me' },
+  );
+  const stats = await runCli('redeem', 'stats');
+  console.log(`[dev-loop]   redeem stats -> ${stats.trim()}`);
+  assert(/imported=1 assigned=1 remaining=0/.test(stats), 'redeem code assigned exactly once');
+});
+
+step('phone: disconnect (drop the cookie)', async () => {
+  cookie = null;
+  console.log('[dev-loop]   cookie jar dropped');
+});
+
+step('phone: reconnect with the SAME phone and NO invite', async () => {
+  // Demo time-travel: the C3 resend window is 60 s; simulating "a minute
+  // later" by clearing this phone's sms window in the db (a real user would
+  // simply wait).
+  const db = new Database(dbPath);
+  db.prepare('DELETE FROM sms_codes WHERE phone_e164 = ?').run(PHONE);
+  db.close();
+  const send = await api('/api/v1/auth/sms/send', { method: 'POST', body: { phone: PHONE, purpose: 'login' } });
+  assert(send.status === 200, `reconnect sms/send -> ${send.status}`);
+  const verify = await api('/api/v1/auth/sms/verify', {
+    method: 'POST',
+    body: { phone: PHONE, code: '246810' },
+  });
+  assert(verify.status === 200, `reconnect sms/verify -> ${verify.status}`);
+  assert(verify.json.user.id === userId, 'same user id after reconnect');
+  assert(verify.json.tenant.status === 'ready', 'tenant ready after reconnect');
+  cookie = verify.setCookie.find((entry) => entry.startsWith('idb_session='))?.split(';')[0];
+  const invites = await runCli('invite', 'list');
+  assert(/uses 1\/1/.test(invites), 'invite still shows exactly one use');
+  console.log(`[dev-loop]   same user ${userId}, same tenant, invite still 1/1`);
+});
+
+step('create a ghost container, then restart the control plane', async () => {
+  const ghost = await client.createContainer({
+    name: 'idb-t_ghost1',
+    image: 'fake-tenant:devloop',
+    env: {
+      IDBOTS_TENANT_ID: 't_ghost1',
+      IDBOTS_GATEWAY_SECRET: 'ghost-secret',
+      FAKE_TENANT_HEALTH_AFTER_MS: '0',
+      FAKE_TENANT_PHASES: 'ready:0',
+    },
+  });
+  await client.startContainer(ghost.Id);
+  const mine = (await client.listContainers({ namePrefix: 'idb-t_' })).filter((c) => c.Names[0] === '/idb-t_devloop');
+  containerIdBefore = mine[0].Id;
+  console.log(`[dev-loop]   ghost idb-t_ghost1 running; tenant container ${containerIdBefore.slice(0, 12)}…`);
+
+  await stopControlPlane();
+  await spawnControlPlane();
+  await waitFor(cpHealthOk, { label: 'control plane healthy after restart' });
+
+  assert(
+    cpLog.includes('unknown container reported, not deleted') && cpLog.includes('idb-t_ghost1'),
+    'reconcile reported the unknown container',
+  );
+  assert(
+    alertSink.messages.some((m) => m.includes('unknown container idb-t_ghost1')),
+    'unknown-container alert delivered',
+  );
+  const ghostAfter = await client.inspectContainer(ghost.Id);
+  assert(ghostAfter.State.Running, 'ghost container left running (never deleted)');
+  console.log('[dev-loop]   reconcile: "unknown container idb-t_ghost1 reported"; ghost still running');
+});
+
+step('after restart: session and tenant intact, container NOT recreated', async () => {
+  const me = await api('/api/v1/me', { cookie });
+  assert(me.status === 200, `/me after restart -> ${me.status}`);
+  assert(me.json.user.id === userId, 'same user after CP restart');
+  assert(me.json.tenant.status === 'ready', 'tenant still ready after CP restart');
+  const mine = (await client.listContainers({ namePrefix: 'idb-t_' })).filter((c) => c.Names[0] === '/idb-t_devloop');
+  assert(mine[0].Id === containerIdBefore, 'tenant container not recreated');
+  console.log(
+    `[dev-loop]   /me 200 (user ${me.json.user.phoneMasked}, tenant ready); container ${mine[0].Id.slice(0, 12)}… unchanged`,
+  );
 });
 
 // --- runner -----------------------------------------------------------------
@@ -206,14 +420,16 @@ step('GET /health on the control plane', async () => {
 let failed = false;
 const ctx = [];
 try {
-  for (const { name, fn } of STEPS) {
+  const selected = QUICK ? STEPS.slice(0, 5) : STEPS;
+  stepTotal = selected.length;
+  for (const { name, fn } of selected) {
     logStep(name);
     const out = await fn(ctx);
     if (out !== undefined) {
       ctx.push(out);
     }
   }
-  console.log(`[dev-loop] OK — local loop complete (${elapsed()})`);
+  console.log(`[dev-loop] OK — ${QUICK ? 'quick loop' : 'full phone loop'} complete (${elapsed()})`);
 } catch (err) {
   failed = true;
   console.error(`[dev-loop] FAILED: ${err.message}`);

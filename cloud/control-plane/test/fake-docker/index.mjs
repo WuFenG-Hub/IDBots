@@ -1,14 +1,22 @@
 #!/usr/bin/env node
 /**
  * Fake Docker Engine API (REQ-B-21 harness): an in-process node:http server
- * emulating the subset of the Docker API the control plane's docker client
- * uses, with containers backed by child processes running fake-tenant.mjs.
- * No Docker daemon required — this is what the local dev loop and the
+ * emulating the subset of the Docker API the control plane uses, with
+ * containers backed by child processes running fake-tenant.mjs. No Docker
+ * daemon required — this is what the local dev loop and the
  * integration tests run against.
+ *
+ * Extra test affordances beyond the real engine:
+ * - `imageEnv`: per-image env merged into the child at start, WINNING over
+ *   the container's own env — lets a test mark one image ref as "broken"
+ *   (e.g. never healthy) without touching provisioning code.
+ * - Each container gets a private data dir (FAKE_TENANT_DATA_DIR) that the
+ *   fake tenant populates; `GET .../archive?path=/data` tars it (the tenant
+ *   export path).
  *
  * Usage from tests:
  *   import { FakeDocker } from '../test/fake-docker/index.mjs';
- *   const docker = new FakeDocker();
+ *   const docker = new FakeDocker({ imageEnv: { 'img:bad': { FAKE_TENANT_HEALTH_AFTER_MS: '60000' } } });
  *   await docker.listen(0);
  *   docker.url();            // http://127.0.0.1:<port>
  *   docker.volumes / docker.containers / docker.images  // live state
@@ -19,6 +27,8 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -47,6 +57,47 @@ function iso(ms) {
   return ms === null || ms === undefined ? ZERO_TIME : new Date(ms).toISOString();
 }
 
+/** Minimal ustar encoder for the archive endpoint (flat file list). */
+function tarEncode(files) {
+  const chunks = [];
+  for (const file of files) {
+    const data = Buffer.isBuffer(file.data) ? file.data : Buffer.from(file.data, 'utf8');
+    const header = Buffer.alloc(512);
+    header.write(file.name.slice(0, 100), 0, 'utf8');
+    header.write('0000644\0', 100, 'utf8'); // mode
+    header.write('0000000\0', 108, 'utf8'); // uid
+    header.write('0000000\0', 116, 'utf8'); // gid
+    header.write(data.length.toString(8).padStart(11, '0') + '\0', 124, 'utf8'); // size
+    header.write(Math.floor(Date.now() / 1000).toString(8).padStart(11, '0') + '\0', 136, 'utf8'); // mtime
+    header.fill(' ', 148, 156); // checksum field as spaces while summing
+    header.write('0', 156, 'utf8'); // regular file
+    header.write('ustar\0', 257, 'utf8');
+    header.write('00', 263, 'utf8');
+    let sum = 0;
+    for (const byte of header) sum += byte;
+    header.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 'utf8');
+    chunks.push(header, data);
+    const pad = (512 - (data.length % 512)) % 512;
+    if (pad > 0) chunks.push(Buffer.alloc(pad));
+  }
+  chunks.push(Buffer.alloc(1024)); // end blocks
+  return Buffer.concat(chunks);
+}
+
+function collectFiles(rootDir, prefix = '') {
+  const out = [];
+  for (const entry of fs.readdirSync(rootDir, { withFileTypes: true })) {
+    const full = path.join(rootDir, entry.name);
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      out.push(...collectFiles(full, rel));
+    } else if (entry.isFile()) {
+      out.push({ name: rel, data: fs.readFileSync(full) });
+    }
+  }
+  return out;
+}
+
 export class FakeDocker {
   /** @type {Map<string, object>} id -> container record */
   containers = new Map();
@@ -60,10 +111,12 @@ export class FakeDocker {
   #host = '127.0.0.1';
   #tenantScript;
   #baseEnv;
+  #imageEnv;
 
-  constructor({ tenantScript = TENANT_SCRIPT, env = {} } = {}) {
+  constructor({ tenantScript = TENANT_SCRIPT, env = {}, imageEnv = {} } = {}) {
     this.#tenantScript = tenantScript;
     this.#baseEnv = env;
+    this.#imageEnv = imageEnv;
   }
 
   async listen(port = 0, host = '127.0.0.1') {
@@ -86,6 +139,7 @@ export class FakeDocker {
   async close() {
     for (const c of this.containers.values()) {
       this.#killChild(c);
+      this.#removeDataDir(c);
     }
     if (this.#server) {
       await new Promise((resolve) => this.#server.close(resolve));
@@ -98,6 +152,13 @@ export class FakeDocker {
       c.child.kill('SIGKILL');
     }
     c.child = null;
+  }
+
+  #removeDataDir(c) {
+    if (c.dataDir) {
+      fs.rmSync(c.dataDir, { recursive: true, force: true });
+      c.dataDir = null;
+    }
   }
 
   async #route(req, res) {
@@ -124,6 +185,21 @@ export class FakeDocker {
       });
       sendJson(res, 201, { Name: body.Name, Driver: 'local', Labels: body.Labels ?? {} });
       return;
+    }
+
+    {
+      const match = /^\/v1\.43\/volumes\/([^/]+)$/.exec(pathname);
+      if (method === 'DELETE' && match) {
+        const name = decodeURIComponent(match[1]);
+        if (!this.volumes.has(name)) {
+          sendJson(res, 404, { message: `volume ${name} not found` });
+          return;
+        }
+        this.volumes.delete(name);
+        res.writeHead(204);
+        res.end();
+        return;
+      }
     }
 
     let match = /^\/v1\.43\/containers\/create$/.exec(pathname);
@@ -160,6 +236,7 @@ export class FakeDocker {
         child: null,
         hostPort: null,
         logBuffer: [],
+        dataDir: null,
       });
       sendJson(res, 201, { Id: id, Warnings: [] });
       return;
@@ -202,6 +279,19 @@ export class FakeDocker {
       return;
     }
 
+    match = /^\/v1\.43\/containers\/([^/]+)\/archive$/.exec(pathname);
+    if (method === 'GET' && match) {
+      const c = this.containers.get(match[1]);
+      if (!c) {
+        sendJson(res, 404, { message: 'no such container' });
+        return;
+      }
+      const files = c.dataDir && fs.existsSync(c.dataDir) ? collectFiles(c.dataDir) : [];
+      res.writeHead(200, { 'Content-Type': 'application/x-tar' });
+      res.end(tarEncode(files));
+      return;
+    }
+
     match = /^\/v1\.43\/containers\/([^/]+)$/.exec(pathname);
     if (method === 'DELETE' && match) {
       const c = this.containers.get(match[1]);
@@ -216,6 +306,7 @@ export class FakeDocker {
         }
         this.#killChild(c);
       }
+      this.#removeDataDir(c);
       this.containers.delete(c.id);
       res.writeHead(204);
       res.end();
@@ -344,7 +435,15 @@ export class FakeDocker {
   }
 
   async #startChild(c) {
-    const env = { ...process.env, ...this.#baseEnv, ...c.env };
+    c.dataDir = fs.mkdtempSync(path.join(os.tmpdir(), `fake-docker-${c.name}-`));
+    // Per-image env wins over the container's own env (test affordance).
+    const env = {
+      ...process.env,
+      ...this.#baseEnv,
+      ...c.env,
+      ...(this.#imageEnv[c.image] ?? {}),
+      FAKE_TENANT_DATA_DIR: c.dataDir,
+    };
     delete env.IDBOTS_GATEWAY_PORT;
     env.IDBOTS_GATEWAY_PORT = '0';
 

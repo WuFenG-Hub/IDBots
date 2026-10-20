@@ -9,7 +9,15 @@ import { FakeDocker } from './index.mjs';
 const portFlag = process.argv.indexOf('--port');
 const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : 0;
 
-const docker = new FakeDocker();
+let imageEnv = {};
+try {
+  imageEnv = JSON.parse(process.env.FAKE_DOCKER_IMAGE_ENV ?? '{}');
+} catch (err) {
+  console.error(`invalid FAKE_DOCKER_IMAGE_ENV: ${err.message}`);
+  process.exit(2);
+}
+
+const docker = new FakeDocker({ imageEnv });
 try {
   const seed = JSON.parse(process.env.FAKE_DOCKER_SEED_IMAGES ?? '{}');
   for (const [ref, labels] of Object.entries(seed)) {
