@@ -93,10 +93,11 @@ test('runner: the ack bubble is dropped once the turn delivered visible text or 
   assert.ok(body.includes('generateTurnAckReply(userPrompt, sessionTitle)'),
     'the reply rides the one-shot cognitive path with session-title context');
 
-  // The gate flag is armed by real visible text in the DSH onMessage path.
-  const onMessageSite = source.indexOf('closes the turn\'s acknowledgment');
+  // The gate flag is armed by a visible text bubble opening in the DSH
+  // onMessage path (anchor on the assignment, not the comment above it).
+  const onMessageSite = source.indexOf('activeSession.dshTurnAckVisibleTextSeen = true');
   assert.ok(onMessageSite > 0, 'the onMessage callback arms the visible-text gate');
-  const gateSnippet = source.slice(onMessageSite - 100, onMessageSite + 600);
+  const gateSnippet = source.slice(onMessageSite - 700, onMessageSite + 100);
   assert.ok(gateSnippet.includes("type === 'assistant'"));
   assert.ok(gateSnippet.includes('isThinking'));
 });

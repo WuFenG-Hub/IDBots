@@ -1342,3 +1342,207 @@ test('assistant mode: accumulated narration bubbles are never rewritten by later
   assert.ok(reply, 'the final answer is its own message')
   assert.equal(reply.metadata.narration, undefined)
 })
+
+// ---- Post-reasoning hold window: the final answer streams ----------------
+// After the step's reasoning block CLOSES (block-end), body text under
+// POST_REASONING_TEXT_HOLD_UNITS stays held (commentary folds silently, no
+// flash); past the window the answer takes over — the bubble opens and
+// streams instead of materializing whole at assistant/message. A tool call
+// landing after the bet folds the streamed bubble back into the Think row.
+
+const openReasoningThenClose = (mapper, reasoning) => {
+  mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } } })
+  mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'reasoning-delta', index: 0, text: reasoning } } })
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: reasoning } } },
+  })
+}
+
+test('DeepSeek: text under the hold window after block-end stays held and folds silently', () => {
+  const mapper = new DshEventMapper()
+  openReasoningThenClose(mapper, 'need the db schema')
+  const held = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 1, text: '先查一下库里的表结构。' } },
+  })
+  assert.equal(held.some((a) => a.slot === 'text'), false, 'commentary-sized text opens no bubble')
+
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'need the db schema' },
+          { type: 'text', text: '先查一下库里的表结构。' },
+          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+        ],
+      },
+    },
+  })
+  assert.equal(done.some((a) => a.slot === 'text'), false, 'silent fold — no visible bubble ever opened')
+  const thinkFinal = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.match(thinkFinal.content, /need the db schema/)
+  assert.match(thinkFinal.content, /先查一下库里的表结构。/)
+})
+
+test('DeepSeek: answer text past the hold window opens the bubble and streams', () => {
+  const mapper = new DshEventMapper()
+  openReasoningThenClose(mapper, 'ready to answer')
+  const answer = `先说结论：任务来源已查清。${'逐项说明核对过程。'.repeat(40)}`
+  assert.ok(answer.length >= 160, 'fixture must exceed the hold window')
+
+  const opened = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 1, text: answer } },
+  })
+  assert.deepEqual(kinds(opened), ['message', 'messageUpdate'], 'the bubble opens and streams')
+  assert.equal(opened[0].slot, 'text')
+
+  const more = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 1, text: '（完）' } },
+  })
+  assert.deepEqual(kinds(more), ['messageUpdate'])
+  assert.equal(more[0].content, `${answer}（完）`, 'updates carry the accumulated stream')
+
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'ready to answer' },
+          { type: 'text', text: `${answer}（完）` },
+        ],
+      },
+    },
+  })
+  const textFinal = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(textFinal.content, `${answer}（完）`)
+  assert.equal(textFinal.metadata, undefined, 'the streamed bubble settles as the visible reply')
+})
+
+test('DeepSeek: a tool call after the streamed window folds the bubble into the Think row and retracts it', () => {
+  const mapper = new DshEventMapper()
+  openReasoningThenClose(mapper, 'plan: verify the task list')
+  const longCommentary = `让我再核对一遍任务清单。${'逐条检查启用状态。'.repeat(40)}`
+  const opened = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 1, text: longCommentary } },
+  })
+  assert.equal(opened.some((a) => a.slot === 'text'), true, 'past the window the text streamed')
+
+  const folded = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 2, blockType: 'tool-call' } },
+  })
+  const thinkUpdate = folded.find((a) => a.kind === 'messageUpdate' && a.slot === 'thinking')
+  assert.match(thinkUpdate.content, /plan: verify the task list/)
+  assert.match(thinkUpdate.content, /逐条检查启用状态。/, 'the streamed text joins the Think row')
+  const retract = folded.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(retract.content, '', 'the wrong-bet bubble retracts')
+
+  const tail = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 1, text: '继续核对。' } },
+  })
+  assert.equal(tail.some((a) => a.slot === 'text'), false, 'later deltas bypass the retracted bubble')
+  const tailUpdate = tail.find((a) => a.kind === 'messageUpdate' && a.slot === 'thinking')
+  assert.match(tailUpdate.content, /继续核对。/, 'later deltas stream into the Think row')
+
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'plan: verify the task list' },
+          { type: 'text', text: `${longCommentary}继续核对。` },
+          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+        ],
+      },
+    },
+  })
+  const thinkFinal = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.match(thinkFinal.content, /plan: verify the task list/)
+  assert.match(thinkFinal.content, /继续核对。/, 'the settle keeps the authoritative combined Think row')
+  assert.equal(done.some((a) => a.kind === 'messageFinalize' && a.slot === 'text'), false)
+})
+
+test('assistant mode: a tool call after the streamed window tags the bubble narration instead of folding', () => {
+  const mapper = new DshEventMapper({ assistantMode: () => true })
+  openReasoningThenClose(mapper, 'narration route')
+  const longText = `我来处理这个排查请求。${'先从任务来源开始逐层说明。'.repeat(40)}`
+  const opened = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 1, text: longText } },
+  })
+  assert.equal(opened.some((a) => a.slot === 'text'), true)
+
+  const atTool = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 2, blockType: 'tool-call' } },
+  })
+  assert.deepEqual(atTool, [], 'assistant mode never folds or retracts — the mark settles later')
+
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'narration route' },
+          { type: 'text', text: longText },
+          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+        ],
+      },
+    },
+  })
+  const settled = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(settled.content, longText, 'the streamed buffer settles verbatim (immutability contract)')
+  assert.equal(settled.metadata.narration, true)
+})
+
+test('DeepSeek: turn aborted while folded settles the Think row with the absorbed text', () => {
+  const mapper = new DshEventMapper()
+  openReasoningThenClose(mapper, 'interrupted plan')
+  const longText = `正在核对任务清单。${'逐条检查。'.repeat(60)}`
+  mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 1, text: longText } } })
+  const folded = mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'block-start', index: 2, blockType: 'tool-call' } } })
+  const retracted = folded.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(retracted.content, '', 'the bubble retracted at fold time')
+  const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', cause: 'user' } } })
+  const thinkFinal = ended.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.match(thinkFinal.content, /interrupted plan/)
+  assert.match(thinkFinal.content, /逐条检查。/)
+})
+
+test('DeepSeek: hold state resets between steps — the next round holds afresh', () => {
+  const mapper = new DshEventMapper()
+  openReasoningThenClose(mapper, 'round one')
+  const longText = `这一轮的正文很长。${'继续补充细节。'.repeat(60)}`
+  mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 1, text: longText } } })
+  mapper.consume({
+    type: 'assistant/message',
+    data: {
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'round one' },
+          { type: 'text', text: longText },
+        ],
+      },
+    },
+  })
+  // Round two: a fresh reasoning block holds text again even past the window
+  // until its own block-end arrives.
+  mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } } })
+  mapper.consume({ type: 'assistant/chunk', data: { chunk: { type: 'reasoning-delta', index: 0, text: 'round two' } } })
+  const held = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 1, text: longText } },
+  })
+  assert.equal(held.some((a) => a.slot === 'text'), false, 'live reasoning holds text regardless of length')
+})

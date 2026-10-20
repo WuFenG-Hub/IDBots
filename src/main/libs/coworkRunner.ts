@@ -10327,14 +10327,21 @@ export class CoworkRunner extends EventEmitter {
             // compaction-deadlock incident).
             const messageMeta = (message as { metadata?: Record<string, unknown> } | null)?.metadata;
             if (messageMeta?.compaction === true && messageMeta?.isError === true) compactionFailedThisTurn = true;
-            // LLM ack gate: real visible text (non-thinking assistant
-            // content, narration included) closes the turn's acknowledgment
-            // window — no ack may land after the answer it acknowledges.
+            // LLM ack gate: a visible text bubble opening (the empty
+            // isStreaming open counts — streaming starts before content
+            // lands) or real visible text (narration included) closes the
+            // turn's acknowledgment window — no ack may land after the
+            // answer it acknowledges.
             if (
               (message as { type?: string } | null)?.type === 'assistant'
               && messageMeta?.isThinking !== true
-              && typeof (message as { content?: string }).content === 'string'
-              && ((message as { content?: string }).content ?? '').trim().length > 0
+              && (
+                messageMeta?.isStreaming === true
+                || (
+                  typeof (message as { content?: string }).content === 'string'
+                  && ((message as { content?: string }).content ?? '').trim().length > 0
+                )
+              )
             ) {
               activeSession.dshTurnAckVisibleTextSeen = true
             }
