@@ -755,15 +755,20 @@ const createMarkdownComponents = (
       // Assistant mode: a link to a local HTML report is the turn's
       // deliverable, not an ordinary file reference — render it as a
       // full-width card so it is visually unmistakable next to plain inline
-      // file links. Clicking flows through the same onOpenLocalFile path
+      // file links. The card still renders through LocalFileLink (block-level
+      // wrapper), so it carries the same right-click menu as every other
+      // file link. Clicking flows through the same onOpenLocalFile path
       // (in-app sandboxed preview). Professional mode keeps the inline link.
       if (chatExperienceMode === 'assistant' && HTML_FILE_RE.test(filePath)) {
         return (
-          <a
-            href={toFileHref(filePath)}
-            onClick={handleClick}
-            title={filePath}
+          <LocalFileLink
+            filePath={filePath}
+            wrapperClassName="block w-full"
             className="group my-1 flex w-full items-center gap-3 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3.5 py-2.5 shadow-subtle transition-colors hover:border-claude-accent/60 dark:hover:border-claude-accent/60 cursor-pointer no-underline"
+            href={toFileHref(filePath)}
+            title={filePath}
+            showTypeIcon={false}
+            onOpen={(_path, event) => handleClick(event)}
           >
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-claude-accent/10">
               <DocumentChartBarIcon className="h-5 w-5 text-claude-accent" />
@@ -777,7 +782,7 @@ const createMarkdownComponents = (
               </span>
             </span>
             <ArrowTopRightOnSquareIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary transition-colors group-hover:text-claude-accent" />
-          </a>
+          </LocalFileLink>
         );
       }
 
