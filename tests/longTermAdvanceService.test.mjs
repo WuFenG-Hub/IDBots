@@ -24,12 +24,16 @@ function makeStubCowork() {
   const counts = new Map();
   const engagement = new Map();
   const metabots = new Map();
+  // Mirrors CoworkStore: NULL until an auto-creating flow stamps it; a
+  // human-opened session never gets one.
+  const autoOrigins = new Map();
   const calls = { create: [], update: [], message: [], autoOrigin: [] };
   return {
     calls,
     counts,
     engagement,
     metabots,
+    autoOrigins,
     createSession(title, cwd, systemPrompt, mode, skills, metabotId, sessionType) {
       const id = `sess-${sessions.size + 1}`;
       sessions.set(id, { id, title, sessionType, skills: [...(skills ?? [])] });
@@ -38,18 +42,28 @@ function makeStubCowork() {
       return { id };
     },
     updateSession(id, patch) { calls.update.push({ id, patch }); },
-    setSessionAutoOrigin(id, autoOrigin) { calls.autoOrigin.push({ id, autoOrigin }); },
+    setSessionAutoOrigin(id, autoOrigin) {
+      autoOrigins.set(id, autoOrigin);
+      calls.autoOrigin.push({ id, autoOrigin });
+    },
     addMessage(id, msg) { counts.set(id, (counts.get(id) ?? 0) + 1); calls.message.push({ id, msg }); },
     getSession(id) { return sessions.get(id) ?? null; },
     countSessionMessages(id) { return counts.get(id) ?? 0; },
+    getSessionAutoOrigin(id) { return autoOrigins.get(id) ?? null; },
     getSessionEngagement(id) {
       return engagement.get(id) ?? { lastOwnerMessageAtMs: null, lastAssistantMessageAtMs: null };
     },
     getSessionMetabotId(id) { return metabots.has(id) ? metabots.get(id) : null; },
-    /** Test helper: a session that exists outside createSession (e.g. a previous sub-project's). */
-    registerSession(id, metabotId) {
-      sessions.set(id, { id, title: id, sessionType: 'longterm', skills: [] });
+    /**
+     * Test helper: a session that exists outside createSession. By default a
+     * human-opened one (no auto-origin — the owner's venue, a definition
+     * session); pass autoOrigin 'longterm' for a previous sub-project's
+     * heartbeat session.
+     */
+    registerSession(id, metabotId, autoOrigin = null) {
+      sessions.set(id, { id, title: id, sessionType: autoOrigin === 'longterm' ? 'longterm' : 'standard', skills: [] });
       metabots.set(id, metabotId ?? null);
+      if (autoOrigin) autoOrigins.set(id, autoOrigin);
     },
   };
 }
@@ -1031,6 +1045,78 @@ test('an over-budget bound session that is the owner\'s live venue is reused, no
   assert.equal(report.escalated[0].sessionId, boundId, 'the owner\'s live session is kept');
   assert.equal(report.escalated[0].reusedSession, true);
   assert.equal(cowork.calls.create.length, 1, 'no fresh session was opened');
+});
+
+test('an owner-opened conversation is never rotated: a due work turn after the owner steps away reuses it over budget, with no pointer or fresh session', async () => {
+  // Production incident: the owner defined a long-term task inside a normal
+  // conversation; the venue rebind bound sub-project #1 to it; 3.5h after the
+  // owner's last message a work push found 353 rows (> budget) and rotated —
+  // a "budget reached" pointer landed in the owner's own conversation and the
+  // task moved to a fresh session, only for the owner's next message to
+  // rebind it and queue the same rotation again.
+  const { store, cowork, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  await new LongTermAdvanceService(deps).run(now); // opens + binds heartbeat session 1
+  const heartbeatSessionId = store.getTask(taskId).subtasks[0].sessionId;
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+
+  // A conversation the OWNER opened (no auto-origin): related to the task,
+  // and the engaged sweep rebinds to it — the venue-follow behaviour.
+  cowork.registerSession('owner-chat', 7);
+  assert.equal(cowork.getSessionAutoOrigin('owner-chat'), null, 'human-opened sessions carry no auto-origin');
+  assert.ok(store.bindSession(subtask.id, 'owner-chat', 'system').ok);
+  assert.ok(store.bindSession(subtask.id, heartbeatSessionId, 'system').ok);
+  const tEngaged = now + 1 * HOUR;
+  cowork.engagement.set('owner-chat', { lastOwnerMessageAtMs: tEngaged - 5 * 60_000, lastAssistantMessageAtMs: null });
+  await new LongTermAdvanceService(deps).run(tEngaged);
+  assert.equal(store.getTask(taskId).subtasks[0].sessionId, 'owner-chat', 'binding followed the owner into their conversation');
+
+  // The owner steps away past the engagement window; their conversation is
+  // far over the rotation budget (tool traffic counts every row) and a work
+  // push is due (still inside the supervision budget, so a plain push). It
+  // must simply run there — the owner's conversation is governed by the
+  // runner's compaction and the owner, never by this budget.
+  cowork.counts.set('owner-chat', 353);
+  const createdBefore = cowork.calls.create.length;
+  const report = await new LongTermAdvanceService(deps).run(tEngaged + 90 * 60_000);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.match(report.escalated[0].reasons[0], /gone quiet/);
+  assert.equal(report.escalated[0].sessionId, 'owner-chat', 'the owner\'s conversation is kept');
+  assert.equal(report.escalated[0].reusedSession, true, 'reused, not rotated');
+  assert.equal(cowork.calls.create.length, createdBefore, 'no fresh session was opened');
+  assert.ok(
+    !cowork.calls.message.some((call) => call.id === 'owner-chat' && call.msg.type === 'system'),
+    'no rotation pointer was posted into the owner\'s conversation',
+  );
+  assert.ok(
+    !store.getTask(taskId).events.some((event) => /session rotated/.test(event.detail)),
+    'nothing was journaled as a rotation',
+  );
+});
+
+test('a heartbeat-owned session still rotates on budget once the owner is gone, even if they once typed in it', async () => {
+  // Ownership is by origin, not by presence: the heartbeat's own sessions stay
+  // subject to the budget (unattended growth is what rotation exists for);
+  // only the live-venue / owner's-latest-word cases hold them back.
+  const { store, cowork, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  await new LongTermAdvanceService(deps).run(now);
+  const boundId = store.getTask(taskId).subtasks[0].sessionId;
+  assert.equal(cowork.getSessionAutoOrigin(boundId), 'longterm', 'heartbeat sessions carry the longterm auto-origin');
+  const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+  const t2 = now + 3 * HOUR;
+  cowork.counts.set(boundId, DEFAULT_SESSION_ROTATION_MESSAGES);
+  // The owner dropped a line here two hours ago — past the engagement window,
+  // so this is neither their live venue nor an owner-facing turn's target.
+  cowork.engagement.set(boundId, { lastOwnerMessageAtMs: t2 - 2 * HOUR, lastAssistantMessageAtMs: t2 - 2 * HOUR });
+  const report = await new LongTermAdvanceService(deps).run(t2);
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.equal(report.escalated[0].reusedSession, false, 'heartbeat-owned session rotated on budget');
+  assert.notEqual(report.escalated[0].sessionId, boundId);
 });
 
 test('getSessionEngagement: heartbeat prompts and cross-session bot relays are not the owner', async () => {

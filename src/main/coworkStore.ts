@@ -3923,6 +3923,19 @@ export class CoworkStore implements MemoryBackend {
     }
   }
 
+  /**
+   * Auto-origin marker of one session (NULL = human-initiated). The long-term
+   * heartbeat's session-rotation ownership check: only sessions the heartbeat
+   * created itself ('longterm') are ever rotated.
+   */
+  getSessionAutoOrigin(sessionId: string): CoworkSessionAutoOrigin | null {
+    const row = this.getOne<{ auto_origin: string | null }>(
+      'SELECT auto_origin FROM cowork_sessions WHERE id = ?',
+      [sessionId],
+    );
+    return (row?.auto_origin as CoworkSessionAutoOrigin | null) ?? null;
+  }
+
   listSessions(options?: { metabotId?: number | null }): CoworkSessionSummary[] {
     interface SessionSummaryRow {
       id: string;

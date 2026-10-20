@@ -78,6 +78,12 @@ export const DEFAULT_OWNER_ENGAGEMENT_WINDOW_MS = 60 * 60_000;
 /**
  * Bound-session budget before the heartbeat rotates to a fresh session.
  *
+ * Scope: ONLY sessions the heartbeat created itself (auto-origin 'longterm').
+ * A session the owner opened — the task's definition session, or any
+ * conversation the owner drove the task from and the venue rebind followed —
+ * is never rotated, whatever its row count: the runner's compaction governs
+ * its context and the owner decides when it ends (see `escalate`).
+ *
  * What is actually counted (CoworkStore.countSessionMessages): EVERY
  * `cowork_messages` row of the session — user + assistant + tool_use +
  * tool_result + system, no type filter. That is not "conversation turns", and
@@ -167,6 +173,8 @@ export interface LongTermAdvanceSessionStore {
   getSession(id: string): unknown;
   /** Message count of a session — the rotation budget check (optional). */
   countSessionMessages?(id: string): number;
+  /** Auto-origin marker of a session (null = human-initiated) — the rotation ownership check (optional; absent = never rotate). */
+  getSessionAutoOrigin?(id: string): CoworkSessionAutoOrigin | null;
   /** Owner/twin message recency probe — the engagement signal (optional). */
   getSessionEngagement?(id: string): LongTermSessionEngagement;
   /** The bot a session belongs to — twin-activity suppression is scoped to the twin's own sessions (optional). */
@@ -877,17 +885,30 @@ export class LongTermAdvanceService {
     let rotation: { from: string; messages: number } | null = null;
     if (boundSessionId && coworkStore.getSession(boundSessionId)) {
       const messageCount = coworkStore.countSessionMessages?.(boundSessionId) ?? 0;
-      // Rotation is skipped in two owner-presence cases — splitting the
-      // heartbeat line away from the owner is the exact failure this fixes:
+      // Rotation is heartbeat-session hygiene and applies ONLY to sessions the
+      // heartbeat created itself (auto-origin 'longterm'). A session the owner
+      // opened is the owner's conversation: its context is governed by the
+      // runner's own compaction and the owner decides when it ends — never
+      // this budget. Before this check, the owner-venue rebind pulled a
+      // sub-project into the owner's own conversation, and the budget then
+      // rotated it out the moment the owner stepped away past the engagement
+      // window — posting a "budget reached" pointer into a conversation the
+      // owner was still using — and the owner's next message rebound it,
+      // repeating the cycle on every visit.
+      const heartbeatOwned = coworkStore.getSessionAutoOrigin?.(boundSessionId) === 'longterm';
+      // Within heartbeat-owned sessions, two owner-presence cases still skip
+      // rotation — splitting the heartbeat line away from the owner is the
+      // exact failure these fix:
       //  - the bound session IS the owner's live venue (rotating away would
       //    abandon the conversation the owner is sitting in);
       //  - an owner-facing turn whose bound session holds the owner's most
       //    recent word (a reminder's only job is to be seen — it belongs
       //    where the owner last spoke, budget or not).
-      // Work turns with no owner presence rotate on budget as before.
+      // Work turns in a heartbeat session with no owner presence rotate on budget.
       const boundIsLiveVenue = engagement.ownerVenueSessionId === boundSessionId;
       const boundHasOwnersLatestWord = engagement.lastOwnerSessionId === boundSessionId;
       if (
+        !heartbeatOwned ||
         messageCount < this.sessionRotationThreshold ||
         boundIsLiveVenue ||
         (this.isOwnerFacing(reasons) && boundHasOwnersLatestWord)
