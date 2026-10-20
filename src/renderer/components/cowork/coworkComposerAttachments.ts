@@ -107,25 +107,34 @@ export const composeCoworkSubmitPrompt = ({
  * parent refuses (`false`) or throws. Taking only the text snapshot — the old
  * steering path — is how a refused mid-run send ate the attachment.
  */
-export const submitCoworkComposerDraft = async ({
+export const submitCoworkComposerDraft = async <TQuoted,>({
   draftField,
   attachmentField,
+  quotedSelectionField,
   onSubmit,
 }: {
   draftField: VersionedComposerField<string>;
   attachmentField: VersionedComposerField<CoworkComposerAttachment[]>;
+  /** Quoted fragments are composer state too: a refused submit must put them
+   *  back, exactly like the attachment manifest. */
+  quotedSelectionField?: VersionedComposerField<TQuoted[]>;
   onSubmit: () => void | boolean | Promise<void | boolean>;
 }): Promise<void | boolean> => {
   const draftSnapshot = draftField.takeAndClear();
   const attachmentSnapshot = attachmentField.takeAndClear();
+  const quotedSnapshot = quotedSelectionField?.takeAndClear() ?? null;
+  const restore = () => {
+    attachmentField.restoreIfUnchanged(attachmentSnapshot);
+    if (quotedSelectionField && quotedSnapshot) {
+      quotedSelectionField.restoreIfUnchanged(quotedSnapshot);
+    }
+  };
   try {
     const accepted = await runComposerSubmission(draftField, draftSnapshot, onSubmit);
-    if (accepted === false) {
-      attachmentField.restoreIfUnchanged(attachmentSnapshot);
-    }
+    if (accepted === false) restore();
     return accepted;
   } catch (error) {
-    attachmentField.restoreIfUnchanged(attachmentSnapshot);
+    restore();
     throw error;
   }
 };

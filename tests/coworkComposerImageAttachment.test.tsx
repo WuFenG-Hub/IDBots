@@ -399,7 +399,7 @@ test('every attachment door and the submit path are wired to the one gate', () =
 
   // Submit side: one composition, no text-only steering branch, and the
   // attachment snapshot is taken unconditionally.
-  assert.match(composerSource, /const \{ trimmedValue, finalPrompt \} = composeCoworkSubmitPrompt\(\{/);
+  assert.match(composerSource, /const finalPrompt = composeSubmittedCoworkPrompt\(\{/);
   assert.match(composerSource, /await submitCoworkComposerDraft\(\{/);
   assert.doesNotMatch(
     composerSource,
@@ -434,20 +434,33 @@ const streamingSubmitGuardVerdict = (state: {
   isStreaming: boolean;
   trimmedValue: string;
   attachmentCount: number;
+  /** Quoted fragments also make a steer sendable, so the mirror takes them too. */
+  quotedSelectionCount?: number;
 }): boolean => {
-  const guard = /if \((isStreaming && !trimmedValue && submittedAttachments\.length === 0)\) return;/
+  const guard = /if \((isStreaming && !trimmedValue && submittedAttachments\.length === 0\s*\n\s*&& submittedQuotedSelections\.length === 0)\) return;/
     .exec(composerSource);
   assert.ok(
     guard,
-    'the streaming guard must stay one expression: `if (isStreaming && !trimmedValue && submittedAttachments.length === 0) return;`',
+    'the streaming guard must stay one expression: `if (isStreaming && !trimmedValue && submittedAttachments.length === 0 && submittedQuotedSelections.length === 0) return;`',
   );
   const evaluate = new Function(
     'isStreaming',
     'trimmedValue',
     'submittedAttachments',
+    'submittedQuotedSelections',
     `return (${guard[1]});`,
-  ) as (isStreaming: boolean, trimmedValue: string, submittedAttachments: unknown[]) => boolean;
-  return evaluate(state.isStreaming, state.trimmedValue, new Array(state.attachmentCount).fill(null));
+  ) as (
+    isStreaming: boolean,
+    trimmedValue: string,
+    submittedAttachments: unknown[],
+    submittedQuotedSelections: unknown[],
+  ) => boolean;
+  return evaluate(
+    state.isStreaming,
+    state.trimmedValue,
+    new Array(state.attachmentCount).fill(null),
+    new Array(state.quotedSelectionCount ?? 0).fill(null),
+  );
 };
 
 const composerSourceIndexOf = (needle: string): number => {
@@ -520,19 +533,23 @@ test('a mid-run submission with neither text nor attachment is still refused', (
   // …and the early return sits between the composition and the handover, so with
   // that verdict onSubmit is never reached and both fields stay put.
   assert.ok(
-    composerSourceIndexOf('const { trimmedValue, finalPrompt } = composeCoworkSubmitPrompt({')
-      < composerSourceIndexOf('if (isStreaming && !trimmedValue && submittedAttachments.length === 0) return;')
-    && composerSourceIndexOf('if (isStreaming && !trimmedValue && submittedAttachments.length === 0) return;')
+    composerSourceIndexOf('if (isStreaming && !trimmedValue && submittedAttachments.length === 0')
+      < composerSourceIndexOf('const finalPrompt = composeSubmittedCoworkPrompt({')
+    && composerSourceIndexOf('const finalPrompt = composeSubmittedCoworkPrompt({')
       < composerSourceIndexOf('await submitCoworkComposerDraft({'),
-    'the guard reads the composed draft and returns before the submission is handed over',
+    'the guard returns before the draft is composed, which is composed before the handover',
   );
 });
 
-test('the idle branch keeps its own guard and the streaming one never decides for it', () => {
+test('the idle branch keeps its own guard, extended to count quoted fragments', () => {
+  // Enter submits bypass the canSubmit affordance (handleKeyDown gates only on
+  // `disabled`), so an empty idle submit still needs an explicit return. The
+  // guard keeps the shape it always had and simply counts quoted fragments as
+  // a third kind of content.
   assert.match(
     composerSource,
-    /if \(!isStreaming && !trimmedValue && submittedAttachments\.length === 0\) return;/,
-    'the idle guard is unchanged',
+    /if \(!isStreaming && !trimmedValue && submittedAttachments\.length === 0 && submittedQuotedSelections\.length === 0\) return;/,
+    'the idle guard counts text, attachments and quoted fragments',
   );
   assert.equal(
     streamingSubmitGuardVerdict({ isStreaming: false, trimmedValue: '', attachmentCount: 0 }),

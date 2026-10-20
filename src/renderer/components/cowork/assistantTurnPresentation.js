@@ -28,10 +28,12 @@ export const isAssistantTurnComplete = ({ sessionLive, isActiveTurn, hasStreamin
 
 /**
  * Index of the turn's delivery message within the VISIBLE assistant items:
- * the last assistant text message (thinking rows never deliver). Assistant
- * mode hangs its single hover-action toolbar off this one message — narration
- * and other process bubbles render without a toolbar — and the "Worked for"
- * collapse uses the same message as the always-visible delivery.
+ * the last assistant text message (thinking rows never deliver). The
+ * professional-mode "Worked for" collapse uses this message as the
+ * always-visible delivery and folds everything before it; assistant mode
+ * collapses nothing. (Assistant mode's hover-action toolbar used to hang off
+ * this one index; it is now mounted per bubble — see
+ * shouldShowAssistantBubbleActions.)
  * Returns -1 when no delivery candidate exists.
  */
 export const findDeliveryAssistantIndex = (visibleAssistantItems) => {
@@ -43,3 +45,23 @@ export const findDeliveryAssistantIndex = (visibleAssistantItems) => {
   }
   return -1;
 };
+
+/**
+ * Whether an assistant message bubble carries its own hover-action toolbar
+ * (copy / feedback / per-message reply / branch).
+ *
+ * Assistant mode now mounts one toolbar PER BUBBLE, narration bubbles
+ * included — the per-message reply entry must be reachable on every single
+ * message, the same parity the professional mode action row gives each
+ * assistant message. The old design pinned a single toolbar to the turn's
+ * delivery message (via findDeliveryAssistantIndex) and skipped narration /
+ * process bubbles, which left "reply to this message" missing on exactly the
+ * bubbles a bot conversation mostly consists of; the final-reply-only and
+ * narration-exclusion conditions were quirks of that one-toolbar layout, not
+ * requirements of the reply feature, so they are gone.
+ * `showCopyButton` keeps the mode-shared gate that hides action toolbars
+ * while the turn still streams.
+ */
+export const shouldShowAssistantBubbleActions = ({ isAssistantMode, showCopyButton }) => (
+  Boolean(isAssistantMode && showCopyButton)
+);

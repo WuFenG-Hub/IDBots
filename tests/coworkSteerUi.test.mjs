@@ -14,15 +14,15 @@ const viewSource = readSource('src', 'renderer', 'components', 'cowork', 'Cowork
 const detailSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkSessionDetail.tsx');
 const i18nSource = readSource('src', 'renderer', 'services', 'i18n.ts');
 
-test('streaming composer derives the stop/send-steer truth table from text OR attachments', async (t) => {
+test('streaming composer derives the stop/send-steer truth table from text OR attachments OR quoted excerpts', async (t) => {
   assert.doesNotMatch(inputSource, /\|\| isStreaming \|\| disabled\) return/);
   assert.match(inputSource, /const hasTextInput = Boolean\(value\.trim\(\)\)/);
-  // Both branches share ONE content verdict — text OR attachments. The idle
-  // branch already counted attachments; the streaming branch used to key off
-  // text alone, which meant a running turn with a pasted picture had no submit
-  // content and the button rendered as Stop. Asserted here so a return to a
-  // text-only fork on either branch fails loudly.
-  assert.match(inputSource, /const hasSubmitContent = hasTextInput \|\| attachmentCount > 0;/);
+  // ONE content verdict for BOTH branches — text OR attachments OR a quoted
+  // fragment. The attachment slice fixed the running-turn button reading Stop
+  // for an image-only composer; the quote slice made excerpts sendable on
+  // their own. Asserted as one rule so a return to a text-only fork (or a
+  // split verdict between the branches) fails loudly.
+  assert.match(inputSource, /const hasSubmitContent = hasTextInput \|\| attachmentCount > 0 \|\| quotedSelectionCount > 0;/);
   assert.match(inputSource, /isStreaming && \(!hasSubmitContent \|\| steerDisabled\)/);
   assert.match(inputSource, /isStreaming && hasSubmitContent && !steerDisabled/);
 
@@ -102,29 +102,28 @@ test('streaming composer derives the stop/send-steer truth table from text OR at
   );
 });
 
-test('running composer keeps dynamic configuration disabled and sends the trimmed draft', () => {
-  // Session configuration (folder, permission mode, model/skill chips) stays
-  // frozen while a turn streams…
+test('running composer keeps dynamic configuration disabled and composes steers through the shared quoted-prompt path', () => {
   assert.match(inputSource, /disabled=\{disabled \|\| isStreaming\}/);
   assert.match(inputSource, /coworkSteerPlaceholder/);
   // The streaming guard is the SAME rule as the idle one further down: text OR
-  // attachments make a submission. It used to demand text alone
-  // (`!trimmedValue`), which refused an image-only steer even after the
+  // attachments OR a quoted fragment make a submission. It used to demand text
+  // alone (`!trimmedValue`), which refused an image-only steer even after the
   // attachment doors had opened — the chip got in and send silently did
-  // nothing. Product call: steering a running turn with a picture is ordinary
-  // in grokbot / codex / dsh, and an attachment already rides the same submit
-  // and the same snapshot as text (see composeCoworkSubmitPrompt).
+  // nothing. Steering a running turn with a picture is ordinary in the sibling
+  // products, and a quote steers too.
   assert.doesNotMatch(inputSource, /if \(isStreaming && !trimmedValue\) return/);
-  assert.match(inputSource, /if \(isStreaming && !trimmedValue && submittedAttachments\.length === 0\) return/);
-  // …the idle branch keeps its own (already correct) guard, unchanged.
-  assert.match(inputSource, /if \(!isStreaming && !trimmedValue && submittedAttachments\.length === 0\) return/);
+  assert.match(inputSource, /if \(isStreaming && !trimmedValue && submittedAttachments\.length === 0\s*\n\s*&& submittedQuotedSelections\.length === 0\) return/);
+  // …the idle branch keeps its own guard, extended to count quoted fragments —
+  // Enter submits bypass the canSubmit affordance (handleKeyDown gates only on
+  // `disabled`), so an empty idle submit still needs an explicit return.
+  assert.match(inputSource, /if \(!isStreaming && !trimmedValue && submittedAttachments\.length === 0 && submittedQuotedSelections\.length === 0\) return/);
   // …while the submitted prompt is composed by ONE rule on both branches. The
   // old `isStreaming ? trimmedValue` fork is gone on purpose: it composed the
   // steering prompt from the text alone, so an attachment inserted mid-run was
   // dropped on send. Attachments now ride the same manifest as an idle send,
   // gated by `steerDisabled` (coworkComposerAttachments.ts) rather than by
   // `isStreaming`.
-  assert.match(inputSource, /const \{ trimmedValue, finalPrompt \} = composeCoworkSubmitPrompt\(\{/);
+  assert.match(inputSource, /const finalPrompt = composeSubmittedCoworkPrompt\(\{/);
   assert.doesNotMatch(inputSource, /isStreaming\s*\?\s*trimmedValue/);
   assert.match(inputSource, /event\.key === 'Enter'[\s\S]*?handleSubmit\(\)/);
 });

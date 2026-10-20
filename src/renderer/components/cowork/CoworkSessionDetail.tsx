@@ -11,10 +11,31 @@ import type {
   CoworkExecutionMode,
   CoworkServiceOrderSummary,
   CoworkPermissionResult,
+  CoworkQuotedSelectionRole,
 } from '../../types/cowork';
 import type { Skill } from '../../types/skill';
 import type { SettingsOpenOptions } from '../Settings';
-import CoworkPromptInput from './CoworkPromptInput';
+import CoworkPromptInput, { type CoworkPromptInputRef } from './CoworkPromptInput';
+import CoworkQuoteActionBar, {
+  QUOTE_ACTION_BAR_HEIGHT,
+  QUOTE_ACTION_BAR_WIDTH,
+} from './CoworkQuoteActionBar';
+import CoworkMessageActionsMenu from './CoworkMessageActionsMenu';
+import CoworkSentQuoteBlock from './CoworkSentQuoteBlock';
+import CoworkImageLightbox from './CoworkImageLightbox';
+import {
+  buildTranscriptMessageIdsByOrdinal,
+  buildTranscriptMessagePositions,
+  createMessageQuotedSelection,
+  createPendingQuotedSelection,
+  createQuotedSelection,
+  findTranscriptMessageElement,
+  parseSentQuoteBlock,
+  parseSentSelectionQuoteBlock,
+  resolveQuoteActionBarAnchorRect,
+  type PendingQuotedSelection,
+  type SentSelectionQuoteLabelSet,
+} from './coworkQuotedSelections';
 import CoworkPermissionPanel from './CoworkPermissionPanel';
 import { buildSessionComposerCommands } from './composerCommandCatalog';
 import PermissionModeSelector from './PermissionModeSelector';
@@ -45,7 +66,6 @@ import {
 } from './coworkTodoList';
 import MarkdownContent from '../MarkdownContent';
 import MarkdownViewerPanel from './MarkdownViewerPanel';
-import LocalFileLink from '../ui/LocalFileLink';
 import {
   CheckIcon,
   InformationCircleIcon,
@@ -81,13 +101,13 @@ import {
   LOCAL_IMAGE_PREVIEW_MAX_BYTES,
   stripHashAndQuery,
 } from '../../utils/localImage';
-import { scrollEventMovesAnchor } from '../../utils/anchoredPopover';
+import { scrollEventMovesAnchor, placePopoverAbove, useAnchorMoveWatcher, type PopoverPlacement } from '../../utils/anchoredPopover';
 import {
   buildPrivateA2ASessionDisplayId,
   getCoworkSessionTitleClassName,
   shouldShowA2AServiceSessionId,
 } from './coworkSessionPresentation.js';
-import { isAssistantTurnComplete, findDeliveryAssistantIndex } from './assistantTurnPresentation.js';
+import { isAssistantTurnComplete, findDeliveryAssistantIndex, shouldShowAssistantBubbleActions } from './assistantTurnPresentation.js';
 import { isAssistantModeOwnerChatSession } from './assistantModeSessionGate';
 import { reuseStableTurns } from './conversationTurnReuse.js';
 import {
@@ -156,6 +176,69 @@ const STEER_STATUS_TRANSLATION_KEYS: Record<string, string> = {
   settled: 'coworkSteerStatusSettled',
   failed: 'coworkSteerStatusFailed',
   cancelled: 'coworkSteerStatusCancelled',
+};
+
+// The quote-jump highlight: the app's own gold accent as a brief ring around
+// the one message that was jumped to — never a background recolour of the
+// transcript.
+//
+// The ring deliberately uses the SOLID accent token: the `/40` opacity
+// modifier does not compile for var()-based claude tokens in this Tailwind
+// build (no <alpha-value> placeholder, so the utility is silently dropped and
+// the ring falls back to Tailwind's default blue). `ring-claude-accent` is the
+// only form that renders the intended colour; same token, no new colour or
+// variable.
+const QUOTE_JUMP_HIGHLIGHT_CLASSES = ['ring-1', 'ring-claude-accent'];
+
+// The label sets the sent-selection-block parser matches against: every
+// shipped dictionary, so a quote block written under one language still gets
+// its clean display after the app language is switched (the transcript renders
+// a sent block in the language it was written in).
+const SENT_QUOTE_LABEL_LANGUAGES = ['zh', 'en'] as const;
+
+export const buildSentSelectionQuoteLabelSets = (botName?: string | null): SentSelectionQuoteLabelSet[] => {
+  const name = (botName ?? '').trim();
+  const fill = (language: (typeof SENT_QUOTE_LABEL_LANGUAGES)[number], key: string): string => {
+    const template = i18nService.tIn(language, key);
+    return name
+      ? template.replace('{name}', name)
+      : template.replace('{name}', i18nService.tIn(language, 'coworkQuoteSentReplySourceAssistantFallback'));
+  };
+  return SENT_QUOTE_LABEL_LANGUAGES.map((language) => ({
+    header: i18nService.tIn(language, 'coworkQuoteBlockHeader'),
+    item: i18nService.tIn(language, 'coworkQuoteBlockItem'),
+    sourceLabel: {
+      user: i18nService.tIn(language, 'coworkQuoteSourceUser'),
+      assistant: i18nService.tIn(language, 'coworkQuoteSourceAssistant'),
+      other: i18nService.tIn(language, 'coworkQuoteSourceOther'),
+    },
+    displayLabel: {
+      user: i18nService.tIn(language, 'coworkQuoteSentSourceUser'),
+      assistant: fill(language, 'coworkQuoteSentSourceAssistant'),
+      other: fill(language, 'coworkQuoteSentSourceOther'),
+    },
+  }));
+};
+
+/**
+ * The speaker names a whole-message reply shows in the transcript, WeChat-style
+ * (`你：` / `<bot 名>：`): the assistant speaks in the session bot's own name,
+ * the owner is "你". `{name}` in the labels is filled with `botName`. The
+ * prompt body keeps the generated `#<ordinal> <side>：` label; see
+ * parseSentQuoteBlock.
+ */
+export const buildSentQuoteDisplaySources = (
+  botName?: string | null,
+): Record<CoworkQuotedSelectionRole, string> => {
+  const name = (botName ?? '').trim();
+  const fill = (template: string): string => (
+    name ? template.replace('{name}', name) : template.replace('{name}', i18nService.t('coworkQuoteSentReplySourceAssistantFallback'))
+  );
+  return {
+    user: i18nService.t('coworkQuoteSentReplySourceUser'),
+    assistant: fill(i18nService.t('coworkQuoteSentReplySourceAssistant')),
+    other: fill(i18nService.t('coworkQuoteSentReplySourceOther')),
+  };
 };
 
 const readDismissedRefundStatusKeys = (): Set<string> => {
@@ -290,6 +373,20 @@ const formatShortHash = (value: string): string => {
   if (!value) return '';
   if (value.length <= 20) return value;
   return `${value.slice(0, 8)}...${value.slice(-8)}`;
+};
+
+/**
+ * Nearest transcript block around a selected node. Message turns already carry
+ * `data-export-role` ('user-message' / 'assistant-block'), so the quote can
+ * name its own source and hang its action bar off a real, moving element —
+ * without injecting any marker node into the transcript.
+ */
+const quoteTranscriptBlockOf = (node: Node | null | undefined): HTMLElement | null => {
+  if (!node) return null;
+  const element = node.nodeType === Node.ELEMENT_NODE
+    ? (node as HTMLElement)
+    : node.parentElement;
+  return element?.closest('[data-export-role]') ?? null;
 };
 
 const formatMessageTimestamp = (timestamp: number): string => {
@@ -777,6 +874,83 @@ const extractImagePaths = (
   return dedupedPaths;
 };
 
+/**
+ * Split the attachment marker lines out of a user message body so the image
+ * files they name can render as pictures instead of as raw paths.
+ *
+ * The composer writes each attachment as its own `附件路径: <path>` line; the
+ * same text is what reaches the model, so this is a DISPLAY-side split only —
+ * `body` keeps every line that is not an attachment marker, and `imagePaths`
+ * carries the image files those markers named, for ImagePreviewStrip. A marker
+ * whose path is not a readable image stays in `body` as text, so nothing is
+ * silently swallowed.
+ */
+const splitUserAttachmentLines = (
+  content: string,
+  resolveLocalFilePath?: (href: string, text: string) => string | null,
+): { body: string; imagePaths: string[] } => {
+  if (!content) return { body: content, imagePaths: [] };
+  const lines = content.replace(/\r\n?/g, '\n').split('\n');
+  const kept: string[] = [];
+  const imagePaths: string[] = [];
+  for (const line of lines) {
+    const marker = /^\s*(?:[-*]\s*)?(?:附件路径|附件文件|输入文件|input\s*file|attachment\s*(?:path|file))\s*[:：]\s*(.+?)\s*$/i.exec(line);
+    if (!marker) {
+      kept.push(line);
+      continue;
+    }
+    const pathText = marker[1].trim();
+    const normalized = normalizeLocalPath(pathText);
+    const isImage = hasSupportedImageExtension(stripHashAndQuery(pathText))
+      || (normalized !== null && hasSupportedImageExtension(normalized.path));
+    if (!isImage) {
+      kept.push(line);
+      continue;
+    }
+    const resolved = resolveLocalFilePath
+      ? resolveLocalFilePath(pathText, pathText)
+      : null;
+    const absolute = (resolved ?? (normalized?.isAbsolute ? normalized.path : null))?.trim();
+    if (!absolute) {
+      kept.push(line);
+      continue;
+    }
+    imagePaths.push(stripFileProtocol(stripHashAndQuery(absolute)));
+  }
+  // Collapse the blank line that separated the marker block from the rest.
+  return { body: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(), imagePaths };
+};
+
+/**
+ * A user message body, with any attachment marker lines rendered as pictures.
+ *
+ * Every user-message branch (plain, reply-quote, selection-quote) renders its
+ * remaining body through this, so an image attachment shows as a thumbnail no
+ * matter which branch the message takes. Display-only: the submitted prompt
+ * text is untouched.
+ */
+const UserMessageBody: React.FC<{
+  content: string;
+  resolveLocalFilePath?: (href: string, text: string) => string | null;
+}> = ({ content, resolveLocalFilePath }) => {
+  const { body, imagePaths } = useMemo(
+    () => splitUserAttachmentLines(content, resolveLocalFilePath),
+    [content, resolveLocalFilePath],
+  );
+  return (
+    <>
+      {body ? (
+        <MarkdownContent
+          content={body}
+          className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
+        />
+      ) : null}
+      {imagePaths.length > 0 && <ImagePreviewStrip imagePaths={imagePaths} inline />}
+    </>
+  );
+};
+
+
 type ToolGroupItem = {
   type: 'tool_group';
   toolUse: CoworkMessage;
@@ -897,6 +1071,28 @@ export const resolveAutoScrollBehavior = (
 export const pinScrollToBottom = (element: HTMLElement | null): void => {
   if (!element) return;
   element.scrollTop = element.scrollHeight;
+};
+
+/**
+ * Whether a follow-effect run is the arrival of the reply a pending quote
+ * reply is waiting for.
+ *
+ * The one-shot flag is set at send time, when the submission carries a quote
+ * block: the owner may be parked at the quoted message on purpose (the
+ * confirmation window), so the follow gate (`shouldAutoScroll`) stays closed
+ * and the "back to bottom" button stays available while the turn runs — but
+ * the reply must still pull the view down once it arrives. "Arrival" is the
+ * transcript's tail turning into an assistant message: the user-message echo
+ * that lands right after the send must not consume the flag, or the view
+ * would leave the quoted message the moment the send goes through.
+ */
+export const shouldFollowPendingQuoteReply = (
+  messages: Array<{ type?: string }> | undefined,
+  pendingQuoteReplyFollow: boolean,
+): boolean => {
+  if (!pendingQuoteReplyFollow) return false;
+  const last = messages?.[messages.length - 1];
+  return last?.type === 'assistant';
 };
 
 export const buildAutoScrollFollowSignal = (
@@ -1105,7 +1301,7 @@ const TodoWriteInputView: React.FC<{ items: TodoListItem[] }> = ({ items }) => {
   );
 };
 
-const ImagePreviewStrip: React.FC<{ imagePaths: string[] }> = ({ imagePaths }) => {
+const ImagePreviewStrip: React.FC<{ imagePaths: string[]; inline?: boolean }> = ({ imagePaths, inline = false }) => {
   const [previewData, setPreviewData] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -1156,39 +1352,44 @@ const ImagePreviewStrip: React.FC<{ imagePaths: string[] }> = ({ imagePaths }) =
   }, [imagePaths]);
 
   const visiblePaths = imagePaths.filter((imagePath) => typeof previewData[imagePath] === 'string');
+
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightboxCaption, setLightboxCaption] = useState<string | undefined>(undefined);
+
   if (visiblePaths.length === 0) return null;
 
-  const handleOpenPath = async (imagePath: string) => {
-    try {
-      await window.electron.shell.openPath(imagePath);
-    } catch (error) {
-      console.error('Failed to open image path:', imagePath, error);
-    }
-  };
-
   return (
-    <div className="ml-4 mt-2 flex flex-wrap gap-2">
-      {visiblePaths.map((imagePath) => (
-        <LocalFileLink
-          key={imagePath}
-          filePath={imagePath}
-          title={imagePath}
-          showTypeIcon={false}
-          onOpen={(path) => { void handleOpenPath(path); }}
-          className="group rounded-lg border dark:border-claude-darkBorder border-claude-border overflow-hidden dark:bg-claude-darkSurface bg-claude-surface hover:border-claude-accent transition-colors"
-        >
-          <img
-            src={previewData[imagePath]}
-            alt={getPathBaseName(imagePath)}
-            className="h-24 w-24 object-cover"
-            loading="lazy"
-          />
-          <div className="px-1.5 py-1 text-[10px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary max-w-24 truncate text-left">
-            {getPathBaseName(imagePath)}
-          </div>
-        </LocalFileLink>
-      ))}
-    </div>
+    <>
+      <div className={inline ? 'mt-2 flex flex-wrap gap-2' : 'ml-4 mt-2 flex flex-wrap gap-2'}>
+        {visiblePaths.map((imagePath) => (
+          <button
+            key={imagePath}
+            type="button"
+            title={getPathBaseName(imagePath)}
+            onClick={() => {
+              setLightboxCaption(getPathBaseName(imagePath));
+              setLightboxSrc(previewData[imagePath]);
+            }}
+            className="group rounded-lg border dark:border-claude-darkBorder border-claude-border overflow-hidden dark:bg-claude-darkSurface bg-claude-surface hover:border-claude-accent transition-colors cursor-zoom-in"
+          >
+            <img
+              src={previewData[imagePath]}
+              alt={getPathBaseName(imagePath)}
+              className="h-24 w-24 object-cover"
+              loading="lazy"
+            />
+            <div className="px-1.5 py-1 text-[10px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary max-w-24 truncate text-left">
+              {getPathBaseName(imagePath)}
+            </div>
+          </button>
+        ))}
+      </div>
+      <CoworkImageLightbox
+        src={lightboxSrc}
+        caption={lightboxCaption}
+        onClose={() => setLightboxSrc(null)}
+      />
+    </>
   );
 };
 
@@ -1368,71 +1569,9 @@ const ToolCallGroup: React.FC<{
   );
 };
 
-// Copy button component
-const CopyButton: React.FC<{
-  content: string;
-  visible: boolean;
-}> = ({ content, visible }) => {
-  const [copied, setCopied] = useState(false);
 
-  const handleCopy = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(content);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error('Failed to copy:', err);
-    }
-  };
-
-  return (
-    <button
-      onClick={handleCopy}
-      className={`p-1.5 rounded-md dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-all duration-200 ${
-        visible ? 'opacity-100' : 'opacity-0 pointer-events-none'
-      }`}
-      title={i18nService.t('copyToClipboard')}
-    >
-      {copied ? (
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="24"
-          height="24"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="w-4 h-4 text-green-500"
-          aria-hidden="true"
-        >
-          <polyline points="20 6 9 17 4 12"></polyline>
-        </svg>
-      ) : (
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="24"
-          height="24"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="w-4 h-4 text-[var(--icon-secondary)]"
-          aria-hidden="true"
-        >
-          <rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect>
-          <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path>
-        </svg>
-      )}
-    </button>
-  );
-};
-
-// Message timestamp shown next to the copy button, sharing its
+// Message timestamp on the turn-end line, sharing the hover-visibility
+// logic and visual style of the action row it sits in.
 // hover-visibility logic and visual style.
 const MessageTimestamp: React.FC<{
   timestamp: number;
@@ -1547,7 +1686,15 @@ const UserMessageItem: React.FC<{
   skills: Skill[];
   sessionType?: string;
   sessionTitle?: string;
-}> = ({ message, skills, sessionType, sessionTitle }) => {
+  /** The session bot's name — the speaker a sent quote names for the assistant. */
+  botName?: string | null;
+  /** Quotes this whole message into the composer slot (the reply entry). */
+  onQuoteReply?: (message: CoworkMessage, text: string) => void;
+  /** Jumps back to the message a sent quote block answers (its ordinal). */
+  onJumpToQuoteBlock?: (ordinal: number) => void;
+  /** Resolves an attachment path to an absolute one, so images can be read. */
+  resolveLocalFilePath?: (href: string, text: string) => string | null;
+}> = ({ message, skills, sessionType, sessionTitle, botName, onQuoteReply, onJumpToQuoteBlock, resolveLocalFilePath }) => {
   const [isHovered, setIsHovered] = useState(false);
   const isSteerMessage = message.metadata?.interactionKind === 'steer';
   const steerStatusKey = isSteerMessage
@@ -1559,6 +1706,20 @@ const UserMessageItem: React.FC<{
   const messageSkills = messageSkillIds
     .map(id => skills.find(s => s.id === id))
     .filter((s): s is NonNullable<typeof s> => s !== undefined);
+
+  // A sent message body can open with the generated reply block ("#<ordinal>
+  // <side>: …"); split it off so it renders as the jump-back control while the
+  // rest of the body renders exactly as before. Hand-written blockquotes — not
+  // at the body's head, or without the label — never match.
+  const sentQuote = parseSentQuoteBlock(message.content, buildSentQuoteDisplaySources(botName));
+  // A body can also open with the generated selection block ("从对话中引用的
+  // 片段…" header + "引自{source}：" lines): split that off too, so it renders
+  // in the same quote-bar language as the reply block instead of as a wall of
+  // system-prompt-voiced markdown. Display-only — the header and the machine
+  // label stay in the submitted prompt body verbatim (the model reads them).
+  const sentSelectionQuote = sentQuote
+    ? null
+    : parseSentSelectionQuoteBlock(message.content, buildSentSelectionQuoteLabelSets(botName));
 
   const gigSquareCard = renderGigSquareCard(message.content);
   if (gigSquareCard) {
@@ -1603,11 +1764,47 @@ const UserMessageItem: React.FC<{
                 sessionType={sessionType}
                 sessionTitle={sessionTitle}
               />
-              <div className="cowork-user-bubble w-fit max-w-[min(646px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text">
-                <MarkdownContent
-                  content={message.content}
-                  className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
-                />
+              {/* The id also rides the bubble: the quote-jump ring wraps the
+                  innermost data-message-id mount, so it hugs this bubble's
+                  own outline — w-fit width, its 22px radius. */}
+              <div
+                className="cowork-user-bubble w-fit max-w-[min(646px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text"
+                data-message-id={message.id}
+              >
+                {sentQuote ? (
+                  <>
+                    <CoworkSentQuoteBlock
+                      block={sentQuote.block}
+                      onJump={onJumpToQuoteBlock
+                        ? () => onJumpToQuoteBlock(sentQuote.ordinal)
+                        : undefined}
+                    />
+                    {sentQuote.rest ? (
+                      <UserMessageBody
+                        content={sentQuote.rest}
+                        resolveLocalFilePath={resolveLocalFilePath}
+                      />
+                    ) : null}
+                  </>
+                ) : sentSelectionQuote ? (
+                  // Same quote bar as the reply block — gold rule, source line,
+                  // excerpt — just without a jump target (a hand-picked
+                  // selection carries no message position).
+                  <>
+                    <CoworkSentQuoteBlock block={sentSelectionQuote.block} />
+                    {sentSelectionQuote.rest ? (
+                      <UserMessageBody
+                        content={sentSelectionQuote.rest}
+                        resolveLocalFilePath={resolveLocalFilePath}
+                      />
+                    ) : null}
+                  </>
+                ) : (
+                  <UserMessageBody
+                    content={message.content}
+                    resolveLocalFilePath={resolveLocalFilePath}
+                  />
+                )}
               </div>
               <div className="flex items-center justify-end gap-1.5 mt-1">
                 {isSteerMessage && (
@@ -1637,13 +1834,10 @@ const UserMessageItem: React.FC<{
                     </span>
                   </div>
                 ))}
-                <MessageTimestamp
-                  timestamp={message.timestamp}
+                <CoworkMessageActionsMenu
                   visible={isHovered}
-                />
-                <CopyButton
-                  content={message.content}
-                  visible={isHovered}
+                  text={message.content}
+                  onQuote={() => onQuoteReply?.(message, message.content)}
                 />
               </div>
             </div>
@@ -1662,13 +1856,15 @@ const AssistantMessageItem: React.FC<{
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   /** Copies the conversation up to and including this message into a new session. */
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
+  /** Quotes this whole message into the composer slot (the reply entry). */
+  onQuoteReply?: (message: CoworkMessage, text: string) => void;
   /** Assistant mode drops the embedded thinking segment (raw reasoning is
    * never shown) and renders only the visible reply text. */
   isAssistantMode?: boolean;
-  /** Assistant mode shows its hover-action toolbar on the turn's final reply
-   * bubble only; narration and process bubbles render without one. Ignored in
-   * professional mode. */
-  isFinalReply?: boolean;
+  /** True on the turn's last bubble: that is the only place the timestamp and
+   * the feedback thumbs render, so a turn's narration segments do not each
+   * carry a near-duplicate clock. */
+  isTurnEnd?: boolean;
 }> = ({
   message,
   resolveLocalFilePath,
@@ -1676,12 +1872,12 @@ const AssistantMessageItem: React.FC<{
   showCopyButton = false,
   onOpenLocalFile,
   onBranch,
+  onQuoteReply,
   isAssistantMode = false,
-  isFinalReply = false,
+  isTurnEnd = false,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
   const displayContent = mapDisplayText ? mapDisplayText(message.content) : message.content;
-  const isNarration = message.metadata?.narration === true;
   const gigSquareCard = renderGigSquareCard(message.content);
   const thinkSplit = splitThinkTaggedContent(displayContent);
   const renderExtension = React.useContext(MessageExtensionContext);
@@ -1708,6 +1904,7 @@ const AssistantMessageItem: React.FC<{
   return (
     <div
       className="relative"
+      data-message-id={message.id}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
@@ -1726,16 +1923,25 @@ const AssistantMessageItem: React.FC<{
           // purely by background color (no border) via the theme-adaptive
           // neutral-gray .assistant-bubble fill. The w-fit wrapper shares the
           // user bubble's max width (max-w-[min(646px,82%)]) so the bubble
-          // hugs short messages and never stretches to the full column. One
-          // hover-action toolbar per turn hangs below the final reply bubble's
-          // bottom edge (never overlapping its text); narration and process
-          // bubbles render without one. The strip overlays the inter-bubble
-          // gap, so consecutive bubbles keep the container's uniform
-          // space-y-1 rhythm in every state (an in-flow row used to add ~32px
-          // under each bubble once the turn completed, and the old in-bubble
-          // overlay covered reply text).
+          // hugs short messages and never stretches to the full column.
+          // EVERY bubble carries its own hover-action toolbar — narration
+          // bubbles included — so each single message is individually
+          // replyable, the same per-message actions the professional row
+          // gives every assistant message. The toolbar hangs below the
+          // bubble's bottom edge (never overlapping its text) and overlays
+          // the inter-bubble gap instead of adding layout, so consecutive
+          // bubbles keep the container's uniform space-y-1 rhythm in every
+          // state (an in-flow row used to add ~32px under each bubble once
+          // the turn completed, and the old in-bubble overlay covered reply
+          // text); z-10 keeps the strip above the next bubble's rounded top.
           <div className="relative w-fit max-w-[min(646px,82%)]">
-            <div className="assistant-bubble rounded-[22px] px-[16px] py-[10px] dark:text-claude-darkText text-claude-text shadow-subtle">
+            {/* The id also rides the bubble: the quote-jump ring wraps the
+                innermost data-message-id mount, so it hugs this bubble's
+                own outline — w-fit width, its 22px radius. */}
+            <div
+              className="assistant-bubble rounded-[22px] px-[16px] py-[10px] dark:text-claude-darkText text-claude-text shadow-subtle"
+              data-message-id={message.id}
+            >
               <MarkdownContent
                 content={replyContent}
                 className="prose dark:prose-invert max-w-none"
@@ -1744,43 +1950,35 @@ const AssistantMessageItem: React.FC<{
                 chatExperienceMode={isAssistantMode ? 'assistant' : 'professional'}
               />
             </div>
-            {showCopyButton && isFinalReply && !isNarration && (
-              // The pt-0.5 bridge keeps the pointer over a DOM descendant of
-              // the hover-tracked root while crossing the bubble→strip seam,
-              // so the toolbar does not flicker when the mouse slides down.
-              <div
-                className={`absolute right-1 top-full flex items-center gap-1 pt-0.5 transition-all duration-200 ${
-                  isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                }`}
-              >
-                <div className="flex items-center gap-1 rounded-lg px-1 py-0.5 dark:bg-claude-darkSurface/90 bg-claude-surface/90 shadow-subtle">
-                  <CopyButton
-                    content={replyContent || displayContent}
+            {shouldShowAssistantBubbleActions({ isAssistantMode, showCopyButton }) && (
+              // Hover design (owner, 2026-10-19): a single "⋯" beside the bubble
+              // opens quote / copy / branch — the old inline strip is gone, so a
+              // turn split into many narration segments no longer stacks a full
+              // action row under every one of them. The turn-end line keeps only
+              // the timestamp and the feedback thumbs, which is what makes
+              // "did I react to this?" visible without opening a menu.
+              <>
+                <div className="absolute z-10 left-full top-1 ml-1">
+                  <CoworkMessageActionsMenu
                     visible={isHovered}
+                    text={replyContent}
+                    onQuote={() => onQuoteReply?.(message, replyContent)}
+                    onBranch={onBranch ? () => void onBranch(message) : undefined}
                   />
-                  <MessageFeedbackControls
-                    messageId={message.id}
-                    visible={isHovered}
-                  />
-                  <MessageTimestamp
-                    timestamp={message.timestamp}
-                    visible={isHovered}
-                  />
-                  {onBranch && (
-                    <button
-                      type="button"
-                      onClick={() => void onBranch(message)}
-                      className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-all duration-200 ${
-                        isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
-                      }`}
-                      title={i18nService.t('coworkBranchNewChatTitle')}
-                    >
-                      <DocumentDuplicateIcon className="h-3 w-3" />
-                      {i18nService.t('coworkBranchNewChatLabel')}
-                    </button>
-                  )}
                 </div>
-              </div>
+                {isTurnEnd && (
+                  <div className="mt-1 flex items-center gap-1.5">
+                    <MessageTimestamp
+                      timestamp={message.timestamp}
+                      visible={isHovered}
+                    />
+                    <MessageFeedbackControls
+                      messageId={message.id}
+                      visible={isHovered}
+                    />
+                  </div>
+                )}
+              </>
             )}
           </div>
         ) : (
@@ -1798,33 +1996,29 @@ const AssistantMessageItem: React.FC<{
       ) : null}
       {renderExtension?.(message)}
       {!isAssistantMode && showCopyButton && (
-        <div className="flex items-center gap-1.5 mt-1">
-          <CopyButton
-            content={replyContent || displayContent}
-            visible={isHovered}
-          />
-          <MessageFeedbackControls
-            messageId={message.id}
-            visible={isHovered}
-          />
-          <MessageTimestamp
-            timestamp={message.timestamp}
-            visible={isHovered}
-          />
-          {onBranch && (
-            <button
-              type="button"
-              onClick={() => void onBranch(message)}
-              className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-all duration-200 ${
-                isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
-              }`}
-              title={i18nService.t('coworkBranchNewChatTitle')}
-            >
-              <DocumentDuplicateIcon className="h-3 w-3" />
-              {i18nService.t('coworkBranchNewChatLabel')}
-            </button>
-          )}
-        </div>
+        // Professional mode renders one bubble per turn, so this row IS the
+        // turn end: timestamp + feedback only. The "⋯" rides at the message's
+        // top-right (the item root is the positioning context).
+        <>
+          <div className="absolute z-10 left-full top-1 ml-1">
+            <CoworkMessageActionsMenu
+              visible={isHovered}
+              text={replyContent}
+              onQuote={() => onQuoteReply?.(message, replyContent)}
+              onBranch={onBranch ? () => void onBranch(message) : undefined}
+            />
+          </div>
+          <div className="flex items-center gap-1.5 mt-1">
+            <MessageTimestamp
+              timestamp={message.timestamp}
+              visible={isHovered}
+            />
+            <MessageFeedbackControls
+              messageId={message.id}
+              visible={isHovered}
+            />
+          </div>
+        </>
       )}
     </div>
   );
@@ -2177,6 +2371,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   isActiveTurn = false,
   onOpenLocalFile,
   onBranch,
+  onQuoteReply,
   isAssistantMode = false,
   activityAvatar = null,
   runtimeStatusMessages = null,
@@ -2193,6 +2388,8 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   isActiveTurn?: boolean;
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
   onBranch?: (message: CoworkMessage) => void | Promise<void>;
+  /** Quotes one whole message into the composer slot (the reply entry). */
+  onQuoteReply?: (message: CoworkMessage, text: string) => void;
   /** Shuffle-bag scope for the assistant-mode indicator's turn-ack phrases. */
   sessionId?: string | null;
   /** Assistant mode: raw thinking and tool-call chrome are hidden entirely
@@ -2434,8 +2631,9 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
           showCopyButton={showCopyButtons && !hasToolGroupAfter}
           onOpenLocalFile={onOpenLocalFile}
           onBranch={onBranch}
+          onQuoteReply={onQuoteReply}
           isAssistantMode={isAssistantMode}
-          isFinalReply={isAssistantMode && index === deliveryIndex}
+          isTurnEnd={!isAssistantMode || index === visibleAssistantItems.length - 1}
         />
       );
     }
@@ -2569,7 +2767,9 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
                   showCopyButton={showCopyButtons}
                   onOpenLocalFile={onOpenLocalFile}
                   onBranch={onBranch}
+                  onQuoteReply={onQuoteReply}
                   isAssistantMode={isAssistantMode}
+                  isTurnEnd
                 />
               </>
             ) : (
@@ -2962,10 +3162,24 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  // Quoted-selection state: the pending selection (before it is added), the
+  // element the floating bar hangs off, the live range it follows, and the
+  // composer it is handed to.
+  const promptInputRef = useRef<CoworkPromptInputRef>(null);
+  const quoteActionBarRef = useRef<HTMLDivElement>(null);
+  const quoteAnchorRef = useRef<HTMLElement | null>(null);
+  const quoteLiveRangeRef = useRef<Range | null>(null);
+  const [pendingQuoteSelection, setPendingQuoteSelection] = useState<PendingQuotedSelection | null>(null);
+  const [quoteActionPlacement, setQuoteActionPlacement] = useState<PopoverPlacement | null>(null);
   const messageElementRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const consumedOrderFocusKeyRef = useRef<string | null>(null);
   const lastAutoScrollSessionIdRef = useRef<string | null>(null);
   const skipNextAutoScrollEffectRef = useRef(false);
+  // One-shot: a submission that carries a quote block arms it; the arrival of
+  // the reply consumes it (see the follow effect). `shouldAutoScroll` is never
+  // touched on this path — the "back to bottom" button must stay available
+  // while the owner waits parked at the quoted message.
+  const pendingQuoteReplyFollowRef = useRef(false);
   const pinningScrollRef = useRef(false);
   const focusHighlightTimeoutRef = useRef<number | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
@@ -3510,6 +3724,111 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     setMenuPosition(null);
   };
 
+  // ----- Quoted transcript selections ("reply to this specific part") -----
+  //
+  // Selecting text in the transcript floats a one-item bar ("add to
+  // conversation"); adding the selection hands it to the composer as a
+  // removable fragment, which then rides into the prompt body of the next
+  // message. Placement reuses the repository's shared anchored-popover
+  // helpers instead of hand-rolled positioning.
+  const updateQuoteActionPlacement = useCallback(() => {
+    const anchorRect = quoteAnchorRef.current?.getBoundingClientRect() ?? null;
+    const liveRect = quoteLiveRangeRef.current?.getBoundingClientRect() ?? null;
+    const rect = resolveQuoteActionBarAnchorRect(liveRect, anchorRect);
+    if (!rect) return;
+    const barRect = quoteActionBarRef.current?.getBoundingClientRect() ?? null;
+    setQuoteActionPlacement(placePopoverAbove(
+      rect,
+      { width: barRect?.width ?? QUOTE_ACTION_BAR_WIDTH, height: barRect?.height ?? QUOTE_ACTION_BAR_HEIGHT },
+      QUOTE_ACTION_BAR_WIDTH,
+    ));
+  }, []);
+
+  // The bar is rendered before it can be measured, so re-place once it is in
+  // the DOM and its real size is known. Keyed on the pending selection, not on
+  // the placement itself (that state object is replaced by every placement,
+  // which would make this effect its own trigger).
+  useLayoutEffect(() => {
+    if (!pendingQuoteSelection) return;
+    updateQuoteActionPlacement();
+  }, [pendingQuoteSelection, updateQuoteActionPlacement]);
+
+  useAnchorMoveWatcher(quoteAnchorRef, pendingQuoteSelection !== null, updateQuoteActionPlacement);
+
+  const captureQuoteSelection = useCallback(() => {
+    const container = scrollContainerRef.current;
+    const selection = typeof window === 'undefined' ? null : window.getSelection();
+    if (!container || !selection || selection.isCollapsed || selection.rangeCount === 0) {
+      setPendingQuoteSelection(null);
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    if (!container.contains(range.commonAncestorContainer)) {
+      setPendingQuoteSelection(null);
+      return;
+    }
+    const block = quoteTranscriptBlockOf(range.commonAncestorContainer);
+    // A whitespace-only selection is not a selection: it produces nothing.
+    const pending = createPendingQuotedSelection(
+      selection.toString(),
+      block?.getAttribute('data-export-role') ?? null,
+    );
+    if (!pending) {
+      setPendingQuoteSelection(null);
+      return;
+    }
+    quoteLiveRangeRef.current = range;
+    quoteAnchorRef.current = block ?? container;
+    setPendingQuoteSelection(pending);
+    updateQuoteActionPlacement();
+  }, [updateQuoteActionPlacement]);
+
+  const handleTranscriptSelectionEnd = useCallback(() => {
+    captureQuoteSelection();
+  }, [captureQuoteSelection]);
+
+  const handleTranscriptSelectionKeyUp = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    // Shift+arrow selections extend a selection without any mouse event.
+    if (event.shiftKey) captureQuoteSelection();
+  }, [captureQuoteSelection]);
+
+  const handleAddQuoteToConversation = useCallback(() => {
+    const pending = pendingQuoteSelection;
+    setPendingQuoteSelection(null);
+    quoteLiveRangeRef.current = null;
+    quoteAnchorRef.current = null;
+    if (!pending) return;
+    const fragment = createQuotedSelection(pending.text, pending.role);
+    if (!fragment) return;
+    promptInputRef.current?.addQuotedSelection(fragment);
+    promptInputRef.current?.focus();
+    // The passage now lives in the composer; drop the browser selection so the
+    // transcript does not keep showing a highlight for text that is already in.
+    if (typeof window !== 'undefined') window.getSelection()?.removeAllRanges();
+  }, [pendingQuoteSelection]);
+
+  // Dismiss the bar on Escape, and on a click that starts somewhere else (a
+  // click INSIDE the transcript is followed by a fresh selection, which
+  // re-captures on mouseup — dismissing first would only flicker).
+  useEffect(() => {
+    if (!pendingQuoteSelection) return;
+    const handleMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && quoteActionBarRef.current?.contains(target)) return;
+      if (target && scrollContainerRef.current?.contains(target)) return;
+      setPendingQuoteSelection(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPendingQuoteSelection(null);
+    };
+    document.addEventListener('mousedown', handleMouseDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [pendingQuoteSelection]);
+
   // Open folder in Finder/Explorer
   const handleOpenFolder = useCallback(async () => {
     if (!currentSession?.cwd) return;
@@ -3894,12 +4213,25 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   // useLayoutEffect runs before paint so the user never sees a frame where
   // the transcript has grown and the viewport has not yet followed.
   useLayoutEffect(() => {
-    if (!shouldAutoScroll) {
+    // A quote reply sent while the owner was parked at the quoted message
+    // (the confirmation window) must still follow when its reply arrives: the
+    // gate is closed on purpose during the wait, so the one-shot flag bypasses
+    // it for exactly this run and is consumed here — the forced scroll lands
+    // near the bottom, and the ordinary near-bottom mechanics take over from
+    // there.
+    const quoteReplyArrived = shouldFollowPendingQuoteReply(
+      currentSession?.messages,
+      pendingQuoteReplyFollowRef.current,
+    );
+    if (!shouldAutoScroll && !quoteReplyArrived) {
       return;
     }
     if (skipNextAutoScrollEffectRef.current) {
       skipNextAutoScrollEffectRef.current = false;
       return;
+    }
+    if (quoteReplyArrived) {
+      pendingQuoteReplyFollowRef.current = false;
     }
     const sessionId = currentSession?.id ?? null;
     if (isStreaming) {
@@ -3919,6 +4251,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       lastAutoScrollSessionIdRef.current = sessionId;
     }
   }, [currentSession?.id, autoScrollFollowSignal, isStreaming, shouldAutoScroll]);
+
+  // Send path for the one-shot follow above: a submission that carries a quote
+  // block — a per-message reply or a hand-picked selection, both of which open
+  // the composed body with their generated block — arms the flag. Every submit
+  // re-decides it, so a later plain message clears a stale one.
+  const handlePromptSubmit = useCallback((prompt: string, skillPrompt?: string) => {
+    pendingQuoteReplyFollowRef.current = parseSentQuoteBlock(prompt) !== null
+      || parseSentSelectionQuoteBlock(prompt, buildSentSelectionQuoteLabelSets()) !== null;
+    return onContinue(prompt, skillPrompt);
+  }, [onContinue]);
 
   useEffect(() => {
     consumedOrderFocusKeyRef.current = null;
@@ -3994,6 +4336,97 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     cache.turns = stable;
     return stable;
   }, [sessionMessages, sessionId]);
+
+  // The per-message reply entry needs its target's transcript position at
+  // click time. Kept in a ref (refreshed whenever the turns rebuild) so the
+  // handler stays stable and never breaks AssistantTurnBlock's memo for the
+  // whole transcript — same pattern as handleBranchFromMessage.
+  const transcriptMessagePositionsRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    transcriptMessagePositionsRef.current = buildTranscriptMessagePositions(turns);
+  }, [turns]);
+
+  // Readable notice shown beside the composer when a quote-jump target is not
+  // in the rendered window (and the timer that clears the jump flash).
+  const [quoteJumpNotice, setQuoteJumpNotice] = useState<string | null>(null);
+  const quoteJumpHighlightTimerRef = useRef<number | null>(null);
+
+  const handleQuoteReplyMessage = useCallback((message: CoworkMessage, text: string) => {
+    // A fresh quote supersedes any "target not loaded" notice from an earlier
+    // jump attempt.
+    setQuoteJumpNotice(null);
+    const ordinal = transcriptMessagePositionsRef.current.get(message.id);
+    // The entry mounts on exactly the messages `turns` carries — user bubbles
+    // and every assistant bubble (narration included) — and this map is built
+    // from those same turns, so every rendered entry resolves here. A miss
+    // means the mount conditions drifted away from
+    // buildTranscriptMessagePositions: surface it instead of a silent no-op
+    // (the user-visible symptom would be "clicked 回复, nothing happened").
+    if (!ordinal) {
+      console.warn('[cowork] reply entry without a transcript position:', message.id);
+      return;
+    }
+    const fragment = createMessageQuotedSelection({
+      content: text,
+      role: message.type === 'user' ? 'user' : message.type === 'assistant' ? 'assistant' : 'other',
+      ordinal,
+      streaming: message.metadata?.isStreaming === true,
+    });
+    if (!fragment) return;
+    // Same slot as the "add to conversation" path: a reply replaces whatever
+    // quote the composer held.
+    promptInputRef.current?.addQuotedSelection(fragment);
+    promptInputRef.current?.focus();
+  }, []);
+
+  // Jump back to a quoted message: scroll its transcript element into view and
+  // ring it briefly, so "which message was I answering?" is one click, not a
+  // hunt. The sent quote blocks in the transcript are the callers (see
+  // handleJumpToSentQuoteBlock).
+  //
+  // The target can legitimately be outside the rendered window (the transcript
+  // pages older messages in on demand), so a miss is not an error path — but it
+  // must not fail silently either: the composer shows a readable notice beside
+  // the input (same alert style as the submit / branch errors) telling the user
+  // the message is not loaded and how to get it. A hit clears the notice.
+  const handleJumpToQuotedMessage = useCallback((messageId: string) => {
+    const container = scrollContainerRef.current;
+    const element = findTranscriptMessageElement(container, messageId);
+    if (!element) {
+      setQuoteJumpNotice(i18nService.t('coworkQuoteJumpMissing'));
+      console.info('[cowork] quote jump: target message is not in the rendered window; notice shown:', messageId);
+      return;
+    }
+    setQuoteJumpNotice(null);
+    element.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    // Remove-then-add so a repeated jump restarts the full 2.5s window; the
+    // ring is a static style, so no reflow trick is needed.
+    element.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
+    element.classList.add(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
+    if (quoteJumpHighlightTimerRef.current != null) {
+      window.clearTimeout(quoteJumpHighlightTimerRef.current);
+    }
+    quoteJumpHighlightTimerRef.current = window.setTimeout(() => {
+      element.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
+      quoteJumpHighlightTimerRef.current = null;
+    }, 2500);
+  }, []);
+
+  // Jump back from a *sent* quote block (a message body that opens with the
+  // generated reply block). The block only carries the quoted message's
+  // position, so the jump resolves position → id against the transcript's
+  // current map and reuses the scroll + ring path above. A position the map no
+  // longer holds is the same "not in the loaded window" story — the readable
+  // notice, never a silent no-op.
+  const handleJumpToSentQuoteBlock = useCallback((ordinal: number) => {
+    const targetId = buildTranscriptMessageIdsByOrdinal(transcriptMessagePositionsRef.current).get(ordinal);
+    if (!targetId) {
+      setQuoteJumpNotice(i18nService.t('coworkQuoteJumpMissing'));
+      console.info('[cowork] quote jump: quoted position is not in the rendered transcript window; notice shown:', ordinal);
+      return;
+    }
+    handleJumpToQuotedMessage(targetId);
+  }, [handleJumpToQuotedMessage]);
 
   // A window whose messages all render as nothing (the transcript hides control
   // and internal-signal messages) would strand the history: there is nothing to
@@ -4094,12 +4527,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       return (
         <React.Fragment key={turn.id}>
           {turn.userMessage && (
-            <div data-export-role="user-message">
+            <div data-export-role="user-message" data-message-id={turn.userMessage.id}>
               <UserMessageItem
                 message={turn.userMessage}
                 skills={skills}
                 sessionType={currentSession?.sessionType}
                 sessionTitle={currentSession?.title}
+                botName={currentSession?.metabotName}
+                resolveLocalFilePath={resolveLocalFilePath}
+                onQuoteReply={handleQuoteReplyMessage}
+                onJumpToQuoteBlock={handleJumpToSentQuoteBlock}
               />
             </div>
           )}
@@ -4116,6 +4553,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 isActiveTurn={currentSession?.status === 'running' && isLastTurn}
                 onOpenLocalFile={handleOpenLocalFile}
                 onBranch={handleBranchFromMessage}
+                onQuoteReply={handleQuoteReplyMessage}
                 isAssistantMode={isAssistantMode}
                 activityAvatar={sessionMetabot?.avatar ?? currentSession.metabotAvatar ?? null}
                 runtimeStatusMessages={isLastTurn ? runtimeStatusMessages : null}
@@ -4366,6 +4804,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       <div
         ref={scrollContainerRef}
         onScroll={handleMessagesScroll}
+        onMouseUp={handleTranscriptSelectionEnd}
+        onKeyUp={handleTranscriptSelectionKeyUp}
         className="flex-1 overflow-y-auto overflow-anchor-none min-h-0 pt-3"
       >
         {isLoadingEarlierMessages && (
@@ -4714,8 +5154,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             ) : (
               <CoworkPromptInput
                 key={currentSession.id}
+                ref={promptInputRef}
                 scopeKey={currentSession.id}
-                onSubmit={onContinue}
+                onSubmit={handlePromptSubmit}
                 onStop={onStop}
                 isStreaming={isStreaming}
                 steerDisabled={steerDisabled}
@@ -4733,6 +5174,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 suggestedPrompts={!isStreaming && latestPromptSuggestion ? [latestPromptSuggestion] : undefined}
                 commands={buildSessionComposerCommands({ sessionId: currentSession.id, goal: currentSession.goal ?? null })}
                 sessionMetabotId={currentSession.metabotId ?? null}
+                botName={currentSession.metabotName}
               />
             )}
             {submitError && (
@@ -4743,6 +5185,14 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             {branchActionError && (
               <div className="mt-2 text-xs text-red-500 dark:text-red-400" role="alert">
                 {branchActionError}
+              </div>
+            )}
+            {quoteJumpNotice && (
+              // "Jump to the quoted message" missed: the message is not in the
+              // rendered window. Readable, beside the input, same style as the
+              // two alerts above — never a silent no-op.
+              <div className="mt-2 text-xs text-red-500 dark:text-red-400" role="alert">
+                {quoteJumpNotice}
               </div>
             )}
           </div>
@@ -4772,6 +5222,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         </>
       )}
       </div>
+
+      {/* Floating "add to conversation" bar for the pending transcript
+          selection. Rendered only while a non-empty selection exists. */}
+      {pendingQuoteSelection && quoteActionPlacement && (
+        <CoworkQuoteActionBar
+          ref={quoteActionBarRef}
+          placement={quoteActionPlacement}
+          onAdd={handleAddQuoteToConversation}
+        />
+      )}
 
       {/* Drag overlay so mouse events are not swallowed mid-resize */}
       {isMarkdownViewerResizing && (

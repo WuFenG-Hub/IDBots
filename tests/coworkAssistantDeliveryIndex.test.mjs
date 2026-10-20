@@ -1,7 +1,9 @@
-// Assistant mode shows its hover-action toolbar on the turn's final reply
-// bubble only; narration and process bubbles render without one. The toolbar
-// hangs off the delivery index, so this pins findDeliveryAssistantIndex: the
-// last non-thinking assistant message wins, everything earlier is process.
+// The delivery index anchors the professional-mode "Worked for" collapse: the
+// last non-thinking assistant message is the always-visible delivery,
+// everything earlier is process. (Assistant mode's hover-action toolbar used
+// to hang off this one index too; it is now mounted per bubble — narration
+// included — see shouldShowAssistantBubbleActions.) This file pins
+// findDeliveryAssistantIndex: the last non-thinking assistant message wins.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

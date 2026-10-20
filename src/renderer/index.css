@@ -93,8 +93,29 @@ blockquote {
   color: var(--text-secondary);
   padding-left: 1em;
   font-style: italic;
-  margin: 1em 0;
+  /* Kept tight on purpose: a quoted block sits inside a message bubble, and
+     the former 1em top/bottom pushed the bubble taller than its content. */
+  margin: 0.25em 0;
 }
+
+/* A SENT quote chip reads on one row, whatever the bubble width: the excerpt is
+   kept whole and this clamps the rendered line so a narrow bubble ellipsizes
+   (always with a "…") instead of wrapping to a second row. The vertical padding
+   is what makes the left rule read a touch taller than its text. Scoped to the
+   sent quote only — hand-written blockquotes keep normal wrapping.
+   The ellipsis must sit on the element that actually holds the text (the <p>
+   inside the blockquote), not on the blockquote wrapper. */
+.cowork-sent-quote-line blockquote {
+  overflow: hidden;
+  padding-top: 0.3em;
+  padding-bottom: 0.3em;
+}
+.cowork-sent-quote-line blockquote p {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 
 .chat-message {
   content-visibility: auto;
@@ -601,9 +622,15 @@ select::-ms-expand {
    hairline inset ring — pure #FFFFFF was faint against the neutral #FAFAFA
    chat surface (the ring plus the original subtle drop shadow, one
    declaration so it cannot fight the shadow-subtle utility). Dark mode's
-   blue-slate fill already contrasts the #1B1B1D page, so it is untouched. */
-.cowork-user-bubble {
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.07), 0 1px 2px rgba(0, 0, 0, 0.05);
+   blue-slate fill already contrasts the #1B1B1D page, so it is untouched.
+   The rule lives in the components layer so a utility can still override it
+   when the state calls for it: the quote-jump ring (ring-1 ring-claude-accent)
+   must win the cascade on this bubble, exactly as it does over the assistant
+   bubble's shadow-subtle utility. */
+@layer components {
+  .cowork-user-bubble {
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.07), 0 1px 2px rgba(0, 0, 0, 0.05);
+  }
 }
 
 @keyframes scheduled-task-running-glow {

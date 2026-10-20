@@ -1130,6 +1130,57 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkInputFileLabel: '附件路径',
     coworkAttachmentRemove: '移除',
     coworkAttachmentImageLoading: '图片读取中…',
+    // Quoted transcript selections ("reply to this specific part")
+    coworkQuoteAddToConversation: '添加到对话',
+    coworkQuoteActionLabel: '引用所选文本',
+    coworkQuoteSelectionsLabel: '已选文本片段',
+    coworkQuoteRemove: '移除引用',
+    coworkQuoteTruncated: '已截断',
+    coworkQuoteSourceUser: '你的消息',
+    coworkQuoteSourceAssistant: 'Bot 回复',
+    coworkQuoteSourceOther: '对话片段',
+    coworkQuoteBlockHeader: '从对话中引用的片段（请针对这些片段回答）：',
+    coworkQuoteBlockItem: '引自{source}：',
+    // Display-only source lines for a SENT selection quote: the transcript
+    // strips the generated header and swaps "引自{source}：" for these — the
+    // prompt body itself never changes (the model still reads the generated
+    // block verbatim; see parseSentSelectionQuoteBlock).
+    coworkQuoteSentSourceUser: '你：',
+    coworkQuoteSentSourceAssistant: '{name}：',
+    coworkQuoteSentSourceOther: '{name}：',
+    // Display-only wording for a whole-message reply's label line, used when the
+    // transcript renders the sent block (the prompt body keeps
+    // coworkQuoteReplySource*, which the model reads). `{source}` is the
+    // speaker, WeChat-style — no message number in the transcript. `{name}` is
+    // filled with the session's bot name when the speaker is the assistant.
+    coworkQuoteSentReplyLabel: '{source}',
+    // Display-only speaker names for a whole-message reply label, WeChat-style.
+    // The assistant speaks in the session bot's own name (`{name}`).
+    coworkQuoteSentReplySourceUser: '你：',
+    coworkQuoteSentReplySourceAssistant: '{name}：',
+    coworkQuoteSentReplySourceOther: '{name}：',
+    // Used when the session carries no bot name, so the label still reads as a
+    // person's name rather than leaking the {name} placeholder.
+    coworkQuoteSentReplySourceAssistantFallback: 'Bot',
+    // The per-message "⋯" trigger that opens the quote / copy / branch menu
+    coworkMessageActionsMore: '更多操作',
+    // Per-message quote reply (the reply entry on a message's action bar)
+    coworkQuoteReplyAction: '回复',
+    // Clicking a sent quote block jumps back to the message it answers.
+    coworkQuoteJumpToMessage: '跳到原消息',
+    // Shown beside the composer when the quoted message is not inside the
+    // window of the transcript that is currently rendered.
+    coworkQuoteJumpMissing: '引用的消息不在当前加载的对话中，可向上滚动加载更早的消息后再试',
+    coworkQuoteReplyPreviewLabel: '引用消息预览',
+    coworkQuoteReplyCancel: '取消回复',
+    coworkQuoteReplyPlaceholder: '回复…',
+    coworkQuoteReplyBlockHeader: '回复以下消息：',
+    coworkQuoteReplyBlockItem: '#{ordinal} {source}{streaming}：',
+    coworkQuoteReplyStreamingMark: '该条仍在生成中',
+    coworkQuoteReplySourceUser: '你的消息',
+    coworkQuoteReplySourceAssistant: '助手消息',
+    coworkQuoteReplySourceOther: '对话消息',
+    coworkQuoteTruncatedNote: '（已截断：仅保留前 {max} 字）',
     contextMenuCut: '剪切',
     contextMenuCopy: '复制',
     contextMenuPaste: '粘贴',
@@ -4180,6 +4231,46 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkInputFileLabel: 'Attachment path',
     coworkAttachmentRemove: 'Remove',
     coworkAttachmentImageLoading: 'Loading image…',
+    // Quoted transcript selections ("reply to this specific part")
+    coworkQuoteAddToConversation: 'Add to conversation',
+    coworkQuoteActionLabel: 'Quote the selected text',
+    coworkQuoteSelectionsLabel: 'Selected text fragments',
+    coworkQuoteRemove: 'Remove quote',
+    coworkQuoteTruncated: 'truncated',
+    coworkQuoteSourceUser: 'Your message',
+    coworkQuoteSourceAssistant: 'Bot reply',
+    coworkQuoteSourceOther: 'Conversation excerpt',
+    coworkQuoteBlockHeader: 'Quoted excerpts from the conversation (reply to these):',
+    coworkQuoteBlockItem: 'Quoted from {source}:',
+    // Display-only source lines for a SENT selection quote (see the zh note).
+    coworkQuoteSentSourceUser: 'You:',
+    coworkQuoteSentSourceAssistant: '{name}:',
+    coworkQuoteSentSourceOther: '{name}:',
+    // Display-only whole-message reply label (see the zh note).
+    coworkQuoteSentReplyLabel: '{source}',
+    coworkQuoteSentReplySourceUser: 'You:',
+    coworkQuoteSentReplySourceAssistant: '{name}:',
+    coworkQuoteSentReplySourceOther: '{name}:',
+    coworkQuoteSentReplySourceAssistantFallback: 'Bot',
+    // The per-message "⋯" trigger that opens the quote / copy / branch menu
+    coworkMessageActionsMore: 'More actions',
+    // Per-message quote reply (the reply entry on a message's action bar)
+    coworkQuoteReplyAction: 'Reply',
+    // Clicking a sent quote block jumps back to the message it answers.
+    coworkQuoteJumpToMessage: 'Jump to the quoted message',
+    // Shown beside the composer when the quoted message is not inside the
+    // window of the transcript that is currently rendered.
+    coworkQuoteJumpMissing: 'The quoted message is not in the loaded conversation — scroll up to load earlier messages and try again',
+    coworkQuoteReplyPreviewLabel: 'Quoted message',
+    coworkQuoteReplyCancel: 'Cancel reply',
+    coworkQuoteReplyPlaceholder: 'Reply…',
+    coworkQuoteReplyBlockHeader: 'Replying to the following messages:',
+    coworkQuoteReplyBlockItem: '#{ordinal} {source}{streaming}:',
+    coworkQuoteReplyStreamingMark: 'still being generated',
+    coworkQuoteReplySourceUser: 'your message',
+    coworkQuoteReplySourceAssistant: 'the assistant message',
+    coworkQuoteReplySourceOther: 'the quoted message',
+    coworkQuoteTruncatedNote: '(truncated: only the first {max} characters are kept)',
     contextMenuCut: 'Cut',
     contextMenuCopy: 'Copy',
     contextMenuPaste: 'Paste',
@@ -6255,6 +6346,20 @@ class I18nService {
       return translations.en[key] || key;
     }
     return translation;
+  }
+
+  /**
+   * Translation for a specific language, regardless of the active one.
+   *
+   * The transcript renders a sent quote block in the language it was WRITTEN
+   * in, so the display-side block parsers match the generated form against
+   * every shipped dictionary — not only the one currently active. Same
+   * fallback as `t`: a missing key degrades to English, then to the key.
+   */
+  tIn(language: LanguageType, key: string): string {
+    const translation = translations[language]?.[key];
+    if (translation) return translation;
+    return translations.en[key] ?? key;
   }
 
   subscribe(listener: () => void): () => void {

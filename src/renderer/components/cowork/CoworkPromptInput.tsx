@@ -25,7 +25,18 @@ import { RootState } from '../../store';
 import { setDraftPrompt, setSessionDraft } from '../../store/slices/coworkSlice';
 import { setSkills, toggleActiveSkill } from '../../store/slices/skillSlice';
 import { Skill } from '../../types/skill';
-import type { CoworkContextUsage, CoworkPermissionMode, CoworkWorkspaceSelection } from '../../types/cowork';
+import type {
+  CoworkContextUsage,
+  CoworkPermissionMode,
+  CoworkQuotedSelection,
+  CoworkWorkspaceSelection,
+} from '../../types/cowork';
+import CoworkQuotedSelectionTiles from './CoworkQuotedSelectionTiles';
+import {
+  QUOTED_SELECTION_SOURCE_KEYS,
+  composeSubmittedCoworkPrompt,
+  removeQuotedSelection,
+} from './coworkQuotedSelections';
 import type { ProjectRecord } from '../../types/project';
 import { getCompactFolderName } from '../../utils/path';
 import {
@@ -33,7 +44,6 @@ import {
   type VersionedComposerField,
 } from './coworkPromptSubmission';
 import {
-  composeCoworkSubmitPrompt,
   coworkAttachmentAdmission,
   forEachIncomingAttachmentPath,
   submitCoworkComposerDraft,
@@ -56,6 +66,8 @@ interface CoworkPromptInputStateOptions {
   disabled: boolean;
   steerDisabled: boolean;
   attachmentCount: number;
+  /** Quoted transcript excerpts waiting in the composer; they can be sent on their own. */
+  quotedSelectionCount?: number;
 }
 
 export const deriveCoworkPromptInputState = ({
@@ -64,21 +76,47 @@ export const deriveCoworkPromptInputState = ({
   disabled,
   steerDisabled,
   attachmentCount,
+  quotedSelectionCount = 0,
 }: CoworkPromptInputStateOptions) => {
   const hasTextInput = Boolean(value.trim());
-  // ONE content verdict for BOTH branches: text OR attachments. The idle branch
-  // always counted attachments; the streaming branch used to key off text alone,
-  // so while a turn streamed an image-only composer had no content and the
-  // button rendered as Stop — a user who pasted a picture mid-run and reached
-  // for Send hit Stop, cancelling the very turn they were steering. So the
-  // boundary and the affordance are fixed together, never the boundary alone:
-  // the attachment already rides the same submit as text (see
-  // composeCoworkSubmitPrompt), and only `steerDisabled` closes the door.
-  const hasSubmitContent = hasTextInput || attachmentCount > 0;
+  // ONE content verdict for BOTH branches: text OR attachments OR a quoted
+  // fragment. An image making a mid-run steer sendable is the behaviour the
+  // attachment slice exists to fix (while the button read Stop, reaching for
+  // Send cancelled the very turn being steered); a quoted excerpt steers too.
+  const hasSubmitContent = hasTextInput || attachmentCount > 0 || quotedSelectionCount > 0;
   const isSteerSubmit = isStreaming && hasSubmitContent && !steerDisabled;
   const showStopButton = isStreaming && (!hasSubmitContent || steerDisabled);
   const canSubmit = !disabled && (isStreaming ? isSteerSubmit : hasSubmitContent);
   return { hasTextInput, isSteerSubmit, showStopButton, canSubmit };
+};
+
+export interface CoworkComposerPlaceholderInput {
+  isStreaming: boolean;
+  steerDisabled: boolean;
+  /** The quote slot holds a fragment: the composer is in reply mode. */
+  hasQuotedSelections: boolean;
+  /** Fallback shown when idle with an empty quote slot. */
+  idlePlaceholder: string;
+}
+
+/**
+ * Effective placeholder of the composer. A filled quote slot is a reply, so
+ * its copy wins over every other hint — including the steer copy while a turn
+ * streams, since the slot can be filled by replying to a streaming message.
+ */
+export const deriveCoworkComposerPlaceholder = ({
+  isStreaming,
+  steerDisabled,
+  hasQuotedSelections,
+  idlePlaceholder,
+}: CoworkComposerPlaceholderInput): string => {
+  if (hasQuotedSelections) return i18nService.t('coworkQuoteReplyPlaceholder');
+  if (isStreaming) {
+    return i18nService.t(steerDisabled
+      ? 'coworkSteerSandboxUnavailablePlaceholder'
+      : 'coworkSteerPlaceholder');
+  }
+  return idlePlaceholder;
 };
 
 export interface CoworkContextMenuDerivedState {
@@ -281,6 +319,14 @@ export interface CoworkPromptInputRef {
   focus: () => void;
   /** 从外部（如宿主面板自带的附件按钮）追加附件 */
   addAttachments: (paths: string[]) => void;
+  /**
+   * Put one quoted transcript fragment into the composer's quote slot (the
+   * transcript's selection action bar and the per-message reply entry both
+   * call this). The slot is single-target: a new quote replaces the previous
+   * one, so the two entries never keep two parallel slots. Tracked separately
+   * from file attachments.
+   */
+  addQuotedSelection: (selection: CoworkQuotedSelection) => void;
 }
 
 interface CoworkPromptInputProps {
@@ -327,6 +373,8 @@ interface CoworkPromptInputProps {
   commands?: ComposerCommand[];
   /** Session's bot binding; narrows the skills picker to that bot's view. */
   sessionMetabotId?: number | null;
+  /** The session bot's name — names the speaker in the pending-quote bar. */
+  botName?: string | null;
 }
 
 const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInputProps>(
@@ -359,6 +407,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       onPermissionModeChange,
       commands,
       sessionMetabotId,
+      botName,
     } = props;
     const isMac = (window as { electron?: { platform?: string } }).electron?.platform === 'darwin';
     const dispatch = useDispatch();
@@ -369,8 +418,13 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     // session's typed text; the unscoped New Task composer owns the global draft.
     const initialDraftRef = useRef(scopeKey ? (sessionDrafts[scopeKey]?.value ?? '') : draftPrompt);
     const initialAttachmentsRef = useRef(scopeKey ? (sessionDrafts[scopeKey]?.attachments ?? []) : []);
+    // Quoted transcript excerpts ride along with the draft (same lifetime, same
+    // store entry) but stay a list of their own: they are conversation text,
+    // not host paths.
+    const initialQuotedSelectionsRef = useRef(scopeKey ? (sessionDrafts[scopeKey]?.quotedSelections ?? []) : []);
     const [value, setValue] = useState(initialDraftRef.current);
     const [attachments, setAttachments] = useState<CoworkAttachment[]>(initialAttachmentsRef.current);
+    const [quotedSelections, setQuotedSelections] = useState<CoworkQuotedSelection[]>(initialQuotedSelectionsRef.current);
     const [showFolderMenu, setShowFolderMenu] = useState(false);
     const [showFolderRequiredWarning, setShowFolderRequiredWarning] = useState(false);
     const [plusMenuOpen, setPlusMenuOpen] = useState(false);
@@ -401,26 +455,54 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     // store, the unscoped New Task composer keeps owning the global draft. The
     // versioned fields call this on every change, including takeAndClear after
     // a submit, which is what makes drafts persist across session switches.
-    const publishComposerState = useCallback((nextValue: string, nextAttachments: CoworkAttachment[]) => {
+    const publishComposerState = useCallback((
+      nextValue: string,
+      nextAttachments: CoworkAttachment[],
+      nextQuotedSelections: CoworkQuotedSelection[],
+    ) => {
       const scope = activeScopeKeyRef.current;
       if (scope) {
-        dispatch(setSessionDraft({ sessionId: scope, value: nextValue, attachments: nextAttachments }));
+        dispatch(setSessionDraft({
+          sessionId: scope,
+          value: nextValue,
+          attachments: nextAttachments,
+          quotedSelections: nextQuotedSelections,
+        }));
       } else {
         dispatch(setDraftPrompt(nextValue));
       }
     }, [dispatch]);
     const draftFieldRef = useRef<VersionedComposerField<string> | null>(null);
     const attachmentFieldRef = useRef<VersionedComposerField<CoworkAttachment[]> | null>(null);
+    const quotedSelectionFieldRef = useRef<VersionedComposerField<CoworkQuotedSelection[]> | null>(null);
     if (!draftFieldRef.current) {
       draftFieldRef.current = createVersionedComposerField(initialDraftRef.current, () => '', (nextValue) => {
         setValue(nextValue);
-        publishComposerState(nextValue, attachmentFieldRef.current?.get() ?? []);
+        publishComposerState(
+          nextValue,
+          attachmentFieldRef.current?.get() ?? [],
+          quotedSelectionFieldRef.current?.get() ?? [],
+        );
       });
     }
     if (!attachmentFieldRef.current) {
       attachmentFieldRef.current = createVersionedComposerField(initialAttachmentsRef.current, () => [], (nextAttachments) => {
         setAttachments(nextAttachments);
-        publishComposerState(draftFieldRef.current?.get() ?? '', nextAttachments);
+        publishComposerState(
+          draftFieldRef.current?.get() ?? '',
+          nextAttachments,
+          quotedSelectionFieldRef.current?.get() ?? [],
+        );
+      });
+    }
+    if (!quotedSelectionFieldRef.current) {
+      quotedSelectionFieldRef.current = createVersionedComposerField(initialQuotedSelectionsRef.current, () => [], (nextQuotedSelections) => {
+        setQuotedSelections(nextQuotedSelections);
+        publishComposerState(
+          draftFieldRef.current?.get() ?? '',
+          attachmentFieldRef.current?.get() ?? [],
+          nextQuotedSelections,
+        );
       });
     }
 
@@ -572,11 +654,20 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       }
       field.set(next);
     },
+    addQuotedSelection: (selection: CoworkQuotedSelection) => {
+      const field = quotedSelectionFieldRef.current;
+      if (!field || !selection || !selection.text.trim()) return;
+      // Single-target slot: the newest quote (a hand-picked passage or a
+      // message reply) replaces the previous one instead of stacking up; the
+      // fragment model still supports N for a future multi-select.
+      field.set([selection]);
+    },
   }));
 
   React.useLayoutEffect(() => () => {
     draftFieldRef.current?.invalidate();
     attachmentFieldRef.current?.invalidate();
+    quotedSelectionFieldRef.current?.invalidate();
   }, []);
 
   useEffect(() => {
@@ -587,13 +678,16 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       activeScopeKeyRef.current = scopeKey;
       draftFieldRef.current?.invalidate();
       attachmentFieldRef.current?.invalidate();
+      quotedSelectionFieldRef.current?.invalidate();
       if (scopeKey) {
         const stored = sessionDrafts[scopeKey];
         draftFieldRef.current?.set(stored?.value ?? '');
         attachmentFieldRef.current?.set(stored?.attachments ?? []);
+        quotedSelectionFieldRef.current?.set(stored?.quotedSelections ?? []);
       } else {
         draftFieldRef.current?.set(draftPrompt);
         attachmentFieldRef.current?.set([]);
+        quotedSelectionFieldRef.current?.set([]);
       }
     }
   }, [scopeKey, sessionDrafts, draftPrompt]);
@@ -761,6 +855,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     }
     draftFieldRef.current?.set('');
     attachmentFieldRef.current?.set([]);
+    quotedSelectionFieldRef.current?.set([]);
     setClaim(null);
   }, [showCommandNotice, submitMessageForCommand]);
 
@@ -806,28 +901,23 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
 
     const draftField = draftFieldRef.current;
     const attachmentField = attachmentFieldRef.current;
-    if (!draftField || !attachmentField) return;
+    const quotedSelectionField = quotedSelectionFieldRef.current;
+    if (!draftField || !attachmentField || !quotedSelectionField) return;
     const submittedValue = draftField.get();
     const submittedAttachments = attachmentField.get();
-    // One composition for both branches: a steering submit carries the same
-    // attachment manifest an idle send does. Composing from the text alone is
-    // how a mid-run image used to vanish between the composer and onSubmit.
-    const { trimmedValue, finalPrompt } = composeCoworkSubmitPrompt({
-      submittedValue,
-      attachments: submittedAttachments,
-      inputFileLabel,
-    });
-    // The streaming guard is the idle rule below, verbatim: text OR attachments
-    // make a submission. Demanding text alone (`!trimmedValue`) refused an
-    // image-only steer even after the attachment doors had opened — the chip got
-    // in and send then did nothing. Attachments already ride the same submit and
-    // the same snapshot as text (`composeCoworkSubmitPrompt` hands an empty draft
-    // the manifest line), and steering a running turn with a picture is ordinary
-    // in the sibling products (grokbot / codex / dsh), so `length === 0` is the
-    // only condition the empty case still needs. Known boundary, left alone here:
-    // the send/stop affordance still keys off text alone, so an image-only steer
-    // is Enter-reachable rather than button-reachable.
-    if (isStreaming && !trimmedValue && submittedAttachments.length === 0) return;
+    const submittedQuotedSelections = quotedSelectionField.get();
+    // ONE composition for both branches, carrying all three: text, quoted
+    // excerpts and the attachment manifest. A steering submit used to compose
+    // from text alone, which is how a mid-run image vanished between the
+    // composer and onSubmit.
+    const trimmedValue = submittedValue.trim();
+    // The streaming guard is the idle rule: text OR attachments OR a quoted
+    // fragment make a submission. Demanding text alone refused an image-only
+    // steer even after the attachment doors had opened — the chip got in and
+    // send then did nothing. Steering a running turn with a picture is ordinary
+    // in the sibling products, and a quote steers too.
+    if (isStreaming && !trimmedValue && submittedAttachments.length === 0
+        && submittedQuotedSelections.length === 0) return;
     // Slash-command adjudication (DSH port): a live claim, a bare `/name`
     // line, or a manually typed `/name <args>` executes the command instead
     // of sending a message; unknown /-leading text falls through as a
@@ -849,7 +939,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       setShowFolderRequiredWarning(true);
       return;
     }
-    if (!isStreaming && !trimmedValue && submittedAttachments.length === 0) return;
+    if (!isStreaming && !trimmedValue && submittedAttachments.length === 0 && submittedQuotedSelections.length === 0) return;
     setShowFolderRequiredWarning(false);
 
     // Get active skills prompts and combine them
@@ -862,13 +952,50 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       ? activeSkills.map(buildInlinedSkillPrompt).join('\n\n')
       : undefined;
 
+    const attachmentLines = submittedAttachments.map((attachment) =>
+      `${inputFileLabel}: ${attachment.path}`
+    ).join('\n');
+    // Quoted excerpts are written into the prompt BODY, not merely rendered
+    // next to it: the bot re-reads the conversation as plain text each turn, so
+    // a highlight alone would never reach it. One composition serves both
+    // branches and carries all three parts — text, excerpts, attachment
+    // manifest — because a steering submit carries the same manifest an idle
+    // send does.
+    const finalPrompt = composeSubmittedCoworkPrompt({
+      value: trimmedValue,
+      quotedSelections: submittedQuotedSelections,
+      attachmentLines,
+      labels: {
+        header: i18nService.t('coworkQuoteBlockHeader'),
+        item: i18nService.t('coworkQuoteBlockItem'),
+        sourceLabel: {
+          user: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.user),
+          assistant: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.assistant),
+          other: i18nService.t(QUOTED_SELECTION_SOURCE_KEYS.other),
+        },
+        // Whole-message replies label themselves with role + position (and a
+        // generating mark) instead of the passage template.
+        replyBlockHeader: i18nService.t('coworkQuoteReplyBlockHeader'),
+        replyBlockItem: i18nService.t('coworkQuoteReplyBlockItem'),
+        replyStreamingMark: i18nService.t('coworkQuoteReplyStreamingMark'),
+        replySourceLabel: {
+          user: i18nService.t('coworkQuoteReplySourceUser'),
+          assistant: i18nService.t('coworkQuoteReplySourceAssistant'),
+          other: i18nService.t('coworkQuoteReplySourceOther'),
+        },
+        truncatedNote: i18nService.t('coworkQuoteTruncatedNote'),
+      },
+    });
+
     try {
-      // Text and attachments are ONE submission: both fields are cleared
-      // together, and a refusal (or a throw) puts both back. Steering takes the
-      // attachment snapshot too — skipping it is what lost a mid-run image.
+      // Text, attachments and quoted excerpts are ONE submission: all three
+      // fields are cleared together, and a refusal (or a throw) puts all of
+      // them back. Steering takes the attachment snapshot too — skipping it is
+      // what lost a mid-run image.
       await submitCoworkComposerDraft({
         draftField,
         attachmentField,
+        quotedSelectionField,
         onSubmit: () => onSubmit(finalPrompt, isStreaming ? undefined : skillPrompt),
       });
     } catch (error) {
@@ -1103,6 +1230,12 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     field.set(field.get().filter((attachment) => attachment.path !== path));
   }, []);
 
+  const handleRemoveQuotedSelection = useCallback((id: string) => {
+    const field = quotedSelectionFieldRef.current;
+    if (!field) return;
+    field.set(removeQuotedSelection(field.get(), id));
+  }, []);
+
   const hasFileTransfer = (dataTransfer: DataTransfer | null): boolean => {
     if (!dataTransfer) return false;
     if (dataTransfer.files.length > 0) return true;
@@ -1293,18 +1426,26 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     disabled,
     steerDisabled,
     attachmentCount: attachments.length,
+    quotedSelectionCount: quotedSelections.length,
   });
-  const effectivePlaceholder = isStreaming
-    ? i18nService.t(steerDisabled
-      ? 'coworkSteerSandboxUnavailablePlaceholder'
-      : 'coworkSteerPlaceholder')
-    : placeholder;
+  const effectivePlaceholder = deriveCoworkComposerPlaceholder({
+    isStreaming,
+    steerDisabled,
+    hasQuotedSelections: quotedSelections.length > 0,
+    idlePlaceholder: placeholder,
+  });
   const enhancedContainerClass = isDraggingFiles
     ? `${containerClass} ring-2 ring-claude-accent/50 border-claude-accent/60`
     : containerClass;
 
   return (
     <div className="relative">
+      <CoworkQuotedSelectionTiles
+        selections={quotedSelections}
+        onRemove={handleRemoveQuotedSelection}
+        botName={botName}
+        disabled={disabled || isStreaming}
+      />
       <div
         ref={composerCardRef}
         className={enhancedContainerClass}
