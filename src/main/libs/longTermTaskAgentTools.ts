@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import type { LongTermTaskStore } from '../longTermTaskStore';
 import { WAIT_UNTIL_STRICT_ISO } from '../longTermTaskStore';
+import type {
+  LongTermBoard,
+  LongTermParticipant,
+  LongTermTaskSummary,
+} from '../../renderer/types/longTermTask';
 import { buildDelegationAnchorBlock } from './longTermDelegationAnchor';
 
 /**
@@ -34,6 +39,32 @@ function textResult(text: string, isError = false) {
 
 function jsonResult(value: unknown) {
   return textResult(JSON.stringify(value, null, 2));
+}
+
+/**
+ * Agent-facing projection of a task row. The store's `participants[]` carry
+ * each bot's avatar as a base64 data URL (~75K chars per bot) for the board's
+ * participant chips; the model has no use for those bytes, yet every create /
+ * activate / get / list echo shipped them — 87% of a 9-sub-project result,
+ * which is what pushed the runtime shaper into its proportional pass and tore
+ * the identity fields (bug report 2026-10-20: id "lt", title "I"). The Twin's
+ * channel drops the avatar here; the owner channel (IPC) keeps the full rows.
+ */
+export type LongTermAgentParticipant = Omit<LongTermParticipant, 'avatar'>;
+export type LongTermAgentTaskView<T extends LongTermTaskSummary> = Omit<T, 'participants'> & {
+  participants: LongTermAgentParticipant[];
+};
+
+export function toAgentTaskView<T extends LongTermTaskSummary>(task: T): LongTermAgentTaskView<T> {
+  const { participants, ...rest } = task;
+  return {
+    ...rest,
+    participants: participants.map(({ id, name }) => ({ id, name })),
+  };
+}
+
+export function toAgentBoardView(board: LongTermBoard): Omit<LongTermBoard, 'cards'> & { cards: LongTermAgentTaskView<LongTermTaskSummary>[] } {
+  return { ...board, cards: board.cards.map((card) => toAgentTaskView(card)) };
 }
 
 export interface LongTermTaskAgentControl {
@@ -79,7 +110,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
           'twin',
         );
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentTaskView(result.value));
       } catch (error) {
         return textResult(`Failed to create the long-term task: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -94,7 +125,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       try {
         const result = store().activateTask(String(args.taskId ?? ''), 'twin');
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentTaskView(result.value));
       } catch (error) {
         return textResult(`Failed to activate: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -107,7 +138,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
     {},
     async () => {
       try {
-        return jsonResult(store().listBoard());
+        return jsonResult(toAgentBoardView(store().listBoard()));
       } catch (error) {
         return textResult(`Failed to list: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -122,7 +153,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
       try {
         const detail = store().getTask(String(args.taskId ?? ''));
         if (!detail) return textResult('Task not found.', true);
-        return jsonResult(detail);
+        return jsonResult(toAgentTaskView(detail));
       } catch (error) {
         return textResult(`Failed to read: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -143,15 +174,27 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
     async (args: { taskId?: string; title?: string; goal?: string; acceptanceDelegate?: boolean; action?: 'pause' | 'resume' | 'cancel'; note?: string }) => {
       try {
         const taskId = String(args.taskId ?? '');
-        if (args.action === 'pause') return jsonResult(store().pauseTask(taskId, 'twin', args.note ?? ''));
-        if (args.action === 'resume') return jsonResult(store().activateTask(taskId, 'twin'));
-        if (args.action === 'cancel') return jsonResult(store().cancelTask(taskId, 'twin', args.note ?? ''));
+        if (args.action === 'pause') {
+          const paused = store().pauseTask(taskId, 'twin', args.note ?? '');
+          if (!paused.ok) return textResult(`Refused (${paused.code}): ${paused.error}`, true);
+          return jsonResult(toAgentTaskView(paused.value));
+        }
+        if (args.action === 'resume') {
+          const resumed = store().activateTask(taskId, 'twin');
+          if (!resumed.ok) return textResult(`Refused (${resumed.code}): ${resumed.error}`, true);
+          return jsonResult(toAgentTaskView(resumed.value));
+        }
+        if (args.action === 'cancel') {
+          const cancelled = store().cancelTask(taskId, 'twin', args.note ?? '');
+          if (!cancelled.ok) return textResult(`Refused (${cancelled.code}): ${cancelled.error}`, true);
+          return textResult('Cancelled.');
+        }
         const result = store().updateTask(
           { taskId, title: args.title, goal: args.goal, acceptanceDelegate: args.acceptanceDelegate },
           'twin',
         );
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentTaskView(result.value));
       } catch (error) {
         return textResult(`Failed to update: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -174,7 +217,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
           { note: String(args.summary ?? ''), evidence: (args.evidence ?? []) as never[] },
         );
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(result.value);
+        return jsonResult(toAgentTaskView(result.value));
       } catch (error) {
         return textResult(`Failed to complete: ${error instanceof Error ? error.message : String(error)}`, true);
       }

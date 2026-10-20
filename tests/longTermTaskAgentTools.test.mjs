@@ -156,3 +156,127 @@ test('longterm_subtask_skip tool: plan verdict with reason; last-open skip keeps
   assert.equal(closingOk.isError, undefined);
   assert.equal(store.getTask(taskId).stage, 'done');
 });
+
+/**
+ * Agent-channel projection (bug report 2026-10-20, SEC-1 / BUG-1 root cause):
+ * the store resolves participants WITH their avatar (a base64 data URL, ~75K
+ * chars per bot) for the board's chips, and every create / activate / get /
+ * list echo shipped it to the model — 87% of the result budget, which is what
+ * pushed the runtime shaper into tearing the identity fields. The Twin's tools
+ * must drop the avatar on every task-shaped echo while the store (the owner
+ * channel) keeps it.
+ */
+async function openWorldWithAvatar() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-lt-avatar-'));
+  const sqliteStore = await SqliteStore.create(dir);
+  const db = sqliteStore.getDatabase();
+  const definitionSessionId = 'sess_definition_1';
+  const now = Date.now();
+  db.run(
+    'INSERT INTO cowork_sessions (id, title, cwd, metabot_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+    [definitionSessionId, 'definition', '/tmp', 7, now, now],
+  );
+  const avatar = 'data:image/png;base64,' + 'A'.repeat(75800);
+  const store = new LongTermTaskStore(db, sqliteStore.getSaveFunction(), {
+    resolveParticipants: (ids) => ids.map((id) => ({ id, name: `bot-${id}`, avatar })),
+  });
+  const captured = new Map();
+  buildLongTermTaskAgentTools({
+    tool: (name, description, schema, handler) => {
+      captured.set(name, { description, handler });
+      return { name };
+    },
+    control: { store: () => store, getAppLanguage: () => 'en' },
+  });
+  return { store, captured, avatar, definitionSessionId };
+}
+
+const BASE64_RUN = /[A-Za-z0-9+/=]{512,}/;
+
+test('agent echoes carry participants without the avatar; the store (owner channel) keeps it', async () => {
+  const { store, captured, avatar, definitionSessionId } = await openWorldWithAvatar();
+  const create = captured.get('longterm_task_create');
+  const created = await create.handler({ ...SPEC, definitionSessionId });
+  assert.equal(created.isError, undefined, created.content[0].text);
+  const createdJson = JSON.parse(created.content[0].text);
+  const taskId = createdJson.id;
+
+  // The store still resolves the full row — the board's chips depend on it.
+  const ownerView = store.getTask(taskId);
+  assert.equal(ownerView.participants.length, 1);
+  assert.equal(ownerView.participants[0].id, 7);
+  assert.equal(ownerView.participants[0].avatar, avatar);
+
+  // The agent echo keeps the participant identity and drops the bytes.
+  assert.deepEqual(createdJson.participants, [{ id: 7, name: 'bot-7' }]);
+  assert.equal('avatar' in createdJson.participants[0], false);
+  assert.doesNotMatch(created.content[0].text, BASE64_RUN, 'create echo carries a base64 run');
+  // Identity fields come back whole (the shaper only tore them because the
+  // avatar blew the budget; without it the echo is well under any budget).
+  assert.equal(createdJson.title, SPEC.title);
+  assert.equal(createdJson.goal, SPEC.goal);
+  assert.equal(createdJson.subtasks.length, 2);
+
+  const taskEchoes = [
+    ['longterm_task_activate', { taskId }],
+    ['longterm_task_get', { taskId }],
+    ['longterm_task_update', { taskId, title: 'Game hub v2' }],
+    ['longterm_task_update', { taskId, action: 'pause', note: 'hold' }],
+    ['longterm_task_update', { taskId, action: 'resume' }],
+  ];
+  for (const [name, args] of taskEchoes) {
+    const result = await captured.get(name).handler(args);
+    assert.equal(result.isError, undefined, `${name}: ${result.content[0].text}`);
+    const text = result.content[0].text;
+    assert.doesNotMatch(text, BASE64_RUN, `${name} echo carries a base64 run`);
+    const json = JSON.parse(text);
+    assert.deepEqual(json.participants, [{ id: 7, name: 'bot-7' }], `${name} participants`);
+  }
+
+  const board = await captured.get('longterm_task_list').handler({});
+  assert.doesNotMatch(board.content[0].text, BASE64_RUN, 'list echo carries a base64 run');
+  const boardJson = JSON.parse(board.content[0].text);
+  assert.equal(boardJson.cards.length, 1);
+  assert.deepEqual(boardJson.cards[0].participants, [{ id: 7, name: 'bot-7' }]);
+
+  // completeTask returns the closed task through the same projection.
+  assert.ok(store.updateTask({ taskId, acceptanceDelegate: true }, 'owner').ok);
+  const closed = await captured.get('longterm_task_complete').handler({
+    taskId,
+    summary: 'hub shipped',
+    evidence: [{ kind: 'url', uri: 'https://x.example/hub' }],
+  });
+  assert.equal(closed.isError, undefined, closed.content[0].text);
+  assert.doesNotMatch(closed.content[0].text, BASE64_RUN, 'complete echo carries a base64 run');
+  assert.deepEqual(JSON.parse(closed.content[0].text).participants, [{ id: 7, name: 'bot-7' }]);
+});
+
+test('longterm_task_update pause/resume/cancel follow the shared result contract (bare value or Refused error)', async () => {
+  const { store, captured } = await openWorldWithAvatar();
+  const update = captured.get('longterm_task_update');
+  const created = store.createTask(SPEC, 'owner');
+  assert.ok(created.ok);
+  const taskId = created.value.id;
+
+  // pause from a draft is refused by the store — the tool surfaces it as an error result.
+  const badPause = await update.handler({ taskId, action: 'pause' });
+  assert.equal(badPause.isError, true);
+  assert.match(badPause.content[0].text, /Refused \(VALIDATION\)/);
+
+  assert.ok(store.activateTask(taskId, 'owner').ok);
+  const paused = await update.handler({ taskId, action: 'pause', note: 'hold' });
+  assert.equal(paused.isError, undefined);
+  const pausedJson = JSON.parse(paused.content[0].text);
+  assert.equal(pausedJson.id, taskId, 'pause returns the task itself, not a {ok,value} wrapper');
+  assert.equal(pausedJson.stage, 'paused');
+  assert.equal('ok' in pausedJson, false);
+
+  const cancelled = await update.handler({ taskId, action: 'cancel', note: 'moot' });
+  assert.equal(cancelled.isError, undefined);
+  assert.equal(cancelled.content[0].text, 'Cancelled.');
+  assert.equal(store.getTask(taskId).stage, 'cancelled');
+
+  const cancelAgain = await update.handler({ taskId, action: 'cancel' });
+  assert.equal(cancelAgain.isError, true);
+  assert.match(cancelAgain.content[0].text, /Refused \(VALIDATION\)/);
+});
