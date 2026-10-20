@@ -24,17 +24,20 @@
 //    (foldsToolRideTextIntoThinking; the 2026-09-25 gas-pool incident hid
 //    two full glm-5.3-flash reports behind the fold). Live reasoning tokens
 //    arrive as `reasoning-delta` on assistant/chunk (the pre-0.1.5
-//    `reasoning-chunks` web-UI stream no longer exists). A native reasoning
-//    block already live this step must not
-//    open the visible text slot — that is the "thinking flashes as body
-//    copy, then folds into a Think row" failure. The same failure shows on
-//    the reasoning-disabled route (effort "off"), where tool-call commentary
-//    is the ONLY process text: it streams into the body bubble because no
-//    reasoning block ever opens the thinking slot, then retracts at
-//    finalize. A `block-start tool-call` arriving while text streams is the
-//    earliest proof the text is commentary, so the bubble converts into the
-//    thinking display at that moment (textRidesThinking) instead of at
-//    assistant/message finalize.
+//    `reasoning-chunks` web-UI stream no longer exists). While a native
+//    reasoning block is live, or within POST_REASONING_TEXT_HOLD_UNITS of
+//    body text after it closes, the visible text slot stays closed: riding
+//    text may still be commentary, and opening a body bubble there is the
+//    "thinking flashes as body copy, then folds into a Think row" failure.
+//    Past that window the text is the final answer taking over — the bubble
+//    OPENS and streams (first-response latency: the answer must not
+//    materialize whole at assistant/message). A tool call that lands after
+//    the bet folds the streamed bubble back into the live Think row and
+//    retracts it (foldStreamedTextIntoThinking). The reasoning-disabled
+//    route (effort "off") keeps its own guard: commentary there is the ONLY
+//    process text, streams into the body bubble because no reasoning block
+//    ever opens the thinking slot, and converts at `block-start tool-call`
+//    (textRidesThinking) instead of at assistant/message finalize.
 //  - Assistant chat-experience mode (DshEventMapperOptions.assistantMode):
 //    commentary the fold paths above would reclassify into the thinking slot
 //    instead stays ordinary text tagged `metadata.narration = true` — the
@@ -70,6 +73,19 @@ const joinThinking = (parts: string[]): string =>
   parts.filter((part) => part.length > 0).join('\n\n')
 
 type TextPhase = 'commentary' | 'final_answer'
+
+/**
+ * Post-reasoning body-text hold, in UTF-16 units, on narration-fold routes
+ * (DeepSeek dialect). Once the step's reasoning block CLOSES (block-end), the
+ * first slice of body text is still held back: if a tool call lands inside
+ * the window the text is commentary and folds into the Think row with no
+ * visible flash; past the window the text is the final answer taking over —
+ * the bubble opens and everything streams (first-response/streaming latency:
+ * the answer must not materialize whole at assistant/message). Short replies
+ * under the window simply settle at finalize, indistinguishable from a full
+ * stream.
+ */
+export const POST_REASONING_TEXT_HOLD_UNITS = 160
 
 /** Parse one pi-ai textSignature (`{"v":1,"id":…,"phase":…}`) into its phase. */
 const phaseOfSignature = (signature: unknown): TextPhase | undefined => {
@@ -135,8 +151,28 @@ export class DshEventMapper {
   /**
    * Native reasoning block is in flight this step (block-start /
    * reasoning-delta). Distinct from think-tag splits inside text-delta.
+   * Cleared at the reasoning block-end: text that arrives afterwards may be
+   * the final answer, gated by the POST_REASONING_TEXT_HOLD_UNITS window.
    */
   private reasoningBlockLive = false
+  /**
+   * A native reasoning block STARTED this step (block-start or
+   * reasoning-delta), live or already closed. Gates the post-reasoning text
+   * hold on narration-fold routes — routes that never opened a reasoning
+   * block (effort "off") keep streaming body text immediately with the
+   * riding-text conversion as their commentary guard.
+   */
+  private reasoningSeenThisStep = false
+  /**
+   * Professional mode: a wrong answer-bet — body text streamed past the hold
+   * window and a tool-call block-start then proved it commentary — folded
+   * the streamed bubble back into the live Think row. Later deltas of the
+   * step keep streaming into that row, recomputed against the pre-fold
+   * thinking captured in foldedThinkingBase.
+   */
+  private streamedTextFoldedIntoThinking = false
+  /** Thinking content BEFORE the wrong-bet fold; deltas rejoin it wholesale. */
+  private foldedThinkingBase = ''
   /**
    * The text-slot message has been converted in place into the thinking
    * display (tool-call commentary on routes with no live reasoning block —
@@ -198,6 +234,7 @@ export class DshEventMapper {
         const chunk = data.chunk
         if (chunk?.type === 'block-start' && chunk.blockType === 'reasoning') {
           this.reasoningBlockLive = true
+          this.reasoningSeenThisStep = true
           this.openThinking(actions)
         } else if (chunk?.type === 'block-start' && chunk.blockType === 'tool-call') {
           // Tool-call announced while text streams with no live thinking
@@ -210,6 +247,13 @@ export class DshEventMapper {
           if (this.toolRideTextFolds()) {
             if (this.assistantMode()) {
               if (this.textOpen) this.textMarkedNarration = true
+            } else if (this.textOpen && this.thinkingOpen) {
+              // Wrong answer-bet on a reasoning route: text streamed past the
+              // hold window and this tool call proves it commentary. Fold it
+              // into the live Think row and retract the bubble now — waiting
+              // for assistant/message would leave commentary visible for the
+              // whole tool round.
+              this.foldStreamedTextIntoThinking(actions)
             } else {
               this.convertRidingTextToThinking(actions)
             }
@@ -227,14 +271,20 @@ export class DshEventMapper {
             // for the rest of this round (settled at assistant/message).
             this.thinkingBuf = split.text
             actions.push({ kind: 'messageUpdate', slot: 'text', content: this.thinkingBuf })
-          } else if (split.text.length > 0 && (!this.reasoningBlockLive || !this.toolRideTextFolds())) {
-            // Native reasoning already live: hold text until assistant/message
-            // proves it is the final answer — on narration-fold routes
-            // (DeepSeek dialect), where riding text may still be commentary and
-            // opening a body bubble here is the flash the DSH web UI never does
-            // (Think row from the first token). Non-folding families (GLM) put
-            // process text in the reasoning channel, so their text is content
-            // and streams visibly like the Claude path.
+          } else if (this.streamedTextFoldedIntoThinking) {
+            // Wrong answer-bet: the rest of this step's text rejoins the
+            // Think row the streamed bubble folded into, recomputed from the
+            // pre-fold thinking base plus the full step text.
+            this.thinkingBuf = joinThinking([this.foldedThinkingBase, split.text])
+            actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
+          } else if (split.text.length > 0 && this.postReasoningTextMayStream(split.text)) {
+            // Native reasoning live or inside the post-reasoning hold
+            // window: text stays held until assistant/message proves it is
+            // the final answer — on narration-fold routes (DeepSeek
+            // dialect) riding text may still be commentary, and opening a
+            // body bubble here is the flash the DSH web UI never does.
+            // Past the hold window (or on non-folding families like GLM,
+            // whose riding text is content) the text streams visibly.
             this.openText(actions)
             this.textBuf = split.text
             this.turnSawStreamedText = true
@@ -242,12 +292,16 @@ export class DshEventMapper {
           }
         } else if (chunk?.type === 'reasoning-delta') {
           this.reasoningBlockLive = true
+          this.reasoningSeenThisStep = true
           this.reasoningFromDeltas = true
           this.appendReasoning(actions, chunk.text ?? '')
         } else if (chunk?.type === 'block-end' && chunk.block?.type === 'reasoning') {
+          // The step's reasoning block is complete — no more reasoning comes
+          // this step, so later body text is answer-or-commentary, gated by
+          // the post-reasoning hold window instead of the hard hold.
+          this.reasoningBlockLive = false
           const assembled = typeof chunk.block.text === 'string' ? chunk.block.text : ''
           if (assembled.length > 0) {
-            this.reasoningBlockLive = true
             this.openThinking(actions)
             this.thinkingBuf = assembled
             actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
@@ -427,6 +481,43 @@ export class DshEventMapper {
   }
 
   /**
+   * Whether body text may stream into the visible bubble on the current
+   * route. Non-folding families (GLM) always stream — their riding text is
+   * content. Folding families (DeepSeek dialect) stream when no reasoning
+   * block is in flight AND either none ever ran this step (effort "off",
+   * where the riding-text conversion guards commentary), the bubble is
+   * already open (a bet was made and stays live), or the held text passed
+   * the POST_REASONING_TEXT_HOLD_UNITS window — the final answer taking
+   * over. Otherwise text stays held to assistant/message: the bubble must
+   * not flash commentary that folds away again.
+   */
+  private postReasoningTextMayStream(text: string): boolean {
+    if (!this.toolRideTextFolds()) return true
+    if (this.textOpen) return true
+    if (this.reasoningBlockLive) return false
+    if (!this.reasoningSeenThisStep) return true
+    return text.length >= POST_REASONING_TEXT_HOLD_UNITS
+  }
+
+  /**
+   * Fold a wrong answer-bet's streamed bubble into the live Think row: the
+   * streamed text joins the row's content, the bubble retracts (finalizes
+   * empty — the renderer hides it), and the step's later deltas keep
+   * streaming into the row. The pre-fold thinking is captured once so each
+   * later delta recomputes base + full step text wholesale.
+   */
+  private foldStreamedTextIntoThinking(actions: DshMapperAction[]): void {
+    const split = splitThinkTaggedContent(this.rawTextBuf)
+    this.foldedThinkingBase = this.thinkingBuf
+    this.thinkingBuf = joinThinking([this.foldedThinkingBase, split.text])
+    this.streamedTextFoldedIntoThinking = true
+    this.textOpen = false
+    this.textBuf = ''
+    actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
+    actions.push({ kind: 'messageFinalize', slot: 'text', content: '' })
+  }
+
+  /**
    * Convert the streaming body bubble into the thinking display the moment a
    * tool call proves its text is commentary. No-op unless text is streaming
    * with no live thinking slot (the effort-"off" native route; with reasoning
@@ -480,6 +571,7 @@ export class DshEventMapper {
     this.textMarkedNarration = false
     this.reasoningFromDeltas = false
     this.reasoningBlockLive = false
+    this.resetStepHoldState()
   }
 
   private finalizeAssistantMessage(
@@ -495,6 +587,7 @@ export class DshEventMapper {
       this.rawTextBuf = ''
       this.reasoningFromDeltas = false
       this.reasoningBlockLive = false
+      this.resetStepHoldState()
       this.turnSawStreamedText = false
       return
     }
@@ -548,6 +641,7 @@ export class DshEventMapper {
       this.rawTextBuf = ''
       this.reasoningFromDeltas = false
       this.reasoningBlockLive = false
+      this.resetStepHoldState()
       this.turnSawStreamedText = false
       return
     }
@@ -607,7 +701,15 @@ export class DshEventMapper {
     this.rawTextBuf = ''
     this.reasoningFromDeltas = false
     this.reasoningBlockLive = false
+    this.resetStepHoldState()
     this.turnSawStreamedText = false
+  }
+
+  /** Reset the per-step post-reasoning hold state at every step boundary. */
+  private resetStepHoldState(): void {
+    this.reasoningSeenThisStep = false
+    this.streamedTextFoldedIntoThinking = false
+    this.foldedThinkingBase = ''
   }
 
   /**
