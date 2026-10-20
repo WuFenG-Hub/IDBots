@@ -638,3 +638,6 @@ man_base_data_pebble/
 !tests/coworkAssistantModeSessionGate.test.ts
 !tests/coworkAssistantSessionGate.test.tsx
 !tests/coworkComposerImageAttachment.test.tsx
+
+# WS-A T5: tenant image static checks
+!tests/tenantImage.test.mjs
