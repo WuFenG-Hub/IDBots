@@ -1010,7 +1010,9 @@ test('session rotation leaves a visible pointer message in the old session', asy
   assert.notEqual(report.escalated[0].sessionId, firstSessionId);
   const pointer = cowork.calls.message.find((call) => call.id === firstSessionId && call.msg.type === 'system');
   assert.ok(pointer, 'a system pointer message was posted to the old session');
-  assert.match(pointer.msg.content, /message budget/);
+  // Owner-facing wording: routine rotation, not a failure — no budget numbers.
+  assert.match(pointer.msg.content, /Routine rotation/);
+  assert.doesNotMatch(pointer.msg.content, /budget/i);
 });
 
 test('an over-budget bound session that is the owner\'s live venue is reused, not rotated', async () => {
