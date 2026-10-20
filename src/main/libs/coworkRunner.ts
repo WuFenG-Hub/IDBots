@@ -9842,52 +9842,25 @@ export class CoworkRunner extends EventEmitter {
     };
 
     try {
-      await this.syncDshSkillSessionEnv(dshSessionId, sessionId, cwd);
-      const hostTools = this.buildDshHostTools(sessionId)
-      // Per-session registry: a concurrent turn of ANOTHER session must not
-      // clobber this session's tool set (Twin-only tools would intermittently
-      // go missing while a worker turn ran, and vice versa).
-      this.dshHostToolRegistry.set(sessionId, new Map(hostTools.map((tool) => [tool.name, tool])))
-      // Agent pre-create, fire-and-forget (first-sentence latency, 2026-10-16):
-      // the per-session agent materialization — Playwright MCP + Chromium
-      // launch for automation bots, ~1-4s — overlaps the volatile-context
-      // build below instead of stacking behind the slot boot inside runTurn.
-      // Sections/hostTools are the REAL ones the turn passes (the runtime
-      // registers prompt sections at agent creation only, never on a
-      // re-ensure); the per-turn reasoning effort lands on the turn's own
-      // ensureSession re-bind, so it can wait for the effort verdict.
-      try {
-        const prewarmGoal = this.store.getSessionWithoutMessages(sessionId)?.goal ?? null;
-        void hub.prewarmTurnAgent?.({
-          sessionId,
-          dshSessionId,
-          provider: this.dshTurnProviderFromRoute(route),
-          sections: [
-            { name: 'idbots:base', order: 0, text: systemPrompt },
-            ...(prewarmGoal && prewarmGoal.status === 'active'
-              ? [{ name: 'idbots:goal', order: 10, text: buildGoalPromptSection(prewarmGoal) }]
-              : []),
-            { name: 'idbots:tool-use', order: 150, text: CoworkRunner.DSH_TOOL_USE_GUIDANCE },
-          ],
-          hostTools,
-          workspace: { cwd },
-        }).catch((prewarmError) => {
-          coworkLog('WARN', 'runDshSessionLocal', 'Turn-agent pre-create failed; the turn will ensure it itself', {
-            sessionId,
-            error: prewarmError instanceof Error ? prewarmError.message : String(prewarmError),
-          });
-        });
-      } catch { /* best-effort: the pre-create must never break the turn */ }
-      // Volatile context (memory projections, time, browser tabs, remote
-      // services) rides inside the user message on DSH turns — at the head by
-      // default (620d2850), with one first-turn exception below.
+      // First-response latency (2026-10-20): everything on this stretch that
+      // needs no await runs FIRST — effort resolve, the turn acks, the auto
+      // effort kick — so the template ack and the LLM ack bubble fire at turn
+      // entry, before ANY pre-flight await. Then the two read-heavy steps
+      // (volatile-context build, prompt-image collection) are kicked and
+      // overlap the env sync and the agent pre-warm below instead of stacking
+      // after them. The env sync stays awaited before the pre-warm kick (the
+      // kernel's agent creation consumes the session env file) — every
+      // ordering guarantee is preserved; only the serial wait between the
+      // steps collapses. The marker catches keep a rejection inside the
+      // overlap window from surfacing as an unhandledRejection before its
+      // real await below.
       const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId)
       const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode, sessionId)
       // "Auto" reasoning effort (sessions without an explicit pick, cerebellum
-      // configured): kicked BEFORE the volatile-context build so the JEV
-      // round-trip overlaps that window's own cerebellum calls — by the time
-      // the effort resolution below runs, the verdict is typically already in
-      // hand and the turn start pays no extra latency.
+      // configured): resolved/kicked BEFORE the volatile-context build so the
+      // JEV round-trip overlaps that window's own cerebellum calls — by the
+      // time the effort resolution below runs, the verdict is typically
+      // already in hand and the turn start pays no extra latency.
       // resolveEffectiveEffort: the picker's "Auto" is stored as the
       // string 'default' — that IS the auto path, not an explicit pick. The
       // sentinelDefault flag distinguishes it from a plain null (never
@@ -9928,13 +9901,59 @@ export class CoworkRunner extends EventEmitter {
       const autoEffortPromise = effectiveEffortRung == null && !unattendedTurn && this.cerebellumEffortSelector
         ? this.cerebellumEffortSelector({ currentUserText: prompt })
         : null
-      const volatileBlocks = await this.buildVolatileContextPrompt(
+      // Volatile context (memory projections, time, browser tabs, remote
+      // services) rides inside the user message on DSH turns — at the head by
+      // default (620d2850), with one first-turn exception below.
+      const volatileContextPromise = this.buildVolatileContextPrompt(
         sessionId,
         prompt,
         this.isSessionMemoryReadEnabled(sessionId, activeSession),
         systemPromptProfile,
         activeSession.disableRemoteServicesPrompt
-      )
+      );
+      volatileContextPromise.catch(() => undefined);
+      const promptImagesPromise = this.collectDshPromptImages(prompt, cwd, modelLimits?.supportsVision === true);
+      promptImagesPromise.catch(() => undefined);
+      await this.syncDshSkillSessionEnv(dshSessionId, sessionId, cwd);
+      const hostTools = this.buildDshHostTools(sessionId)
+      // Per-session registry: a concurrent turn of ANOTHER session must not
+      // clobber this session's tool set (Twin-only tools would intermittently
+      // go missing while a worker turn ran, and vice versa).
+      this.dshHostToolRegistry.set(sessionId, new Map(hostTools.map((tool) => [tool.name, tool])))
+      // Agent pre-create, fire-and-forget (first-sentence latency, 2026-10-16):
+      // the per-session agent materialization — Playwright MCP + Chromium
+      // launch for automation bots, ~1-4s — overlaps the volatile-context
+      // build below instead of stacking behind the slot boot inside runTurn.
+      // Sections/hostTools are the REAL ones the turn passes (the runtime
+      // registers prompt sections at agent creation only, never on a
+      // re-ensure); the per-turn reasoning effort lands on the turn's own
+      // ensureSession re-bind, so it can wait for the effort verdict.
+      try {
+        const prewarmGoal = this.store.getSessionWithoutMessages(sessionId)?.goal ?? null;
+        void hub.prewarmTurnAgent?.({
+          sessionId,
+          dshSessionId,
+          provider: this.dshTurnProviderFromRoute(route),
+          sections: [
+            { name: 'idbots:base', order: 0, text: systemPrompt },
+            ...(prewarmGoal && prewarmGoal.status === 'active'
+              ? [{ name: 'idbots:goal', order: 10, text: buildGoalPromptSection(prewarmGoal) }]
+              : []),
+            { name: 'idbots:tool-use', order: 150, text: CoworkRunner.DSH_TOOL_USE_GUIDANCE },
+          ],
+          hostTools,
+          workspace: { cwd },
+        }).catch((prewarmError) => {
+          coworkLog('WARN', 'runDshSessionLocal', 'Turn-agent pre-create failed; the turn will ensure it itself', {
+            sessionId,
+            error: prewarmError instanceof Error ? prewarmError.message : String(prewarmError),
+          });
+        });
+      } catch { /* best-effort: the pre-create must never break the turn */ }
+      // Volatile context was kicked at the top of this try and overlapped the
+      // env sync, the host-tool build, and the agent pre-warm above; collect
+      // it now (the first heavy await on the turn path).
+      const volatileBlocks = await volatileContextPromise
       const volatileHead = [localTimePrompt, volatileBlocks]
         .filter((section) => section?.trim())
         .join('\n\n')
@@ -9951,8 +9970,9 @@ export class CoworkRunner extends EventEmitter {
           ? `${dshUserPrompt}\n\n${volatileHead}`
           : `${volatileHead}\n\n${dshUserPrompt}`
       // Prompt attachments: collected from the ORIGINAL prompt (marker lines
-      // reference user files, not the volatile context head).
-      const promptImages = await this.collectDshPromptImages(prompt, cwd, modelLimits?.supportsVision === true);
+      // reference user files, not the volatile context head); the collection
+      // was kicked at the top of this try and overlapped everything above.
+      const promptImages = await promptImagesPromise;
       // Same effort/thinking resolution the Claude path applies per query:
       // session UI override wins, then the bot brain effort (a bot with a
       // configured brain is authoritative — its null effort means "model

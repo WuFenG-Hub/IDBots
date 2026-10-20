@@ -69,10 +69,10 @@ test('runner: the LLM ack bubble fires at the early-ack site, gated to cowork_ui
 
   const templateAck = source.indexOf('this.emitTurnAck(sessionId, earlyAckTier)');
   const llmAckCall = source.indexOf('void this.emitTurnAckReplyBubble(sessionId, prompt,');
-  const volatileSite = source.indexOf('await this.buildVolatileContextPrompt(');
+  const envSyncSite = source.indexOf('await this.syncDshSkillSessionEnv(');
   assert.ok(templateAck > 0, 'the template ack still fires first (instant indicator cover)');
   assert.ok(llmAckCall > templateAck, 'the LLM ack fires right after the template ack');
-  assert.ok(volatileSite > llmAckCall, 'both fire before the volatile build (they cover the whole wait window)');
+  assert.ok(envSyncSite > llmAckCall, 'both acks precede every pre-flight await on the turn path');
   const gateWindow = source.slice(templateAck - 400, llmAckCall + 200);
   assert.ok(gateWindow.includes("ackSourceChannel === 'cowork_ui'"),
     'external-facing surfaces keep their established posture (cowork_ui only)');
