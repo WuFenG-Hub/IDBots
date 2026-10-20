@@ -1,8 +1,16 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
+import http from 'node:http';
 import Database from 'better-sqlite3';
 import { openDb } from '../src/db/index.js';
+import { loadConfig, type ControlPlaneConfig } from '../src/config.js';
+import { DockerClient } from '../src/docker/client.js';
+import { FakeSmsProvider } from '../src/sms.js';
+import { createPublicServer } from '../src/server.js';
+import { encryptSecret } from '../src/crypto.js';
+import type { AppContext } from '../src/context.js';
 
 /** Fresh migrated SQLite database in a unique temp directory. */
 export function freshDb(): Database.Database {
@@ -16,6 +24,210 @@ export const TENANT_DEFAULTS = {
   hostId: 'h_testhost',
   tenantImage: 'registry.example.com/idbots/tenant:0.1.0-test',
 };
+
+export function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      server.close(() => resolve(port));
+    });
+    server.on('error', reject);
+  });
+}
+
+export interface TestApp {
+  app: AppContext;
+  config: ControlPlaneConfig;
+  baseUrl: string;
+  close: () => Promise<void>;
+}
+
+/** In-process control plane (ephemeral port) over a caller-owned database. */
+export async function startTestApp(options: {
+  db: Database.Database;
+  dockerUrl: string;
+  alertWebhook?: string;
+  fakeSmsNumbers?: string[];
+  tenantImage?: string;
+  tenantEnv?: Record<string, string>;
+}): Promise<TestApp> {
+  const port = await freePort();
+  const metricsPort = await freePort();
+  const env: NodeJS.ProcessEnv = {
+    CP_PUBLIC_ORIGIN: `http://127.0.0.1:${port}`,
+    CP_LISTEN: `127.0.0.1:${port}`,
+    CP_METRICS_LISTEN: `127.0.0.1:${metricsPort}`,
+    CP_DB_PATH: '/unused/test.sqlite',
+    CP_MASTER_KEY: MASTER_KEY.toString('base64'),
+    CP_DOCKER_URL: options.dockerUrl,
+    CP_TENANT_IMAGE: options.tenantImage ?? 'fake-tenant:test',
+    CP_TENANT_NETWORK: 'idbots-test',
+    CP_SMS_MODE: 'fake',
+    CP_FAKE_SMS_NUMBERS: (options.fakeSmsNumbers ?? ['+8613900000100']).join(','),
+    ...(options.alertWebhook ? { CP_ALERT_WEBHOOK: options.alertWebhook } : {}),
+    ...(options.tenantEnv
+      ? Object.fromEntries(Object.entries(options.tenantEnv).map(([k, v]) => [`CP_TENANT_ENV_${k}`, v]))
+      : {}),
+  };
+  const config = loadConfig(env);
+  const app: AppContext = {
+    config,
+    db: options.db,
+    docker: new DockerClient(options.dockerUrl),
+    sms: new FakeSmsProvider(config.fakeSmsNumbers),
+    poller: null,
+  };
+  const server = createPublicServer(app);
+  await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+  return {
+    app,
+    config,
+    baseUrl: `http://127.0.0.1:${port}`,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
+export interface ApiResponse {
+  status: number;
+  json: unknown;
+  setCookie: string[];
+  requestId: string | null;
+}
+
+/** fetch wrapper: JSON in/out, Origin defaults to the app origin. */
+export async function api(
+  baseUrl: string,
+  path: string,
+  options: {
+    method?: string;
+    body?: unknown;
+    origin?: string | null;
+    cookie?: string | null;
+    headers?: Record<string, string>;
+  } = {},
+): Promise<ApiResponse> {
+  const headers: Record<string, string> = { ...(options.headers ?? {}) };
+  if (options.body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+  }
+  if (options.origin !== null) {
+    headers['Origin'] = options.origin ?? new URL(baseUrl).origin;
+  }
+  if (options.cookie) {
+    headers['Cookie'] = options.cookie;
+  }
+  const res = await fetch(`${baseUrl}${path}`, {
+    method: options.method ?? 'GET',
+    headers,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  });
+  let json: unknown = null;
+  const text = await res.text();
+  if (text.length > 0) {
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = null;
+    }
+  }
+  return {
+    status: res.status,
+    json,
+    setCookie: res.headers.getSetCookie(),
+    requestId: res.headers.get('x-request-id'),
+  };
+}
+
+/** `idb_session=<token>` from a verify response's Set-Cookie header. */
+export function sessionCookieFrom(setCookie: string[]): string {
+  const cookie = setCookie.find((entry) => entry.startsWith('idb_session='));
+  if (!cookie) {
+    throw new Error('no idb_session cookie in response');
+  }
+  return cookie.split(';')[0];
+}
+
+/** Insert a user + tenant row directly (bypasses signup) for poller/reconcile tests. */
+export function seedUserAndTenant(
+  db: Database.Database,
+  opts: {
+    userId: string;
+    phone: string;
+    tenantId: string;
+    status: string;
+    gatewaySecret?: string;
+    image?: string;
+    appVersion?: string | null;
+  },
+): void {
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO users (id, phone_e164, display_name, locale, status, invite_code, created_at)
+     VALUES (?, ?, 'Seed User', 'zh', 'active', NULL, ?)`,
+  ).run(opts.userId, opts.phone, now);
+  db.prepare(
+    `INSERT INTO tenants (
+       id, user_id, host_id, container_name, volume_name, image, previous_image,
+       gateway_secret_enc, status, phase, app_version, contract_version, last_error,
+       created_at, updated_at
+     ) VALUES (?, ?, 'h_testhost', ?, ?, ?, NULL, ?, ?, NULL, ?, NULL, NULL, ?, ?)`,
+  ).run(
+    opts.tenantId,
+    opts.userId,
+    `idb-${opts.tenantId}`,
+    `idb-${opts.tenantId}-data`,
+    opts.image ?? 'fake-tenant:test',
+    encryptSecret(MASTER_KEY, opts.gatewaySecret ?? 'test-secret'),
+    opts.status,
+    opts.appVersion === undefined ? null : opts.appVersion,
+    now,
+    now,
+  );
+}
+
+/** Alert sink: captures webhook POST bodies for assertions. */
+export function startAlertSink(): Promise<{ url: string; messages: string[]; close: () => Promise<void> }> {
+  const messages: string[] = [];
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { content?: { text?: string } };
+        messages.push(body.content?.text ?? '');
+      } catch {
+        messages.push('<unparsable>');
+      }
+      res.writeHead(200);
+      res.end();
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        messages,
+        close: () => new Promise((res) => server.close(() => res())),
+      });
+    });
+  });
+}
+
+export async function waitFor<T>(fn: () => Promise<T | null>, timeoutMs = 5000, intervalMs = 40): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await fn();
+    if (value !== null && value !== undefined) {
+      return value;
+    }
+    if (Date.now() > deadline) {
+      throw new Error('waitFor timed out');
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
 
 export interface SmsSeed {
   phone: string;

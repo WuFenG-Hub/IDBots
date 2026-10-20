@@ -144,10 +144,11 @@ const SECRET = 'test-secret';
 
 describe('fake tenant HTTP surface', () => {
   test('/healthz answers 503 until the gate, then 200 {"ok":true}', async () => {
-    const t = await startTenant({ FAKE_TENANT_HEALTH_AFTER_MS: '150', FAKE_TENANT_PHASES: 'ready:0' });
+    const t = await startTenant({ FAKE_TENANT_HEALTH_AFTER_MS: '400', FAKE_TENANT_PHASES: 'ready:0' });
     try {
       const early = await fetch(`http://127.0.0.1:${t.port}/healthz`);
       assert.equal(early.status, 503);
+      assert.deepEqual(await early.json(), { ok: false });
       const late = await waitFor(async () => {
         const res = await fetch(`http://127.0.0.1:${t.port}/healthz`);
         return res.status === 200 ? res : null;
