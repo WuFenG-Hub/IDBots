@@ -11,6 +11,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "dev:mobile": "cross-env VITE_MOBILE_MOCK=1 vite --config vite.mobile.config.ts --port 5176",
+    "build:mobile": "cross-env NODE_ENV=production MOBILE_BUNDLE=app vite build --config vite.mobile.config.ts && cross-env NODE_ENV=production MOBILE_BUNDLE=login vite build --config vite.mobile.config.ts && node scripts/check-mobile-budgets.mjs",
+    "test:mobile": "npx tsx --test tests/mobileMockBridge.test.ts && node --test tests/mobileI18nStatic.test.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "check:cross-platform-paths": "node scripts/check-cross-platform-paths.js",
     "check:dsh-deps": "node scripts/check-dsh-runtime-deps.cjs",
@@ -104,7 +107,7 @@
     "release:runbook": "node scripts/release-runbook.mjs",
     "preelectron:dev:dsh": "pnpm run check:dsh-deps",
     "electron:dev:dsh": "cross-env IDBOTS_USER_DATA_PATH=./.dev-userdata-dsh IDBOTS_APP_DATA_PATH=./.dev-appdata-dsh concurrently \"vite --host 127.0.0.1 --port 5185\" \"wait-on -v -t 120000 -d 10000 http://127.0.0.1:5185 && node scripts/wait-electron-dev-build.mjs dist-electron && cross-env NODE_ENV=development IDBOTS_DISABLE_SINGLE_INSTANCE_LOCK=1 ELECTRON_START_URL=http://127.0.0.1:5185 electron .\"",
-    "test": "pnpm run compile:electron && node --test tests/llmSafeText.test.mjs && pnpm run test:long-term-task && node --test tests/runtimeDependencyContract.test.mjs tests/dshRuntimeDepsCheck.test.mjs && pnpm run test:workspace-instructions && pnpm run test:pinned-skills && pnpm run test:release-regressions && pnpm run test:memory && pnpm run test:metaweb"
+    "test": "pnpm run compile:electron && node --test tests/llmSafeText.test.mjs && pnpm run test:long-term-task && node --test tests/runtimeDependencyContract.test.mjs tests/dshRuntimeDepsCheck.test.mjs && pnpm run test:workspace-instructions && pnpm run test:pinned-skills && pnpm run test:release-regressions && pnpm run test:memory && pnpm run test:metaweb && pnpm run test:mobile"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",

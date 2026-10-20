@@ -6,6 +6,8 @@ build/*
 node_modules/
 dist/
 dist-electron/
+dist-mobile/
+dist-mobile-login/
 release/
 # Local optimizeDeps content fingerprint (regenerated on each dev start)
 .vite-deps-fingerprint.json
@@ -631,3 +633,7 @@ man_base_data_pebble/
 !tests/coworkAssistantModeSessionGate.test.ts
 !tests/coworkAssistantSessionGate.test.tsx
 !tests/coworkComposerImageAttachment.test.tsx
+
+# WS-E mobile client (T1 mock bridge + i18n static checks)
+!tests/mobileMockBridge.test.ts
+!tests/mobileI18nStatic.test.mjs
