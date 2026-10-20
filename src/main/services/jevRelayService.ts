@@ -617,13 +617,11 @@ export function createJevRelayCallRecorder<R extends { ok: boolean; status: numb
 // IPC surface (renderer: cerebellum free-provider connection test / key fill)
 // ---------------------------------------------------------------------------
 
-interface IpcMainLike {
-  handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void;
-}
+type RegisterIpcHandlerFn = (channel: string, handler: (event: any, ...args: any[]) => any) => void;
 
-export function registerJevRelayIpcHandlers(deps: { ipcMain: IpcMainLike }): void {
-  const { ipcMain } = deps;
-  ipcMain.handle('jevRelay:resolveCredentials', async () => {
+export function registerJevRelayIpcHandlers(deps: { registerIpcHandler: RegisterIpcHandlerFn }): void {
+  const { registerIpcHandler } = deps;
+  registerIpcHandler('jevRelay:resolveCredentials', async () => {
     try {
       return { success: true, credentials: await resolveJevRelayCredentials() };
     } catch (error) {

@@ -5,12 +5,10 @@ import type {
   TokenTransferPreview,
 } from './metabotTokenTransferService';
 
-interface IpcMainLike {
-  handle: (channel: string, listener: (_event: unknown, input: any) => Promise<any>) => void;
-}
+type RegisterIpcHandlerFn = (channel: string, handler: (event: any, ...args: any[]) => any) => void;
 
 interface RegisterMetabotWalletIpcHandlersDeps {
-  ipcMain: IpcMainLike;
+  registerIpcHandler: RegisterIpcHandlerFn;
   getMetabotStore: () => MetabotStore;
   getMetabotWalletAssets: (store: MetabotStore, input: { metabotId: number }) => Promise<MetabotWalletAssets>;
   getTokenTransferFeeSummary: (kind: 'mrc20' | 'mvc-ft') => Promise<{ list: Array<{ title: string; desc: string; feeRate: number }>; defaultFeeRate: number }>;
@@ -31,7 +29,7 @@ function getErrorMessage(error: unknown): string {
 }
 
 export function registerMetabotWalletIpcHandlers(deps: RegisterMetabotWalletIpcHandlersDeps): void {
-  deps.ipcMain.handle('idbots:getMetabotWalletAssets', async (_event, input: { metabotId: number }) => {
+  deps.registerIpcHandler('idbots:getMetabotWalletAssets', async (_event, input: { metabotId: number }) => {
     try {
       const assets = await deps.getMetabotWalletAssets(deps.getMetabotStore(), input);
       return { success: true, assets };
@@ -40,7 +38,7 @@ export function registerMetabotWalletIpcHandlers(deps: RegisterMetabotWalletIpcH
     }
   });
 
-  deps.ipcMain.handle('idbots:getTokenTransferFeeSummary', async (_event, input: { kind: 'mrc20' | 'mvc-ft' }) => {
+  deps.registerIpcHandler('idbots:getTokenTransferFeeSummary', async (_event, input: { kind: 'mrc20' | 'mvc-ft' }) => {
     try {
       const summary = await deps.getTokenTransferFeeSummary(input.kind);
       return { success: true, ...summary };
@@ -49,7 +47,7 @@ export function registerMetabotWalletIpcHandlers(deps: RegisterMetabotWalletIpcH
     }
   });
 
-  deps.ipcMain.handle('idbots:buildTokenTransferPreview', async (_event, input: TokenTransferDraftInput) => {
+  deps.registerIpcHandler('idbots:buildTokenTransferPreview', async (_event, input: TokenTransferDraftInput) => {
     try {
       const preview = await deps.buildTokenTransferPreview(input);
       return { success: true, preview };
@@ -58,7 +56,7 @@ export function registerMetabotWalletIpcHandlers(deps: RegisterMetabotWalletIpcH
     }
   });
 
-  deps.ipcMain.handle('idbots:executeTokenTransfer', async (_event, input: TokenTransferDraftInput) => {
+  deps.registerIpcHandler('idbots:executeTokenTransfer', async (_event, input: TokenTransferDraftInput) => {
     try {
       const result = await deps.executeTokenTransfer(deps.getMetabotStore(), input);
       return { success: true, result };

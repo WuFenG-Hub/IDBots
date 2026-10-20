@@ -120,6 +120,7 @@ export function createBotBrowserTabBridge(options: {
     });
 
     try {
+      // desktop-only: addressed to a specific window (not a broadcast)
       targetWindow.webContents.send('botBrowser:tab-command', { requestId, command });
       if (targetWindow.isMinimized()) targetWindow.restore();
       if (!targetWindow.isVisible()) targetWindow.show();

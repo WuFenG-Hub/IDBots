@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session } from 'electron';
+import { app, session } from 'electron';
 import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -26,6 +26,7 @@ import {
 import type { MetabotStore } from './metabotStore';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
 import { getMetaidRpcBase, getMetaidRpcToken } from './services/metaidRpcEndpoint';
+import { broadcastToRenderers } from './ipc/broadcast';
 
 export type SkillRecord = {
   id: string;
@@ -2192,11 +2193,7 @@ export class SkillManager {
   }
 
   private notifySkillsChanged(): void {
-    BrowserWindow.getAllWindows().forEach(win => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('skills:changed');
-      }
-    });
+    broadcastToRenderers('skills:changed');
   }
 
   private parseSkillDir(
