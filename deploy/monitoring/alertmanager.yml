@@ -1,0 +1,18 @@
+# WS-C REQ-C-16 — Alertmanager routes everything to the alert-relay, which
+# delivers to the Feishu/DingTalk robot (webhook URL lives in
+# /etc/idbots/monitoring.env on the relay, never here).
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: robot
+  group_by: [alertname, severity]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: robot
+    webhook_configs:
+      - url: http://alert-relay:9080/alert
+        send_resolved: true
