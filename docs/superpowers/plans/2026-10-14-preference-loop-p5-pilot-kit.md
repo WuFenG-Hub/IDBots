@@ -57,8 +57,6 @@ All files are created under `scripts/preference-pilot/qanda-v2/`.
 cd /Users/tusm/Documents/MetaID_Projects/IDBots/IDBots
 git fetch --all --prune
 git worktree add .worktrees/preference-p5-pilot -b feat/preference-p5-pilot main
-git config extensions.worktreeConfig true
-git -C .worktrees/preference-p5-pilot config --worktree core.filemode false
 cd .worktrees/preference-p5-pilot
 pnpm install
 mkdir -p scripts/preference-pilot/qanda-v2

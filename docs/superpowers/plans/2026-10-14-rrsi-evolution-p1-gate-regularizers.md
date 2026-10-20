@@ -53,8 +53,6 @@ All constraints in the overview apply. The ones that bite most in this phase:
 ```bash
 cd /Users/tusm/Documents/MetaID_Projects/IDBots/IDBots
 git worktree add .worktrees/rrsi-p1-gate -b feat/rrsi-p1-gate main
-git config extensions.worktreeConfig true
-git -C .worktrees/rrsi-p1-gate config --worktree core.filemode false
 cd .worktrees/rrsi-p1-gate
 pnpm install
 test -f docs/superpowers/specs/2026-10-14-rrsi-regularized-dream-evolution-design.md && echo "design present"

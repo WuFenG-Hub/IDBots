@@ -52,8 +52,6 @@
 ```bash
 cd /Users/tusm/Documents/MetaID_Projects/IDBots/IDBots
 git worktree add .worktrees/preference-p1-engine -b feat/preference-p1-engine main
-git config extensions.worktreeConfig true
-git -C .worktrees/preference-p1-engine config --worktree core.filemode false
 cd .worktrees/preference-p1-engine
 pnpm install
 test -f docs/metaid_protocols/09-preference.md && echo "protocol doc present"

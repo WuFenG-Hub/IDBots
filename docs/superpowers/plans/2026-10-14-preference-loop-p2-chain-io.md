@@ -50,8 +50,6 @@
 ```bash
 cd /Users/tusm/Documents/MetaID_Projects/IDBots/IDBots
 git worktree add .worktrees/preference-p2-chain-io -b feat/preference-p2-chain-io main
-git config extensions.worktreeConfig true
-git -C .worktrees/preference-p2-chain-io config --worktree core.filemode false
 cd .worktrees/preference-p2-chain-io
 pnpm install
 test -f src/main/services/preference/engine.ts && echo "P1 present"

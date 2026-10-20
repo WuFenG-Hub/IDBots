@@ -61,8 +61,6 @@ All constraints in the overview apply. Phase-specific:
 ```bash
 cd /Users/tusm/Documents/MetaID_Projects/IDBots/IDBots
 git worktree add .worktrees/rrsi-p4-explore -b feat/rrsi-p4-explore main
-git config extensions.worktreeConfig true
-git -C .worktrees/rrsi-p4-explore config --worktree core.filemode false
 cd .worktrees/rrsi-p4-explore
 pnpm install
 test -f src/main/libs/capabilityGateRegularizers.ts && echo "P1 present"
