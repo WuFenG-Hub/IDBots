@@ -88,6 +88,41 @@ const API_FORMAT_TO_PROTOCOL = {
 
 const sanitizeRouteKey = (key) => String(key).replace(/[^a-zA-Z0-9_-]/g, '-')
 
+// pi-ai catalog vendors that a user provider key can collide with on the
+// anthropic-messages protocol, mapped to the vendor's OFFICIAL API host.
+// A vendor-named route whose models match the catalog by id inherits the
+// catalog compat — including `supportsMidConvoToolChanges`, which makes the
+// route serialize mid-conversation tool changes as `tool_addition` /
+// `tool_removal` blocks. Real Anthropic implements those; third-party
+// Anthropic-format gateways frequently do not, and one rejection poisons the
+// whole session: the tool-change developer events are durable history, so
+// every later turn replays them and dies with
+// "unknown variant `tool removal`" (the v1.0.2 user report — a wedged
+// conversation that no key/model switch could revive). The flag is "withhold"
+// in pi-ai's compat gates, so config cannot turn it off; the only lever is
+// not naming the route after the vendor. Official endpoints keep the bare
+// vendor key (catalog inheritance there is correct and valuable); anything
+// else gets a deterministic "-gw" suffix. The host mirrors this exact rule
+// in claudeSettings.ts (dshPiAiRouteKey) because every turn passes the route
+// key from the host — the two implementations must stay in sync
+// (tests/coworkDshRouteKeySync.test.mjs pins the agreement).
+export const PI_AI_VENDOR_OFFICIAL_HOSTS = Object.freeze({ anthropic: 'api.anthropic.com' })
+
+const hostOf = (baseUrl) => {
+  try { return new URL(String(baseUrl)).hostname.toLowerCase() } catch { return '' }
+}
+
+/** DSH pi-ai route key for one user provider: vendor-named anthropic-format
+ *  gateways are suffixed so they cannot inherit the catalog vendor's wire
+ *  behavior (mid-convo tool-change blocks above all). */
+export const dshPiAiRouteKey = (provider) => {
+  const key = sanitizeRouteKey(provider.key)
+  if (provider.apiFormat !== 'anthropic') return key
+  const officialHost = PI_AI_VENDOR_OFFICIAL_HOSTS[String(provider.key).toLowerCase()]
+  if (officialHost === undefined || hostOf(provider.baseUrl) === officialHost) return key
+  return `${key}-gw`
+}
+
 /** DeepSeek official Messages-API wire: thinking disabled (`off`) or
  *  reasoning_effort low/high/max (`output_config.effort`). Kept for the
  *  effort ladder documentation; the native adapter validates it itself.
@@ -193,15 +228,15 @@ const compactionHeadroomTokens = (contextWindow) => {
 }
 
 /** One compaction-basic modelPolicies entry per configured provider/model
- *  route. `provider` must equal the REGISTERED route key (sanitized pi-ai
- *  key, or the native adapter's fixed `deepseek-official`) and `model` the
- *  exact model id — a mismatch silently never applies, and a duplicate
+ *  route. `provider` must equal the REGISTERED route key (dshPiAiRouteKey for
+ *  pi-ai routes, or the native adapter's fixed `deepseek-official`) and `model`
+ *  the exact model id — a mismatch silently never applies, and a duplicate
  *  target fails plugin load, so dedupe last-wins per target (mirroring the
  *  routes-dict overwrite semantics for sanitized-key collisions). */
 const compactionModelPolicies = (providers) => {
   const byTarget = new Map()
   for (const provider of providers ?? []) {
-    const routeKey = provider.native ? 'deepseek-official' : sanitizeRouteKey(provider.key)
+    const routeKey = provider.native ? 'deepseek-official' : dshPiAiRouteKey(provider)
     for (const model of provider.models ?? []) {
       const headroomTokens = compactionHeadroomTokens(model?.contextWindow)
       if (headroomTokens === undefined || !model?.id) continue
@@ -398,7 +433,8 @@ export function generateRuntimeConfig(input) {
     if (protocol === undefined) {
       throw new Error(`generate-runtime-config: provider "${provider.key}" has unsupported apiFormat ${JSON.stringify(provider.apiFormat)}`)
     }
-    routes[sanitizeRouteKey(provider.key)] = {
+    const routeKey = dshPiAiRouteKey(provider)
+    routes[routeKey] = {
       displayName: provider.key,
       apiKeyEnv: provider.apiKeyEnv,
       api: protocol,
@@ -409,7 +445,7 @@ export function generateRuntimeConfig(input) {
       // profile headers, so gateway-bound routes carry one here. Keyed by
       // route (see isOpenCodeGoBaseUrl above) and deterministic per route.
       ...(isOpenCodeGoBaseUrl(provider.baseUrl)
-        ? { headers: opencodeSessionHeaders(sanitizeRouteKey(provider.key)) }
+        ? { headers: opencodeSessionHeaders(routeKey) }
         : {}),
       models: provider.models.map((model) => ({
         id: model.id,
@@ -437,7 +473,7 @@ export function generateRuntimeConfig(input) {
   const selectionEnabled = input.subagentModelSelection?.enabled !== false
   const allowedModelMap = new Map()
   for (const provider of providers) {
-    const routeKey = provider.native ? 'deepseek-official' : sanitizeRouteKey(provider.key)
+    const routeKey = provider.native ? 'deepseek-official' : dshPiAiRouteKey(provider)
     for (const model of provider.models) {
       allowedModelMap.set(`${routeKey}\0${model.id}`, { provider: routeKey, model: model.id })
     }

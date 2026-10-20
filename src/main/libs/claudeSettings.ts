@@ -594,12 +594,53 @@ export function resolveDshProviderRoute(
   }
   if (!matched) return null;
   return {
-    provider: matched.providerName,
+    provider: dshPiAiRouteKey(matched.providerName, matched.apiFormat, matched.providerConfig.baseUrl.trim()),
     baseUrl: dshApiRootOf(matched.providerConfig.baseUrl.trim(), matched.apiFormat, matched.providerName),
     apiKey: matched.providerConfig.apiKey?.trim() || '',
     model: matched.modelId,
     apiFormat: matched.apiFormat,
   };
+}
+
+/**
+ * Mirror of dshPiAiRouteKey in dsh-runtime/lib/generate-runtime-config.mjs.
+ * A user provider named after a pi-ai catalog vendor (today: 'anthropic') on
+ * the anthropic apiFormat inherits that vendor's catalog compat when its
+ * models match by id — including supportsMidConvoToolChanges, which serializes
+ * mid-conversation tool changes as tool_addition/tool_removal blocks. Third-
+ * party Anthropic-format gateways frequently reject tool_removal, and because
+ * the tool-change developer events are durable session history, ONE rejection
+ * wedges the conversation permanently (every retry replays the same block —
+ * the v1.0.2 "unknown variant `tool removal`" report). pi-ai withholds that
+ * compat flag from configuration, so the only lever is the route key: keep the
+ * vendor name for the OFFICIAL endpoint, suffix everything else with '-gw' so
+ * the route stops inheriting catalog wire behavior and falls back to the
+ * universally-compatible shape (developer tool-change messages stripped from
+ * requests, full tool declarations per request).
+ *
+ * The runtime config generator keys its pi-ai providers dict with the same
+ * rule, and every DSH turn passes route.provider from here — the two
+ * implementations MUST stay in sync (tests/coworkDshRouteKeySync.test.mjs
+ * pins the agreement across a matrix of inputs).
+ */
+export const PI_AI_VENDOR_OFFICIAL_HOSTS: Readonly<Record<string, string>> = {
+  anthropic: 'api.anthropic.com',
+};
+
+const hostOfUrl = (baseUrl: string): string => {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+};
+
+export function dshPiAiRouteKey(providerKey: string, apiFormat: string, baseUrl: string): string {
+  const key = String(providerKey).replace(/[^a-zA-Z0-9_-]/g, '-');
+  if (apiFormat !== 'anthropic') return key;
+  const officialHost = PI_AI_VENDOR_OFFICIAL_HOSTS[String(providerKey).trim().toLowerCase()];
+  if (officialHost === undefined || hostOfUrl(baseUrl) === officialHost) return key;
+  return `${key}-gw`;
 }
 
 /**

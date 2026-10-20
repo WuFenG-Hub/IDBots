@@ -632,3 +632,4 @@ man_base_data_pebble/
 !tests/coworkAssistantSessionGate.test.tsx
 !tests/coworkComposerImageAttachment.test.tsx
 !tests/coworkQuotaErrorBanner.test.ts
+!tests/coworkDshRouteKeySync.test.mjs
