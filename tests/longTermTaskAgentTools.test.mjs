@@ -280,3 +280,79 @@ test('longterm_task_update pause/resume/cancel follow the shared result contract
   assert.equal(cancelAgain.isError, true);
   assert.match(cancelAgain.content[0].text, /Refused \(VALIDATION\)/);
 });
+
+/**
+ * BUG-2 (bug report 2026-10-20): activation is the owner's sign-off, not the
+ * start of work, so every sub-project is still `pending` afterwards — correct,
+ * but it read as "activated and nothing moved". The activate / resume echoes
+ * now state the next step instead of leaving it to be inferred.
+ */
+test('longterm_task_activate echo names the first beginnable sub-project as nextAction', async () => {
+  const { store, captured } = await openWorld('en');
+  const activate = captured.get('longterm_task_activate');
+  assert.match(activate.description, /does NOT begin work/, 'description must say activation is not begin');
+  const created = store.createTask(SPEC, 'owner');
+  assert.ok(created.ok);
+  const taskId = created.value.id;
+  const [first, second] = created.value.subtasks;
+
+  const activated = await activate.handler({ taskId });
+  assert.equal(activated.isError, undefined, activated.content[0].text);
+  const json = JSON.parse(activated.content[0].text);
+  assert.equal(json.stage, 'active');
+  // The derived focus is already populated (deriveCurrentSubtask); the DB pin stays null until begin.
+  assert.equal(json.currentSubtaskId, first.id);
+  assert.equal(json.currentSubtaskTitle, first.title);
+  assert.equal(json.currentSubtaskStatus, 'pending');
+  assert.equal(typeof json.nextAction, 'string');
+  assert.match(json.nextAction, /longterm_subtask_begin/);
+  assert.ok(json.nextAction.includes(first.id), `nextAction must name the first sub-project id: ${json.nextAction}`);
+  assert.ok(json.nextAction.includes(first.title), `nextAction must name the first sub-project title: ${json.nextAction}`);
+  assert.ok(!json.nextAction.includes(second.id), 'the dependency-blocked second sub-project is not the one to begin');
+
+  // Once work is in flight, resume carries no nextAction — nothing to begin.
+  assert.ok(store.beginSubtask(first.id, 'twin', 'delegate_bot').ok);
+  const update = captured.get('longterm_task_update');
+  const paused = await update.handler({ taskId, action: 'pause', note: 'hold' });
+  assert.equal(paused.isError, undefined);
+  assert.equal('nextAction' in JSON.parse(paused.content[0].text), false, 'pause never carries nextAction');
+  const resumed = await update.handler({ taskId, action: 'resume' });
+  assert.equal(resumed.isError, undefined);
+  const resumedJson = JSON.parse(resumed.content[0].text);
+  assert.equal(resumedJson.stage, 'active');
+  assert.equal(resumedJson.currentSubtaskStatus, 'in_progress');
+  assert.equal('nextAction' in resumedJson, false, 'resume with a sub-project in flight carries no nextAction');
+
+  // Resume with everything still pending (paused before any begin) states the step again.
+  const fresh = store.createTask(SPEC, 'owner');
+  assert.ok(fresh.ok);
+  assert.ok(store.activateTask(fresh.value.id, 'owner').ok);
+  assert.ok(store.pauseTask(fresh.value.id, 'owner').ok);
+  const resumedFresh = await update.handler({ taskId: fresh.value.id, action: 'resume' });
+  assert.equal(resumedFresh.isError, undefined);
+  assert.match(JSON.parse(resumedFresh.content[0].text).nextAction, /longterm_subtask_begin/);
+});
+
+test('longterm_task_activate nextAction reports a fully dependency-blocked plan instead of naming a sub-project', async () => {
+  const { store, captured } = await openWorld('en');
+  // createTask only validates ordinal range / self-reference; a 1 <-> 2 cycle
+  // is accepted at creation and leaves nothing beginnable.
+  const created = store.createTask(
+    {
+      title: 'Cyclic',
+      goal: 'Two sub-projects that wait on each other.',
+      subtasks: [
+        { title: 'A', dependsOnOrdinals: [2] },
+        { title: 'B', dependsOnOrdinals: [1] },
+      ],
+    },
+    'owner',
+  );
+  assert.ok(created.ok, JSON.stringify(created));
+  const activated = await captured.get('longterm_task_activate').handler({ taskId: created.value.id });
+  assert.equal(activated.isError, undefined, activated.content[0].text);
+  const json = JSON.parse(activated.content[0].text);
+  assert.match(json.nextAction, /blocked by an unmet dependency/);
+  assert.match(json.nextAction, /longterm_subtask_update/);
+  assert.doesNotMatch(json.nextAction, /longterm_subtask_begin/);
+});

@@ -4,6 +4,7 @@ import { WAIT_UNTIL_STRICT_ISO } from '../longTermTaskStore';
 import type {
   LongTermBoard,
   LongTermParticipant,
+  LongTermTaskDetail,
   LongTermTaskSummary,
 } from '../../renderer/types/longTermTask';
 import { buildDelegationAnchorBlock } from './longTermDelegationAnchor';
@@ -67,6 +68,34 @@ export function toAgentBoardView(board: LongTermBoard): Omit<LongTermBoard, 'car
   return { ...board, cards: board.cards.map((card) => toAgentTaskView(card)) };
 }
 
+/**
+ * Activation is the owner's sign-off, not the start of work: every sub-project
+ * stays `pending` until the Twin calls longterm_subtask_begin with the agreed
+ * channel. An all-pending list after activate is therefore correct — but it
+ * reads as "activated and nothing moved" to a caller who has to infer the next
+ * step (bug report 2026-10-20, BUG-2). The activate / resume echoes carry this
+ * sentence so the step is stated, not guessed. Null when a sub-project is
+ * already in flight (resume after a begun pause) or nothing is open.
+ */
+export function describeActivationNextAction(detail: LongTermTaskDetail): string | null {
+  const open = detail.subtasks.filter((sub) => sub.status !== 'accepted' && sub.status !== 'skipped');
+  if (open.length === 0) return null;
+  if (open.some((sub) => sub.status !== 'pending')) return null;
+  const acceptedIds = new Set(detail.subtasks.filter((sub) => sub.status === 'accepted').map((sub) => sub.id));
+  const eligible = [...open]
+    .sort((a, b) => a.ordinal - b.ordinal)
+    .find((sub) => sub.dependsOn.every((dep) => acceptedIds.has(dep)));
+  if (!eligible) {
+    return 'The task is active but no sub-project is in progress, and every open sub-project is blocked by an unmet dependency — repair the dependency graph with longterm_subtask_update before anything can begin.';
+  }
+  return `The task is active but no sub-project is in progress yet — activation does not begin work. Call longterm_subtask_begin({ subtaskId: "${eligible.id}", channel }) to start sub-project #${eligible.ordinal} "${eligible.title}" on the channel you and the owner agreed.`;
+}
+
+function withActivationNextAction(detail: LongTermTaskDetail) {
+  const nextAction = describeActivationNextAction(detail);
+  return nextAction ? { ...toAgentTaskView(detail), nextAction } : toAgentTaskView(detail);
+}
+
 export interface LongTermTaskAgentControl {
   store: () => LongTermTaskStore;
   /** Owner's UI language ('zh' | 'en') — delegation anchors follow it. */
@@ -119,13 +148,13 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
 
   const activateTask = tool(
     'longterm_task_activate',
-    'Activate a draft long-term task after the OWNER confirmed the sub-project split and acceptance criteria in prose. Never activate on your own initiative — activation is the owner\'s sign-off.',
+    'Activate a draft long-term task after the OWNER confirmed the sub-project split and acceptance criteria in prose. Never activate on your own initiative — activation is the owner\'s sign-off. Activation does NOT begin work: every sub-project stays pending until you call longterm_subtask_begin; the response\'s nextAction names the first sub-project to begin.',
     { taskId: z.string().min(1) },
     async (args: { taskId?: string }) => {
       try {
         const result = store().activateTask(String(args.taskId ?? ''), 'twin');
         if (!result.ok) return textResult(`Refused (${result.code}): ${result.error}`, true);
-        return jsonResult(toAgentTaskView(result.value));
+        return jsonResult(withActivationNextAction(result.value));
       } catch (error) {
         return textResult(`Failed to activate: ${error instanceof Error ? error.message : String(error)}`, true);
       }
@@ -182,7 +211,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
         if (args.action === 'resume') {
           const resumed = store().activateTask(taskId, 'twin');
           if (!resumed.ok) return textResult(`Refused (${resumed.code}): ${resumed.error}`, true);
-          return jsonResult(toAgentTaskView(resumed.value));
+          return jsonResult(withActivationNextAction(resumed.value));
         }
         if (args.action === 'cancel') {
           const cancelled = store().cancelTask(taskId, 'twin', args.note ?? '');
