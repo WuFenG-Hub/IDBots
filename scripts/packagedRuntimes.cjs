@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('path');
-const { existsSync, statSync } = require('fs');
+const { existsSync, readdirSync, statSync } = require('fs');
 const { PLATFORM_ASSETS } = require('./setup-ffmpeg.js');
 
 /**
@@ -22,6 +22,30 @@ const PACKAGED_RUNTIMES = [
     ],
   },
 ];
+
+/**
+ * Suffixes of files under a packaged runtime's node_modules that nothing loads
+ * at run time: TypeScript declarations and source maps. They are roughly 43%
+ * of the files the Windows installer has to extract (and the previous
+ * version's uninstaller has to delete), so the extraResources filter drops
+ * them and afterPack fails closed if any slip through.
+ *
+ * `.md` must NOT be added: the DSH kernel ships built-in skills
+ * (dsh-agent-preset/skills/.../SKILL.md, dsh-skill-office/assets/.../SKILL.md)
+ * and DevTools issue descriptions as markdown inside node_modules and reads
+ * them at run time.
+ */
+const RUNTIME_DEAD_FILE_SUFFIXES = ['.d.ts', '.d.mts', '.d.cts', '.map'];
+
+/** The electron-builder filter entries that implement RUNTIME_DEAD_FILE_SUFFIXES. */
+const RUNTIME_DEAD_FILE_FILTERS = RUNTIME_DEAD_FILE_SUFFIXES.map(
+  (suffix) => `!**/node_modules/**/*${suffix}`,
+);
+
+// A negated filter body that drops a node_modules tree wholesale: it ends at
+// `node_modules`, optionally followed by a double-star and a trailing `/*`.
+// A body that only names a file type inside node_modules does not match.
+const NODE_MODULES_TREE_EXCLUSION = /(^|\/)node_modules\/?(\*\*(\/\*)?)?\/?$/;
 
 /** electron-builder Arch enum: ia32=0, x64=1, armv7l=2, arm64=3, universal=4 */
 const ELECTRON_BUILDER_ARCH = {
@@ -99,13 +123,50 @@ function resolvePackagedResourcesDir(context) {
   return path.join(appOutDir, 'resources');
 }
 
+function isRuntimeDeadFile(fileName) {
+  return RUNTIME_DEAD_FILE_SUFFIXES.some((suffix) => fileName.endsWith(suffix));
+}
+
+/**
+ * Posix-style paths, relative to runtimeRoot, of every dead file under its
+ * node_modules. Symlinks are not followed.
+ */
+function findPackagedRuntimeDeadFiles(runtimeRoot) {
+  const nodeModulesRoot = path.join(runtimeRoot, 'node_modules');
+  if (!existsSync(nodeModulesRoot)) return [];
+  const found = [];
+  const pending = [nodeModulesRoot];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(full);
+      } else if (entry.isFile() && isRuntimeDeadFile(entry.name)) {
+        found.push(path.relative(runtimeRoot, full).split(path.sep).join('/'));
+      }
+    }
+  }
+  return found.sort();
+}
+
 function verifyPackagedRuntimes(context) {
   const resourcesDir = resolvePackagedResourcesDir(context);
   const missing = [];
+  const deadFiles = [];
   for (const runtime of PACKAGED_RUNTIMES) {
     const runtimeRoot = path.join(resourcesDir, runtime.extraResourceTo);
     for (const rel of missingMarkers(runtimeRoot, runtime.markers)) {
       missing.push(path.join(runtime.extraResourceTo, rel).replace(/\\/g, '/'));
+    }
+    for (const rel of findPackagedRuntimeDeadFiles(runtimeRoot)) {
+      deadFiles.push(`${runtime.extraResourceTo}/${rel}`);
     }
   }
   if (missing.length > 0) {
@@ -114,13 +175,20 @@ function verifyPackagedRuntimes(context) {
       + `${missing.join(', ')}. extraResources must copy node_modules for each packaged runtime.`,
     );
   }
+  if (deadFiles.length > 0) {
+    throw new Error(
+      `Packaged runtime node_modules still contain ${deadFiles.length} file(s) nothing loads at run time `
+      + `(${RUNTIME_DEAD_FILE_SUFFIXES.join(', ')}), e.g. ${deadFiles.slice(0, 5).join(', ')}. `
+      + 'Keep the RUNTIME_DEAD_FILE_FILTERS exclusions in the dsh-runtime extraResources filter of electron-builder.json.',
+    );
+  }
 }
 
 function extraResourceFilterExcludesNodeModules(filter) {
   if (!Array.isArray(filter)) return false;
   return filter.some((pattern) => {
     if (typeof pattern !== 'string' || !pattern.startsWith('!')) return false;
-    return pattern.includes('node_modules');
+    return NODE_MODULES_TREE_EXCLUSION.test(pattern.slice(1).replace(/\\/g, '/'));
   });
 }
 
@@ -164,6 +232,10 @@ function verifyPackagedFfmpeg(context) {
 
 module.exports = {
   PACKAGED_RUNTIMES,
+  RUNTIME_DEAD_FILE_SUFFIXES,
+  RUNTIME_DEAD_FILE_FILTERS,
+  isRuntimeDeadFile,
+  findPackagedRuntimeDeadFiles,
   missingMarkers,
   verifySourceRuntimes,
   verifyPackagedRuntimes,

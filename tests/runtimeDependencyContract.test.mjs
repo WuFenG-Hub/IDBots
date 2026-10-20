@@ -665,6 +665,7 @@ test('Twin orchestration tools have a host-side gate and trusted sandbox registr
 });
 
 test('release packaging wires nested DSH runtime install, extraResources, and pack gates', () => {
+  const { extraResourceFilterExcludesNodeModules, RUNTIME_DEAD_FILE_FILTERS } = require('../scripts/packagedRuntimes.cjs');
   const workflow = fs.readFileSync(path.join(process.cwd(), '.github/workflows/build.yml'), 'utf8');
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
   const builder = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'electron-builder.json'), 'utf8'));
@@ -688,10 +689,17 @@ test('release packaging wires nested DSH runtime install, extraResources, and pa
     'pnpm-lock.yaml must be committed and package-lock.json removed',
   );
   assert.ok(dshResource, 'electron-builder extraResources must copy dsh-runtime');
-  assert.ok(
-    !(dshResource.filter || []).some((pattern) => typeof pattern === 'string' && pattern.startsWith('!') && pattern.includes('node_modules')),
-    'dsh-runtime extraResources filter must not exclude node_modules',
+  assert.equal(
+    extraResourceFilterExcludesNodeModules(dshResource.filter),
+    false,
+    'dsh-runtime extraResources filter must not exclude the node_modules tree',
   );
+  for (const pattern of RUNTIME_DEAD_FILE_FILTERS) {
+    assert.ok(
+      (dshResource.filter || []).includes(pattern),
+      `dsh-runtime extraResources filter must keep ${pattern}: declarations and source maps are roughly 43% of the files the Windows installer extracts`,
+    );
+  }
   assert.match(hooks, /verifySourceRuntimes\(\)/, 'beforePack must fail closed if nested runtime deps are missing');
   assert.match(hooks, /verifyPackagedRuntimes\(context\)/, 'afterPack must fail closed if the copied app Resources omit runtime deps');
   assert.match(
@@ -751,6 +759,10 @@ test('packaged runtime gates fail closed on missing source and packaged markers'
     resolvePackagedResourcesDir,
     resolveFfmpegPlatformKey,
     extraResourceFilterExcludesNodeModules,
+    isRuntimeDeadFile,
+    findPackagedRuntimeDeadFiles,
+    RUNTIME_DEAD_FILE_SUFFIXES,
+    RUNTIME_DEAD_FILE_FILTERS,
   } = require('../scripts/packagedRuntimes.cjs');
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-packaged-runtimes-'));
 
@@ -813,7 +825,60 @@ test('packaged runtime gates fail closed on missing source and packaged markers'
     );
 
     assert.equal(extraResourceFilterExcludesNodeModules(['**/*', '!**/node_modules/**']), true);
+    assert.equal(extraResourceFilterExcludesNodeModules(['**/*', '!**/node_modules']), true);
+    assert.equal(extraResourceFilterExcludesNodeModules(['**/*', '!node_modules/**/*']), true);
     assert.equal(extraResourceFilterExcludesNodeModules(['**/*', '!**/.test-sessions/**']), false);
+    assert.equal(
+      extraResourceFilterExcludesNodeModules(['**/*', ...RUNTIME_DEAD_FILE_FILTERS]),
+      false,
+      'dropping declarations and source maps inside node_modules is not a node_modules exclusion',
+    );
+
+    assert.ok(
+      !RUNTIME_DEAD_FILE_SUFFIXES.includes('.md'),
+      'markdown is not dead weight: the DSH kernel loads SKILL.md and DevTools issue descriptions from node_modules at run time',
+    );
+    for (const name of ['index.d.ts', 'index.d.mts', 'index.d.cts', 'index.js.map', 'index.d.mts.map']) {
+      assert.equal(isRuntimeDeadFile(name), true, `${name} is never loaded at run time`);
+    }
+    for (const name of ['index.js', 'index.mjs', 'index.cjs', 'index.ts', 'package.json', 'LICENSE', 'run.cmd', 'README.md', 'SKILL.md']) {
+      assert.equal(isRuntimeDeadFile(name), false, `${name} must stay in the package`);
+    }
+
+    const runtimeRoot = path.join(tmpRoot, 'mac-out', 'IDBots.app', 'Contents', 'Resources', 'dsh-runtime');
+    const pkgDir = path.join(runtimeRoot, 'node_modules', 'pkg');
+    fs.mkdirSync(path.join(pkgDir, 'node_modules', 'dep'), { recursive: true });
+    fs.mkdirSync(path.join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-sdk-client', 'lib'), { recursive: true });
+    fs.mkdirSync(path.join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-app-boot'), { recursive: true });
+    fs.writeFileSync(path.join(runtimeRoot, 'bin.mjs'), 'ok');
+    fs.writeFileSync(path.join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-sdk-client', 'lib', 'index.js'), 'ok');
+    fs.writeFileSync(path.join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'package.json'), '{}');
+    fs.writeFileSync(path.join(pkgDir, 'index.js'), 'ok');
+    fs.writeFileSync(path.join(pkgDir, 'index.d.ts'), 'export {}');
+    fs.writeFileSync(path.join(pkgDir, 'index.js.map'), '{}');
+    fs.writeFileSync(path.join(pkgDir, 'README.md'), '# pkg');
+    fs.writeFileSync(path.join(pkgDir, 'SKILL.md'), '---\nname: pkg\n---');
+    fs.writeFileSync(path.join(pkgDir, 'node_modules', 'dep', 'types.d.mts'), 'export {}');
+    assert.deepEqual(findPackagedRuntimeDeadFiles(runtimeRoot), [
+      'node_modules/pkg/index.d.ts',
+      'node_modules/pkg/index.js.map',
+      'node_modules/pkg/node_modules/dep/types.d.mts',
+    ]);
+    const packagedContext = {
+      appOutDir: path.join(tmpRoot, 'mac-out'),
+      electronPlatformName: 'darwin',
+      packager: { appInfo: { productFilename: 'IDBots' } },
+    };
+    assert.throws(
+      () => verifyPackagedRuntimes(packagedContext),
+      /3 file\(s\) nothing loads at run time[\s\S]*dsh-runtime\/node_modules\/pkg\/index\.d\.ts/,
+    );
+    for (const rel of findPackagedRuntimeDeadFiles(runtimeRoot)) {
+      fs.rmSync(path.join(runtimeRoot, rel));
+    }
+    assert.deepEqual(findPackagedRuntimeDeadFiles(runtimeRoot), []);
+    assert.ok(fs.existsSync(path.join(pkgDir, 'SKILL.md')), 'run-time markdown survives the prune');
+    assert.doesNotThrow(() => verifyPackagedRuntimes(packagedContext));
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
