@@ -13,7 +13,8 @@ import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStat
 import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, getPersistedChatExperienceMode, resolveDshProviderRoute, getAppConfigProviders, isFreeQuotaProvider, ModelProviderSelectionError, type DshProviderRouteInfo } from './claudeSettings';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { buildGoalPromptSection, type CoworkSessionGoal } from './coworkSessionGoal';
-import { DshTurnHub, dshSessionRootFor, dshWebSearchSeedFromProviders, isNativeDeepSeekChatRoute, type DshTurnProviderRoute } from './coworkDshTurn';
+import { DshTurnHub, dshSessionRootFor, dshWebSearchSeedFromProviders, isNativeDeepSeekChatRoute, DSH_RUNTIME_IDLE_TTL_MS, type DshTurnProviderRoute } from './coworkDshTurn';
+import { filterServerModeAgentTools, resolveDshRuntimeIdleTtlMs } from '../server/serverMode';
 import { isDshShutdownError } from './dshShutdownError';
 import { truncateUtf16Units } from './llmSafeText';
 import { DshStreamUiGate } from './dshStreamUiGate';
@@ -9408,6 +9409,9 @@ export class CoworkRunner extends EventEmitter {
             : false
         ),
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
+        // REQ-A-31: desktop keeps the 30-min idle reap; server mode reclaims
+        // the idle runtime (and its playwright MCP) within 10 minutes.
+        runtimeIdleTtlMs: resolveDshRuntimeIdleTtlMs(DSH_RUNTIME_IDLE_TTL_MS),
       });
     }
     return this.dshTurnHub;
@@ -12764,12 +12768,12 @@ export class CoworkRunner extends EventEmitter {
       const allowlist = studySession.kind === 'qa-surf'
         ? METAWEB_QA_SURF_TOOL_ALLOWLIST
         : METAWEB_STUDY_TOOL_ALLOWLIST;
-      return memoryTools.filter((item) => allowlist.has(String(item?.name ?? '')));
+      return filterServerModeAgentTools(memoryTools.filter((item) => allowlist.has(String(item?.name ?? ''))));
     }
     // MetaWeb surf sessions: the surf allowlist — read/learn across protocols
     // plus the budget-wrapped interaction tools, nothing else.
     if (this.activeSessions.get(sessionId)?.metawebSurfSession) {
-      return memoryTools.filter((item) => METAWEB_SURF_TOOL_ALLOWLIST.has(String(item?.name ?? '')));
+      return filterServerModeAgentTools(memoryTools.filter((item) => METAWEB_SURF_TOOL_ALLOWLIST.has(String(item?.name ?? ''))));
     }
     // Dream-RSI practice sessions: the risk-class allowlist — chain writes,
     // wallet, purchases and scheduled-task creation are never registered;
@@ -12780,9 +12784,11 @@ export class CoworkRunner extends EventEmitter {
       const allowlist = practiceSession.riskClass === 'interact_local'
         ? PRACTICE_INTERACT_LOCAL_INLINE_TOOLS
         : PRACTICE_READ_ONLY_INLINE_TOOLS;
-      return memoryTools.filter((item) => allowlist.has(String(item?.name ?? '')));
+      return filterServerModeAgentTools(memoryTools.filter((item) => allowlist.has(String(item?.name ?? ''))));
     }
-    return memoryTools;
+    // REQ-A-5: server mode never offers tools that depend on desktop-only
+    // features (Bot Browser, OS screenshots, local MetaApps/Projects).
+    return filterServerModeAgentTools(memoryTools);
   }
 
   /**
