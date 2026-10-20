@@ -85,7 +85,7 @@ groups:
         for: 5m
         labels: {severity: critical}
         annotations:
-          summary: "control-plane 5xx above 2% for 5m ({{ $value | printf \"%.1%%\" }})"
+          summary: "control-plane 5xx above 2% for 5m ({{ $value | printf \"%.1f%%\" }})"
 
   - name: idbots-tls
     rules:
