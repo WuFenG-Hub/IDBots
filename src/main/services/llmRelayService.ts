@@ -578,7 +578,8 @@ export async function getLlmRelayQuota(input: { apiKey?: unknown; forceRefresh?:
     });
     return { data, quota: normalizeQuotaPayload(data) };
   };
-  let { data, quota } = await fetchQuota(apiKey);
+  const { data } = await fetchQuota(apiKey);
+  let quota = normalizeQuotaPayload(data);
   let localIdentity: { mvc_address?: unknown; globalmetaid?: unknown } | null = null;
   try {
     localIdentity = getDeps().getUserIdentityStore().get() ?? null;
