@@ -1476,9 +1476,12 @@ interface ActiveSession {
   /**
    * LLM turn-ack bubble gate (first-response latency): serial of the current
    * DSH turn, bumped at the early-ack site, plus whether visible assistant
-   * text has landed since. The pending ack bubble emits only while both still
-   * match — a turn that already delivered real text, or moved on to a newer
-   * turn, must not get an acknowledgment appended after the fact.
+   * text has landed since. A fresh ActiveSession exists per submitted message
+   * and the serial restarts at 1 each time, so the pending ack's gate also
+   * requires the registry's current entry to BE the object it kicked on —
+   * serial equality alone matched the NEXT turn's fresh object too. A turn
+   * that already delivered real text, or moved on to a newer turn, must not
+   * get an acknowledgment appended after the fact.
    */
   dshTurnAckSerial?: number;
   dshTurnAckVisibleTextSeen?: boolean;
@@ -9886,10 +9889,15 @@ export class CoworkRunner extends EventEmitter {
           // latency) in parallel with everything below, so a real
           // LLM-written bubble can land while the turn is still pre-flight
           // or mid-reasoning. Fully fire-and-forget — the gates inside drop
-          // it when the turn beats it to visible text.
-          activeSession.dshTurnAckSerial = (activeSession.dshTurnAckSerial ?? 0) + 1
-          activeSession.dshTurnAckVisibleTextSeen = false
-          void this.emitTurnAckReplyBubble(sessionId, prompt, activeSession.dshTurnAckSerial)
+          // it when the turn beats it to visible text. The turn's
+          // ActiveSession object and the serial AT KICK TIME are both
+          // captured: the resolve-time gate requires object identity, which
+          // serial equality alone cannot provide (a fresh object per turn
+          // restarts the serial at 1).
+          const turnAckSerial = (activeSession.dshTurnAckSerial ?? 0) + 1;
+          activeSession.dshTurnAckSerial = turnAckSerial;
+          activeSession.dshTurnAckVisibleTextSeen = false;
+          void this.emitTurnAckReplyBubble(sessionId, prompt, activeSession, turnAckSerial);
         }
       } catch { /* best-effort: the ack must never break a turn */ }
       // Unattended automation turns (see isUnattendedAutomationSession) never
@@ -15248,20 +15256,38 @@ export class CoworkRunner extends EventEmitter {
    * written by the LLM about THIS message, landing while the kernel turn is
    * still pre-flight or reasoning. It rides the title-class one-shot
    * cognitive path (no kernel spawn), fully parallel to the turn. The
-   * serial/visible-text gates drop it when the turn already delivered real
-   * text or moved on to a newer turn, so an acknowledgment can never appear
-   * after the answer it acknowledges. The bubble is host-side only: it lives
-   * in the UI transcript and never enters the kernel session log, so the
-   * model's own context is untouched.
+   * identity/serial/visible-text gates drop it when the turn already
+   * delivered real text or moved on to a newer turn, so an acknowledgment can
+   * never appear after the answer it acknowledges. The bubble is host-side
+   * only: it lives in the UI transcript and never enters the kernel session
+   * log, so the model's own context is untouched.
    */
-  private async emitTurnAckReplyBubble(sessionId: string, userPrompt: string, turnSerial: number): Promise<void> {
+  private async emitTurnAckReplyBubble(
+    sessionId: string,
+    userPrompt: string,
+    turn: ActiveSession,
+    turnSerial: number,
+  ): Promise<void> {
     try {
       const startedAt = Date.now();
       const sessionTitle = this.store.getSession(sessionId)?.title ?? null;
       const reply = await generateTurnAckReply(userPrompt, sessionTitle);
       if (!reply) return;
-      const activeSession = this.activeSessions.get(sessionId);
-      if (!activeSession || activeSession.dshTurnAckSerial !== turnSerial || activeSession.dshTurnAckVisibleTextSeen) {
+      // Identity first: a fresh ActiveSession is created per submitted
+      // message and dshTurnAckSerial restarts at 1 on each, so serial
+      // equality alone let turn N's ack (still ≤4s in flight) land inside
+      // turn N+1's window after turn N settled quickly — an ack about the
+      // wrong message, then a second ack from turn N+1 itself. Requiring the
+      // registry's current entry to BE this turn's object drops every ack
+      // from a settled or superseded turn (removeActiveSession deletes the
+      // entry at every terminal path); the serial then still drops acks a
+      // re-kick on the SAME object superseded, and the flag drops acks the
+      // turn's own visible text beat. Flags read off the captured object.
+      if (
+        this.activeSessions.get(sessionId) !== turn
+        || turn.dshTurnAckSerial !== turnSerial
+        || turn.dshTurnAckVisibleTextSeen
+      ) {
         return;
       }
       const message = this.store.addMessage(sessionId, {

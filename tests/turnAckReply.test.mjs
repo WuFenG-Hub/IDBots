@@ -84,14 +84,23 @@ test('runner: the ack bubble is dropped once the turn delivered visible text or 
   const emitter = source.indexOf('private async emitTurnAckReplyBubble(');
   assert.ok(emitter > 0, 'emitTurnAckReplyBubble exists');
   const body = source.slice(emitter, source.indexOf('private emitSdkRuntimeStatus(', emitter));
-  assert.ok(body.includes('activeSession.dshTurnAckSerial !== turnSerial'),
-    'a stale ack from an older turn is dropped');
-  assert.ok(body.includes('activeSession.dshTurnAckVisibleTextSeen'),
+  assert.ok(body.includes('this.activeSessions.get(sessionId) !== turn'),
+    'an ack whose turn object is no longer the registry current is dropped (identity)');
+  assert.ok(body.includes('turn.dshTurnAckSerial !== turnSerial'),
+    'a stale ack superseded by a re-kick on the same object is dropped');
+  assert.ok(body.includes('turn.dshTurnAckVisibleTextSeen'),
     'an ack landing after real visible text is dropped');
   assert.ok(body.includes("metadata: { turnAckReply: true, isFinal: true }"),
     'the bubble is a final assistant message tagged turnAckReply');
   assert.ok(body.includes('generateTurnAckReply(userPrompt, sessionTitle)'),
     'the reply rides the one-shot cognitive path with session-title context');
+  // The flags are read off the CAPTURED turn object, so a next turn's fresh
+  // state can never vouch for an older turn's ack.
+  assert.ok(!body.includes('activeSession.dshTurnAckSerial !== turnSerial'),
+    'the gate must not re-read the registry object for the serial');
+  // The kick site captures the object and the serial at kick time.
+  const kick = source.indexOf('void this.emitTurnAckReplyBubble(sessionId, prompt, activeSession, turnAckSerial)');
+  assert.ok(kick > 0, 'the kick passes the turn object and the kick-time serial');
 
   // The gate flag is armed by a visible text bubble opening in the DSH
   // onMessage path (anchor on the assignment, not the comment above it).
@@ -100,6 +109,24 @@ test('runner: the ack bubble is dropped once the turn delivered visible text or 
   const gateSnippet = source.slice(onMessageSite - 700, onMessageSite + 100);
   assert.ok(gateSnippet.includes("type === 'assistant'"));
   assert.ok(gateSnippet.includes('isThinking'));
+});
+
+test('runner: a fresh ActiveSession restarts the ack serial at 1, so identity — not serial equality — is the cross-turn gate', () => {
+  const source = read('src/main/libs/coworkRunner.ts');
+
+  // The per-turn object is a fresh literal that does NOT initialize the serial
+  // (the kick's `?? 0` then lands on 1 every turn). This pins WHY the identity
+  // check above exists: turn N's in-flight ack (≤4s budget) would otherwise
+  // pass turn N+1's gate after turn N settled quickly — an ack about the
+  // wrong message, then a second ack from turn N+1 itself.
+  const activeSessionLiteral = source.indexOf('const activeSession: ActiveSession = {');
+  assert.ok(activeSessionLiteral > 0, 'the per-turn ActiveSession literal exists');
+  const literalEnd = source.indexOf('};', activeSessionLiteral);
+  const literal = source.slice(activeSessionLiteral, literalEnd);
+  assert.ok(!literal.includes('dshTurnAckSerial'),
+    'the fresh object leaves dshTurnAckSerial unset (the kick restarts it at 1)');
+  assert.ok(source.includes('(activeSession.dshTurnAckSerial ?? 0) + 1'),
+    'the kick bumps from undefined, i.e. every turn serial starts at 1');
 });
 
 test('coworkUtil: generateTurnAckReply is a title-class call — no thinking, no web search, tight budget', () => {
