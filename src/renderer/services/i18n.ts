@@ -1141,6 +1141,15 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkQuoteSourceOther: '对话片段',
     coworkQuoteBlockHeader: '从对话中引用的片段（请针对这些片段回答）：',
     coworkQuoteBlockItem: '引自{source}：',
+    // Turn navigator: the slim rail on the right edge of the conversation that
+    // walks turns and previews them on hover.
+    coworkTurnNavigatorLabel: '轮次导航',
+    coworkTurnNavigatorJump: '跳转到第 {turn} 轮',
+    coworkTurnNavigatorJumpLoad: '加载并跳转到第 {turn} 轮',
+    coworkTurnNavigatorTurn: '第 {turn} 轮',
+    // The not-loaded region marker cannot name a turn number (the renderer
+    // exposes only a boolean), so it gets its own number-free label.
+    coworkTurnNavigatorLoadEarlier: '加载更早的对话',
     // Display-only source lines for a SENT selection quote: the transcript
     // strips the generated header and swaps "引自{source}：" for these — the
     // prompt body itself never changes (the model still reads the generated
@@ -4242,6 +4251,13 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkQuoteSourceOther: 'Conversation excerpt',
     coworkQuoteBlockHeader: 'Quoted excerpts from the conversation (reply to these):',
     coworkQuoteBlockItem: 'Quoted from {source}:',
+    // Turn navigator (see the zh note).
+    coworkTurnNavigatorLabel: 'Turn navigation',
+    coworkTurnNavigatorJump: 'Jump to turn {turn}',
+    coworkTurnNavigatorJumpLoad: 'Load and jump to turn {turn}',
+    coworkTurnNavigatorTurn: 'Turn {turn}',
+    // See the zh note: the region marker has no turn number to name.
+    coworkTurnNavigatorLoadEarlier: 'Load earlier conversation',
     // Display-only source lines for a SENT selection quote (see the zh note).
     coworkQuoteSentSourceUser: 'You:',
     coworkQuoteSentSourceAssistant: '{name}:',
