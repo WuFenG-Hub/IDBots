@@ -581,7 +581,11 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     }
   };
 
-  const handleContinueSession = async (prompt: string, skillPrompt?: string) => {
+  const handleContinueSession = async (
+    prompt: string,
+    skillPrompt?: string,
+    quotedMessageIds?: string[],
+  ) => {
     if (!currentSession) return false;
 
     const submittedSessionId = currentSession.id;
@@ -612,6 +616,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       systemPrompt,
       activeSkillIds: sessionSkillIds.length > 0 ? sessionSkillIds : undefined,
       source: isQuickActionPrompt ? 'quick_action' : undefined,
+      quotedMessageIds,
     });
     if (activeSessionIdRef.current !== submittedSessionId) {
       return result.success;

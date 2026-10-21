@@ -25,13 +25,16 @@ import {
   QUOTED_SELECTION_DISPLAY_CHARS,
   QUOTED_SELECTION_MAX_CHARS,
   buildQuotedSelectionsBlock,
+  collectQuotedMessageIds,
   composeCoworkPromptBody,
   composeSubmittedCoworkPrompt,
+  createMessageQuotedSelection,
   createPendingQuotedSelection,
   createQuotedSelection,
   nextQuotedSelectionId,
   normalizeQuotedSelectionText,
   parseSentSelectionQuoteBlock,
+  readQuotedJumpMessageId,
   removeQuotedSelection,
   resolveQuoteActionBarAnchorRect,
   resolveQuotedSelectionRole,
@@ -673,4 +676,80 @@ test('quoted-selection copy lives in both i18n dictionaries', () => {
   }
   assert.match(actionBarSource, /i18nService\.t\('coworkQuoteAddToConversation'\)/);
   assert.match(tilesSource, /QUOTED_SELECTION_SOURCE_KEYS/);
+});
+
+// --- quoted-message id anchors -------------------------------------------------
+// The sent quote block's ordinal label is window-relative copy: paging K older
+// messages in shifts every position by K, so a jump that resolves the frozen
+// ordinal against the current window rings the wrong message. The durable
+// anchor is the quoted message's id, captured into the fragment and persisted
+// on the submitting user message as quotedMessageIds.
+
+test('createMessageQuotedSelection captures the quoted message id into messageRef', () => {
+  const fragment = createMessageQuotedSelection({
+    content: 'quoted body',
+    role: 'assistant',
+    messageId: 'msg-42',
+    ordinal: 7,
+    streaming: false,
+  });
+  assert.equal(fragment?.messageRef?.messageId, 'msg-42');
+  assert.equal(fragment?.messageRef?.ordinal, 7);
+  assert.equal(fragment?.messageRef?.streaming, false);
+
+  // A target without an id (legacy caller) still produces the fragment.
+  const legacy = createMessageQuotedSelection({
+    content: 'quoted body',
+    role: 'assistant',
+    ordinal: 7,
+    streaming: false,
+  });
+  assert.equal(legacy?.messageRef?.messageId, undefined);
+});
+
+test('collectQuotedMessageIds keeps fragment order, dedupes, and skips hand-picked selections', () => {
+  const reply = (id: string | undefined, ordinal: number) => ({
+    id: nextQuotedSelectionId(),
+    role: 'assistant' as const,
+    text: 'excerpt',
+    truncated: false,
+    ...(id ? { messageRef: { messageId: id, ordinal, streaming: false } } : {}),
+  });
+  const handPicked = createQuotedSelection('a passage the owner selected', 'user');
+  assert.ok(handPicked);
+
+  assert.deepEqual(
+    collectQuotedMessageIds([
+      reply('msg-a', 1),
+      handPicked!,
+      reply('msg-b', 2),
+      reply('msg-a', 3),
+    ]),
+    ['msg-a', 'msg-b'],
+  );
+  assert.deepEqual(collectQuotedMessageIds([handPicked!]), []);
+});
+
+test('readQuotedJumpMessageId reads the first recorded anchor and rejects malformed metadata', () => {
+  assert.equal(readQuotedJumpMessageId({ quotedMessageIds: ['msg-first', 'msg-second'] }), 'msg-first');
+  assert.equal(readQuotedJumpMessageId({ quotedMessageIds: [] }), null);
+  assert.equal(readQuotedJumpMessageId({}), null);
+  assert.equal(readQuotedJumpMessageId(undefined), null);
+  assert.equal(readQuotedJumpMessageId({ quotedMessageIds: 'msg-a' }), null);
+  assert.equal(readQuotedJumpMessageId({ quotedMessageIds: [42] }), null);
+  assert.equal(readQuotedJumpMessageId({ quotedMessageIds: ['', 'msg-second'] }), null);
+});
+
+test('sent quote block jumps anchor by id first (source wiring)', () => {
+  // The transcript component passes the metadata anchor alongside the label
+  // ordinal, and the jump handler consumes the anchor before ever resolving
+  // the ordinal — the ordinal is the fallback for pre-anchor messages only.
+  assert.match(detailSource, /readQuotedJumpMessageId\(message\.metadata\)/);
+  const jump = detailSource.match(/const handleJumpToSentQuoteBlock = useCallback\(\(ordinal: number, messageIdAnchor\?: string\) => \{[\s\S]*?\n\s*\}, \[handleJumpToQuotedMessage\]\);/)?.[0] ?? '';
+  assert.ok(jump, 'handleJumpToSentQuoteBlock not found');
+  const anchorBranch = jump.slice(0, jump.indexOf('buildTranscriptMessageIdsByOrdinal'));
+  assert.match(anchorBranch, /if \(messageIdAnchor\) \{/);
+  assert.match(anchorBranch, /handleJumpToQuotedMessage\(messageIdAnchor\)/);
+  // The composer collects the ids and forwards them through the submit chain.
+  assert.match(inputSource, /collectQuotedMessageIds\(submittedQuotedSelections\)/);
 });

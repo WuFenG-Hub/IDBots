@@ -103,6 +103,13 @@ export interface CoworkMessageMetadata {
   /** Optional human-readable detail for the origin (e.g. scheduled task name). */
   originLabel?: string;
   /**
+   * Ids of the whole messages this user message quotes (the reply entry), in
+   * fragment order. Jump anchors for the sent quote blocks: the ordinal baked
+   * into the block label is window-relative display copy that shifts whenever
+   * an older history page loads, while ids stay stable.
+   */
+  quotedMessageIds?: string[];
+  /**
    * Prevent renderer stream listeners from treating this message as a new active run.
    * Used for passive A2A follow-up messages that should appear after completion without
    * restarting the session progress state.
@@ -928,6 +935,12 @@ export interface CoworkSubmitInput {
   activeSkillIds?: string[];
   /** Set when the text was filled verbatim from a quick action (建议操作) entry. */
   source?: 'quick_action';
+  /**
+   * Ids of the whole messages the composed text quotes (the reply entry).
+   * Persisted on the user message as quotedMessageIds so the sent quote
+   * blocks can jump back by id instead of by window-relative ordinal.
+   */
+  quotedMessageIds?: string[];
 }
 
 export type CoworkSubmitInputErrorCode =
@@ -1005,6 +1018,8 @@ export type CoworkQuotedSelectionRole = 'user' | 'assistant' | 'other';
  * the quoted text never changes afterwards.
  */
 export interface CoworkQuotedMessageRef {
+  /** Id of the quoted message — the durable jump anchor (see CoworkQuotedSelection). */
+  messageId?: string;
   /** 1-based position among the transcript's rendered messages. */
   ordinal: number;
   /** Whether the message was still being generated at capture time. */

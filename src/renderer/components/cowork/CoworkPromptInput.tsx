@@ -34,6 +34,7 @@ import type {
 import CoworkQuotedSelectionTiles from './CoworkQuotedSelectionTiles';
 import {
   QUOTED_SELECTION_SOURCE_KEYS,
+  collectQuotedMessageIds,
   composeSubmittedCoworkPrompt,
   removeQuotedSelection,
 } from './coworkQuotedSelections';
@@ -330,7 +331,11 @@ export interface CoworkPromptInputRef {
 }
 
 interface CoworkPromptInputProps {
-  onSubmit: (prompt: string, skillPrompt?: string) => void | boolean | Promise<void | boolean>;
+  onSubmit: (
+    prompt: string,
+    skillPrompt?: string,
+    quotedMessageIds?: string[],
+  ) => void | boolean | Promise<void | boolean>;
   onStop?: () => void;
   isStreaming?: boolean;
   placeholder?: string;
@@ -991,12 +996,18 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       // Text, attachments and quoted excerpts are ONE submission: all three
       // fields are cleared together, and a refusal (or a throw) puts all of
       // them back. Steering takes the attachment snapshot too — skipping it is
-      // what lost a mid-run image.
+      // what lost a mid-run image. The quoted ids ride along so the persisted
+      // user message can anchor its sent quote blocks by message id.
+      const quotedMessageIds = collectQuotedMessageIds(submittedQuotedSelections);
       await submitCoworkComposerDraft({
         draftField,
         attachmentField,
         quotedSelectionField,
-        onSubmit: () => onSubmit(finalPrompt, isStreaming ? undefined : skillPrompt),
+        onSubmit: () => onSubmit(
+          finalPrompt,
+          isStreaming ? undefined : skillPrompt,
+          quotedMessageIds.length > 0 ? quotedMessageIds : undefined,
+        ),
       });
     } catch (error) {
       console.error('Cowork prompt submission failed:', error);

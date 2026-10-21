@@ -32,6 +32,7 @@ import {
   findTranscriptMessageElement,
   parseSentQuoteBlock,
   parseSentSelectionQuoteBlock,
+  readQuotedJumpMessageId,
   resolveQuoteActionBarAnchorRect,
   type PendingQuotedSelection,
   type SentSelectionQuoteLabelSet,
@@ -119,7 +120,11 @@ import {
 
 interface CoworkSessionDetailProps {
   onManageSkills?: () => void;
-  onContinue: (prompt: string, skillPrompt?: string) => void | boolean | Promise<void | boolean>;
+  onContinue: (
+    prompt: string,
+    skillPrompt?: string,
+    quotedMessageIds?: string[],
+  ) => void | boolean | Promise<void | boolean>;
   onStop: () => void;
   submitError?: string | null;
   focusedOrderTxid?: string | null;
@@ -1689,8 +1694,9 @@ const UserMessageItem: React.FC<{
   botName?: string | null;
   /** Quotes this whole message into the composer slot (the reply entry). */
   onQuoteReply?: (message: CoworkMessage, text: string) => void;
-  /** Jumps back to the message a sent quote block answers (its ordinal). */
-  onJumpToQuoteBlock?: (ordinal: number) => void;
+  /** Jumps back to the message a sent quote block answers (id anchor when the
+   * submitting message recorded one, else the block label's ordinal). */
+  onJumpToQuoteBlock?: (ordinal: number, messageIdAnchor?: string) => void;
   /** Resolves an attachment path to an absolute one, so images can be read. */
   resolveLocalFilePath?: (href: string, text: string) => string | null;
 }> = ({ message, skills, sessionType, sessionTitle, botName, onQuoteReply, onJumpToQuoteBlock, resolveLocalFilePath }) => {
@@ -1775,7 +1781,10 @@ const UserMessageItem: React.FC<{
                     <CoworkSentQuoteBlock
                       block={sentQuote.block}
                       onJump={onJumpToQuoteBlock
-                        ? () => onJumpToQuoteBlock(sentQuote.ordinal)
+                        ? () => onJumpToQuoteBlock(
+                          sentQuote.ordinal,
+                          readQuotedJumpMessageId(message.metadata) ?? undefined,
+                        )
                         : undefined}
                     />
                     {sentQuote.rest ? (
@@ -4247,11 +4256,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   // Send path for the one-shot follow above: a submission that carries a quote
   // block — a per-message reply or a hand-picked selection, both of which open
   // the composed body with their generated block — arms the flag. Every submit
-  // re-decides it, so a later plain message clears a stale one.
-  const handlePromptSubmit = useCallback((prompt: string, skillPrompt?: string) => {
+  // re-decides it, so a later plain message clears a stale one. The quoted ids
+  // ride through untouched (the persistence side anchors the sent blocks).
+  const handlePromptSubmit = useCallback((
+    prompt: string,
+    skillPrompt?: string,
+    quotedMessageIds?: string[],
+  ) => {
     pendingQuoteReplyFollowRef.current = parseSentQuoteBlock(prompt) !== null
       || parseSentSelectionQuoteBlock(prompt, buildSentSelectionQuoteLabelSets()) !== null;
-    return onContinue(prompt, skillPrompt);
+    return onContinue(prompt, skillPrompt, quotedMessageIds);
   }, [onContinue]);
 
   useEffect(() => {
@@ -4361,6 +4375,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     const fragment = createMessageQuotedSelection({
       content: text,
       role: message.type === 'user' ? 'user' : message.type === 'assistant' ? 'assistant' : 'other',
+      messageId: message.id,
       ordinal,
       streaming: message.metadata?.isStreaming === true,
     });
@@ -4405,12 +4420,19 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   }, []);
 
   // Jump back from a *sent* quote block (a message body that opens with the
-  // generated reply block). The block only carries the quoted message's
-  // position, so the jump resolves position → id against the transcript's
-  // current map and reuses the scroll + ring path above. A position the map no
-  // longer holds is the same "not in the loaded window" story — the readable
-  // notice, never a silent no-op.
-  const handleJumpToSentQuoteBlock = useCallback((ordinal: number) => {
+  // generated reply block). The metadata anchor (quotedMessageIds[0]) is the
+  // durable target: message ids survive history paging and app restarts, while
+  // the ordinal the block label carries is window-relative copy that shifts by
+  // K the moment an older page of K messages loads — resolving it against the
+  // current map would ring the wrong message. Messages sent before the anchor
+  // existed (no metadata) keep the ordinal → id resolution. Either way a miss
+  // is the same "not in the loaded window" story — the readable notice, never
+  // a silent no-op.
+  const handleJumpToSentQuoteBlock = useCallback((ordinal: number, messageIdAnchor?: string) => {
+    if (messageIdAnchor) {
+      handleJumpToQuotedMessage(messageIdAnchor);
+      return;
+    }
     const targetId = buildTranscriptMessageIdsByOrdinal(transcriptMessagePositionsRef.current).get(ordinal);
     if (!targetId) {
       setQuoteJumpNotice(i18nService.t('coworkQuoteJumpMissing'));
