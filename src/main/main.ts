@@ -101,6 +101,7 @@ import { createMetaBotWallet, getPrivateKeyBufferForEcdh } from './services/meta
 import { UserIdentityStore } from './userIdentityStore';
 import type { UserIdentity } from './types/userIdentity';
 import {
+  confirmDeferredUserIdentitySetup,
   createUserIdentity,
   importUserIdentity,
   logoutUserIdentity,
@@ -141,6 +142,7 @@ import {
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
+import { applyRelayIdentityChange, initRelayIdentityCloseoutService, reconcileRelayCredentialsWithIdentity } from './services/relayIdentityCloseout';
 import { initVisionRelayService, recognizeAudioViaRelay, recognizeImageViaRelay, recognizeVideoAudioViaRelay, recognizeVideoViaRelay } from './services/visionRelayService';
 import { probeMediaFile, convertMediaFile, grabVideoFrame } from './services/mediaToolsService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
@@ -15035,6 +15037,28 @@ if (!gotTheLock) {
     }
   });
 
+  // Adoption signal for a silently provisioned user identity (first-run free
+  // relay bootstrap defers its gas subsidy and /info pins, see
+  // createUserIdentity deferSubsidy): the user just did something that only
+  // makes sense if they intend to keep this identity, so fund it and publish
+  // its pins in the background. No-op for identities that went through the
+  // regular create/import paths or were already confirmed. Never surfaces a
+  // failure to the triggering action; Settings keeps its retry affordances.
+  const confirmDeferredIdentityInBackground = (signal: string): void => {
+    void confirmDeferredUserIdentitySetup(getUserIdentityStore())
+      .then((result) => {
+        if (result) {
+          console.log(`[UserIdentity] deferred identity setup confirmed via ${signal}:`, {
+            subsidy: result.subsidy?.success ?? null,
+            chainSync: result.chainSync?.success ?? null,
+          });
+        }
+      })
+      .catch((error) => {
+        console.warn(`[UserIdentity] deferred identity setup via ${signal} failed:`, error instanceof Error ? error.message : String(error));
+      });
+  };
+
   // Chain-first MetaBot creation: wallet → subsidy → on-chain PINs → DB save.
   // If chain fails, DB records are rolled back. Returns metabot only on full success.
   ipcMain.handle('idbots:createMetaBotOnChain', async (_event, input: {
@@ -15064,7 +15088,14 @@ if (!gotTheLock) {
     // Thin wrapper over the shared core; the Twin metabot_create tool calls the
     // same function so manual and Twin-assisted creation are identical.
     try {
-      return await createMetaBotOnChainCore(input, getMetabotManageDeps());
+      const result = await createMetaBotOnChainCore(input, getMetabotManageDeps());
+      if (result?.success) {
+        // Creating a bot on this identity (the welcome-flow Twin included) is
+        // the clearest adoption signal; bot creation itself needs no user gas
+        // (the bot wallet publishes), so this runs alongside, not ahead of it.
+        confirmDeferredIdentityInBackground('metabot creation');
+      }
+      return result;
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[MetaBot] idbots:createMetaBotOnChain failed:', errMsg);
@@ -15082,12 +15113,19 @@ if (!gotTheLock) {
     }
   });
 
+  // Every path that writes a user_identity row (create/import) must run the
+  // relay identity closeout before reporting success: the free-relay
+  // credential caches otherwise keep serving the PREVIOUS identity's key (the
+  // 2026-10 identity-split incident). The closeout clears the caches
+  // synchronously and then re-bootstraps as the new identity; it never
+  // rejects, so an offline relay cannot fail the identity operation.
   ipcMain.handle('userIdentity:create', async (_event, input: { name: string; avatar?: string | null }) => {
     try {
       const result = await createUserIdentity(getUserIdentityStore(), input ?? { name: '' });
       if (!result.success) {
         return { success: false, error: result.error };
       }
+      const relayCloseout = await applyRelayIdentityChange({ reason: 'create' });
       return {
         success: true,
         identity: toPublicUserIdentity(result.identity ?? null),
@@ -15095,6 +15133,7 @@ if (!gotTheLock) {
         mnemonic: result.mnemonic,
         subsidy: result.subsidy,
         chainSync: result.chainSync,
+        relayCloseout,
       };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
@@ -15109,12 +15148,14 @@ if (!gotTheLock) {
       if (!result.success) {
         return { success: false, error: result.error };
       }
+      const relayCloseout = await applyRelayIdentityChange({ reason: 'import' });
       return {
         success: true,
         identity: toPublicUserIdentity(result.identity ?? null),
         profileSource: result.profileSource,
         subsidy: result.subsidy,
         chainSync: result.chainSync,
+        relayCloseout,
       };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
@@ -15158,6 +15199,8 @@ if (!gotTheLock) {
       if (!identity) {
         return { success: false, error: 'USER_IDENTITY_MISSING' };
       }
+      // Backing up the mnemonic means keeping this identity.
+      confirmDeferredIdentityInBackground('mnemonic backup');
       return { success: true, mnemonic: identity.mnemonic };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
@@ -15225,6 +15268,13 @@ if (!gotTheLock) {
 
   ipcMain.handle('chainBackup:backup', async () => {
     try {
+      // The backup publishes user-signed pins (bots manifest), so a silently
+      // provisioned identity must be funded first — awaited, unlike the other
+      // adoption signals, because the backup would otherwise fail on gas.
+      await confirmDeferredUserIdentitySetup(getUserIdentityStore()).catch((error) => {
+        console.warn('[ChainBackup] deferred identity setup before backup failed:', error instanceof Error ? error.message : String(error));
+        return null;
+      });
       const result = await runChainBackup({
         db: getStore().getDatabase(),
         metabotStore: getMetabotStore(),
@@ -16735,6 +16785,21 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   setJevRelayCallStatsSink(coworkLog);
   initJevRelayService({ getStore });
   registerJevRelayIpcHandlers({ ipcMain });
+
+  // Identity-change closeout for all three relay credential caches (quota
+  // snapshot, JEV kv+memory, vision kv+memory) plus the metaid-free provider
+  // credentials. userIdentity:create/import await it so a replaced identity
+  // never keeps consuming the previous identity's relay key; it also serves
+  // as the quota-response identity-mismatch repair hook and as the startup
+  // reconciliation for installs that split before the closeout existed. The
+  // app_config rewrite is broadcast so the renderer configService reloads
+  // instead of writing its stale snapshot (old key) back.
+  initRelayIdentityCloseoutService({
+    getStore,
+    getUserIdentityStore,
+    onAppConfigChanged: () => broadcastStoreChanged('app_config'),
+    log: coworkLog,
+  });
 
   // Event-loop liveness timeline: a stalled main process fires every
   // in-process timer late (the 2026-10-16 15.4s first-sentence stall), so
@@ -18503,14 +18568,48 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('dsh runtime warmup begin');
     void getCoworkRunner().prewarmDshRuntime();
 
-    // Pre-resolve the free JEV relay key beside the DSH warmup. Relay keys
-    // expire server-side after an idle window, and the first cerebellum call
-    // of the next chat then paid an identity-signed re-bootstrap (15s+
-    // observed) inside the turn's volatile-context build — the 2026-10-15
-    // first-sentence latency report. Fire-and-forget: the resolver never
-    // throws, and a warm key simply makes the first turn's 1.5s-bounded JEV
-    // calls answer from cache.
-    void resolveCerebellumRuntimeConfig(getStore().get('app_config'));
+    // Relay credential <-> identity reconciliation. Installs that split before
+    // the identity closeout existed hold an un-stamped relay key in the caches
+    // (possibly another identity's), and a restored data backup can carry a
+    // stamp naming a different identity; either runs the closeout (clear +
+    // re-issue as the current identity) exactly once, a clean stamp is a
+    // no-op that settles immediately. Fire-and-forget; never rejects.
+    const relayReconciliation = reconcileRelayCredentialsWithIdentity();
+
+    // Pre-resolve the free JEV relay key beside the DSH warmup. When no key is
+    // cached (fresh launch after a kv loss, or a key revoked past the server's
+    // per-identity cap by a newer bootstrap), the first cerebellum call of the
+    // next chat paid an identity-signed re-bootstrap (15s+ observed) inside
+    // the turn's volatile-context build — the 2026-10-15 first-sentence
+    // latency report. Relay keys do NOT expire on idle (assist-base-service,
+    // 2026-10-20); only revocation or cache loss empties the chain. Fire-and-
+    // forget: the resolver never throws, and a warm key simply makes the
+    // first turn's 1.5s-bounded JEV calls answer from cache. Chained behind
+    // the reconciliation so a drifted install resolves the re-issued key
+    // instead of racing the closeout with a second bootstrap of its own; the
+    // aligned case adds no delay.
+    void relayReconciliation
+      .catch(() => null)
+      .then(() => resolveCerebellumRuntimeConfig(getStore().get('app_config')));
+
+    // A silently provisioned identity whose subsidy is still deferred, on an
+    // install that already holds user-created bots, was adopted through a path
+    // that carries no signal (a Twin-tool bot creation, a crash between the
+    // two): fund and publish it now. A claim that already FAILED is not
+    // 'pending' any more and keeps the Settings retry path instead. Installs
+    // without bots stay deferred — the user may still be about to import
+    // their real identity.
+    try {
+      const identity = getUserIdentityStore().get();
+      if (
+        identity?.subsidy_state === 'pending'
+        && getMetabotStore().listMetabots().some((bot) => bot.metabot_type !== 'welcome')
+      ) {
+        confirmDeferredIdentityInBackground('startup with bots');
+      }
+    } catch (error) {
+      console.warn('[UserIdentity] startup deferred identity check skipped:', error instanceof Error ? error.message : String(error));
+    }
 
     await startSqliteBackgroundJobs();
     startSqliteDaemons();

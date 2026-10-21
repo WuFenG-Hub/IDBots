@@ -113,7 +113,14 @@ function persistCredentials(credentials: JevRelayCredentials): void {
   }
 }
 
-function invalidateCredentials(): void {
+/**
+ * Drop the JEV relay credentials everywhere this service caches them: the
+ * in-memory copy AND the jevRelay kv rows. Used on a 401 (revoked key) and by
+ * the identity-change closeout — after a user_identity import/create the
+ * cached key still belongs to the previous identity, and clearing only one
+ * tier would let the other resurrect it.
+ */
+export function invalidateJevRelayCredentials(): void {
   cachedCredentials = null;
   try {
     const store = depsRef?.getStore?.() ?? null;
@@ -237,7 +244,7 @@ export function createJevRelayFetchWithKeyRetry<R extends { ok: boolean; status:
       return first;
     }
     try {
-      invalidateCredentials();
+      invalidateJevRelayCredentials();
       const { apiKey } = await raceAbortSignal(resolveJevRelayCredentials(), signal);
       const headers = {
         ...(init.headers as Record<string, string> | undefined),

@@ -9,6 +9,7 @@ const require = createRequire(import.meta.url);
 
 const { createMetaBotWallet } = await import('../dist-electron/main/services/metabotWalletService.js');
 const {
+  confirmDeferredUserIdentitySetup,
   createUserIdentity,
   importUserIdentity,
   logoutUserIdentity,
@@ -518,5 +519,148 @@ test('retryChainSync (resume) still reports failure when subsidy cannot be claim
   assert.equal(resumed.chainSync.success, false);
   assert.equal(userStore.get().subsidy_state, 'failed');
   assert.equal(pinMock.calls.length, 0);
+  store.close();
+});
+
+// ---------------------------------------------------------------------------
+// Deferred subsidy (silent first-run provisioning) + adoption confirmation
+// ---------------------------------------------------------------------------
+
+const countingSubsidy = () => {
+  const counter = { calls: 0 };
+  const requestSubsidy = async () => {
+    counter.calls += 1;
+    return { success: true };
+  };
+  return { counter, requestSubsidy };
+};
+
+const createDeferredIdentity = async (userStore) =>
+  createUserIdentity(userStore, { name: 'User' }, baseDeps(makePinMock()), { deferChainSync: true, deferSubsidy: true });
+
+test('createUserIdentity with deferSubsidy claims nothing and publishes nothing', async () => {
+  const { store, userStore } = await makeStores();
+  const pinMock = makePinMock();
+  const { counter, requestSubsidy } = countingSubsidy();
+  const result = await createUserIdentity(
+    userStore,
+    { name: 'User' },
+    { ...baseDeps(pinMock), requestSubsidy },
+    { deferChainSync: true, deferSubsidy: true },
+  );
+  assert.equal(result.success, true);
+  assert.equal(result.subsidy, undefined);
+  assert.equal(result.chainSync, undefined);
+  assert.equal(counter.calls, 0, 'no gas subsidy for an identity the user may discard');
+  assert.equal(pinMock.calls.length, 0, 'no on-chain pins');
+  const saved = userStore.get();
+  assert.equal(saved.subsidy_state, 'pending');
+  assert.equal(saved.subsidy_error, null);
+  assert.equal(saved.sync_state, 'pending');
+  assert.equal(saved.sync_error, null);
+  assert.ok(saved.mnemonic && saved.mvc_address && saved.globalmetaid, 'fully signable immediately');
+  store.close();
+});
+
+test('confirmDeferredUserIdentitySetup funds and publishes a deferred identity exactly once', async () => {
+  const { store, userStore } = await makeStores();
+  await createDeferredIdentity(userStore);
+  const pinMock = makePinMock();
+  const { counter, requestSubsidy } = countingSubsidy();
+  const deps = { ...baseDeps(pinMock), requestSubsidy };
+
+  const confirmed = await confirmDeferredUserIdentitySetup(userStore, deps);
+  assert.equal(confirmed.success, true);
+  assert.equal(confirmed.subsidy.success, true);
+  assert.equal(confirmed.chainSync.success, true);
+  assert.equal(counter.calls, 1);
+  assert.deepEqual(pinMock.calls.map((c) => c.metaidData.path), ['/info/name', '/info/chatpubkey']);
+  assert.equal(userStore.get().subsidy_state, 'claimed');
+  assert.equal(userStore.get().sync_state, 'synced');
+
+  // Every later adoption signal is a no-op.
+  assert.equal(await confirmDeferredUserIdentitySetup(userStore, deps), null);
+  assert.equal(counter.calls, 1);
+  assert.equal(pinMock.calls.length, 2);
+  store.close();
+});
+
+test('confirmDeferredUserIdentitySetup is a no-op without an identity or for regularly created ones', async () => {
+  const { store, userStore } = await makeStores();
+  assert.equal(await confirmDeferredUserIdentitySetup(userStore, baseDeps(makePinMock())), null, 'logged out');
+  await createUserIdentity(userStore, { name: 'Alice' }, baseDeps(makePinMock()));
+  assert.equal(userStore.get().subsidy_state, 'claimed');
+  const { counter, requestSubsidy } = countingSubsidy();
+  assert.equal(await confirmDeferredUserIdentitySetup(userStore, { ...baseDeps(makePinMock()), requestSubsidy }), null);
+  assert.equal(counter.calls, 0);
+  store.close();
+});
+
+test('confirmDeferredUserIdentitySetup leaves the usual retryable failed state when the claim fails', async () => {
+  const { store, userStore } = await makeStores();
+  await createDeferredIdentity(userStore);
+  const pinMock = makePinMock();
+  const confirmed = await confirmDeferredUserIdentitySetup(userStore, {
+    ...baseDeps(pinMock),
+    requestSubsidy: async () => ({ success: false, error: 'faucet dry' }),
+  });
+  assert.equal(confirmed.success, true);
+  assert.equal(confirmed.subsidy.success, false);
+  assert.equal(pinMock.calls.length, 0);
+  assert.equal(userStore.get().subsidy_state, 'failed');
+  assert.equal(userStore.get().sync_state, 'failed');
+  // The Settings retry recovers it like any failed claim.
+  const retried = await retryUserIdentitySubsidy(userStore, baseDeps(makePinMock()));
+  assert.equal(retried.subsidy.success, true);
+  assert.equal(userStore.get().subsidy_state, 'claimed');
+  store.close();
+});
+
+test('updateUserIdentityName on a deferred identity funds it, pins the chat key, then publishes only the NEW name', async () => {
+  const { store, userStore } = await makeStores();
+  await createDeferredIdentity(userStore);
+  const pinMock = makePinMock();
+  const { counter, requestSubsidy } = countingSubsidy();
+  const result = await updateUserIdentityName(userStore, { name: 'Alice' }, { ...baseDeps(pinMock), requestSubsidy });
+  assert.equal(result.success, true);
+  assert.equal(counter.calls, 1);
+  const pins = pinMock.calls.map((c) => ({ path: c.metaidData.path, payload: c.metaidData.payload }));
+  assert.deepEqual(pins.map((p) => p.path), ['/info/chatpubkey', '/info/name']);
+  assert.equal(pins[1].payload, 'Alice', 'the placeholder name is never published');
+  const saved = userStore.get();
+  assert.equal(saved.name, 'Alice');
+  assert.equal(saved.subsidy_state, 'claimed');
+  assert.equal(saved.sync_state, 'synced');
+  assert.equal(saved.chat_public_key_pin_id, 'pin-1');
+  assert.equal(saved.name_pin_id, 'pin-2');
+  store.close();
+});
+
+test('updateUserIdentityName on a deferred identity reports SUBSIDY_NOT_CLAIMED when funding fails', async () => {
+  const { store, userStore } = await makeStores();
+  await createDeferredIdentity(userStore);
+  const pinMock = makePinMock();
+  const result = await updateUserIdentityName(userStore, { name: 'Alice' }, {
+    ...baseDeps(pinMock),
+    requestSubsidy: async () => ({ success: false, error: 'faucet dry' }),
+  });
+  assert.equal(result.success, false);
+  assert.equal(result.error, 'SUBSIDY_NOT_CLAIMED');
+  assert.equal(pinMock.calls.length, 0);
+  assert.equal(userStore.get().name, 'User');
+  assert.equal(userStore.get().subsidy_state, 'failed');
+  store.close();
+});
+
+test('updateUserIdentityName stays partial when the chat-key pin of a deferred identity fails', async () => {
+  const { store, userStore } = await makeStores();
+  await createDeferredIdentity(userStore);
+  const pinMock = makePinMock({ failOn: ['/info/chatpubkey'] });
+  const result = await updateUserIdentityName(userStore, { name: 'Alice' }, baseDeps(pinMock));
+  assert.equal(result.success, true, 'the rename itself still lands');
+  const saved = userStore.get();
+  assert.equal(saved.name, 'Alice');
+  assert.equal(saved.chat_public_key_pin_id, null);
+  assert.equal(saved.sync_state, 'partial', 'Settings keeps the retry path for the missing chat-key pin');
   store.close();
 });
