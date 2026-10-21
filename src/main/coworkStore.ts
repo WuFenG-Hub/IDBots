@@ -637,6 +637,13 @@ export interface CoworkMessageMetadata {
   origin?: 'user' | 'quick_action' | 'heartbeat' | 'schedule' | 'cross_session' | 'metaweb_group' | 'metaweb_private' | 'orchestrator' | 'group_task';
   /** Optional human-readable detail for the origin (e.g. scheduled task name). */
   originLabel?: string;
+  /**
+   * Ids of the whole messages this user message quotes (the reply entry), in
+   * fragment order. Jump anchors for the sent quote blocks: the ordinal baked
+   * into the block label is window-relative display copy that shifts whenever
+   * an older history page loads, while ids stay stable.
+   */
+  quotedMessageIds?: string[];
   suppressRunningStatus?: boolean;
   [key: string]: unknown;
 }

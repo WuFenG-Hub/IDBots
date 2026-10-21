@@ -120,6 +120,8 @@ export interface QuotedMessageTarget {
   /** The message body as it reads at capture time (the excerpt snapshot). */
   content: string;
   role: CoworkQuotedSelectionRole;
+  /** Id of the quoted message — the durable jump anchor. */
+  messageId?: string;
   /** 1-based position among the transcript's rendered messages. */
   ordinal: number;
   /** Whether the message was still being generated at capture time. */
@@ -141,7 +143,7 @@ export const createMessageQuotedSelection = (
   if (!fragment) return null;
   return {
     ...fragment,
-    messageRef: { ordinal: target.ordinal, streaming: target.streaming },
+    messageRef: { messageId: target.messageId, ordinal: target.ordinal, streaming: target.streaming },
   };
 };
 
@@ -215,6 +217,24 @@ export const removeQuotedSelection = (
   selections: readonly CoworkQuotedSelection[],
   id: string,
 ): CoworkQuotedSelection[] => selections.filter((selection) => selection.id !== id);
+
+/**
+ * The quoted messages' ids, in fragment order, deduped. Rides alongside the
+ * composed prompt at submit time (CoworkSubmitInput.quotedMessageIds) so the
+ * persisted user message can anchor its sent quote blocks by id — the ordinal
+ * baked into the block label is window-relative copy that shifts whenever an
+ * older history page loads. Empty for hand-picked selections (no target).
+ */
+export const collectQuotedMessageIds = (
+  selections: readonly CoworkQuotedSelection[],
+): string[] => {
+  const ids: string[] = [];
+  for (const selection of selections) {
+    const messageId = selection.messageRef?.messageId;
+    if (messageId && !ids.includes(messageId)) ids.push(messageId);
+  }
+  return ids;
+};
 
 export interface QuotedSelectionBlockLabels {
   /** Heading of the excerpt block. */
@@ -407,6 +427,18 @@ export const buildTranscriptMessageIdsByOrdinal = (
     idsByOrdinal.set(ordinal, id);
   }
   return idsByOrdinal;
+};
+
+/**
+ * The first quoted-message id recorded on a sent user message's metadata —
+ * the jump anchor for its reply block (the block's own label names the first
+ * quoted message, so ids[0] is the same target the label points at). Null for
+ * messages sent before the anchor existed or for hand-picked selections; the
+ * caller then falls back to ordinal resolution.
+ */
+export const readQuotedJumpMessageId = (metadata: unknown): string | null => {
+  const ids = (metadata as { quotedMessageIds?: unknown } | null | undefined)?.quotedMessageIds;
+  return Array.isArray(ids) && typeof ids[0] === 'string' && ids[0] !== '' ? ids[0] : null;
 };
 
 /** A sent reply block split off the head of a message body, for its jump control. */

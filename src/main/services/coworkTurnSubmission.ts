@@ -22,6 +22,13 @@ export type CoworkSubmitInput = {
   origin?: CoworkMessageMetadata['origin'];
   /** Optional human-readable detail for the origin (e.g. scheduled task name). */
   originLabel?: string;
+  /**
+   * Ids of the whole messages the composed text quotes (the reply entry).
+   * Persisted on the user message as quotedMessageIds so the sent quote blocks
+   * can jump back by id — the ordinal in the block label is window-relative
+   * copy that shifts when older history pages in.
+   */
+  quotedMessageIds?: string[];
 };
 
 export type CoworkSubmitInputErrorCode =
@@ -346,6 +353,13 @@ export class CoworkTurnSubmissionController {
     const originMetadata = input.origin
       ? { origin: input.origin, ...(input.originLabel ? { originLabel: input.originLabel } : {}) }
       : {};
+    // Jump anchors for the sent quote blocks (see CoworkSubmitInput). Only
+    // non-empty string ids ever persist, so a malformed input degrades to the
+    // renderer's ordinal fallback instead of writing junk metadata.
+    const quotedIds = Array.isArray(input.quotedMessageIds)
+      ? input.quotedMessageIds.filter((id) => typeof id === 'string' && id.trim() !== '')
+      : [];
+    const quotedMetadata = quotedIds.length > 0 ? { quotedMessageIds: quotedIds } : {};
     const message = existing ?? this.store.addMessageWithId(sessionId, submissionId, {
       type: 'user',
       content: requestedText,
@@ -353,6 +367,7 @@ export class CoworkTurnSubmissionController {
         ? {
             ...sourceMetadata,
             ...originMetadata,
+            ...quotedMetadata,
             interactionKind,
             submissionId,
             submissionMode: 'steer',
@@ -362,6 +377,7 @@ export class CoworkTurnSubmissionController {
         : {
             ...sourceMetadata,
             ...originMetadata,
+            ...quotedMetadata,
             submissionId,
             submissionMode: 'continue',
             submissionResult: 'pending',

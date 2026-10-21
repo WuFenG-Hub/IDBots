@@ -144,6 +144,36 @@ async function readDeclaredInstallerVersion(installerPath: string): Promise<stri
 }
 
 /**
+ * Refuse a mislabeled package before anything touches the installed app.
+ *
+ * v1.0.1 shipped a bundle whose Info.plist still said 1.0.0, so the client kept
+ * judging itself outdated and re-downloaded the same installer. The bundle's own
+ * version is compared against the version recorded by the downloader's sidecar
+ * metadata. Every macOS install path (silent swap AND the interactive fallback
+ * the renderer drops to when the silent swap fails) must run this gate: a
+ * refusal on one path is pointless if the other path installs the same DMG.
+ *
+ * No sidecar (e.g. an installer copied in by hand) keeps the legacy behavior
+ * instead of failing hard.
+ */
+export async function assertInstallerBundleVersion(installerPath: string, sourceApp: string): Promise<void> {
+  const declaredVersion = await readDeclaredInstallerVersion(installerPath);
+  if (!declaredVersion) {
+    console.log('[AppUpdate] No download metadata sidecar; skipping bundle version check');
+    return;
+  }
+  const incomingVersion = await readMacBundleVersion(sourceApp);
+  if (incomingVersion !== declaredVersion) {
+    throw new Error(
+      `Refusing to install a mislabeled update: the bundle reports ${incomingVersion} but the update manifest declares ${declaredVersion}`,
+    );
+  }
+  console.log(
+    `[AppUpdate] Bundle version check passed: ${incomingVersion} matches update manifest ${declaredVersion}`,
+  );
+}
+
+/**
  * Remove stale `idbots-update-*` artifacts (partials, metadata, completed
  * installers) older than STALE_DOWNLOAD_TTL_MS. Failed partial files are kept
  * for resume until they age out; the in-flight download is never touched.
@@ -645,6 +675,8 @@ async function installMacDmg(dmgPath: string): Promise<void> {
     const sourceApp = path.join(mountPoint, appBundle);
     console.log(`[AppUpdate] Source app: ${sourceApp}`);
 
+    await assertInstallerBundleVersion(dmgPath, sourceApp);
+
     // Determine target path: current running app location
     // process.resourcesPath is .app/Contents/Resources, go up 3 levels
     const currentAppPath = path.resolve(process.resourcesPath, '..', '..', '..');
@@ -796,27 +828,7 @@ export async function applyMacUpdateSilently(dmgPath: string): Promise<void> {
     }
     const sourceApp = path.join(mountPoint, appBundle);
 
-    // Guard against mislabeled packages: v1.0.1 shipped a bundle whose
-    // Info.plist still said 1.0.0, so the client kept judging itself outdated
-    // and re-downloaded the same installer. Compare the bundle's own version
-    // against the version recorded by the downloader's sidecar metadata and
-    // refuse before touching the installed app.
-    const declaredVersion = await readDeclaredInstallerVersion(dmgPath);
-    if (declaredVersion) {
-      const incomingVersion = await readMacBundleVersion(sourceApp);
-      if (incomingVersion !== declaredVersion) {
-        throw new Error(
-          `Refusing to install a mislabeled update: the bundle reports ${incomingVersion} but the update manifest declares ${declaredVersion}`,
-        );
-      }
-      console.log(
-        `[AppUpdate] Bundle version check passed: ${incomingVersion} matches update manifest ${declaredVersion}`,
-      );
-    } else {
-      // No sidecar (e.g. an installer copied in by hand): keep the legacy
-      // behavior instead of failing hard.
-      console.log('[AppUpdate] No download metadata sidecar; skipping bundle version check');
-    }
+    await assertInstallerBundleVersion(dmgPath, sourceApp);
 
     const currentAppPath = path.resolve(process.resourcesPath, '..', '..', '..');
     const targetApp = currentAppPath.endsWith('.app') ? currentAppPath : `/Applications/${appBundle}`;

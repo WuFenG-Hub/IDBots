@@ -944,3 +944,39 @@ test('buildOwnerTurnInputPrompt wraps the owner text exactly once', () => {
   assert.equal(framed.split('过').length - 1 >= 1, true);
   assert.equal(framed.indexOf('<owner_message>'), framed.lastIndexOf('<owner_message>'));
 });
+
+test('continue submissions persist quotedMessageIds on the user message, dropping malformed ids', async () => {
+  const harness = createHarness();
+  const result = await harness.controller.submit(input({
+    quotedMessageIds: ['msg-a', 42, '  ', 'msg-b'],
+  }));
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'continue');
+  const persisted = harness.store.getMessageById('session-1', UUID);
+  assert.deepEqual(persisted.metadata.quotedMessageIds, ['msg-a', 'msg-b']);
+  assert.equal(persisted.metadata.submissionMode, 'continue');
+});
+
+test('steer submissions persist quotedMessageIds on the queued user message', async () => {
+  const harness = createHarness({ capability: 'open-local' });
+  harness.runner.delivery = Promise.resolve();
+  const result = await harness.controller.submit(input({
+    quotedMessageIds: ['msg-a'],
+  }));
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'steer');
+  const persisted = harness.store.getMessageById('session-1', UUID);
+  assert.deepEqual(persisted.metadata.quotedMessageIds, ['msg-a']);
+  assert.equal(persisted.metadata.interactionKind, 'steer');
+});
+
+test('submissions without quoted messages persist no quotedMessageIds key', async () => {
+  const harness = createHarness();
+  const result = await harness.controller.submit(input());
+
+  assert.equal(result.success, true);
+  const persisted = harness.store.getMessageById('session-1', UUID);
+  assert.equal('quotedMessageIds' in persisted.metadata, false);
+});
