@@ -219,18 +219,19 @@ test('a narration bubble is replyable end-to-end: its position resolves and the 
 });
 
 test('replying to a message fills the single composer slot with a frozen snapshot', () => {
-  // The fragment captures role, position and the generating state together
-  // with the text.
+  // The fragment captures role, position, the generating state and the
+  // message id (the durable jump anchor) together with the text.
   const fragment = createMessageQuotedSelection({
     content: `  ${REPLY_TEXT}  `,
     role: 'assistant',
+    messageId: 'msg-42',
     ordinal: 3,
     streaming: true,
   }, 'q-reply');
   assert.equal(fragment.id, 'q-reply');
   assert.equal(fragment.text, REPLY_TEXT, 'the excerpt is the message text, normalized');
   assert.equal(fragment.role, 'assistant');
-  assert.deepEqual(fragment.messageRef, { ordinal: 3, streaming: true });
+  assert.deepEqual(fragment.messageRef, { messageId: 'msg-42', ordinal: 3, streaming: true });
   assert.equal(fragment.truncated, false);
 
   // Snapshot semantics: whatever the live message does after the click must
@@ -387,10 +388,12 @@ test('submitting a short message reply carries the full text with role and posit
   });
 
   // The steer path composes through the same single call, and the resulting
-  // body is what onSubmit receives.
+  // body is what onSubmit receives — with the quoted ids riding along as the
+  // third argument so the persisted user message can anchor its jumps.
   assert.match(inputSource, /const finalPrompt = composeSubmittedCoworkPrompt\(\{/);
   assert.equal((inputSource.match(/composeSubmittedCoworkPrompt\(\{/g) ?? []).length, 1, 'one composition path for idle and steer');
-  assert.match(inputSource, /onSubmit\(finalPrompt/);
+  assert.match(inputSource, /onSubmit\(\s*finalPrompt,/);
+  assert.match(inputSource, /quotedMessageIds\.length > 0 \? quotedMessageIds : undefined/);
   assert.doesNotMatch(inputSource, /isStreaming\s*\?\s*trimmedValue/);
 });
 
@@ -784,13 +787,15 @@ test('the sent quote block renders as a clickable control, and the composer-side
   }
 
   // The transcript splits the sent body and mounts the control only for the
-  // parsed block; the click goes through the position → id reverse lookup and
-  // reuses the scroll + ring path.
+  // parsed block; the click goes through the metadata id anchor first (the
+  // durable target) and falls back to the position → id reverse lookup for
+  // pre-anchor messages, reusing the scroll + ring path.
   // The parse carries the display-source map: the rendered block names the
   // speaker (你：/ <bot 名>：) while the prompt body keeps the generated label.
   assert.match(detailSource, /const sentQuote = parseSentQuoteBlock\(message\.content, buildSentQuoteDisplaySources\(botName\)\);/);
   assert.match(detailSource, /<CoworkSentQuoteBlock/);
-  assert.match(detailSource, /onJumpToQuoteBlock\(sentQuote\.ordinal\)/);
+  assert.match(detailSource, /onJumpToQuoteBlock\(\s*sentQuote\.ordinal,/);
+  assert.match(detailSource, /readQuotedJumpMessageId\(message\.metadata\) \?\? undefined/);
   assert.match(detailSource, /buildTranscriptMessageIdsByOrdinal\(transcriptMessagePositionsRef\.current\)/);
   assert.match(detailSource, /findTranscriptMessageElement\(container, messageId\)/);
   assert.match(detailSource, /const QUOTE_JUMP_HIGHLIGHT_CLASSES = \['ring-1', 'ring-claude-accent'\]/);
@@ -830,10 +835,11 @@ test('a quote reply sent from away-from-bottom follows once when its reply arriv
   // Armed on the send path from the composed body (both quote kinds ride
   // there), and never by writing the gate: the "back to bottom" button must
   // stay available while the owner waits parked at the quoted message.
-  const submitWrapper = /const handlePromptSubmit = useCallback\(\(prompt: string, skillPrompt\?: string\) => \{[\s\S]*?\}, \[onContinue\]\);/.exec(detailSource);
+  const submitWrapper = /const handlePromptSubmit = useCallback\(\(\s*prompt: string,\s*skillPrompt\?: string,\s*quotedMessageIds\?: string\[\],\s*\) => \{[\s\S]*?\}, \[onContinue\]\);/.exec(detailSource);
   assert.ok(submitWrapper, 'the submit wrapper is the flag set path');
   assert.match(submitWrapper[0], /pendingQuoteReplyFollowRef\.current = parseSentQuoteBlock\(prompt\) !== null/);
   assert.match(submitWrapper[0], /parseSentSelectionQuoteBlock\(prompt, buildSentSelectionQuoteLabelSets\(\)\) !== null/);
+  assert.match(submitWrapper[0], /onContinue\(prompt, skillPrompt, quotedMessageIds\)/);
   assert.doesNotMatch(submitWrapper[0], /setShouldAutoScroll/, 'the gate is not opened at send time');
   assert.match(detailSource, /onSubmit=\{handlePromptSubmit\}/);
 
