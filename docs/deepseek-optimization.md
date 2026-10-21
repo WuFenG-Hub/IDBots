@@ -149,6 +149,36 @@ Two gaps remained after the placeholder fix, both reproducing the user-visible
    - Non-streaming responses responses now also cache reasoning for tool
      calls, matching the chat/completions path.
 
+### DSH route: DeepSeek on the OpenCode Go gateway rides chat completions
+
+The DSH (pi-ai) path never used the proxy above: it talked to the OpenCode Go
+gateway (`https://opencode.ai/zen/go/v1`, provider `opencode`) directly over
+the provider-level `responses` default. On that wire the gateway returns
+reasoning items as `{ id, type, summary }` with no `encrypted_content`, so the
+client can only replay ids plus summary text and every tool round's
+`reasoning_content` exists solely inside the gateway's Responses→chat
+translation. That translation dropped it once (2026-10-21, cowork session
+`b29803fc`: 18 tool rounds fine, then — right after a 144 s
+`ask_user_question` pause — DeepSeek rejected the next request with the same
+`reasoning_content ... must be passed back` 400; the identical request
+rebuilt from the session log passes, so the fault was the gateway's). The
+host classifies that 400 as won't-heal, so the session died on the spot.
+
+pi-ai's own `opencode-go.json` catalog lists `deepseek-v4-pro` and
+`deepseek-v4.1-flash` exclusively under `openai-completions` (compat
+`requiresReasoningContentOnAssistantMessages: true`, `thinkingFormat:
+'deepseek'`), where pi-ai stores `reasoning_content` per assistant message and
+resends it verbatim — the failure class cannot occur. `opencodeGoProtocol.ts`
+now corrects the DeepSeek V4 family to chat completions on gateway hosts, the
+same per-model correction GLM already rides (suffixed `opencode-oc` route key,
+`DEEPSEEK_V4_CHAT_COMPLETIONS_DECLARATION` for the effort ladder). Verified
+live against the gateway's `/chat/completions`: `thinking: { type }` plus
+`reasoning_effort` are accepted (unlike GLM, which the gateway 400s for the
+`thinking` object), `reasoning_content` is returned and round-trips, and an
+omitted or empty `reasoning_content` on a historical assistant tool-call
+message is tolerated — so sessions born on the Responses wire keep working
+after the switch (their replayed history simply carries no reasoning).
+
 ## 3. Cache Hit Rate Improvements
 
 DeepSeek has no explicit caching API — the entire strategy is **prefix

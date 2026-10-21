@@ -181,7 +181,7 @@ export function dshModelReasoningDeclaration(
   baseUrl?: string | null,
 ): DshModelReasoningDeclaration | null {
   const bare = bareModelIdOf(modelId);
-  if (DEEPSEEK_V4_PATTERN.test(bare) || DEEPSEEK_V4_EXPLICIT_IDS.has(bare.toLowerCase())) {
+  if (isDeepSeekV4FamilyModelId(bare)) {
     if (apiFormat !== 'openai') return null;
     return DEEPSEEK_V4_CHAT_COMPLETIONS_DECLARATION;
   }
@@ -224,6 +224,19 @@ export function foldsToolRideTextIntoThinking(modelId: string | undefined | null
  */
 export function isGlmFamilyModelId(modelId: string): boolean {
   return GLM_PATTERN.test(bareModelIdOf(modelId));
+}
+
+/**
+ * True when the model id (vendor prefixes stripped) is the DeepSeek V4 family
+ * this file declares reasoning for — the same membership the chat-completions
+ * declaration above keys on. Shared with the gateway protocol resolution
+ * (opencodeGoProtocol.ts): the OpenCode Go gateway lists the family only
+ * under chat completions, so a route-level 'responses' apiFormat must be
+ * corrected before the declaration lookup, exactly like GLM.
+ */
+export function isDeepSeekV4FamilyModelId(modelId: string): boolean {
+  const bare = bareModelIdOf(modelId);
+  return DEEPSEEK_V4_PATTERN.test(bare) || DEEPSEEK_V4_EXPLICIT_IDS.has(bare.toLowerCase());
 }
 
 const undeclaredEffortWarnedRoutes = new Set<string>();

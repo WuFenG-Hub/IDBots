@@ -27,9 +27,18 @@ test('resolveOpenCodeGoApiFormat: glm on anthropic corrects to openai as well', 
   );
 });
 
-test('resolveOpenCodeGoApiFormat: deepseek keeps the responses default', () => {
-  assert.equal(resolveOpenCodeGoApiFormat({ baseUrl: GATEWAY, model: 'deepseek-flash', apiFormat: 'responses' }), 'responses');
-  assert.equal(resolveOpenCodeGoApiFormat({ baseUrl: GATEWAY, model: 'deepseek-v4.1-flash', apiFormat: 'responses' }), 'responses');
+test('resolveOpenCodeGoApiFormat: deepseek v4 rides chat completions under the responses default', () => {
+  // 2026-10-21: the gateway's Responses→chat translation dropped
+  // reasoning_content once and DeepSeek 400'd the turn; the family rides the
+  // gateway's declared chat wire like GLM.
+  for (const model of ['deepseek-flash', 'deepseek-v4.1-flash', 'deepseek-v4-pro', 'deepseek/deepseek-v4.1-flash']) {
+    assert.equal(
+      resolveOpenCodeGoApiFormat({ baseUrl: GATEWAY, model, apiFormat: 'responses' }),
+      'openai',
+      `${model} must not ride /v1/responses on the gateway`,
+    );
+  }
+  assert.equal(resolveOpenCodeGoApiFormat({ baseUrl: GATEWAY, model: 'deepseek-v4.1-flash', apiFormat: 'openai' }), 'openai');
 });
 
 test('resolveOpenCodeGoApiFormat: unknown models and empty ids pass through', () => {

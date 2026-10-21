@@ -4,10 +4,11 @@
 // (warmup, first turn, guarded retries) rides, and the effort-rides-route
 // declaration lookup keys off the CORRECTED apiFormat. This file pins the
 // wiring end to end through the real CoworkRunner: an opencode provider row
-// with the 'responses' default must send glm-5.3-flash to chat completions
-// (the 2026-10-13 ModelProtocolUnsupported incident) while deepseek-flash
-// keeps the verified-working Responses wire, and the configured effort must
-// still ride the corrected route.
+// with the 'responses' default must send glm-5.3-flash (the 2026-10-13
+// ModelProtocolUnsupported incident) AND deepseek-flash (the 2026-10-21
+// reasoning_content 400 — the gateway's Responses translation dropped it) to
+// chat completions on the suffixed 'opencode-oc' key, and the configured
+// effort must still ride the corrected route.
 //
 // Host-side only: the turn hub is not started; the private route methods are
 // exercised directly (they are TS-private, not runtime-private).
@@ -121,16 +122,23 @@ test('opencode glm-5.3-flash rides chat completions with the effort still attach
   assert.equal(turnRoute.reasoningEffort, 'max')
 })
 
-test('opencode deepseek keeps the responses default on the same provider', () => {
+test('opencode deepseek rides chat completions on the suffixed key with the effort attached', () => {
   const { claudeSettings } = loadModules()
   const runner = runnerForSession(claudeSettings, { id: 's2', model: 'deepseek-flash', modelProvider: 'opencode' })
   const route = runner.resolveSessionDshRoute('s2')
   const turnRoute = runner.dshTurnProviderFromRoute(route, { reasoningEffort: 'high' })
-  // Verified-working route (the reporter's control case): the provider-level
-  // 'responses' default must survive the correction untouched — including the
-  // route key, so deepseek keeps riding the plain 'opencode' runtime slot.
-  assert.equal(turnRoute.apiFormat, 'responses')
-  assert.equal(turnRoute.key, 'opencode')
+  // 2026-10-21 session b29803fc: on the Responses wire the gateway's
+  // Responses→chat translation dropped reasoning_content once and DeepSeek
+  // 400'd the turn ("must be passed back to the API"), a won't-heal death on
+  // the host side. The family now rides the gateway's declared chat wire —
+  // sharing the 'opencode-oc' slot with GLM, never the bare 'opencode'
+  // responses slot — where pi-ai owns the reasoning_content round-trip.
+  assert.equal(turnRoute.apiFormat, 'openai')
+  assert.equal(turnRoute.key, 'opencode-oc')
+  assert.match(turnRoute.key, /^[a-zA-Z0-9_-]+$/)
+  // Effort rides the corrected route: DEEPSEEK_V4_CHAT_COMPLETIONS_DECLARATION
+  // keys off the corrected apiFormat (it declares nothing on 'responses').
+  assert.equal(turnRoute.reasoningEffort, 'high')
 })
 
 test('opencode responses-only model is corrected up to the Responses wire', () => {
