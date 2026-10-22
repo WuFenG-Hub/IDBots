@@ -118,6 +118,16 @@ const markSessionUnread = (state: CoworkState, sessionId: string) => {
 const isHeartbeatOrigin = (metadata?: CoworkMessageMetadata | null): boolean =>
   metadata?.origin === 'heartbeat';
 
+/**
+ * The follow-up unread carve-out (user decision #5): a session the app marked
+ * follow-up pending is the decision surface — the owner explicitly wants to be
+ * told about it — so heartbeat turns on SUCH a session do light the unread dot,
+ * overriding the heartbeat skip at the two call sites below. Looked up in the
+ * sessions list exactly the way the sidebar's placement does.
+ */
+const isSessionFollowUpPending = (state: CoworkState, sessionId: string): boolean =>
+  state.sessions.find((session) => session.id === sessionId)?.followUpState === 'pending';
+
 const coworkSlice = createSlice({
   name: 'cowork',
   initialState,
@@ -359,8 +369,10 @@ const coworkSlice = createSlice({
       }
 
       // A heartbeat turn is background progress on a long-term task, not an
-      // inbound message the human has to be told about (see isHeartbeatOrigin).
-      if (!isHeartbeatOrigin(message.metadata)) {
+      // inbound message the human has to be told about (see isHeartbeatOrigin) —
+      // unless the session is follow-up pending, the decision surface the
+      // owner asked to be paged about.
+      if (!isHeartbeatOrigin(message.metadata) || isSessionFollowUpPending(state, sessionId)) {
         markSessionUnread(state, sessionId);
       }
     },
@@ -400,8 +412,8 @@ const coworkSlice = createSlice({
       }
 
       // Same rule as addMessage: a heartbeat-driven turn never raises the
-      // session's unread marker.
-      if (!isHeartbeatOrigin(metadata)) {
+      // session's unread marker — unless the session is follow-up pending.
+      if (!isHeartbeatOrigin(metadata) || isSessionFollowUpPending(state, sessionId)) {
         markSessionUnread(state, sessionId);
       }
     },
@@ -467,6 +479,32 @@ const coworkSlice = createSlice({
       }
       if (state.currentSession?.id === sessionId) {
         state.currentSession.foldOverride = override;
+      }
+    },
+
+    /**
+     * Manual "Follow-Up Tasks" move — mirrors updateSessionFoldOverride: the
+     * row moves between the Follow-Up section and its fallback bucket without a
+     * re-read. followUp=true parks the row as pending with source 'manual';
+     * false clears the marker entirely (the manual move-out clears ANY source
+     * main-side, so the local patch does the same) and the auto-origin policy
+     * decides where the row lands next. `followUpAt` is the optimistic stamp
+     * the service passes; the next listSessions refresh replaces it with
+     * main's own timestamp.
+     */
+    updateSessionFollowUp(state, action: PayloadAction<{ sessionId: string; followUp: boolean; followUpAt?: string | null }>) {
+      const { sessionId, followUp, followUpAt } = action.payload;
+      const patch = (session: Pick<CoworkSession, 'followUpState' | 'followUpSource' | 'followUpAt'>) => {
+        session.followUpState = followUp ? 'pending' : null;
+        session.followUpSource = followUp ? 'manual' : null;
+        session.followUpAt = followUp ? (followUpAt ?? null) : null;
+      };
+      const sessionIndex = state.sessions.findIndex(s => s.id === sessionId);
+      if (sessionIndex !== -1) {
+        patch(state.sessions[sessionIndex]);
+      }
+      if (state.currentSession?.id === sessionId) {
+        patch(state.currentSession);
       }
     },
 
@@ -611,6 +649,7 @@ export const {
   setStreaming,
   updateSessionPinned,
   updateSessionFoldOverride,
+  updateSessionFollowUp,
   updateSessionTitle,
   updateSessionPermissionMode,
   updateSessionGoal,

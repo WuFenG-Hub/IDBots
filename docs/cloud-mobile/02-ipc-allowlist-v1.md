@@ -37,7 +37,7 @@ after that date so it gets a tier here.
 
 ## Invoke Channels
 
-### Cowork (68)
+### Cowork (69)
 
 | Channel | Tier | Notes |
 |---------|------|-------|
@@ -48,7 +48,7 @@ after that date so it gets a tier here.
 | `cowork:session:rename`, `cowork:session:pin`, `cowork:session:archive`, `cowork:session:unarchive`, `cowork:session:fork`, `cowork:session:rewind`, `cowork:session:compact`, `cowork:session:clearError` | P1 | |
 | `cowork:session:setModel`, `cowork:session:setEffort`, `cowork:session:setGoal`, `cowork:session:setPermissionMode` | P1 | |
 | `cowork:session:getAutoApproveTools`, `cowork:session:addAutoApproveTool`, `cowork:session:removeAutoApproveTool` | P1 | |
-| `cowork:session:createGreeting`, `cowork:session:listMetabotAvatars`, `cowork:session:foldOverride`, `cowork:session:backgroundTask` | P1 | |
+| `cowork:session:createGreeting`, `cowork:session:listMetabotAvatars`, `cowork:session:foldOverride`, `cowork:session:setFollowUp`, `cowork:session:backgroundTask` | P1 | |
 | `cowork:session:listFeedback`, `cowork:message:setFeedback` | P1 | |
 | `cowork:session:readLocalImage` | P1-R | R-path. |
 | `cowork:stream:liveContent` | P1 | Used by reconnect resync. |

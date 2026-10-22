@@ -72,6 +72,7 @@ const COWORK_INVOKE: Record<string, AllowlistEntry> = {
   'cowork:session:createGreeting': { tier: 'P1' },
   'cowork:session:listMetabotAvatars': { tier: 'P1' },
   'cowork:session:foldOverride': { tier: 'P1' },
+  'cowork:session:setFollowUp': { tier: 'P1' },
   'cowork:session:backgroundTask': { tier: 'P1' },
   'cowork:session:listFeedback': { tier: 'P1' },
   'cowork:message:setFeedback': { tier: 'P1' },

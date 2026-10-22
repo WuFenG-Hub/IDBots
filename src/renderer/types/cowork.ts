@@ -54,6 +54,13 @@ export type CoworkSessionAutoOrigin = 'longterm' | 'orchestration' | 'schedule';
 // manual placement, so the auto-origin policy decides.
 export type CoworkSessionFoldOverride = 'in' | 'out';
 
+// Which lane put a session into the "Follow-Up Tasks" (待跟进任务) bucket
+// (mirrors the follow_up_source column): 'cerebellum' = the turn-end
+// classifier judged the latest turn to be waiting on the owner; 'ask_user' =
+// an AskUserQuestion is pending on the session; 'manual' = the owner moved
+// the row by hand. null/undefined = not pending.
+export type CoworkSessionFollowUpSource = 'cerebellum' | 'ask_user' | 'manual';
+
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 
 // Cowork message metadata
@@ -424,6 +431,12 @@ export interface CoworkSession {
   autoOrigin?: CoworkSessionAutoOrigin | null;
   /** Manual fold placement (see CoworkSessionSummary.foldOverride); null = policy. */
   foldOverride?: CoworkSessionFoldOverride | null;
+  /** Follow-up state (see CoworkSessionSummary.followUpState); 'pending' = needs a human decision. */
+  followUpState?: 'pending' | null;
+  /** Which lane set the follow-up marker (see CoworkSessionSummary.followUpSource); null = none. */
+  followUpSource?: CoworkSessionFollowUpSource | null;
+  /** ISO timestamp of the last follow-up transition; null = never transitioned. */
+  followUpAt?: string | null;
   /** Local MetaBot's display name */
   metabotName?: string | null;
   /** Local MetaBot's avatar data URL */
@@ -881,6 +894,18 @@ export interface CoworkSessionSummary {
    * policy. A manual move always wins over the policy.
    */
   foldOverride?: CoworkSessionFoldOverride | null;
+  /**
+   * Follow-up marker for the sidebar's "Follow-Up Tasks" (待跟进任务) section
+   * (mirrors the follow_up_state column): 'pending' = the session currently
+   * needs a human decision or reply; null/undefined = not pending. Set and
+   * cleared by the main process (cerebellum turn-end gate, AskUserQuestion
+   * bridge, manual owner moves); the renderer only reads it for placement.
+   */
+  followUpState?: 'pending' | null;
+  /** Which lane set the follow-up marker (see CoworkSessionFollowUpSource); null = none. */
+  followUpSource?: CoworkSessionFollowUpSource | null;
+  /** ISO timestamp of the last follow-up transition; null = never transitioned. */
+  followUpAt?: string | null;
 }
 
 // The New Task composer's working-directory choice. `project` and `folder` both

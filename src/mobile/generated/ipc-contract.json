@@ -1004,6 +1004,14 @@
       ]
     },
     {
+      "path": "cowork.setSessionFollowUp",
+      "kind": "invoke",
+      "channel": "cowork:session:setFollowUp",
+      "args": [
+        "options"
+      ]
+    },
+    {
       "path": "cowork.setSessionGoal",
       "kind": "invoke",
       "channel": "cowork:session:setGoal",
