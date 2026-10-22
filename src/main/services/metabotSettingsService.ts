@@ -21,6 +21,12 @@ import {
   normalizeSurfCreationBudgetValue,
   normalizeSurfCreationModeValue,
 } from './surfSettings';
+import {
+  DAILY_REPORT_ENABLED_KEY,
+  DAILY_REPORT_HOUR_KEY,
+  normalizeDailyReportEnabledValue,
+  normalizeDailyReportHourValue,
+} from './dailyReportSettings';
 
 /** Boolean toggle settings are persisted as '1' (on) / '0' (off). */
 const normalizeToggleValue = (value: unknown): string | null => {
@@ -44,6 +50,8 @@ const RENDERER_SETTING_DEFS: Record<string, RendererSettingDef> = {
   [SURF_INTERACTION_BUDGET_KEY]: { normalizeValue: normalizeSurfBudgetValue },
   [SURF_CREATION_BUDGET_KEY]: { normalizeValue: normalizeSurfCreationBudgetValue },
   [SURF_CREATION_MODE_KEY]: { normalizeValue: normalizeSurfCreationModeValue },
+  [DAILY_REPORT_ENABLED_KEY]: { normalizeValue: normalizeDailyReportEnabledValue },
+  [DAILY_REPORT_HOUR_KEY]: { normalizeValue: normalizeDailyReportHourValue },
 };
 
 export const RENDERER_METABOT_SETTING_KEYS: readonly string[] = Object.keys(RENDERER_SETTING_DEFS);

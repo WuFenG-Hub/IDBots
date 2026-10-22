@@ -868,6 +868,28 @@ export class SqliteStore {
       );
     `);
 
+    // Daily Report (每日汇报) run ledger, one row per local day — the
+    // idempotency anchor mirroring metabot_dream_runs: the UNIQUE(report_date)
+    // claim happens BEFORE generation, so a crash between claim and delivery
+    // can only leave a 'failed' row (retried with bounded backoff), never a
+    // duplicate report session.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS daily_report_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        report_date TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        trigger_kind TEXT NOT NULL,
+        session_id TEXT,
+        window_start_ms INTEGER,
+        window_end_ms INTEGER,
+        facts_json TEXT,
+        error TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        completed_at INTEGER
+      );
+    `);
+
     // RSI P0 prediction ledger + prompt-layer snapshots (retention gate).
     // DreamStore.ensureSchema creates the same tables idempotently; keeping
     // them here too matches the other dream tables' double-entry convention.
