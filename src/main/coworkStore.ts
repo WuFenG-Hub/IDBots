@@ -992,6 +992,10 @@ export interface CapabilityDraft {
   /** RRSI P5 specificity verdict from reconciliation (NULL = not assessed,
    * behaves exactly like general). */
   scope: CapabilityScope | null;
+  /** Distillation provenance (dream review P0): NULL = the dream output's own
+   * capability_learnings; 'positive_replay' = the 👍-grounded positive replay
+   * pass. */
+  origin: string | null;
 }
 
 interface CapabilityDraftRow {
@@ -1016,6 +1020,7 @@ interface CapabilityDraftRow {
   source_procedure_id?: string | null;
   dormant_at?: number | string | null;
   scope?: string | null;
+  origin?: string | null;
 }
 
 /** Shared column list for every capability-draft SELECT (mapped by
@@ -1023,7 +1028,7 @@ interface CapabilityDraftRow {
 const CAPABILITY_DRAFT_COLUMNS = `id, metabot_id, dream_date, title, description, capability_type, status, created_at,
              validation_score, validation_notes, validated_at, times_injected, last_injected_at,
              promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text,
-             source_procedure_id, dormant_at, scope`;
+             source_procedure_id, dormant_at, scope, origin`;
 
 /** Which gate pass falsified a hypothesis (RRSI P1 ledger provenance). */
 export type CapabilityFalsifiedSource = 'validation' | 're_review';
@@ -7676,6 +7681,8 @@ export class CoworkStore implements MemoryBackend {
       title?: string | null;
       description?: string | null;
       capabilityType?: string | null;
+      /** Distillation provenance (dream review P0); NULL/omitted = dream output. */
+      origin?: string | null;
     }>,
     options?: { nowMs?: number },
   ): CapabilityDraftInsertResult {
@@ -7722,10 +7729,10 @@ export class CoworkStore implements MemoryBackend {
       }
       this.db.run(`
         INSERT INTO capability_drafts (
-          metabot_id, dream_date, title, description, capability_type, status, created_at
+          metabot_id, dream_date, title, description, capability_type, status, created_at, origin
         )
-        VALUES (?, ?, ?, ?, ?, 'draft', ?)
-      `, [metabotId, dreamDate, title, description, capabilityType, nowMs]);
+        VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)
+      `, [metabotId, dreamDate, title, description, capabilityType, nowMs, learning.origin?.trim() || null]);
       const newId = Number(this.getOne<{ id: number | string }>('SELECT last_insert_rowid() AS id', [])?.id);
       result.inserted += 1;
       result.insertedIds.push(newId);
@@ -7893,6 +7900,7 @@ export class CoworkStore implements MemoryBackend {
       sourceProcedureId: row.source_procedure_id == null ? null : String(row.source_procedure_id),
       dormantAt: row.dormant_at == null ? null : Number(row.dormant_at),
       scope: normalizeCapabilityScope(row.scope),
+      origin: row.origin == null ? null : String(row.origin),
     };
   }
 

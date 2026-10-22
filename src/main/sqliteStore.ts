@@ -698,6 +698,12 @@ export class SqliteStore {
       if (!draftCols.includes('scope')) {
         this.db.run('ALTER TABLE capability_drafts ADD COLUMN scope TEXT');
       }
+      // Dream review P0: distillation provenance. NULL = the dream output's
+      // own capability_learnings; 'positive_replay' = the 👍-grounded
+      // positive replay pass. Validation/promotion treat every origin the same.
+      if (!draftCols.includes('origin')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN origin TEXT');
+      }
     } catch (error) {
       console.warn('migrate capability_drafts validation columns:', error);
     }

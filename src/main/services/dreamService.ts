@@ -71,6 +71,12 @@ import {
   parseCounterfactualReplayOutput,
   pickCounterfactualLesson,
 } from '../libs/counterfactualReplayPrompt';
+import {
+  buildPositiveReplayPrompt,
+  extractPositiveDecisionPoints,
+  parsePositiveReplayOutput,
+  pickPositiveLesson,
+} from '../libs/positiveReplayPrompt';
 import { extractImplicitSignals } from '../libs/implicitSignals';
 import {
   PREDICTION_CALIBRATION_WINDOW_DAYS,
@@ -1256,6 +1262,8 @@ export class DreamService {
         const promotion = this.promoteCapabilityDraftsToProcedures(metabot, date);
         // Empty days have no negative decision points, so the replay no-ops.
         const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
+        // Same for the positive replay: no thumbs-up, no LLM call.
+        const positiveReplay = await this.runPositiveReplayAfterDream(metabot, brain, date, activity);
         const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
         // Self-curriculum (design §3.4): pending read_only proposals from
         // earlier nights still approve + materialize on an empty day.
@@ -1266,6 +1274,7 @@ export class DreamService {
           implicitSignals: 0,
           validation,
           replay,
+          positiveReplay,
           weeklyLongDream,
           capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
           promotedCount: promotion.promoted,
@@ -1364,6 +1373,9 @@ export class DreamService {
       // Runs even when the audit was skipped — older audited nights still count.
       const hotLayerPruning = this.pruneHotLayerAfterDream(metabot, date);
       const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
+      // Dream review P0: positive replay — praised replies reinforce through
+      // the same draft pipeline, counted like the negative path below.
+      const positiveReplay = await this.runPositiveReplayAfterDream(metabot, brain, date, activity);
       const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
       // Self-curriculum (design §3.4, after the replay per §3.1): auto-approve
       // + materialize tonight's pending read_only practice proposals.
@@ -1391,6 +1403,7 @@ export class DreamService {
         diaryTotalRefs: diaryRefs.total,
         validation,
         replay,
+        positiveReplay,
         weeklyLongDream,
         capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
         promotedCount: promotion.promoted,
@@ -3026,6 +3039,81 @@ export class DreamService {
     } catch (error) {
       console.warn(
         `[DreamService] Counterfactual replay failed for metabot ${metabot.id} date ${date}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * Dream review P0: positive replay — the 👍-symmetric counterpart of the
+   * counterfactual replay. Replays the day's praised decision points (thumbs-up
+   * replies, commented ones first, ≤3/day), asks the bot's own LLM what exactly
+   * was praiseworthy and should be repeated, and keeps a lesson only when it
+   * clears the conservative quality gate (repeatable + substantive beyond
+   * generic flattery + grounded in the quoted reply). Passing lessons become
+   * capability_drafts with origin 'positive_replay' — status 'draft', flowing
+   * through the EXISTING validation/promotion pipeline instead of going
+   * straight to the hot layer. Runs after finishRun and never affects the
+   * run's outcome; no praised points means no LLM call.
+   */
+  private async runPositiveReplayAfterDream(
+    metabot: DreamMetabotLike,
+    brain: DreamBrainPair,
+    date: string,
+    activity: DreamDayActivity,
+  ): Promise<{ points: number; lessons: number }> {
+    const zero = { points: 0, lessons: 0 };
+    try {
+      const points = extractPositiveDecisionPoints(activity);
+      if (points.length === 0) return zero;
+      const prompt = buildPositiveReplayPrompt({
+        botName: metabot.name,
+        date,
+        points,
+      });
+      const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
+      const parsed = parsePositiveReplayOutput(raw, new Set(points.map((point) => point.id)));
+      if (!parsed.ok) {
+        console.warn(`[DreamService] Positive replay parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
+        return { points: points.length, lessons: 0 };
+      }
+      const pointById = new Map(points.map((point) => [point.id, point]));
+      const lessons: Array<{ title: string; description: string }> = [];
+      const seenLessons = new Set<string>();
+      for (const result of parsed.results) {
+        const point = pointById.get(result.id);
+        if (!point) continue;
+        const lesson = pickPositiveLesson(result, point);
+        if (!lesson || seenLessons.has(lesson)) continue;
+        seenLessons.add(lesson);
+        lessons.push({
+          title: `值得重复的回复做法:${lesson.slice(0, 40)}`,
+          description: [
+            `${lesson}`,
+            '',
+            `来源:正向重放 ${date}(人类点赞,评语:${point.outcome.replace(/\s+/g, ' ').slice(0, 200)})`,
+            `被赞回复:${point.botAction.slice(0, 300)}`,
+          ].join('\n'),
+        });
+      }
+      if (lessons.length === 0) return { points: points.length, lessons: 0 };
+      // The checked insert dedupes against live drafts and re-proposals of
+      // recently falsified hypotheses — same guarantees as the dream output's
+      // own capability_learnings.
+      const insert = this.deps.coworkStore.insertCapabilityDraftsChecked(
+        metabot.id,
+        date,
+        lessons.map((lesson) => ({ ...lesson, capabilityType: 'workflow', origin: 'positive_replay' })),
+      );
+      if (insert.inserted > 0) {
+        console.log(
+          `[DreamService] Positive replay for metabot ${metabot.id} date ${date}: points=${points.length}, lessons=${insert.inserted}`,
+        );
+      }
+      return { points: points.length, lessons: insert.inserted };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Positive replay failed for metabot ${metabot.id} date ${date}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return zero;
     }
