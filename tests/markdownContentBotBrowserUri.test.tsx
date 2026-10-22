@@ -145,3 +145,20 @@ test('Web2 viewer URLs inside INLINE code spans are rewritten too (they must sta
   assert.match(output, new RegExp(`\\[pin://${REWRITE_PIN}\\]\\(pin://${REWRITE_PIN}\\)`));
   assert.doesNotMatch(output, /metaid\.io/);
 });
+
+test('session deep links (idbots://session/<id>) keep their href and render clickable', () => {
+  const markup = renderToStaticMarkup(
+    React.createElement(MarkdownContent, {
+      content: '[Open report context](idbots://session/3f6f8c42-9d1b-4a7e-b5c2-71d0e9a4f6c2)',
+    }),
+  );
+  assert.match(markup, /href="idbots:\/\/session\//);
+});
+
+test('bare session deep links are linkified like agent internet URIs', () => {
+  const output = linkifyAgentInternetUris('see idbots://session/abc-123_456 for the full briefing.');
+  assert.match(output, /\[idbots:\/\/session\/abc-123_456\]\(idbots:\/\/session\/abc-123_456\) for/);
+  // Already a markdown link destination — not double-wrapped.
+  const linked = linkifyAgentInternetUris('[jump](idbots://session/abc-123_456)');
+  assert.equal((linked.match(/\[jump\]\(idbots:\/\/session\/abc-123_456\)/g) || []).length, 1);
+});

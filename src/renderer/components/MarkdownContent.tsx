@@ -136,7 +136,7 @@ const SYNTAX_HIGHLIGHTER_STYLE = {
   fontSize: '11px',
   lineHeight: '19px',
 };
-const SAFE_URL_PROTOCOLS = new Set(['http', 'https', 'mailto', 'tel', 'file', 'metaid', 'metaapp', 'map', 'metafile', 'pin', 'preview-metaapp']);
+const SAFE_URL_PROTOCOLS = new Set(['http', 'https', 'mailto', 'tel', 'file', 'metaid', 'metaapp', 'map', 'metafile', 'pin', 'preview-metaapp', 'idbots']);
 
 /** Local .html/.htm links render as report cards in assistant chat mode. */
 const HTML_FILE_RE = /\.html?$/i;
@@ -146,8 +146,15 @@ const BOT_BROWSER_URI_PROTOCOL_RE = /^(metaid|metaapp|map|metafile|pin|preview-m
 /** Whether an href points into the Bot Browser (metaid://, metaapp://, …) rather than the external browser. */
 export const isBotBrowserUri = (href: string): boolean => BOT_BROWSER_URI_PROTOCOL_RE.test(href.trim());
 
-const AGENT_INTERNET_URI_RE = /\b(?:metaid|metaapp|map|metafile|pin|preview-metaapp):\/\/[A-Za-z0-9][A-Za-z0-9._~%/@-]*/gi;
-const AGENT_INTERNET_URI_HINT_RE = /(?:metaid|metaapp|map|metafile|pin|preview-metaapp):\/\//i;
+const AGENT_INTERNET_URI_RE = /\b(?:metaid|metaapp|map|metafile|pin|preview-metaapp|idbots):\/\/[A-Za-z0-9][A-Za-z0-9._~%/@-]*/gi;
+const AGENT_INTERNET_URI_HINT_RE = /(?:metaid|metaapp|map|metafile|pin|preview-metaapp|idbots):\/\//i;
+/**
+ * In-app session deep link emitted e.g. by the Twin Bot's daily report:
+ * idbots://session/<sessionId> jumps straight to the referenced CoWork
+ * conversation (handled by the app-wide 'cowork:viewSession' DOM event, see
+ * App.tsx). Other idbots:// shapes are not recognised and stay no-ops.
+ */
+const IDBOTS_SESSION_URI_RE = /^idbots:\/\/session\/([A-Za-z0-9][A-Za-z0-9._~-]*)$/i;
 const CODE_SEGMENT_RE = /(```[\s\S]*?```|`[^`\n]*`)/g;
 const TRAILING_URI_PUNCTUATION_RE = /[.,;:!?]+$/;
 /**
@@ -199,7 +206,8 @@ const linkifyPlainSegment = (segment: string): string => {
 
 /**
  * Turn bare Agent Internet URIs (metaid://, metaapp://, map://, metafile://,
- * pin://, preview-metaapp://) in markdown text into markdown links so they
+ * pin://, preview-metaapp://) and in-app session deep links
+ * (idbots://session/<id>) in markdown text into markdown links so they
  * render clickable everywhere (CoWork, A2A, Bot Browser panel), and rewrite
  * Web2 pin-viewer URLs (metaid.io/pin/…, openagentinternet.org/browser/…)
  * into the matching MetaWeb URIs. Existing markdown link syntax is left
@@ -683,6 +691,34 @@ const createMarkdownComponents = (
     }
 
     const hrefValue = typeof href === 'string' ? href.trim() : '';
+
+    // In-app session deep links (idbots://session/<sessionId>, emitted e.g. by
+    // the Twin Bot's daily report) jump straight to the referenced CoWork
+    // conversation via the app-wide 'cowork:viewSession' DOM event (handler in
+    // App.tsx) — they never leave the app. Unrecognised idbots:// shapes are a
+    // no-op with a warning.
+    if (hrefValue && getHrefProtocol(hrefValue) === 'idbots') {
+      const sessionMatch = hrefValue.match(IDBOTS_SESSION_URI_RE);
+      const handleIdbotsClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+        e.preventDefault();
+        if (!sessionMatch) {
+          console.warn('Unsupported idbots:// link:', hrefValue);
+          return;
+        }
+        window.dispatchEvent(new CustomEvent('cowork:viewSession', { detail: { sessionId: sessionMatch[1] } }));
+      };
+      return (
+        <a
+          href={hrefValue}
+          onClick={handleIdbotsClick}
+          className="text-claude-accent hover:text-claude-accentHover underline decoration-claude-accent/50 hover:decoration-claude-accent transition-colors cursor-pointer break-all"
+          title={hrefValue}
+          {...props}
+        >
+          {children}
+        </a>
+      );
+    }
 
     // Agent Internet URIs (metaid://, metaapp://, map://, metafile://, …) open
     // inside the Bot Browser. Without an explicit opener, fall back to the

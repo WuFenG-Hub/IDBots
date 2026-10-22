@@ -1484,6 +1484,14 @@ interface IElectronAPI {
     get: () => Promise<{ enabled: boolean }>;
     set: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   };
+  dailyReport: {
+    runNow: (opts?: { force?: boolean }) => Promise<
+      | { status: 'completed'; sessionId: string }
+      | { status: 'skipped'; reason: string }
+      | { status: 'failed'; error: string }
+      | { status: 'unavailable'; reason: string }
+    >;
+  };
   feeRates: {
     getTiers: () => Promise<Record<string, { title: string; desc: string; feeRate: number }[]>>;
     getSelected: () => Promise<Record<string, string>>;

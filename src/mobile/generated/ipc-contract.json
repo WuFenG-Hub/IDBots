@@ -1134,6 +1134,14 @@
       ]
     },
     {
+      "path": "dailyReport.runNow",
+      "kind": "invoke",
+      "channel": "dailyReport:runNow",
+      "args": [
+        "opts"
+      ]
+    },
+    {
       "path": "deepseek.getBalance",
       "kind": "invoke",
       "channel": "deepseek:getBalance",

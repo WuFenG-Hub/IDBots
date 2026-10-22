@@ -1,0 +1,483 @@
+/**
+ * Daily Report (每日汇报) service — the system-level scheduler that fires the
+ * Twin's daily briefing (a local Twin chat + a self-contained HTML report).
+ *
+ * Dream-service shape: a self-rescheduling setTimeout tick (≤60s) that
+ * RECOMPUTES the next fire from LIVE Twin settings every tick, so an
+ * hour/toggle edit applies without an app restart. Trigger rules (owner
+ * alignment 2026-10-22):
+ *
+ * - Normal: fire at the configured local hour (default 08:00) while the app
+ *   runs; `trigger_kind='scheduled'`.
+ * - Catch-up: when the app starts past today@hour (+2 min grace) with no run
+ *   row for today, fire 15 minutes after start; `trigger_kind='catchup'`.
+ * - Fresh installs: no fire while `backgroundDeferral()` returns a reason
+ *   (the first ~24h window shared by dream/surf/study).
+ * - Manual: `runNow()` fires the full pipeline on the owner's demand
+ *   (`trigger_kind='manual'`); it re-opens a day that already has a run row
+ *   and always delivers a NEW session. `force:true` bypasses ONLY the
+ *   fresh-install deferral and the empty-window skip — every other gate
+ *   (experimental switch, twin exists, per-Twin enabled) always applies.
+ * - Skip: a window with literally zero activity (collector's
+ *   `hasAnyActivity === false`) records a `skipped` row and sends nothing.
+ * - Retry: a failure after the claim records `failed`; the tick re-arms the
+ *   row with dream-style bounded backoff (classifyDreamError terminal class
+ *   never retries; DREAM_RETRY_MAX_ATTEMPTS caps the attempts) and reuses
+ *   the recorded session_id, so a retry never creates a duplicate session.
+ *
+ * Fire-time gates: the global experimental-automation master switch AND a
+ * Twin exists AND `dailyReport.enabled === '1'` AND the fresh-install
+ * deferral is clear. Double-fire guard: the UNIQUE(report_date) claim happens
+ * before any generation work.
+ */
+
+import {
+  computeDailyReportWindow,
+  formatDailyReportLocalDate,
+  type DailyReportFacts,
+} from './dailyReportCollector';
+import {
+  generateDailyReport,
+  resolveDailyReportStrings,
+  type DailyReportBrainOptions,
+  type DailyReportGenerationResult,
+  type DailyReportPerformChat,
+} from './dailyReportGenerator';
+import { isDailyReportEnabled, resolveDailyReportHour } from './dailyReportSettings';
+import type { DailyReportRun, DailyReportStore, DailyReportTriggerKind } from '../dailyReportStore';
+import {
+  selectDailyReportNarration,
+  DAILY_REPORT_MAX_NARRATED_SESSIONS,
+} from '../cerebellum/dailyReportTriage';
+import {
+  classifyDreamError,
+  computeDreamBackoffDelayMs,
+  DREAM_RETRY_MAX_ATTEMPTS,
+  isRateLimitError,
+} from '../libs/dreamRetryPolicy';
+
+/** Tick cadence: recomputing the fire from live settings every 30s. */
+export const DAILY_REPORT_TICK_INTERVAL_MS = 30_000;
+/** Catch-up fires 15 minutes after app start (owner alignment). */
+export const DAILY_REPORT_CATCHUP_DELAY_MS = 15 * 60_000;
+/** Grace past the configured hour before "app was off at fire time". */
+export const DAILY_REPORT_FIRE_GRACE_MS = 2 * 60_000;
+/** Deterministic session title (owner alignment — always Chinese). */
+export const DAILY_REPORT_SESSION_TITLE_PREFIX = '每日汇报';
+
+export interface DailyReportTwinLike {
+  id: number;
+  name?: string;
+}
+
+export interface DailyReportServiceDeps {
+  coworkStore: {
+    getConfig(): { workingDirectory: string };
+    createSession(
+      title: string,
+      cwd: string,
+      systemPrompt?: string,
+      executionMode?: string,
+      activeSkillIds?: string[],
+      metabotId?: number | null,
+    ): { id: string };
+    addMessage(
+      sessionId: string,
+      message: { type: string; content: string; metadata?: Record<string, unknown> },
+    ): unknown;
+  };
+  metabotStore: {
+    listMetabots(): ReadonlyArray<{ id: number; metabot_type?: string }>;
+    getMetabotSetting(metabotId: number, key: string): string | null;
+  };
+  dailyReportStore: DailyReportStore;
+  /** App kv store backing isExperimentalAutomationAllowed. */
+  experimentalAutomationStore: { get(key: string): unknown } | null;
+  /** Fresh-install deferral (resolveBackgroundAutomationDeferral). */
+  backgroundDeferral: () => string | null;
+  isExperimentalAutomationAllowed: (store: { get(key: string): unknown } | null) => boolean;
+  /** Collector, wired to the shared db by the caller. */
+  collectFacts: (args: { windowStartMs: number; windowEndMs: number; twinId: number }) => DailyReportFacts;
+  /** Cerebellum triage gate; null verdicts degrade to recency order. */
+  triageCandidates: (args: {
+    candidates: ReadonlyArray<{
+      sessionId: string;
+      sessionTitle: string;
+      lastAssistantText: string;
+      lastUserText: string;
+    }>;
+  }) => Promise<ReadonlyMap<string, number> | null>;
+  /** System brain (Twin's primary+fallback pair), resolved lazily per fire. */
+  resolveBrain: () => DailyReportBrainOptions | null;
+  performChat: DailyReportPerformChat;
+  emitCoworkStreamMessage: (sessionId: string, message: unknown) => void;
+  /** UI locale resolver ('zh' | 'en' | OS locale string). */
+  getLocale: () => string;
+  /** <userData>/daily-reports. */
+  reportDir: string;
+  /** resolveSessionWorkingDirectory(base, metabotId) — twin workspace cwd. */
+  resolveSessionCwd: (baseWorkingDirectory: string, metabotId: number | null) => string;
+  now?: () => Date;
+  /** Service-start anchor for the catch-up rule (defaults to real start). */
+  serviceStartedAtMs?: number;
+  tickIntervalMs?: number;
+  log?: (message: string) => void;
+}
+
+const localTodayAtHourMs = (nowMs: number, hour: number): number => {
+  const d = new Date(nowMs);
+  d.setHours(hour, 0, 0, 0);
+  return d.getTime();
+};
+
+export type DailyReportFireTrigger = DailyReportTriggerKind;
+
+export interface DailyReportFireDecision {
+  trigger: DailyReportFireTrigger;
+  /** The re-armed run row when this is a bounded retry of a failed day. */
+  retryRun: DailyReportRun | null;
+}
+
+/**
+ * Structured outcome of one report attempt — returned by the manual "run now"
+ * entry point and produced internally by every fire path, so the IPC layer
+ * can surface exactly what happened without parsing logs. Never throws.
+ */
+export type DailyReportRunNowResult =
+  | { status: 'completed'; sessionId: string }
+  | { status: 'skipped'; reason: string }
+  | { status: 'failed'; error: string }
+  | { status: 'unavailable'; reason: string };
+
+/**
+ * Pure decision core, split out for tests: given today's run row (if any),
+ * the live hour and the service-start anchor, decide whether THIS tick
+ * should fire. Gates (twin/enabled/experimental/deferral) are checked by the
+ * caller BEFORE this — a blocked gate must not consume the catch-up arm.
+ */
+export const decideDailyReportFire = (input: {
+  nowMs: number;
+  serviceStartedAtMs: number;
+  hour: number;
+  run: DailyReportRun | null;
+  maxAttempts?: number;
+}): DailyReportFireDecision | null => {
+  const maxAttempts = Math.max(1, Math.floor(input.maxAttempts ?? DREAM_RETRY_MAX_ATTEMPTS));
+  const todayAtHourMs = localTodayAtHourMs(input.nowMs, input.hour);
+
+  if (input.run) {
+    if (input.run.status !== 'failed') return null; // running/completed/skipped own the day
+    if (input.run.attemptCount >= maxAttempts) return null;
+    if (classifyDreamError(input.run.error) === 'terminal') return null;
+    const failedAtMs = input.run.completedAt ?? input.run.createdAt;
+    const backoffMs = computeDreamBackoffDelayMs({
+      attemptCount: input.run.attemptCount,
+      rateLimited: isRateLimitError(input.run.error),
+    });
+    if (input.nowMs < failedAtMs + backoffMs) return null;
+    return { trigger: 'retry', retryRun: input.run };
+  }
+
+  if (input.nowMs < todayAtHourMs) return null; // before the configured hour
+  if (input.serviceStartedAtMs > todayAtHourMs + DAILY_REPORT_FIRE_GRACE_MS) {
+    // The app was off (or started) past the fire time: catch up 15 minutes
+    // after start, not instantly.
+    return input.nowMs >= input.serviceStartedAtMs + DAILY_REPORT_CATCHUP_DELAY_MS
+      ? { trigger: 'catchup', retryRun: null }
+      : null;
+  }
+  return { trigger: 'scheduled', retryRun: null };
+};
+
+/** Handle returned by startDailyReportService (also what main.ts caches for IPC). */
+export interface DailyReportServiceHandle {
+  /** Test hook: run the decision+fire pipeline immediately. */
+  tickNow: () => Promise<void>;
+  /** Manual "run now" — see the method doc on the implementation. */
+  runNow: (opts?: { force?: boolean }) => Promise<DailyReportRunNowResult>;
+  stop: () => void;
+}
+
+let activeService: DailyReportServiceHandle | null = null;
+
+export const startDailyReportService = (deps: DailyReportServiceDeps): DailyReportServiceHandle => {
+  activeService?.stop();
+  const tickIntervalMs = Math.max(5_000, Math.floor(deps.tickIntervalMs ?? DAILY_REPORT_TICK_INTERVAL_MS));
+  const log = deps.log ?? ((message: string) => console.log(`[DailyReport] ${message}`));
+  const serviceStartedAtMs = deps.serviceStartedAtMs ?? Date.now();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let stopped = false;
+  let firing = false;
+
+  /** One pending tick at a time; a manual tickNow must orphan nothing. */
+  const scheduleNextTick = (): void => {
+    if (stopped) return;
+    if (timer) {
+      clearTimeout(timer);
+    }
+    timer = setTimeout(() => {
+      timer = null;
+      void tick();
+    }, tickIntervalMs);
+  };
+
+  const resolveTwin = (): DailyReportTwinLike | null => {
+    const twin = deps.metabotStore.listMetabots().find((bot) => bot.metabot_type === 'twin');
+    return twin ? { id: twin.id } : null;
+  };
+
+  const fireGatesOpen = (twin: DailyReportTwinLike | null): boolean => {
+    if (!deps.isExperimentalAutomationAllowed(deps.experimentalAutomationStore)) return false;
+    if (!twin) return false;
+    if (!isDailyReportEnabled(deps.metabotStore, twin.id)) return false;
+    if (deps.backgroundDeferral() !== null) return false;
+    return true;
+  };
+
+  const deliverReport = (input: {
+    run: DailyReportRun;
+    twin: DailyReportTwinLike;
+    dateLabel: string;
+    content: string;
+  }): string => {
+    let sessionId = input.run.sessionId;
+    if (!sessionId) {
+      const cwd = deps.resolveSessionCwd(deps.coworkStore.getConfig().workingDirectory, input.twin.id);
+      const session = deps.coworkStore.createSession(
+        `${DAILY_REPORT_SESSION_TITLE_PREFIX} ${input.dateLabel}`,
+        cwd,
+        '',
+        'local',
+        [],
+        input.twin.id,
+      );
+      sessionId = session.id;
+      deps.dailyReportStore.setRunSessionId(input.run.id, sessionId);
+    }
+    const message = deps.coworkStore.addMessage(sessionId, {
+      type: 'assistant',
+      content: input.content,
+      metadata: { origin: 'daily_report', originLabel: input.dateLabel },
+    });
+    deps.emitCoworkStreamMessage(sessionId, message);
+    // Sidebar ordering: a fresh session has activity_at NULL, and
+    // listSessions falls back to updated_at DESC (bumped by addMessage), so
+    // the report tops the main conversation list without extra store writes.
+    return sessionId;
+  };
+
+  const executeReport = async (
+    input: { trigger: DailyReportTriggerKind; force?: boolean; retryRun: DailyReportRun | null },
+    twin: DailyReportTwinLike,
+  ): Promise<DailyReportRunNowResult> => {
+    const now = deps.now?.() ?? new Date();
+    const nowMs = now.getTime();
+    const dateLabel = formatDailyReportLocalDate(nowMs);
+    const lastSuccess = deps.dailyReportStore.getLastSuccessfulRun();
+    const { windowStartMs, windowEndMs } = computeDailyReportWindow({
+      nowMs,
+      lastSuccessfulWindowEndMs: lastSuccess?.windowEndMs ?? null,
+    });
+
+    const claim = { reportDate: dateLabel, windowStartMs, windowEndMs };
+    let run: DailyReportRun | null = null;
+    if (input.trigger === 'retry' && input.retryRun) {
+      run = deps.dailyReportStore.reactivateFailedRun(
+        { ...claim, triggerKind: 'retry' },
+        DREAM_RETRY_MAX_ATTEMPTS,
+        nowMs,
+      );
+    } else if (input.trigger === 'manual') {
+      // Manual runs may re-open a day that already has a row: first claim
+      // (fresh day), else reset whatever is there for a fresh manual attempt.
+      run = deps.dailyReportStore.claimRun({ ...claim, triggerKind: 'manual' }, nowMs)
+        ?? deps.dailyReportStore.resetRunForManual({ ...claim, triggerKind: 'manual' }, nowMs);
+    } else {
+      run = deps.dailyReportStore.claimRun({ ...claim, triggerKind: input.trigger }, nowMs);
+    }
+    if (!run) {
+      return { status: 'unavailable', reason: 'claim_lost' }; // UNIQUE(report_date) — another attempt owns the day
+    }
+
+    try {
+      const facts = deps.collectFacts({ windowStartMs, windowEndMs, twinId: twin.id });
+      if (!facts.hasAnyActivity && input.force !== true) {
+        deps.dailyReportStore.markSkipped(run.id, nowMs);
+        log(`${dateLabel}: window empty — recorded 'skipped', no session created.`);
+        return { status: 'skipped', reason: 'no_activity' };
+      }
+
+      // Cerebellum triage for narration; must-includes bypass it entirely.
+      const mustIncludeSessionIds = facts.pendingFollowUps.map((item) => item.sessionId);
+      const mustInclude = new Set(mustIncludeSessionIds);
+      const candidates = facts.humanSessions.filter((session) => !mustInclude.has(session.sessionId));
+      let verdicts: ReadonlyMap<string, number> | null = null;
+      try {
+        verdicts = await deps.triageCandidates({
+          candidates: candidates.map((session) => ({
+            sessionId: session.sessionId,
+            sessionTitle: session.title,
+            lastAssistantText: session.lastAssistantExcerpt ?? '',
+            lastUserText: session.lastUserExcerpt ?? '',
+          })),
+        });
+      } catch {
+        verdicts = null; // triage never sinks the report
+      }
+      const narratedSessionIds = selectDailyReportNarration({
+        mustIncludeSessionIds,
+        candidates,
+        verdicts,
+        maxNarrated: DAILY_REPORT_MAX_NARRATED_SESSIONS,
+      });
+      const narrated = new Set(narratedSessionIds);
+      // The brain only reads the narrated sessions' excerpts (bounded input);
+      // the deterministic briefing below uses the full facts.
+      const brainFacts: DailyReportFacts = {
+        ...facts,
+        humanSessions: facts.humanSessions.filter((session) => narrated.has(session.sessionId)),
+      };
+
+      const strings = resolveDailyReportStrings(deps.getLocale());
+      const generated = await generateDailyReport({
+        facts: brainFacts,
+        strings,
+        dateLabel,
+        reportDir: deps.reportDir,
+        brain: deps.resolveBrain(),
+        performChat: deps.performChat,
+      });
+
+      const content = `${generated.briefingMarkdown}\n\n[${strings.viewFullReport}](<${generated.htmlFileUrl}>)`;
+      const sessionId = deliverReport({
+        run,
+        twin,
+        dateLabel,
+        content,
+      });
+
+      const stats = {
+        windowStartMs,
+        windowEndMs,
+        trigger: input.trigger,
+        usedFallback: generated.usedFallback,
+        counts: {
+          pendingFollowUps: facts.pendingFollowUps.length,
+          ownerOrchestrations: facts.ownerOrchestrations.length,
+          humanSessions: facts.humanSessions.length,
+          narratedSessions: narratedSessionIds.length,
+          scheduledRuns: facts.machineActivity.scheduledRuns.length,
+          groupTaskTransitions: facts.machineActivity.groupTaskTransitions.length,
+          longTermEvents: facts.machineActivity.longTermEvents.length,
+          botDigests: facts.botDigests.length,
+          onlineBots: facts.onlineActivity.length,
+          newSessions: facts.newSessionCount,
+        },
+      };
+      deps.dailyReportStore.markCompleted(run.id, sessionId, JSON.stringify(stats), nowMs);
+      log(`${dateLabel}: report delivered (session ${sessionId}, fallback=${generated.usedFallback}).`);
+      return { status: 'completed', sessionId };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      deps.dailyReportStore.markFailed(run.id, message, nowMs);
+      const terminal = classifyDreamError(error) === 'terminal';
+      log(`${dateLabel}: report failed (${terminal ? 'terminal' : 'retryable'}): ${message}`);
+      return { status: 'failed', error: message };
+    }
+  };
+
+  const tick = async (): Promise<void> => {
+    if (stopped || firing) {
+      // Keep the cadence alive when a manual run (or a concurrent manual
+      // tick) holds the firing flag — an early return must not kill the loop.
+      scheduleNextTick();
+      return;
+    }
+    firing = true;
+    try {
+      const now = deps.now?.() ?? new Date();
+      const twin = resolveTwin();
+      if (!fireGatesOpen(twin) || !twin) {
+        return; // gates checked at fire time; a later tick picks the change up
+      }
+      const hour = resolveDailyReportHour(deps.metabotStore, twin.id);
+      const run = deps.dailyReportStore.getRunForDate(formatDailyReportLocalDate(now.getTime()));
+      const decision = decideDailyReportFire({ nowMs: now.getTime(), serviceStartedAtMs, hour, run });
+      if (decision) {
+        await executeReport({ trigger: decision.trigger, retryRun: decision.retryRun }, twin);
+      }
+    } catch (error) {
+      log(`tick failed soft: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      firing = false;
+      scheduleNextTick();
+    }
+  };
+
+  scheduleNextTick();
+  log(`service started (tick ${tickIntervalMs}ms).`);
+
+  const service = {
+    /** Test hook: run the decision+fire pipeline immediately. */
+    tickNow: () => tick(),
+    /**
+     * Manual "run now": the full fire pipeline with trigger_kind='manual',
+     * for owners testing the report without waiting for the scheduled hour.
+     * Same gates as scheduled fires EXCEPT force:true, which bypasses ONLY
+     * the fresh-install deferral and the hasAnyActivity gates. May re-open a
+     * day that already has a run row — every manual run delivers a NEW
+     * report session. Never throws.
+     */
+    runNow: async (opts?: { force?: boolean }): Promise<DailyReportRunNowResult> => {
+      if (stopped) {
+        return { status: 'unavailable', reason: 'service_stopped' };
+      }
+      if (firing) {
+        return { status: 'unavailable', reason: 'already_running' };
+      }
+      const twin = resolveTwin();
+      if (!twin) {
+        return { status: 'unavailable', reason: 'no_twin' };
+      }
+      if (!deps.isExperimentalAutomationAllowed(deps.experimentalAutomationStore)) {
+        return { status: 'unavailable', reason: 'experimental_disabled' };
+      }
+      if (!isDailyReportEnabled(deps.metabotStore, twin.id)) {
+        return { status: 'unavailable', reason: 'feature_disabled' };
+      }
+      const force = opts?.force === true;
+      if (!force && deps.backgroundDeferral() !== null) {
+        return { status: 'unavailable', reason: 'deferred' };
+      }
+      firing = true; // hold ticks off for the duration of the manual run
+      try {
+        const outcome = await executeReport({ trigger: 'manual', force, retryRun: null }, twin);
+        log(`manual run (force=${force}): ${outcome.status}${outcome.status === 'failed' ? ` — ${outcome.error}` : ''}`);
+        return outcome;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log(`manual run failed soft: ${message}`);
+        return { status: 'failed', error: message };
+      } finally {
+        firing = false;
+      }
+    },
+    stop: () => {
+      stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (activeService === service) {
+        activeService = null;
+      }
+    },
+  };
+  activeService = service;
+  return service;
+};
+
+export const stopDailyReportService = (): void => {
+  activeService?.stop();
+  activeService = null;
+};

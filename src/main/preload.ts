@@ -7,6 +7,7 @@ import type {
   CoworkSubmitInputResult,
 } from '../renderer/types/cowork';
 import type { KnowledgeBaseLearnStatusEvent } from '../renderer/types/knowledgeBase';
+import type { DailyReportRunNowResult } from './services/dailyReportService';
 
 // 暴露安全的 API 到渲染进程
 contextBridge.exposeInMainWorld('electron', {
@@ -767,6 +768,10 @@ contextBridge.exposeInMainWorld('electron', {
   experimentalAutomation: {
     get: () => ipcRenderer.invoke('app:getExperimentalAutomation') as Promise<{ enabled: boolean }>,
     set: (enabled: boolean) => ipcRenderer.invoke('app:setExperimentalAutomation', enabled) as Promise<{ success: boolean; error?: string }>,
+  },
+  dailyReport: {
+    runNow: (opts?: { force?: boolean }) =>
+      ipcRenderer.invoke('dailyReport:runNow', opts) as Promise<DailyReportRunNowResult>,
   },
   feeRates: {
     getTiers: () => ipcRenderer.invoke('feeRates:getTiers') as Promise<Record<string, { title: string; desc: string; feeRate: number }[]>>,

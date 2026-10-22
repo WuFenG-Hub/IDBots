@@ -24,7 +24,8 @@ export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result
 // 'metaweb_group'/'metaweb_private' = relayed MetaWeb messages,
 // 'orchestrator' = orchestrator-injected turn,
 // 'group_task' = group-task daemon turn (chair directive, member report,
-// host context snapshot, ...).
+// host context snapshot, ...), 'daily_report' = the Twin's daily briefing
+// post (message metadata marker; rendering is the standard assistant bubble).
 export type CoworkMessageOrigin =
   | 'user'
   | 'quick_action'
@@ -34,7 +35,8 @@ export type CoworkMessageOrigin =
   | 'metaweb_group'
   | 'metaweb_private'
   | 'orchestrator'
-  | 'group_task';
+  | 'group_task'
+  | 'daily_report';
 
 // Cowork execution mode
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';

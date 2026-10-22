@@ -164,6 +164,7 @@ after that date so it gets a tier here.
 | `shell:openPath`, `shell:showItemInFolder`, `shell:openWith`, `shell:getOpenWithApps`, `shell:chooseOpenWithApp` | S | Shim converts a `/data` path to a signed URL and opens it; otherwise no-op. |
 | `api:fetch`, `api:stream`, `api:stream:cancel` | N | Generic outbound HTTP proxy. The one mobile-relevant user, the Gig Square order text, already falls back when the call fails. |
 | `app:getAutoLaunch`, `app:setAutoLaunch`, `app:getExperimentalAutomation`, `app:setExperimentalAutomation` | N | |
+| `dailyReport:runNow` | N | Desktop-only — spawns a local Twin report session; no mobile surface in v1. |
 | All `appUpdate:*`, `botBrowser:*`, `metaapps:*`, `metaappOwner:*`, `mcp:*`, `projects:*`, `agentGame:*`, `teamCulture:*`, `powerGuard:*`, `permissions:*`, `log:*`, `git:*` channels | N | Desktop-only or out of scope for v1. |
 
 ### New Channels Added by WS-A
