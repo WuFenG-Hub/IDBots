@@ -197,6 +197,14 @@ export interface LongTermAdvanceDeps {
   resolveWorkingDirectory: (metabotId: number | null) => string;
   getBaseSystemPrompt: () => string;
   getSkillsPrompt?: () => Promise<string | null>;
+  /**
+   * Live-broadcast a message this service wrote straight into the store (the
+   * heartbeat prompt, the rotation pointer). The runner only emits messages it
+   * persists itself, so without this sink an escalation's own messages never
+   * reach an open renderer until a manual reload — the exact "heartbeat fired,
+   * no response visible" hole.
+   */
+  emitSessionMessage?: (sessionId: string, message: unknown) => void;
   /** Owner's UI language ('zh' | 'en') — the nudge prompt follows it. */
   getAppLanguage?: () => string;
   emitLog?: (line: string) => void;
@@ -965,7 +973,7 @@ export class LongTermAdvanceService {
         // Owner-facing wording: this is routine maintenance, not a failure —
         // no budget numbers here (they live in the journal note + dev log);
         // say what happened, that nothing is lost, and that no action is due.
-        coworkStore.addMessage(rotation.from, {
+        const rotationPointer = coworkStore.addMessage(rotation.from, {
           type: 'system',
           content:
             language === 'zh'
@@ -973,6 +981,7 @@ export class LongTermAdvanceService {
               : `[Long-term task] Routine rotation: "${detail.title} · #${current.ordinal} ${current.title}" has been running for a while, so its work now continues seamlessly in a fresh continuation session — no action needed. This session stays readable as an archive.`,
           metadata: { origin: 'heartbeat' },
         });
+        this.deps.emitSessionMessage?.(rotation.from, rotationPointer);
         this.emitLog(
           `[LongTermAdvance] rotated session for task "${detail.title}" sub-project #${current.ordinal}: ${rotation.from} → ${sessionId} (${rotation.messages} messages)`,
         );
@@ -985,11 +994,12 @@ export class LongTermAdvanceService {
     const prompt = buildNudgePrompt(detail, current, reasons, language, supervisionAttempts, rotation, delivery);
 
     coworkStore.updateSession(sessionId, { status: 'running' });
-    coworkStore.addMessage(sessionId, {
+    const heartbeatMessage = coworkStore.addMessage(sessionId, {
       type: 'user',
       content: prompt,
       metadata: { origin: 'heartbeat' },
     });
+    this.deps.emitSessionMessage?.(sessionId, heartbeatMessage);
     // Supervision turns journal as 'supervised' — the owner's audit trail
     // distinguishes interventions from routine pushes.
     if (supervisionAttempts !== null) {
