@@ -149,6 +149,23 @@ Example: `FAKE_TENANT_HEALTH_AFTER_MS=100 FAKE_TENANT_PHASES=migrating:200,boots
 `node:24-alpine` image. It cannot be built on the dev machine (no Docker
 daemon); CI (WS-C) builds it with this directory as the context.
 
+## Operations notes
+
+- **Never expose the control plane directly.** Client IPs come from
+  `X-Forwarded-For` and are trusted unconditionally — safe only behind the
+  WS-C reverse proxy, which must be the single public entry. A directly
+  exposed port lets an attacker rotate `X-Forwarded-For` to bypass the
+  per-IP SMS daily limit.
+- **Upgrade recreation failure leaves the tenant `failed` and offline** (the
+  old container is already gone; an alert fires). Operator remediation:
+  check `tenant show ID` and `tenant logs ID`, then bring it back with
+  `tenant start ID` or `tenant upgrade ID --image <known-good>` after
+  pinning a known-good image tag.
+- **An image without the `org.idbots.rollback-safe-to` label downgrades
+  freely.** The downgrade refusal only applies when the current image
+  declares a floor — pin image tags deliberately and keep that label
+  accurate on every release.
+
 ## Note
 
 The package is not shipped in desktop builds; `electron-builder.json` does
