@@ -1,4 +1,6 @@
-# syntax=docker/dockerfile:1
+# No #syntax directive on purpose: buildx's built-in frontend needs no
+# registry metadata fetch, which keeps CI builds hermetic on restricted
+# networks (the external docker/dockerfile:1 pull timed out once).
 # ============================================================================
 # IDBots tenant image — C1 tenant runtime / REQ-A-26.
 #

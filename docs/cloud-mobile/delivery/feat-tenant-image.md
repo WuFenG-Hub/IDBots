@@ -40,6 +40,13 @@ commit: 3cab9f0b79688f7afdfae18b43d14b94f4ac6788（分支自基线切出，合�
 
 - **web-search 浏览器路径在生产限制下无法启动**（Chromium `No usable sandbox`）——正是工单 A-5 特别说明要求实测的原因。修复：`SKILLs/web-search/server/playwright/browser.ts` 支持 `WEB_SEARCH_CHROME_NO_SANDBOX=1`（追加 `--no-sandbox`），镜像以 `ENV` 注入（entrypoint 同时 export 作冗余）。桌面路径不受影响。修复后浏览器路径实测通过（见上）。
 
+## 复审修复（2026-10-22，WS-A-修改意见）
+
+- 已合入 S2-1（服务端模式额度耗尽文案改为充值引导，桌面不变）与 S2-2（`__test:sleep` 超时钩子）两条修复；`__test:sleep` 在容器内需以 `IDBOTS_GATEWAY_TEST_HOOKS=1` 显式开启，生产默认关闭。
+- 附带健壮性修复：移除 Dockerfile 的 `# syntax=docker/dockerfile:1` 指令——该指令会在构建时拉取 Docker Hub 前端元数据，在受限网络下曾导致构建失败；buildx 内建前端即可完成本 Dockerfile 全部特性。
+- 复审后容器侧复测：fresh volume 首启 **70 s ready**；conformance **11 passed / 0 failed / 1 skipped**，`invoke-timeout — TIMEOUT after 1508 ms`（钩子经 `IDBOTS_GATEWAY_TEST_HOOKS=1` 开启）。
+- 验证方式说明：复审修复的完整镜像重建因 Docker Hub/镜像源当时不可达未能完成；容器复测使用「上一版完整构建镜像 + 本地产物（dist/dist-electron）」的增量补丁镜像（`idbots/tenant:1.0.2-reviewfix`），应用代码与分支 HEAD 一致。`# syntax` 移除本身未再经完整构建验证（属注释级改动，buildx 内建前端语义等价），中转环境首次全量构建时请留意。
+
 ## 未完成/存疑
 
 1. 镜像 ~3.37 GB（Phase 0 参考值 ~2.1 GB 的镜像形态不同）；如需收敛，生产依赖裁剪与 apt 层瘦身是下一步（不阻塞验收）。
