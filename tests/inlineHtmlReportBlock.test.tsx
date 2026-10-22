@@ -79,6 +79,29 @@ test('the loading shell renders the title and placeholder without an iframe', ()
   });
 });
 
+test('the toolbar is a hover-revealed overlay that takes no layout space', () => {
+  withWindowStub(() => {
+    const markup = renderToStaticMarkup(
+      <InlineHtmlReportBlock
+        filePath={REPORT_PATH}
+        displayName="Quarterly Research Report"
+        onOpenInSidePanel={() => undefined}
+      />,
+    );
+    // Default state (no context menu open): the toolbar floats over the
+    // report's top edge, hidden and click-transparent; hovering the block
+    // reveals it. Absolutely positioned, so the report sits flush against
+    // the surrounding chat text with no permanent chrome.
+    assert.match(markup, /absolute inset-x-0 top-0/);
+    assert.match(markup, /opacity-0/);
+    assert.match(markup, /group-hover:opacity-100/);
+    assert.match(markup, /pointer-events-none/);
+    assert.match(markup, /group-hover:pointer-events-auto/);
+  });
+  // An open right-click menu forces the toolbar visible even off-hover.
+  assert.match(blockSource, /menuPosition\s*\?\s*'pointer-events-auto opacity-100'/);
+});
+
 test('srcdoc keeps the document and injects base href plus the reporter script before </body>', () => {
   const html = '<!doctype html><html><head><title>t</title></head><body><h1>Report</h1></body></html>';
   const srcDoc = buildInlineHtmlSrcDoc(html, REPORT_PATH);
