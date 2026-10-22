@@ -3,7 +3,9 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PID_FILE="$PROJECT_DIR/.server.pid"
+RUNTIME_DIR="${WEB_SEARCH_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/idbots-web-search}"
+mkdir -p "$RUNTIME_DIR"
+PID_FILE="$RUNTIME_DIR/.server.pid"
 
 # Check if PID file exists
 if [ ! -f "$PID_FILE" ]; then
