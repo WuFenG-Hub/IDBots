@@ -1,0 +1,10 @@
+{
+  "name": "@idbots/fake-tenant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Fake tenant (REQ-B-21) implementing the C1/C2 surface for integration tests and the local dev loop. Own pnpm root so the test image builds with pnpm only.",
+  "dependencies": {
+    "ws": "8.22.0"
+  }
+}

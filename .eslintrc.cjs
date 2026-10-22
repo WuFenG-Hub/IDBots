@@ -31,6 +31,7 @@ module.exports = {
     'SKILLs/**',
     'sandbox/**',
     'Dev-docs/reference_scripts/**',
+    'cloud/**', // control plane lints itself (REQ-B-3)
   ],
   rules: {
     'react-refresh/only-export-components': 'off',

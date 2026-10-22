@@ -1,0 +1,30 @@
+{
+  "name": "@idbots/control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "IDBots cloud control plane (WS-B): owns users, invites, login, and one tenant container per user. Implements contract C3.",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "tsx --test test/**/*.test.ts",
+    "lint": "eslint .",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.13",
+    "eslint": "^9.17.0",
+    "tsx": "^4.23.13",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.19.0"
+  }
+}
