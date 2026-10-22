@@ -143,6 +143,20 @@ function isSkillTurnTimeoutError(error: unknown): error is { sessionId: string; 
  */
 const TWIN_DELEGATION_SKILL_TURN_TIMEOUT_MS = 30 * 60 * 1000;
 
+/**
+ * ACTIVE wrap-up at budget exhaustion (2026-10-21 real case: a worker burned
+ * its whole 30-min budget mid-investigation and was killed silently — the
+ * passive window never told it it was in overtime, so its findings died with
+ * the turn). With these values the wrap-up sequences stay inside the bridge's
+ * 45-min daemon cap (arithmetic proven in libs/skillTurnWrapUpState.ts):
+ *
+ *   no extension:  30 (budget) + 5 (grace)                = 35 ≤ 45
+ *   with extension: 30 + min(0.5×30, 45−30−5) + 5 (final) = 45 ≤ 45
+ *                                 └── 10 min ──┘
+ */
+const TWIN_DELEGATION_WRAP_UP_GRACE_MS = 5 * 60_000;
+const TWIN_DELEGATION_WRAP_UP_EXTENSION_RATIO = 0.5;
+
 function buildWorkerPrompt(input: DelegateLocalWorkerInput, task: OrchestrationTask, step: OrchestrationStep): string {
   return [
     '<twin_delegation>',
@@ -309,6 +323,43 @@ export class TwinOrchestrationService {
     return formatWorkerEmptyHandoffError(summary, workspaceCommits);
   }
 
+  /**
+   * Wrap-up signal delivery: inject into the worker session through the same
+   * cross-session seam as ORCH-NOTIFY (source = the delegating Twin session,
+   * so the transcript keeps "哪里发起哪里结束" attribution and the queued
+   * continuation wakes the worker as soon as it is not mid-turn). The worker
+   * session id is resolved at CALL time from the attempt record — the wrap-up
+   * only ever fires after onSessionCreated recorded it.
+   */
+  private injectWorkerWrapUpMessage(task: OrchestrationTask, attemptId: string, message: string): void {
+    const sourceSessionId = task.sourceSessionId;
+    const workerSessionId =
+      this.deps.orchestrationStore.getAttempt(attemptId)?.workerSessionId ?? null;
+    if (!sourceSessionId || !workerSessionId) {
+      console.warn(
+        `[TwinOrchestration] Wrap-up injection skipped (attempt ${attemptId}): ` +
+        `sourceSessionId=${sourceSessionId ?? 'null'} workerSessionId=${workerSessionId ?? 'null'}`
+      );
+      return;
+    }
+    const result = this.insertCrossSession({
+      sourceSessionId,
+      targetSessionId: workerSessionId,
+      message,
+    });
+    if ('code' in result) {
+      // CoworkCrossSessionError (insert failed: missing session, A2A target…)
+      console.warn(
+        `[TwinOrchestration] Wrap-up injection failed (attempt ${attemptId}, worker session ` +
+        `${workerSessionId}): ${result.code} ${result.message}`
+      );
+      return;
+    }
+    console.log(
+      `[TwinOrchestration] Wrap-up message delivered to worker session ${workerSessionId} (attempt ${attemptId})`
+    );
+  }
+
   private async executeAttempt(
     task: OrchestrationTask,
     step: OrchestrationStep,
@@ -333,6 +384,16 @@ export class TwinOrchestrationService {
         // Name the budget explicitly instead of inheriting the bridge's
         // short-turn 5-minute default (see TWIN_DELEGATION_SKILL_TURN_TIMEOUT_MS).
         skillTurnTimeoutMs: TWIN_DELEGATION_SKILL_TURN_TIMEOUT_MS,
+        // ACTIVE wrap-up (opt-in — only this delegation path passes it): at
+        // budget exhaustion the bridge injects a wrap-up signal so the worker
+        // writes its handoff instead of being parked silently. group-task,
+        // A2A, study and surf callers never set wrapUpSignal and keep the
+        // legacy passive watchdog byte-for-byte.
+        wrapUpSignal: {
+          graceMs: TWIN_DELEGATION_WRAP_UP_GRACE_MS,
+          extensionRatio: TWIN_DELEGATION_WRAP_UP_EXTENSION_RATIO,
+          injectMessage: (message) => this.injectWorkerWrapUpMessage(task, attemptId, message),
+        },
         onSessionCreated: (sessionId) => {
           this.deps.orchestrationStore.updateStepStatus(step.id, 'running', { activeAttemptId: attempt.id });
           this.deps.orchestrationStore.updateAttempt(attempt.id, 'running', { workerSessionId: sessionId });
