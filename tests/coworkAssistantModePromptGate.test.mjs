@@ -113,3 +113,31 @@ test('the assistant-mode prompt hard-pins narration language, sparseness, and to
     'the tone rule must carry the user-facing status example',
   );
 });
+
+// 2026-10-22 English-install regression (first-run Twin greeting in Chinese on
+// a fully English machine, free-relay deepseek-4.1-flash): the old language
+// rule made Chinese mandatory ("every narration and the final reply are in
+// Chinese") while English was only permitted ("only if the user writes English
+// may they be English"). The greeting turn carries no user-authored text, so
+// the model followed the only mandatory direction and greeted in Chinese.
+// The rule must stay symmetric: BOTH languages mandatory in their own
+// conversations, prohibited in the other's.
+test('the language rule is symmetric — English is as mandatory as 中文', () => {
+  const promptSource = readFileSync(join(here, '../src/main/libs/assistantModePrompt.ts'), 'utf8');
+  assert.ok(
+    !promptSource.includes('only if the user writes English may they be English'),
+    'the permissive English phrasing regressed once and flipped English installs to Chinese output; English must be mandatory, not permitted',
+  );
+  assert.ok(
+    promptSource.includes('The user writes English → every narration and the final reply are in English'),
+    'the rule must state the English direction as mandatory, mirroring the 中文 direction',
+  );
+  assert.ok(
+    promptSource.includes('NEVER write 中文 in an English conversation'),
+    'the rule must prohibit Chinese output in English conversations just as it prohibits English narration in non-English ones',
+  );
+  assert.ok(
+    promptSource.includes('Found the Chinese edition of the file'),
+    'the narration example must not be Chinese-only — a Chinese-only "Good" example pulls flash models toward Chinese even in English chats',
+  );
+});
