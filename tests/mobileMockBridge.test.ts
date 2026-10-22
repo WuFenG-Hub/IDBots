@@ -360,3 +360,193 @@ test('unimplemented channels reject with a named Error, never a TypeError', asyn
   assert.ok(pendingSub instanceof Promise);
   await assert.rejects(pendingSub, /mock: dream:onStatusChanged not implemented/);
 });
+
+// ---------------------------------------------------------------- T2 additions
+
+test('scheduledTasks.create validates input and computes nextRunAtMs', async (t) => {
+  const bridge = makeBridge();
+  t.after(() => bridge.destroy());
+  const api = bridge.electron;
+
+  const noName = await api.scheduledTasks.create({ prompt: 'p', schedule: { type: 'interval', intervalMs: 60_000, unit: 'minutes', value: 1 }, workingDirectory: '/data/workspace', systemPrompt: '', executionMode: 'auto', expiresAt: null, notifyPlatforms: [], enabled: true, name: '  ' });
+  assert.equal(noName.success, false);
+
+  const noPrompt = await api.scheduledTasks.create({ name: 'x', prompt: '', schedule: { type: 'interval', intervalMs: 60_000, unit: 'minutes', value: 1 }, workingDirectory: '/data/workspace', systemPrompt: '', executionMode: 'auto', expiresAt: null, notifyPlatforms: [], enabled: true });
+  assert.equal(noPrompt.success, false);
+
+  const badSchedule = await api.scheduledTasks.create({ name: 'x', prompt: 'p', schedule: { type: 'interval', intervalMs: 0, unit: 'minutes', value: 0 }, workingDirectory: '/data/workspace', systemPrompt: '', executionMode: 'auto', expiresAt: null, notifyPlatforms: [], enabled: true });
+  assert.equal(badSchedule.success, false);
+
+  const before = Date.now();
+  const created = await api.scheduledTasks.create({
+    name: 'Hourly check',
+    description: '',
+    prompt: 'Check things',
+    schedule: { type: 'interval', intervalMs: 3_600_000, unit: 'hours', value: 1 },
+    workingDirectory: '/data/workspace',
+    systemPrompt: '',
+    executionMode: 'auto',
+    expiresAt: null,
+    notifyPlatforms: [],
+    enabled: true,
+  });
+  assert.equal(created.success, true);
+  assert.ok(created.task.id);
+  assert.ok(created.task.state.nextRunAtMs >= before + 3_600_000);
+
+  const listed = await api.scheduledTasks.list();
+  assert.ok(listed.tasks.some((task: { id: string }) => task.id === created.task.id));
+});
+
+test('scheduledTasks.toggle flips enabled and clears/sets nextRunAtMs', async (t) => {
+  const bridge = makeBridge();
+  t.after(() => bridge.destroy());
+  const api = bridge.electron;
+
+  const off = await api.scheduledTasks.toggle('mock-task-1', false);
+  assert.equal(off.success, true);
+  assert.equal(off.task.enabled, false);
+  assert.equal(off.task.state.nextRunAtMs, null);
+
+  const on = await api.scheduledTasks.toggle('mock-task-1', true);
+  assert.equal(on.success, true);
+  assert.equal(on.task.enabled, true);
+  assert.ok(on.task.state.nextRunAtMs > Date.now());
+
+  const missing = await api.scheduledTasks.toggle('mock-task-nope', true);
+  assert.equal(missing.success, false);
+});
+
+test('scheduledTasks.runManually emits the run lifecycle and lands in history', async (t) => {
+  const bridge = makeBridge({ manualRunDelayMs: 50 });
+  t.after(() => bridge.destroy());
+  const api = bridge.electron;
+
+  const statuses: Array<{ taskId: string; state: { lastStatus: string | null } }> = [];
+  const runs: Array<{ run: { id: string; status: string; taskId: string } }> = [];
+  const offStatus = api.scheduledTasks.onStatusUpdate((payload) => statuses.push(payload));
+  const offRun = api.scheduledTasks.onRunUpdate((payload) => runs.push(payload));
+
+  const started = await api.scheduledTasks.runManually('mock-task-2');
+  assert.equal(started.success, true);
+  assert.equal(started.run.status, 'running');
+  assert.equal(started.run.trigger, 'manual');
+
+  await waitFor(
+    () => runs.some((entry) => entry.run.status === 'success' && entry.run.id === started.run.id),
+    'manual run success event',
+  );
+  assert.ok(statuses.some((entry) => entry.taskId === 'mock-task-2' && entry.state.lastStatus === 'running'));
+  assert.ok(statuses.some((entry) => entry.taskId === 'mock-task-2' && entry.state.lastStatus === 'success'));
+
+  const history = await api.scheduledTasks.listRuns('mock-task-2');
+  const finished = history.runs.find((run: { id: string }) => run.id === started.run.id);
+  assert.ok(finished);
+  assert.equal(finished.status, 'success');
+  assert.equal(finished.trigger, 'manual');
+  assert.ok(finished.durationMs > 0);
+  assert.ok(finished.sessionId);
+
+  // Like a scheduled run, the manual run created an auto-origin session.
+  const session = await api.cowork.getSession(finished.sessionId ?? '');
+  assert.equal(session.session.autoOrigin, 'schedule');
+
+  const missing = await api.scheduledTasks.runManually('mock-task-nope');
+  assert.equal(missing.success, false);
+
+  offStatus();
+  offRun();
+});
+
+test('metabot create validates name and update edits persona fields', async (t) => {
+  const bridge = makeBridge();
+  t.after(() => bridge.destroy());
+  const api = bridge.electron;
+
+  const noName = await api.metabot.create({ name: '' });
+  assert.equal(noName.success, false);
+
+  const created = await api.metabot.create({
+    name: 'Writer',
+    metabot_type: 'worker',
+    role: 'Drafts posts',
+    soul: 'A careful writer',
+    bio: 'Writes long-form content',
+  });
+  assert.equal(created.success, true);
+  assert.ok(created.metabot.id > 2);
+  assert.equal(created.metabot.name, 'Writer');
+  assert.equal(created.metabot.metabot_type, 'worker');
+
+  const listed = await api.metabot.list();
+  assert.ok(listed.list.some((bot: { id: number }) => bot.id === created.metabot.id));
+
+  const updated = await api.metabot.update(created.metabot.id, {
+    name: 'Senior Writer',
+    role: 'Drafts and edits posts',
+    soul: 'A meticulous writer',
+    bio: 'Writes and edits long-form content',
+  });
+  assert.equal(updated.success, true);
+  assert.equal(updated.metabot.name, 'Senior Writer');
+  assert.equal(updated.metabot.role, 'Drafts and edits posts');
+  assert.equal(updated.metabot.soul, 'A meticulous writer');
+  assert.equal(updated.metabot.bio, 'Writes and edits long-form content');
+
+  const emptyName = await api.metabot.update(created.metabot.id, { name: '  ' });
+  assert.equal(emptyName.success, false);
+
+  const missing = await api.metabot.update(999, { name: 'Ghost' });
+  assert.equal(missing.success, false);
+
+  const twin = await api.metabot.get(1);
+  assert.equal(twin.success, true);
+  assert.equal(twin.metabot.metabot_type, 'twin');
+});
+
+test('skills.setEnabled flips the fixture and emits skills:changed', async (t) => {
+  const bridge = makeBridge();
+  t.after(() => bridge.destroy());
+  const api = bridge.electron;
+
+  const changes: unknown[] = [];
+  const off = api.skills.onChanged((payload) => changes.push(payload));
+
+  const result = await api.skills.setEnabled({ id: 'web-search', enabled: false });
+  assert.equal(result.success, true);
+  const webSearch = result.skills.find((skill: { id: string }) => skill.id === 'web-search');
+  assert.equal(webSearch.enabled, false);
+
+  const listed = await api.skills.list();
+  assert.equal(listed.skills.find((skill: { id: string }) => skill.id === 'web-search').enabled, false);
+
+  const missing = await api.skills.setEnabled({ id: 'nope', enabled: true });
+  assert.equal(missing.success, false);
+
+  assert.equal(changes.length, 1);
+  off();
+});
+
+test('traffic.redeemCode credits the traffic meter; invalid codes fail', async (t) => {
+  const bridge = makeBridge();
+  t.after(() => bridge.destroy());
+  const api = bridge.electron;
+
+  const before = await api.traffic.getBalance();
+  const balanceBefore = before.balance.balanceBytes;
+
+  const empty = await api.traffic.redeemCode({ code: '   ' });
+  assert.equal(empty.success, false);
+
+  const bad = await api.traffic.redeemCode({ code: 'BAD' });
+  assert.equal(bad.success, false);
+  assert.equal(bad.errorCode, 'INVALID_CODE');
+
+  const ok = await api.traffic.redeemCode({ code: 'MOCK-CODE-1234' });
+  assert.equal(ok.success, true);
+  assert.ok(ok.result.trafficBytes > 0);
+  assert.equal(ok.result.balanceAfter, balanceBefore + ok.result.trafficBytes);
+
+  const after = await api.traffic.getBalance();
+  assert.equal(after.balance.balanceBytes, balanceBefore + ok.result.trafficBytes);
+});

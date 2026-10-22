@@ -42,6 +42,44 @@ export type BundlePlan = NonNullable<
 export type BundleMeters = NonNullable<Awaited<ReturnType<BundleChannelAPI['getMeters']>>['meters']>;
 
 /**
+ * IPC contract version the mock implements (generated from
+ * src/mobile/generated/ipc-contract.json, contractVersion 1.0.0). The Me
+ * screen's About section surfaces it next to the app version.
+ */
+export const CONTRACT_VERSION = '1.0.0';
+
+/** Real channel namespaces the mock implements beyond `bundle`/`mobile`. */
+export type ScheduledTasksChannelAPI = Window['electron']['scheduledTasks'];
+export type MetabotChannelAPI = Window['electron']['metabot'];
+export type SkillsChannelAPI = Window['electron']['skills'];
+export type TrafficChannelAPI = Window['electron']['traffic'];
+
+/** Fixture MetaBot row, derived from the real `metabot:list` payload. */
+export type MockMetabot = NonNullable<Awaited<ReturnType<MetabotChannelAPI['list']>>['list']>[number];
+export type MetabotCreateInput = Parameters<MetabotChannelAPI['create']>[0];
+export type MetabotUpdateInput = Parameters<MetabotChannelAPI['update']>[1];
+/** Fixture skill row, derived from the real `skills:list` payload. */
+export type MockSkill = NonNullable<Awaited<ReturnType<SkillsChannelAPI['list']>>['skills']>[number];
+/** traffic:redeemCode success payload (TrafficRedeemCodeInfo). */
+export type TrafficRedeemResult = NonNullable<Awaited<ReturnType<TrafficChannelAPI['redeemCode']>>['result']>;
+
+/** Cowork session/message projections the chat screen hydrates from. */
+export type CoworkChannelAPI = Window['electron']['cowork'];
+export type CoworkSessionSummary = NonNullable<
+  Awaited<ReturnType<CoworkChannelAPI['listSessions']>>['sessions']
+>[number];
+export type CoworkSessionDetail = NonNullable<Awaited<ReturnType<CoworkChannelAPI['getSession']>>['session']>;
+export type CoworkMessageView = CoworkSessionDetail['messages'][number];
+
+/**
+ * Scheduled-task shapes come from the desktop renderer types
+ * (src/renderer/types/scheduledTask.ts) rather than electron.d.ts, where the
+ * namespace is typed as `any`. Importing keeps the mock aligned with the
+ * create/update contract the desktop TaskForm builds.
+ */
+export type { ScheduledTask, ScheduledTaskInput, ScheduledTaskRun, Schedule } from '../../renderer/types/scheduledTask';
+
+/**
  * The mock's stored order: the C4 `createOrder` payload plus its own
  * bookkeeping. `getOrder` projections must stay assignable to
  * `BundleOrderStatusInfo` (no `gatewayParams` in status polling; paidAt and
@@ -123,6 +161,8 @@ export interface MockBridgeOptions {
   reconnectBlackoutMs?: number;
   /** The scheduled-task demo run fires this long after bridge creation. Default 15 s. */
   scheduledRunDelayMs?: number;
+  /** scheduledTasks.runManually completes its run after this delay. Default 4 s. */
+  manualRunDelayMs?: number;
   /** System locale behind appInfo.getSystemLocale. Default: detected. */
   systemLocale?: string;
 }
