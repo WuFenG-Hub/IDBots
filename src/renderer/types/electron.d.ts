@@ -313,6 +313,12 @@ interface CoworkSession {
   autoOrigin?: 'longterm' | 'orchestration' | 'schedule' | null;
   /** Manual "Autonomous Tasks" fold placement; null = follow the auto-origin policy. */
   foldOverride?: 'in' | 'out' | null;
+  /** "Follow-Up Tasks" marker: 'pending' = currently needs a human decision or reply. */
+  followUpState?: 'pending' | null;
+  /** Which lane set the follow-up marker ('cerebellum' | 'ask_user' | 'manual'); null = none. */
+  followUpSource?: 'cerebellum' | 'ask_user' | 'manual' | null;
+  /** ISO timestamp of the last follow-up transition; null = never transitioned. */
+  followUpAt?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 
@@ -428,6 +434,12 @@ interface CoworkSessionSummary {
   autoOrigin?: 'longterm' | 'orchestration' | 'schedule' | null;
   /** Manual "Autonomous Tasks" fold placement; null = follow the auto-origin policy. */
   foldOverride?: 'in' | 'out' | null;
+  /** "Follow-Up Tasks" marker: 'pending' = currently needs a human decision or reply. */
+  followUpState?: 'pending' | null;
+  /** Which lane set the follow-up marker ('cerebellum' | 'ask_user' | 'manual'); null = none. */
+  followUpSource?: 'cerebellum' | 'ask_user' | 'manual' | null;
+  /** ISO timestamp of the last follow-up transition; null = never transitioned. */
+  followUpAt?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 
@@ -1155,6 +1167,8 @@ interface IElectronAPI {
     listArchivedSessions: (options?: { metabotId?: number | null; query?: string; searchContent?: boolean; sessionType?: 'standard' | 'a2a' | 'browser' | 'group_task'; limit?: number; offset?: number }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; total?: number; error?: string }>;
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) => Promise<{ success: boolean; error?: string }>;
     setSessionFoldOverride: (options: { sessionId: string; override: 'in' | 'out' | null }) => Promise<{ success: boolean; error?: string }>;
+    /** Move a session in or out of the "Follow-Up Tasks" section (manual lane; false clears any pending source). */
+    setSessionFollowUp: (options: { sessionId: string; followUp: boolean }) => Promise<{ success: boolean; error?: string }>;
     setSessionModel: (options: {
       sessionId: string;
       model: string | null;

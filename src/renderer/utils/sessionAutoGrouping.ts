@@ -4,12 +4,20 @@
  * The app creates sessions on its own — [长期] long-term task runs,
  * [编排任务] / [Orchestration Task] delegation runs, [定时] scheduled-task runs.
  * Main stamps `auto_origin` on those rows (CoworkStore.setSessionAutoOrigin) and
- * the summary carries it as `autoOrigin`. The sidebar folds them all into a
- * collapsed "Autonomous Tasks" (自主任务) section per the policy below;
- * scheduled-task runs fold with the rest — every fire is a machine-started run,
- * and one row per fire would otherwise crowd the main list, which is meant to
- * stay the user's own conversations. (This reverses the earlier carve-out that
- * kept scheduled runs visible.)
+ * the summary carries it as `autoOrigin`. The sidebar sorts the local list
+ * into three sections per the placement policy below:
+ *
+ * - the MAIN list — sessions the human initiated (no auto marker, or a
+ *   manual 'out' fold placement);
+ * - 待跟进任务 (Follow-Up Tasks) — auto-created sessions that currently need a
+ *   human decision or reply (followUpState 'pending', or a live board decision
+ *   owed on the session), rendered above the fold;
+ * - 自主任务 (Autonomous Tasks) — auto-created sessions that need no human
+ *   follow-up, collapsed; opened only for post-hoc review.
+ *
+ * A session's bucket is not fixed at creation: main re-judges followUpState at
+ * every turn end (cerebellum gate, AskUserQuestion bridge, owner moves), so a
+ * row moves between Follow-Up and Autonomous as the session progresses.
  *
  * The folder is named for HOW those rows run — the Twin Bot drives them
  * autonomously, without the owner in the loop — while the `autoOrigin` field
@@ -25,6 +33,16 @@ import type { CoworkSessionSummary } from '../types/cowork';
 export interface SessionsByAutonomousFold {
   /** Human-initiated sessions — the visible main list. */
   humanSessions: CoworkSessionSummary[];
+  /** Folded autonomous sessions — the collapsed "Autonomous Tasks" fold. */
+  autoSessions: CoworkSessionSummary[];
+}
+
+/** The three sections of a local-chats list: main, follow-up, autonomous fold. */
+export interface SessionsWithFollowUpSplit {
+  /** Human-initiated sessions — the visible main list. */
+  humanSessions: CoworkSessionSummary[];
+  /** Sessions awaiting a human decision or reply — the "Follow-Up Tasks" section. */
+  followUpSessions: CoworkSessionSummary[];
   /** Folded autonomous sessions — the collapsed "Autonomous Tasks" fold. */
   autoSessions: CoworkSessionSummary[];
 }
@@ -52,6 +70,55 @@ const FOLDED_AUTO_ORIGINS: ReadonlySet<NonNullable<CoworkSessionSummary['autoOri
 export const shouldFoldIntoAutonomousTasks = (
   session: Pick<CoworkSessionSummary, 'autoOrigin'>,
 ): boolean => session.autoOrigin != null && FOLDED_AUTO_ORIGINS.has(session.autoOrigin);
+
+/**
+ * FOLLOW-UP MEMBERSHIP: a session belongs in the "Follow-Up Tasks" section
+ * when main has persisted followUpState 'pending' on the row (cerebellum
+ * turn-end gate, AskUserQuestion bridge, or a manual owner move) OR when the
+ * caller reports a live decision owed on it (`decisionPending` — the
+ * board-derived waiting_owner verdicts). The live set is what covers existing
+ * sessions that predate the persisted column.
+ */
+export const isInFollowUpSection = (
+  session: Pick<CoworkSessionSummary, 'followUpState'>,
+  decisionPending: boolean,
+): boolean => session.followUpState === 'pending' || decisionPending;
+
+/**
+ * Three-way split of the local-chats list, in placement precedence order
+ * (spec §3.1):
+ *  1. `foldOverride` 'in' → Autonomous fold, 'out' → main list (a manual
+ *     placement always wins, in either direction);
+ *  2. follow-up pending (persisted marker or a live board decision) → the
+ *     Follow-Up section;
+ *  3. auto-origin policy → Autonomous fold;
+ *  4. everything else → main list.
+ *
+ * Input order is preserved in every bucket (the caller owns ordering; this
+ * helper never re-sorts).
+ */
+export const splitSessionsWithFollowUp = (
+  sessions: readonly CoworkSessionSummary[],
+  decisionSessionIds?: ReadonlySet<string>,
+): SessionsWithFollowUpSplit => {
+  const humanSessions: CoworkSessionSummary[] = [];
+  const followUpSessions: CoworkSessionSummary[] = [];
+  const autoSessions: CoworkSessionSummary[] = [];
+  for (const session of sessions) {
+    if (session.foldOverride === 'in') {
+      autoSessions.push(session);
+    } else if (session.foldOverride === 'out') {
+      humanSessions.push(session);
+    } else if (isInFollowUpSection(session, decisionSessionIds?.has(session.id) ?? false)) {
+      followUpSessions.push(session);
+    } else if (shouldFoldIntoAutonomousTasks(session)) {
+      autoSessions.push(session);
+    } else {
+      humanSessions.push(session);
+    }
+  }
+  return { humanSessions, followUpSessions, autoSessions };
+};
 
 /**
  * Per-row fold membership. `decisionPending` is the caller-resolved answer of
@@ -90,17 +157,22 @@ export const isInAutonomousFold = (
 /**
  * Split sessions into the main list and the autonomous fold, preserving input
  * order in both halves (the caller owns ordering; this helper never re-sorts).
+ *
+ * Legacy TWO-WAY view: decision-owed sessions (the follow-up bucket of
+ * splitSessionsWithFollowUp) ride the main list here, exactly as they did
+ * before the Follow-Up section existed. The sidebar's local tab uses the
+ * three-way splitSessionsWithFollowUp instead; this variant remains for
+ * callers that have no follow-up section.
  */
 export const splitSessionsByAutonomousFold = (
   sessions: readonly CoworkSessionSummary[],
   decisionSessionIds?: ReadonlySet<string>,
 ): SessionsByAutonomousFold => {
-  const humanSessions: CoworkSessionSummary[] = [];
-  const autoSessions: CoworkSessionSummary[] = [];
-  for (const session of sessions) {
-    (isInAutonomousFold(session, decisionSessionIds) ? autoSessions : humanSessions).push(session);
-  }
-  return { humanSessions, autoSessions };
+  const { humanSessions, followUpSessions, autoSessions } = splitSessionsWithFollowUp(
+    sessions,
+    decisionSessionIds,
+  );
+  return { humanSessions: [...humanSessions, ...followUpSessions], autoSessions };
 };
 
 /**
@@ -119,4 +191,20 @@ export const parseAutoTasksExpandedPreference = (stored: string | null): boolean
 
 /** Value to persist for the fold preference. */
 export const serializeAutoTasksExpandedPreference = (expanded: boolean): string =>
+  expanded ? '1' : '0';
+
+/**
+ * localStorage key remembering whether the "Follow-Up Tasks" section is open.
+ * Same frozen-key contract as the Autonomous fold: the section is collapsed by
+ * default (only an explicit '1' opens it), and once shipped the key name and
+ * its stored value must never change — renaming it would silently reset every
+ * install's preference.
+ */
+export const FOLLOW_UP_EXPANDED_STORAGE_KEY = 'coworkFollowUpExpanded';
+
+/** Parse the persisted Follow-Up preference; anything but '1' means collapsed. */
+export const parseFollowUpExpandedPreference = (stored: string | null): boolean => stored === '1';
+
+/** Value to persist for the Follow-Up preference. */
+export const serializeFollowUpExpandedPreference = (expanded: boolean): string =>
   expanded ? '1' : '0';

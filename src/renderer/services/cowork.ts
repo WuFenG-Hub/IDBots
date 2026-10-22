@@ -16,6 +16,7 @@ import {
   setStreaming,
   updateSessionPinned,
   updateSessionFoldOverride,
+  updateSessionFollowUp,
   updateSessionTitle,
   updateSessionPermissionMode,
   updateSessionGoal,
@@ -1161,6 +1162,32 @@ class CoworkService {
     }
 
     console.error('Failed to update session fold placement:', result.error);
+    return false;
+  }
+
+  /**
+   * Move a session in or out of the sidebar's "Follow-Up Tasks" section.
+   * followUp=true persists a 'pending' marker with source 'manual';
+   * followUp=false clears ANY pending source main-side, so the row falls back
+   * to the auto-origin fold. Mirrors setSessionFoldOverride: on success the
+   * local patch lands immediately (optimistic) and the regular list refresh
+   * reconciles it with main's stamped timestamp.
+   */
+  async setSessionFollowUp(sessionId: string, followUp: boolean): Promise<boolean> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.setSessionFollowUp) return false;
+
+    const result = await cowork.setSessionFollowUp({ sessionId, followUp });
+    if (result.success) {
+      store.dispatch(updateSessionFollowUp({
+        sessionId,
+        followUp,
+        followUpAt: followUp ? new Date().toISOString() : null,
+      }));
+      return true;
+    }
+
+    console.error('Failed to update session follow-up:', result.error);
     return false;
   }
 

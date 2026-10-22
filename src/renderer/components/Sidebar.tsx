@@ -33,7 +33,7 @@ import type {
   SessionSortMode,
   SessionViewMode,
 } from '../utils/sessionViewGrouping';
-import { shouldFoldIntoAutonomousTasks, splitSessionsByAutonomousFold } from '../utils/sessionAutoGrouping';
+import { shouldFoldIntoAutonomousTasks, splitSessionsWithFollowUp } from '../utils/sessionAutoGrouping';
 import { useStableCallback } from '../utils/useStableCallback';
 import { selectTrackedTasksNeedingAttention } from '../utils/trackedTaskAttention';
 import type { SettingsOpenOptions } from './Settings';
@@ -217,21 +217,21 @@ const Sidebar: React.FC<SidebarProps> = ({
   // init) so the dot is correct even if the 长期任务 tab was never opened.
   const longTermBoard = useSelector((state: RootState) => state.longTermTask.board);
   // Sessions currently owed an owner verdict (waiting_owner sub-projects' bound
-  // sessions, board-derived): they leave the autonomous fold and show on the
-  // main timeline — the owner must SEE the decision, not find it buried in the
-  // collapsed folder. Folds back automatically once the verdict lands.
+  // sessions, board-derived): with no manual placement they land in the
+  // Follow-Up section — the owner must SEE the decision, not find it buried in
+  // the collapsed fold. Folds back automatically once the verdict lands.
   const decisionSessionIds = useMemo(
     () => new Set((longTermBoard?.cards ?? []).flatMap((card) => card.decisionSessionIds ?? [])),
     [longTermBoard],
   );
-  // The local tab's list is split in two: the human's own conversations stay in
-  // the main list, while long-term task runs and orchestration delegations
-  // (shouldFoldIntoAutonomousTasks) fold into the collapsed "Autonomous Tasks"
-  // section under the pinned block. Scheduled-task runs stay in the main list on
-  // purpose — they are the user's own automations. Search still sees every
-  // session, folded or not.
-  const { humanSessions: localHumanSessions, autoSessions: localAutoSessions } = useMemo(
-    () => splitSessionsByAutonomousFold(sessionGroups.local, decisionSessionIds),
+  // The local tab's list is split three ways (spec §3.1): the human's own
+  // conversations stay in the main list; sessions that currently need a human
+  // decision or reply (followUpState 'pending', or a live board decision owed)
+  // go to the "Follow-Up Tasks" section; the remaining machine-started runs
+  // fold into the collapsed "Autonomous Tasks" section. A manual fold
+  // placement always wins over both buckets. Search still sees every session.
+  const { humanSessions: localHumanSessions, followUpSessions: localFollowUpSessions, autoSessions: localAutoSessions } = useMemo(
+    () => splitSessionsWithFollowUp(sessionGroups.local, decisionSessionIds),
     [sessionGroups.local, decisionSessionIds],
   );
   const localListSessions = taskRecordTab === 'local' ? localHumanSessions : sessionGroups[taskRecordTab];
@@ -246,19 +246,24 @@ const Sidebar: React.FC<SidebarProps> = ({
     [groupTasks],
   );
   // Per-tab totals and unread counts, shown on the tab buttons. The local tab
-  // counts the main list only: the folded auto sessions carry their own red
-  // dot + unread count on the fold's header row (see CoworkSessionList), and
-  // letting heartbeat-driven background runs also light the tab would be the
+  // counts the main list PLUS the Follow-Up section — pending decisions are the
+  // point of the feature and must light the tab badge (user decision #5),
+  // including their heartbeat-driven turns. The Autonomous fold stays excluded:
+  // its sessions carry their own red dot + unread count on the fold's header
+  // row, and letting plain background runs also light the tab would be the
   // noise the fold exists to remove.
   const tabStats = useMemo(() => {
     const unreadSet = new Set(unreadSessionIds);
     const unreadOf = (list: CoworkSessionSummary[]) => list.filter((session) => unreadSet.has(session.id)).length;
     return {
-      local: { count: localHumanSessions.length, unread: unreadOf(localHumanSessions) },
+      local: {
+        count: localHumanSessions.length + localFollowUpSessions.length,
+        unread: unreadOf(localHumanSessions) + unreadOf(localFollowUpSessions),
+      },
       a2a: { count: sessionGroups.a2a.length, unread: unreadOf(sessionGroups.a2a) },
       group: { count: groupTasks.length + openTeamCollabs.length, unread: unreadOf(sessionGroups.group) },
     };
-  }, [sessionGroups, localHumanSessions, unreadSessionIds, groupTasks, openTeamCollabs]);
+  }, [sessionGroups, localHumanSessions, localFollowUpSessions, unreadSessionIds, groupTasks, openTeamCollabs]);
   const isMac = window.electron.platform === 'darwin';
   const hasRunningScheduledTask = scheduledTasks.some(
     (task) => task.enabled && task.state.runningAtMs !== null && task.state.lastStatus === 'running'
@@ -427,6 +432,19 @@ const Sidebar: React.FC<SidebarProps> = ({
     await coworkService.setSessionFoldOverride(sessionId, override);
   };
 
+  /**
+   * Move a session in or out of the Follow-Up Tasks section.
+   *
+   * Simpler than the fold override: the follow-up marker is a single boolean
+   * lane. Moving in persists 'pending' with source 'manual'; moving out clears
+   * ANY pending source main-side, and the row falls back to whatever the
+   * auto-origin policy says (the fold for machine runs). The row reports where
+   * it sits NOW, so the write is just the inverse of the membership.
+   */
+  const handleToggleFollowUp = async (sessionId: string, currentlyInFollowUp: boolean) => {
+    await coworkService.setSessionFollowUp(sessionId, !currentlyInFollowUp);
+  };
+
   const handleRenameSession = async (sessionId: string, title: string) => {
     await coworkService.renameSession(sessionId, title);
   };
@@ -441,6 +459,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const listOnDeleteSession = useStableCallback(handleDeleteSession);
   const listOnTogglePin = useStableCallback(handleTogglePin);
   const listOnToggleAutonomousFold = useStableCallback(handleToggleAutonomousFold);
+  const listOnToggleFollowUp = useStableCallback(handleToggleFollowUp);
   const listOnRenameSession = useStableCallback(handleRenameSession);
   const listOnToggleSessionSelected = useStableCallback(handleToggleBatchSelected);
 
@@ -823,6 +842,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                 onDeleteSession={listOnDeleteSession}
                 onTogglePin={listOnTogglePin}
                 onToggleAutonomousFold={taskRecordTab === 'local' ? listOnToggleAutonomousFold : undefined}
+                onToggleFollowUp={taskRecordTab === 'local' ? listOnToggleFollowUp : undefined}
                 onRenameSession={listOnRenameSession}
                 emptyText={i18nService.t(activeTaskRecordTab.emptyKey)}
                 selectionMode={isBatchArchiveMode && taskRecordTab === 'local'}
@@ -832,9 +852,14 @@ const Sidebar: React.FC<SidebarProps> = ({
                 sortMode={taskRecordTab === 'local' ? sessionSortMode : undefined}
                 language={language}
                 /** Local chats: the machine-started runs (long-term task,
-                 * orchestration, scheduled) fold into one collapsed folder at
-                 * the bottom instead of mixing into the human list. */
+                 * orchestration, scheduled) that need no human follow-up fold
+                 * into one collapsed folder below the Follow-Up section
+                 * instead of mixing into the human list. */
                 autoSessions={taskRecordTab === 'local' ? localAutoSessions : undefined}
+                /** Local chats: sessions awaiting a human decision or reply
+                 * (persisted pending marker or a live board decision owed)
+                 * render in the Follow-Up section above the fold. */
+                followUpSessions={taskRecordTab === 'local' ? localFollowUpSessions : undefined}
                 decisionSessionIds={taskRecordTab === 'local' ? decisionSessionIds : undefined}
                 /** Online chats: the Bot selector is this list's only
                  * selector, so it is switched on here — nothing else changes. */
@@ -862,6 +887,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         onDeleteSession={handleDeleteSession}
         onTogglePin={handleTogglePin}
         onToggleAutonomousFold={handleToggleAutonomousFold}
+        onToggleFollowUp={handleToggleFollowUp}
         onRenameSession={handleRenameSession}
       />
       <div className="px-3 pb-3 pt-1">

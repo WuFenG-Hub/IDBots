@@ -22,8 +22,11 @@ import {
 } from '../../utils/sessionViewGrouping';
 import {
   AUTO_TASKS_EXPANDED_STORAGE_KEY,
+  FOLLOW_UP_EXPANDED_STORAGE_KEY,
   parseAutoTasksExpandedPreference,
+  parseFollowUpExpandedPreference,
   serializeAutoTasksExpandedPreference,
+  serializeFollowUpExpandedPreference,
 } from '../../utils/sessionAutoGrouping';
 import { ChevronDownIcon, FolderIcon } from '@heroicons/react/24/outline';
 
@@ -47,16 +50,25 @@ interface CoworkSessionListProps {
   /** Ordering within the flat list and inside every group. */
   sortMode?: SessionSortMode;
   /**
-   * Auto-folded sessions (long-term task runs, orchestration/delegation runs)
-   * for the local-chats list — scheduled-task runs are NOT folded, they stay in
-   * the main list. Folded rows are NEVER mixed into the main list: they render
-   * as one collapsed "Autonomous Tasks" folder directly under the pinned
-   * section and above the content groups, independent of the view mode — tucked
-   * out of the human conversations, but visible at a glance instead of buried
-   * at the bottom. Only the local tab passes this; every other caller leaves
-   * it off and its output is unchanged.
+   * Auto-folded sessions (long-term task runs, orchestration/delegation runs,
+   * scheduled-task runs — every machine-started run kind) for the local-chats
+   * list. Folded rows are NEVER mixed into the main list: they render as one
+   * collapsed "Autonomous Tasks" folder directly under the pinned section and
+   * below the Follow-Up section, independent of the view mode — tucked out of
+   * the human conversations, but visible at a glance instead of buried at the
+   * bottom. Only the local tab passes this; every other caller leaves it off
+   * and its output is unchanged.
    */
   autoSessions?: CoworkSessionSummary[];
+  /**
+   * Follow-up sessions (followUpState 'pending' or a live board decision owed)
+   * for the local-chats list: auto-created rows that currently need a human
+   * decision or reply. They render as one collapsed "Follow-Up Tasks" section
+   * directly under the pinned block and ABOVE the Autonomous fold — the
+   * decision surface must be seen, not buried. Only the local tab passes this;
+   * every other caller leaves it off and its output is unchanged.
+   */
+  followUpSessions?: CoworkSessionSummary[];
   /**
    * Sessions owed an owner verdict right now (long-term sub-projects parked in
    * waiting_owner, board-derived): each matching row carries
@@ -72,6 +84,14 @@ interface CoworkSessionListProps {
    * the caller decides the next override without re-deriving it.
    */
   onToggleAutonomousFold?: (sessionId: string, currentlyFolded: boolean) => void;
+  /**
+   * Move one session in or out of the Follow-Up Tasks section (the row menu's
+   * 移入待跟进 / 移出待跟进 entry). Optional: callers that do not offer the move
+   * (and every non-local list) simply leave it off, and the row then hides the
+   * menu entry. `currentlyInFollowUp` is the section membership at menu-open
+   * time, so the caller decides the next write without re-deriving it.
+   */
+  onToggleFollowUp?: (sessionId: string, currentlyInFollowUp: boolean) => void;
   /** Online-chats (A2A) Bot selector — that list's ONLY selector. When on, the
    * list reuses the shared MetaBotSelector (the same component the cowork home
    * and Bot Internet composer use) above the flat list, with `allowAll` adding
@@ -115,6 +135,9 @@ const noopToggleSelected = (): void => {};
 /** Placeholder for the optional fold move; hidden behind the menu entry's own guard. */
 const noopToggleAutonomousFold = (): void => {};
 
+/** Placeholder for the optional follow-up move; hidden behind the menu entry's own guard. */
+const noopToggleFollowUp = (): void => {};
+
 /**
  * Shallow equality, one level deep: `Object.is` per key, and for nested objects
  * a key-wise comparison of their own fields (session summaries carry at most
@@ -153,7 +176,8 @@ const sameSessionSummary = (a: CoworkSessionSummary, b: CoworkSessionSummary): b
 const useStableSessionSummaries = (
   sessions: CoworkSessionSummary[],
   autoSessions?: CoworkSessionSummary[],
-): [CoworkSessionSummary[], CoworkSessionSummary[] | undefined] => {
+  followUpSessions?: CoworkSessionSummary[],
+): [CoworkSessionSummary[], CoworkSessionSummary[] | undefined, CoworkSessionSummary[] | undefined] => {
   const cacheRef = useRef<Map<string, CoworkSessionSummary>>(new Map());
   return useMemo(() => {
     const nextCache = new Map<string, CoworkSessionSummary>();
@@ -164,19 +188,30 @@ const useStableSessionSummaries = (
         nextCache.set(session.id, kept);
         return kept;
       });
-    const result: [CoworkSessionSummary[], CoworkSessionSummary[] | undefined] = [
+    const result: [CoworkSessionSummary[], CoworkSessionSummary[] | undefined, CoworkSessionSummary[] | undefined] = [
       stabilize(sessions),
       autoSessions ? stabilize(autoSessions) : undefined,
+      followUpSessions ? stabilize(followUpSessions) : undefined,
     ];
     cacheRef.current = nextCache;
     return result;
-  }, [sessions, autoSessions]);
+  }, [sessions, autoSessions, followUpSessions]);
 };
 
 /** Remembered open/closed state of the Autonomous Tasks fold, read once on mount. */
 const loadAutoTasksExpanded = (): boolean => {
   try {
     return parseAutoTasksExpandedPreference(window.localStorage.getItem(AUTO_TASKS_EXPANDED_STORAGE_KEY));
+  } catch {
+    // localStorage unavailable; fall through to the collapsed default.
+  }
+  return false;
+};
+
+/** Remembered open/closed state of the Follow-Up Tasks section, read once on mount. */
+const loadFollowUpExpanded = (): boolean => {
+  try {
+    return parseFollowUpExpandedPreference(window.localStorage.getItem(FOLLOW_UP_EXPANDED_STORAGE_KEY));
   } catch {
     // localStorage unavailable; fall through to the collapsed default.
   }
@@ -198,13 +233,19 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   sortMode = 'updatedAt',
   botSelector = false,
   autoSessions: incomingAutoSessions,
+  followUpSessions: incomingFollowUpSessions,
   decisionSessionIds,
   onToggleAutonomousFold,
+  onToggleFollowUp,
   language: languageProp,
 }) => {
   // Same summary objects for the rows whose fields did not change (see the
   // hook); everything below reads these instead of the raw props.
-  const [sessions, autoSessions] = useStableSessionSummaries(incomingSessions, incomingAutoSessions);
+  const [sessions, autoSessions, followUpSessions] = useStableSessionSummaries(
+    incomingSessions,
+    incomingAutoSessions,
+    incomingFollowUpSessions,
+  );
   // One shared clock for the rows' relative-time stamps, ticked once a minute.
   // Rows are memoized, so a row that recomputed Date.now() itself would freeze
   // its label until its data changed; the tick is what keeps "5m" turning into
@@ -227,6 +268,10 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   // memoized row must never receive an undefined callback and then have to
   // guard every click itself.
   const toggleAutonomousFold = useStableCallback(onToggleAutonomousFold ?? noopToggleAutonomousFold);
+  // Optional, so it needs the same no-op treatment as the fold move: a
+  // memoized row must never receive an undefined callback and then have to
+  // guard every click itself.
+  const toggleFollowUp = useStableCallback(onToggleFollowUp ?? noopToggleFollowUp);
   // Batch selection is the one optional action (the search modal never enters
   // selection mode). A no-op keeps the memoized prop a function, so the row's
   // guard cannot silently let an undefined callback through to a click.
@@ -255,6 +300,23 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
         );
       } catch {
         // localStorage unavailable; the fold still toggles for this session.
+      }
+      return next;
+    });
+  };
+  // The Follow-Up section holds the decision surface; it also opens collapsed
+  // every launch (user decision #1 — revisit after usage).
+  const [isFollowUpExpanded, setIsFollowUpExpanded] = useState<boolean>(loadFollowUpExpanded);
+  const toggleFollowUpExpanded = () => {
+    setIsFollowUpExpanded((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(
+          FOLLOW_UP_EXPANDED_STORAGE_KEY,
+          serializeFollowUpExpandedPreference(next),
+        );
+      } catch {
+        // localStorage unavailable; the section still toggles for this session.
       }
       return next;
     });
@@ -360,6 +422,33 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     [visibleSessions, viewMode, sortMode],
   );
 
+  // The Follow-Up section: sessions awaiting a human decision, ordered like the
+  // main list (pinned first, then the active sort mode) inside ONE flat section
+  // that always sits directly under the pinned block and above the Autonomous
+  // fold, whatever the view mode. A pin keeps its place inside the section —
+  // it never rescues a follow-up row back into the human list.
+  const sortedFollowUpSessions = useMemo(() => {
+    const list = followUpSessions ?? [];
+    if (list.length === 0) return [];
+    return [
+      ...sortSessionsByMode(list.filter((session) => session.pinned), sortMode),
+      ...sortSessionsByMode(list.filter((session) => !session.pinned), sortMode),
+    ];
+  }, [followUpSessions, sortMode]);
+  // Newest activity in the section (updatedAt is the session's last-activity
+  // anchor, the same value the row's own timestamp shows).
+  const followUpLatestActivityAt = useMemo(
+    () => sortedFollowUpSessions.reduce((latest, session) => Math.max(latest, session.updatedAt), 0),
+    [sortedFollowUpSessions],
+  );
+  // Unread sessions inside the Follow-Up section. Pending rows are the
+  // decision surface, so — unlike the Autonomous fold — they also light the
+  // local tab's badge through the sidebar's tabStats (user decision #5).
+  const followUpUnreadCount = useMemo(
+    () => sortedFollowUpSessions.filter((session) => unreadSessionIdSet.has(session.id)).length,
+    [sortedFollowUpSessions, unreadSessionIdSet],
+  );
+
   // The Autonomous Tasks fold: machine-started runs, ordered like the main list
   // (pinned first, then the active sort mode) inside ONE flat section that
   // always sits directly under the pinned block, whatever the view mode. A pin
@@ -436,6 +525,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
         onRename={renameSession}
         onToggleSelected={toggleSessionSelected}
         onToggleAutonomousFold={onToggleAutonomousFold ? toggleAutonomousFold : undefined}
+        onToggleFollowUp={onToggleFollowUp ? toggleFollowUp : undefined}
         decisionPending={decisionSessionIds?.has(session.id)}
       />
     );
@@ -448,6 +538,56 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
           {i18nService.t('coworkPinnedGroup')}
         </div>
         {pinned.map(renderItem)}
+      </section>
+    );
+
+  /**
+   * The Follow-Up Tasks section (待跟进任务). Rendered in every view mode
+   * directly under the pinned block and ABOVE the Autonomous fold, and only
+   * when something is pending — an empty section would be noise of its own.
+   *
+   * Membership = followUpState 'pending' on the row (persisted by main: the
+   * cerebellum turn-end gate, the AskUserQuestion bridge, manual owner moves)
+   * or a live board decision owed on the session (see Sidebar's
+   * decisionSessionIds) — the decision surface must be seen, not buried in the
+   * collapsed fold it used to be force-lifted out of.
+   *
+   * The header mirrors the Autonomous fold's: subdued secondary text + folder
+   * glyph, a red dot at the left + the section's UNREAD session count in red
+   * (both only when > 0; the total survives only in the hover tooltip) + the
+   * section's newest activity time. Per-row dots inside the EXPANDED section
+   * stay — that is where "which decision is still open" is traceable.
+   */
+  const renderFollowUpSection = () =>
+    revealBudgetLeft() && sortedFollowUpSessions.length > 0 && (
+      <section data-testid="follow-up-tasks-section">
+        <button
+          type="button"
+          aria-expanded={isFollowUpExpanded}
+          onClick={toggleFollowUpExpanded}
+          title={(followUpUnreadCount > 0
+            ? i18nService.t('coworkFollowUpTasksUnread').replace('{count}', String(followUpUnreadCount))
+            : i18nService.t('coworkFollowUpTasksCount').replace('{count}', String(sortedFollowUpSessions.length)))}
+          className={`flex w-full items-center gap-1.5 px-2.5 pb-1 pt-2.5 text-left transition-colors hover:text-claude-text dark:hover:text-claude-darkText ${groupHeaderLabelClass}`}
+        >
+          {followUpUnreadCount > 0 && (
+            <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-red-500" aria-hidden />
+          )}
+          <ChevronDownIcon
+            className={`h-3 w-3 flex-shrink-0 transition-transform duration-150 ${isFollowUpExpanded ? '' : '-rotate-90'}`}
+          />
+          <FolderIcon className="h-3.5 w-3.5 flex-shrink-0" />
+          <span className="truncate">{i18nService.t('coworkFollowUpTasks')}</span>
+          {followUpUnreadCount > 0 && (
+            <span className="flex-shrink-0 font-medium tabular-nums text-red-500">{followUpUnreadCount}</span>
+          )}
+          {followUpLatestActivityAt > 0 && (
+            <span className="ml-auto flex-shrink-0 font-normal tabular-nums" title={formatRelativeTime(followUpLatestActivityAt).full}>
+              {formatRelativeTime(followUpLatestActivityAt).compact}
+            </span>
+          )}
+        </button>
+        {isFollowUpExpanded && sortedFollowUpSessions.map(renderItem)}
       </section>
     );
 
@@ -548,13 +688,14 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     )
   ) : null;
 
-  // An empty human list still renders the fold when background runs exist:
-  // showing "no chats yet" above a folder of them would be a lie. Every caller
-  // that passes no autoSessions (A2A tab, search modal) keeps the old empty
-  // state exactly — the fold belongs to the local list only, so the selector
-  // path never counts it either.
+  // An empty human list still renders the Follow-Up section and the fold when
+  // background runs exist: showing "no chats yet" above sections full of them
+  // would be a lie. Every caller that passes neither bucket (A2A tab, search
+  // modal) keeps the old empty state exactly — both sections belong to the
+  // local list only, so the selector path never counts them either.
+  const hasFollowUpTasks = sortedFollowUpSessions.length > 0 && !showBotSelector;
   const hasAutoTasks = sortedAutoSessions.length > 0 && !showBotSelector;
-  if (visibleSessions.length === 0 && !hasAutoTasks) {
+  if (visibleSessions.length === 0 && !hasAutoTasks && !hasFollowUpTasks) {
     return (
       <div ref={rootRef} className="text-center py-8">
         <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -569,6 +710,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     return (
       <div ref={rootRef}>
         {renderPinnedSection(timelineGrouped.pinned)}
+        {renderFollowUpSection()}
         {renderAutoTasksSection()}
         {timelineGrouped.groups.map((group) => {
           if (!revealBudgetLeft()) return null;
@@ -590,6 +732,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     return (
       <div ref={rootRef}>
         {renderPinnedSection(projectGrouped.pinned)}
+        {renderFollowUpSection()}
         {renderAutoTasksSection()}
         {projectGrouped.groups.map((group) => {
           if (!revealBudgetLeft()) return null;
@@ -669,11 +812,12 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
 
   return (
     <div ref={rootRef} className="space-y-1">
-      {/* Flat mode has no group headers, so the fold's anchor is the pinned
-       * block itself: pinned rows first, then the fold, then the rest —
-       * the same "under pinned, above everything else" spot the grouped
-       * views give it. */}
+      {/* Flat mode has no group headers, so the sections' anchor is the pinned
+       * block itself: pinned rows first, then the Follow-Up section, then the
+       * fold, then the rest — the same "under pinned, above everything else"
+       * spot the grouped views give them. */}
       {sortedSessions.filter((session) => session.pinned).map(renderItem)}
+      {renderFollowUpSection()}
       {renderAutoTasksSection()}
       {sortedSessions.filter((session) => !session.pinned).map(renderItem)}
     </div>

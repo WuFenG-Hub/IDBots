@@ -20,6 +20,9 @@ interface CoworkSearchModalProps {
   /** Move a result row in or out of the Autonomous Tasks fold; optional, so a
    * host without the fold (or without the handler) simply omits the menu entry. */
   onToggleAutonomousFold?: (sessionId: string, currentlyFolded: boolean) => void;
+  /** Move a result row in or out of the Follow-Up Tasks section; optional, so a
+   * host without the section (or without the handler) omits the menu entry. */
+  onToggleFollowUp?: (sessionId: string, currentlyInFollowUp: boolean) => void;
 }
 
 const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
@@ -34,6 +37,7 @@ const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
   onTogglePin,
   onRenameSession,
   onToggleAutonomousFold,
+  onToggleFollowUp,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [scopedOnly, setScopedOnly] = useState(true);
@@ -136,6 +140,7 @@ const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
               onTogglePin={onTogglePin}
               onRenameSession={onRenameSession}
               onToggleAutonomousFold={onToggleAutonomousFold}
+              onToggleFollowUp={onToggleFollowUp}
               /** The modal re-renders with the app on a language switch; the
                * memoized list needs to see it to refresh its labels. */
               language={i18nService.getLanguage()}
