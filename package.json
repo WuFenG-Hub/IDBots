@@ -6,7 +6,7 @@
   "version": "1.0.3",
   "main": "dist-electron/main.js",
   "engines": {
-    "node": ">=24 <25"
+    "node": ">=24 <27"
   },
   "scripts": {
     "dev": "vite",
