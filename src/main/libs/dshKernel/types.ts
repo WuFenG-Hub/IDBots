@@ -155,6 +155,16 @@ export interface DshPromptSectionInput {
   name: string
   order: number
   text: string
+  /**
+   * Render the text literally instead of interpolating kernel `{{variable}}`
+   * references. Required for sections whose text embeds authored or untrusted
+   * content — the A2A base prompt carries the peer conversation history, and
+   * any literal `{{...}}` inside it (e.g. a quoted {{METABOT_SKILL_PIN}}
+   * placeholder in a peer message) otherwise kills the whole turn in
+   * dsh-system-prompt's strict interpolator. App-composed sections are
+   * finished text, never kernel templates.
+   */
+  interpolate?: false
 }
 
 /**

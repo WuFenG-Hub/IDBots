@@ -9943,9 +9943,13 @@ export class CoworkRunner extends EventEmitter {
           dshSessionId,
           provider: this.dshTurnProviderFromRoute(route),
           sections: [
-            { name: 'idbots:base', order: 0, text: systemPrompt },
+            // interpolate:false — the base prompt embeds authored/untrusted
+            // content (bot persona, A2A peer conversation history); literal
+            // {{...}} text inside it must reach the model verbatim, not die in
+            // the kernel's strict prompt-variable interpolator.
+            { name: 'idbots:base', order: 0, text: systemPrompt, interpolate: false },
             ...(prewarmGoal && prewarmGoal.status === 'active'
-              ? [{ name: 'idbots:goal', order: 10, text: buildGoalPromptSection(prewarmGoal) }]
+              ? [{ name: 'idbots:goal', order: 10, text: buildGoalPromptSection(prewarmGoal), interpolate: false as const }]
               : []),
             { name: 'idbots:tool-use', order: 150, text: CoworkRunner.DSH_TOOL_USE_GUIDANCE },
           ],
@@ -10313,7 +10317,7 @@ export class CoworkRunner extends EventEmitter {
         // turn until paused or cleared; a goal set mid-run applies here.
         const sessionGoal = this.store.getSessionWithoutMessages(sessionId)?.goal ?? null;
         const goalSection = sessionGoal && sessionGoal.status === 'active'
-          ? [{ name: 'idbots:goal', order: 10, text: buildGoalPromptSection(sessionGoal) }]
+          ? [{ name: 'idbots:goal', order: 10, text: buildGoalPromptSection(sessionGoal), interpolate: false as const }]
           : [];
         try {
           return await hub.runTurn({
@@ -10324,7 +10328,9 @@ export class CoworkRunner extends EventEmitter {
         hostTools,
         workspace: { cwd },
         sections: [
-          { name: 'idbots:base', order: 0, text: systemPrompt },
+          // interpolate:false — see the prewarm site above: the base prompt
+          // and the goal text are authored content, never kernel templates.
+          { name: 'idbots:base', order: 0, text: systemPrompt, interpolate: false },
           ...goalSection,
           // The Claude path inherits tool-use discipline from the claude_code
           // preset; the DSH base prompt has none, and without it the model
