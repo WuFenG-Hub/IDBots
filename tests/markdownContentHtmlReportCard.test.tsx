@@ -120,7 +120,8 @@ test('the block degrades to the previous report card when the file cannot be rea
 test('the block frame is sandboxed, non-scrolling and content-height sized', () => {
   assert.match(blockSource, /sandbox="allow-scripts"/);
   assert.match(blockSource, /scrolling="no"/);
-  assert.match(blockSource, /parseInlineHtmlHeightMessage\(\s*event\.data,\s*event\.source,\s*iframeRef\.current\?\.contentWindow \?\? null,/);
+  assert.match(blockSource, /const iframeWindow = iframeRef\.current\?\.contentWindow \?\? null;/);
+  assert.match(blockSource, /parseInlineHtmlHeightMessage\(event\.data, event\.source, iframeWindow\)/);
 });
 
 test('professional mode keeps the plain inline link (no block, no card)', () => {

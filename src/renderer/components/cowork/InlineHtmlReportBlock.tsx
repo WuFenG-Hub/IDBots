@@ -7,7 +7,12 @@
  * outside any text bubble). The document runs in a sandboxed srcdoc iframe
  * whose height tracks its content through a ResizeObserver + postMessage
  * reporter injected next to the <base href> the MarkdownViewerPanel already
- * uses for relative assets. A toolbar carrying the title plus the
+ * uses for relative assets. The injected script double-jobs as a link
+ * bridge: clicks on idbots:// anchors are forwarded to the parent, which
+ * routes session deep links (idbots://session/<id>) through the same
+ * 'cowork:viewSession' event Markdown links use, so report links jump to
+ * the referenced conversation exactly like their markdown counterparts.
+ * A toolbar carrying the title plus the
  * open-in-panel / view-source / download-as-image actions floats over the
  * report's top edge: it stays hidden (and click-transparent) until the
  * pointer hovers the block or its right-click menu is open, so the report
@@ -44,12 +49,13 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 // @ts-ignore
 import prismMarkup from 'react-syntax-highlighter/dist/esm/languages/prism/markup';
 import { i18nService } from '../../services/i18n';
+import { dispatchViewSession, parseIdbotsSessionUri } from '../../utils/sessionDeepLink';
 import { injectHtmlBaseHref } from './MarkdownViewerPanel';
 import LocalFileLink from '../ui/LocalFileLink';
 
 SyntaxHighlighter.registerLanguage('markup', prismMarkup);
 
-/** Marker field the in-frame reporter posts so parents can ignore foreign messages. */
+/** Marker field the in-frame script posts on every block message (height reports and idbots:// nav requests). */
 export const INLINE_HTML_HEIGHT_MESSAGE_KEY = '__idbotsHtmlBlock';
 
 /** Reporter iframe height bounds: below 40px is a broken frame, above 10000px a runaway document. */
@@ -81,10 +87,32 @@ export const parseInlineHtmlHeightMessage = (
 };
 
 /**
- * In-frame height reporter, injected before </body> (or appended when the
- * document has no body close tag). ResizeObserver covers async layout
- * (charts, images, fonts); load + two delayed reports cover documents the
- * observer fires before the final layout settles.
+ * Same per-instance contract as parseInlineHtmlHeightMessage, for the
+ * in-frame link bridge: a marked payload whose `nav` is a non-empty string
+ * is an idbots:// link click the parent should route. Returns the raw href
+ * (the caller validates the exact idbots:// shape before acting) or null.
+ */
+export const parseInlineHtmlNavMessage = (
+  data: unknown,
+  source: unknown,
+  iframeWindow: unknown,
+): string | null => {
+  if (!iframeWindow || source !== iframeWindow) return null;
+  if (!data || typeof data !== 'object') return null;
+  const payload = data as Record<string, unknown>;
+  if (payload[INLINE_HTML_HEIGHT_MESSAGE_KEY] !== true) return null;
+  if (typeof payload.nav !== 'string' || !payload.nav) return null;
+  return payload.nav;
+};
+
+/**
+ * In-frame height reporter + idbots:// link bridge, injected before </body>
+ * (or appended when the document has no body close tag). ResizeObserver
+ * covers async layout (charts, images, fonts); load + two delayed reports
+ * cover documents the observer fires before the final layout settles. The
+ * capture-phase click listener intercepts idbots:// anchors — the sandboxed
+ * frame cannot navigate to them anyway — and forwards the href to the
+ * parent, which routes session deep links exactly like Markdown links do.
  */
 export const buildInlineHtmlReporterScript = (): string => [
   '(function () {',
@@ -109,6 +137,16 @@ export const buildInlineHtmlReporterScript = (): string => [
   '  reportHeight();',
   '  setTimeout(reportHeight, 300);',
   '  setTimeout(reportHeight, 1000);',
+  '  document.addEventListener("click", function (event) {',
+  '    var node = event.target;',
+  '    var anchor = node && node.closest ? node.closest("a[href]") : null;',
+  '    if (!anchor) return;',
+  '    var href = anchor.getAttribute("href") || "";',
+  '    if (!/^idbots:\\/\\//i.test(href)) return;',
+  '    event.preventDefault();',
+  '    event.stopPropagation();',
+  '    try { parent.postMessage({ [KEY]: true, nav: href }, "*"); } catch (err) {}',
+  '  }, true);',
   '})();',
 ].join('\n');
 
@@ -216,17 +254,26 @@ const InlineHtmlReportBlock: React.FC<InlineHtmlReportBlockProps> = ({
   }, [filePath]);
 
   // Track the in-frame reporter: accept only messages whose source is THIS
-  // block's iframe (multiple blocks share the window 'message' bus).
+  // block's iframe (multiple blocks share the window 'message' bus). Height
+  // reports resize the frame; nav requests are idbots:// link clicks, routed
+  // through the same session deep-link path as Markdown links.
   useEffect(() => {
     if (status !== 'ready') return;
     const handleMessage = (event: MessageEvent) => {
-      const nextHeight = parseInlineHtmlHeightMessage(
-        event.data,
-        event.source,
-        iframeRef.current?.contentWindow ?? null,
-      );
+      const iframeWindow = iframeRef.current?.contentWindow ?? null;
+      const nextHeight = parseInlineHtmlHeightMessage(event.data, event.source, iframeWindow);
       if (nextHeight !== null) {
         setHeight(nextHeight);
+        return;
+      }
+      const navHref = parseInlineHtmlNavMessage(event.data, event.source, iframeWindow);
+      if (navHref) {
+        const sessionId = parseIdbotsSessionUri(navHref);
+        if (sessionId) {
+          dispatchViewSession(sessionId);
+        } else {
+          console.warn('Unsupported idbots:// link:', navHref);
+        }
       }
     };
     window.addEventListener('message', handleMessage);

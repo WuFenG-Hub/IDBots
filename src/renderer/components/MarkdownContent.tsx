@@ -49,6 +49,7 @@ import { i18nService } from '../services/i18n';
 import type { ChatExperienceMode } from '../config';
 import LocalFileLink from './ui/LocalFileLink';
 import InlineHtmlReportBlock from './cowork/InlineHtmlReportBlock';
+import { dispatchViewSession, parseIdbotsSessionUri } from '../utils/sessionDeepLink';
 
 /**
  * Code-block languages worth highlighting in chat output.
@@ -148,13 +149,6 @@ export const isBotBrowserUri = (href: string): boolean => BOT_BROWSER_URI_PROTOC
 
 const AGENT_INTERNET_URI_RE = /\b(?:metaid|metaapp|map|metafile|pin|preview-metaapp|idbots):\/\/[A-Za-z0-9][A-Za-z0-9._~%/@-]*/gi;
 const AGENT_INTERNET_URI_HINT_RE = /(?:metaid|metaapp|map|metafile|pin|preview-metaapp|idbots):\/\//i;
-/**
- * In-app session deep link emitted e.g. by the Twin Bot's daily report:
- * idbots://session/<sessionId> jumps straight to the referenced CoWork
- * conversation (handled by the app-wide 'cowork:viewSession' DOM event, see
- * App.tsx). Other idbots:// shapes are not recognised and stay no-ops.
- */
-const IDBOTS_SESSION_URI_RE = /^idbots:\/\/session\/([A-Za-z0-9][A-Za-z0-9._~-]*)$/i;
 const CODE_SEGMENT_RE = /(```[\s\S]*?```|`[^`\n]*`)/g;
 const TRAILING_URI_PUNCTUATION_RE = /[.,;:!?]+$/;
 /**
@@ -694,18 +688,18 @@ const createMarkdownComponents = (
 
     // In-app session deep links (idbots://session/<sessionId>, emitted e.g. by
     // the Twin Bot's daily report) jump straight to the referenced CoWork
-    // conversation via the app-wide 'cowork:viewSession' DOM event (handler in
-    // App.tsx) — they never leave the app. Unrecognised idbots:// shapes are a
-    // no-op with a warning.
+    // conversation via the shared sessionDeepLink helper (the app-wide
+    // 'cowork:viewSession' DOM event, handler in App.tsx) — they never leave
+    // the app. Unrecognised idbots:// shapes are a no-op with a warning.
     if (hrefValue && getHrefProtocol(hrefValue) === 'idbots') {
-      const sessionMatch = hrefValue.match(IDBOTS_SESSION_URI_RE);
+      const sessionId = parseIdbotsSessionUri(hrefValue);
       const handleIdbotsClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
         e.preventDefault();
-        if (!sessionMatch) {
+        if (!sessionId) {
           console.warn('Unsupported idbots:// link:', hrefValue);
           return;
         }
-        window.dispatchEvent(new CustomEvent('cowork:viewSession', { detail: { sessionId: sessionMatch[1] } }));
+        dispatchViewSession(sessionId);
       };
       return (
         <a
