@@ -260,5 +260,10 @@ export async function startGatewayFromApp(context: GatewayAppContext): Promise<G
       return result.mnemonic;
     },
     logger: makeJsonLogger(tenantId),
+    // Conformance-only test channel (`__test:sleep`), opt-in via env. Never
+    // enabled unless IDBOTS_GATEWAY_TEST_HOOKS=1 is set explicitly; it is not
+    // part of the frozen allowlist and must stay off in production.
+    enableTestHooks: env('IDBOTS_GATEWAY_TEST_HOOKS') === '1',
+    testSleepTimeoutMs: Number(env('IDBOTS_GATEWAY_TEST_SLEEP_TIMEOUT_MS')) || 1500,
   });
 }

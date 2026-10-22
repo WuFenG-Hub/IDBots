@@ -72,9 +72,14 @@ build step.
     reconnect is welcomed again; then `mobile:permission:listPending` and
     `cowork:stream:liveContent` (with bogus ids — a result, not a crash)
     both answer.
-12. **invoke-timeout** — always SKIP: the frozen allowlist offers no channel
-    a client can legitimately force past its timeout; hard TIMEOUT coverage
-    lives in `tests/gatewayServer.test.mjs`.
+12. **invoke-timeout** — real check when the target enables the
+    conformance-only test hook (`IDBOTS_GATEWAY_TEST_HOOKS=1`): the virtual
+    `__test:sleep` channel (1.5 s timeout) is invoked with a 5 s sleep and must
+    answer `TIMEOUT`; the PASS line carries the measured elapsed time. When the
+    target has no test hook, the kit prints
+    `SKIP(not-covered): invoke-timeout …` — explicitly **not covered**, never a
+    pass. The test hook is not part of the frozen allowlist and must stay off
+    in production.
 
 ## Running against desktop dev mode
 
@@ -89,6 +94,9 @@ export IDBOTS_USER_DATA_PATH=/tmp/idbots-gateway-dev-data
 export IDBOTS_GATEWAY_DEV=1
 export IDBOTS_GATEWAY_SECRET=$(node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))")
 export IDBOTS_GATEWAY_PORT=8790
+# Optional, enables the __test:sleep hook so invoke-timeout really runs:
+export IDBOTS_GATEWAY_TEST_HOOKS=1
+export IDBOTS_GATEWAY_TEST_SLEEP_TIMEOUT_MS=1500
 
 pnpm run electron:dev
 ```

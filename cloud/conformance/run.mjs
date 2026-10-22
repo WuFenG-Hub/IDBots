@@ -472,14 +472,30 @@ async function main() {
   });
 
   // -- 12. invoke-timeout -------------------------------------------------------------------------------------
-  report('SKIP', 'invoke-timeout', 'covered by unit tests (tests/gatewayServer.test.mjs); the frozen allowlist offers no channel a client can legitimately force past its timeout');
+  // Real timeout against the running gateway: the `__test:sleep` channel is a
+  // conformance-only test hook (IDBOTS_GATEWAY_TEST_HOOKS=1) with a 1.5 s
+  // timeout, so a 5 s sleep must answer TIMEOUT. When the target has no test
+  // hooks the check is reported as explicitly NOT COVERED — never as a pass.
+  {
+    const startedAt = Date.now();
+    const result = await client.invoke('__test:sleep', [{ ms: 5000 }], 15000);
+    const elapsedMs = Date.now() - startedAt;
+    if (!result.ok && result.error.code === 'TIMEOUT') {
+      report('PASS', 'invoke-timeout', `TIMEOUT after ${elapsedMs} ms (channel timeout 1500 ms; handler kept running in the background)`);
+    } else if (!result.ok && result.error.code === 'CHANNEL_NOT_ALLOWED') {
+      report('SKIP(not-covered)', 'invoke-timeout', 'target has no __test:sleep hook (set IDBOTS_GATEWAY_TEST_HOOKS=1); NOT covered — do not count this check as passed');
+    } else {
+      report('FAIL', 'invoke-timeout', `expected TIMEOUT, got ${result.ok ? `ok=${JSON.stringify(result.value)}` : `${result.error.code}: ${result.error.message}`} after ${elapsedMs} ms`);
+    }
+  }
 
   // -- Summary ----------------------------------------------------------------------------------------------------
   client.close();
   const pass = outcomes.filter((o) => o.status === 'PASS').length;
   const fail = outcomes.filter((o) => o.status === 'FAIL').length;
-  const skip = outcomes.filter((o) => o.status === 'SKIP').length;
-  console.log(`conformance: ${pass} passed, ${fail} failed, ${skip} skipped`);
+  const skip = outcomes.filter((o) => o.status === 'SKIP' || o.status.startsWith('SKIP(')).length;
+  const notCovered = outcomes.filter((o) => o.status === 'SKIP(not-covered)').length;
+  console.log(`conformance: ${pass} passed, ${fail} failed, ${skip} skipped${notCovered > 0 ? ` (${notCovered} explicitly not covered)` : ''}`);
   process.exit(fail > 0 ? 1 : 0);
 }
 
