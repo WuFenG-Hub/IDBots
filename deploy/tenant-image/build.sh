@@ -31,6 +31,9 @@ done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
+echo "cwd:       $(pwd)"
+echo "script:    $HERE"
+echo "repo root: $REPO_ROOT"
 
 VERSION="$(node -p "require('$REPO_ROOT/package.json').version")"
 COMMIT_FULL="$(git -C "$REPO_ROOT" rev-parse HEAD)"

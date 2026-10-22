@@ -23,6 +23,7 @@ DNS_SERVERS="${IDBOTS_DNS_SERVERS:-223.5.5.5 223.6.6.6}"
 IPT="${IDBOTS_IPTABLES_BIN:-iptables}"
 
 log() { echo "[idbots-firewall] $*"; }
+log "cwd: $(pwd) script: $(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ "$(cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo 0)" != "1" ]; then
   log "WARNING: net.bridge.bridge-nf-call-iptables is not 1 — bridged tenant traffic"

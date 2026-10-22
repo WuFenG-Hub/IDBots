@@ -46,6 +46,9 @@ TEXTFILE_DIR=/var/lib/idbots/node-exporter-textfile
 log() { printf '\033[1;34m[bootstrap]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[bootstrap WARNING]\033[0m %s\n' "$*" >&2; }
 
+log "cwd:      $(pwd)"
+log "script:   $(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 if [ -r /etc/os-release ]; then
   . /etc/os-release
   log "OS: ${PRETTY_NAME:-unknown}"
