@@ -1048,6 +1048,10 @@ export class DreamService {
   }> {
     const budgets = this.resolveDreamBudgets(brain);
     const estimatedTokens = estimateDreamActivityTokens(activity);
+    // Dream review P0: a bot whose practice pipeline is disabled never sees
+    // the practice_proposals output contract — default installs stop paying
+    // the output tokens for proposals that would be discarded at write time.
+    const practiceEnabled = this.isPracticePipelineEnabled(metabot.id);
     // The weekly long-dream review rides every nightly dream as cross-day
     // context (P2b) — reference, not constraint.
     const weeklyReview = this.buildWeeklyReviewText(metabot.id);
@@ -1068,6 +1072,7 @@ export class DreamService {
         rollbackNotice: dreamExtras?.rollbackNotice,
         falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
         explorationDirective: dreamExtras?.explorationDirective,
+        practiceEnabled,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -1097,6 +1102,7 @@ export class DreamService {
         rollbackNotice: dreamExtras?.rollbackNotice,
         falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
         explorationDirective: dreamExtras?.explorationDirective,
+        practiceEnabled,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -1144,6 +1150,7 @@ export class DreamService {
       rollbackNotice: dreamExtras?.rollbackNotice,
       falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
       explorationDirective: dreamExtras?.explorationDirective,
+      practiceEnabled,
     });
     const output = await this.generateAndParse(
       prompt.system,
@@ -2826,6 +2833,27 @@ export class DreamService {
   }
 
   /**
+   * The self-curriculum pipeline's compound enable gate (design §3.4): both
+   * practiceTasksEnabled AND practiceAutoApproveReadOnly must be on. Both
+   * default OFF, so default installs skip the nightly proposal ask and the
+   * proposal persistence entirely instead of paying tokens and dead rows for
+   * a pipeline that would never run. A policy read failure falls back to
+   * enabled (previous behavior) so a store hiccup never silently rewrites the
+   * contract.
+   */
+  private isPracticePipelineEnabled(metabotId: number): boolean {
+    try {
+      const policy = this.deps.coworkStore.getEffectiveMemoryPolicyForMetabot(metabotId);
+      return Boolean(policy.practiceTasksEnabled && policy.practiceAutoApproveReadOnly);
+    } catch (error) {
+      console.warn(
+        `[DreamService] Practice policy read failed for metabot ${metabotId}; treating practice as enabled: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return true;
+    }
+  }
+
+  /**
    * Self-curriculum approval + materialization (design §3.4, owner decisions
    * §8): with the per-bot practiceTasksEnabled flag ON and
    * practiceAutoApproveReadOnly on, pending read_only proposals auto-approve
@@ -3876,8 +3904,11 @@ export class DreamService {
     // practice proposal becomes a 'pending' dream_practice_proposals row;
     // approval and materialization are a separate pipeline stage. A failure
     // here must not fail the dream run.
+    // Dream review P0: when the bot's practice pipeline is disabled the
+    // proposals are dead rows (nothing approves or materializes them), so
+    // they are dropped at the gate instead of persisted.
     const practiceProposals = Array.isArray(output.practiceProposals) ? output.practiceProposals : [];
-    if (practiceProposals.length > 0) {
+    if (practiceProposals.length > 0 && this.isPracticePipelineEnabled(metabotId)) {
       try {
         const inserted = this.deps.coworkStore.insertDreamPracticeProposals(
           metabotId,
@@ -3895,6 +3926,10 @@ export class DreamService {
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    } else if (practiceProposals.length > 0) {
+      console.log(
+        `[DreamService] Dropped ${practiceProposals.length} practice proposal(s) for metabot ${metabotId} date ${date}: practice pipeline disabled`,
+      );
     }
 
     return { dedupMerged, capabilityDraftInsert };
