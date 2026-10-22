@@ -1460,6 +1460,23 @@ export class CoworkStore implements MemoryBackend {
   private memoryBackend: MemoryBackend | null = null;
   /** Debounce anchor for last_used_at touch saves (full-file writes on wasm). */
   private lastMemoryTouchSaveAt: number | null = null;
+  /**
+   * Dream review P3: in-process write-behind buffer for hot_layer exposure
+   * rows. High-frequency turns used to UPSERT once per rendered item per
+   * turn; rows accumulate here and flush on a ≤5s unref'd timer, at 200
+   * buffered keys, or via flushHotLayerExposureBuffer() (app shutdown).
+   * Pure telemetry — a crash loses at most the buffer window.
+   */
+  private hotLayerExposureBuffer = new Map<string, {
+    metabotId: number;
+    usageDate: string;
+    kind: HotLayerItemKind;
+    id: string;
+    exposure: HotLayerExposure;
+    count: number;
+    firstExposedAt: number;
+  }>();
+  private hotLayerExposureFlushTimer: ReturnType<typeof setInterval> | null = null;
 
   // In-memory tracking of delegation-blocked sessions
   private delegationBlockedSessions: Map<string, { orderId: string }> = new Map();
@@ -8104,18 +8121,42 @@ export class CoworkStore implements MemoryBackend {
       this.saveDb();
     }
     // RRSI P2 exposure ledger: today's hot technique exposures for exactly
-    // the injected drafts (INSERT … SELECT; the WHERE clause is required
-    // before ON CONFLICT in this form). Best-effort telemetry — a failure
+    // the injected drafts. Dream review P3: rides the same write-behind
+    // buffer as recordHotLayerExposures (the old INSERT … SELECT ran one
+    // synchronous write per injection). Best-effort telemetry — a failure
     // never undoes the counter bump above.
     try {
-      this.db.run(
-        `INSERT INTO hot_layer_usage (metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count)
-         SELECT metabot_id, ?, 'technique', CAST(id AS TEXT), 'hot', ?, 1
-         FROM capability_drafts WHERE id IN (${placeholders})
-         ON CONFLICT(metabot_id, usage_date, item_kind, item_id) DO UPDATE SET
-           exposure_count = exposure_count + 1, exposure = 'hot'`,
-        [formatBotWorkspaceDate(new Date(now)), now, ...uniqueIds],
+      const injectedRows = this.getAll<{ metabot_id: number | string; id: number | string }>(
+        `SELECT metabot_id, id FROM capability_drafts WHERE id IN (${placeholders})`,
+        [...uniqueIds],
       );
+      const usageDate = formatBotWorkspaceDate(new Date(now));
+      for (const row of injectedRows) {
+        const metabotId = Number(row.metabot_id);
+        const id = String(row.id);
+        const key = `${metabotId}|${usageDate}|technique|${id}`;
+        const existing = this.hotLayerExposureBuffer.get(key);
+        if (existing) {
+          existing.count += 1;
+          existing.exposure = 'hot';
+        } else {
+          this.hotLayerExposureBuffer.set(key, {
+            metabotId,
+            usageDate,
+            kind: 'technique',
+            id,
+            exposure: 'hot',
+            count: 1,
+            firstExposedAt: now,
+          });
+        }
+      }
+      if (injectedRows.length > 0) {
+        this.ensureHotLayerExposureFlushTimer();
+        if (this.hotLayerExposureBuffer.size >= 200) {
+          this.flushHotLayerExposureBuffer();
+        }
+      }
       this.saveDb();
     } catch (error) {
       console.warn('[CoworkStore] hot_layer_usage technique exposure write failed:', error);
@@ -8145,15 +8186,67 @@ export class CoworkStore implements MemoryBackend {
       && typeof item.id === 'string' && item.id.trim().length > 0
       && (item.exposure === 'hot' || item.exposure === 'recall'));
     if (items.length === 0) return 0;
-    let written = 0;
+    // Dream review P3: buffer instead of per-item synchronous writes. The
+    // UPSERT semantics are preserved at flush time (count accumulation,
+    // 'hot' sticky). Same-day repeats coalesce into one row per key.
     for (const item of items) {
+      const key = `${metabotId}|${usageDate}|${item.kind}|${item.id}`;
+      const existing = this.hotLayerExposureBuffer.get(key);
+      if (existing) {
+        existing.count += 1;
+        if (item.exposure === 'hot') existing.exposure = 'hot';
+      } else {
+        this.hotLayerExposureBuffer.set(key, {
+          metabotId,
+          usageDate,
+          kind: item.kind,
+          id: item.id,
+          exposure: item.exposure,
+          count: 1,
+          firstExposedAt: atMs,
+        });
+      }
+    }
+    this.ensureHotLayerExposureFlushTimer();
+    if (this.hotLayerExposureBuffer.size >= 200) {
+      this.flushHotLayerExposureBuffer();
+    }
+    return items.length;
+  }
+
+  /** Lazily-arm the ≤5s flush timer (unref'd so it never holds the process). */
+  private ensureHotLayerExposureFlushTimer(): void {
+    if (this.hotLayerExposureFlushTimer) return;
+    this.hotLayerExposureFlushTimer = setInterval(() => {
+      try {
+        this.flushHotLayerExposureBuffer();
+      } catch (error) {
+        console.warn('[CoworkStore] hot-layer exposure flush failed:', error);
+      }
+    }, 5_000);
+    (this.hotLayerExposureFlushTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * Dream review P3: drain the exposure buffer into hot_layer_usage with the
+   * same UPSERT semantics as the old synchronous path (exposure_count
+   * accumulation, 'hot' sticky within a day). Called by the ≤5s timer, the
+   * 200-key burst cap, and the app-shutdown cleanup; safe to call when the
+   * buffer is empty. Returns rows written.
+   */
+  flushHotLayerExposureBuffer(): number {
+    if (this.hotLayerExposureBuffer.size === 0) return 0;
+    const rows = [...this.hotLayerExposureBuffer.values()];
+    this.hotLayerExposureBuffer.clear();
+    let written = 0;
+    for (const row of rows) {
       this.db.run(
         `INSERT INTO hot_layer_usage (metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count)
-         VALUES (?, ?, ?, ?, ?, ?, 1)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(metabot_id, usage_date, item_kind, item_id) DO UPDATE SET
-           exposure_count = exposure_count + 1,
+           exposure_count = exposure_count + excluded.exposure_count,
            exposure = CASE WHEN hot_layer_usage.exposure = 'hot' OR excluded.exposure = 'hot' THEN 'hot' ELSE 'recall' END`,
-        [metabotId, usageDate, item.kind, item.id, item.exposure, atMs],
+        [row.metabotId, row.usageDate, row.kind, row.id, row.exposure, row.firstExposedAt, row.count],
       );
       written += 1;
     }

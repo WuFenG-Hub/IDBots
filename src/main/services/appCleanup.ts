@@ -3,6 +3,11 @@ export interface AppCleanupDeps {
   stopSkillWatching: () => void;
   closeMetaidRpcServer: () => void;
   stopCoworkSessions: () => void;
+  /**
+   * Dream review P3: drain the write-behind hot-layer exposure buffer so the
+   * last turns' telemetry rows land before the database closes. Optional so
+   * older cleanup callers still type-check. */
+  flushHotLayerExposures?: () => void;
   /** Drain every DSH runtime subprocess. Optional so older cleanup
    *  callers that only stop cowork sessions still type-check. */
   closeDshRuntime?: () => Promise<void>;
@@ -44,6 +49,12 @@ export async function runAppCleanup(deps: AppCleanupDeps): Promise<void> {
   deps.stopSkillWatching();
   deps.closeMetaidRpcServer();
   deps.stopCoworkSessions();
+  // Dream review P3: last turns may still hold buffered exposure telemetry.
+  try {
+    deps.flushHotLayerExposures?.();
+  } catch (error) {
+    deps.error('Failed to flush hot-layer exposure buffer:', error);
+  }
   await deps.closeDshRuntime?.().catch((error) => {
     deps.error('Failed to close DSH runtime:', error);
   });

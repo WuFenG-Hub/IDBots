@@ -311,6 +311,7 @@ function seedAuditNight(h, night) {
       { kind: 'procedure', id: procedure.entry.id, exposure: 'hot' },
     ],
   });
+  h.coworkStore.flushHotLayerExposureBuffer();
   seedSession(h.coworkStore, h.db, night, [
     { type: 'user', content: '视频发布了吗' },
     { type: 'assistant', content: '我先查重再发布,按记忆里的做法完成了。' },

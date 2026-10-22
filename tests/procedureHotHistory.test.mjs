@@ -149,6 +149,7 @@ test('dream plumbing: the pruning pass stamps sourcePass pruning end-to-end', as
         usageDate: key,
         items: [{ kind: 'procedure', id: procedure.id, exposure: 'hot' }],
       });
+      h.coworkStore.flushHotLayerExposureBuffer();
       h.dreamStore.recordHotLayerUsageVerdicts(BOT_ID, key, [
         { kind: 'procedure', itemId: procedure.id, applied: false, evidence: { labels: [], channels: [] } },
       ], dayStartMs(key) + 1000);

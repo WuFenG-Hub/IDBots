@@ -104,6 +104,7 @@ test('exposures: knowledge and memory kinds record into the widened ledger', asy
       ],
     });
     assert.equal(written, 3);
+    coworkStore.flushHotLayerExposureBuffer();
     const exposures = dreamStore.listHotLayerExposures(BOT_ID, NIGHT);
     assert.deepEqual(
       exposures.map((row) => row.kind).sort(),
@@ -165,6 +166,7 @@ test('dream run audits knowledge + memory exposures and stamps last_applied_at o
         { kind: 'memory', id: memory.id, exposure: 'hot' },
       ],
     });
+    h.coworkStore.flushHotLayerExposureBuffer();
     h.router.on(MARKERS.usageAudit, () => ({
       items: [
         { ref: `knowledge:${knowledge.id}`, applied: true, evidence: ['S1.M2'] },
@@ -240,6 +242,7 @@ test('knowledge cooling: 5+ audited hot nights with 0 applied flips hot_eligible
         usageDate: key,
         items: [{ kind: 'knowledge', id: stale.id, exposure: 'hot' }],
       });
+      h.coworkStore.flushHotLayerExposureBuffer();
       h.dreamStore.recordHotLayerUsageVerdicts(BOT_ID, key, [
         { kind: 'knowledge', itemId: stale.id, applied: false, evidence: { labels: [], channels: [] } },
       ], dayStartMs(key) + 1000);

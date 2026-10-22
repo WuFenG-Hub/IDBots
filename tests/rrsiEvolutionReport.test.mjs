@@ -217,6 +217,7 @@ test('report retention section: budget mean, hot-layer chars, probation funnel, 
       items: [{ kind: 'procedure', id: 'proc-a', exposure: 'hot' }],
       atMs: 0,
     });
+    coworkStore.flushHotLayerExposureBuffer();
 
     const file = exportDbToFile(db, 'retention');
     const handle = new DatabaseSync(file, { readOnly: true });

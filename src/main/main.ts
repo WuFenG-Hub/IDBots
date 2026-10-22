@@ -18360,6 +18360,11 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
           coworkRunner.stopAllSessions('app shutdown');
         }
       },
+      // Dream review P3: drain buffered hot-layer exposure telemetry before
+      // the database closes (a crash would only lose the ≤5s buffer window).
+      flushHotLayerExposures: () => {
+        getCoworkStore().flushHotLayerExposureBuffer();
+      },
       // No waitForTick: an in-flight skill turn can run for tens of minutes;
       // quit must not block on it. The generation bump stops new ticks and
       // new rows immediately, and the in-flight turn fails soft
