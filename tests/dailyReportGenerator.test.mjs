@@ -207,10 +207,11 @@ test('deterministic briefing: empty follow-ups → no needs-you section, rest in
 // Brain prompt (locale-native, principle-based)
 // ---------------------------------------------------------------------------
 
-test('brain prompt: zh is locale-native and mandates Simplified Chinese output', () => {
+test('brain prompt: zh is locale-native and follows the user UI language', () => {
   const prompt = buildDailyReportBrainSystemPrompt(DAILY_REPORT_STRINGS_ZH);
   assert.match(prompt, /执行助理/);
-  assert.match(prompt, /全部使用简体中文/);
+  assert.match(prompt, /与用户界面一致的语言/);
+  assert.doesNotMatch(prompt, /简体|繁体/, 'no hardcoded Chinese variant');
   assert.match(prompt, /不设固定章节标题/);
   assert.doesNotMatch(prompt, /## Headline/, 'no mandated English section names');
   assert.doesNotMatch(prompt, /## Progress/);
@@ -220,7 +221,7 @@ test('brain prompt: zh is locale-native and mandates Simplified Chinese output',
 test('brain prompt: en mirrors the principles without fixed headings', () => {
   const prompt = buildDailyReportBrainSystemPrompt(DAILY_REPORT_STRINGS_EN);
   assert.match(prompt, /executive assistant/i);
-  assert.match(prompt, /write entirely in English/i);
+  assert.match(prompt, /same language as the user's UI/i);
   assert.match(prompt, /not fixed headings/i);
   assert.match(prompt, /real titles/);
   assert.doesNotMatch(prompt, /## Headline/);
@@ -365,7 +366,7 @@ test('generateDailyReport: zh locale keeps the Chinese prompt and Chinese fallba
       return '今天整体平稳："Build landing page" 由 Writer 推进到 50%，没有阻塞，也没有待拍板的事项。';
     },
   });
-  assert.match(seen, /全部使用简体中文/);
+  assert.match(seen, /与用户界面一致的语言/);
   assert.equal(result.usedFallback, false);
   assert.match(result.briefingMarkdown, /今天整体平稳/);
   assert.doesNotMatch(result.briefingMarkdown, /需要你处理/, 'needs-you header absent when no follow-ups');
