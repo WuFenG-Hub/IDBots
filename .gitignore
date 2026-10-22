@@ -446,6 +446,7 @@ man_base_data_pebble/
 !tests/teamCultureCoworkTurn.test.mjs
 !tests/procedureHotHistory.test.mjs
 !tests/capabilityGatePanels.test.mjs
+!tests/surfModelBindingGuard.test.mjs
 !tests/dreamServiceRatings.test.mjs
 !tests/dreamTelemetryWeekly.test.mjs
 !tests/dreamPracticeProposals.test.mjs

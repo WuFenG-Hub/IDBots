@@ -4957,6 +4957,14 @@ const startStartupNightlyServices = (): void => {
     surfBeforeDream: async (metabotId) => {
       const surf = getSurfService();
       if (!surf.shouldPreDreamSurf(metabotId)) return null;
+      // Dream review P3: a stale model binding skips the surf for the night
+      // (no session, no prompt) instead of storming orphan sessions; the
+      // reason lands in the dream telemetry as surfSkipped.
+      const binding = surf.preDreamModelBindingGate(metabotId);
+      if (!binding.ok) {
+        console.warn(`[Dream] Pre-dream surf skipped for metabot ${metabotId}: ${binding.reason}`);
+        return { reportMarkdown: null, skippedReason: `surf-model-binding: ${binding.reason}` };
+      }
       const PRE_DREAM_SURF_TIMEOUT_MS = 35 * 60 * 1000;
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -8921,6 +8929,11 @@ const getSurfService = (): SurfService => {
       broadcast: (payload) => {
         broadcastToRenderers(SURF_STATUS_CHANNEL, payload);
       },
+      // Dream review P3: validate the surf bot's model binding BEFORE the
+      // pipeline can create an orphan [编排任务] session (13/13 pre-dream
+      // surf failures in dev data were one stale binding burning a session
+      // + 49k-char prompt every night).
+      checkModelBinding: (metabotId) => getCoworkRunner().checkAutomationModelBinding(metabotId),
       runSurfSession: async (context) => {
         const coworkStore = getCoworkStore();
         const cwd = resolveSessionWorkingDirectory(

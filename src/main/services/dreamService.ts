@@ -365,7 +365,12 @@ export interface DreamServiceDeps {
    * never fail the dream — it returns null). The returned report markdown is
    * folded into the dream prompt as its own section.
    */
-  surfBeforeDream?: (metabotId: number) => Promise<{ reportMarkdown: string | null } | null>;
+  /**
+   * Pre-dream surf hook. `skippedReason` (dream review P3) is set when the
+   * host skipped the surf on purpose (e.g. a stale model binding) — the run
+   * telemetry records it as surfSkipped so the nightly skip is auditable.
+   */
+  surfBeforeDream?: (metabotId: number) => Promise<{ reportMarkdown: string | null; skippedReason?: string | null } | null>;
   /**
    * Fresh-install deferral (see libs/installAgeGate): returns a one-line
    * reason while background automation must stay off (a brand-new install's
@@ -1232,10 +1237,12 @@ export class DreamService {
       // wiring owns enable/recency/timeout/failure isolation; a null or
       // throwing surf never blocks the dream.
       let surfReport: string | null = null;
+      let surfSkippedReason: string | null = null;
       if (this.deps.surfBeforeDream) {
         try {
           const surf = await this.deps.surfBeforeDream(metabotId);
           surfReport = surf?.reportMarkdown?.trim() || null;
+          surfSkippedReason = surf?.skippedReason?.trim() || null;
         } catch (error) {
           console.warn(
             `[DreamService] Pre-dream surf failed for metabot ${metabotId}; dreaming without it: ${error instanceof Error ? error.message : String(error)}`,
@@ -1306,6 +1313,9 @@ export class DreamService {
           validation,
           replay,
           positiveReplay,
+          // Dream review P3: a deliberate pre-dream surf skip (e.g. stale
+          // model binding) is auditable in the telemetry blob.
+          surfSkipped: surfSkippedReason,
           inputDrops: dropCounters,
           weeklyLongDream,
           capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
@@ -1445,6 +1455,9 @@ export class DreamService {
         validation,
         replay,
         positiveReplay,
+        // Dream review P3: a deliberate pre-dream surf skip (e.g. stale
+        // model binding) is auditable in the telemetry blob.
+        surfSkipped: surfSkippedReason,
         inputDrops: dropCounters,
         selfIdentityRefused: writeResult.selfIdentityRefused,
         weeklyLongDream,

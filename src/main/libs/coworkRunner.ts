@@ -9004,6 +9004,36 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Dream review P3: pre-flight probe of an automation metabot's model
+   * binding, used by the surf pipeline BEFORE it creates a cowork session.
+   * Resolves exactly the route the unattended turn would use (no session
+   * pick — the metabot brain path); a ModelProviderSelectionError (stale
+   * binding, e.g. a provider that no longer offers the enabled model) comes
+   * back as { ok: false, reason } instead of surfacing mid-turn after the
+   * session and its ~49k-char prompt already exist. Never throws.
+   */
+  checkAutomationModelBinding(metabotId: number): { ok: boolean; reason: string | null } {
+    try {
+      const brain = this.automationBrainForMetabot(metabotId);
+      const route = this.resolveBrainDshRoute({
+        sessionModel: null,
+        sessionModelProvider: null,
+        brain,
+        logKey: `binding-probe:${metabotId}`,
+      });
+      if (!route) {
+        return { ok: false, reason: 'no enabled provider route resolves for this bot' };
+      }
+      return { ok: true, reason: null };
+    } catch (error) {
+      if (error instanceof ModelProviderSelectionError) {
+        return { ok: false, reason: error.message };
+      }
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
    * Shared three-tier route resolution — the session/composer model pick,
    * then the metabot's llm_id, then the global default, with the fallback
    * brain ahead of the default and the free-quota relay never substituted for
