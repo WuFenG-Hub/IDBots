@@ -7,19 +7,26 @@
  *
  * 1. Deterministic assembler (NEVER delegated to the LLM): the follow-up
  *    list with `[title](idbots://session/<id>)` deep links and overdue
- *    badges, the owner-task table, the machine/fleet sections, and the HTML
- *    report. Ids and links are attached here — the brain only ever sees
- *    titles, so it can never invent a wrong link.
+ *    badges (omitted entirely when nothing is pending), the owner-task
+ *    table, machine-activity ROLLUPS (counts + named failures only — never
+ *    the run-by-run ledger), the per-bot activity rollup table, and the
+ *    HTML report. Ids and links are attached here — the brain only ever
+ *    sees titles, so it can never invent a wrong link.
  * 2. Brain prose: ONE chat-completion call (dream-style ladder injected by
- *    the service: twin/system brain primary → fallback) writes the headline,
- *    ≤7 progress bullets and a "needs your decision" paragraph keyed to the
- *    follow-up TITLES. Bounded input (facts JSON), bounded output (~1200
- *    tokens), 120s wall timeout. On timeout/failure/no-brain the report
- *    degrades to pure-data deterministic prose — the report always ships.
+ *    the service: twin/system brain primary → fallback) writes a
+ *    principle-based briefing in the owner's language: big-picture opening
+ *    that NAMES the main tasks (real titles, overall %, driver, blockers)
+ *    before any detail, progress bullets that say what each task IS, and a
+ *    needs-you part only when follow-ups exist. Bounded input (facts JSON),
+ *    bounded output (~1200 tokens), 120s wall timeout. On timeout/failure/
+ *    no-brain the report degrades to the deterministic sections — the
+ *    report always ships.
  *
  * Language: the deterministic strings come from a small zh/en table selected
  * by the UI locale at generation time (default English, Chinese when the
- * locale is zh); the brain is instructed to write in the same language.
+ * locale is zh); the brain prompt itself is locale-native — the zh prompt
+ * instructs in Chinese that ALL output must be Simplified Chinese (owner
+ * rework 2026-10-23: English headings leaked into a Chinese report).
  *
  * Kept free of runtime relative imports so plain-Node tests can load it with
  * type stripping (fs/path/node:url only).
@@ -49,42 +56,36 @@ export interface DailyReportStrings {
   reportTitle: string;
   windowLabel: string;
   needsYouTitle: string;
-  progressTitle: string;
   fleetTitle: string;
   overdueBadge: string;
   waitingDaysSuffix: string;
-  noOpenItems: string;
   ownerTasksIntro: string;
   columnTask: string;
   columnStatus: string;
   columnSteps: string;
   columnProgress: string;
   columnBot: string;
-  columnMessages: string;
-  humanSessionsIntro: string;
-  scheduledRunsIntro: string;
-  groupTasksIntro: string;
-  longTermIntro: string;
+  columnSessions: string;
+  columnScheduledRuns: string;
+  columnDMs: string;
+  columnGroupMessages: string;
+  scheduledRunsLabel: string;
+  allSucceededLabel: string;
+  failedSkippedLabel: string;
+  groupTasksRollupLabel: string;
   twinDelegateIntro: string;
-  digestsIntro: string;
-  onlineIntro: string;
-  newSessionsIntro: string;
-  statusLabel: string;
+  longTermIntro: string;
   stepsDone: string;
   viewFullReport: string;
   fallbackHeadline: string;
   generatedAtLabel: string;
+  newSessionsMetaLabel: string;
   htmlNeedsYou: string;
-  htmlProgress: string;
-  htmlFleet: string;
   htmlOwnerTasks: string;
   htmlLongTerm: string;
-  htmlDigests: string;
-  htmlOnline: string;
-  htmlMachine: string;
+  htmlBotRollup: string;
   htmlStatus: string;
   htmlSteps: string;
-  htmlBot: string;
 }
 
 export const DAILY_REPORT_STRINGS_EN: DailyReportStrings = {
@@ -92,42 +93,36 @@ export const DAILY_REPORT_STRINGS_EN: DailyReportStrings = {
   reportTitle: 'Daily Report',
   windowLabel: 'Window',
   needsYouTitle: 'Needs you',
-  progressTitle: 'Progress on your work',
-  fleetTitle: 'Fleet & machine activity',
+  fleetTitle: 'Fleet & automation',
   overdueBadge: 'overdue',
   waitingDaysSuffix: 'd waiting',
-  noOpenItems: 'Nothing is waiting on you right now.',
   ownerTasksIntro: 'Owner-sourced tasks:',
   columnTask: 'Task',
   columnStatus: 'Status',
   columnSteps: 'Steps',
   columnProgress: 'Progress',
   columnBot: 'Bot',
-  columnMessages: 'Messages',
-  humanSessionsIntro: 'Sessions you worked in:',
-  scheduledRunsIntro: 'Scheduled runs:',
-  groupTasksIntro: 'Group task updates:',
-  longTermIntro: 'Long-term projects:',
+  columnSessions: 'Sessions',
+  columnScheduledRuns: 'Runs',
+  columnDMs: 'DMs',
+  columnGroupMessages: 'Group msgs',
+  scheduledRunsLabel: 'Scheduled runs',
+  allSucceededLabel: 'all succeeded',
+  failedSkippedLabel: 'failed/skipped',
+  groupTasksRollupLabel: 'Group task updates',
   twinDelegateIntro: 'Twin-delegated orchestrations touched:',
-  digestsIntro: 'Bot daily digests:',
-  onlineIntro: 'Online activity:',
-  newSessionsIntro: 'New sessions created:',
-  statusLabel: 'status',
+  longTermIntro: 'Long-term projects:',
   stepsDone: 'steps done',
   viewFullReport: 'View the full report',
   fallbackHeadline: 'Here is your daily briefing.',
   generatedAtLabel: 'Generated',
+  newSessionsMetaLabel: 'New sessions',
   htmlNeedsYou: 'Needs you',
-  htmlProgress: 'Progress',
-  htmlFleet: 'Fleet & machine activity',
   htmlOwnerTasks: 'Owner tasks',
   htmlLongTerm: 'Long-term projects',
-  htmlDigests: 'Bot digests',
-  htmlOnline: 'Online activity',
-  htmlMachine: 'Machine activity',
+  htmlBotRollup: 'Per-bot activity',
   htmlStatus: 'Status',
   htmlSteps: 'Steps',
-  htmlBot: 'Bot',
 };
 
 export const DAILY_REPORT_STRINGS_ZH: DailyReportStrings = {
@@ -135,42 +130,36 @@ export const DAILY_REPORT_STRINGS_ZH: DailyReportStrings = {
   reportTitle: '每日汇报',
   windowLabel: '统计区间',
   needsYouTitle: '需要你处理',
-  progressTitle: '你的工作进展',
-  fleetTitle: 'Bot 与自动化动态',
+  fleetTitle: 'Bot 与自动化',
   overdueBadge: '已逾期',
   waitingDaysSuffix: '天待处理',
-  noOpenItems: '当前没有等待你处理的事项。',
   ownerTasksIntro: '你发起的任务：',
   columnTask: '任务',
   columnStatus: '状态',
   columnSteps: '步骤',
   columnProgress: '进度',
   columnBot: 'Bot',
-  columnMessages: '消息数',
-  humanSessionsIntro: '你参与的会话：',
-  scheduledRunsIntro: '定时任务执行：',
-  groupTasksIntro: '群任务动态：',
-  longTermIntro: '长期项目：',
+  columnSessions: '会话',
+  columnScheduledRuns: '定时任务',
+  columnDMs: '私信',
+  columnGroupMessages: '群消息',
+  scheduledRunsLabel: '定时任务',
+  allSucceededLabel: '全部成功',
+  failedSkippedLabel: '失败/跳过',
+  groupTasksRollupLabel: '群任务动态',
   twinDelegateIntro: 'Twin 自动派单触及：',
-  digestsIntro: 'Bot 每日摘要：',
-  onlineIntro: '在线活动：',
-  newSessionsIntro: '新建会话：',
-  statusLabel: '状态',
+  longTermIntro: '长期项目：',
   stepsDone: '步已完成',
   viewFullReport: '查看完整报告',
   fallbackHeadline: '这是你的每日简报。',
   generatedAtLabel: '生成时间',
+  newSessionsMetaLabel: '新建会话',
   htmlNeedsYou: '需要你处理',
-  htmlProgress: '进展',
-  htmlFleet: 'Bot 与自动化动态',
   htmlOwnerTasks: 'Owner 任务',
   htmlLongTerm: '长期项目',
-  htmlDigests: 'Bot 摘要',
-  htmlOnline: '在线活动',
-  htmlMachine: '自动化执行',
+  htmlBotRollup: '各 Bot 活动',
   htmlStatus: '状态',
   htmlSteps: '步骤',
-  htmlBot: 'Bot',
 };
 
 /** Small zh/en table; anything that is not explicitly Chinese stays English. */
@@ -214,18 +203,20 @@ const STATUS_EMOJI: Record<string, string> = {
 
 const statusEmoji = (status: string): string => STATUS_EMOJI[status] ?? '•';
 
+/** Run statuses that count as not-succeeded for the rollup naming. */
+const isFailedOrSkippedRun = (status: string): boolean =>
+  status === 'failed' || status === 'error' || status === 'skipped';
+
 /**
- * Deterministic follow-up list — always present, links attached here. The
- * brain may additionally write prose keyed to these titles, but the list
- * itself never comes from the LLM.
+ * Deterministic follow-up list — present ONLY when something actually needs
+ * the owner (an empty pending set omits the section entirely, in both the
+ * markdown and the HTML). Links are attached here, never by the LLM.
  */
 export const buildDailyReportFollowUpListMarkdown = (
   facts: DailyReportFacts,
   strings: DailyReportStrings,
 ): string => {
-  if (facts.pendingFollowUps.length === 0) {
-    return `**${strings.needsYouTitle}** — ${strings.noOpenItems}`;
-  }
+  if (facts.pendingFollowUps.length === 0) return '';
   const lines = facts.pendingFollowUps.map((item) => {
     const age = item.ageDays !== null && item.ageDays > 0
       ? ` · ${item.ageDays}${strings.waitingDaysSuffix}`
@@ -253,9 +244,104 @@ export const buildDailyReportOwnerTasksMarkdown = (
   return [strings.ownerTasksIntro, header, divider, ...rows].join('\n');
 };
 
+export interface DailyReportBotRollupRow {
+  botName: string;
+  sessions: number;
+  scheduledRuns: number;
+  dms: number;
+  groupMessages: number;
+}
+
 /**
- * The full deterministic briefing — the fallback the report degrades to when
- * the brain is unavailable, and the base the brain prose is spliced into.
+ * Per-bot activity rollup, computed deterministically from facts the
+ * collector already gathers (humanSessions / scheduledRuns / onlineActivity
+ * keyed by botName). One row per bot with any activity — the briefing shows
+ * this table INSTEAD of digest diaries or session-by-session listings.
+ */
+export const buildDailyReportBotRollupRows = (facts: DailyReportFacts): DailyReportBotRollupRow[] => {
+  const byBot = new Map<string, DailyReportBotRollupRow>();
+  const entry = (botName: string | null | undefined): DailyReportBotRollupRow | null => {
+    const name = typeof botName === 'string' ? botName.trim() : '';
+    if (!name) return null;
+    const existing = byBot.get(name);
+    if (existing) return existing;
+    const row: DailyReportBotRollupRow = { botName: name, sessions: 0, scheduledRuns: 0, dms: 0, groupMessages: 0 };
+    byBot.set(name, row);
+    return row;
+  };
+  for (const session of facts.humanSessions) {
+    const row = entry(session.botName);
+    if (row) row.sessions += 1;
+  }
+  for (const run of facts.machineActivity.scheduledRuns) {
+    const row = entry(run.botName);
+    if (row) row.scheduledRuns += 1;
+  }
+  for (const online of facts.onlineActivity) {
+    const row = entry(online.botName);
+    if (!row) continue;
+    row.dms += online.privateMessageCount;
+    row.groupMessages += online.groupMessageCount;
+  }
+  return [...byBot.values()].sort((a, b) =>
+    (b.sessions + b.scheduledRuns + b.dms + b.groupMessages) - (a.sessions + a.scheduledRuns + a.dms + a.groupMessages)
+    || a.botName.localeCompare(b.botName));
+};
+
+/** Per-bot rollup as a markdown table (bot | sessions | runs | DMs | group). */
+export const buildDailyReportBotRollupMarkdown = (
+  facts: DailyReportFacts,
+  strings: DailyReportStrings,
+): string => {
+  const rows = buildDailyReportBotRollupRows(facts);
+  if (rows.length === 0) return '';
+  const header = `| ${strings.columnBot} | ${strings.columnSessions} | ${strings.columnScheduledRuns} | ${strings.columnDMs} | ${strings.columnGroupMessages} |`;
+  const divider = '| --- | --- | --- | --- | --- |';
+  const lines = rows.map((row) =>
+    `| ${markdownTableCell(row.botName)} | ${row.sessions} | ${row.scheduledRuns} | ${row.dms} | ${row.groupMessages} |`);
+  return [header, divider, ...lines].join('\n');
+};
+
+/**
+ * Machine-activity ROLLUPS (owner rework 2026-10-23: no流水账). One summary
+ * line for scheduled runs — total count, "all succeeded" when true, and the
+ * failed/skipped runs NAMED (max 3, with their bot); one count line for
+ * group-task transitions; the twin-delegate count line. Long-term journal
+ * events never reach the briefing.
+ */
+export const buildDailyReportMachineRollupMarkdown = (
+  facts: DailyReportFacts,
+  strings: DailyReportStrings,
+): string[] => {
+  const lines: string[] = [];
+  const runs = facts.machineActivity.scheduledRuns;
+  if (runs.length > 0) {
+    const troubled = runs.filter((run) => isFailedOrSkippedRun(run.status)).slice(0, 3);
+    let line = `${strings.scheduledRunsLabel} ${runs.length} · `;
+    line += troubled.length === 0
+      ? strings.allSucceededLabel
+      : `${strings.failedSkippedLabel} ${troubled.length}:`;
+    lines.push(line);
+    for (const run of troubled) {
+      const skip = run.skipReason ? ` (${run.skipReason})` : '';
+      lines.push(`- ${statusEmoji(run.status)} ${sanitizeMarkdownLinkText(run.taskName)}${run.botName ? ` · ${run.botName}` : ''} — ${run.status}${skip}`);
+    }
+  }
+  if (facts.machineActivity.groupTaskTransitions.length > 0) {
+    lines.push(`${strings.groupTasksRollupLabel} ${facts.machineActivity.groupTaskTransitions.length}`);
+  }
+  if (facts.machineActivity.twinDelegateOrchestrationsInWindow > 0) {
+    lines.push(`${strings.twinDelegateIntro} ${facts.machineActivity.twinDelegateOrchestrationsInWindow}`);
+  }
+  return lines;
+};
+
+/**
+ * The deterministic briefing — the fallback the report degrades to when the
+ * brain is unavailable, and the base the brain prose is spliced into.
+ * humanSessions / botDigests / onlineActivity are BRAIN INPUT ONLY: the
+ * owner-facing output is the follow-up list (when non-empty), owner-task
+ * table, long-term progress, machine rollups, and the per-bot rollup table.
  */
 export const buildDeterministicBriefing = (
   facts: DailyReportFacts,
@@ -263,19 +349,11 @@ export const buildDeterministicBriefing = (
 ): string => {
   const sections: string[] = [];
 
-  sections.push(buildDailyReportFollowUpListMarkdown(facts, strings));
+  const followUps = buildDailyReportFollowUpListMarkdown(facts, strings);
+  if (followUps) sections.push(followUps);
 
   const ownerTasks = buildDailyReportOwnerTasksMarkdown(facts, strings);
   if (ownerTasks) sections.push(ownerTasks);
-
-  if (facts.humanSessions.length > 0) {
-    const lines = facts.humanSessions.map((session) => {
-      const bot = session.botName ? ` · ${session.botName}` : '';
-      const counts = ` · ${session.humanUserMessages}/${session.assistantMessages} ${strings.columnMessages.toLowerCase()}`;
-      return `- [${sanitizeMarkdownLinkText(session.title)}](${sessionDeepLink(session.sessionId)})${bot}${counts}`;
-    });
-    sections.push([strings.humanSessionsIntro, ...lines].join('\n'));
-  }
 
   if (facts.machineActivity.longTermProgress.length > 0) {
     const lines = facts.machineActivity.longTermProgress.map((task) =>
@@ -284,40 +362,14 @@ export const buildDeterministicBriefing = (
     sections.push([strings.longTermIntro, ...lines].join('\n'));
   }
 
-  const machineLines: string[] = [];
-  for (const run of facts.machineActivity.scheduledRuns) {
-    const skip = run.skipReason ? ` (${run.skipReason})` : '';
-    machineLines.push(`- ${statusEmoji(run.status)} ${run.taskName} — ${run.status}${skip}${run.botName ? ` · ${run.botName}` : ''}`);
+  const machineRollups = buildDailyReportMachineRollupMarkdown(facts, strings);
+  const botRollup = buildDailyReportBotRollupMarkdown(facts, strings);
+  if (machineRollups.length > 0 || botRollup) {
+    const fleetParts: string[] = [];
+    if (machineRollups.length > 0) fleetParts.push(machineRollups.join('\n'));
+    if (botRollup) fleetParts.push(botRollup);
+    sections.push(`**${strings.fleetTitle}**\n\n${fleetParts.join('\n\n')}`);
   }
-  for (const transition of facts.machineActivity.groupTaskTransitions) {
-    machineLines.push(`- ${statusEmoji(transition.toStatus)} ${sanitizeMarkdownLinkText(transition.title)} — ${transition.fromStatus ?? '?'} → ${transition.toStatus}`);
-  }
-  for (const event of facts.machineActivity.longTermEvents.slice(0, 5)) {
-    machineLines.push(`- ${sanitizeMarkdownLinkText(event.taskTitle)} — ${event.kind}${event.detail ? `: ${event.detail}` : ''}`);
-  }
-  if (facts.machineActivity.twinDelegateOrchestrationsInWindow > 0) {
-    machineLines.push(`- ${strings.twinDelegateIntro} ${facts.machineActivity.twinDelegateOrchestrationsInWindow}`);
-  }
-  if (machineLines.length > 0) {
-    sections.push([strings.scheduledRunsIntro.replace(/:$/, '') + ' / ' + strings.fleetTitle, ...machineLines].join('\n'));
-  }
-
-  if (facts.onlineActivity.length > 0) {
-    const lines = facts.onlineActivity.map((entry) =>
-      `- ${entry.botName} — ${strings.columnMessages}: ${entry.privateMessageCount} DM / ${entry.groupMessageCount} group`,
-    );
-    sections.push([strings.onlineIntro, ...lines].join('\n'));
-  }
-
-  if (facts.botDigests.length > 0) {
-    const lines = facts.botDigests.map((digest) => {
-      const twin = digest.isTwin ? ' ★' : '';
-      return `- **${digest.botName}${twin}** (${digest.summaryDate}): ${digest.summaryText}`;
-    });
-    sections.push([strings.digestsIntro, ...lines].join('\n'));
-  }
-
-  sections.push(`${strings.newSessionsIntro} ${facts.newSessionCount}`);
 
   return sections.filter(Boolean).join('\n\n');
 };
@@ -348,37 +400,24 @@ export const buildDailyReportHtml = (input: {
     <td>${task.percentComplete !== null ? `${task.percentComplete}%` : '—'}</td>
   </tr>`).join('');
 
-  const humanSessionRows = facts.humanSessions.map((session) => `<tr>
-    <td><a href="${sessionDeepLink(session.sessionId)}">${escapeHtml(session.title)}</a></td>
-    <td>${escapeHtml(session.botName ?? '—')}</td>
-    <td>${session.humanUserMessages}/${session.assistantMessages}</td>
-  </tr>`).join('');
-
   const longTermRows = facts.machineActivity.longTermProgress.map((task) => `<tr>
     <td>${escapeHtml(task.title)}</td>
     <td>${escapeHtml(task.stage)}</td>
     <td>${task.percentComplete}% (${task.subtasksAccepted}/${task.subtasksTotal})</td>
   </tr>`).join('');
 
-  const machineItems = [
-    ...facts.machineActivity.scheduledRuns.map((run) =>
-      `<li>${statusEmoji(run.status)} ${escapeHtml(run.taskName)} — ${escapeHtml(run.status)}${run.skipReason ? ` (${escapeHtml(run.skipReason)})` : ''}${run.botName ? ` · ${escapeHtml(run.botName)}` : ''}</li>`),
-    ...facts.machineActivity.groupTaskTransitions.map((transition) =>
-      `<li>${statusEmoji(transition.toStatus)} ${escapeHtml(transition.title)} — ${escapeHtml(transition.fromStatus ?? '?')} → ${escapeHtml(transition.toStatus)}</li>`),
-    ...facts.machineActivity.longTermEvents.slice(0, 5).map((event) =>
-      `<li>${escapeHtml(event.taskTitle)} — ${escapeHtml(event.kind)}</li>`),
-  ].join('');
+  // Machine rollups (same contract as the markdown): summary line + named
+  // failures only — never the run-by-run ledger, never journal events.
+  const machineRollupItems = buildDailyReportMachineRollupMarkdown(facts, strings)
+    .map((line) => `<li>${escapeHtml(line)}</li>`)
+    .join('');
 
-  const digestRows = facts.botDigests.map((digest) => `<tr>
-    <td>${escapeHtml(digest.botName)}${digest.isTwin ? ' ★' : ''}</td>
-    <td>${escapeHtml(digest.summaryDate)}</td>
-    <td>${escapeHtml(digest.summaryText)}</td>
-  </tr>`).join('');
-
-  const onlineRows = facts.onlineActivity.map((entry) => `<tr>
-    <td>${escapeHtml(entry.botName)}</td>
-    <td>${entry.privateMessageCount}</td>
-    <td>${entry.groupMessageCount}</td>
+  const botRollupRows = buildDailyReportBotRollupRows(facts).map((row) => `<tr>
+    <td>${escapeHtml(row.botName)}</td>
+    <td>${row.sessions}</td>
+    <td>${row.scheduledRuns}</td>
+    <td>${row.dms}</td>
+    <td>${row.groupMessages}</td>
   </tr>`).join('');
 
   const generatedAt = new Date(facts.generatedAtMs).toLocaleString(strings.language === 'zh' ? 'zh-CN' : 'en-US');
@@ -414,16 +453,16 @@ export const buildDailyReportHtml = (input: {
 <body>
 <div class="wrap">
   <h1>${escapeHtml(strings.reportTitle)} · ${escapeHtml(dateLabel)}</h1>
-  <div class="meta">${escapeHtml(strings.windowLabel)}: ${escapeHtml(formatLocalDate(facts.windowStartMs))} → ${escapeHtml(formatLocalDate(facts.windowEndMs))} · ${escapeHtml(strings.generatedAtLabel)}: ${escapeHtml(generatedAt)}</div>
+  <div class="meta">${escapeHtml(strings.windowLabel)}: ${escapeHtml(formatLocalDate(facts.windowStartMs))} → ${escapeHtml(formatLocalDate(facts.windowEndMs))} · ${escapeHtml(strings.generatedAtLabel)}: ${escapeHtml(generatedAt)} · ${escapeHtml(strings.newSessionsMetaLabel)}: ${facts.newSessionCount}</div>
   ${input.headlineText && !input.proseHtml ? `<div class="headline">${escapeHtml(input.headlineText)}</div>` : ''}
   ${input.proseHtml ? `<div class="headline prose">${input.proseHtml}</div>` : ''}
-  ${section(strings.htmlNeedsYou, followUpRows ? `<table><tbody>${followUpRows}</tbody></table>` : `<p>${escapeHtml(strings.noOpenItems)}</p>`)}
-  ${section(strings.htmlProgress, humanSessionRows ? `<table><thead><tr><th>${escapeHtml(strings.columnTask)}</th><th>${escapeHtml(strings.htmlBot)}</th><th>${escapeHtml(strings.columnMessages)}</th></tr></thead><tbody>${humanSessionRows}</tbody></table>` : '')}
+  ${section(strings.htmlNeedsYou, followUpRows ? `<table><tbody>${followUpRows}</tbody></table>` : '')}
   ${section(strings.htmlOwnerTasks, ownerTaskRows ? `<table><thead><tr><th>${escapeHtml(strings.columnTask)}</th><th>${escapeHtml(strings.htmlStatus)}</th><th>${escapeHtml(strings.htmlSteps)}</th><th>${escapeHtml(strings.columnProgress)}</th></tr></thead><tbody>${ownerTaskRows}</tbody></table>` : '')}
   ${section(strings.htmlLongTerm, longTermRows ? `<table><thead><tr><th>${escapeHtml(strings.columnTask)}</th><th>${escapeHtml(strings.htmlStatus)}</th><th>${escapeHtml(strings.columnProgress)}</th></tr></thead><tbody>${longTermRows}</tbody></table>` : '')}
-  ${section(strings.htmlMachine, machineItems ? `<ul>${machineItems}</ul>` : '')}
-  ${section(strings.htmlOnline, onlineRows ? `<table><thead><tr><th>${escapeHtml(strings.htmlBot)}</th><th>DM</th><th>Group</th></tr></thead><tbody>${onlineRows}</tbody></table>` : '')}
-  ${section(strings.htmlDigests, digestRows ? `<table><thead><tr><th>${escapeHtml(strings.htmlBot)}</th><th>Date</th><th>${escapeHtml(strings.columnTask)}</th></tr></thead><tbody>${digestRows}</tbody></table>` : '')}
+  ${section(strings.fleetTitle, [
+      machineRollupItems ? `<ul>${machineRollupItems}</ul>` : '',
+      botRollupRows ? `<h2>${escapeHtml(strings.htmlBotRollup)}</h2><table><thead><tr><th>${escapeHtml(strings.columnBot)}</th><th>${escapeHtml(strings.columnSessions)}</th><th>${escapeHtml(strings.columnScheduledRuns)}</th><th>${escapeHtml(strings.columnDMs)}</th><th>${escapeHtml(strings.columnGroupMessages)}</th></tr></thead><tbody>${botRollupRows}</tbody></table>` : '',
+    ].filter(Boolean).join(''))}
 </div>
 </body>
 </html>`;
@@ -433,8 +472,8 @@ export const buildDailyReportHtml = (input: {
 
 /**
  * Minimal, safe markdown→HTML for the brain's briefing prose: escape FIRST,
- * then lift only the constructs the prompt contract asks for (## headings,
- * `-` bullets, `**bold**`, paragraphs). Anything else renders as plain text.
+ * then lift only the constructs the prompt asks for (## headings, `-`
+ * bullets, `**bold**`, paragraphs). Anything else renders as plain text.
  */
 export const renderDailyReportProseMarkdown = (markdown: string): string => {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n');
@@ -508,17 +547,40 @@ export type DailyReportPerformChat = (
   },
 ) => Promise<string>;
 
+const DAILY_REPORT_BRAIN_PROMPT_ZH =
+  '你是 IDBots 团队（本地 AI Bot 群 + Twin Bot）负责人的执行助理，正在呈交每日简报。\n'
+  + '受众只有负责人本人：他们只关心自己发起的工作、等待他们拍板的事项、以及真正重要的异常。'
+  + '绝对不要叙述 Bot 之间的 A2A 琐事、例行定时任务执行、或每个 Bot 的日记式流水。\n'
+  + '输出要求：使用与用户界面一致的语言撰写（当前界面语言为中文），任务标题等专有名词保持原文；GitHub 风格 markdown；不要使用代码块；不要输出任何链接、id 或会话号；篇幅约 150–250 字。\n'
+  + '内容原则（结构仅为建议，不设固定章节标题）：\n'
+  + '1. 开头 1–3 句平铺直叙的整体态势：点名主要任务的正式名称，给出可推导的整体进度百分比、由谁负责、是否有阻塞；先讲大局，再讲细节；不要只报抽象汇总数字而不点名任务。\n'
+  + '2. 若干条进展要点：每条先说明任务是什么，再讲现状、结果或百分比、负责方、阻塞。\n'
+  + '3. 仅当 facts 中存在待跟进事项时，才写需要你处理的部分：使用事项的确切标题；逾期项附一句提醒和建议动作。\n'
+  + '4. 可选：以一条具体建议收尾。\n'
+  + '严禁编造 id、链接或会话；严禁罗列原始会话日志。';
+
+const DAILY_REPORT_BRAIN_PROMPT_EN =
+  'You are the executive assistant to the owner of an IDBots fleet (local AI bots + the Twin bot), delivering the daily briefing.\n'
+  + 'The audience is the owner only: they care about work THEY initiated, decisions waiting on them, and genuinely important anomalies. '
+  + 'Never narrate bot-to-bot A2A plumbing, routine scheduled-run execution, or per-bot diaries.\n'
+  + 'Output requirements: write in the same language as the user\'s UI (currently English), keeping task titles and other proper nouns verbatim; GitHub-flavored markdown; no code fences; no links, ids, or session references; about 120–180 words.\n'
+  + 'Content principles (structure is a suggestion, not fixed headings):\n'
+  + '1. Open with 1–3 plain-language sentences on the overall state: name the actual main tasks by their real titles, give overall progress % where derivable, who is driving each, and any blocker. Big picture before details — no abstract aggregates without naming the task.\n'
+  + '2. A few progress bullets: each says what the task IS first, then where it stands, the outcome/%, who drives it, and any blocker.\n'
+  + '3. A needs-you part ONLY when follow-ups exist in the facts: use each item\'s exact title; overdue items get a one-sentence nudge with a suggested action.\n'
+  + '4. Optionally end with one concrete suggestion.\n'
+  + 'Never invent ids or links; never list raw session logs.';
+
+/**
+ * Locale-native, principle-based briefing contract (owner rework 2026-10-23:
+ * the old template mandated English section names that leaked into Chinese
+ * reports). Each locale's prompt is written in that language and requires the
+ * output to follow the USER'S UI language — no hardcoded variant like
+ * "Simplified Chinese", so Traditional-Chinese and future locales stay correct.
+ * No mandated section names.
+ */
 export const buildDailyReportBrainSystemPrompt = (strings: DailyReportStrings): string =>
-  `You are the executive assistant of the owner of an IDBots fleet (local AI bots + the Twin bot). `
-  + `Write the owner's daily briefing in ${strings.language === 'zh' ? 'Chinese (Simplified)' : 'English'}. `
-  + 'Output GitHub-flavored markdown with exactly three parts and nothing else:\n'
-  + '1. A `## Headline` section: ONE sentence summarizing the day.\n'
-  + '2. A `## Progress` section: at most 7 bullets on progress of work the OWNER started or participated in; '
-  + 'include the percent number when the facts give one; mention bot-to-bot/A2A work only when it produced an important result or anomaly.\n'
-  + '3. A `## Needs you` section: ONE short paragraph naming the follow-up items that need the owner\'s decision, '
-  + 'referring to each item BY ITS TITLE EXACTLY AS GIVEN in the facts. Never invent ids, links, or sessions. '
-  + 'If an item is overdue, add one nudge sentence with the suggested action.\n'
-  + 'Tone: concise executive assistant. No preamble, no sign-off, no code fences.';
+  strings.language === 'zh' ? DAILY_REPORT_BRAIN_PROMPT_ZH : DAILY_REPORT_BRAIN_PROMPT_EN;
 
 export const buildDailyReportBrainUserMessage = (input: {
   facts: DailyReportFacts;
