@@ -39,6 +39,19 @@ function mobileDevEntriesPlugin() {
         next();
       });
     },
+    // The entries use a relative script src ("./main.tsx") so production
+    // builds (root = the bundle dir) resolve it. In dev the browser URL is
+    // "/" or "/login", where the same relative src would resolve to
+    // "/main.tsx" and 404 — rewrite it to the absolute entry path instead.
+    transformIndexHtml(html: string, ctx: { filename?: string }) {
+      const file = ctx.filename ?? '';
+      const entry = file.includes(`${path.sep}mobile${path.sep}app${path.sep}`)
+        ? '/src/mobile/app/main.tsx'
+        : file.includes(`${path.sep}mobile${path.sep}login${path.sep}`)
+          ? '/src/mobile/login/main.tsx'
+          : null;
+      return entry ? html.replace('src="./main.tsx"', `src="${entry}"`) : html;
+    },
   };
 }
 
