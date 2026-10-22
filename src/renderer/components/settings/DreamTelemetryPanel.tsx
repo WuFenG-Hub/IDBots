@@ -185,6 +185,13 @@ const DreamTelemetryPanel: React.FC<DreamTelemetryPanelProps> = ({ runs }) => {
   const gateTotalChecked = days.reduce((sum, day) => sum + valueOrZero(day.draftsChecked), 0);
   const gateGeometry = slotGeometry(days.length);
 
+  // Chart 5 (P2 frozen exam): sparse weekly scores on a 0..1 scale. Rendered
+  // only when at least one exam run exists — bots without exams keep the
+  // panel exactly as it was.
+  const examValues = days.map((day) => day.examScore);
+  const examLatest = lastNonNull(examValues);
+  const hasExamData = examValues.some((value) => value != null);
+
   const renderFailureBars = () =>
     days.map((day, index) => {
       const value = day.negativePoints;
@@ -375,6 +382,37 @@ const DreamTelemetryPanel: React.FC<DreamTelemetryPanelProps> = ({ runs }) => {
         >
           <ChartSvg>{renderGateBars()}</ChartSvg>
         </ChartCard>
+        {hasExamData && (
+          <ChartCard
+            title={i18nService.t('dreamTelemetryExam')}
+            headline={examLatest == null ? '–' : `${(examLatest * 100).toFixed(0)}%`}
+            caption={i18nService.t('dreamTelemetryExamHint')}
+          >
+            <ChartSvg>
+              {toSegments(toPoints(examValues, 1)).map((segment, index) => (
+                <polyline
+                  key={index}
+                  points={pointsAttr(segment)}
+                  fill="none"
+                  stroke={COLOR_EMERALD}
+                  strokeWidth={1.5}
+                  vector-effect="non-scaling-stroke"
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                />
+              ))}
+              {toPoints(examValues, 1).map((point, index) => point && (
+                <circle
+                  key={index}
+                  cx={point.x}
+                  cy={point.y}
+                  r={1.6}
+                  fill={COLOR_EMERALD}
+                />
+              ))}
+            </ChartSvg>
+          </ChartCard>
+        )}
       </div>
     </div>
   );

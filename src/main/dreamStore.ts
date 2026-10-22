@@ -754,7 +754,230 @@ export class DreamStore {
       CREATE INDEX IF NOT EXISTS idx_metabot_prompt_layer_snapshots_status
       ON metabot_prompt_layer_snapshots(metabot_id, status, dream_date DESC)
     `);
+    // Dream review P2-1: frozen per-bot exams (design 2026-10-10 §P2.5). The
+    // paper is hash-frozen at build time — same content hash never rebuilds;
+    // runs carry the brain model's rubric scores for the growth-curve trend.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_exams (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        content_hash TEXT NOT NULL,
+        questions_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        archived_at INTEGER
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_metabot_exams_metabot_created
+        ON metabot_exams(metabot_id, created_at DESC);
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_exam_runs (
+        id TEXT PRIMARY KEY,
+        exam_id TEXT NOT NULL,
+        metabot_id INTEGER NOT NULL,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        status TEXT NOT NULL DEFAULT 'running',
+        total_score REAL,
+        question_scores_json TEXT,
+        error TEXT
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_metabot_exam_runs_metabot_started
+        ON metabot_exam_runs(metabot_id, started_at DESC);
+    `);
     this.backfillLegacyDreamMemoryDates();
+  }
+
+  // ── Dream review P2-1: frozen exams ────────────────────────────────────────
+
+  /** The bot's current (non-archived) exam paper, or null. */
+  getActiveExam(metabotId: number): { id: string; contentHash: string; questions: unknown[]; createdAt: number } | null {
+    const row = this.getOne<{
+      id: string;
+      content_hash: string;
+      questions_json: string;
+      created_at: number | string;
+    }>(`
+      SELECT id, content_hash, questions_json, created_at
+      FROM metabot_exams
+      WHERE metabot_id = ? AND archived_at IS NULL
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, [metabotId]);
+    if (!row) return null;
+    try {
+      return {
+        id: row.id,
+        contentHash: row.content_hash,
+        questions: JSON.parse(row.questions_json) as unknown[],
+        createdAt: Number(row.created_at),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Freeze a paper: when the bot's active exam already has this content hash
+   * the existing row is returned untouched (same hash never rebuilds); a
+   * different hash archives the old paper first. Returns the active exam row.
+   */
+  freezeExam(metabotId: number, contentHash: string, questions: unknown[], nowMs: number): { id: string; contentHash: string } | null {
+    const hash = String(contentHash ?? '').trim();
+    if (!hash || !Array.isArray(questions) || questions.length === 0) return null;
+    const existing = this.getActiveExam(metabotId);
+    if (existing && existing.contentHash === hash) {
+      return { id: existing.id, contentHash: existing.contentHash };
+    }
+    const stamp = Math.floor(Number(nowMs)) || Date.now();
+    if (existing) {
+      this.db.run('UPDATE metabot_exams SET archived_at = ? WHERE id = ?', [stamp, existing.id]);
+    }
+    const id = uuidv4();
+    this.db.run(
+      'INSERT INTO metabot_exams (id, metabot_id, content_hash, questions_json, created_at) VALUES (?, ?, ?, ?, ?)',
+      [id, metabotId, hash, JSON.stringify(questions), stamp],
+    );
+    this.saveDb();
+    return { id, contentHash: hash };
+  }
+
+  /** The most recent exam run of one bot (any status), for the weekly gate. */
+  getLatestExamRun(metabotId: number): { id: string; examId: string; startedAt: number; status: string; totalScore: number | null } | null {
+    const row = this.getOne<{
+      id: string; exam_id: string; started_at: number | string; status: string; total_score: number | string | null;
+    }>(`
+      SELECT id, exam_id, started_at, status, total_score
+      FROM metabot_exam_runs
+      WHERE metabot_id = ?
+      ORDER BY started_at DESC
+      LIMIT 1
+    `, [metabotId]);
+    if (!row) return null;
+    return {
+      id: row.id,
+      examId: row.exam_id,
+      startedAt: Number(row.started_at),
+      status: row.status,
+      totalScore: row.total_score == null ? null : Number(row.total_score),
+    };
+  }
+
+  createExamRun(metabotId: number, examId: string, startedAt: number): string {
+    const id = uuidv4();
+    this.db.run(
+      'INSERT INTO metabot_exam_runs (id, exam_id, metabot_id, started_at, status) VALUES (?, ?, ?, ?, ?)',
+      [id, examId, metabotId, Math.floor(Number(startedAt)) || Date.now(), 'running'],
+    );
+    this.saveDb();
+    return id;
+  }
+
+  finishExamRun(input: {
+    id: string;
+    status: 'done' | 'failed';
+    finishedAt: number;
+    totalScore?: number | null;
+    questionScores?: unknown[] | null;
+    error?: string | null;
+  }): void {
+    this.db.run(`
+      UPDATE metabot_exam_runs
+      SET status = ?, finished_at = ?, total_score = ?, question_scores_json = ?, error = ?
+      WHERE id = ?
+    `, [
+      input.status,
+      Math.floor(Number(input.finishedAt)) || Date.now(),
+      input.totalScore == null ? null : Math.max(0, Math.min(1, Number(input.totalScore))),
+      input.questionScores == null ? null : JSON.stringify(input.questionScores),
+      input.error ?? null,
+      input.id,
+    ]);
+    this.saveDb();
+  }
+
+  /** Completed exam scores, oldest first — the growth-curve series. */
+  listExamScores(metabotId: number, limit = 52): Array<{ startedAt: number; totalScore: number }> {
+    return this.getAll<{ started_at: number | string; total_score: number | string }>(`
+      SELECT started_at, total_score
+      FROM metabot_exam_runs
+      WHERE metabot_id = ? AND status = 'done' AND total_score IS NOT NULL
+      ORDER BY started_at ASC
+      LIMIT ?
+    `, [metabotId, Math.max(1, Math.floor(limit))])
+      .map((row) => ({ startedAt: Number(row.started_at), totalScore: Number(row.total_score) }))
+      .filter((row) => Number.isFinite(row.startedAt) && Number.isFinite(row.totalScore));
+  }
+
+  /**
+   * Thumbed messages that carried a human comment (either direction) — exam
+   * sediment for the feedback pool. Ordered oldest first.
+   */
+  listFeedbackEventsWithComments(metabotId: number, limit = 20): Array<{
+    messageId: string;
+    sessionTitle: string;
+    rating: 'up' | 'down';
+    comment: string;
+    occurredAt: number;
+  }> {
+    return this.getAll<{
+      message_id: string;
+      session_title: string;
+      rating: string;
+      comment: string;
+      occurred_at: number | string;
+    }>(`
+      SELECT mf.message_id, s.title AS session_title, mf.rating, mf.comment, m.created_at AS occurred_at
+      FROM message_feedback mf
+      JOIN cowork_messages m ON m.id = mf.message_id
+      JOIN cowork_sessions s ON s.id = mf.session_id
+      WHERE s.metabot_id = ? AND mf.comment IS NOT NULL AND TRIM(mf.comment) != ''
+      ORDER BY m.created_at ASC
+      LIMIT ?
+    `, [metabotId, Math.max(1, Math.floor(limit))])
+      .map((row) => ({
+        messageId: row.message_id,
+        sessionTitle: row.session_title,
+        rating: row.rating === 'up' ? 'up' as const : 'down' as const,
+        comment: row.comment,
+        occurredAt: Number(row.occurred_at),
+      }));
+  }
+
+  /** Human review comments on the bot's group tasks, oldest first. */
+  listGroupTaskReviewComments(metabotId: number, limit = 20): Array<{
+    taskId: number;
+    title: string;
+    rating: number | null;
+    comment: string;
+    occurredAt: number;
+  }> {
+    return this.getAll<{
+      task_id: number | string;
+      title: string;
+      rating: number | string | null;
+      rating_comment: string | null;
+      occurred_at: number | string;
+    }>(`
+      SELECT t.id AS task_id, t.title, t.rating, t.rating_comment,
+        CAST(strftime('%s', COALESCE(t.rated_at, t.closed_at)) AS INTEGER) AS occurred_at
+      FROM group_tasks t
+      JOIN group_task_members m ON m.task_id = t.id
+      WHERE m.metabot_id = ? AND m.removed_at IS NULL
+        AND t.rating_comment IS NOT NULL AND TRIM(t.rating_comment) != ''
+      ORDER BY occurred_at ASC
+      LIMIT ?
+    `, [metabotId, Math.max(1, Math.floor(limit))])
+      .map((row) => ({
+        taskId: Number(row.task_id),
+        title: row.title,
+        rating: row.rating == null ? null : Number(row.rating),
+        comment: row.rating_comment ?? '',
+        occurredAt: Number(row.occurred_at) * 1000,
+      }));
   }
 
   /**

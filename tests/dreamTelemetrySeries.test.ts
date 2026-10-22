@@ -36,6 +36,19 @@ test('runsToTelemetryDays maps replay/validation/token fields', () => {
   assert.equal(day.activityTokens, 1500);
 });
 
+test('runsToTelemetryDays maps frozen-exam scores and gaps on missing/failed exams', () => {
+  const days = runsToTelemetryDays([
+    { dreamDate: '2026-10-20', status: 'completed', telemetry: { exam: { score: 0.72, questions: 5 } } },
+    { dreamDate: '2026-10-21', status: 'completed', telemetry: { exam: { ran: true, score: null, questions: 5 } } },
+    { dreamDate: '2026-10-22', status: 'completed', telemetry: {} },
+    { dreamDate: '2026-10-23', status: 'completed', telemetry: { emptyDay: true, exam: { score: 0.9 } } },
+  ]);
+  assert.equal(days[0].examScore, 0.72);
+  assert.equal(days[1].examScore, null, 'a failed exam run gaps the trend');
+  assert.equal(days[2].examScore, null, 'nights without an exam stay null');
+  assert.equal(days[3].examScore, null, 'empty days never carry an exam score');
+});
+
 test('runsToTelemetryDays treats empty days as zero activity with null unmatched refs', () => {
   const [day] = runsToTelemetryDays([
     {

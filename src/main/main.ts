@@ -5006,6 +5006,34 @@ const startStartupNightlyServices = (): void => {
     // Self-curriculum materialization (design 2026-10-10 §3.4): the same host
     // path as ScheduledTaskAgentControl.createTask — a one-shot 'at' task in
     // the night window; a schedule that never fires rolls back and throws.
+    // Dream review P2-1 (design §P2.5): the frozen per-bot exam answers in a
+    // read_only isolated session — the practice interaction guard constrains
+    // every tool call to the read surface, memory writes stay off, and the
+    // session is hidden from the list like surf sessions.
+    runExamSession: async ({ metabotId, userMessage }) => {
+      const coworkStore = getCoworkStore();
+      const cwd = resolveSessionWorkingDirectory(
+        coworkStore.getConfig().workingDirectory,
+        metabotId,
+      );
+      const { createPracticeSessionState } = await import('./libs/practiceInteractionGuard');
+      return runOrchestratorSkillTurn(getCoworkRunner(), coworkStore, {
+        systemPrompt: '',
+        userMessage,
+        cwd,
+        metabotId,
+        activeSkillIds: [],
+        disableRemoteServicesPrompt: true,
+        sourceChannel: 'orchestrator',
+        autoApprove: true,
+        disableMemoryUpdates: true,
+        practiceSession: createPracticeSessionState('read_only'),
+        skillTurnTimeoutMs: 20 * 60 * 1000,
+        onSessionCreated: (sessionId) => {
+          coworkStore.setSessionHiddenFromList(sessionId, true);
+        },
+      });
+    },
     createPracticeScheduledTask: (input) => {
       const store = getScheduledTaskStore();
       const task = store.createTask({

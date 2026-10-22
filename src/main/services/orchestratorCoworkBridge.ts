@@ -10,6 +10,7 @@ import { generateSessionTitle } from '../libs/coworkUtil';
 import { buildOrchestratorSessionTitle } from '../libs/orchestratorSessionTitle';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 import { isDshShutdownError } from '../libs/dshShutdownError';
+import type { PracticeSessionState } from '../libs/practiceInteractionGuard';
 import {
   claimManagedOrchestratorSession,
   resolveOrchestratorPermissionReply,
@@ -97,6 +98,13 @@ export interface RunOrchestratorSkillTurnParams {
   onLateTermination?: (late: { sessionId: string; reason: 'error' | 'stopped'; message?: string }) => void | Promise<void>;
   /** Called when the recovery window expires without any terminal session event. */
   onRecoveryExpired?: (late: { sessionId: string }) => void | Promise<void>;
+  /**
+   * Dream review P2-1: practice-session marker for read_only isolated runs
+   * (frozen exams) — forwarded to runner.startSession so the practice
+   * interaction guard constrains every tool call. Absent → unrestricted
+   * (every existing caller).
+   */
+  practiceSession?: PracticeSessionState;
 }
 
 export interface RunExistingSessionSkillTurnParams {
@@ -240,6 +248,7 @@ export async function runOrchestratorSkillTurn(
     permissionMode = 'default',
     metawebStudySession,
     metawebSurfSession,
+    practiceSession,
   } = params;
 
   const now = Date.now();
@@ -471,6 +480,10 @@ export async function runOrchestratorSkillTurn(
         permissionMode,
         metawebStudySession,
         metawebSurfSession,
+        // Dream review P2-1: read_only practice posture for frozen exams —
+        // the interaction guard constrains every tool call to the read
+        // surface. Absent for every pre-existing caller.
+        ...(practiceSession ? { practiceSession } : {}),
         confirmationMode: 'text',
         workspaceRoot: cwd,
       })

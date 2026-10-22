@@ -50,6 +50,12 @@ export interface DreamRunTelemetry {
   hasExplicitFeedback?: boolean;
   weeklyLongDream?: boolean;
   durationMs?: number;
+  /**
+   * P2 frozen-exam result (since 2026-10-23): the bot's rubric-scored fixed
+   * exam of that night. Absent on nights without an exam run; `score` is null
+   * when the run failed — the trend line gaps on both.
+   */
+  exam?: { score?: number | null; questions?: number } | null;
 }
 
 /** One trend row per dream date. */
@@ -78,6 +84,8 @@ export interface TelemetryDay {
    * null = no telemetry for the day at all.
    */
   hasExplicitFeedback: boolean | null;
+  /** Frozen-exam score (0..1) for nights that ran the exam; null otherwise. */
+  examScore: number | null;
 }
 
 export interface DreamRunLike {
@@ -111,6 +119,7 @@ const nullDay = (date: string): TelemetryDay => ({
   totalRefs: null,
   activityTokens: null,
   hasExplicitFeedback: null,
+  examScore: null,
 });
 
 /**
@@ -152,6 +161,7 @@ export function runsToTelemetryDays(runs: DreamRunLike[]): TelemetryDay[] {
         : typeof telemetry.hasExplicitFeedback === 'boolean'
           ? telemetry.hasExplicitFeedback
           : null,
+      examScore: emptyDay ? null : coerceNumber(telemetry.exam?.score),
     });
   }
   return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));

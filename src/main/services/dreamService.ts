@@ -81,6 +81,16 @@ import {
 } from '../libs/positiveReplayPrompt';
 import { extractImplicitSignals } from '../libs/implicitSignals';
 import {
+  buildExamScoringPrompt,
+  buildExamSessionPrompt,
+  buildMetabotExam,
+  EXAM_MIN_DATA_DAYS,
+  EXAM_RUN_INTERVAL_DAYS,
+  parseExamScores,
+  type ExamQuestion,
+  type MetabotExam,
+} from '../libs/metabotExam';
+import {
   PREDICTION_CALIBRATION_WINDOW_DAYS,
   judgeNumericExpectation,
   renderPredictionCalibrationDigest,
@@ -384,6 +394,13 @@ export interface DreamServiceDeps {
    * ScheduledTaskStore.createTask + Scheduler.reschedule). Optional: without
    * it, approved proposals simply stay approved (tests, headless runs).
    */
+  /**
+   * Dream review P2-1: runs one frozen-exam session in a read_only isolated
+   * cowork turn and returns the answer text. Wired in main.ts on
+   * runOrchestratorSkillTurn with the practice read_only guard; absent →
+   * exams are skipped (tests, slim harnesses).
+   */
+  runExamSession?: (input: { metabotId: number; userMessage: string }) => Promise<string>;
   createPracticeScheduledTask?: (input: {
     metabotId: number;
     name: string;
@@ -1428,6 +1445,9 @@ export class DreamService {
       // the same draft pipeline, counted like the negative path below.
       const positiveReplay = await this.runPositiveReplayAfterDream(metabot, brain, date, activity);
       const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
+      // Dream review P2-1: the frozen exam follows the weekly rhythm (own
+      // weekly gate caps it at one run per bot per week). Best-effort.
+      const exam = await this.maybeRunMetabotExam(metabot, brain, date);
       // Self-curriculum (design §3.4, after the replay per §3.1): auto-approve
       // + materialize tonight's pending read_only practice proposals.
       const practicePipeline = this.processPracticeProposalsAfterDream(metabot, { stalled: exploration.stall.stalled, underExplored: exploration.underExplored });
@@ -1442,6 +1462,7 @@ export class DreamService {
       // P2a telemetry: the dream policy becomes tunable once it is measurable.
       this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
         emptyDay: false,
+        exam,
         fastPath: prepared.meta.fragmentCount === 0,
         fragmentCount: prepared.meta.fragmentCount,
         estimatedActivityTokens: prepared.meta.estimatedInputTokens,
@@ -2706,6 +2727,119 @@ export class DreamService {
     } catch (error) {
       console.warn(
         `[DreamService] Knowledge cooling failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * Dream review P2-1 (design 2026-10-10 §P2.5): the frozen per-bot exam —
+   * the comparable "is the bot getting sharper" signal. Runs at most once
+   * per bot per week, only after the bot has ≥14 days of dream data, inside
+   * a read_only isolated session (no writes possible). The paper is built
+   * from the bot's own sediment and hash-frozen; re-runs score the SAME
+   * paper until the sediment changes enough to change the hash. Best-effort:
+   * any failure lands on the run row and never blocks the dream run.
+   */
+  private async maybeRunMetabotExam(
+    metabot: DreamMetabotLike,
+    brain: DreamBrainPair,
+    date: string,
+  ): Promise<{ ran: boolean; score: number | null; questions: number }> {
+    const zero = { ran: false, score: null as number | null, questions: 0 };
+    try {
+      if (!this.deps.runExamSession) return zero;
+      const dreamStore = this.deps.dreamStore;
+      // Weekly cap: one exam run per bot per 7 days, counted from the last
+      // START (a crashed run still consumed its week's budget).
+      const latestRun = dreamStore.getLatestExamRun(metabot.id);
+      if (latestRun && this.now().getTime() - latestRun.startedAt < EXAM_RUN_INTERVAL_DAYS * 86_400_000) {
+        return zero;
+      }
+      // Data gate: younger than 14 days of dream data → nothing to examine.
+      const summaries = dreamStore.listDailySummaries(metabot.id, 400);
+      if (summaries.length === 0) return zero;
+      const oldestSummary = summaries[summaries.length - 1];
+      if (!oldestSummary || !oldestSummary.summaryDate) return zero;
+      const [year, month, day] = date.split('-').map((part) => Number(part));
+      const dateMs = new Date(year, (month || 1) - 1, (day || 1)).getTime();
+      const oldestMs = new Date(oldestSummary.summaryDate + 'T00:00:00').getTime();
+      if (!Number.isFinite(oldestMs) || (dateMs - oldestMs) / 86_400_000 < EXAM_MIN_DATA_DAYS) {
+        return zero;
+      }
+
+      // Assemble the sediment and build (or reuse) the frozen paper.
+      const valueBoundaries = this.deps.coworkStore.listUserMemories({
+        metabotId: metabot.id,
+        usageClass: 'value_boundary',
+        status: 'created',
+        limit: 20,
+      }).map((memory) => ({ id: memory.id, text: memory.text, updatedAt: memory.createdAt }));
+      const workReviews = this.deps.coworkStore.listUserMemories({
+        metabotId: metabot.id,
+        usageClass: 'work_review',
+        status: 'created',
+        limit: 20,
+      }).map((memory) => ({ id: memory.id, text: memory.text, updatedAt: memory.createdAt }));
+      const knowledgeEntries = (this.deps.metaidKnowledgeStore
+        ? this.deps.metaidKnowledgeStore.listKnowledge({ metabotId: metabot.id, status: 'active', limit: 20 })
+        : []
+      ).map((entry) => ({ id: entry.id, topic: entry.topic, summary: entry.summary, updatedAt: entry.updatedAt }));
+      const built = buildMetabotExam({
+        valueBoundaries,
+        workReviews,
+        knowledgeEntries,
+        feedbackEvents: dreamStore.listFeedbackEventsWithComments(metabot.id),
+        groupTaskComments: dreamStore.listGroupTaskReviewComments(metabot.id),
+      });
+      if (!built) return zero;
+      const nowMs = this.now().getTime();
+      const frozen = dreamStore.freezeExam(metabot.id, built.contentHash, built.questions, nowMs);
+      if (!frozen) return zero;
+      // Same hash → keep the frozen paper's questions (never rebuild).
+      const active = dreamStore.getActiveExam(metabot.id);
+      const questions = (active?.questions ?? built.questions) as ExamQuestion[];
+      const exam: MetabotExam = { contentHash: frozen.contentHash, questions };
+      if (questions.length === 0) return zero;
+
+      // Answer pass: read_only isolated session; scoring pass: the brain model
+      // judges against the frozen rubric.
+      const runId = dreamStore.createExamRun(metabot.id, frozen.id, nowMs);
+      try {
+        const answers = await this.deps.runExamSession({
+          metabotId: metabot.id,
+          userMessage: buildExamSessionPrompt({ botName: metabot.name, exam }),
+        });
+        const scoring = buildExamScoringPrompt({ botName: metabot.name, exam, answers });
+        const raw = await this.callDreamLlm(scoring.system, scoring.user, brain, 4096);
+        const parsed = parseExamScores(raw, new Set(questions.map((question) => question.id)));
+        if (!parsed.ok) throw new Error(`exam scoring parse failed: ${(parsed as { ok: false; error: string }).error}`);
+        dreamStore.finishExamRun({
+          id: runId,
+          status: 'done',
+          finishedAt: this.now().getTime(),
+          totalScore: parsed.total,
+          questionScores: parsed.scores,
+        });
+        console.log(
+          `[DreamService] Frozen exam for metabot ${metabot.id} (${date}): score=${parsed.total.toFixed(2)}, questions=${questions.length}, hash=${frozen.contentHash.slice(0, 8)}`,
+        );
+        return { ran: true, score: parsed.total, questions: questions.length };
+      } catch (error) {
+        dreamStore.finishExamRun({
+          id: runId,
+          status: 'failed',
+          finishedAt: this.now().getTime(),
+          error: error instanceof Error ? error.message : String(error),
+        });
+        console.warn(
+          `[DreamService] Frozen exam run failed for metabot ${metabot.id} date ${date}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return { ran: true, score: null, questions: questions.length };
+      }
+    } catch (error) {
+      console.warn(
+        `[DreamService] Frozen exam pass failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return zero;
     }
