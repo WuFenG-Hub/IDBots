@@ -665,6 +665,13 @@ export interface CoworkMessage {
   type: CoworkMessageType;
   content: string;
   timestamp: number;
+  /**
+   * Per-session monotonic transcript position (MAX(sequence)+1 on insert;
+   * absent on rows predating the column). The renderer uses it to detect a
+   * dropped stream event: a jump in the live tail means a whole message never
+   * arrived and the open session must be reloaded.
+   */
+  sequence?: number;
   metadata?: CoworkMessageMetadata;
 }
 
@@ -4661,6 +4668,7 @@ export class CoworkStore implements MemoryBackend {
       type: row.type as CoworkMessageType,
       content: row.content,
       timestamp: row.created_at,
+      ...(row.sequence != null && row.sequence > 0 ? { sequence: row.sequence } : {}),
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
     }));
   }
@@ -4803,6 +4811,7 @@ export class CoworkStore implements MemoryBackend {
       type: row.type as CoworkMessageType,
       content: row.content,
       timestamp: row.created_at,
+      ...(row.sequence != null && row.sequence > 0 ? { sequence: row.sequence } : {}),
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
     };
   }
@@ -5345,6 +5354,7 @@ export class CoworkStore implements MemoryBackend {
       type: message.type,
       content: message.content,
       timestamp: now,
+      sequence,
       metadata: message.metadata,
     };
     this.enqueueExplicitMemoryUpdate(sessionId, createdMessage);
