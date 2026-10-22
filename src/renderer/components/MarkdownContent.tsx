@@ -44,10 +44,11 @@ import prismC from 'react-syntax-highlighter/dist/esm/languages/prism/c';
 import prismCpp from 'react-syntax-highlighter/dist/esm/languages/prism/cpp';
 // @ts-ignore
 import prismDiff from 'react-syntax-highlighter/dist/esm/languages/prism/diff';
-import { ArrowTopRightOnSquareIcon, CheckIcon, ClipboardDocumentIcon, DocumentChartBarIcon } from '@heroicons/react/24/outline';
+import { CheckIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../services/i18n';
 import type { ChatExperienceMode } from '../config';
 import LocalFileLink from './ui/LocalFileLink';
+import InlineHtmlReportBlock from './cowork/InlineHtmlReportBlock';
 
 /**
  * Code-block languages worth highlighting in chat output.
@@ -753,36 +754,18 @@ const createMarkdownComponents = (
       };
 
       // Assistant mode: a link to a local HTML report is the turn's
-      // deliverable, not an ordinary file reference — render it as a
-      // full-width card so it is visually unmistakable next to plain inline
-      // file links. The card still renders through LocalFileLink (block-level
-      // wrapper), so it carries the same right-click menu as every other
-      // file link. Clicking flows through the same onOpenLocalFile path
-      // (in-app sandboxed preview). Professional mode keeps the inline link.
+      // deliverable, not an ordinary file reference — render it inline as a
+      // full-width block (sandboxed srcdoc iframe, content-height tracking,
+      // view-source + export actions) so the report reads inside the chat
+      // instead of behind a card click. Professional mode keeps the inline
+      // link; a read failure degrades the block back to the report card.
       if (chatExperienceMode === 'assistant' && HTML_FILE_RE.test(filePath)) {
         return (
-          <LocalFileLink
+          <InlineHtmlReportBlock
             filePath={filePath}
-            wrapperClassName="block w-full"
-            className="group my-1 flex w-full items-center gap-3 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3.5 py-2.5 shadow-subtle transition-colors hover:border-claude-accent/60 dark:hover:border-claude-accent/60 cursor-pointer no-underline"
-            href={toFileHref(filePath)}
-            title={filePath}
-            showTypeIcon={false}
-            onOpen={(_path, event) => handleClick(event)}
-          >
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-claude-accent/10">
-              <DocumentChartBarIcon className="h-5 w-5 text-claude-accent" />
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-medium dark:text-claude-darkText text-claude-text">
-                {children}
-              </span>
-              <span className="mt-0.5 block text-[11px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {i18nService.t('htmlReportHint')}
-              </span>
-            </span>
-            <ArrowTopRightOnSquareIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary transition-colors group-hover:text-claude-accent" />
-          </LocalFileLink>
+            displayName={linkText}
+            onOpenInSidePanel={onOpenLocalFile}
+          />
         );
       }
 
@@ -852,7 +835,8 @@ interface MarkdownContentProps {
   resolveLocalFilePath?: (href: string, text: string) => string | null;
   /** Intercept local file link clicks; return true to suppress the default shell.openPath. */
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
-  /** Chat surface mode; 'assistant' renders local HTML report links as cards.
+  /** Chat surface mode; 'assistant' renders local HTML report links as inline
+   * blocks (falling back to cards when the file cannot be read).
    * Defaults to 'professional' (plain inline links). */
   chatExperienceMode?: ChatExperienceMode;
 }
