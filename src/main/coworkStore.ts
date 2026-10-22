@@ -6902,6 +6902,39 @@ export class CoworkStore implements MemoryBackend {
     }
   }
 
+  /**
+   * Dream review P3: persisted capability-gate knob (cowork_config kv, same
+   * pattern as the memory policy rows below). ONLY the panel count is
+   * configurable — the prospective post-origin citation rule is a data-leak
+   * guard and stays unconditionally on. Default 2 panels (behavior
+   * unchanged).
+   */
+  getCapabilityGateConfig(): { panels: 1 | 2 } {
+    const row = this.getOne<{ value: string }>(
+      "SELECT value FROM cowork_config WHERE key = 'capabilityGateConfig'",
+      [],
+    );
+    if (!row?.value) return { panels: 2 };
+    try {
+      const parsed = JSON.parse(row.value) as { panels?: unknown };
+      return { panels: parsed.panels === 1 ? 1 : 2 };
+    } catch {
+      return { panels: 2 };
+    }
+  }
+
+  setCapabilityGateConfig(input: { panels: 1 | 2 }): { panels: 1 | 2 } {
+    const panels = input?.panels === 1 ? 1 : 2;
+    this.db.run(
+      `INSERT INTO cowork_config (key, value, updated_at)
+       VALUES ('capabilityGateConfig', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [JSON.stringify({ panels }), Date.now()],
+    );
+    this.saveDb();
+    return { panels };
+  }
+
   // Config operations
   getConfig(): CoworkConfig {
     interface ConfigRow {

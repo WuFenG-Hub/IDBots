@@ -507,8 +507,6 @@ function diarySpanAnchoredInText(span: string, rawText: string): boolean {
 
 export class DreamService {
   private readonly performChat: DreamPerformChat;
-  /** RRSI P1: resolved once — { panels: 2, prospective: true } unless pinned. */
-  private readonly capabilityGate: CapabilityGateConfig;
   private timer: ReturnType<typeof setInterval> | null = null;
   private queue: DreamQueueItem[] = [];
   private processing = false;
@@ -526,7 +524,25 @@ export class DreamService {
 
   constructor(private deps: DreamServiceDeps) {
     this.performChat = deps.performChat ?? performChatCompletionForOrchestrator;
-    this.capabilityGate = resolveCapabilityGateConfig(deps.capabilityGate);
+  }
+
+  /**
+   * Dream review P3: the gate config resolved for THIS pass — persisted
+   * cowork_config knob (panels only; the prospective data-leak guard stays
+   * unconditionally on) under an explicit deps.capabilityGate test override.
+   * Resolved per pass (not cached on the service) so a config change takes
+   * effect the same night.
+   */
+  private resolveGateConfig(): CapabilityGateConfig {
+    let persisted: { panels: 1 | 2 } | null = null;
+    try {
+      persisted = this.deps.coworkStore.getCapabilityGateConfig?.() ?? null;
+    } catch (error) {
+      console.warn(
+        `[DreamService] Capability gate config read failed; using defaults: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return resolveCapabilityGateConfig(persisted ? { ...persisted, ...this.deps.capabilityGate } : this.deps.capabilityGate);
   }
 
   start(): void {
@@ -1664,6 +1680,8 @@ export class DreamService {
     deferredSameNight: number;
     prospectiveDowngraded: number;
     panels: { agreed: number; disagreed: number; incomplete: number };
+    /** Dream review P3: how many gate panels this pass actually ran. */
+    panelsUsed: 1 | 2;
   }> {
     const zero = {
       checked: 0,
@@ -1674,9 +1692,10 @@ export class DreamService {
       deferredSameNight: 0,
       prospectiveDowngraded: 0,
       panels: { agreed: 0, disagreed: 0, incomplete: 0 },
+      panelsUsed: 2 as const,
     };
     try {
-      const gate = this.capabilityGate;
+      const gate = this.resolveGateConfig();
       // Disputed-timeout sweep (design §4.4): an unresolved dispute older than
       // the auto-reject window demotes to 'rejected'; the existing purge
       // (rejected + old) removes the corpse later.
@@ -1838,8 +1857,8 @@ export class DreamService {
       const draftById = new Map(pending.map((draft) => [draft.id, draft]));
       const knownChainRefs = chainDigest ? new Set(chainDigest.knownRefIds) : null;
       const downgradedIds = new Set<number>();
-      const panelA = this.groundPanelVerdicts(parsedA.verdicts, draftById, evidenceDates, knownChainRefs, downgradedIds);
-      const panelB = this.groundPanelVerdicts(verdictsB, draftById, evidenceDates, knownChainRefs, downgradedIds);
+      const panelA = this.groundPanelVerdicts(parsedA.verdicts, draftById, evidenceDates, knownChainRefs, downgradedIds, gate.prospective);
+      const panelB = this.groundPanelVerdicts(verdictsB, draftById, evidenceDates, knownChainRefs, downgradedIds, gate.prospective);
 
       const panels = { agreed: 0, disagreed: 0, incomplete: 0 };
       let validated = 0;
@@ -1913,6 +1932,7 @@ export class DreamService {
         deferredSameNight,
         prospectiveDowngraded: downgradedIds.size,
         panels,
+        panelsUsed: gate.panels,
       };
     } catch (error) {
       console.warn(
@@ -1935,6 +1955,8 @@ export class DreamService {
     evidenceDates: ReadonlySet<string>,
     knownChainRefs: ReadonlySet<string> | null,
     downgradedIds: Set<number>,
+    /** Dream review P3: the prospective guard is never configurable off. */
+    prospective: boolean,
   ): Map<number, { id: number; verdict: string; score: number; rationale: string }> {
     const grounded = new Map<number, { id: number; verdict: string; score: number; rationale: string }>();
     let droppedUngrounded = 0;
@@ -1958,7 +1980,7 @@ export class DreamService {
       // Prospective downgrade: a validated verdict must cite a diary date
       // strictly later than the draft's origin date.
       if (
-        this.capabilityGate.prospective
+        prospective
         && verdict.verdict === 'validated'
       ) {
         const draft = draftById.get(verdict.id);
@@ -2005,10 +2027,21 @@ export class DreamService {
     metabot: DreamMetabotLike,
     brain: DreamBrainPair,
     date: string,
-  ): Promise<{ reReviewed: number; demoted: number; panels: { agreed: number; disagreed: number; incomplete: number } }> {
-    const zero = { reReviewed: 0, demoted: 0, panels: { agreed: 0, disagreed: 0, incomplete: 0 } };
+  ): Promise<{
+    reReviewed: number;
+    demoted: number;
+    panels: { agreed: number; disagreed: number; incomplete: number };
+    /** Dream review P3: how many gate panels this pass actually ran. */
+    panelsUsed: 1 | 2;
+  }> {
+    const zero = {
+      reReviewed: 0,
+      demoted: 0,
+      panels: { agreed: 0, disagreed: 0, incomplete: 0 },
+      panelsUsed: 2 as const,
+    };
     try {
-      const gate = this.capabilityGate;
+      const gate = this.resolveGateConfig();
       const pending = this.deps.coworkStore.listReReviewableCapabilityDrafts(metabot.id, {
         olderThanMs: Date.now() - CAPABILITY_REVIEW_INTERVAL_DAYS * 86_400_000,
         limit: CAPABILITY_REVIEW_MAX_PER_NIGHT,
@@ -2046,6 +2079,7 @@ export class DreamService {
           reReviewed: pending.length,
           demoted: 0,
           panels: { agreed: 0, disagreed: 0, incomplete: pending.length },
+          panelsUsed: gate.panels,
         };
       }
       // Panel B mirrors the fresh gate: drafts reversed, failures degrade to
@@ -2073,8 +2107,8 @@ export class DreamService {
 
       const draftById = new Map(pending.map((draft) => [draft.id, draft]));
       const downgradedIds = new Set<number>();
-      const panelA = this.groundPanelVerdicts(parsedA.verdicts, draftById, evidenceDates, null, downgradedIds);
-      const panelB = this.groundPanelVerdicts(verdictsB, draftById, evidenceDates, null, downgradedIds);
+      const panelA = this.groundPanelVerdicts(parsedA.verdicts, draftById, evidenceDates, null, downgradedIds, gate.prospective);
+      const panelB = this.groundPanelVerdicts(verdictsB, draftById, evidenceDates, null, downgradedIds, gate.prospective);
 
       const panels = { agreed: 0, disagreed: 0, incomplete: 0 };
       let demoted = 0;
@@ -2151,7 +2185,7 @@ export class DreamService {
       console.log(
         `[DreamService] Capability re-review for metabot ${metabot.id}: reReviewed=${pending.length}, demoted=${demoted}, agreed/disagreed/incomplete=${panels.agreed}/${panels.disagreed}/${panels.incomplete}`,
       );
-      return { reReviewed: pending.length, demoted, panels };
+      return { reReviewed: pending.length, demoted, panels, panelsUsed: gate.panels };
     } catch (error) {
       console.warn(
         `[DreamService] Capability re-review failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
