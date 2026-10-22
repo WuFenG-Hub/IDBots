@@ -18,6 +18,8 @@ type MobileDictionary = Record<string, string>;
 const zhTranslations: MobileDictionary = {
   'mobile.common.loading': '加载中…',
   'mobile.common.error': '出了点问题',
+  'mobile.bridge.unavailableTitle': '客户端未连接',
+  'mobile.bridge.unavailableBody': '当前没有可用的后端连接。请稍后重试，或联系支持人员。',
   'mobile.connection.connecting': '连接中',
   'mobile.connection.online': '已连接',
   'mobile.connection.reconnecting': '正在重连…',
@@ -64,14 +66,23 @@ const zhTranslations: MobileDictionary = {
   'mobile.demo.metersRefresh': '刷新',
   'mobile.demo.reconnectButton': '模拟重连',
   'mobile.login.title': '登录 IDBots',
-  'mobile.login.subtitle': '手机登录将在下一个里程碑提供。',
-  'mobile.login.comingSoon': '即将推出',
+  'mobile.login.subtitle': '使用手机号和验证码登录。',
   'mobile.login.phonePlaceholder': '手机号',
+  'mobile.login.sendCode': '发送验证码',
+  'mobile.login.codeSent': '验证码已发送，{sec} 秒后可重发',
+  'mobile.login.codePlaceholder': '验证码',
+  'mobile.login.verify': '登录',
+  'mobile.login.verified': '登录成功，正在准备你的 Bot（{status}）',
+  'mobile.login.invalidPhone': '手机号格式不正确',
+  'mobile.login.invalidCode': '验证码不正确，请重试',
+  'mobile.login.demoNote': '演示环境：登录接口为 mock。',
 };
 
 const enTranslations: MobileDictionary = {
   'mobile.common.loading': 'Loading…',
   'mobile.common.error': 'Something went wrong',
+  'mobile.bridge.unavailableTitle': 'Client not connected',
+  'mobile.bridge.unavailableBody': 'No backend connection is available right now. Please try again later or contact support.',
   'mobile.connection.connecting': 'Connecting',
   'mobile.connection.online': 'Online',
   'mobile.connection.reconnecting': 'Reconnecting…',
@@ -118,9 +129,16 @@ const enTranslations: MobileDictionary = {
   'mobile.demo.metersRefresh': 'Refresh',
   'mobile.demo.reconnectButton': 'Simulate reconnect',
   'mobile.login.title': 'Sign in to IDBots',
-  'mobile.login.subtitle': 'Mobile sign-in arrives with the next milestone.',
-  'mobile.login.comingSoon': 'Coming soon',
+  'mobile.login.subtitle': 'Sign in with your phone number and SMS code.',
   'mobile.login.phonePlaceholder': 'Phone number',
+  'mobile.login.sendCode': 'Send code',
+  'mobile.login.codeSent': 'Code sent; you can resend it in {sec}s',
+  'mobile.login.codePlaceholder': 'SMS code',
+  'mobile.login.verify': 'Sign in',
+  'mobile.login.verified': 'Signed in; preparing your Bot ({status})',
+  'mobile.login.invalidPhone': 'Invalid phone number',
+  'mobile.login.invalidCode': 'Invalid code, please try again',
+  'mobile.login.demoNote': 'Demo build: the login API is mocked.',
 };
 
 const dictionaries: Record<MobileLanguage, MobileDictionary> = {

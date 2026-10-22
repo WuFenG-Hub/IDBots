@@ -637,3 +637,6 @@ man_base_data_pebble/
 # WS-E mobile client (T1 mock bridge + i18n static checks)
 !tests/mobileMockBridge.test.ts
 !tests/mobileI18nStatic.test.mjs
+
+# WS-E login API seam tests
+!tests/mobileLoginApi.test.ts

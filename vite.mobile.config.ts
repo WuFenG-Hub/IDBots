@@ -42,16 +42,30 @@ function mobileDevEntriesPlugin() {
   };
 }
 
-export default defineConfig(({ command }) => ({
-  plugins: [react(), ...(command === 'serve' ? [mobileDevEntriesPlugin()] : [])],
-  base: command === 'serve' ? '/' : mobileBundle === 'app' ? '/app/' : '/',
+export default defineConfig(({ command }) => {
+  // `vite preview` also runs with command === 'serve': it must NOT get the
+  // dev-server root/base, otherwise dist-mobile is served at '/' and /app/
+  // only answers through the HTML fallback (JS requests then 404). Detect
+  // preview explicitly and treat it exactly like a production build.
+  const isDevServer = command === 'serve' && !process.argv.includes('preview');
+  return {
+  // Build and preview: root at the bundle's own directory so index.html lands
+  // directly in dist-mobile/ and dist-mobile-login/ (the C2/C3 integration
+  // contract: the tenant serves dist-mobile/index.html at /app/, the control
+  // plane serves dist-mobile-login/index.html at / and /login). This also
+  // stops the desktop public/ folder (IM icons etc.) from being copied into
+  // the mobile bundles. Dev keeps the repo root so both entries share one
+  // server.
+  root: isDevServer ? __dirname : path.resolve(__dirname, 'src/mobile', mobileBundle === 'app' ? 'app' : 'login'),
+  plugins: [react(), ...(isDevServer ? [mobileDevEntriesPlugin()] : [])],
+  base: isDevServer ? '/' : mobileBundle === 'app' ? '/app/' : '/',
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src/renderer'),
     },
   },
   build: {
-    outDir: mobileBundle === 'app' ? 'dist-mobile' : 'dist-mobile-login',
+    outDir: path.resolve(__dirname, mobileBundle === 'app' ? 'dist-mobile' : 'dist-mobile-login'),
     emptyOutDir: true,
     sourcemap: false,
     // The budget check (scripts/check-mobile-budgets.mjs) computes each
@@ -59,7 +73,7 @@ export default defineConfig(({ command }) => ({
     manifest: true,
     rollupOptions: {
       input:
-        command === 'serve'
+        isDevServer
           ? { app: appHtml, login: loginHtml }
           : mobileBundle === 'app'
             ? appHtml
@@ -83,4 +97,5 @@ export default defineConfig(({ command }) => ({
     },
   },
   clearScreen: false,
-}));
+  };
+});

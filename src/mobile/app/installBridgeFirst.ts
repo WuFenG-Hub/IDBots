@@ -9,10 +9,6 @@
 import { installMockBridge } from '../bridge/installMockBridge';
 import { setAppBridge } from './appBridge';
 
-const bridge = installMockBridge();
-if (!bridge) {
-  throw new Error(
-    'VITE_MOBILE_MOCK is not set to 1; the mobile demo only runs against the mock bridge (T1).',
-  );
-}
-setAppBridge(bridge);
+// No mock and no real bridge (T3) must never crash the bundle: the app
+// renders a "not connected" screen instead (MobileApp checks hasAppBridge).
+setAppBridge(installMockBridge());

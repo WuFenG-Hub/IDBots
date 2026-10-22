@@ -8,8 +8,14 @@ import type { MobileMockBridge, MockElectronAPI } from '../bridge/types';
 
 let appBridge: MobileMockBridge | null = null;
 
-export function setAppBridge(bridge: MobileMockBridge): void {
+export function setAppBridge(bridge: MobileMockBridge | null): void {
   appBridge = bridge;
+}
+
+/** False in a production build before T3's real shim exists: show a
+ * "not connected" screen rather than crashing on a missing bridge. */
+export function hasAppBridge(): boolean {
+  return appBridge !== null;
 }
 
 export function getAppBridge(): MobileMockBridge {

@@ -1,0 +1,15 @@
+import { t } from '../../i18n';
+
+/**
+ * Shown when neither the mock bridge nor the real gateway shim (T3) is
+ * installed. A built bundle must render this instead of white-screening:
+ * the tenant image serves dist-mobile/ at /app/ as-is.
+ */
+export function BridgeUnavailable(): JSX.Element {
+  return (
+    <div className="flex min-h-dvh flex-col items-center justify-center gap-3 bg-[var(--bg-main)] px-8 text-center text-[var(--text-primary)]">
+      <h1 className="text-lg font-semibold">{t('mobile.bridge.unavailableTitle')}</h1>
+      <p className="text-sm text-[var(--text-secondary)]">{t('mobile.bridge.unavailableBody')}</p>
+    </div>
+  );
+}

@@ -1,4 +1,6 @@
 import { t } from '../i18n';
+import { hasAppBridge } from './appBridge';
+import { BridgeUnavailable } from './components/BridgeUnavailable';
 import { ConnectionBadge } from './components/ConnectionBadge';
 import { ChatDemo } from './components/ChatDemo';
 import { PlansDemo } from './components/PlansDemo';
@@ -11,6 +13,9 @@ import { TaskDemo } from './components/TaskDemo';
  * (tabs, Chat/Tasks/Square/Me) replace this in T2.
  */
 export default function MobileApp(): JSX.Element {
+  if (!hasAppBridge()) {
+    return <BridgeUnavailable />;
+  }
   return (
     <div
       className="min-h-dvh bg-[var(--bg-main)] text-[var(--text-primary)]"
