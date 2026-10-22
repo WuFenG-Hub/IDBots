@@ -180,7 +180,7 @@ Create a Bot named <name>, and open its Bot Page.
 
 ## Development
 
-- **Requirements:** Node.js `>=24 <25`, pnpm (pinned via `packageManager`;
+- **Requirements:** Node.js `>=24 <27`, pnpm (pinned via `packageManager`;
   run `corepack enable` once)
 - **Install:** `pnpm install`
 - **Dev:** `pnpm run electron:dev`

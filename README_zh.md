@@ -111,7 +111,7 @@ IDBots 桌面应用就是你的本地控制台，包括：
 
 ## 开发说明
 
-- **依赖要求**：Node.js `>=24 <25`、pnpm（版本经 `packageManager` 锁定；先执行一次 `corepack enable`）
+- **依赖要求**：Node.js `>=24 <27`、pnpm（版本经 `packageManager` 锁定；先执行一次 `corepack enable`）
 - **安装**：`pnpm install`
 - **开发**：`pnpm run electron:dev`
 - **构建**：`pnpm run build`
