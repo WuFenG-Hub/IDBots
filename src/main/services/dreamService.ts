@@ -1889,6 +1889,7 @@ export class DreamService {
               this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
                 eligible: false,
                 reason: 'gate_rejected',
+                sourcePass: 'validation',
               });
             } catch (error) {
               console.warn(
@@ -2108,6 +2109,7 @@ export class DreamService {
                 this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
                   eligible: false,
                   reason: 'demoted',
+                  sourcePass: 're_review',
                 });
               } else {
                 this.deps.metaidKnowledgeStore.archiveProcedureByTitle(metabot.id, draft.title);
@@ -2216,6 +2218,7 @@ export class DreamService {
             const flipped = this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
               eligible: draft.scope !== 'situational',
               reason: draft.scope === 'situational' ? 'situational' : null,
+              sourcePass: 'promotion',
             });
             if (!flipped) {
               this.deps.coworkStore.updateCapabilityDraftValidation({
@@ -2258,6 +2261,7 @@ export class DreamService {
             this.deps.metaidKnowledgeStore.setProcedureHotEligibility(result.entry.id, {
               eligible: false,
               reason: 'situational',
+              sourcePass: 'promotion',
             });
           }
           const marked = this.deps.coworkStore.markCapabilityDraftPromoted({
@@ -2513,6 +2517,7 @@ export class DreamService {
             eligible: true,
             reason: null,
             atMs: this.now().getTime(),
+            sourcePass: 'pruning',
           });
           if (flipped) {
             reentered += 1;
@@ -2576,6 +2581,7 @@ export class DreamService {
           const flipped = this.deps.metaidKnowledgeStore?.setProcedureHotEligibility(candidate.entry.id, {
             eligible: false,
             reason: 'unused',
+            sourcePass: 'pruning',
           });
           if (flipped) demotedProcedures += 1;
         }
@@ -3424,7 +3430,7 @@ export class DreamService {
             if (agentSourced.has(procedureId)) {
               // It left the active hot set, so it counts in the same log and
               // rollback note as an archive — but the record survives.
-              if (this.deps.metaidKnowledgeStore.setProcedureHotEligibility(procedureId, { eligible: false, reason: 'rollback' })) {
+              if (this.deps.metaidKnowledgeStore.setProcedureHotEligibility(procedureId, { eligible: false, reason: 'rollback', sourcePass: 'rollback' })) {
                 archivedProcedures.add(procedureId);
               }
               continue;
@@ -3464,6 +3470,7 @@ export class DreamService {
             this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
               eligible: false,
               reason: 'rollback',
+              sourcePass: 'rollback',
             });
           } catch (error) {
             console.warn(

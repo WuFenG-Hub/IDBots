@@ -5,6 +5,29 @@ import { tokenizeKnowledgeBaseText } from './libs/knowledgeBaseText';
 import { truncateUtf16Units } from './libs/llmSafeText';
 import { recordChainBackupTombstones } from './libs/chainBackupTombstones';
 import { normalizeProcedureHotReason, type ProcedureHotReason } from './libs/procedureProbation';
+
+/**
+ * Which dream pass flipped a procedure's hot eligibility (dream review P1) —
+ * recorded on every append-only hot_event row so a procedure's standing is
+ * traceable across probation flips, re-review demotions, pruning and
+ * rollbacks instead of only remembering the LAST reason.
+ */
+export type ProcedureHotEventSource =
+  | 'validation'
+  | 'promotion'
+  | 're_review'
+  | 'pruning'
+  | 'rollback'
+  | 'dream';
+
+/** One append-only row of metaid_knowledge_procedure_hot_events. */
+export interface ProcedureHotEvent {
+  id: number;
+  procedureId: string;
+  ts: number;
+  reason: ProcedureHotReason | null;
+  sourcePass: ProcedureHotEventSource;
+}
 import { PROCEDURE_PROMPT_MAX_ITEMS } from './libs/procedurePromptBlocks';
 import { queryHotLayerUsageStats } from './libs/hotLayerUsageQueries';
 import {
@@ -408,6 +431,25 @@ export function ensureMetaIDKnowledgeSchema(db: Database): void {
   } catch (error) {
     console.warn('migrate metaid_knowledge_procedures hot columns:', error);
   }
+
+  // Dream review P1: append-only history of hot-layer eligibility flips.
+  // hot_reason stays the LATEST reason for legacy readers; every flip lands
+  // one row here (which pass, when, and why) so probation flips, re-review
+  // demotions, pruning and rollbacks all stay traceable. New table — plain
+  // CREATE IF NOT EXISTS is the idempotent migration.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS metaid_knowledge_procedure_hot_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      procedure_id TEXT NOT NULL,
+      ts INTEGER NOT NULL,
+      reason TEXT,
+      source_pass TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_metaid_knowledge_procedure_hot_events_procedure
+      ON metaid_knowledge_procedure_hot_events(procedure_id, ts ASC);
+  `);
 }
 
 const asText = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
@@ -1375,7 +1417,13 @@ export class MetaIDKnowledgeStore {
    */
   setProcedureHotEligibility(
     id: string,
-    input: { eligible: boolean; reason: ProcedureHotReason | null; atMs?: number },
+    input: {
+      eligible: boolean;
+      reason: ProcedureHotReason | null;
+      atMs?: number;
+      /** Dream review P1: which pass caused the flip ('dream' when unknown). */
+      sourcePass?: ProcedureHotEventSource;
+    },
   ): boolean {
     const procedureId = asText(id);
     if (!procedureId) return false;
@@ -1404,9 +1452,61 @@ export class MetaIDKnowledgeStore {
     }
     const changed = (this.db.getRowsModified?.() || 0) > 0;
     if (changed) {
+      // Dream review P1: append-only history — the hot_reason column keeps
+      // only the LATEST reason; the event row preserves what happened, when,
+      // and which pass did it. Best-effort: history must never break the flip.
+      try {
+        this.db.run(
+          `INSERT INTO metaid_knowledge_procedure_hot_events (procedure_id, ts, reason, source_pass)
+           VALUES (?, ?, ?, ?)`,
+          [procedureId, atMs, input.eligible ? null : normalizeProcedureHotReason(input.reason), input.sourcePass ?? 'dream'],
+        );
+      } catch (error) {
+        console.warn('record procedure hot event failed:', error);
+      }
       this.saveDb();
     }
     return changed;
+  }
+
+  /**
+   * Dream review P1: the append-only hot-standing history of one procedure,
+   * oldest first. Null when the events table does not exist yet.
+   */
+  listProcedureHotEvents(procedureId: string, options?: { limit?: number }): ProcedureHotEvent[] {
+    const id = asText(procedureId);
+    if (!id) return [];
+    const limit = Math.min(500, Math.max(1, asInteger(options?.limit, 100)));
+    try {
+      const rows = this.getAll<{
+        id: number | string;
+        procedure_id: string;
+        ts: number | string;
+        reason: string | null;
+        source_pass: string;
+      }>(
+        `SELECT id, procedure_id, ts, reason, source_pass
+         FROM metaid_knowledge_procedure_hot_events
+         WHERE procedure_id = ?
+         ORDER BY ts ASC, id ASC
+         LIMIT ?`,
+        [id, limit],
+      );
+      return rows.map((row) => ({
+        id: asInteger(row.id),
+        procedureId: String(row.procedure_id),
+        ts: asInteger(row.ts),
+        reason: normalizeProcedureHotReason(row.reason),
+        sourcePass: (['validation', 'promotion', 're_review', 'pruning', 'rollback', 'dream'] as const)
+          .includes(row.source_pass as ProcedureHotEventSource)
+          ? row.source_pass as ProcedureHotEventSource
+          : 'dream',
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('no such table')) return [];
+      throw error;
+    }
   }
 
   /**

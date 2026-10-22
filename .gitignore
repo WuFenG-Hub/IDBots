@@ -444,6 +444,7 @@ man_base_data_pebble/
 !tests/hotLayerAuditExtension.test.mjs
 !tests/privateChatHotLayerInjection.test.mjs
 !tests/teamCultureCoworkTurn.test.mjs
+!tests/procedureHotHistory.test.mjs
 !tests/dreamServiceRatings.test.mjs
 !tests/dreamTelemetryWeekly.test.mjs
 !tests/dreamPracticeProposals.test.mjs
