@@ -313,6 +313,38 @@ test('proposing from an external wait leaves reminders un-silenced; the session-
   assert.doesNotMatch(later.escalated[0].reasons[0], /stale owner wait/);
 });
 
+test('a proposal produced by the heartbeat turn itself still pages the owner next run (anchor fixed before the turn)', async () => {
+  // Regression (2026-10-22): the journal anchor used to be stored AFTER
+  // `await escalate()` returned — and the turn runs to completion inside
+  // escalate(), so a 'proposed' event created by the turn was swallowed by
+  // the anchor (proposed.id > lastEventId never held) and the owner was never
+  // paged about the acceptance proposal.
+  const { store, runner, deps } = await openWorld();
+  const taskId = await createActive(store);
+  const now = Date.now();
+  // The turn works inside startSession: begin + propose acceptance.
+  runner.startSession = async (sessionId, prompt) => {
+    runner.starts.push({ sessionId, prompt });
+    const subtask = store.getTask(taskId).subtasks[0];
+    if (subtask.status === 'pending') {
+      assert.ok(store.beginSubtask(subtask.id, 'twin').ok);
+      assert.ok(
+        store.proposeSubtask(subtask.id, { evidence: [{ kind: 'dir', uri: '/tmp/done' }], summary: 'criteria met' }, 'twin').ok,
+      );
+    }
+  };
+  const advance = new LongTermAdvanceService(deps);
+  const first = await advance.run(now);
+  assert.equal(first.escalated.length, 1, JSON.stringify(first));
+  assert.equal(store.getTask(taskId).subtasks[0].status, 'waiting_owner');
+
+  // Next sweep: the fresh proposal is newer than the pre-turn anchor, so the
+  // owner-facing page fires immediately (一提请就叫你).
+  const second = await advance.run(now + 60_000);
+  assert.equal(second.escalated.length, 1, JSON.stringify(second));
+  assert.match(second.escalated[0].reasons[0], /acceptance proposal awaiting/);
+});
+
 test('stale detection survives the 200-event detail cap (direct queries, not sliced journal)', async () => {
   const { store, deps } = await openWorld();
   const taskId = await createActive(store);

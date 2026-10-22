@@ -263,6 +263,13 @@ export interface CoworkMessage {
   type: CoworkMessageType;
   content: string;
   timestamp: number;
+  /**
+   * Per-session monotonic transcript position assigned by the main-side store
+   * (absent on legacy rows and synthesized messages). The stream listener
+   * tracks the live tail: a jump of more than 1 means a whole message event
+   * was lost in transit and the open session needs a reload to heal.
+   */
+  sequence?: number;
   metadata?: CoworkMessageMetadata;
 }
 

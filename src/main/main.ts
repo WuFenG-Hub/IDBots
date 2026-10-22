@@ -7869,6 +7869,13 @@ const getLongTermAdvanceService = () => {
         resolveSessionWorkingDirectory(getCoworkStore().getConfig().workingDirectory, metabotId),
       getBaseSystemPrompt: () => getCoworkStore().getConfig().systemPrompt,
       getSkillsPrompt: async () => getSkillManager().buildAutoRoutingPrompt(),
+      // Messages the service persists directly (the heartbeat prompt, the
+      // rotation pointer) bypass the runner's emit path — forward them through
+      // the same sanitize+broadcast channel so an open session shows them live.
+      emitSessionMessage: (sessionId, message) => {
+        if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) return;
+        emitCoworkStreamMessage(sessionId, message);
+      },
       // The heartbeat hand-off message follows the owner's UI language.
       getAppLanguage: () => getPersistedAppLanguage(),
       // P1 supervision telemetry: worker dispatch attempts sourced from every

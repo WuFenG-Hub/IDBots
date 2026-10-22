@@ -104,6 +104,10 @@ const SESSIONS_RELOAD_DEBOUNCE_MS = 300;
 const STREAM_FLUSH_MAX_DELAY_MS = 100;
 /** Bound on the per-message stream baselines kept for the append fast path. */
 const STREAM_DISPATCHED_MAX_KEYS = 256;
+/** Debounce for the gap-heal reload: one reload per session per window. */
+const STREAM_GAP_HEAL_DEBOUNCE_MS = 1200;
+/** Bound on per-session live-tail sequence tracking. */
+const STREAM_TAIL_SEQ_MAX_KEYS = 512;
 
 type PendingStreamUpdate = {
   sessionId: string;
@@ -131,6 +135,10 @@ class CoworkService {
   private sessionsReloadTimer: ReturnType<typeof setTimeout> | null = null;
   /** Callers waiting for the next read the current burst will produce. */
   private sessionsReloadWaiters: Array<() => void> = [];
+  /** Newest live sequence seen per session (stream events + session loads). */
+  private readonly streamTailSeq = new Map<string, number>();
+  /** Sessions with a gap-heal reload already scheduled (debounce). */
+  private readonly streamGapHealTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   async init(): Promise<void> {
     if (this.initialized) return;
@@ -156,6 +164,11 @@ class CoworkService {
 
     // Message listener - also check if session exists (for IM-created sessions)
     const messageCleanup = cowork.onStreamMessage(async ({ sessionId, message }) => {
+      // Whole-message loss detection runs before anything awaitable: a dropped
+      // base event is exactly the case where the rest of this handler may be
+      // the only signal that ever arrives.
+      this.noteStreamSequence(sessionId, message);
+
       // Check if session exists in current list
       let state = store.getState().cowork;
       let sessionExists = state.sessions.some(s => s.id === sessionId);
@@ -329,8 +342,16 @@ class CoworkService {
         }
         if (store.getState().cowork.currentSessionId === sessionId) {
           store.dispatch(setCurrentSession(refreshed.session));
+          // The turn is over; re-seed the live-tail tracker from the
+          // authoritative read so a gap that slipped through mid-turn cannot
+          // keep re-firing (or worse, stay silent) on the next turn.
+          this.noteSessionSnapshotSeq(refreshed.session);
         }
-      }).catch(() => {});
+      }).catch((error) => {
+        // This refresh is the last-line healer for dropped stream events — a
+        // silent failure here is exactly how a finished turn stays invisible.
+        console.warn('[cowork] post-complete session refresh failed:', error);
+      });
     });
     this.streamListenerCleanups.push(completeCleanup);
 
@@ -375,6 +396,8 @@ class CoworkService {
     this.streamReassembly.reset();
     this.streamPending.clear();
     this.cancelStreamFlush();
+    for (const timer of this.streamGapHealTimers.values()) clearTimeout(timer);
+    this.streamGapHealTimers.clear();
   }
 
   /**
@@ -578,6 +601,54 @@ class CoworkService {
     this.streamFlushFrame = null;
     if (this.streamFlushHandle !== null) clearTimeout(this.streamFlushHandle);
     this.streamFlushHandle = null;
+  }
+
+  /**
+   * Whole-message loss detector for the live stream. Every store-written
+   * message carries a per-session monotonic `sequence`; when the live tail
+   * jumps by more than one, a `cowork:stream:message` event never reached this
+   * renderer (the 2026-10-22 incident: a heartbeat turn's entire output —
+   * 28 messages — never rendered until a manual session reload). The heal is a
+   * debounced reload of the session view, guarded to the session actually on
+   * screen; background sessions re-read on open anyway.
+   */
+  private noteStreamSequence(sessionId: string, message: CoworkMessage): void {
+    const seq = typeof message.sequence === 'number' && Number.isFinite(message.sequence)
+      ? message.sequence
+      : null;
+    if (seq === null || seq <= 0) return;
+    const last = this.streamTailSeq.get(sessionId) ?? null;
+    if (last === null || seq > last) {
+      this.streamTailSeq.set(sessionId, seq);
+    }
+    if (this.streamTailSeq.size > STREAM_TAIL_SEQ_MAX_KEYS) {
+      const oldest = this.streamTailSeq.keys().next().value;
+      if (oldest !== undefined) this.streamTailSeq.delete(oldest);
+    }
+    if (last === null || seq <= last + 1) return;
+    if (this.streamGapHealTimers.has(sessionId)) return;
+    console.warn(`[cowork] stream gap on session ${sessionId}: tail ${last} → ${seq}; reloading the session view`);
+    const timer = setTimeout(() => {
+      this.streamGapHealTimers.delete(sessionId);
+      void this.loadSession(sessionId, { onlyIfCurrent: true });
+    }, STREAM_GAP_HEAL_DEBOUNCE_MS);
+    this.streamGapHealTimers.set(sessionId, timer);
+  }
+
+  /**
+   * Seed the live tail from a freshly loaded window (its newest message).
+   * Overwrites rather than max-merges: a rewind/fork legitimately moves the
+   * tail backward, and the load is the authoritative read.
+   */
+  private noteSessionSnapshotSeq(session: CoworkSession | null | undefined): void {
+    if (!session) return;
+    let tail = 0;
+    for (const message of session.messages) {
+      if (typeof message.sequence === 'number' && Number.isFinite(message.sequence) && message.sequence > tail) {
+        tail = message.sequence;
+      }
+    }
+    if (tail > 0) this.streamTailSeq.set(session.id, tail);
   }
 
   private async resyncStreamMessage(sessionId: string, messageId: string): Promise<void> {
@@ -1306,6 +1377,12 @@ class CoworkService {
     const cowork = window.electron?.cowork;
     if (!cowork) return null;
 
+    // Check before the IPC: an onlyIfCurrent caller (the stream-gap heal) has
+    // no use for the payload of a session that is not on screen.
+    if (options.onlyIfCurrent && store.getState().cowork.currentSessionId !== sessionId) {
+      return null;
+    }
+
     const result = await cowork.getSession(sessionId);
     if (result.success && result.session) {
       if (options.onlyIfCurrent && store.getState().cowork.currentSessionId !== sessionId) {
@@ -1313,6 +1390,7 @@ class CoworkService {
       }
       store.dispatch(setCurrentSession(result.session));
       store.dispatch(setStreaming(result.session.status === 'running'));
+      this.noteSessionSnapshotSeq(result.session);
       return result.session;
     }
 

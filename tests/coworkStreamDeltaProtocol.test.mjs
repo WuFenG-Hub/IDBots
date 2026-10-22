@@ -442,7 +442,7 @@ test('both main-process send sites go through the encoder, keeping the IPC cap',
 
   const sender = sliceFrom('const sendCoworkStreamMessageUpdate', 900);
   assert.match(sender, /coworkStreamUiDelta\.encode\(/);
-  assert.match(sender, /send\('cowork:stream:messageUpdate', payload\)/, 'the sender is the only IPC hop');
+  assert.match(sender, /broadcastToRenderers\('cowork:stream:messageUpdate', payload\)/, 'the sender is the only IPC hop');
   assert.doesNotMatch(sender, /truncateIpcString\(update\.content/, 'truncation moved into the encoder');
 
   const runnerListener = sliceFrom("coworkRunner.on('messageUpdate'", 500);
@@ -452,10 +452,10 @@ test('both main-process send sites go through the encoder, keeping the IPC cap',
   assert.match(emitHelper, /sendCoworkStreamMessageUpdate\(sessionId, messageId, update\)/);
 
   // Every other send of that channel must have been migrated too.
-  const rawSends = mainSource.match(/send\('cowork:stream:messageUpdate'/g) ?? [];
+  const rawSends = mainSource.match(/broadcastToRenderers\('cowork:stream:messageUpdate'/g) ?? [];
   assert.equal(rawSends.length, 1, 'exactly one place sends the channel');
 
-  assert.match(mainSource, /ipcMain\.handle\('cowork:stream:liveContent'/);
+  assert.match(mainSource, /registerIpcHandler\('cowork:stream:liveContent'/);
   const preloadSource = fs.readFileSync(path.join(projectRoot, 'src/main/preload.ts'), 'utf8');
   assert.match(preloadSource, /invoke\('cowork:stream:liveContent', payload\)/);
 });
