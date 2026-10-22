@@ -21,10 +21,8 @@ test('registerMetabotWalletIpcHandlers exposes token asset aggregation and trans
   const handlers = {};
 
   walletIpc.registerMetabotWalletIpcHandlers({
-    ipcMain: {
-      handle(name, fn) {
-        handlers[name] = fn;
-      },
+    registerIpcHandler(name, fn) {
+      handlers[name] = fn;
     },
     getMetabotStore: () => ({ fake: true }),
     getMetabotWalletAssets: async (_store, input) => ({ metabotId: input.metabotId, nativeAssets: [], mrc20Assets: [], mvcFtAssets: [] }),
@@ -102,10 +100,8 @@ test('registerMetabotWalletIpcHandlers surfaces wallet token errors as failure p
   const handlers = {};
 
   walletIpc.registerMetabotWalletIpcHandlers({
-    ipcMain: {
-      handle(name, fn) {
-        handlers[name] = fn;
-      },
+    registerIpcHandler(name, fn) {
+      handlers[name] = fn;
     },
     getMetabotStore: () => ({ fake: true }),
     getMetabotWalletAssets: async () => {

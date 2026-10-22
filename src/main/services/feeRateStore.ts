@@ -6,7 +6,7 @@
  * - IPC channels: feeRates:getTiers, feeRates:getSelected, feeRates:select, feeRates:refresh.
  */
 
-import { ipcMain } from 'electron';
+import { registerIpcHandler } from '../ipc/registry';
 
 type ChainKey = 'btc' | 'mvc' | 'doge';
 interface FeeRateTier { title: string; desc: string; feeRate: number; }
@@ -143,13 +143,13 @@ export async function initFeeRateStore(
   loadSelection();
   await fetchTiersFromApi();
 
-  ipcMain.handle('feeRates:getTiers', () => getAllTiers());
-  ipcMain.handle('feeRates:getSelected', () => getSelectedTiers());
-  ipcMain.handle('feeRates:select', (_e, chain: string, tierTitle: string) => {
+  registerIpcHandler('feeRates:getTiers', () => getAllTiers());
+  registerIpcHandler('feeRates:getSelected', () => getSelectedTiers());
+  registerIpcHandler('feeRates:select', (_e, chain: string, tierTitle: string) => {
     selectTier(chain, tierTitle);
     return { success: true };
   });
-  ipcMain.handle('feeRates:refresh', async () => {
+  registerIpcHandler('feeRates:refresh', async () => {
     await fetchTiersFromApi();
     return getAllTiers();
   });

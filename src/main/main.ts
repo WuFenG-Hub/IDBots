@@ -4,6 +4,8 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { SqliteStore } from './sqliteStore';
+import { registerIpcHandler } from './ipc/registry';
+import { broadcastToRenderers } from './ipc/broadcast';
 import { isSqliteWasmBoundsError } from './sqliteRecovery';
 import {
   SQLiteRecoveryCoordinator,
@@ -778,16 +780,7 @@ const sanitizePermissionRequestForIpc = (request: any): any => {
 
 const emitCoworkStreamMessage = (sessionId: string, message: unknown): void => {
   const safeMessage = sanitizeCoworkMessageForIpc(message);
-  const windows = BrowserWindow.getAllWindows();
-  windows.forEach((win) => {
-    if (!win.isDestroyed()) {
-      try {
-        win.webContents.send('cowork:stream:message', { sessionId, message: safeMessage });
-      } catch (error) {
-        console.error('Failed to forward cowork message:', error);
-      }
-    }
-  });
+  broadcastToRenderers('cowork:stream:message', { sessionId, message: safeMessage });
 };
 
 /**
@@ -820,16 +813,7 @@ const sendCoworkStreamMessageUpdate = (
       : undefined,
   });
   if (!payload) return;
-  const windows = BrowserWindow.getAllWindows();
-  windows.forEach((win) => {
-    if (!win.isDestroyed()) {
-      try {
-        win.webContents.send('cowork:stream:messageUpdate', payload);
-      } catch (error) {
-        console.error('Failed to forward cowork message update:', error);
-      }
-    }
-  });
+  broadcastToRenderers('cowork:stream:messageUpdate', payload);
 };
 
 const emitCoworkStreamMessageUpdate = (
@@ -845,13 +829,7 @@ const emitCoworkStreamMessageUpdate = (
  * renderer reloads the session list/detail after a peer profile change.
  */
 const broadcastProfileRefreshed = (sessionId: string): void => {
-  BrowserWindow.getAllWindows().forEach((win) => {
-    if (!win.isDestroyed()) {
-      try {
-        win.webContents.send('cowork:session:profileRefreshed', { sessionId });
-      } catch { /* ignore */ }
-    }
-  });
+  broadcastToRenderers('cowork:session:profileRefreshed', { sessionId });
 };
 
 /**
@@ -935,27 +913,12 @@ const buildServiceOrderDisplayMetadata = (
 });
 
 const emitProviderDiscoveryChanged = (snapshot: DiscoverySnapshot): void => {
-  const windows = BrowserWindow.getAllWindows();
-  windows.forEach((win) => {
-    if (!win.isDestroyed()) {
-      try {
-        win.webContents.send('providerDiscovery:changed', snapshot);
-      } catch (error) {
-        console.error('Failed to forward provider discovery snapshot:', error);
-      }
-    }
-  });
+  broadcastToRenderers('providerDiscovery:changed', snapshot);
 };
 
 /** Broadcast a Group Task event (e.g. groupTask:statusChanged) to all renderer windows. */
 const broadcastGroupTaskEvent = <T extends { type: string }>(payload: T): void => {
-  BrowserWindow.getAllWindows().forEach((win) => {
-    if (!win.isDestroyed()) {
-      try {
-        win.webContents.send(payload.type, payload);
-      } catch { /* ignore */ }
-    }
-  });
+  broadcastToRenderers(payload.type, payload);
 };
 
 const publishServiceOrderEventToCowork = (
@@ -3075,11 +3038,7 @@ const startListenerWithConfig = async (config: ListenerConfig) => {
   const getMetaBots = () =>
     getMetabotStore().listMetabots().map((m) => ({ id: m.id, name: m.name, globalmetaid: m.globalmetaid }));
   const emitLog = (log: string) => {
-    BrowserWindow.getAllWindows().forEach((win) => {
-      if (!win.webContents.isDestroyed()) {
-        win.webContents.send('idbots:listener-log', log);
-      }
-    });
+    broadcastToRenderers('idbots:listener-log', log);
   };
   const resolvePrivateKeyByGlobalMetaId = async (globalMetaId: string): Promise<Buffer | null> => {
     const metabotStore = getMetabotStore();
@@ -4224,11 +4183,7 @@ const startStartupMessageTier = (): void => {
       };
     },
     (channel, data) => {
-      BrowserWindow.getAllWindows().forEach(win => {
-        if (!win.isDestroyed()) {
-          try { win.webContents.send(channel as string, data); } catch { /* ignore */ }
-        }
-      });
+      broadcastToRenderers(channel as string, data);
     },
     getListenerConfigFromStore,
     resolveGigSquareLocalServiceOutputType,
@@ -5007,11 +4962,7 @@ const startStartupNightlyServices = (): void => {
       }
     },
     emitToRenderer: (channel, data) => {
-      BrowserWindow.getAllWindows().forEach(win => {
-        if (!win.isDestroyed()) {
-          try { win.webContents.send(channel as string, data); } catch { /* ignore */ }
-        }
-      });
+      broadcastToRenderers(channel as string, data);
     },
     // Self-curriculum materialization (design 2026-10-10 §3.4): the same host
     // path as ScheduledTaskAgentControl.createTask — a one-shot 'at' task in
@@ -5149,11 +5100,7 @@ const startStartupNightlyServices = (): void => {
     metaidCultureStore: getTeamCultureStore(),
     performChat: performChatCompletionForOrchestrator,
     emitToRenderer: (channel, data) => {
-      BrowserWindow.getAllWindows().forEach(win => {
-        if (!win.isDestroyed()) {
-          try { win.webContents.send(channel as string, data); } catch { /* ignore */ }
-        }
-      });
+      broadcastToRenderers(channel as string, data);
     },
   });
 
@@ -5307,17 +5254,10 @@ const requestRelaunchAfterSqliteRecoveryFailure = (
     recoveryError,
   );
 
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.isDestroyed()) continue;
-    try {
-      win.webContents.send('sqlite:relaunch-required', {
-        operationName,
-        message: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
-      });
-    } catch {
-      // Relaunch is already scheduled; renderer notification is best-effort.
-    }
-  }
+  broadcastToRenderers('sqlite:relaunch-required', {
+    operationName,
+    message: recoveryError instanceof Error ? recoveryError.message : String(recoveryError),
+  });
 
   setTimeout(() => {
     try {
@@ -5466,13 +5406,7 @@ const emitDelegationStateChange = (data: {
   orderId?: string;
   message?: string;
 }) => {
-  BrowserWindow.getAllWindows().forEach(win => {
-    if (!win.isDestroyed()) {
-      try {
-        win.webContents.send('cowork:delegation:stateChange', data);
-      } catch { /* ignore */ }
-    }
-  });
+  broadcastToRenderers('cowork:delegation:stateChange', data);
 };
 
 /**
@@ -5486,13 +5420,7 @@ const injectDelegationSystemMessage = (sessionId: string, content: string) => {
     content,
   });
   const safeMessage = sanitizeCoworkMessageForIpc(message);
-  BrowserWindow.getAllWindows().forEach(win => {
-    if (!win.isDestroyed()) {
-      try {
-        win.webContents.send('cowork:stream:message', { sessionId, message: safeMessage });
-      } catch { /* ignore */ }
-    }
-  });
+  broadcastToRenderers('cowork:stream:message', { sessionId, message: safeMessage });
 };
 
 /**
@@ -7411,16 +7339,7 @@ const getCoworkRunner = () => {
         return;
       }
       const safeMessage = sanitizeCoworkMessageForIpc(message);
-      const windows = BrowserWindow.getAllWindows();
-      windows.forEach(win => {
-        if (!win.isDestroyed()) {
-          try {
-            win.webContents.send('cowork:stream:message', { sessionId, message: safeMessage });
-          } catch (error) {
-            console.error('Failed to forward cowork message:', error);
-          }
-        }
-      });
+      broadcastToRenderers('cowork:stream:message', { sessionId, message: safeMessage });
     });
 
     coworkRunner.on('messageUpdate', (sessionId: string, messageId: string, content: string, metadata?: Record<string, unknown>) => {
@@ -7449,16 +7368,7 @@ const getCoworkRunner = () => {
         return;
       }
       const safeRequest = sanitizePermissionRequestForIpc(request);
-      const windows = BrowserWindow.getAllWindows();
-      windows.forEach(win => {
-        if (!win.isDestroyed()) {
-          try {
-            win.webContents.send('cowork:stream:permission', { sessionId, request: safeRequest });
-          } catch (error) {
-            console.error('Failed to forward cowork permission request:', error);
-          }
-        }
-      });
+      broadcastToRenderers('cowork:stream:permission', { sessionId, request: safeRequest });
     });
 
     // A permission finalized on ANY path (renderer reply, text relay,
@@ -7466,16 +7376,7 @@ const getCoworkRunner = () => {
     // renderer's pendingPermissions copy — otherwise the global overlay keeps
     // rendering a stale, unanswerable prompt forever.
     coworkRunner.on('permissionResolved', (sessionId: string, requestId: string) => {
-      const windows = BrowserWindow.getAllWindows();
-      windows.forEach(win => {
-        if (!win.isDestroyed()) {
-          try {
-            win.webContents.send('cowork:stream:permissionResolved', { sessionId, requestId });
-          } catch (error) {
-            console.error('Failed to forward cowork permission resolved:', error);
-          }
-        }
-      });
+      broadcastToRenderers('cowork:stream:permissionResolved', { sessionId, requestId });
     });
 
     coworkRunner.on('complete', (sessionId: string, claudeSessionId: string | null) => {
@@ -7485,12 +7386,7 @@ const getCoworkRunner = () => {
       if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
         return;
       }
-      const windows = BrowserWindow.getAllWindows();
-      windows.forEach(win => {
-        if (!win.isDestroyed()) {
-          win.webContents.send('cowork:stream:complete', { sessionId, claudeSessionId });
-        }
-      });
+      broadcastToRenderers('cowork:stream:complete', { sessionId, claudeSessionId });
     });
 
     coworkRunner.on('error', (sessionId: string, error: string) => {
@@ -7498,12 +7394,7 @@ const getCoworkRunner = () => {
       if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
         return;
       }
-      const windows = BrowserWindow.getAllWindows();
-      windows.forEach(win => {
-        if (!win.isDestroyed()) {
-          win.webContents.send('cowork:stream:error', { sessionId, error });
-        }
-      });
+      broadcastToRenderers('cowork:stream:error', { sessionId, error });
     });
 
     // Kernel-owned session titles (dsh-session-title): the runner already
@@ -7513,16 +7404,7 @@ const getCoworkRunner = () => {
       if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
         return;
       }
-      const windows = BrowserWindow.getAllWindows();
-      windows.forEach(win => {
-        if (!win.isDestroyed()) {
-          try {
-            win.webContents.send('cowork:stream:sessionTitle', { sessionId, title });
-          } catch (error) {
-            console.error('Failed to forward cowork session title:', error);
-          }
-        }
-      });
+      broadcastToRenderers('cowork:stream:sessionTitle', { sessionId, title });
     });
 
     // Handle delegation requests from the LLM
@@ -7664,11 +7546,7 @@ const getBotBrowserMetaAppCacheService = () => {
 };
 
 function notifyMetaAppsChanged() {
-  BrowserWindow.getAllWindows().forEach((win) => {
-    if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
-      win.webContents.send('metaapps:changed');
-    }
-  });
+  broadcastToRenderers('metaapps:changed');
 }
 
 async function installCommunityMetaAppAndNotify(sourcePinId: string): Promise<CommunityMetaAppInstallResult> {
@@ -7823,21 +7701,11 @@ const getIMGatewayManager = () => {
 
     // Forward IM events to renderer
     imGatewayManager.on('statusChange', (status) => {
-      const windows = BrowserWindow.getAllWindows();
-      windows.forEach(win => {
-        if (!win.isDestroyed()) {
-          win.webContents.send('im:status:change', status);
-        }
-      });
+      broadcastToRenderers('im:status:change', status);
     });
 
     imGatewayManager.on('message', (message) => {
-      const windows = BrowserWindow.getAllWindows();
-      windows.forEach(win => {
-        if (!win.isDestroyed()) {
-          win.webContents.send('im:message:received', message);
-        }
-      });
+      broadcastToRenderers('im:message:received', message);
     });
 
     imGatewayManager.on('error', ({ platform, error }) => {
@@ -8097,13 +7965,7 @@ const getPreferenceStore = (): PreferenceStore => {
 const broadcastPreferenceUpdate = (reason: string): void => {
   preferenceUpdateSeq += 1;
   const payload = { seq: preferenceUpdateSeq, reason };
-  BrowserWindow.getAllWindows().forEach((win) => {
-    if (!win.isDestroyed()) {
-      try {
-        win.webContents.send('preference:update', payload);
-      } catch { /* ignore */ }
-    }
-  });
+  broadcastToRenderers('preference:update', payload);
 };
 
 const preferenceBotWriter = (metabotId: number): PreferenceWriterResolution => {
@@ -8154,16 +8016,11 @@ const metaTaskLocalRosterMetaIds = (): string[] =>
     .filter((id): id is string => typeof id === 'string' && Boolean(id));
 
 const broadcastMetaTaskUpdate = (reason: string): void => {
-  BrowserWindow.getAllWindows().forEach((win) => {
-    if (!win.isDestroyed()) {
-      try {
-        win.webContents.send('metatask:update', {
-          seq: getMetaTaskProjectionStore().bumpSeq(),
-          reason,
-        });
-      } catch { /* ignore */ }
-    }
-  });
+  const payload = {
+    seq: getMetaTaskProjectionStore().bumpSeq(),
+    reason,
+  };
+  broadcastToRenderers('metatask:update', payload);
 };
 
 let metaTaskRefresher: MetaTaskRefresher | null = null;
@@ -8178,13 +8035,7 @@ const getMetaTaskRefresher = () => {
       store: () => getMetaTaskProjectionStore(),
       rosterMetaIds: metaTaskLocalRosterMetaIds,
       onUpdated: (payload) => {
-        BrowserWindow.getAllWindows().forEach((win) => {
-          if (!win.isDestroyed()) {
-            try {
-              win.webContents.send('metatask:update', payload);
-            } catch { /* ignore */ }
-          }
-        });
+        broadcastToRenderers('metatask:update', payload);
       },
     });
   }
@@ -8211,13 +8062,7 @@ let longTermTaskUpdateSeq = 0;
 const broadcastLongTermTaskUpdate = (taskIds: string[], reason: string): void => {
   longTermTaskUpdateSeq += 1;
   const payload = { seq: longTermTaskUpdateSeq, taskIds, reason };
-  BrowserWindow.getAllWindows().forEach((win) => {
-    if (!win.isDestroyed()) {
-      try {
-        win.webContents.send('longtermTask:update', payload);
-      } catch { /* ignore */ }
-    }
-  });
+  broadcastToRenderers('longtermTask:update', payload);
 };
 
 const getTwinOrchestrationService = () => new TwinOrchestrationService({
@@ -8387,26 +8232,10 @@ const startAgentGameHost = (): void => {
   });
   // Surface consent cards + session updates to the renderer.
   agentGameHost.consent.on('consentRequired', (info) => {
-    BrowserWindow.getAllWindows().forEach((win) => {
-      if (!win.isDestroyed()) {
-        try {
-          win.webContents.send('agentGame:consentRequired', info);
-        } catch {
-          /* ignore */
-        }
-      }
-    });
+    broadcastToRenderers('agentGame:consentRequired', info);
   });
   agentGameHost.runtime.on('sessionUpdated', (session) => {
-    BrowserWindow.getAllWindows().forEach((win) => {
-      if (!win.isDestroyed()) {
-        try {
-          win.webContents.send('agentGame:sessionUpdated', toPublicSessionView(session));
-        } catch {
-          /* ignore */
-        }
-      }
-    });
+    broadcastToRenderers('agentGame:sessionUpdated', toPublicSessionView(session));
   });
   // Route group-chat inserts into the runtime (no-op when no session exists).
   // The startup wiring tier already set these seams so early ingest resolves
@@ -8661,11 +8490,7 @@ const getKnowledgeBaseService = (): KnowledgeBaseService => {
       store: getKnowledgeBaseStore(),
       resolveUserDataDir: () => app.getPath('userData'),
       emitToRenderer: (channel, data) => {
-        BrowserWindow.getAllWindows().forEach(win => {
-          if (!win.isDestroyed()) {
-            try { win.webContents.send(channel as string, data); } catch { /* ignore */ }
-          }
-        });
+        broadcastToRenderers(channel as string, data);
       },
     });
   }
@@ -8902,11 +8727,7 @@ const getSurfService = (): SurfService => {
         }));
       },
       broadcast: (payload) => {
-        BrowserWindow.getAllWindows().forEach(win => {
-          if (!win.isDestroyed()) {
-            try { win.webContents.send(SURF_STATUS_CHANNEL, payload); } catch { /* ignore */ }
-          }
-        });
+        broadcastToRenderers(SURF_STATUS_CHANNEL, payload);
       },
       runSurfSession: async (context) => {
         const coworkStore = getCoworkStore();
@@ -9859,9 +9680,7 @@ const recomputeSleepGuard = (): void => {
 };
 
 const broadcastSleepGuardStatus = (state: SleepGuardState): void => {
-  for (const window of BrowserWindow.getAllWindows()) {
-    window.webContents.send('powerGuard:changed', state);
-  }
+  broadcastToRenderers('powerGuard:changed', state);
 };
 
 const startSleepGuardRefresh = (): void => {
@@ -9904,10 +9723,7 @@ let mainWindow: BrowserWindow | null = null;
 let didInitAppOnce = false;
 
 onSandboxProgress((progress) => {
-  const windows = BrowserWindow.getAllWindows();
-  windows.forEach((win) => {
-    win.webContents.send('cowork:sandbox:downloadProgress', progress);
-  });
+  broadcastToRenderers('cowork:sandbox:downloadProgress', progress);
 });
 let isQuitting = false;
 
@@ -9960,6 +9776,7 @@ const emitWindowState = (win?: BrowserWindow | null) => {
   const target = win ?? mainWindow;
   if (!target || target.isDestroyed()) return;
   if (target.webContents.isDestroyed()) return;
+  // desktop-only: addressed to a specific window (not a broadcast)
   target.webContents.send('window:state-changed', {
     isMaximized: target.isMaximized(),
     isFullscreen: target.isFullScreen(),
@@ -10063,7 +9880,7 @@ if (!gotTheLock) {
   // (waitForStore) — a first-read race against the sqlite open otherwise
   // surfaces as "key absent" to tolerant readers and as a spurious failure
   // to strict ones.
-  ipcMain.handle('store:get', async (_event, key) => {
+  registerIpcHandler('store:get', async (_event, key) => {
     const storeRef = await waitForStore();
     return storeRef.get(key);
   });
@@ -10071,35 +9888,28 @@ if (!gotTheLock) {
   // Strict variant for callers that must distinguish "key absent" (null)
   // from "stored value unreadable" (rejects — e.g. a corrupt app_config row
   // must never be mistaken for a fresh install by the config service).
-  ipcMain.handle('store:getStrict', async (_event, key) => {
+  registerIpcHandler('store:getStrict', async (_event, key) => {
     const storeRef = await waitForStore();
     return storeRef.getStrict(key);
   });
 
   // 广播 store 键变更到所有窗口，供多窗口之间实时同步（配置机器人信息等场景）
   const broadcastStoreChanged = (key: string): void => {
-    BrowserWindow.getAllWindows().forEach((win) => {
-      if (win.isDestroyed()) return;
-      try {
-        win.webContents.send('store:changed', { key });
-      } catch (error) {
-        console.error('Failed to broadcast store:changed:', error);
-      }
-    });
+    broadcastToRenderers('store:changed', { key });
   };
   // Sleep guard status for the harness frontend (badge).
-  ipcMain.handle('powerGuard:status', () => {
+  registerIpcHandler('powerGuard:status', () => {
     return getSleepGuard().getState();
   });
 
   // Host setting: 「阻止设备休眠」 (General settings). Stored in the app kv
   // config store so a missing key (fresh install) resolves to OFF, and applied
   // to the running guard immediately — no app restart needed.
-  ipcMain.handle('powerGuard:getPreventDeviceSleep', () => {
+  registerIpcHandler('powerGuard:getPreventDeviceSleep', () => {
     return { enabled: readPreventDeviceSleepEnabled() };
   });
 
-  ipcMain.handle('powerGuard:setPreventDeviceSleep', (_event, enabled: unknown) => {
+  registerIpcHandler('powerGuard:setPreventDeviceSleep', (_event, enabled: unknown) => {
     try {
       const next = enabled === true;
       getStore().set(PREVENT_DEVICE_SLEEP_SETTING_KEY, next);
@@ -10113,13 +9923,13 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('store:set', async (_event, key, value) => {
+  registerIpcHandler('store:set', async (_event, key, value) => {
     const storeRef = await waitForStore();
     storeRef.set(key, value);
     broadcastStoreChanged(key);
   });
 
-  ipcMain.handle('store:remove', async (_event, key) => {
+  registerIpcHandler('store:remove', async (_event, key) => {
     const storeRef = await waitForStore();
     storeRef.delete(key);
     broadcastStoreChanged(key);
@@ -10138,11 +9948,11 @@ if (!gotTheLock) {
   });
 
   // Log IPC handlers
-  ipcMain.handle('log:getPath', () => {
+  registerIpcHandler('log:getPath', () => {
     return getLogFilePath();
   });
 
-  ipcMain.handle('log:openFolder', () => {
+  registerIpcHandler('log:openFolder', () => {
     const logPath = getLogFilePath();
     if (logPath) {
       shell.showItemInFolder(logPath);
@@ -10150,11 +9960,11 @@ if (!gotTheLock) {
   });
 
   // Auto-launch IPC handlers
-  ipcMain.handle('app:getAutoLaunch', () => {
+  registerIpcHandler('app:getAutoLaunch', () => {
     return { enabled: getAutoLaunchEnabled() };
   });
 
-  ipcMain.handle('app:setAutoLaunch', (_event, enabled: unknown) => {
+  registerIpcHandler('app:setAutoLaunch', (_event, enabled: unknown) => {
     if (typeof enabled !== 'boolean') {
       return { success: false, error: 'Invalid parameter: enabled must be boolean' };
     }
@@ -10173,11 +9983,11 @@ if (!gotTheLock) {
   // (browser automation + desktop computer use). Default allow; '0' cuts
   // both providers for every bot on their next turn (slot isolation re-pins
   // the sessions onto the clean runtime).
-  ipcMain.handle('app:getExperimentalAutomation', () => {
+  registerIpcHandler('app:getExperimentalAutomation', () => {
     return { enabled: isExperimentalAutomationAllowed(getStoreOrNull()) };
   });
 
-  ipcMain.handle('app:setExperimentalAutomation', (_event, enabled: unknown) => {
+  registerIpcHandler('app:setExperimentalAutomation', (_event, enabled: unknown) => {
     if (typeof enabled !== 'boolean') {
       return { success: false, error: 'Invalid parameter: enabled must be boolean' };
     }
@@ -10214,7 +10024,7 @@ if (!gotTheLock) {
     windowFromEvent(event)?.close();
   });
 
-  ipcMain.handle('window:isMaximized', (event) => {
+  registerIpcHandler('window:isMaximized', (event) => {
     return windowFromEvent(event)?.isMaximized() ?? false;
   });
 
@@ -10234,9 +10044,9 @@ if (!gotTheLock) {
     showSystemMenu(position, windowFromEvent(event));
   });
 
-  ipcMain.handle('app:getVersion', () => app.getVersion());
-  ipcMain.handle('app:getSystemLocale', () => getOsLocale());
-  ipcMain.handle('startup:rendererInitialized', () => {
+  registerIpcHandler('app:getVersion', () => app.getVersion());
+  registerIpcHandler('app:getSystemLocale', () => getOsLocale());
+  registerIpcHandler('startup:rendererInitialized', () => {
     startupLog('renderer initialization complete');
     return {
       success: true,
@@ -10246,7 +10056,7 @@ if (!gotTheLock) {
   });
 
   // Skills IPC handlers
-  ipcMain.handle('skills:list', () => {
+  registerIpcHandler('skills:list', () => {
     try {
       const manager = getSkillManager();
       const skills = manager.listSkills();
@@ -10265,7 +10075,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('skills:getAssignmentInfo', () => {
+  registerIpcHandler('skills:getAssignmentInfo', () => {
     try {
       const manager = getSkillManager();
       return {
@@ -10285,7 +10095,7 @@ if (!gotTheLock) {
   // Scope editor write: 'global' = share with every bot; 'bots' = exactly the
   // given bots (scope flips to library + assignment rows replaced); 'library'
   // = nobody (rows cleared).
-  ipcMain.handle('skills:setScope', (
+  registerIpcHandler('skills:setScope', (
     _event,
     options: { id: string; scope: 'library' | 'global' | 'bots'; metabotIds?: number[] }
   ) => {
@@ -10307,7 +10117,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('skills:setEnabled', (_event, options: { id: string; enabled: boolean }) => {
+  registerIpcHandler('skills:setEnabled', (_event, options: { id: string; enabled: boolean }) => {
     try {
       const skills = getSkillManager().setSkillEnabled(options.id, options.enabled);
       return { success: true, skills };
@@ -10316,7 +10126,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('skills:delete', (_event, id: string) => {
+  registerIpcHandler('skills:delete', (_event, id: string) => {
     try {
       const skills = getSkillManager().deleteSkill(id);
       return { success: true, skills };
@@ -10327,7 +10137,7 @@ if (!gotTheLock) {
 
   // Authorized-but-missing installs (directory gone, assignment rows intact) —
   // the Skills page banner surfaces them with one-click reinstall/forget.
-  ipcMain.handle('skills:listMissing', () => {
+  registerIpcHandler('skills:listMissing', () => {
     try {
       return { success: true, missing: getSkillManager().listMissingExternalSkills() };
     } catch (error) {
@@ -10335,7 +10145,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('skills:forgetMissing', (_event, id: string) => {
+  registerIpcHandler('skills:forgetMissing', (_event, id: string) => {
     try {
       getSkillManager().forgetMissingSkill(id);
       return { success: true };
@@ -10344,11 +10154,11 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('skills:download', async (_event, source: string) => {
+  registerIpcHandler('skills:download', async (_event, source: string) => {
     return getSkillManager().downloadSkill(source);
   });
 
-  ipcMain.handle('skills:getRoot', () => {
+  registerIpcHandler('skills:getRoot', () => {
     try {
       const root = getSkillManager().getSkillsRoot();
       return { success: true, path: root };
@@ -10357,7 +10167,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('skills:autoRoutingPrompt', () => {
+  registerIpcHandler('skills:autoRoutingPrompt', () => {
     try {
       const prompt = getSkillManager().buildCoworkAutoRoutingPrompt();
       return { success: true, prompt };
@@ -10366,7 +10176,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metaapps:autoRoutingPrompt', () => {
+  registerIpcHandler('metaapps:autoRoutingPrompt', () => {
     try {
       const prompt = getMetaAppManager().buildCoworkAutoRoutingPrompt();
       return { success: true, prompt };
@@ -10375,7 +10185,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('botBrowser:resolveMetaAppPin', async (_event, input: { pinId?: string }) => {
+  registerIpcHandler('botBrowser:resolveMetaAppPin', async (_event, input: { pinId?: string }) => {
     return getBotBrowserMetaAppCacheService().resolveMetaAppPin(String(input?.pinId ?? ''));
   });
 
@@ -10392,7 +10202,7 @@ if (!gotTheLock) {
   // mimeType, so the screenshot tool can request a smaller JPEG when sending the
   // image to the model. The renderer resolves the rect (content area / whole
   // surface / clip); this handler only does the capturePage + encode.
-  ipcMain.handle('botBrowser:capturePage', async (
+  registerIpcHandler('botBrowser:capturePage', async (
     event,
     options: {
       rect: { x: number; y: number; width: number; height: number };
@@ -10463,60 +10273,60 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('botBrowser:resolveResource', async (_event, input: unknown) => {
+  registerIpcHandler('botBrowser:resolveResource', async (_event, input: unknown) => {
     return getBotBrowserHostService().resolveResource(
       botBrowserHostInput<{ actorId?: string; uri?: string }>(input) as { actorId?: string; uri: string },
     );
   });
 
-  ipcMain.handle('botBrowser:getProfile', async (_event, input: unknown) => {
+  registerIpcHandler('botBrowser:getProfile', async (_event, input: unknown) => {
     return getBotBrowserHostService().getProfile(
       botBrowserHostInput<{ actorId?: string; globalMetaId?: string }>(input) as { actorId?: string; globalMetaId: string },
     );
   });
 
-  ipcMain.handle('botBrowser:getSettings', async (_event, input?: unknown) => {
+  registerIpcHandler('botBrowser:getSettings', async (_event, input?: unknown) => {
     return getBotBrowserHostService().getSettings(
       botBrowserHostInput<{ actorId?: string }>(input),
     );
   });
 
-  ipcMain.handle('botBrowser:updateSettings', async (_event, input: unknown) => {
+  registerIpcHandler('botBrowser:updateSettings', async (_event, input: unknown) => {
     return getBotBrowserHostService().updateSettings(
       botBrowserHostInput<{ actorId?: string; browser?: Record<string, unknown> }>(input),
     );
   });
 
-  ipcMain.handle('botBrowser:getMetaAppCache', async () => {
+  registerIpcHandler('botBrowser:getMetaAppCache', async () => {
     return getBotBrowserMetaAppCacheService().getCache();
   });
 
-  ipcMain.handle('botBrowser:clearMetaAppCache', async (_event, input?: { all?: boolean; scope?: string; pinId?: string; cacheKey?: string }) => {
+  registerIpcHandler('botBrowser:clearMetaAppCache', async (_event, input?: { all?: boolean; scope?: string; pinId?: string; cacheKey?: string }) => {
     return getBotBrowserMetaAppCacheService().clearCache(input);
   });
 
-  ipcMain.handle('botBrowser:writeMetaIdPin', async (event, input: unknown) => {
+  registerIpcHandler('botBrowser:writeMetaIdPin', async (event, input: unknown) => {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     return getBotBrowserBridgeServiceForWindow(ownerWindow).writeMetaIdPin(
       botBrowserBridgeInput<BotBrowserPinWriteInput>(input),
     );
   });
 
-  ipcMain.handle('botBrowser:uploadMetaFile', async (event, input: unknown) => {
+  registerIpcHandler('botBrowser:uploadMetaFile', async (event, input: unknown) => {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     return getBotBrowserBridgeServiceForWindow(ownerWindow).uploadMetaFile(
       botBrowserBridgeInput<BotBrowserMetaFileUploadInput>(input),
     );
   });
 
-  ipcMain.handle('botBrowser:completeLlm', async (event, input: unknown) => {
+  registerIpcHandler('botBrowser:completeLlm', async (event, input: unknown) => {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     return getBotBrowserBridgeServiceForWindow(ownerWindow).completeLlm(
       botBrowserBridgeInput<BotBrowserLlmCompleteInput>(input),
     );
   });
 
-  ipcMain.handle('botBrowser:requestPermissions', async (event, input: unknown) => {
+  registerIpcHandler('botBrowser:requestPermissions', async (event, input: unknown) => {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     return getBotBrowserBridgeServiceForWindow(ownerWindow).requestPermissions(
       botBrowserBridgeInput<BotBrowserPermissionsInput>(input),
@@ -10526,7 +10336,7 @@ if (!gotTheLock) {
   // Sends an on-chain /protocols/simplemsg PIN (ECDH-encrypted) from a local
   // Bot to a peer, driven by the Bot Browser private-chat trusted action.
   // Mirrors the A2A guidance-restart send path (see main.ts:5708).
-  ipcMain.handle('botBrowser:sendPrivateChat', async (_event, input: unknown) => {
+  registerIpcHandler('botBrowser:sendPrivateChat', async (_event, input: unknown) => {
     try {
       const body = (input ?? {}) as {
         actorId?: unknown;
@@ -10642,7 +10452,7 @@ if (!gotTheLock) {
 
   // Agent-Game-v2 `browser.app.session.*` host surface (docs/14 §1). IDBots is
   // the authorization + session-state owner; ABC (when integrated) forwards.
-  ipcMain.handle('agentGame:session', async (_event, input: { method: string; payload?: unknown; actorId?: string; resourceUri?: string } | undefined) => {
+  registerIpcHandler('agentGame:session', async (_event, input: { method: string; payload?: unknown; actorId?: string; resourceUri?: string } | undefined) => {
     // The host starts on the idle startup tier, so a MetaApp that loads before
     // that must still be able to bring it up — same on-demand start the RPC
     // surface performs.
@@ -10658,7 +10468,7 @@ if (!gotTheLock) {
     return host.handleSessionMethod(method, payload, actorId, { resourceUri });
   });
 
-  ipcMain.handle('agentGame:respondConsent', async (_event, input: { requestId: string; approved: boolean; reason?: string } | undefined) => {
+  registerIpcHandler('agentGame:respondConsent', async (_event, input: { requestId: string; approved: boolean; reason?: string } | undefined) => {
     const host = getAgentGameHost();
     if (!host) {
       return { success: false, error: 'Agent-Game runtime not started' };
@@ -10669,13 +10479,13 @@ if (!gotTheLock) {
     return { success: true };
   });
 
-  ipcMain.handle('agentGame:listPendingConsent', async () => {
+  registerIpcHandler('agentGame:listPendingConsent', async () => {
     const host = getAgentGameHost();
     if (!host) return { cards: [] };
     return { cards: host.consent.listPending() };
   });
 
-  ipcMain.handle('agentGame:listSessions', async (_event, input: { appId?: string; status?: string; groupId?: string } | undefined) => {
+  registerIpcHandler('agentGame:listSessions', async (_event, input: { appId?: string; status?: string; groupId?: string } | undefined) => {
     const host = getAgentGameHost();
     if (!host) return { sessions: [] };
     const actorId = getUserIdentityStore().get()?.globalmetaid ?? '';
@@ -10683,7 +10493,7 @@ if (!gotTheLock) {
     return { sessions: host.runtime.list(actorId, { appId: input?.appId, status, groupId: input?.groupId }) };
   });
 
-  ipcMain.handle('metaapps:list', async () => {
+  registerIpcHandler('metaapps:list', async () => {
     try {
       const manager = getMetaAppManager();
       const apps = manager.listMetaApps();
@@ -10718,7 +10528,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metaapps:listCommunity', async (_event, input?: { cursor?: string; size?: number; seen?: string[] }) => {
+  registerIpcHandler('metaapps:listCommunity', async (_event, input?: { cursor?: string; size?: number; seen?: string[] }) => {
     try {
       const result = await listCommunityMetaApps({
         manager: getMetaAppManager(),
@@ -10738,7 +10548,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metaapps:installCommunity', async (_event, input: { sourcePinId: string }) => {
+  registerIpcHandler('metaapps:installCommunity', async (_event, input: { sourcePinId: string }) => {
     try {
       const result = await installCommunityMetaAppAndNotify(String(input?.sourcePinId || ''));
       return result;
@@ -10747,7 +10557,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metaappOwner:list', async (_event, input: { metabotId: number; cursor?: string; size?: number }) => {
+  registerIpcHandler('metaappOwner:list', async (_event, input: { metabotId: number; cursor?: string; size?: number }) => {
     try {
       const result = await listOwnerMetaApps(getMetabotStore(), input.metabotId, {
         cursor: input.cursor, size: input.size,
@@ -10758,7 +10568,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metaappOwner:publish', async (_event, input: any) => {
+  registerIpcHandler('metaappOwner:publish', async (_event, input: any) => {
     try {
       const result = await publishMetaApp(getMetabotStore(), input.metabotId, input.manifest, {
         confirm: input.confirm, network: input.network,
@@ -10769,7 +10579,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metaappOwner:update', async (_event, input: any) => {
+  registerIpcHandler('metaappOwner:update', async (_event, input: any) => {
     try {
       const result = await updateMetaApp(getMetabotStore(), input.metabotId, input.targetPinId, input.manifest, {
         confirm: input.confirm, network: input.network, firstPinId: input.firstPinId,
@@ -10780,7 +10590,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metaappOwner:delete', async (_event, input: any) => {
+  registerIpcHandler('metaappOwner:delete', async (_event, input: any) => {
     try {
       const result = await removeMetaApp(getMetabotStore(), input.metabotId, input.targetPinId, {
         confirm: input.confirm, network: input.network, firstPinId: input.firstPinId,
@@ -10791,7 +10601,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metaapps:open', async (_event, input: { appId: string; targetPath?: string }) => {
+  registerIpcHandler('metaapps:open', async (_event, input: { appId: string; targetPath?: string }) => {
     try {
       return await openMetaApp({
         appId: String(input?.appId ?? ''),
@@ -10805,7 +10615,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metaapps:resolveUrl', async (_event, input: { appId: string; targetPath?: string }) => {
+  registerIpcHandler('metaapps:resolveUrl', async (_event, input: { appId: string; targetPath?: string }) => {
     try {
       return await resolveMetaAppUrl({
         appId: String(input?.appId ?? ''),
@@ -10818,15 +10628,15 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('skills:getConfig', (_event, skillId: string) => {
+  registerIpcHandler('skills:getConfig', (_event, skillId: string) => {
     return getSkillManager().getSkillConfig(skillId);
   });
 
-  ipcMain.handle('skills:setConfig', (_event, skillId: string, config: Record<string, string>) => {
+  registerIpcHandler('skills:setConfig', (_event, skillId: string, config: Record<string, string>) => {
     return getSkillManager().setSkillConfig(skillId, config);
   });
 
-  ipcMain.handle('skills:testEmailConnectivity', async (
+  registerIpcHandler('skills:testEmailConnectivity', async (
     _event,
     skillId: string,
     config: Record<string, string>
@@ -10835,7 +10645,7 @@ if (!gotTheLock) {
   });
 
   // Official skills sync IPC handlers (MetaWeb)
-  ipcMain.handle('idbots:getOfficialSkillsStatus', async () => {
+  registerIpcHandler('idbots:getOfficialSkillsStatus', async () => {
     try {
       return await getOfficialSkillsStatus();
     } catch (error) {
@@ -10843,7 +10653,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('idbots:installOfficialSkill', async (_event, skill: {
+  registerIpcHandler('idbots:installOfficialSkill', async (_event, skill: {
     name: string;
     skillFileUri: string;
     remoteVersion: string;
@@ -10857,11 +10667,7 @@ if (!gotTheLock) {
         skill.remoteCreator
       );
       if (result.success) {
-        BrowserWindow.getAllWindows().forEach(win => {
-          if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
-            win.webContents.send('skills:changed');
-          }
-        });
+        broadcastToRenderers('skills:changed');
       }
       return result;
     } catch (error) {
@@ -10869,15 +10675,11 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('idbots:syncAllOfficialSkills', async () => {
+  registerIpcHandler('idbots:syncAllOfficialSkills', async () => {
     try {
       const result = await syncAllOfficialSkills();
       if (result.success) {
-        BrowserWindow.getAllWindows().forEach(win => {
-          if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
-            win.webContents.send('skills:changed');
-          }
-        });
+        broadcastToRenderers('skills:changed');
       }
       return result;
     } catch (error) {
@@ -10885,7 +10687,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('idbots:getCommunitySkillsStatus', async () => {
+  registerIpcHandler('idbots:getCommunitySkillsStatus', async () => {
     try {
       return await getCommunitySkillsStatus();
     } catch (error) {
@@ -10894,13 +10696,13 @@ if (!gotTheLock) {
   });
 
   // MetaWebListener IPC (real WebSocket + DB; isolated from IM Gateway)
-  ipcMain.handle('idbots:getListenerConfig', async () => {
+  registerIpcHandler('idbots:getListenerConfig', async () => {
     return { success: true, config: getListenerConfigFromStore() };
   });
-  ipcMain.handle('idbots:getListenerStatus', async () => {
+  registerIpcHandler('idbots:getListenerStatus', async () => {
     return { success: true, running: isListenerRunning(), connected: isListenerSocketConnected() };
   });
-  ipcMain.handle('idbots:toggleListener', async (_event, payload: { type: 'enabled' | 'groupChats' | 'privateChats' | 'serviceRequests' | 'respondToStrangerPrivateChats'; enabled: boolean }) => {
+  registerIpcHandler('idbots:toggleListener', async (_event, payload: { type: 'enabled' | 'groupChats' | 'privateChats' | 'serviceRequests' | 'respondToStrangerPrivateChats'; enabled: boolean }) => {
     const config = getListenerConfigFromStore();
     if (payload.type === 'enabled' || payload.type === 'groupChats' || payload.type === 'privateChats' || payload.type === 'serviceRequests' || payload.type === 'respondToStrangerPrivateChats') {
       const next = normalizeListenerConfig({
@@ -10919,7 +10721,7 @@ if (!gotTheLock) {
     }
     return { success: false, error: 'Invalid listener type' };
   });
-  ipcMain.handle('idbots:startMetaWebListener', async () => {
+  registerIpcHandler('idbots:startMetaWebListener', async () => {
     try {
       const config = getListenerConfigFromStore();
       if (!shouldRunListener(config)) {
@@ -10933,7 +10735,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('idbots:assignGroupChatTask', async (_event, params: AssignGroupChatTaskParams) => {
+  registerIpcHandler('idbots:assignGroupChatTask', async (_event, params: AssignGroupChatTaskParams) => {
     try {
       const db = getStore().getDatabase();
       const saveDb = getStore().getSaveFunction();
@@ -10949,7 +10751,7 @@ if (!gotTheLock) {
   });
 
   // Cowork IPC handlers
-  ipcMain.handle('cowork:session:start', async (_event, options: {
+  registerIpcHandler('cowork:session:start', async (_event, options: {
     prompt: string;
     cwd?: string;
     systemPrompt?: string;
@@ -11121,7 +10923,7 @@ if (!gotTheLock) {
   // the user's typing/reading instead of stacking inside the first turn.
   // Fire-and-forget: the handler returns immediately and the boot proceeds in
   // the background; a wrong guess idles out under the normal reap.
-  ipcMain.handle('cowork:session:prewarmTurnSlot', async (_event, input: {
+  registerIpcHandler('cowork:session:prewarmTurnSlot', async (_event, input: {
     sessionId?: string;
     metabotId?: number | null;
     model?: string | null;
@@ -11172,7 +10974,7 @@ if (!gotTheLock) {
   // If the turn cannot start, or dies before producing any assistant text
   // (offline, free quota exhausted, model misconfigured), the fallbackGreeting
   // is seeded so the chat never opens empty.
-  ipcMain.handle('cowork:session:createGreeting', async (_event, options: {
+  registerIpcHandler('cowork:session:createGreeting', async (_event, options: {
     title?: string;
     cwd?: string;
     systemPrompt?: string;
@@ -11283,7 +11085,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:ensureA2A', async (_event, input: {
+  registerIpcHandler('cowork:session:ensureA2A', async (_event, input: {
     actorId?: unknown;
     localMetabotId?: unknown;
     peerGlobalMetaId?: unknown;
@@ -11314,7 +11116,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:continue', async (_event, options: {
+  registerIpcHandler('cowork:session:continue', async (_event, options: {
     sessionId: string;
     prompt: string;
     systemPrompt?: string;
@@ -11353,13 +11155,13 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:submitInput', async (_event, input: CoworkSubmitInput) =>
+  registerIpcHandler('cowork:session:submitInput', async (_event, input: CoworkSubmitInput) =>
     withSqliteRecovery('cowork:session:submitInput', async () =>
       getCoworkTurnSubmissionController().submit(input)
     )
   );
 
-  ipcMain.handle('cowork:session:stop', async (_event, sessionId: string) => {
+  registerIpcHandler('cowork:session:stop', async (_event, sessionId: string) => {
     try {
       const runner = getCoworkRunner();
       runner.stopSession(sessionId, { reason: 'user requested stop' });
@@ -11373,7 +11175,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:compact', async (_event, sessionId: string) => {
+  registerIpcHandler('cowork:session:compact', async (_event, sessionId: string) => {
     try {
       return await getCoworkRunner().requestManualCompaction(sessionId);
     } catch (error) {
@@ -11386,7 +11188,7 @@ if (!gotTheLock) {
 
   // /export command: render the session transcript as Markdown and save it
   // through a native save dialog (host-side port of the DSH /export command).
-  ipcMain.handle('cowork:session:exportTranscript', async (event, sessionId: string) => {
+  registerIpcHandler('cowork:session:exportTranscript', async (event, sessionId: string) => {
     try {
       if (!sessionId) {
         return { success: false, error: 'Session id is required' };
@@ -11425,7 +11227,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:setPermissionMode', async (_event, payload: {
+  registerIpcHandler('cowork:session:setPermissionMode', async (_event, payload: {
     sessionId: string;
     permissionMode: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
   }) => {
@@ -11448,7 +11250,7 @@ if (!gotTheLock) {
   });
 
   // /goal command: set, update, or clear a session's goal (null clears).
-  ipcMain.handle('cowork:session:setGoal', async (_event, payload: {
+  registerIpcHandler('cowork:session:setGoal', async (_event, payload: {
     sessionId: string;
     goal: { text: string; status: 'active' | 'paused' } | null;
   }) => {
@@ -11477,7 +11279,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:stopTask', async (_event, payload: {
+  registerIpcHandler('cowork:session:stopTask', async (_event, payload: {
     sessionId: string;
     taskId: string;
   }) => {
@@ -11497,7 +11299,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:backgroundTask', async (_event, payload: {
+  registerIpcHandler('cowork:session:backgroundTask', async (_event, payload: {
     sessionId: string;
     toolUseId?: string;
   }) => {
@@ -11516,7 +11318,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:setEffort', async (_event, payload: {
+  registerIpcHandler('cowork:session:setEffort', async (_event, payload: {
     sessionId: string;
     effort: string | null;
   }) => {
@@ -11535,7 +11337,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:fork', async (_event, payload: {
+  registerIpcHandler('cowork:session:fork', async (_event, payload: {
     sessionId: string;
     messageId: string;
     title?: string;
@@ -11574,7 +11376,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:rewind', async (_event, payload: {
+  registerIpcHandler('cowork:session:rewind', async (_event, payload: {
     sessionId: string;
     messageId: string;
   }) => {
@@ -11598,7 +11400,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:getSubagents', async (_event, sessionId: string) => {
+  registerIpcHandler('cowork:session:getSubagents', async (_event, sessionId: string) => {
     try {
       if (!sessionId) throw new Error('Session id is required');
       const session = getCoworkStore().getSession(sessionId);
@@ -11618,7 +11420,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:getSubagentMessages', async (_event, payload: {
+  registerIpcHandler('cowork:session:getSubagentMessages', async (_event, payload: {
     sessionId: string;
     agentId: string;
     limit?: number;
@@ -11644,7 +11446,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:getAutoApproveTools', async (_event, sessionId: string) => {
+  registerIpcHandler('cowork:session:getAutoApproveTools', async (_event, sessionId: string) => {
     try {
       if (!sessionId) throw new Error('Session id is required');
       return { success: true, tools: getCoworkRunner().getAutoApproveTools(sessionId) };
@@ -11656,7 +11458,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:addAutoApproveTool', async (_event, payload: {
+  registerIpcHandler('cowork:session:addAutoApproveTool', async (_event, payload: {
     sessionId: string;
     toolName: string;
   }) => {
@@ -11673,7 +11475,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:removeAutoApproveTool', async (_event, payload: {
+  registerIpcHandler('cowork:session:removeAutoApproveTool', async (_event, payload: {
     sessionId: string;
     toolName: string;
   }) => {
@@ -11690,7 +11492,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:queueA2AGuidance', async (_event, input: {
+  registerIpcHandler('cowork:session:queueA2AGuidance', async (_event, input: {
     sessionId?: unknown;
     guidance?: unknown;
   }) => {
@@ -11921,7 +11723,7 @@ if (!gotTheLock) {
   // owner-reply policy answers it once the pin syncs back. This deliberately
   // bypasses the guidance flow — the words are the human's own, not a steer
   // for the bot's next LLM turn.
-  ipcMain.handle('cowork:session:sendOwnerA2AMessage', async (_event, input: {
+  registerIpcHandler('cowork:session:sendOwnerA2AMessage', async (_event, input: {
     sessionId?: unknown;
     content?: unknown;
   }) => {
@@ -12057,7 +11859,7 @@ if (!gotTheLock) {
   // on; this is the same guarded heal the daemon applies on new A2A activity,
   // exposed so the renderer banner can be cleared explicitly. Only an errored
   // A2A session moves to 'completed' — running/idle/stopped keep their meaning.
-  ipcMain.handle('cowork:session:clearError', async (_event, sessionId: string) => {
+  registerIpcHandler('cowork:session:clearError', async (_event, sessionId: string) => {
     try {
       const coworkStoreInst = getCoworkStore();
       const session = coworkStoreInst.getSessionWithoutMessages(sessionId);
@@ -12071,11 +11873,7 @@ if (!gotTheLock) {
         return { success: true, status: session.status };
       }
       coworkStoreInst.updateSession(sessionId, { status: 'completed' });
-      BrowserWindow.getAllWindows().forEach((win) => {
-        if (!win.isDestroyed()) {
-          try { win.webContents.send('cowork:stream:complete', { sessionId }); } catch { /* ignore */ }
-        }
-      });
+      broadcastToRenderers('cowork:stream:complete', { sessionId });
       return { success: true, status: 'completed' };
     } catch (error) {
       return {
@@ -12085,18 +11883,14 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:endA2APrivateChat', async (_event, sessionId: string) => {
+  registerIpcHandler('cowork:session:endA2APrivateChat', async (_event, sessionId: string) => {
     try {
       const coworkStoreInst = getCoworkStore();
       const result = endPrivateChatA2AConversation({
         coworkStore: coworkStoreInst,
         sessionId,
         emitToRenderer: (channel, data) => {
-          BrowserWindow.getAllWindows().forEach((win) => {
-            if (!win.isDestroyed()) {
-              try { win.webContents.send(channel as string, data); } catch { /* ignore */ }
-            }
-          });
+          broadcastToRenderers(channel as string, data);
         },
       });
       if (!result.success) {
@@ -12194,7 +11988,7 @@ if (!gotTheLock) {
     return { sessionId: '', orderTxid: null };
   };
 
-  ipcMain.handle('cowork:session:resendA2ADeliveryArtifact', async (_event, input: unknown, legacyOrderTxid?: unknown) => {
+  registerIpcHandler('cowork:session:resendA2ADeliveryArtifact', async (_event, input: unknown, legacyOrderTxid?: unknown) => {
     try {
       const { sessionId, orderTxid } = normalizeA2ADeliveryArtifactResendInput(input, legacyOrderTxid);
       if (!sessionId) {
@@ -12278,11 +12072,7 @@ if (!gotTheLock) {
           orderDeliveryUploadNotice: true,
         }),
       });
-      BrowserWindow.getAllWindows().forEach((win) => {
-        if (!win.isDestroyed()) {
-          try { win.webContents.send('cowork:stream:message', { sessionId, message: uploadNoticeMessage }); } catch { /* ignore */ }
-        }
-      });
+      broadcastToRenderers('cowork:stream:message', { sessionId, message: uploadNoticeMessage });
 
       const { uploadMetaFile } = await import('./services/metaFileUploadService');
       const verifiedUpload = await uploadVerifiedDeliveryArtifact({
@@ -12329,11 +12119,7 @@ if (!gotTheLock) {
             }),
           }),
         });
-        BrowserWindow.getAllWindows().forEach((win) => {
-          if (!win.isDestroyed()) {
-            try { win.webContents.send('cowork:stream:message', { sessionId, message: failureMessage }); } catch { /* ignore */ }
-          }
-        });
+        broadcastToRenderers('cowork:stream:message', { sessionId, message: failureMessage });
         return {
           success: false,
           error: verifiedUpload.error instanceof Error
@@ -12386,11 +12172,7 @@ if (!gotTheLock) {
           }),
         }),
       });
-      BrowserWindow.getAllWindows().forEach((win) => {
-        if (!win.isDestroyed()) {
-          try { win.webContents.send('cowork:stream:message', { sessionId, message: deliveryMessage }); } catch { /* ignore */ }
-        }
-      });
+      broadcastToRenderers('cowork:stream:message', { sessionId, message: deliveryMessage });
 
       getServiceOrderLifecycleService().markSellerOrderDelivered({
         localMetabotId: metabotId,
@@ -12412,7 +12194,7 @@ if (!gotTheLock) {
 
   // Archiving replaces deletion for user-facing session management: raw
   // records are experience data and are never destroyed from the UI.
-  ipcMain.handle('cowork:session:archive', async (_event, sessionId: string) => {
+  registerIpcHandler('cowork:session:archive', async (_event, sessionId: string) => {
     return withSqliteRecovery('cowork:session:archive', async () => {
       try {
         const coworkStoreInstance = getCoworkStore();
@@ -12428,7 +12210,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:unarchive', async (_event, sessionId: string) => {
+  registerIpcHandler('cowork:session:unarchive', async (_event, sessionId: string) => {
     return withSqliteRecovery('cowork:session:unarchive', async () => {
       try {
         const coworkStoreInstance = getCoworkStore();
@@ -12444,7 +12226,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:listArchived', async (_event, options?: { metabotId?: number | null; query?: string; searchContent?: boolean; sessionType?: 'standard' | 'a2a' | 'browser' | 'group_task'; limit?: number; offset?: number }) => {
+  registerIpcHandler('cowork:session:listArchived', async (_event, options?: { metabotId?: number | null; query?: string; searchContent?: boolean; sessionType?: 'standard' | 'a2a' | 'browser' | 'group_task'; limit?: number; offset?: number }) => {
     return withSqliteRecovery('cowork:session:listArchived', async () => {
       try {
         const coworkStoreInstance = getCoworkStore();
@@ -12461,7 +12243,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:pin', async (_event, options: { sessionId: string; pinned: boolean }) => {
+  registerIpcHandler('cowork:session:pin', async (_event, options: { sessionId: string; pinned: boolean }) => {
     return withSqliteRecovery('cowork:session:pin', async () => {
       try {
         const coworkStoreInstance = getCoworkStore();
@@ -12477,7 +12259,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:foldOverride', async (_event, options: { sessionId: string; override: 'in' | 'out' | null }) => {
+  registerIpcHandler('cowork:session:foldOverride', async (_event, options: { sessionId: string; override: 'in' | 'out' | null }) => {
     return withSqliteRecovery('cowork:session:foldOverride', async () => {
       try {
         const sessionId = typeof options?.sessionId === 'string' ? options.sessionId.trim() : '';
@@ -12504,7 +12286,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:setModel', async (_event, options: {
+  registerIpcHandler('cowork:session:setModel', async (_event, options: {
     sessionId: string;
     model: string | null;
     /** Optional per-session effort (off/low/high/max, or the 'default' sentinel for an explicit Default pick); undefined leaves it unchanged. */
@@ -12535,7 +12317,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:rename', async (_event, options: { sessionId: string; title: string }) => {
+  registerIpcHandler('cowork:session:rename', async (_event, options: { sessionId: string; title: string }) => {
     return withSqliteRecovery('cowork:session:rename', async () => {
       try {
         const title = options.title.trim();
@@ -12559,7 +12341,7 @@ if (!gotTheLock) {
   // (dsh-plan-mode ctx.planMode.set via idbots/plan-mode/set). Returns the
   // controller outcome plus the current { active, pending? } view; ok:false
   // when no live kernel owns the session.
-  ipcMain.handle('cowork:plan-mode:set', async (_event, options: { sessionId: string; active: boolean }) => {
+  registerIpcHandler('cowork:plan-mode:set', async (_event, options: { sessionId: string; active: boolean }) => {
     return withSqliteRecovery('cowork:plan-mode:set', async () => {
       try {
         return await getCoworkRunner().dshSetPlanMode(options.sessionId, options.active === true);
@@ -12576,7 +12358,7 @@ if (!gotTheLock) {
   // Read-only plan-mode view for the sidebar chip's initial state (the
   // kernel-side mode survives on the session log). Best-effort: ok:true
   // with plan:null when no runtime currently hosts the session.
-  ipcMain.handle('cowork:plan-mode:get', async (_event, options: { sessionId: string }) => {
+  registerIpcHandler('cowork:plan-mode:get', async (_event, options: { sessionId: string }) => {
     return withSqliteRecovery('cowork:plan-mode:get', async () => {
       try {
         return await getCoworkRunner().dshGetPlanMode(options.sessionId);
@@ -12590,7 +12372,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:get', async (_event, payload: string | { sessionId?: unknown; messageLimit?: unknown }) => {
+  registerIpcHandler('cowork:session:get', async (_event, payload: string | { sessionId?: unknown; messageLimit?: unknown }) => {
     return withSqliteRecovery('cowork:session:get', async () => {
       try {
         // The session view is a bounded window (newest messages first) plus the
@@ -12684,7 +12466,7 @@ if (!gotTheLock) {
    * delta mode for that message, so adopting it realigns both sides; null means
    * the next update for the message is a full send anyway.
    */
-  ipcMain.handle('cowork:stream:liveContent', async (_event, payload: { sessionId?: unknown; messageId?: unknown }) => {
+  registerIpcHandler('cowork:stream:liveContent', async (_event, payload: { sessionId?: unknown; messageId?: unknown }) => {
     const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : '';
     const messageId = typeof payload?.messageId === 'string' ? payload.messageId : '';
     if (!sessionId || !messageId) return { success: false as const };
@@ -12694,7 +12476,7 @@ if (!gotTheLock) {
       : { success: true as const, content };
   });
 
-  ipcMain.handle('cowork:session:refreshPeerProfile', async (_event, input: {
+  registerIpcHandler('cowork:session:refreshPeerProfile', async (_event, input: {
     sessionId?: unknown;
     force?: unknown;
   }) => {
@@ -12707,7 +12489,7 @@ if (!gotTheLock) {
     return { success: true, changed: result.changed };
   });
 
-  ipcMain.handle('cowork:session:getMessagesPage', async (_event, input: {
+  registerIpcHandler('cowork:session:getMessagesPage', async (_event, input: {
     sessionId?: unknown;
     beforeSequence?: unknown;
     beforeTranscriptCursor?: unknown;
@@ -12739,7 +12521,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:message:setFeedback', async (_event, input: {
+  registerIpcHandler('cowork:message:setFeedback', async (_event, input: {
     messageId?: unknown;
     rating?: unknown;
     comment?: unknown;
@@ -12792,7 +12574,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:listFeedback', async (_event, input: {
+  registerIpcHandler('cowork:session:listFeedback', async (_event, input: {
     sessionId?: unknown;
   }) => {
     return withSqliteRecovery('cowork:session:listFeedback', async () => {
@@ -12813,7 +12595,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:getA2AHistoryPage', async (_event, input: {
+  registerIpcHandler('cowork:session:getA2AHistoryPage', async (_event, input: {
     sessionId?: unknown;
     beforeCursor?: { episodeIndex?: unknown; beforeSequence?: unknown } | null;
     limit?: unknown;
@@ -12850,7 +12632,7 @@ if (!gotTheLock) {
 
   // Episode metadata (index, close reason, handoff summary) of an A2A
   // conversation thread — feeds the episode divider cards in the chat view.
-  ipcMain.handle('cowork:session:getA2AEpisodes', async (_event, sessionId: unknown) => {
+  registerIpcHandler('cowork:session:getA2AEpisodes', async (_event, sessionId: unknown) => {
     return withSqliteRecovery('cowork:session:getA2AEpisodes', async () => {
       try {
         const id = typeof sessionId === 'string' ? sessionId.trim() : '';
@@ -12867,7 +12649,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:list', async (_event, options?: { metabotId?: number | null }) => {
+  registerIpcHandler('cowork:session:list', async (_event, options?: { metabotId?: number | null }) => {
     return withSqliteRecovery('cowork:session:list', async () => {
       try {
         repairSelfDirectedServiceOrders();
@@ -12885,7 +12667,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:listMetabotAvatars', async (_event, metabotIds?: number[]) => {
+  registerIpcHandler('cowork:session:listMetabotAvatars', async (_event, metabotIds?: number[]) => {
     return withSqliteRecovery('cowork:session:listMetabotAvatars', async () => {
       try {
         const avatars = getCoworkStore().listMetabotAvatars(metabotIds);
@@ -12900,7 +12682,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:processServiceRefund', async (_event, sessionId: string) => {
+  registerIpcHandler('cowork:session:processServiceRefund', async (_event, sessionId: string) => {
     return withSqliteRecovery('cowork:session:processServiceRefund', async () => {
     try {
       const order = resolveServiceOrderForSession(sessionId);
@@ -12927,7 +12709,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:readLocalImage', async (_event, options: { path: string; maxBytes?: number }) => {
+  registerIpcHandler('cowork:session:readLocalImage', async (_event, options: { path: string; maxBytes?: number }) => {
     try {
       const rawPath = typeof options?.path === 'string' ? options.path.trim() : '';
       if (!rawPath) {
@@ -12977,7 +12759,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:exportResultImage', async (
+  registerIpcHandler('cowork:session:exportResultImage', async (
     event,
     options: {
       rect: { x: number; y: number; width: number; height: number };
@@ -13001,7 +12783,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:captureImageChunk', async (
+  registerIpcHandler('cowork:session:captureImageChunk', async (
     event,
     options: {
       rect: { x: number; y: number; width: number; height: number };
@@ -13030,7 +12812,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:saveResultImage', async (
+  registerIpcHandler('cowork:session:saveResultImage', async (
     event,
     options: {
       pngBase64: string;
@@ -13057,7 +12839,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:metafile:download', async (
+  registerIpcHandler('cowork:metafile:download', async (
     event,
     options: {
       url?: string;
@@ -13075,7 +12857,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:permission:respond', async (_event, options: {
+  registerIpcHandler('cowork:permission:respond', async (_event, options: {
     requestId: string;
     result: PermissionResult;
   }) => {
@@ -13091,7 +12873,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:config:get', async () => {
+  registerIpcHandler('cowork:config:get', async () => {
     try {
       const config = getCoworkStore().getConfig();
       return { success: true, config };
@@ -13104,7 +12886,7 @@ if (!gotTheLock) {
   });
 
   // --- Delegation blocking IPC handlers ---
-  ipcMain.handle('cowork:isDelegationBlocking', async (_event, sessionId: string) => {
+  registerIpcHandler('cowork:isDelegationBlocking', async (_event, sessionId: string) => {
     try {
       return getCoworkStore().isDelegationBlocking(sessionId);
     } catch {
@@ -13112,7 +12894,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:getDelegationInfo', async (_event, sessionId: string) => {
+  registerIpcHandler('cowork:getDelegationInfo', async (_event, sessionId: string) => {
     try {
       return getCoworkStore().getDelegationInfo(sessionId);
     } catch {
@@ -13120,7 +12902,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:sandbox:status', async () => {
+  registerIpcHandler('cowork:sandbox:status', async () => {
     return getSandboxStatus();
   });
   const resolveMemoryMetabotIdFromInput = (
@@ -13148,7 +12930,7 @@ if (!gotTheLock) {
     return {};
   };
 
-  ipcMain.handle('cowork:memory:listEntries', async (_event, input: {
+  registerIpcHandler('cowork:memory:listEntries', async (_event, input: {
     sessionId?: string;
     metabotId?: number;
     scopeKind?: 'owner' | 'contact' | 'conversation';
@@ -13191,7 +12973,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:memory:unarchiveEntry', async (_event, input: { id: string }) => {
+  registerIpcHandler('cowork:memory:unarchiveEntry', async (_event, input: { id: string }) => {
     try {
       const store = getCoworkStore();
       const restored = store.unarchiveUserMemories({ ids: [input?.id] });
@@ -13203,7 +12985,7 @@ if (!gotTheLock) {
       };
     }
   });
-  ipcMain.handle('cowork:memory:createEntry', async (_event, input: {
+  registerIpcHandler('cowork:memory:createEntry', async (_event, input: {
     sessionId?: string;
     metabotId?: number;
     scopeKind?: 'owner' | 'contact' | 'conversation';
@@ -13239,7 +13021,7 @@ if (!gotTheLock) {
       };
     }
   });
-  ipcMain.handle('cowork:memory:updateEntry', async (_event, input: {
+  registerIpcHandler('cowork:memory:updateEntry', async (_event, input: {
     sessionId?: string;
     metabotId?: number;
     scopeKind?: 'owner' | 'contact' | 'conversation';
@@ -13282,7 +13064,7 @@ if (!gotTheLock) {
       };
     }
   });
-  ipcMain.handle('cowork:memory:deleteEntry', async (_event, input: {
+  registerIpcHandler('cowork:memory:deleteEntry', async (_event, input: {
     sessionId?: string;
     metabotId?: number;
     scopeKind?: 'owner' | 'contact' | 'conversation';
@@ -13312,7 +13094,7 @@ if (!gotTheLock) {
       };
     }
   });
-  ipcMain.handle('cowork:memory:getStats', async (_event, input?: {
+  registerIpcHandler('cowork:memory:getStats', async (_event, input?: {
     sessionId?: string;
     metabotId?: number;
     scopeKind?: 'owner' | 'contact' | 'conversation';
@@ -13339,7 +13121,7 @@ if (!gotTheLock) {
       };
     }
   });
-  ipcMain.handle('cowork:memory:listScopes', async (_event, input: {
+  registerIpcHandler('cowork:memory:listScopes', async (_event, input: {
     metabotId?: number;
   }) => {
     try {
@@ -13360,7 +13142,7 @@ if (!gotTheLock) {
       };
     }
   });
-  ipcMain.handle('cowork:memory:getSessionScope', async (_event, input: {
+  registerIpcHandler('cowork:memory:getSessionScope', async (_event, input: {
     sessionId?: string;
   }) => {
     try {
@@ -13393,7 +13175,7 @@ if (!gotTheLock) {
       };
     }
   });
-  ipcMain.handle('cowork:memory:getPolicy', async (_event, input?: { sessionId?: string; metabotId?: number }) => {
+  registerIpcHandler('cowork:memory:getPolicy', async (_event, input?: { sessionId?: string; metabotId?: number }) => {
     try {
       const store = getCoworkStore();
       const memoryBackend = store.getMemoryBackend();
@@ -13409,7 +13191,7 @@ if (!gotTheLock) {
       };
     }
   });
-  ipcMain.handle('cowork:memory:setPolicy', async (_event, input: {
+  registerIpcHandler('cowork:memory:setPolicy', async (_event, input: {
     metabotId: number;
     memoryEnabled?: boolean;
     memoryImplicitUpdateEnabled?: boolean;
@@ -13462,7 +13244,7 @@ if (!gotTheLock) {
 
   // Drop a per-MetaBot memory policy override so the bot follows the global
   // default again (Settings → Memory → policy card "reset to global").
-  ipcMain.handle('cowork:memory:deletePolicy', async (_event, input: { metabotId?: number }) => {
+  registerIpcHandler('cowork:memory:deletePolicy', async (_event, input: { metabotId?: number }) => {
     try {
       const metabotId = typeof input?.metabotId === 'number' && Number.isFinite(input.metabotId) && input.metabotId > 0
         ? Math.floor(input.metabotId)
@@ -13479,7 +13261,7 @@ if (!gotTheLock) {
       };
     }
   });
-  ipcMain.handle('cowork:sandbox:install', async () => {
+  registerIpcHandler('cowork:sandbox:install', async () => {
     const result = await ensureSandboxReady();
     return {
       success: result.ok,
@@ -13488,7 +13270,7 @@ if (!gotTheLock) {
     };
   });
 
-  ipcMain.handle('cowork:config:set', async (_event, config: {
+  registerIpcHandler('cowork:config:set', async (_event, config: {
     workingDirectory?: string;
     executionMode?: 'auto' | 'local' | 'sandbox';
     memoryEnabled?: boolean;
@@ -13569,7 +13351,7 @@ if (!gotTheLock) {
 
   // ==================== Group Task IPC Handlers ====================
 
-  ipcMain.handle('groupTask:create', async (_event, input: {
+  registerIpcHandler('groupTask:create', async (_event, input: {
     title?: string;
     goal?: string;
     acceptanceCriteria?: string;
@@ -13592,7 +13374,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:list', async (_event, filter?: { status?: GroupTaskStatus }) => {
+  registerIpcHandler('groupTask:list', async (_event, filter?: { status?: GroupTaskStatus }) => {
     try {
       const status = typeof filter?.status === 'string' && filter.status.trim()
         ? filter.status.trim() as GroupTaskStatus
@@ -13606,7 +13388,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:getTurnActivity', async () => {
+  registerIpcHandler('groupTask:getTurnActivity', async () => {
     // Sidebar badge: in-memory snapshot of the daemon's in-flight turns so a
     // freshly (re)loaded renderer does not wait for the next change event.
     try {
@@ -13616,7 +13398,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:get', async (_event, input: { taskId?: number }) => {
+  registerIpcHandler('groupTask:get', async (_event, input: { taskId?: number }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -13629,7 +13411,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:close', async (_event, input: { taskId?: number; status?: string; reason?: string; rating?: number; ratingComment?: string }) => {
+  registerIpcHandler('groupTask:close', async (_event, input: { taskId?: number; status?: string; reason?: string; rating?: number; ratingComment?: string }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -13665,7 +13447,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:reopen', async (_event, input: { taskId?: number; reason?: string }) => {
+  registerIpcHandler('groupTask:reopen', async (_event, input: { taskId?: number; reason?: string }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -13685,7 +13467,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:rework', async (_event, input: { taskId?: number; reason?: string }) => {
+  registerIpcHandler('groupTask:rework', async (_event, input: { taskId?: number; reason?: string }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -13702,7 +13484,7 @@ if (!gotTheLock) {
 
   // G-04: owner-side resume of a supervisor pause. The click on the Tasks
   // panel button IS the owner confirmation (confirmOwner: true).
-  ipcMain.handle('groupTask:resume', async (_event, input: { taskId?: number }) => {
+  registerIpcHandler('groupTask:resume', async (_event, input: { taskId?: number }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -13724,7 +13506,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:listMessages', async (_event, input: { taskId?: number; beforeId?: number; limit?: number }) => {
+  registerIpcHandler('groupTask:listMessages', async (_event, input: { taskId?: number; beforeId?: number; limit?: number }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -13745,7 +13527,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:sendUserMessage', async (_event, input: { taskId?: number; content?: string }) => {
+  registerIpcHandler('groupTask:sendUserMessage', async (_event, input: { taskId?: number; content?: string }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -13764,7 +13546,7 @@ if (!gotTheLock) {
   });
 
   // OpenTeam M3: owner removes a member (local worker or remote bot) from a task.
-  ipcMain.handle('groupTask:kickMember', async (_event, input: {
+  registerIpcHandler('groupTask:kickMember', async (_event, input: {
     taskId?: number;
     metabotId?: number;
     globalmetaid?: string;
@@ -13797,7 +13579,7 @@ if (!gotTheLock) {
   });
 
   // Local-only UI state: rename (display name), pin, archive/unarchive.
-  ipcMain.handle('groupTask:rename', async (_event, input: { taskId?: number; title?: string }) => {
+  registerIpcHandler('groupTask:rename', async (_event, input: { taskId?: number; title?: string }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -13811,7 +13593,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:pin', async (_event, input: { taskId?: number; pinned?: boolean }) => {
+  registerIpcHandler('groupTask:pin', async (_event, input: { taskId?: number; pinned?: boolean }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -13825,7 +13607,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:archive', async (_event, input: { taskId?: number }) => {
+  registerIpcHandler('groupTask:archive', async (_event, input: { taskId?: number }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -13838,7 +13620,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:unarchive', async (_event, input: { taskId?: number }) => {
+  registerIpcHandler('groupTask:unarchive', async (_event, input: { taskId?: number }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -13851,7 +13633,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:listArchived', async (_event, options?: { offset?: number; limit?: number }) => {
+  registerIpcHandler('groupTask:listArchived', async (_event, options?: { offset?: number; limit?: number }) => {
     try {
       const offset = typeof options?.offset === 'number' ? options.offset : 0;
       const limit = typeof options?.limit === 'number' ? options.limit : 50;
@@ -13867,7 +13649,7 @@ if (!gotTheLock) {
   // ==================== OpenTeam Collab (invitee-side) IPC Handlers ====================
   // Owner traceability for auto-accepted OpenTeam invites: every external group
   // task this machine's bots joined (or left), with a message-activity digest.
-  ipcMain.handle('openTeamCollab:list', async () => {
+  registerIpcHandler('openTeamCollab:list', async () => {
     try {
       const items = await withSqliteRecovery('openTeamCollab:list', () =>
         getOpenTeamMembershipStore().listCollabSummaries());
@@ -13880,7 +13662,7 @@ if (!gotTheLock) {
   // P0-1: guest-side invite history — every [OPENTEAM_INVITE] this machine's
   // bots received, regardless of outcome, newest first. Records exist even for
   // declined/skipped/expired invites, so the collab UI shows the full flow.
-  ipcMain.handle('openTeamCollab:listGuestInvites', async () => {
+  registerIpcHandler('openTeamCollab:listGuestInvites', async () => {
     try {
       const items = await withSqliteRecovery('openTeamCollab:listGuestInvites', () =>
         getOpenTeamMembershipStore().listGuestInvites());
@@ -13894,7 +13676,7 @@ if (!gotTheLock) {
   // at insert time; reuse the group-task transcript query as-is. Membership
   // gate: only groups this machine's bots actually joined (or left) may be
   // read through this endpoint.
-  ipcMain.handle('openTeamCollab:listMessages', async (_event, input: { groupId?: string; beforeId?: number; limit?: number }) => {
+  registerIpcHandler('openTeamCollab:listMessages', async (_event, input: { groupId?: string; beforeId?: number; limit?: number }) => {
     try {
       const groupId = String(input?.groupId ?? '').trim();
       if (!groupId) {
@@ -13918,7 +13700,7 @@ if (!gotTheLock) {
   // Owner-side channel (actor='owner'); the Twin acts through the longterm_*
   // agent tools. Every mutation broadcasts longtermTask:update.
 
-  ipcMain.handle('longtermTask:board', async () => {
+  registerIpcHandler('longtermTask:board', async () => {
     try {
       return { success: true, board: getLongTermTaskStore().listBoard() };
     } catch (error) {
@@ -13926,7 +13708,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('longtermTask:get', async (_event, input: { taskId: string }) => {
+  registerIpcHandler('longtermTask:get', async (_event, input: { taskId: string }) => {
     try {
       const detail = getLongTermTaskStore().getTask(input?.taskId);
       if (!detail) return { success: false, error: 'Task not found' };
@@ -13936,7 +13718,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('longtermTask:update', async (_event, input: {
+  registerIpcHandler('longtermTask:update', async (_event, input: {
     taskId: string; title?: string; goal?: string; acceptanceDelegate?: boolean;
   }) => {
     try {
@@ -13948,7 +13730,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('longtermTask:setStage', async (_event, input: {
+  registerIpcHandler('longtermTask:setStage', async (_event, input: {
     taskId: string; action: 'pause' | 'resume' | 'cancel'; note?: string;
   }) => {
     try {
@@ -13969,7 +13751,7 @@ if (!gotTheLock) {
   // lands in 'done', and the heartbeat stops driving it. Owner channel only —
   // the Twin reaches the same store method through the longterm_task_complete
   // agent tool (with the delegate-switch gate).
-  ipcMain.handle('longtermTask:complete', async (_event, input: {
+  registerIpcHandler('longtermTask:complete', async (_event, input: {
     taskId: string; note?: string; evidence?: Array<{ kind: string; uri: string; note?: string }>;
   }) => {
     try {
@@ -13981,7 +13763,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('longtermTask:subtaskSkip', async (_event, input: { subtaskId: string; reason?: string }) => {
+  registerIpcHandler('longtermTask:subtaskSkip', async (_event, input: { subtaskId: string; reason?: string }) => {
     try {
       const store = getLongTermTaskStore();
       const result = store.skipSubtask(input?.subtaskId, 'owner', input?.reason ?? '');
@@ -13992,7 +13774,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('longtermTask:subtaskAdd', async (_event, input: { taskId: string } & Record<string, unknown>) => {
+  registerIpcHandler('longtermTask:subtaskAdd', async (_event, input: { taskId: string } & Record<string, unknown>) => {
     try {
       const result = getLongTermTaskStore().addSubtask(input?.taskId, input as never, 'owner');
       if (result.ok) broadcastLongTermTaskUpdate([input.taskId], 'subtask_added');
@@ -14002,7 +13784,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('longtermTask:subtaskUpdate', async (_event, input: { subtaskId: string } & Record<string, unknown>) => {
+  registerIpcHandler('longtermTask:subtaskUpdate', async (_event, input: { subtaskId: string } & Record<string, unknown>) => {
     try {
       const store = getLongTermTaskStore();
       const result = store.updateSubtask(input as never, 'owner');
@@ -14013,7 +13795,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('longtermTask:begin', async (_event, input: { subtaskId: string; channel?: never }) => {
+  registerIpcHandler('longtermTask:begin', async (_event, input: { subtaskId: string; channel?: never }) => {
     try {
       const store = getLongTermTaskStore();
       const result = store.beginSubtask(input?.subtaskId, 'owner', input?.channel ?? null);
@@ -14024,7 +13806,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('longtermTask:accept', async (_event, input: { subtaskId: string; note?: string }) => {
+  registerIpcHandler('longtermTask:accept', async (_event, input: { subtaskId: string; note?: string }) => {
     try {
       const store = getLongTermTaskStore();
       const result = store.acceptSubtask(input?.subtaskId, 'owner', input?.note ?? '');
@@ -14035,7 +13817,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('longtermTask:reject', async (_event, input: { subtaskId: string; feedback: string }) => {
+  registerIpcHandler('longtermTask:reject', async (_event, input: { subtaskId: string; feedback: string }) => {
     try {
       const store = getLongTermTaskStore();
       const result = store.rejectSubtask(input?.subtaskId, 'owner', input?.feedback ?? '');
@@ -14046,7 +13828,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('longtermTask:unblock', async (_event, input: { subtaskId: string; note?: string }) => {
+  registerIpcHandler('longtermTask:unblock', async (_event, input: { subtaskId: string; note?: string }) => {
     try {
       const store = getLongTermTaskStore();
       const result = store.unblockSubtask(input?.subtaskId, 'owner', input?.note ?? '');
@@ -14057,7 +13839,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('longtermTask:note', async (_event, input: { taskId: string; subtaskId?: string; text: string }) => {
+  registerIpcHandler('longtermTask:note', async (_event, input: { taskId: string; subtaskId?: string; text: string }) => {
     try {
       const result = getLongTermTaskStore().addNote(input?.taskId, input?.subtaskId ?? null, input?.text ?? '', 'owner');
       if (result.ok) broadcastLongTermTaskUpdate([input.taskId], 'note');
@@ -14068,7 +13850,7 @@ if (!gotTheLock) {
   });
 
   /** Session-side origin chip: which long-term task/sub-project owns this session (null = independent session). */
-  ipcMain.handle('longtermTask:forSession', async (_event, input: { sessionId: string }) => {
+  registerIpcHandler('longtermTask:forSession', async (_event, input: { sessionId: string }) => {
     try {
       const hit = getLongTermTaskStore().findBySessionId(input?.sessionId);
       return {
@@ -14082,7 +13864,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('longtermTask:moveSubtask', async (_event, input: { subtaskId: string; direction: 'up' | 'down' }) => {
+  registerIpcHandler('longtermTask:moveSubtask', async (_event, input: { subtaskId: string; direction: 'up' | 'down' }) => {
     try {
       const result = getLongTermTaskStore().moveSubtask(input?.subtaskId, input?.direction, 'owner');
       if (result.ok) broadcastLongTermTaskUpdate([result.value?.taskId ?? ''], 'subtask_moved');
@@ -14096,7 +13878,7 @@ if (!gotTheLock) {
   // The chain is the source of truth; these read the local rebuildable
   // projection. Board reads kick a background sweep when the cache is stale.
 
-  ipcMain.handle('metatask:board', async () => {
+  registerIpcHandler('metatask:board', async () => {
     try {
       const refresher = getMetaTaskRefresher();
       const info = refresher.board().refresh;
@@ -14108,7 +13890,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metatask:get', async (_event, input: { rootPinId: string }) => {
+  registerIpcHandler('metatask:get', async (_event, input: { rootPinId: string }) => {
     try {
       const detail = getMetaTaskRefresher().detail(String(input?.rootPinId ?? ''));
       if (!detail) return { success: false, error: 'MetaTask root not found in the local projection' };
@@ -14123,7 +13905,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metatask:refresh', async () => {
+  registerIpcHandler('metatask:refresh', async () => {
     try {
       const result = await getMetaTaskRefresher().refreshOnce('manual');
       return { success: result.ok, board: result.board ?? undefined, error: result.error ?? undefined };
@@ -14139,15 +13921,15 @@ if (!gotTheLock) {
     service: () => getPreferenceService(),
     userGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
   });
-  ipcMain.handle('preference:listRounds', (_event, input: unknown) => preferenceIpc.listRounds(input));
-  ipcMain.handle('preference:roundStatus', (_event, input: unknown) => preferenceIpc.roundStatus(input));
-  ipcMain.handle('preference:commit', (_event, input: unknown) => preferenceIpc.commit(input));
-  ipcMain.handle('preference:telemetry', (_event, input: unknown) => preferenceIpc.telemetry(input));
-  ipcMain.handle('preference:refresh', () => preferenceIpc.refresh());
+  registerIpcHandler('preference:listRounds', (_event, input: unknown) => preferenceIpc.listRounds(input));
+  registerIpcHandler('preference:roundStatus', (_event, input: unknown) => preferenceIpc.roundStatus(input));
+  registerIpcHandler('preference:commit', (_event, input: unknown) => preferenceIpc.commit(input));
+  registerIpcHandler('preference:telemetry', (_event, input: unknown) => preferenceIpc.telemetry(input));
+  registerIpcHandler('preference:refresh', () => preferenceIpc.refresh());
 
   // ==================== Scheduled Task IPC Handlers ====================
 
-  ipcMain.handle('scheduledTask:list', async () => {
+  registerIpcHandler('scheduledTask:list', async () => {
     try {
       const tasks = getScheduledTaskStore().listTasks();
       return { success: true, tasks };
@@ -14156,7 +13938,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('scheduledTask:get', async (_event, id: string) => {
+  registerIpcHandler('scheduledTask:get', async (_event, id: string) => {
     try {
       const task = getScheduledTaskStore().getTask(id);
       return { success: true, task };
@@ -14179,7 +13961,7 @@ if (!gotTheLock) {
     return trimmed ? trimmed : null;
   };
 
-  ipcMain.handle('scheduledTask:create', async (_event, input: any) => {
+  registerIpcHandler('scheduledTask:create', async (_event, input: any) => {
     try {
       const coworkConfig = getCoworkStore().getConfig();
       const normalizedInput = input && typeof input === 'object' ? { ...input } : {};
@@ -14202,7 +13984,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('scheduledTask:update', async (_event, id: string, input: any) => {
+  registerIpcHandler('scheduledTask:update', async (_event, id: string, input: any) => {
     try {
       const scheduledTaskStore = getScheduledTaskStore();
       const existingTask = scheduledTaskStore.getTask(id);
@@ -14235,7 +14017,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('scheduledTask:delete', async (_event, id: string) => {
+  registerIpcHandler('scheduledTask:delete', async (_event, id: string) => {
     try {
       getScheduler().stopTask(id);
       const result = getScheduledTaskStore().deleteTask(id);
@@ -14246,7 +14028,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('scheduledTask:toggle', async (_event, id: string, enabled: boolean) => {
+  registerIpcHandler('scheduledTask:toggle', async (_event, id: string, enabled: boolean) => {
     try {
       const { task, warning } = getScheduledTaskStore().toggleTask(id, enabled);
       getScheduler().reschedule();
@@ -14256,7 +14038,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('scheduledTask:runManually', async (_event, id: string) => {
+  registerIpcHandler('scheduledTask:runManually', async (_event, id: string) => {
     try {
       getScheduler().runManually(id).catch((err) => {
         console.error(`[IPC] Manual run failed for ${id}:`, err);
@@ -14267,7 +14049,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('scheduledTask:stop', async (_event, id: string) => {
+  registerIpcHandler('scheduledTask:stop', async (_event, id: string) => {
     try {
       const result = getScheduler().stopTask(id);
       return { success: true, result };
@@ -14276,7 +14058,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('scheduledTask:listRuns', async (_event, taskId: string, limit?: number, offset?: number) => {
+  registerIpcHandler('scheduledTask:listRuns', async (_event, taskId: string, limit?: number, offset?: number) => {
     try {
       const runs = getScheduledTaskStore().listRuns(taskId, limit, offset);
       return { success: true, runs };
@@ -14285,7 +14067,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('scheduledTask:countRuns', async (_event, taskId: string) => {
+  registerIpcHandler('scheduledTask:countRuns', async (_event, taskId: string) => {
     try {
       const count = getScheduledTaskStore().countRuns(taskId);
       return { success: true, count };
@@ -14294,7 +14076,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('scheduledTask:listAllRuns', async (_event, limit?: number, offset?: number) => {
+  registerIpcHandler('scheduledTask:listAllRuns', async (_event, limit?: number, offset?: number) => {
     try {
       const runs = getScheduledTaskStore().listAllRuns(limit, offset);
       return { success: true, runs };
@@ -14305,7 +14087,7 @@ if (!gotTheLock) {
 
   // ==================== MetaBot IPC Handlers ====================
 
-  ipcMain.handle('idbots:getMetaBots', async () => withSqliteRecovery('idbots:getMetaBots', async () => {
+  registerIpcHandler('idbots:getMetaBots', async () => withSqliteRecovery('idbots:getMetaBots', async () => {
     try {
       const list = getMetabotStore().getAllMetaBots();
       return { success: true, list };
@@ -14315,7 +14097,7 @@ if (!gotTheLock) {
     }
   }));
 
-  ipcMain.handle('metabot:list', async () => withSqliteRecovery('metabot:list', async () => {
+  registerIpcHandler('metabot:list', async () => withSqliteRecovery('metabot:list', async () => {
     try {
       const dreamService = getDreamService();
       const surfService = getSurfService();
@@ -14347,7 +14129,7 @@ if (!gotTheLock) {
     }
   }));
 
-  ipcMain.handle('dream:getStatus', async () => {
+  registerIpcHandler('dream:getStatus', async () => {
     try {
       return { success: true, dreamingBotIds: getDreamService()?.getDreamingBotIds() ?? [] };
     } catch (error) {
@@ -14355,7 +14137,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('dream:listDailySummaries', async (_event, options: { metabotId: number; limit?: number; offset?: number }) => {
+  registerIpcHandler('dream:listDailySummaries', async (_event, options: { metabotId: number; limit?: number; offset?: number }) => {
     return withSqliteRecovery('dream:listDailySummaries', async () => {
       try {
         const metabotId = Number(options?.metabotId);
@@ -14371,7 +14153,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('dream:listRuns', async (_event, options: { metabotId: number; limit?: number }) => {
+  registerIpcHandler('dream:listRuns', async (_event, options: { metabotId: number; limit?: number }) => {
     return withSqliteRecovery('dream:listRuns', async () => {
       try {
         const metabotId = Number(options?.metabotId);
@@ -14395,7 +14177,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('dream:listCapabilityDrafts', async (_event, options: { metabotId: number; limit?: number }) => {
+  registerIpcHandler('dream:listCapabilityDrafts', async (_event, options: { metabotId: number; limit?: number }) => {
     return withSqliteRecovery('dream:listCapabilityDrafts', async () => {
       try {
         const metabotId = Number(options?.metabotId);
@@ -14417,7 +14199,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('dream:listTelemetryDaily', async (_event, options: { metabotId: number; sinceDays?: number }) => {
+  registerIpcHandler('dream:listTelemetryDaily', async (_event, options: { metabotId: number; sinceDays?: number }) => {
     return withSqliteRecovery('dream:listTelemetryDaily', async () => {
       try {
         const metabotId = Number(options?.metabotId);
@@ -14436,7 +14218,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('dream:runNow', async (_event, options: { metabotId: number; date?: string }) => {
+  registerIpcHandler('dream:runNow', async (_event, options: { metabotId: number; date?: string }) => {
     return withSqliteRecovery('dream:runNow', async () => {
       try {
         const metabotId = Number(options?.metabotId);
@@ -14458,7 +14240,7 @@ if (!gotTheLock) {
 
   // ==================== Memory Hygiene IPC Handlers ====================
 
-  ipcMain.handle('memoryHygiene:get', async () => {
+  registerIpcHandler('memoryHygiene:get', async () => {
     try {
       const store = getCoworkStore();
       return {
@@ -14474,7 +14256,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('memoryHygiene:setConfig', async (_event, input: Record<string, unknown>) => {
+  registerIpcHandler('memoryHygiene:setConfig', async (_event, input: Record<string, unknown>) => {
     try {
       const store = getCoworkStore();
       // The store normalizes and clamps every field, so untyped IPC input is safe.
@@ -14488,7 +14270,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('memoryHygiene:runNow', async () => {
+  registerIpcHandler('memoryHygiene:runNow', async () => {
     try {
       const service = getMemoryHygieneService();
       if (!service) {
@@ -14507,7 +14289,7 @@ if (!gotTheLock) {
   // ==================== Team Culture IPC Handlers ====================
   // Fleet-shared coordination prior (glossary / conventions / lessons).
 
-  ipcMain.handle('teamCulture:list', async (_event, input?: {
+  registerIpcHandler('teamCulture:list', async (_event, input?: {
     kind?: TeamCultureKind | 'all';
     status?: 'active' | 'superseded' | 'archived' | 'all';
     query?: string;
@@ -14534,7 +14316,7 @@ if (!gotTheLock) {
 
   // Recent task-close distillation verdicts — the "why is the culture base
   // (still) empty" answer, persisted across restarts.
-  ipcMain.handle('teamCulture:distillationLog', async () => {
+  registerIpcHandler('teamCulture:distillationLog', async () => {
     try {
       const store = getTeamCultureStore();
       return { success: true, records: store.listCultureDistillationLog() };
@@ -14546,7 +14328,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('teamCulture:upsert', async (_event, input: {
+  registerIpcHandler('teamCulture:upsert', async (_event, input: {
     kind?: TeamCultureKind;
     topic: string;
     text: string;
@@ -14573,7 +14355,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('teamCulture:update', async (_event, input: {
+  registerIpcHandler('teamCulture:update', async (_event, input: {
     id: string;
     kind?: TeamCultureKind;
     topic?: string;
@@ -14599,7 +14381,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('teamCulture:archive', async (_event, input: { id: string }) => {
+  registerIpcHandler('teamCulture:archive', async (_event, input: { id: string }) => {
     try {
       const entry = getTeamCultureStore().archiveCulture(input?.id);
       if (!entry) return { success: false, error: 'Team culture entry not found' };
@@ -14612,7 +14394,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('teamCulture:restore', async (_event, input: { id: string }) => {
+  registerIpcHandler('teamCulture:restore', async (_event, input: { id: string }) => {
     try {
       const entry = getTeamCultureStore().restoreCulture(input?.id);
       if (!entry) return { success: false, error: 'Team culture entry not found' };
@@ -14625,7 +14407,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('teamCulture:delete', async (_event, input: { id: string }) => {
+  registerIpcHandler('teamCulture:delete', async (_event, input: { id: string }) => {
     try {
       const removed = getTeamCultureStore().deleteCulture(input?.id);
       return { success: removed };
@@ -14637,7 +14419,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('teamCulture:commTrend', async () => {
+  registerIpcHandler('teamCulture:commTrend', async () => {
     try {
       const tasks = getGroupTaskStore().listRecentTaskCommStats(15);
       return { success: true, tasks };
@@ -14649,7 +14431,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('teamCulture:getConfig', async () => {
+  registerIpcHandler('teamCulture:getConfig', async () => {
     try {
       return { success: true, config: getTeamCultureStore().getCultureConfig() };
     } catch (error) {
@@ -14660,7 +14442,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('teamCulture:setConfig', async (_event, input: { enabled?: boolean }) => {
+  registerIpcHandler('teamCulture:setConfig', async (_event, input: { enabled?: boolean }) => {
     try {
       const current = getTeamCultureStore().getCultureConfig();
       const config = getTeamCultureStore().setCultureConfig(
@@ -14675,7 +14457,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('teamCulture:approve', async (_event, input: { id: string }) => {
+  registerIpcHandler('teamCulture:approve', async (_event, input: { id: string }) => {
     try {
       const entry = getTeamCultureStore().approveCulture(input?.id);
       if (!entry) return { success: false, error: 'Team culture entry not found' };
@@ -14690,7 +14472,7 @@ if (!gotTheLock) {
 
   // ==================== Knowledge Base IPC Handlers ====================
 
-  ipcMain.handle('knowledgeBase:list', async (_event, metabotId: number) =>
+  registerIpcHandler('knowledgeBase:list', async (_event, metabotId: number) =>
     withSqliteRecovery('knowledgeBase:list', async () => {
       try {
         const knowledgeBases = getKnowledgeBaseService().listKnowledgeBases(Number(metabotId));
@@ -14701,7 +14483,7 @@ if (!gotTheLock) {
       }
     }));
 
-  ipcMain.handle('knowledgeBase:create', async (_event, metabotId: number, input: { name: string; description?: string; rawDir?: string }) =>
+  registerIpcHandler('knowledgeBase:create', async (_event, metabotId: number, input: { name: string; description?: string; rawDir?: string }) =>
     withSqliteRecovery('knowledgeBase:create', async () => {
       try {
         const knowledgeBase = getKnowledgeBaseService().createKnowledgeBase(Number(metabotId), input ?? { name: '' });
@@ -14712,7 +14494,7 @@ if (!gotTheLock) {
       }
     }));
 
-  ipcMain.handle('knowledgeBase:update', async (_event, metabotId: number, kbId: string, patch: { name?: string; description?: string; autoLearn?: boolean }) =>
+  registerIpcHandler('knowledgeBase:update', async (_event, metabotId: number, kbId: string, patch: { name?: string; description?: string; autoLearn?: boolean }) =>
     withSqliteRecovery('knowledgeBase:update', async () => {
       try {
         const knowledgeBase = getKnowledgeBaseService().updateKnowledgeBase(Number(metabotId), String(kbId), patch ?? {});
@@ -14723,7 +14505,7 @@ if (!gotTheLock) {
       }
     }));
 
-  ipcMain.handle('knowledgeBase:remove', async (_event, metabotId: number, kbId: string) =>
+  registerIpcHandler('knowledgeBase:remove', async (_event, metabotId: number, kbId: string) =>
     withSqliteRecovery('knowledgeBase:remove', async () => {
       try {
         getKnowledgeBaseService().removeKnowledgeBase(Number(metabotId), String(kbId));
@@ -14734,7 +14516,7 @@ if (!gotTheLock) {
       }
     }));
 
-  ipcMain.handle('knowledgeBase:learn', async (_event, metabotId: number, kbId: string, options?: { full?: boolean }) =>
+  registerIpcHandler('knowledgeBase:learn', async (_event, metabotId: number, kbId: string, options?: { full?: boolean }) =>
     withSqliteRecovery('knowledgeBase:learn', async () => {
       try {
         const summary = await getKnowledgeBaseService().learnKnowledgeBase(Number(metabotId), String(kbId), { full: options?.full === true });
@@ -14745,7 +14527,7 @@ if (!gotTheLock) {
       }
     }));
 
-  ipcMain.handle('knowledgeBase:importFiles', async (_event, metabotId: number, kbId: string, filePaths: string[]) =>
+  registerIpcHandler('knowledgeBase:importFiles', async (_event, metabotId: number, kbId: string, filePaths: string[]) =>
     withSqliteRecovery('knowledgeBase:importFiles', async () => {
       try {
         const { imported, skipped } = getKnowledgeBaseService().importFiles(
@@ -14760,7 +14542,7 @@ if (!gotTheLock) {
       }
     }));
 
-  ipcMain.handle('knowledgeBase:openDir', async (_event, metabotId: number, kbId: string) =>
+  registerIpcHandler('knowledgeBase:openDir', async (_event, metabotId: number, kbId: string) =>
     withSqliteRecovery('knowledgeBase:openDir', async () => {
       try {
         const record = getKnowledgeBaseService().requireKnowledgeBase(Number(metabotId), String(kbId));
@@ -14778,7 +14560,7 @@ if (!gotTheLock) {
 
   // ==================== MetaWeb Study Job IPC Handlers ====================
 
-  ipcMain.handle('metawebStudy:list', async (_event, metabotId: number) =>
+  registerIpcHandler('metawebStudy:list', async (_event, metabotId: number) =>
     withSqliteRecovery('metawebStudy:list', async () => {
       try {
         const jobs = getMetawebStudyService().listStudyJobs(Number(metabotId));
@@ -14791,7 +14573,7 @@ if (!gotTheLock) {
 
   // ==================== MetaWeb Surf IPC Handlers ====================
 
-  ipcMain.handle('surf:listRuns', async (_event, metabotId: number, limit?: number) =>
+  registerIpcHandler('surf:listRuns', async (_event, metabotId: number, limit?: number) =>
     withSqliteRecovery('surf:listRuns', async () => {
       try {
         const runs = getMetawebSurfStore().listRunsByMetabot(Number(metabotId), limit);
@@ -14802,7 +14584,7 @@ if (!gotTheLock) {
       }
     }));
 
-  ipcMain.handle('surf:runNow', async (_event, metabotId: number) =>
+  registerIpcHandler('surf:runNow', async (_event, metabotId: number) =>
     withSqliteRecovery('surf:runNow', async () => {
       try {
         const run = getSurfService().startSurf(Number(metabotId), 'manual-ui');
@@ -14813,7 +14595,7 @@ if (!gotTheLock) {
       }
     }));
 
-  ipcMain.handle('metabot:checkNameExists', async (_event, options: { name: string; excludeId?: number }) => {
+  registerIpcHandler('metabot:checkNameExists', async (_event, options: { name: string; excludeId?: number }) => {
     try {
       const list = getMetabotStore().listMetabots();
       const name = (options.name || '').trim().toLowerCase();
@@ -14827,7 +14609,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metabot:get', async (_event, id: number) => withSqliteRecovery('metabot:get', async () => {
+  registerIpcHandler('metabot:get', async (_event, id: number) => withSqliteRecovery('metabot:get', async () => {
     try {
       const metabot = getMetabotStore().getMetabotById(id);
       return { success: true, metabot };
@@ -14840,7 +14622,7 @@ if (!gotTheLock) {
   // getMetabotManageDeps() is defined at module scope (hoisted) so both the IPC
   // handlers below and getCoworkRunner() can share it.
 
-  ipcMain.handle('metabot:create', async (_event, input: {
+  registerIpcHandler('metabot:create', async (_event, input: {
     name: string;
     avatar?: string | null;
     metabot_type: 'twin' | 'worker';
@@ -14904,7 +14686,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metabot:update', async (_event, id: number, input: {
+  registerIpcHandler('metabot:update', async (_event, id: number, input: {
     name?: string;
     avatar?: string | null;
     enabled?: boolean;
@@ -14943,7 +14725,7 @@ if (!gotTheLock) {
   // Per-metabot kv settings (metabot_settings table) are not metabots-table
   // columns, so they bypass metabot:update; the whitelist lives in
   // metabotSettingsService and rejects any key the renderer may not touch.
-  ipcMain.handle('metabot:getSetting', async (_event, metabotId: number, key: string) =>
+  registerIpcHandler('metabot:getSetting', async (_event, metabotId: number, key: string) =>
     withSqliteRecovery('metabot:getSetting', async () => {
       try {
         const value = getRendererMetabotSetting(getMetabotStore(), metabotId, key);
@@ -14954,7 +14736,7 @@ if (!gotTheLock) {
       }
     }));
 
-  ipcMain.handle('metabot:setSetting', async (_event, metabotId: number, key: string, value: unknown) =>
+  registerIpcHandler('metabot:setSetting', async (_event, metabotId: number, key: string, value: unknown) =>
     withSqliteRecovery('metabot:setSetting', async () => {
       try {
         const stored = setRendererMetabotSetting(getMetabotStore(), metabotId, key, value);
@@ -14965,7 +14747,7 @@ if (!gotTheLock) {
       }
     }));
 
-  ipcMain.handle('idbots:addMetaBot', async (_event, input: {
+  registerIpcHandler('idbots:addMetaBot', async (_event, input: {
     name: string;
     avatar?: string | null;
     role: string;
@@ -15061,7 +14843,7 @@ if (!gotTheLock) {
 
   // Chain-first MetaBot creation: wallet → subsidy → on-chain PINs → DB save.
   // If chain fails, DB records are rolled back. Returns metabot only on full success.
-  ipcMain.handle('idbots:createMetaBotOnChain', async (_event, input: {
+  registerIpcHandler('idbots:createMetaBotOnChain', async (_event, input: {
     name: string;
     avatar?: string | null;
     role?: string;
@@ -15103,7 +14885,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('userIdentity:get', async () => {
+  registerIpcHandler('userIdentity:get', async () => {
     try {
       return { success: true, identity: toPublicUserIdentity(getUserIdentityStore().get()) };
     } catch (error) {
@@ -15119,7 +14901,7 @@ if (!gotTheLock) {
   // 2026-10 identity-split incident). The closeout clears the caches
   // synchronously and then re-bootstraps as the new identity; it never
   // rejects, so an offline relay cannot fail the identity operation.
-  ipcMain.handle('userIdentity:create', async (_event, input: { name: string; avatar?: string | null }) => {
+  registerIpcHandler('userIdentity:create', async (_event, input: { name: string; avatar?: string | null }) => {
     try {
       const result = await createUserIdentity(getUserIdentityStore(), input ?? { name: '' });
       if (!result.success) {
@@ -15142,7 +14924,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('userIdentity:import', async (_event, input: { mnemonic: string; path?: string }) => {
+  registerIpcHandler('userIdentity:import', async (_event, input: { mnemonic: string; path?: string }) => {
     try {
       const result = await importUserIdentity(getUserIdentityStore(), input ?? { mnemonic: '' });
       if (!result.success) {
@@ -15164,7 +14946,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('userIdentity:updateName', async (_event, input: { name: string }) => {
+  registerIpcHandler('userIdentity:updateName', async (_event, input: { name: string }) => {
     try {
       const result = await updateUserIdentityName(getUserIdentityStore(), input ?? { name: '' });
       if (!result.success) {
@@ -15182,7 +14964,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('userIdentity:logout', async () => {
+  registerIpcHandler('userIdentity:logout', async () => {
     try {
       const removed = logoutUserIdentity(getUserIdentityStore());
       return removed ? { success: true } : { success: false, error: 'USER_IDENTITY_MISSING' };
@@ -15193,7 +14975,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('userIdentity:revealMnemonic', async () => {
+  registerIpcHandler('userIdentity:revealMnemonic', async () => {
     try {
       const identity = getUserIdentityStore().get();
       if (!identity) {
@@ -15209,7 +14991,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('userIdentity:retrySubsidy', async () => {
+  registerIpcHandler('userIdentity:retrySubsidy', async () => {
     try {
       const store = getUserIdentityStore();
       if (!store.get()) {
@@ -15233,7 +15015,7 @@ if (!gotTheLock) {
 
   // Resume the whole bootstrap flow: claim the subsidy when needed, then
   // publish every /info pin that is still missing (idempotent).
-  ipcMain.handle('userIdentity:retryChainSync', async () => {
+  registerIpcHandler('userIdentity:retryChainSync', async () => {
     try {
       const store = getUserIdentityStore();
       if (!store.get()) {
@@ -15261,12 +15043,10 @@ if (!gotTheLock) {
   // renderer-facing sync entry point anymore.
 
   const broadcastChainBackupProgress = (channel: string, progress: unknown) => {
-    BrowserWindow.getAllWindows().forEach((win) => {
-      win.webContents.send(channel, progress);
-    });
+    broadcastToRenderers(channel, progress);
   };
 
-  ipcMain.handle('chainBackup:backup', async () => {
+  registerIpcHandler('chainBackup:backup', async () => {
     try {
       // The backup publishes user-signed pins (bots manifest), so a silently
       // provisioned identity must be funded first — awaited, unlike the other
@@ -15295,7 +15075,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('chainBackup:restore', async () => {
+  registerIpcHandler('chainBackup:restore', async () => {
     try {
       const result = await runChainBackupRestore({
         db: getStore().getDatabase(),
@@ -15315,7 +15095,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('chainBackup:getState', async () => {
+  registerIpcHandler('chainBackup:getState', async () => {
     try {
       return { success: true, states: listChainBackupStates(getStore().getDatabase()) };
     } catch (error) {
@@ -15324,7 +15104,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('idbots:restoreMetaBotFromMnemonic', async (_event, input: { mnemonic: string; path?: string; boss_global_metaid?: string | null }) => {
+  registerIpcHandler('idbots:restoreMetaBotFromMnemonic', async (_event, input: { mnemonic: string; path?: string; boss_global_metaid?: string | null }) => {
     return restoreMetabotFromMnemonicCore(getMetabotStore(), input ?? { mnemonic: '' }, {
       applyAssignedSkills: (metabotId, skills) => {
         getSkillManager().applyMetabotAssignedSkills(metabotId, skills, 'migration');
@@ -15332,7 +15112,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('idbots:syncMetaBot', async (_event, metabotId: number) => {
+  registerIpcHandler('idbots:syncMetaBot', async (_event, metabotId: number) => {
     try {
       console.log('[MetaBot] idbots:syncMetaBot requested', { metabotId });
       const store = getMetabotStore();
@@ -15360,7 +15140,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('idbots:resumeMetabotSetup', async (_event, input: { metabotId: number; mode: 'subsidized' | 'self-funded' }) => {
+  registerIpcHandler('idbots:resumeMetabotSetup', async (_event, input: { metabotId: number; mode: 'subsidized' | 'self-funded' }) => {
     try {
       console.log('[MetaBot] idbots:resumeMetabotSetup requested', input);
       const result = await resumeMetabotSetupCore(input ?? { metabotId: 0, mode: 'subsidized' }, getMetabotManageDeps());
@@ -15382,7 +15162,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('idbots:syncMetaBotEditChanges', async (_event, input: {
+  registerIpcHandler('idbots:syncMetaBotEditChanges', async (_event, input: {
     metabotId: number;
     syncName?: boolean;
     syncAvatar?: boolean;
@@ -15432,7 +15212,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('idbots:uploadMetabotHomepageFile', async (_event, input: {
+  registerIpcHandler('idbots:uploadMetabotHomepageFile', async (_event, input: {
     metabotId: number;
     fileName: string;
     contentType?: string;
@@ -15482,7 +15262,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('idbots:getMetaBotMnemonic', async (_event, metabotId: number) => {
+  registerIpcHandler('idbots:getMetaBotMnemonic', async (_event, metabotId: number) => {
     try {
       const store = getMetabotStore();
       const wallet = store.getMetabotWalletByMetabotId(metabotId);
@@ -15493,7 +15273,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('idbots:deleteMetaBot', async (_event, metabotId: number) => {
+  registerIpcHandler('idbots:deleteMetaBot', async (_event, metabotId: number) => {
     // Shared with the Twin metabot_delete tool. Also guards against deleting
     // the last remaining bot so the machine is never left botless.
     try {
@@ -15504,7 +15284,7 @@ if (!gotTheLock) {
   });
 
 
-  ipcMain.handle('gigSquare:fetchServices', async () => withSqliteRecovery('gigSquare:fetchServices', async () => {
+  registerIpcHandler('gigSquare:fetchServices', async () => withSqliteRecovery('gigSquare:fetchServices', async () => {
     try {
       repairSelfDirectedServiceOrders();
       const refundRiskByProvider = new Map(
@@ -15531,7 +15311,7 @@ if (!gotTheLock) {
     }
   }));
 
-  ipcMain.handle('gigSquare:fetchMyServices', async (_event, params?: {
+  registerIpcHandler('gigSquare:fetchMyServices', async (_event, params?: {
     page?: number;
     pageSize?: number;
     refresh?: boolean;
@@ -15565,7 +15345,7 @@ if (!gotTheLock) {
     }
   }));
 
-  ipcMain.handle('gigSquare:fetchMyServiceOrders', async (_event, params?: {
+  registerIpcHandler('gigSquare:fetchMyServiceOrders', async (_event, params?: {
     serviceId?: string;
     page?: number;
     pageSize?: number;
@@ -15669,7 +15449,7 @@ if (!gotTheLock) {
     }
   }));
 
-  ipcMain.handle('gigSquare:fetchRefunds', async () => withSqliteRecovery('gigSquare:fetchRefunds', async () => {
+  registerIpcHandler('gigSquare:fetchRefunds', async () => withSqliteRecovery('gigSquare:fetchRefunds', async () => {
     try {
       const refunds = await getGigSquareRefundsService().listRefunds();
       return { success: true, refunds };
@@ -15679,7 +15459,7 @@ if (!gotTheLock) {
     }
   }));
 
-  ipcMain.handle('gigSquare:processRefundOrder', async (_event, params?: {
+  registerIpcHandler('gigSquare:processRefundOrder', async (_event, params?: {
     orderId?: string;
   }) => {
     try {
@@ -15701,7 +15481,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('gigSquare:syncFromRemote', async () => {
+  registerIpcHandler('gigSquare:syncFromRemote', async () => {
     try {
       await syncGigSquareMyServicesData({ refresh: true });
       await syncServiceRefundProtocols();
@@ -15711,7 +15491,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('gigSquare:fetchProviderInfo', async (_event, params: {
+  registerIpcHandler('gigSquare:fetchProviderInfo', async (_event, params: {
     providerMetaId?: string;
     providerGlobalMetaId?: string;
     providerAddress?: string;
@@ -15813,7 +15593,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('gigSquare:preflightOrder', async (_event, params: {
+  registerIpcHandler('gigSquare:preflightOrder', async (_event, params: {
     metabotId: number;
     toGlobalMetaId: string;
   }) => {
@@ -15850,7 +15630,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('gigSquare:publishService', async (_event, params: {
+  registerIpcHandler('gigSquare:publishService', async (_event, params: {
     metabotId: number;
     serviceName: string;
     displayName: string;
@@ -16025,7 +15805,7 @@ if (!gotTheLock) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to publish service' };
     }
   });
-  ipcMain.handle('gigSquare:revokeService', async (_event, params?: { serviceId?: string }) => {
+  registerIpcHandler('gigSquare:revokeService', async (_event, params?: { serviceId?: string }) => {
     try {
       await syncGigSquareMyServicesData({ refresh: true });
       const serviceId = toSafeString(params?.serviceId).trim();
@@ -16087,7 +15867,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('gigSquare:modifyService', async (_event, params?: {
+  registerIpcHandler('gigSquare:modifyService', async (_event, params?: {
     serviceId?: string;
     serviceName?: string;
     displayName?: string;
@@ -16269,7 +16049,7 @@ if (!gotTheLock) {
     }
   });
 
-ipcMain.handle('gigSquare:createServiceOrderPin', async (_event, params: {
+registerIpcHandler('gigSquare:createServiceOrderPin', async (_event, params: {
     metabotId: number;
     servicePinId?: string | null;
     paymentTxid?: string | null;
@@ -16297,7 +16077,7 @@ ipcMain.handle('gigSquare:createServiceOrderPin', async (_event, params: {
     }
   });
 
-ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
+registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     metabotId: number;
     toGlobalMetaId: string;
     toChatPubkey: string;
@@ -16563,7 +16343,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('gigSquare:pingProvider', async (_event, params: {
+  registerIpcHandler('gigSquare:pingProvider', async (_event, params: {
     metabotId: number;
     toGlobalMetaId: string;
     toChatPubkey: string;
@@ -16598,7 +16378,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   });
 
   // --- Provider discovery IPC handlers ---
-  ipcMain.handle('providerDiscovery:getOnlineServices', async () => withSqliteRecovery('providerDiscovery:getOnlineServices', async () => {
+  registerIpcHandler('providerDiscovery:getOnlineServices', async () => withSqliteRecovery('providerDiscovery:getOnlineServices', async () => {
     try {
       const services = getProviderDiscoveryService().getDiscoverySnapshot().availableServices;
       return { success: true, services };
@@ -16608,7 +16388,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   }));
 
-  ipcMain.handle('providerDiscovery:getOnlineBots', async () => withSqliteRecovery('providerDiscovery:getOnlineBots', async () => {
+  registerIpcHandler('providerDiscovery:getOnlineBots', async () => withSqliteRecovery('providerDiscovery:getOnlineBots', async () => {
     try {
       const bots = getProviderDiscoveryService().getDiscoverySnapshot().onlineBots;
       return { success: true, bots };
@@ -16618,7 +16398,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   }));
 
-  ipcMain.handle('providerDiscovery:getSnapshot', async () => withSqliteRecovery('providerDiscovery:getSnapshot', async () => {
+  registerIpcHandler('providerDiscovery:getSnapshot', async () => withSqliteRecovery('providerDiscovery:getSnapshot', async () => {
     try {
       const snapshot = getProviderDiscoveryService().getDiscoverySnapshot();
       return { success: true, snapshot };
@@ -16628,7 +16408,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   }));
 
-  ipcMain.handle('idbots:getAddressBalance', async (_event, options: { metabotId?: number; addresses?: { btc?: string; mvc?: string; doge?: string } }) => {
+  registerIpcHandler('idbots:getAddressBalance', async (_event, options: { metabotId?: number; addresses?: { btc?: string; mvc?: string; doge?: string } }) => {
     try {
       const store = getMetabotStore();
       let btcAddr: string | undefined;
@@ -16677,7 +16457,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('idbots:getTransferFeeSummary', async (_event, chain: TransferChain) => {
+  registerIpcHandler('idbots:getTransferFeeSummary', async (_event, chain: TransferChain) => {
     try {
       // Use global fee rate store (same as Settings > Params & Config) so transfer and Settings show same tiers/rate
       const globalTiers = getGlobalFeeTiers()[chain];
@@ -16693,7 +16473,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle(
+  registerIpcHandler(
     'idbots:buildTransferPreview',
     async (
       _event,
@@ -16709,7 +16489,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   );
 
-  ipcMain.handle(
+  registerIpcHandler(
     'idbots:executeTransfer',
     async (
       _event,
@@ -16730,7 +16510,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   );
 
   registerMetabotWalletIpcHandlers({
-    ipcMain,
+    registerIpcHandler,
     getMetabotStore,
     getMetabotWalletAssets,
     async getTokenTransferFeeSummary(kind) {
@@ -16760,7 +16540,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     getMetabotStore,
     getUserIdentityStore,
   });
-  registerTrafficAccountIpcHandlers({ ipcMain });
+  registerTrafficAccountIpcHandlers({ registerIpcHandler });
 
   // Free LLM quota relay: identity-signed bootstrap issues the relay key for
   // the built-in `metaid-free` provider (first-run welcome experience).
@@ -16768,7 +16548,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     getStore,
     getUserIdentityStore,
   });
-  registerLlmRelayIpcHandlers({ ipcMain });
+  registerLlmRelayIpcHandlers({ registerIpcHandler });
 
   // Vision relay (describe_image backend): reuses the free-quota relay
   // credentials (metaid-free provider key, identity-signed bootstrap on
@@ -16784,7 +16564,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   // P50/P90) land in cowork.log, and the last partial day flushes at quit.
   setJevRelayCallStatsSink(coworkLog);
   initJevRelayService({ getStore });
-  registerJevRelayIpcHandlers({ ipcMain });
+  registerJevRelayIpcHandlers({ registerIpcHandler });
 
   // Identity-change closeout for all three relay credential caches (quota
   // snapshot, JEV kv+memory, vision kv+memory) plus the metaid-free provider
@@ -16806,7 +16586,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   // bracket future stalls with an explicit WARN instead of a silent log gap.
   startEventLoopLagMonitor();
 
-  ipcMain.handle('metabot:setEnabled', async (_event, id: number, enabled: boolean) => {
+  registerIpcHandler('metabot:setEnabled', async (_event, id: number, enabled: boolean) => {
     try {
       const store = getMetabotStore();
       const metabot = store.updateMetabot(id, { enabled });
@@ -16818,7 +16598,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
 
   // ==================== Permissions IPC Handlers ====================
 
-  ipcMain.handle('permissions:checkCalendar', async () => {
+  registerIpcHandler('permissions:checkCalendar', async () => {
     try {
       const status = await checkCalendarPermission();
       
@@ -16843,7 +16623,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('permissions:requestCalendar', async () => {
+  registerIpcHandler('permissions:requestCalendar', async () => {
     try {
       // Request permission and check status
       const granted = await requestCalendarPermission();
@@ -16857,7 +16637,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
 
   // ==================== IM Gateway IPC Handlers ====================
 
-  ipcMain.handle('im:config:get', async () => {
+  registerIpcHandler('im:config:get', async () => {
     try {
       const config = getIMGatewayManager().getConfig();
       return { success: true, config };
@@ -16869,7 +16649,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('im:config:set', async (_event, config: Partial<IMGatewayConfig>) => {
+  registerIpcHandler('im:config:set', async (_event, config: Partial<IMGatewayConfig>) => {
     try {
       getIMGatewayManager().setConfig(config);
       return { success: true };
@@ -16881,7 +16661,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('im:gateway:start', async (_event, platform: IMPlatform) => {
+  registerIpcHandler('im:gateway:start', async (_event, platform: IMPlatform) => {
     try {
       // Persist enabled state
       const manager = getIMGatewayManager();
@@ -16896,7 +16676,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('im:gateway:stop', async (_event, platform: IMPlatform) => {
+  registerIpcHandler('im:gateway:stop', async (_event, platform: IMPlatform) => {
     try {
       // Persist disabled state
       const manager = getIMGatewayManager();
@@ -16911,7 +16691,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('im:gateway:test', async (
+  registerIpcHandler('im:gateway:test', async (
     _event,
     platform: IMPlatform,
     configOverride?: Partial<IMGatewayConfig>
@@ -16927,7 +16707,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('im:status:get', async () => {
+  registerIpcHandler('im:status:get', async () => {
     try {
       const status = getIMGatewayManager().getStatus();
       return { success: true, status };
@@ -16939,26 +16719,26 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('generate-session-title', async (_event, userInput: string | null) => {
+  registerIpcHandler('generate-session-title', async (_event, userInput: string | null) => {
     return generateSessionTitle(userInput);
   });
 
-  ipcMain.handle('get-recent-cwds', async (_event, limit?: number) => {
+  registerIpcHandler('get-recent-cwds', async (_event, limit?: number) => {
     const boundedLimit = limit ? Math.min(Math.max(limit, 1), 20) : 8;
     return getCoworkStore().listRecentCwds(boundedLimit);
   });
 
   // Best-effort git branch detection for a workspace directory (used by the
   // cowork header to show the active branch of a project-bound conversation).
-  ipcMain.handle('git:getBranch', async (_event, cwd?: string) => {
+  registerIpcHandler('git:getBranch', async (_event, cwd?: string) => {
     return getGitBranch(cwd);
   });
 
-  ipcMain.handle('get-api-config', async () => {
+  registerIpcHandler('get-api-config', async () => {
     return getCurrentApiConfig();
   });
 
-  ipcMain.handle('check-api-config', async () => {
+  registerIpcHandler('check-api-config', async () => {
     const { config, error } = resolveCurrentApiConfig();
     return { hasConfig: config !== null, config, error };
   });
@@ -16966,11 +16746,11 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   // DeepSeek wallet balance: fetches GET /user/balance. Used by the balance chip
   // in the cowork header. Event-driven (called on session start + after turns),
   // not polled on a timer.
-  ipcMain.handle('deepseek:getBalance', async () => {
+  registerIpcHandler('deepseek:getBalance', async () => {
     return fetchDeepSeekBalance();
   });
 
-  ipcMain.handle('save-api-config', async (_event, config: {
+  registerIpcHandler('save-api-config', async (_event, config: {
     apiKey: string;
     baseURL: string;
     model: string;
@@ -16988,7 +16768,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   });
 
   // Dialog handlers
-  ipcMain.handle('dialog:selectDirectory', async () => {
+  registerIpcHandler('dialog:selectDirectory', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],
     });
@@ -16998,7 +16778,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     return { success: true, path: result.filePaths[0] };
   });
 
-  ipcMain.handle('dialog:selectFile', async (_event, options?: { title?: string; filters?: { name: string; extensions: string[] }[]; multi?: boolean }) => {
+  registerIpcHandler('dialog:selectFile', async (_event, options?: { title?: string; filters?: { name: string; extensions: string[] }[]; multi?: boolean }) => {
     const result = await dialog.showOpenDialog({
       properties: options?.multi ? ['openFile', 'multiSelections'] : ['openFile'],
       title: options?.title,
@@ -17010,7 +16790,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     return { success: true, path: result.filePaths[0], paths: result.filePaths };
   });
 
-  ipcMain.handle(
+  registerIpcHandler(
     'dialog:saveInlineFile',
     async (
       _event,
@@ -17057,7 +16837,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   );
 
   // Shell handlers - 打开文件/文件夹
-  ipcMain.handle('shell:openPath', async (_event, filePath: string) => {
+  registerIpcHandler('shell:openPath', async (_event, filePath: string) => {
     try {
       const normalizedPath = normalizeWindowsShellPath(filePath);
       const result = await shell.openPath(normalizedPath);
@@ -17071,7 +16851,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('shell:showItemInFolder', async (_event, filePath: string) => {
+  registerIpcHandler('shell:showItemInFolder', async (_event, filePath: string) => {
     try {
       const normalizedPath = normalizeWindowsShellPath(filePath);
       shell.showItemInFolder(normalizedPath);
@@ -17081,7 +16861,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('shell:openExternal', async (_event, url: string) => {
+  registerIpcHandler('shell:openExternal', async (_event, url: string) => {
     try {
       const trimmed = (url || '').trim();
       if (!trimmed) {
@@ -17181,7 +16961,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   };
 
-  ipcMain.handle('shell:getOpenWithApps', async (_event, filePath: string): Promise<{ success: boolean; apps: { id: string; name: string }[]; error?: string }> => {
+  registerIpcHandler('shell:getOpenWithApps', async (_event, filePath: string): Promise<{ success: boolean; apps: { id: string; name: string }[]; error?: string }> => {
     try {
       const normalizedPath = normalizeWindowsShellPath(filePath);
       if (!normalizedPath || !fs.existsSync(normalizedPath)) {
@@ -17194,7 +16974,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('shell:openWith', async (_event, payload: { filePath: string; appId: string }): Promise<{ success: boolean; error?: string }> => {
+  registerIpcHandler('shell:openWith', async (_event, payload: { filePath: string; appId: string }): Promise<{ success: boolean; error?: string }> => {
     try {
       const filePath = normalizeWindowsShellPath(payload?.filePath ?? '');
       const appId = payload?.appId ?? '';
@@ -17214,7 +16994,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('shell:chooseOpenWithApp', async (_event, filePath: string): Promise<{ success: boolean; error?: string }> => {
+  registerIpcHandler('shell:chooseOpenWithApp', async (_event, filePath: string): Promise<{ success: boolean; error?: string }> => {
     try {
       const normalizedPath = normalizeWindowsShellPath(filePath);
       if (!normalizedPath || !fs.existsSync(normalizedPath)) {
@@ -17272,7 +17052,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('fs:readTextFile', async (_event, payload: { filePath: string; maxBytes?: number }): Promise<{ success: boolean; content?: string; size?: number; limit?: number; error?: string }> => {
+  registerIpcHandler('fs:readTextFile', async (_event, payload: { filePath: string; maxBytes?: number }): Promise<{ success: boolean; content?: string; size?: number; limit?: number; error?: string }> => {
     try {
       const filePath = normalizeWindowsShellPath(payload?.filePath ?? '');
       if (!filePath) {
@@ -17300,10 +17080,11 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   });
 
   // App update download & install
-  ipcMain.handle('appUpdate:download', async (event, payload: { url: string; version?: string; sha256?: string }) => {
+  registerIpcHandler('appUpdate:download', async (event, payload: { url: string; version?: string; sha256?: string }) => {
     try {
       const filePath = await downloadUpdate(payload.url, (progress) => {
         if (!event.sender.isDestroyed()) {
+          // desktop-only: reply addressed to the requesting sender (not a broadcast)
           event.sender.send('appUpdate:downloadProgress', progress);
         }
       }, {
@@ -17316,12 +17097,12 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('appUpdate:cancelDownload', async () => {
+  registerIpcHandler('appUpdate:cancelDownload', async () => {
     const cancelled = cancelActiveDownload();
     return { success: cancelled };
   });
 
-  ipcMain.handle('appUpdate:install', async (_event, filePath: string) => {
+  registerIpcHandler('appUpdate:install', async (_event, filePath: string) => {
     try {
       await installUpdate(filePath);
       return { success: true };
@@ -17332,7 +17113,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
 
   // Silent macOS apply: replace the .app bundle without elevation or relaunch.
   // On permission failure the renderer falls back to the interactive install.
-  ipcMain.handle('appUpdate:applySilent', async (_event, filePath: string) => {
+  registerIpcHandler('appUpdate:applySilent', async (_event, filePath: string) => {
     if (process.platform !== 'darwin') {
       return { success: false, error: 'Silent apply is only supported on macOS' };
     }
@@ -17350,13 +17131,13 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   });
 
   // Relaunch into a silently-applied macOS update (user confirmed the restart).
-  ipcMain.handle('appUpdate:relaunchNow', async () => {
+  registerIpcHandler('appUpdate:relaunchNow', async () => {
     const relaunching = await relaunchPendingMacUpdate();
     return { success: relaunching };
   });
 
   // API 代理处理程序 - 解决 CORS 问题
-  ipcMain.handle('api:fetch', async (_event, options: {
+  registerIpcHandler('api:fetch', async (_event, options: {
     url: string;
     method: string;
     headers: Record<string, string>;
@@ -17411,7 +17192,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   });
 
   // SSE 流式 API 代理
-  ipcMain.handle('api:stream', async (event, options: {
+  registerIpcHandler('api:stream', async (event, options: {
     url: string;
     method: string;
     headers: Record<string, string>;
@@ -17507,7 +17288,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   });
 
   // 取消流式请求
-  ipcMain.handle('api:stream:cancel', (_event, requestId: string) => {
+  registerIpcHandler('api:stream:cancel', (_event, requestId: string) => {
     const controller = activeStreamControllers.get(requestId);
     if (controller) {
       controller.abort();
@@ -17517,7 +17298,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     return false;
   });
 
-  ipcMain.handle('metaid:getUserInfo', async (_e: Electron.IpcMainInvokeEvent, params: { globalMetaId: string }) => {
+  registerIpcHandler('metaid:getUserInfo', async (_e: Electron.IpcMainInvokeEvent, params: { globalMetaId: string }) => {
     try {
       return await fetchMetaidUserInfoByGlobalMetaId(params.globalMetaId);
     } catch (error) {
@@ -17529,7 +17310,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('metaid:resolveAvatarSource', async (_e: Electron.IpcMainInvokeEvent, params: { reference: string }) => {
+  registerIpcHandler('metaid:resolveAvatarSource', async (_e: Electron.IpcMainInvokeEvent, params: { reference: string }) => {
     try {
       const reference = toSafeString(params?.reference).trim();
       if (!reference) {
@@ -17557,7 +17338,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     });
   };
 
-  ipcMain.handle('metaid:contacts:list', async (_event, input: { observerGlobalMetaId?: string }) => {
+  registerIpcHandler('metaid:contacts:list', async (_event, input: { observerGlobalMetaId?: string }) => {
     try {
       const observerGlobalMetaId = toSafeString(input?.observerGlobalMetaId).trim();
       if (!observerGlobalMetaId) {
@@ -17573,7 +17354,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('metaid:contacts:detail', async (_event, input: {
+  registerIpcHandler('metaid:contacts:detail', async (_event, input: {
     observerGlobalMetaId?: string;
     subjectGlobalMetaId?: string;
   }) => {
@@ -17595,7 +17376,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
 
   // Knowledge-point anchored memory browser (Settings → Memory → Knowledge).
   // The store already supports list/archive; these expose them to the renderer.
-  ipcMain.handle('metaid:knowledge:list', async (_event, input: {
+  registerIpcHandler('metaid:knowledge:list', async (_event, input: {
     metabotId?: number;
     kind?: string;
     status?: string;
@@ -17625,7 +17406,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('metaid:knowledge:archive', async (_event, input: {
+  registerIpcHandler('metaid:knowledge:archive', async (_event, input: {
     id?: string;
     metabotId?: number;
   }) => {
@@ -17648,7 +17429,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('metaid:knowledge:update', async (_event, input: {
+  registerIpcHandler('metaid:knowledge:update', async (_event, input: {
     id?: string;
     metabotId?: number;
     topic?: string;
@@ -17680,7 +17461,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('metaid:knowledge:delete', async (_event, input: {
+  registerIpcHandler('metaid:knowledge:delete', async (_event, input: {
     id?: string;
     metabotId?: number;
   }) => {
@@ -17700,7 +17481,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('mcp:list', () => {
+  registerIpcHandler('mcp:list', () => {
     try {
       return { success: true, servers: getMcpStore().listServers() };
     } catch (error) {
@@ -17708,7 +17489,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('mcp:create', (_event, data: McpServerFormData) => {
+  registerIpcHandler('mcp:create', (_event, data: McpServerFormData) => {
     try {
       getMcpStore().createServer(data);
       return { success: true, servers: getMcpStore().listServers() };
@@ -17717,7 +17498,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('mcp:update', (_event, id: string, data: Partial<McpServerFormData>) => {
+  registerIpcHandler('mcp:update', (_event, id: string, data: Partial<McpServerFormData>) => {
     try {
       const updated = getMcpStore().updateServer(id, data);
       if (!updated) {
@@ -17729,7 +17510,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('mcp:delete', (_event, id: string) => {
+  registerIpcHandler('mcp:delete', (_event, id: string) => {
     try {
       const deleted = getMcpStore().deleteServer(id);
       if (!deleted) {
@@ -17741,7 +17522,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('mcp:setEnabled', (_event, options: { id: string; enabled: boolean }) => {
+  registerIpcHandler('mcp:setEnabled', (_event, options: { id: string; enabled: boolean }) => {
     try {
       const updated = getMcpStore().setEnabled(options.id, options.enabled);
       if (!updated) {
@@ -17753,7 +17534,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('projects:list', () => {
+  registerIpcHandler('projects:list', () => {
     try {
       return { success: true, projects: getProjectStore().listProjects() };
     } catch (error) {
@@ -17761,7 +17542,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('projects:create', (_event, data: ProjectFormData) => {
+  registerIpcHandler('projects:create', (_event, data: ProjectFormData) => {
     try {
       getProjectStore().createProject(data);
       return { success: true, projects: getProjectStore().listProjects() };
@@ -17770,7 +17551,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('projects:update', (_event, id: string, data: Partial<ProjectFormData>) => {
+  registerIpcHandler('projects:update', (_event, id: string, data: Partial<ProjectFormData>) => {
     try {
       const updated = getProjectStore().updateProject(id, data);
       if (!updated) {
@@ -17782,7 +17563,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('projects:delete', (_event, id: string) => {
+  registerIpcHandler('projects:delete', (_event, id: string) => {
     try {
       const deleted = getProjectStore().deleteProject(id);
       if (!deleted) {
@@ -17794,7 +17575,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
-  ipcMain.handle('projects:setEnabled', (_event, options: { id: string; enabled: boolean }) => {
+  registerIpcHandler('projects:setEnabled', (_event, options: { id: string; enabled: boolean }) => {
     try {
       const updated = getProjectStore().setEnabled(options.id, options.enabled);
       if (!updated) {

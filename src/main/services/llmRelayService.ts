@@ -610,27 +610,25 @@ export async function getLlmRelayQuota(input: { apiKey?: unknown; forceRefresh?:
 // IPC surface
 // ---------------------------------------------------------------------------
 
-interface IpcMainLike {
-  handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void;
-}
+type RegisterIpcHandlerFn = (channel: string, handler: (event: any, ...args: any[]) => any) => void;
 
-export function registerLlmRelayIpcHandlers(deps: { ipcMain: IpcMainLike }): void {
-  const { ipcMain } = deps;
-  ipcMain.handle('llmRelay:bootstrap', async () => {
+export function registerLlmRelayIpcHandlers(deps: { registerIpcHandler: RegisterIpcHandlerFn }): void {
+  const { registerIpcHandler } = deps;
+  registerIpcHandler('llmRelay:bootstrap', async () => {
     try {
       return { success: true, result: await bootstrapLlmRelay() };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('llmRelay:getQuota', async (_event, input: { apiKey?: unknown; forceRefresh?: boolean }) => {
+  registerIpcHandler('llmRelay:getQuota', async (_event, input: { apiKey?: unknown; forceRefresh?: boolean }) => {
     try {
       return { success: true, quota: await getLlmRelayQuota(input ?? {}) };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('llmRelay:setApiBase', async (_event, input: { apiBase?: unknown }) => {
+  registerIpcHandler('llmRelay:setApiBase', async (_event, input: { apiBase?: unknown }) => {
     try {
       return { success: true, apiBase: setLlmRelayApiBase(input?.apiBase) };
     } catch (error) {
