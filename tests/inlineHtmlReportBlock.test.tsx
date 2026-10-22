@@ -97,6 +97,8 @@ test('the toolbar is a hover-revealed overlay that takes no layout space', () =>
     assert.match(markup, /group-hover:opacity-100/);
     assert.match(markup, /pointer-events-none/);
     assert.match(markup, /group-hover:pointer-events-auto/);
+    // The toolbar title reads in the accent color, same as its icon and badge.
+    assert.match(markup, /truncate text-xs font-medium text-claude-accent/);
   });
   // An open right-click menu forces the toolbar visible even off-hover.
   assert.match(blockSource, /menuPosition\s*\?\s*'pointer-events-auto opacity-100'/);

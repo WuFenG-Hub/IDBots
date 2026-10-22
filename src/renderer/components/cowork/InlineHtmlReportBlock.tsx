@@ -400,7 +400,7 @@ const InlineHtmlReportBlock: React.FC<InlineHtmlReportBlockProps> = ({
       >
         <DocumentChartBarIcon className="h-4 w-4 shrink-0 text-claude-accent" />
         <span
-          className="min-w-0 flex-1 truncate text-xs font-medium dark:text-claude-darkText text-claude-text"
+          className="min-w-0 flex-1 truncate text-xs font-medium text-claude-accent"
           title={filePath}
         >
           {displayName || filePath}
