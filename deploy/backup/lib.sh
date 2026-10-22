@@ -42,6 +42,10 @@ info() { log INFO "$*"; }
 warn() { log WARN "$*" >&2; }
 err()  { log ERROR "$*" >&2; }
 
+# S2-5: every script announces where it was invoked from and where it lives,
+# so systemd journal / ops logs always carry the locating context.
+info "cwd=$(pwd) script_dir=$IDBOTS_BACKUP_DIR env=$IDBOTS_BACKUP_ENV"
+
 die() { err "$*"; exit 1; }
 
 need_bin() {
@@ -261,4 +265,66 @@ integrity_check_volume() { # volume label [image]
   else
     warn "integrity check skipped for $vol (no readable path, no docker/image)"
   fi
+}
+
+# --- backup fidelity manifests (WS-C review S2-3) --------------------------------
+# make_manifest DIR OUT_JSON — inventory a snapshot: file count, total bytes,
+# and per-table row counts for every *.sqlite. Stored inside each archive as
+# _backup-manifest.json so any restore can prove fidelity against the source.
+make_manifest() {
+  local dir="$1" out="$2"
+  need_bin jq; need_bin sqlite3
+  local statflag="-f%z"
+  stat -c%s /dev/null >/dev/null 2>&1 && statflag="-c%s"
+  local files bytes
+  # *.sqlite-wal / *.sqlite-shm are volatile sidecars: their bytes are already
+  # reflected in the row counts (opening the db recovers the WAL), and whether
+  # they exist at all depends on checkpoint timing — exclude them from the
+  # file/byte accounting so the compare is deterministic. They still ship in
+  # the archive (a live WAL carries the newest data).
+  files="$(find "$dir" -type f ! -name '._*' ! -name '_backup-manifest.json' ! -name '*.sqlite-wal' ! -name '*.sqlite-shm' | wc -l | tr -d ' ')"
+  bytes="$(find "$dir" -type f ! -name '._*' ! -name '_backup-manifest.json' ! -name '*.sqlite-wal' ! -name '*.sqlite-shm' -exec stat $statflag {} + 2>/dev/null | awk '{s+=$1} END {print s+0}')"
+  local dbjson="{}" db rel t c tjson
+  while IFS= read -r db; do
+    rel="${db#"$dir"/}"
+    tjson="{}"
+    while IFS= read -r t; do
+      [ -n "$t" ] || continue
+      c="$(sqlite3 "$db" "SELECT COUNT(*) FROM \"$t\";" 2>/dev/null || echo -1)"
+      tjson="$(jq --arg t "$t" --argjson c "$c" '. + {($t): $c}' <<<"$tjson")"
+    done < <(sqlite3 "$db" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\';" 2>/dev/null)
+    dbjson="$(jq --arg k "$rel" --argjson v "$tjson" '. + {($k): $v}' <<<"$dbjson")"
+  done < <(find "$dir" -type f -name '*.sqlite' ! -name '._*')
+  jq -nc --argjson files "$files" --argjson bytes "$bytes" --argjson sqlite "$dbjson" \
+    '{files:$files,bytes:$bytes,sqlite:$sqlite}' > "$out"
+  info "manifest: ${files} files, ${bytes} bytes, $(jq 'length' <<<"$dbjson") sqlite db(s)"
+}
+
+# compare_manifests MANIFEST_JSON RESTORED_DIR — recompute the manifest of a
+# restored tree and diff it against the archived one. Prints per-field
+# PASS/DIFF lines; returns non-zero on any difference.
+compare_manifests() {
+  local archived="$1" restored_dir="$2" rc=0
+  [ -f "$archived" ] || { warn "archive carries no _backup-manifest.json (pre-manifest backup?) — compare skipped"; return 0; }
+  local recomputed
+  recomputed="$(mktemp)"
+  make_manifest "$restored_dir" "$recomputed"
+  local field a b
+  for field in files bytes; do
+    a="$(jq -r ".$field" "$archived")"; b="$(jq -r ".$field" "$recomputed")"
+    if [ "$a" = "$b" ]; then echo "  PASS  $field: $a"; else rc=1; echo "  DIFF  $field: archived=$a restored=$b"; fi
+  done
+  local db
+  while IFS= read -r db; do
+    [ -n "$db" ] || continue
+    local t
+    while IFS= read -r t; do
+      [ -n "$t" ] || continue
+      a="$(jq -r --arg d "$db" --arg t "$t" '.sqlite[$d][$t] // "missing"' "$archived")"
+      b="$(jq -r --arg d "$db" --arg t "$t" '.sqlite[$d][$t] // "missing"' "$recomputed")"
+      if [ "$a" = "$b" ]; then echo "  PASS  $db.$t rows=$a"; else rc=1; echo "  DIFF  $db.$t rows: archived=$a restored=$b"; fi
+    done < <(jq -r --arg d "$db" '.sqlite[$d] | keys[]' "$archived")
+  done < <(jq -r '.sqlite | keys[]' "$archived")
+  rm -f "$recomputed"
+  return $rc
 }

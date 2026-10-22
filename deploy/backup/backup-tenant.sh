@@ -56,6 +56,11 @@ if [ "$PAUSED_FOR" -gt "$BACKUP_PAUSE_BUDGET_SECONDS" ]; then
   alert backup "tenant $TENANT pause exceeded budget: ${PAUSED_FOR}s > ${BACKUP_PAUSE_BUDGET_SECONDS}s"
 fi
 
+# Fidelity manifest travels inside the archive; restore compares against it
+# (WS-C review S2-3).
+make_manifest "$WORK/snapshot" "$WORK/manifest.json"
+cp "$WORK/manifest.json" "$WORK/snapshot/_backup-manifest.json"
+
 # Archive + encrypt + upload.
 make_archive "$WORK/snapshot" "$WORK/archive.tar.zst.enc"
 SIZE="$(stat -f%z "$WORK/archive.tar.zst.enc" 2>/dev/null || stat -c%s "$WORK/archive.tar.zst.enc")"

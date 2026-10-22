@@ -118,6 +118,14 @@ IMAGE="${IDBOTS_DRILL_IMAGE:-${LIVE_IMAGE:-}}"
 # --- 3. integrity check (before anything boots on the data) ------------------------------
 integrity_check_volume "$DRILL_VOLUME" "$KEY" "$IMAGE" || die "integrity check failed — NOT proceeding"
 
+# --- 3b. fidelity compare against the archive's manifest (WS-C review S2-3) ---------------
+info "comparing restored data against the archived manifest"
+if compare_manifests "$WORK/extracted/_backup-manifest.json" "$WORK/extracted"; then
+  info "data fidelity: MATCH"
+else
+  die "data fidelity MISMATCH — restored data differs from the archived manifest"
+fi
+
 if [ "$MODE" = drill ]; then
   # --- 4a. boot a throwaway container on the restored volume -------------------------------
   if have_docker; then
