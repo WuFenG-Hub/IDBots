@@ -14,6 +14,34 @@
 /** Hard display cap: an ack is 1-2 sentences, never a paragraph. */
 export const TURN_ACK_REPLY_MAX_CHARS = 160;
 
+/**
+ * CJK script detector for the ack language guard: ideographs (unified, ext-A,
+ * compatibility) and kana. CJK punctuation (U+3000-U+303F, fullwidth forms)
+ * is deliberately excluded — a lone "。" is not evidence the ack is in the
+ * user's language.
+ */
+const CJK_SCRIPT_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+
+/** True when the text contains at least one CJK ideograph or kana character. */
+export function containsCjk(text: string): boolean {
+  return CJK_SCRIPT_RE.test(text ?? '');
+}
+
+/**
+ * Meta-analysis markers betraying reasoning-style output ABOUT the message
+ * instead of an acknowledgment addressed to the user. On 2026-10-23 an
+ * always-thinking GLM-5.3 ack burned its budget on hidden reasoning; the
+ * resolver promoted reasoning_content into content and a mid-thought English
+ * fragment shaped like these markers leaked out as the ack bubble.
+ */
+const TURN_ACK_GENRE_MARKERS = [
+  "the user's message",
+  'the user is',
+  'which means',
+  'acknowledging something',
+  'translates as',
+] as const;
+
 /** Input cap for the user-text slice sent to the ack model. */
 const TURN_ACK_USER_TEXT_MAX_CHARS = 1200;
 
@@ -52,6 +80,7 @@ export function buildTurnAckReplyMessages(
         'You write the opening acknowledgment of a chat assistant. The user just sent a message; the full reply is being prepared separately and will appear after yours.',
         'Write ONE short acknowledgment that confirms you received and understood the request and says in plain words what you are about to do for it.',
         'Rules: 1-2 sentences, under 40 words. Same language as the user message. Do not answer, solve, or start the task. Do not promise results or time limits, and do not ask questions. No markdown, lists, quotes, emoji, or greetings. Output only the acknowledgment text.',
+        "Never describe, analyze, translate, or quote the user's message; never mention what language it is in.",
       ].join('\n'),
     },
     {
@@ -86,4 +115,27 @@ export function sanitizeTurnAckReply(raw: string): string {
   // Keep the last complete sentence when one fits; otherwise hard-cap.
   const cut = lastStop > TURN_ACK_REPLY_MAX_CHARS * 0.5 ? lastStop + 1 : TURN_ACK_REPLY_MAX_CHARS;
   return capped.slice(0, cut).trimEnd();
+}
+
+/**
+ * Input-aware sanitize for the LLM ack (2026-10-23 thinking-leak fix).
+ * Two deterministic rejections return '' BEFORE the length cap so the caller
+ * keeps the template phrase instead of emitting leaked reasoning:
+ *  - genre guard: the ack reads as meta-analysis about the message (starts
+ *    with "The user" or contains one of TURN_ACK_GENRE_MARKERS);
+ *  - language guard: the user wrote CJK but the ack contains no CJK at all.
+ * Anything else falls through to the plain sanitizer unchanged.
+ */
+export function sanitizeTurnAckReplyForInput(raw: string, userText: string): string {
+  const probe = (raw ?? '')
+    .replace(/^[\s"'`«»“”‘’「」『』]+/, '')
+    .replace(/[\u2018\u2019]/g, "'")
+    .toLowerCase();
+  if (!probe) return '';
+  if (probe.startsWith('the user')) return '';
+  for (const marker of TURN_ACK_GENRE_MARKERS) {
+    if (probe.includes(marker)) return '';
+  }
+  if (containsCjk(userText ?? '') && !containsCjk(raw ?? '')) return '';
+  return sanitizeTurnAckReply(raw);
 }

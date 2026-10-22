@@ -3,7 +3,7 @@ import { execSync } from 'child_process';
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'fs';
 import { delimiter, dirname, join, resolve } from 'path';
 import { truncateUtf16Units } from './llmSafeText';
-import { buildEnvForConfig, getCurrentApiConfig } from './claudeSettings';
+import { buildEnvForConfig, getCurrentApiConfig, resolveApiConfigForModel } from './claudeSettings';
 import type { OpenAICompatProxyTarget } from './coworkOpenAICompatProxy';
 import { getInternalApiBaseURL } from './coworkOpenAICompatProxy';
 import { coworkLog } from './coworkLogger';
@@ -12,7 +12,8 @@ import { resolveWritableSkillsRoot } from './skillRoots';
 import { getMetaidRpcBase, getMetaidRpcTokenFilePath, METAID_RPC_AUTHFILE_ENV } from '../services/metaidRpcEndpoint';
 import { chatCompletionWithTools } from '../services/cognitiveChatCompletion';
 import type { MetabotBrainOptions } from '../services/llmFallback';
-import { buildTurnAckReplyMessages, sanitizeTurnAckReply } from './turnAckReply';
+import { buildTurnAckReplyMessages, sanitizeTurnAckReplyForInput } from './turnAckReply';
+import { modelAlwaysThinks } from './modelThinking';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 import { assignPathValue, collapseWindowsPathKeys, pathValueOf } from './windowsPathEnv';
 import { appendPythonRuntimeToEnv } from './pythonRuntime';
@@ -1294,6 +1295,20 @@ export function setTurnAckReplyBrainProvider(provider: (() => MetabotBrainOption
 export async function generateTurnAckReply(userText: string, sessionTitle?: string | null): Promise<string> {
   try {
     const brain = turnAckReplyBrainProvider?.() ?? null;
+    // Effective model for the thinking-aware budget below: the brain's llmId,
+    // else the app default the cognitive layer would resolve for an unset
+    // llmId (the same default generateSessionTitle rides when no brain has
+    // an llmId). Read-only resolution — no proxy pin, no side effects.
+    const effectiveModel =
+      brain?.llmId ??
+      resolveApiConfigForModel(null, 'local', null, brain?.llmProvider ?? null)?.config?.model ??
+      null;
+    // F2 (2026-10-23 thinking-leak fix): always-thinking models (GLM-5.x —
+    // the wire cannot turn their reasoning off, so `thinking: 'disabled'` is
+    // a no-op for them) get reasoning headroom; a 96-token ceiling burns
+    // entirely in hidden reasoning and the ack comes back empty. Models that
+    // can genuinely disable thinking keep the tight 96.
+    const maxTokens = modelAlwaysThinks(effectiveModel) ? 2048 : 96;
     const result = await chatCompletionWithTools(
       buildTurnAckReplyMessages({ userText, sessionTitle }),
       {
@@ -1302,7 +1317,7 @@ export async function generateTurnAckReply(userText: string, sessionTitle?: stri
         thinking: 'disabled',
         // An ack must never wait on reasoning (same rationale as titles).
         effort: 'off',
-        maxTokens: 96,
+        maxTokens,
         temperature: 0.6,
         throwOnEmptyContent: true,
         // The Responses path injects server-side web_search by default; a
@@ -1311,7 +1326,24 @@ export async function generateTurnAckReply(userText: string, sessionTitle?: stri
         attemptTimeoutMs: 4_000,
       }
     );
-    return sanitizeTurnAckReply(result.content ?? '');
+    // F1 (2026-10-23 thinking-leak fix): on the always-thinking GLM-5.x
+    // brain the ack budget burned in hidden reasoning, content came back
+    // empty, and the openai-compat resolver PROMOTED reasoning_content into
+    // content — a mid-thought English analysis fragment then leaked out as
+    // the ack bubble. Reject reasoning-promoted content and length-truncated
+    // completions outright; the caller keeps the template phrase.
+    const metadata = result.responseMetadata;
+    const promotedFromReasoning = metadata?.contentBlockTypes?.includes('reasoning') ?? false;
+    if (promotedFromReasoning || metadata?.stopReason === 'length') {
+      console.info(
+        '[turnAck] dropped LLM ack reply:',
+        `promotedFromReasoning=${promotedFromReasoning}`,
+        `stopReason=${metadata?.stopReason ?? 'n/a'}`,
+        `blocks=${metadata?.contentBlockTypes?.join(',') ?? 'none'}`
+      );
+      return '';
+    }
+    return sanitizeTurnAckReplyForInput(result.content ?? '', userText);
   } catch (error) {
     if (isSqliteWasmBoundsError(error)) {
       throw error;
