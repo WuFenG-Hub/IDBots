@@ -459,6 +459,55 @@ const MAX_CHAIN_CONTENT_ENTRIES_PER_KIND = 50;
 /** Bound the buyer-rating section per day so a popular service cannot flood the dream. */
 const MAX_SERVICE_RATINGS_PER_DAY = 10;
 
+/**
+ * Silent-drop counters for dream input assembly and output parsing (dream
+ * review P0 2026-10-23). Every place that silently truncates or drops dream
+ * input/output increments the matching counter; the dream run threads one
+ * mutable instance through the activity query, prompt building and parsing,
+ * surfaces it in the run telemetry (metabot_dream_telemetry_daily.extra_json
+ * carries the whole telemetry blob) and console.warns when any counter is
+ * non-zero. All fields are plain overflow counts — a zero means nothing was
+ * lost on that axis.
+ */
+export interface DreamInputDropCounters {
+  /** On-chain group-chat messages dropped over the per-task cap. */
+  groupChatMessages: number;
+  /** Chain-write ledger rows dropped over the per-day cap. */
+  chainWrites: number;
+  /** Chain-read ledger rows dropped over the per-day cap. */
+  chainReads: number;
+  /** Implicit signals dropped over the per-day cap. */
+  implicitSignals: number;
+  /** Sessions reduced to a title-only stub by fair-share budgeting. */
+  sessionsTitleOnly: number;
+  /** Surf-report characters cut off by the prompt's surf cap. */
+  surfReportChars: number;
+  /** Dream-output array entries dropped by the per-field parse caps. */
+  parseArrayEntries: number;
+}
+
+export function createDreamInputDropCounters(): DreamInputDropCounters {
+  return {
+    groupChatMessages: 0,
+    chainWrites: 0,
+    chainReads: 0,
+    implicitSignals: 0,
+    sessionsTitleOnly: 0,
+    surfReportChars: 0,
+    parseArrayEntries: 0,
+  };
+}
+
+export function countDreamInputDrops(counters: DreamInputDropCounters): number {
+  return counters.groupChatMessages
+    + counters.chainWrites
+    + counters.chainReads
+    + counters.implicitSignals
+    + counters.sessionsTitleOnly
+    + counters.surfReportChars
+    + counters.parseArrayEntries;
+}
+
 const parseIdNumber = (value: unknown): number | null => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.floor(parsed) : null;
@@ -1420,7 +1469,12 @@ export class DreamStore {
    * Hidden sessions are included on purpose — order execution sessions are
    * hidden from the UI list but are still experience.
    */
-  getActivityForDate(metabotId: number, dayStartMs: number, dayEndMs: number): DreamDayActivity {
+  getActivityForDate(
+    metabotId: number,
+    dayStartMs: number,
+    dayEndMs: number,
+    dropCounters?: DreamInputDropCounters,
+  ): DreamDayActivity {
     const sessionRows = this.getAll<{
       id: string;
       title: string;
@@ -1546,7 +1600,10 @@ export class DreamStore {
         memberRole: row.role === 'chair' ? 'chair' : 'worker',
         messages: [],
       };
-      if (existing.messages.length >= MAX_GROUP_CHAT_MESSAGES_PER_TASK) continue;
+      if (existing.messages.length >= MAX_GROUP_CHAT_MESSAGES_PER_TASK) {
+        if (dropCounters) dropCounters.groupChatMessages += 1;
+        continue;
+      }
       const occurredSec = parseIdNumber(row.chain_timestamp);
       existing.messages.push({
         senderName: (row.sender_name ?? '').trim() || 'unknown',
@@ -1660,6 +1717,13 @@ export class DreamStore {
       contentText: row.content_text ?? null,
       occurredAtMs: Number(row.occurred_at_ms) || dayStartMs,
     }));
+    if (dropCounters && chainWrites.length >= MAX_CHAIN_CONTENT_ENTRIES_PER_KIND) {
+      const total = parseIdNumber(this.getOne<{ n: number | string }>(
+        'SELECT COUNT(*) AS n FROM metabot_chain_writes WHERE metabot_id = ? AND occurred_at_ms >= ? AND occurred_at_ms < ?',
+        [metabotId, dayStartMs, dayEndMs],
+      )?.n) ?? chainWrites.length;
+      dropCounters.chainWrites += Math.max(0, total - MAX_CHAIN_CONTENT_ENTRIES_PER_KIND);
+    }
 
     const chainReads = this.getAll<{
       pin_id: string;
@@ -1689,6 +1753,13 @@ export class DreamStore {
       savedToKb: Number(row.saved_to_kb) === 1,
       lastReadAtMs: Number(row.last_read_at_ms) || dayStartMs,
     }));
+    if (dropCounters && chainReads.length >= MAX_CHAIN_CONTENT_ENTRIES_PER_KIND) {
+      const total = parseIdNumber(this.getOne<{ n: number | string }>(
+        'SELECT COUNT(*) AS n FROM metabot_chain_reads WHERE metabot_id = ? AND last_read_at_ms >= ? AND last_read_at_ms < ?',
+        [metabotId, dayStartMs, dayEndMs],
+      )?.n) ?? chainReads.length;
+      dropCounters.chainReads += Math.max(0, total - MAX_CHAIN_CONTENT_ENTRIES_PER_KIND);
+    }
 
     // Buyer ratings received that day on services THIS bot provides. The
     // rating pins are synced chain-wide by gigSquareRatingSyncService into

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { CapabilityFalsifiedHypothesis, CoworkStore } from '../coworkStore';
-import type { DreamDayActivity, DreamStore, MetabotPrediction, PromptLayerSnapshot } from '../dreamStore';
+import type { DreamDayActivity, DreamInputDropCounters, DreamStore, MetabotPrediction, PromptLayerSnapshot } from '../dreamStore';
+import { countDreamInputDrops, createDreamInputDropCounters } from '../dreamStore';
 import type { MetaIDExperienceStore } from '../metaidExperienceStore';
 import type { MetaIDImpressionStore } from '../metaidImpressionStore';
 import type { MetaIDKnowledgeStore } from '../metaidKnowledgeStore';
@@ -1047,6 +1048,8 @@ export class DreamService {
       falsifiedHypotheses?: Array<{ title: string; reason: string }>;
       explorationDirective?: string | null;
     },
+    /** Silent-drop counters for prompt-building and parse caps (telemetry). */
+    dropCounters?: DreamInputDropCounters,
   ): Promise<{
     prompt: { system: string; user: string };
     output: DreamOutput;
@@ -1079,13 +1082,14 @@ export class DreamService {
         falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
         explorationDirective: dreamExtras?.explorationDirective,
         practiceEnabled,
-      });
+      }, dropCounters);
       const output = await this.generateAndParse(
         prompt.system,
         prompt.user,
         brain,
         budgets.maxOutputTokens,
         attemptTimeoutMs,
+        dropCounters,
       );
       return { prompt, output, meta: { estimatedInputTokens: estimatedTokens, fragmentCount: 0 } };
     }
@@ -1109,13 +1113,14 @@ export class DreamService {
         falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
         explorationDirective: dreamExtras?.explorationDirective,
         practiceEnabled,
-      });
+      }, dropCounters);
       const output = await this.generateAndParse(
         prompt.system,
         prompt.user,
         brain,
         budgets.maxOutputTokens,
         attemptTimeoutMs,
+        dropCounters,
       );
       return { prompt, output, meta: { estimatedInputTokens: estimatedTokens, fragmentCount: 0 } };
     }
@@ -1157,13 +1162,14 @@ export class DreamService {
       falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
       explorationDirective: dreamExtras?.explorationDirective,
       practiceEnabled,
-    });
+    }, dropCounters);
     const output = await this.generateAndParse(
       prompt.system,
       prompt.user,
       brain,
       budgets.maxOutputTokens,
       attemptTimeoutMs,
+      dropCounters,
     );
     return { prompt, output, meta: { estimatedInputTokens: estimatedTokens, fragmentCount: chunks.length } };
   }
@@ -1218,10 +1224,11 @@ export class DreamService {
         }
       }
       const { startMs, endMs } = getDayBoundsMs(date);
-      const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs);
+      const dropCounters = createDreamInputDropCounters();
+      const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs, dropCounters);
       // Mechanical implicit-signal collection: structural facts only, attached
       // before prompt building so the dream itself judges what they mean.
-      activity.implicitSignals = extractImplicitSignals(activity);
+      activity.implicitSignals = extractImplicitSignals(activity, dropCounters);
       // RSI P0 retention gate: if yesterday (the dreamed date) carried a
       // negative-feedback spike, deterministically roll back the previous
       // dream night's prompt layer BEFORE tonight's snapshot/synthesis. Repair
@@ -1268,6 +1275,11 @@ export class DreamService {
         // Self-curriculum (design §3.4): pending read_only proposals from
         // earlier nights still approve + materialize on an empty day.
         const practicePipeline = this.processPracticeProposalsAfterDream(metabot, { stalled: exploration.stall.stalled, underExplored: exploration.underExplored });
+        if (countDreamInputDrops(dropCounters) > 0) {
+          console.warn(
+            `[DreamService] Dream input drops for metabot ${metabotId} date ${date}: ${JSON.stringify(dropCounters)}`,
+          );
+        }
         this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
           emptyDay: true,
           estimatedActivityTokens: 0,
@@ -1275,6 +1287,7 @@ export class DreamService {
           validation,
           replay,
           positiveReplay,
+          inputDrops: dropCounters,
           weeklyLongDream,
           capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
           promotedCount: promotion.promoted,
@@ -1341,6 +1354,7 @@ export class DreamService {
           falsifiedHypotheses,
           explorationDirective: exploration.directive,
         },
+        dropCounters,
       );
       let output = prepared.output;
       // Repair runs discard selfIdentity in writeDreamResults, so skip the
@@ -1356,6 +1370,11 @@ export class DreamService {
         );
       }
       const writeResult = this.writeDreamResults(metabotId, date, output, activity, brain.llmId, isRepair, impressionSubjects, metabot.globalmetaid);
+      if (countDreamInputDrops(dropCounters) > 0) {
+        console.warn(
+          `[DreamService] Dream input drops for metabot ${metabotId} date ${date}: ${JSON.stringify(dropCounters)}`,
+        );
+      }
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
       console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}${isRepair ? ' (version repair)' : ''}`);
       const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date, activity);
@@ -1404,6 +1423,7 @@ export class DreamService {
         validation,
         replay,
         positiveReplay,
+        inputDrops: dropCounters,
         weeklyLongDream,
         capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
         promotedCount: promotion.promoted,
@@ -1497,9 +1517,10 @@ export class DreamService {
     brain: DreamBrainPair,
     maxTokens?: number,
     attemptTimeoutMs?: number,
+    dropCounters?: DreamInputDropCounters,
   ): Promise<DreamOutput> {
     const firstRaw = await this.callDreamLlm(system, user, brain, maxTokens, attemptTimeoutMs);
-    const first = parseDreamOutput(firstRaw);
+    const first = parseDreamOutput(firstRaw, dropCounters);
     if (first.ok) return first.output;
     const firstError = (first as { ok: false; error: string }).error;
 
@@ -1510,7 +1531,7 @@ export class DreamService {
       maxTokens,
       attemptTimeoutMs,
     );
-    const retry = parseDreamOutput(retryRaw);
+    const retry = parseDreamOutput(retryRaw, dropCounters);
     if (retry.ok) return retry.output;
     throw new Error(`dream output unparseable after retry: ${(retry as { ok: false; error: string }).error}`);
   }

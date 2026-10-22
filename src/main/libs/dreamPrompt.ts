@@ -4,6 +4,7 @@ import type {
   DreamDayActivity,
   DreamGroupChatActivity,
   DreamGroupTaskEvaluation,
+  DreamInputDropCounters,
   DreamSessionActivity,
 } from '../dreamStore';
 import { formatBotWorkspaceDate } from './botWorkspace';
@@ -500,7 +501,7 @@ export function buildDreamPrompt(input: {
    * Defaults to true (previous behavior) for existing callers/tests.
    */
   practiceEnabled?: boolean;
-}): { system: string; user: string } {
+}, dropCounters?: DreamInputDropCounters): { system: string; user: string } {
   const sourceMode = input.sourceMode ?? 'raw_activity';
   const practiceEnabled = input.practiceEnabled !== false;
   const activityTokenBudget = Math.max(
@@ -566,6 +567,7 @@ export function buildDreamPrompt(input: {
     let block: string;
     if (share <= 0) {
       block = `${entry.header}\n……(篇幅有限,内容从略)`;
+      if (dropCounters) dropCounters.sessionsTitleOnly += 1;
     } else {
       block = truncateToTokenBudget(`${entry.header}\n${entry.body}`, share);
     }
@@ -589,6 +591,10 @@ export function buildDreamPrompt(input: {
     sections.push(`## 当日阅读的链上内容(完整读过的文章/帖子,读过即有印象)\n${readLines}`);
   }
   if (sourceMode !== 'fragment' && input.surfReport?.trim()) {
+    if (dropCounters) {
+      const normalizedSurf = stripLoneSurrogates(input.surfReport.trim().replace(/\s+/g, ' '));
+      if (normalizedSurf.length > 2000) dropCounters.surfReportChars += normalizedSurf.length - 2000;
+    }
     sections.push(`## 今夜做梦前的 AI 互联网冲浪报告(你睡前的上网冲浪:新看到的内容、学到的知识、参与的互动——把它当作今晚 freshest 的一段经历来消化)\n${truncateText(input.surfReport.trim(), 2000)}`);
     // P2a creation reflection: the dream is where consumption turns into
     // tomorrow's creative agenda — without these questions a surf-only night
@@ -918,7 +924,10 @@ const normalizeEvaluation = (value: unknown): DreamWorkReviewEvaluation => {
  * outermost brace span, and normalizes into DreamOutput. Fails when there is
  * no usable JSON object or daily_summary is missing.
  */
-export function parseDreamOutput(raw: string): DreamParseResult {
+export function parseDreamOutput(
+  raw: string,
+  dropCounters?: DreamInputDropCounters,
+): DreamParseResult {
   if (!raw || !raw.trim()) {
     return { ok: false, error: 'dream output is empty' };
   }
@@ -1160,6 +1169,22 @@ export function parseDreamOutput(raw: string): DreamParseResult {
         component: normalizePracticeComponent(rawComponent),
       });
     }
+  }
+
+  if (dropCounters) {
+    // Per-output-array truncation telemetry (dream review P0): entries the
+    // model produced beyond a field's cap are dropped at parse time — count
+    // the overflow so silent drops become visible in run telemetry.
+    const overflow = (value: unknown, cap: number): number =>
+      Array.isArray(value) && value.length > cap ? value.length - cap : 0;
+    dropCounters.parseArrayEntries +=
+      overflow(record.work_reviews, MAX_WORK_REVIEWS)
+      + overflow(record.important_memories, MAX_IMPORTANT_MEMORIES)
+      + overflow(record.value_lessons, MAX_VALUE_LESSONS)
+      + overflow(rawImpressionUpdates, MAX_IMPRESSION_UPDATES)
+      + overflow(record.knowledge_points, MAX_KNOWLEDGE_UPDATES)
+      + overflow(record.capability_learnings, MAX_CAPABILITY_LEARNINGS)
+      + overflow(rawPracticeProposals, PRACTICE_PROPOSALS_MAX_PER_NIGHT);
   }
 
   return {

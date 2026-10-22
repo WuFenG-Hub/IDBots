@@ -439,6 +439,7 @@ man_base_data_pebble/
 !tests/capabilityValidation.test.mjs
 !tests/counterfactualReplay.test.mjs
 !tests/positiveReplay.test.mjs
+!tests/dreamInputDrops.test.mjs
 !tests/dreamServiceRatings.test.mjs
 !tests/dreamTelemetryWeekly.test.mjs
 !tests/dreamPracticeProposals.test.mjs

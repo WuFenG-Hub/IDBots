@@ -1,4 +1,4 @@
-import type { DreamDayActivity, DreamImplicitSignal, DreamImplicitSignalKind } from '../dreamStore';
+import type { DreamDayActivity, DreamImplicitSignal, DreamImplicitSignalKind, DreamInputDropCounters } from '../dreamStore';
 
 /**
  * Implicit activity signals (隐式信号) — the mechanical collection layer.
@@ -47,9 +47,13 @@ export function bigramSimilarity(a: string, b: string): number {
 /**
  * Extract the day's structural implicit signals. Pure: same activity in, same
  * signals out. At most one re-ask per session (the strongest), and the whole
- * list is capped so busy days stay bounded.
+ * list is capped so busy days stay bounded. When `dropCounters` is given, the
+ * signals sliced off by the cap are counted there (dream review P0 telemetry).
  */
-export function extractImplicitSignals(activity: DreamDayActivity): DreamImplicitSignal[] {
+export function extractImplicitSignals(
+  activity: DreamDayActivity,
+  dropCounters?: DreamInputDropCounters,
+): DreamImplicitSignal[] {
   const signals: DreamImplicitSignal[] = [];
 
   for (const session of activity.sessions) {
@@ -117,5 +121,8 @@ export function extractImplicitSignals(activity: DreamDayActivity): DreamImplici
     }
   }
 
+  if (signals.length > MAX_IMPLICIT_SIGNALS && dropCounters) {
+    dropCounters.implicitSignals += signals.length - MAX_IMPLICIT_SIGNALS;
+  }
   return signals.slice(0, MAX_IMPLICIT_SIGNALS);
 }
