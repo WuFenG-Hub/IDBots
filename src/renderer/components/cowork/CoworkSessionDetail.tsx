@@ -49,6 +49,7 @@ import ManualCompactButton from './ManualCompactButton';
 import A2AMessageItem from './A2AMessageItem';
 import UserMessageOriginBadge from './UserMessageOriginBadge';
 import MessageFeedbackControls from './MessageFeedbackControls';
+import FeedbackNudgeHint from './FeedbackNudgeHint';
 import { ThinkingBlock, splitThinkTaggedContent } from './ThinkingBlock';
 import { AssistantActivityIndicator } from './AssistantActivityIndicator';
 import { drawTurnAckPhrase, findTailTurnAck } from './turnAckPhrases';
@@ -4972,6 +4973,15 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           onDismiss={handleDismissRefundStatusCard}
         />
       )}
+
+      {/* Dream review P2-2: one quiet feedback nudge under a mature,
+          completely unrated session (the message_feedback table has been
+          empty since launch — RLHF starves at the source). Renders nothing
+          for young/unrated-yet/dismissed sessions. */}
+      <FeedbackNudgeHint
+        sessionId={currentSession.id}
+        messages={currentSession.messages}
+      />
 
       {/* Streaming Activity Bar — professional mode only. Assistant mode's
           single activity indicator lives inline at the reply position (see

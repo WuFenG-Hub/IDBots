@@ -448,6 +448,7 @@ man_base_data_pebble/
 !tests/capabilityGatePanels.test.mjs
 !tests/surfModelBindingGuard.test.mjs
 !tests/metabotExam.test.mjs
+!tests/feedbackNudge.test.ts
 !tests/dreamServiceRatings.test.mjs
 !tests/dreamTelemetryWeekly.test.mjs
 !tests/dreamPracticeProposals.test.mjs
