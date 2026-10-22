@@ -253,6 +253,28 @@ export function validateSelfIdentity(text?: string | null): { valid: boolean; ch
 }
 
 /**
+ * Dream review P0 (2026-10-23) — conservative injection screen for newly
+ * generated self-identity text before it can replace the previous identity.
+ * The identity is injected into every prompt, so a dream-distilled (or
+ * prompt-injected) identity carrying prompt-override phrasing would re-enter
+ * every context unchecked. Patterns stay deliberately narrow; a match (or an
+ * empty-after-trim value) means the update is REFUSED and the previous
+ * identity is kept.
+ */
+const SELF_IDENTITY_OVERRIDE_PATTERNS: RegExp[] = [
+  /ignore\s+(all|previous|above)/i,
+  /you are now/i,
+  /system prompt/i,
+  /\bdisregard\b/i,
+];
+
+export function isSelfIdentityInjectionAttempt(text?: string | null): boolean {
+  const trimmed = String(text ?? '').trim();
+  if (!trimmed) return true;
+  return SELF_IDENTITY_OVERRIDE_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+/**
  * Failed-run retry backoff (2026-10-08 dream-consolidation-timeout fix):
  * exponential ladder 2/5/15 min via computeDreamBackoffDelayMs. When the last
  * error text is a 429/rate-limit hit, or the failure chain shows consecutive

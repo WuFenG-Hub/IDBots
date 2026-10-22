@@ -232,14 +232,15 @@ test('buildMinimalSelfCognitionBlocks keeps the newest dream days within the sum
   );
 });
 
-test('buildMinimalSelfCognitionBlocks never truncates the identity, even past the overall cap', () => {
+test('buildMinimalSelfCognitionBlocks caps the identity with a marker, and the overall cap still yields to it', () => {
   const longIdentity = `我是${'一个很长的自我认知'.repeat(400)}的 MetaBot`;
   const pack = buildMinimalSelfCognitionBlocks({
     identityText: longIdentity,
     summaries: [{ summaryDate: '2026-10-03', summaryText: '今天的梦' }],
   });
   assert.ok(pack.includes('<metabot_self_identity>'), 'identity survives');
-  assert.ok(pack.includes(longIdentity), 'identity text is never cut');
-  assert.ok(!pack.includes('<recent_daily_summaries>'), 'summaries drop entirely before identity is touched');
-  assert.ok(pack.length > MINIMAL_SELF_COGNITION_MAX_CHARS, 'cap yields to identity integrity');
+  assert.ok(pack.includes('身份记录过长,此处截断'), 'identity is capped with the explicit marker (dream review P0)');
+  assert.ok(!pack.includes(longIdentity), 'identity text over the cap is cut');
+  assert.ok(!pack.includes('<recent_daily_summaries>'), 'summaries drop entirely before the identity block is touched');
+  assert.ok(pack.length <= MINIMAL_SELF_COGNITION_MAX_CHARS, 'with the identity capped the pack fits the overall cap');
 });

@@ -10,6 +10,7 @@ import {
   DREAM_VERSION,
   buildDreamFragmentPrompt,
   buildDreamPrompt,
+  isSelfIdentityInjectionAttempt,
   computeDueDreamDates,
   getDayBoundsMs,
   parseDreamOutput,
@@ -1424,6 +1425,7 @@ export class DreamService {
         replay,
         positiveReplay,
         inputDrops: dropCounters,
+        selfIdentityRefused: writeResult.selfIdentityRefused,
         weeklyLongDream,
         capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
         promotedCount: promotion.promoted,
@@ -3749,6 +3751,8 @@ export class DreamService {
   ): {
     dedupMerged: number;
     capabilityDraftInsert: { inserted: number; skippedDuplicate: number; skippedFalsified: number };
+    /** Dream review P0: a self-identity update was refused by the injection screen. */
+    selfIdentityRefused: boolean;
   } {
     // RSI P0 retention gate: snapshot the CURRENT dream-origin prompt layer
     // immediately before tonight's writes, so a later negative-feedback spike
@@ -3876,41 +3880,54 @@ export class DreamService {
     // Self-identity only moves forward in time: version repairs never touch
     // it, and a normal run for a date older than the identity's current
     // source date must not regress it either.
+    // Dream review P0: before anything else, the injection screen refuses a
+    // newly generated identity that carries prompt-override phrasing (or is
+    // empty after trimming) — the identity rides every prompt, so a bad row
+    // must never replace the previous one. Refusals keep the old identity and
+    // are marked in the run telemetry.
+    let selfIdentityRefused = false;
     if (output.selfIdentity && !isRepair) {
-      const latestIdentityDate = this.deps.coworkStore.getDreamIdentityLatestDate(metabotId);
-      if (latestIdentityDate && date < latestIdentityDate) {
-        console.log(`[DreamService] Skip self-identity update for metabot ${metabotId}: date ${date} older than current source ${latestIdentityDate}`);
+      if (isSelfIdentityInjectionAttempt(output.selfIdentity)) {
+        selfIdentityRefused = true;
+        console.warn(
+          `[DreamService] Refusing self-identity update for metabot ${metabotId} date ${date}: prompt-override pattern or empty text; keeping the previous identity`,
+        );
       } else {
-        const existing = this.deps.coworkStore.listUserMemories({
-          metabotId,
-          scopeKind: 'owner',
-          scopeKey: 'owner:self',
-          usageClass: 'self_identity',
-          status: 'all',
-          limit: 1,
-        })[0];
-        if (existing) {
-          this.deps.coworkStore.updateUserMemory({
-            id: existing.id,
-            metabotId,
-            text: output.selfIdentity,
-            usageClass: 'self_identity',
-            allowProtected: true,
-            source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
-          });
+        const latestIdentityDate = this.deps.coworkStore.getDreamIdentityLatestDate(metabotId);
+        if (latestIdentityDate && date < latestIdentityDate) {
+          console.log(`[DreamService] Skip self-identity update for metabot ${metabotId}: date ${date} older than current source ${latestIdentityDate}`);
         } else {
-          this.deps.coworkStore.createUserMemory({
+          const existing = this.deps.coworkStore.listUserMemories({
             metabotId,
-            text: output.selfIdentity,
             scopeKind: 'owner',
             scopeKey: 'owner:self',
             usageClass: 'self_identity',
-            origin: 'dream',
-            isExplicit: true,
-            confidence: 0.9,
-            forceNew: true,
-            source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
-          });
+            status: 'all',
+            limit: 1,
+          })[0];
+          if (existing) {
+            this.deps.coworkStore.updateUserMemory({
+              id: existing.id,
+              metabotId,
+              text: output.selfIdentity,
+              usageClass: 'self_identity',
+              allowProtected: true,
+              source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
+            });
+          } else {
+            this.deps.coworkStore.createUserMemory({
+              metabotId,
+              text: output.selfIdentity,
+              scopeKind: 'owner',
+              scopeKey: 'owner:self',
+              usageClass: 'self_identity',
+              origin: 'dream',
+              isExplicit: true,
+              confidence: 0.9,
+              forceNew: true,
+              source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
+            });
+          }
         }
       }
     }
@@ -4042,7 +4059,7 @@ export class DreamService {
       );
     }
 
-    return { dedupMerged, capabilityDraftInsert };
+    return { dedupMerged, capabilityDraftInsert, selfIdentityRefused };
   }
 }
 
