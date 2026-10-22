@@ -117,6 +117,14 @@ export interface GatewayOptions {
   logger?: (level: 'info' | 'warn' | 'error', component: string, msg: string, extra?: Record<string, unknown>) => void;
   /** Test hook: overrides the default 120 s invoke timeout for channels without an entry. */
   defaultTimeoutMs?: number;
+  /**
+   * Conformance-only (IDBOTS_GATEWAY_TEST_HOOKS=1): registers the virtual
+   * `__test:sleep` channel so the conformance kit can force a real invoke
+   * timeout. Never enabled in production; not part of the frozen allowlist.
+   */
+  enableTestHooks?: boolean;
+  /** Timeout applied to `__test:sleep` (default 1500 ms) to keep the kit fast. */
+  testSleepTimeoutMs?: number;
 }
 
 export interface GatewayHandle {
@@ -683,9 +691,15 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
       sendResult(state, makeResultError(id, makeError('RATE_LIMITED', 'too many in-flight invokes (max 32)')));
       return;
     }
+    // Conformance-only virtual channel: a guaranteed-slow invoke with a short
+    // timeout, so `invoke-timeout` is verified against a real gateway. Only
+    // reachable when the test hooks were explicitly enabled via env.
+    const isTestSleep = options.enableTestHooks === true && channel === '__test:sleep';
     // Allowlist + tier gate (02 + C2).
-    const entry = lookupInvokeChannel(channel);
-    if (!isTierAllowed(entry)) {
+    const entry = isTestSleep
+      ? { tier: 'P1' as const, timeoutMs: options.testSleepTimeoutMs ?? 1500 }
+      : lookupInvokeChannel(channel);
+    if (!isTestSleep && !isTierAllowed(entry)) {
       sendResult(state, makeResultError(id, makeError('CHANNEL_NOT_ALLOWED', `channel '${channel}' is not allowed at tier ${options.tier}`)));
       return;
     }
@@ -695,7 +709,7 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
       sendResult(state, makeResultError(id, makeError('TENANT_NOT_READY', `tenant is not ready (phase: ${phase})`)));
       return;
     }
-    if (!options.hasHandler(channel)) {
+    if (!isTestSleep && !options.hasHandler(channel)) {
       sendResult(state, makeResultError(id, makeError('CHANNEL_NOT_FOUND', `no handler registered for '${channel}'`)));
       return;
     }
@@ -730,7 +744,21 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
     }, timeoutMs);
     timer.unref?.();
 
-    options.invokeHandler(channel, state.clientId, dispatchArgs)
+    let invokePromise: Promise<unknown>;
+    if (isTestSleep) {
+      const rawMs = (args[0] as { ms?: unknown } | undefined)?.ms;
+      const sleepMs = typeof rawMs === 'number' && Number.isFinite(rawMs) && rawMs >= 0 && rawMs <= 10000
+        ? rawMs
+        : 5000;
+      invokePromise = new Promise((resolve) => {
+        const sleeper = setTimeout(() => resolve({ sleptMs: sleepMs }), sleepMs);
+        sleeper.unref?.();
+      });
+    } else {
+      invokePromise = options.invokeHandler(channel, state.clientId, dispatchArgs);
+    }
+
+    invokePromise
       .then((rawValue) => {
         if (settled) return;
         settled = true;
