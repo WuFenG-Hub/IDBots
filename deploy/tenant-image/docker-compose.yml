@@ -1,0 +1,59 @@
+# Local/dev runner for the tenant image — encodes the C1 resource table
+# (see deploy/tenant-image/README.md and docs/cloud-mobile/01-interface-contracts.md).
+# No published ports: the gateway is reached over the container network.
+#
+#   docker compose -f deploy/tenant-image/docker-compose.yml up -d --build
+#
+# Production runs are orchestrated by WS-C's control plane, not this file.
+
+services:
+  tenant:
+    image: idbots/tenant:${APP_VERSION:-dev}-${COMMIT7:-local}
+    build:
+      context: ../..
+      dockerfile: deploy/tenant-image/Dockerfile
+      platforms:
+        - "linux/amd64"
+      args:
+        APP_VERSION: ${APP_VERSION:?set APP_VERSION, e.g. APP_VERSION=$(node -p 'require("./package.json").version')}
+        GIT_COMMIT: ${GIT_COMMIT:?set GIT_COMMIT, e.g. GIT_COMMIT=$(git rev-parse HEAD)}
+        ROLLBACK_SAFE_TO: ${ROLLBACK_SAFE_TO:-}
+    init: true
+    environment:
+      IDBOTS_SERVER_MODE: "1"
+      IDBOTS_TENANT_ID: ${IDBOTS_TENANT_ID:-t_dev_local}
+      IDBOTS_GATEWAY_SECRET: ${IDBOTS_GATEWAY_SECRET:?set IDBOTS_GATEWAY_SECRET (32 random bytes, base64url)}
+      IDBOTS_GATEWAY_PORT: "8790"
+      IDBOTS_BOOTSTRAP_DISPLAY_NAME: ${IDBOTS_BOOTSTRAP_DISPLAY_NAME:-IDBots User}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - tenant-data:/data
+    # C1 resource table.
+    mem_limit: 2304m
+    memswap_limit: 2304m
+    cpus: 2.0
+    pids_limit: 2048
+    shm_size: 1g
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://127.0.0.1:8790/healthz
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  tenant-data:

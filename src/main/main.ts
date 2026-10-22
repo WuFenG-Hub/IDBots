@@ -3,9 +3,32 @@ import type { FileFilter, MessageBoxOptions, OpenDialogOptions, Session, WebCont
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import { startGatewayFromApp, getActiveGatewayContext, getActiveGatewayReadiness, setGatewayReadinessProvider, GATEWAY_CONTRACT_VERSION } from './gateway/wiring';
+import { createGatewayFileSignHandler } from './gateway/fileSignChannel';
+import type { GatewayHandle } from './gateway/server';
+import {
+  applyServerModeEnvDefaults,
+  isServerMode,
+  resolveServerBootDelayMs,
+  resolveServerWorkspacePath,
+} from './server/serverMode';
+import { installServerConsoleLogger, makeServerLogger } from './server/logger';
+import { installServerShutdownHandlers } from './server/shutdown';
+import { runServerBootstrap, ServerBootstrapStore, type ServerBootstrapRun } from './server/bootstrap';
+import { createServerBootstrapFacts, createServerBootstrapStepExecutors } from './server/bootstrapSteps';
 import { SqliteStore } from './sqliteStore';
 import { registerIpcHandler } from './ipc/registry';
 import { broadcastToRenderers } from './ipc/broadcast';
+import {
+  listPendingPermissions,
+  resolvePendingPermission,
+  trackPendingPermission,
+} from './ipc/pendingPermissions';
+import {
+  IPC_UPDATE_CONTENT_MAX_CHARS,
+  sanitizeIpcPayload,
+  truncateIpcString,
+} from './ipc/sanitize';
 import { isSqliteWasmBoundsError } from './sqliteRecovery';
 import {
   SQLiteRecoveryCoordinator,
@@ -143,6 +166,7 @@ import {
 } from './services/metabotTokenTransferService';
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
+import { initBundleService, registerBundleIpcHandlers } from './services/bundleService';
 import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
 import { applyRelayIdentityChange, initRelayIdentityCloseoutService, reconcileRelayCredentialsWithIdentity } from './services/relayIdentityCloseout';
 import { initVisionRelayService, recognizeAudioViaRelay, recognizeImageViaRelay, recognizeVideoAudioViaRelay, recognizeVideoViaRelay } from './services/visionRelayService';
@@ -586,13 +610,8 @@ const INVALID_FILE_NAME_PATTERN = /[<>:"/\\|?*\u0000-\u001F]/g;
 const MIN_MEMORY_USER_MEMORIES_MAX_ITEMS = 1;
 const MAX_MEMORY_USER_MEMORIES_MAX_ITEMS = 120; // quota audit 2026-09-17 (F1): was 60 (keep in sync with coworkStore.ts)
 const IPC_MESSAGE_CONTENT_MAX_CHARS = 120_000;
-const IPC_UPDATE_CONTENT_MAX_CHARS = 120_000;
-const IPC_STRING_MAX_CHARS = 4_000;
-const IPC_MAX_DEPTH = 5;
 /** /goal objective cap: the goal rides the system-side prompt every turn. */
 const SESSION_GOAL_MAX_CHARS = 4_000;
-const IPC_MAX_KEYS = 80;
-const IPC_MAX_ITEMS = 40;
 const MAX_INLINE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_LOCAL_IMAGE_PREVIEW_BYTES = 10 * 1024 * 1024;
 const LOCAL_IMAGE_PREVIEW_EXTENSION_MIME: Record<string, string> = {
@@ -701,58 +720,6 @@ const resolveInlineAttachmentDir = (cwd?: string): string => {
 
 const ensurePngFileName = (value: string): string => {
   return value.toLowerCase().endsWith('.png') ? value : `${value}.png`;
-};
-
-const truncateIpcString = (value: string, maxChars: number): string => {
-  if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}\n...[truncated in main IPC forwarding]`;
-};
-
-const sanitizeIpcPayload = (value: unknown, depth = 0, seen?: WeakSet<object>): unknown => {
-  const localSeen = seen ?? new WeakSet<object>();
-  if (
-    value === null
-    || typeof value === 'number'
-    || typeof value === 'boolean'
-    || typeof value === 'undefined'
-  ) {
-    return value;
-  }
-  if (typeof value === 'string') {
-    return truncateIpcString(value, IPC_STRING_MAX_CHARS);
-  }
-  if (typeof value === 'bigint') {
-    return value.toString();
-  }
-  if (typeof value === 'function') {
-    return '[function]';
-  }
-  if (depth >= IPC_MAX_DEPTH) {
-    return '[truncated-depth]';
-  }
-  if (Array.isArray(value)) {
-    const result = value.slice(0, IPC_MAX_ITEMS).map((entry) => sanitizeIpcPayload(entry, depth + 1, localSeen));
-    if (value.length > IPC_MAX_ITEMS) {
-      result.push(`[truncated-items:${value.length - IPC_MAX_ITEMS}]`);
-    }
-    return result;
-  }
-  if (typeof value === 'object') {
-    if (localSeen.has(value as object)) {
-      return '[circular]';
-    }
-    localSeen.add(value as object);
-    const entries = Object.entries(value as Record<string, unknown>);
-    const result: Record<string, unknown> = {};
-    for (const [key, entry] of entries.slice(0, IPC_MAX_KEYS)) {
-      result[key] = sanitizeIpcPayload(entry, depth + 1, localSeen);
-    }
-    if (entries.length > IPC_MAX_KEYS) {
-      result.__truncated_keys__ = entries.length - IPC_MAX_KEYS;
-    }
-    return result;
-  }
-  return String(value);
 };
 
 const sanitizeCoworkMessageForIpc = (message: any): any => {
@@ -2450,8 +2417,18 @@ const migrateLegacyUserData = (): void => {
   }
 };
 
+// REQ-A-1/REQ-A-7: apply the C1 /data path defaults BEFORE app path
+// resolution so configureUserDataPath() (via libs/runtimeDataPaths.ts) lands
+// on /data/userdata + /data/appdata in server mode. No-op on desktop.
+applyServerModeEnvDefaults();
 configureUserDataPath();
-initLogger();
+if (isServerMode()) {
+  // REQ-A-10: server mode logs one redacted JSON object per line to
+  // stdout/stderr (C1) instead of the electron-log file setup.
+  installServerConsoleLogger();
+} else {
+  initLogger();
+}
 const startupStartedAt = Date.now();
 const startupLog = (stage: string): void => {
   console.log(`[Startup +${Date.now() - startupStartedAt}ms] ${stage}`);
@@ -2656,7 +2633,7 @@ if (disableGpu) {
   // 禁用硬件加速
   app.disableHardwareAcceleration();
 }
-if (enableVerboseLogging) {
+if (enableVerboseLogging && !isServerMode()) {
   app.commandLine.appendSwitch('enable-logging');
   app.commandLine.appendSwitch('v', '1');
 }
@@ -2748,6 +2725,12 @@ let gigSquareRefundsService: GigSquareRefundsService | null = null;
 let gigSquareSchemaReady = false;
 let scheduler: Scheduler | null = null;
 let metaidRpcServer: ReturnType<typeof startMetaidRpcServer> | null = null;
+/** REQ-A-3: the running gateway handle, closed first in server-mode shutdown. */
+let gatewayHandle: GatewayHandle | null = null;
+/** REQ-A-8: the running server bootstrap state machine (server mode only). */
+let serverBootstrapRun: ServerBootstrapRun | null = null;
+/** REQ-A-10: shutdown-phase logger (component 'shutdown') that bypasses the console. */
+const serverPhaseLog = makeServerLogger({});
 let idchatPresenceService: IdchatPresenceService | null = null;
 let providerDiscoveryService: ProviderDiscoveryService | null = null;
 let providerPingService: ProviderPingService | null = null;
@@ -3773,6 +3756,10 @@ const cancelDeferredStartupWork = (): void => {
 
 const scheduleStartupTier = (label: string, delayMs: number, run: () => void): void => {
   if (startupTiersCancelled) return;
+  // REQ-A-33: server mode spreads each tier by a deterministic per-tenant
+  // jitter so a host restarting many tenants does not run their boot work in
+  // the same instant. Desktop timing is unchanged.
+  const effectiveDelayMs = resolveServerBootDelayMs(delayMs, `tier:${label}`);
   const timer = setTimeout(() => {
     startupTierTimers = startupTierTimers.filter((entry) => entry !== timer);
     if (startupTiersCancelled) return;
@@ -3783,8 +3770,21 @@ const scheduleStartupTier = (label: string, delayMs: number, run: () => void): v
       console.error(`[Startup] deferred startup "${label}" failed:`, error);
     }
     startupLog(`deferred startup "${label}" done`);
-  }, delayMs);
+  }, effectiveDelayMs);
   startupTierTimers.push(timer);
+};
+
+/**
+ * REQ-A-33 seam for boot jobs that desktop runs inline: desktop behavior is
+ * the inline call; server mode routes the job through the (cancellation-
+ * aware) startup tier so it gets its own deterministic jitter delay.
+ */
+const startServerAwareBootJob = (label: string, run: () => void): void => {
+  if (isServerMode()) {
+    scheduleStartupTier(label, 0, run);
+    return;
+  }
+  run();
 };
 
 interface StartupIdleStep {
@@ -6082,6 +6082,12 @@ const hostLocationOsHint = (): string => process.platform === 'darwin'
  * afterwards.
  */
 const requestSystemLocationFix = async (): Promise<SystemFix> => {
+  // REQ-A-2: precise geolocation needs a renderer window; server mode must
+  // never create even a hidden one, so the precise path fails closed here and
+  // the location tool degrades to coarse.
+  if (isServerMode()) {
+    throw new Error('Precise geolocation requires a renderer window (desktop only).');
+  }
   let hiddenWindow: BrowserWindow | null = null;
   try {
     const fixPromise = (async (): Promise<SystemFix> => {
@@ -6325,6 +6331,8 @@ const getCoworkRunner = () => {
       // LLM request, so only sessions whose bot explicitly enables MCP pay
       // the cost. See services/coworkMcpToolsPreference.ts.
       mcpServerProvider: (coworkSessionId: string) => {
+        // REQ-A-5: local MCP servers are disabled in server mode.
+        if (isServerMode()) return [];
         const metabotId = getCoworkStore().getSession(coworkSessionId)?.metabotId;
         if (!isCoworkMcpMountEnabled(getMetabotStore(), metabotId)) return [];
         return getMcpStore().getEnabledServers();
@@ -6353,6 +6361,8 @@ const getCoworkRunner = () => {
       browserAutomationForMetabot: (metabotId: number | null) => metabotAutomationProviders.browser(metabotId),
       computerUseForMetabot: (metabotId: number | null) => metabotAutomationProviders.computer(metabotId),
       mcpServersForMetabot: (metabotId: number | null) => {
+        // REQ-A-5: local MCP servers are disabled in server mode.
+        if (isServerMode()) return [];
         if (!isCoworkMcpMountEnabled(getMetabotStore(), metabotId)) return [];
         return getMcpStore().getEnabledServers();
       },
@@ -7369,14 +7379,21 @@ const getCoworkRunner = () => {
       }
       const safeRequest = sanitizePermissionRequestForIpc(request);
       broadcastToRenderers('cowork:stream:permission', { sessionId, request: safeRequest });
+      // Mobile pending mirror (REQ-A-24): record exactly what was broadcast so
+      // `mobile:permission:listPending` can resync a reconnecting client.
+      trackPendingPermission(sessionId, safeRequest);
     });
 
     // A permission finalized on ANY path (renderer reply, text relay,
     // auto-allow, the 60s watchdog, abort, session stop) must dequeue the
     // renderer's pendingPermissions copy — otherwise the global overlay keeps
-    // rendering a stale, unanswerable prompt forever.
+    // rendering a stale, unanswerable prompt forever. Every one of those
+    // paths funnels through this event (the runner's finalize emits it, and
+    // session stop clears the runner's map through the same finalize), so it
+    // also drops the mobile pending mirror's entry.
     coworkRunner.on('permissionResolved', (sessionId: string, requestId: string) => {
       broadcastToRenderers('cowork:stream:permissionResolved', { sessionId, requestId });
+      resolvePendingPermission(sessionId, requestId);
     });
 
     coworkRunner.on('complete', (sessionId: string, claudeSessionId: string | null) => {
@@ -7389,12 +7406,14 @@ const getCoworkRunner = () => {
       broadcastToRenderers('cowork:stream:complete', { sessionId, claudeSessionId });
     });
 
-    coworkRunner.on('error', (sessionId: string, error: string) => {
+    coworkRunner.on('error', (sessionId: string, error: string, metadata?: { errorCode?: string }) => {
       recomputeSleepGuard();
       if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
         return;
       }
-      broadcastToRenderers('cowork:stream:error', { sessionId, error });
+      // REQ-A-25: metadata.errorCode ('LLM_QUOTA_EXHAUSTED') rides along so
+      // the mobile web app can offer recharge without parsing the text.
+      broadcastToRenderers('cowork:stream:error', { sessionId, error, ...(metadata ? { metadata } : {}) });
     });
 
     // Kernel-owned session titles (dsh-session-title): the runner already
@@ -8107,6 +8126,34 @@ const getUserIdentityStore = () => {
   return userIdentityStore;
 };
 
+// Extracted cores shared by the IPC handlers and the C2 sensitive route
+// (src/main/gateway/wiring.ts): the gateway reveals mnemonics through the
+// exact same code path, never through IPC (REQ-A-20).
+const revealUserMnemonicCore = async (): Promise<{ success: boolean; mnemonic?: string; error?: string }> => {
+  try {
+    const identity = getUserIdentityStore().get();
+    if (!identity) {
+      return { success: false, error: 'USER_IDENTITY_MISSING' };
+    }
+    return { success: true, mnemonic: identity.mnemonic };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[UserIdentity] userIdentity:revealMnemonic failed:', errMsg);
+    return { success: false, error: errMsg };
+  }
+};
+
+const revealMetabotMnemonicCore = async (metabotId: number): Promise<{ success: boolean; mnemonic?: string; error?: string }> => {
+  try {
+    const store = getMetabotStore();
+    const wallet = store.getMetabotWalletByMetabotId(metabotId);
+    if (!wallet) return { success: false, error: 'Wallet not found for this MetaBot' };
+    return { success: true, mnemonic: wallet.mnemonic };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : 'Failed to get mnemonic' };
+  }
+};
+
 // Agent-Game-v2 host (docs/14). Lazily created and started; survives MetaApp
 // close and host restart. Held at module scope so IPC handlers can reach it.
 let agentGameHost: AgentGameHost | null = null;
@@ -8332,6 +8379,47 @@ function getMetabotManageDeps(): MetabotManageDeps {
         providers?: Record<string, { enabled?: boolean; models?: Array<{ id?: string }> } | undefined>;
       }>('app_config')?.providers,
   };
+}
+
+/**
+ * REQ-A-8: assemble + start the server bootstrap state machine. Called from
+ * initApp in server mode only, after store init and before the gateway start
+ * (the gateway captures the readiness provider, so /readyz, the WS welcome
+ * frame, and mobile:bootstrap:status all report live bootstrap state from
+ * the first answer — 503 while bootstrapping, TENANT_NOT_READY invoke gate).
+ */
+function startServerModeBootstrap(): ServerBootstrapRun {
+  const sqliteStore = getStore();
+  const bootstrapStore = new ServerBootstrapStore(
+    sqliteStore.getDatabase(),
+    sqliteStore.getSaveFunction(),
+  );
+  const run = runServerBootstrap({
+    bootstrapStore,
+    executors: createServerBootstrapStepExecutors({
+      getSqliteStore: () => getStore(),
+      getUserIdentityStore,
+      getMetabotStore,
+      getCoworkStore,
+      getMetabotManageDeps,
+      workspaceRoot: resolveServerWorkspacePath(path.join(os.homedir(), 'idbots', 'project')),
+      ensureListenerReady: (metabotId) => ensurePrivateChatListenerReady(metabotId, 5000),
+      log: (level, msg, extra) => serverPhaseLog(level, 'bootstrap', msg, extra),
+    }),
+    getFacts: createServerBootstrapFacts({
+      getUserIdentityStore,
+      getMetabotStore,
+    }),
+    version: {
+      version: app.getVersion(),
+      commit: process.env.IDBOTS_COMMIT || 'dev',
+      contractVersion: GATEWAY_CONTRACT_VERSION,
+    },
+    log: (level, msg, extra) => serverPhaseLog(level, 'bootstrap', msg, extra),
+  });
+  setGatewayReadinessProvider(() => run.getReadinessState());
+  run.start();
+  return run;
 }
 
 function getIdchatPresenceService(): IdchatPresenceService {
@@ -9672,6 +9760,9 @@ const collectSleepGuardWork = () =>
   );
 
 const recomputeSleepGuard = (): void => {
+  // REQ-A-4: the sleep/power guard is desktop-only; in server mode nothing
+  // may touch powerSaveBlocker (a headless host has no display to keep awake).
+  if (isServerMode()) return;
   try {
     getSleepGuard().apply(evaluateSleepGuardWork(collectSleepGuardWork()));
   } catch (error) {
@@ -9684,6 +9775,8 @@ const broadcastSleepGuardStatus = (state: SleepGuardState): void => {
 };
 
 const startSleepGuardRefresh = (): void => {
+  // REQ-A-4: desktop-only (see recomputeSleepGuard).
+  if (isServerMode()) return;
   if (sleepGuardRefreshTimer) return;
   // Periodic safety refresh: self-heals even if an event-driven update was
   // missed (e.g. a session ended without its completion event firing).
@@ -15262,16 +15355,7 @@ if (!gotTheLock) {
     }
   });
 
-  registerIpcHandler('idbots:getMetaBotMnemonic', async (_event, metabotId: number) => {
-    try {
-      const store = getMetabotStore();
-      const wallet = store.getMetabotWalletByMetabotId(metabotId);
-      if (!wallet) return { success: false, error: 'Wallet not found for this MetaBot' };
-      return { success: true, mnemonic: wallet.mnemonic };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to get mnemonic' };
-    }
-  });
+  registerIpcHandler('idbots:getMetaBotMnemonic', async (_event, metabotId: number) => revealMetabotMnemonicCore(metabotId));
 
   registerIpcHandler('idbots:deleteMetaBot', async (_event, metabotId: number) => {
     // Shared with the Twin metabot_delete tool. Also guards against deleting
@@ -16549,6 +16633,49 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     getUserIdentityStore,
   });
   registerLlmRelayIpcHandlers({ registerIpcHandler });
+
+  // Metaso bundles (REQ-A-24, C4): plan catalog / orders / meters for the
+  // mobile recharge surface. Shares the traffic service's identity-signing
+  // machinery and base-URL resolution; serves the local stub when
+  // IDBOTS_BUNDLE_STUB=1 or the apiBase is stub://local.
+  initBundleService({
+    getStore,
+    getUserIdentityStore,
+  });
+  registerBundleIpcHandlers({ registerIpcHandler });
+
+  // Mobile gateway channels (REQ-A-24). `gateway:file:sign` mints a signed
+  // download token with the RUNNING gateway's secret — on plain desktop it
+  // answers a structured "gateway not running" instead of throwing.
+  registerIpcHandler('gateway:file:sign', createGatewayFileSignHandler(getActiveGatewayContext));
+
+  // Pending tool-permission mirror for reconnecting mobile clients (C2
+  // "Tool Permission Requests"): the tracker records what was broadcast and
+  // drops entries as the runner resolves them. Additive — the renderer keeps
+  // its own path untouched.
+  registerIpcHandler('mobile:permission:listPending', async () => {
+    try {
+      return sanitizeIpcPayload(listPendingPermissions());
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list pending permissions',
+      };
+    }
+  });
+
+  // Bootstrap/onboarding state the mobile client shows during provisioning
+  // (the `onboarding` object of the C1 /readyz readiness provider).
+  registerIpcHandler('mobile:bootstrap:status', async () => {
+    try {
+      return getActiveGatewayReadiness().onboarding;
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to read bootstrap status',
+      };
+    }
+  });
 
   // Vision relay (describe_image backend): reuses the free-quota relay
   // credentials (metaid-free provider key, identity-signed bootstrap on
@@ -18100,8 +18227,32 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
       });
   };
 
-  process.once('SIGINT', () => handleTerminationSignal('SIGINT'));
-  process.once('SIGTERM', () => handleTerminationSignal('SIGTERM'));
+  // REQ-A-3: in server mode SIGTERM/SIGINT route through the gateway-first
+  // shutdown (close sockets 4012 → existing child-process teardown → SQLite
+  // flush → exit) with a 20 s hard watchdog. Desktop keeps the legacy
+  // handlers below; exactly one set is ever installed.
+  if (isServerMode()) {
+    installServerShutdownHandlers({
+      getGateway: () => gatewayHandle,
+      runAppCleanup,
+      onBegin: () => {
+        // REQ-A-8: the readiness provider flips to `stopping` the moment the
+        // shutdown sequence begins, and pending bootstrap retries stand down.
+        serverBootstrapRun?.markStopping();
+      },
+      flushSqlite: () => {
+        getStoreOrNull()?.getSaveFunction()();
+      },
+      closeSqlite: () => {
+        getStoreOrNull()?.close();
+      },
+      exit: (code) => app.exit(code),
+      log: (level, phase, msg, extra) => serverPhaseLog(level, 'shutdown', `[${phase}] ${msg}`, extra),
+    });
+  } else {
+    process.once('SIGINT', () => handleTerminationSignal('SIGINT'));
+    process.once('SIGTERM', () => handleTerminationSignal('SIGTERM'));
+  }
 
   // 初始化应用
   const initApp = async () => {
@@ -18119,7 +18270,9 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     // We don't trigger permission dialogs at startup to avoid annoying users
 
     // Ensure default working directory exists
-    const defaultProjectDir = path.join(os.homedir(), 'idbots', 'project');
+    // REQ-A-7: server mode defaults the workspace to /data/workspace (C1);
+    // desktop keeps ~/idbots/project.
+    const defaultProjectDir = resolveServerWorkspacePath(path.join(os.homedir(), 'idbots', 'project'));
     if (!fs.existsSync(defaultProjectDir)) {
       fs.mkdirSync(defaultProjectDir, { recursive: true });
       console.log('Created default project directory:', defaultProjectDir);
@@ -18127,6 +18280,42 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
 
     store = await initStore();
     startupLog('store ready');
+
+    // REQ-A-8: start the tenant bootstrap state machine BEFORE the gateway so
+    // the readiness provider is live from the gateway's first answer
+    // (/healthz immediately, /readyz 503 + TENANT_NOT_READY while
+    // bootstrapping). Idempotent per step: an existing volume fast-paths
+    // through steps already recorded done/skipped in SQLite.
+    if (isServerMode()) {
+      serverBootstrapRun = startServerModeBootstrap();
+      startupLog('server bootstrap started');
+    }
+
+    // REQ-A-22: mobile gateway (C2). Starts only in desktop dev mode
+    // (IDBOTS_GATEWAY_DEV=1, never in packaged builds) or server mode
+    // (IDBOTS_SERVER_MODE=1); with neither set, desktop behavior is unchanged.
+    // The reveal cores above keep the sensitive route on the exact handler
+    // code paths, without going through IPC.
+    const gatewayDevMode = process.env.IDBOTS_GATEWAY_DEV === '1' && !app.isPackaged;
+    if (gatewayDevMode || isServerMode()) {
+      try {
+        gatewayHandle = await startGatewayFromApp({
+          storeGet: (key) => getStore().get(key),
+          getWorkspaceRoot: () => getCoworkStore().getConfig().workingDirectory,
+          revealUserMnemonic: revealUserMnemonicCore,
+          revealMetabotMnemonic: revealMetabotMnemonicCore,
+        });
+        const gatewayHost = isServerMode() ? '0.0.0.0' : '127.0.0.1';
+        startupLog(`gateway listening on ${gatewayHost}:${gatewayHandle.port}`);
+        console.log(`[Gateway] listening on http://${gatewayHost}:${gatewayHandle.port}`);
+      } catch (error) {
+        console.error('[Gateway] failed to start:', error);
+        if (isServerMode()) {
+          // Server mode without a gateway is a failed tenant — fail fast.
+          app.exit(1);
+        }
+      }
+    }
 
     // Chain write ledger: wire the store into the runtime accessor before the
     // RPC server / daemons can broadcast the first pin.
@@ -18137,15 +18326,22 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     startupLog(`listener config loaded (enabled=${shouldRunListener(listenerConfig)})`);
     if (shouldRunListener(listenerConfig)) {
       startupLog('listener start begin');
-      startListenerWithConfig(listenerConfig).catch((error) => {
-        console.error('[MetaWebListener] auto-start failed:', error);
+      // REQ-A-33: server mode staggers the listener start across the tenant
+      // fleet; desktop starts it inline as before.
+      startServerAwareBootJob('metaweb listener start', () => {
+        startListenerWithConfig(listenerConfig).catch((error) => {
+          console.error('[MetaWebListener] auto-start failed:', error);
+        });
       });
       startupLog('listener start invoked');
     }
 
     // Global fee rate store: must init after store is ready
     startupLog('fee rate store init schedule begin');
-    initFeeRateStore(getStore()).catch((e: unknown) => console.error('[FeeRateStore] init failed:', e));
+    // REQ-A-33: staggered in server mode like the listener start.
+    startServerAwareBootJob('fee rate store init', () => {
+      initFeeRateStore(getStore()).catch((e: unknown) => console.error('[FeeRateStore] init failed:', e));
+    });
     startupLog('fee rate store init scheduled');
     // Local Q&A answer ledger (post_simpleanswer repeat notice): same kv store.
     setSimpleQaAnswerLedgerStore(getStore());
@@ -18262,19 +18458,25 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
 
     const manager = getSkillManager();
     startupLog('sync bundled skills begin');
-    manager.syncBundledSkillsToUserData();
-    startupLog('sync bundled skills done');
-    startupLog('skill manager watching begin');
-    manager.startWatching();
-    startupLog('skill manager watching done');
+    // REQ-A-33: bundled-skill sync + watching is staggered in server mode;
+    // desktop runs it inline as before.
+    startServerAwareBootJob('skill manager sync+watch', () => {
+      manager.syncBundledSkillsToUserData();
+      startupLog('sync bundled skills done');
+      startupLog('skill manager watching begin');
+      manager.startWatching();
+      startupLog('skill manager watching done');
+    });
 
     const metaAppMgr = getMetaAppManager();
     startupLog('sync bundled metaapps begin');
-    metaAppMgr.syncBundledMetaAppsToUserData();
-    startupLog('sync bundled metaapps done');
-    startupLog('metaapp manager watching begin');
-    metaAppMgr.startWatching();
-    startupLog('metaapp manager watching done');
+    startServerAwareBootJob('metaapp manager sync+watch', () => {
+      metaAppMgr.syncBundledMetaAppsToUserData();
+      startupLog('sync bundled metaapps done');
+      startupLog('metaapp manager watching begin');
+      metaAppMgr.startWatching();
+      startupLog('metaapp manager watching done');
+    });
 
     // Start skill services. Deliberately not awaited: the web-search bridge
     // boot must never sit between the app and its first paint, and the skill's
@@ -18282,11 +18484,13 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     // coming up when the first search request lands.
     const skillServices = getSkillServiceManager();
     startupLog('skill services startAll begin');
-    void skillServices.startAll()
-      .then(() => startupLog('skill services ready'))
-      .catch((error) => {
-        console.error('[SkillServices] startAll failed:', error);
-      });
+    startServerAwareBootJob('skill services startAll', () => {
+      void skillServices.startAll()
+        .then(() => startupLog('skill services ready'))
+        .catch((error) => {
+          console.error('[SkillServices] startAll failed:', error);
+        });
+    });
 
     // [关键代码] 显式告诉 Electron 使用系统的代理配置
     // 这会涵盖绝大多数 VPN（如 Clash, V2Ray 等开启了"系统代理"模式的情况）
@@ -18320,11 +18524,30 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     setContentSecurityPolicy();
 
     // 安装应用菜单（File → New Window 多开窗口）
-    setupApplicationMenu();
+    // REQ-A-4: the application menu is desktop-only; server mode has no
+    // window and no menu.
+    if (!isServerMode()) {
+      setupApplicationMenu();
+    }
 
-    // 创建窗口
-    startupLog('about to create window');
-    createAppWindow();
+    // REQ-A-2: server mode creates NO BrowserWindow. The window-gated one-time
+    // services the first window's ready-to-show would have started (task
+    // scheduler + cowork-store heavy maintenance; REQ-A-11 depends on the
+    // scheduler) are hoisted here and staggered across the tenant fleet
+    // (REQ-A-33). Tray and sleep guard stay desktop-only (REQ-A-4).
+    if (isServerMode()) {
+      startupLog('server mode: no window; starting window-gated services directly');
+      scheduleStartupTier('server: task scheduler start', 0, () => {
+        didInitAppOnce = true;
+        scheduleCoworkStoreHeavyMaintenance();
+        getScheduler().start();
+        startupLog('server mode: task scheduler + heavy maintenance started');
+      });
+    } else {
+      // 创建窗口
+      startupLog('about to create window');
+      createAppWindow();
+    }
 
     // The abandoned-streaming scan only ever touches rows a hard quit left
     // dirty, yet it used to walk every message row before the window existed.
@@ -18405,7 +18628,9 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     });
 
     // 首次启动时默认开启开机自启动（先写标记再设置，避免崩溃后重复设置）
-    if (!getStore().get('auto_launch_initialized')) {
+    // REQ-A-4: auto-launch registration is desktop-only; a container tenant is
+    // started by the entrypoint, not by the OS session.
+    if (!isServerMode() && !getStore().get('auto_launch_initialized')) {
       getStore().set('auto_launch_initialized', true);
       setAutoLaunchEnabled(true);
     }
@@ -18422,7 +18647,9 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     });
 
     // 在 macOS 上，当点击 dock 图标时显示已有窗口或重新创建
+    // REQ-A-2: server mode never creates a window, dock click or not.
     app.on('activate', () => {
+      if (isServerMode()) return;
       if (mainWindow && !mainWindow.isDestroyed()) {
         if (!mainWindow.isVisible()) mainWindow.show();
         if (!mainWindow.isFocused()) mainWindow.focus();
@@ -18438,7 +18665,10 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
   initApp().catch(console.error);
 
   // 当所有窗口关闭时退出应用
+  // REQ-A-2: with no window in server mode this event fires immediately at
+  // startup; the tenant must keep running.
   app.on('window-all-closed', () => {
+    if (isServerMode()) return;
     if (process.platform !== 'darwin') {
       app.quit();
     }

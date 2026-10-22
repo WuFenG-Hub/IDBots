@@ -57,6 +57,13 @@ docs/*
 !docs/tickets/
 !docs/tickets/**
 tests/*
+!tests/gatewayCore.test.mjs
+!tests/gatewayServer.test.mjs
+!tests/bundleService.test.mjs
+!tests/mobileChannels.test.mjs
+!tests/quotaExhaustedStreamError.test.mjs
+!tests/serverMode.test.mjs
+!tests/serverBootstrap.test.mjs
 !tests/fixtures/
 !tests/agentGameConvergence.test.mjs
 !tests/fixtures/longTaskBoardSeed.mjs
@@ -633,3 +640,6 @@ man_base_data_pebble/
 !tests/coworkComposerImageAttachment.test.tsx
 !tests/coworkQuotaErrorBanner.test.ts
 !tests/coworkDshRouteKeySync.test.mjs
+
+# WS-A T5: tenant image static checks
+!tests/tenantImage.test.mjs
