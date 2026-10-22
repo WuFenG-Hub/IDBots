@@ -67,12 +67,11 @@ export const buildTurnNavigatorItems = (
     if (!turn.userMessage) continue;
 
     const promptMessage = turn.userMessage;
+    // The find above already filters to type === 'assistant', so the result
+    // (when present) is always the assistant reply.
     const firstAssistant = turn.assistantItems.find((item) => item.type === 'assistant');
     const prompt = getText(promptMessage.content);
-    const response =
-      firstAssistant && firstAssistant.type === 'assistant'
-        ? getText(firstAssistant.message.content)
-        : '';
+    const response = firstAssistant ? getText(firstAssistant.message.content) : '';
 
     items.push({
       turn: items.length + 1,

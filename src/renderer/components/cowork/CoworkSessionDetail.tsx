@@ -200,6 +200,46 @@ const QUOTE_JUMP_HIGHLIGHT_CLASSES = ['ring-1', 'ring-claude-accent'];
 // bubble, not the turn wrapper, so it never draws a rule across the transcript.
 const TURN_NAVIGATOR_HIGHLIGHT_MS = 2500;
 
+// How long the quote-jump ring stays lit. Same 2.5s window as the rail jump:
+// both are "you were taken here" cues, so they age out together.
+const QUOTE_JUMP_HIGHLIGHT_MS = 2500;
+
+/**
+ * Paint a transient accent ring on `element`, clearing whatever the previous
+ * jump lit first. Shared by the turn-rail jump and the quote jump so both
+ * follow one contract:
+ *
+ * - Clear EVERY ring in `container`, not just the one the previous timer was
+ *   going to un-ring. Clearing only the timer orphans the element it was
+ *   going to un-ring, so rapid jumps stacked rings and the earlier ones
+ *   stayed lit for good (verified live: three jumps in a row left two rings
+ *   still on).
+ * - Clear the pending timer, then light the new ring: remove-then-add is what
+ *   restarts the full window on a repeated jump to the same element.
+ * - `ms` later, un-ring and drop the timer. The caller owns the timer ref and
+ *   its unmount cleanup.
+ *
+ * The ring is a static style, so no reflow trick is needed to make it visible.
+ */
+const transientHighlight = (
+  timerRef: { current: number | null },
+  container: HTMLElement,
+  element: HTMLElement,
+  ms: number,
+): void => {
+  container
+    .querySelectorAll<HTMLElement>(`.${QUOTE_JUMP_HIGHLIGHT_CLASSES[1]}`)
+    .forEach((lit) => lit.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES));
+  if (timerRef.current != null) {
+    window.clearTimeout(timerRef.current);
+  }
+  element.classList.add(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
+  timerRef.current = window.setTimeout(() => {
+    element.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
+    timerRef.current = null;
+  }, ms);
+};
+
 // The label sets the sent-selection-block parser matches against: every
 // shipped dictionary, so a quote block written under one language still gets
 // its clean display after the app language is switched (the transcript renders
@@ -4408,16 +4448,18 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   // scroll container rather than tracked as state so the rail never drives a
   // re-render of the transcript on scroll.
   const [turnNavigatorActiveId, setTurnNavigatorActiveId] = useState<string | null>(null);
-  // One timer for the rail's landing ring, so a second jump restarts the window
-  // instead of letting the first one clear the mark early.
-  const turnNavigatorHighlightTimerRef = useRef<number | null>(null);
-  // Clear the landing ring on unmount and on session switch: the timer holds the
+  // One timer for the transient highlight ring (rail jump AND quote jump), so
+  // a second jump restarts the window instead of letting the first one clear
+  // the mark early. One ref for both: the helper clears every lit ring before
+  // lighting the next, so two independent timers could only race to un-ring.
+  const transientHighlightTimerRef = useRef<number | null>(null);
+  // Clear the ring on unmount and on session switch: the timer holds the
   // element it will un-ring, so leaving it armed would keep a detached node
   // alive and could un-ring a same-id node in the next session.
   useEffect(() => () => {
-    if (turnNavigatorHighlightTimerRef.current != null) {
-      window.clearTimeout(turnNavigatorHighlightTimerRef.current);
-      turnNavigatorHighlightTimerRef.current = null;
+    if (transientHighlightTimerRef.current != null) {
+      window.clearTimeout(transientHighlightTimerRef.current);
+      transientHighlightTimerRef.current = null;
     }
   }, [sessionId]);
 
@@ -4498,23 +4540,14 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     // Paint the ring BEFORE the scroll. scrollIntoView() and
     // scrollTo({behavior:'smooth'}) are both inert on this transcript (measured:
     // the call returns without moving scrollTop), so the cue must not depend on
-    // the scroll succeeding.
-    // Clear EVERY ring on the transcript, not just the one from the previous
-    // timer. Clearing only the timer orphans the element it was going to
-    // un-ring, so rapid jumps stacked rings and the earlier ones stayed lit for
-    // good (verified live: three jumps in a row left two rings still on).
-    container
-      .querySelectorAll<HTMLElement>(`.${QUOTE_JUMP_HIGHLIGHT_CLASSES[1]}`)
-      .forEach((lit) => lit.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES));
-    if (turnNavigatorHighlightTimerRef.current != null) {
-      window.clearTimeout(turnNavigatorHighlightTimerRef.current);
-      turnNavigatorHighlightTimerRef.current = null;
-    }
-    ringTarget.classList.add(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
-    turnNavigatorHighlightTimerRef.current = window.setTimeout(() => {
-      ringTarget.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
-      turnNavigatorHighlightTimerRef.current = null;
-    }, TURN_NAVIGATOR_HIGHLIGHT_MS);
+    // the scroll succeeding. transientHighlight also clears every lit ring and
+    // restarts the window — see its contract near its definition.
+    transientHighlight(
+      transientHighlightTimerRef,
+      container,
+      ringTarget,
+      TURN_NAVIGATOR_HIGHLIGHT_MS,
+    );
 
     // Assign scrollTop rather than asking for a smooth scroll: behavior:'auto'
     // and a direct assignment land exactly where the smooth path does nothing.
@@ -4534,9 +4567,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   }, [turns]);
 
   // Readable notice shown beside the composer when a quote-jump target is not
-  // in the rendered window (and the timer that clears the jump flash).
+  // in the rendered window.
   const [quoteJumpNotice, setQuoteJumpNotice] = useState<string | null>(null);
-  const quoteJumpHighlightTimerRef = useRef<number | null>(null);
 
   const handleQuoteReplyMessage = useCallback((message: CoworkMessage, text: string) => {
     // A fresh quote supersedes any "target not loaded" notice from an earlier
@@ -4591,17 +4623,15 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     // leaves scrollTop untouched, while an instant jump lands). Painting the
     // highlight first means the cue the reader came for does not depend on that
     // call succeeding — the jump and the mark are separate promises.
-    // Remove-then-add so a repeated jump restarts the full 2.5s window; the
-    // ring is a static style, so no reflow trick is needed.
-    element.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
-    element.classList.add(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
-    if (quoteJumpHighlightTimerRef.current != null) {
-      window.clearTimeout(quoteJumpHighlightTimerRef.current);
-    }
-    quoteJumpHighlightTimerRef.current = window.setTimeout(() => {
-      element.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
-      quoteJumpHighlightTimerRef.current = null;
-    }, 2500);
+    // transientHighlight shares the rail jump's contract: every lit ring is
+    // cleared first (so repeated jumps restart the full 2.5s window and never
+    // stack rings), then this element is lit.
+    transientHighlight(
+      transientHighlightTimerRef,
+      container,
+      element,
+      QUOTE_JUMP_HIGHLIGHT_MS,
+    );
     // Center the target by assigning scrollTop. This transcript's smooth path
     // is inert: scrollIntoView({behavior:'smooth'}) returns without moving
     // scrollTop at all (measured — the ring painted correctly on an element
