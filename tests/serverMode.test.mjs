@@ -369,7 +369,8 @@ test('REQ-A-33 boot delay is the plain base delay on desktop', () => {
 });
 
 test('REQ-A-33 main.ts routes boot jobs and startup tiers through the jitter seam', () => {
-  assert.match(mainTs, /const effectiveDelayMs = resolveServerBootDelayMs\(delayMs, `tier:\$\{label\}`\);/);
+  const startupTiersTs = fs.readFileSync(path.join(srcMainDir, 'libs', 'startupTiers.ts'), 'utf8');
+  assert.match(startupTiersTs, /const effectiveDelayMs = resolveServerBootDelayMs\(delayMs, `tier:\$\{label\}`\);/);
   assert.match(mainTs, /startServerAwareBootJob\('metaweb listener start'/);
   assert.match(mainTs, /startServerAwareBootJob\('fee rate store init'/);
   assert.match(mainTs, /startServerAwareBootJob\('skill manager sync\+watch'/);
