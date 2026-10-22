@@ -22,6 +22,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 
 import {
   CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD,
@@ -238,4 +240,40 @@ test('classify: a hanging endpoint is aborted at the deadline', async () => {
   const elapsed = Date.now() - startedAt;
   assert.ok(elapsed < 1000, `abort deadline honored (took ${elapsed}ms)`);
   assert.equal(CEREBELLUM_SESSION_FOLLOW_UP_TIMEOUT_MS, 1500, 'default deadline stays at 1.5s');
+});
+
+// ── Dream review P2-3: the missing offline eval script ─────────────────────
+// (handoff doc #19 / §2.20 — the 0.5 threshold shipped on cookbook precedent;
+// this script is how it gets measured.)
+
+test('eval script builds the request through the module', () => {
+  const source = readFileSync(new URL('../scripts/cerebellum-session-follow-up-eval.mjs', import.meta.url), 'utf8');
+  assert.match(source, /buildSessionFollowUpRequest/);
+  assert.match(source, /parseSessionFollowUpAnswer/);
+  assert.match(source, /sessionFollowUpFromNoul/);
+  assert.match(source, /CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD/);
+  assert.match(source, /threshold sweep/i);
+  assert.doesNotMatch(source, /sk-[A-Za-z0-9_-]{10,}/, 'no hardcoded API keys in the script');
+});
+
+test('eval script --dry-run self-checks without credentials', () => {
+  const output = execFileSync(process.execPath, ['scripts/cerebellum-session-follow-up-eval.mjs', 'eval', '--dry-run'], {
+    cwd: new URL('..', import.meta.url).pathname,
+    encoding: 'utf8',
+  });
+  assert.match(output, /dry-run: \d+ cases — no API calls made\./);
+  assert.match(output, /first request body that would be sent:/);
+  assert.match(output, /needs_human_followup/, 'the dry-run preview shows the real request body');
+});
+
+test('eval script refuses a live run without credentials', () => {
+  assert.throws(
+    () => execFileSync(process.execPath, ['scripts/cerebellum-session-follow-up-eval.mjs', 'eval'], {
+      cwd: new URL('..', import.meta.url).pathname,
+      encoding: 'utf8',
+      env: { ...process.env, TYPESAFE_API_KEY: '', JEV_API_KEY: '' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }),
+    /missing API key/,
+  );
 });
