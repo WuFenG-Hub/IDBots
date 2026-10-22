@@ -302,6 +302,7 @@ const FEATURES_UTIL_INVOKE: Record<string, AllowlistEntry> = {
   'app:setAutoLaunch': { tier: 'N', note: '`02`: desktop-only.' },
   'app:getExperimentalAutomation': { tier: 'N', note: '`02`: desktop-only.' },
   'app:setExperimentalAutomation': { tier: 'N', note: '`02`: desktop-only.' },
+  'dailyReport:runNow': { tier: 'N', note: '`02`: desktop-only — spawns a local Twin report session.' },
 };
 
 // ---------------------------------------------------------------------------

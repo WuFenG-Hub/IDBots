@@ -61,6 +61,7 @@ import { startEventLoopLagMonitor } from './libs/eventLoopLagMonitor';
 import { rankConversationsWithCerebellum } from './cerebellum/conversationSearchRank';
 import { decideGroupReplyWithCerebellum } from './cerebellum/groupReplyGate';
 import { classifySessionFollowUpWithCerebellum } from './cerebellum/sessionFollowUpGate';
+import { classifyDailyReportTriagedSessions } from './cerebellum/dailyReportTriage';
 import { rankWorkersWithCerebellum, CEREBELLUM_WORKER_RANK_TOP_K } from './cerebellum/workerRank';
 import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
 import { selectEffortWithCerebellum } from './cerebellum/effortSelector';
@@ -340,6 +341,9 @@ import { setChainContentHistoryStore } from './chainContentHistoryRuntime';
 import { SleepGuard, evaluateSleepGuardWork, resolvePreventDeviceSleepEnabled, PREVENT_DEVICE_SLEEP_SETTING_KEY, type SleepGuardSource, type SleepGuardState } from './sleepGuard';
 import { collectSleepGuardWorkFrom } from './sleepGuardWorkSources';
 import { DreamStore } from './dreamStore';
+import { DailyReportStore } from './dailyReportStore';
+import { startDailyReportService, stopDailyReportService } from './services/dailyReportService';
+import { collectDailyReportFacts, createDailyReportDbAccessor } from './services/dailyReportCollector';
 import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
 import { DREAM_RETRY_MAX_ATTEMPTS } from './libs/dreamRetryPolicy';
@@ -2681,6 +2685,8 @@ process.on('unhandledRejection', (error) => {
 let store: SqliteStore | null = null;
 let coworkStore: CoworkStore | null = null;
 let dreamStore: DreamStore | null = null;
+let dailyReportStore: DailyReportStore | null = null;
+let dailyReportServiceHandle: import('./services/dailyReportService').DailyReportServiceHandle | null = null;
 let messageFeedbackStore: MessageFeedbackStore | null = null;
 let coworkStoreHeavyMaintenanceScheduled = false;
 let coworkStoreHeavyMaintenanceFinished = false;
@@ -3302,6 +3308,40 @@ const createCerebellumSessionFollowUpGate = () =>
       latencyMs: Date.now() - startedAt,
     });
     return verdict;
+  };
+
+/**
+ * Cerebellum (小脑) daily-report triage: ONE batched /v1/systemone call marks
+ * which human-participating sessions deserve narration in the owner's daily
+ * briefing. Must-includes (pending follow-ups) bypass this gate; a null
+ * verdict (disabled/timeout/quota/malformed/low coverage) degrades narration
+ * to plain recency order. Logs counts + latency only — never message text.
+ */
+const createDailyReportTriageGate = () =>
+  async ({ candidates }: {
+    candidates: ReadonlyArray<{
+      sessionId: string;
+      sessionTitle: string;
+      lastAssistantText: string;
+      lastUserText: string;
+    }>;
+  }): Promise<ReadonlyMap<string, number> | null> => {
+    const context = await resolveCerebellumCallContext();
+    if (!context) {
+      return null;
+    }
+    const startedAt = Date.now();
+    const verdicts = await classifyDailyReportTriagedSessions({
+      config: context.config,
+      fetchImpl: context.fetchImpl,
+      candidates,
+    });
+    coworkLog('INFO', 'dailyReport:cerebellumTriage', 'daily report triage evaluated', {
+      candidates: candidates.length,
+      selected: verdicts?.size ?? 0,
+      latencyMs: Date.now() - startedAt,
+    });
+    return verdicts;
   };
 
 /**
@@ -5119,6 +5159,35 @@ const startStartupNightlyServices = (): void => {
     },
   });
 
+  // Daily Report (每日汇报): the Twin's once-a-day proactive briefing — a new
+  // local Twin chat ("每日汇报 <date>") plus a self-contained HTML report.
+  // System-level service (not a scheduled_tasks row) so it owns its run
+  // ledger, catch-up and retry semantics; gates ride the global experimental
+  // switch + the per-Twin dailyReport.enabled + the fresh-install deferral.
+  dailyReportServiceHandle = startDailyReportService({
+    coworkStore: getCoworkStore(),
+    metabotStore: getMetabotStore(),
+    dailyReportStore: getDailyReportStore(),
+    experimentalAutomationStore: getStore(),
+    backgroundDeferral: resolveBackgroundAutomationDeferral,
+    isExperimentalAutomationAllowed,
+    collectFacts: ({ windowStartMs, windowEndMs, twinId }) =>
+      collectDailyReportFacts({
+        db: createDailyReportDbAccessor(getStore().getDatabase()),
+        windowStartMs,
+        windowEndMs,
+        twinId,
+      }),
+    triageCandidates: createDailyReportTriageGate(),
+    resolveBrain: () => resolveSystemBrainOptions(getMetabotStore().listMetabots()),
+    performChat: performChatCompletionForOrchestrator,
+    emitCoworkStreamMessage,
+    getLocale: getPersistedAppLanguage,
+    reportDir: path.join(app.getPath('userData'), 'daily-reports'),
+    resolveSessionCwd: (baseWorkingDirectory, metabotId) =>
+      resolveSessionWorkingDirectory(baseWorkingDirectory, metabotId),
+  });
+
   // Memory hygiene ("记忆整理"): the deterministic compression stroke that
   // follows the dreams — retires stale impression observations, archives old
   // episodes and decayed dream memories, prunes revision overflow. LLM-free,
@@ -5180,6 +5249,8 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   await stopCognitiveOrchestrator({ waitForTick: true });
   await stopPrivateChatDaemon({ waitForTick: true });
   stopDreamService();
+  stopDailyReportService();
+  dailyReportServiceHandle = null;
   stopMemoryHygieneService();
   knowledgeBaseService?.stopAutoLearnSchedule();
   metawebStudyService?.stopSchedule();
@@ -5372,6 +5443,14 @@ const getDreamStore = (): DreamStore => {
     dreamStore = new DreamStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   }
   return dreamStore;
+};
+
+const getDailyReportStore = (): DailyReportStore => {
+  if (!dailyReportStore) {
+    const sqliteStore = getStore();
+    dailyReportStore = new DailyReportStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return dailyReportStore;
 };
 
 const getMessageFeedbackStore = (): MessageFeedbackStore => {
@@ -10130,6 +10209,23 @@ if (!gotTheLock) {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to set the experimental automation switch',
       };
+    }
+  });
+
+  // Daily Report (每日汇报) manual "run now": fire the full pipeline on demand
+  // so the owner can test the report without waiting for the scheduled hour.
+  // force:true bypasses ONLY the fresh-install deferral and the
+  // empty-window skip (dev tuning knob); every other gate always applies.
+  registerIpcHandler('dailyReport:runNow', async (_event, payload: unknown) => {
+    if (!dailyReportServiceHandle) {
+      return { status: 'unavailable', reason: 'service_not_started' };
+    }
+    const force = typeof payload === 'object' && payload !== null
+      && (payload as { force?: unknown }).force === true;
+    try {
+      return await dailyReportServiceHandle.runNow(force ? { force: true } : undefined);
+    } catch (error) {
+      return { status: 'failed', error: error instanceof Error ? error.message : 'daily report run failed' };
     }
   });
 
