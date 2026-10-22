@@ -67,7 +67,7 @@ describe('startup reconcile (REQ-B-11)', () => {
     // (b) a container the tenants table does not know
     await startContainer('idb-t_ghost');
 
-    // (c) a provisioning tenant with no container at all
+    // (c) a provisioning tenant with no container at all: re-provisioned, not failed
     seedUserAndTenant(db, {
       userId: 'u_rc3',
       phone: '+8613900004003',
@@ -76,17 +76,18 @@ describe('startup reconcile (REQ-B-11)', () => {
     });
 
     const reported = await reconcileAtStartup(app.app);
-    assert.equal(reported.length, 2);
-    assert.ok(reported.some((entry) => entry.includes('t_orphan')));
+    assert.equal(reported.length, 1, 'only the unknown container is reported');
     assert.ok(reported.some((entry) => entry.includes('unknown container idb-t_ghost')));
 
-    // (c) failed; (a) untouched.
-    const orphan = db.prepare("SELECT status, last_error FROM tenants WHERE id = 't_orphan'").get() as {
-      status: string;
-      last_error: string | null;
-    };
-    assert.equal(orphan.status, 'failed');
-    assert.equal(orphan.last_error, 'container missing on startup');
+    // (c) recovered: container created, tenant handed to the poller at booting.
+    const orphanContainers = await client.listContainers({ namePrefix: 'idb-t_orphan' });
+    assert.equal(orphanContainers.length, 1, 'orphaned provisioning tenant re-provisioned');
+    const orphan = db.prepare("SELECT status FROM tenants WHERE id = 't_orphan'").get() as { status: string };
+    assert.equal(orphan.status, 'booting');
+    assert.ok(
+      (db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE target = 't_orphan' AND action = 'tenant.recovery.reprovision'").get() as { n: number }).n === 1,
+      'recovery audit row written',
+    );
     const known = db.prepare("SELECT status FROM tenants WHERE id = 't_known'").get() as { status: string };
     assert.equal(known.status, 'ready');
 

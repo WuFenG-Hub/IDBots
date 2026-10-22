@@ -109,13 +109,71 @@ export function buildContainerSpec(
   };
 }
 
-function markFailed(app: AppContext, tenantId: string, message: string): void {
+export function markFailed(
+  app: Pick<AppContext, 'db'>,
+  tenantId: string,
+  message: string,
+): void {
   app.db
     .prepare("UPDATE tenants SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?")
     .run(message.slice(0, 512), Date.now(), tenantId);
 }
 
-export async function provisionTenant(app: AppContext, tenantId: string): Promise<void> {
+/**
+ * Tenants currently being provisioned (live sign-up or recovery-driven).
+ * Guards against double-execution when the poller's stale-row net and a
+ * live `provisionTenant` overlap.
+ */
+const provisioningInFlight = new Set<string>();
+
+export function isProvisioningInFlight(tenantId: string): boolean {
+  return provisioningInFlight.has(tenantId);
+}
+
+async function findContainerIdByName(
+  app: Pick<AppContext, 'docker'>,
+  name: string,
+): Promise<string | null> {
+  const list = await app.docker.listContainers({ namePrefix: name, all: true });
+  const item = list.find((entry) => entry.Names[0] === `/${name}`);
+  return item ? item.Id : null;
+}
+
+function setBooting(app: Pick<AppContext, 'db'>, tenantId: string): void {
+  app.db
+    .prepare(
+      "UPDATE tenants SET status = 'booting', phase = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
+    )
+    .run(Date.now(), tenantId);
+}
+
+/**
+ * Provision (or resume provisioning of) a tenant. Idempotent: reuses the
+ * gateway secret already stored in `gateway_secret_enc` when present (only
+ * mints one when the column is NULL), tolerates an existing volume, and on
+ * a container-name conflict adopts the existing container (starting it when
+ * stopped) instead of failing. Never throws — failures land in
+ * tenants.last_error plus an operator alert.
+ */
+export async function provisionTenant(
+  app: Pick<AppContext, 'config' | 'db' | 'docker'>,
+  tenantId: string,
+): Promise<void> {
+  if (provisioningInFlight.has(tenantId)) {
+    return;
+  }
+  provisioningInFlight.add(tenantId);
+  try {
+    await provisionTenantInner(app, tenantId);
+  } finally {
+    provisioningInFlight.delete(tenantId);
+  }
+}
+
+async function provisionTenantInner(
+  app: Pick<AppContext, 'config' | 'db' | 'docker'>,
+  tenantId: string,
+): Promise<void> {
   const log = (level: 'info' | 'warn' | 'error', msg: string, extra?: Record<string, unknown>) =>
     console.log(JSON.stringify({ level, component: 'provisioning', tenant: tenantId, msg, ...extra }));
 
@@ -139,12 +197,26 @@ export async function provisionTenant(app: AppContext, tenantId: string): Promis
     return;
   }
 
-  // Secret first: the database must hold it before any Docker call happens,
-  // so a crashed provision still leaves the tenant attachable.
-  const gatewaySecret = newGatewaySecret();
-  app.db
-    .prepare('UPDATE tenants SET gateway_secret_enc = ?, updated_at = ? WHERE id = ?')
-    .run(encryptSecret(app.config.masterKey, gatewaySecret), Date.now(), tenantId);
+  // Secret BEFORE any Docker call. Reuse the stored secret on re-runs so a
+  // retried provision never orphans the container's credentials; mint only
+  // when the column is NULL (or undecryptable — a config bug we can recover
+  // from by re-keying).
+  let gatewaySecret: string | null = null;
+  if (tenant.gateway_secret_enc) {
+    try {
+      gatewaySecret = decryptSecret(app.config.masterKey, tenant.gateway_secret_enc);
+    } catch (err) {
+      log('warn', 'stored gateway secret undecryptable, minting a new one', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  if (!gatewaySecret) {
+    gatewaySecret = newGatewaySecret();
+    app.db
+      .prepare('UPDATE tenants SET gateway_secret_enc = ?, updated_at = ? WHERE id = ?')
+      .run(encryptSecret(app.config.masterKey, gatewaySecret), Date.now(), tenantId);
+  }
 
   try {
     await app.docker.createVolume(tenant.volume_name, {
@@ -181,6 +253,27 @@ export async function provisionTenant(app: AppContext, tenantId: string): Promis
     const created = await app.docker.createContainer(spec);
     await app.docker.startContainer(created.Id);
   } catch (err) {
+    if (err instanceof DockerError && err.status === 409) {
+      // Name conflict: a previous run already created the container — adopt it.
+      const existingId = await findContainerIdByName(app, tenant.container_name);
+      if (existingId) {
+        try {
+          const inspect = await app.docker.inspectContainer(existingId);
+          if (!inspect.State.Running) {
+            await app.docker.startContainer(existingId);
+          }
+          setBooting(app, tenantId);
+          log('info', 'adopted existing container, tenant is booting');
+          return;
+        } catch (startErr) {
+          const message = `existing container adopt/start failed: ${startErr instanceof Error ? startErr.message : String(startErr)}`;
+          markFailed(app, tenantId, message);
+          log('error', message);
+          await sendAlert(app.config, `tenant ${tenantId}: ${message}`);
+          return;
+        }
+      }
+    }
     const message = `container create/start failed: ${err instanceof Error ? err.message : String(err)}`;
     markFailed(app, tenantId, message);
     log('error', message);
@@ -188,10 +281,6 @@ export async function provisionTenant(app: AppContext, tenantId: string): Promis
     return;
   }
 
-  app.db
-    .prepare(
-      "UPDATE tenants SET status = 'booting', phase = NULL, last_error = NULL, updated_at = ? WHERE id = ?",
-    )
-    .run(Date.now(), tenantId);
+  setBooting(app, tenantId);
   log('info', 'container started, tenant is booting');
 }

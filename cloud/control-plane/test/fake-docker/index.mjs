@@ -10,6 +10,8 @@
  * - `imageEnv`: per-image env merged into the child at start, WINNING over
  *   the container's own env — lets a test mark one image ref as "broken"
  *   (e.g. never healthy) without touching provisioning code.
+ * - `failCreateImages`: image refs whose container create must fail with a
+ *   500 (upgrade/recovery failure paths).
  * - Each container gets a private data dir (FAKE_TENANT_DATA_DIR) that the
  *   fake tenant populates; `GET .../archive?path=/data` tars it (the tenant
  *   export path).
@@ -112,11 +114,13 @@ export class FakeDocker {
   #tenantScript;
   #baseEnv;
   #imageEnv;
+  #failCreateImages;
 
-  constructor({ tenantScript = TENANT_SCRIPT, env = {}, imageEnv = {} } = {}) {
+  constructor({ tenantScript = TENANT_SCRIPT, env = {}, imageEnv = {}, failCreateImages = [] } = {}) {
     this.#tenantScript = tenantScript;
     this.#baseEnv = env;
     this.#imageEnv = imageEnv;
+    this.#failCreateImages = new Set(failCreateImages);
   }
 
   async listen(port = 0, host = '127.0.0.1') {
@@ -206,6 +210,10 @@ export class FakeDocker {
     if (method === 'POST' && match) {
       const name = url.searchParams.get('name');
       const body = JSON.parse(await readBody(req));
+      if (this.#failCreateImages.has(body.Image)) {
+        sendJson(res, 500, { message: `fake docker: create failed for image ${body.Image}` });
+        return;
+      }
       if (!name) {
         sendJson(res, 400, { message: 'query parameter "name" is required' });
         return;

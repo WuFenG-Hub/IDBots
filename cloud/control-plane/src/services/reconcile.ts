@@ -1,12 +1,20 @@
 import type { AppContext } from '../context.js';
 import { sendAlert } from '../alerts.js';
+import { recoverTenant } from './recovery.js';
 
 /**
  * Startup reconcile (REQ-B-11): match the tenants table against the
- * containers that actually exist before the poller resumes. Tenants whose
- * container vanished fail (ready/degraded also alert); containers the table
- * does not know are reported and NEVER deleted. `upgrading` rows are left
- * for the upgrade phase; stopped/suspended/failed rows are not touched.
+ * containers that actually exist before the poller resumes, and recover
+ * rows orphaned by the previous process dying mid-work (review S2-1/S2-2):
+ *
+ * - `provisioning`: container exists → back to `booting`; missing →
+ *   re-provisioned (idempotent, same secret).
+ * - `upgrading`: orphaned by definition → roll back onto the pre-upgrade
+ *   image (`tenants.image`) with the same secret, then `booting`.
+ * - booting/onboarding/ready/degraded whose container vanished → `failed`
+ *   (ready/degraded also alert).
+ * - Containers the table does not know are reported and NEVER deleted;
+ *   stopped/suspended/failed rows are not touched.
  *
  * When the Docker API is unreachable the reconcile is skipped entirely
  * (transient outage — statuses must not flap on a dead engine).
@@ -14,11 +22,17 @@ import { sendAlert } from '../alerts.js';
 
 interface TenantRow {
   id: string;
+  user_id: string;
   container_name: string;
+  volume_name: string;
+  image: string;
   status: string;
+  gateway_secret_enc: string;
 }
 
-export async function reconcileAtStartup(app: Pick<AppContext, 'config' | 'db' | 'docker'>): Promise<string[]> {
+export async function reconcileAtStartup(
+  app: Pick<AppContext, 'config' | 'db' | 'docker'>,
+): Promise<string[]> {
   const log = (level: 'info' | 'warn' | 'error', msg: string, extra?: Record<string, unknown>) =>
     console.log(JSON.stringify({ level, component: 'reconcile', msg, ...extra }));
 
@@ -33,12 +47,28 @@ export async function reconcileAtStartup(app: Pick<AppContext, 'config' | 'db' |
   }
 
   const byName = new Map(containers.map((c) => [c.Names[0].replace(/^\//, ''), c]));
-  const tenants = app.db.prepare('SELECT id, container_name, status FROM tenants').all() as TenantRow[];
+  const tenants = app.db
+    .prepare(
+      'SELECT id, user_id, container_name, volume_name, image, status, gateway_secret_enc FROM tenants',
+    )
+    .all() as TenantRow[];
   const tenantNames = new Set(tenants.map((t) => t.container_name));
   const reported: string[] = [];
 
   for (const tenant of tenants) {
-    if (tenant.status === 'upgrading' || tenant.status === 'stopped' || tenant.status === 'suspended' || tenant.status === 'failed') {
+    if (tenant.status === 'stopped' || tenant.status === 'suspended' || tenant.status === 'failed') {
+      continue;
+    }
+    if (tenant.status === 'provisioning' || tenant.status === 'upgrading') {
+      try {
+        const outcome = await recoverTenant(app, tenant);
+        log('info', 'recovered orphaned tenant row', { tenant: tenant.id, outcome });
+      } catch (err) {
+        log('error', 'tenant recovery failed', {
+          tenant: tenant.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       continue;
     }
     if (byName.has(tenant.container_name)) {
@@ -46,7 +76,9 @@ export async function reconcileAtStartup(app: Pick<AppContext, 'config' | 'db' |
     }
     const wasServing = tenant.status === 'ready' || tenant.status === 'degraded';
     app.db
-      .prepare("UPDATE tenants SET status = 'failed', last_error = 'container missing on startup', updated_at = ? WHERE id = ?")
+      .prepare(
+        "UPDATE tenants SET status = 'failed', last_error = 'container missing on startup', updated_at = ? WHERE id = ?",
+      )
       .run(Date.now(), tenant.id);
     const message = `tenant ${tenant.id}: container missing on startup`;
     log('warn', 'tenant container missing on startup', { tenant: tenant.id, status: tenant.status });

@@ -1,6 +1,8 @@
 import type { AppContext } from '../context.js';
 import { sendAlert } from '../alerts.js';
 import { probeTenant } from './probe.js';
+import { isProvisioningInFlight } from './provisioning.js';
+import { recoverTenant } from './recovery.js';
 import {
   DEFAULT_TIMEOUTS,
   nextStatus,
@@ -15,9 +17,12 @@ import {
  * slow tenant never delays a stuck one. Sweeps are serialized and every
  * tenant is isolated in its own try/catch.
  *
- * `provisioning` and `upgrading` rows are deliberately NOT probed here —
- * those statuses belong to provisionTenant / the upgrade service, which
- * move them on to booting or failed.
+ * `provisioning` rows are not probed for readiness — that status belongs to
+ * provisionTenant — but the sweep does recover STALE provisioning rows
+ * (updated_at older than staleProvisioningMs, default 5 min) whose
+ * provisioning died with the process; a live run is never double-executed
+ * because provisioning's in-flight guard covers both entry points. The same
+ * recovery runs unconditionally at startup (reconcileAtStartup).
  */
 
 export interface PollerOptions {
@@ -25,12 +30,17 @@ export interface PollerOptions {
   tickSlowMs?: number;
   timeouts?: Partial<Timeouts>;
   probeTimeoutMs?: number;
+  /** Runtime safety net for provisioning rows stuck by a dead process. */
+  staleProvisioningMs?: number;
   now?: () => number;
 }
 
 interface TenantRow {
   id: string;
+  user_id: string;
   container_name: string;
+  volume_name: string;
+  image: string;
   status: string;
   phase: string | null;
   app_version: string | null;
@@ -44,6 +54,7 @@ export class TenantPoller {
   private readonly tickSlowMs: number;
   private readonly timeouts: Timeouts;
   private readonly probeTimeoutMs: number;
+  private readonly staleProvisioningMs: number;
   private readonly now: () => number;
   private timer: NodeJS.Timeout | null = null;
   private chain: Promise<void> = Promise.resolve();
@@ -57,6 +68,7 @@ export class TenantPoller {
     this.tickSlowMs = opts.tickSlowMs ?? 30_000;
     this.timeouts = { ...DEFAULT_TIMEOUTS, ...opts.timeouts };
     this.probeTimeoutMs = opts.probeTimeoutMs ?? 2000;
+    this.staleProvisioningMs = opts.staleProvisioningMs ?? 300_000;
     this.now = opts.now ?? (() => Date.now());
   }
 
@@ -88,6 +100,7 @@ export class TenantPoller {
   }
 
   private async sweep(): Promise<void> {
+    await this.recoverStaleProvisioningRows();
     const rows = this.app.db
       .prepare(
         "SELECT * FROM tenants WHERE status IN ('booting', 'onboarding', 'ready', 'degraded')",
@@ -115,6 +128,50 @@ export class TenantPoller {
             component: 'poller',
             tenant: row.id,
             msg: 'probe failed',
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      }
+    }
+  }
+
+  /**
+   * Runtime safety net: provisioning rows whose `updated_at` predates the
+   * stale threshold were orphaned by a dead process (restart/crash between
+   * sign-up and container start). Rows owned by a live provisionTenant run
+   * are skipped via the in-flight guard.
+   */
+  private async recoverStaleProvisioningRows(): Promise<void> {
+    const now = this.now();
+    const stale = this.app.db
+      .prepare(
+        `SELECT * FROM tenants
+         WHERE status = 'provisioning' AND updated_at < ?
+         ORDER BY updated_at`,
+      )
+      .all(now - this.staleProvisioningMs) as TenantRow[];
+    for (const row of stale) {
+      if (isProvisioningInFlight(row.id)) {
+        continue;
+      }
+      try {
+        const outcome = await recoverTenant(this.app, row);
+        console.log(
+          JSON.stringify({
+            level: 'info',
+            component: 'poller',
+            tenant: row.id,
+            msg: 'recovered stale provisioning row',
+            outcome,
+          }),
+        );
+      } catch (err) {
+        console.error(
+          JSON.stringify({
+            level: 'error',
+            component: 'poller',
+            tenant: row.id,
+            msg: 'stale provisioning recovery failed',
             error: err instanceof Error ? err.message : String(err),
           }),
         );
