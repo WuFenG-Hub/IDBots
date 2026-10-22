@@ -55,20 +55,16 @@ const PermissionModeSelector: React.FC<PermissionModeSelectorProps> = ({
     }
   };
 
-  // Accent modes (default + full-trust) use the brand yellow (#FFDC51, same as
-  // the main send button) as their TEXT color in both light and dark mode — not
-  // a fill. The trigger keeps its normal bordered style.
-  const ACCENT_ITEM_TEXT = 'text-[#FFDC51]';
-
-  const modeColor = (mode: CoworkPermissionMode): string => {
-    switch (mode) {
-      case 'plan': return 'text-blue-500';
-      case 'acceptEdits': return 'text-amber-500';
-      // Accent modes use the brand yellow text color.
-      case 'bypassPermissions': return ACCENT_ITEM_TEXT;
-      default: return ACCENT_ITEM_TEXT;
-    }
-  };
+  // Selected-mode color: only full-trust keeps a signal color (amber, reused
+  // from the old auto-edit tone) so the risky mode stands out; every other
+  // mode uses the same neutral secondary gray as the adjacent usage chip.
+  // (Owner 2026-10-23: the brand-yellow selected text was illegible on light
+  // backgrounds and the per-mode rainbow read as visual noise.)
+  const modeColor = (mode: CoworkPermissionMode): string => (
+    mode === 'bypassPermissions'
+      ? 'text-amber-500'
+      : 'text-claude-textSecondary dark:text-claude-darkTextSecondary'
+  );
 
   return (
     <div ref={containerRef} className="relative">
