@@ -57,8 +57,11 @@ fail2ban-client status sshd                        # sshd jail enabled
 
 ## 3. Fill the secrets files
 
-All files under `/etc/idbots`, root:root, 0600 (bootstrap already set modes).
-Each maps to the secrets register in `00-program-plan.md`:
+All files under `/etc/idbots` are created by `bootstrap.sh` (root:root, 0600;
+`/etc/idbots` itself is 0700). `deploy.env` holds no secrets (hostnames and
+image tags only) but gets the same 0600 treatment — do not loosen it. Re-run
+of bootstrap never overwrites a filled file. Each file maps to the secrets
+register in `00-program-plan.md`:
 
 | File | Fill | Secret source |
 |---|---|---|
@@ -108,8 +111,15 @@ already point `{APP_HOST}` at the EIP). WebSocket idle behavior and the
 
 ## 7. Verify tenant isolation (AC-C-1)
 
-After WS-B provisions a first tenant (or with the stand-in image started
-manually on the `idbots_tenants` network):
+One command (prints the live ruleset, then expected-vs-actual probes):
+
+```bash
+sudo /opt/idbots/firewall-verify.sh       # exit 0 only if every probe matches
+```
+
+Manual spot-checks if you want to see it by hand (after WS-B provisions a
+first tenant, or with the stand-in image started manually on the
+`idbots_tenants` network):
 
 ```bash
 # from inside a tenant these must FAIL:

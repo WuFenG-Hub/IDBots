@@ -51,6 +51,16 @@ and prefixes every message with `[IDBots]` (use it as the robot keyword if the
 robot has no signing secret). The same message format is used by the backup
 scripts' failure alerts (`deploy/backup/lib.sh`), so one robot serves both.
 
+`notify-test.sh` proves the delivery path on demand — run it after filling
+`monitoring.env`, after every webhook rotation, and before the AC-C-6 fire
+drill:
+
+```bash
+sudo /opt/idbots/monitoring/notify-test.sh
+# prints cwd/script, the webhook host (token stripped), HTTP status, and the
+# robot's response body; exit 0 only on HTTP 200.
+```
+
 ## Testing an alert end to end (AC-C-6)
 
 On the host, after the stack is up:

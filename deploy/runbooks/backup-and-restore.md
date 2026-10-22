@@ -51,9 +51,13 @@ sudo BACKUP_AGE_KEY_FILE=/root/idbots-backup.key \
 
 The script: downloads the object → decrypts → materializes a NEW volume
 `idb-t_xxx-restore-{ts}` → normalizes ownership to uid 1000 →
-`PRAGMA integrity_check` on every sqlite file → boots a throwaway container
-on it (same image and env as the live tenant) → waits for `/healthz` → tears
-down (unless `--keep`). Finish with `shred -u /root/idbots-backup.key`.
+`PRAGMA integrity_check` on every sqlite file → **compares the restored tree
+against the archive's `_backup-manifest.json` (file count, bytes, per-table
+row counts — every line must be PASS)** → boots a throwaway container on it
+(same image and env as the live tenant) → waits for `/healthz` → tears down
+(unless `--keep`). Pass criteria and the target time (≤ 30 min, A-21) are
+written down in `deploy/backup/drill/2026-10-22-local-restore-drill.md`.
+Finish with `shred -u /root/idbots-backup.key`.
 
 ## Single-tenant restore — replace (disaster path)
 
