@@ -39,6 +39,7 @@ import MetaBotAdvancedActionsSection from './MetaBotAdvancedActionsSection';
 import MetaBotHomepageSection, { composeHomepageForSave } from './MetaBotHomepageSection';
 import KnowledgeBasePanel from './KnowledgeBasePanel';
 import SurfSection from './SurfSection';
+import DailyReportSection from './DailyReportSection';
 import { buildMetaBotToggleViewModel, canShowMetabotTwinSwitch } from './metaBotCardPresentation.js';
 
 const AVATAR_MAX_SIZE_BYTES = 200 * 1024; // 200KB
@@ -1363,13 +1364,24 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
           </div>
         </div>
 
+        {/* Daily Report ("每日汇报"): Twin-only proactive daily briefing —
+            immediate-effect kv settings, gated by the global experimental
+            automation switch inside the section. */}
+        {isTwin && (
+          <div
+            className="space-y-3 pt-4 mt-4 border-t dark:border-claude-darkBorder border-claude-border"
+            data-slot="metabot-daily-report-panel"
+          >
+            <DailyReportSection metabotId={metabotId} />
+          </div>
+        )}
+
         {/* Wallet / Backup / Delete — OAC-aligned Advanced actions. Immediate
             effects (panels / delete flow), kept out of the homepage save above. */}
         {metabot && onDelete && (
           <MetaBotAdvancedActionsSection metabot={metabot} onDelete={onDelete} />
         )}
       </div>
-
       {showTwinSwitch && twinDemoteConfirmOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4"
