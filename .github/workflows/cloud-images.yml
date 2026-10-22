@@ -39,6 +39,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Fail fast with NAMES ONLY (never values) when CI is missing its
+      # registry config — an unauthenticated run must not produce or push
+      # anything (WS-C review S2-4).
+      - name: Verify registry credentials are injected
+        env:
+          ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          missing=""
+          [ -n "$ACR_REGISTRY" ] || missing="$missing vars.ACR_REGISTRY"
+          [ -n "$ACR_USERNAME" ] || missing="$missing secrets.ACR_USERNAME"
+          [ -n "$ACR_PASSWORD" ] || missing="$missing secrets.ACR_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::missing CI configuration (names only):$missing"
+            exit 1
+          fi
+          echo "registry credentials present (values not shown)"
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
