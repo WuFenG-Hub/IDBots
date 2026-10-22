@@ -39,7 +39,9 @@ volumes:
 
 services:
   caddy:
-    image: caddy:2.8.4
+    # 2.10.x line — request_body max_size verified working (see DELIVERY-NOTE;
+    # 2.8.4 also validated, we pin the newer edge for its security fixes).
+    image: caddy:2.10.2
     restart: unless-stopped
     depends_on:
       - control-plane
