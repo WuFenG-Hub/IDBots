@@ -25,6 +25,10 @@ module.exports = {
   ignorePatterns: [
     'dist/',
     'dist-electron/',
+    'dist-mobile/',
+    'dist-mobile-login/',
+    'mobile-shell/android/',
+    'mobile-shell/ios/',
     'node_modules/',
     'release/',
     'build/',
