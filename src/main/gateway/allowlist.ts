@@ -109,6 +109,7 @@ const COWORK_INVOKE: Record<string, AllowlistEntry> = {
   'cowork:session:exportResultImage': { tier: 'N', note: '`02`: captures the desktop window.' },
   'cowork:session:captureImageChunk': { tier: 'N', note: '`02`: captures the desktop window.' },
   'cowork:session:saveResultImage': { tier: 'N', note: '`02`: desktop save flow.' },
+  'cowork:htmlReport:exportImage': { tier: 'N', note: '`02`: hidden-window capture plus a desktop save dialog.' },
   'cowork:metafile:download': { tier: 'N', note: '`02`: opens a save dialog; the phone opens the public metafile URL instead.' },
   'cowork:sandbox:install': { tier: 'N', note: '`02`: sandbox execution is disabled in server mode.' },
   'cowork:sandbox:status': { tier: 'N', note: '`02`: sandbox execution is disabled in server mode.' },
