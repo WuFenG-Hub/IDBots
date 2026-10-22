@@ -54,7 +54,8 @@ probe "nc -w 3 169.254.169.254 80 < /dev/null";        verdict "tenant -> link-l
 probe "nc -w 3 $CP_IP 8080 < /dev/null";               verdict "tenant -> control plane 8080" blocked $?
 probe "nc -w 3 $PROBE_B_IP 8790 < /dev/null";          verdict "tenant -> tenant 8790" blocked $?
 probe "nslookup -type=a api.deepseek.com 223.5.5.5";   verdict "tenant -> DNS 223.5.5.5" ok $?
-probe "wget -q -T 8 -O /dev/null https://api.deepseek.com"; verdict "tenant -> https://api.deepseek.com" ok $?
+probe "nc -w 8 api.deepseek.com 443 < /dev/null";      verdict "tenant -> api.deepseek.com:443" ok $?
+probe "nc -w 8 www.metaso.network 443 < /dev/null";    verdict "tenant -> www.metaso.network:443" ok $?
 
 echo "== control plane -> tenant 8790 =="
 CP_CONTAINER="${IDBOTS_CP_CONTAINER:-idbots-control-plane-1}"
