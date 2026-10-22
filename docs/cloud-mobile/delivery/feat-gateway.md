@@ -22,7 +22,7 @@ commit: 3cab9f0b79688f7afdfae18b43d14b94f4ac6788（分支自基线切出，随�
 | REQ-A-24 | DONE | 7 个新通道全部经 `registerIpcHandler` 注册并有 preload 方法（`preload.ts:798-819`）：`gateway:file:sign`、`mobile:permission:listPending`（新追踪器 `src/main/ipc/pendingPermissions.ts`，挂在既有 permission 广播/解决点上，桌面行为不变）、`mobile:bootstrap:status`、`bundle:getPlans/createOrder/getOrder/getMeters`（`src/main/services/bundleService.ts`，复用 trafficAccountService 的身份签名；`IDBOTS_BUNDLE_STUB=1` 或 `stub://local` 走本地 C4 stub：两个套餐、订单首查即 credited）。契约已重新生成：405 → 412 方法，`--check` 通过。 |
 | REQ-A-25 | DONE | `coworkRunner.ts`、`CoworkSessionDetail.tsx`、`privateChatSkillTurnPolicy.ts`、`dreamRetryPolicy.ts` 四处检测均扩展到 `free_quota_exhausted` + `quota_exhausted`；cowork 流错误带 `metadata.errorCode = 'LLM_QUOTA_EXHAUSTED'`（main.ts:7347-7356 透传）；移动端文案改为引导充值（运行时经 `src/renderer/services/isMobileRuntime.ts` 判定，桌面文案不变）。`tests/quotaExhaustedStreamError.test.mjs` 4 项 + dream/privateChat 既有测试各 +2。 |
 | REQ-A-29 | DONE | `tests/gatewayCore.test.mjs`（28）+ `tests/gatewayServer.test.mjs`（34）+ `tests/bundleService.test.mjs`（9）+ `tests/mobileChannels.test.mjs`（7）+ `tests/quotaExhaustedStreamError.test.mjs`（4）：registry 完整性、allowlist tier/限制、帧编解码与错误码、文件 token 签名/过期/租户绑定/路径限制（含符号链接逃逸）、reverify token 与 nonce 重用、上传限额。bootstrap 崩溃恢复测试属 T4 范围。 |
-| REQ-A-30 | DONE | `cloud/conformance/run.mjs`（+ README）：auth / welcome / invoke-allowed / invoke-denied / arg-restricted / payload-limit / file-roundtrip / upload-limits / event-during-chat / reconnect-resync 十项可执行检查 + 两项文档化 SKIP（理由见「存疑」）。对桌面开发模式实测：**10 passed, 0 failed, 2 skipped**。 |
+| REQ-A-30 | DONE | `cloud/conformance/run.mjs`（+ README）：auth / welcome / invoke-allowed / invoke-denied / arg-restricted / payload-limit / file-roundtrip / upload-limits / event-during-chat / reconnect-resync / **invoke-timeout（真实执行，复审 S2-2 修复）** 十一项可执行检查 + 一项文档化 SKIP（invoke-not-found）。对桌面开发模式实测：**11 passed, 0 failed, 1 skipped**。 |
 
 ## 自检结果
 
@@ -30,11 +30,11 @@ commit: 3cab9f0b79688f7afdfae18b43d14b94f4ac6788（分支自基线切出，随�
 - pnpm run compile:electron: PASS
 - pnpm run build:skills: PASS
 - pnpm test: PASS（除一处环境性失败：`tests/coworkProxyBindHost.test.mjs`「proxy listens on loopback only」——本机 VPN 的 fake-ip 接口（198.18.0.1）把到该地址的连接 NAT 回本机栈，与代码无关；在未触碰该文件的 feat/ipc-registry 分支上同样失败。其后被中断的 test:cowork-proxy 其余 100 项、test:release-regressions-extra、test:memory（154）、test:metaweb（222）均已单独补跑通过）
-- conformance: PASS（桌面开发模式，10 passed / 0 failed / 2 skipped；命令 `node cloud/conformance/run.mjs --url ws://127.0.0.1:8790/gateway/v1/ws --secret <dev-secret>`）
+- conformance: PASS（桌面开发模式，**11 passed / 0 failed / 1 skipped**；`invoke-timeout` 经 `IDBOTS_GATEWAY_TEST_HOOKS=1` 的 `__test:sleep` 钩子真实执行，TIMEOUT 实测 1504 ms。复审 S2-2 修复后的结果；命令 `node cloud/conformance/run.mjs --url ws://127.0.0.1:8790/gateway/v1/ws --secret <dev-secret>`）
 
 ## 未完成/存疑
 
-1. **invoke-timeout 检查在一致性套件中为 SKIP**：冻结 allowlist 里没有任何通道能让客户端合法地把 handler 拖过超时；TIMEOUT 的硬覆盖在 `tests/gatewayServer.test.mjs`（fake handler + 缩短超时钩子）。如需端到端覆盖，建议在 CR 中新增测试通道。
+1. ~~invoke-timeout 检查在一致性套件中为 SKIP~~ → **复审 S2-2 已修复**：`IDBOTS_GATEWAY_TEST_HOOKS=1` 时网关注册虚拟 `__test:sleep` 通道（不在冻结 allowlist 内，生产关闭），超时阈值 1.5 s；套件真实断言 TIMEOUT 并输出耗时。目标未开钩子时输出 `SKIP(not-covered)`，明确「未覆盖、不得据此认为通过」。
 2. **invoke-not-found 为 SKIP**：正确实现不存在「allowlisted 但未注册」的通道；CHANNEL_NOT_FOUND 路径同样由单元测试覆盖。
 3. **dev 模式多数据根（实现细节偏差）**：契约假设单一 `/data` 根；桌面开发模式下 userData 与 cowork 工作区不相交，`GatewayPaths` 增加可选 `dataRoots`（server 模式仍单根 `/data`，行为不变），否则 upload → file:sign 回路在桌面开发模式下必然 ARG_RESTRICTED。一致性套件 file-roundtrip 曾因此 FAIL，修复后通过。
 4. **C2 文件 URL 形态**：C2 说 `url` 为「相对控制平面 origin 的 `/files/{token}`」，而租户路由是 `/gateway/v1/files/{token}`；当前实现返回租户路由形态，一致性套件两种形态都接受。需要契约方澄清（应由 WS-B 代理改写还是改 C2 文字），已按变更申请处理流程记录，未改契约。

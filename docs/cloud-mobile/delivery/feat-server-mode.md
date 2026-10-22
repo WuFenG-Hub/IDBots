@@ -41,6 +41,11 @@ commit: 3cab9f0b79688f7afdfae18b43d14b94f4ac6788（分支自基线切出，随�
 2. 真实首启链上写入（身份 subsidy、relay bootstrap、twin pin、traffic grant）需要网络与气体赞助；结构性覆盖靠单测 + 复用既有已证路径，300 s ready 计时属 AC-A-3。
 3. `bootstrapSteps.ts` 刻意未移植渲染进程「fresh install 且无 metabot」门——server 模式的步骤记录取代了它（文件内有注释）。
 
+## 复审修复（2026-10-22，WS-A-修改意见 S2-1）
+
+- **S2-1（额度耗尽提示指向手机端不存在的页面）**：`coworkRunner.ts` 的 `freeRelayQuotaNotice` 抽出为纯函数 `buildFreeRelayQuotaNotice`（`coworkAssistantReply.ts`），`isServerMode()` 时文案改为「免费体验额度已用完，可在『我的』页面充值继续对话」（英文：Recharge on the Me page），桌面文案逐字不变；`free_quota_exhausted`/`quota_exhausted` 错误码原样插值，渲染层分支不受影响。测试：`tests/quotaExhaustedStreamError.test.mjs` 新增「quota notice points at recharge in server mode and Settings > Models on desktop」（双码 × 双语 × 双模式断言）。
+- 同链已合入 feat/gateway 的 S2-2 修复（`__test:sleep` 超时钩子）。
+
 ## 需求外的观察
 
 - `main.ts` 中 `didInitAppOnce` 原先由首窗 `ready-to-show` 设置，调度器因此依赖窗口存在——这是 REQ-A-2 之外值得知道的既有耦合，已通过启动层吊起解决。

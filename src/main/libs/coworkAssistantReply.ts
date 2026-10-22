@@ -170,6 +170,32 @@ export function relayQuotaErrorMetadata(message: unknown): { errorCode: string }
 }
 
 /**
+ * Transcript notice for a free-relay quota death (REQ-A-25).
+ *
+ * Desktop points at Settings > Models (the user's own provider key is the
+ * actionable fix there). Server mode (phone) has no Settings > Models page,
+ * so the notice points at recharge instead. The upstream quota code is
+ * interpolated verbatim in both modes: the renderer's quota banner keys off
+ * it, and tests rely on it staying machine-readable.
+ */
+export function buildFreeRelayQuotaNotice(
+  relayQuotaCode: string | null,
+  serverMode: boolean,
+  t: (zh: string, en: string) => string,
+): string {
+  const code = relayQuotaCode ?? 'free_quota_exhausted';
+  return serverMode
+    ? t(
+      `（这不是配置错误：IDBots-Free 免费体验额度已用完。可在「我的」页面充值继续对话。错误代码：${code}。）`,
+      ` (This is not a configuration error: the IDBots-Free starter allowance is used up. Recharge on the Me page to keep chatting. Error code: ${code}.)`,
+    )
+    : t(
+      `（这不是配置错误：IDBots-Free 免费体验额度已用完。请到 设置 > 模型 添加一个自己的模型服务商 API Key 即可继续对话。错误代码：${code}。）`,
+      ` (This is not a configuration error: the IDBots-Free starter allowance is used up. Add your own model provider API key in Settings > Models to keep chatting. Error code: ${code}.)`,
+    );
+}
+
+/**
  * Upstream "credential rejected" fingerprints mirrored from provider error
  * bodies (OpenAI-compat relays, DeepSeek, aggregator gateways). ASCII upstream
  * fingerprints only — never natural-language intent. A bare `401` never
