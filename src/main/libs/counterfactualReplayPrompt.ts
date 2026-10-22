@@ -30,9 +30,9 @@ const CONTEXT_WINDOW_MESSAGES = 6;
 const LOW_RATING_THRESHOLD = 2;
 
 export interface CounterfactualDecisionPoint {
-  /** Stable id echoed back by the LLM (`msg:...` / `task:...` / `implicit:...`). */
+  /** Stable id echoed back by the LLM (`msg:...` / `task:...` / `implicit:...` / `svc:...`). */
   id: string;
-  kind: 'thumbs_down' | 'low_rating' | 'implicit';
+  kind: 'thumbs_down' | 'low_rating' | 'low_service_rating' | 'implicit';
   /** What led up to the decision point. */
   situation: string;
   /** What the bot actually did. */
@@ -62,10 +62,11 @@ const truncate = (text: string, maxChars: number): string =>
 
 /**
  * Did the day carry ANY explicit human feedback (audit P1)? True when at
- * least one assistant message was thumbed (up OR down) or one group task was
- * accepted with a star rating. Computed from the already-loaded dream
- * activity (getActivityForDate) — no extra queries. This is the denominator
- * that separates a day with zero negative decision points because the bot
+ * least one assistant message was thumbed (up OR down), one group task was
+ * accepted with a star rating, or one buyer rating arrived on a service this
+ * bot provides. Computed from the already-loaded dream activity
+ * (getActivityForDate) — no extra queries. This is the denominator that
+ * separates a day with zero negative decision points because the bot
  * genuinely did well (feedback present, none negative) from a day where zero
  * simply means the feedback channel was never exercised.
  */
@@ -75,7 +76,8 @@ export function hasExplicitHumanFeedback(activity: DreamDayActivity): boolean {
       if (message.feedbackRating === 'up' || message.feedbackRating === 'down') return true;
     }
   }
-  return (activity.groupTasks ?? []).some((task) => task.rating != null);
+  if ((activity.groupTasks ?? []).some((task) => task.rating != null)) return true;
+  return (activity.serviceRatings ?? []).length > 0;
 }
 
 /**
@@ -122,6 +124,22 @@ export function extractNegativeDecisionPoints(
       situation: `群任务「${task.title}」: ${truncate(task.goal.replace(/\s+/g, ' ').trim(), CONTEXT_MESSAGE_MAX_CHARS)}`,
       botAction: `作为${task.memberRole === 'chair' ? '主席' : '成员'}完成了该任务并交付验收`,
       outcome: `人类验收评分 ${task.rating}/5${task.ratingComment?.trim() ? `,评语:「${truncate(task.ratingComment.trim(), 200)}」` : '。(无评语)'}`,
+    }));
+
+  // Low buyer ratings on this bot's own skill services (dream review P0):
+  // the delivery the rating refers to is identified by the order payment tx
+  // when the rating pin carried one.
+  const lowServiceRatings: CounterfactualDecisionPoint[] = (activity.serviceRatings ?? [])
+    .filter((rating) => rating.rating != null && rating.rating <= LOW_RATING_THRESHOLD)
+    .map((rating) => ({
+      id: `svc:${rating.serviceId}:${rating.ratingPinId}`,
+      kind: 'low_service_rating' as const,
+      situation: `我发布的服务「${truncate(rating.serviceName ?? rating.serviceId, CONTEXT_MESSAGE_MAX_CHARS)}」收到了买家的星级评价`,
+      botAction: rating.orderTxid
+        ? `完成了该服务的一次订单交付(支付 tx:${truncate(rating.orderTxid, 80)})`
+        : '完成了该服务的一次交付',
+      outcome: `买家评分 ${rating.rating}/5${rating.comment?.trim() ? `,评语:「${truncate(rating.comment.trim(), 200)}」` : '。(无评语)'}`
+        + (rating.raterGlobalMetaId ? `(买家 ${rating.raterGlobalMetaId})` : ''),
     }));
 
   // Implicit candidates (lowest priority): structural facts only, never
@@ -171,6 +189,7 @@ export function extractNegativeDecisionPoints(
   return [
     ...thumbsDown.map((entry) => entry.point),
     ...lowRatings,
+    ...lowServiceRatings,
     ...implicit,
   ].slice(0, Math.max(1, maxPoints));
 }

@@ -305,6 +305,28 @@ export interface DreamChainReadActivity {
   lastReadAtMs: number;
 }
 
+/**
+ * One buyer rating a chain-synced skill service owned by this bot received on
+ * the dream date (remote_skill_service_rating_seen joined against
+ * remote_skill_service provider identity). Ratings for other providers'
+ * services never appear here.
+ */
+export interface DreamServiceRatingActivity {
+  /** remote_skill_service row id (the service being rated). */
+  serviceId: string;
+  serviceName: string | null;
+  /** The rating pin id — a stable on-chain anchor for the event. */
+  ratingPinId: string;
+  /** 1-5 stars. */
+  rating: number | null;
+  comment: string | null;
+  /** Order payment tx when the rating pin carried one. */
+  orderTxid: string | null;
+  raterGlobalMetaId: string | null;
+  raterMetaId: string | null;
+  ratedAtMs: number;
+}
+
 /** Structural implicit-signal kinds (mechanical facts, no sentiment). */
 export type DreamImplicitSignalKind = 'reask' | 'unanswered_burst' | 'repeat_order';
 
@@ -335,6 +357,8 @@ export interface DreamDayActivity {
   chainWrites?: DreamChainWriteActivity[];
   /** Chain pins this bot fully read that day (chain content history). */
   chainReads?: DreamChainReadActivity[];
+  /** Buyer ratings received that day on skill services this bot provides. */
+  serviceRatings?: DreamServiceRatingActivity[];
   /** Structural implicit signals, attached by the dream service post-query. */
   implicitSignals?: DreamImplicitSignal[];
 }
@@ -432,6 +456,8 @@ interface PromptLayerSnapshotRow {
 const MAX_GROUP_CHAT_MESSAGES_PER_TASK = 400;
 /** Bound each chain-content-history kind per day so a heavy bot cannot flood the dream. */
 const MAX_CHAIN_CONTENT_ENTRIES_PER_KIND = 50;
+/** Bound the buyer-rating section per day so a popular service cannot flood the dream. */
+const MAX_SERVICE_RATINGS_PER_DAY = 10;
 
 const parseIdNumber = (value: unknown): number | null => {
   const parsed = Number(value);
@@ -1664,6 +1690,48 @@ export class DreamStore {
       lastReadAtMs: Number(row.last_read_at_ms) || dayStartMs,
     }));
 
+    // Buyer ratings received that day on services THIS bot provides. The
+    // rating pins are synced chain-wide by gigSquareRatingSyncService into
+    // remote_skill_service_rating_seen; provider identity comes from the
+    // synced remote_skill_service row (publisher metaid / globalmetaid).
+    // created_at is epoch milliseconds (the sync normalizes legacy second
+    // values on write), so the day window applies directly.
+    const serviceRatings = this.getAll<{
+      service_id: string;
+      service_name: string | null;
+      display_name: string | null;
+      pin_id: string;
+      rate: number | string | null;
+      comment: string | null;
+      service_paid_tx: string | null;
+      rater_global_metaid: string | null;
+      rater_metaid: string | null;
+      created_at: number | string;
+    }>(`
+      SELECT s.id AS service_id, s.service_name, s.display_name,
+        r.pin_id, r.rate, r.comment, r.service_paid_tx,
+        r.rater_global_metaid, r.rater_metaid, r.created_at
+      FROM remote_skill_service_rating_seen r
+      JOIN remote_skill_service s ON s.id = r.service_id
+      JOIN metabots b ON b.id = ?
+      WHERE (s.metaid = b.metaid
+          OR (b.globalmetaid IS NOT NULL AND TRIM(b.globalmetaid) != ''
+            AND s.global_metaid = b.globalmetaid))
+        AND r.created_at >= ? AND r.created_at < ?
+      ORDER BY r.created_at ASC
+      LIMIT ?
+    `, [metabotId, dayStartMs, dayEndMs, MAX_SERVICE_RATINGS_PER_DAY]).map((row) => ({
+      serviceId: row.service_id,
+      serviceName: (row.display_name ?? row.service_name ?? '').trim() || null,
+      ratingPinId: row.pin_id,
+      rating: row.rate == null ? null : Number(row.rate),
+      comment: row.comment ?? null,
+      orderTxid: row.service_paid_tx ?? null,
+      raterGlobalMetaId: (row.rater_global_metaid ?? '').trim() || null,
+      raterMetaId: (row.rater_metaid ?? '').trim() || null,
+      ratedAtMs: Number(row.created_at) || dayStartMs,
+    }));
+
     return {
       sessions,
       taskRuns,
@@ -1672,6 +1740,7 @@ export class DreamStore {
       groupChats,
       chainWrites,
       chainReads,
+      serviceRatings,
     };
   }
 

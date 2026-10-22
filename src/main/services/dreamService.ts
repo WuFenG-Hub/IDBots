@@ -1240,6 +1240,7 @@ export class DreamService {
         && (activity.groupChats?.length ?? 0) === 0
         && (activity.chainWrites?.length ?? 0) === 0
         && (activity.chainReads?.length ?? 0) === 0
+        && (activity.serviceRatings?.length ?? 0) === 0
         && impressionSubjects.length === 0
         && !surfReport
       ) {

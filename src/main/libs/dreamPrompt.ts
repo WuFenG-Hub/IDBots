@@ -628,6 +628,22 @@ export function buildDreamPrompt(input: {
       .join('\n');
     sections.push(`## 当日隐式信号(以下只是结构化事实,不代表负面,请结合上方对话上下文自行判断它们意味着什么)\n${signalLines}`);
   }
+  // Dream review P0: buyer ratings received that day on services this bot
+  // provides — the provider-side counterpart of group-task acceptance
+  // ratings. Low ones (≤2 stars) are negative feedback the dream must face
+  // (see the output-contract rule below); high ones deserve a work_review too.
+  if (sourceMode !== 'fragment' && (input.activity.serviceRatings ?? []).length > 0) {
+    const ratingLines = (input.activity.serviceRatings ?? []).map((rating) => {
+      const stars = rating.rating == null ? '未打分' : `${rating.rating} 星`;
+      return [
+        `- 「${truncateText(rating.serviceName ?? rating.serviceId, 80)}」${stars}`,
+        rating.comment?.trim() ? `  买家评语:${truncateText(rating.comment.trim(), 200)}` : '',
+        rating.orderTxid ? `  订单支付tx:${truncateText(rating.orderTxid, 80)}` : '',
+        rating.raterGlobalMetaId ? `  买家:${truncateText(rating.raterGlobalMetaId, 80)}` : '',
+      ].filter(Boolean).join('\n');
+    });
+    sections.push(`## 当天我发布的服务收到的买家评价(我作为服务方的星级打分,低分是必须正视的反馈)\n${ratingLines.join('\n')}`);
+  }
   // RSI P0 retention gate: tonight's prompt carries the rollback notice so the
   // dream treats the disavowed day's lessons with suspicion instead of
   // re-distilling them.
@@ -841,6 +857,7 @@ export function buildDreamPrompt(input: {
     '}',
     '',
     '关于群任务验收评价:若上方有「群任务验收评价」记录,work_reviews 里必须为对应任务写一条复盘——subject 写任务标题,counterparty 写验收的人类(Boss);高分(4-5 星)要总结这次具体做对了什么,并把可复用的做法写进 important_memories,供下次同类任务沿用;低分(1-3 星)要对照人类的具体评价找出差距,note 里给出下次的具体改进方向;evaluation 结合评分与评价内容判断,不许把高分写成空洞的自我表扬,也不许对低分轻描淡写。',
+    '关于我发布的服务的买家评价:若上方有「当天我发布的服务收到的买家评价」,work_reviews 里必须为被评的服务写一条复盘——subject 写服务标题,counterparty 写买家(不知道就写「买家」);低分(1-2 星)必须正视:work_reviews 与 value_lessons 要对照买家评语找出交付差距,不得回避;高分(4-5 星)要总结这次具体做对了什么,把可复用的做法写进 important_memories,供下次同类订单沿用。',
     '关于人类逐条消息评价:会话里你的回复若带〔人类评价:赞〕标记,表示人类明确认可这条回复——总结它具体好在哪里,把可复用的做法蒸馏进 important_memories 或写进 work_reviews;若带〔人类评价:踩〕标记,表示人类不认可——work_reviews 与 value_lessons 必须正视这些负反馈,不得回避;附有〔人类留言〕时,留言是改进的第一手依据(ground truth),要对照留言给出具体改进方向。',
     '关于知识点(knowledge_points):只提炼「对未来同类任务有预判帮助、可被复用」的知识点——要么是正面做法(know_how:下次该这么做),要么是坑/反例(pitfall:这个踩过,千万别再踩),要么是通用原则(principle)。不要把今天的琐碎流水、或只对本次有效的临时细节写成知识点。若上方「我已有的知识点」里有某条的结论今天被证伪、补充或修正,请用与那条完全相同的 topic 输出更新版本(系统会按 topic 匹配并升版本);如果是全新的知识点,给一个独立的新 topic。没有值得提炼的就给空数组,不要硬凑。',
     '关于能力候选(capability_learnings):只提炼今天「重复出现过、或验证成功、值得沉淀为可复用技能/工作流/工具模式」的能力,最多 5 条;每条要具体、可操作,能指导下次同类任务,不要写泛泛的自我评价或琐碎流水;没有值得沉淀的就给空数组。',
