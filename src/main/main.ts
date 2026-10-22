@@ -11233,9 +11233,13 @@ if (!gotTheLock) {
         // minus the renderer-supplied bits; the session's own systemPrompt (the
         // onboarding prompt) is picked up from the row by the runner.
         const runner = getCoworkRunner();
+        // The greeting turn carries no user-authored text, so the target
+        // language is named explicitly (resolved from the same persisted app
+        // language the UI reads) — a fresh English install greets in English
+        // even though the model's context is otherwise mixed-language.
         const greetingPrompt = tApp(
-          '用户刚刚第一次进入 IDBots。现在向他问好，并按照你的新手引导说明行动。',
-          'The user just opened IDBots for the very first time. Greet them now, following your onboarding instructions.',
+          '用户刚刚第一次进入 IDBots。现在用中文向他问好，并按照你的新手引导说明行动。',
+          'The user just opened IDBots for the very first time. Greet them in English now, following your onboarding instructions.',
         );
         void runner.startSession(session.id, greetingPrompt, {
           skipInitialUserMessage: true,

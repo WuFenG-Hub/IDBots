@@ -86,7 +86,7 @@ import { isContextWindowExceededError } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
-import { ASSISTANT_MODE_PROMPT } from './assistantModePrompt';
+import { buildAssistantModePrompt } from './assistantModePrompt';
 import { CHAIN_IDENTIFIER_VERBATIM_RULE } from './chainIdentifierPrompt';
 import { QA_BEHAVIOR_RULE } from './qaBehaviorPrompt';
 import { hasEmbeddedSkillCatalog } from './skillPromptMarkers';
@@ -6492,7 +6492,7 @@ export class CoworkRunner extends EventEmitter {
       // prompt's User Update Protocol. Gated by the caller to regular
       // interactive owner chats (see isAssistantModeOwnerChatSession).
       ...(assistantMode
-        ? [{ name: 'idbots:assistant-mode', order: PROMPT_SECTION_ORDER.ASSISTANT_MODE, text: ASSISTANT_MODE_PROMPT }]
+        ? [{ name: 'idbots:assistant-mode', order: PROMPT_SECTION_ORDER.ASSISTANT_MODE, text: buildAssistantModePrompt() }]
         : []),
     ]);
   }
