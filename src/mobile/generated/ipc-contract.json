@@ -516,6 +516,14 @@
       ]
     },
     {
+      "path": "cowork.exportHtmlReportImage",
+      "kind": "invoke",
+      "channel": "cowork:htmlReport:exportImage",
+      "args": [
+        "options"
+      ]
+    },
+    {
       "path": "cowork.exportResultImage",
       "kind": "invoke",
       "channel": "cowork:session:exportResultImage",

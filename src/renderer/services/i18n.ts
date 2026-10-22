@@ -2053,6 +2053,14 @@ const translations: Record<LanguageType, Record<string, string>> = {
     markdownViewerFileMissing: '文件不存在或已被移动。',
     markdownViewerTooLarge: '文档过大（超过 {limit}），请用外部应用打开。',
     htmlReportHint: 'HTML 报告',
+    htmlReportLoading: '正在加载报告…',
+    htmlReportOpenInPanel: '在右侧面板打开',
+    htmlReportViewSource: '查看源代码',
+    htmlReportViewRendered: '查看渲染结果',
+    htmlReportDownloadImage: '下载为图片',
+    htmlReportOpenWithDefault: '用默认应用打开',
+    htmlReportExportFailed: '导出图片失败',
+    htmlReportImageSaved: '图片已保存',
 
     // IM Bot
     imBot: 'IM 机器人',
@@ -5150,6 +5158,14 @@ const translations: Record<LanguageType, Record<string, string>> = {
     markdownViewerFileMissing: 'The file does not exist or has been moved.',
     markdownViewerTooLarge: 'The document is too large (over {limit}); open it externally.',
     htmlReportHint: 'HTML report',
+    htmlReportLoading: 'Loading report…',
+    htmlReportOpenInPanel: 'Open in side panel',
+    htmlReportViewSource: 'View source',
+    htmlReportViewRendered: 'View rendered',
+    htmlReportDownloadImage: 'Download as image',
+    htmlReportOpenWithDefault: 'Open with default app',
+    htmlReportExportFailed: 'Failed to export image',
+    htmlReportImageSaved: 'Image saved',
 
     // IM Bot
     imBot: 'IM Bot',

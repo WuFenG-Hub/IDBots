@@ -38,9 +38,11 @@ const HTML_FILE_RE = /\.html?$/i;
  * srcdoc documents have no URL of their own, so a relative asset reference
  * (img/css/js) inside a report would resolve nowhere. Point <base> at the
  * file's directory on a best-effort basis — assistant reports are single-file
- * by prompt design, so a still-broken relative path is acceptable.
+ * by prompt design, so a still-broken relative path is acceptable. Exported
+ * for the inline report block, which renders the same documents in the chat
+ * message column.
  */
-const injectHtmlBaseHref = (html: string, filePath: string): string => {
+export const injectHtmlBaseHref = (html: string, filePath: string): string => {
   const dirName = getDirName(filePath).replace(/\\/g, '/');
   const baseHref = `file://${/^[A-Za-z]:/.test(dirName) ? '/' : ''}${encodeURI(dirName)}/`;
   const baseTag = `<base href="${baseHref}">`;

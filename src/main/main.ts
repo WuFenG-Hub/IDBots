@@ -12954,6 +12954,83 @@ if (!gotTheLock) {
     }
   });
 
+  // Inline HTML report -> PNG export. Loads the report file in a hidden
+  // window (loadFile resolves its relative assets natively), resizes the
+  // window to the document's full height, captures the page, and saves
+  // through the same dialog flow as the session image export.
+  registerIpcHandler('cowork:htmlReport:exportImage', async (
+    event,
+    options: {
+      filePath?: string;
+      width?: number;
+      suggestedName?: string;
+    }
+  ) => {
+    let hiddenWindow: BrowserWindow | null = null;
+    try {
+      const filePath = normalizeWindowsShellPath(String(options?.filePath ?? ''));
+      if (!filePath || !/\.html?$/i.test(filePath)) {
+        return { success: false, error: 'invalid_path' };
+      }
+      const requestedWidth = Number(options?.width);
+      const width = Number.isFinite(requestedWidth)
+        ? Math.min(2000, Math.max(320, Math.round(requestedWidth)))
+        : 900;
+      const suggestedName = typeof options?.suggestedName === 'string' && options.suggestedName.trim()
+        ? options.suggestedName.trim()
+        : 'html-report';
+      const defaultName = getDefaultExportImageName(suggestedName);
+
+      hiddenWindow = new BrowserWindow({
+        show: false,
+        width,
+        height: 800,
+        // Reports are Bot-generated, but a stray alert/confirm would otherwise
+        // block executeJavaScript and hang the IPC forever.
+        webPreferences: { sandbox: true, disableDialogs: true },
+      });
+      await hiddenWindow.loadFile(filePath);
+      // Let charts / async layout settle before measuring, then resize the
+      // window to the document height so capturePage sees the full page.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const measuredHeight = await hiddenWindow.webContents.executeJavaScript(
+        'Math.ceil(Math.max(document.body ? (document.body.scrollHeight || 0) : 0, document.documentElement ? (document.documentElement.scrollHeight || 0) : 0))'
+      ) as unknown;
+      const contentHeight = typeof measuredHeight === 'number' && Number.isFinite(measuredHeight)
+        ? Math.min(8000, Math.max(200, Math.round(measuredHeight)))
+        : 800;
+      hiddenWindow.setContentSize(width, contentHeight);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const image = await hiddenWindow.webContents.capturePage();
+      const pngData = image.toPNG();
+      const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+      const saveOptions = {
+        title: tApp('导出 HTML 报告', 'Export HTML Report'),
+        defaultPath: path.join(app.getPath('downloads'), defaultName),
+        filters: [{ name: 'PNG Image', extensions: ['png'] }],
+      };
+      const saveResult = ownerWindow
+        ? await dialog.showSaveDialog(ownerWindow, saveOptions)
+        : await dialog.showSaveDialog(saveOptions);
+      if (saveResult.canceled || !saveResult.filePath) {
+        return { success: true, canceled: true };
+      }
+      const outputPath = ensurePngFileName(saveResult.filePath);
+      await fs.promises.writeFile(outputPath, pngData);
+      return { success: true, canceled: false, path: outputPath };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to export HTML report image',
+      };
+    } finally {
+      if (hiddenWindow && !hiddenWindow.isDestroyed()) {
+        hiddenWindow.destroy();
+      }
+    }
+  });
+
   registerIpcHandler('cowork:session:saveResultImage', async (
     event,
     options: {
