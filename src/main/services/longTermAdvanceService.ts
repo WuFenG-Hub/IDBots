@@ -606,10 +606,15 @@ export class LongTermAdvanceService {
           reusedSession: outcome.reusedSession,
           reasons,
         });
-        // Store the journal position AFTER the nudge event itself, or the
-        // nudge would count as "new events" and defeat the throttle next run.
-        const postEventId = store.getTask(card.id)?.events[0]?.id ?? latestEventId;
-        store.setNudgeState(card.id, { lastNudgeAtMs: nowMs, lastEventId: postEventId });
+        // Store the journal position captured by escalate() right AFTER the
+        // nudge event itself but BEFORE the turn ran — the nudge must not
+        // count as "new events" (that would defeat the throttle next run),
+        // while the turn's own events (a fresh proposal above all) MUST stay
+        // visible to the next sweep's reason collection.
+        store.setNudgeState(card.id, {
+          lastNudgeAtMs: nowMs,
+          lastEventId: Math.max(outcome.journalAnchorEventId, latestEventId),
+        });
         if (supervision) {
           // P1-A: the failure-streak marker is written ONLY by failure turns;
           // duration turns re-arm by time (lastSuperviseAtMs) and must not
@@ -873,7 +878,7 @@ export class LongTermAdvanceService {
       lastTwinActivityAtMs: null,
       twinSessionActive: false,
     },
-  ): Promise<{ sessionId: string; reusedSession: boolean }> {
+  ): Promise<{ sessionId: string; reusedSession: boolean; journalAnchorEventId: number }> {
     const coworkStore = this.deps.coworkStore();
     const runner = this.deps.coworkRunner();
     const twinId = this.deps.resolveTwinMetabotId();
@@ -996,7 +1001,15 @@ export class LongTermAdvanceService {
         `heartbeat escalation (${reasons.join('; ')}) → session ${sessionId}${delivery === 'hot' ? " (owner's live session)" : ''}`,
       );
     }
+    // Anchor the journal position NOW, right after the nudge event itself —
+    // never after startSession returns. The turn runs to completion inside
+    // startSession, so a post-turn anchor swallows the turn's own events; a
+    // 'proposed' event created by THIS turn would then fail the
+    // proposed.id > lastEventId check forever, and the "a fresh proposal pages
+    // the owner at the next tick" path dies silently (the 2026-10-22 incident:
+    // sub-project #2's acceptance proposal produced no reminder at all).
+    const journalAnchorEventId = this.deps.store().getTask(detail.id)?.events[0]?.id ?? 0;
     await runner.startSession(sessionId, prompt, { skipInitialUserMessage: true, confirmationMode: 'text' });
-    return { sessionId, reusedSession };
+    return { sessionId, reusedSession, journalAnchorEventId };
   }
 }
