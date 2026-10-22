@@ -13,7 +13,12 @@
 //   (d) source wiring pins: the export action goes through the new
 //       cowork:htmlReport:exportImage IPC (preload + allowlist + main-process
 //       hidden-window capture), the source view uses the prism 'markup'
-//       grammar, and the right-click menu carries the file actions.
+//       grammar, and the right-click menu carries the file actions;
+//   (e) the in-frame link bridge intercepts idbots:// anchor clicks, the nav
+//       message contract mirrors the height contract, and session deep links
+//       route through the shared sessionDeepLink helper both here and in
+//       MarkdownContent (strict parse, case-insensitive scheme, no-ops for
+//       foreign shapes).
 //
 // The live postMessage -> setHeight round-trip needs a DOM MessageEvent and
 // is intentionally covered by (c)'s parser contract plus the wiring pin in
@@ -32,7 +37,9 @@ import InlineHtmlReportBlock, {
   buildInlineHtmlSrcDoc,
   clampInlineHtmlHeight,
   parseInlineHtmlHeightMessage,
+  parseInlineHtmlNavMessage,
 } from '../src/renderer/components/cowork/InlineHtmlReportBlock';
+import { parseIdbotsSessionUri } from '../src/renderer/utils/sessionDeepLink';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const blockSource = fs.readFileSync(
@@ -49,6 +56,10 @@ const allowlistSource = fs.readFileSync(
 );
 const mainSource = fs.readFileSync(
   path.join(projectRoot, 'src', 'main', 'main.ts'),
+  'utf8',
+);
+const markdownContentSource = fs.readFileSync(
+  path.join(projectRoot, 'src', 'renderer', 'components', 'MarkdownContent.tsx'),
   'utf8',
 );
 
@@ -134,6 +145,71 @@ test('the reporter script observes resize, load and delayed settle reports', () 
   assert.match(script, /setTimeout\(reportHeight, 1000\)/);
   assert.match(script, /parent\.postMessage\(\{ \[KEY\]: true, h: h \}, "\*"\)/);
   assert.ok(!script.includes('</script>'), 'the inline script must not break the srcdoc script tag');
+});
+
+test('the injected script bridges idbots:// link clicks to the parent', () => {
+  const script = buildInlineHtmlReporterScript();
+  // Capture-phase click listener resolving the enclosing anchor.
+  assert.match(script, /document\.addEventListener\("click", function \(event\) \{/);
+  assert.match(script, /node\.closest\("a\[href\]"\)/);
+  // Only idbots:// hrefs are intercepted (case-insensitive scheme), the
+  // in-frame navigation is suppressed, and the href is posted to the parent.
+  assert.match(script, /\^idbots:\\\/\\\//);
+  assert.match(script, /event\.preventDefault\(\)/);
+  assert.match(script, /parent\.postMessage\(\{ \[KEY\]: true, nav: href \}, "\*"\)/);
+});
+
+test('nav messages are accepted only from this block iframe with a marked string href', () => {
+  const iframeWindow = { name: 'frame-a' };
+  const otherWindow = { name: 'frame-b' };
+  const nav = 'idbots://session/abc-123_456';
+
+  assert.equal(
+    parseInlineHtmlNavMessage({ [INLINE_HTML_HEIGHT_MESSAGE_KEY]: true, nav }, iframeWindow, iframeWindow),
+    nav,
+  );
+  // Another block's frame must not drive this block's navigation.
+  assert.equal(
+    parseInlineHtmlNavMessage({ [INLINE_HTML_HEIGHT_MESSAGE_KEY]: true, nav }, otherWindow, iframeWindow),
+    null,
+  );
+  // Missing marker, wrong marker value, empty/non-string href: all ignored.
+  assert.equal(parseInlineHtmlNavMessage({ nav }, iframeWindow, iframeWindow), null);
+  assert.equal(
+    parseInlineHtmlNavMessage({ [INLINE_HTML_HEIGHT_MESSAGE_KEY]: false, nav }, iframeWindow, iframeWindow),
+    null,
+  );
+  assert.equal(
+    parseInlineHtmlNavMessage({ [INLINE_HTML_HEIGHT_MESSAGE_KEY]: true, nav: '' }, iframeWindow, iframeWindow),
+    null,
+  );
+  assert.equal(
+    parseInlineHtmlNavMessage({ [INLINE_HTML_HEIGHT_MESSAGE_KEY]: true, nav: 42 }, iframeWindow, iframeWindow),
+    null,
+  );
+});
+
+test('session deep links parse strictly; other idbots:// or foreign shapes stay no-ops', () => {
+  assert.equal(parseIdbotsSessionUri('idbots://session/abc-123_456'), 'abc-123_456');
+  // URL schemes are case-insensitive (the daily report has emitted IDBOTS://).
+  assert.equal(
+    parseIdbotsSessionUri('IDBOTS://session/89125bf0-1e4b-45b0-b432-c93f5bea2e40'),
+    '89125bf0-1e4b-45b0-b432-c93f5bea2e40',
+  );
+  assert.equal(parseIdbotsSessionUri('idbots://other/abc'), null);
+  assert.equal(parseIdbotsSessionUri('idbots://session/'), null);
+  assert.equal(parseIdbotsSessionUri('idbots://session/abc/def'), null);
+  assert.equal(parseIdbotsSessionUri('https://example.com/session/abc'), null);
+  assert.equal(parseIdbotsSessionUri('javascript:alert(1)'), null);
+});
+
+test('the block routes in-frame nav clicks through the shared session deep-link path', () => {
+  // Renderer wiring: the block and MarkdownContent share one parser +
+  // dispatcher so report links behave exactly like markdown links.
+  assert.match(blockSource, /import \{ dispatchViewSession, parseIdbotsSessionUri \} from '\.\.\/\.\.\/utils\/sessionDeepLink'/);
+  assert.match(blockSource, /dispatchViewSession\(sessionId\)/);
+  assert.match(markdownContentSource, /import \{ dispatchViewSession, parseIdbotsSessionUri \} from '\.\.\/utils\/sessionDeepLink'/);
+  assert.match(markdownContentSource, /dispatchViewSession\(sessionId\)/);
 });
 
 test('height messages are accepted only from this block iframe and clamped', () => {
