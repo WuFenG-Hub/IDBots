@@ -1,6 +1,6 @@
 import { getMobileElectron } from '../appBridge';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { BundleMeters, BundleOrder, BundlePlan } from '../../bridge/types';
+import type { BundleMeters, BundlePlan } from '../../bridge/types';
 
 /**
  * Plans + payment demo state (REQ-E-8): fixture plans from `bundle:getPlans`,
@@ -59,14 +59,22 @@ export function usePlansMeters(): {
     async (planId: string) => {
       const result = await getMobileElectron().bundle.createOrder({ planId });
       if (!result?.success || !result.order) return;
-      const created: BundleOrder = result.order;
-      setOrder({ orderId: created.orderId, qrCode: created.gatewayParams.qrCode, status: created.status });
+      // createOrder returns BundleOrderInfo: no status/paidAt yet — a fresh
+      // order is status 1 (created) by definition (C4).
+      const created = result.order;
+      setOrder({ orderId: created.orderId, qrCode: created.gatewayParams.qrCode ?? '', status: 1 });
       stopPolling();
       pollRef.current = setInterval(() => {
         void (async () => {
           const latest = await getMobileElectron().bundle.getOrder({ orderId: created.orderId });
           if (!latest?.success || !latest.order) return;
-          setOrder({ orderId: latest.order.orderId, qrCode: latest.order.gatewayParams.qrCode, status: latest.order.status });
+          // BundleOrderStatusInfo carries no gatewayParams: the QR code is
+          // returned once at creation and kept from there.
+          setOrder((prev) => ({
+            orderId: latest.order.orderId,
+            qrCode: prev?.qrCode ?? '',
+            status: latest.order.status,
+          }));
           if (latest.order.status === 3 || latest.order.status === 4) {
             stopPolling();
             await refreshMeters();

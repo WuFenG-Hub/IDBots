@@ -34,12 +34,13 @@
  */
 
 import type {
+  BundleChannelAPI,
   BundleMeters,
-  BundleOrder,
   BundlePlan,
   ConnectionState,
   MobileMockBridge,
   MockBridgeOptions,
+  MockBundleOrder,
   MockElectronAPI,
   OfflineError,
   PendingPermissionRequest,
@@ -697,7 +698,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       remark: '',
     },
   ];
-  const orders = new Map<string, BundleOrder>();
+  const orders = new Map<string, MockBundleOrder>();
   let orderSeq = 0;
 
   const meters: BundleMeters = {
@@ -720,7 +721,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     },
   };
 
-  const bundleImpl: Record<string, unknown> = {
+  const bundleImpl: BundleChannelAPI = {
     getPlans: () =>
       guardOnline(async () => ({
         success: true,
@@ -731,7 +732,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
         const plan = plans.find((p) => p.planId === input?.planId && p.status === 1);
         if (!plan) return { success: false, error: 'plan not found or off sale' };
         const createdAt = now();
-        const order: BundleOrder = {
+        const order: MockBundleOrder = {
           orderId: `bo_mock_${++orderSeq}`,
           planId: plan.planId,
           payAmount: plan.payAmount,
@@ -743,8 +744,6 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
             qrCode: `https://qr.alipay.com/mock?id=${plan.planId}&n=${orderSeq}`,
             alipayOutTradeNo: `mock-out-${orderSeq}`,
           },
-          paidAt: null,
-          creditedAt: null,
           expiresAt: createdAt + 15 * 60 * 1000,
           createdAt,
         };

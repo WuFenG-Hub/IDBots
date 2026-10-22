@@ -27,68 +27,35 @@ export interface IdbotsMobileInfo {
 }
 
 /**
- * C4 bundle plan (docs/cloud-mobile/01-interface-contracts.md, "Bundle
- * Plans"). `payAmount` is a decimal string, as in the C4 envelope.
+ * C4 bundle types DERIVE from the real preload channel declarations in
+ * src/renderer/types/electron.d.ts. Its interfaces are module-scoped (not
+ * global), so they are reached through `Window['electron']` — never
+ * hand-copied into a parallel definition. The last hand-copied set drifted
+ * on `llm.unit`, the `createOrder` result fields, and `getOrder`'s missing
+ * `gatewayParams`, breaking `tsc` as soon as WS-A's types landed.
+ * (`mobile`/`gateway` helper channels get the same treatment in T3.)
  */
-export interface BundlePlan {
-  planId: string;
-  name: string;
-  nameEn: string;
-  payCurrency: string;
-  payAmount: string;
-  trafficBytes: number;
-  llmQuota: number;
-  llmQuotaUnit: string;
-  /** 1 = on sale. */
-  status: number;
-  sort: number;
-  remark: string;
-}
+export type BundleChannelAPI = Window['electron']['bundle'];
+export type BundlePlan = NonNullable<
+  Awaited<ReturnType<BundleChannelAPI['getPlans']>>['plans']
+>[number];
+export type BundleMeters = NonNullable<Awaited<ReturnType<BundleChannelAPI['getMeters']>>['meters']>;
 
 /**
- * C4 bundle order. `status`: 1 created, 2 paid, 3 credited, 4 closed (same
- * codes as traffic recharge orders).
+ * The mock's stored order: the C4 `createOrder` payload plus its own
+ * bookkeeping. `getOrder` projections must stay assignable to
+ * `BundleOrderStatusInfo` (no `gatewayParams` in status polling; paidAt and
+ * creditedAt are numbers once set, absent before — never null).
  */
-export interface BundleOrder {
-  orderId: string;
-  planId: string;
-  payAmount: string;
-  payCurrency: string;
-  trafficBytes: number;
-  llmQuota: number;
+export type MockBundleOrder = NonNullable<
+  Awaited<ReturnType<BundleChannelAPI['createOrder']>>['order']
+> & {
+  /** 1 created, 2 paid, 3 credited, 4 closed (C4 status codes). */
   status: number;
-  gatewayParams: {
-    qrCode: string;
-    alipayOutTradeNo: string;
-  };
-  paidAt: number | null;
-  creditedAt: number | null;
-  expiresAt: number;
+  paidAt?: number;
+  creditedAt?: number;
   createdAt: number;
-}
-
-/** C4 meters: the balance card data behind `bundle:getMeters`. */
-export interface BundleMeters {
-  /** Shape-compatible with the desktop `TrafficAccountInfo`. */
-  traffic: {
-    accountId: string;
-    identityAddress: string;
-    balanceBytes: number;
-    reservedBytes: number;
-    grantedBytesTotal: number;
-    spentBytesTotal: number;
-    status: number;
-  };
-  /** Shape-compatible with the C4 `GET /v2/assist/llm/quota` additions. */
-  llm: {
-    quotaTotal: number;
-    quotaUsed: number;
-    quotaRemaining: number;
-    quotaFree: number;
-    quotaPurchased: number;
-    unit: 'tokens';
-  };
-}
+};
 
 /** Pending tool-permission request as returned by `mobile:permission:listPending`. */
 export interface PendingPermissionRequest {
@@ -101,19 +68,6 @@ export interface PendingPermissionRequest {
     toolUseId: string | null;
   };
   createdAt: number;
-}
-
-/**
- * Extension channels added by WS-A (docs/cloud-mobile/02-ipc-allowlist-v1.md,
- * "New Channels Added by WS-A"). They do not exist in `IElectronAPI` yet —
- * REQ-A-24 adds the matching preload methods — so the mock types them here
- * and hangs them off `window.electron` under `bundle` and `mobile`.
- */
-export interface BundleChannelAPI {
-  getPlans: () => Promise<{ success: boolean; plans?: BundlePlan[]; error?: string }>;
-  createOrder: (input: { planId: string }) => Promise<{ success: boolean; order?: BundleOrder; error?: string }>;
-  getOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: BundleOrder; error?: string }>;
-  getMeters: () => Promise<{ success: boolean; meters?: BundleMeters; error?: string }>;
 }
 
 export interface MobileChannelAPI {
@@ -137,11 +91,10 @@ export interface MobileChannelAPI {
 
 /**
  * The full mock surface: the desktop `IElectronAPI` (referenced through the
- * global declaration in src/renderer/types/electron.d.ts) plus the WS-A
- * extension channels.
+ * global declaration in src/renderer/types/electron.d.ts, which already
+ * includes `bundle`) plus the mock's `mobile` helper channels.
  */
 export type MockElectronAPI = Window['electron'] & {
-  bundle: BundleChannelAPI;
   mobile: MobileChannelAPI;
 };
 
