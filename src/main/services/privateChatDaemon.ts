@@ -16,7 +16,15 @@ import {
 } from './metaWebCrypto';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
-import type { CoworkRunner } from '../libs/coworkRunner';
+import type { CoworkRunner, CoworkKnowledgeStore } from '../libs/coworkRunner';
+import {
+  buildKnowledgeBlock,
+  KNOWLEDGE_PROMPT_MAX_CHARS,
+  KNOWLEDGE_PROMPT_MAX_ITEMS,
+  selectKnowledgePromptItems,
+} from '../libs/knowledgePromptBlocks';
+import { PROCEDURE_PROMPT_MAX_ITEMS, renderProcedureBlock } from '../libs/procedurePromptBlocks';
+import { formatBotWorkspaceDate } from '../libs/botWorkspace';
 import { isDshShutdownError } from '../libs/dshShutdownError';
 import { PrivateChatOrderCowork, type OrderCoworkRequest } from './privateChatOrderCowork';
 import { appendA2AGuidanceToSystemPrompt } from './a2aGuidance';
@@ -3887,6 +3895,8 @@ async function processOne(
   wakeDisposition?: PrivateChatWakeReDriveDisposition,
   /** Optional cerebellum (小脑) re-ranker for the reply-turn memory blocks. */
   cerebellumMemoryRanker?: PrivateChatCerebellumMemoryRankerFn,
+  /** Dream review P1: knowledge/procedures hot-layer source (direct answer path). */
+  getKnowledgeStore?: () => CoworkKnowledgeStore | null,
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
@@ -5644,7 +5654,67 @@ async function processOne(
         // telemetry is best-effort
       }
     }
-    const systemPromptWithExperience = experienceContext ? `${systemPrompt}\n\n${experienceContext}` : systemPrompt;
+    // Dream review P1: knowledge + procedures hot layer for the direct
+    // answer path (A2A high-frequency turns see the same craft the cowork
+    // runner injects). Same builders, same hot selection (cooled knowledge
+    // stays recall-only), same exposure accounting — the nightly usage audit
+    // reads these rows as evidence. Best-effort: a failure degrades to the
+    // plain prompt, never to a failed turn.
+    let craftContext = '';
+    if (memoryPolicy.memoryEnabled && getKnowledgeStore) {
+      try {
+        const knowledgeStore = getKnowledgeStore();
+        if (knowledgeStore) {
+          const knowledgeEntries = knowledgeStore.listKnowledge({
+            metabotId: metabot.id,
+            status: 'active',
+            limit: KNOWLEDGE_PROMPT_MAX_ITEMS,
+            hotEligibleOnly: true,
+          });
+          const knowledgeBlock = buildKnowledgeBlock(
+            knowledgeEntries,
+            KNOWLEDGE_PROMPT_MAX_ITEMS,
+            KNOWLEDGE_PROMPT_MAX_CHARS,
+          );
+          const renderedKnowledge = selectKnowledgePromptItems(
+            knowledgeEntries,
+            KNOWLEDGE_PROMPT_MAX_ITEMS,
+            KNOWLEDGE_PROMPT_MAX_CHARS,
+          );
+          const procedureEntries = knowledgeStore.listHotProcedures
+            ? knowledgeStore.listHotProcedures(metabot.id, { limit: PROCEDURE_PROMPT_MAX_ITEMS })
+            : [];
+          const renderedProcedures = renderProcedureBlock(procedureEntries, PROCEDURE_PROMPT_MAX_ITEMS);
+          const exposureItems = [
+            ...renderedKnowledge
+              .filter((entry) => typeof entry.id === 'string' && entry.id)
+              .map((entry) => ({ kind: 'knowledge' as const, id: entry.id as string, exposure: 'hot' as const })),
+            ...renderedProcedures.includedIds
+              .map((id) => ({ kind: 'procedure' as const, id, exposure: 'hot' as const })),
+          ];
+          if (exposureItems.length > 0) {
+            try {
+              coworkStore.recordHotLayerExposures({
+                metabotId: metabot.id,
+                usageDate: formatBotWorkspaceDate(new Date()),
+                items: exposureItems,
+              });
+            } catch {
+              // exposure telemetry is best-effort
+            }
+          }
+          craftContext = [knowledgeBlock, renderedProcedures.text].filter((block) => block.trim()).join('\n\n');
+        }
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        emitLog(`[PrivateChat] Knowledge/procedures hot layer unavailable for message ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const systemPromptWithExperience = [
+      systemPrompt,
+      experienceContext,
+      craftContext,
+    ].filter((section) => section && section.trim()).join('\n\n');
     // A re-run of this row (after an empty-reply retry or a retriable skill-turn
     // error) carries an explicit host notice so the model knows why it is being
     // asked again and what a valid completion looks like. A wake turn instead
@@ -6124,6 +6194,14 @@ export function startPrivateChatDaemon(
   getMetaIDCognitionPromptBlock?: GetMetaIDCognitionPromptBlockFn,
   /** Optional cerebellum (小脑) re-ranker for the reply-turn memory blocks. */
   cerebellumMemoryRanker?: PrivateChatCerebellumMemoryRankerFn,
+  /**
+   * Dream review P1: knowledge/procedures hot-layer source for the direct
+   * answer path. Optional so older harnesses keep working; when present, the
+   * bot's own craft (<knowledge> + <procedures>) rides the reply turn and its
+   * exposures are accounted like the cowork path. Owner-memory privacy rules
+   * are untouched — these blocks describe the bot's own skills.
+   */
+  getKnowledgeStore?: () => CoworkKnowledgeStore | null,
 ): void {
   void stopPrivateChatDaemon();
   const daemonGeneration = ++privateChatDaemonGeneration;
@@ -6211,6 +6289,7 @@ export function startPrivateChatDaemon(
               isSessionTurnActive,
               reDrivenWakeDispositions.get(row.id),
               cerebellumMemoryRanker,
+              getKnowledgeStore,
             );
           } catch (e) {
             console.error('[PrivateChat] processOne error:', e);

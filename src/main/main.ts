@@ -4257,6 +4257,9 @@ const startStartupMessageTier = (): void => {
     // (roadmap #6) — the same shared ranker the cowork runner and the
     // group-task daemon use (see createCerebellumMemoryRanker).
     createCerebellumMemoryRanker(),
+    // Dream review P1: knowledge/procedures hot layer for the direct answer
+    // path (A2A turns) — same builders and hot selection as the cowork runner.
+    () => getMetaIDKnowledgeStore(),
   );
 
   // Periodically reconcile private chat history with the MetaSO API so
