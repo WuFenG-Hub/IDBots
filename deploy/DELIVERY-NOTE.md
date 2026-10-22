@@ -215,9 +215,22 @@ runbook §8 的点火演练执行。
 
 ## Trivy 扫描记录（AC-C-3 证据）
 
-（本机对 CI 所建同一镜像 `…/idbots/tenant:1.0.2-d4c96cc` 执行
-`trivy image --severity CRITICAL --ignore-unfixed --exit-code 1`）
+CI 的 Trivy 门禁（`aquasecurity/trivy-action@0.28.0`，CRITICAL 且有修复即失败）
+在 GitHub 托管 runner 上数秒内即可下载漏洞库并出结果，该腿本身无需改动。
 
-```
-TRIVY_RESULT_PLACEHOLDER
+**本机实测记录（诚实声明）**：trivy-db（129.5 MiB，OCI artifact，
+ghcr.io/aquasecurity/trivy-db:2）在本机所有可用通道上均只有 ~10–55 KiB/s
+（ghcr 直连 / daocloud 镜像 / Docker Desktop 代理 / 系统代理四条实测），
+两次 20 分钟窗口都未能完成下载，因此本地没有产生扫描结果。这是本机网络
+对 GitHub CDN 的限速，不是资产缺陷：
+
+- 占位镜像内容极小且完全可审：`node:24-bookworm-slim` 基底 + 3 个文件
+  （server.mjs / entrypoint.sh），无额外 apt 包；Dockerfile 全文在库内。
+- 运维侧补偿手段（建议，无需改库）：在 ACR 控制台对 `idbots` 命名空间开启
+  「镜像安全扫描」（推送即扫），作为 CI 之外的第二道。
+- 任意网络正常的机器上复核命令：
+
+```bash
+trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 \
+  registry.cn-hongkong.aliyuncs.com/idbots/tenant:1.0.2-d4c96cc
 ```
