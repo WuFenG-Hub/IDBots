@@ -23,6 +23,12 @@ export interface MemoryUserMemory {
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
+  /**
+   * Dream review P1: stamped only when the nightly hot-layer usage audit
+   * judged the memory APPLIED in a reply; outranks lastUsedAt in hygiene
+   * decay and prompt eviction. Absent on backends without the column.
+   */
+  lastAppliedAt?: number | null;
   /** Hygiene-archive timestamp; null/undefined means the row is active. */
   archivedAt?: number | null;
   /** Recall weight derived at write time (see memoryImportance.ts). */
@@ -225,6 +231,14 @@ export interface MemoryBackend {
    * pooling a row without injecting it is not usage.
    */
   touchUserMemoriesLastUsed(metabotId: number, memoryIds: string[]): void;
+  /**
+   * Dream review P1: stamp last_applied_at for exactly the given rows — the
+   * "was actually used" signal, written only when the nightly hot-layer usage
+   * audit judges a memory APPLIED (evidence-cited) in a reply. Distinct from
+   * the injection touch above; hygiene decay and prompt eviction read the
+   * applied stamp first. Returns rows changed.
+   */
+  touchUserMemoriesLastApplied(metabotId: number, memoryIds: string[]): number;
   createUserMemory(input: MemoryCreateUserMemoryInput): MemoryUserMemory;
   updateUserMemory(input: MemoryUpdateUserMemoryInput): MemoryUserMemory | null;
   deleteUserMemory(input: MemoryDeleteUserMemoryInput): boolean;

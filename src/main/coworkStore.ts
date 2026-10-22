@@ -929,6 +929,13 @@ export interface CoworkUserMemory {
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
+  /**
+   * Dream review P1 (2026-10-23): stamped ONLY when the nightly hot-layer
+   * usage audit judges the memory APPLIED in a reply (evidence-cited) —
+   * injection touches last_used_at, application touches this. Hygiene decay
+   * and prompt eviction read COALESCE(last_applied_at, last_used_at, ...).
+   */
+  lastAppliedAt?: number | null;
   /** Hygiene decay mark: archived dream memories leave injection but stay restorable. */
   archivedAt?: number | null;
   /** Recall weight: high-importance memories get guaranteed injection and late eviction. */
@@ -1049,8 +1056,12 @@ export interface CapabilityFalsifiedHypothesis {
   lastHitAt: number | null;
 }
 
-/** Which hot-layer kind an exposure row tracks (RRSI P2, design §6.2 P2.4). */
-export type HotLayerItemKind = 'technique' | 'procedure';
+/** Which hot-layer kind an exposure row tracks (RRSI P2, design §6.2 P2.4).
+ * Dream review P1 (2026-10-23) widens the set: 'knowledge' = metaid knowledge
+ * hot-layer entries, 'memory' = injected value_boundary / work_review
+ * user_memories. The hot_layer_usage CHECK constraint is widened by a
+ * table-rebuild migration in sqliteStore. */
+export type HotLayerItemKind = 'technique' | 'procedure' | 'knowledge' | 'memory';
 
 /** How the item reached the model: always-on injection or on-demand recall. */
 export type HotLayerExposure = 'hot' | 'recall';
@@ -1367,6 +1378,7 @@ interface CoworkUserMemoryRow {
   created_at: number;
   updated_at: number;
   last_used_at: number | null;
+  last_applied_at?: number | null;
   metabot_id?: number | null;
   scope_kind?: string | null;
   scope_key?: string | null;
@@ -1880,6 +1892,15 @@ export class CoworkStore implements MemoryBackend {
       }
       if (!memoryColumns.includes('archived_at')) {
         this.db.run('ALTER TABLE user_memories ADD COLUMN archived_at INTEGER;');
+        changed = true;
+      }
+      // Dream review P1 (2026-10-23): "applied" timestamp, written ONLY by the
+      // nightly hot-layer usage audit when a memory is judged applied in a
+      // reply (evidence-cited). Injection keeps touching last_used_at; decay
+      // and eviction read COALESCE(last_applied_at, last_used_at, updated_at)
+      // so "was used" outranks "was injected".
+      if (!memoryColumns.includes('last_applied_at')) {
+        this.db.run('ALTER TABLE user_memories ADD COLUMN last_applied_at INTEGER;');
         changed = true;
       }
       if (!memoryColumns.includes('importance')) {
@@ -7107,6 +7128,7 @@ export class CoworkStore implements MemoryBackend {
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
       lastUsedAt: row.last_used_at === null ? null : Number(row.last_used_at),
+      lastAppliedAt: row.last_applied_at == null ? null : Number(row.last_applied_at),
       archivedAt: row.archived_at == null ? null : Number(row.archived_at),
       importance: clampMemoryImportance(row.importance),
     };
@@ -7380,6 +7402,31 @@ export class CoworkStore implements MemoryBackend {
         this.saveDb();
       }
     }
+  }
+
+  /**
+   * Dream review P1: stamp last_applied_at for memories the nightly usage
+   * audit judged APPLIED (evidence-cited) in a reply. Distinct from the
+   * injection touch above — this is the "was actually used" signal feeding
+   * hygiene decay and prompt eviction. Debounced save like the injection touch.
+   */
+  touchUserMemoriesLastApplied(metabotId: number, memoryIds: string[]): number {
+    const uniqueIds = Array.from(new Set(memoryIds.map((id) => id.trim()).filter(Boolean)));
+    if (uniqueIds.length === 0) return 0;
+    const placeholders = uniqueIds.map(() => '?').join(', ');
+    const now = Date.now();
+    this.db.run(`
+      UPDATE user_memories
+      SET last_applied_at = ?
+      WHERE metabot_id = ?
+        AND id IN (${placeholders})
+    `, [now, metabotId, ...uniqueIds]);
+    const changed = this.db.getRowsModified?.() || 0;
+    if (changed > 0 && now - (this.lastMemoryTouchSaveAt ?? 0) >= 10_000) {
+      this.lastMemoryTouchSaveAt = now;
+      this.saveDb();
+    }
+    return changed;
   }
 
   createUserMemory(input: MemoryCreateUserMemoryInput): CoworkUserMemory {
@@ -8061,7 +8108,7 @@ export class CoworkStore implements MemoryBackend {
     if (!Number.isInteger(metabotId) || metabotId <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(usageDate)) return 0;
     const atMs = Math.floor(Number(input.atMs ?? Date.now())) || Date.now();
     const items = (input.items ?? []).filter((item) =>
-      (item.kind === 'technique' || item.kind === 'procedure')
+      (item.kind === 'technique' || item.kind === 'procedure' || item.kind === 'knowledge' || item.kind === 'memory')
       && typeof item.id === 'string' && item.id.trim().length > 0
       && (item.exposure === 'hot' || item.exposure === 'recall'));
     if (items.length === 0) return 0;
@@ -8935,7 +8982,10 @@ export class CoworkStore implements MemoryBackend {
    * Hygiene decay stroke: dream-origin memories (never self_identity, never
    * conversation-origin rows that may carry the user's explicit "remember
    * this") untouched for longer than the cutoff get a reversible archived_at
-   * mark so they leave injection and default listings. Bounded per pass.
+   * mark so they leave injection and default listings. Recency reads
+   * COALESCE(last_applied_at, last_used_at, updated_at): a memory the usage
+   * audit saw APPLIED stays alive on the applied clock, an injected-but-
+   * never-applied one on the injection clock (dream review P1).
    */
   archiveDecayedDreamMemories(input: {
     cutoffMs: number;
@@ -8955,8 +9005,8 @@ export class CoworkStore implements MemoryBackend {
          AND status = 'created'
          AND origin = 'dream'
          AND usage_class != 'self_identity'
-         AND COALESCE(last_used_at, updated_at) < ?${metabotExclusion}
-       ORDER BY COALESCE(last_used_at, updated_at) ASC
+         AND COALESCE(last_applied_at, last_used_at, updated_at) < ?${metabotExclusion}
+       ORDER BY COALESCE(last_applied_at, last_used_at, updated_at) ASC
        LIMIT ?`,
       [cutoff, ...excluded, limit],
     ).map((row) => row.id);

@@ -72,6 +72,7 @@ import {
   formatKnowledgeUpsertResult,
   KNOWLEDGE_PROMPT_MAX_CHARS,
   KNOWLEDGE_PROMPT_MAX_ITEMS,
+  selectKnowledgePromptItems,
   type KnowledgePromptEntry,
 } from './knowledgePromptBlocks';
 import {
@@ -1943,6 +1944,8 @@ export interface CoworkKnowledgeStore {
     limit?: number;
     /** Cold recall channel: include status='archived' entries alongside active ones. */
     includeArchived?: boolean;
+    /** Dream review P1: keep only entries not cooled out of the hot pool. */
+    hotEligibleOnly?: boolean;
     touchLastUsed?: boolean;
   }): Array<{
     id: string;
@@ -4033,6 +4036,28 @@ export class CoworkRunner extends EventEmitter {
     });
     if (injectedIds.length > 0) {
       this.getMemoryBackend().touchUserMemoriesLastUsed(metabotId, injectedIds);
+      // Dream review P1 exposure ledger: the guidance memories
+      // (value_boundary / work_review) that rendered enter the nightly usage
+      // audit's evidence pool as kind 'memory'. Best-effort telemetry.
+      const guidanceClassById = new Map<string, string>();
+      for (const entry of [...context.ownerEntries, ...context.contactEntries, ...context.conversationEntries]) {
+        if (entry?.id && entry.usageClass) guidanceClassById.set(entry.id, entry.usageClass);
+      }
+      const memoryExposureIds = injectedIds.filter((id) => {
+        const usageClass = guidanceClassById.get(id);
+        return usageClass === 'value_boundary' || usageClass === 'work_review';
+      });
+      if (memoryExposureIds.length > 0) {
+        try {
+          this.store.recordHotLayerExposures({
+            metabotId,
+            usageDate: formatBotWorkspaceDate(new Date()),
+            items: memoryExposureIds.map((id) => ({ kind: 'memory', id, exposure: 'hot' })),
+          });
+        } catch {
+          // telemetry is best-effort
+        }
+      }
     }
 
     coworkLog('INFO', 'memory:promptBlocks', 'Built scoped memory prompt blocks', {
@@ -6284,6 +6309,9 @@ export class CoworkRunner extends EventEmitter {
       metabotId,
       status: 'active',
       limit: CEREBELLUM_KNOWLEDGE_MAX_CANDIDATES,
+      // Dream review P1: usage-audit-cooled entries leave the hot pool (they
+      // stay recallable); the wide pool for the cerebellum rank is hot-only.
+      hotEligibleOnly: true,
     });
     if (entries.length < CEREBELLUM_KNOWLEDGE_MIN_POOL) return null;
     return entries;
@@ -6367,6 +6395,7 @@ export class CoworkRunner extends EventEmitter {
     // with the experience blocks rather than injected separately, to keep the
     // memory prompt cohesive.
     let knowledgeBlock = '';
+    let fallbackKnowledgeEntries: KnowledgePromptEntry[] | null = null;
     if (knowledgeHot) {
       // The wide pool was already loaded for the rank call. A null score map
       // keeps recency order, and buildKnowledgeBlock then slices the newest 8
@@ -6378,12 +6407,41 @@ export class CoworkRunner extends EventEmitter {
         knowledgeHot.relevanceScoreById,
       );
     } else if (this.knowledgeStore) {
-      const knowledgeEntries = this.knowledgeStore.listKnowledge({
+      fallbackKnowledgeEntries = this.knowledgeStore.listKnowledge({
         metabotId,
         status: 'active',
         limit: KNOWLEDGE_PROMPT_MAX_ITEMS,
+        // Dream review P1: cooled entries stay recall-only.
+        hotEligibleOnly: true,
       });
-      knowledgeBlock = buildKnowledgeBlock(knowledgeEntries);
+      knowledgeBlock = buildKnowledgeBlock(fallbackKnowledgeEntries);
+    }
+    // Dream review P1 exposure ledger: record today's hot knowledge exposures
+    // for exactly the entries that rendered (same inputs → same selection as
+    // buildKnowledgeBlock). Best-effort telemetry — never breaks a turn.
+    if (knowledgeBlock && knowledgeBlock.includes('<knowledge>')) {
+      try {
+        const renderedKnowledge = knowledgeHot
+          ? selectKnowledgePromptItems(
+              knowledgeHot.entries,
+              KNOWLEDGE_PROMPT_MAX_ITEMS,
+              KNOWLEDGE_PROMPT_MAX_CHARS,
+              knowledgeHot.relevanceScoreById,
+            )
+          : selectKnowledgePromptItems(fallbackKnowledgeEntries ?? []);
+        const knowledgeExposureItems = renderedKnowledge
+          .filter((entry) => typeof entry.id === 'string' && entry.id)
+          .map((entry) => ({ kind: 'knowledge' as const, id: entry.id as string, exposure: 'hot' as const }));
+        if (knowledgeExposureItems.length > 0) {
+          this.store.recordHotLayerExposures({
+            metabotId,
+            usageDate: formatBotWorkspaceDate(new Date()),
+            items: knowledgeExposureItems,
+          });
+        }
+      } catch {
+        // telemetry is best-effort
+      }
     }
     // Procedure hot-layer (经验): proven task workflows ride the same block so
     // a matching procedure preempts a fresh MetaWeb search for a task the bot

@@ -441,6 +441,7 @@ man_base_data_pebble/
 !tests/positiveReplay.test.mjs
 !tests/dreamInputDrops.test.mjs
 !tests/dreamSelfIdentityGuard.test.mjs
+!tests/hotLayerAuditExtension.test.mjs
 !tests/dreamServiceRatings.test.mjs
 !tests/dreamTelemetryWeekly.test.mjs
 !tests/dreamPracticeProposals.test.mjs

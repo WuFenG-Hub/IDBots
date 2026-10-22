@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
-import type { CapabilityFalsifiedHypothesis, CoworkStore } from '../coworkStore';
+import type { CapabilityFalsifiedHypothesis, CoworkStore, CoworkUserMemory } from '../coworkStore';
 import type { DreamDayActivity, DreamInputDropCounters, DreamStore, MetabotPrediction, PromptLayerSnapshot } from '../dreamStore';
 import { countDreamInputDrops, createDreamInputDropCounters } from '../dreamStore';
 import type { MetaIDExperienceStore } from '../metaidExperienceStore';
 import type { MetaIDImpressionStore } from '../metaidImpressionStore';
-import type { MetaIDKnowledgeStore } from '../metaidKnowledgeStore';
+import type { MetaIDKnowledgeEntry, MetaIDKnowledgeStore } from '../metaidKnowledgeStore';
 import {
   DREAM_LOOKBACK_DAYS,
   DREAM_VERSION,
@@ -124,6 +124,8 @@ import {
   sampleUsageAuditExcerpts,
   selectUsageAuditItems,
   USAGE_AUDIT_ITEM_GIST_CHARS,
+  USAGE_AUDIT_MAX_ITEMS_TOTAL,
+  type UsageAuditItem,
 } from '../libs/hotLayerUsageAudit';
 import {
   HOT_LAYER_REENTRY_MIN_APPLIED_NIGHTS,
@@ -1392,6 +1394,9 @@ export class DreamService {
       // RRSI P3: prune hot-layer items that keep being shown but never used.
       // Runs even when the audit was skipped — older audited nights still count.
       const hotLayerPruning = this.pruneHotLayerAfterDream(metabot, date);
+      // Dream review P1: knowledge entries the audit keeps seeing unused cool
+      // out of the <knowledge> hot pool (recall keeps them).
+      const knowledgeCooling = this.coolHotKnowledgeAfterDream(metabot, date);
       const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
       // Dream review P0: positive replay — praised replies reinforce through
       // the same draft pipeline, counted like the negative path below.
@@ -1437,6 +1442,7 @@ export class DreamService {
         // RRSI P3: L1 pruning outcome (design §6.3 P3.3) — never deletes
         // anything; demotion changes a status or an eligibility flag only.
         hotLayerPruning,
+        knowledgeCooling,
         hotLayer: this.buildHotLayerTelemetry(metabotId, date),
         // P1 periodic re-review (audit): how many validated drafts faced the
         // verdict panel again tonight and how many were demoted off the
@@ -2288,42 +2294,110 @@ export class DreamService {
    * list) neither earns nor loses standing. Best-effort: any failure returns
    * the zero result and never fails the dream run.
    */
+  /**
+   * RRSI P3 usage audit (design §6.3 P3.1), extended by dream review P1
+   * (2026-10-23) to ALL hot-layer kinds: techniques, procedures, knowledge
+   * hot-layer entries and injected value_boundary / work_review memories.
+   * One bounded LLM call compares the day's exposed items with sampled
+   * assistant replies (≤40 excerpts) and writes applied/evidence verdicts into
+   * hot_layer_usage. Only audited rows count as evidence — an exposure never
+   * judged (no replies to sample, item source gone, parse failure, item
+   * missing from the verdict list) neither earns nor loses standing. Applied
+   * 'memory' verdicts additionally stamp user_memories.last_applied_at — the
+   * "was actually used" signal (injection touches last_used_at). Best-effort:
+   * any failure returns the zero result and never fails the dream run.
+   */
   private async runHotLayerUsageAudit(
     metabot: DreamMetabotLike,
     brain: DreamBrainPair,
     date: string,
     activity: DreamDayActivity,
-  ): Promise<{ ran: boolean; items: number; applied: number; excerpts: number; parseFailed: boolean }> {
-    const zero = { ran: false, items: 0, applied: 0, excerpts: 0, parseFailed: false };
+  ): Promise<{
+    ran: boolean;
+    items: number;
+    applied: number;
+    excerpts: number;
+    parseFailed: boolean;
+    knowledgeItems: number;
+    knowledgeApplied: number;
+    memoryItems: number;
+    memoryApplied: number;
+  }> {
+    const zero = {
+      ran: false, items: 0, applied: 0, excerpts: 0, parseFailed: false,
+      knowledgeItems: 0, knowledgeApplied: 0, memoryItems: 0, memoryApplied: 0,
+    };
     try {
       const exposures = this.deps.dreamStore.listHotLayerExposures(metabot.id, date);
       if (exposures.length === 0) return zero;
       const excerpts = sampleUsageAuditExcerpts(activity.sessions ?? []);
       if (excerpts.length === 0) return zero;
-      const items: Array<{ ref: string; kind: 'technique' | 'procedure'; itemId: string; title: string; gist: string }> = [];
-      for (const exposure of selectUsageAuditItems(exposures)) {
+      const techniqueProcedureItems: UsageAuditItem[] = [];
+      const knowledgeItems: UsageAuditItem[] = [];
+      const memoryItems: UsageAuditItem[] = [];
+      let memoryById: Map<string, CoworkUserMemory> | null = null;
+      for (const exposure of selectUsageAuditItems(exposures, USAGE_AUDIT_MAX_ITEMS_TOTAL * 2)) {
         if (exposure.kind === 'technique') {
           const draft = this.deps.coworkStore.getCapabilityDraft(metabot.id, Number(exposure.itemId));
           if (!draft) continue;
-          items.push({
+          techniqueProcedureItems.push({
             ref: `technique:${exposure.itemId}`,
             kind: 'technique',
             itemId: exposure.itemId,
             title: draft.title,
             gist: truncateUtf16Units(draft.description, USAGE_AUDIT_ITEM_GIST_CHARS),
           });
-        } else {
+        } else if (exposure.kind === 'procedure') {
           const procedure = this.deps.metaidKnowledgeStore?.getProcedure(exposure.itemId) ?? null;
           if (!procedure) continue;
-          items.push({
+          techniqueProcedureItems.push({
             ref: `procedure:${exposure.itemId}`,
             kind: 'procedure',
             itemId: exposure.itemId,
             title: procedure.title,
             gist: truncateUtf16Units(`${procedure.triggerText};${procedure.steps[0] ?? ''}`, USAGE_AUDIT_ITEM_GIST_CHARS),
           });
+        } else if (exposure.kind === 'knowledge') {
+          const knowledge = this.deps.metaidKnowledgeStore?.getKnowledge(exposure.itemId) ?? null;
+          if (!knowledge || knowledge.status !== 'active') continue;
+          knowledgeItems.push({
+            ref: `knowledge:${exposure.itemId}`,
+            kind: 'knowledge',
+            itemId: exposure.itemId,
+            title: knowledge.topic,
+            gist: truncateUtf16Units(`${knowledge.topic};${knowledge.summary}`, USAGE_AUDIT_ITEM_GIST_CHARS),
+          });
+        } else if (exposure.kind === 'memory') {
+          // Two bounded lookups total (not per exposure): the guidance
+          // classes the exposure ledger records for kind 'memory'.
+          if (!memoryById) {
+            memoryById = new Map();
+            for (const usageClass of ['value_boundary', 'work_review'] as const) {
+              for (const entry of this.deps.coworkStore.listUserMemories({
+                metabotId: metabot.id,
+                usageClass,
+                status: 'all',
+                limit: 500,
+              })) {
+                memoryById.set(entry.id, entry);
+              }
+            }
+          }
+          const memory = memoryById.get(exposure.itemId);
+          if (!memory) continue;
+          memoryItems.push({
+            ref: `memory:${exposure.itemId}`,
+            kind: 'memory',
+            itemId: exposure.itemId,
+            title: memory.text.slice(0, 40),
+            gist: truncateUtf16Units(memory.text, USAGE_AUDIT_ITEM_GIST_CHARS),
+          });
         }
       }
+      // One shared call: techniques/procedures first (legacy priority), then
+      // knowledge, then memory — the combined list stays under the hard cap.
+      const items = [...techniqueProcedureItems, ...knowledgeItems, ...memoryItems]
+        .slice(0, USAGE_AUDIT_MAX_ITEMS_TOTAL);
       if (items.length === 0) return zero;
       const prompt = buildHotLayerUsageAuditPrompt({ date, items, excerpts });
       const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 2048);
@@ -2332,12 +2406,21 @@ export class DreamService {
         new Set(items.map((item) => item.ref)),
         new Set(excerpts.map((excerpt) => excerpt.label)),
       );
+      const byKindCounts = {
+        knowledgeItems: items.filter((item) => item.kind === 'knowledge').length,
+        memoryItems: items.filter((item) => item.kind === 'memory').length,
+        knowledgeApplied: 0,
+        memoryApplied: 0,
+      };
       if (parsed.ok === false) {
-        return { ran: true, items: items.length, applied: 0, excerpts: excerpts.length, parseFailed: true };
+        return {
+          ran: true, items: items.length, applied: 0, excerpts: excerpts.length, parseFailed: true,
+          ...byKindCounts,
+        };
       }
       const channelByLabel = new Map(excerpts.map((excerpt) => [excerpt.label, excerpt.channel]));
       const mapped: Array<{
-        kind: 'technique' | 'procedure';
+        kind: 'technique' | 'procedure' | 'knowledge' | 'memory';
         itemId: string;
         applied: boolean;
         evidence: { labels: string[]; channels: Array<'owner' | 'external'> };
@@ -2353,11 +2436,26 @@ export class DreamService {
             channels.push(channel);
           }
         }
-        if (verdict.applied) applied += 1;
+        if (verdict.applied) {
+          applied += 1;
+          if (item.kind === 'knowledge') byKindCounts.knowledgeApplied += 1;
+          if (item.kind === 'memory') byKindCounts.memoryApplied += 1;
+        }
         mapped.push({ kind: item.kind, itemId: item.itemId, applied: verdict.applied, evidence: { labels: verdict.labels, channels } });
       }
       this.deps.dreamStore.recordHotLayerUsageVerdicts(metabot.id, date, mapped, this.now().getTime());
-      return { ran: true, items: items.length, applied, excerpts: excerpts.length, parseFailed: false };
+      // The "was actually used" stamp: applied guidance memories move off the
+      // injection clock onto the applied clock for hygiene decay + eviction.
+      const appliedMemoryIds = mapped
+        .filter((verdict) => verdict.kind === 'memory' && verdict.applied)
+        .map((verdict) => verdict.itemId);
+      if (appliedMemoryIds.length > 0) {
+        this.deps.coworkStore.touchUserMemoriesLastApplied(metabot.id, appliedMemoryIds);
+      }
+      return {
+        ran: true, items: items.length, applied, excerpts: excerpts.length, parseFailed: false,
+        ...byKindCounts,
+      };
     } catch (error) {
       console.warn(
         `[DreamService] Usage audit failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -2486,6 +2584,75 @@ export class DreamService {
     } catch (error) {
       console.warn(
         `[DreamService] Hot-layer pruning failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * Dream review P1 — knowledge hot-layer cooling, mirroring the
+   * technique/procedure pruning above: an ACTIVE knowledge entry past its
+   * 14-day grace (updated_at as the hot-entry proxy — knowledge rows carry no
+   * hot_since) with ≥5 audited hot exposure nights in the trailing 30-day
+   * window and zero applied nights leaves the proactive <knowledge> injection
+   * pool (hot_eligible = 0). Nothing is deleted and recall keeps returning the
+   * entry. At most 2 coolings per night. The reference clock is the dreamed
+   * date's day end. Best-effort: any failure returns the zero result.
+   */
+  private coolHotKnowledgeAfterDream(
+    metabot: DreamMetabotLike,
+    date: string,
+  ): { cooled: number } {
+    const zero = { cooled: 0 };
+    try {
+      if (!this.deps.metaidKnowledgeStore) return zero;
+      const refMs = getDayBoundsMs(date).endMs;
+      const sinceDate = shiftDateKey(date, -(HOT_LAYER_UTILITY_WINDOW_DAYS - 1));
+      const stats = this.deps.dreamStore.listHotLayerUsageStats(metabot.id, {
+        kind: 'knowledge',
+        sinceDate,
+        untilDate: date,
+      });
+      if (stats.size === 0) return zero;
+      const candidates: Array<{
+        entry: MetaIDKnowledgeEntry;
+        key: string;
+        kind: 'knowledge';
+        hotSinceMs: number;
+        appliedNights: number;
+        exposedNights: number;
+      }> = [];
+      for (const [itemId, itemStats] of stats) {
+        const entry = this.deps.metaidKnowledgeStore.getKnowledge(itemId);
+        if (!entry || entry.status !== 'active') continue;
+        if (entry.hotEligible === false) continue;
+        candidates.push({
+          entry,
+          key: `knowledge:${itemId}`,
+          kind: 'knowledge',
+          hotSinceMs: entry.updatedAt ?? entry.createdAt,
+          appliedNights: itemStats.appliedNights,
+          exposedNights: itemStats.exposedNights,
+        });
+      }
+      const cooled = selectHotLayerDemotions(candidates, { nowMs: refMs });
+      let cooledCount = 0;
+      for (const candidate of cooled) {
+        const flipped = this.deps.metaidKnowledgeStore.setKnowledgeHotEligibility(candidate.entry.id, {
+          eligible: false,
+          atMs: this.now().getTime(),
+        });
+        if (flipped) {
+          cooledCount += 1;
+          console.log(
+            `[DreamService] Knowledge "${candidate.entry.topic}" cooled out of the hot pool for metabot ${metabot.id}: ${candidate.exposedNights} audited hot nights, applied on none`,
+          );
+        }
+      }
+      return { cooled: cooledCount };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Knowledge cooling failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return zero;
     }

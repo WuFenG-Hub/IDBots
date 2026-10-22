@@ -5,7 +5,7 @@ import {
   MEMORY_IMPORTANCE_GUARANTEED_THRESHOLD,
 } from './memoryImportance';
 
-export type MemoryPromptEntryLike = Pick<MemoryUserMemory, 'id' | 'text' | 'usageClass' | 'visibility' | 'updatedAt' | 'lastUsedAt' | 'importance'>;
+export type MemoryPromptEntryLike = Pick<MemoryUserMemory, 'id' | 'text' | 'usageClass' | 'visibility' | 'updatedAt' | 'lastUsedAt' | 'lastAppliedAt' | 'importance'>;
 
 /**
  * Byte budget for the whole rendered memory injection (all scoped blocks
@@ -192,8 +192,11 @@ function applyPromptCharBudget(
     return selection;
   }
   // Evict globally by lowest importance first (ties: oldest recency =
-  // lastUsedAt ?? updatedAt, then the lower-priority rank) — but never evict
-  // the top-ranked entry overall: a budget must not zero memory out entirely.
+  // lastAppliedAt ?? lastUsedAt ?? updatedAt, then the lower-priority rank) —
+  // the applied stamp (written only when the nightly usage audit judged the
+  // memory APPLIED) outranks the mere injection touch, so a proven-useful
+  // memory survives over a merely-injected one. Never evict the top-ranked
+  // entry overall: a budget must not zero memory out entirely.
   const evictionOrder = rankedFlat
     .map((entry, rankIndex) => ({ entry, rankIndex }))
     .sort((left, right) => {
@@ -202,8 +205,8 @@ function applyPromptCharBudget(
       if (leftImportance !== rightImportance) {
         return leftImportance - rightImportance;
       }
-      const leftRecency = left.entry.lastUsedAt ?? left.entry.updatedAt ?? 0;
-      const rightRecency = right.entry.lastUsedAt ?? right.entry.updatedAt ?? 0;
+      const leftRecency = left.entry.lastAppliedAt ?? left.entry.lastUsedAt ?? left.entry.updatedAt ?? 0;
+      const rightRecency = right.entry.lastAppliedAt ?? right.entry.lastUsedAt ?? right.entry.updatedAt ?? 0;
       if (leftRecency !== rightRecency) {
         return leftRecency - rightRecency;
       }

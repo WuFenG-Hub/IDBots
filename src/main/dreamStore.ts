@@ -544,7 +544,7 @@ const parseSessionRefs = (raw: string | null | undefined): DailySummarySessionRe
 /** One hot_layer_usage row for a (bot, date): how the item reached the model
  * and whether the P3 usage audit judged it applied (null = unaudited). */
 export interface HotLayerExposureRow {
-  kind: 'technique' | 'procedure';
+  kind: 'technique' | 'procedure' | 'knowledge' | 'memory';
   itemId: string;
   exposure: 'hot' | 'recall';
   exposureCount: number;
@@ -2069,7 +2069,7 @@ export class DreamStore {
     if (!Number.isInteger(id) || id <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
     try {
       return this.getAll<{
-        item_kind: 'technique' | 'procedure';
+        item_kind: 'technique' | 'procedure' | 'knowledge' | 'memory';
         item_id: string;
         exposure: 'hot' | 'recall';
         exposure_count: number | string;
@@ -2081,7 +2081,7 @@ export class DreamStore {
         WHERE metabot_id = ? AND usage_date = ?
         ORDER BY exposure = 'hot' DESC, exposure_count DESC, item_kind ASC, item_id ASC
       `, [id, date]).map((row) => ({
-        kind: row.item_kind,
+        kind: row.item_kind as HotLayerExposureRow['kind'],
         itemId: String(row.item_id),
         exposure: row.exposure,
         exposureCount: Math.max(0, Math.floor(Number(row.exposure_count) || 0)),
@@ -2104,7 +2104,7 @@ export class DreamStore {
     metabotId: number,
     usageDate: string,
     verdicts: Array<{
-      kind: 'technique' | 'procedure';
+      kind: 'technique' | 'procedure' | 'knowledge' | 'memory';
       itemId: string;
       applied: boolean;
       evidence: { labels: string[]; channels: Array<'owner' | 'external'> };
@@ -2116,7 +2116,8 @@ export class DreamStore {
     const stamp = Math.floor(Number(atMs));
     if (!Number.isInteger(id) || id <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(stamp)) return 0;
     const rows = (verdicts ?? []).filter((verdict) =>
-      (verdict?.kind === 'technique' || verdict?.kind === 'procedure')
+      (verdict?.kind === 'technique' || verdict?.kind === 'procedure'
+        || verdict?.kind === 'knowledge' || verdict?.kind === 'memory')
       && typeof verdict?.itemId === 'string' && verdict.itemId.length > 0);
     if (rows.length === 0) return 0;
     let changed = 0;
@@ -2141,7 +2142,7 @@ export class DreamStore {
   /** Trailing-window usage stats per item (shared aggregation helper). */
   listHotLayerUsageStats(
     metabotId: number,
-    input: { kind: 'technique' | 'procedure'; sinceDate: string; untilDate: string; itemIds?: readonly string[] },
+    input: { kind: 'technique' | 'procedure' | 'knowledge' | 'memory'; sinceDate: string; untilDate: string; itemIds?: readonly string[] },
   ): Map<string, HotLayerUsageStats> {
     return queryHotLayerUsageStats(this.db, { metabotId, ...input });
   }

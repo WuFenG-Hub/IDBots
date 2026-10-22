@@ -60,6 +60,12 @@ export interface MetaIDKnowledgeEntry {
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
+  /**
+   * Hot-pool membership (dream review P1): false = cooled out of the proactive
+   * <knowledge> injection pool by the nightly usage audit; recall paths keep
+   * returning the entry. Defaults true.
+   */
+  hotEligible?: boolean;
 }
 
 export interface MetaIDKnowledgeSource {
@@ -199,6 +205,12 @@ export interface ListMetaIDKnowledgeOptions {
   offset?: number;
   /** Cold recall channel: widen the default/'active' filter to active+archived. Never widens to superseded. */
   includeArchived?: boolean;
+  /**
+   * Hot-pool filter (dream review P1): true keeps only entries the usage
+   * audit has not cooled out (COALESCE(hot_eligible,1) = 1). Recall paths
+   * leave this unset so cooled entries stay reachable.
+   */
+  hotEligibleOnly?: boolean;
   /** Bump last_used_at on returned rows (recall reuse signal). */
   touchLastUsed?: boolean;
 }
@@ -229,6 +241,7 @@ interface KnowledgeEntryRow {
   created_at: number | string;
   updated_at: number | string;
   last_used_at: number | string | null;
+  hot_eligible?: number | string | null;
 }
 
 interface KnowledgeSourceRow {
@@ -285,6 +298,7 @@ export function ensureMetaIDKnowledgeSchema(db: Database): void {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       last_used_at INTEGER,
+      hot_eligible INTEGER NOT NULL DEFAULT 1,
       UNIQUE(metabot_id, topic_fingerprint)
     );
   `);
@@ -300,6 +314,17 @@ export function ensureMetaIDKnowledgeSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_metaid_knowledge_entries_metabot_status_used
       ON metaid_knowledge_entries(metabot_id, status, last_used_at DESC);
   `);
+  // Dream review P1 (2026-10-23): hot-pool membership flag. The nightly usage
+  // audit's knowledge cooling flips it to 0 (never deletes) — a cooled entry
+  // leaves the proactive <knowledge> hot pool but stays fully recallable.
+  try {
+    const knowledgeCols = (db.exec('PRAGMA table_info(metaid_knowledge_entries)')[0]?.values?.map((row) => row[1]) || []) as string[];
+    if (!knowledgeCols.includes('hot_eligible')) {
+      db.run('ALTER TABLE metaid_knowledge_entries ADD COLUMN hot_eligible INTEGER NOT NULL DEFAULT 1;');
+    }
+  } catch (error) {
+    console.warn('migrate metaid_knowledge_entries hot_eligible:', error);
+  }
 
   db.run(`
     CREATE TABLE IF NOT EXISTS metaid_knowledge_sources (
@@ -506,6 +531,7 @@ function rowToEntry(row: KnowledgeEntryRow): MetaIDKnowledgeEntry {
     createdAt: asInteger(row.created_at),
     updatedAt: asInteger(row.updated_at),
     lastUsedAt: row.last_used_at == null ? null : asInteger(row.last_used_at),
+    hotEligible: row.hot_eligible == null ? true : Number(row.hot_eligible) !== 0,
   };
 }
 
@@ -918,6 +944,9 @@ export class MetaIDKnowledgeStore {
     if (options.kind) {
       clauses.push('kind = ?');
       params.push(normalizeKind(options.kind));
+    }
+    if (options.hotEligibleOnly) {
+      clauses.push('COALESCE(hot_eligible, 1) = 1');
     }
     if (options.category) {
       clauses.push('category = ?');
@@ -1380,6 +1409,29 @@ export class MetaIDKnowledgeStore {
     return changed;
   }
 
+  /**
+   * Dream review P1: flip one ACTIVE knowledge entry's hot-pool membership.
+   * The nightly usage audit's knowledge cooling (≥5 audited hot nights in the
+   * trailing window, 0 applied) calls this with eligible=false — the entry
+   * leaves the proactive <knowledge> injection pool but stays active and fully
+   * recallable. Nothing is ever deleted. Idempotent: re-cooling a cooled entry
+   * touches no row and returns false.
+   */
+  setKnowledgeHotEligibility(id: string, input: { eligible: boolean; atMs?: number }): boolean {
+    const knowledgeId = asText(id);
+    if (!knowledgeId) return false;
+    this.db.run(
+      `UPDATE metaid_knowledge_entries
+       SET hot_eligible = ?
+       WHERE id = ? AND status = 'active'`,
+      [input.eligible ? 1 : 0, knowledgeId],
+    );
+    const changed = (this.db.getRowsModified?.() || 0) > 0;
+    if (changed) {
+      this.saveDb();
+    }
+    return changed;
+  }
   /**
    * RRSI P2 hot layer (design §6.2 P2.3): active, hot-eligible procedures —
    * the only ones injected as always-on. Recall-only rows stay reachable
