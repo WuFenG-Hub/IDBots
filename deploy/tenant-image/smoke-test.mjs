@@ -37,6 +37,16 @@ async function main() {
     'readyz payload: version + contractVersion');
   assert(b.onboarding && typeof b.onboarding === 'object', 'readyz payload: onboarding block');
 
+  // Upload roundtrip (C2): 1 KB file in, {path,size} out.
+  const up = await fetch(`${base}/gateway/v1/upload?name=smoke.bin`, {
+    method: 'POST',
+    headers: { 'x-idbots-gateway-secret': secret, 'content-type': 'application/octet-stream' },
+    body: Buffer.alloc(1024, 7),
+  }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) })).catch(() => null);
+  assert(up?.status === 200 && up?.body?.size === 1024 && typeof up?.body?.path === 'string',
+    'POST /gateway/v1/upload stores the body and returns {path,size}',
+    `got ${up?.status} ${JSON.stringify(up?.body)}`);
+
   // WebSocket: wrong secret must not upgrade.
   const badWs = await new Promise((resolve) => {
     let settled = false;

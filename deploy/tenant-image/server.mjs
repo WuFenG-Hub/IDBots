@@ -183,7 +183,7 @@ function cleanupSocket(state) {
   log('info', 'ws', 'client disconnected', { clients: sockets.size });
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const json = (code, obj, headers = {}) => {
     res.writeHead(code, { 'content-type': 'application/json', ...headers });
@@ -205,7 +205,41 @@ const server = http.createServer((req, res) => {
     return res.end();
   }
   if (url.pathname === '/gateway/v1/upload' && req.method === 'POST') {
-    return json(501, { error: { code: 'STAND_IN', message: 'upload is implemented by the WS-A image' } });
+    // C2: max 25 MB, stored under /data/workspace/uploads/{yyyy-mm-dd}/.
+    const name = (url.searchParams.get('name') || 'file').replace(/[^\w.-]+/g, '_').slice(-80);
+    const day = new Date().toISOString().slice(0, 10);
+    const dir = `${process.env.IDBOTS_WORKSPACE_PATH || '/data/workspace'}/uploads/${day}`;
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    fs.mkdirSync(dir, { recursive: true });
+    const dest = path.join(dir, `${crypto.randomUUID()}-${name}`);
+    const MAX = 25 * 1000 * 1000; // C2 "25 MB" (SI) — matches the edge's 26MB outer gate
+    let size = 0;
+    let tooBig = false;
+    const out = fs.createWriteStream(dest);
+    try {
+      for await (const chunk of req) {
+        size += chunk.length;
+        if (size > MAX) { tooBig = true; break; }
+        if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
+      }
+    } catch (err) {
+      // The edge (or the client) aborted the body mid-stream — the caller is
+      // already gone; clean up and move on, never crash the process.
+      out.destroy();
+      fs.rmSync(dest, { force: true });
+      log('warn', 'upload', 'request body aborted mid-stream', { received: size, error: String(err?.code || err) });
+      return;
+    }
+    if (tooBig) {
+      out.destroy();
+      fs.rmSync(dest, { force: true });
+      return json(413, { error: { code: 'PAYLOAD_TOO_LARGE', message: 'upload exceeds 25 MB' } });
+    }
+    out.end();
+    await new Promise((r) => out.on('finish', r));
+    if (res.writableEnded) return;
+    return json(200, { path: dest, size, mime: req.headers['content-type'] || 'application/octet-stream' });
   }
   if (url.pathname.startsWith('/app/')) {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' });
