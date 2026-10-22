@@ -1,4 +1,4 @@
-/** Small display formatters for the T1 demo page (not business logic). */
+/** Small display formatters shared by the mobile screens (not business logic). */
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
@@ -16,7 +16,18 @@ export function formatCount(value: number): string {
   return Number.isFinite(value) ? Math.round(value).toLocaleString('en-US') : '0';
 }
 
-export function formatTime(ms: number | null | undefined): string {
+export function formatDateTime(ms: number | null | undefined): string {
   if (!ms) return '—';
   return new Date(ms).toLocaleString();
+}
+
+/** Short date+time for next/last run lines; falls back to the em-dash key. */
+export function formatRunTime(ms: number | null | undefined): string | null {
+  if (!ms) return null;
+  return new Date(ms).toLocaleString();
+}
+
+export function formatDurationMs(ms: number | null | undefined): string | null {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return null;
+  return String(Math.max(0, Math.round(ms)));
 }

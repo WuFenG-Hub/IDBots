@@ -6,4 +6,4 @@
 import './installBridgeFirst';
 import { mountMobileApp } from './bootstrap';
 
-mountMobileApp();
+void mountMobileApp();

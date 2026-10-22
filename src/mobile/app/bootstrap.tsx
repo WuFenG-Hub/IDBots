@@ -1,22 +1,17 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import '@/index.css';
-import { mobileI18n } from '../i18n';
 import MobileApp from './MobileApp';
+import { initSystemThemeListener, loadSettings } from './services/settings';
 
-/** Applies the OS theme before first paint (no dark: utilities on mobile). */
-function applySystemTheme(): void {
-  if (typeof window.matchMedia !== 'function') return;
-  const apply = () => {
-    document.documentElement.classList.toggle('dark', window.matchMedia('(prefers-color-scheme: dark)').matches);
-  };
-  apply();
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', apply);
-}
-
-export function mountMobileApp(): void {
-  mobileI18n.initFromDeviceLocale();
-  applySystemTheme();
+/**
+ * Hydrates persisted language + theme from the R-store before first paint
+ * (no flash of the wrong theme), then mounts the shell. The OS theme
+ * listener keeps 'system' mode in sync afterward.
+ */
+export async function mountMobileApp(): Promise<void> {
+  await loadSettings();
+  initSystemThemeListener();
   const rootElement = document.getElementById('root');
   if (!rootElement) {
     throw new Error('Failed to find the root element');
