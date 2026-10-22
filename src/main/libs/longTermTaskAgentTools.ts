@@ -22,7 +22,9 @@ import { buildDelegationAnchorBlock } from './longTermDelegationAnchor';
  *
  * Discipline the tool descriptions encode (the creation skill owns the rest):
  *  - create stays a DRAFT until the owner explicitly confirms → activate.
- *  - acceptance is owner-only unless the task's delegate switch is on.
+ *  - acceptance is owner-only unless the task's delegate switch is on (the
+ *    switch defaults ON at task creation since 2026-10-22; the owner can turn
+ *    it off per task).
  *  - every write lands in the task's event journal (restart-proof memory).
  */
 
@@ -304,12 +306,12 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
 
   const updateTask = tool(
     'longterm_task_update',
-    'Update a long-term task\'s title/goal, toggle the acceptance-delegate switch (only when the owner explicitly granted it in chat), or pause/resume/cancel the task. Every change is journalled as a replan.',
+    'Update a long-term task\'s title/goal, toggle the acceptance-delegate switch (it defaults to on; change it only when the owner explicitly asks in chat), or pause/resume/cancel the task. Every change is journalled as a replan.',
     {
       taskId: z.string().min(1),
       title: z.string().optional(),
       goal: z.string().optional(),
-      acceptanceDelegate: z.boolean().optional().describe('Owner granted TwinBot acceptance authority for THIS task.'),
+      acceptanceDelegate: z.boolean().optional().describe('TwinBot acceptance authority for THIS task (defaults to on; set false only at the owner\'s explicit request).'),
       action: z.enum(['pause', 'resume', 'cancel']).optional(),
       note: z.string().optional().describe('Reason for pause/cancel.'),
     },
@@ -345,7 +347,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
 
   const completeTask = tool(
     'longterm_task_complete',
-    `Declare the TASK'S GOAL met and close the whole task — the one-call exit when the outcome the task existed for is already achieved (typically the owner just said so in chat; their goal-level verdict outranks the sub-project state machine) or the remaining sub-projects became moot. Every remaining open sub-project is marked SKIPPED (never fake-accepted), the task lands in done, and the heartbeat stops driving it. Requires: the task's acceptance-delegate switch on (owner granted it), at least one goal-level evidence URI, and a summary that passes the two-level check — re-read the task goal, show WHICH evidence proves it, and say why each remaining open sub-project is moot. Do NOT use this to abandon a task that is simply stale (use longterm_task_update action=cancel) or to rubber-stamp sub-projects whose work you never verified.`,
+    `Declare the TASK'S GOAL met and close the whole task — the one-call exit when the outcome the task existed for is already achieved (typically the owner just said so in chat; their goal-level verdict outranks the sub-project state machine) or the remaining sub-projects became moot. Every remaining open sub-project is marked SKIPPED (never fake-accepted), the task lands in done, and the heartbeat stops driving it. Requires: the task's acceptance-delegate switch on (it defaults to on; the owner can switch it off per task), at least one goal-level evidence URI, and a summary that passes the two-level check — re-read the task goal, show WHICH evidence proves it, and say why each remaining open sub-project is moot. Do NOT use this to abandon a task that is simply stale (use longterm_task_update action=cancel) or to rubber-stamp sub-projects whose work you never verified.`,
     {
       taskId: z.string().min(1),
       summary: z.string().min(1).describe('Goal-level closure verdict in the owner\'s language: how the goal is met (quote it), which evidence proves it, and why the remaining open sub-projects are moot.'),
@@ -505,7 +507,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
 
   const acceptSubtask = tool(
     'longterm_subtask_accept',
-    'Accept a sub-project as the Twin — ONLY when the task\'s acceptance-delegate switch is on (the owner granted it explicitly) AND you verified every acceptance criterion against the evidence. Otherwise ask the owner to accept. When the last open sub-project is accepted the whole task completes.',
+    'Accept a sub-project as the Twin — ONLY when the task\'s acceptance-delegate switch is on (it defaults to on; the owner can switch it off per task) AND you verified every acceptance criterion against the evidence. Otherwise ask the owner to accept. When the last open sub-project is accepted the whole task completes.',
     { subtaskId: z.string().min(1), note: z.string().optional() },
     async (args: { subtaskId?: string; note?: string }) => {
       try {

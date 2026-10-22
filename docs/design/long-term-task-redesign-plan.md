@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS long_term_tasks (
   -- lifecycle flags stored; the kanban column is DERIVED (see below)
   stage TEXT NOT NULL DEFAULT 'defining'
     CHECK (stage IN ('defining','active','paused','done','cancelled')),
-  acceptance_delegate INTEGER NOT NULL DEFAULT 0,  -- owner may delegate sign-off to TwinBot
+  acceptance_delegate INTEGER NOT NULL DEFAULT 1,  -- TwinBot sign-off delegated by default (2026-10-22); owner may revoke per task
   current_subtask_id TEXT,
   definition_session_id TEXT,
   created_at TEXT NOT NULL,

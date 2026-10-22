@@ -40,7 +40,9 @@ import { LONG_TERM_COLUMN_ORDER } from '../renderer/types/longTermTask';
  *  - Every mutation writes a `long_term_events` row — the journal is the
  *    TwinBot's restart-proof memory of "where this task is and why".
  *  - Acceptance authority: `acceptSubtask` with actor 'twin' is refused unless
- *    the task carries acceptance_delegate = 1 (owner granted it explicitly).
+ *    the task carries acceptance_delegate = 1. The delegate switch defaults to
+ *    ON at creation (owner's call, 2026-10-22) and can be switched off per
+ *    task from the detail panel; existing tasks keep their stored value.
  */
 
 type Row = Record<string, unknown>;
@@ -306,7 +308,7 @@ export class LongTermTaskStore {
         goal TEXT NOT NULL,
         stage TEXT NOT NULL DEFAULT 'defining'
           CHECK(stage IN ('defining','active','paused','done','cancelled')),
-        acceptance_delegate INTEGER NOT NULL DEFAULT 0,
+        acceptance_delegate INTEGER NOT NULL DEFAULT 1,
         current_subtask_id TEXT,
         definition_session_id TEXT,
         created_at TEXT NOT NULL,
@@ -574,7 +576,7 @@ export class LongTermTaskStore {
     }
     this.db.run(
       `INSERT INTO long_term_tasks (id, title, goal, stage, acceptance_delegate, definition_session_id, created_at, updated_at)
-       VALUES (?, ?, ?, 'defining', 0, ?, ?, ?)`,
+       VALUES (?, ?, ?, 'defining', 1, ?, ?, ?)`,
       [taskId, title, goal, input.definitionSessionId ?? null, now, now],
     );
     drafts.forEach((draft, index) => {
