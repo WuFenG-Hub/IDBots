@@ -7,9 +7,12 @@
  * outside any text bubble). The document runs in a sandboxed srcdoc iframe
  * whose height tracks its content through a ResizeObserver + postMessage
  * reporter injected next to the <base href> the MarkdownViewerPanel already
- * uses for relative assets. A slim header carries the open-in-panel /
- * view-source / download-as-image actions, and the whole block has a
- * right-click menu with the file-level conveniences (copy path, reveal,
+ * uses for relative assets. A toolbar carrying the title plus the
+ * open-in-panel / view-source / download-as-image actions floats over the
+ * report's top edge: it stays hidden (and click-transparent) until the
+ * pointer hovers the block or its right-click menu is open, so the report
+ * sits flush against the surrounding chat text with no permanent chrome.
+ * The right-click menu adds the file-level conveniences (copy path, reveal,
  * open with default app).
  *
  * If the file cannot be read (missing, not a file, over the size cap, or
@@ -384,11 +387,17 @@ const InlineHtmlReportBlock: React.FC<InlineHtmlReportBlockProps> = ({
 
   return (
     <div
-      className="my-1 w-full overflow-hidden rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-subtle"
+      className="group relative my-1 w-full overflow-hidden rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-subtle"
       onContextMenu={handleContextMenu}
       data-inline-html-report={filePath}
     >
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b px-3 dark:border-claude-darkBorder border-claude-border">
+      <div
+        className={`absolute inset-x-0 top-0 z-10 flex h-9 items-center gap-2 border-b px-3 backdrop-blur-sm transition-opacity duration-150 dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface/90 bg-claude-surface/90 ${
+          menuPosition
+            ? 'pointer-events-auto opacity-100'
+            : 'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100'
+        }`}
+      >
         <DocumentChartBarIcon className="h-4 w-4 shrink-0 text-claude-accent" />
         <span
           className="min-w-0 flex-1 truncate text-xs font-medium dark:text-claude-darkText text-claude-text"
