@@ -2362,6 +2362,30 @@ export class SqliteStore {
         this.save();
       }
 
+      if (!columns.includes('follow_up_state')) {
+        // Pending-human-decision marker for the sidebar's "Follow-Up Tasks"
+        // (待跟进任务) section: NULL = not waiting on the owner, 'pending' =
+        // the session currently needs a human decision or reply. Additive and
+        // unbackfilled on purpose — classification happens lazily on new turns.
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN follow_up_state TEXT;');
+        this.save();
+      }
+
+      if (!columns.includes('follow_up_source')) {
+        // Which lane set the pending marker: 'cerebellum' (turn-end
+        // classifier), 'ask_user' (a pending AskUserQuestion), or 'manual'
+        // (the owner moved the row). NULL = no pending marker.
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN follow_up_source TEXT;');
+        this.save();
+      }
+
+      if (!columns.includes('follow_up_at')) {
+        // ISO timestamp of the last follow-up transition, for sorting/badge
+        // staleness in the renderer.
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN follow_up_at TEXT;');
+        this.save();
+      }
+
       if (!columns.includes('metabot_id')) {
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN metabot_id INTEGER;');
         this.save();

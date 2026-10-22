@@ -2462,6 +2462,24 @@ export interface CoworkRunnerOptions {
     currentUserText: string;
   }) => Promise<Record<'off' | 'low' | 'high' | 'max', number> | null>;
   /**
+   * Optional cerebellum (小脑) turn-end classifier behind the "Follow-Up
+   * Tasks" (待跟进任务) bucket: one Noul over the session title + the turn's
+   * final assistant message decides whether a completed turn on an
+   * auto-origin session leaves it waiting on the owner. true = land the
+   * session in Follow-Up (pending / 'cerebellum'); false = clear a previous
+   * cerebellum verdict (settle back into the Autonomous fold); null = leave
+   * the state untouched (fail-open). The classifier never clears 'manual' or
+   * 'ask_user' markers. The callback must never throw; main.ts resolves the
+   * cerebellum call context lazily inside the callback so Settings edits
+   * apply on the next turn without a restart.
+   */
+  cerebellumSessionFollowUpGate?: (input: {
+    sessionTitle: string;
+    lastAssistantText: string;
+    /** Set for scheduled-task runs (the firing task's name). */
+    taskName?: string;
+  }) => Promise<boolean | null>;
+  /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
    * turn ended without terminal events) and settled so the query can close.
@@ -2628,6 +2646,7 @@ export class CoworkRunner extends EventEmitter {
   private cerebellumIntuitionAvailable?: CoworkRunnerOptions['cerebellumIntuitionAvailable'];
   private cerebellumIntuition?: CoworkRunnerOptions['cerebellumIntuition'];
   private cerebellumEffortSelector?: CoworkRunnerOptions['cerebellumEffortSelector'];
+  private cerebellumSessionFollowUpGate?: CoworkRunnerOptions['cerebellumSessionFollowUpGate'];
   /**
    * Per-session sticky state for the auto effort rung: the last escalated
    * verdict with its timestamp. Follow-ups within the sticky window keep the
@@ -2812,6 +2831,7 @@ export class CoworkRunner extends EventEmitter {
     this.cerebellumIntuitionAvailable = options?.cerebellumIntuitionAvailable;
     this.cerebellumIntuition = options?.cerebellumIntuition;
     this.cerebellumEffortSelector = options?.cerebellumEffortSelector;
+    this.cerebellumSessionFollowUpGate = options?.cerebellumSessionFollowUpGate;
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
@@ -3724,6 +3744,103 @@ export class CoworkRunner extends EventEmitter {
       enqueuedAt: Date.now(),
     });
     void this.drainTurnMemoryQueue();
+  }
+
+  /**
+   * Turn-start half of the Follow-Up Tasks (待跟进任务) lifecycle: a human
+   * reply picks the thread back up, so a cerebellum-sourced pending marker is
+   * cleared (the session is re-judged at this turn's end and may re-enter).
+   * 'manual' and 'ask_user' markers are untouched here. Never throws.
+   */
+  private clearCerebellumFollowUpOnUserTurn(sessionId: string): void {
+    try {
+      const session = this.store.getSessionWithoutMessages(sessionId);
+      if (session?.followUpSource !== 'cerebellum') return;
+      this.store.clearSessionFollowUp(sessionId, { onlySources: ['cerebellum'] });
+    } catch (error) {
+      coworkLog('WARN', 'followUp:turnStart', 'failed to clear cerebellum follow-up on user turn', {
+        sessionId,
+        error: String(error),
+      });
+    }
+  }
+
+  /**
+   * Turn-end half of the Follow-Up Tasks lifecycle, fire-and-forget by
+   * contract: after a turn completes on an auto-origin session, the injected
+   * cerebellum classifier re-judges whether the session now waits on the
+   * owner. true → pending / 'cerebellum'; false → clear a previous
+   * cerebellum verdict only; null → no change (fail-open). Runs detached so
+   * it never blocks turn completion; every failure is swallowed.
+   */
+  private classifySessionFollowUpAfterTurn(sessionId: string): void {
+    const gate = this.cerebellumSessionFollowUpGate;
+    if (!gate) return;
+    void (async () => {
+      try {
+        const session = this.store.getSessionWithoutMessages(sessionId);
+        if (!session?.autoOrigin) return;
+        const page = this.store.getSessionMessagesPage(sessionId, { limit: 20 });
+        const lastAssistant = page.messages.find(
+          (message) =>
+            message.type === 'assistant'
+            && Boolean(message.content?.trim())
+            && message.metadata?.isThinking !== true,
+        );
+        if (!lastAssistant?.content) return;
+        const lastUser = page.messages.find((message) => message.type === 'user');
+        const taskName =
+          lastUser?.metadata?.origin === 'schedule'
+            ? (typeof lastUser.metadata.originLabel === 'string' ? lastUser.metadata.originLabel : undefined)
+            : undefined;
+        const verdict = await gate({
+          sessionTitle: session.title,
+          lastAssistantText: lastAssistant.content,
+          ...(taskName ? { taskName } : {}),
+        });
+        if (verdict === true) {
+          this.store.setSessionFollowUp(sessionId, 'cerebellum');
+        } else if (verdict === false) {
+          this.store.clearSessionFollowUp(sessionId, { onlySources: ['cerebellum'] });
+        }
+      } catch (error) {
+        coworkLog('WARN', 'followUp:turnEnd', 'follow-up classification failed', {
+          sessionId,
+          error: String(error),
+        });
+      }
+    })();
+  }
+
+  /**
+   * AskUserQuestion persistence for Follow-Up Tasks: a pending structured ask
+   * on an auto-origin session parks the row in Follow-Up (source 'ask_user')
+   * so the pending survives restarts and shows on the sidebar row. Never
+   * throws.
+   */
+  private setAskUserFollowUpForAutoSession(sessionId: string): void {
+    try {
+      const session = this.store.getSessionWithoutMessages(sessionId);
+      if (!session?.autoOrigin) return;
+      this.store.setSessionFollowUp(sessionId, 'ask_user');
+    } catch (error) {
+      coworkLog('WARN', 'followUp:askUser', 'failed to persist ask_user follow-up', {
+        sessionId,
+        error: String(error),
+      });
+    }
+  }
+
+  /** Clears an ask_user-sourced follow-up marker; other sources are untouched. */
+  private clearAskUserFollowUp(sessionId: string): void {
+    try {
+      this.store.clearSessionFollowUp(sessionId, { onlySources: ['ask_user'] });
+    } catch (error) {
+      coworkLog('WARN', 'followUp:askUser', 'failed to clear ask_user follow-up', {
+        sessionId,
+        error: String(error),
+      });
+    }
   }
 
   private getSandboxUnavailableFallbackNotice(errorMessage: string): string {
@@ -7754,6 +7871,10 @@ export class CoworkRunner extends EventEmitter {
         metadata: options.skillIds?.length ? { skillIds: options.skillIds } : undefined,
       });
       this.emit('message', sessionId, userMessage);
+      // A human-composed turn: pick any cerebellum follow-up pending back up
+      // (it re-judges at this turn's end). Machine flows pass
+      // skipInitialUserMessage and never reach this block.
+      this.clearCerebellumFollowUpOnUserTurn(sessionId);
     }
 
     // Create abort controller
@@ -7936,6 +8057,11 @@ export class CoworkRunner extends EventEmitter {
         metadata: options.skillIds?.length ? { skillIds: options.skillIds } : undefined,
       });
       this.emit('message', sessionId, userMessage);
+      // A human-composed turn: pick any cerebellum follow-up pending back up
+      // (it re-judges at this turn's end). Machine flows (scheduler, IM relay,
+      // steer submissions) persist their own origin-stamped message and pass
+      // skipUserMessage, so they never clear the marker here.
+      this.clearCerebellumFollowUpOnUserTurn(sessionId);
     }
 
     // Continue with the existing session
@@ -10554,6 +10680,10 @@ export class CoworkRunner extends EventEmitter {
                 // broadcast so the renderer queue never keeps a stale entry
                 // for an ask answered outside its own respond call.
                 this.emit('permissionResolved', sessionId, ask.id);
+                // The ask is resolved in every branch below (declined or
+                // answered): drop the session-level follow-up marker the
+                // pending ask created.
+                this.clearAskUserFollowUp(sessionId);
                 if (result.behavior !== 'allow') {
                   void hub.respondAsk(ask.id, (ask.questions ?? []).map((q) => ({
                     id: q.id,
@@ -10568,6 +10698,12 @@ export class CoworkRunner extends EventEmitter {
                   .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask respond failed', { error: String(error) }));
               },
             });
+            // Follow-Up Tasks: a pending structured ask parks an auto-origin
+            // session in the bucket (source 'ask_user') so it survives
+            // restarts and shows on the sidebar row. The bypass self-answer
+            // path above returns before this point — it never waits on a
+            // human, so it never marks the session.
+            this.setAskUserFollowUpForAutoSession(sessionId);
             activeSession.pendingPermission = request;
             this.emit('permissionRequest', sessionId, request);
             coworkLog('INFO', 'runDshSessionLocal', 'ask_user_question awaiting user answer', { sessionId, askId: ask.id, questionCount: modalQuestions.length });
@@ -10576,6 +10712,9 @@ export class CoworkRunner extends EventEmitter {
             const pending = this.pendingPermissions.get(askId);
             if (pending) {
               this.pendingPermissions.delete(askId);
+              // Kernel-deadline / turn-teardown cancellation: the ask is no
+              // longer waiting on the owner, so drop the ask_user marker.
+              this.clearAskUserFollowUp(sessionId);
               pending.resolve({ behavior: 'deny', message: 'Question cancelled' });
             }
             if (activeSession.pendingPermission?.requestId === askId) {
@@ -11066,6 +11205,7 @@ export class CoworkRunner extends EventEmitter {
       // and leave the session `idle` so the user can re-send to continue.
       // Still emit `complete` so automation waiters resolve (the orchestrator
       // bridge treats an empty reply as a non-answer).
+      let turnCompletedSuccessfully = false;
       if (outcome.emptyTerminal) {
         this.reportEmptyTerminalTurn(sessionId);
         finish('idle');
@@ -11079,6 +11219,7 @@ export class CoworkRunner extends EventEmitter {
         finish('idle');
       } else {
         finish('completed');
+        turnCompletedSuccessfully = true;
       }
       // Any terminal outcome here (completed / empty terminal / truncated)
       // proves the provider path is live again — clear the consecutive-stall
@@ -11100,6 +11241,12 @@ export class CoworkRunner extends EventEmitter {
       this.clearPendingPermissions(sessionId);
       this.settleDshSteerSubmissions(activeSession, 'settled');
       this.removeActiveSession(sessionId, activeSession);
+      if (turnCompletedSuccessfully) {
+        // Follow-Up Tasks re-judgement: fire-and-forget after ALL turn
+        // bookkeeping — it must never block completion or throw. Absent gate
+        // (tests, minimal embedders) or a null verdict leaves the state as-is.
+        this.classifySessionFollowUpAfterTurn(sessionId);
+      }
     } catch (error) {
       if (isDshShutdownError(error)) {
         // App/host shutdown closed the runtime mid-turn. This is not a

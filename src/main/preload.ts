@@ -456,6 +456,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:pin', options),
     setSessionFoldOverride: (options: { sessionId: string; override: 'in' | 'out' | null }) =>
       ipcRenderer.invoke('cowork:session:foldOverride', options),
+    setSessionFollowUp: (options: { sessionId: string; followUp: boolean }) =>
+      ipcRenderer.invoke('cowork:session:setFollowUp', options),
     setSessionModel: (options: {
       sessionId: string;
       model: string | null;

@@ -35,6 +35,7 @@ import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
 import { startEventLoopLagMonitor } from './libs/eventLoopLagMonitor';
 import { rankConversationsWithCerebellum } from './cerebellum/conversationSearchRank';
 import { decideGroupReplyWithCerebellum } from './cerebellum/groupReplyGate';
+import { classifySessionFollowUpWithCerebellum } from './cerebellum/sessionFollowUpGate';
 import { rankWorkersWithCerebellum, CEREBELLUM_WORKER_RANK_TOP_K } from './cerebellum/workerRank';
 import { gateMemoryWriteWithCerebellum } from './cerebellum/memoryWriteGate';
 import { selectEffortWithCerebellum } from './cerebellum/effortSelector';
@@ -3330,6 +3331,38 @@ const createCerebellumGroupReplyGate = () =>
   };
 
 /**
+ * Cerebellum (小脑) session follow-up gate (Follow-Up Tasks / 待跟进任务):
+ * one Noul on every completed turn of an auto-origin session. true = the turn
+ * ends waiting on the owner (session lands in Follow-Up), false = a previous
+ * cerebellum verdict settles back into the Autonomous fold, null = no change.
+ * Logs verdict + latency only — never message content.
+ */
+const createCerebellumSessionFollowUpGate = () =>
+  async ({ sessionTitle, lastAssistantText, taskName }: {
+    sessionTitle: string;
+    lastAssistantText: string;
+    taskName?: string;
+  }): Promise<boolean | null> => {
+    const context = await resolveCerebellumCallContext();
+    if (!context) {
+      return null;
+    }
+    const startedAt = Date.now();
+    const verdict = await classifySessionFollowUpWithCerebellum({
+      config: context.config,
+      fetchImpl: context.fetchImpl,
+      sessionTitle,
+      lastAssistantText,
+      taskName,
+    });
+    coworkLog('INFO', 'sessionFollowUp:cerebellumClassify', 'session follow-up gate evaluated', {
+      verdict: verdict === null ? 'no-verdict' : verdict ? 'follow-up' : 'no-follow-up',
+      latencyMs: Date.now() - startedAt,
+    });
+    return verdict;
+  };
+
+/**
  * Cerebellum (小脑) worker fit ranking (roadmap #13). One Choice question
  * over the planning-turn roster. null = no hint. Never logs task text or
  * worker descriptions.
@@ -6393,6 +6426,11 @@ const getCoworkRunner = () => {
       // "auto" rung on unpicked sessions resolves from one JEV choice verdict
       // per turn (see createCerebellumEffortSelector).
       cerebellumEffortSelector: createCerebellumEffortSelector(),
+      // Cerebellum (小脑) session follow-up gate (Follow-Up Tasks / 待跟进任务):
+      // re-judges every completed turn of an auto-origin session and moves the
+      // session between the Autonomous fold and the Follow-Up bucket
+      // (see createCerebellumSessionFollowUpGate).
+      cerebellumSessionFollowUpGate: createCerebellumSessionFollowUpGate(),
       // Per-bot opt-in (default off): mounted MCP tool schemas ride every
       // LLM request, so only sessions whose bot explicitly enables MCP pay
       // the cost. See services/coworkMcpToolsPreference.ts.
@@ -12499,6 +12537,39 @@ if (!gotTheLock) {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to update session fold placement',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:setFollowUp', async (_event, options: { sessionId: string; followUp: boolean }) => {
+    return withSqliteRecovery('cowork:session:setFollowUp', async () => {
+      try {
+        const sessionId = typeof options?.sessionId === 'string' ? options.sessionId.trim() : '';
+        if (!sessionId) {
+          return { success: false, error: 'sessionId is required' };
+        }
+        // Strict value gate, same as foldOverride: followUp drives a
+        // three-valued column family (state/source/at), so a non-boolean
+        // would silently corrupt the placement policy — refuse instead.
+        if (typeof options?.followUp !== 'boolean') {
+          return { success: false, error: 'followUp must be a boolean' };
+        }
+        const coworkStoreInstance = getCoworkStore();
+        if (options.followUp) {
+          coworkStoreInstance.setSessionFollowUp(sessionId, 'manual');
+        } else {
+          // Manual move-out (移出待跟进) clears ANY pending source — the row
+          // falls back to the auto-origin fold — unlike the classifier's
+          // lane-guarded clear, which never touches 'manual'.
+          coworkStoreInstance.clearSessionFollowUp(sessionId);
+        }
+        return { success: true };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to update session follow-up state',
         };
       }
     });

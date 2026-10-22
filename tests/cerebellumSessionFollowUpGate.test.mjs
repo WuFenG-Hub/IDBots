@@ -1,0 +1,241 @@
+// src/main/cerebellum/sessionFollowUpGate.ts — the turn-end classifier behind
+// the "Follow-Up Tasks" (待跟进任务) sidebar bucket.
+//
+// One Noul (needs_human_followup) reads the session title plus the turn's
+// final assistant message and decides whether the completed turn leaves an
+// auto-origin session waiting on the owner. true → the session lands in
+// Follow-Up (pending / 'cerebellum'); false → a previous cerebellum verdict
+// settles back into the Autonomous fold; null (disabled/timeout/quota/blank/
+// malformed) → no change (fail-open).
+//
+// Contract under test:
+//   a. request shape — one noul question, English instructions, hard caps on
+//      every caller-authored state field, task_name only for scheduled runs;
+//   b. answer parsing — clamps into 0..1, unusable shapes → null;
+//   c. verdict semantics — noul >= 0.5 → true, below → false;
+//   d. every failure mode returns null without throwing (fail-open);
+//   e. a hanging endpoint is aborted at the deadline.
+//
+// The pure module is loaded straight from src/ (Node type stripping); there is
+// no compiled-DI seam in this module (the caller injects fetch), so no
+// dist-electron import is needed here.
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD,
+  CEREBELLUM_SESSION_FOLLOW_UP_TIMEOUT_MS,
+  CEREBELLUM_SESSION_FOLLOW_UP_QUESTION_ID,
+  CEREBELLUM_SESSION_FOLLOW_UP_TITLE_MAX_CHARS,
+  CEREBELLUM_SESSION_FOLLOW_UP_MESSAGE_MAX_CHARS,
+  CEREBELLUM_SESSION_FOLLOW_UP_TASK_NAME_MAX_CHARS,
+  buildSessionFollowUpRequest,
+  parseSessionFollowUpAnswer,
+  sessionFollowUpFromNoul,
+  classifySessionFollowUpWithCerebellum,
+} from '../src/main/cerebellum/sessionFollowUpGate.ts';
+
+const TEST_CONFIG = {
+  provider: 'typesafe-jev',
+  apiKey: 'sk-jev-test',
+  baseUrl: 'https://jev.example.com',
+  model: 'jev-latest',
+};
+
+function classifyPayload(noul) {
+  return {
+    model: 'jev-latest',
+    answers: { [CEREBELLUM_SESSION_FOLLOW_UP_QUESTION_ID]: { noul } },
+    usage: { input_tokens: 50 },
+  };
+}
+
+function okFetch(payload, captured = []) {
+  return async (url, init) => {
+    captured.push({ url, init, body: JSON.parse(init.body) });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => payload,
+    };
+  };
+}
+
+const GATE_INPUT = {
+  config: TEST_CONFIG,
+  sessionTitle: '[定时] 每日站点巡检',
+  lastAssistantText: '巡检完成：发现 2 个异常，请确认是否立即处理？',
+  taskName: '每日站点巡检',
+};
+
+// ---------------------------------------------------------------------------
+// Request building
+// ---------------------------------------------------------------------------
+
+test('buildSessionFollowUpRequest: state carries title + final reply, one noul question, task_name for scheduled runs', () => {
+  const request = buildSessionFollowUpRequest({
+    sessionTitle: GATE_INPUT.sessionTitle,
+    lastAssistantText: GATE_INPUT.lastAssistantText,
+    taskName: GATE_INPUT.taskName,
+    model: 'jev-latest',
+  });
+  assert.equal(request.model, 'jev-latest');
+  assert.equal(request.state.session_title, GATE_INPUT.sessionTitle);
+  assert.equal(request.state.last_assistant_message, GATE_INPUT.lastAssistantText);
+  assert.equal(request.state.task_name, GATE_INPUT.taskName);
+  assert.deepEqual(Object.keys(request.questions), [CEREBELLUM_SESSION_FOLLOW_UP_QUESTION_ID]);
+  const question = request.questions[CEREBELLUM_SESSION_FOLLOW_UP_QUESTION_ID];
+  assert.equal(question.type, 'noul');
+  assert.match(question.instructions, /decide, approve, choose, or reply/);
+  assert.match(question.instructions, /ANY language/);
+  assert.match(question.criteria.true, /question to the user/);
+  assert.match(question.criteria.true, /owner's decision/);
+  assert.match(question.criteria.false, /final report or bot-to-bot handoff/);
+  assert.match(question.criteria.false, /no human action is needed/);
+});
+
+test('buildSessionFollowUpRequest: omits task_name for non-scheduled turns and blank names', () => {
+  const withoutTask = buildSessionFollowUpRequest({
+    sessionTitle: 'Report',
+    lastAssistantText: 'Done.',
+    model: 'jev-latest',
+  });
+  assert.equal('task_name' in withoutTask.state, false);
+
+  const blankTask = buildSessionFollowUpRequest({
+    sessionTitle: 'Report',
+    lastAssistantText: 'Done.',
+    taskName: '   ',
+    model: 'jev-latest',
+  });
+  assert.equal('task_name' in blankTask.state, false);
+});
+
+test('buildSessionFollowUpRequest: caller-authored fields are whitespace-collapsed and hard-capped', () => {
+  const request = buildSessionFollowUpRequest({
+    sessionTitle: `  [定时]\n${'标'.repeat(500)}  `,
+    lastAssistantText: `${'文'.repeat(3000)}\n\n多行`,
+    taskName: `  ${'任务'.repeat(200)} `,
+    model: 'jev-latest',
+  });
+  assert.equal(request.state.session_title.length, CEREBELLUM_SESSION_FOLLOW_UP_TITLE_MAX_CHARS);
+  assert.equal(request.state.session_title.includes('\n'), false, 'whitespace collapsed');
+  assert.equal(
+    request.state.last_assistant_message.length,
+    CEREBELLUM_SESSION_FOLLOW_UP_MESSAGE_MAX_CHARS,
+  );
+  assert.equal(
+    request.state.task_name.length,
+    CEREBELLUM_SESSION_FOLLOW_UP_TASK_NAME_MAX_CHARS,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Answer parsing
+// ---------------------------------------------------------------------------
+
+test('parseSessionFollowUpAnswer: happy path, clamping, and unusable shapes', () => {
+  assert.equal(parseSessionFollowUpAnswer(classifyPayload(0.8)), 0.8);
+  assert.equal(parseSessionFollowUpAnswer(classifyPayload(1.7)), 1);
+  assert.equal(parseSessionFollowUpAnswer(classifyPayload(-0.2)), 0);
+  assert.equal(parseSessionFollowUpAnswer({ answers: {} }), null);
+  assert.equal(parseSessionFollowUpAnswer({ answers: { other: { noul: 0.9 } } }), null);
+  assert.equal(parseSessionFollowUpAnswer({ answers: { needs_human_followup: { noul: 'high' } } }), null);
+  assert.equal(parseSessionFollowUpAnswer({ answers: { needs_human_followup: {} } }), null);
+  assert.equal(parseSessionFollowUpAnswer({ nope: 1 }), null);
+  assert.equal(parseSessionFollowUpAnswer(null), null);
+  assert.equal(parseSessionFollowUpAnswer('junk'), null);
+});
+
+test('sessionFollowUpFromNoul: threshold is inclusive at 0.5', () => {
+  assert.equal(sessionFollowUpFromNoul(0.5), true);
+  assert.equal(sessionFollowUpFromNoul(0.49), false);
+  assert.equal(sessionFollowUpFromNoul(0), false);
+  assert.equal(sessionFollowUpFromNoul(1), true);
+  assert.equal(CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD, 0.5);
+});
+
+// ---------------------------------------------------------------------------
+// classifySessionFollowUpWithCerebellum — verdict semantics and fail-open
+// ---------------------------------------------------------------------------
+
+test('classify: noul at/above threshold → true, below → false', async () => {
+  assert.equal(
+    await classifySessionFollowUpWithCerebellum({ ...GATE_INPUT, fetchImpl: okFetch(classifyPayload(0.9)) }),
+    true,
+  );
+  assert.equal(
+    await classifySessionFollowUpWithCerebellum({
+      ...GATE_INPUT,
+      fetchImpl: okFetch(classifyPayload(CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD)),
+    }),
+    true,
+    'threshold is inclusive (P >= 0.5 → follow-up)',
+  );
+  assert.equal(
+    await classifySessionFollowUpWithCerebellum({ ...GATE_INPUT, fetchImpl: okFetch(classifyPayload(0.49)) }),
+    false,
+  );
+});
+
+test('classify: request hits /v1/systemone with bearer auth and the session state', async () => {
+  const captured = [];
+  await classifySessionFollowUpWithCerebellum({
+    ...GATE_INPUT,
+    fetchImpl: okFetch(classifyPayload(0.9), captured),
+  });
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].url, 'https://jev.example.com/v1/systemone');
+  assert.equal(captured[0].init.headers.Authorization, 'Bearer sk-jev-test');
+  assert.equal(captured[0].body.model, 'jev-latest');
+  assert.equal(captured[0].body.state.session_title, GATE_INPUT.sessionTitle);
+  assert.equal(captured[0].body.state.last_assistant_message, GATE_INPUT.lastAssistantText);
+  assert.equal(captured[0].body.state.task_name, GATE_INPUT.taskName);
+  assert.deepEqual(Object.keys(captured[0].body.questions), [CEREBELLUM_SESSION_FOLLOW_UP_QUESTION_ID]);
+});
+
+test('classify: every failure mode returns null (fail-open) without throwing', async () => {
+  const http500 = async () => ({ ok: false, status: 500, json: async () => ({}) });
+  assert.equal(await classifySessionFollowUpWithCerebellum({ ...GATE_INPUT, fetchImpl: http500 }), null);
+
+  const throwing = async () => {
+    throw new Error('network down');
+  };
+  assert.equal(await classifySessionFollowUpWithCerebellum({ ...GATE_INPUT, fetchImpl: throwing }), null);
+
+  const malformedJson = async () => ({ ok: true, status: 200, json: async () => 'not-json' });
+  assert.equal(await classifySessionFollowUpWithCerebellum({ ...GATE_INPUT, fetchImpl: malformedJson }), null);
+});
+
+test('classify: blank assistant text never leaves the machine', async () => {
+  let calls = 0;
+  const counting = async () => {
+    calls += 1;
+    return { ok: true, status: 200, json: async () => classifyPayload(0.9) };
+  };
+  assert.equal(
+    await classifySessionFollowUpWithCerebellum({
+      ...GATE_INPUT,
+      lastAssistantText: '   ',
+      fetchImpl: counting,
+    }),
+    null,
+  );
+  assert.equal(calls, 0);
+});
+
+test('classify: a hanging endpoint is aborted at the deadline', async () => {
+  const hanging = (url, init) =>
+    new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+  const startedAt = Date.now();
+  assert.equal(
+    await classifySessionFollowUpWithCerebellum({ ...GATE_INPUT, fetchImpl: hanging, timeoutMs: 25 }),
+    null,
+  );
+  const elapsed = Date.now() - startedAt;
+  assert.ok(elapsed < 1000, `abort deadline honored (took ${elapsed}ms)`);
+  assert.equal(CEREBELLUM_SESSION_FOLLOW_UP_TIMEOUT_MS, 1500, 'default deadline stays at 1.5s');
+});

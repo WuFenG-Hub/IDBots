@@ -602,6 +602,15 @@ export type CoworkSessionAutoOrigin = 'longterm' | 'orchestration' | 'schedule';
  * (shouldFoldIntoAutonomousTasks) decides.
  */
 export type CoworkSessionFoldOverride = 'in' | 'out';
+/**
+ * Which lane put a session into the "Follow-Up Tasks" (待跟进任务) bucket,
+ * mirroring the `follow_up_source` column. 'cerebellum' = the turn-end
+ * classifier judged the latest turn to be waiting on the owner; 'ask_user' =
+ * an AskUserQuestion is pending on the session; 'manual' = the owner moved
+ * the row by hand (manual pins are sticky — the classifier never clears
+ * them). NULL = the session is not pending human follow-up.
+ */
+export type CoworkSessionFollowUpSource = 'cerebellum' | 'ask_user' | 'manual';
 export type CoworkPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 const SERVICE_ORDER_RATING_SESSION_HOLD_MS = 24 * 60 * 60 * 1000;
@@ -787,6 +796,18 @@ export interface CoworkSession {
    * auto-origin policy. The renderer's fold membership reads this first.
    */
   foldOverride?: CoworkSessionFoldOverride | null;
+  /**
+   * Follow-up state for the sidebar's "Follow-Up Tasks" (待跟进任务) section:
+   * 'pending' = the session currently needs a human decision or reply,
+   * null/undefined = not waiting on the owner. Set and cleared by the
+   * cerebellum turn-end classifier, the AskUserQuestion bridge, and manual
+   * owner moves.
+   */
+  followUpState?: 'pending' | null;
+  /** Which lane set the follow-up marker (see CoworkSessionFollowUpSource); null = none. */
+  followUpSource?: CoworkSessionFollowUpSource | null;
+  /** ISO timestamp of the last follow-up transition; null = never transitioned. */
+  followUpAt?: string | null;
   /** Local MetaBot's display name (populated from metabots table) */
   metabotName?: string | null;
   /** Local MetaBot's avatar data URL (populated from metabots table) */
@@ -870,6 +891,12 @@ export interface CoworkSessionSummary {
   autoOrigin?: CoworkSessionAutoOrigin | null;
   /** Manual fold placement (see CoworkSession.foldOverride); null = follow the policy. */
   foldOverride?: CoworkSessionFoldOverride | null;
+  /** Follow-up state (see CoworkSession.followUpState); 'pending' = needs a human decision. */
+  followUpState?: 'pending' | null;
+  /** Which lane set the follow-up marker (see CoworkSessionFollowUpSource); null = none. */
+  followUpSource?: CoworkSessionFollowUpSource | null;
+  /** ISO timestamp of the last follow-up transition; null = never transitioned. */
+  followUpAt?: string | null;
   /** FK to projects.id; the Settings > Projects project this conversation is bound to. */
   projectId?: string | null;
   /** Working directory the session runs in; used by the sidebar's by-project grouping. */
@@ -3442,6 +3469,9 @@ export class CoworkStore implements MemoryBackend {
       // after this call; a freshly created row starts human-initiated.
       autoOrigin: null,
       foldOverride: null,
+      followUpState: null,
+      followUpSource: null,
+      followUpAt: null,
       permissionMode,
       model,
       effort,
@@ -3544,6 +3574,9 @@ export class CoworkStore implements MemoryBackend {
       hidden_from_session_list?: number | null;
       auto_origin?: string | null;
       fold_override?: string | null;
+      follow_up_state?: string | null;
+      follow_up_source?: string | null;
+      follow_up_at?: string | null;
       permission_mode?: string | null;
       parent_session_id?: string | null;
       fork_point_message_id?: string | null;
@@ -3558,7 +3591,7 @@ export class CoworkStore implements MemoryBackend {
 
     const row = this.getOne<SessionRow>(`
       SELECT id, title, claude_session_id, status, pinned, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id,
-             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, auto_origin, fold_override, permission_mode, parent_session_id, fork_point_message_id, model, model_provider, effort, project_id, goal, created_at, updated_at
+             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, auto_origin, fold_override, follow_up_state, follow_up_source, follow_up_at, permission_mode, parent_session_id, fork_point_message_id, model, model_provider, effort, project_id, goal, created_at, updated_at
       FROM cowork_sessions
       WHERE id = ?
     `, [id]);
@@ -3607,6 +3640,9 @@ export class CoworkStore implements MemoryBackend {
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
       autoOrigin: (row.auto_origin as CoworkSessionAutoOrigin | null) ?? null,
       foldOverride: (row.fold_override as CoworkSessionFoldOverride | null) ?? null,
+      followUpState: (row.follow_up_state as 'pending' | null) ?? null,
+      followUpSource: (row.follow_up_source as CoworkSessionFollowUpSource | null) ?? null,
+      followUpAt: row.follow_up_at ?? null,
       browserUri: row.browser_uri ?? null,
       browserTitle: row.browser_title ?? null,
       permissionMode: (row.permission_mode as CoworkPermissionMode) || 'default',
@@ -3943,6 +3979,73 @@ export class CoworkStore implements MemoryBackend {
     return (row?.auto_origin as CoworkSessionAutoOrigin | null) ?? null;
   }
 
+  /**
+   * Mark a session as waiting on the owner for the "Follow-Up Tasks"
+   * (待跟进任务) sidebar section. Stamps state 'pending', the lane that set
+   * it, and the transition time. Manual pins are sticky: an existing pending
+   * marker with source 'manual' is never overwritten by another lane (the
+   * owner deliberately parked the row), while a manual write always lands.
+   */
+  setSessionFollowUp(sessionId: string, source: CoworkSessionFollowUpSource): void {
+    this.db.run(
+      `UPDATE cowork_sessions
+       SET follow_up_state = 'pending', follow_up_source = ?, follow_up_at = ?, updated_at = ?
+       WHERE id = ?
+         AND (
+           ? = 'manual'
+           OR follow_up_state IS NULL
+           OR follow_up_source IS NULL
+           OR follow_up_source != 'manual'
+         )`,
+      [source, new Date().toISOString(), Date.now(), sessionId, source],
+    );
+    if ((this.db.getRowsModified?.() || 0) > 0) {
+      this.saveDb();
+    }
+  }
+
+  /**
+   * Clear the follow-up marker so the session falls back to the auto-origin
+   * policy. When `onlySources` is given, only a pending marker whose current
+   * source is in the list is cleared — the cerebellum classifier uses this to
+   * leave manual and structured (ask_user) markers untouched. Without
+   * `onlySources` any pending marker is cleared (the manual 移出待跟进 move).
+   */
+  clearSessionFollowUp(
+    sessionId: string,
+    opts?: { onlySources?: CoworkSessionFollowUpSource[] },
+  ): void {
+    if (opts?.onlySources !== undefined) {
+      // Lane-guarded clear: only a pending marker whose current source is in
+      // the list is cleared (the cerebellum classifier never touches 'manual'
+      // or 'ask_user' markers). An explicit empty list matches no lane and
+      // therefore clears nothing — only an ABSENT onlySources means "clear
+      // any pending" (the manual 移出待跟进 move).
+      const onlySources = opts.onlySources.filter((source): source is CoworkSessionFollowUpSource =>
+        source === 'cerebellum' || source === 'ask_user' || source === 'manual',
+      );
+      if (onlySources.length === 0) return;
+      const placeholders = onlySources.map(() => '?').join(', ');
+      this.db.run(
+        `UPDATE cowork_sessions
+         SET follow_up_state = NULL, follow_up_source = NULL, follow_up_at = NULL, updated_at = ?
+         WHERE id = ? AND follow_up_source IN (${placeholders})`,
+        [Date.now(), sessionId, ...onlySources],
+      );
+    } else {
+      this.db.run(
+        `UPDATE cowork_sessions
+         SET follow_up_state = NULL, follow_up_source = NULL, follow_up_at = NULL, updated_at = ?
+         WHERE id = ?`,
+        [Date.now(), sessionId],
+      );
+    }
+    if ((this.db.getRowsModified?.() || 0) > 0) {
+      this.saveDb();
+    }
+  }
+
+
   listSessions(options?: { metabotId?: number | null }): CoworkSessionSummary[] {
     interface SessionSummaryRow {
       id: string;
@@ -3960,6 +4063,9 @@ export class CoworkStore implements MemoryBackend {
       hidden_from_session_list?: number | null;
       auto_origin?: string | null;
       fold_override?: string | null;
+      follow_up_state?: string | null;
+      follow_up_source?: string | null;
+      follow_up_at?: string | null;
       model?: string | null;
       model_provider?: string | null;
       effort?: string | null;
@@ -3989,6 +4095,9 @@ export class CoworkStore implements MemoryBackend {
         s.hidden_from_session_list,
         s.auto_origin,
         s.fold_override,
+        s.follow_up_state,
+        s.follow_up_source,
+        s.follow_up_at,
         s.model,
         s.model_provider,
         s.effort,
@@ -4042,6 +4151,9 @@ export class CoworkStore implements MemoryBackend {
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
       autoOrigin: (row.auto_origin as CoworkSessionAutoOrigin | null) ?? null,
       foldOverride: (row.fold_override as CoworkSessionFoldOverride | null) ?? null,
+      followUpState: (row.follow_up_state as 'pending' | null) ?? null,
+      followUpSource: (row.follow_up_source as CoworkSessionFollowUpSource | null) ?? null,
+      followUpAt: row.follow_up_at ?? null,
       model: row.model ?? null,
       modelProvider: row.model_provider ?? null,
       effort: row.effort ?? null,
@@ -4221,6 +4333,9 @@ export class CoworkStore implements MemoryBackend {
       hidden_from_session_list?: number | null;
       auto_origin?: string | null;
       fold_override?: string | null;
+      follow_up_state?: string | null;
+      follow_up_source?: string | null;
+      follow_up_at?: string | null;
       model?: string | null;
       model_provider?: string | null;
       effort?: string | null;
@@ -4237,7 +4352,7 @@ export class CoworkStore implements MemoryBackend {
     const rows = this.getAll<ArchivedSessionRow>(`
       SELECT
         s.id, s.title, s.status, s.pinned, s.metabot_id, s.session_type, s.peer_name,
-        s.browser_uri, s.browser_title, s.hidden_from_session_list, s.auto_origin, s.fold_override, s.model, s.model_provider, s.effort, s.project_id,
+        s.browser_uri, s.browser_title, s.hidden_from_session_list, s.auto_origin, s.fold_override, s.follow_up_state, s.follow_up_source, s.follow_up_at, s.model, s.model_provider, s.effort, s.project_id,
         s.archived_at, s.created_at, s.updated_at
       FROM cowork_sessions s
       WHERE ${clauses.join(' AND ')}
@@ -4261,6 +4376,9 @@ export class CoworkStore implements MemoryBackend {
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
       autoOrigin: (row.auto_origin as CoworkSessionAutoOrigin | null) ?? null,
       foldOverride: (row.fold_override as CoworkSessionFoldOverride | null) ?? null,
+      followUpState: (row.follow_up_state as 'pending' | null) ?? null,
+      followUpSource: (row.follow_up_source as CoworkSessionFollowUpSource | null) ?? null,
+      followUpAt: row.follow_up_at ?? null,
       model: row.model ?? null,
       modelProvider: row.model_provider ?? null,
       effort: row.effort ?? null,
