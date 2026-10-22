@@ -643,3 +643,11 @@ man_base_data_pebble/
 
 # WS-A T5: tenant image static checks
 !tests/tenantImage.test.mjs
+
+# WS-C deploy assets: filled env files hold real secrets — only the
+# *.example templates may be committed (REQ-C-21).
+deploy/hosts/deploy.env
+deploy/hosts/cp.env
+deploy/backup/backup.env
+deploy/monitoring/monitoring.env
+deploy/hosts/prometheus.yml

@@ -1,0 +1,65 @@
+# WS-C REQ-C-16/REQ-C-17 support — monitoring stack for one IDBots relay host.
+# Apply together with compose.yml:
+#   docker compose --env-file /etc/idbots/deploy.env \
+#     -f compose.yml -f compose.monitoring.yml up -d
+#
+# Nothing here publishes a host port. Reach Prometheus/Alertmanager through an
+# SSH tunnel (runbooks/host-bootstrap.md § verification). Alerts leave the host
+# only as outbound HTTPS to the Feishu/DingTalk webhook via alert-relay.
+
+name: idbots
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    volumes:
+      # Rendered from prometheus.yml.template by bootstrap.sh (fills __APP_HOST__).
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - monitoring
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ../monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    networks:
+      - monitoring
+
+  alert-relay:
+    # Tiny dependency-free relay: Alertmanager webhook -> Feishu/DingTalk robot.
+    build:
+      context: ../monitoring/alert-relay
+    image: idbots-local/alert-relay:1
+    restart: unless-stopped
+    env_file:
+      - /etc/idbots/monitoring.env
+    networks:
+      - monitoring
+
+  blackbox-exporter:
+    # Probes https://{APP_HOST}/health through the public path (DNS + EIP +
+    # Caddy) so the TLS-expiry and uptime alerts measure what users hit.
+    image: prom/blackbox-exporter:v0.25.0
+    restart: unless-stopped
+    volumes:
+      - ../monitoring/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    networks:
+      - monitoring
+      - edge # edge is not internal: outbound HTTPS to the public URL works
