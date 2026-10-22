@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getMe, logout, sendCode, verifyCode } from '../src/mobile/login/loginApi';
+import { getMe, logout, requestAccountDeletion, sendCode, verifyCode } from '../src/mobile/login/loginApi';
 
 // Distinct phones per scenario keep the mock's "new vs returning phone"
 // state deterministic (node:test runs a file's tests sequentially).
@@ -165,4 +165,20 @@ test('loginApi logs never contain the phone number, SMS code, or invite code (SE
   assert.ok(!all.includes('123456'), 'SMS code must not be logged');
   assert.ok(!all.includes('invite-token'), 'invite code must not be logged');
   assert.ok(!all.includes('Secret Name'), 'display name value must not be logged');
+});
+
+test('loginApi.requestAccountDeletion rejects without a session and clears it after', async () => {
+  await assert.rejects(requestAccountDeletion('done with the demo'), (error: Error & { code?: string }) => {
+    assert.equal(error.code, 'UNAUTHORIZED');
+    return true;
+  });
+  await verifyCode('+8613900000111', '246810', { inviteCode: 'invite-token' });
+  const result = await requestAccountDeletion('done with the demo');
+  assert.deepEqual(result, { success: true });
+  // The session is gone: getMe rejects and a re-request fails too.
+  await assert.rejects(getMe(), (error: Error & { code?: string }) => {
+    assert.equal(error.code, 'UNAUTHORIZED');
+    return true;
+  });
+  await assert.rejects(requestAccountDeletion());
 });

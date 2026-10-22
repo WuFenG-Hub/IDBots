@@ -59,6 +59,10 @@ export interface LogoutResult {
   success: boolean;
 }
 
+export interface AccountDeletionResult {
+  success: boolean;
+}
+
 const MOCK_LATENCY_MS = 300;
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -203,6 +207,26 @@ export async function getMe(): Promise<GetMeResult> {
 export async function logout(): Promise<LogoutResult> {
   console.info('[loginApi] logout called (mock)');
   await wait(MOCK_LATENCY_MS);
+  mockSessionPhone = null;
+  mockMePollCount = 0;
+  return { success: true };
+}
+
+/**
+ * C3 `POST /api/v1/account/deletion-requests` (shape per the Me screen's
+ * delete-account flow: an optional human reason). In the mock the request is
+ * accepted whenever a session exists and the session is cleared immediately
+ * (the real control plane keeps the account in a pending-deletion grace
+ * period server-side).
+ */
+export async function requestAccountDeletion(reason?: string): Promise<AccountDeletionResult> {
+  console.info('[loginApi] requestAccountDeletion called (mock)', {
+    hasReason: Boolean(reason && reason.trim()),
+  });
+  await wait(MOCK_LATENCY_MS);
+  if (!mockSessionPhone) {
+    throw mockError('UNAUTHORIZED');
+  }
   mockSessionPhone = null;
   mockMePollCount = 0;
   return { success: true };

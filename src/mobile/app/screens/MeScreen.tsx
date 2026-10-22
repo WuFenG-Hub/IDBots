@@ -1,0 +1,418 @@
+import { useEffect, useState } from 'react';
+import { ChevronRightIcon, PencilSquareIcon, PlusIcon } from '@heroicons/react/24/outline';
+import { t } from '../../i18n';
+import type { MobileLanguage } from '../../i18n';
+import type { MockMetabot } from '../../bridge/types';
+import { CONTRACT_VERSION } from '../../bridge/types';
+import { getMobileElectron } from '../appBridge';
+import { logout, requestAccountDeletion } from '../../login/loginApi';
+import { useIdentity } from '../hooks/useIdentity';
+import { useMeters } from '../hooks/useMeters';
+import { useSettings } from '../hooks/useSettings';
+import { useSkills } from '../hooks/useSkills';
+import { useMetabots } from '../hooks/useMetabots';
+import { formatBytes, formatCount } from '../format';
+import { BottomSheet } from '../components/BottomSheet';
+import { Section } from '../components/Section';
+import { Switch } from '../components/Switch';
+
+function Segmented<T extends string>(props: {
+  value: T;
+  options: Array<{ value: T; labelKey: string }>;
+  onChange: (value: T) => void;
+}): JSX.Element {
+  return (
+    <div className="flex gap-2">
+      {props.options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => props.onChange(option.value)}
+          className={`min-h-[44px] flex-1 rounded-xl border px-2 text-sm ${
+            props.value === option.value
+              ? 'border-[var(--color-primary)] bg-[var(--color-primary)] text-black'
+              : 'border-[var(--border-color)] text-[var(--text-secondary)]'
+          }`}
+        >
+          {t(option.labelKey)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function BalanceCard(props: { onOpenRecharge: () => void }): JSX.Element {
+  const { meters } = useMeters();
+  return (
+    <Section title={t('mobile.me.balanceTitle')}>
+      <div className="mb-3 flex gap-3">
+        <div className="flex-1 rounded-xl bg-[var(--bg-main)] p-3">
+          <p className="text-xs text-[var(--text-secondary)]">{t('mobile.me.trafficLabel')}</p>
+          <p className="text-lg font-semibold text-[var(--text-primary)]">
+            {meters?.traffic ? formatBytes(meters.traffic.balanceBytes) : '—'}
+          </p>
+        </div>
+        <div className="flex-1 rounded-xl bg-[var(--bg-main)] p-3">
+          <p className="text-xs text-[var(--text-secondary)]">{t('mobile.me.llmLabel')}</p>
+          <p className="text-lg font-semibold text-[var(--text-primary)]">
+            {meters ? `${formatCount(meters.llm.quotaRemaining)} ${meters.llm.unit}` : '—'}
+          </p>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={props.onOpenRecharge}
+          className="min-h-[44px] flex-1 rounded-xl bg-[var(--color-primary)] py-2 text-sm font-medium text-black active:opacity-80"
+        >
+          {t('mobile.me.rechargeEntry')}
+        </button>
+        <RedeemButton />
+      </div>
+    </Section>
+  );
+}
+
+function RedeemButton(): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState('');
+  const [feedback, setFeedback] = useState<{ ok: boolean; message: string } | null>(null);
+  const { meters, reload } = useMeters();
+
+  const submit = async () => {
+    const result = await getMobileElectron().traffic.redeemCode({ code });
+    if (result?.success && result.result) {
+      setFeedback({ ok: true, message: t('mobile.me.redeemSuccess', { amount: formatBytes(result.result.trafficBytes) }) });
+      await reload();
+      setCode('');
+    } else {
+      setFeedback({ ok: false, message: t('mobile.me.redeemError') });
+    }
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="min-h-[44px] flex-1 rounded-xl border border-[var(--border-color)] py-2 text-sm text-[var(--text-primary)] active:bg-[var(--bg-hover)]"
+      >
+        {t('mobile.me.redeemEntry')}
+      </button>
+      {open ? (
+        <BottomSheet title={t('mobile.me.redeemTitle')} onClose={() => setOpen(false)}>
+          <div className="flex flex-col gap-3">
+            <input
+              value={code}
+              onChange={(event) => setCode(event.target.value)}
+              placeholder={t('mobile.me.redeemPlaceholder')}
+              className="min-h-[44px] w-full rounded-xl border border-[var(--border-color)] bg-[var(--bg-main)] px-3 py-2.5 text-[15px] text-[var(--text-primary)] outline-none"
+            />
+            {feedback ? (
+              <p className={`text-sm ${feedback.ok ? 'text-emerald-600' : 'text-red-600'}`}>{feedback.message}</p>
+            ) : null}
+            <p className="text-xs text-[var(--text-secondary)]">
+              {`${t('mobile.me.trafficLabel')}: ${meters?.traffic ? formatBytes(meters.traffic.balanceBytes) : '—'}`}
+            </p>
+            <button
+              type="button"
+              onClick={() => void submit()}
+              disabled={!code.trim()}
+              className="min-h-[44px] rounded-xl bg-[var(--color-primary)] py-2 text-sm font-medium text-black active:opacity-80 disabled:opacity-40"
+            >
+              {t('mobile.me.redeemSubmit')}
+            </button>
+          </div>
+        </BottomSheet>
+      ) : null}
+    </>
+  );
+}
+
+function BotFormSheet(props: {
+  bot: MockMetabot | null;
+  onSave: (input: { name: string; role: string; soul: string; bio: string }) => Promise<boolean>;
+  busy: boolean;
+  onClose: () => void;
+}): JSX.Element {
+  const [name, setName] = useState(props.bot?.name ?? '');
+  const [role, setRole] = useState(props.bot?.role ?? '');
+  const [soul, setSoul] = useState(props.bot?.soul ?? '');
+  const [bio, setBio] = useState(props.bot?.bio ?? '');
+  const inputClass =
+    'min-h-[44px] w-full rounded-xl border border-[var(--border-color)] bg-[var(--bg-main)] px-3 py-2.5 text-[15px] text-[var(--text-primary)] outline-none';
+
+  return (
+    <BottomSheet title={props.bot ? t('mobile.me.botEdit') : t('mobile.me.botCreate')} onClose={props.onClose}>
+      <div className="flex flex-col gap-3">
+        <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t('mobile.me.botNamePlaceholder')} className={inputClass} />
+        <input value={role} onChange={(event) => setRole(event.target.value)} placeholder={t('mobile.me.botRolePlaceholder')} className={inputClass} />
+        <textarea value={soul} onChange={(event) => setSoul(event.target.value)} placeholder={t('mobile.me.botSoulPlaceholder')} rows={2} className={`${inputClass} resize-none`} />
+        <textarea value={bio} onChange={(event) => setBio(event.target.value)} placeholder={t('mobile.me.botBioPlaceholder')} rows={2} className={`${inputClass} resize-none`} />
+        <button
+          type="button"
+          disabled={props.busy || !name.trim()}
+          onClick={() => {
+            void props.onSave({ name: name.trim(), role: role.trim(), soul: soul.trim(), bio: bio.trim() }).then((ok) => {
+              if (ok) props.onClose();
+            });
+          }}
+          className="min-h-[44px] rounded-xl bg-[var(--color-primary)] py-2 font-medium text-black active:opacity-80 disabled:opacity-40"
+        >
+          {t('mobile.me.botSave')}
+        </button>
+      </div>
+    </BottomSheet>
+  );
+}
+
+function BotsSection(): JSX.Element {
+  const { bots, createBot, updateBot } = useMetabots();
+  const [formState, setFormState] = useState<{ bot: MockMetabot | null; busy: boolean } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!notice) return undefined;
+    const timer = setTimeout(() => setNotice(null), 2000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  return (
+    <Section title={t('mobile.me.botsTitle')}>
+      {notice ? <p className="mb-2 text-sm text-emerald-600">{notice}</p> : null}
+      {bots.map((bot) => (
+        <div key={bot.id} className="flex min-h-[44px] items-center gap-2 border-b border-[var(--border-color)] py-2 last:border-b-0">
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[15px] text-[var(--text-primary)]">{bot.name}</p>
+            <p className="truncate text-xs text-[var(--text-secondary)]">
+              {t(bot.metabot_type === 'twin' ? 'mobile.me.botType.twin' : 'mobile.me.botType.worker')}
+              {bot.role ? ` · ${bot.role}` : ''}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFormState({ bot, busy: false })}
+            aria-label={`${t('mobile.me.botEdit')} · ${bot.name}`}
+            className="flex min-h-[44px] min-w-[44px] items-center justify-center text-[var(--text-secondary)] active:text-[var(--text-primary)]"
+          >
+            <PencilSquareIcon className="h-5 w-5" aria-hidden />
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={() => setFormState({ bot: null, busy: false })}
+        className="mt-2 flex min-h-[44px] w-full items-center justify-center gap-1 rounded-xl border border-[var(--border-color)] py-2 text-sm text-[var(--text-primary)] active:bg-[var(--bg-hover)]"
+      >
+        <PlusIcon className="h-4 w-4" aria-hidden />
+        {t('mobile.me.botCreate')}
+      </button>
+      {formState ? (
+        <BotFormSheet
+          bot={formState.bot}
+          busy={formState.busy}
+          onClose={() => setFormState(null)}
+          onSave={async (input) => {
+            setFormState((prev) => (prev ? { ...prev, busy: true } : prev));
+            const ok = formState.bot ? await updateBot(formState.bot.id, input) : await createBot(input);
+            if (ok) setNotice(t(formState.bot ? 'mobile.me.botUpdated' : 'mobile.me.botCreated'));
+            setFormState(null);
+            return ok;
+          }}
+        />
+      ) : null}
+    </Section>
+  );
+}
+
+function SkillsSection(): JSX.Element {
+  const { skills, setEnabled } = useSkills();
+  return (
+    <Section title={t('mobile.me.skillsTitle')}>
+      {skills.map((skill) => (
+        <div key={skill.id} className="flex min-h-[44px] items-center gap-2 border-b border-[var(--border-color)] py-2 last:border-b-0">
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[15px] text-[var(--text-primary)]">{skill.name}</p>
+            <p className="truncate text-xs text-[var(--text-secondary)]">{skill.description}</p>
+          </div>
+          <Switch checked={skill.enabled} onChange={(checked) => void setEnabled(skill.id, checked)} label={`${skill.name} · ${t('mobile.tasks.enabled')}`} />
+        </div>
+      ))}
+    </Section>
+  );
+}
+
+function SettingsSection(): JSX.Element {
+  const { language, theme, changeLanguage, changeTheme } = useSettings();
+  return (
+    <Section title={t('mobile.me.settingsTitle')}>
+      <p className="mb-2 text-xs font-medium uppercase text-[var(--text-secondary)]">{t('mobile.me.languageLabel')}</p>
+      <Segmented<MobileLanguage>
+        value={language}
+        options={[
+          { value: 'zh', labelKey: 'mobile.me.languageZh' },
+          { value: 'en', labelKey: 'mobile.me.languageEn' },
+        ]}
+        onChange={(value) => void changeLanguage(value)}
+      />
+      <p className="mb-2 mt-4 text-xs font-medium uppercase text-[var(--text-secondary)]">{t('mobile.me.themeLabel')}</p>
+      <Segmented<'light' | 'dark' | 'system'>
+        value={theme}
+        options={[
+          { value: 'light', labelKey: 'mobile.me.themeLight' },
+          { value: 'dark', labelKey: 'mobile.me.themeDark' },
+          { value: 'system', labelKey: 'mobile.me.themeSystem' },
+        ]}
+        onChange={(value) => void changeTheme(value)}
+      />
+    </Section>
+  );
+}
+
+function AccountSection(): JSX.Element {
+  const [sheet, setSheet] = useState<'logout' | 'delete' | null>(null);
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const doLogout = async () => {
+    setBusy(true);
+    try {
+      await logout();
+      window.location.assign('/login');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doDelete = async () => {
+    setBusy(true);
+    try {
+      await requestAccountDeletion(reason.trim() || undefined);
+      setDone(true);
+      setTimeout(() => window.location.assign('/login'), 1200);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Section title={t('mobile.me.accountTitle')}>
+      <button
+        type="button"
+        onClick={() => setSheet('logout')}
+        className="flex min-h-[44px] w-full items-center justify-between border-b border-[var(--border-color)] py-2 text-[15px] text-[var(--text-primary)] last:border-b-0"
+      >
+        {t('mobile.me.logout')}
+        <ChevronRightIcon className="h-4 w-4 text-[var(--text-secondary)]" aria-hidden />
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          setDone(false);
+          setReason('');
+          setSheet('delete');
+        }}
+        className="flex min-h-[44px] w-full items-center justify-between py-2 text-[15px] text-red-600"
+      >
+        {t('mobile.me.deleteAccount')}
+        <ChevronRightIcon className="h-4 w-4" aria-hidden />
+      </button>
+      {sheet === 'logout' ? (
+        <BottomSheet title={t('mobile.me.logoutTitle')} onClose={() => setSheet(null)}>
+          <p className="mb-4 text-sm text-[var(--text-secondary)]">{t('mobile.me.logoutBody')}</p>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={() => setSheet(null)}
+              className="min-h-[44px] flex-1 rounded-xl border border-[var(--border-color)] py-2 text-[var(--text-primary)] active:bg-[var(--bg-hover)]"
+            >
+              {t('mobile.me.botCancel')}
+            </button>
+            <button
+              type="button"
+              onClick={() => void doLogout()}
+              disabled={busy}
+              className="min-h-[44px] flex-1 rounded-xl bg-[var(--color-primary)] py-2 font-medium text-black active:opacity-80 disabled:opacity-40"
+            >
+              {t('mobile.me.logoutConfirm')}
+            </button>
+          </div>
+        </BottomSheet>
+      ) : null}
+      {sheet === 'delete' ? (
+        <BottomSheet title={t('mobile.me.deleteTitle')} onClose={() => setSheet(null)}>
+          {done ? (
+            <p className="min-h-[44px] py-3 text-center text-sm font-medium text-emerald-600">
+              {t('mobile.me.deleteDone')}
+            </p>
+          ) : (
+            <div className="flex flex-col gap-3">
+              <p className="text-sm text-[var(--text-secondary)]">{t('mobile.me.deleteBody')}</p>
+              <input
+                value={reason}
+                onChange={(event) => setReason(event.target.value)}
+                placeholder={t('mobile.me.deleteReasonPlaceholder')}
+                className="min-h-[44px] w-full rounded-xl border border-[var(--border-color)] bg-[var(--bg-main)] px-3 py-2.5 text-[15px] text-[var(--text-primary)] outline-none"
+              />
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setSheet(null)}
+                  className="min-h-[44px] flex-1 rounded-xl border border-[var(--border-color)] py-2 text-[var(--text-primary)] active:bg-[var(--bg-hover)]"
+                >
+                  {t('mobile.me.botCancel')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void doDelete()}
+                  disabled={busy}
+                  className="min-h-[44px] flex-1 rounded-xl bg-red-600 py-2 font-medium text-white active:opacity-80 disabled:opacity-40"
+                >
+                  {t('mobile.me.deleteConfirm')}
+                </button>
+              </div>
+            </div>
+          )}
+        </BottomSheet>
+      ) : null}
+    </Section>
+  );
+}
+
+function AboutSection(): JSX.Element {
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  useEffect(() => {
+    void getMobileElectron()
+      .appInfo.getVersion()
+      .then((version) => setAppVersion(version))
+      .catch(() => setAppVersion(null));
+  }, []);
+  return (
+    <Section title={t('mobile.me.aboutTitle')}>
+      <p className="text-sm text-[var(--text-secondary)]">{t('mobile.me.appVersion', { version: appVersion ?? '—' })}</p>
+      <p className="text-sm text-[var(--text-secondary)]">{t('mobile.me.contractVersion', { version: CONTRACT_VERSION })}</p>
+    </Section>
+  );
+}
+
+/** Me tab (REQ-E-14). */
+export default function MeScreen(props: { onOpenRecharge: () => void }): JSX.Element {
+  const identity = useIdentity();
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="border-b border-[var(--border-color)] bg-[var(--bg-panel)] px-4 py-3">
+        <h1 className="text-base font-semibold text-[var(--text-primary)]">{t('mobile.me.title')}</h1>
+        <p className="truncate text-sm text-[var(--text-secondary)]">{identity.name ?? ''}</p>
+      </div>
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+        <BalanceCard onOpenRecharge={props.onOpenRecharge} />
+        <BotsSection />
+        <SkillsSection />
+        <SettingsSection />
+        <AccountSection />
+        <AboutSection />
+      </div>
+    </div>
+  );
+}
