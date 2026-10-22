@@ -9,6 +9,7 @@ import type { Readable } from 'stream';
 import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { PermissionResult } from './coworkPermissionTypes';
+import { isServerMode } from '../server/serverMode';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
 import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, getPersistedChatExperienceMode, resolveDshProviderRoute, getAppConfigProviders, isFreeQuotaProvider, ModelProviderSelectionError, type DshProviderRouteInfo } from './claudeSettings';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
@@ -44,7 +45,7 @@ import { rewriteWin32McpStdioServer } from './win32StdioCommand';
 import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
-import { CONFIG_HARD_FALLBACK_RESUME_PROMPT, CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isAuthDshTurnError, isBodyLimitDshTurnError, isConfigModelMissingDshTurnError, isMalformedToolCallDshTurnError, isOverflowDshTurnError, isQuotaDshTurnError, isTransientDshTurnError, isWontHealDshTurnError, MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT, OVERFLOW_TURN_RESUME_PROMPT, relayQuotaErrorMetadata, extractRelayQuotaExhaustedCode, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
+import { CONFIG_HARD_FALLBACK_RESUME_PROMPT, CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isAuthDshTurnError, isBodyLimitDshTurnError, isConfigModelMissingDshTurnError, isMalformedToolCallDshTurnError, isOverflowDshTurnError, isQuotaDshTurnError, isTransientDshTurnError, isWontHealDshTurnError, MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT, OVERFLOW_TURN_RESUME_PROMPT, relayQuotaErrorMetadata, extractRelayQuotaExhaustedCode, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT, buildFreeRelayQuotaNotice } from './coworkAssistantReply';
 import {
   filterSdkInternalDiagnostics,
   isSdkInternalDiagnostic,
@@ -10945,18 +10946,15 @@ export class CoworkRunner extends EventEmitter {
               ` (No usable model configured: the session's bound model is unavailable and neither the bot fallback nor the current-default ladder has a valid target — this is a configuration error, not a transient rate limit. Configure a usable default model in Settings > Models, or top up the provider.)`
             )}`
           : '';
-        // Free starter allowance exhausted: the actionable fix is the user's
-        // own provider, not a top-up of a relay they cannot pay into. The
-        // notice carries the literal upstream quota code on purpose (REQ-A-25:
-        // free_quota_exhausted or the new C4 quota_exhausted — whichever the
-        // relay returned): the renderer's quota banner (CoworkSessionDetail)
-        // keys off it and offers the Settings > Model shortcut, so the
-        // message and the banner agree instead of contradicting each other.
+        // Free starter allowance exhausted. Desktop's actionable fix is the
+        // user's own provider (Settings > Models exists there); in server
+        // mode the phone has no Settings > Models page, so the notice points
+        // at recharge instead (REQ-A-25). The literal upstream quota code is
+        // preserved verbatim in both modes (free_quota_exhausted or the new
+        // C4 quota_exhausted): the renderer's quota banner
+        // (CoworkSessionDetail) keys off it, so message and banner agree.
         const freeRelayQuotaNotice = freeRelayQuotaDeath
-          ? ` ${tApp(
-              `（这不是配置错误：IDBots-Free 免费体验额度已用完。请到 设置 > 模型 添加一个自己的模型服务商 API Key 即可继续对话。错误代码：${relayQuotaCode ?? 'free_quota_exhausted'}。）`,
-              ` (This is not a configuration error: the IDBots-Free starter allowance is used up. Add your own model provider API key in Settings > Models to keep chatting. Error code: ${relayQuotaCode ?? 'free_quota_exhausted'}.)`
-            )}`
+          ? ` ${buildFreeRelayQuotaNotice(relayQuotaCode, isServerMode(), tApp)}`
           : '';
         // Quota death is not retryable on the same route and the raw provider
         // body names no culprit: append an actionable notice naming the route

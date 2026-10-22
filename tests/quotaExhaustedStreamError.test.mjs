@@ -45,6 +45,7 @@ const {
   isQuotaDshTurnError,
   relayQuotaErrorMetadata,
   LLM_QUOTA_EXHAUSTED_ERROR_CODE,
+  buildFreeRelayQuotaNotice,
 } = loadCompiledModule('../dist-electron/main/libs/coworkAssistantReply.js');
 
 assert.equal(LLM_QUOTA_EXHAUSTED_ERROR_CODE, 'LLM_QUOTA_EXHAUSTED');
@@ -153,4 +154,24 @@ test('cowork stream error stays metadata-free for non-quota failures', () => {
   runner.handleError('s1', 'DSH turn failed: LLM request failed: 502 bad gateway');
   assert.equal(errors.length, 1);
   assert.equal(errors[0].metadata, undefined);
+});
+
+test('quota notice points at recharge in server mode and Settings > Models on desktop', () => {
+  const zh = (z, _e) => z;
+  const en = (_z, e) => e;
+  for (const code of ['free_quota_exhausted', 'quota_exhausted']) {
+    for (const t of [zh, en]) {
+      const desktop = buildFreeRelayQuotaNotice(code, false, t);
+      const server = buildFreeRelayQuotaNotice(code, true, t);
+      // The upstream code is interpolated verbatim in both modes (the
+      // renderer's quota banner keys off it).
+      assert.ok(desktop.includes(code));
+      assert.ok(server.includes(code));
+      // Desktop wording is unchanged; server mode never points at the
+      // nonexistent-on-mobile Settings > Models page.
+      assert.ok(desktop.includes('Settings > Models') || desktop.includes('设置 > 模型'));
+      assert.ok(!server.includes('Settings > Models') && !server.includes('设置 > 模型'));
+      assert.ok(server.includes('Recharge') || server.includes('充值'));
+    }
+  }
 });
