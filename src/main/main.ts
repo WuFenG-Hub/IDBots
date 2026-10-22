@@ -4603,19 +4603,7 @@ const startStartupMessageTier = (): void => {
     markCapabilityDraftsInjected: (ids) => {
       getCoworkStore().markCapabilityDraftsInjected(ids);
     },
-    buildTeamCultureBlock: () => {
-      try {
-        const cultureStore = getTeamCultureStore();
-        // Master switch: one gate for both injection and distillation.
-        if (!cultureStore.getCultureConfig().enabled) return null;
-        return cultureStore.buildCulturePromptBlock();
-      } catch (error) {
-        console.warn(
-          `[GroupTaskDaemon] Team culture block unavailable: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        return null;
-      }
-    },
+    buildTeamCultureBlock: buildTeamCulturePromptBlock,
     ...(cognitionContextService
       ? {
           getMetaIDGroupCognitionPromptBlock: (input: {
@@ -6371,6 +6359,9 @@ const getCoworkRunner = () => {
       },
       experienceStore: getDreamStore(),
       knowledgeStore: getMetaIDKnowledgeStore(),
+      // Dream review P1: fleet culture block in the cowork volatile tail
+      // (same master switch and builder as the group-task daemon).
+      buildTeamCultureBlock: buildTeamCulturePromptBlock,
       episodeTimelineProvider: getMetaIDExperienceStore(),
       // Cerebellum (小脑) per-turn decision bundle (2026-10-16 merge): ONE
       // /v1/systemone request per turn covers the memory re-rank, knowledge
@@ -8653,6 +8644,25 @@ const getTeamCultureStore = (): TeamCultureStore => {
     );
   }
   return teamCultureStore;
+};
+
+/**
+ * Shared team-culture prompt block (dream review P1): the SAME master switch
+ * as the group-task daemon — one fleet-wide culture layer, default ON, with
+ * the block's own hard char cap doing the bounding. Used by both the
+ * group-task turns and the cowork volatile tail.
+ */
+const buildTeamCulturePromptBlock = (): string | null => {
+  try {
+    const cultureStore = getTeamCultureStore();
+    if (!cultureStore.getCultureConfig().enabled) return null;
+    return cultureStore.buildCulturePromptBlock();
+  } catch (error) {
+    console.warn(
+      `[TeamCulture] Prompt block unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
 };
 
 const getKnowledgeBaseStore = (): KnowledgeBaseStore => {

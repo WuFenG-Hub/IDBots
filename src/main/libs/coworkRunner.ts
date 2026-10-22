@@ -2187,6 +2187,13 @@ export interface CoworkRunnerOptions {
   experienceStore?: CoworkExperienceStore;
   /** Knowledge-point anchored memory (经验/知识点): hot block + recall/upsert tools. */
   knowledgeStore?: CoworkKnowledgeStore;
+  /**
+   * Dream review P1: team culture block (fleet glossary / conventions /
+   * lessons) for the volatile tail, built per turn with usage counters.
+   * Returns null when the culture layer is disabled or unavailable.
+   * Implemented in main.ts on top of TeamCultureStore.
+   */
+  buildTeamCultureBlock?: () => string | null;
   /** Raw episode timeline for the time-anchor fallback in experience_recall. */
   episodeTimelineProvider?: CoworkEpisodeTimeline;
   /**
@@ -2623,6 +2630,7 @@ export class CoworkRunner extends EventEmitter {
   private controlBotBrowser?: BotBrowserControl;
   private experienceStore?: CoworkExperienceStore;
   private knowledgeStore?: CoworkKnowledgeStore;
+  private buildTeamCultureBlock?: () => string | null;
   private episodeTimelineProvider?: CoworkEpisodeTimeline;
   private metaIdSearch?: MetaIdSearchControl;
   private networkServices?: NetworkServicesControl;
@@ -2804,6 +2812,7 @@ export class CoworkRunner extends EventEmitter {
     this.controlBotBrowser = options?.controlBotBrowser;
     this.experienceStore = options?.experienceStore;
     this.knowledgeStore = options?.knowledgeStore;
+    this.buildTeamCultureBlock = options?.buildTeamCultureBlock;
     this.episodeTimelineProvider = options?.episodeTimelineProvider;
     this.metaIdSearch = options?.metaIdSearch;
     this.networkServices = options?.networkServices;
@@ -6965,6 +6974,27 @@ export class CoworkRunner extends EventEmitter {
       }
       // Per-bot knowledge bases: doc counts shift on every learn run, so
       // the listing is volatile and content-deduped like the other blocks.
+      // Dream review P1: the fleet's shared culture (glossary / conventions /
+      // lessons) rides the volatile tail like the group-task turns — one
+      // compact <team_culture> block under a hard char cap, built per turn
+      // (the builder refreshes its usage counters). Gated by the same master
+      // switch as group tasks inside the builder; the cerebellum volatile
+      // gate can skip it like the other guidance blocks. No private-chat
+      // injection (privacy surface) — cowork turns only.
+      if (sessionMemoryEnabled && this.buildTeamCultureBlock && shouldInjectVolatile('team-culture')) {
+        let cultureBlock: string | null = null;
+        try {
+          cultureBlock = this.buildTeamCultureBlock();
+        } catch {
+          cultureBlock = null;
+        }
+        if (cultureBlock) {
+          sections.push({
+            key: 'team-culture',
+            text: cultureBlock,
+          });
+        }
+      }
       if (sessionMemoryEnabled && shouldInjectVolatile('knowledge-bases')) {
         sections.push({
           key: 'knowledge-bases',

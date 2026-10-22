@@ -443,6 +443,7 @@ man_base_data_pebble/
 !tests/dreamSelfIdentityGuard.test.mjs
 !tests/hotLayerAuditExtension.test.mjs
 !tests/privateChatHotLayerInjection.test.mjs
+!tests/teamCultureCoworkTurn.test.mjs
 !tests/dreamServiceRatings.test.mjs
 !tests/dreamTelemetryWeekly.test.mjs
 !tests/dreamPracticeProposals.test.mjs

@@ -70,6 +70,8 @@ export const CEREBELLUM_VOLATILE_GATE_SECTION_KEYS = [
   'twin-impression',
   'knowledge-bases',
   'remote-services',
+  // Dream review P1: team culture block in the cowork volatile tail.
+  'team-culture',
 ] as const;
 
 export type CerebellumVolatileGateSectionKey = (typeof CEREBELLUM_VOLATILE_GATE_SECTION_KEYS)[number];
@@ -86,6 +88,9 @@ export const CEREBELLUM_VOLATILE_GATE_THRESHOLDS: Record<CerebellumVolatileGateS
   'twin-impression': 0.35,
   'knowledge-bases': 0.35,
   'remote-services': 0.35,
+  // Same bias as the other guidance blocks: only skip when fairly confident
+  // the turn does not involve shared team conventions/terms/lessons.
+  'team-culture': 0.35,
 };
 
 /**
@@ -116,6 +121,11 @@ export const CEREBELLUM_VOLATILE_GATE_INSTRUCTIONS: Record<CerebellumVolatileGat
     'on-chain services offered by other bots? Needed only when the message seeks a ' +
     'capability the assistant itself lacks and might delegate or purchase externally; ' +
     'ordinary self-served requests do not need it.',
+  'team-culture':
+    'Does replying to the user\'s message at `current_message` need the shared team ' +
+    'culture block (fleet-wide glossary terms, working conventions, distilled team ' +
+    'lessons)? Needed only when the message involves fleet coordination, team members, ' +
+    'shared terminology, or ways of working; ordinary task requests do not need it.',
 };
 
 export const CEREBELLUM_VOLATILE_GATE_CRITERIA = {

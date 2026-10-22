@@ -102,6 +102,7 @@ test('parseVolatileGateAnswers: noul at/above the block threshold injects, below
     'twin-impression': false,
     'knowledge-bases': true,
     'remote-services': false,
+    'team-culture': true, // no answer → fail-open (dream review P1 key)
   });
 });
 
