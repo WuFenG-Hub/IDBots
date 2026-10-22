@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
-import { PaperAirplaneIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
+import { ArrowUpIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
 import { PaperClipIcon, SparklesIcon, ChevronDownIcon, PlusIcon, PuzzlePieceIcon, CommandLineIcon } from '@heroicons/react/24/outline';
 import { placePopoverAbove, useAnchorMoveWatcher } from '../../utils/anchoredPopover';
 import ModelEffortPicker, { type ModelEffortValue } from '../ModelEffortPicker';
@@ -1581,14 +1581,14 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                     categories={contextUsage.categories}
                   />
                 )}
-                {/* Composer send/stop icon ink: deep orange #9A3412 — a deliberate
-                    exception to the near-black accentInk used by every other
-                    yellow-fill button (user preference, do not unify). */}
+                {/* Composer send/stop: neutral gray circle with dark-gray ink
+                    (owner preference 2026-10-23 — supersedes the old yellow
+                    fill + deep-orange #9A3412 "do not unify" note). */}
                 {showStopButton ? (
                   <button
                     type="button"
                     onClick={handleStopClick}
-                    className="p-2 rounded-xl bg-claude-accent hover:bg-claude-accentHover text-[#9A3412] transition-all shadow-subtle hover:shadow-card active:scale-95"
+                    className="p-2 rounded-full bg-claude-surfaceHover hover:bg-claude-border text-claude-text transition-all shadow-subtle hover:shadow-card active:scale-95"
                     aria-label={i18nService.t('stop')}
                   >
                     <StopIcon className="h-5 w-5" />
@@ -1598,10 +1598,10 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                     type="button"
                     onClick={() => { void handleSubmit(); }}
                     disabled={!canSubmit}
-                    className="p-2 rounded-xl bg-claude-accent hover:bg-claude-accentHover text-[#9A3412] transition-all shadow-subtle hover:shadow-card active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="p-2 rounded-full bg-claude-surfaceHover hover:bg-claude-border text-claude-text transition-all shadow-subtle hover:shadow-card active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                     aria-label={isSteerSubmit ? i18nService.t('coworkSendSteer') : i18nService.t('sendMessage')}
                   >
-                    <PaperAirplaneIcon className="h-5 w-5" />
+                    <ArrowUpIcon className="h-5 w-5" />
                   </button>
                 )}
               </div>
@@ -1634,12 +1634,12 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               className={textareaClass}
             />
 
-            {/* Same composer-only deep-orange ink as the wide layout above. */}
+            {/* Same neutral gray composer send/stop as the wide layout above. */}
             {showStopButton ? (
               <button
                 type="button"
                 onClick={handleStopClick}
-                className="flex-shrink-0 p-2 rounded-lg bg-claude-accent hover:bg-claude-accentHover text-[#9A3412] transition-all shadow-subtle hover:shadow-card active:scale-95"
+                className="flex-shrink-0 p-2 rounded-full bg-claude-surfaceHover hover:bg-claude-border text-claude-text transition-all shadow-subtle hover:shadow-card active:scale-95"
                 aria-label={i18nService.t('stop')}
               >
                 <StopIcon className="h-4 w-4" />
@@ -1649,10 +1649,10 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                 type="button"
                 onClick={() => { void handleSubmit(); }}
                 disabled={!canSubmit}
-                className="flex-shrink-0 p-2 rounded-lg bg-claude-accent hover:bg-claude-accentHover text-[#9A3412] transition-all shadow-subtle hover:shadow-card active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex-shrink-0 p-2 rounded-full bg-claude-surfaceHover hover:bg-claude-border text-claude-text transition-all shadow-subtle hover:shadow-card active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                 aria-label={isSteerSubmit ? i18nService.t('coworkSendSteer') : i18nService.t('sendMessage')}
               >
-                <PaperAirplaneIcon className="h-4 w-4" />
+                <ArrowUpIcon className="h-4 w-4" />
               </button>
             )}
           </>

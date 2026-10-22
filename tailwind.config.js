@@ -47,8 +47,6 @@ export default {
           // Near-black ink for text/icons sitting ON the yellow accent fill
           // (white-on-yellow is illegible). Matches .btn-idchat-primary-filled's
           // #303133; fixed (not a var) because the yellow fill is mode-invariant.
-          // Exception: the composer send/stop button uses deep-orange
-          // #9A3412 (see CoworkPromptInput) — do not blanket-change this token.
           accentInk: '#303133',
         },
         primary: {
