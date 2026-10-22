@@ -1744,7 +1744,7 @@ const UserMessageItem: React.FC<{
                   sessionType={sessionType}
                   sessionTitle={sessionTitle}
                 />
-                <div className="w-fit max-w-[min(646px,82%)]">
+                <div className="w-fit max-w-[min(720px,82%)]">
                   {gigSquareCard}
                 </div>
               </div>
@@ -1774,7 +1774,7 @@ const UserMessageItem: React.FC<{
                   innermost data-message-id mount, so it hugs this bubble's
                   own outline — w-fit width, its 22px radius. */}
               <div
-                className="cowork-user-bubble w-fit max-w-[min(646px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text"
+                className="cowork-user-bubble w-fit max-w-[min(720px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text"
                 data-message-id={message.id}
               >
                 {sentQuote ? (
@@ -1931,7 +1931,7 @@ const AssistantMessageItem: React.FC<{
           // in a chat bubble shaped like the user bubble, differentiated
           // purely by background color (no border) via the theme-adaptive
           // neutral-gray .assistant-bubble fill. The w-fit wrapper shares the
-          // user bubble's max width (max-w-[min(646px,82%)]) so the bubble
+          // user bubble's max width (max-w-[min(720px,82%)]) so the bubble
           // hugs short messages and never stretches to the full column.
           // EVERY bubble carries its own hover-action toolbar — narration
           // bubbles included — so each single message is individually
@@ -1943,7 +1943,7 @@ const AssistantMessageItem: React.FC<{
           // state (an in-flow row used to add ~32px under each bubble once
           // the turn completed, and the old in-bubble overlay covered reply
           // text); z-10 keeps the strip above the next bubble's rounded top.
-          <div className="relative w-fit max-w-[min(646px,82%)]">
+          <div className="relative w-fit max-w-[min(720px,82%)]">
             {/* The id also rides the bubble: the quote-jump ring wraps the
                 innermost data-message-id mount, so it hugs this bubble's
                 own outline — w-fit width, its 22px radius. */}
