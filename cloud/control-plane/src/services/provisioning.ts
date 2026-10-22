@@ -36,6 +36,7 @@ interface UserRow {
   id: string;
   display_name: string;
   locale: string;
+  invite_code: string | null;
 }
 
 export interface ContainerSpecInput {
@@ -234,14 +235,36 @@ async function provisionTenantInner(
     log('info', 'volume already exists, reusing');
   }
 
-  const spec = buildContainerSpec(app, {
-    tenantId,
-    user,
-    image: app.config.tenantImage,
-    gatewaySecret,
-    includeRedeemCode: true,
-  });
-  if (!spec.env?.IDBOTS_BOOTSTRAP_TRAFFIC_REDEEM_CODE) {
+  // The redeem code is attached only when THIS sign-up required one
+  // (review S2-3): resolve with_redeem through the invite the user signed up
+  // with. The empty-pool warn+alert fires only when a code was required but
+  // the pool had none — plain invites must not flood the webhook.
+  const invite = user.invite_code
+    ? (app.db.prepare('SELECT with_redeem FROM invites WHERE code = ?').get(user.invite_code) as
+        | { with_redeem: number }
+        | undefined)
+    : undefined;
+  const redeemRequired = invite?.with_redeem === 1;
+
+  let spec: CreateContainerOptions;
+  try {
+    spec = buildContainerSpec(app, {
+      tenantId,
+      user,
+      image: app.config.tenantImage,
+      gatewaySecret,
+      includeRedeemCode: redeemRequired,
+    });
+  } catch (err) {
+    // S3-3: a spec-build failure (e.g. corrupt redeem ciphertext) must mark
+    // the tenant failed, never crash the process as an unhandled rejection.
+    const message = `container spec build failed: ${err instanceof Error ? err.message : String(err)}`;
+    markFailed(app, tenantId, message);
+    log('error', message);
+    await sendAlert(app.config, `tenant ${tenantId}: ${message}`);
+    return;
+  }
+  if (redeemRequired && !spec.env?.IDBOTS_BOOTSTRAP_TRAFFIC_REDEEM_CODE) {
     log('warn', 'redeem pool empty for this tenant; provisioning without a code');
     await sendAlert(
       app.config,

@@ -11,7 +11,8 @@ import { maskPhone, sha256Hex } from '../crypto.js';
 import { checkPhoneLock, checkSmsSend, incrementCodeAttempts } from '../rateLimit.js';
 import { generateSmsCode, hashSmsCode } from '../sms.js';
 import { signup } from '../services/signup.js';
-import { provisionTenant } from '../services/provisioning.js';
+import { markFailed, provisionTenant } from '../services/provisioning.js';
+import { sendAlert } from '../alerts.js';
 import { newSessionToken } from '../ids.js';
 import {
   SESSION_TTL_MS,
@@ -254,7 +255,16 @@ async function smsVerify(app: AppContext, reqCtx: RequestCtx, body: unknown): Pr
     isNewUser = result.isNewUser;
     if (isNewUser && tenant) {
       // Provisioning is asynchronous: the client polls GET /api/v1/me.
-      void provisionTenant(app, tenant.id);
+      // provisionTenant marks failures itself; the .catch is the last line
+      // of defense so an unexpected throw can never become an unhandled
+      // rejection (Node 24 would crash the process).
+      const newTenantId = tenant.id;
+      void provisionTenant(app, newTenantId).catch((err: unknown) => {
+        const message = `provisioning failed: ${err instanceof Error ? err.message : String(err)}`;
+        reqCtx.log('error', 'provisioning failed unexpectedly', { tenantId: newTenantId, error: message });
+        markFailed(app, newTenantId, message);
+        void sendAlert(app.config, `tenant ${newTenantId}: ${message}`);
+      });
     }
   }
 

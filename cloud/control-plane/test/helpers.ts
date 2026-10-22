@@ -159,13 +159,14 @@ export function seedUserAndTenant(
     gatewaySecret?: string;
     image?: string;
     appVersion?: string | null;
+    inviteCode?: string;
   },
 ): void {
   const now = Date.now();
   db.prepare(
     `INSERT INTO users (id, phone_e164, display_name, locale, status, invite_code, created_at)
-     VALUES (?, ?, 'Seed User', 'zh', 'active', NULL, ?)`,
-  ).run(opts.userId, opts.phone, now);
+     VALUES (?, ?, 'Seed User', 'zh', 'active', ?, ?)`,
+  ).run(opts.userId, opts.phone, opts.inviteCode ?? null, now);
   db.prepare(
     `INSERT INTO tenants (
        id, user_id, host_id, container_name, volume_name, image, previous_image,
