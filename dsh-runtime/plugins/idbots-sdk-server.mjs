@@ -776,6 +776,10 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
         name: section.name,
         order: Number.isFinite(section.order) ? section.order : 0,
         text: section.text,
+        // interpolate:false keeps authored content (A2A conversation history in
+        // idbots:base, user goal text) literal — a {{placeholder}} quoted in
+        // peer messages must not kill the kernel's strict interpolator.
+        ...(section.interpolate !== undefined ? { interpolate: section.interpolate } : {}),
       })
     }
   }

@@ -533,6 +533,7 @@ man_base_data_pebble/
 !tests/coworkDshWarmupStaleSessionRoute.test.mjs
 !tests/staleModelBindingReconcile.test.mjs
 !tests/coworkDshIdleTurnToolRequest.test.mjs
+!tests/coworkDshSectionInterpolate.test.mjs
 !tests/coworkDshRuntimeKillGuard.test.mjs
 !tests/coworkDshKernelBusyGate.test.mjs
 
