@@ -12,6 +12,7 @@ import {
   resolveServerBootDelayMs,
   resolveServerWorkspacePath,
 } from './server/serverMode';
+import { scheduleStartupTier, cancelDeferredStartupWork, noteSqliteDaemonsStarted, setStartupTierLogger, areStartupTiersCancelled } from './libs/startupTiers';
 import { installServerConsoleLogger, makeServerLogger } from './server/logger';
 import { installServerShutdownHandlers } from './server/shutdown';
 import { runServerBootstrap, ServerBootstrapStore, type ServerBootstrapRun } from './server/bootstrap';
@@ -2434,6 +2435,7 @@ const startupStartedAt = Date.now();
 const startupLog = (stage: string): void => {
   console.log(`[Startup +${Date.now() - startupStartedAt}ms] ${stage}`);
 };
+setStartupTierLogger(startupLog);
 startupLog(`boot marker ${new Date(startupStartedAt).toISOString()}`);
 
 const isDev = process.env.NODE_ENV === 'development';
@@ -3771,41 +3773,6 @@ const runInitialSqliteBackgroundJobs = (): void => {
 const STARTUP_MESSAGE_TIER_DELAY_MS = 2_000;
 const STARTUP_IDLE_TIER_DELAY_MS = 7_000;
 
-let startupTierTimers: Array<ReturnType<typeof setTimeout>> = [];
-let startupTiersCancelled = false;
-
-const clearPendingStartupTiers = (): void => {
-  for (const timer of startupTierTimers) {
-    clearTimeout(timer);
-  }
-  startupTierTimers = [];
-};
-
-/** App cleanup calls this: a pending tier must never start work after cleanup. */
-const cancelDeferredStartupWork = (): void => {
-  startupTiersCancelled = true;
-  clearPendingStartupTiers();
-};
-
-const scheduleStartupTier = (label: string, delayMs: number, run: () => void): void => {
-  if (startupTiersCancelled) return;
-  // REQ-A-33: server mode spreads each tier by a deterministic per-tenant
-  // jitter so a host restarting many tenants does not run their boot work in
-  // the same instant. Desktop timing is unchanged.
-  const effectiveDelayMs = resolveServerBootDelayMs(delayMs, `tier:${label}`);
-  const timer = setTimeout(() => {
-    startupTierTimers = startupTierTimers.filter((entry) => entry !== timer);
-    if (startupTiersCancelled) return;
-    startupLog(`deferred startup "${label}" begin`);
-    try {
-      run();
-    } catch (error) {
-      console.error(`[Startup] deferred startup "${label}" failed:`, error);
-    }
-    startupLog(`deferred startup "${label}" done`);
-  }, effectiveDelayMs);
-  startupTierTimers.push(timer);
-};
 
 /**
  * REQ-A-33 seam for boot jobs that desktop runs inline: desktop behavior is
@@ -3834,7 +3801,7 @@ const runIdleStartupSteps = (steps: StartupIdleStep[]): void => {
   const queue = [...steps];
   const runNext = (): void => {
     const step = queue.shift();
-    if (!step || startupTiersCancelled) return;
+    if (!step || areStartupTiersCancelled()) return;
     startupLog(`idle startup step "${step.label}" begin`);
     try {
       step.run();
@@ -3865,7 +3832,7 @@ const wireGroupChatIngestHooks = (): void => {
 const startSqliteDaemons = (): void => {
   // A re-entry (sqlite recovery restarts the daemons) drops the previous
   // generation's pending tiers so no daemon is started twice by an old timer.
-  clearPendingStartupTiers();
+  noteSqliteDaemonsStarted();
   // Publish the chain write ledger store before any daemon/RPC flow can pin.
   getChainContentHistoryStore();
   // Group-chat ingest must know about the agent-game runtime and local bot

@@ -6,7 +6,11 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 DEFAULT_SERVER_URL="http://127.0.0.1:8923"
 SERVER_URL="${WEB_SEARCH_SERVER:-$DEFAULT_SERVER_URL}"
 ACTIVE_SERVER_URL="$SERVER_URL"
-CONNECTION_CACHE="$PROJECT_DIR/.connection"
+# Runtime files live outside the (possibly read-only) skill source dir.
+RUNTIME_DIR="${WEB_SEARCH_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/idbots-web-search}"
+mkdir -p "$RUNTIME_DIR"
+CONNECTION_CACHE="$RUNTIME_DIR/.connection"
+LOG_FILE="$RUNTIME_DIR/.server.log"
 
 # Colors for output
 RED='\033[0;31m'
@@ -241,9 +245,9 @@ check_server() {
     fi
     echo -e "${RED}✗ Failed to auto-start Bridge Server${NC}" >&2
     echo -e "${YELLOW}  Try manually: bash $SCRIPT_DIR/start-server.sh${NC}" >&2
-    if [ -f "$PROJECT_DIR/.server.log" ]; then
+    if [ -f "$LOG_FILE" ]; then
       echo -e "${YELLOW}  Recent logs:${NC}" >&2
-      tail -20 "$PROJECT_DIR/.server.log" >&2
+      tail -20 "$LOG_FILE" >&2
     fi
     exit 1
   fi
@@ -260,9 +264,9 @@ check_server() {
   if ! is_server_healthy "$ACTIVE_SERVER_URL"; then
     echo -e "${RED}✗ Bridge Server still unavailable after start${NC}" >&2
     echo -e "${YELLOW}  Endpoint checked: $ACTIVE_SERVER_URL/api/health${NC}" >&2
-    if [ -f "$PROJECT_DIR/.server.log" ]; then
+    if [ -f "$LOG_FILE" ]; then
       echo -e "${YELLOW}  Recent logs:${NC}" >&2
-      tail -20 "$PROJECT_DIR/.server.log" >&2
+      tail -20 "$LOG_FILE" >&2
     fi
     exit 1
   fi
@@ -306,9 +310,9 @@ repair_server_runtime() {
 
   if ! WEB_SEARCH_FORCE_REPAIR=1 bash "$SCRIPT_DIR/start-server.sh" > /dev/null 2>&1; then
     echo -e "${RED}✗ Failed to repair web-search runtime${NC}" >&2
-    if [ -f "$PROJECT_DIR/.server.log" ]; then
+    if [ -f "$LOG_FILE" ]; then
       echo -e "${YELLOW}  Recent logs:${NC}" >&2
-      tail -20 "$PROJECT_DIR/.server.log" >&2
+      tail -20 "$LOG_FILE" >&2
     fi
     return 1
   fi

@@ -3,8 +3,14 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PID_FILE="$PROJECT_DIR/.server.pid"
-LOG_FILE="$PROJECT_DIR/.server.log"
+# Runtime files (pid/log) must NOT live in the skill source directory: the
+# tenant image ships /app/SKILLs read-only, so lazy-start failed with
+# Permission denied. WEB_SEARCH_RUNTIME_DIR overrides the default writable
+# location (created on demand).
+RUNTIME_DIR="${WEB_SEARCH_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/idbots-web-search}"
+mkdir -p "$RUNTIME_DIR"
+PID_FILE="$RUNTIME_DIR/.server.pid"
+LOG_FILE="$RUNTIME_DIR/.server.log"
 SERVER_ENTRY="dist/server/index.js"
 FORCE_REPAIR="${WEB_SEARCH_FORCE_REPAIR:-0}"
 SERVER_PORT="8923"
