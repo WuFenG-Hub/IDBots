@@ -86,7 +86,8 @@ test('parseGroupReplyNoul clamps and rejects junk', () => {
 test('groupReplyFromNoul over-replies at the default threshold', () => {
   assert.equal(groupReplyFromNoul(CEREBELLUM_GROUP_REPLY_THRESHOLD), true);
   assert.equal(groupReplyFromNoul(CEREBELLUM_GROUP_REPLY_THRESHOLD - 0.01), false);
-  assert.equal(CEREBELLUM_GROUP_REPLY_THRESHOLD < 0.5, true);
+  // Pinned to the 2026-10-23 live-calibrated value (see constant docstring).
+  assert.equal(CEREBELLUM_GROUP_REPLY_THRESHOLD, 0.5);
 });
 
 test('resolveUnsolicitedGroupReply replaces the coin flip only on a boolean verdict', () => {

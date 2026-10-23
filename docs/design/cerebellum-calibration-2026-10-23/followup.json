@@ -1,0 +1,129 @@
+{
+  "generatedAt": "2026-10-23T06:42:30.982Z",
+  "model": "jev-latest",
+  "productionThreshold": 0.5,
+  "labeled": 12,
+  "lost": 0,
+  "extra": 0,
+  "cases": [
+    {
+      "id": "f1",
+      "sessionTitle": "修复构建失败",
+      "lastAssistant": "构建失败的根因是 pnpm-workspace.yaml 的 overrides 冲突。我已修复并本地验证通过,需要你确认后我再提交,可以吗?",
+      "followUp": true,
+      "want": true,
+      "noul": 1
+    },
+    {
+      "id": "f2",
+      "sessionTitle": "整理本周梦境报告",
+      "lastAssistant": "本周梦境报告已生成:7 晚全部完成,新增 3 条 value_boundary,固定试卷得分 0.72。报告已保存到 output 目录。",
+      "followUp": false,
+      "want": false,
+      "noul": 0.01
+    },
+    {
+      "id": "f3",
+      "sessionTitle": "群任务 #12 交付物验收",
+      "taskName": "官网海报设计",
+      "lastAssistant": "海报终稿已按验收意见改完配色,回传 Pin 已发布。验收通过,任务关闭。",
+      "followUp": false,
+      "want": false,
+      "noul": 0.01
+    },
+    {
+      "id": "f4",
+      "sessionTitle": "升级 DSH 内核",
+      "lastAssistant": "内核 0.2.1 升级计划有两处风险需要你拍板:① 是否接受首个夜间窗口的 15 秒启动延迟;② 回滚保留天数 7 天是否够?请回复 ①② 的决定。",
+      "followUp": true,
+      "want": true,
+      "noul": 0.99
+    },
+    {
+      "id": "f5",
+      "sessionTitle": "回复私聊询问",
+      "lastAssistant": "对方问的是链上手续费问题,我已按最新费率回答并附了查询链接,对方已读。",
+      "followUp": false,
+      "want": false,
+      "noul": 0.02
+    },
+    {
+      "id": "f6",
+      "sessionTitle": "数据库迁移检查",
+      "lastAssistant": "迁移检查发现 capability_drafts 表缺 origin 列。我可以按幂等模式补迁移,但这会写用户库——需要你授权后执行,还是先只做只读检查?",
+      "followUp": true,
+      "want": true,
+      "noul": 0.99
+    },
+    {
+      "id": "f7",
+      "sessionTitle": "冲浪报告汇总",
+      "lastAssistant": "冲浪完成:读了 6 篇,赞了 2 篇,收藏 1 篇到知识库,报告已写入 run 记录。",
+      "followUp": false,
+      "want": false,
+      "noul": 0.01
+    },
+    {
+      "id": "f8",
+      "sessionTitle": "视频渲染参数确认",
+      "lastAssistant": "你给的参数里码率与分辨率不匹配目标平台上限。我推荐两个可行组合(高画质 / 小体积),你选一个我就开跑。",
+      "followUp": true,
+      "want": true,
+      "noul": 0.99
+    },
+    {
+      "id": "f9",
+      "sessionTitle": "链上发布早间简报",
+      "lastAssistant": "早间简报已发布,Pin ID 已记录,buzz 上已有 3 个赞。定时任务下次运行时间明早 8 点。",
+      "followUp": false,
+      "want": false,
+      "noul": 0.01
+    },
+    {
+      "id": "f10",
+      "sessionTitle": "清理孤儿会话",
+      "lastAssistant": "发现 12 个失败冲浪留下的孤儿会话。我可以批量归档(不可逆地移出列表),还是你想先逐个看一眼?",
+      "followUp": true,
+      "want": true,
+      "noul": 0.99
+    },
+    {
+      "id": "f11",
+      "sessionTitle": "Bot 人格设定更新",
+      "lastAssistant": "新 soul 文案已写入草稿,未生效。说「确认」我就替换,说「再改」我继续调整。",
+      "followUp": true,
+      "want": true,
+      "noul": 0.99
+    },
+    {
+      "id": "f12",
+      "sessionTitle": "知识库索引重建",
+      "lastAssistant": "索引重建完成,12 个文档全部可检索,耗时 40 秒。",
+      "followUp": false,
+      "want": false,
+      "noul": 0.01
+    }
+  ],
+  "sweep": [
+    {
+      "threshold": 0.2,
+      "lost": 0,
+      "extra": 0
+    },
+    {
+      "threshold": 0.35,
+      "lost": 0,
+      "extra": 0
+    },
+    {
+      "threshold": 0.5,
+      "lost": 0,
+      "extra": 0
+    },
+    {
+      "threshold": 0.65,
+      "lost": 0,
+      "extra": 0
+    }
+  ]
+}

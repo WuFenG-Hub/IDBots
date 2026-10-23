@@ -1,0 +1,7 @@
+ok  want=design  top=design,copy,eng  做一张活动海报，要醒目的大字和配色
+ok  want=eng  top=eng,copy,design  把交付文件发到链上，并在群里贴 txid
+ok  want=copy  top=copy,design,eng  给这个产品写三句中文介绍
+ok  want=ops  top=ops,copy,design  排一下这周各渠道的发布时间
+ok  want=design  top=design,copy,eng  海报初稿的字体和留白再收一版
+ok  want=eng  top=eng,copy,design  接口 401 了，把免费 relay 的请求修好
+top-1 6/6  recall@3 6/6

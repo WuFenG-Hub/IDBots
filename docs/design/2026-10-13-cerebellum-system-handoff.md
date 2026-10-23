@@ -210,23 +210,36 @@ The sidebar folds every bot-created session (`auto_origin` set) into the collaps
 - Tests: `tests/cerebellumSessionFollowUpGate.test.mjs` (10 — request shape/caps, parse clamping, all failure modes → null, blank no-call, abort deadline) + `tests/coworkSessionFollowUp.test.mjs` (7 — migration idempotency across reopen, round-trips incl. the archived mapper, manual stickiness, onlySources guard, persistence).
 - **`scripts/cerebellum-session-follow-up-eval.mjs` — BUILT 2026-10-23 (dream review P2-3)**, live run still pending — see the calibration record below; the 0.5 threshold still ships on cookbook precedent (#1), not on measured data. Run the eval live before treating the question as calibrated.
 
-## 2.21 Calibration status record (2026-10-23, dream review P2-3)
+## 2.21 Calibration status record (2026-10-23, dream review P2-3; live runs 2026-10-23)
 
 Which cerebellum thresholds have been **live-calibrated** (labeled eval set run
 against the real decision model, threshold swept against the errors that
-matter) and which still ship on cookbook precedent:
+matter) and which still ship on cookbook precedent.
+
+**2026-10-23 live round**: every row below was run against the production
+decision model (`jev-1.14.0`) with a direct TypeSafe key. Two environment
+gotchas, for the next person: `api.typesafe.ai` is region-blocked from some
+egress networks (HTTP 451 — route through an HTTPS proxy, Node needs
+`NODE_USE_ENV_PROXY=1 HTTPS_PROXY=...`), and the `metaso.network` relay only
+accepts `mrk_...` relay keys (a direct `apikey_...` TypeSafe key 401s there).
+Raw artifacts live in `docs/design/cerebellum-calibration-2026-10-23/`.
 
 | Gate | Eval script | Status 2026-10-23 |
 | --- | --- | --- |
-| #4 Memory re-rank | `scripts/cerebellum-memory-eval.mjs` | **uncalibrated** — script exists, only `--dry-run` recorded in this doc; thresholds not measured |
-| #5 Knowledge hot rank | `scripts/cerebellum-knowledge-hot-rank-eval.mjs` | **uncalibrated** — same |
+| #4 Memory re-rank | `scripts/cerebellum-memory-eval.mjs` | **live-calibrated** — recall@5 cerebellum 8/10 vs lexical 3/10 (labeled queries only) |
+| #5 Knowledge hot rank | `scripts/cerebellum-knowledge-hot-rank-eval.mjs` | **live-calibrated** — recall@8 cerebellum 10/10 vs recency 2/10; labeled nouls med 0.96 |
 | #13 Volatile block gate | `scripts/cerebellum-volatile-gate-eval.mjs` | **live-calibrated** — tuned against real Chinese turns per the threshold comments in `src/main/cerebellum/volatileBlockGate.ts` |
-| #15 Group reply | `scripts/cerebellum-group-reply-eval.mjs` | **uncalibrated** — script exists; no live run recorded |
-| #16 Worker rank | `scripts/cerebellum-worker-rank-eval.mjs` | **uncalibrated** — script exists; no live run recorded |
-| #19 Session follow-up | `scripts/cerebellum-session-follow-up-eval.mjs` | **script built 2026-10-23 (12 labeled cases, threshold sweep)** — **dry-run only**: no `TYPESAFE_API_KEY`/`JEV_API_KEY` in the environment, so the 0.5 threshold remains **uncalibrated** until someone with credentials runs `node scripts/cerebellum-session-follow-up-eval.mjs eval` |
+| #15 Group reply | `scripts/cerebellum-group-reply-eval.mjs` | **live-calibrated, threshold changed 0.35 → 0.5** — labeled replies scored ≥0.79, labeled skips ≤0.53; 0.35 over-replied on 2-3/10 casual messages, 0.5 keeps lost=0 with ≤1 marginal extra; sweep rows ≥0.65 also clean on this set |
+| #16 Worker rank | `scripts/cerebellum-worker-rank-eval.mjs` | **live-calibrated** — top-1 6/6, recall@3 6/6 |
+| #19 Session follow-up | `scripts/cerebellum-session-follow-up-eval.mjs` | **live-calibrated** — 12/12 at the shipped 0.5; sweep clean at every row 0.20-0.65 (follow-ups ≥0.99, settled ≤0.02) |
+| Session search rerank | `scripts/cerebellum-conversation-rank-eval.mjs` | **live-calibrated** — recall@1 cerebellum 4/4 vs recency 1/4 |
+| Remote-service shortlist | `scripts/cerebellum-remote-service-shortlist-eval.mjs` | **live-calibrated** — top-1 12/12, recall@3 12/12 (≈$0.0005/run) |
 
-The dry-run-only caveat applies to every "uncalibrated" row above until a live
-run is recorded here with its date and the chosen sweep row.
+Note: the threshold-sweep printers of the group-reply and follow-up scripts
+were fixed in the same round — `scored.push({...item, reply})` used to
+overwrite the case label with the computed verdict, so the sweep compared the
+model against itself and always printed 0/0. The rows above come from the
+fixed scripts.
 
 ## 3. Design rules (do not break)
 
