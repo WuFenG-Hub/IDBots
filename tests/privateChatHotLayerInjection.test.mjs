@@ -201,7 +201,16 @@ function createDirectAnswerHarness() {
         getEffectiveMemoryPolicyForMetabot() {
           return { memoryEnabled: true, memoryUserMemoriesMaxItems: 12, memoryPromptMaxChars: 4000 };
         },
-        listUserMemories() {
+        listUserMemories(options = {}) {
+          if (options.usageClass === 'value_boundary' || options.usageClass === 'work_review') {
+            return [{
+              id: 'm-guidance-1',
+              text: '交付前必须先自己验证一遍结果再回复。',
+              usageClass: options.usageClass,
+              importance: 0.7,
+              updatedAt: 1000,
+            }];
+          }
           return [];
         },
         touchUserMemoriesLastUsed() {},
@@ -293,7 +302,15 @@ test('direct answer path injects <knowledge> and <procedures> and records hot ex
   assert.ok(prompt.includes('<procedures>') || prompt.includes('视频交付流程'), 'procedures hot layer injected');
   assert.equal(listKnowledgeCalls, 1);
   // Exposure accounting rides along with the same semantics as cowork.
-  assert.equal(exposures.length, 1);
+  assert.ok(exposures.length >= 1, 'the craft batch rides along');
+  // Review M5: the guidance memories rendered in BOTH private-chat paths
+  // (the scoped memory blocks and the A2A experience block) join the
+  // hot-layer ledger as kind 'memory'.
+  const memoryExposureItems = exposures.flatMap((batch) => batch.items).filter((item) => item.kind === 'memory');
+  assert.ok(
+    memoryExposureItems.some((item) => item.id === 'm-guidance-1' && item.exposure === 'hot'),
+    'rendered guidance memories are recorded for the nightly usage audit',
+  );
   assert.deepEqual(
     exposures[0].items.sort((a, b) => a.id.localeCompare(b.id)),
     [

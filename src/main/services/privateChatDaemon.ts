@@ -1993,6 +1993,13 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
   limit: number;
   currentUserText?: string;
   cerebellumMemoryRanker?: PrivateChatCerebellumMemoryRankerFn;
+  /**
+   * Review M5: hot-layer exposure accounting for the guidance memories
+   * (value_boundary / work_review) that actually rendered — same semantics
+   * as the cowork runner, so A2A-heavy bots' guidance memories finally
+   * reach the nightly usage audit (and last_applied_at). Absent → skipped.
+   */
+  recordGuidanceExposures?: (memoryIds: string[]) => void;
 }): string | Promise<string> {
   const resolved = resolveMemoryScopes({
     metabotId: params.metabotId,
@@ -2054,6 +2061,25 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
     // Injection IS the usage event for the hygiene decay clock.
     if (injectedIds.length > 0) {
       params.memoryBackend.touchUserMemoriesLastUsed(params.metabotId, injectedIds);
+      // Review M5: the guidance memories among the rendered ids enter the
+      // hot-layer exposure ledger (kind 'memory') with cowork semantics.
+      if (params.recordGuidanceExposures) {
+        const usageClassById = new Map<string, string>();
+        for (const entry of [...ownerEntries, ...contactEntries, ...conversationEntries]) {
+          if (entry?.id && entry.usageClass) usageClassById.set(entry.id, entry.usageClass);
+        }
+        const guidanceIds = injectedIds.filter((id) => {
+          const usageClass = usageClassById.get(id);
+          return usageClass === 'value_boundary' || usageClass === 'work_review';
+        });
+        if (guidanceIds.length > 0) {
+          try {
+            params.recordGuidanceExposures(guidanceIds);
+          } catch {
+            // exposure telemetry is best-effort
+          }
+        }
+      }
     }
     return xml;
   };
@@ -5434,6 +5460,15 @@ async function processOne(
           limit: memoryPolicy.memoryUserMemoriesMaxItems,
           currentUserText: plaintext,
           cerebellumMemoryRanker,
+          // Review M5: guidance memories that render here join the nightly
+          // usage audit's evidence pool (kind 'memory'), cowork semantics.
+          recordGuidanceExposures: (memoryIds) => {
+            coworkStore.recordHotLayerExposures({
+              metabotId: metabot.id,
+              usageDate: formatBotWorkspaceDate(new Date()),
+              items: memoryIds.map((id) => ({ kind: 'memory', id, exposure: 'hot' })),
+            });
+          },
         })
       : '';
     const memoryContext = typeof memoryContextOrPromise === 'string'
@@ -5708,6 +5743,45 @@ async function processOne(
       } catch (error) {
         rethrowSqliteWasmBoundsError(error);
         emitLog(`[PrivateChat] Knowledge/procedures hot layer unavailable for message ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    // Review M5: the guidance memories rendered into the A2A experience
+    // block join the hot-layer exposure ledger too (kind 'memory'), same
+    // semantics as the cowork runner — text-presence keeps the accounting
+    // honest about what actually rendered under the char-budget caps.
+    if (experienceContext && memoryPolicy.memoryEnabled) {
+      try {
+        const renderedGuidanceIds = [
+          ...memoryBackend.listUserMemories({
+            metabotId: metabot.id,
+            scope: createOwnerMemoryScope(),
+            usageClass: 'value_boundary',
+            status: 'created',
+            includeDeleted: false,
+            limit: 5,
+            offset: 0,
+          }),
+          ...memoryBackend.listUserMemories({
+            metabotId: metabot.id,
+            scope: createOwnerMemoryScope(),
+            usageClass: 'work_review',
+            status: 'created',
+            includeDeleted: false,
+            limit: 5,
+            offset: 0,
+          }),
+        ]
+          .filter((memory) => memory.text && experienceContext.includes(memory.text))
+          .map((memory) => memory.id);
+        if (renderedGuidanceIds.length > 0) {
+          coworkStore.recordHotLayerExposures({
+            metabotId: metabot.id,
+            usageDate: formatBotWorkspaceDate(new Date()),
+            items: renderedGuidanceIds.map((id) => ({ kind: 'memory', id, exposure: 'hot' })),
+          });
+        }
+      } catch {
+        // exposure telemetry is best-effort
       }
     }
     const systemPromptWithExperience = [
