@@ -1,0 +1,17 @@
+diff --git a/lib/index.js b/lib/index.js
+index d1edf17749338cb8bf1222f8d7b3272c2d45532e..2e4d2bae429ce529f0c963b277e4d5c07be858ad 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -933,6 +933,12 @@ function parseGrepArgs(args) {
+ function buildGrepCommand(input) {
+ 	const parts = ["--json", `--regexp=${input.pattern}`];
+ 	if (input.include !== void 0) parts.push(`--glob=${input.include}`);
++	// An explicitly named search target must actually be searched. Without
++	// --no-ignore, gitignore pruning (e.g. build outputs like METAAPPs/*)
++	// silently drops the whole tree and reports "No matches found" as if the
++	// content did not exist. Ambient scans without an explicit path keep the
++	// ignore semantics. Mirrors buildGlobCommand's unconditional --no-ignore.
++	if (input.path !== void 0) parts.push("--no-ignore");
+ 	if (input.path !== void 0) parts.push("--", input.path);
+ 	return parts;
+ }
