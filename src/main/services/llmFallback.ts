@@ -6,6 +6,7 @@
 
 import type { Metabot } from '../types/metabot';
 import { toLlmEffortLevel, type LlmEffortLevel } from '../libs/llmEffort';
+import { classifyOneShotLlmTerminalError, type OneShotLlmTerminalKind } from '../libs/llmTerminalError';
 
 /** Normalize a raw llm id (model id or legacy provider key) for use in LLM calls; null when unusable. */
 export function normalizeMetabotLlmId(value: unknown): string | null {
@@ -192,6 +193,121 @@ export async function runWithLlmFallback<TResult, TOptions extends LlmFallbackCa
         combined.name = primaryError.name;
       }
       throw combined;
+    }
+  }
+}
+
+/** A last-resort route offered by the system rescue rung. */
+export interface SystemRescueRoute {
+  llmId: string;
+  llmProvider: string;
+}
+
+/** Details of a successful system rescue, for owner-facing notification. */
+export interface BrainRescueInfo {
+  fromLlmId: string | null;
+  fromProvider: string | null;
+  toLlmId: string;
+  toProvider: string;
+  /** Terminal class of the failure that triggered the rescue. */
+  kind: OneShotLlmTerminalKind;
+  /** Message of the error that triggered the rescue. */
+  triggerError: string;
+}
+
+export interface SystemRescueRunOptions {
+  /**
+   * Resolve the last-resort route given the (model, provider) pairs already
+   * tried this call; null when no usable alternative exists. Injected so this
+   * module stays store-free and unit-testable — the production resolver is
+   * claudeSettings.resolveSystemRescueBrain.
+   */
+  resolveRescue: (tried: Array<{ llmId: string | null; llmProvider: string | null }>) => SystemRescueRoute | null;
+  /** Called after a rescue attempt SUCCEEDS, so callers can surface the switch. */
+  onRescue?: (info: BrainRescueInfo) => void;
+}
+
+/**
+ * The rung BELOW the fallback brain (2026-10-23 new-user free-quota post-mortem):
+ * a bot whose primary brain died on a terminal error (quota exhausted, auth
+ * rejected, model/config not served) and whose fallback brain is unset or also
+ * failed used to die outright — in passive scenarios (private chat, group tasks,
+ * dreams) that meant a silently consumed message. When every configured brain
+ * fails TERMINALLY, this wrapper makes ONE attempt on a system-resolved route
+ * (e.g. the user's own provider key they configured but never wired into the
+ * bot's brain settings).
+ *
+ * Gated strictly on terminal classification: transient failures (timeout, 5xx,
+ * connection reset, bare 429 rate limit) rethrow untouched, so a rescue switch
+ * never masks a flaky network and never bills another provider for a blip.
+ * The rescue attempt drops the caller's effort override (a different model
+ * family's default is safer than a mismatched effort) and gets its own fresh
+ * per-attempt timeout window like any other attempt. Nothing is anchored — the
+ * next call re-resolves from the bot's own brain settings.
+ */
+export async function runWithSystemRescue<TResult, TOptions extends LlmFallbackCallOptions>(
+  options: TOptions,
+  attempt: (options: TOptions) => Promise<TResult>,
+  rescue: SystemRescueRunOptions,
+  log: (message: string) => void = console.log
+): Promise<TResult> {
+  try {
+    return await runWithLlmFallback(options, attempt, log);
+  } catch (error) {
+    const kind = classifyOneShotLlmTerminalError(error);
+    if (!kind) throw error;
+    const sharedSignal = (options as { signal?: AbortSignal }).signal;
+    if (sharedSignal?.aborted) throw error;
+
+    const tried: Array<{ llmId: string | null; llmProvider: string | null }> = [
+      { llmId: normalizeMetabotLlmId(options.llmId), llmProvider: normalizeMetabotLlmId(options.llmProvider) },
+    ];
+    const fallbackId = resolveFallbackLlmId(
+      options.llmId,
+      options.fallbackLlmId,
+      options.llmProvider,
+      options.fallbackLlmProvider
+    );
+    if (fallbackId) {
+      tried.push({ llmId: fallbackId, llmProvider: normalizeMetabotLlmId(options.fallbackLlmProvider) });
+    }
+
+    const route = rescue.resolveRescue(tried);
+    if (!route) throw error;
+
+    const fromLabel = tried[0]?.llmId ?? 'default';
+    const fromProvider = tried[0]?.llmProvider ?? null;
+    const rescueLabel = `${route.llmId}@${route.llmProvider}`;
+    const triggerMessage = error instanceof Error ? error.message : String(error);
+    log(
+      `[LLM Rescue] Brain '${fromLabel}' failed terminally (${kind}); ` +
+      `making one rescue attempt on '${rescueLabel}'.`
+    );
+    try {
+      const result = await attempt(withPerAttemptSignal({
+        ...options,
+        llmId: route.llmId,
+        llmProvider: route.llmProvider,
+        fallbackLlmId: null,
+        fallbackLlmProvider: null,
+        effort: null,
+        fallbackEffort: null,
+      }));
+      try {
+        rescue.onRescue?.({
+          fromLlmId: tried[0]?.llmId ?? null,
+          fromProvider,
+          toLlmId: route.llmId,
+          toProvider: route.llmProvider,
+          kind,
+          triggerError: triggerMessage,
+        });
+      } catch { /* owner notification is best-effort and must never fail the call */ }
+      return result;
+    } catch (rescueError) {
+      const rescueMessage = rescueError instanceof Error ? rescueError.message : String(rescueError);
+      console.error(`[LLM Rescue] Rescue route '${rescueLabel}' also failed: ${rescueMessage}`);
+      throw new Error(`${triggerMessage} (system rescue '${rescueLabel}' also failed: ${rescueMessage})`);
     }
   }
 }

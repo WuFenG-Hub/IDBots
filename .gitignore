@@ -460,6 +460,7 @@ man_base_data_pebble/
 !tests/memoryHygieneService.test.mjs
 !tests/memoryLastUsedTouch.test.mjs
 !tests/llmFallback.test.mjs
+!tests/llmSystemRescue.test.mjs
 !tests/systemBrain.test.mjs
 !tests/deepConsolidationPrompt.test.mjs
 !tests/teamCultureStore.test.mjs

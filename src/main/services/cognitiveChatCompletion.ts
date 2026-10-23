@@ -6,12 +6,12 @@
  * Anthropic (/v1/messages) APIs so that e.g. DeepSeek (anthropic format) works correctly.
  */
 
-import { resolveApiConfigForModel } from '../libs/claudeSettings';
+import { resolveApiConfigForModel, resolveSystemRescueBrain } from '../libs/claudeSettings';
 import { clearCoworkSessionUpstream } from '../libs/coworkOpenAICompatProxy';
 import { buildOpenCodeGoHeaders } from '../libs/opencodeGatewayHeaders';
 import { effortForAnthropicWire, effortForOpenAiWire, type LlmEffortLevel } from '../libs/llmEffort';
 import { budgetAssumesThinking, modelAlwaysThinks } from '../libs/modelThinking';
-import { runWithLlmFallback } from './llmFallback';
+import { runWithSystemRescue, type BrainRescueInfo } from './llmFallback';
 import { fetchLlmPost } from './llmFetch';
 
 let oneShotPinCounter = 0;
@@ -246,6 +246,13 @@ export interface ChatCompletionOptions {
    * instead of sharing one caller signal.
    */
   attemptTimeoutMs?: number;
+  /**
+   * Called after the system-rescue rung (llmFallback.runWithSystemRescue)
+   * answers a call whose configured brains all failed terminally — passive
+   * scenarios (private chat, group tasks) use it to surface the silent
+   * provider switch to the owner.
+   */
+  onBrainRescue?: (info: BrainRescueInfo) => void;
 }
 
 /**
@@ -253,12 +260,34 @@ export interface ChatCompletionOptions {
  * Used by Cognitive Orchestrator for multi-turn tool loop (Task 12.4).
  * When options.fallbackLlmId is set (and differs from llmId), a failed primary
  * attempt (config resolution or API call) is retried once with the fallback.
+ * When every configured brain fails TERMINALLY (quota/auth/config), one last
+ * attempt rides the system rescue brain (first enabled, keyed, non-free
+ * provider) so passive scenarios keep working for users who configured their
+ * own provider but never wired it into the bot's brain settings.
  */
 export async function chatCompletionWithTools(
   messages: ChatMessage[],
   options: ChatCompletionOptions = {}
 ): Promise<ChatCompletionResult> {
-  return runWithLlmFallback(options, (attemptOptions) => chatCompletionSingleAttempt(messages, attemptOptions));
+  return runWithSystemRescue(
+    options,
+    (attemptOptions) => chatCompletionSingleAttempt(messages, attemptOptions),
+    {
+      resolveRescue: (tried) => resolveSystemRescueBrain({
+        excludeProviders: tried.map((route) => route.llmProvider),
+      }),
+      onRescue: (info) => {
+        console.warn(
+          `[Orchestrator] System rescue: brain '${info.fromLlmId ?? 'default'}'` +
+          `${info.fromProvider ? ` (${info.fromProvider})` : ''} failed terminally (${info.kind}); ` +
+          `answered via ${info.toLlmId} (${info.toProvider}).`
+        );
+        try {
+          options.onBrainRescue?.(info);
+        } catch { /* owner notification is best-effort and must never fail the call */ }
+      },
+    }
+  );
 }
 
 /** Single chat completion attempt against the resolved config for options.llmId. */
@@ -389,6 +418,8 @@ export async function performChatCompletionForOrchestrator(
     webSearch?: boolean;
     /** Per-attempt timeout in ms; primary and fallback each get a fresh window. */
     attemptTimeoutMs?: number;
+    /** Called after the system-rescue rung answers a terminally-failed call. */
+    onBrainRescue?: (info: BrainRescueInfo) => void;
   } = {}
 ): Promise<string> {
   const messages: ChatMessage[] = [
@@ -408,6 +439,7 @@ export async function performChatCompletionForOrchestrator(
     thinking: options.thinking,
     webSearch: options.webSearch,
     attemptTimeoutMs: options.attemptTimeoutMs,
+    onBrainRescue: options.onBrainRescue,
   });
   const content = result.content?.trim() ?? '';
   if (result.tool_calls?.length) {
