@@ -255,6 +255,7 @@ import { buildMetataskAgentTools, type MetaTaskAgentControl } from './metataskAg
 import { buildPreferenceAgentTools, type PreferenceAgentControl } from './preferenceAgentTools';
 import { buildPredictionAgentTools, type PredictionAgentControl } from './predictionAgentTools';
 import { checkUploadAllowed, wrapUploadWithGate, type UploadGateDeps } from './chainUploadGate';
+import { detectExternalAgentCli } from './externalAgentCli';
 import { buildOmniCasterAgentTools } from './omniCasterAgentTools';
 import { buildPostSimpleLogAgentTools } from './postSimpleLogAgentTools';
 import {
@@ -11613,6 +11614,43 @@ export class CoworkRunner extends EventEmitter {
       // allow, outside → auto-deny) instead of blocking on a confirmation no
       // human will answer.
       const permissionMode = activeSession?.permissionMode ?? 'default'
+      // External agent CLIs (cursor-agent, claude, codex, …) spawn their own
+      // agent loops whose child processes walk the filesystem, and on macOS
+      // every TCC check those children trigger is attributed to THIS app as
+      // the responsible process — the source of the recurring "IDBots wants
+      // to access other apps' data" dialogs (2026-10-23 bot-4 cursor-agent
+      // incident: 48 TCC requests in 24h, none permanently answerable).
+      // Gated exactly like deletes: attended default sessions confirm each
+      // invocation; unattended (autoApprove) sessions auto-deny with an
+      // instructive reason because nobody answers their dialogs;
+      // acceptEdits/bypassPermissions skip, matching the delete policy.
+      if (permissionMode === 'default' && normalized === 'bash') {
+        const agentCli = detectExternalAgentCli(this.extractToolCommand(toolInput))
+        if (agentCli) {
+          const commandPreview = this.truncateCommandPreview(this.extractToolCommand(toolInput))
+          const cliDetail = commandPreview ? tApp(` 命令: ${commandPreview}`, ` Command: ${commandPreview}`) : ''
+          if (activeSession?.autoApprove === true) {
+            coworkLog('WARN', 'evaluateDshToolPolicy', 'Auto-denied external agent CLI in unattended session', {
+              sessionId,
+              agentCli,
+            })
+            return {
+              decision: 'deny',
+              reason: tApp(
+                `无人值守会话不允许启动外部 Agent CLI "${agentCli}"：其子进程的文件访问会以本应用名义反复触发系统权限弹窗。请改用本会话自带的工具完成任务，或请用户在有人看管的会话中手动运行。${cliDetail}`,
+                `External agent CLI "${agentCli}" is not allowed in unattended sessions: its child processes repeatedly trigger OS permission prompts attributed to this app. Use this session's own built-in tools instead, or ask the user to run it in an attended session.${cliDetail}`
+              ),
+            }
+          }
+          return {
+            decision: 'ask',
+            reason: tApp(
+              `工具 "${toolName}" 将启动外部 Agent CLI "${agentCli}"。该类程序的子进程会以本应用名义访问文件，可能反复触发系统权限弹窗（如"IDBots 想访问其他 App 的数据"）。是否允许本次运行？${cliDetail}`,
+              `Tool "${toolName}" will launch the external agent CLI "${agentCli}". Its child processes access files under this app's identity and may repeatedly trigger OS permission prompts (e.g. "IDBots wants to access other apps' data"). Allow this run?${cliDetail}`
+            ),
+          }
+        }
+      }
       if (permissionMode === 'default' && activeSession?.autoApprove === true) {
         const unattendedDecision = this.evaluateUnattendedDeletePolicy(sessionId, activeSession, normalized, toolInput)
         if (unattendedDecision) {
