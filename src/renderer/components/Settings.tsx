@@ -20,6 +20,7 @@ import { setAvailableModels, setSelectedModel } from '../store/slices/modelSlice
 import { RootState } from '../store';
 import ThemedSelect from './ui/ThemedSelect';
 import SecretInput from './ui/SecretInput';
+import { useTextInputContextMenu } from './ui/useTextInputContextMenu';
 import type {
   CoworkExecutionMode,
   CoworkSandboxProgress,
@@ -638,6 +639,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
   // Raw input for the draft model's optional context window (empty = default 128K).
   const [customModelContextWindow, setCustomModelContextWindow] = useState('');
   const [customProviderError, setCustomProviderError] = useState<string | null>(null);
+
+  // Right-click cut/copy/paste menus for the Base URL inputs on this page
+  // (API-key fields get theirs from SecretInput itself).
+  const providerBaseUrlContextMenu = useTextInputContextMenu();
+  const cerebellumBaseUrlContextMenu = useTextInputContextMenu();
+  const customProviderBaseUrlContextMenu = useTextInputContextMenu();
 
   const coworkConfig = useSelector((state: RootState) => state.cowork.config);
   const imConfig = useSelector((state: RootState) => state.im.config);
@@ -3341,9 +3348,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                     id={`${activeProvider}-baseUrl`}
                     value={providers[activeProvider].baseUrl}
                     onChange={(e) => handleProviderConfigChange(activeProvider, 'baseUrl', e.target.value)}
+                    onContextMenu={providerBaseUrlContextMenu.onContextMenu}
                     className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
                     placeholder={i18nService.t('baseUrlPlaceholder')}
                   />
+                  {providerBaseUrlContextMenu.menu}
                 </div>
               )}
 
@@ -3615,9 +3624,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                       id="cerebellum-baseUrl"
                       value={cerebellum.baseUrl}
                       onChange={(e) => handleCerebellumConfigChange('baseUrl', e.target.value)}
+                      onContextMenu={cerebellumBaseUrlContextMenu.onContextMenu}
                       className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
                       placeholder="https://api.typesafe.ai"
                     />
+                    {cerebellumBaseUrlContextMenu.menu}
                   </div>
 
                   <div>
@@ -4097,9 +4108,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                           setCustomProviderError(null);
                         }
                       }}
+                      onContextMenu={customProviderBaseUrlContextMenu.onContextMenu}
                       className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
                       placeholder={i18nService.t('providerBaseUrlPlaceholder')}
                     />
+                    {customProviderBaseUrlContextMenu.menu}
                   </div>
                   <div>
                     <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
