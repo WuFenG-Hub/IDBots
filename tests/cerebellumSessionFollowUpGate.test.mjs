@@ -26,6 +26,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 import {
   CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD,
@@ -289,7 +290,7 @@ test('eval script builds the request through the module', () => {
 
 test('eval script --dry-run self-checks without credentials', () => {
   const output = execFileSync(process.execPath, ['scripts/cerebellum-session-follow-up-eval.mjs', 'eval', '--dry-run'], {
-    cwd: new URL('..', import.meta.url).pathname,
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
     encoding: 'utf8',
   });
   assert.match(output, /dry-run: \d+ cases — no API calls made\./);
@@ -300,7 +301,7 @@ test('eval script --dry-run self-checks without credentials', () => {
 test('eval script refuses a live run without credentials', () => {
   assert.throws(
     () => execFileSync(process.execPath, ['scripts/cerebellum-session-follow-up-eval.mjs', 'eval'], {
-      cwd: new URL('..', import.meta.url).pathname,
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
       encoding: 'utf8',
       env: { ...process.env, TYPESAFE_API_KEY: '', JEV_API_KEY: '' },
       stdio: ['ignore', 'pipe', 'pipe'],
