@@ -1129,11 +1129,20 @@ export class DreamStore {
    * error or exhausted retry budget); the error text says which. */
   finishRun(metabotId: number, dreamDate: string, status: 'completed' | 'failed' | 'terminal-failed', error?: string | null): void {
     const now = Date.now();
+    // Upsert (review M1): a dream that dies BEFORE beginRun completes (sick
+    // store mid-recovery) has no row to UPDATE — the failure must still land
+    // as a failed run or the night looks like it never happened.
     this.db.run(`
-      UPDATE metabot_dream_runs
-      SET status = ?, error = ?, completed_at = ?, updated_at = ?
-      WHERE metabot_id = ? AND dream_date = ?
-    `, [status, error ?? null, now, now, metabotId, dreamDate]);
+      INSERT INTO metabot_dream_runs (
+        id, metabot_id, dream_date, status, attempt_count, llm_id, error,
+        started_at, completed_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 1, NULL, ?, ?, ?, ?, ?)
+      ON CONFLICT(metabot_id, dream_date) DO UPDATE SET
+        status = excluded.status,
+        error = excluded.error,
+        completed_at = excluded.completed_at,
+        updated_at = excluded.updated_at
+    `, [uuidv4(), metabotId, dreamDate, status, error ?? null, now, now, now, now]);
     this.saveDb();
   }
 

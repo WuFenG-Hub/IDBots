@@ -1039,3 +1039,52 @@ test('a TRANSIENT override failure retries in place instead of degrading to the 
     ctx.cleanup()
   }
 })
+
+// ── Review M1: a throwing beginRun must not strand the bot in dreamingBots ──
+
+test('beginRun throwing leaves no dreaming-bot stuck and lands a failed run row', async () => {
+  const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/main/dreamStore.js'));
+  const { db, cleanup } = await createSqliteStore();
+  const coworkStore = createCoworkStore(db);
+  const dreamStore = new DreamStore(db, () => {});
+  seedActivity(coworkStore, db);
+  let beginCalls = 0;
+  const failingStore = new Proxy(dreamStore, {
+    get(target, prop, receiver) {
+      if (prop === 'beginRun') {
+        return (...args) => {
+          beginCalls += 1;
+          if (beginCalls === 1) throw new Error('sqlite bounds error (simulated)');
+          return Reflect.get(target, prop, receiver).apply(target, args);
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  const service = new DreamService({
+    coworkStore,
+    metabotStore: metabotStoreStub(),
+    dreamStore: failingStore,
+    llmTimeoutMs: 5000,
+    now: () => new Date(2026, 7, 1, 3, 0),
+    performChat: async () => makePayload(),
+  });
+  try {
+    // First run: beginRun throws before any attempt row exists.
+    await service.runNow(5, DAY);
+    assert.equal(service.isDreaming(5), false, 'bot must not stay stuck in dreamingBots');
+    assert.equal(beginCalls, 1);
+    const failedRun = dreamStore.getRun(5, DAY);
+    assert.equal(failedRun.status, 'failed', 'the failure lands on the run row');
+    assert.match(failedRun.error ?? '', /sqlite bounds error/);
+
+    // The date can be retried — the second run proceeds normally.
+    await service.runNow(5, DAY);
+    assert.equal(service.isDreaming(5), false);
+    const second = dreamStore.getRun(5, DAY);
+    assert.equal(second.status, 'completed', `a later retry succeeds (error=${second.error})`);
+    assert.equal(beginCalls, 2);
+  } finally {
+    cleanup();
+  }
+});

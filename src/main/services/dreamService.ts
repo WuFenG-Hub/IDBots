@@ -1246,9 +1246,15 @@ export class DreamService {
     this.dreamingBots.add(metabotId);
     this.emitDreaming(metabotId, true);
     const runStartedAtMs = Date.now();
-    const brain = this.resolveDreamBrain(metabot);
-    const currentRun = this.deps.dreamStore.beginRun(metabotId, date, brain.llmId, DREAM_VERSION);
+    // Review M1: the brain resolution and beginRun used to run OUTSIDE the
+    // try — a throwing beginRun (sick store mid-recovery) never reached the
+    // finally, leaving the bot in dreamingBots forever (every later enqueue
+    // returned false) and escaped as an unhandled rejection. Both live inside
+    // the try now; currentRun stays null until beginRun succeeds.
+    let currentRun: ReturnType<DreamStore['beginRun']> | null = null;
     try {
+      const brain = this.resolveDreamBrain(metabot);
+      currentRun = this.deps.dreamStore.beginRun(metabotId, date, brain.llmId, DREAM_VERSION);
       // Pre-dream surf ("做梦前自动冲浪"): the bot browses MetaWeb first so
       // tonight's dream can fold what it learned into long-term memory. The
       // wiring owns enable/recency/timeout/failure isolation; a null or
@@ -1543,24 +1549,33 @@ export class DreamService {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      // Timeout-class failures (attempt aborts, the run-budget sentinel) never
-      // become terminal no matter how many attempts a date has burned: a
-      // timeout says the window was too small, and the next scheduled window
-      // — with the wider adaptive tier and the ≥10-min consecutive-timeout
-      // backoff — can genuinely fix it. Only deterministic provider
-      // rejections (H-80) and the retry cap on OTHER retryable errors end in
-      // terminal-failed.
-      const timeoutClass = isTimeoutError(message);
-      if (!timeoutClass && (classifyDreamError(message) === 'terminal' || currentRun.attemptCount >= DREAM_RETRY_MAX_ATTEMPTS)) {
-        console.warn(
-          `[DreamService] Dream terminally failed for metabot ${metabotId} date ${date} `
-          + `(attempt ${currentRun.attemptCount}, no further auto-retry):`,
-          message,
-        );
-        this.deps.dreamStore.finishRun(metabotId, date, 'terminal-failed', message);
-      } else {
-        console.warn(`[DreamService] Dream failed for metabot ${metabotId} date ${date}:`, message);
+      if (!currentRun) {
+        // The failure happened BEFORE beginRun produced an attempt row
+        // (brain resolution or the beginRun write itself). There is no
+        // attempt count to classify against — record a plain failed row
+        // (finishRun upserts) and let the scheduler retry per policy.
+        console.warn(`[DreamService] Dream aborted before run start for metabot ${metabotId} date ${date}:`, message);
         this.deps.dreamStore.finishRun(metabotId, date, 'failed', message);
+      } else {
+        // Timeout-class failures (attempt aborts, the run-budget sentinel) never
+        // become terminal no matter how many attempts a date has burned: a
+        // timeout says the window was too small, and the next scheduled window
+        // — with the wider adaptive tier and the ≥10-min consecutive-timeout
+        // backoff — can genuinely fix it. Only deterministic provider
+        // rejections (H-80) and the retry cap on OTHER retryable errors end in
+        // terminal-failed.
+        const timeoutClass = isTimeoutError(message);
+        if (!timeoutClass && (classifyDreamError(message) === 'terminal' || currentRun.attemptCount >= DREAM_RETRY_MAX_ATTEMPTS)) {
+          console.warn(
+            `[DreamService] Dream terminally failed for metabot ${metabotId} date ${date} `
+            + `(attempt ${currentRun.attemptCount}, no further auto-retry):`,
+            message,
+          );
+          this.deps.dreamStore.finishRun(metabotId, date, 'terminal-failed', message);
+        } else {
+          console.warn(`[DreamService] Dream failed for metabot ${metabotId} date ${date}:`, message);
+          this.deps.dreamStore.finishRun(metabotId, date, 'failed', message);
+        }
       }
     } finally {
       this.dreamingBots.delete(metabotId);
