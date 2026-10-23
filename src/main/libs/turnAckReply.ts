@@ -79,7 +79,7 @@ export function buildTurnAckReplyMessages(
       content: [
         'You write the opening acknowledgment of a chat assistant. The user just sent a message; the full reply is being prepared separately and will appear after yours.',
         'Write ONE short acknowledgment that confirms you received and understood the request and says in plain words what you are about to do for it.',
-        'Rules: 1-2 sentences, under 40 words. Same language as the user message. Do not answer, solve, or start the task. Do not promise results or time limits, and do not ask questions. No markdown, lists, quotes, emoji, or greetings. Output only the acknowledgment text.',
+        'Rules: 1-2 sentences, under 40 words. Same language as the user message. Do not answer, solve, or start the task. Do not promise results or time limits, and do not ask questions. No markdown, lists, quotes, emoji, or greetings. Output only the finished acknowledgment text — never your thinking, deliberation, or reasoning about these rules or the message.',
         "Never describe, analyze, translate, or quote the user's message; never mention what language it is in.",
       ].join('\n'),
     },
