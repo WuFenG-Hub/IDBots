@@ -15,7 +15,9 @@ import {
   ecdhEncrypt,
 } from './metaWebCrypto';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
-import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
+import { metabotBrainOptions, normalizeMetabotLlmId, type BrainRescueInfo } from './llmFallback';
+import { classifyOneShotLlmTerminalError, type OneShotLlmTerminalKind } from '../libs/llmTerminalError';
+import { tApp } from '../libs/appLanguage';
 import type { CoworkRunner } from '../libs/coworkRunner';
 import { isDshShutdownError } from '../libs/dshShutdownError';
 import { PrivateChatOrderCowork, type OrderCoworkRequest } from './privateChatOrderCowork';
@@ -224,6 +226,8 @@ type PrivateChatPerformChatFn = (
     effort?: 'off' | 'low' | 'high' | 'max' | null;
     fallbackEffort?: 'off' | 'low' | 'high' | 'max' | null;
     thinking?: 'enabled' | 'disabled';
+    /** Called when the system-rescue rung answered the call after every configured brain failed terminally. */
+    onBrainRescue?: (info: BrainRescueInfo) => void;
   }
 ) => Promise<string>;
 type GetMetaIDCognitionPromptBlockFn = (input: {
@@ -272,6 +276,58 @@ export function getActiveA2AReplyTaskIds(): string[] {
 }
 /** Backoff state for chat-skill turns that failed with a retryable error. */
 const privateChatSkillTurnRetries = new Map<string, { attempts: number; nextRetryAt: number }>();
+
+/**
+ * Owner-visible brain-failure notices (2026-10-23 new-user free-quota
+ * post-mortem): passive private-chat failures used to surface only as a
+ * cowork.log line while the peer saw silence, and a system-rescue provider
+ * switch was invisible to the owner. Both now post ONE throttled system
+ * message per conversation into the local A2A session view — visible to the
+ * owner in the chat thread, never sent on-chain to the peer. Cleared in
+ * stopPrivateChatDaemon.
+ */
+const privateChatBrainNotices = new Map<string, number>();
+/** Minimum gap between two brain notices of the same kind in one conversation. */
+const PRIVATE_CHAT_BRAIN_NOTICE_THROTTLE_MS = 60 * 60 * 1000;
+
+function shouldEmitPrivateChatBrainNotice(conversationKey: string, kind: string, now: number = Date.now()): boolean {
+  const key = `${conversationKey}:${kind}`;
+  const last = privateChatBrainNotices.get(key) ?? 0;
+  if (now - last < PRIVATE_CHAT_BRAIN_NOTICE_THROTTLE_MS) return false;
+  privateChatBrainNotices.set(key, now);
+  return true;
+}
+
+function describeBrainFailureKind(kind: OneShotLlmTerminalKind): { zh: string; en: string } {
+  if (kind === 'quota') return { zh: '额度耗尽', en: 'quota exhausted' };
+  if (kind === 'auth') return { zh: '鉴权失败', en: 'authentication failed' };
+  return { zh: '模型/配置不可用', en: 'model/config unavailable' };
+}
+
+function appendPrivateChatBrainNotice(params: {
+  coworkStore: Pick<CoworkStore, 'addMessage'>;
+  sessionId: string;
+  externalConversationId: string;
+  content: string;
+  emitToRenderer?: RendererEmitter;
+}): void {
+  try {
+    const message = params.coworkStore.addMessage(params.sessionId, {
+      type: 'system',
+      content: params.content,
+      metadata: {
+        sourceChannel: 'metaweb_private',
+        externalConversationId: params.externalConversationId,
+        privateChatBrainNotice: true,
+        suppressRunningStatus: true,
+      },
+    });
+    params.emitToRenderer?.('cowork:stream:message', {
+      sessionId: params.sessionId,
+      message,
+    });
+  } catch { /* the owner notice is best-effort and must never break the reply pipeline */ }
+}
 
 /**
  * Row ids whose ciphertext failed to decrypt with every known shared-secret
@@ -5695,6 +5751,28 @@ async function processOne(
             effort: brain.effort,
             fallbackEffort: brain.fallbackEffort,
             thinking: 'enabled',
+            onBrainRescue: (info) => {
+              // The reply succeeded on the system rescue route after every
+              // configured brain failed terminally — surface the silent
+              // provider switch to the owner (throttled, local-only).
+              const noticeKey = `${metabot.id}:${externalConversationId}`;
+              if (!shouldEmitPrivateChatBrainNotice(noticeKey, 'rescue')) return;
+              const kindLabel = describeBrainFailureKind(info.kind);
+              emitLog(
+                `[PrivateChat] Brain rescue for message ${row.id}: '${info.fromLlmId ?? 'default'}'` +
+                `${info.fromProvider ? ` (${info.fromProvider})` : ''} -> ${info.toLlmId} (${info.toProvider}) [${info.kind}].`
+              );
+              appendPrivateChatBrainNotice({
+                coworkStore,
+                sessionId,
+                externalConversationId,
+                content: tApp(
+                  `（系统提示：主大脑模型当前不可用（${kindLabel.zh}），本条回复已自动改用 ${info.toProvider} 的 ${info.toLlmId} 完成。如需固定使用，请在 Bot 设置中调整主大脑/备用大脑。）`,
+                  ` (System notice: the primary brain model is currently unavailable (${kindLabel.en}); this reply was completed automatically via ${info.toLlmId} on ${info.toProvider}. To make the switch permanent, adjust the main/backup brain in the bot settings.)`,
+                ),
+                emitToRenderer,
+              });
+            },
           });
         }
       } catch (e) {
@@ -5730,6 +5808,27 @@ async function processOne(
             `[PrivateChat] Skill turn failed permanently for message ${row.id} ` +
             `(${classifyPrivateChatSkillTurnError(e)}); marking processed.`
           );
+        }
+        // Terminal brain failure (quota/auth/config — the classes the system
+        // rescue rung could not save either): the peer sees silence, so the
+        // OWNER gets one throttled, local-only system notice pointing at the
+        // fix instead of the failure staying a cowork.log line.
+        const terminalKind = classifyOneShotLlmTerminalError(e);
+        if (terminalKind) {
+          const noticeKey = `${metabot.id}:${externalConversationId}`;
+          if (shouldEmitPrivateChatBrainNotice(noticeKey, 'terminal')) {
+            const kindLabel = describeBrainFailureKind(terminalKind);
+            appendPrivateChatBrainNotice({
+              coworkStore,
+              sessionId,
+              externalConversationId,
+              content: tApp(
+                `（系统提示：本次自动回复失败——主大脑${llmId ? `（${llmId}）` : ''}不可用（${kindLabel.zh}），备用大脑未设置或同样不可用。请到 设置 > 模型 检查 API Key 与额度，或在 Bot 设置中调整主大脑/备用大脑。）`,
+                ` (System notice: this auto-reply failed — the primary brain${llmId ? ` (${llmId})` : ''} is unavailable (${kindLabel.en}) and no backup brain or other configured provider could take over. Check API keys and quota in Settings > Models, or adjust the main/backup brain in the bot settings.)`,
+              ),
+              emitToRenderer,
+            });
+          }
         }
         markProcessed(db, row.id, saveDb);
         return;
@@ -6258,6 +6357,7 @@ export async function stopPrivateChatDaemon(options?: { waitForTick?: boolean })
   orderCowork = null;
   thinkingTasks.clear();
   privateChatSkillTurnRetries.clear();
+  privateChatBrainNotices.clear();
   privateChatBusyDeferredSince.clear();
   privateChatA2AWakes.clear();
   privateChatDecryptFailedIds.clear();
