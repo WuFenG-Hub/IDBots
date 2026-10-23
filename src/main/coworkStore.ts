@@ -8156,8 +8156,11 @@ export class CoworkStore implements MemoryBackend {
         if (this.hotLayerExposureBuffer.size >= 200) {
           this.flushHotLayerExposureBuffer();
         }
+        // Review nit: no saveDb here — the exposure rows ride the write-behind
+        // flush (≤5s), and the times_injected counter bump is telemetry whose
+        // tail can ride the next save (same debounce rationale as the culture
+        // usage counters).
       }
-      this.saveDb();
     } catch (error) {
       console.warn('[CoworkStore] hot_layer_usage technique exposure write failed:', error);
     }
@@ -8165,11 +8168,13 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
-   * RRSI P2 exposure ledger (design §6.2 P2.4): one row per item per local
-   * day, counting repeat exposures. Within a day, 'hot' is sticky — an item
-   * that was injected hot and later recalled still counts as hot. Best-effort
-   * telemetry: callers wrap their own failures, and this method throws only
-   * on a genuinely broken database. Returns the number of items written.
+   * RRSI P2 exposure ledger (design §6.2 P2.4), write-behind since the dream
+   * review P3 batching: items coalesce into an in-process buffer and flush on
+   * a ≤5s timer, at 200 buffered keys, or via flushHotLayerExposureBuffer().
+   * Within a day, 'hot' is sticky — an item that was injected hot and later
+   * recalled still counts as hot. Best-effort telemetry: invalid items are
+   * dropped, buffering throws only on a genuinely broken database, and the
+   * return value is the number of items ACCEPTED (not yet written).
    */
   recordHotLayerExposures(input: {
     metabotId: number;

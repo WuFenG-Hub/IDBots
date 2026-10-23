@@ -15,7 +15,8 @@
  *      unaffected),
  *   5. hygiene decay reads the applied clock: a fresh last_applied_at keeps a
  *      stale-injection memory alive; prompt eviction prefers applied rows.
- */
+  * NOTE: imports the dist-electron build — run `pnpm run compile:electron` first.
+*/
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';

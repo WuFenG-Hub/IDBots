@@ -15,7 +15,8 @@
  *      resolves again,
  *   3. dream telemetry: a host-side skip surfaces as surfSkipped; a normal
  *      surf (or no surf hook) leaves it null.
- */
+  * NOTE: imports the dist-electron build — run `pnpm run compile:electron` first.
+*/
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';

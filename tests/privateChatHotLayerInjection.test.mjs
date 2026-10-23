@@ -5,7 +5,8 @@
  * builders and hot selection as the cowork runner, with hot-layer exposure
  * accounting wired like the cowork path (the nightly usage audit reads these
  * rows as evidence). Owner-memory privacy rules are untouched.
- */
+  * NOTE: imports the dist-electron build — run `pnpm run compile:electron` first.
+*/
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -359,4 +360,61 @@ test('direct answer path degrades to the plain prompt when the knowledge store i
   }
   const prompt = seenPerformChatCalls[0].system;
   assert.ok(!prompt.includes('<knowledge>'), 'no craft blocks without the store');
+});
+
+
+test('review nit: the craft layer rides even when the owner-memory policy is off', async () => {
+  seenPerformChatCalls.length = 0;
+  const { db, row, coworkStore, metabotStore } = createDirectAnswerHarness();
+  // Memory policy OFF — owner-memory blocks stay silent, but the bot's own
+  // craft (knowledge/procedures) must not be silenced by the owner switch.
+  coworkStore.getMemoryBackend = () => ({
+    getEffectiveMemoryPolicyForMetabot() {
+      return { memoryEnabled: false, memoryUserMemoriesMaxItems: 12, memoryPromptMaxChars: 4000 };
+    },
+    listUserMemories() {
+      return [];
+    },
+    touchUserMemoriesLastUsed() {},
+  });
+  const getKnowledgeStore = () => ({
+    listKnowledge() {
+      return [{ id: 'k1', topic: '视频导出流程', summary: '先渲染预览确认无误再导出正式版。', kind: 'know_how', category: null, tags: [], version: 1, status: 'active', updatedAt: 2 }];
+    },
+    listHotProcedures() {
+      return [];
+    },
+  });
+  startPrivateChatDaemon(
+    db,
+    () => {},
+    coworkStore,
+    metabotStore,
+    { on() {}, off() {} },
+    async () => ({ txids: ['t'.repeat(64)], pinId: 'p'.repeat(64) + 'i0' }),
+    () => {},
+    null,
+    undefined,
+    undefined,
+    () => ({ respondToStrangerPrivateChats: true }),
+    undefined,
+    undefined,
+    undefined,
+    async () => ({ prompt: '', activeSkillIds: [] }),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    getKnowledgeStore,
+  );
+  try {
+    await waitFor(() => row.is_processed === 1, 20_000);
+  } finally {
+    await stopPrivateChatDaemon({ waitForTick: true });
+  }
+  const prompt = seenPerformChatCalls[0].system;
+  assert.ok(prompt.includes('<knowledge>'), 'craft injects independently of the owner-memory switch');
 });

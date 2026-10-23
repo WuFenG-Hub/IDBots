@@ -20,6 +20,8 @@ export type ProcedureHotEventSource =
   | 'rollback'
   | 'dream';
 
+import { PROCEDURE_PROMPT_MAX_ITEMS } from './libs/procedurePromptBlocks';
+
 /** One append-only row of metaid_knowledge_procedure_hot_events. */
 export interface ProcedureHotEvent {
   id: number;
@@ -28,7 +30,6 @@ export interface ProcedureHotEvent {
   reason: ProcedureHotReason | null;
   sourcePass: ProcedureHotEventSource;
 }
-import { PROCEDURE_PROMPT_MAX_ITEMS } from './libs/procedurePromptBlocks';
 import { queryHotLayerUsageStats } from './libs/hotLayerUsageQueries';
 import {
   HOT_LAYER_FRESH_SLOTS,

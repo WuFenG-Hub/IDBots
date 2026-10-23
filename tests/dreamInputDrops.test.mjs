@@ -13,7 +13,8 @@
  *   5. surf-report chars cut by the 2000-char cap,
  *   6. per-output-array truncations at parse time,
  *   7. end-to-end: a dream run reports inputDrops in the run telemetry.
- */
+  * NOTE: imports the dist-electron build — run `pnpm run compile:electron` first.
+*/
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';

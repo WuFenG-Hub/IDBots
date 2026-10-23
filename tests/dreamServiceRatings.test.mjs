@@ -14,7 +14,8 @@
  *   3. counterfactual replay — a ≤2-star service rating becomes a
  *      low_service_rating decision point; any service rating counts as
  *      explicit human feedback for the hasExplicitHumanFeedback denominator.
- */
+  * NOTE: imports the dist-electron build — run `pnpm run compile:electron` first.
+*/
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';

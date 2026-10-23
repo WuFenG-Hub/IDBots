@@ -11,7 +11,8 @@
  * identity matching prompt-override patterns (or empty after trimming) is
  * refused, the previous identity is kept, a warning is logged and the run
  * telemetry is marked (selfIdentityRefused).
- */
+  * NOTE: imports the dist-electron build — run `pnpm run compile:electron` first.
+*/
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';

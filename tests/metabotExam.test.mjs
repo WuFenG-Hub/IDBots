@@ -11,7 +11,8 @@
  *   3. the dream pass: ≥14-day data gate, ≤1 run per bot per week, answers +
  *      scoring land on the run row, telemetry carries the score,
  *   4. score parser: tolerant JSON, unknown ids dropped, total recomputed.
- */
+  * NOTE: imports the dist-electron build — run `pnpm run compile:electron` first.
+*/
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';

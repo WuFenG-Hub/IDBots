@@ -17,7 +17,8 @@
  *   3. dual-panel default unchanged: no config → two calls, panelsUsed: 2,
  *   4. precedence: an explicit deps.capabilityGate test override still wins
  *      over the persisted knob.
- */
+  * NOTE: imports the dist-electron build — run `pnpm run compile:electron` first.
+*/
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';

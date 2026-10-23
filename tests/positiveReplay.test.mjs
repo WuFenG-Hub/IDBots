@@ -14,7 +14,8 @@
  *      origin 'positive_replay'); flattery/ungated output writes nothing;
  *      a clean day makes no positive-replay call at all; telemetry counts
  *      points/lessons like the negative path.
- */
+  * NOTE: imports the dist-electron build — run `pnpm run compile:electron` first.
+*/
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Module from 'node:module';

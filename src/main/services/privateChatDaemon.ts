@@ -5695,8 +5695,13 @@ async function processOne(
     // stays recall-only), same exposure accounting — the nightly usage audit
     // reads these rows as evidence. Best-effort: a failure degrades to the
     // plain prompt, never to a failed turn.
+    // Review nit: the craft layer (knowledge + procedures) describes the
+    // BOT'S OWN skills, not the owner's memories — it must not be silenced
+    // by the owner-memory policy switch. Privacy semantics unchanged: the
+    // knowledge/procedures blocks carry no owner data (the owner-memory
+    // blocks above remain gated by memoryPolicy as before).
     let craftContext = '';
-    if (memoryPolicy.memoryEnabled && getKnowledgeStore) {
+    if (getKnowledgeStore) {
       try {
         const knowledgeStore = getKnowledgeStore();
         if (knowledgeStore) {
