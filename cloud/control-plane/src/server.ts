@@ -8,6 +8,7 @@ import { authRoutes } from './routes/auth.js';
 import { sensitiveRoutes } from './routes/sensitive.js';
 import { requireUser } from './routes/auth.js';
 import { proxyRoutes } from './services/httpProxy.js';
+import { loginRoutes } from './services/loginBundle.js';
 import { attachWsProxy, type WsProxyOptions } from './services/wsProxy.js';
 
 /**
@@ -190,7 +191,15 @@ async function handle(
 }
 
 export function createRequestHandler(app: AppContext): http.RequestListener {
-  const routes: Route[] = [...authRoutes, ...sensitiveRoutes, ...accountRoutes, ...proxyRoutes];
+  // Login bundle routes come last: their `/*` catch-all serves bundle
+// assets and 404s anything unmatched above.
+const routes: Route[] = [
+  ...authRoutes,
+  ...sensitiveRoutes,
+  ...accountRoutes,
+  ...proxyRoutes,
+  ...loginRoutes,
+];
   return (req, res) => {
     handle(app, routes, req, res).catch((err) => {
       console.error(JSON.stringify({ level: 'error', msg: 'request handler crashed', error: String(err) }));

@@ -53,6 +53,8 @@ export async function startTestApp(options: {
   tenantEnv?: Record<string, string>;
   /** Overrides for the /ws proxy keepalive (tests inject short intervals). */
   wsProxy?: import('../src/server.js').PublicServerOptions['wsProxy'];
+  /** CP_LOGIN_BUNDLE_DIR override. */
+  loginBundleDir?: string;
 }): Promise<TestApp> {
   const port = await freePort();
   const metricsPort = await freePort();
@@ -71,6 +73,7 @@ export async function startTestApp(options: {
     ...(options.tenantEnv
       ? Object.fromEntries(Object.entries(options.tenantEnv).map(([k, v]) => [`CP_TENANT_ENV_${k}`, v]))
       : {}),
+    ...(options.loginBundleDir ? { CP_LOGIN_BUNDLE_DIR: options.loginBundleDir } : {}),
   };
   const config = loadConfig(env);
   const app: AppContext = {

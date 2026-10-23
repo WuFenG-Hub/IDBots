@@ -77,6 +77,8 @@ function loadCliContext(env: NodeJS.ProcessEnv): AppContext {
     },
     fakeSmsNumbers: [],
     alertWebhook: env.CP_ALERT_WEBHOOK ?? null,
+    // The CLI never serves HTTP; this is an inert default.
+    loginBundleDir: '',
   } as ControlPlaneConfig;
   const docker = new DockerClient(config.dockerUrl);
   return { config, db: openDb(dbPath), docker, sms: new FakeSmsProvider([]), poller: null };
