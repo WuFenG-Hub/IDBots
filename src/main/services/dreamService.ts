@@ -2423,7 +2423,10 @@ export class DreamService {
       const knowledgeItems: UsageAuditItem[] = [];
       const memoryItems: UsageAuditItem[] = [];
       let memoryById: Map<string, CoworkUserMemory> | null = null;
-      for (const exposure of selectUsageAuditItems(exposures, USAGE_AUDIT_MAX_ITEMS_TOTAL * 2)) {
+      // The pools form from a wide slice so an extreme technique/procedure
+      // day cannot crowd knowledge/memory out of the pools themselves before
+      // the per-kind quotas below ever see them (review Minor 4).
+      for (const exposure of selectUsageAuditItems(exposures, USAGE_AUDIT_MAX_ITEMS_TOTAL * 4)) {
         if (exposure.kind === 'technique') {
           const draft = this.deps.coworkStore.getCapabilityDraft(metabot.id, Number(exposure.itemId));
           if (!draft) continue;
@@ -2481,10 +2484,23 @@ export class DreamService {
           });
         }
       }
-      // One shared call: techniques/procedures first (legacy priority), then
-      // knowledge, then memory — the combined list stays under the hard cap.
-      const items = [...techniqueProcedureItems, ...knowledgeItems, ...memoryItems]
-        .slice(0, USAGE_AUDIT_MAX_ITEMS_TOTAL);
+      // One shared call. Review Minor 4 (audit starvation): a busy bot can
+      // expose far more than the cap in techniques/procedures alone, which
+      // under a pure technique-first fill would starve knowledge/memory of
+      // EVERY audit. Reserve up to 4 slots per new kind when their pools are
+      // non-empty and let techniques/procedures take the remainder (legacy
+      // priority inside each band).
+      const knowledgeCap = knowledgeItems.length > 0 ? Math.min(4, knowledgeItems.length) : 0;
+      const memoryCap = memoryItems.length > 0 ? Math.min(4, memoryItems.length) : 0;
+      const techniqueProcedureCap = Math.max(
+        0,
+        USAGE_AUDIT_MAX_ITEMS_TOTAL - knowledgeCap - memoryCap,
+      );
+      const items = [
+        ...techniqueProcedureItems.slice(0, techniqueProcedureCap),
+        ...knowledgeItems.slice(0, knowledgeCap),
+        ...memoryItems.slice(0, memoryCap),
+      ].slice(0, USAGE_AUDIT_MAX_ITEMS_TOTAL);
       if (items.length === 0) return zero;
       const prompt = buildHotLayerUsageAuditPrompt({ date, items, excerpts });
       const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 2048);

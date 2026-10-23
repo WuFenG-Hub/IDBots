@@ -396,3 +396,57 @@ test('review Minor 1: knowledge_recall records exposure rows and cooled knowledg
     cleanup();
   }
 });
+
+
+test('review Minor 4: per-kind quotas keep knowledge and memory auditable under a technique flood', async () => {
+  const h = await createDreamHarness();
+  const D = '2026-08-10';
+  try {
+    seedSession(h.coworkStore, h.db, D, [
+      { type: 'user', content: '视频做好了吗' },
+      { type: 'assistant', content: '做好了,按照先渲染预览再导出的流程走了一遍。' },
+    ]);
+    // Twenty hot technique/procedure exposures crowd the day.
+    for (let index = 0; index < 20; index += 1) {
+      const draft = h.coworkStore.insertCapabilityDraftsChecked(h.coworkStore ? 5 : 5, '2026-08-01', [
+        { title: `技巧 ${index}`, description: 'd', capabilityType: 'skill' },
+      ]);
+      h.db.run('UPDATE capability_drafts SET status = ? WHERE id = ?', ['validated', draft.insertedIds[0]]);
+      h.coworkStore.recordHotLayerExposures({
+        metabotId: BOT_ID,
+        usageDate: D,
+        items: [{ kind: 'technique', id: String(draft.insertedIds[0]), exposure: 'hot' }],
+      });
+    }
+    const knowledge = h.knowledgeStore.upsertKnowledge({
+      metabotId: BOT_ID, topic: '视频导出流程', summary: '先渲染预览确认无误再导出正式版。', kind: 'know_how',
+    }).entry;
+    const memory = h.coworkStore.createDreamUserMemory({
+      metabotId: BOT_ID,
+      text: '交付前必须先自己验证一遍结果再回复。',
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      origin: 'dream',
+      isExplicit: true,
+      source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-08-09' },
+    }).memory;
+    h.coworkStore.recordHotLayerExposures({
+      metabotId: BOT_ID,
+      usageDate: D,
+      items: [
+        { kind: 'knowledge', id: knowledge.id, exposure: 'hot' },
+        { kind: 'memory', id: memory.id, exposure: 'hot' },
+      ],
+    });
+    h.coworkStore.flushHotLayerExposureBuffer();
+    h.router.on(MARKERS.usageAudit, () => ({ items: [] }));
+    await h.runNight(D);
+    const audit = h.telemetry(D)?.usageAudit;
+    assert.equal(audit.knowledgeItems, 1, 'knowledge keeps an audit seat despite the flood');
+    assert.equal(audit.memoryItems, 1, 'memory keeps an audit seat despite the flood');
+    assert.ok(audit.items <= 16, 'the hard cap still holds');
+  } finally {
+    h.cleanup();
+  }
+});
