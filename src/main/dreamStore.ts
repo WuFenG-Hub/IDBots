@@ -486,6 +486,8 @@ export interface DreamInputDropCounters {
   parseArrayEntries: number;
   /** Human feedback-comment characters cut by the prompt's inline cap (review M3). */
   feedbackCommentChars: number;
+  /** Buyer service ratings dropped over the per-day cap (review M4). */
+  serviceRatings: number;
   /** Counterfactual/positive replay points beyond the ≤3/day cap (nit). */
   replayPointsDropped: number;
   /** Required dream-output fields missing at parse time (daily_summary etc., nit). */
@@ -504,6 +506,7 @@ export function createDreamInputDropCounters(): DreamInputDropCounters {
     feedbackCommentChars: 0,
     replayPointsDropped: 0,
     parseFieldDrops: 0,
+    serviceRatings: 0,
   };
 }
 
@@ -517,7 +520,8 @@ export function countDreamInputDrops(counters: DreamInputDropCounters): number {
     + counters.parseArrayEntries
     + counters.feedbackCommentChars
     + counters.replayPointsDropped
-    + counters.parseFieldDrops;
+    + counters.parseFieldDrops
+    + counters.serviceRatings;
 }
 
 const parseIdNumber = (value: unknown): number | null => {
@@ -2046,6 +2050,23 @@ export class DreamStore {
       raterMetaId: (row.rater_metaid ?? '').trim() || null,
       ratedAtMs: Number(row.created_at) || dayStartMs,
     }));
+    // Review M4: same silent-truncation invariant as chainWrites/Reads — the
+    // exact overflow is counted only when the capped query hits the limit (no
+    // extra query on normal nights).
+    if (dropCounters && serviceRatings.length >= MAX_SERVICE_RATINGS_PER_DAY) {
+      const total = parseIdNumber(this.getOne<{ n: number | string }>(
+        `SELECT COUNT(*) AS n
+         FROM remote_skill_service_rating_seen r
+         JOIN remote_skill_service s ON s.id = r.service_id
+         JOIN metabots b ON b.id = ?
+         WHERE (s.metaid = b.metaid
+             OR (b.globalmetaid IS NOT NULL AND TRIM(b.globalmetaid) != ''
+               AND s.global_metaid = b.globalmetaid))
+           AND r.created_at >= ? AND r.created_at < ?`,
+        [metabotId, dayStartMs, dayEndMs],
+      )?.n) ?? serviceRatings.length;
+      dropCounters.serviceRatings += Math.max(0, total - MAX_SERVICE_RATINGS_PER_DAY);
+    }
 
     return {
       sessions,

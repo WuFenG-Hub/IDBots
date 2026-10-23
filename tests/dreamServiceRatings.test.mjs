@@ -23,7 +23,10 @@ import { createCoworkStore, createSqliteStore } from './memoryTestUtils.mjs';
 
 const require = Module.createRequire(import.meta.url);
 
-const { DreamStore } = require('../dist-electron/main/dreamStore.js');
+const {
+  DreamStore,
+  createDreamInputDropCounters,
+} = require('../dist-electron/main/dreamStore.js');
 const {
   buildDreamPrompt,
 } = require('../dist-electron/main/libs/dreamPrompt.js');
@@ -127,7 +130,7 @@ test('getActivityForDate: other providers, other days and unrated-service pins a
   }
 });
 
-test('getActivityForDate: service ratings are capped per day', async () => {
+test('getActivityForDate: service ratings are capped per day and the overflow is counted (review M4)', async () => {
   const { db, cleanup } = await createSqliteStore();
   try {
     seedProviderFixtures(db);
@@ -138,8 +141,10 @@ test('getActivityForDate: service ratings are capped per day', async () => {
     }
     createCoworkStore(db);
     const dreamStore = new DreamStore(db, () => {});
-    const activity = dreamStore.getActivityForDate(5, DAY_START, DAY_END);
+    const counters = createDreamInputDropCounters();
+    const activity = dreamStore.getActivityForDate(5, DAY_START, DAY_END, counters);
     assert.equal(activity.serviceRatings.length, 10, 'bounded so a popular service cannot flood the dream');
+    assert.equal(counters.serviceRatings, 5, 'the exact overflow feeds the drop counters, like chainWrites/Reads');
   } finally {
     cleanup();
   }
