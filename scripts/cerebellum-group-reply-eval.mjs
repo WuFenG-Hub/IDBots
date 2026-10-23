@@ -126,7 +126,7 @@ async function runEval(opts) {
     labeled += 1;
     if (want && !reply) lost += 1;
     if (!want && reply) extra += 1;
-    scored.push({ ...item, noul, reply });
+    scored.push({ ...item, want, noul, reply });
     const mark = want === reply ? 'ok' : want ? 'LOST' : 'EXTRA';
     console.log(`${mark.padEnd(5)} ${item.id}  noul=${noul.toFixed(2)}  want=${want ? 'reply' : 'skip'}  [${latencyMs}ms]  ${item.latest}`);
   }
@@ -139,8 +139,8 @@ async function runEval(opts) {
     let sweepExtra = 0;
     for (const item of scored) {
       const reply = groupReplyFromNoul(item.noul, threshold);
-      if (item.reply && !reply) sweepLost += 1;
-      if (!item.reply && reply) sweepExtra += 1;
+      if (item.want && !reply) sweepLost += 1;
+      if (!item.want && reply) sweepExtra += 1;
     }
     console.log(`  >=${threshold.toFixed(2)}  lost=${sweepLost}  extra=${sweepExtra}`);
   }

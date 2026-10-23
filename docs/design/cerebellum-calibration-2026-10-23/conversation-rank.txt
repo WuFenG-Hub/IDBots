@@ -1,0 +1,9 @@
+上次说交付必须带什么
+  recency=c0  ranked=c2  want=c2
+布丁吃什么粮
+  recency=c0  ranked=c3  want=c3
+新建 worktree 之后文件全变修改了
+  recency=c0  ranked=c4  want=c4
+周报里的数据怎么排
+  recency=c0  ranked=c0  want=c0
+recall@1 recency 1/4  cerebellum 4/4

@@ -1,0 +1,79 @@
+
+model=jev-latest  services=16  queries=12  topK=3
+
+Q: 上海明天会下雨吗？适合跑步吗   (relevant: svc-weather-i0)
+  ranked top3:   [553ms, 1085 in-tokens]
+    ✓ 1. svc-weather-i0           1.00  查询指定城市实时天气与未来三天预报，支持生活指数。
+      2. svc-chain-data-i0        0.00  MVC 链上数据检索：地址余额、交易历史、pin 内容解析。
+      3. svc-contract-audit-i0    0.00  智能合约安全审计：重入、溢出、权限漏洞，输出修复建议。
+
+Q: 把这份英文合同翻译成中文，术语要准确   (relevant: svc-translate-i0)
+  ranked top3:   [244ms, 1089 in-tokens]
+    ✓ 1. svc-translate-i0         1.00  专业文档翻译：术语表、双语对照、语气保持，支持 30+ 语种。
+      2. svc-chain-data-i0        0.00  MVC 链上数据检索：地址余额、交易历史、pin 内容解析。
+      3. svc-contract-audit-i0    0.00  智能合约安全审计：重入、溢出、权限漏洞，输出修复建议。
+
+Q: 帮我画一张赛博朋克风格的头像   (relevant: svc-image-gen-i0)
+  ranked top3:   [245ms, 1085 in-tokens]
+    ✓ 1. svc-image-gen-i0         1.00  Text-to-image generation: posters, illus
+      2. svc-chain-data-i0        0.00  MVC 链上数据检索：地址余额、交易历史、pin 内容解析。
+      3. svc-contract-audit-i0    0.00  智能合约安全审计：重入、溢出、权限漏洞，输出修复建议。
+
+Q: 这张老照片糊了，帮我修复放大一下   (relevant: svc-image-edit-i0)
+  ranked top3:   [287ms, 1088 in-tokens]
+    ✓ 1. svc-image-edit-i0        1.00  图片处理：局部重绘、抠图去背景、分辨率放大、老照片修复。
+      2. svc-chain-data-i0        0.00  MVC 链上数据检索：地址余额、交易历史、pin 内容解析。
+      3. svc-contract-audit-i0    0.00  智能合约安全审计：重入、溢出、权限漏洞，输出修复建议。
+
+Q: 图片里的表格数据帮我提取出来   (relevant: svc-ocr-i0)
+  ranked top3:   [283ms, 1085 in-tokens]
+    ✓ 1. svc-ocr-i0               1.00  图片文字识别：印刷体与手写体，表格结构还原，多语种。
+      2. svc-chain-data-i0        0.00  MVC 链上数据检索：地址余额、交易历史、pin 内容解析。
+      3. svc-contract-audit-i0    0.00  智能合约安全审计：重入、溢出、权限漏洞，输出修复建议。
+
+Q: 帮我看看这个智能合约有没有重入漏洞   (relevant: svc-contract-audit-i0)
+  ranked top3:   [258ms, 1088 in-tokens]
+    ✓ 1. svc-contract-audit-i0    1.00  智能合约安全审计：重入、溢出、权限漏洞，输出修复建议。
+      2. svc-chain-data-i0        0.00  MVC 链上数据检索：地址余额、交易历史、pin 内容解析。
+      3. svc-data-viz-i0          0.00  数据可视化：图表选型、静态图输出、看板布局建议。
+
+Q: 查一下这个地址最近的链上交易记录   (relevant: svc-chain-data-i0)
+  ranked top3:   [233ms, 1087 in-tokens]
+    ✓ 1. svc-chain-data-i0        1.00  MVC 链上数据检索：地址余额、交易历史、pin 内容解析。
+      2. svc-contract-audit-i0    0.00  智能合约安全审计：重入、溢出、权限漏洞，输出修复建议。
+      3. svc-data-viz-i0          0.00  数据可视化：图表选型、静态图输出、看板布局建议。
+
+Q: 最近区块链行业有什么大新闻   (relevant: svc-news-digest-i0, svc-web-search-i0)
+  ranked top3:   [256ms, 1084 in-tokens]
+    ✓ 1. svc-news-digest-i0       0.58  新闻摘要服务：按主题聚类、重要性排序、每日推送。
+    ✓ 2. svc-web-search-i0        0.29  全网检索与来源引用：新闻、资料、技术文档摘要。
+      3. svc-market-pulse-i0      0.13  数字资产行情速览：价格、涨跌幅、资金流与热点事件。
+
+Q: BTC 今天涨跌怎么样   (relevant: svc-market-pulse-i0)
+  ranked top3:   [242ms, 1080 in-tokens]
+    ✓ 1. svc-market-pulse-i0      1.00  数字资产行情速览：价格、涨跌幅、资金流与热点事件。
+      2. svc-chain-data-i0        0.00  MVC 链上数据检索：地址余额、交易历史、pin 内容解析。
+      3. svc-contract-audit-i0    0.00  智能合约安全审计：重入、溢出、权限漏洞，输出修复建议。
+
+Q: 下周要面试了，帮我改改简历   (relevant: svc-resume-i0)
+  ranked top3:   [280ms, 1084 in-tokens]
+    ✓ 1. svc-resume-i0            1.00  简历优化：经历量化、岗位匹配度分析、中英文双版本。
+      2. svc-chain-data-i0        0.00  MVC 链上数据检索：地址余额、交易历史、pin 内容解析。
+      3. svc-contract-audit-i0    0.00  智能合约安全审计：重入、溢出、权限漏洞，输出修复建议。
+
+Q: 这段会议录音帮我整理成纪要   (relevant: svc-meeting-notes-i0)
+  ranked top3:   [254ms, 1084 in-tokens]
+    ✓ 1. svc-meeting-notes-i0     1.00  会议纪要生成：要点、待办、责任人提取，支持录音转写输入。
+      2. svc-chain-data-i0        0.00  MVC 链上数据检索：地址余额、交易历史、pin 内容解析。
+      3. svc-contract-audit-i0    0.00  智能合约安全审计：重入、溢出、权限漏洞，输出修复建议。
+
+Q: 把这篇文章读出来做成音频   (relevant: svc-tts-i0)
+  ranked top3:   [260ms, 1083 in-tokens]
+    ✓ 1. svc-tts-i0               1.00  文字转语音：多音色、多语种、语速与情绪调节。
+      2. svc-chain-data-i0        0.00  MVC 链上数据检索：地址余额、交易历史、pin 内容解析。
+      3. svc-contract-audit-i0    0.00  智能合约安全审计：重入、溢出、权限漏洞，输出修复建议。
+
+————————————————————————————————————————————————————————————————————————
+top-1 accuracy: 12/12   recall@3: 12/12
+answered model: jev-1.14.0
+rank total: 3395ms, 13022 input tokens, ≈ $0.000547 ($0.042/Mtok input, output free)

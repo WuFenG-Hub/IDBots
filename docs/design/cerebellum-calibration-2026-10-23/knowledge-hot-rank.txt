@@ -1,0 +1,55 @@
+
+model=jev-latest  points=16  queries=10  hot=8
+
+Q: 帮我估一下发这条 pin 大概要多少 sats   (relevant: k8)  [560ms]
+  recency@8:    (miss)
+  cerebellum@8:  k7:0.60  ✓k8:0.32   k9:0.20   k10:0.05   k0:0.03   k6:0.03   k1:0.02   k3:0.02
+
+Q: 为什么上次那个知识点没出现在这次提示词里   (relevant: k9)  [525ms]
+  recency@8:    (miss)
+  cerebellum@8: ✓k9:0.94   k14:0.26   k13:0.13   k6:0.08   k8:0.08   k12:0.07   k15:0.07   k7:0.06
+
+Q: 群任务做完了，交付的时候要注意什么   (relevant: k10)  [523ms]
+  recency@8:    (miss)
+  cerebellum@8: ✓k10:0.96   k9:0.70   k0:0.25   k8:0.18   k7:0.09   k1:0.07   k6:0.06   k5:0.04
+
+Q: 新建 worktree 之后 git status 怎么全是修改   (relevant: k11)  [536ms]
+  recency@8:    (miss)
+  cerebellum@8: ✓k11:0.98   k10:0.23   k8:0.15   k9:0.08   k6:0.03   k7:0.03   k12:0.03   k0:0.02
+
+Q: 给小脑写一个新的判断题，中文指令行不行   (relevant: k12)  [301ms]
+  recency@8:    (miss)
+  cerebellum@8: ✓k12:0.94   k9:0.16   k13:0.09   k6:0.07   k8:0.07   k15:0.05   k10:0.04   k14:0.04
+
+Q: 免费小脑接口返回 401 了   (relevant: k13)  [472ms]
+  recency@8:    (miss)
+  cerebellum@8: ✓k13:0.97   k12:0.70   k9:0.18   k8:0.09   k0:0.04   k15:0.04   k1:0.03   k6:0.03
+
+Q: 记忆的 last_used 为什么整池都在刷新   (relevant: k14)  [517ms]
+  recency@8:    (miss)
+  cerebellum@8: ✓k14:0.97   k13:0.96   k9:0.16   k8:0.15   k15:0.06   k7:0.04   k11:0.04   k12:0.04
+
+Q: MetaWeb 用英文搜教程什么都没有   (relevant: k15)  [257ms]
+  recency@8:    (miss)
+  cerebellum@8: ✓k15:0.97   k9:0.18   k8:0.06   k12:0.06   k6:0.05   k13:0.05   k0:0.03   k1:0.03
+
+Q: 帮我把这周的周报数据整理一下   (relevant: k1)  [269ms]
+  recency@8:    k1
+  cerebellum@8: ✓k1:0.93   k9:0.23   k8:0.09   k0:0.08   k10:0.06   k6:0.05   k7:0.04   k5:0.03
+
+Q: 布丁最近软便，猫粮要不要换   (relevant: k2)  [253ms]
+  recency@8:    k2
+  cerebellum@8: ✓k2:0.95   k9:0.25   k8:0.07   k14:0.03   k15:0.03   k0:0.02   k1:0.02   k4:0.02
+
+————————————————————————————————————————————————————————————————————————
+recall@8:  recency 2/10   cerebellum 10/10
+labeled nouls: n=10 min=0.32 med=0.96 max=0.98
+other nouls:   n=150 min=0.01 med=0.03 max=0.96
+labeled points at or above noul (calibration, not a product cutoff):
+  >=0.20  10/10
+  >=0.35  9/10
+  >=0.50  9/10
+  >=0.65  9/10
+  >=0.80  9/10
+rank total: 4213ms across 10 verdicts
+input-token cost is not on this client; the app log records latency only. Output tokens are free.

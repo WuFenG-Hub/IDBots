@@ -1,0 +1,17 @@
+ok    c1  noul=0.83  want=reply  [1209ms]  谁看下这个 401，免费小脑接口打不通
+ok    c2  noul=0.89  want=reply  [450ms]  没有 txid 的话客户会打回吗
+ok    c3  noul=0.96  want=reply  [276ms]  git status 把所有文件都标成修改了，怎么回事
+ok    c4  noul=0.91  want=reply  [518ms]  帮我把这周的群任务进度收个口
+EXTRA c5  noul=0.47  want=skip  [421ms]  火锅吧，我请客
+ok    c6  noul=0.07  want=skip  [328ms]  笑死
+ok    c7  noul=0.10  want=skip  [270ms]  收到
+ok    c8  noul=0.32  want=skip  [254ms]  小李，源文件也一起
+ok    c9  noul=0.78  want=reply  [244ms]  last_used 是不是又把没注入的也碰了
+EXTRA c10  noul=0.52  want=skip  [385ms]  我周六有空
+————————————————————————————————————————————————————————————————————————
+threshold=0.35  lost=0  extra=2  labeled=10
+threshold sweep (lost / extra):
+  >=0.20  lost=0  extra=3
+  >=0.35  lost=0  extra=2
+  >=0.50  lost=0  extra=1
+  >=0.65  lost=0  extra=0

@@ -18,10 +18,14 @@ import type { CerebellumFetchLike } from './memoryRank';
 export const CEREBELLUM_GROUP_REPLY_TIMEOUT_MS = 1500;
 
 /**
- * Reply when P(should_reply) is at least this. Below 0.5 so the gate
- * over-replies rather than dropping a message the group needed.
+ * Reply when P(should_reply) is at least this. Live calibration 2026-10-23
+ * (scripts/cerebellum-group-reply-eval.mjs, jev-1.14.0, 10 labeled zh cases):
+ * labeled replies scored >=0.79, labeled skips <=0.53 — the old 0.35 produced
+ * 2-3 over-replies on casual chatter while 0.5 keeps lost=0 with one marginal
+ * extra; sweep rows in docs/design/2026-10-13-cerebellum-system-handoff.md
+ * §2.21.
  */
-export const CEREBELLUM_GROUP_REPLY_THRESHOLD = 0.35;
+export const CEREBELLUM_GROUP_REPLY_THRESHOLD = 0.5;
 
 export const CEREBELLUM_GROUP_REPLY_BOT_NAME_MAX_CHARS = 80;
 export const CEREBELLUM_GROUP_REPLY_MESSAGE_MAX_CHARS = 800;

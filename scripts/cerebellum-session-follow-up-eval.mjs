@@ -203,7 +203,7 @@ async function runEval(opts) {
     labeled += 1;
     if (want && !followUp) lost += 1;
     if (!want && followUp) extra += 1;
-    scored.push({ ...item, noul, followUp });
+    scored.push({ ...item, want, noul, followUp });
     const mark = want === followUp ? 'ok' : want ? 'LOST' : 'EXTRA';
     console.log(`${mark.padEnd(5)} ${item.id}  noul=${noul.toFixed(2)}  want=${want ? 'follow-up' : 'settled'}  [${latencyMs}ms]  ${item.sessionTitle}`);
   }
@@ -217,8 +217,8 @@ async function runEval(opts) {
     let sweepExtra = 0;
     for (const item of scored) {
       const followUp = sessionFollowUpFromNoul(item.noul, threshold);
-      if (item.followUp && !followUp) sweepLost += 1;
-      if (!item.followUp && followUp) sweepExtra += 1;
+      if (item.want && !followUp) sweepLost += 1;
+      if (!item.want && followUp) sweepExtra += 1;
     }
     sweep.push({ threshold, lost: sweepLost, extra: sweepExtra });
     console.log(`  >=${threshold.toFixed(2)}  lost=${sweepLost}  extra=${sweepExtra}`);
