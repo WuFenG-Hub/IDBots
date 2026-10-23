@@ -323,6 +323,27 @@ class CoworkService {
     });
     this.streamListenerCleanups.push(permissionResolvedCleanup);
 
+    // Renderer-reload replay (2026-10-23 ab67c828 incident): the permission
+    // broadcast is raise-time only, so a window reload while an ask waits
+    // (ask_user_question with timeout:-1 never self-unwinds) orphaned its
+    // modal — the turn kept waiting with no UI left to answer. Re-enqueue
+    // whatever main still tracks; the reducer's requestId dedup keeps this
+    // idempotent with entries the live broadcast already delivered.
+    void window.electron?.cowork?.listPendingPermissions?.().then((response) => {
+      if (!response?.success || !Array.isArray(response.permissions)) return;
+      for (const entry of response.permissions) {
+        if (typeof entry?.requestId !== 'string' || !entry.requestId) continue;
+        store.dispatch(enqueuePendingPermission({
+          sessionId: entry.sessionId,
+          toolName: entry.toolName,
+          toolInput: entry.toolInput,
+          requestId: entry.requestId,
+          toolUseId: entry.toolUseId ?? null,
+          perQuestionTimeoutMs: entry.perQuestionTimeoutMs ?? null,
+        } as never));
+      }
+    }).catch(() => undefined);
+
     // Complete listener
     const completeCleanup = cowork.onStreamComplete(({ sessionId }) => {
       store.dispatch(updateSessionStatus({ sessionId, status: 'completed' }));

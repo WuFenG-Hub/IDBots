@@ -2926,9 +2926,29 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const handlePermissionResponse = useCallback(async (result: CoworkPermissionResult) => {
     if (!pendingPermission || isRespondingToPermission) return;
     setIsRespondingToPermission(true);
-    const success = await coworkService.respondToPermission(pendingPermission.requestId, result);
-    if (!success) setIsRespondingToPermission(false);
+    // 2026-10-23 incident (session ab67c828): one failed respond IPC (dev-build
+    // skew, channel rejection, uncloneable payload) rejected this await with no
+    // catch, latching `responding` forever — the question wizard's every control
+    // went disabled with no retry and no close, and a timeout:-1 ask left the
+    // turn waiting on a modal nobody could answer. The flag must reset on every
+    // settle path; an error may cost one click, never the whole modal.
+    try {
+      const success = await coworkService.respondToPermission(pendingPermission.requestId, result);
+      if (!success) setIsRespondingToPermission(false);
+    } catch (error) {
+      console.error('Failed to respond to permission:', error);
+      setIsRespondingToPermission(false);
+    }
   }, [pendingPermission, isRespondingToPermission]);
+  // Settle watchdog: the respond IPC normally settles in milliseconds; if it
+  // never settles at all (pathological transport), re-enable the modal instead
+  // of latching it disabled. A retried respond for an id main already resolved
+  // is harmless (runner treats unknown ids as no-ops and broadcasts resolved).
+  useEffect(() => {
+    if (!isRespondingToPermission) return;
+    const timer = window.setTimeout(() => setIsRespondingToPermission(false), 15000);
+    return () => window.clearTimeout(timer);
+  }, [isRespondingToPermission, pendingPermission?.requestId]);
   // Chat experience mode (Settings > General), scoped per session: the
   // assistant form ('assistant' hides raw thinking and tool-call chrome; the
   // model's narration arrives as ordinary chat bubbles) applies only while

@@ -24,6 +24,9 @@ const readSource = (...segments) => fs.readFileSync(path.join(projectRoot, ...se
 const runnerSource = readSource('src', 'main', 'libs', 'coworkRunner.ts');
 const hubSource = readSource('src', 'main', 'libs', 'coworkDshTurn.ts');
 const kernelSource = readSource('src', 'main', 'libs', 'dshKernel', 'dshKernel.ts');
+const mainSource = readSource('src', 'main', 'main.ts');
+const preloadSource = readSource('src', 'main', 'preload.ts');
+const coworkServiceSource = readSource('src', 'renderer', 'services', 'cowork.ts');
 const generatorSource = readSource('dsh-runtime', 'lib', 'generate-runtime-config.mjs');
 const panelSource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkPermissionPanel.tsx');
 const overlaySource = readSource('src', 'renderer', 'components', 'cowork', 'CoworkPermissionOverlay.tsx');
@@ -175,4 +178,50 @@ test('composer takeover copy exists in both locales', () => {
     const occurrences = i18nSource.split(`${key}:`).length - 1;
     assert.ok(occurrences >= 2, `${key} must be defined in both the zh and en locale tables (found ${occurrences})`);
   }
+});
+
+// 2026-10-23 incident (session ab67c828, ask-mvkz88jh-2): the wizard walked to
+// its 4th question and every control went permanently disabled — options,
+// skip, deny and submit — while the model had called ask_user_question with
+// timeout:-1, so no kernel deadline would ever unwind the ask. One failed
+// respond IPC had latched `responding` with no catch; the modal had no retry
+// and no close, and the turn waited forever on a modal nobody could answer.
+test('a failed respond never latches the question wizard disabled', () => {
+  // Every settle path of handlePermissionResponse resets the responding flag:
+  // a rejected/throwing respond IPC re-enables the controls instead of
+  // wedging them.
+  assert.match(sessionDetailSource, /setIsRespondingToPermission\(true\);/);
+  assert.match(
+    sessionDetailSource,
+    /catch \(error\) \{[\s\S]*?setIsRespondingToPermission\(false\);[\s\S]*?\}/,
+  );
+  // Settle watchdog: even a never-settling IPC (pathological transport) must
+  // not wedge the modal; a retried respond for an already-resolved id is a
+  // harmless no-op on the main side.
+  assert.match(
+    sessionDetailSource,
+    /setTimeout\(\(\) => setIsRespondingToPermission\(false\), 15000\)/,
+  );
+});
+
+test('responding to an unknown requestId still broadcasts resolution', () => {
+  // A stale renderer entry must not render an unanswerable modal forever:
+  // the unknown-id path broadcasts permissionResolved so the renderer
+  // dequeues its copy, and leaves a forensics trail instead of a silent
+  // no-op (which made renderer/main drift invisible).
+  const start = runnerSource.indexOf('respondToPermission(requestId: string');
+  assert.notEqual(start, -1, 'coworkRunner must implement respondToPermission');
+  const body = runnerSource.slice(start, start + 2500);
+  assert.match(body, /no pending permission for requestId; broadcasting resolved anyway/);
+  assert.match(body, /this\.emit\('permissionResolved', '', requestId\)/);
+});
+
+test('a reloaded renderer replays still-pending permission requests', () => {
+  // The permission broadcast is raise-time only; a window reload while an ask
+  // waits (timeout:-1 asks never self-unwind) must re-enqueue the modal from
+  // the main-side pending mirror instead of orphaning the turn.
+  assert.match(mainSource, /cowork:permission:listPending/);
+  assert.match(preloadSource, /listPendingPermissions/);
+  assert.match(coworkServiceSource, /listPendingPermissions\?\.\(\)/);
+  assert.match(coworkServiceSource, /enqueuePendingPermission\(\{[\s\S]*?perQuestionTimeoutMs: entry\.perQuestionTimeoutMs \?\? null,/);
 });
