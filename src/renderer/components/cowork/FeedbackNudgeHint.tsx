@@ -20,7 +20,12 @@ import {
 const FeedbackNudgeHint: React.FC<{
   sessionId: string;
   messages: Pick<CoworkMessage, 'id' | 'type'>[];
-}> = ({ sessionId, messages }) => {
+  /**
+   * Review Minor 5: false while the session's feedback rows are still loading
+   * — the hint must not flash for a rated session mid-hydration.
+   */
+  feedbackLoaded: boolean;
+}> = ({ sessionId, messages, feedbackLoaded }) => {
   const feedbackByMessageId = useSelector(
     (state: RootState) => state.cowork.feedbackByMessageId,
   );
@@ -42,7 +47,10 @@ const FeedbackNudgeHint: React.FC<{
     0,
   );
 
-  if (!shouldShowFeedbackNudge({ assistantMessageCount, sessionFeedbackCount, dismissed })) {
+  if (
+    !feedbackLoaded
+    || !shouldShowFeedbackNudge({ assistantMessageCount, sessionFeedbackCount, dismissed })
+  ) {
     return null;
   }
 

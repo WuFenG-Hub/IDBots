@@ -2861,6 +2861,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   // transcript on every composer keystroke because sessionDrafts/draftPrompt
   // live in the same cowork slice (one dispatch per keystroke).
   const currentSession = useSelector((state: RootState) => state.cowork.currentSession);
+  // Review Minor 5: the feedback nudge waits for the session's feedback rows
+  // to hydrate before judging "completely unrated" (no rated-session flash).
+  const feedbackLoadedForNudge = useSelector(
+    (state: RootState) => state.cowork.feedbackLoadedBySessionId[currentSession?.id ?? ''] === true,
+  );
   const isStreaming = useSelector((state: RootState) => state.cowork.isStreaming);
   const pendingPermissions = useSelector((state: RootState) => state.cowork.pendingPermissions);
   const pendingPermission = currentSession
@@ -4979,8 +4984,13 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           empty since launch — RLHF starves at the source). Renders nothing
           for young/unrated-yet/dismissed sessions. */}
       <FeedbackNudgeHint
+        // Review Minor 3: the key remounts the hint on session switch —
+        // without it React reuses the instance and session A's dismissed
+        // state (plus the lazy localStorage read) leaks into session B.
+        key={`feedback-nudge-${currentSession.id}`}
         sessionId={currentSession.id}
         messages={currentSession.messages}
+        feedbackLoaded={feedbackLoadedForNudge}
       />
 
       {/* Streaming Activity Bar — professional mode only. Assistant mode's

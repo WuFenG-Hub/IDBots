@@ -87,12 +87,18 @@ test('the hint renders near the message controls and never as a popup', () => {
   assert.ok(detailSource.includes('import FeedbackNudgeHint'), 'session detail mounts the hint');
   assert.ok(detailSource.includes('<FeedbackNudgeHint'), 'rendered with the live session');
   assert.ok(detailSource.includes('sessionId={currentSession.id}'), 'scoped to the current session');
+  assert.ok(
+    detailSource.includes('key={`feedback-nudge-${currentSession.id}`}'),
+    'keyed by session id so dismissed state cannot leak across sessions (review Minor 3)',
+  );
   // Strip comments before the popup-pattern scan (the doc comment itself
   // mentions what the hint must NOT be).
   const hintCode = hintSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
   assert.ok(!/alert\(|\btoast\b|\bmodal\b|position:\s*fixed|className="[^"]*\bfixed\b/.test(hintCode), 'no popup/toast/overlay pattern in the hint');
   assert.ok(hintSource.includes('data-feedback-nudge'), 'a stable hook for future UI tests');
   assert.ok(hintSource.includes("i18nService.t('coworkFeedbackNudge')"), 'copy goes through i18n');
+  assert.ok(hintSource.includes('feedbackLoaded: boolean;'), 'the loaded gate is a declared prop (review Minor 5)');
+  assert.ok(hintSource.includes('!feedbackLoaded'), 'no render before the session feedback hydration lands');
 });
 
 test('i18n carries the hint copy in both languages', () => {
