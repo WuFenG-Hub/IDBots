@@ -651,6 +651,10 @@ man_base_data_pebble/
 !tests/coworkComposerImageAttachment.test.tsx
 !tests/coworkQuotaErrorBanner.test.ts
 !tests/coworkDshRouteKeySync.test.mjs
+!tests/skillTurnWrapUpState.test.mjs
+!tests/orchestratorCoworkBridgeWrapUp.test.mjs
+!tests/twinDelegationWrapUpContract.test.mjs
+EVIDENCE.md
 
 # WS-A T5: tenant image static checks
 !tests/tenantImage.test.mjs
