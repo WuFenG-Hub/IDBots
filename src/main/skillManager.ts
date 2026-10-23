@@ -6,7 +6,7 @@ import { stripLoneSurrogates, truncateUtf16Units } from './libs/llmSafeText';
 import yaml from 'js-yaml';
 import extractZip from 'extract-zip';
 import { SqliteStore } from './sqliteStore';
-import { getEnhancedEnv } from './libs/coworkUtil';
+import { getEnhancedEnv, getSkillHostEnv } from './libs/coworkUtil';
 import { isPathWithin, resolveElectronExecutablePath } from './libs/runtimePaths';
 import { resolveBundledSkillsRoot, resolveWritableSkillsRoot } from './libs/skillRoots';
 import {
@@ -999,12 +999,22 @@ export class SkillManager {
 
   private skillDependencyInstallRunning = false;
 
+  /**
+   * Spawn npm with the login-shell-aware skill env merged in: an Electron app
+   * launched from Finder/Dock/Start menu gets a bare PATH, so a Homebrew/nvm
+   * npm would be invisible with raw process.env.
+   */
+  private skillChildEnv(): NodeJS.ProcessEnv {
+    return { ...process.env, ...getSkillHostEnv() };
+  }
+
   private hasNpm(): boolean {
     try {
       const result = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['--version'], {
         stdio: 'ignore',
         windowsHide: true,
         shell: process.platform === 'win32',
+        env: this.skillChildEnv(),
       });
       return !result.error && result.status === 0;
     } catch {
@@ -1018,6 +1028,7 @@ export class SkillManager {
         cwd: dir,
         windowsHide: true,
         shell: process.platform === 'win32',
+        env: this.skillChildEnv(),
       });
       let stderr = '';
       child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });

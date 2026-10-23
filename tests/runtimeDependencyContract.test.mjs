@@ -8,6 +8,8 @@ import { createRequire } from 'node:module';
 const packageJsonPath = path.join(process.cwd(), 'package.json');
 const mainProcessPath = path.join(process.cwd(), 'src', 'main', 'main.ts');
 const skillManagerPath = path.join(process.cwd(), 'src', 'main', 'skillManager.ts');
+const coworkUtilPath = path.join(process.cwd(), 'src', 'main', 'libs', 'coworkUtil.ts');
+const metaidRpcServerPath = path.join(process.cwd(), 'src', 'main', 'services', 'metaidRpcServer.ts');
 const coworkRunnerPath = path.join(process.cwd(), 'src', 'main', 'libs', 'coworkRunner.ts');
 const electronMainExternalsPath = path.join(process.cwd(), 'scripts', 'electron-main-externals.cjs');
 const viteConfigPath = path.join(process.cwd(), 'vite.config.ts');
@@ -72,6 +74,72 @@ test('electron dev scripts use IPv4 loopback for Vite readiness', () => {
     mainProcessSource,
     /ELECTRON_START_URL \|\| 'http:\/\/127\.0\.0\.1:5175'/,
     'The main process development fallback should avoid localhost for direct Electron starts too',
+  );
+});
+
+test('Electron Node shim covers macOS/Linux, not just Windows', () => {
+  const source = fs.readFileSync(coworkUtilPath, 'utf8');
+
+  assert.doesNotMatch(
+    source,
+    /ensureWindowsElectronNodeShim/,
+    'The shim writer must be platform-agnostic; a win32-only name means the gate is back',
+  );
+  const shimFn = source.match(/function ensureElectronNodeShim\(\)[\s\S]*?\n}/);
+  assert.ok(shimFn, 'ensureElectronNodeShim must exist');
+  assert.doesNotMatch(
+    shimFn[0].slice(0, shimFn[0].indexOf('try {')),
+    /process\.platform !== 'win32'/,
+    'ensureElectronNodeShim must not return null on macOS/Linux — packaged macOS users without a system Node get ENOENT for every skill script otherwise',
+  );
+
+  const overridesFn = source.match(/function applyPackagedEnvOverrides[\s\S]*?\n}\n/);
+  assert.ok(overridesFn, 'applyPackagedEnvOverrides must exist');
+  assert.match(
+    overridesFn[0],
+    /if \(!app\.isPackaged\) \{\s*injectElectronNodeShim\(\);/,
+    'Non-Windows dev mode must also inject the shim so behavior matches packaged builds',
+  );
+  assert.match(
+    overridesFn[0],
+    /listNvmNodeBinDirs\(home\)/,
+    'The macOS PATH fallback must enumerate ~/.nvm/versions/node instead of the nonexistent ~/.nvm/current/bin',
+  );
+  assert.doesNotMatch(
+    overridesFn[0],
+    /\.nvm['"`],\s*['"`]current/,
+    'nvm has no current symlink; the stale fallback path must not come back',
+  );
+  // The shim prepend must come after the user-shell PATH assignment on POSIX
+  // or resolveUserShellPath would overwrite it.
+  const userPathIdx = overridesFn[0].indexOf('resolveUserShellPath()');
+  const posixInjectIdx = overridesFn[0].lastIndexOf('injectElectronNodeShim();');
+  assert.ok(
+    userPathIdx > -1 && posixInjectIdx > userPathIdx,
+    'On macOS/Linux the shim PATH prepend must run after user-shell PATH resolution',
+  );
+});
+
+test('skillManager npm spawns use the login-shell-aware skill env', () => {
+  const source = fs.readFileSync(skillManagerPath, 'utf8');
+  assert.match(
+    source,
+    /getSkillHostEnv/,
+    'npm install for bundled skills must see the login-shell PATH (Finder-launched apps have a bare PATH)',
+  );
+  assert.equal(
+    (source.match(/env: this\.skillChildEnv\(\)/g) || []).length >= 2,
+    true,
+    'Both hasNpm and runNpmInstall must spawn with the skill env',
+  );
+});
+
+test('MetaID RPC 401 tells callers how to authenticate', () => {
+  const source = fs.readFileSync(metaidRpcServerPath, 'utf8');
+  assert.match(
+    source,
+    /error: 'Unauthorized',\s*\n?\s*hint:/,
+    'A bare 401 makes bots guess at settings toggles; include a hint pointing at IDBOTS_RPC_TOKEN / IDBOTS_RPC_AUTHFILE',
   );
 });
 

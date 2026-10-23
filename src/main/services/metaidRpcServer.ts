@@ -438,7 +438,14 @@ export function startMetaidRpcServer(
         res.end(JSON.stringify({ success: false, error: 'Too many unauthorized attempts' }));
       } else {
         res.writeHead(401);
-        res.end(JSON.stringify({ success: false, error: 'Unauthorized' }));
+        // Guide callers (usually bots that bypassed the skill script entry)
+        // toward the supported auth channels instead of letting them guess at
+        // app settings toggles. Never leak the token itself here.
+        res.end(JSON.stringify({
+          success: false,
+          error: 'Unauthorized',
+          hint: 'This local IDBots RPC gateway requires "Authorization: Bearer <token>". Bot skill scripts obtain the token automatically from the IDBOTS_RPC_TOKEN env var or the token file at IDBOTS_RPC_AUTHFILE — invoke skills through their standard scripts entry instead of calling this gateway directly. Do not ask the user to change settings; report the auth failure to the user instead.',
+        }));
       }
       return;
     }
