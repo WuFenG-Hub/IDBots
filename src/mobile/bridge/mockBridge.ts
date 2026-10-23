@@ -38,18 +38,30 @@ import type {
   BundleMeters,
   BundlePlan,
   ConnectionState,
+  MetabotCreateInput,
+  MetabotUpdateInput,
   MobileMockBridge,
   MockBridgeOptions,
   MockBundleOrder,
   MockElectronAPI,
+  MockMetabot,
+  MockSkill,
   OfflineError,
   PendingPermissionRequest,
+  Schedule,
+  ScheduledTask,
+  ScheduledTaskInput,
+  ScheduledTaskRun,
 } from './types';
 
 const DEFAULT_STREAM_TOKEN_INTERVAL_MS = 40;
 const DEFAULT_ORDER_COMPLETE_DELAY_MS = 10_000;
 const DEFAULT_RECONNECT_BLACKOUT_MS = 3_000;
 const DEFAULT_SCHEDULED_RUN_DELAY_MS = 15_000;
+const DEFAULT_MANUAL_RUN_DELAY_MS = 4_000;
+
+/** Fixture bytes credited by a successful traffic.redeemCode (5 GB). */
+const REDEEM_CODE_GRANT_BYTES = 5 * 1024 * 1024 * 1024;
 
 /** Canned assistant replies (mock model output; not UI copy). */
 const REPLY_NORMAL =
@@ -171,6 +183,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
   const orderCompleteDelayMs = options.orderCompleteDelayMs ?? DEFAULT_ORDER_COMPLETE_DELAY_MS;
   const reconnectBlackoutMs = options.reconnectBlackoutMs ?? DEFAULT_RECONNECT_BLACKOUT_MS;
   const scheduledRunDelayMs = options.scheduledRunDelayMs ?? DEFAULT_SCHEDULED_RUN_DELAY_MS;
+  const manualRunDelayMs = options.manualRunDelayMs ?? DEFAULT_MANUAL_RUN_DELAY_MS;
 
   const emitter = new ChannelEmitter();
   const timers = new Set<ReturnType<typeof setTimeout>>();
@@ -280,6 +293,9 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       if (destroyed) return;
       await sleep(streamTokenIntervalMs);
       if (destroyed) return;
+      // stopSession flips the session back to idle; honor it like a real
+      // kernel abort and stop emitting for this turn.
+      if (session.status !== 'running') return;
       const accumulated = (liveMessages.get(key)?.content ?? '');
       if (i === 0) {
         message.content = chunks[0];
@@ -366,6 +382,11 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       });
       return;
     }
+    if (session.status !== 'running') {
+      // The turn was aborted via stopSession after the last chunk was cut.
+      emitter.emit('cowork:stream:complete', { sessionId: session.id, claudeSessionId: session.claudeSessionId });
+      return;
+    }
     session.status = 'completed';
     session.updatedAt = now();
     emitter.emit('cowork:stream:complete', { sessionId: session.id, claudeSessionId: session.claudeSessionId });
@@ -435,6 +456,11 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       guardOnline(async () => {
         const session = sessions.get(sessionId);
         if (session) session.status = 'idle';
+        // Release a turn blocked on a pending permission for this session.
+        for (const [requestId, waiter] of [...permissionWaiters]) {
+          const pending = pendingPermissions.get(requestId);
+          if (pending?.sessionId === sessionId) waiter('destroyed');
+        }
         return { success: true };
       }),
     respondToPermission: (input: { requestId: string; result: { behavior?: string } }) =>
@@ -479,55 +505,9 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
   };
 
   // -------------------------------------------------------- scheduled tasks
-  interface MockScheduledTaskState {
-    nextRunAtMs: number | null;
-    lastRunAtMs: number | null;
-    lastStatus: 'success' | 'error' | 'running' | null;
-    lastError: string | null;
-    lastDurationMs: number | null;
-    runningAtMs: number | null;
-    consecutiveErrors: number;
-  }
-
-  type MockSchedule =
-    | { type: 'interval'; intervalMs: number; unit: 'minutes' | 'hours' | 'days'; value: number }
-    | { type: 'cron'; expression: string };
-
-  interface MockScheduledTask {
-    id: string;
-    name: string;
-    description: string;
-    enabled: boolean;
-    schedule: MockSchedule;
-    prompt: string;
-    workingDirectory: string;
-    systemPrompt: string;
-    executionMode: 'auto' | 'local' | 'sandbox';
-    metabotId: number | null;
-    coworkSessionId: string | null;
-    targetSessionId: string | null;
-    expiresAt: string | null;
-    notifyPlatforms: string[];
-    state: MockScheduledTaskState;
-    createdAt: string;
-    updatedAt: string;
-  }
-
-  interface MockScheduledTaskRun {
-    id: string;
-    taskId: string;
-    sessionId: string | null;
-    status: 'running' | 'success' | 'error' | 'skipped';
-    startedAt: string;
-    finishedAt: string | null;
-    durationMs: number | null;
-    error: string | null;
-    trigger: 'scheduled' | 'manual';
-    skipReason: string | null;
-  }
-
   const bootAt = now();
-  const scheduledTasks: MockScheduledTask[] = [
+
+  const scheduledTasks: ScheduledTask[] = [
     {
       id: 'mock-task-1',
       name: 'Daily digest',
@@ -583,18 +563,65 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       updatedAt: new Date(bootAt).toISOString(),
     },
   ];
-  const scheduledRuns = new Map<string, MockScheduledTaskRun[]>();
+  const scheduledRuns = new Map<string, ScheduledTaskRun[]>();
   let runSeq = 0;
+  let taskSeq = 2;
 
-  function taskById(id: string): MockScheduledTask | undefined {
+  function taskById(id: string): ScheduledTask | undefined {
     return scheduledTasks.find((task) => task.id === id);
   }
 
-  function fireScheduledRun(): void {
-    const task = taskById('mock-task-1');
-    if (!task || destroyed) return;
+  /** Next fire time for a schedule from `now`, used by create/toggle. */
+  function nextRunAtMsFor(schedule: Schedule, fromMs: number): number | null {
+    if (schedule.type === 'interval') {
+      return fromMs + schedule.intervalMs;
+    }
+    if (schedule.type === 'cron') {
+      // Mobile mock only produces daily-time cron strings ("m h * * *");
+      // other expressions fall back to the next midnight tick.
+      const parts = schedule.expression.split(/\s+/);
+      const minute = Number(parts[0]);
+      const hour = Number(parts[1]);
+      const next = new Date(fromMs);
+      next.setHours(Number.isFinite(hour) ? hour : 0, Number.isFinite(minute) ? minute : 0, 0, 0);
+      if (next.getTime() <= fromMs) next.setDate(next.getDate() + 1);
+      return next.getTime();
+    }
+    const at = Date.parse(schedule.datetime);
+    return Number.isFinite(at) && at > fromMs ? at : null;
+  }
+
+  function validateTaskInput(input: ScheduledTaskInput): string | null {
+    if (!input || typeof input !== 'object') return 'input must be an object';
+    if (typeof input.name !== 'string' || !input.name.trim()) return 'name is required';
+    if (typeof input.prompt !== 'string' || !input.prompt.trim()) return 'prompt is required';
+    const schedule: Schedule = input.schedule;
+    if (!schedule || typeof schedule !== 'object') return 'schedule is required';
+    if (schedule.type === 'interval') {
+      if (!(schedule.intervalMs > 0)) return 'interval schedule needs intervalMs > 0';
+    } else if (schedule.type === 'cron') {
+      if (typeof schedule.expression !== 'string' || !schedule.expression.trim()) {
+        return 'cron schedule needs an expression';
+      }
+    } else if (schedule.type === 'at') {
+      if (!Number.isFinite(Date.parse(schedule.datetime))) return 'at schedule needs a valid datetime';
+    } else {
+      return 'unknown schedule type';
+    }
+    return null;
+  }
+
+  /**
+   * Runs a task once: emits the running status, then the completed run (and a
+   * matching runUpdate/statusUpdate pair) after the delay. The completed run
+   * lands in `listRuns` history and creates an auto-origin cowork session,
+   * like a real scheduled run. The scheduled demo tick (mock-task-1) finishes
+   * quickly; manual runs run for `manualRunDelayMs` so the UI can show the
+   * running state.
+   */
+  function startTaskRun(task: ScheduledTask, trigger: 'scheduled' | 'manual', finishDelayMs: number): ScheduledTaskRun {
     const runSession = createSession({
-      title: 'Scheduled run: Daily digest',
+      title: `Scheduled run: ${task.name}`,
       prompt: task.prompt,
       metabotId: task.metabotId,
       autoOrigin: 'schedule',
@@ -607,25 +634,34 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     };
     task.updatedAt = new Date(startedMs).toISOString();
     emitter.emit('scheduledTask:statusUpdate', { taskId: task.id, state: { ...task.state } });
-    const run: MockScheduledTaskRun = {
+    const run: ScheduledTaskRun = {
       id: `mock-run-${++runSeq}`,
       taskId: task.id,
       sessionId: runSession.id,
-      status: 'success',
+      status: 'running',
       startedAt: new Date(startedMs).toISOString(),
       finishedAt: null,
       durationMs: null,
       error: null,
-      trigger: 'scheduled',
+      trigger,
       skipReason: null,
     };
+    if (trigger === 'manual') {
+      // Manual runs surface the running entry immediately so the UI can show
+      // progress; the scheduled demo tick keeps its single success event.
+      const runs = scheduledRuns.get(task.id) ?? [];
+      runs.unshift(run);
+      scheduledRuns.set(task.id, runs);
+      emitter.emit('scheduledTask:runUpdate', { run: { ...run } });
+    }
     const finishRun = () => {
       if (destroyed) return;
       const finishedMs = now();
+      run.status = 'success';
       run.finishedAt = new Date(finishedMs).toISOString();
       run.durationMs = finishedMs - startedMs;
       task.state = {
-        nextRunAtMs: finishedMs + 86_400_000,
+        nextRunAtMs: nextRunAtMsFor(task.schedule, finishedMs),
         lastRunAtMs: finishedMs,
         lastStatus: 'success',
         lastError: null,
@@ -636,15 +672,19 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       task.updatedAt = new Date(finishedMs).toISOString();
       runSession.status = 'completed';
       const runs = scheduledRuns.get(task.id) ?? [];
-      runs.unshift(run);
+      if (!runs.some((existing) => existing.id === run.id)) runs.unshift(run);
       scheduledRuns.set(task.id, runs);
       emitter.emit('scheduledTask:runUpdate', { run: { ...run } });
       emitter.emit('scheduledTask:statusUpdate', { taskId: task.id, state: { ...task.state } });
     };
-    later(finishRun, Math.min(200, scheduledRunDelayMs));
+    later(finishRun, finishDelayMs);
+    return run;
   }
 
-  later(fireScheduledRun, scheduledRunDelayMs);
+  later(() => {
+    const task = taskById('mock-task-1');
+    if (task?.enabled && !destroyed) startTaskRun(task, 'scheduled', Math.min(200, scheduledRunDelayMs));
+  }, scheduledRunDelayMs);
 
   const scheduledTasksImpl: Record<string, unknown> = {
     list: () => guardOnline(async () => ({ success: true, tasks: scheduledTasks.map((t) => ({ ...t })) })),
@@ -652,6 +692,63 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       guardOnline(async () => {
         const task = taskById(id);
         return task ? { success: true, task: { ...task } } : { success: false, error: 'task not found' };
+      }),
+    create: (input: ScheduledTaskInput) =>
+      guardOnline(async () => {
+        const invalid = validateTaskInput(input);
+        if (invalid) return { success: false, error: `invalid task: ${invalid}` };
+        const ts = now();
+        const task: ScheduledTask = {
+          id: `mock-task-${++taskSeq}`,
+          name: input.name.trim(),
+          description: typeof input.description === 'string' ? input.description : '',
+          enabled: input.enabled !== false,
+          schedule: input.schedule,
+          prompt: input.prompt,
+          workingDirectory: input.workingDirectory || MOCK_WORKSPACE,
+          systemPrompt: input.systemPrompt || '',
+          executionMode: input.executionMode === 'local' || input.executionMode === 'sandbox' ? input.executionMode : 'auto',
+          metabotId: typeof input.metabotId === 'number' ? input.metabotId : null,
+          coworkSessionId: null,
+          targetSessionId: typeof input.targetSessionId === 'string' ? input.targetSessionId : null,
+          expiresAt: typeof input.expiresAt === 'string' ? input.expiresAt : null,
+          notifyPlatforms: Array.isArray(input.notifyPlatforms) ? [...input.notifyPlatforms] : [],
+          state: {
+            nextRunAtMs: input.enabled === false ? null : nextRunAtMsFor(input.schedule, ts),
+            lastRunAtMs: null,
+            lastStatus: null,
+            lastError: null,
+            lastDurationMs: null,
+            runningAtMs: null,
+            consecutiveErrors: 0,
+          },
+          createdAt: new Date(ts).toISOString(),
+          updatedAt: new Date(ts).toISOString(),
+        };
+        scheduledTasks.push(task);
+        emitter.emit('scheduledTask:statusUpdate', { taskId: task.id, state: { ...task.state } });
+        return { success: true, task: { ...task } };
+      }),
+    toggle: (id: string, enabled: boolean) =>
+      guardOnline(async () => {
+        const task = taskById(id);
+        if (!task) return { success: false, error: 'task not found' };
+        const ts = now();
+        task.enabled = Boolean(enabled);
+        task.state = {
+          ...task.state,
+          nextRunAtMs: task.enabled ? (task.state.nextRunAtMs ?? nextRunAtMsFor(task.schedule, ts)) : null,
+        };
+        task.updatedAt = new Date(ts).toISOString();
+        emitter.emit('scheduledTask:statusUpdate', { taskId: task.id, state: { ...task.state } });
+        return { success: true, task: { ...task } };
+      }),
+    runManually: (id: string) =>
+      guardOnline(async () => {
+        const task = taskById(id);
+        if (!task) return { success: false, error: 'task not found' };
+        const run = startTaskRun(task, 'manual', manualRunDelayMs);
+        return { success: true, run: { ...run } };
       }),
     listRuns: (taskId: string, limit = 50, offset = 0) =>
       guardOnline(async () => {
@@ -834,6 +931,150 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     return 'en';
   };
 
+  const metabotFixtures: MockMetabot[] = [
+    {
+      id: 1,
+      wallet_id: 1,
+      name: 'Twin Bot',
+      avatar: null,
+      enabled: true,
+      globalmetaid: 'mock-globalmetaid-twin',
+      metabot_type: 'twin',
+      role: 'Your twin',
+      soul: 'Mock twin soul',
+      goal: null,
+      bio: 'The mock Twin Bot',
+      background: null,
+      boss_id: null,
+      boss_global_metaid: null,
+      llm_id: null,
+      tools: [],
+      skills: ['web-search'],
+      allow_chat_skills: [],
+      created_at: bootAt,
+      updated_at: bootAt,
+    },
+    {
+      id: 2,
+      wallet_id: 2,
+      name: 'Researcher',
+      avatar: null,
+      enabled: true,
+      globalmetaid: 'mock-globalmetaid-worker',
+      metabot_type: 'worker',
+      role: 'Researches the MetaWeb',
+      soul: 'Mock worker soul',
+      goal: null,
+      bio: 'A mock worker Bot',
+      background: null,
+      boss_id: null,
+      boss_global_metaid: null,
+      llm_id: null,
+      tools: [],
+      skills: [],
+      allow_chat_skills: [],
+      created_at: bootAt,
+      updated_at: bootAt,
+    },
+  ];
+  let metabotSeq = 2;
+
+  const metabotImpl: Record<string, unknown> = {
+    list: () =>
+      guardOnline(async () => ({
+        success: true,
+        list: metabotFixtures.map((bot) => ({ ...bot })),
+      })),
+    get: (id: number) =>
+      guardOnline(async () => {
+        const bot = metabotFixtures.find((entry) => entry.id === id);
+        return bot ? { success: true, metabot: { ...bot } } : { success: false, error: 'metabot not found' };
+      }),
+    create: (input: MetabotCreateInput) =>
+      guardOnline(async () => {
+        if (!input || typeof input.name !== 'string' || !input.name.trim()) {
+          return { success: false, error: 'name is required' };
+        }
+        const ts = now();
+        const bot: MockMetabot = {
+          id: ++metabotSeq,
+          wallet_id: metabotSeq,
+          name: input.name.trim(),
+          avatar: input.avatar ?? null,
+          enabled: true,
+          globalmetaid: `mock-globalmetaid-${metabotSeq}`,
+          metabot_type: input.metabot_type === 'twin' || input.metabot_type === 'welcome' ? input.metabot_type : 'worker',
+          role: typeof input.role === 'string' ? input.role : '',
+          soul: typeof input.soul === 'string' ? input.soul : '',
+          goal: input.goal ?? null,
+          bio: input.bio ?? null,
+          background: input.background ?? null,
+          boss_id: input.boss_id ?? null,
+          boss_global_metaid: input.boss_global_metaid ?? null,
+          llm_id: input.llm_id ?? null,
+          tools: [],
+          skills: [],
+          allow_chat_skills: input.allow_chat_skills ?? [],
+          created_at: ts,
+          updated_at: ts,
+        };
+        metabotFixtures.push(bot);
+        return { success: true, metabot: { ...bot } };
+      }),
+    update: (id: number, input: MetabotUpdateInput) =>
+      guardOnline(async () => {
+        const bot = metabotFixtures.find((entry) => entry.id === id);
+        if (!bot) return { success: false, error: 'metabot not found' };
+        if (input && typeof input.name === 'string') {
+          if (!input.name.trim()) return { success: false, error: 'name must not be empty' };
+          bot.name = input.name.trim();
+        }
+        if (input) {
+          if (typeof input.role === 'string') bot.role = input.role;
+          if (typeof input.soul === 'string') bot.soul = input.soul;
+          if (input.bio !== undefined) bot.bio = input.bio;
+          if (input.goal !== undefined) bot.goal = input.goal;
+          if (typeof input.enabled === 'boolean') bot.enabled = input.enabled;
+        }
+        bot.updated_at = now();
+        return { success: true, metabot: { ...bot } };
+      }),
+    setEnabled: (id: number, enabled: boolean) =>
+      guardOnline(async () => {
+        const bot = metabotFixtures.find((entry) => entry.id === id);
+        if (!bot) return { success: false, error: 'metabot not found' };
+        bot.enabled = Boolean(enabled);
+        bot.updated_at = now();
+        return { success: true, metabot: { ...bot } };
+      }),
+  };
+
+  const skillFixtures: MockSkill[] = [
+    {
+      id: 'web-search',
+      name: 'web-search',
+      description: 'Searches the web',
+      enabled: true,
+      isOfficial: true,
+      isBuiltIn: false,
+      updatedAt: bootAt,
+      prompt: '',
+      skillPath: '/data/appdata/SKILLs/web-search',
+    },
+    {
+      id: 'memory',
+      name: 'memory',
+      description: 'Long-term memory',
+      enabled: true,
+      isOfficial: true,
+      isBuiltIn: true,
+      updatedAt: bootAt,
+      prompt: '',
+      skillPath: '/data/appdata/SKILLs/memory',
+    },
+  ];
+  let redeemSeq = 0;
+
   const electron: Record<string, unknown> = {
     // REQ-E-3: the server is linux/x64; keep the same values so desktop
     // renderer services that branch on platform never take a desktop path.
@@ -928,58 +1169,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
           })),
       },
     },
-    metabot: {
-      list: () =>
-        guardOnline(async () => ({
-          success: true,
-          list: [
-            {
-              id: 1,
-              wallet_id: 1,
-              name: 'Twin Bot',
-              avatar: null,
-              enabled: true,
-              globalmetaid: 'mock-globalmetaid-twin',
-              metabot_type: 'twin',
-              role: 'Your twin',
-              soul: 'Mock twin soul',
-              goal: null,
-              bio: 'The mock Twin Bot',
-              background: null,
-              boss_id: null,
-              boss_global_metaid: null,
-              llm_id: null,
-              tools: [],
-              skills: ['web-search'],
-              allow_chat_skills: [],
-              created_at: bootAt,
-              updated_at: bootAt,
-            },
-            {
-              id: 2,
-              wallet_id: 2,
-              name: 'Researcher',
-              avatar: null,
-              enabled: true,
-              globalmetaid: 'mock-globalmetaid-worker',
-              metabot_type: 'worker',
-              role: 'Researches the MetaWeb',
-              soul: 'Mock worker soul',
-              goal: null,
-              bio: 'A mock worker Bot',
-              background: null,
-              boss_id: null,
-              boss_global_metaid: null,
-              llm_id: null,
-              tools: [],
-              skills: [],
-              allow_chat_skills: [],
-              created_at: bootAt,
-              updated_at: bootAt,
-            },
-          ],
-        })),
-    },
+    metabot: metabotImpl,
     userIdentity: {
       get: () =>
         guardOnline(async () => ({
@@ -1012,36 +1202,39 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       list: () =>
         guardOnline(async () => ({
           success: true,
-          skills: [
-            {
-              id: 'web-search',
-              name: 'web-search',
-              description: 'Searches the web',
-              enabled: true,
-              isOfficial: true,
-              isBuiltIn: false,
-              updatedAt: bootAt,
-              prompt: '',
-              skillPath: '/data/appdata/SKILLs/web-search',
-            },
-            {
-              id: 'memory',
-              name: 'memory',
-              description: 'Long-term memory',
-              enabled: true,
-              isOfficial: true,
-              isBuiltIn: true,
-              updatedAt: bootAt,
-              prompt: '',
-              skillPath: '/data/appdata/SKILLs/memory',
-            },
-          ],
+          skills: skillFixtures.map((skill) => ({ ...skill })),
         })),
+      setEnabled: (options: { id: string; enabled: boolean }) =>
+        guardOnline(async () => {
+          const skill = skillFixtures.find((entry) => entry.id === options?.id);
+          if (!skill) return { success: false, error: 'skill not found' };
+          skill.enabled = Boolean(options.enabled);
+          skill.updatedAt = now();
+          emitter.emit('skills:changed', { id: skill.id, enabled: skill.enabled });
+          return { success: true, skills: skillFixtures.map((entry) => ({ ...entry })) };
+        }),
       onChanged: (callback: () => void) => emitter.on('skills:changed', callback as never),
     },
     traffic: {
       getBalance: () =>
         guardOnline(async () => ({ success: true, balance: { ...meters.traffic } })),
+      redeemCode: (input: { code: string }) =>
+        guardOnline(async () => {
+          const code = typeof input?.code === 'string' ? input.code.trim() : '';
+          if (!code) return { success: false, error: 'code is required' };
+          if (code === 'BAD') {
+            return { success: false, error: 'redeem code is invalid', errorCode: 'INVALID_CODE' };
+          }
+          meters.traffic.balanceBytes += REDEEM_CODE_GRANT_BYTES;
+          meters.traffic.grantedBytesTotal += REDEEM_CODE_GRANT_BYTES;
+          redeemSeq += 1;
+          const result = {
+            codeId: redeemSeq,
+            trafficBytes: REDEEM_CODE_GRANT_BYTES,
+            balanceAfter: meters.traffic.balanceBytes,
+          };
+          return { success: true, result };
+        }),
     },
     llmRelay: {
       getQuota: () =>

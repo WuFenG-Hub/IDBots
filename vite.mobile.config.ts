@@ -31,10 +31,23 @@ function mobileDevEntriesPlugin() {
     configureServer(server: import('vite').ViteDevServer) {
       server.middlewares.use((req, res, next) => {
         const url = req.url?.split('?')[0] ?? '';
-        if (url === '/' || url === '/index.html') {
+        // The login page navigates to /app/ after sign-in; serve the app
+        // entry there (and at /app) so the flow works on dev:mobile.
+        if (url === '/app' || url === '/app/' || url === '/app/index.html') {
+          req.url = '/src/mobile/app/index.html';
+        } else if (url === '/' || url === '/index.html') {
           req.url = '/src/mobile/app/index.html';
         } else if (url === '/login' || url === '/login/' || url === '/login/index.html') {
           req.url = '/src/mobile/login/index.html';
+        } else if (url === '/manifest.webmanifest' || url === '/app/manifest.webmanifest') {
+          // PWA manifest + icons (REQ-E-21): the dev root is the repo, so
+          // these resolve from the app bundle's public/ source dir.
+          req.url = '/src/mobile/app/public/manifest.webmanifest';
+        } else {
+          const icon = url.match(/^\/(?:app\/)?(icon-192\.png|icon-512\.png|apple-touch-icon\.png)$/);
+          if (icon) {
+            req.url = `/src/mobile/app/public/${icon[1]}`;
+          }
         }
         next();
       });
