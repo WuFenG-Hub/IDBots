@@ -470,3 +470,40 @@ test('a night with no hot procedures reports zero procedureBlockChars', async ()
     h.cleanup();
   }
 });
+
+
+test('review Minor 2: a mid-flush failure requeues the window instead of losing it', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const today = localDateKey(new Date());
+    coworkStore.recordHotLayerExposures({
+      metabotId: 5,
+      usageDate: today,
+      items: [{ kind: 'procedure', id: 'p-requeue', exposure: 'hot' }],
+    });
+    // Sabotage the table mid-flush: DROP it so the UPSERT throws.
+    db.run('DROP TABLE hot_layer_usage');
+    assert.throws(() => coworkStore.flushHotLayerExposureBuffer());
+    db.run(`
+      CREATE TABLE hot_layer_usage (
+        metabot_id INTEGER NOT NULL,
+        usage_date TEXT NOT NULL,
+        item_kind TEXT NOT NULL CHECK (item_kind IN ('technique', 'procedure', 'knowledge', 'memory')),
+        item_id TEXT NOT NULL,
+        exposure TEXT NOT NULL CHECK (exposure IN ('hot', 'recall')),
+        first_exposed_at INTEGER NOT NULL,
+        exposure_count INTEGER NOT NULL DEFAULT 1,
+        applied INTEGER CHECK (applied IS NULL OR applied IN (0, 1)),
+        evidence TEXT,
+        audited_at INTEGER,
+        PRIMARY KEY (metabot_id, usage_date, item_kind, item_id)
+      );
+    `);
+    // The requeued window lands on the next flush.
+    assert.equal(coworkStore.flushHotLayerExposureBuffer(), 1);
+    assert.equal(usageRow(db, "item_id = 'p-requeue'").count, 1, 'no row was lost across the failed flush');
+  } finally {
+    cleanup();
+  }
+});

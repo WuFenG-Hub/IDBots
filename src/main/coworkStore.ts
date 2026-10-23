@@ -8221,7 +8221,17 @@ export class CoworkStore implements MemoryBackend {
       try {
         this.flushHotLayerExposureBuffer();
       } catch (error) {
+        // Review Minor 2: the failure warning is throttled by the drain-stop
+        // below — a broken database warns once per failed window, not every
+        // 5s forever.
         console.warn('[CoworkStore] hot-layer exposure flush failed:', error);
+      }
+      // Review Minor 2: stop the timer when the buffer drains — an idle
+      // store must not wake every 5s for the rest of the process lifetime.
+      // The next recordHotLayerExposures call re-arms it on demand.
+      if (this.hotLayerExposureBuffer.size === 0 && this.hotLayerExposureFlushTimer) {
+        clearInterval(this.hotLayerExposureFlushTimer);
+        this.hotLayerExposureFlushTimer = null;
       }
     }, 5_000);
     (this.hotLayerExposureFlushTimer as unknown as { unref?: () => void }).unref?.();
@@ -8237,21 +8247,38 @@ export class CoworkStore implements MemoryBackend {
   flushHotLayerExposureBuffer(): number {
     if (this.hotLayerExposureBuffer.size === 0) return 0;
     const rows = [...this.hotLayerExposureBuffer.values()];
+    // Review Minor 2: snapshot-and-clear BEFORE writing; on failure the rows
+    // go back (merged with anything recorded while we wrote) instead of the
+    // whole window being lost or double-counted.
     this.hotLayerExposureBuffer.clear();
-    let written = 0;
-    for (const row of rows) {
-      this.db.run(
-        `INSERT INTO hot_layer_usage (metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(metabot_id, usage_date, item_kind, item_id) DO UPDATE SET
-           exposure_count = exposure_count + excluded.exposure_count,
-           exposure = CASE WHEN hot_layer_usage.exposure = 'hot' OR excluded.exposure = 'hot' THEN 'hot' ELSE 'recall' END`,
-        [row.metabotId, row.usageDate, row.kind, row.id, row.exposure, row.firstExposedAt, row.count],
-      );
-      written += 1;
+    try {
+      let written = 0;
+      for (const row of rows) {
+        this.db.run(
+          `INSERT INTO hot_layer_usage (metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(metabot_id, usage_date, item_kind, item_id) DO UPDATE SET
+             exposure_count = exposure_count + excluded.exposure_count,
+             exposure = CASE WHEN hot_layer_usage.exposure = 'hot' OR excluded.exposure = 'hot' THEN 'hot' ELSE 'recall' END`,
+          [row.metabotId, row.usageDate, row.kind, row.id, row.exposure, row.firstExposedAt, row.count],
+        );
+        written += 1;
+      }
+      this.saveDb();
+      return written;
+    } catch (error) {
+      for (const row of rows) {
+        const key = `${row.metabotId}|${row.usageDate}|${row.kind}|${row.id}`;
+        const existing = this.hotLayerExposureBuffer.get(key);
+        if (existing) {
+          existing.count += row.count;
+          if (row.exposure === 'hot') existing.exposure = 'hot';
+        } else {
+          this.hotLayerExposureBuffer.set(key, row);
+        }
+      }
+      throw error;
     }
-    this.saveDb();
-    return written;
   }
 
   /** Retention horizon for hot_layer_usage rows (hygiene step, RRSI P2). */

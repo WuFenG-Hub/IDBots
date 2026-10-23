@@ -347,3 +347,52 @@ test('prompt eviction prefers the applied memory over the merely-injected one', 
   assert.ok(!xml.includes('甲'.repeat(1600)), 'the merely-injected memory is evicted first');
   assert.deepEqual(injectedIds, ['m-applied']);
 });
+
+
+test('review Minor 1: knowledge_recall records exposure rows and cooled knowledge re-enters on applied evidence', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  const coworkStore = createCoworkStore(db);
+  const dreamStore = new DreamStore(db, () => {});
+  try {
+    db.run(
+      `INSERT INTO metabots (
+        id, wallet_id, mvc_address, btc_address, doge_address, public_key,
+        chat_public_key, name, metaid, metabot_type, created_by, role, soul, created_at, updated_at
+      ) VALUES (5, 1, 'mvc-5', 'btc-5', 'doge-5', 'pub-5', 'chat-5', '小火', 'metaid-5', 'worker', 'test', 'role', 'soul', 1, 1)`,
+    );
+    const { MetaIDKnowledgeStore } = require('../dist-electron/main/metaidKnowledgeStore.js');
+    const knowledgeStore = new MetaIDKnowledgeStore(db, () => {}, () => 1_800_000_000_000);
+    const entry = knowledgeStore.upsertKnowledge({
+      metabotId: 5, topic: '回流知识点', summary: '被冷却后靠 recall 应用回流。', kind: 'know_how',
+    }).entry;
+    // Cool it out of the hot pool, then record two applied recall nights.
+    knowledgeStore.setKnowledgeHotEligibility(entry.id, { eligible: false });
+    for (const offset of [3, 2]) {
+      const date = new Date(Date.now() - offset * 86_400_000);
+      const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      coworkStore.recordHotLayerExposures({
+        metabotId: 5, usageDate: key,
+        items: [{ kind: 'knowledge', id: entry.id, exposure: 'recall' }],
+      });
+      coworkStore.flushHotLayerExposureBuffer();
+      dreamStore.recordHotLayerUsageVerdicts(5, key, [
+        { kind: 'knowledge', itemId: entry.id, applied: true, evidence: { labels: [], channels: [] } },
+      ], Date.now());
+    }
+    // The re-entry rule lives in the dream pass; assert the pieces it reads:
+    // the exposure rows are there (recall accounting) and the candidate list
+    // exposes the cooled entry.
+    const rows = db.exec("SELECT COUNT(*) FROM hot_layer_usage WHERE item_kind = 'knowledge' AND exposure = 'recall'")[0].values[0][0];
+    assert.equal(rows, 2, 'recall exposure rows land in the ledger');
+    const cooled = knowledgeStore.listCooledKnowledge(5);
+    assert.ok(cooled.some((row) => row.id === entry.id), 'the cooled entry is a re-entry candidate');
+    const stats = dreamStore.listHotLayerUsageStats(5, {
+      kind: 'knowledge',
+      sinceDate: new Date(Date.now() - 14 * 86_400_000).toISOString().slice(0, 10),
+      untilDate: new Date().toISOString().slice(0, 10),
+    });
+    assert.ok((stats.get(entry.id)?.appliedNights ?? 0) >= 2, 'applied nights feed the re-entry rule');
+  } finally {
+    cleanup();
+  }
+});

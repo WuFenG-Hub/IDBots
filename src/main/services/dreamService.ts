@@ -2575,6 +2575,29 @@ export class DreamService {
       // Only hot_reason 'unused' ever re-enters through usage evidence.
       const reenteredIds = new Set<string>();
       let reentered = 0;
+      // Review Minor 1: cooled knowledge re-enters the hot pool under the
+      // SAME rule as unused procedures — ≥2 applied nights within the
+      // trailing 14-day window (recall exposure rows now feed appliedNights
+      // via the knowledge_recall ledger).
+      const knowledgeReentryCandidates = this.deps.metaidKnowledgeStore
+        ? this.deps.metaidKnowledgeStore.listCooledKnowledge(metabot.id)
+        : [];
+      if (knowledgeReentryCandidates.length > 0) {
+        const knowledgeReentryStats = this.deps.dreamStore.listHotLayerUsageStats(metabot.id, {
+          kind: 'knowledge',
+          sinceDate: shiftDateKey(date, -(HOT_LAYER_REENTRY_WINDOW_DAYS - 1)),
+          untilDate: date,
+        });
+        for (const entry of knowledgeReentryCandidates) {
+          if ((knowledgeReentryStats.get(entry.id)?.appliedNights ?? 0) >= HOT_LAYER_REENTRY_MIN_APPLIED_NIGHTS) {
+            const flipped = this.deps.metaidKnowledgeStore?.setKnowledgeHotEligibility(entry.id, {
+              eligible: true,
+              atMs: this.now().getTime(),
+            });
+            if (flipped) reentered += 1;
+          }
+        }
+      }
       const reentryCandidates = this.deps.metaidKnowledgeStore
         ? this.deps.metaidKnowledgeStore.listUnusedProcedures(metabot.id)
         : [];

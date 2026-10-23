@@ -1510,6 +1510,22 @@ export class MetaIDKnowledgeStore {
   }
 
   /**
+   * Review Minor 1: active knowledge entries currently cooled out of the hot
+   * pool — the re-entry candidate list, mirroring listUnusedProcedures.
+   */
+  listCooledKnowledge(metabotId: number): MetaIDKnowledgeEntry[] {
+    const id = asInteger(metabotId);
+    if (!id) return [];
+    const rows = this.getAll<KnowledgeEntryRow>(`
+      SELECT * FROM metaid_knowledge_entries
+      WHERE metabot_id = ? AND status = 'active' AND COALESCE(hot_eligible, 1) = 0
+      ORDER BY updated_at DESC
+      LIMIT 200
+    `, [id]);
+    return rows.map(rowToEntry);
+  }
+
+  /**
    * Dream review P1: flip one ACTIVE knowledge entry's hot-pool membership.
    * The nightly usage audit's knowledge cooling (≥5 audited hot nights in the
    * trailing window, 0 applied) calls this with eligible=false — the entry

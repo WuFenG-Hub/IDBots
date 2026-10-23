@@ -4468,6 +4468,18 @@ export class CoworkRunner extends EventEmitter {
       const injectedIds = filtered.map((entry) => entry.id).filter(Boolean);
       if (injectedIds.length > 0) {
         this.knowledgeStore.touchKnowledgeLastUsed?.(metabotId, injectedIds);
+        // Review Minor 1: recall exposure accounting, symmetric with
+        // procedure_recall — cooled knowledge earns its re-entry evidence
+        // through these rows. Best-effort telemetry.
+        try {
+          this.store.recordHotLayerExposures({
+            metabotId,
+            usageDate: formatBotWorkspaceDate(new Date()),
+            items: injectedIds.map((id) => ({ kind: 'knowledge', id, exposure: 'recall' })),
+          });
+        } catch {
+          // telemetry is best-effort
+        }
       }
       const entries: KnowledgePromptEntry[] = filtered.map((entry) => ({
         topic: entry.topic,
