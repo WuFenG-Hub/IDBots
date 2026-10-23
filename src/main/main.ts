@@ -195,6 +195,7 @@ import {
 import { seedGreetingFallbackIfMissing } from './services/onboardingGreeting';
 import { deleteBootstrapDoc } from './libs/welcomeBootstrap';
 import { migrateLegacyLlmBrainValues } from './services/llmBrainMigration';
+import { backfillFreeBrainFallbacks, collectUsablePaidProviderKeys } from './services/brainFallbackBackfill';
 import { reconcileStaleModelBindings } from './services/staleModelBindingReconcile';
 import { migrateDeepSeekOutputCeiling } from './services/deepseekOutputCeilingMigration';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
@@ -18628,6 +18629,34 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     }
     startupLog('llm brain migration done');
 
+    // One-shot backup-brain backfill (2026-10-23 new-user free-quota
+    // post-mortem): bots created while only the free-quota relay existed hold
+    // a free primary brain with NO fallback, so an exhausted free allowance
+    // kills passive scenarios even when the owner later configured their own
+    // provider key. When a usable non-free provider is already present at
+    // boot, seed it as the fallback brain of every free-primary bot that has
+    // none. kv-flag guarded to run ONCE per install: a user who deliberately
+    // clears a fallback brain must not be silently re-filled on the next
+    // boot (the live app_config watch below covers providers added later).
+    try {
+      const storeRef = getStore();
+      if (storeRef && !storeRef.get('brain_fallback_backfill_v1')) {
+        const backfillResult = backfillFreeBrainFallbacks({
+          metabotStore: getMetabotStore(),
+          getAppConfig: () => getStore()?.get<{
+            model?: { defaultModel?: string };
+            providers?: Record<string, { enabled?: boolean; apiKey?: string | null; models?: Array<{ id?: string }> }>;
+          }>('app_config') ?? null,
+        });
+        storeRef.set('brain_fallback_backfill_v1', { ranAt: Date.now(), ...backfillResult });
+        startupLog(
+          `brain fallback backfill done (backfilled=${backfillResult.backfilled}, source=${backfillResult.sourceProvider ?? 'none'})`,
+        );
+      }
+    } catch (error) {
+      console.error('[brain-fallback-backfill] startup migration failed (non-fatal):', error);
+    }
+
     // HOST-FIX-RFP 2026-09-28 (D2, the zhipu silent-drop incident): reconcile
     // every stored model binding (session picks + bot brains) against the live
     // provider catalog at startup. Auto-rebinds when the model id maps to
@@ -18865,6 +18894,43 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
       if (currentLanguage !== lastLanguage) {
         lastLanguage = currentLanguage;
         updateTrayMenu(() => mainWindow, getStore());
+      }
+    });
+
+    // Live backup-brain seeding (2026-10-23 new-user free-quota post-mortem):
+    // when a provider becomes newly usable (enabled + keyed + has models),
+    // seed it as the fallback brain of every free-primary bot that has none,
+    // so an exhausted free allowance stops killing passive scenarios without
+    // the owner ever learning the brain settings. The one-shot startup
+    // backfill above covers providers that already existed at boot; this
+    // watch covers providers added (or re-enabled/keyed) while the app runs.
+    let lastUsablePaidProviderKeys = collectUsablePaidProviderKeys(
+      getStore().get<{ providers?: Record<string, { enabled?: boolean; apiKey?: string | null; models?: Array<{ id?: string }> }> }>('app_config'),
+    );
+    getStore().onDidChange('app_config', () => {
+      try {
+        const currentKeys = collectUsablePaidProviderKeys(
+          getStore().get<{ providers?: Record<string, { enabled?: boolean; apiKey?: string | null; models?: Array<{ id?: string }> }> }>('app_config'),
+        );
+        const addedKeys = currentKeys.filter((key) => !lastUsablePaidProviderKeys.includes(key));
+        lastUsablePaidProviderKeys = currentKeys;
+        if (addedKeys.length === 0) return;
+        const result = backfillFreeBrainFallbacks({
+          metabotStore: getMetabotStore(),
+          getAppConfig: () => getStore()?.get<{
+            model?: { defaultModel?: string };
+            providers?: Record<string, { enabled?: boolean; apiKey?: string | null; models?: Array<{ id?: string }> }>;
+          }>('app_config') ?? null,
+          onlyProviderKeys: addedKeys,
+        });
+        if (result.backfilled > 0) {
+          console.log(
+            `[brain-fallback-backfill] seeded backup brain from newly usable provider(s) ${addedKeys.join(', ')} ` +
+            `for ${result.backfilled} free-primary bot(s)`,
+          );
+        }
+      } catch (error) {
+        console.error('[brain-fallback-backfill] provider watch failed (non-fatal):', error);
       }
     });
 
