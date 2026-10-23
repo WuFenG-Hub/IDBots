@@ -3,7 +3,9 @@ import { randomUUID } from 'node:crypto';
 import type { AppContext } from './context.js';
 import { HttpError, writeError, writeJson, type RequestCtx, type Route } from './http.js';
 import { isOriginAllowed } from './origin.js';
+import { accountRoutes } from './routes/account.js';
 import { authRoutes } from './routes/auth.js';
+import { sensitiveRoutes } from './routes/sensitive.js';
 import { requireUser } from './routes/auth.js';
 import { proxyRoutes } from './services/httpProxy.js';
 import { attachWsProxy, type WsProxyOptions } from './services/wsProxy.js';
@@ -188,7 +190,7 @@ async function handle(
 }
 
 export function createRequestHandler(app: AppContext): http.RequestListener {
-  const routes: Route[] = [...authRoutes, ...proxyRoutes];
+  const routes: Route[] = [...authRoutes, ...sensitiveRoutes, ...accountRoutes, ...proxyRoutes];
   return (req, res) => {
     handle(app, routes, req, res).catch((err) => {
       console.error(JSON.stringify({ level: 'error', msg: 'request handler crashed', error: String(err) }));

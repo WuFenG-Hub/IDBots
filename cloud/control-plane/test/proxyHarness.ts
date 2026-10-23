@@ -5,6 +5,7 @@ import {
   freshDb,
   insertInvite,
   sessionCookieFrom,
+  startAlertSink,
   startTestApp,
   waitFor,
   type TestApp,
@@ -26,6 +27,8 @@ export interface ProxyTest {
   sessionToken: string;
   userId: string;
   tenantId: string;
+  /** Present only when requested via withAlertSink. */
+  sink: { url: string; messages: string[]; close: () => Promise<void> } | null;
   close: () => Promise<void>;
 }
 
@@ -37,17 +40,20 @@ export interface ProxyTest {
  */
 export async function setupProxyTest(options: {
   wsProxy?: PublicServerOptions['wsProxy'];
+  withAlertSink?: boolean;
 } = {}): Promise<ProxyTest> {
   const phone = '+8613900009001';
   const db = freshDb();
   const fake = new FakeDocker();
   await fake.listen(0);
   const client = new DockerClient(fake.url());
+  const sink = options.withAlertSink ? await startAlertSink() : null;
   const app = await startTestApp({
     db,
     dockerUrl: fake.url(),
     fakeSmsNumbers: [phone],
     wsProxy: options.wsProxy,
+    ...(sink ? { alertWebhook: sink.url } : {}),
     tenantEnv: {
       FAKE_TENANT_HEALTH_AFTER_MS: '30',
       FAKE_TENANT_PHASES: 'migrating:100,bootstrapping:100,ready:0',
@@ -98,9 +104,11 @@ export async function setupProxyTest(options: {
     sessionToken,
     userId,
     tenantId,
+    sink,
     close: async () => {
       await poller.stop();
       await app.close();
+      await sink?.close();
       await fake.close();
       db.close();
     },

@@ -147,15 +147,17 @@ function getTenantByUserId(app: AppContext, userId: string): TenantRow | undefin
   return app.db.prepare('SELECT * FROM tenants WHERE user_id = ?').get(userId) as TenantRow | undefined;
 }
 
-async function smsSend(app: AppContext, reqCtx: RequestCtx, body: unknown): Promise<void> {
-  const phone = requireStringField(body, 'phone');
-  const purpose = requireStringField(body, 'purpose');
-  if (purpose !== LOGIN_PURPOSE) {
-    throw new HttpError(400, 'INVALID_PURPOSE', `purpose must be "${LOGIN_PURPOSE}"`);
-  }
-  if (!PHONE_RE.test(phone)) {
-    throw new HttpError(400, 'INVALID_PHONE', `expected a mainland China number like +861xxxxxxxxxx`);
-  }
+/**
+ * Shared SMS-code issuance (REQ-B-6/B-16): rate-limit gate, 6-digit code
+ * (fixed 246810 for fake-listed numbers), hashed row with a 5-minute TTL.
+ * Returns whether delivery succeeded (undeliverable is only logged).
+ */
+export async function issueSmsCode(
+  app: AppContext,
+  reqCtx: RequestCtx,
+  phone: string,
+  purpose: 'login' | 'reverify',
+): Promise<void> {
   const now = Date.now();
   const check = checkSmsSend(app.db, { phone, ip: reqCtx.ip, now });
   if (!check.allowed) {
@@ -165,19 +167,16 @@ async function smsSend(app: AppContext, reqCtx: RequestCtx, body: unknown): Prom
     });
     throw new HttpError(429, 'RATE_LIMITED', `sms send refused: ${check.reason ?? 'rate limited'}`);
   }
-
-  const fakeListed =
-    app.config.smsMode === 'fake' && app.config.fakeSmsNumbers.includes(phone);
+  const fakeListed = app.config.smsMode === 'fake' && app.config.fakeSmsNumbers.includes(phone);
   const code = fakeListed ? '246810' : generateSmsCode();
   app.db
     .prepare(
       `INSERT INTO sms_codes (phone_e164, purpose, code_hash, attempts, expires_at, consumed_at, ip, created_at)
        VALUES (?, ?, ?, 0, ?, NULL, ?, ?)`,
     )
-    .run(phone, LOGIN_PURPOSE, hashSmsCode(phone, LOGIN_PURPOSE, code), now + SMS_CODE_TTL_MS, reqCtx.ip, now);
-
+    .run(phone, purpose, hashSmsCode(phone, purpose, code), now + SMS_CODE_TTL_MS, reqCtx.ip, now);
   try {
-    await app.sms.send(phone, LOGIN_PURPOSE, code);
+    await app.sms.send(phone, purpose, code);
   } catch (err) {
     // Undeliverable (fake mode with an unlisted number, provider outage):
     // the code row exists but no SMS arrives, exactly like production.
@@ -186,6 +185,53 @@ async function smsSend(app: AppContext, reqCtx: RequestCtx, body: unknown): Prom
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/** Validates a submitted SMS code (REQ-B-6/B-16 shared rules). */
+export function consumeSmsCode(
+  app: AppContext,
+  phone: string,
+  purpose: 'login' | 'reverify',
+  code: string,
+): void {
+  const now = Date.now();
+  const lock = checkPhoneLock(app.db, phone, now);
+  if (lock.locked) {
+    throw new HttpError(429, 'TOO_MANY_ATTEMPTS', 'too many failed verification attempts for this phone');
+  }
+  const codeRow = app.db
+    .prepare(
+      `SELECT * FROM sms_codes
+       WHERE phone_e164 = ? AND purpose = ? AND consumed_at IS NULL
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(phone, purpose) as { id: number; code_hash: string; attempts: number; expires_at: number } | undefined;
+  if (!codeRow) {
+    throw new HttpError(400, 'CODE_INVALID', 'no active code for this phone');
+  }
+  if (codeRow.attempts >= 5) {
+    throw new HttpError(429, 'TOO_MANY_ATTEMPTS', 'this code has no attempts left');
+  }
+  if (codeRow.expires_at <= now) {
+    throw new HttpError(400, 'CODE_EXPIRED', 'the code has expired');
+  }
+  if (hashSmsCode(phone, purpose, code) !== codeRow.code_hash) {
+    incrementCodeAttempts(app.db, codeRow.id);
+    throw new HttpError(400, 'CODE_INVALID', 'wrong code');
+  }
+  app.db.prepare('UPDATE sms_codes SET consumed_at = ? WHERE id = ?').run(now, codeRow.id);
+}
+
+async function smsSend(app: AppContext, reqCtx: RequestCtx, body: unknown): Promise<void> {
+  const phone = requireStringField(body, 'phone');
+  const purpose = requireStringField(body, 'purpose');
+  if (purpose !== LOGIN_PURPOSE) {
+    throw new HttpError(400, 'INVALID_PURPOSE', `purpose must be "${LOGIN_PURPOSE}"`);
+  }
+  if (!PHONE_RE.test(phone)) {
+    throw new HttpError(400, 'INVALID_PHONE', `expected a mainland China number like +861xxxxxxxxxx`);
+  }
+  await issueSmsCode(app, reqCtx, phone, LOGIN_PURPOSE);
   writeJson(reqCtx.res, 200, { resendAfterSec: 60 });
 }
 
@@ -209,32 +255,7 @@ async function smsVerify(app: AppContext, reqCtx: RequestCtx, body: unknown): Pr
   }
   const now = Date.now();
 
-  const lock = checkPhoneLock(app.db, phone, now);
-  if (lock.locked) {
-    throw new HttpError(429, 'TOO_MANY_ATTEMPTS', 'too many failed verification attempts for this phone');
-  }
-
-  const codeRow = app.db
-    .prepare(
-      `SELECT * FROM sms_codes
-       WHERE phone_e164 = ? AND purpose = ? AND consumed_at IS NULL
-       ORDER BY created_at DESC LIMIT 1`,
-    )
-    .get(phone, LOGIN_PURPOSE) as { id: number; code_hash: string; attempts: number; expires_at: number } | undefined;
-  if (!codeRow) {
-    throw new HttpError(400, 'CODE_INVALID', 'no active code for this phone');
-  }
-  if (codeRow.attempts >= 5) {
-    throw new HttpError(429, 'TOO_MANY_ATTEMPTS', 'this code has no attempts left');
-  }
-  if (codeRow.expires_at <= now) {
-    throw new HttpError(400, 'CODE_EXPIRED', 'the code has expired');
-  }
-  if (hashSmsCode(phone, LOGIN_PURPOSE, code) !== codeRow.code_hash) {
-    incrementCodeAttempts(app.db, codeRow.id);
-    throw new HttpError(400, 'CODE_INVALID', 'wrong code');
-  }
-  app.db.prepare('UPDATE sms_codes SET consumed_at = ? WHERE id = ?').run(now, codeRow.id);
+  consumeSmsCode(app, phone, LOGIN_PURPOSE, code);
 
   const existing = app.db.prepare('SELECT * FROM users WHERE phone_e164 = ?').get(phone) as
     | UserRow

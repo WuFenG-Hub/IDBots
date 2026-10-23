@@ -94,7 +94,10 @@ function handleRevealMnemonic(req, res) {
   } catch {
     return fail();
   }
-  const expected = crypto.createHmac('sha256', SECRET).update(token.slice(0, dot)).digest();
+  const expected = crypto
+    .createHmac('sha256', SECRET)
+    .update(Buffer.from(token.slice(0, dot), 'base64url'))
+    .digest();
   let actual;
   try {
     actual = Buffer.from(token.slice(dot + 1), 'base64url');
