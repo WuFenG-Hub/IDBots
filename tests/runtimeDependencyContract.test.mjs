@@ -733,7 +733,7 @@ test('Twin orchestration tools have a host-side gate and trusted sandbox registr
 });
 
 test('release packaging wires nested DSH runtime install, extraResources, and pack gates', () => {
-  const { extraResourceFilterExcludesNodeModules, RUNTIME_DEAD_FILE_FILTERS } = require('../scripts/packagedRuntimes.cjs');
+  const { extraResourceFilterExcludesNodeModules, RUNTIME_DEAD_FILE_FILTERS, RESOURCE_DOT_ENTRY_FILTERS } = require('../scripts/packagedRuntimes.cjs');
   const workflow = fs.readFileSync(path.join(process.cwd(), '.github/workflows/build.yml'), 'utf8');
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
   const builder = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'electron-builder.json'), 'utf8'));
@@ -768,8 +768,31 @@ test('release packaging wires nested DSH runtime install, extraResources, and pa
       `dsh-runtime extraResources filter must keep ${pattern}: declarations and source maps are roughly 43% of the files the Windows installer extracts`,
     );
   }
+  const skillsResource = (builder.extraResources || []).find((entry) => entry && entry.from === 'SKILLs');
+  assert.ok(skillsResource, 'electron-builder extraResources must copy SKILLs');
+  for (const pattern of RESOURCE_DOT_ENTRY_FILTERS) {
+    assert.ok(
+      (skillsResource.filter || []).includes(pattern),
+      `SKILLs extraResources filter must keep ${pattern}: git-ignored local scratch dirs (SKILLs/.tmp_*, .cowork-temp) shipped ~30k files / ~1.2 GB in the 1.0.2/1.0.3 installers`,
+    );
+  }
+  for (const pattern of RUNTIME_DEAD_FILE_FILTERS) {
+    assert.ok(
+      (skillsResource.filter || []).includes(pattern),
+      `SKILLs extraResources filter must keep ${pattern}: the web-search node_modules ships dead declarations and source maps otherwise`,
+    );
+  }
+  const metaappsResource = (builder.extraResources || []).find((entry) => entry && entry.from === 'METAAPPs');
+  assert.ok(metaappsResource, 'electron-builder extraResources must copy METAAPPs');
+  for (const pattern of RESOURCE_DOT_ENTRY_FILTERS) {
+    assert.ok(
+      (metaappsResource.filter || []).includes(pattern),
+      `METAAPPs extraResources filter must keep ${pattern}: the same untracked-scratch leak vector applies`,
+    );
+  }
   assert.match(hooks, /verifySourceRuntimes\(\)/, 'beforePack must fail closed if nested runtime deps are missing');
   assert.match(hooks, /verifyPackagedRuntimes\(context\)/, 'afterPack must fail closed if the copied app Resources omit runtime deps');
+  assert.match(hooks, /verifyPackagedContentResources\(context\)/, 'afterPack must fail closed if content resources ship dot-entries or dead files');
   assert.match(
     workflow,
     /node scripts\/setup-ffmpeg\.js --required/,
@@ -947,6 +970,74 @@ test('packaged runtime gates fail closed on missing source and packaged markers'
     assert.deepEqual(findPackagedRuntimeDeadFiles(runtimeRoot), []);
     assert.ok(fs.existsSync(path.join(pkgDir, 'SKILL.md')), 'run-time markdown survives the prune');
     assert.doesNotThrow(() => verifyPackagedRuntimes(packagedContext));
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('packaged content resource gates fail closed on dot entries and dead files', () => {
+  const {
+    findDotEntries,
+    verifyPackagedContentResources,
+    PACKAGED_CONTENT_RESOURCES,
+  } = require('../scripts/packagedRuntimes.cjs');
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-packaged-content-'));
+
+  try {
+    assert.deepEqual(
+      PACKAGED_CONTENT_RESOURCES.map((entry) => entry.extraResourceTo),
+      ['SKILLs', 'METAAPPs'],
+    );
+
+    const context = {
+      appOutDir: path.join(tmpRoot, 'win-out'),
+      electronPlatformName: 'win32',
+      packager: { appInfo: { productFilename: 'IDBots' } },
+    };
+    const resourcesDir = path.join(context.appOutDir, 'resources');
+
+    assert.throws(
+      () => verifyPackagedContentResources(context),
+      /SKILLs\//,
+      'missing content resource trees must fail closed',
+    );
+
+    const skillsRoot = path.join(resourcesDir, 'SKILLs');
+    fs.mkdirSync(path.join(skillsRoot, 'web-search', 'node_modules', 'pkg'), { recursive: true });
+    fs.writeFileSync(path.join(skillsRoot, 'skills.config.json'), '{}');
+    fs.mkdirSync(path.join(resourcesDir, 'METAAPPs', 'demo'), { recursive: true });
+    fs.writeFileSync(path.join(resourcesDir, 'METAAPPs', 'demo', 'index.html'), '<html></html>');
+    assert.doesNotThrow(() => verifyPackagedContentResources(context));
+
+    fs.mkdirSync(path.join(skillsRoot, '.tmp_lucy_task29_whisper', 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(skillsRoot, '.tmp_lucy_task29_whisper', 'nested', 'chunk.wav'), 'x');
+    fs.writeFileSync(path.join(resourcesDir, 'METAAPPs', '.DS_Store'), 'x');
+    fs.mkdirSync(path.join(skillsRoot, 'web-search', 'node_modules', '.bin'), { recursive: true });
+    fs.writeFileSync(path.join(skillsRoot, 'web-search', 'node_modules', '.bin', 'tsc'), 'x');
+    assert.deepEqual(
+      findDotEntries(skillsRoot),
+      ['.tmp_lucy_task29_whisper', 'web-search/node_modules/.bin'],
+      'dot-directories are recorded without descending into them',
+    );
+    assert.throws(
+      () => verifyPackagedContentResources(context),
+      /dot-entr[\s\S]*SKILLs\/\.tmp_lucy_task29_whisper/,
+      'untracked scratch dirs must fail the pack',
+    );
+
+    fs.rmSync(path.join(skillsRoot, '.tmp_lucy_task29_whisper'), { recursive: true, force: true });
+    fs.rmSync(path.join(resourcesDir, 'METAAPPs', '.DS_Store'));
+    fs.rmSync(path.join(skillsRoot, 'web-search', 'node_modules', '.bin'), { recursive: true, force: true });
+    assert.doesNotThrow(() => verifyPackagedContentResources(context));
+
+    fs.writeFileSync(path.join(skillsRoot, 'web-search', 'node_modules', 'pkg', 'index.d.ts'), 'export {}');
+    assert.throws(
+      () => verifyPackagedContentResources(context),
+      /nothing loads at run time[\s\S]*SKILLs\/web-search\/node_modules\/pkg\/index\.d\.ts/,
+      'dead declarations under the web-search node_modules must fail the pack',
+    );
+    fs.rmSync(path.join(skillsRoot, 'web-search', 'node_modules', 'pkg', 'index.d.ts'));
+    assert.doesNotThrow(() => verifyPackagedContentResources(context));
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
