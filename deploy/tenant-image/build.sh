@@ -51,7 +51,7 @@ if [ "$BUILDER" = buildx ]; then
   if ! docker buildx build \
     --platform "$PLATFORM" \
     --build-arg "APP_VERSION=${VERSION}" \
-    --build-arg "APP_COMMIT=${COMMIT_FULL}" \
+    --build-arg "GIT_COMMIT=${COMMIT_FULL}" \
     --build-arg "CONTRACT_VERSION=${CONTRACT_VERSION}" \
     --tag "$IMAGE" \
     --label "org.idbots.version=${VERSION}" \
@@ -69,7 +69,7 @@ fi
 if [ "$BUILDER" = classic ]; then
   docker build \
     --build-arg "APP_VERSION=${VERSION}" \
-    --build-arg "APP_COMMIT=${COMMIT_FULL}" \
+    --build-arg "GIT_COMMIT=${COMMIT_FULL}" \
     --build-arg "CONTRACT_VERSION=${CONTRACT_VERSION}" \
     --tag "$IMAGE" \
     --file "$HERE/Dockerfile" \
