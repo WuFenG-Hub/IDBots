@@ -1494,6 +1494,17 @@ interface ActiveSession {
    */
   dshTurnAckSerial?: number;
   dshTurnAckVisibleTextSeen?: boolean;
+  /**
+   * True when this turn was kicked with skipInitialUserMessage — the prompt is
+   * host-authored (first-run greeting, machine flows) and no user message
+   * entered the transcript. Turn acknowledgments exist to acknowledge a USER
+   * message, so this flag gates the whole ack emission (template phrase and
+   * LLM bubble): on the first-run greeting the ack rules ("acknowledge only,
+   * never greet, never answer") contradict the greeting instruction, and the
+   * free-relay flash model resolved the conflict by leaking its deliberation
+   * in English as the ack bubble — the very first sentence a fresh user saw.
+   */
+  skipInitialUserMessage: boolean;
   delegationRequestEmitted: boolean;
   staleResumeDetected: boolean;
   staleResumeRetryAllowed: boolean;
@@ -8039,6 +8050,7 @@ export class CoworkRunner extends EventEmitter {
       resolveTurnSettled,
       turnSettlementResolved: false,
       disableRemoteServicesPrompt: Boolean(options.disableRemoteServicesPrompt),
+      skipInitialUserMessage: Boolean(options.skipInitialUserMessage),
       autoApprove: options.autoApprove ?? false,
       disableMemoryUpdates: Boolean(options.disableMemoryUpdates),
       memoryReadOnly: Boolean(options.memoryReadOnly),
@@ -10188,7 +10200,14 @@ export class CoworkRunner extends EventEmitter {
       // newer turnAck message wins the renderer's tail scan by construction).
       try {
         const ackSourceChannel = this.store.getConversationSourceContextBySession(sessionId)?.sourceChannel
-        if (ackSourceChannel === 'cowork_ui') {
+        // Host-initiated turns (skipInitialUserMessage: first-run greeting,
+        // machine flows) carry no user message, so there is nothing to
+        // acknowledge — and on the greeting the ack rules directly contradict
+        // the greeting instruction, which the free-relay flash model resolved
+        // by emitting its English deliberation as the ack bubble (session
+        // a6194072). Both the template phrase ("收到…") and the LLM bubble
+        // would acknowledge a message the user never sent.
+        if (ackSourceChannel === 'cowork_ui' && !activeSession.skipInitialUserMessage) {
           const earlyAckTier = effectiveEffortRung != null
             ? mapCerebellumEffortRungToTurnAckTier(effectiveEffortRung)
             : 'generic'

@@ -130,6 +130,31 @@ test('runner: the LLM ack bubble fires at the early-ack site, gated to cowork_ui
     'external-facing surfaces keep their established posture (cowork_ui only)');
 });
 
+// 2026-10-23 first-run greeting incident (session a6194072): the greeting turn
+// is host-initiated (skipInitialUserMessage — no user message in the
+// transcript), yet the ack fired. Its rules ("acknowledge only, never greet,
+// never answer") contradict the greeting instruction, and the free-relay
+// flash model resolved the conflict by emitting its English deliberation as
+// the ack bubble — the first sentence a fresh user ever saw. A turn with no
+// user message has nothing to acknowledge: both the template phrase and the
+// LLM bubble must be gated off.
+test('runner: host-initiated turns (skipInitialUserMessage) emit no turn acknowledgment at all', () => {
+  const source = read('src/main/libs/coworkRunner.ts');
+
+  const gate = source.indexOf("ackSourceChannel === 'cowork_ui' && !activeSession.skipInitialUserMessage");
+  assert.ok(gate > 0, 'the ack emission (template + LLM bubble) must be gated off for host-initiated turns');
+  const templateAck = source.indexOf('this.emitTurnAck(sessionId, earlyAckTier)');
+  const llmAckCall = source.indexOf('void this.emitTurnAckReplyBubble(sessionId, prompt,');
+  assert.ok(gate < templateAck && gate < llmAckCall,
+    'the gate condition must wrap both the template ack and the LLM bubble call');
+  // The flag is captured per turn from the runner options at ActiveSession
+  // construction, so it reflects THIS turn, not a cached session state.
+  assert.ok(
+    source.includes('skipInitialUserMessage: Boolean(options.skipInitialUserMessage)'),
+    'the ActiveSession must carry the per-turn skipInitialUserMessage flag',
+  );
+});
+
 test('runner: the ack bubble is dropped once the turn delivered visible text or moved on', () => {
   const source = read('src/main/libs/coworkRunner.ts');
 
