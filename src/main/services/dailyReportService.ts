@@ -30,7 +30,10 @@
  * - Retry: a failure after the claim records `failed`; the tick re-arms the
  *   row with dream-style bounded backoff (classifyDreamError terminal class
  *   never retries; DREAM_RETRY_MAX_ATTEMPTS caps the attempts) and reuses
- *   the recorded session_id, so a retry never creates a duplicate session.
+ *   the recorded session_id, so a retry never creates a duplicate session —
+ *   unless the user deleted or archived that session inside the backoff
+ *   window; delivery then re-checks existence first and falls back to a
+ *   fresh report session, repointing the run row via setRunSessionId.
  *
  * Fire-time gates: the global experimental-automation master switch AND a
  * Twin exists AND `dailyReport.enabled === '1'` AND the fresh-install
@@ -92,6 +95,10 @@ export interface DailyReportServiceDeps {
       sessionId: string,
       message: { type: string; content: string; metadata?: Record<string, unknown> },
     ): unknown;
+    /** Lightweight existence probe (no messages loaded); null = row deleted. */
+    getSessionWithoutMessages(id: string): { id: string } | null;
+    /** Archived sessions stay out of the sidebar — invalid retry targets. */
+    isSessionArchived(id: string): boolean;
   };
   metabotStore: {
     listMetabots(): ReadonlyArray<{ id: number; metabot_type?: string }>;
@@ -289,7 +296,18 @@ export const startDailyReportService = (deps: DailyReportServiceDeps): DailyRepo
     content: string;
   }): string => {
     let sessionId = input.run.sessionId;
-    if (!sessionId) {
+    // A retry may reuse the recorded session only while it is still
+    // deliverable: the user may have deleted or archived it inside the
+    // backoff window, and writing the report into that orphan would mark
+    // the run completed while the owner never sees the message (archived
+    // sessions stay out of the sidebar list).
+    const recordedSessionDeliverable = sessionId != null
+      && deps.coworkStore.getSessionWithoutMessages(sessionId) != null
+      && !deps.coworkStore.isSessionArchived(sessionId);
+    if (!recordedSessionDeliverable) {
+      if (sessionId) {
+        log(`${input.dateLabel}: recorded session ${sessionId} was deleted or archived — creating a fresh report session.`);
+      }
       const cwd = deps.resolveSessionCwd(deps.coworkStore.getConfig().workingDirectory, input.twin.id);
       const session = deps.coworkStore.createSession(
         `${DAILY_REPORT_SESSION_TITLE_PREFIX} ${input.dateLabel}`,

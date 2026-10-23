@@ -71,11 +71,15 @@ const setup = (input = {}) => {
   const emitted = [];
   const metabots = input.metabots ?? [{ id: 7, metabot_type: 'twin' }];
   let failAddMessage = input.failFirstAddMessage ?? false;
+  // Shared fake-CoworkStore view: session existence/archival across service
+  // instances of one test. Pass `sessionProbe` in to share it between setups
+  // (the real instances all read the same CoworkStore database).
+  const sessionProbe = input.sessionProbe ?? { deleted: new Set(), archived: new Set(), nextId: 1 };
   const deps = {
     coworkStore: {
       getConfig: () => ({ workingDirectory: '/tmp/ws' }),
       createSession: (title, cwd, systemPrompt, executionMode, activeSkillIds, metabotId) => {
-        const session = { id: `sess-${createdSessions.length + 1}`, title, cwd, metabotId };
+        const session = { id: `sess-${sessionProbe.nextId++}`, title, cwd, metabotId };
         createdSessions.push(session);
         return session;
       },
@@ -87,6 +91,8 @@ const setup = (input = {}) => {
         addedMessages.push({ sessionId, message });
         return { id: `m-${addedMessages.length}`, sessionId, ...message, timestamp: NOW_9AM };
       },
+      getSessionWithoutMessages: (id) => (sessionProbe.deleted.has(id) ? null : { id }),
+      isSessionArchived: (id) => sessionProbe.archived.has(id),
     },
     metabotStore: {
       listMetabots: () => metabots,
@@ -110,7 +116,7 @@ const setup = (input = {}) => {
     log: () => {},
   };
   const service = startDailyReportService(deps);
-  return { service, deps, dailyReportStore, createdSessions, addedMessages, emitted };
+  return { service, deps, dailyReportStore, createdSessions, addedMessages, emitted, sessionProbe };
 };
 
 // ---------------------------------------------------------------------------
@@ -468,6 +474,59 @@ test('retry: failure after session delivery reuses the session (never a duplicat
   assert.equal(late.addedMessages.length, 1);
   assert.equal(late.addedMessages[0].sessionId, 'sess-1');
   late.service.stop();
+});
+
+test('retry: recorded session removed inside the backoff window → fresh session, nothing written to the orphan', async () => {
+  // Same shape as the reuse test, but between the failure and the retry the
+  // user deletes (or archives) the report session. The retry must detect the
+  // orphan, create a NEW session, repoint the run row, and deliver there —
+  // never into the removed session id.
+  for (const removal of ['deleted', 'archived']) {
+    const sharedDb = createNativeSqliteDatabase(':memory:');
+    const sharedStore = new DailyReportStore(sharedDb, () => {});
+    // First attempt: session created, delivery (addMessage) dies → failed row
+    // already carrying session_id.
+    const first = setup({
+      db: sharedDb,
+      dailyReportStore: sharedStore,
+      nowMs: NOW_9AM,
+      serviceStartedAtMs: new Date(2026, 9, 22, 6, 0, 0).getTime(),
+      failFirstAddMessage: true,
+    });
+    await first.service.tickNow();
+    let run = sharedStore.getRunForDate(DATE_LABEL);
+    assert.equal(run.status, 'failed');
+    assert.equal(run.sessionId, 'sess-1', 'session id persisted before delivery settled');
+    // The user removes the report session while the retry is cooling down.
+    first.sessionProbe[removal === 'deleted' ? 'deleted' : 'archived'].add('sess-1');
+    first.service.stop();
+
+    // After the backoff: re-arms, detects the orphan, delivers into a fresh session.
+    const late = setup({
+      db: sharedDb,
+      dailyReportStore: sharedStore,
+      sessionProbe: first.sessionProbe, // same fake-CoworkStore view
+      nowMs: NOW_9AM + 5 * 60_000,
+      serviceStartedAtMs: new Date(2026, 9, 22, 6, 0, 0).getTime(),
+    });
+    await late.service.tickNow();
+    run = sharedStore.getRunForDate(DATE_LABEL);
+    assert.equal(run.status, 'completed', `${removal}: retried day completes`);
+    assert.equal(run.attemptCount, 2);
+    assert.equal(run.triggerKind, 'retry');
+    assert.equal(late.createdSessions.length, 1, `${removal}: a NEW report session`);
+    assert.equal(late.createdSessions[0].id, 'sess-2');
+    assert.equal(run.sessionId, 'sess-2', `${removal}: run row repointed at the new session`);
+    assert.equal(late.addedMessages.length, 1);
+    assert.equal(late.addedMessages[0].sessionId, 'sess-2', `${removal}: message delivered into the new session`);
+    assert.ok(
+      !late.addedMessages.some((entry) => entry.sessionId === 'sess-1'),
+      `${removal}: nothing written into the removed session id`,
+    );
+    assert.equal(late.emitted.length, 1);
+    assert.equal(late.emitted[0].sessionId, 'sess-2', `${removal}: stream broadcast follows the new session`);
+    late.service.stop();
+  }
 });
 
 test('double-fire guard: pre-existing running row blocks a second claim', async () => {
