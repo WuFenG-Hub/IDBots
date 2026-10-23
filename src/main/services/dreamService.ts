@@ -4449,7 +4449,12 @@ export class DreamService {
     // proposals are dead rows (nothing approves or materializes them), so
     // they are dropped at the gate instead of persisted.
     const practiceProposals = Array.isArray(output.practiceProposals) ? output.practiceProposals : [];
-    if (practiceProposals.length > 0 && this.isPracticePipelineEnabled(metabotId)) {
+    // Review Minor 7: repair re-dreams re-run writeDreamResults for a date the
+    // original night already proposed — proposals have no batch-replace
+    // semantics (unlike the day's memories), so persisting here would pile
+    // duplicate rows into the approval pipeline. Repairs keep the original
+    // night's proposals untouched.
+    if (practiceProposals.length > 0 && !isRepair && this.isPracticePipelineEnabled(metabotId)) {
       try {
         const inserted = this.deps.coworkStore.insertDreamPracticeProposals(
           metabotId,
