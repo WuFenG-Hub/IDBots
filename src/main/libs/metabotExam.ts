@@ -156,7 +156,7 @@ export interface ExamScoreResult {
 }
 
 export type ExamScoreParseResult =
-  | { ok: true; scores: ExamScoreResult[]; total: number }
+  | { ok: true; scores: ExamScoreResult[]; total: number; scoredCount: number; expectedCount: number }
   | { ok: false; error: string };
 
 /**
@@ -192,7 +192,12 @@ export function parseExamScores(raw: string, validIds: ReadonlySet<string>): Exa
     total += score;
   }
   if (scores.length === 0) return { ok: false, error: 'no usable scores' };
-  return { ok: true, scores, total: total / scores.length };
+  // Review M6b: divide by the EXPECTED question count — a question the scorer
+  // skipped counts as zero, so a partial verdict can never masquerade as a
+  // high mean. scoredCount vs expectedCount rides the run row so partial
+  // scoring renders as a gap, not a low score.
+  const expectedCount = Math.max(1, validIds.size);
+  return { ok: true, scores, total: total / expectedCount, scoredCount: scores.length, expectedCount };
 }
 
 /** The scoring pass prompt: the brain model judges its own exam against the frozen rubric. */

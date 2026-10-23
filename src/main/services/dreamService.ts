@@ -2760,8 +2760,8 @@ export class DreamService {
     metabot: DreamMetabotLike,
     brain: DreamBrainPair,
     date: string,
-  ): Promise<{ ran: boolean; score: number | null; questions: number }> {
-    const zero = { ran: false, score: null as number | null, questions: 0 };
+  ): Promise<{ ran: boolean; score: number | null; questions: number; scoredCount: number }> {
+    const zero = { ran: false, score: null as number | null, questions: 0, scoredCount: 0 };
     try {
       if (!this.deps.runExamSession) return zero;
       const dreamStore = this.deps.dreamStore;
@@ -2784,18 +2784,12 @@ export class DreamService {
       }
 
       // Assemble the sediment and build (or reuse) the frozen paper.
-      const valueBoundaries = this.deps.coworkStore.listUserMemories({
-        metabotId: metabot.id,
-        usageClass: 'value_boundary',
-        status: 'created',
-        limit: 20,
-      }).map((memory) => ({ id: memory.id, text: memory.text, updatedAt: memory.createdAt }));
-      const workReviews = this.deps.coworkStore.listUserMemories({
-        metabotId: metabot.id,
-        usageClass: 'work_review',
-        status: 'created',
-        limit: 20,
-      }).map((memory) => ({ id: memory.id, text: memory.text, updatedAt: memory.createdAt }));
+      // Review M6a: the sediment pool must order by a STABLE key — the
+      // generic listUserMemories sorts by COALESCE(last_used_at, updated_at),
+      // and last_used_at moves on every injection, which would reorder the
+      // pool between runs and flip the paper's hash without any real change.
+      const valueBoundaries = dreamStore.listExamSedimentMemories(metabot.id, 'value_boundary', 20);
+      const workReviews = dreamStore.listExamSedimentMemories(metabot.id, 'work_review', 20);
       const knowledgeEntries = (this.deps.metaidKnowledgeStore
         ? this.deps.metaidKnowledgeStore.listKnowledge({ metabotId: metabot.id, status: 'active', limit: 20 })
         : []
@@ -2834,12 +2828,23 @@ export class DreamService {
           status: 'done',
           finishedAt: this.now().getTime(),
           totalScore: parsed.total,
+          scoredCount: parsed.scoredCount,
           questionScores: parsed.scores,
         });
+        // Review M6b: a PARTIAL verdict (scorer skipped questions) is not a
+        // low score — report it as score:null so the trend gaps instead of
+        // dipping, and carry scoredCount for the audit trail.
+        const complete = parsed.scoredCount >= parsed.expectedCount;
         console.log(
-          `[DreamService] Frozen exam for metabot ${metabot.id} (${date}): score=${parsed.total.toFixed(2)}, questions=${questions.length}, hash=${frozen.contentHash.slice(0, 8)}`,
+          `[DreamService] Frozen exam for metabot ${metabot.id} (${date}): score=${complete ? parsed.total.toFixed(2) : 'partial'}, `
+          + `scored=${parsed.scoredCount}/${parsed.expectedCount}, hash=${frozen.contentHash.slice(0, 8)}`,
         );
-        return { ran: true, score: parsed.total, questions: questions.length };
+        return {
+          ran: true,
+          score: complete ? parsed.total : null,
+          questions: questions.length,
+          scoredCount: parsed.scoredCount,
+        };
       } catch (error) {
         dreamStore.finishExamRun({
           id: runId,
@@ -2850,7 +2855,7 @@ export class DreamService {
         console.warn(
           `[DreamService] Frozen exam run failed for metabot ${metabot.id} date ${date}: ${error instanceof Error ? error.message : String(error)}`,
         );
-        return { ran: true, score: null, questions: questions.length };
+        return { ran: true, score: null, questions: questions.length, scoredCount: 0 };
       }
     } catch (error) {
       console.warn(

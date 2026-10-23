@@ -87,6 +87,17 @@ test('score parser: tolerant JSON, unknown ids dropped, total recomputed', () =>
   assert.equal(clamped.scores[0].score, 1, 'scores clamp to [0,1]');
 });
 
+test('partial scoring: skipped questions count as zero and are distinguishable (review M6b)', () => {
+  const valid = new Set(['q1', 'q2', 'q3']);
+  // Only q2 scored 0.9 — under the old mean this read 0.9 (an A); the truth
+  // is one great answer and two missing ones.
+  const parsed = parseExamScores('{"scores":[{"id":"q2","score":0.9}]}', valid);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.scoredCount, 1);
+  assert.equal(parsed.expectedCount, 3);
+  assert.ok(Math.abs(parsed.total - 0.3) < 1e-9, 'total divides by the EXPECTED count, missing = 0');
+});
+
 test('store freeze: same hash never rebuilds; a changed hash archives the old paper', async () => {
   const { db, cleanup } = await createSqliteStore();
   try {
@@ -340,6 +351,73 @@ test('dream pass: bots younger than 14 days of data skip the exam', async () => 
     await service.runNow(5, D);
     assert.equal(examCalls, 0, '<14 days of data → no exam');
     assert.equal(dreamStore.getRun(5, D).telemetry.exam.ran, false);
+  } finally {
+    cleanup();
+  }
+});
+
+
+test('exam pool is stable under last_used_at churn — same paper hash across runs (review M6a)', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const dreamStore = new DreamStore(db, () => {});
+    db.run(
+      `INSERT INTO metabots (
+        id, wallet_id, mvc_address, btc_address, doge_address, public_key,
+        chat_public_key, name, metaid, metabot_type, created_by, role, soul, created_at, updated_at
+      ) VALUES (5, 1, 'mvc-5', 'btc-5', 'doge-5', 'pub-5', 'chat-5', '小火', 'metaid-5', 'worker', 'test', 'role', 'soul', 1, 1)`,
+    );
+    const older = coworkStore.createDreamUserMemory({
+      metabotId: 5,
+      text: '涉及个人痛苦的话题要更谨慎。',
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      origin: 'dream',
+      isExplicit: true,
+      source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-08-01' },
+    }).memory;
+    const newer = coworkStore.createDreamUserMemory({
+      metabotId: 5,
+      text: '不确定的问题不要不懂装懂。',
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      origin: 'dream',
+      isExplicit: true,
+      source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-08-02' },
+    }).memory;
+
+    const buildHash = () => {
+      const built = buildMetabotExam({
+        valueBoundaries: dreamStore.listExamSedimentMemories(5, 'value_boundary', 20),
+        workReviews: dreamStore.listExamSedimentMemories(5, 'work_review', 20),
+        knowledgeEntries: [],
+        feedbackEvents: [],
+        groupTaskComments: [],
+      });
+      return built?.contentHash ?? null;
+    };
+
+    // Pin distinct created_at (same-ms inserts would tie and break by id —
+    // still deterministic, just not insertion order).
+    db.run('UPDATE user_memories SET created_at = 1000 WHERE id = ?', [older.id]);
+    db.run('UPDATE user_memories SET created_at = 2000 WHERE id = ?', [newer.id]);
+
+    const first = buildHash();
+    assert.ok(first, 'paper builds from the sediment');
+    assert.deepEqual(
+      dreamStore.listExamSedimentMemories(5, 'value_boundary').map((row) => row.id),
+      [older.id, newer.id],
+      'oldest-first by created_at with an id tiebreaker',
+    );
+
+    // Simulate nights of injections: last_used_at moves, created_at must not.
+    coworkStore.touchUserMemoriesLastUsed(5, [newer.id]);
+    db.run('UPDATE user_memories SET last_used_at = ? WHERE id = ?', [9_999_999, older.id]);
+    const second = buildHash();
+    assert.equal(second, first, 'paper hash is stable under last_used_at churn');
   } finally {
     cleanup();
   }

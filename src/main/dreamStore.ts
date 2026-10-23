@@ -804,7 +804,36 @@ export class DreamStore {
       CREATE INDEX IF NOT EXISTS idx_metabot_exam_runs_metabot_started
         ON metabot_exam_runs(metabot_id, started_at DESC);
     `);
+    // Review M6b: how many of the paper's questions the scorer actually
+    // returned — a partial verdict is not a low score. PRAGMA-guarded and
+    // additive; pre-existing rows read NULL (= fully scored, the old shape).
+    try {
+      const examRunCols = (this.db.exec('PRAGMA table_info(metabot_exam_runs)')[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!examRunCols.includes('scored_count')) {
+        this.db.run('ALTER TABLE metabot_exam_runs ADD COLUMN scored_count INTEGER;');
+      }
+    } catch (error) {
+      console.warn('migrate metabot_exam_runs scored_count:', error);
+    }
     this.backfillLegacyDreamMemoryDates();
+  }
+
+  /**
+   * Review M6a: exam-sediment memories under a STABLE ordering (created_at
+   * ASC, id ASC). The generic listUserMemories orders by
+   * COALESCE(last_used_at, updated_at) — last_used_at moves on every
+   * injection, which would reorder the pool between runs and flip the frozen
+   * paper's hash without any sediment change, destroying comparability.
+   */
+  listExamSedimentMemories(metabotId: number, usageClass: 'value_boundary' | 'work_review', limit = 20): Array<{ id: string; text: string; updatedAt: number }> {
+    return this.getAll<{ id: string; text: string; created_at: number | string }>(`
+      SELECT id, text, created_at
+      FROM user_memories
+      WHERE metabot_id = ? AND usage_class = ? AND status = 'created' AND archived_at IS NULL
+      ORDER BY created_at ASC, id ASC
+      LIMIT ?
+    `, [metabotId, usageClass, Math.max(1, Math.floor(limit))])
+      .map((row) => ({ id: row.id, text: row.text, updatedAt: Number(row.created_at) }));
   }
 
   // ── Dream review P2-1: frozen exams ────────────────────────────────────────
@@ -897,17 +926,19 @@ export class DreamStore {
     status: 'done' | 'failed';
     finishedAt: number;
     totalScore?: number | null;
+    scoredCount?: number | null;
     questionScores?: unknown[] | null;
     error?: string | null;
   }): void {
     this.db.run(`
       UPDATE metabot_exam_runs
-      SET status = ?, finished_at = ?, total_score = ?, question_scores_json = ?, error = ?
+      SET status = ?, finished_at = ?, total_score = ?, scored_count = ?, question_scores_json = ?, error = ?
       WHERE id = ?
     `, [
       input.status,
       Math.floor(Number(input.finishedAt)) || Date.now(),
       input.totalScore == null ? null : Math.max(0, Math.min(1, Number(input.totalScore))),
+      input.scoredCount == null ? null : Math.max(0, Math.floor(Number(input.scoredCount))),
       input.questionScores == null ? null : JSON.stringify(input.questionScores),
       input.error ?? null,
       input.id,
