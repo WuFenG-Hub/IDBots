@@ -7,10 +7,12 @@
  * the feedback thumbs, so "did I react to this?" stays visible at a glance
  * instead of hiding behind a menu.
  *
- * Two existing visual families are reused verbatim so this looks like
- * something the app already had:
- *  - the trigger is an inline action (`CoworkMessageReplyAction`, the branch
- *    button in `CoworkSessionDetail`)
+ * Two existing visual families are reused so this looks like something the app
+ * already had:
+ *  - the trigger started as an inline action (`CoworkMessageReplyAction`, the
+ *    branch button in `CoworkSessionDetail`); per owner request (2026-10-23)
+ *    it now runs one size up with the solid ellipsis in primary text color,
+ *    because the original small gray glyph was too easy to miss
  *  - the panel is the session-list context menu (`CoworkSessionItem`)
  * No new colour, shadow, radius or font token is introduced.
  */
@@ -20,8 +22,10 @@ import {
   ArrowRightOnRectangleIcon,
   ChatBubbleBottomCenterTextIcon,
   ClipboardDocumentIcon,
-  EllipsisHorizontalIcon,
 } from '@heroicons/react/24/outline';
+// Solid ellipsis: the trigger was hard to spot beside the bubble, so it runs
+// one size up in the filled variant (owner request 2026-10-23).
+import { EllipsisHorizontalIcon } from '@heroicons/react/24/solid';
 import { i18nService } from '../../services/i18n';
 import { hasQuotableText } from './coworkQuotedSelections';
 
@@ -122,11 +126,11 @@ const CoworkMessageActionsMenu: React.FC<CoworkMessageActionsMenuProps> = ({
           if (position) close();
           else open();
         }}
-        className={`inline-flex items-center justify-center rounded-md p-0.5 text-[10px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-all duration-200 ${
+        className={`inline-flex items-center justify-center rounded-md p-1 dark:text-claude-darkText text-claude-text hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-all duration-200 ${
           visible || position ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
-        <EllipsisHorizontalIcon className="h-3.5 w-3.5" />
+        <EllipsisHorizontalIcon className="h-5 w-5" />
       </button>
 
       {position && (
