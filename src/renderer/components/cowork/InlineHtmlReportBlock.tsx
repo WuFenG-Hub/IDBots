@@ -52,6 +52,7 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import prismMarkup from 'react-syntax-highlighter/dist/esm/languages/prism/markup';
 import { i18nService } from '../../services/i18n';
 import { dispatchViewSession, parseIdbotsSessionUri } from '../../utils/sessionDeepLink';
+import { buildLocalFileUrl } from '../../services/localFileUrl';
 import { injectHtmlBaseHref } from './MarkdownViewerPanel';
 import LocalFileLink from '../ui/LocalFileLink';
 
@@ -176,11 +177,6 @@ export const buildInlineHtmlSrcDoc = (html: string, filePath: string): string =>
   return /<\/body[^>]*>/i.test(withBase)
     ? withBase.replace(/<\/body[^>]*>/i, (match) => `${reporterTag}${match}`)
     : `${withBase}${reporterTag}`;
-};
-
-const toFileHref = (filePath: string): string => {
-  const normalized = filePath.replace(/\\/g, '/');
-  return /^[A-Za-z]:/.test(filePath) ? `file:///${normalized}` : `file://${normalized}`;
 };
 
 const showToast = (message: string): void => {
@@ -447,7 +443,7 @@ const InlineHtmlReportBlock: React.FC<InlineHtmlReportBlockProps> = ({
         filePath={filePath}
         wrapperClassName="block w-full"
         className="group my-1 flex w-full items-center gap-3 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3.5 py-2.5 shadow-subtle transition-colors hover:border-claude-accent/60 dark:hover:border-claude-accent/60 cursor-pointer no-underline"
-        href={toFileHref(filePath)}
+        href={buildLocalFileUrl(filePath)}
         title={filePath}
         showTypeIcon={false}
         onOpen={onOpenInSidePanel
