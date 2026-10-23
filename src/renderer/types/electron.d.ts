@@ -1308,6 +1308,18 @@ interface IElectronAPI {
       suggestedName?: string;
     }) => Promise<{ success: boolean; canceled?: boolean; path?: string; error?: string }>;
     respondToPermission: (options: { requestId: string; result: CoworkPermissionResult }) => Promise<{ success: boolean; error?: string }>;
+    listPendingPermissions: () => Promise<{
+      success: boolean;
+      permissions?: Array<{
+        sessionId: string;
+        requestId: string;
+        toolName: string;
+        toolInput: Record<string, unknown>;
+        toolUseId?: string | null;
+        perQuestionTimeoutMs?: number | null;
+      }>;
+      error?: string;
+    }>;
     getConfig: () => Promise<{ success: boolean; config?: CoworkConfig; error?: string }>;
     setConfig: (config: CoworkConfigUpdate) => Promise<{ success: boolean; error?: string }>;
     listMemoryEntries: (input: {

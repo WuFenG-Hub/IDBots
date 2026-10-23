@@ -13318,6 +13318,20 @@ if (!gotTheLock) {
     }
   });
 
+  // Renderer-reload replay (2026-10-23 ab67c828 incident follow-up): the
+  // permission broadcast is raise-time only, so a window reload while an ask
+  // waits (e.g. ask_user_question with timeout:-1, which never self-unwinds)
+  // orphaned the modal — the turn kept waiting with no UI left to answer.
+  // The mobile pending mirror already tracks every live request; hand it back
+  // so a freshly booted renderer can re-enqueue what it missed.
+  registerIpcHandler('cowork:permission:listPending', async () => {
+    const permissions = listPendingPermissions().map((entry) => ({
+      sessionId: entry.sessionId,
+      ...(entry.request as Record<string, unknown>),
+    }));
+    return { success: true, permissions };
+  });
+
   registerIpcHandler('cowork:config:get', async () => {
     try {
       const config = getCoworkStore().getConfig();

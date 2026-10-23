@@ -8637,7 +8637,16 @@ export class CoworkRunner extends EventEmitter {
     }
 
     const pending = this.pendingPermissions.get(requestId);
-    if (!pending) return;
+    if (!pending) {
+      // Unknown id: the ask was already resolved elsewhere (or this renderer
+      // holds a stale entry). Acknowledge resolution so the renderer dequeues
+      // its copy instead of rendering an unanswerable modal forever, and leave
+      // a forensics trail (2026-10-23 ab67c828 incident: silent no-ops made
+      // renderer/main state drift invisible).
+      this.emit('permissionResolved', '', requestId);
+      coworkLog('WARN', 'respondToPermission', 'no pending permission for requestId; broadcasting resolved anyway', { requestId });
+      return;
+    }
 
     pending.resolve(result);
     this.pendingPermissions.delete(requestId);

@@ -518,6 +518,9 @@ contextBridge.exposeInMainWorld('electron', {
     // Permission handling
     respondToPermission: (options: { requestId: string; result: any }) =>
       ipcRenderer.invoke('cowork:permission:respond', options),
+    // Reload replay: still-pending permission requests for a fresh renderer.
+    listPendingPermissions: () =>
+      ipcRenderer.invoke('cowork:permission:listPending'),
 
     // Configuration
     getConfig: () =>
