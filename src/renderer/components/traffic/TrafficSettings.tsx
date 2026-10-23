@@ -52,6 +52,11 @@ type TrafficFreeGrantCampaignInfo = {
   grantBytes: number;
   claimed: boolean;
   claimable: boolean;
+  /** Repeat-campaign fields; absent on backends still running the one-time campaign. */
+  repeatEnabled?: boolean;
+  thresholdBytes?: number;
+  lastClaimAt?: number;
+  nextClaimAt?: number;
 };
 type TrafficRedeemResultInfo = {
   codeId: number;
@@ -225,6 +230,9 @@ const TRAFFIC_ERROR_CODE_KEYS: Record<string, string> = {
   CAMPAIGN_DISABLED: 'trafficErrCampaignDisabled',
   ALREADY_CLAIMED: 'trafficErrAlreadyClaimed',
   CLIENT_NOT_ALLOWED: 'trafficErrClientNotAllowed',
+  CLAIM_RATE_LIMITED: 'trafficErrClaimRateLimited',
+  CLAIM_COOLDOWN: 'trafficErrClaimCooldown',
+  BALANCE_NOT_LOW: 'trafficErrBalanceNotLow',
   CODE_NOT_FOUND: 'trafficErrCodeNotFound',
   CODE_USED: 'trafficErrCodeUsed',
   CODE_DISABLED: 'trafficErrCodeDisabled',
@@ -976,8 +984,12 @@ const TrafficSettings: React.FC = () => {
   // claimable (same backend formula) so a missing/false claimable field
   // cannot hide the button. If status failed after the account exists,
   // keep the button so a fresh install can still claim.
+  // Repeat campaign: the server keeps `claimed` true after the first claim
+  // and flips `claimable` back on once the balance drops below the campaign
+  // threshold and the cooldown has passed — so `claimed` must not gate the
+  // banner, only `claimable` does.
   const canClaimFreeGrant = campaign
-    ? Boolean(!campaign.claimed && (campaign.claimable || campaign.enabled))
+    ? Boolean(campaign.claimable || (!campaign.claimed && campaign.enabled))
     : Boolean(campaignReady && balance);
   const freeGrantBytes = campaign?.grantBytes || DEFAULT_FREE_GRANT_BYTES;
 

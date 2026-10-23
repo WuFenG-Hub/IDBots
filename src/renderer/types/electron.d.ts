@@ -210,6 +210,11 @@ interface TrafficFreeGrantCampaignStatusInfo {
   grantBytes: number;
   claimed: boolean;
   claimable: boolean;
+  /** Repeat-campaign fields; absent on backends still running the one-time campaign. */
+  repeatEnabled?: boolean;
+  thresholdBytes?: number;
+  lastClaimAt?: number;
+  nextClaimAt?: number;
 }
 
 interface TrafficFreeGrantClaimInfo {
