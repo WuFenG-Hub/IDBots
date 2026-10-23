@@ -1,8 +1,9 @@
 /**
  * Floating action bar that appears next to a text selection in the transcript.
  *
- * Two actions are offered, stacked: "copy text" on top and "add to
- * conversation" (quoting the selected passage into the composer) below.
+ * Only one action is offered — quoting the selected passage into the composer.
+ * (A "copy text" item was tried on 2026-10-23 and reverted the same day: the
+ * second button read as clutter next to the selection.)
  * The reference implementations (Codex desktop, Grok Bot) also offer "ask in a
  * side chat"; that one needs a product surface this host does not have (no
  * separate side conversation exists here), so it is deliberately not ported.
@@ -13,14 +14,13 @@
  */
 
 import React from 'react';
-import { ChatBubbleBottomCenterTextIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
+import { ChatBubbleBottomCenterTextIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { PopoverPlacement } from '../../utils/anchoredPopover';
 
 interface CoworkQuoteActionBarProps {
   placement: PopoverPlacement;
   onAdd: () => void;
-  onCopy: () => void;
 }
 
 /**
@@ -28,24 +28,21 @@ interface CoworkQuoteActionBarProps {
  *
  * Width covers the widest label (the English dictionary string measures
  * ~162px at the text-xs / px-3 sizing below). The bar is right-justified
- * inside this width, so narrower labels (the zh ones, ~107px) keep their right
- * edge — the edge pinned to the selection — aligned. Height is the two
- * buttons' laid-out height plus the gap (2×(16px line + 2×6px padding +
- * 2×1px border) + 4px).
+ * inside this width, so a narrower label (the zh one, ~107px) keeps its right
+ * edge — the edge pinned to the selection — aligned. Height is the button's
+ * laid-out height (16px line + 2×6px padding + 2×1px border).
  */
 export const QUOTE_ACTION_BAR_WIDTH = 164;
-export const QUOTE_ACTION_BAR_HEIGHT = 64;
-
-const ACTION_BUTTON_CLASS = 'inline-flex items-center gap-1.5 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3 py-1.5 text-xs font-medium shadow-elevated dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors';
+export const QUOTE_ACTION_BAR_HEIGHT = 30;
 
 const CoworkQuoteActionBar = React.forwardRef<HTMLDivElement, CoworkQuoteActionBarProps>(
-  ({ placement, onAdd, onCopy }, ref) => (
+  ({ placement, onAdd }, ref) => (
     <div
       ref={ref}
       data-cowork-quote-action="true"
       role="toolbar"
       aria-label={i18nService.t('coworkQuoteActionLabel')}
-      className="z-40 flex flex-col items-end gap-1"
+      className="z-40 flex justify-end"
       style={{
         position: 'fixed',
         top: placement.top,
@@ -58,17 +55,8 @@ const CoworkQuoteActionBar = React.forwardRef<HTMLDivElement, CoworkQuoteActionB
         // Keep the transcript selection alive until the click handler has read
         // it: pressing the bar must not collapse the selection first.
         onMouseDown={(event) => event.preventDefault()}
-        onClick={onCopy}
-        className={ACTION_BUTTON_CLASS}
-      >
-        <ClipboardDocumentIcon className="h-3.5 w-3.5 flex-shrink-0" />
-        <span className="truncate">{i18nService.t('coworkQuoteCopyText')}</span>
-      </button>
-      <button
-        type="button"
-        onMouseDown={(event) => event.preventDefault()}
         onClick={onAdd}
-        className={ACTION_BUTTON_CLASS}
+        className="inline-flex items-center gap-1.5 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3 py-1.5 text-xs font-medium shadow-elevated dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
       >
         <ChatBubbleBottomCenterTextIcon className="h-3.5 w-3.5 flex-shrink-0" />
         <span className="truncate">{i18nService.t('coworkQuoteAddToConversation')}</span>

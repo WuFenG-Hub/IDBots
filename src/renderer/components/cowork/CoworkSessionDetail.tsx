@@ -3789,8 +3789,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
   // ----- Quoted transcript selections ("reply to this specific part") -----
   //
-  // Selecting text in the transcript floats a two-item bar ("copy text" and
-  // "add to conversation"); adding the selection hands it to the composer as a
+  // Selecting text in the transcript floats a one-item bar ("add to
+  // conversation"); adding the selection hands it to the composer as a
   // removable fragment, which then rides into the prompt body of the next
   // message. Placement reuses the repository's shared anchored-popover
   // helpers instead of hand-rolled positioning.
@@ -3867,18 +3867,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     promptInputRef.current?.focus();
     // The passage now lives in the composer; drop the browser selection so the
     // transcript does not keep showing a highlight for text that is already in.
-    if (typeof window !== 'undefined') window.getSelection()?.removeAllRanges();
-  }, [pendingQuoteSelection]);
-
-  const handleCopyQuoteSelection = useCallback(() => {
-    const pending = pendingQuoteSelection;
-    setPendingQuoteSelection(null);
-    quoteLiveRangeRef.current = null;
-    quoteAnchorRef.current = null;
-    if (!pending) return;
-    void navigator.clipboard.writeText(pending.text).catch((err) => {
-      console.error('Failed to copy selection:', err);
-    });
     if (typeof window !== 'undefined') window.getSelection()?.removeAllRanges();
   }, [pendingQuoteSelection]);
 
@@ -5513,14 +5501,13 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       )}
       </div>
 
-      {/* Floating copy/quote bar for the pending transcript
+      {/* Floating "add to conversation" bar for the pending transcript
           selection. Rendered only while a non-empty selection exists. */}
       {pendingQuoteSelection && quoteActionPlacement && (
         <CoworkQuoteActionBar
           ref={quoteActionBarRef}
           placement={quoteActionPlacement}
           onAdd={handleAddQuoteToConversation}
-          onCopy={handleCopyQuoteSelection}
         />
       )}
 

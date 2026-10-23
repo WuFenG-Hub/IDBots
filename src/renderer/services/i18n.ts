@@ -1135,7 +1135,6 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkAttachmentImageLoading: '图片读取中…',
     // Quoted transcript selections ("reply to this specific part")
     coworkQuoteAddToConversation: '添加到对话',
-    coworkQuoteCopyText: '复制文字',
     coworkQuoteActionLabel: '引用所选文本',
     coworkQuoteSelectionsLabel: '已选文本片段',
     coworkQuoteRemove: '移除引用',
@@ -4299,7 +4298,6 @@ const translations: Record<LanguageType, Record<string, string>> = {
     coworkAttachmentImageLoading: 'Loading image…',
     // Quoted transcript selections ("reply to this specific part")
     coworkQuoteAddToConversation: 'Add to conversation',
-    coworkQuoteCopyText: 'Copy text',
     coworkQuoteActionLabel: 'Quote the selected text',
     coworkQuoteSelectionsLabel: 'Selected text fragments',
     coworkQuoteRemove: 'Remove quote',
