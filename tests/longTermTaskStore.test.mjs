@@ -115,6 +115,9 @@ test('dependency gating: #2 cannot begin until #1 is accepted; then it can', asy
 test('acceptance authority: twin refused without the delegate switch, allowed with it', async () => {
   const { store } = await openStore();
   const taskId = await createActive(store);
+  // The delegate switch defaults ON at creation (2026-10-22); the refusal
+  // path is exercised against an owner-opted-out task.
+  assert.ok(store.updateTask({ taskId, acceptanceDelegate: false }, 'owner').ok);
   const first = store.getTask(taskId).subtasks[0];
   assert.ok(store.beginSubtask(first.id, 'twin').ok);
   assert.ok(store.proposeSubtask(first.id, { evidence: [{ kind: 'dir', uri: '/tmp/x' }], summary: 's' }, 'twin').ok);
@@ -500,6 +503,8 @@ test('completeTask: owner one-click closure skips open sub-projects and lands th
 test('completeTask authority: twin refused without the delegate switch, allowed with it; evidence validated', async () => {
   const { store } = await openStore();
   const taskId = await createActive(store);
+  // The delegate switch defaults ON at creation (2026-10-22); opt out first.
+  assert.ok(store.updateTask({ taskId, acceptanceDelegate: false }, 'owner').ok);
 
   const refused = store.completeTask(taskId, 'twin', { note: 'all shipped' });
   assert.equal(refused.ok, false);
@@ -566,6 +571,8 @@ test('skipSubtask: verdict on the plan, not the work — reason journalled, stat
 test('skipSubtask closing the last open sub-project carries acceptance authority', async () => {
   const { store } = await openStore();
   const taskId = await createActive(store);
+  // The delegate switch defaults ON at creation (2026-10-22); opt out first.
+  assert.ok(store.updateTask({ taskId, acceptanceDelegate: false }, 'owner').ok);
   const subs = store.getTask(taskId).subtasks;
   for (const sub of subs.slice(0, 2)) {
     assert.ok(store.skipSubtask(sub.id, 'owner', 'not needed').ok);

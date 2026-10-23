@@ -108,6 +108,9 @@ test('longterm_task_complete tool: delegate gate + goal-level closure through th
   assert.ok(created.ok);
   const taskId = created.value.id;
   assert.ok(store.activateTask(taskId, 'owner').ok);
+  // The delegate switch defaults ON at creation (2026-10-22); the refusal
+  // path is exercised against an owner-opted-out task.
+  assert.ok(store.updateTask({ taskId, acceptanceDelegate: false }, 'owner').ok);
 
   const refused = await complete.handler({
     taskId,
@@ -137,6 +140,8 @@ test('longterm_subtask_skip tool: plan verdict with reason; last-open skip keeps
   assert.ok(created.ok);
   const taskId = created.value.id;
   assert.ok(store.activateTask(taskId, 'owner').ok);
+  // The delegate switch defaults ON at creation (2026-10-22); opt out first.
+  assert.ok(store.updateTask({ taskId, acceptanceDelegate: false }, 'owner').ok);
   const [first, second] = store.getTask(taskId).subtasks;
 
   const skipped = await skip.handler({ subtaskId: second.id, reason: 'spectate covered by the replay page' });
@@ -239,8 +244,8 @@ test('agent echoes carry participants without the avatar; the store (owner chann
   assert.equal(boardJson.cards.length, 1);
   assert.deepEqual(boardJson.cards[0].participants, [{ id: 7, name: 'bot-7' }]);
 
-  // completeTask returns the closed task through the same projection.
-  assert.ok(store.updateTask({ taskId, acceptanceDelegate: true }, 'owner').ok);
+  // completeTask returns the closed task through the same projection. The
+  // delegate switch defaults ON at creation, so no toggle is needed here.
   const closed = await captured.get('longterm_task_complete').handler({
     taskId,
     summary: 'hub shipped',
@@ -423,7 +428,7 @@ test('task echoes keep a 9-sub-project roster inline under the spill cap, fresh 
   assert.deepEqual(second.dependsOn, [first.id], 'real dependencies stay');
   assert.equal(first.expectedMinutes, 240);
   assert.equal('decisionSessionIds' in created.json, false, 'empty root lists are omitted');
-  assert.equal(created.json.acceptanceDelegate, false, 'false is a value, not empty');
+  assert.equal(created.json.acceptanceDelegate, true, 'true is a value, not empty — the delegate switch defaults ON at creation');
   assert.equal(created.json.counts.accepted, 0, '0 is a value, not empty');
   assert.equal(created.json.progress.total, 9);
   assert.equal(typeof created.json.createdAt, 'string', 'the root keeps its timestamps');
