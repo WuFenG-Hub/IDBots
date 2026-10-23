@@ -106,7 +106,7 @@ jobs:
           echo "::warning::cloud/control-plane/Dockerfile not present — WS-B has not delivered it at this baseline. Skipping control-plane build/scan/push; the gate enforces itself once the file lands."
 
       - name: Trivy scan — tenant (fail on fixed CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.meta.outputs.tenant_tag }}
           severity: CRITICAL
@@ -115,7 +115,7 @@ jobs:
 
       - name: Trivy scan — control-plane (fail on fixed CRITICAL)
         if: hashFiles('cloud/control-plane/Dockerfile') != ''
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.meta.outputs.cp_tag }}
           severity: CRITICAL

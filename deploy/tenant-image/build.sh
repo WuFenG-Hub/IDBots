@@ -51,14 +51,15 @@ if [ "$BUILDER" = buildx ]; then
   if ! docker buildx build \
     --platform "$PLATFORM" \
     --build-arg "APP_VERSION=${VERSION}" \
-    --build-arg "APP_COMMIT=${COMMIT_FULL}" \
+    --build-arg "GIT_COMMIT=${COMMIT_FULL}" \
     --build-arg "CONTRACT_VERSION=${CONTRACT_VERSION}" \
     --tag "$IMAGE" \
     --label "org.idbots.version=${VERSION}" \
     --label "org.idbots.commit=${COMMIT_FULL}" \
     --label "org.idbots.contract=${CONTRACT_VERSION}" \
+    --file "$HERE/Dockerfile" \
     --load \
-    "$HERE"; then
+    "$REPO_ROOT"; then
     echo "buildx failed (often registry reachability on dev machines) — falling back to classic docker build (host platform)" >&2
     BUILDER=classic
   else
@@ -68,10 +69,11 @@ fi
 if [ "$BUILDER" = classic ]; then
   docker build \
     --build-arg "APP_VERSION=${VERSION}" \
-    --build-arg "APP_COMMIT=${COMMIT_FULL}" \
+    --build-arg "GIT_COMMIT=${COMMIT_FULL}" \
     --build-arg "CONTRACT_VERSION=${CONTRACT_VERSION}" \
     --tag "$IMAGE" \
-    "$HERE"
+    --file "$HERE/Dockerfile" \
+    "$REPO_ROOT"
 fi
 
 if [ "$SCAN" = 1 ]; then
