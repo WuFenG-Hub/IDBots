@@ -56,6 +56,7 @@ import type { MetabotStore } from '../metabotStore';
 import type { CoworkStore } from '../coworkStore';
 import { createUserIdentity, resumeUserIdentitySetup } from '../services/userIdentityService';
 import { bootstrapLlmRelay } from '../services/llmRelayService';
+import { collectUsablePaidProviderKeys } from '../services/brainFallbackBackfill';
 import {
   createMetaBotOnChainCore,
   getMetabotChainSyncState,
@@ -202,13 +203,32 @@ export function createServerBootstrapStepExecutors(
 
   /**
    * The Twin's brain: the provisioned free provider's first model, else the
-   * configured default (mirrors WelcomeFlow.resolveTwinBrain).
+   * configured default (mirrors WelcomeFlow.resolveTwinBrain). A free primary
+   * is paired with a backup brain seeded from the first usable self-configured
+   * provider when one exists, so an exhausted free allowance never silently
+   * kills the twin before the owner learns the brain settings.
    */
-  const resolveTwinBrain = (): { llmId: string; llmProvider?: string } | null => {
+  const resolveTwinBrain = (): {
+    llmId: string;
+    llmProvider?: string;
+    fallbackLlmId?: string;
+    fallbackLlmProvider?: string;
+  } | null => {
     const config = (deps.getSqliteStore()?.get<AppConfigRow>('app_config') ?? {}) as AppConfigRow;
     const freeProvider = config.providers?.[LLM_FREE_PROVIDER_KEY];
     const freeModelId = freeProvider?.enabled ? freeProvider.models?.[0]?.id : '';
-    if (freeModelId) return { llmId: freeModelId, llmProvider: LLM_FREE_PROVIDER_KEY };
+    if (freeModelId) {
+      const defaultModel = String(config.model?.defaultModel ?? '').trim();
+      for (const key of collectUsablePaidProviderKeys(config)) {
+        const models = (config.providers?.[key]?.models ?? []).filter((model) => typeof model?.id === 'string' && model.id);
+        if (models.length === 0) continue;
+        const modelId = defaultModel && models.some((model) => model.id === defaultModel)
+          ? defaultModel
+          : (models[0].id as string);
+        return { llmId: freeModelId, llmProvider: LLM_FREE_PROVIDER_KEY, fallbackLlmId: modelId, fallbackLlmProvider: key };
+      }
+      return { llmId: freeModelId, llmProvider: LLM_FREE_PROVIDER_KEY };
+    }
     const fallbackModelId = String(config.model?.defaultModel ?? '').trim();
     if (!fallbackModelId) return null;
     const fallbackProvider = String(config.model?.defaultProvider ?? '').trim();
@@ -285,6 +305,8 @@ export function createServerBootstrapStepExecutors(
           metabot_type: 'twin',
           llm_id: brain.llmId,
           llm_provider: brain.llmProvider ?? null,
+          fallback_llm_id: brain.fallbackLlmId ?? null,
+          fallback_llm_provider: brain.fallbackLlmProvider ?? null,
           boss_global_metaid: ownerGlobalMetaId,
         }, manageDeps);
         if (!result.success) {

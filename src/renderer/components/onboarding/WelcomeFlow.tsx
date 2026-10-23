@@ -102,13 +102,25 @@ async function findExistingTwin(): Promise<Metabot | null> {
  * The Twin's brain: the provisioned free provider when it is available,
  * otherwise the user's configured default model. Null means the machine has no
  * usable model at all and the bot cannot be created.
+ *
+ * When the primary brain is the free relay, the backup brain is seeded from
+ * the first usable self-configured provider (when one exists) — onboarding
+ * users must not have to learn the brain settings to survive the day their
+ * free allowance runs out. When no own provider exists yet, the main-process
+ * provider watch (services/brainFallbackBackfill) backfills the backup brain
+ * the moment the user adds one.
  */
-function resolveTwinBrain(): { llmId: string; llmProvider?: string } | null {
+function resolveTwinBrain(): {
+  llmId: string;
+  llmProvider?: string;
+  fallbackLlmId?: string;
+  fallbackLlmProvider?: string;
+} | null {
   const config = configService.getConfig();
   const freeProvider = config.providers?.[LLM_FREE_PROVIDER_KEY];
   const freeModelId = freeProvider?.enabled ? freeProvider.models?.[0]?.id : '';
   if (freeModelId) {
-    return { llmId: freeModelId, llmProvider: LLM_FREE_PROVIDER_KEY };
+    return { llmId: freeModelId, llmProvider: LLM_FREE_PROVIDER_KEY, ...(resolveTwinBackupBrain(config) ?? {}) };
   }
   const fallbackModelId = (config.model?.defaultModel ?? '').trim();
   if (!fallbackModelId) {
@@ -116,6 +128,29 @@ function resolveTwinBrain(): { llmId: string; llmProvider?: string } | null {
   }
   const fallbackProvider = (config.model?.defaultProvider ?? '').trim();
   return { llmId: fallbackModelId, ...(fallbackProvider ? { llmProvider: fallbackProvider } : {}) };
+}
+
+/**
+ * The Twin's backup brain at creation time: the first enabled, keyed, non-free
+ * provider's default/first model (config order); null when the owner has not
+ * configured any provider of their own yet.
+ */
+function resolveTwinBackupBrain(
+  config: ReturnType<typeof configService.getConfig>,
+): { fallbackLlmId: string; fallbackLlmProvider: string } | null {
+  const defaultModel = (config.model?.defaultModel ?? '').trim();
+  for (const [key, provider] of Object.entries(config.providers ?? {})) {
+    if (key === LLM_FREE_PROVIDER_KEY) continue;
+    if (!provider?.enabled) continue;
+    if (key !== 'ollama' && !(provider.apiKey ?? '').trim()) continue;
+    const models = (provider.models ?? []).filter((model) => typeof model?.id === 'string' && model.id);
+    if (models.length === 0) continue;
+    const modelId = defaultModel && models.some((model) => model.id === defaultModel)
+      ? defaultModel
+      : (models[0].id as string);
+    return { fallbackLlmId: modelId, fallbackLlmProvider: key };
+  }
+  return null;
 }
 
 function messageFromError(error: unknown): string {
@@ -155,6 +190,8 @@ async function ensureTwinBot(): Promise<Metabot> {
     metabot_type: 'twin',
     llm_id: brain.llmId,
     llm_provider: brain.llmProvider ?? null,
+    fallback_llm_id: brain.fallbackLlmId ?? null,
+    fallback_llm_provider: brain.fallbackLlmProvider ?? null,
     boss_global_metaid: ownerGlobalMetaId || null,
   });
   if (result?.success && result.metabot?.id) {
