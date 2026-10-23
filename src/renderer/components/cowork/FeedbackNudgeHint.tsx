@@ -66,6 +66,7 @@ const FeedbackNudgeHint: React.FC<{
           onClick={handleDismiss}
           className="p-0.5 rounded-md dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary transition-colors"
           title={i18nService.t('close')}
+          aria-label={i18nService.t('close')}
         >
           <XMarkIcon className="w-3.5 h-3.5" />
         </button>

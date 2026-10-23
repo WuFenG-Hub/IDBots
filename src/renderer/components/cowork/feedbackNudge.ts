@@ -31,9 +31,14 @@ export function shouldShowFeedbackNudge(input: FeedbackNudgeInput): boolean {
   return input.assistantMessageCount >= FEEDBACK_NUDGE_MIN_ASSISTANT_MESSAGES;
 }
 
-/** localStorage key pinning the once-per-session dismissal. */
+/**
+ * localStorage key pinning the once-per-session dismissal. The session id is
+ * length-capped (review nit): ids are caller-controlled strings and the key
+ * rides the origin's storage quota.
+ */
 export function feedbackNudgeDismissKey(sessionId: string): string {
-  return `cowork:feedback-nudge-dismissed:${String(sessionId ?? '').trim()}`;
+  const normalized = String(sessionId ?? '').trim();
+  return `cowork:feedback-nudge-dismissed:${normalized.slice(0, 128)}`;
 }
 
 export function readFeedbackNudgeDismissed(storage: Pick<Storage, 'getItem'>, sessionId: string): boolean {

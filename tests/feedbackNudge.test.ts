@@ -74,6 +74,11 @@ test('dismissal persistence is per-session and storage-failure safe', () => {
   assert.equal(readFeedbackNudgeDismissed(storage, 's1'), true, 'dismissed session stays dismissed');
   assert.equal(readFeedbackNudgeDismissed(storage, 's2'), false, 'other sessions unaffected');
   assert.equal(feedbackNudgeDismissKey('s1'), 'cowork:feedback-nudge-dismissed:s1');
+  const longId = 'x'.repeat(500);
+  assert.ok(
+    feedbackNudgeDismissKey(longId).length <= 128 + 'cowork:feedback-nudge-dismissed:'.length,
+    'the dismiss key caps the caller-controlled session id (review nit)',
+  );
 
   const broken = {
     getItem: () => { throw new Error('blocked'); },
@@ -99,6 +104,7 @@ test('the hint renders near the message controls and never as a popup', () => {
   assert.ok(hintSource.includes("i18nService.t('coworkFeedbackNudge')"), 'copy goes through i18n');
   assert.ok(hintSource.includes('feedbackLoaded: boolean;'), 'the loaded gate is a declared prop (review Minor 5)');
   assert.ok(hintSource.includes('!feedbackLoaded'), 'no render before the session feedback hydration lands');
+  assert.ok(hintSource.includes('aria-label={i18nService.t(\'close\')}'), 'the dismiss button has an aria-label');
 });
 
 test('i18n carries the hint copy in both languages', () => {
