@@ -25,8 +25,8 @@ test('Main process registers applySilent and relaunchNow IPC handlers', () => {
   const source = read('src/main/main.ts');
 
   assert.match(source, /import\s*\{[^}]*applyMacUpdateSilently[^}]*relaunchPendingMacUpdate[^}]*\}\s*from\s*'\.\/libs\/appUpdateInstaller'/);
-  assert.match(source, /ipcMain\.handle\('appUpdate:applySilent'/);
-  assert.match(source, /ipcMain\.handle\('appUpdate:relaunchNow'/);
+  assert.match(source, /registerIpcHandler\('appUpdate:applySilent'/);
+  assert.match(source, /registerIpcHandler\('appUpdate:relaunchNow'/);
   assert.match(source, /permissionDenied:\s*err\.code === 'EACCES'/);
 });
 
