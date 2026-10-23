@@ -6,6 +6,7 @@ import {
   writeJson,
   type RequestCtx,
   type Route,
+  type SessionUser,
 } from '../http.js';
 import { maskPhone, sha256Hex } from '../crypto.js';
 import { checkPhoneLock, checkSmsSend, incrementCodeAttempts } from '../rateLimit.js';
@@ -62,11 +63,18 @@ interface TenantRow {
   last_error: string | null;
 }
 
-/** Loads the session user from the idb_session cookie; slides the expiry. */
-export function requireUser(app: AppContext, reqCtx: RequestCtx): void {
-  const token = sessionTokenFromCookieHeader(reqCtx.cookieHeader);
+/**
+ * Resolves the idb_session cookie to the session user (sliding the expiry),
+ * returning the raw session token too — the WS proxy derives the stable
+ * C2 client id from it. Null when absent/expired/invalid.
+ */
+export function resolveSession(
+  app: AppContext,
+  cookieHeader: string | undefined,
+): { user: SessionUser; token: string } | null {
+  const token = sessionTokenFromCookieHeader(cookieHeader);
   if (!token) {
-    throw new HttpError(401, 'UNAUTHORIZED', 'no session cookie');
+    return null;
   }
   const tokenHash = sha256Hex(token);
   const now = Date.now();
@@ -77,19 +85,28 @@ export function requireUser(app: AppContext, reqCtx: RequestCtx): void {
     if (session) {
       app.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
     }
-    throw new HttpError(401, 'UNAUTHORIZED', 'session expired or unknown');
+    return null;
   }
   const user = app.db.prepare('SELECT * FROM users WHERE id = ?').get(session.user_id) as
-    | UserRow
+    | SessionUser
     | undefined;
   if (!user || user.status !== 'active') {
-    throw new HttpError(401, 'UNAUTHORIZED', 'session user unavailable');
+    return null;
   }
   app.db
     .prepare('UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE token_hash = ?')
     .run(now, now + SESSION_TTL_MS, tokenHash);
-  reqCtx.user = user;
-  reqCtx.tokenHash = tokenHash;
+  return { user, token };
+}
+
+/** Loads the session user from the idb_session cookie; slides the expiry. */
+export function requireUser(app: AppContext, reqCtx: RequestCtx): void {
+  const resolved = resolveSession(app, reqCtx.cookieHeader);
+  if (!resolved) {
+    throw new HttpError(401, 'UNAUTHORIZED', 'no session cookie');
+  }
+  reqCtx.user = resolved.user;
+  reqCtx.tokenHash = sha256Hex(resolved.token);
 }
 
 export function publicUser(user: Pick<UserRow, 'id' | 'phone_e164' | 'created_at' | 'locale'>): {

@@ -5,15 +5,44 @@ import { HttpError, writeError, writeJson, type RequestCtx, type Route } from '.
 import { isOriginAllowed } from './origin.js';
 import { authRoutes } from './routes/auth.js';
 import { requireUser } from './routes/auth.js';
+import { proxyRoutes } from './services/httpProxy.js';
+import { attachWsProxy, type WsProxyOptions } from './services/wsProxy.js';
 
 /**
  * Minimal node:http server (no web framework, per REQ-B-2): a tiny
- * method+path router, JSON bodies (64 KiB cap), the C3 error envelope, a
- * per-request id (echoed in x-request-id), REQ-B-8 Origin checks on every
- * state-changing request, and cookie auth for routes that ask for it.
+ * method+path router (`:param` segments and a trailing `/*` prefix), JSON
+ * bodies (64 KiB cap) unless a route is marked `raw`, the C3 error envelope,
+ * a per-request id (echoed in x-request-id), REQ-B-8 Origin checks on every
+ * state-changing request, cookie auth for routes that ask for it, the C2/C3
+ * proxy routes (REQ-B-13/14/15), and the /ws upgrade (REQ-B-13).
  */
 
 const BODY_LIMIT = 64 * 1024;
+
+/** Match a route path against a pathname; `:param` captures, trailing `/*` prefixes. */
+function matchPath(pattern: string, pathname: string): Record<string, string> | null {
+  if (pattern.endsWith('/*')) {
+    const prefix = pattern.slice(0, -1); // keep the trailing slash
+    if (pathname === prefix.slice(0, -1) || pathname.startsWith(prefix)) {
+      return { '*': pathname.slice(prefix.length) };
+    }
+    return null;
+  }
+  const pSeg = pattern.split('/');
+  const uSeg = pathname.split('/');
+  if (pSeg.length !== uSeg.length) {
+    return null;
+  }
+  const params: Record<string, string> = {};
+  for (let i = 0; i < pSeg.length; i += 1) {
+    if (pSeg[i].startsWith(':')) {
+      params[pSeg[i].slice(1)] = decodeURIComponent(uSeg[i]);
+    } else if (pSeg[i] !== uSeg[i]) {
+      return null;
+    }
+  }
+  return params;
+}
 
 function readBodyLimited(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -78,6 +107,7 @@ async function handle(
     ip: clientIp(req),
     userAgent: String(req.headers['user-agent'] ?? ''),
     cookieHeader: req.headers.cookie,
+    req,
     res,
     log: (level, msg, extra) =>
       console.log(
@@ -107,13 +137,26 @@ async function handle(
       }
     }
 
-    const route = routes.find((r) => r.method === method && r.path === url.pathname);
-    if (!route) {
+    let matched: Route | undefined;
+    let params: Record<string, string> = {};
+    for (const route of routes) {
+      if (route.method !== method) {
+        continue;
+      }
+      const matchedParams = matchPath(route.path, url.pathname);
+      if (matchedParams) {
+        matched = route;
+        params = matchedParams;
+        break;
+      }
+    }
+    if (!matched) {
       throw new HttpError(404, 'NOT_FOUND', `no route for ${method} ${url.pathname}`);
     }
+    const route = matched;
 
     let body: unknown = null;
-    if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
+    if (!route.raw && (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE')) {
       const raw = await readBodyLimited(req);
       if (raw.length > 0) {
         try {
@@ -127,7 +170,7 @@ async function handle(
     if (route.auth) {
       requireUser(app, reqCtx);
     }
-    await route.handler(app, reqCtx, body);
+    await route.handler(app, reqCtx, body, params);
   } catch (err) {
     if (err instanceof HttpError) {
       writeError(res, err.status, err.code, err.message);
@@ -145,7 +188,7 @@ async function handle(
 }
 
 export function createRequestHandler(app: AppContext): http.RequestListener {
-  const routes: Route[] = [...authRoutes];
+  const routes: Route[] = [...authRoutes, ...proxyRoutes];
   return (req, res) => {
     handle(app, routes, req, res).catch((err) => {
       console.error(JSON.stringify({ level: 'error', msg: 'request handler crashed', error: String(err) }));
@@ -158,8 +201,15 @@ export function createRequestHandler(app: AppContext): http.RequestListener {
   };
 }
 
-export function createPublicServer(app: AppContext): http.Server {
-  return http.createServer(createRequestHandler(app));
+export interface PublicServerOptions {
+  /** Overrides for the /ws proxy keepalive (tests inject short intervals). */
+  wsProxy?: WsProxyOptions;
+}
+
+export function createPublicServer(app: AppContext, opts: PublicServerOptions = {}): http.Server {
+  const server = http.createServer(createRequestHandler(app));
+  attachWsProxy(app, server, opts.wsProxy);
+  return server;
 }
 
 /** Stub metrics endpoint (REQ-B-20 fills in real Prometheus series later). */

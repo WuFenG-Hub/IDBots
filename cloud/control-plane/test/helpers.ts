@@ -51,6 +51,8 @@ export async function startTestApp(options: {
   fakeSmsNumbers?: string[];
   tenantImage?: string;
   tenantEnv?: Record<string, string>;
+  /** Overrides for the /ws proxy keepalive (tests inject short intervals). */
+  wsProxy?: import('../src/server.js').PublicServerOptions['wsProxy'];
 }): Promise<TestApp> {
   const port = await freePort();
   const metricsPort = await freePort();
@@ -78,7 +80,7 @@ export async function startTestApp(options: {
     sms: new FakeSmsProvider(config.fakeSmsNumbers),
     poller: null,
   };
-  const server = createPublicServer(app);
+  const server = createPublicServer(app, options.wsProxy ? { wsProxy: options.wsProxy } : {});
   await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
   return {
     app,
