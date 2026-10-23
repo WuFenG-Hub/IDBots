@@ -12,7 +12,9 @@
 //   a. request shape — one noul question, English instructions, hard caps on
 //      every caller-authored state field, task_name only for scheduled runs;
 //   b. answer parsing — clamps into 0..1, unusable shapes → null;
-//   c. verdict semantics — noul >= 0.5 → true, below → false;
+//   c. verdict semantics — noul >= 0.35 → true, below → false (recall-biased:
+//      over-flagging beats missing); high-severity keyword markers short-
+//      circuit to true without a JEV call;
 //   d. every failure mode returns null without throwing (fail-open);
 //   e. a hanging endpoint is aborted at the deadline.
 //
@@ -35,6 +37,7 @@ import {
   buildSessionFollowUpRequest,
   parseSessionFollowUpAnswer,
   sessionFollowUpFromNoul,
+  hasForceFollowUpSignal,
   classifySessionFollowUpWithCerebellum,
 } from '../src/main/cerebellum/sessionFollowUpGate.ts';
 
@@ -150,12 +153,12 @@ test('parseSessionFollowUpAnswer: happy path, clamping, and unusable shapes', ()
   assert.equal(parseSessionFollowUpAnswer('junk'), null);
 });
 
-test('sessionFollowUpFromNoul: threshold is inclusive at 0.5', () => {
-  assert.equal(sessionFollowUpFromNoul(0.5), true);
-  assert.equal(sessionFollowUpFromNoul(0.49), false);
+test('sessionFollowUpFromNoul: recall-biased threshold is inclusive at 0.35', () => {
+  assert.equal(sessionFollowUpFromNoul(0.35), true);
+  assert.equal(sessionFollowUpFromNoul(0.34), false);
   assert.equal(sessionFollowUpFromNoul(0), false);
   assert.equal(sessionFollowUpFromNoul(1), true);
-  assert.equal(CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD, 0.5);
+  assert.equal(CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD, 0.35);
 });
 
 // ---------------------------------------------------------------------------
@@ -173,12 +176,40 @@ test('classify: noul at/above threshold → true, below → false', async () => 
       fetchImpl: okFetch(classifyPayload(CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD)),
     }),
     true,
-    'threshold is inclusive (P >= 0.5 → follow-up)',
+    'threshold is inclusive (P >= 0.35 → follow-up)',
   );
   assert.equal(
-    await classifySessionFollowUpWithCerebellum({ ...GATE_INPUT, fetchImpl: okFetch(classifyPayload(0.49)) }),
+    await classifySessionFollowUpWithCerebellum({ ...GATE_INPUT, fetchImpl: okFetch(classifyPayload(0.34)) }),
     false,
   );
+});
+
+test('classify: high-severity markers short-circuit to true without a JEV call', async () => {
+  const fetchMustNotBeCalled = async () => {
+    throw new Error('fetch must not be called for a forced verdict');
+  };
+  const incidentReport =
+    'CRITICAL（需人工处置，无一条已自动恢复）\n\nMetaFS uploader 服务整体故障：容器健康检查 unhealthy，' +
+    '端口 7282 未监听，公网入口 502。建议 SSH 登录两台机器 docker logs 查崩溃原因并手动重启容器。';
+  assert.equal(
+    await classifySessionFollowUpWithCerebellum({
+      ...GATE_INPUT,
+      lastAssistantText: incidentReport,
+      fetchImpl: fetchMustNotBeCalled,
+    }),
+    true,
+  );
+});
+
+test('hasForceFollowUpSignal: severity markers hit, negations and benign prose do not', () => {
+  assert.equal(hasForceFollowUpSignal('CRITICAL: disk full on 47.76.58.120'), true);
+  assert.equal(hasForceFollowUpSignal('以下事项需要你拍板后才能继续'), true);
+  assert.equal(hasForceFollowUpSignal('Action required: approve the deployment.'), true);
+  assert.equal(hasForceFollowUpSignal('This needs your approval before rollout.'), true);
+  assert.equal(hasForceFollowUpSignal('巡检完成，全部正常，无需人工处理。'), false);
+  assert.equal(hasForceFollowUpSignal('这个方案无需拍板，继续推进即可。'), false);
+  assert.equal(hasForceFollowUpSignal('We discussed critical thinking in the design doc.'), false);
+  assert.equal(hasForceFollowUpSignal('已自动恢复，无一条需要跟进。'), false);
 });
 
 test('classify: request hits /v1/systemone with bearer auth and the session state', async () => {
@@ -243,8 +274,8 @@ test('classify: a hanging endpoint is aborted at the deadline', async () => {
 });
 
 // ── Dream review P2-3: the missing offline eval script ─────────────────────
-// (handoff doc #19 / §2.20 — the 0.5 threshold shipped on cookbook precedent;
-// this script is how it gets measured.)
+// (handoff doc #19 / §2.20 — the recall-biased 0.35 threshold is exercised by
+// this script's sweep, which is how it gets measured.)
 
 test('eval script builds the request through the module', () => {
   const source = readFileSync(new URL('../scripts/cerebellum-session-follow-up-eval.mjs', import.meta.url), 'utf8');
