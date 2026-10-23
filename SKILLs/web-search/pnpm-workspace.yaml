@@ -9,3 +9,8 @@
 # copy symlinks pointing into the developer's pnpm store and the packaged
 # app would ship broken paths.
 nodeLinker: hoisted
+
+# Transitive security pin: proxy-addr ships in this tree via the express@4
+# chain; 2.0.8 is the CVE-2026-90711 fix the image Trivy gate requires.
+overrides:
+  proxy-addr: 2.0.8
