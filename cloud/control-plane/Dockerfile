@@ -19,7 +19,8 @@ RUN pnpm build
 FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-RUN groupadd -g 1000 idbots && useradd -u 1000 -g idbots -m idbots
+RUN groupmod -n idbots node && usermod -l idbots -d /home/idbots -m node \
+ && mkdir -p /var/lib/idbots-cp && chown idbots:idbots /var/lib/idbots-cp
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
