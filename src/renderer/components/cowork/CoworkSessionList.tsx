@@ -28,7 +28,7 @@ import {
   serializeAutoTasksExpandedPreference,
   serializeFollowUpExpandedPreference,
 } from '../../utils/sessionAutoGrouping';
-import { ChevronDownIcon, FolderIcon } from '@heroicons/react/24/outline';
+import { ChevronDownIcon, Cog6ToothIcon, FolderIcon, HandRaisedIcon } from '@heroicons/react/24/outline';
 
 interface CoworkSessionListProps {
   sessions: CoworkSessionSummary[];
@@ -543,8 +543,8 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
 
   /**
    * The Follow-Up Tasks section (待跟进任务). Rendered in every view mode
-   * directly under the pinned block and ABOVE the Autonomous fold, and only
-   * when something is pending — an empty section would be noise of its own.
+   * directly under the Autonomous fold, and only when something is pending —
+   * an empty section would be noise of its own.
    *
    * Membership = followUpState 'pending' on the row (persisted by main: the
    * cerebellum turn-end gate, the AskUserQuestion bridge, manual owner moves)
@@ -552,8 +552,10 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
    * decisionSessionIds) — the decision surface must be seen, not buried in the
    * collapsed fold it used to be force-lifted out of.
    *
-   * The header mirrors the Autonomous fold's: subdued secondary text + folder
-   * glyph, a red dot at the left + the section's UNREAD session count in red
+   * The header mirrors the Autonomous fold's: subdued secondary text + a
+   * raised-hand glyph (these sessions need a human decision, not an
+   * unattended gear), a red dot at the left + the section's UNREAD session
+   * count in red
    * (both only when > 0; the total survives only in the hover tooltip) + the
    * section's newest activity time. Per-row dots inside the EXPANDED section
    * stay — that is where "which decision is still open" is traceable.
@@ -576,7 +578,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
           <ChevronDownIcon
             className={`h-3 w-3 flex-shrink-0 transition-transform duration-150 ${isFollowUpExpanded ? '' : '-rotate-90'}`}
           />
-          <FolderIcon className="h-3.5 w-3.5 flex-shrink-0" />
+          <HandRaisedIcon className="h-3.5 w-3.5 flex-shrink-0" />
           <span className="truncate">{i18nService.t('coworkFollowUpTasks')}</span>
           {followUpUnreadCount > 0 && (
             <span className="flex-shrink-0 font-medium tabular-nums text-red-500">{followUpUnreadCount}</span>
@@ -593,9 +595,9 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
 
   /**
    * The Autonomous Tasks fold. Rendered in every view mode directly under the
-   * pinned block (above the timeline/project groups, where it is seen without
-   * scrolling), and only when there is something to fold — an empty folder
-   * would be noise of its own.
+   * pinned block (above the Follow-Up section and the timeline/project groups,
+   * where it is seen without scrolling), and only when there is something to
+   * fold — an empty folder would be noise of its own.
    *
    * Membership = the auto-origin policy (long-term task runs, orchestration
    * delegations) with the row's manual placement winning over it ('in' parks a
@@ -603,12 +605,11 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
    * isInAutonomousFold. Rows leave the fold by being archived, and the whole
    * section disappears once nothing is left in it.
    *
-   * The header is styled like the project groups' folder header (subdued
-   * secondary text + folder glyph) so it reads as a container, not as a
-   * conversation, and carries a red dot at the row's left + the fold's UNREAD
-   * session count in red (both only when > 0 — the signal the user actually
-   * watches; the total survives only in the hover tooltip) + the fold's newest
-   * activity time.
+   * The header shares the project groups' subdued secondary text, with a gear
+   * glyph (these runs drive themselves, no human in the loop), a red dot at
+   * the row's left + the fold's UNREAD session count in red (both only when
+   * > 0 — the signal the user actually watches; the total survives only in the
+   * hover tooltip) + the fold's newest activity time.
    * Per-row dots inside the EXPANDED fold stay — that is where "which run has
    * news" is actually traceable.
    */
@@ -630,7 +631,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
           <ChevronDownIcon
             className={`h-3 w-3 flex-shrink-0 transition-transform duration-150 ${isAutoTasksExpanded ? '' : '-rotate-90'}`}
           />
-          <FolderIcon className="h-3.5 w-3.5 flex-shrink-0" />
+          <Cog6ToothIcon className="h-3.5 w-3.5 flex-shrink-0" />
           <span className="truncate">{i18nService.t('coworkAutonomousTasks')}</span>
           {autoUnreadCount > 0 && (
             <span className="flex-shrink-0 font-medium tabular-nums text-red-500">{autoUnreadCount}</span>
@@ -710,8 +711,8 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     return (
       <div ref={rootRef}>
         {renderPinnedSection(timelineGrouped.pinned)}
-        {renderFollowUpSection()}
         {renderAutoTasksSection()}
+        {renderFollowUpSection()}
         {timelineGrouped.groups.map((group) => {
           if (!revealBudgetLeft()) return null;
           return (
@@ -732,8 +733,8 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     return (
       <div ref={rootRef}>
         {renderPinnedSection(projectGrouped.pinned)}
-        {renderFollowUpSection()}
         {renderAutoTasksSection()}
+        {renderFollowUpSection()}
         {projectGrouped.groups.map((group) => {
           if (!revealBudgetLeft()) return null;
           const collapsed = collapsedGroupKeys.has(group.key);
@@ -813,12 +814,12 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   return (
     <div ref={rootRef} className="space-y-1">
       {/* Flat mode has no group headers, so the sections' anchor is the pinned
-       * block itself: pinned rows first, then the Follow-Up section, then the
-       * fold, then the rest — the same "under pinned, above everything else"
+       * block itself: pinned rows first, then the fold, then the Follow-Up
+       * section, then the rest — the same "under pinned, above everything else"
        * spot the grouped views give them. */}
       {sortedSessions.filter((session) => session.pinned).map(renderItem)}
-      {renderFollowUpSection()}
       {renderAutoTasksSection()}
+      {renderFollowUpSection()}
       {sortedSessions.filter((session) => !session.pinned).map(renderItem)}
     </div>
   );
