@@ -57,6 +57,7 @@ if [ "$BUILDER" = buildx ]; then
     --label "org.idbots.version=${VERSION}" \
     --label "org.idbots.commit=${COMMIT_FULL}" \
     --label "org.idbots.contract=${CONTRACT_VERSION}" \
+    --file "$HERE/Dockerfile" \
     --load \
     "$REPO_ROOT"; then
     echo "buildx failed (often registry reachability on dev machines) — falling back to classic docker build (host platform)" >&2
@@ -71,6 +72,7 @@ if [ "$BUILDER" = classic ]; then
     --build-arg "APP_COMMIT=${COMMIT_FULL}" \
     --build-arg "CONTRACT_VERSION=${CONTRACT_VERSION}" \
     --tag "$IMAGE" \
+    --file "$HERE/Dockerfile" \
     "$REPO_ROOT"
 fi
 
