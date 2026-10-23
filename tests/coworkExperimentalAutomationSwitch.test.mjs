@@ -20,13 +20,32 @@ test('kill-switch wiring: service exports, provider gates, IPC, preload, UI, i18
   assert.match(pref, /export function setExperimentalAutomationAllowed/)
 
   const main = readSrc('src/main/main.ts')
-  // Both runtime providers consult the global gate before the per-bot switch.
-  const browserGate = main.match(/browserAutomationProvider:[\s\S]*?detectSystemChromium\(\)/)?.[0] ?? ''
+  // Every invoke channel registers through the IPC registry (REQ-A-12); the
+  // registry module is the only place allowed to call ipcMain.handle.
+  assert.match(main, /import \{ registerIpcHandler \} from '\.\/ipc\/registry'/)
+
+  // Both runtime providers consult the global gate before the per-bot
+  // switch. The gates live in the shared metabotAutomationProviders resolver
+  // so the session-keyed runner providers and the metabot-keyed prewarm
+  // variants agree on a bot's combo.
+  const browserGate = main.match(/browser: \(metabotId: number \| null\) => \{[\s\S]*?detectSystemChromium\(\)/)?.[0] ?? ''
   assert.match(browserGate, /isExperimentalAutomationAllowed\(getStoreOrNull\(\)\)\) return undefined/)
-  const cuGate = main.match(/computerUseProvider:[\s\S]*?isCoworkComputerUseEnabled[\s\S]*?\n\s*\},/)?.[0] ?? ''
-  assert.match(cuGate, /isExperimentalAutomationAllowed\(getStoreOrNull\(\)\)\) return false/)
-  assert.match(main, /ipcMain\.handle\('app:getExperimentalAutomation'/)
-  assert.match(main, /ipcMain\.handle\('app:setExperimentalAutomation'/)
+  assert.match(browserGate, /if \(!isCoworkBrowserAutomationEnabled\(getMetabotStore\(\), metabotId\)\) return undefined/)
+  const computerGate = main.match(/computer: \(metabotId: number \| null\) => \{[\s\S]*?\n\s*\},/)?.[0] ?? ''
+  assert.match(computerGate, /isExperimentalAutomationAllowed\(getStoreOrNull\(\)\)\) return false/)
+
+  // The session-keyed runner providers must stay delegates of the shared
+  // resolver — an inline gate here would let the prewarm slot disagree with
+  // the turn's.
+  assert.match(main, /browserAutomationProvider: \(coworkSessionId: string\) => \{[\s\S]*?metabotAutomationProviders\.browser\(metabotId \?\? null\)/)
+  assert.match(main, /computerUseProvider: \(coworkSessionId: string\) => \{[\s\S]*?metabotAutomationProviders\.computer\(metabotId \?\? null\)/)
+
+  // Each switch channel is registered exactly once, through the registry —
+  // never a bare ipcMain.handle (ipcRegistry.test.mjs fails those).
+  assert.equal((main.match(/registerIpcHandler\('app:getExperimentalAutomation'/g) ?? []).length, 1)
+  assert.equal((main.match(/registerIpcHandler\('app:setExperimentalAutomation'/g) ?? []).length, 1)
+  assert.doesNotMatch(main, /ipcMain\.handle\('app:getExperimentalAutomation'/)
+  assert.doesNotMatch(main, /ipcMain\.handle\('app:setExperimentalAutomation'/)
 
   const preload = readSrc('src/main/preload.ts')
   assert.match(preload, /experimentalAutomation:\s*\{/)

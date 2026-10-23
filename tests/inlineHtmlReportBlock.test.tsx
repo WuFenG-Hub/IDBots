@@ -37,6 +37,7 @@ import InlineHtmlReportBlock, {
   buildInlineHtmlSrcDoc,
   clampInlineHtmlHeight,
   parseInlineHtmlHeightMessage,
+  parseInlineHtmlHeightReport,
   parseInlineHtmlNavMessage,
 } from '../src/renderer/components/cowork/InlineHtmlReportBlock';
 import { parseIdbotsSessionUri } from '../src/renderer/utils/sessionDeepLink';
@@ -60,6 +61,10 @@ const mainSource = fs.readFileSync(
 );
 const markdownContentSource = fs.readFileSync(
   path.join(projectRoot, 'src', 'renderer', 'components', 'MarkdownContent.tsx'),
+  'utf8',
+);
+const i18nSource = fs.readFileSync(
+  path.join(projectRoot, 'src', 'renderer', 'services', 'i18n.ts'),
   'utf8',
 );
 
@@ -244,6 +249,68 @@ test('height messages are accepted only from this block iframe and clamped', () 
   );
 });
 
+test('height reports flag truncation when the raw height tops the frame cap', () => {
+  const iframeWindow = { name: 'frame-a' };
+  const otherWindow = { name: 'frame-b' };
+
+  // Over the cap: clamped to 10000 and flagged truncated.
+  assert.deepEqual(
+    parseInlineHtmlHeightReport({ [INLINE_HTML_HEIGHT_MESSAGE_KEY]: true, h: 42000 }, iframeWindow, iframeWindow),
+    { height: 10000, truncated: true },
+  );
+  // Exactly at the cap is not truncated — the whole document fits.
+  assert.deepEqual(
+    parseInlineHtmlHeightReport({ [INLINE_HTML_HEIGHT_MESSAGE_KEY]: true, h: 10000 }, iframeWindow, iframeWindow),
+    { height: 10000, truncated: false },
+  );
+  // Ordinary heights: not truncated.
+  assert.deepEqual(
+    parseInlineHtmlHeightReport({ [INLINE_HTML_HEIGHT_MESSAGE_KEY]: true, h: 520 }, iframeWindow, iframeWindow),
+    { height: 520, truncated: false },
+  );
+  // Same per-instance contract as the height-only view: foreign sources and
+  // malformed payloads are ignored.
+  assert.equal(
+    parseInlineHtmlHeightReport({ [INLINE_HTML_HEIGHT_MESSAGE_KEY]: true, h: 42000 }, otherWindow, iframeWindow),
+    null,
+  );
+  assert.equal(parseInlineHtmlHeightReport({ h: 42000 }, iframeWindow, iframeWindow), null);
+  assert.equal(
+    parseInlineHtmlHeightReport({ [INLINE_HTML_HEIGHT_MESSAGE_KEY]: true, h: '42000' }, iframeWindow, iframeWindow),
+    null,
+  );
+  // The height-only view stays a clamped number regardless of truncation.
+  assert.equal(
+    parseInlineHtmlHeightMessage({ [INLINE_HTML_HEIGHT_MESSAGE_KEY]: true, h: 42000 }, iframeWindow, iframeWindow),
+    10000,
+  );
+});
+
+test('a truncated report shows a footer notice with an open-full-report action', () => {
+  // The block tracks truncation separately from the height and resets it when
+  // the file reloads.
+  assert.match(blockSource, /const \[heightTruncated, setHeightTruncated\] = useState\(false\)/);
+  assert.match(blockSource, /setHeightTruncated\(false\)/);
+  // Height reports drive both the frame height and the truncation flag through
+  // the report parser, never the height-only view.
+  assert.match(blockSource, /parseInlineHtmlHeightReport\(event\.data, event\.source, iframeWindow\)/);
+  assert.match(blockSource, /setHeightTruncated\(heightReport\.truncated\)/);
+  // The footer renders only for a truncated, ready, render-mode block, and
+  // carries the notice plus the localized open-full-report button.
+  assert.match(
+    blockSource,
+    /status === 'ready' && view === 'render' && heightTruncated[\s\S]*?i18nService\.t\('htmlReportTruncated'\)[\s\S]*?onClick=\{openFullReport\}[\s\S]*?i18nService\.t\('htmlReportOpenFullReport'\)/,
+  );
+  // The action prefers the side panel and falls back to the OS default app.
+  assert.match(blockSource, /const openFullReport = useCallback\([\s\S]*?if \(onOpenInSidePanel\) \{\s*onOpenInSidePanel\(filePath, event\);\s*return;\s*\}/);
+  assert.match(blockSource, /const openFullReport = useCallback\([\s\S]*?window\.electron\.shell\.openPath\(filePath\)/);
+  // Both locales carry the new strings.
+  assert.match(i18nSource, /htmlReportTruncated: '报告内容过长，预览已截断'/);
+  assert.match(i18nSource, /htmlReportOpenFullReport: '打开完整报告'/);
+  assert.match(i18nSource, /htmlReportTruncated: 'This report is very tall — the preview is truncated'/);
+  assert.match(i18nSource, /htmlReportOpenFullReport: 'Open full report'/);
+});
+
 test('the export action goes through the hidden-window capture IPC end to end', () => {
   // Renderer bridge.
   assert.match(
@@ -265,6 +332,35 @@ test('the export action goes through the hidden-window capture IPC end to end', 
   assert.match(mainSource, /hiddenWindow\.destroy\(\)/);
   // Width is sanitized into the capture-safe range.
   assert.match(mainSource, /Math\.min\(2000, Math\.max\(320, Math\.round\(requestedWidth\)\)\)/);
+});
+
+test('the hidden-window load is bounded by a timeout and a render-process-gone watch', () => {
+  // A wedged report (dead-loop script or never-settling resource) must surface
+  // as a { success: false } result through a bounded load — never a hung IPC
+  // invoke or a leaked hidden window.
+  const loaderSource = mainSource.slice(
+    mainSource.indexOf('HTML_REPORT_WINDOW_LOAD_TIMEOUT_MS'),
+    mainSource.indexOf('loadHtmlReportWindow(hiddenWindow, filePath)'),
+  );
+  // Clearly named, ~15s budget.
+  assert.match(mainSource, /const HTML_REPORT_WINDOW_LOAD_TIMEOUT_MS = 15_000;/);
+  // The handler goes through the bounded loader instead of a raw loadFile.
+  assert.match(mainSource, /await loadHtmlReportWindow\(hiddenWindow, filePath\)/);
+  assert.doesNotMatch(mainSource, /await hiddenWindow\.loadFile\(filePath\)/);
+  // Both failure signals are wired into the load race.
+  assert.match(loaderSource, /setTimeout\([\s\S]*?HTML_REPORT_WINDOW_LOAD_TIMEOUT_MS\)/);
+  assert.match(loaderSource, /webContents\.on\('render-process-gone', onRenderProcessGone\)/);
+  assert.match(loaderSource, /window\.loadFile\(filePath\)/);
+  // Whichever settles first rejects and tears the other signal down, so a
+  // wedged load leaves no dangling listener or timer behind.
+  assert.match(loaderSource, /clearTimeout\(timer\)/);
+  assert.match(loaderSource, /removeListener\('render-process-gone', onRenderProcessGone\)/);
+  assert.match(loaderSource, /reject\(error\)/);
+  // The rejection lands in the handler's catch ({ success: false, error }) and
+  // the finally block still destroys the hidden window.
+  const handlerSource = mainSource.slice(mainSource.indexOf("registerIpcHandler('cowork:htmlReport:exportImage'"));
+  assert.match(handlerSource, /catch \(error\) \{\s*return \{\s*success: false,/);
+  assert.match(handlerSource, /finally \{\s*if \(hiddenWindow && !hiddenWindow\.isDestroyed\(\)\) \{\s*hiddenWindow\.destroy\(\);/);
 });
 
 test('the source view highlights as markup and the menu carries the file actions', () => {

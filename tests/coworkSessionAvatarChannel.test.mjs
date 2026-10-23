@@ -86,10 +86,14 @@ test('the avatar channel is wired once across main, preload, and the renderer se
   const serviceSource = readSource('src', 'renderer', 'services', 'cowork.ts');
   const electronTypes = readSource('src', 'renderer', 'types', 'electron.d.ts');
 
+  // REQ-A-12: the channel registers exactly once, through the IPC registry
+  // (the registry module is the only place allowed to call ipcMain.handle —
+  // ipcRegistry.test.mjs fails bare registrations).
   assert.equal(
-    mainSource.match(/ipcMain\.handle\('cowork:session:listMetabotAvatars'/g)?.length ?? 0,
+    mainSource.match(/registerIpcHandler\('cowork:session:listMetabotAvatars'/g)?.length ?? 0,
     1,
   );
+  assert.doesNotMatch(mainSource, /ipcMain\.handle\('cowork:session:listMetabotAvatars'/);
   assert.match(mainSource, /cowork:session:listMetabotAvatars'[\s\S]*?getCoworkStore\(\)\.listMetabotAvatars\(metabotIds\)/);
   assert.match(preloadSource, /listMetabotAvatars: \(metabotIds: number\[\]\) =>\s*ipcRenderer\.invoke\('cowork:session:listMetabotAvatars', metabotIds\)/);
   assert.match(electronTypes, /listMetabotAvatars: \(metabotIds: number\[\]\) => Promise<\{/);

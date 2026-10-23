@@ -4055,6 +4055,35 @@ export class CoworkStore implements MemoryBackend {
     }
   }
 
+  /**
+   * Startup residue sweep for the Follow-Up Tasks bucket: an 'ask_user'
+   * marker persisted by a previous process is ALWAYS stale — the pending
+   * AskUserQuestion lives only in that process's memory (CoworkRunner's
+   * pendingPermissions map) and can never be answered after a restart, so
+   * without this sweep the row would park in Follow-Up forever. 'cerebellum'
+   * verdicts and 'manual' pins are judgement/pin state that legitimately
+   * survives restarts and stay untouched. Deliberately narrow: only the three
+   * follow-up columns are reset — updated_at and every other column are left
+   * alone so a pure residue sweep cannot perturb session-list ordering.
+   * Called once when the app first makes the cowork store available.
+   * Returns the number of cleared rows.
+   */
+  clearStaleAskUserFollowUpsAfterRestart(): number {
+    if (!this.tableExists('cowork_sessions')) {
+      return 0;
+    }
+    this.db.run(
+      `UPDATE cowork_sessions
+       SET follow_up_state = NULL, follow_up_source = NULL, follow_up_at = NULL
+       WHERE follow_up_state = 'pending' AND follow_up_source = 'ask_user'`,
+    );
+    const cleared = this.db.getRowsModified?.() || 0;
+    if (cleared > 0) {
+      this.saveDb();
+    }
+    return cleared;
+  }
+
 
   listSessions(options?: { metabotId?: number | null }): CoworkSessionSummary[] {
     interface SessionSummaryRow {

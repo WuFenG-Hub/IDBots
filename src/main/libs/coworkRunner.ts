@@ -15286,7 +15286,18 @@ export class CoworkRunner extends EventEmitter {
     });
   }
 
+  /**
+   * Session-level teardown of the in-memory permission/ask queue: every
+   * pending entry for the session is denied so blocked tool calls return
+   * instead of wedging the turn. The persisted 'ask_user' follow-up marker
+   * is cleared in the same beat, BEFORE denying entries: terminal cleanup
+   * (turn failure, stall abort, DSH shutdown, turn crash, stop) denies the
+   * pending AskUserQuestion, which can never be answered after this, so the
+   * Follow-Up Tasks row must not outlive it. Lane-guarded — cerebellum and
+   * manual markers are untouched.
+   */
   private clearPendingPermissions(sessionId: string): void {
+    this.clearAskUserFollowUp(sessionId);
     for (const [requestId, pending] of this.pendingPermissions.entries()) {
       if (pending.sessionId === sessionId) {
         pending.resolve({ behavior: 'deny', message: 'Session aborted' });

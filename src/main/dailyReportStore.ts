@@ -4,10 +4,13 @@
  * Mirrors metabot_dream_runs' per-date idempotency: the service claims a day
  * with an INSERT whose UNIQUE(report_date) guards double-fire, then moves the
  * row through running → completed/skipped/failed. A failure after the claim
- * (generator/LLM error, crash) leaves a 'failed' row that the service re-arms
- * with bounded same-day backoff (dreamRetryPolicy); a failure after delivery
+ * (generator/LLM error) leaves a 'failed' row that the service re-arms with
+ * bounded same-day backoff (dreamRetryPolicy); a failure after delivery
  * reused the recorded session_id, so a retry never creates a second report
- * session for the same day.
+ * session for the same day. A crash after the claim leaves a stale 'running'
+ * row that failStaleRunningRuns (service start / each tick) flips to 'failed'
+ * so the day re-enters the bounded-retry path instead of blocking the
+ * UNIQUE(report_date) claim forever.
  */
 
 import type { SqliteDatabase as Database } from './sqliteTypes';
@@ -180,6 +183,33 @@ export class DailyReportStore {
     }
     this.saveDb();
     return this.getRunForDate(claim.reportDate);
+  }
+
+  /**
+   * Crash recovery for runs orphaned by a killed process: flip 'running' rows
+   * created BEFORE the current service instance started to 'failed' with a
+   * recovery error and completed_at = atMs. Rows created at/after
+   * `startedAtMs` belong to the live instance (including one it is executing
+   * right now — its claims are stamped with atMs >= its own start) and are
+   * never touched. The failed rows re-enter the service's bounded retry/
+   * backoff path, so a recovered day is retried instead of permanently
+   * blocking the UNIQUE(report_date) claim. Returns the recovered runs.
+   */
+  failStaleRunningRuns(startedAtMs: number, atMs: number = Date.now()): DailyReportRun[] {
+    const stale = this.getAll<DailyReportRunRow>(
+      `SELECT * FROM daily_report_runs WHERE status = 'running' AND created_at < ?`,
+      [startedAtMs],
+    );
+    if (stale.length === 0) return [];
+    const error = 'run interrupted by app restart (recovered stale running row)';
+    this.db.run(
+      `UPDATE daily_report_runs
+       SET status = 'failed', error = ?, completed_at = ?
+       WHERE status = 'running' AND created_at < ?`,
+      [error, atMs, startedAtMs],
+    );
+    this.saveDb();
+    return stale.map((row) => this.rowToRun({ ...row, status: 'failed', error, completed_at: atMs }));
   }
 
   /**

@@ -203,6 +203,13 @@ jobs:
       - name: Run private-chat wake re-drive disposition tests
         run: pnpm run test:private-chat-wake-disposition
 
+      # Behavioral regression for the daily-report / follow-up gate: the
+      # collector, generator, settings, cerebellum triage, session follow-up
+      # gate, and the cowork follow-up flow. The script runs
+      # compile:electron first (project convention).
+      - name: Run daily-report / follow-up regression tests
+        run: pnpm run test:daily-report
+
       - name: Run memory and team-culture tests
         run: pnpm run test:memory
 

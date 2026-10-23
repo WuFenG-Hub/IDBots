@@ -9,8 +9,15 @@
  *
  * - Normal: fire at the configured local hour (default 08:00) while the app
  *   runs; `trigger_kind='scheduled'`.
- * - Catch-up: when the app starts past today@hour (+2 min grace) with no run
- *   row for today, fire 15 minutes after start; `trigger_kind='catchup'`.
+ * - Catch-up: when the app starts past the START day's configured hour (+2
+ *   min grace) with no run row for that day, fire 15 minutes after start;
+ *   `trigger_kind='catchup'`. The report is claimed for the MISSED start day
+ *   even when the 15-minute delay fires after midnight (start 23:45, hour 8
+ *   → fires 00:00 next day with report_date = the start day).
+ * - Crash recovery: at service start and on every tick, 'running' rows
+ *   created before this service instance started (orphaned by a killed
+ *   process) are flipped to 'failed', so their days re-enter the bounded
+ *   retry/backoff path instead of blocking the day forever.
  * - Fresh installs: no fire while `backgroundDeferral()` returns a reason
  *   (the first ~24h window shared by dream/surf/study).
  * - Manual: `runNow()` fires the full pipeline on the owner's demand
@@ -23,7 +30,10 @@
  * - Retry: a failure after the claim records `failed`; the tick re-arms the
  *   row with dream-style bounded backoff (classifyDreamError terminal class
  *   never retries; DREAM_RETRY_MAX_ATTEMPTS caps the attempts) and reuses
- *   the recorded session_id, so a retry never creates a duplicate session.
+ *   the recorded session_id, so a retry never creates a duplicate session —
+ *   unless the user deleted or archived that session inside the backoff
+ *   window; delivery then re-checks existence first and falls back to a
+ *   fresh report session, repointing the run row via setRunSessionId.
  *
  * Fire-time gates: the global experimental-automation master switch AND a
  * Twin exists AND `dailyReport.enabled === '1'` AND the fresh-install
@@ -85,6 +95,10 @@ export interface DailyReportServiceDeps {
       sessionId: string,
       message: { type: string; content: string; metadata?: Record<string, unknown> },
     ): unknown;
+    /** Lightweight existence probe (no messages loaded); null = row deleted. */
+    getSessionWithoutMessages(id: string): { id: string } | null;
+    /** Archived sessions stay out of the sidebar — invalid retry targets. */
+    isSessionArchived(id: string): boolean;
   };
   metabotStore: {
     listMetabots(): ReadonlyArray<{ id: number; metabot_type?: string }>;
@@ -136,6 +150,10 @@ export interface DailyReportFireDecision {
   trigger: DailyReportFireTrigger;
   /** The re-armed run row when this is a bounded retry of a failed day. */
   retryRun: DailyReportRun | null;
+  /** The local date the claim/report belongs to — the missed start day for a
+   *  cross-midnight catch-up, today for a scheduled fire, the failed day's
+   *  date for a retry. */
+  reportDate: string;
 }
 
 /**
@@ -150,43 +168,80 @@ export type DailyReportRunNowResult =
   | { status: 'unavailable'; reason: string };
 
 /**
- * Pure decision core, split out for tests: given today's run row (if any),
- * the live hour and the service-start anchor, decide whether THIS tick
- * should fire. Gates (twin/enabled/experimental/deferral) are checked by the
- * caller BEFORE this — a blocked gate must not consume the catch-up arm.
+ * Pure decision core, split out for tests: given the service-start anchor,
+ * the live hour and a per-date run-row lookup, decide whether THIS tick
+ * should fire, and for WHICH local date. Gates (twin/enabled/experimental/
+ * deferral) are checked by the caller BEFORE this — a blocked gate must not
+ * consume the catch-up arm.
+ *
+ * Two candidate dates, in priority order:
+ *  1. The missed start day: when the service began AFTER that day's configured
+ *     fire time (+ grace), the report is owed to THAT day. The 15-minute
+ *     catch-up delay can push the actual fire past midnight (start 23:45,
+ *     hour 8 → fire 00:00 next day) — the claim still carries the start day.
+ *     While the start-day row is missing, the catch-up arm owns the decision
+ *     and today's scheduled arm must not sneak in. Once the start-day row
+ *     settles (or fails terminally / exhausts its budget), a DIFFERENT today
+ *     falls through to the normal scheduled/retry arm.
+ *  2. Today: the normal scheduled arm once the configured hour passes, plus
+ *     the bounded-retry arm for today's failed row.
  */
 export const decideDailyReportFire = (input: {
   nowMs: number;
   serviceStartedAtMs: number;
   hour: number;
-  run: DailyReportRun | null;
+  /** Run-row lookup by local date label ('YYYY-MM-DD'). */
+  getRun: (reportDate: string) => DailyReportRun | null;
   maxAttempts?: number;
 }): DailyReportFireDecision | null => {
   const maxAttempts = Math.max(1, Math.floor(input.maxAttempts ?? DREAM_RETRY_MAX_ATTEMPTS));
-  const todayAtHourMs = localTodayAtHourMs(input.nowMs, input.hour);
 
-  if (input.run) {
-    if (input.run.status !== 'failed') return null; // running/completed/skipped own the day
-    if (input.run.attemptCount >= maxAttempts) return null;
-    if (classifyDreamError(input.run.error) === 'terminal') return null;
-    const failedAtMs = input.run.completedAt ?? input.run.createdAt;
+  // Bounded retry of a failed row: dream-style backoff from the failure time;
+  // terminal error classes and exhausted budgets never retry.
+  const retryDecisionFor = (run: DailyReportRun): DailyReportFireDecision | null => {
+    if (run.attemptCount >= maxAttempts) return null;
+    if (classifyDreamError(run.error) === 'terminal') return null;
+    const failedAtMs = run.completedAt ?? run.createdAt;
     const backoffMs = computeDreamBackoffDelayMs({
-      attemptCount: input.run.attemptCount,
-      rateLimited: isRateLimitError(input.run.error),
+      attemptCount: run.attemptCount,
+      rateLimited: isRateLimitError(run.error),
     });
     if (input.nowMs < failedAtMs + backoffMs) return null;
-    return { trigger: 'retry', retryRun: input.run };
+    return { trigger: 'retry', retryRun: run, reportDate: run.reportDate };
+  };
+
+  const todayAtHourMs = localTodayAtHourMs(input.nowMs, input.hour);
+  const startDayAtHourMs = localTodayAtHourMs(input.serviceStartedAtMs, input.hour);
+  const startDateLabel = formatDailyReportLocalDate(input.serviceStartedAtMs);
+  const todayLabel = formatDailyReportLocalDate(input.nowMs);
+  // The app was off (or started) past the START day's fire time: that day is
+  // owed a report 15 minutes after start.
+  const missedStartDay = input.serviceStartedAtMs > startDayAtHourMs + DAILY_REPORT_FIRE_GRACE_MS;
+
+  if (missedStartDay) {
+    const startDayRun = input.getRun(startDateLabel);
+    if (!startDayRun) {
+      return input.nowMs >= input.serviceStartedAtMs + DAILY_REPORT_CATCHUP_DELAY_MS
+        ? { trigger: 'catchup', retryRun: null, reportDate: startDateLabel }
+        : null;
+    }
+    if (startDayRun.status === 'failed') {
+      const retry = retryDecisionFor(startDayRun);
+      if (retry) return retry;
+      // Failed but cooling down / terminal / budget exhausted: only a
+      // DIFFERENT today may still fire; the start day itself is done.
+    }
+    if (todayLabel === startDateLabel) return null; // settled or un-retryable row owns the day
+    // else fall through — today is a new date with its own scheduled/retry arm
   }
 
-  if (input.nowMs < todayAtHourMs) return null; // before the configured hour
-  if (input.serviceStartedAtMs > todayAtHourMs + DAILY_REPORT_FIRE_GRACE_MS) {
-    // The app was off (or started) past the fire time: catch up 15 minutes
-    // after start, not instantly.
-    return input.nowMs >= input.serviceStartedAtMs + DAILY_REPORT_CATCHUP_DELAY_MS
-      ? { trigger: 'catchup', retryRun: null }
-      : null;
+  const todayRun = input.getRun(todayLabel);
+  if (todayRun) {
+    if (todayRun.status !== 'failed') return null; // running/completed/skipped own the day
+    return retryDecisionFor(todayRun);
   }
-  return { trigger: 'scheduled', retryRun: null };
+  if (input.nowMs < todayAtHourMs) return null; // before the configured hour
+  return { trigger: 'scheduled', retryRun: null, reportDate: todayLabel };
 };
 
 /** Handle returned by startDailyReportService (also what main.ts caches for IPC). */
@@ -241,7 +296,18 @@ export const startDailyReportService = (deps: DailyReportServiceDeps): DailyRepo
     content: string;
   }): string => {
     let sessionId = input.run.sessionId;
-    if (!sessionId) {
+    // A retry may reuse the recorded session only while it is still
+    // deliverable: the user may have deleted or archived it inside the
+    // backoff window, and writing the report into that orphan would mark
+    // the run completed while the owner never sees the message (archived
+    // sessions stay out of the sidebar list).
+    const recordedSessionDeliverable = sessionId != null
+      && deps.coworkStore.getSessionWithoutMessages(sessionId) != null
+      && !deps.coworkStore.isSessionArchived(sessionId);
+    if (!recordedSessionDeliverable) {
+      if (sessionId) {
+        log(`${input.dateLabel}: recorded session ${sessionId} was deleted or archived — creating a fresh report session.`);
+      }
       const cwd = deps.resolveSessionCwd(deps.coworkStore.getConfig().workingDirectory, input.twin.id);
       const session = deps.coworkStore.createSession(
         `${DAILY_REPORT_SESSION_TITLE_PREFIX} ${input.dateLabel}`,
@@ -267,12 +333,14 @@ export const startDailyReportService = (deps: DailyReportServiceDeps): DailyRepo
   };
 
   const executeReport = async (
-    input: { trigger: DailyReportTriggerKind; force?: boolean; retryRun: DailyReportRun | null },
+    input: { trigger: DailyReportTriggerKind; force?: boolean; retryRun: DailyReportRun | null; reportDate?: string },
     twin: DailyReportTwinLike,
   ): Promise<DailyReportRunNowResult> => {
     const now = deps.now?.() ?? new Date();
     const nowMs = now.getTime();
-    const dateLabel = formatDailyReportLocalDate(nowMs);
+    // The decision already pinned the date (the missed start day for a
+    // cross-midnight catch-up); manual runs always claim today.
+    const dateLabel = input.reportDate ?? formatDailyReportLocalDate(nowMs);
     const lastSuccess = deps.dailyReportStore.getLastSuccessfulRun();
     const { windowStartMs, windowEndMs } = computeDailyReportWindow({
       nowMs,
@@ -386,6 +454,21 @@ export const startDailyReportService = (deps: DailyReportServiceDeps): DailyRepo
     }
   };
 
+  /**
+   * Crash recovery: a 'running' row created BEFORE this service instance
+   * started cannot belong to it (this instance only claims at/after its own
+   * start), so it is a crash orphan — fail it into the bounded retry path.
+   * A row this instance is actively executing carries created_at >=
+   * serviceStartedAtMs and is left untouched. Runs before the fire gates on
+   * purpose: the ledger heals even while the feature is gated off.
+   */
+  const recoverInterruptedRuns = (atMs: number): void => {
+    const recovered = deps.dailyReportStore.failStaleRunningRuns(serviceStartedAtMs, atMs);
+    if (recovered.length > 0) {
+      log(`recovered ${recovered.length} stale running run(s) orphaned by a crash (${recovered.map((r) => r.reportDate).join(', ')}) — moved to 'failed' for bounded retry.`);
+    }
+  };
+
   const tick = async (): Promise<void> => {
     if (stopped || firing) {
       // Keep the cadence alive when a manual run (or a concurrent manual
@@ -396,15 +479,23 @@ export const startDailyReportService = (deps: DailyReportServiceDeps): DailyRepo
     firing = true;
     try {
       const now = deps.now?.() ?? new Date();
+      recoverInterruptedRuns(now.getTime());
       const twin = resolveTwin();
       if (!fireGatesOpen(twin) || !twin) {
         return; // gates checked at fire time; a later tick picks the change up
       }
       const hour = resolveDailyReportHour(deps.metabotStore, twin.id);
-      const run = deps.dailyReportStore.getRunForDate(formatDailyReportLocalDate(now.getTime()));
-      const decision = decideDailyReportFire({ nowMs: now.getTime(), serviceStartedAtMs, hour, run });
+      const decision = decideDailyReportFire({
+        nowMs: now.getTime(),
+        serviceStartedAtMs,
+        hour,
+        getRun: (date) => deps.dailyReportStore.getRunForDate(date),
+      });
       if (decision) {
-        await executeReport({ trigger: decision.trigger, retryRun: decision.retryRun }, twin);
+        await executeReport(
+          { trigger: decision.trigger, retryRun: decision.retryRun, reportDate: decision.reportDate },
+          twin,
+        );
       }
     } catch (error) {
       log(`tick failed soft: ${error instanceof Error ? error.message : String(error)}`);
@@ -414,6 +505,7 @@ export const startDailyReportService = (deps: DailyReportServiceDeps): DailyRepo
     }
   };
 
+  recoverInterruptedRuns(serviceStartedAtMs);
   scheduleNextTick();
   log(`service started (tick ${tickIntervalMs}ms).`);
 

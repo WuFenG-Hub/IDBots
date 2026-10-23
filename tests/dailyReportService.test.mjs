@@ -11,7 +11,14 @@
 //      catchup trigger after;
 //   d. skip — zero-activity window → 'skipped' row, NO session created;
 //   e. retry — collector throws → 'failed' row; after the backoff the tick
-//      re-arms, delivers and completes WITHOUT a duplicate session.
+//      re-arms, delivers and completes WITHOUT a duplicate session;
+//   f. cross-midnight catch-up — 23:45 start with hour=8: nothing before
+//      start+15min, then fires AFTER 00:00 claiming the START day as
+//      report_date (session title, claim and ledger row all dated start day);
+//   g. crash recovery — a 'running' row created BEFORE service start is
+//      failed at start/tick and retries to success after the backoff, while
+//      rows created at/after start (the live instance's own claims) are
+//      never touched.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -64,11 +71,15 @@ const setup = (input = {}) => {
   const emitted = [];
   const metabots = input.metabots ?? [{ id: 7, metabot_type: 'twin' }];
   let failAddMessage = input.failFirstAddMessage ?? false;
+  // Shared fake-CoworkStore view: session existence/archival across service
+  // instances of one test. Pass `sessionProbe` in to share it between setups
+  // (the real instances all read the same CoworkStore database).
+  const sessionProbe = input.sessionProbe ?? { deleted: new Set(), archived: new Set(), nextId: 1 };
   const deps = {
     coworkStore: {
       getConfig: () => ({ workingDirectory: '/tmp/ws' }),
       createSession: (title, cwd, systemPrompt, executionMode, activeSkillIds, metabotId) => {
-        const session = { id: `sess-${createdSessions.length + 1}`, title, cwd, metabotId };
+        const session = { id: `sess-${sessionProbe.nextId++}`, title, cwd, metabotId };
         createdSessions.push(session);
         return session;
       },
@@ -80,6 +91,8 @@ const setup = (input = {}) => {
         addedMessages.push({ sessionId, message });
         return { id: `m-${addedMessages.length}`, sessionId, ...message, timestamp: NOW_9AM };
       },
+      getSessionWithoutMessages: (id) => (sessionProbe.deleted.has(id) ? null : { id }),
+      isSessionArchived: (id) => sessionProbe.archived.has(id),
     },
     metabotStore: {
       listMetabots: () => metabots,
@@ -103,7 +116,7 @@ const setup = (input = {}) => {
     log: () => {},
   };
   const service = startDailyReportService(deps);
-  return { service, deps, dailyReportStore, createdSessions, addedMessages, emitted };
+  return { service, deps, dailyReportStore, createdSessions, addedMessages, emitted, sessionProbe };
 };
 
 // ---------------------------------------------------------------------------
@@ -113,7 +126,7 @@ const setup = (input = {}) => {
 test('decideDailyReportFire: before the hour → nothing', () => {
   const nowMs = new Date(2026, 9, 22, 7, 30, 0).getTime();
   assert.equal(
-    decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 60_000, hour: 8, run: null }),
+    decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 60_000, hour: 8, getRun: () => null }),
     null,
   );
 });
@@ -121,41 +134,73 @@ test('decideDailyReportFire: before the hour → nothing', () => {
 test('decideDailyReportFire: app running at the hour → scheduled', () => {
   const nowMs = new Date(2026, 9, 22, 8, 0, 1).getTime();
   assert.deepEqual(
-    decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, run: null }),
-    { trigger: 'scheduled', retryRun: null },
+    decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, getRun: () => null }),
+    { trigger: 'scheduled', retryRun: null, reportDate: '2026-10-22' },
   );
 });
 
 test('decideDailyReportFire: started past the hour → catchup only after 15 min', () => {
   const startMs = new Date(2026, 9, 22, 8, 5, 0).getTime();
   assert.equal(
-    decideDailyReportFire({ nowMs: startMs + 60_000, serviceStartedAtMs: startMs, hour: 8, run: null }),
+    decideDailyReportFire({ nowMs: startMs + 60_000, serviceStartedAtMs: startMs, hour: 8, getRun: () => null }),
     null,
     'before start+15min: nothing',
   );
   assert.deepEqual(
-    decideDailyReportFire({ nowMs: startMs + DAILY_REPORT_CATCHUP_DELAY_MS + 1000, serviceStartedAtMs: startMs, hour: 8, run: null }),
-    { trigger: 'catchup', retryRun: null },
+    decideDailyReportFire({ nowMs: startMs + DAILY_REPORT_CATCHUP_DELAY_MS + 1000, serviceStartedAtMs: startMs, hour: 8, getRun: () => null }),
+    { trigger: 'catchup', retryRun: null, reportDate: '2026-10-22' },
   );
 });
 
 test('decideDailyReportFire: any settled row owns the day; failed rows retry with backoff', () => {
   const nowMs = NOW_9AM;
   const base = { reportDate: DATE_LABEL, triggerKind: 'scheduled', sessionId: null, windowStartMs: 0, windowEndMs: 0, factsJson: null, attemptCount: 1, createdAt: nowMs, completedAt: nowMs };
-  assert.equal(decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, run: { ...base, status: 'completed' } }), null);
-  assert.equal(decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, run: { ...base, status: 'skipped' } }), null);
-  assert.equal(decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, run: { ...base, status: 'running' } }), null);
+  const runOnly = (run) => () => run;
+  assert.equal(decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, getRun: runOnly({ ...base, status: 'completed' }) }), null);
+  assert.equal(decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, getRun: runOnly({ ...base, status: 'skipped' }) }), null);
+  assert.equal(decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, getRun: runOnly({ ...base, status: 'running' }) }), null);
   // failed, backoff (2 min first attempt) not yet expired
   const justFailed = { ...base, status: 'failed', error: 'fetch failed', completedAt: nowMs - 60_000 };
-  assert.equal(decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, run: justFailed }), null);
+  assert.equal(decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, getRun: runOnly(justFailed) }), null);
   const cooledDown = { ...justFailed, completedAt: nowMs - 3 * 60_000 };
-  const decision = decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, run: cooledDown });
+  const decision = decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, getRun: runOnly(cooledDown) });
   assert.equal(decision?.trigger, 'retry');
+  assert.equal(decision?.reportDate, DATE_LABEL);
   // terminal provider rejection never retries; exhausted budget never retries
   const terminal = { ...base, status: 'failed', error: 'LLM request failed: 400 invalid_request_error', completedAt: nowMs - 3_600_000 };
-  assert.equal(decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, run: terminal }), null);
+  assert.equal(decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, getRun: runOnly(terminal) }), null);
   const exhausted = { ...cooledDown, attemptCount: 5 };
-  assert.equal(decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, run: exhausted }), null);
+  assert.equal(decideDailyReportFire({ nowMs, serviceStartedAtMs: nowMs - 3_600_000, hour: 8, getRun: runOnly(exhausted) }), null);
+});
+
+test('decideDailyReportFire: cross-midnight catch-up claims the missed start day', () => {
+  // 23:45 start, hour=8 → the 15-min delay lands at 00:00 NEXT day, but the
+  // report is owed to the START day (regression: the old today@hour gate
+  // returned null after midnight and the catch-up was lost forever).
+  const startMs = new Date(2026, 9, 22, 23, 45, 0).getTime();
+  assert.equal(
+    decideDailyReportFire({ nowMs: startMs + 60_000, serviceStartedAtMs: startMs, hour: 8, getRun: () => null }),
+    null,
+    '23:46 — catch-up delay not elapsed yet',
+  );
+  assert.deepEqual(
+    decideDailyReportFire({ nowMs: startMs + 16 * 60_000, serviceStartedAtMs: startMs, hour: 8, getRun: () => null }),
+    { trigger: 'catchup', retryRun: null, reportDate: '2026-10-22' },
+    '00:01 next day — fires with the START day as report_date',
+  );
+  // Once the start-day row settled, a DIFFERENT today gets its own scheduled arm.
+  const settledStartDay = { reportDate: '2026-10-22', triggerKind: 'catchup', status: 'completed', sessionId: 'sess-1', windowStartMs: 0, windowEndMs: 0, factsJson: null, error: null, attemptCount: 1, createdAt: startMs, completedAt: startMs };
+  const nextMorning = new Date(2026, 9, 23, 9, 0, 0).getTime();
+  assert.deepEqual(
+    decideDailyReportFire({
+      nowMs: nextMorning,
+      serviceStartedAtMs: startMs,
+      hour: 8,
+      getRun: (date) => (date === '2026-10-22' ? settledStartDay : null),
+    }),
+    { trigger: 'scheduled', retryRun: null, reportDate: '2026-10-23' },
+    'start day delivered → the next day fires its own scheduled report',
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -232,6 +277,144 @@ test('catch-up fire: nothing before start+15min, catchup trigger after', async (
   late.service.stop();
 });
 
+test('catch-up across midnight: 23:45 start fires after 00:00 claiming the START day', async () => {
+  // v1.0.3 regression: decideDailyReportFire gated on TODAY's hour, so a
+  // 23:45 start with hour=8 lost the catch-up forever once the clock passed
+  // midnight. The claim/report must carry the missed start day.
+  const startMs = new Date(2026, 9, 22, 23, 45, 0).getTime();
+  const nextDayLabel = '2026-10-23';
+  const sharedDb = createNativeSqliteDatabase(':memory:');
+  const sharedStore = new DailyReportStore(sharedDb, () => {});
+
+  const early = setup({
+    db: sharedDb,
+    dailyReportStore: sharedStore,
+    nowMs: startMs + 60_000, // 23:46 — still inside the 15-min delay
+    serviceStartedAtMs: startMs,
+  });
+  await early.service.tickNow();
+  assert.equal(early.createdSessions.length, 0, 'nothing before start+15min');
+  assert.equal(sharedStore.getRunForDate(DATE_LABEL), null, 'no claim for the start day yet');
+  assert.equal(sharedStore.getRunForDate(nextDayLabel), null, 'no claim for the next day either');
+  early.service.stop();
+
+  const late = setup({
+    db: sharedDb,
+    dailyReportStore: sharedStore,
+    nowMs: startMs + 16 * 60_000, // 00:01 next day
+    serviceStartedAtMs: startMs,
+  });
+  await late.service.tickNow();
+  assert.equal(late.createdSessions.length, 1, 'catch-up fired once start+15min elapsed');
+  assert.equal(late.createdSessions[0].title, `${DAILY_REPORT_SESSION_TITLE_PREFIX} ${DATE_LABEL}`);
+  const run = sharedStore.getRunForDate(DATE_LABEL);
+  assert.equal(run.status, 'completed');
+  assert.equal(run.triggerKind, 'catchup');
+  assert.equal(run.reportDate, DATE_LABEL, 'the claim owns the MISSED start day');
+  assert.equal(sharedStore.getRunForDate(nextDayLabel), null, 'the next day is NOT pre-claimed');
+  assert.equal(late.addedMessages[0].message.metadata.originLabel, DATE_LABEL);
+  late.service.stop();
+});
+
+test('crash recovery: stale running row fails at start, retries to success after backoff', async () => {
+  // A killed process left status='running' behind; the next service instance
+  // must recover it into 'failed' (bounded retry path) without disturbing its
+  // own in-flight rows, and the tick must re-arm it once the backoff cools.
+  const sharedDb = createNativeSqliteDatabase(':memory:');
+  const sharedStore = new DailyReportStore(sharedDb, () => {});
+  const staleClaimMs = NOW_9AM - 3_600_000; // claimed an hour before this start
+  const stale = sharedStore.claimRun({
+    reportDate: DATE_LABEL,
+    triggerKind: 'scheduled',
+    windowStartMs: NOW_9AM - DAY_MS,
+    windowEndMs: NOW_9AM,
+  }, staleClaimMs);
+  assert.ok(stale);
+  assert.equal(stale.status, 'running', 'simulated crash orphan');
+
+  // First tick after start: recovery flips the orphan to failed; the retry
+  // arm respects the 2-minute backoff, so nothing fires yet.
+  const first = setup({
+    db: sharedDb,
+    dailyReportStore: sharedStore,
+    nowMs: NOW_9AM,
+    serviceStartedAtMs: NOW_9AM,
+  });
+  await first.service.tickNow();
+  let run = sharedStore.getRunForDate(DATE_LABEL);
+  assert.equal(run.status, 'failed', 'stale running row recovered to failed');
+  assert.equal(run.error, 'run interrupted by app restart (recovered stale running row)');
+  assert.equal(run.completedAt, NOW_9AM);
+  assert.equal(run.attemptCount, 1, 'recovery does not consume retry budget');
+  assert.equal(first.createdSessions.length, 0, 'backoff not elapsed — no retry yet');
+  first.service.stop();
+
+  // Inside the backoff window: still failed, no re-arm.
+  const early = setup({
+    db: sharedDb,
+    dailyReportStore: sharedStore,
+    nowMs: NOW_9AM + 60_000,
+    serviceStartedAtMs: NOW_9AM,
+  });
+  await early.service.tickNow();
+  run = sharedStore.getRunForDate(DATE_LABEL);
+  assert.equal(run.status, 'failed');
+  assert.equal(run.attemptCount, 1, 'no re-arm inside the backoff window');
+  early.service.stop();
+
+  // After the backoff: the tick re-arms (attempt 2), delivers, completes.
+  const late = setup({
+    db: sharedDb,
+    dailyReportStore: sharedStore,
+    nowMs: NOW_9AM + 3 * 60_000,
+    serviceStartedAtMs: NOW_9AM,
+  });
+  await late.service.tickNow();
+  run = sharedStore.getRunForDate(DATE_LABEL);
+  assert.equal(run.status, 'completed');
+  assert.equal(run.attemptCount, 2);
+  assert.equal(run.triggerKind, 'retry');
+  assert.equal(run.error, null);
+  assert.equal(late.createdSessions.length, 1, 'recovered day delivered a fresh report session');
+  assert.equal(run.sessionId, late.createdSessions[0].id);
+  late.service.stop();
+});
+
+test('failStaleRunningRuns: only rows created BEFORE the service start are recovered', () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new DailyReportStore(db, () => {});
+  const stale = store.claimRun({
+    reportDate: '2026-10-21',
+    triggerKind: 'scheduled',
+    windowStartMs: 0,
+    windowEndMs: 1,
+  }, 1_000);
+  const live = store.claimRun({
+    reportDate: '2026-10-22',
+    triggerKind: 'scheduled',
+    windowStartMs: 0,
+    windowEndMs: 1,
+  }, 5_000);
+  assert.ok(stale && live);
+
+  const recovered = store.failStaleRunningRuns(5_000, 9_000);
+  assert.equal(recovered.length, 1, 'exactly the pre-start row is recovered');
+  assert.equal(recovered[0].reportDate, '2026-10-21');
+  assert.equal(recovered[0].status, 'failed');
+  assert.equal(recovered[0].completedAt, 9_000);
+
+  const staleAfter = store.getRunForDate('2026-10-21');
+  assert.equal(staleAfter.status, 'failed');
+  assert.match(staleAfter.error, /interrupted by app restart/);
+  const liveAfter = store.getRunForDate('2026-10-22');
+  assert.equal(liveAfter.status, 'running', 'the live instance\'s own row is untouched');
+  assert.equal(liveAfter.error, null);
+  assert.equal(liveAfter.completedAt, null);
+
+  // Idempotent: a second pass finds nothing.
+  assert.equal(store.failStaleRunningRuns(5_000, 10_000).length, 0);
+});
+
 test('skip: zero-activity window records skipped and sends nothing', async () => {
   const { service, dailyReportStore, createdSessions } = setup({
     nowMs: NOW_9AM,
@@ -291,6 +474,59 @@ test('retry: failure after session delivery reuses the session (never a duplicat
   assert.equal(late.addedMessages.length, 1);
   assert.equal(late.addedMessages[0].sessionId, 'sess-1');
   late.service.stop();
+});
+
+test('retry: recorded session removed inside the backoff window → fresh session, nothing written to the orphan', async () => {
+  // Same shape as the reuse test, but between the failure and the retry the
+  // user deletes (or archives) the report session. The retry must detect the
+  // orphan, create a NEW session, repoint the run row, and deliver there —
+  // never into the removed session id.
+  for (const removal of ['deleted', 'archived']) {
+    const sharedDb = createNativeSqliteDatabase(':memory:');
+    const sharedStore = new DailyReportStore(sharedDb, () => {});
+    // First attempt: session created, delivery (addMessage) dies → failed row
+    // already carrying session_id.
+    const first = setup({
+      db: sharedDb,
+      dailyReportStore: sharedStore,
+      nowMs: NOW_9AM,
+      serviceStartedAtMs: new Date(2026, 9, 22, 6, 0, 0).getTime(),
+      failFirstAddMessage: true,
+    });
+    await first.service.tickNow();
+    let run = sharedStore.getRunForDate(DATE_LABEL);
+    assert.equal(run.status, 'failed');
+    assert.equal(run.sessionId, 'sess-1', 'session id persisted before delivery settled');
+    // The user removes the report session while the retry is cooling down.
+    first.sessionProbe[removal === 'deleted' ? 'deleted' : 'archived'].add('sess-1');
+    first.service.stop();
+
+    // After the backoff: re-arms, detects the orphan, delivers into a fresh session.
+    const late = setup({
+      db: sharedDb,
+      dailyReportStore: sharedStore,
+      sessionProbe: first.sessionProbe, // same fake-CoworkStore view
+      nowMs: NOW_9AM + 5 * 60_000,
+      serviceStartedAtMs: new Date(2026, 9, 22, 6, 0, 0).getTime(),
+    });
+    await late.service.tickNow();
+    run = sharedStore.getRunForDate(DATE_LABEL);
+    assert.equal(run.status, 'completed', `${removal}: retried day completes`);
+    assert.equal(run.attemptCount, 2);
+    assert.equal(run.triggerKind, 'retry');
+    assert.equal(late.createdSessions.length, 1, `${removal}: a NEW report session`);
+    assert.equal(late.createdSessions[0].id, 'sess-2');
+    assert.equal(run.sessionId, 'sess-2', `${removal}: run row repointed at the new session`);
+    assert.equal(late.addedMessages.length, 1);
+    assert.equal(late.addedMessages[0].sessionId, 'sess-2', `${removal}: message delivered into the new session`);
+    assert.ok(
+      !late.addedMessages.some((entry) => entry.sessionId === 'sess-1'),
+      `${removal}: nothing written into the removed session id`,
+    );
+    assert.equal(late.emitted.length, 1);
+    assert.equal(late.emitted[0].sessionId, 'sess-2', `${removal}: stream broadcast follows the new session`);
+    late.service.stop();
+  }
 });
 
 test('double-fire guard: pre-existing running row blocks a second claim', async () => {
