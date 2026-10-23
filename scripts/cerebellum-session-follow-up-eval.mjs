@@ -23,6 +23,8 @@
  *   node scripts/cerebellum-session-follow-up-eval.mjs eval --cases cases.json
  *
  * --cases: [{ id, sessionTitle, taskName?, lastAssistant, followUp }]
+ * --out results.json: persist the scored rows + threshold sweep as a
+ *   calibration artifact (review Minor 9).
  *
  * API credentials: --key / TYPESAFE_API_KEY (or JEV_API_KEY), --base-url /
  * TYPESAFE_BASE_URL, --model / TYPESAPE_MODEL (sic: TYPESAFE_MODEL).
@@ -126,6 +128,7 @@ function parseArgs(args) {
     else if (arg === '--base-url') opts.baseUrl = args[++i];
     else if (arg === '--model') opts.model = args[++i];
     else if (arg === '--cases') opts.cases = args[++i];
+    else if (arg === '--out') opts.out = args[++i];
     else if (arg.startsWith('--')) {
       console.error(`unknown option: ${arg}`);
       exit(2);
@@ -207,6 +210,7 @@ async function runEval(opts) {
 
   console.log('—'.repeat(72));
   console.log(`threshold=${CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD}  lost=${lost}  extra=${extra}  labeled=${labeled}`);
+  const sweep = [];
   console.log('threshold sweep (lost / extra):');
   for (const threshold of SWEEP) {
     let sweepLost = 0;
@@ -216,10 +220,26 @@ async function runEval(opts) {
       if (item.followUp && !followUp) sweepLost += 1;
       if (!item.followUp && followUp) sweepExtra += 1;
     }
+    sweep.push({ threshold, lost: sweepLost, extra: sweepExtra });
     console.log(`  >=${threshold.toFixed(2)}  lost=${sweepLost}  extra=${sweepExtra}`);
   }
   if (labeled < cases.length) {
     console.log(`warning: ${cases.length - labeled} case(s) produced no usable noul — sweep is partial`);
+  }
+  if (opts.out) {
+    // Review Minor 9: persist the calibration artifact for the handoff doc.
+    const artifact = {
+      generatedAt: new Date().toISOString(),
+      model: opts.model,
+      productionThreshold: CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD,
+      labeled,
+      lost,
+      extra,
+      cases: scored,
+      sweep,
+    };
+    await (await import('node:fs/promises')).writeFile(opts.out, JSON.stringify(artifact, null, 2));
+    console.log(`results written to ${opts.out}`);
   }
 }
 

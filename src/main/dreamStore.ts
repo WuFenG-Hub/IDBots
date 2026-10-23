@@ -877,7 +877,10 @@ export class DreamStore {
     if (existing && existing.contentHash === hash) {
       return { id: existing.id, contentHash: existing.contentHash };
     }
-    const stamp = Math.floor(Number(nowMs)) || Date.now();
+    // Review Minor 10: an explicit epoch-0 timestamp must not fall through
+    // to the wall clock (|| Date.now() made deterministic tests time-travel).
+    const parsedNow = Number(nowMs);
+    const stamp = Number.isFinite(parsedNow) ? Math.floor(parsedNow) : Date.now();
     if (existing) {
       this.db.run('UPDATE metabot_exams SET archived_at = ? WHERE id = ?', [stamp, existing.id]);
     }
@@ -944,19 +947,6 @@ export class DreamStore {
       input.id,
     ]);
     this.saveDb();
-  }
-
-  /** Completed exam scores, oldest first — the growth-curve series. */
-  listExamScores(metabotId: number, limit = 52): Array<{ startedAt: number; totalScore: number }> {
-    return this.getAll<{ started_at: number | string; total_score: number | string }>(`
-      SELECT started_at, total_score
-      FROM metabot_exam_runs
-      WHERE metabot_id = ? AND status = 'done' AND total_score IS NOT NULL
-      ORDER BY started_at ASC
-      LIMIT ?
-    `, [metabotId, Math.max(1, Math.floor(limit))])
-      .map((row) => ({ startedAt: Number(row.started_at), totalScore: Number(row.total_score) }))
-      .filter((row) => Number.isFinite(row.startedAt) && Number.isFinite(row.totalScore));
   }
 
   /**
