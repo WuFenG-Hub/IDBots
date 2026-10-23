@@ -95,7 +95,7 @@ import { computeCoworkContextUsage } from './libs/coworkContextUsage';
 import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
 import { generateSessionTitle, setSessionTitleBrainProvider, setTurnAckReplyBrainProvider } from './libs/coworkUtil';
 import { ensureSandboxReady, getSandboxStatus, onSandboxProgress } from './libs/coworkSandboxRuntime';
-import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps } from './libs/coworkOpenAICompatProxy';
+import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps, setFreeQuotaExhaustedListener } from './libs/coworkOpenAICompatProxy';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
 import { isWorkspaceMetabotId, resolveBotWorkspaceCwd, resolveSessionWorkingDirectory, shouldUseBotWorkspaceCwd } from './libs/botWorkspace';
 import { getGitBranch } from './libs/gitWorkspace';
@@ -170,7 +170,16 @@ import {
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { initBundleService, registerBundleIpcHandlers } from './services/bundleService';
-import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
+import { initLlmRelayService, registerLlmRelayIpcHandlers, getLlmRelayQuota } from './services/llmRelayService';
+import { createQuotaNudgeController, type QuotaNudgeController, type QuotaNudgeState } from './services/quotaNudgeService';
+
+/**
+ * Global free-quota nudge controller (Phase 2, 2026-10-23 new-user free-quota
+ * post-mortem). Created once stores are ready (initApp tail); the IPC handlers
+ * answer a quiet null state before that so an early renderer mount never
+ * crashes on a not-yet-wired controller.
+ */
+let quotaNudgeController: QuotaNudgeController | null = null;
 import { applyRelayIdentityChange, initRelayIdentityCloseoutService, reconcileRelayCredentialsWithIdentity } from './services/relayIdentityCloseout';
 import { initVisionRelayService, recognizeAudioViaRelay, recognizeImageViaRelay, recognizeVideoAudioViaRelay, recognizeVideoViaRelay } from './services/visionRelayService';
 import { probeMediaFile, convertMediaFile, grabVideoFrame } from './services/mediaToolsService';
@@ -15032,7 +15041,17 @@ if (!gotTheLock) {
       // over remaining steps), the exact same updateMetaBotCore the Twin
       // metabot_update tool calls. Returns the attempted/remaining sync plan so
       // the renderer can render sync status and offer a manual Retry.
-      return await updateMetaBotCore(id, input, getMetabotManageDeps());
+      const result = await updateMetaBotCore(id, input, getMetabotManageDeps());
+      // A manual brain edit may take every bot off the free relay — recompute
+      // the global quota nudge so the banner disappears the moment the setup
+      // is fixed (2026-10-23 sticky-banner lesson: derived state, no latch).
+      if (
+        result?.success
+        && ['llm_id', 'llm_provider', 'fallback_llm_id', 'fallback_llm_provider'].some((field) => field in input)
+      ) {
+        void quotaNudgeController?.refresh().catch(() => undefined);
+      }
+      return result;
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update metabot' };
     }
@@ -16856,6 +16875,27 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     getUserIdentityStore,
   });
   registerLlmRelayIpcHandlers({ registerIpcHandler });
+
+  // Global free-quota nudge IPC (Phase 2, 2026-10-23): the derived banner
+  // state is computed in the main process (quota + bot brains + provider
+  // catalog + per-cycle dismissal) so the renderer banner stays a dumb view.
+  registerIpcHandler('llmRelay:getQuotaNudgeState', async () => {
+    try {
+      const state: QuotaNudgeState | null = quotaNudgeController ? await quotaNudgeController.refresh() : null;
+      return { success: true, state };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  registerIpcHandler('llmRelay:dismissQuotaNudge', async (_event, input: { level?: unknown }) => {
+    try {
+      const level = input?.level === 'exhausted' ? 'exhausted' : 'low';
+      const state: QuotaNudgeState | null = quotaNudgeController ? await quotaNudgeController.dismiss(level) : null;
+      return { success: true, state };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
 
   // Metaso bundles (REQ-A-24, C4): plan catalog / orders / meters for the
   // mobile recharge surface. Shares the traffic service's identity-signing
@@ -18914,6 +18954,11 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
         );
         const addedKeys = currentKeys.filter((key) => !lastUsablePaidProviderKeys.includes(key));
         lastUsablePaidProviderKeys = currentKeys;
+        // Any provider-catalog change (add/remove/key edit/free-relay
+        // provisioning) can move the nudge's suggested switch target or the
+        // free provider key — recompute. Cheap: the relay quota read behind
+        // it is 30s-cached and the push only fires on an actual state change.
+        void quotaNudgeController?.refresh().catch(() => undefined);
         if (addedKeys.length === 0) return;
         const result = backfillFreeBrainFallbacks({
           metabotStore: getMetabotStore(),
@@ -18933,6 +18978,26 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
         console.error('[brain-fallback-backfill] provider watch failed (non-fatal):', error);
       }
     });
+
+    // Global free-quota nudge (Phase 2, 2026-10-23): derives the banner state
+    // from live quota + bot brain bindings + provider catalog. Push triggers:
+    // the 30-min poll inside the controller, a relay 429 observed by the
+    // OpenAI-compat proxy, app_config changes (the provider watch above), and
+    // manual brain edits (metabot:update). The banner is a pure function of
+    // this state, so fixing the setup (switch or manual edit) makes it
+    // disappear without any explicit hide action.
+    quotaNudgeController = createQuotaNudgeController({
+      getAppConfig: () => getStore()?.get('app_config') ?? null,
+      listMetabots: () => getMetabotStore().listMetabots(),
+      fetchQuota: (input) => getLlmRelayQuota(input),
+      getKv: (key) => getStore()?.get(key),
+      setKv: (key, value) => {
+        getStore()?.set(key, value);
+      },
+      emit: (state) => broadcastToRenderers('llmRelay:quotaNudgeChanged', state),
+    });
+    setFreeQuotaExhaustedListener(() => quotaNudgeController?.notifyExhaustedSeen());
+    void quotaNudgeController.refresh().catch(() => undefined);
 
     // 在 macOS 上，当点击 dock 图标时显示已有窗口或重新创建
     // REQ-A-2: server mode never creates a window, dock click or not.

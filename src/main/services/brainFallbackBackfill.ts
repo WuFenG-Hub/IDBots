@@ -30,13 +30,15 @@
 import type { Metabot, MetabotUpdate } from '../types/metabot';
 
 /** Mirror of claudeSettings.LLM_FREE_PROVIDER_KEY, kept literal so this module stays store-free. */
-const FREE_PROVIDER_KEY = 'metaid-free';
+export const FREE_PROVIDER_KEY = 'metaid-free';
 /** Providers exempt from the apiKey requirement (local daemons). */
 const API_KEY_EXEMPT_PROVIDERS = new Set(['ollama']);
 
 export interface BrainFallbackBackfillProvider {
   enabled?: boolean;
   apiKey?: string | null;
+  /** Optional display name (e.g. 'IDBots-Free'); UI falls back to the provider key. */
+  name?: string;
   models?: Array<{ id?: string }>;
 }
 
@@ -78,6 +80,11 @@ function isUsableProvider(key: string, provider: BrainFallbackBackfillProvider |
   return (provider.models ?? []).some((model) => typeof model?.id === 'string' && model.id);
 }
 
+/** Public wrapper: is the named provider usable right now (enabled, keyed, has models)? */
+export function isUsableProviderKey(appConfig: BrainFallbackBackfillAppConfig | null | undefined, key: string): boolean {
+  return isUsableProvider(key, appConfig?.providers?.[key]);
+}
+
 /**
  * The provider keys a fallback brain may be seeded from: every usable non-free
  * provider in config order. The free-quota relay is excluded — it is the
@@ -106,11 +113,24 @@ function defaultModelForProvider(
 }
 
 /**
+ * The seed model of the named provider (app default when served, else first
+ * model); null when the provider is missing or serves no models.
+ */
+export function resolveProviderSeedModel(
+  appConfig: BrainFallbackBackfillAppConfig | null | undefined,
+  providerKey: string,
+): string | null {
+  const provider = appConfig?.providers?.[providerKey];
+  if (!provider) return null;
+  return defaultModelForProvider(provider, appConfig ?? {});
+}
+
+/**
  * True when the bot's PRIMARY brain rides the free-quota relay: an explicit
  * metaid-free provider hint, or (legacy rows without a hint) an llm_id the
  * free provider serves. Bots with a paid primary are never touched.
  */
-function isFreePrimaryBrain(
+export function isFreePrimaryBrain(
   bot: Pick<Metabot, 'llm_id' | 'llm_provider'>,
   appConfig: BrainFallbackBackfillAppConfig,
 ): boolean {
