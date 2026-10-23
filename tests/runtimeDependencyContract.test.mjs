@@ -93,7 +93,10 @@ test('Electron Node shim covers macOS/Linux, not just Windows', () => {
     'ensureElectronNodeShim must not return null on macOS/Linux — packaged macOS users without a system Node get ENOENT for every skill script otherwise',
   );
 
-  const overridesFn = source.match(/function applyPackagedEnvOverrides[\s\S]*?\n}\n/);
+  // \r? — the Windows runner checks out with CRLF line endings; a bare \n}\n
+  // only matches on LF checkouts (SOP §11.9: static source assertions must be
+  // line-ending agnostic or they go red on exactly one platform).
+  const overridesFn = source.match(/function applyPackagedEnvOverrides[\s\S]*?\r?\n}\r?\n/);
   assert.ok(overridesFn, 'applyPackagedEnvOverrides must exist');
   assert.match(
     overridesFn[0],
