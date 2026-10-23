@@ -1,4 +1,4 @@
-import type { DreamDayActivity } from '../dreamStore';
+import type { DreamDayActivity, DreamInputDropCounters } from '../dreamStore';
 
 /**
  * Positive replay — the 👍-symmetric counterpart of the counterfactual replay
@@ -101,6 +101,7 @@ const contentBigrams = (text: string): Set<string> => {
 export function extractPositiveDecisionPoints(
   activity: DreamDayActivity,
   maxPoints: number = POSITIVE_REPLAY_MAX_POINTS,
+  dropCounters?: DreamInputDropCounters,
 ): PositiveDecisionPoint[] {
   const praised: Array<{ point: PositiveDecisionPoint; hasComment: boolean }> = [];
   for (const session of activity.sessions) {
@@ -126,6 +127,10 @@ export function extractPositiveDecisionPoints(
     });
   }
   praised.sort((a, b) => Number(b.hasComment) - Number(a.hasComment));
+  // Review nit: count the praised replies beyond the daily cap.
+  if (dropCounters && praised.length > Math.max(1, maxPoints)) {
+    dropCounters.replayPointsDropped += praised.length - Math.max(1, maxPoints);
+  }
   return praised
     .map((entry) => entry.point)
     .slice(0, Math.max(1, maxPoints));

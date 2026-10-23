@@ -996,6 +996,8 @@ export function parseDreamOutput(
   const record = parsed as Record<string, unknown>;
   const dailySummary = typeof record.daily_summary === 'string' ? record.daily_summary.trim() : '';
   if (!dailySummary) {
+    // Review nit: count the required-field drop like every other truncation.
+    if (dropCounters) dropCounters.parseFieldDrops += 1;
     return { ok: false, error: 'dream output missing daily_summary' };
   }
 

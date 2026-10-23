@@ -1,4 +1,4 @@
-import type { DreamDayActivity } from '../dreamStore';
+import type { DreamDayActivity, DreamInputDropCounters } from '../dreamStore';
 
 /**
  * Counterfactual replay — the Dream-RSI "dreaming in the replay simulator"
@@ -89,6 +89,7 @@ export function hasExplicitHumanFeedback(activity: DreamDayActivity): boolean {
 export function extractNegativeDecisionPoints(
   activity: DreamDayActivity,
   maxPoints: number = COUNTERFACTUAL_MAX_POINTS,
+  dropCounters?: DreamInputDropCounters,
 ): CounterfactualDecisionPoint[] {
   const thumbsDown: Array<{ point: CounterfactualDecisionPoint; hasComment: boolean }> = [];
   for (const session of activity.sessions) {
@@ -186,12 +187,18 @@ export function extractNegativeDecisionPoints(
     }
   }
 
-  return [
+  const combined = [
     ...thumbsDown.map((entry) => entry.point),
     ...lowRatings,
     ...lowServiceRatings,
     ...implicit,
-  ].slice(0, Math.max(1, maxPoints));
+  ];
+  // Review nit: points beyond the daily cap were silently dropped — count
+  // them like every other truncation in the pipeline.
+  if (dropCounters && combined.length > Math.max(1, maxPoints)) {
+    dropCounters.replayPointsDropped += combined.length - Math.max(1, maxPoints);
+  }
+  return combined.slice(0, Math.max(1, maxPoints));
 }
 
 export function buildCounterfactualReplayPrompt(input: {

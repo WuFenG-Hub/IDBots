@@ -264,8 +264,55 @@ test('dream run surfaces inputDrops in run telemetry', async () => {
       feedbackCommentChars: 0,
       replayPointsDropped: 0,
       parseFieldDrops: 0,
+      serviceRatings: 0,
     });
   } finally {
     cleanup();
   }
+});
+
+
+test('review nit: replay points beyond the cap and missing daily_summary feed the drop counters', () => {
+  // Replay extraction: 5 thumbs-up, cap 3 → 2 dropped.
+  const sessions = [{
+    sessionId: 's1',
+    title: 't',
+    sessionType: 'standard',
+    peerName: null,
+    isOrder: false,
+    messages: Array.from({ length: 5 }, (_, index) => ({
+      type: 'assistant',
+      content: `被赞回复 ${index}`,
+      createdAt: index + 1,
+      feedbackRating: 'up',
+    })),
+  }];
+  const positiveCounters = createDreamInputDropCounters();
+  const { extractPositiveDecisionPoints } = require('../dist-electron/main/libs/positiveReplayPrompt.js');
+  extractPositiveDecisionPoints({ sessions, taskRuns: [], orderCount: 0, groupTasks: [] }, 3, positiveCounters);
+  assert.equal(positiveCounters.replayPointsDropped, 2, 'praised replies over the cap are counted');
+
+  const negativeCounters = createDreamInputDropCounters();
+  const { extractNegativeDecisionPoints } = require('../dist-electron/main/libs/counterfactualReplayPrompt.js');
+  const downSessions = [{
+    sessionId: 's2',
+    title: 't',
+    sessionType: 'standard',
+    peerName: null,
+    isOrder: false,
+    messages: Array.from({ length: 5 }, (_, index) => ({
+      type: 'assistant',
+      content: `被踩回复 ${index}`,
+      createdAt: index + 1,
+      feedbackRating: 'down',
+    })),
+  }];
+  extractNegativeDecisionPoints({ sessions: downSessions, taskRuns: [], orderCount: 0, groupTasks: [] }, 3, negativeCounters);
+  assert.equal(negativeCounters.replayPointsDropped, 2, 'negative points over the cap are counted too');
+
+  // Required-field drop: daily_summary missing.
+  const parseCounters = createDreamInputDropCounters();
+  const bad = parseDreamOutput(JSON.stringify({ sections: {}, self_identity: 'x' }), parseCounters);
+  assert.equal(bad.ok, false);
+  assert.equal(parseCounters.parseFieldDrops, 1, 'a missing required field counts as a drop');
 });

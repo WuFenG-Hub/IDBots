@@ -68,6 +68,7 @@ import {
 } from '../libs/chainEvidence';
 import {
   buildCounterfactualReplayPrompt,
+  COUNTERFACTUAL_MAX_POINTS,
   extractNegativeDecisionPoints,
   hasExplicitHumanFeedback,
   parseCounterfactualReplayOutput,
@@ -78,6 +79,7 @@ import {
   extractPositiveDecisionPoints,
   parsePositiveReplayOutput,
   pickPositiveLesson,
+  POSITIVE_REPLAY_MAX_POINTS,
 } from '../libs/positiveReplayPrompt';
 import { extractImplicitSignals } from '../libs/implicitSignals';
 import {
@@ -1317,9 +1319,9 @@ export class DreamService {
         const reconciliation = await this.reconcileValidatedCapabilityDrafts(metabot, brain, date, validation.validatedIds);
         const promotion = this.promoteCapabilityDraftsToProcedures(metabot, date);
         // Empty days have no negative decision points, so the replay no-ops.
-        const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
+        const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity, dropCounters);
         // Same for the positive replay: no thumbs-up, no LLM call.
-        const positiveReplay = await this.runPositiveReplayAfterDream(metabot, brain, date, activity);
+        const positiveReplay = await this.runPositiveReplayAfterDream(metabot, brain, date, activity, dropCounters);
         const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
         // Self-curriculum (design §3.4): pending read_only proposals from
         // earlier nights still approve + materialize on an empty day.
@@ -1446,10 +1448,10 @@ export class DreamService {
       // Dream review P1: knowledge entries the audit keeps seeing unused cool
       // out of the <knowledge> hot pool (recall keeps them).
       const knowledgeCooling = this.coolHotKnowledgeAfterDream(metabot, date);
-      const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
+      const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity, dropCounters);
       // Dream review P0: positive replay — praised replies reinforce through
       // the same draft pipeline, counted like the negative path below.
-      const positiveReplay = await this.runPositiveReplayAfterDream(metabot, brain, date, activity);
+      const positiveReplay = await this.runPositiveReplayAfterDream(metabot, brain, date, activity, dropCounters);
       const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
       // Dream review P2-1: the frozen exam follows the weekly rhythm (own
       // weekly gate caps it at one run per bot per week). Best-effort.
@@ -2479,7 +2481,7 @@ export class DreamService {
             ref: `memory:${exposure.itemId}`,
             kind: 'memory',
             itemId: exposure.itemId,
-            title: memory.text.slice(0, 40),
+            title: truncateUtf16Units(memory.text, 40),
             gist: truncateUtf16Units(memory.text, USAGE_AUDIT_ITEM_GIST_CHARS),
           });
         }
@@ -3427,10 +3429,11 @@ export class DreamService {
     brain: DreamBrainPair,
     date: string,
     activity: DreamDayActivity,
+    dropCounters?: DreamInputDropCounters,
   ): Promise<{ points: number; lessons: number; pointsByKind: Record<string, number> }> {
     const zero = { points: 0, lessons: 0, pointsByKind: {} as Record<string, number> };
     try {
-      const points = extractNegativeDecisionPoints(activity);
+      const points = extractNegativeDecisionPoints(activity, COUNTERFACTUAL_MAX_POINTS, dropCounters);
       if (points.length === 0) return { ...zero, pointsByKind: {} };
       const pointsByKind: Record<string, number> = {};
       for (const point of points) {
@@ -3497,10 +3500,11 @@ export class DreamService {
     brain: DreamBrainPair,
     date: string,
     activity: DreamDayActivity,
+    dropCounters?: DreamInputDropCounters,
   ): Promise<{ points: number; lessons: number }> {
     const zero = { points: 0, lessons: 0 };
     try {
-      const points = extractPositiveDecisionPoints(activity);
+      const points = extractPositiveDecisionPoints(activity, POSITIVE_REPLAY_MAX_POINTS, dropCounters);
       if (points.length === 0) return zero;
       const prompt = buildPositiveReplayPrompt({
         botName: metabot.name,
