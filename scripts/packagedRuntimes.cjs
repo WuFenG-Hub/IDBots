@@ -42,6 +42,43 @@ const RUNTIME_DEAD_FILE_FILTERS = RUNTIME_DEAD_FILE_SUFFIXES.map(
   (suffix) => `!**/node_modules/**/*${suffix}`,
 );
 
+/**
+ * Content extraResources (SKILLs, METAAPPs) copy from the developer's working
+ * tree, so git-ignored local scratch dirs (SKILLs/.tmp_*, .cowork-temp, ...)
+ * would otherwise ship in the installer: in the 1.0.2/1.0.3 builds that was
+ * ~30k files / ~1.2 GB of pure junk, each file extracted by the NSIS installer
+ * (and deleted again by the previous version's uninstaller on the next
+ * upgrade) under real-time Defender scanning — the multi-minute "installing"
+ * stall reported by Windows users. The filter drops every dot-entry and
+ * afterPack fails closed if one slips through.
+ *
+ * No tracked file under SKILLs/ or METAAPPs/ has a dot segment, and the
+ * runtimes that need these trees (e.g. the web-search service) spawn
+ * node dist/server/index.js directly — node_modules/.bin shims are never
+ * used, so excluding dot dirs is safe.
+ */
+const RESOURCE_DOT_ENTRY_FILTERS = ['!**/.*', '!**/.*/**'];
+
+/**
+ * Content extraResources verified afterPack: markers must be present (so a
+ * broken filter that drops the tree fails closed), no dot-entries may appear
+ * anywhere, and listed node_modules roots must stay free of dead files.
+ */
+const PACKAGED_CONTENT_RESOURCES = [
+  {
+    id: 'SKILLs',
+    extraResourceTo: 'SKILLs',
+    markers: ['skills.config.json'],
+    deadFileRoots: [path.join('web-search')],
+  },
+  {
+    id: 'METAAPPs',
+    extraResourceTo: 'METAAPPs',
+    markers: [],
+    deadFileRoots: [],
+  },
+];
+
 // A negated filter body that drops a node_modules tree wholesale: it ends at
 // `node_modules`, optionally followed by a double-star and a trailing `/*`.
 // A body that only names a file type inside node_modules does not match.
@@ -184,6 +221,80 @@ function verifyPackagedRuntimes(context) {
   }
 }
 
+/**
+ * Posix-style paths, relative to root, of every entry (file or directory)
+ * whose basename starts with a dot. Dot-directories are recorded without
+ * descending into them: one entry already condemns the whole subtree.
+ */
+function findDotEntries(root) {
+  if (!existsSync(root)) return [];
+  const found = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.name.startsWith('.')) {
+        if (entry.isDirectory()) pending.push(path.join(dir, entry.name));
+        continue;
+      }
+      found.push(path.relative(root, path.join(dir, entry.name)).split(path.sep).join('/'));
+    }
+  }
+  return found.sort();
+}
+
+function verifyPackagedContentResources(context) {
+  const resourcesDir = resolvePackagedResourcesDir(context);
+  const missing = [];
+  const dotEntries = [];
+  const deadFiles = [];
+  for (const resource of PACKAGED_CONTENT_RESOURCES) {
+    const resourceRoot = path.join(resourcesDir, resource.extraResourceTo);
+    if (!existsSync(resourceRoot)) {
+      missing.push(`${resource.extraResourceTo}/`);
+      continue;
+    }
+    for (const rel of missingMarkers(resourceRoot, resource.markers)) {
+      missing.push(path.join(resource.extraResourceTo, rel).replace(/\\/g, '/'));
+    }
+    for (const rel of findDotEntries(resourceRoot)) {
+      dotEntries.push(`${resource.extraResourceTo}/${rel}`);
+    }
+    for (const deadRoot of resource.deadFileRoots) {
+      const runtimeRoot = path.join(resourceRoot, deadRoot);
+      for (const rel of findPackagedRuntimeDeadFiles(runtimeRoot)) {
+        deadFiles.push(`${resource.extraResourceTo}/${deadRoot.replace(/\\/g, '/')}/${rel}`);
+      }
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      'Packaged app is missing content resource files under Resources: '
+      + `${missing.join(', ')}. extraResources must copy each packaged content tree.`,
+    );
+  }
+  if (dotEntries.length > 0) {
+    throw new Error(
+      `Packaged content resources contain ${dotEntries.length} dot-entr${dotEntries.length === 1 ? 'y' : 'ies'} `
+      + `untracked local scratch must never ship (e.g. ${dotEntries.slice(0, 5).join(', ')}). `
+      + 'Keep the RESOURCE_DOT_ENTRY_FILTERS exclusions in the SKILLs/METAAPPs extraResources filters of electron-builder.json.',
+    );
+  }
+  if (deadFiles.length > 0) {
+    throw new Error(
+      `Packaged content resources still contain ${deadFiles.length} file(s) nothing loads at run time `
+      + `(${RUNTIME_DEAD_FILE_SUFFIXES.join(', ')}), e.g. ${deadFiles.slice(0, 5).join(', ')}. `
+      + 'Keep the RUNTIME_DEAD_FILE_FILTERS exclusions in the SKILLs extraResources filter of electron-builder.json.',
+    );
+  }
+}
+
 function extraResourceFilterExcludesNodeModules(filter) {
   if (!Array.isArray(filter)) return false;
   return filter.some((pattern) => {
@@ -232,13 +343,17 @@ function verifyPackagedFfmpeg(context) {
 
 module.exports = {
   PACKAGED_RUNTIMES,
+  PACKAGED_CONTENT_RESOURCES,
   RUNTIME_DEAD_FILE_SUFFIXES,
   RUNTIME_DEAD_FILE_FILTERS,
+  RESOURCE_DOT_ENTRY_FILTERS,
   isRuntimeDeadFile,
   findPackagedRuntimeDeadFiles,
+  findDotEntries,
   missingMarkers,
   verifySourceRuntimes,
   verifyPackagedRuntimes,
+  verifyPackagedContentResources,
   verifySourceFfmpeg,
   verifyPackagedFfmpeg,
   resolvePackagedResourcesDir,

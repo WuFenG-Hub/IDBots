@@ -12,6 +12,7 @@ const {
   verifySourceRuntimes,
   verifyPackagedFfmpeg,
   verifyPackagedRuntimes,
+  verifyPackagedContentResources,
 } = require('./packagedRuntimes.cjs');
 
 function isWindowsTarget(context) {
@@ -126,6 +127,8 @@ async function beforePack(context) {
 async function afterPack(context) {
   verifyPackagedRuntimes(context);
   console.log('[electron-builder-hooks] Nested packaged runtimes present in Resources');
+  verifyPackagedContentResources(context);
+  console.log('[electron-builder-hooks] Packaged content resources free of dot-entries and dead files');
   verifyPackagedFfmpeg(context);
   if (resolveFfmpegPlatformKey(context)) {
     console.log('[electron-builder-hooks] Bundled ffmpeg present in Resources');

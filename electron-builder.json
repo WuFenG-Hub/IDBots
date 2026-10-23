@@ -22,14 +22,22 @@
         "!**/.env",
         "!**/.env.*",
         "!**/.venv/**",
-        "!**/venv/**"
+        "!**/venv/**",
+        "!**/.*",
+        "!**/.*/**",
+        "!**/node_modules/**/*.d.ts",
+        "!**/node_modules/**/*.d.mts",
+        "!**/node_modules/**/*.d.cts",
+        "!**/node_modules/**/*.map"
       ]
     },
     {
       "from": "METAAPPs",
       "to": "METAAPPs",
       "filter": [
-        "**/*"
+        "**/*",
+        "!**/.*",
+        "!**/.*/**"
       ]
     },
     {
