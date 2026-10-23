@@ -1,6 +1,6 @@
 import { app, session } from 'electron';
 import { execSync } from 'child_process';
-import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, chmodSync, readdirSync } from 'fs';
 import { delimiter, dirname, join, resolve } from 'path';
 import { truncateUtf16Units } from './llmSafeText';
 import { buildEnvForConfig, getCurrentApiConfig } from './claudeSettings';
@@ -183,16 +183,18 @@ function getWindowsGitToolDirs(bashPath: string): string[] {
   return candidates.filter((dir) => existsSync(dir));
 }
 
-type WindowsNodeShimInfo = {
+type ElectronNodeShimInfo = {
   shimDir: string;
   shimScriptPath: string;
 };
 
-function ensureWindowsElectronNodeShim(): WindowsNodeShimInfo | null {
-  if (process.platform !== 'win32') {
-    return null;
-  }
-
+/**
+ * Write the Electron-as-Node shim (node/npx/ts-node launchers backed by
+ * ELECTRON_RUN_AS_NODE) into userData/cowork/bin. Applies to every platform:
+ * Windows uses it because Start-menu launches lack Node on PATH; macOS/Linux
+ * packaged installs hit the same wall when the user never installed Node.
+ */
+function ensureElectronNodeShim(): ElectronNodeShimInfo | null {
   try {
     const shimDir = join(app.getPath('userData'), 'cowork', 'bin');
     mkdirSync(shimDir, { recursive: true });
@@ -545,17 +547,20 @@ function ensureWindowsElectronNodeShim(): WindowsNodeShimInfo | null {
 
     writeFileSync(shimScriptPath, shimScriptContent, 'utf8');
     writeFileSync(nodeSh, nodeShContent, 'utf8');
-    writeFileSync(nodeCmd, nodeCmdContent, 'utf8');
     writeFileSync(npxSh, npxShContent, 'utf8');
-    writeFileSync(npxCmd, npxCmdContent, 'utf8');
     writeFileSync(tsNodeSh, tsNodeShContent, 'utf8');
-    writeFileSync(tsNodeCmd, tsNodeCmdContent, 'utf8');
+    if (process.platform === 'win32') {
+      // .cmd launchers only matter for cmd.exe contexts on Windows.
+      writeFileSync(nodeCmd, nodeCmdContent, 'utf8');
+      writeFileSync(npxCmd, npxCmdContent, 'utf8');
+      writeFileSync(tsNodeCmd, tsNodeCmdContent, 'utf8');
+    }
     try {
       chmodSync(nodeSh, 0o755);
       chmodSync(npxSh, 0o755);
       chmodSync(tsNodeSh, 0o755);
     } catch {
-      // Ignore chmod errors on Windows file systems that do not support POSIX modes.
+      // Ignore chmod errors on file systems that do not support POSIX modes.
     }
 
     // Cygpath shim: Claude Code CLI may invoke cygpath from bash or cmd contexts.
@@ -690,12 +695,15 @@ function ensureWindowsElectronNodeShim(): WindowsNodeShimInfo | null {
       'exit /b 0',
       '',
     ].join('\r\n');
-    writeFileSync(cygpathSh, cygpathShContent, 'utf8');
-    writeFileSync(cygpathCmd, cygpathCmdContent, 'utf8');
-    try {
-      chmodSync(cygpathSh, 0o755);
-    } catch {
-      // Ignore chmod errors
+    if (process.platform === 'win32') {
+      // cygpath is only invoked by Claude Code CLI from Windows bash/cmd contexts.
+      writeFileSync(cygpathSh, cygpathShContent, 'utf8');
+      writeFileSync(cygpathCmd, cygpathCmdContent, 'utf8');
+      try {
+        chmodSync(cygpathSh, 0o755);
+      } catch {
+        // Ignore chmod errors
+      }
     }
 
     return {
@@ -919,6 +927,29 @@ function resolveWindowsNodeDirs(): string[] {
   return Array.from(found).filter(Boolean);
 }
 
+/**
+ * nvm does not create a `current` symlink, so `~/.nvm/current/bin` misses real
+ * installs. Enumerate `~/.nvm/versions/node/*` and return bin dirs newest-first.
+ */
+function listNvmNodeBinDirs(home: string): string[] {
+  try {
+    const versionsDir = join(home, '.nvm', 'versions', 'node');
+    return readdirSync(versionsDir)
+      .map((name) => {
+        const match = name.match(/^v?(\d+)\.(\d+)\.(\d+)/);
+        return match
+          ? { name, score: [Number(match[1]), Number(match[2]), Number(match[3])] as const }
+          : null;
+      })
+      .filter((entry): entry is { name: string; score: readonly [number, number, number] } => Boolean(entry))
+      .sort((a, b) => b.score[0] - a.score[0] || b.score[1] - a.score[1] || b.score[2] - a.score[2])
+      .map((entry) => join(versionsDir, entry.name, 'bin'))
+      .filter((dir) => existsSync(dir));
+  } catch {
+    return [];
+  }
+}
+
 function applyPackagedEnvOverrides(env: Record<string, string | undefined>): void {
   // On Windows, resolve git-bash and ensure Git toolchain directories are available in PATH.
   if (process.platform === 'win32') {
@@ -938,7 +969,7 @@ function applyPackagedEnvOverrides(env: Record<string, string | undefined>): voi
     }
 
     // Prepend shim dir so our cygpath (and node) shims are found first — avoids "cygpath -u" failures when Git's cygpath is missing
-    const shimInfo = ensureWindowsElectronNodeShim();
+    const shimInfo = ensureElectronNodeShim();
     if (shimInfo) {
       assignPathValue(env, appendEnvPath(pathValueOf(env), [shimInfo.shimDir]));
       env.IDBOTS_NODE_SHIM_SCRIPT = shimInfo.shimScriptPath;
@@ -963,7 +994,24 @@ function applyPackagedEnvOverrides(env: Record<string, string | undefined>): voi
     env.MSYS2_ARG_CONV_EXCL = '*';
   }
 
+  // Guarantee a Node runtime for skill scripts on every platform: write the
+  // Electron-as-Node shim into userData/cowork/bin and prepend it to PATH so a
+  // machine without a system Node still runs skills out of the box. Windows is
+  // handled in the branch above; on macOS/Linux the prepend must happen AFTER
+  // the user-shell PATH resolution below or it would be overwritten. A
+  // user-installed Node stays reachable as fallback.
+  const injectElectronNodeShim = (): void => {
+    if (process.platform === 'win32') return;
+    const shimInfo = ensureElectronNodeShim();
+    if (!shimInfo) return;
+    assignPathValue(env, appendEnvPath(pathValueOf(env), [shimInfo.shimDir]));
+    env.IDBOTS_NODE_SHIM_SCRIPT = shimInfo.shimScriptPath;
+    env.IDBOTS_NODE_SHIM_DIR = shimInfo.shimDir;
+    coworkLog('INFO', 'resolveNodeShim', `Injected Electron Node shim PATH entry: ${shimInfo.shimDir}`);
+  };
+
   if (!app.isPackaged) {
+    injectElectronNodeShim();
     return;
   }
 
@@ -981,12 +1029,14 @@ function applyPackagedEnvOverrides(env: Record<string, string | undefined>): voi
     const commonPaths = [
       '/usr/local/bin',
       '/opt/homebrew/bin',
-      `${home}/.nvm/current/bin`,
+      ...listNvmNodeBinDirs(home),
       `${home}/.volta/bin`,
       `${home}/.fnm/current/bin`,
     ];
     assignPathValue(env, [pathValueOf(env), ...commonPaths].filter(Boolean).join(delimiter));
   }
+
+  injectElectronNodeShim();
 
   const resourcesPath = process.resourcesPath;
   const nodePaths = [

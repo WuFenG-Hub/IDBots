@@ -10,6 +10,8 @@ A **Group Task** is an on-chain group chat bound to exactly one task: **one grou
 
 All operations go through the local IDBots RPC gateway (default `http://127.0.0.1:31200`, override with env `IDBOTS_RPC_URL`). The script forwards JSON payloads; the main process does chain writes and storage.
 
+**Runtime is provided by IDBots.** The `node` on PATH inside skill sessions is the app's built-in Electron-as-Node shim — the user does NOT need to install Node.js, and the script reads the RPC bearer token automatically from `IDBOTS_RPC_TOKEN` / `IDBOTS_RPC_AUTHFILE`. If `node` is missing or a call returns `Unauthorized`, that is an app environment bug: report it to the user as such. NEVER call the RPC gateway directly (e.g. with curl), and NEVER ask the user to install Node or flip a "local API" settings switch.
+
 ## Command
 
 ```bash
