@@ -11,6 +11,7 @@ import { clearCoworkSessionUpstream } from '../libs/coworkOpenAICompatProxy';
 import { buildOpenCodeGoHeaders } from '../libs/opencodeGatewayHeaders';
 import { effortForAnthropicWire, effortForOpenAiWire, type LlmEffortLevel } from '../libs/llmEffort';
 import { budgetAssumesThinking, modelAlwaysThinks } from '../libs/modelThinking';
+import { resolveOpenAiCompatContent } from '../libs/openAiCompatContent';
 import { runWithLlmFallback } from './llmFallback';
 import { fetchLlmPost } from './llmFetch';
 
@@ -680,26 +681,31 @@ async function callOpenAIStyleWithTools(
   }
 
   const msg = data.choices?.[0]?.message;
-  // DeepSeek thinking 等模型可能把最终答案放在 reasoning_content，content 为空；
-  // MetaApp browser.llm.complete 路径必须能读到文本，否则被映射成 llm_unavailable。
-  const primaryContent = msg?.content != null ? String(msg.content).trim() : '';
-  const reasoningFallback = String(msg?.reasoning_content || msg?.reasoning || '').trim();
-  const resolvedContent = primaryContent || reasoningFallback;
+  // Family-aware content resolution (../libs/openAiCompatContent): the
+  // DeepSeek dialect can park the final answer in reasoning_content with
+  // content empty, so the fallback promotion stays there; GLM
+  // reasoning_content is ALWAYS hidden thinking (GLM-5.x cannot turn it
+  // off), so promoting it can only leak reasoning as the answer — the
+  // 2026-10-23 ack-bubble leak, where a mid-thought English analysis
+  // fragment shipped as the ack. Unknown families keep the historical
+  // promote-if-empty behavior. 'reasoning' in contentBlockTypes still
+  // reports thinking-only replies even when not promoted, so consumers
+  // like the turn-ack guard can detect and drop them.
+  const resolved = resolveOpenAiCompatContent(model, msg);
   const out: ChatCompletionResult = {
     responseMetadata: {
       apiType: 'openai',
       stopReason: data.choices?.[0]?.finish_reason ?? null,
       contentBlockTypes: [
-        ...(primaryContent ? ['text'] : []),
-        ...(!primaryContent && reasoningFallback ? ['reasoning'] : []),
+        ...resolved.contentBlockTypes,
         ...(msg?.tool_calls?.length ? ['tool_calls'] : []),
       ],
       inputTokens: data.usage?.prompt_tokens ?? null,
       outputTokens: data.usage?.completion_tokens ?? null,
     },
   };
-  if (resolvedContent) {
-    out.content = resolvedContent;
+  if (resolved.content) {
+    out.content = resolved.content;
   }
   if (msg?.tool_calls?.length) {
     out.tool_calls = msg.tool_calls.map((tc) => ({

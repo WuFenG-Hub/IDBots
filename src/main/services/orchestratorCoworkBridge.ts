@@ -15,6 +15,15 @@ import {
   claimManagedOrchestratorSession,
   resolveOrchestratorPermissionReply,
 } from './orchestratorPermissionRelay';
+import {
+  advanceWrapUpMachine,
+  buildExtensionGrantedMessage,
+  buildWrapUpMessage,
+  EXTENSION_REQUEST_MARKER,
+  initialWrapUpMachineState,
+  resolveWrapUpRuntimeConfig,
+  type WrapUpEffect,
+} from '../libs/skillTurnWrapUpState';
 
 const SKILL_TURN_TIMEOUT_MS = 300_000;
 /**
@@ -86,6 +95,37 @@ export interface RunOrchestratorSkillTurnParams {
   permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
   /** Overrides the skill-turn watchdog timeout (ms). Defaults to 300s. */
   skillTurnTimeoutMs?: number;
+  /**
+   * ACTIVE wrap-up mechanism for Twin→Worker delegations — OPT-IN, nothing
+   * changes for callers that leave it undefined (group-task, A2A, study,
+   * surf, private-chat routing keep the legacy passive watchdog exactly).
+   *
+   * When set, the budget watchdog no longer passively parks the turn: the
+   * bridge injects ONE wrap-up cross-session message ("budget exhausted;
+   * stop exploring; write your handoff NOW; ask for ONE extension by
+   * starting your reply with `EXTENSION_REQUEST: <reason>`, else start with
+   * `WRAP_UP:`") and runs the grace/extension timers through the pure state
+   * machine in libs/skillTurnWrapUpState.ts. A reply that is anything other
+   * than a first-time extension request resolves the turn normally with that
+   * reply as the handoff. The whole sequence (budget + grace, or budget +
+   * capped extension + final grace) is hard-capped at the 45-min daemon
+   * watchdog documented there.
+   */
+  wrapUpSignal?: {
+    /** Grace window (ms) after the wrap-up signal. Defaults to 5 min. */
+    graceMs?: number;
+    /** Requested extension as a ratio of the original budget. Defaults to 0.5. */
+    extensionRatio?: number;
+    /**
+     * Injection seam for the wrap-up / extension messages. The bridge has no
+     * session identity of its own to insert a cross-session message with, so
+     * the delegating service provides the injector (the Twin service injects
+     * as the Twin session, the same seam as its ORCH-NOTIFY path). When
+     * omitted the machine still runs — bounded windows, completions resolve —
+     * but no signal is delivered and a warning is logged.
+     */
+    injectMessage?: (message: string) => void | Promise<void>;
+  };
   /**
    * How long (ms) the bridge keeps watching the session after the watchdog
    * fires so a still-running worker session can deliver a late result.
@@ -308,11 +348,22 @@ export async function runOrchestratorSkillTurn(
 
   const skillTurnTimeoutMs = params.skillTurnTimeoutMs ?? SKILL_TURN_TIMEOUT_MS;
   const lateCompletionTimeoutMs = params.lateCompletionTimeoutMs ?? SKILL_TURN_RECOVERY_WINDOW_MS;
+  // ACTIVE wrap-up (Twin→Worker delegations only): undefined → every timer
+  // below behaves exactly as before (byte-identical legacy passive watchdog).
+  const wrapUpConfig = params.wrapUpSignal
+    ? resolveWrapUpRuntimeConfig(params.wrapUpSignal, skillTurnTimeoutMs)
+    : null;
 
   return new Promise<string>((resolve, reject) => {
     let settled = false;
     let recoveryActive = false;
     let recoveryWindowTimer: ReturnType<typeof setTimeout> | null = null;
+    // Wrap-up machine state — only engaged when the caller passed
+    // params.wrapUpSignal. `null` for every other caller.
+    let wrapUp = wrapUpConfig ? initialWrapUpMachineState() : null;
+    let wrapUpTimer: ReturnType<typeof setTimeout> | null = null;
+    const turnStartedAt = Date.now();
+    const wrapUpElapsedMs = () => Date.now() - turnStartedAt;
 
     const cleanup = () => {
       runner.off('complete', onComplete);
@@ -320,6 +371,7 @@ export async function runOrchestratorSkillTurn(
       runner.off('stopped', onStopped);
       if (timeoutId != null) clearTimeout(timeoutId);
       if (recoveryWindowTimer != null) clearTimeout(recoveryWindowTimer);
+      if (wrapUpTimer != null) clearTimeout(wrapUpTimer);
     };
 
     const finish = (result: string) => {
@@ -399,6 +451,21 @@ export async function runOrchestratorSkillTurn(
     const onComplete = (sid: string) => {
       if (sid !== sessionId) return;
       const lastAssistantContent = extractLastAssistantContent();
+      if (wrapUp && wrapUpConfig && !settled && wrapUp.phase !== 'running') {
+        // Wrap-up engaged: this completion is the worker's answer to the
+        // wrap-up protocol — OR the original turn finishing late inside the
+        // grace window; the pure machine treats both identically (anything
+        // that is not a first-time EXTENSION_REQUEST resolves the turn with
+        // the reply as the handoff).
+        const result = advanceWrapUpMachine(
+          wrapUp,
+          { type: 'turn-completed', replyText: lastAssistantContent || '', elapsedMs: wrapUpElapsedMs() },
+          wrapUpConfig,
+        );
+        wrapUp = result.state;
+        applyWrapUpEffect(result.effect);
+        return;
+      }
       if (recoveryActive) {
         // Watchdog already fired: the session finished late. Hand the result to
         // the recovery callback so the attempt can be corrected to completed.
@@ -453,9 +520,159 @@ export async function runOrchestratorSkillTurn(
       }, lateCompletionTimeoutMs);
     };
 
+    // Legacy watchdog settlement, shared by the passive path and every
+    // wrap-up expiry: park in recovery (listeners stay attached so a late
+    // completion still flows to onLateCompletion) and reject with
+    // SkillTurnTimeoutError so callers can distinguish a watchdog fire.
+    const settleAsTimeout = () => {
+      if (settled) return;
+      settled = true;
+      enterRecovery();
+      reject(new SkillTurnTimeoutError(sessionId, skillTurnTimeoutMs));
+    };
+
+    const injectWrapUpMessage = (message: string, label: string) => {
+      const inject = params.wrapUpSignal?.injectMessage;
+      if (!inject) {
+        console.warn(
+          `[Orchestrator] [Bridge] Wrap-up ${label} skipped: wrapUpSignal carries no injectMessage seam (session ${sessionId})`
+        );
+        return;
+      }
+      try {
+        const outcome = inject(message);
+        if (outcome && typeof (outcome as Promise<void>).then === 'function') {
+          void (outcome as Promise<void>).catch((error) => {
+            console.warn(
+              `[Orchestrator] [Bridge] Wrap-up ${label} injection failed (session ${sessionId}):`,
+              error instanceof Error ? error.message : String(error)
+            );
+          });
+        }
+        console.log(`[Orchestrator] [Bridge] Wrap-up ${label} injected into session ${sessionId}`);
+      } catch (error) {
+        console.warn(
+          `[Orchestrator] [Bridge] Wrap-up ${label} injection failed (session ${sessionId}):`,
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    };
+
+    // WHY a fresh window per phase: each phase (wrap grace, extension,
+    // final grace) gets its own budget from the pure machine, and the whole
+    // sequence budget + extension + final grace is proven ≤ the 45-min
+    // daemon cap in libs/skillTurnWrapUpState.ts (computeExtensionBudgetMs
+    // subtracts the final grace from the watchdog headroom at grant time).
+    const startWrapUpWindow = (ms: number) => {
+      if (wrapUpTimer != null) {
+        clearTimeout(wrapUpTimer);
+        wrapUpTimer = null;
+      }
+      wrapUpTimer = setTimeout(() => {
+        wrapUpTimer = null;
+        if (settled || !wrapUp || !wrapUpConfig) return;
+        const result = advanceWrapUpMachine(
+          wrapUp,
+          { type: 'window-expired', elapsedMs: wrapUpElapsedMs() },
+          wrapUpConfig,
+        );
+        wrapUp = result.state;
+        applyWrapUpEffect(result.effect);
+      }, Math.max(0, ms));
+    };
+
+    const applyWrapUpEffect = (effect: WrapUpEffect) => {
+      if (!wrapUpConfig) return;
+      const budgetMinutes = Math.round(skillTurnTimeoutMs / 60_000);
+      switch (effect.kind) {
+        case 'inject-wrap-up': {
+          console.log(
+            `[Orchestrator] [Bridge] Wrap-up signal engaged (session ${sessionId}): budget ` +
+            `${skillTurnTimeoutMs / 1000}s exhausted at ${wrapUpElapsedMs() / 1000}s; grace ` +
+            `${effect.graceMs / 1000}s; one extension available via ${EXTENSION_REQUEST_MARKER}`
+          );
+          injectWrapUpMessage(
+            buildWrapUpMessage({ budgetMinutes, offerExtension: true }),
+            'signal',
+          );
+          startWrapUpWindow(effect.graceMs);
+          return;
+        }
+        case 'grant-extension': {
+          console.log(
+            `[Orchestrator] [Bridge] Wrap-up extension granted (session ${sessionId}): ` +
+            `+${effect.extensionMs / 1000}s (capped by watchdog headroom)`
+          );
+          injectWrapUpMessage(
+            buildExtensionGrantedMessage({ extensionMs: effect.extensionMs }),
+            'extension-granted notice',
+          );
+          startWrapUpWindow(effect.extensionMs);
+          return;
+        }
+        case 'deny-extension': {
+          console.warn(
+            `[Orchestrator] [Bridge] Wrap-up extension denied (session ${sessionId}): no watchdog ` +
+            `headroom left; final grace ${effect.graceMs / 1000}s (extension requests now ignored)`
+          );
+          injectWrapUpMessage(
+            buildWrapUpMessage({ budgetMinutes, offerExtension: false }),
+            'final signal (extension denied)',
+          );
+          startWrapUpWindow(effect.graceMs);
+          return;
+        }
+        case 'inject-final-wrap-up': {
+          console.log(
+            `[Orchestrator] [Bridge] Wrap-up extension exhausted (session ${sessionId}); final ` +
+            `wrap-up signal with grace ${effect.graceMs / 1000}s (extension requests ignored)`
+          );
+          injectWrapUpMessage(
+            buildWrapUpMessage({ budgetMinutes, offerExtension: false }),
+            'final signal',
+          );
+          startWrapUpWindow(effect.graceMs);
+          return;
+        }
+        case 'resolve': {
+          console.log(
+            `[Orchestrator] [Bridge] Wrap-up resolved (session ${sessionId}) at ${wrapUpElapsedMs() / 1000}s ` +
+            `with a ${effect.replyText.length}-char reply`
+          );
+          finish(effect.replyText || '');
+          return;
+        }
+        case 'timeout': {
+          console.warn(
+            `[Orchestrator] [Bridge] Wrap-up window expired (session ${sessionId}) at ` +
+            `${wrapUpElapsedMs() / 1000}s — settling as SkillTurnTimeoutError, recovery stays attached`
+          );
+          settleAsTimeout();
+          return;
+        }
+        case 'none':
+          return;
+      }
+    };
+
     let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {
       timeoutId = null;
       if (settled) return;
+      if (wrapUpConfig && wrapUp) {
+        // ACTIVE wrap-up path (Twin→Worker delegations): at budget exhaustion
+        // inject the wrap-up signal instead of passively parking the turn.
+        // The promise stays PENDING through the grace/extension phases and
+        // settles either with the worker's handoff or the legacy timeout —
+        // never later than the 45-min daemon cap (skillTurnWrapUpState.ts).
+        const result = advanceWrapUpMachine(
+          wrapUp,
+          { type: 'budget-exhausted', elapsedMs: wrapUpElapsedMs() },
+          wrapUpConfig,
+        );
+        wrapUp = result.state;
+        applyWrapUpEffect(result.effect);
+        return;
+      }
       // The caller's promise gives up at the watchdog, but the session itself
       // is NOT stopped and keeps running. Park the turn in recovery mode
       // instead of failing the session: a late completion must still be able

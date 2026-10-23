@@ -6,7 +6,9 @@ import path from 'node:path';
 import {
   TURN_ACK_REPLY_MAX_CHARS,
   buildTurnAckReplyMessages,
+  containsCjk,
   sanitizeTurnAckReply,
+  sanitizeTurnAckReplyForInput,
 } from '../src/main/libs/turnAckReply.ts';
 
 const repoRoot = path.resolve(import.meta.dirname, '..');
@@ -58,6 +60,56 @@ test('sanitizeTurnAckReply: caps oversized output, preferring a sentence boundar
   const boundaryless = 'a'.repeat(400);
   const hard = sanitizeTurnAckReply(boundaryless);
   assert.ok(hard.length <= TURN_ACK_REPLY_MAX_CHARS);
+});
+
+test('containsCjk: detects ideographs and kana, ignores Latin and CJK punctuation', () => {
+  assert.equal(containsCjk('帮我看下定时任务'), true);
+  assert.equal(containsCjk('カタカナ'), true);
+  assert.equal(containsCjk('ひらがな'), true);
+  assert.equal(containsCjk('hello world'), false);
+  // CJK punctuation alone is not script evidence.
+  assert.equal(containsCjk('。！？'), false);
+  assert.equal(containsCjk(''), false);
+});
+
+test('sanitizeTurnAckReplyForInput: language guard — CJK input demands a CJK ack', () => {
+  // The 2026-10-23 leak shape: CJK user text, English analysis fragment.
+  assert.equal(sanitizeTurnAckReplyForInput('The user is asking about scheduled tasks.', '帮我看看定时任务'), '');
+  // CJK input + Latin-only ack -> reject (template phrase takes over).
+  assert.equal(sanitizeTurnAckReplyForInput('On it right away.', '帮我看看定时任务'), '');
+  // CJK input + Chinese ack -> kept.
+  assert.equal(
+    sanitizeTurnAckReplyForInput('收到，我这就去查这些定时任务的来源。', '帮我看看定时任务'),
+    '收到，我这就去查这些定时任务的来源。'
+  );
+  // English input + English ack -> kept (the guard must not over-fire).
+  assert.equal(
+    sanitizeTurnAckReplyForInput('Got it, checking the scheduled tasks now.', 'check my scheduled tasks'),
+    'Got it, checking the scheduled tasks now.'
+  );
+});
+
+test('sanitizeTurnAckReplyForInput: genre guard — meta-analysis markers are rejected', () => {
+  // Starts with "The user" (leading wrapping quotes must not dodge it).
+  assert.equal(sanitizeTurnAckReplyForInput('"The user is asking about tasks."', 'fix the bug'), '');
+  assert.equal(sanitizeTurnAckReplyForInput('“The user’s message is a question.”', 'fix the bug'), '');
+  // Marker phrases anywhere in the ack.
+  assert.equal(sanitizeTurnAckReplyForInput("It echoes the user's message back.", 'fix the bug'), '');
+  assert.equal(sanitizeTurnAckReplyForInput('This is acknowledging something in the request.', 'fix the bug'), '');
+  assert.equal(sanitizeTurnAckReplyForInput('It translates as a task request.', 'fix the bug'), '');
+  assert.equal(sanitizeTurnAckReplyForInput('This confirms the task, which means work starts now.', 'fix the bug'), '');
+  // Plain acks with no meta-analysis still pass.
+  assert.equal(sanitizeTurnAckReplyForInput('On it — checking now.', 'fix the bug'), 'On it — checking now.');
+});
+
+test('buildTurnAckReplyMessages: prompt forbids describing/analyzing/quoting the message', () => {
+  const messages = buildTurnAckReplyMessages({ userText: '帮我看看定时任务' });
+  assert.ok(
+    messages[0].content.includes(
+      "Never describe, analyze, translate, or quote the user's message; never mention what language it is in."
+    ),
+    'the no-meta-analysis rule is part of the system prompt'
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -138,8 +190,31 @@ test('coworkUtil: generateTurnAckReply is a title-class call — no thinking, no
   assert.ok(body.includes("effort: 'off'"), 'effort off — an ack never waits on reasoning');
   assert.ok(body.includes('webSearch: false'), 'no server-side web_search detour');
   assert.ok(body.includes('attemptTimeoutMs: 4_000'), 'per-attempt timeout bounds the ack latency');
-  assert.ok(body.includes('sanitizeTurnAckReply(result.content'), 'output goes through the sanitizer');
+  assert.ok(body.includes('sanitizeTurnAckReplyForInput(result.content'), 'output goes through the input-aware sanitizer');
   assert.ok(!body.includes('fallbackLlm'), 'single attempt: latency over robustness');
+});
+
+test('coworkUtil: generateTurnAckReply drops reasoning-promoted / length-truncated acks and sizes the budget by thinking mode', () => {
+  const source = read('src/main/libs/coworkUtil.ts');
+  const start = source.indexOf('export async function generateTurnAckReply(');
+  const body = source.slice(start, source.indexOf('\n}', start) + 2);
+  assert.ok(start > 0, 'generateTurnAckReply exists');
+  // F1: content promoted from reasoning_content and length-truncated
+  // completions are rejected (2026-10-23 thinking-leak fix).
+  assert.ok(
+    body.includes("contentBlockTypes?.includes('reasoning')"),
+    'reasoning-promoted content is rejected via responseMetadata'
+  );
+  assert.ok(body.includes("stopReason === 'length'"), 'length-truncated completions are rejected');
+  // F2: thinking-aware budget — always-thinking models (glm-5.3 etc.) get
+  // reasoning headroom, thinking-off models keep the tight 96.
+  assert.ok(body.includes('modelAlwaysThinks('), 'the budget consults modelAlwaysThinks');
+  assert.ok(body.includes('? 2048 : 96'), 'always-thinking ceiling 2048 vs thinking-off 96');
+  // F3 wiring: the sanitizer runs with the user text so the language guard fires.
+  assert.ok(
+    body.includes('sanitizeTurnAckReplyForInput(result.content'),
+    'output goes through the input-aware sanitizer'
+  );
 });
 
 test('main.ts: the ack brain is wired to the Twin system brain beside the title brain', () => {
