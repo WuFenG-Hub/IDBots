@@ -484,6 +484,12 @@ export interface DreamInputDropCounters {
   surfReportChars: number;
   /** Dream-output array entries dropped by the per-field parse caps. */
   parseArrayEntries: number;
+  /** Human feedback-comment characters cut by the prompt's inline cap (review M3). */
+  feedbackCommentChars: number;
+  /** Counterfactual/positive replay points beyond the ≤3/day cap (nit). */
+  replayPointsDropped: number;
+  /** Required dream-output fields missing at parse time (daily_summary etc., nit). */
+  parseFieldDrops: number;
 }
 
 export function createDreamInputDropCounters(): DreamInputDropCounters {
@@ -495,6 +501,9 @@ export function createDreamInputDropCounters(): DreamInputDropCounters {
     sessionsTitleOnly: 0,
     surfReportChars: 0,
     parseArrayEntries: 0,
+    feedbackCommentChars: 0,
+    replayPointsDropped: 0,
+    parseFieldDrops: 0,
   };
 }
 
@@ -505,7 +514,10 @@ export function countDreamInputDrops(counters: DreamInputDropCounters): number {
     + counters.implicitSignals
     + counters.sessionsTitleOnly
     + counters.surfReportChars
-    + counters.parseArrayEntries;
+    + counters.parseArrayEntries
+    + counters.feedbackCommentChars
+    + counters.replayPointsDropped
+    + counters.parseFieldDrops;
 }
 
 const parseIdNumber = (value: unknown): number | null => {

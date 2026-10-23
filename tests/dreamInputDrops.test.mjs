@@ -186,6 +186,40 @@ test('parse-time per-output-array truncations are counted', () => {
   assert.equal(counters.parseArrayEntries, 5);
 });
 
+test('feedback comments over the inline cap are truncated and counted (review M3)', () => {
+  const counters = createDreamInputDropCounters();
+  const longComment = '反馈'.repeat(400);
+  const prompt = buildDreamPrompt({
+    botName: '小火',
+    date: DAY,
+    activity: {
+      sessions: [{
+        sessionId: 's1',
+        title: '会话',
+        sessionType: 'standard',
+        peerName: null,
+        isOrder: false,
+        messages: [
+          {
+            type: 'assistant',
+            content: '回复',
+            createdAt: DAY_START,
+            feedbackRating: 'down',
+            feedbackComment: longComment,
+          },
+        ],
+      }],
+      taskRuns: [],
+      orderCount: 0,
+      groupTasks: [],
+    },
+  }, counters);
+  const commentLine = prompt.user.split('\n').find((line) => line.includes('〔人类留言:'));
+  assert.ok(commentLine, 'comment rendered inline');
+  assert.ok(commentLine.length <= 360, 'comment bounded (~300 chars + marker + prefix)');
+  assert.equal(counters.feedbackCommentChars, 800 - 300, 'the cut feeds the drop counters');
+});
+
 test('dream run surfaces inputDrops in run telemetry', async () => {
   const { db, cleanup } = await createSqliteStore();
   const coworkStore = createCoworkStore(db);
@@ -227,6 +261,9 @@ test('dream run surfaces inputDrops in run telemetry', async () => {
       sessionsTitleOnly: 0,
       surfReportChars: 0,
       parseArrayEntries: 3,
+      feedbackCommentChars: 0,
+      replayPointsDropped: 0,
+      parseFieldDrops: 0,
     });
   } finally {
     cleanup();

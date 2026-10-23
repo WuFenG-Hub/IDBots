@@ -403,7 +403,10 @@ function truncateToTokenBudget(text: string, maxTokens: number): string {
   return best;
 }
 
-function formatSessionActivity(session: DreamSessionActivity): string {
+/** Inline cap for the human feedback comment — the last unbounded user-controlled string (review M3). */
+export const FEEDBACK_COMMENT_PROMPT_MAX_CHARS = 300;
+
+function formatSessionActivity(session: DreamSessionActivity, dropCounters?: DreamInputDropCounters): string {
   const lines: string[] = [];
   for (const message of session.messages) {
     const speaker = message.type === 'user' ? '对方' : '你';
@@ -414,7 +417,16 @@ function formatSessionActivity(session: DreamSessionActivity): string {
       line += message.feedbackRating === 'up' ? '〔人类评价:赞〕' : '〔人类评价:踩〕';
       const comment = message.feedbackComment?.trim();
       if (comment) {
-        line += `〔人类留言:${comment.replace(/\s+/g, ' ')}〕`;
+        // Review M3: bound the comment like every other user-controlled
+        // string in the pipeline; the cut feeds the drop counters.
+        const normalized = comment.replace(/\s+/g, ' ');
+        const clipped = normalized.length > FEEDBACK_COMMENT_PROMPT_MAX_CHARS
+          ? `${normalized.slice(0, FEEDBACK_COMMENT_PROMPT_MAX_CHARS)}…`
+          : normalized;
+        if (dropCounters && normalized.length > FEEDBACK_COMMENT_PROMPT_MAX_CHARS) {
+          dropCounters.feedbackCommentChars += normalized.length - FEEDBACK_COMMENT_PROMPT_MAX_CHARS;
+        }
+        line += `〔人类留言:${clipped}〕`;
       }
     }
     lines.push(line);
@@ -566,7 +578,7 @@ export function buildDreamPrompt(input: {
   for (const session of input.activity.sessions) {
     const peerSuffix = session.peerName ? `(${session.peerName})` : '';
     const header = `【会话:${truncateText(session.title, 80)}${peerSuffix}】`;
-    const body = formatSessionActivity(session);
+    const body = formatSessionActivity(session, dropCounters);
     if (!body) continue;
     const bucket = sourceMode === 'fragment_summaries'
       ? fragmentSessions
