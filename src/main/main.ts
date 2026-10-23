@@ -2290,6 +2290,49 @@ const savePngWithDialog = async (
   return { success: true, canceled: false, path: outputPath };
 };
 
+// Hidden report-window loads must never outlive this budget: a report whose
+// scripts never settle (or a resource that keeps the load pending) would
+// otherwise hold loadFile forever, hang the exporting IPC invoke, and leak
+// the hidden window since the handler's finally only runs once the await
+// settles. The timer is unref'd so it never holds the app open by itself.
+const HTML_REPORT_WINDOW_LOAD_TIMEOUT_MS = 15_000;
+
+// loadFile plus a hard deadline and a render-process-gone watch. Whichever
+// settles first wins; listener and timer are always removed so a wedged load
+// leaves no dangling handles behind.
+const loadHtmlReportWindow = (window: BrowserWindow, filePath: string): Promise<void> =>
+  new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      window.webContents.removeListener('render-process-gone', onRenderProcessGone);
+    };
+    const finish = (error: Error | null): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+    const timer = setTimeout(() => {
+      finish(new Error(`Report window load timed out after ${HTML_REPORT_WINDOW_LOAD_TIMEOUT_MS}ms`));
+    }, HTML_REPORT_WINDOW_LOAD_TIMEOUT_MS);
+    timer.unref?.();
+    const onRenderProcessGone = (_event: Electron.Event, details: Electron.RenderProcessGoneDetails): void => {
+      finish(new Error(`Report window render process gone (${details.reason})`));
+    };
+    window.webContents.on('render-process-gone', onRenderProcessGone);
+    window.loadFile(filePath).then(
+      () => finish(null),
+      (error: unknown) => finish(error instanceof Error ? error : new Error(String(error))),
+    );
+  });
+
 const normalizeMetafileContentUrl = (value: unknown): string => {
   const raw = typeof value === 'string' ? value.trim() : '';
   if (!raw) {
@@ -13098,7 +13141,7 @@ if (!gotTheLock) {
         // block executeJavaScript and hang the IPC forever.
         webPreferences: { sandbox: true, disableDialogs: true },
       });
-      await hiddenWindow.loadFile(filePath);
+      await loadHtmlReportWindow(hiddenWindow, filePath);
       // Let charts / async layout settle before measuring, then resize the
       // window to the document height so capturePage sees the full page.
       await new Promise((resolve) => setTimeout(resolve, 500));

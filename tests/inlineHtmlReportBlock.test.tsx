@@ -267,6 +267,35 @@ test('the export action goes through the hidden-window capture IPC end to end', 
   assert.match(mainSource, /Math\.min\(2000, Math\.max\(320, Math\.round\(requestedWidth\)\)\)/);
 });
 
+test('the hidden-window load is bounded by a timeout and a render-process-gone watch', () => {
+  // A wedged report (dead-loop script or never-settling resource) must surface
+  // as a { success: false } result through a bounded load — never a hung IPC
+  // invoke or a leaked hidden window.
+  const loaderSource = mainSource.slice(
+    mainSource.indexOf('HTML_REPORT_WINDOW_LOAD_TIMEOUT_MS'),
+    mainSource.indexOf('loadHtmlReportWindow(hiddenWindow, filePath)'),
+  );
+  // Clearly named, ~15s budget.
+  assert.match(mainSource, /const HTML_REPORT_WINDOW_LOAD_TIMEOUT_MS = 15_000;/);
+  // The handler goes through the bounded loader instead of a raw loadFile.
+  assert.match(mainSource, /await loadHtmlReportWindow\(hiddenWindow, filePath\)/);
+  assert.doesNotMatch(mainSource, /await hiddenWindow\.loadFile\(filePath\)/);
+  // Both failure signals are wired into the load race.
+  assert.match(loaderSource, /setTimeout\([\s\S]*?HTML_REPORT_WINDOW_LOAD_TIMEOUT_MS\)/);
+  assert.match(loaderSource, /webContents\.on\('render-process-gone', onRenderProcessGone\)/);
+  assert.match(loaderSource, /window\.loadFile\(filePath\)/);
+  // Whichever settles first rejects and tears the other signal down, so a
+  // wedged load leaves no dangling listener or timer behind.
+  assert.match(loaderSource, /clearTimeout\(timer\)/);
+  assert.match(loaderSource, /removeListener\('render-process-gone', onRenderProcessGone\)/);
+  assert.match(loaderSource, /reject\(error\)/);
+  // The rejection lands in the handler's catch ({ success: false, error }) and
+  // the finally block still destroys the hidden window.
+  const handlerSource = mainSource.slice(mainSource.indexOf("registerIpcHandler('cowork:htmlReport:exportImage'"));
+  assert.match(handlerSource, /catch \(error\) \{\s*return \{\s*success: false,/);
+  assert.match(handlerSource, /finally \{\s*if \(hiddenWindow && !hiddenWindow\.isDestroyed\(\)\) \{\s*hiddenWindow\.destroy\(\);/);
+});
+
 test('the source view highlights as markup and the menu carries the file actions', () => {
   assert.match(blockSource, /SyntaxHighlighter/);
   assert.match(blockSource, /language="markup"/);
