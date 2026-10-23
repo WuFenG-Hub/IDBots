@@ -308,6 +308,14 @@
       ]
     },
     {
+      "path": "brainSwitch.switchFreeBrainsTo",
+      "kind": "invoke",
+      "channel": "brainSwitch:switchFreeBrainsTo",
+      "args": [
+        "input"
+      ]
+    },
+    {
       "path": "bundle.createOrder",
       "kind": "invoke",
       "channel": "bundle:createOrder",
@@ -733,6 +741,12 @@
       "args": [
         "metabotIds"
       ]
+    },
+    {
+      "path": "cowork.listPendingPermissions",
+      "kind": "invoke",
+      "channel": "cowork:permission:listPending",
+      "args": []
     },
     {
       "path": "cowork.listSessionFeedback",
@@ -1866,12 +1880,31 @@
       "args": []
     },
     {
+      "path": "llmRelay.dismissQuotaNudge",
+      "kind": "invoke",
+      "channel": "llmRelay:dismissQuotaNudge",
+      "args": [
+        "input"
+      ]
+    },
+    {
       "path": "llmRelay.getQuota",
       "kind": "invoke",
       "channel": "llmRelay:getQuota",
       "args": [
         "input"
       ]
+    },
+    {
+      "path": "llmRelay.getQuotaNudgeState",
+      "kind": "invoke",
+      "channel": "llmRelay:getQuotaNudgeState",
+      "args": []
+    },
+    {
+      "path": "llmRelay.onQuotaNudgeChanged",
+      "kind": "on",
+      "channel": "llmRelay:quotaNudgeChanged"
     },
     {
       "path": "llmRelay.setApiBase",

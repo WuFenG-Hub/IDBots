@@ -53,6 +53,7 @@ after that date so it gets a tier here.
 | `cowork:session:readLocalImage` | P1-R | R-path. |
 | `cowork:stream:liveContent` | P1 | Used by reconnect resync. |
 | `cowork:permission:respond` | P1 | |
+| `cowork:permission:listPending` | P1 | Pending-permission resync after a reconnect or renderer reload; read-only. |
 | `cowork:plan-mode:get`, `cowork:plan-mode:set` | P1 | |
 | `cowork:config:get` | P1 | |
 | `cowork:config:set` | P1-R | R-cfg. |
@@ -119,6 +120,9 @@ after that date so it gets a tier here.
 | `traffic:setSettings` | N | The server sets traffic sponsorship at bootstrap. |
 | `llmRelay:getQuota` | P1 | |
 | `llmRelay:bootstrap`, `llmRelay:setApiBase` | N | Server bootstrap owns the relay key and base URL. |
+| `llmRelay:getQuotaNudgeState`, `llmRelay:dismissQuotaNudge` | P1 | Pure UI state for the free-quota nudge banner. |
+| `llmRelay:quotaNudgeChanged` (event) | P1 | Banner refresh broadcast. |
+| `brainSwitch:switchFreeBrainsTo` | N | Server-side quota rescue owns brain routing; the channel rebinds the global default route and bot brains. |
 | `feeRates:getTiers`, `feeRates:getSelected`, `feeRates:select`, `feeRates:refresh` | P1 | |
 | `deepseek:getBalance` | N | Bring-your-own-key feature, later release. |
 

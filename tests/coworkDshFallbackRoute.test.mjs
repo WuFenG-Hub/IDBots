@@ -129,6 +129,14 @@ function installApiConfig(claudeSettings, overrides = {}) {
   claudeSettings.setStoreGetter(() => fakeConfigStore)
 }
 
+// 2026-10-23 system-rescue-brain: an enabled, keyed, non-free provider that no
+// brain binds (gw-b in the default fixture) is now a rescue candidate, so a
+// quota/auth death that used to terminate now rescues onto it. Tests that
+// verify the NO-rescue terminal behavior disable it with this override.
+const NO_RESCUE_PROVIDERS = {
+  'gw-b': { enabled: false, apiKey: '', baseUrl: 'http://fallback.example/v1', apiFormat: 'openai', models: [] },
+}
+
 // Drive one runDshSessionLocal turn with a scripted fake hub. `script(input,
 // callNo)` returns the DshTurnOutcome for each hub.runTurn call (callNo is
 // 1-based). Returns the recorded calls plus the post-turn session row.
@@ -236,6 +244,7 @@ test('without a fallback brain the turn fails after the primary resume budget (b
     sessionId: 'gt02-no-fallback',
     metabot: { id: 2, name: 'NoFallback Bot', llm_id: 'mock-a1', llm_provider: 'gw-a' },
     script: () => ({ kind: 'error', error: { code: 'TIMEOUT', message: 'request timed out' } }),
+    configOverrides: { providers: NO_RESCUE_PROVIDERS },
   })
 
   assert.equal(result.runTurnCalls.length, 4, '1 initial + 3 primary resumes, then the turn fails')
@@ -306,6 +315,7 @@ test('a transport-class hard error (413 body limit) still never triggers the fal
 test('a fallback brain resolving to the SAME route as the failed primary is not retried', async () => {
   const result = await driveTurn({
     sessionId: 'gt02-same-route-fallback',
+    configOverrides: { providers: NO_RESCUE_PROVIDERS },
     // Fallback brain points at the same provider+model as the primary —
     // switching would just re-hit the dead path.
     metabot: {
@@ -526,7 +536,7 @@ test('a quota death with NO fallback brain rescues the turn onto the free-relay 
     // Owner moved the default to the free relay AFTER the session/bot binding
     // to gw-a/mock-a1 was made; the stale binding dies on quota at call 1 and
     // the free-relay default carries call 2 to completion.
-    configOverrides: FREE_RELAY_OVERRIDES,
+    configOverrides: { ...FREE_RELAY_OVERRIDES, providers: { ...FREE_RELAY_OVERRIDES.providers, ...NO_RESCUE_PROVIDERS } },
     script: (_input, callNo) => (callNo === 1 ? quotaError() : { kind: 'completed' }),
   })
 
@@ -587,7 +597,7 @@ test('an exhausted RATE_LIMIT (transient) ladder with no fallback brain rescues 
   const result = await driveTurn({
     sessionId: 'stale-binding-ratelimit-default-rescue',
     metabot: BOT_WITHOUT_FALLBACK,
-    configOverrides: FREE_RELAY_OVERRIDES,
+    configOverrides: { ...FREE_RELAY_OVERRIDES, providers: { ...FREE_RELAY_OVERRIDES.providers, ...NO_RESCUE_PROVIDERS } },
     // 1 initial + 3 same-route transient resumes all rate-limited on the dead
     // bound route; the default-rescue attempt (call 5) completes.
     script: (_input, callNo) => (callNo <= 4 ? rateLimitError() : { kind: 'completed' }),
@@ -613,6 +623,7 @@ test('a quota death with no valid ladder target names the exhausted provider, ne
   // outcome in the cowork.log ERROR line) and the normalized code is kept.
   const result = await driveTurn({
     sessionId: 'stale-binding-no-op-rescue',
+    configOverrides: { providers: NO_RESCUE_PROVIDERS },
     metabot: BOT_WITHOUT_FALLBACK,
     // defaultModel stays mock-a1/gw-a — the same route that is quota-dead.
     script: (_input, callNo) => (callNo === 1 ? quotaError() : { kind: 'completed' }),
@@ -647,7 +658,16 @@ test('a quota death on the FREE relay tells the user to bring their own key (ban
   const result = await driveTurn({
     sessionId: 'fresh-install-free-quota-death',
     metabot: { ...BOT_WITHOUT_FALLBACK, id: 3, name: 'Fresh Twin', llm_id: 'free-m1', llm_provider: 'metaid-free' },
-    configOverrides: FREE_RELAY_OVERRIDES,
+    // Fresh-install shape: the free relay is the ONLY configured route — the
+    // fixture's residual gw-a must not become a system rescue brain either.
+    configOverrides: {
+      ...FREE_RELAY_OVERRIDES,
+      providers: {
+        ...FREE_RELAY_OVERRIDES.providers,
+        ...NO_RESCUE_PROVIDERS,
+        'gw-a': { enabled: false, apiKey: '', baseUrl: 'http://primary.example/v1', apiFormat: 'openai', models: [] },
+      },
+    },
     script: () => ({
       kind: 'error',
       error: {
@@ -672,6 +692,7 @@ test('a genuinely misconfigured route still reports the configuration error', as
   // ring-④ configuration semantics — quota wording must never mask it.
   const result = await driveTurn({
     sessionId: 'stale-binding-model-missing',
+    configOverrides: { providers: NO_RESCUE_PROVIDERS },
     metabot: BOT_WITHOUT_FALLBACK,
     script: (_input, callNo) => (
       callNo === 1
@@ -777,7 +798,7 @@ test('route circuit breaker: consecutive wont-heal deaths stop spending model ca
 
   // Three inbound messages, three won't-heal settlements (no fallback brain —
   // each invocation is a single primary attempt).
-  const ctx = await driveSequence({ sessionId: 'gt02-circuit', metabot: noFallbackBot, script: authDeath, invocations: 3 })
+  const ctx = await driveSequence({ sessionId: 'gt02-circuit', metabot: noFallbackBot, script: authDeath, invocations: 3, configOverrides: { providers: NO_RESCUE_PROVIDERS } })
   assert.equal(ctx.runTurnCalls.length, 3, 'each invocation spent its primary attempt')
   const opened = ctx.runner.dshRouteCircuits.get('gt02-circuit')
   assert.ok(opened, 'the circuit recorded the failures')
@@ -806,7 +827,7 @@ test('route circuit breaker: consecutive wont-heal deaths stop spending model ca
 test('route circuit breaker: changing the model binding resets the verdict', async () => {
   const botV1 = { id: 7, name: 'Circuit Switch Bot', llm_id: 'mock-a1', llm_provider: 'gw-a' }
   const authDeath = () => ({ kind: 'error', error: { code: 'AUTH_FAILED', message: '401 invalid api key' } })
-  const ctx = await driveSequence({ sessionId: 'gt02-circuit-switch', metabot: botV1, script: authDeath, invocations: 3 })
+  const ctx = await driveSequence({ sessionId: 'gt02-circuit-switch', metabot: botV1, script: authDeath, invocations: 3, configOverrides: { providers: NO_RESCUE_PROVIDERS } })
   assert.ok((ctx.runner.dshRouteCircuits.get('gt02-circuit-switch')?.openUntil ?? 0) > Date.now(), 'circuit open')
 
   // The owner rebinds the bot to a different provider/model: the old route's
@@ -817,6 +838,7 @@ test('route circuit breaker: changing the model binding resets the verdict', asy
     metabot: { id: 7, name: 'Circuit Switch Bot', llm_id: 'mock-c1', llm_provider: 'gw-c' },
     configOverrides: {
       providers: {
+        ...NO_RESCUE_PROVIDERS,
         'gw-c': {
           enabled: true,
           apiKey: 'sk-c',
