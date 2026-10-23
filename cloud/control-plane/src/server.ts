@@ -7,6 +7,7 @@ import { accountRoutes } from './routes/account.js';
 import { authRoutes } from './routes/auth.js';
 import { sensitiveRoutes } from './routes/sensitive.js';
 import { requireUser } from './routes/auth.js';
+import { maskPhone } from './crypto.js';
 import { proxyRoutes } from './services/httpProxy.js';
 import { loginRoutes } from './services/loginBundle.js';
 import { attachWsProxy, type WsProxyOptions } from './services/wsProxy.js';
@@ -126,8 +127,11 @@ async function handle(
       ),
   };
 
+  const startedAtMs = Date.now();
+  let routePattern = '(unmatched)';
   try {
     if (method === 'GET' && url.pathname === '/health') {
+      routePattern = '/health';
       await handleHealth(app, res);
       return;
     }
@@ -157,6 +161,7 @@ async function handle(
       throw new HttpError(404, 'NOT_FOUND', `no route for ${method} ${url.pathname}`);
     }
     const route = matched;
+    routePattern = route.path;
 
     let body: unknown = null;
     if (!route.raw && (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE')) {
@@ -177,16 +182,27 @@ async function handle(
   } catch (err) {
     if (err instanceof HttpError) {
       writeError(res, err.status, err.code, err.message);
-      return;
-    }
-    reqCtx.log('error', 'unhandled error', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    if (!res.headersSent) {
-      writeError(res, 500, 'INTERNAL', `internal error (request ${requestId})`);
     } else {
-      res.end();
+      reqCtx.log('error', 'unhandled error', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      if (!res.headersSent) {
+        writeError(res, 500, 'INTERNAL', `internal error (request ${requestId})`);
+      } else {
+        res.end();
+      }
     }
+  } finally {
+    // REQ-B-20: one access line per request; bodies (codes, tokens,
+    // mnemonics) are never logged — only route, status, timing, identity.
+    const status = res.statusCode || 500;
+    app.metrics.httpRequest(routePattern, status);
+    reqCtx.log('info', 'request', {
+      route: routePattern,
+      status,
+      durationMs: Date.now() - startedAtMs,
+      user: reqCtx.user ? maskPhone(reqCtx.user.phone_e164) : undefined,
+    });
   }
 }
 
@@ -219,14 +235,23 @@ export interface PublicServerOptions {
 
 export function createPublicServer(app: AppContext, opts: PublicServerOptions = {}): http.Server {
   const server = http.createServer(createRequestHandler(app));
-  attachWsProxy(app, server, opts.wsProxy);
+  const stats = attachWsProxy(app, server, opts.wsProxy);
+  app.metrics.gaugeFn('cp_open_sockets', () => stats.openSockets);
   return server;
 }
 
-/** Stub metrics endpoint (REQ-B-20 fills in real Prometheus series later). */
-export function createMetricsServer(): http.Server {
+/** REQ-B-20: Prometheus text on the internal port. */
+export function createMetricsServer(app: AppContext): http.Server {
   return http.createServer((_req, res) => {
+    const tenantRows = app.db.prepare('SELECT status, COUNT(*) AS n FROM tenants GROUP BY status').all() as Array<{
+      status: string;
+      n: number;
+    }>;
+    const lines: string[] = [];
+    for (const row of tenantRows) {
+      lines.push(`cp_tenants{status="${row.status}"} ${row.n}`);
+    }
     res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
-    res.end('# cp_metrics placeholder\n');
+    res.end(`${app.metrics.render()}${lines.join('\n')}\n`);
   });
 }

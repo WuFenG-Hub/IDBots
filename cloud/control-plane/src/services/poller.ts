@@ -42,6 +42,7 @@ interface TenantRow {
   volume_name: string;
   image: string;
   status: string;
+  created_at: number;
   phase: string | null;
   app_version: string | null;
   contract_version: string | null;
@@ -61,7 +62,7 @@ export class TenantPoller {
   private readonly nextPollAt = new Map<string, number>();
 
   constructor(
-    private readonly app: Pick<AppContext, 'config' | 'db' | 'docker'>,
+    private readonly app: Pick<AppContext, 'config' | 'db' | 'docker'> & Partial<Pick<AppContext, 'metrics'>>,
     opts: PollerOptions = {},
   ) {
     this.tickFastMs = opts.tickFastMs ?? 3000;
@@ -196,6 +197,20 @@ export class TenantPoller {
       transition.appVersion !== row.app_version ||
       transition.contractVersion !== row.contract_version;
     if (changed) {
+      // REQ-B-20: observe the provisioning duration exactly once — when the
+      // container that just became ready was started with the tenant's
+      // creation (first boot, not a restart or an upgrade recreate, both of
+      // which have a much later StartedAt than tenants.created_at).
+      const firstBootContainer =
+        startedAtMs !== null && Math.abs(startedAtMs - row.created_at) < 60_000;
+      const becameServing =
+        (transition.to === 'ready' || transition.to === 'degraded') &&
+        firstBootContainer &&
+        row.status !== 'ready' &&
+        row.status !== 'degraded';
+      if (becameServing) {
+        this.app.metrics?.provisioningDuration((now - row.created_at) / 1000);
+      }
       this.app.db
         .prepare(
           `UPDATE tenants

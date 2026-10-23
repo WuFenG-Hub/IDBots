@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type http from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -82,6 +83,9 @@ async function handleUpgrade(
   head: Buffer,
   opts: { pingIntervalMs: number; pongTimeoutMs: number },
 ): Promise<void> {
+  const requestIdHeader = req.headers['x-request-id'];
+  const requestId =
+    typeof requestIdHeader === 'string' && requestIdHeader.length > 0 ? requestIdHeader : randomUUID();
   const accept = (): Promise<WebSocket> =>
     new Promise((resolve) => wss.handleUpgrade(req, socket, head, (ws) => resolve(ws)));
 
@@ -92,6 +96,7 @@ async function handleUpgrade(
         level: 'warn',
         component: 'ws-proxy',
         msg: 'upgrade closed',
+        requestId,
         code,
         reason,
         ...(logExtra ?? {}),
@@ -131,6 +136,7 @@ async function handleUpgrade(
       level: 'info',
       component: 'ws-proxy',
       msg: 'socket open',
+      requestId,
       user: maskPhone(session.user.phone_e164),
       tenant: lookup.resolved.tenant.id,
       clientId,
@@ -164,6 +170,7 @@ async function handleUpgrade(
         level: 'info',
         component: 'ws-proxy',
         msg: 'socket closed',
+        requestId,
         user: maskPhone(session.user.phone_e164),
         tenant: lookup.resolved.tenant.id,
         code,

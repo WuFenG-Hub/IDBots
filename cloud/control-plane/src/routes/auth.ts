@@ -157,7 +157,7 @@ export async function issueSmsCode(
   reqCtx: RequestCtx,
   phone: string,
   purpose: 'login' | 'reverify',
-): Promise<void> {
+): Promise<boolean> {
   const now = Date.now();
   const check = checkSmsSend(app.db, { phone, ip: reqCtx.ip, now });
   if (!check.allowed) {
@@ -175,9 +175,11 @@ export async function issueSmsCode(
        VALUES (?, ?, ?, 0, ?, NULL, ?, ?)`,
     )
     .run(phone, purpose, hashSmsCode(phone, purpose, code), now + SMS_CODE_TTL_MS, reqCtx.ip, now);
+  let delivered = true;
   try {
     await app.sms.send(phone, purpose, code);
   } catch (err) {
+    delivered = false;
     // Undeliverable (fake mode with an unlisted number, provider outage):
     // the code row exists but no SMS arrives, exactly like production.
     reqCtx.log('warn', 'sms delivery failed', {
@@ -185,6 +187,8 @@ export async function issueSmsCode(
       error: err instanceof Error ? err.message : String(err),
     });
   }
+  app.metrics.smsSend(purpose, delivered);
+  return delivered;
 }
 
 /** Validates a submitted SMS code (REQ-B-6/B-16 shared rules). */

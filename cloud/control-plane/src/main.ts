@@ -6,6 +6,7 @@ import { AliyunSmsProvider, FakeSmsProvider, type SmsProvider } from './sms.js';
 import { createPublicServer, createMetricsServer } from './server.js';
 import { TenantPoller } from './services/poller.js';
 import { reconcileAtStartup } from './services/reconcile.js';
+import { MetricsRegistry } from './metrics.js';
 import type { AppContext } from './context.js';
 
 /**
@@ -36,7 +37,7 @@ async function main(): Promise<void> {
   const sms: SmsProvider =
     config.smsMode === 'fake' ? new FakeSmsProvider(config.fakeSmsNumbers) : new AliyunSmsProvider();
 
-  const app: AppContext = { config, db, docker, sms, poller: null };
+  const app: AppContext = { config, db, docker, sms, poller: null, metrics: new MetricsRegistry() };
 
   // REQ-B-11: reconcile before the poller takes over.
   await reconcileAtStartup(app).catch((err) => {
@@ -55,7 +56,7 @@ async function main(): Promise<void> {
   poller.start();
 
   const publicServer = createPublicServer(app);
-  const metricsServer = createMetricsServer();
+  const metricsServer = createMetricsServer(app);
   const publicListen = parseListen(config.listen);
   const metricsListen = parseListen(config.metricsListen);
 
