@@ -23,7 +23,7 @@ export function queryHotLayerUsageStats(
   db: Database,
   input: {
     metabotId: number;
-    kind: 'technique' | 'procedure';
+    kind: 'technique' | 'procedure' | 'knowledge' | 'memory';
     sinceDate: string;
     untilDate: string;
     itemIds?: readonly string[];

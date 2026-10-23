@@ -51,12 +51,28 @@ const escapeXml = (value: string): string =>
  * (cowork UI and A2A) — it describes the bot itself, not the user, so it does
  * not fall under the external-channel owner-memory privacy block.
  */
+
+/**
+ * Hard cap for the INJECTED identity text (dream review P0 2026-10-23). The
+ * identity is the most-protected prompt block, but an unbounded row still
+ * crowds every context it rides in — over the cap it is cut with an explicit
+ * truncation marker; the full text stays in long-term memory and remains
+ * reachable through recall. The dream-side write contract (200-600 chars)
+ * keeps normal identities far below this cap — it is a guard rail, not a
+ * budget.
+ */
+export const SELF_IDENTITY_PROMPT_MAX_CHARS = 1500;
+const SELF_IDENTITY_TRUNCATION_MARKER = '……(身份记录过长,此处截断;完整记录见长期记忆)';
+
 export function buildSelfIdentityBlock(identityText: string): string {
   const trimmed = identityText?.trim();
   if (!trimmed) return '';
+  const capped = trimmed.length > SELF_IDENTITY_PROMPT_MAX_CHARS
+    ? `${truncateUtf16Units(trimmed, SELF_IDENTITY_PROMPT_MAX_CHARS)}${SELF_IDENTITY_TRUNCATION_MARKER}`
+    : trimmed;
   return [
     '<metabot_self_identity>',
-    escapeXml(trimmed),
+    escapeXml(capped),
     '</metabot_self_identity>',
     '<instruction>',
     'The &lt;metabot_self_identity&gt; block above is your own self-cognition, written and refined by',
@@ -221,7 +237,8 @@ export function buildExperiencePromptBlocksXml(input: {
     .join('\n\n');
 }
 
-/** Overall cap for the minimal self-cognition pack (identity never cut). */
+/** Overall cap for the minimal self-cognition pack (identity itself capped at
+ * SELF_IDENTITY_PROMPT_MAX_CHARS with a truncation marker; summaries cut first). */
 export const MINIMAL_SELF_COGNITION_MAX_CHARS = 2500;
 /** Char budget for the dream-summaries section inside the minimal pack. */
 export const MINIMAL_SELF_COGNITION_SUMMARIES_MAX_CHARS = 1500;
@@ -230,11 +247,12 @@ export const MINIMAL_SELF_COGNITION_SUMMARIES_MAX_CHARS = 1500;
  * Minimal self-cognition pack for the lightweight one-shot LLM paths that have
  * no cowork runner to inject the full experience block (group-chat direct
  * replies, OpenTeam guest plain turns): the protected self-identity entry —
- * NEVER truncated — plus the last days' dream summaries under their own char
- * budget (newest kept). Over the overall cap the summaries shrink first, then
- * drop entirely; when the identity alone exceeds the cap the pack is returned
- * whole — the identity instruction block's integrity beats the budget (same
- * rule as buildGroupTaskExperienceBlock).
+ * itself capped at SELF_IDENTITY_PROMPT_MAX_CHARS with an explicit truncation
+ * marker inside buildSelfIdentityBlock — plus the last days' dream summaries
+ * under their own char budget (newest kept). Over the overall cap the
+ * summaries shrink first, then drop entirely; when the (already capped)
+ * identity alone still exceeds the cap the pack is returned whole — the
+ * identity instruction block's integrity beats the budget.
  */
 export function buildMinimalSelfCognitionBlocks(input: {
   identityText?: string | null;

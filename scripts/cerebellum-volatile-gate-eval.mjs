@@ -9,9 +9,10 @@
  * faithful copy of that module — keep the two in sync when tuning.
  *
  * What it does:
- *   For each labeled turn, one POST {baseUrl}/v1/systemone carrying FOUR
+ *   For each labeled turn, one POST {baseUrl}/v1/systemone carrying FIVE
  *   Noul questions (experience / twin-impression / knowledge-bases /
- *   remote-services) against one shared state (the user message). Verdicts
+ *   remote-services / team-culture) against one shared state (the user
+ *   message). Verdicts
  *   at the module thresholds are compared with labels and a per-block
  *   confusion matrix is printed:
  *     keep-and-needed (TP)   skip-and-unneeded (TN = tokens saved)
@@ -52,7 +53,9 @@ import { argv, env, exit } from 'node:process';
 // blocks a good assistant would actually consult for this turn)
 // ---------------------------------------------------------------------------
 
-const BLOCK_KEYS = ['experience', 'twin-impression', 'knowledge-bases', 'remote-services'];
+// Review Minor 6: 'team-culture' joined the gateable blocks — the embedded
+// copy must carry it like the module does.
+const BLOCK_KEYS = ['experience', 'twin-impression', 'knowledge-bases', 'remote-services', 'team-culture'];
 
 const SAMPLE_CASES = [
   // --- none needed: plain tasks / chat ---
@@ -108,6 +111,11 @@ const INSTRUCTIONS = {
     'on-chain services offered by other bots? Needed only when the message seeks a ' +
     'capability the assistant itself lacks and might delegate or purchase externally; ' +
     'ordinary self-served requests do not need it.',
+  'team-culture':
+    'Does replying to the user\'s message at `user_message` need the shared team ' +
+    'culture block (fleet-wide glossary terms, working conventions, distilled team ' +
+    'lessons)? Needed only when the message involves fleet coordination, team members, ' +
+    'shared terminology, or ways of working; ordinary task requests do not need it.',
 };
 
 const CRITERIA = {

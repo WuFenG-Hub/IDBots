@@ -68,7 +68,11 @@ import type {
   CerebellumRemoteServiceChoiceQuestion,
   CerebellumRemoteServiceRankEntry,
 } from './remoteServiceShortlist';
-import { buildVolatileGateQuestions, parseVolatileGateAnswers } from './volatileBlockGate';
+import {
+  buildVolatileGateQuestions,
+  CEREBELLUM_VOLATILE_GATE_SECTION_KEYS,
+  parseVolatileGateAnswers,
+} from './volatileBlockGate';
 
 /**
  * Same hard abort deadline as every other cerebellum call site, unchanged by
@@ -276,7 +280,9 @@ export async function runCerebellumTurnDecisions(input: {
       knowledgeSent: selection.knowledge.length,
       skillsSent: selection.skills.length,
       servicesSent: selection.services.length,
-      gateQuestions: selection.includeGate ? 4 : 0,
+      // Review Minor 6: derive from the gate's own key list — a hardcoded 4
+      // silently desynced when 'team-culture' joined the gateable blocks.
+      gateQuestions: selection.includeGate ? CEREBELLUM_VOLATILE_GATE_SECTION_KEYS.length : 0,
       totalQuestions: Object.keys(request.questions).length,
       currentMessageChars: request.state.current_message.length,
       totalChars: body.length,

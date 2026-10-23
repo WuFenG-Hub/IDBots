@@ -4300,6 +4300,9 @@ const startStartupMessageTier = (): void => {
     // (roadmap #6) — the same shared ranker the cowork runner and the
     // group-task daemon use (see createCerebellumMemoryRanker).
     createCerebellumMemoryRanker(),
+    // Dream review P1: knowledge/procedures hot layer for the direct answer
+    // path (A2A turns) — same builders and hot selection as the cowork runner.
+    () => getMetaIDKnowledgeStore(),
   );
 
   // Periodically reconcile private chat history with the MetaSO API so
@@ -4643,19 +4646,7 @@ const startStartupMessageTier = (): void => {
     markCapabilityDraftsInjected: (ids) => {
       getCoworkStore().markCapabilityDraftsInjected(ids);
     },
-    buildTeamCultureBlock: () => {
-      try {
-        const cultureStore = getTeamCultureStore();
-        // Master switch: one gate for both injection and distillation.
-        if (!cultureStore.getCultureConfig().enabled) return null;
-        return cultureStore.buildCulturePromptBlock();
-      } catch (error) {
-        console.warn(
-          `[GroupTaskDaemon] Team culture block unavailable: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        return null;
-      }
-    },
+    buildTeamCultureBlock: buildTeamCulturePromptBlock,
     ...(cognitionContextService
       ? {
           getMetaIDGroupCognitionPromptBlock: (input: {
@@ -5009,6 +5000,14 @@ const startStartupNightlyServices = (): void => {
     surfBeforeDream: async (metabotId) => {
       const surf = getSurfService();
       if (!surf.shouldPreDreamSurf(metabotId)) return null;
+      // Dream review P3: a stale model binding skips the surf for the night
+      // (no session, no prompt) instead of storming orphan sessions; the
+      // reason lands in the dream telemetry as surfSkipped.
+      const binding = surf.preDreamModelBindingGate(metabotId);
+      if (!binding.ok) {
+        console.warn(`[Dream] Pre-dream surf skipped for metabot ${metabotId}: ${binding.reason}`);
+        return { reportMarkdown: null, skippedReason: `surf-model-binding: ${binding.reason}` };
+      }
       const PRE_DREAM_SURF_TIMEOUT_MS = 35 * 60 * 1000;
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -5050,6 +5049,34 @@ const startStartupNightlyServices = (): void => {
     // Self-curriculum materialization (design 2026-10-10 §3.4): the same host
     // path as ScheduledTaskAgentControl.createTask — a one-shot 'at' task in
     // the night window; a schedule that never fires rolls back and throws.
+    // Dream review P2-1 (design §P2.5): the frozen per-bot exam answers in a
+    // read_only isolated session — the practice interaction guard constrains
+    // every tool call to the read surface, memory writes stay off, and the
+    // session is hidden from the list like surf sessions.
+    runExamSession: async ({ metabotId, userMessage }) => {
+      const coworkStore = getCoworkStore();
+      const cwd = resolveSessionWorkingDirectory(
+        coworkStore.getConfig().workingDirectory,
+        metabotId,
+      );
+      const { createPracticeSessionState } = await import('./libs/practiceInteractionGuard');
+      return runOrchestratorSkillTurn(getCoworkRunner(), coworkStore, {
+        systemPrompt: '',
+        userMessage,
+        cwd,
+        metabotId,
+        activeSkillIds: [],
+        disableRemoteServicesPrompt: true,
+        sourceChannel: 'orchestrator',
+        autoApprove: true,
+        disableMemoryUpdates: true,
+        practiceSession: createPracticeSessionState('read_only'),
+        skillTurnTimeoutMs: 20 * 60 * 1000,
+        onSessionCreated: (sessionId) => {
+          coworkStore.setSessionHiddenFromList(sessionId, true);
+        },
+      });
+    },
     createPracticeScheduledTask: (input) => {
       const store = getScheduledTaskStore();
       const task = store.createTask({
@@ -6424,6 +6451,9 @@ const getCoworkRunner = () => {
       },
       experienceStore: getDreamStore(),
       knowledgeStore: getMetaIDKnowledgeStore(),
+      // Dream review P1: fleet culture block in the cowork volatile tail
+      // (same master switch and builder as the group-task daemon).
+      buildTeamCultureBlock: buildTeamCulturePromptBlock,
       episodeTimelineProvider: getMetaIDExperienceStore(),
       // Cerebellum (小脑) per-turn decision bundle (2026-10-16 merge): ONE
       // /v1/systemone request per turn covers the memory re-rank, knowledge
@@ -8708,6 +8738,25 @@ const getTeamCultureStore = (): TeamCultureStore => {
   return teamCultureStore;
 };
 
+/**
+ * Shared team-culture prompt block (dream review P1): the SAME master switch
+ * as the group-task daemon — one fleet-wide culture layer, default ON, with
+ * the block's own hard char cap doing the bounding. Used by both the
+ * group-task turns and the cowork volatile tail.
+ */
+const buildTeamCulturePromptBlock = (): string | null => {
+  try {
+    const cultureStore = getTeamCultureStore();
+    if (!cultureStore.getCultureConfig().enabled) return null;
+    return cultureStore.buildCulturePromptBlock();
+  } catch (error) {
+    console.warn(
+      `[TeamCulture] Prompt block unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+};
+
 const getKnowledgeBaseStore = (): KnowledgeBaseStore => {
   if (!knowledgeBaseStore) {
     const sqliteStore = getStore();
@@ -8964,6 +9013,11 @@ const getSurfService = (): SurfService => {
       broadcast: (payload) => {
         broadcastToRenderers(SURF_STATUS_CHANNEL, payload);
       },
+      // Dream review P3: validate the surf bot's model binding BEFORE the
+      // pipeline can create an orphan [编排任务] session (13/13 pre-dream
+      // surf failures in dev data were one stale binding burning a session
+      // + 49k-char prompt every night).
+      checkModelBinding: (metabotId) => getCoworkRunner().checkAutomationModelBinding(metabotId),
       runSurfSession: async (context) => {
         const coworkStore = getCoworkStore();
         const cwd = resolveSessionWorkingDirectory(
@@ -18402,6 +18456,11 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
           console.log('[Main] Stopping cowork sessions...');
           coworkRunner.stopAllSessions('app shutdown');
         }
+      },
+      // Dream review P3: drain buffered hot-layer exposure telemetry before
+      // the database closes (a crash would only lose the ≤5s buffer window).
+      flushHotLayerExposures: () => {
+        getCoworkStore().flushHotLayerExposureBuffer();
       },
       // No waitForTick: an in-flight skill turn can run for tens of minutes;
       // quit must not block on it. The generation bump stops new ticks and

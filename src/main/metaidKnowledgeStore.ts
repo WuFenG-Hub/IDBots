@@ -5,7 +5,31 @@ import { tokenizeKnowledgeBaseText } from './libs/knowledgeBaseText';
 import { truncateUtf16Units } from './libs/llmSafeText';
 import { recordChainBackupTombstones } from './libs/chainBackupTombstones';
 import { normalizeProcedureHotReason, type ProcedureHotReason } from './libs/procedureProbation';
+
+/**
+ * Which dream pass flipped a procedure's hot eligibility (dream review P1) —
+ * recorded on every append-only hot_event row so a procedure's standing is
+ * traceable across probation flips, re-review demotions, pruning and
+ * rollbacks instead of only remembering the LAST reason.
+ */
+export type ProcedureHotEventSource =
+  | 'validation'
+  | 'promotion'
+  | 're_review'
+  | 'pruning'
+  | 'rollback'
+  | 'dream';
+
 import { PROCEDURE_PROMPT_MAX_ITEMS } from './libs/procedurePromptBlocks';
+
+/** One append-only row of metaid_knowledge_procedure_hot_events. */
+export interface ProcedureHotEvent {
+  id: number;
+  procedureId: string;
+  ts: number;
+  reason: ProcedureHotReason | null;
+  sourcePass: ProcedureHotEventSource;
+}
 import { queryHotLayerUsageStats } from './libs/hotLayerUsageQueries';
 import {
   HOT_LAYER_FRESH_SLOTS,
@@ -60,6 +84,12 @@ export interface MetaIDKnowledgeEntry {
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
+  /**
+   * Hot-pool membership (dream review P1): false = cooled out of the proactive
+   * <knowledge> injection pool by the nightly usage audit; recall paths keep
+   * returning the entry. Defaults true.
+   */
+  hotEligible?: boolean;
 }
 
 export interface MetaIDKnowledgeSource {
@@ -199,6 +229,12 @@ export interface ListMetaIDKnowledgeOptions {
   offset?: number;
   /** Cold recall channel: widen the default/'active' filter to active+archived. Never widens to superseded. */
   includeArchived?: boolean;
+  /**
+   * Hot-pool filter (dream review P1): true keeps only entries the usage
+   * audit has not cooled out (COALESCE(hot_eligible,1) = 1). Recall paths
+   * leave this unset so cooled entries stay reachable.
+   */
+  hotEligibleOnly?: boolean;
   /** Bump last_used_at on returned rows (recall reuse signal). */
   touchLastUsed?: boolean;
 }
@@ -229,6 +265,7 @@ interface KnowledgeEntryRow {
   created_at: number | string;
   updated_at: number | string;
   last_used_at: number | string | null;
+  hot_eligible?: number | string | null;
 }
 
 interface KnowledgeSourceRow {
@@ -285,6 +322,7 @@ export function ensureMetaIDKnowledgeSchema(db: Database): void {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       last_used_at INTEGER,
+      hot_eligible INTEGER NOT NULL DEFAULT 1,
       UNIQUE(metabot_id, topic_fingerprint)
     );
   `);
@@ -300,6 +338,17 @@ export function ensureMetaIDKnowledgeSchema(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_metaid_knowledge_entries_metabot_status_used
       ON metaid_knowledge_entries(metabot_id, status, last_used_at DESC);
   `);
+  // Dream review P1 (2026-10-23): hot-pool membership flag. The nightly usage
+  // audit's knowledge cooling flips it to 0 (never deletes) — a cooled entry
+  // leaves the proactive <knowledge> hot pool but stays fully recallable.
+  try {
+    const knowledgeCols = (db.exec('PRAGMA table_info(metaid_knowledge_entries)')[0]?.values?.map((row) => row[1]) || []) as string[];
+    if (!knowledgeCols.includes('hot_eligible')) {
+      db.run('ALTER TABLE metaid_knowledge_entries ADD COLUMN hot_eligible INTEGER NOT NULL DEFAULT 1;');
+    }
+  } catch (error) {
+    console.warn('migrate metaid_knowledge_entries hot_eligible:', error);
+  }
 
   db.run(`
     CREATE TABLE IF NOT EXISTS metaid_knowledge_sources (
@@ -383,6 +432,25 @@ export function ensureMetaIDKnowledgeSchema(db: Database): void {
   } catch (error) {
     console.warn('migrate metaid_knowledge_procedures hot columns:', error);
   }
+
+  // Dream review P1: append-only history of hot-layer eligibility flips.
+  // hot_reason stays the LATEST reason for legacy readers; every flip lands
+  // one row here (which pass, when, and why) so probation flips, re-review
+  // demotions, pruning and rollbacks all stay traceable. New table — plain
+  // CREATE IF NOT EXISTS is the idempotent migration.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS metaid_knowledge_procedure_hot_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      procedure_id TEXT NOT NULL,
+      ts INTEGER NOT NULL,
+      reason TEXT,
+      source_pass TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_metaid_knowledge_procedure_hot_events_procedure
+      ON metaid_knowledge_procedure_hot_events(procedure_id, ts ASC);
+  `);
 }
 
 const asText = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
@@ -506,6 +574,7 @@ function rowToEntry(row: KnowledgeEntryRow): MetaIDKnowledgeEntry {
     createdAt: asInteger(row.created_at),
     updatedAt: asInteger(row.updated_at),
     lastUsedAt: row.last_used_at == null ? null : asInteger(row.last_used_at),
+    hotEligible: row.hot_eligible == null ? true : Number(row.hot_eligible) !== 0,
   };
 }
 
@@ -918,6 +987,9 @@ export class MetaIDKnowledgeStore {
     if (options.kind) {
       clauses.push('kind = ?');
       params.push(normalizeKind(options.kind));
+    }
+    if (options.hotEligibleOnly) {
+      clauses.push('COALESCE(hot_eligible, 1) = 1');
     }
     if (options.category) {
       clauses.push('category = ?');
@@ -1346,7 +1418,13 @@ export class MetaIDKnowledgeStore {
    */
   setProcedureHotEligibility(
     id: string,
-    input: { eligible: boolean; reason: ProcedureHotReason | null; atMs?: number },
+    input: {
+      eligible: boolean;
+      reason: ProcedureHotReason | null;
+      atMs?: number;
+      /** Dream review P1: which pass caused the flip ('dream' when unknown). */
+      sourcePass?: ProcedureHotEventSource;
+    },
   ): boolean {
     const procedureId = asText(id);
     if (!procedureId) return false;
@@ -1375,11 +1453,102 @@ export class MetaIDKnowledgeStore {
     }
     const changed = (this.db.getRowsModified?.() || 0) > 0;
     if (changed) {
+      // Dream review P1: append-only history — the hot_reason column keeps
+      // only the LATEST reason; the event row preserves what happened, when,
+      // and which pass did it. Best-effort: history must never break the flip.
+      try {
+        this.db.run(
+          `INSERT INTO metaid_knowledge_procedure_hot_events (procedure_id, ts, reason, source_pass)
+           VALUES (?, ?, ?, ?)`,
+          [procedureId, atMs, input.eligible ? null : normalizeProcedureHotReason(input.reason), input.sourcePass ?? 'dream'],
+        );
+      } catch (error) {
+        console.warn('record procedure hot event failed:', error);
+      }
       this.saveDb();
     }
     return changed;
   }
 
+  /**
+   * Dream review P1: the append-only hot-standing history of one procedure,
+   * oldest first. Null when the events table does not exist yet.
+   */
+  listProcedureHotEvents(procedureId: string, options?: { limit?: number }): ProcedureHotEvent[] {
+    const id = asText(procedureId);
+    if (!id) return [];
+    const limit = Math.min(500, Math.max(1, asInteger(options?.limit, 100)));
+    try {
+      const rows = this.getAll<{
+        id: number | string;
+        procedure_id: string;
+        ts: number | string;
+        reason: string | null;
+        source_pass: string;
+      }>(
+        `SELECT id, procedure_id, ts, reason, source_pass
+         FROM metaid_knowledge_procedure_hot_events
+         WHERE procedure_id = ?
+         ORDER BY ts ASC, id ASC
+         LIMIT ?`,
+        [id, limit],
+      );
+      return rows.map((row) => ({
+        id: asInteger(row.id),
+        procedureId: String(row.procedure_id),
+        ts: asInteger(row.ts),
+        reason: normalizeProcedureHotReason(row.reason),
+        sourcePass: (['validation', 'promotion', 're_review', 'pruning', 'rollback', 'dream'] as const)
+          .includes(row.source_pass as ProcedureHotEventSource)
+          ? row.source_pass as ProcedureHotEventSource
+          : 'dream',
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('no such table')) return [];
+      throw error;
+    }
+  }
+
+  /**
+   * Review Minor 1: active knowledge entries currently cooled out of the hot
+   * pool — the re-entry candidate list, mirroring listUnusedProcedures.
+   */
+  listCooledKnowledge(metabotId: number): MetaIDKnowledgeEntry[] {
+    const id = asInteger(metabotId);
+    if (!id) return [];
+    const rows = this.getAll<KnowledgeEntryRow>(`
+      SELECT * FROM metaid_knowledge_entries
+      WHERE metabot_id = ? AND status = 'active' AND COALESCE(hot_eligible, 1) = 0
+      ORDER BY updated_at DESC
+      LIMIT 200
+    `, [id]);
+    return rows.map(rowToEntry);
+  }
+
+  /**
+   * Dream review P1: flip one ACTIVE knowledge entry's hot-pool membership.
+   * The nightly usage audit's knowledge cooling (≥5 audited hot nights in the
+   * trailing window, 0 applied) calls this with eligible=false — the entry
+   * leaves the proactive <knowledge> injection pool but stays active and fully
+   * recallable. Nothing is ever deleted. Idempotent: re-cooling a cooled entry
+   * touches no row and returns false.
+   */
+  setKnowledgeHotEligibility(id: string, input: { eligible: boolean; atMs?: number }): boolean {
+    const knowledgeId = asText(id);
+    if (!knowledgeId) return false;
+    this.db.run(
+      `UPDATE metaid_knowledge_entries
+       SET hot_eligible = ?
+       WHERE id = ? AND status = 'active'`,
+      [input.eligible ? 1 : 0, knowledgeId],
+    );
+    const changed = (this.db.getRowsModified?.() || 0) > 0;
+    if (changed) {
+      this.saveDb();
+    }
+    return changed;
+  }
   /**
    * RRSI P2 hot layer (design §6.2 P2.3): active, hot-eligible procedures —
    * the only ones injected as always-on. Recall-only rows stay reachable

@@ -208,7 +208,25 @@ The sidebar folds every bot-created session (`auto_origin` set) into the collaps
 - `main.ts` — `createCerebellumSessionFollowUpGate()` via `resolveCerebellumCallContext()`, wired as the runner's `cerebellumSessionFollowUpGate` DI option. Logs `sessionFollowUp:cerebellumClassify` with verdict + latency only — never message content.
 - Privacy: the existing notice already lists conversation excerpts (#15's category) — session titles and final assistant messages are that category. **Notice not widened.**
 - Tests: `tests/cerebellumSessionFollowUpGate.test.mjs` (10 — request shape/caps, parse clamping, all failure modes → null, blank no-call, abort deadline) + `tests/coworkSessionFollowUp.test.mjs` (7 — migration idempotency across reopen, round-trips incl. the archived mapper, manual stickiness, onlySources guard, persistence).
-- **`scripts/cerebellum-session-follow-up-eval.mjs` is still missing** — the labeled Chinese eval + threshold sweep has not been built or live-run; the 0.5 threshold ships on cookbook precedent (#1), not on measured data. Build and run it live before treating the question as calibrated.
+- **`scripts/cerebellum-session-follow-up-eval.mjs` — BUILT 2026-10-23 (dream review P2-3)**, live run still pending — see the calibration record below; the 0.5 threshold still ships on cookbook precedent (#1), not on measured data. Run the eval live before treating the question as calibrated.
+
+## 2.21 Calibration status record (2026-10-23, dream review P2-3)
+
+Which cerebellum thresholds have been **live-calibrated** (labeled eval set run
+against the real decision model, threshold swept against the errors that
+matter) and which still ship on cookbook precedent:
+
+| Gate | Eval script | Status 2026-10-23 |
+| --- | --- | --- |
+| #4 Memory re-rank | `scripts/cerebellum-memory-eval.mjs` | **uncalibrated** — script exists, only `--dry-run` recorded in this doc; thresholds not measured |
+| #5 Knowledge hot rank | `scripts/cerebellum-knowledge-hot-rank-eval.mjs` | **uncalibrated** — same |
+| #13 Volatile block gate | `scripts/cerebellum-volatile-gate-eval.mjs` | **live-calibrated** — tuned against real Chinese turns per the threshold comments in `src/main/cerebellum/volatileBlockGate.ts` |
+| #15 Group reply | `scripts/cerebellum-group-reply-eval.mjs` | **uncalibrated** — script exists; no live run recorded |
+| #16 Worker rank | `scripts/cerebellum-worker-rank-eval.mjs` | **uncalibrated** — script exists; no live run recorded |
+| #19 Session follow-up | `scripts/cerebellum-session-follow-up-eval.mjs` | **script built 2026-10-23 (12 labeled cases, threshold sweep)** — **dry-run only**: no `TYPESAFE_API_KEY`/`JEV_API_KEY` in the environment, so the 0.5 threshold remains **uncalibrated** until someone with credentials runs `node scripts/cerebellum-session-follow-up-eval.mjs eval` |
+
+The dry-run-only caveat applies to every "uncalibrated" row above until a live
+run is recorded here with its date and the chosen sweep row.
 
 ## 3. Design rules (do not break)
 

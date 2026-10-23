@@ -393,10 +393,12 @@ test('flow: stalled — directive rides the prompt and a directed proposal compl
   const h = await createDreamHarness();
   try {
     seedStalledTelemetry(h.db, D);
+    insertMetabotRow(h.db, BOT_ID);
     seedSession(h.coworkStore, h.db, D, [
       { type: 'user', content: '视频做好了吗' },
       { type: 'assistant', content: '做好了' },
     ]);
+    h.coworkStore.setMemoryPolicyForMetabot(BOT_ID, { practiceTasksEnabled: true, practiceAutoApproveReadOnly: true });
     h.router.setFallback(() => dreamJson({ practice_proposals: skillProposal('skill') }));
     await h.runNight(D);
     const lastCall = h.router.calls[h.router.calls.length - 1];
@@ -426,6 +428,8 @@ test('flow: stalled — an already-practiced component does not comply', async (
     h.coworkStore.insertDreamPracticeProposals(BOT_ID, shiftDateKey(D, -10), [
       { title: '旧的 memory 练习', prompt: '指令', targetRefs: ['draft:9'], component: 'memory' },
     ]);
+    insertMetabotRow(h.db, BOT_ID);
+    h.coworkStore.setMemoryPolicyForMetabot(BOT_ID, { practiceTasksEnabled: true, practiceAutoApproveReadOnly: true });
     h.router.setFallback(() => dreamJson({ practice_proposals: skillProposal('memory') }));
     await h.runNight(D);
     const exploration = h.telemetry(D).exploration;

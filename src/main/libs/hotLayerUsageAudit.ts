@@ -2,6 +2,10 @@ import { truncateUtf16Units } from './llmSafeText';
 
 /** At most this many exposed items face one audit call (RRSI P3). */
 export const USAGE_AUDIT_MAX_ITEMS = 12;
+/** Hard ceiling across ALL kinds in one audit call (dream review P1): the
+ * per-kind lists fill technique/procedure first, then knowledge, then memory —
+ * the cap keeps the single LLM call bounded. */
+export const USAGE_AUDIT_MAX_ITEMS_TOTAL = 16;
 /** At most this many assistant excerpts ride one audit prompt. */
 export const USAGE_AUDIT_MAX_EXCERPTS = 40;
 /** One excerpt is cut to this many UTF-16 units. */
@@ -19,7 +23,7 @@ export interface UsageAuditExcerpt {
 /** One exposed hot-layer item as the audit prompt shows it. */
 export interface UsageAuditItem {
   ref: string;
-  kind: 'technique' | 'procedure';
+  kind: 'technique' | 'procedure' | 'knowledge' | 'memory';
   itemId: string;
   title: string;
   gist: string;
@@ -69,7 +73,7 @@ export function sampleUsageAuditExcerpts(
  * The audit reads at most the first `maxItems` exposures — the caller's list
  * is already ordered hot-first, then by repeat count (listHotLayerExposures).
  */
-export function selectUsageAuditItems<T extends { kind: 'technique' | 'procedure'; itemId: string }>(
+export function selectUsageAuditItems<T extends { kind: 'technique' | 'procedure' | 'knowledge' | 'memory'; itemId: string }>(
   exposures: readonly T[],
   maxItems: number = USAGE_AUDIT_MAX_ITEMS,
 ): T[] {

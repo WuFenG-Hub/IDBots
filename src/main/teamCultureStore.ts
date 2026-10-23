@@ -268,6 +268,14 @@ export function ensureTeamCultureSchema(db: Database): void {
 
 export class TeamCultureStore {
   private readonly maxActive: Record<TeamCultureKind, number>;
+  /**
+   * Review Minor 8: debounce anchor for the per-build usage-counter flush.
+   * buildCulturePromptBlock runs on EVERY cowork turn; the counter UPDATEs
+   * are cheap in-memory ops, but saveDb is a full-file serialization that
+   * used to run per turn. A lost tail of counter ticks is cosmetic (the
+   * counters only feed displacement/decay ordering).
+   */
+  private lastUsageSaveAt = 0;
 
   constructor(
     private readonly db: Database,
@@ -684,7 +692,12 @@ export class TeamCultureStore {
         [now, id],
       );
     }
-    this.saveDb();
+    // Review Minor 8: debounce the full-file save — at most one write per
+    // 10s window no matter how many turns rendered the block.
+    if (now - this.lastUsageSaveAt >= 10_000) {
+      this.lastUsageSaveAt = now;
+      this.saveDb();
+    }
     return [...header, ...sections, closingTag].join('\n');
   }
 

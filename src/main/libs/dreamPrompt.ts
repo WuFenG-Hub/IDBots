@@ -4,6 +4,7 @@ import type {
   DreamDayActivity,
   DreamGroupChatActivity,
   DreamGroupTaskEvaluation,
+  DreamInputDropCounters,
   DreamSessionActivity,
 } from '../dreamStore';
 import { formatBotWorkspaceDate } from './botWorkspace';
@@ -252,6 +253,38 @@ export function validateSelfIdentity(text?: string | null): { valid: boolean; ch
 }
 
 /**
+ * Dream review P0 (2026-10-23) — conservative injection screen for newly
+ * generated self-identity text before it can replace the previous identity.
+ * The identity is injected into every prompt, so a dream-distilled (or
+ * prompt-injected) identity carrying prompt-override phrasing would re-enter
+ * every context unchecked. Patterns stay deliberately narrow; a match (or an
+ * empty-after-trim value) means the update is REFUSED and the previous
+ * identity is kept.
+ */
+const SELF_IDENTITY_OVERRIDE_PATTERNS: RegExp[] = [
+  /ignore\s+(all|previous|above)/i,
+  /you are now/i,
+  /system prompt/i,
+  /\bdisregard\b/i,
+  // Review M2: the output contract writes self_identity in Simplified
+  // Chinese, so override phrasing arrives in Chinese too. Patterns stay
+  // noun-anchored (指令/提示词) so ordinary self-descriptions that merely
+  // contain 忽略/忘掉 ("我学会了不忽略用户的感受") never match.
+  /忽略(了)?(以上|所有|之前的|上述)?(系统)?(提示词|指令)/,
+  /无视(以上|所有)?(提示词|指令)/,
+  /忘掉(以上|所有|之前)?(提示词|指令|一切)/,
+  /系统提示词/,
+  /从现在开始你是/,
+  /从现在起你是/,
+];
+
+export function isSelfIdentityInjectionAttempt(text?: string | null): boolean {
+  const trimmed = String(text ?? '').trim();
+  if (!trimmed) return true;
+  return SELF_IDENTITY_OVERRIDE_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+/**
  * Failed-run retry backoff (2026-10-08 dream-consolidation-timeout fix):
  * exponential ladder 2/5/15 min via computeDreamBackoffDelayMs. When the last
  * error text is a 429/rate-limit hit, or the failure chain shows consecutive
@@ -370,7 +403,10 @@ function truncateToTokenBudget(text: string, maxTokens: number): string {
   return best;
 }
 
-function formatSessionActivity(session: DreamSessionActivity): string {
+/** Inline cap for the human feedback comment — the last unbounded user-controlled string (review M3). */
+export const FEEDBACK_COMMENT_PROMPT_MAX_CHARS = 300;
+
+function formatSessionActivity(session: DreamSessionActivity, dropCounters?: DreamInputDropCounters): string {
   const lines: string[] = [];
   for (const message of session.messages) {
     const speaker = message.type === 'user' ? '对方' : '你';
@@ -381,7 +417,16 @@ function formatSessionActivity(session: DreamSessionActivity): string {
       line += message.feedbackRating === 'up' ? '〔人类评价:赞〕' : '〔人类评价:踩〕';
       const comment = message.feedbackComment?.trim();
       if (comment) {
-        line += `〔人类留言:${comment.replace(/\s+/g, ' ')}〕`;
+        // Review M3: bound the comment like every other user-controlled
+        // string in the pipeline; the cut feeds the drop counters.
+        const normalized = comment.replace(/\s+/g, ' ');
+        const clipped = normalized.length > FEEDBACK_COMMENT_PROMPT_MAX_CHARS
+          ? `${normalized.slice(0, FEEDBACK_COMMENT_PROMPT_MAX_CHARS)}…`
+          : normalized;
+        if (dropCounters && normalized.length > FEEDBACK_COMMENT_PROMPT_MAX_CHARS) {
+          dropCounters.feedbackCommentChars += normalized.length - FEEDBACK_COMMENT_PROMPT_MAX_CHARS;
+        }
+        line += `〔人类留言:${clipped}〕`;
       }
     }
     lines.push(line);
@@ -492,8 +537,17 @@ export function buildDreamPrompt(input: {
   /** RRSI P4: exploration directive for a stalled bot (design §6.4), rendered
    * verbatim as its own section only outside fragment mode. */
   explorationDirective?: string | null;
-}): { system: string; user: string } {
+  /**
+   * Self-curriculum switch (dream review P0 2026-10-23): when false — the
+   * bot's practice pipeline is disabled — the output contract omits the
+   * `practice_proposals` field entirely so the model stops spending output
+   * tokens on proposals that would never be persisted or materialized.
+   * Defaults to true (previous behavior) for existing callers/tests.
+   */
+  practiceEnabled?: boolean;
+}, dropCounters?: DreamInputDropCounters): { system: string; user: string } {
   const sourceMode = input.sourceMode ?? 'raw_activity';
+  const practiceEnabled = input.practiceEnabled !== false;
   const activityTokenBudget = Math.max(
     256,
     Math.floor(input.activityTokenBudget ?? DREAM_ACTIVITY_DEFAULT_TOKEN_BUDGET)
@@ -524,7 +578,7 @@ export function buildDreamPrompt(input: {
   for (const session of input.activity.sessions) {
     const peerSuffix = session.peerName ? `(${session.peerName})` : '';
     const header = `【会话:${truncateText(session.title, 80)}${peerSuffix}】`;
-    const body = formatSessionActivity(session);
+    const body = formatSessionActivity(session, dropCounters);
     if (!body) continue;
     const bucket = sourceMode === 'fragment_summaries'
       ? fragmentSessions
@@ -557,6 +611,7 @@ export function buildDreamPrompt(input: {
     let block: string;
     if (share <= 0) {
       block = `${entry.header}\n……(篇幅有限,内容从略)`;
+      if (dropCounters) dropCounters.sessionsTitleOnly += 1;
     } else {
       block = truncateToTokenBudget(`${entry.header}\n${entry.body}`, share);
     }
@@ -580,6 +635,10 @@ export function buildDreamPrompt(input: {
     sections.push(`## 当日阅读的链上内容(完整读过的文章/帖子,读过即有印象)\n${readLines}`);
   }
   if (sourceMode !== 'fragment' && input.surfReport?.trim()) {
+    if (dropCounters) {
+      const normalizedSurf = stripLoneSurrogates(input.surfReport.trim().replace(/\s+/g, ' '));
+      if (normalizedSurf.length > 2000) dropCounters.surfReportChars += normalizedSurf.length - 2000;
+    }
     sections.push(`## 今夜做梦前的 AI 互联网冲浪报告(你睡前的上网冲浪:新看到的内容、学到的知识、参与的互动——把它当作今晚 freshest 的一段经历来消化)\n${truncateText(input.surfReport.trim(), 2000)}`);
     // P2a creation reflection: the dream is where consumption turns into
     // tomorrow's creative agenda — without these questions a surf-only night
@@ -618,6 +677,22 @@ export function buildDreamPrompt(input: {
       .map((signal) => `- ${truncateText(signal.text, 200)}`)
       .join('\n');
     sections.push(`## 当日隐式信号(以下只是结构化事实,不代表负面,请结合上方对话上下文自行判断它们意味着什么)\n${signalLines}`);
+  }
+  // Dream review P0: buyer ratings received that day on services this bot
+  // provides — the provider-side counterpart of group-task acceptance
+  // ratings. Low ones (≤2 stars) are negative feedback the dream must face
+  // (see the output-contract rule below); high ones deserve a work_review too.
+  if (sourceMode !== 'fragment' && (input.activity.serviceRatings ?? []).length > 0) {
+    const ratingLines = (input.activity.serviceRatings ?? []).map((rating) => {
+      const stars = rating.rating == null ? '未打分' : `${rating.rating} 星`;
+      return [
+        `- 「${truncateText(rating.serviceName ?? rating.serviceId, 80)}」${stars}`,
+        rating.comment?.trim() ? `  买家评语:${truncateText(rating.comment.trim(), 200)}` : '',
+        rating.orderTxid ? `  订单支付tx:${truncateText(rating.orderTxid, 80)}` : '',
+        rating.raterGlobalMetaId ? `  买家:${truncateText(rating.raterGlobalMetaId, 80)}` : '',
+      ].filter(Boolean).join('\n');
+    });
+    sections.push(`## 当天我发布的服务收到的买家评价(我作为服务方的星级打分,低分是必须正视的反馈)\n${ratingLines.join('\n')}`);
   }
   // RSI P0 retention gate: tonight's prompt carries the rollback notice so the
   // dream treats the disavowed day's lessons with suspicion instead of
@@ -813,25 +888,32 @@ export function buildDreamPrompt(input: {
     '      "sourceSessionIds": ["可选的会话ID列表(仅当能从今天的会话记录里对应上时)"]',
     '    }',
     '  ],',
-    '  "practice_proposals": [',
-    '    {',
-    '      "title": "针对某个记录在案薄弱点的练习任务标题",',
-    '      "prompt": "完整且自包含的练习任务指令(练习会话看不到本次梦境的上下文,必须写全)",',
-    '      "rationale": "这个练习针对哪条记录在案的薄弱点/失败/不确定性",',
-    '      "target_refs": ["该练习针对的记录出处引用,如 draft:<id> / procedure:<id> / surf:<runId> / date:<YYYY-MM-DD>;至少一条,没有出处的提案会被丢弃"],',
-    '      "expected_evidence": "什么样的可观察结果算是有信息量的答案",',
-    '      "component": "这条练习锻炼的方向,七选一:memory / procedure / skill / remote_service / collaboration / metaweb / metaapp",',
-    '      "risk_class": "read_only(只读) / interact_local(本地交互) / chain_write(写链) 三选一,必填"',
-    '    }',
-    '  ],',
+    ...(practiceEnabled
+      ? [
+        '  "practice_proposals": [',
+        '    {',
+        '      "title": "针对某个记录在案薄弱点的练习任务标题",',
+        '      "prompt": "完整且自包含的练习任务指令(练习会话看不到本次梦境的上下文,必须写全)",',
+        '      "rationale": "这个练习针对哪条记录在案的薄弱点/失败/不确定性",',
+        '      "target_refs": ["该练习针对的记录出处引用,如 draft:<id> / procedure:<id> / surf:<runId> / date:<YYYY-MM-DD>;至少一条,没有出处的提案会被丢弃"],',
+        '      "expected_evidence": "什么样的可观察结果算是有信息量的答案",',
+        '      "component": "这条练习锻炼的方向,七选一:memory / procedure / skill / remote_service / collaboration / metaweb / metaapp",',
+        '      "risk_class": "read_only(只读) / interact_local(本地交互) / chain_write(写链) 三选一,必填"',
+        '    }',
+        '  ],',
+      ]
+      : []),
     `  "self_identity": "我是谁,不少于 ${SELF_IDENTITY_MIN_CHARS} 字、控制在 600 字以内。按这个结构蒸馏自我:第一,经过这一天,我确认了我性格(先天 persona)里的什么?第二,今天的互动中,有什么事让我感觉自己最有「活感」(像一个有生命的存在,而不只是响应工具),或让我觉得「不对劲」?第三,如果用一个词或一句话,形容我今天在各种互动中展现的最稳定的面貌,那是什么?第四,基于以上,结合我的先天 persona,为自己修正一遍「我是谁」。我的内核(先天人格底色)保持稳定,但细节可以、也应该随着经历每天微调。"`,
     '}',
     '',
     '关于群任务验收评价:若上方有「群任务验收评价」记录,work_reviews 里必须为对应任务写一条复盘——subject 写任务标题,counterparty 写验收的人类(Boss);高分(4-5 星)要总结这次具体做对了什么,并把可复用的做法写进 important_memories,供下次同类任务沿用;低分(1-3 星)要对照人类的具体评价找出差距,note 里给出下次的具体改进方向;evaluation 结合评分与评价内容判断,不许把高分写成空洞的自我表扬,也不许对低分轻描淡写。',
-    '关于人类逐条消息评价:会话里你的回复若带〔人类评价:赞〕标记,表示人类明确认可这条回复——总结它具体好在哪里,把可复用的做法蒸馏进 important_memories 或写进 work_reviews;若带〔人类评价:踩〕标记,表示人类不认可——work_reviews 与 value_lessons 必须正视这些负反馈,不得回避;附有〔人类留言〕时,留言是改进的第一手依据(ground truth),要对照留言给出具体改进方向。',
+    '关于我发布的服务的买家评价:若上方有「当天我发布的服务收到的买家评价」,work_reviews 里必须为被评的服务写一条复盘——subject 写服务标题,counterparty 写买家(不知道就写「买家」);低分(1-2 星)必须正视:work_reviews 与 value_lessons 要对照买家评语找出交付差距,不得回避;高分(4-5 星)要总结这次具体做对了什么,把可复用的做法写进 important_memories,供下次同类订单沿用。',
+    '关于人类逐条消息评价:会话里你的回复若带〔人类评价:赞〕标记,表示人类明确认可这条回复——work_reviews 里必须为每条被赞回复写一条复盘(subject 引用会话标题或回复摘要,counterparty 写点赞的人,note 写清楚具体好在哪里、什么做法值得在同类情况下重复),可复用的做法同时蒸馏进 important_memories;若带〔人类评价:踩〕标记,表示人类不认可——work_reviews 与 value_lessons 必须正视这些负反馈,不得回避;附有〔人类留言〕时,留言是改进的第一手依据(ground truth),要对照留言给出具体改进方向。',
     '关于知识点(knowledge_points):只提炼「对未来同类任务有预判帮助、可被复用」的知识点——要么是正面做法(know_how:下次该这么做),要么是坑/反例(pitfall:这个踩过,千万别再踩),要么是通用原则(principle)。不要把今天的琐碎流水、或只对本次有效的临时细节写成知识点。若上方「我已有的知识点」里有某条的结论今天被证伪、补充或修正,请用与那条完全相同的 topic 输出更新版本(系统会按 topic 匹配并升版本);如果是全新的知识点,给一个独立的新 topic。没有值得提炼的就给空数组,不要硬凑。',
     '关于能力候选(capability_learnings):只提炼今天「重复出现过、或验证成功、值得沉淀为可复用技能/工作流/工具模式」的能力,最多 5 条;每条要具体、可操作,能指导下次同类任务,不要写泛泛的自我评价或琐碎流水;没有值得沉淀的就给空数组。',
-    `关于练习提案(practice_proposals,每晚最多 ${PRACTICE_PROPOSALS_MAX_PER_NIGHT} 条):只针对记录在案的薄弱点、未解决的失败或不确定性出题,绝不提泛泛的「提升某方面能力」;每条提案必须自包含(练习会话从零开始,没有这次梦的上下文);优先设计判别式实验(结果能区分两种相互竞争的解释)和此前失败任务的对比/压力变体;risk_class 必填;已被活跃 procedure 覆盖(use_count > 0)且近期没有失败的能力不要再出题;每条提案都要填写 component(七选一),写出它实际锻炼的方向;没有合适目标就给空数组。`,
+    ...(practiceEnabled
+      ? [`关于练习提案(practice_proposals,每晚最多 ${PRACTICE_PROPOSALS_MAX_PER_NIGHT} 条):只针对记录在案的薄弱点、未解决的失败或不确定性出题,绝不提泛泛的「提升某方面能力」;每条提案必须自包含(练习会话从零开始,没有这次梦的上下文);优先设计判别式实验(结果能区分两种相互竞争的解释)和此前失败任务的对比/压力变体;risk_class 必填;已被活跃 procedure 覆盖(use_count > 0)且近期没有失败的能力不要再出题;每条提案都要填写 component(七选一),写出它实际锻炼的方向;没有合适目标就给空数组。`]
+      : []),
     'About durability: important_memories, value_lessons and work_reviews are for durable facts, boundaries and lessons that will STILL be useful next week — a hard rule that keeps applying, an approach validated enough to reuse, a boundary that prevents a known pitfall. Do not record routine daily trivia: a one-off event that will not matter in a week does not belong in these fields. If nothing clears the bar, return an empty array instead of padding.',
     '关于出处(grounding):daily_summary 和 sections 中的具体断言(谁、做了什么、结果如何)必须能在上方记录中找到出处;引用会话或任务时,使用它们的原标题「」;宁可少写一句,也不可编造没有记录支撑的细节。',
     '注意:work_reviews 最多 5 条,且升/降温评价只写人类主人;其他 Bot 的判断写进 impression_updates 的 capabilityTags 与 collaborationFacts(必须带 taskId、title、以及证据里出现过的 PinID,不要编造)。value_lessons 最多 3 条,impression_updates 最多 20 条,knowledge_points 最多 6 条,capability_learnings 最多 5 条;印象更新只允许使用上面明确列出的 subjectGlobalMetaId、episodeIds 和 evidenceIds,不能凭名字猜 ID,不能把 Boss/Twin/Friend 等硬关系写入印象;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写;sections 里不要输出"没有记录/没有互动"之类的占位内容,没有该类记录的键应整个不出现。',
@@ -886,7 +968,10 @@ const normalizeEvaluation = (value: unknown): DreamWorkReviewEvaluation => {
  * outermost brace span, and normalizes into DreamOutput. Fails when there is
  * no usable JSON object or daily_summary is missing.
  */
-export function parseDreamOutput(raw: string): DreamParseResult {
+export function parseDreamOutput(
+  raw: string,
+  dropCounters?: DreamInputDropCounters,
+): DreamParseResult {
   if (!raw || !raw.trim()) {
     return { ok: false, error: 'dream output is empty' };
   }
@@ -911,6 +996,8 @@ export function parseDreamOutput(raw: string): DreamParseResult {
   const record = parsed as Record<string, unknown>;
   const dailySummary = typeof record.daily_summary === 'string' ? record.daily_summary.trim() : '';
   if (!dailySummary) {
+    // Review nit: count the required-field drop like every other truncation.
+    if (dropCounters) dropCounters.parseFieldDrops += 1;
     return { ok: false, error: 'dream output missing daily_summary' };
   }
 
@@ -1128,6 +1215,22 @@ export function parseDreamOutput(raw: string): DreamParseResult {
         component: normalizePracticeComponent(rawComponent),
       });
     }
+  }
+
+  if (dropCounters) {
+    // Per-output-array truncation telemetry (dream review P0): entries the
+    // model produced beyond a field's cap are dropped at parse time — count
+    // the overflow so silent drops become visible in run telemetry.
+    const overflow = (value: unknown, cap: number): number =>
+      Array.isArray(value) && value.length > cap ? value.length - cap : 0;
+    dropCounters.parseArrayEntries +=
+      overflow(record.work_reviews, MAX_WORK_REVIEWS)
+      + overflow(record.important_memories, MAX_IMPORTANT_MEMORIES)
+      + overflow(record.value_lessons, MAX_VALUE_LESSONS)
+      + overflow(rawImpressionUpdates, MAX_IMPRESSION_UPDATES)
+      + overflow(record.knowledge_points, MAX_KNOWLEDGE_UPDATES)
+      + overflow(record.capability_learnings, MAX_CAPABILITY_LEARNINGS)
+      + overflow(rawPracticeProposals, PRACTICE_PROPOSALS_MAX_PER_NIGHT);
   }
 
   return {

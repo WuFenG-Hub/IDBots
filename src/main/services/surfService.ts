@@ -136,6 +136,16 @@ export interface SurfServiceDeps {
    * counts when own posts exist.
    */
   fetchSurfReception?: (input: { owner: string; sinceTs: number; pinIds: string[] }) => Promise<Array<{ pinId: string; interactions: number }>>;
+  /**
+   * Dream review P3: pre-flight model-binding validation (host-wired to the
+   * cowork runner's route probe). Surf sessions are unattended orchestrator
+   * turns — a stale binding used to create an orphan [编排任务] session plus
+   * its ~49k-char prompt EVERY night before failing at turn time (13/13
+   * pre-dream failures in dev data). The check runs BEFORE any session
+   * exists; a failure fails the run row without creating a session.
+   * Absent → no check (tests, digest-only harnesses).
+   */
+  checkModelBinding?: (metabotId: number) => { ok: boolean; reason: string | null };
   /** Protocol radar fetcher (R6): newest registered /protocols/* declarations. */
   fetchProtocolRadar?: () => Promise<SurfProtocolRadarFetchResult>;
   /** Hot posts fetcher (P2b): engagement-ranked items; errors land in hotPosts.error. */
@@ -166,6 +176,14 @@ export class SurfService {
   private readonly getLatestDreamDigest?: SurfServiceDeps['getLatestDreamDigest'];
   private readonly runningByMetabot = new Map<number, string>();
   private readonly backgroundDeferral?: SurfServiceDeps['backgroundDeferral'];
+  private readonly checkModelBinding?: SurfServiceDeps['checkModelBinding'];
+  /**
+   * Dream review P3: pre-dream surf skips caused by a stale model binding —
+   * one entry per bot, cleared as soon as the binding resolves again. The
+   * dream fires once per night, so the gate re-validates on every call; the
+   * map preserves the skip reason for the night's telemetry.
+   */
+  private preDreamBindingSkips = new Map<number, string>();
   /** One-line "deferred" log latch (see shouldPreDreamSurf). */
   private deferralLogged = false;
 
@@ -186,6 +204,36 @@ export class SurfService {
     this.fetchProtocolRadar = deps.fetchProtocolRadar;
     this.fetchHotPosts = deps.fetchHotPosts;
     this.getLatestDreamDigest = deps.getLatestDreamDigest;
+    this.checkModelBinding = deps.checkModelBinding;
+  }
+
+  /**
+   * Dream review P3: the pre-dream surf's binding gate. Validates the bot's
+   * model binding; on failure records the skip (one per bot) and returns the
+   * reason so the host can log it and mark the dream telemetry surfSkipped.
+   * A later call re-validates — once the binding resolves the skip clears
+   * and surfing resumes. A throwing/absent checker never blocks the surf.
+   */
+  preDreamModelBindingGate(metabotId: number): { ok: boolean; reason: string | null } {
+    if (!this.checkModelBinding) return { ok: true, reason: null };
+    let result: { ok: boolean; reason: string | null } | null = null;
+    try {
+      result = this.checkModelBinding(metabotId) ?? null;
+    } catch {
+      return { ok: true, reason: null };
+    }
+    if (result?.ok) {
+      this.preDreamBindingSkips.delete(metabotId);
+      return { ok: true, reason: null };
+    }
+    const reason = (result?.reason ?? '').trim() || 'model binding unresolved';
+    this.preDreamBindingSkips.set(metabotId, reason);
+    return { ok: false, reason };
+  }
+
+  /** The currently recorded binding-skip reason for one bot (telemetry/tests). */
+  preDreamBindingSkipReason(metabotId: number): string | null {
+    return this.preDreamBindingSkips.get(metabotId) ?? null;
   }
 
   /** Crash recovery at startup: runs orphaned by a killed process become failed. */
@@ -338,6 +386,21 @@ export class SurfService {
       // session are re-derived locally — the duplicate-interaction guard must
       // never work off a stale ledger. Idempotent (strongest-wins batching).
       this.reconcileSeenLedger(metabotId);
+      // Dream review P3: validate the model binding BEFORE any cowork
+      // session exists — every trigger (pre-dream, manual, scheduled) shares
+      // this guard, so a stale binding can no longer mint orphan [编排任务]
+      // sessions. The run fails on its row with the binding reason instead.
+      if (this.checkModelBinding) {
+        let binding: { ok: boolean; reason: string | null } = { ok: true, reason: null };
+        try {
+          binding = this.checkModelBinding(metabotId) ?? binding;
+        } catch {
+          // A broken checker must never block a surf.
+        }
+        if (!binding.ok) {
+          throw new Error(`Surf model binding stale: ${(binding.reason ?? '').trim() || 'unresolved'}`);
+        }
+      }
       const budget = getSurfInteractionBudget(this.metabotStore, metabotId);
       const creationBudget = getSurfCreationBudget(this.metabotStore, metabotId);
       const creationMode = getSurfCreationMode(this.metabotStore, metabotId);

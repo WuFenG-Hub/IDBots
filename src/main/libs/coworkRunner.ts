@@ -72,6 +72,7 @@ import {
   formatKnowledgeUpsertResult,
   KNOWLEDGE_PROMPT_MAX_CHARS,
   KNOWLEDGE_PROMPT_MAX_ITEMS,
+  selectKnowledgePromptItems,
   type KnowledgePromptEntry,
 } from './knowledgePromptBlocks';
 import {
@@ -1943,6 +1944,8 @@ export interface CoworkKnowledgeStore {
     limit?: number;
     /** Cold recall channel: include status='archived' entries alongside active ones. */
     includeArchived?: boolean;
+    /** Dream review P1: keep only entries not cooled out of the hot pool. */
+    hotEligibleOnly?: boolean;
     touchLastUsed?: boolean;
   }): Array<{
     id: string;
@@ -2184,6 +2187,13 @@ export interface CoworkRunnerOptions {
   experienceStore?: CoworkExperienceStore;
   /** Knowledge-point anchored memory (经验/知识点): hot block + recall/upsert tools. */
   knowledgeStore?: CoworkKnowledgeStore;
+  /**
+   * Dream review P1: team culture block (fleet glossary / conventions /
+   * lessons) for the volatile tail, built per turn with usage counters.
+   * Returns null when the culture layer is disabled or unavailable.
+   * Implemented in main.ts on top of TeamCultureStore.
+   */
+  buildTeamCultureBlock?: () => string | null;
   /** Raw episode timeline for the time-anchor fallback in experience_recall. */
   episodeTimelineProvider?: CoworkEpisodeTimeline;
   /**
@@ -2620,6 +2630,7 @@ export class CoworkRunner extends EventEmitter {
   private controlBotBrowser?: BotBrowserControl;
   private experienceStore?: CoworkExperienceStore;
   private knowledgeStore?: CoworkKnowledgeStore;
+  private buildTeamCultureBlock?: () => string | null;
   private episodeTimelineProvider?: CoworkEpisodeTimeline;
   private metaIdSearch?: MetaIdSearchControl;
   private networkServices?: NetworkServicesControl;
@@ -2801,6 +2812,7 @@ export class CoworkRunner extends EventEmitter {
     this.controlBotBrowser = options?.controlBotBrowser;
     this.experienceStore = options?.experienceStore;
     this.knowledgeStore = options?.knowledgeStore;
+    this.buildTeamCultureBlock = options?.buildTeamCultureBlock;
     this.episodeTimelineProvider = options?.episodeTimelineProvider;
     this.metaIdSearch = options?.metaIdSearch;
     this.networkServices = options?.networkServices;
@@ -4033,6 +4045,28 @@ export class CoworkRunner extends EventEmitter {
     });
     if (injectedIds.length > 0) {
       this.getMemoryBackend().touchUserMemoriesLastUsed(metabotId, injectedIds);
+      // Dream review P1 exposure ledger: the guidance memories
+      // (value_boundary / work_review) that rendered enter the nightly usage
+      // audit's evidence pool as kind 'memory'. Best-effort telemetry.
+      const guidanceClassById = new Map<string, string>();
+      for (const entry of [...context.ownerEntries, ...context.contactEntries, ...context.conversationEntries]) {
+        if (entry?.id && entry.usageClass) guidanceClassById.set(entry.id, entry.usageClass);
+      }
+      const memoryExposureIds = injectedIds.filter((id) => {
+        const usageClass = guidanceClassById.get(id);
+        return usageClass === 'value_boundary' || usageClass === 'work_review';
+      });
+      if (memoryExposureIds.length > 0) {
+        try {
+          this.store.recordHotLayerExposures({
+            metabotId,
+            usageDate: formatBotWorkspaceDate(new Date()),
+            items: memoryExposureIds.map((id) => ({ kind: 'memory', id, exposure: 'hot' })),
+          });
+        } catch {
+          // telemetry is best-effort
+        }
+      }
     }
 
     coworkLog('INFO', 'memory:promptBlocks', 'Built scoped memory prompt blocks', {
@@ -4434,6 +4468,18 @@ export class CoworkRunner extends EventEmitter {
       const injectedIds = filtered.map((entry) => entry.id).filter(Boolean);
       if (injectedIds.length > 0) {
         this.knowledgeStore.touchKnowledgeLastUsed?.(metabotId, injectedIds);
+        // Review Minor 1: recall exposure accounting, symmetric with
+        // procedure_recall — cooled knowledge earns its re-entry evidence
+        // through these rows. Best-effort telemetry.
+        try {
+          this.store.recordHotLayerExposures({
+            metabotId,
+            usageDate: formatBotWorkspaceDate(new Date()),
+            items: injectedIds.map((id) => ({ kind: 'knowledge', id, exposure: 'recall' })),
+          });
+        } catch {
+          // telemetry is best-effort
+        }
       }
       const entries: KnowledgePromptEntry[] = filtered.map((entry) => ({
         topic: entry.topic,
@@ -6284,6 +6330,9 @@ export class CoworkRunner extends EventEmitter {
       metabotId,
       status: 'active',
       limit: CEREBELLUM_KNOWLEDGE_MAX_CANDIDATES,
+      // Dream review P1: usage-audit-cooled entries leave the hot pool (they
+      // stay recallable); the wide pool for the cerebellum rank is hot-only.
+      hotEligibleOnly: true,
     });
     if (entries.length < CEREBELLUM_KNOWLEDGE_MIN_POOL) return null;
     return entries;
@@ -6367,6 +6416,7 @@ export class CoworkRunner extends EventEmitter {
     // with the experience blocks rather than injected separately, to keep the
     // memory prompt cohesive.
     let knowledgeBlock = '';
+    let fallbackKnowledgeEntries: KnowledgePromptEntry[] | null = null;
     if (knowledgeHot) {
       // The wide pool was already loaded for the rank call. A null score map
       // keeps recency order, and buildKnowledgeBlock then slices the newest 8
@@ -6378,12 +6428,41 @@ export class CoworkRunner extends EventEmitter {
         knowledgeHot.relevanceScoreById,
       );
     } else if (this.knowledgeStore) {
-      const knowledgeEntries = this.knowledgeStore.listKnowledge({
+      fallbackKnowledgeEntries = this.knowledgeStore.listKnowledge({
         metabotId,
         status: 'active',
         limit: KNOWLEDGE_PROMPT_MAX_ITEMS,
+        // Dream review P1: cooled entries stay recall-only.
+        hotEligibleOnly: true,
       });
-      knowledgeBlock = buildKnowledgeBlock(knowledgeEntries);
+      knowledgeBlock = buildKnowledgeBlock(fallbackKnowledgeEntries);
+    }
+    // Dream review P1 exposure ledger: record today's hot knowledge exposures
+    // for exactly the entries that rendered (same inputs → same selection as
+    // buildKnowledgeBlock). Best-effort telemetry — never breaks a turn.
+    if (knowledgeBlock && knowledgeBlock.includes('<knowledge>')) {
+      try {
+        const renderedKnowledge = knowledgeHot
+          ? selectKnowledgePromptItems(
+              knowledgeHot.entries,
+              KNOWLEDGE_PROMPT_MAX_ITEMS,
+              KNOWLEDGE_PROMPT_MAX_CHARS,
+              knowledgeHot.relevanceScoreById,
+            )
+          : selectKnowledgePromptItems(fallbackKnowledgeEntries ?? []);
+        const knowledgeExposureItems = renderedKnowledge
+          .filter((entry) => typeof entry.id === 'string' && entry.id)
+          .map((entry) => ({ kind: 'knowledge' as const, id: entry.id as string, exposure: 'hot' as const }));
+        if (knowledgeExposureItems.length > 0) {
+          this.store.recordHotLayerExposures({
+            metabotId,
+            usageDate: formatBotWorkspaceDate(new Date()),
+            items: knowledgeExposureItems,
+          });
+        }
+      } catch {
+        // telemetry is best-effort
+      }
     }
     // Procedure hot-layer (经验): proven task workflows ride the same block so
     // a matching procedure preempts a fresh MetaWeb search for a task the bot
@@ -6907,6 +6986,27 @@ export class CoworkRunner extends EventEmitter {
       }
       // Per-bot knowledge bases: doc counts shift on every learn run, so
       // the listing is volatile and content-deduped like the other blocks.
+      // Dream review P1: the fleet's shared culture (glossary / conventions /
+      // lessons) rides the volatile tail like the group-task turns — one
+      // compact <team_culture> block under a hard char cap, built per turn
+      // (the builder refreshes its usage counters). Gated by the same master
+      // switch as group tasks inside the builder; the cerebellum volatile
+      // gate can skip it like the other guidance blocks. No private-chat
+      // injection (privacy surface) — cowork turns only.
+      if (sessionMemoryEnabled && this.buildTeamCultureBlock && shouldInjectVolatile('team-culture')) {
+        let cultureBlock: string | null = null;
+        try {
+          cultureBlock = this.buildTeamCultureBlock();
+        } catch {
+          cultureBlock = null;
+        }
+        if (cultureBlock) {
+          sections.push({
+            key: 'team-culture',
+            text: cultureBlock,
+          });
+        }
+      }
       if (sessionMemoryEnabled && shouldInjectVolatile('knowledge-bases')) {
         sections.push({
           key: 'knowledge-bases',
@@ -8913,6 +9013,36 @@ export class CoworkRunner extends EventEmitter {
     const sessionModelProvider = sessionRow?.modelProvider?.trim() || null
     const brain = sessionModel ? null : this.getSessionAutomationBrain(sessionId)
     return this.resolveBrainDshRoute({ sessionModel, sessionModelProvider, brain, logKey: sessionId })
+  }
+
+  /**
+   * Dream review P3: pre-flight probe of an automation metabot's model
+   * binding, used by the surf pipeline BEFORE it creates a cowork session.
+   * Resolves exactly the route the unattended turn would use (no session
+   * pick — the metabot brain path); a ModelProviderSelectionError (stale
+   * binding, e.g. a provider that no longer offers the enabled model) comes
+   * back as { ok: false, reason } instead of surfacing mid-turn after the
+   * session and its ~49k-char prompt already exist. Never throws.
+   */
+  checkAutomationModelBinding(metabotId: number): { ok: boolean; reason: string | null } {
+    try {
+      const brain = this.automationBrainForMetabot(metabotId);
+      const route = this.resolveBrainDshRoute({
+        sessionModel: null,
+        sessionModelProvider: null,
+        brain,
+        logKey: `binding-probe:${metabotId}`,
+      });
+      if (!route) {
+        return { ok: false, reason: 'no enabled provider route resolves for this bot' };
+      }
+      return { ok: true, reason: null };
+    } catch (error) {
+      if (error instanceof ModelProviderSelectionError) {
+        return { ok: false, reason: error.message };
+      }
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   /**

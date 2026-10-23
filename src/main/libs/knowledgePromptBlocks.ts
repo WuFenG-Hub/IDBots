@@ -96,30 +96,15 @@ export function buildKnowledgeBlock(
   maxChars: number = KNOWLEDGE_PROMPT_MAX_CHARS,
   relevanceScoreById?: ReadonlyMap<string, number> | null,
 ): string {
-  const items = orderKnowledgeEntriesForPrompt(entries ?? [], relevanceScoreById)
-    .slice(0, Math.max(1, maxItems))
-    .map((entry) => ({
-      topic: truncate(entry.topic, KNOWLEDGE_TOPIC_MAX_CHARS),
-      summary: truncate(entry.summary, KNOWLEDGE_ENTRY_MAX_CHARS),
-      kind: entry.kind === 'pitfall' ? 'pitfall' : entry.kind === 'principle' ? 'principle' : 'know_how',
-      category: typeof entry.category === 'string' && entry.category.trim() ? entry.category.trim() : null,
-    }))
-    .filter((entry) => entry.topic && entry.summary);
+  const items = selectKnowledgePromptItems(entries, maxItems, maxChars, relevanceScoreById);
   if (items.length === 0) return '';
 
   const lines: string[] = ['<knowledge>'];
-  let used = lines.join('\n').length;
-  let included = 0;
   for (const entry of items) {
     const tag = entry.kind === 'pitfall' ? 'pitfall' : entry.kind === 'principle' ? 'principle' : 'know_how';
     const categoryAttr = entry.category ? ` category="${escapeXml(entry.category)}"` : '';
-    const line = `  <${tag}${categoryAttr} topic="${escapeXml(entry.topic)}">${escapeXml(entry.summary)}</${tag}>`;
-    if (included > 0 && used + 1 + line.length > maxChars) break;
-    lines.push(line);
-    used += 1 + line.length;
-    included += 1;
+    lines.push(`  <${tag}${categoryAttr} topic="${escapeXml(entry.topic)}">${escapeXml(entry.summary)}</${tag}>`);
   }
-  if (included === 0) return '';
   lines.push('</knowledge>');
   lines.push(
     '<instruction>',
@@ -134,6 +119,45 @@ export function buildKnowledgeBlock(
   return rendered.length <= maxChars
     ? rendered
     : `${truncateUtf16Units(rendered, Math.max(0, maxChars - 1)).trim()}…`;
+}
+
+/**
+ * The item selection behind buildKnowledgeBlock, exported so callers can
+ * record hot-layer exposures for EXACTLY the entries that render (dream
+ * review P1: the nightly usage audit's evidence pool keys off these ids).
+ * Returns the surviving entries in render order with their truncated
+ * topic/summary and char-budget accounting identical to the rendered block.
+ */
+export function selectKnowledgePromptItems(
+  entries: KnowledgePromptEntry[],
+  maxItems: number = KNOWLEDGE_PROMPT_MAX_ITEMS,
+  maxChars: number = KNOWLEDGE_PROMPT_MAX_CHARS,
+  relevanceScoreById?: ReadonlyMap<string, number> | null,
+): Array<{ id: string | null; topic: string; summary: string; kind: KnowledgePromptEntry['kind']; category: string | null }> {
+  const items = orderKnowledgeEntriesForPrompt(entries ?? [], relevanceScoreById)
+    .slice(0, Math.max(1, maxItems))
+    .map((entry) => ({
+      id: typeof entry.id === 'string' && entry.id ? entry.id : null,
+      topic: truncate(entry.topic, KNOWLEDGE_TOPIC_MAX_CHARS),
+      summary: truncate(entry.summary, KNOWLEDGE_ENTRY_MAX_CHARS),
+      kind: entry.kind === 'pitfall' ? 'pitfall' as const : entry.kind === 'principle' ? 'principle' as const : 'know_how' as const,
+      category: typeof entry.category === 'string' && entry.category.trim() ? entry.category.trim() : null,
+    }))
+    .filter((entry) => entry.topic && entry.summary);
+  if (items.length === 0) return [];
+
+  const budget = Math.max(1, Math.floor(maxChars));
+  const selected: Array<typeof items[number]> = [];
+  let used = '<knowledge>'.length;
+  for (const entry of items) {
+    const tag = entry.kind === 'pitfall' ? 'pitfall' : entry.kind === 'principle' ? 'principle' : 'know_how';
+    const categoryAttr = entry.category ? ` category="${escapeXml(entry.category)}"` : '';
+    const line = `  <${tag}${categoryAttr} topic="${escapeXml(entry.topic)}">${escapeXml(entry.summary)}</${tag}>`;
+    if (selected.length > 0 && used + 1 + line.length > budget) break;
+    selected.push(entry);
+    used += 1 + line.length;
+  }
+  return selected;
 }
 
 /** Plain-text rendering of recall results for the knowledge_recall tool response. */

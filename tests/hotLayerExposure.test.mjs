@@ -180,6 +180,7 @@ test('markCapabilityDraftsInjected writes one hot technique row per day, bumping
     const today = localDateKey(new Date());
     assert.equal(coworkStore.markCapabilityDraftsInjected([draft.id]), 1);
     assert.equal(coworkStore.markCapabilityDraftsInjected([draft.id]), 1);
+    coworkStore.flushHotLayerExposureBuffer();
     const row = usageRow(db, 'metabot_id = 5 AND usage_date = ? AND item_kind = ?', [today, 'technique']);
     assert.deepEqual(row, { kind: 'technique', id: String(draft.id), exposure: 'hot', count: 2 });
     assert.equal(coworkStore.listCapabilityDrafts(5)[0].timesInjected, 2, 'the counter still bumps');
@@ -211,6 +212,7 @@ test('recordHotLayerExposures: hot wins over recall within a day', async () => {
         { kind: 'procedure', id: 'p-hot-then-recall', exposure: 'recall' },
       ],
     });
+    coworkStore.flushHotLayerExposureBuffer();
     assert.equal(usageRow(db, "item_id = 'p-recall-then-hot'").exposure, 'hot');
     assert.equal(usageRow(db, "item_id = 'p-hot-then-recall'").exposure, 'hot', 'hot is sticky once set');
     assert.equal(usageRow(db, "item_id = 'p-recall-only'").exposure, 'recall');
@@ -239,6 +241,7 @@ test('runner: the hot block and the recall tool write exposure rows', async () =
 
     const block = runner.buildExperiencePromptBlocksXml(session.id);
     assert.ok(block.includes('热规程甲'));
+    coworkStore.flushHotLayerExposureBuffer();
     const today = localDateKey(new Date());
     const hotRows = db.exec(
       "SELECT item_id FROM hot_layer_usage WHERE metabot_id = 5 AND usage_date = ? AND item_kind = 'procedure' AND exposure = 'hot'",
@@ -248,12 +251,114 @@ test('runner: the hot block and the recall tool write exposure rows', async () =
 
     const recalled = runner.runProcedureRecallTool({ query: '查重' }, session.id);
     assert.equal(recalled.isError, false);
+    coworkStore.flushHotLayerExposureBuffer();
     const recallRow = usageRow(db, "item_id = ?", [recallOnly.entry.id]);
     assert.equal(recallRow.exposure, 'recall');
     assert.equal(recallRow.kind, 'procedure');
   } finally {
     cleanup();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Dream review P3: write-behind buffer (per-turn UPSERT amplification)
+// ---------------------------------------------------------------------------
+
+test('buffering: exposures are invisible until flushed, then land with accumulated counts', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const today = localDateKey(new Date());
+    for (let index = 0; index < 3; index += 1) {
+      coworkStore.recordHotLayerExposures({
+        metabotId: 5,
+        usageDate: today,
+        items: [{ kind: 'procedure', id: 'p-buffered', exposure: 'hot' }],
+      });
+    }
+    assert.equal(usageCount(db), 0, 'rows stay in the buffer until the flush');
+    const flushed = coworkStore.flushHotLayerExposureBuffer();
+    assert.equal(flushed, 1, 'same-day repeats coalesce into one row');
+    const row = usageRow(db, "item_id = 'p-buffered'");
+    assert.equal(row.count, 3, 'the flush accumulates the buffered count');
+    assert.equal(row.exposure, 'hot');
+    assert.equal(coworkStore.flushHotLayerExposureBuffer(), 0, 'an empty buffer flushes as zero');
+  } finally {
+    cleanup();
+  }
+});
+
+test('buffering: hot stays sticky through the buffer, recall merges into hot', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const today = localDateKey(new Date());
+    coworkStore.recordHotLayerExposures({
+      metabotId: 5,
+      usageDate: today,
+      items: [{ kind: 'technique', id: 't-sticky', exposure: 'recall' }],
+    });
+    coworkStore.recordHotLayerExposures({
+      metabotId: 5,
+      usageDate: today,
+      items: [{ kind: 'technique', id: 't-sticky', exposure: 'hot' }],
+    });
+    coworkStore.recordHotLayerExposures({
+      metabotId: 5,
+      usageDate: today,
+      items: [{ kind: 'technique', id: 't-sticky', exposure: 'recall' }],
+    });
+    coworkStore.flushHotLayerExposureBuffer();
+    assert.equal(usageRow(db, "item_id = 't-sticky'").exposure, 'hot', 'hot wins within the buffer too');
+    assert.equal(usageRow(db, "item_id = 't-sticky'").count, 3);
+  } finally {
+    cleanup();
+  }
+});
+
+test('buffering: the 200-key burst cap flushes synchronously', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const today = localDateKey(new Date());
+    const items = Array.from({ length: 200 }, (_, index) => ({
+      kind: 'procedure',
+      id: `p-burst-${index}`,
+      exposure: 'hot',
+    }));
+    coworkStore.recordHotLayerExposures({ metabotId: 5, usageDate: today, items });
+    assert.equal(usageCount(db), 200, 'the burst cap flushed without waiting for the timer');
+  } finally {
+    cleanup();
+  }
+});
+
+test('app cleanup drains the exposure buffer before the database closes', async () => {
+  const { runAppCleanup } = await import('../dist-electron/main/services/appCleanup.js');
+  let flushed = false;
+  const noop = () => {};
+  const asyncNoop = async () => {};
+  await runAppCleanup({
+    destroyTray: noop,
+    stopSkillWatching: noop,
+    closeMetaidRpcServer: noop,
+    stopCoworkSessions: noop,
+    flushHotLayerExposures: () => {
+      flushed = true;
+    },
+    closeDshRuntime: asyncNoop,
+    stopOpenAICompatProxy: asyncNoop,
+    stopSkillServices: asyncNoop,
+    stopIMGateways: asyncNoop,
+    stopScheduler: noop,
+    stopCognitiveOrchestrator: noop,
+    stopDreamService: noop,
+    stopProviderDiscovery: noop,
+    deactivateGroupChatTasks: noop,
+    log: noop,
+    error: noop,
+  });
+  assert.equal(flushed, true, 'the shutdown path flushes buffered exposure telemetry');
 });
 
 test('a failing exposure write never breaks markCapabilityDraftsInjected', async () => {
@@ -296,6 +401,7 @@ test('hygiene purges hot-layer usage rows past the 120-day retention', async () 
       metabotId: 9, usageDate: freshDate, items: [{ kind: 'technique', id: 't-fresh', exposure: 'hot' }],
       atMs: now.getTime() - 119 * DAYMS,
     });
+    coworkStore.flushHotLayerExposureBuffer();
     assert.equal(usageCount(db), 2);
 
     const service = new MemoryHygieneService({
@@ -362,5 +468,42 @@ test('a night with no hot procedures reports zero procedureBlockChars', async ()
     assert.equal(hotLayer.exposedItems, 0);
   } finally {
     h.cleanup();
+  }
+});
+
+
+test('review Minor 2: a mid-flush failure requeues the window instead of losing it', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const today = localDateKey(new Date());
+    coworkStore.recordHotLayerExposures({
+      metabotId: 5,
+      usageDate: today,
+      items: [{ kind: 'procedure', id: 'p-requeue', exposure: 'hot' }],
+    });
+    // Sabotage the table mid-flush: DROP it so the UPSERT throws.
+    db.run('DROP TABLE hot_layer_usage');
+    assert.throws(() => coworkStore.flushHotLayerExposureBuffer());
+    db.run(`
+      CREATE TABLE hot_layer_usage (
+        metabot_id INTEGER NOT NULL,
+        usage_date TEXT NOT NULL,
+        item_kind TEXT NOT NULL CHECK (item_kind IN ('technique', 'procedure', 'knowledge', 'memory')),
+        item_id TEXT NOT NULL,
+        exposure TEXT NOT NULL CHECK (exposure IN ('hot', 'recall')),
+        first_exposed_at INTEGER NOT NULL,
+        exposure_count INTEGER NOT NULL DEFAULT 1,
+        applied INTEGER CHECK (applied IS NULL OR applied IN (0, 1)),
+        evidence TEXT,
+        audited_at INTEGER,
+        PRIMARY KEY (metabot_id, usage_date, item_kind, item_id)
+      );
+    `);
+    // The requeued window lands on the next flush.
+    assert.equal(coworkStore.flushHotLayerExposureBuffer(), 1);
+    assert.equal(usageRow(db, "item_id = 'p-requeue'").count, 1, 'no row was lost across the failed flush');
+  } finally {
+    cleanup();
   }
 });

@@ -311,6 +311,7 @@ function seedAuditNight(h, night) {
       { kind: 'procedure', id: procedure.entry.id, exposure: 'hot' },
     ],
   });
+  h.coworkStore.flushHotLayerExposureBuffer();
   seedSession(h.coworkStore, h.db, night, [
     { type: 'user', content: '视频发布了吗' },
     { type: 'assistant', content: '我先查重再发布,按记忆里的做法完成了。' },
@@ -343,6 +344,7 @@ test('flow: audited verdicts fill the day\'s exposure rows and telemetry', async
     assert.ok(procedure.audited_at > 0);
     assert.deepEqual(h.telemetry(NIGHT)?.usageAudit, {
       ran: true, items: 2, applied: 1, excerpts: 1, parseFailed: false,
+      knowledgeItems: 0, knowledgeApplied: 0, memoryItems: 0, memoryApplied: 0,
     });
     assert.equal(h.coworkStore.getCapabilityDraft(5, seeded.draftId).status, 'validated', 'score 0.7 stays unpromoted');
   } finally {
@@ -361,6 +363,7 @@ test('flow: garbage audit output marks parseFailed and writes nothing', async ()
     assert.ok(audited.every((value) => value === null), 'no row is marked audited');
     assert.deepEqual(h.telemetry(NIGHT)?.usageAudit, {
       ran: true, items: 2, applied: 0, excerpts: 1, parseFailed: true,
+      knowledgeItems: 0, knowledgeApplied: 0, memoryItems: 0, memoryApplied: 0,
     });
     assert.ok(h.dreamStore.getRun(5, NIGHT), 'the dream run still completes');
   } finally {
@@ -380,6 +383,7 @@ test('flow: nights without exposures skip the audit call entirely', async () => 
     assert.ok(!h.router.calls.some((call) => call.system.includes('使用核查')), 'no audit prompt was sent');
     assert.deepEqual(h.telemetry(NIGHT)?.usageAudit, {
       ran: false, items: 0, applied: 0, excerpts: 0, parseFailed: false,
+      knowledgeItems: 0, knowledgeApplied: 0, memoryItems: 0, memoryApplied: 0,
     });
   } finally {
     h.cleanup();

@@ -305,6 +305,28 @@ export interface DreamChainReadActivity {
   lastReadAtMs: number;
 }
 
+/**
+ * One buyer rating a chain-synced skill service owned by this bot received on
+ * the dream date (remote_skill_service_rating_seen joined against
+ * remote_skill_service provider identity). Ratings for other providers'
+ * services never appear here.
+ */
+export interface DreamServiceRatingActivity {
+  /** remote_skill_service row id (the service being rated). */
+  serviceId: string;
+  serviceName: string | null;
+  /** The rating pin id — a stable on-chain anchor for the event. */
+  ratingPinId: string;
+  /** 1-5 stars. */
+  rating: number | null;
+  comment: string | null;
+  /** Order payment tx when the rating pin carried one. */
+  orderTxid: string | null;
+  raterGlobalMetaId: string | null;
+  raterMetaId: string | null;
+  ratedAtMs: number;
+}
+
 /** Structural implicit-signal kinds (mechanical facts, no sentiment). */
 export type DreamImplicitSignalKind = 'reask' | 'unanswered_burst' | 'repeat_order';
 
@@ -335,6 +357,8 @@ export interface DreamDayActivity {
   chainWrites?: DreamChainWriteActivity[];
   /** Chain pins this bot fully read that day (chain content history). */
   chainReads?: DreamChainReadActivity[];
+  /** Buyer ratings received that day on skill services this bot provides. */
+  serviceRatings?: DreamServiceRatingActivity[];
   /** Structural implicit signals, attached by the dream service post-query. */
   implicitSignals?: DreamImplicitSignal[];
 }
@@ -432,6 +456,73 @@ interface PromptLayerSnapshotRow {
 const MAX_GROUP_CHAT_MESSAGES_PER_TASK = 400;
 /** Bound each chain-content-history kind per day so a heavy bot cannot flood the dream. */
 const MAX_CHAIN_CONTENT_ENTRIES_PER_KIND = 50;
+/** Bound the buyer-rating section per day so a popular service cannot flood the dream. */
+const MAX_SERVICE_RATINGS_PER_DAY = 10;
+
+/**
+ * Silent-drop counters for dream input assembly and output parsing (dream
+ * review P0 2026-10-23). Every place that silently truncates or drops dream
+ * input/output increments the matching counter; the dream run threads one
+ * mutable instance through the activity query, prompt building and parsing,
+ * surfaces it in the run telemetry (metabot_dream_telemetry_daily.extra_json
+ * carries the whole telemetry blob) and console.warns when any counter is
+ * non-zero. All fields are plain overflow counts — a zero means nothing was
+ * lost on that axis.
+ */
+export interface DreamInputDropCounters {
+  /** On-chain group-chat messages dropped over the per-task cap. */
+  groupChatMessages: number;
+  /** Chain-write ledger rows dropped over the per-day cap. */
+  chainWrites: number;
+  /** Chain-read ledger rows dropped over the per-day cap. */
+  chainReads: number;
+  /** Implicit signals dropped over the per-day cap. */
+  implicitSignals: number;
+  /** Sessions reduced to a title-only stub by fair-share budgeting. */
+  sessionsTitleOnly: number;
+  /** Surf-report characters cut off by the prompt's surf cap. */
+  surfReportChars: number;
+  /** Dream-output array entries dropped by the per-field parse caps. */
+  parseArrayEntries: number;
+  /** Human feedback-comment characters cut by the prompt's inline cap (review M3). */
+  feedbackCommentChars: number;
+  /** Buyer service ratings dropped over the per-day cap (review M4). */
+  serviceRatings: number;
+  /** Counterfactual/positive replay points beyond the ≤3/day cap (nit). */
+  replayPointsDropped: number;
+  /** Required dream-output fields missing at parse time (daily_summary etc., nit). */
+  parseFieldDrops: number;
+}
+
+export function createDreamInputDropCounters(): DreamInputDropCounters {
+  return {
+    groupChatMessages: 0,
+    chainWrites: 0,
+    chainReads: 0,
+    implicitSignals: 0,
+    sessionsTitleOnly: 0,
+    surfReportChars: 0,
+    parseArrayEntries: 0,
+    feedbackCommentChars: 0,
+    replayPointsDropped: 0,
+    parseFieldDrops: 0,
+    serviceRatings: 0,
+  };
+}
+
+export function countDreamInputDrops(counters: DreamInputDropCounters): number {
+  return counters.groupChatMessages
+    + counters.chainWrites
+    + counters.chainReads
+    + counters.implicitSignals
+    + counters.sessionsTitleOnly
+    + counters.surfReportChars
+    + counters.parseArrayEntries
+    + counters.feedbackCommentChars
+    + counters.replayPointsDropped
+    + counters.parseFieldDrops
+    + counters.serviceRatings;
+}
 
 const parseIdNumber = (value: unknown): number | null => {
   const parsed = Number(value);
@@ -469,7 +560,7 @@ const parseSessionRefs = (raw: string | null | undefined): DailySummarySessionRe
 /** One hot_layer_usage row for a (bot, date): how the item reached the model
  * and whether the P3 usage audit judged it applied (null = unaudited). */
 export interface HotLayerExposureRow {
-  kind: 'technique' | 'procedure';
+  kind: 'technique' | 'procedure' | 'knowledge' | 'memory';
   itemId: string;
   exposure: 'hot' | 'recall';
   exposureCount: number;
@@ -679,7 +770,251 @@ export class DreamStore {
       CREATE INDEX IF NOT EXISTS idx_metabot_prompt_layer_snapshots_status
       ON metabot_prompt_layer_snapshots(metabot_id, status, dream_date DESC)
     `);
+    // Dream review P2-1: frozen per-bot exams (design 2026-10-10 §P2.5). The
+    // paper is hash-frozen at build time — same content hash never rebuilds;
+    // runs carry the brain model's rubric scores for the growth-curve trend.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_exams (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        content_hash TEXT NOT NULL,
+        questions_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        archived_at INTEGER
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_metabot_exams_metabot_created
+        ON metabot_exams(metabot_id, created_at DESC);
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_exam_runs (
+        id TEXT PRIMARY KEY,
+        exam_id TEXT NOT NULL,
+        metabot_id INTEGER NOT NULL,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        status TEXT NOT NULL DEFAULT 'running',
+        total_score REAL,
+        question_scores_json TEXT,
+        error TEXT
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_metabot_exam_runs_metabot_started
+        ON metabot_exam_runs(metabot_id, started_at DESC);
+    `);
+    // Review M6b: how many of the paper's questions the scorer actually
+    // returned — a partial verdict is not a low score. PRAGMA-guarded and
+    // additive; pre-existing rows read NULL (= fully scored, the old shape).
+    try {
+      const examRunCols = (this.db.exec('PRAGMA table_info(metabot_exam_runs)')[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!examRunCols.includes('scored_count')) {
+        this.db.run('ALTER TABLE metabot_exam_runs ADD COLUMN scored_count INTEGER;');
+      }
+    } catch (error) {
+      console.warn('migrate metabot_exam_runs scored_count:', error);
+    }
     this.backfillLegacyDreamMemoryDates();
+  }
+
+  /**
+   * Review M6a: exam-sediment memories under a STABLE ordering (created_at
+   * ASC, id ASC). The generic listUserMemories orders by
+   * COALESCE(last_used_at, updated_at) — last_used_at moves on every
+   * injection, which would reorder the pool between runs and flip the frozen
+   * paper's hash without any sediment change, destroying comparability.
+   */
+  listExamSedimentMemories(metabotId: number, usageClass: 'value_boundary' | 'work_review', limit = 20): Array<{ id: string; text: string; updatedAt: number }> {
+    return this.getAll<{ id: string; text: string; created_at: number | string }>(`
+      SELECT id, text, created_at
+      FROM user_memories
+      WHERE metabot_id = ? AND usage_class = ? AND status = 'created' AND archived_at IS NULL
+      ORDER BY created_at ASC, id ASC
+      LIMIT ?
+    `, [metabotId, usageClass, Math.max(1, Math.floor(limit))])
+      .map((row) => ({ id: row.id, text: row.text, updatedAt: Number(row.created_at) }));
+  }
+
+  // ── Dream review P2-1: frozen exams ────────────────────────────────────────
+
+  /** The bot's current (non-archived) exam paper, or null. */
+  getActiveExam(metabotId: number): { id: string; contentHash: string; questions: unknown[]; createdAt: number } | null {
+    const row = this.getOne<{
+      id: string;
+      content_hash: string;
+      questions_json: string;
+      created_at: number | string;
+    }>(`
+      SELECT id, content_hash, questions_json, created_at
+      FROM metabot_exams
+      WHERE metabot_id = ? AND archived_at IS NULL
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, [metabotId]);
+    if (!row) return null;
+    try {
+      return {
+        id: row.id,
+        contentHash: row.content_hash,
+        questions: JSON.parse(row.questions_json) as unknown[],
+        createdAt: Number(row.created_at),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Freeze a paper: when the bot's active exam already has this content hash
+   * the existing row is returned untouched (same hash never rebuilds); a
+   * different hash archives the old paper first. Returns the active exam row.
+   */
+  freezeExam(metabotId: number, contentHash: string, questions: unknown[], nowMs: number): { id: string; contentHash: string } | null {
+    const hash = String(contentHash ?? '').trim();
+    if (!hash || !Array.isArray(questions) || questions.length === 0) return null;
+    const existing = this.getActiveExam(metabotId);
+    if (existing && existing.contentHash === hash) {
+      return { id: existing.id, contentHash: existing.contentHash };
+    }
+    // Review Minor 10: an explicit epoch-0 timestamp must not fall through
+    // to the wall clock (|| Date.now() made deterministic tests time-travel).
+    const parsedNow = Number(nowMs);
+    const stamp = Number.isFinite(parsedNow) ? Math.floor(parsedNow) : Date.now();
+    if (existing) {
+      this.db.run('UPDATE metabot_exams SET archived_at = ? WHERE id = ?', [stamp, existing.id]);
+    }
+    const id = uuidv4();
+    this.db.run(
+      'INSERT INTO metabot_exams (id, metabot_id, content_hash, questions_json, created_at) VALUES (?, ?, ?, ?, ?)',
+      [id, metabotId, hash, JSON.stringify(questions), stamp],
+    );
+    this.saveDb();
+    return { id, contentHash: hash };
+  }
+
+  /** The most recent exam run of one bot (any status), for the weekly gate. */
+  getLatestExamRun(metabotId: number): { id: string; examId: string; startedAt: number; status: string; totalScore: number | null } | null {
+    const row = this.getOne<{
+      id: string; exam_id: string; started_at: number | string; status: string; total_score: number | string | null;
+    }>(`
+      SELECT id, exam_id, started_at, status, total_score
+      FROM metabot_exam_runs
+      WHERE metabot_id = ?
+      ORDER BY started_at DESC
+      LIMIT 1
+    `, [metabotId]);
+    if (!row) return null;
+    return {
+      id: row.id,
+      examId: row.exam_id,
+      startedAt: Number(row.started_at),
+      status: row.status,
+      totalScore: row.total_score == null ? null : Number(row.total_score),
+    };
+  }
+
+  createExamRun(metabotId: number, examId: string, startedAt: number): string {
+    const id = uuidv4();
+    this.db.run(
+      'INSERT INTO metabot_exam_runs (id, exam_id, metabot_id, started_at, status) VALUES (?, ?, ?, ?, ?)',
+      [id, examId, metabotId, Math.floor(Number(startedAt)) || Date.now(), 'running'],
+    );
+    this.saveDb();
+    return id;
+  }
+
+  finishExamRun(input: {
+    id: string;
+    status: 'done' | 'failed';
+    finishedAt: number;
+    totalScore?: number | null;
+    scoredCount?: number | null;
+    questionScores?: unknown[] | null;
+    error?: string | null;
+  }): void {
+    this.db.run(`
+      UPDATE metabot_exam_runs
+      SET status = ?, finished_at = ?, total_score = ?, scored_count = ?, question_scores_json = ?, error = ?
+      WHERE id = ?
+    `, [
+      input.status,
+      Math.floor(Number(input.finishedAt)) || Date.now(),
+      input.totalScore == null ? null : Math.max(0, Math.min(1, Number(input.totalScore))),
+      input.scoredCount == null ? null : Math.max(0, Math.floor(Number(input.scoredCount))),
+      input.questionScores == null ? null : JSON.stringify(input.questionScores),
+      input.error ?? null,
+      input.id,
+    ]);
+    this.saveDb();
+  }
+
+  /**
+   * Thumbed messages that carried a human comment (either direction) — exam
+   * sediment for the feedback pool. Ordered oldest first.
+   */
+  listFeedbackEventsWithComments(metabotId: number, limit = 20): Array<{
+    messageId: string;
+    sessionTitle: string;
+    rating: 'up' | 'down';
+    comment: string;
+    occurredAt: number;
+  }> {
+    return this.getAll<{
+      message_id: string;
+      session_title: string;
+      rating: string;
+      comment: string;
+      occurred_at: number | string;
+    }>(`
+      SELECT mf.message_id, s.title AS session_title, mf.rating, mf.comment, m.created_at AS occurred_at
+      FROM message_feedback mf
+      JOIN cowork_messages m ON m.id = mf.message_id
+      JOIN cowork_sessions s ON s.id = mf.session_id
+      WHERE s.metabot_id = ? AND mf.comment IS NOT NULL AND TRIM(mf.comment) != ''
+      ORDER BY m.created_at ASC
+      LIMIT ?
+    `, [metabotId, Math.max(1, Math.floor(limit))])
+      .map((row) => ({
+        messageId: row.message_id,
+        sessionTitle: row.session_title,
+        rating: row.rating === 'up' ? 'up' as const : 'down' as const,
+        comment: row.comment,
+        occurredAt: Number(row.occurred_at),
+      }));
+  }
+
+  /** Human review comments on the bot's group tasks, oldest first. */
+  listGroupTaskReviewComments(metabotId: number, limit = 20): Array<{
+    taskId: number;
+    title: string;
+    rating: number | null;
+    comment: string;
+    occurredAt: number;
+  }> {
+    return this.getAll<{
+      task_id: number | string;
+      title: string;
+      rating: number | string | null;
+      rating_comment: string | null;
+      occurred_at: number | string;
+    }>(`
+      SELECT t.id AS task_id, t.title, t.rating, t.rating_comment,
+        CAST(strftime('%s', COALESCE(t.rated_at, t.closed_at)) AS INTEGER) AS occurred_at
+      FROM group_tasks t
+      JOIN group_task_members m ON m.task_id = t.id
+      WHERE m.metabot_id = ? AND m.removed_at IS NULL
+        AND t.rating_comment IS NOT NULL AND TRIM(t.rating_comment) != ''
+      ORDER BY occurred_at ASC
+      LIMIT ?
+    `, [metabotId, Math.max(1, Math.floor(limit))])
+      .map((row) => ({
+        taskId: Number(row.task_id),
+        title: row.title,
+        rating: row.rating == null ? null : Number(row.rating),
+        comment: row.rating_comment ?? '',
+        occurredAt: Number(row.occurred_at) * 1000,
+      }));
   }
 
   /**
@@ -831,11 +1166,20 @@ export class DreamStore {
    * error or exhausted retry budget); the error text says which. */
   finishRun(metabotId: number, dreamDate: string, status: 'completed' | 'failed' | 'terminal-failed', error?: string | null): void {
     const now = Date.now();
+    // Upsert (review M1): a dream that dies BEFORE beginRun completes (sick
+    // store mid-recovery) has no row to UPDATE — the failure must still land
+    // as a failed run or the night looks like it never happened.
     this.db.run(`
-      UPDATE metabot_dream_runs
-      SET status = ?, error = ?, completed_at = ?, updated_at = ?
-      WHERE metabot_id = ? AND dream_date = ?
-    `, [status, error ?? null, now, now, metabotId, dreamDate]);
+      INSERT INTO metabot_dream_runs (
+        id, metabot_id, dream_date, status, attempt_count, llm_id, error,
+        started_at, completed_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 1, NULL, ?, ?, ?, ?, ?)
+      ON CONFLICT(metabot_id, dream_date) DO UPDATE SET
+        status = excluded.status,
+        error = excluded.error,
+        completed_at = excluded.completed_at,
+        updated_at = excluded.updated_at
+    `, [uuidv4(), metabotId, dreamDate, status, error ?? null, now, now, now, now]);
     this.saveDb();
   }
 
@@ -1394,7 +1738,12 @@ export class DreamStore {
    * Hidden sessions are included on purpose — order execution sessions are
    * hidden from the UI list but are still experience.
    */
-  getActivityForDate(metabotId: number, dayStartMs: number, dayEndMs: number): DreamDayActivity {
+  getActivityForDate(
+    metabotId: number,
+    dayStartMs: number,
+    dayEndMs: number,
+    dropCounters?: DreamInputDropCounters,
+  ): DreamDayActivity {
     const sessionRows = this.getAll<{
       id: string;
       title: string;
@@ -1520,7 +1869,10 @@ export class DreamStore {
         memberRole: row.role === 'chair' ? 'chair' : 'worker',
         messages: [],
       };
-      if (existing.messages.length >= MAX_GROUP_CHAT_MESSAGES_PER_TASK) continue;
+      if (existing.messages.length >= MAX_GROUP_CHAT_MESSAGES_PER_TASK) {
+        if (dropCounters) dropCounters.groupChatMessages += 1;
+        continue;
+      }
       const occurredSec = parseIdNumber(row.chain_timestamp);
       existing.messages.push({
         senderName: (row.sender_name ?? '').trim() || 'unknown',
@@ -1634,6 +1986,13 @@ export class DreamStore {
       contentText: row.content_text ?? null,
       occurredAtMs: Number(row.occurred_at_ms) || dayStartMs,
     }));
+    if (dropCounters && chainWrites.length >= MAX_CHAIN_CONTENT_ENTRIES_PER_KIND) {
+      const total = parseIdNumber(this.getOne<{ n: number | string }>(
+        'SELECT COUNT(*) AS n FROM metabot_chain_writes WHERE metabot_id = ? AND occurred_at_ms >= ? AND occurred_at_ms < ?',
+        [metabotId, dayStartMs, dayEndMs],
+      )?.n) ?? chainWrites.length;
+      dropCounters.chainWrites += Math.max(0, total - MAX_CHAIN_CONTENT_ENTRIES_PER_KIND);
+    }
 
     const chainReads = this.getAll<{
       pin_id: string;
@@ -1663,6 +2022,72 @@ export class DreamStore {
       savedToKb: Number(row.saved_to_kb) === 1,
       lastReadAtMs: Number(row.last_read_at_ms) || dayStartMs,
     }));
+    if (dropCounters && chainReads.length >= MAX_CHAIN_CONTENT_ENTRIES_PER_KIND) {
+      const total = parseIdNumber(this.getOne<{ n: number | string }>(
+        'SELECT COUNT(*) AS n FROM metabot_chain_reads WHERE metabot_id = ? AND last_read_at_ms >= ? AND last_read_at_ms < ?',
+        [metabotId, dayStartMs, dayEndMs],
+      )?.n) ?? chainReads.length;
+      dropCounters.chainReads += Math.max(0, total - MAX_CHAIN_CONTENT_ENTRIES_PER_KIND);
+    }
+
+    // Buyer ratings received that day on services THIS bot provides. The
+    // rating pins are synced chain-wide by gigSquareRatingSyncService into
+    // remote_skill_service_rating_seen; provider identity comes from the
+    // synced remote_skill_service row (publisher metaid / globalmetaid).
+    // created_at is epoch milliseconds (the sync normalizes legacy second
+    // values on write), so the day window applies directly.
+    const serviceRatings = this.getAll<{
+      service_id: string;
+      service_name: string | null;
+      display_name: string | null;
+      pin_id: string;
+      rate: number | string | null;
+      comment: string | null;
+      service_paid_tx: string | null;
+      rater_global_metaid: string | null;
+      rater_metaid: string | null;
+      created_at: number | string;
+    }>(`
+      SELECT s.id AS service_id, s.service_name, s.display_name,
+        r.pin_id, r.rate, r.comment, r.service_paid_tx,
+        r.rater_global_metaid, r.rater_metaid, r.created_at
+      FROM remote_skill_service_rating_seen r
+      JOIN remote_skill_service s ON s.id = r.service_id
+      JOIN metabots b ON b.id = ?
+      WHERE (s.metaid = b.metaid
+          OR (b.globalmetaid IS NOT NULL AND TRIM(b.globalmetaid) != ''
+            AND s.global_metaid = b.globalmetaid))
+        AND r.created_at >= ? AND r.created_at < ?
+      ORDER BY r.created_at ASC
+      LIMIT ?
+    `, [metabotId, dayStartMs, dayEndMs, MAX_SERVICE_RATINGS_PER_DAY]).map((row) => ({
+      serviceId: row.service_id,
+      serviceName: (row.display_name ?? row.service_name ?? '').trim() || null,
+      ratingPinId: row.pin_id,
+      rating: row.rate == null ? null : Number(row.rate),
+      comment: row.comment ?? null,
+      orderTxid: row.service_paid_tx ?? null,
+      raterGlobalMetaId: (row.rater_global_metaid ?? '').trim() || null,
+      raterMetaId: (row.rater_metaid ?? '').trim() || null,
+      ratedAtMs: Number(row.created_at) || dayStartMs,
+    }));
+    // Review M4: same silent-truncation invariant as chainWrites/Reads — the
+    // exact overflow is counted only when the capped query hits the limit (no
+    // extra query on normal nights).
+    if (dropCounters && serviceRatings.length >= MAX_SERVICE_RATINGS_PER_DAY) {
+      const total = parseIdNumber(this.getOne<{ n: number | string }>(
+        `SELECT COUNT(*) AS n
+         FROM remote_skill_service_rating_seen r
+         JOIN remote_skill_service s ON s.id = r.service_id
+         JOIN metabots b ON b.id = ?
+         WHERE (s.metaid = b.metaid
+             OR (b.globalmetaid IS NOT NULL AND TRIM(b.globalmetaid) != ''
+               AND s.global_metaid = b.globalmetaid))
+           AND r.created_at >= ? AND r.created_at < ?`,
+        [metabotId, dayStartMs, dayEndMs],
+      )?.n) ?? serviceRatings.length;
+      dropCounters.serviceRatings += Math.max(0, total - MAX_SERVICE_RATINGS_PER_DAY);
+    }
 
     return {
       sessions,
@@ -1672,6 +2097,7 @@ export class DreamStore {
       groupChats,
       chainWrites,
       chainReads,
+      serviceRatings,
     };
   }
 
@@ -1929,7 +2355,7 @@ export class DreamStore {
     if (!Number.isInteger(id) || id <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
     try {
       return this.getAll<{
-        item_kind: 'technique' | 'procedure';
+        item_kind: 'technique' | 'procedure' | 'knowledge' | 'memory';
         item_id: string;
         exposure: 'hot' | 'recall';
         exposure_count: number | string;
@@ -1941,7 +2367,7 @@ export class DreamStore {
         WHERE metabot_id = ? AND usage_date = ?
         ORDER BY exposure = 'hot' DESC, exposure_count DESC, item_kind ASC, item_id ASC
       `, [id, date]).map((row) => ({
-        kind: row.item_kind,
+        kind: row.item_kind as HotLayerExposureRow['kind'],
         itemId: String(row.item_id),
         exposure: row.exposure,
         exposureCount: Math.max(0, Math.floor(Number(row.exposure_count) || 0)),
@@ -1964,7 +2390,7 @@ export class DreamStore {
     metabotId: number,
     usageDate: string,
     verdicts: Array<{
-      kind: 'technique' | 'procedure';
+      kind: 'technique' | 'procedure' | 'knowledge' | 'memory';
       itemId: string;
       applied: boolean;
       evidence: { labels: string[]; channels: Array<'owner' | 'external'> };
@@ -1976,7 +2402,8 @@ export class DreamStore {
     const stamp = Math.floor(Number(atMs));
     if (!Number.isInteger(id) || id <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(stamp)) return 0;
     const rows = (verdicts ?? []).filter((verdict) =>
-      (verdict?.kind === 'technique' || verdict?.kind === 'procedure')
+      (verdict?.kind === 'technique' || verdict?.kind === 'procedure'
+        || verdict?.kind === 'knowledge' || verdict?.kind === 'memory')
       && typeof verdict?.itemId === 'string' && verdict.itemId.length > 0);
     if (rows.length === 0) return 0;
     let changed = 0;
@@ -2001,7 +2428,7 @@ export class DreamStore {
   /** Trailing-window usage stats per item (shared aggregation helper). */
   listHotLayerUsageStats(
     metabotId: number,
-    input: { kind: 'technique' | 'procedure'; sinceDate: string; untilDate: string; itemIds?: readonly string[] },
+    input: { kind: 'technique' | 'procedure' | 'knowledge' | 'memory'; sinceDate: string; untilDate: string; itemIds?: readonly string[] },
   ): Map<string, HotLayerUsageStats> {
     return queryHotLayerUsageStats(this.db, { metabotId, ...input });
   }

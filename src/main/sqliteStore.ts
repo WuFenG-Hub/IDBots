@@ -698,6 +698,12 @@ export class SqliteStore {
       if (!draftCols.includes('scope')) {
         this.db.run('ALTER TABLE capability_drafts ADD COLUMN scope TEXT');
       }
+      // Dream review P0: distillation provenance. NULL = the dream output's
+      // own capability_learnings; 'positive_replay' = the 👍-grounded
+      // positive replay pass. Validation/promotion treat every origin the same.
+      if (!draftCols.includes('origin')) {
+        this.db.run('ALTER TABLE capability_drafts ADD COLUMN origin TEXT');
+      }
     } catch (error) {
       console.warn('migrate capability_drafts validation columns:', error);
     }
@@ -735,7 +741,7 @@ export class SqliteStore {
       CREATE TABLE IF NOT EXISTS hot_layer_usage (
         metabot_id INTEGER NOT NULL,
         usage_date TEXT NOT NULL,
-        item_kind TEXT NOT NULL CHECK (item_kind IN ('technique', 'procedure')),
+        item_kind TEXT NOT NULL CHECK (item_kind IN ('technique', 'procedure', 'knowledge', 'memory')),
         item_id TEXT NOT NULL,
         exposure TEXT NOT NULL CHECK (exposure IN ('hot', 'recall')),
         first_exposed_at INTEGER NOT NULL,
@@ -750,6 +756,58 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_hot_layer_usage_item
         ON hot_layer_usage(metabot_id, item_kind, item_id, usage_date DESC);
     `);
+
+    // Dream review P1 (2026-10-23): widen the item_kind CHECK so the usage
+    // audit can also cover knowledge hot-layer entries and injected
+    // value_boundary / work_review memories ('knowledge', 'memory'). SQLite
+    // cannot alter a CHECK constraint — rebuild the table, preserving every
+    // row, only when the installed schema still carries the old two-kind
+    // CHECK (fresh databases get the wide CHECK from the CREATE above).
+    try {
+      const hotLayerDdlRows = this.db.exec(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hot_layer_usage'",
+        [],
+      );
+      const hotLayerDdl = String(hotLayerDdlRows[0]?.values?.[0]?.[0] ?? '');
+      if (hotLayerDdl && !hotLayerDdl.includes("'knowledge'")) {
+        this.db.run('BEGIN TRANSACTION');
+        try {
+          this.db.run(`
+            CREATE TABLE hot_layer_usage_new (
+              metabot_id INTEGER NOT NULL,
+              usage_date TEXT NOT NULL,
+              item_kind TEXT NOT NULL CHECK (item_kind IN ('technique', 'procedure', 'knowledge', 'memory')),
+              item_id TEXT NOT NULL,
+              exposure TEXT NOT NULL CHECK (exposure IN ('hot', 'recall')),
+              first_exposed_at INTEGER NOT NULL,
+              exposure_count INTEGER NOT NULL DEFAULT 1,
+              applied INTEGER CHECK (applied IS NULL OR applied IN (0, 1)),
+              evidence TEXT,
+              audited_at INTEGER,
+              PRIMARY KEY (metabot_id, usage_date, item_kind, item_id)
+            );
+          `);
+          this.db.run(`
+            INSERT INTO hot_layer_usage_new
+              (metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count, applied, evidence, audited_at)
+            SELECT metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count, applied, evidence, audited_at
+            FROM hot_layer_usage;
+          `);
+          this.db.run('DROP TABLE hot_layer_usage');
+          this.db.run('ALTER TABLE hot_layer_usage_new RENAME TO hot_layer_usage');
+          this.db.run(`
+            CREATE INDEX IF NOT EXISTS idx_hot_layer_usage_item
+              ON hot_layer_usage(metabot_id, item_kind, item_id, usage_date DESC);
+          `);
+          this.db.run('COMMIT');
+        } catch (error) {
+          this.db.run('ROLLBACK');
+          throw error;
+        }
+      }
+    } catch (error) {
+      console.warn('migrate hot_layer_usage item_kind CHECK:', error);
+    }
 
     // Dream-RSI self-curriculum (P0, design 2026-10-10 §3.3): targeted
     // practice tasks proposed by the nightly dream. A proposal lands as

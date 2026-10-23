@@ -13,6 +13,7 @@ import {
   setMessageFeedback as setMessageFeedbackAction,
   clearMessageFeedback as clearMessageFeedbackAction,
   loadSessionFeedback as loadSessionFeedbackAction,
+  markSessionFeedbackLoaded,
   setStreaming,
   updateSessionPinned,
   updateSessionFoldOverride,
@@ -1540,6 +1541,8 @@ class CoworkService {
       rating: record.rating,
       comment: record.comment ?? undefined,
     }))));
+    // Review Minor 5: the nudge may now safely consult the hydrated rows.
+    store.dispatch(markSessionFeedbackLoaded(sessionId));
   }
 
   async getA2AConversationHistoryPage(input: {

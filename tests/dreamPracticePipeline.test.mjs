@@ -296,13 +296,14 @@ test('buildDreamPrompt renders the practice-outcomes section with truncation', (
 // Dream pipeline: materialization (policy-gated)
 // ---------------------------------------------------------------------------
 
-test('feature OFF (default): proposals stay pending, zero side effects, telemetry zeroed', async () => {
+test('feature OFF (default): proposals are dropped (never persisted), prompt omits the ask, telemetry zeroed', async () => {
   const { db, cleanup } = await createSqliteStore();
   const coworkStore = createCoworkStore(db);
   const dreamStore = new DreamStore(db, () => {});
   seedActivity(coworkStore, db);
   insertMetabot(db, 5);
   const createdTasks = [];
+  const prompts = [];
   const service = new DreamService({
     coworkStore,
     metabotStore: metabotStoreStub(),
@@ -313,22 +314,27 @@ test('feature OFF (default): proposals stay pending, zero side effects, telemetr
       createdTasks.push(input);
       return { id: `task-${createdTasks.length}` };
     },
-    performChat: async () => makePayload([
-      { title: '只读练习', prompt: 'p', target_refs: ['draft:1'], risk_class: 'read_only' },
-      { title: '本地练习', prompt: 'p', target_refs: ['draft:2'], risk_class: 'interact_local' },
-    ]),
+    performChat: async (system, user) => {
+      prompts.push(user);
+      return makePayload([
+        { title: '只读练习', prompt: 'p', target_refs: ['draft:1'], risk_class: 'read_only' },
+        { title: '本地练习', prompt: 'p', target_refs: ['draft:2'], risk_class: 'interact_local' },
+      ]);
+    },
   });
   try {
     await service.runNow(5, DAY);
     assert.equal(createdTasks.length, 0, 'feature off: nothing materializes');
-    const proposals = coworkStore.listDreamPracticeProposals(5);
-    assert.equal(proposals.length, 2);
-    assert.ok(proposals.every((row) => row.status === 'pending'), 'all stay pending');
+    assert.equal(coworkStore.listDreamPracticeProposals(5).length, 0, 'feature off: proposals are not persisted');
+    assert.ok(
+      !prompts.some((user) => user.includes('"practice_proposals"')),
+      'feature off: the dream prompt does not ask for practice_proposals',
+    );
     const telemetry = dreamStore.getRun(5, DAY).telemetry;
     assert.deepEqual(telemetry.practiceRuns, { completed: 0, failed: 0 });
-    assert.equal(telemetry.practiceProposals.proposed, 2);
+    assert.equal(telemetry.practiceProposals.proposed, 2, 'funnel still counts what the model returned');
     assert.equal(telemetry.practiceProposals.autoApproved, 0);
-    assert.equal(telemetry.practiceProposals.pendingOwner, 2);
+    assert.equal(telemetry.practiceProposals.pendingOwner, 0, 'nothing lands in the pending backlog');
     assert.equal(telemetry.practiceProposals.rejected, 0);
     assert.equal(telemetry.practiceProposals.expired, 0);
   } finally {
@@ -401,7 +407,7 @@ test('feature ON: read_only auto-approves and materializes; interact_local/chain
   }
 });
 
-test('auto-approve disabled: feature on but every proposal waits for the owner', async () => {
+test('auto-approve disabled: the pipeline counts as disabled, proposals are dropped and the prompt omits the ask', async () => {
   const { db, cleanup } = await createSqliteStore();
   const coworkStore = createCoworkStore(db);
   const dreamStore = new DreamStore(db, () => {});
@@ -410,6 +416,7 @@ test('auto-approve disabled: feature on but every proposal waits for the owner',
   coworkStore.setMemoryPolicyForMetabot(5, { practiceTasksEnabled: true, practiceAutoApproveReadOnly: false });
 
   const createdTasks = [];
+  const prompts = [];
   const service = new DreamService({
     coworkStore,
     metabotStore: metabotStoreStub(),
@@ -420,14 +427,21 @@ test('auto-approve disabled: feature on but every proposal waits for the owner',
       createdTasks.push(input);
       return { id: `task-${createdTasks.length}` };
     },
-    performChat: async () => makePayload([
-      { title: '只读练习', prompt: 'p', target_refs: ['draft:1'], risk_class: 'read_only' },
-    ]),
+    performChat: async (system, user) => {
+      prompts.push(user);
+      return makePayload([
+        { title: '只读练习', prompt: 'p', target_refs: ['draft:1'], risk_class: 'read_only' },
+      ]);
+    },
   });
   try {
     await service.runNow(5, DAY);
     assert.equal(createdTasks.length, 0);
-    assert.equal(coworkStore.listDreamPracticeProposals(5)[0].status, 'pending');
+    assert.equal(coworkStore.listDreamPracticeProposals(5).length, 0, 'pipeline disabled: nothing persists');
+    assert.ok(
+      !prompts.some((user) => user.includes('"practice_proposals"')),
+      'pipeline disabled: the dream prompt does not ask for practice_proposals',
+    );
     assert.equal(dreamStore.getRun(5, DAY).telemetry.practiceProposals.autoApproved, 0);
   } finally {
     cleanup();

@@ -16,7 +16,15 @@ import {
 } from './metaWebCrypto';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
-import type { CoworkRunner } from '../libs/coworkRunner';
+import type { CoworkRunner, CoworkKnowledgeStore } from '../libs/coworkRunner';
+import {
+  buildKnowledgeBlock,
+  KNOWLEDGE_PROMPT_MAX_CHARS,
+  KNOWLEDGE_PROMPT_MAX_ITEMS,
+  selectKnowledgePromptItems,
+} from '../libs/knowledgePromptBlocks';
+import { PROCEDURE_PROMPT_MAX_ITEMS, renderProcedureBlock } from '../libs/procedurePromptBlocks';
+import { formatBotWorkspaceDate } from '../libs/botWorkspace';
 import { isDshShutdownError } from '../libs/dshShutdownError';
 import { PrivateChatOrderCowork, type OrderCoworkRequest } from './privateChatOrderCowork';
 import { appendA2AGuidanceToSystemPrompt } from './a2aGuidance';
@@ -1985,6 +1993,13 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
   limit: number;
   currentUserText?: string;
   cerebellumMemoryRanker?: PrivateChatCerebellumMemoryRankerFn;
+  /**
+   * Review M5: hot-layer exposure accounting for the guidance memories
+   * (value_boundary / work_review) that actually rendered — same semantics
+   * as the cowork runner, so A2A-heavy bots' guidance memories finally
+   * reach the nightly usage audit (and last_applied_at). Absent → skipped.
+   */
+  recordGuidanceExposures?: (memoryIds: string[]) => void;
 }): string | Promise<string> {
   const resolved = resolveMemoryScopes({
     metabotId: params.metabotId,
@@ -2046,6 +2061,25 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
     // Injection IS the usage event for the hygiene decay clock.
     if (injectedIds.length > 0) {
       params.memoryBackend.touchUserMemoriesLastUsed(params.metabotId, injectedIds);
+      // Review M5: the guidance memories among the rendered ids enter the
+      // hot-layer exposure ledger (kind 'memory') with cowork semantics.
+      if (params.recordGuidanceExposures) {
+        const usageClassById = new Map<string, string>();
+        for (const entry of [...ownerEntries, ...contactEntries, ...conversationEntries]) {
+          if (entry?.id && entry.usageClass) usageClassById.set(entry.id, entry.usageClass);
+        }
+        const guidanceIds = injectedIds.filter((id) => {
+          const usageClass = usageClassById.get(id);
+          return usageClass === 'value_boundary' || usageClass === 'work_review';
+        });
+        if (guidanceIds.length > 0) {
+          try {
+            params.recordGuidanceExposures(guidanceIds);
+          } catch {
+            // exposure telemetry is best-effort
+          }
+        }
+      }
     }
     return xml;
   };
@@ -3887,6 +3921,8 @@ async function processOne(
   wakeDisposition?: PrivateChatWakeReDriveDisposition,
   /** Optional cerebellum (小脑) re-ranker for the reply-turn memory blocks. */
   cerebellumMemoryRanker?: PrivateChatCerebellumMemoryRankerFn,
+  /** Dream review P1: knowledge/procedures hot-layer source (direct answer path). */
+  getKnowledgeStore?: () => CoworkKnowledgeStore | null,
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
@@ -5424,6 +5460,15 @@ async function processOne(
           limit: memoryPolicy.memoryUserMemoriesMaxItems,
           currentUserText: plaintext,
           cerebellumMemoryRanker,
+          // Review M5: guidance memories that render here join the nightly
+          // usage audit's evidence pool (kind 'memory'), cowork semantics.
+          recordGuidanceExposures: (memoryIds) => {
+            coworkStore.recordHotLayerExposures({
+              metabotId: metabot.id,
+              usageDate: formatBotWorkspaceDate(new Date()),
+              items: memoryIds.map((id) => ({ kind: 'memory', id, exposure: 'hot' })),
+            });
+          },
         })
       : '';
     const memoryContext = typeof memoryContextOrPromise === 'string'
@@ -5644,7 +5689,111 @@ async function processOne(
         // telemetry is best-effort
       }
     }
-    const systemPromptWithExperience = experienceContext ? `${systemPrompt}\n\n${experienceContext}` : systemPrompt;
+    // Dream review P1: knowledge + procedures hot layer for the direct
+    // answer path (A2A high-frequency turns see the same craft the cowork
+    // runner injects). Same builders, same hot selection (cooled knowledge
+    // stays recall-only), same exposure accounting — the nightly usage audit
+    // reads these rows as evidence. Best-effort: a failure degrades to the
+    // plain prompt, never to a failed turn.
+    // Review nit: the craft layer (knowledge + procedures) describes the
+    // BOT'S OWN skills, not the owner's memories — it must not be silenced
+    // by the owner-memory policy switch. Privacy semantics unchanged: the
+    // knowledge/procedures blocks carry no owner data (the owner-memory
+    // blocks above remain gated by memoryPolicy as before).
+    let craftContext = '';
+    if (getKnowledgeStore) {
+      try {
+        const knowledgeStore = getKnowledgeStore();
+        if (knowledgeStore) {
+          const knowledgeEntries = knowledgeStore.listKnowledge({
+            metabotId: metabot.id,
+            status: 'active',
+            limit: KNOWLEDGE_PROMPT_MAX_ITEMS,
+            hotEligibleOnly: true,
+          });
+          const knowledgeBlock = buildKnowledgeBlock(
+            knowledgeEntries,
+            KNOWLEDGE_PROMPT_MAX_ITEMS,
+            KNOWLEDGE_PROMPT_MAX_CHARS,
+          );
+          const renderedKnowledge = selectKnowledgePromptItems(
+            knowledgeEntries,
+            KNOWLEDGE_PROMPT_MAX_ITEMS,
+            KNOWLEDGE_PROMPT_MAX_CHARS,
+          );
+          const procedureEntries = knowledgeStore.listHotProcedures
+            ? knowledgeStore.listHotProcedures(metabot.id, { limit: PROCEDURE_PROMPT_MAX_ITEMS })
+            : [];
+          const renderedProcedures = renderProcedureBlock(procedureEntries, PROCEDURE_PROMPT_MAX_ITEMS);
+          const exposureItems = [
+            ...renderedKnowledge
+              .filter((entry) => typeof entry.id === 'string' && entry.id)
+              .map((entry) => ({ kind: 'knowledge' as const, id: entry.id as string, exposure: 'hot' as const })),
+            ...renderedProcedures.includedIds
+              .map((id) => ({ kind: 'procedure' as const, id, exposure: 'hot' as const })),
+          ];
+          if (exposureItems.length > 0) {
+            try {
+              coworkStore.recordHotLayerExposures({
+                metabotId: metabot.id,
+                usageDate: formatBotWorkspaceDate(new Date()),
+                items: exposureItems,
+              });
+            } catch {
+              // exposure telemetry is best-effort
+            }
+          }
+          craftContext = [knowledgeBlock, renderedProcedures.text].filter((block) => block.trim()).join('\n\n');
+        }
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        emitLog(`[PrivateChat] Knowledge/procedures hot layer unavailable for message ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    // Review M5: the guidance memories rendered into the A2A experience
+    // block join the hot-layer exposure ledger too (kind 'memory'), same
+    // semantics as the cowork runner — text-presence keeps the accounting
+    // honest about what actually rendered under the char-budget caps.
+    if (experienceContext && memoryPolicy.memoryEnabled) {
+      try {
+        const renderedGuidanceIds = [
+          ...memoryBackend.listUserMemories({
+            metabotId: metabot.id,
+            scope: createOwnerMemoryScope(),
+            usageClass: 'value_boundary',
+            status: 'created',
+            includeDeleted: false,
+            limit: 5,
+            offset: 0,
+          }),
+          ...memoryBackend.listUserMemories({
+            metabotId: metabot.id,
+            scope: createOwnerMemoryScope(),
+            usageClass: 'work_review',
+            status: 'created',
+            includeDeleted: false,
+            limit: 5,
+            offset: 0,
+          }),
+        ]
+          .filter((memory) => memory.text && experienceContext.includes(memory.text))
+          .map((memory) => memory.id);
+        if (renderedGuidanceIds.length > 0) {
+          coworkStore.recordHotLayerExposures({
+            metabotId: metabot.id,
+            usageDate: formatBotWorkspaceDate(new Date()),
+            items: renderedGuidanceIds.map((id) => ({ kind: 'memory', id, exposure: 'hot' })),
+          });
+        }
+      } catch {
+        // exposure telemetry is best-effort
+      }
+    }
+    const systemPromptWithExperience = [
+      systemPrompt,
+      experienceContext,
+      craftContext,
+    ].filter((section) => section && section.trim()).join('\n\n');
     // A re-run of this row (after an empty-reply retry or a retriable skill-turn
     // error) carries an explicit host notice so the model knows why it is being
     // asked again and what a valid completion looks like. A wake turn instead
@@ -6124,6 +6273,14 @@ export function startPrivateChatDaemon(
   getMetaIDCognitionPromptBlock?: GetMetaIDCognitionPromptBlockFn,
   /** Optional cerebellum (小脑) re-ranker for the reply-turn memory blocks. */
   cerebellumMemoryRanker?: PrivateChatCerebellumMemoryRankerFn,
+  /**
+   * Dream review P1: knowledge/procedures hot-layer source for the direct
+   * answer path. Optional so older harnesses keep working; when present, the
+   * bot's own craft (<knowledge> + <procedures>) rides the reply turn and its
+   * exposures are accounted like the cowork path. Owner-memory privacy rules
+   * are untouched — these blocks describe the bot's own skills.
+   */
+  getKnowledgeStore?: () => CoworkKnowledgeStore | null,
 ): void {
   void stopPrivateChatDaemon();
   const daemonGeneration = ++privateChatDaemonGeneration;
@@ -6211,6 +6368,7 @@ export function startPrivateChatDaemon(
               isSessionTurnActive,
               reDrivenWakeDispositions.get(row.id),
               cerebellumMemoryRanker,
+              getKnowledgeStore,
             );
           } catch (e) {
             console.error('[PrivateChat] processOne error:', e);

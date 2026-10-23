@@ -251,6 +251,25 @@ test('buildDreamPrompt instructs practice_proposals with the self-curriculum rul
   assert.match(prompt.user, /每晚最多 2 条/, 'nightly cap stated');
 });
 
+test('buildDreamPrompt omits practice_proposals when practiceEnabled is false', () => {
+  const prompt = buildDreamPrompt({
+    botName: '小火',
+    date: DAY,
+    activity: { sessions: [], taskRuns: [], orderCount: 0, groupTasks: [] },
+    practiceEnabled: false,
+  });
+  assert.ok(!prompt.user.includes('"practice_proposals"'), 'contract field omitted');
+  assert.ok(!prompt.user.includes('关于练习提案'), 'instruction line omitted');
+  assert.ok(!prompt.user.includes('target_refs'), 'no practice schema remnants');
+  // Default (omitted flag) keeps the previous behavior.
+  const defaulted = buildDreamPrompt({
+    botName: '小火',
+    date: DAY,
+    activity: { sessions: [], taskRuns: [], orderCount: 0, groupTasks: [] },
+  });
+  assert.ok(defaulted.user.includes('"practice_proposals"'), 'default still asks for proposals');
+});
+
 // ---------------------------------------------------------------------------
 // Store: insert / list / get
 // ---------------------------------------------------------------------------
@@ -535,6 +554,15 @@ test('end-to-end: dream run persists practice_proposals as pending rows (parse r
   const coworkStore = createCoworkStore(db);
   const dreamStore = new DreamStore(db, () => {});
   seedActivity(coworkStore, db);
+  // Persistence is gated on the practice pipeline being enabled for the bot.
+  db.run(
+    `INSERT INTO metabots (
+      id, wallet_id, mvc_address, btc_address, doge_address, public_key,
+      chat_public_key, name, metaid, metabot_type, created_by, role, soul,
+      created_at, updated_at
+    ) VALUES (5, 1, 'mvc-5', 'btc-5', 'doge-5', 'pk-5', 'chatpk-5', 'bot-5', 'metaid-5', 'worker', 'test', 'role', 'soul', 1, 1)`,
+  );
+  coworkStore.setMemoryPolicyForMetabot(5, { practiceTasksEnabled: true, practiceAutoApproveReadOnly: true });
   const service = new DreamService({
     coworkStore,
     metabotStore: metabotStoreStub(),
@@ -581,6 +609,46 @@ test('end-to-end: dream run persists practice_proposals as pending rows (parse r
     assert.equal(second.riskClass, 'read_only', 'invalid risk_class defaults to read_only end-to-end');
     assert.deepEqual(second.targetRefs, ['date:2026-08-01']);
     assert.equal(dreamStore.getRun(5, DAY).status, 'completed', 'the dream run itself is unaffected');
+  } finally {
+    cleanup();
+  }
+});
+
+
+test('review Minor 7: a repair re-dream does not duplicate the night\'s proposals', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  const coworkStore = createCoworkStore(db);
+  const dreamStore = new DreamStore(db, () => {});
+  seedActivity(coworkStore, db);
+  db.run(
+    `INSERT INTO metabots (
+      id, wallet_id, mvc_address, btc_address, doge_address, public_key,
+      chat_public_key, name, metaid, metabot_type, created_by, role, soul, created_at, updated_at
+    ) VALUES (5, 1, 'mvc-5', 'btc-5', 'doge-5', 'pk-5', 'chatpk-5', 'bot-5', 'metaid-5', 'worker', 'test', 'role', 'soul', 1, 1)`,
+  );
+  coworkStore.setMemoryPolicyForMetabot(5, { practiceTasksEnabled: true, practiceAutoApproveReadOnly: true });
+  const service = new DreamService({
+    coworkStore,
+    metabotStore: metabotStoreStub(),
+    dreamStore,
+    llmTimeoutMs: 5000,
+    now: () => new Date(2026, 7, 3, 3, 0),
+    performChat: async () => makePayload([
+      { title: '对比实验:发布前自检清单', prompt: 'p', target_refs: ['draft:1'], risk_class: 'read_only' },
+    ]),
+  });
+  try {
+    await service.runNow(5, DAY);
+    assert.equal(coworkStore.listDreamPracticeProposals(5).length, 1, 'original night proposes once');
+    // Drive a version-repair re-dream through the same writeDreamResults path
+    // (private members are plain JS at runtime).
+    service.enqueue(5, DAY, { isRepair: true });
+    await service.processQueue();
+    assert.equal(
+      coworkStore.listDreamPracticeProposals(5).length,
+      1,
+      'repair re-dream keeps the original proposals without piling duplicates',
+    );
   } finally {
     cleanup();
   }

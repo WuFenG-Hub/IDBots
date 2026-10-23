@@ -1,14 +1,16 @@
 import { createHash } from 'node:crypto';
-import type { CapabilityFalsifiedHypothesis, CoworkStore } from '../coworkStore';
-import type { DreamDayActivity, DreamStore, MetabotPrediction, PromptLayerSnapshot } from '../dreamStore';
+import type { CapabilityFalsifiedHypothesis, CoworkStore, CoworkUserMemory } from '../coworkStore';
+import type { DreamDayActivity, DreamInputDropCounters, DreamStore, MetabotPrediction, PromptLayerSnapshot } from '../dreamStore';
+import { countDreamInputDrops, createDreamInputDropCounters } from '../dreamStore';
 import type { MetaIDExperienceStore } from '../metaidExperienceStore';
 import type { MetaIDImpressionStore } from '../metaidImpressionStore';
-import type { MetaIDKnowledgeStore } from '../metaidKnowledgeStore';
+import type { MetaIDKnowledgeEntry, MetaIDKnowledgeStore } from '../metaidKnowledgeStore';
 import {
   DREAM_LOOKBACK_DAYS,
   DREAM_VERSION,
   buildDreamFragmentPrompt,
   buildDreamPrompt,
+  isSelfIdentityInjectionAttempt,
   computeDueDreamDates,
   getDayBoundsMs,
   parseDreamOutput,
@@ -66,12 +68,30 @@ import {
 } from '../libs/chainEvidence';
 import {
   buildCounterfactualReplayPrompt,
+  COUNTERFACTUAL_MAX_POINTS,
   extractNegativeDecisionPoints,
   hasExplicitHumanFeedback,
   parseCounterfactualReplayOutput,
   pickCounterfactualLesson,
 } from '../libs/counterfactualReplayPrompt';
+import {
+  buildPositiveReplayPrompt,
+  extractPositiveDecisionPoints,
+  parsePositiveReplayOutput,
+  pickPositiveLesson,
+  POSITIVE_REPLAY_MAX_POINTS,
+} from '../libs/positiveReplayPrompt';
 import { extractImplicitSignals } from '../libs/implicitSignals';
+import {
+  buildExamScoringPrompt,
+  buildExamSessionPrompt,
+  buildMetabotExam,
+  EXAM_MIN_DATA_DAYS,
+  EXAM_RUN_INTERVAL_DAYS,
+  parseExamScores,
+  type ExamQuestion,
+  type MetabotExam,
+} from '../libs/metabotExam';
 import {
   PREDICTION_CALIBRATION_WINDOW_DAYS,
   judgeNumericExpectation,
@@ -116,6 +136,8 @@ import {
   sampleUsageAuditExcerpts,
   selectUsageAuditItems,
   USAGE_AUDIT_ITEM_GIST_CHARS,
+  USAGE_AUDIT_MAX_ITEMS_TOTAL,
+  type UsageAuditItem,
 } from '../libs/hotLayerUsageAudit';
 import {
   HOT_LAYER_REENTRY_MIN_APPLIED_NIGHTS,
@@ -355,7 +377,12 @@ export interface DreamServiceDeps {
    * never fail the dream — it returns null). The returned report markdown is
    * folded into the dream prompt as its own section.
    */
-  surfBeforeDream?: (metabotId: number) => Promise<{ reportMarkdown: string | null } | null>;
+  /**
+   * Pre-dream surf hook. `skippedReason` (dream review P3) is set when the
+   * host skipped the surf on purpose (e.g. a stale model binding) — the run
+   * telemetry records it as surfSkipped so the nightly skip is auditable.
+   */
+  surfBeforeDream?: (metabotId: number) => Promise<{ reportMarkdown: string | null; skippedReason?: string | null } | null>;
   /**
    * Fresh-install deferral (see libs/installAgeGate): returns a one-line
    * reason while background automation must stay off (a brand-new install's
@@ -369,6 +396,13 @@ export interface DreamServiceDeps {
    * ScheduledTaskStore.createTask + Scheduler.reschedule). Optional: without
    * it, approved proposals simply stay approved (tests, headless runs).
    */
+  /**
+   * Dream review P2-1: runs one frozen-exam session in a read_only isolated
+   * cowork turn and returns the answer text. Wired in main.ts on
+   * runOrchestratorSkillTurn with the practice read_only guard; absent →
+   * exams are skipped (tests, slim harnesses).
+   */
+  runExamSession?: (input: { metabotId: number; userMessage: string }) => Promise<string>;
   createPracticeScheduledTask?: (input: {
     metabotId: number;
     name: string;
@@ -497,8 +531,6 @@ function diarySpanAnchoredInText(span: string, rawText: string): boolean {
 
 export class DreamService {
   private readonly performChat: DreamPerformChat;
-  /** RRSI P1: resolved once — { panels: 2, prospective: true } unless pinned. */
-  private readonly capabilityGate: CapabilityGateConfig;
   private timer: ReturnType<typeof setInterval> | null = null;
   private queue: DreamQueueItem[] = [];
   private processing = false;
@@ -516,7 +548,25 @@ export class DreamService {
 
   constructor(private deps: DreamServiceDeps) {
     this.performChat = deps.performChat ?? performChatCompletionForOrchestrator;
-    this.capabilityGate = resolveCapabilityGateConfig(deps.capabilityGate);
+  }
+
+  /**
+   * Dream review P3: the gate config resolved for THIS pass — persisted
+   * cowork_config knob (panels only; the prospective data-leak guard stays
+   * unconditionally on) under an explicit deps.capabilityGate test override.
+   * Resolved per pass (not cached on the service) so a config change takes
+   * effect the same night.
+   */
+  private resolveGateConfig(): CapabilityGateConfig {
+    let persisted: { panels: 1 | 2 } | null = null;
+    try {
+      persisted = this.deps.coworkStore.getCapabilityGateConfig?.() ?? null;
+    } catch (error) {
+      console.warn(
+        `[DreamService] Capability gate config read failed; using defaults: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return resolveCapabilityGateConfig(persisted ? { ...persisted, ...this.deps.capabilityGate } : this.deps.capabilityGate);
   }
 
   start(): void {
@@ -1041,6 +1091,8 @@ export class DreamService {
       falsifiedHypotheses?: Array<{ title: string; reason: string }>;
       explorationDirective?: string | null;
     },
+    /** Silent-drop counters for prompt-building and parse caps (telemetry). */
+    dropCounters?: DreamInputDropCounters,
   ): Promise<{
     prompt: { system: string; user: string };
     output: DreamOutput;
@@ -1048,6 +1100,10 @@ export class DreamService {
   }> {
     const budgets = this.resolveDreamBudgets(brain);
     const estimatedTokens = estimateDreamActivityTokens(activity);
+    // Dream review P0: a bot whose practice pipeline is disabled never sees
+    // the practice_proposals output contract — default installs stop paying
+    // the output tokens for proposals that would be discarded at write time.
+    const practiceEnabled = this.isPracticePipelineEnabled(metabot.id);
     // The weekly long-dream review rides every nightly dream as cross-day
     // context (P2b) — reference, not constraint.
     const weeklyReview = this.buildWeeklyReviewText(metabot.id);
@@ -1068,13 +1124,15 @@ export class DreamService {
         rollbackNotice: dreamExtras?.rollbackNotice,
         falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
         explorationDirective: dreamExtras?.explorationDirective,
-      });
+        practiceEnabled,
+      }, dropCounters);
       const output = await this.generateAndParse(
         prompt.system,
         prompt.user,
         brain,
         budgets.maxOutputTokens,
         attemptTimeoutMs,
+        dropCounters,
       );
       return { prompt, output, meta: { estimatedInputTokens: estimatedTokens, fragmentCount: 0 } };
     }
@@ -1097,13 +1155,15 @@ export class DreamService {
         rollbackNotice: dreamExtras?.rollbackNotice,
         falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
         explorationDirective: dreamExtras?.explorationDirective,
-      });
+        practiceEnabled,
+      }, dropCounters);
       const output = await this.generateAndParse(
         prompt.system,
         prompt.user,
         brain,
         budgets.maxOutputTokens,
         attemptTimeoutMs,
+        dropCounters,
       );
       return { prompt, output, meta: { estimatedInputTokens: estimatedTokens, fragmentCount: 0 } };
     }
@@ -1144,13 +1204,15 @@ export class DreamService {
       rollbackNotice: dreamExtras?.rollbackNotice,
       falsifiedHypotheses: dreamExtras?.falsifiedHypotheses,
       explorationDirective: dreamExtras?.explorationDirective,
-    });
+      practiceEnabled,
+    }, dropCounters);
     const output = await this.generateAndParse(
       prompt.system,
       prompt.user,
       brain,
       budgets.maxOutputTokens,
       attemptTimeoutMs,
+      dropCounters,
     );
     return { prompt, output, meta: { estimatedInputTokens: estimatedTokens, fragmentCount: chunks.length } };
   }
@@ -1186,18 +1248,26 @@ export class DreamService {
     this.dreamingBots.add(metabotId);
     this.emitDreaming(metabotId, true);
     const runStartedAtMs = Date.now();
-    const brain = this.resolveDreamBrain(metabot);
-    const currentRun = this.deps.dreamStore.beginRun(metabotId, date, brain.llmId, DREAM_VERSION);
+    // Review M1: the brain resolution and beginRun used to run OUTSIDE the
+    // try — a throwing beginRun (sick store mid-recovery) never reached the
+    // finally, leaving the bot in dreamingBots forever (every later enqueue
+    // returned false) and escaped as an unhandled rejection. Both live inside
+    // the try now; currentRun stays null until beginRun succeeds.
+    let currentRun: ReturnType<DreamStore['beginRun']> | null = null;
     try {
+      const brain = this.resolveDreamBrain(metabot);
+      currentRun = this.deps.dreamStore.beginRun(metabotId, date, brain.llmId, DREAM_VERSION);
       // Pre-dream surf ("做梦前自动冲浪"): the bot browses MetaWeb first so
       // tonight's dream can fold what it learned into long-term memory. The
       // wiring owns enable/recency/timeout/failure isolation; a null or
       // throwing surf never blocks the dream.
       let surfReport: string | null = null;
+      let surfSkippedReason: string | null = null;
       if (this.deps.surfBeforeDream) {
         try {
           const surf = await this.deps.surfBeforeDream(metabotId);
           surfReport = surf?.reportMarkdown?.trim() || null;
+          surfSkippedReason = surf?.skippedReason?.trim() || null;
         } catch (error) {
           console.warn(
             `[DreamService] Pre-dream surf failed for metabot ${metabotId}; dreaming without it: ${error instanceof Error ? error.message : String(error)}`,
@@ -1205,10 +1275,11 @@ export class DreamService {
         }
       }
       const { startMs, endMs } = getDayBoundsMs(date);
-      const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs);
+      const dropCounters = createDreamInputDropCounters();
+      const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs, dropCounters);
       // Mechanical implicit-signal collection: structural facts only, attached
       // before prompt building so the dream itself judges what they mean.
-      activity.implicitSignals = extractImplicitSignals(activity);
+      activity.implicitSignals = extractImplicitSignals(activity, dropCounters);
       // RSI P0 retention gate: if yesterday (the dreamed date) carried a
       // negative-feedback spike, deterministically roll back the previous
       // dream night's prompt layer BEFORE tonight's snapshot/synthesis. Repair
@@ -1233,6 +1304,7 @@ export class DreamService {
         && (activity.groupChats?.length ?? 0) === 0
         && (activity.chainWrites?.length ?? 0) === 0
         && (activity.chainReads?.length ?? 0) === 0
+        && (activity.serviceRatings?.length ?? 0) === 0
         && impressionSubjects.length === 0
         && !surfReport
       ) {
@@ -1247,17 +1319,29 @@ export class DreamService {
         const reconciliation = await this.reconcileValidatedCapabilityDrafts(metabot, brain, date, validation.validatedIds);
         const promotion = this.promoteCapabilityDraftsToProcedures(metabot, date);
         // Empty days have no negative decision points, so the replay no-ops.
-        const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
+        const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity, dropCounters);
+        // Same for the positive replay: no thumbs-up, no LLM call.
+        const positiveReplay = await this.runPositiveReplayAfterDream(metabot, brain, date, activity, dropCounters);
         const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
         // Self-curriculum (design §3.4): pending read_only proposals from
         // earlier nights still approve + materialize on an empty day.
         const practicePipeline = this.processPracticeProposalsAfterDream(metabot, { stalled: exploration.stall.stalled, underExplored: exploration.underExplored });
+        if (countDreamInputDrops(dropCounters) > 0) {
+          console.warn(
+            `[DreamService] Dream input drops for metabot ${metabotId} date ${date}: ${JSON.stringify(dropCounters)}`,
+          );
+        }
         this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
           emptyDay: true,
           estimatedActivityTokens: 0,
           implicitSignals: 0,
           validation,
           replay,
+          positiveReplay,
+          // Dream review P3: a deliberate pre-dream surf skip (e.g. stale
+          // model binding) is auditable in the telemetry blob.
+          surfSkipped: surfSkippedReason,
+          inputDrops: dropCounters,
           weeklyLongDream,
           capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
           promotedCount: promotion.promoted,
@@ -1324,6 +1408,7 @@ export class DreamService {
           falsifiedHypotheses,
           explorationDirective: exploration.directive,
         },
+        dropCounters,
       );
       let output = prepared.output;
       // Repair runs discard selfIdentity in writeDreamResults, so skip the
@@ -1339,6 +1424,11 @@ export class DreamService {
         );
       }
       const writeResult = this.writeDreamResults(metabotId, date, output, activity, brain.llmId, isRepair, impressionSubjects, metabot.globalmetaid);
+      if (countDreamInputDrops(dropCounters) > 0) {
+        console.warn(
+          `[DreamService] Dream input drops for metabot ${metabotId} date ${date}: ${JSON.stringify(dropCounters)}`,
+        );
+      }
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
       console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}${isRepair ? ' (version repair)' : ''}`);
       const validation = await this.validateCapabilityDraftsAfterDream(metabot, brain, date, activity);
@@ -1355,8 +1445,17 @@ export class DreamService {
       // RRSI P3: prune hot-layer items that keep being shown but never used.
       // Runs even when the audit was skipped — older audited nights still count.
       const hotLayerPruning = this.pruneHotLayerAfterDream(metabot, date);
-      const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity);
+      // Dream review P1: knowledge entries the audit keeps seeing unused cool
+      // out of the <knowledge> hot pool (recall keeps them).
+      const knowledgeCooling = this.coolHotKnowledgeAfterDream(metabot, date);
+      const replay = await this.runCounterfactualReplayAfterDream(metabot, brain, date, activity, dropCounters);
+      // Dream review P0: positive replay — praised replies reinforce through
+      // the same draft pipeline, counted like the negative path below.
+      const positiveReplay = await this.runPositiveReplayAfterDream(metabot, brain, date, activity, dropCounters);
       const weeklyLongDream = await this.maybeRunWeeklyLongDream(metabot, brain, date);
+      // Dream review P2-1: the frozen exam follows the weekly rhythm (own
+      // weekly gate caps it at one run per bot per week). Best-effort.
+      const exam = await this.maybeRunMetabotExam(metabot, brain, date);
       // Self-curriculum (design §3.4, after the replay per §3.1): auto-approve
       // + materialize tonight's pending read_only practice proposals.
       const practicePipeline = this.processPracticeProposalsAfterDream(metabot, { stalled: exploration.stall.stalled, underExplored: exploration.underExplored });
@@ -1371,6 +1470,7 @@ export class DreamService {
       // P2a telemetry: the dream policy becomes tunable once it is measurable.
       this.deps.dreamStore.updateRunTelemetry(metabotId, date, {
         emptyDay: false,
+        exam,
         fastPath: prepared.meta.fragmentCount === 0,
         fragmentCount: prepared.meta.fragmentCount,
         estimatedActivityTokens: prepared.meta.estimatedInputTokens,
@@ -1383,6 +1483,12 @@ export class DreamService {
         diaryTotalRefs: diaryRefs.total,
         validation,
         replay,
+        positiveReplay,
+        // Dream review P3: a deliberate pre-dream surf skip (e.g. stale
+        // model binding) is auditable in the telemetry blob.
+        surfSkipped: surfSkippedReason,
+        inputDrops: dropCounters,
+        selfIdentityRefused: writeResult.selfIdentityRefused,
         weeklyLongDream,
         capabilityUtilization: this.buildCapabilityUtilizationTelemetry(metabotId),
         promotedCount: promotion.promoted,
@@ -1394,6 +1500,7 @@ export class DreamService {
         // RRSI P3: L1 pruning outcome (design §6.3 P3.3) — never deletes
         // anything; demotion changes a status or an eligibility flag only.
         hotLayerPruning,
+        knowledgeCooling,
         hotLayer: this.buildHotLayerTelemetry(metabotId, date),
         // P1 periodic re-review (audit): how many validated drafts faced the
         // verdict panel again tonight and how many were demoted off the
@@ -1444,24 +1551,33 @@ export class DreamService {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      // Timeout-class failures (attempt aborts, the run-budget sentinel) never
-      // become terminal no matter how many attempts a date has burned: a
-      // timeout says the window was too small, and the next scheduled window
-      // — with the wider adaptive tier and the ≥10-min consecutive-timeout
-      // backoff — can genuinely fix it. Only deterministic provider
-      // rejections (H-80) and the retry cap on OTHER retryable errors end in
-      // terminal-failed.
-      const timeoutClass = isTimeoutError(message);
-      if (!timeoutClass && (classifyDreamError(message) === 'terminal' || currentRun.attemptCount >= DREAM_RETRY_MAX_ATTEMPTS)) {
-        console.warn(
-          `[DreamService] Dream terminally failed for metabot ${metabotId} date ${date} `
-          + `(attempt ${currentRun.attemptCount}, no further auto-retry):`,
-          message,
-        );
-        this.deps.dreamStore.finishRun(metabotId, date, 'terminal-failed', message);
-      } else {
-        console.warn(`[DreamService] Dream failed for metabot ${metabotId} date ${date}:`, message);
+      if (!currentRun) {
+        // The failure happened BEFORE beginRun produced an attempt row
+        // (brain resolution or the beginRun write itself). There is no
+        // attempt count to classify against — record a plain failed row
+        // (finishRun upserts) and let the scheduler retry per policy.
+        console.warn(`[DreamService] Dream aborted before run start for metabot ${metabotId} date ${date}:`, message);
         this.deps.dreamStore.finishRun(metabotId, date, 'failed', message);
+      } else {
+        // Timeout-class failures (attempt aborts, the run-budget sentinel) never
+        // become terminal no matter how many attempts a date has burned: a
+        // timeout says the window was too small, and the next scheduled window
+        // — with the wider adaptive tier and the ≥10-min consecutive-timeout
+        // backoff — can genuinely fix it. Only deterministic provider
+        // rejections (H-80) and the retry cap on OTHER retryable errors end in
+        // terminal-failed.
+        const timeoutClass = isTimeoutError(message);
+        if (!timeoutClass && (classifyDreamError(message) === 'terminal' || currentRun.attemptCount >= DREAM_RETRY_MAX_ATTEMPTS)) {
+          console.warn(
+            `[DreamService] Dream terminally failed for metabot ${metabotId} date ${date} `
+            + `(attempt ${currentRun.attemptCount}, no further auto-retry):`,
+            message,
+          );
+          this.deps.dreamStore.finishRun(metabotId, date, 'terminal-failed', message);
+        } else {
+          console.warn(`[DreamService] Dream failed for metabot ${metabotId} date ${date}:`, message);
+          this.deps.dreamStore.finishRun(metabotId, date, 'failed', message);
+        }
       }
     } finally {
       this.dreamingBots.delete(metabotId);
@@ -1476,9 +1592,10 @@ export class DreamService {
     brain: DreamBrainPair,
     maxTokens?: number,
     attemptTimeoutMs?: number,
+    dropCounters?: DreamInputDropCounters,
   ): Promise<DreamOutput> {
     const firstRaw = await this.callDreamLlm(system, user, brain, maxTokens, attemptTimeoutMs);
-    const first = parseDreamOutput(firstRaw);
+    const first = parseDreamOutput(firstRaw, dropCounters);
     if (first.ok) return first.output;
     const firstError = (first as { ok: false; error: string }).error;
 
@@ -1489,7 +1606,7 @@ export class DreamService {
       maxTokens,
       attemptTimeoutMs,
     );
-    const retry = parseDreamOutput(retryRaw);
+    const retry = parseDreamOutput(retryRaw, dropCounters);
     if (retry.ok) return retry.output;
     throw new Error(`dream output unparseable after retry: ${(retry as { ok: false; error: string }).error}`);
   }
@@ -1614,6 +1731,8 @@ export class DreamService {
     deferredSameNight: number;
     prospectiveDowngraded: number;
     panels: { agreed: number; disagreed: number; incomplete: number };
+    /** Dream review P3: how many gate panels this pass actually ran. */
+    panelsUsed: 1 | 2;
   }> {
     const zero = {
       checked: 0,
@@ -1624,9 +1743,10 @@ export class DreamService {
       deferredSameNight: 0,
       prospectiveDowngraded: 0,
       panels: { agreed: 0, disagreed: 0, incomplete: 0 },
+      panelsUsed: 2 as const,
     };
     try {
-      const gate = this.capabilityGate;
+      const gate = this.resolveGateConfig();
       // Disputed-timeout sweep (design §4.4): an unresolved dispute older than
       // the auto-reject window demotes to 'rejected'; the existing purge
       // (rejected + old) removes the corpse later.
@@ -1788,8 +1908,8 @@ export class DreamService {
       const draftById = new Map(pending.map((draft) => [draft.id, draft]));
       const knownChainRefs = chainDigest ? new Set(chainDigest.knownRefIds) : null;
       const downgradedIds = new Set<number>();
-      const panelA = this.groundPanelVerdicts(parsedA.verdicts, draftById, evidenceDates, knownChainRefs, downgradedIds);
-      const panelB = this.groundPanelVerdicts(verdictsB, draftById, evidenceDates, knownChainRefs, downgradedIds);
+      const panelA = this.groundPanelVerdicts(parsedA.verdicts, draftById, evidenceDates, knownChainRefs, downgradedIds, gate.prospective);
+      const panelB = this.groundPanelVerdicts(verdictsB, draftById, evidenceDates, knownChainRefs, downgradedIds, gate.prospective);
 
       const panels = { agreed: 0, disagreed: 0, incomplete: 0 };
       let validated = 0;
@@ -1839,6 +1959,7 @@ export class DreamService {
               this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
                 eligible: false,
                 reason: 'gate_rejected',
+                sourcePass: 'validation',
               });
             } catch (error) {
               console.warn(
@@ -1862,6 +1983,7 @@ export class DreamService {
         deferredSameNight,
         prospectiveDowngraded: downgradedIds.size,
         panels,
+        panelsUsed: gate.panels,
       };
     } catch (error) {
       console.warn(
@@ -1884,6 +2006,8 @@ export class DreamService {
     evidenceDates: ReadonlySet<string>,
     knownChainRefs: ReadonlySet<string> | null,
     downgradedIds: Set<number>,
+    /** Dream review P3: the prospective guard is never configurable off. */
+    prospective: boolean,
   ): Map<number, { id: number; verdict: string; score: number; rationale: string }> {
     const grounded = new Map<number, { id: number; verdict: string; score: number; rationale: string }>();
     let droppedUngrounded = 0;
@@ -1907,7 +2031,7 @@ export class DreamService {
       // Prospective downgrade: a validated verdict must cite a diary date
       // strictly later than the draft's origin date.
       if (
-        this.capabilityGate.prospective
+        prospective
         && verdict.verdict === 'validated'
       ) {
         const draft = draftById.get(verdict.id);
@@ -1954,10 +2078,21 @@ export class DreamService {
     metabot: DreamMetabotLike,
     brain: DreamBrainPair,
     date: string,
-  ): Promise<{ reReviewed: number; demoted: number; panels: { agreed: number; disagreed: number; incomplete: number } }> {
-    const zero = { reReviewed: 0, demoted: 0, panels: { agreed: 0, disagreed: 0, incomplete: 0 } };
+  ): Promise<{
+    reReviewed: number;
+    demoted: number;
+    panels: { agreed: number; disagreed: number; incomplete: number };
+    /** Dream review P3: how many gate panels this pass actually ran. */
+    panelsUsed: 1 | 2;
+  }> {
+    const zero = {
+      reReviewed: 0,
+      demoted: 0,
+      panels: { agreed: 0, disagreed: 0, incomplete: 0 },
+      panelsUsed: 2 as const,
+    };
     try {
-      const gate = this.capabilityGate;
+      const gate = this.resolveGateConfig();
       const pending = this.deps.coworkStore.listReReviewableCapabilityDrafts(metabot.id, {
         olderThanMs: Date.now() - CAPABILITY_REVIEW_INTERVAL_DAYS * 86_400_000,
         limit: CAPABILITY_REVIEW_MAX_PER_NIGHT,
@@ -1995,6 +2130,7 @@ export class DreamService {
           reReviewed: pending.length,
           demoted: 0,
           panels: { agreed: 0, disagreed: 0, incomplete: pending.length },
+          panelsUsed: gate.panels,
         };
       }
       // Panel B mirrors the fresh gate: drafts reversed, failures degrade to
@@ -2022,8 +2158,8 @@ export class DreamService {
 
       const draftById = new Map(pending.map((draft) => [draft.id, draft]));
       const downgradedIds = new Set<number>();
-      const panelA = this.groundPanelVerdicts(parsedA.verdicts, draftById, evidenceDates, null, downgradedIds);
-      const panelB = this.groundPanelVerdicts(verdictsB, draftById, evidenceDates, null, downgradedIds);
+      const panelA = this.groundPanelVerdicts(parsedA.verdicts, draftById, evidenceDates, null, downgradedIds, gate.prospective);
+      const panelB = this.groundPanelVerdicts(verdictsB, draftById, evidenceDates, null, downgradedIds, gate.prospective);
 
       const panels = { agreed: 0, disagreed: 0, incomplete: 0 };
       let demoted = 0;
@@ -2058,6 +2194,7 @@ export class DreamService {
                 this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
                   eligible: false,
                   reason: 'demoted',
+                  sourcePass: 're_review',
                 });
               } else {
                 this.deps.metaidKnowledgeStore.archiveProcedureByTitle(metabot.id, draft.title);
@@ -2099,7 +2236,7 @@ export class DreamService {
       console.log(
         `[DreamService] Capability re-review for metabot ${metabot.id}: reReviewed=${pending.length}, demoted=${demoted}, agreed/disagreed/incomplete=${panels.agreed}/${panels.disagreed}/${panels.incomplete}`,
       );
-      return { reReviewed: pending.length, demoted, panels };
+      return { reReviewed: pending.length, demoted, panels, panelsUsed: gate.panels };
     } catch (error) {
       console.warn(
         `[DreamService] Capability re-review failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -2166,6 +2303,7 @@ export class DreamService {
             const flipped = this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
               eligible: draft.scope !== 'situational',
               reason: draft.scope === 'situational' ? 'situational' : null,
+              sourcePass: 'promotion',
             });
             if (!flipped) {
               this.deps.coworkStore.updateCapabilityDraftValidation({
@@ -2208,6 +2346,7 @@ export class DreamService {
             this.deps.metaidKnowledgeStore.setProcedureHotEligibility(result.entry.id, {
               eligible: false,
               reason: 'situational',
+              sourcePass: 'promotion',
             });
           }
           const marked = this.deps.coworkStore.markCapabilityDraftPromoted({
@@ -2244,42 +2383,126 @@ export class DreamService {
    * list) neither earns nor loses standing. Best-effort: any failure returns
    * the zero result and never fails the dream run.
    */
+  /**
+   * RRSI P3 usage audit (design §6.3 P3.1), extended by dream review P1
+   * (2026-10-23) to ALL hot-layer kinds: techniques, procedures, knowledge
+   * hot-layer entries and injected value_boundary / work_review memories.
+   * One bounded LLM call compares the day's exposed items with sampled
+   * assistant replies (≤40 excerpts) and writes applied/evidence verdicts into
+   * hot_layer_usage. Only audited rows count as evidence — an exposure never
+   * judged (no replies to sample, item source gone, parse failure, item
+   * missing from the verdict list) neither earns nor loses standing. Applied
+   * 'memory' verdicts additionally stamp user_memories.last_applied_at — the
+   * "was actually used" signal (injection touches last_used_at). Best-effort:
+   * any failure returns the zero result and never fails the dream run.
+   */
   private async runHotLayerUsageAudit(
     metabot: DreamMetabotLike,
     brain: DreamBrainPair,
     date: string,
     activity: DreamDayActivity,
-  ): Promise<{ ran: boolean; items: number; applied: number; excerpts: number; parseFailed: boolean }> {
-    const zero = { ran: false, items: 0, applied: 0, excerpts: 0, parseFailed: false };
+  ): Promise<{
+    ran: boolean;
+    items: number;
+    applied: number;
+    excerpts: number;
+    parseFailed: boolean;
+    knowledgeItems: number;
+    knowledgeApplied: number;
+    memoryItems: number;
+    memoryApplied: number;
+  }> {
+    const zero = {
+      ran: false, items: 0, applied: 0, excerpts: 0, parseFailed: false,
+      knowledgeItems: 0, knowledgeApplied: 0, memoryItems: 0, memoryApplied: 0,
+    };
     try {
       const exposures = this.deps.dreamStore.listHotLayerExposures(metabot.id, date);
       if (exposures.length === 0) return zero;
       const excerpts = sampleUsageAuditExcerpts(activity.sessions ?? []);
       if (excerpts.length === 0) return zero;
-      const items: Array<{ ref: string; kind: 'technique' | 'procedure'; itemId: string; title: string; gist: string }> = [];
-      for (const exposure of selectUsageAuditItems(exposures)) {
+      const techniqueProcedureItems: UsageAuditItem[] = [];
+      const knowledgeItems: UsageAuditItem[] = [];
+      const memoryItems: UsageAuditItem[] = [];
+      let memoryById: Map<string, CoworkUserMemory> | null = null;
+      // The pools form from a wide slice so an extreme technique/procedure
+      // day cannot crowd knowledge/memory out of the pools themselves before
+      // the per-kind quotas below ever see them (review Minor 4).
+      for (const exposure of selectUsageAuditItems(exposures, USAGE_AUDIT_MAX_ITEMS_TOTAL * 4)) {
         if (exposure.kind === 'technique') {
           const draft = this.deps.coworkStore.getCapabilityDraft(metabot.id, Number(exposure.itemId));
           if (!draft) continue;
-          items.push({
+          techniqueProcedureItems.push({
             ref: `technique:${exposure.itemId}`,
             kind: 'technique',
             itemId: exposure.itemId,
             title: draft.title,
             gist: truncateUtf16Units(draft.description, USAGE_AUDIT_ITEM_GIST_CHARS),
           });
-        } else {
+        } else if (exposure.kind === 'procedure') {
           const procedure = this.deps.metaidKnowledgeStore?.getProcedure(exposure.itemId) ?? null;
           if (!procedure) continue;
-          items.push({
+          techniqueProcedureItems.push({
             ref: `procedure:${exposure.itemId}`,
             kind: 'procedure',
             itemId: exposure.itemId,
             title: procedure.title,
             gist: truncateUtf16Units(`${procedure.triggerText};${procedure.steps[0] ?? ''}`, USAGE_AUDIT_ITEM_GIST_CHARS),
           });
+        } else if (exposure.kind === 'knowledge') {
+          const knowledge = this.deps.metaidKnowledgeStore?.getKnowledge(exposure.itemId) ?? null;
+          if (!knowledge || knowledge.status !== 'active') continue;
+          knowledgeItems.push({
+            ref: `knowledge:${exposure.itemId}`,
+            kind: 'knowledge',
+            itemId: exposure.itemId,
+            title: knowledge.topic,
+            gist: truncateUtf16Units(`${knowledge.topic};${knowledge.summary}`, USAGE_AUDIT_ITEM_GIST_CHARS),
+          });
+        } else if (exposure.kind === 'memory') {
+          // Two bounded lookups total (not per exposure): the guidance
+          // classes the exposure ledger records for kind 'memory'.
+          if (!memoryById) {
+            memoryById = new Map();
+            for (const usageClass of ['value_boundary', 'work_review'] as const) {
+              for (const entry of this.deps.coworkStore.listUserMemories({
+                metabotId: metabot.id,
+                usageClass,
+                status: 'all',
+                limit: 500,
+              })) {
+                memoryById.set(entry.id, entry);
+              }
+            }
+          }
+          const memory = memoryById.get(exposure.itemId);
+          if (!memory) continue;
+          memoryItems.push({
+            ref: `memory:${exposure.itemId}`,
+            kind: 'memory',
+            itemId: exposure.itemId,
+            title: truncateUtf16Units(memory.text, 40),
+            gist: truncateUtf16Units(memory.text, USAGE_AUDIT_ITEM_GIST_CHARS),
+          });
         }
       }
+      // One shared call. Review Minor 4 (audit starvation): a busy bot can
+      // expose far more than the cap in techniques/procedures alone, which
+      // under a pure technique-first fill would starve knowledge/memory of
+      // EVERY audit. Reserve up to 4 slots per new kind when their pools are
+      // non-empty and let techniques/procedures take the remainder (legacy
+      // priority inside each band).
+      const knowledgeCap = knowledgeItems.length > 0 ? Math.min(4, knowledgeItems.length) : 0;
+      const memoryCap = memoryItems.length > 0 ? Math.min(4, memoryItems.length) : 0;
+      const techniqueProcedureCap = Math.max(
+        0,
+        USAGE_AUDIT_MAX_ITEMS_TOTAL - knowledgeCap - memoryCap,
+      );
+      const items = [
+        ...techniqueProcedureItems.slice(0, techniqueProcedureCap),
+        ...knowledgeItems.slice(0, knowledgeCap),
+        ...memoryItems.slice(0, memoryCap),
+      ].slice(0, USAGE_AUDIT_MAX_ITEMS_TOTAL);
       if (items.length === 0) return zero;
       const prompt = buildHotLayerUsageAuditPrompt({ date, items, excerpts });
       const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 2048);
@@ -2288,12 +2511,21 @@ export class DreamService {
         new Set(items.map((item) => item.ref)),
         new Set(excerpts.map((excerpt) => excerpt.label)),
       );
+      const byKindCounts = {
+        knowledgeItems: items.filter((item) => item.kind === 'knowledge').length,
+        memoryItems: items.filter((item) => item.kind === 'memory').length,
+        knowledgeApplied: 0,
+        memoryApplied: 0,
+      };
       if (parsed.ok === false) {
-        return { ran: true, items: items.length, applied: 0, excerpts: excerpts.length, parseFailed: true };
+        return {
+          ran: true, items: items.length, applied: 0, excerpts: excerpts.length, parseFailed: true,
+          ...byKindCounts,
+        };
       }
       const channelByLabel = new Map(excerpts.map((excerpt) => [excerpt.label, excerpt.channel]));
       const mapped: Array<{
-        kind: 'technique' | 'procedure';
+        kind: 'technique' | 'procedure' | 'knowledge' | 'memory';
         itemId: string;
         applied: boolean;
         evidence: { labels: string[]; channels: Array<'owner' | 'external'> };
@@ -2309,11 +2541,26 @@ export class DreamService {
             channels.push(channel);
           }
         }
-        if (verdict.applied) applied += 1;
+        if (verdict.applied) {
+          applied += 1;
+          if (item.kind === 'knowledge') byKindCounts.knowledgeApplied += 1;
+          if (item.kind === 'memory') byKindCounts.memoryApplied += 1;
+        }
         mapped.push({ kind: item.kind, itemId: item.itemId, applied: verdict.applied, evidence: { labels: verdict.labels, channels } });
       }
       this.deps.dreamStore.recordHotLayerUsageVerdicts(metabot.id, date, mapped, this.now().getTime());
-      return { ran: true, items: items.length, applied, excerpts: excerpts.length, parseFailed: false };
+      // The "was actually used" stamp: applied guidance memories move off the
+      // injection clock onto the applied clock for hygiene decay + eviction.
+      const appliedMemoryIds = mapped
+        .filter((verdict) => verdict.kind === 'memory' && verdict.applied)
+        .map((verdict) => verdict.itemId);
+      if (appliedMemoryIds.length > 0) {
+        this.deps.coworkStore.touchUserMemoriesLastApplied(metabot.id, appliedMemoryIds);
+      }
+      return {
+        ran: true, items: items.length, applied, excerpts: excerpts.length, parseFailed: false,
+        ...byKindCounts,
+      };
     } catch (error) {
       console.warn(
         `[DreamService] Usage audit failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -2346,6 +2593,29 @@ export class DreamService {
       // Only hot_reason 'unused' ever re-enters through usage evidence.
       const reenteredIds = new Set<string>();
       let reentered = 0;
+      // Review Minor 1: cooled knowledge re-enters the hot pool under the
+      // SAME rule as unused procedures — ≥2 applied nights within the
+      // trailing 14-day window (recall exposure rows now feed appliedNights
+      // via the knowledge_recall ledger).
+      const knowledgeReentryCandidates = this.deps.metaidKnowledgeStore
+        ? this.deps.metaidKnowledgeStore.listCooledKnowledge(metabot.id)
+        : [];
+      if (knowledgeReentryCandidates.length > 0) {
+        const knowledgeReentryStats = this.deps.dreamStore.listHotLayerUsageStats(metabot.id, {
+          kind: 'knowledge',
+          sinceDate: shiftDateKey(date, -(HOT_LAYER_REENTRY_WINDOW_DAYS - 1)),
+          untilDate: date,
+        });
+        for (const entry of knowledgeReentryCandidates) {
+          if ((knowledgeReentryStats.get(entry.id)?.appliedNights ?? 0) >= HOT_LAYER_REENTRY_MIN_APPLIED_NIGHTS) {
+            const flipped = this.deps.metaidKnowledgeStore?.setKnowledgeHotEligibility(entry.id, {
+              eligible: true,
+              atMs: this.now().getTime(),
+            });
+            if (flipped) reentered += 1;
+          }
+        }
+      }
       const reentryCandidates = this.deps.metaidKnowledgeStore
         ? this.deps.metaidKnowledgeStore.listUnusedProcedures(metabot.id)
         : [];
@@ -2371,6 +2641,7 @@ export class DreamService {
             eligible: true,
             reason: null,
             atMs: this.now().getTime(),
+            sourcePass: 'pruning',
           });
           if (flipped) {
             reentered += 1;
@@ -2434,6 +2705,7 @@ export class DreamService {
           const flipped = this.deps.metaidKnowledgeStore?.setProcedureHotEligibility(candidate.entry.id, {
             eligible: false,
             reason: 'unused',
+            sourcePass: 'pruning',
           });
           if (flipped) demotedProcedures += 1;
         }
@@ -2442,6 +2714,193 @@ export class DreamService {
     } catch (error) {
       console.warn(
         `[DreamService] Hot-layer pruning failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * Dream review P1 — knowledge hot-layer cooling, mirroring the
+   * technique/procedure pruning above: an ACTIVE knowledge entry past its
+   * 14-day grace (updated_at as the hot-entry proxy — knowledge rows carry no
+   * hot_since) with ≥5 audited hot exposure nights in the trailing 30-day
+   * window and zero applied nights leaves the proactive <knowledge> injection
+   * pool (hot_eligible = 0). Nothing is deleted and recall keeps returning the
+   * entry. At most 2 coolings per night. The reference clock is the dreamed
+   * date's day end. Best-effort: any failure returns the zero result.
+   */
+  private coolHotKnowledgeAfterDream(
+    metabot: DreamMetabotLike,
+    date: string,
+  ): { cooled: number } {
+    const zero = { cooled: 0 };
+    try {
+      if (!this.deps.metaidKnowledgeStore) return zero;
+      const refMs = getDayBoundsMs(date).endMs;
+      const sinceDate = shiftDateKey(date, -(HOT_LAYER_UTILITY_WINDOW_DAYS - 1));
+      const stats = this.deps.dreamStore.listHotLayerUsageStats(metabot.id, {
+        kind: 'knowledge',
+        sinceDate,
+        untilDate: date,
+      });
+      if (stats.size === 0) return zero;
+      const candidates: Array<{
+        entry: MetaIDKnowledgeEntry;
+        key: string;
+        kind: 'knowledge';
+        hotSinceMs: number;
+        appliedNights: number;
+        exposedNights: number;
+      }> = [];
+      for (const [itemId, itemStats] of stats) {
+        const entry = this.deps.metaidKnowledgeStore.getKnowledge(itemId);
+        if (!entry || entry.status !== 'active') continue;
+        if (entry.hotEligible === false) continue;
+        candidates.push({
+          entry,
+          key: `knowledge:${itemId}`,
+          kind: 'knowledge',
+          hotSinceMs: entry.updatedAt ?? entry.createdAt,
+          appliedNights: itemStats.appliedNights,
+          exposedNights: itemStats.exposedNights,
+        });
+      }
+      const cooled = selectHotLayerDemotions(candidates, { nowMs: refMs });
+      let cooledCount = 0;
+      for (const candidate of cooled) {
+        const flipped = this.deps.metaidKnowledgeStore.setKnowledgeHotEligibility(candidate.entry.id, {
+          eligible: false,
+          atMs: this.now().getTime(),
+        });
+        if (flipped) {
+          cooledCount += 1;
+          console.log(
+            `[DreamService] Knowledge "${candidate.entry.topic}" cooled out of the hot pool for metabot ${metabot.id}: ${candidate.exposedNights} audited hot nights, applied on none`,
+          );
+        }
+      }
+      return { cooled: cooledCount };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Knowledge cooling failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * Dream review P2-1 (design 2026-10-10 §P2.5): the frozen per-bot exam —
+   * the comparable "is the bot getting sharper" signal. Runs at most once
+   * per bot per week, only after the bot has ≥14 days of dream data, inside
+   * a read_only isolated session (no writes possible). The paper is built
+   * from the bot's own sediment and hash-frozen; re-runs score the SAME
+   * paper until the sediment changes enough to change the hash. Best-effort:
+   * any failure lands on the run row and never blocks the dream run.
+   */
+  private async maybeRunMetabotExam(
+    metabot: DreamMetabotLike,
+    brain: DreamBrainPair,
+    date: string,
+  ): Promise<{ ran: boolean; score: number | null; questions: number; scoredCount: number }> {
+    const zero = { ran: false, score: null as number | null, questions: 0, scoredCount: 0 };
+    try {
+      if (!this.deps.runExamSession) return zero;
+      const dreamStore = this.deps.dreamStore;
+      // Weekly cap: one exam run per bot per 7 days, counted from the last
+      // START (a crashed run still consumed its week's budget).
+      const latestRun = dreamStore.getLatestExamRun(metabot.id);
+      if (latestRun && this.now().getTime() - latestRun.startedAt < EXAM_RUN_INTERVAL_DAYS * 86_400_000) {
+        return zero;
+      }
+      // Data gate: younger than 14 days of dream data → nothing to examine.
+      const summaries = dreamStore.listDailySummaries(metabot.id, 400);
+      if (summaries.length === 0) return zero;
+      const oldestSummary = summaries[summaries.length - 1];
+      if (!oldestSummary || !oldestSummary.summaryDate) return zero;
+      const [year, month, day] = date.split('-').map((part) => Number(part));
+      const dateMs = new Date(year, (month || 1) - 1, (day || 1)).getTime();
+      const oldestMs = new Date(oldestSummary.summaryDate + 'T00:00:00').getTime();
+      if (!Number.isFinite(oldestMs) || (dateMs - oldestMs) / 86_400_000 < EXAM_MIN_DATA_DAYS) {
+        return zero;
+      }
+
+      // Assemble the sediment and build (or reuse) the frozen paper.
+      // Review M6a: the sediment pool must order by a STABLE key — the
+      // generic listUserMemories sorts by COALESCE(last_used_at, updated_at),
+      // and last_used_at moves on every injection, which would reorder the
+      // pool between runs and flip the paper's hash without any real change.
+      const valueBoundaries = dreamStore.listExamSedimentMemories(metabot.id, 'value_boundary', 20);
+      const workReviews = dreamStore.listExamSedimentMemories(metabot.id, 'work_review', 20);
+      const knowledgeEntries = (this.deps.metaidKnowledgeStore
+        ? this.deps.metaidKnowledgeStore.listKnowledge({ metabotId: metabot.id, status: 'active', limit: 20 })
+        : []
+      ).map((entry) => ({ id: entry.id, topic: entry.topic, summary: entry.summary, updatedAt: entry.updatedAt }));
+      const built = buildMetabotExam({
+        valueBoundaries,
+        workReviews,
+        knowledgeEntries,
+        feedbackEvents: dreamStore.listFeedbackEventsWithComments(metabot.id),
+        groupTaskComments: dreamStore.listGroupTaskReviewComments(metabot.id),
+      });
+      if (!built) return zero;
+      const nowMs = this.now().getTime();
+      const frozen = dreamStore.freezeExam(metabot.id, built.contentHash, built.questions, nowMs);
+      if (!frozen) return zero;
+      // Same hash → keep the frozen paper's questions (never rebuild).
+      const active = dreamStore.getActiveExam(metabot.id);
+      const questions = (active?.questions ?? built.questions) as ExamQuestion[];
+      const exam: MetabotExam = { contentHash: frozen.contentHash, questions };
+      if (questions.length === 0) return zero;
+
+      // Answer pass: read_only isolated session; scoring pass: the brain model
+      // judges against the frozen rubric.
+      const runId = dreamStore.createExamRun(metabot.id, frozen.id, nowMs);
+      try {
+        const answers = await this.deps.runExamSession({
+          metabotId: metabot.id,
+          userMessage: buildExamSessionPrompt({ botName: metabot.name, exam }),
+        });
+        const scoring = buildExamScoringPrompt({ botName: metabot.name, exam, answers });
+        const raw = await this.callDreamLlm(scoring.system, scoring.user, brain, 4096);
+        const parsed = parseExamScores(raw, new Set(questions.map((question) => question.id)));
+        if (!parsed.ok) throw new Error(`exam scoring parse failed: ${(parsed as { ok: false; error: string }).error}`);
+        dreamStore.finishExamRun({
+          id: runId,
+          status: 'done',
+          finishedAt: this.now().getTime(),
+          totalScore: parsed.total,
+          scoredCount: parsed.scoredCount,
+          questionScores: parsed.scores,
+        });
+        // Review M6b: a PARTIAL verdict (scorer skipped questions) is not a
+        // low score — report it as score:null so the trend gaps instead of
+        // dipping, and carry scoredCount for the audit trail.
+        const complete = parsed.scoredCount >= parsed.expectedCount;
+        console.log(
+          `[DreamService] Frozen exam for metabot ${metabot.id} (${date}): score=${complete ? parsed.total.toFixed(2) : 'partial'}, `
+          + `scored=${parsed.scoredCount}/${parsed.expectedCount}, hash=${frozen.contentHash.slice(0, 8)}`,
+        );
+        return {
+          ran: true,
+          score: complete ? parsed.total : null,
+          questions: questions.length,
+          scoredCount: parsed.scoredCount,
+        };
+      } catch (error) {
+        dreamStore.finishExamRun({
+          id: runId,
+          status: 'failed',
+          finishedAt: this.now().getTime(),
+          error: error instanceof Error ? error.message : String(error),
+        });
+        console.warn(
+          `[DreamService] Frozen exam run failed for metabot ${metabot.id} date ${date}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return { ran: true, score: null, questions: questions.length, scoredCount: 0 };
+      }
+    } catch (error) {
+      console.warn(
+        `[DreamService] Frozen exam pass failed for metabot ${metabot.id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return zero;
     }
@@ -2826,6 +3285,27 @@ export class DreamService {
   }
 
   /**
+   * The self-curriculum pipeline's compound enable gate (design §3.4): both
+   * practiceTasksEnabled AND practiceAutoApproveReadOnly must be on. Both
+   * default OFF, so default installs skip the nightly proposal ask and the
+   * proposal persistence entirely instead of paying tokens and dead rows for
+   * a pipeline that would never run. A policy read failure falls back to
+   * enabled (previous behavior) so a store hiccup never silently rewrites the
+   * contract.
+   */
+  private isPracticePipelineEnabled(metabotId: number): boolean {
+    try {
+      const policy = this.deps.coworkStore.getEffectiveMemoryPolicyForMetabot(metabotId);
+      return Boolean(policy.practiceTasksEnabled && policy.practiceAutoApproveReadOnly);
+    } catch (error) {
+      console.warn(
+        `[DreamService] Practice policy read failed for metabot ${metabotId}; treating practice as enabled: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return true;
+    }
+  }
+
+  /**
    * Self-curriculum approval + materialization (design §3.4, owner decisions
    * §8): with the per-bot practiceTasksEnabled flag ON and
    * practiceAutoApproveReadOnly on, pending read_only proposals auto-approve
@@ -2949,10 +3429,11 @@ export class DreamService {
     brain: DreamBrainPair,
     date: string,
     activity: DreamDayActivity,
+    dropCounters?: DreamInputDropCounters,
   ): Promise<{ points: number; lessons: number; pointsByKind: Record<string, number> }> {
     const zero = { points: 0, lessons: 0, pointsByKind: {} as Record<string, number> };
     try {
-      const points = extractNegativeDecisionPoints(activity);
+      const points = extractNegativeDecisionPoints(activity, COUNTERFACTUAL_MAX_POINTS, dropCounters);
       if (points.length === 0) return { ...zero, pointsByKind: {} };
       const pointsByKind: Record<string, number> = {};
       for (const point of points) {
@@ -2997,6 +3478,82 @@ export class DreamService {
     } catch (error) {
       console.warn(
         `[DreamService] Counterfactual replay failed for metabot ${metabot.id} date ${date}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return zero;
+    }
+  }
+
+  /**
+   * Dream review P0: positive replay — the 👍-symmetric counterpart of the
+   * counterfactual replay. Replays the day's praised decision points (thumbs-up
+   * replies, commented ones first, ≤3/day), asks the bot's own LLM what exactly
+   * was praiseworthy and should be repeated, and keeps a lesson only when it
+   * clears the conservative quality gate (repeatable + substantive beyond
+   * generic flattery + grounded in the quoted reply). Passing lessons become
+   * capability_drafts with origin 'positive_replay' — status 'draft', flowing
+   * through the EXISTING validation/promotion pipeline instead of going
+   * straight to the hot layer. Runs after finishRun and never affects the
+   * run's outcome; no praised points means no LLM call.
+   */
+  private async runPositiveReplayAfterDream(
+    metabot: DreamMetabotLike,
+    brain: DreamBrainPair,
+    date: string,
+    activity: DreamDayActivity,
+    dropCounters?: DreamInputDropCounters,
+  ): Promise<{ points: number; lessons: number }> {
+    const zero = { points: 0, lessons: 0 };
+    try {
+      const points = extractPositiveDecisionPoints(activity, POSITIVE_REPLAY_MAX_POINTS, dropCounters);
+      if (points.length === 0) return zero;
+      const prompt = buildPositiveReplayPrompt({
+        botName: metabot.name,
+        date,
+        points,
+      });
+      const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
+      const parsed = parsePositiveReplayOutput(raw, new Set(points.map((point) => point.id)));
+      if (!parsed.ok) {
+        console.warn(`[DreamService] Positive replay parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
+        return { points: points.length, lessons: 0 };
+      }
+      const pointById = new Map(points.map((point) => [point.id, point]));
+      const lessons: Array<{ title: string; description: string }> = [];
+      const seenLessons = new Set<string>();
+      for (const result of parsed.results) {
+        const point = pointById.get(result.id);
+        if (!point) continue;
+        const lesson = pickPositiveLesson(result, point);
+        if (!lesson || seenLessons.has(lesson)) continue;
+        seenLessons.add(lesson);
+        lessons.push({
+          title: `值得重复的回复做法:${lesson.slice(0, 40)}`,
+          description: [
+            `${lesson}`,
+            '',
+            `来源:正向重放 ${date}(人类点赞,评语:${point.outcome.replace(/\s+/g, ' ').slice(0, 200)})`,
+            `被赞回复:${point.botAction.slice(0, 300)}`,
+          ].join('\n'),
+        });
+      }
+      if (lessons.length === 0) return { points: points.length, lessons: 0 };
+      // The checked insert dedupes against live drafts and re-proposals of
+      // recently falsified hypotheses — same guarantees as the dream output's
+      // own capability_learnings.
+      const insert = this.deps.coworkStore.insertCapabilityDraftsChecked(
+        metabot.id,
+        date,
+        lessons.map((lesson) => ({ ...lesson, capabilityType: 'workflow', origin: 'positive_replay' })),
+      );
+      if (insert.inserted > 0) {
+        console.log(
+          `[DreamService] Positive replay for metabot ${metabot.id} date ${date}: points=${points.length}, lessons=${insert.inserted}`,
+        );
+      }
+      return { points: points.length, lessons: insert.inserted };
+    } catch (error) {
+      console.warn(
+        `[DreamService] Positive replay failed for metabot ${metabot.id} date ${date}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return zero;
     }
@@ -3117,7 +3674,7 @@ export class DreamService {
             if (agentSourced.has(procedureId)) {
               // It left the active hot set, so it counts in the same log and
               // rollback note as an archive — but the record survives.
-              if (this.deps.metaidKnowledgeStore.setProcedureHotEligibility(procedureId, { eligible: false, reason: 'rollback' })) {
+              if (this.deps.metaidKnowledgeStore.setProcedureHotEligibility(procedureId, { eligible: false, reason: 'rollback', sourcePass: 'rollback' })) {
                 archivedProcedures.add(procedureId);
               }
               continue;
@@ -3157,6 +3714,7 @@ export class DreamService {
             this.deps.metaidKnowledgeStore.setProcedureHotEligibility(draft.sourceProcedureId, {
               eligible: false,
               reason: 'rollback',
+              sourcePass: 'rollback',
             });
           } catch (error) {
             console.warn(
@@ -3611,6 +4169,8 @@ export class DreamService {
   ): {
     dedupMerged: number;
     capabilityDraftInsert: { inserted: number; skippedDuplicate: number; skippedFalsified: number };
+    /** Dream review P0: a self-identity update was refused by the injection screen. */
+    selfIdentityRefused: boolean;
   } {
     // RSI P0 retention gate: snapshot the CURRENT dream-origin prompt layer
     // immediately before tonight's writes, so a later negative-feedback spike
@@ -3738,41 +4298,54 @@ export class DreamService {
     // Self-identity only moves forward in time: version repairs never touch
     // it, and a normal run for a date older than the identity's current
     // source date must not regress it either.
+    // Dream review P0: before anything else, the injection screen refuses a
+    // newly generated identity that carries prompt-override phrasing (or is
+    // empty after trimming) — the identity rides every prompt, so a bad row
+    // must never replace the previous one. Refusals keep the old identity and
+    // are marked in the run telemetry.
+    let selfIdentityRefused = false;
     if (output.selfIdentity && !isRepair) {
-      const latestIdentityDate = this.deps.coworkStore.getDreamIdentityLatestDate(metabotId);
-      if (latestIdentityDate && date < latestIdentityDate) {
-        console.log(`[DreamService] Skip self-identity update for metabot ${metabotId}: date ${date} older than current source ${latestIdentityDate}`);
+      if (isSelfIdentityInjectionAttempt(output.selfIdentity)) {
+        selfIdentityRefused = true;
+        console.warn(
+          `[DreamService] Refusing self-identity update for metabot ${metabotId} date ${date}: prompt-override pattern or empty text; keeping the previous identity`,
+        );
       } else {
-        const existing = this.deps.coworkStore.listUserMemories({
-          metabotId,
-          scopeKind: 'owner',
-          scopeKey: 'owner:self',
-          usageClass: 'self_identity',
-          status: 'all',
-          limit: 1,
-        })[0];
-        if (existing) {
-          this.deps.coworkStore.updateUserMemory({
-            id: existing.id,
-            metabotId,
-            text: output.selfIdentity,
-            usageClass: 'self_identity',
-            allowProtected: true,
-            source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
-          });
+        const latestIdentityDate = this.deps.coworkStore.getDreamIdentityLatestDate(metabotId);
+        if (latestIdentityDate && date < latestIdentityDate) {
+          console.log(`[DreamService] Skip self-identity update for metabot ${metabotId}: date ${date} older than current source ${latestIdentityDate}`);
         } else {
-          this.deps.coworkStore.createUserMemory({
+          const existing = this.deps.coworkStore.listUserMemories({
             metabotId,
-            text: output.selfIdentity,
             scopeKind: 'owner',
             scopeKey: 'owner:self',
             usageClass: 'self_identity',
-            origin: 'dream',
-            isExplicit: true,
-            confidence: 0.9,
-            forceNew: true,
-            source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
-          });
+            status: 'all',
+            limit: 1,
+          })[0];
+          if (existing) {
+            this.deps.coworkStore.updateUserMemory({
+              id: existing.id,
+              metabotId,
+              text: output.selfIdentity,
+              usageClass: 'self_identity',
+              allowProtected: true,
+              source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
+            });
+          } else {
+            this.deps.coworkStore.createUserMemory({
+              metabotId,
+              text: output.selfIdentity,
+              scopeKind: 'owner',
+              scopeKey: 'owner:self',
+              usageClass: 'self_identity',
+              origin: 'dream',
+              isExplicit: true,
+              confidence: 0.9,
+              forceNew: true,
+              source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
+            });
+          }
         }
       }
     }
@@ -3876,8 +4449,16 @@ export class DreamService {
     // practice proposal becomes a 'pending' dream_practice_proposals row;
     // approval and materialization are a separate pipeline stage. A failure
     // here must not fail the dream run.
+    // Dream review P0: when the bot's practice pipeline is disabled the
+    // proposals are dead rows (nothing approves or materializes them), so
+    // they are dropped at the gate instead of persisted.
     const practiceProposals = Array.isArray(output.practiceProposals) ? output.practiceProposals : [];
-    if (practiceProposals.length > 0) {
+    // Review Minor 7: repair re-dreams re-run writeDreamResults for a date the
+    // original night already proposed — proposals have no batch-replace
+    // semantics (unlike the day's memories), so persisting here would pile
+    // duplicate rows into the approval pipeline. Repairs keep the original
+    // night's proposals untouched.
+    if (practiceProposals.length > 0 && !isRepair && this.isPracticePipelineEnabled(metabotId)) {
       try {
         const inserted = this.deps.coworkStore.insertDreamPracticeProposals(
           metabotId,
@@ -3895,9 +4476,13 @@ export class DreamService {
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    } else if (practiceProposals.length > 0) {
+      console.log(
+        `[DreamService] Dropped ${practiceProposals.length} practice proposal(s) for metabot ${metabotId} date ${date}: practice pipeline disabled`,
+      );
     }
 
-    return { dedupMerged, capabilityDraftInsert };
+    return { dedupMerged, capabilityDraftInsert, selfIdentityRefused };
   }
 }
 

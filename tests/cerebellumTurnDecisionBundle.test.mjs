@@ -441,9 +441,9 @@ test('runCerebellumTurnDecisions: payload accounting counts every decision once'
   assert.equal(stat.knowledgeSent, selection.knowledge.length);
   assert.equal(stat.skillsSent, selection.skills.length);
   assert.equal(stat.servicesSent, selection.services.length);
-  assert.equal(stat.gateQuestions, 4);
+  assert.equal(stat.gateQuestions, 5, 'team-culture joined the gateable blocks (review Minor 6)');
   // Choice decisions are ONE question each (options ride inside `criteria`).
   assert.equal(stat.totalQuestions,
-    selection.memories.length + selection.knowledge.length + 4 + 2);
+    selection.memories.length + selection.knowledge.length + 5 + 2);
   assert.ok(stat.totalChars > 0);
 });

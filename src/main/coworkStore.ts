@@ -929,6 +929,13 @@ export interface CoworkUserMemory {
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
+  /**
+   * Dream review P1 (2026-10-23): stamped ONLY when the nightly hot-layer
+   * usage audit judges the memory APPLIED in a reply (evidence-cited) —
+   * injection touches last_used_at, application touches this. Hygiene decay
+   * and prompt eviction read COALESCE(last_applied_at, last_used_at, ...).
+   */
+  lastAppliedAt?: number | null;
   /** Hygiene decay mark: archived dream memories leave injection but stay restorable. */
   archivedAt?: number | null;
   /** Recall weight: high-importance memories get guaranteed injection and late eviction. */
@@ -992,6 +999,10 @@ export interface CapabilityDraft {
   /** RRSI P5 specificity verdict from reconciliation (NULL = not assessed,
    * behaves exactly like general). */
   scope: CapabilityScope | null;
+  /** Distillation provenance (dream review P0): NULL = the dream output's own
+   * capability_learnings; 'positive_replay' = the 👍-grounded positive replay
+   * pass. */
+  origin: string | null;
 }
 
 interface CapabilityDraftRow {
@@ -1016,6 +1027,7 @@ interface CapabilityDraftRow {
   source_procedure_id?: string | null;
   dormant_at?: number | string | null;
   scope?: string | null;
+  origin?: string | null;
 }
 
 /** Shared column list for every capability-draft SELECT (mapped by
@@ -1023,7 +1035,7 @@ interface CapabilityDraftRow {
 const CAPABILITY_DRAFT_COLUMNS = `id, metabot_id, dream_date, title, description, capability_type, status, created_at,
              validation_score, validation_notes, validated_at, times_injected, last_injected_at,
              promoted_at, promoted_procedure_id, last_reviewed_at, conditions_text, uncertainty_text,
-             source_procedure_id, dormant_at, scope`;
+             source_procedure_id, dormant_at, scope, origin`;
 
 /** Which gate pass falsified a hypothesis (RRSI P1 ledger provenance). */
 export type CapabilityFalsifiedSource = 'validation' | 're_review';
@@ -1044,8 +1056,12 @@ export interface CapabilityFalsifiedHypothesis {
   lastHitAt: number | null;
 }
 
-/** Which hot-layer kind an exposure row tracks (RRSI P2, design §6.2 P2.4). */
-export type HotLayerItemKind = 'technique' | 'procedure';
+/** Which hot-layer kind an exposure row tracks (RRSI P2, design §6.2 P2.4).
+ * Dream review P1 (2026-10-23) widens the set: 'knowledge' = metaid knowledge
+ * hot-layer entries, 'memory' = injected value_boundary / work_review
+ * user_memories. The hot_layer_usage CHECK constraint is widened by a
+ * table-rebuild migration in sqliteStore. */
+export type HotLayerItemKind = 'technique' | 'procedure' | 'knowledge' | 'memory';
 
 /** How the item reached the model: always-on injection or on-demand recall. */
 export type HotLayerExposure = 'hot' | 'recall';
@@ -1362,6 +1378,7 @@ interface CoworkUserMemoryRow {
   created_at: number;
   updated_at: number;
   last_used_at: number | null;
+  last_applied_at?: number | null;
   metabot_id?: number | null;
   scope_kind?: string | null;
   scope_key?: string | null;
@@ -1443,6 +1460,23 @@ export class CoworkStore implements MemoryBackend {
   private memoryBackend: MemoryBackend | null = null;
   /** Debounce anchor for last_used_at touch saves (full-file writes on wasm). */
   private lastMemoryTouchSaveAt: number | null = null;
+  /**
+   * Dream review P3: in-process write-behind buffer for hot_layer exposure
+   * rows. High-frequency turns used to UPSERT once per rendered item per
+   * turn; rows accumulate here and flush on a ≤5s unref'd timer, at 200
+   * buffered keys, or via flushHotLayerExposureBuffer() (app shutdown).
+   * Pure telemetry — a crash loses at most the buffer window.
+   */
+  private hotLayerExposureBuffer = new Map<string, {
+    metabotId: number;
+    usageDate: string;
+    kind: HotLayerItemKind;
+    id: string;
+    exposure: HotLayerExposure;
+    count: number;
+    firstExposedAt: number;
+  }>();
+  private hotLayerExposureFlushTimer: ReturnType<typeof setInterval> | null = null;
 
   // In-memory tracking of delegation-blocked sessions
   private delegationBlockedSessions: Map<string, { orderId: string }> = new Map();
@@ -1875,6 +1909,15 @@ export class CoworkStore implements MemoryBackend {
       }
       if (!memoryColumns.includes('archived_at')) {
         this.db.run('ALTER TABLE user_memories ADD COLUMN archived_at INTEGER;');
+        changed = true;
+      }
+      // Dream review P1 (2026-10-23): "applied" timestamp, written ONLY by the
+      // nightly hot-layer usage audit when a memory is judged applied in a
+      // reply (evidence-cited). Injection keeps touching last_used_at; decay
+      // and eviction read COALESCE(last_applied_at, last_used_at, updated_at)
+      // so "was used" outranks "was injected".
+      if (!memoryColumns.includes('last_applied_at')) {
+        this.db.run('ALTER TABLE user_memories ADD COLUMN last_applied_at INTEGER;');
         changed = true;
       }
       if (!memoryColumns.includes('importance')) {
@@ -6905,6 +6948,39 @@ export class CoworkStore implements MemoryBackend {
     }
   }
 
+  /**
+   * Dream review P3: persisted capability-gate knob (cowork_config kv, same
+   * pattern as the memory policy rows below). ONLY the panel count is
+   * configurable — the prospective post-origin citation rule is a data-leak
+   * guard and stays unconditionally on. Default 2 panels (behavior
+   * unchanged).
+   */
+  getCapabilityGateConfig(): { panels: 1 | 2 } {
+    const row = this.getOne<{ value: string }>(
+      "SELECT value FROM cowork_config WHERE key = 'capabilityGateConfig'",
+      [],
+    );
+    if (!row?.value) return { panels: 2 };
+    try {
+      const parsed = JSON.parse(row.value) as { panels?: unknown };
+      return { panels: parsed.panels === 1 ? 1 : 2 };
+    } catch {
+      return { panels: 2 };
+    }
+  }
+
+  setCapabilityGateConfig(input: { panels: 1 | 2 }): { panels: 1 | 2 } {
+    const panels = input?.panels === 1 ? 1 : 2;
+    this.db.run(
+      `INSERT INTO cowork_config (key, value, updated_at)
+       VALUES ('capabilityGateConfig', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [JSON.stringify({ panels }), Date.now()],
+    );
+    this.saveDb();
+    return { panels };
+  }
+
   // Config operations
   getConfig(): CoworkConfig {
     interface ConfigRow {
@@ -7131,6 +7207,7 @@ export class CoworkStore implements MemoryBackend {
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
       lastUsedAt: row.last_used_at === null ? null : Number(row.last_used_at),
+      lastAppliedAt: row.last_applied_at == null ? null : Number(row.last_applied_at),
       archivedAt: row.archived_at == null ? null : Number(row.archived_at),
       importance: clampMemoryImportance(row.importance),
     };
@@ -7404,6 +7481,31 @@ export class CoworkStore implements MemoryBackend {
         this.saveDb();
       }
     }
+  }
+
+  /**
+   * Dream review P1: stamp last_applied_at for memories the nightly usage
+   * audit judged APPLIED (evidence-cited) in a reply. Distinct from the
+   * injection touch above — this is the "was actually used" signal feeding
+   * hygiene decay and prompt eviction. Debounced save like the injection touch.
+   */
+  touchUserMemoriesLastApplied(metabotId: number, memoryIds: string[]): number {
+    const uniqueIds = Array.from(new Set(memoryIds.map((id) => id.trim()).filter(Boolean)));
+    if (uniqueIds.length === 0) return 0;
+    const placeholders = uniqueIds.map(() => '?').join(', ');
+    const now = Date.now();
+    this.db.run(`
+      UPDATE user_memories
+      SET last_applied_at = ?
+      WHERE metabot_id = ?
+        AND id IN (${placeholders})
+    `, [now, metabotId, ...uniqueIds]);
+    const changed = this.db.getRowsModified?.() || 0;
+    if (changed > 0 && now - (this.lastMemoryTouchSaveAt ?? 0) >= 10_000) {
+      this.lastMemoryTouchSaveAt = now;
+      this.saveDb();
+    }
+    return changed;
   }
 
   createUserMemory(input: MemoryCreateUserMemoryInput): CoworkUserMemory {
@@ -7705,6 +7807,8 @@ export class CoworkStore implements MemoryBackend {
       title?: string | null;
       description?: string | null;
       capabilityType?: string | null;
+      /** Distillation provenance (dream review P0); NULL/omitted = dream output. */
+      origin?: string | null;
     }>,
     options?: { nowMs?: number },
   ): CapabilityDraftInsertResult {
@@ -7751,10 +7855,10 @@ export class CoworkStore implements MemoryBackend {
       }
       this.db.run(`
         INSERT INTO capability_drafts (
-          metabot_id, dream_date, title, description, capability_type, status, created_at
+          metabot_id, dream_date, title, description, capability_type, status, created_at, origin
         )
-        VALUES (?, ?, ?, ?, ?, 'draft', ?)
-      `, [metabotId, dreamDate, title, description, capabilityType, nowMs]);
+        VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)
+      `, [metabotId, dreamDate, title, description, capabilityType, nowMs, learning.origin?.trim() || null]);
       const newId = Number(this.getOne<{ id: number | string }>('SELECT last_insert_rowid() AS id', [])?.id);
       result.inserted += 1;
       result.insertedIds.push(newId);
@@ -7922,6 +8026,7 @@ export class CoworkStore implements MemoryBackend {
       sourceProcedureId: row.source_procedure_id == null ? null : String(row.source_procedure_id),
       dormantAt: row.dormant_at == null ? null : Number(row.dormant_at),
       scope: normalizeCapabilityScope(row.scope),
+      origin: row.origin == null ? null : String(row.origin),
     };
   }
 
@@ -8045,19 +8150,46 @@ export class CoworkStore implements MemoryBackend {
       this.saveDb();
     }
     // RRSI P2 exposure ledger: today's hot technique exposures for exactly
-    // the injected drafts (INSERT … SELECT; the WHERE clause is required
-    // before ON CONFLICT in this form). Best-effort telemetry — a failure
+    // the injected drafts. Dream review P3: rides the same write-behind
+    // buffer as recordHotLayerExposures (the old INSERT … SELECT ran one
+    // synchronous write per injection). Best-effort telemetry — a failure
     // never undoes the counter bump above.
     try {
-      this.db.run(
-        `INSERT INTO hot_layer_usage (metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count)
-         SELECT metabot_id, ?, 'technique', CAST(id AS TEXT), 'hot', ?, 1
-         FROM capability_drafts WHERE id IN (${placeholders})
-         ON CONFLICT(metabot_id, usage_date, item_kind, item_id) DO UPDATE SET
-           exposure_count = exposure_count + 1, exposure = 'hot'`,
-        [formatBotWorkspaceDate(new Date(now)), now, ...uniqueIds],
+      const injectedRows = this.getAll<{ metabot_id: number | string; id: number | string }>(
+        `SELECT metabot_id, id FROM capability_drafts WHERE id IN (${placeholders})`,
+        [...uniqueIds],
       );
-      this.saveDb();
+      const usageDate = formatBotWorkspaceDate(new Date(now));
+      for (const row of injectedRows) {
+        const metabotId = Number(row.metabot_id);
+        const id = String(row.id);
+        const key = `${metabotId}|${usageDate}|technique|${id}`;
+        const existing = this.hotLayerExposureBuffer.get(key);
+        if (existing) {
+          existing.count += 1;
+          existing.exposure = 'hot';
+        } else {
+          this.hotLayerExposureBuffer.set(key, {
+            metabotId,
+            usageDate,
+            kind: 'technique',
+            id,
+            exposure: 'hot',
+            count: 1,
+            firstExposedAt: now,
+          });
+        }
+      }
+      if (injectedRows.length > 0) {
+        this.ensureHotLayerExposureFlushTimer();
+        if (this.hotLayerExposureBuffer.size >= 200) {
+          this.flushHotLayerExposureBuffer();
+        }
+        // Review nit: no saveDb here — the exposure rows ride the write-behind
+        // flush (≤5s), and the times_injected counter bump is telemetry whose
+        // tail can ride the next save (same debounce rationale as the culture
+        // usage counters).
+      }
     } catch (error) {
       console.warn('[CoworkStore] hot_layer_usage technique exposure write failed:', error);
     }
@@ -8065,11 +8197,13 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
-   * RRSI P2 exposure ledger (design §6.2 P2.4): one row per item per local
-   * day, counting repeat exposures. Within a day, 'hot' is sticky — an item
-   * that was injected hot and later recalled still counts as hot. Best-effort
-   * telemetry: callers wrap their own failures, and this method throws only
-   * on a genuinely broken database. Returns the number of items written.
+   * RRSI P2 exposure ledger (design §6.2 P2.4), write-behind since the dream
+   * review P3 batching: items coalesce into an in-process buffer and flush on
+   * a ≤5s timer, at 200 buffered keys, or via flushHotLayerExposureBuffer().
+   * Within a day, 'hot' is sticky — an item that was injected hot and later
+   * recalled still counts as hot. Best-effort telemetry: invalid items are
+   * dropped, buffering throws only on a genuinely broken database, and the
+   * return value is the number of items ACCEPTED (not yet written).
    */
   recordHotLayerExposures(input: {
     metabotId: number;
@@ -8082,24 +8216,103 @@ export class CoworkStore implements MemoryBackend {
     if (!Number.isInteger(metabotId) || metabotId <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(usageDate)) return 0;
     const atMs = Math.floor(Number(input.atMs ?? Date.now())) || Date.now();
     const items = (input.items ?? []).filter((item) =>
-      (item.kind === 'technique' || item.kind === 'procedure')
+      (item.kind === 'technique' || item.kind === 'procedure' || item.kind === 'knowledge' || item.kind === 'memory')
       && typeof item.id === 'string' && item.id.trim().length > 0
       && (item.exposure === 'hot' || item.exposure === 'recall'));
     if (items.length === 0) return 0;
-    let written = 0;
+    // Dream review P3: buffer instead of per-item synchronous writes. The
+    // UPSERT semantics are preserved at flush time (count accumulation,
+    // 'hot' sticky). Same-day repeats coalesce into one row per key.
     for (const item of items) {
-      this.db.run(
-        `INSERT INTO hot_layer_usage (metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count)
-         VALUES (?, ?, ?, ?, ?, ?, 1)
-         ON CONFLICT(metabot_id, usage_date, item_kind, item_id) DO UPDATE SET
-           exposure_count = exposure_count + 1,
-           exposure = CASE WHEN hot_layer_usage.exposure = 'hot' OR excluded.exposure = 'hot' THEN 'hot' ELSE 'recall' END`,
-        [metabotId, usageDate, item.kind, item.id, item.exposure, atMs],
-      );
-      written += 1;
+      const key = `${metabotId}|${usageDate}|${item.kind}|${item.id}`;
+      const existing = this.hotLayerExposureBuffer.get(key);
+      if (existing) {
+        existing.count += 1;
+        if (item.exposure === 'hot') existing.exposure = 'hot';
+      } else {
+        this.hotLayerExposureBuffer.set(key, {
+          metabotId,
+          usageDate,
+          kind: item.kind,
+          id: item.id,
+          exposure: item.exposure,
+          count: 1,
+          firstExposedAt: atMs,
+        });
+      }
     }
-    this.saveDb();
-    return written;
+    this.ensureHotLayerExposureFlushTimer();
+    if (this.hotLayerExposureBuffer.size >= 200) {
+      this.flushHotLayerExposureBuffer();
+    }
+    return items.length;
+  }
+
+  /** Lazily-arm the ≤5s flush timer (unref'd so it never holds the process). */
+  private ensureHotLayerExposureFlushTimer(): void {
+    if (this.hotLayerExposureFlushTimer) return;
+    this.hotLayerExposureFlushTimer = setInterval(() => {
+      try {
+        this.flushHotLayerExposureBuffer();
+      } catch (error) {
+        // Review Minor 2: the failure warning is throttled by the drain-stop
+        // below — a broken database warns once per failed window, not every
+        // 5s forever.
+        console.warn('[CoworkStore] hot-layer exposure flush failed:', error);
+      }
+      // Review Minor 2: stop the timer when the buffer drains — an idle
+      // store must not wake every 5s for the rest of the process lifetime.
+      // The next recordHotLayerExposures call re-arms it on demand.
+      if (this.hotLayerExposureBuffer.size === 0 && this.hotLayerExposureFlushTimer) {
+        clearInterval(this.hotLayerExposureFlushTimer);
+        this.hotLayerExposureFlushTimer = null;
+      }
+    }, 5_000);
+    (this.hotLayerExposureFlushTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * Dream review P3: drain the exposure buffer into hot_layer_usage with the
+   * same UPSERT semantics as the old synchronous path (exposure_count
+   * accumulation, 'hot' sticky within a day). Called by the ≤5s timer, the
+   * 200-key burst cap, and the app-shutdown cleanup; safe to call when the
+   * buffer is empty. Returns rows written.
+   */
+  flushHotLayerExposureBuffer(): number {
+    if (this.hotLayerExposureBuffer.size === 0) return 0;
+    const rows = [...this.hotLayerExposureBuffer.values()];
+    // Review Minor 2: snapshot-and-clear BEFORE writing; on failure the rows
+    // go back (merged with anything recorded while we wrote) instead of the
+    // whole window being lost or double-counted.
+    this.hotLayerExposureBuffer.clear();
+    try {
+      let written = 0;
+      for (const row of rows) {
+        this.db.run(
+          `INSERT INTO hot_layer_usage (metabot_id, usage_date, item_kind, item_id, exposure, first_exposed_at, exposure_count)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(metabot_id, usage_date, item_kind, item_id) DO UPDATE SET
+             exposure_count = exposure_count + excluded.exposure_count,
+             exposure = CASE WHEN hot_layer_usage.exposure = 'hot' OR excluded.exposure = 'hot' THEN 'hot' ELSE 'recall' END`,
+          [row.metabotId, row.usageDate, row.kind, row.id, row.exposure, row.firstExposedAt, row.count],
+        );
+        written += 1;
+      }
+      this.saveDb();
+      return written;
+    } catch (error) {
+      for (const row of rows) {
+        const key = `${row.metabotId}|${row.usageDate}|${row.kind}|${row.id}`;
+        const existing = this.hotLayerExposureBuffer.get(key);
+        if (existing) {
+          existing.count += row.count;
+          if (row.exposure === 'hot') existing.exposure = 'hot';
+        } else {
+          this.hotLayerExposureBuffer.set(key, row);
+        }
+      }
+      throw error;
+    }
   }
 
   /** Retention horizon for hot_layer_usage rows (hygiene step, RRSI P2). */
@@ -8956,7 +9169,10 @@ export class CoworkStore implements MemoryBackend {
    * Hygiene decay stroke: dream-origin memories (never self_identity, never
    * conversation-origin rows that may carry the user's explicit "remember
    * this") untouched for longer than the cutoff get a reversible archived_at
-   * mark so they leave injection and default listings. Bounded per pass.
+   * mark so they leave injection and default listings. Recency reads
+   * COALESCE(last_applied_at, last_used_at, updated_at): a memory the usage
+   * audit saw APPLIED stays alive on the applied clock, an injected-but-
+   * never-applied one on the injection clock (dream review P1).
    */
   archiveDecayedDreamMemories(input: {
     cutoffMs: number;
@@ -8976,8 +9192,8 @@ export class CoworkStore implements MemoryBackend {
          AND status = 'created'
          AND origin = 'dream'
          AND usage_class != 'self_identity'
-         AND COALESCE(last_used_at, updated_at) < ?${metabotExclusion}
-       ORDER BY COALESCE(last_used_at, updated_at) ASC
+         AND COALESCE(last_applied_at, last_used_at, updated_at) < ?${metabotExclusion}
+       ORDER BY COALESCE(last_applied_at, last_used_at, updated_at) ASC
        LIMIT ?`,
       [cutoff, ...excluded, limit],
     ).map((row) => row.id);

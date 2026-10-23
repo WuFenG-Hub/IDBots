@@ -64,6 +64,12 @@ interface CoworkState {
   isSubagentPanelOpen: boolean;
   /** Per-message human feedback (thumbs up/down) keyed by message id. */
   feedbackByMessageId: Record<string, MessageFeedback>;
+  /**
+   * Sessions whose feedback rows have been fetched from the main process
+   * (review Minor 5): the feedback nudge must not flash for a rated session
+   * while this async hydration is still in flight.
+   */
+  feedbackLoadedBySessionId: Record<string, true>;
 }
 
 const initialState: CoworkState = {
@@ -82,6 +88,7 @@ const initialState: CoworkState = {
   subagentTasks: {},
   isSubagentPanelOpen: false,
   feedbackByMessageId: {},
+  feedbackLoadedBySessionId: {},
   config: {
     workingDirectory: '',
     systemPrompt: '',
@@ -451,6 +458,10 @@ const coworkSlice = createSlice({
       }
     },
 
+    markSessionFeedbackLoaded(state, action: PayloadAction<string>) {
+      state.feedbackLoadedBySessionId[action.payload] = true;
+    },
+
     setStreaming(state, action: PayloadAction<boolean>) {
       state.isStreaming = action.payload;
     },
@@ -646,6 +657,7 @@ export const {
   setMessageFeedback,
   clearMessageFeedback,
   loadSessionFeedback,
+  markSessionFeedbackLoaded,
   setStreaming,
   updateSessionPinned,
   updateSessionFoldOverride,
