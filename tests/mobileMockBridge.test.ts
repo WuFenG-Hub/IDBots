@@ -93,9 +93,11 @@ test('permission request arrives, resolves via respond, and empties the pending 
     api.cowork.onStreamComplete(() => completes.push({})),
   ];
 
-  const before = await api.mobile.permission.listPending();
-  assert.equal(before.success, true);
-  assert.deepEqual(before.pending, []);
+  // Aligned with the real contract: mobile.listPendingPermissions resolves
+  // with a bare array on success (no { success, pending } envelope).
+  const before = await api.mobile.listPendingPermissions();
+  assert.ok(Array.isArray(before));
+  assert.deepEqual(before, []);
 
   const started = await api.cowork.startSession({ prompt: 'please run the permission demo' });
   assert.equal(started.success, true);
@@ -104,10 +106,11 @@ test('permission request arrives, resolves via respond, and empties the pending 
   assert.equal(requests[0].sessionId, started.session.id);
   assert.equal(requests[0].request.toolName, 'write_file');
 
-  const during = await api.mobile.permission.listPending();
-  assert.equal(during.pending.length, 1);
-  assert.equal(during.pending[0].request.requestId, requests[0].request.requestId);
-  assert.equal(typeof during.pending[0].createdAt, 'number');
+  const during = await api.mobile.listPendingPermissions();
+  assert.ok(Array.isArray(during));
+  assert.equal(during.length, 1);
+  assert.equal(during[0].request.requestId, requests[0].request.requestId);
+  assert.equal(typeof during[0].createdAt, 'number');
 
   const response = await api.cowork.respondToPermission({
     requestId: requests[0].request.requestId,
@@ -118,8 +121,8 @@ test('permission request arrives, resolves via respond, and empties the pending 
   await waitFor(() => resolved.length === 1 && completes.length === 1, 'permission resolution and completion');
   assert.equal(resolved[0].requestId, requests[0].request.requestId);
 
-  const after = await api.mobile.permission.listPending();
-  assert.deepEqual(after.pending, []);
+  const after = await api.mobile.listPendingPermissions();
+  assert.deepEqual(after, []);
 
   // A second response to the same requestId is an unknown request.
   const again = await api.cowork.respondToPermission({

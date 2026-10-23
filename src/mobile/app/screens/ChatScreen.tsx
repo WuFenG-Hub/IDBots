@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { Bars3Icon, PlusIcon, PaperAirplaneIcon, StopIcon } from '@heroicons/react/24/outline';
+import MarkdownContent from '@/components/MarkdownContent';
 import { t } from '../../i18n';
 import type { MockMetabot } from '../../bridge/types';
 import type { useChat } from '../hooks/useChat';
 import { useKeyboardInset } from '../hooks/useKeyboardInset';
 import { BottomSheet } from '../components/BottomSheet';
-import { MarkdownView } from './chat/MarkdownView';
 
 type Chat = ReturnType<typeof useChat>;
 
@@ -216,7 +216,10 @@ export default function ChatScreen(props: { chat: Chat; bots: MockMetabot[]; onO
                 </div>
               ) : (
                 <div className="max-w-[90%] rounded-2xl border border-[var(--border-color)] bg-[var(--bg-panel)] px-3.5 py-2.5">
-                  <MarkdownView text={message.text} />
+                  {/* T3 swap (REQ-E-26): the desktop MarkdownContent renders GFM,
+                      highlighted code blocks, and routes file:// link clicks
+                      through shell.openPath (the mobile shim signs + opens). */}
+                  <MarkdownContent content={message.text} chatExperienceMode="assistant" compact />
                   {message.streaming ? (
                     <span className="mt-1 inline-block h-4 w-2 animate-pulse bg-[var(--color-primary)]" aria-hidden />
                   ) : null}

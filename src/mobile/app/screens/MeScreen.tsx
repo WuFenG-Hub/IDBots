@@ -41,8 +41,8 @@ function Segmented<T extends string>(props: {
   );
 }
 
-function BalanceCard(props: { onOpenRecharge: () => void }): JSX.Element {
-  const { meters } = useMeters();
+function BalanceCard(props: { onOpenRecharge: () => void; resyncCounter?: number }): JSX.Element {
+  const { meters } = useMeters(props.resyncCounter);
   return (
     <Section title={t('mobile.me.balanceTitle')}>
       <div className="mb-3 flex gap-3">
@@ -397,8 +397,8 @@ function AboutSection(): JSX.Element {
 }
 
 /** Me tab (REQ-E-14). */
-export default function MeScreen(props: { onOpenRecharge: () => void }): JSX.Element {
-  const identity = useIdentity();
+export default function MeScreen(props: { resyncCounter?: number; onOpenRecharge: () => void }): JSX.Element {
+  const identity = useIdentity(props.resyncCounter);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="border-b border-[var(--border-color)] bg-[var(--bg-panel)] px-4 py-3">
@@ -406,7 +406,7 @@ export default function MeScreen(props: { onOpenRecharge: () => void }): JSX.Ele
         <p className="truncate text-sm text-[var(--text-secondary)]">{identity.name ?? ''}</p>
       </div>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-        <BalanceCard onOpenRecharge={props.onOpenRecharge} />
+        <BalanceCard resyncCounter={props.resyncCounter} onOpenRecharge={props.onOpenRecharge} />
         <BotsSection />
         <SkillsSection />
         <SettingsSection />

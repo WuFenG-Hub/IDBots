@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { getMobileElectron } from '../appBridge';
 
 /** Public identity for the Me screen header. */
-export function useIdentity(): { name: string | null; globalMetaId: string | null; reload: () => Promise<void> } {
+export function useIdentity(resyncCounter = 0): { name: string | null; globalMetaId: string | null; reload: () => Promise<void> } {
   const [name, setName] = useState<string | null>(null);
   const [globalMetaId, setGlobalMetaId] = useState<string | null>(null);
 
@@ -16,7 +16,8 @@ export function useIdentity(): { name: string | null; globalMetaId: string | nul
 
   useEffect(() => {
     void reload();
-  }, [reload]);
+    // resyncCounter: REQ-E-5 reconnect resync re-pulls identity after every reconnect.
+  }, [reload, resyncCounter]);
 
   return { name, globalMetaId, reload };
 }

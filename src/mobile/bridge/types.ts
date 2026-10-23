@@ -95,7 +95,10 @@ export type MockBundleOrder = NonNullable<
   createdAt: number;
 };
 
-/** Pending tool-permission request as returned by `mobile:permission:listPending`. */
+/**
+ * Pending tool-permission request as returned by `mobile:permission:listPending`
+ * (`mobile.listPendingPermissions` on the wire).
+ */
 export interface PendingPermissionRequest {
   sessionId: string;
   request: {
@@ -108,23 +111,16 @@ export interface PendingPermissionRequest {
   createdAt: number;
 }
 
+/**
+ * `mobile.*` helper channels, aligned verbatim with the generated IPC contract
+ * (src/mobile/generated/ipc-contract.json → `mobile.listPendingPermissions`,
+ * `mobile.getBootstrapStatus`) and the preload typings in
+ * src/renderer/types/electron.d.ts, so the mock and the real gateway shim
+ * expose the same surface.
+ */
 export interface MobileChannelAPI {
-  permission: {
-    listPending: () => Promise<{ success: boolean; pending?: PendingPermissionRequest[]; error?: string }>;
-  };
-  bootstrap: {
-    status: () => Promise<{ success: boolean; onboarding?: Record<string, unknown>; error?: string }>;
-  };
-  file: {
-    sign: (input: { path: string; disposition?: 'inline' | 'attachment' }) => Promise<{
-      success: boolean;
-      url?: string;
-      expiresAt?: number;
-      size?: number;
-      mime?: string;
-      error?: string;
-    }>;
-  };
+  listPendingPermissions: () => Promise<PendingPermissionRequest[] | { success: false; error: string }>;
+  getBootstrapStatus: () => Promise<Record<string, unknown> | { success: false; error: string }>;
 }
 
 /**

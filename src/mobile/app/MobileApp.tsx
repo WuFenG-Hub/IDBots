@@ -1,10 +1,17 @@
-import { lazy, Suspense, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { t } from '../i18n';
 import { hasAppBridge } from './appBridge';
 import { useChat } from './hooks/useChat';
 import { useMetabots } from './hooks/useMetabots';
+import { useResync } from './hooks/useResync';
+import { useTerminalBridgeState } from './hooks/useTerminalBridgeState';
 import { BridgeUnavailable } from './components/BridgeUnavailable';
 import { ConnectionBanner } from './components/ConnectionBanner';
+import {
+  TenantUnavailableScreen,
+  TooManyDevicesScreen,
+  VersionMismatchScreen,
+} from './components/GatewayTerminalScreens';
 import { TabBar } from './components/TabBar';
 import type { MobileTab } from './components/TabBar';
 
@@ -33,9 +40,38 @@ export default function MobileApp(): JSX.Element {
   // Chat state lives at the shell level so switching tabs keeps the stream.
   const chat = useChat();
   const { bots } = useMetabots();
+  // Terminal gateway states (REQ-E-2 close codes) replace the whole shell.
+  const { terminal, versionMismatch } = useTerminalBridgeState();
+  // Reconnect resync (REQ-E-5): refresh on every (re)connect, whichever
+  // bridge is active; the counter drives the tasks/meters/me list refresh.
+  const resyncCounter = useResync(
+    { getOpenSessionId: chat.getOpenSessionId, getStreamingMessage: chat.getStreamingMessage },
+    chat.applyResync,
+  );
+
+  // 4001/4003 unauthorized: the session is no longer valid — sign in again.
+  useEffect(() => {
+    if (terminal === 'unauthorized') {
+      window.location.assign('/login');
+    }
+  }, [terminal]);
 
   if (!hasAppBridge()) {
     return <BridgeUnavailable />;
+  }
+
+  if (terminal === 'unauthorized') {
+    // Navigating away in the effect above; render nothing meanwhile.
+    return <div className="hidden" data-testid="gateway-unauthorized" />;
+  }
+  if (terminal === 'tenant-unavailable') {
+    return <TenantUnavailableScreen />;
+  }
+  if (terminal === 'too-many-devices') {
+    return <TooManyDevicesScreen />;
+  }
+  if (terminal === 'version-mismatch') {
+    return <VersionMismatchScreen mismatch={versionMismatch} />;
   }
 
   return (
@@ -52,12 +88,12 @@ export default function MobileApp(): JSX.Element {
         ) : null}
         {tab === 'tasks' ? (
           <Suspense fallback={<TabFallback />}>
-            <TasksScreen />
+            <TasksScreen resyncCounter={resyncCounter} />
           </Suspense>
         ) : null}
         {tab === 'me' ? (
           <Suspense fallback={<TabFallback />}>
-            <MeScreen onOpenRecharge={() => setRechargeOpen(true)} />
+            <MeScreen resyncCounter={resyncCounter} onOpenRecharge={() => setRechargeOpen(true)} />
           </Suspense>
         ) : null}
       </div>

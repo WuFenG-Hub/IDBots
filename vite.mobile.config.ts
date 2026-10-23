@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import crypto from 'node:crypto';
 import path from 'path';
 
 /**
@@ -23,6 +24,63 @@ const isProductionBuild = process.env.NODE_ENV === 'production';
 
 const appHtml = path.resolve(__dirname, 'src/mobile/app/index.html');
 const loginHtml = path.resolve(__dirname, 'src/mobile/login/index.html');
+
+/**
+ * REQ-E-9 dev proxy: the mobile app bundle always talks to its own origin
+ * (`ws(s)://{host}/ws`, `/files/…`, `/upload`); in dev the vite server
+ * forwards those to the local gateway. The WS upgrade cannot carry headers
+ * from a browser WebSocket, so the proxy injects the gateway secret itself —
+ * mirroring src/main/gateway/wiring.ts dev mode, which generates and prints a
+ * random secret when IDBOTS_GATEWAY_SECRET is unset (server mode fails fast
+ * instead; here we degrade to a generated dev secret with a warning).
+ */
+const GATEWAY_TARGET_HOST = '127.0.0.1:8790';
+
+function gatewayDevSecret(): string | undefined {
+  const fromEnv = process.env.IDBOTS_GATEWAY_SECRET;
+  if (fromEnv && fromEnv.trim()) {
+    return fromEnv.trim();
+  }
+  const generated = crypto.randomBytes(32).toString('base64url');
+  console.warn(
+    `[mobile-dev] IDBOTS_GATEWAY_SECRET is not set; using a generated dev gateway secret: ${generated}\n` +
+      '[mobile-dev] set IDBOTS_GATEWAY_SECRET to reuse the desktop dev gateway secret (it prints once at startup).',
+  );
+  return generated;
+}
+
+function mobileDevProxy() {
+  // Lazy: only generate/log when the dev server actually starts.
+  let secret: string | undefined;
+  const secretHeader = () => {
+    if (secret === undefined) secret = gatewayDevSecret();
+    return { 'X-IDBots-Gateway-Secret': secret as string };
+  };
+  return {
+    // C2 websocket; the client connects to /ws on the page origin.
+    '/ws': {
+      target: `ws://${GATEWAY_TARGET_HOST}`,
+      ws: true,
+      changeOrigin: true,
+      headers: secretHeader(),
+      rewrite: (requestPath: string) => '/gateway/v1/ws' + requestPath.slice('/ws'.length),
+    },
+    // C2 File Download (signed tokens); /files/<token> → /gateway/v1/files/<token>.
+    '/files/': {
+      target: `http://${GATEWAY_TARGET_HOST}`,
+      changeOrigin: true,
+      headers: secretHeader(),
+      rewrite: (requestPath: string) => `/gateway/v1${requestPath}`,
+    },
+    // C2 Upload; /upload?name=… → /gateway/v1/upload?name=… (query preserved).
+    '/upload': {
+      target: `http://${GATEWAY_TARGET_HOST}`,
+      changeOrigin: true,
+      headers: secretHeader(),
+      rewrite: (requestPath: string) => `/gateway/v1${requestPath}`,
+    },
+  };
+}
 
 /** Dev-only: serve / and /login without leaving the mobile entries. */
 function mobileDevEntriesPlugin() {
@@ -121,6 +179,9 @@ export default defineConfig(({ command }) => {
     hmr: {
       port: devPort,
     },
+    // Dev only (never `vite preview`): the gateway proxy is harmless
+    // alongside the mock bridge and is what dev:mobile:real flips on.
+    ...(isDevServer ? { proxy: mobileDevProxy() } : {}),
   },
   clearScreen: false,
   };

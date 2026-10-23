@@ -8,7 +8,7 @@ import { getMobileElectron } from '../appBridge';
  * run-now and per-task run history hydrated from listRuns + runUpdate.
  */
 
-export function useScheduledTasks(): {
+export function useScheduledTasks(resyncCounter = 0): {
   tasks: ScheduledTask[];
   creating: boolean;
   createError: string | null;
@@ -33,8 +33,7 @@ export function useScheduledTasks(): {
 
   useEffect(() => {
     void reload();
-    const api = getMobileElectron().scheduledTasks;
-    const offStatus = api.onStatusUpdate(({ taskId, state }) => {
+    const api = getMobileElectron().scheduledTasks;    const offStatus = api.onStatusUpdate(({ taskId, state }) => {
       setTasks((prev) => prev.map((task) => (task.id === taskId ? { ...task, state: { ...state } } : task)));
     });
     const offRun = api.onRunUpdate(({ run }) => {
@@ -66,7 +65,8 @@ export function useScheduledTasks(): {
       offStatus();
       offRun();
     };
-  }, [reload]);
+    // resyncCounter: REQ-E-5 reconnect resync re-lists after every reconnect.
+  }, [reload, resyncCounter]);
 
   const loadRuns = useCallback(async (taskId: string) => {
     const result = await getMobileElectron().scheduledTasks.listRuns(taskId, 20);
@@ -107,7 +107,12 @@ export function useScheduledTasks(): {
   );
 
   const toggleTask = useCallback(async (id: string, enabled: boolean) => {
-    await getMobileElectron().scheduledTasks.toggle(id, enabled);
+    const result = await getMobileElectron().scheduledTasks.toggle(id, enabled);
+    // The statusUpdate event only carries the schedule state; apply the
+    // enabled flag locally so the row's switch flips without a full reload.
+    if (result?.success && result.task) {
+      setTasks((prev) => prev.map((task) => (task.id === id ? { ...task, enabled: result.task.enabled } : task)));
+    }
   }, []);
 
   const runTask = useCallback(async (id: string) => {

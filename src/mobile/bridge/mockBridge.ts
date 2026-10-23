@@ -1131,43 +1131,39 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     scheduledTasks: scheduledTasksImpl,
     bundle: bundleImpl,
     mobile: {
-      permission: {
-        listPending: () =>
-          guardOnline(async () => ({
-            success: true,
-            pending: [...pendingPermissions.values()].map((p) => ({
-              sessionId: p.sessionId,
-              request: { ...p.request },
-              createdAt: p.createdAt,
-            })),
+      // Channel names aligned with the generated IPC contract / real preload
+      // (mobile.listPendingPermissions, mobile.getBootstrapStatus) so screens
+      // work against both bridges unchanged.
+      listPendingPermissions: () =>
+        guardOnline(async () =>
+          [...pendingPermissions.values()].map((p) => ({
+            sessionId: p.sessionId,
+            request: { ...p.request },
+            createdAt: p.createdAt,
           })),
-      },
-      bootstrap: {
-        status: () =>
-          guardOnline(async () => ({
-            success: true,
-            onboarding: {
-              identity: 'done',
-              llmProvider: 'done',
-              twinMetabot: 'done',
-              workspace: 'done',
-              trafficAccount: 'done',
-              redeemCode: 'skipped',
-              globalMetaId: 'mock-globalmetaid',
-              twinMetabotId: 1,
-            },
-          })),
-      },
-      file: {
-        sign: (input: { path: string; disposition?: 'inline' | 'attachment' }) =>
-          guardOnline(async () => ({
-            success: true,
-            url: `/files/mock-${encodeURIComponent(String(input?.path ?? '').slice(-24))}`,
-            expiresAt: now() + 10 * 60 * 1000,
-            size: 1024,
-            mime: 'application/octet-stream',
-          })),
-      },
+        ),
+      getBootstrapStatus: () =>
+        guardOnline(async () => ({
+          identity: 'done',
+          llmProvider: 'done',
+          twinMetabot: 'done',
+          workspace: 'done',
+          trafficAccount: 'done',
+          redeemCode: 'skipped',
+          globalMetaId: 'mock-globalmetaid',
+          twinMetabotId: 1,
+        })),
+    },
+    gateway: {
+      // Real shape per src/renderer/types/electron.d.ts: the success variant
+      // carries {url, expiresAt, size, mime} directly (no success envelope).
+      fileSign: (input: { path: string; disposition?: 'inline' | 'attachment' }) =>
+        guardOnline(async () => ({
+          url: `/files/mock-${encodeURIComponent(String(input?.path ?? '').slice(-24))}`,
+          expiresAt: now() + 10 * 60 * 1000,
+          size: 1024,
+          mime: 'application/octet-stream',
+        })),
     },
     metabot: metabotImpl,
     userIdentity: {
@@ -1271,7 +1267,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
   }
   // Wrap the implemented namespaces too, so even they reject (never TypeError)
   // on methods the mock did not implement.
-  for (const name of ['store', 'cowork', 'scheduledTasks', 'bundle', 'mobile', 'metabot', 'skills', 'traffic', 'llmRelay', 'startup', 'window', 'dialog', 'shell', 'appInfo', 'userIdentity'] as const) {
+  for (const name of ['store', 'cowork', 'scheduledTasks', 'bundle', 'mobile', 'gateway', 'metabot', 'skills', 'traffic', 'llmRelay', 'startup', 'window', 'dialog', 'shell', 'appInfo', 'userIdentity'] as const) {
     electron[name] = stubNamespace(name, (electron[name] as Record<string, unknown>) ?? {});
   }
 
