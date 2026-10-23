@@ -309,22 +309,22 @@ test('the list renders one Autonomous Tasks fold, collapsed by default, directly
   assert.match(src, /parseAutoTasksExpandedPreference\(window\.localStorage\.getItem\(AUTO_TASKS_EXPANDED_STORAGE_KEY\)\)/);
   // Timeline, project and flat branches all render the same fold.
   assert.equal((src.match(/\{renderAutoTasksSection\(\)\}/g) ?? []).length, 3);
-  // Position: directly under the Follow-Up section, above the content groups,
-  // so the folders are visible without scrolling — sitting last made the fold
-  // read as if the feature did not exist.
-  assert.match(src, /\{renderPinnedSection\(timelineGrouped\.pinned\)\}\s*\{renderFollowUpSection\(\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{timelineGrouped\.groups\.map/);
-  assert.match(src, /\{renderPinnedSection\(projectGrouped\.pinned\)\}\s*\{renderFollowUpSection\(\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{projectGrouped\.groups\.map/);
+  // Position: directly under the pinned block, above the Follow-Up section and
+  // the content groups, so the folders are visible without scrolling — sitting
+  // last made the fold read as if the feature did not exist.
+  assert.match(src, /\{renderPinnedSection\(timelineGrouped\.pinned\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{renderFollowUpSection\(\)\}\s*\{timelineGrouped\.groups\.map/);
+  assert.match(src, /\{renderPinnedSection\(projectGrouped\.pinned\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{renderFollowUpSection\(\)\}\s*\{projectGrouped\.groups\.map/);
   const flatPinned = src.indexOf('sortedSessions.filter((session) => session.pinned).map(renderItem)');
   const flatFollowUp = src.indexOf('{renderFollowUpSection()}', flatPinned);
   const flatFold = src.indexOf('{renderAutoTasksSection()}', flatPinned);
   const flatRest = src.indexOf('sortedSessions.filter((session) => !session.pinned).map(renderItem)');
-  assert.ok(flatPinned !== -1 && flatPinned < flatFollowUp && flatFollowUp < flatFold && flatFold < flatRest,
-    'flat branch: pinned rows, then the Follow-Up section, then the fold, then the rest');
+  assert.ok(flatPinned !== -1 && flatPinned < flatFold && flatFold < flatFollowUp && flatFollowUp < flatRest,
+    'flat branch: pinned rows, then the fold, then the Follow-Up section, then the rest');
   // Nothing is rendered when there is nothing to fold.
   assert.match(src, /sortedAutoSessions\.length > 0 && \(/);
 });
 
-test('the list renders one Follow-Up section above the fold, collapsed by default, in every view mode', () => {
+test('the list renders one Follow-Up section below the fold, collapsed by default, in every view mode', () => {
   const src = readSource('src/renderer/components/cowork/CoworkSessionList.tsx');
 
   assert.match(src, /data-testid="follow-up-tasks-section"/);
@@ -333,9 +333,10 @@ test('the list renders one Follow-Up section above the fold, collapsed by defaul
   // Timeline, project and flat branches all render the same section, exactly
   // once each.
   assert.equal((src.match(/\{renderFollowUpSection\(\)\}/g) ?? []).length, 3);
-  // Position: directly under the pinned block, ABOVE the Autonomous fold.
-  assert.match(src, /\{renderPinnedSection\(timelineGrouped\.pinned\)\}\s*\{renderFollowUpSection\(\)\}\s*\{renderAutoTasksSection\(\)\}/);
-  assert.match(src, /\{renderPinnedSection\(projectGrouped\.pinned\)\}\s*\{renderFollowUpSection\(\)\}\s*\{renderAutoTasksSection\(\)\}/);
+  // Position: directly under the Autonomous fold, which sits under the pinned
+  // block (owner 2026-10-23: auto first, follow-up second).
+  assert.match(src, /\{renderPinnedSection\(timelineGrouped\.pinned\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{renderFollowUpSection\(\)\}/);
+  assert.match(src, /\{renderPinnedSection\(projectGrouped\.pinned\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{renderFollowUpSection\(\)\}/);
   // Nothing is rendered when nothing is pending.
   assert.match(src, /sortedFollowUpSessions\.length > 0 && \(/);
   // An empty human list still renders the section (decisions must not hide
@@ -351,6 +352,8 @@ test('the follow-up header carries label + unread count + latest activity, and n
   );
 
   assert.match(header, /coworkFollowUpTasks'/);
+  // Raised hand, not a folder: these sessions wait on a HUMAN decision.
+  assert.match(header, /<HandRaisedIcon className="h-3\.5 w-3\.5 flex-shrink-0" \/>/);
   assert.match(header, /formatRelativeTime\(followUpLatestActivityAt\)/, 'the newest-activity stamp stays');
   // The header signals unread the way the fold's does: a red dot at the row's
   // left plus the section's unread session count in red, both only when > 0.
@@ -379,6 +382,8 @@ test('the fold header carries label + unread count + latest activity, and no tot
   );
 
   assert.match(header, /coworkAutonomousTasks'/);
+  // Gear, not a folder: these runs drive themselves with no human in the loop.
+  assert.match(header, /<Cog6ToothIcon className="h-3\.5 w-3\.5 flex-shrink-0" \/>/);
   assert.match(header, /formatRelativeTime\(autoLatestActivityAt\)/, 'the newest-activity stamp stays');
   // The header signals unread the way the user asked for it: a red dot at the
   // row's left (same dot the tabs use) plus the fold's unread session count in
