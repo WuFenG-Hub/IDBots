@@ -1,42 +1,45 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { HandThumbUpIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { RootState } from '../../store';
 import { i18nService } from '../../services/i18n';
 import { CoworkMessage } from '../../types/cowork';
 import {
-  readFeedbackNudgeDismissed,
+  readFeedbackNudgeDone,
   shouldShowFeedbackNudge,
-  writeFeedbackNudgeDismissed,
+  writeFeedbackNudgeDone,
 } from './feedbackNudge';
 
 /**
  * The feedback-desert nudge (dream review P2-2): one quiet, dismissible line
  * near the message controls when a session has ≥5 assistant messages and no
  * thumbs yet. Deliberately NOT a toast/popup — it rides the bottom area like
- * the quota banner and never covers content. Any feedback in the session
- * suppresses it permanently; dismissing suppresses it for this session.
+ * the quota banner and never covers content.
+ *
+ * 2026-10-23 redesign: GLOBAL ONE-SHOT. The first session that ever displays
+ * the hint consumes it (written to storage on display); dismissing consumes
+ * it too. No session ever shows it twice, and it never appears in more than
+ * one session — being told once is enough.
  */
 const FeedbackNudgeHint: React.FC<{
-  sessionId: string;
   messages: Pick<CoworkMessage, 'id' | 'type'>[];
   /**
    * Review Minor 5: false while the session's feedback rows are still loading
    * — the hint must not flash for a rated session mid-hydration.
    */
   feedbackLoaded: boolean;
-}> = ({ sessionId, messages, feedbackLoaded }) => {
+}> = ({ messages, feedbackLoaded }) => {
   const feedbackByMessageId = useSelector(
     (state: RootState) => state.cowork.feedbackByMessageId,
   );
-  const [dismissed, setDismissed] = useState(() =>
-    readFeedbackNudgeDismissed(window.localStorage, sessionId),
+  const [done, setDone] = useState(() =>
+    readFeedbackNudgeDone(window.localStorage),
   );
 
   const handleDismiss = useCallback(() => {
-    setDismissed(true);
-    writeFeedbackNudgeDismissed(window.localStorage, sessionId);
-  }, [sessionId]);
+    setDone(true);
+    writeFeedbackNudgeDone(window.localStorage);
+  }, []);
 
   const assistantMessageCount = messages.reduce(
     (count, message) => (message.type === 'assistant' ? count + 1 : count),
@@ -47,10 +50,17 @@ const FeedbackNudgeHint: React.FC<{
     0,
   );
 
-  if (
-    !feedbackLoaded
-    || !shouldShowFeedbackNudge({ assistantMessageCount, sessionFeedbackCount, dismissed })
-  ) {
+  const visible =
+    feedbackLoaded && shouldShowFeedbackNudge({ assistantMessageCount, sessionFeedbackCount, done });
+
+  // Displaying the hint consumes the global one-shot: persist it so no other
+  // session (or a later remount) shows it again, while leaving this instance
+  // on screen until it is dismissed or the session changes.
+  useEffect(() => {
+    if (visible) writeFeedbackNudgeDone(window.localStorage);
+  }, [visible]);
+
+  if (!visible) {
     return null;
   }
 

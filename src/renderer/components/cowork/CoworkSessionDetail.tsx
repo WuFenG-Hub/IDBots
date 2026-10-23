@@ -5220,14 +5220,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
       {/* Dream review P2-2: one quiet feedback nudge under a mature,
           completely unrated session (the message_feedback table has been
-          empty since launch — RLHF starves at the source). Renders nothing
-          for young/unrated-yet/dismissed sessions. */}
+          empty since launch — RLHF starves at the source). Global one-shot
+          (2026-10-23 redesign): the first session that displays it consumes
+          it everywhere; renders nothing afterwards. */}
       <FeedbackNudgeHint
-        // Review Minor 3: the key remounts the hint on session switch —
-        // without it React reuses the instance and session A's dismissed
-        // state (plus the lazy localStorage read) leaks into session B.
+        // Remount per session so the lazy storage read re-runs on switch.
         key={`feedback-nudge-${currentSession.id}`}
-        sessionId={currentSession.id}
         messages={currentSession.messages}
         feedbackLoaded={feedbackLoadedForNudge}
       />
