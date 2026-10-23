@@ -31,7 +31,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Package Manager
 
-- Supported Node.js: `>=24 <25`.
+- Supported Node.js: `>=24 <27` (24 LTS and 26 LTS both verified; 26 verification: full `dist:mac` packaging + packaged-app smoke launch on v26.7.0).
 - Package manager: pnpm only (pinned via `packageManager` in `package.json`; run `corepack enable` once). `pnpm-lock.yaml` is committed; never reintroduce `package-lock.json`.
 - Three packages, three lockfiles: the repository root, `dsh-runtime/`, and `SKILLs/web-search/` are installed separately (`pnpm install` in each; the root `postinstall` covers the two nested ones automatically). pnpm settings live in each directory's `pnpm-workspace.yaml` (root and nested: hoisted `nodeLinker` + overrides + build approvals) — pnpm 11 ignores `.npmrc` for settings, so do not move them there.
 - `nodeLinker: hoisted` is a hard requirement, not a preference: electron-builder packages production `node_modules` into the app and copies `dsh-runtime/` + `SKILLs/` (with their `node_modules`) as extraResources — the default isolated linker would ship symlinks into the developer's pnpm store and break the packaged app. Packages are still hard-linked from the global pnpm store, so per-worktree install cost stays near zero.

@@ -6,6 +6,8 @@ build/*
 node_modules/
 dist/
 dist-electron/
+dist-mobile/
+dist-mobile-login/
 release/
 # Local optimizeDeps content fingerprint (regenerated on each dev start)
 .vite-deps-fingerprint.json
@@ -57,6 +59,15 @@ docs/*
 !docs/tickets/
 !docs/tickets/**
 tests/*
+!tests/gatewayCore.test.mjs
+!tests/startupTiers.test.mjs
+!tests/webSearchRuntimeDir.test.mjs
+!tests/gatewayServer.test.mjs
+!tests/bundleService.test.mjs
+!tests/mobileChannels.test.mjs
+!tests/quotaExhaustedStreamError.test.mjs
+!tests/serverMode.test.mjs
+!tests/serverBootstrap.test.mjs
 !tests/fixtures/
 !tests/agentGameConvergence.test.mjs
 !tests/fixtures/longTaskBoardSeed.mjs
@@ -136,6 +147,7 @@ tests/*
 !tests/coworkDshDeletePolicy.test.mjs
 !tests/coworkDshWebSearch.test.mjs
 !tests/coworkDshModelSwitch.test.mjs
+!tests/turnNavigator.test.mjs
 !tests/llmSafeText.test.mjs
 !tests/skillImageProviderEnv.test.mjs
 !tests/twinWorkerSessionStop.test.mjs
@@ -522,6 +534,7 @@ man_base_data_pebble/
 !tests/coworkDshWarmupStaleSessionRoute.test.mjs
 !tests/staleModelBindingReconcile.test.mjs
 !tests/coworkDshIdleTurnToolRequest.test.mjs
+!tests/coworkDshSectionInterpolate.test.mjs
 !tests/coworkDshRuntimeKillGuard.test.mjs
 !tests/coworkDshKernelBusyGate.test.mjs
 
@@ -584,6 +597,7 @@ man_base_data_pebble/
 !tests/coworkTranscriptImageAttachment.test.tsx
 !tests/coworkStreamDeltaProtocol.test.mjs
 !tests/coworkStreamFlushCoalescing.test.mjs
+!tests/coworkStreamGapHeal.test.mjs
 !tests/coworkConversationTurnReuse.test.mjs
 !tests/coworkCompactedNotice.test.tsx
 !tests/sessionListRenderBudget.test.mjs
@@ -619,12 +633,15 @@ man_base_data_pebble/
 !tests/cerebellumWorkerRank.test.mjs
 !tests/cerebellumConversationRank.test.mjs
 !tests/cerebellumTurnDecisionBundle.test.mjs
+!tests/cerebellumSessionFollowUpGate.test.mjs
+!tests/coworkSessionFollowUp.test.mjs
 !tests/turnAckPhrases.test.mjs
 !tests/turnAckReply.test.mjs
 !tests/coworkAssistantNarrationSurvival.test.ts
 !tests/coworkAssistantModePromptGate.test.mjs
 !tests/coworkAssistantDeliveryIndex.test.mjs
 !tests/markdownContentHtmlReportCard.test.tsx
+!tests/inlineHtmlReportBlock.test.tsx
 !tests/markdownContentSingleTilde.test.tsx
 !tests/groupTaskWorkingState.test.mjs
 !tests/groupTaskSkillTurnMemoryReadOnly.test.mjs
@@ -637,3 +654,21 @@ man_base_data_pebble/
 !tests/orchestratorCoworkBridgeWrapUp.test.mjs
 !tests/twinDelegationWrapUpContract.test.mjs
 EVIDENCE.md
+
+# WS-A T5: tenant image static checks
+!tests/tenantImage.test.mjs
+
+# WS-C deploy assets: filled env files hold real secrets — only the
+# *.example templates may be committed (REQ-C-21).
+deploy/hosts/deploy.env
+deploy/hosts/cp.env
+deploy/backup/backup.env
+deploy/monitoring/monitoring.env
+deploy/hosts/prometheus.yml
+
+# WS-E mobile client (T1 mock bridge + i18n static checks)
+!tests/mobileMockBridge.test.ts
+!tests/mobileI18nStatic.test.mjs
+
+# WS-E login API seam tests
+!tests/mobileLoginApi.test.ts

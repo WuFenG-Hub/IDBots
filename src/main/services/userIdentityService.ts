@@ -246,12 +246,22 @@ export async function syncUserIdentityToChain(
   };
 }
 
-/** Create a brand-new user identity with a fresh mnemonic. */
+/**
+ * Create a brand-new user identity with a fresh mnemonic.
+ *
+ * options.deferSubsidy is the silent first-run provisioning mode: the wallet
+ * is generated and stored (fully signable, which is all the relay bootstrap
+ * needs) but the MVC gas subsidy is NOT claimed and nothing is published —
+ * subsidy_state stays 'pending'. A fresh install that is about to import the
+ * user's real identity would otherwise burn one subsidy per reinstall on an
+ * identity it discards minutes later. confirmDeferredUserIdentitySetup funds
+ * and publishes the identity once the user adopts it. Implies deferChainSync.
+ */
 export async function createUserIdentity(
   userStore: UserIdentityStore,
   input: { name: string; avatar?: string | null },
   deps: UserIdentityServiceDeps = {},
-  options: { deferChainSync?: boolean } = {},
+  options: { deferChainSync?: boolean; deferSubsidy?: boolean } = {},
 ): Promise<UserIdentityResult> {
   if (userStore.get()) {
     return { success: false, error: 'USER_IDENTITY_EXISTS' };
@@ -267,6 +277,33 @@ export async function createUserIdentity(
 
   const requestSubsidy = deps.requestSubsidy ?? requestMvcGasSubsidy;
   const wallet = await createMetaBotWallet({});
+
+  if (options.deferSubsidy) {
+    const identity = userStore.insert({
+      mnemonic: wallet.mnemonic,
+      path: wallet.path,
+      mvc_address: wallet.mvc_address,
+      btc_address: wallet.btc_address,
+      doge_address: wallet.doge_address,
+      public_key: wallet.public_key,
+      chat_public_key: wallet.chat_public_key,
+      chat_public_key_pin_id: null,
+      metaid: wallet.metaid,
+      globalmetaid: wallet.globalmetaid,
+      name,
+      avatar,
+      subsidy_state: 'pending',
+      subsidy_error: null,
+      sync_state: 'pending',
+      sync_error: null,
+    });
+    return {
+      success: true,
+      identity,
+      mnemonic: wallet.mnemonic,
+      profileSource: 'local',
+    };
+  }
 
   // 1. Claim MVC gas subsidy. When it fails, skip on-chain pins: without gas
   // every pin would fail with "not enough balance" and waste user attempts.
@@ -465,6 +502,34 @@ export async function retryUserIdentitySubsidy(
 }
 
 /**
+ * Claim the MVC gas subsidy for the current identity and record the outcome
+ * (claimed -> sync pending; failed -> sync failed with an actionable error).
+ * Shared by the resume flow and by the deferred-subsidy adoption paths.
+ */
+async function claimUserIdentitySubsidy(
+  userStore: UserIdentityStore,
+  identity: UserIdentity,
+  deps: UserIdentityServiceDeps,
+): Promise<UserSubsidyResult> {
+  const requestSubsidy = deps.requestSubsidy ?? requestMvcGasSubsidy;
+  const subsidy = await requestSubsidySafe(
+    requestSubsidy,
+    identity.mvc_address,
+    identity.mnemonic,
+    identity.path,
+  );
+  userStore.update({
+    subsidy_state: subsidy.success ? 'claimed' : 'failed',
+    subsidy_error: subsidy.success ? null : (subsidy.error ?? 'Traffic subsidy request failed.'),
+    sync_state: subsidy.success ? 'pending' : 'failed',
+    sync_error: subsidy.success
+      ? null
+      : 'MVC subsidy must be claimed before syncing to chain.',
+  });
+  return subsidy;
+}
+
+/**
  * Resume the bootstrap flow for the current identity: claim the subsidy when
  * it is not claimed yet, then publish every /info pin that is still missing.
  * Idempotent — safe to call repeatedly after failures.
@@ -480,21 +545,7 @@ export async function resumeUserIdentitySetup(
 
   let subsidy: UserSubsidyResult | undefined;
   if (identity.subsidy_state !== 'claimed') {
-    const requestSubsidy = deps.requestSubsidy ?? requestMvcGasSubsidy;
-    subsidy = await requestSubsidySafe(
-      requestSubsidy,
-      identity.mvc_address,
-      identity.mnemonic,
-      identity.path,
-    );
-    userStore.update({
-      subsidy_state: subsidy.success ? 'claimed' : 'failed',
-      subsidy_error: subsidy.success ? null : (subsidy.error ?? 'Traffic subsidy request failed.'),
-      sync_state: subsidy.success ? 'pending' : 'failed',
-      sync_error: subsidy.success
-        ? null
-        : 'MVC subsidy must be claimed before syncing to chain.',
-    });
+    subsidy = await claimUserIdentitySubsidy(userStore, identity, deps);
     if (!subsidy.success) {
       return {
         success: true,
@@ -521,6 +572,26 @@ export async function resumeUserIdentitySetup(
     subsidy,
     chainSync,
   };
+}
+
+/**
+ * Fund and publish a silently provisioned identity once the user has adopted
+ * it (created a MetaBot on it, backed up its mnemonic, asked for a chain
+ * backup, or kept using an install that already holds their bots). Resolves
+ * null when there is nothing to do — no identity, or its subsidy was already
+ * claimed/failed through the regular paths — so callers can fire it from any
+ * adoption signal without checking state first. A failure leaves the identity
+ * 'failed' with the usual retry affordances in Settings.
+ */
+export async function confirmDeferredUserIdentitySetup(
+  userStore: UserIdentityStore,
+  deps: UserIdentityServiceDeps = {},
+): Promise<UserIdentityResult | null> {
+  const identity = userStore.get();
+  if (!identity || identity.subsidy_state !== 'pending') {
+    return null;
+  }
+  return resumeUserIdentitySetup(userStore, deps);
 }
 
 /**
@@ -555,6 +626,21 @@ export async function updateUserIdentityName(
   ) {
     return { success: false, error: 'SUBSIDY_NOT_CLAIMED' };
   }
+  // A silently provisioned identity (deferred subsidy) adopted through its
+  // first rename: fund it and publish the base pins now, but let the NEW name
+  // be its first /info/name instead of the placeholder. The pause mirrors the
+  // inter-pin interval of the sync flow so the name pin does not race the
+  // chat-key pin for the same funding UTXO.
+  if (identity.subsidy_state === 'pending') {
+    const subsidy = await claimUserIdentitySubsidy(userStore, identity, deps);
+    if (!subsidy.success) {
+      return { success: false, error: 'SUBSIDY_NOT_CLAIMED' };
+    }
+    const baseSync = await syncUserIdentityToChain(userStore, { includeProfileSteps: false }, deps);
+    if (baseSync.txids.length > 0) {
+      await (deps.sleep ?? defaultSleep)(USER_PIN_STEP_INTERVAL_MS);
+    }
+  }
 
   const createPin = deps.createPin ?? createPinForIdentity;
   let result: Awaited<ReturnType<typeof createPinForIdentity>>;
@@ -577,10 +663,13 @@ export async function updateUserIdentityName(
     return { success: false, error: 'name pin failed: no txid' };
   }
 
+  // When the chat-key pin is still missing (a deferred identity whose base
+  // sync just failed), stay 'partial' so Settings keeps the retry path.
+  const chatKeyPinned = Boolean(userStore.get()?.chat_public_key_pin_id);
   const updated = userStore.update({
     name,
     name_pin_id: result.pinId ?? `${result.txids[0]}i0`,
-    sync_state: 'synced',
+    sync_state: chatKeyPinned ? 'synced' : 'partial',
     sync_error: null,
   });
   return {

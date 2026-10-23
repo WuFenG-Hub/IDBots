@@ -3,6 +3,7 @@ import { useSelector } from 'react-redux';
 import { MessageExtensionContext } from './MessageExtensionContext';
 import { RootState } from '../../store';
 import { i18nService } from '../../services/i18n';
+import { isMobileRuntime } from '../../services/isMobileRuntime';
 import type { ModelEffortValue } from '../ModelEffortPicker';
 import { convertLegacyEffortLevel, LLM_EFFORT_DEFAULT_SENTINEL } from '../../services/modelCatalog';
 import type {
@@ -95,7 +96,7 @@ import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
 import { getCompactFolderName } from '../../utils/path';
 import { buildCompactedNoticeText, extractCompactedCounts, formatCompactTokens } from './compactedNotice';
-import { isFreeQuotaErrorLive } from './quotaErrorBanner';
+import { isQuotaExhaustedErrorLive } from './quotaErrorBanner';
 import { isRenderableAvatarSource as isSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import { isRenderableAssistantOrSystemMessage } from '../../utils/coworkMessageVisibility';
 import {
@@ -112,6 +113,7 @@ import {
 import { isAssistantTurnComplete, findDeliveryAssistantIndex, shouldShowAssistantBubbleActions } from './assistantTurnPresentation.js';
 import { isAssistantModeOwnerChatSession } from './assistantModeSessionGate';
 import { reuseStableTurns } from './conversationTurnReuse.js';
+import TurnNavigator, { buildTurnNavigatorItems, type TurnNavigatorItem } from './TurnNavigator';
 import {
   buildRefundStatusDismissKey,
   getRefundCardVariant,
@@ -193,6 +195,51 @@ const STEER_STATUS_TRANSLATION_KEYS: Record<string, string> = {
 // only form that renders the intended colour; same token, no new colour or
 // variable.
 const QUOTE_JUMP_HIGHLIGHT_CLASSES = ['ring-1', 'ring-claude-accent'];
+
+// Rail-jump landing cue. Same ring as the quote jump (that cue is right — it is
+// what marks "the message you were sent to"), but the ring target is the message
+// bubble, not the turn wrapper, so it never draws a rule across the transcript.
+const TURN_NAVIGATOR_HIGHLIGHT_MS = 2500;
+
+// How long the quote-jump ring stays lit. Same 2.5s window as the rail jump:
+// both are "you were taken here" cues, so they age out together.
+const QUOTE_JUMP_HIGHLIGHT_MS = 2500;
+
+/**
+ * Paint a transient accent ring on `element`, clearing whatever the previous
+ * jump lit first. Shared by the turn-rail jump and the quote jump so both
+ * follow one contract:
+ *
+ * - Clear EVERY ring in `container`, not just the one the previous timer was
+ *   going to un-ring. Clearing only the timer orphans the element it was
+ *   going to un-ring, so rapid jumps stacked rings and the earlier ones
+ *   stayed lit for good (verified live: three jumps in a row left two rings
+ *   still on).
+ * - Clear the pending timer, then light the new ring: remove-then-add is what
+ *   restarts the full window on a repeated jump to the same element.
+ * - `ms` later, un-ring and drop the timer. The caller owns the timer ref and
+ *   its unmount cleanup.
+ *
+ * The ring is a static style, so no reflow trick is needed to make it visible.
+ */
+const transientHighlight = (
+  timerRef: { current: number | null },
+  container: HTMLElement,
+  element: HTMLElement,
+  ms: number,
+): void => {
+  container
+    .querySelectorAll<HTMLElement>(`.${QUOTE_JUMP_HIGHLIGHT_CLASSES[1]}`)
+    .forEach((lit) => lit.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES));
+  if (timerRef.current != null) {
+    window.clearTimeout(timerRef.current);
+  }
+  element.classList.add(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
+  timerRef.current = window.setTimeout(() => {
+    element.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
+    timerRef.current = null;
+  }, ms);
+};
 
 // The label sets the sent-selection-block parser matches against: every
 // shipped dictionary, so a quote block written under one language still gets
@@ -971,7 +1018,9 @@ type AssistantTurnItem =
   | { type: 'tool_group'; group: ToolGroupItem }
   | { type: 'tool_result'; message: CoworkMessage };
 
-type ConversationTurn = {
+// Exported for TurnNavigator.tsx, which reuses this grouping instead of
+// re-deriving turns from the raw message list.
+export type ConversationTurn = {
   id: string;
   userMessage: CoworkMessage | null;
   assistantItems: AssistantTurnItem[];
@@ -1743,7 +1792,7 @@ const UserMessageItem: React.FC<{
                   sessionType={sessionType}
                   sessionTitle={sessionTitle}
                 />
-                <div className="w-fit max-w-[min(646px,82%)]">
+                <div className="w-fit max-w-[min(720px,82%)]">
                   {gigSquareCard}
                 </div>
               </div>
@@ -1773,7 +1822,7 @@ const UserMessageItem: React.FC<{
                   innermost data-message-id mount, so it hugs this bubble's
                   own outline — w-fit width, its 22px radius. */}
               <div
-                className="cowork-user-bubble w-fit max-w-[min(646px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text"
+                className="cowork-user-bubble w-fit max-w-[min(720px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text"
                 data-message-id={message.id}
               >
                 {sentQuote ? (
@@ -1930,7 +1979,7 @@ const AssistantMessageItem: React.FC<{
           // in a chat bubble shaped like the user bubble, differentiated
           // purely by background color (no border) via the theme-adaptive
           // neutral-gray .assistant-bubble fill. The w-fit wrapper shares the
-          // user bubble's max width (max-w-[min(646px,82%)]) so the bubble
+          // user bubble's max width (max-w-[min(720px,82%)]) so the bubble
           // hugs short messages and never stretches to the full column.
           // EVERY bubble carries its own hover-action toolbar — narration
           // bubbles included — so each single message is individually
@@ -1942,7 +1991,7 @@ const AssistantMessageItem: React.FC<{
           // state (an in-flow row used to add ~32px under each bubble once
           // the turn completed, and the old in-bubble overlay covered reply
           // text); z-10 keeps the strip above the next bubble's rounded top.
-          <div className="relative w-fit max-w-[min(646px,82%)]">
+          <div className="relative w-fit max-w-[min(720px,82%)]">
             {/* The id also rides the bubble: the quote-jump ring wraps the
                 innermost data-message-id mount, so it hugs this bubble's
                 own outline — w-fit width, its 22px radius. */}
@@ -2906,13 +2955,20 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
     return ended;
   }, [currentSession?.messages]);
-  // Free-quota call-to-action banner: follows the LIVE error state (status
-  // 'error' + newest system error carries the quota code), never the whole
-  // transcript — see quotaErrorBanner.ts for why.
-  const freeQuotaExhausted = useMemo(
-    () => isFreeQuotaErrorLive(currentSession?.messages, currentSession?.status),
+  // Quota call-to-action banner (REQ-A-25): follows the LIVE error state
+  // (status 'error' + newest system error carries the quota code), never the
+  // whole transcript — see quotaErrorBanner.ts for why. Covers both machine
+  // codes: free_quota_exhausted (never had purchased quota) and the new C4
+  // quota_exhausted (purchased pool used up).
+  const quotaExhausted = useMemo(
+    () => isQuotaExhaustedErrorLive(currentSession?.messages, currentSession?.status),
     [currentSession?.messages, currentSession?.status],
   );
+  // Runtime split for the banner action (REQ-A-25): desktop keeps the
+  // Settings > Models shortcut; the mobile web app offers recharge instead
+  // (no Settings > Models surface exists there — see
+  // services/isMobileRuntime.ts for the detection seam).
+  const isMobile = useMemo(() => isMobileRuntime(), []);
   // Cause text for the A2A error banner: the newest system error message.
   // System bubbles are hidden in the A2A view, so without this the banner
   // says "something failed" without ever showing what.
@@ -4122,6 +4178,44 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     visibleA2AMessages.length,
   ]);
 
+  // Rail-initiated "load earlier": same page fetch, different landing.
+  //
+  // loadEarlierMessages deliberately keeps the reading position fixed when new
+  // history lands above (scrollTop += addedHeight). That is right for an
+  // incidental scroll-to-top, but wrong when the reader explicitly asks for
+  // older turns from the rail: the page lands above the viewport, the new marks
+  // appear off-screen, and the click reads as "nothing happened". Here, after
+  // the fetch grows the transcript, we bring the oldest rendered turn into view
+  // so the newly loaded turns are where the reader is looking. The target is
+  // resolved from the DOM rather than from the rail's item list, so this
+  // callback does not depend on state declared later in the component.
+  const handleTurnNavigatorLoadEarlier = useCallback(async () => {
+    const container = scrollContainerRef.current;
+    const beforeHeight = container?.scrollHeight ?? 0;
+    await loadEarlierMessages();
+    const activeContainer = scrollContainerRef.current;
+    if (!activeContainer || activeContainer.scrollHeight <= beforeHeight) return;
+    setShouldAutoScroll(false);
+    // Wait for the prepended page to be laid out. loadEarlierMessages resolves
+    // after its own one-frame scroll compensation, but the prepended messages
+    // render on a later commit, so aiming immediately lands on stale geometry
+    // and the browser then keeps that offset as the content grows. Two frames
+    // puts us after that commit.
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
+    });
+    const settled = scrollContainerRef.current;
+    if (!settled) return;
+    const oldest = settled.querySelector<HTMLElement>('[data-message-id]');
+    if (oldest) {
+      oldest.scrollIntoView({ block: 'start' });
+      return;
+    }
+    // No anchor to aim at: the prepended page sits directly above the previous
+    // head, so the top is where the newly loaded turns begin.
+    settled.scrollTop = 0;
+  }, [loadEarlierMessages]);
+
   const handleMessagesScroll = useCallback(() => {
     if (pinningScrollRef.current) return;
     const container = scrollContainerRef.current;
@@ -4343,6 +4437,134 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     return stable;
   }, [sessionMessages, sessionId]);
 
+  // Turn navigator rail: one mark per turn, derived from the same grouped turns
+  // the transcript renders. Preview text is plain text with block-level
+  // whitespace collapsed, so a multi-paragraph message still reads as one line
+  // (prompt) or a short excerpt (response) in the hover card.
+  const turnNavigatorItems = useMemo(() => {
+    const plainText = (content: string | null | undefined): string => {
+      if (!content) return '';
+      return content
+        .replace(/```[\s\S]*?```/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    };
+    return buildTurnNavigatorItems(turns, plainText);
+  }, [turns]);
+
+  // Which turn the reader is currently at, for the active mark. Read from the
+  // scroll container rather than tracked as state so the rail never drives a
+  // re-render of the transcript on scroll.
+  const [turnNavigatorActiveId, setTurnNavigatorActiveId] = useState<string | null>(null);
+  // One timer for the transient highlight ring (rail jump AND quote jump), so
+  // a second jump restarts the window instead of letting the first one clear
+  // the mark early. One ref for both: the helper clears every lit ring before
+  // lighting the next, so two independent timers could only race to un-ring.
+  const transientHighlightTimerRef = useRef<number | null>(null);
+  // Clear the ring on unmount and on session switch: the timer holds the
+  // element it will un-ring, so leaving it armed would keep a detached node
+  // alive and could un-ring a same-id node in the next session.
+  useEffect(() => () => {
+    if (transientHighlightTimerRef.current != null) {
+      window.clearTimeout(transientHighlightTimerRef.current);
+      transientHighlightTimerRef.current = null;
+    }
+  }, [sessionId]);
+
+  // Anchor the active mark to the last user message whose element has scrolled
+  // to or above the reading position.
+  //
+  // Resolution goes through findTranscriptMessageElement — the same transcript
+  // lookup the quote-jump path uses — NOT through messageElementRefs. That ref
+  // is only populated on the A2A branch, so a standard session would resolve
+  // nothing and the rail would neither track nor jump.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container || turnNavigatorItems.length === 0) return;
+    const resolveActive = () => {
+      const containerTop = container.getBoundingClientRect().top;
+      // A turn counts as "being read" once its start has entered the upper
+      // quarter of the viewport. The band is deliberately generous: an 8px
+      // threshold reported NO active turn at the very top of the transcript,
+      // because the first message starts below the container's own padding.
+      const band = container.clientHeight * 0.25;
+      let found: string | null = null;
+      for (const item of turnNavigatorItems) {
+        if (!item.anchorId) continue;
+        const element = findTranscriptMessageElement(container, item.anchorId);
+        if (!element) continue;
+        if (element.getBoundingClientRect().top - containerTop <= band) found = item.anchorId;
+      }
+      // At the very top no turn start may fall inside the band; the reader is
+      // unambiguously at turn 1 then, so fall back rather than report nothing.
+      if (!found) found = turnNavigatorItems[0]?.anchorId ?? null;
+      setTurnNavigatorActiveId((current) => (current === found ? current : found));
+    };
+    // One resolution per animation frame: scroll fires far more often than the
+    // rail can usefully repaint, and each pass queries the DOM per turn.
+    let frame = 0;
+    const scheduleResolve = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        resolveActive();
+      });
+    };
+    resolveActive();
+    container.addEventListener('scroll', scheduleResolve, { passive: true });
+    return () => {
+      container.removeEventListener('scroll', scheduleResolve);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [turnNavigatorItems, scrollContainerRef, sessionMessages]);
+
+  const handleTurnNavigatorNavigate = useCallback((item: TurnNavigatorItem) => {
+    if (!item.anchorId) return;
+    // Both targets are resolved at CLICK time: a ref captured by an empty-dep
+    // closure can predate the transcript mounting.
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const selector = `[data-message-id="${CSS.escape(item.anchorId)}"]`;
+    const matches = Array.from(container.querySelectorAll<HTMLElement>(selector));
+    // A miss is not an error: the window may have trimmed the target, or the
+    // session switched under the click. Say nothing rather than jump nowhere.
+    if (matches.length === 0) return;
+
+    // TWO elements, on purpose. The same id is on the enclosing turn wrapper
+    // and on the message bubble inside it.
+    //  - Scroll by the OUTERMOST one: it starts the turn, so the landing is the
+    //    top of the turn the reader picked (the innermost sits mid-turn).
+    //  - Ring the INNERMOST one: the accent ring hugs the element it is on, and
+    //    on the wide short wrapper it reads as a stray gold rule across the
+    //    transcript, while on the bubble it reads as "this message".
+    // Using one element for both jobs is what made an earlier attempt either
+    // land wrong or draw a line instead of a ring.
+    const scrollTarget = matches[0];
+    const ringTarget = matches.find((candidate) => !candidate.querySelector(selector))
+      ?? matches[matches.length - 1];
+
+    setShouldAutoScroll(false);
+
+    // Paint the ring BEFORE the scroll. scrollIntoView() and
+    // scrollTo({behavior:'smooth'}) are both inert on this transcript (measured:
+    // the call returns without moving scrollTop), so the cue must not depend on
+    // the scroll succeeding. transientHighlight also clears every lit ring and
+    // restarts the window — see its contract near its definition.
+    transientHighlight(
+      transientHighlightTimerRef,
+      container,
+      ringTarget,
+      TURN_NAVIGATOR_HIGHLIGHT_MS,
+    );
+
+    // Assign scrollTop rather than asking for a smooth scroll: behavior:'auto'
+    // and a direct assignment land exactly where the smooth path does nothing.
+    const containerRect = container.getBoundingClientRect();
+    const elementRect = scrollTarget.getBoundingClientRect();
+    const target = Math.max(0, container.scrollTop + (elementRect.top - containerRect.top));
+    container.scrollTo({ top: target, behavior: 'auto' });
+  }, []);
+
   // The per-message reply entry needs its target's transcript position at
   // click time. Kept in a ref (refreshed whenever the turns rebuild) so the
   // handler stays stable and never breaks AssistantTurnBlock's memo for the
@@ -4353,9 +4575,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   }, [turns]);
 
   // Readable notice shown beside the composer when a quote-jump target is not
-  // in the rendered window (and the timer that clears the jump flash).
+  // in the rendered window.
   const [quoteJumpNotice, setQuoteJumpNotice] = useState<string | null>(null);
-  const quoteJumpHighlightTimerRef = useRef<number | null>(null);
 
   const handleQuoteReplyMessage = useCallback((message: CoworkMessage, text: string) => {
     // A fresh quote supersedes any "target not loaded" notice from an earlier
@@ -4405,18 +4626,32 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       return;
     }
     setQuoteJumpNotice(null);
-    element.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    // Remove-then-add so a repeated jump restarts the full 2.5s window; the
-    // ring is a static style, so no reflow trick is needed.
-    element.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
-    element.classList.add(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
-    if (quoteJumpHighlightTimerRef.current != null) {
-      window.clearTimeout(quoteJumpHighlightTimerRef.current);
-    }
-    quoteJumpHighlightTimerRef.current = window.setTimeout(() => {
-      element.classList.remove(...QUOTE_JUMP_HIGHLIGHT_CLASSES);
-      quoteJumpHighlightTimerRef.current = null;
-    }, 2500);
+    // Ring BEFORE scrolling, deliberately. scrollIntoView on this transcript
+    // container is inert (measured: scrollTo/scrollIntoView with smooth behavior
+    // leaves scrollTop untouched, while an instant jump lands). Painting the
+    // highlight first means the cue the reader came for does not depend on that
+    // call succeeding — the jump and the mark are separate promises.
+    // transientHighlight shares the rail jump's contract: every lit ring is
+    // cleared first (so repeated jumps restart the full 2.5s window and never
+    // stack rings), then this element is lit.
+    transientHighlight(
+      transientHighlightTimerRef,
+      container,
+      element,
+      QUOTE_JUMP_HIGHLIGHT_MS,
+    );
+    // Center the target by assigning scrollTop. This transcript's smooth path
+    // is inert: scrollIntoView({behavior:'smooth'}) returns without moving
+    // scrollTop at all (measured — the ring painted correctly on an element
+    // left 8957px outside the viewport, which is why a jump looked like "no
+    // highlight": the highlight existed, the view never went to it). The same
+    // fix as the turn-rail jump.
+    const containerRect = container.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+    const centred = container.scrollTop
+      + (elementRect.top - containerRect.top)
+      - (container.clientHeight - elementRect.height) / 2;
+    container.scrollTo({ top: Math.max(0, centred), behavior: 'auto' });
   }, []);
 
   // Jump back from a *sent* quote block (a message body that opens with the
@@ -4601,7 +4836,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     : Math.max(MARKDOWN_VIEWER_MIN_WIDTH_PX, Math.round(window.innerWidth * markdownViewerFraction));
 
   return (
-    <div ref={detailRootRef} className="flex-1 flex flex-col cowork-chat-surface h-full">
+    <div ref={detailRootRef} className="relative flex-1 flex flex-col cowork-chat-surface h-full">
       {/* Header */}
       <div className="draggable flex h-12 items-center justify-between px-4 border-b dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface/50 bg-claude-surface/50 shrink-0">
         {/* Left side: Toggle buttons (when collapsed) + Title + Sandbox badge */}
@@ -4976,15 +5211,26 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         />
       )}
 
-      {freeQuotaExhausted && (
+      {quotaExhausted && (
         <div className="px-4 pb-2 shrink-0">
           <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
             <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
               <ExclamationTriangleIcon className="h-4 w-4 text-red-500 shrink-0" />
               <span className="text-xs text-red-700 dark:text-red-300">
-                {i18nService.t('freeQuotaExhaustedBanner')}
+                {i18nService.t(isMobile ? 'quotaExhaustedBannerMobile' : 'freeQuotaExhaustedBanner')}
               </span>
-              {onRequestAppSettings && (
+              {isMobile ? (
+                // Mobile web (REQ-A-25): no Settings > Models surface — the
+                // recharge screen lives in the WS-E shell, which listens for
+                // this event (seam documented in services/isMobileRuntime.ts).
+                <button
+                  type="button"
+                  onClick={() => window.dispatchEvent(new CustomEvent('idbots:mobile-recharge'))}
+                  className="text-xs font-medium text-red-700 dark:text-red-300 underline hover:no-underline shrink-0"
+                >
+                  {i18nService.t('quotaExhaustedRechargeMobile')}
+                </button>
+              ) : onRequestAppSettings && (
                 <button
                   type="button"
                   onClick={() => onRequestAppSettings({ initialTab: 'model', notice: i18nService.t('freeQuotaExhaustedNotice') })}
@@ -4998,7 +5244,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         </div>
       )}
 
-      {isA2ASession && currentSession.status === 'error' && !freeQuotaExhausted && (
+      {isA2ASession && currentSession.status === 'error' && !quotaExhausted && (
         <div className="px-4 pb-2 shrink-0">
           <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
             <div className="flex items-start justify-between gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
@@ -5246,6 +5492,22 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           onAdd={handleAddQuoteToConversation}
         />
       )}
+
+      {/* Turn navigator rail — absolutely positioned against the detail root so
+          it floats beside the transcript without disturbing the column layout.
+          It centres itself in the band above the composer and hides on narrow
+          viewports (see TurnNavigator). */}
+      <div className="pointer-events-none absolute inset-y-0 right-1 flex items-center">
+        <TurnNavigator
+          items={turnNavigatorItems}
+          activeAnchorId={turnNavigatorActiveId}
+          sessionRunning={currentSession.status === 'running'}
+          hasMoreBefore={Boolean(currentSession.messageHistory?.hasMoreBefore)}
+          onLoadEarlier={handleTurnNavigatorLoadEarlier}
+          scrollContainerRef={scrollContainerRef}
+          onNavigate={handleTurnNavigatorNavigate}
+        />
+      </div>
 
       {/* Drag overlay so mouse events are not swallowed mid-resize */}
       {isMarkdownViewerResizing && (

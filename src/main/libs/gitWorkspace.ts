@@ -23,26 +23,15 @@ export async function getGitBranch(cwd: string | null | undefined): Promise<stri
   const trimmed = typeof cwd === 'string' ? cwd.trim() : '';
   if (!trimmed) return null;
   try {
-    // `--show-current` is empty for detached HEAD; fall back to `symbolic-ref`
-    // so a detached checkout at least surfaces the raw ref rather than nothing.
+    // `--show-current` is empty for a detached HEAD; git older than 2.22 rejects
+    // the flag and throws. Both mean "no branch here": this probe is best-effort
+    // and never throws to the caller, so both collapse to null.
     const { stdout } = await execFileAsync('git', ['branch', '--show-current'], {
       cwd: trimmed,
       timeout: GIT_PROBE_TIMEOUT_MS,
       windowsHide: true,
     });
-    const branch = stdout.trim();
-    if (branch) return branch;
-  } catch {
-    return null;
-  }
-  try {
-    const { stdout } = await execFileAsync('git', ['symbolic-ref', '--short', '-q', 'HEAD'], {
-      cwd: trimmed,
-      timeout: GIT_PROBE_TIMEOUT_MS,
-      windowsHide: true,
-    });
-    const branch = stdout.trim();
-    return branch || null;
+    return stdout.trim() || null;
   } catch {
     return null;
   }

@@ -2,8 +2,8 @@
 // white text/icons on the yellow accent fill (bg-claude-accent). White on
 // #FFDC51 is nearly illegible; content on the accent fill must use the
 // near-black accentInk token (#303133, matching .btn-idchat-primary-filled).
-// Sole exception: the composer send/stop button overrides to deep-orange
-// #9A3412 locally in CoworkPromptInput (user preference — see test below).
+// The old composer send/stop deep-orange-on-yellow exception was retired on
+// 2026-10-23: those buttons are now neutral gray circles with dark-gray ink.
 // Semantic error fills (red/green) keep their white text and are out of scope.
 
 import test from 'node:test';
@@ -54,13 +54,16 @@ test('accentInk token is defined and is the shared near-black on yellow', () => 
   assert.match(filled.slice(0, 200), /color: #303133/);
 });
 
-test('composer send/stop button is the sole deep-orange-on-yellow exception', () => {
+test('composer send/stop buttons use the neutral gray circle with dark-gray ink', () => {
   const composer = readFileSync(
     join(here, '../src/renderer/components/cowork/CoworkPromptInput.tsx'),
     'utf8',
   );
-  // Every composer send/stop className pins the deep-orange ink explicitly.
-  assert.equal((composer.match(/bg-claude-accent hover:bg-claude-accentHover text-\[#9A3412\]/g) || []).length, 4);
-  // ...and the composer never falls back to accentInk for these buttons.
-  assert.doesNotMatch(composer, /bg-claude-accent hover:bg-claude-accentHover text-claude-accentInk/);
+  // Every composer send/stop className pins the gray-circle + dark-ink style.
+  assert.equal(
+    (composer.match(/rounded-full bg-claude-surfaceHover hover:bg-claude-border text-claude-text/g) || []).length,
+    4,
+  );
+  // ...and the retired yellow fill + deep-orange ink never comes back.
+  assert.doesNotMatch(composer, /bg-claude-accent hover:bg-claude-accentHover text-\[#9A3412\]/);
 });

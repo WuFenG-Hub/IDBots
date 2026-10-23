@@ -29,6 +29,10 @@ const {
   SURF_CREATION_BUDGET_KEY,
   SURF_CREATION_MODE_KEY,
 } = require('../dist-electron/main/services/surfSettings.js');
+const {
+  DAILY_REPORT_ENABLED_KEY,
+  DAILY_REPORT_HOUR_KEY,
+} = require('../dist-electron/main/services/dailyReportSettings.js');
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-metabot-settings-service-test-'));
@@ -60,10 +64,11 @@ function seedMetabot(db) {
   );
 }
 
-test('whitelist exposes the OpenTeam remote-collab, cowork MCP-mount, automation, and surf keys', () => {
+test('whitelist exposes the OpenTeam remote-collab, cowork MCP-mount, automation, surf, and daily-report keys', () => {
   // cowork.mountMcpTools joined the whitelist with the per-bot MCP-tools
   // opt-in (commit 123267a9); automation keys with 91a92311; the surf keys
-  // with the surf settings bridge, surf_creation_budget with P1a.
+  // with the surf settings bridge, surf_creation_budget with P1a; the
+  // daily-report toggle/hour with the 每日汇报 feature (default OFF).
   assert.deepEqual(RENDERER_METABOT_SETTING_KEYS, [
     OPENTEAM_ALLOW_REMOTE_COLLAB_KEY,
     COWORK_MOUNT_MCP_TOOLS_KEY,
@@ -73,6 +78,8 @@ test('whitelist exposes the OpenTeam remote-collab, cowork MCP-mount, automation
     SURF_INTERACTION_BUDGET_KEY,
     SURF_CREATION_BUDGET_KEY,
     SURF_CREATION_MODE_KEY,
+    DAILY_REPORT_ENABLED_KEY,
+    DAILY_REPORT_HOUR_KEY,
   ]);
 });
 
@@ -131,6 +138,36 @@ test('OpenTeam remote-collab toggle round-trips with guestService semantics', as
       () => getRendererMetabotSetting(metabotStore, 0, OPENTEAM_ALLOW_REMOTE_COLLAB_KEY),
       /positive integer/,
     );
+  } finally {
+    store.close();
+  }
+});
+
+test('daily-report toggle + hour round-trip through the renderer bridge', async () => {
+  const tempDir = makeTempDir();
+  const { store, metabotStore, db } = await openStores(tempDir);
+  try {
+    seedMetabot(db);
+    // Default OFF: no record until the owner enables it.
+    assert.equal(getRendererMetabotSetting(metabotStore, 1, DAILY_REPORT_ENABLED_KEY), null);
+
+    assert.equal(setRendererMetabotSetting(metabotStore, 1, DAILY_REPORT_ENABLED_KEY, true), '1');
+    assert.equal(getRendererMetabotSetting(metabotStore, 1, DAILY_REPORT_ENABLED_KEY), '1');
+    assert.equal(setRendererMetabotSetting(metabotStore, 1, DAILY_REPORT_ENABLED_KEY, false), '0');
+
+    // Hour: whole 0–23 accepted, anything else rejected without a write.
+    assert.equal(setRendererMetabotSetting(metabotStore, 1, DAILY_REPORT_HOUR_KEY, '8'), '8');
+    assert.equal(getRendererMetabotSetting(metabotStore, 1, DAILY_REPORT_HOUR_KEY), '8');
+    assert.equal(setRendererMetabotSetting(metabotStore, 1, DAILY_REPORT_HOUR_KEY, 0), '0');
+    assert.throws(
+      () => setRendererMetabotSetting(metabotStore, 1, DAILY_REPORT_HOUR_KEY, '24'),
+      /Invalid value/,
+    );
+    assert.throws(
+      () => setRendererMetabotSetting(metabotStore, 1, DAILY_REPORT_HOUR_KEY, 'eight'),
+      /Invalid value/,
+    );
+    assert.equal(getRendererMetabotSetting(metabotStore, 1, DAILY_REPORT_HOUR_KEY), '0', 'rejects leave the value untouched');
   } finally {
     store.close();
   }

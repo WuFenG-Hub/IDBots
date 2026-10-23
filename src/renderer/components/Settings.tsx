@@ -3353,7 +3353,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                   <label htmlFor={`${activeProvider}-apiFormat`} className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
                     {i18nService.t('apiFormat')}
                   </label>
-                  <div className="flex items-center space-x-4 flex-wrap gap-y-1.5">
+                  <div className="flex flex-col items-start space-y-1.5">
                     <label className="flex items-center">
                       <input
                         type="radio"

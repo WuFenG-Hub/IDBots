@@ -24,7 +24,12 @@ const toErrorText = (error: unknown): string => {
 export const classifyPrivateChatSkillTurnError = (error: unknown): PrivateChatSkillTurnErrorKind => {
   const text = toErrorText(error).toLowerCase();
   if (
+    // REQ-A-25: the relay answers 429 with free_quota_exhausted (existing)
+    // or quota_exhausted (new C4 code for a used-up purchased pool). The
+    // latter also matches as a substring of the former, but both are listed
+    // so the intent stays explicit.
     text.includes('free_quota_exhausted')
+    || text.includes('quota_exhausted')
     || text.includes('insufficient_quota')
     || text.includes('"code":"quota"')
     || text.includes("'code':'quota'")

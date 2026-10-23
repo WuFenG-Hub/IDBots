@@ -1,0 +1,139 @@
+/**
+ * Shared types for the mobile bridge (mock now, real gateway shim in T3).
+ *
+ * The mock bridge (REQ-E-8) backs `window.electron` with fixtures and timers
+ * so the mobile UI and its Playwright suite can run without a tenant. The
+ * real C2 gateway shim (T3) replaces the same `window.electron` surface, so
+ * screens written against the mock need no changes.
+ */
+
+/** Connection lifecycle of the gateway client, mirrored into the UI banner. */
+export type ConnectionState =
+  | 'connecting'
+  | 'online'
+  | 'reconnecting'
+  | 'offline'
+  | 'upgrading';
+
+export type IdbotsMobileOs = 'ios' | 'android' | 'web';
+
+export type IdbotsMobileShell = 'pwa' | 'capacitor' | 'browser';
+
+/** Client facts exposed next to `window.electron` (C2/REQ-E-3 shape). */
+export interface IdbotsMobileInfo {
+  isMobile: true;
+  os: IdbotsMobileOs;
+  shell: IdbotsMobileShell;
+}
+
+/**
+ * C4 bundle types DERIVE from the real preload channel declarations in
+ * src/renderer/types/electron.d.ts. Its interfaces are module-scoped (not
+ * global), so they are reached through `Window['electron']` — never
+ * hand-copied into a parallel definition. The last hand-copied set drifted
+ * on `llm.unit`, the `createOrder` result fields, and `getOrder`'s missing
+ * `gatewayParams`, breaking `tsc` as soon as WS-A's types landed.
+ * (`mobile`/`gateway` helper channels get the same treatment in T3.)
+ */
+export type BundleChannelAPI = Window['electron']['bundle'];
+export type BundlePlan = NonNullable<
+  Awaited<ReturnType<BundleChannelAPI['getPlans']>>['plans']
+>[number];
+export type BundleMeters = NonNullable<Awaited<ReturnType<BundleChannelAPI['getMeters']>>['meters']>;
+
+/**
+ * The mock's stored order: the C4 `createOrder` payload plus its own
+ * bookkeeping. `getOrder` projections must stay assignable to
+ * `BundleOrderStatusInfo` (no `gatewayParams` in status polling; paidAt and
+ * creditedAt are numbers once set, absent before — never null).
+ */
+export type MockBundleOrder = NonNullable<
+  Awaited<ReturnType<BundleChannelAPI['createOrder']>>['order']
+> & {
+  /** 1 created, 2 paid, 3 credited, 4 closed (C4 status codes). */
+  status: number;
+  paidAt?: number;
+  creditedAt?: number;
+  createdAt: number;
+};
+
+/** Pending tool-permission request as returned by `mobile:permission:listPending`. */
+export interface PendingPermissionRequest {
+  sessionId: string;
+  request: {
+    sessionId: string;
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    requestId: string;
+    toolUseId: string | null;
+  };
+  createdAt: number;
+}
+
+export interface MobileChannelAPI {
+  permission: {
+    listPending: () => Promise<{ success: boolean; pending?: PendingPermissionRequest[]; error?: string }>;
+  };
+  bootstrap: {
+    status: () => Promise<{ success: boolean; onboarding?: Record<string, unknown>; error?: string }>;
+  };
+  file: {
+    sign: (input: { path: string; disposition?: 'inline' | 'attachment' }) => Promise<{
+      success: boolean;
+      url?: string;
+      expiresAt?: number;
+      size?: number;
+      mime?: string;
+      error?: string;
+    }>;
+  };
+}
+
+/**
+ * The full mock surface: the desktop `IElectronAPI` (referenced through the
+ * global declaration in src/renderer/types/electron.d.ts, which already
+ * includes `bundle`) plus the mock's `mobile` helper channels.
+ */
+export type MockElectronAPI = Window['electron'] & {
+  mobile: MobileChannelAPI;
+};
+
+/** Offline rejection handed to invokes made while the mock is "disconnected". */
+export interface OfflineError extends Error {
+  code: 'OFFLINE';
+  retryable: true;
+}
+
+/** Controls the mock exposes to the demo page and the tests. */
+export interface MobileMockControl {
+  /** Flips connection state online -> reconnecting -> online over the blackout delay. */
+  simulateReconnect: () => void;
+  getConnectionState: () => ConnectionState;
+  /** URLs passed to shell:openExternal while http(s) (for test assertions). */
+  getOpenedUrls: () => string[];
+}
+
+/** Timer/scenario knobs; tests shrink these to keep the suite fast. */
+export interface MockBridgeOptions {
+  /** Delay between streamed reply tokens. Default 40 ms. */
+  streamTokenIntervalMs?: number;
+  /** Order goes from status 1 (created) to 3 (credited) after this delay. Default 10 s. */
+  orderCompleteDelayMs?: number;
+  /** How long simulateReconnect() stays disconnected. Default 3 s. */
+  reconnectBlackoutMs?: number;
+  /** The scheduled-task demo run fires this long after bridge creation. Default 15 s. */
+  scheduledRunDelayMs?: number;
+  /** System locale behind appInfo.getSystemLocale. Default: detected. */
+  systemLocale?: string;
+}
+
+export interface MobileMockBridge {
+  electron: MockElectronAPI;
+  connection: {
+    getState: () => ConnectionState;
+    onChange: (callback: (state: ConnectionState) => void) => () => void;
+  };
+  control: MobileMockControl;
+  /** Tears down pending timers; call in tests to avoid open handles. */
+  destroy: () => void;
+}

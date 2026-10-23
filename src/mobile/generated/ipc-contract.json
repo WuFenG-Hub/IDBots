@@ -1,0 +1,3048 @@
+{
+  "contractVersion": "1.0.0",
+  "allowlistVersion": "1.0.0",
+  "source": "src/main/preload.ts",
+  "methods": [
+    {
+      "path": "agentGame.listPendingConsent",
+      "kind": "invoke",
+      "channel": "agentGame:listPendingConsent",
+      "args": []
+    },
+    {
+      "path": "agentGame.listSessions",
+      "kind": "invoke",
+      "channel": "agentGame:listSessions",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "agentGame.onConsentRequired",
+      "kind": "on",
+      "channel": "agentGame:consentRequired"
+    },
+    {
+      "path": "agentGame.onSessionUpdated",
+      "kind": "on",
+      "channel": "agentGame:sessionUpdated"
+    },
+    {
+      "path": "agentGame.respondConsent",
+      "kind": "invoke",
+      "channel": "agentGame:respondConsent",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "agentGame.session",
+      "kind": "invoke",
+      "channel": "agentGame:session",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "api.cancelStream",
+      "kind": "invoke",
+      "channel": "api:stream:cancel",
+      "args": [
+        "requestId"
+      ]
+    },
+    {
+      "path": "api.fetch",
+      "kind": "invoke",
+      "channel": "api:fetch",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "api.onStreamAbort",
+      "kind": "on",
+      "channel": "api:stream:{requestId}:abort",
+      "note": "Per-request template channel written in the preload as `api:stream:${requestId}:abort`. Same provenance and N tier as api.onStreamData; see scripts/ipc-contract-overrides.json and the `api:stream:` event prefix in src/main/gateway/allowlist.ts."
+    },
+    {
+      "path": "api.onStreamData",
+      "kind": "on",
+      "channel": "api:stream:{requestId}:data",
+      "note": "Per-request template channel written in the preload as `api:stream:${requestId}:data`. It belongs to the api:stream invoke machinery, which `02` denies at tier N (generic outbound HTTP proxy); the per-request stream events are not listed in `02` v1.0.0 and are covered by the EVENT_ALLOWLIST `api:stream:` prefix at tier N pending a change request."
+    },
+    {
+      "path": "api.onStreamDone",
+      "kind": "on",
+      "channel": "api:stream:{requestId}:done",
+      "note": "Per-request template channel written in the preload as `api:stream:${requestId}:done`. Same provenance and N tier as api.onStreamData; see scripts/ipc-contract-overrides.json and the `api:stream:` event prefix in src/main/gateway/allowlist.ts."
+    },
+    {
+      "path": "api.onStreamError",
+      "kind": "on",
+      "channel": "api:stream:{requestId}:error",
+      "note": "Per-request template channel written in the preload as `api:stream:${requestId}:error`. Same provenance and N tier as api.onStreamData; see scripts/ipc-contract-overrides.json and the `api:stream:` event prefix in src/main/gateway/allowlist.ts."
+    },
+    {
+      "path": "api.stream",
+      "kind": "invoke",
+      "channel": "api:stream",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "appEvents.onNewTask",
+      "kind": "on",
+      "channel": "app:newTask"
+    },
+    {
+      "path": "appEvents.onOpenSettings",
+      "kind": "on",
+      "channel": "app:openSettings"
+    },
+    {
+      "path": "appInfo.getSystemLocale",
+      "kind": "invoke",
+      "channel": "app:getSystemLocale",
+      "args": []
+    },
+    {
+      "path": "appInfo.getVersion",
+      "kind": "invoke",
+      "channel": "app:getVersion",
+      "args": []
+    },
+    {
+      "path": "appUpdate.applySilent",
+      "kind": "invoke",
+      "channel": "appUpdate:applySilent",
+      "args": [
+        "filePath"
+      ]
+    },
+    {
+      "path": "appUpdate.cancelDownload",
+      "kind": "invoke",
+      "channel": "appUpdate:cancelDownload",
+      "args": []
+    },
+    {
+      "path": "appUpdate.download",
+      "kind": "invoke",
+      "channel": "appUpdate:download",
+      "args": [
+        "url",
+        "version",
+        "sha256"
+      ]
+    },
+    {
+      "path": "appUpdate.install",
+      "kind": "invoke",
+      "channel": "appUpdate:install",
+      "args": [
+        "filePath"
+      ]
+    },
+    {
+      "path": "appUpdate.onDownloadProgress",
+      "kind": "on",
+      "channel": "appUpdate:downloadProgress"
+    },
+    {
+      "path": "appUpdate.relaunchNow",
+      "kind": "invoke",
+      "channel": "appUpdate:relaunchNow",
+      "args": []
+    },
+    {
+      "path": "arch",
+      "kind": "value"
+    },
+    {
+      "path": "autoLaunch.get",
+      "kind": "invoke",
+      "channel": "app:getAutoLaunch",
+      "args": []
+    },
+    {
+      "path": "autoLaunch.set",
+      "kind": "invoke",
+      "channel": "app:setAutoLaunch",
+      "args": [
+        "enabled"
+      ]
+    },
+    {
+      "path": "botBrowser.capturePage",
+      "kind": "invoke",
+      "channel": "botBrowser:capturePage",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "botBrowser.clearMetaAppCache",
+      "kind": "invoke",
+      "channel": "botBrowser:clearMetaAppCache",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "botBrowser.completeLlm",
+      "kind": "invoke",
+      "channel": "botBrowser:completeLlm",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "botBrowser.getMetaAppCache",
+      "kind": "invoke",
+      "channel": "botBrowser:getMetaAppCache",
+      "args": []
+    },
+    {
+      "path": "botBrowser.getProfile",
+      "kind": "invoke",
+      "channel": "botBrowser:getProfile",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "botBrowser.getSettings",
+      "kind": "invoke",
+      "channel": "botBrowser:getSettings",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "botBrowser.onCaptureRequest",
+      "kind": "on",
+      "channel": "botBrowser:capture-request"
+    },
+    {
+      "path": "botBrowser.onOpenUri",
+      "kind": "on",
+      "channel": "botBrowser:openUri"
+    },
+    {
+      "path": "botBrowser.onTabCommand",
+      "kind": "on",
+      "channel": "botBrowser:tab-command"
+    },
+    {
+      "path": "botBrowser.requestPermissions",
+      "kind": "invoke",
+      "channel": "botBrowser:requestPermissions",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "botBrowser.resolveMetaAppPin",
+      "kind": "invoke",
+      "channel": "botBrowser:resolveMetaAppPin",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "botBrowser.resolveResource",
+      "kind": "invoke",
+      "channel": "botBrowser:resolveResource",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "botBrowser.respondToCaptureRequest",
+      "kind": "send",
+      "channel": "botBrowser:capture-request:response",
+      "args": [
+        "response"
+      ]
+    },
+    {
+      "path": "botBrowser.respondToTabCommand",
+      "kind": "send",
+      "channel": "botBrowser:tab-command:response",
+      "args": [
+        "response"
+      ]
+    },
+    {
+      "path": "botBrowser.sendPrivateChat",
+      "kind": "invoke",
+      "channel": "botBrowser:sendPrivateChat",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "botBrowser.updateSettings",
+      "kind": "invoke",
+      "channel": "botBrowser:updateSettings",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "botBrowser.uploadMetaFile",
+      "kind": "invoke",
+      "channel": "botBrowser:uploadMetaFile",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "botBrowser.writeMetaIdPin",
+      "kind": "invoke",
+      "channel": "botBrowser:writeMetaIdPin",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "bundle.createOrder",
+      "kind": "invoke",
+      "channel": "bundle:createOrder",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "bundle.getMeters",
+      "kind": "invoke",
+      "channel": "bundle:getMeters",
+      "args": []
+    },
+    {
+      "path": "bundle.getOrder",
+      "kind": "invoke",
+      "channel": "bundle:getOrder",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "bundle.getPlans",
+      "kind": "invoke",
+      "channel": "bundle:getPlans",
+      "args": []
+    },
+    {
+      "path": "chainBackup.backup",
+      "kind": "invoke",
+      "channel": "chainBackup:backup",
+      "args": []
+    },
+    {
+      "path": "chainBackup.getState",
+      "kind": "invoke",
+      "channel": "chainBackup:getState",
+      "args": []
+    },
+    {
+      "path": "chainBackup.onProgress",
+      "kind": "on",
+      "channel": "chainBackup:progress"
+    },
+    {
+      "path": "chainBackup.onRestoreProgress",
+      "kind": "on",
+      "channel": "chainBackup:restoreProgress"
+    },
+    {
+      "path": "chainBackup.restore",
+      "kind": "invoke",
+      "channel": "chainBackup:restore",
+      "args": []
+    },
+    {
+      "path": "checkApiConfig",
+      "kind": "invoke",
+      "channel": "check-api-config",
+      "args": []
+    },
+    {
+      "path": "cowork.addAutoApproveTool",
+      "kind": "invoke",
+      "channel": "cowork:session:addAutoApproveTool",
+      "args": [
+        "sessionId",
+        "toolName"
+      ]
+    },
+    {
+      "path": "cowork.approveTeamCulture",
+      "kind": "invoke",
+      "channel": "teamCulture:approve",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.archiveKnowledge",
+      "kind": "invoke",
+      "channel": "metaid:knowledge:archive",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.archiveSession",
+      "kind": "invoke",
+      "channel": "cowork:session:archive",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.archiveTeamCulture",
+      "kind": "invoke",
+      "channel": "teamCulture:archive",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.backgroundTask",
+      "kind": "invoke",
+      "channel": "cowork:session:backgroundTask",
+      "args": [
+        "sessionId",
+        "toolUseId"
+      ]
+    },
+    {
+      "path": "cowork.captureImageChunk",
+      "kind": "invoke",
+      "channel": "cowork:session:captureImageChunk",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.clearSessionError",
+      "kind": "invoke",
+      "channel": "cowork:session:clearError",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.continueSession",
+      "kind": "invoke",
+      "channel": "cowork:session:continue",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.createGreetingSession",
+      "kind": "invoke",
+      "channel": "cowork:session:createGreeting",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.createMemoryEntry",
+      "kind": "invoke",
+      "channel": "cowork:memory:createEntry",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.deleteKnowledge",
+      "kind": "invoke",
+      "channel": "metaid:knowledge:delete",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.deleteMemoryEntry",
+      "kind": "invoke",
+      "channel": "cowork:memory:deleteEntry",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.deleteMemoryPolicy",
+      "kind": "invoke",
+      "channel": "cowork:memory:deletePolicy",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.deleteTeamCulture",
+      "kind": "invoke",
+      "channel": "teamCulture:delete",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.downloadMetafile",
+      "kind": "invoke",
+      "channel": "cowork:metafile:download",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.endA2APrivateChat",
+      "kind": "invoke",
+      "channel": "cowork:session:endA2APrivateChat",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.ensureA2ASession",
+      "kind": "invoke",
+      "channel": "cowork:session:ensureA2A",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.exportHtmlReportImage",
+      "kind": "invoke",
+      "channel": "cowork:htmlReport:exportImage",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.exportResultImage",
+      "kind": "invoke",
+      "channel": "cowork:session:exportResultImage",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.exportTranscript",
+      "kind": "invoke",
+      "channel": "cowork:session:exportTranscript",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.forkSession",
+      "kind": "invoke",
+      "channel": "cowork:session:fork",
+      "args": [
+        "sessionId",
+        "messageId",
+        "title"
+      ]
+    },
+    {
+      "path": "cowork.getA2AConversationHistoryPage",
+      "kind": "invoke",
+      "channel": "cowork:session:getA2AHistoryPage",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.getA2AEpisodes",
+      "kind": "invoke",
+      "channel": "cowork:session:getA2AEpisodes",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.getAutoApproveTools",
+      "kind": "invoke",
+      "channel": "cowork:session:getAutoApproveTools",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.getConfig",
+      "kind": "invoke",
+      "channel": "cowork:config:get",
+      "args": []
+    },
+    {
+      "path": "cowork.getDelegationInfo",
+      "kind": "invoke",
+      "channel": "cowork:getDelegationInfo",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.getMemoryHygiene",
+      "kind": "invoke",
+      "channel": "memoryHygiene:get",
+      "args": []
+    },
+    {
+      "path": "cowork.getMemoryPolicy",
+      "kind": "invoke",
+      "channel": "cowork:memory:getPolicy",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.getMemoryStats",
+      "kind": "invoke",
+      "channel": "cowork:memory:getStats",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.getPlanMode",
+      "kind": "invoke",
+      "channel": "cowork:plan-mode:get",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.getSandboxStatus",
+      "kind": "invoke",
+      "channel": "cowork:sandbox:status",
+      "args": []
+    },
+    {
+      "path": "cowork.getSession",
+      "kind": "invoke",
+      "channel": "cowork:session:get",
+      "args": [
+        "sessionId",
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.getSessionMemoryScope",
+      "kind": "invoke",
+      "channel": "cowork:memory:getSessionScope",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.getSessionMessagesPage",
+      "kind": "invoke",
+      "channel": "cowork:session:getMessagesPage",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.getStreamLiveContent",
+      "kind": "invoke",
+      "channel": "cowork:stream:liveContent",
+      "args": [
+        "payload"
+      ]
+    },
+    {
+      "path": "cowork.getSubagentMessages",
+      "kind": "invoke",
+      "channel": "cowork:session:getSubagentMessages",
+      "args": [
+        "sessionId",
+        "agentId",
+        "limit"
+      ]
+    },
+    {
+      "path": "cowork.getSubagents",
+      "kind": "invoke",
+      "channel": "cowork:session:getSubagents",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.getTeamCultureConfig",
+      "kind": "invoke",
+      "channel": "teamCulture:getConfig",
+      "args": []
+    },
+    {
+      "path": "cowork.installSandbox",
+      "kind": "invoke",
+      "channel": "cowork:sandbox:install",
+      "args": []
+    },
+    {
+      "path": "cowork.isDelegationBlocking",
+      "kind": "invoke",
+      "channel": "cowork:isDelegationBlocking",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.listArchivedSessions",
+      "kind": "invoke",
+      "channel": "cowork:session:listArchived",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.listKnowledge",
+      "kind": "invoke",
+      "channel": "metaid:knowledge:list",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.listMemoryEntries",
+      "kind": "invoke",
+      "channel": "cowork:memory:listEntries",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.listMemoryScopes",
+      "kind": "invoke",
+      "channel": "cowork:memory:listScopes",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.listMetabotAvatars",
+      "kind": "invoke",
+      "channel": "cowork:session:listMetabotAvatars",
+      "args": [
+        "metabotIds"
+      ]
+    },
+    {
+      "path": "cowork.listSessionFeedback",
+      "kind": "invoke",
+      "channel": "cowork:session:listFeedback",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.listSessions",
+      "kind": "invoke",
+      "channel": "cowork:session:list",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.listTaskCommTrend",
+      "kind": "invoke",
+      "channel": "teamCulture:commTrend",
+      "args": []
+    },
+    {
+      "path": "cowork.listTeamCulture",
+      "kind": "invoke",
+      "channel": "teamCulture:list",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.listTeamCultureDistillationLog",
+      "kind": "invoke",
+      "channel": "teamCulture:distillationLog",
+      "args": []
+    },
+    {
+      "path": "cowork.onDelegationStateChange",
+      "kind": "on",
+      "channel": "cowork:delegation:stateChange"
+    },
+    {
+      "path": "cowork.onMemoryHygieneStatusChanged",
+      "kind": "on",
+      "channel": "memoryHygiene:statusChanged"
+    },
+    {
+      "path": "cowork.onSandboxDownloadProgress",
+      "kind": "on",
+      "channel": "cowork:sandbox:downloadProgress"
+    },
+    {
+      "path": "cowork.onSessionProfileRefreshed",
+      "kind": "on",
+      "channel": "cowork:session:profileRefreshed"
+    },
+    {
+      "path": "cowork.onStreamComplete",
+      "kind": "on",
+      "channel": "cowork:stream:complete"
+    },
+    {
+      "path": "cowork.onStreamError",
+      "kind": "on",
+      "channel": "cowork:stream:error"
+    },
+    {
+      "path": "cowork.onStreamMessage",
+      "kind": "on",
+      "channel": "cowork:stream:message"
+    },
+    {
+      "path": "cowork.onStreamMessageUpdate",
+      "kind": "on",
+      "channel": "cowork:stream:messageUpdate"
+    },
+    {
+      "path": "cowork.onStreamPermission",
+      "kind": "on",
+      "channel": "cowork:stream:permission"
+    },
+    {
+      "path": "cowork.onStreamPermissionResolved",
+      "kind": "on",
+      "channel": "cowork:stream:permissionResolved"
+    },
+    {
+      "path": "cowork.onStreamSessionTitle",
+      "kind": "on",
+      "channel": "cowork:stream:sessionTitle"
+    },
+    {
+      "path": "cowork.prewarmTurnSlot",
+      "kind": "invoke",
+      "channel": "cowork:session:prewarmTurnSlot",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.processServiceRefund",
+      "kind": "invoke",
+      "channel": "cowork:session:processServiceRefund",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.queueA2AGuidance",
+      "kind": "invoke",
+      "channel": "cowork:session:queueA2AGuidance",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.readLocalImage",
+      "kind": "invoke",
+      "channel": "cowork:session:readLocalImage",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.refreshPeerProfile",
+      "kind": "invoke",
+      "channel": "cowork:session:refreshPeerProfile",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.removeAutoApproveTool",
+      "kind": "invoke",
+      "channel": "cowork:session:removeAutoApproveTool",
+      "args": [
+        "sessionId",
+        "toolName"
+      ]
+    },
+    {
+      "path": "cowork.renameSession",
+      "kind": "invoke",
+      "channel": "cowork:session:rename",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.requestManualCompaction",
+      "kind": "invoke",
+      "channel": "cowork:session:compact",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.resendA2ADeliveryArtifact",
+      "kind": "invoke",
+      "channel": "cowork:session:resendA2ADeliveryArtifact",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.respondToPermission",
+      "kind": "invoke",
+      "channel": "cowork:permission:respond",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.restoreTeamCulture",
+      "kind": "invoke",
+      "channel": "teamCulture:restore",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.rewindSession",
+      "kind": "invoke",
+      "channel": "cowork:session:rewind",
+      "args": [
+        "sessionId",
+        "messageId"
+      ]
+    },
+    {
+      "path": "cowork.runMemoryHygieneNow",
+      "kind": "invoke",
+      "channel": "memoryHygiene:runNow",
+      "args": []
+    },
+    {
+      "path": "cowork.saveResultImage",
+      "kind": "invoke",
+      "channel": "cowork:session:saveResultImage",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.sendOwnerA2AMessage",
+      "kind": "invoke",
+      "channel": "cowork:session:sendOwnerA2AMessage",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.setConfig",
+      "kind": "invoke",
+      "channel": "cowork:config:set",
+      "args": [
+        "config"
+      ]
+    },
+    {
+      "path": "cowork.setEffort",
+      "kind": "invoke",
+      "channel": "cowork:session:setEffort",
+      "args": [
+        "sessionId",
+        "effort"
+      ]
+    },
+    {
+      "path": "cowork.setMemoryHygieneConfig",
+      "kind": "invoke",
+      "channel": "memoryHygiene:setConfig",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.setMemoryPolicy",
+      "kind": "invoke",
+      "channel": "cowork:memory:setPolicy",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.setMessageFeedback",
+      "kind": "invoke",
+      "channel": "cowork:message:setFeedback",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.setPermissionMode",
+      "kind": "invoke",
+      "channel": "cowork:session:setPermissionMode",
+      "args": [
+        "sessionId",
+        "permissionMode"
+      ]
+    },
+    {
+      "path": "cowork.setPlanMode",
+      "kind": "invoke",
+      "channel": "cowork:plan-mode:set",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.setSessionFoldOverride",
+      "kind": "invoke",
+      "channel": "cowork:session:foldOverride",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.setSessionFollowUp",
+      "kind": "invoke",
+      "channel": "cowork:session:setFollowUp",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.setSessionGoal",
+      "kind": "invoke",
+      "channel": "cowork:session:setGoal",
+      "args": [
+        "sessionId",
+        "goal"
+      ]
+    },
+    {
+      "path": "cowork.setSessionModel",
+      "kind": "invoke",
+      "channel": "cowork:session:setModel",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.setSessionPinned",
+      "kind": "invoke",
+      "channel": "cowork:session:pin",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.setTeamCultureConfig",
+      "kind": "invoke",
+      "channel": "teamCulture:setConfig",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.startSession",
+      "kind": "invoke",
+      "channel": "cowork:session:start",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "cowork.stopSession",
+      "kind": "invoke",
+      "channel": "cowork:session:stop",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.stopTask",
+      "kind": "invoke",
+      "channel": "cowork:session:stopTask",
+      "args": [
+        "sessionId",
+        "taskId"
+      ]
+    },
+    {
+      "path": "cowork.submitInput",
+      "kind": "invoke",
+      "channel": "cowork:session:submitInput",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.unarchiveMemoryEntry",
+      "kind": "invoke",
+      "channel": "cowork:memory:unarchiveEntry",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.unarchiveSession",
+      "kind": "invoke",
+      "channel": "cowork:session:unarchive",
+      "args": [
+        "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.updateKnowledge",
+      "kind": "invoke",
+      "channel": "metaid:knowledge:update",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.updateMemoryEntry",
+      "kind": "invoke",
+      "channel": "cowork:memory:updateEntry",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.updateTeamCulture",
+      "kind": "invoke",
+      "channel": "teamCulture:update",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.upsertTeamCulture",
+      "kind": "invoke",
+      "channel": "teamCulture:upsert",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "dailyReport.runNow",
+      "kind": "invoke",
+      "channel": "dailyReport:runNow",
+      "args": [
+        "opts"
+      ]
+    },
+    {
+      "path": "deepseek.getBalance",
+      "kind": "invoke",
+      "channel": "deepseek:getBalance",
+      "args": []
+    },
+    {
+      "path": "dialog.saveInlineFile",
+      "kind": "invoke",
+      "channel": "dialog:saveInlineFile",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "dialog.selectDirectory",
+      "kind": "invoke",
+      "channel": "dialog:selectDirectory",
+      "args": []
+    },
+    {
+      "path": "dialog.selectFile",
+      "kind": "invoke",
+      "channel": "dialog:selectFile",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "dream.getStatus",
+      "kind": "invoke",
+      "channel": "dream:getStatus",
+      "args": []
+    },
+    {
+      "path": "dream.listCapabilityDrafts",
+      "kind": "invoke",
+      "channel": "dream:listCapabilityDrafts",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "dream.listDailySummaries",
+      "kind": "invoke",
+      "channel": "dream:listDailySummaries",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "dream.listRuns",
+      "kind": "invoke",
+      "channel": "dream:listRuns",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "dream.listTelemetryDaily",
+      "kind": "invoke",
+      "channel": "dream:listTelemetryDaily",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "dream.onStatusChanged",
+      "kind": "on",
+      "channel": "metabot:dreamStatusChanged"
+    },
+    {
+      "path": "dream.runNow",
+      "kind": "invoke",
+      "channel": "dream:runNow",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "experimentalAutomation.get",
+      "kind": "invoke",
+      "channel": "app:getExperimentalAutomation",
+      "args": []
+    },
+    {
+      "path": "experimentalAutomation.set",
+      "kind": "invoke",
+      "channel": "app:setExperimentalAutomation",
+      "args": [
+        "enabled"
+      ]
+    },
+    {
+      "path": "feeRates.getSelected",
+      "kind": "invoke",
+      "channel": "feeRates:getSelected",
+      "args": []
+    },
+    {
+      "path": "feeRates.getTiers",
+      "kind": "invoke",
+      "channel": "feeRates:getTiers",
+      "args": []
+    },
+    {
+      "path": "feeRates.refresh",
+      "kind": "invoke",
+      "channel": "feeRates:refresh",
+      "args": []
+    },
+    {
+      "path": "feeRates.select",
+      "kind": "invoke",
+      "channel": "feeRates:select",
+      "args": [
+        "chain",
+        "tierTitle"
+      ]
+    },
+    {
+      "path": "fs.readTextFile",
+      "kind": "invoke",
+      "channel": "fs:readTextFile",
+      "args": [
+        "filePath",
+        "maxBytes"
+      ]
+    },
+    {
+      "path": "gateway.fileSign",
+      "kind": "invoke",
+      "channel": "gateway:file:sign",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "generateSessionTitle",
+      "kind": "invoke",
+      "channel": "generate-session-title",
+      "args": [
+        "userInput"
+      ]
+    },
+    {
+      "path": "getApiConfig",
+      "kind": "invoke",
+      "channel": "get-api-config",
+      "args": []
+    },
+    {
+      "path": "getGitBranch",
+      "kind": "invoke",
+      "channel": "git:getBranch",
+      "args": [
+        "cwd"
+      ]
+    },
+    {
+      "path": "getRecentCwds",
+      "kind": "invoke",
+      "channel": "get-recent-cwds",
+      "args": [
+        "limit"
+      ]
+    },
+    {
+      "path": "gigSquare.createServiceOrderPin",
+      "kind": "invoke",
+      "channel": "gigSquare:createServiceOrderPin",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "gigSquare.fetchMyServiceOrders",
+      "kind": "invoke",
+      "channel": "gigSquare:fetchMyServiceOrders",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "gigSquare.fetchMyServices",
+      "kind": "invoke",
+      "channel": "gigSquare:fetchMyServices",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "gigSquare.fetchProviderInfo",
+      "kind": "invoke",
+      "channel": "gigSquare:fetchProviderInfo",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "gigSquare.fetchRefunds",
+      "kind": "invoke",
+      "channel": "gigSquare:fetchRefunds",
+      "args": []
+    },
+    {
+      "path": "gigSquare.fetchServices",
+      "kind": "invoke",
+      "channel": "gigSquare:fetchServices",
+      "args": []
+    },
+    {
+      "path": "gigSquare.modifyService",
+      "kind": "invoke",
+      "channel": "gigSquare:modifyService",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "gigSquare.pingProvider",
+      "kind": "invoke",
+      "channel": "gigSquare:pingProvider",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "gigSquare.preflightOrder",
+      "kind": "invoke",
+      "channel": "gigSquare:preflightOrder",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "gigSquare.processRefundOrder",
+      "kind": "invoke",
+      "channel": "gigSquare:processRefundOrder",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "gigSquare.publishService",
+      "kind": "invoke",
+      "channel": "gigSquare:publishService",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "gigSquare.revokeService",
+      "kind": "invoke",
+      "channel": "gigSquare:revokeService",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "gigSquare.sendOrder",
+      "kind": "invoke",
+      "channel": "gigSquare:sendOrder",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "gigSquare.syncFromRemote",
+      "kind": "invoke",
+      "channel": "gigSquare:syncFromRemote",
+      "args": []
+    },
+    {
+      "path": "groupTask.archive",
+      "kind": "invoke",
+      "channel": "groupTask:archive",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "groupTask.close",
+      "kind": "invoke",
+      "channel": "groupTask:close",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "groupTask.create",
+      "kind": "invoke",
+      "channel": "groupTask:create",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "groupTask.get",
+      "kind": "invoke",
+      "channel": "groupTask:get",
+      "args": [
+        "taskId"
+      ]
+    },
+    {
+      "path": "groupTask.getTurnActivity",
+      "kind": "invoke",
+      "channel": "groupTask:getTurnActivity",
+      "args": []
+    },
+    {
+      "path": "groupTask.kickMember",
+      "kind": "invoke",
+      "channel": "groupTask:kickMember",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "groupTask.list",
+      "kind": "invoke",
+      "channel": "groupTask:list",
+      "args": [
+        "filter"
+      ]
+    },
+    {
+      "path": "groupTask.listArchived",
+      "kind": "invoke",
+      "channel": "groupTask:listArchived",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "groupTask.listMessages",
+      "kind": "invoke",
+      "channel": "groupTask:listMessages",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "groupTask.onCheckpointChanged",
+      "kind": "on",
+      "channel": "groupTask:checkpointChanged"
+    },
+    {
+      "path": "groupTask.onOwnerReportDelivery",
+      "kind": "on",
+      "channel": "groupTask:ownerReportDelivery"
+    },
+    {
+      "path": "groupTask.onStatusChanged",
+      "kind": "on",
+      "channel": "groupTask:statusChanged"
+    },
+    {
+      "path": "groupTask.onTurnActivityChanged",
+      "kind": "on",
+      "channel": "groupTask:turnActivityChanged"
+    },
+    {
+      "path": "groupTask.pin",
+      "kind": "invoke",
+      "channel": "groupTask:pin",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "groupTask.rename",
+      "kind": "invoke",
+      "channel": "groupTask:rename",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "groupTask.reopen",
+      "kind": "invoke",
+      "channel": "groupTask:reopen",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "groupTask.resume",
+      "kind": "invoke",
+      "channel": "groupTask:resume",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "groupTask.rework",
+      "kind": "invoke",
+      "channel": "groupTask:rework",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "groupTask.sendUserMessage",
+      "kind": "invoke",
+      "channel": "groupTask:sendUserMessage",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "groupTask.unarchive",
+      "kind": "invoke",
+      "channel": "groupTask:unarchive",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "idbots.addMetaBot",
+      "kind": "invoke",
+      "channel": "idbots:addMetaBot",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "idbots.buildTokenTransferPreview",
+      "kind": "invoke",
+      "channel": "idbots:buildTokenTransferPreview",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "idbots.buildTransferPreview",
+      "kind": "invoke",
+      "channel": "idbots:buildTransferPreview",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "idbots.createMetaBotOnChain",
+      "kind": "invoke",
+      "channel": "idbots:createMetaBotOnChain",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "idbots.deleteMetaBot",
+      "kind": "invoke",
+      "channel": "idbots:deleteMetaBot",
+      "args": [
+        "metabotId"
+      ]
+    },
+    {
+      "path": "idbots.executeTokenTransfer",
+      "kind": "invoke",
+      "channel": "idbots:executeTokenTransfer",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "idbots.executeTransfer",
+      "kind": "invoke",
+      "channel": "idbots:executeTransfer",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "idbots.getAddressBalance",
+      "kind": "invoke",
+      "channel": "idbots:getAddressBalance",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "idbots.getCommunitySkillsStatus",
+      "kind": "invoke",
+      "channel": "idbots:getCommunitySkillsStatus",
+      "args": []
+    },
+    {
+      "path": "idbots.getMetaBotMnemonic",
+      "kind": "invoke",
+      "channel": "idbots:getMetaBotMnemonic",
+      "args": [
+        "metabotId"
+      ]
+    },
+    {
+      "path": "idbots.getMetaBots",
+      "kind": "invoke",
+      "channel": "idbots:getMetaBots",
+      "args": []
+    },
+    {
+      "path": "idbots.getMetabotWalletAssets",
+      "kind": "invoke",
+      "channel": "idbots:getMetabotWalletAssets",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "idbots.getOfficialSkillsStatus",
+      "kind": "invoke",
+      "channel": "idbots:getOfficialSkillsStatus",
+      "args": []
+    },
+    {
+      "path": "idbots.getTokenTransferFeeSummary",
+      "kind": "invoke",
+      "channel": "idbots:getTokenTransferFeeSummary",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "idbots.getTransferFeeSummary",
+      "kind": "invoke",
+      "channel": "idbots:getTransferFeeSummary",
+      "args": [
+        "chain"
+      ]
+    },
+    {
+      "path": "idbots.installOfficialSkill",
+      "kind": "invoke",
+      "channel": "idbots:installOfficialSkill",
+      "args": [
+        "skill"
+      ]
+    },
+    {
+      "path": "idbots.restoreMetaBotFromMnemonic",
+      "kind": "invoke",
+      "channel": "idbots:restoreMetaBotFromMnemonic",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "idbots.resumeMetabotSetup",
+      "kind": "invoke",
+      "channel": "idbots:resumeMetabotSetup",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "idbots.syncAllOfficialSkills",
+      "kind": "invoke",
+      "channel": "idbots:syncAllOfficialSkills",
+      "args": []
+    },
+    {
+      "path": "idbots.syncMetaBot",
+      "kind": "invoke",
+      "channel": "idbots:syncMetaBot",
+      "args": [
+        "metabotId"
+      ]
+    },
+    {
+      "path": "idbots.syncMetaBotEditChanges",
+      "kind": "invoke",
+      "channel": "idbots:syncMetaBotEditChanges",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "idbots.uploadMetabotHomepageFile",
+      "kind": "invoke",
+      "channel": "idbots:uploadMetabotHomepageFile",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "im.getConfig",
+      "kind": "invoke",
+      "channel": "im:config:get",
+      "args": []
+    },
+    {
+      "path": "im.getStatus",
+      "kind": "invoke",
+      "channel": "im:status:get",
+      "args": []
+    },
+    {
+      "path": "im.onMessageReceived",
+      "kind": "on",
+      "channel": "im:message:received"
+    },
+    {
+      "path": "im.onStatusChange",
+      "kind": "on",
+      "channel": "im:status:change"
+    },
+    {
+      "path": "im.setConfig",
+      "kind": "invoke",
+      "channel": "im:config:set",
+      "args": [
+        "config"
+      ]
+    },
+    {
+      "path": "im.startGateway",
+      "kind": "invoke",
+      "channel": "im:gateway:start",
+      "args": [
+        "platform"
+      ]
+    },
+    {
+      "path": "im.stopGateway",
+      "kind": "invoke",
+      "channel": "im:gateway:stop",
+      "args": [
+        "platform"
+      ]
+    },
+    {
+      "path": "im.testGateway",
+      "kind": "invoke",
+      "channel": "im:gateway:test",
+      "args": [
+        "platform",
+        "configOverride"
+      ]
+    },
+    {
+      "path": "jevRelay.resolveCredentials",
+      "kind": "invoke",
+      "channel": "jevRelay:resolveCredentials",
+      "args": []
+    },
+    {
+      "path": "knowledgeBase.create",
+      "kind": "invoke",
+      "channel": "knowledgeBase:create",
+      "args": [
+        "metabotId",
+        "input"
+      ]
+    },
+    {
+      "path": "knowledgeBase.importFiles",
+      "kind": "invoke",
+      "channel": "knowledgeBase:importFiles",
+      "args": [
+        "metabotId",
+        "kbId",
+        "filePaths"
+      ]
+    },
+    {
+      "path": "knowledgeBase.learn",
+      "kind": "invoke",
+      "channel": "knowledgeBase:learn",
+      "args": [
+        "metabotId",
+        "kbId",
+        "options"
+      ]
+    },
+    {
+      "path": "knowledgeBase.list",
+      "kind": "invoke",
+      "channel": "knowledgeBase:list",
+      "args": [
+        "metabotId"
+      ]
+    },
+    {
+      "path": "knowledgeBase.onLearnStatus",
+      "kind": "on",
+      "channel": "knowledgeBase:learnStatus"
+    },
+    {
+      "path": "knowledgeBase.openDir",
+      "kind": "invoke",
+      "channel": "knowledgeBase:openDir",
+      "args": [
+        "metabotId",
+        "kbId"
+      ]
+    },
+    {
+      "path": "knowledgeBase.remove",
+      "kind": "invoke",
+      "channel": "knowledgeBase:remove",
+      "args": [
+        "metabotId",
+        "kbId"
+      ]
+    },
+    {
+      "path": "knowledgeBase.update",
+      "kind": "invoke",
+      "channel": "knowledgeBase:update",
+      "args": [
+        "metabotId",
+        "kbId",
+        "patch"
+      ]
+    },
+    {
+      "path": "llmRelay.bootstrap",
+      "kind": "invoke",
+      "channel": "llmRelay:bootstrap",
+      "args": []
+    },
+    {
+      "path": "llmRelay.getQuota",
+      "kind": "invoke",
+      "channel": "llmRelay:getQuota",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "llmRelay.setApiBase",
+      "kind": "invoke",
+      "channel": "llmRelay:setApiBase",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "log.getPath",
+      "kind": "invoke",
+      "channel": "log:getPath",
+      "args": []
+    },
+    {
+      "path": "log.openFolder",
+      "kind": "invoke",
+      "channel": "log:openFolder",
+      "args": []
+    },
+    {
+      "path": "longtermTask.accept",
+      "kind": "invoke",
+      "channel": "longtermTask:accept",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.begin",
+      "kind": "invoke",
+      "channel": "longtermTask:begin",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.board",
+      "kind": "invoke",
+      "channel": "longtermTask:board",
+      "args": []
+    },
+    {
+      "path": "longtermTask.complete",
+      "kind": "invoke",
+      "channel": "longtermTask:complete",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.forSession",
+      "kind": "invoke",
+      "channel": "longtermTask:forSession",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.get",
+      "kind": "invoke",
+      "channel": "longtermTask:get",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.moveSubtask",
+      "kind": "invoke",
+      "channel": "longtermTask:moveSubtask",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.note",
+      "kind": "invoke",
+      "channel": "longtermTask:note",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.onUpdate",
+      "kind": "on",
+      "channel": "longtermTask:update"
+    },
+    {
+      "path": "longtermTask.reject",
+      "kind": "invoke",
+      "channel": "longtermTask:reject",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.setStage",
+      "kind": "invoke",
+      "channel": "longtermTask:setStage",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.subtaskAdd",
+      "kind": "invoke",
+      "channel": "longtermTask:subtaskAdd",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.subtaskSkip",
+      "kind": "invoke",
+      "channel": "longtermTask:subtaskSkip",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.subtaskUpdate",
+      "kind": "invoke",
+      "channel": "longtermTask:subtaskUpdate",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.unblock",
+      "kind": "invoke",
+      "channel": "longtermTask:unblock",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "longtermTask.update",
+      "kind": "invoke",
+      "channel": "longtermTask:update",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "mcp.create",
+      "kind": "invoke",
+      "channel": "mcp:create",
+      "args": [
+        "data"
+      ]
+    },
+    {
+      "path": "mcp.delete",
+      "kind": "invoke",
+      "channel": "mcp:delete",
+      "args": [
+        "id"
+      ]
+    },
+    {
+      "path": "mcp.list",
+      "kind": "invoke",
+      "channel": "mcp:list",
+      "args": []
+    },
+    {
+      "path": "mcp.setEnabled",
+      "kind": "invoke",
+      "channel": "mcp:setEnabled",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "mcp.update",
+      "kind": "invoke",
+      "channel": "mcp:update",
+      "args": [
+        "id",
+        "data"
+      ]
+    },
+    {
+      "path": "metaWebListener.assignGroupChatTask",
+      "kind": "invoke",
+      "channel": "idbots:assignGroupChatTask",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "metaWebListener.getListenerConfig",
+      "kind": "invoke",
+      "channel": "idbots:getListenerConfig",
+      "args": []
+    },
+    {
+      "path": "metaWebListener.getListenerStatus",
+      "kind": "invoke",
+      "channel": "idbots:getListenerStatus",
+      "args": []
+    },
+    {
+      "path": "metaWebListener.onListenerLog",
+      "kind": "on",
+      "channel": "idbots:listener-log"
+    },
+    {
+      "path": "metaWebListener.startMetaWebListener",
+      "kind": "invoke",
+      "channel": "idbots:startMetaWebListener",
+      "args": []
+    },
+    {
+      "path": "metaWebListener.toggleListener",
+      "kind": "invoke",
+      "channel": "idbots:toggleListener",
+      "args": [
+        "payload"
+      ]
+    },
+    {
+      "path": "metaappOwner.list",
+      "kind": "invoke",
+      "channel": "metaappOwner:list",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "metaappOwner.publish",
+      "kind": "invoke",
+      "channel": "metaappOwner:publish",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "metaappOwner.remove",
+      "kind": "invoke",
+      "channel": "metaappOwner:delete",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "metaappOwner.update",
+      "kind": "invoke",
+      "channel": "metaappOwner:update",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "metaapps.autoRoutingPrompt",
+      "kind": "invoke",
+      "channel": "metaapps:autoRoutingPrompt",
+      "args": []
+    },
+    {
+      "path": "metaapps.installCommunity",
+      "kind": "invoke",
+      "channel": "metaapps:installCommunity",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "metaapps.list",
+      "kind": "invoke",
+      "channel": "metaapps:list",
+      "args": []
+    },
+    {
+      "path": "metaapps.listCommunity",
+      "kind": "invoke",
+      "channel": "metaapps:listCommunity",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "metaapps.onChanged",
+      "kind": "on",
+      "channel": "metaapps:changed"
+    },
+    {
+      "path": "metaapps.open",
+      "kind": "invoke",
+      "channel": "metaapps:open",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "metaapps.resolveUrl",
+      "kind": "invoke",
+      "channel": "metaapps:resolveUrl",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "metabot.checkNameExists",
+      "kind": "invoke",
+      "channel": "metabot:checkNameExists",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "metabot.create",
+      "kind": "invoke",
+      "channel": "metabot:create",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "metabot.get",
+      "kind": "invoke",
+      "channel": "metabot:get",
+      "args": [
+        "id"
+      ]
+    },
+    {
+      "path": "metabot.getSetting",
+      "kind": "invoke",
+      "channel": "metabot:getSetting",
+      "args": [
+        "id",
+        "key"
+      ]
+    },
+    {
+      "path": "metabot.list",
+      "kind": "invoke",
+      "channel": "metabot:list",
+      "args": []
+    },
+    {
+      "path": "metabot.setEnabled",
+      "kind": "invoke",
+      "channel": "metabot:setEnabled",
+      "args": [
+        "id",
+        "enabled"
+      ]
+    },
+    {
+      "path": "metabot.setSetting",
+      "kind": "invoke",
+      "channel": "metabot:setSetting",
+      "args": [
+        "id",
+        "key",
+        "value"
+      ]
+    },
+    {
+      "path": "metabot.update",
+      "kind": "invoke",
+      "channel": "metabot:update",
+      "args": [
+        "id",
+        "input"
+      ]
+    },
+    {
+      "path": "metatask.board",
+      "kind": "invoke",
+      "channel": "metatask:board",
+      "args": []
+    },
+    {
+      "path": "metatask.get",
+      "kind": "invoke",
+      "channel": "metatask:get",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "metatask.onUpdate",
+      "kind": "on",
+      "channel": "metatask:update"
+    },
+    {
+      "path": "metatask.refresh",
+      "kind": "invoke",
+      "channel": "metatask:refresh",
+      "args": []
+    },
+    {
+      "path": "metawebStudy.list",
+      "kind": "invoke",
+      "channel": "metawebStudy:list",
+      "args": [
+        "metabotId"
+      ]
+    },
+    {
+      "path": "mobile.getBootstrapStatus",
+      "kind": "invoke",
+      "channel": "mobile:bootstrap:status",
+      "args": []
+    },
+    {
+      "path": "mobile.listPendingPermissions",
+      "kind": "invoke",
+      "channel": "mobile:permission:listPending",
+      "args": []
+    },
+    {
+      "path": "networkStatus.send",
+      "kind": "send",
+      "channel": "network:status-change",
+      "args": [
+        "status"
+      ]
+    },
+    {
+      "path": "openTeamCollab.list",
+      "kind": "invoke",
+      "channel": "openTeamCollab:list",
+      "args": []
+    },
+    {
+      "path": "openTeamCollab.listGuestInvites",
+      "kind": "invoke",
+      "channel": "openTeamCollab:listGuestInvites",
+      "args": []
+    },
+    {
+      "path": "openTeamCollab.listMessages",
+      "kind": "invoke",
+      "channel": "openTeamCollab:listMessages",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "p2p.getContactDetail",
+      "kind": "invoke",
+      "channel": "metaid:contacts:detail",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "p2p.getUserInfo",
+      "kind": "invoke",
+      "channel": "metaid:getUserInfo",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "p2p.listContacts",
+      "kind": "invoke",
+      "channel": "metaid:contacts:list",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "p2p.resolveAvatarSource",
+      "kind": "invoke",
+      "channel": "metaid:resolveAvatarSource",
+      "args": [
+        "params"
+      ]
+    },
+    {
+      "path": "permissions.checkCalendar",
+      "kind": "invoke",
+      "channel": "permissions:checkCalendar",
+      "args": []
+    },
+    {
+      "path": "permissions.requestCalendar",
+      "kind": "invoke",
+      "channel": "permissions:requestCalendar",
+      "args": []
+    },
+    {
+      "path": "platform",
+      "kind": "value"
+    },
+    {
+      "path": "powerGuard.getPreventDeviceSleep",
+      "kind": "invoke",
+      "channel": "powerGuard:getPreventDeviceSleep",
+      "args": []
+    },
+    {
+      "path": "powerGuard.getStatus",
+      "kind": "invoke",
+      "channel": "powerGuard:status",
+      "args": []
+    },
+    {
+      "path": "powerGuard.onChanged",
+      "kind": "on",
+      "channel": "powerGuard:changed"
+    },
+    {
+      "path": "powerGuard.setPreventDeviceSleep",
+      "kind": "invoke",
+      "channel": "powerGuard:setPreventDeviceSleep",
+      "args": [
+        "enabled"
+      ]
+    },
+    {
+      "path": "preference.commit",
+      "kind": "invoke",
+      "channel": "preference:commit",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "preference.listRounds",
+      "kind": "invoke",
+      "channel": "preference:listRounds",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "preference.onUpdate",
+      "kind": "on",
+      "channel": "preference:update"
+    },
+    {
+      "path": "preference.refresh",
+      "kind": "invoke",
+      "channel": "preference:refresh",
+      "args": []
+    },
+    {
+      "path": "preference.roundStatus",
+      "kind": "invoke",
+      "channel": "preference:roundStatus",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "preference.telemetry",
+      "kind": "invoke",
+      "channel": "preference:telemetry",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "projects.create",
+      "kind": "invoke",
+      "channel": "projects:create",
+      "args": [
+        "data"
+      ]
+    },
+    {
+      "path": "projects.delete",
+      "kind": "invoke",
+      "channel": "projects:delete",
+      "args": [
+        "id"
+      ]
+    },
+    {
+      "path": "projects.list",
+      "kind": "invoke",
+      "channel": "projects:list",
+      "args": []
+    },
+    {
+      "path": "projects.setEnabled",
+      "kind": "invoke",
+      "channel": "projects:setEnabled",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "projects.update",
+      "kind": "invoke",
+      "channel": "projects:update",
+      "args": [
+        "id",
+        "data"
+      ]
+    },
+    {
+      "path": "providerDiscovery.getOnlineBots",
+      "kind": "invoke",
+      "channel": "providerDiscovery:getOnlineBots",
+      "args": []
+    },
+    {
+      "path": "providerDiscovery.getOnlineServices",
+      "kind": "invoke",
+      "channel": "providerDiscovery:getOnlineServices",
+      "args": []
+    },
+    {
+      "path": "providerDiscovery.getSnapshot",
+      "kind": "invoke",
+      "channel": "providerDiscovery:getSnapshot",
+      "args": []
+    },
+    {
+      "path": "providerDiscovery.onChanged",
+      "kind": "on",
+      "channel": "providerDiscovery:changed"
+    },
+    {
+      "path": "saveApiConfig",
+      "kind": "invoke",
+      "channel": "save-api-config",
+      "args": [
+        "config"
+      ]
+    },
+    {
+      "path": "scheduledTasks.countRuns",
+      "kind": "invoke",
+      "channel": "scheduledTask:countRuns",
+      "args": [
+        "taskId"
+      ]
+    },
+    {
+      "path": "scheduledTasks.create",
+      "kind": "invoke",
+      "channel": "scheduledTask:create",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "scheduledTasks.delete",
+      "kind": "invoke",
+      "channel": "scheduledTask:delete",
+      "args": [
+        "id"
+      ]
+    },
+    {
+      "path": "scheduledTasks.get",
+      "kind": "invoke",
+      "channel": "scheduledTask:get",
+      "args": [
+        "id"
+      ]
+    },
+    {
+      "path": "scheduledTasks.list",
+      "kind": "invoke",
+      "channel": "scheduledTask:list",
+      "args": []
+    },
+    {
+      "path": "scheduledTasks.listAllRuns",
+      "kind": "invoke",
+      "channel": "scheduledTask:listAllRuns",
+      "args": [
+        "limit",
+        "offset"
+      ]
+    },
+    {
+      "path": "scheduledTasks.listRuns",
+      "kind": "invoke",
+      "channel": "scheduledTask:listRuns",
+      "args": [
+        "taskId",
+        "limit",
+        "offset"
+      ]
+    },
+    {
+      "path": "scheduledTasks.onRunUpdate",
+      "kind": "on",
+      "channel": "scheduledTask:runUpdate"
+    },
+    {
+      "path": "scheduledTasks.onStatusUpdate",
+      "kind": "on",
+      "channel": "scheduledTask:statusUpdate"
+    },
+    {
+      "path": "scheduledTasks.runManually",
+      "kind": "invoke",
+      "channel": "scheduledTask:runManually",
+      "args": [
+        "id"
+      ]
+    },
+    {
+      "path": "scheduledTasks.stop",
+      "kind": "invoke",
+      "channel": "scheduledTask:stop",
+      "args": [
+        "id"
+      ]
+    },
+    {
+      "path": "scheduledTasks.toggle",
+      "kind": "invoke",
+      "channel": "scheduledTask:toggle",
+      "args": [
+        "id",
+        "enabled"
+      ]
+    },
+    {
+      "path": "scheduledTasks.update",
+      "kind": "invoke",
+      "channel": "scheduledTask:update",
+      "args": [
+        "id",
+        "input"
+      ]
+    },
+    {
+      "path": "shell.chooseOpenWithApp",
+      "kind": "invoke",
+      "channel": "shell:chooseOpenWithApp",
+      "args": [
+        "filePath"
+      ]
+    },
+    {
+      "path": "shell.getOpenWithApps",
+      "kind": "invoke",
+      "channel": "shell:getOpenWithApps",
+      "args": [
+        "filePath"
+      ]
+    },
+    {
+      "path": "shell.openExternal",
+      "kind": "invoke",
+      "channel": "shell:openExternal",
+      "args": [
+        "url"
+      ]
+    },
+    {
+      "path": "shell.openPath",
+      "kind": "invoke",
+      "channel": "shell:openPath",
+      "args": [
+        "filePath"
+      ]
+    },
+    {
+      "path": "shell.openWith",
+      "kind": "invoke",
+      "channel": "shell:openWith",
+      "args": [
+        "filePath",
+        "appId"
+      ]
+    },
+    {
+      "path": "shell.showItemInFolder",
+      "kind": "invoke",
+      "channel": "shell:showItemInFolder",
+      "args": [
+        "filePath"
+      ]
+    },
+    {
+      "path": "skills.autoRoutingPrompt",
+      "kind": "invoke",
+      "channel": "skills:autoRoutingPrompt",
+      "args": []
+    },
+    {
+      "path": "skills.delete",
+      "kind": "invoke",
+      "channel": "skills:delete",
+      "args": [
+        "id"
+      ]
+    },
+    {
+      "path": "skills.download",
+      "kind": "invoke",
+      "channel": "skills:download",
+      "args": [
+        "source"
+      ]
+    },
+    {
+      "path": "skills.forgetMissing",
+      "kind": "invoke",
+      "channel": "skills:forgetMissing",
+      "args": [
+        "id"
+      ]
+    },
+    {
+      "path": "skills.getAssignmentInfo",
+      "kind": "invoke",
+      "channel": "skills:getAssignmentInfo",
+      "args": []
+    },
+    {
+      "path": "skills.getConfig",
+      "kind": "invoke",
+      "channel": "skills:getConfig",
+      "args": [
+        "skillId"
+      ]
+    },
+    {
+      "path": "skills.getRoot",
+      "kind": "invoke",
+      "channel": "skills:getRoot",
+      "args": []
+    },
+    {
+      "path": "skills.list",
+      "kind": "invoke",
+      "channel": "skills:list",
+      "args": []
+    },
+    {
+      "path": "skills.listMissing",
+      "kind": "invoke",
+      "channel": "skills:listMissing",
+      "args": []
+    },
+    {
+      "path": "skills.onChanged",
+      "kind": "on",
+      "channel": "skills:changed"
+    },
+    {
+      "path": "skills.setConfig",
+      "kind": "invoke",
+      "channel": "skills:setConfig",
+      "args": [
+        "skillId",
+        "config"
+      ]
+    },
+    {
+      "path": "skills.setEnabled",
+      "kind": "invoke",
+      "channel": "skills:setEnabled",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "skills.setScope",
+      "kind": "invoke",
+      "channel": "skills:setScope",
+      "args": [
+        "options"
+      ]
+    },
+    {
+      "path": "skills.testEmailConnectivity",
+      "kind": "invoke",
+      "channel": "skills:testEmailConnectivity",
+      "args": [
+        "skillId",
+        "config"
+      ]
+    },
+    {
+      "path": "startup.rendererInitialized",
+      "kind": "invoke",
+      "channel": "startup:rendererInitialized",
+      "args": []
+    },
+    {
+      "path": "store.get",
+      "kind": "invoke",
+      "channel": "store:get",
+      "args": [
+        "key"
+      ]
+    },
+    {
+      "path": "store.getStrict",
+      "kind": "invoke",
+      "channel": "store:getStrict",
+      "args": [
+        "key"
+      ]
+    },
+    {
+      "path": "store.onChanged",
+      "kind": "on",
+      "channel": "store:changed"
+    },
+    {
+      "path": "store.remove",
+      "kind": "invoke",
+      "channel": "store:remove",
+      "args": [
+        "key"
+      ]
+    },
+    {
+      "path": "store.set",
+      "kind": "invoke",
+      "channel": "store:set",
+      "args": [
+        "key",
+        "value"
+      ]
+    },
+    {
+      "path": "surf.listRuns",
+      "kind": "invoke",
+      "channel": "surf:listRuns",
+      "args": [
+        "metabotId",
+        "limit"
+      ]
+    },
+    {
+      "path": "surf.onStatusChanged",
+      "kind": "on",
+      "channel": "metabot:surfStatusChanged"
+    },
+    {
+      "path": "surf.runNow",
+      "kind": "invoke",
+      "channel": "surf:runNow",
+      "args": [
+        "metabotId"
+      ]
+    },
+    {
+      "path": "traffic.bindAllBots",
+      "kind": "invoke",
+      "channel": "traffic:bindAllBots",
+      "args": []
+    },
+    {
+      "path": "traffic.claimFreeGrant",
+      "kind": "invoke",
+      "channel": "traffic:claimFreeGrant",
+      "args": []
+    },
+    {
+      "path": "traffic.createRechargeOrder",
+      "kind": "invoke",
+      "channel": "traffic:createRechargeOrder",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "traffic.ensureAccount",
+      "kind": "invoke",
+      "channel": "traffic:ensureAccount",
+      "args": []
+    },
+    {
+      "path": "traffic.getAccount",
+      "kind": "invoke",
+      "channel": "traffic:getAccount",
+      "args": []
+    },
+    {
+      "path": "traffic.getBalance",
+      "kind": "invoke",
+      "channel": "traffic:getBalance",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "traffic.getDailyUsage",
+      "kind": "invoke",
+      "channel": "traffic:getDailyUsage",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "traffic.getFreeGrantCampaignStatus",
+      "kind": "invoke",
+      "channel": "traffic:getFreeGrantCampaignStatus",
+      "args": []
+    },
+    {
+      "path": "traffic.getLedger",
+      "kind": "invoke",
+      "channel": "traffic:getLedger",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "traffic.getLocalJournal",
+      "kind": "invoke",
+      "channel": "traffic:getLocalJournal",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "traffic.getPricing",
+      "kind": "invoke",
+      "channel": "traffic:getPricing",
+      "args": []
+    },
+    {
+      "path": "traffic.getRechargeGateway",
+      "kind": "invoke",
+      "channel": "traffic:getRechargeGateway",
+      "args": []
+    },
+    {
+      "path": "traffic.getRechargeOrder",
+      "kind": "invoke",
+      "channel": "traffic:getRechargeOrder",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "traffic.getSettings",
+      "kind": "invoke",
+      "channel": "traffic:getSettings",
+      "args": []
+    },
+    {
+      "path": "traffic.getUsageSummary",
+      "kind": "invoke",
+      "channel": "traffic:getUsageSummary",
+      "args": []
+    },
+    {
+      "path": "traffic.mockConfirmRechargeOrder",
+      "kind": "invoke",
+      "channel": "traffic:mockConfirmRechargeOrder",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "traffic.redeemCode",
+      "kind": "invoke",
+      "channel": "traffic:redeemCode",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "traffic.setSettings",
+      "kind": "invoke",
+      "channel": "traffic:setSettings",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "userIdentity.create",
+      "kind": "invoke",
+      "channel": "userIdentity:create",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "userIdentity.get",
+      "kind": "invoke",
+      "channel": "userIdentity:get",
+      "args": []
+    },
+    {
+      "path": "userIdentity.importFromMnemonic",
+      "kind": "invoke",
+      "channel": "userIdentity:import",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "userIdentity.logout",
+      "kind": "invoke",
+      "channel": "userIdentity:logout",
+      "args": []
+    },
+    {
+      "path": "userIdentity.retryChainSync",
+      "kind": "invoke",
+      "channel": "userIdentity:retryChainSync",
+      "args": []
+    },
+    {
+      "path": "userIdentity.retrySubsidy",
+      "kind": "invoke",
+      "channel": "userIdentity:retrySubsidy",
+      "args": []
+    },
+    {
+      "path": "userIdentity.revealMnemonic",
+      "kind": "invoke",
+      "channel": "userIdentity:revealMnemonic",
+      "args": []
+    },
+    {
+      "path": "userIdentity.updateName",
+      "kind": "invoke",
+      "channel": "userIdentity:updateName",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "window.close",
+      "kind": "send",
+      "channel": "window-close",
+      "args": []
+    },
+    {
+      "path": "window.isMaximized",
+      "kind": "invoke",
+      "channel": "window:isMaximized",
+      "args": []
+    },
+    {
+      "path": "window.minimize",
+      "kind": "send",
+      "channel": "window-minimize",
+      "args": []
+    },
+    {
+      "path": "window.moveBy",
+      "kind": "send",
+      "channel": "window:move-by",
+      "args": [
+        "dx",
+        "dy"
+      ]
+    },
+    {
+      "path": "window.onStateChanged",
+      "kind": "on",
+      "channel": "window:state-changed"
+    },
+    {
+      "path": "window.showSystemMenu",
+      "kind": "send",
+      "channel": "window:showSystemMenu",
+      "args": [
+        "position"
+      ]
+    },
+    {
+      "path": "window.toggleMaximize",
+      "kind": "send",
+      "channel": "window-maximize",
+      "args": []
+    }
+  ]
+}

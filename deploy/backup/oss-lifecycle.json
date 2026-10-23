@@ -1,0 +1,19 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-backups-30d",
+      "Status": "Enabled",
+      "Prefix": "",
+      "Expiration": {
+        "Days": 30,
+        "ExpiredObjectDeleteMarker": true
+      },
+      "NonVersionExpiration": {
+        "NoncurrentDays": 30
+      },
+      "AbortMultipartUpload": {
+        "DaysAfterInitiation": 7
+      }
+    }
+  ]
+}

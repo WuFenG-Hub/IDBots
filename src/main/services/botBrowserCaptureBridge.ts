@@ -119,6 +119,7 @@ export function createBotBrowserCaptureBridge(options: {
     });
 
     try {
+      // desktop-only: addressed to a specific window (not a broadcast)
       targetWindow.webContents.send('botBrowser:capture-request', { requestId, ...input });
       // The Bot Browser surface must paint to be captured. Restore a minimized
       // window so the compositor has fresh pixels; do NOT steal focus.

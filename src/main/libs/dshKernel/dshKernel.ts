@@ -308,7 +308,7 @@ export class DshKernel {
     maxTokens?: number
     /** DSH/pi-ai ReasoningEffortId (off|low|medium|high|max). */
     reasoningEffort?: string
-    sections?: Array<{ name: string; order: number; text: string }>
+    sections?: Array<{ name: string; order: number; text: string; interpolate?: false }>
     hostTools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>
     /** Per-session cowork workspace. Bash/fs resolve relative paths from this
      *  cwd; composition-level plugin cwd stays pinned so cwd churn does not

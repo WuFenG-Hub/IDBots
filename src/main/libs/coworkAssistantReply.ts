@@ -145,6 +145,57 @@ export function isQuotaDshTurnError(outcome: { kind?: string; error?: { code?: s
 }
 
 /**
+ * REQ-A-25: the relay answers an exhausted identity quota with HTTP 429 and
+ * one of two machine codes — free_quota_exhausted (identity never had
+ * purchased quota) and the new C4 quota_exhausted (purchased pool used up).
+ * Returns the matched code in lowercase, or null when the text carries
+ * neither. (quota_exhausted is a substring of free_quota_exhausted, so the
+ * alternation order pins the more specific code first.)
+ */
+export function extractRelayQuotaExhaustedCode(message: unknown): string | null {
+  const match = /(free_quota_exhausted|quota_exhausted)/i.exec(String(message ?? ''));
+  return match ? match[1].toLowerCase() : null;
+}
+
+/** Stable machine code stamped on the cowork stream error for a quota death. */
+export const LLM_QUOTA_EXHAUSTED_ERROR_CODE = 'LLM_QUOTA_EXHAUSTED';
+
+/**
+ * Metadata for the `cowork:stream:error` payload when the turn died on either
+ * relay quota code — undefined for every other failure so the stream error
+ * shape stays unchanged outside the quota case.
+ */
+export function relayQuotaErrorMetadata(message: unknown): { errorCode: string } | undefined {
+  return extractRelayQuotaExhaustedCode(message) ? { errorCode: LLM_QUOTA_EXHAUSTED_ERROR_CODE } : undefined;
+}
+
+/**
+ * Transcript notice for a free-relay quota death (REQ-A-25).
+ *
+ * Desktop points at Settings > Models (the user's own provider key is the
+ * actionable fix there). Server mode (phone) has no Settings > Models page,
+ * so the notice points at recharge instead. The upstream quota code is
+ * interpolated verbatim in both modes: the renderer's quota banner keys off
+ * it, and tests rely on it staying machine-readable.
+ */
+export function buildFreeRelayQuotaNotice(
+  relayQuotaCode: string | null,
+  serverMode: boolean,
+  t: (zh: string, en: string) => string,
+): string {
+  const code = relayQuotaCode ?? 'free_quota_exhausted';
+  return serverMode
+    ? t(
+      `（这不是配置错误：IDBots-Free 免费体验额度已用完。可在「我的」页面充值继续对话。错误代码：${code}。）`,
+      ` (This is not a configuration error: the IDBots-Free starter allowance is used up. Recharge on the Me page to keep chatting. Error code: ${code}.)`,
+    )
+    : t(
+      `（这不是配置错误：IDBots-Free 免费体验额度已用完。请到 设置 > 模型 添加一个自己的模型服务商 API Key 即可继续对话。错误代码：${code}。）`,
+      ` (This is not a configuration error: the IDBots-Free starter allowance is used up. Add your own model provider API key in Settings > Models to keep chatting. Error code: ${code}.)`,
+    );
+}
+
+/**
  * Upstream "credential rejected" fingerprints mirrored from provider error
  * bodies (OpenAI-compat relays, DeepSeek, aggregator gateways). ASCII upstream
  * fingerprints only — never natural-language intent. A bare `401` never

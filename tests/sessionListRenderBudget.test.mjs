@@ -61,7 +61,7 @@ test('the row stamp takes the list clock, and the row carries the i18n generatio
 });
 
 test('the list stabilizes the summary objects it renders before anything reads them', () => {
-  assert.match(listSource, /const \[sessions, autoSessions\] = useStableSessionSummaries\(incomingSessions, incomingAutoSessions\);/);
+  assert.match(listSource, /const \[sessions, autoSessions, followUpSessions\] = useStableSessionSummaries\(\s*incomingSessions,\s*incomingAutoSessions,\s*incomingFollowUpSessions,\s*\);/);
   assert.match(listSource, /const useStableSessionSummaries = \(/);
   // Shallow, one level deep into nested objects, and conservative: anything that
   // differs keeps the fresh object.
@@ -116,9 +116,10 @@ test('only a bounded prefix of rows mounts, and scrolling toward the end reveals
 
 test('the reveal budget applies to every branch that renders rows', () => {
   // Every row list ends in renderItem, which is what spends the budget: the
-  // pinned block, the expanded Autonomous Tasks fold, the timeline groups, the
-  // project groups, and the three flat lists (the selector branch, plus the
-  // plain branch's pinned and unpinned halves).
-  assert.equal((listSource.match(/\.map\(renderItem\)/g) ?? []).length, 7);
+  // pinned block, the expanded Follow-Up section, the expanded Autonomous
+  // Tasks fold, the timeline groups, the project groups, and the three flat
+  // lists (the selector branch, plus the plain branch's pinned and unpinned
+  // halves).
+  assert.equal((listSource.match(/\.map\(renderItem\)/g) ?? []).length, 8);
   assert.equal((listSource.match(/renderItem = \(session: CoworkSessionSummary\)/g) ?? []).length, 1);
 });

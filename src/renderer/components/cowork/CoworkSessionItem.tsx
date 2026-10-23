@@ -5,7 +5,7 @@ import { i18nService } from '../../services/i18n';
 import { getCoworkSessionTitleClassName, getAssistantSessionDisplayTitle, shouldShowCoworkA2ADot } from './coworkSessionPresentation.js';
 import { copyCoworkSessionLinkToClipboard } from './coworkSessionLink.js';
 import { isRenderableAvatarSource } from '../../utils/avatarSource';
-import { isInAutonomousFoldWithDecision } from '../../utils/sessionAutoGrouping';
+import { isInAutonomousFoldWithDecision, isInFollowUpSection } from '../../utils/sessionAutoGrouping';
 import { scrollEventMovesAnchor } from '../../utils/anchoredPopover';
 
 interface CoworkSessionItemProps {
@@ -29,6 +29,16 @@ interface CoworkSessionItemProps {
    * action.
    */
   onToggleAutonomousFold?: (sessionId: string, currentlyFolded: boolean) => void;
+  /**
+   * Move this session in or out of the sidebar's Follow-Up Tasks section
+   * (移入待跟进 / 移出待跟进). Optional, same as the fold move: lists that do
+   * not offer it leave it off and the row omits the menu entry. Only rendered
+   * for auto-origin sessions — v1 scope covers exactly the machine-created
+   * rows. `currentlyInFollowUp` is the row's section membership at menu-open
+   * time (persisted marker OR a live board decision), so the label and the
+   * caller's next write agree with what the user sees.
+   */
+  onToggleFollowUp?: (sessionId: string, currentlyInFollowUp: boolean) => void;
   /** Batch-selection mode (e.g. batch archive): the row shows a checkbox and
    * clicking it toggles selection instead of opening the session. */
   selectionMode?: boolean;
@@ -268,6 +278,7 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   onTogglePin,
   onRename,
   onToggleAutonomousFold,
+  onToggleFollowUp,
   selectionMode = false,
   isSelected = false,
   onToggleSelected,
@@ -360,6 +371,14 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
     // The row tells the handler where it is NOW; the caller turns that into the
     // next override ('in' when moving in, 'out'/null when moving out).
     onToggleAutonomousFold?.(session.id, isInAutonomousFoldWithDecision(session, decisionPending ?? false));
+    closeMenu();
+  };
+
+  const handleToggleFollowUp = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    // Same contract as the fold move: the row reports its current section
+    // membership, the caller turns it into the next write (pending vs cleared).
+    onToggleFollowUp?.(session.id, inFollowUpSection);
     closeMenu();
   };
 
@@ -482,6 +501,12 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   const autonomousFoldLabel = i18nService.t(
     inAutonomousFold ? 'coworkMoveOutOfAutonomous' : 'coworkMoveToAutonomous',
   );
+  // Follow-Up membership is the section placement: the persisted marker OR a
+  // live board decision owed on the row both land it in the section.
+  const inFollowUpSection = isInFollowUpSection(session, decisionPending ?? false);
+  const followUpLabel = i18nService.t(
+    inFollowUpSection ? 'coworkMoveOutOfFollowUp' : 'coworkMoveToFollowUp',
+  );
   const relativeTime = formatRelativeTime(session.updatedAt, nowMs);
   const showRunningIndicator = session.status === 'running';
   const showUnreadIndicator = !showRunningIndicator && hasUnread;
@@ -514,18 +539,26 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
       ...(onToggleAutonomousFold
         ? [{ key: 'autonomous-fold', label: autonomousFoldLabel, onClick: handleToggleAutonomousFold }]
         : []),
+      // Follow-Up moves target exactly the auto-origin rows (v1 scope): a human
+      // session is never follow-up eligible, so the entry stays hidden on those.
+      ...(onToggleFollowUp && session.autoOrigin != null
+        ? [{ key: 'follow-up', label: followUpLabel, onClick: handleToggleFollowUp }]
+        : []),
       { key: 'archive', label: archiveLabel, onClick: handleDeleteClick },
     ];
   }, [
     copySessionIdLabel,
     archiveLabel,
     autonomousFoldLabel,
+    followUpLabel,
     handleCopySessionIdClick,
     handleDeleteClick,
     handleRenameClick,
     handleToggleAutonomousFold,
+    handleToggleFollowUp,
     handleTogglePin,
     onToggleAutonomousFold,
+    onToggleFollowUp,
     pinButtonLabel,
     renameLabel,
   ]);

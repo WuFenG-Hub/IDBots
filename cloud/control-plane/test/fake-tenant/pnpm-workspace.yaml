@@ -1,0 +1,5 @@
+# pnpm 11 reads pnpm-specific settings only from this file. This directory is
+# its own workspace root (no `packages` key) so the fake-tenant image has its
+# own lockfile, separate from cloud/control-plane; the parent package's
+# install must not treat this directory as a workspace member.
+nodeLinker: hoisted

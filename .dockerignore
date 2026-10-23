@@ -1,0 +1,61 @@
+# Build context for the tenant image (deploy/tenant-image/Dockerfile builds
+# with the REPO ROOT as context). Keep the context lean: every dependency is
+# installed inside the build stages and every artifact is built there.
+
+# VCS metadata and local tooling state
+.git
+.worktrees
+.review-worktrees
+.zcode
+.claude
+.cursor
+.cowork-temp
+.dev-userdata-dsh
+.dev-userdata-fresh
+.dev-appdata-fresh
+.local-skills
+.tmp-bin
+.playwright-mcp
+.idbots-extract
+.dsh-runtime/.test-sessions
+**/.DS_Store
+._*
+nul
+
+# Installed dependencies and build outputs — installed/built inside stages
+**/node_modules
+dist
+dist-electron
+release
+release-assets
+release-assets-v101
+output
+logs
+*.tsbuildinfo
+.vite-deps-fingerprint.json
+
+# Runtime data — never part of an image
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+man_base_data_pebble
+SKILLs/**/.connection
+SKILLs/**/.server.log
+SKILLs/**/.server.pid
+SKILLs/**/account.json
+SKILLs/edge-tts-mf
+SKILLs/.tmp*/
+METAAPPs/metaapps.config.json
+
+# electron-builder downloaded payloads (Windows-only)
+resources/ffmpeg
+resources/mingit
+resources/MinGit-*.zip
+resources/PortableGit-*.7z.exe
+resources/python-win
+resources/python-win-runtime.zip
+
+# Sandbox image scratch
+sandbox/image/out
+sandbox/image/publish
+sandbox/image/.work

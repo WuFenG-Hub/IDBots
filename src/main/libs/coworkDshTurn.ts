@@ -467,6 +467,15 @@ export const DSH_WARMUP_SESSION_ID = '__dsh_warmup__'
  */
 export const DSH_KERNEL_ACTIVITY_GRACE_MS = 10 * 60_000
 
+/**
+ * Default idle-runtime TTL (REQ-A-31 desktop value): a slot whose runtime
+ * has seen no in-flight turns for this long is reaped — kernel, subprocesses
+ * and the playwright MCP it pre-starts all exit, and the next turn on the
+ * slot cold-starts from disk. Server mode overrides this to 10 minutes via
+ * resolveDshRuntimeIdleTtlMs (src/main/server/serverMode.ts).
+ */
+export const DSH_RUNTIME_IDLE_TTL_MS = 30 * 60_000
+
 const DSH_WARMUP_CALLBACKS: DshTurnCallbacks = {
   onMessage: () => 'dsh-warmup',
   onMessageUpdate: () => undefined,
@@ -1416,7 +1425,7 @@ export class DshTurnHub {
   }
 
   private scheduleReap(): void {
-    const ttl = this.opts.runtimeIdleTtlMs ?? 30 * 60 * 1000
+    const ttl = this.opts.runtimeIdleTtlMs ?? DSH_RUNTIME_IDLE_TTL_MS
     if (ttl <= 0 || this.reapTimer) return
     const delay = Math.max(50, Math.min(ttl, 60_000))
     this.reapTimer = setTimeout(() => {
@@ -1427,7 +1436,7 @@ export class DshTurnHub {
   }
 
   private async reapIdleSlots(): Promise<void> {
-    const ttl = this.opts.runtimeIdleTtlMs ?? 30 * 60 * 1000
+    const ttl = this.opts.runtimeIdleTtlMs ?? DSH_RUNTIME_IDLE_TTL_MS
     if (ttl <= 0) return
     const now = Date.now()
     for (const [key, slot] of [...this.slots]) {

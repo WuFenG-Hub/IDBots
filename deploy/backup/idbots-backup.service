@@ -1,0 +1,14 @@
+# WS-C REQ-C-14 — nightly backups between 03:00 and 05:00 Asia/Shanghai.
+# Installed by bootstrap.sh; enabled once /etc/idbots/backup.env is filled.
+[Unit]
+Description=IDBots nightly backup (control-plane db + all tenants, staggered)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Host clock is Asia/Shanghai (bootstrap sets it); the timer fires at 03:05.
+Environment=TZ=Asia/Shanghai
+ExecStart=/opt/idbots/backup/backup-nightly.sh
+# Never let two runs overlap; the script also self-locks.
+TimeoutStartSec=7200

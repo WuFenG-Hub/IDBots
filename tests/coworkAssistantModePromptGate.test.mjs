@@ -113,3 +113,72 @@ test('the assistant-mode prompt hard-pins narration language, sparseness, and to
     'the tone rule must carry the user-facing status example',
   );
 });
+
+// 2026-10-22 English-install regression (first-run Twin greeting in Chinese on
+// a fully English machine, free-relay deepseek-4.1-flash): the old language
+// rule made Chinese mandatory ("every narration and the final reply are in
+// Chinese") while English was only permitted ("only if the user writes
+// English may they be English"). The greeting turn carries no user-authored
+// text, so the model followed the only mandatory direction and greeted in
+// Chinese. The rule must stay symmetric: BOTH languages mandatory in their
+// own conversations, prohibited in the other's.
+test('the language rule is symmetric — English is as mandatory as 中文', () => {
+  const promptSource = readFileSync(join(here, '../src/main/libs/assistantModePrompt.ts'), 'utf8');
+  assert.ok(
+    !promptSource.includes('only if the user writes English may they be English'),
+    'the permissive English phrasing regressed once and flipped English installs to Chinese output; English must be mandatory, not permitted',
+  );
+  assert.ok(
+    promptSource.includes('the user writes English → every narration and the final reply are in English'),
+    'the rule must state the English direction as mandatory, mirroring the 中文 direction',
+  );
+  assert.ok(
+    promptSource.includes('NEVER write 中文 in an English conversation'),
+    'the rule must prohibit Chinese output in English conversations just as it prohibits English narration in non-English ones',
+  );
+  assert.ok(
+    promptSource.includes('Found the Chinese edition of the file'),
+    'the narration example must not be Chinese-only — a Chinese-only "Good" example pulls flash models toward Chinese even in English chats',
+  );
+});
+
+// 2026-10-22 owner follow-up: "the language of the user's own messages" is
+// UNDEFINED while the user has not typed anything — exactly the first-greeting
+// case. The section must therefore carry an explicit UI-language anchor,
+// resolved from the same persisted app language the UI i18n reads (tApp), so
+// zero-input turns are told the conversation language instead of inferring it
+// from ambient prompt prose. The anchor yields to the user's own words after
+// they write.
+test('the section anchors the UI language for zero-user-input turns', () => {
+  const promptSource = readFileSync(join(here, '../src/main/libs/assistantModePrompt.ts'), 'utf8');
+  const runnerSource = readFileSync(join(here, '../src/main/libs/coworkRunner.ts'), 'utf8');
+  const mainSource = readFileSync(join(here, '../src/main/main.ts'), 'utf8');
+  assert.ok(
+    promptSource.includes('export function buildAssistantModePrompt'),
+    'the section must be a per-call builder so the language anchor resolves from the persisted app language at compose time',
+  );
+  assert.ok(
+    !promptSource.includes('export const ASSISTANT_MODE_PROMPT'),
+    'a frozen const cannot carry a locale-resolved anchor',
+  );
+  assert.ok(
+    promptSource.includes('tApp(ASSISTANT_MODE_LANGUAGE_ANCHOR_ZH, ASSISTANT_MODE_LANGUAGE_ANCHOR_EN)'),
+    'the anchor must ride tApp — the same persisted-app-language source the UI uses',
+  );
+  assert.ok(
+    promptSource.includes('until they write in another language, every visible line in this conversation'),
+    'the English anchor must mandate English output for the whole conversation until the user writes otherwise',
+  );
+  assert.ok(
+    promptSource.includes('一律使用中文'),
+    'the Chinese anchor must mandate Chinese output for the whole conversation until the owner writes otherwise',
+  );
+  assert.ok(
+    runnerSource.includes('text: buildAssistantModePrompt()'),
+    'the composer must mount the built section, not a stale const',
+  );
+  assert.ok(
+    mainSource.includes('Greet them in English now') && mainSource.includes('用中文向他问好'),
+    'the greeting turn instruction must name the output language in both tApp branches — it is the only user-role text a first greeting has',
+  );
+});

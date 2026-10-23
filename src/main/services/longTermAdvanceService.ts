@@ -197,6 +197,14 @@ export interface LongTermAdvanceDeps {
   resolveWorkingDirectory: (metabotId: number | null) => string;
   getBaseSystemPrompt: () => string;
   getSkillsPrompt?: () => Promise<string | null>;
+  /**
+   * Live-broadcast a message this service wrote straight into the store (the
+   * heartbeat prompt, the rotation pointer). The runner only emits messages it
+   * persists itself, so without this sink an escalation's own messages never
+   * reach an open renderer until a manual reload — the exact "heartbeat fired,
+   * no response visible" hole.
+   */
+  emitSessionMessage?: (sessionId: string, message: unknown) => void;
   /** Owner's UI language ('zh' | 'en') — the nudge prompt follows it. */
   getAppLanguage?: () => string;
   emitLog?: (line: string) => void;
@@ -606,10 +614,15 @@ export class LongTermAdvanceService {
           reusedSession: outcome.reusedSession,
           reasons,
         });
-        // Store the journal position AFTER the nudge event itself, or the
-        // nudge would count as "new events" and defeat the throttle next run.
-        const postEventId = store.getTask(card.id)?.events[0]?.id ?? latestEventId;
-        store.setNudgeState(card.id, { lastNudgeAtMs: nowMs, lastEventId: postEventId });
+        // Store the journal position captured by escalate() right AFTER the
+        // nudge event itself but BEFORE the turn ran — the nudge must not
+        // count as "new events" (that would defeat the throttle next run),
+        // while the turn's own events (a fresh proposal above all) MUST stay
+        // visible to the next sweep's reason collection.
+        store.setNudgeState(card.id, {
+          lastNudgeAtMs: nowMs,
+          lastEventId: Math.max(outcome.journalAnchorEventId, latestEventId),
+        });
         if (supervision) {
           // P1-A: the failure-streak marker is written ONLY by failure turns;
           // duration turns re-arm by time (lastSuperviseAtMs) and must not
@@ -873,7 +886,7 @@ export class LongTermAdvanceService {
       lastTwinActivityAtMs: null,
       twinSessionActive: false,
     },
-  ): Promise<{ sessionId: string; reusedSession: boolean }> {
+  ): Promise<{ sessionId: string; reusedSession: boolean; journalAnchorEventId: number }> {
     const coworkStore = this.deps.coworkStore();
     const runner = this.deps.coworkRunner();
     const twinId = this.deps.resolveTwinMetabotId();
@@ -960,7 +973,7 @@ export class LongTermAdvanceService {
         // Owner-facing wording: this is routine maintenance, not a failure —
         // no budget numbers here (they live in the journal note + dev log);
         // say what happened, that nothing is lost, and that no action is due.
-        coworkStore.addMessage(rotation.from, {
+        const rotationPointer = coworkStore.addMessage(rotation.from, {
           type: 'system',
           content:
             language === 'zh'
@@ -968,6 +981,7 @@ export class LongTermAdvanceService {
               : `[Long-term task] Routine rotation: "${detail.title} · #${current.ordinal} ${current.title}" has been running for a while, so its work now continues seamlessly in a fresh continuation session — no action needed. This session stays readable as an archive.`,
           metadata: { origin: 'heartbeat' },
         });
+        this.deps.emitSessionMessage?.(rotation.from, rotationPointer);
         this.emitLog(
           `[LongTermAdvance] rotated session for task "${detail.title}" sub-project #${current.ordinal}: ${rotation.from} → ${sessionId} (${rotation.messages} messages)`,
         );
@@ -980,11 +994,12 @@ export class LongTermAdvanceService {
     const prompt = buildNudgePrompt(detail, current, reasons, language, supervisionAttempts, rotation, delivery);
 
     coworkStore.updateSession(sessionId, { status: 'running' });
-    coworkStore.addMessage(sessionId, {
+    const heartbeatMessage = coworkStore.addMessage(sessionId, {
       type: 'user',
       content: prompt,
       metadata: { origin: 'heartbeat' },
     });
+    this.deps.emitSessionMessage?.(sessionId, heartbeatMessage);
     // Supervision turns journal as 'supervised' — the owner's audit trail
     // distinguishes interventions from routine pushes.
     if (supervisionAttempts !== null) {
@@ -996,7 +1011,15 @@ export class LongTermAdvanceService {
         `heartbeat escalation (${reasons.join('; ')}) → session ${sessionId}${delivery === 'hot' ? " (owner's live session)" : ''}`,
       );
     }
+    // Anchor the journal position NOW, right after the nudge event itself —
+    // never after startSession returns. The turn runs to completion inside
+    // startSession, so a post-turn anchor swallows the turn's own events; a
+    // 'proposed' event created by THIS turn would then fail the
+    // proposed.id > lastEventId check forever, and the "a fresh proposal pages
+    // the owner at the next tick" path dies silently (the 2026-10-22 incident:
+    // sub-project #2's acceptance proposal produced no reminder at all).
+    const journalAnchorEventId = this.deps.store().getTask(detail.id)?.events[0]?.id ?? 0;
     await runner.startSession(sessionId, prompt, { skipInitialUserMessage: true, confirmationMode: 'text' });
-    return { sessionId, reusedSession };
+    return { sessionId, reusedSession, journalAnchorEventId };
   }
 }

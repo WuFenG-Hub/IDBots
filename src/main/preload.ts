@@ -7,6 +7,7 @@ import type {
   CoworkSubmitInputResult,
 } from '../renderer/types/cowork';
 import type { KnowledgeBaseLearnStatusEvent } from '../renderer/types/knowledgeBase';
+import type { DailyReportRunNowResult } from './services/dailyReportService';
 
 // 暴露安全的 API 到渲染进程
 contextBridge.exposeInMainWorld('electron', {
@@ -456,6 +457,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:pin', options),
     setSessionFoldOverride: (options: { sessionId: string; override: 'in' | 'out' | null }) =>
       ipcRenderer.invoke('cowork:session:foldOverride', options),
+    setSessionFollowUp: (options: { sessionId: string; followUp: boolean }) =>
+      ipcRenderer.invoke('cowork:session:setFollowUp', options),
     setSessionModel: (options: {
       sessionId: string;
       model: string | null;
@@ -509,6 +512,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:saveResultImage', options),
     downloadMetafile: (options: { url: string; fallbackUrl?: string; fileName?: string }) =>
       ipcRenderer.invoke('cowork:metafile:download', options),
+    exportHtmlReportImage: (options: { filePath: string; width?: number; suggestedName?: string }) =>
+      ipcRenderer.invoke('cowork:htmlReport:exportImage', options),
 
     // Permission handling
     respondToPermission: (options: { requestId: string; result: any }) =>
@@ -764,6 +769,10 @@ contextBridge.exposeInMainWorld('electron', {
     get: () => ipcRenderer.invoke('app:getExperimentalAutomation') as Promise<{ enabled: boolean }>,
     set: (enabled: boolean) => ipcRenderer.invoke('app:setExperimentalAutomation', enabled) as Promise<{ success: boolean; error?: string }>,
   },
+  dailyReport: {
+    runNow: (opts?: { force?: boolean }) =>
+      ipcRenderer.invoke('dailyReport:runNow', opts) as Promise<DailyReportRunNowResult>,
+  },
   feeRates: {
     getTiers: () => ipcRenderer.invoke('feeRates:getTiers') as Promise<Record<string, { title: string; desc: string; feeRate: number }[]>>,
     getSelected: () => ipcRenderer.invoke('feeRates:getSelected') as Promise<Record<string, string>>,
@@ -792,6 +801,29 @@ contextBridge.exposeInMainWorld('electron', {
     redeemCode: (input: { code: string }) => ipcRenderer.invoke('traffic:redeemCode', input),
     getSettings: () => ipcRenderer.invoke('traffic:getSettings'),
     setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string; rechargeGateway?: string }) => ipcRenderer.invoke('traffic:setSettings', input),
+  },
+  // Mobile gateway channels (REQ-A-24); desktop callers use the same
+  // handlers the C2 gateway dispatches to.
+  gateway: {
+    fileSign: (input: { path: string; disposition?: 'inline' | 'attachment' }) =>
+      ipcRenderer.invoke('gateway:file:sign', input) as Promise<
+        | { url: string; expiresAt: number; size: number; mime: string }
+        | { success: false; error: string; code?: string; retryable?: boolean }
+      >,
+  },
+  mobile: {
+    listPendingPermissions: () =>
+      ipcRenderer.invoke('mobile:permission:listPending') as Promise<
+        Array<{ sessionId: string; request: any; createdAt: number }> | { success: false; error: string }
+      >,
+    getBootstrapStatus: () =>
+      ipcRenderer.invoke('mobile:bootstrap:status') as Promise<Record<string, any> | { success: false; error: string }>,
+  },
+  bundle: {
+    getPlans: () => ipcRenderer.invoke('bundle:getPlans'),
+    createOrder: (input: { planId: string; gateway?: string }) => ipcRenderer.invoke('bundle:createOrder', input),
+    getOrder: (input: { orderId: string }) => ipcRenderer.invoke('bundle:getOrder', input),
+    getMeters: () => ipcRenderer.invoke('bundle:getMeters'),
   },
   llmRelay: {
     bootstrap: () => ipcRenderer.invoke('llmRelay:bootstrap'),

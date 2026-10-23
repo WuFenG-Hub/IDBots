@@ -113,7 +113,14 @@ function persistCredentials(credentials: JevRelayCredentials): void {
   }
 }
 
-function invalidateCredentials(): void {
+/**
+ * Drop the JEV relay credentials everywhere this service caches them: the
+ * in-memory copy AND the jevRelay kv rows. Used on a 401 (revoked key) and by
+ * the identity-change closeout — after a user_identity import/create the
+ * cached key still belongs to the previous identity, and clearing only one
+ * tier would let the other resurrect it.
+ */
+export function invalidateJevRelayCredentials(): void {
   cachedCredentials = null;
   try {
     const store = depsRef?.getStore?.() ?? null;
@@ -237,7 +244,7 @@ export function createJevRelayFetchWithKeyRetry<R extends { ok: boolean; status:
       return first;
     }
     try {
-      invalidateCredentials();
+      invalidateJevRelayCredentials();
       const { apiKey } = await raceAbortSignal(resolveJevRelayCredentials(), signal);
       const headers = {
         ...(init.headers as Record<string, string> | undefined),
@@ -679,13 +686,11 @@ export function createJevRelayCallRecorder<R extends { ok: boolean; status: numb
 // IPC surface (renderer: cerebellum free-provider connection test / key fill)
 // ---------------------------------------------------------------------------
 
-interface IpcMainLike {
-  handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void;
-}
+type RegisterIpcHandlerFn = (channel: string, handler: (event: any, ...args: any[]) => any) => void;
 
-export function registerJevRelayIpcHandlers(deps: { ipcMain: IpcMainLike }): void {
-  const { ipcMain } = deps;
-  ipcMain.handle('jevRelay:resolveCredentials', async () => {
+export function registerJevRelayIpcHandlers(deps: { registerIpcHandler: RegisterIpcHandlerFn }): void {
+  const { registerIpcHandler } = deps;
+  registerIpcHandler('jevRelay:resolveCredentials', async () => {
     try {
       return { success: true, credentials: await resolveJevRelayCredentials() };
     } catch (error) {

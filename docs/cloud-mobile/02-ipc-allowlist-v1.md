@@ -37,7 +37,7 @@ after that date so it gets a tier here.
 
 ## Invoke Channels
 
-### Cowork (68)
+### Cowork (69)
 
 | Channel | Tier | Notes |
 |---------|------|-------|
@@ -48,7 +48,7 @@ after that date so it gets a tier here.
 | `cowork:session:rename`, `cowork:session:pin`, `cowork:session:archive`, `cowork:session:unarchive`, `cowork:session:fork`, `cowork:session:rewind`, `cowork:session:compact`, `cowork:session:clearError` | P1 | |
 | `cowork:session:setModel`, `cowork:session:setEffort`, `cowork:session:setGoal`, `cowork:session:setPermissionMode` | P1 | |
 | `cowork:session:getAutoApproveTools`, `cowork:session:addAutoApproveTool`, `cowork:session:removeAutoApproveTool` | P1 | |
-| `cowork:session:createGreeting`, `cowork:session:listMetabotAvatars`, `cowork:session:foldOverride`, `cowork:session:backgroundTask` | P1 | |
+| `cowork:session:createGreeting`, `cowork:session:listMetabotAvatars`, `cowork:session:foldOverride`, `cowork:session:setFollowUp`, `cowork:session:backgroundTask` | P1 | |
 | `cowork:session:listFeedback`, `cowork:message:setFeedback` | P1 | |
 | `cowork:session:readLocalImage` | P1-R | R-path. |
 | `cowork:stream:liveContent` | P1 | Used by reconnect resync. |
@@ -164,6 +164,7 @@ after that date so it gets a tier here.
 | `shell:openPath`, `shell:showItemInFolder`, `shell:openWith`, `shell:getOpenWithApps`, `shell:chooseOpenWithApp` | S | Shim converts a `/data` path to a signed URL and opens it; otherwise no-op. |
 | `api:fetch`, `api:stream`, `api:stream:cancel` | N | Generic outbound HTTP proxy. The one mobile-relevant user, the Gig Square order text, already falls back when the call fails. |
 | `app:getAutoLaunch`, `app:setAutoLaunch`, `app:getExperimentalAutomation`, `app:setExperimentalAutomation` | N | |
+| `dailyReport:runNow` | N | Desktop-only — spawns a local Twin report session; no mobile surface in v1. |
 | All `appUpdate:*`, `botBrowser:*`, `metaapps:*`, `metaappOwner:*`, `mcp:*`, `projects:*`, `agentGame:*`, `teamCulture:*`, `powerGuard:*`, `permissions:*`, `log:*`, `git:*` channels | N | Desktop-only or out of scope for v1. |
 
 ### New Channels Added by WS-A

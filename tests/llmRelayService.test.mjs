@@ -6,15 +6,19 @@ const require = createRequire(import.meta.url);
 const { mvc } = require('meta-contract');
 
 const {
+  LLM_RELAY_KEY_IDENTITY_KV,
   LlmRelayApiError,
   bootstrapLlmRelay,
   buildLlmRelayBootstrapMessage,
+  clearLlmRelayQuotaCache,
   getLlmRelayQuota,
   initLlmRelayService,
   normalizeLlmRelayApiBase,
   readLlmRelayApiBase,
+  relayIdentityMatchesLocalIdentity,
   resetLlmRelayServiceForTests,
   setLlmRelayApiBase,
+  setLlmRelayIdentityMismatchHandler,
 } = await import('../dist-electron/main/services/llmRelayService.js');
 
 const IDENTITY_MNEMONIC =
@@ -125,11 +129,10 @@ test('bootstrap signs the canonical message and normalizes the payload', async (
   );
 });
 
-test('bootstrap silently provisions the identity on first run', async () => {
+test('bootstrap silently provisions the identity on first run with subsidy and pins deferred', async () => {
   resetLlmRelayServiceForTests();
   let identity = null;
   const createCalls = [];
-  const resumeCalls = [];
   const { fetchImpl } = makeFetchStub(() => ({ ok: true, status: 200, body: { code: 0, message: 'success', data: BOOTSTRAP_DATA } }));
   initLlmRelayService({
     getStore: () => makeKvStore(),
@@ -139,10 +142,6 @@ test('bootstrap silently provisions the identity on first run', async () => {
       identity = makeIdentity();
       return { success: true, identity };
     },
-    resumeIdentityImpl: async () => {
-      resumeCalls.push(1);
-      return { success: true };
-    },
     fetchImpl,
     baseUrl: 'https://relay.test',
   });
@@ -151,7 +150,11 @@ test('bootstrap silently provisions the identity on first run', async () => {
   assert.equal(createCalls.length, 1);
   assert.equal(createCalls[0].input.name, 'User');
   assert.equal(createCalls[0].options?.deferChainSync, true, 'first paint must not block on chain pins');
-  assert.equal(resumeCalls.length, 1, 'chain sync resumes in the background');
+  assert.equal(
+    createCalls[0].options?.deferSubsidy,
+    true,
+    'a first-run identity the user may discard for an import must not burn a gas subsidy or leave orphan pins',
+  );
 });
 
 test('bootstrap fails when identity provisioning fails', async () => {
@@ -280,4 +283,228 @@ test('apiBase normalization and kv override', async () => {
   assert.equal(readLlmRelayApiBase(kv), 'https://staging.example.com/assist-open-api');
   await bootstrapLlmRelay();
   assert.ok(calls[0].url.startsWith('https://staging.example.com/assist-open-api/'), `kv override must win, got ${calls[0].url}`);
+});
+
+// ---------------------------------------------------------------------------
+// Identity guard (2026-10 identity-split incident backstop)
+// ---------------------------------------------------------------------------
+
+test('relayIdentityMatchesLocalIdentity: unreported fields pass, disagreeing fields fail', () => {
+  const local = { mvc_address: IDENTITY_ADDRESS, globalmetaid: 'idq1testidentity' };
+  assert.equal(relayIdentityMatchesLocalIdentity({}, local), true, 'legacy backend without identity fields');
+  assert.equal(relayIdentityMatchesLocalIdentity({ identityAddress: IDENTITY_ADDRESS }, local), true);
+  assert.equal(relayIdentityMatchesLocalIdentity({ identityAddress: ` ${IDENTITY_ADDRESS} ` }, local), true, 'whitespace tolerant');
+  assert.equal(relayIdentityMatchesLocalIdentity({ identityAddress: '1SomeoneElse' }, local), false);
+  assert.equal(relayIdentityMatchesLocalIdentity({ globalMetaId: 'idq1testidentity' }, local), true);
+  assert.equal(relayIdentityMatchesLocalIdentity({ globalMetaId: 'idq1other' }, local), false, 'globalMetaId decides only when no address is reported');
+  assert.equal(relayIdentityMatchesLocalIdentity({ identityAddress: '1SomeoneElse' }, null), true, 'no local identity to compare against');
+  assert.equal(relayIdentityMatchesLocalIdentity({ identityAddress: '1SomeoneElse' }, { mvc_address: '' }), true, 'blank local address');
+});
+
+test('relayIdentityMatchesLocalIdentity: a reported identityAddress is authoritative over globalMetaId', () => {
+  const local = { mvc_address: IDENTITY_ADDRESS, globalmetaid: 'idq1testidentity' };
+  assert.equal(
+    relayIdentityMatchesLocalIdentity({ identityAddress: IDENTITY_ADDRESS, globalMetaId: 'IDQ1-differently-encoded' }, local),
+    true,
+    'a backend globalMetaId representation that differs from the local derivation must not read as a foreign identity',
+  );
+  assert.equal(
+    relayIdentityMatchesLocalIdentity({ identityAddress: '1SomeoneElse', globalMetaId: 'idq1testidentity' }, local),
+    false,
+    'a matching globalMetaId cannot rescue a foreign address',
+  );
+  assert.equal(
+    relayIdentityMatchesLocalIdentity({ identityAddress: IDENTITY_ADDRESS, globalMetaId: 'idq1other' }, { mvc_address: '', globalmetaid: 'idq1testidentity' }),
+    false,
+    'without a local address the globalMetaId fallback still applies',
+  );
+});
+
+test('bootstrap accepts a response naming the signing identity and surfaces identityAddress', async () => {
+  resetLlmRelayServiceForTests();
+  const { fetchImpl } = makeFetchStub(() => ({
+    ok: true,
+    status: 200,
+    body: { code: 0, message: 'success', data: { ...BOOTSTRAP_DATA, identityAddress: IDENTITY_ADDRESS, globalMetaId: 'idq1testidentity' } },
+  }));
+  initLlmRelayService({
+    getStore: () => makeKvStore(),
+    getUserIdentityStore: () => ({ get: () => makeIdentity() }),
+    fetchImpl,
+    baseUrl: 'https://relay.test',
+  });
+  const result = await bootstrapLlmRelay();
+  assert.equal(result.apiKey, 'mrk_testkey123');
+  assert.equal(result.identityAddress, IDENTITY_ADDRESS);
+});
+
+test('bootstrap rejects a response that belongs to another identity (key never handed out)', async () => {
+  resetLlmRelayServiceForTests();
+  const kv = makeKvStore();
+  const { fetchImpl } = makeFetchStub(() => ({
+    ok: true,
+    status: 200,
+    body: { code: 0, message: 'success', data: { ...BOOTSTRAP_DATA, identityAddress: '1SomeoneElse' } },
+  }));
+  initLlmRelayService({
+    getStore: () => kv,
+    getUserIdentityStore: () => ({ get: () => makeIdentity() }),
+    fetchImpl,
+    baseUrl: 'https://relay.test',
+  });
+  await assert.rejects(bootstrapLlmRelay(), (error) => {
+    assert.ok(error instanceof LlmRelayApiError);
+    assert.equal(error.stage, 'bootstrap');
+    assert.match(error.message, /identity mismatch/);
+    assert.match(error.message, new RegExp(IDENTITY_ADDRESS));
+    return true;
+  });
+  assert.equal(kv.get(LLM_RELAY_KEY_IDENTITY_KV), undefined, 'a rejected bootstrap stamps nothing');
+});
+
+test('bootstrap stamps the identity the issued key belongs to', async () => {
+  resetLlmRelayServiceForTests();
+  const kv = makeKvStore();
+  const { fetchImpl } = makeFetchStub(() => ({ ok: true, status: 200, body: { code: 0, message: 'success', data: BOOTSTRAP_DATA } }));
+  initLlmRelayService({
+    getStore: () => kv,
+    getUserIdentityStore: () => ({ get: () => makeIdentity() }),
+    fetchImpl,
+    baseUrl: 'https://relay.test',
+  });
+  await bootstrapLlmRelay();
+  assert.equal(kv.get(LLM_RELAY_KEY_IDENTITY_KV), IDENTITY_ADDRESS);
+});
+
+/** Quota stub whose response names the owner of the presented bearer key. */
+function makeIdentityAwareQuotaStub(keyOwners) {
+  return makeFetchStub(({ init }) => {
+    const bearer = String(init.headers?.Authorization ?? '').replace(/^Bearer /, '');
+    const owner = keyOwners[bearer];
+    if (!owner) {
+      return { ok: false, status: 401, body: { error: { message: 'relay key invalid or revoked', code: 'invalid_api_key' } } };
+    }
+    return {
+      ok: true,
+      status: 200,
+      body: { code: 0, message: 'success', data: { ...BOOTSTRAP_DATA, apiKey: undefined, keyPrefix: bearer.slice(0, 10), identityAddress: owner } },
+    };
+  });
+}
+
+test('quota: a key owned by another identity is rejected without caching when no repair handler is registered', async () => {
+  resetLlmRelayServiceForTests();
+  const { calls, fetchImpl } = makeIdentityAwareQuotaStub({ mrk_identityB: '1IdentityBAddress' });
+  initLlmRelayService({
+    getStore: () => makeKvStore(),
+    getUserIdentityStore: () => ({ get: () => makeIdentity() }),
+    fetchImpl,
+    baseUrl: 'https://relay.test',
+  });
+  await assert.rejects(getLlmRelayQuota({ apiKey: 'mrk_identityB' }), (error) => {
+    assert.ok(error instanceof LlmRelayApiError);
+    assert.equal(error.stage, 'quota');
+    assert.match(error.message, /identity mismatch/);
+    return true;
+  });
+  // The mismatched snapshot must never be served from the 30s cache.
+  await assert.rejects(getLlmRelayQuota({ apiKey: 'mrk_identityB' }), /identity mismatch/);
+  assert.equal(calls.length, 2, 'every call re-fetches: nothing was cached');
+});
+
+test('quota: identity mismatch runs the repair handler, drops the stale key and re-reads behind the re-issued provider key', async () => {
+  resetLlmRelayServiceForTests();
+  const kv = makeKvStore();
+  kv.set('app_config', {
+    providers: { 'metaid-free': { enabled: true, apiKey: 'mrk_identityB', baseUrl: 'https://relay.test/v1', models: [{ id: 'deepseek-chat' }] } },
+  });
+  const { calls, fetchImpl } = makeIdentityAwareQuotaStub({ mrk_identityB: '1IdentityBAddress', mrk_identityA: IDENTITY_ADDRESS });
+  initLlmRelayService({
+    getStore: () => kv,
+    getUserIdentityStore: () => ({ get: () => makeIdentity() }),
+    fetchImpl,
+    baseUrl: 'https://relay.test',
+  });
+  const handlerCalls = [];
+  setLlmRelayIdentityMismatchHandler(async (context) => {
+    handlerCalls.push(context);
+    // The closeout re-bootstraps as the local identity and rewrites the provider entry.
+    const appConfig = kv.get('app_config');
+    kv.set('app_config', {
+      ...appConfig,
+      providers: { 'metaid-free': { ...appConfig.providers['metaid-free'], apiKey: 'mrk_identityA' } },
+    });
+  });
+  const quota = await getLlmRelayQuota({ apiKey: 'mrk_identityB' });
+  assert.equal(handlerCalls.length, 1);
+  assert.equal(handlerCalls[0].localMvcAddress, IDENTITY_ADDRESS);
+  assert.equal(handlerCalls[0].quota.identityAddress, '1IdentityBAddress');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer mrk_identityB');
+  assert.equal(calls[1].init.headers.Authorization, 'Bearer mrk_identityA', 'the re-read uses the repaired provider key');
+  assert.equal(quota.identityAddress, IDENTITY_ADDRESS);
+  assert.equal(quota.keyPrefix, 'mrk_identi');
+  // The repaired snapshot is what gets cached.
+  await getLlmRelayQuota({ apiKey: 'mrk_identityB' });
+  assert.equal(calls.length, 2, 'cached after repair');
+});
+
+test('quota: a repair handler that yields no new key still surfaces the mismatch', async () => {
+  resetLlmRelayServiceForTests();
+  const kv = makeKvStore();
+  kv.set('app_config', { providers: { 'metaid-free': { enabled: true, apiKey: 'mrk_identityB', baseUrl: 'https://relay.test/v1' } } });
+  const { calls, fetchImpl } = makeIdentityAwareQuotaStub({ mrk_identityB: '1IdentityBAddress' });
+  initLlmRelayService({
+    getStore: () => kv,
+    getUserIdentityStore: () => ({ get: () => makeIdentity() }),
+    fetchImpl,
+    baseUrl: 'https://relay.test',
+  });
+  setLlmRelayIdentityMismatchHandler(async () => {
+    // Offline closeout: caches cleared, no fresh key issued.
+    const appConfig = kv.get('app_config');
+    kv.set('app_config', {
+      ...appConfig,
+      providers: { 'metaid-free': { ...appConfig.providers['metaid-free'], apiKey: '', baseUrl: '' } },
+    });
+  });
+  await assert.rejects(getLlmRelayQuota({ apiKey: 'mrk_identityB' }), /identity mismatch/);
+  assert.equal(calls.length, 1, 'no re-read without a repaired key');
+});
+
+test('quota: responses without identity fields keep working (legacy backend) and never invoke the handler', async () => {
+  resetLlmRelayServiceForTests();
+  const quotaBody = { code: 0, message: 'success', data: { ...BOOTSTRAP_DATA, apiKey: undefined } };
+  const { fetchImpl } = makeFetchStub(() => ({ ok: true, status: 200, body: quotaBody }));
+  initLlmRelayService({
+    getStore: () => makeKvStore(),
+    getUserIdentityStore: () => ({ get: () => makeIdentity() }),
+    fetchImpl,
+    baseUrl: 'https://relay.test',
+  });
+  let handlerCalls = 0;
+  setLlmRelayIdentityMismatchHandler(async () => {
+    handlerCalls += 1;
+  });
+  const quota = await getLlmRelayQuota({ apiKey: 'mrk_testkey123' });
+  assert.equal(quota.identityAddress, '');
+  assert.equal(handlerCalls, 0);
+});
+
+test('clearLlmRelayQuotaCache drops the 30s snapshot', async () => {
+  resetLlmRelayServiceForTests();
+  const quotaBody = { code: 0, message: 'success', data: { ...BOOTSTRAP_DATA, apiKey: undefined } };
+  const { calls, fetchImpl } = makeFetchStub(() => ({ ok: true, status: 200, body: quotaBody }));
+  initLlmRelayService({
+    getStore: () => makeKvStore(),
+    getUserIdentityStore: () => ({ get: () => makeIdentity() }),
+    fetchImpl,
+    baseUrl: 'https://relay.test',
+  });
+  await getLlmRelayQuota({ apiKey: 'mrk_testkey123' });
+  await getLlmRelayQuota({ apiKey: 'mrk_testkey123' });
+  assert.equal(calls.length, 1);
+  clearLlmRelayQuotaCache();
+  await getLlmRelayQuota({ apiKey: 'mrk_testkey123' });
+  assert.equal(calls.length, 2, 'a cleared cache forces a re-fetch');
 });

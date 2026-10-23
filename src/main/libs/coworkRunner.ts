@@ -9,11 +9,13 @@ import type { Readable } from 'stream';
 import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { PermissionResult } from './coworkPermissionTypes';
+import { isServerMode } from '../server/serverMode';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
 import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, getPersistedChatExperienceMode, resolveDshProviderRoute, getAppConfigProviders, isFreeQuotaProvider, ModelProviderSelectionError, type DshProviderRouteInfo } from './claudeSettings';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { buildGoalPromptSection, type CoworkSessionGoal } from './coworkSessionGoal';
-import { DshTurnHub, dshSessionRootFor, dshWebSearchSeedFromProviders, isNativeDeepSeekChatRoute, type DshTurnProviderRoute } from './coworkDshTurn';
+import { DshTurnHub, dshSessionRootFor, dshWebSearchSeedFromProviders, isNativeDeepSeekChatRoute, DSH_RUNTIME_IDLE_TTL_MS, type DshTurnProviderRoute } from './coworkDshTurn';
+import { filterServerModeAgentTools, resolveDshRuntimeIdleTtlMs } from '../server/serverMode';
 import { isDshShutdownError } from './dshShutdownError';
 import { truncateUtf16Units } from './llmSafeText';
 import { DshStreamUiGate } from './dshStreamUiGate';
@@ -43,7 +45,7 @@ import { rewriteWin32McpStdioServer } from './win32StdioCommand';
 import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
-import { CONFIG_HARD_FALLBACK_RESUME_PROMPT, CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isAuthDshTurnError, isBodyLimitDshTurnError, isConfigModelMissingDshTurnError, isMalformedToolCallDshTurnError, isOverflowDshTurnError, isQuotaDshTurnError, isTransientDshTurnError, isWontHealDshTurnError, MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT, OVERFLOW_TURN_RESUME_PROMPT, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT } from './coworkAssistantReply';
+import { CONFIG_HARD_FALLBACK_RESUME_PROMPT, CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isAuthDshTurnError, isBodyLimitDshTurnError, isConfigModelMissingDshTurnError, isMalformedToolCallDshTurnError, isOverflowDshTurnError, isQuotaDshTurnError, isTransientDshTurnError, isWontHealDshTurnError, MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT, OVERFLOW_TURN_RESUME_PROMPT, relayQuotaErrorMetadata, extractRelayQuotaExhaustedCode, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT, buildFreeRelayQuotaNotice } from './coworkAssistantReply';
 import {
   filterSdkInternalDiagnostics,
   isSdkInternalDiagnostic,
@@ -86,7 +88,7 @@ import { isContextWindowExceededError } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
-import { ASSISTANT_MODE_PROMPT } from './assistantModePrompt';
+import { buildAssistantModePrompt } from './assistantModePrompt';
 import { CHAIN_IDENTIFIER_VERBATIM_RULE } from './chainIdentifierPrompt';
 import { QA_BEHAVIOR_RULE } from './qaBehaviorPrompt';
 import { hasEmbeddedSkillCatalog } from './skillPromptMarkers';
@@ -1426,7 +1428,13 @@ export interface CoworkRunnerEvents {
   messageUpdate: (sessionId: string, messageId: string, content: string) => void;
   permissionRequest: (sessionId: string, request: PermissionRequest) => void;
   complete: (sessionId: string, claudeSessionId: string | null) => void;
-  error: (sessionId: string, error: string) => void;
+  /**
+   * Terminal session error. `metadata.errorCode` carries a stable machine
+   * code for known classes (REQ-A-25: 'LLM_QUOTA_EXHAUSTED' for relay
+   * free_quota_exhausted / quota_exhausted deaths) so clients need not parse
+   * the human-readable text.
+   */
+  error: (sessionId: string, error: string, metadata?: { errorCode?: string }) => void;
   steerSettled: (sessionId: string, submissionId: string) => void;
   steerFailed: (sessionId: string, submissionId: string, reason: string) => void;
   steerCancelled: (sessionId: string, submissionId: string, reason: string) => void;
@@ -2462,6 +2470,24 @@ export interface CoworkRunnerOptions {
     currentUserText: string;
   }) => Promise<Record<'off' | 'low' | 'high' | 'max', number> | null>;
   /**
+   * Optional cerebellum (小脑) turn-end classifier behind the "Follow-Up
+   * Tasks" (待跟进任务) bucket: one Noul over the session title + the turn's
+   * final assistant message decides whether a completed turn on an
+   * auto-origin session leaves it waiting on the owner. true = land the
+   * session in Follow-Up (pending / 'cerebellum'); false = clear a previous
+   * cerebellum verdict (settle back into the Autonomous fold); null = leave
+   * the state untouched (fail-open). The classifier never clears 'manual' or
+   * 'ask_user' markers. The callback must never throw; main.ts resolves the
+   * cerebellum call context lazily inside the callback so Settings edits
+   * apply on the next turn without a restart.
+   */
+  cerebellumSessionFollowUpGate?: (input: {
+    sessionTitle: string;
+    lastAssistantText: string;
+    /** Set for scheduled-task runs (the firing task's name). */
+    taskName?: string;
+  }) => Promise<boolean | null>;
+  /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
    * turn ended without terminal events) and settled so the query can close.
@@ -2628,6 +2654,7 @@ export class CoworkRunner extends EventEmitter {
   private cerebellumIntuitionAvailable?: CoworkRunnerOptions['cerebellumIntuitionAvailable'];
   private cerebellumIntuition?: CoworkRunnerOptions['cerebellumIntuition'];
   private cerebellumEffortSelector?: CoworkRunnerOptions['cerebellumEffortSelector'];
+  private cerebellumSessionFollowUpGate?: CoworkRunnerOptions['cerebellumSessionFollowUpGate'];
   /**
    * Per-session sticky state for the auto effort rung: the last escalated
    * verdict with its timestamp. Follow-ups within the sticky window keep the
@@ -2812,6 +2839,7 @@ export class CoworkRunner extends EventEmitter {
     this.cerebellumIntuitionAvailable = options?.cerebellumIntuitionAvailable;
     this.cerebellumIntuition = options?.cerebellumIntuition;
     this.cerebellumEffortSelector = options?.cerebellumEffortSelector;
+    this.cerebellumSessionFollowUpGate = options?.cerebellumSessionFollowUpGate;
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
@@ -3724,6 +3752,103 @@ export class CoworkRunner extends EventEmitter {
       enqueuedAt: Date.now(),
     });
     void this.drainTurnMemoryQueue();
+  }
+
+  /**
+   * Turn-start half of the Follow-Up Tasks (待跟进任务) lifecycle: a human
+   * reply picks the thread back up, so a cerebellum-sourced pending marker is
+   * cleared (the session is re-judged at this turn's end and may re-enter).
+   * 'manual' and 'ask_user' markers are untouched here. Never throws.
+   */
+  private clearCerebellumFollowUpOnUserTurn(sessionId: string): void {
+    try {
+      const session = this.store.getSessionWithoutMessages(sessionId);
+      if (session?.followUpSource !== 'cerebellum') return;
+      this.store.clearSessionFollowUp(sessionId, { onlySources: ['cerebellum'] });
+    } catch (error) {
+      coworkLog('WARN', 'followUp:turnStart', 'failed to clear cerebellum follow-up on user turn', {
+        sessionId,
+        error: String(error),
+      });
+    }
+  }
+
+  /**
+   * Turn-end half of the Follow-Up Tasks lifecycle, fire-and-forget by
+   * contract: after a turn completes on an auto-origin session, the injected
+   * cerebellum classifier re-judges whether the session now waits on the
+   * owner. true → pending / 'cerebellum'; false → clear a previous
+   * cerebellum verdict only; null → no change (fail-open). Runs detached so
+   * it never blocks turn completion; every failure is swallowed.
+   */
+  private classifySessionFollowUpAfterTurn(sessionId: string): void {
+    const gate = this.cerebellumSessionFollowUpGate;
+    if (!gate) return;
+    void (async () => {
+      try {
+        const session = this.store.getSessionWithoutMessages(sessionId);
+        if (!session?.autoOrigin) return;
+        const page = this.store.getSessionMessagesPage(sessionId, { limit: 20 });
+        const lastAssistant = page.messages.find(
+          (message) =>
+            message.type === 'assistant'
+            && Boolean(message.content?.trim())
+            && message.metadata?.isThinking !== true,
+        );
+        if (!lastAssistant?.content) return;
+        const lastUser = page.messages.find((message) => message.type === 'user');
+        const taskName =
+          lastUser?.metadata?.origin === 'schedule'
+            ? (typeof lastUser.metadata.originLabel === 'string' ? lastUser.metadata.originLabel : undefined)
+            : undefined;
+        const verdict = await gate({
+          sessionTitle: session.title,
+          lastAssistantText: lastAssistant.content,
+          ...(taskName ? { taskName } : {}),
+        });
+        if (verdict === true) {
+          this.store.setSessionFollowUp(sessionId, 'cerebellum');
+        } else if (verdict === false) {
+          this.store.clearSessionFollowUp(sessionId, { onlySources: ['cerebellum'] });
+        }
+      } catch (error) {
+        coworkLog('WARN', 'followUp:turnEnd', 'follow-up classification failed', {
+          sessionId,
+          error: String(error),
+        });
+      }
+    })();
+  }
+
+  /**
+   * AskUserQuestion persistence for Follow-Up Tasks: a pending structured ask
+   * on an auto-origin session parks the row in Follow-Up (source 'ask_user')
+   * so the pending survives restarts and shows on the sidebar row. Never
+   * throws.
+   */
+  private setAskUserFollowUpForAutoSession(sessionId: string): void {
+    try {
+      const session = this.store.getSessionWithoutMessages(sessionId);
+      if (!session?.autoOrigin) return;
+      this.store.setSessionFollowUp(sessionId, 'ask_user');
+    } catch (error) {
+      coworkLog('WARN', 'followUp:askUser', 'failed to persist ask_user follow-up', {
+        sessionId,
+        error: String(error),
+      });
+    }
+  }
+
+  /** Clears an ask_user-sourced follow-up marker; other sources are untouched. */
+  private clearAskUserFollowUp(sessionId: string): void {
+    try {
+      this.store.clearSessionFollowUp(sessionId, { onlySources: ['ask_user'] });
+    } catch (error) {
+      coworkLog('WARN', 'followUp:askUser', 'failed to clear ask_user follow-up', {
+        sessionId,
+        error: String(error),
+      });
+    }
   }
 
   private getSandboxUnavailableFallbackNotice(errorMessage: string): string {
@@ -6492,7 +6617,7 @@ export class CoworkRunner extends EventEmitter {
       // prompt's User Update Protocol. Gated by the caller to regular
       // interactive owner chats (see isAssistantModeOwnerChatSession).
       ...(assistantMode
-        ? [{ name: 'idbots:assistant-mode', order: PROMPT_SECTION_ORDER.ASSISTANT_MODE, text: ASSISTANT_MODE_PROMPT }]
+        ? [{ name: 'idbots:assistant-mode', order: PROMPT_SECTION_ORDER.ASSISTANT_MODE, text: buildAssistantModePrompt() }]
         : []),
     ]);
   }
@@ -7754,6 +7879,10 @@ export class CoworkRunner extends EventEmitter {
         metadata: options.skillIds?.length ? { skillIds: options.skillIds } : undefined,
       });
       this.emit('message', sessionId, userMessage);
+      // A human-composed turn: pick any cerebellum follow-up pending back up
+      // (it re-judges at this turn's end). Machine flows pass
+      // skipInitialUserMessage and never reach this block.
+      this.clearCerebellumFollowUpOnUserTurn(sessionId);
     }
 
     // Create abort controller
@@ -7936,6 +8065,11 @@ export class CoworkRunner extends EventEmitter {
         metadata: options.skillIds?.length ? { skillIds: options.skillIds } : undefined,
       });
       this.emit('message', sessionId, userMessage);
+      // A human-composed turn: pick any cerebellum follow-up pending back up
+      // (it re-judges at this turn's end). Machine flows (scheduler, IM relay,
+      // steer submissions) persist their own origin-stamped message and pass
+      // skipUserMessage, so they never clear the marker here.
+      this.clearCerebellumFollowUpOnUserTurn(sessionId);
     }
 
     // Continue with the existing session
@@ -9405,6 +9539,9 @@ export class CoworkRunner extends EventEmitter {
             : false
         ),
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
+        // REQ-A-31: desktop keeps the 30-min idle reap; server mode reclaims
+        // the idle runtime (and its playwright MCP) within 10 minutes.
+        runtimeIdleTtlMs: resolveDshRuntimeIdleTtlMs(DSH_RUNTIME_IDLE_TTL_MS),
       });
     }
     return this.dshTurnHub;
@@ -9943,9 +10080,13 @@ export class CoworkRunner extends EventEmitter {
           dshSessionId,
           provider: this.dshTurnProviderFromRoute(route),
           sections: [
-            { name: 'idbots:base', order: 0, text: systemPrompt },
+            // interpolate:false — the base prompt embeds authored/untrusted
+            // content (bot persona, A2A peer conversation history); literal
+            // {{...}} text inside it must reach the model verbatim, not die in
+            // the kernel's strict prompt-variable interpolator.
+            { name: 'idbots:base', order: 0, text: systemPrompt, interpolate: false },
             ...(prewarmGoal && prewarmGoal.status === 'active'
-              ? [{ name: 'idbots:goal', order: 10, text: buildGoalPromptSection(prewarmGoal) }]
+              ? [{ name: 'idbots:goal', order: 10, text: buildGoalPromptSection(prewarmGoal), interpolate: false as const }]
               : []),
             { name: 'idbots:tool-use', order: 150, text: CoworkRunner.DSH_TOOL_USE_GUIDANCE },
           ],
@@ -10313,7 +10454,7 @@ export class CoworkRunner extends EventEmitter {
         // turn until paused or cleared; a goal set mid-run applies here.
         const sessionGoal = this.store.getSessionWithoutMessages(sessionId)?.goal ?? null;
         const goalSection = sessionGoal && sessionGoal.status === 'active'
-          ? [{ name: 'idbots:goal', order: 10, text: buildGoalPromptSection(sessionGoal) }]
+          ? [{ name: 'idbots:goal', order: 10, text: buildGoalPromptSection(sessionGoal), interpolate: false as const }]
           : [];
         try {
           return await hub.runTurn({
@@ -10324,7 +10465,9 @@ export class CoworkRunner extends EventEmitter {
         hostTools,
         workspace: { cwd },
         sections: [
-          { name: 'idbots:base', order: 0, text: systemPrompt },
+          // interpolate:false — see the prewarm site above: the base prompt
+          // and the goal text are authored content, never kernel templates.
+          { name: 'idbots:base', order: 0, text: systemPrompt, interpolate: false },
           ...goalSection,
           // The Claude path inherits tool-use discipline from the claude_code
           // preset; the DSH base prompt has none, and without it the model
@@ -10554,6 +10697,10 @@ export class CoworkRunner extends EventEmitter {
                 // broadcast so the renderer queue never keeps a stale entry
                 // for an ask answered outside its own respond call.
                 this.emit('permissionResolved', sessionId, ask.id);
+                // The ask is resolved in every branch below (declined or
+                // answered): drop the session-level follow-up marker the
+                // pending ask created.
+                this.clearAskUserFollowUp(sessionId);
                 if (result.behavior !== 'allow') {
                   void hub.respondAsk(ask.id, (ask.questions ?? []).map((q) => ({
                     id: q.id,
@@ -10568,6 +10715,12 @@ export class CoworkRunner extends EventEmitter {
                   .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask respond failed', { error: String(error) }));
               },
             });
+            // Follow-Up Tasks: a pending structured ask parks an auto-origin
+            // session in the bucket (source 'ask_user') so it survives
+            // restarts and shows on the sidebar row. The bypass self-answer
+            // path above returns before this point — it never waits on a
+            // human, so it never marks the session.
+            this.setAskUserFollowUpForAutoSession(sessionId);
             activeSession.pendingPermission = request;
             this.emit('permissionRequest', sessionId, request);
             coworkLog('INFO', 'runDshSessionLocal', 'ask_user_question awaiting user answer', { sessionId, askId: ask.id, questionCount: modalQuestions.length });
@@ -10576,6 +10729,9 @@ export class CoworkRunner extends EventEmitter {
             const pending = this.pendingPermissions.get(askId);
             if (pending) {
               this.pendingPermissions.delete(askId);
+              // Kernel-deadline / turn-teardown cancellation: the ask is no
+              // longer waiting on the owner, so drop the ask_user marker.
+              this.clearAskUserFollowUp(sessionId);
               pending.resolve({ behavior: 'deny', message: 'Question cancelled' });
             }
             if (activeSession.pendingPermission?.requestId === askId) {
@@ -10928,26 +11084,30 @@ export class CoworkRunner extends EventEmitter {
         // non-quota no-alternative death keeps the configuration wording. The
         // raw 429/limit body stays in the ERROR log line above either way.
         const quotaTerminalDeath = ladderNoTargetKind === 'no-alternative' && isQuotaDshTurnError(outcome);
+        // REQ-A-25: the relay signals an exhausted identity quota with TWO
+        // machine codes — free_quota_exhausted (never had purchased quota)
+        // and the new C4 quota_exhausted (purchased pool used up). Match
+        // both; the wording below stays free-relay specific only when the
+        // failing route is the built-in free provider.
+        const relayQuotaCode = extractRelayQuotaExhaustedCode(outcome.error?.message);
+        const relayQuotaExhausted = relayQuotaCode !== null;
         const freeRelayQuotaDeath = quotaTerminalDeath
-          && (isFreeQuotaProvider(lastAttemptRoute.provider)
-            || /free_quota_exhausted/i.test(String(outcome.error?.message ?? '')));
+          && (isFreeQuotaProvider(lastAttemptRoute.provider) || relayQuotaExhausted);
         const noModelConfiguredNotice = ladderNoTargetKind === 'no-alternative' && !quotaTerminalDeath
           ? ` ${tApp(
               `（未配置可用模型：会话绑定的模型已不可用，备用模型与当前默认降级链上没有任何有效目标——这是配置错误而非临时限流。请到 设置 > 模型 配置一个可用的默认模型，或为现有供应商充值。）`,
               ` (No usable model configured: the session's bound model is unavailable and neither the bot fallback nor the current-default ladder has a valid target — this is a configuration error, not a transient rate limit. Configure a usable default model in Settings > Models, or top up the provider.)`
             )}`
           : '';
-        // Free starter allowance exhausted: the actionable fix is the user's
-        // own provider, not a top-up of a relay they cannot pay into. The
-        // notice carries the literal `free_quota_exhausted` code on purpose:
-        // the renderer's quota banner (CoworkSessionDetail) keys off it and
-        // offers the Settings > Model shortcut, so the message and the banner
-        // agree instead of contradicting each other.
+        // Free starter allowance exhausted. Desktop's actionable fix is the
+        // user's own provider (Settings > Models exists there); in server
+        // mode the phone has no Settings > Models page, so the notice points
+        // at recharge instead (REQ-A-25). The literal upstream quota code is
+        // preserved verbatim in both modes (free_quota_exhausted or the new
+        // C4 quota_exhausted): the renderer's quota banner
+        // (CoworkSessionDetail) keys off it, so message and banner agree.
         const freeRelayQuotaNotice = freeRelayQuotaDeath
-          ? ` ${tApp(
-              `（这不是配置错误：IDBots-Free 免费体验额度已用完。请到 设置 > 模型 添加一个自己的模型服务商 API Key 即可继续对话。错误代码：free_quota_exhausted。）`,
-              ` (This is not a configuration error: the IDBots-Free starter allowance is used up. Add your own model provider API key in Settings > Models to keep chatting. Error code: free_quota_exhausted.)`
-            )}`
+          ? ` ${buildFreeRelayQuotaNotice(relayQuotaCode, isServerMode(), tApp)}`
           : '';
         // Quota death is not retryable on the same route and the raw provider
         // body names no culprit: append an actionable notice naming the route
@@ -11015,7 +11175,14 @@ export class CoworkRunner extends EventEmitter {
                     ))
               : `未配置可用模型（配置错误：绑定模型与备用/默认降级链均无效；最后错误码 ${outcome.error?.code ?? 'UNKNOWN'}）`)
           : failureDetail;
-        this.handleError(sessionId, `DSH turn failed: ${ladderSemantics}${quotaNotice}${noModelConfiguredNotice}${freeRelayQuotaNotice}${bodyLimitNotice}${overflowNotice}${authNotice}`);
+        this.handleError(
+          sessionId,
+          `DSH turn failed: ${ladderSemantics}${quotaNotice}${noModelConfiguredNotice}${freeRelayQuotaNotice}${bodyLimitNotice}${overflowNotice}${authNotice}`,
+          // REQ-A-25: stamp a stable machine code on the stream error for
+          // both relay quota codes so the desktop banner and the mobile
+          // recharge notice can key off it without parsing the text.
+          relayQuotaErrorMetadata(outcome.error?.message),
+        );
         // Route circuit breaker: count consecutive won't-heal settlements on
         // the current route identity; past the threshold the circuit opens
         // (entry check above) and further turns short-circuit until the probe.
@@ -11066,6 +11233,7 @@ export class CoworkRunner extends EventEmitter {
       // and leave the session `idle` so the user can re-send to continue.
       // Still emit `complete` so automation waiters resolve (the orchestrator
       // bridge treats an empty reply as a non-answer).
+      let turnCompletedSuccessfully = false;
       if (outcome.emptyTerminal) {
         this.reportEmptyTerminalTurn(sessionId);
         finish('idle');
@@ -11079,6 +11247,7 @@ export class CoworkRunner extends EventEmitter {
         finish('idle');
       } else {
         finish('completed');
+        turnCompletedSuccessfully = true;
       }
       // Any terminal outcome here (completed / empty terminal / truncated)
       // proves the provider path is live again — clear the consecutive-stall
@@ -11100,6 +11269,12 @@ export class CoworkRunner extends EventEmitter {
       this.clearPendingPermissions(sessionId);
       this.settleDshSteerSubmissions(activeSession, 'settled');
       this.removeActiveSession(sessionId, activeSession);
+      if (turnCompletedSuccessfully) {
+        // Follow-Up Tasks re-judgement: fire-and-forget after ALL turn
+        // bookkeeping — it must never block completion or throw. Absent gate
+        // (tests, minimal embedders) or a null verdict leaves the state as-is.
+        this.classifySessionFollowUpAfterTurn(sessionId);
+      }
     } catch (error) {
       if (isDshShutdownError(error)) {
         // App/host shutdown closed the runtime mid-turn. This is not a
@@ -12752,12 +12927,12 @@ export class CoworkRunner extends EventEmitter {
       const allowlist = studySession.kind === 'qa-surf'
         ? METAWEB_QA_SURF_TOOL_ALLOWLIST
         : METAWEB_STUDY_TOOL_ALLOWLIST;
-      return memoryTools.filter((item) => allowlist.has(String(item?.name ?? '')));
+      return filterServerModeAgentTools(memoryTools.filter((item) => allowlist.has(String(item?.name ?? ''))));
     }
     // MetaWeb surf sessions: the surf allowlist — read/learn across protocols
     // plus the budget-wrapped interaction tools, nothing else.
     if (this.activeSessions.get(sessionId)?.metawebSurfSession) {
-      return memoryTools.filter((item) => METAWEB_SURF_TOOL_ALLOWLIST.has(String(item?.name ?? '')));
+      return filterServerModeAgentTools(memoryTools.filter((item) => METAWEB_SURF_TOOL_ALLOWLIST.has(String(item?.name ?? ''))));
     }
     // Dream-RSI practice sessions: the risk-class allowlist — chain writes,
     // wallet, purchases and scheduled-task creation are never registered;
@@ -12768,9 +12943,11 @@ export class CoworkRunner extends EventEmitter {
       const allowlist = practiceSession.riskClass === 'interact_local'
         ? PRACTICE_INTERACT_LOCAL_INLINE_TOOLS
         : PRACTICE_READ_ONLY_INLINE_TOOLS;
-      return memoryTools.filter((item) => allowlist.has(String(item?.name ?? '')));
+      return filterServerModeAgentTools(memoryTools.filter((item) => allowlist.has(String(item?.name ?? ''))));
     }
-    return memoryTools;
+    // REQ-A-5: server mode never offers tools that depend on desktop-only
+    // features (Bot Browser, OS screenshots, local MetaApps/Projects).
+    return filterServerModeAgentTools(memoryTools);
   }
 
   /**
@@ -15645,7 +15822,7 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
-  private handleError(sessionId: string, error: string): void {
+  private handleError(sessionId: string, error: string, metadata?: { errorCode?: string }): void {
     if (this.stoppedSessions.has(sessionId)) {
       return;
     }
@@ -15655,7 +15832,7 @@ export class CoworkRunner extends EventEmitter {
     const latest = this.store.getSessionMessagesPage?.(sessionId, { limit: 1 });
     const last = latest?.messages?.[latest.messages.length - 1];
     if (last?.type === 'system' && last.content === content) {
-      this.emit('error', sessionId, error);
+      this.emit('error', sessionId, error, metadata);
       return;
     }
     const message = this.store.addMessage(sessionId, {
@@ -15664,7 +15841,7 @@ export class CoworkRunner extends EventEmitter {
       metadata: { error },
     });
     this.emit('message', sessionId, message);
-    this.emit('error', sessionId, error);
+    this.emit('error', sessionId, error, metadata);
   }
 
   isSessionActive(sessionId: string): boolean {

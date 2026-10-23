@@ -650,6 +650,13 @@ class ConfigService {
    * write until a read succeeds.
    */
   private loadedFromStore = false;
+  /**
+   * Monotonic count of local updateConfig writes. reloadFromStore captures it
+   * before its read and discards the result when a write happened in between:
+   * a reload racing an in-flight write could otherwise adopt the pre-write
+   * row, and the NEXT updateConfig would persist that regressed snapshot.
+   */
+  private writeSeq = 0;
 
   async init() {
     try {
@@ -723,6 +730,7 @@ class ConfigService {
       ...newConfig,
       ...(normalizedProviders ? { providers: normalizedProviders } : {}),
     });
+    this.writeSeq += 1;
     await localStore.setItem(CONFIG_KEYS.APP_CONFIG, this.config);
   }
 
@@ -732,11 +740,20 @@ class ConfigService {
    * stored: if the write silently failed or a migration reshaped a provider,
    * the fields visibly reflect the persisted truth instead of the pre-save
    * editor state (credential issues were otherwise undiagnosable — masked
-   * inputs hid which key each provider really holds).
+   * inputs hid which key each provider really holds). Also driven by the
+   * store:changed broadcast for app_config, so main-side rewrites (the relay
+   * identity closeout re-issuing the metaid-free key) replace the in-memory
+   * snapshot instead of being overwritten by it on the next save.
    */
   async reloadFromStore(): Promise<AppConfig> {
+    const seqAtStart = this.writeSeq;
     try {
       const storedConfig = await localStore.getItemStrict<AppConfig>(CONFIG_KEYS.APP_CONFIG);
+      if (this.writeSeq !== seqAtStart) {
+        // A local write superseded this read; its own store:changed broadcast
+        // schedules a fresh reload against the newer row.
+        return this.config;
+      }
       if (storedConfig) {
         this.config = normalizeDeepSeekAppConfig({
           ...defaultConfig,

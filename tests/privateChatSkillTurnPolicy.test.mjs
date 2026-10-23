@@ -22,6 +22,14 @@ test('quota and auth failures are terminal skill-turn errors', () => {
     ),
     'terminal',
   );
+  // REQ-A-25: the new C4 code for a used-up purchased pool is terminal too.
+  assert.equal(
+    classifyPrivateChatSkillTurnError(
+      'DSH turn failed: {"kind":"error","error":{"message":"429: {\\"code\\":\\"quota_exhausted\\"}","code":"QUOTA"}}',
+    ),
+    'terminal',
+  );
+  assert.equal(classifyPrivateChatSkillTurnError('quota_exhausted'), 'terminal');
   assert.equal(classifyPrivateChatSkillTurnError('insufficient_quota'), 'terminal');
   assert.equal(classifyPrivateChatSkillTurnError('401 unauthorized'), 'terminal');
   assert.equal(classifyPrivateChatSkillTurnError('ETIMEDOUT'), 'retryable');
@@ -31,6 +39,13 @@ test('terminal quota errors are never retried', () => {
   assert.equal(
     shouldRetryPrivateChatSkillTurn({
       error: 'free_quota_exhausted',
+      attempts: 1,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRetryPrivateChatSkillTurn({
+      error: 'quota_exhausted',
       attempts: 1,
     }),
     false,

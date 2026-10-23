@@ -18,13 +18,22 @@
  *   cerebellum (JEV) pool; absent/0 means the backend reports one shared pool.
  * - GET /v2/assist/llm/quota — Authorization: Bearer <relay key>; same data
  *   shape minus apiKey.
+ * - Both responses may carry identityAddress/globalMetaId naming the identity
+ *   that owns the account/key. When present, they are compared against the
+ *   local user identity (relayIdentityMatchesLocalIdentity; identityAddress
+ *   is authoritative, globalMetaId only fills in when no address is reported);
+ *   a mismatch means the cached key belongs to a different identity and must
+ *   be dropped — the backstop for any future "key vs identity" drift (the
+ *   2026-10 identity-split incident: an imported identity kept consuming the
+ *   silently provisioned previous identity's quota because every cache still
+ *   held its key).
  *
  * The service is Electron-free (store/identity/fetch are injected) so plain
  * node:test coverage works, mirroring trafficAccountService.
  */
 
 import { signMvcAddressMessage } from './mvcSponsorClient';
-import { createUserIdentity, resumeUserIdentitySetup } from './userIdentityService';
+import { createUserIdentity } from './userIdentityService';
 import type { SqliteStore } from '../sqliteStore';
 import type { UserIdentityStore } from '../userIdentityStore';
 
@@ -37,6 +46,15 @@ const DEFAULT_IDENTITY_NAME = 'User';
 
 /** kvStore key: assist-service base URL override (integration testing). */
 export const LLM_RELAY_API_BASE_KEY = 'llmRelay.apiBase';
+/**
+ * kvStore key: mvc address of the identity the most recently issued relay key
+ * belongs to. Written on every successful bootstrap (the single issuance
+ * funnel for the renderer provisioning, the JEV/vision resolvers and the
+ * identity closeout alike) and compared against user_identity at startup by
+ * relayIdentityCloseout — a missing or foreign stamp beside a cached key means
+ * the key may belong to another identity and must be re-issued.
+ */
+export const LLM_RELAY_KEY_IDENTITY_KV = 'llmRelay.keyIdentity';
 
 // ---------------------------------------------------------------------------
 // Types + typed error
@@ -77,6 +95,8 @@ export interface LlmRelayBootstrapInfo {
   jevQuotaTotal: number;
   jevQuotaUsed: number;
   jevQuotaRemaining: number;
+  /** Identity address the relay says owns the account/key; '' when unreported. */
+  identityAddress: string;
 }
 
 export interface LlmRelayQuotaInfo {
@@ -92,6 +112,8 @@ export interface LlmRelayQuotaInfo {
   jevQuotaTotal: number;
   jevQuotaUsed: number;
   jevQuotaRemaining: number;
+  /** Identity address the relay says owns the key; '' when unreported. */
+  identityAddress: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,12 +128,29 @@ export interface LlmRelayServiceDeps {
   baseUrl?: string;
   /** Test seam for first-run identity provisioning. */
   createIdentityImpl?: typeof createUserIdentity;
-  /** Test seam for the background identity chain-sync resume. */
-  resumeIdentityImpl?: typeof resumeUserIdentitySetup;
 }
 
 let depsRef: LlmRelayServiceDeps | null = null;
 let quotaCache: (LlmRelayQuotaInfo & { fetchedAt: number }) | null = null;
+
+/**
+ * Repair hook for a quota-response identity mismatch: the cached relay key
+ * belongs to a different identity than the local user_identity row, so every
+ * credential cache must be dropped and re-provisioned with a fresh
+ * identity-signed bootstrap. Registered by relayIdentityCloseout at startup
+ * (dependency inversion — this module never imports the orchestrator, so the
+ * node:test harness stays free of production wiring).
+ */
+export type LlmRelayIdentityMismatchHandler = (context: {
+  quota: LlmRelayQuotaInfo;
+  localMvcAddress: string;
+}) => Promise<void>;
+
+let identityMismatchHandler: LlmRelayIdentityMismatchHandler | null = null;
+
+export function setLlmRelayIdentityMismatchHandler(handler: LlmRelayIdentityMismatchHandler | null): void {
+  identityMismatchHandler = handler;
+}
 
 export function initLlmRelayService(deps: LlmRelayServiceDeps): void {
   depsRef = deps;
@@ -119,6 +158,12 @@ export function initLlmRelayService(deps: LlmRelayServiceDeps): void {
 
 export function resetLlmRelayServiceForTests(): void {
   depsRef = null;
+  quotaCache = null;
+  identityMismatchHandler = null;
+}
+
+/** Drop the cached quota snapshot (identity change / mismatch closeout). */
+export function clearLlmRelayQuotaCache(): void {
   quotaCache = null;
 }
 
@@ -224,6 +269,19 @@ export function setLlmRelayApiBase(value: unknown): string {
     }
   }
   return next;
+}
+
+/** Best-effort stamp of the identity a freshly issued relay key belongs to. */
+function persistRelayKeyIdentity(identityAddress: string): void {
+  const kv = getKvStore();
+  if (kv && 'set' in kv && typeof (kv as { set?: unknown }).set === 'function') {
+    try {
+      (kv as Pick<SqliteStore, 'set'>).set(LLM_RELAY_KEY_IDENTITY_KV, identityAddress);
+    } catch {
+      // persistence loss is non-fatal: startup reconciliation treats a
+      // missing stamp as drift and simply re-issues the key once
+    }
+  }
 }
 
 // Canonical request string (backend llm_relay_service/message.go — do not change).
@@ -347,7 +405,45 @@ function normalizeQuotaPayload(data: Record<string, unknown>): Omit<LlmRelayBoot
     jevQuotaTotal: toNumber(data.jevQuotaTotal),
     jevQuotaUsed: toNumber(data.jevQuotaUsed),
     jevQuotaRemaining: toNumber(data.jevQuotaRemaining),
+    identityAddress: pickText(data, 'identityAddress', 'identity_address'),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Identity guard (key-vs-identity mismatch backstop)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare relay-reported identity fields against the local user identity.
+ * Backends that do not report the fields yet (blank on either side) pass —
+ * the guard is additive.
+ *
+ * identityAddress is authoritative: the backend echoes the exact
+ * X-Identity-Address string the account was bound with, so it compares
+ * byte-for-byte with user_identity.mvc_address. globalMetaId is consulted only
+ * when no address was reported — its encoding is produced independently on
+ * both sides, and a representation difference must never read as a foreign
+ * identity (that would re-issue the key on every quota read).
+ */
+export function relayIdentityMatchesLocalIdentity(
+  reported: { identityAddress?: unknown; globalMetaId?: unknown },
+  local: { mvc_address?: unknown; globalmetaid?: unknown } | null | undefined,
+): boolean {
+  if (!local) {
+    // No local identity to compare against (logged out / not yet created).
+    return true;
+  }
+  const reportedAddress = normalizeText(reported.identityAddress);
+  const localAddress = normalizeText(local.mvc_address);
+  if (reportedAddress && localAddress) {
+    return reportedAddress === localAddress;
+  }
+  const reportedGlobal = normalizeText(reported.globalMetaId);
+  const localGlobal = normalizeText(local.globalmetaid);
+  if (reportedGlobal && localGlobal && reportedGlobal !== localGlobal) {
+    return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -356,31 +452,31 @@ function normalizeQuotaPayload(data: Record<string, unknown>): Omit<LlmRelayBoot
 
 /**
  * Returns the local user identity, silently provisioning one on first run.
- * The identity wallet is generated locally (signing works offline); the gas
- * subsidy and on-chain profile pins degrade gracefully when the network is
- * unavailable and are retried by the existing resume flow.
+ * The identity wallet is generated locally (signing works offline), which is
+ * all the relay bootstrap needs. The gas subsidy and the on-chain profile
+ * pins are deferred (subsidy_state 'pending') until the user adopts the
+ * identity — confirmDeferredUserIdentitySetup, driven by the adoption
+ * signals in main.ts — so a returning user who imports their real identity
+ * minutes later never burns a subsidy or leaves orphan pins behind.
  */
 async function ensureUserIdentity(): Promise<{ mnemonic: string; path: string; mvcAddress: string }> {
   const deps = getDeps();
   const store = deps.getUserIdentityStore();
   let identity = store.get();
   if (!identity) {
-    // deferChainSync keeps first paint fast: the awaited on-chain pin publish
-    // would otherwise block the bootstrap for tens of seconds. The identity
-    // row is fully signable immediately; the background resume publishes the
-    // /info pins (idempotent, persisted per-step) without blocking startup.
     const createIdentity = deps.createIdentityImpl ?? createUserIdentity;
-    const result = await createIdentity(store, { name: DEFAULT_IDENTITY_NAME, avatar: null }, {}, { deferChainSync: true });
+    const result = await createIdentity(
+      store,
+      { name: DEFAULT_IDENTITY_NAME, avatar: null },
+      {},
+      { deferChainSync: true, deferSubsidy: true },
+    );
     if (!result.success) {
       throw new LlmRelayApiError({
         stage: 'bootstrap',
         message: `failed to provision local user identity: ${normalizeText(result.error) || 'unknown error'}`,
       });
     }
-    const resumeIdentity = deps.resumeIdentityImpl ?? resumeUserIdentitySetup;
-    void resumeIdentity(store).catch((error) => {
-      console.warn('[llm-relay] background identity chain sync failed:', getErrorMessage(error));
-    });
     identity = store.get();
   }
   const mvcAddress = normalizeText(identity?.mvc_address);
@@ -422,18 +518,47 @@ export async function bootstrapLlmRelay(): Promise<LlmRelayBootstrapInfo> {
     path: '/v2/assist/llm/bootstrap',
     identity: { address: identity.mvcAddress, timestamp, signature },
   });
+  if (!relayIdentityMatchesLocalIdentity(data, { mvc_address: identity.mvcAddress })) {
+    // The account the server returned is not the one this request signed as —
+    // persisting its key would recreate the identity-split incident.
+    throw new LlmRelayApiError({
+      stage: 'bootstrap',
+      message: `LLM relay bootstrap identity mismatch: signed as ${identity.mvcAddress} but the response belongs to ${normalizeText(data.identityAddress) || 'another identity'}.`,
+    });
+  }
   const quota = normalizeQuotaPayload(data);
   const apiKey = pickText(data, 'apiKey');
   if (!apiKey) {
     throw new LlmRelayApiError({ stage: 'bootstrap', message: 'LLM relay bootstrap returned no apiKey.' });
   }
   quotaCache = { ...quota, fetchedAt: Date.now() };
+  persistRelayKeyIdentity(identity.mvcAddress);
   return { apiKey, ...quota };
+}
+
+/** Relay key currently stored in the metaid-free provider config ('' when absent). */
+function readMetaIdFreeProviderApiKey(): string {
+  try {
+    const appConfig = getKvStore()?.get('app_config') as
+      | { providers?: Record<string, { apiKey?: unknown } | undefined> }
+      | null;
+    const apiKey = appConfig?.providers?.['metaid-free']?.apiKey;
+    return typeof apiKey === 'string' ? apiKey.trim() : '';
+  } catch {
+    return '';
+  }
 }
 
 /**
  * Query the quota snapshot behind a relay key. Results are cached for 30s
  * unless forceRefresh is set.
+ *
+ * When the response reports the key owner's identity and it disagrees with
+ * the local user_identity row, the cached key is stale for this install
+ * (imported identity, split account): the registered mismatch handler drops
+ * every relay credential cache and re-bootstraps with the current identity,
+ * then the quota is re-read behind the repaired provider key. The mismatched
+ * snapshot is never cached.
  */
 export async function getLlmRelayQuota(input: { apiKey?: unknown; forceRefresh?: boolean }): Promise<LlmRelayQuotaInfo> {
   const apiKey = normalizeText(input?.apiKey);
@@ -444,13 +569,39 @@ export async function getLlmRelayQuota(input: { apiKey?: unknown; forceRefresh?:
     const { fetchedAt: _fetchedAt, ...snapshot } = quotaCache;
     return snapshot;
   }
-  const data = await llmRelayRequestJson({
-    stage: 'quota',
-    method: 'GET',
-    path: '/v2/assist/llm/quota',
-    bearer: apiKey,
-  });
-  const quota = normalizeQuotaPayload(data);
+  const fetchQuota = async (bearerKey: string): Promise<{ data: Record<string, unknown>; quota: LlmRelayQuotaInfo }> => {
+    const data = await llmRelayRequestJson({
+      stage: 'quota',
+      method: 'GET',
+      path: '/v2/assist/llm/quota',
+      bearer: bearerKey,
+    });
+    return { data, quota: normalizeQuotaPayload(data) };
+  };
+  const { data } = await fetchQuota(apiKey);
+  let quota = normalizeQuotaPayload(data);
+  let localIdentity: { mvc_address?: unknown; globalmetaid?: unknown } | null = null;
+  try {
+    localIdentity = getDeps().getUserIdentityStore().get() ?? null;
+  } catch {
+    localIdentity = null;
+  }
+  if (!relayIdentityMatchesLocalIdentity(data, localIdentity)) {
+    const localMvcAddress = normalizeText(localIdentity?.mvc_address);
+    if (identityMismatchHandler) {
+      await identityMismatchHandler({ quota, localMvcAddress });
+      const repairedKey = readMetaIdFreeProviderApiKey();
+      if (repairedKey && repairedKey !== apiKey) {
+        ({ quota } = await fetchQuota(repairedKey));
+        quotaCache = { ...quota, fetchedAt: Date.now() };
+        return quota;
+      }
+    }
+    throw new LlmRelayApiError({
+      stage: 'quota',
+      message: `LLM relay key identity mismatch: the key belongs to ${quota.identityAddress || 'another identity'} but the local identity is ${localMvcAddress || 'unknown'}.`,
+    });
+  }
   quotaCache = { ...quota, fetchedAt: Date.now() };
   return quota;
 }
@@ -459,27 +610,25 @@ export async function getLlmRelayQuota(input: { apiKey?: unknown; forceRefresh?:
 // IPC surface
 // ---------------------------------------------------------------------------
 
-interface IpcMainLike {
-  handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void;
-}
+type RegisterIpcHandlerFn = (channel: string, handler: (event: any, ...args: any[]) => any) => void;
 
-export function registerLlmRelayIpcHandlers(deps: { ipcMain: IpcMainLike }): void {
-  const { ipcMain } = deps;
-  ipcMain.handle('llmRelay:bootstrap', async () => {
+export function registerLlmRelayIpcHandlers(deps: { registerIpcHandler: RegisterIpcHandlerFn }): void {
+  const { registerIpcHandler } = deps;
+  registerIpcHandler('llmRelay:bootstrap', async () => {
     try {
       return { success: true, result: await bootstrapLlmRelay() };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('llmRelay:getQuota', async (_event, input: { apiKey?: unknown; forceRefresh?: boolean }) => {
+  registerIpcHandler('llmRelay:getQuota', async (_event, input: { apiKey?: unknown; forceRefresh?: boolean }) => {
     try {
       return { success: true, quota: await getLlmRelayQuota(input ?? {}) };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('llmRelay:setApiBase', async (_event, input: { apiBase?: unknown }) => {
+  registerIpcHandler('llmRelay:setApiBase', async (_event, input: { apiBase?: unknown }) => {
     try {
       return { success: true, apiBase: setLlmRelayApiBase(input?.apiBase) };
     } catch (error) {

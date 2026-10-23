@@ -1,0 +1,28 @@
+# Python dependencies for the bundled document skills, installed into
+# /opt/skills-venv (on PATH) in the tenant image (REQ-A-26).
+#
+# The skills ship no requirements files of their own; this list is the union
+# of the imports in their scripts:
+#   SKILLs/docx/ooxml/scripts/{unpack,pack}.py      -> defusedxml, lxml
+#   SKILLs/pptx/scripts/*.py                        -> python-pptx, Pillow
+#   SKILLs/pptx/ooxml/scripts/*.py                  -> defusedxml, lxml
+#   SKILLs/pptx (text extraction)                   -> markitdown[pptx]
+#   SKILLs/xlsx/recalc.py                           -> (drives soffice)
+#   SKILLs/pdf/scripts/*.py                         -> pypdf, pdf2image, Pillow,
+#                                                      pytesseract
+# python-pptx must import in the venv (REQ-A-26).
+#
+# System (apt) counterparts live in the Dockerfile: poppler-utils for
+# pdf2image/pdftotext, tesseract-ocr(-chi-sim) for pytesseract,
+# libreoffice-writer/-calc/-impress for soffice, pandoc for docx conversions.
+
+defusedxml>=0.7.1
+lxml>=5.0.0
+Pillow>=10.0.0
+pdf2image>=1.17.0
+pytesseract>=0.3.10
+pypdf>=4.0.0
+openpyxl>=3.1.0
+six>=1.16.0
+python-pptx>=0.6.23
+markitdown[pptx]>=0.1.0

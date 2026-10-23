@@ -44,10 +44,11 @@ import prismC from 'react-syntax-highlighter/dist/esm/languages/prism/c';
 import prismCpp from 'react-syntax-highlighter/dist/esm/languages/prism/cpp';
 // @ts-ignore
 import prismDiff from 'react-syntax-highlighter/dist/esm/languages/prism/diff';
-import { ArrowTopRightOnSquareIcon, CheckIcon, ClipboardDocumentIcon, DocumentChartBarIcon } from '@heroicons/react/24/outline';
+import { CheckIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../services/i18n';
 import type { ChatExperienceMode } from '../config';
 import LocalFileLink from './ui/LocalFileLink';
+import InlineHtmlReportBlock from './cowork/InlineHtmlReportBlock';
 
 /**
  * Code-block languages worth highlighting in chat output.
@@ -135,7 +136,7 @@ const SYNTAX_HIGHLIGHTER_STYLE = {
   fontSize: '11px',
   lineHeight: '19px',
 };
-const SAFE_URL_PROTOCOLS = new Set(['http', 'https', 'mailto', 'tel', 'file', 'metaid', 'metaapp', 'map', 'metafile', 'pin', 'preview-metaapp']);
+const SAFE_URL_PROTOCOLS = new Set(['http', 'https', 'mailto', 'tel', 'file', 'metaid', 'metaapp', 'map', 'metafile', 'pin', 'preview-metaapp', 'idbots']);
 
 /** Local .html/.htm links render as report cards in assistant chat mode. */
 const HTML_FILE_RE = /\.html?$/i;
@@ -145,8 +146,15 @@ const BOT_BROWSER_URI_PROTOCOL_RE = /^(metaid|metaapp|map|metafile|pin|preview-m
 /** Whether an href points into the Bot Browser (metaid://, metaapp://, …) rather than the external browser. */
 export const isBotBrowserUri = (href: string): boolean => BOT_BROWSER_URI_PROTOCOL_RE.test(href.trim());
 
-const AGENT_INTERNET_URI_RE = /\b(?:metaid|metaapp|map|metafile|pin|preview-metaapp):\/\/[A-Za-z0-9][A-Za-z0-9._~%/@-]*/gi;
-const AGENT_INTERNET_URI_HINT_RE = /(?:metaid|metaapp|map|metafile|pin|preview-metaapp):\/\//i;
+const AGENT_INTERNET_URI_RE = /\b(?:metaid|metaapp|map|metafile|pin|preview-metaapp|idbots):\/\/[A-Za-z0-9][A-Za-z0-9._~%/@-]*/gi;
+const AGENT_INTERNET_URI_HINT_RE = /(?:metaid|metaapp|map|metafile|pin|preview-metaapp|idbots):\/\//i;
+/**
+ * In-app session deep link emitted e.g. by the Twin Bot's daily report:
+ * idbots://session/<sessionId> jumps straight to the referenced CoWork
+ * conversation (handled by the app-wide 'cowork:viewSession' DOM event, see
+ * App.tsx). Other idbots:// shapes are not recognised and stay no-ops.
+ */
+const IDBOTS_SESSION_URI_RE = /^idbots:\/\/session\/([A-Za-z0-9][A-Za-z0-9._~-]*)$/i;
 const CODE_SEGMENT_RE = /(```[\s\S]*?```|`[^`\n]*`)/g;
 const TRAILING_URI_PUNCTUATION_RE = /[.,;:!?]+$/;
 /**
@@ -198,7 +206,8 @@ const linkifyPlainSegment = (segment: string): string => {
 
 /**
  * Turn bare Agent Internet URIs (metaid://, metaapp://, map://, metafile://,
- * pin://, preview-metaapp://) in markdown text into markdown links so they
+ * pin://, preview-metaapp://) and in-app session deep links
+ * (idbots://session/<id>) in markdown text into markdown links so they
  * render clickable everywhere (CoWork, A2A, Bot Browser panel), and rewrite
  * Web2 pin-viewer URLs (metaid.io/pin/…, openagentinternet.org/browser/…)
  * into the matching MetaWeb URIs. Existing markdown link syntax is left
@@ -683,6 +692,34 @@ const createMarkdownComponents = (
 
     const hrefValue = typeof href === 'string' ? href.trim() : '';
 
+    // In-app session deep links (idbots://session/<sessionId>, emitted e.g. by
+    // the Twin Bot's daily report) jump straight to the referenced CoWork
+    // conversation via the app-wide 'cowork:viewSession' DOM event (handler in
+    // App.tsx) — they never leave the app. Unrecognised idbots:// shapes are a
+    // no-op with a warning.
+    if (hrefValue && getHrefProtocol(hrefValue) === 'idbots') {
+      const sessionMatch = hrefValue.match(IDBOTS_SESSION_URI_RE);
+      const handleIdbotsClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+        e.preventDefault();
+        if (!sessionMatch) {
+          console.warn('Unsupported idbots:// link:', hrefValue);
+          return;
+        }
+        window.dispatchEvent(new CustomEvent('cowork:viewSession', { detail: { sessionId: sessionMatch[1] } }));
+      };
+      return (
+        <a
+          href={hrefValue}
+          onClick={handleIdbotsClick}
+          className="text-claude-accent hover:text-claude-accentHover underline decoration-claude-accent/50 hover:decoration-claude-accent transition-colors cursor-pointer break-all"
+          title={hrefValue}
+          {...props}
+        >
+          {children}
+        </a>
+      );
+    }
+
     // Agent Internet URIs (metaid://, metaapp://, map://, metafile://, …) open
     // inside the Bot Browser. Without an explicit opener, fall back to the
     // app-wide DOM event so this works in every markdown surface.
@@ -753,36 +790,18 @@ const createMarkdownComponents = (
       };
 
       // Assistant mode: a link to a local HTML report is the turn's
-      // deliverable, not an ordinary file reference — render it as a
-      // full-width card so it is visually unmistakable next to plain inline
-      // file links. The card still renders through LocalFileLink (block-level
-      // wrapper), so it carries the same right-click menu as every other
-      // file link. Clicking flows through the same onOpenLocalFile path
-      // (in-app sandboxed preview). Professional mode keeps the inline link.
+      // deliverable, not an ordinary file reference — render it inline as a
+      // full-width block (sandboxed srcdoc iframe, content-height tracking,
+      // view-source + export actions) so the report reads inside the chat
+      // instead of behind a card click. Professional mode keeps the inline
+      // link; a read failure degrades the block back to the report card.
       if (chatExperienceMode === 'assistant' && HTML_FILE_RE.test(filePath)) {
         return (
-          <LocalFileLink
+          <InlineHtmlReportBlock
             filePath={filePath}
-            wrapperClassName="block w-full"
-            className="group my-1 flex w-full items-center gap-3 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3.5 py-2.5 shadow-subtle transition-colors hover:border-claude-accent/60 dark:hover:border-claude-accent/60 cursor-pointer no-underline"
-            href={toFileHref(filePath)}
-            title={filePath}
-            showTypeIcon={false}
-            onOpen={(_path, event) => handleClick(event)}
-          >
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-claude-accent/10">
-              <DocumentChartBarIcon className="h-5 w-5 text-claude-accent" />
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-medium dark:text-claude-darkText text-claude-text">
-                {children}
-              </span>
-              <span className="mt-0.5 block text-[11px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {i18nService.t('htmlReportHint')}
-              </span>
-            </span>
-            <ArrowTopRightOnSquareIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary transition-colors group-hover:text-claude-accent" />
-          </LocalFileLink>
+            displayName={linkText}
+            onOpenInSidePanel={onOpenLocalFile}
+          />
         );
       }
 
@@ -852,7 +871,8 @@ interface MarkdownContentProps {
   resolveLocalFilePath?: (href: string, text: string) => string | null;
   /** Intercept local file link clicks; return true to suppress the default shell.openPath. */
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
-  /** Chat surface mode; 'assistant' renders local HTML report links as cards.
+  /** Chat surface mode; 'assistant' renders local HTML report links as inline
+   * blocks (falling back to cards when the file cannot be read).
    * Defaults to 'professional' (plain inline links). */
   chatExperienceMode?: ChatExperienceMode;
 }

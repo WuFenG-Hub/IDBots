@@ -1,0 +1,10 @@
+# WS-C REQ-C-14 — fires the nightly backup inside the 03:00-05:00 window.
+[Unit]
+Description=IDBots nightly backup timer (03:05 Asia/Shanghai)
+
+[Timer]
+OnCalendar=*-*-* 03:05:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

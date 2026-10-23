@@ -39,3 +39,20 @@ export const isFreeQuotaErrorLive = (
   const latestError = lastA2AErrorDetail([...(messages ?? [])], Number.POSITIVE_INFINITY);
   return latestError !== null && latestError.includes(FREE_QUOTA_EXHAUSTED_CODE);
 };
+
+/**
+ * REQ-A-25: the quota relay surfaces a second machine code, quota_exhausted
+ * (the purchased pool is used up), alongside free_quota_exhausted (the
+ * identity never had purchased quota). Same live-state rule as above — both
+ * codes are annotated into the error text by the OpenAI-compat proxy.
+ */
+export const QUOTA_EXHAUSTED_CODES = [FREE_QUOTA_EXHAUSTED_CODE, 'quota_exhausted'];
+
+export const isQuotaExhaustedErrorLive = (
+  messages: ReadonlyArray<CoworkMessage> | null | undefined,
+  status: CoworkSessionStatus | null | undefined,
+): boolean => {
+  if (status !== 'error') return false;
+  const latestError = lastA2AErrorDetail([...(messages ?? [])], Number.POSITIVE_INFINITY);
+  return latestError !== null && QUOTA_EXHAUSTED_CODES.some((code) => latestError.includes(code));
+};
