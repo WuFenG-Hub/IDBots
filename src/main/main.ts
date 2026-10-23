@@ -5399,6 +5399,19 @@ const getCoworkStore = () => {
     } catch (error) {
       console.warn('[Main] Cowork steer restart recovery failed; continuing startup:', error);
     }
+    try {
+      // AskUserQuestion follow-up markers persisted by a previous process are
+      // unanswerable residue (the pending ask lived only in that process's
+      // memory) — sweep them once so stale rows do not park in Follow-Up
+      // Tasks forever. Cerebellum/manual markers survive restarts by design.
+      const staleAskUserFollowUps = candidate.clearStaleAskUserFollowUpsAfterRestart();
+      startupLog(`cowork stale ask_user follow-up sweep done (count=${staleAskUserFollowUps})`);
+      if (staleAskUserFollowUps > 0) {
+        console.info(`[Main] Cleared ${staleAskUserFollowUps} stale ask_user follow-up marker(s) left by a previous run`);
+      }
+    } catch (error) {
+      console.warn('[Main] Cowork stale ask_user follow-up sweep failed; continuing startup:', error);
+    }
     coworkStore = candidate;
   }
   return coworkStore;

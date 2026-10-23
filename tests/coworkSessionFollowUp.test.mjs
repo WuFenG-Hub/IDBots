@@ -19,7 +19,16 @@
 //   d. clearSessionFollowUp without onlySources clears any pending; with
 //      onlySources it clears only a matching lane;
 //   e. createSession rows start with NULLs and the auto-origin fact on the
-//      same row is untouched by follow-up writes.
+//      same row is untouched by follow-up writes;
+//   f. clearStaleAskUserFollowUpsAfterRestart (the boot-time residue sweep)
+//      clears only 'ask_user' markers — a pending AskUserQuestion cannot
+//      survive a process restart — while cerebellum/manual rows stay pending,
+//      the sweep is idempotent, and it leaves updated_at (session-list sort
+//      order) untouched on every row;
+//   g. CoworkRunner.clearPendingPermissions (the session-level terminal
+//      teardown every DSH abort/error/crash/shutdown path runs) clears the
+//      ask_user marker through the same lane-guarded store call, so a denied
+//      pending ask can never leave a stale Follow-Up row behind.
 //
 // Runs against the compiled output (pnpm run compile:electron first).
 
@@ -290,4 +299,140 @@ test('follow-up writes never touch the auto-origin or fold facts on the same row
     try { sqlite.close(); } catch { /* already closed */ }
     cleanupDir(dir);
   }
+});
+
+test('startup sweep clears only ask_user residue: cerebellum/manual stay pending, sweep is idempotent and persists', async () => {
+  const dir = makeTempDir();
+  let askA = '';
+  let askB = '';
+  let cerebellum = '';
+  let manual = '';
+  /** updated_at of every row, snapshotted after the writes and before the sweep. */
+  let updatedAtBefore = new Map();
+  const sqlite = await openStartupStore(dir);
+  try {
+    const cowork = new CoworkStore(sqlite.getDatabase(), sqlite.getSaveFunction());
+    // Two auto-origin sessions parked by a pending AskUserQuestion, plus one
+    // cerebellum verdict and one manual pin — as a previous process left them.
+    askA = cowork.createSession('[长期] Ask A', dir, '', 'local', [], null, 'longterm').id;
+    askB = cowork.createSession('[长期] Ask B', dir, '', 'local', [], null, 'longterm').id;
+    cerebellum = cowork.createSession('[定时] Nightly', dir, '', 'local', [], null, 'standard').id;
+    manual = cowork.createSession('[长期] Manual', dir, '', 'local', [], null, 'longterm').id;
+    for (const id of [askA, askB, cerebellum, manual]) {
+      cowork.setSessionFollowUp(id, 'ask_user');
+    }
+    cowork.setSessionFollowUp(cerebellum, 'cerebellum');
+    cowork.setSessionFollowUp(manual, 'manual');
+    updatedAtBefore = new Map(
+      [askA, askB, cerebellum, manual].map((id) => [
+        id,
+        getRow(sqlite.getDatabase(), 'SELECT updated_at FROM cowork_sessions WHERE id = ?', [id])?.updated_at,
+      ]),
+    );
+  } finally {
+    try { sqlite.close(); } catch { /* already closed */ }
+  }
+
+  // "Restart": reopen the same file the way app startup does and run the
+  // residue sweep on the fresh store.
+  const reopened = await openStartupStore(dir);
+  try {
+    const cowork = new CoworkStore(reopened.getDatabase(), reopened.getSaveFunction());
+    const cleared = cowork.clearStaleAskUserFollowUpsAfterRestart();
+    assert.equal(cleared, 2, 'exactly the two ask_user rows are swept');
+
+    for (const id of [askA, askB]) {
+      assert.deepEqual(
+        followUpRowOf(reopened.getDatabase(), id),
+        { follow_up_state: null, follow_up_source: null, follow_up_at: null },
+        'ask_user residue is cleared',
+      );
+    }
+    assert.equal(
+      cowork.getSession(cerebellum)?.followUpSource,
+      'cerebellum',
+      'a cerebellum verdict survives the sweep',
+    );
+    assert.equal(cowork.getSession(cerebellum)?.followUpState, 'pending');
+    assert.equal(
+      cowork.getSession(manual)?.followUpSource,
+      'manual',
+      'a manual pin survives the sweep',
+    );
+    assert.equal(cowork.getSession(manual)?.followUpState, 'pending');
+
+    // The sweep is a pure follow-up-column reset: updated_at (and therefore
+    // session-list sort order) must be untouched on every row, swept or not.
+    for (const [id, before] of updatedAtBefore) {
+      const after = getRow(reopened.getDatabase(), 'SELECT updated_at FROM cowork_sessions WHERE id = ?', [id])?.updated_at;
+      assert.equal(after, before, `updated_at unchanged by the sweep for ${id}`);
+    }
+
+    assert.equal(
+      cowork.clearStaleAskUserFollowUpsAfterRestart(),
+      0,
+      'second sweep is a no-op (idempotent)',
+    );
+  } finally {
+    try { reopened.close(); } catch { /* already closed */ }
+  }
+
+  // The sweep is persisted, not just held in memory.
+  const rereopened = await openStartupStore(dir);
+  try {
+    const cowork = new CoworkStore(rereopened.getDatabase(), rereopened.getSaveFunction());
+    assert.equal(cowork.getSession(askA)?.followUpState, null);
+    assert.equal(cowork.getSession(cerebellum)?.followUpSource, 'cerebellum');
+    assert.equal(cowork.getSession(manual)?.followUpSource, 'manual');
+    for (const [id, before] of updatedAtBefore) {
+      const after = getRow(rereopened.getDatabase(), 'SELECT updated_at FROM cowork_sessions WHERE id = ?', [id])?.updated_at;
+      assert.equal(after, before, `updated_at still unchanged after reopen for ${id}`);
+    }
+  } finally {
+    try { rereopened.close(); } catch { /* already closed */ }
+    cleanupDir(dir);
+  }
+});
+
+test('runner terminal teardown: clearPendingPermissions clears the ask_user marker through the lane-guarded store call', async () => {
+  const { createRequire } = await import('node:module');
+  const require = createRequire(import.meta.url);
+  const { CoworkRunner } = require('../dist-electron/main/libs/coworkRunner.js');
+
+  const cleared = [];
+  const fakeStore = new Proxy({}, {
+    get: (_target, prop) => {
+      if (prop === 'clearSessionFollowUp') {
+        return (sessionId, opts) => cleared.push([sessionId, opts]);
+      }
+      return () => undefined;
+    },
+  });
+  const runner = new CoworkRunner(fakeStore);
+  // The session-level teardown every DSH terminal path (turn failure, stall
+  // abort, DSH shutdown, turn crash, stop) runs — a pending ask is denied
+  // here and can never be answered afterwards, so the persisted Follow-Up
+  // marker must drop in the same beat (cerebellum/manual lanes untouched).
+  runner.clearPendingPermissions('session-1');
+  assert.deepEqual(
+    cleared,
+    [['session-1', { onlySources: ['ask_user'] }]],
+    'terminal teardown clears ONLY the ask_user follow-up lane',
+  );
+});
+
+test('runner source anchor: clearPendingPermissions itself calls clearAskUserFollowUp', () => {
+  const source = fs.readFileSync(
+    new URL('../src/main/libs/coworkRunner.ts', import.meta.url),
+    'utf8',
+  );
+  const method = source.match(
+    /private clearPendingPermissions\(sessionId: string\): void \{[\s\S]*?\n  \}/,
+  );
+  assert.ok(method, 'clearPendingPermissions method is present in the runner source');
+  assert.match(
+    method[0],
+    /this\.clearAskUserFollowUp\(sessionId\);/,
+    'the centralized teardown must clear the ask_user marker — otherwise a terminal cleanup leaves a stale Follow-Up row',
+  );
 });
