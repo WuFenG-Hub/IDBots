@@ -30,8 +30,6 @@ const require = createRequire(import.meta.url);
 
 const { fetchProtocolPinsFromIndexer, DEFAULT_TIMEOUT_MS } = require('../dist-electron/main/services/protocolPinFetch.js');
 
-const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
-
 function jsonResponse(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -58,14 +56,26 @@ test('DEFAULT_TIMEOUT_MS is raised to 10s (>= 3s floor from the incident analysi
 test('default options survive a ~2.2s cold first page (the old 2s default aborted exactly this shape)', async () => {
   const startedAt = Date.now();
   let calls = 0;
-  const fetchImpl = async () => {
+  // Honors init.signal like a real fetch: if the abort fires BEFORE the page
+  // resolves, the promise must reject (page-level abort -> whole-walk
+  // fetch-error). A signal-ignoring mock would make this case pass even
+  // against the old 2s default — the first draft did exactly that and the
+  // independent review caught it (2026-10-24), so the case had no teeth.
+  const fetchImpl = (_url, init) => new Promise((resolve, reject) => {
     calls += 1;
-    // First (and only) page resolves after 2.2s: above the old 2,000ms
-    // default, below the new one. The page holds one row and no nextCursor,
-    // so a successful walk returns exactly that row.
-    await sleep(2_200);
-    return jsonResponse({ code: 1, data: { list: [row('cold-page-pin')] } });
-  };
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(jsonResponse({ code: 1, data: { list: [row('cold-page-pin')] } }));
+    }, 2_200);
+    init?.signal?.addEventListener('abort', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error('TimeoutError'));
+    });
+  });
 
   const pins = await fetchProtocolPinsFromIndexer('/protocols/test-timeout', {
     // No timeoutMs passed: the walk must run on the raised DEFAULT_TIMEOUT_MS.
