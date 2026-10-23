@@ -18,7 +18,9 @@
  * pointer hovers the block or its right-click menu is open, so the report
  * sits flush against the surrounding chat text with no permanent chrome.
  * The right-click menu adds the file-level conveniences (copy path, reveal,
- * open with default app).
+ * open with default app). Reports taller than the frame cap (10000px) render
+ * truncated with a footer notice plus an "open full report" action, so the
+ * cut-off is explicit instead of silently unreachable.
  *
  * If the file cannot be read (missing, not a file, over the size cap, or
  * binary), the block degrades to the previous report card so the message
@@ -71,19 +73,32 @@ export const clampInlineHtmlHeight = (height: number): number => {
  * Validate a window 'message' event from a reporter iframe: the data must
  * carry the marker field with a finite numeric height, and the source must
  * be exactly the iframe's contentWindow so multiple blocks in one session
- * never react to each other's reports. Returns the clamped height or null.
+ * never react to each other's reports. Returns the clamped height plus a
+ * `truncated` flag when the raw report exceeded MAX_FRAME_HEIGHT — the frame
+ * caps at the max and the document below it stays unreachable, so the block
+ * must surface that state instead of silently cutting the report off.
  */
-export const parseInlineHtmlHeightMessage = (
+export const parseInlineHtmlHeightReport = (
   data: unknown,
   source: unknown,
   iframeWindow: unknown,
-): number | null => {
+): { height: number; truncated: boolean } | null => {
   if (!iframeWindow || source !== iframeWindow) return null;
   if (!data || typeof data !== 'object') return null;
   const payload = data as Record<string, unknown>;
   if (payload[INLINE_HTML_HEIGHT_MESSAGE_KEY] !== true) return null;
   if (typeof payload.h !== 'number' || !Number.isFinite(payload.h)) return null;
-  return clampInlineHtmlHeight(payload.h);
+  return { height: clampInlineHtmlHeight(payload.h), truncated: payload.h > MAX_FRAME_HEIGHT };
+};
+
+/** Height-only view of parseInlineHtmlHeightReport (see its contract). */
+export const parseInlineHtmlHeightMessage = (
+  data: unknown,
+  source: unknown,
+  iframeWindow: unknown,
+): number | null => {
+  const report = parseInlineHtmlHeightReport(data, source, iframeWindow);
+  return report ? report.height : null;
 };
 
 /**
@@ -204,6 +219,7 @@ const InlineHtmlReportBlock: React.FC<InlineHtmlReportBlockProps> = ({
   const [html, setHtml] = useState('');
   const [view, setView] = useState<'render' | 'source'>('render');
   const [height, setHeight] = useState(DEFAULT_FRAME_HEIGHT);
+  const [heightTruncated, setHeightTruncated] = useState(false);
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const [copiedPath, setCopiedPath] = useState(false);
 
@@ -228,6 +244,7 @@ const InlineHtmlReportBlock: React.FC<InlineHtmlReportBlockProps> = ({
     setStatus('loading');
     setView('render');
     setHeight(DEFAULT_FRAME_HEIGHT);
+    setHeightTruncated(false);
     void (async () => {
       try {
         const result = await window.electron.fs.readTextFile(filePath);
@@ -255,15 +272,18 @@ const InlineHtmlReportBlock: React.FC<InlineHtmlReportBlockProps> = ({
 
   // Track the in-frame reporter: accept only messages whose source is THIS
   // block's iframe (multiple blocks share the window 'message' bus). Height
-  // reports resize the frame; nav requests are idbots:// link clicks, routed
-  // through the same session deep-link path as Markdown links.
+  // reports resize the frame — and flag truncation when the raw report tops
+  // the frame cap, so the footer notice only appears while content is truly
+  // cut off; nav requests are idbots:// link clicks, routed through the same
+  // session deep-link path as Markdown links.
   useEffect(() => {
     if (status !== 'ready') return;
     const handleMessage = (event: MessageEvent) => {
       const iframeWindow = iframeRef.current?.contentWindow ?? null;
-      const nextHeight = parseInlineHtmlHeightMessage(event.data, event.source, iframeWindow);
-      if (nextHeight !== null) {
-        setHeight(nextHeight);
+      const heightReport = parseInlineHtmlHeightReport(event.data, event.source, iframeWindow);
+      if (heightReport !== null) {
+        setHeight(heightReport.height);
+        setHeightTruncated(heightReport.truncated);
         return;
       }
       const navHref = parseInlineHtmlNavMessage(event.data, event.source, iframeWindow);
@@ -326,6 +346,26 @@ const InlineHtmlReportBlock: React.FC<InlineHtmlReportBlockProps> = ({
     closeMenu();
     onOpenInSidePanel?.(filePath, event);
   }, [closeMenu, filePath, onOpenInSidePanel]);
+
+  // Truncation footer action: prefer the side panel (full-height scrollable
+  // view); without that callback, hand the file to the OS default app.
+  const openFullReport = useCallback((event: React.MouseEvent) => {
+    if (onOpenInSidePanel) {
+      onOpenInSidePanel(filePath, event);
+      return;
+    }
+    void (async () => {
+      try {
+        const result = await window.electron.shell.openPath(filePath);
+        if (!result?.success) {
+          showToast(i18nService.t('openFileFailed'));
+        }
+      } catch (error) {
+        console.error('Failed to open file:', filePath, error);
+        showToast(i18nService.t('openFileFailed'));
+      }
+    })();
+  }, [filePath, onOpenInSidePanel]);
 
   const toggleView = useCallback(() => {
     closeMenu();
@@ -505,7 +545,9 @@ const InlineHtmlReportBlock: React.FC<InlineHtmlReportBlockProps> = ({
         // Sandboxed like the MarkdownViewerPanel preview (allow-scripts, opaque
         // origin). scrolling="no" + content-height + overflow:hidden keep the
         // report inside the frame — the frame itself must never scroll; the
-        // ResizeObserver reporter keeps the height glued to the content.
+        // ResizeObserver reporter keeps the height glued to the content. Past
+        // MAX_FRAME_HEIGHT the frame stops growing and the footer below tells
+        // the user the preview is cut off instead of hiding the rest silently.
         <iframe
           ref={iframeRef}
           title={displayName || filePath}
@@ -515,6 +557,22 @@ const InlineHtmlReportBlock: React.FC<InlineHtmlReportBlockProps> = ({
           className="block w-full border-0 bg-white"
           style={{ height: `${height}px`, overflow: 'hidden' }}
         />
+      )}
+
+      {status === 'ready' && view === 'render' && heightTruncated && (
+        <div className="flex items-center justify-between gap-2 border-t px-3 py-2 dark:border-claude-darkBorder border-claude-border">
+          <span className="text-[11px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('htmlReportTruncated')}
+          </span>
+          <button
+            type="button"
+            onClick={openFullReport}
+            className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-claude-accent transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
+          >
+            <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
+            {i18nService.t('htmlReportOpenFullReport')}
+          </button>
+        </div>
       )}
 
       {menuPosition && (

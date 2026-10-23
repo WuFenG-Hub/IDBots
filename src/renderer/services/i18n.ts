@@ -2091,6 +2091,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     htmlReportOpenWithDefault: '用默认应用打开',
     htmlReportExportFailed: '导出图片失败',
     htmlReportImageSaved: '图片已保存',
+    htmlReportTruncated: '报告内容过长，预览已截断',
+    htmlReportOpenFullReport: '打开完整报告',
 
     // IM Bot
     imBot: 'IM 机器人',
@@ -5224,6 +5226,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     htmlReportOpenWithDefault: 'Open with default app',
     htmlReportExportFailed: 'Failed to export image',
     htmlReportImageSaved: 'Image saved',
+    htmlReportTruncated: 'This report is very tall — the preview is truncated',
+    htmlReportOpenFullReport: 'Open full report',
 
     // IM Bot
     imBot: 'IM Bot',

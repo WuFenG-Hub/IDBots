@@ -121,7 +121,9 @@ test('the block frame is sandboxed, non-scrolling and content-height sized', () 
   assert.match(blockSource, /sandbox="allow-scripts"/);
   assert.match(blockSource, /scrolling="no"/);
   assert.match(blockSource, /const iframeWindow = iframeRef\.current\?\.contentWindow \?\? null;/);
-  assert.match(blockSource, /parseInlineHtmlHeightMessage\(event\.data, event\.source, iframeWindow\)/);
+  // The handler consumes the height report (clamped height + truncation flag);
+  // the height-only parseInlineHtmlHeightMessage view wraps the same parser.
+  assert.match(blockSource, /parseInlineHtmlHeightReport\(event\.data, event\.source, iframeWindow\)/);
 });
 
 test('professional mode keeps the plain inline link (no block, no card)', () => {
