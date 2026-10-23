@@ -612,6 +612,7 @@ man_base_data_pebble/
 !tests/schedulerTargetSession.test.mjs
 !tests/scheduledTaskSkipLedger.test.mjs
 !tests/settingsUnarchiveRefreshStatic.test.mjs
+!tests/settingsInputContextMenu.test.tsx
 !tests/coworkDshSessionTitle.test.mjs
 !tests/botBrowserPreviewAct.test.ts
 !tests/memoryUserEditsTool.test.mjs
