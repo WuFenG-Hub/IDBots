@@ -248,6 +248,11 @@ function createGateHarness({ gate, includeMemoryPromptBlocks = true }) {
     getMetabotIdForSession() {
       return 7;
     },
+    // Recent-sessions pulse rides the same tail but has no bearing on the
+    // gate under test — the stub keeps it empty.
+    recentSessionPulse() {
+      return [];
+    },
   };
   const runner = new CoworkRunner(store, {
     getRemoteServicesPrompt: () => REMOTE_BLOCK_TEXT,

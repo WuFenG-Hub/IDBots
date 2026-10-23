@@ -421,6 +421,11 @@ function createMemoryRankRunnerHarness({ memories, ranker }) {
     getMetabotIdForSession() {
       return 7;
     },
+    // Recent-sessions pulse rides the same tail but has no bearing on the
+    // memory ranking under test — the stub keeps it empty.
+    recentSessionPulse() {
+      return [];
+    },
     listCapabilityDrafts() {
       return [];
     },

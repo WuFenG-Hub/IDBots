@@ -320,6 +320,11 @@ function createShortlistHarness({ ranker, catalogMode = 'volatile' }) {
     getMetabotIdForSession() {
       return 7;
     },
+    // Recent-sessions pulse rides the same tail but has no bearing on the
+    // skill shortlist under test — the stub keeps it empty.
+    recentSessionPulse() {
+      return [];
+    },
     getSessionWithoutMessages() {
       return {};
     },
