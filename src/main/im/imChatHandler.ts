@@ -34,6 +34,35 @@ export interface IMChatHandlerOptions {
 // GLM/DeepSeek replies mid-thought; 32K matches the app-wide default.
 export const IM_DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
 
+/**
+ * Build the OpenAI Responses endpoint URL from a base URL. Module-level pure
+ * function so the routing rule is unit-testable; the class method below
+ * delegates here.
+ *
+ * Versioned bases (…/v1, …/v4 — e.g. Zhipu's /api/coding/paas/v4) mount
+ * /responses directly, mirroring buildOpenAICompatibleChatCompletionsUrl's
+ * versioned-base rule. The old code only recognized …/v1 and blindly appended
+ * /v1/responses to everything else, producing doubled paths like
+ * …/v4/v1/responses and …/v4/chat/completions/v1/responses for versioned
+ * chat bases (route-construction 404s, 2026-10-23). A trailing
+ * /chat/completions identifies the chat endpoint, not the base — strip it
+ * before the version check.
+ */
+export function buildOpenAIResponsesUrlForBase(baseUrl: string): string {
+  const normalized = baseUrl.replace(/\/+$/, '');
+  if (!normalized) {
+    return '/v1/responses';
+  }
+  if (normalized.endsWith('/responses')) {
+    return normalized;
+  }
+  const versioned = normalized.replace(/\/chat\/completions$/, '');
+  if (/\/v\d+$/.test(versioned)) {
+    return `${versioned}/responses`;
+  }
+  return `${normalized}/v1/responses`;
+}
+
 export class IMChatHandler {
   private options: IMChatHandlerOptions;
 
@@ -131,17 +160,7 @@ export class IMChatHandler {
   }
 
   private buildOpenAIResponsesUrl(config: LLMConfig): string {
-    const normalized = config.baseUrl.replace(/\/+$/, '');
-    if (!normalized) {
-      return '/v1/responses';
-    }
-    if (normalized.endsWith('/responses')) {
-      return normalized;
-    }
-    if (normalized.endsWith('/v1')) {
-      return `${normalized}/responses`;
-    }
-    return `${normalized}/v1/responses`;
+    return buildOpenAIResponsesUrlForBase(config.baseUrl);
   }
 
   private shouldUseOpenAIResponsesApi(config: LLMConfig): boolean {
