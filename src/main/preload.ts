@@ -829,6 +829,16 @@ contextBridge.exposeInMainWorld('electron', {
     bootstrap: () => ipcRenderer.invoke('llmRelay:bootstrap'),
     getQuota: (input: { apiKey: string; forceRefresh?: boolean }) => ipcRenderer.invoke('llmRelay:getQuota', input),
     setApiBase: (input: { apiBase: string }) => ipcRenderer.invoke('llmRelay:setApiBase', input),
+    getQuotaNudgeState: () => ipcRenderer.invoke('llmRelay:getQuotaNudgeState'),
+    dismissQuotaNudge: (input: { level: 'low' | 'exhausted' }) => ipcRenderer.invoke('llmRelay:dismissQuotaNudge', input),
+    onQuotaNudgeChanged: (handler: (state: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, state: unknown) => handler(state);
+      ipcRenderer.on('llmRelay:quotaNudgeChanged', listener);
+      return () => ipcRenderer.removeListener('llmRelay:quotaNudgeChanged', listener);
+    },
+  },
+  brainSwitch: {
+    switchFreeBrainsTo: (input: { providerKey: string }) => ipcRenderer.invoke('brainSwitch:switchFreeBrainsTo', input),
   },
   jevRelay: {
     resolveCredentials: () => ipcRenderer.invoke('jevRelay:resolveCredentials'),

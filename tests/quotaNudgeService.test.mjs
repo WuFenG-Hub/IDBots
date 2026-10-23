@@ -144,6 +144,21 @@ test('controller emits only on state change and stop() ends polling', async () =
   controller.stop();
 });
 
+test('numeric (ms-epoch) cycleResetAt from the relay normalizes for per-cycle dismissal', async () => {
+  const resetMs = Date.parse('2026-10-30T00:00:00Z');
+  const deps = makeDeps({
+    fetchQuota: async () => ({ quotaRemaining: 100, quotaTotal: 1000, quotaCycleResetAt: resetMs }),
+  });
+  const controller = createQuotaNudgeController({ ...deps, emit: () => {}, pollIntervalMs: 0 });
+  const low = await controller.refresh();
+  assert.equal(low.level, 'low');
+  assert.equal(low.cycleResetAt, '2026-10-30T00:00:00.000Z');
+  const dismissed = await controller.dismiss('low');
+  assert.equal(dismissed.level, 'none');
+  assert.equal(dismissed.reason, 'dismissed');
+  controller.stop();
+});
+
 test('notifyExhaustedSeen forces a quota re-read and is throttled', async () => {
   let fetches = 0;
   let forced = 0;

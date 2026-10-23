@@ -271,6 +271,29 @@ interface LlmRelayQuotaInfo {
   jevQuotaRemaining: number;
 }
 
+/** Global free-quota nudge banner state (derived in the main process; see services/quotaNudgeService). */
+interface QuotaNudgeState {
+  level: 'none' | 'low' | 'exhausted';
+  reason: 'threshold' | 'ok' | 'no-free-brain-bots' | 'quota-unavailable' | 'dismissed';
+  quotaRemaining: number | null;
+  quotaTotal: number | null;
+  /** Cycle reset instant as an ISO string; null when unknown. */
+  cycleResetAt: string | null;
+  freeBrainBotCount: number;
+  suggestedProvider: { key: string; name: string; modelId: string } | null;
+}
+
+/** Result of the one-click free-brain switch (services/brainSwitchService). */
+interface BrainSwitchResultInfo {
+  success: boolean;
+  error?: string;
+  providerKey: string;
+  modelId?: string;
+  switchedBotIds: number[];
+  failedBots: Array<{ id: number; name: string; error: string }>;
+  defaultRouteUpdated: boolean;
+}
+
 interface JevRelayCredentials {
   apiKey: string;
   baseUrl: string;
@@ -1538,6 +1561,12 @@ interface IElectronAPI {
     bootstrap: () => Promise<{ success: boolean; result?: LlmRelayBootstrapInfo; error?: string }>;
     getQuota: (input: { apiKey: string; forceRefresh?: boolean }) => Promise<{ success: boolean; quota?: LlmRelayQuotaInfo; error?: string }>;
     setApiBase: (input: { apiBase?: string }) => Promise<{ success: boolean; apiBase?: string; error?: string }>;
+    getQuotaNudgeState: () => Promise<{ success: boolean; state?: QuotaNudgeState | null; error?: string }>;
+    dismissQuotaNudge: (input: { level: 'low' | 'exhausted' }) => Promise<{ success: boolean; state?: QuotaNudgeState | null; error?: string }>;
+    onQuotaNudgeChanged: (handler: (state: QuotaNudgeState) => void) => () => void;
+  };
+  brainSwitch: {
+    switchFreeBrainsTo: (input: { providerKey: string }) => Promise<{ success: boolean; result?: BrainSwitchResultInfo; error?: string }>;
   };
   jevRelay: {
     resolveCredentials: () => Promise<{ success: boolean; credentials?: JevRelayCredentials; error?: string }>;

@@ -43,7 +43,7 @@ export interface BrainFallbackBackfillProvider {
 }
 
 export interface BrainFallbackBackfillAppConfig {
-  model?: { defaultModel?: string };
+  model?: { defaultModel?: string; defaultProvider?: string };
   providers?: Record<string, BrainFallbackBackfillProvider | undefined>;
 }
 

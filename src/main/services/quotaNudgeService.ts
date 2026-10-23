@@ -51,7 +51,7 @@ export interface QuotaNudgeState {
   reason: QuotaNudgeReason;
   quotaRemaining: number | null;
   quotaTotal: number | null;
-  /** Relay quota-cycle reset instant (ISO string from the relay), null when unknown. */
+  /** Quota-cycle reset instant, normalized to an ISO string (the relay's ms-epoch number is converted); null when unknown. */
   cycleResetAt: string | null;
   freeBrainBotCount: number;
   suggestedProvider: QuotaNudgeSuggestedProvider | null;
@@ -88,6 +88,13 @@ const LEVEL_RANK: Record<QuotaNudgeLevel, number> = { none: 0, low: 1, exhausted
 const numberOrNull = (value: unknown): number | null => {
   const n = typeof value === 'string' ? Number(value) : value;
   return typeof n === 'number' && Number.isFinite(n) ? n : null;
+};
+
+/** The relay reports the cycle reset as an ms-epoch number; accept an ISO string too. */
+const normalizeCycleResetAt = (value: unknown): string | null => {
+  if (typeof value === 'string' && value.trim()) return value;
+  const n = numberOrNull(value);
+  return n && n > 0 ? new Date(n).toISOString() : null;
 };
 
 function normalizeDismissRecord(raw: unknown): QuotaNudgeDismissRecord | null {
@@ -150,7 +157,7 @@ export async function computeQuotaNudgeState(deps: QuotaNudgeDeps): Promise<Quot
   }
   const quotaRemaining = numberOrNull(quota?.quotaRemaining);
   const quotaTotal = numberOrNull(quota?.quotaTotal);
-  const cycleResetAt = typeof quota?.quotaCycleResetAt === 'string' ? quota.quotaCycleResetAt : null;
+  const cycleResetAt = normalizeCycleResetAt(quota?.quotaCycleResetAt);
   if (quotaRemaining == null) {
     return { level: 'none', reason: 'quota-unavailable', ...base, quotaTotal, cycleResetAt };
   }

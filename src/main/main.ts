@@ -172,6 +172,7 @@ import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './
 import { initBundleService, registerBundleIpcHandlers } from './services/bundleService';
 import { initLlmRelayService, registerLlmRelayIpcHandlers, getLlmRelayQuota } from './services/llmRelayService';
 import { createQuotaNudgeController, type QuotaNudgeController, type QuotaNudgeState } from './services/quotaNudgeService';
+import { switchFreePrimaryBrainsToProvider } from './services/brainSwitchService';
 
 /**
  * Global free-quota nudge controller (Phase 2, 2026-10-23 new-user free-quota
@@ -16892,6 +16893,35 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
       const level = input?.level === 'exhausted' ? 'exhausted' : 'low';
       const state: QuotaNudgeState | null = quotaNudgeController ? await quotaNudgeController.dismiss(level) : null;
       return { success: true, state };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  // One-click brain switch (Phase 2, 2026-10-23): the quota nudge banner's
+  // primary action — move every free-primary bot onto the owner's own provider
+  // (free relay kept as fallback), and move the global default route off the
+  // relay when it still rides it. Per-bot writes go through updateMetaBotCore,
+  // the exact path a manual bot-edit takes.
+  registerIpcHandler('brainSwitch:switchFreeBrainsTo', async (_event, input: { providerKey?: unknown }) => {
+    try {
+      const providerKey = typeof input?.providerKey === 'string' ? input.providerKey.trim() : '';
+      if (!providerKey) return { success: false, error: 'providerKey is required' };
+      const result = await switchFreePrimaryBrainsToProvider({
+        listMetabots: () => getMetabotStore().listMetabots(),
+        getAppConfig: () => getStore()?.get('app_config') ?? null,
+        updateBot: (id, botInput) => updateMetaBotCore(id, botInput, getMetabotManageDeps()),
+        mutateAppConfig: (mutate) => {
+          const storeRef = getStore();
+          if (!storeRef) return;
+          storeRef.set('app_config', mutate(storeRef.get('app_config') ?? {}));
+        },
+      }, providerKey);
+      // The switch changes brain bindings (and possibly the default route):
+      // recompute the quota nudge so the banner disappears. A bot-only switch
+      // does not touch app_config, so the provider watch alone would miss it.
+      void quotaNudgeController?.refresh().catch(() => undefined);
+      return { success: result.success, error: result.error, result };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
