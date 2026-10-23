@@ -266,6 +266,16 @@ const SELF_IDENTITY_OVERRIDE_PATTERNS: RegExp[] = [
   /you are now/i,
   /system prompt/i,
   /\bdisregard\b/i,
+  // Review M2: the output contract writes self_identity in Simplified
+  // Chinese, so override phrasing arrives in Chinese too. Patterns stay
+  // noun-anchored (指令/提示词) so ordinary self-descriptions that merely
+  // contain 忽略/忘掉 ("我学会了不忽略用户的感受") never match.
+  /忽略(了)?(以上|所有|之前的|上述)?(系统)?(提示词|指令)/,
+  /无视(以上|所有)?(提示词|指令)/,
+  /忘掉(以上|所有|之前)?(提示词|指令|一切)/,
+  /系统提示词/,
+  /从现在开始你是/,
+  /从现在起你是/,
 ];
 
 export function isSelfIdentityInjectionAttempt(text?: string | null): boolean {
