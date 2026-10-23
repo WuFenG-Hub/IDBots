@@ -3342,7 +3342,8 @@ const createCerebellumGroupReplyGate = () =>
  * Logs verdict + latency only — never message content.
  */
 const createCerebellumSessionFollowUpGate = () =>
-  async ({ sessionTitle, lastAssistantText, taskName }: {
+  async ({ sessionId, sessionTitle, lastAssistantText, taskName }: {
+    sessionId?: string;
     sessionTitle: string;
     lastAssistantText: string;
     taskName?: string;
@@ -3360,6 +3361,7 @@ const createCerebellumSessionFollowUpGate = () =>
       taskName,
     });
     coworkLog('INFO', 'sessionFollowUp:cerebellumClassify', 'session follow-up gate evaluated', {
+      sessionId: sessionId ?? 'unknown',
       verdict: verdict === null ? 'no-verdict' : verdict ? 'follow-up' : 'no-follow-up',
       latencyMs: Date.now() - startedAt,
     });

@@ -45,6 +45,8 @@ import { rewriteWin32McpStdioServer } from './win32StdioCommand';
 import { ensurePythonRuntimeReady } from './pythonRuntime';
 import { resolveBundledSkillsRoot } from './skillRoots';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
+import { extractTurnEndFollowUpInput } from './followUpTurnEndExtract';
+import { hasForceFollowUpSignal } from '../cerebellum/sessionFollowUpGate';
 import { CONFIG_HARD_FALLBACK_RESUME_PROMPT, CONTINUE_TURN_REASONING_EFFORT, DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult, isAuthDshTurnError, isBodyLimitDshTurnError, isConfigModelMissingDshTurnError, isMalformedToolCallDshTurnError, isOverflowDshTurnError, isQuotaDshTurnError, isTransientDshTurnError, isWontHealDshTurnError, MALFORMED_TOOL_CALL_TURN_CONTINUE_PROMPT, OVERFLOW_TURN_RESUME_PROMPT, relayQuotaErrorMetadata, extractRelayQuotaExhaustedCode, TRANSIENT_TURN_RESUME_PROMPT, TRUNCATED_TURN_CONTINUE_PROMPT, buildFreeRelayQuotaNotice } from './coworkAssistantReply';
 import {
   filterSdkInternalDiagnostics,
@@ -2504,6 +2506,8 @@ export interface CoworkRunnerOptions {
    * apply on the next turn without a restart.
    */
   cerebellumSessionFollowUpGate?: (input: {
+    /** For log attribution only — the classifier itself is session-agnostic. */
+    sessionId?: string;
     sessionTitle: string;
     lastAssistantText: string;
     /** Set for scheduled-task runs (the firing task's name). */
@@ -3813,22 +3817,23 @@ export class CoworkRunner extends EventEmitter {
         const session = this.store.getSessionWithoutMessages(sessionId);
         if (!session?.autoOrigin) return;
         const page = this.store.getSessionMessagesPage(sessionId, { limit: 20 });
-        const lastAssistant = page.messages.find(
-          (message) =>
-            message.type === 'assistant'
-            && Boolean(message.content?.trim())
-            && message.metadata?.isThinking !== true,
-        );
-        if (!lastAssistant?.content) return;
-        const lastUser = page.messages.find((message) => message.type === 'user');
-        const taskName =
-          lastUser?.metadata?.origin === 'schedule'
-            ? (typeof lastUser.metadata.originLabel === 'string' ? lastUser.metadata.originLabel : undefined)
-            : undefined;
+        const input = extractTurnEndFollowUpInput(page.messages);
+        if (!input) return;
+        // Deterministic recall net first: an unambiguous high-severity marker
+        // in the turn's final message parks the session in Follow-Up without
+        // waiting on (or depending on) the cerebellum relay — a 429/quota or
+        // disabled cerebellum must never swallow a CRITICAL report. The
+        // 'cerebellum' source keeps the same lifecycle (cleared on owner
+        // reply, re-judged at the next turn end).
+        if (hasForceFollowUpSignal(input.lastAssistantText)) {
+          this.store.setSessionFollowUp(sessionId, 'cerebellum');
+          return;
+        }
         const verdict = await gate({
+          sessionId,
           sessionTitle: session.title,
-          lastAssistantText: lastAssistant.content,
-          ...(taskName ? { taskName } : {}),
+          lastAssistantText: input.lastAssistantText,
+          ...(input.taskName ? { taskName: input.taskName } : {}),
         });
         if (verdict === true) {
           this.store.setSessionFollowUp(sessionId, 'cerebellum');

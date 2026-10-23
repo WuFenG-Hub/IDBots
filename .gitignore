@@ -652,6 +652,7 @@ man_base_data_pebble/
 !tests/cerebellumTurnDecisionBundle.test.mjs
 !tests/cerebellumSessionFollowUpGate.test.mjs
 !tests/coworkSessionFollowUp.test.mjs
+!tests/followUpTurnEndExtract.test.mjs
 !tests/turnAckPhrases.test.mjs
 !tests/turnAckReply.test.mjs
 !tests/openAiCompatContent.test.mjs

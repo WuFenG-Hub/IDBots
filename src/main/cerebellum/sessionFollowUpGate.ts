@@ -46,9 +46,33 @@ export const CEREBELLUM_SESSION_FOLLOW_UP_TIMEOUT_MS = 1500;
 
 /**
  * Noul probability at or above which the completed turn counts as waiting on
- * the owner (cookbook gate at P >= 0.5, same as the memory write gate).
+ * the owner. Recall-biased by owner decision (2026-10-23): for follow-up
+ * triage a false positive costs the user one glance, a false negative costs a
+ * missed incident — so the bar sits at P >= 0.35 instead of the cookbook 0.5,
+ * and obvious high-severity reports never even reach the Noul (see
+ * hasForceFollowUpSignal below).
  */
-export const CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD = 0.5;
+export const CEREBELLUM_SESSION_FOLLOW_UP_THRESHOLD = 0.35;
+
+/**
+ * High-precision severity markers that force a follow-up verdict WITHOUT
+ * asking the cerebellum (recall safety net — "rather over-flag than miss").
+ * Applied to the turn's final assistant message only. Keep this list tight:
+ * every entry must be near-zero false-positive in bot report prose.
+ */
+export const CEREBELLUM_SESSION_FOLLOW_UP_FORCE_PATTERNS: readonly RegExp[] = [
+  /\bCRITICAL\b/,
+  /(?<![无不非])需(?:要)?人工(?:处置|处理|介入|干预|确认|决策)/,
+  /(?<![无不非])(?:待|需(?:要)?|请)你?(?:拍板|定夺)/,
+  /(?<![无不非])(?:待|等待)(?:你|您|owner)(?:的)?(?:处理|确认|决策|批准|回复)/,
+  /\baction required\b/i,
+  /\bneeds? (?:your|human|manual) (?:approval|decision|attention|intervention)\b/i,
+];
+
+/** True when the text carries an unambiguous "human must act" signal. */
+export function hasForceFollowUpSignal(text: string): boolean {
+  return CEREBELLUM_SESSION_FOLLOW_UP_FORCE_PATTERNS.some((pattern) => pattern.test(text));
+}
 
 /** Caller-authored dimensions, hard-capped like every cerebellum state field. */
 export const CEREBELLUM_SESSION_FOLLOW_UP_TITLE_MAX_CHARS = 200;
@@ -69,12 +93,17 @@ export const CEREBELLUM_SESSION_FOLLOW_UP_INSTRUCTIONS =
   '`session_title` — end by asking the human owner to decide, approve, choose, or reply? ' +
   'Count it as needing follow-up when the reply ends with a question directed at the user, a request for ' +
   'approval or a decision, or warnings/recommendations that require the owner\'s decision before proceeding. ' +
-  'Do NOT count a final report, summary, or bot-to-bot handoff that completes the task with no human action needed. ' +
-  'The text may be in ANY language; judge the intent, not keywords.';
+  'A monitoring, inspection, patrol, or health-check report that lists UNRESOLVED failures, outages, ' +
+  'severity-marked items (CRITICAL/WARN), or recommends manual operations (investigate, restart, clean up, ' +
+  'expand capacity, approve) ALWAYS counts as needing follow-up — the owner must triage it even when the ' +
+  'reply does not end with a literal question. ' +
+  'Do NOT count a final report where every finding is resolved or explicitly informational, a clean ' +
+  'all-clear summary, or a bot-to-bot handoff that completes the task with no human action needed. ' +
+  'The text may be in ANY language; judge the intent, not keywords. When in doubt, prefer follow-up.';
 
 export const CEREBELLUM_SESSION_FOLLOW_UP_CRITERIA = {
-  true: 'The turn ends asking the human to decide, approve, choose, or reply — e.g. it ends with a question to the user, a request for approval, or warnings/recommendations that require the owner\'s decision.',
-  false: 'The turn is a final report or bot-to-bot handoff; the task is complete and no human action is needed.',
+  true: 'The turn ends asking the human to decide, approve, choose, or reply — e.g. it ends with a question to the user, a request for approval, warnings/recommendations that require the owner\'s decision, or a monitoring/inspection report with unresolved failures or manual-operation suggestions.',
+  false: 'The turn is a final report or bot-to-bot handoff where the task is complete: every finding is resolved or informational, and no human action is needed.',
 } as const;
 
 export interface CerebellumSessionFollowUpRequest {
@@ -153,9 +182,10 @@ export function sessionFollowUpFromNoul(
 
 /**
  * Ask the cerebellum whether the completed turn leaves the session waiting on
- * the owner. Returns true (needs follow-up, noul >= threshold), false
- * (settles back, noul < threshold), or null (no verdict — blank assistant
- * text, HTTP/network error, abort/timeout, malformed payload). Never throws.
+ * the owner. Returns true (needs follow-up), false (settles back, noul <
+ * threshold), or null (no verdict — blank assistant text, HTTP/network error,
+ * abort/timeout, malformed payload). A high-severity keyword hit short-
+ * circuits to true without spending a JEV call. Never throws.
  */
 export async function classifySessionFollowUpWithCerebellum(input: {
   config: ResolvedCerebellumConfig;
@@ -167,6 +197,10 @@ export async function classifySessionFollowUpWithCerebellum(input: {
   threshold?: number;
 }): Promise<boolean | null> {
   if (!collapseWhitespace(input.lastAssistantText)) return null;
+
+  // Recall safety net: an unambiguous "human must act" marker never waits on
+  // the Noul — the owner would rather over-flag than miss an incident.
+  if (hasForceFollowUpSignal(input.lastAssistantText)) return true;
 
   const controller = new AbortController();
   const timer = setTimeout(
