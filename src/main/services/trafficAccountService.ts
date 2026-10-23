@@ -1057,6 +1057,18 @@ export interface TrafficFreeGrantCampaignStatus {
   grantBytes: number;
   claimed: boolean;
   claimable: boolean;
+  /**
+   * Repeat-campaign fields (free-grant repeat rollout). Absent on backends
+   * that still run the one-time campaign; the renderer must treat their
+   * absence as "one-time only" and keep trusting `claimable`.
+   */
+  repeatEnabled?: boolean;
+  /** Balance below this threshold makes a claimed account claimable again. */
+  thresholdBytes?: number;
+  /** Unix ms of the latest successful claim; 0/absent when never claimed. */
+  lastClaimAt?: number;
+  /** Unix ms when the next claim unlocks (cooldown); 0/absent when claimable now. */
+  nextClaimAt?: number;
 }
 
 export interface TrafficFreeGrantClaimResult {
@@ -1085,12 +1097,23 @@ export async function getFreeGrantCampaignStatus(): Promise<TrafficFreeGrantCamp
     identity: { address: identity.mvcAddress, timestamp, signature },
   });
   const record = data as Record<string, unknown>;
-  return {
+  const status: TrafficFreeGrantCampaignStatus = {
     enabled: normalizeBoolean(record.enabled),
     grantBytes: toNumber(record.grantBytes ?? record.grant_bytes),
     claimed: normalizeBoolean(record.claimed),
     claimable: normalizeBoolean(record.claimable),
   };
+  // Optional repeat-campaign fields: only attach when the backend actually
+  // sends them so older backends keep the one-time semantics end-to-end.
+  const repeatEnabled = record.repeatEnabled ?? record.repeat_enabled;
+  if (repeatEnabled !== undefined) status.repeatEnabled = normalizeBoolean(repeatEnabled);
+  const thresholdBytes = record.thresholdBytes ?? record.threshold_bytes;
+  if (thresholdBytes !== undefined) status.thresholdBytes = toNumber(thresholdBytes);
+  const lastClaimAt = record.lastClaimAt ?? record.last_claim_at;
+  if (lastClaimAt !== undefined) status.lastClaimAt = toNumber(lastClaimAt);
+  const nextClaimAt = record.nextClaimAt ?? record.next_claim_at;
+  if (nextClaimAt !== undefined) status.nextClaimAt = toNumber(nextClaimAt);
+  return status;
 }
 
 /**

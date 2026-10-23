@@ -796,6 +796,79 @@ test('getFreeGrantCampaignStatus signs the canonical message and parses the camp
   );
 });
 
+test('getFreeGrantCampaignStatus passes through repeat-campaign fields and tolerates their absence', async () => {
+  // Repeat-capable backend: claimed stays true while claimable flips back on
+  // (low balance + cooldown passed); the new fields ride along.
+  const repeatFetch = createFetchStub([
+    ['/v1/traffic/campaign/free-grant/status', {
+      enabled: true,
+      grantBytes: 50000000,
+      claimed: true,
+      claimable: true,
+      repeatEnabled: true,
+      thresholdBytes: 1000000,
+      lastClaimAt: 1761000000000,
+      nextClaimAt: 0,
+    }],
+    ['/v1/traffic/accounts', accountPayload()],
+  ]);
+  await makeServiceFixture({ fetchImpl: repeatFetch });
+
+  const repeatStatus = await getFreeGrantCampaignStatus();
+  assert.deepEqual(repeatStatus, {
+    enabled: true,
+    grantBytes: 50000000,
+    claimed: true,
+    claimable: true,
+    repeatEnabled: true,
+    thresholdBytes: 1000000,
+    lastClaimAt: 1761000000000,
+    nextClaimAt: 0,
+  });
+
+  // Snake_case aliases parse into the same camelCase shape.
+  const snakeFetch = createFetchStub([
+    ['/v1/traffic/campaign/free-grant/status', {
+      enabled: true,
+      grant_bytes: 50000000,
+      claimed: true,
+      claimable: false,
+      repeat_enabled: 1,
+      threshold_bytes: 1000000,
+      last_claim_at: 1761000000000,
+      next_claim_at: 1761604800000,
+    }],
+    ['/v1/traffic/accounts', accountPayload()],
+  ]);
+  await makeServiceFixture({ fetchImpl: snakeFetch });
+
+  const snakeStatus = await getFreeGrantCampaignStatus();
+  assert.deepEqual(snakeStatus, {
+    enabled: true,
+    grantBytes: 50000000,
+    claimed: true,
+    claimable: false,
+    repeatEnabled: true,
+    thresholdBytes: 1000000,
+    lastClaimAt: 1761000000000,
+    nextClaimAt: 1761604800000,
+  });
+
+  // Legacy one-time backend: no repeat fields at all — none get attached.
+  const legacyFetch = createFetchStub([
+    ['/v1/traffic/campaign/free-grant/status', { enabled: true, grantBytes: 10000000, claimed: true, claimable: false }],
+    ['/v1/traffic/accounts', accountPayload()],
+  ]);
+  await makeServiceFixture({ fetchImpl: legacyFetch });
+
+  const legacyStatus = await getFreeGrantCampaignStatus();
+  assert.deepEqual(legacyStatus, { enabled: true, grantBytes: 10000000, claimed: true, claimable: false });
+  assert.equal('repeatEnabled' in legacyStatus, false);
+  assert.equal('thresholdBytes' in legacyStatus, false);
+  assert.equal('lastClaimAt' in legacyStatus, false);
+  assert.equal('nextClaimAt' in legacyStatus, false);
+});
+
 test('claimFreeGrant signs traffic-free-grant-claim, sends idbots client, and invalidates the balance cache', async () => {
   let captured = null;
   const fetchImpl = createFetchStub([
