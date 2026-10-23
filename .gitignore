@@ -673,6 +673,7 @@ man_base_data_pebble/
 !tests/skillTurnWrapUpState.test.mjs
 !tests/orchestratorCoworkBridgeWrapUp.test.mjs
 !tests/twinDelegationWrapUpContract.test.mjs
+!tests/recentSessionsPrompt.test.mjs
 EVIDENCE.md
 
 # WS-A T5: tenant image static checks

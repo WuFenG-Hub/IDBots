@@ -17,6 +17,7 @@ import {
 } from './libs/coworkMemoryJudge';
 import { evaluateConversationMemoryQuality } from './libs/coworkMemoryQuality';
 import { stripLoneSurrogates, truncateUtf16Units } from './libs/llmSafeText';
+import type { RecentSessionPulseEntry } from './libs/recentSessionsPrompt';
 import { recordChainBackupTombstones } from './libs/chainBackupTombstones';
 import {
   parseSessionGoal,
@@ -10160,5 +10161,75 @@ export class CoworkStore implements MemoryBackend {
       human: this.getLatestMessageByType(row.id, 'user'),
       assistant: this.getLatestMessageByType(row.id, 'assistant'),
     }));
+  }
+
+  /**
+   * Recent-sessions pulse rows for the per-turn volatile tail: the bot's N
+   * most recent OTHER sessions (same metabot scope) with the latest visible
+   * exchange. Mirrors the session-list visibility rules — hidden, archived,
+   * and superseded A2A episodes stay out — so the pulse never surfaces a
+   * conversation the owner has deliberately put away. Read-only and cheap:
+   * one indexed list query plus two point lookups per row.
+   */
+  recentSessionPulse(options: {
+    metabotId: number;
+    excludeSessionId?: string | null;
+    limit?: number;
+  }): RecentSessionPulseEntry[] {
+    const limit = Math.max(1, Math.min(20, Math.floor(options.limit ?? 8)));
+    const clauses: string[] = [
+      's.metabot_id = ?',
+      'COALESCE(s.hidden_from_session_list, 0) = 0',
+      's.archived_at IS NULL',
+      // Same thread-aggregation rule as listSessions: a superseded A2A
+      // episode stays out; the thread's latest episode represents it.
+      `NOT EXISTS (
+        SELECT 1 FROM a2a_conversation_episodes episode
+        WHERE episode.session_id = s.id AND episode.next_session_id IS NOT NULL
+      )`,
+    ];
+    const params: Array<string | number> = [options.metabotId];
+    if (options.excludeSessionId) {
+      clauses.push('s.id != ?');
+      params.push(options.excludeSessionId);
+    }
+    const rows = this.getAll<{
+      id: string;
+      title: string;
+      activity_at: number | null;
+      updated_at: number;
+    }>(`
+      SELECT s.id, s.title,
+        COALESCE(s.activity_at, ${coworkSessionActivityAtSelectSql('s')}) AS activity_at,
+        s.updated_at
+      FROM cowork_sessions s
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY activity_at DESC, s.updated_at DESC, s.created_at DESC
+      LIMIT ?
+    `, [...params, limit]);
+    return rows
+      .map((row) => ({
+        sessionId: row.id,
+        title: row.title || 'Untitled',
+        activityAt: Number(row.activity_at ?? row.updated_at) || 0,
+        human: this.getLatestMessageByType(row.id, 'user'),
+        assistant: this.getLatestVisibleAssistantSnippet(row.id),
+      }))
+      .filter((row) => row.human || row.assistant);
+  }
+
+  private getLatestVisibleAssistantSnippet(sessionId: string): string {
+    // Same visibility rule as getSessionLatestVisibleMessage: never surface a
+    // thinking draft or a half-streamed placeholder as a session's last word.
+    const row = this.getOne<{ content: string }>(`
+      SELECT content
+      FROM cowork_messages
+      WHERE session_id = ? AND type = 'assistant'
+        AND (metadata IS NULL OR metadata NOT LIKE '%"isThinking":true%')
+        AND (metadata IS NULL OR metadata NOT LIKE '%"isStreaming":true%')
+      ORDER BY created_at DESC, COALESCE(sequence, 0) DESC, ROWID DESC
+      LIMIT 1
+    `, [sessionId]);
+    return truncate((row?.content || '').replace(/\s+/g, ' ').trim(), 280);
   }
 }

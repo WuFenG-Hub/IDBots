@@ -143,6 +143,10 @@ import {
   type VolatileDedupState,
   type VolatileSection,
 } from './coworkVolatileDedup';
+import {
+  buildRecentSessionsPromptBlock,
+  RECENT_SESSIONS_PROMPT_LIMIT,
+} from './recentSessionsPrompt';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
 import {
   CoworkCrossSessionService,
@@ -6162,6 +6166,7 @@ export class CoworkRunner extends EventEmitter {
       '## Memory Strategy',
       '- Historical retrieval is tool-first: when the user references previous chats, earlier outputs, prior decisions, or says "还记得/之前/上次/刚才", call `conversation_search` or `recent_chats` before answering.',
       '- When the conversation includes an `IDBots://{sessionId}` link, extract the session id and use `idbots_session_read_all` or `idbots_session_read_latest` to inspect that local Cowork/A2A session before relying on it.',
+      '- When a <recent_sessions> digest rides the turn, it lists your most recent other conversations with their latest exchange (newest first). Treat it as live awareness of your own recent work: before asking the owner to do or provide anything, or reporting anything as still pending, cross-check the digest first and open the IDBots:// link with `idbots_session_read_all` when unsure.',
       '- Use `idbots_session_insert_user_message` only to send an instruction into another Cowork session; the source session id is derived automatically.',
       '- Do not guess historical facts from partial context. If retrieval returns no evidence, explicitly say not found.',
       '- Do not call history tools for every request; only use them when historical context is required.',
@@ -6831,6 +6836,26 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Recent-sessions pulse: ambient awareness of this bot's OTHER recent
+   * conversations (latest exchange each, newest first). Tool-first retrieval
+   * requires the model to decide to look, which reliably fails exactly when
+   * it matters ("you already gave me that in the other chat"); the pulse
+   * rides the turn so the latest state of the bot's own recent work is
+   * present without a retrieval step. Unattributed sessions skip the block
+   * entirely — never leak another bot's sessions.
+   */
+  private buildRecentSessionsPromptBlockXml(sessionId: string): string {
+    const metabotId = this.store.getMetabotIdForSession(sessionId);
+    if (metabotId == null) return '';
+    const entries = this.store.recentSessionPulse({
+      metabotId,
+      excludeSessionId: sessionId,
+      limit: RECENT_SESSIONS_PROMPT_LIMIT,
+    });
+    return buildRecentSessionsPromptBlock(entries);
+  }
+
+  /**
    * Build the volatile per-turn context blocks that used to live in the system
    * prompt but MUST move to the current user message to keep the system-prompt
    * prefix byte-stable (Reasonix pattern: inject volatile state into the user
@@ -6962,6 +6987,16 @@ export class CoworkRunner extends EventEmitter {
       // call has usually resolved. Ungateable keys and missing verdicts
       // always inject — only an explicit false for a gateable key skips.
       await awaitVolatileGate();
+      // Recent-sessions pulse (see buildRecentSessionsPromptBlockXml). NOT
+      // alwaysInject: the dedup layer skips a byte-identical digest while the
+      // other sessions stand still and re-injects the moment any snippet
+      // moves, so the steady state costs zero repeated tokens.
+      if (sessionMemoryEnabled) {
+        const recentSessionsText = this.buildRecentSessionsPromptBlockXml(sessionId);
+        if (recentSessionsText) {
+          sections.push({ key: 'recent-sessions', text: recentSessionsText });
+        }
+      }
       // Hot-layer experience injection (self-identity + recent dream summaries).
       // The dream service rewrites these nightly and the summary window rolls
       // daily, so they can never live in the system prompt — they belong here
