@@ -95,7 +95,7 @@ import { computeCoworkContextUsage } from './libs/coworkContextUsage';
 import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
 import { generateSessionTitle, setSessionTitleBrainProvider, setTurnAckReplyBrainProvider } from './libs/coworkUtil';
 import { ensureSandboxReady, getSandboxStatus, onSandboxProgress } from './libs/coworkSandboxRuntime';
-import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps } from './libs/coworkOpenAICompatProxy';
+import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps, setFreeQuotaExhaustedListener } from './libs/coworkOpenAICompatProxy';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
 import { isWorkspaceMetabotId, resolveBotWorkspaceCwd, resolveSessionWorkingDirectory, shouldUseBotWorkspaceCwd } from './libs/botWorkspace';
 import { getGitBranch } from './libs/gitWorkspace';
@@ -170,7 +170,17 @@ import {
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { initBundleService, registerBundleIpcHandlers } from './services/bundleService';
-import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
+import { initLlmRelayService, registerLlmRelayIpcHandlers, getLlmRelayQuota } from './services/llmRelayService';
+import { createQuotaNudgeController, type QuotaNudgeController, type QuotaNudgeState } from './services/quotaNudgeService';
+import { switchFreePrimaryBrainsToProvider } from './services/brainSwitchService';
+
+/**
+ * Global free-quota nudge controller (Phase 2, 2026-10-23 new-user free-quota
+ * post-mortem). Created once stores are ready (initApp tail); the IPC handlers
+ * answer a quiet null state before that so an early renderer mount never
+ * crashes on a not-yet-wired controller.
+ */
+let quotaNudgeController: QuotaNudgeController | null = null;
 import { applyRelayIdentityChange, initRelayIdentityCloseoutService, reconcileRelayCredentialsWithIdentity } from './services/relayIdentityCloseout';
 import { initVisionRelayService, recognizeAudioViaRelay, recognizeImageViaRelay, recognizeVideoAudioViaRelay, recognizeVideoViaRelay } from './services/visionRelayService';
 import { probeMediaFile, convertMediaFile, grabVideoFrame } from './services/mediaToolsService';
@@ -195,6 +205,7 @@ import {
 import { seedGreetingFallbackIfMissing } from './services/onboardingGreeting';
 import { deleteBootstrapDoc } from './libs/welcomeBootstrap';
 import { migrateLegacyLlmBrainValues } from './services/llmBrainMigration';
+import { backfillFreeBrainFallbacks, collectUsablePaidProviderKeys } from './services/brainFallbackBackfill';
 import { reconcileStaleModelBindings } from './services/staleModelBindingReconcile';
 import { migrateDeepSeekOutputCeiling } from './services/deepseekOutputCeilingMigration';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
@@ -15141,7 +15152,17 @@ if (!gotTheLock) {
       // over remaining steps), the exact same updateMetaBotCore the Twin
       // metabot_update tool calls. Returns the attempted/remaining sync plan so
       // the renderer can render sync status and offer a manual Retry.
-      return await updateMetaBotCore(id, input, getMetabotManageDeps());
+      const result = await updateMetaBotCore(id, input, getMetabotManageDeps());
+      // A manual brain edit may take every bot off the free relay — recompute
+      // the global quota nudge so the banner disappears the moment the setup
+      // is fixed (2026-10-23 sticky-banner lesson: derived state, no latch).
+      if (
+        result?.success
+        && ['llm_id', 'llm_provider', 'fallback_llm_id', 'fallback_llm_provider'].some((field) => field in input)
+      ) {
+        void quotaNudgeController?.refresh().catch(() => undefined);
+      }
+      return result;
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update metabot' };
     }
@@ -16966,6 +16987,56 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
   });
   registerLlmRelayIpcHandlers({ registerIpcHandler });
 
+  // Global free-quota nudge IPC (Phase 2, 2026-10-23): the derived banner
+  // state is computed in the main process (quota + bot brains + provider
+  // catalog + per-cycle dismissal) so the renderer banner stays a dumb view.
+  registerIpcHandler('llmRelay:getQuotaNudgeState', async () => {
+    try {
+      const state: QuotaNudgeState | null = quotaNudgeController ? await quotaNudgeController.refresh() : null;
+      return { success: true, state };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  registerIpcHandler('llmRelay:dismissQuotaNudge', async (_event, input: { level?: unknown }) => {
+    try {
+      const level = input?.level === 'exhausted' ? 'exhausted' : 'low';
+      const state: QuotaNudgeState | null = quotaNudgeController ? await quotaNudgeController.dismiss(level) : null;
+      return { success: true, state };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  // One-click brain switch (Phase 2, 2026-10-23): the quota nudge banner's
+  // primary action — move every free-primary bot onto the owner's own provider
+  // (free relay kept as fallback), and move the global default route off the
+  // relay when it still rides it. Per-bot writes go through updateMetaBotCore,
+  // the exact path a manual bot-edit takes.
+  registerIpcHandler('brainSwitch:switchFreeBrainsTo', async (_event, input: { providerKey?: unknown }) => {
+    try {
+      const providerKey = typeof input?.providerKey === 'string' ? input.providerKey.trim() : '';
+      if (!providerKey) return { success: false, error: 'providerKey is required' };
+      const result = await switchFreePrimaryBrainsToProvider({
+        listMetabots: () => getMetabotStore().listMetabots(),
+        getAppConfig: () => getStore()?.get('app_config') ?? null,
+        updateBot: (id, botInput) => updateMetaBotCore(id, botInput, getMetabotManageDeps()),
+        mutateAppConfig: (mutate) => {
+          const storeRef = getStore();
+          if (!storeRef) return;
+          storeRef.set('app_config', mutate(storeRef.get('app_config') ?? {}));
+        },
+      }, providerKey);
+      // The switch changes brain bindings (and possibly the default route):
+      // recompute the quota nudge so the banner disappears. A bot-only switch
+      // does not touch app_config, so the provider watch alone would miss it.
+      void quotaNudgeController?.refresh().catch(() => undefined);
+      return { success: result.success, error: result.error, result };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
   // Metaso bundles (REQ-A-24, C4): plan catalog / orders / meters for the
   // mobile recharge surface. Shares the traffic service's identity-signing
   // machinery and base-URL resolution; serves the local stub when
@@ -18743,6 +18814,34 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     }
     startupLog('llm brain migration done');
 
+    // One-shot backup-brain backfill (2026-10-23 new-user free-quota
+    // post-mortem): bots created while only the free-quota relay existed hold
+    // a free primary brain with NO fallback, so an exhausted free allowance
+    // kills passive scenarios even when the owner later configured their own
+    // provider key. When a usable non-free provider is already present at
+    // boot, seed it as the fallback brain of every free-primary bot that has
+    // none. kv-flag guarded to run ONCE per install: a user who deliberately
+    // clears a fallback brain must not be silently re-filled on the next
+    // boot (the live app_config watch below covers providers added later).
+    try {
+      const storeRef = getStore();
+      if (storeRef && !storeRef.get('brain_fallback_backfill_v1')) {
+        const backfillResult = backfillFreeBrainFallbacks({
+          metabotStore: getMetabotStore(),
+          getAppConfig: () => getStore()?.get<{
+            model?: { defaultModel?: string };
+            providers?: Record<string, { enabled?: boolean; apiKey?: string | null; models?: Array<{ id?: string }> }>;
+          }>('app_config') ?? null,
+        });
+        storeRef.set('brain_fallback_backfill_v1', { ranAt: Date.now(), ...backfillResult });
+        startupLog(
+          `brain fallback backfill done (backfilled=${backfillResult.backfilled}, source=${backfillResult.sourceProvider ?? 'none'})`,
+        );
+      }
+    } catch (error) {
+      console.error('[brain-fallback-backfill] startup migration failed (non-fatal):', error);
+    }
+
     // HOST-FIX-RFP 2026-09-28 (D2, the zhipu silent-drop incident): reconcile
     // every stored model binding (session picks + bot brains) against the live
     // provider catalog at startup. Auto-rebinds when the model id maps to
@@ -18982,6 +19081,68 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
         updateTrayMenu(() => mainWindow, getStore());
       }
     });
+
+    // Live backup-brain seeding (2026-10-23 new-user free-quota post-mortem):
+    // when a provider becomes newly usable (enabled + keyed + has models),
+    // seed it as the fallback brain of every free-primary bot that has none,
+    // so an exhausted free allowance stops killing passive scenarios without
+    // the owner ever learning the brain settings. The one-shot startup
+    // backfill above covers providers that already existed at boot; this
+    // watch covers providers added (or re-enabled/keyed) while the app runs.
+    let lastUsablePaidProviderKeys = collectUsablePaidProviderKeys(
+      getStore().get<{ providers?: Record<string, { enabled?: boolean; apiKey?: string | null; models?: Array<{ id?: string }> }> }>('app_config'),
+    );
+    getStore().onDidChange('app_config', () => {
+      try {
+        const currentKeys = collectUsablePaidProviderKeys(
+          getStore().get<{ providers?: Record<string, { enabled?: boolean; apiKey?: string | null; models?: Array<{ id?: string }> }> }>('app_config'),
+        );
+        const addedKeys = currentKeys.filter((key) => !lastUsablePaidProviderKeys.includes(key));
+        lastUsablePaidProviderKeys = currentKeys;
+        // Any provider-catalog change (add/remove/key edit/free-relay
+        // provisioning) can move the nudge's suggested switch target or the
+        // free provider key — recompute. Cheap: the relay quota read behind
+        // it is 30s-cached and the push only fires on an actual state change.
+        void quotaNudgeController?.refresh().catch(() => undefined);
+        if (addedKeys.length === 0) return;
+        const result = backfillFreeBrainFallbacks({
+          metabotStore: getMetabotStore(),
+          getAppConfig: () => getStore()?.get<{
+            model?: { defaultModel?: string };
+            providers?: Record<string, { enabled?: boolean; apiKey?: string | null; models?: Array<{ id?: string }> }>;
+          }>('app_config') ?? null,
+          onlyProviderKeys: addedKeys,
+        });
+        if (result.backfilled > 0) {
+          console.log(
+            `[brain-fallback-backfill] seeded backup brain from newly usable provider(s) ${addedKeys.join(', ')} ` +
+            `for ${result.backfilled} free-primary bot(s)`,
+          );
+        }
+      } catch (error) {
+        console.error('[brain-fallback-backfill] provider watch failed (non-fatal):', error);
+      }
+    });
+
+    // Global free-quota nudge (Phase 2, 2026-10-23): derives the banner state
+    // from live quota + bot brain bindings + provider catalog. Push triggers:
+    // the 30-min poll inside the controller, a relay 429 observed by the
+    // OpenAI-compat proxy, app_config changes (the provider watch above), and
+    // manual brain edits (metabot:update). The banner is a pure function of
+    // this state, so fixing the setup (switch or manual edit) makes it
+    // disappear without any explicit hide action.
+    quotaNudgeController = createQuotaNudgeController({
+      getAppConfig: () => getStore()?.get('app_config') ?? null,
+      listMetabots: () => getMetabotStore().listMetabots(),
+      fetchQuota: (input) => getLlmRelayQuota(input),
+      getKv: (key) => getStore()?.get(key),
+      setKv: (key, value) => {
+        getStore()?.set(key, value);
+      },
+      emit: (state) => broadcastToRenderers('llmRelay:quotaNudgeChanged', state),
+    });
+    setFreeQuotaExhaustedListener(() => quotaNudgeController?.notifyExhaustedSeen());
+    void quotaNudgeController.refresh().catch(() => undefined);
 
     // 在 macOS 上，当点击 dock 图标时显示已有窗口或重新创建
     // REQ-A-2: server mode never creates a window, dock click or not.

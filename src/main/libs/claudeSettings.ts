@@ -567,6 +567,53 @@ export function getAppConfigProviders(): Record<
 }
 
 /**
+ * The system rescue brain (2026-10-23 new-user free-quota post-mortem): the
+ * first enabled, keyed, non-free provider's default/first model, in config
+ * order. This is the last-resort rung for one-shot cognitive calls
+ * (services/llmFallback.runWithSystemRescue) and for the DSH current-default
+ * rescue when a bot's primary AND fallback brains both die on terminal errors
+ * (quota/auth/config) — the classic case being a new user whose IDBots-Free
+ * allowance ran out but who already configured their own provider key in
+ * Settings without wiring it into any brain setting.
+ *
+ * The free-quota relay is NEVER a rescue candidate: it must not silently
+ * absorb paid-brain traffic, and an exhausted free relay is the most common
+ * rescue trigger. Providers already tried this call are excluded by the caller
+ * (a dead account fails again). Returns null when nothing usable remains.
+ */
+export interface SystemRescueBrain {
+  llmId: string;
+  llmProvider: string;
+}
+
+export function resolveSystemRescueBrain(options?: {
+  /** Provider keys already tried for this call (a dead account fails again). */
+  excludeProviders?: ReadonlyArray<string | null | undefined>;
+}): SystemRescueBrain | null {
+  const appConfig = getStore()?.get<AppConfig>('app_config');
+  const providers = appConfig?.providers ?? {};
+  const excluded = new Set(
+    (options?.excludeProviders ?? [])
+      .map((key) => (key ?? '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const defaultModel = appConfig?.model?.defaultModel?.trim() || '';
+  for (const [key, provider] of Object.entries(providers)) {
+    if (!provider?.enabled) continue;
+    if (isFreeQuotaProvider(key)) continue;
+    if (excluded.has(key.trim().toLowerCase())) continue;
+    if (providerRequiresApiKey(key) && !provider.apiKey?.trim()) continue;
+    const models = (provider.models ?? []).filter((model) => typeof model?.id === 'string' && model.id);
+    if (models.length === 0) continue;
+    const modelId = defaultModel && models.some((model) => model.id === defaultModel)
+      ? defaultModel
+      : (models[0].id as string);
+    return { llmId: modelId, llmProvider: key };
+  }
+  return null;
+}
+
+/**
  * Direct-upstream provider route for the DSH kernel (Phase 1 M5): same
  * provider matching as the Claude path, but WITHOUT the OpenAI-compat proxy —
  * the DSH runtime speaks the provider's native protocol directly, so this

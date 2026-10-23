@@ -234,6 +234,17 @@ let proxyServer: http.Server | null = null;
 let proxyPort: number | null = null;
 let upstreamConfig: OpenAICompatUpstreamConfig | null = null;
 let lastProxyError: string | null = null;
+
+/**
+ * Fired when an upstream answer carries a relay quota-exhaustion machine code
+ * (free_quota_exhausted / quota_exhausted). Registered by main.ts to trigger
+ * an immediate quota-nudge recompute so the global banner lights up at the
+ * moment of failure instead of at the next poll. Never awaited, never throws.
+ */
+let freeQuotaExhaustedListener: (() => void) | null = null;
+export function setFreeQuotaExhaustedListener(listener: (() => void) | null): void {
+  freeQuotaExhaustedListener = listener;
+}
 // Per-session upstream registry. Each cowork session whose provider routes via
 // this proxy (openai/responses apiFormat) registers its own upstream here, so
 // concurrent sessions on different providers no longer overwrite each other
@@ -4187,6 +4198,14 @@ async function handleRequest(
       const firstErrorCode = extractUpstreamErrorCode(firstErrorText);
       if (firstErrorCode && !firstErrorMessage.includes(firstErrorCode)) {
         firstErrorMessage = `${firstErrorCode}: ${firstErrorMessage}`;
+      }
+      // A relay quota death is a state change the global quota nudge cares
+      // about: force a recompute so the banner lights up now, not at the
+      // next poll tick.
+      if (firstErrorCode && /^(free_quota_exhausted|quota_exhausted)$/i.test(firstErrorCode)) {
+        try {
+          freeQuotaExhaustedListener?.();
+        } catch { /* the listener must never break the proxy */ }
       }
 
       if (upstreamAPIType === 'chat_completions' && upstreamResponse.status === 400) {

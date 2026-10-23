@@ -4,6 +4,7 @@ import { RootState } from './store';
 import type { SettingsOpenOptions } from './components/Settings';
 import Sidebar from './components/Sidebar';
 import Toast from './components/Toast';
+import QuotaNudgeBanner from './components/QuotaNudgeBanner';
 import WindowTitleBar from './components/window/WindowTitleBar';
 import { CoworkView } from './components/cowork';
 import CoworkPermissionOverlay from './components/cowork/CoworkPermissionOverlay';
@@ -1372,6 +1373,7 @@ const App: React.FC = () => {
       {toastMessage && (
         <Toast message={toastMessage} onClose={() => setToastMessage(null)} />
       )}
+      <QuotaNudgeBanner onOpenModelSettings={() => handleShowSettings({ initialTab: 'model' })} />
       <CoworkPermissionOverlay
         inlineSessionId={mainView === 'cowork' && showHomeSurface ? currentSessionId : null}
       />

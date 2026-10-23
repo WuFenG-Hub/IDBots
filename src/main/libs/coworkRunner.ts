@@ -11,7 +11,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { PermissionResult } from './coworkPermissionTypes';
 import { isServerMode } from '../server/serverMode';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
-import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, getPersistedChatExperienceMode, resolveDshProviderRoute, getAppConfigProviders, isFreeQuotaProvider, ModelProviderSelectionError, type DshProviderRouteInfo } from './claudeSettings';
+import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, getPersistedChatExperienceMode, resolveDshProviderRoute, resolveSystemRescueBrain, getAppConfigProviders, isFreeQuotaProvider, ModelProviderSelectionError, type DshProviderRouteInfo } from './claudeSettings';
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { buildGoalPromptSection, type CoworkSessionGoal } from './coworkSessionGoal';
 import { DshTurnHub, dshSessionRootFor, dshWebSearchSeedFromProviders, isNativeDeepSeekChatRoute, DSH_RUNTIME_IDLE_TTL_MS, type DshTurnProviderRoute } from './coworkDshTurn';
@@ -9170,12 +9170,22 @@ export class CoworkRunner extends EventEmitter {
    * is not a concern and an avoided cost is not worth a dead turn. The
    * rescue now accepts ANY enabled default (free or paid) as long as it
    * maps to a different upstream; per-call only, nothing is anchored.
+   *
+   * 2026-10-23 new-user free-quota post-mortem: the current default cannot
+   * rescue when it IS the failed route — the classic case is a new user
+   * whose global default provider is the exhausted free relay (same-route
+   * decline). In that case (or when no default resolves at all) the rescue
+   * falls through to the system rescue brain: the first enabled, keyed,
+   * non-free provider the owner configured in Settings but never wired into
+   * any brain setting. The free relay is never a candidate, and the failed
+   * route's provider is excluded — a dead account fails again.
    */
   private resolveCurrentDefaultDshRoute(
     sessionId: string,
     failedRoute: DshProviderRouteInfo,
-  ): { route: DshProviderRouteInfo | null; decline: 'none' | 'resolve-error' | 'no-default' | 'same-route' } {
+  ): { route: DshProviderRouteInfo | null; decline: 'none' | 'resolve-error' | 'no-default' | 'same-route'; source: 'default' | 'system-rescue' | null } {
     let defaultRoute: ReturnType<typeof resolveDshProviderRoute> = null;
+    let decline: 'resolve-error' | 'no-default' | 'same-route' = 'no-default';
     try {
       defaultRoute = resolveDshProviderRoute();
     } catch (error) {
@@ -9183,22 +9193,55 @@ export class CoworkRunner extends EventEmitter {
         sessionId,
         error: error instanceof Error ? error.message : String(error),
       });
-      return { route: null, decline: 'resolve-error' };
+      decline = 'resolve-error';
     }
-    if (!defaultRoute?.baseUrl || !defaultRoute.apiKey) return { route: null, decline: 'no-default' };
+    if (defaultRoute && (!defaultRoute.baseUrl || !defaultRoute.apiKey)) {
+      defaultRoute = null;
+    }
     if (
-      defaultRoute.provider === failedRoute.provider
+      defaultRoute
+      && defaultRoute.provider === failedRoute.provider
       && defaultRoute.baseUrl === failedRoute.baseUrl
       && defaultRoute.model === failedRoute.model
     ) {
-      return { route: null, decline: 'same-route' };
+      defaultRoute = null;
+      decline = 'same-route';
     }
-    coworkLog('WARN', 'resolveCurrentDefaultDshRoute', 'Bound route died on quota/rate-limit with no fallback brain — rescuing the turn onto the current default route', {
-      sessionId,
-      fromRoute: { provider: failedRoute.provider, model: failedRoute.model, baseUrl: failedRoute.baseUrl },
-      toRoute: { provider: defaultRoute.provider, model: defaultRoute.model, baseUrl: defaultRoute.baseUrl },
-    });
-    return { route: defaultRoute, decline: 'none' };
+    if (defaultRoute) {
+      coworkLog('WARN', 'resolveCurrentDefaultDshRoute', 'Bound route died on quota/rate-limit with no fallback brain — rescuing the turn onto the current default route', {
+        sessionId,
+        fromRoute: { provider: failedRoute.provider, model: failedRoute.model, baseUrl: failedRoute.baseUrl },
+        toRoute: { provider: defaultRoute.provider, model: defaultRoute.model, baseUrl: defaultRoute.baseUrl },
+      });
+      return { route: defaultRoute, decline: 'none', source: 'default' };
+    }
+    const rescueBrain = resolveSystemRescueBrain({ excludeProviders: [failedRoute.provider] });
+    if (rescueBrain) {
+      let rescueRoute: ReturnType<typeof resolveDshProviderRoute> = null;
+      try {
+        rescueRoute = resolveDshProviderRoute(rescueBrain.llmId, rescueBrain.llmProvider);
+      } catch {
+        rescueRoute = null;
+      }
+      if (
+        rescueRoute?.baseUrl
+        && rescueRoute.apiKey
+        && !(
+          rescueRoute.provider === failedRoute.provider
+          && rescueRoute.baseUrl === failedRoute.baseUrl
+          && rescueRoute.model === failedRoute.model
+        )
+      ) {
+        coworkLog('WARN', 'resolveCurrentDefaultDshRoute', 'Current default could not rescue the turn — handing it to the system rescue provider', {
+          sessionId,
+          decline,
+          fromRoute: { provider: failedRoute.provider, model: failedRoute.model, baseUrl: failedRoute.baseUrl },
+          toRoute: { provider: rescueRoute.provider, model: rescueRoute.model, baseUrl: rescueRoute.baseUrl },
+        });
+        return { route: rescueRoute, decline: 'none', source: 'system-rescue' };
+      }
+    }
+    return { route: null, decline, source: null };
   }
 
   /**
@@ -11092,10 +11135,12 @@ export class CoworkRunner extends EventEmitter {
         // scratch.
         let fallbackRoute = this.resolveSessionFallbackDshRoute(sessionId, gateSourceRoute);
         let fallbackIsCurrentDefault = false;
+        let fallbackIsSystemRescue = false;
         if (!fallbackRoute && (gateQuota || gateTransient || gateConfigHard)) {
           const rescue = this.resolveCurrentDefaultDshRoute(sessionId, gateSourceRoute);
           fallbackRoute = rescue.route;
-          fallbackIsCurrentDefault = fallbackRoute !== null;
+          fallbackIsCurrentDefault = rescue.source === 'default';
+          fallbackIsSystemRescue = rescue.source === 'system-rescue';
           if (!fallbackRoute) {
             ladderNoTargetKind = 'no-alternative';
           }
@@ -11122,23 +11167,25 @@ export class CoworkRunner extends EventEmitter {
           // §9 visibility: the degradation must be discoverable where the
           // session itself is inspected (transcript/UI/session log), not only
           // in cowork.log — a group-task post-mortem reads the worker session.
+          const switchTargetZh = fallbackIsSystemRescue ? '系统兜底模型' : fallbackIsCurrentDefault ? '当前默认模型' : '该 Bot 的备用模型';
+          const switchTargetEn = fallbackIsSystemRescue ? 'the system rescue model' : fallbackIsCurrentDefault ? 'the current default' : "the bot's fallback model";
           this.addSystemMessage(
             sessionId,
             tApp(
               gateQuota
-                ? `主模型 ${route.model}（${route.provider}）额度不足，本轮已切换到${fallbackIsCurrentDefault ? '当前默认模型' : '该 Bot 的备用模型'} ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`
+                ? `主模型 ${route.model}（${route.provider}）额度不足，本轮已切换到${switchTargetZh} ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`
                 : gateOverflow
                   ? `主模型 ${route.model}（${route.provider}）上下文超限，本轮已切换到该 Bot 的备用模型 ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`
                 : gateConfigHard
-                  ? `主模型 ${route.model}（${route.provider}）配置类错误（鉴权被拒或模型不存在），本轮已降级到${fallbackIsCurrentDefault ? '当前默认模型' : '该 Bot 的备用模型'} ${fallbackRoute.model}（${fallbackRoute.provider}）继续；请检查原供应商的 API key 或模型配置。`
-                  : `主模型路由持续不可用，本轮已切换到${fallbackIsCurrentDefault ? '当前默认模型' : '该 Bot 的备用模型'} ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`,
+                  ? `主模型 ${route.model}（${route.provider}）配置类错误（鉴权被拒或模型不存在），本轮已降级到${switchTargetZh} ${fallbackRoute.model}（${fallbackRoute.provider}）继续；请检查原供应商的 API key 或模型配置。`
+                  : `主模型路由持续不可用，本轮已切换到${switchTargetZh} ${fallbackRoute.model}（${fallbackRoute.provider}）继续。`,
               gateQuota
-                ? `The primary model ${route.model} (${route.provider}) ran out of credit; this turn switched to the ${fallbackIsCurrentDefault ? 'current default' : "bot's fallback"} model ${fallbackRoute.model} (${fallbackRoute.provider}).`
+                ? `The primary model ${route.model} (${route.provider}) ran out of credit; this turn switched to the ${switchTargetEn} model ${fallbackRoute.model} (${fallbackRoute.provider}).`
                 : gateOverflow
                   ? `The primary model ${route.model} (${route.provider}) exceeded its context window; this turn switched to the bot's fallback model ${fallbackRoute.model} (${fallbackRoute.provider}).`
                 : gateConfigHard
-                  ? `The primary model ${route.model} (${route.provider}) failed with a configuration-level error (auth rejected or model not found); this turn degraded to the ${fallbackIsCurrentDefault ? 'current default' : "bot's fallback"} model ${fallbackRoute.model} (${fallbackRoute.provider}). Check the original provider's API key or model configuration.`
-                  : `The primary model route kept failing; this turn switched to the ${fallbackIsCurrentDefault ? 'current default' : "bot's fallback"} model ${fallbackRoute.model} (${fallbackRoute.provider}).`
+                  ? `The primary model ${route.model} (${route.provider}) failed with a configuration-level error (auth rejected or model not found); this turn degraded to the ${switchTargetEn} model ${fallbackRoute.model} (${fallbackRoute.provider}). Check the original provider's API key or model configuration.`
+                  : `The primary model route kept failing; this turn switched to the ${switchTargetEn} model ${fallbackRoute.model} (${fallbackRoute.provider}).`
             ),
             {
               dshRouteFallback: true,
@@ -11146,6 +11193,7 @@ export class CoworkRunner extends EventEmitter {
               fromModel: route.model,
               toProvider: fallbackRoute.provider,
               toModel: fallbackRoute.model,
+              ...(fallbackIsSystemRescue ? { systemRescue: true } : {}),
             }
           );
           // Quota/overflow/config-hard unconditional first attempt: these
