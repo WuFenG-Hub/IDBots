@@ -120,6 +120,7 @@ import { MetaIDKnowledgeStore } from './metaidKnowledgeStore';
 import { TeamCultureStore, type TeamCultureEntry, type TeamCultureKind } from './teamCultureStore';
 import { StandingPageStore } from './standingPageStore';
 import { setStandingPageStore } from './standingPageRuntime';
+import { sampleStandingPageScope } from './libs/standingPageRefresh';
 import { MetaIDCognitionContextService } from './services/metaidCognitionContext';
 import { MetaIDRelationshipResolver } from './services/metaidRelationshipResolver';
 import { MetaIDContactViewService } from './services/metaidContactViewService';
@@ -14747,6 +14748,59 @@ if (!gotTheLock) {
   // ==================== Team Culture IPC Handlers ====================
   // Fleet-shared coordination prior (glossary / conventions / lessons).
 
+  // Standing pages (memory evolution #2): owner-facing read/manage surface.
+  registerIpcHandler('standingPages:list', async (_event, input?: { metabotId?: number }) => {
+    const metabotId = input?.metabotId ?? null;
+    if (metabotId == null) return { success: false, error: 'metabotId is required' };
+    try {
+      const store = getStandingPageStore();
+      if (!store) return { success: false, error: 'standing page store unavailable' };
+      const scopeStores = {
+        coworkStore: getCoworkStore(),
+        dreamStore: getDreamStore(),
+        knowledgeStore: getMetaIDKnowledgeStore(),
+      };
+      const pages = store.listStandingPages(metabotId, { includeArchived: true }).map((page) => {
+        let stale: boolean | null = null;
+        if (page.builtAt != null && page.status === 'active') {
+          const sample = sampleStandingPageScope(scopeStores, metabotId, page.spec);
+          stale = sample != null && sample.fingerprint !== page.scopeFingerprint;
+        }
+        return { ...page, stale };
+      });
+      return { success: true, pages };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  registerIpcHandler('standingPages:create', async (_event, input: { metabotId: number; name: string; question: string }) => {
+    try {
+      const store = getStandingPageStore();
+      if (!store) return { success: false, error: 'standing page store unavailable' };
+      const page = store.createCustomPage({ metabotId: input.metabotId, name: input.name, question: input.question });
+      return { success: true, page };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  registerIpcHandler('standingPages:remove', async (_event, input: { metabotId: number; key: string }) => {
+    try {
+      const store = getStandingPageStore();
+      if (!store) return { success: false, error: 'standing page store unavailable' };
+      return { success: store.removeStandingPage(input.metabotId, input.key) };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  registerIpcHandler('standingPages:restore', async (_event, input: { metabotId: number; key: string }) => {
+    try {
+      const store = getStandingPageStore();
+      if (!store) return { success: false, error: 'standing page store unavailable' };
+      return { success: store.restoreStandingPage(input.metabotId, input.key) };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
   registerIpcHandler('teamCulture:list', async (_event, input?: {
     kind?: TeamCultureKind | 'all';
     status?: 'active' | 'superseded' | 'archived' | 'all';

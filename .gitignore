@@ -722,3 +722,4 @@ blob-report/
 !tests/standingPageStore.test.mjs
 !tests/standingPageRefresh.test.mjs
 !tests/standingPagesTool.test.mjs
+!tests/standingPagesSettingsStatic.test.mjs

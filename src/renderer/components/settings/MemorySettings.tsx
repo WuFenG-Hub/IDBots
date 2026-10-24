@@ -40,7 +40,7 @@ type MetabotOption = {
   globalmetaid: string | null;
 };
 
-type MemorySection = 'knowledge' | 'contacts' | 'facts' | 'dream' | 'culture';
+type MemorySection = 'knowledge' | 'contacts' | 'facts' | 'dream' | 'culture' | 'standingPages';
 
 /** Usage classes a user may assign manually. `self_identity` is dream-protected. */
 type EditableUsageClass = 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
@@ -214,6 +214,17 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [hygieneNotice, setHygieneNotice] = useState<string | null>(null);
 
   // --- Team culture (fleet-shared; independent of the selected bot) ---
+  // ---- Standing pages (memory evolution #2) ----
+  const [standingPages, setStandingPages] = useState<Array<{
+    id: string; pageKey: string; name: string; question: string; content: string;
+    sections: Array<{ key: string; title: string; body: string }>;
+    builtAt: number | null; status: 'active' | 'archived'; isDefault: boolean;
+    lastRefreshError: string | null; stale?: boolean | null;
+  }>>([]);
+  const [standingNewName, setStandingNewName] = useState('');
+  const [standingNewQuestion, setStandingNewQuestion] = useState('');
+  const [standingAddError, setStandingAddError] = useState<string | null>(null);
+
   const [cultureEntries, setCultureEntries] = useState<TeamCultureEntry[]>([]);
   const [cultureCounts, setCultureCounts] = useState<TeamCultureActiveCounts | null>(null);
   const [cultureLoading, setCultureLoading] = useState(false);
@@ -892,6 +903,21 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     if (activeSection !== 'culture') return;
     void loadCulture();
   }, [activeSection, loadCulture]);
+
+  const loadStandingPages = useCallback(async () => {
+    if (metabotId == null) return;
+    try {
+      setStandingPages(await coworkService.listStandingPages(metabotId));
+    } catch (error) {
+      console.error('Failed to load standing pages:', error);
+      setStandingPages([]);
+    }
+  }, [metabotId]);
+
+  useEffect(() => {
+    if (activeSection !== 'standingPages') return;
+    void loadStandingPages();
+  }, [activeSection, loadStandingPages]);
 
   const resetCultureEditor = () => {
     setEditingCultureId(null);
@@ -1872,6 +1898,92 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     disabled: i18nService.t('memoryCultureDistillOutcomeDisabled'),
   };
 
+  const renderStandingPages = () => (
+    <div className="space-y-3">
+      {standingPages.length === 0 && (
+        <div className="py-4 text-center text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('standingPagesEmpty')}</div>
+      )}
+      {standingPages.map((page) => (
+        <div key={page.id} className="rounded-lg border px-3 py-2 dark:border-claude-darkBorder border-claude-border">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-medium dark:text-claude-darkText text-claude-text">{page.name}</span>
+              {page.status === 'archived' ? (
+                <span className="rounded-full border px-2 py-0.5 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('standingPagesArchived')}</span>
+              ) : page.builtAt == null ? (
+                <span className="rounded-full border px-2 py-0.5 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('standingPagesUnbuilt')}</span>
+              ) : (
+                <span className={`rounded-full px-2 py-0.5 text-[10px] ${page.stale ? 'bg-amber-500/10 text-amber-700 dark:text-amber-400' : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'}`}>
+                  {page.stale ? i18nService.t('standingPagesStale') : i18nService.t('standingPagesFresh')}
+                </span>
+              )}
+              {page.builtAt != null && (
+                <span className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('standingPagesBuiltAt')}: {new Date(page.builtAt).toLocaleString()}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              className="rounded-lg border px-2 py-1 text-[11px] dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary"
+              onClick={async () => {
+                if (page.status === 'archived') await coworkService.restoreStandingPage(metabotId ?? 0, page.pageKey);
+                else await coworkService.removeStandingPage(metabotId ?? 0, page.pageKey);
+                await loadStandingPages();
+              }}
+            >
+              {page.status === 'archived' ? i18nService.t('standingPagesRestore') : i18nService.t('standingPagesRemove')}
+            </button>
+          </div>
+          <div className="mt-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{page.question}</div>
+          {page.lastRefreshError && (
+            <div className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">{i18nService.t('standingPagesRefreshError')}: {page.lastRefreshError}</div>
+          )}
+          {page.sections.length > 0 && (
+            <div className="mt-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{page.sections.map((section) => section.title).join(' / ')}</div>
+          )}
+          {page.builtAt != null && page.content && (
+            <details className="mt-1">
+              <summary className="cursor-pointer text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{page.pageKey}</summary>
+              <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded-lg bg-claude-surface p-2 text-[11px] dark:bg-claude-darkSurface dark:text-claude-darkText text-claude-text">{page.content}</pre>
+            </details>
+          )}
+        </div>
+      ))}
+      <div className="rounded-lg border px-3 py-2 dark:border-claude-darkBorder border-claude-border">
+        <div className="text-xs font-medium dark:text-claude-darkText text-claude-text">{i18nService.t('standingPagesAddTitle')}</div>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          <input
+            value={standingNewName}
+            onChange={(event) => setStandingNewName(event.target.value)}
+            placeholder={i18nService.t('standingPagesAddName')}
+            className="rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface dark:text-claude-darkText text-claude-text"
+          />
+          <input
+            value={standingNewQuestion}
+            onChange={(event) => setStandingNewQuestion(event.target.value)}
+            placeholder={i18nService.t('standingPagesAddQuestion')}
+            className="rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface dark:text-claude-darkText text-claude-text"
+          />
+        </div>
+        {standingAddError && <div className="mt-1 text-[11px] text-red-500">{standingAddError}</div>}
+        <button
+          type="button"
+          className="mt-2 rounded-lg border px-3 py-1 text-xs dark:border-claude-darkAccent border-claude-accent text-claude-accent dark:text-claude-darkAccent"
+          onClick={async () => {
+            setStandingAddError(null);
+            const error = await coworkService.createStandingPage(metabotId ?? 0, standingNewName.trim(), standingNewQuestion.trim());
+            if (error) { setStandingAddError(error); return; }
+            setStandingNewName(''); setStandingNewQuestion('');
+            await loadStandingPages();
+          }}
+        >
+          {i18nService.t('standingPagesAddButton')}
+        </button>
+      </div>
+    </div>
+  );
+
   const renderCulture = () => (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-2">
@@ -2196,6 +2308,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         {sectionTab('facts', i18nService.t('memorySectionFacts'), metabotId == null || !factsStats ? undefined : factsStats.created + factsStats.stale)}
         {sectionTab('dream', i18nService.t('memorySectionDream'), metabotId == null || dreamSummaries.length === 0 ? undefined : dreamSummaries.length)}
         {sectionTab('culture', i18nService.t('memorySectionCulture'), cultureCounts == null ? undefined : cultureCounts.glossary + cultureCounts.convention + cultureCounts.team_lesson)}
+        {sectionTab('standingPages', i18nService.t('memorySectionStandingPages'), metabotId == null || standingPages.filter((page) => page.builtAt != null).length === 0 ? undefined : standingPages.filter((page) => page.builtAt != null).length)}
       </div>
 
       {/* Active section */}
@@ -2209,6 +2322,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             {activeSection === 'facts' && renderFacts()}
             {activeSection === 'dream' && renderDream()}
             {activeSection === 'culture' && renderCulture()}
+            {activeSection === 'standingPages' && renderStandingPages()}
           </>
         )}
       </div>
