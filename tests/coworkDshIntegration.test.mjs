@@ -62,6 +62,7 @@ class RecordingStore {
   // Runner reads the session goal through this lighter accessor every DSH turn.
   getSessionWithoutMessages(id) { return this.sessions.get(id) ?? null }
   getConfig() { return this.configValue }
+  getMetabotIdForSession() { return null }
   updateSession(id, updates) {
     const existing = this.sessions.get(id) ?? { id, messages: this.messages }
     this.sessions.set(id, { ...existing, ...updates })

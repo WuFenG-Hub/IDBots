@@ -219,6 +219,7 @@ class RecordingStore {
   getSession(id) { return this.sessions.get(id) ?? null; }
   getSessionWithoutMessages(id) { return this.sessions.get(id) ?? null; }
   getConfig() { return {}; }
+  getMetabotIdForSession() { return null; }
   updateSession(id, updates) {
     this.sessionPatches.push({ id, updates });
     const existing = this.sessions.get(id) ?? { id };
@@ -357,6 +358,7 @@ function makeBridgeFixtures(sessionId) {
     createSession() {
       return session;
     },
+    setSessionAutoOrigin() {},
     addMessage(sessionIdToAdd, message) {
       const record = {
         id: `message-${session.messages.length + 1}`,

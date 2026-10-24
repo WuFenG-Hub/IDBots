@@ -76,6 +76,7 @@ class RecordingStore {
   getSession(id) { return this.sessions.get(id) ?? null }
   getSessionWithoutMessages(id) { return this.sessions.get(id) ?? null }
   getConfig() { return {} }
+  getMetabotIdForSession() { return null }
   updateSession(id, updates) {
     const existing = this.sessions.get(id) ?? { id }
     this.sessions.set(id, { ...existing, ...updates })
