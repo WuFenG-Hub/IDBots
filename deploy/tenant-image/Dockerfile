@@ -50,6 +50,10 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY patches ./patches
 COPY scripts ./scripts
 COPY dsh-runtime/package.json dsh-runtime/pnpm-lock.yaml dsh-runtime/pnpm-workspace.yaml ./dsh-runtime/
+# dsh-runtime/pnpm-lock.yaml declares patchedDependencies; the root
+# postinstall's nested `pnpm --dir dsh-runtime install --frozen-lockfile`
+# reads those patch files from here (same reason as `COPY patches` above).
+COPY dsh-runtime/patches ./dsh-runtime/patches
 COPY SKILLs/web-search/package.json SKILLs/web-search/pnpm-lock.yaml SKILLs/web-search/pnpm-workspace.yaml ./SKILLs/web-search/
 
 RUN pnpm install --frozen-lockfile
