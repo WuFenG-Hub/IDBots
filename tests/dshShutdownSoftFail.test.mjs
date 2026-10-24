@@ -218,12 +218,14 @@ class RecordingStore {
   }
   getSession(id) { return this.sessions.get(id) ?? null; }
   getSessionWithoutMessages(id) { return this.sessions.get(id) ?? null; }
+  getMetabotIdForSession(id) { return this.sessions.get(id)?.metabotId ?? null; }
   getConfig() { return {}; }
   updateSession(id, updates) {
     this.sessionPatches.push({ id, updates });
     const existing = this.sessions.get(id) ?? { id };
     this.sessions.set(id, { ...existing, ...updates });
   }
+  setSessionAutoOrigin(id, autoOrigin) { this.updateSession(id, { autoOrigin }); }
   addMessage(sessionId, message) {
     const stored = { id: `m-${this.messages.length + 1}`, timestamp: Date.now(), ...message };
     this.messages.push({ sessionId, ...stored });
@@ -357,6 +359,10 @@ function makeBridgeFixtures(sessionId) {
     createSession() {
       return session;
     },
+    setSessionAutoOrigin(targetSessionId, autoOrigin) {
+      assert.equal(targetSessionId, session.id);
+      session.autoOrigin = autoOrigin;
+    },
     addMessage(sessionIdToAdd, message) {
       const record = {
         id: `message-${session.messages.length + 1}`,
@@ -445,7 +451,7 @@ test('bridge (orchestrator session): startSession shutdown rejection rejects WIT
       lateCompletionTimeoutMs: 60_000,
     }),
     (error) => {
-      assert.equal(error.name, 'DshShutdownError');
+      assert.equal(error.name, 'DshShutdownError', error.stack || error.message);
       return true;
     },
   );

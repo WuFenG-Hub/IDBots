@@ -66,6 +66,7 @@ class RecordingStore {
   getSession(id) { return this.sessions.get(id) ?? null }
   // Runner reads the session goal through this lighter accessor every DSH turn.
   getSessionWithoutMessages(id) { return this.sessions.get(id) ?? null }
+  getMetabotIdForSession(id) { return this.sessions.get(id)?.metabotId ?? null }
   getConfig() { return {} }
   updateSession(id, updates) {
     const existing = this.sessions.get(id) ?? { id }
@@ -97,6 +98,7 @@ class RecordingStore {
     }
   }
   getSessionUsageStats() { return null }
+  recentSessionPulse() { return [] }
   // Proven-techniques injection (a6f7d570) reads capability drafts every turn;
   // none exist in this fixture.
   listCapabilityDrafts() { return [] }
@@ -145,7 +147,8 @@ test('DSH session-type coverage', { skip: runtimeReady ? false : 'dsh-runtime/no
   runner.on('message', (sid, message) => { if (sid === 'session-types') events.messages.push(message) })
   runner.on('complete', (sid) => { if (sid === 'session-types') events.completes.push(sid) })
   runner.on('permissionRequest', (sid, request) => { if (sid === 'session-types') events.permissions.push(request) })
-  runner.on('error', () => undefined)
+  const errors = []
+  runner.on('error', (sid, message) => errors.push({ sid, message }))
 
   const makeSession = (extra) => {
     const sessionId = 'session-types'
@@ -181,7 +184,7 @@ test('DSH session-type coverage', { skip: runtimeReady ? false : 'dsh-runtime/no
     serverB.seen.length = 0
     await runner.runDshSessionLocal(s2.activeSession, 'HELLO_GROUP', process.cwd(), 'You are Alice.')
     assert.ok(serverB.seen.some((r) => r.body?.messages?.some((m) => String(m.content).includes('HELLO_GROUP'))),
-      'metabot llm_id routed the turn to provider B')
+      `metabot llm_id routed the turn to provider B: ${JSON.stringify({ errors, session: store.getSession('session-types') })}`)
 
     // ---- 3. twin tool gating via the shared inline builder ----------------
     const twinTools = runner.buildDshHostTools('session-types')
