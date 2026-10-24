@@ -154,16 +154,18 @@ jobs:
           # Cold-start of skill services was measured at ~109s on a 2-CPU runner,
           # so 120s was cutting it too fine; allow 300s and log progress.
           for i in $(seq 1 300); do
-            if curl -fsS -m 2 http://127.0.0.1:8790/readyz >/dev/null 2>&1; then
+            # /readyz sits behind the gateway secret (only /healthz is anonymous),
+            # so the probe must send the same header the clients use.
+            if curl -fsS -m 2 -H "x-idbots-gateway-secret: ci-test-secret" http://127.0.0.1:8790/readyz >/dev/null 2>&1; then
               echo "tenant ready after ${i}s"
-              curl -fsS -m 2 http://127.0.0.1:8790/readyz || true
+              curl -fsS -m 2 -H "x-idbots-gateway-secret: ci-test-secret" http://127.0.0.1:8790/readyz || true
               exit 0
             fi
             if [ $((i % 20)) -eq 0 ]; then echo "still bootstrapping after ${i}s"; fi
             sleep 1
           done
           echo "tenant never reached ready; last readyz:"
-          curl -sS -m 2 http://127.0.0.1:8790/readyz || true
+          curl -sS -m 2 -H "x-idbots-gateway-secret: ci-test-secret" http://127.0.0.1:8790/readyz || true
           docker logs idb-t_ci
           exit 1
 
