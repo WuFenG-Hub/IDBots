@@ -18,6 +18,13 @@ export type PublishMetaAppFromDirectoryInput = {
   prompt?: string;
   /** Capability/protocol tags (e.g. simplebuzz, game); forked apps inherit the source tags when omitted. */
   tags?: string[];
+  /**
+   * Motion Video learning provenance (shared contract §2.4): whether the
+   * builder used shared evidence and the exact exemplars/lessons/recipes
+   * made available. Recorded in manifest metadata; publisher claim only.
+   */
+  learningMode?: 'none' | 'exemplars' | 'lessons' | 'combined';
+  learnedFrom?: string[];
   metabotStore: MetabotStore;
   /** Native confirmation gate; must resolve true before any chain write happens. */
   confirmPublish: (details: {
@@ -112,6 +119,18 @@ export async function publishMetaAppFromDirectory(
     throw new Error('Metafile upload did not return a pin id.');
   }
 
+  const manifestMetadata: Record<string, unknown> = {};
+  if (input.learningMode) {
+    manifestMetadata.learningMode = input.learningMode;
+  }
+  const learnedFrom = (input.learnedFrom ?? [])
+    .map((uri) => String(uri ?? '').trim())
+    .filter((uri) => /^((metaapp|pin):\/\/[0-9a-z]+i\d+)$/iu.test(uri))
+    .slice(0, 64);
+  if (learnedFrom.length) {
+    manifestMetadata.learnedFrom = learnedFrom;
+  }
+
   const result = await (input.deps?.publishMetaApp ?? publishMetaApp)(input.metabotStore, input.metabotId, {
     title,
     appName,
@@ -125,6 +144,7 @@ export async function publishMetaAppFromDirectory(
     indexFile: entryFile,
     codeType: 'application/zip',
     tags: input.tags?.length ? input.tags : marker?.tags,
+    ...(Object.keys(manifestMetadata).length ? { metadata: manifestMetadata } : {}),
   }, { confirm: true });
 
   return {

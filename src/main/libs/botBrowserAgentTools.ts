@@ -4,7 +4,11 @@ import path from 'path';
 import { truncateUtf16Units } from './llmSafeText';
 import { parseMetaAppPinIdFromUri } from '../services/botBrowserMetaAppForkService';
 import { readRendererFromEnvelope } from '../services/botBrowserSourceLocator';
-import type { MetaAppSearchItem } from '../services/metaAppSearchService';
+import {
+  MetaAppValidatedBasisUnavailableError,
+  type MetaAppSearchItem,
+  type PreferenceComparisonItem,
+} from '../services/metaAppSearchService';
 import type {
   BotBrowserTabCommand,
   BotBrowserTabCommandResult,
@@ -85,6 +89,9 @@ export type BotBrowserControl = {
     intro?: string;
     prompt?: string;
     tags?: string[];
+    /** Motion Video learning provenance (shared contract §2.4), recorded in manifest metadata. */
+    learningMode?: 'none' | 'exemplars' | 'lessons' | 'combined';
+    learnedFrom?: string[];
   }): Promise<{
     pinId: string;
     metaappUri: string;
@@ -98,9 +105,28 @@ export type BotBrowserControl = {
     publisher?: string;
     since?: number;
     limit?: number;
+    /** MetaSo R4 preference ordering (requires chainName). */
+    chainName?: string;
+    sort?: 'preference';
+    order?: 'asc' | 'desc';
+    basis?: 'open' | 'validated';
+    minJudges?: number;
+    learning?: 'declared' | 'incomplete';
   }): Promise<{ items: MetaAppSearchCandidate[]; hasMore: boolean }>;
   /** List direct remix children of an app from the aggregation API. */
   listMetaAppForks?(input: { pinId: string; limit?: number }): Promise<{ items: MetaAppSearchCandidate[]; hasMore: boolean }>;
+  /** GET /api/preference/comparisons — open preferred/rejected contrasts with reasons. */
+  listPreferenceComparisons?(input: {
+    chainName: string;
+    subject?: string;
+    outcome?: 'preferred' | 'rejected' | 'all';
+    limit?: number;
+    cursor?: string;
+  }): Promise<{
+    items: PreferenceComparisonItem[];
+    nextCursor: string | null;
+    hasMore: boolean;
+  }>;
 };
 
 /** Minimal shape of the claude-agent-sdk `tool()` helper we depend on. */
@@ -129,6 +155,32 @@ export function formatBotBrowserTabs(result: BotBrowserTabCommandResult): string
 
 export type SearchMetaAppsNextStep = 'browser' | 'install';
 
+/**
+ * Evidence annotation for a candidate: basis, score, comparison/judge counts,
+ * and publisher-declared learning status. Honest labels only — an unjudged or
+ * weakly judged item says so, and `learning: declared` is never presented as
+ * package verification.
+ */
+function formatPreferenceEvidence(item: MetaAppSearchCandidate): string {
+  const parts: string[] = [];
+  const open = item.preference?.open ?? null;
+  if (open) {
+    const score = typeof open.score === 'number' ? open.score.toFixed(2) : 'unjudged';
+    const counts = typeof open.comparisons === 'number' && typeof open.judges === 'number'
+      ? `${open.comparisons} cmp / ${open.judges} judge${open.judges === 1 ? '' : 's'}`
+      : 'unknown counts';
+    parts.push(`pref(open): ${score} (${counts}${open.state ? `, ${open.state}` : ''})`);
+  }
+  const learningStatus = item.motionVideo?.learning?.status ?? null;
+  if (learningStatus) {
+    parts.push(`learning: ${learningStatus} (publisher-declared, not verified)`);
+  }
+  if (item.currentPinId) {
+    parts.push(`version: metaapp://${item.currentPinId}`);
+  }
+  return parts.join(' | ');
+}
+
 /** Ready-to-quote markdown bullets for MetaApp search candidates: titles and authors are already links. */
 export function formatMetaAppCandidates(items: MetaAppSearchCandidate[]): string {
   return items.map((item) => {
@@ -146,7 +198,8 @@ export function formatMetaAppCandidates(items: MetaAppSearchCandidate[]): string
       item.tags.length ? `tags: ${item.tags.join(', ')}` : '',
       item.updatedAt ? `updated: ${new Date(item.updatedAt * 1000).toISOString().slice(0, 10)}` : '',
     ].filter(Boolean).join(' | ');
-    return `- [${linkTitle}](metaapp://${item.pinId})${intro}\n  ${meta}`;
+    const evidence = formatPreferenceEvidence(item);
+    return `- [${linkTitle}](metaapp://${item.pinId})${intro}\n  ${meta}${evidence ? `\n  ${evidence}` : ''}`;
   }).join('\n');
 }
 
@@ -158,107 +211,203 @@ export function buildSearchMetaAppsAgentTools(deps: {
   tool: SdkToolFactory;
   searchMetaApps: NonNullable<BotBrowserControl['searchMetaApps']>;
   listMetaAppForks?: BotBrowserControl['listMetaAppForks'];
+  listPreferenceComparisons?: BotBrowserControl['listPreferenceComparisons'];
   nextStep?: SearchMetaAppsNextStep;
 }): unknown[] {
   const { tool, searchMetaApps, listMetaAppForks } = deps;
+  const listPreferenceComparisons = deps.listPreferenceComparisons;
   const nextStep = deps.nextStep ?? 'browser';
   const nextStepHint = nextStep === 'install'
-    ? 'Pick the single best match for the user\'s intent and call skill_tool with action="extract_metaapp" and its pinId to read APP.md / install instructions. When listing apps in your reply, REUSE the bullet lines above verbatim: app titles and author names MUST remain markdown links — never mention an app or an author as plain text. Offer 2–3 alternatives if the best one might not be what they meant; if nothing fits, say so instead of inventing an app.'
-    : 'Pick the single best match for the user\'s intent and open it with bot_browser_open_uri (prefer newTab=true). When listing apps in your reply, REUSE the bullet lines above verbatim: app titles and author names MUST remain markdown links — never mention an app or an author as plain text. Offer 2–3 alternatives if the best one might not be what they meant; if nothing fits, say so instead of opening a random app.';
+    ? 'Pick the single best match for the user\'s intent and call skill_tool with action="extract_metaapp" and its pinId to read APP.md / install instructions. When listing apps in your reply, REUSE the bullet lines above verbatim: app titles and author names MUST remain markdown links — never mention an app or an author as plain text. Offer 2–3 alternatives if the best match might not be what they meant; if nothing fits, say so instead of inventing an app.'
+    : 'Pick the single best match for the user\'s intent and open it with bot_browser_open_uri (prefer newTab=true). When listing apps in your reply, REUSE the bullet lines above verbatim: app titles and author names MUST remain markdown links — never mention an app or an author as plain text. Offer 2–3 alternatives if the best match might not be what they meant; if nothing fits, say so instead of opening a random app.';
   const whenNotToUse = nextStep === 'install'
     ? 'With a known app pinId, skip this and call skill_tool extract_metaapp directly. Apps only — for posts use search_social_posts, for identities search_metaids.'
     : 'With a known app pinId, skip this and open metaapp://<pinId> directly with bot_browser_open_uri. Apps only — for posts use search_social_posts, for identities search_metaids.';
   const useLine = 'Returns up to `limit` candidates, best first. For remix children of a known app, use mode="forks" with its pinId.';
+  const preferenceLine = 'Preference ordering: pass sort="preference" with chainName (e.g. "mvc"), optionally order/basis/minJudges/learning, to rank by open comparison evidence (basis "validated" is not yet available). Each candidate line carries its evidence basis, score, comparison/judge counts, and publisher-declared learning status — treat "declared" as a publisher claim, never as package verification, and do not present unjudged or weakly judged items as good or bad.';
 
-  return [
-    tool(
-      'search_metaapps',
-      [
-        'Search on-chain MetaApps (HTML mini-apps on /protocols/metaapp). Use to find an app by intent, tag, recency, or publisher — not to open a known one.',
-        whenNotToUse,
-        useLine,
-      ].join(' '),
-      {
-        query: z.string().optional(),
-        tag: z.string().optional(),
-        publisher: z.string().optional(),
-        sinceDays: z.number().optional(),
-        mode: z.enum(['search', 'forks']).optional(),
-        pinId: z.string().optional(),
-        limit: z.number().optional(),
-      },
-      async (args: {
-        query?: string;
-        tag?: string;
-        publisher?: string;
-        sinceDays?: number;
-        mode?: 'search' | 'forks';
-        pinId?: string;
-        limit?: number;
-      }) => {
-        const limit = Math.min(20, Math.max(1, Math.floor(args.limit ?? 8)));
-        const mode = args.mode ?? 'search';
+  const searchTool = tool(
+    'search_metaapps',
+    [
+      'Search on-chain MetaApps (HTML mini-apps on /protocols/metaapp). Use to find an app by intent, tag, recency, or publisher — not to open a known one.',
+      whenNotToUse,
+      useLine,
+      preferenceLine,
+    ].join(' '),
+    {
+      query: z.string().optional(),
+      tag: z.string().optional(),
+      publisher: z.string().optional(),
+      sinceDays: z.number().optional(),
+      mode: z.enum(['search', 'forks']).optional(),
+      pinId: z.string().optional(),
+      limit: z.number().optional(),
+      chainName: z.string().optional(),
+      sort: z.enum(['preference']).optional(),
+      order: z.enum(['asc', 'desc']).optional(),
+      basis: z.enum(['open', 'validated']).optional(),
+      minJudges: z.number().optional(),
+      learning: z.enum(['declared', 'incomplete']).optional(),
+    },
+    async (args: {
+      query?: string;
+      tag?: string;
+      publisher?: string;
+      sinceDays?: number;
+      mode?: 'search' | 'forks';
+      pinId?: string;
+      limit?: number;
+      chainName?: string;
+      sort?: 'preference';
+      order?: 'asc' | 'desc';
+      basis?: 'open' | 'validated';
+      minJudges?: number;
+      learning?: 'declared' | 'incomplete';
+    }) => {
+      const limit = Math.min(20, Math.max(1, Math.floor(args.limit ?? 8)));
+      const mode = args.mode ?? 'search';
 
-        if (mode === 'forks') {
-          if (!listMetaAppForks) {
-            return textResult('Fork listing is not supported by this host.', true);
-          }
-          const pinId = parseMetaAppPinIdFromUri(args.pinId ?? '');
-          if (!pinId) {
-            return textResult('search_metaapps mode="forks" requires a valid pinId (or metaapp://<pinId>).', true);
-          }
-          try {
-            const { items } = await listMetaAppForks({ pinId, limit });
-            if (!items.length) {
-              return textResult(`No remixes (forks) found for metaapp://${pinId}. If the user expected some, the lineage may simply not exist yet — say so honestly.`);
-            }
-            return textResult([
-              `${items.length} direct remix(es) of metaapp://${pinId}:`,
-              formatMetaAppCandidates(items),
-            ].join('\n\n'));
-          } catch (error) {
-            return textResult(`Failed to list forks: ${error instanceof Error ? error.message : String(error)}`, true);
-          }
+      if (mode === 'forks') {
+        if (!listMetaAppForks) {
+          return textResult('Fork listing is not supported by this host.', true);
         }
-
-        const since = typeof args.sinceDays === 'number' && args.sinceDays > 0
-          ? Math.floor(Date.now() / 1000) - Math.floor(args.sinceDays) * 86400
-          : undefined;
+        const pinId = parseMetaAppPinIdFromUri(args.pinId ?? '');
+        if (!pinId) {
+          return textResult('search_metaapps mode="forks" requires a valid pinId (or metaapp://<pinId>).', true);
+        }
         try {
-          let { items } = await searchMetaApps({
-            keyword: args.query,
-            tag: args.tag,
-            publisher: args.publisher,
-            since,
-            limit,
-          });
-          // Empty-result degradation: drop the weakest (last) query token once and retry.
-          if (!items.length && args.query?.trim()) {
-            const tokens = args.query.trim().split(/\s+/);
-            if (tokens.length > 1) {
-              ({ items } = await searchMetaApps({
-                keyword: tokens.slice(0, -1).join(' '),
-                tag: args.tag,
-                publisher: args.publisher,
-                since,
-                limit,
-              }));
-            }
-          }
+          const { items } = await listMetaAppForks({ pinId, limit });
           if (!items.length) {
-            return textResult(`No on-chain MetaApps matched${args.query ? ` "${args.query}"` : ''}${args.publisher ? ` from ${args.publisher}` : ''}${args.sinceDays ? ` in the last ${args.sinceDays} days` : ''}. Tell the user honestly; do NOT invent apps.`);
+            return textResult(`No remixes (forks) found for metaapp://${pinId}. If the user expected some, the lineage may simply not exist yet — say so honestly.`);
           }
           return textResult([
-            `${items.length} on-chain MetaApp candidate(s), best first:`,
+            `${items.length} direct remix(es) of metaapp://${pinId}:`,
             formatMetaAppCandidates(items),
-            nextStepHint,
           ].join('\n\n'));
         } catch (error) {
-          return textResult(`MetaApp search failed: ${error instanceof Error ? error.message : String(error)}`, true);
+          return textResult(`Failed to list forks: ${error instanceof Error ? error.message : String(error)}`, true);
+        }
+      }
+
+      if (args.sort === 'preference' && !args.chainName?.trim()) {
+        return textResult('sort="preference" requires an explicit chainName (preference scores never blend across chains).', true);
+      }
+
+      const since = typeof args.sinceDays === 'number' && args.sinceDays > 0
+        ? Math.floor(Date.now() / 1000) - Math.floor(args.sinceDays) * 86400
+        : undefined;
+      const searchArgs = {
+        keyword: args.query,
+        tag: args.tag,
+        publisher: args.publisher,
+        since,
+        limit,
+        ...(args.chainName?.trim() ? { chainName: args.chainName.trim() } : {}),
+        ...(args.sort ? { sort: args.sort as 'preference' } : {}),
+        ...(args.order ? { order: args.order } : {}),
+        ...(args.basis ? { basis: args.basis } : {}),
+        ...(typeof args.minJudges === 'number' && args.minJudges >= 0 ? { minJudges: args.minJudges } : {}),
+        ...(args.learning ? { learning: args.learning } : {}),
+      };
+      try {
+        let { items } = await searchMetaApps(searchArgs);
+        // Empty-result degradation: drop the weakest (last) query token once and retry.
+        if (!items.length && args.query?.trim() && args.sort !== 'preference') {
+          const tokens = args.query.trim().split(/\s+/);
+          if (tokens.length > 1) {
+            ({ items } = await searchMetaApps({ ...searchArgs, keyword: tokens.slice(0, -1).join(' ') }));
+          }
+        }
+        if (!items.length) {
+          return textResult(`No on-chain MetaApps matched${args.query ? ` "${args.query}"` : ''}${args.publisher ? ` from ${args.publisher}` : ''}${args.sinceDays ? ` in the last ${args.sinceDays} days` : ''}. Tell the user honestly; do NOT invent apps.`);
+        }
+        const header = args.sort === 'preference'
+          ? `${items.length} on-chain MetaApp candidate(s), strongest open preference first (chain ${args.chainName}):`
+          : `${items.length} on-chain MetaApp candidate(s), best first:`;
+        return textResult([
+          header,
+          formatMetaAppCandidates(items),
+          nextStepHint,
+        ].join('\n\n'));
+      } catch (error) {
+        if (error instanceof MetaAppValidatedBasisUnavailableError) {
+          return textResult('Validated preference aggregation is not yet available; query again with basis="open" or without a basis.', true);
+        }
+        return textResult(`MetaApp search failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    },
+  );
+
+  const comparisonsTool = listPreferenceComparisons
+    ? tool(
+      'search_preference_comparisons',
+      [
+        'Read open pairwise comparison evidence for Motion Videos (MetaSo GET /api/preference/comparisons): who preferred which of two exact video versions, with concrete optional reasons.',
+        'Use outcome="preferred" with a subject videoSha256 to retrieve wins for a video, or outcome="rejected" for its losses — rejected contrasts plus reasons are the most useful learning signal.',
+        'Evidence is open-basis (self-published, not sealed) — cite it as open feedback, never as validated verdicts, and never treat unjudged works as negative examples.',
+        'Requires chainName (reference: "mvc"). Validated basis is not yet available.',
+      ].join(' '),
+      {
+        chainName: z.string(),
+        subject: z.string().optional(),
+        outcome: z.enum(['preferred', 'rejected', 'all']).optional(),
+        limit: z.number().optional(),
+        cursor: z.string().optional(),
+      },
+      async (args: {
+        chainName: string;
+        subject?: string;
+        outcome?: 'preferred' | 'rejected' | 'all';
+        limit?: number;
+        cursor?: string;
+      }) => {
+        const limit = Math.min(50, Math.max(1, Math.floor(args.limit ?? 10)));
+        const outcome = args.outcome ?? 'all';
+        const subject = args.subject?.trim() ?? '';
+        if (outcome !== 'all' && !subject) {
+          return textResult('search_preference_comparisons: outcome "preferred"/"rejected" requires a subject videoSha256.', true);
+        }
+        try {
+          const page = await listPreferenceComparisons({
+            chainName: args.chainName,
+            ...(subject ? { subject } : {}),
+            outcome,
+            limit,
+            ...(args.cursor?.trim() ? { cursor: args.cursor.trim() } : {}),
+          });
+          if (!page.items.length) {
+            return textResult(`No open comparison evidence matched on chain ${args.chainName}${subject ? ` for subject ${subject}` : ''}. Say so honestly; do not invent comparisons.`);
+          }
+          const lines = page.items.map((item) => {
+            const a = item.a ? `${item.a.app} @ ${item.a.version} (video ${item.a.videoSha256.slice(0, 12)}…)` : '(missing a)';
+            const b = item.b ? `${item.b.app} @ ${item.b.version} (video ${item.b.videoSha256.slice(0, 12)}…)` : '(missing b)';
+            const pick = item.pick === 'a' ? 'preferred A' : item.pick === 'b' ? 'preferred B' : 'tie';
+            const details = [
+              `pick: ${pick}`,
+              item.reason ? `reason: ${item.reason}` : '',
+              `signer: ${item.signerGlobalMetaId || 'unknown'}`,
+              item.clientArtifact ? `client: ${item.clientArtifact}${item.clientMode ? ` (${item.clientMode})` : ''}` : '',
+              item.isMempool ? 'pending (mempool, score-neutral)' : '',
+              item.excluded && item.excludedReason ? `excluded: ${item.excludedReason}` : '',
+            ].filter(Boolean).join(' | ');
+            return `- feedback [pin](pin://${item.feedbackPinId}) (${item.basis || 'open'}): A=${a} vs B=${b}\n  ${details}`;
+          });
+          return textResult([
+            `${page.items.length} open comparison(s)${subject ? ` for subject ${subject}` : ''} on chain ${args.chainName}${outcome !== 'all' ? ` (${outcome})` : ''}:`,
+            lines.join('\n'),
+            page.hasMore && page.nextCursor ? `More available — pass cursor=${page.nextCursor}.` : '',
+          ].filter(Boolean).join('\n\n'));
+        } catch (error) {
+          if (error instanceof MetaAppValidatedBasisUnavailableError) {
+            return textResult('Validated preference aggregation is not yet available; query again with basis="open" or without a basis.', true);
+          }
+          return textResult(`Failed to list preference comparisons: ${error instanceof Error ? error.message : String(error)}`, true);
         }
       },
-    ),
-  ];
+    )
+    : null;
+
+  return [searchTool, ...(comparisonsTool ? [comparisonsTool] : [])];
 }
 
 /**
@@ -442,6 +591,7 @@ export function buildBotBrowserAgentTools(deps: {
         tool,
         searchMetaApps: controlBotBrowser.searchMetaApps,
         listMetaAppForks: controlBotBrowser.listMetaAppForks,
+        listPreferenceComparisons: controlBotBrowser.listPreferenceComparisons,
         nextStep: 'browser',
       }),
     );
@@ -490,15 +640,25 @@ export function buildBotBrowserAgentTools(deps: {
     extraTools.push(
       tool(
         'bot_browser_publish_app',
-        'Publish a local MetaApp directory (from bot_browser_fork_current_app or built in the workspace) on-chain under the user\'s MetaID. Requires APP.md at the directory root: a natural-language doc for other agents (what it does, structure, params/outputs, subpages, protocols, remix notes — facts only). Writes on-chain, COSTS fees, IRREVERSIBLE: always preview first with bot_browser_preview_local AND get explicit user confirmation; never publish without both or without APP.md. Host shows a final native confirmation dialog; cancel aborts. forkedFrom provenance is recorded automatically for forks.',
+        'Publish a local MetaApp directory (from bot_browser_fork_current_app or built in the workspace) on-chain under the user\'s MetaID. Requires APP.md at the directory root: a natural-language doc for other agents (what it does, structure, params/outputs, subpages, protocols, remix notes — facts only). Writes on-chain, COSTS fees, IRREVERSIBLE: always preview first with bot_browser_preview_local AND get explicit user confirmation; never publish without both or without APP.md. Host shows a final native confirmation dialog; cancel aborts. forkedFrom provenance is recorded automatically for forks. For Motion Video learning provenance, pass learningMode ("none"|"exemplars"|"lessons"|"combined") and learnedFrom (exact metaapp:// or pin:// URIs of the evidence actually used) — record them only when true.',
         {
           dir: z.string().min(1),
           title: z.string().optional(),
           intro: z.string().optional(),
           prompt: z.string().optional(),
           tags: z.array(z.string()).optional(),
+          learningMode: z.enum(['none', 'exemplars', 'lessons', 'combined']).optional(),
+          learnedFrom: z.array(z.string()).optional(),
         },
-        async (args: { dir: string; title?: string; intro?: string; prompt?: string; tags?: string[] }) => {
+        async (args: {
+          dir: string;
+          title?: string;
+          intro?: string;
+          prompt?: string;
+          tags?: string[];
+          learningMode?: 'none' | 'exemplars' | 'lessons' | 'combined';
+          learnedFrom?: string[];
+        }) => {
           try {
             const result = await publishMetaApp({
               sessionId,
@@ -507,6 +667,8 @@ export function buildBotBrowserAgentTools(deps: {
               intro: args.intro,
               prompt: args.prompt,
               tags: args.tags,
+              ...(args.learningMode ? { learningMode: args.learningMode } : {}),
+              ...(args.learnedFrom?.length ? { learnedFrom: args.learnedFrom } : {}),
             });
             const lines = [
               `Published on-chain: ${result.metaappUri}`,

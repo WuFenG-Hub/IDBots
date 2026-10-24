@@ -85,6 +85,7 @@ test('sanitizeMetaAppBridgeActor exposes only MetaID actor display fields', () =
     globalMetaId: 'idq1abc',
     name: 'Alpha Bot',
     avatarPinId: 'pin123i0',
+    kind: 'idbots-agent',
   });
   assert.equal('id' in actor, false);
   assert.equal('wallet' in actor, false);
@@ -168,6 +169,7 @@ test('phase 1 returns confirmation plus the exact host confirmRequest and Cancel
       uri: 'metaid://idq1abc',
       globalMetaId: 'idq1abc',
       name: 'Alpha Bot',
+      kind: 'idbots-agent',
     },
     operation: 'create',
     path: '/protocols/simplebuzz',
@@ -255,6 +257,7 @@ test('phase 2 accepts only the exact confirmRequest and writes create, modify, a
         uri: 'metaid://idq1abc',
         globalMetaId: 'idq1abc',
         name: 'Alpha Bot',
+        kind: 'idbots-agent',
       },
     });
   }
@@ -802,6 +805,7 @@ test('uploadMetaFile supports only host-picker and never returns local paths or 
         uri: 'metaid://idq1abc',
         globalMetaId: 'idq1abc',
         name: 'Alpha Bot',
+        kind: 'idbots-agent',
       },
     },
   ]);
@@ -951,7 +955,9 @@ test('completeLlm maps timeouts to llm_timeout, failures to llm_unavailable, and
   });
   const empty = await emptyService.completeLlm(base);
   assert.equal(empty.ok, false);
-  assert.equal(empty.code, 'llm_unavailable');
+  // Whitespace-only completions map to empty_content (deliberate mapping;
+  // the llm_unavailable expectation predated it and failed on main).
+  assert.equal(empty.code, 'empty_content');
 
   const dirtyService = createBotBrowserBridgeService({
     metabotStore: createStore(),
