@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
+import http from 'node:http';
 import net from 'node:net';
 import { FakeDocker } from './fake-docker/index.mjs';
 import { DockerClient, DockerError, tenantBaseUrl } from '../src/docker/client.js';
@@ -56,6 +57,34 @@ describe('docker client against the fake engine', () => {
     });
     const unreachable = new DockerClient(`http://127.0.0.1:${dead}`);
     assert.equal(await unreachable.ping(), false);
+  });
+
+  test('a POST with a body declares Content-Type application/json (socket-proxy contract)', async () => {
+    // The staging docker-socket-proxy rejects bodied requests that are not
+    // application/json with 400, and FakeDocker now enforces the same
+    // contract, so the create succeeding here is itself the behavioral
+    // assertion; the recorded header pins the exact wire value.
+    await client.createVolume('idb-t_ct', { 'org.idbots.kind': 'tenant-data' });
+    assert.equal(fake.lastBodyContentType, 'application/json');
+  });
+
+  test('the fake engine rejects a bodied POST without Content-Type (negative control)', async () => {
+    // Raw node:http request with Content-Length but no Content-Type — the
+    // exact wire shape the unpatched client produced — must be a 400 at the
+    // fake, proving the fake's guard would have caught the defect locally.
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request(
+        `${baseUrl}/v1.43/volumes/create`,
+        { method: 'POST', headers: { 'Content-Length': Buffer.byteLength('{"Name":"negctl"}') } },
+        (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode ?? 0));
+        },
+      );
+      req.on('error', reject);
+      req.end('{"Name":"negctl"}');
+    });
+    assert.equal(status, 400);
   });
 
   test('volume create + duplicate conflict', async () => {

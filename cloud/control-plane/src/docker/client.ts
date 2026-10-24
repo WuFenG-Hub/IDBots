@@ -150,7 +150,15 @@ export class DockerClient {
         {
           ...options,
           method,
-          headers: { ...options.headers, 'Content-Length': body ? Buffer.byteLength(body) : 0 },
+          headers: {
+            ...options.headers,
+            // The staging docker-socket-proxy rejects bodied requests whose
+            // Content-Type is not application/json (400), so every bodied
+            // call must declare it; empty-bodied calls (GET/DELETE/start…)
+            // stay header-free.
+            ...(body ? { 'Content-Type': 'application/json' } : {}),
+            'Content-Length': body ? Buffer.byteLength(body) : 0,
+          },
         },
         (res) => {
           const chunks: Buffer[] = [];

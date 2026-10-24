@@ -107,6 +107,13 @@ export class FakeDocker {
   volumes = new Map();
   /** @type {Map<string, {ref: string, labels: object}>} */
   images = new Map();
+  /**
+   * Content-Type of the most recent request that carried a body, as seen by
+   * the server. Lets tests assert the client declares `application/json` —
+   * the contract the staging docker-socket-proxy enforces.
+   * @type {string | undefined}
+   */
+  lastBodyContentType;
 
   #server = null;
   #port = 0;
@@ -169,6 +176,24 @@ export class FakeDocker {
     const url = new URL(req.url, 'http://localhost');
     const pathname = url.pathname;
     const method = req.method ?? 'GET';
+
+    // Mimic the staging docker-socket-proxy (tecnativa/docker-socket-proxy:
+    // 0.3.0, HAProxy 2.2): a request that carries a body must declare
+    // Content-Type application/json, anything else is rejected with 400
+    // before the route reads the body. Without this check a client that sets
+    // Content-Length but forgets Content-Type sails through the fake and
+    // only breaks against the real proxy on staging.
+    const contentLength = Number(req.headers['content-length'] ?? '0');
+    if (contentLength > 0) {
+      const contentType = req.headers['content-type'];
+      this.lastBodyContentType = contentType;
+      if (contentType !== 'application/json') {
+        sendJson(res, 400, {
+          message: `unsupported Content-Type header (${contentType ?? 'none'}): must be 'application/json'`,
+        });
+        return;
+      }
+    }
 
     if (method === 'GET' && pathname === '/_ping') {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
