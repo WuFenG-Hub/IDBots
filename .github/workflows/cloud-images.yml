@@ -90,15 +90,29 @@ jobs:
             deploy/tenant-image/build.sh --platform linux/amd64 \
             --tag "${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.commit7 }}"
 
+      # The control-plane Dockerfile copies dist-mobile-login/ from the repo root,
+      # so the bundle must exist before its build starts (the Dockerfile documents
+      # this contract in its header).
+      - name: Build mobile login bundle for the control-plane image
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build:mobile
+
       - name: Build control-plane image (linux/amd64)
         id: cp-build
         if: hashFiles('cloud/control-plane/Dockerfile') != ''
         run: |
+          # BUILD CONTEXT IS THE REPOSITORY ROOT (see cloud/control-plane/Dockerfile
+          # header): the Dockerfile copies both cloud/control-plane/** and the
+          # root-level dist-mobile-login/. Passing cloud/control-plane as the
+          # context made every COPY resolve against the wrong root and the build
+          # failed with "failed to calculate checksum ... not found".
           docker buildx build \
             --platform linux/amd64 \
             --tag "${{ steps.meta.outputs.cp_tag }}" \
+            --file cloud/control-plane/Dockerfile \
             --load \
-            cloud/control-plane
+            .
 
       - name: Control-plane Dockerfile missing (WS-B pending)
         if: hashFiles('cloud/control-plane/Dockerfile') == ''
