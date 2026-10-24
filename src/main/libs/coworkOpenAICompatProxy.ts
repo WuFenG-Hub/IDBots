@@ -1120,8 +1120,19 @@ export function buildOpenAIResponsesURL(baseURL: string, provider?: string): str
   if (normalized.endsWith('/responses') || normalized.endsWith(responsesPath)) {
     return normalized;
   }
-  if (!isDeepSeekHost && normalized.endsWith('/v1')) {
-    return `${normalized}/responses`;
+  if (!isDeepSeekHost) {
+    // Versioned bases (…/v1, …/v4 — e.g. Zhipu's /api/coding/paas/v4) mount
+    // /responses directly, mirroring buildOpenAIChatCompletionsURL's
+    // versioned-base rule. The old code only recognized …/v1 and blindly
+    // appended /v1/responses to everything else, producing doubled paths
+    // like …/v4/v1/responses and …/v4/chat/completions/v1/responses for
+    // versioned chat bases (route-construction 404s, 2026-10-23). A trailing
+    // /chat/completions identifies the chat endpoint, not the base — strip it
+    // first, the same way the DeepSeek branch strips /anthropic.
+    const versioned = normalized.replace(/\/chat\/completions$/, '');
+    if (/\/v\d+$/.test(versioned)) {
+      return `${versioned}/responses`;
+    }
   }
   return `${normalized}${responsesPath}`;
 }

@@ -143,6 +143,36 @@ test('buildOpenAIResponsesURL uses /v1/responses for OpenAI', async () => {
   assert.equal(buildOpenAIResponsesURL('https://api.openai.com', 'openai'), 'https://api.openai.com/v1/responses');
 });
 
+test('buildOpenAIResponsesURL regression: /v1 bases still mount /responses directly', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { buildOpenAIResponsesURL } = __openAICompatProxyTestUtils;
+
+  assert.equal(buildOpenAIResponsesURL('https://api.openai.com/v1'), 'https://api.openai.com/v1/responses');
+  assert.equal(buildOpenAIResponsesURL('https://opencode.ai/zen/go/v1'), 'https://opencode.ai/zen/go/v1/responses');
+});
+
+test('buildOpenAIResponsesURL mounts /responses directly on versioned bases (…/v4), no /v1/responses doubling', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { buildOpenAIResponsesURL } = __openAICompatProxyTestUtils;
+
+  // Zhipu GLM coding-plan chat base — the versioned base named in
+  // buildOpenAIChatCompletionsURL's rule. The old constructor appended
+  // /v1/responses to anything that did not end in /v1 or /responses,
+  // yielding …/v4/v1/responses (route-construction 404, 2026-10-23).
+  assert.equal(
+    buildOpenAIResponsesURL('https://open.bigmodel.cn/api/coding/paas/v4'),
+    'https://open.bigmodel.cn/api/coding/paas/v4/responses'
+  );
+  // A base that carries the chat endpoint path must not double it either:
+  // the observed failure shape was …/v4/chat/completions/v1/responses.
+  assert.equal(
+    buildOpenAIResponsesURL('https://open.bigmodel.cn/api/coding/paas/v4/chat/completions'),
+    'https://open.bigmodel.cn/api/coding/paas/v4/responses'
+  );
+  // Other versioned bases follow the same rule.
+  assert.equal(buildOpenAIResponsesURL('https://relay.example/v3'), 'https://relay.example/v3/responses');
+});
+
 // ---------------------------------------------------------------------------
 // Responses request conversion (web_search + reasoning injection)
 // ---------------------------------------------------------------------------
