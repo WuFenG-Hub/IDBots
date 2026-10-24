@@ -159,8 +159,11 @@ jobs:
         if: hashFiles('cloud/conformance/run.mjs') != ''
         run: |
           pnpm install --frozen-lockfile
+          # The kit takes --url as a ws:// endpoint (see cloud/conformance/run.mjs
+          # header). The previous --target flag is not a recognised argument, so the
+          # step exited 2 before running a single check.
           node cloud/conformance/run.mjs \
-            --target http://127.0.0.1:8790 --secret ci-test-secret
+            --url ws://127.0.0.1:8790/gateway/v1/ws --secret ci-test-secret
 
       - name: Stand-in smoke test (until the WS-A conformance kit lands)
         if: hashFiles('cloud/conformance/run.mjs') == ''
