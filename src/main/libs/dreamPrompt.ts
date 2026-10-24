@@ -87,6 +87,16 @@ export interface DreamValueLesson {
   source: string;
 }
 
+/**
+ * One `important_memories` entry with the evidence it was distilled from.
+ * `source` is optional in the contract (a bare string entry is still
+ * accepted); when present it becomes the memory's evidence quote.
+ */
+export interface DreamImportantMemory {
+  text: string;
+  source: string | null;
+}
+
 export interface DreamImpressionPromptEvidence {
   id: string;
   evidenceType: string;
@@ -200,6 +210,13 @@ export interface DreamOutput {
   sections: Partial<Record<DreamSectionKey, string>>;
   workReviews: DreamWorkReview[];
   importantMemories: string[];
+  /**
+   * The same `important_memories` entries with their cited evidence, in the
+   * same order as `importantMemories`. Optional so hand-built outputs (tests,
+   * repairs) that only carry the string list keep compiling; writers fall
+   * back to the strings with a null source.
+   */
+  importantMemoryItems?: DreamImportantMemory[];
   valueLessons: DreamValueLesson[];
   selfIdentity: string | null;
   impressionUpdates: DreamImpressionUpdate[];
@@ -853,7 +870,12 @@ export function buildDreamPrompt(input: {
     '      "note": "温度判断的一句话依据(具体引用对话中的变化)"',
     '    }',
     '  ],',
-    '  "important_memories": ["由你自己判断的、值得长期记住的重要事项,每条一句话,最多 5 条;没有值得记的可以给空数组"],',
+    '  "important_memories": [',
+    '    {',
+    '      "text": "由你自己判断的、值得长期记住的重要事项,一句话;最多 5 条,没有值得记的可以给空数组",',
+    '      "source": "这条事项蒸馏自今天的哪段具体对话或事件(一句话引述原话或事实),它是这条记忆的证据"',
+    '    }',
+    '  ],',
     '  "value_lessons": [',
     '    {',
     '      "rule": "从今天经历中蒸馏出的价值边界,必须是抽象、范式化的表述——例如「在涉及个人痛苦的话题上要更谨慎」「面对自己不确定的问题,不要不懂装懂」;不要写成「我不该和用户说那句话」这种具体琐事。写成「边界」(什么情况不该做、要停下来),不要写成「指令」(什么情况都必须怎么做)——它约束的是已知的坑,给未来的选择保留探索和变化的空间",',
@@ -1030,16 +1052,19 @@ export function parseDreamOutput(
   }
 
   const importantMemories: string[] = [];
+  const importantMemoryItems: DreamImportantMemory[] = [];
   if (Array.isArray(record.important_memories)) {
     for (const item of record.important_memories) {
       if (importantMemories.length >= MAX_IMPORTANT_MEMORIES) break;
+      const entry = item && typeof item === 'object' ? (item as Record<string, unknown>) : null;
       const text = typeof item === 'string'
         ? item.trim()
-        : (item && typeof item === 'object' && typeof (item as Record<string, unknown>).text === 'string'
-          ? ((item as Record<string, unknown>).text as string).trim()
-          : '');
+        : (entry && typeof entry.text === 'string' ? entry.text.trim() : '');
       if (text) {
         importantMemories.push(text);
+        const rawSource = entry ? (entry.source ?? entry.evidence) : null;
+        const source = typeof rawSource === 'string' ? rawSource.trim() : '';
+        importantMemoryItems.push({ text, source: source || null });
       }
     }
   }
@@ -1240,6 +1265,7 @@ export function parseDreamOutput(
       sections,
       workReviews,
       importantMemories,
+      importantMemoryItems,
       valueLessons,
       selfIdentity,
       impressionUpdates,

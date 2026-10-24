@@ -1701,6 +1701,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     skippedDisabled: i18nService.t('memoryHygieneStatSkipped'),
     deepConsolidationBots: i18nService.t('memoryHygieneStatDeepBots'),
     deepRetiredMemories: i18nService.t('memoryHygieneStatDeepMemories'),
+    deepRewrittenMemories: i18nService.t('memoryHygieneStatDeepMemoryRewrites'),
     deepRetiredKnowledge: i18nService.t('memoryHygieneStatDeepKnowledge'),
     deepRewrittenKnowledge: i18nService.t('memoryHygieneStatDeepRewrites'),
   };

@@ -323,8 +323,14 @@ export class MemoryHygieneService {
         const errors: string[] = [];
         let botsConsidered = 0;
         let retiredMemories = 0;
+        let rewrittenMemories = 0;
         let retiredKnowledge = 0;
         let rewrittenKnowledge = 0;
+        const isoDate = (epochMs: number | null | undefined): string | undefined => {
+          const value = Number(epochMs);
+          if (!Number.isFinite(value) || value <= 0) return undefined;
+          return new Date(value).toISOString().slice(0, 10);
+        };
         for (const bot of this.deps.metabotStore.listMetabots()) {
           if (context.disabledMetabotIds.has(bot.id)) continue;
           // Align with the dream gate: no consolidation tokens for disabled bots.
@@ -348,12 +354,40 @@ export class MemoryHygieneService {
             status: 'created',
             limit: 50,
           });
+          // Owner facts are where preference/state changes live ("used to X,
+          // now Y"); conversation-origin rows ride along as read-only context
+          // so the owner's own words can supersede a dream belief.
+          const facts = context.coworkStore.listUserMemories({
+            metabotId: bot.id,
+            scopeKind: 'owner',
+            scopeKey: 'owner:self',
+            usageClass: 'profile_fact',
+            status: 'created',
+            limit: 50,
+          });
           const knowledge = context.knowledgeStore
             ? context.knowledgeStore.listKnowledgeForDream(bot.id, 60)
             : [];
+          const memories = [...boundaries, ...reviews, ...facts];
+          const evidence = context.coworkStore.listUserMemoryEvidence(memories.map((memory) => memory.id));
+          const toMemoryItem = (
+            memory: (typeof memories)[number],
+            kind: 'value_boundary' | 'work_review' | 'profile_fact',
+          ): DeepConsolidationInventoryItem => ({
+            id: memory.id,
+            kind,
+            text: memory.text,
+            origin: memory.origin === 'dream' ? 'dream' : 'conversation',
+            rewritable: memory.origin === 'dream',
+            proofCount: evidence.get(memory.id)?.proofCount ?? 0,
+            quotes: evidence.get(memory.id)?.quotes ?? [],
+            firstSeen: isoDate(memory.createdAt),
+            lastSeen: isoDate(memory.updatedAt),
+          });
           const items: DeepConsolidationInventoryItem[] = [
-            ...boundaries.map((memory) => ({ id: memory.id, kind: 'value_boundary' as const, text: memory.text })),
-            ...reviews.map((memory) => ({ id: memory.id, kind: 'work_review' as const, text: memory.text })),
+            ...boundaries.map((memory) => toMemoryItem(memory, 'value_boundary')),
+            ...reviews.map((memory) => toMemoryItem(memory, 'work_review')),
+            ...facts.map((memory) => toMemoryItem(memory, 'profile_fact')),
             ...knowledge.map((entry) => ({
               id: entry.id,
               kind: 'knowledge' as const,
@@ -418,35 +452,60 @@ export class MemoryHygieneService {
           }
           const errorsBeforeApply = errors.length;
 
-          const memoryIds = new Set([...boundaries, ...reviews].map((memory) => memory.id));
           const knowledgeIds = new Set(knowledge.map((entry) => entry.id));
-          // Retire protection aligned with the deterministic decay stroke:
-          // only dream-origin rows are ever auto-archived — conversation-origin
-          // entries may carry the user's explicit "remember this".
+          // Retire/rewrite protection aligned with the deterministic decay
+          // stroke: only dream-origin rows are ever auto-archived or rewritten
+          // — conversation-origin entries may carry the user's explicit
+          // "remember this" and ride along as read-only context.
           const dreamMemoryIds = new Set(
-            [...boundaries, ...reviews]
+            memories
               .filter((memory) => memory.origin === 'dream')
               .map((memory) => memory.id),
           );
-          const retireMemories = output.retireMemoryIds.filter((id) => dreamMemoryIds.has(id));
+          // One row, one action: a rewrite is the survivor of a merge, so an
+          // id the model also lists for retirement keeps its (rewritten) row.
+          const rewriteMemories = output.rewriteMemories.filter((rewrite) => dreamMemoryIds.has(rewrite.id));
+          const rewriteMemoryIds = new Set(rewriteMemories.map((rewrite) => rewrite.id));
+          const retireMemories = output.retireMemoryIds.filter((id) => dreamMemoryIds.has(id) && !rewriteMemoryIds.has(id));
           const retireKnowledge = output.retireKnowledgeIds.filter((id) => knowledgeIds.has(id));
           const rewrites = output.rewriteKnowledge.filter((rewrite) => knowledgeIds.has(rewrite.id));
 
-          // Guardrail: a VALIDATED retire list eating more than a quarter of
+          // Guardrail: a VALIDATED action list eating more than a quarter of
           // the belief layer in one pass smells like a hallucinated purge —
           // refuse the whole proposal and let the cadence retry later.
           // (Bogus and conversation-origin ids are already filtered out, so
-          // junk output cannot trip the guardrail by itself.)
+          // junk output cannot trip the guardrail by itself.) Memory rewrites
+          // count: a narrative rewrite changes what the bot believes, even
+          // though the previous wording stays reversible in the revision log.
           const retireCap = deepConsolidationRetireCap(items.length);
-          if (retireMemories.length + retireKnowledge.length > retireCap) {
+          const actionCount = retireMemories.length + retireKnowledge.length + rewriteMemories.length;
+          if (actionCount > retireCap) {
             errors.push(
-              `deep-consolidation bot ${bot.id}: retire list exceeds guardrail` +
-                ` (${retireMemories.length + retireKnowledge.length} > ${retireCap}); refusing`
+              `deep-consolidation bot ${bot.id}: action list exceeds guardrail` +
+                ` (${actionCount} > ${retireCap}); refusing`
             );
             context.coworkStore.setDeepConsolidationAttempts(bot.id, attempts + 1);
             continue;
           }
-          void memoryIds;
+
+          // Rewrites first so the survivor of a contradiction is written even
+          // when the retire half of the proposal is partly refused below.
+          for (const rewrite of rewriteMemories) {
+            try {
+              const changed = context.coworkStore.rewriteUserMemoryText({
+                id: rewrite.id,
+                metabotId: bot.id,
+                text: rewrite.text,
+                reason: 'evolution_rewrite',
+                sourceType: `deep_consolidation:${rewrite.reason}`,
+                // Same await-window guard as the archive below.
+                notUsedSince: context.nowMs,
+              });
+              if (changed) rewrittenMemories += 1;
+            } catch (error) {
+              errors.push(`deep-consolidation bot ${bot.id}: rewrite memory ${rewrite.id} failed`);
+            }
+          }
 
           retiredMemories += context.coworkStore.archiveUserMemories({
             ids: retireMemories,
@@ -503,6 +562,7 @@ export class MemoryHygieneService {
           counts: {
             deepConsolidationBots: botsConsidered,
             deepRetiredMemories: retiredMemories,
+            deepRewrittenMemories: rewrittenMemories,
             deepRetiredKnowledge: retiredKnowledge,
             deepRewrittenKnowledge: rewrittenKnowledge,
           },

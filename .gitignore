@@ -714,3 +714,6 @@ e2e/mobile/test-results/
 test-results/
 playwright-report/
 blob-report/
+
+# Memory evolution: evidence ledger (quotes + revisions) and contradiction narratives
+!tests/memoryEvidenceLedger.test.mjs

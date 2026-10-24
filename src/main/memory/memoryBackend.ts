@@ -33,6 +33,12 @@ export interface MemoryUserMemory {
   archivedAt?: number | null;
   /** Recall weight derived at write time (see memoryImportance.ts). */
   importance?: number;
+  /**
+   * Evidence ledger: active provenance rows corroborating this memory.
+   * Populated by listUserMemories (one grouped count per call); feeds the
+   * bounded proof boost in recall ranking. Absent = unknown = neutral.
+   */
+  proofCount?: number;
 }
 
 export interface MemoryUserMemorySourceInput {
@@ -45,6 +51,11 @@ export interface MemoryUserMemorySourceInput {
   sourceId?: string;
   /** Dream pipeline: the YYYY-MM-DD this memory was distilled from. */
   dreamDate?: string;
+  /**
+   * Evidence ledger: the verbatim excerpt this source contributed (see
+   * memoryEvidence.ts). Storage + idle-time input only; never injected.
+   */
+  quote?: string;
 }
 
 export interface MemoryUserMemoryStats {

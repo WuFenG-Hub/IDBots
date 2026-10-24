@@ -63,6 +63,15 @@ import {
   normalizeMemorySemanticKey,
   scoreMemorySimilarity,
 } from './memory/memorySimilarity';
+import {
+  MEMORY_EVIDENCE_QUOTES_PER_MEMORY,
+  MEMORY_REVISIONS_KEEP_PER_MEMORY,
+  normalizeMemoryQuote,
+  pickEvidenceQuote,
+  type MemoryEvidenceSummary,
+  type MemoryRevision,
+  type MemoryRevisionReason,
+} from './memory/memoryEvidence';
 import { BOT_WORKSPACE_DIR_NAME, formatBotWorkspaceDate } from './libs/botWorkspace';
 import { queryHotLayerUsageStats } from './libs/hotLayerUsageQueries';
 import {
@@ -941,6 +950,11 @@ export interface CoworkUserMemory {
   archivedAt?: number | null;
   /** Recall weight: high-importance memories get guaranteed injection and late eviction. */
   importance: number;
+  /**
+   * Evidence ledger: active provenance rows corroborating this memory
+   * (populated by listUserMemories; absent elsewhere = neutral in ranking).
+   */
+  proofCount?: number;
 }
 
 export interface CoworkUserMemorySource {
@@ -963,6 +977,12 @@ export interface CoworkUserMemorySourceInput {
   sourceId?: string;
   /** Dream pipeline: the YYYY-MM-DD this memory was distilled from. */
   dreamDate?: string;
+  /**
+   * Evidence ledger: the verbatim excerpt this source contributed (capped at
+   * MEMORY_EVIDENCE_QUOTE_MAX_CHARS). Storage + idle-time input only; never
+   * rendered into a turn.
+   */
+  quote?: string;
 }
 
 /** One L3b procedural-memory draft row (`capability_drafts`, SDD §4.1). */
@@ -1982,6 +2002,13 @@ export class CoworkStore implements MemoryBackend {
         this.db.run('ALTER TABLE user_memory_sources ADD COLUMN dream_date TEXT NULL;');
         changed = true;
       }
+      if (!sourceColumns.includes('quote')) {
+        // Evidence ledger (memory evolution 2026-10-24): the verbatim excerpt
+        // this source contributed. Pre-existing rows stay NULL — they were
+        // written before quotes were captured and are not backfilled.
+        this.db.run('ALTER TABLE user_memory_sources ADD COLUMN quote TEXT NULL;');
+        changed = true;
+      }
       this.db.run(`
         CREATE INDEX IF NOT EXISTS idx_user_memory_sources_channel_conversation
         ON user_memory_sources(source_channel, external_conversation_id, created_at DESC)
@@ -1992,6 +2019,37 @@ export class CoworkStore implements MemoryBackend {
       `);
     } catch (error) {
       console.warn('[CoworkStore] Failed to verify user_memory_sources source columns:', error);
+    }
+
+    try {
+      // Revision history (memory evolution 2026-10-24): the text a merge or
+      // rewrite replaced — near-duplicate merge, cross-night dream merge,
+      // deep-consolidation evolution rewrite, owner edit. Turns every change
+      // of wording into an audit trail and keeps consolidation rewrites
+      // reversible. CREATE TABLE IF NOT EXISTS is the idempotent first-run
+      // migration; existing memory rows are never touched.
+      if (!this.tableExists('user_memory_revisions')) {
+        this.db.run(`
+          CREATE TABLE IF NOT EXISTS user_memory_revisions (
+            id TEXT PRIMARY KEY,
+            memory_id TEXT NOT NULL,
+            metabot_id INTEGER,
+            previous_text TEXT NOT NULL,
+            new_text TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            source_type TEXT,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (memory_id) REFERENCES user_memories(id) ON DELETE CASCADE
+          )
+        `);
+        changed = true;
+      }
+      this.db.run(`
+        CREATE INDEX IF NOT EXISTS idx_user_memory_revisions_memory
+        ON user_memory_revisions(memory_id, created_at DESC)
+      `);
+    } catch (error) {
+      console.warn('[CoworkStore] Failed to verify user_memory_revisions table:', error);
     }
 
     try {
@@ -7234,9 +7292,9 @@ export class CoworkStore implements MemoryBackend {
     this.db.run(`
       INSERT INTO user_memory_sources (
         id, memory_id, metabot_id, session_id, source_channel, source_type, external_conversation_id, source_id,
-        message_id, role, is_active, created_at, dream_date
+        message_id, role, is_active, created_at, dream_date, quote
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
     `, [
       uuidv4(),
       memoryId,
@@ -7250,7 +7308,50 @@ export class CoworkStore implements MemoryBackend {
       source?.role || 'system',
       now,
       source?.dreamDate?.trim() || null,
+      normalizeMemoryQuote(source?.quote),
     ]);
+  }
+
+  /**
+   * Evidence ledger: keep the wording a merge/rewrite replaced. No-op when the
+   * text did not change (a corroborating merge that keeps the stored wording
+   * is provenance, not a revision). History is bounded per memory — the
+   * newest MEMORY_REVISIONS_KEEP_PER_MEMORY rows survive.
+   */
+  private recordMemoryRevision(input: {
+    memoryId: string;
+    metabotId: number | null;
+    previousText: string;
+    newText: string;
+    reason: MemoryRevisionReason;
+    sourceType?: string | null;
+  }): void {
+    if (input.previousText === input.newText) return;
+    const now = Date.now();
+    this.db.run(`
+      INSERT INTO user_memory_revisions (
+        id, memory_id, metabot_id, previous_text, new_text, reason, source_type, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      uuidv4(),
+      input.memoryId,
+      input.metabotId,
+      input.previousText,
+      input.newText,
+      input.reason,
+      input.sourceType?.trim() || null,
+      now,
+    ]);
+    this.db.run(`
+      DELETE FROM user_memory_revisions
+      WHERE memory_id = ?
+        AND id NOT IN (
+          SELECT id FROM user_memory_revisions
+          WHERE memory_id = ?
+          ORDER BY created_at DESC, ROWID DESC
+          LIMIT ?
+        )
+    `, [input.memoryId, input.memoryId, MEMORY_REVISIONS_KEEP_PER_MEMORY]);
   }
 
   private createOrReviveUserMemory(input: MemoryCreateUserMemoryInput): { memory: CoworkUserMemory; created: boolean; updated: boolean } {
@@ -7330,6 +7431,14 @@ export class CoworkStore implements MemoryBackend {
       // Match queries only filter status != 'deleted', so a restatement can
       // land on an archived row; revive must clear archived_at or the memory
       // stays invisible to injection and listings forever.
+      this.recordMemoryRevision({
+        memoryId: existing.id,
+        metabotId,
+        previousText: existing.text,
+        newText: mergedText,
+        reason: 'near_duplicate_merge',
+        sourceType: input.source?.sourceType ?? null,
+      });
       this.db.run(`
         UPDATE user_memories
         SET text = ?, fingerprint = ?, confidence = ?, is_explicit = ?, status = 'created',
@@ -7456,10 +7565,35 @@ export class CoworkStore implements MemoryBackend {
     `, [...params, limit, offset]);
 
     const entries = rows.map((row) => this.mapMemoryRow(row));
+    // Evidence ledger: one grouped count per listing (pool <= 200 rows, index
+    // on (memory_id, is_active)) so recall ranking can apply the bounded proof
+    // boost without a per-row query.
+    const proofCounts = this.countActiveMemorySources(entries.map((entry) => entry.id));
+    for (const entry of entries) {
+      entry.proofCount = proofCounts.get(entry.id) ?? 0;
+    }
     if (options.touchLastUsed) {
       this.touchUserMemoriesLastUsed(metabotId, entries.map((entry) => entry.id));
     }
     return entries;
+  }
+
+  private countActiveMemorySources(memoryIds: readonly string[]): Map<string, number> {
+    const ids = Array.from(new Set(memoryIds.map((id) => id.trim()).filter(Boolean)));
+    const counts = new Map<string, number>();
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      const rows = this.getAll<{ memory_id: string; n: number }>(`
+        SELECT memory_id, COUNT(*) AS n
+        FROM user_memory_sources
+        WHERE is_active = 1 AND memory_id IN (${chunk.map(() => '?').join(', ')})
+        GROUP BY memory_id
+      `, chunk);
+      for (const row of rows) {
+        counts.set(row.memory_id, Number(row.n) || 0);
+      }
+    }
+    return counts;
   }
 
   touchUserMemoriesLastUsed(metabotId: number, memoryIds: string[]): void {
@@ -7586,6 +7720,14 @@ export class CoworkStore implements MemoryBackend {
               isExplicit: input.isExplicit === true,
             }),
         );
+        this.recordMemoryRevision({
+          memoryId: bestCandidate.id,
+          metabotId,
+          previousText: bestCandidate.text,
+          newText: mergedText,
+          reason: 'dream_cross_night_merge',
+          sourceType: input.source?.sourceType ?? 'dream',
+        });
         this.db.run(`
           UPDATE user_memories
           SET text = ?, fingerprint = ?, updated_at = ?, importance = ?
@@ -9087,6 +9229,14 @@ export class CoworkStore implements MemoryBackend {
       }),
     );
 
+    this.recordMemoryRevision({
+      memoryId: input.id,
+      metabotId: input.metabotId,
+      previousText: current.text,
+      newText: nextText,
+      reason: input.allowProtected ? 'protected_update' : 'user_edit',
+      sourceType: input.source?.sourceType ?? null,
+    });
     this.db.run(`
       UPDATE user_memories
       SET text = ?, fingerprint = ?, confidence = ?, is_explicit = ?, status = ?,
@@ -9264,6 +9414,123 @@ export class CoworkStore implements MemoryBackend {
     return archived;
   }
 
+  /**
+   * Evidence ledger read: per memory, how many active provenance rows
+   * corroborate it (proof count) and its newest distinct quotes. Feeds the
+   * idle-time passes (deep consolidation judges a belief by its evidence) and
+   * owner surfaces; the per-turn prompt never reads it. Ids without rows map
+   * to an empty summary so callers can index unconditionally.
+   */
+  listUserMemoryEvidence(
+    memoryIds: readonly string[],
+    options?: { maxQuotes?: number },
+  ): Map<string, MemoryEvidenceSummary> {
+    const ids = Array.from(new Set(memoryIds.map((id) => id.trim()).filter(Boolean)));
+    const result = new Map<string, MemoryEvidenceSummary>();
+    for (const id of ids) result.set(id, { proofCount: 0, quotes: [] });
+    if (ids.length === 0) return result;
+    const maxQuotes = Math.max(0, Math.min(10, Math.floor(options?.maxQuotes ?? MEMORY_EVIDENCE_QUOTES_PER_MEMORY)));
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      const rows = this.getAll<{ memory_id: string; quote: string | null }>(`
+        SELECT memory_id, quote
+        FROM user_memory_sources
+        WHERE is_active = 1 AND memory_id IN (${chunk.map(() => '?').join(', ')})
+        ORDER BY created_at DESC, ROWID DESC
+      `, chunk);
+      for (const row of rows) {
+        const entry = result.get(row.memory_id);
+        if (!entry) continue;
+        entry.proofCount += 1;
+        const quote = normalizeMemoryQuote(row.quote);
+        if (quote && entry.quotes.length < maxQuotes && !entry.quotes.includes(quote)) {
+          entry.quotes.push(quote);
+        }
+      }
+    }
+    return result;
+  }
+
+  /** Newest-first wording history of one memory (see recordMemoryRevision). */
+  listUserMemoryRevisions(memoryId: string, limit: number = MEMORY_REVISIONS_KEEP_PER_MEMORY): MemoryRevision[] {
+    const id = memoryId.trim();
+    if (!id) return [];
+    const rows = this.getAll<{
+      id: string;
+      memory_id: string;
+      previous_text: string;
+      new_text: string;
+      reason: string;
+      source_type: string | null;
+      created_at: number;
+    }>(`
+      SELECT id, memory_id, previous_text, new_text, reason, source_type, created_at
+      FROM user_memory_revisions
+      WHERE memory_id = ?
+      ORDER BY created_at DESC, ROWID DESC
+      LIMIT ?
+    `, [id, Math.max(1, Math.min(100, Math.floor(limit)))]);
+    return rows.map((row) => ({
+      id: row.id,
+      memoryId: row.memory_id,
+      previousText: row.previous_text,
+      newText: row.new_text,
+      reason: row.reason,
+      sourceType: row.source_type ?? null,
+      createdAt: Number(row.created_at),
+    }));
+  }
+
+  /**
+   * Deep-consolidation evolution rewrite: replace a memory's wording with the
+   * narrative that carries a contradiction or state change ("曾…，现在…"),
+   * keeping the replaced text as a revision so the rewrite stays reversible.
+   * Same protections as archiveUserMemories — active rows only, never
+   * self_identity, and the notUsedSince guard skips rows touched during the
+   * proposal's LLM window. The write goes through the ordinary text cap, so a
+   * rewrite can never grow the injected surface. Returns whether a row changed.
+   */
+  rewriteUserMemoryText(input: {
+    id: string;
+    metabotId: number;
+    text: string;
+    reason: MemoryRevisionReason;
+    sourceType?: string | null;
+    notUsedSince?: number;
+  }): boolean {
+    const id = input.id.trim();
+    if (!id) return false;
+    const usageGuard = input.notUsedSince != null
+      ? ' AND COALESCE(last_used_at, updated_at) <= ?'
+      : '';
+    const guardParams = input.notUsedSince != null ? [Math.floor(input.notUsedSince)] : [];
+    const current = this.getOne<CoworkUserMemoryRow>(`
+      SELECT ${MEMORY_ROW_SELECT_COLUMNS}
+      FROM user_memories
+      WHERE id = ? AND metabot_id = ?
+        AND status = 'created' AND archived_at IS NULL
+        AND usage_class != 'self_identity'${usageGuard}
+    `, [id, input.metabotId, ...guardParams]);
+    if (!current) return false;
+    const nextText = truncate(normalizeMemoryText(input.text), maxMemoryTextChars(current.usage_class));
+    if (!nextText || nextText === current.text) return false;
+    this.recordMemoryRevision({
+      memoryId: id,
+      metabotId: input.metabotId,
+      previousText: current.text,
+      newText: nextText,
+      reason: input.reason,
+      sourceType: input.sourceType ?? null,
+    });
+    this.db.run(`
+      UPDATE user_memories
+      SET text = ?, fingerprint = ?, updated_at = ?
+      WHERE id = ? AND metabot_id = ?
+    `, [nextText, buildMemoryFingerprint(nextText), Date.now(), id, input.metabotId]);
+    this.saveDb();
+    return true;
+  }
+
   // Deep-consolidation cadence: metabot id -> epoch ms of its last run.
   getDeepConsolidationLastRunAt(metabotId: number): number | null {
     const row = this.getOne<{ value: string }>(
@@ -9396,6 +9663,12 @@ export class CoworkStore implements MemoryBackend {
           `DELETE FROM user_memory_sources WHERE memory_id IN (${chunk.map(() => '?').join(', ')})`,
           chunk,
         );
+        if (this.tableExists('user_memory_revisions')) {
+          this.db.run(
+            `DELETE FROM user_memory_revisions WHERE memory_id IN (${chunk.map(() => '?').join(', ')})`,
+            chunk,
+          );
+        }
         this.db.run(
           `DELETE FROM user_memories
            WHERE status = 'deleted' AND id IN (${chunk.map(() => '?').join(', ')})`,
@@ -9925,6 +10198,7 @@ export class CoworkStore implements MemoryBackend {
             messageId: options.userMessageId,
             sourceType: change.isExplicit ? 'turn_explicit' : 'turn_implicit',
             sourceId: options.userMessageId,
+            quote: pickEvidenceQuote(options.userText, change.text) ?? undefined,
           },
           metabotId,
         });
@@ -9936,6 +10210,7 @@ export class CoworkStore implements MemoryBackend {
             messageId: options.assistantMessageId,
             sourceType: 'turn_assistant',
             sourceId: options.assistantMessageId,
+            quote: pickEvidenceQuote(options.assistantText, change.text) ?? undefined,
           });
         }
 
@@ -9985,6 +10260,7 @@ export class CoworkStore implements MemoryBackend {
             messageId: options.userMessageId,
             sourceType: change.isExplicit ? 'turn_explicit' : 'turn_llm',
             sourceId: options.userMessageId,
+            quote: pickEvidenceQuote(options.userText, change.text) ?? undefined,
           },
           metabotId,
         });
