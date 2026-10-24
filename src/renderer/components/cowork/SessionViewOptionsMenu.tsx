@@ -3,8 +3,8 @@ import {
   CheckCircleIcon,
   CheckIcon,
   ClockIcon,
-  FolderIcon,
   PlusCircleIcon,
+  UsersIcon,
 } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { SessionSortMode, SessionViewMode } from '../../utils/sessionViewGrouping';
@@ -54,7 +54,7 @@ const sectionHeaderClass =
 
 /**
  * "Filter & sort" dropdown for the bot-home session list: a View section
- * (by project / timeline) and a Sort-by section (update time / creation
+ * (by Bot / timeline) and a Sort-by section (update time / creation
  * time). Rendered as a fixed element so the sidebar's overflow containers
  * cannot clip it; stays open across selections and closes on outside click,
  * Escape, or viewport resize.
@@ -135,10 +135,10 @@ const SessionViewOptionsMenu: React.FC<SessionViewOptionsMenuProps> = ({
     >
       <div className={sectionHeaderClass}>{i18nService.t('sessionViewSectionView')}</div>
       <MenuOption
-        icon={<FolderIcon className="h-4 w-4" />}
-        label={i18nService.t('sessionViewByProject')}
-        selected={viewMode === 'project'}
-        onClick={() => onViewModeChange('project')}
+        icon={<UsersIcon className="h-4 w-4" />}
+        label={i18nService.t('sessionViewByBot')}
+        selected={viewMode === 'bot'}
+        onClick={() => onViewModeChange('bot')}
       />
       <MenuOption
         icon={<ClockIcon className="h-4 w-4" />}

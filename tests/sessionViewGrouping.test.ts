@@ -6,8 +6,9 @@ import { fileURLToPath } from 'node:url';
 import {
   buildBotSessionCounts,
   formatMonthLabel,
-  groupSessionsByProject,
+  groupSessionsByBot,
   groupSessionsByTimeline,
+  type BotViewBot,
 } from '../src/renderer/utils/sessionViewGrouping';
 import type { CoworkSessionSummary } from '../src/renderer/types/cowork';
 
@@ -101,120 +102,117 @@ test('month labels render per language', () => {
   assert.equal(formatMonthLabel(2026, 7, 'en'), 'Jul 2026');
 });
 
-test('project grouping collapses dated bot-workspace folders into one bot group', () => {
-  const result = groupSessionsByProject(
-    [
-      mkSession({
-        id: 's1',
-        cwd: '/Users/tusm/idbots/project/bots/1/2026-08-28',
-        metabotId: 1,
-        metabotName: 'Twin Bot',
-        metabotAvatar: 'data:image/png;base64,AAA',
-        createdAt: at(2026, 7, 28),
-        updatedAt: at(2026, 7, 28, 9),
-      }),
-      mkSession({
-        id: 's2',
-        cwd: '/Users/tusm/idbots/project/bots/1/2026-08-29',
-        metabotId: 1,
-        metabotName: 'Twin Bot',
-        createdAt: at(2026, 7, 29),
-        updatedAt: at(2026, 7, 29, 10),
-      }),
-    ],
-    'updatedAt',
-  );
-  assert.equal(result.groups.length, 1);
-  const group = result.groups[0];
-  assert.equal(group.kind, 'bot');
-  assert.equal(group.key, 'bot:1');
-  assert.deepEqual(group.bot, { id: 1, name: 'Twin Bot', avatar: 'data:image/png;base64,AAA' });
-  // Newest first inside the group.
-  assert.deepEqual(group.sessions.map((session) => session.id), ['s2', 's1']);
+const mkBot = (overrides: Partial<BotViewBot> & Pick<BotViewBot, 'id'>): BotViewBot => ({
+  name: `Bot ${overrides.id}`,
+  avatar: null,
+  isTwin: false,
+  createdAt: 0,
+  ...overrides,
 });
 
-test('a dated bots folder belonging to another bot id stays a directory group keyed by its date-stripped root', () => {
-  const result = groupSessionsByProject(
+test('bot grouping seeds every local bot a group and orders Twin first, then oldest-created first', () => {
+  const result = groupSessionsByBot(
     [
-      mkSession({
-        id: 's1',
-        cwd: '/Users/tusm/idbots/project/bots/2/2026-08-01',
-        metabotId: 1,
-        createdAt: at(2026, 7, 1),
-        updatedAt: at(2026, 7, 1),
-      }),
-      mkSession({
-        id: 's2',
-        cwd: '/Users/tusm/idbots/project/bots/2/2026-08-02',
-        metabotId: 1,
-        createdAt: at(2026, 7, 2),
-        updatedAt: at(2026, 7, 2),
-      }),
+      mkSession({ id: 's1', metabotId: 7, createdAt: at(2026, 7, 28), updatedAt: at(2026, 7, 28, 9) }),
+      mkSession({ id: 's2', metabotId: 1, cwd: '/Users/tusm/work/custom-dir', createdAt: at(2026, 7, 29), updatedAt: at(2026, 7, 29, 10) }),
     ],
     'updatedAt',
-  );
-  assert.equal(result.groups.length, 1);
-  assert.equal(result.groups[0].kind, 'directory');
-  assert.equal(result.groups[0].directoryPath, '/Users/tusm/idbots/project/bots/2');
-  assert.equal(result.groups[0].directoryName, '2');
-});
-
-test('directory groups key by normalized path and expose the last segment as label', () => {
-  const result = groupSessionsByProject(
     [
-      mkSession({ id: 's1', cwd: '/Users/tusm/work/IDBots', createdAt: 1, updatedAt: 1 }),
-      mkSession({ id: 's2', cwd: '/Users/tusm/work/IDBots/', createdAt: 2, updatedAt: 2 }),
+      // Youngest bot (id 7, newest createdAt) but the Twin: still first.
+      mkBot({ id: 7, isTwin: true, name: 'Twin Bot', createdAt: 900 }),
+      mkBot({ id: 3, name: 'Worker C', createdAt: 300 }),
+      mkBot({ id: 1, name: 'Worker A', createdAt: 100 }),
+      mkBot({ id: 2, name: 'Worker B', createdAt: 200 }),
+      // A tie on createdAt breaks by id ascending.
+      mkBot({ id: 5, name: 'Worker E', createdAt: 300 }),
     ],
-    'updatedAt',
-  );
-  assert.equal(result.groups.length, 1);
-  assert.equal(result.groups[0].directoryName, 'IDBots');
-  assert.equal(result.groups[0].directoryPath, '/Users/tusm/work/IDBots');
-});
-
-test('project groups order by their first session creation time, newest first', () => {
-  const result = groupSessionsByProject(
-    [
-      mkSession({ id: 'a1', cwd: '/work/project-a', createdAt: at(2026, 7, 1), updatedAt: at(2026, 7, 20) }),
-      mkSession({ id: 'b1', cwd: '/work/project-b', createdAt: at(2026, 7, 10), updatedAt: at(2026, 7, 11) }),
-      mkSession({ id: 'a2', cwd: '/work/project-a', createdAt: at(2026, 7, 5), updatedAt: at(2026, 7, 6) }),
-    ],
-    'updatedAt',
   );
   assert.deepEqual(
-    result.groups.map((group) => group.directoryName),
-    ['project-b', 'project-a'],
+    result.groups.map((group) => group.key),
+    ['bot:7', 'bot:1', 'bot:2', 'bot:3', 'bot:5'],
   );
+  // Every seeded bot keeps a group, empty ones included (20 local bots means
+  // 20 groups); no trailing bucket appears when nothing is left unmatched.
+  assert.deepEqual(
+    result.groups.map((group) => group.sessions.length),
+    [1, 1, 0, 0, 0],
+  );
+  assert.equal(result.groups[0].bot?.name, 'Twin Bot');
+  // The custom working directory plays no role anymore: the row lands under
+  // its bot (id 1), not under a directory group.
+  assert.deepEqual(result.groups[1].sessions.map((session) => session.id), ['s2']);
 });
 
-test('legacy rows without cwd fall back to bot grouping, then a shared other group', () => {
-  const result = groupSessionsByProject(
+test('bot grouping files rows no live bot claims into one trailing other group', () => {
+  const result = groupSessionsByBot(
     [
-      mkSession({ id: 's1', metabotId: 3, metabotName: 'Bot 3', createdAt: 1, updatedAt: 1 }),
-      mkSession({ id: 's2', createdAt: 2, updatedAt: 2 }),
+      mkSession({ id: 'live', metabotId: 1, createdAt: 1, updatedAt: 1 }),
+      mkSession({ id: 'gone', metabotId: 42, createdAt: 2, updatedAt: 2 }),
+      mkSession({ id: 'legacy', createdAt: 3, updatedAt: 3 }),
     ],
     'updatedAt',
+    [mkBot({ id: 1, createdAt: 100 })],
   );
   assert.deepEqual(
-    result.groups.map((group) => group.kind),
-    // The other-group session appeared later, so it sorts first.
-    ['other', 'bot'],
+    result.groups.map((group) => group.key),
+    ['bot:1', 'other'],
   );
-  assert.equal(result.groups[1].bot?.id, 3);
+  assert.deepEqual(
+    result.groups[1].sessions.map((session) => session.id),
+    ['legacy', 'gone'],
+  );
 });
 
-test('project grouping keeps pinned sessions out of the groups', () => {
-  const result = groupSessionsByProject(
+test('bot grouping keeps pinned sessions out of the groups and sorts rows by the active mode', () => {
+  const result = groupSessionsByBot(
     [
-      mkSession({ id: 'pinned', pinned: true, cwd: '/work/a', createdAt: 3, updatedAt: 3 }),
-      mkSession({ id: 'plain', cwd: '/work/a', createdAt: 1, updatedAt: 1 }),
+      mkSession({ id: 'pinned', pinned: true, metabotId: 1, createdAt: 3, updatedAt: 3 }),
+      mkSession({ id: 'newer', metabotId: 1, createdAt: 1, updatedAt: 20 }),
+      mkSession({ id: 'older', metabotId: 1, createdAt: 2, updatedAt: 10 }),
     ],
     'updatedAt',
+    [mkBot({ id: 1, createdAt: 100 })],
   );
   assert.deepEqual(result.pinned.map((session) => session.id), ['pinned']);
   assert.deepEqual(
     result.groups[0].sessions.map((session) => session.id),
-    ['plain'],
+    ['newer', 'older'],
+  );
+  const byCreation = groupSessionsByBot(
+    [
+      mkSession({ id: 'newer', metabotId: 1, createdAt: 1, updatedAt: 20 }),
+      mkSession({ id: 'older', metabotId: 1, createdAt: 2, updatedAt: 10 }),
+    ],
+    'createdAt',
+    [mkBot({ id: 1, createdAt: 100 })],
+  );
+  assert.deepEqual(
+    byCreation.groups[0].sessions.map((session) => session.id),
+    ['older', 'newer'],
+  );
+});
+
+test('an empty roster degrades to session-derived bot groups, newest activity first, freshest snapshot identity', () => {
+  const result = groupSessionsByBot(
+    [
+      mkSession({ id: 't1', metabotId: 1, metabotName: 'Twin Bot', metabotAvatar: 'data:image/png;base64,AAA', createdAt: 1, updatedAt: 100 }),
+      mkSession({ id: 't2', metabotId: 1, createdAt: 2, updatedAt: 50 }),
+      // A newer row without a name must not erase the fresher snapshot's name.
+      mkSession({ id: 't3', metabotId: 1, createdAt: 3, updatedAt: 200 }),
+      mkSession({ id: 'w1', metabotId: 2, metabotName: 'Worker', createdAt: 4, updatedAt: 90 }),
+      mkSession({ id: 'legacy', createdAt: 5, updatedAt: 60 }),
+    ],
+    'updatedAt',
+    [],
+  );
+  assert.deepEqual(
+    result.groups.map((group) => group.key),
+    ['bot:1', 'bot:2', 'other'],
+  );
+  assert.deepEqual(result.groups[0].bot, { id: 1, name: 'Twin Bot', avatar: 'data:image/png;base64,AAA' });
+  assert.deepEqual(
+    result.groups[2].sessions.map((session) => session.id),
+    ['legacy'],
   );
 });
 
@@ -250,7 +248,9 @@ test('the card strip is gone: no dead symbol survives anywhere in src', () => {
     'bot-filter-unread-badge',
     'botFilterBar',
     'botFilter=',
-    "viewMode === 'bot'",
+    // NOTE: `viewMode === 'bot'` was in this list while the directory-based
+    // project view held the grouped slot; the by-Bot view is back by design
+    // (one group per local bot, Twin first) and owns that string again.
     // The "Bot:" caption was dropped when the native <select> became the
     // avatar-led popover; its i18n key must not come back.
     'sessionBotSelectorCaption',

@@ -14,9 +14,10 @@ import { isAssistantModeOwnerChatSession } from './assistantModeSessionGate';
 import { useProgressiveRowReveal } from './sessionListRevealBudget';
 import {
   buildBotSessionCounts,
-  groupSessionsByProject,
+  groupSessionsByBot,
   groupSessionsByTimeline,
   sortSessionsByMode,
+  type BotViewBot,
   type SessionSortMode,
   type SessionViewMode,
 } from '../../utils/sessionViewGrouping';
@@ -334,9 +335,12 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   // The selector's bots come from the same read-only IPC the composers use
   // (enabled bots only, Twin first) — NOT from the sessions, so a deleted or
   // disabled bot can never reappear as a filter option. Best effort: any
-  // failure leaves the selector off (empty list).
+  // failure leaves the selector off (empty list). The same roster also feeds
+  // the by-Bot view's groups (every enabled bot gets a group, empty ones
+  // included), so the view opens for the local list too, not just the A2A
+  // selector.
   useEffect(() => {
-    if (!botSelector) return;
+    if (!botSelector && viewMode !== 'bot') return;
     let cancelled = false;
     window.electron?.idbots
       ?.getMetaBots?.()
@@ -349,7 +353,22 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [botSelector]);
+  }, [botSelector, viewMode]);
+
+  // Roster shaped for the by-Bot view: Twin flag + creation time for the
+  // group order. An IPC row that predates created_at (impossible today, but
+  // the field is optional on the selector type) orders as the oldest.
+  const viewBots = useMemo<BotViewBot[]>(
+    () =>
+      (selectorBots ?? []).map((bot) => ({
+        id: bot.id,
+        name: bot.name,
+        avatar: bot.avatar,
+        isTwin: bot.metabot_type === 'twin',
+        createdAt: bot.created_at ?? 0,
+      })),
+    [selectorBots],
+  );
 
   // Per-bot conversation counts for the selector's option rows (each live bot
   // pre-seeded at 0, 'all' carrying the total). They exist only for the online
@@ -360,7 +379,10 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   );
   // A lone local bot needs no selector (the same "zero noise" rule as the
   // single-group degradation), so the control stays off below two local bots.
-  const showBotSelector = (selectorBots?.length ?? 0) > 1;
+  // Gated on the botSelector PROP: the by-Bot view also loads the roster, but
+  // it must never turn the selector logic on for the local list — among other
+  // things the fold/section visibility below keys off !showBotSelector.
+  const showBotSelector = botSelector && (selectorBots?.length ?? 0) > 1;
   // The selector opens on the Twin — the bot you converse with — falling back
   // to 全部 Bot when there is no Twin or it has no online sessions yet, so the
   // list never opens scoped to an empty selection.
@@ -417,9 +439,9 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     [visibleSessions, viewMode, sortMode, language, nowMs],
   );
 
-  const projectGrouped = useMemo(
-    () => (viewMode === 'project' ? groupSessionsByProject(visibleSessions, sortMode) : null),
-    [visibleSessions, viewMode, sortMode],
+  const botGrouped = useMemo(
+    () => (viewMode === 'bot' ? groupSessionsByBot(visibleSessions, sortMode, viewBots) : null),
+    [visibleSessions, viewMode, sortMode, viewBots],
   );
 
   // The Follow-Up section: sessions awaiting a human decision, ordered like the
@@ -728,14 +750,17 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     );
   }
 
-  // Project view: collapsible per-project / per-bot groups, pinned first.
-  if (projectGrouped) {
+  // By-Bot view: one collapsible group per local bot (empty bots included),
+  // Twin first then oldest-created first, pinned leading. The group header
+  // matches the session-row height (same px-2.5 py-1.5 box + h-6 avatar) so
+  // the roster reads as rows of its own, not as thin captions.
+  if (botGrouped) {
     return (
       <div ref={rootRef}>
-        {renderPinnedSection(projectGrouped.pinned)}
+        {renderPinnedSection(botGrouped.pinned)}
         {renderAutoTasksSection()}
         {renderFollowUpSection()}
-        {projectGrouped.groups.map((group) => {
+        {botGrouped.groups.map((group) => {
           if (!revealBudgetLeft()) return null;
           const collapsed = collapsedGroupKeys.has(group.key);
           let headerLabel: React.ReactNode;
@@ -745,24 +770,15 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
                 <SessionAvatarCircle
                   src={group.bot.avatar}
                   name={group.bot.name}
-                  sizeClass="h-4 w-4"
+                  sizeClass="h-6 w-6"
                 />
                 <span className="truncate">{group.bot.name || `Bot ${group.bot.id}`}</span>
-              </>
-            );
-          } else if (group.kind === 'directory') {
-            headerLabel = (
-              <>
-                <FolderIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                <span className="truncate" title={group.directoryPath}>
-                  {group.directoryName}
-                </span>
               </>
             );
           } else {
             headerLabel = (
               <>
-                <FolderIcon className="h-3.5 w-3.5 flex-shrink-0" />
+                <FolderIcon className="h-4 w-4 flex-shrink-0" />
                 <span className="truncate">{i18nService.t('sessionGroupOther')}</span>
               </>
             );
@@ -773,14 +789,21 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
                 type="button"
                 aria-expanded={!collapsed}
                 onClick={() => toggleGroupCollapsed(group.key)}
-                className={`flex w-full items-center gap-1.5 px-2.5 pb-1 pt-2.5 text-left transition-colors hover:text-claude-text dark:hover:text-claude-darkText ${groupHeaderLabelClass}`}
+                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm font-medium transition-colors dark:text-claude-darkText text-claude-text hover:text-claude-accent dark:hover:text-claude-accent"
               >
                 <ChevronDownIcon
-                  className={`h-3 w-3 flex-shrink-0 transition-transform duration-150 ${collapsed ? '-rotate-90' : ''}`}
+                  className={`h-3.5 w-3.5 flex-shrink-0 transition-transform duration-150 ${collapsed ? '-rotate-90' : ''}`}
                 />
                 {headerLabel}
               </button>
-              {!collapsed && group.sessions.map(renderItem)}
+              {!collapsed
+                && (group.sessions.length > 0 ? (
+                  group.sessions.map(renderItem)
+                ) : (
+                  <div className={`px-2.5 pb-1.5 pl-10 text-xs ${groupHeaderLabelClass}`}>
+                    {i18nService.t('sessionGroupNoConversations')}
+                  </div>
+                ))}
             </section>
           );
         })}
