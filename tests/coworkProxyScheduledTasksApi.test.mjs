@@ -115,6 +115,7 @@ function createViaApi(base, patch = {}) {
       name: 'Bound task',
       prompt: 'follow up here',
       schedule: { type: 'cron', expression: '0 8 * * *' },
+      exitCondition: 'Retire once the upstream delivery is confirmed.',
       ...patch,
     }),
   });
@@ -370,4 +371,90 @@ test('PUT rejects a non-string sessionId', async () => {
   assert.equal(res.status, 400);
   const body = await res.json();
   assert.match(body.error, /sessionId must be a string/);
+});
+
+// --- Lifecycle discipline (2026-10-24): death clause + provenance ---------
+
+test('POST create rejects recurring tasks without an exit condition (hard reject + guidance)', async () => {
+  const { base, tasks } = await setup();
+  const cron = await createViaApi(base, { exitCondition: null });
+  assert.equal(cron.status, 400);
+  const cronBody = await cron.json();
+  assert.match(cronBody.error, /require "exitCondition"/);
+  assert.match(cronBody.error, /upstream lifecycle/);
+
+  const interval = await createViaApi(base, {
+    exitCondition: null,
+    schedule: { type: 'interval', intervalMs: 3600000 },
+  });
+  assert.equal(interval.status, 400);
+  assert.equal(tasks.size, 1, 'only the seed task exists — nothing was created');
+});
+
+test('POST create accepts one-shot "at" tasks without an exit condition', async () => {
+  const { base } = await setup();
+  const res = await createViaApi(base, {
+    exitCondition: null,
+    schedule: { type: 'at', datetime: new Date(Date.now() + 3600_000).toISOString() },
+  });
+  assert.equal(res.status, 201);
+  const body = await res.json();
+  assert.equal(body.success, true);
+  assert.equal(body.task.exitCondition, null);
+  assert.equal(body.task.maxFires, null, 'one-shot tasks carry no fire budget');
+});
+
+test('POST create stamps agent provenance and derives the origin context host-side', async () => {
+  const { base } = await setup({
+    resolveSessionOriginContext: (sessionId) => (sessionId === 'sess-gt-9' ? 'group-task:9' : 'chat'),
+  });
+  const body = await (await createViaApi(base, {
+    originSessionId: 'sess-gt-9',
+    origin: 'human', // caller self-description that must be ignored
+    originContext: 'lies',
+  })).json();
+  assert.equal(body.success, true);
+  assert.equal(body.task.origin, 'agent', 'the API surface is bot-only; origin is stamped, never trusted');
+  assert.equal(body.task.originSessionId, 'sess-gt-9');
+  assert.equal(body.task.originContext, 'group-task:9', 'host-derived context wins over caller claims');
+
+  const fallback = await (await createViaApi(base, { originContext: 'surf' })).json();
+  assert.equal(fallback.task.originContext, 'surf', 'without a session the caller-declared context is kept');
+});
+
+test('POST create applies the default fire budget and validates maxFires', async () => {
+  const { base } = await setup();
+  const defaulted = await (await createViaApi(base)).json();
+  assert.equal(defaulted.task.maxFires, 50, 'bot-created recurring tasks default to a 50-fire budget');
+
+  const raised = await (await createViaApi(base, { maxFires: 200 })).json();
+  assert.equal(raised.task.maxFires, 200);
+
+  const invalid = await createViaApi(base, { maxFires: -3 });
+  assert.equal(invalid.status, 400);
+  assert.match((await invalid.json()).error, /maxFires must be a positive integer/);
+});
+
+test('PUT update revises the exit clause and budget but never the provenance', async () => {
+  const { base, seedId, store } = await setup();
+  const created = await (await createViaApi(base)).json();
+  const id = created.task.id;
+
+  const revised = await (await updateViaApi(base, id, {
+    exitCondition: 'New clause: retire when the weekly report ships.',
+    maxFires: 99,
+  })).json();
+  assert.equal(revised.task.exitCondition, 'New clause: retire when the weekly report ships.');
+  assert.equal(revised.task.maxFires, 99);
+
+  // Provenance rewrite attempts are silently stripped, not applied.
+  const forged = await (await updateViaApi(base, id, { origin: 'human', originSessionId: 'forged', originContext: 'ui' })).json();
+  assert.equal(forged.task.origin, 'agent');
+  assert.equal(forged.task.originSessionId, created.task.originSessionId);
+  assert.equal(forged.task.originContext, created.task.originContext);
+
+  const invalidBudget = await updateViaApi(base, seedId, { maxFires: 0 });
+  assert.equal(invalidBudget.status, 400);
+  assert.match((await invalidBudget.json()).error, /maxFires must be a positive integer/);
+  assert.equal(store.getTask(seedId).name, 'Daily skill', 'seed task untouched');
 });

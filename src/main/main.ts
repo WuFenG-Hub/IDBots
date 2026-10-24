@@ -106,7 +106,7 @@ import { APP_NAME } from './appConstants';
 import { getSkillServiceManager } from './skillServices';
 import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 import { isAutoLaunched, getAutoLaunchEnabled, setAutoLaunchEnabled } from './autoLaunchManager';
-import { ScheduledTaskStore } from './scheduledTaskStore';
+import { ScheduledTaskStore, DEFAULT_AGENT_MAX_FIRES } from './scheduledTaskStore';
 import { dshPluginsDirFor, resolveDshPluginEntries } from './libs/dshPluginManager';
 import { GroupTaskStore, setGroupTaskStoreStatusBroadcaster, type GroupTaskStatus } from './groupTaskStore';
 import { OpenTeamMembershipStore } from './openTeamMembershipStore';
@@ -5106,6 +5106,13 @@ const startStartupNightlyServices = (): void => {
         expiresAt: null,
         notifyPlatforms: [],
         enabled: true,
+        // One-shot practice materialization: provenance stamped, no death
+        // clause needed ('at' tasks self-disable after execution).
+        origin: 'agent',
+        originSessionId: null,
+        originContext: 'dream-practice',
+        exitCondition: null,
+        maxFires: null,
       });
       if (task.state.nextRunAtMs == null) {
         store.deleteTask(task.id);
@@ -7097,6 +7104,15 @@ const getCoworkRunner = () => {
             expiresAt: null,
             notifyPlatforms: [],
             enabled: true,
+            // Lifecycle provenance + death clause (tool layer validated
+            // exitCondition for recurring schedules; budget defaults to 50).
+            origin: 'agent',
+            originSessionId: input.originSessionId ?? null,
+            originContext: input.originContext ?? null,
+            exitCondition: input.exitCondition ?? null,
+            maxFires: input.schedule.type === 'at'
+              ? null
+              : (input.maxFires ?? DEFAULT_AGENT_MAX_FIRES),
           });
           if (task.state.nextRunAtMs == null) {
             store.deleteTask(task.id);
@@ -14411,6 +14427,21 @@ if (!gotTheLock) {
         : coworkConfig.workingDirectory;
       normalizedInput.workingDirectory = resolveExistingTaskWorkingDirectory(candidateWorkingDirectory);
       normalizedInput.metabotId = normalizeScheduledTaskMetabotId(normalizedInput.metabotId);
+      // The renderer is the human surface: UI creates are human-origin with
+      // no session birthplace, and lifecycle fields ride along as submitted
+      // (exitCondition/maxFires are optional for humans — unlimited is the
+      // legacy default).
+      normalizedInput.origin = 'human';
+      normalizedInput.originSessionId = null;
+      normalizedInput.originContext = 'ui';
+      if (normalizedInput.exitCondition !== undefined) {
+        normalizedInput.exitCondition =
+          typeof normalizedInput.exitCondition === 'string' ? normalizedInput.exitCondition.trim() || null : null;
+      }
+      if (normalizedInput.maxFires !== undefined && normalizedInput.maxFires !== null) {
+        const rawMaxFires = Number(normalizedInput.maxFires);
+        normalizedInput.maxFires = Number.isInteger(rawMaxFires) && rawMaxFires > 0 ? rawMaxFires : null;
+      }
       if (typeof normalizedInput.targetSessionId === 'string') {
         normalizedInput.targetSessionId = normalizeScheduledTaskTargetSessionId(normalizedInput.targetSessionId);
       } else {
@@ -18958,6 +18989,25 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
         if (session.sessionType === 'a2a') return false;
         if (session.executionMode === 'sandbox') return false;
         return true;
+      },
+      // Provenance stamping for API creates: the host derives the creation
+      // context from its own session/mapping tables (never trusts the
+      // caller's self-description) — 'a2a' / 'group-task:<id>' / 'chat'.
+      resolveSessionOriginContext: (sessionId: string): string | null => {
+        try {
+          const store = getCoworkStore();
+          const session = store.getSessionWithoutMessages(sessionId);
+          if (!session) return null;
+          if (session.sessionType === 'a2a') return 'a2a';
+          const mapping = store.getConversationMappingForSession('metaweb_group_task', sessionId);
+          const match = mapping
+            ? /^group-task:(\d+)$/.exec((mapping.externalConversationId ?? '').trim())
+            : null;
+          if (match) return `group-task:${match[1]}`;
+          return 'chat';
+        } catch {
+          return null;
+        }
       },
     });
 
