@@ -171,6 +171,7 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('CALL_MID_TOOL') ? 'mid_output_tool'
         : lastUserText.includes('CALL_DANGEROUS') ? 'dangerous_tool'
         : lastUserText.includes('STEER_TEST') ? 'slow_tool'
+        : lastUserText.includes('CALL_OWNER_UPDATE') ? 'owner_update'
         : lastUserText.includes('CALL_HOST_TOOL_IMAGE') ? 'host_echo_tool'
         : lastUserText.includes('CALL_HOST_TOOL') ? 'host_echo_tool'
         : lastUserText.includes('CALL_MCP_TOOL') ? 'mcp__echo__echo'
@@ -220,7 +221,7 @@ export function startMockServer(port = 48787) {
         // existing (possibly dematerialized) continuable child; drives the
         // cold-resume path (subagent-cold-resume test).
         const followupMatch = /FOLLOWUP_AGENT:([A-Za-z0-9-]+)/.exec(lastUserText)
-        const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__playwright-mcp__browser_navigate' ? { url: 'data:text/html,<h1>BROWSER_SMOKE_OK</h1>' } : toolCallFor === 'mcp__playwright-mcp__browser_network_requests' ? {} : cuaFgCall ? { delivery_mode: 'foreground' } : toolCallFor?.startsWith('cua_driver_native__') ? {} : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' }
+        const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'owner_update' ? { message: 'Owner milestone from runtime', kind: 'milestone' } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__playwright-mcp__browser_navigate' ? { url: 'data:text/html,<h1>BROWSER_SMOKE_OK</h1>' } : toolCallFor === 'mcp__playwright-mcp__browser_network_requests' ? {} : cuaFgCall ? { delivery_mode: 'foreground' } : toolCallFor?.startsWith('cua_driver_native__') ? {} : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' }
           : toolCallFor === 'send_message' ? { agent_id: followupMatch?.[1] ?? 'unknown-agent', message: 'FOLLOWUP_PING please answer this' }
           : toolCallFor === 'ask_user_question' ? (() => {
             const timedMatch = /CALL_ASK_TOOL_TIMED:(\d+)/.exec(lastUserText)

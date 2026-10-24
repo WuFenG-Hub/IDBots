@@ -22,7 +22,7 @@ export interface AssistantModeSessionIdentity {
  * unattended, so they keep the professional treatment there.
  *
  * The two implementations MUST NOT drift: the backend gates the assistant
- * prompt section, narration tagging, and the assistant effort rung on this
+ * prompt section, owner_update surface, and assistant effort rung on this
  * exact rule, so a renderer that decides differently recreates the defect
  * this mirror fixes — a transcript that "looks assistant" (thinking/tool
  * chrome hidden) while its turns actually run the professional prompt (or

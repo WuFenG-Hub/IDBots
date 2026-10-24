@@ -39,14 +39,13 @@
 //    ever opens the thinking slot, and converts at `block-start tool-call`
 //    (textRidesThinking) instead of at assistant/message finalize.
 //  - Assistant chat-experience mode (DshEventMapperOptions.assistantMode):
-//    commentary the fold paths above would reclassify into the thinking slot
-//    instead stays ordinary text tagged `metadata.narration = true` — the
-//    assistant transcript hides raw thinking entirely and surfaces the model's
-//    narration as normal chat bubbles. Reasoning still maps to the thinking
-//    slot exactly as in professional mode, and final_answer stays plain text.
-//    The flag is a getter evaluated per fold decision, never cached: the
-//    mapper is a long-lived per-session instance and the mode can flip
-//    mid-session. With the flag off every behavior below is unchanged.
+//    commentary folds into the thinking slot exactly as in professional mode;
+//    the assistant transcript hides it. Only explicit host `owner_update`
+//    calls become narration bubbles. The mode adds the post-reasoning hold to
+//    effort-off streams too, so short commentary never flashes a body bubble;
+//    final_answer stays plain text and long answers still stream past the hold.
+//    The flag is a getter evaluated per decision, never cached: the mapper is
+//    a long-lived per-session instance and the mode can flip mid-session.
 //
 // Think rows are SEGMENTED PER TOOL ROUND (deepseek-harness web parity): each
 // assistant step's thinking is finalized as its own settled Think message at
@@ -128,12 +127,11 @@ const replayTextPhasesOf = (message: {
 
 export interface DshEventMapperOptions {
   /**
-   * Assistant chat-experience mode getter, evaluated at every fold decision
-   * (never cached): the mapper is a long-lived per-session instance while the
-   * global mode can flip mid-session. When it returns true, commentary that
-   * professional mode folds into the thinking slot instead stays/emits as
-   * ordinary text tagged `metadata.narration = true`; reasoning blocks and
-   * deltas still map to the thinking slot exactly as in professional mode.
+   * Assistant chat-experience mode getter, evaluated at every stream-hold
+   * decision (never cached): the mapper is a long-lived per-session instance
+   * while the global mode can flip mid-session. Commentary folds into thinking
+   * in both modes; assistant mode additionally holds short effort-off text so
+   * it cannot flash a visible bubble before a tool call classifies it.
    */
   assistantMode?: () => boolean
 }
@@ -158,17 +156,16 @@ export class DshEventMapper {
   /**
    * A native reasoning block STARTED this step (block-start or
    * reasoning-delta), live or already closed. Gates the post-reasoning text
-   * hold on narration-fold routes — routes that never opened a reasoning
-   * block (effort "off") keep streaming body text immediately with the
-   * riding-text conversion as their commentary guard.
+   * hold on narration-fold routes in professional mode. Assistant mode uses
+   * the same hold even when effort-off means no reasoning block ever opens.
    */
   private reasoningSeenThisStep = false
   /**
-   * Professional mode: a wrong answer-bet — body text streamed past the hold
-   * window and a tool-call block-start then proved it commentary — folded
-   * the streamed bubble back into the live Think row. Later deltas of the
-   * step keep streaming into that row, recomputed against the pre-fold
-   * thinking captured in foldedThinkingBase.
+   * A wrong answer-bet — body text streamed past the hold window and a
+   * tool-call block-start then proved it commentary — folds the streamed
+   * bubble back into the live Think row. Later deltas of the step keep
+   * streaming into that row, recomputed against the pre-fold thinking
+   * captured in foldedThinkingBase.
    */
   private streamedTextFoldedIntoThinking = false
   /** Thinking content BEFORE the wrong-bet fold; deltas rejoin it wholesale. */
@@ -182,14 +179,6 @@ export class DshEventMapper {
    * thinking bookkeeping (thinkingOpen / thinkingBuf) rides on top of it.
    */
   private textRidesThinking = false
-  /**
-   * Assistant mode only: a tool-call block-start already proved the streaming
-   * text is commentary, but the bubble stays a normal chat message (no
-   * thinking conversion) and is tagged `narration: true` when it settles —
-   * including the turn/end abort path, where no assembled message exists to
-   * classify it. Professional mode never sets this flag.
-   */
-  private textMarkedNarration = false
   private lastUsage: DshUsageSnapshot | null = null
   private provider: string | undefined
   private model: string | undefined
@@ -241,13 +230,8 @@ export class DshEventMapper {
           // display: on narration-fold routes (DeepSeek dialect) this text is
           // commentary, not the reply. GLM keeps process text in the reasoning
           // channel — its riding text is content and must not convert.
-          // Assistant mode never converts the bubble into the thinking
-          // display: narration keeps streaming as a normal chat message and is
-          // tagged at settle time.
           if (this.toolRideTextFolds()) {
-            if (this.assistantMode()) {
-              if (this.textOpen) this.textMarkedNarration = true
-            } else if (this.textOpen && this.thinkingOpen) {
+            if (this.textOpen && this.thinkingOpen) {
               // Wrong answer-bet on a reasoning route: text streamed past the
               // hold window and this tool call proves it commentary. Fold it
               // into the live Think row and retract the bubble now — waiting
@@ -484,17 +468,19 @@ export class DshEventMapper {
    * Whether body text may stream into the visible bubble on the current
    * route. Non-folding families (GLM) always stream — their riding text is
    * content. Folding families (DeepSeek dialect) stream when no reasoning
-   * block is in flight AND either none ever ran this step (effort "off",
-   * where the riding-text conversion guards commentary), the bubble is
-   * already open (a bet was made and stays live), or the held text passed
-   * the POST_REASONING_TEXT_HOLD_UNITS window — the final answer taking
-   * over. Otherwise text stays held to assistant/message: the bubble must
-   * not flash commentary that folds away again.
+   * block is in flight AND either none ever ran this step in professional
+   * mode (effort "off", where the riding-text conversion guards commentary),
+   * the bubble is already open (a bet was made and stays live), or the held
+   * text passed the POST_REASONING_TEXT_HOLD_UNITS window — the final answer
+   * taking over. Assistant mode always uses that window on folding routes:
+   * short effort-off commentary cannot flash before a tool call, while long
+   * final answers still stream. Otherwise text stays held to assistant/message.
    */
   private postReasoningTextMayStream(text: string): boolean {
     if (!this.toolRideTextFolds()) return true
     if (this.textOpen) return true
     if (this.reasoningBlockLive) return false
+    if (this.assistantMode()) return text.length >= POST_REASONING_TEXT_HOLD_UNITS
     if (!this.reasoningSeenThisStep) return true
     return text.length >= POST_REASONING_TEXT_HOLD_UNITS
   }
@@ -557,18 +543,9 @@ export class DshEventMapper {
     }
     if (this.textOpen) {
       this.textOpen = false
-      // A commentary-marked stream (assistant mode: a tool-call block-start
-      // already proved it) settles as a tagged narration bubble even when the
-      // turn aborts before the assembled message could classify it.
-      actions.push({
-        kind: 'messageFinalize',
-        slot: 'text',
-        content: this.textBuf,
-        ...(this.textMarkedNarration ? { metadata: { narration: true } } : {}),
-      })
+      actions.push({ kind: 'messageFinalize', slot: 'text', content: this.textBuf })
       this.textBuf = ''
     }
-    this.textMarkedNarration = false
     this.reasoningFromDeltas = false
     this.reasoningBlockLive = false
     this.resetStepHoldState()
@@ -632,23 +609,6 @@ export class DshEventMapper {
       visibleText = splitThinkTaggedContent(visibleText).text
     }
 
-    // Assistant chat-experience mode: commentary surfaces as narration-tagged
-    // chat text instead of folding into the Think row (the assistant
-    // transcript never renders raw thinking). The professional path below is
-    // unchanged.
-    if (this.assistantMode()) {
-      this.finalizeAssistantModeMessage(actions, reasoning, commentary, visibleText)
-      this.rawTextBuf = ''
-      this.reasoningFromDeltas = false
-      this.reasoningBlockLive = false
-      this.resetStepHoldState()
-      this.turnSawStreamedText = false
-      return
-    }
-    // Professional mode never consults the mark; reset it so a mid-round mode
-    // flip cannot leak a stale tag into a later settle.
-    this.textMarkedNarration = false
-
     // A commentary-only message whose text already streamed into the text slot
     // converts that message in place (finalize as thinking) — no separate
     // thinking message and no empty visible bubble left behind. Skip when a
@@ -710,87 +670,6 @@ export class DshEventMapper {
     this.reasoningSeenThisStep = false
     this.streamedTextFoldedIntoThinking = false
     this.foldedThinkingBase = ''
-  }
-
-  /**
-   * Assistant-mode settle of one assistant step. Reasoning still lands in the
-   * thinking slot exactly as in professional mode (the assistant transcript
-   * simply never renders it), while commentary — the model's user-facing
-   * narration around tool calls — stays ordinary text tagged
-   * `metadata.narration = true` instead of folding into the Think row; final
-   * answer text remains a plain bubble without the tag. Narration orders
-   * BEFORE the reply bubble: a commentary stream already occupying the text
-   * slot settles in place (tagged), and commentary that never streamed (held
-   * behind live reasoning, or assembled without deltas) materializes as its
-   * own settled message ahead of the reply.
-   *
-   * Immutability contract: a bubble's text never rewrites after the user has
-   * watched it appear. A streamed narration bubble therefore settles with the
-   * streamed buffer verbatim — the assembled message text may differ (phase
-   * reclassification, delta quirks) and swapping it in re-wrote the bubble
-   * in place (the 2026-10-13 twinbot acceptance report). The assembled text
-   * is authoritative only for narration that never streamed, which
-   * materializes whole and is immutable by construction.
-   */
-  private finalizeAssistantModeMessage(
-    actions: DshMapperAction[],
-    reasoning: string,
-    commentary: string,
-    visibleText: string,
-  ): void {
-    if (reasoning.length > 0) {
-      this.openThinking(actions)
-      this.thinkingBuf = reasoning
-    }
-    if (this.thinkingOpen) {
-      this.thinkingOpen = false
-      actions.push({ kind: 'messageFinalize', slot: 'thinking', content: this.thinkingBuf })
-      this.thinkingBuf = ''
-    }
-
-    const streamedNarration = this.textOpen ? this.textBuf : ''
-    const streamedNarrationSettles = this.textOpen && (commentary.length > 0 || this.textMarkedNarration)
-    if (streamedNarrationSettles) {
-      this.textOpen = false
-      actions.push({
-        kind: 'messageFinalize',
-        slot: 'text',
-        content: streamedNarration,
-        metadata: { narration: true },
-      })
-      this.textBuf = ''
-    } else if (commentary.length > 0) {
-      actions.push({
-        kind: 'message',
-        message: { type: 'assistant', content: commentary, metadata: { narration: true } },
-      })
-    }
-
-    // The reply bubble. Skipped when the narration settle above already
-    // carries this text verbatim: a streamed mixed step (commentary and the
-    // final answer sharing one delta stream — mid-stream the wire carries no
-    // phase tags) keeps both in its immutable narration bubble, and
-    // re-emitting the tail as a new bubble would duplicate what the user
-    // already read. Same for the live-marked stream the assembled message did
-    // not classify as commentary: the streamed buffer IS the reply text.
-    const narrationCarriesReply = streamedNarrationSettles
-      && visibleText.length > 0
-      && streamedNarration.includes(visibleText)
-    if (visibleText.length > 0 && !narrationCarriesReply) {
-      this.turnSawFinalText = true
-      this.openText(actions)
-      this.textBuf = visibleText
-      this.textOpen = false
-      actions.push({ kind: 'messageFinalize', slot: 'text', content: this.textBuf })
-      this.textBuf = ''
-    } else if (this.textOpen) {
-      // Commentary was held; close the leaked visible placeholder so a tiny
-      // summary cannot linger between rounds (same contract as professional).
-      this.textOpen = false
-      actions.push({ kind: 'messageFinalize', slot: 'text', content: '' })
-      this.textBuf = ''
-    }
-    this.textMarkedNarration = false
   }
 
   /**

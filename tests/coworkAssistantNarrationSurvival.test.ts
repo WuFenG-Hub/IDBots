@@ -1,15 +1,20 @@
 // Regression test for the assistant-mode acceptance report "earlier
-// narration bubbles disappear when the final report streams in".
+// narration bubbles disappear when the final report streams in", pinned to
+// the 2026-10-24 owner_update design.
 //
-// Assistant mode surfaces model narration (commentary) as ordinary chat
-// messages tagged metadata.narration, one per tool round. The live renderer
-// path is: main emits `message` (new rows) and `messageUpdate` (stream/finalize
-// for slotted rows) → coworkSlice reducers apply them to the open session.
-// This test drives the REAL coworkSlice reducer with the exact live event
-// sequence of a two-round commentary turn plus a streamed final answer and
-// asserts every narration bubble survives — present and byte-identical — at
-// every point, including the turn-complete session refresh (windowed merge)
-// and the transcript's turn projection.
+// Assistant mode surfaces progress ONLY through explicit host owner_update
+// calls: each accepted call mints one whole chat bubble tagged
+// metadata.{ narration: true, ownerUpdateKind } (coworkRunner
+// emitAssistantOwnerUpdate, capped per turn). Ordinary model commentary
+// folds into the hidden thinking display and never becomes a chat message.
+// The live renderer path is: main emits `message` (new rows) and
+// `messageUpdate` (stream/finalize for slotted rows) → coworkSlice reducers
+// apply them to the open session. This test drives the REAL coworkSlice
+// reducer with the exact live event sequence of a two-round turn whose
+// progress arrives as owner_update bubbles plus a streamed final answer, and
+// asserts every owner-update bubble survives — present and byte-identical,
+// ownerUpdateKind included — at every point, including the turn-complete
+// session refresh (windowed merge) and the transcript's turn projection.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -67,25 +72,39 @@ const row = (overrides: Partial<CoworkMessage>): CoworkMessage => ({
   ...overrides,
 });
 
-/** Assert every narration bubble is still present with its original text. */
-const assertNarrationsIntact = (state: { currentSession: CoworkSession | null }, expected: string[]) => {
+interface OwnerUpdate {
+  text: string;
+  kind: 'opening' | 'milestone' | 'problem';
+}
+
+/** Assert every owner-update bubble is still present with its original text and kind. */
+const assertNarrationsIntact = (state: { currentSession: CoworkSession | null }, expected: OwnerUpdate[]) => {
   const narrations = (state.currentSession?.messages ?? []).filter((m) => m.metadata?.narration === true);
-  assert.deepEqual(narrations.map((m) => m.content), expected);
+  assert.deepEqual(
+    narrations.map((m) => ({ text: m.content, kind: m.metadata?.ownerUpdateKind })),
+    expected,
+  );
 };
 
-test('narration bubbles survive the final answer and the turn-complete refresh', () => {
+test('owner-update bubbles survive the final answer and the turn-complete refresh', () => {
   let state = reducer(undefined, setSessions([summary({ id: 'session-a' })]));
   state = reducer(state, setCurrentSession(sessionWith([
     row({ id: 'u1', type: 'user', content: '帮我跑两轮再总结' }),
   ])));
 
-  const narrationTexts = ['好的，我这就动手。', '初步检索到三笔记录。'];
-  const expected: string[] = [];
+  const ownerUpdates: OwnerUpdate[] = [
+    { text: '好的，我这就动手。', kind: 'opening' },
+    { text: '初步检索到三笔记录。', kind: 'milestone' },
+  ];
+  const expected: OwnerUpdate[] = [];
 
-  // Two commentary rounds, in the exact live event shape the DSH path emits:
-  // streaming thinking row → settled thinking row → narration row minted
-  // settled (single addMessage, metadata.narration) → tool_use → tool_result.
-  for (const [step, text] of narrationTexts.entries()) {
+  // Two tool rounds, in the exact live event shape the DSH path emits in
+  // assistant mode: the round's commentary folds into the hidden thinking
+  // display (streaming thinking row → settled thinking row), then tool_use →
+  // owner_update → tool_result. The ONE visible progress event arrives whole
+  // from the host tool (single addMessage, narration + ownerUpdateKind,
+  // never a rewritable stream).
+  for (const [step, update] of ownerUpdates.entries()) {
     const thinking = row({ content: '', metadata: { isThinking: true, isStreaming: true } });
     state = reducer(state, addMessage({ sessionId: 'session-a', message: thinking }));
     state = reducer(state, updateMessageContent({
@@ -101,14 +120,14 @@ test('narration bubbles survive the final answer and the turn-complete refresh',
     }));
     state = reducer(state, addMessage({
       sessionId: 'session-a',
-      message: row({ content: text, metadata: { narration: true } }),
-    }));
-    expected.push(text);
-    assertNarrationsIntact(state, expected);
-    state = reducer(state, addMessage({
-      sessionId: 'session-a',
       message: row({ type: 'tool_use', content: 'Using tool: bash', metadata: { toolUseId: `c${step}` } }),
     }));
+    state = reducer(state, addMessage({
+      sessionId: 'session-a',
+      message: row({ content: update.text, metadata: { narration: true, ownerUpdateKind: update.kind } }),
+    }));
+    expected.push(update);
+    assertNarrationsIntact(state, expected);
     state = reducer(state, addMessage({
       sessionId: 'session-a',
       message: row({ type: 'tool_result', content: 'ok', metadata: { toolUseId: `c${step}` } }),
@@ -133,22 +152,23 @@ test('narration bubbles survive the final answer and the turn-complete refresh',
   // Turn-complete refresh: the renderer re-reads the session through the
   // bounded newest-messages window. A long turn can push its own earliest
   // messages out of the window — the merge must still keep every message the
-  // live stream accumulated (the reported erasure).
+  // live stream accumulated (the reported erasure), owner_update bubbles
+  // included, kinds intact.
   const windowed = sessionWith((state.currentSession?.messages ?? [])
-    .filter((m) => m.id !== expected[0] && m.content !== narrationTexts[0]));
+    .filter((m) => m.content !== ownerUpdates[0].text));
   state = reducer(state, setCurrentSession(windowed));
   assertNarrationsIntact(state, expected);
 
-  // Transcript projection: both narrations stay ordinary assistant items in
-  // the turn (the assistant-mode visibility filter only drops thinking and
-  // tool chrome).
+  // Transcript projection: both owner-update bubbles stay ordinary assistant
+  // items in the turn (the assistant-mode visibility filter only drops
+  // thinking and tool chrome).
   const turns = buildConversationTurns(buildDisplayItems(state.currentSession!.messages));
   const lastTurn = turns[turns.length - 1];
   const renderedTexts = lastTurn.assistantItems
     .filter((item) => item.type === 'assistant')
     .map((item) => item.message.content);
-  for (const text of narrationTexts) {
-    assert.ok(renderedTexts.includes(text), `turn projection must keep narration: ${text}`);
+  for (const update of ownerUpdates) {
+    assert.ok(renderedTexts.includes(update.text), `turn projection must keep owner update: ${update.text}`);
   }
   assert.ok(renderedTexts.includes(report), 'turn projection must keep the final answer');
 });

@@ -342,10 +342,9 @@ export interface DshHubOptions {
   mcpServersProvider?: (coworkSessionId: string) => DshMcpServerDefinition[]
   /**
    * Assistant chat-experience mode getter (may flip mid-session). Receives
-   * the DSH session id so the host can scope narration tagging to owner
-   * chats; forwarded to every kernel so the event mapper surfaces model
-   * narration as tagged chat text instead of folding it into the thinking
-   * slot.
+   * the DSH session id so the host can scope the assistant stream hold to
+   * owner chats; forwarded to every kernel. Commentary folds into thinking
+   * in both modes; explicit host owner_update calls own visible progress.
    */
   assistantModeProvider?: (dshSessionId: string) => boolean
   /** 0.1.7 experimental browser automation (dsh-browser-use + Playwright MCP),
@@ -571,6 +570,7 @@ export class DshTurnHub {
    *  alongside its successor; steer/cancel/dispose must reach the exact
    *  process that owns the agent. */
   private kernelByDsh = new Map<string, DshKernel>()
+  private hostToolSurfaceByDsh = new Map<string, string>()
   /** Approval / ask ids belong to the kernel that raised them. */
   private askKernelById = new Map<string, DshKernel>()
   /** DeepSeek server-side web search is composition-level and shared across
@@ -723,8 +723,9 @@ export class DshTurnHub {
   /**
    * Pre-create the session's runtime AGENT on its turn slot — one step beyond
    * prewarmTurnSlot's process boot. Sections/hostTools are registered at agent
-   * creation (the runtime never re-registers them on a re-ensure), so the
-   * caller must pass the SAME prompt sections the turn will; the per-turn
+   * creation (the runtime never re-registers them on a re-ensure), so
+   * ensureSessionWithHostTools recreates the agent when the tool surface
+   * changes. The caller must pass the SAME prompt sections the turn will; the per-turn
    * reasoning effort is deliberately omitted here and re-binds on the turn's
    * own ensureSession (a re-ensure re-binds the route without touching
    * sections). For automation bots this is where the per-session Playwright
@@ -773,7 +774,7 @@ export class DshTurnHub {
       await holder.disposeSession(input.dshSessionId).catch(() => undefined)
     }
     this.kernelByDsh.set(input.dshSessionId, kernel)
-    const ensured = await kernel.ensureSession({
+    const ensured = await this.ensureSessionWithHostTools(kernel, nextKey, {
       sessionId: input.dshSessionId,
       provider: input.provider.key,
       model: input.provider.model,
@@ -890,7 +891,7 @@ export class DshTurnHub {
         if (this.closed) throw new DshShutdownError()
         try {
           try {
-            await kernel.ensureSession(ensureSessionInput)
+            await this.ensureSessionWithHostTools(kernel, nextKey, ensureSessionInput)
           } catch (error) {
             const slot = this.slots.get(nextKey)
             // Heal only zstd compositions — a plaintext ('none') test composition
@@ -913,7 +914,7 @@ export class DshTurnHub {
             slot.lastConfigJson = JSON.stringify(config)
             kernel = successor
             this.kernelByDsh.set(input.dshSessionId, successor)
-            await successor.ensureSession(ensureSessionInput)
+            await this.ensureSessionWithHostTools(successor, nextKey, ensureSessionInput)
           }
           await kernel.prompt(input.dshSessionId, input.prompt, input.promptImages)
           break
@@ -1365,6 +1366,7 @@ export class DshTurnHub {
     this.subagentParentByChild.clear()
     this.runtimeKeyByDsh.clear()
     this.kernelByDsh.clear()
+    this.hostToolSurfaceByDsh.clear()
     this.askKernelById.clear()
   }
 
@@ -1400,7 +1402,32 @@ export class DshTurnHub {
     return count
   }
 
-  private async disposeSessionOnSlot(runtimeKey: string, dshSessionId: string): Promise<void> {
+  private async ensureSessionWithHostTools(
+    kernel: DshKernel,
+    runtimeKey: string,
+    input: Parameters<DshKernel['ensureSession']>[0],
+  ): Promise<{ resumed: boolean }> {
+    const signature = JSON.stringify((input.hostTools ?? []).map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    })))
+    const previous = this.hostToolSurfaceByDsh.get(input.sessionId)
+    // The runtime registers host tools only at agent creation. Recreate just
+    // the agent when that surface changes; the session JSONL stays intact.
+    if (previous !== undefined && previous !== signature) {
+      await this.disposeSessionOnSlot(runtimeKey, input.sessionId, { throwOnError: true })
+    }
+    const ensured = await kernel.ensureSession(input)
+    this.hostToolSurfaceByDsh.set(input.sessionId, signature)
+    return ensured
+  }
+
+  private async disposeSessionOnSlot(
+    runtimeKey: string,
+    dshSessionId: string,
+    options?: { throwOnError?: boolean },
+  ): Promise<void> {
     // The agent may live on a drained kernel of this slot rather than on the
     // current one — dispose where it actually is (no-op elsewhere).
     const kernel = this.kernelForDsh(dshSessionId)
@@ -1417,6 +1444,7 @@ export class DshTurnHub {
         runtime: runtimeKey,
         error: error instanceof Error ? error.message : String(error),
       })
+      if (options?.throwOnError) throw error
     }
   }
 

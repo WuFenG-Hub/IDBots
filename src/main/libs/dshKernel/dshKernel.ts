@@ -69,11 +69,10 @@ export interface DshKernelOptions {
   log?: (level: 'info' | 'warn' | 'error', message: string, detail?: unknown) => void
   /**
    * Assistant chat-experience mode getter, handed to every session's
-   * DshEventMapper and evaluated per fold decision — the mode can flip
+   * DshEventMapper and evaluated per stream-hold decision — the mode can flip
    * mid-session while mappers stay alive. Receives the DSH session id so
    * the host can scope the experience to specific sessions (owner chats);
-   * absent means professional behavior (commentary folds into the thinking
-   * slot).
+   * absent means professional stream behavior.
    */
   assistantModeProvider?: (dshSessionId: string) => boolean
 }
@@ -608,8 +607,8 @@ export class DshKernel {
     if (!sessionId) return
     const mapper = this.mappers.get(sessionId)
       ?? new DshEventMapper({
-        // Bind the mapper to ITS session: the provider is re-read per fold
-        // (live mode flips), but always for this dshSessionId.
+        // Bind the mapper to ITS session: the provider is re-read per stream-
+        // hold decision (live mode flips), always for this dshSessionId.
         assistantMode: () => this.opts.assistantModeProvider?.(sessionId) ?? false,
       })
     this.mappers.set(sessionId, mapper)

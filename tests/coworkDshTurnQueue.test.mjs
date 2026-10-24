@@ -116,3 +116,54 @@ test('concurrent turns for one DSH session are serialized, never clobbered', { s
     fs.rmSync(sessionRoot, { recursive: true, force: true })
   }
 })
+
+test('host tool surfaces dispose only on change and stop when disposal fails', async () => {
+  const { DshTurnHub } = loadModules()
+  const hub = Object.create(DshTurnHub.prototype)
+  hub.hostToolSurfaceByDsh = new Map()
+  hub.kernelByDsh = new Map()
+  hub.runtimeKeyByDsh = new Map()
+  hub.slots = new Map()
+  hub.opts = { log: () => undefined }
+  let disposeCalls = 0
+  let ensureCalls = 0
+  let failDispose = false
+  const kernel = {
+    running: true,
+    disposeSession: async () => {
+      disposeCalls += 1
+      if (failDispose) throw new Error('dispose failed')
+      return { disposed: true }
+    },
+    ensureSession: async () => {
+      ensureCalls += 1
+      return { resumed: true }
+    },
+  }
+  hub.kernelByDsh.set('s', kernel)
+  hub.runtimeKeyByDsh.set('s', 'mock')
+  const input = {
+    sessionId: 's',
+    hostTools: [{ name: 'owner_update', description: 'one', parameters: { type: 'object' } }],
+  }
+
+  await hub.ensureSessionWithHostTools(kernel, 'mock', input)
+  await hub.ensureSessionWithHostTools(kernel, 'mock', input)
+  assert.equal(disposeCalls, 0, 'an identical surface never recreates the agent')
+  assert.equal(ensureCalls, 2)
+
+  const changed = { ...input, hostTools: [{ ...input.hostTools[0], description: 'two' }] }
+  await hub.ensureSessionWithHostTools(kernel, 'mock', changed)
+  assert.equal(disposeCalls, 1, 'a changed surface recreates the agent once')
+  assert.equal(ensureCalls, 3)
+
+  const changedAgain = { ...input, hostTools: [{ ...input.hostTools[0], description: 'three' }] }
+  failDispose = true
+  await assert.rejects(hub.ensureSessionWithHostTools(kernel, 'mock', changedAgain), /dispose failed/)
+  assert.equal(ensureCalls, 3, 'a failed dispose never re-ensures the stale agent')
+
+  failDispose = false
+  await hub.ensureSessionWithHostTools(kernel, 'mock', changedAgain)
+  assert.equal(disposeCalls, 3, 'the old signature retries disposal on the next attempt')
+  assert.equal(ensureCalls, 4)
+})
