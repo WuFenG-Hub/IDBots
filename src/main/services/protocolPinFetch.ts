@@ -12,6 +12,14 @@ type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 export interface FetchProtocolPinsOptions {
   pageSize?: number;
   maxPages?: number;
+  /**
+   * Per-page fetch timeout. Defaults to DEFAULT_TIMEOUT_MS. Callers may pass
+   * a tighter budget, but a per-page threshold below real-world cold-start
+   * latency (~2.1-2.2s on proxied/TUN paths, measured 2026-10-22 against the
+   * same endpoint family) aborts every cold page into a whole-walk
+   * fetch-error, so the default deliberately keeps multiple seconds of
+   * headroom.
+   */
   timeoutMs?: number;
   localBaseUrl?: string;
   remoteBaseUrl?: string;
@@ -42,7 +50,16 @@ interface ProtocolPinRecordWithOrder extends ProtocolPinRecord {
 
 const DEFAULT_PAGE_SIZE = 200;
 const DEFAULT_MAX_PAGES = 10;
-const DEFAULT_TIMEOUT_MS = 2_000;
+// 2026-10-24: the previous 2s default aborted every cold page fetch on
+// proxied/TUN paths (dual-machine measurement: cold pages 2.06-2.18s vs warm
+// 0.4s on the same endpoint), turning one slow page into a whole-walk
+// fetch-error (rows:0) for any user whose RTT crosses the threshold — a
+// 100% false-failure rate for those users, plus a full-walk retry on top.
+// 10s keeps a 10-page worst-case walk bounded (~100s) while leaving ~4x
+// headroom over the observed worst cold page, matching the JSON-fetch budget
+// other indexer calls in this codebase already use (8-15s). Exported for the
+// default-value regression test.
+export const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_REMOTE_BASE_URL = 'https://manapi.metaid.io';
 
 const normalizeBaseUrl = (value: string): string => String(value || '').replace(/\/+$/, '');
