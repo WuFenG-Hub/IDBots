@@ -732,3 +732,4 @@ blob-report/
 
 # Memory evolution #5: per-bot owner directives (external-facing hard rules)
 !tests/botDirectives.test.mjs
+!tests/botDirectivesUiStatic.test.mjs

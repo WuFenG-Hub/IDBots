@@ -14759,6 +14759,22 @@ if (!gotTheLock) {
   // ==================== Team Culture IPC Handlers ====================
   // Fleet-shared coordination prior (glossary / conventions / lessons).
 
+  // Bot directives (#5): owner-facing manage surface (immediate CRUD).
+  const botDirectivesResult = (run: () => unknown) => {
+    try { return { success: true, result: run() }; }
+    catch (error) { return { success: false, error: error instanceof Error ? error.message : String(error) }; }
+  };
+  registerIpcHandler('botDirectives:list', async (_event, input: { metabotId: number }) =>
+    botDirectivesResult(() => ({ directives: getBotDirectivesStoreInstance().listBotDirectives(input.metabotId, { includeArchived: true }) })));
+  registerIpcHandler('botDirectives:create', async (_event, input: { metabotId: number; text: string; scope?: 'external' | 'all' }) =>
+    botDirectivesResult(() => ({ directive: getBotDirectivesStoreInstance().createBotDirective(input) })));
+  registerIpcHandler('botDirectives:update', async (_event, input: { metabotId: number; id: string; text?: string; scope?: 'external' | 'all' }) =>
+    botDirectivesResult(() => ({ directive: getBotDirectivesStoreInstance().updateBotDirective(input) })));
+  registerIpcHandler('botDirectives:archive', async (_event, input: { metabotId: number; id: string }) =>
+    botDirectivesResult(() => getBotDirectivesStoreInstance().archiveBotDirective(input.metabotId, input.id)));
+  registerIpcHandler('botDirectives:restore', async (_event, input: { metabotId: number; id: string }) =>
+    botDirectivesResult(() => getBotDirectivesStoreInstance().restoreBotDirective(input.metabotId, input.id)));
+
   // Standing pages (memory evolution #2): owner-facing read/manage surface.
   registerIpcHandler('standingPages:list', async (_event, input?: { metabotId?: number }) => {
     const metabotId = input?.metabotId ?? null;
