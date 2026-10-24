@@ -144,14 +144,23 @@ jobs:
             -e IDBOTS_SERVER_MODE=1 \
             -e IDBOTS_TENANT_ID=t_ci0000000000000000 \
             -e IDBOTS_GATEWAY_SECRET=ci-test-secret \
+            -e IDBOTS_GATEWAY_TEST_HOOKS=1 \
             -p 127.0.0.1:8790:8790 \
             "${{ steps.meta.outputs.tenant_tag }}"
-          for i in $(seq 1 30); do
-            if curl -fsS -m 2 http://127.0.0.1:8790/healthz >/dev/null 2>&1; then
-              echo "tenant healthy after ${i}s"; exit 0
+          # /healthz answers 200 as soon as the socket is up, while the gateway is
+          # still "bootstrapping" (ready=false). Every N-tier check then fails with
+          # TENANT_NOT_READY, so gate on /readyz — C1's readiness probe, which only
+          # returns 200 for phase ready/degraded.
+          for i in $(seq 1 120); do
+            if curl -fsS -m 2 http://127.0.0.1:8790/readyz >/dev/null 2>&1; then
+              echo "tenant ready after ${i}s"
+              curl -fsS -m 2 http://127.0.0.1:8790/readyz || true
+              exit 0
             fi
             sleep 1
           done
+          echo "tenant never reached ready; last readyz:"
+          curl -sS -m 2 http://127.0.0.1:8790/readyz || true
           docker logs idb-t_ci
           exit 1
 
