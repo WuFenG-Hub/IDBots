@@ -726,3 +726,6 @@ blob-report/
 
 # Memory evolution #3: event-time axis (occurred vs learned)
 !tests/memoryEventTime.test.mjs
+
+# Memory evolution #6: write-time memory defense (secret/PII screening)
+!tests/memoryDefense.test.mjs

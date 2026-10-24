@@ -63,6 +63,7 @@ import {
   normalizeMemorySemanticKey,
   scoreMemorySimilarity,
 } from './memory/memorySimilarity';
+import { applyMemoryDefense, MemoryDefenseError } from './memory/memoryDefense';
 import {
   MEMORY_EVIDENCE_QUOTES_PER_MEMORY,
   MEMORY_REVISIONS_KEEP_PER_MEMORY,
@@ -1313,6 +1314,8 @@ export interface ApplyTurnMemoryUpdatesResult {
   judgeRejected: number;
   llmReviewed: number;
   skipped: number;
+  /** Memory defense (#6): candidates refused for containing secrets. */
+  defenseRejected: number;
 }
 
 let cachedDefaultSystemPrompt: string | null = null;
@@ -7389,10 +7392,14 @@ export class CoworkStore implements MemoryBackend {
   }
 
   private createOrReviveUserMemory(input: MemoryCreateUserMemoryInput): { memory: CoworkUserMemory; created: boolean; updated: boolean } {
-    const normalizedText = truncate(normalizeMemoryText(input.text), maxMemoryTextChars(input.usageClass));
+    let normalizedText = truncate(normalizeMemoryText(input.text), maxMemoryTextChars(input.usageClass));
     if (!normalizedText) {
       throw new Error('Memory text is required');
     }
+    // Memory defense (#6): deterministic secret screening at the single write
+    // chokepoint every path (turn, dream, UI, agent tool) funnels through.
+    // Redact-in-place for token-shaped matches; throw for mnemonics/keys.
+    normalizedText = applyMemoryDefense(normalizedText);
 
     const now = Date.now();
     const fingerprint = buildMemoryFingerprint(normalizedText);
@@ -7718,10 +7725,19 @@ export class CoworkStore implements MemoryBackend {
    * targets — bringing those back stays with the revive path. On a miss the
    * write falls through to the legacy forceNew insert.
    */
-  createDreamUserMemory(input: MemoryCreateUserMemoryInput): { memory: CoworkUserMemory; merged: boolean } {
-    const normalizedText = truncate(normalizeMemoryText(input.text), maxMemoryTextChars(input.usageClass));
+  createDreamUserMemory(input: MemoryCreateUserMemoryInput): { memory: CoworkUserMemory; merged: boolean } | null {
+    let normalizedText = truncate(normalizeMemoryText(input.text), maxMemoryTextChars(input.usageClass));
     if (!normalizedText) {
       throw new Error('Memory text is required');
+    }
+    try {
+      normalizedText = applyMemoryDefense(normalizedText);
+    } catch (error) {
+      if (error instanceof MemoryDefenseError) {
+        console.warn('[MemoryDefense] dropped a dream memory write (secret detected)');
+        return null;
+      }
+      throw error;
     }
     const metabotId = input.metabotId;
     const scope = this.resolveMemoryScopeSelector(input);
@@ -9245,7 +9261,7 @@ export class CoworkStore implements MemoryBackend {
 
     const now = Date.now();
     const nextText = input.text !== undefined
-      ? truncate(normalizeMemoryText(input.text), maxMemoryTextChars(input.usageClass ?? current.usage_class))
+      ? applyMemoryDefense(truncate(normalizeMemoryText(input.text), maxMemoryTextChars(input.usageClass ?? current.usage_class)))
       : current.text;
     if (!nextText) {
       throw new Error('Memory text is required');
@@ -10146,6 +10162,7 @@ export class CoworkStore implements MemoryBackend {
       judgeRejected: 0,
       llmReviewed: 0,
       skipped: 0,
+      defenseRejected: 0,
     };
 
     const metabotId = this.resolveMetabotIdForMemory(options.sessionId);
@@ -10229,7 +10246,9 @@ export class CoworkStore implements MemoryBackend {
           continue;
         }
 
-        const write = this.createOrReviveUserMemory({
+        let write;
+        try {
+          write = this.createOrReviveUserMemory({
           text: change.text,
           confidence: change.confidence,
           isExplicit: change.isExplicit,
@@ -10243,7 +10262,15 @@ export class CoworkStore implements MemoryBackend {
             quote: pickEvidenceQuote(options.userText, change.text) ?? undefined,
           },
           metabotId,
-        });
+          });
+        } catch (error) {
+          if (error instanceof MemoryDefenseError) {
+            result.defenseRejected += 1;
+            result.skipped += 1;
+            continue;
+          }
+          throw error;
+        }
 
         if (!change.isExplicit && options.assistantMessageId) {
           this.addMemorySource(write.memory.id, metabotId, {
@@ -10291,7 +10318,9 @@ export class CoworkStore implements MemoryBackend {
           continue;
         }
         result.llmReviewed += 1;
-        const write = this.createOrReviveUserMemory({
+        let write;
+        try {
+          write = this.createOrReviveUserMemory({
           text: change.text,
           confidence: change.isExplicit ? 0.95 : 0.8,
           isExplicit: change.isExplicit,
@@ -10306,7 +10335,15 @@ export class CoworkStore implements MemoryBackend {
           },
           metabotId,
           occurredAt: resolveOccurredAtEpochMs(change.occurredOn) ?? undefined,
-        });
+          });
+        } catch (error) {
+          if (error instanceof MemoryDefenseError) {
+            result.defenseRejected += 1;
+            result.skipped += 1;
+            continue;
+          }
+          throw error;
+        }
         if (write.created) result.created += 1;
         else if (write.updated) result.updated += 1;
         else result.skipped += 1;

@@ -210,6 +210,8 @@ export interface ApplyTurnMemoryUpdatesResult {
   judgeRejected: number;
   llmReviewed: number;
   skipped: number;
+  /** Memory defense (#6): candidates refused for containing secrets. */
+  defenseRejected: number;
 }
 
 export interface MemoryScopeSummary {
