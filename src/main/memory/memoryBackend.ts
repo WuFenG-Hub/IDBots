@@ -45,6 +45,11 @@ export interface MemoryUserMemorySourceInput {
   sourceId?: string;
   /** Dream pipeline: the YYYY-MM-DD this memory was distilled from. */
   dreamDate?: string;
+  /**
+   * Evidence ledger: the verbatim excerpt this source contributed (see
+   * memoryEvidence.ts). Storage + idle-time input only; never injected.
+   */
+  quote?: string;
 }
 
 export interface MemoryUserMemoryStats {

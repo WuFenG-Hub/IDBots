@@ -696,3 +696,6 @@ deploy/hosts/prometheus.yml
 
 # WS-E login in-app browser detection tests
 !tests/mobileInAppBrowser.test.ts
+
+# Memory evolution: evidence ledger (quotes + revisions) and contradiction narratives
+!tests/memoryEvidenceLedger.test.mjs

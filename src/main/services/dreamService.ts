@@ -4226,16 +4226,26 @@ export class DreamService {
     // Surfaces in the run telemetry as dedupMerged.
     let dedupMerged = 0;
 
-    for (const text of new Set(output.importantMemories)) {
+    // Evidence ledger: each dream write carries the excerpt it was distilled
+    // from as its source quote (important memory `source`, value lesson
+    // `source`, work review `note`), so the belief layer can later be judged
+    // by evidence instead of wording. Outputs built without the item list
+    // (repairs, hand-built fixtures) fall back to the bare strings.
+    const importantMemoryItems = output.importantMemoryItems
+      ?? output.importantMemories.map((text) => ({ text, source: null }));
+    const seenImportant = new Set<string>();
+    for (const item of importantMemoryItems) {
+      if (seenImportant.has(item.text)) continue;
+      seenImportant.add(item.text);
       const write = this.deps.coworkStore.createDreamUserMemory({
         metabotId,
-        text,
+        text: item.text,
         scopeKind: 'owner',
         scopeKey: 'owner:self',
         usageClass: 'profile_fact',
         origin: 'dream',
         isExplicit: true,
-        source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
+        source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date, quote: item.source ?? undefined },
       });
       if (write.merged) dedupMerged += 1;
     }
@@ -4262,7 +4272,7 @@ export class DreamService {
         usageClass: 'value_boundary',
         origin: 'dream',
         isExplicit: true,
-        source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
+        source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date, quote: source },
       });
       if (write.merged) dedupMerged += 1;
     }
@@ -4290,7 +4300,7 @@ export class DreamService {
         usageClass: 'work_review',
         origin: 'dream',
         isExplicit: true,
-        source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
+        source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date, quote: review.note || undefined },
       });
       if (write.merged) dedupMerged += 1;
     }
