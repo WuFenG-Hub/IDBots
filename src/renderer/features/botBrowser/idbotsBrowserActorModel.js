@@ -106,15 +106,54 @@ export function buildBrowserRuntimeActors(metabots, human = null) {
 }
 
 /**
- * Default Actor policy: an existing usable Bot default is preserved when Bots
- * exist (adding the human Actor must not change signing behavior on upgrade);
- * with no usable Bot but a usable human identity, the human becomes the
- * default so generic signing remains possible without forcing Bot creation.
- * A visible-but-locked human is never the default.
+ * Resolve the runtime Actor list AND its default together.
+ *
+ * The default is chosen from the deduplicated list so it can never point at
+ * an Actor the user cannot actually select:
+ * 1. The existing default Bot is preserved when it survived dedup.
+ * 2. If it was deduped against the human identity (same GlobalMetaId), the
+ *    usable human account Actor — the same chain identity — takes over.
+ * 3. Otherwise the next surviving Bot, then nothing.
+ * The chosen Actor is marked isDefault in the returned list and returned by
+ * reference, so `defaultActor` always exists in `actors` with matching flags.
+ */
+export function resolveBrowserRuntimeActors(metabots, human = null) {
+  const actors = buildBrowserRuntimeActors(metabots, human);
+  const rawDefaultBot = selectDefaultBrowserActor(metabots);
+  let defaultActor = null;
+  if (rawDefaultBot) {
+    defaultActor = actors.find((actor) => actor.id === rawDefaultBot.id) ?? null;
+  }
+  if (!defaultActor && rawDefaultBot) {
+    // The default Bot was deduped against the human identity: the usable
+    // human Actor represents the same identity and takes over the default.
+    const humanActor = actors.find((actor) => actor.kind === 'idbots-account') ?? null;
+    if (humanActor && isUsableHumanIdentity(human)) {
+      defaultActor = humanActor;
+    } else {
+      // Locked human: fall back to the next surviving Bot.
+      defaultActor = actors.find((actor) => actor.kind === 'idbots-agent') ?? null;
+    }
+  }
+  if (!defaultActor && isUsableHumanIdentity(human)) {
+    // No Bot default at all: a usable human identity keeps generic signing
+    // possible without forcing Bot creation.
+    defaultActor = actors.find((actor) => actor.kind === 'idbots-account') ?? null;
+  }
+  for (const actor of actors) {
+    actor.isDefault = defaultActor ? actor.id === defaultActor.id : false;
+  }
+  return { actors, defaultActor };
+}
+
+/**
+ * Default Actor policy (see resolveBrowserRuntimeActors): an existing usable
+ * Bot default is preserved when it is still selectable; a deduped default
+ * falls back to the same-identity human account, then the next Bot; with no
+ * usable Bot at all a usable human identity may be the default. A
+ * visible-but-locked human is never the default. The returned Actor is the
+ * same object that resolveBrowserRuntimeActors marks isDefault.
  */
 export function selectDefaultBrowserRuntimeActor(metabots, human = null) {
-  const botDefault = selectDefaultBrowserActor(metabots);
-  if (botDefault) return botDefault;
-  if (isUsableHumanIdentity(human)) return humanIdentityToBrowserActor(human);
-  return null;
+  return resolveBrowserRuntimeActors(metabots, human).defaultActor;
 }

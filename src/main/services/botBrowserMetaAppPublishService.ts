@@ -90,6 +90,42 @@ export async function publishMetaAppFromDirectory(
   }
   const hasAppDoc = await fs.promises.stat(path.join(dir, 'APP.md')).then((stat) => stat.isFile()).catch(() => false);
 
+  // Motion-video learning provenance (shared contract §2.4). Validated
+  // strictly at the service layer BEFORE any side effect (zip, confirmation,
+  // upload, chain write) — the Agent tool's zod is not the last line of
+  // defense: pin ids must be the full 64-hex + index form inside a
+  // metaapp:// or pin:// URI, invalid values are rejected (never silently
+  // trimmed or truncated), and the learningMode enum is re-checked.
+  const LEARNING_MODES = new Set(['none', 'exemplars', 'lessons', 'combined']);
+  const LEARNED_FROM_URI_PATTERN = /^(?:metaapp|pin):\/\/[0-9a-f]{64}i\d+$/iu;
+  const MAX_LEARNED_FROM_URIS = 64;
+  if (input.learningMode != null && !LEARNING_MODES.has(input.learningMode)) {
+    throw new Error(`Invalid learningMode "${input.learningMode}"; expected none, exemplars, lessons, or combined.`);
+  }
+  if (input.learnedFrom != null && !Array.isArray(input.learnedFrom)) {
+    throw new Error('learnedFrom must be an array of metaapp:// or pin:// URIs.');
+  }
+  const learnedFromUris = ((input.learnedFrom as unknown[] | undefined) ?? [])
+    .map((uri) => String(uri ?? '').trim());
+  if (learnedFromUris.length > MAX_LEARNED_FROM_URIS) {
+    throw new Error(`learnedFrom accepts at most ${MAX_LEARNED_FROM_URIS} URIs; got ${learnedFromUris.length}.`);
+  }
+  const invalidUris = learnedFromUris.filter((uri) => !LEARNED_FROM_URI_PATTERN.test(uri));
+  if (invalidUris.length) {
+    throw new Error(
+      `Invalid learnedFrom URI(s): ${invalidUris.slice(0, 3).map((uri) => JSON.stringify(uri)).join(', ')}`
+      + `${invalidUris.length > 3 ? ` (and ${invalidUris.length - 3} more)` : ''}.`
+      + ' Each entry must be a full metaapp:// or pin:// URI with a 64-hex-character pin id.',
+    );
+  }
+  const manifestMetadata: Record<string, unknown> = {};
+  if (input.learningMode) {
+    manifestMetadata.learningMode = input.learningMode;
+  }
+  if (learnedFromUris.length) {
+    manifestMetadata.learnedFrom = learnedFromUris;
+  }
+
   const title = (input.title ?? '').trim() || marker?.title || path.basename(dir);
   const appName = title.slice(0, 60);
 
@@ -117,18 +153,6 @@ export async function publishMetaAppFromDirectory(
   const zipPinId = String(upload.pinId || '').trim().toLowerCase();
   if (!zipPinId) {
     throw new Error('Metafile upload did not return a pin id.');
-  }
-
-  const manifestMetadata: Record<string, unknown> = {};
-  if (input.learningMode) {
-    manifestMetadata.learningMode = input.learningMode;
-  }
-  const learnedFrom = (input.learnedFrom ?? [])
-    .map((uri) => String(uri ?? '').trim())
-    .filter((uri) => /^((metaapp|pin):\/\/[0-9a-z]+i\d+)$/iu.test(uri))
-    .slice(0, 64);
-  if (learnedFrom.length) {
-    manifestMetadata.learnedFrom = learnedFrom;
   }
 
   const result = await (input.deps?.publishMetaApp ?? publishMetaApp)(input.metabotStore, input.metabotId, {

@@ -118,6 +118,25 @@ test('getRuntime defaults to the human Actor only when no usable Bot exists', as
   assert.equal((await lockedAdapter.getRuntime()).data.actors.length, 1);
 });
 
+test('getRuntime never returns a defaultActor outside the deduplicated actor list', async () => {
+  // The default Bot shares the human's GlobalMetaId and is deduped away; the
+  // runtime default must move to the human account Actor, not dangle.
+  const adapter = createAdapter({
+    listMetabots: async () => [
+      createMetabot({ id: 1, created_at: 10, globalmetaid: 'IDQ1HUMAN' }),
+      createMetabot({ id: 2, created_at: 20, globalmetaid: 'IDQ1BOT' }),
+    ],
+    getHumanIdentity: async () => ({ label: 'Sunny', globalMetaId: 'IDQ1HUMAN', signingAvailable: true }),
+  });
+
+  const result = await adapter.getRuntime();
+  const ids = result.data.actors.map((actor) => actor.id);
+  assert.deepEqual(ids, ['idbots-account-1', 'idbots-metabot-2']);
+  assert.ok(ids.includes(result.data.defaultActor.id));
+  assert.equal(result.data.defaultActor.id, 'idbots-account-1');
+  assert.equal(result.data.defaultActor.isDefault, true);
+});
+
 test('getRuntime tolerates a failing human-identity lookup without losing Bots', async () => {
   const adapter = createAdapter({
     getHumanIdentity: async () => {

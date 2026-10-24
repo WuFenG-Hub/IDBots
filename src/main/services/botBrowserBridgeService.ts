@@ -13,6 +13,9 @@ import {
 import type { MetabotStore } from '../metabotStore';
 import type { Metabot } from '../types/metabot';
 import type { MetaidDataPayload } from './metaidCore';
+import type { PinPathResolution } from './pinPathResolver';
+
+export type { PinPathResolution } from './pinPathResolver';
 
 const MAX_PIN_PAYLOAD_BYTES = 512 * 1024;
 const PIN_ID_PATTERN = /^[0-9a-f]{64}i\d+$/iu;
@@ -51,6 +54,7 @@ export type BotBrowserBridgeErrorCode =
   | 'actor_required'
   | 'unsupported_actor'
   | 'signer_unavailable'
+  | 'signer_changed'
   | 'manual_action_required'
   | 'user_cancelled'
   | 'consent_denied'
@@ -84,8 +88,8 @@ export interface HumanBridgeActor {
 }
 
 export type HumanPinWriteOutcome =
-  | { ok: false; error: 'USER_IDENTITY_MISSING' | 'SUBSIDY_NOT_CLAIMED' }
-  | { ok: true; pinId: string; txids: string[] };
+  | { ok: false; error: 'USER_IDENTITY_MISSING' | 'SUBSIDY_NOT_CLAIMED' | 'IDENTITY_MISMATCH' }
+  | { ok: true; pinId: string; txids: string[]; totalCost?: number };
 
 export interface BotBrowserPinWriteResult {
   pinId: string;
@@ -206,15 +210,21 @@ export interface BotBrowserBridgeServiceDeps {
   /**
    * Generic human-identity PIN signer (shared serialized queue; see
    * humanIdentityPinWriter). Wired in main.ts to the same writer instance the
-   * sealed preference user writer shares.
+   * sealed preference user writer shares. expectedGlobalMetaId re-checks the
+   * confirmed identity when the write dequeues, so a write authorized for
+   * identity A can never be signed by a replacement identity B.
    */
-  createHumanPin?: (metaidPayload: MetaidDataPayload) => Promise<HumanPinWriteOutcome>;
+  createHumanPin?: (
+    metaidPayload: MetaidDataPayload,
+    options?: { expectedGlobalMetaId?: string },
+  ) => Promise<HumanPinWriteOutcome>;
   /**
-   * Best-effort pin-id → protocol-path resolver used to reject modify/revoke
-   * writes that target the create-only /protocols/preference/feedback path.
-   * Return null/undefined when the target path cannot be determined.
+   * Bounded pin-id → protocol-path resolver used to reject modify/revoke
+   * writes that target the create-only /protocols/preference/feedback path
+   * (see services/pinPathResolver.ts for the caching/rate-limit policy).
+   * Fail-closed: 'not-found' and 'unknown' targets are rejected too.
    */
-  resolvePinPath?: (pinId: string) => Promise<string | null | undefined>;
+  resolvePinPath?: (pinId: string, rateLimitKey?: string) => Promise<PinPathResolution>;
   uploadMetaFile?: UploadMetaFileFn;
   completeLlm?: CompleteLlmFn;
   pickFiles?: (input: {
@@ -236,7 +246,7 @@ export interface BotBrowserBridgeServiceDeps {
  * electron-log file transport captures them) for later review.
  */
 export interface BotBrowserBridgeAuditEvent {
-  type: 'permission-granted' | 'permission-revoked' | 'granted-write';
+  type: 'permission-granted' | 'permission-revoked' | 'granted-write' | 'pin-write';
   at: number;
   /** Local MetaBot id for Bot actors; the host Actor id for the human account. */
   actorId: number | string;
@@ -427,8 +437,8 @@ function isCommandFailure(value: unknown): value is BrowserCommandResult<never> 
 
 /** Human-identity signer gate failure surfaced by the shared pin writer. */
 class HumanPinWriteError extends Error {
-  code: 'USER_IDENTITY_MISSING' | 'SUBSIDY_NOT_CLAIMED';
-  constructor(code: 'USER_IDENTITY_MISSING' | 'SUBSIDY_NOT_CLAIMED') {
+  code: 'USER_IDENTITY_MISSING' | 'SUBSIDY_NOT_CLAIMED' | 'IDENTITY_MISMATCH';
+  constructor(code: 'USER_IDENTITY_MISSING' | 'SUBSIDY_NOT_CLAIMED' | 'IDENTITY_MISMATCH') {
     super(code);
     this.name = 'HumanPinWriteError';
     this.code = code;
@@ -1166,17 +1176,36 @@ export function createBotBrowserBridgeService(
         }
       }
 
-      // '@<targetPinId>' modify/revoke targets: best-effort resolve via the
-      // host pin-path resolver and reject feedback targets before signing.
-      if (validation.operation !== 'create') {
+      // '@<targetPinId>' modify/revoke targets: resolve via the bounded
+      // pin-path resolver and fail CLOSED. The shared contract requires
+      // modify/revoke for /protocols/preference/feedback to be rejected
+      // before signing and has no best-effort carve-out, so a target whose
+      // path cannot be determined (indexer has not seen it, or the lookup
+      // failed) is rejected rather than waved through. Enforcement is scoped
+      // to MVC (the milestone's chain); other networks keep their existing
+      // behavior because the MVC indexer cannot speak for their pins.
+      if (validation.operation !== 'create' && deps.resolvePinPath) {
         const targetPinId = validation.bridgeMetadata?.originalId
           ?? (validation.path.startsWith('@') ? validation.path.slice(1) : '');
-        if (targetPinId && deps.resolvePinPath) {
-          const targetPath = await deps.resolvePinPath(targetPinId);
-          if (targetPath === PREFERENCE_FEEDBACK_PATH) {
+        const network = text(input.network).toLowerCase();
+        if (targetPinId && (!network || network === 'mvc')) {
+          const resolution = await deps.resolvePinPath(targetPinId, resourceUri);
+          if (resolution.status === 'resolved' && resolution.path === PREFERENCE_FEEDBACK_PATH) {
             return failure(
               'invalid_params',
               `${PREFERENCE_FEEDBACK_PATH} supports create only; modify/revoke is rejected before signing.`,
+            );
+          }
+          if (resolution.status === 'not-found') {
+            return failure(
+              'invalid_params',
+              `The modify/revoke target pin ${targetPinId} is not known to the indexer yet, so the host cannot verify it is not a preference feedback pin; the write is rejected. Try again after the pin is indexed.`,
+            );
+          }
+          if (resolution.status === 'unknown') {
+            return failure(
+              'invalid_request',
+              `The protocol path of the modify/revoke target pin ${targetPinId} could not be verified right now (indexer unreachable or lookup rate limited), so the write is rejected. Try again shortly.`,
             );
           }
         }
@@ -1239,7 +1268,9 @@ export function createBotBrowserBridgeService(
       try {
         // Signer dispatch is bound to the resolved Actor kind. A failure on
         // either path surfaces as an error for THAT identity — there is never
-        // a cross-signer fallback.
+        // a cross-signer fallback. Human writes carry the confirmed identity:
+        // the writer re-checks it at dequeue time so a write authorized for
+        // identity A can never be signed by a replacement identity B.
         const result = actorResult.kind === 'bot'
           ? await deps.createPin!(
               deps.metabotStore,
@@ -1248,16 +1279,38 @@ export function createBotBrowserBridgeService(
               { network: text(input.network) || undefined },
             )
           : await (async () => {
-              const outcome = await deps.createHumanPin!(validation.metaidPayload);
+              const outcome = await deps.createHumanPin!(
+                validation.metaidPayload,
+                { expectedGlobalMetaId: actorResult.actor.globalMetaId },
+              );
               if (outcome.ok === false) {
                 throw new HumanPinWriteError(outcome.error);
               }
-              return { pinId: outcome.pinId, txids: outcome.txids, totalCost: 0 };
+              return {
+                pinId: outcome.pinId,
+                txids: outcome.txids,
+                totalCost: typeof outcome.totalCost === 'number' && Number.isFinite(outcome.totalCost)
+                  ? outcome.totalCost
+                  : 0,
+              };
             })();
         const pinId = text(result.pinId);
         const txid = text(result.txids?.[0]);
         if (!pinId || !txid) {
           return failure('pin_write_failed', 'MetaID PIN write failed.');
+        }
+        if (!autoWriteAuthorized) {
+          recordAudit({
+            type: 'pin-write',
+            at: now(),
+            actorId: actorResult.kind === 'bot' ? actorResult.metabotId : actorResult.actorId,
+            actorGlobalMetaId: actorResult.actor.globalMetaId,
+            resourceUri,
+            sessionId,
+            path: validation.path,
+            pinId,
+            txid,
+          });
         }
         if (autoWriteAuthorized) {
           recordAudit({
@@ -1281,6 +1334,12 @@ export function createBotBrowserBridgeService(
         });
       } catch (error) {
         if (error instanceof HumanPinWriteError) {
+          if (error.code === 'IDENTITY_MISMATCH') {
+            return failure(
+              'signer_changed',
+              'The confirmed account Actor no longer matches the current identity (it was replaced while this write was in flight). Start a new confirmation with the current identity.',
+            );
+          }
           return failure(
             error.code === 'SUBSIDY_NOT_CLAIMED' ? 'signer_unavailable' : 'actor_required',
             error.code === 'SUBSIDY_NOT_CLAIMED'

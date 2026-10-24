@@ -439,6 +439,7 @@ import {
   humanIdentitySigningAvailable,
   type HumanIdentityPinWriter,
 } from './services/humanIdentityPinWriter';
+import { createBoundedPinPathResolver } from './services/pinPathResolver';
 import {
   createBotBrowserHostService,
   fetchLatestBotProfileInfo,
@@ -2944,25 +2945,14 @@ function getSanitizedHumanBrowserActor(): HumanBridgeActor | null {
   };
 }
 
-// Best-effort pin-id → protocol-path cache for the create-only preference
-// feedback guard (modify/revoke '@<pinId>' targets). Network failures resolve
-// to null and never block a legitimate modify.
-const pinPathLookupCache = new Map<string, string | null>();
-async function lookupPinProtocolPath(pinId: string): Promise<string | null> {
-  const key = pinId.toLowerCase();
-  if (pinPathLookupCache.has(key)) {
-    return pinPathLookupCache.get(key) ?? null;
-  }
-  let path: string | null = null;
-  try {
-    const row = await getPinData(key, false);
-    path = typeof row?.path === 'string' && row.path.trim() ? row.path.trim() : null;
-  } catch {
-    path = null;
-  }
-  pinPathLookupCache.set(key, path);
-  return path;
-}
+// Bounded/TTL/rate-limited pin-id → protocol-path resolver for the
+// create-only preference feedback guard (modify/revoke '@<pinId>' targets).
+// Fail-closed by policy — see services/pinPathResolver.ts.
+const pinPathLookup = createBoundedPinPathResolver(async (pinId: string) => {
+  const row = await getPinData(pinId, false);
+  if (!row) return { found: false };
+  return { found: true, path: row?.path };
+});
 
 let humanIdentityPinWriterSingleton: HumanIdentityPinWriter | null = null;
 /**
@@ -3003,8 +2993,8 @@ function getBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null):
       feeRate: getGlobalFeeRate(resolveCreatePinNetwork(options?.network)),
     }),
     getHumanActor: getSanitizedHumanBrowserActor,
-    createHumanPin: (metaidPayload) => getHumanIdentityPinWriter()(metaidPayload),
-    resolvePinPath: lookupPinProtocolPath,
+    createHumanPin: (metaidPayload, options) => getHumanIdentityPinWriter()(metaidPayload, options),
+    resolvePinPath: pinPathLookup,
     uploadMetaFile: async (...args) => {
       const { uploadMetaFile } = await import('./services/metaFileUploadService');
       return uploadMetaFile(...args);

@@ -185,3 +185,112 @@ test('publish requires the entry file to exist', async () => {
     /Entry file not found/,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Motion-video learning provenance validation (shared contract §2.4)
+// ---------------------------------------------------------------------------
+
+const VALID_URI_A = `metaapp://${'a'.repeat(64)}i0`;
+const VALID_URI_B = `pin://${'5'.repeat(64)}i3`;
+
+test('learningMode and learnedFrom are recorded in manifest metadata when valid', async () => {
+  const workspace = makeTempDir();
+  const dir = writeAppDir(workspace);
+  const calls = {};
+  await publishMetaAppFromDirectory({
+    dir,
+    workspaceDir: workspace,
+    metabotId: 1,
+    metabotStore: {},
+    learningMode: 'combined',
+    learnedFrom: [VALID_URI_A, VALID_URI_B],
+    confirmPublish: async () => true,
+    deps: makeDeps(calls),
+  });
+  assert.deepEqual(calls.manifest.metadata, {
+    learningMode: 'combined',
+    learnedFrom: [VALID_URI_A, VALID_URI_B],
+  });
+});
+
+test('invalid learnedFrom URIs are rejected, never trimmed or truncated', async () => {
+  const workspace = makeTempDir();
+  const dir = writeAppDir(workspace);
+  const cases = [
+    ['not-a-uri'],
+    ['metaapp://shorti0'], // non-hex, short id
+    [`metaapp://${'g'.repeat(64)}i0`], // non-hex characters
+    [`pin://${'a'.repeat(63)}i0`], // 63 hex chars
+    [`metaapp://${'a'.repeat(64)}i0 trailing`],
+    [VALID_URI_A, ''],
+  ];
+  for (const learnedFrom of cases) {
+    const calls = {};
+    await assert.rejects(
+      publishMetaAppFromDirectory({
+        dir,
+        workspaceDir: workspace,
+        metabotId: 1,
+        metabotStore: {},
+        learningMode: 'exemplars',
+        learnedFrom,
+        confirmPublish: async () => true,
+        deps: makeDeps(calls),
+      }),
+      /Invalid learnedFrom/,
+    );
+    // Rejection happens before upload or chain write.
+    assert.equal(calls.upload, undefined);
+    assert.equal(calls.manifest, undefined);
+  }
+});
+
+test('more than 64 learnedFrom URIs is an explicit rejection', async () => {
+  const workspace = makeTempDir();
+  const dir = writeAppDir(workspace);
+  const learnedFrom = Array.from({ length: 65 }, (_unused, index) => `pin://${String(index % 10).repeat(64)}i${index}`);
+  await assert.rejects(
+    publishMetaAppFromDirectory({
+      dir,
+      workspaceDir: workspace,
+      metabotId: 1,
+      metabotStore: {},
+      learnedFrom,
+      confirmPublish: async () => true,
+      deps: makeDeps({}),
+    }),
+    /at most 64/,
+  );
+});
+
+test('learningMode is enum-checked at the service layer, not only in the tool schema', async () => {
+  const workspace = makeTempDir();
+  const dir = writeAppDir(workspace);
+  await assert.rejects(
+    publishMetaAppFromDirectory({
+      dir,
+      workspaceDir: workspace,
+      metabotId: 1,
+      metabotStore: {},
+      learningMode: 'everything',
+      confirmPublish: async () => true,
+      deps: makeDeps({}),
+    }),
+    /Invalid learningMode/,
+  );
+});
+
+test('omitting provenance keeps the manifest metadata-free', async () => {
+  const workspace = makeTempDir();
+  const dir = writeAppDir(workspace);
+  const calls = {};
+  await publishMetaAppFromDirectory({
+    dir,
+    workspaceDir: workspace,
+    metabotId: 1,
+    metabotStore: {},
+    confirmPublish: async () => true,
+    deps: makeDeps(calls),
+  });
+  assert.equal(calls.manifest.metadata, undefined);
+});

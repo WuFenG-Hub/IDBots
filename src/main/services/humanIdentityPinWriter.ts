@@ -3,13 +3,29 @@ import type { UserIdentityStore } from '../userIdentityStore';
 import type { UserIdentity } from '../types/userIdentity';
 import type { IdentityCreatePin } from './preference/userWriter';
 
-export type HumanIdentityPinErrorCode = 'USER_IDENTITY_MISSING' | 'SUBSIDY_NOT_CLAIMED';
+export type HumanIdentityPinErrorCode =
+  | 'USER_IDENTITY_MISSING'
+  | 'SUBSIDY_NOT_CLAIMED'
+  | 'IDENTITY_MISMATCH';
+
+export type HumanIdentityPinWriteOptions = {
+  /**
+   * GlobalMetaId the caller authorized (e.g. the identity shown on the
+   * Browser confirmation card). Re-checked when the write dequeues: if the
+   * identity was replaced while the write waited behind another one, the
+   * write fails with IDENTITY_MISMATCH instead of signing as someone else.
+   */
+  expectedGlobalMetaId?: string;
+};
 
 export type HumanIdentityPinWriteOutcome =
   | { ok: false; error: HumanIdentityPinErrorCode }
-  | { ok: true; pinId: string; txids: string[] };
+  | { ok: true; pinId: string; txids: string[]; totalCost: number };
 
-export type HumanIdentityPinWriter = (metaidData: MetaidDataPayload) => Promise<HumanIdentityPinWriteOutcome>;
+export type HumanIdentityPinWriter = (
+  metaidData: MetaidDataPayload,
+  options?: HumanIdentityPinWriteOptions,
+) => Promise<HumanIdentityPinWriteOutcome>;
 
 export interface HumanIdentityPinWriterDeps {
   createPin: IdentityCreatePin;
@@ -30,8 +46,14 @@ export function humanIdentitySigningAvailable(identity: UserIdentity | null | un
   );
 }
 
-function identityWriteError(identity: UserIdentity | null): HumanIdentityPinErrorCode | null {
+function identityWriteError(
+  identity: UserIdentity | null,
+  expectedGlobalMetaId?: string,
+): HumanIdentityPinErrorCode | null {
   if (!identity || !identity.globalmetaid) return 'USER_IDENTITY_MISSING';
+  if (expectedGlobalMetaId && identity.globalmetaid.trim().toLowerCase() !== expectedGlobalMetaId.trim().toLowerCase()) {
+    return 'IDENTITY_MISMATCH';
+  }
   if (!humanIdentitySigningAvailable(identity)) return 'SUBSIDY_NOT_CLAIMED';
   return null;
 }
@@ -62,10 +84,10 @@ export function createHumanIdentityPinWriter(
   let snapshotOwnerMnemonic = '';
   let snapshotOwnerPath = '';
 
-  return (metaidData) => {
+  return (metaidData, options) => {
     const run = async (): Promise<HumanIdentityPinWriteOutcome> => {
       const identity = userStore.get();
-      const gateError = identityWriteError(identity);
+      const gateError = identityWriteError(identity, options?.expectedGlobalMetaId);
       if (gateError) return { ok: false, error: gateError };
 
       const mnemonic = identity.mnemonic;
@@ -88,7 +110,14 @@ export function createHumanIdentityPinWriter(
       }
       snapshot.preferredFundingUtxos = result.changeUtxo ? [result.changeUtxo] : [];
       const txid = result.txids[0] ?? '';
-      return { ok: true, pinId: result.pinId || `${txid}i0`, txids: result.txids };
+      return {
+        ok: true,
+        pinId: result.pinId || `${txid}i0`,
+        txids: result.txids,
+        totalCost: typeof result.totalCost === 'number' && Number.isFinite(result.totalCost)
+          ? result.totalCost
+          : 0,
+      };
     };
     const next = queue.then(run, run);
     queue = next.catch(() => undefined);

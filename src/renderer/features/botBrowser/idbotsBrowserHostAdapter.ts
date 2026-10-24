@@ -43,8 +43,7 @@ import {
   parseLocalMetabotActorId,
 } from './botBrowserIntent.js';
 import {
-  buildBrowserRuntimeActors,
-  selectDefaultBrowserRuntimeActor,
+  resolveBrowserRuntimeActors,
 } from './idbotsBrowserActorModel.js';
 import {
   localMetaAppToBrowserRecord,
@@ -413,10 +412,13 @@ export function createIdbotsBrowserHostAdapter(
         input.listMetabots(),
         input.getHumanIdentity ? input.getHumanIdentity().catch(() => null) : Promise.resolve(null),
       ]);
+      // actors and defaultActor come from one resolver so the default always
+      // exists in the (deduplicated) list with matching isDefault flags.
+      const { actors, defaultActor } = resolveBrowserRuntimeActors(metabots, humanIdentity);
       return browserSuccess({
         host: { kind: 'idbots', name: 'IDBots', localMode: true },
-        actors: buildBrowserRuntimeActors(metabots, humanIdentity),
-        defaultActor: selectDefaultBrowserRuntimeActor(metabots, humanIdentity),
+        actors,
+        defaultActor,
         defaultUri: null,
         features: {
           privateChat: true,

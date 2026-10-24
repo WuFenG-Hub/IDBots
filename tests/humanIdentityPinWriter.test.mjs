@@ -145,7 +145,7 @@ test('missing pin id falls back to txidi0', async () => {
     { get: () => BASE },
     { createPin, feeRate: () => 1 },
   )(payload());
-  assert.deepEqual(outcome, { ok: true, pinId: 'txfallbacki0', txids: ['txfallback'] });
+  assert.deepEqual(outcome, { ok: true, pinId: 'txfallbacki0', txids: ['txfallback'], totalCost: 1 });
 });
 
 test('humanIdentitySigningAvailable mirrors the sealed writer usability predicate', () => {
@@ -156,4 +156,65 @@ test('humanIdentitySigningAvailable mirrors the sealed writer usability predicat
   assert.equal(humanIdentitySigningAvailable({ ...BASE, subsidy_state: null, chat_public_key_pin_id: 'pin1i0' }), true);
   assert.equal(humanIdentitySigningAvailable(null), false);
   assert.equal(humanIdentitySigningAvailable({ ...BASE, globalmetaid: null }), false);
+});
+
+test('a write blocked behind another fails on identity replacement instead of signing as the new identity', async () => {
+  // First write occupies the queue; the second (authorized as identity A)
+  // dequeues only after the identity was replaced by B.
+  const seenMnemonics = [];
+  let releaseFirst;
+  const gate = new Promise((resolve) => { releaseFirst = resolve; });
+  let calls = 0;
+  const createPin = async (params) => {
+    calls += 1;
+    seenMnemonics.push(params.mnemonic);
+    if (calls === 1) {
+      await gate;
+      return { txids: ['t1'], pinId: 'pin-1i0', totalCost: 3 };
+    }
+    throw new Error('second createPin call must never happen');
+  };
+  let identity = { ...BASE };
+  const store = { get: () => identity };
+  const writePin = createHumanIdentityPinWriter(store, { createPin, feeRate: () => 1 });
+
+  const first = writePin(payload('/protocols/simplebuzz'));
+  const second = writePin(payload(), { expectedGlobalMetaId: 'idq1human' });
+  // Replace the identity while the second write is still queued.
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  identity = { ...BASE, mnemonic: 'other '.repeat(12).trim(), globalmetaid: 'idq1other' };
+  releaseFirst();
+
+  assert.deepEqual(await second, { ok: false, error: 'IDENTITY_MISMATCH' });
+  assert.equal((await first).ok, true);
+  assert.equal(calls, 1);
+  assert.deepEqual(seenMnemonics, [BASE.mnemonic]);
+});
+
+test('expectedGlobalMetaId matching keeps the write flowing', async () => {
+  let signed = 0;
+  const createPin = async () => {
+    signed += 1;
+    return { txids: ['t'], pinId: 'pin-1i0', totalCost: 7 };
+  };
+  const outcome = await createHumanIdentityPinWriter(
+    { get: () => BASE },
+    { createPin, feeRate: () => 1 },
+  )(payload(), { expectedGlobalMetaId: ' IDQ1HUMAN ' });
+  assert.deepEqual(outcome, { ok: true, pinId: 'pin-1i0', txids: ['t'], totalCost: 7 });
+  assert.equal(signed, 1);
+});
+
+test('totalCost is propagated (and defaults to 0 when the worker omits it)', async () => {
+  const withCost = await createHumanIdentityPinWriter(
+    { get: () => BASE },
+    { createPin: async () => ({ txids: ['t'], pinId: 'pi0', totalCost: 42 }), feeRate: () => 1 },
+  )(payload());
+  assert.equal(withCost.ok && withCost.totalCost, 42);
+
+  const withoutCost = await createHumanIdentityPinWriter(
+    { get: () => BASE },
+    { createPin: async () => ({ txids: ['t'], pinId: 'pi0' }), feeRate: () => 1 },
+  )(payload());
+  assert.equal(withoutCost.ok && withoutCost.totalCost, 0);
 });

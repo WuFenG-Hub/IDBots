@@ -25,24 +25,27 @@ function usableHuman(overrides = {}) {
 }
 
 function createService(overrides = {}) {
-  const calls = { botPin: 0, humanPin: 0, resolvedPinPaths: [] };
+  const calls = { botPin: 0, humanPin: 0, resolvedPinPaths: [], humanPinOptions: [], audit: [] };
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
     getHumanActor: () => overrides.human ?? null,
-    createHumanPin: async (payload) => {
+    createHumanPin: async (payload, options) => {
       calls.humanPin += 1;
+      calls.humanPinOptions.push(options);
       if (overrides.humanPinOutcome) return overrides.humanPinOutcome();
-      return { ok: true, pinId: `human-pin-${calls.humanPin}`, txids: [`human-tx-${calls.humanPin}`] };
+      return { ok: true, pinId: `human-pin-${calls.humanPin}`, txids: [`human-tx-${calls.humanPin}`], totalCost: 2 };
     },
     createPin: async (_store, metabotId) => {
       calls.botPin += 1;
       return { pinId: `bot-pin-${calls.botPin}`, txids: [`bot-tx-${calls.botPin}`], totalCost: 1, metabotId };
     },
-    resolvePinPath: async (pinId) => {
+    resolvePinPath: async (pinId, rateLimitKey) => {
       calls.resolvedPinPaths.push(pinId);
-      if (pinId === FEEDBACK_TARGET_PIN) return FEEDBACK_PATH;
-      return '/protocols/simplebuzz';
+      if (overrides.pinPathResolution) return overrides.pinPathResolution(pinId);
+      if (pinId === FEEDBACK_TARGET_PIN) return { status: 'resolved', path: FEEDBACK_PATH };
+      return { status: 'resolved', path: '/protocols/simplebuzz', rateLimitKey };
     },
+    audit: (event) => calls.audit.push(event),
     ...overrides.deps,
   });
   return { service, calls };
@@ -353,4 +356,140 @@ test('human Actor rejects non-MVC networks explicitly', async () => {
   });
   assert.equal(result.ok, false);
   assert.equal(result.code, 'unsupported_actor');
+});
+
+// ---------------------------------------------------------------------------
+// Rework regressions (WS2 review): queued identity replacement, fail-closed
+// '@pin' guard, confirmed-write audit
+// ---------------------------------------------------------------------------
+
+test('human writes carry the confirmed identity as expectedGlobalMetaId', async () => {
+  const { service, calls } = createService({ human: usableHuman({ globalMetaId: 'IDQ1HUMAN' }) });
+
+  const phaseOne = await service.writeMetaIdPin({
+    actorId: HUMAN_ACCOUNT_ACTOR_ID,
+    resourceUri: RESOURCE,
+    payload: pinWritePayload(),
+  });
+  const result = await service.writeMetaIdPin({
+    actorId: HUMAN_ACCOUNT_ACTOR_ID,
+    ...phaseOne.data.confirmRequest,
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls.humanPinOptions, [{ expectedGlobalMetaId: 'idq1human' }]);
+});
+
+test('a write that dequeues onto a replaced identity fails with signer_changed, not a B signature', async () => {
+  // Simulates the shared writer's dequeue-time identity check: the
+  // confirmation was consumed for identity A, the identity was replaced
+  // while the write waited, and the writer rejects with IDENTITY_MISMATCH.
+  const { service, calls } = createService({
+    human: usableHuman({ globalMetaId: 'IDQ1HUMAN' }),
+    humanPinOutcome: () => ({ ok: false, error: 'IDENTITY_MISMATCH' }),
+  });
+
+  const phaseOne = await service.writeMetaIdPin({
+    actorId: HUMAN_ACCOUNT_ACTOR_ID,
+    resourceUri: RESOURCE,
+    payload: pinWritePayload(),
+  });
+  const result = await service.writeMetaIdPin({
+    actorId: HUMAN_ACCOUNT_ACTOR_ID,
+    ...phaseOne.data.confirmRequest,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'signer_changed');
+  assert.match(result.message, /replaced while this write was in flight/);
+  assert.equal(calls.botPin, 0);
+});
+
+test("modify/revoke fails closed when the '@pin' target is not in the indexer", async () => {
+  const { service, calls } = createService({
+    human: usableHuman(),
+    pinPathResolution: (pinId) => (pinId === FEEDBACK_TARGET_PIN
+      ? { status: 'not-found' }
+      : { status: 'resolved', path: '/protocols/simplebuzz' }),
+  });
+
+  const result = await service.writeMetaIdPin({
+    actorId: HUMAN_ACCOUNT_ACTOR_ID,
+    resourceUri: RESOURCE,
+    payload: pinWritePayload({
+      operation: 'modify',
+      path: `@${FEEDBACK_TARGET_PIN}`,
+      originalId: FEEDBACK_TARGET_PIN,
+    }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'invalid_params');
+  assert.match(result.message, /not known to the indexer/);
+  assert.equal(calls.humanPin, 0);
+  assert.equal(calls.botPin, 0);
+});
+
+test("modify/revoke fails closed when the '@pin' lookup errors or is rate limited", async () => {
+  const { service, calls } = createService({
+    human: usableHuman(),
+    pinPathResolution: (pinId) => (pinId === FEEDBACK_TARGET_PIN
+      ? { status: 'unknown' }
+      : { status: 'resolved', path: '/protocols/simplebuzz' }),
+  });
+
+  const result = await service.writeMetaIdPin({
+    actorId: HUMAN_ACCOUNT_ACTOR_ID,
+    resourceUri: RESOURCE,
+    payload: pinWritePayload({
+      operation: 'revoke',
+      path: `@${FEEDBACK_TARGET_PIN}`,
+      originalId: FEEDBACK_TARGET_PIN,
+      payload: { encoding: 'utf8', value: '' },
+    }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'invalid_request');
+  assert.match(result.message, /could not be verified right now/);
+  assert.equal(calls.humanPin, 0);
+  assert.equal(calls.botPin, 0);
+});
+
+test('non-MVC modify/revoke keeps the pre-guard behavior (no MVC indexer claim)', async () => {
+  const { service, calls } = createService({ human: usableHuman() });
+
+  // The human Actor rejects non-MVC outright, so the scoping check rides on
+  // the Bot Actor (whose multi-network createPin path predates the guard).
+  const result = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: RESOURCE,
+    network: 'doge',
+    payload: pinWritePayload({
+      operation: 'modify',
+      path: `@${FEEDBACK_TARGET_PIN}`,
+      originalId: FEEDBACK_TARGET_PIN,
+    }),
+  });
+  assert.equal(result.state, 'manual_action_required');
+  assert.equal(calls.resolvedPinPaths.length, 0);
+});
+
+test('confirmed two-phase writes emit a pin-write audit event naming the actual signer', async () => {
+  const { service, calls } = createService({ human: usableHuman() });
+
+  const phaseOne = await service.writeMetaIdPin({
+    actorId: HUMAN_ACCOUNT_ACTOR_ID,
+    resourceUri: RESOURCE,
+    payload: pinWritePayload(),
+  });
+  const result = await service.writeMetaIdPin({
+    actorId: HUMAN_ACCOUNT_ACTOR_ID,
+    ...phaseOne.data.confirmRequest,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls.audit.length, 1);
+  assert.equal(calls.audit[0].type, 'pin-write');
+  assert.equal(calls.audit[0].actorId, HUMAN_ACCOUNT_ACTOR_ID);
+  assert.equal(calls.audit[0].actorGlobalMetaId, 'idq1human');
+  assert.equal(calls.audit[0].path, FEEDBACK_PATH);
+  assert.equal(calls.audit[0].pinId, 'human-pin-1');
+  // No session id on a plain two-phase write (grants are Bot-only today).
+  assert.equal(calls.audit[0].sessionId, '');
 });
