@@ -738,3 +738,4 @@ blob-report/
 # Motion Video Arena MetaApp (WS4): component tests, mock MetaSo + mock Browser bridge
 !tests/motionVideoArena.test.mjs
 !tests/motionVideoArenaStatic.test.mjs
+!tests/motionVideoArenaBridge.test.mjs

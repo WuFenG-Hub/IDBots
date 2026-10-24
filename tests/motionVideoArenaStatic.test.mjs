@@ -39,7 +39,9 @@ test('arena source is tracked by git under the .gitignore whitelist', () => {
     .sort();
   assert.deepEqual(tracked, [
     'METAAPPs/motion-video-arena/APP.md',
+    'METAAPPs/motion-video-arena/agent-browser-helper.js',
     'METAAPPs/motion-video-arena/app.js',
+    'METAAPPs/motion-video-arena/host-sim-harness.html',
     'METAAPPs/motion-video-arena/index.html',
     'METAAPPs/motion-video-arena/styles.css',
   ]);

@@ -19,13 +19,25 @@ signs, never selects signers, and never writes telemetry.
 
 ## Package map
 
-- `index.html` — single entry, relative references only (`./styles.css`, `./app.js`).
+- `index.html` — single entry, relative references only
+  (`./styles.css`, `./agent-browser-helper.js`, `./app.js`).
+- `agent-browser-helper.js` — standard AgentBrowser client (loaded BEFORE
+  `app.js`): installs `window.AgentBrowser.request/on/navigate` over the
+  `agent-browser:request|response|event` postMessage protocol the Bot Browser
+  chrome answers, with per-call timeouts and a bounded host probe
+  (`probeBrowserHost`) that lets the app degrade to read-only when no host
+  responds.
 - `app.js` — DOM-free core (normalization, routing, pair selection, queue,
   payload build/validate, audio coordination, submission controller) plus
   browser wiring. The core is exported CommonJS-style for component tests.
 - `styles.css` — responsive styles: desktop two-column compare grid + queue
   sidebar; `<= 860px` stacks the players vertically (each pane keeps its
   "Left video"/"Right video" heading so votes stay associated).
+- `host-sim-harness.html` — development-only self-test page, never loaded by
+  the app: silent mode auto-drives one mock vote→submit and captures the
+  outcome copy (`?mock=fail` / `?mock=unknown` exercise the other outcomes);
+  `?host=1` simulates the Bot Browser protocol side to prove bridge
+  recognition, Actor display, mock-ignored gating, and the unpublished lock.
 - `APP.md` — this document.
 
 ## Routes and parameters
@@ -35,27 +47,35 @@ signs, never selects signers, and never writes telemetry.
   Values are URL-decoded and must be full 66-character app root ids
   (64 lowercase hex + `i0`); invalid links show a recoverable error and a way
   back to `#/`. A deep-linked pair takes precedence over auto selection.
-- Query parameters (non-routing): `?mock=1` swaps MetaSo reads and the Browser
-  bridge for local mocks with the two reference fixture shapes (development
-  only; a banner is always shown); `?mock=fail` makes the mock write reject;
-  `?mockVideoA=<url>&mockVideoB=<url>` override mock video sources for preview
-  screenshots; `?smoke=motion-video-smoke` adds the `test:motion-video-smoke`
-  category tag **only** for an explicitly authorized smoke run — ordinary
-  operation never adds a `test:` tag.
+- Query parameters (non-routing): development mode is requested with
+  `?mock=1` (mock success), `?mock=fail` (mock rejection), or
+  `?mock=unknown` (mock resolves without a pin id — exercises the
+  unknown-outcome path). All three swap MetaSo reads and the Browser bridge
+  for local mocks with the two reference fixture shapes and show a permanent
+  banner; mock success copy always states that nothing was written on chain.
+  **A live Browser bridge always wins**: when the host probe succeeds, the
+  mock parameter is ignored and a banner says so — a production instance in
+  the Bot Browser can never be flipped into mock mode via the query string.
+  `?mockVideoA=<url>&mockVideoB=<url>` override mock video sources for
+  preview screenshots. `?smoke=motion-video-smoke` (short label) adds the
+  full `test:motion-video-smoke` category tag **only** for an explicitly
+  authorized smoke run — ordinary operation never adds a `test:` tag.
 
 ## MetaSo endpoints consumed
 
 - `GET https://so.metaid.io/api/metaapp/list?tag=motion-video&chainName=mvc&size=100`
   — candidate pool. Envelope `{code,data,message}`; `code === 0` opens
   `data.items`.
-- `GET https://so.metaapp.io/api/metaapp/detail/<rootPinId>?chainName=mvc`
+- `GET https://so.metaid.io/api/metaapp/detail/<rootPinId>?chainName=mvc`
   — deep-linked candidates (one call per side, accepts a root or mid-chain id).
 
 Fields consumed per item: `chainName`, `pinId` (stable root), `currentPinId`
-(exact folded package), `disabled`, `title`, and the additive `motionVideo`
-block (`videoFile`, `videoSha256`, optional `videoUrl`, `durationSec`,
-`hasAudio`). Publisher, builder model, learning mode, and any `preference`
-scores may arrive but are never shown before the user chooses.
+(exact folded package), `disabled`, `title`, `coverImg` (initial poster), and
+the additive `motionVideo` block (`videoFile`, `videoSha256`, optional
+`videoUrl`, `durationSec`, `hasAudio`). All reads go to the single MetaSo host
+`https://so.metaid.io` (list and detail alike). Publisher, builder model,
+learning mode, and any `preference` scores may arrive but are never shown
+before the user chooses.
 
 Normalization requires a non-disabled item with valid `chainName === 'mvc'`,
 `pinId`, `currentPinId`, a parseable `metafile://` `videoFile` (extension
@@ -77,21 +97,35 @@ For every comparison the app builds, from the candidate:
 
 ## Browser bridge usage
 
-- `window.AgentBrowser.request({ method: 'browser.actor.current' })` —
-  display-only probe of the currently disclosed Actor. Optional for writing;
-  the Browser confirmation remains the authoritative signer display.
-- `window.AgentBrowser.request({ method: 'metaid.pin.write', params: … })` —
-  one call per submitted batch with
+- `agent-browser-helper.js` (loaded first) installs
+  `window.AgentBrowser.request/on/navigate` — nothing injects the client side
+  into the MetaApp frame for us. `request` correlates
+  `agent-browser:request` postMessages with `agent-browser:response` by id
+  and supports a per-call `timeoutMs`; `probeBrowserHost` bounds the initial
+  host detection (8 s) so a plain browser degrades to read-only instead of
+  hanging. The two-phase `metaid.pin.write` confirmation card, signer
+  selection, and phase-2 execution all stay in the Browser chrome — the
+  Arena never implements or retries its own confirmation flow.
+- `browser.actor.current` — display-only read of the currently disclosed
+  Actor (may surface the host's identity-disclosure consent card). Optional
+  for writing; the Browser confirmation remains the authoritative signer
+  display.
+- `browser.actor.changed` — live Actor chip updates: switching identities in
+  the Browser refreshes the top bar without a reload.
+- `metaid.pin.write` — one call per submitted batch with
   `operation: 'create'`, `path: '/protocols/preference/feedback'`,
   `version: '1.0.0'`, `contentType: 'application/json'`, `encryption: '0'`,
   a UTF-8 JSON `payload.value`, and a `display` title/summary naming the batch
-  count. No Actor id is ever passed — Actor selection and confirmation belong
-  to the Browser chrome. The app renders no replacement confirm flow.
+  count (120 s bridge timeout; a timeout resolves as an unknown outcome, not
+  an auto-retry). No Actor id is ever passed — Actor selection and
+  confirmation belong to the Browser chrome. The app renders no replacement
+  confirm flow.
 - MetaFile resolution: `motionVideo.videoUrl` when MetaSo supplies an
   `https://` URL, otherwise
   `https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/<pinId>`
-  built from the `metafile://` pin id (extension stripped). No assumption is
-  made about reading Browser-chrome settings.
+  built from the `metafile://` pin id (extension stripped). `coverImg`
+  posters resolve the same way. No assumption is made about reading
+  Browser-chrome settings.
 
 ## Produced preference-feedback payload
 
@@ -120,8 +154,10 @@ carries no judge id, Actor id, score, timestamp, or viewing telemetry.
 
 **Real submission requires a published Arena root for `client.artifact`.**
 Until this app is published and its root recorded in `app.js`
-(`CLIENT_ARTIFACT_ROOT`), the submit button stays locked in non-mock mode and
-all write-path verification is mock-only.
+(`CLIENT_ARTIFACT_ROOT`), the live submit button stays locked. Unpublished
+previews exercise the write path only in mock mode, which substitutes a
+shape-valid mock-only root and clearly reports that nothing was written on
+chain.
 
 ## Queue and submission behavior
 

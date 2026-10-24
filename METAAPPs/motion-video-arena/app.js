@@ -106,6 +106,7 @@
     if (!SHA256_RE.test(videoSha256)) return { ok: false, status: 'malformed', title: title };
     var videoUrl = motionVideo ? text(motionVideo.videoUrl) : '';
     var durationSec = Number(motionVideo && motionVideo.durationSec);
+    var coverImg = text(raw.coverImg);
     return {
       ok: true,
       candidate: {
@@ -117,6 +118,7 @@
         videoPinId: ref[1],
         videoSha256: videoSha256,
         videoUrl: /^https:\/\//i.test(videoUrl) ? videoUrl : '',
+        coverImg: coverImg,
         durationSec: Number.isFinite(durationSec) && durationSec > 0 ? durationSec : null,
         // Missing hasAudio is unknown (null), never false.
         hasAudio: motionVideo && motionVideo.hasAudio === undefined ? null : (motionVideo ? motionVideo.hasAudio === true : null),
@@ -148,12 +150,14 @@
   /**
    * Parse '#/' or '#/compare?a=<rootPinId>&b=<rootPinId>'.
    * Query values are decoded by URLSearchParams and validated as full
-   * 66-character app root ids (64 lowercase hex + 'i0').
+   * 66-character app root ids (64 lowercase hex + 'i0'). Only the exact
+   * '/compare' path (before '?') is a deep link — near-miss prefixes such as
+   * '/comparexyz' fall back to the pool route instead of half-matching.
    */
   function parseCompareRoute(hash) {
     var raw = String(hash == null ? '' : hash).replace(/^#/, '');
     if (!raw || raw === '/') return { route: 'home' };
-    if (raw.indexOf('/compare') !== 0) return { route: 'home' };
+    if (raw.split('?')[0] !== '/compare') return { route: 'home' };
     var queryIndex = raw.indexOf('?');
     if (queryIndex < 0) return { route: 'error', error: 'missing-query' };
     var params = new URLSearchParams(raw.slice(queryIndex + 1));
@@ -178,6 +182,19 @@
   function resolveVideoUrl(candidate) {
     if (candidate.videoUrl) return candidate.videoUrl;
     return METAFILE_CONTENT_BASE + candidate.videoPinId;
+  }
+
+  /**
+   * Initial poster: use the item's coverImg (package poster) when it is an
+   * https URL or a metafile:// reference; anything else yields no poster.
+   */
+  function resolvePosterUrl(coverImg) {
+    var value = text(coverImg);
+    if (!value) return '';
+    if (/^https:\/\//i.test(value)) return value;
+    var ref = METAFILE_RE.exec(value);
+    if (ref) return METAFILE_CONTENT_BASE + ref[1];
+    return '';
   }
 
   // ===== Pair selection =====
@@ -462,6 +479,7 @@
         try {
           var result = await bridge.request({
             method: 'metaid.pin.write',
+            timeoutMs: 120000,
             params: {
               operation: 'create',
               path: PIN_PATH,
@@ -493,6 +511,13 @@
             message: 'The broadcast outcome is unknown (no pin id returned). Queued comparisons were kept. Check the Browser write history before submitting again.',
           };
         } catch (error) {
+          if (error && error.code === 'bridge_timeout') {
+            return {
+              ok: false,
+              status: 'unknown',
+              message: 'The broadcast outcome is unknown (no host response before the bridge timeout). Queued comparisons were kept — do not resubmit blindly; check the Browser write history first.',
+            };
+          }
           return {
             ok: false,
             status: 'rejected',
@@ -504,6 +529,22 @@
         }
       },
     };
+  }
+
+  /**
+   * Single source of submission status copy so mock wording can never be
+   * mistaken for a real on-chain write. Mock success must say, in plain
+   * words, that nothing was written on chain.
+   */
+  function submissionOutcomeMessage(result, options) {
+    var isMock = !!(options && options.mock);
+    if (result.ok) {
+      if (isMock) return 'Mock submission succeeded — nothing was written on chain.';
+      return 'Submitted ' + result.submittedCount + ' comparison' + (result.submittedCount === 1 ? '' : 's') + ' on chain.';
+    }
+    if (result.status === 'busy') return 'A submission is already in flight.';
+    if (result.message) return result.message;
+    return 'Submission failed: ' + result.status + '.';
   }
 
   // ===== Core export (component tests; unused in the browser) =====
@@ -525,6 +566,7 @@
     normalizePool: normalizePool,
     parseCompareRoute: parseCompareRoute,
     resolveVideoUrl: resolveVideoUrl,
+    resolvePosterUrl: resolvePosterUrl,
     createPairSelector: createPairSelector,
     createQueue: createQueue,
     buildComparisonItem: buildComparisonItem,
@@ -532,6 +574,7 @@
     validateBatchPayload: validateBatchPayload,
     createAudioCoordinator: createAudioCoordinator,
     createSubmissionController: createSubmissionController,
+    submissionOutcomeMessage: submissionOutcomeMessage,
   };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = ArenaCore;
@@ -543,9 +586,27 @@
 
   if (typeof document === 'undefined' || !document.getElementById('arena-root')) return;
 
-  var MOCK_MODE = new URLSearchParams(location.search).get('mock') === '1';
-  var MOCK_FAIL = new URLSearchParams(location.search).get('mock') === 'fail';
-  var SMOKE_PARAM = text(new URLSearchParams(location.search).get('smoke'));
+  var queryParams = new URLSearchParams(location.search);
+  // Development mode is explicit AND exclusive with a live host:
+  //   ?mock=1      mock bridge success
+  //   ?mock=fail   mock bridge rejection
+  //   ?mock=unknown  mock bridge resolves without a pin id (unknown outcome)
+  // When a live Browser bridge answers the probe, the mock parameter is
+  // ignored — a production instance inside the Bot Browser can never be
+  // flipped into mock mode through the query string.
+  var MOCK_PARAM = text(queryParams.get('mock'));
+  var MOCK_VARIANTS = ['1', 'fail', 'unknown'];
+  var mockRequested = MOCK_VARIANTS.indexOf(MOCK_PARAM) >= 0;
+  // Smoke runs opt in with the short label ?smoke=motion-video-smoke; the
+  // batch then carries the full test:motion-video-smoke category tag.
+  var SMOKE_SHORT_PARAM = 'motion-video-smoke';
+  var SMOKE_ACTIVE = text(queryParams.get('smoke')) === SMOKE_SHORT_PARAM;
+  // Mock-only client.artifact root: shape-valid 66-char id that is never a
+  // real published app. It exists so an unpublished preview can exercise the
+  // full mock write path; the production root below stays locked until the
+  // Arena is actually published.
+  var MOCK_CLIENT_ARTIFACT_ROOT = 'f00df00df00df00df00df00df00df00df00df00df00df00df00df00df00df00di0';
+  var MOCK_PIN_ID = 'e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4i0';
 
   var MOCK_ROOT_A = '22ce6ca2ba950c3659c739e235b519e94341fe0a19f13c876807dad6e0955659i0';
   var MOCK_ROOT_B = '5686db0dd51ac19ec60c4a02ff66bc51adcf0149b8484141b38e730c734d9bb4i0';
@@ -563,6 +624,7 @@
             pinId: MOCK_ROOT_A, sourcePinId: MOCK_ROOT_A, currentPinId: MOCK_ROOT_A,
             chainName: 'mvc', title: 'Ukiyo-e 10s fixture', appName: 'motion-fixture-a',
             tags: ['motion-video'], disabled: false,
+            coverImg: 'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/1a2b3c4d5e6f0718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9i0.png',
             publisherGlobalMetaId: 'idmockpublisher0000000000000000000000000a',
             publisherName: 'Mock Publisher A',
             motionVideo: {
@@ -579,6 +641,7 @@
             pinId: MOCK_ROOT_B, sourcePinId: MOCK_ROOT_B, currentPinId: MOCK_ROOT_B,
             chainName: 'mvc', title: 'Silent film 47s fixture', appName: 'motion-fixture-b',
             tags: ['motion-video'], disabled: false,
+            coverImg: 'metafile://2b3c4d5e6f70818293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a2i0.jpg',
             publisherGlobalMetaId: 'idmockpublisher0000000000000000000000000b',
             publisherName: 'Mock Publisher B',
             motionVideo: {
@@ -629,9 +692,14 @@
           return Promise.resolve({ actor: { globalMetaId: 'idmockactor0000000000000000000000000001', name: 'Mock Actor', kind: 'idbots-account' } });
         }
         if (call.method === 'metaid.pin.write') {
-          if (MOCK_FAIL) return Promise.reject(new Error('Mock rejection: broadcast failed'));
+          if (MOCK_PARAM === 'fail') {
+            return Promise.reject(new Error('Mock rejection: the broadcast failed (nothing was written on chain).'));
+          }
+          if (MOCK_PARAM === 'unknown') {
+            return Promise.resolve({ status: 'accepted', note: 'mock unknown-outcome response without a pin id' });
+          }
           return Promise.resolve({
-            pinId: 'e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4i0',
+            pinId: MOCK_PIN_ID,
             actor: { globalMetaId: 'idmockactor0000000000000000000000000001', name: 'Mock Actor' },
           });
         }
@@ -644,12 +712,19 @@
     return fetch(url, { headers: { accept: 'application/json' } });
   }
 
-  var fetchImpl = MOCK_MODE ? mockFetch : httpFetch;
-  var bridge = null;
-  if (MOCK_MODE) bridge = mockBridge();
-  else if (typeof window !== 'undefined' && window.AgentBrowser && typeof window.AgentBrowser.request === 'function') {
-    bridge = window.AgentBrowser;
-  }
+  // Runtime mode resolution happens once, after the host probe settles:
+  //   live bridge → production path (mock parameter ignored, if any)
+  //   no host + mock requested → local mock bridge + mock MetaSo fetch
+  //   no host, no mock → read-only
+  var runtime = {
+    booting: true,
+    mock: false,
+    mockIgnored: false,
+    hostProbe: 'pending',
+    bridge: null,
+  };
+  var fetchImpl = httpFetch;
+  var submission = null;
 
   async function apiGet(url) {
     var response = await fetchImpl(url);
@@ -702,34 +777,42 @@
     lastStatus: null,
   };
 
-  var submission = createSubmissionController({
-    bridge: bridge,
-    clientArtifactRoot: function () { return CLIENT_ARTIFACT_ROOT; },
-    queue: state.queue,
-    options: { smokeTag: function () { return SMOKE_PARAM === SMOKE_TAG ? SMOKE_TAG : ''; } },
-  });
+  function createSubmission() {
+    return createSubmissionController({
+      bridge: runtime.bridge,
+      clientArtifactRoot: function () {
+        return runtime.mock ? MOCK_CLIENT_ARTIFACT_ROOT : CLIENT_ARTIFACT_ROOT;
+      },
+      queue: state.queue,
+      options: { smokeTag: function () { return SMOKE_ACTIVE ? SMOKE_TAG : ''; } },
+    });
+  }
 
   // ---- Rendering ----
 
   function renderTopbar() {
     var modeLine = byId('mode-line');
     modeLine.textContent = '';
-    if (MOCK_MODE) {
-      modeLine.appendChild(el('span', { class: 'pill pill-mock', text: 'MOCK MODE — no real chain reads or writes' }));
+    if (runtime.mock) {
+      modeLine.appendChild(el('span', { class: 'pill pill-mock', text: 'MOCK MODE — local mocks only; nothing is read from or written to chain' }));
+    } else if (runtime.mockIgnored) {
+      modeLine.appendChild(el('span', { class: 'pill pill-smoke', text: 'mock parameter ignored — live Browser bridge in use' }));
     }
-    if (SMOKE_PARAM === SMOKE_TAG) {
+    if (SMOKE_ACTIVE) {
       modeLine.appendChild(el('span', { class: 'pill pill-smoke', text: 'Authorized smoke run — batch will carry ' + SMOKE_TAG }));
     }
     var actorLine = byId('actor-line');
     actorLine.textContent = '';
-    if (!bridge) {
+    if (runtime.booting) {
+      actorLine.appendChild(el('span', { class: 'muted', text: 'Detecting Browser bridge…' }));
+    } else if (!runtime.bridge) {
       actorLine.appendChild(el('span', { class: 'muted', text: 'No Browser bridge detected — read-only host. Feedback submission is unavailable here.' }));
     } else if (state.actor && state.actor.globalMetaId) {
       actorLine.appendChild(el('span', {
-        text: 'Current Actor: ' + (state.actor.name || shortPin(state.actor.globalMetaId)) + ' (' + shortPin(state.actor.globalMetaId) + ')',
+        text: (runtime.mock ? 'Mock Actor: ' : 'Current Actor: ') + (state.actor.name || shortPin(state.actor.globalMetaId)) + ' (' + shortPin(state.actor.globalMetaId) + ')',
       }));
     } else {
-      actorLine.appendChild(el('span', { class: 'muted', text: 'No Actor disclosed yet — the Browser chip owns signing identity.' }));
+      actorLine.appendChild(el('span', { class: 'muted', text: 'Browser bridge active — no Actor disclosed yet (consent may be required). The Browser chip owns signing identity.' }));
     }
   }
 
@@ -748,6 +831,8 @@
       parts.push(excludedTotal + ' excluded for technical reasons — never counted as negative preference');
     }
     node.appendChild(el('span', { text: parts.join(' · ') }));
+    // "Next pair" needs an eligible pool; deep-link errors clear it.
+    byId('next-pair-button').disabled = state.pool.eligible.length < 2;
   }
 
   function videoPane(side, candidate) {
@@ -758,6 +843,9 @@
       'aria-label': side + ' video for comparison',
       src: resolveVideoUrl(candidate),
     };
+    // Initial poster from the candidate's coverImg, when usable.
+    var posterUrl = resolvePosterUrl(candidate.coverImg);
+    if (posterUrl) videoAttrs.poster = posterUrl;
     var video = el('video', videoAttrs);
     video.muted = false;
     var replayButton = el('button', {
@@ -922,13 +1010,17 @@
       listNode.appendChild(queueItemSummary(item, index));
     });
     var submitButton = byId('submit-button');
-    var writable = submission.canWrite();
-    submitButton.disabled = !items.length || !writable || submission.isBusy();
+    var writable = !!submission && submission.canWrite();
+    submitButton.disabled = !items.length || !writable || (submission && submission.isBusy());
     submitButton.textContent = 'Submit ' + Math.max(items.length, 1) + ' comparison' + (items.length === 1 ? '' : 's');
-    if (!writable) {
-      submitButton.textContent = bridge
-        ? 'Submission locked — Arena root not yet published'
-        : 'Submission unavailable — no Browser bridge';
+    if (runtime.mock) {
+      submitButton.textContent += ' (mock — nothing goes on chain)';
+    } else if (runtime.booting) {
+      submitButton.textContent = 'Detecting Browser bridge…';
+    } else if (!runtime.bridge) {
+      submitButton.textContent = 'Submission unavailable — no Browser bridge';
+    } else if (!writable) {
+      submitButton.textContent = 'Submission locked — Arena root not yet published';
     }
   }
 
@@ -942,19 +1034,20 @@
   }
 
   async function onSubmit() {
-    if (submission.isBusy()) return;
+    if (!submission || submission.isBusy()) return;
     byId('submit-button').disabled = true;
-    setStatus('muted', 'Submitting — one pin write for the whole batch. Confirm in the Browser dialog…');
+    setStatus('muted', runtime.mock
+      ? 'Submitting through the mock bridge — nothing goes on chain.'
+      : 'Submitting — one pin write for the whole batch. Confirm in the Browser dialog…');
     var result = await submission.submit();
+    var message = submissionOutcomeMessage(result, { mock: runtime.mock });
+    var extra = null;
     if (result.ok) {
-      var extra = el('span', { class: 'mono small', text: ' pin: ' + result.pinId + (result.actor && result.actor.globalMetaId ? ' · signed by ' + (result.actor.name || result.actor.globalMetaId) : '') });
-      setStatus('ok', 'Submitted ' + result.submittedCount + ' comparison' + (result.submittedCount === 1 ? '' : 's') + ' on chain.', extra);
-    } else if (result.status === 'busy') {
-      setStatus('error', 'A submission is already in flight.');
-    } else if (result.status === 'unavailable' || result.status === 'invalid' || result.status === 'empty' || result.status === 'unknown' || result.status === 'rejected') {
-      setStatus('error', result.message || ('Submission failed: ' + result.status));
+      var pinLabel = runtime.mock ? ' mock pin id: ' : ' pin: ';
+      extra = el('span', { class: 'mono small', text: pinLabel + result.pinId + (result.actor && result.actor.globalMetaId ? ' · signed by ' + (result.actor.name || result.actor.globalMetaId) : '') });
+      setStatus(result.ok ? 'ok' : 'error', message, extra);
     } else {
-      setStatus('error', 'Submission failed: ' + result.status);
+      setStatus('error', message);
     }
     renderQueue();
   }
@@ -1004,6 +1097,11 @@
       renderCompare();
       setStatus('muted', 'Deep-linked pair loaded (left = a, right = b as linked).');
     } catch (error) {
+      // A broken deep link leaves no usable pair behind: clear pool/pair so
+      // "Next pair" cannot resurrect a stale selection.
+      state.pair = null;
+      state.pool = { eligible: [], excluded: { disabled: 0, chain: 0, malformed: 0 } };
+      renderPoolStatus();
       var stage = byId('stage');
       stage.textContent = '';
       var back = el('button', { type: 'button', class: 'primary', text: 'Back to the candidate pool', onclick: function () { location.hash = '#/'; } });
@@ -1016,9 +1114,9 @@
   }
 
   async function refreshActor() {
-    if (!bridge) return;
+    if (!runtime.bridge || runtime.mock) return;
     try {
-      var result = await bridge.request({ method: 'browser.actor.current' });
+      var result = await runtime.bridge.request({ method: 'browser.actor.current', timeoutMs: 15000 });
       state.actor = (result && result.actor) || null;
     } catch (error) {
       state.actor = null;
@@ -1030,6 +1128,9 @@
     var route = parseCompareRoute(location.hash);
     if (route.route === 'compare') loadDeepLink(route);
     else if (route.route === 'error') {
+      state.pair = null;
+      state.pool = { eligible: [], excluded: { disabled: 0, chain: 0, malformed: 0 } };
+      renderPoolStatus();
       var stage = byId('stage');
       stage.textContent = '';
       stage.appendChild(el('div', { class: 'notice', role: 'alert' }, [
@@ -1041,9 +1142,10 @@
     }
   }
 
-  window.addEventListener('hashchange', onRoute);
   window.addEventListener('beforeunload', function (event) {
-    if (state.queue.size() > 0 && !submission.isBusy()) {
+    // Any unsubmitted queued item warrants the warning, including while a
+    // submission is in flight (its outcome is not confirmed yet).
+    if (state.queue.size() > 0) {
       event.preventDefault();
       event.returnValue = '';
     }
@@ -1051,10 +1153,51 @@
   byId('submit-button').addEventListener('click', onSubmit);
   byId('next-pair-button').addEventListener('click', function () { nextPair(); });
 
+  /**
+   * Boot: paint the shell, then resolve the runtime mode once the host probe
+   * settles (live Browser bridge / local mocks / read-only), then route.
+   */
+  async function initRuntime() {
+    var probe = { host: false, actor: null, error: 'helper-missing' };
+    var helper = typeof window.MotionVideoArenaBridgeHelper === 'object' ? window.MotionVideoArenaBridgeHelper : null;
+    if (helper && typeof helper.probeBrowserHost === 'function') {
+      probe = await helper.probeBrowserHost(8000);
+    }
+    if (mockRequested && !probe.host) {
+      runtime.mock = true;
+      runtime.hostProbe = 'none';
+      runtime.bridge = mockBridge();
+      fetchImpl = mockFetch;
+      state.actor = { globalMetaId: 'idmockactor0000000000000000000000000001', name: 'Mock Actor', kind: 'idbots-account' };
+    } else {
+      if (mockRequested) runtime.mockIgnored = true; // a live host can never be mocked via query
+      if (probe.host) {
+        runtime.hostProbe = 'live';
+        runtime.bridge = window.AgentBrowser;
+        state.actor = probe.actor;
+        if (window.AgentBrowser && typeof window.AgentBrowser.on === 'function') {
+          window.AgentBrowser.on('browser.actor.changed', function (payload) {
+            state.actor = (payload && payload.actor) || null;
+            renderTopbar();
+          });
+        }
+        refreshActor();
+      } else {
+        runtime.hostProbe = 'none';
+        runtime.bridge = null;
+      }
+    }
+    runtime.booting = false;
+    submission = createSubmission();
+    renderTopbar();
+    renderQueue();
+    window.addEventListener('hashchange', onRoute);
+    onRoute();
+  }
+
   renderTopbar();
   renderPoolStatus();
   renderQueue();
   renderCompare();
-  refreshActor();
-  onRoute();
+  initRuntime();
 })();
