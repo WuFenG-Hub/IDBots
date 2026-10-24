@@ -88,6 +88,15 @@ export const SCHEDULED_TASK_SKIP_REASONS = [
 
 export type ScheduledTaskSkipReason = (typeof SCHEDULED_TASK_SKIP_REASONS)[number];
 
+/**
+ * Default fire budget for bot-created RECURRING tasks (creation seams stamp
+ * it when the caller passes none). Humans keep unlimited tasks; a bot's
+ * cron/interval loop must always carry a bounded lifecycle. 50 fires ≈ 4.2
+ * days at the incident's every-2-hours cadence — long enough for any
+ * legitimate watch, short enough to never become permanent noise.
+ */
+export const DEFAULT_AGENT_MAX_FIRES = 50;
+
 export interface ScheduledTaskRun {
   id: string;
   taskId: string;
