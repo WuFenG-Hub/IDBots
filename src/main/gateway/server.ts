@@ -480,11 +480,10 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
         ? 'public, max-age=31536000, immutable'
         : 'no-cache';
     res.writeHead(200, {
-      // The fileSign map intentionally has no .html (downloads stay
-      // octet-stream); the bundle route needs the real type.
-      'Content-Type': path.extname(filePath).toLowerCase() === '.html'
-        ? 'text/html; charset=utf-8'
-        : mimeForPath(filePath),
+      // Bundle route serves browser-executable assets; the fileSign download
+      // map (mimeForPath) must NOT be used here — its octet-stream default
+      // makes browsers refuse module scripts (white screen).
+      'Content-Type': bundleContentType(filePath),
       'Content-Length': stat.size,
       'Cache-Control': cacheControl,
     });
@@ -925,4 +924,40 @@ function parseRangeHeader(header: string, size: number): ByteRange | null {
 /** Vite-style fingerprinted asset names (`index-DiWRgTda.js`, `app.a1b2c3d4.css`). */
 function isHashedAsset(filePath: string): boolean {
   return /[.-][0-9a-zA-Z_-]{8,}\.[a-z0-9]+$/i.test(path.basename(filePath));
+}
+
+/**
+ * Content types for the static PWA bundle route (`/app/*`). These files are
+ * executed or rendered by a browser, so the extension → type mapping must
+ * match what the bundler emits — most importantly `text/javascript` for
+ * `.js`/`.mjs`: browsers refuse module scripts served as
+ * `application/octet-stream` (hard white screen, zero WS traffic).
+ *
+ * Deliberately separate from the fileSign download map (fileSign.ts): that
+ * table serves signed file downloads whose octet-stream default is intended.
+ * Extensions not listed here fall back to the download map, which keeps
+ * media/document assets (.pdf, .mp4, …) behaving as before.
+ */
+const BUNDLE_CONTENT_TYPE_BY_EXTENSION: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.webmanifest': 'application/manifest+json',
+  '.json': 'application/json',
+  '.map': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+};
+
+function bundleContentType(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+  return BUNDLE_CONTENT_TYPE_BY_EXTENSION[extension] ?? mimeForPath(filePath);
 }
