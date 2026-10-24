@@ -68,6 +68,28 @@ export function normalizeMemoryQuote(
   return `${truncateUtf16Units(text, maxChars - 1)}…`;
 }
 
+/**
+ * How far corroboration may move a memory's recall rank: a multiplicative
+ * nudge centred on 1.0 and capped at ±(alpha / 2) = ±5%. Secondary signals
+ * must never outrank relevance — a barely-relevant memory cannot leapfrog a
+ * clearly relevant one just because more sources repeated it — so the boost
+ * is multiplicative (proportional to the base score), not additive.
+ */
+export const MEMORY_PROOF_BOOST_ALPHA = 0.1;
+
+/**
+ * proof_norm = clamp(0.5 + ln(n) / 10, 0, 1); boost = 1 + alpha * (proof_norm - 0.5).
+ * One source is neutral (1.0); 3 → +1.1%; 10 → +2.3%; 150+ saturates at +5%.
+ * Missing/zero counts are neutral too, so rows written before the ledger
+ * existed rank exactly as they did.
+ */
+export function proofCountBoost(proofCount: number | null | undefined): number {
+  const count = Math.floor(Number(proofCount));
+  if (!Number.isFinite(count) || count <= 1) return 1;
+  const norm = Math.max(0, Math.min(1, 0.5 + Math.log(count) / 10));
+  return 1 + MEMORY_PROOF_BOOST_ALPHA * (norm - 0.5);
+}
+
 const SENTENCE_TERMINATORS = new Set(['。', '！', '？', '!', '?', '；', ';']);
 
 /**

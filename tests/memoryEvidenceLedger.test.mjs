@@ -435,3 +435,28 @@ test('dream output parser carries important_memories evidence alongside the stri
     { text: '带 evidence 别名', source: '旧字段名也接受' },
   ]);
 });
+
+test('proofCountBoost is neutral at one source, monotonic, and capped at +5%; listUserMemories carries proofCount', async () => {
+  const { proofCountBoost, MEMORY_PROOF_BOOST_ALPHA } = loadCompiled('../dist-electron/main/memory/memoryEvidence.js');
+  assert.equal(MEMORY_PROOF_BOOST_ALPHA, 0.1);
+  assert.equal(proofCountBoost(undefined), 1);
+  assert.equal(proofCountBoost(0), 1);
+  assert.equal(proofCountBoost(1), 1);
+  assert.ok(Math.abs(proofCountBoost(3) - 1.011) < 0.001, `3 sources ≈ +1.1% (got ${proofCountBoost(3)})`);
+  assert.ok(Math.abs(proofCountBoost(10) - 1.023) < 0.001, `10 sources ≈ +2.3% (got ${proofCountBoost(10)})`);
+  assert.ok(proofCountBoost(10) > proofCountBoost(3) && proofCountBoost(3) > proofCountBoost(1), 'monotonic');
+  assert.equal(proofCountBoost(1_000_000), 1 + MEMORY_PROOF_BOOST_ALPHA * 0.5, 'saturates at +5%');
+
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    const corroborated = store.createUserMemory({ metabotId: 1, text: '用户常用 pnpm 管理依赖', ...OWNER, source: { role: 'user', quote: 'q1' } });
+    store.createUserMemory({ metabotId: 1, text: '用户常用 pnpm 管理依赖', ...OWNER, source: { role: 'user', quote: 'q2' } });
+    const single = store.createUserMemory({ metabotId: 1, text: '用户的时区是上海', ...OWNER });
+    const listed = store.listUserMemories({ metabotId: 1, ...OWNER, status: 'created' });
+    assert.equal(listed.find((entry) => entry.id === corroborated.id).proofCount, 2);
+    assert.equal(listed.find((entry) => entry.id === single.id).proofCount, 1);
+  } finally {
+    cleanup();
+  }
+});

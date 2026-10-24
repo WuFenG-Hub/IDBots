@@ -363,3 +363,68 @@ test('the guaranteed-importance tier floats to the front regardless of relevance
   assert.equal(lines[1], '- the owner drinks tea every morning');
   assert.equal(lines[2], '- the owner has a ragdoll cat');
 });
+
+// ---------------------------------------------------------------------------
+// Memory evolution (2026-10-24): bounded proof-count boost — order only, never size.
+// ---------------------------------------------------------------------------
+
+test('proof count nudges equally relevant entries but is capped and never outranks relevance', () => {
+  const entries = [
+    { id: 'once', text: 'owner likes short answers', usageClass: 'preference', visibility: 'local_only', updatedAt: 1, proofCount: 1 },
+    { id: 'often', text: 'owner likes concise replies', usageClass: 'preference', visibility: 'local_only', updatedAt: 1, proofCount: 12 },
+    { id: 'legacy', text: 'owner likes brief wording', usageClass: 'preference', visibility: 'local_only', updatedAt: 1 },
+  ];
+  const { injectedIds } = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    ownerEntries: entries,
+    // No overlap with any entry: every lexical score is the base 1, so only
+    // the proof boost separates them.
+    currentUserText: 'unrelated question about deployment',
+  });
+  assert.equal(injectedIds[0], 'often', 'the corroborated memory wins an otherwise tied rank');
+  assert.deepEqual(injectedIds.slice(1).sort(), ['legacy', 'once'], 'a missing count is neutral, same as one source');
+
+  const relevant = [
+    { id: 'hit', text: 'deployment happens on wednesday', usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 1, proofCount: 1 },
+    { id: 'popular-miss', text: 'owner likes concise replies', usageClass: 'preference', visibility: 'local_only', updatedAt: 1, proofCount: 500 },
+  ];
+  const relevantResult = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    ownerEntries: relevant,
+    // Tokens must not be substrings of the other entry ("is" ⊂ "concise").
+    currentUserText: 'deployment schedule',
+  });
+  assert.equal(relevantResult.injectedIds[0], 'hit', 'a single token hit (+3) beats a +5% boost on a base score');
+});
+
+test('proof count applies inside the cerebellum tier and breaks eviction ties after recency', () => {
+  const scored = [
+    { id: 'a', text: 'alpha belief', usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 1, proofCount: 1 },
+    { id: 'b', text: 'beta belief', usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 1, proofCount: 20 },
+  ];
+  const nouls = new Map([['a', 0.60], ['b', 0.59]]);
+  const ranked = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    ownerEntries: scored,
+    relevanceScoreById: nouls,
+  });
+  // 0.59 * (1 + 0.1 * (0.5 + ln(20)/10 - 0.5)) ≈ 0.59 * 1.03 ≈ 0.6077 > 0.60
+  assert.deepEqual(ranked.injectedIds, ['b', 'a'], 'a near-tie in noul flips toward the corroborated memory');
+
+  const overBudget = [
+    // A token hit pins `top` to rank 0; the other two tie on relevance.
+    { id: 'top', text: `alpha ${'x'.repeat(1600)}`, usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 5, proofCount: 1 },
+    { id: 'weak', text: 'y'.repeat(300), usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 1, proofCount: 1 },
+    { id: 'strong', text: 'z'.repeat(300), usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 1, proofCount: 7 },
+  ];
+  const evicted = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    ownerEntries: overBudget,
+    currentUserText: 'alpha',
+    // Budget clamps to the 2000-char floor: top (1610) + one 304-char entry fits, not both.
+    maxTotalChars: 2000,
+  });
+  assert.ok(evicted.injectedIds.includes('top'), 'the top-ranked entry is never evicted');
+  assert.ok(evicted.injectedIds.includes('strong'), 'at equal importance and recency the better-corroborated row survives');
+  assert.ok(!evicted.injectedIds.includes('weak'));
+});

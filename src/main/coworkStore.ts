@@ -950,6 +950,11 @@ export interface CoworkUserMemory {
   archivedAt?: number | null;
   /** Recall weight: high-importance memories get guaranteed injection and late eviction. */
   importance: number;
+  /**
+   * Evidence ledger: active provenance rows corroborating this memory
+   * (populated by listUserMemories; absent elsewhere = neutral in ranking).
+   */
+  proofCount?: number;
 }
 
 export interface CoworkUserMemorySource {
@@ -7560,10 +7565,35 @@ export class CoworkStore implements MemoryBackend {
     `, [...params, limit, offset]);
 
     const entries = rows.map((row) => this.mapMemoryRow(row));
+    // Evidence ledger: one grouped count per listing (pool <= 200 rows, index
+    // on (memory_id, is_active)) so recall ranking can apply the bounded proof
+    // boost without a per-row query.
+    const proofCounts = this.countActiveMemorySources(entries.map((entry) => entry.id));
+    for (const entry of entries) {
+      entry.proofCount = proofCounts.get(entry.id) ?? 0;
+    }
     if (options.touchLastUsed) {
       this.touchUserMemoriesLastUsed(metabotId, entries.map((entry) => entry.id));
     }
     return entries;
+  }
+
+  private countActiveMemorySources(memoryIds: readonly string[]): Map<string, number> {
+    const ids = Array.from(new Set(memoryIds.map((id) => id.trim()).filter(Boolean)));
+    const counts = new Map<string, number>();
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      const rows = this.getAll<{ memory_id: string; n: number }>(`
+        SELECT memory_id, COUNT(*) AS n
+        FROM user_memory_sources
+        WHERE is_active = 1 AND memory_id IN (${chunk.map(() => '?').join(', ')})
+        GROUP BY memory_id
+      `, chunk);
+      for (const row of rows) {
+        counts.set(row.memory_id, Number(row.n) || 0);
+      }
+    }
+    return counts;
   }
 
   touchUserMemoriesLastUsed(metabotId: number, memoryIds: string[]): void {

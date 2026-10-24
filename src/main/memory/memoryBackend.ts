@@ -33,6 +33,12 @@ export interface MemoryUserMemory {
   archivedAt?: number | null;
   /** Recall weight derived at write time (see memoryImportance.ts). */
   importance?: number;
+  /**
+   * Evidence ledger: active provenance rows corroborating this memory.
+   * Populated by listUserMemories (one grouped count per call); feeds the
+   * bounded proof boost in recall ranking. Absent = unknown = neutral.
+   */
+  proofCount?: number;
 }
 
 export interface MemoryUserMemorySourceInput {

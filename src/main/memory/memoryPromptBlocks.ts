@@ -4,8 +4,9 @@ import {
   MEMORY_IMPORTANCE_GUARANTEED_MAX_ITEMS,
   MEMORY_IMPORTANCE_GUARANTEED_THRESHOLD,
 } from './memoryImportance';
+import { proofCountBoost } from './memoryEvidence';
 
-export type MemoryPromptEntryLike = Pick<MemoryUserMemory, 'id' | 'text' | 'usageClass' | 'visibility' | 'updatedAt' | 'lastUsedAt' | 'lastAppliedAt' | 'importance'>;
+export type MemoryPromptEntryLike = Pick<MemoryUserMemory, 'id' | 'text' | 'usageClass' | 'visibility' | 'updatedAt' | 'lastUsedAt' | 'lastAppliedAt' | 'importance' | 'proofCount'>;
 
 /**
  * Byte budget for the whole rendered memory injection (all scoped blocks
@@ -143,8 +144,10 @@ function rankEntries(
         ...entry,
         block,
         // A cerebellum score replaces the lexical score outright (it is a
-        // rank key, not a summand); the tier split happens in the sort.
-        relevanceScore: mapScore ?? scoreEntryForPrompt(entry, currentUserText),
+        // rank key, not a summand); the tier split happens in the sort. Both
+        // tiers get the bounded proof boost (<= +5%, multiplicative): a
+        // corroborated memory nudges up, but relevance still decides.
+        relevanceScore: proofCountBoost(entry.proofCount) * (mapScore ?? scoreEntryForPrompt(entry, currentUserText)),
       };
     })
     .sort((left, right) => {
@@ -192,11 +195,13 @@ function applyPromptCharBudget(
     return selection;
   }
   // Evict globally by lowest importance first (ties: oldest recency =
-  // lastAppliedAt ?? lastUsedAt ?? updatedAt, then the lower-priority rank) —
-  // the applied stamp (written only when the nightly usage audit judged the
-  // memory APPLIED) outranks the mere injection touch, so a proven-useful
-  // memory survives over a merely-injected one. Never evict the top-ranked
-  // entry overall: a budget must not zero memory out entirely.
+  // lastAppliedAt ?? lastUsedAt ?? updatedAt, then fewer corroborating
+  // sources, then the lower-priority rank) — the applied stamp (written only
+  // when the nightly usage audit judged the memory APPLIED) outranks the mere
+  // injection touch, so a proven-useful memory survives over a merely-injected
+  // one, and at equal recency a belief many sources repeated survives over a
+  // one-off. Never evict the top-ranked entry overall: a budget must not zero
+  // memory out entirely.
   const evictionOrder = rankedFlat
     .map((entry, rankIndex) => ({ entry, rankIndex }))
     .sort((left, right) => {
@@ -209,6 +214,11 @@ function applyPromptCharBudget(
       const rightRecency = right.entry.lastAppliedAt ?? right.entry.lastUsedAt ?? right.entry.updatedAt ?? 0;
       if (leftRecency !== rightRecency) {
         return leftRecency - rightRecency;
+      }
+      const leftProof = left.entry.proofCount ?? 0;
+      const rightProof = right.entry.proofCount ?? 0;
+      if (leftProof !== rightProof) {
+        return leftProof - rightProof;
       }
       return right.rankIndex - left.rankIndex;
     });
