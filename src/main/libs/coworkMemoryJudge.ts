@@ -409,6 +409,12 @@ export interface TurnMemoryExtractionChange {
   action: 'add' | 'delete';
   text: string;
   isExplicit: boolean;
+  /**
+   * Event-time axis (#3): absolute YYYY-MM-DD of the underlying event, resolved
+   * by the judge against the turn's day (relative dates included). Absent on
+   * regex-channel changes and timeless facts.
+   */
+  occurredOn?: string | null;
 }
 
 export type TurnMemoryExtractionRunner = (input: {
@@ -478,6 +484,10 @@ export function parseTurnMemoryExtractionPayload(raw: string): TurnMemoryExtract
       const text = truncateUtf16Units(normalizeText(String(row.text ?? '')), TURN_EXTRACTION_MAX_TEXT_CHARS);
       if (!action || text.length < 2) continue;
       const isExplicit = row.is_explicit === true || row.isExplicit === true;
+      const rawOccurredOn = row.occurred_on ?? row.occurredOn;
+      const occurredOn = typeof rawOccurredOn === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(rawOccurredOn.trim())
+        ? rawOccurredOn.trim()
+        : null;
       if (action === 'delete') {
         if (deletes >= TURN_EXTRACTION_MAX_DELETES) continue;
         deletes += 1;
@@ -488,7 +498,9 @@ export function parseTurnMemoryExtractionPayload(raw: string): TurnMemoryExtract
         if (implicitAdds >= TURN_EXTRACTION_MAX_IMPLICIT_ADDS) continue;
         implicitAdds += 1;
       }
-      changes.push({ action, text, isExplicit });
+      const change: TurnMemoryExtractionChange = { action, text, isExplicit };
+      if (occurredOn) change.occurredOn = occurredOn;
+      changes.push(change);
     }
     return changes;
   } catch {
@@ -525,7 +537,8 @@ async function runTurnMemoryExtractionDefault(input: {
       ? 'Implicit-memory mode: implicit facts AND explicit instructions both count.'
       : 'Explicit-only mode: extract ONLY explicit remember/forget instructions from the user.',
     'Each "text" carries the fact itself in the user\'s own language, with the instruction verb stripped. Do not translate.',
-    'Return strict JSON only: {"changes":[{"action":"add"|"delete","text":"...","is_explicit":true|false}]} — at most 2 implicit adds, 2 explicit adds, 2 deletes; return {"changes":[]} when nothing qualifies.',
+    `Today is ${new Date().toISOString().slice(0, 10)}. For every "add" whose fact is tied to a specific event date, resolve it to an absolute YYYY-MM-DD field "occurred_on" (relative dates like "last Friday" resolve against today). Omit "occurred_on" for timeless facts and deletes.`,
+    'Return strict JSON only: {"changes":[{"action":"add"|"delete","text":"...","is_explicit":true|false,"occurred_on":"YYYY-MM-DD"(optional)}]} — at most 2 implicit adds, 2 explicit adds, 2 deletes; return {"changes":[]} when nothing qualifies.',
   ].join('\n');
   const userPrompt = JSON.stringify({
     user_message: userText,

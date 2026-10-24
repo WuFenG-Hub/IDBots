@@ -154,3 +154,20 @@ export function pickEvidenceQuote(
   }
   return normalizeMemoryQuote(best, maxChars);
 }
+
+/**
+ * Event-time recency nudge (memory evolution #3): multiplicative, centred on
+ * 1.0, capped at +10% / -8% (alpha 0.2 over a 365-day linear decay, floor
+ * 0.1) — Hindsight's recency signal. Rows without an event time are neutral,
+ * so pre-migration memories rank exactly as before.
+ */
+export const MEMORY_RECENCY_BOOST_ALPHA = 0.2;
+export const MEMORY_RECENCY_WINDOW_DAYS = 365;
+
+export function memoryRecencyBoost(occurredAt: number | null | undefined, nowMs: number = Date.now()): number {
+  const value = Number(occurredAt);
+  if (!Number.isFinite(value) || value <= 0) return 1;
+  const daysAgo = Math.max(0, (nowMs - value) / 86_400_000);
+  const recency = Math.max(0.1, Math.min(1, 1 - daysAgo / MEMORY_RECENCY_WINDOW_DAYS));
+  return 1 + MEMORY_RECENCY_BOOST_ALPHA * (recency - 0.5);
+}

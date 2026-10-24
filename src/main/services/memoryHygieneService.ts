@@ -393,6 +393,7 @@ export class MemoryHygieneService {
             quotes: evidence.get(memory.id)?.quotes ?? [],
             firstSeen: isoDate(memory.createdAt),
             lastSeen: isoDate(memory.updatedAt),
+            occurred: isoDate(memory.occurredAt),
           });
           const items: DeepConsolidationInventoryItem[] = [
             ...boundaries.map((memory) => toMemoryItem(memory, 'value_boundary')),
