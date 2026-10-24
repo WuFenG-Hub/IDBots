@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowTopRightOnSquareIcon, DocumentIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import MarkdownContent from '../MarkdownContent';
 import { i18nService } from '../../services/i18n';
+import { buildLocalFileDirBaseHref } from '../../services/localFileUrl';
 import { formatBytes } from '../update/format';
 
 interface MarkdownViewerPanelProps {
@@ -43,8 +44,7 @@ const HTML_FILE_RE = /\.html?$/i;
  * message column.
  */
 export const injectHtmlBaseHref = (html: string, filePath: string): string => {
-  const dirName = getDirName(filePath).replace(/\\/g, '/');
-  const baseHref = `file://${/^[A-Za-z]:/.test(dirName) ? '/' : ''}${encodeURI(dirName)}/`;
+  const baseHref = buildLocalFileDirBaseHref(getDirName(filePath));
   const baseTag = `<base href="${baseHref}">`;
   return /<head[^>]*>/i.test(html)
     ? html.replace(/<head[^>]*>/i, (match) => `${match}${baseTag}`)

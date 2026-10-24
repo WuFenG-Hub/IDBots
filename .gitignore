@@ -65,6 +65,7 @@ tests/*
 !tests/gatewayServer.test.mjs
 !tests/bundleService.test.mjs
 !tests/mobileChannels.test.mjs
+!tests/mobileShim.test.ts
 !tests/quotaExhaustedStreamError.test.mjs
 !tests/serverMode.test.mjs
 !tests/serverBootstrap.test.mjs
@@ -697,3 +698,19 @@ deploy/hosts/prometheus.yml
 
 # WS-E login in-app browser detection tests
 !tests/mobileInAppBrowser.test.ts
+
+# WS-E gateway client (C2) tests
+!tests/mobileGatewayClient.test.ts
+
+# WS-E T3 uploads (REQ-E-6) + local file URLs (REQ-E-7) tests
+!tests/mobileUpload.test.ts
+!tests/localFileUrl.test.ts
+
+# WS-E T3 integration slice: reconnect resync (REQ-E-5) tests
+!tests/mobileResync.test.ts
+
+# WS-E T3 Playwright suite (REQ-E-26): specs are committed; artifacts are not.
+e2e/mobile/test-results/
+test-results/
+playwright-report/
+blob-report/

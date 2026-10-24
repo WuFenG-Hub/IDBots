@@ -3,6 +3,7 @@ import { CoworkStreamReassembler } from '@/services/coworkStreamReassembly';
 import type { CoworkSessionSummary, CoworkSessionDetail } from '../../bridge/types';
 import { getMobileElectron, hasAppBridge } from '../appBridge';
 import { t } from '../../i18n';
+import type { ResyncSnapshot } from './useResync';
 
 /**
  * Chat tab state (REQ-E-12): session list drawer, MetaBot switcher, live
@@ -51,6 +52,34 @@ function detailToViews(session: CoworkSessionDetail): ChatMessageView[] {
     }));
 }
 
+/**
+ * REQ-E-5: merges a freshly pulled session detail into the live message list
+ * without duplicates. Server rows win by message id; a local optimistic user
+ * message whose text the server now persisted (an offline send that actually
+ * landed — its local id can never match the server id) is dropped as a
+ * content duplicate; local messages the server does not know about yet stay.
+ */
+export function mergeResyncedMessages(
+  existing: ChatMessageView[],
+  detailMessages: ChatMessageView[],
+): ChatMessageView[] {
+  const detailIds = new Set(detailMessages.map((message) => message.id));
+  const detailUserTexts = new Set(
+    detailMessages.filter((message) => message.role === 'user').map((message) => message.text),
+  );
+  const unackedLocal = existing.filter(
+    (message) =>
+      message.id.startsWith('local-') && !detailIds.has(message.id) && !detailUserTexts.has(message.text),
+  );
+  const retained = existing.filter((message) => !message.id.startsWith('local-') && !detailIds.has(message.id));
+  const merged = detailMessages.map((message) => {
+    const prior = existing.find((entry) => entry.id === message.id);
+    // Keep the event-driven streaming flag; the detail text wins when present.
+    return prior ? { ...prior, text: message.text || prior.text } : message;
+  });
+  return [...unackedLocal, ...retained, ...merged];
+}
+
 export function useChat(): {
   messages: ChatMessageView[];
   sessions: CoworkSessionSummary[];
@@ -70,6 +99,11 @@ export function useChat(): {
   respondPermission: (allow: boolean) => Promise<void>;
   dismissPermission: () => void;
   dismissQuota: () => void;
+  /** REQ-E-5: consumes a reconnect-resync snapshot (steps 1–3 of useResync). */
+  applyResync: (snapshot: ResyncSnapshot) => void;
+  /** Fresh context getters for the resync trigger (ref-backed, never stale). */
+  getOpenSessionId: () => string | null;
+  getStreamingMessage: () => { sessionId: string; messageId: string } | null;
 } {
   const [messages, setMessages] = useState<ChatMessageView[]>([]);
   const [sessions, setSessions] = useState<CoworkSessionSummary[]>([]);
@@ -83,8 +117,15 @@ export function useChat(): {
 
   const reassemblerRef = useRef(new CoworkStreamReassembler());
   const sessionIdRef = useRef<string | null>(null);
+  const messagesRef = useRef<ChatMessageView[]>([]);
   const localSeqRef = useRef(0);
   const permissionHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Ref mirror for the resync trigger: subscriptions fire outside the render
+  // cycle and must see the latest message list.
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   const reloadSessions = useCallback(async () => {
     if (!hasAppBridge()) return;
@@ -267,6 +308,59 @@ export function useChat(): {
 
   const dismissQuota = useCallback(() => setQuotaExhausted(false), []);
 
+  const applyResync = useCallback(
+    (snapshot: ResyncSnapshot) => {
+      const currentSessionId = sessionIdRef.current;
+      // Step 1: rebuild the transcript from the fresh session detail.
+      if (snapshot.session && snapshot.session.id === currentSessionId) {
+        setMessages((prev) => mergeResyncedMessages(prev, detailToViews(snapshot.session as CoworkSessionDetail)));
+        setSessionTitle(snapshot.session.title ?? null);
+      }
+      // Step 2: heal the in-flight stream through the reassembler.
+      if (snapshot.liveContent && snapshot.liveContent.sessionId === currentSessionId) {
+        const resolved = reassemblerRef.current.resolveResync(
+          snapshot.liveContent.sessionId,
+          snapshot.liveContent.messageId,
+          snapshot.liveContent.content,
+        );
+        if (resolved.kind === 'full') {
+          setMessages((prev) =>
+            prev.map((msg) => (msg.id === resolved.messageId ? { ...msg, text: resolved.text } : msg)),
+          );
+        }
+      }
+      // Step 3: surface a permission request that survived the reconnect.
+      const pending =
+        snapshot.pendingPermissions.find((entry) => entry.sessionId === currentSessionId) ??
+        snapshot.pendingPermissions[0];
+      if (pending) {
+        if (permissionHideTimerRef.current) clearTimeout(permissionHideTimerRef.current);
+        setPermission((prev) =>
+          prev && prev.requestId === pending.request.requestId
+            ? prev
+            : {
+                requestId: pending.request.requestId,
+                toolName: pending.request.toolName,
+                input: pending.request.toolInput ?? {},
+                resolved: null,
+              },
+        );
+      }
+      // The sessions drawer refreshes with the same resync.
+      void reloadSessions();
+    },
+    [reloadSessions],
+  );
+
+  const getOpenSessionId = useCallback(() => sessionIdRef.current, []);
+
+  const getStreamingMessage = useCallback(() => {
+    const currentSessionId = sessionIdRef.current;
+    if (!currentSessionId) return null;
+    const streaming = messagesRef.current.find((msg) => msg.streaming);
+    return streaming ? { sessionId: currentSessionId, messageId: streaming.id } : null;
+  }, []);
+
   return {
     messages,
     sessions,
@@ -286,5 +380,8 @@ export function useChat(): {
     respondPermission,
     dismissPermission,
     dismissQuota,
+    applyResync,
+    getOpenSessionId,
+    getStreamingMessage,
   };
 }

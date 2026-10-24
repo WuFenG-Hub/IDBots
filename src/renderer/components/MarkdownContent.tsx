@@ -50,6 +50,7 @@ import type { ChatExperienceMode } from '../config';
 import LocalFileLink from './ui/LocalFileLink';
 import InlineHtmlReportBlock from './cowork/InlineHtmlReportBlock';
 import { dispatchViewSession, parseIdbotsSessionUri } from '../utils/sessionDeepLink';
+import { buildLocalFileUrl } from '../services/localFileUrl';
 
 /**
  * Code-block languages worth highlighting in chat output.
@@ -530,17 +531,6 @@ const isLikelyLocalFilePath = (href: string): boolean => {
   return !commonTlds.has(ext);
 };
 
-const toFileHref = (filePath: string): string => {
-  const normalized = filePath.replace(/\\/g, '/');
-  if (/^[A-Za-z]:/.test(filePath)) {
-    return `file:///${normalized}`;
-  }
-  if (normalized.startsWith('/')) {
-    return `file://${normalized}`;
-  }
-  return `file://${normalized}`;
-};
-
 const getLocalPathFromLink = (
   href: string | null,
   text: string,
@@ -805,7 +795,7 @@ const createMarkdownComponents = (
           isDirectory={looksLikeDirectory(filePath)}
           className="text-claude-accent hover:text-claude-accentHover underline decoration-claude-accent/50 hover:decoration-claude-accent transition-colors cursor-pointer inline-flex items-center gap-1"
           title={filePath}
-          href={toFileHref(filePath)}
+          href={buildLocalFileUrl(filePath)}
           onOpen={(_path, event) => handleClick(event)}
         >
           {children}

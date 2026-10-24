@@ -69,7 +69,7 @@ function TaskRow(props: { task: ScheduledTask; screen: ReturnType<typeof useSche
           }}
           aria-expanded={expanded}
           className="flex min-h-[44px] min-w-[44px] items-center justify-center text-[var(--text-secondary)]"
-          aria-label={t(expanded ? 'mobile.tasks.hideHistory' : 'mobile.tasks.showHistory')}
+          aria-label={`${t(expanded ? 'mobile.tasks.hideHistory' : 'mobile.tasks.showHistory')} · ${task.name}`}
         >
           {expanded ? <ChevronDownIcon className="h-5 w-5" aria-hidden /> : <ChevronRightIcon className="h-5 w-5" aria-hidden />}
         </button>
@@ -232,8 +232,9 @@ function CreateTaskSheet(props: {
 }
 
 /** Scheduled-tasks tab (REQ-E-13). */
-export default function TasksScreen(): JSX.Element {
-  const screen = useScheduledTasks();
+export default function TasksScreen(props: { resyncCounter?: number }): JSX.Element {
+  // resyncCounter: REQ-E-5 reconnect resync re-lists tasks after every reconnect.
+  const screen = useScheduledTasks(props.resyncCounter);
   const [createOpen, setCreateOpen] = useState(false);
 
   return (

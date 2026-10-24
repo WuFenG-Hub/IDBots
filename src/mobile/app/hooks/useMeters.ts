@@ -3,7 +3,7 @@ import type { BundleMeters } from '../../bridge/types';
 import { getMobileElectron } from '../appBridge';
 
 /** Identity-bound traffic + LLM meters behind the balance card. */
-export function useMeters(): {
+export function useMeters(resyncCounter = 0): {
   meters: BundleMeters | null;
   reload: () => Promise<void>;
 } {
@@ -18,7 +18,8 @@ export function useMeters(): {
 
   useEffect(() => {
     void reload();
-  }, [reload]);
+    // resyncCounter: REQ-E-5 reconnect resync re-pulls meters after every reconnect.
+  }, [reload, resyncCounter]);
 
   return { meters, reload };
 }
