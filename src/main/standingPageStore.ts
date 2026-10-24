@@ -500,3 +500,51 @@ export class StandingPageStore {
     return this.getAll<T>(sql, params)[0] ?? null;
   }
 }
+
+const formatBuiltDate = (builtAt: number | null): string => {
+  if (builtAt == null) return 'not built yet';
+  const date = new Date(builtAt);
+  if (!Number.isFinite(date.getTime())) return 'not built yet';
+  return `built ${date.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+};
+
+/**
+ * Tool/read-side formatting (pure): the list view shows one line per page —
+ * key, name, section titles, freshness. Only BUILT pages belong in the agent
+ * surface; an unbuilt page has nothing settled to say.
+ */
+export function formatStandingPagesList(pages: readonly StandingPage[]): string {
+  const built = pages.filter((page) => page.builtAt != null);
+  if (built.length === 0) {
+    return 'No standing pages are built yet. The nightly memory pass builds them once there is enough material; nothing to read now.';
+  }
+  const lines = built.map((page) => {
+    const titles = page.sections.map((section) => section.title).join(' / ');
+    return `- ${page.pageKey} | ${page.name} — ${formatBuiltDate(page.builtAt)}${titles ? ` — ${titles}` : ' (empty)'}${page.lastRefreshError ? ` — last refresh failed: ${page.lastRefreshError}` : ''}`;
+  });
+  return [`Your standing pages (${built.length}):`, ...lines].join('\n');
+}
+
+/** Tool/read-side formatting (pure): one page's full markdown with a freshness header. */
+export function formatStandingPageRead(page: StandingPage): string {
+  const header = `# ${page.name} (${page.pageKey}) — ${formatBuiltDate(page.builtAt)}`;
+  const question = `Question it answers: ${page.question}`;
+  const body = page.content.trim() || '(This page has no sections yet.)';
+  const warning = page.lastRefreshError ? `\n\n(Last refresh failed: ${page.lastRefreshError} — content may be behind.)` : '';
+  return `${header}\n\n${question}\n\n${body}${warning}`;
+}
+
+/** Find a page by key or name (case-insensitive) for the read action. */
+export function findStandingPageForRead(
+  pages: readonly StandingPage[],
+  keyOrName: string
+): StandingPage | null {
+  const needle = keyOrName.trim().toLowerCase();
+  if (!needle) return null;
+  return (
+    pages.find((page) => page.pageKey.toLowerCase() === needle)
+    ?? pages.find((page) => page.name.toLowerCase() === needle)
+    ?? pages.find((page) => page.name.toLowerCase().includes(needle))
+    ?? null
+  );
+}

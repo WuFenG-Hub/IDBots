@@ -119,6 +119,7 @@ import { MetaIDImpressionStore } from './metaidImpressionStore';
 import { MetaIDKnowledgeStore } from './metaidKnowledgeStore';
 import { TeamCultureStore, type TeamCultureEntry, type TeamCultureKind } from './teamCultureStore';
 import { StandingPageStore } from './standingPageStore';
+import { setStandingPageStore } from './standingPageRuntime';
 import { MetaIDCognitionContextService } from './services/metaidCognitionContext';
 import { MetaIDRelationshipResolver } from './services/metaidRelationshipResolver';
 import { MetaIDContactViewService } from './services/metaidContactViewService';
@@ -3705,6 +3706,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   metawebStudyService = null;
   chainContentHistoryStore = null;
   setChainContentHistoryStore(null);
+  setStandingPageStore(null);
   contentSummaryService = null;
   serviceOrderLifecycleService = null;
   serviceRefundSyncService = null;
@@ -8833,6 +8835,7 @@ const getChainContentHistoryStore = (): ChainContentHistoryStore => {
       sqliteStore.getSaveFunction(),
     );
     setChainContentHistoryStore(chainContentHistoryStore);
+    setStandingPageStore(getStandingPageStore());
   }
   return chainContentHistoryStore;
 };
