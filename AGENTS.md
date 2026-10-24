@@ -21,6 +21,13 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - Do not merge a feature branch back into `main` on your own initiative; wait for an explicit user instruction to merge or close out the work.
 - When the user asks to merge a branch back into `main`, after the merge you may delete that branch and its worktree without asking, provided the branch is now fully absorbed into `main` (safe to delete). Do not delete branches that still carry unmerged or uncommitted work.
 
+### Production deployments come from `main` only
+
+- **Every deployment to a production (or production-like staging) environment must be built from `main`. Never deploy straight off a feature branch.** One running version, one source of truth: what is live must be reconstructible by anyone who checks out `main`.
+- A branch may be built and run only for local verification. The moment a branch's change is accepted, merge it into `main` and deploy from `main` — do not let an accepted-but-unmerged branch stay live, because the next rebuild from `main` silently reverts it (a fixed bug comes back with no diff to explain it).
+- Acceptance is not complete until the change is in `main`. A verified fix that exists only on a branch is an unfinished delivery, and it must be called out as such in any status report.
+- When a deployment has already happened from a branch, treat that as a debt to clear immediately: merge the branch into `main`, rebuild, redeploy from `main`, and confirm the running artifact matches the `main` commit.
+
 ## Language Conventions
 
 - Write all documentation in English: Markdown docs, design notes, code comments, and commit messages.
