@@ -53,6 +53,19 @@ export interface ScheduledTaskAgentCreateInput {
    * reaches this layer). Absent/null = run in a new session each time.
    */
   targetSessionId?: string | null;
+  /**
+   * REQUIRED for recurring (interval/cron) tasks: the death clause. Natural
+   * language, covering both the watched condition and the upstream lifecycle
+   * it serves. Enforced at this seam — a recurring loop without one is how
+   * probes outlive the orders they were created for.
+   */
+  exitCondition?: string | null;
+  /** Total fire budget for recurring tasks; null/undefined = default 50. */
+  maxFires?: number | null;
+  /** Provenance: the session this task was created from (stamped by the tool). */
+  originSessionId?: string | null;
+  /** Provenance: creation context tag (stamped by the tool). */
+  originContext?: string | null;
 }
 
 export interface ScheduledTaskAgentCreated {
@@ -166,6 +179,8 @@ export function buildScheduledTaskAgentTools(deps: {
       intervalUnit: z.enum(['minutes', 'hours', 'days']).optional().describe('For scheduleType "interval": the unit'),
       cron: z.string().optional().describe('For scheduleType "cron": 5-field cron expression in local time'),
       sessionId: z.union([z.string(), z.null()]).optional().describe("Which chat session the task runs in. Pass 'current' to run in THIS conversation, or a session UUID to run in that session. Omit to use the default: this conversation for one-shot 'at' tasks, a new session for recurring tasks. Pass null to deliberately run a one-shot task in a new session (opt out of the default). If the session is missing or archived at run time, the task runs in a new session instead."),
+      exitCondition: z.string().optional().describe('REQUIRED for recurring (interval/cron) tasks: when this task has done its job and must retire itself — cover BOTH the watched condition AND the upstream work it serves, e.g. "Retire once the endpoint is confirmed live AND order-x is delivered; if order-x is already closed, retire on the next fire."'),
+      maxFires: z.number().int().positive().optional().describe('Total fire budget for recurring tasks (default 50). Raise it only for standing routines with a real reason to outlive the default.'),
     },
     async (args: {
       name?: string;
@@ -176,6 +191,8 @@ export function buildScheduledTaskAgentTools(deps: {
       intervalUnit?: 'minutes' | 'hours' | 'days';
       cron?: string;
       sessionId?: string | null;
+      exitCondition?: string | null;
+      maxFires?: number | null;
     }) => {
       try {
         if (surfState) {
@@ -212,6 +229,24 @@ export function buildScheduledTaskAgentTools(deps: {
           intervalUnit: args.intervalUnit,
           cron: args.cron,
         });
+        // Recurring tasks must be born with a death clause (lifecycle
+        // discipline, 2026-10-24): refuse and teach — the model reading this
+        // error can fix the call in one round.
+        const exitCondition = String(args.exitCondition ?? '').trim();
+        if (schedule.type !== 'at' && !exitCondition) {
+          return textResult(
+            'Recurring (interval/cron) tasks require `exitCondition`: state when this task has done its job and must retire itself — cover BOTH the watched condition AND the upstream work it serves. Example: exitCondition: "Retire once the video endpoint is confirmed live AND order-x is delivered; if order-x is already closed, retire on the next fire." Retry with the field added.',
+            true,
+          );
+        }
+        let maxFires: number | null = null;
+        if (args.maxFires !== undefined && args.maxFires !== null) {
+          const raw = Number(args.maxFires);
+          if (!Number.isInteger(raw) || raw <= 0) {
+            return textResult('`maxFires` must be a positive integer (total fire budget), or omitted for the default of 50.', true);
+          }
+          maxFires = raw;
+        }
         // `sessionId: "current"` resolves HERE, against the surf session this
         // run belongs to — the literal must never reach the host/store. An
         // explicit null is the deliberate opt-out: it is forwarded as null so
@@ -240,6 +275,10 @@ export function buildScheduledTaskAgentTools(deps: {
           prompt,
           schedule,
           targetSessionId,
+          exitCondition: exitCondition || null,
+          maxFires,
+          originSessionId: sessionId,
+          originContext: 'surf',
         });
         if (surfState) {
           surfState.tasksScheduled = (surfState.tasksScheduled ?? 0) + 1;

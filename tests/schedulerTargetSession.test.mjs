@@ -202,7 +202,9 @@ test('Scheduler submits a bound task into its existing session instead of creati
   assert.equal(recording.submitCalls.length, 1);
   const submission = recording.submitCalls[0];
   assert.equal(submission.sessionId, 'bound-session');
-  assert.equal(submission.text, 'Run the check');
+  // Recurring tasks carry the lifecycle preamble in front of the prompt.
+  assert.ok(submission.text.startsWith('[Scheduled task lifecycle]'));
+  assert.ok(submission.text.endsWith('Run the check'));
   assert.equal(submission.origin, 'schedule');
   assert.equal(submission.originLabel, 'Daily check');
   assert.match(submission.submissionId, UUID_V4_RE);
@@ -269,7 +271,9 @@ test('Scheduler wired to the real turn-submission controller persists the prompt
 
   assert.equal(messages.length, 1);
   assert.equal(messages[0].type, 'user');
-  assert.equal(messages[0].content, 'Run the check');
+  // Recurring tasks carry the lifecycle preamble in front of the prompt.
+  assert.ok(messages[0].content.startsWith('[Scheduled task lifecycle]'));
+  assert.ok(messages[0].content.endsWith('Run the check'));
   assert.equal(messages[0].metadata.origin, 'schedule');
   assert.equal(messages[0].metadata.originLabel, 'Daily check');
   assert.equal(messages[0].metadata.submissionMode, 'continue');

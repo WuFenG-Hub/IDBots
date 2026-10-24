@@ -29,6 +29,7 @@ import {
 import { modelSupportsVision } from './coworkModelLimits';
 import { modelAlwaysThinks, responsesEffortForThinkingOff, thinkingWireFamily } from './modelThinking';
 import type { ScheduledTaskStore, ScheduledTaskInput } from '../scheduledTaskStore';
+import { DEFAULT_AGENT_MAX_FIRES } from '../scheduledTaskStore';
 import type { Scheduler } from './scheduler';
 
 export type OpenAICompatUpstreamConfig = {
@@ -483,6 +484,12 @@ interface ScheduledTaskDeps {
    * in a fresh session. Absent → warnings are skipped.
    */
   isSessionUsableAsTaskTarget?: (sessionId: string) => boolean;
+  /**
+   * Host-side provenance stamping for API creates: derives the creation
+   * context of a session ('a2a' / 'group-task:<id>' / 'chat' / …). Absent →
+   * the caller-declared originContext (if any) is used, else null.
+   */
+  resolveSessionOriginContext?: (sessionId: string) => string | null;
 }
 let scheduledTaskDeps: ScheduledTaskDeps | null = null;
 
@@ -3579,6 +3586,52 @@ async function handleCreateScheduledTask(
   // Optional session binding submitted as `sessionId`; stored as targetSessionId.
   const sessionBinding = resolveCreateTargetSessionId(input.sessionId);
 
+  // Lifecycle discipline (2026-10-24, Seedance-probe incident): every API
+  // create comes from a bot session (humans use the settings UI), so the task
+  // is stamped agent-origin with this session as its birthplace — a recurring
+  // task must never exist without a traceable creator. Recurring tasks
+  // additionally REQUIRE a declared exit condition: a cron/interval loop with
+  // no death clause is exactly how a probe fired 61 times after the order it
+  // served was already delivered.
+  const isRecurring = input.schedule.type === 'interval' || input.schedule.type === 'cron';
+  const exitCondition = typeof input.exitCondition === 'string' ? input.exitCondition.trim() : '';
+  if (isRecurring && !exitCondition) {
+    writeJSON(res, 400, {
+      success: false,
+      error: 'Recurring (interval/cron) tasks require "exitCondition": a natural-language clause stating when this task has done its job and must retire itself. Cover BOTH the watched condition AND the upstream lifecycle, e.g. {"exitCondition":"Retire once the video endpoint is confirmed live AND order-xiaoyi-birthday is delivered; if that order is already closed, retire on the next fire."}. One-shot ("at") tasks do not need it.',
+    } as any);
+    return;
+  }
+
+  const originSessionId =
+    typeof input.originSessionId === 'string' && input.originSessionId.trim()
+      ? input.originSessionId.trim()
+      : null;
+  let originContext: string | null = null;
+  if (originSessionId && scheduledTaskDeps.resolveSessionOriginContext) {
+    try {
+      originContext = scheduledTaskDeps.resolveSessionOriginContext(originSessionId);
+    } catch (error) {
+      console.warn('[CoworkProxy] Origin-context resolution failed:', error);
+    }
+  }
+  if (!originContext && typeof input.originContext === 'string' && input.originContext.trim()) {
+    originContext = input.originContext.trim();
+  }
+
+  if (input.maxFires !== undefined && input.maxFires !== null) {
+    const raw = Number(input.maxFires);
+    if (!Number.isInteger(raw) || raw <= 0) {
+      writeJSON(res, 400, { success: false, error: 'maxFires must be a positive integer (total fire budget), or null/omitted.' } as any);
+      return;
+    }
+  }
+  const maxFires = isRecurring
+    ? (input.maxFires === undefined || input.maxFires === null
+        ? DEFAULT_AGENT_MAX_FIRES
+        : Number(input.maxFires))
+    : null;
+
   // Build ScheduledTaskInput with defaults
   const taskInput: ScheduledTaskInput = {
     name: input.name.trim(),
@@ -3592,6 +3645,11 @@ async function handleCreateScheduledTask(
     expiresAt: input.expiresAt || null,
     notifyPlatforms: input.notifyPlatforms || [],
     enabled: input.enabled !== false,
+    origin: 'agent',
+    originSessionId,
+    originContext,
+    exitCondition: exitCondition || null,
+    maxFires,
     ...(sessionBinding.targetSessionId ? { targetSessionId: sessionBinding.targetSessionId } : {}),
   };
 
@@ -3807,6 +3865,24 @@ async function handleUpdateScheduledTask(
       console.warn(`[CoworkProxy] Ignoring non-string sessionId (${typeof rawSessionId}) on scheduled-task update`);
       sessionWarning = 'sessionId must be a string, null, or omitted; it was ignored and the existing session binding was kept.';
     }
+  }
+  // Lifecycle fields are updatable (exit clause revision, explicit budget
+  // extension = renewal), but provenance is immutable after create — an
+  // update must never rewrite who created the task or from where.
+  delete normalizedInput.origin;
+  delete normalizedInput.originSessionId;
+  delete normalizedInput.originContext;
+  if (normalizedInput.exitCondition !== undefined) {
+    normalizedInput.exitCondition =
+      typeof normalizedInput.exitCondition === 'string' ? normalizedInput.exitCondition.trim() || null : null;
+  }
+  if (normalizedInput.maxFires !== undefined && normalizedInput.maxFires !== null) {
+    const rawMaxFires = Number(normalizedInput.maxFires);
+    if (!Number.isInteger(rawMaxFires) || rawMaxFires <= 0) {
+      writeJSON(res, 400, { success: false, error: 'maxFires must be a positive integer (total fire budget), or null/omitted.' } as any);
+      return;
+    }
+    normalizedInput.maxFires = rawMaxFires;
   }
   try {
     const task = store.updateTask(id, normalizedInput as Partial<ScheduledTaskInput>);

@@ -172,6 +172,48 @@ process.stdout.write(JSON.stringify(parsed));
 NODE
 }
 
+# Provenance stamping (2026-10-24): the API stamps every task it creates as
+# agent-origin; the creating session id is injected HERE from the env (the
+# HTTP layer never sees the env) unless the payload already carries one. The
+# host derives the origin context (a2a / group-task:<id> / chat) from this id.
+inject_origin_session_id_into_payload() {
+  local BODY="$1"
+  local SESSION_ID="$2"
+
+  if [ -z "$SESSION_ID" ]; then
+    printf '%s' "$BODY"
+    return 0
+  fi
+
+  if ! resolve_http_node_runtime; then
+    printf '%s' "$BODY"
+    return 0
+  fi
+
+  env "${HTTP_NODE_ENV_PREFIX[@]}" "$HTTP_NODE_CMD" "${HTTP_NODE_ARGS[@]}" - "$BODY" "$SESSION_ID" <<'NODE'
+const [body, sessionId] = process.argv.slice(2);
+
+let parsed;
+try {
+  parsed = JSON.parse(body);
+} catch {
+  process.stdout.write(body);
+  process.exit(0);
+}
+
+if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  process.stdout.write(body);
+  process.exit(0);
+}
+
+if (!parsed.originSessionId && typeof parsed.originSessionId !== 'string') {
+  parsed.originSessionId = sessionId;
+}
+
+process.stdout.write(JSON.stringify(parsed));
+NODE
+}
+
 # `sessionId: "current"` means "the session this bot is running in". The HTTP
 # layer never resolves it (it would store the literal), so resolve it here from
 # the env IDBots injects into every cowork subprocess; without that env var the
@@ -293,6 +335,7 @@ if [ "${PAYLOAD#@}" != "$PAYLOAD" ]; then
 fi
 
 PAYLOAD="$(inject_metabot_id_into_payload "$PAYLOAD" "${IDBOTS_METABOT_ID:-}")"
+PAYLOAD="$(inject_origin_session_id_into_payload "$PAYLOAD" "${IDBOTS_COWORK_SESSION_ID:-}")"
 PAYLOAD="$(resolve_current_session_id_in_payload "$PAYLOAD")"
 PAYLOAD="$(apply_default_session_binding "$PAYLOAD")"
 

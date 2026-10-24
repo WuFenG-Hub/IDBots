@@ -17,6 +17,14 @@
 #   new session instead. The API response may add a "sessionWarning" field when
 #   the sessionId does not resolve to a usable session.
 #
+# Lifecycle fields (partial-update like any other field):
+#   exitCondition -> revise the retire clause (natural language)
+#   maxFires      -> raise/lower the total fire budget (positive integer);
+#                    combined with re-enabling a retired task this is the
+#                    explicit renewal path (fire counter resets on re-enable)
+#   origin / originSessionId / originContext are host-stamped provenance and
+#   are silently ignored on update — provenance never changes after create.
+#
 # Environment variables (set automatically by IDBots cowork session):
 #   IDBOTS_API_BASE_URL - Internal proxy URL (always points to local proxy)
 #   IDBOTS_COWORK_SESSION_ID - id of the session this script runs in

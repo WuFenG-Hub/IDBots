@@ -125,7 +125,7 @@ test('one-shot "at" without sessionId gains the current session id', () => {
   const run = runCreateTask(payload, { IDBOTS_COWORK_SESSION_ID: 'sess-default-1' });
   assert.equal(run.status, 0);
   assert.equal(JSON.parse(run.stdout).success, true);
-  assert.deepEqual(run.sent, { ...payload, sessionId: 'sess-default-1' });
+  assert.deepEqual(run.sent, { ...payload, sessionId: 'sess-default-1', originSessionId: 'sess-default-1' });
   assert.match(run.stderr, /one-shot task defaults to current session sess-default-1/);
   assert.match(run.stderr, /pass "sessionId": null to run in a new session/);
 });
@@ -141,7 +141,7 @@ test('an explicit null opts a one-shot task out of the default', () => {
   const payload = { ...oneShotPayload(), sessionId: null };
   const run = runCreateTask(payload, { IDBOTS_COWORK_SESSION_ID: 'sess-default-1' });
   assert.equal(run.status, 0);
-  assert.deepEqual(run.sent, payload);
+  assert.deepEqual(run.sent, { ...payload, originSessionId: 'sess-default-1' });
   assert.equal(run.sent.sessionId, null);
   assert.doesNotMatch(run.stderr, /defaults to current session/);
 });
@@ -150,7 +150,7 @@ test('an explicit UUID wins over the one-shot default', () => {
   const payload = { ...oneShotPayload(), sessionId: '11111111-2222-3333-4444-555555555555' };
   const run = runCreateTask(payload, { IDBOTS_COWORK_SESSION_ID: 'sess-default-1' });
   assert.equal(run.status, 0);
-  assert.deepEqual(run.sent, payload);
+  assert.deepEqual(run.sent, { ...payload, originSessionId: 'sess-default-1' });
 });
 
 test('recurring interval and cron tasks are left unbound', () => {
@@ -161,7 +161,7 @@ test('recurring interval and cron tasks are left unbound', () => {
   };
   const intervalRun = runCreateTask(intervalPayload, { IDBOTS_COWORK_SESSION_ID: 'sess-default-1' });
   assert.equal(intervalRun.status, 0);
-  assert.deepEqual(intervalRun.sent, intervalPayload);
+  assert.deepEqual(intervalRun.sent, { ...intervalPayload, originSessionId: 'sess-default-1' });
   assert.equal('sessionId' in intervalRun.sent, false);
 
   const cronPayload = {
@@ -171,7 +171,7 @@ test('recurring interval and cron tasks are left unbound', () => {
   };
   const cronRun = runCreateTask(cronPayload, { IDBOTS_COWORK_SESSION_ID: 'sess-default-1' });
   assert.equal(cronRun.status, 0);
-  assert.deepEqual(cronRun.sent, cronPayload);
+  assert.deepEqual(cronRun.sent, { ...cronPayload, originSessionId: 'sess-default-1' });
   assert.equal('sessionId' in cronRun.sent, false);
 });
 

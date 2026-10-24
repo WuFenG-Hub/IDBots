@@ -45,6 +45,8 @@ const validArgs = (overrides = {}) => ({
   ...overrides,
 });
 
+const EXIT_CLAUSE = 'Retire once the release is published and confirmed.';
+
 test('registers create_scheduled_task', () => {
   const { byName } = makeHarness();
   assert.deepEqual(Object.keys(byName), ['create_scheduled_task']);
@@ -111,7 +113,7 @@ test('rejects "at" without the at field, and cron without an expression', async 
 test('normalizes an interval schedule to intervalMs', async () => {
   const { calls, byName } = makeHarness();
   const result = await byName.create_scheduled_task.handler(
-    validArgs({ scheduleType: 'interval', at: undefined, intervalValue: 2, intervalUnit: 'hours' }),
+    validArgs({ scheduleType: 'interval', at: undefined, intervalValue: 2, intervalUnit: 'hours', exitCondition: EXIT_CLAUSE }),
   );
   assert.equal(result.isError, undefined);
   assert.equal(calls[0].schedule.type, 'interval');
@@ -173,10 +175,10 @@ test('an omitted sessionId on a one-shot "at" task defaults to the surf session'
 test('an omitted sessionId on a recurring task stays unbound (fresh session each run)', async () => {
   const { calls, byName } = makeHarness();
   await byName.create_scheduled_task.handler(
-    validArgs({ scheduleType: 'interval', at: undefined, intervalValue: 2, intervalUnit: 'hours' }),
+    validArgs({ scheduleType: 'interval', at: undefined, intervalValue: 2, intervalUnit: 'hours', exitCondition: EXIT_CLAUSE }),
   );
   assert.equal(calls[0].targetSessionId, undefined);
-  await byName.create_scheduled_task.handler(validArgs({ scheduleType: 'cron', at: undefined, cron: '0 9 * * *' }));
+  await byName.create_scheduled_task.handler(validArgs({ scheduleType: 'cron', at: undefined, cron: '0 9 * * *', exitCondition: EXIT_CLAUSE }));
   assert.equal(calls[1].targetSessionId, undefined);
 });
 
@@ -198,9 +200,52 @@ test('an explicit null opts a one-shot "at" task out of the default', async () =
 test('an explicit null on a recurring task is forwarded as null too', async () => {
   const { calls, byName } = makeHarness();
   await byName.create_scheduled_task.handler(
-    validArgs({ scheduleType: 'cron', at: undefined, cron: '0 9 * * *', sessionId: null }),
+    validArgs({ scheduleType: 'cron', at: undefined, cron: '0 9 * * *', sessionId: null, exitCondition: EXIT_CLAUSE }),
   );
   assert.equal(calls[0].targetSessionId, null);
+});
+
+test('recurring tasks without an exit condition are refused with teach-back guidance', async () => {
+  const { calls, byName } = makeHarness();
+  const interval = await byName.create_scheduled_task.handler(
+    validArgs({ scheduleType: 'interval', at: undefined, intervalValue: 2, intervalUnit: 'hours' }),
+  );
+  assert.equal(interval.isError, true);
+  assert.match(interval.content[0].text, /require `exitCondition`/);
+  assert.match(interval.content[0].text, /upstream work it serves/);
+  assert.equal(calls.length, 0, 'the host is never touched without the death clause');
+
+  const cron = await byName.create_scheduled_task.handler(
+    validArgs({ scheduleType: 'cron', at: undefined, cron: '0 */2 * * *' }),
+  );
+  assert.equal(cron.isError, true);
+  assert.match(cron.content[0].text, /require `exitCondition`/);
+});
+
+test('recurring tasks carry the exit clause, fire budget, and surf provenance to the host', async () => {
+  const { calls, byName } = makeHarness();
+  const result = await byName.create_scheduled_task.handler(
+    validArgs({ scheduleType: 'cron', at: undefined, cron: '0 */2 * * *', exitCondition: EXIT_CLAUSE, maxFires: 120 }),
+  );
+  assert.equal(result.isError, undefined);
+  assert.equal(calls[0].exitCondition, EXIT_CLAUSE);
+  assert.equal(calls[0].maxFires, 120);
+  assert.equal(calls[0].originSessionId, SESSION_ID, 'provenance: created from the surf session');
+  assert.equal(calls[0].originContext, 'surf');
+  // One-shot tasks need no death clause and carry no budget.
+  await byName.create_scheduled_task.handler(validArgs());
+  assert.equal(calls[1].exitCondition, null);
+  assert.equal(calls[1].maxFires, null);
+});
+
+test('rejects a non-positive or non-integer maxFires', async () => {
+  const { calls, byName } = makeHarness();
+  const zero = await byName.create_scheduled_task.handler(
+    validArgs({ scheduleType: 'cron', at: undefined, cron: '0 9 * * *', exitCondition: EXIT_CLAUSE, maxFires: 0 }),
+  );
+  assert.equal(zero.isError, true);
+  assert.match(zero.content[0].text, /maxFires` must be a positive integer/);
+  assert.equal(calls.length, 0);
 });
 
 test('the sessionId param is advertised on the tool schema', () => {

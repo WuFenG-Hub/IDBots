@@ -58,6 +58,10 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
   const [prompt, setPrompt] = useState(task?.prompt ?? '');
   const [workingDirectory, setWorkingDirectory] = useState(task?.workingDirectory ?? '');
   const [expiresAt, setExpiresAt] = useState(task?.expiresAt ?? '');
+  const [exitCondition, setExitCondition] = useState(task?.exitCondition ?? '');
+  const [maxFires, setMaxFires] = useState(
+    task?.maxFires != null ? String(task.maxFires) : ''
+  );
   const [metabots, setMetabots] = useState<Metabot[]>([]);
   const [selectedMetabotId, setSelectedMetabotId] = useState<number | null>(defaultMetabotId);
   const [sessionMode, setSessionMode] = useState<SessionMode>(initialSessionMode);
@@ -161,10 +165,13 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
     if (!validate()) return;
     setSubmitting(true);
     try {
+      const schedule = buildSchedule();
+      const isRecurring = schedule.type !== 'at';
+      const parsedMaxFires = Number(maxFires);
       const input: ScheduledTaskInput = {
         name: name.trim(),
         description: '',
-        schedule: buildSchedule(),
+        schedule,
         prompt: prompt.trim(),
         workingDirectory: workingDirectory.trim() || defaultWorkingDirectory,
         systemPrompt: '',
@@ -174,6 +181,12 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
         expiresAt: expiresAt || null,
         notifyPlatforms,
         enabled: task?.enabled ?? true,
+        // Death clause: optional for humans, only meaningful for recurring
+        // schedules (one-shot tasks retire themselves after execution).
+        exitCondition: isRecurring && exitCondition.trim() ? exitCondition.trim() : null,
+        maxFires: isRecurring && maxFires.trim() && Number.isInteger(parsedMaxFires) && parsedMaxFires > 0
+          ? parsedMaxFires
+          : null,
       };
       if (mode === 'create') {
         await scheduledTaskService.createTask(input);
@@ -453,6 +466,49 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
           )}
         </div>
       </div>
+
+      {/* Lifecycle: exit condition + fire budget (recurring schedules only) */}
+      {buildSchedule()?.type !== 'at' && (
+        <>
+          <div>
+            <label className={labelClass}>
+              {i18nService.t('scheduledTasksFormExitCondition')}
+              <span className="text-xs font-normal dark:text-claude-darkTextSecondary text-claude-textSecondary ml-1">
+                {i18nService.t('scheduledTasksFormOptional')}
+              </span>
+            </label>
+            <textarea
+              value={exitCondition}
+              onChange={(e) => setExitCondition(e.target.value)}
+              className={inputClass + ' h-20 resize-none'}
+              placeholder={i18nService.t('scheduledTasksFormExitConditionPlaceholder')}
+            />
+            <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-1">
+              {i18nService.t('scheduledTasksFormExitConditionHint')}
+            </p>
+          </div>
+          <div>
+            <label className={labelClass}>
+              {i18nService.t('scheduledTasksFormMaxFires')}
+              <span className="text-xs font-normal dark:text-claude-darkTextSecondary text-claude-textSecondary ml-1">
+                {i18nService.t('scheduledTasksFormOptional')}
+              </span>
+            </label>
+            <input
+              type="number"
+              value={maxFires}
+              onChange={(e) => setMaxFires(e.target.value)}
+              className={inputClass}
+              min={1}
+              step={1}
+              placeholder={i18nService.t('scheduledTasksDetailFireUnlimited')}
+            />
+            <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-1">
+              {i18nService.t('scheduledTasksFormMaxFiresHint')}
+            </p>
+          </div>
+        </>
+      )}
 
       {/* Notification */}
       <div>

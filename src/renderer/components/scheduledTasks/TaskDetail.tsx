@@ -82,15 +82,29 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, onRequestDelete }) => {
     onRequestDelete(task.id, task.name);
   };
 
+  // i18n keys are camelCase; 'max_fires_reached' needs an explicit mapping.
+  const statusKeySuffix: Record<string, string> = {
+    max_fires_reached: 'MaxFiresReached',
+  };
   const statusLabel = task.state.lastStatus
-    ? i18nService.t(`scheduledTasksStatus${task.state.lastStatus.charAt(0).toUpperCase() + task.state.lastStatus.slice(1)}`)
+    ? i18nService.t(
+        `scheduledTasksStatus${statusKeySuffix[task.state.lastStatus]
+          ?? task.state.lastStatus.charAt(0).toUpperCase() + task.state.lastStatus.slice(1)}`
+      )
     : '-';
 
-  const statusColor = {
+  const statusColor: Record<string, string> = {
     success: 'text-green-500',
     error: 'text-red-500',
     running: 'text-blue-500',
+    max_fires_reached: 'text-amber-500',
   };
+
+  const originLabel = task.origin === 'human'
+    ? i18nService.t('scheduledTasksDetailOriginHuman')
+    : task.origin === 'agent'
+      ? i18nService.t('scheduledTasksDetailOriginAgent')
+      : i18nService.t('scheduledTasksDetailOriginLegacy');
 
   const sectionClass = 'rounded-lg border dark:border-claude-darkBorder border-claude-border p-4';
   const sectionTitleClass = 'text-sm font-semibold dark:text-claude-darkText text-claude-text mb-3';
@@ -210,6 +224,41 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, onRequestDelete }) => {
                 : i18nService.t('scheduledTasksFormNotifyNone')}
             </div>
           </div>
+          <div>
+            <div className={labelClass}>{i18nService.t('scheduledTasksDetailOrigin')}</div>
+            <div className={valueClass}>
+              {originLabel}
+              {task.originContext && (
+                <span className="ml-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  ({task.originContext})
+                </span>
+              )}
+            </div>
+          </div>
+          {task.schedule.type !== 'at' && (
+            <>
+              <div>
+                <div className={labelClass}>{i18nService.t('scheduledTasksDetailFireBudget')}</div>
+                <div className={valueClass}>
+                  {task.maxFires != null
+                    ? `${task.fireCount} / ${task.maxFires}`
+                    : `${task.fireCount} · ${i18nService.t('scheduledTasksDetailFireUnlimited')}`}
+                </div>
+              </div>
+              <div className="col-span-2">
+                <div className={labelClass}>{i18nService.t('scheduledTasksDetailExitCondition')}</div>
+                <div className={valueClass + ' whitespace-pre-wrap'}>
+                  {task.exitCondition || i18nService.t('scheduledTasksNone')}
+                </div>
+              </div>
+            </>
+          )}
+          {task.originSessionId && (
+            <div className="col-span-2">
+              <div className={labelClass}>{i18nService.t('scheduledTasksDetailOriginSession')}</div>
+              <div className={valueClass + ' font-mono text-xs'}>{task.originSessionId}</div>
+            </div>
+          )}
         </div>
       </div>
 

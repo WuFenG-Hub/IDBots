@@ -4,7 +4,14 @@ import { CronExpressionParser } from 'cron-parser';
 import { resolveCoworkExecutionMode } from './libs/coworkExecutionMode';
 
 // Types for scheduled tasks (main process side)
-export type TaskLastStatus = 'success' | 'error' | 'running' | null;
+export type TaskLastStatus = 'success' | 'error' | 'running' | 'max_fires_reached' | null;
+
+/**
+ * Who initiated the task's creation. 'human' = the settings UI (a deliberate
+ * owner act); 'agent' = a bot through the skill script / inline tool / proxy
+ * API. Null = rows created before the lifecycle fields existed (legacy).
+ */
+export type TaskOrigin = 'human' | 'agent';
 
 export interface TaskState {
   nextRunAtMs: number | null;
@@ -42,6 +49,19 @@ export interface ScheduledTask {
   targetSessionId: string | null;
   expiresAt: string | null;
   notifyPlatforms: NotifyPlatform[];
+  /**
+   * Lifecycle provenance and fire budget. `origin`/`originSessionId`/
+   * `originContext` record WHO created the task and WHERE (never recreated
+   * from nothing); `exitCondition`/`maxFires`/`fireCount` carry the death
+   * clause — recurring tasks must be able to end. Legacy rows keep NULL
+   * origin / NULL maxFires (no behavior change for them).
+   */
+  origin: TaskOrigin | null;
+  originSessionId: string | null;
+  originContext: string | null;
+  exitCondition: string | null;
+  maxFires: number | null;
+  fireCount: number;
   state: TaskState;
   createdAt: string;
   updatedAt: string;
@@ -95,6 +115,12 @@ export interface ScheduledTaskInput {
   expiresAt: string | null;
   notifyPlatforms: NotifyPlatform[];
   enabled: boolean;
+  origin?: TaskOrigin | null;
+  originSessionId?: string | null;
+  originContext?: string | null;
+  exitCondition?: string | null;
+  /** NULL = uncapped (human-created default); seams stamp 50 for bot-created recurring tasks. */
+  maxFires?: number | null;
 }
 
 // Raw DB row types
@@ -112,6 +138,12 @@ interface TaskRow {
   cowork_session_id: string | null;
   target_session_id: string | null;
   expires_at: string | null;
+  origin: string | null;
+  origin_session_id: string | null;
+  origin_context: string | null;
+  exit_condition: string | null;
+  max_fires: number | null;
+  fire_count: number;
   notify_platforms_json: string;
   next_run_at_ms: number | null;
   last_run_at_ms: number | null;
@@ -157,6 +189,7 @@ export class ScheduledTaskStore {
     this.ensureTargetSessionColumn();
     this.ensureRunSkipReasonColumn();
     this.ensureMigrationColumns();
+    this.ensureLifecycleColumns();
     this.unmigrateLegacySdkCronTasks();
     this.resetStuckRunningTasks();
   }
@@ -297,6 +330,56 @@ export class ScheduledTaskStore {
   }
 
   /**
+   * Lifecycle columns (2026-10-24): `origin` / `origin_session_id` /
+   * `origin_context` record who created a task and from where (provenance —
+   * a recurring task must never exist without a traceable birthplace);
+   * `exit_condition` / `max_fires` / `fire_count` carry the death clause
+   * (exit discipline — recurring tasks must be able to end). Legacy rows
+   * keep NULL origin / NULL max_fires: no cap, no behavior change.
+   * Idempotent: repeated startup never errors.
+   */
+  private ensureLifecycleColumns(): void {
+    try {
+      if (!this.tableExists('scheduled_tasks')) return;
+
+      const columnsResult = this.db.exec('PRAGMA table_info(scheduled_tasks);');
+      const columns = columnsResult[0]?.values.map((row) => String(row[1])) ?? [];
+      let shouldSave = false;
+
+      if (!columns.includes('origin')) {
+        this.db.run('ALTER TABLE scheduled_tasks ADD COLUMN origin TEXT');
+        shouldSave = true;
+      }
+      if (!columns.includes('origin_session_id')) {
+        this.db.run('ALTER TABLE scheduled_tasks ADD COLUMN origin_session_id TEXT');
+        shouldSave = true;
+      }
+      if (!columns.includes('origin_context')) {
+        this.db.run('ALTER TABLE scheduled_tasks ADD COLUMN origin_context TEXT');
+        shouldSave = true;
+      }
+      if (!columns.includes('exit_condition')) {
+        this.db.run('ALTER TABLE scheduled_tasks ADD COLUMN exit_condition TEXT');
+        shouldSave = true;
+      }
+      if (!columns.includes('max_fires')) {
+        this.db.run('ALTER TABLE scheduled_tasks ADD COLUMN max_fires INTEGER');
+        shouldSave = true;
+      }
+      if (!columns.includes('fire_count')) {
+        this.db.run('ALTER TABLE scheduled_tasks ADD COLUMN fire_count INTEGER NOT NULL DEFAULT 0');
+        shouldSave = true;
+      }
+
+      if (shouldSave) {
+        this.saveDb();
+      }
+    } catch (error) {
+      console.warn('Failed to ensure scheduled task lifecycle columns:', error);
+    }
+  }
+
+  /**
    * One-time (idempotent) un-migration for the retired SDK durable-cron feature:
    * tasks migrated to SDK cron were disabled and marked migrated. With the SDK-cron
    * machinery gone, restore them as enabled host-scheduled tasks with a freshly
@@ -419,8 +502,9 @@ export class ScheduledTaskStore {
       INSERT INTO scheduled_tasks
         (id, name, description, enabled, schedule_json, prompt,
          working_directory, system_prompt, execution_mode, metabot_id, cowork_session_id, target_session_id, expires_at,
+         origin, origin_session_id, origin_context, exit_condition, max_fires, fire_count,
          notify_platforms_json, next_run_at_ms, consecutive_errors, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 0, ?, ?)
     `, [
       id, input.name, input.description,
       input.enabled ? 1 : 0,
@@ -430,6 +514,11 @@ export class ScheduledTaskStore {
       input.metabotId ?? null,
       normalizeTargetSessionId(input.targetSessionId),
       input.expiresAt ?? null,
+      input.origin ?? null,
+      input.originSessionId ?? null,
+      input.originContext ?? null,
+      input.exitCondition ?? null,
+      input.maxFires ?? null,
       JSON.stringify(input.notifyPlatforms ?? []),
       nextRunAtMs,
       now, now,
@@ -460,6 +549,14 @@ export class ScheduledTaskStore {
       : existing.targetSessionId;
     const expiresAt = input.expiresAt !== undefined ? input.expiresAt : existing.expiresAt;
     const notifyPlatforms = input.notifyPlatforms !== undefined ? input.notifyPlatforms : existing.notifyPlatforms;
+    const exitCondition = input.exitCondition !== undefined ? input.exitCondition : existing.exitCondition;
+    const maxFires = input.maxFires !== undefined ? input.maxFires : existing.maxFires;
+
+    // Re-enabling a disabled task is a deliberate renewal: the fire budget
+    // resets so the task gets a fresh lifecycle. Editing an enabled task
+    // leaves the counter alone.
+    const isRenewal = !existing.enabled && enabled;
+    const fireCount = isRenewal ? 0 : existing.fireCount;
 
     // Recalculate next run if schedule or enabled changed
     let nextRunAtMs = existing.state.nextRunAtMs;
@@ -474,7 +571,8 @@ export class ScheduledTaskStore {
       SET name = ?, description = ?, enabled = ?, schedule_json = ?,
           prompt = ?, working_directory = ?, system_prompt = ?,
           execution_mode = ?, metabot_id = ?, expires_at = ?, notify_platforms_json = ?,
-          next_run_at_ms = ?, cowork_session_id = ?, target_session_id = ?, updated_at = ?
+          next_run_at_ms = ?, cowork_session_id = ?, target_session_id = ?,
+          exit_condition = ?, max_fires = ?, fire_count = ?, updated_at = ?
       WHERE id = ?
     `, [
       name, description,
@@ -488,6 +586,9 @@ export class ScheduledTaskStore {
       nextRunAtMs,
       shouldResetSessionBindings ? null : existing.coworkSessionId,
       shouldResetSessionBindings ? null : targetSessionId,
+      exitCondition,
+      maxFires,
+      fireCount,
       now, id,
     ]);
 
@@ -556,7 +657,12 @@ export class ScheduledTaskStore {
     const now = Date.now();
     const task = this.getTask(id);
     const consecutiveErrors = success ? 0 : (task?.state.consecutiveErrors ?? 0) + 1;
-    const nextRunAtMs = task?.enabled ? this.calculateNextRunTime(schedule, now) : null;
+    // Every real execution (success or error, scheduled or manual) spends one
+    // unit of the fire budget — an erroring loop is just as noisy as a
+    // successful one. Skips never reach this method.
+    const fireCount = (task?.fireCount ?? 0) + 1;
+    const retired = task?.maxFires != null && fireCount >= task.maxFires;
+    const nextRunAtMs = retired || !task?.enabled ? null : this.calculateNextRunTime(schedule, now);
 
     this.db.run(`
       UPDATE scheduled_tasks
@@ -567,18 +673,28 @@ export class ScheduledTaskStore {
           last_duration_ms = ?,
           consecutive_errors = ?,
           next_run_at_ms = ?,
+          fire_count = ?,
+          enabled = CASE WHEN ? THEN 0 ELSE enabled END,
           updated_at = ?
       WHERE id = ?
     `, [
       now,
-      success ? 'success' : 'error',
+      retired ? 'max_fires_reached' : (success ? 'success' : 'error'),
       error,
       durationMs,
       consecutiveErrors,
       nextRunAtMs,
+      fireCount,
+      retired ? 1 : 0,
       new Date().toISOString(),
       id,
     ]);
+
+    if (retired) {
+      console.warn(
+        `[ScheduledTaskStore] Task ${id} retired: fire budget exhausted (${fireCount}/${task?.maxFires}); auto-disabled`
+      );
+    }
 
     this.saveDb();
   }
@@ -723,6 +839,7 @@ export class ScheduledTaskStore {
         AND next_run_at_ms <= ?
         AND running_at_ms IS NULL
         AND (expires_at IS NULL OR expires_at > ?)
+        AND (max_fires IS NULL OR fire_count < max_fires)
       ORDER BY next_run_at_ms ASC
     `, [nowMs, todayStr]);
     return rows.map((row) => this.rowToTask(row));
@@ -757,13 +874,14 @@ export class ScheduledTaskStore {
 
   getNextDueTimeMs(): number | null {
     const todayStr = new Date().toISOString().slice(0, 10);
-    const row = this.getOne<{ min_time: number | null }>(
-      `SELECT MIN(next_run_at_ms) as min_time
-       FROM scheduled_tasks
-       WHERE enabled = 1
-         AND next_run_at_ms IS NOT NULL
-         AND running_at_ms IS NULL
-         AND (expires_at IS NULL OR expires_at > ?)`,
+    const row = this.getOne<{ min_time: number | null }>(`
+      SELECT MIN(next_run_at_ms) as min_time
+      FROM scheduled_tasks
+      WHERE enabled = 1
+        AND next_run_at_ms IS NOT NULL
+        AND running_at_ms IS NULL
+        AND (expires_at IS NULL OR expires_at > ?)
+        AND (max_fires IS NULL OR fire_count < max_fires)`,
       [todayStr]
     );
     return row?.min_time ?? null;
@@ -828,6 +946,12 @@ export class ScheduledTaskStore {
       coworkSessionId: row.cowork_session_id ?? null,
       targetSessionId: row.target_session_id ?? null,
       expiresAt: row.expires_at,
+      origin: (row.origin as TaskOrigin | null) ?? null,
+      originSessionId: row.origin_session_id ?? null,
+      originContext: row.origin_context ?? null,
+      exitCondition: row.exit_condition ?? null,
+      maxFires: row.max_fires ?? null,
+      fireCount: row.fire_count ?? 0,
       notifyPlatforms,
       state: {
         nextRunAtMs: row.next_run_at_ms,
