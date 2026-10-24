@@ -717,3 +717,6 @@ blob-report/
 
 # Memory evolution: evidence ledger (quotes + revisions) and contradiction narratives
 !tests/memoryEvidenceLedger.test.mjs
+
+# Memory evolution #2: standing pages (mental models)
+!tests/standingPageStore.test.mjs
