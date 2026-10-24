@@ -58,13 +58,16 @@ official: true
 
 ```bash
 # "sessionId": "current" 表示在「当前会话」中运行；删除该行则每次都在新会话中运行
+# 注意：interval / cron 类重复任务必须带 "exitCondition"（见下方「周期任务退出机制」）
 cat > /tmp/scheduled-task.json <<'JSON'
 {
   "name": "任务名称",
   "schedule": { "type": "cron", "expression": "0 9 * * *" },
   "prompt": "任务运行时 Claude 将执行的详细指令...",
   "workingDirectory": "/path/to/project",
-  "sessionId": "current"
+  "sessionId": "current",
+  "exitCondition": "端点确认可用且工单 xxx 交付后停用本任务；若工单已关闭，下次触发即停用",
+  "maxFires": 50
 }
 JSON
 
@@ -85,6 +88,9 @@ bash "$SKILLS_ROOT/scheduled-task/scripts/create-task.sh" @/tmp/scheduled-task.j
 | `systemPrompt` | ❌ | 自定义系统提示词（默认空） |
 | `executionMode` | ❌ | `"auto"` / `"local"` / `"sandbox"`（默认 `"local"`） |
 | `expiresAt` | ❌ | 过期日期 `"YYYY-MM-DD"`（默认 null，不过期） |
+| `exitCondition` | 重复任务✅ | **退出条件**（自然语言）：何时使命完成、应自行停用。必须同时覆盖①探测的信号本身成立，②它所服务的上游事项（工单/帖子/群任务）已经收口或不再需要。一次性 `at` 任务不需要。缺失时创建会被拒绝并返回示例 |
+| `maxFires` | ❌ | 触发次数上限（正整数）。通过脚本/API 创建的重复任务缺省 **50 次**：到达后任务自动停用（`lastStatus=max_fires_reached`）。长期例行任务可显式调高 |
+| `origin` / `originSessionId` / `originContext` | — | 只读：宿主自动记录的创建来源（人工 UI / bot 会话 / a2a / 群任务等），创建后不可修改 |
 | `notifyPlatforms` | ❌ | 通知平台数组：`["dingtalk","feishu","telegram","discord"]`（默认 `[]`） |
 | `enabled` | ❌ | 是否立即启用（默认 `true`） |
 
@@ -100,6 +106,17 @@ bash "$SKILLS_ROOT/scheduled-task/scripts/create-task.sh" @/tmp/scheduled-task.j
 - 📋 执行内容摘要
 - 💡 提示用户可在「设置 → 定时任务」中管理
 
+## 周期任务退出机制（必读）
+
+周期任务（`interval` / `cron`）只有出生证明、没有死亡条款，就会变成永久的噪音（真实事故：一个端点探测任务在它服务的工单早已交付后，又每 2 小时跑了 4 天共 61 次）。因此：
+
+1. **创建即带死亡条款**：`exitCondition` 对重复任务是必填的（缺失会被 API 拒绝）。写法要覆盖两种死亡：
+   - **条件型**：探测的信号本身触发了（如「端点由不可用变为在线」）——任务下一轮自己就能看见；
+   - **生命周期型**：看它的理由消失了（上游工单已交付、帖子已回复、群任务已收口）——信号面上什么都不会发生，只有执行任务的你判断得出来。**条款里必须点名上游事项**，例：「端点确认可用且工单 order-x 交付后停用本任务；若工单已关闭，下次触发即停用」。
+2. **每次触发时判断退出**：宿主会在任务 prompt 前注入 `[Scheduled task lifecycle]` 块（第几次触发 / 预算余量 / 退出条件原文 / 创建来源会话）。**每次执行完主体工作后，对照条款判断：条件已满足或存在理由已消失，就当场停用自己**——`bash "$SKILLS_ROOT/scheduled-task/scripts/toggle-task.sh" <task_id> false`（task id 在注入块里），并在收尾说明中写明已停用及原因。把一个使命已尽的任务留着继续跑是缺陷，不是谨慎。
+3. **预算兜底**：重复任务缺省 50 次触发上限（`maxFires`）。最后一发前宿主会预告「这是最后一次触发」。到达上限任务自动停用，`lastStatus=max_fires_reached`。
+4. **续期必须显式**：重新启用一个已停用的任务 = 显式续期，触发计数从零开始；也可以用 `update-task.sh` 修改 `exitCondition` / `maxFires`（创建来源字段不可改）。
+
 ## 重要注意事项
 
 - **编码安全（Windows 必看）**：含中文 payload 必须优先使用 `@file` 方式，避免命令行参数编码导致标题/提示词乱码
@@ -112,7 +129,7 @@ bash "$SKILLS_ROOT/scheduled-task/scripts/create-task.sh" @/tmp/scheduled-task.j
   ```
 - **自动执行**：定时任务运行时所有工具调用自动批准（auto-approve），无需人工审批
 - **独立运行**：`prompt` 是任务独立运行时执行 agent 收到的唯一指令，应写得清晰完整
-- **自动禁用**：连续失败 5 次的任务会自动禁用
+- **自动禁用**：连续失败 5 次的任务会自动禁用；重复任务另有触发次数预算（`maxFires`，脚本/API 创建缺省 50 次），到达上限自动停用（`max_fires_reached`）
 - **一次性任务**：`type: "at"` 的任务执行后自动禁用
 - **Cowork 会话**：每次执行会创建一个新的 Cowork 会话（标题前缀为「[定时]」），可在 Cowork 列表中查看执行详情
 - **会话绑定**：绑定后 prompt 会直接注入指定会话，执行记录以普通对话轮次出现在该会话中（而不是新建「[定时]」会话）。一次性任务默认绑定创建它的会话，重复任务默认每次新建会话；显式传 `sessionId` 可覆盖，一次性任务也可以传 `"sessionId": null` 回到新会话。绑定的会话在运行时已不存在、已归档，或为 A2A / 沙箱会话时，任务会自动退回新会话运行。
