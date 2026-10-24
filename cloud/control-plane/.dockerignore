@@ -1,3 +1,7 @@
+# Applies only when the build context is THIS package directory. The
+# production build uses the repository root as its context (see the
+# Dockerfile header), and that context is governed by the repository-root
+# .dockerignore — not by this file.
 node_modules
 dist
 test

@@ -8,7 +8,8 @@ import { openDb } from '../src/db/index.js';
 import { loadConfig, type ControlPlaneConfig } from '../src/config.js';
 import { DockerClient } from '../src/docker/client.js';
 import { FakeSmsProvider } from '../src/sms.js';
-import { createPublicServer } from '../src/server.js';
+import { createMetricsServer, createPublicServer } from '../src/server.js';
+import { MetricsRegistry } from '../src/metrics.js';
 import { encryptSecret } from '../src/crypto.js';
 import type { AppContext } from '../src/context.js';
 
@@ -40,6 +41,7 @@ export interface TestApp {
   app: AppContext;
   config: ControlPlaneConfig;
   baseUrl: string;
+  metricsUrl: string;
   close: () => Promise<void>;
 }
 
@@ -51,6 +53,10 @@ export async function startTestApp(options: {
   fakeSmsNumbers?: string[];
   tenantImage?: string;
   tenantEnv?: Record<string, string>;
+  /** Overrides for the /ws proxy keepalive (tests inject short intervals). */
+  wsProxy?: import('../src/server.js').PublicServerOptions['wsProxy'];
+  /** CP_LOGIN_BUNDLE_DIR override. */
+  loginBundleDir?: string;
 }): Promise<TestApp> {
   const port = await freePort();
   const metricsPort = await freePort();
@@ -69,6 +75,7 @@ export async function startTestApp(options: {
     ...(options.tenantEnv
       ? Object.fromEntries(Object.entries(options.tenantEnv).map(([k, v]) => [`CP_TENANT_ENV_${k}`, v]))
       : {}),
+    ...(options.loginBundleDir ? { CP_LOGIN_BUNDLE_DIR: options.loginBundleDir } : {}),
   };
   const config = loadConfig(env);
   const app: AppContext = {
@@ -77,14 +84,21 @@ export async function startTestApp(options: {
     docker: new DockerClient(options.dockerUrl),
     sms: new FakeSmsProvider(config.fakeSmsNumbers),
     poller: null,
+    metrics: new MetricsRegistry(),
   };
-  const server = createPublicServer(app);
+  const server = createPublicServer(app, options.wsProxy ? { wsProxy: options.wsProxy } : {});
   await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+  const metricsServer = createMetricsServer(app);
+  await new Promise<void>((resolve) => metricsServer.listen(metricsPort, '127.0.0.1', resolve));
   return {
     app,
     config,
     baseUrl: `http://127.0.0.1:${port}`,
-    close: () => new Promise((resolve) => server.close(() => resolve())),
+    metricsUrl: `http://127.0.0.1:${metricsPort}`,
+    close: () =>
+      new Promise((resolve) =>
+        server.close(() => metricsServer.close(() => resolve())),
+      ),
   };
 }
 

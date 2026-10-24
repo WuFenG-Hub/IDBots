@@ -149,6 +149,20 @@ Example: `FAKE_TENANT_HEALTH_AFTER_MS=100 FAKE_TENANT_PHASES=migrating:200,boots
 `node:24-alpine` image. It cannot be built on the dev machine (no Docker
 daemon); CI (WS-C) builds it with this directory as the context.
 
+## Login bundle (REQ-B-19)
+
+`/` and `/login` serve the mobile login bundle WS-E builds with
+`pnpm build:mobile` (`dist-mobile-login/` at the repo root). Set
+`CP_LOGIN_BUNDLE_DIR` to override; when neither exists, a built-in English
+placeholder (`static-login/`) that polls `/api/v1/me` is served. A visitor
+with a valid cookie and a ready/degraded tenant is redirected to `/app/`.
+
+The image build context is the **repository root** so the Dockerfile can
+`COPY dist-mobile-login/` (CI builds the bundle first — see the Dockerfile
+header). The package-local `.dockerignore` only applies to package-context
+builds; a root-context build is governed by the repository-root
+`.dockerignore`.
+
 ## Operations notes
 
 - **Never expose the control plane directly.** Client IPs come from

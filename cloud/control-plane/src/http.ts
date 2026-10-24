@@ -33,6 +33,8 @@ export interface RequestCtx {
   ip: string;
   userAgent: string;
   cookieHeader: string | undefined;
+  /** The raw request — only for routes marked `raw` (streaming proxies). */
+  req?: http.IncomingMessage;
   res: http.ServerResponse;
   log: (level: 'info' | 'warn' | 'error', msg: string, extra?: Record<string, unknown>) => void;
   /** Set by the auth middleware for auth routes. */
@@ -40,13 +42,24 @@ export interface RequestCtx {
   tokenHash?: string;
 }
 
-export type RouteHandler = (app: AppContext, reqCtx: RequestCtx, body: unknown) => Promise<void>;
+/**
+ * A route path is exact except for `:param` segments and a trailing `/*`
+ * (prefix capture into params['*']).
+ */
+export type RouteHandler = (
+  app: AppContext,
+  reqCtx: RequestCtx,
+  body: unknown,
+  params: Record<string, string>,
+) => Promise<void>;
 
 export interface Route {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   path: string;
   /** Requires a valid idb_session cookie; loads the user onto reqCtx state. */
   auth?: boolean;
+  /** Skip JSON body parsing — the handler streams reqCtx.req itself. */
+  raw?: boolean;
   handler: RouteHandler;
 }
 

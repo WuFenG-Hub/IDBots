@@ -23,6 +23,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
 
@@ -54,6 +55,91 @@ const PHASES = (env.FAKE_TENANT_PHASES ?? 'ready:0')
   .filter((entry) => entry.phase.length > 0);
 
 const INBOUND_LIMIT = 1024 * 1024; // C2: 1 MiB inbound frame limit
+const UPLOAD_LIMIT = 25 * 1024 * 1024; // C2: 25 MB upload cap
+
+// Built-in fixtures for the proxy tests (deterministic, a few KB).
+const FIXTURE_FILE_BODY = `${TENANT_ID} fixture file for proxy tests\n`.repeat(128);
+const FIXTURE_INDEX_HTML = `<!doctype html><html><head><title>fake app</title><script src="/app/assets/app.fake123.js"></script></head><body><div id="root">fake tenant app fixture</div></body></html>`;
+const FIXTURE_ASSET_JS = `console.log('fake tenant app fixture asset');`;
+
+const MNEMONIC_WORDS = 'apple banana cherry dragon eagle falcon grape hazel iris jasmine kite lemon';
+
+function sanitizeName(name) {
+  return name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128) || 'upload.bin';
+}
+
+function uploadDir() {
+  const base = process.env.FAKE_TENANT_DATA_DIR ?? path.join(os.tmpdir(), 'fake-tenant-data');
+  fs.mkdirSync(base, { recursive: true });
+  return base;
+}
+
+// reveal-mnemonic state: seen nonces with their expiry (C2: kept in memory
+// until expiry, then forgotten).
+const seenNonces = new Map();
+
+function handleRevealMnemonic(req, res) {
+  const fail = () => {
+    res.writeHead(401);
+    res.end();
+  };
+  const token = String(req.headers['x-idbots-reverify'] ?? '');
+  const dot = token.indexOf('.');
+  if (dot === -1) {
+    return fail();
+  }
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(token.slice(0, dot), 'base64url').toString('utf8'));
+  } catch {
+    return fail();
+  }
+  const expected = crypto
+    .createHmac('sha256', SECRET)
+    .update(Buffer.from(token.slice(0, dot), 'base64url'))
+    .digest();
+  let actual;
+  try {
+    actual = Buffer.from(token.slice(dot + 1), 'base64url');
+  } catch {
+    return fail();
+  }
+  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+    return fail();
+  }
+  const now = Date.now();
+  if (payload.t !== TENANT_ID || payload.p !== 'reveal-mnemonic' || typeof payload.e !== 'number' || payload.e <= now) {
+    return fail();
+  }
+  if (typeof payload.n !== 'string' || payload.n.length === 0) {
+    return fail();
+  }
+  if (seenNonces.has(payload.n)) {
+    return fail();
+  }
+  seenNonces.set(payload.n, payload.e);
+  // Housekeeping: forget expired nonces opportunistically.
+  for (const [nonce, expiry] of seenNonces) {
+    if (expiry <= now) {
+      seenNonces.delete(nonce);
+    }
+  }
+  const chunks = [];
+  req.on('data', (c) => chunks.push(c));
+  req.on('end', () => {
+    let target = null;
+    try {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      target = body.target === 'metabot' ? `metabot:${Number(body.metabotId)}` : 'user';
+    } catch {
+      target = 'unknown';
+    }
+    // Audit-shaped log line WITHOUT the mnemonic.
+    log('info', 'sensitive', 'mnemonic revealed', { target });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ mnemonic: MNEMONIC_WORDS }));
+  });
+}
 const startedAt = Date.now();
 
 function log(level, component, msg, extra = undefined) {
@@ -186,6 +272,128 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // -- C2 file download. Token crypto validation is WS-A's side; the fake
+  // accepts any token when the secret is right and serves a deterministic
+  // fixture, honoring Range (RFC 7231 single-range subset).
+  if (req.method === 'GET' && url.pathname.startsWith('/gateway/v1/files/')) {
+    const token = url.pathname.slice('/gateway/v1/files/'.length);
+    const body = Buffer.from(FIXTURE_FILE_BODY, 'utf8');
+    const ext = token.includes('.') ? token.split('.').pop().toLowerCase() : 'txt';
+    const contentType =
+      { txt: 'text/plain; charset=utf-8', json: 'application/json', js: 'text/javascript', png: 'image/png' }[ext] ??
+      'application/octet-stream';
+    const rangeHeader = req.headers.range;
+    const match = typeof rangeHeader === 'string' ? /^bytes=(\d+)-(\d*)$/.exec(rangeHeader) : null;
+    if (match) {
+      const start = Number(match[1]);
+      const end = match[2] === '' ? body.length - 1 : Math.min(Number(match[2]), body.length - 1);
+      if (start >= body.length || start > end) {
+        res.writeHead(416, { 'Content-Range': `bytes */${body.length}` });
+        res.end();
+        return;
+      }
+      res.writeHead(206, {
+        'Content-Type': contentType,
+        'Content-Length': end - start + 1,
+        'Content-Range': `bytes ${start}-${end}/${body.length}`,
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-store',
+      });
+      res.end(body.subarray(start, end + 1));
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': body.length,
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'no-store',
+    });
+    res.end(body);
+    return;
+  }
+
+  // -- C2 upload: stream-store into the data dir; enforces its own 25 MB cap.
+  if (req.method === 'POST' && url.pathname === '/gateway/v1/upload') {
+    const name = sanitizeName(new URL(req.url, 'http://localhost').searchParams.get('name') ?? 'upload.bin');
+    const targetDir = uploadDir();
+    fs.mkdirSync(targetDir, { recursive: true });
+    const target = path.join(targetDir, `${Date.now()}-${name}`);
+    const file = fs.createWriteStream(target);
+    // An aborted upload (proxy cutting at 25 MB) can still deliver queued
+    // chunks after destroy — swallow the stream error and guard writes.
+    file.on('error', () => {});
+    let size = 0;
+    let over = false;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > UPLOAD_LIMIT && !over) {
+        over = true;
+        file.destroy();
+        fs.rmSync(target, { force: true });
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 'PAYLOAD_TOO_LARGE', message: 'over the 25 MB limit' } }));
+        req.resume();
+        return;
+      }
+      if (!over && !file.destroyed) {
+        file.write(chunk);
+      }
+    });
+    req.on('end', () => {
+      if (over) {
+        return;
+      }
+      file.end(() => {
+        log('info', 'gateway', 'upload stored', { name, size });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            path: `/data/workspace/uploads/${path.basename(target)}`,
+            size,
+            mime: String(req.headers['content-type'] ?? 'application/octet-stream'),
+          }),
+        );
+      });
+    });
+    req.on('error', () => {
+      file.destroy();
+      fs.rmSync(target, { force: true });
+      if (!res.headersSent) {
+        res.writeHead(500);
+        res.end();
+      }
+    });
+    return;
+  }
+
+  // -- C2 sensitive route: full reveal-mnemonic implementation (C2 token:
+  // base64url(payload) + '.' + base64url(HMAC-SHA256(secret, payload))).
+  if (req.method === 'POST' && url.pathname === '/gateway/v1/sensitive/reveal-mnemonic') {
+    handleRevealMnemonic(req, res);
+    return;
+  }
+
+  // -- C2 static mobile bundle fixture.
+  if (req.method === 'GET' && (url.pathname === '/app' || url.pathname.startsWith('/app/'))) {
+    const rest = url.pathname === '/app' ? '' : url.pathname.slice('/app/'.length);
+    if (rest === '' || rest === 'index.html') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+      res.end(FIXTURE_INDEX_HTML);
+      return;
+    }
+    if (rest === 'assets/app.fake123.js') {
+      res.writeHead(200, {
+        'Content-Type': 'text/javascript; charset=utf-8',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+      });
+      res.end(FIXTURE_ASSET_JS);
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+    res.end(JSON.stringify({ error: 'not found' }));
+    return;
+  }
+
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'not found' }));
 });
@@ -214,6 +422,8 @@ wss.on('connection', (ws, req) => {
   const clientId = req.headers['x-idbots-client-id'] ?? null;
   log('info', 'gateway', 'client connected', clientId ? { clientId } : undefined);
 
+  // Test-only extension: echo the upstream headers the control plane added
+  // so proxy tests can assert they were set (never in the real tenant).
   ws.send(
     JSON.stringify({
       v: 1,
@@ -224,6 +434,8 @@ wss.on('connection', (ws, req) => {
       serverTime: Date.now(),
       ready: readyBody().ready,
       phase: currentPhase(),
+      clientId: clientId ?? null,
+      xff: req.headers['x-forwarded-for'] ?? null,
     }),
   );
 

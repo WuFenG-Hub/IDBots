@@ -112,6 +112,10 @@ async function upgradeOne(
   newImage: string,
   opts: Required<UpgradeOptions>,
 ): Promise<UpgradeResult> {
+  const startedAtMs = Date.now();
+  const observe = (result: 'upgraded' | 'rolled-back'): void => {
+    app.metrics.upgradeDuration((Date.now() - startedAtMs) / 1000, result);
+  };
   const fail = async (detail: string, alertText?: string): Promise<UpgradeResult> => {
     app.db
       .prepare("UPDATE tenants SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?")
@@ -200,6 +204,7 @@ async function upgradeOne(
       to: newImage,
       status: wait.outcome,
     });
+    observe('upgraded');
     return { tenantId, outcome: 'upgraded', detail: wait.outcome };
   }
 
@@ -259,6 +264,7 @@ async function upgradeOne(
       to: rollbackImage,
       status: rollbackWait.outcome,
     });
+    observe('rolled-back');
     return { tenantId, outcome: 'rolled-back', detail };
   }
   const detail = `rollback to ${rollbackImage} also did not become ready (${rollbackWait.outcome})`;

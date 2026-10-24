@@ -1,8 +1,14 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 /**
  * Environment-driven configuration (REQ-B configuration table). `loadConfig`
  * is pure and testable: it takes a process-env-like object and returns a typed
  * config, throwing a ConfigError with a clear message on any violation.
  */
+
+const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -37,9 +43,24 @@ export interface ControlPlaneConfig {
   };
   fakeSmsNumbers: string[];
   alertWebhook: string | null;
+  /**
+   * Directory with the mobile login bundle (index.html + assets) served at
+   * / and /login (REQ-B-19). Defaults to the WS-E build output
+   * (`dist-mobile-login/` at the repo root) when present, else the
+   * built-in placeholder under `static-login/`.
+   */
+  loginBundleDir: string;
 }
 
 const FAKE_SMS_ALLOWED_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+function defaultLoginBundleDir(): string {
+  const repoRootBundle = path.resolve(PACKAGE_ROOT, '..', '..', 'dist-mobile-login');
+  if (fs.existsSync(repoRootBundle)) {
+    return repoRootBundle;
+  }
+  return path.join(PACKAGE_ROOT, 'static-login');
+}
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name];
@@ -163,5 +184,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): ControlPlaneConfig {
     },
     fakeSmsNumbers,
     alertWebhook: env.CP_ALERT_WEBHOOK ?? null,
+    loginBundleDir: env.CP_LOGIN_BUNDLE_DIR ?? defaultLoginBundleDir(),
   };
 }

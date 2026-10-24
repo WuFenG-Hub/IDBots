@@ -21,6 +21,7 @@ import net from 'node:net';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
+import { WebSocket } from 'ws';
 import { startFakeDocker } from '../test/fake-docker/index.mjs';
 import { DockerClient, tenantBaseUrl } from '../dist/docker/client.js';
 
@@ -99,6 +100,7 @@ let dbPath;
 let dbDir;
 let cpEnv;
 let cpBase;
+let metricsBase;
 let cpChild;
 let cpLog = '';
 const PHONE = '+8613900000000';
@@ -181,6 +183,7 @@ step('start control plane against the fake docker', async (ctx) => {
   dbPath = path.join(dbDir, 'cp.sqlite');
   const publicPort = await freePort();
   const metricsPort = await freePort();
+  metricsBase = `http://127.0.0.1:${metricsPort}`;
   cpEnv = {
     ...process.env,
     CP_PUBLIC_ORIGIN: `http://127.0.0.1:${publicPort}`,
@@ -413,6 +416,133 @@ step('after restart: session and tenant intact, container NOT recreated', async 
   console.log(
     `[dev-loop]   /me 200 (user ${me.json.user.phoneMasked}, tenant ready); container ${mine[0].Id.slice(0, 12)}… unchanged`,
   );
+});
+
+// --- T3 steps -----------------------------------------------------------------
+
+step('T3: /ws echo through the control plane (real ws client)', async () => {
+  const ws = new WebSocket(`${cpBase.replace(/^http/, 'ws')}/ws`, {
+    headers: { Cookie: cookie, Origin: new URL(cpBase).origin },
+  });
+  const frames = [];
+  ws.on('message', (data) => frames.push(JSON.parse(data.toString('utf8'))));
+  await new Promise((resolve, reject) => {
+    ws.once('open', resolve);
+    ws.once('error', reject);
+  });
+  const welcome = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('no welcome frame through /ws')), 5000);
+    const poll = setInterval(() => {
+      const frame = frames.find((f) => f.type === 'welcome');
+      if (frame) {
+        clearTimeout(timer);
+        clearInterval(poll);
+        resolve(frame);
+      }
+    }, 20);
+  });
+  assert(welcome && welcome.tenantId, 'welcome frame through /ws');
+  console.log(`[dev-loop]   /ws welcome: tenant=${welcome.tenantId} clientId=${welcome.clientId}`);
+  const echoed = new Promise((resolve) => {
+    const timer = setInterval(() => {
+      const result = frames.find((f) => f.type === 'result' && f.id === 'loop1');
+      if (result) {
+        clearInterval(timer);
+        resolve(result);
+      }
+    }, 20);
+  });
+  ws.send(JSON.stringify({ v: 1, type: 'invoke', id: 'loop1', channel: 'cowork:session:start', args: ['dev-loop'] }));
+  const result = await echoed;
+  console.log(`[dev-loop]   invoke result ok=${result.ok} echo=${JSON.stringify(result.value.echo.channel)}`);
+  ws.close();
+});
+
+step('T3: HTTP proxy routes (/app, /upload, /files)', async () => {
+  const appRes = await fetch(`${cpBase}/app/`, { headers: { Cookie: cookie } });
+  assert(appRes.status === 200, `/app/ -> ${appRes.status}`);
+  const html = await appRes.text();
+  console.log(`[dev-loop]   GET /app/ -> 200 (${html.length} bytes, first: ${JSON.stringify(html.slice(0, 40))})`);
+
+  const upload = await fetch(`${cpBase}/upload?name=devloop.txt`, {
+    method: 'POST',
+    headers: { Cookie: cookie, Origin: new URL(cpBase).origin, 'Content-Type': 'text/plain' },
+    body: 'dev-loop upload\n',
+  });
+  assert(upload.status === 200, `/upload -> ${upload.status}`);
+  const uploaded = await upload.json();
+  console.log(`[dev-loop]   POST /upload -> 200 path=${uploaded.path} size=${uploaded.size}`);
+
+  const file = await fetch(`${cpBase}/files/devloop.txt`, { headers: { Cookie: cookie } });
+  assert(file.status === 200, `/files -> ${file.status}`);
+  console.log(`[dev-loop]   GET /files/{token} -> 200 (${(await file.text()).length} fixture bytes)`);
+});
+
+step('T3: reverify -> mnemonic export (words never printed)', async () => {
+  // Demo time-travel: clear the 60 s resend window (see step 11).
+  const db = new Database(dbPath);
+  db.prepare('DELETE FROM sms_codes WHERE phone_e164 = ?').run(PHONE);
+  db.close();
+  const send = await api('/api/v1/reverify/send', { method: 'POST', cookie, body: { purpose: 'reveal-mnemonic' } });
+  assert(send.status === 200, `reverify/send -> ${send.status}`);
+  const verify = await api('/api/v1/reverify/verify', {
+    method: 'POST',
+    cookie,
+    body: { purpose: 'reveal-mnemonic', code: '246810' },
+  });
+  assert(verify.status === 200, `reverify/verify -> ${verify.status}`);
+  const { reverifyId } = verify.json;
+  const reveal = await api('/api/v1/sensitive/reveal-mnemonic', {
+    method: 'POST',
+    cookie,
+    body: { reverifyId, target: 'user' },
+  });
+  assert(reveal.status === 200, `reveal -> ${reveal.status}`);
+  const wordCount = reveal.json.mnemonic.split(' ').length;
+  assert(wordCount === 12, '12-word mnemonic');
+  assert(!cpLog.includes(reveal.json.mnemonic.split(' ')[0]), 'mnemonic never logged');
+  console.log(`[dev-loop]   mnemonic: <redacted len=${wordCount} words>`);
+});
+
+step('T3: deletion request -> 202 + operator alert', async () => {
+  const res = await api('/api/v1/account/deletion-request', { method: 'POST', cookie, body: { reason: 'dev-loop' } });
+  assert(res.status === 202, `deletion-request -> ${res.status}`);
+  const { requestId } = res.json;
+  await waitFor(async () => (alertSink.messages.some((m) => m.includes(`#${requestId}`)) ? true : null), {
+    label: 'deletion alert at the sink',
+  });
+  const alert = alertSink.messages.find((m) => m.includes(`#${requestId}`));
+  assert(!alert.includes(PHONE), 'alert has no full phone');
+  console.log(`[dev-loop]   deletion-request -> 202 requestId=${requestId}; alert: ${alert}`);
+});
+
+step('T3: scrape /metrics on the internal port', async () => {
+  const res = await fetch(`${metricsBase}/metrics`);
+  assert(res.status === 200, `/metrics -> ${res.status}`);
+  const text = await res.text();
+  const cpLines = text.split('\n').filter((line) => line.startsWith('cp_'));
+  for (const line of cpLines) {
+    console.log(`[dev-loop]   ${line}`);
+  }
+  assert(cpLines.some((l) => l.startsWith('cp_tenants{status="ready"}')), 'cp_tenants present');
+  assert(cpLines.some((l) => l.startsWith('cp_open_sockets')), 'cp_open_sockets present');
+  assert(cpLines.some((l) => l.startsWith('cp_http_requests_total')), 'cp_http_requests_total present');
+  assert(cpLines.some((l) => l.startsWith('cp_sms_sends_total')), 'cp_sms_sends_total present');
+  console.log(
+    '[dev-loop]   (in-memory counters reset on the step-12 restart; provisioning/upgrade histograms are covered by test/metrics.test.ts)',
+  );
+});
+
+step('T3: login bundle at /', async () => {
+  const anon = await fetch(`${cpBase}/login`);
+  assert(anon.status === 200, `/login -> ${anon.status}`);
+  const html = await anon.text();
+  const which = html.includes('Preparing your Bot') ? 'built-in placeholder' : 'WS-E dist-mobile-login bundle';
+  console.log(`[dev-loop]   GET /login (no cookie) -> 200 (serving: ${which}, ${html.length} bytes)`);
+
+  const ready = await fetch(`${cpBase}/`, { headers: { Cookie: cookie }, redirect: 'manual' });
+  assert(ready.status === 302 && ready.headers.get('location') === '/app/', 'ready session redirects to /app/');
+  console.log('[dev-loop]   GET / (cookie, ready tenant) -> 302 /app/');
 });
 
 // --- runner -----------------------------------------------------------------

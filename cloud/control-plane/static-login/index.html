@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IDBots — sign in</title>
+    <!--
+      Placeholder login bundle (REQ-B-19). Used only when WS-E's real build
+      (dist-mobile-login/ at the repo root, built by `pnpm build:mobile`) is
+      not present. It polls /api/v1/me and forwards a ready session to /app/.
+    -->
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 3rem auto; max-width: 28rem; padding: 0 1rem; color: #1c1e21; }
+      h1 { font-size: 1.4rem; }
+      #state { color: #666; }
+    </style>
+  </head>
+  <body>
+    <h1>IDBots</h1>
+    <p id="state">Preparing your Bot…</p>
+    <script>
+      (function poll() {
+        fetch('/api/v1/me', { credentials: 'same-origin' })
+          .then(function (res) {
+            if (res.status === 401) {
+              document.getElementById('state').textContent = 'Please sign in (placeholder login page).';
+              return;
+            }
+            return res.json().then(function (body) {
+              var status = body.tenant && body.tenant.status;
+              if (status === 'ready' || status === 'degraded') {
+                location.href = '/app/';
+              } else {
+                document.getElementById('state').textContent = 'Preparing your Bot… (' + status + ')';
+                setTimeout(poll, 3000);
+              }
+            });
+          })
+          .catch(function () { setTimeout(poll, 3000); });
+      })();
+    </script>
+  </body>
+</html>

@@ -18,6 +18,7 @@ import { FakeSmsProvider } from './sms.js';
 import { newInviteCode, newGatewaySecret } from './ids.js';
 import { encryptSecret, sha256Hex, maskPhone } from './crypto.js';
 import { upgradeTenants, findContainerId, recreateContainer } from './services/upgrade.js';
+import { MetricsRegistry } from './metrics.js';
 import type { AppContext } from './context.js';
 
 // --- CLI-scoped config (no listen/SMS/origin requirements) ------------------
@@ -77,9 +78,18 @@ function loadCliContext(env: NodeJS.ProcessEnv): AppContext {
     },
     fakeSmsNumbers: [],
     alertWebhook: env.CP_ALERT_WEBHOOK ?? null,
+    // The CLI never serves HTTP; this is an inert default.
+    loginBundleDir: '',
   } as ControlPlaneConfig;
   const docker = new DockerClient(config.dockerUrl);
-  return { config, db: openDb(dbPath), docker, sms: new FakeSmsProvider([]), poller: null };
+  return {
+    config,
+    db: openDb(dbPath),
+    docker,
+    sms: new FakeSmsProvider([]),
+    poller: null,
+    metrics: new MetricsRegistry(),
+  };
 }
 
 // --- helpers ----------------------------------------------------------------
