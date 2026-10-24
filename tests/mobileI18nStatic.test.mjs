@@ -59,13 +59,27 @@ function parseDictionary(source, varName) {
   const open = source.indexOf('{', decl);
   const body = extractObjectBody(source, open);
   const entries = new Map();
-  const pattern = /'(mobile\.[A-Za-z0-9_.-]+)':\s*'((?:\\.|[^'\\])*)'/g;
+  // A value is either a string literal or a module-constant reference (the
+  // build-mode-conditional demo notice). Constants are verified against
+  // their `const NAME = MOCK_LOGIN_API ? '<copy>' : ''` declaration below.
+  const pattern = /'(mobile\.[A-Za-z0-9_.-]+)':\s*('((?:\\.|[^'\\])*)'|([A-Za-z_$][A-Za-z0-9_$]*)),/g;
   let match;
   while ((match = pattern.exec(body)) !== null) {
-    const value = match[2].replace(/\\'/g, "'");
-    entries.set(match[1], value);
+    if (match[3] !== undefined) {
+      entries.set(match[1], { kind: 'literal', value: match[3].replace(/\\'/g, "'") });
+    } else {
+      entries.set(match[1], { kind: 'constant', value: match[4] });
+    }
   }
   return { body, entries };
+}
+
+/** Resolves the mock-mode copy behind a conditional constant declaration. */
+function constantTrueBranch(source, name) {
+  const decl = source.match(
+    new RegExp(`const ${name}(?:: string)? = MOCK_LOGIN_API \\? '((?:\\\\.|[^'\\\\])*)' : ''`),
+  );
+  return decl ? decl[1] : null;
 }
 
 const i18nSource = readFileSync(I18N_FILE, 'utf8');
@@ -79,9 +93,23 @@ test('mobile i18n: zh/en key parity, no empty values, mobile. prefix', () => {
   assert.deepEqual(zhKeys, enKeys, 'zh/en dictionaries must have identical key sets');
 
   for (const [dictName, dict] of [['zh', zh.entries], ['en', en.entries]]) {
-    for (const [key, value] of dict) {
+    for (const [key, entry] of dict) {
       assert.ok(key.startsWith('mobile.'), `${dictName} key must start with mobile.: ${key}`);
-      assert.ok(value.trim().length > 0, `${dictName} value for ${key} must not be empty`);
+      if (entry.kind === 'literal') {
+        assert.ok(
+          entry.value.trim().length > 0,
+          `${dictName} value for ${key} must not be empty`,
+        );
+      } else {
+        // Constant reference (build-mode-conditional copy): the true branch
+        // is what the mock/dev mode renders and must be real copy.
+        const copy = constantTrueBranch(i18nSource, entry.value);
+        assert.ok(copy, `${dictName} ${key} references unknown conditional constant ${entry.value}`);
+        assert.ok(
+          copy.trim().length > 0,
+          `${dictName} conditional constant ${entry.value} must carry non-empty copy`,
+        );
+      }
     }
   }
 

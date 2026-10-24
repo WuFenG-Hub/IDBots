@@ -15,6 +15,27 @@ export type MobileLanguage = 'zh' | 'en';
 
 type MobileDictionary = Record<string, string>;
 
+/**
+ * Login-demo mock switch, mirroring loginApi.ts: `true` only with
+ * `VITE_MOBILE_MOCK=1` outside production builds (`pnpm dev:mobile`). Vite's
+ * define statically replaces `process.env.NODE_ENV` with a literal, so every
+ * production build folds this to a constant `false` and the demo-notice
+ * constants below collapse to empty strings that minify away.
+ */
+const MOCK_LOGIN_API =
+  process.env.NODE_ENV !== 'production' &&
+  ((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_MOBILE_MOCK === '1' ||
+    process.env.VITE_MOBILE_MOCK === '1');
+
+/**
+ * Demo notice values (mobile.login.demoNote). Defined as constants so
+ * mobileI18nStatic's dictionary parser can verify the referenced copy is
+ * non-empty for the mock mode, while a production build folds
+ * `MOCK_LOGIN_API ? copy : ''` to `''` and never ships the notice string.
+ */
+const DEMO_NOTE_ZH = MOCK_LOGIN_API ? '演示环境：登录接口为 mock。' : '';
+const DEMO_NOTE_EN = MOCK_LOGIN_API ? 'Demo build: the login API is mocked.' : '';
+
 const zhTranslations: MobileDictionary = {
   'mobile.common.loading': '加载中…',
   'mobile.common.error': '出了点问题',
@@ -186,7 +207,7 @@ const zhTranslations: MobileDictionary = {
   'mobile.login.verified': '登录成功，正在准备你的 Bot（{status}）',
   'mobile.login.invalidPhone': '手机号格式不正确',
   'mobile.login.invalidCode': '验证码不正确，请重试',
-  'mobile.login.demoNote': '演示环境：登录接口为 mock。',
+  'mobile.login.demoNote': DEMO_NOTE_ZH,
   'mobile.login.resendIn': '重新发送验证码（{sec} 秒）',
   'mobile.login.invitePlaceholder': '邀请码',
   'mobile.login.inviteRequired': '注册需要邀请码。请输入邀请码后重试。',
@@ -403,7 +424,7 @@ const enTranslations: MobileDictionary = {
   'mobile.login.verified': 'Signed in; preparing your Bot ({status})',
   'mobile.login.invalidPhone': 'Invalid phone number',
   'mobile.login.invalidCode': 'Invalid code, please try again',
-  'mobile.login.demoNote': 'Demo build: the login API is mocked.',
+  'mobile.login.demoNote': DEMO_NOTE_EN,
   'mobile.login.resendIn': 'Resend code ({sec}s)',
   'mobile.login.invitePlaceholder': 'Invite code',
   'mobile.login.inviteRequired': 'An invite code is required to sign up. Enter one and try again.',
@@ -485,10 +506,13 @@ class MobileI18nService {
 
   t(key: string, params?: Record<string, string | number>): string {
     let translation = dictionaries[this.currentLanguage][key];
-    if (!translation) {
+    if (translation === undefined) {
+      // Missing key (e.g. the deleted demo notice outside VITE_MOBILE_MOCK
+      // builds): warn loudly for development, but render nothing — falling
+      // back to the key name would leak an internal identifier into the UI.
       console.warn(`[mobile-i18n] missing key: ${key} (${this.currentLanguage})`);
       translation = dictionaries.en[key];
-      if (!translation) return key;
+      if (translation === undefined) return '';
     }
     if (params) {
       translation = translation.replace(/\{(\w+)\}/g, (match, name: string) =>

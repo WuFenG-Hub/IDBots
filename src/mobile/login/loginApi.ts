@@ -1,11 +1,21 @@
 /**
  * Login API seam (C3 control-plane auth endpoints).
  *
- * The page talks ONLY to these functions. T1/T2 implement them as mocks;
- * T3/T4 swaps the internals for `fetch('/api/v1/auth/sms/send')`,
- * `fetch('/api/v1/auth/sms/verify')`, `fetch('/api/v1/me')` and
- * `fetch('/api/v1/auth/logout')` without touching the page. Request and
- * response shapes already mirror C3 (01-interface-contracts.md).
+ * The page talks ONLY to these functions. Under `VITE_MOBILE_MOCK=1`
+ * (`pnpm dev:mobile`) the functions below serve the REQ-E-8 demo mocks; any
+ * other build hits the real C3 endpoints per 01-interface-contracts.md:
+ * `POST /api/v1/auth/sms/send`, `POST /api/v1/auth/sms/verify`,
+ * `GET /api/v1/me`, `POST /api/v1/auth/logout` and
+ * `POST /api/v1/account/deletion-request`. Request and response shapes mirror
+ * C3 exactly, so swapping never touches the page.
+ *
+ * The page is served from the same origin as the control plane (staging:
+ * `https://staging.idbots.world`), so the fetches use origin-relative URLs
+ * and `credentials: 'same-origin'` — the browser fills in the `Origin` header
+ * itself and the `idb_session` cookie rides along (the control plane rejects
+ * state-changing requests whose Origin does not match the deployment origin
+ * with `403 ORIGIN_NOT_ALLOWED`; a hand-set Origin header is a forbidden
+ * header name, so there is nothing to configure here).
  *
  * Logging never includes the phone number, the SMS code, or the invite code
  * (SEC-12).
@@ -63,14 +73,172 @@ export interface AccountDeletionResult {
   success: boolean;
 }
 
-const MOCK_LATENCY_MS = 300;
-const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** C3 error body: `{"error":{"code":"…","message":"…"}}`. */
+interface ApiErrorBody {
+  error?: { code?: string; message?: string };
+}
 
-function mockError(code: string): Error & { code: string } {
-  const error = new Error(code) as Error & { code: string };
+/**
+ * Mock-mode switch (REQ-E-8). `true` only with `VITE_MOBILE_MOCK=1` outside
+ * production builds: `pnpm dev:mobile` sets it, `pnpm build:mobile` leaves it
+ * unset. Vite's define statically replaces `process.env.NODE_ENV` with a
+ * literal, so in every production bundle this folds to a constant `false`,
+ * esbuild dead-code-eliminates every mock branch below, and none of the mock
+ * code or copy reaches the shipped bundle. On the node test runner
+ * `import.meta.env` is absent and process.env drives the switch, so the mock
+ * suite (VITE_MOBILE_MOCK=1) and the real-C3 suite stay testable.
+ */
+const MOCK_LOGIN_API =
+  process.env.NODE_ENV !== 'production' &&
+  ((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_MOBILE_MOCK === '1' ||
+    process.env.VITE_MOBILE_MOCK === '1');
+
+function errorWithCode(code: string): Error & { code: string } {
+  const error = new Error(`loginApi: ${code}`) as Error & { code: string };
   error.code = code;
   return error;
 }
+
+/** Maps a C3 error response to a page-dispatchable error code. */
+async function responseError(response: Response): Promise<Error & { code: string }> {
+  let code = '';
+  try {
+    const body = (await response.json()) as ApiErrorBody;
+    if (typeof body?.error?.code === 'string' && body.error.code) {
+      code = body.error.code;
+    }
+  } catch {
+    // Non-JSON error body: fall through to the status-derived code.
+  }
+  if (!code && response.status === 401) {
+    code = 'UNAUTHORIZED';
+  }
+  if (!code) {
+    code = `HTTP_${response.status}`;
+  }
+  return errorWithCode(code);
+}
+
+async function requestJson<T>(
+  path: string,
+  init?: { method?: string; jsonBody?: unknown },
+): Promise<T> {
+  const response = await fetch(path, {
+    credentials: 'same-origin',
+    method: init?.method ?? 'GET',
+    ...(init?.jsonBody !== undefined
+      ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(init.jsonBody) }
+      : {}),
+  });
+  if (!response.ok) {
+    throw await responseError(response);
+  }
+  return (await response.json()) as T;
+}
+
+// ---------------------------------------------------------------------------
+// Real C3 implementation.
+// ---------------------------------------------------------------------------
+
+/** C3 `POST /api/v1/auth/sms/send` with `{ phone, purpose: 'login' }`. */
+export async function sendCode(phone: string, purpose = 'login'): Promise<SendCodeResult> {
+  if (MOCK_LOGIN_API) {
+    return mockSendCode(phone, purpose);
+  }
+  console.info('[loginApi] sendCode', { purpose });
+  if (!/^\+86\d{11}$/.test(phone)) {
+    throw errorWithCode('INVALID_PHONE');
+  }
+  return requestJson<SendCodeResult>('/api/v1/auth/sms/send', {
+    method: 'POST',
+    jsonBody: { phone, purpose },
+  });
+}
+
+/**
+ * C3 `POST /api/v1/auth/sms/verify` with
+ * `{ phone, code, inviteCode?, displayName? }`. Success sets the
+ * `idb_session` cookie; error codes pass through verbatim (`CODE_INVALID`,
+ * `CODE_EXPIRED`, `INVITE_REQUIRED`, `INVITE_INVALID`, `INVITE_EXHAUSTED`,
+ * `USER_DISABLED`, `TOO_MANY_ATTEMPTS`).
+ */
+export async function verifyCode(
+  phone: string,
+  code: string,
+  options?: VerifyCodeOptions,
+): Promise<VerifyCodeResult> {
+  if (MOCK_LOGIN_API) {
+    return mockVerifyCode(phone, code, options);
+  }
+  const inviteCode = options?.inviteCode;
+  const displayName = options?.displayName;
+  console.info('[loginApi] verifyCode', {
+    hasInviteCode: Boolean(inviteCode),
+    hasDisplayName: Boolean(displayName),
+  });
+  if (!code) {
+    throw errorWithCode('CODE_INVALID');
+  }
+  return requestJson<VerifyCodeResult>('/api/v1/auth/sms/verify', {
+    method: 'POST',
+    jsonBody: {
+      phone,
+      code,
+      ...(inviteCode !== undefined ? { inviteCode } : {}),
+      ...(displayName !== undefined ? { displayName } : {}),
+    },
+  });
+}
+
+/** C3 `GET /api/v1/me` (session cookie). */
+export async function getMe(): Promise<GetMeResult> {
+  if (MOCK_LOGIN_API) {
+    return mockGetMe();
+  }
+  console.info('[loginApi] getMe');
+  return requestJson<GetMeResult>('/api/v1/me');
+}
+
+/** C3 `POST /api/v1/auth/logout` (204, cookie cleared). */
+export async function logout(): Promise<LogoutResult> {
+  if (MOCK_LOGIN_API) {
+    return mockLogout();
+  }
+  console.info('[loginApi] logout');
+  const response = await fetch('/api/v1/auth/logout', {
+    credentials: 'same-origin',
+    method: 'POST',
+  });
+  if (!response.ok) {
+    throw await responseError(response);
+  }
+  return { success: true };
+}
+
+/**
+ * C3 `POST /api/v1/account/deletion-request` (`{ reason? }` →
+ * `202 { requestId }`; the control plane keeps the account in a
+ * pending-deletion grace period server-side).
+ */
+export async function requestAccountDeletion(reason?: string): Promise<AccountDeletionResult> {
+  if (MOCK_LOGIN_API) {
+    return mockRequestAccountDeletion(reason);
+  }
+  const trimmed = reason?.trim();
+  console.info('[loginApi] requestAccountDeletion', { hasReason: Boolean(trimmed) });
+  await requestJson<{ requestId: string }>('/api/v1/account/deletion-request', {
+    method: 'POST',
+    jsonBody: trimmed ? { reason: trimmed } : {},
+  });
+  return { success: true };
+}
+
+// ---------------------------------------------------------------------------
+// REQ-E-8 demo mocks, active only under VITE_MOBILE_MOCK=1.
+// ---------------------------------------------------------------------------
+
+const MOCK_LATENCY_MS = 300;
+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
  * Mock page-session state. `verifiedPhones` stands in for the account table
@@ -82,25 +250,16 @@ const verifiedPhones = new Set<string>();
 let mockSessionPhone: string | null = null;
 let mockMePollCount = 0;
 
-/**
- * C3 `POST /api/v1/auth/sms/send`.
- *
- * The production request body MUST include `purpose` (staging returns 400
- * without it): `{ phone, purpose: 'login' }`.
- */
-export async function sendCode(phone: string, purpose = 'login'): Promise<SendCodeResult> {
+async function mockSendCode(phone: string, purpose: string): Promise<SendCodeResult> {
   console.info('[loginApi] sendCode called (mock)', { purpose });
   await wait(MOCK_LATENCY_MS);
   if (!/^\+86\d{11}$/.test(phone)) {
-    throw mockError('INVALID_PHONE');
+    throw errorWithCode('INVALID_PHONE');
   }
   return { resendAfterSec: 60 };
 }
 
 /**
- * C3 `POST /api/v1/auth/sms/verify` with
- * `{ phone, code, inviteCode?, displayName? }`.
- *
  * Mock rules (deterministic, so the demo can exercise every branch):
  * - empty code -> `CODE_INVALID`; code `000000` -> `CODE_EXPIRED`;
  * - a phone never verified in this page session is a new account: without
@@ -108,7 +267,7 @@ export async function sendCode(phone: string, purpose = 'login'): Promise<SendCo
  *   `INVITE_EXHAUSTED`/`INVITE_INVALID`; any other invite is accepted;
  * - a returning phone needs no invite.
  */
-export async function verifyCode(
+async function mockVerifyCode(
   phone: string,
   code: string,
   options?: VerifyCodeOptions,
@@ -121,20 +280,20 @@ export async function verifyCode(
   });
   await wait(MOCK_LATENCY_MS);
   if (!code) {
-    throw mockError('CODE_INVALID');
+    throw errorWithCode('CODE_INVALID');
   }
   if (code === '000000') {
-    throw mockError('CODE_EXPIRED');
+    throw errorWithCode('CODE_EXPIRED');
   }
   const isReturningPhone = verifiedPhones.has(phone);
   if (!isReturningPhone && !inviteCode) {
-    throw mockError('INVITE_REQUIRED');
+    throw errorWithCode('INVITE_REQUIRED');
   }
   if (inviteCode === 'FULL') {
-    throw mockError('INVITE_EXHAUSTED');
+    throw errorWithCode('INVITE_EXHAUSTED');
   }
   if (inviteCode === 'BAD') {
-    throw mockError('INVITE_INVALID');
+    throw errorWithCode('INVITE_INVALID');
   }
   verifiedPhones.add(phone);
   mockSessionPhone = phone;
@@ -174,12 +333,11 @@ const TENANT_PHASE: Partial<Record<LoginTenant['status'], string>> = {
   onboarding: 'initializing-workspace',
 };
 
-/** C3 `GET /api/v1/me` (session cookie in production). */
-export async function getMe(): Promise<GetMeResult> {
+async function mockGetMe(): Promise<GetMeResult> {
   console.info('[loginApi] getMe called (mock)');
   await wait(MOCK_LATENCY_MS);
   if (!mockSessionPhone) {
-    throw mockError('UNAUTHORIZED');
+    throw errorWithCode('UNAUTHORIZED');
   }
   mockMePollCount += 1;
   const status = TENANT_PROGRESSION[mockMePollCount - 1] ?? 'ready';
@@ -200,11 +358,8 @@ export async function getMe(): Promise<GetMeResult> {
   };
 }
 
-/**
- * C3 `POST /api/v1/auth/logout` (204 in production). Clears the mock session
- * and resets the tenant progression so the next sign-in starts over.
- */
-export async function logout(): Promise<LogoutResult> {
+/** Clears the mock session and resets the tenant progression. */
+async function mockLogout(): Promise<LogoutResult> {
   console.info('[loginApi] logout called (mock)');
   await wait(MOCK_LATENCY_MS);
   mockSessionPhone = null;
@@ -213,19 +368,16 @@ export async function logout(): Promise<LogoutResult> {
 }
 
 /**
- * C3 `POST /api/v1/account/deletion-requests` (shape per the Me screen's
- * delete-account flow: an optional human reason). In the mock the request is
- * accepted whenever a session exists and the session is cleared immediately
- * (the real control plane keeps the account in a pending-deletion grace
- * period server-side).
+ * In the mock the request is accepted whenever a session exists and the
+ * session is cleared immediately.
  */
-export async function requestAccountDeletion(reason?: string): Promise<AccountDeletionResult> {
+async function mockRequestAccountDeletion(reason?: string): Promise<AccountDeletionResult> {
   console.info('[loginApi] requestAccountDeletion called (mock)', {
     hasReason: Boolean(reason && reason.trim()),
   });
   await wait(MOCK_LATENCY_MS);
   if (!mockSessionPhone) {
-    throw mockError('UNAUTHORIZED');
+    throw errorWithCode('UNAUTHORIZED');
   }
   mockSessionPhone = null;
   mockMePollCount = 0;

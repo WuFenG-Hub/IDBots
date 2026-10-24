@@ -709,6 +709,8 @@ deploy/hosts/prometheus.yml
 
 # WS-E login API seam tests
 !tests/mobileLoginApi.test.ts
+!tests/mobileLoginApiReal.test.ts
+!tests/mobileI18nMockNotice.test.ts
 
 # WS-E login in-app browser detection tests
 !tests/mobileInAppBrowser.test.ts
