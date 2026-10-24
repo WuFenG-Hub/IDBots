@@ -44,6 +44,48 @@ class SchedulerStoppedError extends Error {
   }
 }
 
+/**
+ * Lifecycle preamble prepended to a recurring task's prompt at fire time.
+ * The host only states FACTS (fire number, budget, declared exit condition,
+ * origin pointer); deciding whether the condition is met stays with the bot
+ * (protocol-standard over host heuristics). One-shot 'at' tasks get no
+ * preamble — the host already disables them after execution.
+ *
+ * Exported for tests.
+ */
+export function buildScheduledTaskLifecyclePreamble(task: ScheduledTask): string {
+  if (task.schedule.type === 'at') return '';
+
+  const fireNumber = (task.fireCount ?? 0) + 1;
+  const maxFires = task.maxFires ?? null;
+  const remaining = maxFires != null ? maxFires - fireNumber : null;
+  const lines: string[] = [`[Scheduled task lifecycle] Task "${task.name}" (id ${task.id}), fire #${fireNumber}.`];
+
+  if (maxFires != null) {
+    lines.push(
+      remaining > 0
+        ? `Fire budget: ${maxFires} total, ${remaining} remaining after this one.`
+        : `Fire budget: ${maxFires} total — this is the FINAL fire; the task will be disabled automatically after this run. Finish or hand off anything it is responsible for.`
+    );
+  }
+
+  lines.push(
+    task.exitCondition?.trim()
+      ? `Exit condition (declared at creation): "${task.exitCondition.trim()}"`
+      : 'No exit condition was declared for this task — scrutinize whether it still has a reason to run.'
+  );
+
+  lines.push(
+    `After this run's work, decide whether this task still deserves to exist. If the exit condition is met, or the reason this task exists is gone (the upstream order/thread/group task it serves is finished or moot), retire it now: bash "$SKILLS_ROOT/scheduled-task/scripts/toggle-task.sh" ${task.id} false — then state in your final message that you retired the task and why. Keeping a task whose purpose has ended is a defect, not caution.`
+  );
+
+  if (task.originSessionId) {
+    lines.push(`Created from session ${task.originSessionId}${task.originContext ? ` (${task.originContext})` : ''} — consult it if the task's purpose is unclear.`);
+  }
+
+  return lines.join('\n');
+}
+
 export class Scheduler {
   private store: ScheduledTaskStore;
   private coworkStore: CoworkStore;
@@ -420,11 +462,17 @@ export class Scheduler {
   private async startCoworkSession(task: ScheduledTask, executionGeneration: number): Promise<string> {
     this.assertExecutionCurrent(executionGeneration);
 
+    // The lifecycle preamble (fire number, budget, exit clause) rides in front
+    // of the prompt on EVERY delivery path so the firing bot can judge — and
+    // execute — the task's retirement in the same run.
+    const preamble = buildScheduledTaskLifecyclePreamble(task);
+    const fullPrompt = preamble ? `${preamble}\n\n${task.prompt}` : task.prompt;
+
     // A task bound to an existing session posts its prompt there instead of
     // opening a fresh one. An invalid binding (deleted/archived/A2A/sandbox
     // session) falls through to the fresh-session path below.
     if (task.targetSessionId) {
-      const boundSessionId = await this.submitToBoundSession(task, task.targetSessionId, executionGeneration);
+      const boundSessionId = await this.submitToBoundSession(task, task.targetSessionId, fullPrompt, executionGeneration);
       if (boundSessionId) return boundSessionId;
     }
 
@@ -464,7 +512,7 @@ export class Scheduler {
     // Add initial user message
     this.coworkStore.addMessage(sessionId, {
       type: 'user',
-      content: task.prompt,
+      content: fullPrompt,
       metadata: { origin: 'schedule', originLabel: task.name },
     });
 
@@ -495,7 +543,7 @@ export class Scheduler {
       }, watchdogMs);
     }
     try {
-      await runner.startSession(sessionId, task.prompt, {
+      await runner.startSession(sessionId, fullPrompt, {
         skipInitialUserMessage: true,
         ...(practiceProposal
           ? {
@@ -529,6 +577,7 @@ export class Scheduler {
   private async submitToBoundSession(
     task: ScheduledTask,
     targetSessionId: string,
+    fullPrompt: string,
     executionGeneration: number,
   ): Promise<string | null> {
     // Defense in depth: without the submit seam we cannot honour the binding.
@@ -562,7 +611,7 @@ export class Scheduler {
     const result = await this.submitToSession({
       sessionId: targetSessionId,
       submissionId: randomUUID(),
-      text: task.prompt,
+      text: fullPrompt,
       origin: 'schedule',
       originLabel: task.name,
     });
