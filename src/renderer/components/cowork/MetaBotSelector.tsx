@@ -4,7 +4,19 @@ import TwinBadge from '../metabots/TwinBadge';
 import { i18nService } from '../../services/i18n';
 import { placePopoverAbove, placePopoverBelow, useAnchorMoveWatcher } from '../../utils/anchoredPopover';
 
-export type MetaBotForSelector = { id: number; name: string; avatar: string | null; metabot_type: string };
+/**
+ * Minimal bot row shared by the bot pickers and the by-Bot session view.
+ * `created_at` (bot creation time, drives the by-Bot view's group order) is
+ * optional because the composer-side providers of this type predate it; the
+ * getMetaBots IPC always fills it in.
+ */
+export type MetaBotForSelector = {
+  id: number;
+  name: string;
+  avatar: string | null;
+  metabot_type: string;
+  created_at?: number;
+};
 
 /**
  * `selectedId` value of the leading "All Bots" entry that `allowAll` adds. A

@@ -307,13 +307,13 @@ test('the list renders one Autonomous Tasks fold, collapsed by default, directly
   assert.match(src, /data-testid="autonomous-tasks-section"/);
   assert.match(src, /const \[isAutoTasksExpanded, setIsAutoTasksExpanded\] = useState<boolean>\(loadAutoTasksExpanded\)/);
   assert.match(src, /parseAutoTasksExpandedPreference\(window\.localStorage\.getItem\(AUTO_TASKS_EXPANDED_STORAGE_KEY\)\)/);
-  // Timeline, project and flat branches all render the same fold.
+  // Timeline, by-Bot and flat branches all render the same fold.
   assert.equal((src.match(/\{renderAutoTasksSection\(\)\}/g) ?? []).length, 3);
   // Position: directly under the pinned block, above the Follow-Up section and
   // the content groups, so the folders are visible without scrolling — sitting
   // last made the fold read as if the feature did not exist.
   assert.match(src, /\{renderPinnedSection\(timelineGrouped\.pinned\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{renderFollowUpSection\(\)\}\s*\{timelineGrouped\.groups\.map/);
-  assert.match(src, /\{renderPinnedSection\(projectGrouped\.pinned\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{renderFollowUpSection\(\)\}\s*\{projectGrouped\.groups\.map/);
+  assert.match(src, /\{renderPinnedSection\(botGrouped\.pinned\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{renderFollowUpSection\(\)\}\s*\{botGrouped\.groups\.map/);
   const flatPinned = src.indexOf('sortedSessions.filter((session) => session.pinned).map(renderItem)');
   const flatFollowUp = src.indexOf('{renderFollowUpSection()}', flatPinned);
   const flatFold = src.indexOf('{renderAutoTasksSection()}', flatPinned);
@@ -330,13 +330,13 @@ test('the list renders one Follow-Up section below the fold, collapsed by defaul
   assert.match(src, /data-testid="follow-up-tasks-section"/);
   assert.match(src, /const \[isFollowUpExpanded, setIsFollowUpExpanded\] = useState<boolean>\(loadFollowUpExpanded\)/);
   assert.match(src, /parseFollowUpExpandedPreference\(window\.localStorage\.getItem\(FOLLOW_UP_EXPANDED_STORAGE_KEY\)\)/);
-  // Timeline, project and flat branches all render the same section, exactly
+  // Timeline, by-Bot and flat branches all render the same section, exactly
   // once each.
   assert.equal((src.match(/\{renderFollowUpSection\(\)\}/g) ?? []).length, 3);
   // Position: directly under the Autonomous fold, which sits under the pinned
   // block (owner 2026-10-23: auto first, follow-up second).
   assert.match(src, /\{renderPinnedSection\(timelineGrouped\.pinned\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{renderFollowUpSection\(\)\}/);
-  assert.match(src, /\{renderPinnedSection\(projectGrouped\.pinned\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{renderFollowUpSection\(\)\}/);
+  assert.match(src, /\{renderPinnedSection\(botGrouped\.pinned\)\}\s*\{renderAutoTasksSection\(\)\}\s*\{renderFollowUpSection\(\)\}/);
   // Nothing is rendered when nothing is pending.
   assert.match(src, /sortedFollowUpSessions\.length > 0 && \(/);
   // An empty human list still renders the section (decisions must not hide

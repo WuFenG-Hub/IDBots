@@ -1788,7 +1788,7 @@ interface IElectronAPI {
     listGuestInvites: () => Promise<{ success: boolean; items?: OpenTeamGuestInvite[]; error?: string }>;
   };
   idbots: {
-    getMetaBots: () => Promise<{ success: boolean; list?: Array<{ id: number; name: string; avatar: string | null; metabot_type: string }>; error?: string }>;
+    getMetaBots: () => Promise<{ success: boolean; list?: Array<{ id: number; name: string; avatar: string | null; metabot_type: string; created_at: number }>; error?: string }>;
     getOfficialSkillsStatus: () => Promise<{ success: boolean; skills?: OfficialSkillItem[]; error?: string }>;
     installOfficialSkill: (skill: { name: string; skillFileUri: string; remoteVersion: string; remoteCreator: string }) =>
       Promise<{ success: boolean; error?: string }>;

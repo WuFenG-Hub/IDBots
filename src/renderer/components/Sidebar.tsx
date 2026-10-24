@@ -101,7 +101,11 @@ const SESSION_SORT_MODE_STORAGE_KEY = 'sessionSortMode';
 const loadSessionViewMode = (): SessionViewMode => {
   try {
     const stored = window.localStorage.getItem(SESSION_VIEW_MODE_STORAGE_KEY);
-    if (stored === 'project') return 'project';
+    // 'project' is the retired directory-based view; its closest successor is
+    // the by-Bot view, so the stored choice carries over instead of snapping
+    // back to the timeline default.
+    if (stored === 'project') return 'bot';
+    if (stored === 'bot') return 'bot';
   } catch {
     // localStorage unavailable; fall through to the default view.
   }
@@ -738,7 +742,7 @@ const Sidebar: React.FC<SidebarProps> = ({
           {taskRecordTab === 'local' && localHumanSessions.length > 0 && (
             <div className="flex items-center justify-between gap-1.5 px-3 pb-1.5 shrink-0">
               <span className="min-w-0 truncate text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {i18nService.t(sessionViewMode === 'project' ? 'sessionViewByProject' : 'sessionViewTimeline')}
+                {i18nService.t(sessionViewMode === 'bot' ? 'sessionViewByBot' : 'sessionViewTimeline')}
               </span>
               <div className="flex items-center gap-1.5">
                 {isBatchArchiveMode ? (

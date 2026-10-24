@@ -7,12 +7,10 @@
  *  - timeline: buckets sessions by last-activity (or creation) date into
  *    Today / Yesterday / This Week (2-7 days) / Last Week (8-14 days) /
  *    This Month / calendar-month groups. Time buckets are static headers.
- *  - project: buckets sessions by working directory. Bot-workspace sessions
- *    (<root>/bots/<botId>/<date>, the "current bot's working directory"
- *    default) collapse to one group per bot keyed by the bot identity, not the
- *    per-day folder; every other directory is its own group, ordered by when
- *    the project's first session appeared (newest first). Project groups are
- *    collapsible in the UI.
+ *  - bot: one group per local bot, whatever the working directory — every
+ *    enabled bot from the live metabot list gets a group even with zero
+ *    conversations. Groups are ordered Twin first, then by bot creation time
+ *    ascending (the oldest bot sits on top), and are collapsible in the UI.
  *
  * Sorting within every bucket (and the pinned section) follows the chosen sort
  * mode: updatedAt (default) or createdAt. Pinned sessions are always pulled
@@ -21,7 +19,7 @@
 
 import type { CoworkSessionSummary } from '../types/cowork';
 
-export type SessionViewMode = 'timeline' | 'project';
+export type SessionViewMode = 'timeline' | 'bot';
 export type SessionSortMode = 'updatedAt' | 'createdAt';
 
 /** The timeline bucket a session lands in; month buckets carry a `YYYY-MM` key. */
@@ -32,20 +30,6 @@ export interface SessionTimelineGroup {
   /** Preformatted label for calendar-month buckets (e.g. "Jul 2026" / "2026年7月"). */
   monthLabel?: string;
   sessions: CoworkSessionSummary[];
-}
-
-export interface SessionProjectGroup {
-  key: string;
-  kind: 'bot' | 'directory' | 'other';
-  /** Bot identity for kind === 'bot' (drives the avatar + name header). */
-  bot?: { id: number; name: string | null; avatar: string | null };
-  /** Directory display name (last path segment) for kind === 'directory'. */
-  directoryName?: string;
-  /** Full working-directory path (tooltip) for kind === 'directory'. */
-  directoryPath?: string;
-  sessions: CoworkSessionSummary[];
-  /** When this group's first session was created; orders groups, newest first. */
-  firstSeenAt: number;
 }
 
 export interface GroupedSessions<TGroup> {
@@ -192,120 +176,134 @@ export const groupSessionsByTimeline = (
   return { pinned, groups };
 };
 
-/**
- * Matches the per-bot dated workspace layout produced by main's
- * libs/botWorkspace: <root>/bots/<metabotId>/<YYYY-MM-DD> (the date segment is
- * optional so a manually picked <root>/bots/<id> folder groups the same way).
- */
-const BOT_WORKSPACE_PATH_RE = /[\\/]bots[\\/](\d+)(?:[\\/]\d{4}-\d{2}-\d{2})?$/;
-
-interface ProjectKeyResolution {
-  kind: 'bot' | 'directory' | 'other';
-  key: string;
-  botId?: number;
-  directoryPath?: string;
+/** A live bot the by-Bot view builds its groups from (the enabled metabot
+ * list: identity, twin flag for the fixed first slot, and creation time for
+ * the group order). */
+export interface BotViewBot {
+  id: number;
+  name: string | null;
+  avatar: string | null;
+  isTwin: boolean;
+  createdAt: number;
 }
 
-const resolveProjectKey = (session: CoworkSessionSummary): ProjectKeyResolution => {
-  const rawCwd = session.cwd?.trim();
-  if (rawCwd) {
-    const normalized = rawCwd.replace(/[\\/]+$/, '') || rawCwd;
-    const botMatch = BOT_WORKSPACE_PATH_RE.exec(normalized);
-    if (botMatch) {
-      // The dated folder is keyed by the session's own bot id; only then does
-      // the group become the bot itself (avatar + name, no path).
-      if (session.metabotId != null && Number(botMatch[1]) === session.metabotId) {
-        return { kind: 'bot', key: `bot:${session.metabotId}`, botId: session.metabotId };
-      }
-      // A bot-workspace folder picked manually for another bot stays a
-      // directory group, keyed by its date-stripped root so per-day folders do
-      // not fragment the group.
-      const directoryPath = normalized.replace(/[\\/]\d{4}-\d{2}-\d{2}$/, '');
-      return { kind: 'directory', key: `dir:${directoryPath}`, directoryPath };
-    }
-    return { kind: 'directory', key: `dir:${normalized}`, directoryPath: normalized };
-  }
-  // Legacy rows without a persisted cwd: the bot workspace has always been the
-  // default chain, so attribute by bot when possible.
-  if (session.metabotId != null) {
-    return { kind: 'bot', key: `bot:${session.metabotId}`, botId: session.metabotId };
-  }
-  return { kind: 'other', key: 'other' };
+export interface SessionBotListGroup {
+  key: string;
+  kind: 'bot' | 'other';
+  /** Bot identity (drives the avatar + name header). */
+  bot?: { id: number; name: string | null; avatar: string | null };
+  sessions: CoworkSessionSummary[];
+}
+
+/** Order for the seeded bot groups: Twin first, then creation time ascending
+ * (the earliest-created bot sits on top), id as the deterministic tie-break. */
+const compareBotViewBots = (a: BotViewBot, b: BotViewBot): number => {
+  if (a.isTwin !== b.isTwin) return a.isTwin ? -1 : 1;
+  if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+  return a.id - b.id;
 };
 
-/** Accumulator used while folding sessions into project groups. */
-interface ProjectGroupAccumulator extends SessionProjectGroup {
-  /** updatedAt of the row the current bot snapshot came from (freshness). */
-  botSnapshotUpdatedAt: number;
-}
-
 /**
- * Group sessions by working directory. Bot-workspace sessions form one group
- * per bot (avatar + name header, no path); other directories form one group
- * per path. Groups are ordered by their first session's creation time, newest
- * first, so a newly used project rises to the top.
+ * Group sessions by bot — one group per local bot, independent of any working
+ * directory. Every bot in `bots` gets a group even with zero sessions, so the
+ * view mirrors the local bot roster (20 bots → 20 groups). Sessions whose bot
+ * is not in the live list (legacy rows without a metabotId, or the bot was
+ * deleted/disabled since) fall into one trailing "other" group so no
+ * conversation silently disappears from the view.
+ *
+ * When `bots` is empty (the live list is still loading, or its IPC failed) the
+ * groups are derived straight from the sessions — per bot id, identity from
+ * the freshest row snapshot, most recently active bot first — so the list
+ * still groups by bot instead of dumping everything into "other".
  */
-export const groupSessionsByProject = (
+export const groupSessionsByBot = (
   sessions: CoworkSessionSummary[],
   sortMode: SessionSortMode,
-): GroupedSessions<SessionProjectGroup> => {
+  bots: readonly BotViewBot[],
+): GroupedSessions<SessionBotListGroup> => {
   const { pinned, rest } = splitPinned(sessions, sortMode);
-  const byKey = new Map<string, ProjectGroupAccumulator>();
 
-  for (const session of rest) {
-    const resolution = resolveProjectKey(session);
-    let entry = byKey.get(resolution.key);
-    if (!entry) {
-      entry = {
-        key: resolution.key,
-        kind: resolution.kind,
+  // The trailing bucket for rows no live bot claims. Created lazily so the
+  // header never renders for an empty roster edge case.
+  let other: SessionBotListGroup | null = null;
+  const pushToOther = (session: CoworkSessionSummary): void => {
+    if (!other) other = { key: 'other', kind: 'other', sessions: [] };
+    other.sessions.push(session);
+  };
+
+  const groups: SessionBotListGroup[] = [];
+
+  if (bots.length > 0) {
+    const byId = new Map<number, SessionBotListGroup>();
+    for (const bot of [...bots].sort(compareBotViewBots)) {
+      const group: SessionBotListGroup = {
+        key: `bot:${bot.id}`,
+        kind: 'bot',
+        bot: { id: bot.id, name: bot.name, avatar: bot.avatar },
         sessions: [],
-        firstSeenAt: Number.MAX_SAFE_INTEGER,
-        botSnapshotUpdatedAt: -1,
       };
-      byKey.set(resolution.key, entry);
+      byId.set(bot.id, group);
+      groups.push(group);
     }
-    entry.sessions.push(session);
-    if (resolution.directoryPath && !entry.directoryPath) {
-      entry.directoryPath = resolution.directoryPath;
+    for (const session of rest) {
+      const group = session.metabotId != null ? byId.get(session.metabotId) : undefined;
+      if (group) group.sessions.push(session);
+      else pushToOther(session);
     }
-    if (session.createdAt < entry.firstSeenAt) {
-      entry.firstSeenAt = session.createdAt;
+  } else {
+    // Degraded roster: derive one group per bot id from the sessions
+    // themselves. The freshest row that carries a name/avatar snapshot wins
+    // the header identity (same freshness rule the retired project view used).
+    interface DerivedBotEntry {
+      group: SessionBotListGroup;
+      latestActivityAt: number;
+      snapshotUpdatedAt: number;
     }
-    if (resolution.kind === 'bot') {
-      // Prefer the freshest snapshot in the group so a renamed/re-avatar'd
-      // bot updates the header as soon as any session row refreshes; fields
-      // the fresher row lacks fall back to the previous snapshot.
-      const hasIdentity = Boolean(session.metabotName || session.metabotAvatar);
-      if (hasIdentity && session.updatedAt >= entry.botSnapshotUpdatedAt) {
-        entry.bot = {
-          id: resolution.botId ?? session.metabotId ?? 0,
-          name: session.metabotName ?? entry.bot?.name ?? null,
-          avatar: session.metabotAvatar ?? entry.bot?.avatar ?? null,
+    const derived = new Map<number, DerivedBotEntry>();
+    for (const session of rest) {
+      if (session.metabotId == null) {
+        pushToOther(session);
+        continue;
+      }
+      let entry = derived.get(session.metabotId);
+      if (!entry) {
+        const group: SessionBotListGroup = {
+          key: `bot:${session.metabotId}`,
+          kind: 'bot',
+          bot: { id: session.metabotId, name: null, avatar: null },
+          sessions: [],
         };
-        entry.botSnapshotUpdatedAt = session.updatedAt;
+        entry = { group, latestActivityAt: Number.MIN_SAFE_INTEGER, snapshotUpdatedAt: -1 };
+        derived.set(session.metabotId, entry);
+      }
+      entry.group.sessions.push(session);
+      entry.latestActivityAt = Math.max(entry.latestActivityAt, session.updatedAt);
+      const hasIdentity = Boolean(session.metabotName || session.metabotAvatar);
+      if (hasIdentity && session.updatedAt >= entry.snapshotUpdatedAt) {
+        entry.group.bot = {
+          id: session.metabotId,
+          name: session.metabotName ?? entry.group.bot?.name ?? null,
+          avatar: session.metabotAvatar ?? entry.group.bot?.avatar ?? null,
+        };
+        entry.snapshotUpdatedAt = session.updatedAt;
       }
     }
+    // Most recently active bot first: with no roster there is no creation
+    // time to order by, so activity recency is the closest stable stand-in.
+    groups.push(
+      ...[...derived.values()]
+        .sort((a, b) => {
+          if (a.latestActivityAt !== b.latestActivityAt) return b.latestActivityAt - a.latestActivityAt;
+          return (a.group.bot?.id ?? 0) - (b.group.bot?.id ?? 0);
+        })
+        .map((entry) => entry.group),
+    );
   }
 
-  const directoryNameOf = (dirPath: string): string =>
-    dirPath.split(/[\\/]/).filter(Boolean).pop() ?? dirPath;
-
-  const groups: SessionProjectGroup[] = [...byKey.values()].map((entry) => ({
-    key: entry.key,
-    kind: entry.kind,
-    sessions: sortSessionsByMode(entry.sessions, sortMode),
-    firstSeenAt: entry.firstSeenAt,
-    ...(entry.bot ? { bot: entry.bot } : {}),
-    ...(entry.directoryPath
-      ? { directoryPath: entry.directoryPath, directoryName: directoryNameOf(entry.directoryPath) }
-      : {}),
-  }));
-
-  groups.sort((a, b) => {
-    if (a.firstSeenAt !== b.firstSeenAt) return b.firstSeenAt - a.firstSeenAt;
-    return a.key.localeCompare(b.key);
-  });
+  if (other && other.sessions.length > 0) groups.push(other);
+  for (const group of groups) {
+    group.sessions = sortSessionsByMode(group.sessions, sortMode);
+  }
   return { pinned, groups };
 };
 
