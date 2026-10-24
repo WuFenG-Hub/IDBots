@@ -44,6 +44,8 @@ export interface DeepConsolidationInventoryItem {
   firstSeen?: string;
   /** YYYY-MM-DD the item was last written/corroborated. */
   lastSeen?: string;
+  /** YYYY-MM-DD the underlying fact/event happened (event-time axis, #3). */
+  occurred?: string;
 }
 
 export type DeepConsolidationRewriteReason = 'contradiction' | 'state_change' | 'redundant';
@@ -100,6 +102,7 @@ function formatInventoryItem(item: DeepConsolidationInventoryItem): string[] {
   if (item.origin) meta.push(`origin=${item.origin}`);
   if (item.rewritable === false) meta.push('read-only');
   if (typeof item.proofCount === 'number') meta.push(`proof=${item.proofCount}`);
+  if (item.occurred) meta.push(`occurred=${item.occurred}`);
   if (item.firstSeen) meta.push(`first=${item.firstSeen}`);
   if (item.lastSeen) meta.push(`last=${item.lastSeen}`);
   if (item.extra) meta.push(item.extra);
@@ -128,6 +131,7 @@ export function buildDeepConsolidationPrompt(input: {
     '- Direct contradiction: two items assert incompatible states about the same subject → never silently drop the older state. Rewrite the survivor (prefer the one with more evidence, else the newer) as a temporal narrative that carries BOTH states and the transition — e.g. "曾偏好周五发版(9月前),10月起改为周三发版" / "used to prefer React (until March), switched to Vue in June and no longer uses React" — then retire the superseded item.',
     '- State change: a newer item replaces a state an older item records → rewrite the survivor to name the transition explicitly ("从 X 改为 Y", "used to X, now Y") and retire the old one. Never just restate the new fact.',
     '- When no transition is explainable and the states are incompatible, treat the most recent, better-evidenced state as current and say the earlier one was the previous understanding.',
+    '- Dates in narratives come from the evidence: use occurred=YYYY-MM-DD (when the fact happened) whenever an item carries it; fall back to first/last (when it was learned) only when occurred is absent, and never invent a date.',
     '- Items marked [read-only] (conversation-origin, possibly the owner\'s own words) are context only: they may justify rewriting a rewritable item — the owner\'s explicit statement supersedes a dream belief — but must never appear in retire_memory_ids or rewrite_memories.',
     '- Rewritten text must stay a durable belief in the same class (a boundary stays a boundary, an owner fact stays an owner fact), use the same language as the inventory, be at most ' + DEEP_CONSOLIDATION_REWRITE_MAX_CHARS + ' characters, and contain only what the listed items and their evidence support — never invented detail.',
     '',

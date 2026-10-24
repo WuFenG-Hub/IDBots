@@ -4,9 +4,9 @@ import {
   MEMORY_IMPORTANCE_GUARANTEED_MAX_ITEMS,
   MEMORY_IMPORTANCE_GUARANTEED_THRESHOLD,
 } from './memoryImportance';
-import { proofCountBoost } from './memoryEvidence';
+import { memoryRecencyBoost, proofCountBoost } from './memoryEvidence';
 
-export type MemoryPromptEntryLike = Pick<MemoryUserMemory, 'id' | 'text' | 'usageClass' | 'visibility' | 'updatedAt' | 'lastUsedAt' | 'lastAppliedAt' | 'importance' | 'proofCount'>;
+export type MemoryPromptEntryLike = Pick<MemoryUserMemory, 'id' | 'text' | 'usageClass' | 'visibility' | 'updatedAt' | 'lastUsedAt' | 'lastAppliedAt' | 'importance' | 'proofCount' | 'occurredAt'>;
 
 /**
  * Byte budget for the whole rendered memory injection (all scoped blocks
@@ -145,9 +145,12 @@ function rankEntries(
         block,
         // A cerebellum score replaces the lexical score outright (it is a
         // rank key, not a summand); the tier split happens in the sort. Both
-        // tiers get the bounded proof boost (<= +5%, multiplicative): a
-        // corroborated memory nudges up, but relevance still decides.
-        relevanceScore: proofCountBoost(entry.proofCount) * (mapScore ?? scoreEntryForPrompt(entry, currentUserText)),
+        // tiers get the bounded proof boost (<= +5%) and the event-time
+        // recency nudge (+10% / -8%), both multiplicative: a corroborated or
+        // recent memory nudges up, but relevance still decides.
+        relevanceScore: proofCountBoost(entry.proofCount)
+          * memoryRecencyBoost(entry.occurredAt)
+          * (mapScore ?? scoreEntryForPrompt(entry, currentUserText)),
       };
     })
     .sort((left, right) => {

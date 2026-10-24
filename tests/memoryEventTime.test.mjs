@@ -111,3 +111,51 @@ test('turn-extraction parser carries a validated occurred_on and drops malformed
   assert.deepEqual(changes?.map((c) => c.occurredOn ?? null), ['2026-10-16', null, '2026-10-16']);
   assert.equal(changes?.[1].occurredOn, undefined, 'absent field stays undefined');
 });
+
+test('recency boost is bounded (+10% / -8%), neutral without event time, and only reorders', () => {
+  const { memoryRecencyBoost } = loadCompiled('../dist-electron/main/memory/memoryEvidence.js');
+  const { buildScopedMemoryPromptBlocksDetailed } = loadCompiled('../dist-electron/main/memory/memoryPromptBlocks.js');
+  const now = Date.UTC(2026, 9, 24);
+  assert.equal(memoryRecencyBoost(null, now), 1);
+  assert.equal(memoryRecencyBoost(undefined, now), 1);
+  assert.ok(Math.abs(memoryRecencyBoost(now, now) - 1.10) < 1e-9, 'today = +10%');
+  assert.ok(Math.abs(memoryRecencyBoost(now - 182.5 * 86_400_000, now) - 1.0) < 1e-9, 'half a year = neutral');
+  assert.ok(Math.abs(memoryRecencyBoost(now - 5 * 365 * 86_400_000, now) - 0.92) < 1e-9, 'years ago floors at -8%');
+  assert.ok(memoryRecencyBoost(now + 86_400_000, now) <= 1.10, 'future dates never exceed the cap');
+
+  const recent = Date.now() - 86_400_000;
+  const old = Date.now() - 3 * 365 * 86_400_000;
+  const { injectedIds } = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    ownerEntries: [
+      { id: 'old', text: 'owner moved to shanghai', usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 1, occurredAt: old },
+      { id: 'recent', text: 'owner moved to hangzhou', usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 1, occurredAt: recent },
+      { id: 'undated', text: 'owner moved to suzhou', usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 1 },
+    ],
+    currentUserText: 'unrelated question',
+  });
+  assert.deepEqual(injectedIds, ['recent', 'undated', 'old'], 'recent > undated(neutral) > old at equal relevance');
+
+  const hit = buildScopedMemoryPromptBlocksDetailed({
+    channel: 'cowork_ui',
+    ownerEntries: [
+      { id: 'relevant-old', text: 'deployment runs on wednesday', usageClass: 'profile_fact', visibility: 'local_only', updatedAt: 1, occurredAt: old },
+      { id: 'irrelevant-recent', text: 'owner likes tea', usageClass: 'preference', visibility: 'local_only', updatedAt: 1, occurredAt: recent },
+    ],
+    currentUserText: 'deployment schedule',
+  });
+  assert.equal(hit.injectedIds[0], 'relevant-old', 'a token hit (+3) still beats a +10% recency nudge');
+});
+
+test('deep-consolidation inventory renders occurred dates and the prompt tells the model to use them', () => {
+  const { buildDeepConsolidationPrompt } = loadCompiled('../dist-electron/main/libs/deepConsolidationPrompt.js');
+  const prompt = buildDeepConsolidationPrompt({
+    botName: 'Twin',
+    items: [
+      ...Array.from({ length: 8 }, (_, i) => ({ id: `b${i}`, kind: 'value_boundary', text: `rule ${i}` })),
+      { id: 'f1', kind: 'profile_fact', text: '老板偏好周五发版', origin: 'dream', rewritable: true, proofCount: 2, occurred: '2026-09-05', firstSeen: '2026-09-06', lastSeen: '2026-10-20' },
+    ],
+  });
+  assert.ok(prompt.includes('[origin=dream, proof=2, occurred=2026-09-05, first=2026-09-06, last=2026-10-20]'), 'occurred renders before first/last');
+  assert.ok(prompt.includes('use occurred=YYYY-MM-DD (when the fact happened)'), 'narratives are told to use real event dates');
+});
