@@ -1038,3 +1038,158 @@ test('capability-falsified retention purges rows older than 180 days and reports
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Memory evolution (2026-10-24): contradiction narratives in deep consolidation.
+// ---------------------------------------------------------------------------
+
+const seedBeliefLayer = (db, coworkStore, snapshotMs) => {
+  const boundaryIds = [];
+  for (let index = 0; index < 8; index += 1) {
+    boundaryIds.push(coworkStore.createUserMemory({
+      metabotId: 9,
+      text: `boundary rule ${index}`,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      origin: 'dream',
+      forceNew: true,
+      source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-08-20', quote: `night ${index} evidence` },
+    }).id);
+  }
+  const dreamFact = coworkStore.createUserMemory({
+    metabotId: 9,
+    text: '老板偏好周五发版',
+    scopeKind: 'owner',
+    scopeKey: 'owner:self',
+    usageClass: 'profile_fact',
+    origin: 'dream',
+    forceNew: true,
+    source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-08-21', quote: '老板说周五发版周末能缓冲' },
+  }).id;
+  // The owner's own later words: read-only context for the pass, never a target.
+  const ownerFact = coworkStore.createUserMemory({
+    metabotId: 9,
+    text: '记住:以后改成周三发版',
+    scopeKind: 'owner',
+    scopeKey: 'owner:self',
+    usageClass: 'profile_fact',
+    origin: 'conversation',
+    isExplicit: true,
+    forceNew: true,
+    source: { role: 'user', sourceType: 'turn_explicit', quote: '记住:以后改成周三发版' },
+  }).id;
+  db.run('UPDATE user_memories SET updated_at = ?, last_used_at = ? WHERE metabot_id = 9', [snapshotMs, snapshotMs]);
+  return { boundaryIds, dreamFact, ownerFact };
+};
+
+test('deep consolidation rewrites dream-origin beliefs as evolution narratives and feeds evidence into the prompt', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  const snapshotMs = new Date(2026, 7, 25, 8, 0).getTime();
+  const { boundaryIds, dreamFact, ownerFact } = seedBeliefLayer(db, coworkStore, snapshotMs);
+
+  const calls = [];
+  const narrative = '老板曾偏好周五发版(8月前,因周末可缓冲回滚),10月起改为周三发版,周五只做热修';
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: { listMetabots: () => [{ id: 9, name: 'Twin', llm_id: null, globalmetaid: 'metaid://stub-owner' }] },
+    performChat: async (_system, user) => {
+      calls.push(user);
+      return JSON.stringify({
+        // The dream fact is listed for BOTH retire and rewrite: the rewrite
+        // wins (one row, one action) and the row survives rewritten.
+        retire_memory_ids: [dreamFact, boundaryIds[0], ownerFact, 'bogus-id'],
+        retire_knowledge_ids: [],
+        rewrite_memories: [
+          { id: dreamFact, text: narrative, reason: 'contradiction' },
+          { id: ownerFact, text: 'must never apply to a read-only row', reason: 'state_change' },
+          { id: 'bogus-id', text: 'ignored', reason: 'redundant' },
+        ],
+        rewrite_knowledge: [],
+        notes: 'owner statement supersedes the dream belief; wrote the transition',
+      });
+    },
+    now: () => new Date(2026, 7, 25, 10, 0),
+  });
+  try {
+    const stats = await service.runNow();
+    assert.equal(stats.counts.deepConsolidationBots, 1);
+    assert.equal(stats.counts.deepRewrittenMemories, 1, 'only the dream-origin rewrite applies');
+    assert.equal(stats.counts.deepRetiredMemories, 1, 'boundary retired; the rewritten id is dropped from the retire list; read-only + bogus ids ignored');
+    assert.deepEqual(stats.errors.filter((line) => line.includes('deep-consolidation')), []);
+
+    // Evidence rides the prompt: quotes, proof counts, read-only markers.
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /老板偏好周五发版 \[origin=dream, proof=1, first=\d{4}-\d{2}-\d{2}, last=\d{4}-\d{2}-\d{2}\]/);
+    assert.ok(calls[0].includes('evidence: "老板说周五发版周末能缓冲"'), 'the dream fact\'s quote is listed as evidence');
+    assert.match(calls[0], /记住:以后改成周三发版 \[origin=conversation, read-only, proof=1/);
+    assert.ok(calls[0].includes('- Direct contradiction:'), 'merge rules are part of the pass');
+
+    const facts = coworkStore.listUserMemories({
+      metabotId: 9,
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'profile_fact',
+      status: 'created',
+      limit: 50,
+    });
+    const rewritten = facts.find((memory) => memory.id === dreamFact);
+    assert.ok(rewritten, 'the rewritten row stays active (not archived)');
+    assert.equal(rewritten.text, narrative);
+    assert.equal(rewritten.origin, 'dream', 'origin is untouched by a rewrite');
+    const owner = facts.find((memory) => memory.id === ownerFact);
+    assert.equal(owner.text, '记住:以后改成周三发版', 'read-only row is never rewritten');
+
+    const revisions = coworkStore.listUserMemoryRevisions(dreamFact);
+    assert.equal(revisions.length, 1);
+    assert.equal(revisions[0].reason, 'evolution_rewrite');
+    assert.equal(revisions[0].sourceType, 'deep_consolidation:contradiction');
+    assert.equal(revisions[0].previousText, '老板偏好周五发版', 'the replaced wording stays reversible');
+    assert.equal(coworkStore.listUserMemoryRevisions(ownerFact).length, 0);
+
+    const visibleBoundaries = coworkStore.listUserMemories({
+      metabotId: 9, scopeKind: 'owner', scopeKey: 'owner:self', usageClass: 'value_boundary', status: 'created', limit: 50,
+    });
+    assert.equal(visibleBoundaries.length, 7, 'exactly the listed dream boundary retired');
+    assert.notEqual(coworkStore.getDeepConsolidationLastRunAt(9), null, 'a clean pass stamps the cadence');
+  } finally {
+    cleanup();
+  }
+});
+
+test('deep consolidation counts memory rewrites toward the guardrail and refuses oversized proposals whole', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  insertMetabot(db, 9, 'metaid://stub-owner');
+  const coworkStore = createCoworkStore(db);
+  const snapshotMs = new Date(2026, 7, 25, 8, 0).getTime();
+  const { boundaryIds, dreamFact } = seedBeliefLayer(db, coworkStore, snapshotMs);
+  // Inventory = 8 boundaries + 2 facts = 10 items → cap ceil(2.5) = 3.
+  const service = new MemoryHygieneService({
+    coworkStore,
+    metabotStore: { listMetabots: () => [{ id: 9, name: 'Twin', llm_id: null, globalmetaid: 'metaid://stub-owner' }] },
+    performChat: async () => JSON.stringify({
+      retire_memory_ids: [boundaryIds[0], boundaryIds[1]],
+      retire_knowledge_ids: [],
+      rewrite_memories: [
+        { id: dreamFact, text: '叙事 A', reason: 'state_change' },
+        { id: boundaryIds[2], text: '叙事 B', reason: 'redundant' },
+      ],
+      rewrite_knowledge: [],
+      notes: 'too eager',
+    }),
+    now: () => new Date(2026, 7, 25, 10, 0),
+  });
+  try {
+    const stats = await service.runNow();
+    assert.equal(stats.counts.deepRewrittenMemories, 0, 'nothing applied from a refused proposal');
+    assert.equal(stats.counts.deepRetiredMemories, 0);
+    assert.ok(stats.errors.some((line) => line.includes('action list exceeds guardrail (4 > 3)')), stats.errors.join(' | '));
+    assert.equal(coworkStore.listUserMemoryRevisions(dreamFact).length, 0, 'no rewrite leaked through');
+    assert.equal(coworkStore.getDeepConsolidationLastRunAt(9), null, 'no cadence stamp on a refused run');
+    assert.equal(coworkStore.getDeepConsolidationAttempts(9), 1, 'a refused run counts as a failed pass');
+  } finally {
+    cleanup();
+  }
+});
