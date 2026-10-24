@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { configService, mergeProvidersConfig } from '../services/config';
 import { apiService } from '../services/api';
 import { buildOpenCodeGoSessionHeaders } from '../services/opencodeGatewayHeaders';
+import { buildOpenAIResponsesUrl } from '../services/openaiResponsesUrl';
 import { themeService } from '../services/theme';
 import { i18nService, LanguageType } from '../services/i18n';
 import { decryptSecret, encryptWithPassword, decryptWithPassword, EncryptedPayload, PasswordEncryptedPayload } from '../services/encryption';
@@ -406,19 +407,9 @@ const buildOpenAICompatibleChatCompletionsUrl = (baseUrl: string, provider: stri
   }
   return `${normalized}/v1/chat/completions`;
 };
-const buildOpenAIResponsesUrl = (baseUrl: string): string => {
-  const normalized = baseUrl.trim().replace(/\/+$/, '');
-  if (!normalized) {
-    return '/v1/responses';
-  }
-  if (normalized.endsWith('/responses')) {
-    return normalized;
-  }
-  if (normalized.endsWith('/v1')) {
-    return `${normalized}/responses`;
-  }
-  return `${normalized}/v1/responses`;
-};
+// buildOpenAIResponsesUrl is imported from services/openaiResponsesUrl (the
+// shared renderer routing rule — DeepSeek host-root + versioned-base guard)
+// so the settings probe hits the exact URL the data paths build.
 const shouldUseOpenAIResponsesForProvider = (provider: string): boolean => (
   provider === 'openai'
 );
@@ -1799,7 +1790,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
         const useResponsesApi = providerConfig.apiFormat === 'responses'
           || shouldUseOpenAIResponsesForProvider(activeProvider);
         const openaiUrl = useResponsesApi
-          ? buildOpenAIResponsesUrl(normalizedBaseUrl)
+          ? buildOpenAIResponsesUrl(normalizedBaseUrl, activeProvider)
           : buildOpenAICompatibleChatCompletionsUrl(normalizedBaseUrl, activeProvider);
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
