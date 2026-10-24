@@ -86,12 +86,12 @@ export interface CoworkMessageMetadata {
   isFinal?: boolean;
   isThinking?: boolean;
   /**
-   * Assistant chat-experience mode: this ordinary assistant text is model
-   * narration — the commentary professional mode folds into the Think row
-   * ("好的，我这就动手…") — surfaced as a normal chat bubble instead. The tag
-   * records the origin only; rendering is the standard assistant bubble.
+   * Assistant chat-experience mode: an explicit owner-facing progress message
+   * emitted through the host owner_update tool. Ordinary model commentary
+   * stays in the hidden thinking stream; rendering is the standard bubble.
    */
   narration?: boolean;
+  ownerUpdateKind?: 'opening' | 'milestone' | 'problem';
   /**
    * LLM-generated turn-acknowledgment bubble (first-response latency): a
    * short host-side assistant reply emitted before the kernel turn's own

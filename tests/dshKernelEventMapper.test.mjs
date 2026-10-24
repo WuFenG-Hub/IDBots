@@ -947,23 +947,35 @@ test('explicit DeepSeek route keeps the narration fold', () => {
   assert.match(settled.content, /本地没装 tsx/)
 })
 
-// ---- Assistant chat-experience mode: narration surfaces as chat text ------
-// With the assistant-mode flag on, commentary that professional mode folds
-// into the Think row becomes ordinary text tagged metadata.narration = true.
-// Reasoning still maps to the thinking slot; final_answer stays plain text.
+// ---- Assistant chat-experience mode: the fold is mode-symmetric ----------
+// Commentary folds into the hidden thinking display in assistant mode
+// EXACTLY as in professional mode — no mapper action ever carries
+// metadata.narration. Assistant mode's only delta is the post-reasoning hold
+// (POST_REASONING_TEXT_HOLD_UNITS) applied even on effort-off/no-reasoning
+// steps: short commentary cannot flash a visible bubble before a tool call
+// classifies it; text past the window still streams as a possible final
+// answer, and a subsequent tool call performs the existing wrong-bet
+// fold/retraction (identical to professional mode). Visible progress bubbles
+// are minted host-side by explicit owner_update({ message, kind }) calls
+// (coworkRunner emitAssistantOwnerUpdate, capped per turn — see
+// coworkAssistantOwnerUpdate.test.mjs); the mapper-side contract pinned here
+// is that ordinary commentary never becomes one.
 
 const assistantMapper = () => new DshEventMapper({ assistantMode: () => true })
 
-test('assistant mode: streamed commentary settles as narration text, not thinking', () => {
+test('assistant mode: short streamed commentary stays held and folds silently into the thinking row', () => {
   const mapper = assistantMapper()
+  // Phase-tagged commentary (DeepSeek Responses): under the hold window the
+  // text opens NO body bubble — assistant mode gates short text exactly like
+  // post-reasoning commentary instead of streaming it optimistically.
   const opened = mapper.consume({
     type: 'assistant/chunk',
     data: { turn: 3, step: 1, chunk: { type: 'text-delta', index: 0, text: '让我先查一下配置。' } },
   })
-  assert.equal(opened[0].slot, 'text')
+  assert.deepEqual(opened, [], 'short commentary opens no visible slot in assistant mode')
 
-  // The tool-call block-start must NOT convert the bubble into the thinking
-  // display — narration keeps streaming as a normal chat message.
+  // The tool-call block-start arrives with nothing held open: no conversion,
+  // no retraction — the fold completes silently at assistant/message.
   const atTool = mapper.consume({
     type: 'assistant/chunk',
     data: { turn: 3, step: 1, chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } },
@@ -990,14 +1002,19 @@ test('assistant mode: streamed commentary settles as narration text, not thinkin
       },
     },
   })
-  const finalize = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
-  assert.equal(finalize.content, '让我先查一下配置。')
-  assert.equal(finalize.metadata.narration, true)
-  assert.equal(finalize.metadata.isThinking, undefined, 'narration never carries thinking semantics')
-  assert.equal(done.some((a) => a.slot === 'thinking'), false, 'commentary does not touch the thinking slot')
+  assert.equal(done.some((a) => a.slot === 'text'), false, 'no visible bubble ever opened')
+  const thinking = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.equal(thinking.content, '让我先查一下配置。', 'commentary settles into the hidden Think row')
+  assert.equal(thinking.metadata, undefined)
+  assert.equal(done.some((a) => a.message?.metadata?.narration === true), false, 'the mapper never mints narration rows')
+
+  // A commentary-only step followed by its tool call must not look empty.
+  mapper.consume({ type: 'tool/call', data: { callId: 'c1', name: 'bash', arguments: '{}' } })
+  const ended = mapper.consume({ type: 'turn/end', data: { turn: 3, reason: { kind: 'aborted', reason: 'cancel' } } })
+  assert.equal(ended[0].kind, 'turnEnd')
 })
 
-test('assistant mode: reasoning still maps to thinking; held commentary becomes a narration message', () => {
+test('assistant mode: held commentary folds into the reasoning round\'s Think row — no separate narration message', () => {
   const mapper = assistantMapper()
   mapper.consume({
     type: 'assistant/chunk',
@@ -1009,9 +1026,10 @@ test('assistant mode: reasoning still maps to thinking; held commentary becomes 
   })
   assert.equal(streamed[0].slot, 'thinking')
 
-  // Reasoning live on a fold route holds the riding text until the assembled
-  // message classifies it — here: tool-call commentary (native DeepSeek, no
-  // phase tags).
+  // Live reasoning holds the riding text until the assembled message
+  // classifies it (native DeepSeek, no phase tags): commentary joins the
+  // round's reasoning in ONE settled Think row — exactly the professional-
+  // mode fold. Assistant mode mints no separate narration message.
   const done = mapper.consume({
     type: 'assistant/message',
     data: {
@@ -1027,10 +1045,9 @@ test('assistant mode: reasoning still maps to thinking; held commentary becomes 
     },
   })
   const thinkFinal = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
-  assert.equal(thinkFinal.content, 'need a tool', 'the Think row carries reasoning only — no commentary fold')
-  const narration = done.find((a) => a.kind === 'message' && a.message.metadata?.narration === true)
-  assert.equal(narration.message.content, '本地没装 tsx，用 npx 临时拉一个跑：')
+  assert.equal(thinkFinal.content, 'need a tool\n\n本地没装 tsx，用 npx 临时拉一个跑：', 'reasoning + commentary share one settled Think row')
   assert.equal(done.some((a) => a.slot === 'text'), false, 'held commentary never opens a visible stream placeholder')
+  assert.equal(done.some((a) => a.message?.metadata?.narration === true), false, 'the mapper never mints narration rows')
 })
 
 test('assistant mode: final_answer stays a plain bubble without the narration tag', () => {
@@ -1055,7 +1072,7 @@ test('assistant mode: final_answer stays a plain bubble without the narration ta
   assert.equal(finalize.metadata, undefined)
 })
 
-test('assistant mode: unassembled mixed commentary + final_answer split into narration then plain reply', () => {
+test('assistant mode: unassembled mixed commentary + final_answer splits into a Think row then a plain reply', () => {
   const mapper = assistantMapper()
   const done = mapper.consume({
     type: 'assistant/message',
@@ -1074,95 +1091,58 @@ test('assistant mode: unassembled mixed commentary + final_answer split into nar
       },
     },
   })
-  const narrationIndex = done.findIndex((a) => a.kind === 'message' && a.message.metadata?.narration === true)
-  assert.notEqual(narrationIndex, -1, 'commentary becomes its own narration message')
-  assert.equal(done[narrationIndex].message.content, 'First, deliberation.')
-  const textIndex = done.findIndex((a) => a.kind === 'message' && a.slot === 'text')
-  assert.ok(narrationIndex < textIndex, 'narration lands before the reply')
-  const textFinal = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  const thinking = done.filter((a) => a.slot === 'thinking').find((a) => a.kind === 'messageFinalize')
+  assert.equal(thinking.content, 'First, deliberation.', 'commentary is thinking here, not a narration bubble')
+  const textFinal = done.filter((a) => a.slot === 'text').find((a) => a.kind === 'messageFinalize')
   assert.equal(textFinal.content, 'The final answer.')
   assert.equal(textFinal.metadata, undefined, 'the reply is plain visible text')
+  assert.equal(done.some((a) => a.message?.metadata?.narration === true), false, 'the mapper never mints narration rows')
 })
 
-test('assistant mode: a streamed mixed step keeps the streamed bubble verbatim and does not duplicate the reply', () => {
+test('assistant mode: long effort-off text streams as a possible final answer and a tool call folds it back', () => {
   const mapper = assistantMapper()
-  // Mid-stream the wire carries no phase: commentary and the final answer
-  // share one text stream. The immutability contract keeps the streamed
-  // bubble exactly as the user watched it (both parts); the classified
-  // final_answer tail must not be re-emitted as a duplicate reply bubble.
-  mapper.consume({
+  // Assistant mode applies the hold window even with no reasoning block, so
+  // the length check alone is what lets a genuinely long answer stream
+  // early — the exact professional wrong-bet contract, one guard earlier.
+  const longText = `我来处理这个排查请求。${'先从任务来源开始逐层说明。'.repeat(40)}`
+  assert.ok(longText.length >= 160, 'fixture must exceed the hold window')
+  const opened = mapper.consume({
     type: 'assistant/chunk',
-    data: { chunk: { type: 'text-delta', index: 0, text: 'First, deliberation.' } },
+    data: { chunk: { type: 'text-delta', index: 0, text: longText } },
   })
-  mapper.consume({
-    type: 'assistant/chunk',
-    data: { chunk: { type: 'text-delta', index: 0, text: 'The final answer.' } },
-  })
-  const done = mapper.consume({
-    type: 'assistant/message',
-    data: {
-      turn: 7, step: 1,
-      message: {
-        role: 'assistant',
-        content: [
-          { type: 'text', text: 'First, deliberation.' },
-          { type: 'text', text: 'The final answer.' },
-        ],
-        source: { kind: 'model', replayState: { blocks: [
-          { type: 'text', textSignature: sig('commentary') },
-          { type: 'text', textSignature: sig('final_answer') },
-        ] } },
-      },
-    },
-  })
-  const settles = done.filter((a) => a.kind === 'messageFinalize' && a.slot === 'text')
-  assert.equal(settles.length, 1, 'the streamed bubble settles once, as narration')
-  assert.equal(settles[0].content, 'First, deliberation.The final answer.', 'the bubble keeps the text the user watched stream')
-  assert.equal(settles[0].metadata.narration, true)
-  assert.equal(
-    done.some((a) => a.kind === 'messageFinalize' && a.slot === 'text' && a.metadata === undefined),
-    false,
-    'the contained final tail is not re-emitted as a duplicate reply bubble',
-  )
-})
+  assert.deepEqual(kinds(opened), ['message', 'messageUpdate'], 'past the window the possible answer streams')
+  assert.equal(opened[0].slot, 'text')
 
-test('assistant mode: assembled commentary diverging from the stream never rewrites the streamed narration', () => {
-  const mapper = assistantMapper()
-  // The streamed text is what the user watched appear; the assembled message
-  // (phase reclassification, provider quirks) may classify or serialize
-  // differently. The settle must keep the streamed buffer verbatim — a
-  // bubble's text may never change after it appeared (2026-10-13 twinbot
-  // acceptance report).
-  mapper.consume({
-    type: 'assistant/chunk',
-    data: { chunk: { type: 'text-delta', index: 0, text: '好，方案 A——我这就重写草案。' } },
-  })
-  mapper.consume({
+  // The tool call proves the bet wrong: the bubble folds into the thinking
+  // display in place (the effort-off conversion — no thinking slot is live
+  // to retract into), keeping the streamed buffer verbatim.
+  const atTool = mapper.consume({
     type: 'assistant/chunk',
     data: { chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } },
   })
-  const done = mapper.consume({
+  const converted = atTool.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(converted.content, longText, 'the fold keeps the text the user watched stream')
+  assert.equal(converted.metadata.isThinking, true)
+  assert.equal(converted.metadata.isStreaming, true, 'the converted display keeps the streaming pulse')
+  assert.equal(converted.metadata.narration, undefined, 'no narration mark — this is the professional-mode conversion')
+
+  const settled = mapper.consume({
     type: 'assistant/message',
     data: {
-      turn: 2, step: 1,
       message: {
         role: 'assistant',
         content: [
-          { type: 'text', text: '好，按方案 A 走——机制说明写好后我再重写草案。' },
+          { type: 'text', text: longText },
           { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
         ],
-        source: { kind: 'model', replayState: { blocks: [
-          { type: 'text', textSignature: sig('commentary') },
-          { type: 'tool-call' },
-        ] } },
       },
     },
   })
-  const finalize = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
-  assert.equal(finalize.content, '好，方案 A——我这就重写草案。', 'the streamed text wins, not the assembled rewrite')
-  assert.equal(finalize.metadata.narration, true)
-  assert.equal(done.some((a) => a.kind === 'message' && a.message.metadata?.narration === true), false,
-    'the diverging assembled commentary is not re-emitted as an extra bubble either')
+  const ride = settled.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(ride.content, longText)
+  assert.equal(ride.metadata.isThinking, true)
+  assert.equal(ride.metadata.isStreaming, undefined, 'the round settles its own Think row')
+  assert.equal(settled.some((a) => a.kind === 'message' && a.slot === 'thinking'), false, 'no second Think bubble')
 })
 
 test('assistant mode: a turn whose only output is commentary is still an empty terminal turn', () => {
@@ -1183,27 +1163,26 @@ test('assistant mode: a turn whose only output is commentary is still an empty t
     },
   })
   const ended = mapper.consume({ type: 'turn/end', data: { turn: 5, reason: { kind: 'stop' } } })
-  // Narration is process text, not the reply: the auto-continue guard must
-  // still fire, exactly as in professional mode.
+  // Folded commentary is process text, not the reply: the auto-continue
+  // guard must still fire, exactly as in professional mode.
   const turnEnd = ended.find((a) => a.kind === 'turnEnd')
   assert.equal(turnEnd.emptyTerminal, true)
 })
 
-test('assistant mode: a turn aborted mid commentary settles the bubble tagged as narration', () => {
+test('assistant mode: a turn aborted mid possible-answer stream settles the bubble plain', () => {
   const mapper = assistantMapper()
+  // Whatever streamed past the window was a POSSIBLE final answer, so the
+  // abort settles it as plain visible text — never with a narration mark.
+  const longText = `正在整理最终结论。${'补充一些细节。'.repeat(40)}`
+  assert.ok(longText.length >= 160, 'fixture must exceed the hold window')
   mapper.consume({
     type: 'assistant/chunk',
-    data: { chunk: { type: 'text-delta', index: 0, text: '让我' } },
-  })
-  mapper.consume({
-    type: 'assistant/chunk',
-    data: { chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } },
+    data: { chunk: { type: 'text-delta', index: 0, text: longText } },
   })
   const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: 'cancel' } } })
   const settled = ended.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
-  assert.equal(settled.content, '让我')
-  assert.equal(settled.metadata.narration, true, 'the live commentary mark survives the abort path')
-  assert.equal(settled.metadata.isThinking, undefined)
+  assert.equal(settled.content, longText, 'the streamed buffer settles verbatim at the abort')
+  assert.equal(settled.metadata, undefined, 'plain visible text — the mapper never tags narration')
   assert.equal(ended.some((a) => a.kind === 'turnEnd'), true)
 })
 
@@ -1236,45 +1215,48 @@ test('assistant mode: GLM tool-ride text stays a plain visible bubble (no narrat
   assert.equal(textFinal.metadata, undefined, 'GLM content is the deliverable, not narration')
 })
 
-test('the assistant-mode getter is evaluated per decision (a mid-turn flip degrades to the fold)', () => {
+test('the assistant-mode getter is evaluated per decision (a mid-stream flip degrades to professional streaming)', () => {
   let assistant = true
   const mapper = new DshEventMapper({ assistantMode: () => assistant })
-  mapper.consume({
+  // Short effort-off text: assistant mode holds it inside the window…
+  const held = mapper.consume({
     type: 'assistant/chunk',
     data: { turn: 3, step: 1, chunk: { type: 'text-delta', index: 0, text: '先看配置。' } },
   })
-  // The user flips to professional mode while the turn streams: the settle
-  // must follow the CURRENT mode (the fold), not the mode at stream start.
+  assert.deepEqual(held, [], 'assistant mode holds short text — no bubble opens')
+  // …the user flips to professional mode mid-step: the SAME in-flight stream
+  // now behaves professionally (effort-off text streams immediately), proving
+  // the getter is re-evaluated at every stream decision, never cached at
+  // step or turn start.
   assistant = false
-  const done = mapper.consume({
-    type: 'assistant/message',
-    data: {
-      turn: 3, step: 1,
-      message: {
-        role: 'assistant',
-        content: [
-          { type: 'text', text: '先看配置。' },
-          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
-        ],
-        source: { kind: 'model', replayState: { blocks: [
-          { type: 'text', textSignature: sig('commentary') },
-          { type: 'tool-call' },
-        ] } },
-      },
-    },
+  const opened = mapper.consume({
+    type: 'assistant/chunk',
+    data: { turn: 3, step: 1, chunk: { type: 'text-delta', index: 0, text: '继续查。' } },
   })
-  const finalize = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
-  assert.equal(finalize.metadata.isThinking, true, 'professional mode keeps the fold')
-  assert.equal(finalize.metadata.narration, undefined)
+  assert.deepEqual(kinds(opened), ['message', 'messageUpdate'], 'professional mode opens the bubble on the very next delta')
+  assert.equal(opened[0].slot, 'text')
+  assert.equal(opened[1].content, '先看配置。继续查。', 'the bubble carries the accumulated in-flight buffer')
+  const atTool = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } },
+  })
+  const converted = atTool.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(converted.metadata.isThinking, true, 'the professional-mode conversion then folds the commentary')
+  assert.equal(converted.metadata.narration, undefined)
 })
 
-test('assistant mode: accumulated narration bubbles are never rewritten by later rounds or the final answer', () => {
-  // Regression for the acceptance report "earlier narration bubbles disappear
-  // when the final report streams in": every round's commentary must mint and
-  // keep its own message, and no later finalize may rewrite an earlier
-  // narration's content. Simulates the kernel's slot bookkeeping so each
-  // message action gets a distinct id, exactly like DshKernel.applyAction.
-  const mapper = new DshEventMapper({ assistantMode: () => true })
+test('assistant mode: 20 rounds of internal commentary mint no narration rows and the final answer stays plain', () => {
+  // 2026-10-24 session 2c70849f follow-up: the old design minted one
+  // narration bubble per tool round — 20 progress bubbles in a single turn.
+  // The mapper contract is now mode-symmetric: commentary folds into the
+  // hidden thinking display, NO mapper action may ever carry
+  // metadata.narration (visible progress is minted host-side by explicit
+  // owner_update calls, see coworkAssistantOwnerUpdate.test.mjs), and the
+  // final answer settles as plain visible text. Simulates the kernel's slot
+  // bookkeeping so each message action gets a distinct id and a later
+  // finalize cannot rewrite an earlier row — the same harness as the
+  // acceptance-report regression this replaces.
+  const mapper = assistantMapper()
   const messages = new Map()
   const slotIds = {}
   let nextId = 1
@@ -1299,48 +1281,71 @@ test('assistant mode: accumulated narration bubbles are never rewritten by later
       }
     }
   }
-  const consume = (envelope) => { for (const action of mapper.consume(envelope)) apply(action) }
+  const allActions = []
+  const consume = (envelope) => {
+    const actions = mapper.consume(envelope)
+    allActions.push(...actions)
+    for (const action of actions) apply(action)
+    return actions
+  }
 
-  // Two commentary rounds with live-streamed text (the effort-off shape:
-  // no reasoning block, text streams, the tool-call block-start marks it).
-  for (const [step, text] of [[1, '好的，我这就动手。'], [2, '初步检索到三笔记录。']]) {
-    consume({ type: 'assistant/chunk', data: { turn: 1, step, chunk: { type: 'text-delta', index: 0, text } } })
-    consume({ type: 'assistant/chunk', data: { turn: 1, step, chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } } })
-    consume({ type: 'tool/call', data: { callId: `c${step}`, name: 'bash', arguments: '{}' } })
-    consume({ type: 'tool/result', data: { message: { toolCallId: `c${step}`, isError: false, content: [{ type: 'text', text: 'ok' }] } } })
-    consume({
+  // Twenty tool rounds, each emitting one short internal commentary line —
+  // the exact shape that produced 20 visible progress bubbles under the old
+  // narration design (effort-off native DeepSeek: text streams, the
+  // tool-call block-start marks the round, the assembled message repeats it).
+  const commentaryOf = (round) => `第 ${round} 轮：内部检索和核对已完成。`
+  for (let round = 1; round <= 20; round += 1) {
+    consume({ type: 'assistant/chunk', data: { turn: 1, step: round, chunk: { type: 'text-delta', index: 0, text: commentaryOf(round) } } })
+    consume({ type: 'assistant/chunk', data: { turn: 1, step: round, chunk: { type: 'block-start', index: 1, blockType: 'tool-call' } } })
+    consume({ type: 'tool/call', data: { callId: `c${round}`, name: 'bash', arguments: '{}' } })
+    consume({ type: 'tool/result', data: { message: { toolCallId: `c${round}`, isError: false, content: [{ type: 'text', text: 'ok' }] } } })
+    const done = consume({
       type: 'assistant/message',
       data: {
-        turn: 1, step,
+        turn: 1, step: round,
         message: {
           role: 'assistant',
           content: [
-            { type: 'text', text },
-            { type: 'tool-call', id: `c${step}`, name: 'bash', arguments: '{}' },
+            { type: 'text', text: commentaryOf(round) },
+            { type: 'tool-call', id: `c${round}`, name: 'bash', arguments: '{}' },
           ],
         },
       },
     })
+    const settled = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+    assert.ok(settled, `round ${round} settles its own Think row`)
+    assert.ok(settled.content.includes(commentaryOf(round)), `round ${round}'s commentary folds into the hidden Think row`)
   }
 
-  // The final answer streams and settles.
-  consume({ type: 'assistant/chunk', data: { turn: 1, step: 3, chunk: { type: 'text-delta', index: 0, text: '## 汇总' } } })
-  consume({
+  // Across all twenty rounds: no visible text slot EVER opens…
+  assert.equal(allActions.some((a) => a.slot === 'text'), false, 'short commentary never opens a visible text slot in assistant mode')
+  // …and no mapper action mints a narration row.
+  assert.equal(
+    allActions.some((a) => (a.message?.metadata?.narration ?? a.metadata?.narration) === true),
+    false,
+    'no mapper narration rows — visible progress is host-minted via owner_update',
+  )
+
+  // The final answer materializes whole at assistant/message (short replies
+  // need no stream) and settles plain — no fold, no narration tag.
+  const report = '## 汇总\n全部完成。'
+  const reply = consume({
     type: 'assistant/message',
-    data: { turn: 1, step: 3, message: { role: 'assistant', content: [{ type: 'text', text: '## 汇总' }] } },
+    data: { turn: 1, step: 21, message: { role: 'assistant', content: [{ type: 'text', text: report }] } },
   })
+  const textFinal = reply.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(textFinal.content, report)
+  assert.equal(textFinal.metadata, undefined, 'the final answer settles as plain visible text')
   consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
 
+  // Store level: the transcript holds only thinking + tool rows plus the
+  // plain reply — zero narration bubbles exist to be rewritten or erased.
   const narrations = [...messages.values()].filter((m) => m.metadata.narration === true)
-  assert.deepEqual(
-    narrations.map((m) => m.content),
-    ['好的，我这就动手。', '初步检索到三笔记录。'],
-    'each round keeps its own narration message',
-  )
-  assert.deepEqual(rewrites, [], 'no finalize may rewrite an already-settled narration')
-  const reply = [...messages.values()].find((m) => m.content === '## 汇总')
-  assert.ok(reply, 'the final answer is its own message')
-  assert.equal(reply.metadata.narration, undefined)
+  assert.deepEqual(narrations, [], 'no narration bubbles in the simulated transcript')
+  assert.deepEqual(rewrites, [], 'no finalize may rewrite an already-settled row')
+  const finalMessage = [...messages.values()].find((m) => m.content === report)
+  assert.ok(finalMessage, 'the final answer is its own message')
+  assert.equal(finalMessage.metadata.narration, undefined)
 })
 
 // ---- Post-reasoning hold window: the final answer streams ----------------
@@ -1471,7 +1476,7 @@ test('DeepSeek: a tool call after the streamed window folds the bubble into the 
   assert.equal(done.some((a) => a.kind === 'messageFinalize' && a.slot === 'text'), false)
 })
 
-test('assistant mode: a tool call after the streamed window tags the bubble narration instead of folding', () => {
+test('assistant mode: a tool call after the streamed window performs the same wrong-bet fold and retraction as professional mode', () => {
   const mapper = new DshEventMapper({ assistantMode: () => true })
   openReasoningThenClose(mapper, 'narration route')
   const longText = `我来处理这个排查请求。${'先从任务来源开始逐层说明。'.repeat(40)}`
@@ -1479,13 +1484,22 @@ test('assistant mode: a tool call after the streamed window tags the bubble narr
     type: 'assistant/chunk',
     data: { chunk: { type: 'text-delta', index: 1, text: longText } },
   })
-  assert.equal(opened.some((a) => a.slot === 'text'), true)
+  assert.equal(opened.some((a) => a.slot === 'text'), true, 'past the window the possible answer streams')
 
-  const atTool = mapper.consume({
+  // Assistant mode does NOT tag the streamed bubble as narration and skip
+  // the fold (the pre-2026-10-24 behavior): the tool call gets the exact
+  // professional-mode wrong-bet treatment — the streamed text joins the
+  // live Think row and the bubble retracts.
+  const folded = mapper.consume({
     type: 'assistant/chunk',
     data: { chunk: { type: 'block-start', index: 2, blockType: 'tool-call' } },
   })
-  assert.deepEqual(atTool, [], 'assistant mode never folds or retracts — the mark settles later')
+  const thinkUpdate = folded.find((a) => a.kind === 'messageUpdate' && a.slot === 'thinking')
+  assert.match(thinkUpdate.content, /narration route/)
+  assert.match(thinkUpdate.content, /先从任务来源开始逐层说明。/, 'the streamed text joins the Think row')
+  const retract = folded.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
+  assert.equal(retract.content, '', 'the wrong-bet bubble retracts')
+  assert.equal(retract.metadata?.narration, undefined, 'no narration mark on the retraction')
 
   const done = mapper.consume({
     type: 'assistant/message',
@@ -1500,9 +1514,10 @@ test('assistant mode: a tool call after the streamed window tags the bubble narr
       },
     },
   })
-  const settled = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'text')
-  assert.equal(settled.content, longText, 'the streamed buffer settles verbatim (immutability contract)')
-  assert.equal(settled.metadata.narration, true)
+  const thinkFinal = done.find((a) => a.kind === 'messageFinalize' && a.slot === 'thinking')
+  assert.match(thinkFinal.content, /narration route/)
+  assert.match(thinkFinal.content, /先从任务来源开始逐层说明。/)
+  assert.equal(done.some((a) => a.kind === 'messageFinalize' && a.slot === 'text'), false)
 })
 
 test('DeepSeek: turn aborted while folded settles the Think row with the absorbed text', () => {

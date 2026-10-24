@@ -75,6 +75,7 @@ class RecordingStore {
   }
   getSession(id) { return this.sessions.get(id) ?? null }
   getSessionWithoutMessages(id) { return this.sessions.get(id) ?? null }
+  getMetabotIdForSession(id) { return this.sessions.get(id)?.metabotId ?? null }
   getConfig() { return {} }
   updateSession(id, updates) {
     const existing = this.sessions.get(id) ?? { id }
@@ -106,6 +107,7 @@ class RecordingStore {
     }
   }
   getSessionUsageStats() { return null }
+  recentSessionPulse() { return [] }
   // Proven-techniques injection (a6f7d570) reads capability drafts every
   // memory-enabled turn; none exist in this fixture.
   listCapabilityDrafts() { return [] }
@@ -154,7 +156,8 @@ test('DSH host-tool registry is per-session (no cross-session clobbering)', { sk
     update: async () => ({ success: true }),
     remove: async () => ({ success: true }),
   }
-  runner.on('error', () => undefined)
+  const errors = []
+  runner.on('error', (sid, message) => errors.push({ sid, message }))
 
   const runTag = `${process.pid}-${Date.now().toString(36)}`
   const makeSession = (label, extra) => {
@@ -182,7 +185,11 @@ test('DSH host-tool registry is per-session (no cross-session clobbering)', { sk
     // 1. Twin turn starts and stays mid-turn on slow_tool (1.5s window).
     const twinTurn = runner.runDshSessionLocal(twin.activeSession, 'STEER_TEST', process.cwd(), 'You are the Twin.')
     const slowToolSeen = (sid) => store.messages.some((m) => m.sessionId === sid && m.type === 'tool_use' && m.metadata?.toolName === 'slow_tool')
-    await waitFor(() => slowToolSeen(twin.sessionId), 25000, 'twin turn slow_tool')
+    try {
+      await waitFor(() => slowToolSeen(twin.sessionId), 25000, 'twin turn slow_tool')
+    } catch (error) {
+      throw new Error(`${error.message}: ${JSON.stringify({ errors, messages: store.messages })}`)
+    }
 
     // 2. A worker session starts ITS turn while the twin turn is in flight and
     //    also stays mid-turn on slow_tool. Its registry rebuild must not touch

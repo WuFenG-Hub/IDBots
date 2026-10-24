@@ -492,12 +492,15 @@ const DELETE_TOOL_NAMES = new Set(['delete', 'remove', 'unlink', 'rmdir']);
 // Coalescing window for high-frequency task_progress / tool_progress events
 // per task_id, so the subagent panel updates don't flood the message stream.
 const SUBAGENT_PROGRESS_THROTTLE_MS = 1_000;
-// Tools that never mutate the filesystem or execute side effects. Used by 'plan'
-// permission mode to enforce read-only behavior. Bash is intentionally excluded
-// (it can do anything). AskUserQuestion is excluded (handled separately).
+const ASSISTANT_OWNER_UPDATE_PER_TURN_CAP = 6;
+// Tools that never mutate the workspace or external state. Used by 'plan'
+// permission mode to enforce read-only behavior; owner_update only writes the
+// session's own UI transcript. Bash is intentionally excluded (it can do
+// anything). AskUserQuestion is excluded (handled separately).
 const READ_ONLY_TOOL_NAMES = new Set([
   'read', 'read_image', 'view', 'ls', 'glob', 'grep', 'list',
   'todo_write', 'todowrite', 'taskget', 'tasklist',
+  'owner_update',
   'project_query',  // local Projects metadata lookup; no side effects
   'web_search', 'websearch', 'webfetch',  // informational; network policy handled separately
   'search_metaapps',
@@ -1501,6 +1504,7 @@ interface ActiveSession {
    */
   dshTurnAckSerial?: number;
   dshTurnAckVisibleTextSeen?: boolean;
+  assistantOwnerUpdateCount: number;
   /**
    * True when this turn was kicked with skipInitialUserMessage — the prompt is
    * host-authored (first-run greeting, machine flows) and no user message
@@ -7405,8 +7409,8 @@ export class CoworkRunner extends EventEmitter {
 
   /**
    * Whether a tool call is read-only under 'plan' permission mode. Read-only
-   * tools never mutate the filesystem or execute side effects. Bash is treated
-   * as non-read-only by default since it can do anything.
+   * tools never mutate the workspace or external state; owner_update only
+   * writes the session transcript. Bash is non-read-only because it can do anything.
    */
   private isReadOnlyTool(toolName: string): boolean {
     return READ_ONLY_TOOL_NAMES.has(toolName.toLowerCase());
@@ -8071,6 +8075,7 @@ export class CoworkRunner extends EventEmitter {
       lastStreamingThinkingUpdateAt: 0,
       hasAssistantTextOutput: false,
       hasAssistantThinkingOutput: false,
+      assistantOwnerUpdateCount: 0,
       delegationRequestEmitted: false,
       staleResumeDetected: false,
       staleResumeRetryAllowed: true,
@@ -9762,12 +9767,12 @@ export class CoworkRunner extends EventEmitter {
           // that finally's markCrossSessionTurnSettled.
           if (status === 'idle') this.scheduleCrossSessionContinuationDrain(coworkSessionId);
         },
-        // Narration tagging is an owner-chat experience decision, mirroring
-        // the prompt and effort gates: background sessions (group tasks,
-        // A2A/IM, dreams, warmup, kernel subagents — every non-cw- session
-        // id) keep the professional fold, and their reply extraction must
-        // never see interim narration. Still a live read per fold, so a
-        // mid-session mode flip is honored.
+        // The assistant stream hold is an owner-chat experience decision,
+        // mirroring the prompt and effort gates: background sessions (group
+        // tasks, A2A/IM, dreams, warmup, kernel subagents — every non-cw-
+        // session id) keep professional streaming. Explicit owner_update
+        // calls own visible progress in both cases. The getter stays live so
+        // a mid-session mode flip is honored.
         assistantModeProvider: (dshSessionId: string) => (
           dshSessionId.startsWith('cw-')
             ? this.isAssistantModeOwnerChatSession(dshSessionId.slice('cw-'.length))
@@ -11604,7 +11609,21 @@ export class CoworkRunner extends EventEmitter {
       parameters: Record<string, unknown>,
       execute: (args: any) => Promise<unknown>
     ) => ({ name, description, parameters: normalizeToolSchema(parameters), execute })
-    return this.buildSessionInlineTools(sessionId, passthrough, undefined)
+    const tools = this.buildSessionInlineTools(sessionId, passthrough, undefined)
+    const activeSession = this.activeSessions.get(sessionId)
+    if (!activeSession || !this.isAssistantModeOwnerChatSession(sessionId)) {
+      return tools
+    }
+    tools.push(passthrough(
+      'owner_update',
+      'Show one concise progress update to the owner. Use opening for the first substantive response to multi-step work, milestone only for a meaningful result, decision or deliverable, and problem for a blocker that affects the owner. At most 6 updates are shown per submission, including the opening. Never narrate tool calls, retries, environment setup or self-talk. Write 1-2 short sentences in the conversation language, without tool names or file paths. Ordinary commentary is hidden; plain reply text is for the final answer.',
+      {
+        message: z.string().trim().min(1).max(280),
+        kind: z.enum(['opening', 'milestone', 'problem']).optional(),
+      },
+      async (args) => this.emitAssistantOwnerUpdate(sessionId, args, activeSession),
+    ))
+    return tools
   }
 
   /**
@@ -11853,6 +11872,43 @@ export class CoworkRunner extends EventEmitter {
       return []
     }
     return images
+  }
+
+  private emitAssistantOwnerUpdate(
+    sessionId: string,
+    args: { message?: unknown; kind?: unknown },
+    activeSession: ActiveSession,
+  ): { shown: boolean; remaining?: number; reason?: string } {
+    if (this.activeSessions.get(sessionId) !== activeSession || !this.isAssistantModeOwnerChatSession(sessionId)) {
+      return { shown: false, reason: 'owner update turn is no longer active' }
+    }
+    const message = typeof args.message === 'string' ? args.message.trim() : ''
+    if (message.length === 0 || message.length > 280) {
+      return { shown: false, reason: 'message must contain 1-280 characters' }
+    }
+    const kind = args.kind ?? 'milestone'
+    if (kind !== 'opening' && kind !== 'milestone' && kind !== 'problem') {
+      return { shown: false, reason: 'kind must be opening, milestone or problem' }
+    }
+    const count = activeSession.assistantOwnerUpdateCount ?? 0
+    if (count >= ASSISTANT_OWNER_UPDATE_PER_TURN_CAP) {
+      return {
+        shown: false,
+        reason: 'per-submission update cap reached; continue silently and include important information in the final answer',
+      }
+    }
+    const stored = this.store.addMessage(sessionId, {
+      type: 'assistant',
+      content: message,
+      metadata: { narration: true, ownerUpdateKind: kind },
+    })
+    activeSession.assistantOwnerUpdateCount = count + 1
+    activeSession.dshTurnAckVisibleTextSeen = true
+    this.emit('message', sessionId, stored)
+    return {
+      shown: true,
+      remaining: ASSISTANT_OWNER_UPDATE_PER_TURN_CAP - activeSession.assistantOwnerUpdateCount,
+    }
   }
 
   /** Execute a host-bridged tool call from the runtime. */

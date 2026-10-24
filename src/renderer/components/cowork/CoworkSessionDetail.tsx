@@ -1285,7 +1285,7 @@ const isVisibleAssistantTurnItem = (item: AssistantTurnItem, isAssistantMode = f
     return false;
   }
   // Assistant mode never surfaces raw reasoning: thinking items stay out of
-  // the transcript entirely. The model's user-facing narration arrives as
+  // the transcript entirely. Explicit owner_update progress arrives as
   // ordinary chat messages (metadata.narration) instead.
   if (isAssistantMode && item.type === 'assistant' && item.message.metadata?.isThinking) {
     return false;
@@ -2451,8 +2451,8 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   /** Shuffle-bag scope for the assistant-mode indicator's turn-ack phrases. */
   sessionId?: string | null;
   /** Assistant mode: raw thinking and tool-call chrome are hidden entirely
-   * (model narration arrives as ordinary chat bubbles), and the "Worked for"
-   * collapse stays disabled so the visible list renders in order. */
+   * (explicit owner_update progress arrives as ordinary chat bubbles), and
+   * the "Worked for" collapse stays disabled so the visible list renders in order. */
   isAssistantMode?: boolean;
   /** Session bot avatar for the inline assistant-mode activity indicator. */
   activityAvatar?: string | null;
@@ -2950,8 +2950,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     return () => window.clearTimeout(timer);
   }, [isRespondingToPermission, pendingPermission?.requestId]);
   // Chat experience mode (Settings > General), scoped per session: the
-  // assistant form ('assistant' hides raw thinking and tool-call chrome; the
-  // model's narration arrives as ordinary chat bubbles) applies only while
+  // assistant form ('assistant' hides raw thinking and tool-call chrome;
+  // explicit owner_update progress arrives as ordinary chat bubbles) applies only while
   // THIS session is a regular interactive owner chat — the same
   // isAssistantModeOwnerChatSession rule the backend enforces
   // (src/main/libs/coworkRunner.ts), so the transcript can never render

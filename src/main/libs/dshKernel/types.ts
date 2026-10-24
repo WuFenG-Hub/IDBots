@@ -35,13 +35,6 @@ export type DshFinalizeMetadata = {
    * isStreaming:false, so this flag wins.
    */
   isStreaming?: boolean
-  /**
-   * Assistant chat-experience mode: the finalized text is model narration —
-   * commentary professional mode would fold into the Think row — surfaced as
-   * an ordinary chat bubble. The tag only records the origin; rendering is
-   * the normal assistant bubble in both modes.
-   */
-  narration?: boolean
 }
 
 /** Actions the adapter applies to the store + event surface. */

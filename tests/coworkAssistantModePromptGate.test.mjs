@@ -84,10 +84,17 @@ test('the opening line bans bare-acknowledgment openers — the host ack owns th
 
 // 2026-10-13 DeepSeek acceptance findings: with reasoning off, the model
 // leaked English internal monologue as narration ("Good. Now let me build…")
-// and emitted one bubble per tool round. The prompt must carry the three
-// fixes as explicit prohibitions, not soft suggestions.
-test('the assistant-mode prompt hard-pins narration language, sparseness, and tone', () => {
+// and emitted one bubble per tool round. 2026-10-24 session 2c70849f: the
+// soft "2-4 narrations" budget still produced 20 progress bubbles in one
+// turn, so visibility moved to the host's structured
+// owner_update({ message, kind }) tool with a hard per-turn cap. The prompt
+// must carry the language and tone prohibitions AND the owner_update
+// protocol plus the final-report contract as explicit rules, not soft
+// suggestions.
+test('the assistant-mode prompt hard-pins the owner_update protocol, language, tone, and the final-report contract', () => {
   const promptSource = readFileSync(join(here, '../src/main/libs/assistantModePrompt.ts'), 'utf8');
+  // Language + tone hard prohibitions (unchanged incidents: 2026-10-13
+  // English monologue, 2026-10-22 asymmetric language rule).
   assert.ok(
     promptSource.includes('NEVER narrate in English'),
     'the language rule must be a hard prohibition (English narration only when the user writes English)',
@@ -97,20 +104,71 @@ test('the assistant-mode prompt hard-pins narration language, sparseness, and to
     'the language rule must carry an explicit Chinese example',
   );
   assert.ok(
-    promptSource.includes('NEVER write one line per tool call'),
-    'narration must be sparse milestone-only, never one bubble per tool call',
-  );
-  assert.ok(
-    promptSource.includes('2-4 narrations'),
-    'the prompt must state the expected total narration budget',
-  );
-  assert.ok(
     promptSource.includes('NEVER self-talk'),
     'the tone rule must ban internal monologue ("let me check", "I miscounted")',
   );
   assert.ok(
     promptSource.includes('已找到中文版的文件'),
     'the tone rule must carry the user-facing status example',
+  );
+  // The visibility protocol: owner_update is the ONLY progress channel, with
+  // the opening kind, a hard per-turn budget, and the three accepted kinds.
+  assert.ok(
+    promptSource.includes('owner_update({ message, kind })'),
+    'owner_update({message,kind}) must be the only way to show progress before the final reply',
+  );
+  assert.ok(
+    promptSource.includes('kind: "opening"'),
+    'the opening update kind must be mandated for multi-step work',
+  );
+  assert.ok(
+    promptSource.includes('AT MOST 5 further owner_update calls'),
+    'at most 5 further updates after the opening',
+  );
+  assert.ok(
+    promptSource.includes('6 total including the opening'),
+    'the total per-turn budget must be stated (6 including the opening)',
+  );
+  assert.ok(
+    promptSource.includes('"milestone"'),
+    'kind "milestone" must be defined for meaningful results',
+  );
+  assert.ok(
+    promptSource.includes('"problem"'),
+    'kind "problem" must be defined for owner-relevant blockers',
+  );
+  assert.ok(
+    promptSource.includes('ordinary mid-turn commentary is hidden'),
+    'the prompt must state that plain commentary never reaches the owner',
+  );
+  assert.ok(
+    promptSource.includes('retries and self-corrections are internal'),
+    'routine retries and setup must stay internal',
+  );
+  assert.ok(
+    !promptSource.includes('2-4 narrations'),
+    'the soft "2-4 narrations" budget is gone — it produced 20 bubbles in one turn (2026-10-24)',
+  );
+  // The final-report contract for complex tasks.
+  assert.ok(
+    promptSource.includes('the final reply MUST include clear short sections for the outcome'),
+    'a complex final reply must lead with the outcome',
+  );
+  assert.ok(
+    promptSource.includes('unresolved issues or limits'),
+    'the final reply must state unresolved issues or limits (explicitly none when there are none)',
+  );
+  assert.ok(
+    promptSource.includes('recommended next actions'),
+    'the final reply must recommend next actions',
+  );
+  assert.ok(
+    promptSource.includes('Use a compact Markdown table for structured comparisons'),
+    'simple structured comparisons prefer a compact Markdown table',
+  );
+  assert.ok(
+    promptSource.includes('Use an HTML report only when richer visual presentation would be materially clearer'),
+    'HTML is optional and reserved for materially clearer cases',
   );
 });
 

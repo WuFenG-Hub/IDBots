@@ -3,6 +3,8 @@
 Date: 2026-10-13
 Status: Phase 1 + first polish round shipped to `main`. This document hands off the remaining work to the next dev agent.
 
+> **2026-10-24 update (branch `feat/assistant-output-bubbles`)** — owner review of session `2c70849f` found 20 narration bubbles in one turn despite the existing 2–4 prompt budget. Progress visibility now uses an explicit `owner_update({ message, kind })` host tool: opening, milestone and problem updates arrive as whole persisted narration messages, capped at six per user submission. Ordinary commentary folds into hidden thinking in both experience modes; assistant mode holds short effort-off text behind the existing classification window to prevent visible flashes, while long final answers still stream. The final-report prompt requires outcome, evidence, unresolved issues and recommended next actions, with Markdown tables for simple structured results and optional HTML for richer presentation.
+
 > **2026-10-13 update (branch `feat/assistant-phase2-ux`)** — the following landed on that branch (not yet merged):
 > - Acceptance-report UX fixes: the inline activity indicator is now visible through the ENTIRE running turn (it used to step aside while reply text streamed, leaving multi-minute tool windows looking idle), narration bubbles settle verbatim (a bubble's text never rewrites after it appeared — streamed buffer wins over the assembled message text), and the indicator reflects api_retry/requesting transport status (runtime-status messages are merged into its activity list by timestamp).
 > - Phase 2 item 1 (delegation copy): assistant-mode wording for the delegation-blocking banner + disabled composer, and sidebar rows strip the `[编排任务] `/`[Orchestration Task] ` prefix (render-only; stored titles untouched). `useChatExperienceMode` hook extracted for reuse.
@@ -15,7 +17,7 @@ Status: Phase 1 + first polish round shipped to `main`. This document hands off 
 A chat experience mode switch in **Settings → General** (`chatExperienceMode`: `'professional' | 'assistant'`, default `'assistant'`). Target: non-technical users — the bot should feel like a living personal assistant, not an engineering console.
 
 - **Professional mode** = the original experience (full reasoning blocks, tool-call cards, "Worked for" collapse, bottom streaming bar). It must stay **pixel-identical**; every assistant-mode change is gated behind the mode flag.
-- **Assistant mode** = fast first reply, narration bubbles, hidden thinking/tools, boss-report style, neutral-gray chat surface, bot-avatar activity indicator.
+- **Assistant mode** = fast first reply, sparse explicit owner-update bubbles, hidden thinking/tools/commentary, structured boss reports, neutral-gray chat surface, bot-avatar activity indicator.
 
 ## 2. Shipped so far (all merged to `main`)
 
@@ -35,9 +37,11 @@ A chat experience mode switch in **Settings → General** (`chatExperienceMode`:
 
 - **Mode storage**: `app_config.chatExperienceMode` (sqlite kv via `SqliteStore`); renderer reads via `configService` + `localStore.onChanged` on `CONFIG_KEYS.APP_CONFIG`; main reads via `getPersistedChatExperienceMode()`.
 - **Prompt gating**: `composeEffectiveSystemPrompt(..., assistantMode)` — call sites pass `isAssistantModeOwnerChatSession(sessionId)`: standard type, no `autoOrigin`, `sourceChannel === 'cowork_ui'`. Group tasks / A2A / IM / heartbeat / schedule / orchestration never get the assistant prompt.
-- **Narration pipeline**: `dsh-runtime` stream → `src/main/libs/dshKernel/dshEventMapper.ts` (per-decision `assistantMode` getter; commentary → text slot + `metadata.narration`, reasoning → thinking slot) → `coworkRunner` → IPC → Redux `coworkSlice` → `CoworkSessionDetail.tsx` render filters (`isVisibleAssistantTurnItem`, `getVisibleAssistantItems`).
+- **Owner-update pipeline**: model `owner_update` call → DSH host-tool bridge → `CoworkRunner.emitAssistantOwnerUpdate` (active assistant-owner gate + six-update per-submission budget) → `store.addMessage` with `{ narration: true, ownerUpdateKind }` and the normal message event → IPC → Redux `coworkSlice` → `CoworkSessionDetail.tsx`. Messages arrive whole and remain identical after reload; excess calls return `shown: false` without persisting a bubble. Tool closures bind their submission's `ActiveSession`; stale calls cannot charge or suppress the ack of a later submission.
+- **Agent tool registration**: DSH registers host tools only at agent creation. `DshTurnHub.ensureSessionWithHostTools` fingerprints the surface and disposes/recreates only the agent when it changes (including professional ↔ assistant transitions), preserving the session JSONL and avoiding runtime restarts on identical turns.
+- **Commentary pipeline**: `dsh-runtime` stream → `src/main/libs/dshKernel/dshEventMapper.ts`. Commentary and reasoning fold into thinking in both modes; assistant mode additionally applies the 160-unit hold to effort-off folding routes so short internal text never flashes a bubble. Long final answers still stream past the hold, and non-folding GLM content behavior is unchanged. Renderer filters hide thinking/tool chrome in assistant mode.
 - **Effort chain**: `runDshSessionLocal` in `coworkRunner.ts` — `session override ?? (assistantMode ? 'off' : brain ?? persisted ?? model default)`.
-- **Tests**: `tests/dshKernelEventMapper.test.mjs`, `tests/coworkComposerEffortDefault.test.mjs`, `tests/coworkAssistantModePromptGate.test.mjs`, `tests/coworkAssistantNarrationSurvival.test.ts`, `tests/coworkAssistantDeliveryIndex.test.mjs`, `tests/markdownContentHtmlReportCard.test.tsx` — mostly wired into `pnpm run test:ui-regressions`. `tests/*` is git-ignored by default; new test files need a `.gitignore` negation entry.
+- **Tests**: `tests/dshKernelEventMapper.test.mjs`, `tests/coworkAssistantOwnerUpdate.test.mjs`, `tests/coworkDshIntegration.test.mjs`, `tests/coworkComposerEffortDefault.test.mjs`, `tests/coworkAssistantModePromptGate.test.mjs`, `tests/coworkAssistantNarrationSurvival.test.ts`, `tests/coworkAssistantDeliveryIndex.test.mjs`, `tests/markdownContentHtmlReportCard.test.tsx` — wired into the DSH/UI regression suites. `tests/*` is git-ignored by default; new test files need a `.gitignore` negation entry.
 
 ## 4. Remaining work
 

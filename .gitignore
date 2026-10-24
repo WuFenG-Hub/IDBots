@@ -659,6 +659,7 @@ man_base_data_pebble/
 !tests/openAiCompatContent.test.mjs
 !tests/coworkAssistantNarrationSurvival.test.ts
 !tests/coworkAssistantModePromptGate.test.mjs
+!tests/coworkAssistantOwnerUpdate.test.mjs
 !tests/coworkAssistantDeliveryIndex.test.mjs
 !tests/markdownContentHtmlReportCard.test.tsx
 !tests/inlineHtmlReportBlock.test.tsx

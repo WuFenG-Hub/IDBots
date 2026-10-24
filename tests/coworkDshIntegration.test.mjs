@@ -57,10 +57,12 @@ class RecordingStore {
     this.messages = []
     this.sessions = new Map()
     this.configValue = {}
+    this.sourceChannel = null
   }
   getSession(id) { return this.sessions.get(id) ?? null }
   // Runner reads the session goal through this lighter accessor every DSH turn.
   getSessionWithoutMessages(id) { return this.sessions.get(id) ?? null }
+  getMetabotIdForSession(id) { return this.sessions.get(id)?.metabotId ?? null }
   getConfig() { return this.configValue }
   updateSession(id, updates) {
     const existing = this.sessions.get(id) ?? { id, messages: this.messages }
@@ -72,7 +74,9 @@ class RecordingStore {
     return stored
   }
   getConversationSourceContextBySession() {
-    return { hasSourceContext: false }
+    return this.sourceChannel
+      ? { sourceChannel: this.sourceChannel, externalConversationId: null }
+      : { hasSourceContext: false }
   }
   getMemoryBackend() {
     const noMemories = () => []
@@ -182,6 +186,37 @@ test('CoworkRunner DSH integration', { skip: runtimeReady ? false : 'dsh-runtime
     assert.ok(activeSession.claudeSessionId?.startsWith('dsh:'), `session handle pinned: ${activeSession.claudeSessionId}`)
     const firstRequest = seen.find((r) => r.body?.messages?.some((m) => m.role === 'system'))
     assert.match(firstRequest.body.messages.find((m) => m.role === 'system').content, /You are Alice/)
+
+    // Assistant owner updates travel the real runtime schema → host execution
+    // → persistence/event path, ordered between the tool call and its result.
+    const beforeOwnerTurn = store.messages.length
+    store.sourceChannel = 'cowork_ui'
+    activeSession.skipInitialUserMessage = true
+    await runner.runDshSessionLocal(activeSession, 'CALL_OWNER_UPDATE', process.cwd(), 'You are Alice.')
+    assert.ok(!failure, `owner_update turn should not fail: ${failure}`)
+    const ownerMessages = store.messages.slice(beforeOwnerTurn)
+    const ownerTool = ownerMessages.find((m) => m.type === 'tool_use' && m.metadata?.toolName === 'owner_update')
+    const ownerBubble = ownerMessages.find((m) => m.type === 'assistant' && m.content === 'Owner milestone from runtime')
+    const ownerResult = ownerMessages.find((m) => m.type === 'tool_result' && m.metadata?.toolUseId === ownerTool?.metadata?.toolUseId)
+    const ownerReply = ownerMessages.find((m) => m.type === 'assistant' && m.content.includes('mock says: tool finished'))
+    assert.ok(ownerTool, 'runtime emitted the owner_update tool call')
+    assert.ok(ownerBubble, `host persisted the owner update bubble: ${JSON.stringify(ownerMessages)}`)
+    assert.ok(ownerResult, 'runtime received the host tool result')
+    assert.ok(ownerReply, 'final answer still follows the owner update')
+    assert.equal(ownerBubble.metadata.narration, true)
+    assert.equal(ownerBubble.metadata.ownerUpdateKind, 'milestone')
+    assert.equal(ownerReply.metadata.narration, undefined)
+    assert.match(String(ownerResult.content), /"shown":true/)
+    assert.match(String(ownerResult.content), /"remaining":5/)
+    assert.ok(ownerMessages.indexOf(ownerTool) < ownerMessages.indexOf(ownerBubble))
+    assert.ok(ownerMessages.indexOf(ownerBubble) < ownerMessages.indexOf(ownerResult))
+    assert.equal(activeSession.assistantOwnerUpdateCount, 1)
+    assert.ok(
+      seen.some((r) => (r.body?.tools ?? []).some((tool) => (tool.function?.name ?? tool.name) === 'owner_update')),
+      'the normalized owner_update schema reached the real runtime',
+    )
+    store.sourceChannel = null
+    activeSession.skipInitialUserMessage = false
 
     // Routing stickiness: the pinned handle keeps dsh even with the store gone.
     claudeSettings.setStoreGetter(() => null)
