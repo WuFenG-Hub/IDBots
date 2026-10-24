@@ -1844,6 +1844,39 @@ class CoworkService {
     return Boolean(result?.success);
   }
 
+  async listStandingPages(metabotId: number): Promise<Array<{
+    id: string; pageKey: string; spec: string; name: string; question: string;
+    sections: Array<{ key: string; title: string; body: string }>;
+    content: string; builtAt: number | null; status: 'active' | 'archived';
+    isDefault: boolean; lastRefreshError: string | null; updatedAt: number; stale?: boolean | null;
+  }>> {
+    const api = window.electron?.cowork?.listStandingPages;
+    if (!api) return [];
+    const result = await api({ metabotId });
+    return result?.success ? (result.pages ?? []) : [];
+  }
+
+  async createStandingPage(metabotId: number, name: string, question: string): Promise<string | null> {
+    const api = window.electron?.cowork?.createStandingPage;
+    if (!api) return 'unavailable';
+    const result = await api({ metabotId, name, question });
+    return result?.success ? null : (result?.error ?? 'failed');
+  }
+
+  async removeStandingPage(metabotId: number, key: string): Promise<boolean> {
+    const api = window.electron?.cowork?.removeStandingPage;
+    if (!api) return false;
+    const result = await api({ metabotId, key });
+    return Boolean(result?.success);
+  }
+
+  async restoreStandingPage(metabotId: number, key: string): Promise<boolean> {
+    const api = window.electron?.cowork?.restoreStandingPage;
+    if (!api) return false;
+    const result = await api({ metabotId, key });
+    return Boolean(result?.success);
+  }
+
   async restoreTeamCulture(id: string): Promise<boolean> {
     const api = window.electron?.cowork?.restoreTeamCulture;
     if (!api) return false;

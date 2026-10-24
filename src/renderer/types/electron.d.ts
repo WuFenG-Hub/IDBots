@@ -1437,6 +1437,38 @@ interface IElectronAPI {
       entry?: TeamCultureEntry;
       error?: string;
     }>;
+    listStandingPages: (input: { metabotId: number }) => Promise<{
+      success: boolean;
+      pages?: Array<{
+        id: string;
+        pageKey: string;
+        spec: string;
+        name: string;
+        question: string;
+        sections: Array<{ key: string; title: string; body: string }>;
+        content: string;
+        builtAt: number | null;
+        status: 'active' | 'archived';
+        isDefault: boolean;
+        lastRefreshError: string | null;
+        updatedAt: number;
+        stale?: boolean | null;
+      }>;
+      error?: string;
+    }>;
+    createStandingPage: (input: { metabotId: number; name: string; question: string }) => Promise<{
+      success: boolean;
+      page?: unknown;
+      error?: string;
+    }>;
+    removeStandingPage: (input: { metabotId: number; key: string }) => Promise<{
+      success: boolean;
+      error?: string;
+    }>;
+    restoreStandingPage: (input: { metabotId: number; key: string }) => Promise<{
+      success: boolean;
+      error?: string;
+    }>;
     restoreTeamCulture: (input: { id: string }) => Promise<{
       success: boolean;
       entry?: TeamCultureEntry;

@@ -59,6 +59,12 @@ import {
   type ChainHistoryRecallArgs,
 } from './chainHistoryRecallBlocks';
 import { getChainContentHistoryStore } from '../chainContentHistoryRuntime';
+import { getStandingPageStore } from '../standingPageRuntime';
+import {
+  findStandingPageForRead,
+  formatStandingPageRead,
+  formatStandingPagesList,
+} from '../standingPageStore';
 import {
   buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
   formatExperienceRecallResults,
@@ -4390,12 +4396,50 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * standing_pages tool: PULL-only read surface over the bot's standing
+   * briefing pages (owner profile / work threads / playbook / custom). The
+   * nightly pass maintains them; reading costs zero per-turn context because
+   * nothing is injected — the bot asks for a settled overview only when it
+   * needs one.
+   */
+  private runStandingPagesTool(args: { action?: string; page?: string }, sessionId: string): { text: string; isError: boolean } {
+    const store = getStandingPageStore();
+    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+    if (!store) {
+      return { text: 'standing_pages unavailable: standing page store is not configured', isError: true };
+    }
+    if (metabotId == null) {
+      return { text: 'standing_pages failed: could not resolve MetaBot for session', isError: true };
+    }
+    try {
+      const pages = store.listStandingPages(metabotId);
+      if (args.action === 'read' || args.page) {
+        const target = args.page
+          ? findStandingPageForRead(pages, args.page)
+          : pages[0];
+        if (!target) {
+          return { text: `standing_pages: no page matches "${args.page ?? ''}". Call without arguments to list your pages.`, isError: true };
+        }
+        if (target.builtAt == null) {
+          return { text: `standing_pages: "${target.name}" has not been built yet (the nightly pass needs more material).`, isError: false };
+        }
+        return { text: formatStandingPageRead(target), isError: false };
+      }
+      return { text: formatStandingPagesList(pages), isError: false };
+    } catch (error) {
+      return {
+        text: `standing_pages failed: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+  }
+
+  /**
    * chain_history_recall tool: retrieval over the bot's chain content history
    * ledger — pins it published and chain pins it fully read. Answers "what
    * exactly did I publish/read" with pin ids, complementing the day-narrative
    * recall of experience_recall.
-   */
-  private runChainHistoryRecallTool(args: ChainHistoryRecallArgs, sessionId: string): { text: string; isError: boolean } {
+   */  private runChainHistoryRecallTool(args: ChainHistoryRecallArgs, sessionId: string): { text: string; isError: boolean } {
     const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
     if (metabotId == null) {
       return { text: 'chain_history_recall failed: could not resolve MetaBot for session', isError: true };
@@ -12301,6 +12345,42 @@ export class CoworkRunner extends EventEmitter {
           }
         )
       );
+    }
+    // Standing pages mount only when at least one page is BUILT — the same
+    // probe pattern as the knowledge recall tools (an empty surface costs a
+    // tool schema for nothing).
+    if (sessionMemoryReadEnabled && getStandingPageStore()) {
+      const standingPagesStore = getStandingPageStore();
+      const standingPagesMetabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+      let hasBuiltStandingPages = false;
+      if (standingPagesStore && standingPagesMetabotId != null) {
+        try {
+          hasBuiltStandingPages = standingPagesStore
+            .listStandingPages(standingPagesMetabotId)
+            .some((page) => page.builtAt != null);
+        } catch {
+          hasBuiltStandingPages = false;
+        }
+      }
+      if (hasBuiltStandingPages) {
+        memoryTools.push(
+          tool(
+            'standing_pages',
+            'Read YOUR OWN standing briefing pages — always-current answers the nightly memory pass maintains for you: your owner\'s profile and preferences, the current work threads, your playbook of proven techniques (and owner-defined pages). Bare call: list your pages with section titles and build dates; action read + page (key or name) returns one page\'s full content. Pull-only — pages are NOT injected per turn, so call this when you want a settled overview instead of re-reading raw memories. Each page carries its build date: judge whether to trust it or verify against fresher sources. Not raw facts (memory_user_edits), not day logs (experience_recall), not knowledge points (knowledge_recall).',
+            {
+              action: z.enum(['list', 'read']).optional(),
+              page: z.string().optional(),
+            },
+            async (args: { action?: 'list' | 'read'; page?: string }) => {
+              const result = this.runStandingPagesTool(args, sessionId);
+              return {
+                content: [{ type: 'text', text: result.text }],
+                isError: result.isError,
+              } as any;
+            }
+          )
+        );
+      }
     }
     if (sessionMemoryReadEnabled && this.knowledgeStore) {
       // Tool-mount tightening (design 2026-09-27, decision 2A): recall tools

@@ -651,6 +651,14 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('teamCulture:archive', input),
     restoreTeamCulture: (input: { id: string }) =>
       ipcRenderer.invoke('teamCulture:restore', input),
+    listStandingPages: (input: { metabotId: number }) =>
+      ipcRenderer.invoke('standingPages:list', input),
+    createStandingPage: (input: { metabotId: number; name: string; question: string }) =>
+      ipcRenderer.invoke('standingPages:create', input),
+    removeStandingPage: (input: { metabotId: number; key: string }) =>
+      ipcRenderer.invoke('standingPages:remove', input),
+    restoreStandingPage: (input: { metabotId: number; key: string }) =>
+      ipcRenderer.invoke('standingPages:restore', input),
     deleteTeamCulture: (input: { id: string }) =>
       ipcRenderer.invoke('teamCulture:delete', input),
     listTaskCommTrend: () =>
