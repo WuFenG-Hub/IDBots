@@ -4245,6 +4245,7 @@ export class DreamService {
         usageClass: 'profile_fact',
         origin: 'dream',
         isExplicit: true,
+        occurredAt: Date.parse(`${date}T00:00:00.000Z`),
         source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date, quote: item.source ?? undefined },
       });
       if (write.merged) dedupMerged += 1;
@@ -4272,6 +4273,7 @@ export class DreamService {
         usageClass: 'value_boundary',
         origin: 'dream',
         isExplicit: true,
+        occurredAt: Date.parse(`${date}T00:00:00.000Z`),
         source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date, quote: source },
       });
       if (write.merged) dedupMerged += 1;
@@ -4300,6 +4302,7 @@ export class DreamService {
         usageClass: 'work_review',
         origin: 'dream',
         isExplicit: true,
+        occurredAt: Date.parse(`${date}T00:00:00.000Z`),
         source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date, quote: review.note || undefined },
       });
       if (write.merged) dedupMerged += 1;

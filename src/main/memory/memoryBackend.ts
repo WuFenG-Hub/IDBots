@@ -39,6 +39,8 @@ export interface MemoryUserMemory {
    * bounded proof boost in recall ranking. Absent = unknown = neutral.
    */
   proofCount?: number;
+  /** Event-time axis (#3): when the fact/event happened; null = timeless. */
+  occurredAt?: number | null;
 }
 
 export interface MemoryUserMemorySourceInput {
@@ -105,6 +107,11 @@ export interface MemoryCreateUserMemoryInput extends MemoryScopeSelectorInput, M
   origin?: MemoryOrigin;
   /** Explicit importance override; when omitted the store derives it (memoryImportance.ts). */
   importance?: number;
+  /**
+   * Event-time axis (#3): absolute epoch ms (or YYYY-MM-DD string) of the
+   * underlying event, extracted by the turn judge / dream pipeline.
+   */
+  occurredAt?: number | string | null;
   source?: MemoryUserMemorySourceInput;
   metabotId: number;
   /**

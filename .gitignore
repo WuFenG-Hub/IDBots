@@ -723,3 +723,6 @@ blob-report/
 !tests/standingPageRefresh.test.mjs
 !tests/standingPagesTool.test.mjs
 !tests/standingPagesSettingsStatic.test.mjs
+
+# Memory evolution #3: event-time axis (occurred vs learned)
+!tests/memoryEventTime.test.mjs

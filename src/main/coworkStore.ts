@@ -208,7 +208,7 @@ const coworkSessionActivityAtMessageSql = (sessionRef: string): string => `(
         )`;
 const MEMORY_ROW_SELECT_COLUMNS = `
   id, text, fingerprint, confidence, is_explicit, status,
-  created_at, updated_at, last_used_at, scope_kind, scope_key, usage_class, visibility, origin, archived_at, importance
+  created_at, updated_at, last_used_at, scope_kind, scope_key, usage_class, visibility, origin, archived_at, importance, occurred_at
 `;
 const PRIVATE_CHAT_SIMPLEMSG_BACKFILL_TIME_WINDOW_MS = 10 * 60 * 1000;
 /**
@@ -327,6 +327,25 @@ function parseLastWorkspaceSelection(raw: string | undefined): CoworkWorkspaceSe
 
 function normalizeMemoryText(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
+}
+
+const OCCURRED_ON_RE = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * Event-time axis (#3): validate + convert an extracted "occurred_on"
+ * (YYYY-MM-DD, resolved against the turn's day by the judge) to epoch ms.
+ * Null for timeless facts, malformed values, or dates absurdly in the future.
+ */
+function resolveOccurredAtEpochMs(occurredAt?: number | string | null): number | null {
+  if (occurredAt == null) return null;
+  if (typeof occurredAt === 'number') {
+    return Number.isFinite(occurredAt) && occurredAt > 0 ? Math.floor(occurredAt) : null;
+  }
+  const value = occurredAt.trim();
+  if (!OCCURRED_ON_RE.test(value)) return null;
+  const epoch = Date.parse(`${value}T00:00:00.000Z`);
+  if (!Number.isFinite(epoch)) return null;
+  if (epoch > Date.now() + 86_400_000) return null;
+  return epoch;
 }
 
 function extractConversationSearchTerms(value: string): string[] {
@@ -951,6 +970,12 @@ export interface CoworkUserMemory {
   /** Recall weight: high-importance memories get guaranteed injection and late eviction. */
   importance: number;
   /**
+   * Event-time axis (#3): when the underlying fact/event happened (epoch ms),
+   * distinct from createdAt ("when we learned it"). Null = timeless or
+   * recorded before the column existed.
+   */
+  occurredAt?: number | null;
+  /**
    * Evidence ledger: active provenance rows corroborating this memory
    * (populated by listUserMemories; absent elsewhere = neutral in ranking).
    */
@@ -1408,6 +1433,7 @@ interface CoworkUserMemoryRow {
   origin?: string | null;
   archived_at?: number | string | null;
   importance?: number | string | null;
+  occurred_at?: number | string | null;
 }
 
 interface CoworkUserMemorySourceRow {
@@ -1939,6 +1965,13 @@ export class CoworkStore implements MemoryBackend {
       // so "was used" outranks "was injected".
       if (!memoryColumns.includes('last_applied_at')) {
         this.db.run('ALTER TABLE user_memories ADD COLUMN last_applied_at INTEGER;');
+        changed = true;
+      }
+      if (!memoryColumns.includes('occurred_at')) {
+        // Event-time axis (memory evolution #3): when the underlying fact or
+        // event actually happened, distinct from created_at ("when we learned
+        // it"). Pre-existing rows stay NULL — event time cannot be backfilled.
+        this.db.run('ALTER TABLE user_memories ADD COLUMN occurred_at INTEGER;');
         changed = true;
       }
       if (!memoryColumns.includes('importance')) {
@@ -7269,6 +7302,7 @@ export class CoworkStore implements MemoryBackend {
       lastAppliedAt: row.last_applied_at == null ? null : Number(row.last_applied_at),
       archivedAt: row.archived_at == null ? null : Number(row.archived_at),
       importance: clampMemoryImportance(row.importance),
+      occurredAt: row.occurred_at == null ? null : Number(row.occurred_at),
     };
   }
 
@@ -7428,6 +7462,9 @@ export class CoworkStore implements MemoryBackend {
             isExplicit: mergedExplicit === 1,
           }),
       );
+      const mergedOccurredAt = existing.occurred_at != null
+        ? Number(existing.occurred_at)
+        : (resolveOccurredAtEpochMs(input.occurredAt) ?? null);
       // Match queries only filter status != 'deleted', so a restatement can
       // land on an archived row; revive must clear archived_at or the memory
       // stays invisible to injection and listings forever.
@@ -7442,7 +7479,8 @@ export class CoworkStore implements MemoryBackend {
       this.db.run(`
         UPDATE user_memories
         SET text = ?, fingerprint = ?, confidence = ?, is_explicit = ?, status = 'created',
-            usage_class = ?, visibility = ?, updated_at = ?, archived_at = NULL, importance = ?
+            usage_class = ?, visibility = ?, updated_at = ?, archived_at = NULL, importance = ?,
+            occurred_at = COALESCE(occurred_at, ?)
         WHERE id = ? AND metabot_id = ? AND scope_kind = ? AND scope_key = ?
       `, [
         mergedText,
@@ -7453,6 +7491,7 @@ export class CoworkStore implements MemoryBackend {
         mergedClassification.visibility,
         now,
         mergedImportance,
+        mergedOccurredAt,
         existing.id,
         metabotId,
         scope.kind,
@@ -7482,8 +7521,8 @@ export class CoworkStore implements MemoryBackend {
     this.db.run(`
       INSERT INTO user_memories (
         id, metabot_id, text, fingerprint, confidence, is_explicit, status,
-        scope_kind, scope_key, usage_class, visibility, origin, created_at, updated_at, last_used_at, importance
-      ) VALUES (?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+        scope_kind, scope_key, usage_class, visibility, origin, created_at, updated_at, last_used_at, importance, occurred_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
     `, [
       id,
       metabotId,
@@ -7499,6 +7538,7 @@ export class CoworkStore implements MemoryBackend {
       now,
       now,
       importance,
+      resolveOccurredAtEpochMs(input.occurredAt),
     ]);
     this.addMemorySource(id, metabotId, input.source);
 
@@ -7730,13 +7770,15 @@ export class CoworkStore implements MemoryBackend {
         });
         this.db.run(`
           UPDATE user_memories
-          SET text = ?, fingerprint = ?, updated_at = ?, importance = ?
+          SET text = ?, fingerprint = ?, updated_at = ?, importance = ?,
+              occurred_at = COALESCE(occurred_at, ?)
           WHERE id = ? AND metabot_id = ? AND scope_kind = ? AND scope_key = ?
         `, [
           mergedText,
           buildMemoryFingerprint(mergedText),
           Date.now(),
           mergedImportance,
+          resolveOccurredAtEpochMs(input.occurredAt),
           bestCandidate.id,
           metabotId,
           scope.kind,
@@ -10263,6 +10305,7 @@ export class CoworkStore implements MemoryBackend {
             quote: pickEvidenceQuote(options.userText, change.text) ?? undefined,
           },
           metabotId,
+          occurredAt: resolveOccurredAtEpochMs(change.occurredOn) ?? undefined,
         });
         if (write.created) result.created += 1;
         else if (write.updated) result.updated += 1;
