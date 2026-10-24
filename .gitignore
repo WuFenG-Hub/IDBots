@@ -720,3 +720,4 @@ blob-report/
 
 # Memory evolution #2: standing pages (mental models)
 !tests/standingPageStore.test.mjs
+!tests/standingPageRefresh.test.mjs

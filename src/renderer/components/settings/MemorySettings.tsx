@@ -1704,6 +1704,9 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     deepRewrittenMemories: i18nService.t('memoryHygieneStatDeepMemoryRewrites'),
     deepRetiredKnowledge: i18nService.t('memoryHygieneStatDeepKnowledge'),
     deepRewrittenKnowledge: i18nService.t('memoryHygieneStatDeepRewrites'),
+    standingPagesBuilt: i18nService.t('memoryHygieneStatStandingPagesBuilt'),
+    standingPagesRefreshed: i18nService.t('memoryHygieneStatStandingPagesRefreshed'),
+    standingPagesFreshSkipped: i18nService.t('memoryHygieneStatStandingPagesFresh'),
   };
 
   const renderHygiene = () => {

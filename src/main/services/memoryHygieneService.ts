@@ -22,6 +22,13 @@ import { resolveDreamAttemptTimeoutMs } from '../libs/dreamRetryPolicy';
 import { FALSIFIED_MAX_PER_BOT, FALSIFIED_RETENTION_DAYS } from '../libs/capabilityGateRegularizers';
 import { HOT_LAYER_USAGE_RETENTION_DAYS } from '../coworkStore';
 import { metabotBrainOptions } from './llmFallback';
+import type { StandingPageStore } from '../standingPageStore';
+import {
+  STANDING_PAGE_MAX_OUTPUT_TOKENS,
+  buildStandingPageRefreshPrompt,
+  parseStandingPageRefreshOutput,
+  sampleStandingPageScope,
+} from '../libs/standingPageRefresh';
 
 /**
  * Memory hygiene service — the nightly deterministic "compression stroke".
@@ -92,6 +99,7 @@ export interface MemoryHygieneRunContext {
   impressionStore?: MetaIDImpressionStore;
   knowledgeStore?: MetaIDKnowledgeStore;
   cultureStore?: TeamCultureStore;
+  standingPageStore?: StandingPageStore;
 }
 
 /** Steps return flat counters, or { counts, errors } when they collect
@@ -133,6 +141,8 @@ export interface MemoryHygieneDeps {
   metaidImpressionStore?: MetaIDImpressionStore;
   metaidKnowledgeStore?: MetaIDKnowledgeStore;
   metaidCultureStore?: TeamCultureStore;
+  /** Required only for the standing-pages step; absent = step no-ops. */
+  standingPageStore?: StandingPageStore;
   /** Required only for the deep-consolidation step; absent = step no-ops. */
   performChat?: MemoryHygienePerformChat;
   tickIntervalMs?: number;
@@ -570,6 +580,107 @@ export class MemoryHygieneService {
         };
       },
     });
+    // Standing pages (memory evolution #2): per-bot briefing pages rebuilt in
+    // the background whenever the sediments in their scope change. Scope
+    // fingerprints gate every LLM call — an unchanged scope costs nothing.
+    // Surgical operations keep unmentioned sections physically untouched.
+    this.steps.push({
+      name: 'standing-pages',
+      run: async (context) => {
+        if (!this.deps.performChat || !context.standingPageStore) return { counts: {} };
+        const errors: string[] = [];
+        let botsConsidered = 0;
+        let pagesBuilt = 0;
+        let pagesRefreshed = 0;
+        let pagesFreshSkipped = 0;
+        let pagesNoSediment = 0;
+        for (const bot of this.deps.metabotStore.listMetabots()) {
+          if (context.disabledMetabotIds.has(bot.id)) continue;
+          if (bot.enabled === false) continue;
+          context.standingPageStore.seedDefaultPages(bot.id);
+          const pages = context.standingPageStore.listStandingPages(bot.id);
+          if (pages.length === 0) continue;
+          botsConsidered += 1;
+          const brain = metabotBrainOptions(bot);
+          for (const page of pages) {
+            const sample = sampleStandingPageScope(
+              {
+                coworkStore: context.coworkStore,
+                dreamStore: context.dreamStore,
+                knowledgeStore: context.knowledgeStore,
+              },
+              bot.id,
+              page.spec
+            );
+            if (!sample) {
+              pagesNoSediment += 1;
+              continue;
+            }
+            if (page.scopeFingerprint === sample.fingerprint && page.builtAt != null) {
+              pagesFreshSkipped += 1;
+              continue;
+            }
+            let raw: string;
+            try {
+              raw = await this.deps.performChat(
+                'You are a memory consolidation assistant. Respond only with the requested JSON object.',
+                buildStandingPageRefreshPrompt({
+                  botName: bot.name ?? `MetaBot ${bot.id}`,
+                  pageName: page.name,
+                  question: page.question,
+                  sections: page.sections,
+                  lines: sample.lines,
+                }),
+                brain.llmId,
+                {
+                  thinking: 'disabled',
+                  attemptTimeoutMs: resolveDreamAttemptTimeoutMs(1),
+                  maxTokens: STANDING_PAGE_MAX_OUTPUT_TOKENS,
+                  webSearch: false,
+                  llmProvider: brain.llmProvider,
+                  fallbackLlmId: brain.fallbackLlmId,
+                  fallbackLlmProvider: brain.fallbackLlmProvider,
+                },
+              );
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              errors.push(`standing-pages bot ${bot.id} page ${page.pageKey}: LLM request failed: ${message}`);
+              context.standingPageStore.setRefreshError(page.id, message);
+              continue;
+            }
+            const parsed = parseStandingPageRefreshOutput(raw);
+            if (!parsed) {
+              errors.push(`standing-pages bot ${bot.id} page ${page.pageKey}: unparseable output`);
+              context.standingPageStore.setRefreshError(page.id, 'unparseable output (no complete JSON object)');
+              continue;
+            }
+            const updated = context.standingPageStore.commitPageRefresh({
+              pageId: page.id,
+              operations: parsed.operations,
+              scopeFingerprint: sample.fingerprint,
+              reason: page.builtAt == null ? 'initial' : 'scope_refresh',
+            });
+            if (updated) {
+              if (page.builtAt == null) pagesBuilt += 1;
+              else pagesRefreshed += 1;
+            }
+          }
+        }
+        if (errors.length > 0) {
+          console.warn(`[MemoryHygiene] Standing page warnings: ${errors.join(' | ')}`);
+        }
+        return {
+          counts: {
+            standingPagesBots: botsConsidered,
+            standingPagesBuilt: pagesBuilt,
+            standingPagesRefreshed: pagesRefreshed,
+            standingPagesFreshSkipped: pagesFreshSkipped,
+            standingPagesNoSediment: pagesNoSediment,
+          },
+          errors,
+        };
+      },
+    });
   }
 
   start(): void {
@@ -667,6 +778,7 @@ export class MemoryHygieneService {
         impressionStore: this.deps.metaidImpressionStore,
         knowledgeStore: this.deps.metaidKnowledgeStore,
         cultureStore: this.deps.metaidCultureStore,
+        standingPageStore: this.deps.standingPageStore,
       };
       for (const step of this.steps) {
         try {

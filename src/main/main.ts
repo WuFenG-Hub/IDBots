@@ -118,6 +118,7 @@ import { MetaIDExperienceStore } from './metaidExperienceStore';
 import { MetaIDImpressionStore } from './metaidImpressionStore';
 import { MetaIDKnowledgeStore } from './metaidKnowledgeStore';
 import { TeamCultureStore, type TeamCultureEntry, type TeamCultureKind } from './teamCultureStore';
+import { StandingPageStore } from './standingPageStore';
 import { MetaIDCognitionContextService } from './services/metaidCognitionContext';
 import { MetaIDRelationshipResolver } from './services/metaidRelationshipResolver';
 import { MetaIDContactViewService } from './services/metaidContactViewService';
@@ -2767,6 +2768,7 @@ let metaidExperienceStore: MetaIDExperienceStore | null = null;
 let metaidImpressionStore: MetaIDImpressionStore | null = null;
 let metaidKnowledgeStore: MetaIDKnowledgeStore | null = null;
 let teamCultureStore: TeamCultureStore | null = null;
+let standingPageStore: StandingPageStore | null = null;
 let knowledgeBaseStore: KnowledgeBaseStore | null = null;
 let knowledgeBaseService: KnowledgeBaseService | null = null;
 let metawebStudyJobStore: MetawebStudyJobStore | null = null;
@@ -5251,6 +5253,7 @@ const startStartupNightlyServices = (): void => {
     metaidImpressionStore: dreamImpressionStore,
     metaidKnowledgeStore: dreamKnowledgeStore,
     metaidCultureStore: getTeamCultureStore(),
+    standingPageStore: getStandingPageStore(),
     performChat: performChatCompletionForOrchestrator,
     emitToRenderer: (channel, data) => {
       broadcastToRenderers(channel as string, data);
@@ -8727,6 +8730,17 @@ const getMetaIDKnowledgeStore = (): MetaIDKnowledgeStore => {
     );
   }
   return metaidKnowledgeStore;
+};
+
+const getStandingPageStore = (): StandingPageStore => {
+  if (!standingPageStore) {
+    const sqliteStore = getStore();
+    standingPageStore = new StandingPageStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return standingPageStore;
 };
 
 const getTeamCultureStore = (): TeamCultureStore => {
