@@ -26,7 +26,21 @@ RUN pnpm build
 FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-RUN groupadd -g 1000 idbots && useradd -u 1000 -g idbots -m idbots
+# node:24-bookworm-slim already ships a "node" user/group at uid/gid 1000, so a
+# bare `groupadd -g 1000` exits 4 ("GID already exists"). Rename whatever owns
+# 1000 instead, and only create it when the slot is free — the runtime must keep
+# uid/gid 1000 because the tenant volume is created 1000:1000.
+RUN set -eux; \
+    if getent group 1000 >/dev/null; then \
+      groupmod -n idbots "$(getent group 1000 | cut -d: -f1)"; \
+    else \
+      groupadd -g 1000 idbots; \
+    fi; \
+    if getent passwd 1000 >/dev/null; then \
+      usermod -l idbots -g idbots -d /home/idbots -m "$(getent passwd 1000 | cut -d: -f1)"; \
+    else \
+      useradd -u 1000 -g idbots -m idbots; \
+    fi
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
