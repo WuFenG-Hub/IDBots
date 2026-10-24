@@ -630,6 +630,7 @@ man_base_data_pebble/
 !tests/schedulerTargetSession.test.mjs
 !tests/scheduledTaskSkipLedger.test.mjs
 !tests/scheduledTaskLifecycleStore.test.mjs
+!tests/scheduledTaskLifecycleUi.test.mjs
 !tests/scheduledTaskLifecycleSeams.test.mjs
 !tests/schedulerLifecyclePreamble.test.mjs
 !tests/settingsUnarchiveRefreshStatic.test.mjs

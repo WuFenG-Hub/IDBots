@@ -19,7 +19,11 @@ export interface ScheduleCron {
 export type Schedule = ScheduleAt | ScheduleInterval | ScheduleCron;
 
 // 任务状态
-export type TaskLastStatus = 'success' | 'error' | 'running' | null;
+export type TaskLastStatus = 'success' | 'error' | 'running' | 'max_fires_reached' | null;
+
+// Who created the task: 'human' = the settings UI; 'agent' = a bot through
+// the skill script / inline tool / proxy API; null = legacy row.
+export type TaskOrigin = 'human' | 'agent' | null;
 
 export interface TaskState {
   nextRunAtMs: number | null;
@@ -50,6 +54,13 @@ export interface ScheduledTask {
   targetSessionId: string | null; // bound cowork session id; null = start a new session each run
   expiresAt: string | null; // ISO 8601 日期（精确到天），null 表示不过期
   notifyPlatforms: NotifyPlatform[]; // 任务完成后通知的 IM 平台
+  // Lifecycle provenance & death clause (null origin = legacy row)
+  origin: TaskOrigin;
+  originSessionId: string | null; // session the task was created from
+  originContext: string | null; // host-stamped creation context ('ui'/'chat'/'surf'/'a2a'/'group-task:<id>'/…)
+  exitCondition: string | null; // natural-language retire clause
+  maxFires: number | null; // total fire budget; null = unlimited
+  fireCount: number; // real executions so far
   state: TaskState;
   createdAt: string;
   updatedAt: string;
@@ -95,6 +106,9 @@ export interface ScheduledTaskInput {
   expiresAt: string | null; // ISO 8601 日期（精确到天），null 表示不过期
   notifyPlatforms: NotifyPlatform[]; // 任务完成后通知的 IM 平台
   enabled: boolean;
+  // Optional on the human surface: humans keep unlimited recurring tasks.
+  exitCondition?: string | null;
+  maxFires?: number | null;
 }
 
 // IPC 事件
