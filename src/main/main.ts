@@ -219,6 +219,7 @@ import {
   startGroupTaskDaemon,
   stopGroupTaskDaemon,
   getGroupTaskTurnActivity,
+  gateGroupChatToolChairSend,
   type GroupTaskDaemonSendOwnerReportFn,
 } from './services/groupTaskDaemon';
 import { groupTaskLog } from './libs/groupTaskLogger';
@@ -6029,9 +6030,48 @@ const getCoworkRunner = () => {
         // (incident: sender_name "claude bot"). The field stays on the
         // GroupChatControl input type for interface stability; resolution
         // mirrors getMetabotDisplayName above.
-        sendGroupMessage: async ({ metabotId, groupId, content, replyPin, channelId, mention, network }) => {
+        sendGroupMessage: async ({ metabotId, groupId, content, replyPin, channelId, mention, network, sessionId }) => {
           const metabotStore = getMetabotStore();
           const resolvedNickName = metabotStore.getMetabotById(metabotId)?.name?.trim() || '';
+          // FIX-B (F-4, gt#6 2026-10-24): the RPC/skill-script path has the
+          // CHAIR_IDENTITY_CONFIRM_REQUIRED guard, but this tool channel did
+          // NOT — a Twin cowork session could post a chair-identity directive
+          // into a RUNNING task's group (the gt#6 forged second dispatch
+          // plan). Same wallet on chain, so the only distinguishing signal is
+          // the calling session: refuse unless this session IS the task's own
+          // daemon-chair session. Worker-identity sends and terminal tasks
+          // always pass.
+          try {
+            const boundTask = getGroupTaskStore().getTaskByGroupId(groupId);
+            if (boundTask) {
+              const chairMember = getGroupTaskStore().listMembers(boundTask.id)
+                .find((candidate) => candidate.role === 'chair');
+              const chairSessionId = chairMember?.metabotId != null
+                ? (getCoworkStore().getConversationMapping(
+                  'metaweb_group_task',
+                  `group-task:${boundTask.id}`,
+                  chairMember.metabotId,
+                )?.coworkSessionId ?? null)
+                : null;
+              const chairGate = gateGroupChatToolChairSend({
+                senderMetabotId: metabotId,
+                chairMetabotId: chairMember?.metabotId ?? null,
+                taskStatus: boundTask.status ?? null,
+                sessionId,
+                chairSessionId,
+              });
+              if ('error' in chairGate) {
+                throw new Error(`CHAIR_IDENTITY_CONFIRM_REQUIRED: ${chairGate.error}`);
+              }
+            }
+          } catch (gateError) {
+            if (gateError instanceof Error && gateError.message.startsWith('CHAIR_IDENTITY_CONFIRM_REQUIRED')) {
+              throw gateError;
+            }
+            // Store lookup failures must not block ordinary sends — the
+            // dispatch-layer guard (FIX-A) still tags forged pins at ingest.
+            console.warn('[Main] group_chat chair-identity gate lookup failed:', gateError);
+          }
           const payload: Record<string, unknown> = {
             groupId,
             nickName: resolvedNickName,
@@ -6059,7 +6099,10 @@ const getCoworkRunner = () => {
               }, { network: resolvedNetwork, feeRate: resolveCreatePinFeeRate(resolvedNetwork) });
               // R4 single-send ledger: mid-turn tool sends are recorded so the
               // guest daemon never duplicates them as the turn's final text.
-              recordOutgoingGroupSend({ metabotId, groupId, pinId: sent.pinId, origin: 'group_chat_tool' });
+              // FIX-A/B: the record also carries the calling session so the
+              // dispatch layer can tell the daemon-chair session from a
+              // Twin-session chair-identity send.
+              recordOutgoingGroupSend({ metabotId, groupId, pinId: sent.pinId, origin: 'group_chat_tool', sessionId });
               return sent;
             },
           );
