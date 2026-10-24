@@ -181,6 +181,9 @@ COPY --from=prod-deps /app/package.json ./package.json
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/dist-electron ./dist-electron
+# Mobile/PWA bundle (build:mobile output): the gateway serves /app/* from it
+# in server mode (gateway wiring looks next to the app path); absent → 404.
+COPY --from=build /app/dist-mobile ./dist-mobile
 COPY --from=prod-deps /app/SKILLs ./SKILLs
 # web-search's compiled server output comes from the build stage.
 COPY --from=build /app/SKILLs/web-search/dist ./SKILLs/web-search/dist
