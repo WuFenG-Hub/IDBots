@@ -124,13 +124,21 @@ test('parity with the main-process builder on every battery input', async () => 
     // Three levels up from src/renderer/services/ to the project root.
     ({ buildOpenAIResponsesURL: mainBuilder } = require('../../../dist-electron/main/libs/coworkOpenAICompatProxy.js'));
   } catch {
-    // dist-electron not compiled in this checkout — skip parity (CI compiles
-    // before the test steps); the behavioral cases above still run. Printed
-    // loudly so a silent skip can never read as a pass.
-    console.warn('[openaiResponsesUrl.test] dist-electron not compiled — parity block SKIPPED (run pnpm run compile:electron first)');
+    // dist-electron not compiled in this checkout. CI compiles before the
+    // test steps, so a missing build here must FAIL LOUDLY instead of
+    // skipping — a warn-and-return still ends the test as a pass, which is
+    // a false green on a fresh checkout. IDBOTS_SKIP_MAIN_PARITY=1 is the
+    // only explicit opt-out (for environments that cannot compile electron).
+    if (process.env.IDBOTS_SKIP_MAIN_PARITY === '1') {
+      console.warn('[openaiResponsesUrl.test] parity SKIPPED via IDBOTS_SKIP_MAIN_PARITY=1 (explicit opt-out)');
+      return;
+    }
     mainBuilder = null;
   }
-  if (!mainBuilder) return;
+  assert.ok(
+    mainBuilder,
+    'parity must run: dist-electron/main/libs/coworkOpenAICompatProxy.js not found — run `pnpm run compile:electron` first, or set IDBOTS_SKIP_MAIN_PARITY=1 to skip explicitly',
+  );
 
   const battery: Array<[string, string | undefined]> = [
     ['', undefined],
