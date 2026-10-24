@@ -45,6 +45,36 @@ export function resolveElectronExecutablePath(): string {
   return process.execPath;
 }
 
+/**
+ * Background skill processes must not register as another Dock application on
+ * macOS. Use Electron's bundled LSUIElement helper when it is available; DSH
+ * and desktop-automation workers keep resolveElectronExecutablePath so their
+ * existing permission responsibility stays unchanged.
+ */
+export function resolveElectronSkillExecutablePath(): string {
+  const electronExe = resolveElectronExecutablePath();
+  if (process.platform !== 'darwin') return electronExe;
+  try {
+    const executableName = path.basename(electronExe);
+    const helperName = `${executableName} Helper`;
+    const helperPath = path.resolve(
+      path.dirname(electronExe),
+      '..',
+      'Frameworks',
+      `${helperName}.app`,
+      'Contents',
+      'MacOS',
+      helperName,
+    );
+    if (fs.existsSync(helperPath) && fs.statSync(helperPath).isFile()) {
+      return helperPath;
+    }
+  } catch {
+    // Fall back to the main executable if the helper is unavailable.
+  }
+  return electronExe;
+}
+
 export function resolveMetabotDistModulePath(
   relativePath: string,
   input?: {

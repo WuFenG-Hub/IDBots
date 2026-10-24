@@ -38,6 +38,24 @@ function findPackagedBash(appOutDir) {
   return null;
 }
 
+function verifyMacBackgroundSkillHelper(appPath, appName) {
+  const helperName = `${appName} Helper`;
+  const helperAppPath = path.join(appPath, 'Contents', 'Frameworks', `${helperName}.app`);
+  const helperExecutable = path.join(helperAppPath, 'Contents', 'MacOS', helperName);
+  if (!existsSync(helperExecutable)) {
+    throw new Error(`[electron-builder-hooks] Missing background skill runtime: ${helperExecutable}`);
+  }
+  const helperPlist = path.join(helperAppPath, 'Contents', 'Info.plist');
+  const uiElement = spawnSync('plutil', ['-extract', 'LSUIElement', 'raw', helperPlist], { encoding: 'utf8' });
+  if (uiElement.status !== 0 || uiElement.stdout.trim() !== 'true') {
+    throw new Error(
+      `[electron-builder-hooks] ${helperName}.app must set LSUIElement=true; `
+      + 'background skill processes would otherwise appear as generic exec icons in the macOS Dock.',
+    );
+  }
+  console.log('[electron-builder-hooks] Verified background skill runtime is LSUIElement');
+}
+
 function applyMacIconFix(appPath) {
   console.log('[electron-builder-hooks] Applying macOS icon fix for Apple Silicon compatibility...');
 
@@ -152,6 +170,7 @@ async function afterPack(context) {
 
     if (existsSync(appPath)) {
       applyMacIconFix(appPath);
+      verifyMacBackgroundSkillHelper(appPath, appName);
 
       // The packaged bundle must report the version this build is released as:
       // clients compare their own bundle version against the update manifest, so

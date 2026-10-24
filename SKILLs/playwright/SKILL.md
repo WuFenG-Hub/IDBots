@@ -11,7 +11,9 @@ Drive a real browser from the terminal using `playwright-cli`. Prefer the bundle
 Treat this skill as CLI-first automation. Do not pivot to `@playwright/test` unless the user explicitly asks for test files.
 
 **Tool priority**: when the session already offers `mcp__playwright-mcp__*` browser-automation tools (IDBots ships them and most bots have the switch on by default), prefer those over this CLI — they need no downloads and keep state in the app's managed browser slots. Use this CLI skill when the MCP tools are unavailable/disabled or when you explicitly need a terminal-driven workflow (traces, custom output dirs, scripting).
-**Offline note**: the wrapper resolves `@playwright/mcp` through `npx`, which downloads the package on first use — this skill needs network access at least once per machine.
+**Offline note**: the wrapper resolves `@playwright/cli` through `npx`, which downloads the package on first use — this skill needs network access at least once per machine.
+
+**macOS browser runtime**: when IDBots provides `PLAYWRIGHT_MCP_EXECUTABLE_PATH`, keep it so the CLI uses an installed app-bundled Chrome/Chromium/Edge instead of the unbundled `chrome-headless-shell` (which can appear as a generic `exec` Dock icon). When writing Playwright library code directly, use the full-Chromium headless mode (`chromium.launch({ channel: 'chromium', headless: true })`) or an explicit `executablePath`; do not default to `chromium.launch({ headless: true })` on macOS.
 
 ## Prerequisite check (required)
 
@@ -29,7 +31,7 @@ node --version
 npm --version
 
 # If missing, install Node.js/npm, then:
-npm install -g @playwright/mcp@latest
+npm install -g @playwright/cli@latest
 playwright-cli --help
 ```
 
@@ -60,7 +62,7 @@ Use the wrapper script:
 If the user prefers a global install, this is also valid:
 
 ```bash
-npm install -g @playwright/mcp@latest
+npm install -g @playwright/cli@latest
 playwright-cli --help
 ```
 
@@ -125,7 +127,7 @@ Refs can go stale. When a command fails due to a missing ref, snapshot again.
 
 ## Wrapper script
 
-The wrapper script uses `npx --package @playwright/mcp playwright-cli` so the CLI can run without a global install:
+The wrapper script uses `npx --package @playwright/cli playwright-cli` so the CLI can run without a global install:
 
 ```bash
 "$PWCLI" --help

@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 
-function loadRuntimePathsWithElectronStub() {
+function loadRuntimePathsWithElectronStub(exePath = process.execPath) {
   const originalLoad = Module._load;
   Module._load = function patchedModuleLoad(request, parent, isMain) {
     if (request === 'electron') {
@@ -18,7 +18,7 @@ function loadRuntimePathsWithElectronStub() {
             return process.cwd();
           },
           getPath() {
-            return process.execPath;
+            return exePath;
           },
         },
       };
@@ -56,4 +56,51 @@ test('resolveMetabotDistModulePath climbs out of a worktree-like directory when 
   });
 
   assert.equal(resolved, existingMetabotFile);
+});
+
+function withPlatform(platform, run) {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+  try {
+    return run();
+  } finally {
+    Object.defineProperty(process, 'platform', descriptor);
+  }
+}
+
+function createMacAppFixture() {
+  const appRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-mac-app-'));
+  const mainExe = path.join(appRoot, 'Contents', 'MacOS', 'IDBots');
+  const helperExe = path.join(appRoot, 'Contents', 'Frameworks', 'IDBots Helper.app', 'Contents', 'MacOS', 'IDBots Helper');
+  fs.mkdirSync(path.dirname(mainExe), { recursive: true });
+  fs.mkdirSync(path.dirname(helperExe), { recursive: true });
+  fs.writeFileSync(mainExe, 'main');
+  fs.writeFileSync(helperExe, 'helper');
+  return { mainExe, helperExe };
+}
+
+test('macOS skill processes use the LSUIElement helper without changing the DSH executable', () => {
+  const { mainExe, helperExe } = createMacAppFixture();
+  const runtimePaths = loadRuntimePathsWithElectronStub(mainExe);
+  withPlatform('darwin', () => {
+    assert.equal(runtimePaths.resolveElectronSkillExecutablePath(), helperExe);
+    assert.equal(runtimePaths.resolveElectronExecutablePath(), mainExe);
+  });
+});
+
+test('macOS skill helper falls back to the main executable when the helper is missing', () => {
+  const { mainExe, helperExe } = createMacAppFixture();
+  fs.rmSync(helperExe);
+  const runtimePaths = loadRuntimePathsWithElectronStub(mainExe);
+  withPlatform('darwin', () => {
+    assert.equal(runtimePaths.resolveElectronSkillExecutablePath(), mainExe);
+  });
+});
+
+test('non-macOS skill processes keep the existing Electron executable', () => {
+  const { mainExe } = createMacAppFixture();
+  const runtimePaths = loadRuntimePathsWithElectronStub(mainExe);
+  withPlatform('win32', () => {
+    assert.equal(runtimePaths.resolveElectronSkillExecutablePath(), mainExe);
+  });
 });

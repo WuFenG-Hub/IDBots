@@ -99,6 +99,7 @@ import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduled
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
 import { isWorkspaceMetabotId, resolveBotWorkspaceCwd, resolveSessionWorkingDirectory, shouldUseBotWorkspaceCwd } from './libs/botWorkspace';
 import { getGitBranch } from './libs/gitWorkspace';
+import { detectSystemChromium } from './libs/chromiumRuntime';
 import { CoworkStreamUiDeltaEncoder } from './libs/coworkStreamUiDelta';
 import { IMGatewayManager, IMPlatform, IMGatewayConfig } from './im';
 import { APP_NAME } from './appConstants';
@@ -6188,27 +6189,6 @@ const executeDelegationPipeline = async (
       orderId: orderId || serviceOrderPinId,
       message: `Waiting for delivery from "${delegation.serviceName}"`,
     });
-};
-
-// Prefer an installed Chrome/Chromium for the 0.1.7 browser-automation
-// provider over a Playwright-managed download (offline-safe, no extra ~150MB).
-// Probed once per process: every existsSync under /Applications counts as an
-// AppBundles TCC access attributed to this app, and the browser provider runs
-// this on every session setup — on machines without Chrome installed the
-// repeated probes surfaced as recurring "IDBots wants to access other apps'
-// data" prompts (2026-10-23). A browser installed mid-session is picked up on
-// the next app launch.
-let systemChromiumCache: { executablePath: string } | Record<string, never> | null = null;
-const detectSystemChromium = (): { executablePath: string } | Record<string, never> => {
-  if (systemChromiumCache) return systemChromiumCache;
-  const candidates = process.platform === 'darwin'
-    ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge']
-    : process.platform === 'win32'
-      ? [process.env['PROGRAMFILES'] + '\\Google\\Chrome\\Application\\chrome.exe', process.env['PROGRAMFILES(X86)'] + '\\Google\\Chrome\\Application\\chrome.exe']
-      : ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
-  const hit = candidates.find((candidate) => candidate && fs.existsSync(candidate));
-  systemChromiumCache = hit ? { executablePath: hit } : {};
-  return systemChromiumCache;
 };
 
 // --- Host geolocation (get_host_location tool) ------------------------------
