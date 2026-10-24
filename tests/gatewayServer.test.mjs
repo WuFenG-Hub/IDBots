@@ -911,7 +911,10 @@ test('http: /app/* serves the bundle with index no-cache and hashed assets immut
   const hashed = await httpRequest(handle.port, 'GET', '/app/app-DiWRgTda.js');
   assert.equal(hashed.status, 200);
   assert.equal(hashed.headers.get('cache-control'), 'public, max-age=31536000, immutable');
-  assert.equal(hashed.headers.get('content-type'), 'application/octet-stream');
+  // MIME regression (2026-10-24 white screen): module scripts must be
+  // text/javascript. The pre-fix logic served application/octet-stream here
+  // and Chrome refused to execute the bundle.
+  assert.equal(hashed.headers.get('content-type'), 'text/javascript; charset=utf-8');
 
   const unhashed = await httpRequest(handle.port, 'GET', '/app/logo.png');
   assert.equal(unhashed.status, 200);
@@ -923,6 +926,45 @@ test('http: /app/* serves the bundle with index no-cache and hashed assets immut
 
   const missing = await httpRequest(handle.port, 'GET', '/app/nope.txt');
   assert.equal(missing.status, 404);
+});
+
+test('http: /app/* bundle MIME — browser-executable types for js/css/webmanifest; signed downloads still octet-stream', async (t) => {
+  // Negative control: against the pre-fix bundle route (`.html` ternary +
+  // mimeForPath from fileSign.ts) each bundle assertion below fails with
+  // `application/octet-stream` — verified red on 2026-10-24 before the fix
+  // landed (see the fix commit message for the captured red run).
+  const bundle = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-bundle-mime-')));
+  t.after(() => fs.rmSync(bundle, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(bundle, 'index-Cj2fQa9x.js'), 'export default 1');
+  fs.writeFileSync(path.join(bundle, 'index-Km3vTz8y.css'), 'body{margin:0}');
+  fs.writeFileSync(path.join(bundle, 'manifest.webmanifest'), '{"name":"IDBots"}');
+
+  const { handle } = await startServer(t, { gateway: { staticBundleDir: bundle } });
+
+  const script = await httpRequest(handle.port, 'GET', '/app/index-Cj2fQa9x.js');
+  assert.equal(script.status, 200);
+  assert.equal(script.headers.get('content-type'), 'text/javascript; charset=utf-8');
+
+  const style = await httpRequest(handle.port, 'GET', '/app/index-Km3vTz8y.css');
+  assert.equal(style.status, 200);
+  assert.equal(style.headers.get('content-type'), 'text/css; charset=utf-8');
+
+  const manifest = await httpRequest(handle.port, 'GET', '/app/manifest.webmanifest');
+  assert.equal(manifest.status, 200);
+  assert.equal(manifest.headers.get('content-type'), 'application/manifest+json');
+
+  // Control: the signed download route keeps its download semantics — a .js
+  // file downloads as application/octet-stream by design (fileSign.ts).
+  const { paths } = makeTenantTree(t);
+  const downloadPath = path.join(paths.dataRoot, 'exports', 'session-log.js');
+  fs.mkdirSync(path.dirname(downloadPath), { recursive: true });
+  fs.writeFileSync(downloadPath, 'console.log("not a page")');
+  const token = tokens.signFileToken(SECRET, TENANT, downloadPath, 'attachment', Date.now() + 60_000);
+
+  const download = await httpRequest(handle.port, 'GET', `/gateway/v1/files/${token}`);
+  assert.equal(download.status, 200);
+  assert.equal(download.headers.get('content-type'), 'application/octet-stream');
+  assert.match(download.headers.get('content-disposition'), /^attachment; filename="session-log\.js"$/);
 });
 
 // ---------------------------------------------------------------------------
