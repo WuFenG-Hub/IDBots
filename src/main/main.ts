@@ -119,6 +119,7 @@ import { MetaIDImpressionStore } from './metaidImpressionStore';
 import { MetaIDKnowledgeStore } from './metaidKnowledgeStore';
 import { TeamCultureStore, type TeamCultureEntry, type TeamCultureKind } from './teamCultureStore';
 import { StandingPageStore } from './standingPageStore';
+import { BotDirectivesStore, setBotDirectivesStore } from './botDirectivesStore';
 import { setStandingPageStore } from './standingPageRuntime';
 import { sampleStandingPageScope } from './libs/standingPageRefresh';
 import { MetaIDCognitionContextService } from './services/metaidCognitionContext';
@@ -2771,6 +2772,7 @@ let metaidImpressionStore: MetaIDImpressionStore | null = null;
 let metaidKnowledgeStore: MetaIDKnowledgeStore | null = null;
 let teamCultureStore: TeamCultureStore | null = null;
 let standingPageStore: StandingPageStore | null = null;
+let botDirectivesStore: BotDirectivesStore | null = null;
 let knowledgeBaseStore: KnowledgeBaseStore | null = null;
 let knowledgeBaseService: KnowledgeBaseService | null = null;
 let metawebStudyJobStore: MetawebStudyJobStore | null = null;
@@ -8735,6 +8737,14 @@ const getMetaIDKnowledgeStore = (): MetaIDKnowledgeStore => {
   return metaidKnowledgeStore;
 };
 
+const getBotDirectivesStoreInstance = (): BotDirectivesStore => {
+  if (!botDirectivesStore) {
+    const sqliteStore = getStore();
+    botDirectivesStore = new BotDirectivesStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return botDirectivesStore;
+};
+
 const getStandingPageStore = (): StandingPageStore => {
   if (!standingPageStore) {
     const sqliteStore = getStore();
@@ -8837,6 +8847,7 @@ const getChainContentHistoryStore = (): ChainContentHistoryStore => {
     );
     setChainContentHistoryStore(chainContentHistoryStore);
     setStandingPageStore(getStandingPageStore());
+    setBotDirectivesStore(getBotDirectivesStoreInstance());
   }
   return chainContentHistoryStore;
 };

@@ -97,6 +97,7 @@ import {
 } from '../libs/experiencePromptBlocks';
 import { truncateUtf16Units } from '../libs/llmSafeText';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
+import { getBotDirectivesStore, renderBotDirectivesBlock } from '../botDirectivesStore';
 import { buildGroupTaskWorkingStateBlock } from './groupTaskWorkingState';
 import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
 import type { MemoryUsageClass, MemoryVisibility } from '../memory/memoryScope';
@@ -4142,7 +4143,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           && entry.usageClass !== 'value_boundary'
           && entry.usageClass !== 'work_review');
       const renderBlock = (relevanceScoreById: ReadonlyMap<string, number> | null): string => {
-        const { xml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
+        const memoryBlocks = buildScopedMemoryPromptBlocksDetailed({
           // A group task is the owner's own fleet working on the owner's behalf:
           // the explicit LOCAL channel renders the owner block (a null channel
           // would fall back to the trigger text and read as external).
@@ -4161,6 +4162,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           maxOwnerEntries: maxItems,
           maxTotalChars: GROUP_MEMORY_BLOCK_MAX_CHARS,
         });
+        const injectedIds = memoryBlocks.injectedIds;
+        // Bot directives (#5): group tasks speak to the outside world —
+        // external-facing for the owner's hard rules.
+        let xml = memoryBlocks.xml;
+        const directivesStore = getBotDirectivesStore();
+        if (directivesStore) {
+          const directivesXml = renderBotDirectivesBlock(directivesStore.listBotDirectives(bot.id));
+          if (directivesXml) xml = `${directivesXml}\n${xml}`;
+        }
         // Injection IS the usage event for the hygiene decay clock: touch only
         // the rows that actually rendered into the block.
         if (injectedIds.length > 0) {
