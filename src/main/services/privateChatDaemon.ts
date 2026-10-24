@@ -53,6 +53,7 @@ import type { MemoryBackend } from '../memory/memoryBackend';
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { recordMetaIDPrivateA2AExperience } from './metaidExperienceRecorder';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
+import { getBotDirectivesStore, renderBotDirectivesBlock } from '../botDirectivesStore';
 import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
@@ -2103,7 +2104,7 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
     : [];
 
   const renderBlocks = (relevanceScoreById: ReadonlyMap<string, number> | null): string => {
-    const { xml, injectedIds } = buildScopedMemoryPromptBlocksDetailed({
+    const memoryBlocks = buildScopedMemoryPromptBlocksDetailed({
       channel: params.sourceChannel,
       currentUserText: params.currentUserText,
       ownerEntries,
@@ -2114,6 +2115,14 @@ export function buildPrivateReplyMemoryPromptBlocks(params: {
       maxScopedEntries: params.limit,
       maxOwnerOperationalPreferences: Math.min(3, params.limit),
     });
+    const injectedIds = memoryBlocks.injectedIds;
+    // Bot directives (#5): private chat is an external-facing channel.
+    let xml = memoryBlocks.xml;
+    const directivesStore = getBotDirectivesStore();
+    if (directivesStore) {
+      const directivesXml = renderBotDirectivesBlock(directivesStore.listBotDirectives(params.metabotId));
+      if (directivesXml) xml = `${directivesXml}\n${xml}`;
+    }
     // Injection IS the usage event for the hygiene decay clock.
     if (injectedIds.length > 0) {
       params.memoryBackend.touchUserMemoriesLastUsed(params.metabotId, injectedIds);

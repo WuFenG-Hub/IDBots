@@ -729,3 +729,6 @@ blob-report/
 
 # Memory evolution #6: write-time memory defense (secret/PII screening)
 !tests/memoryDefense.test.mjs
+
+# Memory evolution #5: per-bot owner directives (external-facing hard rules)
+!tests/botDirectives.test.mjs
