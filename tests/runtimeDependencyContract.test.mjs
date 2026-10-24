@@ -113,13 +113,114 @@ test('Electron Node shim covers macOS/Linux, not just Windows', () => {
     /\.nvm['"`],\s*['"`]current/,
     'nvm has no current symlink; the stale fallback path must not come back',
   );
-  // The shim prepend must come after the user-shell PATH assignment on POSIX
-  // or resolveUserShellPath would overwrite it.
+  // The fallback injection must come after the user-shell PATH assignment on
+  // POSIX or resolveUserShellPath would overwrite it.
   const userPathIdx = overridesFn[0].indexOf('resolveUserShellPath()');
   const posixInjectIdx = overridesFn[0].lastIndexOf('injectElectronNodeShim();');
   assert.ok(
     userPathIdx > -1 && posixInjectIdx > userPathIdx,
-    'On macOS/Linux the shim PATH prepend must run after user-shell PATH resolution',
+    'On macOS/Linux the shim fallback must run after user-shell PATH resolution',
+  );
+  const injectFn = overridesFn[0].match(/const injectElectronNodeShim[\s\S]*?\n  \};/);
+  assert.ok(injectFn, 'The POSIX shim injector must have a bounded implementation');
+  assert.match(
+    injectFn[0],
+    /appendEnvPathFallback\(pathValueOf\(env\), \[shimInfo\.shimDir\]\)/,
+    'An installed system Node/npm must win over the Electron shim; only a missing runtime falls back to Electron',
+  );
+  assert.doesNotMatch(
+    injectFn[0],
+    /appendEnvPath\(pathValueOf\(env\), \[shimInfo\.shimDir\]\)/,
+    'Do not prepend the Electron shim on POSIX: it launches two Electron processes and creates exec Dock tiles even with real Node installed',
+  );
+});
+
+test('system Chromium resolver covers platform fallbacks and cache misses', () => {
+  const { resolveSystemChromium } = require('../dist-electron/main/libs/chromiumRuntime.js');
+  const edge = '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge';
+  assert.deepEqual(
+    resolveSystemChromium({ platform: 'darwin', existsSync: (candidate) => candidate === edge }),
+    { executablePath: edge },
+    'macOS must fall back to an installed Chromium-based browser',
+  );
+  assert.deepEqual(
+    resolveSystemChromium({ platform: 'darwin', existsSync: () => false }),
+    {},
+    'No installed browser must stay an empty resolution instead of a fabricated path',
+  );
+  const windowsChrome = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+  assert.deepEqual(
+    resolveSystemChromium({
+      platform: 'win32',
+      env: { PROGRAMFILES: 'C:\\Program Files' },
+      existsSync: (candidate) => candidate === windowsChrome,
+    }),
+    { executablePath: windowsChrome },
+    'Windows resolution must preserve the existing PROGRAMFILES behavior',
+  );
+  assert.deepEqual(
+    resolveSystemChromium({ platform: 'linux', existsSync: (candidate) => candidate === '/usr/bin/chromium' }),
+    { executablePath: '/usr/bin/chromium' },
+    'Linux resolution must retain the Chromium fallback',
+  );
+});
+
+test('skill host env points Playwright MCP at an app-bundled Chromium on macOS', () => {
+  const coworkSource = fs.readFileSync(coworkUtilPath, 'utf8');
+  const mainSource = fs.readFileSync(mainProcessPath, 'utf8');
+  assert.match(
+    coworkSource,
+    /process\.env\.PLAYWRIGHT_MCP_EXECUTABLE_PATH/,
+    'An explicit user-provided Playwright executable must take precedence',
+  );
+  assert.match(
+    coworkSource,
+    /env\.PLAYWRIGHT_MCP_EXECUTABLE_PATH = playwrightExecutable/,
+    'Skill and DSH child processes must inherit the resolved browser executable',
+  );
+  assert.match(
+    coworkSource,
+    /process\.platform === 'darwin'[\s\S]*?detectSystemChromium\(\)\.executablePath/,
+    'The automatic fallback must be scoped to macOS, where unbundled headless-shell creates exec Dock tiles',
+  );
+  assert.match(
+    mainSource,
+    /import \{ detectSystemChromium \} from '\.\/libs\/chromiumRuntime'/,
+    'The built-in browser automation provider must share the same resolver',
+  );
+  assert.doesNotMatch(
+    mainSource,
+    /let systemChromiumCache/,
+    'The one-shot TCC probe cache must move with the resolver, not be duplicated in main.ts',
+  );
+  const skillServicesSource = fs.readFileSync(path.join(process.cwd(), 'src', 'main', 'skillServices.ts'), 'utf8');
+  const skillManagerSource = fs.readFileSync(skillManagerPath, 'utf8');
+  for (const [name, source] of [['coworkUtil', coworkSource], ['skillServices', skillServicesSource], ['skillManager', skillManagerSource]]) {
+    assert.match(source, /resolveElectronSkillExecutablePath/, `${name} must use the background skill executable`);
+    assert.doesNotMatch(source, /resolveElectronExecutablePath/, `${name} must not launch the ordinary Dock app binary for background skills`);
+  }
+});
+
+test('official Playwright wrapper uses the standalone CLI package and full-Chromium guidance', () => {
+  const wrapper = fs.readFileSync(
+    path.join(process.cwd(), 'SKILLs', 'playwright', 'scripts', 'playwright_cli.sh'),
+    'utf8',
+  );
+  assert.match(
+    wrapper,
+    /--package @playwright\/cli playwright-cli/,
+    'The CLI moved out of @playwright/mcp; the wrapper must use the standalone @playwright/cli package',
+  );
+  assert.doesNotMatch(
+    wrapper,
+    /--package @playwright\/mcp playwright-cli/,
+    'The old package/command pair fails with playwright-cli: command not found',
+  );
+  const skillDoc = fs.readFileSync(path.join(process.cwd(), 'SKILLs', 'playwright', 'SKILL.md'), 'utf8');
+  assert.match(
+    skillDoc,
+    /channel: 'chromium', headless: true/,
+    'Direct library examples must select full Chromium instead of the unbundled headless shell on macOS',
   );
 });
 
@@ -796,6 +897,16 @@ test('release packaging wires nested DSH runtime install, extraResources, and pa
   assert.match(hooks, /verifySourceRuntimes\(\)/, 'beforePack must fail closed if nested runtime deps are missing');
   assert.match(hooks, /verifyPackagedRuntimes\(context\)/, 'afterPack must fail closed if the copied app Resources omit runtime deps');
   assert.match(hooks, /verifyPackagedContentResources\(context\)/, 'afterPack must fail closed if content resources ship dot-entries or dead files');
+  assert.match(
+    hooks,
+    /verifyMacBackgroundSkillHelper\(appPath, appName\)/,
+    'afterPack must require the LSUIElement helper used by background skill processes',
+  );
+  assert.match(
+    hooks,
+    /LSUIElement/,
+    'the packaging gate must reject helpers that would register as a Dock app',
+  );
   assert.match(
     workflow,
     /node scripts\/setup-ffmpeg\.js --required/,

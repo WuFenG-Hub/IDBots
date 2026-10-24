@@ -7,7 +7,7 @@ import { buildEnvForConfig, getCurrentApiConfig, resolveApiConfigForModel } from
 import type { OpenAICompatProxyTarget } from './coworkOpenAICompatProxy';
 import { getInternalApiBaseURL } from './coworkOpenAICompatProxy';
 import { coworkLog } from './coworkLogger';
-import { resolveElectronExecutablePath } from './runtimePaths';
+import { resolveElectronSkillExecutablePath } from './runtimePaths';
 import { resolveWritableSkillsRoot } from './skillRoots';
 import { getMetaidRpcBase, getMetaidRpcTokenFilePath, METAID_RPC_AUTHFILE_ENV } from '../services/metaidRpcEndpoint';
 import { chatCompletionWithTools } from '../services/cognitiveChatCompletion';
@@ -17,6 +17,7 @@ import { modelAlwaysThinks } from './modelThinking';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 import { assignPathValue, collapseWindowsPathKeys, pathValueOf } from './windowsPathEnv';
 import { appendPythonRuntimeToEnv } from './pythonRuntime';
+import { detectSystemChromium } from './chromiumRuntime';
 
 function appendEnvPath(current: string | undefined, additions: string[]): string | undefined {
   const items = new Set<string>();
@@ -36,6 +37,14 @@ function appendEnvPath(current: string | undefined, additions: string[]): string
   }
 
   return items.size > 0 ? Array.from(items).join(delimiter) : current;
+}
+
+function appendEnvPathFallback(current: string | undefined, additions: string[]): string | undefined {
+  const items = current ? current.split(delimiter).filter(Boolean) : [];
+  for (const entry of additions) {
+    if (entry && !items.includes(entry)) items.push(entry);
+  }
+  return items.length > 0 ? items.join(delimiter) : current;
 }
 
 /**
@@ -954,7 +963,7 @@ function listNvmNodeBinDirs(home: string): string[] {
 function applyPackagedEnvOverrides(env: Record<string, string | undefined>): void {
   // On Windows, resolve git-bash and ensure Git toolchain directories are available in PATH.
   if (process.platform === 'win32') {
-    const electronExe = resolveElectronExecutablePath();
+    const electronExe = resolveElectronSkillExecutablePath();
     env.IDBOTS_ELECTRON_PATH = electronExe;
 
     const configuredBashPath = normalizeWindowsPath(env.CLAUDE_CODE_GIT_BASH_PATH);
@@ -996,16 +1005,16 @@ function applyPackagedEnvOverrides(env: Record<string, string | undefined>): voi
   }
 
   // Guarantee a Node runtime for skill scripts on every platform: write the
-  // Electron-as-Node shim into userData/cowork/bin and prepend it to PATH so a
-  // machine without a system Node still runs skills out of the box. Windows is
-  // handled in the branch above; on macOS/Linux the prepend must happen AFTER
-  // the user-shell PATH resolution below or it would be overwritten. A
-  // user-installed Node stays reachable as fallback.
+  // Electron-as-Node shim into userData/cowork/bin as a FALLBACK after any
+  // user-installed Node. Windows is handled in the branch above; on macOS/Linux
+  // the fallback must happen AFTER the user-shell PATH resolution below or it
+  // would be overwritten. Prepending the shim forced two Electron launches even
+  // when real Node was already installed and produced generic exec Dock tiles.
   const injectElectronNodeShim = (): void => {
     if (process.platform === 'win32') return;
     const shimInfo = ensureElectronNodeShim();
     if (!shimInfo) return;
-    assignPathValue(env, appendEnvPath(pathValueOf(env), [shimInfo.shimDir]));
+    assignPathValue(env, appendEnvPathFallback(pathValueOf(env), [shimInfo.shimDir]));
     env.IDBOTS_NODE_SHIM_SCRIPT = shimInfo.shimScriptPath;
     env.IDBOTS_NODE_SHIM_DIR = shimInfo.shimDir;
     coworkLog('INFO', 'resolveNodeShim', `Injected Electron Node shim PATH entry: ${shimInfo.shimDir}`);
@@ -1112,7 +1121,16 @@ export function getSkillHostEnv(): Record<string, string> {
 
   env.SKILLS_ROOT = skillsRoot;
   env.IDBOTS_SKILLS_ROOT = skillsRoot;
-  env.IDBOTS_ELECTRON_PATH = resolveElectronExecutablePath();
+  env.IDBOTS_ELECTRON_PATH = resolveElectronSkillExecutablePath();
+  const explicitPlaywrightExecutable = process.env.PLAYWRIGHT_MCP_EXECUTABLE_PATH?.trim();
+  const playwrightExecutable = explicitPlaywrightExecutable || (process.platform === 'darwin'
+    ? detectSystemChromium().executablePath
+    : undefined);
+  // An unbundled chrome-headless-shell becomes a generic exec Dock tile when
+  // a GUI app launches it. Use an app-bundled browser when one is available.
+  if (playwrightExecutable) {
+    env.PLAYWRIGHT_MCP_EXECUTABLE_PATH = playwrightExecutable;
+  }
   env.IDBOTS_APP_DATA_PATH = app.getPath('appData');
   env.IDBOTS_USER_DATA_PATH = app.getPath('userData');
   // Global RPC base (no token). Per-session IDBOTS_RPC_TOKEN still rides

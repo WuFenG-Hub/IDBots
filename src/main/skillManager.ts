@@ -7,7 +7,7 @@ import yaml from 'js-yaml';
 import extractZip from 'extract-zip';
 import { SqliteStore } from './sqliteStore';
 import { getEnhancedEnv, getSkillHostEnv } from './libs/coworkUtil';
-import { isPathWithin, resolveElectronExecutablePath } from './libs/runtimePaths';
+import { isPathWithin, resolveElectronSkillExecutablePath } from './libs/runtimePaths';
 import { resolveBundledSkillsRoot, resolveWritableSkillsRoot } from './libs/skillRoots';
 import {
   assignSkillToMetabot,
@@ -2674,7 +2674,7 @@ export class SkillManager {
     if (!app.isPackaged) {
       candidates.push({ command: 'node' });
     }
-    const electronExecutable = resolveElectronExecutablePath();
+    const electronExecutable = resolveElectronSkillExecutablePath();
     candidates.push({
       command: electronExecutable,
       extraEnv: { ELECTRON_RUN_AS_NODE: '1' },

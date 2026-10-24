@@ -137,13 +137,13 @@ function runStaticChecks() {
 
   checkFileContains(
     'src/main/libs/coworkUtil.ts',
-    ['MSYS_NO_PATHCONV', 'MSYS2_ARG_CONV_EXCL', 'cygpath', 'IDBOTS_SKILLS_ROOT', 'resolveElectronExecutablePath('],
+    ['MSYS_NO_PATHCONV', 'MSYS2_ARG_CONV_EXCL', 'cygpath', 'IDBOTS_SKILLS_ROOT', 'resolveElectronSkillExecutablePath('],
     'cowork util has windows shell + skills root hardening'
   );
 
   checkFileContains(
     'src/main/skillServices.ts',
-    ['getEnhancedEnv(', 'resolveElectronExecutablePath(', 'IDBOTS_ELECTRON_PATH'],
+    ['getEnhancedEnv(', 'resolveElectronSkillExecutablePath(', 'IDBOTS_ELECTRON_PATH'],
     'skill services share cowork env hardening'
   );
 
@@ -155,7 +155,7 @@ function runStaticChecks() {
 
   checkFileContains(
     'src/main/skillManager.ts',
-    ['getEnhancedEnv(', 'resolveElectronExecutablePath(', 'IDBOTS_SKILLS_ROOT'],
+    ['getEnhancedEnv(', 'resolveElectronSkillExecutablePath(', 'IDBOTS_SKILLS_ROOT'],
     'skill manager aligns env and skills root resolution'
   );
 

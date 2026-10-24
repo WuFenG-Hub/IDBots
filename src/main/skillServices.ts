@@ -7,7 +7,7 @@ import path from 'path';
 import fs from 'fs';
 import { app } from 'electron';
 import { getEnhancedEnv } from './libs/coworkUtil';
-import { resolveElectronExecutablePath } from './libs/runtimePaths';
+import { resolveElectronSkillExecutablePath } from './libs/runtimePaths';
 import { resolveBundledSkillsRoot, resolveWritableSkillsRoot } from './libs/skillRoots';
 
 const WEB_SEARCH_HEALTH_POLL_INTERVAL_MS = 200;
@@ -21,7 +21,7 @@ async function buildSkillServiceEnv(): Promise<Record<string, string | undefined
   const startedAt = Date.now();
   console.log('[SkillServices] Building skill service env...');
   const env = await getEnhancedEnv('local');
-  env.IDBOTS_ELECTRON_PATH = resolveElectronExecutablePath();
+  env.IDBOTS_ELECTRON_PATH = resolveElectronSkillExecutablePath();
   console.log(`[SkillServices] Built skill service env in ${Date.now() - startedAt}ms`);
   return env;
 }
@@ -126,7 +126,7 @@ export class SkillServiceManager {
       return { command: 'node', args: [] };
     }
 
-    const electronExecutable = resolveElectronExecutablePath();
+    const electronExecutable = resolveElectronSkillExecutablePath();
     return {
       command: electronExecutable,
       args: [],
@@ -288,7 +288,7 @@ export class SkillServiceManager {
     const env = {
       ...baseEnv,
       ...(runtime.extraEnv ?? {}),
-      IDBOTS_ELECTRON_PATH: resolveElectronExecutablePath(),
+      IDBOTS_ELECTRON_PATH: resolveElectronSkillExecutablePath(),
     };
 
     // Node/Electron validates stdio streams synchronously. Use fd to avoid
@@ -310,7 +310,7 @@ export class SkillServiceManager {
     fs.writeFileSync(pidFile, child.pid!.toString());
     child.unref();
 
-    const runtimeLabel = runtime.command === resolveElectronExecutablePath() ? 'electron-node' : 'node';
+    const runtimeLabel = runtime.command === resolveElectronSkillExecutablePath() ? 'electron-node' : 'node';
     console.log(`[SkillServices] Web Search Bridge Server starting (PID: ${child.pid}, runtime: ${runtimeLabel})`);
     console.log(`[SkillServices] Logs: ${logFile}`);
     console.log(`[SkillServices] startWebSearchServiceProcess complete in ${Date.now() - startedAt}ms`);
