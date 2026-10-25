@@ -332,3 +332,31 @@ export const buildBotSessionCounts = (
   }
   return { ...counts, all: total };
 };
+
+/**
+ * Per-bot unread session counts for the online-chats Bot selector's option rows.
+ * Same structure as BotSessionCounts: every bot id in `botIds` is pre-seeded at 0,
+ * and 'all' carries the total unread count.
+ */
+export type BotUnreadCounts = Partial<Record<number | 'all', number>>;
+
+export const buildBotUnreadCounts = (
+  sessions: CoworkSessionSummary[],
+  botIds: readonly number[],
+  unreadSessionIds: ReadonlySet<string>,
+): BotUnreadCounts => {
+  const unreads: Record<number, number> = {};
+  for (const id of botIds) {
+    unreads[id] = 0;
+  }
+  let total = 0;
+  for (const session of sessions) {
+    if (unreadSessionIds.has(session.id)) {
+      if (session.metabotId != null) {
+        unreads[session.metabotId] = (unreads[session.metabotId] ?? 0) + 1;
+      }
+      total += 1;
+    }
+  }
+  return { ...unreads, all: total };
+};
