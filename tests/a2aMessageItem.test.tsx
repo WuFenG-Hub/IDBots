@@ -144,7 +144,7 @@ test('A2A incoming message falls back to the message-level senderName when peerN
   assert.match(markup, /Snapshot Peer/);
 });
 
-test('A2A non-chain ordinary messages render as internal status instead of chat bubbles', () => {
+test('A2A non-chain assistant messages render as plain notices without an internal-status header', () => {
   const markup = renderToStaticMarkup(
     <A2AMessageItem
       message={{
@@ -159,7 +159,7 @@ test('A2A non-chain ordinary messages render as internal status instead of chat 
   );
 
   assert.match(markup, /本地执行结果，还没有发到链上。/);
-  assert.match(markup, /内部状态|Internal status/);
+  assert.doesNotMatch(markup, /内部状态|Internal status/);
   assert.doesNotMatch(markup, /Local Bot/);
   assert.doesNotMatch(markup, /rounded-2xl/);
 });
@@ -369,7 +369,7 @@ test('A2A upload notice renders an order-scoped resend digital delivery action',
   assert.match(markup, /再次发送数字成果|Resend digital delivery/);
   assert.match(markup, new RegExp(`data-order-txid="${orderTxid}"`));
   assert.doesNotMatch(markup, /\[ORDER_STATUS:/);
-  assert.match(markup, /内部状态|Internal status/);
+  assert.doesNotMatch(markup, /内部状态|Internal status/);
 });
 
 test('A2A upload notice hides resend action when it is not tied to a seller order', () => {

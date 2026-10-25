@@ -102,6 +102,7 @@ import {
   isA2ALiveWorkMessage,
   isA2ASystemErrorMessage,
   shouldHideA2AInternalMessage,
+  type A2AHideContext,
 } from './shared/a2aInternalMessageFilter';
 import { resolveServerWorkspacePath } from './server/serverMode';
 
@@ -5102,6 +5103,32 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Whether this session carries metaweb_private chain traffic. Only those
+   * bot↔bot conversations patch a txid into every delivered reply, so only
+   * there does "assistant message without a txid" mean "internal monologue".
+   */
+  private getA2AHideContext(sessionId: string): A2AHideContext {
+    const row = this.getOne<{ found: number }>(`
+      SELECT 1 AS found FROM cowork_messages
+      WHERE session_id = ? AND metadata LIKE '%"sourceChannel":"metaweb_private"%'
+      LIMIT 1
+    `, [sessionId]);
+    return { chainBackedConversation: row != null };
+  }
+
+  private getA2AThreadHideContext(threadId: string): A2AHideContext {
+    const row = this.getOne<{ found: number }>(`
+      SELECT 1 AS found
+      FROM a2a_conversation_episodes episode
+      JOIN cowork_messages message ON message.session_id = episode.session_id
+      WHERE episode.thread_id = ?
+        AND message.metadata LIKE '%"sourceChannel":"metaweb_private"%'
+      LIMIT 1
+    `, [threadId]);
+    return { chainBackedConversation: row != null };
+  }
+
+  /**
    * A2A UI window: walk newest→oldest skipping hidden internals so a flood of
    * system errors cannot empty the conversation. Keeps trailing live work
    * (tools/thinking) and at most one latest system error for banners.
@@ -5110,6 +5137,7 @@ export class CoworkStore implements MemoryBackend {
     sessionId: string,
     options: { beforeSequence: number | null; limit: number },
   ): CoworkMessagePage {
+    const hideContext = this.getA2AHideContext(sessionId);
     const chunkSize = 100;
     const maxChunks = 40;
     const selected: Array<{ message: CoworkMessage; sequence: number }> = [];
@@ -5129,7 +5157,7 @@ export class CoworkStore implements MemoryBackend {
         const message = this.mapCoworkMessageRow(row);
         const sequence = Number(row.sequence);
         const normalizedSequence = Number.isFinite(sequence) && sequence > 0 ? sequence : 0;
-        if (!shouldHideA2AInternalMessage(message)) {
+        if (!shouldHideA2AInternalMessage(message, hideContext)) {
           selected.push({ message, sequence: normalizedSequence });
           visibleCount += 1;
           inTrailingHidden = false;
@@ -5170,6 +5198,7 @@ export class CoworkStore implements MemoryBackend {
 
   private hasOlderA2ADisplayMessage(sessionId: string, beforeSequence: number | null): boolean {
     if (beforeSequence == null || beforeSequence <= 0) return false;
+    const hideContext = this.getA2AHideContext(sessionId);
     let cursor: number | null = beforeSequence;
     const chunkSize = 100;
     for (let chunkIndex = 0; chunkIndex < 40 && cursor != null; chunkIndex += 1) {
@@ -5177,7 +5206,7 @@ export class CoworkStore implements MemoryBackend {
         beforeSequence: cursor,
         limit: chunkSize,
       });
-      if (rows.some((row) => !shouldHideA2AInternalMessage(this.mapCoworkMessageRow(row)))) {
+      if (rows.some((row) => !shouldHideA2AInternalMessage(this.mapCoworkMessageRow(row), hideContext))) {
         return true;
       }
       if (!hasMoreBefore || rows.length === 0) return false;
@@ -5220,6 +5249,9 @@ export class CoworkStore implements MemoryBackend {
     // (same filter as the in-session pager), and stop at limit+1 visible.
     const rawChunkSize = Math.max(limit * 3, 60);
     const maxChunks = 20;
+    // One thread spans several episode sessions of the same conversation pair,
+    // so the chain-backed flag is resolved once across all of them.
+    const hideContext = this.getA2AThreadHideContext(anchorThreadId);
     const fetchRawRows = (
       chunkEpisodeIndex: number | null,
       chunkBeforeSequence: number | null,
@@ -5292,7 +5324,7 @@ export class CoworkStore implements MemoryBackend {
           timestamp: row.created_at,
           metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
         };
-        if (shouldHideA2AInternalMessage(message)) continue;
+        if (shouldHideA2AInternalMessage(message, hideContext)) continue;
         visible.push({ row, episodeIndex: parseIdNumber(row.episode_index) ?? 1 });
       }
       if (rawExhausted) break;

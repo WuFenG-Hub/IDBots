@@ -5,6 +5,7 @@ import {
   isA2AOrderRelatedMessage,
   shouldHideA2AInternalMessage,
   lastA2AErrorDetail,
+  resolveA2AMessageTxid,
 } from '../src/renderer/components/cowork/a2aInternalMessageFilter';
 import type { CoworkMessage } from '../src/renderer/types/cowork';
 
@@ -143,6 +144,26 @@ test('ordinary conversation bubbles and local notices stay visible', () => {
   assert.equal(shouldHideA2AInternalMessage(endNotice), false);
   assert.equal(shouldHideA2AInternalMessage(failedDelivery), false);
   assert.equal(shouldHideA2AInternalMessage(plainAssistant), false);
+});
+
+test('chain-backed conversations hide assistant monologue without a txid', () => {
+  const chainBacked = { chainBackedConversation: true };
+  const monologue = asMessage({
+    type: 'assistant',
+    content: '任务建好但会话绑定落空（将跑新会话）——修正报告路由：改为直达私聊，不依赖会话落点。',
+    metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing', isFinal: true },
+  });
+  // Chain-backed session: no resolvable txid = internal monologue → hidden.
+  assert.equal(shouldHideA2AInternalMessage(monologue, chainBacked), true);
+  // Delivered reply anchors on a txid → stays a conversation bubble.
+  assert.equal(shouldHideA2AInternalMessage({
+    ...monologue,
+    metadata: { ...monologue.metadata, txid: 'a'.repeat(64) },
+  }, chainBacked), false);
+  // Owner-facing local turns (autonomous task sessions, weather answers) never
+  // broadcast: without the chain-backed context nothing new is hidden.
+  assert.equal(shouldHideA2AInternalMessage(monologue), false);
+  assert.equal(resolveA2AMessageTxid(monologue), '');
 });
 
 test('lastA2AErrorDetail prefers the newest error and strips the Error: prefix', () => {
