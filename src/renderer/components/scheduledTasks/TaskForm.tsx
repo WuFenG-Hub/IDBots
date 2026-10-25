@@ -4,13 +4,13 @@ import { RootState } from '../../store';
 import { scheduledTaskService } from '../../services/scheduledTask';
 import { i18nService } from '../../services/i18n';
 import type { ScheduledTask, ScheduledTaskInput, ScheduledTaskMemoryAccess, NotifyPlatform } from '../../types/scheduledTask';
-import type { Metabot } from '../../types/metabot';
 import {
   buildScheduleFromFormState,
   type IntervalUnit,
   parseScheduleToFormState,
   type ScheduleMode,
 } from './taskFormSchedule';
+import MetaBotSelector, { type MetaBotForSelector } from '../cowork/MetaBotSelector';
 
 interface TaskFormProps {
   mode: 'create' | 'edit';
@@ -64,7 +64,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
   const [maxFires, setMaxFires] = useState(
     task?.maxFires != null ? String(task.maxFires) : ''
   );
-  const [metabots, setMetabots] = useState<Metabot[]>([]);
+  const [metabots, setMetabots] = useState<MetaBotForSelector[]>([]);
   const [selectedMetabotId, setSelectedMetabotId] = useState<number | null>(defaultMetabotId);
   const [sessionMode, setSessionMode] = useState<SessionMode>(initialSessionMode);
   const [customSessionId, setCustomSessionId] = useState(
@@ -94,19 +94,18 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
     let cancelled = false;
     const loadMetabots = async () => {
       try {
-        const result = await window.electron?.metabot?.list?.();
+        const result = await window.electron?.idbots?.getMetaBots?.();
         if (cancelled || !result?.success || !result.list) return;
-        const enabledMetabots = result.list.filter((metabot) => metabot.enabled);
-        setMetabots(enabledMetabots);
+        setMetabots(result.list);
         setSelectedMetabotId((current) => {
-          if (current != null && enabledMetabots.some((metabot) => metabot.id === current)) {
+          if (current != null && result.list.some((metabot) => metabot.id === current)) {
             return current;
           }
-          if (defaultMetabotId != null && enabledMetabots.some((metabot) => metabot.id === defaultMetabotId)) {
+          if (defaultMetabotId != null && result.list.some((metabot) => metabot.id === defaultMetabotId)) {
             return defaultMetabotId;
           }
-          const twin = enabledMetabots.find((metabot) => metabot.metabot_type === 'twin');
-          return twin?.id ?? enabledMetabots[0]?.id ?? null;
+          // Twin is already first in sorted list
+          return result.list[0]?.id ?? null;
         });
       } catch {
         // Keep the existing default if the list cannot be loaded.
@@ -275,22 +274,14 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
       {/* MetaBot */}
       <div>
         <label className={labelClass}>{i18nService.t('scheduledTasksFormMetabot')}</label>
-        <select
-          value={selectedMetabotId ?? ''}
-          onChange={(e) => setSelectedMetabotId(e.target.value ? Number(e.target.value) : null)}
-          className={inputClass}
-          disabled={metabots.length === 0}
-        >
-          {metabots.length === 0 ? (
-            <option value="">{i18nService.t('metabotCreateFirstPrompt')}</option>
-          ) : (
-            metabots.map((metabot) => (
-              <option key={metabot.id} value={metabot.id}>
-                {metabot.name} ({metabot.metabot_type})
-              </option>
-            ))
-          )}
-        </select>
+        <MetaBotSelector
+          label={i18nService.t('scheduledTasksFormMetabot')}
+          metabots={metabots}
+          selectedId={selectedMetabotId}
+          onSelect={setSelectedMetabotId}
+          placeholder={metabots.length === 0 ? i18nService.t('metabotCreateFirstPrompt') : i18nService.t('scheduledTasksFormMetabot')}
+          compact={false}
+        />
         {errors.metabot && <p className={errorClass}>{errors.metabot}</p>}
       </div>
 

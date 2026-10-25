@@ -185,13 +185,14 @@ export interface BotViewBot {
   avatar: string | null;
   isTwin: boolean;
   createdAt: number;
+  role?: string;
 }
 
 export interface SessionBotListGroup {
   key: string;
   kind: 'bot' | 'other';
   /** Bot identity (drives the avatar + name header). */
-  bot?: { id: number; name: string | null; avatar: string | null };
+  bot?: { id: number; name: string | null; avatar: string | null; role?: string };
   sessions: CoworkSessionSummary[];
 }
 
@@ -239,7 +240,7 @@ export const groupSessionsByBot = (
       const group: SessionBotListGroup = {
         key: `bot:${bot.id}`,
         kind: 'bot',
-        bot: { id: bot.id, name: bot.name, avatar: bot.avatar },
+        bot: { id: bot.id, name: bot.name, avatar: bot.avatar, role: bot.role },
         sessions: [],
       };
       byId.set(bot.id, group);

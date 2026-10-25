@@ -31,8 +31,9 @@ import {
   buildGigSquareOrderPayload,
   validateGigSquareOrderPrompt,
 } from './gigSquareOrderPayloadBuilder.mjs';
+import MetaBotSelector, { type MetaBotForSelector } from '../cowork/MetaBotSelector';
 
-type MetabotOption = { id: number; name: string; avatar: string | null; metabot_type: string };
+type MetabotOption = MetaBotForSelector;
 type Mrc20PaymentAsset = {
   kind: 'mrc20';
   chain: 'btc';
@@ -924,18 +925,17 @@ const GigSquareOrderModal: React.FC<GigSquareOrderModalProps> = ({
               <span className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 {i18nService.t('gigSquareUseMetabot')}
               </span>
-              <select
-                value={selectedMetabotId ?? ''}
-                onChange={(e) => { setSelectedMetabotId(Number(e.target.value) || null); setHandshake('idle'); }}
-                className="rounded-lg border dark:border-claude-darkBorder border-claude-border bg-[var(--bg-panel)] dark:bg-claude-darkSurface px-3 py-2 text-sm dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent"
-                disabled={status !== 'idle'}
-              >
-                {metabots.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
+              <div className="min-w-[200px]">
+                <MetaBotSelector
+                  label={i18nService.t('gigSquareUseMetabot')}
+                  metabots={metabots}
+                  selectedId={selectedMetabotId}
+                  onSelect={(id) => { setSelectedMetabotId(id); setHandshake('idle'); }}
+                  placeholder={i18nService.t('gigSquareUseMetabot')}
+                  compact={true}
+                  disabled={status !== 'idle'}
+                />
+              </div>
               <button
                 type="button"
                 onClick={handleOpenConfirm}

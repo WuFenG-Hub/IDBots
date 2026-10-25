@@ -30,7 +30,7 @@ import {
   serializeAutoTasksExpandedPreference,
   serializeFollowUpExpandedPreference,
 } from '../../utils/sessionAutoGrouping';
-import { ChevronDownIcon, Cog6ToothIcon, FolderIcon, HandRaisedIcon } from '@heroicons/react/24/outline';
+import { ChevronDownIcon, Cog6ToothIcon, FolderIcon, HandRaisedIcon, PlusIcon } from '@heroicons/react/24/outline';
 
 interface CoworkSessionListProps {
   sessions: CoworkSessionSummary[];
@@ -115,6 +115,12 @@ interface CoworkSessionListProps {
    * App's i18n subscription).
    */
   language?: string;
+  /**
+   * Quick-create new task with selected bot. When passed, bot group headers in
+   * "by bot" view show a plus button on hover that creates a new task with that
+   * bot pre-selected.
+   */
+  onQuickCreateTask?: (botId: number) => void;
 }
 
 const groupHeaderLabelClass =
@@ -240,6 +246,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   onToggleAutonomousFold,
   onToggleFollowUp,
   language: languageProp,
+  onQuickCreateTask,
 }) => {
   // Same summary objects for the rows whose fields did not change (see the
   // hook); everything below reads these instead of the raw props.
@@ -367,6 +374,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
         avatar: bot.avatar,
         isTwin: bot.metabot_type === 'twin',
         createdAt: bot.created_at ?? 0,
+        role: bot.role,
       })),
     [selectorBots],
   );
@@ -773,6 +781,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
           if (!revealBudgetLeft()) return null;
           const collapsed = collapsedGroupKeys.has(group.key);
           let headerLabel: React.ReactNode;
+          let roleTooltip: string | undefined;
           if (group.kind === 'bot' && group.bot) {
             headerLabel = (
               <>
@@ -784,6 +793,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
                 <span className="truncate">{group.bot.name || `Bot ${group.bot.id}`}</span>
               </>
             );
+            roleTooltip = group.bot.role || undefined;
           } else {
             headerLabel = (
               <>
@@ -794,17 +804,33 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
           }
           return (
             <section key={group.key}>
-              <button
-                type="button"
-                aria-expanded={!collapsed}
-                onClick={() => toggleGroupCollapsed(group.key)}
-                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm font-medium transition-colors dark:text-claude-darkText text-claude-text hover:text-claude-accent dark:hover:text-claude-accent"
-              >
-                <ChevronDownIcon
-                  className={`h-3.5 w-3.5 flex-shrink-0 transition-transform duration-150 ${collapsed ? '-rotate-90' : ''}`}
-                />
-                {headerLabel}
-              </button>
+              <div className="relative group">
+                <button
+                  type="button"
+                  aria-expanded={!collapsed}
+                  onClick={() => toggleGroupCollapsed(group.key)}
+                  title={roleTooltip}
+                  className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm font-medium transition-colors dark:text-claude-darkText text-claude-text hover:text-claude-accent dark:hover:text-claude-accent"
+                >
+                  <ChevronDownIcon
+                    className={`h-3.5 w-3.5 flex-shrink-0 transition-transform duration-150 ${collapsed ? '-rotate-90' : ''}`}
+                  />
+                  {headerLabel}
+                </button>
+                {group.kind === 'bot' && group.bot && onQuickCreateTask && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onQuickCreateTask(group.bot.id);
+                    }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded transition-all opacity-0 invisible group-hover:opacity-100 group-hover:visible hover:bg-claude-accent/10 dark:hover:bg-claude-accent/10"
+                    title={i18nService.t('newTask')}
+                  >
+                    <PlusIcon className="h-4 w-4 text-claude-accent dark:text-claude-accent" />
+                  </button>
+                )}
+              </div>
               {!collapsed
                 && (group.sessions.length > 0 ? (
                   group.sessions.map(renderItem)

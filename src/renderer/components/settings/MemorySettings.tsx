@@ -31,6 +31,7 @@ import MetaIDContactPanel, { ContactGlobalMetaIdHint } from './MetaIDContactPane
 import DreamTelemetryPanel from './DreamTelemetryPanel';
 import CapabilityDraftsPanel, { type CapabilityDraftItem } from './CapabilityDraftsPanel';
 import BrainIcon from '../icons/BrainIcon';
+import MetaBotSelector from '../cowork/MetaBotSelector';
 
 type MetabotOption = {
   id: number;
@@ -38,6 +39,7 @@ type MetabotOption = {
   avatar: string | null;
   metabot_type: string;
   globalmetaid: string | null;
+  created_at?: number;
 };
 
 type MemorySection = 'knowledge' | 'contacts' | 'facts' | 'dream' | 'culture' | 'standingPages';
@@ -252,28 +254,22 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   // ---- MetaBot loading ----
   const loadMetabots = useCallback(async () => {
     try {
-      const result = await window.electron?.metabot?.list();
+      // Use idbots:getMetaBots which returns sorted list (twin first, then by creation time)
+      const result = await window.electron?.idbots?.getMetaBots?.();
       const list: MetabotOption[] = result?.success && Array.isArray(result.list)
-        ? result.list
-          .filter((item) => (
-            typeof item?.id === 'number'
-            && Number.isFinite(item.id)
-            && item.id > 0
-            && typeof item?.name === 'string'
-          ))
-          .map((item) => ({
+        ? result.list.map((item) => ({
             id: item.id,
             name: item.name,
             avatar: item.avatar ?? null,
-            metabot_type: item.metabot_type === 'worker' ? 'worker' : 'twin',
-            globalmetaid: item.globalmetaid ?? null,
+            metabot_type: item.metabot_type,
+            globalmetaid: null, // idbots:getMetaBots doesn't include globalmetaid, but we don't need it for the selector
+            created_at: item.created_at,
           }))
         : [];
       setMetabots(list);
       setMetabotId((current) => {
         if (current != null && list.some((item) => item.id === current)) return current;
-        const defaultTwin = list.find((item) => item.metabot_type === 'twin');
-        if (defaultTwin) return defaultTwin.id;
+        // Twin is already first in the sorted list
         return list.length > 0 ? list[0].id : null;
       });
     } catch (loadError) {
@@ -2246,26 +2242,18 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             <div className="text-sm font-medium dark:text-claude-darkText text-claude-text">{i18nService.t('coworkMemoryTitle')}</div>
             <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('memoryPageHint')}</div>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('memorySelectMetabot')}</span>
-            <select
-              value={metabotId ?? ''}
-              onChange={(event) => {
-                const next = Number(event.target.value);
-                setMetabotId(Number.isFinite(next) && next > 0 ? next : null);
+          <div className="min-w-[240px]">
+            <MetaBotSelector
+              metabots={metabots}
+              selectedId={metabotId}
+              onSelect={(id) => {
+                setMetabotId(id);
                 setSelectedContactId(null);
               }}
-              className="min-w-[180px] rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-              disabled={metabots.length === 0}
-            >
-              {metabots.length === 0 ? (
-                <option value="">{i18nService.t('memoryNoMetabot')}</option>
-              ) : (
-                metabots.map((item) => (
-                  <option key={item.id} value={item.id}>{item.name}</option>
-                ))
-              )}
-            </select>
+              label={i18nService.t('memorySelectMetabot')}
+              placeholder={metabots.length === 0 ? i18nService.t('memoryNoMetabot') : i18nService.t('memorySelectMetabot')}
+              compact={true}
+            />
           </div>
         </div>
         {metabotId == null && (

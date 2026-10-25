@@ -12,13 +12,9 @@ import { setDingTalkConfig, setFeishuConfig, setTelegramConfig, setDiscordConfig
 import { i18nService } from '../../services/i18n';
 import type { IMPlatform, IMConnectivityCheck, IMConnectivityTestResult, IMGatewayConfig } from '../../types/im';
 import { getVisibleIMPlatforms } from '../../utils/regionFilter';
+import MetaBotSelector, { type MetaBotForSelector } from '../cowork/MetaBotSelector';
 
-interface IMMetabotOption {
-  id: number;
-  name: string;
-  avatar: string | null;
-  metabot_type: string;
-}
+interface IMMetabotOption extends MetaBotForSelector {}
 
 interface ChainListenerConfig {
   enabled: boolean;
@@ -216,24 +212,14 @@ const IMSettings: React.FC = () => {
         <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
           {i18nService.t('imMatchedMetabot')}
         </label>
-        <select
-          value={selectedMetabotId != null ? String(selectedMetabotId) : ''}
-          onChange={(e) => { void handlePlatformMetabotChange(platform, e.target.value); }}
+        <MetaBotSelector
+          label={i18nService.t('imMatchedMetabot')}
+          metabots={metabotOptions}
+          selectedId={selectedMetabotId ?? null}
+          onSelect={(id) => { void handlePlatformMetabotChange(platform, String(id)); }}
+          placeholder={metabotLoading ? i18nService.t('loading') : i18nService.t('imMatchedMetabotEmpty')}
           disabled={metabotLoading || empty}
-          className="block w-full rounded-lg dark:bg-claude-darkSurface/80 bg-claude-surface/80 dark:border-claude-darkBorder/60 border-claude-border/60 border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {empty ? (
-            <option value="">
-              {metabotLoading ? i18nService.t('loading') : i18nService.t('imMatchedMetabotEmpty')}
-            </option>
-          ) : (
-            metabotOptions.map((item) => (
-              <option key={item.id} value={String(item.id)}>
-                {item.metabot_type === 'twin' ? `${item.name} (twin)` : item.name}
-              </option>
-            ))
-          )}
-        </select>
+        />
         <p className="text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">
           {i18nService.t('imMatchedMetabotHint')}
         </p>

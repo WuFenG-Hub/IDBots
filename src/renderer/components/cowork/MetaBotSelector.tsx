@@ -16,6 +16,7 @@ export type MetaBotForSelector = {
   avatar: string | null;
   metabot_type: string;
   created_at?: number;
+  role?: string;
 };
 
 /**
@@ -66,6 +67,10 @@ interface MetaBotSelectorProps {
    * list). Mirrors ModelEffortPicker's flag for the same reason.
    */
   useFixedDropdown?: boolean;
+  /**
+   * Disable the selector (e.g., during async operations).
+   */
+  disabled?: boolean;
 }
 
 /** The fixed-mode dropdown never shrinks below this, so option rows keep room
@@ -84,6 +89,7 @@ const MetaBotSelector: React.FC<MetaBotSelectorProps> = ({
   sessionCounts,
   unreadCounts,
   useFixedDropdown = false,
+  disabled = false,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -198,6 +204,7 @@ const MetaBotSelector: React.FC<MetaBotSelectorProps> = ({
           aria-haspopup="listbox"
           aria-expanded={isOpen}
           title={compact ? `${label}: ${currentLabel}` : undefined}
+          disabled={disabled}
         >
           {isAllSelected ? (
             <>

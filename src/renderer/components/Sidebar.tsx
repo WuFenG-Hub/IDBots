@@ -15,6 +15,7 @@ import {
 import { openTeamCollabService } from '../services/openTeamCollabService';
 import { splitGroupTasksByOpenTeam } from './groupTasks/groupTaskUtils.js';
 import { selectCollab, selectTask as selectGroupTask } from '../store/slices/groupTasksSlice';
+import { clearCurrentSession, setNewTaskMetabotId } from '../store/slices/coworkSlice';
 import type { OpenTeamCollabSummary } from '../types/openTeamCollab';
 import { MagnifyingGlassIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon, UserGroupIcon, GlobeAltIcon, ArchiveBoxIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import Tooltip from './ui/Tooltip';
@@ -467,6 +468,16 @@ const Sidebar: React.FC<SidebarProps> = ({
   const listOnRenameSession = useStableCallback(handleRenameSession);
   const listOnToggleSessionSelected = useStableCallback(handleToggleBatchSelected);
 
+  /** Quick-create new task with selected bot from bot group header. */
+  const handleQuickCreateTask = useStableCallback((botId: number) => {
+    // Clear current session to show new task view
+    dispatch(clearCurrentSession());
+    // Set the selected bot for the new task
+    dispatch(setNewTaskMetabotId(botId));
+    // Switch to cowork view if not already there
+    onShowCowork();
+  });
+
   /** Open a group task from the sidebar: switch to the Group Tasks view and select the task. */
   const handleSelectGroupTask = (taskId: number) => {
     onShowGroupTasks();
@@ -868,6 +879,8 @@ const Sidebar: React.FC<SidebarProps> = ({
                 /** Online chats: the Bot selector is this list's only
                  * selector, so it is switched on here — nothing else changes. */
                 botSelector={taskRecordTab === 'a2a'}
+                /** Quick-create task with selected bot. */
+                onQuickCreateTask={taskRecordTab === 'local' ? handleQuickCreateTask : undefined}
               />
             )}
           </div>

@@ -321,7 +321,7 @@ export class MetabotStore {
    * Twin is ordered first for default selection. `created_at` drives the
    * by-Bot session view's group order (Twin first, then oldest bot first).
    */
-  getAllMetaBots(): Array<{ id: number; name: string; avatar: string | null; metabot_type: string; created_at: number }> {
+  getAllMetaBots(): Array<{ id: number; name: string; avatar: string | null; metabot_type: string; created_at: number; role: string }> {
     const rows = this.getAll<MetabotRow>(
       "SELECT * FROM metabots WHERE enabled = 1 ORDER BY metabot_type = 'twin' DESC, id ASC"
     );
@@ -331,6 +331,7 @@ export class MetabotStore {
       avatar: avatarFromRow(row),
       metabot_type: row.metabot_type,
       created_at: row.created_at,
+      role: row.role,
     }));
   }
 
