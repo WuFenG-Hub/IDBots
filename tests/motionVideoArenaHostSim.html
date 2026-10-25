@@ -26,8 +26,8 @@
     // implemented by the Bot Browser chrome (agent-browser:request →
     // agent-browser:response, agent-browser:event broadcast) and records
     // every bridge call. The mock parameter must be ignored (live host
-    // wins), the Actor line must show the simulated host Actor, and the
-    // submit button must stay locked until the Arena root is published.
+    // wins), the Actor line must show the simulated host Actor, and an empty
+    // queue stays disabled while one queued choice is enough to submit.
     (function () {
       var HOST_MODE = new URLSearchParams(location.search).get('host') === '1';
       var log = document.getElementById('harness-log');
@@ -73,9 +73,8 @@
                 ' path=' + (data.params && data.params.path) +
                 ' clientArtifact=' + (payload && payload.client && payload.client.artifact));
             // The real chrome renders its confirmation card here; the
-            // harness never signs and answers with the expected production
-            // state for an unpublished client root.
-            reply(false, { code: 'pin_write_locked', message: 'simulated: submission locked — Arena root not yet published' });
+            // harness never signs and simulates the user cancelling that card.
+            reply(false, { code: 'user_cancelled', message: 'simulated: user cancelled the host confirmation' });
             return;
           }
           reply(false, { code: 'unsupported_method', message: 'simulated host: unsupported ' + data.method });

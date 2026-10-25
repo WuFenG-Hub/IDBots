@@ -48,11 +48,13 @@
   var ALLOWED_PAYLOAD_KEYS = ['category', 'kind', 'client', 'items'];
 
   /**
-   * Published Arena root used as `client.artifact`. Real submission requires a
-   * published root (shared contract §4.2); until the owner publishes this app,
-   * the value stays empty and the submit path stays mock-only / disabled.
+   * Published Arena root used as `client.artifact` — the on-chain create pin
+   * of this MetaApp, published 2026-10-25 through the reviewed metaapp
+   * publish flow (author identity Bob, idq1w8ye5psdkqrn6ugxxwvf5p4kkeuzufa6
+   * n9tt47). Real submission is enabled by this constant; do not clear it
+   * without revoking the publication.
    */
-  var CLIENT_ARTIFACT_ROOT = '';
+  var CLIENT_ARTIFACT_ROOT = 'a13726e12c1c5c99d1843cc6470b30c71c2efe20000282bda1d7524ae23f16d1i0';
 
   // ===== Small helpers =====
 
@@ -205,57 +207,65 @@
   }
 
   /**
-   * Exposure-balanced local pair selection for the initial corpus.
+   * Exposure-balanced selection of unseen unordered pairs for this page session.
    * - never pairs identical videoSha256 values
-   * - avoids repeating the previous unordered pair
+   * - never recycles a shown pair, including with reversed sides
    * - prefers least-shown candidates so new/unjudged works keep exposure
    * - randomizes left/right with the injected rng (browser crypto by default)
    */
   function createPairSelector(options) {
     var rng = (options && typeof options.rng === 'function') ? options.rng : defaultRng();
     var shownCount = {};
-    var lastPair = '';
+    var seenPairs = {};
+
+    function unseenPairs(eligible) {
+      var pool = (eligible || []).filter(function (candidate) {
+        return candidate && candidate.ok !== false;
+      });
+      pool.forEach(function (candidate) {
+        if (!Object.prototype.hasOwnProperty.call(shownCount, candidate.rootPinId)) {
+          shownCount[candidate.rootPinId] = 0;
+        }
+      });
+      var pairs = [];
+      for (var i = 0; i < pool.length; i++) {
+        for (var j = i + 1; j < pool.length; j++) {
+          if (pool[i].videoSha256 === pool[j].videoSha256) continue;
+          var key = pairKey(pool[i], pool[j]);
+          if (seenPairs[key]) continue;
+          pairs.push({
+            candidates: [pool[i], pool[j]],
+            key: key,
+            exposure: shownCount[pool[i].rootPinId] + shownCount[pool[j].rootPinId],
+          });
+        }
+      }
+      pairs.sort(function (a, b) {
+        return a.exposure - b.exposure || (a.key < b.key ? -1 : 1);
+      });
+      return pairs;
+    }
+
+    function markShown(candidateA, candidateB) {
+      var key = pairKey(candidateA, candidateB);
+      if (seenPairs[key]) return;
+      seenPairs[key] = true;
+      shownCount[candidateA.rootPinId] = (shownCount[candidateA.rootPinId] || 0) + 1;
+      shownCount[candidateB.rootPinId] = (shownCount[candidateB.rootPinId] || 0) + 1;
+    }
+
     return {
       pick: function (eligible) {
-        var pool = (eligible || []).filter(function (candidate) {
-          return candidate && candidate.ok !== false;
-        });
-        if (pool.length < 2) return null;
-        pool.forEach(function (candidate) {
-          if (!Object.prototype.hasOwnProperty.call(shownCount, candidate.rootPinId)) {
-            shownCount[candidate.rootPinId] = 0;
-          }
-        });
-        var byExposure = pool.slice().sort(function (x, y) {
-          var diff = shownCount[x.rootPinId] - shownCount[y.rootPinId];
-          if (diff !== 0) return diff;
-          return x.rootPinId < y.rootPinId ? -1 : 1;
-        });
-        var candidates = null;
-        for (var attempt = 0; attempt < 2 && !candidates; attempt++) {
-          var avoidLastPair = attempt === 0;
-          for (var band = 2; band <= byExposure.length && !candidates; band++) {
-            var head = byExposure.slice(0, band);
-            for (var i = 0; i < head.length && !candidates; i++) {
-              for (var j = i + 1; j < head.length; j++) {
-                if (head[i].videoSha256 === head[j].videoSha256) continue;
-                if (avoidLastPair && pairKey(head[i], head[j]) === lastPair) continue;
-                candidates = [head[i], head[j]];
-                break;
-              }
-            }
-          }
-        }
-        // Distinct video hashes are a hard rule; repeating a pair is only
-        // avoided when an alternative exists (a 2-candidate pool has none).
-        if (!candidates) return null;
-        lastPair = pairKey(candidates[0], candidates[1]);
-        shownCount[candidates[0].rootPinId] += 1;
-        shownCount[candidates[1].rootPinId] += 1;
-        // Random left/right placement per pair.
+        var next = unseenPairs(eligible)[0];
+        if (!next) return null;
+        var candidates = next.candidates;
+        markShown(candidates[0], candidates[1]);
         if (rng() < 0.5) candidates = [candidates[1], candidates[0]];
         return { left: candidates[0], right: candidates[1] };
       },
+      markShown: markShown,
+      remainingCount: function (eligible) { return unseenPairs(eligible).length; },
+      shownPairCount: function () { return Object.keys(seenPairs).length; },
       shownCounts: function () {
         var copy = {};
         Object.keys(shownCount).forEach(function (key) { copy[key] = shownCount[key]; });
@@ -806,7 +816,7 @@
     if (runtime.booting) {
       actorLine.appendChild(el('span', { class: 'muted', text: 'Detecting Browser bridge…' }));
     } else if (!runtime.bridge) {
-      actorLine.appendChild(el('span', { class: 'muted', text: 'No Browser bridge detected — read-only host. Feedback submission is unavailable here.' }));
+      actorLine.appendChild(el('span', { class: 'muted', text: 'No Browser bridge confirmed — read-only for now. Respond to an open identity request to reconnect; queued choices are kept.' }));
     } else if (state.actor && state.actor.globalMetaId) {
       actorLine.appendChild(el('span', {
         text: (runtime.mock ? 'Mock Actor: ' : 'Current Actor: ') + (state.actor.name || shortPin(state.actor.globalMetaId)) + ' (' + shortPin(state.actor.globalMetaId) + ')',
@@ -821,7 +831,9 @@
     node.textContent = '';
     var eligible = state.pool.eligible.length;
     var excluded = state.pool.excluded;
+    var remaining = state.selector.remainingCount(state.pool.eligible);
     var parts = ['Pool: ' + eligible + ' eligible candidate' + (eligible === 1 ? '' : 's')];
+    if (eligible > 1) parts.push(remaining + ' unseen pair' + (remaining === 1 ? '' : 's') + ' in this session');
     var excludedTotal = (excluded.disabled || 0) + (excluded.chain || 0) + (excluded.malformed || 0);
     if (excludedTotal > 0) {
       var detail = [];
@@ -831,8 +843,7 @@
       parts.push(excludedTotal + ' excluded for technical reasons — never counted as negative preference');
     }
     node.appendChild(el('span', { text: parts.join(' · ') }));
-    // "Next pair" needs an eligible pool; deep-link errors clear it.
-    byId('next-pair-button').disabled = state.pool.eligible.length < 2;
+    byId('next-pair-button').disabled = remaining === 0;
   }
 
   function videoPane(side, candidate) {
@@ -910,9 +921,12 @@
     stage.textContent = '';
     var pair = state.pair;
     if (!pair) {
+      var exhausted = state.pool.eligible.length > 1 && state.selector.shownPairCount() > 0;
       stage.appendChild(el('div', { class: 'notice' }, [
-        el('p', { text: 'Not enough eligible Motion Video candidates to form a pair yet.' }),
-        el('button', { type: 'button', class: 'primary', text: 'Reload pool', onclick: function () { loadHome(); } }),
+        el('p', { text: exhausted
+          ? 'All unique pairs in this candidate pool have been shown. Your queued choices remain available to review and submit.'
+          : 'Not enough eligible Motion Video candidates to form a pair yet.' }),
+        el('button', { type: 'button', class: 'primary', text: exhausted ? 'Check for new candidates' : 'Reload pool', onclick: function () { loadHome(); } }),
       ]));
       return;
     }
@@ -942,7 +956,7 @@
       }
       state.queue.add(built.item);
       renderQueue();
-      setStatus('ok', 'Choice queued (' + state.queue.size() + '/' + MAX_QUEUE + ').');
+      setStatus('ok', 'Choice queued (' + state.queue.size() + ' total). Submit now or compare more; one batch holds up to ' + MAX_QUEUE + '.');
       reasonInput.value = '';
       nextPair();
     }
@@ -965,6 +979,7 @@
 
   function nextPair() {
     state.pair = state.selector.pick(state.pool.eligible);
+    renderPoolStatus();
     renderCompare();
   }
 
@@ -1002,9 +1017,9 @@
     var countNode = byId('queue-count');
     listNode.textContent = '';
     var items = state.queue.items();
-    countNode.textContent = 'Queued: ' + items.length + ' / ' + MAX_QUEUE;
+    countNode.textContent = 'Queued choices: ' + items.length + ' (maximum ' + MAX_QUEUE + ' per batch)';
     if (!items.length) {
-      listNode.appendChild(el('p', { class: 'muted small', text: 'No queued comparisons yet. Watch both sides, then choose.' }));
+      listNode.appendChild(el('p', { class: 'muted small', text: 'No queued comparisons yet. Watch both sides, then choose. One choice is enough to submit.' }));
     }
     items.forEach(function (item, index) {
       listNode.appendChild(queueItemSummary(item, index));
@@ -1018,7 +1033,7 @@
     } else if (runtime.booting) {
       submitButton.textContent = 'Detecting Browser bridge…';
     } else if (!runtime.bridge) {
-      submitButton.textContent = 'Submission unavailable — no Browser bridge';
+      submitButton.textContent = 'Submission unavailable — no confirmed Browser bridge';
     } else if (!writable) {
       submitButton.textContent = 'Submission locked — Arena root not yet published';
     }
@@ -1059,11 +1074,13 @@
     try {
       var data = await apiGet(LIST_URL);
       state.pool = normalizePool(data.items);
-      renderPoolStatus();
       state.pair = state.selector.pick(state.pool.eligible);
+      renderPoolStatus();
       renderCompare();
       if (!state.pool.eligible.length) {
         setStatus('error', 'No comparison-eligible motion-video candidates on ' + CHAIN_NAME + ' yet. This stays a read-only view until the pool grows.');
+      } else if (!state.pair) {
+        setStatus('muted', 'No unseen pairs remain in this pool. Check for new candidates or submit your queued choices.');
       } else {
         setStatus('muted', 'Pair loaded. Watch both sides, then choose — choices queue locally until you submit.');
       }
@@ -1092,6 +1109,7 @@
         throw new Error('The linked pair references the same video — that is not a visual comparison.');
       }
       state.pool = { eligible: candidates, excluded: { disabled: 0, chain: 0, malformed: 0 } };
+      state.selector.markShown(candidates[0], candidates[1]);
       state.pair = { left: candidates[0], right: candidates[1] };
       renderPoolStatus();
       renderCompare();
@@ -1153,9 +1171,37 @@
   byId('submit-button').addEventListener('click', onSubmit);
   byId('next-pair-button').addEventListener('click', function () { nextPair(); });
 
+  function activateLiveBridge(probe) {
+    if (runtime.mock || !window.AgentBrowser) return;
+    runtime.hostProbe = 'live';
+    runtime.bridge = window.AgentBrowser;
+    runtime.booting = false;
+    state.actor = (probe && probe.actor) || null;
+    submission = createSubmission();
+    if (!runtime.actorEventsBound && typeof window.AgentBrowser.on === 'function') {
+      runtime.actorEventsBound = true;
+      window.AgentBrowser.on('browser.actor.changed', function (payload) {
+        state.actor = (payload && payload.actor) || null;
+        renderTopbar();
+      });
+    }
+    renderTopbar();
+    renderQueue();
+    refreshActor();
+  }
+
+  function watchHostRecovery(probe) {
+    if (!probe || !probe.recovery) return;
+    probe.recovery.then(function (recovered) {
+      if (!recovered.host || runtime.mock) return;
+      activateLiveBridge(recovered);
+    });
+  }
+
   /**
    * Boot: paint the shell, then resolve the runtime mode once the host probe
-   * settles (live Browser bridge / local mocks / read-only), then route.
+   * settles (live Browser bridge / local mocks / read-only), then route. A late
+   * consent response can activate the live bridge without reloading the queue.
    */
   async function initRuntime() {
     var probe = { host: false, actor: null, error: 'helper-missing' };
@@ -1171,24 +1217,15 @@
       state.actor = { globalMetaId: 'idmockactor0000000000000000000000000001', name: 'Mock Actor', kind: 'idbots-account' };
     } else {
       if (mockRequested) runtime.mockIgnored = true; // a live host can never be mocked via query
-      if (probe.host) {
-        runtime.hostProbe = 'live';
-        runtime.bridge = window.AgentBrowser;
-        state.actor = probe.actor;
-        if (window.AgentBrowser && typeof window.AgentBrowser.on === 'function') {
-          window.AgentBrowser.on('browser.actor.changed', function (payload) {
-            state.actor = (payload && payload.actor) || null;
-            renderTopbar();
-          });
-        }
-        refreshActor();
-      } else {
+      if (probe.host) activateLiveBridge(probe);
+      else {
         runtime.hostProbe = 'none';
         runtime.bridge = null;
       }
     }
+    watchHostRecovery(probe);
     runtime.booting = false;
-    submission = createSubmission();
+    if (!submission) submission = createSubmission();
     renderTopbar();
     renderQueue();
     window.addEventListener('hashchange', onRoute);

@@ -3,7 +3,7 @@ name: motion-video-arena
 description: Motion Video Arena — a portable blind side-by-side comparison client for code-rendered Motion Videos. Queues explicit pairwise choices locally and submits them as one public /protocols/preference/feedback comparison-batch pin through the Browser-selected Actor.
 official: true
 entry: /motion-video-arena/index.html
-version: 0.1.0
+version: 1.0.2
 creator-metaid: idbots
 source-type: bundled-idbots
 ---
@@ -12,8 +12,8 @@ source-type: bundled-idbots
 
 A static reference client (workstream WS4 of the motion-video preference
 learning plan) where a human watches two code-rendered Motion Videos and picks
-the preferred one. Several choices queue in a volatile in-memory list and are
-submitted together as **one** ordinary `metaid.pin.write` — a
+the preferred one. One or several choices queue in a volatile in-memory list
+and are submitted together as **one** ordinary `metaid.pin.write` — a
 `/protocols/preference/feedback` `comparison-batch` pin. The Arena never
 signs, never selects signers, and never writes telemetry.
 
@@ -24,9 +24,9 @@ signs, never selects signers, and never writes telemetry.
 - `agent-browser-helper.js` — standard AgentBrowser client (loaded BEFORE
   `app.js`): installs `window.AgentBrowser.request/on/navigate` over the
   `agent-browser:request|response|event` postMessage protocol the Bot Browser
-  chrome answers, with per-call timeouts and a bounded host probe
-  (`probeBrowserHost`) that lets the app degrade to read-only when no host
-  responds.
+  chrome answers, with per-call timeouts and a bounded initial host probe
+  (`probeBrowserHost`). A late consent response remains available through its
+  `recovery` result so the app can reconnect instead of staying read-only.
 - `app.js` — DOM-free core (normalization, routing, pair selection, queue,
   payload build/validate, audio coordination, submission controller) plus
   browser wiring. The core is exported CommonJS-style for component tests.
@@ -55,9 +55,11 @@ production files.
   unknown-outcome path). All three swap MetaSo reads and the Browser bridge
   for local mocks with the two reference fixture shapes and show a permanent
   banner; mock success copy always states that nothing was written on chain.
-  **A live Browser bridge always wins**: when the host probe succeeds, the
-  mock parameter is ignored and a banner says so — a production instance in
-  the Bot Browser can never be flipped into mock mode via the query string.
+  **A live Browser bridge wins during initial detection**: when the host probe
+  succeeds, the mock parameter is ignored and a banner says so. Once a mock
+  session has started, a late host response never converts it into a live
+  signing session; reload without the mock parameter to use the real host.
+  Mock candidates therefore can never be submitted as real feedback.
   `?mockVideoA=<url>&mockVideoB=<url>` override mock video sources for
   preview screenshots. `?smoke=motion-video-smoke` (short label) adds the
   full `test:motion-video-smoke` category tag **only** for an explicitly
@@ -105,9 +107,12 @@ For every comparison the app builds, from the candidate:
   `agent-browser:request` postMessages with `agent-browser:response` by id
   and supports a per-call `timeoutMs`; `probeBrowserHost` bounds the initial
   host detection (8 s) so a plain browser degrades to read-only instead of
-  hanging. The two-phase `metaid.pin.write` confirmation card, signer
-  selection, and phase-2 execution all stay in the Browser chrome — the
-  Arena never implements or retries its own confirmation flow.
+  hanging. It does not cancel the identity request at that deadline: a later
+  consent response or denial resolves `recovery`, reactivates the live bridge,
+  and preserves queued real candidates. The two-phase `metaid.pin.write`
+  confirmation card, signer selection, and phase-2 execution all stay in the
+  Browser chrome — the Arena never implements or retries its own confirmation
+  flow.
 - `browser.actor.current` — display-only read of the currently disclosed
   Actor (may surface the host's identity-disclosure consent card). Optional
   for writing; the Browser confirmation remains the authoritative signer
@@ -155,8 +160,11 @@ shared contract (tag/dimension regexes, ArtifactRef shapes, distinct
 carries no judge id, Actor id, score, timestamp, or viewing telemetry.
 
 **Real submission requires a published Arena root for `client.artifact`.**
-Until this app is published and its root recorded in `app.js`
-(`CLIENT_ARTIFACT_ROOT`), the live submit button stays locked. Unpublished
+This app is published at stable root
+`metaapp://a13726e12c1c5c99d1843cc6470b30c71c2efe20000282bda1d7524ae23f16d1i0`
+(recorded in `app.js` as `CLIENT_ARTIFACT_ROOT`; v1.0.0 create + v1.0.1 root
+update, author identity Bob). This v1.0.2 modify candidate keeps that root.
+Remixes that are NOT published must keep the constant empty — unpublished
 previews exercise the write path only in mock mode, which substitutes a
 shape-valid mock-only root and clearly reports that nothing was written on
 chain.
@@ -164,8 +172,13 @@ chain.
 ## Queue and submission behavior
 
 - The queue is in-memory only for the current session (no localStorage, no
-  silent uploads later), holds at most 28 items, and requires submission
-  before adding more at the cap.
+  silent uploads later). One choice is enough to submit; 28 is only the maximum
+  batch size, not required progress. Submission is required before adding more
+  at the cap.
+- Automatic pair selection shows each eligible unordered pair at most once per
+  page session, including when skipped or reversed. Exposure balancing still
+  prefers least-shown candidates. When every pair has been shown, the Arena
+  reports exhaustion instead of recycling pairs; the queue remains available.
 - Queued items can be reviewed (full ArtifactRefs per side) and removed
   individually before submission.
 - Leaving the page with unsubmitted items raises an unload warning.

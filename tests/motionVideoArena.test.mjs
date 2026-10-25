@@ -211,24 +211,46 @@ test('pair selection never pairs identical video hashes', () => {
   assert.equal(selector.pick(sameShaPool), null);
 });
 
-test('a 2-candidate pool keeps serving its only pair instead of dead-ending', () => {
+test('a 2-candidate pool serves its only pair once and then exhausts', () => {
   const pool = [Arena.normalizeCandidate(fixtureA()).candidate, Arena.normalizeCandidate(fixtureB()).candidate];
   const selector = Arena.createPairSelector({ rng: () => 0.5 });
-  const first = selector.pick(pool);
-  const second = selector.pick(pool);
-  assert.ok(first && second);
-  const key = (pair) => [pair.left.rootPinId, pair.right.rootPinId].sort().join('|');
-  assert.equal(key(first), key(second));
+  assert.ok(selector.pick(pool));
+  assert.equal(selector.pick(pool), null, 'an already-shown pair is not recycled');
 });
 
-test('exposure stays balanced: least-shown candidates are picked first', () => {
-  const selector = Arena.createPairSelector({ rng: () => 0.9 }); // never swaps
+test('a 4-candidate pool serves all six unordered pairs once and then exhausts', () => {
   const pool = candidatePool();
-  for (let i = 0; i < 9; i++) selector.pick(pool);
+  pool.push(Arena.normalizeCandidate(fixtureB({
+    pinId: 'a1'.repeat(32) + 'i0',
+    currentPinId: 'a1'.repeat(32) + 'i0',
+    motionVideo: {
+      ...fixtureB().motionVideo,
+      videoFile: 'metafile://' + 'a1'.repeat(32) + 'i0.mp4',
+      videoSha256: '22'.repeat(32),
+    },
+  })).candidate);
+  const selector = Arena.createPairSelector({ rng: () => 0.9 });
+  const keys = new Set();
+  for (let i = 0; i < 6; i++) {
+    const pair = selector.pick(pool);
+    assert.ok(pair, `pair ${i + 1} should exist`);
+    keys.add([pair.left.rootPinId, pair.right.rootPinId].sort().join('|'));
+  }
+  assert.equal(keys.size, 6);
+  assert.equal(selector.pick(pool), null, 'no seventh duplicate pair');
+  const counts = Object.values(selector.shownCounts());
+  assert.equal(counts.length, 4);
+  assert.ok(counts.every((count) => count === 3), `balanced four-candidate exposure, got ${counts.join(',')}`);
+});
+
+test('exposure stays balanced across the unique-pair cycle', () => {
+  const selector = Arena.createPairSelector({ rng: () => 0.9 });
+  const pool = candidatePool();
+  for (let i = 0; i < 3; i++) assert.ok(selector.pick(pool));
+  assert.equal(selector.pick(pool), null);
   const counts = Object.values(selector.shownCounts());
   assert.equal(counts.length, 3, 'every candidate keeps exposure');
-  const spread = Math.max(...counts) - Math.min(...counts);
-  assert.ok(spread <= 1, `expected balanced exposure, got ${counts.join(',')}`);
+  assert.ok(counts.every((count) => count === 2), `expected two appearances each, got ${counts.join(',')}`);
 });
 
 test('left/right placement follows the injected (crypto) rng', () => {

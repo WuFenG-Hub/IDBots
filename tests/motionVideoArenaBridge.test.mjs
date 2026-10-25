@@ -156,6 +156,42 @@ test('probeBrowserHost: silence resolves host=false after the bounded wait', asy
   assert.ok(Date.now() - started >= 50, 'waited for the probe window');
 });
 
+test('probeBrowserHost: a late consent response recovers the live host and Actor', async () => {
+  const fake = makeFakeWindow();
+  globalThis.window = fake.win;
+  const probe = await Helper.probeBrowserHost(20);
+  assert.equal(probe.host, false);
+  assert.equal(probe.error, 'bridge_timeout');
+  assert.ok(probe.recovery, 'the initial request remains available for late recovery');
+  const sent = fake.posted.find((message) => message.method === 'browser.actor.current');
+  fake.deliver({
+    type: 'agent-browser:response',
+    id: sent.id,
+    ok: true,
+    result: { actor: { globalMetaId: 'idlatehuman' } },
+  });
+  const recovered = await probe.recovery;
+  assert.equal(recovered.host, true);
+  assert.equal(recovered.actor.globalMetaId, 'idlatehuman');
+});
+
+test('probeBrowserHost: late consent denial recovers the host without an Actor', async () => {
+  const fake = makeFakeWindow();
+  globalThis.window = fake.win;
+  const probe = await Helper.probeBrowserHost(20);
+  const sent = fake.posted.find((message) => message.method === 'browser.actor.current');
+  fake.deliver({
+    type: 'agent-browser:response',
+    id: sent.id,
+    ok: false,
+    error: { code: 'consent_denied', message: 'denied' },
+  });
+  const recovered = await probe.recovery;
+  assert.equal(recovered.host, true);
+  assert.equal(recovered.actor, null);
+  assert.equal(recovered.error, 'denied');
+});
+
 test('probeBrowserHost: consent denial is a live host with an undisclosed actor', async () => {
   const fake = makeFakeWindow({
     responder: (message) => message.type === 'agent-browser:request'
