@@ -1,65 +1,58 @@
-import type { CreatePinWorkerSuccess, MetaidDataPayload, MvcCreatePinSessionSnapshot } from '../metaidCore';
+import type { MetaidDataPayload } from '../metaidCore';
+import {
+  HumanIdentitySignerError,
+  createHumanIdentityWriter,
+  type HumanIdentityWriter,
+  type IdentityCreatePin,
+} from '../humanIdentityWriter';
 import type { UserIdentityStore } from '../../userIdentityStore';
 import { PREFERENCE_PIN_VERSION, preferencePoolPath, type PreferenceSegment } from './constants';
 import type { PreferencePinWriteResult, PreferenceWriterResolution } from './service';
 
-export type IdentityCreatePin = (params: {
-  mnemonic: string;
-  path?: string;
-  metaidData: MetaidDataPayload;
-  options?: { feeRate?: number };
-  sessionSnapshot?: MvcCreatePinSessionSnapshot;
-}) => Promise<CreatePinWorkerSuccess>;
+export type { IdentityCreatePin };
 
 export interface UserPreferenceWriterDeps {
   createPin: IdentityCreatePin;
   feeRate: () => number;
+  /**
+   * Shared process-wide human writer. When omitted (tests), a private writer
+   * is built from createPin/feeRate with the same queue + UTXO snapshot
+   * semantics the preference writer has always owned.
+   */
+  writer?: HumanIdentityWriter;
 }
 
 /**
- * createPinForIdentity bypasses the per-MetaBot spend coordinator, so this
- * writer owns serialization for the human wallet: one queue, one snapshot.
+ * Sealed-preference writes signed by the local human identity. Serialization
+ * and UTXO threading live in the shared `HumanIdentityWriter` so preference
+ * and browser-bridge writes never race the same wallet with second queues.
  */
 export function createUserPreferenceWriter(
   userStore: Pick<UserIdentityStore, 'get'>,
   deps: UserPreferenceWriterDeps,
 ): () => PreferenceWriterResolution {
-  let queue: Promise<unknown> = Promise.resolve();
-  const sessionSnapshot: MvcCreatePinSessionSnapshot = { excludeOutpoints: [], preferredFundingUtxos: [] };
+  const writer = deps.writer ?? createHumanIdentityWriter(userStore, deps);
 
   return () => {
+    const error = writer.check();
+    if (error) return { error };
     const identity = userStore.get();
-    if (!identity || !identity.globalmetaid) return { error: 'USER_IDENTITY_MISSING' };
-    if (identity.subsidy_state === 'failed' || (!identity.subsidy_state && !identity.chat_public_key_pin_id)) {
-      return { error: 'SUBSIDY_NOT_CLAIMED' };
-    }
+    if (!identity?.globalmetaid) return { error: 'USER_IDENTITY_MISSING' };
     const write = (segment: PreferenceSegment, payload: object): Promise<PreferencePinWriteResult> => {
-      const run = async (): Promise<PreferencePinWriteResult> => {
-        const current = userStore.get() ?? identity;
-        const result = await deps.createPin({
-          mnemonic: current.mnemonic,
-          path: current.path,
-          metaidData: {
-            operation: 'create',
-            path: preferencePoolPath(segment),
-            encryption: '0',
-            version: PREFERENCE_PIN_VERSION,
-            contentType: 'application/json',
-            payload: JSON.stringify(payload),
-          },
-          options: { feeRate: deps.feeRate() },
-          sessionSnapshot,
-        });
-        if (Array.isArray(result.spentOutpoints) && result.spentOutpoints.length > 0) {
-          sessionSnapshot.excludeOutpoints.push(...result.spentOutpoints);
-        }
-        sessionSnapshot.preferredFundingUtxos = result.changeUtxo ? [result.changeUtxo] : [];
-        const txid = result.txids[0] ?? '';
-        return { pinId: result.pinId || `${txid}i0`, txids: result.txids };
+      const metaidData: MetaidDataPayload = {
+        operation: 'create',
+        path: preferencePoolPath(segment),
+        encryption: '0',
+        version: PREFERENCE_PIN_VERSION,
+        contentType: 'application/json',
+        payload: JSON.stringify(payload),
       };
-      const next = queue.then(run, run);
-      queue = next.catch(() => undefined);
-      return next;
+      return writer.write(metaidData).catch((writeError) => {
+        if (writeError instanceof HumanIdentitySignerError) {
+          throw new Error(writeError.code);
+        }
+        throw writeError;
+      });
     };
     return { globalMetaId: identity.globalmetaid, write };
   };

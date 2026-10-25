@@ -43,7 +43,7 @@ import {
   parseLocalMetabotActorId,
 } from './botBrowserIntent.js';
 import {
-  metabotsToBrowserActors,
+  buildBrowserActors,
   selectDefaultBrowserActor,
 } from './idbotsBrowserActorModel.js';
 import {
@@ -65,6 +65,13 @@ const APP_SESSION_METHODS: Partial<Record<BrowserTrustedActionKind, string>> = {
 
 export interface IdBotsBrowserHostAdapterInput {
   listMetabots: () => Promise<Metabot[]>;
+  /**
+   * Sanitized public view of the local human identity (mnemonic already
+   * stripped by the main process). Only label / globalmetaid / avatar are
+   * read here; failures propagate so the runtime never silently omits a
+   * registered identity because of a broken IPC call.
+   */
+  getUserIdentity?: () => Promise<IdBotsBrowserUserIdentityView | null>;
   listMetaApps: () => Promise<MetaAppRecord[]>;
   resolveBrowserResource?: (
     input: BrowserResolveInput,
@@ -119,6 +126,13 @@ export interface BotBrowserBridgeTrustedActionRequest {
   resourceUri: string;
   sessionId?: string;
   payload?: unknown;
+}
+
+/** Public (mnemonic-free) human identity fields the runtime Actor needs. */
+export interface IdBotsBrowserUserIdentityView {
+  globalmetaid?: string | null;
+  name?: string | null;
+  avatar?: string | null;
 }
 
 function text(value: unknown): string {
@@ -389,10 +403,11 @@ export function createIdbotsBrowserHostAdapter(
   return {
     async getRuntime(_runtimeInput?: BrowserRuntimeInput): Promise<BrowserCommandResult<BrowserRuntimeSnapshot>> {
       const metabots = await input.listMetabots();
+      const user = input.getUserIdentity ? await input.getUserIdentity() : null;
       return browserSuccess({
         host: { kind: 'idbots', name: 'IDBots', localMode: true },
-        actors: metabotsToBrowserActors(metabots),
-        defaultActor: selectDefaultBrowserActor(metabots),
+        actors: buildBrowserActors(metabots, user),
+        defaultActor: selectDefaultBrowserActor(metabots, user),
         defaultUri: null,
         features: {
           privateChat: true,
@@ -402,9 +417,12 @@ export function createIdbotsBrowserHostAdapter(
           walletLogin: false,
         },
         labels: {
-          actorChip: 'Bot',
-          noActorTitle: 'No Bot available',
-          noActorBody: 'Create or restore a local Bot before using IDBots Browser actions.',
+          // Generic Actor wording: the selector now offers both the human
+          // identity (idbots-account) and local Bots (idbots-agent). The
+          // 0.7.1 UI badges known kinds Human/Bot on its own.
+          actorChip: 'Actor',
+          noActorTitle: 'No Actor available',
+          noActorBody: 'Set up your identity or create a local Bot before using IDBots Browser actions.',
           noActorAction: {
             label: 'Create Bot',
             actionKind: 'open-settings',

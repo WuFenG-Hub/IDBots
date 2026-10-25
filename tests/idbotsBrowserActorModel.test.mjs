@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  IDBOTS_ACCOUNT_ACTOR_ID,
+  buildBrowserActors,
   metabotToBrowserActor,
   metabotsToBrowserActors,
   selectDefaultBrowserActor,
+  userIdentityToBrowserActor,
 } from '../src/renderer/features/botBrowser/idbotsBrowserActorModel.js';
 
 function createMetabot(overrides = {}) {
@@ -82,4 +85,68 @@ test('selectDefaultBrowserActor follows the browser metabot sort rule', () => {
     capabilities: ['private-chat'],
     localMetabotId: 2,
   });
+});
+
+function createUserIdentity(overrides = {}) {
+  return {
+    globalmetaid: ' IDP1HUMAN ',
+    name: ' Sunny ',
+    avatar: 'data:image/png;base64,AAAA',
+    // Fields that must never surface in a runtime Actor.
+    mnemonic: 'never leak me',
+    path: "m/44'/10001'/0'/0/0",
+    mvc_address: 'mvc-address',
+    public_key: 'public-key',
+    ...overrides,
+  };
+}
+
+test('userIdentityToBrowserActor maps the human identity to idbots-account without secrets', () => {
+  const actor = userIdentityToBrowserActor(createUserIdentity());
+
+  assert.equal(actor.id, IDBOTS_ACCOUNT_ACTOR_ID);
+  assert.equal(actor.kind, 'idbots-account');
+  assert.equal(actor.globalMetaId, 'idp1human');
+  assert.equal(actor.label, 'Sunny');
+  assert.deepEqual(actor.capabilities, []);
+  assert.equal(JSON.stringify(actor).includes('never leak me'), false);
+  assert.equal(JSON.stringify(actor).includes("m/44'/10001"), false);
+  assert.equal(JSON.stringify(actor).includes('mvc-address'), false);
+});
+
+test('userIdentityToBrowserActor omits an unregistered human identity', () => {
+  assert.equal(userIdentityToBrowserActor(null), null);
+  assert.equal(userIdentityToBrowserActor({ globalmetaid: null, name: 'Sunny' }), null);
+  assert.equal(userIdentityToBrowserActor({ globalmetaid: 'not-a-metaid', name: 'Sunny' }), null);
+});
+
+test('buildBrowserActors lists the human identity first and keeps the Bot default', () => {
+  const actors = buildBrowserActors(
+    [createMetabot({ id: 2, created_at: 20, globalmetaid: 'idq1bbb' }), createMetabot()],
+    createUserIdentity(),
+  );
+
+  assert.deepEqual(
+    actors.map((actor) => actor.id),
+    [IDBOTS_ACCOUNT_ACTOR_ID, 'idbots-metabot-1', 'idbots-metabot-2'],
+  );
+  assert.equal(actors[0].isDefault, false);
+  assert.equal(actors.find((actor) => actor.id === 'idbots-metabot-1').isDefault, true);
+});
+
+test('buildBrowserActors keeps bot-only runtimes unchanged', () => {
+  const actors = buildBrowserActors([createMetabot()], null);
+  assert.deepEqual(
+    actors.map((actor) => actor.id),
+    ['idbots-metabot-1'],
+  );
+});
+
+test('selectDefaultBrowserActor falls back to the human identity only without Bots', () => {
+  const human = selectDefaultBrowserActor([], createUserIdentity());
+  assert.equal(human.id, IDBOTS_ACCOUNT_ACTOR_ID);
+  assert.equal(human.isDefault, true);
+
+  const bot = selectDefaultBrowserActor([createMetabot()], createUserIdentity());
+  assert.equal(bot.id, 'idbots-metabot-1');
 });

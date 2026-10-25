@@ -157,6 +157,13 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
           const result = await window.electron.metabot.list();
           return result?.list ?? [];
         },
+        getUserIdentity: async () => {
+          const result = await window.electron.userIdentity.get();
+          if (!result?.success) {
+            throw new Error(result?.error || 'Failed to load the local identity.');
+          }
+          return result.identity ?? null;
+        },
         listMetaApps: async () => {
           const result = await window.electron.metaapps.list();
           return result?.apps ?? [];

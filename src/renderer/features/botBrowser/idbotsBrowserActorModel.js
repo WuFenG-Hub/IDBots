@@ -5,6 +5,12 @@ import {
   sortMetabotsForBrowser,
 } from './botBrowserIntent.js';
 
+/**
+ * Stable host-local Actor id of the local human identity (user_identity).
+ * The main-process bridge recognizes the same id when signing.
+ */
+export const IDBOTS_ACCOUNT_ACTOR_ID = 'idbots-account';
+
 export function metabotToBrowserActor(metabot, defaultMetabotId = null) {
   const id = Number.isFinite(metabot?.id) ? metabot.id : 0;
   const actorId = buildLocalMetabotActorId(id);
@@ -40,8 +46,60 @@ export function metabotsToBrowserActors(metabots) {
     .filter(Boolean);
 }
 
-export function selectDefaultBrowserActor(metabots) {
+/**
+ * Sanitized Browser Actor for the local human identity. Only display fields
+ * (label / globalMetaId / avatar) ever leave the main process; the mnemonic,
+ * wallet paths, and addresses stay behind the IPC boundary. "Registered"
+ * means a usable globalMetaid exists — otherwise the host simply omits the
+ * human Actor from the runtime instead of guessing.
+ */
+export function userIdentityToBrowserActor(user, isDefault = false) {
+  const globalMetaId = normalizeBrowserGlobalMetaId(user?.globalmetaid);
+  if (!globalMetaId) return null;
+
+  const label =
+    typeof user?.name === 'string' && user.name.trim()
+      ? user.name.trim()
+      : globalMetaId;
+  const avatar =
+    typeof user?.avatar === 'string' && user.avatar.trim()
+      ? user.avatar.trim()
+      : undefined;
+
+  return {
+    id: IDBOTS_ACCOUNT_ACTOR_ID,
+    label,
+    kind: 'idbots-account',
+    globalMetaId,
+    ...(avatar ? { avatar } : {}),
+    isDefault,
+    // Chat actions are Bot-only; the human Actor signs generic writes.
+    capabilities: [],
+  };
+}
+
+/**
+ * Runtime Actor list: the registered human identity first, then available
+ * Bots (idbots-requirements WS-A). Actor ids, not display names, determine
+ * selection — no globalMetaId-driven dedup across kinds.
+ */
+export function buildBrowserActors(metabots, user) {
+  const botActors = metabotsToBrowserActors(metabots);
+  const hasBotDefault = botActors.some((actor) => actor.isDefault);
+  const humanActor = userIdentityToBrowserActor(user, !hasBotDefault);
+  if (!humanActor) return botActors;
+  return [humanActor, ...botActors];
+}
+
+/**
+ * Default Actor: the existing default Bot whenever one is available; the
+ * human identity only becomes the default when no usable Bot exists, so an
+ * upgrade never silently changes signing behavior.
+ */
+export function selectDefaultBrowserActor(metabots, user = null) {
   const defaultMetabot = selectDefaultBrowserMetabot(metabots);
-  if (!defaultMetabot) return null;
-  return metabotToBrowserActor(defaultMetabot, defaultMetabot.id);
+  if (defaultMetabot) {
+    return metabotToBrowserActor(defaultMetabot, defaultMetabot.id);
+  }
+  return userIdentityToBrowserActor(user, true);
 }

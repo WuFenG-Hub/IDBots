@@ -1103,3 +1103,283 @@ test('granted writes enforce the 16KB payload cap and the per-resource write rat
   });
   assert.equal(otherResource.state, 'manual_action_required');
 });
+
+// ---------------------------------------------------------------------------
+// Human/Bot dual-stack Actor integration (ABC 0.7.1, idbots-requirements WS-B)
+// ---------------------------------------------------------------------------
+
+function createUserIdentityStore(identity) {
+  return {
+    get() {
+      return identity;
+    },
+  };
+}
+
+function createHumanIdentity(overrides = {}) {
+  return {
+    id: 1,
+    mnemonic: 'human seed words',
+    path: "m/44'/10001'/0'/0/0",
+    globalmetaid: 'IDP1HUMAN',
+    name: ' Sunny ',
+    ...overrides,
+  };
+}
+
+function createHumanBridgeService({ identity = createHumanIdentity(), createPinCalls, humanPinCalls, auditEvents } = {}) {
+  return createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    userIdentityStore: createUserIdentityStore(identity),
+    createPin: async () => {
+      if (createPinCalls) createPinCalls.count += 1;
+      return { pinId: 'botpin123i0', txids: ['bottx'], totalCost: 1 };
+    },
+    createHumanPin: async () => {
+      if (humanPinCalls) humanPinCalls.count += 1;
+      return { pinId: 'humanpin123i0', txids: ['humantx'] };
+    },
+    now: () => 1_700_000_000_000,
+    confirmationTtlMs: 60_000,
+    createConfirmationId: (() => {
+      let sequence = 0;
+      return () => `confirmation-${++sequence}`;
+    })(),
+    createConfirmationToken: (() => {
+      let sequence = 0;
+      return () => `opaque-token-${++sequence}`;
+    })(),
+    ...(auditEvents ? { audit: (event) => auditEvents.push(event) } : {}),
+  });
+}
+
+test('human Actor pin write is confirmed, signed by the human stack, and returns the human actor', async () => {
+  const createPinCalls = { count: 0 };
+  const humanPinCalls = { count: 0 };
+  const service = createHumanBridgeService({ createPinCalls, humanPinCalls });
+
+  const phaseOne = await service.writeMetaIdPin({
+    actorId: 'idbots-account',
+    resourceUri: 'metaapp://app123i0',
+    payload: createPinWritePayload(),
+  });
+  assert.equal(phaseOne.state, 'manual_action_required');
+  assert.equal(phaseOne.data.confirmation.actor.globalMetaId, 'idp1human');
+  assert.equal(phaseOne.data.confirmation.actor.name, 'Sunny');
+  assert.equal(createPinCalls.count, 0);
+  assert.equal(humanPinCalls.count, 0);
+
+  const confirmRequest = phaseOne.data.confirmRequest;
+  const phaseTwo = await service.writeMetaIdPin({
+    actorId: 'idbots-account',
+    resourceUri: confirmRequest.resourceUri,
+    payload: confirmRequest.payload,
+  });
+  assert.equal(phaseTwo.ok, true);
+  assert.equal(phaseTwo.data.pinId, 'humanpin123i0');
+  assert.equal(phaseTwo.data.actor.globalMetaId, 'idp1human');
+  assert.equal(createPinCalls.count, 0, 'human writes never route to the Bot signer');
+  assert.equal(humanPinCalls.count, 1);
+});
+
+test('Bot confirmation token replayed as the human Actor fails closed, and vice versa', async () => {
+  const service = createHumanBridgeService();
+
+  const botPhaseOne = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    payload: createPinWritePayload(),
+  });
+  assert.equal(botPhaseOne.state, 'manual_action_required');
+
+  // Replay the Bot's confirmation while the human Actor is selected.
+  const replayAsHuman = await service.writeMetaIdPin({
+    actorId: 'idbots-account',
+    resourceUri: botPhaseOne.data.confirmRequest.resourceUri,
+    payload: botPhaseOne.data.confirmRequest.payload,
+  });
+  assert.equal(replayAsHuman.ok, false);
+  assert.equal(replayAsHuman.code, 'invalid_request');
+
+  // And the human's own confirmation must not authorize a Bot write.
+  const humanPhaseOne = await service.writeMetaIdPin({
+    actorId: 'idbots-account',
+    resourceUri: 'metaapp://app123i0',
+    payload: createPinWritePayload({ payload: { encoding: 'utf8', value: '{"human":true}' } }),
+  });
+  assert.equal(humanPhaseOne.state, 'manual_action_required');
+  const replayAsBot = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: humanPhaseOne.data.confirmRequest.resourceUri,
+    payload: humanPhaseOne.data.confirmRequest.payload,
+  });
+  assert.equal(replayAsBot.ok, false);
+  assert.equal(replayAsBot.code, 'invalid_request');
+});
+
+test('forged or unknown Actor ids never select a signer', async () => {
+  const createPinCalls = { count: 0 };
+  const humanPinCalls = { count: 0 };
+  const service = createHumanBridgeService({ createPinCalls, humanPinCalls });
+
+  for (const actorId of [
+    'idbots-account-extra',
+    'human:idbots-account',
+    'idbots-metabot-999999',
+    'idbots-agent-7',
+    'wallet:abc',
+    '',
+  ]) {
+    const result = await service.writeMetaIdPin({
+      actorId,
+      resourceUri: 'metaapp://app123i0',
+      payload: createPinWritePayload(),
+    });
+    assert.equal(result.ok, false, actorId);
+    assert.equal(result.code, 'actor_required', actorId);
+  }
+  assert.equal(createPinCalls.count, 0);
+  assert.equal(humanPinCalls.count, 0);
+});
+
+test('unsupported human Actor action combinations fail explicitly without cross-signer fallback', async () => {
+  const createPinCalls = { count: 0 };
+  const service = createHumanBridgeService({ createPinCalls });
+
+  const llm = await service.completeLlm({
+    actorId: 'idbots-account',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'session-1',
+    payload: { messages: [{ role: 'user', content: 'hi' }] },
+  });
+  assert.equal(llm.ok, false);
+  assert.equal(llm.code, 'unsupported_actor_action');
+
+  const upload = await service.uploadMetaFile({
+    actorId: 'idbots-account',
+    resourceUri: 'metaapp://app123i0',
+    payload: { source: { kind: 'host-picker', accept: ['image/png'] } },
+  });
+  assert.equal(upload.ok, false);
+  assert.equal(upload.code, 'unsupported_actor_action');
+  assert.equal(createPinCalls.count, 0);
+});
+
+test('human identity removal or replacement invalidates grants and pending confirmations', async () => {
+  const auditEvents = [];
+  let identity = createHumanIdentity();
+  const identityStore = { get: () => identity };
+  const service = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    userIdentityStore: identityStore,
+    createPin: async () => ({ pinId: 'botpin123i0', txids: ['bottx'], totalCost: 1 }),
+    createHumanPin: async () => ({ pinId: 'humanpin123i0', txids: ['humantx'] }),
+    now: () => 1_700_000_000_000,
+    confirmationTtlMs: 60_000,
+    createConfirmationId: (() => {
+      let sequence = 0;
+      return () => `confirmation-${++sequence}`;
+    })(),
+    createConfirmationToken: () => 'opaque-token-fixed',
+    audit: (event) => auditEvents.push(event),
+  });
+
+  // Grant a session permission to the human Actor.
+  const grantPhaseOne = await service.requestPermissions({
+    actorId: 'idbots-account',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'session-1',
+    payload: { grants: [{ method: 'metaid.pin.write', operation: 'create', path: '/protocols/simplegroupchat' }] },
+  });
+  assert.equal(grantPhaseOne.state, 'manual_action_required');
+  const grantPhaseTwo = await service.requestPermissions({
+    actorId: 'idbots-account',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'session-1',
+    payload: grantPhaseOne.data.confirmRequest.payload,
+  });
+  assert.equal(grantPhaseTwo.ok, true);
+
+  // A granted human write works before identity replacement.
+  const grantedWrite = await service.writeMetaIdPin({
+    actorId: 'idbots-account',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'session-1',
+    payload: createPinWritePayload({ path: '/protocols/simplegroupchat' }),
+  });
+  assert.equal(grantedWrite.ok, true);
+
+  // Replace the human identity: everything bound to the old human Actor dies.
+  service.invalidateUserIdentity();
+  identity = createHumanIdentity({ globalmetaid: 'IDP1OTHER' });
+
+  const staleGrantedWrite = await service.writeMetaIdPin({
+    actorId: 'idbots-account',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'session-1',
+    payload: createPinWritePayload({ path: '/protocols/simplegroupchat' }),
+  });
+  assert.equal(staleGrantedWrite.state, 'manual_action_required', 'the stale grant must be gone');
+
+  // The Bot's session grants are untouched by human identity changes.
+  const botGrantPhaseOne = await service.requestPermissions({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'session-2',
+    payload: { grants: [{ method: 'metaid.pin.write', operation: 'create', path: '/protocols/simplegroupchat' }] },
+  });
+  assert.equal(botGrantPhaseOne.state, 'manual_action_required');
+  const botGrantPhaseTwo = await service.requestPermissions({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'session-2',
+    payload: botGrantPhaseOne.data.confirmRequest.payload,
+  });
+  assert.equal(botGrantPhaseTwo.ok, true);
+  const botGrantedWrite = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'session-2',
+    payload: createPinWritePayload({ path: '/protocols/simplegroupchat' }),
+  });
+  assert.equal(botGrantedWrite.ok, true);
+
+  const revoked = auditEvents.filter((event) => event.type === 'permission-revoked');
+  assert.equal(revoked.length, 1);
+  assert.equal(revoked[0].actorId, 'idbots-account');
+  assert.equal(revoked[0].actorKind, 'human');
+  assert.equal(revoked[0].reason, 'user-identity-changed');
+});
+
+test('human Actor session grants authorize only that identity, not the Bot', async () => {
+  const createPinCalls = { count: 0 };
+  const humanPinCalls = { count: 0 };
+  const service = createHumanBridgeService({ createPinCalls, humanPinCalls });
+  const sessionId = 'session-human-1';
+
+  const grantPhaseOne = await service.requestPermissions({
+    actorId: 'idbots-account',
+    resourceUri: 'metaapp://app123i0',
+    sessionId,
+    payload: { grants: [{ method: 'metaid.pin.write', operation: 'create', path: '/protocols/simplegroupchat' }] },
+  });
+  assert.equal(grantPhaseOne.state, 'manual_action_required');
+  const grantPhaseTwo = await service.requestPermissions({
+    actorId: 'idbots-account',
+    resourceUri: 'metaapp://app123i0',
+    sessionId,
+    payload: grantPhaseOne.data.confirmRequest.payload,
+  });
+  assert.equal(grantPhaseTwo.ok, true);
+
+  // The same session's granted write as the Bot must NOT be auto-authorized:
+  // the grant belongs to the human Actor.
+  const botWrite = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    sessionId,
+    payload: createPinWritePayload({ path: '/protocols/simplegroupchat' }),
+  });
+  assert.equal(botWrite.state, 'manual_action_required', 'Bot must not inherit the human grant');
+  assert.equal(createPinCalls.count, 0);
+});

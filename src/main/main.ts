@@ -381,6 +381,7 @@ import { createPreferenceIpcHandlers } from './services/preference/ipc';
 import { PreferenceService, type PreferenceSigner, type PreferenceWriterResolution } from './services/preference/service';
 import { PreferenceStore } from './services/preference/store';
 import { createUserPreferenceWriter } from './services/preference/userWriter';
+import { createHumanIdentityWriter, type HumanIdentityWriter } from './services/humanIdentityWriter';
 import { HeartbeatService } from './services/heartbeatService';
 import { LongTermAdvanceService, LONGTERM_ADVANCE_INTERVAL_MS } from './services/longTermAdvanceService';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
@@ -2917,6 +2918,35 @@ async function pickBotBrowserMetaFiles(
 
 const botBrowserBridgeServices = new WeakMap<BrowserWindow, BotBrowserBridgeService>();
 let fallbackBotBrowserBridgeService: BotBrowserBridgeService | null = null;
+// Live bridge services (WeakRefs so closed windows do not leak). Identity
+// lifecycle hooks iterate them to revoke human-Actor authorization state.
+const liveBotBrowserBridgeServices = new Set<WeakRef<BotBrowserBridgeService>>();
+
+/**
+ * Process-wide human identity writer: ONE queue + UTXO session snapshot for
+ * the user wallet, shared by the Browser bridge and the preference writer.
+ */
+let humanIdentityWriter: HumanIdentityWriter | null = null;
+const getHumanIdentityWriter = (): HumanIdentityWriter => {
+  if (!humanIdentityWriter) {
+    humanIdentityWriter = createHumanIdentityWriter(getUserIdentityStore(), {
+      createPin: createPinForIdentity,
+      feeRate: () => getGlobalFeeRate('mvc'),
+    });
+  }
+  return humanIdentityWriter;
+};
+
+function invalidateBotBrowserUserIdentityState(): void {
+  for (const reference of [...liveBotBrowserBridgeServices]) {
+    const service = reference.deref();
+    if (!service) {
+      liveBotBrowserBridgeServices.delete(reference);
+      continue;
+    }
+    service.invalidateUserIdentity();
+  }
+}
 
 function getBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null): BotBrowserBridgeService {
   const existing = ownerWindow
@@ -2928,10 +2958,12 @@ function getBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null):
 
   const service = createBotBrowserBridgeService({
     metabotStore: getMetabotStore(),
+    userIdentityStore: getUserIdentityStore(),
     createPin: (metabotStore, metabotId, metaidPayload, options) => createPin(metabotStore, metabotId, metaidPayload, {
       network: options?.network,
       feeRate: getGlobalFeeRate(resolveCreatePinNetwork(options?.network)),
     }),
+    createHumanPin: (metaidPayload) => getHumanIdentityWriter().write(metaidPayload),
     uploadMetaFile: async (...args) => {
       const { uploadMetaFile } = await import('./services/metaFileUploadService');
       return uploadMetaFile(...args);
@@ -2983,6 +3015,7 @@ function getBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null):
   } else {
     fallbackBotBrowserBridgeService = service;
   }
+  liveBotBrowserBridgeServices.add(new WeakRef(service));
   return service;
 }
 
@@ -8219,6 +8252,9 @@ const getPreferenceService = (): PreferenceService => {
     const userWriter = createUserPreferenceWriter(getUserIdentityStore(), {
       createPin: createPinForIdentity,
       feeRate: () => getGlobalFeeRate('mvc'),
+      // Share the process-wide human writer so preference and Browser-bridge
+      // writes never run two UTXO queues over the same user wallet.
+      writer: getHumanIdentityWriter(),
     });
     preferenceService = new PreferenceService({
       store: getPreferenceStore(),
@@ -15487,6 +15523,9 @@ if (!gotTheLock) {
       if (!result.success) {
         return { success: false, error: result.error };
       }
+      // Identity replacement: revoke stale human-Actor grants/confirmations
+      // before any further browser write can run.
+      invalidateBotBrowserUserIdentityState();
       const relayCloseout = await applyRelayIdentityChange({ reason: 'create' });
       return {
         success: true,
@@ -15510,6 +15549,7 @@ if (!gotTheLock) {
       if (!result.success) {
         return { success: false, error: result.error };
       }
+      invalidateBotBrowserUserIdentityState();
       const relayCloseout = await applyRelayIdentityChange({ reason: 'import' });
       return {
         success: true,
@@ -15547,6 +15587,9 @@ if (!gotTheLock) {
   registerIpcHandler('userIdentity:logout', async () => {
     try {
       const removed = logoutUserIdentity(getUserIdentityStore());
+      if (removed) {
+        invalidateBotBrowserUserIdentityState();
+      }
       return removed ? { success: true } : { success: false, error: 'USER_IDENTITY_MISSING' };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);

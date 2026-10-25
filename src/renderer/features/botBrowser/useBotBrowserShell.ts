@@ -36,7 +36,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
     return fallback;
   };
 
-  const ensureLocalBot = useCallback(async (): Promise<boolean> => {
+  const ensureBrowserActorAvailable = useCallback(async (): Promise<boolean> => {
     try {
       const result = await window.electron.metabot.list();
       if (!result?.success) {
@@ -44,12 +44,19 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
         return false;
       }
 
-      if (!Array.isArray(result.list) || result.list.length === 0) {
-        showToast('No local Bot. Please create a Bot first.');
-        return false;
+      if (Array.isArray(result.list) && result.list.length > 0) {
+        return true;
       }
 
-      return true;
+      // No local Bot: the registered human identity may still act as the
+      // default Actor, so the Browser stays usable (no forced Bot creation).
+      const identity = await window.electron.userIdentity.get();
+      if (identity?.success && identity.identity?.globalmetaid) {
+        return true;
+      }
+
+      showToast('No local Actor. Set up your identity or create a Bot first.');
+      return false;
     } catch (error) {
       showToast(messageFromError(error, 'Failed to load local Bots.'));
       return false;
@@ -57,12 +64,12 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
   }, [showToast]);
 
   const showBrowser = useCallback(async (): Promise<boolean> => {
-    if (!await ensureLocalBot()) return false;
+    if (!await ensureBrowserActorAvailable()) return false;
     setHasMountedBrowser(true);
     setSurfaceMode('browser');
     setInternetPane('browser');
     return true;
-  }, [ensureLocalBot]);
+  }, [ensureBrowserActorAvailable]);
 
   const openUriWhenBrowserReady = useCallback((input: BotBrowserOpenUriInput) => {
     pendingOpenUriRef.current = input;

@@ -74,11 +74,94 @@ test('getRuntime exposes the IDBots host and local actors/default actor', async 
     templateSettings: true,
     walletLogin: false,
   });
-  assert.match(result.data.labels.noActorTitle, /Bot/i);
+  assert.match(result.data.labels.noActorTitle, /Actor/i);
   assert.doesNotMatch(result.data.labels.noActorTitle, /MetaBot/i);
-  assert.match(result.data.labels.noActorBody, /local/i);
+  assert.match(result.data.labels.noActorBody, /identity|Bot/i);
   assert.match(result.data.labels.noActorAction.label, /Bot/i);
   assert.doesNotMatch(result.data.labels.noActorAction.label, /MetaBot/i);
+});
+
+test('getRuntime lists the registered human identity first without changing the Bot default', async () => {
+  const adapter = createAdapter({
+    listMetabots: async () => [
+      createMetabot({ id: 2, created_at: 20, globalmetaid: 'IDQ1DEF' }),
+      createMetabot({ id: 1, created_at: 10, globalmetaid: 'IDQ1ABC' }),
+    ],
+    getUserIdentity: async () => ({
+      globalmetaid: 'IDP1HUMAN',
+      name: ' Sunny ',
+      avatar: 'data:image/png;base64,AAAA',
+      // Secret-bearing fields that must never surface in the runtime Actor.
+      mnemonic: 'never leak me',
+      path: "m/44'/10001'/0'/0/0",
+      mvc_address: 'mvc-address',
+      public_key: 'public-key',
+    }),
+  });
+
+  const result = await adapter.getRuntime();
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    result.data.actors.map((actor) => actor.id),
+    ['idbots-account', 'idbots-metabot-1', 'idbots-metabot-2'],
+  );
+  const human = result.data.actors[0];
+  assert.equal(human.kind, 'idbots-account');
+  assert.equal(human.globalMetaId, 'idp1human');
+  assert.equal(human.label, 'Sunny');
+  assert.equal(human.isDefault, false);
+  assert.deepEqual(
+    Object.keys(human).sort(),
+    ['avatar', 'capabilities', 'globalMetaId', 'id', 'isDefault', 'kind', 'label'].sort(),
+  );
+  assert.equal(JSON.stringify(human).includes('never leak me'), false);
+  assert.equal(JSON.stringify(human).includes('mvc-address'), false);
+  assert.equal(JSON.stringify(human).includes("m/44'/10001"), false);
+  // Existing Bot default is preserved when Bots are available.
+  assert.equal(result.data.defaultActor.id, 'idbots-metabot-1');
+});
+
+test('getRuntime falls back to the human Actor as default only when no Bot exists', async () => {
+  const adapter = createAdapter({
+    listMetabots: async () => [],
+    getUserIdentity: async () => ({ globalmetaid: 'IDP1HUMAN', name: 'Sunny' }),
+  });
+
+  const result = await adapter.getRuntime();
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    result.data.actors.map((actor) => actor.id),
+    ['idbots-account'],
+  );
+  assert.equal(result.data.defaultActor.id, 'idbots-account');
+  assert.equal(result.data.defaultActor.kind, 'idbots-account');
+});
+
+test('getRuntime omits the human Actor when the identity has no usable globalMetaId', async () => {
+  const adapter = createAdapter({
+    getUserIdentity: async () => ({ globalmetaid: null, name: 'Sunny' }),
+  });
+
+  const result = await adapter.getRuntime();
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    result.data.actors.map((actor) => actor.id),
+    ['idbots-metabot-1'],
+  );
+  assert.equal(result.data.defaultActor.id, 'idbots-metabot-1');
+});
+
+test('getRuntime propagates identity lookup failures instead of silently hiding the Actor', async () => {
+  const adapter = createAdapter({
+    getUserIdentity: async () => {
+      throw new Error('identity store unavailable');
+    },
+  });
+
+  await assert.rejects(() => adapter.getRuntime(), /identity store unavailable/);
 });
 
 test('resolveResource finds a local MetaApp by normalized source pin id and returns its local run URL', async () => {
