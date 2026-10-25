@@ -21,10 +21,9 @@
  * keeping unsaved edits in the other tabs intact.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PhotoIcon, PlusIcon, QuestionMarkCircleIcon, WrenchScrewdriverIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
-import { coworkService } from '../../services/cowork';
 import { configService } from '../../services/config';
 import { isLlmEffortLevel, type LlmEffortLevel } from '../../services/modelCatalog';
 import ModelEffortPicker from '../ModelEffortPicker';
@@ -113,7 +112,7 @@ export interface LlmOption {
   label: string;
 }
 
-export type MetaBotEditTabKey = 'basic' | 'persona' | 'directives' | 'chatSettings' | 'knowledgeBase' | 'surf' | 'advanced';
+export type MetaBotEditTabKey = 'basic' | 'persona' | 'chatSettings' | 'knowledgeBase' | 'surf' | 'advanced';
 
 /** Editable fields owned by each tab; drives dirty tracking and save scoping. */
 // 'knowledgeBase' and 'surf' are deliberately absent: Knowledge Base manages
@@ -139,12 +138,11 @@ export const EDIT_TAB_SYNC_GROUPS: Partial<Record<MetaBotEditTabKey, readonly Sy
   advanced: ['homepage'],
 };
 
-const EDIT_TAB_ORDER: readonly MetaBotEditTabKey[] = ['basic', 'persona', 'directives', 'chatSettings', 'knowledgeBase', 'surf', 'advanced'];
+const EDIT_TAB_ORDER: readonly MetaBotEditTabKey[] = ['basic', 'persona', 'chatSettings', 'knowledgeBase', 'surf', 'advanced'];
 
 const EDIT_TAB_LABEL_KEYS: Record<MetaBotEditTabKey, 'metabotTabBasic' | 'metabotTabPersona' | 'metabotTabDirectives' | 'metabotTabChatSettings' | 'metabotTabKnowledgeBase' | 'metabotTabSurf' | 'metabotTabAdvanced'> = {
   basic: 'metabotTabBasic',
   persona: 'metabotTabPersona',
-  directives: 'metabotTabDirectives',
   chatSettings: 'metabotTabChatSettings',
   knowledgeBase: 'metabotTabKnowledgeBase',
   surf: 'metabotTabSurf',
@@ -255,20 +253,7 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const [values, setValues] = useState<MetaBotEditValues>(() => buildInitialValues(initialValues));
   const [baseline, setBaseline] = useState<MetaBotEditValues>(() => buildInitialValues(initialValues));
-  const [activeTab, setActiveTab] = useState<MetaBotEditTabKey>('basic');
-  // ---- Owner directives (#5): immediate CRUD, not part of the tab save flow ----
-  const [botDirectives, setBotDirectives] = useState<Array<{ id: string; text: string; scope: 'external' | 'all'; status: 'active' | 'archived' }>>([]);
-  const [newDirectiveText, setNewDirectiveText] = useState('');
-  const [newDirectiveScope, setNewDirectiveScope] = useState<'external' | 'all'>('external');
-  const [directiveError, setDirectiveError] = useState<string | null>(null);
-  useEffect(() => {
-    if (activeTab !== 'directives') return;
-    void coworkService.listBotDirectives(metabotId).then(setBotDirectives);
-  }, [activeTab, metabotId]);
-  const reloadDirectives = useCallback(async () => {
-    setBotDirectives(await coworkService.listBotDirectives(metabotId));
-  }, [metabotId]);
-  const [savingTab, setSavingTab] = useState<MetaBotEditTabKey | null>(null);
+  const [activeTab, setActiveTab] = useState<MetaBotEditTabKey>('basic');  const [savingTab, setSavingTab] = useState<MetaBotEditTabKey | null>(null);
   const [tabErrors, setTabErrors] = useState<Partial<Record<MetaBotEditTabKey, string>>>({});
   const [nameDuplicate, setNameDuplicate] = useState(false);
   const [selectedAllowChatSkillId, setSelectedAllowChatSkillId] = useState('');
@@ -1045,67 +1030,7 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
       </div>
 
       {/* Chat Settings tab: private/group chat skill allowlist */}
-            {/* Owner directives tab (#5): external-facing hard rules, immediate CRUD */}
       <div
-        role="tabpanel"
-        data-slot="metabot-edit-panel-directives"
-        className={`space-y-3 ${activeTab === 'directives' ? '' : 'hidden'}`}
-      >
-        <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('botDirectivesHint')}</p>
-        {botDirectives.map((directive) => (
-          <div key={directive.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 dark:border-claude-darkBorder border-claude-border">
-            <div className="min-w-0 flex-1">
-              <div className={`text-sm ${directive.status === 'archived' ? 'line-through opacity-60' : ''} dark:text-claude-darkText text-claude-text`}>{directive.text}</div>
-              <div className="mt-0.5 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {directive.scope === 'external' ? i18nService.t('botDirectivesScopeExternal') : i18nService.t('botDirectivesScopeAll')}
-              </div>
-            </div>
-            <button
-              type="button"
-              className="rounded-lg border px-2 py-1 text-[11px] dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary"
-              onClick={async () => { await coworkService.setBotDirectiveStatus(metabotId, directive.id, directive.status === 'active'); await reloadDirectives(); }}
-            >
-              {directive.status === 'active' ? i18nService.t('botDirectivesDisable') : i18nService.t('botDirectivesEnable')}
-            </button>
-          </div>
-        ))}
-        {botDirectives.filter((d) => d.status === 'active').length < 5 && (
-          <div className="rounded-lg border px-3 py-2 dark:border-claude-darkBorder border-claude-border">
-            <div className="flex gap-2">
-              <input
-                value={newDirectiveText}
-                onChange={(event) => setNewDirectiveText(event.target.value.slice(0, 200))}
-                placeholder={i18nService.t('botDirectivesPlaceholder')}
-                className="min-w-0 flex-1 rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface dark:text-claude-darkText text-claude-text"
-              />
-              <select
-                value={newDirectiveScope}
-                onChange={(event) => setNewDirectiveScope(event.target.value === 'all' ? 'all' : 'external')}
-                className="rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface dark:text-claude-darkText text-claude-text"
-              >
-                <option value="external">{i18nService.t('botDirectivesScopeExternal')}</option>
-                <option value="all">{i18nService.t('botDirectivesScopeAll')}</option>
-              </select>
-            </div>
-            {directiveError && <div className="mt-1 text-[11px] text-red-500">{directiveError}</div>}
-            <button
-              type="button"
-              className="mt-2 rounded-lg border px-3 py-1 text-xs dark:border-claude-darkAccent border-claude-accent text-claude-accent dark:text-claude-darkAccent"
-              onClick={async () => {
-                setDirectiveError(null);
-                const error = await coworkService.saveBotDirective({ metabotId, text: newDirectiveText.trim(), scope: newDirectiveScope });
-                if (error) { setDirectiveError(error); return; }
-                setNewDirectiveText('');
-                await reloadDirectives();
-              }}
-            >
-              {i18nService.t('botDirectivesAdd')}
-            </button>
-          </div>
-        )}
-      </div>
-
-<div
         role="tabpanel"
         data-slot="metabot-edit-panel-chatSettings"
         className={`space-y-3 ${activeTab === 'chatSettings' ? '' : 'hidden'}`}

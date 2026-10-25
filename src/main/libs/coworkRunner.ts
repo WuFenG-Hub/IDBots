@@ -60,7 +60,7 @@ import {
 } from './chainHistoryRecallBlocks';
 import { getChainContentHistoryStore } from '../chainContentHistoryRuntime';
 import { getStandingPageStore } from '../standingPageRuntime';
-import { getBotDirectivesStore, renderBotDirectivesBlock } from '../botDirectivesStore';
+import { renderBotDirectivesBlock } from '../botDirectives';
 import { normalizeScopeChannel } from '../memory/memoryScope';
 import {
   findStandingPageForRead,
@@ -4080,14 +4080,10 @@ export class CoworkRunner extends EventEmitter {
     // Bot directives (#5): owner-set hard rules; external-scope ones render
     // only on external-facing turns — owner chats gain zero chars.
     let promptBlocksXml = memoryBlocks.xml;
-    const directivesStore = getBotDirectivesStore();
-    if (directivesStore && metabotId != null) {
-      const directivesXml = renderBotDirectivesBlock(
-        directivesStore.listBotDirectives(metabotId),
-        { channelIsExternal: normalizeScopeChannel(sourceChannel) !== 'cowork_ui' }
-      );
-      if (directivesXml) promptBlocksXml = `${directivesXml}\n${promptBlocksXml}`;
-    }
+    const directivesXml = renderBotDirectivesBlock(
+      { channelIsExternal: normalizeScopeChannel(sourceChannel) !== 'cowork_ui' }
+    );
+    if (directivesXml) promptBlocksXml = `${directivesXml}\n${promptBlocksXml}`;
     if (injectedIds.length > 0) {
       this.getMemoryBackend().touchUserMemoriesLastUsed(metabotId, injectedIds);
       // Dream review P1 exposure ledger: the guidance memories

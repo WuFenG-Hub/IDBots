@@ -2,8 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import Module from 'node:module';
-import { createSqliteStore } from './memoryTestUtils.mjs';
-
 const require = Module.createRequire(import.meta.url);
 function loadCompiled(modulePath) {
   const originalLoad = Module._load;
@@ -13,61 +11,30 @@ function loadCompiled(modulePath) {
   };
   try { return require(modulePath); } finally { Module._load = originalLoad; }
 }
-const {
-  BotDirectivesStore, renderBotDirectivesBlock,
-  BOT_DIRECTIVE_MAX_ACTIVE_PER_BOT, BOT_DIRECTIVE_MAX_CHARS,
-  getBotDirectivesStore, setBotDirectivesStore,
-} = loadCompiled('../dist-electron/main/botDirectivesStore.js');
+const { renderBotDirectivesBlock } = loadCompiled('../dist-electron/main/botDirectives.js');
 
-test('store: CRUD, cap, clipping, archive/restore, idempotent schema', async () => {
-  const { db, cleanup } = await createSqliteStore();
-  try {
-    const store = new BotDirectivesStore(db, () => {});
-    new BotDirectivesStore(db, () => {}); // idempotent
-    const a = store.createBotDirective({ metabotId: 1, text: '外部渠道永远用正式英文回复' });
-    const b = store.createBotDirective({ metabotId: 1, text: '对外绝不透露客户名单', scope: 'all' });
-    assert.equal(a.scope, 'external', 'default scope is external');
-    assert.equal(store.createBotDirective({ metabotId: 1, text: 'x'.repeat(400) }).text.length, BOT_DIRECTIVE_MAX_CHARS);
-    assert.throws(() => store.createBotDirective({ metabotId: 1, text: '' }), /required/);
-    for (let i = 0; i < BOT_DIRECTIVE_MAX_ACTIVE_PER_BOT - 3; i += 1) {
-      store.createBotDirective({ metabotId: 1, text: `rule ${i}` });
-    }
-    assert.throws(() => store.createBotDirective({ metabotId: 1, text: 'over' }), /at most/);
-    assert.equal(store.listBotDirectives(2).length, 0, 'per-bot isolation');
-    assert.ok(store.archiveBotDirective(1, a.id));
-    assert.equal(store.listBotDirectives(1).length, BOT_DIRECTIVE_MAX_ACTIVE_PER_BOT - 1);
-    assert.ok(store.restoreBotDirective(1, a.id));
-    const updated = store.updateBotDirective({ metabotId: 1, id: b.id, text: '对外绝不透露任何客户信息' });
-    assert.equal(updated.text, '对外绝不透露任何客户信息');
-  } finally { cleanup(); }
+test('built-in directives: render on external turns only, bounded, classic set', () => {
+  const owner = renderBotDirectivesBlock({ channelIsExternal: false });
+  assert.equal(owner, '', 'owner cowork chats gain zero chars');
+  const external = renderBotDirectivesBlock({ channelIsExternal: true });
+  assert.ok(external.includes('<bot_directives>'));
+  assert.ok(external.includes('MUST follow'));
+  assert.ok(external.includes('wallet details, mnemonics, private keys'));
+  assert.ok(external.includes('spending money'));
+  assert.ok(external.includes('legal or contractual'));
+  assert.ok(external.length < 800, 'bounded block');
+  assert.ok(renderBotDirectivesBlock().length > 0, 'external is the default context');
 });
 
-test('render: external-scope directives stay out of owner chats; all-scope always render', () => {
-  const mk = (scope) => ({ id: `d-${scope}`, metabotId: 1, text: `rule-${scope}`, scope, status: 'active', createdAt: 1, updatedAt: 1 });
-  const ownerChat = renderBotDirectivesBlock([mk('external'), mk('all')], { channelIsExternal: false });
-  assert.equal(ownerChat.includes('rule-external'), false, 'owner chats gain zero chars from external directives');
-  assert.ok(ownerChat.includes('rule-all') && ownerChat.includes('MUST follow'));
-  const external = renderBotDirectivesBlock([mk('external'), mk('all')], { channelIsExternal: true });
-  assert.ok(external.includes('rule-external') && external.includes('rule-all'));
-  assert.equal(renderBotDirectivesBlock([mk('external')], { channelIsExternal: false }), '');
-  assert.equal(renderBotDirectivesBlock([], { channelIsExternal: true }), '');
-});
-
-test('runtime + wiring anchors: singleton accessor; three external-facing sites prepend the block', () => {
-  const prev = getBotDirectivesStore();
-  try {
-    setBotDirectivesStore(null);
-    assert.equal(getBotDirectivesStore(), null);
-    const stub = { text: 'store' };
-    setBotDirectivesStore(stub);
-    assert.equal(getBotDirectivesStore(), stub);
-  } finally { setBotDirectivesStore(prev); }
+test('wiring anchors: all three external-facing sites render the built-ins; no management surface remains', () => {
   const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8');
   for (const site of ['../src/main/libs/coworkRunner.ts', '../src/main/services/privateChatDaemon.ts', '../src/main/services/groupTaskDaemon.ts']) {
     const source = read(site);
     assert.match(source, /renderBotDirectivesBlock\(/, `${site} renders directives`);
-    assert.match(source, /getBotDirectivesStore\(\)/, `${site} pulls the runtime store`);
+    assert.doesNotMatch(source, /getBotDirectivesStore/, 'no store coupling');
   }
-  assert.match(read('../src/main/libs/coworkRunner.ts'), /channelIsExternal: normalizeScopeChannel\(sourceChannel\) !== 'cowork_ui'/, 'cowork sessions gate on the real channel');
-  assert.match(read('../src/main/main.ts'), /setBotDirectivesStore\(getBotDirectivesStoreInstance\(\)\);/, 'main pushes the singleton');
+  assert.match(read('../src/main/libs/coworkRunner.ts'), /channelIsExternal: normalizeScopeChannel\(sourceChannel\) !== 'cowork_ui'/);
+  assert.equal(read('../src/main/main.ts').includes('botDirectives'), false, 'main has no directives wiring left');
+  const tabs = read('../src/renderer/components/metabots/MetaBotEditTabs.tsx');
+  assert.equal(tabs.includes('directives'), false, 'the persona-page tab is gone');
 });

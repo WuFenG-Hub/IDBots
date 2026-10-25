@@ -1443,22 +1443,6 @@ interface IElectronAPI {
       entry?: TeamCultureEntry;
       error?: string;
     }>;
-    listBotDirectives: (input: { metabotId: number }) => Promise<{
-      success: boolean;
-      result?: { directives: Array<{ id: string; text: string; scope: 'external' | 'all'; status: 'active' | 'archived'; updatedAt: number }> };
-      error?: string;
-    }>;
-    createBotDirective: (input: { metabotId: number; text: string; scope?: 'external' | 'all' }) => Promise<{
-      success: boolean;
-      result?: { directive: { id: string } };
-      error?: string;
-    }>;
-    updateBotDirective: (input: { metabotId: number; id: string; text?: string; scope?: 'external' | 'all' }) => Promise<{
-      success: boolean;
-      error?: string;
-    }>;
-    archiveBotDirective: (input: { metabotId: number; id: string }) => Promise<{ success: boolean; error?: string }>;
-    restoreBotDirective: (input: { metabotId: number; id: string }) => Promise<{ success: boolean; error?: string }>;
     listStandingPages: (input: { metabotId: number }) => Promise<{
       success: boolean;
       pages?: Array<{

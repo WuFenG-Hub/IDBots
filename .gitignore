@@ -742,7 +742,6 @@ blob-report/
 
 # Memory evolution #5: per-bot owner directives (external-facing hard rules)
 !tests/botDirectives.test.mjs
-!tests/botDirectivesUiStatic.test.mjs
 
 # Motion Video Arena MetaApp (WS4): component tests, mock MetaSo + mock Browser bridge
 !tests/motionVideoArena.test.mjs

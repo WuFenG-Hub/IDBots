@@ -1844,33 +1844,6 @@ class CoworkService {
     return Boolean(result?.success);
   }
 
-  async listBotDirectives(metabotId: number): Promise<Array<{ id: string; text: string; scope: 'external' | 'all'; status: 'active' | 'archived'; updatedAt: number }>> {
-    const api = window.electron?.cowork?.listBotDirectives;
-    if (!api) return [];
-    const result = await api({ metabotId });
-    return result?.success ? (result.result?.directives ?? []) : [];
-  }
-
-  async saveBotDirective(input: { metabotId: number; id?: string; text: string; scope: 'external' | 'all' }): Promise<string | null> {
-    if (input.id) {
-      const api = window.electron?.cowork?.updateBotDirective;
-      if (!api) return 'unavailable';
-      const result = await api({ metabotId: input.metabotId, id: input.id, text: input.text, scope: input.scope });
-      return result?.success ? null : (result?.error ?? 'failed');
-    }
-    const createApi = window.electron?.cowork?.createBotDirective;
-    if (!createApi) return 'unavailable';
-    const created = await createApi({ metabotId: input.metabotId, text: input.text, scope: input.scope });
-    return created?.success ? null : (created?.error ?? 'failed');
-  }
-
-  async setBotDirectiveStatus(metabotId: number, id: string, archived: boolean): Promise<boolean> {
-    const api = archived ? window.electron?.cowork?.archiveBotDirective : window.electron?.cowork?.restoreBotDirective;
-    if (!api) return false;
-    const result = await api({ metabotId, id });
-    return Boolean(result?.success);
-  }
-
   async listStandingPages(metabotId: number): Promise<Array<{
     id: string; pageKey: string; spec: string; name: string; question: string;
     sections: Array<{ key: string; title: string; body: string }>;

@@ -99,7 +99,7 @@ import {
 } from '../libs/experiencePromptBlocks';
 import { truncateUtf16Units } from '../libs/llmSafeText';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
-import { getBotDirectivesStore, renderBotDirectivesBlock } from '../botDirectivesStore';
+import { renderBotDirectivesBlock } from '../botDirectives';
 import { buildGroupTaskWorkingStateBlock } from './groupTaskWorkingState';
 import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
 import type { MemoryUsageClass, MemoryVisibility } from '../memory/memoryScope';
@@ -4280,11 +4280,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         // Bot directives (#5): group tasks speak to the outside world —
         // external-facing for the owner's hard rules.
         let xml = memoryBlocks.xml;
-        const directivesStore = getBotDirectivesStore();
-        if (directivesStore) {
-          const directivesXml = renderBotDirectivesBlock(directivesStore.listBotDirectives(bot.id));
-          if (directivesXml) xml = `${directivesXml}\n${xml}`;
-        }
+        const directivesXml = renderBotDirectivesBlock();
+        if (directivesXml) xml = `${directivesXml}\n${xml}`;
         // Injection IS the usage event for the hygiene decay clock: touch only
         // the rows that actually rendered into the block.
         if (injectedIds.length > 0) {

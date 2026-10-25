@@ -662,16 +662,6 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('teamCulture:restore', input),
     listStandingPages: (input: { metabotId: number }) =>
       ipcRenderer.invoke('standingPages:list', input),
-    listBotDirectives: (input: { metabotId: number }) =>
-      ipcRenderer.invoke('botDirectives:list', input),
-    createBotDirective: (input: { metabotId: number; text: string; scope?: 'external' | 'all' }) =>
-      ipcRenderer.invoke('botDirectives:create', input),
-    updateBotDirective: (input: { metabotId: number; id: string; text?: string; scope?: 'external' | 'all' }) =>
-      ipcRenderer.invoke('botDirectives:update', input),
-    archiveBotDirective: (input: { metabotId: number; id: string }) =>
-      ipcRenderer.invoke('botDirectives:archive', input),
-    restoreBotDirective: (input: { metabotId: number; id: string }) =>
-      ipcRenderer.invoke('botDirectives:restore', input),
     createStandingPage: (input: { metabotId: number; name: string; question: string }) =>
       ipcRenderer.invoke('standingPages:create', input),
     removeStandingPage: (input: { metabotId: number; key: string }) =>
