@@ -323,6 +323,10 @@ test('Scheduler falls back to a fresh session for A2A and sandbox bound sessions
   for (const [name, session] of [
     ['a2a', standardSession('bound-session', { sessionType: 'a2a' })],
     ['sandbox', standardSession('bound-session', { executionMode: 'sandbox' })],
+    // Nightly-token audit 2026-10-25: surf/study/exam sessions are hidden and
+    // stopped after their run — a task bound to one (the legacy surf default)
+    // must not re-feed that transcript into an invisible work session.
+    ['hidden-unattended', standardSession('bound-session', { hiddenFromSessionList: true })],
   ]) {
     const task = createTask({ id: `bound-task-${name}`, targetSessionId: 'bound-session' });
     const { scheduler, recording } = createHarness({

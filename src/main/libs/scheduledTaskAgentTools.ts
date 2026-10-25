@@ -167,9 +167,23 @@ export function buildScheduledTaskAgentTools(deps: {
 }): unknown[] {
   const { tool, control, resolveMetabotId, sessionId, surfState } = deps;
 
+  // Surf sessions are hidden from the session list and stopped once the run
+  // ends, so a task that "continues this conversation" would re-feed the whole
+  // surf transcript (49k-char prompt + every deep read) as the prefix of an
+  // invisible work session — 45% of scheduled-task fires in the 2026-10 audit
+  // week went that way. In a surf session every task therefore runs in a NEW
+  // session unless the model names another specific session; the legacy
+  // continue-this-conversation default stays for non-surf registrations.
+  const sessionPlacement = surfState
+    ? 'Every task runs LATER in a NEW session (this surf session is unattended and ends tonight). Pass a session UUID only to run the task inside a specific other chat session.'
+    : 'One-shot tasks (scheduleType "at") run in THIS conversation by default; recurring tasks run in a new session each time. Pass sessionId to override.';
+  const sessionIdDescription = surfState
+    ? 'Optional: a specific chat session UUID the task should run in. Omit (or pass null) to run in a new session — the default for every task created while surfing. "current" is treated as omitted: this surf session is unattended and ends tonight. If the session is missing or archived at run time, the task runs in a new session instead.'
+    : "Which chat session the task runs in. Pass 'current' to run in THIS conversation, or a session UUID to run in that session. Omit to use the default: this conversation for one-shot 'at' tasks, a new session for recurring tasks. Pass null to deliberately run a one-shot task in a new session (opt out of the default). If the session is missing or archived at run time, the task runs in a new session instead.";
+
   const createScheduledTask = tool(
     'create_scheduled_task',
-    'Create one scheduled task for THIS bot — a prompt the bot executes later, unattended, as a FULL work session (coding tools, skills, publishing — all available there, unlike this surf session). Hand off work you decided to undertake but cannot do here. The prompt must be fully self-contained: what to do, the source pinId/thread, and the exact delivery step. Prefer scheduleType "at" (one-time). One-shot tasks (scheduleType "at") run in THIS conversation by default; recurring tasks run in a new session each time. Pass sessionId to override.',
+    `Create one scheduled task for THIS bot — a prompt the bot executes later, unattended, as a FULL work session (coding tools, skills, publishing — all available there, unlike this surf session). Hand off work you decided to undertake but cannot do here. The prompt must be fully self-contained: what to do, the source pinId/thread, and the exact delivery step. Prefer scheduleType "at" (one-time). ${sessionPlacement}`,
     {
       name: z.string().min(1).describe(`Short task name, at most ${MAX_TASK_NAME_CHARS} chars`),
       prompt: z.string().min(1).describe(`Self-contained runtime instructions for the future work session, at most ${MAX_TASK_PROMPT_CHARS} chars: what to do, source pinIds/threads, delivery step`),
@@ -178,7 +192,7 @@ export function buildScheduledTaskAgentTools(deps: {
       intervalValue: z.number().optional().describe('For scheduleType "interval": positive integer count'),
       intervalUnit: z.enum(['minutes', 'hours', 'days']).optional().describe('For scheduleType "interval": the unit'),
       cron: z.string().optional().describe('For scheduleType "cron": 5-field cron expression in local time'),
-      sessionId: z.union([z.string(), z.null()]).optional().describe("Which chat session the task runs in. Pass 'current' to run in THIS conversation, or a session UUID to run in that session. Omit to use the default: this conversation for one-shot 'at' tasks, a new session for recurring tasks. Pass null to deliberately run a one-shot task in a new session (opt out of the default). If the session is missing or archived at run time, the task runs in a new session instead."),
+      sessionId: z.union([z.string(), z.null()]).optional().describe(sessionIdDescription),
       exitCondition: z.string().optional().describe('REQUIRED for recurring (interval/cron) tasks: when this task has done its job and must retire itself — cover BOTH the watched condition AND the upstream work it serves, e.g. "Retire once the endpoint is confirmed live AND order-x is delivered; if order-x is already closed, retire on the next fire."'),
       maxFires: z.number().int().positive().optional().describe('Total fire budget for recurring tasks (default 50). Raise it only for standing routines with a real reason to outlive the default.'),
     },
@@ -260,11 +274,18 @@ export function buildScheduledTaskAgentTools(deps: {
           targetSessionId = requestedSessionId
             ? (requestedSessionId === 'current' ? sessionId : requestedSessionId)
             : undefined;
-          // Default: a one-shot task created inside a session belongs to that
-          // session (the follow-up continues this conversation). Recurring
-          // tasks keep the fresh-session-per-run default so they cannot bloat
-          // one context with every repeat.
-          if (targetSessionId === undefined && scheduleType === 'at') {
+          if (surfState) {
+            // Surf session: never bind to the hidden, soon-stopped surf
+            // session itself — neither by the one-shot default nor via
+            // "current". Only a different, explicitly named session binds.
+            if (targetSessionId === undefined || targetSessionId === sessionId) {
+              targetSessionId = null;
+            }
+          } else if (targetSessionId === undefined && scheduleType === 'at') {
+            // Default: a one-shot task created inside a session belongs to that
+            // session (the follow-up continues this conversation). Recurring
+            // tasks keep the fresh-session-per-run default so they cannot bloat
+            // one context with every repeat.
             targetSessionId = sessionId;
           }
         }
