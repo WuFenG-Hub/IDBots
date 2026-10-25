@@ -464,7 +464,7 @@ export function buildBotBrowserAgentTools(deps: {
 
   const botBrowserOpenUri = tool(
     'bot_browser_open_uri',
-    'Navigate the Bot Browser to a URI: metaid://<globalMetaId> for an Agent homepage, metaapp://<pinId> for a MetaApp, map:// or metafile:// resources. By default the active tab navigates; set newTab=true to open in a new tab instead. Use this when the user asks to open or view a specific Agent, app, or on-chain page. When NOT to use: to preview a LOCAL app you are building use bot_browser_preview_local (preview-metaapp://); and to discover an app by intent before opening it, use search_metaapps first.',
+    'Navigate the Bot Browser to a URI: metaid://<globalMetaId> for an Agent homepage, metaapp://<pinId> for a MetaApp, map:// or metafile:// resources. By default the active tab navigates; set newTab=true to open in a new tab instead. Use this when the user asks to open or view a specific Agent, app, or on-chain page. When NOT to use: to preview a LOCAL app you are building use bot_browser_preview_local (preview-metaapp://); to discover an app by intent before opening it, use search_metaapps first; and in an assistant-mode owner chat, when the owner should use a MetaApp right inside the conversation, do not call this tool — embed the app in your reply with markdown image syntax `![app name](metaapp://<pinId>)` (it renders inline and signs as you).',
     {
       uri: z.string().min(1),
       newTab: z.boolean().optional(),
