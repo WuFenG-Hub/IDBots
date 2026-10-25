@@ -14,6 +14,7 @@ import { isAssistantModeOwnerChatSession } from './assistantModeSessionGate';
 import { useProgressiveRowReveal } from './sessionListRevealBudget';
 import {
   buildBotSessionCounts,
+  buildBotUnreadCounts,
   groupSessionsByBot,
   groupSessionsByTimeline,
   sortSessionsByMode,
@@ -377,6 +378,13 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
     () => (botSelector ? buildBotSessionCounts(sessions, (selectorBots ?? []).map((bot) => bot.id)) : undefined),
     [botSelector, sessions, selectorBots],
   );
+  // Per-bot unread counts for the selector's option unread indicators (yellow
+  // dots). Each live bot is pre-seeded at 0, 'all' carrying the total unread
+  // count. Only computed for the online list; every other caller gets nothing.
+  const unreadCounts = useMemo(
+    () => (botSelector ? buildBotUnreadCounts(sessions, (selectorBots ?? []).map((bot) => bot.id), unreadSessionIdSet) : undefined),
+    [botSelector, sessions, selectorBots, unreadSessionIdSet],
+  );
   // A lone local bot needs no selector (the same "zero noise" rule as the
   // single-group degradation), so the control stays off below two local bots.
   // Gated on the botSelector PROP: the by-Bot view also loads the roster, but
@@ -685,6 +693,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
           compact
           allowAll
           sessionCounts={sessionCounts}
+          unreadCounts={unreadCounts}
           useFixedDropdown
         />
       </div>

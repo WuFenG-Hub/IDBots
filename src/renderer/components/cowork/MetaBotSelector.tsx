@@ -28,6 +28,10 @@ export const ALL_METABOTS_SELECTOR_ID = -1;
  * the All Bots entry (only rendered when `allowAll` is on). */
 export type MetaBotSessionCounts = Partial<Record<number | 'all', number>>;
 
+/** Per-entry unread counts for the option rows' unread indicator; 'all' keys
+ * the All Bots entry (only rendered when `allowAll` is on). */
+export type MetaBotUnreadCounts = Partial<Record<number | 'all', number>>;
+
 interface MetaBotSelectorProps {
   metabots: MetaBotForSelector[];
   selectedId: number | null;
@@ -51,6 +55,12 @@ interface MetaBotSelectorProps {
    */
   sessionCounts?: MetaBotSessionCounts;
   /**
+   * Unread counts for the unread indicator (yellow dot) on each option (and on
+   * the All Bots entry). Omitted entries or zero counts render no indicator;
+   * surfaces without unread tracking simply leave this off.
+   */
+  unreadCounts?: MetaBotUnreadCounts;
+  /**
    * Render the dropdown with `position: fixed` anchored to the trigger so it
    * escapes `overflow-hidden` / scrollable ancestors (e.g. the sidebar session
    * list). Mirrors ModelEffortPicker's flag for the same reason.
@@ -72,6 +82,7 @@ const MetaBotSelector: React.FC<MetaBotSelectorProps> = ({
   dropdownDirection = 'down',
   allowAll = false,
   sessionCounts,
+  unreadCounts,
   useFixedDropdown = false,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -226,7 +237,12 @@ const MetaBotSelector: React.FC<MetaBotSelectorProps> = ({
                 className={`${optionClass} ${isAllSelected ? 'dark:bg-claude-darkSurfaceHover/50 bg-claude-surfaceHover/50' : ''}`}
               >
                 {renderAllAvatar(avatarSize, avatarIcon)}
-                <span className="truncate flex-1">{allLabel}</span>
+                <span className="truncate flex-1 flex items-center gap-1.5">
+                  {allLabel}
+                  {(unreadCounts?.all ?? 0) > 0 && (
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400 flex-shrink-0" aria-hidden />
+                  )}
+                </span>
                 {sessionCounts?.all != null && (
                   <span className={countClass} title={countTitle(sessionCounts.all)}>
                     {sessionCounts.all}
@@ -245,7 +261,12 @@ const MetaBotSelector: React.FC<MetaBotSelectorProps> = ({
                 className={`${optionClass} ${!isAllSelected && selectedId === m.id ? 'dark:bg-claude-darkSurfaceHover/50 bg-claude-surfaceHover/50' : ''}`}
               >
                 {renderAvatar(m)}
-                <span className="truncate flex-1">{m.name}</span>
+                <span className="truncate flex-1 flex items-center gap-1.5">
+                  {m.name}
+                  {(unreadCounts?.[m.id] ?? 0) > 0 && (
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400 flex-shrink-0" aria-hidden />
+                  )}
+                </span>
                 {sessionCounts?.[m.id] != null && (
                   <span className={countClass} title={countTitle(sessionCounts[m.id])}>
                     {sessionCounts[m.id]}
