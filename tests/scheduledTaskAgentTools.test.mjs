@@ -156,30 +156,51 @@ test('without a surf marker there is no cap bookkeeping (defensive path)', async
   assert.doesNotMatch(result.content[0].text, /Tasks remaining/);
 });
 
-test('sessionId "current" resolves to the surf session the tool runs in', async () => {
+// Surf sessions are hidden and stopped after the run (nightly-token audit
+// 2026-10-25): a task bound to one re-feeds the whole surf transcript into an
+// invisible work session. In surf mode nothing binds to the surf session —
+// not the one-shot default, not "current".
+test('surf mode: sessionId "current" never binds to the hidden surf session (fresh session instead)', async () => {
   const { calls, byName } = makeHarness();
   const result = await byName.create_scheduled_task.handler(validArgs({ sessionId: 'current' }));
   assert.equal(result.isError, undefined);
-  assert.equal(calls[0].targetSessionId, SESSION_ID);
+  assert.equal(calls[0].targetSessionId, null);
+  assert.match(byName.create_scheduled_task.description, /NEW session/);
 });
 
-test('an omitted sessionId on a one-shot "at" task defaults to the surf session', async () => {
+test('surf mode: an omitted sessionId on a one-shot "at" task runs in a fresh session', async () => {
   const { calls, byName } = makeHarness();
   await byName.create_scheduled_task.handler(validArgs());
-  assert.equal(calls[0].targetSessionId, SESSION_ID);
+  assert.equal(calls[0].targetSessionId, null);
   // A blank value is treated the same as omitted.
   await byName.create_scheduled_task.handler(validArgs({ sessionId: '   ' }));
-  assert.equal(calls[1].targetSessionId, SESSION_ID);
+  assert.equal(calls[1].targetSessionId, null);
+  // The literal surf session id is refused the same way.
+  await byName.create_scheduled_task.handler(validArgs({ sessionId: SESSION_ID }));
+  assert.equal(calls[2].targetSessionId, null);
 });
 
-test('an omitted sessionId on a recurring task stays unbound (fresh session each run)', async () => {
+test('surf mode: an omitted sessionId on a recurring task stays unbound (fresh session each run)', async () => {
   const { calls, byName } = makeHarness();
   await byName.create_scheduled_task.handler(
     validArgs({ scheduleType: 'interval', at: undefined, intervalValue: 2, intervalUnit: 'hours', exitCondition: EXIT_CLAUSE }),
   );
-  assert.equal(calls[0].targetSessionId, undefined);
+  assert.equal(calls[0].targetSessionId, null);
   await byName.create_scheduled_task.handler(validArgs({ scheduleType: 'cron', at: undefined, cron: '0 9 * * *', exitCondition: EXIT_CLAUSE }));
-  assert.equal(calls[1].targetSessionId, undefined);
+  assert.equal(calls[1].targetSessionId, null);
+});
+
+test('legacy (non-surf) registration keeps the continue-this-conversation default', async () => {
+  const { calls, byName } = makeHarness({ surfState: undefined });
+  await byName.create_scheduled_task.handler(validArgs({ sessionId: 'current' }));
+  assert.equal(calls[0].targetSessionId, SESSION_ID, '"current" resolves to the hosting session');
+  await byName.create_scheduled_task.handler(validArgs());
+  assert.equal(calls[1].targetSessionId, SESSION_ID, 'one-shot default binds to the hosting session');
+  await byName.create_scheduled_task.handler(
+    validArgs({ scheduleType: 'interval', at: undefined, intervalValue: 2, intervalUnit: 'hours', exitCondition: EXIT_CLAUSE }),
+  );
+  assert.equal(calls[2].targetSessionId, undefined, 'recurring stays unbound');
+  assert.match(byName.create_scheduled_task.description, /THIS conversation by default/);
 });
 
 test('an explicit sessionId always wins over the one-shot default', async () => {
@@ -249,12 +270,16 @@ test('rejects a non-positive or non-integer maxFires', async () => {
 });
 
 test('the sessionId param is advertised on the tool schema', () => {
+  // Surf mode: tasks run in a NEW session; the param only names another one.
   const { byName } = makeHarness();
   assert.ok(byName.create_scheduled_task.schema.sessionId, 'sessionId must be part of the tool schema');
-  assert.match(byName.create_scheduled_task.description, /One-shot tasks \(scheduleType "at"\) run in THIS conversation by default/);
-  // The opt-out is documented on the param itself.
+  assert.match(byName.create_scheduled_task.description, /Every task runs LATER in a NEW session/);
+  assert.match(byName.create_scheduled_task.schema.sessionId.description, /"current" is treated as omitted/);
+  // Legacy (non-surf) mode keeps the continue-this-conversation contract.
+  const legacy = makeHarness({ surfState: undefined }).byName;
+  assert.match(legacy.create_scheduled_task.description, /One-shot tasks \(scheduleType "at"\) run in THIS conversation by default/);
   assert.match(
-    byName.create_scheduled_task.schema.sessionId.description,
+    legacy.create_scheduled_task.schema.sessionId.description,
     /Pass null to deliberately run a one-shot task in a new session \(opt out of the default\)/,
   );
 });

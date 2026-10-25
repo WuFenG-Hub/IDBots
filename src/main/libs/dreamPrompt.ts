@@ -270,6 +270,32 @@ export function validateSelfIdentity(text?: string | null): { valid: boolean; ch
 }
 
 /**
+ * Identity text from the compact self_identity repair call. The call asks
+ * for plain prose, but models may still answer with a fenced block, a bare
+ * JSON object carrying self_identity, or even the full dream JSON — all of
+ * which must resolve to the identity string, never be stored verbatim.
+ * Returns null when nothing usable can be extracted.
+ */
+export function extractSelfIdentityFromRetry(raw: string): string | null {
+  let text = String(raw ?? '').trim();
+  if (!text) return null;
+  const fenced = text.match(/^```[a-zA-Z]*\s*([\s\S]*?)\s*```$/);
+  if (fenced) text = fenced[1]!.trim();
+  if (text.startsWith('{')) {
+    const parsed = parseDreamOutput(text);
+    if (parsed.ok) return parsed.output.selfIdentity?.trim() || null;
+    try {
+      const value = JSON.parse(text) as Record<string, unknown>;
+      const candidate = value?.self_identity ?? value?.selfIdentity;
+      return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null;
+    } catch {
+      return null;
+    }
+  }
+  return text.replace(/^["'「]+|["'」]+$/g, '').trim() || null;
+}
+
+/**
  * Dream review P0 (2026-10-23) — conservative injection screen for newly
  * generated self-identity text before it can replace the previous identity.
  * The identity is injected into every prompt, so a dream-distilled (or

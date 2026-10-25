@@ -639,6 +639,16 @@ export class Scheduler {
       console.log(`[Scheduler] Task ${task.id} bound session ${targetSessionId} runs in a sandbox, using a fresh session`);
       return null;
     }
+    // Unattended orchestrator sessions (surf/study/exam) are hidden from the
+    // session list and stopped once their run ends. Posting a task into one
+    // re-feeds its whole transcript as the prefix of an invisible work
+    // session — the legacy default of surf-created one-shot tasks (45% of
+    // fires in the 2026-10 audit week). The creation seam no longer binds
+    // them; this catches the rows already in the store.
+    if (targetSession.hiddenFromSessionList) {
+      console.log(`[Scheduler] Task ${task.id} bound session ${targetSessionId} is a hidden unattended session, using a fresh session`);
+      return null;
+    }
 
     this.taskSessionIds.set(task.id, targetSessionId);
     this.assertExecutionCurrent(executionGeneration);

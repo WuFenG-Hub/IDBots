@@ -84,6 +84,13 @@ export interface MetawebSurfRunStats {
   discoveredProtocols: number;
   /** Scheduled tasks created (surf→work handoff); ground truth from the session marker. */
   tasksScheduled: number;
+  /**
+   * 1 when the pre-dream run found an empty briefing (no unseen items, an
+   * error-free empty inbox) and skipped the unattended LLM session entirely,
+   * finishing digest-only; 0 otherwise. Numeric because stats_json read-back
+   * keeps numeric keys only.
+   */
+  sessionSkipped: number;
 }
 
 export const emptySurfRunStats = (): MetawebSurfRunStats => ({
@@ -100,6 +107,7 @@ export const emptySurfRunStats = (): MetawebSurfRunStats => ({
   inboxPresented: 0,
   discoveredProtocols: 0,
   tasksScheduled: 0,
+  sessionSkipped: 0,
 });
 
 export interface MetawebSurfRunRecord {

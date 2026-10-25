@@ -350,7 +350,7 @@ import {
 import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { MetawebSurfStore } from './metawebSurfStore';
 import { SurfService, SURF_STATUS_CHANNEL } from './services/surfService';
-import { buildSurfSessionPrompt, parseSurfRunReport, SURF_KB_ADD_BUDGET } from './libs/surfPrompt';
+import { buildSurfSessionPrompt, parseSurfRunReport, SURF_DEEP_READ_GUIDANCE, SURF_KB_ADD_BUDGET } from './libs/surfPrompt';
 import { foldSurfReceiptsIntoSeenActions, surfReceiptSeenActions, surfSessionPartialStats, type SurfSessionWriteState } from './libs/surfInteractionGuard';
 import { isSurfBeforeDreamEnabled, SURF_BEFORE_DREAM_ENABLED_KEY } from './services/surfSettings';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
@@ -5098,6 +5098,12 @@ const startStartupNightlyServices = (): void => {
         return await Promise.race([
           surf.runSurfAndWait(metabotId, 'pre-dream').then((run) => ({
             reportMarkdown: run.status === 'done' ? run.reportMarkdown : null,
+            // Empty-briefing skip (digest-only run, no LLM session): recorded
+            // in the dream telemetry like the binding skip so the nightly
+            // saving is auditable per bot.
+            skippedReason: run.status === 'done' && run.stats.sessionSkipped === 1
+              ? 'surf-empty-briefing'
+              : undefined,
           })),
           new Promise<null>((resolve) => {
             timeout = setTimeout(() => {
@@ -5155,6 +5161,8 @@ const startStartupNightlyServices = (): void => {
         autoApprove: true,
         disableMemoryUpdates: true,
         practiceSession: createPracticeSessionState('read_only'),
+        // Hidden exam session: static title body, no title LLM call.
+        sessionTitle: `Exam ${new Date().toISOString().slice(0, 10)}`,
         skillTurnTimeoutMs: 20 * 60 * 1000,
         onSessionCreated: (sessionId) => {
           coworkStore.setSessionHiddenFromList(sessionId, true);
@@ -9035,6 +9043,9 @@ const getMetawebStudyService = (): MetawebStudyService => {
           permissionMode: 'acceptEdits',
           disableMemoryUpdates: false,
           metawebStudySession: { pinBudget: job.budgetPins, kind: job.kind },
+          // Hidden session (see onSessionCreated below): static title body,
+          // no per-session title LLM call.
+          sessionTitle: `Study ${job.topic.slice(0, 40)}`,
           // Study runs read up to ~20 pins; the 300s delegation default is far
           // too small. On timeout the job records failed while the session may
           // still finish in the background — its KB saves are never lost.
@@ -9215,6 +9226,10 @@ const getSurfService = (): SurfService => {
             ? 0
             : (context.briefing.creationBudget ?? context.briefing.interactionBudget),
           kbBudget: SURF_KB_ADD_BUDGET,
+          // Deep-read ceiling mirrors the prompt guidance (advisory) with a
+          // hard stop in the read wrapper — each read rides the resent
+          // transcript, so an unbounded loop compounds per round.
+          deepReadBudget: SURF_DEEP_READ_GUIDANCE,
         };
         try {
           const replyText = await runOrchestratorSkillTurn(getCoworkRunner(), coworkStore, {
@@ -9232,6 +9247,9 @@ const getSurfService = (): SurfService => {
             permissionMode: 'acceptEdits',
             disableMemoryUpdates: false,
             metawebSurfSession: writeState,
+            // The session is hidden from the list right below, so a generated
+            // title would never be displayed — static body, no title LLM call.
+            sessionTitle: `MetaWeb Surf ${new Date().toISOString().slice(0, 10)}`,
             // Live-run data (round 3): a first-surf backlog run takes ~30 min,
             // so the old 30-min watchdog was a coin-flip (one live run finished
             // 22s under it, the next timed out). Manual runs get 60 min; the

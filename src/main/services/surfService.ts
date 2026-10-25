@@ -78,6 +78,29 @@ export interface SurfSessionResult {
   seenActions?: Array<{ pinId: string; action: import('../metawebSurfStore').MetawebSurfSeenAction }>;
 }
 
+/**
+ * Nightly-token audit (2026-10-25): does the deterministic briefing give the
+ * unattended session anything PERSONAL to act on? "No" means no unseen
+ * protocol items and an error-free empty inbox. The pre-dream path then
+ * skips the LLM session and finishes digest-only — production showed
+ * fetched:0 nights still spending the full 10-20 min / ~3.5M-token session
+ * on the prompt's mandatory search party, hot-post engagement and creation
+ * steps, which is exactly what the skip gives up on a dead night.
+ *
+ * Fetch errors never qualify: an unknown window is not an empty one, and the
+ * errored sections' watermarks are preserved for the next run either way.
+ * An absent inbox section (bot without an identity/fetcher) counts as empty.
+ */
+export function surfBriefingHasNoWork(briefing: SurfBriefing): boolean {
+  if (briefing.items.length > 0) return false;
+  if (briefing.protocols.some((section) => section.error)) return false;
+  if (briefing.inbox) {
+    if (briefing.inbox.error) return false;
+    if (briefing.inbox.items.length > 0) return false;
+  }
+  return true;
+}
+
 export interface SurfServiceDeps {
   store: MetawebSurfStore;
   metabotStore: SurfMetabotStoreLike;
@@ -451,7 +474,21 @@ export class SurfService {
       let reportMarkdown: string | null = null;
       let reportJson: string | null = null;
       const sessionSeenActions: Array<{ pinId: string; action: MetawebSurfSeenAction }> = [];
-      if (this.runSurfSession) {
+      // Empty-briefing skip (nightly-token audit 2026-10-25): only the
+      // unattended pre-dream path — a manual trigger is the owner asking for
+      // a surf and always runs. The run still completes as digest-only below
+      // (watermarks advance, briefing digest recorded, recency dedupe holds),
+      // and with no report the same night's dream sees no surf activity.
+      const sessionSkipped = trigger === 'pre-dream'
+        && this.runSurfSession != null
+        && surfBriefingHasNoWork(briefing);
+      if (sessionSkipped) {
+        stats.sessionSkipped = 1;
+        console.log(
+          `[SurfService] Pre-dream surf for metabot ${metabotId}: empty briefing (no unseen items, empty inbox) — LLM session skipped, digest-only run.`,
+        );
+      }
+      if (this.runSurfSession && !sessionSkipped) {
         const session = await this.runSurfSession({
           runId,
           metabotId,
@@ -474,7 +511,7 @@ export class SurfService {
       // briefed pins were marked 'presented' and never re-presented. A
       // session that provably did nothing must not consume the window — fail
       // the run so the next surf re-presents it, same as any other failure.
-      if (this.runSurfSession) {
+      if (this.runSurfSession && !sessionSkipped) {
         const sessionDidSomething = reportJson != null
           || reportMarkdown != null
           || stats.deepRead > 0

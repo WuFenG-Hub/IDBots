@@ -92,6 +92,14 @@ export interface RunOrchestratorSkillTurnParams {
    * object so a per-turn tool-surface rebuild cannot reset them (P2.1).
    */
   metawebSurfSession?: import('../libs/surfInteractionGuard').SurfSessionWriteState;
+  /**
+   * Static session title. When set, the title-summarization LLM call is
+   * skipped entirely and the localized orchestrator prefix is composed with
+   * this body instead. For unattended sessions that are hidden from the
+   * session list (surf/study/exam) the generated title is never displayed,
+   * so the per-session title LLM call is pure token waste.
+   */
+  sessionTitle?: string;
   permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
   /** Overrides the skill-turn watchdog timeout (ms). Defaults to 300s. */
   skillTurnTimeoutMs?: number;
@@ -293,9 +301,14 @@ export async function runOrchestratorSkillTurn(
 
   const now = Date.now();
   const normalizedGroupId = (groupId ?? '').trim();
+  const staticTitleBody = params.sessionTitle?.trim() || '';
   const sessionTitle = normalizedGroupId
     ? `Group-${normalizedGroupId.slice(0, 12)}-${now}`
-    : await resolveOrchestratorSessionTitle(store, userMessage);
+    : staticTitleBody
+      // Unattended hidden sessions: the caller-supplied body replaces the
+      // title-summarization LLM call, which nothing would ever display.
+      ? buildOrchestratorSessionTitle(store.getAppLanguage(), staticTitleBody, staticTitleBody)
+      : await resolveOrchestratorSessionTitle(store, userMessage);
   const externalConversationId = normalizedGroupId
     ? `metaweb-group:${normalizedGroupId}:${now}`
     : `orchestrator:${now}`;

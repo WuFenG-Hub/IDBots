@@ -12,6 +12,7 @@ import {
   buildDreamPrompt,
   isSelfIdentityInjectionAttempt,
   computeDueDreamDates,
+  extractSelfIdentityFromRetry,
   getDayBoundsMs,
   parseDreamOutput,
   validateSelfIdentity,
@@ -1274,6 +1275,11 @@ export class DreamService {
           );
         }
       }
+      // Cost attribution (nightly-token audit 2026-10-25): durationMs below
+      // used to fold the pre-dream surf wait into the dream's own duration,
+      // making dream telemetry unreadable for token-cost analysis. The split
+      // keeps the legacy total and adds the two components.
+      const surfEndedAtMs = Date.now();
       const { startMs, endMs } = getDayBoundsMs(date);
       const dropCounters = createDreamInputDropCounters();
       const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs, dropCounters);
@@ -1370,6 +1376,8 @@ export class DreamService {
           predictionOod: this.buildPredictionOodTelemetry(metabotId),
           promptLayerRollback: retentionGate,
           durationMs: Date.now() - runStartedAtMs,
+          surfMs: surfEndedAtMs - runStartedAtMs,
+          dreamMs: Date.now() - surfEndedAtMs,
         });
         return;
       }
@@ -1548,6 +1556,8 @@ export class DreamService {
         predictionOod: this.buildPredictionOodTelemetry(metabotId),
         promptLayerRollback: retentionGate,
         durationMs: Date.now() - runStartedAtMs,
+        surfMs: surfEndedAtMs - runStartedAtMs,
+        dreamMs: Date.now() - surfEndedAtMs,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1615,28 +1625,33 @@ export class DreamService {
   private async ensureSelfIdentity(
     output: DreamOutput,
     system: string,
-    user: string,
+    _user: string,
     brain: DreamBrainPair,
-    maxTokens?: number,
+    _maxTokens?: number,
     attemptTimeoutMs?: number,
   ): Promise<DreamOutput> {
     const validation = validateSelfIdentity(output.selfIdentity);
     if (validation.valid) return output;
 
+    // Token-waste fix: the retry used to re-send the ENTIRE dream prompt
+    // (30-50k+ input tokens) just to repair one short field. Only the
+    // identity text is missing, so a compact targeted call under the same
+    // system prompt (persona context) suffices; the already-parsed dream
+    // output is kept and only self_identity is patched.
     const retryRaw = await this.callDreamLlm(
       system,
-      `${user}\n\n(上一次的 self_identity ${output.selfIdentity ? `只有 ${validation.charCount} 个非空白字符` : '缺失'}。请重新输出完整 JSON,其中 self_identity 不少于 200 个非空白字符,认真写一段「我是谁」。)`,
+      `(昨晚梦境输出中的 self_identity ${output.selfIdentity ? `只有 ${validation.charCount} 个非空白字符` : '缺失'}。请只用第一人称认真写一段「我是谁」的自我描述:你是谁、你的性格与立场、你在积累什么。不少于 200 个非空白字符。只输出这段文字本身,不要 JSON、不要解释、不要标题。)`,
       brain,
-      maxTokens,
+      1024,
       attemptTimeoutMs,
     );
-    const retry = parseDreamOutput(retryRaw);
-    if (retry.ok && validateSelfIdentity(retry.output.selfIdentity).valid) {
-      return retry.output;
+    const retryText = extractSelfIdentityFromRetry(retryRaw);
+    if (retryText && validateSelfIdentity(retryText).valid) {
+      return { ...output, selfIdentity: retryText };
     }
     // Keep the original output rather than failing the whole run over length.
     console.warn('[DreamService] self_identity still below minimum after retry; keeping best effort output');
-    return output.selfIdentity ? output : (retry.ok ? retry.output : output);
+    return output;
   }
 
   /**
