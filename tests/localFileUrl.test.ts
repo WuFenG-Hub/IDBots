@@ -157,6 +157,27 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 2000): Promise<void
   }
 };
 
+test('F-11: mobile rewrites the tenant files route to the same-origin /files route, never file://', async (t) => {
+  // The REAL gateway returns the tenant-scoped route (fileSign.ts
+  // FILE_ROUTE_PATH_PREFIX = '/gateway/v1/files'); the PWA origin only
+  // serves /files/{token} (control-plane httpProxy / dev proxy REQ-E-9).
+  const { calls } = installMobileWindow(signOk('/gateway/v1/files/payload.sig', Date.now() + TEN_MINUTES_MS));
+  t.after(uninstallMobileWindow);
+  const url = await resolveLocalFileUrl('/data/workspace/移动端验收测试 A-04.docx');
+  assert.equal(url, '/files/payload.sig');
+  assert.ok(!url.startsWith('file://'), 'mobile links must never be file:// container paths');
+  assert.ok(!url.includes('/gateway/v1/'), 'mobile links must not leak the unroutable tenant route');
+  assert.deepEqual(calls, [{ path: '/data/workspace/移动端验收测试 A-04.docx', disposition: undefined }]);
+});
+
+test('F-11: mobile passes absolute http(s) signed URLs through unchanged', async (t) => {
+  const { calls } = installMobileWindow(signOk('https://cdn.example/signed/report.pdf?tok=1', Date.now() + TEN_MINUTES_MS));
+  t.after(uninstallMobileWindow);
+  const url = await resolveLocalFileUrl('/data/workspace/report.pdf');
+  assert.equal(url, 'https://cdn.example/signed/report.pdf?tok=1');
+  assert.equal(calls.length, 1);
+});
+
 test('mobile resolveLocalFileUrl signs through the gateway and returns the relative url', async (t) => {
   const { calls } = installMobileWindow(signOk('/files/token-1', Date.now() + TEN_MINUTES_MS));
   t.after(uninstallMobileWindow);

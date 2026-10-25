@@ -51,6 +51,7 @@ if (!fs.existsSync(serverJs)) {
   }
 }
 const server = require(serverJs);
+const fileSignCore = require(path.join(repoRoot, 'dist-electron', 'main', 'gateway', 'fileSign.js'));
 
 // ---------------------------------------------------------------------------
 // (b) in-memory cowork fixture echoing the mock bridge's protocol
@@ -64,8 +65,29 @@ const paths = {
 };
 fs.mkdirSync(paths.uploadsRoot, { recursive: true });
 
+/**
+ * F-11 file-delivery mode (`GW_FIXTURE_FILE=1`): seeds a deterministic
+ * "document" into the fixture workspace and appends file:// links to the
+ * canned reply — exactly the shape a tenant bot produces after generating a
+ * docx/pdf. The e2e spec (e2e/mobile/gateway.spec.ts) then proves the mobile
+ * UI renders a clickable same-origin /files/{token} download link instead of
+ * the dead container path.
+ */
+const GW_FILE_E2E = process.env.GW_FIXTURE_FILE === '1';
+const FIXTURE_FILE_NAME = 'gateway-e2e-report.docx';
+/** Mirror of the payload asserted in e2e/mobile/gateway.spec.ts. */
+const FIXTURE_FILE_BYTES = Buffer.from('PK\x03\x04 gateway fixture docx payload 0123456789abcdef');
+
+if (GW_FILE_E2E) {
+  fs.writeFileSync(path.join(paths.workspaceRoot, FIXTURE_FILE_NAME), FIXTURE_FILE_BYTES);
+}
+
 /** Canned reply streamed by the fixture turn (not UI copy). */
-const FIXTURE_REPLY = '**Gateway fixture online.**\n\nThis reply streamed over a real C2 gateway socket.';
+const FIXTURE_REPLY =
+  '**Gateway fixture online.**\n\nThis reply streamed over a real C2 gateway socket.' +
+  (GW_FILE_E2E
+    ? `\n\n文件已生成：[${FIXTURE_FILE_NAME}](file://${path.join(paths.workspaceRoot, FIXTURE_FILE_NAME)})\n\n[工作目录](${paths.workspaceRoot})`
+    : '');
 
 const sessions = new Map();
 const liveMessages = new Map(); // `${sessionId}${messageId}` -> message
@@ -200,6 +222,22 @@ async function invokeHandler(channel, clientId, args) {
     case 'cowork:stream:liveContent': {
       const key = `${args[0]?.sessionId}${args[0]?.messageId}`;
       return { success: true, content: liveMessages.get(key)?.content ?? '' };
+    }
+    case 'gateway:file:sign': {
+      // Real signing against the compiled pure core (mirrors
+      // src/main/gateway/fileSignChannel.ts) so the spec exercises the same
+      // url/disposition semantics production mobile clients get.
+      const input = args[0] ?? {};
+      const result = fileSignCore.signFileDownload(
+        { secret: SECRET, tenantId: TENANT, paths, realpathSync: fs.realpathSync },
+        {
+          path: typeof input.path === 'string' ? input.path : '',
+          disposition: input.disposition === 'inline' ? 'inline' : 'attachment',
+        },
+      );
+      return fileSignCore.isSignedFileDownload(result)
+        ? result
+        : { success: false, error: result.message, code: result.code };
     }
     case 'cowork:permission:respond':
       return { success: false, error: 'no pending permission in the fixture' };

@@ -48,9 +48,10 @@ import { CheckIcon, ClipboardDocumentIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../services/i18n';
 import type { ChatExperienceMode } from '../config';
 import LocalFileLink from './ui/LocalFileLink';
+import MobileFileLink from './ui/MobileFileLink';
 import InlineHtmlReportBlock from './cowork/InlineHtmlReportBlock';
 import { dispatchViewSession, parseIdbotsSessionUri } from '../utils/sessionDeepLink';
-import { buildLocalFileUrl } from '../services/localFileUrl';
+import { buildLocalFileUrl, isMobileBridgeRuntime } from '../services/localFileUrl';
 
 /**
  * Code-block languages worth highlighting in chat output.
@@ -786,6 +787,22 @@ const createMarkdownComponents = (
             displayName={linkText}
             onOpenInSidePanel={onOpenLocalFile}
           />
+        );
+      }
+
+      // F-11: in the mobile shell a container path like
+      // /data/workspace/report.docx is not openable — the file:// href is a
+      // dead link and the shell.openPath sign-then-window.open path is
+      // popup-blocked after the async sign. Render a same-origin signed
+      // download anchor instead (native click, cookie auth, no popups).
+      if (isMobileBridgeRuntime()) {
+        return (
+          <MobileFileLink
+            filePath={filePath}
+            isDirectory={looksLikeDirectory(filePath)}
+          >
+            {children}
+          </MobileFileLink>
         );
       }
 
