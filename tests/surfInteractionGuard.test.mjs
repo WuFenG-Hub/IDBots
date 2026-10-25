@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { createSurfCreatePinGuard, surfReceiptSeenActions, foldSurfReceiptsIntoSeenActions, recordSurfDeepRead, surfDeepReadReceiptSeenActions, surfSessionPartialStats, surfReceiptsFromChainWriteRecord } = await import('../dist-electron/main/libs/surfInteractionGuard.js');
+const { createSurfCreatePinGuard, surfReceiptSeenActions, foldSurfReceiptsIntoSeenActions, recordSurfDeepRead, surfDeepReadReceiptSeenActions, surfSessionPartialStats, surfReceiptsFromChainWriteRecord, surfDeepReadBudgetExceeded } = await import('../dist-electron/main/libs/surfInteractionGuard.js');
 
 const METABOT_ID = 7;
 
@@ -371,4 +371,24 @@ test('P1a: absent creationBudget keeps the legacy shared-pool semantics exactly'
   await assert.rejects(() => guard(METABOT_ID, likeData('pin-b'), {}), /interaction budget exhausted/);
   assert.equal(shared.writesUsed, 2, 'posts still count against the shared pool');
   assert.equal(shared.creationsUsed, undefined, 'no creation counter without an explicit pool');
+});
+
+test('deep-read budget: counts deduped reads on the marker and trips at the budget (nightly-token audit 2026-10-25)', () => {
+  const state = { interactionBudget: 10, kbBudget: 5, deepReadBudget: 3 };
+  assert.equal(surfDeepReadBudgetExceeded(state, 40), false, 'fresh marker is under budget');
+  recordSurfDeepRead(state, 'pin-a');
+  recordSurfDeepRead(state, 'pin-a');
+  recordSurfDeepRead(state, 'pin-b');
+  assert.equal(surfDeepReadBudgetExceeded(state, 40), false, 'duplicates do not count (2 unique < 3)');
+  recordSurfDeepRead(state, 'pin-c');
+  assert.equal(surfDeepReadBudgetExceeded(state, 40), true, 'third unique read reaches the budget');
+
+  // Legacy markers without deepReadBudget fall back to the caller default.
+  const legacy = { interactionBudget: 10, kbBudget: 5 };
+  for (let index = 0; index < 40; index += 1) recordSurfDeepRead(legacy, `pin-${index}`);
+  assert.equal(surfDeepReadBudgetExceeded(legacy, 41), false);
+  assert.equal(surfDeepReadBudgetExceeded(legacy, 40), true);
+
+  // A non-positive budget means "no ceiling" rather than "block everything".
+  assert.equal(surfDeepReadBudgetExceeded({ interactionBudget: 1, kbBudget: 1, deepReadBudget: 0 }, 0), false);
 });

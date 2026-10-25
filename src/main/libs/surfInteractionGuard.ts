@@ -28,6 +28,12 @@ export interface SurfSessionWriteState {
   creationsUsed?: number;
   /** metaweb-source KB adds so far this run (read by the KB wrapper). */
   kbAddsUsed?: number;
+  /**
+   * Hard ceiling of deduped deep reads for this run (surfDeepReadBudgetExceeded).
+   * Absent (legacy states) falls back to the caller-provided default, which
+   * the wrapper derives from the prompt guidance constant.
+   */
+  deepReadBudget?: number;
   /** targetPinId → strongest interaction rank published this run (dup guard). */
   interactions?: Record<string, number>;
   /**
@@ -113,6 +119,22 @@ export function recordSurfDeepRead(state: SurfSessionWriteState, pinId: string):
   if (!clean) return;
   const reads = state.readPinIds ?? (state.readPinIds = []);
   if (!reads.includes(clean)) reads.push(clean);
+}
+
+/**
+ * Deep-read budget check: the prompt's "at most ~N deep reads" guidance is
+ * advisory only, so a runaway model loop could read unboundedly (each read
+ * rides the resent transcript and grows every later round). The wrapper in
+ * coworkRunner consults this before every readPin/readPinsBatch call and
+ * hard-stops the run at the budget, mirroring the KB-add budget error.
+ */
+export function surfDeepReadBudgetExceeded(
+  state: SurfSessionWriteState,
+  defaultBudget: number,
+): boolean {
+  const budget = Math.max(0, Math.floor(Number(state.deepReadBudget ?? defaultBudget) || 0));
+  if (budget <= 0) return false;
+  return (state.readPinIds?.length ?? 0) >= budget;
 }
 
 /** The run's tracked deep reads as 'read'-class seen-ledger entries. */

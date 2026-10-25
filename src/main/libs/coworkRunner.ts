@@ -256,7 +256,8 @@ import {
 import { buildPostSimpleQaAgentTools } from './postSimpleQaAgentTools';
 import { buildLikePinAgentTools } from './likePinAgentTools';
 import { buildCommentPinAgentTools } from './commentPinAgentTools';
-import { createSurfCreatePinGuard, recordSurfDeepRead, type SurfSessionWriteState } from './surfInteractionGuard';
+import { createSurfCreatePinGuard, recordSurfDeepRead, surfDeepReadBudgetExceeded, type SurfSessionWriteState } from './surfInteractionGuard';
+import { SURF_DEEP_READ_GUIDANCE } from './surfPrompt';
 import {
   PRACTICE_INTERACT_LOCAL_INLINE_TOOLS,
   PRACTICE_READ_ONLY_INLINE_TOOLS,
@@ -13450,14 +13451,22 @@ export class CoworkRunner extends EventEmitter {
     control: MetawebLearningControl,
     marker: SurfSessionWriteState,
   ): MetawebLearningControl {
+    // Prompt guidance ("at most ~N deep reads") is advisory; this mirrors the
+    // KB-add budget so a runaway read loop hard-stops at the same number the
+    // prompt promises (nightly-token audit 2026-10-25).
+    const deepReadBudgetError = (): Error => new Error(
+      `Deep-read budget reached (${Math.floor(marker.deepReadBudget ?? SURF_DEEP_READ_GUIDANCE)} pins read this run). Stop reading and write the final \`\`\`json report now.`,
+    );
     return {
       search: (input) => control.search(input),
       readPin: async (pinId) => {
+        if (surfDeepReadBudgetExceeded(marker, SURF_DEEP_READ_GUIDANCE)) throw deepReadBudgetError();
         const pin = await control.readPin(pinId);
         if (pin?.text != null) recordSurfDeepRead(marker, pinId);
         return pin;
       },
       readPinsBatch: async (pinIds) => {
+        if (surfDeepReadBudgetExceeded(marker, SURF_DEEP_READ_GUIDANCE)) throw deepReadBudgetError();
         const entries = await control.readPinsBatch(pinIds);
         for (const [requestedId, entry] of Object.entries(entries)) {
           if (entry && !('error' in entry) && entry.text != null) {

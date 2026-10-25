@@ -350,7 +350,7 @@ import {
 import { MetawebStudyJobStore } from './metawebStudyJobStore';
 import { MetawebSurfStore } from './metawebSurfStore';
 import { SurfService, SURF_STATUS_CHANNEL } from './services/surfService';
-import { buildSurfSessionPrompt, parseSurfRunReport, SURF_KB_ADD_BUDGET } from './libs/surfPrompt';
+import { buildSurfSessionPrompt, parseSurfRunReport, SURF_DEEP_READ_GUIDANCE, SURF_KB_ADD_BUDGET } from './libs/surfPrompt';
 import { foldSurfReceiptsIntoSeenActions, surfReceiptSeenActions, surfSessionPartialStats, type SurfSessionWriteState } from './libs/surfInteractionGuard';
 import { isSurfBeforeDreamEnabled, SURF_BEFORE_DREAM_ENABLED_KEY } from './services/surfSettings';
 import { ChainContentHistoryStore } from './chainContentHistoryStore';
@@ -9188,6 +9188,10 @@ const getSurfService = (): SurfService => {
             ? 0
             : (context.briefing.creationBudget ?? context.briefing.interactionBudget),
           kbBudget: SURF_KB_ADD_BUDGET,
+          // Deep-read ceiling mirrors the prompt guidance (advisory) with a
+          // hard stop in the read wrapper — each read rides the resent
+          // transcript, so an unbounded loop compounds per round.
+          deepReadBudget: SURF_DEEP_READ_GUIDANCE,
         };
         try {
           const replyText = await runOrchestratorSkillTurn(getCoworkRunner(), coworkStore, {
@@ -9205,13 +9209,13 @@ const getSurfService = (): SurfService => {
             permissionMode: 'acceptEdits',
             disableMemoryUpdates: false,
             metawebSurfSession: writeState,
+            // The session is hidden from the list right below, so a generated
+            // title would never be displayed — static body, no title LLM call.
+            sessionTitle: `MetaWeb Surf ${new Date().toISOString().slice(0, 10)}`,
             // Live-run data (round 3): a first-surf backlog run takes ~30 min,
             // so the old 30-min watchdog was a coin-flip (one live run finished
             // 22s under it, the next timed out). Manual runs get 60 min; the
             // pre-dream path stays bounded tighter by its own 35-min race +
-            // The session is hidden from the list right below, so a generated
-            // title would never be displayed — static body, no title LLM call.
-            sessionTitle: `MetaWeb Surf ${new Date().toISOString().slice(0, 10)}`,
             // stopSession (see surfBeforeDream).
             skillTurnTimeoutMs: 60 * 60 * 1000,
             onSessionCreated: (sessionId) => {
