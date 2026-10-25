@@ -1088,6 +1088,7 @@ export class SqliteStore {
         metabot_id INTEGER,
         cowork_session_id TEXT,
         target_session_id TEXT,
+        memory_access TEXT,
         expires_at TEXT,
         notify_platforms_json TEXT NOT NULL DEFAULT '[]',
         next_run_at_ms INTEGER,

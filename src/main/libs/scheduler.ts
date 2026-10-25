@@ -1,6 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { broadcastToRenderers } from '../ipc/broadcast';
-import { ScheduledTaskStore, ScheduledTask, ScheduledTaskRun, Schedule, NotifyPlatform } from '../scheduledTaskStore';
+import {
+  ScheduledTaskStore,
+  ScheduledTask,
+  ScheduledTaskRun,
+  Schedule,
+  NotifyPlatform,
+  ScheduledTaskMemoryAccess,
+  SCHEDULED_TASK_MEMORY_ACCESS_LEVELS,
+} from '../scheduledTaskStore';
 import type { CoworkStore, DreamPracticeProposalRecord } from '../coworkStore';
 import type { CoworkRunner } from './coworkRunner';
 import { resolveSessionWorkingDirectory } from './botWorkspace';
@@ -17,6 +25,27 @@ type SubmitToSessionFailure = Extract<CoworkSubmitInputResult, { success: false 
  * off, where a boolean-literal discriminant does not narrow.
  */
 type SubmitToSessionResult = { success: boolean; error?: SubmitToSessionFailure['error'] };
+
+/**
+ * Memory-surface runner options for an ordinary scheduled task, derived from
+ * its per-task opt-in (SCHEDULED_TASK_MEMORY_ACCESS_LEVELS). `none` keeps the
+ * legacy blackout (disableMemoryUpdates blocks memory reads AND writes —
+ * the pre-opt-in behavior of every scheduled task); `read-only` mounts the
+ * recall tools without the mutating ones; `read-write` leaves both flags off.
+ * Unknown values fall back to 'none' so a hand-edited row cannot silently
+ * widen the surface.
+ */
+function resolveMemoryAccessRunnerOptions(memoryAccess: ScheduledTaskMemoryAccess | string | null | undefined): {
+  disableMemoryUpdates?: boolean;
+  memoryReadOnly?: boolean;
+} {
+  const normalized = SCHEDULED_TASK_MEMORY_ACCESS_LEVELS.includes(memoryAccess as ScheduledTaskMemoryAccess)
+    ? (memoryAccess as ScheduledTaskMemoryAccess)
+    : 'none';
+  if (normalized === 'read-only') return { memoryReadOnly: true };
+  if (normalized === 'read-write') return {};
+  return { disableMemoryUpdates: true };
+}
 
 interface SchedulerDeps {
   scheduledTaskStore: ScheduledTaskStore;
@@ -543,6 +572,11 @@ export class Scheduler {
       }, watchdogMs);
     }
     try {
+      // Memory-surface selection (2026-10-25): the practice policy below keeps
+      // precedence — a practice run always reads but never writes memory,
+      // whatever the task declared. Ordinary tasks map their per-task opt-in
+      // via resolveMemoryAccessRunnerOptions, whose default ('none') is the
+      // legacy blackout every scheduled task had before the opt-in existed.
       await runner.startSession(sessionId, fullPrompt, {
         skipInitialUserMessage: true,
         ...(practiceProposal
@@ -551,7 +585,7 @@ export class Scheduler {
               autoApprove: true,
               practiceSession: createPracticeSessionState(practiceProposal.riskClass),
             }
-          : { disableMemoryUpdates: true }),
+          : resolveMemoryAccessRunnerOptions(task.memoryAccess)),
         confirmationMode: 'text',
       });
       if (practiceWatchdogFired) {

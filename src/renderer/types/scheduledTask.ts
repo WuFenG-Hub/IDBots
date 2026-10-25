@@ -38,6 +38,10 @@ export interface TaskState {
 // IM 通知平台类型
 export type NotifyPlatform = 'dingtalk' | 'feishu' | 'telegram' | 'discord';
 
+// Per-task memory-surface opt-in (mirrors the main-process
+// SCHEDULED_TASK_MEMORY_ACCESS_LEVELS; 'none' = legacy full blackout).
+export type ScheduledTaskMemoryAccess = 'none' | 'read-only' | 'read-write';
+
 // 定时任务
 export interface ScheduledTask {
   id: string;
@@ -52,6 +56,8 @@ export interface ScheduledTask {
   metabotId: number | null;
   coworkSessionId: string | null;
   targetSessionId: string | null; // bound cowork session id; null = start a new session each run
+  /** Memory-surface opt-in for the task's session; 'none' = legacy blackout. */
+  memoryAccess: ScheduledTaskMemoryAccess;
   expiresAt: string | null; // ISO 8601 日期（精确到天），null 表示不过期
   notifyPlatforms: NotifyPlatform[]; // 任务完成后通知的 IM 平台
   // Lifecycle provenance & death clause (null origin = legacy row)
@@ -103,6 +109,8 @@ export interface ScheduledTaskInput {
   executionMode: 'auto' | 'local' | 'sandbox';
   metabotId?: number | null;
   targetSessionId?: string | null; // bound cowork session id; null/undefined = start a new session each run
+  /** Optional; absent/invalid values store as 'none' (legacy blackout). */
+  memoryAccess?: ScheduledTaskMemoryAccess;
   expiresAt: string | null; // ISO 8601 日期（精确到天），null 表示不过期
   notifyPlatforms: NotifyPlatform[]; // 任务完成后通知的 IM 平台
   enabled: boolean;

@@ -11394,6 +11394,20 @@ export class CoworkRunner extends EventEmitter {
         // non-quota no-alternative death keeps the configuration wording. The
         // raw 429/limit body stays in the ERROR log line above either way.
         const quotaTerminalDeath = ladderNoTargetKind === 'no-alternative' && isQuotaDshTurnError(outcome);
+        // Transport-class terminal death (ledger #25, 2026-10-25): a
+        // no-alternative settle whose terminal outcome is environmental
+        // (TRANSPORT/TIMEOUT/RATE_LIMIT/SERVER/EMPTY_RESPONSE — the
+        // TRANSIENT_TURN_ERROR_CODES set, after the resume budget ran out)
+        // is NOT a configuration hole. The old copy read "未配置可用模型 …
+        // 这是配置错误而非临时限流" for a dead network too, sending the user
+        // hunting for a misconfiguration during an outage (peer source
+        // evidence 2026-10-22: the template stamped 配置错误 first and only
+        // appended the real code afterwards). Transport deaths get their own
+        // copy naming the environmental failure and carrying the code; only
+        // a genuine config hole keeps the configuration wording.
+        const transportTerminalDeath = ladderNoTargetKind === 'no-alternative'
+          && !quotaTerminalDeath
+          && isTransientDshTurnError(outcome);
         // REQ-A-25: the relay signals an exhausted identity quota with TWO
         // machine codes — free_quota_exhausted (never had purchased quota)
         // and the new C4 quota_exhausted (purchased pool used up). Match
@@ -11403,7 +11417,7 @@ export class CoworkRunner extends EventEmitter {
         const relayQuotaExhausted = relayQuotaCode !== null;
         const freeRelayQuotaDeath = quotaTerminalDeath
           && (isFreeQuotaProvider(lastAttemptRoute.provider) || relayQuotaExhausted);
-        const noModelConfiguredNotice = ladderNoTargetKind === 'no-alternative' && !quotaTerminalDeath
+        const noModelConfiguredNotice = ladderNoTargetKind === 'no-alternative' && !quotaTerminalDeath && !transportTerminalDeath
           ? ` ${tApp(
               `（未配置可用模型：会话绑定的模型已不可用，备用模型与当前默认降级链上没有任何有效目标——这是配置错误而非临时限流。请到 设置 > 模型 配置一个可用的默认模型，或为现有供应商充值。）`,
               ` (No usable model configured: the session's bound model is unavailable and neither the bot fallback nor the current-default ladder has a valid target — this is a configuration error, not a transient rate limit. Configure a usable default model in Settings > Models, or top up the provider.)`
@@ -11483,7 +11497,12 @@ export class CoworkRunner extends EventEmitter {
                       `模型供应商 ${lastAttemptRoute.provider} 的 ${lastAttemptRoute.model} 额度不足，本轮已终止（最后错误码 ${outcome.error?.code ?? 'QUOTA'}）`,
                       `Provider ${lastAttemptRoute.provider} model ${lastAttemptRoute.model} is out of credits and the turn was aborted (last error code ${outcome.error?.code ?? 'QUOTA'})`
                     ))
-              : `未配置可用模型（配置错误：绑定模型与备用/默认降级链均无效；最后错误码 ${outcome.error?.code ?? 'UNKNOWN'}）`)
+              : transportTerminalDeath
+                ? tApp(
+                    `模型请求因网络或供应商暂时不可达而终止（传输类失败；网络或供应商恢复后重发即可。最后错误码 ${outcome.error?.code ?? 'TRANSPORT'}）`,
+                    `The model request was terminated because the network or provider was unreachable (transport-class failure; resend once the network or provider has recovered. Last error code ${outcome.error?.code ?? 'TRANSPORT'})`
+                  )
+                : `未配置可用模型（配置错误：绑定模型与备用/默认降级链均无效；最后错误码 ${outcome.error?.code ?? 'UNKNOWN'}）`)
           : failureDetail;
         this.handleError(
           sessionId,

@@ -749,3 +749,6 @@ blob-report/
 !tests/motionVideoArenaStatic.test.mjs
 !tests/motionVideoArenaBridge.test.mjs
 !tests/motionVideoArenaHostSim.html
+
+# Scheduled-task memory-access opt-in
+!tests/scheduledTaskMemoryAccess.test.mjs

@@ -47,6 +47,8 @@ export interface ScheduledTask {
   metabotId: number | null;
   coworkSessionId: string | null;
   targetSessionId: string | null;
+  /** Memory-surface opt-in for the task's session; 'none' = legacy blackout. */
+  memoryAccess: ScheduledTaskMemoryAccess;
   expiresAt: string | null;
   notifyPlatforms: NotifyPlatform[];
   /**
@@ -97,6 +99,22 @@ export type ScheduledTaskSkipReason = (typeof SCHEDULED_TASK_SKIP_REASONS)[numbe
  */
 export const DEFAULT_AGENT_MAX_FIRES = 50;
 
+/**
+ * Per-task opt-in for the session memory surface (2026-10-25): what the
+ * memory-family tools of a task's cowork session may do.
+ * - `none`: the legacy default — full blackout, no memory reads or writes
+ *   (exactly the pre-opt-in behavior of every scheduled task).
+ * - `read-only`: the recall/injection tools mount, mutating tools do not.
+ * - `read-write`: recall, injection, and turn-end/mutating memory updates.
+ */
+export const SCHEDULED_TASK_MEMORY_ACCESS_LEVELS = [
+  'none',
+  'read-only',
+  'read-write',
+] as const;
+
+export type ScheduledTaskMemoryAccess = (typeof SCHEDULED_TASK_MEMORY_ACCESS_LEVELS)[number];
+
 export interface ScheduledTaskRun {
   id: string;
   taskId: string;
@@ -121,6 +139,8 @@ export interface ScheduledTaskInput {
   executionMode: 'auto' | 'local' | 'sandbox';
   metabotId?: number | null;
   targetSessionId?: string | null;
+  /** Optional; absent/invalid values store as 'none' (legacy blackout). */
+  memoryAccess?: ScheduledTaskMemoryAccess;
   expiresAt: string | null;
   notifyPlatforms: NotifyPlatform[];
   enabled: boolean;
@@ -146,6 +166,7 @@ interface TaskRow {
   metabot_id: number | null;
   cowork_session_id: string | null;
   target_session_id: string | null;
+  memory_access: string | null;
   expires_at: string | null;
   origin: string | null;
   origin_session_id: string | null;
@@ -187,6 +208,18 @@ function normalizeTargetSessionId(value: string | null | undefined): string | nu
   return trimmed ? trimmed : null;
 }
 
+/**
+ * Every row written before the memoryAccess opt-in has NULL here, and any
+ * unknown value is treated the same way: they all normalize to 'none', the
+ * legacy full-blackout default. Keeps upgraded databases byte-compatible with
+ * the pre-opt-in behavior until the owner opts a task in.
+ */
+function normalizeMemoryAccess(value: string | null | undefined): ScheduledTaskMemoryAccess {
+  return SCHEDULED_TASK_MEMORY_ACCESS_LEVELS.includes(value as ScheduledTaskMemoryAccess)
+    ? (value as ScheduledTaskMemoryAccess)
+    : 'none';
+}
+
 export class ScheduledTaskStore {
   private db: Database;
   private saveDb: () => void;
@@ -199,6 +232,7 @@ export class ScheduledTaskStore {
     this.ensureRunSkipReasonColumn();
     this.ensureMigrationColumns();
     this.ensureLifecycleColumns();
+    this.ensureMemoryAccessColumn();
     this.unmigrateLegacySdkCronTasks();
     this.resetStuckRunningTasks();
   }
@@ -282,6 +316,27 @@ export class ScheduledTaskStore {
       }
     } catch (error) {
       console.warn('Failed to ensure scheduled task target session column:', error);
+    }
+  }
+
+  /**
+   * `memory_access` carries the per-task memory-surface opt-in (see
+   * SCHEDULED_TASK_MEMORY_ACCESS_LEVELS). Legacy rows keep NULL and read as
+   * 'none' via normalizeMemoryAccess. Idempotent: repeated startup never errors.
+   */
+  private ensureMemoryAccessColumn(): void {
+    try {
+      if (!this.tableExists('scheduled_tasks')) return;
+
+      const columnsResult = this.db.exec('PRAGMA table_info(scheduled_tasks);');
+      const columns = columnsResult[0]?.values.map((row) => String(row[1])) ?? [];
+
+      if (!columns.includes('memory_access')) {
+        this.db.run('ALTER TABLE scheduled_tasks ADD COLUMN memory_access TEXT');
+        this.saveDb();
+      }
+    } catch (error) {
+      console.warn('Failed to ensure scheduled task memory access column:', error);
     }
   }
 
@@ -510,10 +565,10 @@ export class ScheduledTaskStore {
     this.db.run(`
       INSERT INTO scheduled_tasks
         (id, name, description, enabled, schedule_json, prompt,
-         working_directory, system_prompt, execution_mode, metabot_id, cowork_session_id, target_session_id, expires_at,
+         working_directory, system_prompt, execution_mode, metabot_id, cowork_session_id, target_session_id, memory_access, expires_at,
          origin, origin_session_id, origin_context, exit_condition, max_fires, fire_count,
          notify_platforms_json, next_run_at_ms, consecutive_errors, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 0, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 0, ?, ?)
     `, [
       id, input.name, input.description,
       input.enabled ? 1 : 0,
@@ -522,6 +577,7 @@ export class ScheduledTaskStore {
       input.workingDirectory, input.systemPrompt, resolveCoworkExecutionMode(input.executionMode),
       input.metabotId ?? null,
       normalizeTargetSessionId(input.targetSessionId),
+      normalizeMemoryAccess(input.memoryAccess),
       input.expiresAt ?? null,
       input.origin ?? null,
       input.originSessionId ?? null,
@@ -556,6 +612,11 @@ export class ScheduledTaskStore {
     const targetSessionId = input.targetSessionId !== undefined
       ? normalizeTargetSessionId(input.targetSessionId)
       : existing.targetSessionId;
+    // Only an explicitly provided value rewrites the opt-in; absent keeps the
+    // stored one, and an invalid provided value normalizes to 'none'.
+    const memoryAccess = input.memoryAccess !== undefined
+      ? normalizeMemoryAccess(input.memoryAccess)
+      : existing.memoryAccess;
     const expiresAt = input.expiresAt !== undefined ? input.expiresAt : existing.expiresAt;
     const notifyPlatforms = input.notifyPlatforms !== undefined ? input.notifyPlatforms : existing.notifyPlatforms;
     const exitCondition = input.exitCondition !== undefined ? input.exitCondition : existing.exitCondition;
@@ -580,7 +641,7 @@ export class ScheduledTaskStore {
       SET name = ?, description = ?, enabled = ?, schedule_json = ?,
           prompt = ?, working_directory = ?, system_prompt = ?,
           execution_mode = ?, metabot_id = ?, expires_at = ?, notify_platforms_json = ?,
-          next_run_at_ms = ?, cowork_session_id = ?, target_session_id = ?,
+          next_run_at_ms = ?, cowork_session_id = ?, target_session_id = ?, memory_access = ?,
           exit_condition = ?, max_fires = ?, fire_count = ?, updated_at = ?
       WHERE id = ?
     `, [
@@ -595,6 +656,7 @@ export class ScheduledTaskStore {
       nextRunAtMs,
       shouldResetSessionBindings ? null : existing.coworkSessionId,
       shouldResetSessionBindings ? null : targetSessionId,
+      memoryAccess,
       exitCondition,
       maxFires,
       fireCount,
@@ -954,6 +1016,7 @@ export class ScheduledTaskStore {
       metabotId: row.metabot_id ?? null,
       coworkSessionId: row.cowork_session_id ?? null,
       targetSessionId: row.target_session_id ?? null,
+      memoryAccess: normalizeMemoryAccess(row.memory_access),
       expiresAt: row.expires_at,
       origin: (row.origin as TaskOrigin | null) ?? null,
       originSessionId: row.origin_session_id ?? null,

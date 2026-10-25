@@ -9,6 +9,7 @@ import {
 } from './modelRequestOptions';
 import { buildOpenCodeGoSessionHeaders } from './opencodeGatewayHeaders';
 import { resolveOpenCodeGoApiFormat } from './opencodeGoProtocol';
+import { buildOpenAIResponsesUrl } from './openaiResponsesUrl';
 
 const CONNECTIVITY_TEST_TOKEN_BUDGET = 64;
 
@@ -94,24 +95,11 @@ export function buildOpenAICompatibleChatCompletionsUrl(baseUrl: string, provide
   return `${normalized}/v1/chat/completions`;
 }
 
-export function buildOpenAIResponsesUrl(baseUrl: string, provider?: string): string {
-  let normalized = baseUrl.trim().replace(/\/+$/, '');
-  // DeepSeek's Responses endpoint lives at the host root (`/responses`) without a
-  // version prefix, matching https://api-docs.deepseek.com/zh-cn/guides/responses_api.
-  // Strip a trailing /anthropic or /v1 so a base URL like
-  // https://api.deepseek.com/anthropic resolves to the root responses path.
-  const isDeepSeekHost = normalized.toLowerCase().includes('api.deepseek.com')
-    || provider?.toLowerCase() === 'deepseek';
-  if (isDeepSeekHost) {
-    normalized = normalized.replace(/\/anthropic$/, '').replace(/\/v1$/, '');
-    if (!normalized) return '/responses';
-    return normalized.endsWith('/responses') ? normalized : `${normalized}/responses`;
-  }
-  if (!normalized) return '/v1/responses';
-  if (normalized.endsWith('/responses')) return normalized;
-  if (normalized.endsWith('/v1')) return `${normalized}/responses`;
-  return `${normalized}/v1/responses`;
-}
+// The Responses URL routing rule (DeepSeek host-root + versioned-base guard)
+// lives in the shared openaiResponsesUrl module so the renderer's three
+// responses paths stay byte-identical by construction; re-exported here for
+// existing importers.
+export { buildOpenAIResponsesUrl };
 
 function shouldUseOpenAIResponsesForProvider(provider: string, modelId?: string): boolean {
   // OpenAI always uses the Responses API.

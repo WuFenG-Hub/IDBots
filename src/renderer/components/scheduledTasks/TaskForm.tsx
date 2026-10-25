@@ -3,7 +3,7 @@ import { useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { scheduledTaskService } from '../../services/scheduledTask';
 import { i18nService } from '../../services/i18n';
-import type { ScheduledTask, ScheduledTaskInput, NotifyPlatform } from '../../types/scheduledTask';
+import type { ScheduledTask, ScheduledTaskInput, ScheduledTaskMemoryAccess, NotifyPlatform } from '../../types/scheduledTask';
 import type { Metabot } from '../../types/metabot';
 import {
   buildScheduleFromFormState,
@@ -24,6 +24,8 @@ type SessionMode = 'new' | 'current' | 'custom';
 
 const NOTIFY_PLATFORMS: NotifyPlatform[] = ['dingtalk', 'feishu', 'telegram', 'discord'];
 const WEEKDAYS = [0, 1, 2, 3, 4, 5, 6] as const; // 0=Sunday
+
+const MEMORY_ACCESS_OPTIONS: ScheduledTaskMemoryAccess[] = ['none', 'read-only', 'read-write'];
 
 const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) => {
   const coworkConfig = useSelector((state: RootState) => state.cowork.config);
@@ -68,6 +70,9 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
   const [customSessionId, setCustomSessionId] = useState(
     initialSessionMode === 'custom' ? boundSessionId ?? '' : ''
   );
+  // Memory-surface opt-in; defaults to the legacy blackout for new tasks and
+  // shows the stored value when editing.
+  const [memoryAccess, setMemoryAccess] = useState<ScheduledTaskMemoryAccess>(task?.memoryAccess ?? 'none');
   const [notifyPlatforms, setNotifyPlatforms] = useState<NotifyPlatform[]>(task?.notifyPlatforms ?? []);
   const [notifyDropdownOpen, setNotifyDropdownOpen] = useState(false);
   const notifyDropdownRef = useRef<HTMLDivElement>(null);
@@ -178,6 +183,7 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
         executionMode: 'local',
         metabotId: selectedMetabotId,
         targetSessionId: resolveTargetSessionId(),
+        memoryAccess,
         expiresAt: expiresAt || null,
         notifyPlatforms,
         enabled: task?.enabled ?? true,
@@ -220,6 +226,12 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
     4: 'scheduledTasksFormWeekThu',
     5: 'scheduledTasksFormWeekFri',
     6: 'scheduledTasksFormWeekSat',
+  };
+
+  const memoryAccessOptionKeys: Record<ScheduledTaskMemoryAccess, string> = {
+    'none': 'scheduledTasksFormMemoryAccessNone',
+    'read-only': 'scheduledTasksFormMemoryAccessReadOnly',
+    'read-write': 'scheduledTasksFormMemoryAccessReadWrite',
   };
 
   const inputClass = 'w-full rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-white px-3 py-2 text-sm dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent/50';
@@ -312,6 +324,25 @@ const TaskForm: React.FC<TaskFormProps> = ({ mode, task, onCancel, onSaved }) =>
             </p>
           </>
         )}
+      </div>
+
+      {/* Memory access */}
+      <div>
+        <label className={labelClass}>{i18nService.t('scheduledTasksFormMemoryAccess')}</label>
+        <select
+          value={memoryAccess}
+          onChange={(e) => setMemoryAccess(e.target.value as ScheduledTaskMemoryAccess)}
+          className={inputClass}
+        >
+          {MEMORY_ACCESS_OPTIONS.map((option) => (
+            <option key={option} value={option}>
+              {i18nService.t(memoryAccessOptionKeys[option])}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-1">
+          {i18nService.t('scheduledTasksFormMemoryAccessHint')}
+        </p>
       </div>
 
       {/* Schedule */}

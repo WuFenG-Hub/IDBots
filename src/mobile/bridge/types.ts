@@ -77,7 +77,13 @@ export type CoworkMessageView = CoworkSessionDetail['messages'][number];
  * namespace is typed as `any`. Importing keeps the mock aligned with the
  * create/update contract the desktop TaskForm builds.
  */
-export type { ScheduledTask, ScheduledTaskInput, ScheduledTaskRun, Schedule } from '../../renderer/types/scheduledTask';
+export type {
+  ScheduledTask,
+  ScheduledTaskInput,
+  ScheduledTaskMemoryAccess,
+  ScheduledTaskRun,
+  Schedule,
+} from '../../renderer/types/scheduledTask';
 
 /**
  * The mock's stored order: the C4 `createOrder` payload plus its own

@@ -30,6 +30,15 @@ export interface OutgoingGroupSendRecord {
   at: number;
   /** Which choke point recorded it ('transport' | 'group_chat_tool' | custom). */
   origin: string;
+  /**
+   * FIX-B/F-4 (gt#6, 2026-10-24): the cowork session that requested the send,
+   * when the send came through the group_chat TOOL ('group_chat_tool' origin).
+   * The dispatch layer uses it to tell the task's own daemon-chair session
+   * (legitimate mid-turn delivery, Task #83) from any OTHER session sending
+   * under the chair bot's wallet (the Twin-session forged-directive bypass).
+   * Undefined for transport-origin (daemon-authored) sends.
+   */
+  sessionId?: string;
 }
 
 const LEDGER_CAP = 500;
@@ -54,6 +63,7 @@ export function recordOutgoingGroupSend(entry: {
   pinId: string;
   at?: number;
   origin?: string;
+  sessionId?: string;
 }): void {
   try {
     records.push({
@@ -62,11 +72,25 @@ export function recordOutgoingGroupSend(entry: {
       pinId: entry.pinId,
       at: entry.at ?? Date.now(),
       origin: entry.origin ?? 'transport',
+      sessionId: entry.sessionId,
     });
     prune();
   } catch {
     // A ledger failure must never break the send path it observes.
   }
+}
+
+/**
+ * FIX-A/F-5 (gt#6, 2026-10-24): look up the ledger record for one on-chain
+ * group pin id. Returns undefined when this process never sent that pin
+ * (message from another machine, or sent before a restart — the ledger is
+ * deliberately in-memory). Callers must treat `undefined` as "origin
+ * unknown", never as "forged".
+ */
+export function findOutgoingGroupSendByPin(pinId: string): OutgoingGroupSendRecord | undefined {
+  const normalized = String(pinId ?? '').trim().toLowerCase();
+  if (!normalized) return undefined;
+  return records.find((record) => record.pinId.toLowerCase() === normalized);
 }
 
 /**
