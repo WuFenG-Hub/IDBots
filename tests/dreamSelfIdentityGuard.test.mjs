@@ -204,3 +204,54 @@ test('dream run updates the identity normally when the screen passes', async () 
     cleanup();
   }
 });
+
+test('self_identity repair is a compact targeted call that patches only the identity (no full-prompt resend)', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  const coworkStore = createCoworkStore(db);
+  const dreamStore = new DreamStore(db, () => {});
+  const session = coworkStore.createSession('聊天', '/tmp/a', '', 'local', [], 5);
+  db.run(
+    'INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ['u1', session.id, 'user', '今天怎么样', '{}', DAY_START + 1000, 1]
+  );
+  db.run(
+    'INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ['a1', session.id, 'assistant', '挺好的', '{}', DAY_START + 2000, 2]
+  );
+
+  const calls = [];
+  const service = new DreamService({
+    coworkStore,
+    metabotStore: metabotStoreStub(),
+    dreamStore,
+    llmTimeoutMs: 5000,
+    now: () => new Date(2026, 7, 9, 3, 0),
+    performChat: async (systemPrompt, userMessage, llmId, options) => {
+      calls.push({ systemPrompt, userMessage, llmId, options });
+      // Synthesis: a too-short identity triggers the repair; the repair itself
+      // answers with plain prose, as the compact request asks.
+      return calls.length === 1 ? dreamJson({ self_identity: '太短的身份。' }) : LONG_IDENTITY;
+    },
+  });
+  try {
+    await service.runNow(5, DAY);
+    const synthesis = calls[0];
+    const repair = calls.find((call, index) => index > 0 && /self_identity/.test(call.userMessage));
+    assert.ok(repair, 'a repair call was made');
+    assert.ok(synthesis.userMessage.includes('今天怎么样'), 'synthesis carried the day activity');
+    assert.ok(!repair.userMessage.includes('今天怎么样'), 'repair does NOT resend the day activity');
+    assert.ok(repair.userMessage.length < 400, `repair prompt is compact (${repair.userMessage.length} chars)`);
+    assert.equal(repair.systemPrompt, synthesis.systemPrompt, 'repair keeps the persona system prompt');
+    assert.equal(repair.options.maxTokens, 1024, 'repair uses a small output budget');
+    const identities = coworkStore.listUserMemories({
+      metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', usageClass: 'self_identity', status: 'all',
+    });
+    assert.equal(identities.length, 1);
+    assert.equal(identities[0].text, LONG_IDENTITY, 'repaired identity patched into the kept dream output');
+    const summaries = dreamStore.listDailySummaries(5, 5, 0);
+    assert.equal(summaries.length, 1, 'the synthesis output itself was kept, not regenerated');
+    assert.equal(summaries[0].summaryText, '今天一切顺利。');
+  } finally {
+    cleanup();
+  }
+});

@@ -42,6 +42,8 @@ try {
   } = await import('../dist-electron/main/libs/dreamPrompt.js'));
 }
 
+const { extractSelfIdentityFromRetry } = await import('../dist-electron/main/libs/dreamPrompt.js');
+
 const dateStr = (d) => {
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
@@ -176,6 +178,30 @@ test('validateSelfIdentity enforces the 200 non-whitespace char minimum', () => 
   assert.equal(validateSelfIdentity('一'.repeat(200)).valid, true);
   assert.equal(validateSelfIdentity(`${'一'.repeat(100)} \n ${'二'.repeat(100)}`).valid, true);
   assert.equal(validateSelfIdentity(null).valid, false);
+});
+
+test('extractSelfIdentityFromRetry resolves prose, fenced, bare-JSON and full-dream-JSON replies to the identity text', () => {
+  const identity = `我是一个认真严谨的 MetaBot。${'我先验证再交付。'.repeat(30)}`;
+  // Plain prose (the requested shape), with stray quotes stripped.
+  assert.equal(extractSelfIdentityFromRetry(`  ${identity}  `), identity);
+  assert.equal(extractSelfIdentityFromRetry(`「${identity}」`), identity);
+  // Fenced prose.
+  assert.equal(extractSelfIdentityFromRetry(`\`\`\`\n${identity}\n\`\`\``), identity);
+  // Bare JSON object carrying only the field.
+  assert.equal(extractSelfIdentityFromRetry(JSON.stringify({ self_identity: identity })), identity);
+  assert.equal(extractSelfIdentityFromRetry(`\`\`\`json\n${JSON.stringify({ selfIdentity: identity })}\n\`\`\``), identity);
+  // The full dream JSON (a model ignoring the compact request) must yield the
+  // field, never the whole blob.
+  const full = JSON.stringify({
+    daily_summary: '今天一切顺利。', sections: {}, work_reviews: [], important_memories: [],
+    value_lessons: [], self_identity: identity, capability_learnings: [],
+  });
+  assert.equal(extractSelfIdentityFromRetry(full), identity);
+  // Nothing usable.
+  assert.equal(extractSelfIdentityFromRetry(''), null);
+  assert.equal(extractSelfIdentityFromRetry('   '), null);
+  assert.equal(extractSelfIdentityFromRetry('{"daily_summary":"x"}'), null);
+  assert.equal(extractSelfIdentityFromRetry('{not json'), null);
 });
 
 test('parseDreamOutput parses clean, fenced and prose-wrapped JSON', () => {
