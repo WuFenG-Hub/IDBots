@@ -317,3 +317,90 @@ test('refreshNowIfStale refreshes when the snapshot is missing or at least 10s o
   assert.equal(service.getLastRefreshAtMs(), nowMs);
   service.dispose();
 });
+
+// ── issue #24: online-status poll backoff (ladder + circuit breaker) ─────────
+
+const { PollBackoffController } = require('../dist-electron/main/services/pollBackoffController.js');
+
+const makeBackoffDiscovery = (failModeRef) => {
+  const clock = { value: 1_790_000_000_000 };
+  const logs = [];
+  const presence = {
+    statusCalls: 0,
+    async fetchOnlineStatus(globalMetaIds) {
+      this.statusCalls += 1;
+      if (failModeRef.value) throw new Error(failModeRef.value);
+      return {
+        total: globalMetaIds.length,
+        onlineCount: 0,
+        list: globalMetaIds.map((id) => ({
+          globalMetaId: id, isOnline: false, lastSeenAt: 0, lastSeenAgoSeconds: 0, deviceCount: 0,
+        })),
+      };
+    },
+  };
+  const backoff = new PollBackoffController({
+    name: 'test-provider-discovery',
+    baseMs: 10_000,
+    now: () => clock.value,
+    random: () => 0.5,
+    emitLog: (line) => logs.push(line),
+  });
+  const { ProviderDiscoveryService } = loadProviderDiscoveryService();
+  const service = new ProviderDiscoveryService({ presence, now: () => clock.value, backoff });
+  const getServices = () => [
+    { providerGlobalMetaId: 'idq1providerissue24', providerAddress: 'mvc-x', serviceName: 'svc' },
+  ];
+  return { service, presence, backoff, clock, logs, getServices };
+};
+
+test('issue #24: online-status failures escalate the ladder, open the circuit, and recover via a probe', async () => {
+  const failMode = { value: 'timeout' };
+  const h = makeBackoffDiscovery(failMode);
+  try {
+    // install the service list (the immediate 'initial' tick is failure #1)
+    h.service.startPolling(h.getServices);
+    await h.service.waitForRefresh();
+    const delays = [h.backoff.nextDelayMs()];
+    h.clock.value += h.backoff.nextDelayMs() + 1;
+    for (let i = 2; i <= 4; i += 1) {
+      await h.service.refreshNow();
+      delays.push(h.backoff.nextDelayMs());
+      h.clock.value += h.backoff.nextDelayMs() + 1;
+    }
+    assert.deepEqual(delays, [20_000, 40_000, 80_000, 160_000], 'base 10s ladder: 20/40/80/160s');
+    const backingOff = h.logs.filter((l) => l.includes('[PollBackoff:test-provider-discovery]') && l.includes('backing off after failure #'));
+    assert.equal(backingOff.length, 4, 'each failing refresh logs a backing-off line');
+
+    // 5th failure opens the circuit (default threshold 5)
+    await h.service.refreshNow();
+    await h.service.waitForRefresh();
+    assert.equal(h.backoff.getState().circuit, 'open');
+    assert.ok(h.logs.some((l) => l.includes('circuit OPEN')), 'circuit OPEN logged');
+
+    // past the cooldown the controller allows exactly one half-open probe;
+    // the outage ends right before it, so the probe succeeds and closes
+    failMode.value = null;
+    h.clock.value += 600_000;
+    assert.equal(h.backoff.ready(), true);
+    assert.equal(h.backoff.getState().circuit, 'half-open');
+    await h.service.refreshNow();
+    assert.equal(h.backoff.getState().circuit, 'closed');
+    assert.equal(h.backoff.nextDelayMs(), 10_000, 'base cadence restored');
+    assert.ok(h.logs.some((l) => l.includes('recovered — resuming normal cadence')), 'recovery logged');
+  } finally {
+    h.service.dispose();
+  }
+});
+
+test('issue #24: a refresh with no provider ids records nothing (no network attempted)', async () => {
+  const failMode = { value: 'timeout' };
+  const h = makeBackoffDiscovery(failMode);
+  try {
+    await h.service.refreshNow();
+    assert.equal(h.backoff.getState().consecutiveFailures, 0, 'no ids -> no attempt -> no failure');
+    assert.equal(h.presence.statusCalls, 0);
+  } finally {
+    h.service.dispose();
+  }
+});

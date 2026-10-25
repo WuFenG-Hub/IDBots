@@ -374,6 +374,7 @@ import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationB
 import { LongTermTaskStore } from './longTermTaskStore';
 import { MetaTaskProjectionStore } from './services/metatask/projectionStore';
 import { MetaTaskRefresher } from './services/metatask/refresher';
+import { PollBackoffController } from './services/pollBackoffController';
 import { estimateMetaTaskShares } from './services/metatask/estimate';
 import { MetaTaskWatchService } from './services/metatask/watchService';
 import { collectPreferenceEvents } from './services/preference/collector';
@@ -4032,7 +4033,11 @@ const startSqliteDaemons = (): void => {
     intervalMs: 5 * 60_000,
     jitterMs: 45_000,
     run: async () => {
-      await getMetaTaskRefresher().refreshOnce('heartbeat-refresh', { bypassMinInterval: true });
+      const refresher = getMetaTaskRefresher();
+      // Issue #24: skip the chain sweep while the backoff ladder/circuit
+      // holds (outage periods) — the gate re-arms after the cooldown.
+      if (!refresher.refreshBackoffReady()) return;
+      await refresher.refreshOnce('heartbeat-refresh', { bypassMinInterval: true });
     },
   });
   getHeartbeatService().registerHandler({
@@ -8385,11 +8390,31 @@ let metaTaskRefresher: MetaTaskRefresher | null = null;
  * of truth; the local projection store is a rebuildable cache. Board reads
  * trigger a background sweep when the cache is stale (10 min).
  */
+let metaTaskRefreshBackoff: PollBackoffController | null = null;
+/**
+ * Issue #24 retry hygiene for the MetaTask pin-walk heartbeat: failed chain
+ * sweeps escalate the retry ladder (10/20/40/80 min from the 5 min cadence,
+ * capped) and, past 5 consecutive failures, open the circuit for a 10 min
+ * cooldown before a half-open probe. Transitions log with the fixed
+ * `[PollBackoff:metatask-refresh]` prefix.
+ */
+const getMetaTaskRefreshBackoff = (): PollBackoffController => {
+  if (!metaTaskRefreshBackoff) {
+    metaTaskRefreshBackoff = new PollBackoffController({
+      name: 'metatask-refresh',
+      baseMs: 5 * 60_000,
+      emitLog: (line) => console.log(line),
+    });
+  }
+  return metaTaskRefreshBackoff;
+};
+
 const getMetaTaskRefresher = () => {
   if (!metaTaskRefresher) {
     metaTaskRefresher = new MetaTaskRefresher({
       store: () => getMetaTaskProjectionStore(),
       rosterMetaIds: metaTaskLocalRosterMetaIds,
+      backoff: getMetaTaskRefreshBackoff(),
       onUpdated: (payload) => {
         broadcastToRenderers('metatask:update', payload);
       },

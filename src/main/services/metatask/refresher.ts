@@ -3,6 +3,7 @@ import { nextTimeDeadlineMs } from './deadlines';
 import { replayMetaTask, taskDirtyKey, taskEventSet, type MetaTaskTaskEventSet } from './engine';
 import type { MetaTaskBoard, MetaTaskTaskProjection } from './types';
 import type { MetaTaskProjectionStore } from './projectionStore';
+import type { PollBackoffController } from '../pollBackoffController';
 
 export interface MetaTaskRefreshResult {
   ok: boolean;
@@ -33,6 +34,12 @@ export interface MetaTaskRefresherOptions {
   now?: () => number;
   /** Push hook: called with the bumped seq after every successful refresh. */
   onUpdated?: (payload: { seq: number; reason: string }) => void;
+  /**
+   * Issue #24 retry hygiene for the periodic heartbeat sweep: ok:false sweeps
+   * record failures (escalating ladder + circuit breaker) and the heartbeat
+   * consults refreshBackoffReady() before each sweep. Absent = no gating.
+   */
+  backoff?: PollBackoffController;
 }
 
 /**
@@ -105,6 +112,16 @@ export class MetaTaskRefresher {
     this.trailing = null;
   }
 
+  /**
+   * Issue #24: backoff gate for the periodic heartbeat sweep — false while
+   * the shared controller has the ladder delay pending or the circuit open
+   * (asking past the cooldown flips the circuit to half-open: one probe).
+   * Absent controller = always ready (no gating).
+   */
+  refreshBackoffReady(): boolean {
+    return this.options.backoff ? this.options.backoff.ready() : true;
+  }
+
   private start(reason: string): Promise<MetaTaskRefreshResult> {
     this.lastStartedAtMs = this.now();
     this.inFlight = this.runRefresh(reason, this.lastStartedAtMs).finally(() => {
@@ -162,6 +179,14 @@ export class MetaTaskRefresher {
     store.setRefreshing(true);
     try {
       const collected = await collectMetaTaskEvents(this.options.collectOptions);
+      // Issue #24: the collector deliberately swallows pool-walk failures into
+      // per-path `error` fields (a failed path must not fail the whole sweep),
+      // so a total network outage still lands here with ok semantics. A sweep
+      // where EVERY pool failed to walk is the outage shape — feed the backoff
+      // ladder; any healthy pool counts as success.
+      const walkedPools = collected.perPath.length;
+      const failedPools = collected.perPath.filter((entry) => Boolean(entry.error)).length;
+      const totalWalkFailure = walkedPools > 0 && failedPools === walkedPools;
       store.upsertEvents(collected.events);
       const allEvents = store.loadEvents();
       // Same-side roster pins travel with the event set: the engine filters a
@@ -220,10 +245,16 @@ export class MetaTaskRefresher {
       store.markRefreshDone(true, null, boundaryBlock);
       const seq = store.bumpSeq();
       this.options.onUpdated?.({ seq, reason });
+      if (totalWalkFailure) {
+        this.options.backoff?.recordFailure();
+      } else {
+        this.options.backoff?.recordSuccess();
+      }
       return { ok: true, board: store.board(this.roster()), error: null };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       store.markRefreshDone(false, message, -1);
+      this.options.backoff?.recordFailure();
       return { ok: false, board: store.board(this.roster()), error: message };
     }
   }
