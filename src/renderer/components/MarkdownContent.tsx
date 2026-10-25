@@ -179,14 +179,28 @@ const rewriteWeb2PinViewerUris = (segment: string): string => {
   });
 };
 
-const linkifyPlainSegment = (segment: string): string => {
-  // First rewrite Web2 pin-viewer URLs (bare or as markdown link
-  // destinations) into MetaWeb URIs, then run the pin/scheme linkify passes.
-  let out = rewriteWeb2PinViewerUris(segment);
-  // R3: turn bare pin ids into pin:// links (before the scheme pass, so
-  // the subsequent scheme matcher sees them as already-linkified destinations
-  // and skips them via the ']' + '(' guard below).
-  out = out.replace(BARE_PINID_RE, (m: string) => `[${m}](pin://${m})`);
+/**
+ * Find the closing `]` of a simple (non-nested) markdown link text span.
+ * Returns -1 for nested `[`, escaped or newline-interrupted spans — those are
+ * not the simple link form we protect.
+ */
+const findLinkTextEnd = (input: string, start: number): number => {
+  for (let i = start; i < input.length; i += 1) {
+    const char = input[i];
+    if (char === '\\') {
+      i += 1;
+      continue;
+    }
+    if (char === '[') return -1;
+    if (char === '\n') return -1;
+    if (char === ']') return i;
+  }
+  return -1;
+};
+
+const linkifyChunk = (chunk: string): string => {
+  // R3: turn bare pin ids into pin:// links.
+  let out = chunk.replace(BARE_PINID_RE, (m: string) => `[${m}](pin://${m})`);
   out = out.replace(AGENT_INTERNET_URI_RE, (rawMatch: string, offset: number, full: string) => {
     // Already a markdown link/image destination — leave it alone.
     if (full.slice(Math.max(0, offset - 2), offset) === '](') return rawMatch;
@@ -197,6 +211,45 @@ const linkifyPlainSegment = (segment: string): string => {
     return `[${match}](${match})${rawMatch.slice(match.length)}`;
   });
   return out;
+};
+
+const linkifyPlainSegment = (segment: string): string => {
+  // First rewrite Web2 pin-viewer URLs (bare or as markdown link
+  // destinations) into MetaWeb URIs, then run the pin/scheme linkify passes.
+  const out = rewriteWeb2PinViewerUris(segment);
+  // Protect existing markdown links/images: rewriting inside their text or
+  // destination corrupts the markdown. A link whose visible text is itself a
+  // scheme URI (bots emit `[pin://…](pin://…)` constantly) used to be wrapped
+  // a second time, rendering as a broken nested link with a literal
+  // `](pin://…)` tail — a garbled bubble where the tail is not clickable.
+  // Only the plain text between link spans is linkified.
+  let result = '';
+  let cursor = 0;
+  while (cursor < out.length) {
+    const openIndex = out.indexOf('[', cursor);
+    if (openIndex === -1) {
+      result += linkifyChunk(out.slice(cursor));
+      break;
+    }
+    const textEnd = findLinkTextEnd(out, openIndex + 1);
+    if (textEnd === -1 || out[textEnd + 1] !== '(') {
+      // Not a simple `[…](…)` link: emit up to and including this '[' and
+      // keep scanning after it.
+      result += linkifyChunk(out.slice(cursor, openIndex + 1));
+      cursor = openIndex + 1;
+      continue;
+    }
+    const destEnd = findMarkdownLinkEnd(out, textEnd + 2);
+    if (destEnd === -1) {
+      result += linkifyChunk(out.slice(cursor, openIndex + 1));
+      cursor = openIndex + 1;
+      continue;
+    }
+    result += linkifyChunk(out.slice(cursor, openIndex));
+    result += out.slice(openIndex, destEnd + 1);
+    cursor = destEnd + 1;
+  }
+  return result;
 };
 
 /**

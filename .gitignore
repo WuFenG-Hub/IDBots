@@ -414,7 +414,6 @@ man_base_data_pebble/
 !tests/mediaToolsAgentTools.test.mjs
 !tests/metafileRouteAgentTools.test.mjs
 !tests/metaAppManagerBundledSync.test.mjs
-!tests/markdownContentBotBrowserUri.test.tsx
 !tests/browserIframeBridgeScript.test.ts
 !tests/browserNavButtonSync.test.ts
 !tests/botBrowserSurfaceStatic.test.mjs
@@ -662,9 +661,7 @@ man_base_data_pebble/
 !tests/coworkAssistantModePromptGate.test.mjs
 !tests/coworkAssistantOwnerUpdate.test.mjs
 !tests/coworkAssistantDeliveryIndex.test.mjs
-!tests/markdownContentHtmlReportCard.test.tsx
 !tests/inlineHtmlReportBlock.test.tsx
-!tests/markdownContentSingleTilde.test.tsx
 !tests/groupTaskWorkingState.test.mjs
 !tests/groupTaskSkillTurnMemoryReadOnly.test.mjs
 !tests/coworkAssistantModeSessionGate.test.ts
@@ -729,3 +726,4 @@ blob-report/
 
 # Scheduled-task memory-access opt-in
 !tests/scheduledTaskMemoryAccess.test.mjs
+!tests/markdownContentLinkifyNoDoubleWrap.test.tsx
