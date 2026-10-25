@@ -35,6 +35,22 @@ describe('proxy HTTP routes (REQ-B-14, REQ-B-15)', () => {
     assert.match(String(ranged.headers.get('content-range')), /bytes 0-3\/\d+/);
   });
 
+  test('F-11 security: GET /files/{token} without a session cookie is rejected 401', async () => {
+    // The signed token alone must not be enough: the browser route is
+    // cookie-gated, so an unauthenticated client (no PWA session) cannot
+    // pull tenant files even with a leaked token string.
+    const noCookie = await fetch(`${t.cpBase}/files/report.txt`);
+    assert.equal(noCookie.status, 401);
+    const body = (await noCookie.json()) as { error: { code: string } };
+    assert.equal(body.error.code, 'UNAUTHORIZED');
+
+    // A garbage/foreign session cookie is rejected the same way.
+    const badCookie = await fetch(`${t.cpBase}/files/report.txt`, {
+      headers: { Cookie: 'idb_session=not-a-session' },
+    });
+    assert.equal(badCookie.status, 401);
+  });
+
   test('POST /upload streams to the tenant and reports path/size/mime', async () => {
     const content = 'hello proxy upload\n';
     const res = await fetch(`${t.cpBase}/upload?name=${encodeURIComponent('note.txt')}`, {

@@ -749,6 +749,34 @@ test('http: file route never reaches the handler for bad tokens (no leaks in res
   assert.equal((await httpRequest(handle.port, 'GET', '/gateway/v1/files/')).status, 404);
 });
 
+test('F-11: authorized downloads of office/pdf documents carry the correct content-type', async (t) => {
+  const { handle, paths } = await startServer(t);
+  const cases = [
+    ['report.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+    ['移动端验收测试 A-04.pdf', 'application/pdf'],
+    ['sheet.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+    ['deck.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  ];
+  for (const [name, expectedMime] of cases) {
+    const filePath = path.join(paths.dataRoot, 'docs', name);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, 'PK\u0003\u0004 document bytes');
+    const token = tokens.signFileToken(SECRET, TENANT, filePath, 'attachment', Date.now() + 60_000);
+    const res = await httpRequest(handle.port, 'GET', `/gateway/v1/files/${token}`);
+    assert.equal(res.status, 200, name);
+    assert.equal(res.headers.get('content-type'), expectedMime, name);
+    if (/^[\x20-\x7E]+$/.test(name)) {
+      assert.equal(res.headers.get('content-disposition'), `attachment; filename="${name}"`);
+    } else {
+      // Non-ASCII basenames ship the RFC 5987 form.
+      assert.match(
+        res.headers.get('content-disposition'),
+        new RegExp(`^attachment; filename="download"; filename\\*=UTF-8''${encodeURIComponent(name)}$`),
+      );
+    }
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Upload route
 // ---------------------------------------------------------------------------

@@ -93,6 +93,8 @@ class FakeInput {
 function makeFakeDom() {
   const created: FakeInput[] = [];
   const opened: Array<{ url: string; target: string; features: string }> = [];
+  const navigations: string[] = [];
+  let openAllowed = true;
   const fakeDocument = {
     createElement(tag: string) {
       assert.equal(tag, 'input');
@@ -109,9 +111,26 @@ function makeFakeDom() {
   const fakeWindow = {
     open(url: string, target: string, features: string) {
       opened.push({ url, target, features });
+      // Real browsers return the new window on success and null/undefined
+      // when the popup blocker swallowed the call.
+      return openAllowed ? ({ mark: 'opened-window' } as unknown) : undefined;
+    },
+    location: {
+      assign(url: string) {
+        navigations.push(url);
+      },
     },
   };
-  return { created, opened, fakeDocument, fakeWindow };
+  return {
+    created,
+    opened,
+    navigations,
+    blockOpen: () => {
+      openAllowed = false;
+    },
+    fakeDocument,
+    fakeWindow,
+  };
 }
 
 function installGlobals(fake: ReturnType<typeof makeFakeDom>) {
@@ -262,6 +281,53 @@ test('shell.openPath signs the /data path and opens the signed URL', async (t) =
     ['gateway:file:sign'],
     'shell:openPath must be answered locally; only the sign call may reach the gateway',
   );
+});
+
+test('F-11: signAndOpen rewrites the tenant files route to the same-origin /files route', async (t) => {
+  const dom = makeFakeDom();
+  installGlobals(dom);
+  t.after(clearGlobals);
+  const { fake, deps } = makeDeps();
+  // The REAL gateway returns the tenant-scoped route (fileSign.ts
+  // FILE_ROUTE_PATH_PREFIX); the PWA origin only serves /files/{token}.
+  fake.handle('gateway:file:sign', () => ({
+    url: '/gateway/v1/files/payload.sig',
+    expiresAt: 1,
+    size: 2,
+    mime: 'application/pdf',
+  }));
+  const electron = buildElectronFromContract(CONTRACT, deps);
+
+  const result = await electron.shell.openPath('/data/workspace/report.pdf');
+  assert.deepEqual(result, { success: true });
+  assert.deepEqual(dom.opened, [
+    { url: '/files/payload.sig', target: '_blank', features: 'noopener,noreferrer' },
+  ]);
+  assert.equal(dom.navigations.length, 0, 'no fallback navigation when window.open succeeded');
+  assert.ok(
+    dom.opened[0].url.startsWith('/files/'),
+    'the opened URL must never be the unroutable /gateway/v1/files/… path',
+  );
+});
+
+test('F-11: popup-blocked window.open falls back to a same-tab navigation', async (t) => {
+  const dom = makeFakeDom();
+  dom.blockOpen();
+  installGlobals(dom);
+  t.after(clearGlobals);
+  const { fake, deps } = makeDeps();
+  fake.handle('gateway:file:sign', () => ({
+    url: '/gateway/v1/files/payload.sig',
+    expiresAt: 1,
+    size: 2,
+    mime: 'application/pdf',
+  }));
+  const electron = buildElectronFromContract(CONTRACT, deps);
+
+  const result = await electron.shell.openPath('/data/workspace/report.pdf');
+  assert.deepEqual(result, { success: true });
+  assert.equal(dom.opened.length, 1, 'the blocked attempt was still made first');
+  assert.deepEqual(dom.navigations, ['/files/payload.sig']);
 });
 
 test('shell sign-and-open failures resolve the desktop failure shape', async (t) => {

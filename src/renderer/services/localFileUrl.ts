@@ -19,6 +19,32 @@
 
 export type LocalFileUrlDisposition = 'inline' | 'attachment';
 
+/**
+ * Tenant route prefix the gateway's `gateway:file:sign` puts on signed URLs
+ * (src/main/gateway/fileSign.ts FILE_ROUTE_PATH_PREFIX). Browsers never reach
+ * it: the control plane exposes the same download at `/files/{token}` with
+ * cookie auth (cloud/control-plane/src/services/httpProxy.ts), and the dev
+ * proxy rewrites `/files/…` to it (vite.mobile.config.ts REQ-E-9).
+ */
+const TENANT_FILES_ROUTE_PREFIX = '/gateway/v1/files/';
+
+/** Browser route (same origin) for signed file downloads. */
+const BROWSER_FILES_ROUTE_PREFIX = '/files/';
+
+/**
+ * Normalize a signed URL from `gateway:file:sign` into the form a browser can
+ * actually fetch: the tenant-scoped route prefix is rewritten to the
+ * same-origin `/files/{token}` route; absolute http(s) URLs pass through
+ * unchanged. Without this rewrite the PWA would open `/gateway/v1/files/…`
+ * on the control-plane origin, which has no such route (404) — F-11.
+ */
+export function toBrowserFileUrl(signedUrl: string): string {
+  if (signedUrl.startsWith(TENANT_FILES_ROUTE_PREFIX)) {
+    return BROWSER_FILES_ROUTE_PREFIX + signedUrl.slice(TENANT_FILES_ROUTE_PREFIX.length);
+  }
+  return signedUrl;
+}
+
 export interface ResolveLocalFileUrlOptions {
   disposition?: LocalFileUrlDisposition;
 }
@@ -129,7 +155,7 @@ async function signAndCache(
   const existing = signedUrlCache.get(key);
   if (existing?.refreshTimer) clearTimeout(existing.refreshTimer);
   const entry: SignedUrlEntry = {
-    url: signed.url,
+    url: toBrowserFileUrl(signed.url),
     expiresAt,
     refreshTimer: null,
     listeners: existing?.listeners ?? new Set(),

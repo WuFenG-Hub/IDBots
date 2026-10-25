@@ -25,6 +25,7 @@
  */
 
 import type { IdbotsMobileOs, IdbotsMobileShell } from './types';
+import { toBrowserFileUrl } from '../../renderer/services/localFileUrl';
 import rawIpcContract from '../generated/ipc-contract.json';
 
 /** Structural view of the C2 gateway client this shim is wired against. */
@@ -174,9 +175,21 @@ async function signAndOpen(
       | { url?: unknown; error?: unknown }
       | null
       | undefined;
-    const url = signed?.url;
-    if (typeof url === 'string' && url.length > 0) {
-      browserWindow()?.open?.(url, '_blank', 'noopener,noreferrer');
+    const rawUrl = signed?.url;
+    if (typeof rawUrl === 'string' && rawUrl.length > 0) {
+      // F-11: the signed url carries the tenant route prefix
+      // (/gateway/v1/files/…), which does not exist on the origin the PWA
+      // is served from; rewrite it to the same-origin /files/{token} route
+      // the control plane (or dev proxy) exposes.
+      const url = toBrowserFileUrl(rawUrl);
+      const win = browserWindow();
+      const opened = win?.open?.(url, '_blank', 'noopener,noreferrer');
+      if (!opened && win) {
+        // window.open after an await loses the user gesture and is
+        // popup-blocked on phones; fall back to a same-tab navigation (an
+        // attachment/inline GET that shows the download or preview).
+        win.location.assign(url);
+      }
       return { success: true };
     }
     // `{ success: false }` envelopes pass through from the gateway client.
