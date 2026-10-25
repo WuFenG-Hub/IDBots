@@ -747,3 +747,19 @@ test('issue #24: without a backoff the refresher stays ungated (back-compat)', a
     h.cleanup();
   }
 });
+
+test('issue #24 (guard): refreshOnce is single-flight — a caller arriving mid-sweep joins the in-flight promise', async () => {
+  const clock = { value: T0 + 60_000 };
+  const h = await openHarness(clock, { minIntervalMs: 0 });
+  try {
+    const first = h.refresher.refreshOnce('demand-a'); // starts the sweep, inFlight set synchronously
+    const second = h.refresher.refreshOnce('demand-b'); // arrives while the sweep is running
+    assert.equal(first, second, 'concurrent callers share the exact same in-flight promise');
+    const [resultA, resultB] = await Promise.all([first, second]);
+    assert.equal(resultA.ok, true, resultA.error ?? '');
+    assert.equal(resultB.ok, true, resultB.error ?? '');
+    assert.equal(h.fetchCount(), 10, 'exactly one sweep ran (single-flight, not two)');
+  } finally {
+    h.cleanup();
+  }
+});
