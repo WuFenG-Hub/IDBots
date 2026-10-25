@@ -20,7 +20,7 @@ test('CoworkSessionDetail hides non-order internal states in A2A sessions', () =
   assert.match(source, /import \{ shouldHideA2AInternalMessage, lastA2AErrorDetail \} from '\.\/a2aInternalMessageFilter'/);
   assert.match(
     source,
-    /visibleA2AMessages[\s\S]*?!shouldHideControlMessage\(message\) && !shouldHideA2AInternalMessage\(message\)/,
+    /!shouldHideControlMessage\(message\)\s*\n\s*&& !shouldHideA2AInternalMessage\(message, \{ chainBackedConversation: isPrivateA2ASession \}\)/,
   );
 });
 

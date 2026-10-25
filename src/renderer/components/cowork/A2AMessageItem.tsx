@@ -14,6 +14,17 @@ import {
   messengerRowClassName,
   messengerTxidRowClassName,
 } from '../chat/messengerBubble';
+import {
+  formatA2ATxidPreview,
+  normalizeTxidCandidate,
+  resolveA2AMessageTxid,
+} from './a2aInternalMessageFilter';
+
+export { formatA2ATxidPreview, resolveA2AMessageTxid };
+
+const normalizeMetafileCandidate = (candidate: string): string => {
+  return String(candidate || '').trim().replace(/[),.;:!?]+$/, '');
+};
 
 interface A2AMessageItemProps {
   message: CoworkMessage;
@@ -82,8 +93,6 @@ const METAFILE_PREVIEW_MAX_BYTES = 20 * 1024 * 1024;
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.gif', '.png', '.webp', '.bmp', '.svg']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov']);
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.flac']);
-const TXID_RE = /^[0-9a-f]{64}$/i;
-const PIN_ID_TXID_RE = /^([0-9a-f]{64})i\d+$/i;
 const MIME_TYPE_BY_EXTENSION = new Map<string, string>([
   ['.jpg', 'image/jpeg'],
   ['.jpeg', 'image/jpeg'],
@@ -142,56 +151,6 @@ const parseDeliveryPayload = (content: string): DeliveryPayload | null => {
 const stripOrderProtocolTag = (content: string): string => (
   String(content || '').trim().replace(ORDER_PROTOCOL_TAG_RE, '').trim()
 );
-
-const normalizeMetafileCandidate = (candidate: string): string => {
-  return String(candidate || '').trim().replace(/[),.;:!?]+$/, '');
-};
-
-const normalizeTxidCandidate = (value: unknown): string => {
-  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  return TXID_RE.test(normalized) ? normalized : '';
-};
-
-const normalizePinIdCandidate = (value: unknown): string => {
-  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  const match = normalized.match(PIN_ID_TXID_RE);
-  return match?.[1] ?? '';
-};
-
-export const formatA2ATxidPreview = (txid: string): string => {
-  const normalized = normalizeTxidCandidate(txid);
-  return normalized ? `${normalized.slice(0, 8)}....` : '';
-};
-
-export const resolveA2AMessageTxid = (message: CoworkMessage): string => {
-  const metadata = message.metadata ?? {};
-  const txidsCandidate = Array.isArray(metadata.txids)
-    ? metadata.txids.map(normalizeTxidCandidate).find(Boolean)
-    : '';
-  const directCandidate = [
-    metadata.txid,
-    metadata.messageTxid,
-    metadata.pinTxid,
-    metadata.deliveryTxid,
-    metadata.deliveryMessageTxid,
-    metadata.orderMessageTxid,
-  ].map(normalizeTxidCandidate).find(Boolean);
-  if (txidsCandidate) return txidsCandidate;
-  if (directCandidate) return directCandidate;
-
-  const pinCandidate = [
-    metadata.pinId,
-    metadata.messagePinId,
-    metadata.deliveryPinId,
-    metadata.deliveryMessagePinId,
-    metadata.orderMessagePinId,
-    metadata.refundRequestPinId,
-    metadata.refundFinalizePinId,
-  ].map(normalizePinIdCandidate).find(Boolean);
-  if (pinCandidate) return pinCandidate;
-
-  return '';
-};
 
 export const getA2AMessageOrderTxid = (message: CoworkMessage): string => {
   const metadata = message.metadata ?? {};
@@ -753,11 +712,14 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
   );
 
   if (!txid) {
+    // Non-chain fallback rendering. Conversational internal states are filtered
+    // out upstream (shouldHideA2AInternalMessage), so only local notices that
+    // must stay actionable — e.g. order-flow status with the resend action —
+    // reach this branch. Rendered as a plain notice without any bubble chrome.
     const internalContent = stripOrderProtocolTag(message.content);
     return (
       <div className="px-4 py-1 flex justify-center">
         <div className="max-w-[76%] px-3 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-words dark:text-claude-darkTextSecondary text-claude-textSecondary">
-          <div className="mb-0.5 font-medium">{i18nService.t('a2aInternalStatus')}</div>
           <div>{internalContent}</div>
           {renderResendAction()}
           <div className="mt-0.5 text-[10px] opacity-70">{formatTime(message.timestamp)}</div>

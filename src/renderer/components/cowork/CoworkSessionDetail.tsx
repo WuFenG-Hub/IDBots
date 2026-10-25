@@ -3337,9 +3337,10 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   );
   const visibleA2AMessages = useMemo(() => (
     currentSession?.messages.filter((message) => (
-      !shouldHideControlMessage(message) && !shouldHideA2AInternalMessage(message)
+      !shouldHideControlMessage(message)
+      && !shouldHideA2AInternalMessage(message, { chainBackedConversation: isPrivateA2ASession })
     )) ?? []
-  ), [currentSession?.messages]);
+  ), [currentSession?.messages, isPrivateA2ASession]);
   // Episode metadata of the A2A thread — powers the divider cards shown where
   // the visible history crosses an episode rollover boundary.
   const [a2aThreadEpisodes, setA2aThreadEpisodes] = useState<Array<{

@@ -189,9 +189,54 @@ test('A2A view hides the persisted no-reply sentinel bubble', () => {
   const deliveredBubble = {
     type: 'assistant',
     content: '（保持静默。）',
-    metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing' },
+    metadata: {
+      sourceChannel: 'metaweb_private',
+      direction: 'outgoing',
+      txid: 'c'.repeat(64),
+    },
   };
   assert.equal(shouldHideA2AInternalMessage(deliveredBubble), false);
+});
+
+test('A2A view hides assistant monologue that never reached the chain', () => {
+  // Production shape (2026-10-25): intermediate working notes between tool
+  // calls carry no chain metadata — they rendered as "内部状态" blocks below
+  // the delivered reply they belonged to. They are internal state now.
+  const monologue = {
+    type: 'assistant',
+    content: '任务建好但会话绑定落空（将跑新会话）——修正报告路由：改为直达私聊，不依赖会话落点。',
+    metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing', isFinal: true },
+  };
+  const chainBacked = { chainBackedConversation: true };
+  assert.equal(shouldHideA2AInternalMessage(monologue, chainBacked), true);
+  // Without the chain-backed session context the txid rule stays off —
+  // owner-facing local turns (weather answers, artifact handoffs) never
+  // broadcast and must keep rendering.
+  assert.equal(shouldHideA2AInternalMessage(monologue), false);
+  // Delivered replies anchor on a chain txid (direct, txids array, or pin id).
+  assert.equal(shouldHideA2AInternalMessage({
+    ...monologue,
+    metadata: { ...monologue.metadata, txid: 'a'.repeat(64) },
+  }, chainBacked), false);
+  assert.equal(shouldHideA2AInternalMessage({
+    ...monologue,
+    metadata: { ...monologue.metadata, txids: ['b'.repeat(64)] },
+  }, chainBacked), false);
+  assert.equal(shouldHideA2AInternalMessage({
+    ...monologue,
+    metadata: { ...monologue.metadata, pinId: `c${'d'.repeat(63)}i0` },
+  }, chainBacked), false);
+  // Order-flow messages keep their traceability regardless of txid presence.
+  assert.equal(shouldHideA2AInternalMessage({
+    ...monologue,
+    metadata: { ...monologue.metadata, orderTxid: 'e'.repeat(64) },
+  }, chainBacked), false);
+  // Incoming peer messages are never hidden by the txid rule.
+  assert.equal(shouldHideA2AInternalMessage({
+    type: 'user',
+    content: '你好',
+    metadata: { sourceChannel: 'metaweb_private', direction: 'incoming' },
+  }, chainBacked), false);
 });
 
 const TEST_MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';

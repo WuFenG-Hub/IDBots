@@ -84,7 +84,6 @@ test('required English UI keys exist', () => {
     'discordTokenHint',
     'metabotWalletNativeAssets',
     'a2aDownloadFile',
-    'a2aInternalStatus',
     'a2aMediaLoadingVideo',
     'a2aMediaLoadFailedVideo',
   ];
