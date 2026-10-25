@@ -60,6 +60,21 @@ function installOn(fake) {
   return bridge;
 }
 
+test('helper never overwrites a natively injected AgentBrowser', () => {
+  const fake = makeFakeWindow();
+  const nativeRequest = function () { return Promise.resolve({ native: true }); };
+  const nativeOn = function () { return function () {}; };
+  fake.win.AgentBrowser = { request: nativeRequest, on: nativeOn };
+  globalThis.window = fake.win;
+  const bridge = Helper.installAgentBrowserHelper();
+  assert.equal(bridge.request, nativeRequest, 'native request preserved');
+  assert.equal(bridge.on, nativeOn, 'native on preserved');
+  assert.equal(typeof bridge.navigate, 'function', 'missing navigate filled in');
+  // The filled-in navigate still speaks the protocol; the native methods stay untouched.
+  bridge.navigate('metaapp://native-host');
+  assert.equal(fake.posted[0].type, 'agent-browser:navigate');
+});
+
 test('helper installs window.AgentBrowser with request/on/navigate', () => {
   const fake = makeFakeWindow();
   const bridge = installOn(fake);

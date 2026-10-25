@@ -13,7 +13,10 @@
   <div id="harness-log">self-test harness booting…</div>
   <iframe id="arena" title="arena under test"></iframe>
   <script>
-    // Development-only self-test page (never loaded by the app itself).
+    // Development-only self-test page. Lives in tests/ — NOT inside
+    // METAAPPs/motion-video-arena/ — so it never ships in the published
+    // package (electron-builder extraResources copies the whole METAAPPs
+    // directory into the release ZIP).
     //
     // Mode A (default, silent parent): the app's host probe times out, the
     // explicit ?mock=1 parameter activates local mocks, and the harness
@@ -136,7 +139,10 @@
       }
       window.__harnessDump = dump;
       var variant = new URLSearchParams(location.search).get('mock') || '1';
-      frame.src = './index.html?mock=' + encodeURIComponent(variant) + '&mockVideoA=http://127.0.0.1:18743/a.mp4&mockVideoB=http://127.0.0.1:18743/b.mp4';
+      // Serve the REPOSITORY ROOT (e.g. `python3 -m http.server 18742` from the
+      // repo top) and open /tests/motionVideoArenaHostSim.html — the iframe
+      // targets the package relatively, same-origin for state dumps.
+      frame.src = '../METAAPPs/motion-video-arena/index.html?mock=' + encodeURIComponent(variant) + '&mockVideoA=http://127.0.0.1:18743/a.mp4&mockVideoB=http://127.0.0.1:18743/b.mp4';
     })();
   </script>
 </body>

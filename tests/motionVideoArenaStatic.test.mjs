@@ -41,13 +41,32 @@ test('arena source is tracked by git under the .gitignore whitelist', () => {
     'METAAPPs/motion-video-arena/APP.md',
     'METAAPPs/motion-video-arena/agent-browser-helper.js',
     'METAAPPs/motion-video-arena/app.js',
-    'METAAPPs/motion-video-arena/host-sim-harness.html',
     'METAAPPs/motion-video-arena/index.html',
     'METAAPPs/motion-video-arena/styles.css',
   ]);
   const gitignore = fs.readFileSync(path.join(repoRoot, '.gitignore'), 'utf8');
   assert.match(gitignore, /!METAAPPs\/motion-video-arena\/\n/);
   assert.match(gitignore, /!METAAPPs\/motion-video-arena\/\*\*\n/);
+});
+
+test('the publishable package carries only production files (no dev pages)', () => {
+  // electron-builder extraResources copies the whole METAAPPs directory into
+  // the release ZIP, so anything under the package ships. Development
+  // tooling must live outside it — the host-sim harness lives in tests/.
+  const files = fs.readdirSync(appDir).sort();
+  assert.deepEqual(files, [
+    'APP.md',
+    'agent-browser-helper.js',
+    'app.js',
+    'index.html',
+    'styles.css',
+  ]);
+  assert.ok(
+    fs.existsSync(path.join(repoRoot, 'tests', 'motionVideoArenaHostSim.html')),
+    'host-sim harness lives in tests/, not in the package',
+  );
+  const harness = fs.readFileSync(path.join(repoRoot, 'tests', 'motionVideoArenaHostSim.html'), 'utf8');
+  assert.match(harness, /\.\.\/METAAPPs\/motion-video-arena\/index\.html/, 'harness targets the package relatively');
 });
 
 test('APP.md frontmatter follows the bundled registration contract', () => {

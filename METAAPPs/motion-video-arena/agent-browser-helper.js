@@ -40,6 +40,14 @@
     }
 
     if (!installed) {
+      // Installation guards: a host that already injects a native
+      // AgentBrowser keeps its own implementation — the helper only fills in
+      // missing methods and never overwrites a working bridge.
+      var hasNativeRequest = typeof bridge.request === 'function';
+      var hasNativeOn = typeof bridge.on === 'function';
+      var hasNativeNavigate = typeof bridge.navigate === 'function';
+
+      if (!hasNativeRequest) {
       bridge.request = function request(input) {
         var id = 'arena-req-' + nextId++;
         var timeoutMs = input && typeof input.timeoutMs === 'number' ? input.timeoutMs : 0;
@@ -69,17 +77,22 @@
           });
         });
       };
+      }
 
+      if (!hasNativeOn) {
       bridge.on = function on(eventName, handler) {
         (listeners[eventName] = listeners[eventName] || []).push(handler);
         return function unsubscribe() {
           listeners[eventName] = (listeners[eventName] || []).filter(function (h) { return h !== handler; });
         };
       };
+      }
 
+      if (!hasNativeNavigate) {
       bridge.navigate = function navigate(uri) {
         postToParent({ type: NAVIGATE_TYPE, version: PROTOCOL_VERSION, uri: String(uri || '') });
       };
+      }
 
       bridge.__arenaHelperInstalled = true;
 

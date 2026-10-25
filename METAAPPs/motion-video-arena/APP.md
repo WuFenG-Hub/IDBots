@@ -33,12 +33,14 @@ signs, never selects signers, and never writes telemetry.
 - `styles.css` — responsive styles: desktop two-column compare grid + queue
   sidebar; `<= 860px` stacks the players vertically (each pane keeps its
   "Left video"/"Right video" heading so votes stay associated).
-- `host-sim-harness.html` — development-only self-test page, never loaded by
-  the app: silent mode auto-drives one mock vote→submit and captures the
-  outcome copy (`?mock=fail` / `?mock=unknown` exercise the other outcomes);
-  `?host=1` simulates the Bot Browser protocol side to prove bridge
-  recognition, Actor display, mock-ignored gating, and the unpublished lock.
 - `APP.md` — this document.
+
+The package intentionally contains nothing else. Development tooling —
+including the host-simulation harness that auto-drives the mock flows and
+answers the Browser protocol — lives outside it in the repository
+(`tests/motionVideoArenaHostSim.html`), because the release packaging copies
+the whole `METAAPPs` directory and a published MetaApp must ship only
+production files.
 
 ## Routes and parameters
 
