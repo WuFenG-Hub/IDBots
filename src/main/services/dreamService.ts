@@ -1275,6 +1275,11 @@ export class DreamService {
           );
         }
       }
+      // Cost attribution (nightly-token audit 2026-10-25): durationMs below
+      // used to fold the pre-dream surf wait into the dream's own duration,
+      // making dream telemetry unreadable for token-cost analysis. The split
+      // keeps the legacy total and adds the two components.
+      const surfEndedAtMs = Date.now();
       const { startMs, endMs } = getDayBoundsMs(date);
       const dropCounters = createDreamInputDropCounters();
       const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs, dropCounters);
@@ -1371,6 +1376,8 @@ export class DreamService {
           predictionOod: this.buildPredictionOodTelemetry(metabotId),
           promptLayerRollback: retentionGate,
           durationMs: Date.now() - runStartedAtMs,
+          surfMs: surfEndedAtMs - runStartedAtMs,
+          dreamMs: Date.now() - surfEndedAtMs,
         });
         return;
       }
@@ -1549,6 +1556,8 @@ export class DreamService {
         predictionOod: this.buildPredictionOodTelemetry(metabotId),
         promptLayerRollback: retentionGate,
         durationMs: Date.now() - runStartedAtMs,
+        surfMs: surfEndedAtMs - runStartedAtMs,
+        dreamMs: Date.now() - surfEndedAtMs,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
