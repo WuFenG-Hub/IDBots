@@ -5156,6 +5156,8 @@ const startStartupNightlyServices = (): void => {
         autoApprove: true,
         disableMemoryUpdates: true,
         practiceSession: createPracticeSessionState('read_only'),
+        // Hidden exam session: static title body, no title LLM call.
+        sessionTitle: `Exam ${new Date().toISOString().slice(0, 10)}`,
         skillTurnTimeoutMs: 20 * 60 * 1000,
         onSessionCreated: (sessionId) => {
           coworkStore.setSessionHiddenFromList(sessionId, true);
@@ -9003,6 +9005,9 @@ const getMetawebStudyService = (): MetawebStudyService => {
           permissionMode: 'acceptEdits',
           disableMemoryUpdates: false,
           metawebStudySession: { pinBudget: job.budgetPins, kind: job.kind },
+          // Hidden session (see onSessionCreated below): static title body,
+          // no per-session title LLM call.
+          sessionTitle: `Study ${job.topic.slice(0, 40)}`,
           // Study runs read up to ~20 pins; the 300s delegation default is far
           // too small. On timeout the job records failed while the session may
           // still finish in the background — its KB saves are never lost.
@@ -9204,6 +9209,9 @@ const getSurfService = (): SurfService => {
             // so the old 30-min watchdog was a coin-flip (one live run finished
             // 22s under it, the next timed out). Manual runs get 60 min; the
             // pre-dream path stays bounded tighter by its own 35-min race +
+            // The session is hidden from the list right below, so a generated
+            // title would never be displayed — static body, no title LLM call.
+            sessionTitle: `MetaWeb Surf ${new Date().toISOString().slice(0, 10)}`,
             // stopSession (see surfBeforeDream).
             skillTurnTimeoutMs: 60 * 60 * 1000,
             onSessionCreated: (sessionId) => {
