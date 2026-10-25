@@ -42,36 +42,41 @@ export function createUserPreferenceWriter(
     feeRate: deps.feeRate,
   });
 
-  const write = (segment: PreferenceSegment, payload: object): Promise<PreferencePinWriteResult> => {
-    const metaidData: MetaidDataPayload = {
-      operation: 'create',
-      path: preferencePoolPath(segment),
-      encryption: '0',
-      version: PREFERENCE_PIN_VERSION,
-      contentType: 'application/json',
-      payload: JSON.stringify(payload),
-    };
-    return writePin(metaidData).then((outcome): PreferencePinWriteResult => {
-      if (outcome.ok === false) {
-        // Keep the pre-refactor error surface: gate failures throw, and the
-        // sentinel codes ride along for callers that inspect them.
-        const error = new Error(outcome.error) as Error & { code?: string };
-        error.code = outcome.error;
-        throw error;
-      }
-      return { pinId: outcome.pinId, txids: outcome.txids };
-    });
-  };
-
-  // The shared writer re-gates on identity+subsidy at execution time;
-  // resolve() keeps the earlier resolve-time gate so sealed callers see the
-  // same error resolution before any payload is built.
-  return () => {
+  // resolve() captures the identity it resolved to; every write then carries
+  // it as expectedGlobalMetaId so the shared writer re-checks at dequeue
+  // time. A round/commit/reveal/lesson write queued behind another one can
+  // therefore never be signed by a replacement identity.
+  const resolve = (): PreferenceWriterResolution => {
     const identity = userStore.get();
     if (!identity || !identity.globalmetaid) return { error: 'USER_IDENTITY_MISSING' };
     if (identity.subsidy_state === 'failed' || (!identity.subsidy_state && !identity.chat_public_key_pin_id)) {
       return { error: 'SUBSIDY_NOT_CLAIMED' };
     }
-    return { globalMetaId: identity.globalmetaid, write };
+    const resolvedGlobalMetaId = identity.globalmetaid;
+    const write = (segment: PreferenceSegment, payload: object): Promise<PreferencePinWriteResult> => {
+      const metaidData: MetaidDataPayload = {
+        operation: 'create',
+        path: preferencePoolPath(segment),
+        encryption: '0',
+        version: PREFERENCE_PIN_VERSION,
+        contentType: 'application/json',
+        payload: JSON.stringify(payload),
+      };
+      return writePin(metaidData, { expectedGlobalMetaId: resolvedGlobalMetaId }).then(
+        (outcome): PreferencePinWriteResult => {
+          if (outcome.ok === false) {
+            // Keep the pre-refactor error surface: gate failures throw, and
+            // the sentinel codes ride along for callers that inspect them.
+            const error = new Error(outcome.error) as Error & { code?: string };
+            error.code = outcome.error;
+            throw error;
+          }
+          return { pinId: outcome.pinId, txids: outcome.txids };
+        },
+      );
+    };
+    return { globalMetaId: resolvedGlobalMetaId, write };
   };
+
+  return resolve;
 }

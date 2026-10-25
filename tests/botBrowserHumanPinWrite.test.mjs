@@ -493,3 +493,40 @@ test('confirmed two-phase writes emit a pin-write audit event naming the actual 
   // No session id on a plain two-phase write (grants are Bot-only today).
   assert.equal(calls.audit[0].sessionId, '');
 });
+
+test('a build without a pin-path resolver rejects MVC @pin modify/revoke (no guard bypass)', async () => {
+  const service = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    getHumanActor: () => usableHuman(),
+    createHumanPin: async () => ({ ok: true, pinId: 'p', txids: ['t'], totalCost: 1 }),
+    createPin: async () => ({ pinId: 'p', txids: ['t'], totalCost: 1 }),
+  });
+
+  const result = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: RESOURCE,
+    payload: pinWritePayload({
+      operation: 'modify',
+      path: `@${FEEDBACK_TARGET_PIN}`,
+      originalId: FEEDBACK_TARGET_PIN,
+    }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'invalid_request');
+  assert.match(result.message, /no pin-path resolver configured/);
+});
+
+test('successful writes expose the actual chain cost to the caller', async () => {
+  const { service } = createService({ human: usableHuman() });
+  const phaseOne = await service.writeMetaIdPin({
+    actorId: HUMAN_ACCOUNT_ACTOR_ID,
+    resourceUri: RESOURCE,
+    payload: pinWritePayload(),
+  });
+  const result = await service.writeMetaIdPin({
+    actorId: HUMAN_ACCOUNT_ACTOR_ID,
+    ...phaseOne.data.confirmRequest,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.data.totalCost, 2);
+});

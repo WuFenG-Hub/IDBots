@@ -97,6 +97,8 @@ export interface BotBrowserPinWriteResult {
   operation: 'create' | 'modify' | 'revoke';
   path: string;
   actor: MetaAppBridgeActor;
+  /** Actual chain cost in sats reported by the signer, when available. */
+  totalCost?: number;
 }
 
 export interface BotBrowserMetaFileUploadResultFile {
@@ -222,7 +224,9 @@ export interface BotBrowserBridgeServiceDeps {
    * Bounded pin-id → protocol-path resolver used to reject modify/revoke
    * writes that target the create-only /protocols/preference/feedback path
    * (see services/pinPathResolver.ts for the caching/rate-limit policy).
-   * Fail-closed: 'not-found' and 'unknown' targets are rejected too.
+   * Fail-closed: 'not-found' and 'unknown' targets are rejected — and a
+   * build that wires no resolver at all rejects MVC '@pin' modify/revoke
+   * outright, so the guard can never be bypassed by a missing dependency.
    */
   resolvePinPath?: (pinId: string, rateLimitKey?: string) => Promise<PinPathResolution>;
   uploadMetaFile?: UploadMetaFileFn;
@@ -1140,8 +1144,9 @@ export function createBotBrowserBridgeService(
 
       // Shared contract: /protocols/preference/feedback is create-only. The
       // direct-path form is named explicitly before generic path validation;
-      // '@<targetPinId>' modify/revoke targets are resolved best-effort via
-      // the host pin-path resolver after payload validation.
+      // '@<targetPinId>' modify/revoke targets are resolved via the bounded
+      // pin-path resolver after payload validation, failing CLOSED (see the
+      // guard below).
       const rawPayloadBody = objectRecord(input.payload);
       const rawOperation = text(rawPayloadBody?.operation);
       const rawPath = text(rawPayloadBody?.path);
@@ -1180,15 +1185,22 @@ export function createBotBrowserBridgeService(
       // pin-path resolver and fail CLOSED. The shared contract requires
       // modify/revoke for /protocols/preference/feedback to be rejected
       // before signing and has no best-effort carve-out, so a target whose
-      // path cannot be determined (indexer has not seen it, or the lookup
-      // failed) is rejected rather than waved through. Enforcement is scoped
-      // to MVC (the milestone's chain); other networks keep their existing
-      // behavior because the MVC indexer cannot speak for their pins.
-      if (validation.operation !== 'create' && deps.resolvePinPath) {
+      // path cannot be determined (indexer has not seen it, the lookup
+      // failed, or this build wired no resolver at all) is rejected rather
+      // than waved through. Enforcement is scoped to MVC (the milestone's
+      // chain); other networks keep their existing behavior because the MVC
+      // indexer cannot speak for their pins.
+      if (validation.operation !== 'create') {
         const targetPinId = validation.bridgeMetadata?.originalId
           ?? (validation.path.startsWith('@') ? validation.path.slice(1) : '');
         const network = text(input.network).toLowerCase();
         if (targetPinId && (!network || network === 'mvc')) {
+          if (!deps.resolvePinPath) {
+            return failure(
+              'invalid_request',
+              `The protocol path of the modify/revoke target pin ${targetPinId} could not be verified (no pin-path resolver configured in this build), so the write is rejected.`,
+            );
+          }
           const resolution = await deps.resolvePinPath(targetPinId, resourceUri);
           if (resolution.status === 'resolved' && resolution.path === PREFERENCE_FEEDBACK_PATH) {
             return failure(
@@ -1331,6 +1343,9 @@ export function createBotBrowserBridgeService(
           operation: validation.operation,
           path: validation.path,
           actor: actorResult.actor,
+          ...(typeof result.totalCost === 'number' && Number.isFinite(result.totalCost)
+            ? { totalCost: result.totalCost }
+            : {}),
         });
       } catch (error) {
         if (error instanceof HumanPinWriteError) {
