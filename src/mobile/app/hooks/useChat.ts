@@ -14,7 +14,7 @@ import type { ResyncSnapshot } from './useResync';
 
 export interface ChatMessageView {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'error';
   text: string;
   streaming: boolean;
 }
@@ -33,23 +33,96 @@ export interface ChatToolCallView {
   input: Record<string, unknown>;
 }
 
-interface StreamCompletePayload {
+/**
+ * Real `cowork:stream:error` frame (runner → main.ts wiring, REQ-A-25):
+ * `metadata.errorCode` rides the ERROR frame for classifiable failures —
+ * today 'LLM_QUOTA_EXHAUSTED' for both relay quota codes
+ * (free_quota_exhausted / quota_exhausted). The mock bridge used to
+ * simulate it on the completion frame; the tenant sends it here.
+ */
+interface StreamErrorPayload {
   sessionId: string;
-  claudeSessionId: string | null;
+  error: string;
   metadata?: { errorCode?: string };
 }
 
 const QUOTA_ERROR_CODE = 'LLM_QUOTA_EXHAUSTED';
 
+/** Which relay allowance the failure burned: the free starter or the purchased pool. */
+export type QuotaExhaustedKind = 'free' | 'purchased';
+
+export interface QuotaExhaustedState {
+  exhausted: boolean;
+  kind: QuotaExhaustedKind | null;
+}
+
+// quota_exhausted is a substring of free_quota_exhausted, so the alternation
+// order pins the more specific code first (same pin as the main-process
+// extractRelayQuotaExhaustedCode in coworkAssistantReply.ts).
+const RELAY_QUOTA_CODE_PATTERN = /(free_quota_exhausted|quota_exhausted)/i;
+
+/** Reads the relay quota machine code out of an error text, if any. */
+export function quotaKindFromErrorText(text: unknown): QuotaExhaustedKind | null {
+  const match = RELAY_QUOTA_CODE_PATTERN.exec(String(text ?? ''));
+  if (!match) return null;
+  return match[1].toLowerCase() === 'quota_exhausted' ? 'purchased' : 'free';
+}
+
+/**
+ * Terminal turn failures are persisted by the runner's handleError as
+ * `Error: …` system rows; they are the only system messages the phone
+ * renders (as the inline red notice). Every other system row stays
+ * transcript-internal.
+ */
+function isTerminalErrorRow(message: { type?: unknown; content?: unknown } | null | undefined): message is { type: 'system'; content: string } {
+  return (
+    message !== null
+    && typeof message === 'object'
+    && message.type === 'system'
+    && typeof message.content === 'string'
+    && message.content.startsWith('Error:')
+  );
+}
+
+/**
+ * Quota-card state from a session detail (the reopen / reconnect-resync
+ * path). Mirrors the desktop live-state rule (renderer quotaErrorBanner):
+ * the card belongs to the CURRENT failure only — the session must sit in
+ * status 'error' and its newest terminal error row must carry a relay
+ * quota code. The next submitted turn flips the status to 'running',
+ * which retires the card again; a different failure leaves the card to
+ * that failure's own inline notice.
+ */
+export function deriveQuotaExhaustedFromDetail(
+  session: Pick<CoworkSessionDetail, 'status' | 'messages'> | null | undefined,
+): QuotaExhaustedState {
+  if (!session || session.status !== 'error') return { exhausted: false, kind: null };
+  const messages = Array.isArray(session.messages) ? session.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (isTerminalErrorRow(message)) {
+      const kind = quotaKindFromErrorText(message.content);
+      return { exhausted: kind !== null, kind };
+    }
+  }
+  return { exhausted: false, kind: null };
+}
+
 function detailToViews(session: CoworkSessionDetail): ChatMessageView[] {
-  return session.messages
-    .filter((message) => message.type === 'user' || message.type === 'assistant')
-    .map((message) => ({
-      id: message.id,
-      role: message.type === 'user' ? 'user' : 'assistant',
-      text: message.content ?? '',
-      streaming: false,
-    }));
+  const views: ChatMessageView[] = [];
+  for (const message of session.messages) {
+    if (message.type === 'user' || message.type === 'assistant') {
+      views.push({
+        id: message.id,
+        role: message.type === 'user' ? 'user' : 'assistant',
+        text: message.content ?? '',
+        streaming: false,
+      });
+    } else if (isTerminalErrorRow(message)) {
+      views.push({ id: message.id, role: 'error', text: message.content, streaming: false });
+    }
+  }
+  return views;
 }
 
 /**
@@ -90,6 +163,7 @@ export function useChat(): {
   permission: ChatPermissionView | null;
   toolCalls: ChatToolCallView[];
   quotaExhausted: boolean;
+  quotaKind: QuotaExhaustedKind | null;
   setMetabotId: (id: number | null) => void;
   reloadSessions: () => Promise<void>;
   openSession: (id: string) => Promise<void>;
@@ -114,6 +188,7 @@ export function useChat(): {
   const [permission, setPermission] = useState<ChatPermissionView | null>(null);
   const [toolCalls, setToolCalls] = useState<ChatToolCallView[]>([]);
   const [quotaExhausted, setQuotaExhausted] = useState(false);
+  const [quotaKind, setQuotaKind] = useState<QuotaExhaustedKind | null>(null);
 
   const reassemblerRef = useRef(new CoworkStreamReassembler());
   const sessionIdRef = useRef<string | null>(null);
@@ -145,7 +220,25 @@ export function useChat(): {
     };
 
     const offMessage = cowork.onStreamMessage(({ message }) => {
-      setMessages((prev) => [...prev, { id: message.id, role: 'assistant', text: '', streaming: true }]);
+      if (message.type === 'system') {
+        // System rows are one-shot: they arrive with their full content on
+        // the message frame and the runner never streams into them. Only
+        // terminal `Error: …` rows render (inline red notice); other system
+        // notices stay transcript-internal on the phone.
+        if (isTerminalErrorRow(message)) {
+          setMessages((prev) => [...prev, { id: message.id, role: 'error', text: message.content, streaming: false }]);
+        }
+        return;
+      }
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: message.id,
+          role: 'assistant',
+          text: typeof message.content === 'string' ? message.content : '',
+          streaming: true,
+        },
+      ]);
       setIsStreaming(true);
     });
     const offUpdate = cowork.onStreamMessageUpdate((payload) => {
@@ -199,15 +292,24 @@ export function useChat(): {
       // Keep the resolved state visible briefly, then free the sheet.
       permissionHideTimerRef.current = setTimeout(() => setPermission(null), 1400);
     });
-    const offComplete = cowork.onStreamComplete((payload: StreamCompletePayload) => {
+    const offComplete = cowork.onStreamComplete(() => {
       setIsStreaming(false);
-      if (payload.metadata?.errorCode === QUOTA_ERROR_CODE) {
-        setQuotaExhausted(true);
-      }
       void reloadSessions();
     });
-    const offError = cowork.onStreamError(() => {
+    const offError = cowork.onStreamError((payload: StreamErrorPayload) => {
       setIsStreaming(false);
+      // REQ-A-25: the quota death settles on the ERROR frame with
+      // metadata.errorCode — the recharge card keys off it instead of
+      // parsing the human-readable text. Only the open session's failure
+      // may raise the card; background sessions (scheduled tasks, titles)
+      // keep their errors internal.
+      if (
+        payload?.metadata?.errorCode === QUOTA_ERROR_CODE
+        && payload.sessionId === sessionIdRef.current
+      ) {
+        setQuotaKind(quotaKindFromErrorText(payload.error) ?? 'free');
+        setQuotaExhausted(true);
+      }
     });
 
     return () => {
@@ -229,7 +331,12 @@ export function useChat(): {
     setSessionTitle(result.session.title ?? null);
     setMessages(detailToViews(result.session));
     setIsStreaming(false);
-    setQuotaExhausted(false);
+    // Reopened errored sessions re-derive the quota card from the persisted
+    // terminal error row, so the wall survives app restarts and session
+    // switches (the live stream:error frame is transient).
+    const quota = deriveQuotaExhaustedFromDetail(result.session);
+    setQuotaExhausted(quota.exhausted);
+    setQuotaKind(quota.kind);
   }, []);
 
   const newChat = useCallback(() => {
@@ -239,6 +346,7 @@ export function useChat(): {
     setMessages([]);
     setIsStreaming(false);
     setQuotaExhausted(false);
+    setQuotaKind(null);
   }, []);
 
   const send = useCallback(
@@ -246,6 +354,7 @@ export function useChat(): {
       const trimmed = text.trim();
       if (!trimmed) return;
       setQuotaExhausted(false);
+      setQuotaKind(null);
       const cowork = getMobileElectron().cowork;
       const currentSessionId = sessionIdRef.current;
       // Append the user message BEFORE the invoke: the mock emits the
@@ -315,6 +424,11 @@ export function useChat(): {
       if (snapshot.session && snapshot.session.id === currentSessionId) {
         setMessages((prev) => mergeResyncedMessages(prev, detailToViews(snapshot.session as CoworkSessionDetail)));
         setSessionTitle(snapshot.session.title ?? null);
+        // The resync detail is authoritative for the quota card too: a turn
+        // that died while the socket was down still shows the wall.
+        const quota = deriveQuotaExhaustedFromDetail(snapshot.session as CoworkSessionDetail);
+        setQuotaExhausted(quota.exhausted);
+        setQuotaKind(quota.kind);
       }
       // Step 2: heal the in-flight stream through the reassembler.
       if (snapshot.liveContent && snapshot.liveContent.sessionId === currentSessionId) {
@@ -371,6 +485,7 @@ export function useChat(): {
     permission,
     toolCalls,
     quotaExhausted,
+    quotaKind,
     setMetabotId,
     reloadSessions,
     openSession,

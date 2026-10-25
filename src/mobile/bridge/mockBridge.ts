@@ -17,15 +17,15 @@
  *   - cowork.onStreamPermission     <- 'cowork:stream:permission'    { sessionId, request: CoworkPermissionRequest }
  *   - cowork.onStreamPermissionResolved <- 'cowork:stream:permissionResolved' { requestId }
  *   - cowork.onStreamComplete       <- 'cowork:stream:complete'      { sessionId, claudeSessionId }
- *   - cowork.onStreamError          <- 'cowork:stream:error'         { sessionId, error }
+ *   - cowork.onStreamError          <- 'cowork:stream:error'         { sessionId, error, metadata? }
  *   - scheduledTasks.onRunUpdate    <- 'scheduledTask:runUpdate'     { run }
  *   - scheduledTasks.onStatusUpdate <- 'scheduledTask:statusUpdate'  { taskId, state }
  *
  * Payload simplifications vs the desktop main process (documented per REQ-E-8):
- *   - 'cowork:stream:complete' carries an optional extension field
- *     `metadata.errorCode` for the LLM_QUOTA_EXHAUSTED scenario (WS-A
- *     REQ-A-25); IElectronAPI types it as { sessionId, claudeSessionId } only,
- *     and WS-A will add the metadata field on the server side.
+ *   - 'cowork:stream:error' carries an optional `metadata.errorCode` for
+ *     the LLM_QUOTA_EXHAUSTED scenario (WS-A REQ-A-25): the runner stamps
+ *     it on the ERROR frame together with the persisted `Error: …` system
+ *     row, so the mobile recharge card keys off it without parsing the text.
  *   - Stream deltas are emitted on a fixed timer instead of model-paced flush
  *     batches; the { delta, baseLength } wire shape is identical, so the real
  *     CoworkStreamReassembler consumes them unchanged.
@@ -382,13 +382,26 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
 
     if (destroyed) return;
     if (wantsQuota) {
-      assistantMessage.metadata = { ...(assistantMessage.metadata ?? {}), errorCode: QUOTA_ERROR_CODE };
       session.status = 'error';
-      // Extension payload: WS-A REQ-A-25 adds metadata.errorCode to the
-      // completion event; IElectronAPI types only { sessionId, claudeSessionId } today.
-      emitter.emit('cowork:stream:complete', {
+      session.updatedAt = now();
+      // Real contract (main.ts runner wiring, REQ-A-25): a quota death
+      // settles like every terminal turn failure — a persisted `Error: …`
+      // system row broadcast on cowork:stream:message, then the
+      // cowork:stream:error frame carrying metadata.errorCode. The
+      // completion frame never carries quota metadata; the assistant
+      // bubble keeps only the partial text streamed before the death.
+      const errorText = 'DSH turn failed: LLM quota exhausted (free_quota_exhausted)';
+      const systemError: MockCoworkMessage = {
+        id: nextMessageId(),
+        type: 'system',
+        content: `Error: ${errorText}`,
+        timestamp: now(),
+      };
+      session.messages.push(systemError);
+      emitter.emit('cowork:stream:message', { sessionId: session.id, message: { ...systemError } });
+      emitter.emit('cowork:stream:error', {
         sessionId: session.id,
-        claudeSessionId: session.claudeSessionId,
+        error: errorText,
         metadata: { errorCode: QUOTA_ERROR_CODE },
       });
       return;

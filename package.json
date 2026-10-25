@@ -16,7 +16,7 @@
     "test:e2e:mobile": "node scripts/run-mobile-e2e.mjs",
     "test:e2e:mobile:gateway": "node scripts/run-mobile-e2e-gateway.mjs",
     "build:mobile": "cross-env NODE_ENV=production MOBILE_BUNDLE=app vite build --config vite.mobile.config.ts && cross-env NODE_ENV=production MOBILE_BUNDLE=login vite build --config vite.mobile.config.ts && node scripts/check-mobile-budgets.mjs",
-    "test:mobile": "tsc --noEmit && npx tsx --test tests/mobileMockBridge.test.ts tests/mobileLoginApi.test.ts tests/mobileInAppBrowser.test.ts tests/mobileShim.test.ts tests/mobileGatewayClient.test.ts tests/mobileUpload.test.ts tests/localFileUrl.test.ts tests/mobileResync.test.ts && node --test tests/mobileI18nStatic.test.mjs",
+    "test:mobile": "tsc --noEmit && npx tsx --test tests/mobileMockBridge.test.ts tests/mobileLoginApi.test.ts tests/mobileInAppBrowser.test.ts tests/mobileShim.test.ts tests/mobileGatewayClient.test.ts tests/mobileUpload.test.ts tests/localFileUrl.test.ts tests/mobileResync.test.ts tests/mobileQuotaExhausted.test.tsx && node --test tests/mobileI18nStatic.test.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "check:cross-platform-paths": "node scripts/check-cross-platform-paths.js",
     "check:dsh-deps": "node scripts/check-dsh-runtime-deps.cjs",

@@ -134,22 +134,41 @@ test('permission request arrives, resolves via respond, and empties the pending 
   for (const off of offs) off();
 });
 
-test('quota trigger ends the stream with LLM_QUOTA_EXHAUSTED metadata', async (t) => {
+test('quota trigger settles as a stream:error frame with LLM_QUOTA_EXHAUSTED metadata', async (t) => {
   const bridge = makeBridge();
   t.after(() => bridge.destroy());
   const api = bridge.electron;
 
+  // Real contract (REQ-A-25, main.ts runner wiring): the quota death rides
+  // the ERROR frame with metadata.errorCode; the completion frame never
+  // carries quota metadata.
+  const errors: Array<{ sessionId: string; error: string; metadata?: { errorCode?: string } }> = [];
   const completes: Array<{ sessionId: string; metadata?: { errorCode?: string } }> = [];
-  const off = api.cowork.onStreamComplete((payload) => completes.push(payload));
+  const offErrors = api.cowork.onStreamError((payload) => errors.push(payload));
+  const offCompletes = api.cowork.onStreamComplete((payload) => completes.push(payload));
 
   const started = await api.cowork.startSession({ prompt: 'what is my quota' });
   assert.equal(started.success, true);
-  await waitFor(() => completes.length === 1, 'quota completion');
+  await waitFor(() => errors.length === 1, 'quota stream error');
 
-  assert.equal(completes[0].metadata?.errorCode, 'LLM_QUOTA_EXHAUSTED');
+  assert.equal(errors[0].sessionId, started.session.id);
+  assert.equal(errors[0].metadata?.errorCode, 'LLM_QUOTA_EXHAUSTED');
+  assert.match(errors[0].error, /free_quota_exhausted/);
+  assert.equal(completes.length, 0);
+
   const fetched = await api.cowork.getSession(started.session.id);
   assert.equal(fetched.session.status, 'error');
-  off();
+  // The terminal error row is persisted exactly like the real runner's
+  // handleError, so a reopened session still shows the failure.
+  assert.ok(
+    (fetched.session.messages as Array<{ type: string; content: string }>).some(
+      (message) => message.type === 'system'
+        && message.content.startsWith('Error:')
+        && message.content.includes('free_quota_exhausted'),
+    ),
+  );
+  offErrors();
+  offCompletes();
 });
 
 test('scheduled-task run event arrives and the run shows up in history', async (t) => {

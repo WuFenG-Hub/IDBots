@@ -214,6 +214,15 @@ export default function ChatScreen(props: { chat: Chat; bots: MockMetabot[]; onO
                 <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl bg-[var(--color-primary)] px-3.5 py-2.5 text-[15px] text-black">
                   {message.text}
                 </div>
+              ) : message.role === 'error' ? (
+                /* Terminal turn failure persisted by the runner (Error: …);
+                   plain text, full width — a dead turn must not be silent. */
+                <div
+                  className="w-full whitespace-pre-wrap break-words rounded-2xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-sm text-red-700"
+                  data-testid="error-bubble"
+                >
+                  {message.text}
+                </div>
               ) : (
                 <div className="max-w-[90%] rounded-2xl border border-[var(--border-color)] bg-[var(--bg-panel)] px-3.5 py-2.5">
                   {/* T3 swap (REQ-E-26): the desktop MarkdownContent renders GFM,
@@ -234,8 +243,16 @@ export default function ChatScreen(props: { chat: Chat; bots: MockMetabot[]; onO
 
       {chat.quotaExhausted ? (
         <div className="mx-3 mb-2 rounded-2xl border border-amber-300 bg-amber-50 p-3" data-testid="quota-card">
-          <p className="text-sm font-semibold text-amber-800">{t('mobile.chat.quotaTitle')}</p>
-          <p className="mb-2 text-sm text-amber-700">{t('mobile.chat.quotaBody')}</p>
+          {/* REQ-A-25 has two relay codes — free_quota_exhausted (free starter
+              allowance) and quota_exhausted (purchased pool) — surfaced as the
+              card kind; copy stays friendly either way and always names the
+              way out: recharge. */}
+          <p className="text-sm font-semibold text-amber-800">
+            {t(chat.quotaKind === 'purchased' ? 'mobile.chat.quotaTitlePurchased' : 'mobile.chat.quotaTitleFree')}
+          </p>
+          <p className="mb-2 text-sm text-amber-700">
+            {t(chat.quotaKind === 'purchased' ? 'mobile.chat.quotaBodyPurchased' : 'mobile.chat.quotaBodyFree')}
+          </p>
           <div className="flex gap-2">
             <button
               type="button"
