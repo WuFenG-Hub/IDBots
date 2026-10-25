@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Motion Video Arena</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-row">
+      <span class="logo">MVA</span>
+      <span class="brand-name">Motion Video Arena</span>
+      <span id="mode-line" class="mode-line"></span>
+    </div>
+    <p id="actor-line" class="actor-line"></p>
+    <p class="intro">
+      Watch two code-rendered Motion Videos and pick the one you prefer. Choices queue locally and are
+      submitted together as one public on-chain preference pin through the Browser identity you select.
+      Author, model, and scores stay hidden until after you choose.
+    </p>
+  </header>
+
+  <main id="arena-root" class="layout">
+    <section class="stage-col" aria-label="Comparison stage">
+      <p id="pool-status" class="pool-status"></p>
+      <div id="stage" class="stage"></div>
+      <p id="status-line" class="status-line" role="status" aria-live="polite"></p>
+      <button type="button" id="next-pair-button" class="ghost">Next pair</button>
+    </section>
+
+    <aside class="queue-col" aria-label="Queued comparisons">
+      <h2 class="queue-title">Queued comparisons</h2>
+      <p id="queue-count" class="queue-count"></p>
+      <div id="queue-list" class="queue-list"></div>
+      <p class="queue-warn small">
+        Submitting writes your choices and any reasons as one public pin on chain. Only deliberate
+        choices are submitted — watch time and viewing behavior stay local and never enter the pin.
+      </p>
+      <button type="button" id="submit-button" class="primary" disabled>Submit comparisons</button>
+    </aside>
+  </main>
+
+  <footer class="foot">
+    Motion Video Arena is a portable MetaApp. Signing identity is chosen in the Browser chrome; this app
+    never signs by itself. Technical playback failures are never counted as negative votes.
+  </footer>
+
+  <script src="./agent-browser-helper.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>

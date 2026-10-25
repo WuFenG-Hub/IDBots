@@ -331,6 +331,8 @@ METAAPPs/*
 !METAAPPs/metatask-viz/**
 !METAAPPs/simplelog-timeline/
 !METAAPPs/simplelog-timeline/**
+!METAAPPs/motion-video-arena/
+!METAAPPs/motion-video-arena/**
 METAAPPs/metaapps.config.json
 METAAPPs/**/.DS_Store
 
@@ -737,3 +739,9 @@ blob-report/
 # Memory evolution #5: per-bot owner directives (external-facing hard rules)
 !tests/botDirectives.test.mjs
 !tests/botDirectivesUiStatic.test.mjs
+
+# Motion Video Arena MetaApp (WS4): component tests, mock MetaSo + mock Browser bridge
+!tests/motionVideoArena.test.mjs
+!tests/motionVideoArenaStatic.test.mjs
+!tests/motionVideoArenaBridge.test.mjs
+!tests/motionVideoArenaHostSim.html

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Self-test harness — Motion Video Arena</title>
+  <style>
+    body { margin: 0; font: 13px/1.4 monospace; }
+    iframe { width: 100%; height: 78vh; border: 2px solid #303133; }
+    #harness-log { white-space: pre-wrap; padding: 6px 10px; background: #f3f4f6; }
+  </style>
+</head>
+<body>
+  <div id="harness-log">self-test harness booting…</div>
+  <iframe id="arena" title="arena under test"></iframe>
+  <script>
+    // Development-only self-test page. Lives in tests/ — NOT inside
+    // METAAPPs/motion-video-arena/ — so it never ships in the published
+    // package (electron-builder extraResources copies the whole METAAPPs
+    // directory into the release ZIP).
+    //
+    // Mode A (default, silent parent): the app's host probe times out, the
+    // explicit ?mock=1 parameter activates local mocks, and the harness
+    // auto-drives vote → submit, capturing the mock success copy.
+    //
+    // Mode B (?host=1): the harness answers the exact postMessage protocol
+    // implemented by the Bot Browser chrome (agent-browser:request →
+    // agent-browser:response, agent-browser:event broadcast) and records
+    // every bridge call. The mock parameter must be ignored (live host
+    // wins), the Actor line must show the simulated host Actor, and the
+    // submit button must stay locked until the Arena root is published.
+    (function () {
+      var HOST_MODE = new URLSearchParams(location.search).get('host') === '1';
+      var log = document.getElementById('harness-log');
+      var lines = [];
+      function say(text) {
+        lines.push(text);
+        log.textContent = lines.join('\n');
+      }
+      say('self-test harness: ' + (HOST_MODE ? 'HOST mode (protocol answered)' : 'SILENT mode (mock flow, auto-drive)'));
+
+      var HOST_ACTOR = { globalMetaId: 'idhostsimactor0000000000000000000000001', name: 'Test Host Actor', kind: 'idbots-account' };
+      var frame = document.getElementById('arena');
+      var pinWriteRequests = 0;
+
+      if (HOST_MODE) {
+        frame.addEventListener('load', function () {
+          say('harness(host): frame loaded, broadcasting browser.actor.changed');
+          frame.contentWindow.postMessage({
+            type: 'agent-browser:event',
+            version: 1,
+            event: 'browser.actor.changed',
+            payload: { actor: HOST_ACTOR },
+          }, '*');
+        });
+        window.addEventListener('message', function (event) {
+          var data = event && event.data;
+          if (!data || data.type !== 'agent-browser:request') return;
+          say('harness(host): request ' + data.method + ' id=' + data.id);
+          function reply(ok, body) {
+            var message = { type: 'agent-browser:response', version: 1, id: data.id, ok: ok };
+            if (ok) message.result = body || {};
+            else message.error = body || { code: 'invalid_request', message: 'simulated error' };
+            event.source.postMessage(message, '*');
+          }
+          if (data.method === 'browser.actor.current') {
+            reply(true, { actor: HOST_ACTOR });
+            return;
+          }
+          if (data.method === 'metaid.pin.write') {
+            pinWriteRequests += 1;
+            var payload = data.params && data.params.payload ? JSON.parse(data.params.payload.value) : null;
+            say('harness(host): metaid.pin.write #' + pinWriteRequests +
+                ' path=' + (data.params && data.params.path) +
+                ' clientArtifact=' + (payload && payload.client && payload.client.artifact));
+            // The real chrome renders its confirmation card here; the
+            // harness never signs and answers with the expected production
+            // state for an unpublished client root.
+            reply(false, { code: 'pin_write_locked', message: 'simulated: submission locked — Arena root not yet published' });
+            return;
+          }
+          reply(false, { code: 'unsupported_method', message: 'simulated host: unsupported ' + data.method });
+        });
+      }
+
+      function appDoc() { return frame.contentDocument; }
+      function clickById(id) {
+        var node = appDoc().getElementById(id);
+        if (!node) return false;
+        node.click();
+        return true;
+      }
+      function clickChoice(label) {
+        var buttons = appDoc().querySelectorAll('button');
+        for (var i = 0; i < buttons.length; i++) {
+          if (buttons[i].textContent.trim() === label) {
+            buttons[i].click();
+            return true;
+          }
+        }
+        return false;
+      }
+
+      if (!HOST_MODE) {
+        // Silent mode: wait out the 8 s host probe, then auto-drive one
+        // comparison through the mock bridge and capture the outcome copy.
+        frame.addEventListener('load', function () {
+          setTimeout(function () {
+            say('harness(silent): auto-drive vote…');
+            var voted = clickChoice('Prefer left');
+            setTimeout(function () {
+              say('harness(silent): voted=' + voted + ' → submit…');
+              clickById('submit-button');
+              setTimeout(function () {
+                say('harness(silent): settled after submit');
+                say(dump());
+              }, 1500);
+            }, 1500);
+          }, 9500);
+        });
+      }
+
+      function dump() {
+        var doc = appDoc();
+        var text = function (id) {
+          var node = doc.getElementById(id);
+          return node ? node.textContent.trim() : '(missing)';
+        };
+        var button = doc.getElementById('submit-button');
+        return JSON.stringify({
+          actorLine: text('actor-line'),
+          modeLine: text('mode-line'),
+          poolStatus: text('pool-status'),
+          queueCount: text('queue-count'),
+          submitDisabled: button ? button.disabled : null,
+          submitLabel: button ? button.textContent.trim() : null,
+          status: text('status-line'),
+          pinWriteRequests: pinWriteRequests,
+        }, null, 2);
+      }
+      window.__harnessDump = dump;
+      var variant = new URLSearchParams(location.search).get('mock') || '1';
+      // Serve the REPOSITORY ROOT (e.g. `python3 -m http.server 18742` from the
+      // repo top) and open /tests/motionVideoArenaHostSim.html — the iframe
+      // targets the package relatively, same-origin for state dumps.
+      frame.src = '../METAAPPs/motion-video-arena/index.html?mock=' + encodeURIComponent(variant) + '&mockVideoA=http://127.0.0.1:18743/a.mp4&mockVideoB=http://127.0.0.1:18743/b.mp4';
+    })();
+  </script>
+</body>
+</html>

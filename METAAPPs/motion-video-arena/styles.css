@@ -1,0 +1,235 @@
+/* Motion Video Arena — single-file styles, no external dependencies.
+ * Desktop: two-column compare grid + queue sidebar. Narrow (<=860px):
+ * everything stacks vertically; each pane keeps its own vote association. */
+
+:root {
+  --ink: #303133;
+  --ink-soft: #5f6368;
+  --paper: #f7f7f8;
+  --card: #ffffff;
+  --line: #dadce0;
+  --accent: #9a3412;
+  --ok: #1b5e20;
+  --error: #b3261e;
+  --focus: #1a73e8;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overflow-wrap: anywhere;
+}
+
+/* Keyboard visibility: never rely on color alone; outline every focused control. */
+button:focus-visible,
+input:focus-visible,
+summary:focus-visible,
+video:focus-visible,
+a:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+button {
+  font: inherit;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) { border-color: var(--ink-soft); }
+
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+button.choice { font-weight: 600; }
+
+button.ghost { background: transparent; }
+
+button.small { padding: 4px 10px; font-size: 13px; }
+
+.topbar {
+  padding: 14px 20px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+}
+
+.brand-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.logo {
+  display: inline-block;
+  background: var(--ink);
+  color: #fff;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.brand-name { font-size: 18px; font-weight: 600; }
+
+.mode-line { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.pill {
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pill-mock { background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; }
+
+.pill-smoke { background: #ede9fe; color: #5b21b6; border: 1px solid #8b5cf6; }
+
+.actor-line { margin: 8px 0 0; font-size: 13px; color: var(--ink-soft); }
+
+.intro { margin: 6px 0 0; font-size: 13px; color: var(--ink-soft); max-width: 72ch; }
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 18px;
+  padding: 18px 20px;
+  align-items: start;
+}
+
+.pool-status { margin: 0 0 10px; font-size: 13px; color: var(--ink-soft); }
+
+.stage { min-height: 120px; }
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.pane {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pane-title { margin: 0; font-size: 15px; }
+
+.pane video {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 8px;
+}
+
+.pane-meta { margin: 0; font-size: 13px; color: var(--ink-soft); }
+
+.pane-error { margin: 0; font-size: 13px; color: var(--error); }
+
+.vote-block {
+  margin-top: 14px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.reason-label { font-size: 13px; font-weight: 600; }
+
+#reason-input {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.controls { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+
+.status-line { margin: 12px 0 8px; font-size: 14px; min-height: 1.5em; }
+
+.status-line.ok { color: var(--ok); font-weight: 600; }
+
+.status-line.error { color: var(--error); font-weight: 600; }
+
+.status-line.muted { color: var(--ink-soft); }
+
+.notice {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.queue-col {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  position: sticky;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.queue-title { margin: 0; font-size: 16px; }
+
+.queue-count { margin: 0; font-size: 13px; font-weight: 600; }
+
+.queue-list { display: flex; flex-direction: column; gap: 8px; }
+
+.queue-item { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+
+.queue-item summary { cursor: pointer; font-size: 13px; }
+
+.queue-item-body { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+
+.queue-item-body p { margin: 0; }
+
+.queue-warn { color: var(--ink-soft); margin: 4px 0 0; }
+
+.muted { color: var(--ink-soft); }
+
+.small { font-size: 13px; }
+
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+
+.foot {
+  padding: 14px 20px 20px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  border-top: 1px solid var(--line);
+}
+
+/* Narrow screens: stack the two players vertically, then the vote block.
+ * Each pane keeps its heading ("Left video"/"Right video") so the choice
+ * buttons stay associated with the right video in the stacked order. */
+@media (max-width: 860px) {
+  .layout { grid-template-columns: minmax(0, 1fr); padding: 12px; }
+
+  .queue-col { position: static; }
+
+  .compare-grid { grid-template-columns: minmax(0, 1fr); }
+
+  .intro { display: none; }
+}
