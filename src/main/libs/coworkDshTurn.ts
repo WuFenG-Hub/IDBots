@@ -432,6 +432,17 @@ interface DshRuntimeSlot {
   workspaceSeen: DshRuntimeConfigInput['workspace']
   providersSeen: Map<string, DshProviderRoute>
   routeApiKeys: Map<string, { envName: string; apiKey: string }>
+  /** DeepSeek server-side web search mount state for THIS slot: set once the
+   *  slot's own provider union contains an official DeepSeek route with an
+   *  API key. Per-slot by design (fix/websearch-provider-gating): the search
+   *  endpoint is DeepSeek-account-bound, so a slot whose provider is not
+   *  DeepSeek must not mount the trio — the pre-fix hub-level stickiness
+   *  mounted it into every runtime after ANY DeepSeek route was seen, and an
+   *  out-of-balance DeepSeek account then turned every model web_search call
+   *  into an HTTP 402. */
+  webSearchSeen: { apiKey: string; baseURL: string } | null
+  /** Guard for the one-time provider-gate notice (see buildRuntimeConfig). */
+  webSearchGateNoticeSent: boolean
   mcpServersSeen: Map<string, DshMcpServerDefinition>
   /** The slot key already encodes this combo, so every turn landing here
    *  carries the same values — these simply record them for config rebuilds
@@ -463,10 +474,6 @@ export class DshTurnHub {
   private kernelByDsh = new Map<string, DshKernel>()
   /** Approval / ask ids belong to the kernel that raised them. */
   private askKernelById = new Map<string, DshKernel>()
-  /** DeepSeek server-side web search is composition-level and shared across
-   *  every provider slot once an official DeepSeek route has been seen —
-   *  same stickiness as the pre-split single runtime. */
-  private webSearchSeen: { apiKey: string; baseURL: string } | null = null
   private reapTimer: ReturnType<typeof setTimeout> | null = null
   /** Per-DSH-session turn chain: a runTurn for a session whose previous turn
    *  is still in flight must queue, never overwrite the live controller —
@@ -1078,6 +1085,8 @@ export class DshTurnHub {
       workspaceSeen: undefined,
       providersSeen: new Map(),
       routeApiKeys: new Map(),
+      webSearchSeen: null,
+      webSearchGateNoticeSent: false,
       mcpServersSeen: new Map(),
       browserUseSeen: undefined,
       computerUseSeen: false,
@@ -1186,7 +1195,7 @@ export class DshTurnHub {
       }
     }
     if (isOfficialDeepSeekRoute(input.provider) && input.provider.apiKey) {
-      this.webSearchSeen = {
+      slot.webSearchSeen = {
         apiKey: input.provider.apiKey,
         baseURL: deepSeekWebSearchBaseURL(input.provider.baseUrl),
       }
@@ -1197,6 +1206,13 @@ export class DshTurnHub {
   }
 
   private buildRuntimeConfig(slot: DshRuntimeSlot, input: DshTurnInput): DshRuntimeConfigInput {
+    if (!slot.webSearchSeen && !slot.webSearchGateNoticeSent) {
+      slot.webSearchGateNoticeSent = true
+      this.opts.log?.('info', 'dshTurnHub.webSearchProviderGated', {
+        runtime: slot.key,
+        detail: 'built-in web_search not mounted: the search endpoint is DeepSeek-account-bound and this provider slot has no official DeepSeek route; use the browser-search skill (SKILLs/web-search) if web search is needed',
+      })
+    }
     return {
       sessionRoot: this.opts.sessionRoot,
       runtimeId: slot.key,
@@ -1217,10 +1233,10 @@ export class DshTurnHub {
       mcpServers: [...slot.mcpServersSeen.values()],
       ...(slot.browserUseSeen !== undefined ? { browserUse: slot.browserUseSeen } : {}),
       ...(slot.computerUseSeen ? { computerUse: true } : {}),
-      ...(this.webSearchSeen ? {
+      ...(slot.webSearchSeen ? {
         webSearch: {
           apiKeyEnv: DSH_WEBSEARCH_API_KEY_ENV,
-          baseURL: this.webSearchSeen.baseURL,
+          baseURL: slot.webSearchSeen.baseURL,
           model: DSH_WEBSEARCH_MODEL,
         },
       } : {}),
@@ -1232,7 +1248,7 @@ export class DshTurnHub {
       extraEntries: [...(this.opts.extraEntries ?? []), ...(this.opts.extraEntriesProvider?.() ?? [])],
       env: buildDshChildEnv({
         routeApiKeys: slot.routeApiKeys.values(),
-        webSearchApiKey: this.webSearchSeen?.apiKey,
+        webSearchApiKey: slot.webSearchSeen?.apiKey,
         rpcToken: getMetaidRpcToken(),
         rpcAuthFile: getMetaidRpcTokenFilePath(app.getPath('userData')),
         skillHostEnv: this.opts.skillHostEnvProvider?.(),
