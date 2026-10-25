@@ -17,6 +17,16 @@
 
 import type { AppLanguage } from '../libs/inferLanguageFromLocale';
 import {
+  hasDeliverableTagLine,
+  parseDeliverableLines,
+} from './groupTaskDeliverableParser';
+
+/** Fence-only strip (mirrors the daemon's local stripFencedCodeBlocks, kept local to avoid a daemon→parser import cycle). */
+function stripFencedCodeBlocksLocal(content: string): string {
+  return String(content ?? '')
+    .replace(/```[\s\S]*?(?:```|$)/g, '');
+}
+import {
   GROUP_TASK_NOTICE,
   acceptanceSummaryCopy,
   buildAcceptanceGuidanceText,
@@ -236,6 +246,52 @@ export function extractChairConclusion(report: string): string | null {
   return cleaned.length > CHAIR_CONCLUSION_MAX_CHARS
     ? `${cleaned.slice(0, CHAIR_CONCLUSION_MAX_CHARS).trimEnd()}…`
     : cleaned;
+}
+
+// ---------------------------------------------------------------------------
+// F-6: acceptance-summary vs deliverable-ledger consistency check.
+//
+// The summary's deliverable checklist is built from the ledger (never from the
+// message stream), so a [DELIVERABLE]-tagged message the ingestion path missed
+// (historically: chair-session publications) would silently vanish from every
+// owner-facing surface. This pure detector cross-checks the group's
+// [DELIVERABLE]-tagged message history against the ledger's recorded message
+// pins so the summary generation site can flag — never silently swallow — the
+// gap.
+// ---------------------------------------------------------------------------
+
+/** One group message carrying a valid protocol [DELIVERABLE] tag line that has no ledger row. */
+export interface DeliverableLedgerGap {
+  pinId: string;
+  senderGlobalMetaId: string | null;
+}
+
+/**
+ * F-6: messages whose (fence-stripped) content carries a PROTOCOL
+ * [DELIVERABLE] tag line with at least one VALID candidate, but whose message
+ * pin has no row in the ledger. `ledgerMsgPinIds` is the set of msg_pin_id
+ * values already recorded (worker path, chair path, or external close-time
+ * registrations). Messages without a pin id cannot be ledger-joined and are
+ * skipped; invalid-only tag lines (placeholders, truncated URIs) are not gaps.
+ */
+export function detectDeliverableLedgerGaps(
+  tagMessages: Array<{ pinId: string; senderGlobalMetaId: string | null; content: string | null }>,
+  ledgerMsgPinIds: Iterable<string>,
+): DeliverableLedgerGap[] {
+  const recorded = new Set(
+    Array.from(ledgerMsgPinIds).map((pin) => String(pin ?? '').trim()).filter(Boolean),
+  );
+  const gaps: DeliverableLedgerGap[] = [];
+  for (const message of Array.isArray(tagMessages) ? tagMessages : []) {
+    const pinId = String(message?.pinId ?? '').trim();
+    if (!pinId || recorded.has(pinId)) continue;
+    const parseContent = stripFencedCodeBlocksLocal(String(message?.content ?? ''));
+    if (!hasDeliverableTagLine(parseContent)) continue;
+    const candidates = parseDeliverableLines(parseContent);
+    if (!candidates.some((candidate) => candidate.valid)) continue;
+    gaps.push({ pinId, senderGlobalMetaId: message.senderGlobalMetaId ?? null });
+  }
+  return gaps;
 }
 
 // ---------------------------------------------------------------------------

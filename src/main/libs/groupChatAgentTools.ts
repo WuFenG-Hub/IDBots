@@ -31,6 +31,13 @@ export type GroupChatControl = {
     channelId?: string;
     mention?: string[];
     network?: 'mvc' | 'doge' | 'btc';
+    /**
+     * FIX-B (F-4, gt#6 2026-10-24): the cowork session invoking the tool.
+     * Enables the host-side chair-identity guard: a send under the chair
+     * bot's identity on a running group task is refused unless this session
+     * IS the task's daemon-chair session.
+     */
+    sessionId?: string;
   }): Promise<{ txids: string[]; pinId: string; totalCost?: number; feeAssist?: unknown }>;
   /**
    * Task #65: when this cowork session belongs to a GROUP TASK, the on-chain
@@ -307,6 +314,9 @@ export function buildGroupChatAgentTools(deps: {
           channelId: asString(args.channel_id) || undefined,
           mention: mention.length ? mention : undefined,
           network,
+          // FIX-B (F-4, gt#6): forward the calling session so the host can
+          // gate chair-identity sends on running group tasks.
+          sessionId,
         });
         return textResult(formatPinResult('Group message sent (SimpleGroupChat).', result) + routingNote);
       } catch (error) {

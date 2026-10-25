@@ -88,9 +88,11 @@ import { recordMetaIDGroupTaskExperience } from './metaidExperienceRecorder';
 import {
   buildAcceptanceSummary,
   buildGroupTaskTimeBreakdown,
+  detectDeliverableLedgerGaps,
   extractChairConclusion,
   extractCriteriaVerdicts,
 } from './groupTaskAcceptanceSummary';
+import { findOutgoingGroupSendByPin } from './groupSendLedger';
 import {
   buildExperiencePromptBlocksXml,
   RECENT_SUMMARIES_PROMPT_DAYS,
@@ -1884,6 +1886,115 @@ export function gateExternalChairSend(input: GateExternalChairSendInput):
   };
 }
 
+/**
+ * FIX-B (F-4, gt#6 2026-10-24): chair-identity guard for the HOST group_chat
+ * TOOL send path (send_group_message). The P2 RPC gate above covers the skill
+ * script channel only; a Twin cowork session could still post a
+ * chair-identity directive into a running task's group through this tool —
+ * the exact bypass that produced the second, contradictory "Monday" dispatch
+ * plan (pin 56f14b23…). The chain signature cannot distinguish sessions (same
+ * bot wallet), but the TOOL layer knows the calling cowork session, so the
+ * gate compares it with the task's own daemon-chair session binding
+ * (channel 'metaweb_group_task', conversation 'group-task:<id>').
+ *
+ * Rules: worker-identity sends always pass; chair-identity sends on a
+ * TERMINAL task pass; a chair-identity send passes only when it comes from
+ * the task's own chair session (the daemon chair legitimately delivers
+ * mid-turn through this tool — Task #83). Everything else — including a
+ * missing/unknown sessionId — is refused with the same
+ * CHAIR_IDENTITY_CONFIRM_REQUIRED code family as the RPC gate. Pure +
+ * exported for unit tests.
+ */
+export interface GateGroupChatToolChairSendInput {
+  senderMetabotId: number;
+  /** Chair member's metabot id of the task bound to the target group. */
+  chairMetabotId: number | null;
+  /** Task status; terminal tasks have no chair floor to protect. */
+  taskStatus: string | null;
+  /** The cowork session invoking the group_chat tool. */
+  sessionId?: string | null;
+  /** Session id of the task's own daemon-chair session (null when unbound). */
+  chairSessionId?: string | null;
+}
+
+const GCT_TERMINAL_STATUSES = new Set(['done', 'cancelled']);
+
+export function gateGroupChatToolChairSend(input: GateGroupChatToolChairSendInput):
+  { ok: true } | { ok: false; code: 'CHAIR_IDENTITY_CONFIRM_REQUIRED'; error: string } {
+  const { senderMetabotId, chairMetabotId, taskStatus } = input;
+  if (chairMetabotId == null || senderMetabotId !== chairMetabotId) return { ok: true };
+  if (taskStatus != null && GCT_TERMINAL_STATUSES.has(taskStatus)) return { ok: true };
+  if (input.chairSessionId && input.sessionId && input.sessionId === input.chairSessionId) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    code: 'CHAIR_IDENTITY_CONFIRM_REQUIRED',
+    error:
+      'Refusing to send as the chair of a running group task from this session: ' +
+      'the chair voice belongs to the task\'s own daemon-driven chair session, and an external ' +
+      'chair-identity message reads as impersonation to the whole group (gt#6 / task #21 ' +
+      'incidents). Steer the task as the OWNER in the task UI instead.',
+  };
+}
+
+/**
+ * FIX-A (F-5, gt#6 2026-10-24): dispatch-layer attribution check. The chain
+ * signature cannot tell the daemon chair session from a Twin session using
+ * the same bot wallet, so the OUTGOING-SEND LEDGER is the extra signal: the
+ * daemon authors group posts through groupChatTransport (origin
+ * 'transport'), while the group_chat tool records its own sends with the
+ * calling session id. A message whose sender GlobalMetaID equals the chair's
+ * and whose pin is ledger-recorded from a NON-transport origin that is NOT
+ * the task's own chair session is a forged chair dispatch: tag-and-ignore
+ * (the daemon marks it SUSPECT so no worker is woken and no deliverable or
+ * assignment is derived from it).
+ *
+ * Fail-open by design on UNKNOWN origins: a pin this process never sent
+ * (other machine, or sent before a restart — the ledger is in-memory) stays
+ * unconsumed-guarded but is NOT flagged forged, because the old behavior
+ * (chair gmid = authority) must survive for genuinely daemon-authored
+ * pre-restart messages. Pure + exported for unit tests.
+ */
+export interface NonDaemonChairDispatchCheckInput {
+  pinId?: string | null;
+  senderGlobalMetaId?: string | null;
+  chairGlobalMetaId: string;
+  /** Ledger record origin for this pin, when this process knows the pin. */
+  ledgerOrigin?: string | null;
+  /** Ledger-recorded cowork session of the send, when known. */
+  ledgerSessionId?: string | null;
+  /** Session id of the task's own daemon-chair session (null when unbound). */
+  chairSessionId?: string | null;
+}
+
+export function isNonDaemonChairDispatch(input: NonDaemonChairDispatchCheckInput):
+  { forged: boolean; reason: string } {
+  const { pinId, senderGlobalMetaId, chairGlobalMetaId } = input;
+  if (!pinId || !chairGlobalMetaId || !senderGlobalMetaId) {
+    return { forged: false, reason: '' };
+  }
+  if (senderGlobalMetaId.trim().toLowerCase() !== chairGlobalMetaId.trim().toLowerCase()) {
+    return { forged: false, reason: '' };
+  }
+  const origin = (input.ledgerOrigin ?? '').trim();
+  if (!origin) {
+    return { forged: false, reason: '' }; // origin unknown (pre-restart / remote) — fail open
+  }
+  if (origin === 'transport' || origin === 'transport:identity') {
+    return { forged: false, reason: '' }; // daemon-authored
+  }
+  if (input.chairSessionId && input.ledgerSessionId === input.chairSessionId) {
+    return { forged: false, reason: '' }; // the task's own chair session delivering mid-turn (Task #83)
+  }
+  return {
+    forged: true,
+    reason:
+      `chair-identity pin ${pinId} was sent from ${input.ledgerSessionId ? `session ${input.ledgerSessionId}` : `origin "${origin}"`}` +
+      ' which is NOT the daemon-chair session',
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Daemon loop
 // ---------------------------------------------------------------------------
@@ -3484,6 +3595,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       const preferred = list.find((item) => {
         if (!item.row) return false;
+        // FIX-A (F-5, gt#6): a forged (SUSPECT) chair dispatch never wins
+        // coalescing preference — it is not a real assignment.
+        if (Number(item.row.sender_suspect ?? 0) === 1) return false;
         if (sqlite.get<string>(`${ACK_SEEN_PREFIX}${task.id}:${item.entry.messageId}`) === '1') return false;
         return isChairDispatchContent(
           String(item.row.content ?? '').trim(),
@@ -5216,8 +5330,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // when the notice round-trips through the daemon.
     if (hasGroupTaskNotice(content)) return verificationNotes;
 
-    // Deliverable collection is worker-only: a chair message that merely quotes
-    // an example (`metaapp://<pinId>`) or recap must never become a deliverable.
+    // Deliverable collection provenance (F-6 fix): the strict line-scoped parser
+    // already rejects prose citations and fenced examples, so a chair message
+    // carrying a PROTOCOL [DELIVERABLE] tag line is a real delivery (e.g. the
+    // final synthesis report at task close) — it now registers into the ledger
+    // with a `chair:` kind prefix as its provenance marker. Recaps that merely
+    // quote a `metaapp://<pinId>` example still never become deliverables.
     const chairGlobalMetaId = (
       members.find((member) => member.role === 'chair')?.globalmetaid ?? ''
     ).trim();
@@ -5247,10 +5365,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // R6/R9 (OpenTeam chat scenario): chat groups run zero ledger
       // discipline — a stray [DELIVERABLE] line in a conversation is noise,
       // never a task artifact.
-    } else if (
-      (hasDeliverableTagLine(parseContent) || simpleLogCandidates.length > 0)
-      && !isChairMessage
-    ) {
+    } else if (hasDeliverableTagLine(parseContent) || simpleLogCandidates.length > 0) {
+      // F-6 fix: chair-session publications are no longer excluded — they enter
+      // the ledger with a `chair:` provenance prefix on kind (mirroring the
+      // `external:` stamp used by close-time external_deliveries).
+      const chairProvenance = isChairMessage;
       // Round-4: per-candidate ingestion. Every [DELIVERABLE] tag occurrence
       // (its own line or inline) produces one candidate; valid candidates each
       // get their own row — a message with two tag lines records TWO rows.
@@ -5374,9 +5493,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           taskId: task.id,
           msgPinId,
           authorGlobalmetaid: message.senderGlobalMetaId,
-          kind: candidate.kind,
+          kind: chairProvenance
+            ? `chair:${candidate.kind ?? 'text'}`.slice(0, 100)
+            : candidate.kind,
           uri: candidate.uri,
         });
+        if (chairProvenance) {
+          // F-6 provenance: the durable marker is the `chair:` kind prefix
+          // (the verification column is later overwritten by the monitor's
+          // on-chain verification JSON).
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: chair-session [DELIVERABLE] registered ` +
+            `${deliverable.id} (${deliverable.kind}) with chair provenance`,
+          );
+        }
         recordedDeliverables.push(candidate);
         recordedNewCount += 1;
         // Review fix (delivery-deadline hygiene): the deliverable ARRIVED —
@@ -5890,6 +6020,45 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 // contract): review never blocks on a chain write.
                 try {
                   const deliverables = store.listDeliverables(task.id);
+                  // F-6 consistency check: the summary checklist renders from the
+                  // ledger ONLY, so a [DELIVERABLE]-tagged group message the
+                  // ingestion path missed would vanish from every owner-facing
+                  // surface while the narrative still claims completion. Detect
+                  // and flag it — never silently swallow.
+                  try {
+                    const gaps = detectDeliverableLedgerGaps(
+                      task.groupId
+                        ? store.listGroupChatMessagesWithDeliverableTag(task.groupId)
+                        : [],
+                      deliverables
+                        .map((deliverable) => deliverable.msgPinId)
+                        .filter((pin): pin is string => Boolean(pin)),
+                    );
+                    if (gaps.length > 0) {
+                      emitLog(
+                        `[GroupTaskDaemon] Task ${task.id}: F-6 ledger gap — ${gaps.length} ` +
+                        `[DELIVERABLE]-tagged message(s) missing from the ledger ` +
+                        `(${gaps.map((gap) => gap.pinId.slice(0, 24)).join(', ')}); ` +
+                        `the acceptance summary does NOT cover them`,
+                      );
+                      store.recordHostNote({
+                        taskId: task.id,
+                        kind: 'ledger',
+                        target: 'deliverable ledger consistency',
+                        dedupeKey: `f6_ledger_gap:${task.id}:${gaps.map((gap) => gap.pinId).join('|')}`,
+                        body:
+                          `Acceptance summary/ledger inconsistency (F-6): ` +
+                          `${gaps.length} message(s) carrying a valid [DELIVERABLE] tag have no ledger row ` +
+                          `(${gaps.map((gap) => `#${gap.pinId.slice(0, 24)}`).join(', ')}). ` +
+                          `The summary checklist below does not include them — reconcile before accepting.`,
+                      });
+                    }
+                  } catch (gapError) {
+                    emitLog(
+                      `[GroupTaskDaemon] Task ${task.id}: F-6 ledger gap check failed: ` +
+                      `${gapError instanceof Error ? gapError.message : String(gapError)}`,
+                    );
+                  }
                   // Improvement #4 (v1.3): snapshot the chair's recorded
                   // [PLAN_CHANGE] resolutions into the summary so every
                   // owner-facing surface renders the same disclosure.
@@ -8481,6 +8650,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     message: GroupTaskDaemonMessage,
     memberGmids: Set<string>,
     ownerGlobalMetaId: string,
+    // FIX-A (F-5, gt#6 2026-10-24): optional task/member context so the
+    // non-daemon chair-dispatch guard can run at this single attribution
+    // choke point — every downstream consumer (responder gating, deliverable
+    // collection, dependency-wait, tag processing) consumes the enriched
+    // message, so a SUSPECT stamp here removes the forged directive's
+    // dispatch semantics everywhere at once.
+    chairContext?: { task: GroupTask; members: GroupTaskMember[] } | null,
   ): Promise<GroupTaskDaemonMessage> => {
     let globalMetaId = (message.senderGlobalMetaId ?? '').trim();
     const legacy = (message.senderMetaId ?? '').trim();
@@ -8504,8 +8680,40 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
     const normalized = globalMetaId.toLowerCase();
-    const suspect = !globalMetaId
+    let suspect = !globalMetaId
       || (!memberGmids.has(normalized) && normalized !== ownerGlobalMetaId.toLowerCase());
+    // FIX-A (F-5, gt#6 2026-10-24): a chair-identity message whose pin the
+    // outgoing-send ledger attributes to a session OTHER than the task's own
+    // daemon-chair session (or to a non-transport origin at all) is a forged
+    // chair dispatch (the Twin-session bypass). Tag-and-ignore: mark SUSPECT
+    // so it never wakes workers, never lands as a deliverable, and never
+    // reads as an assignment. Fail-open when the pin's origin is unknown.
+    if (!suspect && chairContext && chairContext.task.mode !== 'chat') {
+      const chairMember = chairContext.members.find((candidate) => candidate.role === 'chair');
+      const chairGmid = (chairMember?.globalmetaid ?? '').trim();
+      if (chairMember && chairGmid && globalMetaId) {
+        const chairSessionId = chairMember.metabotId != null
+          ? (getLocalMemberSessionInfo(chairContext.task.id, chairMember.metabotId)?.sessionId ?? null)
+          : null;
+        const ledgerRecord = message.pinId ? findOutgoingGroupSendByPin(message.pinId) : undefined;
+        const verdict = isNonDaemonChairDispatch({
+          pinId: message.pinId,
+          senderGlobalMetaId: globalMetaId,
+          chairGlobalMetaId: chairGmid,
+          ledgerOrigin: ledgerRecord?.origin ?? null,
+          ledgerSessionId: ledgerRecord?.sessionId ?? null,
+          chairSessionId,
+        });
+        if (verdict.forged) {
+          suspect = true;
+          emitLog(
+            `[GroupTaskDaemon] Task ${chairContext.task.id}: message ${message.id} ` +
+            `(pin ${message.pinId ?? 'n/a'}) IGNORED as NON-DAEMON CHAIR DISPATCH — ${verdict.reason}. ` +
+            'No worker wake-up, no deliverable, no assignment (F-5 guard, gt#6).',
+          );
+        }
+      }
+    }
     if (suspect !== Boolean(message.senderSuspect)) {
       try {
         deps.getGroupTaskStore().setMessageSenderSuspect(message.id, suspect);
@@ -8977,6 +9185,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
         for (const row of rows) {
           const message = toDaemonMessage(row);
+          // FIX-A (F-5, gt#6): SUSPECT rows include forged chair dispatches —
+          // they must never read as the member's latest assignment.
+          if (message.senderSuspect) continue;
           if (hasGroupTaskNotice(message.content) || isRollCallPresenceCheck(message.content)) continue;
           if (isMentioned(message, bot)) {
             assignment = message;
@@ -10436,7 +10647,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       `(${freshStatus} -> ${directive})`,
     );
     const rawMessage = toDaemonMessage(candidate);
-    const tagMessage = await enrichMessageAttribution(rawMessage, memberGmids, ownerGlobalMetaId)
+    const tagMessage = await enrichMessageAttribution(rawMessage, memberGmids, ownerGlobalMetaId, { task, members })
       .catch(() => rawMessage);
     await processMessageTags(task, tagMessage, members, botsById, promptMembers);
     handleMemberProtocolMarkers(task, tagMessage, members, botsById);
@@ -12025,6 +12236,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           toDaemonMessage(row),
           memberGmids,
           ownerGlobalMetaId,
+          { task, members },
         );
         if (message.senderSuspect) {
           emitLog(
@@ -12353,7 +12565,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           // rows, protocol markers) get one final chance to land.
           try {
             const rawMessage = toDaemonMessage(row);
-            const tagMessage = await enrichMessageAttribution(rawMessage, memberGmids, ownerGlobalMetaId)
+            const tagMessage = await enrichMessageAttribution(rawMessage, memberGmids, ownerGlobalMetaId, { task, members })
               .catch(() => rawMessage);
             await processMessageTags(task, tagMessage, members, botsById, promptMembers);
             handleMemberProtocolMarkers(task, tagMessage, members, botsById);

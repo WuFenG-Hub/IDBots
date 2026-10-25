@@ -230,6 +230,9 @@ test('send_group_message uses the MetaBot display name as nickName and forwards 
     channelId: 'chan-1',
     mention: ['idq1a', 'idq1b'],
     network: 'mvc',
+    // FIX-B (F-4, gt#6): the tool now forwards the calling session so the
+    // host can gate chair-identity sends on running group tasks.
+    sessionId: SESSION_ID,
   });
   const text = result.content[0].text;
   assert.equal(result.isError, undefined);
