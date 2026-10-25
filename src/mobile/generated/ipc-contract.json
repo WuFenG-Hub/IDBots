@@ -199,6 +199,12 @@
       ]
     },
     {
+      "path": "botBrowser.getHumanActor",
+      "kind": "invoke",
+      "channel": "botBrowser:getHumanActor",
+      "args": []
+    },
+    {
       "path": "botBrowser.getMetaAppCache",
       "kind": "invoke",
       "channel": "botBrowser:getMetaAppCache",
@@ -219,6 +225,11 @@
       "args": [
         "input"
       ]
+    },
+    {
+      "path": "botBrowser.onActorsChanged",
+      "kind": "on",
+      "channel": "botBrowser:actorsChanged"
     },
     {
       "path": "botBrowser.onCaptureRequest",
@@ -395,6 +406,14 @@
       ]
     },
     {
+      "path": "cowork.archiveBotDirective",
+      "kind": "invoke",
+      "channel": "botDirectives:archive",
+      "args": [
+        "input"
+      ]
+    },
+    {
       "path": "cowork.archiveKnowledge",
       "kind": "invoke",
       "channel": "metaid:knowledge:archive",
@@ -452,6 +471,14 @@
       ]
     },
     {
+      "path": "cowork.createBotDirective",
+      "kind": "invoke",
+      "channel": "botDirectives:create",
+      "args": [
+        "input"
+      ]
+    },
+    {
       "path": "cowork.createGreetingSession",
       "kind": "invoke",
       "channel": "cowork:session:createGreeting",
@@ -463,6 +490,14 @@
       "path": "cowork.createMemoryEntry",
       "kind": "invoke",
       "channel": "cowork:memory:createEntry",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.createStandingPage",
+      "kind": "invoke",
+      "channel": "standingPages:create",
       "args": [
         "input"
       ]
@@ -711,6 +746,14 @@
       ]
     },
     {
+      "path": "cowork.listBotDirectives",
+      "kind": "invoke",
+      "channel": "botDirectives:list",
+      "args": [
+        "input"
+      ]
+    },
+    {
       "path": "cowork.listKnowledge",
       "kind": "invoke",
       "channel": "metaid:knowledge:list",
@@ -762,6 +805,14 @@
       "channel": "cowork:session:list",
       "args": [
         "options"
+      ]
+    },
+    {
+      "path": "cowork.listStandingPages",
+      "kind": "invoke",
+      "channel": "standingPages:list",
+      "args": [
+        "input"
       ]
     },
     {
@@ -889,6 +940,14 @@
       ]
     },
     {
+      "path": "cowork.removeStandingPage",
+      "kind": "invoke",
+      "channel": "standingPages:remove",
+      "args": [
+        "input"
+      ]
+    },
+    {
       "path": "cowork.renameSession",
       "kind": "invoke",
       "channel": "cowork:session:rename",
@@ -918,6 +977,22 @@
       "channel": "cowork:permission:respond",
       "args": [
         "options"
+      ]
+    },
+    {
+      "path": "cowork.restoreBotDirective",
+      "kind": "invoke",
+      "channel": "botDirectives:restore",
+      "args": [
+        "input"
+      ]
+    },
+    {
+      "path": "cowork.restoreStandingPage",
+      "kind": "invoke",
+      "channel": "standingPages:restore",
+      "args": [
+        "input"
       ]
     },
     {
@@ -1113,6 +1188,14 @@
       "channel": "cowork:session:unarchive",
       "args": [
         "sessionId"
+      ]
+    },
+    {
+      "path": "cowork.updateBotDirective",
+      "kind": "invoke",
+      "channel": "botDirectives:update",
+      "args": [
+        "input"
       ]
     },
     {
