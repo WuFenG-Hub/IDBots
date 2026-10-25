@@ -50,6 +50,8 @@ import type { ChatExperienceMode } from '../config';
 import LocalFileLink from './ui/LocalFileLink';
 import MobileFileLink from './ui/MobileFileLink';
 import InlineHtmlReportBlock from './cowork/InlineHtmlReportBlock';
+import InlineMetaAppBlock from './cowork/InlineMetaAppBlock';
+import { parseMetaAppEmbedUri } from './cowork/inlineMetaAppBridge';
 import { dispatchViewSession, parseIdbotsSessionUri } from '../utils/sessionDeepLink';
 import { buildLocalFileUrl, isMobileBridgeRuntime } from '../services/localFileUrl';
 
@@ -664,9 +666,36 @@ const createMarkdownComponents = (
       {children}
     </td>
   ),
-  img: ({ node, className, ...props }: any) => (
-    <img className="max-w-full h-auto rounded-xl my-4" {...props} />
-  ),
+  img: ({ node, className, src, alt, ...props }: any) => {
+    // `![name](metaapp://<pin>)` is the Bot's "show this app here" form; the
+    // link form keeps opening the Bot Browser. Assistant mode renders the app
+    // in place, every other surface degrades to the same Bot Browser link so
+    // the destination is never a broken image.
+    const embed = parseMetaAppEmbedUri(src);
+    if (embed) {
+      const caption = typeof alt === 'string' ? alt.trim() : '';
+      if (chatExperienceMode === 'assistant') {
+        return <InlineMetaAppBlock uri={embed.uri} title={caption} />;
+      }
+      const openUri = onOpenBotBrowserUri ?? ((uri: string) => {
+        window.dispatchEvent(new CustomEvent('botBrowser:openUri', { detail: { uri } }));
+      });
+      return (
+        <a
+          href={embed.uri}
+          onClick={(e: React.MouseEvent<HTMLAnchorElement>) => {
+            e.preventDefault();
+            openUri(embed.uri);
+          }}
+          className="text-claude-accent hover:text-claude-accentHover underline decoration-claude-accent/50 hover:decoration-claude-accent transition-colors cursor-pointer break-all"
+          title={embed.uri}
+        >
+          {caption || embed.uri}
+        </a>
+      );
+    }
+    return <img className="max-w-full h-auto rounded-xl my-4" src={src} alt={alt} {...props} />;
+  },
   hr: ({ node, ...props }: any) => (
     <hr className="my-[32px] dark:border-claude-darkBorder border-claude-border" {...props} />
   ),

@@ -1,6 +1,9 @@
 import React, { useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react';
 import { useSelector } from 'react-redux';
 import { MessageExtensionContext } from './MessageExtensionContext';
+import { InlineMetaAppActorContext } from './InlineMetaAppActorContext';
+import type { InlineMetaAppActor } from './inlineMetaAppBridge';
+import { buildLocalMetabotActorId } from '../../features/botBrowser/botBrowserIntent';
 import { RootState } from '../../store';
 import { i18nService } from '../../services/i18n';
 import { isMobileRuntime } from '../../services/isMobileRuntime';
@@ -3286,6 +3289,20 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const renameInputRef = useRef<HTMLInputElement>(null);
   const ignoreNextBlurRef = useRef(false);
   const [sessionMetabot, setSessionMetabot] = useState<{ name: string; avatar: string | null; llm_id: string | null; llm_provider?: string | null; llm_effort?: string | null; fallback_llm_id?: string | null; globalmetaid: string | null; metabot_type: string } | null>(null);
+  // MetaApps embedded in this session's assistant bubbles act as the session
+  // Bot (idbots-metabot-<id>, the actor id botBrowserBridgeService resolves to
+  // that Bot's wallet). Name/globalMetaId ride along for the app's
+  // browser.actor.current view; null when the session has no Bot.
+  const inlineMetaAppActor = useMemo<InlineMetaAppActor | null>(() => {
+    const metabotId = currentSession?.metabotId;
+    const actorId = typeof metabotId === 'number' ? buildLocalMetabotActorId(metabotId) : '';
+    if (!actorId) return null;
+    return {
+      actorId,
+      name: sessionMetabot?.name || currentSession?.metabotName || '',
+      globalMetaId: sessionMetabot?.globalmetaid || '',
+    };
+  }, [currentSession?.metabotId, currentSession?.metabotName, sessionMetabot?.name, sessionMetabot?.globalmetaid]);
   // Picker value: session pick wins, else the bound bot's brain (model id or
   // legacy provider key — the picker resolves legacy keys for display), else
   // nothing (global default). Effort mirrors the runtime tiering:
@@ -4863,6 +4880,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     : Math.max(MARKDOWN_VIEWER_MIN_WIDTH_PX, Math.round(window.innerWidth * markdownViewerFraction));
 
   return (
+    <InlineMetaAppActorContext.Provider value={inlineMetaAppActor}>
     <div ref={detailRootRef} className="relative flex-1 flex flex-col cowork-chat-surface h-full">
       {/* Header */}
       <div className="draggable flex h-12 items-center justify-between px-4 border-b dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface/50 bg-claude-surface/50 shrink-0">
@@ -5553,6 +5571,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         <div className="fixed inset-0 z-50 cursor-col-resize" />
       )}
     </div>
+    </InlineMetaAppActorContext.Provider>
   );
 };
 

@@ -50,6 +50,13 @@
  * explicit UI-language anchor (tApp) so zero-input turns are TOLD the
  * conversation language instead of inferring it from ambient prompt prose.
  * The anchor yields to the user's own words once they write.
+ *
+ * 2026-10-25: MetaApps can render inside assistant bubbles. The embed form is
+ * markdown image syntax (`![name](metaapp://<pin>)`, InlineMetaAppBlock); the
+ * link form keeps opening the Bot Browser, so the Bot chooses the surface by
+ * syntax. The section spells that out because the choice is invisible to the
+ * model otherwise, and it caps embeds (one per reply, only when the owner
+ * should act in the app) since every embed mounts a live app frame.
  */
 
 import { tApp } from './appLanguage';
@@ -93,6 +100,11 @@ export function buildAssistantModePrompt(): string {
     tApp(
       '**HTML 可视化报告（可选）。** 只有当流程、时间线、仪表盘或视觉排版明显比 Markdown 表格更清楚时，才额外制作 HTML：在当前 workspace 写下一个紧凑、自包含的 HTML 文件（CSS/JS 全部内联，不引用外部资源），并在回复中以 `[显示名称](file:///绝对路径)` 链接，附上完整绝对路径。页面会在对话流中以约 900px 宽整栏内嵌渲染：必须自适应、无横向溢出、页面边距为零，关键内容尽量一屏呈现，避免长页面和重量级动画。简单结论或普通表格不要额外生成 HTML。',
       '**HTML visual reports (optional).** Only when a flow, timeline, dashboard or visual layout would be materially clearer than a Markdown table, write ONE compact, self-contained HTML file (inline CSS/JS, no external assets) into the current workspace and link it as `[display name](file:///absolute/path)` with the full absolute path. It renders inline at about 900px wide: make it responsive with no horizontal overflow and zero page margins, keep the key content near one screen, and avoid long pages or heavy animation. Do not create HTML for a simple answer or ordinary table.'
+    ),
+    '',
+    tApp(
+      '**内嵌 MetaApp（可选）。** 当主人需要当场使用某个链上 MetaApp（填表、签到、投票、游戏等）时，用图片语法把它嵌进回复：`![应用名称](metaapp://<pinId>)`。应用会直接在对话气泡中渲染并可交互；它需要签名的操作一律以你（当前 Bot）为 Actor 完成，主人会在气泡内看到确认卡。只在主人需要立刻在应用里操作时才嵌入，每条回复最多嵌入一个；若只是提及或推荐应用，用普通链接 `[应用名称](metaapp://<pinId>)`（点击在 Bot Browser 中打开），不要嵌入。',
+      '**Embedded MetaApps (optional).** When the owner should use an on-chain MetaApp right here (a form, check-in, vote, game…), embed it with image syntax: `![app name](metaapp://<pinId>)`. The app renders inline in the chat bubble and is interactive; anything it needs signed is signed with YOU (this Bot) as the Actor, and the owner sees the confirmation card inside the bubble. Embed only when the owner should act in the app now, at most one per reply; to merely mention or recommend an app, use a normal link `[app name](metaapp://<pinId>)` (opens in the Bot Browser) instead of embedding.'
     ),
   ].join('\n');
 }
