@@ -51,6 +51,7 @@ import type {
   Schedule,
   ScheduledTask,
   ScheduledTaskInput,
+  ScheduledTaskMemoryAccess,
   ScheduledTaskRun,
 } from './types';
 
@@ -62,6 +63,16 @@ const DEFAULT_MANUAL_RUN_DELAY_MS = 4_000;
 
 /** Fixture bytes credited by a successful traffic.redeemCode (5 GB). */
 const REDEEM_CODE_GRANT_BYTES = 5 * 1024 * 1024 * 1024;
+
+/**
+ * Valid memory-access opt-ins for scheduled tasks (mirrors the main-process
+ * SCHEDULED_TASK_MEMORY_ACCESS_LEVELS; 'none' = legacy full blackout).
+ */
+const SCHEDULED_TASK_MEMORY_ACCESS_OPTIONS: ScheduledTaskMemoryAccess[] = [
+  'none',
+  'read-only',
+  'read-write',
+];
 
 /** Canned assistant replies (mock model output; not UI copy). */
 const REPLY_NORMAL =
@@ -521,6 +532,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       metabotId: 1,
       coworkSessionId: null,
       targetSessionId: null,
+      memoryAccess: 'none',
       expiresAt: null,
       notifyPlatforms: [],
       state: {
@@ -548,6 +560,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       metabotId: 2,
       coworkSessionId: null,
       targetSessionId: null,
+      memoryAccess: 'none',
       expiresAt: null,
       notifyPlatforms: [],
       state: {
@@ -607,6 +620,12 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       if (!Number.isFinite(Date.parse(schedule.datetime))) return 'at schedule needs a valid datetime';
     } else {
       return 'unknown schedule type';
+    }
+    if (
+      input.memoryAccess !== undefined &&
+      !SCHEDULED_TASK_MEMORY_ACCESS_OPTIONS.includes(input.memoryAccess)
+    ) {
+      return 'unknown memory access';
     }
     return null;
   }
@@ -711,6 +730,9 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
           metabotId: typeof input.metabotId === 'number' ? input.metabotId : null,
           coworkSessionId: null,
           targetSessionId: typeof input.targetSessionId === 'string' ? input.targetSessionId : null,
+          memoryAccess: SCHEDULED_TASK_MEMORY_ACCESS_OPTIONS.includes(input.memoryAccess as ScheduledTaskMemoryAccess)
+            ? (input.memoryAccess as ScheduledTaskMemoryAccess)
+            : 'none',
           expiresAt: typeof input.expiresAt === 'string' ? input.expiresAt : null,
           notifyPlatforms: Array.isArray(input.notifyPlatforms) ? [...input.notifyPlatforms] : [],
           state: {
