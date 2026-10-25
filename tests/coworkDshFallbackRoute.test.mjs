@@ -708,6 +708,55 @@ test('a genuinely misconfigured route still reports the configuration error', as
   assert.doesNotMatch(errorText, /免费额度|free_quota_exhausted/, 'and never claims a quota problem')
 })
 
+test('a transport-class terminal death with no alternative is NOT reported as a configuration error', async () => {
+  // Ledger #25 (2026-10-25): a dead network (or an unreachable provider)
+  // with no fallback brain and no rescue default settles after the transient
+  // resume budget is exhausted. The old no-alternative copy read
+  // "未配置可用模型 … 这是配置错误而非临时限流" for this environmental death
+  // too, sending the user hunting for a misconfiguration during an outage.
+  // The transport-class terminal death gets its own copy: it names the
+  // environmental failure, tells the user to resend after recovery, and
+  // carries the machine code — and never contains the 配置错误 wording.
+  const result = await driveTurn({
+    sessionId: 'transport-death-no-alternative',
+    configOverrides: { providers: NO_RESCUE_PROVIDERS },
+    metabot: BOT_WITHOUT_FALLBACK,
+    script: () => ({
+      kind: 'error',
+      error: { code: 'TRANSPORT', message: 'fetch failed: network unreachable' },
+    }),
+  })
+
+  assert.equal(result.sessionRow?.status, 'error')
+  const errorText = String(result.errors[0].error)
+  assert.match(errorText, /传输类失败|transport-class failure/, 'the copy names the environmental failure class')
+  assert.match(errorText, /网络或供应商|network or provider/, 'and the likely cause')
+  assert.match(errorText, /TRANSPORT/, 'the machine code rides along for diagnosis')
+  assert.doesNotMatch(errorText, /未配置可用模型|No usable model configured/, 'not the no-usable-model wording')
+  assert.doesNotMatch(errorText, /配置错误|configuration error/, 'and never claims a configuration problem')
+})
+
+test('every transient-class terminal code keeps the transport copy — TIMEOUT carries its own code', async () => {
+  // The environmental set is TRANSIENT_TURN_ERROR_CODES
+  // (TRANSPORT/TIMEOUT/RATE_LIMIT/SERVER/EMPTY_RESPONSE); the copy must
+  // interpolate the ACTUAL code, not a hardcoded TRANSPORT literal.
+  const result = await driveTurn({
+    sessionId: 'timeout-death-no-alternative',
+    configOverrides: { providers: NO_RESCUE_PROVIDERS },
+    metabot: BOT_WITHOUT_FALLBACK,
+    script: () => ({
+      kind: 'error',
+      error: { code: 'TIMEOUT', message: 'request timed out after 30000ms' },
+    }),
+  })
+
+  assert.equal(result.sessionRow?.status, 'error')
+  const errorText = String(result.errors[0].error)
+  assert.match(errorText, /TIMEOUT/, 'the TIMEOUT code is interpolated verbatim')
+  assert.doesNotMatch(errorText, /TRANSPORT/, 'not the hardcoded TRANSPORT literal')
+  assert.doesNotMatch(errorText, /配置错误|configuration error/, 'and never claims a configuration problem')
+})
+
 
 // ---------------------------------------------------------------------------
 // 2026-10-18 (session 3144cb1a storm: expired OpenCode key on the primary +
