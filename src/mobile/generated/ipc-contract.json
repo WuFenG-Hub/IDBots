@@ -406,14 +406,6 @@
       ]
     },
     {
-      "path": "cowork.archiveBotDirective",
-      "kind": "invoke",
-      "channel": "botDirectives:archive",
-      "args": [
-        "input"
-      ]
-    },
-    {
       "path": "cowork.archiveKnowledge",
       "kind": "invoke",
       "channel": "metaid:knowledge:archive",
@@ -468,14 +460,6 @@
       "channel": "cowork:session:continue",
       "args": [
         "options"
-      ]
-    },
-    {
-      "path": "cowork.createBotDirective",
-      "kind": "invoke",
-      "channel": "botDirectives:create",
-      "args": [
-        "input"
       ]
     },
     {
@@ -746,14 +730,6 @@
       ]
     },
     {
-      "path": "cowork.listBotDirectives",
-      "kind": "invoke",
-      "channel": "botDirectives:list",
-      "args": [
-        "input"
-      ]
-    },
-    {
       "path": "cowork.listKnowledge",
       "kind": "invoke",
       "channel": "metaid:knowledge:list",
@@ -980,14 +956,6 @@
       ]
     },
     {
-      "path": "cowork.restoreBotDirective",
-      "kind": "invoke",
-      "channel": "botDirectives:restore",
-      "args": [
-        "input"
-      ]
-    },
-    {
       "path": "cowork.restoreStandingPage",
       "kind": "invoke",
       "channel": "standingPages:restore",
@@ -1188,14 +1156,6 @@
       "channel": "cowork:session:unarchive",
       "args": [
         "sessionId"
-      ]
-    },
-    {
-      "path": "cowork.updateBotDirective",
-      "kind": "invoke",
-      "channel": "botDirectives:update",
-      "args": [
-        "input"
       ]
     },
     {
