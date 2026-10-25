@@ -224,6 +224,7 @@ tests/*
 !tests/humanIdentityPinWriter.test.mjs
 !tests/pinPathResolver.test.mjs
 !tests/botBrowserHostService.test.mjs
+!tests/abcActorIntegrationSmoke.mjs
 !tests/privateChatOrderCoworkTimeout.test.mjs
 !tests/a2aGuidanceRestart.test.ts
 !tests/a2aStaleErrorHeal.test.mjs

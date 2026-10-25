@@ -51,8 +51,10 @@ test('shell defaults to Bot Home with a mounted Browser while retaining guarded 
   assert.match(shellSource, /window\.electron\.metabot\.list\(\)/);
   assert.match(shellSource, /if \(!result\?\.success\) \{/);
   assert.match(shellSource, /showToast\(messageFromError\(result\?\.error, 'Failed to load local Bots\.'\)\);/);
-  assert.match(shellSource, /if \(!Array\.isArray\(result\.list\) \|\| result\.list\.length === 0\) \{/);
-  assert.match(shellSource, /showToast\('No local Bot\. Please create a Bot first\.'\);/);
+  assert.match(shellSource, /if \(Array\.isArray\(result\.list\) && result\.list\.length > 0\) \{/);
+  assert.match(shellSource, /const identity = await window\.electron\.userIdentity\.get\(\);/);
+  assert.match(shellSource, /if \(identity\?\.success && identity\.identity\?\.globalmetaid\) \{/);
+  assert.match(shellSource, /showToast\('No local Actor\. Set up your identity or create a Bot first\.'\);/);
   assert.match(shellSource, /catch \(error\) \{/);
   assert.match(shellSource, /showToast\(messageFromError\(error, 'Failed to load local Bots\.'\)\);/);
   assert.match(shellSource, /const \[surfaceMode, setSurfaceMode\] = useState<BotBrowserSurfaceMode>\('home'\);/);
