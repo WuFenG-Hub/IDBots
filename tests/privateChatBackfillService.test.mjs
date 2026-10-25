@@ -362,10 +362,151 @@ test('backfill is a no-op while private chats are disabled', async () => {
 
     const result = await loop.syncOnce();
 
-    assert.deepEqual(result, { identities: 0, probedPeers: 0, inserted: 0, failedPeers: 0 });
+    assert.deepEqual(result, { identities: 0, probedPeers: 0, inserted: 0, failedPeers: 0, failedDirectories: 0 });
     assert.equal(harness.historyCalls.length, 0);
     assert.equal(harness.directoryCalls.length, 0);
   } finally {
     sqlite.cleanup();
+  }
+});
+
+// ── issue #24: backoff ladder + circuit breaker on the poll loop ──────────────
+
+const { PollBackoffController } = await import('../dist-electron/main/services/pollBackoffController.js');
+
+test('issue #24: total-failure ticks (directory AND peer fetches all fail) escalate the ladder', async () => {
+  const sqlite = await createSqliteStore();
+  try {
+    seedPrivateChatRow(sqlite.db, {
+      pinId: 'pin-old',
+      fromGlobalMetaId: LOCAL_GLOBAL_META_ID,
+      toGlobalMetaId: PEER_GLOBAL_META_ID,
+      chainTimestamp: 10_000,
+    });
+    const clock = { value: 1_785_000_000_000 };
+    const logs = [];
+    const backoff = new PollBackoffController({
+      name: 'test-private-backfill',
+      baseMs: 15_000,
+      now: () => clock.value,
+      random: () => 0.5,
+      emitLog: (line) => logs.push(line),
+    });
+    const harness = createHarness({
+      directoryFails: true,
+      historyMessages: () => { throw new Error('history offline'); },
+    });
+    const loop = createPrivateChatBackfillLoop({
+      ...harness.deps,
+      db: sqlite.db,
+      saveDb: () => {},
+      intervalMs: 15_000,
+      backoff,
+    });
+
+    // shape: one direct syncOnce proves the new failure signal is surfaced
+    const shape = await loop.syncOnce();
+    assert.equal(shape.failedDirectories, 1, 'directory failure surfaced in the result');
+    assert.equal(shape.failedPeers, 1, 'peer failure surfaced in the result');
+    const delays = [];
+    for (let i = 1; i <= 3; i += 1) {
+      await loop.runTick();
+      delays.push(backoff.nextDelayMs());
+      clock.value += backoff.nextDelayMs() + 1;
+    }
+    assert.deepEqual(delays, [30_000, 60_000, 120_000], '>= 3 strictly growing tiers');
+    assert.ok(logs.some((l) => l.includes('[PollBackoff:test-private-backfill]') && l.includes('backing off after failure #3')));
+  } finally {
+    sqlite.close?.();
+  }
+});
+
+test('issue #24: partial failure (one identity directory up, one down) is NOT total failure', async () => {
+  const sqlite = await createSqliteStore();
+  try {
+    seedPrivateChatRow(sqlite.db, {
+      pinId: 'pin-old',
+      fromGlobalMetaId: LOCAL_GLOBAL_META_ID,
+      toGlobalMetaId: PEER_GLOBAL_META_ID,
+      chainTimestamp: 10_000,
+    });
+    const clock = { value: 1_785_000_000_000 };
+    const backoff = new PollBackoffController({
+      name: 'test-private-backfill',
+      baseMs: 15_000,
+      now: () => clock.value,
+      random: () => 0.5,
+      emitLog: () => {},
+    });
+    // Two identities: the first identity's directory fetch fails on every
+    // endpoint, the second still serves. The tick is PARTIAL (one network
+    // unit succeeded), so the ladder must not escalate. Note: a directory-
+    // ONLY outage (every identity failing) IS total failure once peer probes
+    // are throttled — that escalation is the intended behavior (retry storm).
+    const SECOND_GLOBAL_META_ID = 'idq1second0000000000000000000000000';
+    const historyCalls = [];
+    const deps = {
+      getLocalIdentities: () => [LOCAL_IDENTITY, { metabotId: 2, globalMetaId: SECOND_GLOBAL_META_ID }],
+      historySync: {
+        async fetchRecentConversationMessages(params) {
+          historyCalls.push(params);
+          return [];
+        },
+      },
+      fetchDirectoryJson: async (url) => {
+        if (String(url).includes(LOCAL_GLOBAL_META_ID)) {
+          throw new Error('directory offline');
+        }
+        return { data: { list: [] } };
+      },
+      now: () => clock.value,
+      emitLog: () => undefined,
+    };
+    const loop = createPrivateChatBackfillLoop({
+      ...deps,
+      db: sqlite.db,
+      saveDb: () => {},
+      intervalMs: 15_000,
+      backoff,
+    });
+    const shape = await loop.syncOnce();
+    assert.equal(shape.failedDirectories, 1);
+    assert.equal(shape.failedPeers, 0);
+    await loop.runTick();
+    assert.equal(backoff.getState().consecutiveFailures, 0, 'partial failure must not escalate');
+    assert.equal(backoff.nextDelayMs(), 15_000);
+  } finally {
+    sqlite.close?.();
+  }
+});
+
+test('issue #24: shouldRun()=false ticks attempt nothing and keep the ladder state', async () => {
+  const sqlite = await createSqliteStore();
+  try {
+    const clock = { value: 1_785_000_000_000 };
+    const backoff = new PollBackoffController({
+      name: 'test-private-backfill',
+      baseMs: 15_000,
+      now: () => clock.value,
+      random: () => 0.5,
+      emitLog: () => {},
+    });
+    const harness = createHarness({});
+    const loop = createPrivateChatBackfillLoop({
+      ...harness.deps,
+      db: sqlite.db,
+      saveDb: () => {},
+      intervalMs: 15_000,
+      backoff,
+      shouldRun: () => false,
+    });
+    backoff.recordFailure();
+    const allowedBefore = backoff.getState().nextAttemptAllowedAtMs;
+    clock.value = allowedBefore + 1;
+    await loop.runTick();
+    assert.equal(backoff.getState().consecutiveFailures, 1, 'no-op tick must not reset');
+    assert.equal(backoff.getState().nextAttemptAllowedAtMs, allowedBefore, 'no-op tick must not retime');
+  } finally {
+    sqlite.close?.();
   }
 });

@@ -9,6 +9,11 @@
  * rows newer than a per-pair threshold are flagged is_processed = 0 so the
  * private chat daemon picks them up for display and auto-reply; older rows
  * are archived silently.
+ *
+ * Issue #24: the fixed 15s cadence is now gated by a shared PollBackoffController —
+ * consecutive total-failure ticks escalate the retry delay, and after a
+ * threshold the circuit opens (attempts paused for a cooldown, then one
+ * half-open probe). Scheduled ticks skip cheaply while the gate is closed.
  */
 
 import type { SqliteDatabase as Database } from '../sqliteTypes';
@@ -18,6 +23,7 @@ import {
   storePrivateChatHistoryMessages,
   type PrivateChatHistoryMessage,
 } from './privateChatHistorySyncService';
+import { PollBackoffController } from './pollBackoffController';
 
 export interface PrivateChatBackfillIdentity {
   metabotId: number;
@@ -50,6 +56,8 @@ export interface PrivateChatBackfillServiceDeps {
   catchUpWindowSec?: number;
   overlapSec?: number;
   localPeerProbeIntervalMs?: number;
+  /** Retry-hygiene controller (issue #24); defaults to a local instance. */
+  backoff?: PollBackoffController;
 }
 
 export interface PrivateChatBackfillSyncResult {
@@ -57,10 +65,19 @@ export interface PrivateChatBackfillSyncResult {
   probedPeers: number;
   inserted: number;
   failedPeers: number;
+  /** Identities whose directory fetch failed this tick (issue #24 signal). */
+  failedDirectories: number;
 }
 
 export interface PrivateChatBackfillLoop {
   syncOnce(): Promise<PrivateChatBackfillSyncResult>;
+  /**
+   * One guarded poll tick: consults the backoff gate, runs syncOnce, records
+   * the outcome. Test seam for driving the backoff ladder without real
+   * timers — the scheduler only times calls to this.
+   */
+  runTick(): Promise<void>;
+  getBackoff(): PollBackoffController;
   start(): void;
   stop(): void;
   isRunning(): boolean;
@@ -240,8 +257,16 @@ export function createPrivateChatBackfillLoop(
 
   /** Per-pair throttle for peers the directory cannot tell us about. */
   const lastLocalPeerProbeAt = new Map<string, number>();
-  let timer: ReturnType<typeof setInterval> | null = null;
+
+  const backoff = deps.backoff ?? new PollBackoffController({
+    name: 'private-chat-backfill',
+    baseMs: intervalMs,
+    emitLog,
+  });
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
   let syncing = false;
+  let stopped = true;
 
   const syncOnce = async (): Promise<PrivateChatBackfillSyncResult> => {
     const result: PrivateChatBackfillSyncResult = {
@@ -249,6 +274,7 @@ export function createPrivateChatBackfillLoop(
       probedPeers: 0,
       inserted: 0,
       failedPeers: 0,
+      failedDirectories: 0,
     };
     if (deps.shouldRun && !deps.shouldRun()) {
       return result;
@@ -271,6 +297,11 @@ export function createPrivateChatBackfillLoop(
         directory = await fetchDirectoryPeers({ ...deps, fetchJson }, identity.globalMetaId);
       } catch (error) {
         emitLog(`[PrivateChatBackfill] Directory fetch failed for ${identity.globalMetaId.slice(0, 12)}…: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      // fetchDirectoryPeers answers null when EVERY endpoint failed (it never
+      // throws for network failure) — the honest total-outage signal (issue #24).
+      if (directory === null) {
+        result.failedDirectories += 1;
       }
 
       const probePeers = new Set<string>();
@@ -354,33 +385,70 @@ export function createPrivateChatBackfillLoop(
     return result;
   };
 
-  const runBackgroundSync = (): void => {
+  /**
+   * Issue #24: a tick is a retry-worthy failure only when EVERY attempted
+   * network unit failed — every identity's directory fetch AND every probed
+   * peer (the hard-outage shape). Partial success means the network is at
+   * least partly alive, so the ladder resets. A tick with no identities
+   * attempted nothing and keeps the current state.
+   */
+  const recordTickOutcome = (result: PrivateChatBackfillSyncResult): void => {
+    if (result.identities === 0) return;
+    const attempted = result.identities + result.probedPeers;
+    const failed = result.failedDirectories + result.failedPeers;
+    if (failed === attempted) {
+      backoff.recordFailure();
+    } else {
+      backoff.recordSuccess();
+    }
+  };
+
+  const runTick = async (): Promise<void> => {
     if (syncing) return;
+    if (!backoff.ready()) return; // circuit open / ladder delay — skip this attempt
     syncing = true;
-    void syncOnce()
-      .catch((error) => {
-        emitLog(`[PrivateChatBackfill] Sync failed: ${error instanceof Error ? error.message : String(error)}`);
-      })
-      .finally(() => {
-        syncing = false;
-      });
+    try {
+      const result = await syncOnce();
+      recordTickOutcome(result);
+    } catch (error) {
+      emitLog(`[PrivateChatBackfill] Sync failed: ${error instanceof Error ? error.message : String(error)}`);
+      backoff.recordFailure();
+    } finally {
+      syncing = false;
+    }
+  };
+
+  const scheduledTick = (): void => {
+    timer = null;
+    void runTick().finally(() => {
+      if (stopped) return; // stop() ran while the tick was in flight
+      scheduleNext(backoff.nextDelayMs());
+    });
+  };
+
+  const scheduleNext = (delayMs: number): void => {
+    timer = setTimeout(scheduledTick, Math.max(0, delayMs));
+    timer.unref?.();
   };
 
   return {
     syncOnce,
+    runTick,
+    getBackoff: () => backoff,
     start() {
-      if (timer) return;
-      runBackgroundSync();
-      timer = setInterval(runBackgroundSync, intervalMs);
-      timer.unref?.();
+      if (!stopped) return;
+      stopped = false;
+      scheduledTick(); // immediate first sync, then self-rescheduling
     },
     stop() {
-      if (!timer) return;
-      clearInterval(timer);
-      timer = null;
+      stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
     },
     isRunning() {
-      return timer !== null;
+      return !stopped;
     },
   };
 }

@@ -256,3 +256,139 @@ test('malformed endpoint responses never kill the tick', async () => {
     h.cleanup();
   }
 });
+
+// ── issue #24: backoff ladder + circuit breaker on the poll loop ──────────────
+
+const { PollBackoffController } = require('../dist-electron/main/services/pollBackoffController.js');
+
+const makeBackoffHarness = async (pages, groupIds, clockValue) => {
+  const tempDir = makeTempDir();
+  const store = await SqliteStore.create(tempDir);
+  const logs = [];
+  const clock = { value: clockValue };
+  const backoff = new PollBackoffController({
+    name: 'test-group-backfill',
+    baseMs: 15_000,
+    now: () => clock.value,
+    random: () => 0.5,
+    emitLog: (line) => logs.push(line),
+  });
+  const calls = [];
+  const fetchJson = createFakeFetch(pages, calls);
+  setGroupChatBackfillActiveGroupIdsGetter(() => groupIds);
+  const loop = createGroupChatBackfillLoop({
+    db: store.getDatabase(),
+    saveDb: () => {},
+    fetchJson,
+    emitLog: () => {},
+    intervalMs: 15_000,
+    backoff,
+  });
+  return {
+    store, db: store.getDatabase(), calls, loop, backoff, logs, clock,
+    advance: () => { clock.value += backoff.nextDelayMs() + 1; },
+    cleanup: () => store.close(),
+  };
+};
+
+test('issue #24: total-failure ticks escalate the retry delay >= 3 tiers and open the circuit', async () => {
+  const pages = {
+    [`https://api.idchat.io|${GROUP_ID}|0`]: new Error('network down'),
+    [`https://www.show.now|${GROUP_ID}|0`]: new Error('network down'),
+  };
+  const h = await makeBackoffHarness(pages, [GROUP_ID], 1_000_000);
+  try {
+    const delays = [];
+    for (let i = 1; i <= 4; i += 1) {
+      await h.loop.runTick();
+      delays.push(h.backoff.nextDelayMs());
+      h.advance();
+    }
+    assert.deepEqual(delays, [30_000, 60_000, 120_000, 240_000], 'ladder must grow across >= 3 tiers');
+    const backingOff = h.logs.filter((l) => l.includes('[PollBackoff:test-group-backfill]') && l.includes('backing off after failure #'));
+    assert.equal(backingOff.length, 4, 'every failing tick logs a backing-off line');
+
+    // 5th failure opens the circuit
+    await h.loop.runTick();
+    assert.equal(h.backoff.getState().circuit, 'open');
+    assert.ok(h.logs.some((l) => l.includes('circuit OPEN')), 'circuit OPEN logged');
+
+    // while open, ticks skip without touching the network
+    const callsBefore = h.calls.length;
+    h.clock.value += 1;
+    await h.loop.runTick();
+    assert.equal(h.calls.length, callsBefore, 'no fetch while the circuit is open');
+
+    // past the cooldown: one half-open probe runs; with the outage still on it re-opens
+    h.clock.value += 600_000;
+    assert.equal(h.backoff.ready(), true);
+    assert.equal(h.backoff.getState().circuit, 'half-open');
+    await h.loop.runTick();
+    assert.equal(h.backoff.getState().circuit, 'open', 'failed probe re-opens');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('issue #24: recovery via half-open probe closes the circuit and resumes base cadence', async () => {
+  const pages = {
+    [`https://api.idchat.io|${GROUP_ID}|0`]: new Error('network down'),
+    [`https://www.show.now|${GROUP_ID}|0`]: new Error('network down'),
+  };
+  const h = await makeBackoffHarness(pages, [GROUP_ID], 2_000_000);
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      await h.loop.runTick();
+      h.advance();
+    }
+    assert.equal(h.backoff.getState().circuit, 'open');
+    // outage ends before the probe
+    pages[`https://api.idchat.io|${GROUP_ID}|0`] = pageEnvelope([]);
+    pages[`https://www.show.now|${GROUP_ID}|0`] = pageEnvelope([]);
+    h.clock.value += 600_000;
+    await h.loop.runTick();
+    assert.equal(h.backoff.getState().circuit, 'closed');
+    assert.equal(h.backoff.getState().consecutiveFailures, 0);
+    assert.equal(h.backoff.nextDelayMs(), 15_000);
+    assert.ok(h.logs.some((l) => l.includes('recovered — resuming normal cadence')), 'recovery line emitted');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('issue #24: partial failure (one group still serves) resets the ladder', async () => {
+  const pages = {
+    [`https://api.idchat.io|${GROUP_ID}|0`]: new Error('network down'),
+    [`https://www.show.now|${GROUP_ID}|0`]: new Error('network down'),
+    [`https://api.idchat.io|${OTHER_GROUP_ID}|0`]: pageEnvelope([]),
+    [`https://www.show.now|${OTHER_GROUP_ID}|0`]: pageEnvelope([]),
+  };
+  const h = await makeBackoffHarness(pages, [GROUP_ID, OTHER_GROUP_ID], 3_000_000);
+  try {
+    await h.loop.runTick(); // total failure? no — OTHER_GROUP_ID succeeded
+    assert.equal(h.backoff.getState().consecutiveFailures, 0, 'partial success must not escalate');
+    assert.equal(h.backoff.nextDelayMs(), 15_000);
+    // even a pre-existing ladder resets on the partial-success tick
+    await h.loop.runTick();
+    assert.equal(h.backoff.getState().consecutiveFailures, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('issue #24: a tick with no active groups keeps the backoff state untouched', async () => {
+  const pages = {};
+  const h = await makeBackoffHarness(pages, [], 4_000_000);
+  try {
+    // seed one failure directly, then advance past the gated instant so the
+    // tick actually runs syncOnce (groups=0) — the outcome must be ignored
+    h.backoff.recordFailure();
+    const allowedBefore = h.backoff.getState().nextAttemptAllowedAtMs;
+    h.clock.value = allowedBefore + 1;
+    await h.loop.runTick();
+    assert.equal(h.backoff.getState().consecutiveFailures, 1, 'empty tick must not reset');
+    assert.equal(h.backoff.getState().nextAttemptAllowedAtMs, allowedBefore, 'empty tick must not retime');
+  } finally {
+    h.cleanup();
+  }
+});

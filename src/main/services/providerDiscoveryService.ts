@@ -1,7 +1,16 @@
 import { normalizeRawGlobalMetaId } from '../shared/globalMetaId';
 import type { IdchatOnlineStatusEntry, IdchatPresenceService } from './idchatPresenceService';
+import { PollBackoffController } from './pollBackoffController';
 
-/** Skip a forced refresh when the last snapshot is younger than the poll cadence. */
+/**
+ * Skip a forced refresh when the last snapshot is younger than the poll cadence.
+ * Issue #24: the polling cadence is now gated by a PollBackoffController —
+ * consecutive online-status fetch failures escalate the retry delay and
+ * eventually open the circuit (attempts paused for a cooldown, then one
+ * half-open probe). Demand-driven refreshes (refreshNow / refreshNowIfStale
+ * callers) are NOT gated — they always run; their outcomes still feed the
+ * same controller so a successful external probe recovers the poller.
+ */
 export const DISCOVERY_SNAPSHOT_MIN_AGE_MS = 10 * 1000;
 const PRESENCE_POLL_INTERVAL_MS = DISCOVERY_SNAPSHOT_MIN_AGE_MS;
 
@@ -45,6 +54,8 @@ export interface DiscoverySnapshot {
 export interface ProviderDiscoveryServiceDeps {
   presence: Pick<IdchatPresenceService, 'fetchOnlineStatus'>;
   now?: () => number;
+  /** Retry-hygiene controller (issue #24); defaults to a local instance. */
+  backoff?: PollBackoffController;
 }
 
 type DiscoveryListener = (snapshot: DiscoverySnapshot) => void;
@@ -151,11 +162,14 @@ const uniqueGlobalMetaIds = (groups: ProviderGroup[]): string[] => {
 
 export class ProviderDiscoveryService {
   private readonly deps: ProviderDiscoveryServiceDeps;
+  private readonly backoff: PollBackoffController;
   private readonly listeners: Set<DiscoveryListener> = new Set();
   private readonly forcedOfflineGlobalMetaIds: Set<string> = new Set();
   private snapshot: DiscoverySnapshot = cloneDiscoverySnapshot(EMPTY_SNAPSHOT);
   private snapshotSignature = serializeSnapshot(EMPTY_SNAPSHOT);
-  private intervalId: ReturnType<typeof setInterval> | null = null;
+  private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  private pollingActive = false;
+  private onPollRefreshError: ((error: unknown, phase: 'initial' | 'interval') => void) | null = null;
   private getServices: (() => any[]) | null = null;
   private refreshPromise: Promise<void> | null = null;
   private pendingRefresh = false;
@@ -164,6 +178,17 @@ export class ProviderDiscoveryService {
 
   constructor(deps: ProviderDiscoveryServiceDeps) {
     this.deps = deps;
+    this.backoff = deps.backoff ?? new PollBackoffController({
+      name: 'provider-discovery',
+      baseMs: PRESENCE_POLL_INTERVAL_MS,
+      now: deps.now,
+      emitLog: (line: string) => console.log(line),
+    });
+  }
+
+  /** Issue #24: retry-hygiene state of the polling loop (tests / future UI). */
+  getPollBackoff(): PollBackoffController {
+    return this.backoff;
   }
 
   get availableServices(): any[] {
@@ -185,7 +210,7 @@ export class ProviderDiscoveryService {
     this.stopPolling();
     this.getServices = getServices;
     const onRefreshError = options?.onRefreshError;
-    const handleRefreshError = (phase: 'initial' | 'interval', error: unknown): void => {
+    const handleRefreshError = (error: unknown, phase: 'initial' | 'interval'): void => {
       if (onRefreshError) {
         void Promise.resolve(onRefreshError(error, phase)).catch((handlerError) => {
           console.warn('[ProviderDiscovery] refresh error handler failed:', handlerError);
@@ -194,23 +219,58 @@ export class ProviderDiscoveryService {
       }
       console.warn(`[ProviderDiscovery] ${phase} refresh failed:`, error);
     };
-    void this.refreshNow().catch((error) => {
-      handleRefreshError('initial', error);
-    });
-    this.intervalId = setInterval(() => {
-      void this.refreshNow().catch((error) => {
-        handleRefreshError('interval', error);
-      });
-    }, PRESENCE_POLL_INTERVAL_MS);
-    this.intervalId.unref?.();
+    this.onPollRefreshError = handleRefreshError;
+    this.pollingActive = true;
+    // Immediate first refresh (parity with the old loop: callers can observe
+    // refreshPromise right after startPolling), then self-rescheduling ticks
+    // gated by the backoff controller.
+    this.pollTick('initial');
   }
 
   stopPolling(): void {
-    if (this.intervalId !== null) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+    this.pollingActive = false;
+    this.onPollRefreshError = null;
+    if (this.pollTimer !== null) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = null;
     }
     this.getServices = null;
+  }
+
+  /**
+   * Issue #24: one guarded polling tick. The backoff gate only throttles the
+   * AUTOMATIC loop; demand-driven refreshNow callers are unaffected. Unexpected
+   * throws (e.g. getServices blowing up) count as failures too.
+   */
+  /**
+   * The first (immediate) tick reports phase 'initial', later ones 'interval'
+   * — same contract as the pre-backoff loop.
+   */
+  private pollTick(phase: 'initial' | 'interval' = 'interval'): void {
+    this.pollTimer = null;
+    if (!this.pollingActive) return;
+    const handleRefreshError = this.onPollRefreshError
+      ?? ((error: unknown, errPhase: 'initial' | 'interval') => {
+        console.warn(`[ProviderDiscovery] ${errPhase} refresh failed:`, error);
+      });
+    if (!this.backoff.ready()) {
+      this.schedulePoll(this.backoff.nextDelayMs());
+      return;
+    }
+    void this.refreshNow()
+      .catch((error: unknown) => {
+        this.backoff.recordFailure();
+        handleRefreshError(error, phase);
+      })
+      .finally(() => {
+        if (!this.pollingActive) return;
+        this.schedulePoll(this.backoff.nextDelayMs());
+      });
+  }
+
+  private schedulePoll(delayMs: number): void {
+    this.pollTimer = setTimeout(() => this.pollTick(), Math.max(0, delayMs));
+    this.pollTimer.unref?.();
   }
 
   markOffline(globalMetaId: string): void {
@@ -302,9 +362,11 @@ export class ProviderDiscoveryService {
           options.rebroadcast,
         );
         this.lastRefreshAtMs = this.nowMs();
+        this.backoff.recordSuccess();
         return;
       } catch (error) {
         console.warn('[ProviderDiscovery] idchat online-status fetch failed:', error);
+        this.backoff.recordFailure();
       }
     }
 

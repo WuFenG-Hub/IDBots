@@ -88,7 +88,7 @@ const openHarness = async (clock, over = {}) => {
   const contentBodies = over.contentBodies ?? {};
   let fetchCalls = 0;
   let contentCalls = 0;
-  const fetchImpl = async (url) => {
+  const defaultFetchImpl = async (url) => {
     fetchCalls += 1;
     const href = String(url);
     if (href.includes('/content/')) {
@@ -112,9 +112,10 @@ const openHarness = async (clock, over = {}) => {
   };
   const refresher = new MetaTaskRefresher({
     store: () => store,
-    collectOptions: { fetchImpl },
+    collectOptions: { fetchImpl: over.fetchImpl ?? defaultFetchImpl },
     now: () => (over.frozenClock === false ? Date.now() : clock.value),
     minIntervalMs: over.minIntervalMs ?? 0,
+    backoff: over.backoff,
   });
   return {
     dir,
@@ -122,6 +123,7 @@ const openHarness = async (clock, over = {}) => {
     store,
     refresher,
     items,
+    defaultFetch: defaultFetchImpl,
     fetchCount: () => fetchCalls,
     contentFetchCount: () => contentCalls,
     cleanup: () => {
@@ -636,6 +638,112 @@ test('refreshOnce: heartbeat callers bypass the interval and never wait', async 
     assert.ok(deferred);
   } finally {
     // dispose() cancels the pending coalesced sweep (the timer is unref'd too).
+    h.cleanup();
+  }
+});
+
+// ── issue #24: heartbeat sweep backoff wiring ────────────────────────────────
+
+const { PollBackoffController } = require('../dist-electron/main/services/pollBackoffController.js');
+
+test('issue #24: a failed sweep records a backoff failure; the ladder grows across >= 3 tiers', async () => {
+  const clock = { value: T0 + 60_000 };
+  const logs = [];
+  const backoff = new PollBackoffController({
+    name: 'test-metatask-refresh',
+    baseMs: 5 * 60_000,
+    now: () => clock.value,
+    random: () => 0.5,
+    emitLog: (line) => logs.push(line),
+  });
+  const h = await openHarness(clock, {
+    backoff,
+    fetchImpl: async () => { throw new Error('chain endpoints unreachable'); },
+  });
+  try {
+    const delays = [];
+    for (let i = 1; i <= 3; i += 1) {
+      const result = await h.refresher.refreshOnce(`test-fail-${i}`, { bypassMinInterval: true });
+      // the sweep itself still "succeeds" (the collector records per-path
+      // errors; the projection keeps its rows) — the outage signal is the ladder
+      assert.equal(result.ok, true, `sweep ${i} keeps ok semantics`);
+      assert.equal(backoff.getState().consecutiveFailures, i, `sweep ${i} records a backoff failure`);
+      delays.push(backoff.nextDelayMs());
+      clock.value += backoff.nextDelayMs() + 1;
+    }
+    // base 5 min, factor 2: 10 min, 20 min, 40 min
+    assert.deepEqual(delays, [600_000, 1_200_000, 2_400_000], '>= 3 strictly growing tiers');
+    assert.ok(logs.some((l) => l.includes('[PollBackoff:test-metatask-refresh]') && l.includes('backing off after failure #3')));
+    assert.equal(h.refresher.refreshBackoffReady(), true, 'ladder still allows the next sweep once the delay elapsed');
+    // heartbeat gate: not ready while the delay is pending
+    const h2clock = { value: clock.value };
+    const backoff2 = new PollBackoffController({
+      name: 'test-metatask-refresh',
+      baseMs: 5 * 60_000,
+      now: () => h2clock.value,
+      random: () => 0.5,
+      emitLog: () => {},
+    });
+    const h2 = await openHarness(h2clock, {
+      backoff: backoff2,
+      fetchImpl: async () => { throw new Error('chain endpoints unreachable'); },
+    });
+    try {
+      await h2.refresher.refreshOnce('gate-fail', { bypassMinInterval: true });
+      h2clock.value += 1;
+      assert.equal(h2.refresher.refreshBackoffReady(), false, 'gate holds while the ladder delay is pending');
+      h2clock.value += backoff2.nextDelayMs();
+      assert.equal(h2.refresher.refreshBackoffReady(), true, 'gate opens at the allowed instant');
+    } finally {
+      h2.cleanup();
+    }
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('issue #24: a successful sweep records success and closes the ladder', async () => {
+  const clock = { value: T0 + 60_000 };
+  const backoff = new PollBackoffController({
+    name: 'test-metatask-refresh',
+    baseMs: 5 * 60_000,
+    now: () => clock.value,
+    random: () => 0.5,
+    emitLog: () => {},
+  });
+  let failing = true;
+  const h = await openHarness(clock, {
+    backoff,
+    fetchImpl: async (url) => {
+      if (failing) throw new Error('chain endpoints unreachable');
+      return h.defaultFetch(url);
+    },
+  });
+  try {
+    const failed = await h.refresher.refreshOnce('fail-first', { bypassMinInterval: true });
+    assert.equal(failed.ok, true, 'ok semantics unchanged during an outage');
+    assert.equal(backoff.getState().consecutiveFailures, 1);
+    failing = false;
+    clock.value += backoff.nextDelayMs() + 1;
+    const ok = await h.refresher.refreshOnce('recover', { bypassMinInterval: true });
+    assert.equal(ok.ok, true);
+    assert.equal(backoff.getState().consecutiveFailures, 0);
+    assert.equal(backoff.getState().circuit, 'closed');
+    assert.equal(backoff.nextDelayMs(), 5 * 60_000);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('issue #24: without a backoff the refresher stays ungated (back-compat)', async () => {
+  const clock = { value: T0 + 60_000 };
+  const h = await openHarness(clock, {});
+  try {
+    assert.equal(h.refresher.refreshBackoffReady(), true);
+    const first = await h.refresher.refreshOnce('plain', { bypassMinInterval: true });
+    assert.equal(first.ok, true);
+    assert.equal(h.refresher.refreshBackoffReady(), true);
+  } finally {
     h.cleanup();
   }
 });

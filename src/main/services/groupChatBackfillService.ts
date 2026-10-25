@@ -7,11 +7,16 @@
  *
  * Loop pattern cloned from privateChatBackfillService (15s interval, single-tick
  * re-entry guard, timer.unref(), module-level start/stop/isRunning singleton).
+ * Issue #24: the fixed cadence is now gated by a shared PollBackoffController —
+ * consecutive total-failure ticks escalate the retry delay, and after a
+ * threshold the circuit opens (attempts paused for a cooldown, then one
+ * half-open probe). Scheduled ticks skip cheaply while the gate is closed.
  */
 
 import type { SqliteDatabase as Database } from '../sqliteTypes';
 import { decryptGroupMessage } from './metaWebCrypto';
 import { notifyGroupMessageInserted, resolveGroupChatSenderName } from './metaWebListenerService';
+import { PollBackoffController } from './pollBackoffController';
 
 export interface GroupChatBackfillServiceDeps {
   db: Database;
@@ -22,6 +27,8 @@ export interface GroupChatBackfillServiceDeps {
   intervalMs?: number;
   pageSize?: number;
   maxRowsPerGroupPerTick?: number;
+  /** Retry-hygiene controller (issue #24); defaults to a local instance. */
+  backoff?: PollBackoffController;
 }
 
 export interface GroupChatBackfillSyncResult {
@@ -33,6 +40,13 @@ export interface GroupChatBackfillSyncResult {
 
 export interface GroupChatBackfillLoop {
   syncOnce(): Promise<GroupChatBackfillSyncResult>;
+  /**
+   * One guarded poll tick: consults the backoff gate, runs syncOnce, records
+   * the outcome. Test seam for driving the backoff ladder without real
+   * timers — the scheduler only times calls to this.
+   */
+  runTick(): Promise<void>;
+  getBackoff(): PollBackoffController;
   start(): void;
   stop(): void;
   isRunning(): boolean;
@@ -307,8 +321,15 @@ export function createGroupChatBackfillLoop(
     return await response.json() as unknown;
   });
 
-  let timer: ReturnType<typeof setInterval> | null = null;
+  const backoff = deps.backoff ?? new PollBackoffController({
+    name: 'group-chat-backfill',
+    baseMs: intervalMs,
+    emitLog,
+  });
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
   let syncing = false;
+  let stopped = true;
 
   const syncOnce = async (): Promise<GroupChatBackfillSyncResult> => {
     const result: GroupChatBackfillSyncResult = {
@@ -374,33 +395,67 @@ export function createGroupChatBackfillLoop(
     return result;
   };
 
-  const runBackgroundSync = (): void => {
+  /**
+   * Issue #24: a tick is a retry-worthy failure only when EVERY group failed
+   * (the hard-outage shape). Partial success means the network is at least
+   * partly alive, so the ladder resets. A tick with no active groups
+   * attempted nothing and keeps the current state.
+   */
+  const recordTickOutcome = (result: GroupChatBackfillSyncResult): void => {
+    if (result.groups === 0) return;
+    if (result.failedGroups === result.groups) {
+      backoff.recordFailure();
+    } else {
+      backoff.recordSuccess();
+    }
+  };
+
+  const runTick = async (): Promise<void> => {
     if (syncing) return;
+    if (!backoff.ready()) return; // circuit open / ladder delay — skip this attempt
     syncing = true;
-    void syncOnce()
-      .catch((error) => {
-        emitLog(`[GroupChatBackfill] Sync failed: ${error instanceof Error ? error.message : String(error)}`);
-      })
-      .finally(() => {
-        syncing = false;
-      });
+    try {
+      const result = await syncOnce();
+      recordTickOutcome(result);
+    } catch (error) {
+      emitLog(`[GroupChatBackfill] Sync failed: ${error instanceof Error ? error.message : String(error)}`);
+      backoff.recordFailure();
+    } finally {
+      syncing = false;
+    }
+  };
+
+  const scheduledTick = (): void => {
+    timer = null;
+    void runTick().finally(() => {
+      if (stopped) return; // stop() ran while the tick was in flight
+      scheduleNext(backoff.nextDelayMs());
+    });
+  };
+
+  const scheduleNext = (delayMs: number): void => {
+    timer = setTimeout(scheduledTick, Math.max(0, delayMs));
+    timer.unref?.();
   };
 
   return {
     syncOnce,
+    runTick,
+    getBackoff: () => backoff,
     start() {
-      if (timer) return;
-      runBackgroundSync();
-      timer = setInterval(runBackgroundSync, intervalMs);
-      timer.unref?.();
+      if (!stopped) return;
+      stopped = false;
+      scheduledTick(); // immediate first sync, then self-rescheduling
     },
     stop() {
-      if (!timer) return;
-      clearInterval(timer);
-      timer = null;
+      stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
     },
     isRunning() {
-      return timer !== null;
+      return !stopped;
     },
   };
 }
