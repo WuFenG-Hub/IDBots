@@ -726,3 +726,6 @@ blob-report/
 
 # Memory evolution #3: event-time axis (occurred vs learned)
 !tests/memoryEventTime.test.mjs
+
+# Scheduled-task memory-access opt-in
+!tests/scheduledTaskMemoryAccess.test.mjs
