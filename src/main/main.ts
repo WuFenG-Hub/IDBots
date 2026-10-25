@@ -5099,6 +5099,12 @@ const startStartupNightlyServices = (): void => {
         return await Promise.race([
           surf.runSurfAndWait(metabotId, 'pre-dream').then((run) => ({
             reportMarkdown: run.status === 'done' ? run.reportMarkdown : null,
+            // Empty-briefing skip (digest-only run, no LLM session): recorded
+            // in the dream telemetry like the binding skip so the nightly
+            // saving is auditable per bot.
+            skippedReason: run.status === 'done' && run.stats.sessionSkipped === 1
+              ? 'surf-empty-briefing'
+              : undefined,
           })),
           new Promise<null>((resolve) => {
             timeout = setTimeout(() => {

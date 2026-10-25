@@ -23,6 +23,8 @@ export interface MetawebSurfRunStats {
   inboxPresented: number;
   discoveredProtocols: number;
   tasksScheduled: number;
+  /** 1 when a pre-dream run skipped its LLM session on an empty briefing (digest-only); absent/0 otherwise. */
+  sessionSkipped?: number;
 }
 
 export interface MetawebSurfRunInfo {

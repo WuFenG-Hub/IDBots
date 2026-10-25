@@ -714,3 +714,136 @@ test('radar: fetchProtocolRadar flows into the briefing and a failure still fini
   assert.equal(second.status, 'done', 'a sick radar backend never fails the run');
   assert.match(second.briefingMarkdown, /radar fetch failed: radar down/);
 });
+
+// --- Empty-briefing skip (nightly-token audit 2026-10-25) ---------------------
+
+const sessionRecorder = () => {
+  const calls = [];
+  const runSurfSession = async (context) => {
+    calls.push(context);
+    return { stats: { deepRead: 1 }, reportMarkdown: '# Report', reportJson: '{"summary":"ok"}' };
+  };
+  return { calls, runSurfSession };
+};
+
+const sessionService = (store, registry, extra = {}) => new SurfService({
+  store,
+  metabotStore: {
+    getMetabotById: () => ({ id: 7, name: 'Tester' }),
+    getMetabotSetting: () => null,
+  },
+  broadcast: () => {},
+  registry,
+  nowMs: () => NOW_MS,
+  ...extra,
+});
+
+test('pre-dream: an empty briefing skips the LLM session and finishes digest-only', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const registry = [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])];
+  const { calls, runSurfSession } = sessionRecorder();
+  const service = sessionService(store, registry, { runSurfSession });
+
+  // Night 1: fresh content → the session runs.
+  const first = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(first.status, 'done');
+  assert.equal(calls.length, 1);
+  assert.equal(first.stats.sessionSkipped, 0);
+
+  // Night 2 (pre-dream): the same window is already presented → nothing to do.
+  const second = await service.runSurfAndWait(7, 'pre-dream');
+  assert.equal(second.status, 'done', 'a skipped run is a finished run, not a failure');
+  assert.equal(calls.length, 1, 'no LLM session was launched for the empty briefing');
+  assert.equal(second.stats.fetched, 0);
+  assert.equal(second.stats.sessionSkipped, 1, 'the skip is recorded on the run stats');
+  assert.equal(second.reportMarkdown, null, 'no report → the dream sees no surf activity');
+  assert.match(second.briefingMarkdown ?? '', /./, 'the digest is still recorded');
+  assert.equal(service.shouldPreDreamSurf(7), false, 'the finished skip run still holds the recency dedupe');
+});
+
+test('manual triggers always run the session, even on an empty briefing', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const registry = [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])];
+  const { calls, runSurfSession } = sessionRecorder();
+  const service = sessionService(store, registry, { runSurfSession });
+  await service.runSurfAndWait(7, 'manual-ui');
+  const second = await service.runSurfAndWait(7, 'manual-ui');
+  assert.equal(second.status, 'done');
+  assert.equal(second.stats.fetched, 0);
+  assert.equal(calls.length, 2, 'the owner asked for a surf — it runs regardless of the briefing');
+  assert.equal(second.stats.sessionSkipped, 0);
+});
+
+test('pre-dream: a protocol fetch error never qualifies as an empty briefing', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const broken = {
+    key: 'broken',
+    displayName: 'Broken',
+    paths: ['/protocols/broken'],
+    interactions: ['like'],
+    relevanceHint: 'hint',
+    fetchFresh: async () => { throw new Error('backend down'); },
+  };
+  const { calls, runSurfSession } = sessionRecorder();
+  const service = sessionService(store, [broken], { runSurfSession });
+  const run = await service.runSurfAndWait(7, 'pre-dream');
+  assert.equal(run.status, 'done');
+  assert.equal(run.stats.fetched, 0);
+  assert.equal(calls.length, 1, 'an unknown window is not an empty one — the session runs');
+  assert.equal(run.stats.sessionSkipped, 0);
+});
+
+test('pre-dream: pending inbox items (or an inbox fetch error) keep the session running', async () => {
+  const db = createNativeSqliteDatabase(':memory:');
+  const store = new MetawebSurfStore(db, () => {});
+  const registry = [alphaDescriptor([])];
+  const { calls, runSurfSession } = sessionRecorder();
+  const withInbox = sessionService(store, registry, {
+    runSurfSession,
+    getBotIdentity: () => ({ address: '0xABC', globalMetaId: 'idq-tester' }),
+    fetchSurfInbox: async () => [makeInboxItem('inbox-1', NOW_SEC - 200)],
+  });
+  const run = await withInbox.runSurfAndWait(7, 'pre-dream');
+  assert.equal(run.status, 'done');
+  assert.equal(run.stats.fetched, 0);
+  assert.equal(run.stats.inboxPresented, 1);
+  assert.equal(calls.length, 1, 'a reply waiting in the inbox is work — the session runs');
+  assert.equal(run.stats.sessionSkipped, 0);
+
+  const db2 = createNativeSqliteDatabase(':memory:');
+  const store2 = new MetawebSurfStore(db2, () => {});
+  const recorder2 = sessionRecorder();
+  const inboxError = sessionService(store2, registry, {
+    runSurfSession: recorder2.runSurfSession,
+    getBotIdentity: () => ({ address: '0xABC', globalMetaId: 'idq-tester' }),
+    fetchSurfInbox: async () => { throw new Error('inbox api down'); },
+  });
+  const run2 = await inboxError.runSurfAndWait(7, 'pre-dream');
+  assert.equal(run2.status, 'done');
+  assert.equal(recorder2.calls.length, 1, 'an inbox fetch error is unknown work, not no work');
+  assert.equal(run2.stats.sessionSkipped, 0);
+
+  // Error-free empty inbox + no items → skip.
+  const db3 = createNativeSqliteDatabase(':memory:');
+  const store3 = new MetawebSurfStore(db3, () => {});
+  const recorder3 = sessionRecorder();
+  const emptyInbox = sessionService(store3, registry, {
+    runSurfSession: recorder3.runSurfSession,
+    getBotIdentity: () => ({ address: '0xABC', globalMetaId: 'idq-tester' }),
+    fetchSurfInbox: async () => [],
+  });
+  const run3 = await emptyInbox.runSurfAndWait(7, 'pre-dream');
+  assert.equal(run3.status, 'done');
+  assert.equal(recorder3.calls.length, 0, 'empty items + error-free empty inbox → skipped');
+  assert.equal(run3.stats.sessionSkipped, 1);
+});
+
+test('digest-only harness (no session injected) never reports a skip', async () => {
+  const { service } = setup([alphaDescriptor([])]);
+  const run = await service.runSurfAndWait(7, 'pre-dream');
+  assert.equal(run.status, 'done');
+  assert.equal(run.stats.sessionSkipped, 0, 'nothing to skip when no session is configured');
+});
