@@ -1822,81 +1822,87 @@ const UserMessageItem: React.FC<{
               {/* The id also rides the bubble: the quote-jump ring wraps the
                   innermost data-message-id mount, so it hugs this bubble's
                   own outline — w-fit width, its 22px radius. */}
-              <div
-                className="cowork-user-bubble w-fit max-w-[min(720px,82%)] rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text"
-                data-message-id={message.id}
-              >
-                {sentQuote ? (
-                  <>
-                    <CoworkSentQuoteBlock
-                      block={sentQuote.block}
-                      onJump={onJumpToQuoteBlock
-                        ? () => onJumpToQuoteBlock(
-                          sentQuote.ordinal,
-                          readQuotedJumpMessageId(message.metadata) ?? undefined,
-                        )
-                        : undefined}
+              <div className="relative w-fit max-w-[min(720px,82%)]">
+                <div
+                  className="cowork-user-bubble rounded-[22px] px-[16px] py-[10px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text"
+                  data-message-id={message.id}
+                >
+                  {sentQuote ? (
+                    <>
+                      <CoworkSentQuoteBlock
+                        block={sentQuote.block}
+                        onJump={onJumpToQuoteBlock
+                          ? () => onJumpToQuoteBlock(
+                            sentQuote.ordinal,
+                            readQuotedJumpMessageId(message.metadata) ?? undefined,
+                          )
+                          : undefined}
+                      />
+                      {sentQuote.rest ? (
+                        <UserMessageBody
+                          content={sentQuote.rest}
+                          resolveLocalFilePath={resolveLocalFilePath}
+                        />
+                      ) : null}
+                    </>
+                  ) : sentSelectionQuote ? (
+                    // Same quote bar as the reply block — gold rule, source line,
+                    // excerpt — just without a jump target (a hand-picked
+                    // selection carries no message position).
+                    <>
+                      <CoworkSentQuoteBlock block={sentSelectionQuote.block} />
+                      {sentSelectionQuote.rest ? (
+                        <UserMessageBody
+                          content={sentSelectionQuote.rest}
+                          resolveLocalFilePath={resolveLocalFilePath}
+                        />
+                      ) : null}
+                    </>
+                  ) : (
+                    <UserMessageBody
+                      content={message.content}
+                      resolveLocalFilePath={resolveLocalFilePath}
                     />
-                    {sentQuote.rest ? (
-                      <UserMessageBody
-                        content={sentQuote.rest}
-                        resolveLocalFilePath={resolveLocalFilePath}
-                      />
-                    ) : null}
-                  </>
-                ) : sentSelectionQuote ? (
-                  // Same quote bar as the reply block — gold rule, source line,
-                  // excerpt — just without a jump target (a hand-picked
-                  // selection carries no message position).
-                  <>
-                    <CoworkSentQuoteBlock block={sentSelectionQuote.block} />
-                    {sentSelectionQuote.rest ? (
-                      <UserMessageBody
-                        content={sentSelectionQuote.rest}
-                        resolveLocalFilePath={resolveLocalFilePath}
-                      />
-                    ) : null}
-                  </>
-                ) : (
-                  <UserMessageBody
-                    content={message.content}
-                    resolveLocalFilePath={resolveLocalFilePath}
+                  )}
+                </div>
+                {/* Menu button positioned on the left side of the bubble, symmetrical to bot messages */}
+                <div className="absolute z-10 right-full top-1 mr-1">
+                  <CoworkMessageActionsMenu
+                    visible={isHovered}
+                    text={message.content}
+                    onQuote={() => onQuoteReply?.(message, message.content)}
                   />
-                )}
-              </div>
-              <div className="flex items-center justify-end gap-1.5 mt-1">
-                {isSteerMessage && (
-                  <>
-                    <span className="inline-flex items-center rounded-md bg-claude-accent/10 px-1.5 py-0.5 text-[10px] font-semibold text-claude-accent">
-                      {i18nService.t('coworkSteerLabel')}
-                    </span>
-                    {steerStatusKey && (
-                      <span className={`text-[10px] ${message.metadata?.steerStatus === 'failed'
-                        ? 'text-red-500 dark:text-red-400'
-                        : 'dark:text-claude-darkTextSecondary text-claude-textSecondary'
-                      }`}>
-                        {i18nService.t(steerStatusKey)}
+                </div>
+                {/* Metadata badges below the bubble */}
+                <div className="flex items-center justify-end gap-1.5 mt-1">
+                  {isSteerMessage && (
+                    <>
+                      <span className="inline-flex items-center rounded-md bg-claude-accent/10 px-1.5 py-0.5 text-[10px] font-semibold text-claude-accent">
+                        {i18nService.t('coworkSteerLabel')}
                       </span>
-                    )}
-                  </>
-                )}
-                {messageSkills.map(skill => (
-                  <div
-                    key={skill.id}
-                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-claude-accent/5 dark:bg-claude-accent/10"
-                    title={skill.description}
-                  >
-                    <PuzzlePieceIcon className="h-2.5 w-2.5 text-claude-accent/70" />
-                    <span className="text-[10px] font-medium text-claude-accent/70 max-w-[60px] truncate">
-                      {skill.name}
-                    </span>
-                  </div>
-                ))}
-                <CoworkMessageActionsMenu
-                  visible={isHovered}
-                  text={message.content}
-                  onQuote={() => onQuoteReply?.(message, message.content)}
-                />
+                      {steerStatusKey && (
+                        <span className={`text-[10px] ${message.metadata?.steerStatus === 'failed'
+                          ? 'text-red-500 dark:text-red-400'
+                          : 'dark:text-claude-darkTextSecondary text-claude-textSecondary'
+                        }`}>
+                          {i18nService.t(steerStatusKey)}
+                        </span>
+                      )}
+                    </>
+                  )}
+                  {messageSkills.map(skill => (
+                    <div
+                      key={skill.id}
+                      className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-claude-accent/5 dark:bg-claude-accent/10"
+                      title={skill.description}
+                    >
+                      <PuzzlePieceIcon className="h-2.5 w-2.5 text-claude-accent/70" />
+                      <span className="text-[10px] font-medium text-claude-accent/70 max-w-[60px] truncate">
+                        {skill.name}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
