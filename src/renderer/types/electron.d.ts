@@ -1012,6 +1012,12 @@ interface IElectronAPI {
   };
   botBrowser: {
     onOpenUri: (callback: (input: { uri: string; actorId?: string | null }) => void) => () => void;
+    /** Sanitized local human identity for the Browser Actor list (display fields only). */
+    getHumanActor: () => Promise<{
+      actor: { label: string; globalMetaId: string; avatar?: string; signingAvailable: boolean } | null;
+    }>;
+    /** Fired when the human identity is created/imported/replaced/removed; refresh runtime actors. */
+    onActorsChanged: (callback: () => void) => () => void;
     onTabCommand: (callback: (input: {
       requestId: string;
       command: BotBrowserTabCommand;

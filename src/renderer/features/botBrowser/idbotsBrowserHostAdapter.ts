@@ -43,8 +43,7 @@ import {
   parseLocalMetabotActorId,
 } from './botBrowserIntent.js';
 import {
-  metabotsToBrowserActors,
-  selectDefaultBrowserActor,
+  resolveBrowserRuntimeActors,
 } from './idbotsBrowserActorModel.js';
 import {
   localMetaAppToBrowserRecord,
@@ -65,6 +64,14 @@ const APP_SESSION_METHODS: Partial<Record<BrowserTrustedActionKind, string>> = {
 
 export interface IdBotsBrowserHostAdapterInput {
   listMetabots: () => Promise<Metabot[]>;
+  /**
+   * Sanitized local human identity for the Browser runtime Actor list. Must
+   * come from the host's trusted path and carry only display fields
+   * (label/globalMetaId/avatar/signingAvailable) — never the mnemonic, keys,
+   * wallet snapshots, paths, or raw store rows. Returns null when no human
+   * identity is registered.
+   */
+  getHumanIdentity?: () => Promise<HumanBrowserIdentity | null>;
   listMetaApps: () => Promise<MetaAppRecord[]>;
   resolveBrowserResource?: (
     input: BrowserResolveInput,
@@ -119,6 +126,19 @@ export interface BotBrowserBridgeTrustedActionRequest {
   resourceUri: string;
   sessionId?: string;
   payload?: unknown;
+}
+
+/**
+ * Display-only descriptor of the local human identity, supplied by the
+ * sanitized main-process path (botBrowser:getHumanActor). signingAvailable is
+ * false when the signer is locked (e.g. gas subsidy failed/missing); such an
+ * Actor may remain visible but writes fail with an explicit error.
+ */
+export interface HumanBrowserIdentity {
+  label: string;
+  globalMetaId: string;
+  avatar?: string;
+  signingAvailable: boolean;
 }
 
 function text(value: unknown): string {
@@ -388,11 +408,17 @@ export function createIdbotsBrowserHostAdapter(
 
   return {
     async getRuntime(_runtimeInput?: BrowserRuntimeInput): Promise<BrowserCommandResult<BrowserRuntimeSnapshot>> {
-      const metabots = await input.listMetabots();
+      const [metabots, humanIdentity] = await Promise.all([
+        input.listMetabots(),
+        input.getHumanIdentity ? input.getHumanIdentity().catch(() => null) : Promise.resolve(null),
+      ]);
+      // actors and defaultActor come from one resolver so the default always
+      // exists in the (deduplicated) list with matching isDefault flags.
+      const { actors, defaultActor } = resolveBrowserRuntimeActors(metabots, humanIdentity);
       return browserSuccess({
         host: { kind: 'idbots', name: 'IDBots', localMode: true },
-        actors: metabotsToBrowserActors(metabots),
-        defaultActor: selectDefaultBrowserActor(metabots),
+        actors,
+        defaultActor,
         defaultUri: null,
         features: {
           privateChat: true,
@@ -402,11 +428,12 @@ export function createIdbotsBrowserHostAdapter(
           walletLogin: false,
         },
         labels: {
-          actorChip: 'Bot',
-          noActorTitle: 'No Bot available',
-          noActorBody: 'Create or restore a local Bot before using IDBots Browser actions.',
+          actorChip: 'Actor',
+          noActorTitle: 'No Actor available',
+          noActorBody:
+            'Create or import a human account, or create a local Bot, before using IDBots Browser actions.',
           noActorAction: {
-            label: 'Create Bot',
+            label: 'Open Settings',
             actionKind: 'open-settings',
           },
         },

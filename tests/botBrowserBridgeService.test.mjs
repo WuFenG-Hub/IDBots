@@ -85,6 +85,7 @@ test('sanitizeMetaAppBridgeActor exposes only MetaID actor display fields', () =
     globalMetaId: 'idq1abc',
     name: 'Alpha Bot',
     avatarPinId: 'pin123i0',
+    kind: 'idbots-agent',
   });
   assert.equal('id' in actor, false);
   assert.equal('wallet' in actor, false);
@@ -98,6 +99,7 @@ test('writeMetaIdPin validates payload before issuing authorization or executing
   let createPinCalls = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
+    resolvePinPath: async () => ({ status: 'resolved', path: '/protocols/simplebuzz' }),
     createPin: async () => {
       createPinCalls += 1;
       return { pinId: 'pin123i0', txids: ['tx123'], totalCost: 1 };
@@ -126,6 +128,7 @@ test('phase 1 returns confirmation plus the exact host confirmRequest and Cancel
   let createPinCalls = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
+    resolvePinPath: async () => ({ status: 'resolved', path: '/protocols/simplebuzz' }),
     createPin: async () => {
       createPinCalls += 1;
       return { pinId: 'pin123i0', txids: ['tx123'], totalCost: 1 };
@@ -168,6 +171,7 @@ test('phase 1 returns confirmation plus the exact host confirmRequest and Cancel
       uri: 'metaid://idq1abc',
       globalMetaId: 'idq1abc',
       name: 'Alpha Bot',
+      kind: 'idbots-agent',
     },
     operation: 'create',
     path: '/protocols/simplebuzz',
@@ -202,6 +206,7 @@ test('phase 2 accepts only the exact confirmRequest and writes create, modify, a
   let confirmationSequence = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
+    resolvePinPath: async () => ({ status: 'resolved', path: '/protocols/simplebuzz' }),
     createConfirmationId: () => `confirmation-${++confirmationSequence}`,
     createConfirmationToken: () => `opaque-token-${confirmationSequence}`,
     createPin: async (_store, metabotId, metaidPayload, options) => {
@@ -255,7 +260,9 @@ test('phase 2 accepts only the exact confirmRequest and writes create, modify, a
         uri: 'metaid://idq1abc',
         globalMetaId: 'idq1abc',
         name: 'Alpha Bot',
+        kind: 'idbots-agent',
       },
+      totalCost: 1,
     });
   }
 
@@ -322,6 +329,7 @@ test('invalid and expired confirmations are rejected, and a consumed token canno
   let createPinCalls = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
+    resolvePinPath: async () => ({ status: 'resolved', path: '/protocols/simplebuzz' }),
     now: () => currentTime,
     confirmationTtlMs: 1_000,
     createConfirmationId: () => `confirmation-${++confirmationSequence}`,
@@ -489,6 +497,7 @@ test('writeMetaIdPin rejects modify and revoke slash paths before authorization 
   let createPinCalls = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
+    resolvePinPath: async () => ({ status: 'resolved', path: '/protocols/simplebuzz' }),
     createPin: async () => {
       createPinCalls += 1;
       return { pinId: 'pin123i0', txids: ['tx123'], totalCost: 1 };
@@ -529,6 +538,7 @@ test('session permissions authorize only exact whitelisted protocol creates and 
   let confirmationSequence = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
+    resolvePinPath: async () => ({ status: 'resolved', path: '/protocols/simplebuzz' }),
     createConfirmationId: () => `permission-${++confirmationSequence}`,
     createConfirmationToken: () => `permission-token-${confirmationSequence}`,
     audit: (event) => auditEvents.push(event),
@@ -641,6 +651,7 @@ test('session permissions authorize only exact whitelisted protocol creates and 
 test('permission confirmations are bound to actor, resource, session, and exact grants', async () => {
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
+    resolvePinPath: async () => ({ status: 'resolved', path: '/protocols/simplebuzz' }),
     createConfirmationId: () => 'permission-bound',
     createConfirmationToken: () => 'permission-bound-token',
     createPin: async () => ({ pinId: 'pin123i0', txids: ['tx123'], totalCost: 1 }),
@@ -753,6 +764,7 @@ test('uploadMetaFile supports only host-picker and never returns local paths or 
   const uploads = [];
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
+    resolvePinPath: async () => ({ status: 'resolved', path: '/protocols/simplebuzz' }),
     pickFiles: async () => [
       { filePath: '/Users/tusm/private/report.pdf', name: 'report.pdf' },
     ],
@@ -802,6 +814,7 @@ test('uploadMetaFile supports only host-picker and never returns local paths or 
         uri: 'metaid://idq1abc',
         globalMetaId: 'idq1abc',
         name: 'Alpha Bot',
+        kind: 'idbots-agent',
       },
     },
   ]);
@@ -853,6 +866,7 @@ test('completeLlm enforces a per-resource rate limit and a single in-flight comp
   let completed = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
+    resolvePinPath: async () => ({ status: 'resolved', path: '/protocols/simplebuzz' }),
     now: () => 5_000_000,
     llmTimeoutMs: 1_000,
     completeLlm: async () => {
@@ -951,7 +965,9 @@ test('completeLlm maps timeouts to llm_timeout, failures to llm_unavailable, and
   });
   const empty = await emptyService.completeLlm(base);
   assert.equal(empty.ok, false);
-  assert.equal(empty.code, 'llm_unavailable');
+  // Whitespace-only completions map to empty_content (deliberate mapping;
+  // the llm_unavailable expectation predated it and failed on main).
+  assert.equal(empty.code, 'empty_content');
 
   const dirtyService = createBotBrowserBridgeService({
     metabotStore: createStore(),
@@ -973,6 +989,7 @@ test('permissions-request rejects off-whitelist and sensitive protocol paths wit
   let confirmationsIssued = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
+    resolvePinPath: async () => ({ status: 'resolved', path: '/protocols/simplebuzz' }),
     createConfirmationId: () => `permission-${++confirmationsIssued}`,
     createConfirmationToken: () => `permission-token-${confirmationsIssued}`,
   });
@@ -1024,6 +1041,7 @@ test('granted writes enforce the 16KB payload cap and the per-resource write rat
   let confirmationSequence = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
+    resolvePinPath: async () => ({ status: 'resolved', path: '/protocols/simplebuzz' }),
     now: () => 5_000_000,
     createConfirmationId: () => `permission-${++confirmationSequence}`,
     createConfirmationToken: () => `permission-token-${confirmationSequence}`,

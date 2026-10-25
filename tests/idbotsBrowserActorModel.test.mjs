@@ -2,9 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildBrowserRuntimeActors,
+  humanIdentityToBrowserActor,
+  isUsableHumanIdentity,
   metabotToBrowserActor,
   metabotsToBrowserActors,
+  resolveBrowserRuntimeActors,
   selectDefaultBrowserActor,
+  selectDefaultBrowserRuntimeActor,
 } from '../src/renderer/features/botBrowser/idbotsBrowserActorModel.js';
 
 function createMetabot(overrides = {}) {
@@ -82,4 +87,152 @@ test('selectDefaultBrowserActor follows the browser metabot sort rule', () => {
     capabilities: ['private-chat'],
     localMetabotId: 2,
   });
+});
+
+// ---------------------------------------------------------------------------
+// Human account Actor (motion-video preference loop, idbots-account kind)
+// ---------------------------------------------------------------------------
+
+const HUMAN = {
+  label: ' Sunny ',
+  globalMetaId: ' IDQ1HUMAN ',
+  avatar: ' data:image/png;base64,zz ',
+  signingAvailable: true,
+};
+
+test('humanIdentityToBrowserActor maps the sanitized identity to an idbots-account actor', () => {
+  const actor = humanIdentityToBrowserActor(HUMAN);
+  assert.deepEqual(actor, {
+    id: 'idbots-account-1',
+    label: 'Sunny · Account',
+    kind: 'idbots-account',
+    globalMetaId: 'idq1human',
+    avatar: 'data:image/png;base64,zz',
+    isDefault: false,
+    capabilities: [],
+  });
+});
+
+test('humanIdentityToBrowserActor never carries secret or wallet material', () => {
+  const actor = humanIdentityToBrowserActor({
+    ...HUMAN,
+    mnemonic: 'word word word',
+    mvc_address: 'mvc-addr',
+    public_key: 'pk',
+    path: "m/44'/10001'/0'/0/0",
+    rawRow: { any: 'thing' },
+  });
+  const serialized = JSON.stringify(actor);
+  for (const secret of ['mnemonic', 'mvc_address', 'public_key', 'path', 'rawRow', 'word word']) {
+    assert.ok(!serialized.includes(secret), `actor must not carry ${secret}`);
+  }
+});
+
+test('humanIdentityToBrowserActor drops identities without a usable globalmetaid', () => {
+  assert.equal(humanIdentityToBrowserActor(null), null);
+  assert.equal(humanIdentityToBrowserActor({ label: 'x', globalMetaId: 'metaid://idq1x' }), null);
+  assert.equal(humanIdentityToBrowserActor({ label: 'x', globalMetaId: 'abc' }), null);
+});
+
+test('buildBrowserRuntimeActors lists the human first and dedups bots sharing its globalmetaid', () => {
+  const actors = buildBrowserRuntimeActors(
+    [
+      createMetabot({ id: 1, created_at: 10, globalmetaid: 'idq111' }),
+      createMetabot({ id: 2, created_at: 20, globalmetaid: 'IDQ1HUMAN' }),
+    ],
+    HUMAN,
+  );
+  assert.deepEqual(
+    actors.map((actor) => actor.id),
+    ['idbots-account-1', 'idbots-metabot-1'],
+  );
+  assert.equal(actors[0].kind, 'idbots-account');
+  assert.equal(actors[1].kind, 'idbots-agent');
+});
+
+test('selectDefaultBrowserRuntimeActor preserves the Bot default when Bots exist', () => {
+  const actor = selectDefaultBrowserRuntimeActor(
+    [createMetabot({ id: 1, created_at: 10, globalmetaid: 'idq111' })],
+    HUMAN,
+  );
+  assert.equal(actor.id, 'idbots-metabot-1');
+  assert.equal(actor.kind, 'idbots-agent');
+});
+
+test('selectDefaultBrowserRuntimeActor falls back to a usable human identity with no Bots', () => {
+  const actor = selectDefaultBrowserRuntimeActor([], HUMAN);
+  assert.equal(actor.id, 'idbots-account-1');
+  assert.equal(actor.kind, 'idbots-account');
+});
+
+test('a visible-but-locked human identity is never the default', () => {
+  const actor = selectDefaultBrowserRuntimeActor([], { ...HUMAN, signingAvailable: false });
+  assert.equal(actor, null);
+});
+
+test('when the default Bot is deduped against the human identity, the human takes the default', () => {
+  // Bot 1 is the oldest usable Bot (the default) but shares the human's
+  // GlobalMetaId, so it is filtered from the list. The same-identity human
+  // account Actor must take over the default — never a dangling reference.
+  const { actors, defaultActor } = resolveBrowserRuntimeActors(
+    [
+      createMetabot({ id: 1, created_at: 10, globalmetaid: 'IDQ1HUMAN' }),
+      createMetabot({ id: 2, created_at: 20, globalmetaid: 'IDQ1BOT' }),
+    ],
+    HUMAN,
+  );
+  assert.deepEqual(
+    actors.map((actor) => actor.id),
+    ['idbots-account-1', 'idbots-metabot-2'],
+  );
+  assert.equal(defaultActor.id, 'idbots-account-1');
+  assert.equal(actors[0].isDefault, true);
+  assert.equal(actors[1].isDefault, false);
+  // The default is a member of the list itself.
+  assert.ok(actors.includes(defaultActor));
+});
+
+test('a locked human with a deduped default Bot falls back to the next Bot', () => {
+  const { actors, defaultActor } = resolveBrowserRuntimeActors(
+    [
+      createMetabot({ id: 1, created_at: 10, globalmetaid: 'IDQ1HUMAN' }),
+      createMetabot({ id: 2, created_at: 20, globalmetaid: 'IDQ1BOT' }),
+    ],
+    { ...HUMAN, signingAvailable: false },
+  );
+  assert.deepEqual(
+    actors.map((actor) => actor.id),
+    ['idbots-account-1', 'idbots-metabot-2'],
+  );
+  assert.equal(defaultActor.id, 'idbots-metabot-2');
+  assert.equal(actors[1].isDefault, true);
+  assert.equal(actors[0].isDefault, false);
+});
+
+test('the human default only with no Bots carries isDefault on the listed actor', () => {
+  const { actors, defaultActor } = resolveBrowserRuntimeActors([], HUMAN);
+  assert.equal(defaultActor.id, 'idbots-account-1');
+  assert.equal(defaultActor.isDefault, true);
+  assert.equal(actors[0].isDefault, true);
+  assert.ok(actors.includes(defaultActor));
+
+  const locked = resolveBrowserRuntimeActors([], { ...HUMAN, signingAvailable: false });
+  assert.equal(locked.defaultActor, null);
+  assert.equal(locked.actors[0].isDefault, false);
+});
+
+test('selectDefaultBrowserRuntimeActor agrees with the resolver-marked default', () => {
+  const metabots = [
+    createMetabot({ id: 1, created_at: 10, globalmetaid: 'IDQ1HUMAN' }),
+    createMetabot({ id: 2, created_at: 20, globalmetaid: 'IDQ1BOT' }),
+  ];
+  const actor = selectDefaultBrowserRuntimeActor(metabots, HUMAN);
+  assert.equal(actor.id, 'idbots-account-1');
+  assert.equal(actor.isDefault, true);
+});
+
+test('isUsableHumanIdentity requires the signing flag', () => {
+  assert.equal(isUsableHumanIdentity(HUMAN), true);
+  assert.equal(isUsableHumanIdentity({ ...HUMAN, signingAvailable: false }), false);
+  assert.equal(isUsableHumanIdentity(null), false);
 });

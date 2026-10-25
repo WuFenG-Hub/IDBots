@@ -220,6 +220,9 @@ tests/*
 !tests/botBrowserModeSwitch.test.tsx
 !tests/sidebarNavigation.test.mjs
 !tests/botBrowserBridgeService.test.mjs
+!tests/botBrowserHumanPinWrite.test.mjs
+!tests/humanIdentityPinWriter.test.mjs
+!tests/pinPathResolver.test.mjs
 !tests/botBrowserHostService.test.mjs
 !tests/privateChatOrderCoworkTimeout.test.mjs
 !tests/a2aGuidanceRestart.test.ts

@@ -157,6 +157,10 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
           const result = await window.electron.metabot.list();
           return result?.list ?? [];
         },
+        getHumanIdentity: async () => {
+          const result = await window.electron.botBrowser.getHumanActor();
+          return result?.actor ?? null;
+        },
         listMetaApps: async () => {
           const result = await window.electron.metaapps.list();
           return result?.apps ?? [];
@@ -312,6 +316,20 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
       if (!visible) return;
       void ensureSrcDoc().catch(() => {});
     }, [ensureSrcDoc, visible]);
+
+    // Human identity lifecycle (create/import/replace/logout): refresh the
+    // Browser runtime so stale Actor/grant state never outlives the identity
+    // it was issued for.
+    useEffect(() => {
+      return window.electron.botBrowser.onActorsChanged(() => {
+        if (!srcDocRef.current) return;
+        if (readyRef.current) {
+          postToIframe({ type: 'refresh-runtime' });
+        } else {
+          pendingRefreshRuntimeRef.current = true;
+        }
+      });
+    }, [postToIframe]);
 
     useEffect(() => {
       return themeService.subscribe(() => {

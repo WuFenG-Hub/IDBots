@@ -12670,6 +12670,7 @@ export class CoworkRunner extends EventEmitter {
           tool,
           searchMetaApps: this.controlBotBrowser.searchMetaApps,
           listMetaAppForks: this.controlBotBrowser.listMetaAppForks,
+          listPreferenceComparisons: this.controlBotBrowser.listPreferenceComparisons,
           nextStep: 'install',
         })
       );

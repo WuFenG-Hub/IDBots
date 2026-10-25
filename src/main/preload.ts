@@ -104,6 +104,15 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('botBrowser:openUri', handler);
       return () => ipcRenderer.removeListener('botBrowser:openUri', handler);
     },
+    getHumanActor: () =>
+      ipcRenderer.invoke('botBrowser:getHumanActor') as Promise<{
+        actor: { label: string; globalMetaId: string; avatar?: string; signingAvailable: boolean } | null;
+      }>,
+    onActorsChanged: (callback: () => void) => {
+      const handler = () => callback();
+      ipcRenderer.on('botBrowser:actorsChanged', handler);
+      return () => ipcRenderer.removeListener('botBrowser:actorsChanged', handler);
+    },
     onTabCommand: (callback: (input: {
       requestId: string;
       command: {

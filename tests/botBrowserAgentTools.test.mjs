@@ -7,6 +7,7 @@ import path from 'node:path';
 
 const require = Module.createRequire(import.meta.url);
 const { buildBotBrowserAgentTools, buildBotBrowserScreenshotTool, buildSearchMetaAppsAgentTools, formatBotBrowserTabs } = require('../dist-electron/main/libs/botBrowserAgentTools.js');
+const { MetaAppValidatedBasisUnavailableError } = require('../dist-electron/main/services/metaAppSearchService.js');
 
 function makeHarness(overrides = {}) {
   const calls = { execute: [], openUri: [], forkMetaApp: [], search: [] };
@@ -508,4 +509,185 @@ test('bot_browser_screenshot surfaces bridge errors with the surface hint', asyn
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /timed out/);
   assert.match(result.content[0].text, /switch to Bot Browser mode/);
+});
+
+// ---------------------------------------------------------------------------
+// Motion-video preference evidence (search_metaapps + search_preference_comparisons)
+// ---------------------------------------------------------------------------
+
+const MV_CANDIDATE = {
+  ...SEARCH_CANDIDATE,
+  pinId: 'm'.repeat(64) + 'i0',
+  title: 'Ukiyo-e Loop',
+  tags: ['motion-video'],
+  currentPinId: 'n'.repeat(64) + 'i0',
+  prompt: 'ukiyo-e ten second loop',
+  motionVideo: {
+    videoFile: 'metafile://' + 'o'.repeat(64) + 'i0.mp4',
+    videoSha256: 'b8113ccc77c592466f8c67b7ff775cb9c57927a516c34989e8611a1d09f81674',
+    learning: { sourceIncluded: true, hasPrompt: true, status: 'declared' },
+  },
+  preference: {
+    open: { score: 0.73, scoreVersion: 'motion-video-open-pref-v1', state: 'established', comparisons: 18, judges: 5 },
+    validated: { score: null, state: 'unavailable' },
+  },
+};
+
+test('search_metaapps preference sorting requires an explicit chainName', async () => {
+  const { byName } = makeHarness();
+  const result = await byName.search_metaapps.handler({ sort: 'preference' });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /requires an explicit chainName/);
+});
+
+test('search_metaapps passes preference filters and surfaces evidence summaries', async () => {
+  const { calls, byName } = makeHarness({
+    searchResult: { items: [MV_CANDIDATE], hasMore: false },
+  });
+  const result = await byName.search_metaapps.handler({
+    tag: 'motion-video',
+    sort: 'preference',
+    chainName: 'mvc',
+    order: 'desc',
+    basis: 'open',
+    minJudges: 3,
+    learning: 'declared',
+  });
+  assert.deepEqual(calls.search.at(-1), {
+    keyword: undefined,
+    tag: 'motion-video',
+    publisher: undefined,
+    since: undefined,
+    limit: 8,
+    chainName: 'mvc',
+    sort: 'preference',
+    order: 'desc',
+    basis: 'open',
+    minJudges: 3,
+    learning: 'declared',
+  });
+  const text = result.content[0].text;
+  assert.match(text, /strongest open preference first \(chain mvc\)/);
+  assert.match(text, /pref\(open\): 0\.73 \(18 cmp \/ 5 judges, established\)/);
+  assert.match(text, /learning: declared \(publisher-declared, not verified\)/);
+  assert.match(text, new RegExp('version: metaapp://' + 'n'.repeat(64) + 'i0'));
+  assert.equal(result.isError, undefined);
+});
+
+test('search_metaapps labels unjudged items honestly', async () => {
+  const { byName } = makeHarness({
+    searchResult: {
+      items: [{
+        ...MV_CANDIDATE,
+        preference: {
+          open: { score: null, scoreVersion: 'motion-video-open-pref-v1', state: 'unjudged' },
+          validated: { score: null, state: 'unavailable' },
+        },
+      }],
+    },
+  });
+  const result = await byName.search_metaapps.handler({ sort: 'preference', chainName: 'mvc' });
+  assert.match(result.content[0].text, /pref\(open\): unjudged/);
+});
+
+test('search_metaapps maps validated-basis unavailability to a readable message', async () => {
+  const { byName } = makeHarness({
+    control: {
+      searchMetaApps: async () => {
+        throw new MetaAppValidatedBasisUnavailableError('preference_validated_basis_unavailable');
+      },
+    },
+  });
+  const result = await byName.search_metaapps.handler({ sort: 'preference', chainName: 'mvc', basis: 'validated' });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Validated preference aggregation is not yet available/);
+});
+
+test('search_preference_comparisons formats open contrasts with reasons', async () => {
+  const sha = 'b8113ccc77c592466f8c67b7ff775cb9c57927a516c34989e8611a1d09f81674';
+  const { byName } = makeHarness({
+    control: {
+      listPreferenceComparisons: async (input) => {
+        comparisonsCalls.push(input);
+        return {
+          items: [{
+            feedbackPinId: 'f'.repeat(64) + 'i3',
+            chainName: 'mvc',
+            basis: 'open',
+            isMempool: false,
+            confirmedAt: 1792832839,
+            a: {
+              chainName: 'mvc',
+              app: 'metaapp://' + '1'.repeat(64) + 'i0',
+              version: 'metaapp://' + '2'.repeat(64) + 'i0',
+              video: 'metafile://' + '3'.repeat(64) + 'i0.mp4',
+              videoSha256: sha,
+            },
+            b: {
+              chainName: 'mvc',
+              app: 'metaapp://' + '4'.repeat(64) + 'i0',
+              version: 'metaapp://' + '5'.repeat(64) + 'i0',
+              video: 'metafile://' + '6'.repeat(64) + 'i0',
+              videoSha256: '9'.repeat(64),
+            },
+            pick: 'b',
+            reason: 'left side motion was jittery',
+            dims: null,
+            signerGlobalMetaId: 'idq1judge',
+            clientArtifact: 'metaapp://arena',
+            clientMode: 'arena',
+            subject: sha,
+            outcome: 'rejected',
+            excluded: false,
+            excludedReason: null,
+          }],
+          nextCursor: 'cmp-2',
+          hasMore: true,
+        };
+      },
+    },
+  });
+  var comparisonsCalls = [];
+  const result = await byName.search_preference_comparisons.handler({
+    chainName: 'mvc',
+    subject: sha,
+    outcome: 'rejected',
+  });
+  const text = result.content[0].text;
+  assert.match(text, /1 open comparison\(s\) for subject/);
+  assert.match(text, /pick: preferred B/);
+  assert.match(text, /reason: left side motion was jittery/);
+  assert.match(text, /signer: idq1judge/);
+  assert.match(text, /client: metaapp:\/\/arena \(arena\)/);
+  assert.match(text, /cursor=cmp-2/);
+  assert.equal(result.isError, undefined);
+});
+
+test('search_preference_comparisons requires a subject for directional outcomes', async () => {
+  const { byName } = makeHarness({
+    control: { listPreferenceComparisons: async () => ({ items: [], nextCursor: null, hasMore: false }) },
+  });
+  const result = await byName.search_preference_comparisons.handler({ chainName: 'mvc', outcome: 'preferred' });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /requires a subject videoSha256/);
+});
+
+test('search_preference_comparisons reports honest empties and unavailable validated basis', async () => {
+  const { byName } = makeHarness({
+    control: { listPreferenceComparisons: async () => ({ items: [], nextCursor: null, hasMore: false }) },
+  });
+  const empty = await byName.search_preference_comparisons.handler({ chainName: 'mvc' });
+  assert.equal(empty.isError, undefined);
+  assert.match(empty.content[0].text, /No open comparison evidence matched/);
+
+  const { byName: unavailable } = makeHarness({
+    control: {
+      listPreferenceComparisons: async () => {
+        throw new MetaAppValidatedBasisUnavailableError('preference_validated_basis_unavailable');
+      },
+    },
+  });
+  const result = await unavailable.search_preference_comparisons.handler({ chainName: 'mvc' });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Validated preference aggregation is not yet available/);
 });

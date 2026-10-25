@@ -13,6 +13,9 @@ import {
 import type { MetabotStore } from '../metabotStore';
 import type { Metabot } from '../types/metabot';
 import type { MetaidDataPayload } from './metaidCore';
+import type { PinPathResolution } from './pinPathResolver';
+
+export type { PinPathResolution } from './pinPathResolver';
 
 const MAX_PIN_PAYLOAD_BYTES = 512 * 1024;
 const PIN_ID_PATTERN = /^[0-9a-f]{64}i\d+$/iu;
@@ -35,12 +38,23 @@ const PROTOCOL_GRANT_WHITELIST = new Set([
   '/protocols/simplegroupjoin',
   '/protocols/simplegroupchat',
 ]);
+/** Stable host-local Actor id for the single local human identity. */
+export const HUMAN_ACCOUNT_ACTOR_ID = 'idbots-account-1';
+/**
+ * Lightweight open preference feedback path (motion-video comparison batches).
+ * Shared contract: create-only — hosts reject modify/revoke for this path
+ * before signing; indexers ignore any that nevertheless appear on chain.
+ */
+const PREFERENCE_FEEDBACK_PATH = '/protocols/preference/feedback';
 
 export type BotBrowserBridgeErrorCode =
   | 'invalid_request'
   | 'unsupported_method'
   | 'invalid_params'
   | 'actor_required'
+  | 'unsupported_actor'
+  | 'signer_unavailable'
+  | 'signer_changed'
   | 'manual_action_required'
   | 'user_cancelled'
   | 'consent_denied'
@@ -57,7 +71,25 @@ export interface MetaAppBridgeActor {
   globalMetaId: string;
   name: string;
   avatarPinId?: string;
+  /** Host Actor kind; lets confirmation cards and results name the actual signer. */
+  kind?: 'idbots-agent' | 'idbots-account';
 }
+
+/**
+ * Sanitized display descriptor of the local human identity, mirroring the
+ * renderer-facing HumanBrowserIdentity. Carries no mnemonic, keys, addresses,
+ * wallet snapshots, paths, or raw store rows.
+ */
+export interface HumanBridgeActor {
+  label: string;
+  globalMetaId: string;
+  avatar?: string;
+  signingAvailable: boolean;
+}
+
+export type HumanPinWriteOutcome =
+  | { ok: false; error: 'USER_IDENTITY_MISSING' | 'SUBSIDY_NOT_CLAIMED' | 'IDENTITY_MISMATCH' }
+  | { ok: true; pinId: string; txids: string[]; totalCost?: number };
 
 export interface BotBrowserPinWriteResult {
   pinId: string;
@@ -65,6 +97,8 @@ export interface BotBrowserPinWriteResult {
   operation: 'create' | 'modify' | 'revoke';
   path: string;
   actor: MetaAppBridgeActor;
+  /** Actual chain cost in sats reported by the signer, when available. */
+  totalCost?: number;
 }
 
 export interface BotBrowserMetaFileUploadResultFile {
@@ -170,6 +204,31 @@ type CompleteLlmFn = (input: {
 export interface BotBrowserBridgeServiceDeps {
   metabotStore: MetabotStore;
   createPin?: CreatePinFn;
+  /**
+   * Sanitized local human identity (display fields only), re-read at execution
+   * time so a replaced/removed identity can never authorize a stale write.
+   */
+  getHumanActor?: () => HumanBridgeActor | null;
+  /**
+   * Generic human-identity PIN signer (shared serialized queue; see
+   * humanIdentityPinWriter). Wired in main.ts to the same writer instance the
+   * sealed preference user writer shares. expectedGlobalMetaId re-checks the
+   * confirmed identity when the write dequeues, so a write authorized for
+   * identity A can never be signed by a replacement identity B.
+   */
+  createHumanPin?: (
+    metaidPayload: MetaidDataPayload,
+    options?: { expectedGlobalMetaId?: string },
+  ) => Promise<HumanPinWriteOutcome>;
+  /**
+   * Bounded pin-id → protocol-path resolver used to reject modify/revoke
+   * writes that target the create-only /protocols/preference/feedback path
+   * (see services/pinPathResolver.ts for the caching/rate-limit policy).
+   * Fail-closed: 'not-found' and 'unknown' targets are rejected — and a
+   * build that wires no resolver at all rejects MVC '@pin' modify/revoke
+   * outright, so the guard can never be bypassed by a missing dependency.
+   */
+  resolvePinPath?: (pinId: string, rateLimitKey?: string) => Promise<PinPathResolution>;
   uploadMetaFile?: UploadMetaFileFn;
   completeLlm?: CompleteLlmFn;
   pickFiles?: (input: {
@@ -191,9 +250,10 @@ export interface BotBrowserBridgeServiceDeps {
  * electron-log file transport captures them) for later review.
  */
 export interface BotBrowserBridgeAuditEvent {
-  type: 'permission-granted' | 'permission-revoked' | 'granted-write';
+  type: 'permission-granted' | 'permission-revoked' | 'granted-write' | 'pin-write';
   at: number;
-  actorId: number;
+  /** Local MetaBot id for Bot actors; the host Actor id for the human account. */
+  actorId: number | string;
   actorGlobalMetaId: string;
   resourceUri: string;
   sessionId: string;
@@ -209,6 +269,13 @@ export interface BotBrowserBridgeService {
   uploadMetaFile(input: BotBrowserMetaFileUploadInput): Promise<BrowserCommandResult<BotBrowserMetaFileUploadResult>>;
   completeLlm(input: BotBrowserLlmCompleteInput): Promise<BrowserCommandResult<BrowserLlmCompleteResult>>;
   requestPermissions(input: BotBrowserPermissionsInput): Promise<BrowserCommandResult<BrowserPermissionsResult>>;
+  /**
+   * Drop every pending confirmation, permission grant, and granted-write state
+   * bound to the human account Actor. Called when the local human identity is
+   * created/imported/replaced/removed so stale authorization can never write
+   * under a different (or absent) identity.
+   */
+  invalidateHumanActorState(): void;
 }
 
 function text(value: unknown): string {
@@ -255,6 +322,10 @@ function parseLocalMetabotActorId(actorId: unknown): number | null {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
+function isHumanAccountActorId(actorId: unknown): boolean {
+  return text(actorId) === HUMAN_ACCOUNT_ACTOR_ID;
+}
+
 function extractPinId(value: unknown): string {
   let candidate = text(value);
   if (!candidate) return '';
@@ -280,6 +351,7 @@ export function sanitizeMetaAppBridgeActor(metabot: Metabot | null | undefined):
     uri: `metaid://${globalMetaId}`,
     globalMetaId,
     name: text(metabot?.name) || globalMetaId,
+    kind: 'idbots-agent',
   };
   const avatarPinId = extractPinId(metabot?.avatar);
   if (avatarPinId) {
@@ -288,26 +360,93 @@ export function sanitizeMetaAppBridgeActor(metabot: Metabot | null | undefined):
   return actor;
 }
 
+/**
+ * Human identity → sanitized bridge Actor for confirmations, results, and
+ * audit. Display name is suffixed so the confirmation card names the actual
+ * (human) signer unambiguously; no secret material is carried.
+ */
+export function sanitizeHumanBridgeActor(human: HumanBridgeActor | null | undefined): (MetaAppBridgeActor & { kind: 'idbots-account' }) | null {
+  const globalMetaId = normalizeBridgeGlobalMetaId(human?.globalMetaId ?? null);
+  if (!globalMetaId) return null;
+  const label = text(human?.label) || 'Account';
+  return {
+    uri: `metaid://${globalMetaId}`,
+    globalMetaId,
+    name: `${label} (Account)`,
+    kind: 'idbots-account',
+  };
+}
+
+/**
+ * Discriminated Human/Bot Actor resolution. The Actor id comes only from
+ * trusted Browser state; the identity is re-read from its store at execution
+ * time, so a removed/replaced identity resolves to an explicit error instead
+ * of silently falling back to another Actor.
+ */
+export type ResolvedBridgeActor =
+  | {
+      kind: 'bot';
+      actorId: string;
+      metabotId: number;
+      metabot: Metabot;
+      actor: MetaAppBridgeActor;
+      human: null;
+    }
+  | {
+      kind: 'human';
+      actorId: string;
+      metabotId: null;
+      metabot: null;
+      actor: MetaAppBridgeActor & { kind: 'idbots-account' };
+      human: HumanBridgeActor;
+    };
+
 function resolveActor(
-  metabotStore: MetabotStore,
+  deps: Pick<BotBrowserBridgeServiceDeps, 'metabotStore' | 'getHumanActor'>,
   actorId: unknown,
-): { metabot: Metabot; actor: MetaAppBridgeActor } | BrowserCommandResult<never> {
-  const metabotId = parseLocalMetabotActorId(actorId);
-  if (metabotId === null) {
-    return failure('actor_required', 'A current Actor Bot is required.');
+): ResolvedBridgeActor | BrowserCommandResult<never> {
+  if (isHumanAccountActorId(actorId)) {
+    const human = deps.getHumanActor?.() ?? null;
+    const actor = sanitizeHumanBridgeActor(human);
+    if (!human || !actor) {
+      return failure('actor_required', 'The selected account Actor is not available on this host.');
+    }
+    return { kind: 'human', actorId: HUMAN_ACCOUNT_ACTOR_ID, metabotId: null, metabot: null, actor, human };
   }
 
-  const metabot = metabotStore.getMetabotById(metabotId);
+  const metabotId = parseLocalMetabotActorId(actorId);
+  if (metabotId === null) {
+    return failure('actor_required', 'A current Actor (local Bot or account) is required.');
+  }
+
+  const metabot = deps.metabotStore.getMetabotById(metabotId);
   const actor = sanitizeMetaAppBridgeActor(metabot);
   if (!metabot || !actor) {
     return failure('actor_required', 'A current Actor Bot is required.');
   }
 
-  return { metabot, actor };
+  return {
+    kind: 'bot',
+    actorId: `idbots-metabot-${metabotId}`,
+    metabotId,
+    metabot,
+    actor,
+    human: null,
+  };
 }
 
 function isCommandFailure(value: unknown): value is BrowserCommandResult<never> {
   return Boolean(value && typeof value === 'object' && (value as BrowserCommandResult<never>).ok === false);
+}
+
+/** Human-identity signer gate failure surfaced by the shared pin writer. */
+class HumanPinWriteError extends Error {
+  code: 'USER_IDENTITY_MISSING' | 'SUBSIDY_NOT_CLAIMED' | 'IDENTITY_MISMATCH';
+  constructor(code: 'USER_IDENTITY_MISSING' | 'SUBSIDY_NOT_CLAIMED' | 'IDENTITY_MISMATCH') {
+    super(code);
+    this.name = 'HumanPinWriteError';
+    this.code = code;
+  }
 }
 
 function normalizePinId(value: unknown): string {
@@ -501,7 +640,8 @@ function validatePinWritePayload(payload: unknown): {
 }
 
 interface PendingPinWriteAuthorization {
-  actorId: number;
+  /** Trusted host Actor id the confirmation was issued for. */
+  actorKey: string;
   actorGlobalMetaId: string;
   resourceUri: string;
   requestHash: string;
@@ -510,7 +650,7 @@ interface PendingPinWriteAuthorization {
 }
 
 interface PendingPermissionAuthorization {
-  actorId: number;
+  actorKey: string;
   actorGlobalMetaId: string;
   resourceUri: string;
   sessionId: string;
@@ -520,7 +660,7 @@ interface PendingPermissionAuthorization {
 }
 
 interface ActivePermissionContext {
-  actorId: number;
+  actorKey: string;
   actorGlobalMetaId: string;
   resourceUri: string;
   sessionId: string;
@@ -839,18 +979,18 @@ export function createBotBrowserBridgeService(
   };
 
   const permissionContextKey = (
-    actorResult: { metabot: Metabot; actor: MetaAppBridgeActor },
+    actorResult: ResolvedBridgeActor,
     resourceUri: string,
     sessionId: string,
   ): string => JSON.stringify([
     sessionId,
-    actorResult.metabot.id,
+    actorResult.actorId,
     actorResult.actor.globalMetaId,
     resourceUri,
   ]);
 
   const hasAutoWritePermission = (
-    actorResult: { metabot: Metabot; actor: MetaAppBridgeActor },
+    actorResult: ResolvedBridgeActor,
     resourceUri: string,
     sessionId: string,
     operation: 'create' | 'modify' | 'revoke',
@@ -866,7 +1006,7 @@ export function createBotBrowserBridgeService(
   };
 
   const issuePinWriteConfirmation = (
-    actorResult: { metabot: Metabot; actor: MetaAppBridgeActor },
+    actorResult: ResolvedBridgeActor,
     resourceUri: string,
     validation: Exclude<ReturnType<typeof validatePinWritePayload>, BrowserCommandResult<never>>,
   ): BrowserCommandResult<BotBrowserPinWriteResult> => {
@@ -883,7 +1023,7 @@ export function createBotBrowserBridgeService(
     const opaqueToken = createConfirmationToken();
     const expiresAt = issuedAt + confirmationTtlMs;
     pendingPinWrites.set(confirmationId, {
-      actorId: actorResult.metabot.id,
+      actorKey: actorResult.actorId,
       actorGlobalMetaId: actorResult.actor.globalMetaId,
       resourceUri,
       requestHash: requestHash(validation.normalizedPayload),
@@ -924,7 +1064,7 @@ export function createBotBrowserBridgeService(
   };
 
   const issuePermissionsConfirmation = (
-    actorResult: { metabot: Metabot; actor: MetaAppBridgeActor },
+    actorResult: ResolvedBridgeActor,
     resourceUri: string,
     sessionId: string,
     validation: ValidatedPermissionsRequest,
@@ -946,7 +1086,7 @@ export function createBotBrowserBridgeService(
     const opaqueToken = createConfirmationToken();
     const expiresAt = issuedAt + confirmationTtlMs;
     pendingPermissions.set(confirmationId, {
-      actorId: actorResult.metabot.id,
+      actorKey: actorResult.actorId,
       actorGlobalMetaId: actorResult.actor.globalMetaId,
       resourceUri,
       sessionId,
@@ -984,7 +1124,7 @@ export function createBotBrowserBridgeService(
 
   return {
     async writeMetaIdPin(input: BotBrowserPinWriteInput): Promise<BrowserCommandResult<BotBrowserPinWriteResult>> {
-      const actorResult = resolveActor(deps.metabotStore, input.actorId);
+      const actorResult = resolveActor(deps, input.actorId);
       if (isCommandFailure(actorResult)) {
         const confirmationAttempt = parseHostConfirmationAttempt(input.payload);
         if (!isCommandFailure(confirmationAttempt) && confirmationAttempt) {
@@ -1002,11 +1142,85 @@ export function createBotBrowserBridgeService(
       }
       const sessionId = normalizedSessionId(input.sessionId);
 
+      // Shared contract: /protocols/preference/feedback is create-only. The
+      // direct-path form is named explicitly before generic path validation;
+      // '@<targetPinId>' modify/revoke targets are resolved via the bounded
+      // pin-path resolver after payload validation, failing CLOSED (see the
+      // guard below).
+      const rawPayloadBody = objectRecord(input.payload);
+      const rawOperation = text(rawPayloadBody?.operation);
+      const rawPath = text(rawPayloadBody?.path);
+      if ((rawOperation === 'modify' || rawOperation === 'revoke') && rawPath === PREFERENCE_FEEDBACK_PATH) {
+        return failure(
+          'invalid_params',
+          `${PREFERENCE_FEEDBACK_PATH} supports create only; modify/revoke is rejected before signing.`,
+        );
+      }
+
       const validation = validatePinWritePayload(input.payload);
       if (isCommandFailure(validation)) return validation;
 
-      if (!deps.createPin) {
+      if (actorResult.kind === 'bot' && !deps.createPin) {
         return failure('unsupported_method', 'MetaID PIN write is not supported in this IDBots build.');
+      }
+      if (actorResult.kind === 'human') {
+        if (!deps.createHumanPin) {
+          return failure('unsupported_method', 'MetaID PIN write is not supported for the account Actor in this IDBots build.');
+        }
+        // A locked/unavailable human signer is an explicit error — never a
+        // silent fallback to a Bot signer.
+        if (!actorResult.human.signingAvailable) {
+          return failure(
+            'signer_unavailable',
+            'The selected account Actor cannot sign (identity locked or gas subsidy not claimed). Fix the account setup, or explicitly select a Bot Actor.',
+          );
+        }
+        const network = text(input.network);
+        if (network && network.toLowerCase() !== 'mvc') {
+          return failure('unsupported_actor', 'The account Actor signs on MVC only in this IDBots build.');
+        }
+      }
+
+      // '@<targetPinId>' modify/revoke targets: resolve via the bounded
+      // pin-path resolver and fail CLOSED. The shared contract requires
+      // modify/revoke for /protocols/preference/feedback to be rejected
+      // before signing and has no best-effort carve-out, so a target whose
+      // path cannot be determined (indexer has not seen it, the lookup
+      // failed, or this build wired no resolver at all) is rejected rather
+      // than waved through. Enforcement is scoped to MVC (the milestone's
+      // chain); other networks keep their existing behavior because the MVC
+      // indexer cannot speak for their pins.
+      if (validation.operation !== 'create') {
+        const targetPinId = validation.bridgeMetadata?.originalId
+          ?? (validation.path.startsWith('@') ? validation.path.slice(1) : '');
+        const network = text(input.network).toLowerCase();
+        if (targetPinId && (!network || network === 'mvc')) {
+          if (!deps.resolvePinPath) {
+            return failure(
+              'invalid_request',
+              `The protocol path of the modify/revoke target pin ${targetPinId} could not be verified (no pin-path resolver configured in this build), so the write is rejected.`,
+            );
+          }
+          const resolution = await deps.resolvePinPath(targetPinId, resourceUri);
+          if (resolution.status === 'resolved' && resolution.path === PREFERENCE_FEEDBACK_PATH) {
+            return failure(
+              'invalid_params',
+              `${PREFERENCE_FEEDBACK_PATH} supports create only; modify/revoke is rejected before signing.`,
+            );
+          }
+          if (resolution.status === 'not-found') {
+            return failure(
+              'invalid_params',
+              `The modify/revoke target pin ${targetPinId} is not known to the indexer yet, so the host cannot verify it is not a preference feedback pin; the write is rejected. Try again after the pin is indexed.`,
+            );
+          }
+          if (resolution.status === 'unknown') {
+            return failure(
+              'invalid_request',
+              `The protocol path of the modify/revoke target pin ${targetPinId} could not be verified right now (indexer unreachable or lookup rate limited), so the write is rejected. Try again shortly.`,
+            );
+          }
+        }
       }
 
       const confirmationAttempt = parseHostConfirmationAttempt(input.payload);
@@ -1035,7 +1249,7 @@ export function createBotBrowserBridgeService(
         }
 
         if (
-          authorization.actorId !== actorResult.metabot.id
+          authorization.actorKey !== actorResult.actorId
           || authorization.actorGlobalMetaId !== actorResult.actor.globalMetaId
           || authorization.resourceUri !== resourceUri
           || authorization.requestHash !== requestHash(validation.normalizedPayload)
@@ -1064,22 +1278,57 @@ export function createBotBrowserBridgeService(
       }
 
       try {
-        const result = await deps.createPin(
-          deps.metabotStore,
-          actorResult.metabot.id,
-          validation.metaidPayload,
-          { network: text(input.network) || undefined },
-        );
+        // Signer dispatch is bound to the resolved Actor kind. A failure on
+        // either path surfaces as an error for THAT identity — there is never
+        // a cross-signer fallback. Human writes carry the confirmed identity:
+        // the writer re-checks it at dequeue time so a write authorized for
+        // identity A can never be signed by a replacement identity B.
+        const result = actorResult.kind === 'bot'
+          ? await deps.createPin!(
+              deps.metabotStore,
+              actorResult.metabotId,
+              validation.metaidPayload,
+              { network: text(input.network) || undefined },
+            )
+          : await (async () => {
+              const outcome = await deps.createHumanPin!(
+                validation.metaidPayload,
+                { expectedGlobalMetaId: actorResult.actor.globalMetaId },
+              );
+              if (outcome.ok === false) {
+                throw new HumanPinWriteError(outcome.error);
+              }
+              return {
+                pinId: outcome.pinId,
+                txids: outcome.txids,
+                totalCost: typeof outcome.totalCost === 'number' && Number.isFinite(outcome.totalCost)
+                  ? outcome.totalCost
+                  : 0,
+              };
+            })();
         const pinId = text(result.pinId);
         const txid = text(result.txids?.[0]);
         if (!pinId || !txid) {
           return failure('pin_write_failed', 'MetaID PIN write failed.');
         }
+        if (!autoWriteAuthorized) {
+          recordAudit({
+            type: 'pin-write',
+            at: now(),
+            actorId: actorResult.kind === 'bot' ? actorResult.metabotId : actorResult.actorId,
+            actorGlobalMetaId: actorResult.actor.globalMetaId,
+            resourceUri,
+            sessionId,
+            path: validation.path,
+            pinId,
+            txid,
+          });
+        }
         if (autoWriteAuthorized) {
           recordAudit({
             type: 'granted-write',
             at: now(),
-            actorId: actorResult.metabot.id,
+            actorId: actorResult.kind === 'bot' ? actorResult.metabotId : actorResult.actorId,
             actorGlobalMetaId: actorResult.actor.globalMetaId,
             resourceUri,
             sessionId,
@@ -1094,15 +1343,35 @@ export function createBotBrowserBridgeService(
           operation: validation.operation,
           path: validation.path,
           actor: actorResult.actor,
+          ...(typeof result.totalCost === 'number' && Number.isFinite(result.totalCost)
+            ? { totalCost: result.totalCost }
+            : {}),
         });
-      } catch {
+      } catch (error) {
+        if (error instanceof HumanPinWriteError) {
+          if (error.code === 'IDENTITY_MISMATCH') {
+            return failure(
+              'signer_changed',
+              'The confirmed account Actor no longer matches the current identity (it was replaced while this write was in flight). Start a new confirmation with the current identity.',
+            );
+          }
+          return failure(
+            error.code === 'SUBSIDY_NOT_CLAIMED' ? 'signer_unavailable' : 'actor_required',
+            error.code === 'SUBSIDY_NOT_CLAIMED'
+              ? 'The selected account Actor cannot sign (gas subsidy not claimed).'
+              : 'The selected account Actor is no longer available on this host.',
+          );
+        }
         return failure('pin_write_failed', 'MetaID PIN write failed.');
       }
     },
 
     async completeLlm(input: BotBrowserLlmCompleteInput): Promise<BrowserCommandResult<BrowserLlmCompleteResult>> {
-      const actorResult = resolveActor(deps.metabotStore, input.actorId);
+      const actorResult = resolveActor(deps, input.actorId);
       if (isCommandFailure(actorResult)) return actorResult;
+      if (actorResult.kind !== 'bot') {
+        return failure('unsupported_actor', 'Local LLM completion runs as a Bot Actor; the account Actor is not supported for this action.');
+      }
 
       const resourceUri = normalizedResourceUri(input.resourceUri);
       const sessionId = normalizedSessionId(input.sessionId);
@@ -1173,8 +1442,11 @@ export function createBotBrowserBridgeService(
     },
 
     async requestPermissions(input: BotBrowserPermissionsInput): Promise<BrowserCommandResult<BrowserPermissionsResult>> {
-      const actorResult = resolveActor(deps.metabotStore, input.actorId);
+      const actorResult = resolveActor(deps, input.actorId);
       if (isCommandFailure(actorResult)) return actorResult;
+      if (actorResult.kind !== 'bot') {
+        return failure('unsupported_actor', 'Session write permissions are Bot-Actor only in this IDBots build; the account Actor is not supported for this action.');
+      }
 
       const resourceUri = normalizedResourceUri(input.resourceUri);
       const sessionId = normalizedSessionId(input.sessionId);
@@ -1191,7 +1463,7 @@ export function createBotBrowserBridgeService(
           recordAudit({
             type: 'permission-revoked',
             at: now(),
-            actorId: actorResult.metabot.id,
+            actorId: actorResult.metabotId,
             actorGlobalMetaId: actorResult.actor.globalMetaId,
             resourceUri,
             sessionId,
@@ -1246,7 +1518,7 @@ export function createBotBrowserBridgeService(
         ...(validation.reason ? { reason: validation.reason } : {}),
       };
       if (
-        authorization.actorId !== actorResult.metabot.id
+        authorization.actorKey !== actorResult.actorId
         || authorization.actorGlobalMetaId !== actorResult.actor.globalMetaId
         || authorization.resourceUri !== resourceUri
         || authorization.sessionId !== sessionId
@@ -1266,7 +1538,7 @@ export function createBotBrowserBridgeService(
       }
       const grants = [...merged.values()];
       activePermissions.set(contextKey, {
-        actorId: actorResult.metabot.id,
+        actorKey: actorResult.actorId,
         actorGlobalMetaId: actorResult.actor.globalMetaId,
         resourceUri,
         sessionId,
@@ -1275,7 +1547,7 @@ export function createBotBrowserBridgeService(
       recordAudit({
         type: 'permission-granted',
         at: now(),
-        actorId: actorResult.metabot.id,
+        actorId: actorResult.metabotId,
         actorGlobalMetaId: actorResult.actor.globalMetaId,
         resourceUri,
         sessionId,
@@ -1286,8 +1558,11 @@ export function createBotBrowserBridgeService(
     },
 
     async uploadMetaFile(input: BotBrowserMetaFileUploadInput): Promise<BrowserCommandResult<BotBrowserMetaFileUploadResult>> {
-      const actorResult = resolveActor(deps.metabotStore, input.actorId);
+      const actorResult = resolveActor(deps, input.actorId);
       if (isCommandFailure(actorResult)) return actorResult;
+      if (actorResult.kind !== 'bot') {
+        return failure('unsupported_actor', 'MetaFile upload runs as a Bot Actor; the account Actor is not supported for this action.');
+      }
 
       const validation = validateUploadPayload(input.payload);
       if (isCommandFailure(validation)) return validation;
@@ -1310,7 +1585,7 @@ export function createBotBrowserBridgeService(
             return failure('upload_failed', 'MetaFile upload failed.');
           }
           const uploadResult = await deps.uploadMetaFile(deps.metabotStore, {
-            metabotId: actorResult.metabot.id,
+            metabotId: actorResult.metabotId,
             filePath,
             contentType: text(pickedFile.contentType) || undefined,
             network: text(input.network) || undefined,
@@ -1323,6 +1598,24 @@ export function createBotBrowserBridgeService(
         return browserSuccess({ files });
       } catch {
         return failure('upload_failed', 'MetaFile upload failed.');
+      }
+    },
+
+    invalidateHumanActorState(): void {
+      for (const [confirmationId, authorization] of pendingPinWrites) {
+        if (authorization.actorKey === HUMAN_ACCOUNT_ACTOR_ID) {
+          pendingPinWrites.delete(confirmationId);
+        }
+      }
+      for (const [confirmationId, authorization] of pendingPermissions) {
+        if (authorization.actorKey === HUMAN_ACCOUNT_ACTOR_ID) {
+          pendingPermissions.delete(confirmationId);
+        }
+      }
+      for (const [contextKey, context] of activePermissions) {
+        if (context.actorKey === HUMAN_ACCOUNT_ACTOR_ID) {
+          activePermissions.delete(contextKey);
+        }
       }
     },
   };
