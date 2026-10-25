@@ -121,33 +121,35 @@
   }
 
   /**
-   * Probe for a live host: asks browser.actor.current with a bounded wait.
-   * In the Bot Browser this may surface the identity-disclosure consent card
-   * (user approval can exceed the timeout — a timeout means "no host
-   * answered", denial resolves as a live host with no disclosed actor).
-   * Resolves { host: true|false, actor: object|null, error: string }.
+   * Probe for a live host with a bounded initial wait. Identity consent can
+   * take longer than that wait, so the request itself is not cancelled. On an
+   * initial timeout, `recovery` settles with the eventual host result instead
+   * of discarding a late response and locking the app into read-only mode.
    */
   function probeBrowserHost(timeoutMs) {
     var wait = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : 8000;
+    var bridge = installAgentBrowserHelper();
+    if (!bridge || !global.window.AgentBrowser || global.window.parent === global.window) {
+      return Promise.resolve({ host: false, actor: null, error: 'no-parent-frame' });
+    }
+    var recovery = bridge.request({ method: 'browser.actor.current' }).then(function (result) {
+      return { host: true, actor: (result && result.actor) || null, error: '' };
+    }, function (error) {
+      return { host: true, actor: null, error: (error && error.message) || 'actor-not-disclosed' };
+    });
     return new Promise(function (resolve) {
-      var bridge = installAgentBrowserHelper();
-      if (!bridge || !global.window.AgentBrowser || global.window.parent === global.window) {
-        resolve({ host: false, actor: null, error: 'no-parent-frame' });
-        return;
-      }
-      bridge.request({ method: 'browser.actor.current', timeoutMs: wait })
-        .then(function (result) {
-          resolve({ host: true, actor: (result && result.actor) || null, error: '' });
-        })
-        .catch(function (error) {
-          if (error && error.code === 'bridge_timeout') {
-            resolve({ host: false, actor: null, error: 'bridge_timeout' });
-            return;
-          }
-          // Live host that refused disclosure (consent denied / unsupported):
-          // the bridge is usable; the actor simply stays undisclosed.
-          resolve({ host: true, actor: null, error: (error && error.message) || 'actor-not-disclosed' });
-        });
+      var settled = false;
+      var timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        resolve({ host: false, actor: null, error: 'bridge_timeout', recovery: recovery });
+      }, wait);
+      recovery.then(function (result) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      });
     });
   }
 

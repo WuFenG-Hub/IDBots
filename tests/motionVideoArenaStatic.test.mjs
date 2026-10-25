@@ -166,3 +166,30 @@ test('narrow screens stack the two players vertically', () => {
   assert.match(js, /Left video/);
   assert.match(js, /Right video/);
 });
+
+test('the published client root stays pinned for the next modify release', () => {
+  const root = 'a13726e12c1c5c99d1843cc6470b30c71c2efe20000282bda1d7524ae23f16d1i0';
+  assert.match(read('app.js'), new RegExp(`var CLIENT_ARTIFACT_ROOT = '${root}';`));
+  assert.match(read('APP.md'), /version: 1\.0\.2/);
+  assert.match(read('APP.md'), new RegExp(root));
+});
+
+test('queue copy presents one-choice submission and a batch cap, not required progress', () => {
+  const js = read('app.js');
+  assert.match(js, /Queued choices: /);
+  assert.match(js, /maximum ' \+ MAX_QUEUE \+ ' per batch/);
+  assert.match(js, /One choice is enough to submit/);
+  assert.doesNotMatch(js, /state\.queue\.size\(\) \+ '\/' \+ MAX_QUEUE/);
+  assert.match(js, /All unique pairs in this candidate pool have been shown/);
+  assert.match(js, /byId\('next-pair-button'\)\.disabled = remaining === 0/);
+});
+
+test('late host recovery reactivates submission without breaking mock isolation', () => {
+  const js = read('app.js');
+  assert.match(js, /function activateLiveBridge\(probe\)/);
+  assert.match(js, /if \(runtime\.mock \|\| !window\.AgentBrowser\) return/);
+  assert.match(js, /probe\.recovery\.then/);
+  assert.match(js, /if \(!recovered\.host \|\| runtime\.mock\) return/);
+  assert.match(js, /submission = createSubmission\(\)/);
+  assert.match(js, /if \(!runtime\.actorEventsBound/);
+});
