@@ -222,9 +222,14 @@ ENV HOME=/home/idbots
 ENV WEB_SEARCH_CHROME_NO_SANDBOX=1
 
 # Non-root runtime user (C1: uid 1000) and the single state volume.
+# /app/SKILLs must be owned by the runtime user too: COPY payloads arrive as
+# root, but skill servers write their own state inside their skill dir
+# (web-search's .server.log: EACCES at first start on every tenant → Web2
+# search dead fleet-wide, audit gate5 2026-10-25 F-12). The tenant runs with
+# --cap-drop ALL, so ownership cannot be fixed at runtime — only in-image.
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin idbots \
  && mkdir -p /data \
- && chown -R 1000:1000 /data /home/idbots
+ && chown -R 1000:1000 /data /home/idbots /app/SKILLs
 USER 1000
 VOLUME ["/data"]
 
