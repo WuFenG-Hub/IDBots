@@ -1372,6 +1372,28 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     getConnectionState: () => connectionState,
     getOpenedUrls: () => [...openedUrls],
     emitCoworkStream: (channel: MobileMockCoworkStreamChannel, payload: unknown) => {
+      if (channel === 'permission') {
+        const event = payload as {
+          sessionId: string;
+          request: PendingPermissionRequest['request'];
+        };
+        pendingPermissions.set(event.request.requestId, {
+          sessionId: event.sessionId,
+          request: event.request,
+          createdAt: now(),
+        });
+        permissionWaiters.set(event.request.requestId, () => {
+          pendingPermissions.delete(event.request.requestId);
+          emitter.emit('cowork:stream:permissionResolved', {
+            sessionId: event.sessionId,
+            requestId: event.request.requestId,
+          });
+        });
+      } else if (channel === 'permissionResolved') {
+        const event = payload as { requestId: string };
+        pendingPermissions.delete(event.requestId);
+        permissionWaiters.delete(event.requestId);
+      }
       emitter.emit(`cowork:stream:${channel}`, payload);
     },
   };
