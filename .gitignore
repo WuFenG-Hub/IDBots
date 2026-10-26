@@ -722,6 +722,9 @@ deploy/hosts/prometheus.yml
 # WS-E T3 integration slice: reconnect resync (REQ-E-5) tests
 !tests/mobileResync.test.ts
 
+# REQ-E-15 recharge expiry unit guard (contract 01 expiresAt is seconds)
+!tests/mobileRechargeExpire.test.ts
+
 # WS-E T3 Playwright suite (REQ-E-26): specs are committed; artifacts are not.
 e2e/mobile/test-results/
 test-results/

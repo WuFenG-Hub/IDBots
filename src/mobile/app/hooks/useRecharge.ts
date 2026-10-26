@@ -29,6 +29,16 @@ const POLL_BUDGET_MS = 10 * 60_000;
 /** How long we wait for the Alipay app to open before offering fallbacks. */
 const APP_OPEN_GRACE_MS = 1_800;
 
+/**
+ * Contract 01 §C4 sends `expiresAt` as Unix SECONDS (example value
+ * 1760000000, docs/cloud-mobile/01-interface-contracts.md line 497), while
+ * Date.now() is milliseconds — convert before comparing or every fresh order
+ * is judged expired on the first poll.
+ */
+export function isOrderExpired(expiresAt: number, nowMs: number = Date.now()): boolean {
+  return nowMs > expiresAt * 1000;
+}
+
 export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void): {
   plans: BundlePlan[];
   meters: BundleMeters | null;
@@ -106,7 +116,7 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
   const pollOnce = useCallback(async () => {
     const current = orderRef.current;
     if (!current) return;
-    if (Date.now() > current.expiresAt) {
+    if (isOrderExpired(current.expiresAt)) {
       stopPolling();
       stopAppOpenWatch();
       setStage('expired');
