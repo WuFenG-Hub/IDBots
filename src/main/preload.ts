@@ -869,6 +869,7 @@ contextBridge.exposeInMainWorld('electron', {
   },
   updateNotification: {
     shouldForceShow: () => ipcRenderer.invoke('updateNotification:shouldForceShow') as Promise<boolean>,
+    resolveFirstInstallVersion: (currentVersion: string) => ipcRenderer.invoke('updateNotification:resolveFirstInstallVersion', currentVersion) as Promise<string | null>,
     getFirstInstallVersion: () => ipcRenderer.invoke('updateNotification:getFirstInstallVersion') as Promise<string | null>,
     setFirstInstallVersion: (version: string) => ipcRenderer.invoke('updateNotification:setFirstInstallVersion', version),
     hasViewed: (version: string) => ipcRenderer.invoke('updateNotification:hasViewed', version) as Promise<boolean>,

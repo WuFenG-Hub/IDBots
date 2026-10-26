@@ -1632,6 +1632,7 @@ interface IElectronAPI {
   };
   updateNotification: {
     shouldForceShow: () => Promise<boolean>;
+    resolveFirstInstallVersion: (currentVersion: string) => Promise<string | null>;
     getFirstInstallVersion: () => Promise<string | null>;
     setFirstInstallVersion: (version: string) => Promise<void>;
     hasViewed: (version: string) => Promise<boolean>;
