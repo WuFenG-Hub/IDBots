@@ -11,7 +11,7 @@
  */
 
 export const messengerRowClassName = (isOutgoing: boolean): string => (
-  `flex items-end gap-2 px-4 py-1 ${isOutgoing ? 'flex-row-reverse' : 'flex-row'}`
+  `flex items-end gap-2 px-4 py-2.5 ${isOutgoing ? 'flex-row-reverse' : 'flex-row'}`
 );
 
 export const messengerColumnClassName = (isOutgoing: boolean): string => (

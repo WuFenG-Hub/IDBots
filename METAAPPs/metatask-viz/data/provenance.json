@@ -1,23 +1,32 @@
 {
-  "boundaryBlock": 189829,
-  "eventCount": 539,
+  "boundaryBlock": 194933,
+  "eventCount": 1335,
   "eventCountByPath": {
-    "task": 2,
-    "tree": 2,
-    "spec": 23,
-    "claim": 123,
-    "release": 9,
-    "submission": 124,
-    "verify": 256
+    "task": 19,
+    "tree": 19,
+    "spec": 82,
+    "claim": 257,
+    "release": 19,
+    "submission": 330,
+    "verify": 598,
+    "amend": 11,
+    "challenge": 0
   },
-  "eventSetCanonicalSha256": "52429941508aaf6052b1c7589739da24f84b28c221ce4c7e19d013a88a2e5b42",
-  "canonicalRule": "539 rows of '<short-path>\\t<pinId>\\t<blockHeight>\\t<txIndex>' sorted lexicographically, '\\n'-joined with trailing newline, sha256",
-  "fetchedAt": "2026-09-18T08:38:23+0800",
-  "source": "https://manapi.metaid.io /pin/path/list (7 metatask paths, height <= 189829)",
-  "generator": "metaso-p2p metatask-replay-indexer c896334 local serve (--serve --listen 127.0.0.1:18088 --manapi https://manapi.metaid.io) + curl of /api/metatask/{tasks,tasks/<root>,replay/<root>}",
+  "eventSetCanonicalSha256": "1648da340e34b81f0701e982d89b4c288fd20bd2c6a094fcfbe709cbd2413ad4",
+  "canonicalRule": "1335 rows of '<short-path>\\t<pinId>\\t<blockHeight>\\t<txIndex>' over 9 metatask paths (challenge is an empty path contributing 0 rows) sorted lexicographically, '\\n'-joined with trailing newline, sha256",
+  "fetchedAt": "2026-10-24T00:58:18+08:00",
+  "source": "https://manapi.metaid.io/api/pin/path/list (9 metatask paths, height <= 194933; cursor-paged, full walk verified walked >= total per path)",
+  "generator": "metaso-p2p metatask-replay-indexer main@6d7cdda local serve (--serve --listen 127.0.0.1:18088 --manapi https://manapi.metaid.io) + curl of /api/metatask/{tasks,tasks/<root>,replay/<root>}; canonical list re-crawled independently from manapi via curl",
   "crossRefs": {
-    "sharedEventsJsonlSha256": "2e56c39706e1773db7ab7a1861a17bde4aecff94871424e68ca34936f10ef083",
-    "independentRecompute": "Builder阿码 2026-09-18: re-crawl from manapi (539 tuples) -> canonical digest equal, canonical list diff == 0 lines vs the acceptance-seat list"
+    "replayEventCountByPathMatch": "independent re-crawl counts equal the serve-mode replay eventCountByPath field-for-field (task 19, tree 19, spec 82, claim 257, release 19, submission 330, verify 598, amend 11, challenge 0; total 1335)",
+    "tasksCoverage": "data/tasks.json rows = 19 = metatask_list chain view count (2026-10-24 00:56 +08:00)"
   },
-  "notes": "Snapshot mode only: data is frozen at the boundary block above and labeled as such in every view; no deployment endpoint is embedded."
+  "trimmed": {
+    "applied": true,
+    "reason": "package size cap 4.5MB (v1.2 acceptance criterion 3): full snapshot would be ~4.6MB",
+    "scope": "replay-08cac496dfa93874dd7d16893038da16b0d2dbc92f844d09512ca0cc78c03b46i0.json: per-node events arrays removed (nodes[*].events); all other tasks keep full replay detail",
+    "recovery": "the removed per-node event detail survives byte-identical inside panorama-08cac496dfa93874dd7d16893038da16b0d2dbc92f844d09512ca0cc78c03b46i0.json (nodes[].events, verified equal before trim); node detail view falls back to it",
+    "notAffected": "event set canonical digest above is computed from an independent manapi re-crawl, not from package replay files, and is unaffected by this trim"
+  },
+  "notes": "Snapshot mode only: data is frozen at the boundary block above and labeled as such in every view; no deployment endpoint is embedded. Display layer (profiles.json + avatars/) regenerated for all 65 globalMetaIds in the snapshot."
 }

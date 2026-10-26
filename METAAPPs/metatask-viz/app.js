@@ -338,7 +338,9 @@ async function renderNode(el, root, nodeId) {
   const st = stateInfo(n.displayState);
   const sub = n.activeSubmission || null;
   const claim = n.currentClaim || null;
-  const events = (n.events || []).slice().sort((a, b) => a.blockHeight - b.blockHeight || a.blockTs - b.blockTs);
+  // replay 明细裁剪兜底（provenance.trimmed 记录口径）：replay 无 events 时回退 panorama 同节点明细
+  const pNode = Array.isArray(p?.nodes) ? p.nodes.find((x) => x && x.id === nodeId) : (p?.nodes?.[nodeId] ?? null);
+  const events = (n.events?.length ? n.events : pNode?.events || []).slice().sort((a, b) => a.blockHeight - b.blockHeight || a.blockTs - b.blockTs);
   const votes = n.votes || [];
   const counted = votes.filter((v) => v.counts).length;
   el.innerHTML = `
