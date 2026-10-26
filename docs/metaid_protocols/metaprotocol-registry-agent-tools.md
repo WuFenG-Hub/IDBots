@@ -67,7 +67,7 @@ Publish (create) and update (modify) share the human square's body JSON:
 Base URL `https://so.metaid.io` (overridable via `IDBOTS_METAWEB_API_BASE_URL`). Envelope `{code, data, message}` with HTTP always 200; business error codes `40000 / 40400 / 50000`.
 
 - `GET /api/metaweb/protocols` — registry list (v2): `q` / `publisher` / `path` / `includeConflicts` / `size` (1–100) / `cursor`; `createdAt` desc.
-- `GET /api/metaweb/protocols/check?path=…` — precheck; `path` must match `^/protocols/[a-z0-9_]+(/[a-z0-9_]+)*$`; `available=true` ⇒ `existing=null`; unconfirmed registrations count as occupied.
+- `GET /api/metaweb/protocols/check?path=…` — precheck; `path` must match `^/protocols/[a-z0-9_-]+(/[a-z0-9_-]+)*$`; `available=true` ⇒ `existing=null`; unconfirmed registrations count as occupied.
 - `GET /api/metaweb/protocols/detail?path=…` or `?pinId=…` — record (with payload) + versions (oldest → newest, `chain`/`local` attribution) + conflicts/invalidModifies.
 - `GET /api/metaweb/pin/:pinId/versions` — modify-chain versions.
 
