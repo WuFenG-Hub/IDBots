@@ -76,7 +76,6 @@ const sampleFacts = (overrides = {}) => ({
     longTermProgress: [{ taskId: 'lt1', title: 'Q4 roadmap', stage: 'active', subtasksAccepted: 1, subtasksTotal: 4, percentComplete: 25 }],
     twinDelegateOrchestrationsInWindow: 2,
   },
-  botDigests: [{ botName: 'Ops', isTwin: false, summaryDate: '2026-10-21', summaryText: 'Inspected 12 hosts.' }],
   onlineActivity: [{ botName: 'Ops', privateMessageCount: 4, groupMessageCount: 1 }],
   botActivity: [
     {
@@ -257,7 +256,6 @@ test('deterministic briefing: needs-you + bot lines + owner tasks + fleet + agen
   assert.match(markdown, /今日预告/);
   assert.doesNotMatch(markdown, /\| Bot \| 会话 \|/, 'v1 per-bot counts table is gone');
   assert.doesNotMatch(markdown, /Landing copy/, 'humanSessions listing removed (brain input only)');
-  assert.doesNotMatch(markdown, /Inspected 12 hosts/, 'digest diary removed (brain input only)');
   assert.doesNotMatch(markdown, /stage_changed/, 'long-term journal events removed');
 });
 
@@ -381,7 +379,6 @@ test('buildDailyReportHtml: KPI row, chart svg, bot cards, needs cards, agenda; 
   assert.match(html, /总览首句。/);
   // v1 counts table is gone.
   assert.doesNotMatch(html, /各 Bot 活动/);
-  assert.doesNotMatch(html, /Inspected 12 hosts/, 'digest diary removed from HTML');
   assert.doesNotMatch(html, /Landing copy/, 'human-session table removed from HTML');
   assert.match(html, /新建会话: 5/, 'session count kept in the meta line');
 });
@@ -415,7 +412,6 @@ test('generateDailyReport: no brain → deterministic fallback ships + HTML writ
   assert.match(result.briefingMarkdown, /idbots:\/\/session\/sess-1/);
   assert.match(result.briefingMarkdown, /Bot one-liners/);
   assert.match(result.briefingMarkdown, /Today ahead/);
-  assert.doesNotMatch(result.briefingMarkdown, /Inspected 12 hosts/);
   assert.equal(path.basename(result.htmlFilePath), '2026-10-22.html');
   assert.ok(fs.existsSync(result.htmlFilePath), 'HTML file written');
   assert.match(result.htmlFileUrl, /^file:\/\//);

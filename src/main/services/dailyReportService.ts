@@ -437,7 +437,6 @@ export const startDailyReportService = (deps: DailyReportServiceDeps): DailyRepo
           scheduledRuns: facts.machineActivity.scheduledRuns.length,
           groupTaskTransitions: facts.machineActivity.groupTaskTransitions.length,
           longTermEvents: facts.machineActivity.longTermEvents.length,
-          botDigests: facts.botDigests.length,
           onlineBots: facts.onlineActivity.length,
           botActivity: facts.botActivity.length,
           upcomingFires: facts.upcoming.scheduledFiresTotal,
