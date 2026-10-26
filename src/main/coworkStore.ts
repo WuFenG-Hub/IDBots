@@ -63,7 +63,7 @@ import {
   normalizeMemorySemanticKey,
   scoreMemorySimilarity,
 } from './memory/memorySimilarity';
-import { applyMemoryDefense, MemoryDefenseError } from './memory/memoryDefense';
+import { applyMemoryDefense, defendMemoryQuote, MemoryDefenseError } from './memory/memoryDefense';
 import {
   MEMORY_EVIDENCE_QUOTES_PER_MEMORY,
   MEMORY_REVISIONS_KEEP_PER_MEMORY,
@@ -7377,7 +7377,10 @@ export class CoworkStore implements MemoryBackend {
       source?.role || 'system',
       now,
       source?.dreamDate?.trim() || null,
-      normalizeMemoryQuote(source?.quote),
+      // The quote carries raw conversation wording the memory text may have
+      // paraphrased away — screen it like memory text (redact, or drop on a
+      // blocking detector; provenance never refuses the write).
+      defendMemoryQuote(normalizeMemoryQuote(source?.quote)),
     ]);
   }
 
@@ -9578,7 +9581,10 @@ export class CoworkStore implements MemoryBackend {
    * Same protections as archiveUserMemories — active rows only, never
    * self_identity, and the notUsedSince guard skips rows touched during the
    * proposal's LLM window. The write goes through the ordinary text cap, so a
-   * rewrite can never grow the injected surface. Returns whether a row changed.
+   * rewrite can never grow the injected surface. The new wording is
+   * re-screened by memory defense: a redaction applies in place, and a
+   * blocking hit skips the rewrite and keeps the stored text. Returns whether
+   * a row changed.
    */
   rewriteUserMemoryText(input: {
     id: string;
@@ -9604,11 +9610,22 @@ export class CoworkStore implements MemoryBackend {
     if (!current) return false;
     const nextText = truncate(normalizeMemoryText(input.text), maxMemoryTextChars(current.usage_class));
     if (!nextText || nextText === current.text) return false;
+    let defendedText: string;
+    try {
+      defendedText = applyMemoryDefense(nextText);
+    } catch (error) {
+      if (error instanceof MemoryDefenseError) {
+        console.warn('[MemoryDefense] skipped an evolution rewrite (secret in the new wording)');
+        return false;
+      }
+      throw error;
+    }
+    if (!defendedText || defendedText === current.text) return false;
     this.recordMemoryRevision({
       memoryId: id,
       metabotId: input.metabotId,
       previousText: current.text,
-      newText: nextText,
+      newText: defendedText,
       reason: input.reason,
       sourceType: input.sourceType ?? null,
     });
@@ -9616,7 +9633,7 @@ export class CoworkStore implements MemoryBackend {
       UPDATE user_memories
       SET text = ?, fingerprint = ?, updated_at = ?
       WHERE id = ? AND metabot_id = ?
-    `, [nextText, buildMemoryFingerprint(nextText), Date.now(), id, input.metabotId]);
+    `, [defendedText, buildMemoryFingerprint(defendedText), Date.now(), id, input.metabotId]);
     this.saveDb();
     return true;
   }

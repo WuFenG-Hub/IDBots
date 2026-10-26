@@ -98,3 +98,76 @@ test('write chokepoints: turn writes count refusals, dream writes drop, UI edits
 });
 
 import path from 'node:path';
+
+test('defense: CJK prose survives credential redaction; Chinese mnemonics block', () => {
+  const { wordlists } = require('bip39');
+
+  // The old value class ([^\s"']{8,}) swallowed the whole CJK clause after a
+  // label — these must pass through untouched.
+  const prose = [
+    '助记词:千万不能泄露给任何人，这是底线',
+    '密钥:2026年10月到期后需要重新生成',
+    '他的 secret: curiosity drives everything',
+  ];
+  for (const text of prose) {
+    assert.equal(scanMemoryText(text).length, 0, `no violation: ${text}`);
+    assert.equal(applyMemoryDefense(text), text);
+  }
+  // Real ASCII-shaped secrets still redact.
+  assert.ok(applyMemoryDefense('密码: MyS3cr3tPassw0rd').includes('[REDACTED:credential_assignment]'));
+  assert.ok(applyMemoryDefense('api_key=abc123def456').includes('[REDACTED:credential_assignment]'));
+  assert.ok(applyMemoryDefense('部署密码: hunter2secret!').includes('[REDACTED:credential_assignment]'));
+
+  // Chinese mnemonics block — simplified and traditional lists.
+  const zhSimplified = wordlists.chinese_simplified.slice(0, 12).join(' ');
+  assert.ok(scanMemoryText(`备份: ${zhSimplified}`).some((v) => v.detector === 'bip39_mnemonic' && v.severity === 'block'));
+  assert.throws(() => applyMemoryDefense(zhSimplified), MemoryDefenseError);
+  const zhTraditional = wordlists.chinese_traditional.slice(0, 12).join(' ');
+  assert.ok(scanMemoryText(zhTraditional).some((v) => v.detector === 'bip39_mnemonic' && v.severity === 'block'));
+
+  // Unspaced CJK prose glues into tokens no single-character list contains,
+  // and short spaced runs stay under the >= 12 threshold.
+  assert.equal(scanMemoryText('我今天在这里学习了很多新的东西，感觉很好').length, 0);
+  assert.equal(scanMemoryText('谢 谢 你 的 帮 助 和 陪 伴').length, 0);
+});
+
+test('defense: evidence quotes are screened and evolution rewrites are re-screened', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    const redactedQuote = store.createUserMemory({
+      metabotId: 1, text: '保持每周轮换 api key 的习惯', ...OWNER,
+      source: { sourceType: 'session_turn', quote: '我的 api key: supersecret123456 记在这里' },
+    });
+    const blockedQuote = store.createUserMemory({
+      metabotId: 1, text: '钱包助记词有十二个英文单词', ...OWNER,
+      source: { sourceType: 'session_turn', quote: `助记词备份 ${MNEMONIC}` },
+    });
+    const evidence = store.listUserMemoryEvidence([redactedQuote.id, blockedQuote.id]);
+    const redactedQuotes = evidence.get(redactedQuote.id)?.quotes ?? [];
+    assert.equal(redactedQuotes.length, 1, 'a redact-level quote is stored redacted');
+    assert.ok(redactedQuotes[0].includes('[REDACTED:credential_assignment]'));
+    assert.ok(!redactedQuotes[0].includes('supersecret123456'));
+    assert.equal((evidence.get(blockedQuote.id)?.quotes ?? []).length, 0, 'a blocking quote is dropped, not stored');
+
+    // Evolution rewrite: a redaction applies in place; a blocking hit keeps
+    // the stored text and refuses the rewrite.
+    const rewritten = store.rewriteUserMemoryText({
+      id: redactedQuote.id, metabotId: 1,
+      text: '现在改成: password: abc123def456 每两周', reason: 'evolution_rewrite',
+    });
+    assert.equal(rewritten, true, 'the rewrite lands with the redaction applied');
+    const after = store.listUserMemories({ metabotId: 1, ...OWNER, status: 'created' });
+    const row = after.find((entry) => entry.id === redactedQuote.id);
+    assert.ok(row?.text.includes('[REDACTED:credential_assignment]'));
+    assert.ok(!row?.text.includes('abc123def456'));
+
+    const skipped = store.rewriteUserMemoryText({
+      id: redactedQuote.id, metabotId: 1,
+      text: `换成了这套短语 ${MNEMONIC}`, reason: 'evolution_rewrite',
+    });
+    assert.equal(skipped, false, 'a blocking rewrite is refused and the stored text kept');
+  } finally {
+    cleanup();
+  }
+});

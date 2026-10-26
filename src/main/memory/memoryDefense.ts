@@ -38,15 +38,27 @@ export class MemoryDefenseError extends Error {
   }
 }
 
-const BIP39_WORDS: ReadonlySet<string> | null = (() => {
+const loadWordlistSet = (pick: () => string[] | undefined): ReadonlySet<string> | null => {
   try {
-    const list = wordlists?.english;
+    const list = pick();
     if (!Array.isArray(list) || list.length < 2048) return null;
     return new Set(list);
   } catch {
     return null;
   }
-})();
+};
+
+const BIP39_WORDS: ReadonlySet<string> | null = loadWordlistSet(() => wordlists?.english);
+
+// Simplified + traditional Chinese share the pure single-character shape and a
+// mnemonic is written in exactly one of them, so union both lists and let the
+// run length (>= 12) do the precision work.
+const BIP39_CJK_WORDS: ReadonlySet<string> | null = loadWordlistSet(() => {
+  const simplified = wordlists?.chinese_simplified;
+  const traditional = wordlists?.chinese_traditional;
+  if (!Array.isArray(simplified) || !Array.isArray(traditional)) return undefined;
+  return [...simplified, ...traditional];
+});
 
 const previewOf = (match: string): string => {
   const text = match.replace(/\s+/g, ' ').trim();
@@ -67,6 +79,34 @@ function findMnemonicPhrases(text: string): RegExpMatchArray[] {
     }
     if (run >= 12) {
       const phrase = words.slice(index - run, index).join(' ');
+      results.push({ 0: phrase, length: phrase.length } as RegExpMatchArray);
+    }
+    run = 0;
+  }
+  return results;
+}
+
+/**
+ * Chinese BIP39 mnemonics: the Chinese wordlists are pure single characters,
+ * so a hit is a run of >= 12 Han tokens — split on anything that is not a Han
+ * character (spaces, punctuation, ASCII) — that each sit in the wordlist.
+ * Unspaced CJK prose glues into multi-character tokens that can never match a
+ * single-character list, so the detector only fires on the space-delimited
+ * shape a mnemonic actually leaks in.
+ */
+function findCjkMnemonicPhrases(text: string): RegExpMatchArray[] {
+  if (!BIP39_CJK_WORDS) return [];
+  const results: RegExpMatchArray[] = [];
+  const tokens = text.split(/[^\p{Script=Han}]+/u).filter(Boolean);
+  let run = 0;
+  for (let index = 0; index <= tokens.length; index += 1) {
+    const inList = index < tokens.length && BIP39_CJK_WORDS.has(tokens[index]);
+    if (inList) {
+      run += 1;
+      continue;
+    }
+    if (run >= 12) {
+      const phrase = tokens.slice(index - run, index).join(' ');
       results.push({ 0: phrase, length: phrase.length } as RegExpMatchArray);
     }
     run = 0;
@@ -95,13 +135,22 @@ const DETECTORS: Detector[] = [
   { detector: 'github_token', severity: 'redact', pattern: /\b(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,})\b/g },
   { detector: 'aws_access_key', severity: 'redact', pattern: /\bAKIA[0-9A-Z]{16}\b/g },
   { detector: 'bearer_token', severity: 'redact', pattern: /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}\b/g },
-  { detector: 'credential_assignment', severity: 'redact', pattern: /(?:api[\s_-]?key|secret|token|passwd|passphrase|password|密码|密钥|助记词|私钥)\s*[:：=]\s*["']?([^\s"']{8,})["']?/gi },
+  // The value must be a secret-shaped ASCII run: >= 8 key-class characters
+  // containing at least one digit/symbol. CJK has no spaces, so the previous
+  // any-non-space value class swallowed the whole Chinese clause after a label
+  // ("助记词:千万不能泄露给任何人，这是底线") and destroyed its meaning;
+  // prose now passes, typical API keys/passwords still match. Pure-CJK
+  // "values" are either prose (keep) or a Chinese mnemonic (bip39 detector).
+  { detector: 'credential_assignment', severity: 'redact', pattern: /(?:api[\s_-]?key|secret|token|passwd|passphrase|password|密码|密钥|助记词|私钥)\s*[:：=]\s*["']?(?=[A-Za-z0-9+/=_.:@#&$%^*!?~-]{8,})(?=[A-Za-z0-9+/=_.:@#&$%^*!?~-]*[0-9+/=_.:@#&$%^*!?~-])[A-Za-z0-9+/=_.:@#&$%^*!?~-]{8,}["']?/gi },
 ];
 
 /** Scan one candidate text. Returns every violation (block first). */
 export function scanMemoryText(text: string): MemoryDefenseViolation[] {
   const violations: MemoryDefenseViolation[] = [];
   for (const match of findMnemonicPhrases(text)) {
+    violations.push({ detector: 'bip39_mnemonic', severity: 'block', preview: previewOf(match[0]) });
+  }
+  for (const match of findCjkMnemonicPhrases(text)) {
     violations.push({ detector: 'bip39_mnemonic', severity: 'block', preview: previewOf(match[0]) });
   }
   for (const detector of DETECTORS) {
@@ -134,4 +183,21 @@ export function applyMemoryDefense(text: string): string {
   }
   console.warn(`[MemoryDefense] redacted a memory write: ${violations.map((v) => v.detector).join(', ')}`);
   return defended;
+}
+
+/**
+ * Evidence quotes (user_memory_sources.quote) are best-effort provenance that
+ * only idle-time passes read. They quote raw conversation, so they carry the
+ * same leak risk as memory text: redact detector matches; on a blocking hit
+ * return null and drop the quote instead of throwing — the memory text itself
+ * was already defended, and provenance is never worth refusing a write over.
+ */
+export function defendMemoryQuote(quote: string | null | undefined): string | null {
+  if (!quote) return null;
+  try {
+    return applyMemoryDefense(quote);
+  } catch (error) {
+    if (error instanceof MemoryDefenseError) return null;
+    throw error;
+  }
 }
