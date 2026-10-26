@@ -2235,6 +2235,23 @@ export class SqliteStore {
       );
     `);
 
+    // App metadata: stores application-level metadata (e.g., first_install_version)
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS app_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `);
+
+    // Viewed update notifications: tracks which update notifications the user has seen
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS viewed_update_notifications (
+        version TEXT PRIMARY KEY,
+        viewed_at INTEGER NOT NULL
+      );
+    `);
+
     // Agent-Game-v2: persistent App/Game Runtime (docs/14 §5). Sessions, task
     // grants, the idempotent write ledger, and the audit trail. These tables
     // are user-data and must survive auto-update; column additions are guarded.

@@ -68,6 +68,7 @@ tests/*
 !tests/mobileChannels.test.mjs
 !tests/mobileShim.test.ts
 !tests/quotaExhaustedStreamError.test.mjs
+!tests/update-notification.test.mjs
 !tests/serverMode.test.mjs
 !tests/serverBootstrap.test.mjs
 !tests/fixtures/

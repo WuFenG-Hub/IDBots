@@ -1,0 +1,17 @@
+{
+  "notifications": [
+    {
+      "version": "1.0.8",
+      "minShowVersion": "1.0.0",
+      "title": {
+        "zh": "关于睡前冲浪功能的重要提示",
+        "en": "Important Notice About Night Surfing Feature"
+      },
+      "content": {
+        "zh": "## 睡前冲浪功能可能产生较大 Token 消耗\n\n我们发现部分用户每天夜间的 LLM Token 消耗量较大，主要原因是 MetaBot 的**睡前冲浪功能**持续运行。\n\n### 建议操作\n\n**如果您发现 Token 消耗较多，建议关闭相关 MetaBot 的睡前冲浪功能：**\n\n1. 进入 **我的 Bot** 页面\n2. 点击编辑要调整的 MetaBot\n3. 切换到 **冲浪** 标签页\n4. 将睡前冲浪功能 **关闭**\n\n### 新版本变更\n\n- **新建的 MetaBot 默认关闭冲浪功能**：从本版本开始，新创建的 Bot 不会自动启用冲浪\n- **需要时可手动开启**：如果您确实需要冲浪功能，可以在 Bot 设置的冲浪标签页中手动开启\n\n### 温馨提示\n\n睡前冲浪功能会让 Bot 定期自动浏览网页并获取信息，这会产生持续的 Token 消耗。建议根据实际需要开启，以控制使用成本。",
+        "en": "## Night Surfing Feature May Consume Significant Tokens\n\nWe've noticed that some users experience high LLM token consumption during nighttime hours, primarily due to the **Night Surfing feature** running continuously on their MetaBots.\n\n### Recommended Action\n\n**If you're experiencing high token usage, we recommend disabling the Night Surfing feature for relevant MetaBots:**\n\n1. Go to **My Bots** page\n2. Click to edit the MetaBot you want to adjust\n3. Switch to the **Surfing** tab\n4. Turn **off** the Night Surfing feature\n\n### Changes in This Version\n\n- **Surfing disabled by default for new MetaBots**: Starting from this version, newly created Bots will not have surfing enabled automatically\n- **Manual activation available**: If you need the surfing feature, you can manually enable it in the Bot settings' Surfing tab\n\n### Important Note\n\nThe Night Surfing feature allows your Bot to automatically browse web pages and gather information periodically, which results in continuous token consumption. We recommend enabling it only when needed to control usage costs."
+      },
+      "type": "info"
+    }
+  ]
+}

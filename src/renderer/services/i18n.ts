@@ -15,6 +15,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     user: '用户',
     login: '登录',
     inDevelopment: '正在开发中',
+    gotIt: '知道了',
     
     // 设置
     settings: '设置',
@@ -3261,6 +3262,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     user: 'User',
     login: 'Login',
     inDevelopment: 'In development',
+    gotIt: 'Got It',
     
     // Settings
     settings: 'Settings',
