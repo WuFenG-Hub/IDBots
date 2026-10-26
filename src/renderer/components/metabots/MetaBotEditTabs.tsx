@@ -1253,7 +1253,9 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
         data-slot="metabot-edit-panel-surf"
         className={`space-y-3 ${activeTab === 'surf' ? '' : 'hidden'}`}
       >
-        <SurfSection metabotId={metabotId} />
+        {/* Persisted type (baseline, not the edited value): the surf
+            before-dream toggle's unset default is twin-only. */}
+        <SurfSection metabotId={metabotId} metabotType={baseline.metabot_type} />
       </div>
 
       {/* Advanced tab: on-chain homepage source */}

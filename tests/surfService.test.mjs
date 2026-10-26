@@ -115,11 +115,12 @@ test('unknown bot is rejected', async () => {
   await assert.rejects(() => service.runSurfAndWait(9, 'manual-ui'), /not found/);
 });
 
-test('pre-dream surf toggle is default-on: unset means ON, explicit 0 opts out, 1 stays on', () => {
-  // Owner decision (2026-09-28): pre-dream surfing ships enabled for every
-  // bot, flipping the 2026-09-14 opt-in default. An explicit '0' opts out
-  // (users who turned it off keep it off); an explicit '1' is a no-op
-  // against the default.
+test('pre-dream surf toggle defaults twin-only: unset = ON for the Twin / OFF for others, explicit values always win', () => {
+  // Owner decision (2026-10-26 nightly-token audit): the 2026-09-28
+  // default-on flips to twin-only. Bots that predate the flip carry an
+  // explicit '1' from the MetabotStore legacy-pin migration and keep
+  // surfing until they opt out; bots created after it ride the type
+  // default. An explicit '0' opts any bot out; '1' opts any bot in.
   const settings = new Map();
   const db = createNativeSqliteDatabase(':memory:');
   const store = new MetawebSurfStore(db, () => {});
@@ -128,16 +129,31 @@ test('pre-dream surf toggle is default-on: unset means ON, explicit 0 opts out, 
     metabotStore: {
       getMetabotById: () => ({ id: 7, name: 'Tester' }),
       getMetabotSetting: (id, key) => settings.get(key) ?? null,
+      isTwinMetabot: (id) => id === 7,
     },
     broadcast: () => {},
     registry: [],
     nowMs: () => NOW_MS,
   });
-  assert.equal(service.shouldPreDreamSurf(7), true, 'unset means ON (default-on)');
+  assert.equal(service.shouldPreDreamSurf(7), true, 'unset + Twin means ON');
+  assert.equal(service.shouldPreDreamSurf(8), false, 'unset + non-Twin means OFF');
   settings.set('surf_before_dream_enabled', '1');
-  assert.equal(service.shouldPreDreamSurf(7), true, 'explicit 1 stays on');
+  assert.equal(service.shouldPreDreamSurf(8), true, 'explicit 1 opts a non-Twin in');
   settings.set('surf_before_dream_enabled', '0');
-  assert.equal(service.shouldPreDreamSurf(7), false, 'explicit 0 opts out');
+  assert.equal(service.shouldPreDreamSurf(7), false, 'explicit 0 opts the Twin out');
+  // A stub without the twin probe (legacy harnesses) resolves to OFF — the
+  // safe side of the default.
+  const legacyService = new SurfService({
+    store,
+    metabotStore: {
+      getMetabotById: () => ({ id: 7, name: 'Tester' }),
+      getMetabotSetting: () => null,
+    },
+    broadcast: () => {},
+    registry: [],
+    nowMs: () => NOW_MS,
+  });
+  assert.equal(legacyService.shouldPreDreamSurf(7), false, 'no twin probe reads as non-Twin');
 });
 
 test('fresh-install deferral: pre-dream surf is skipped while the gate reports a reason', async () => {
@@ -151,7 +167,9 @@ test('fresh-install deferral: pre-dream surf is skipped while the gate reports a
     store,
     metabotStore: {
       getMetabotById: () => ({ id: 7, name: 'Tester' }),
-      getMetabotSetting: () => null,
+      // Surf explicitly enabled: this test exercises the deferral gate, not
+      // the (twin-only) toggle default.
+      getMetabotSetting: (id, key) => (key === 'surf_before_dream_enabled' ? '1' : null),
     },
     broadcast: () => {},
     registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
@@ -182,7 +200,9 @@ test('memory-disabled bot: manual surf runs degraded, pre-dream stays gated (rev
     store,
     metabotStore: {
       getMetabotById: () => ({ id: 7, name: 'Tester' }),
-      getMetabotSetting: () => null,
+      // Surf explicitly enabled: this test exercises the memory gate, not
+      // the (twin-only) toggle default.
+      getMetabotSetting: (id, key) => (key === 'surf_before_dream_enabled' ? '1' : null),
     },
     broadcast: () => {},
     registry: [alphaDescriptor([makeItem('pin-a', NOW_SEC - 100)])],
@@ -730,7 +750,9 @@ const sessionService = (store, registry, extra = {}) => new SurfService({
   store,
   metabotStore: {
     getMetabotById: () => ({ id: 7, name: 'Tester' }),
-    getMetabotSetting: () => null,
+    // Surf explicitly enabled: these tests exercise the empty-briefing skip,
+    // not the (twin-only) toggle default.
+    getMetabotSetting: (id, key) => (key === 'surf_before_dream_enabled' ? '1' : null),
   },
   broadcast: () => {},
   registry,

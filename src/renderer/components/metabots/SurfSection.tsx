@@ -59,13 +59,20 @@ const creationModeI18nKey: Record<(typeof SURF_CREATION_MODES)[number], string> 
 
 interface SurfSectionProps {
   metabotId: number;
+  /**
+   * The bot's PERSISTED type (baseline, not the edited form value): the
+   * surf-before-dream default is twin-only (owner decision 2026-10-26 —
+   * unset means ON for the Twin, OFF for every other bot), so the toggle's
+   * initial state before the kv read resolves must follow the type.
+   */
+  metabotType: 'twin' | 'worker' | 'welcome';
 }
 
-const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
-  // Surf-before-dream toggle; the kv default (no record) means ON (owner
-  // decision, 2026-09-28 — pre-dream surfing ships enabled; an explicit '0'
-  // opts the bot out).
-  const [surfBeforeDream, setSurfBeforeDream] = useState(true);
+const SurfSection: React.FC<SurfSectionProps> = ({ metabotId, metabotType }) => {
+  // Surf-before-dream toggle; the kv default (no record) is twin-only:
+  // ON for the Twin bot, OFF for workers/welcome bots (owner decision,
+  // 2026-10-26 — an explicit '0' opts any bot out, '1' opts in).
+  const [surfBeforeDream, setSurfBeforeDream] = useState(metabotType === 'twin');
   const [surfBeforeDreamLoaded, setSurfBeforeDreamLoaded] = useState(false);
   // Interaction budget, kept as the raw input string while typing.
   const [surfBudget, setSurfBudget] = useState(String(DEFAULT_SURF_INTERACTION_BUDGET));
@@ -84,10 +91,12 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
   const [runVersion, setRunVersion] = useState(0);
 
   // Load both surf settings on mount / metabotId change. A missing or failed
-  // read falls back to the product defaults (surf-before-dream ON, budget 50).
+  // read falls back to the product defaults (surf-before-dream twin-only,
+  // budget 50).
   useEffect(() => {
     let cancelled = false;
-    setSurfBeforeDream(true);
+    const typeDefaultOn = metabotType === 'twin';
+    setSurfBeforeDream(typeDefaultOn);
     setSurfBeforeDreamLoaded(false);
     setSurfBudget(String(DEFAULT_SURF_INTERACTION_BUDGET));
     setCreationBudget(String(DEFAULT_SURF_CREATION_BUDGET));
@@ -97,12 +106,14 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
     window.electron.metabot.getSetting(metabotId, SURF_BEFORE_DREAM_ENABLED_KEY)
       .then((result) => {
         if (cancelled) return;
-        setSurfBeforeDream(result.success ? result.value !== '0' : true);
+        // null/absent value rides the twin-only type default; an explicit
+        // '1'/'0' always wins. A failed read keeps the type default.
+        setSurfBeforeDream(result.success && result.value != null ? result.value !== '0' : typeDefaultOn);
         setSurfBeforeDreamLoaded(true);
       })
       .catch(() => {
         if (cancelled) return;
-        setSurfBeforeDream(true);
+        setSurfBeforeDream(typeDefaultOn);
         setSurfBeforeDreamLoaded(true);
       });
     window.electron.metabot.getSetting(metabotId, SURF_INTERACTION_BUDGET_KEY)
@@ -137,7 +148,7 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
-  }, [metabotId]);
+  }, [metabotId, metabotType]);
 
   // Live surf status for this bot (mirrors the dreamStatusChanged pattern in
   // MetabotsManager). Every event also bumps runVersion so the reports panel

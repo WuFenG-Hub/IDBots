@@ -5092,10 +5092,13 @@ const startStartupNightlyServices = (): void => {
     metaidKnowledgeStore: dreamKnowledgeStore,
     // Fresh-install deferral: no dreaming (and no catch-up) on day one.
     backgroundDeferral: resolveBackgroundAutomationDeferral,
-    // Pre-dream surf ("做梦前自动冲浪"): default OFF per bot (opt-in — every
-    // surf spends LLM tokens and gas); skipped when a surf finished within
-    // the recency window. Hard-capped so an overrunning surf can never stall
-    // the night's dream; failures degrade to no surf.
+    // Pre-dream surf ("做梦前自动冲浪"): default ON only for the Twin bot —
+    // every other bot opts in explicitly (owner decision 2026-10-26,
+    // nightly-token audit; bots that predate the flip carry an explicit '1'
+    // from the MetabotStore legacy-pin migration and keep surfing until they
+    // opt out). Skipped when a surf finished within the recency window.
+    // Hard-capped so an overrunning surf can never stall the night's dream;
+    // failures degrade to no surf.
     surfBeforeDream: async (metabotId) => {
       const surf = getSurfService();
       if (!surf.shouldPreDreamSurf(metabotId)) return null;
