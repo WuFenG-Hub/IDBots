@@ -11,11 +11,12 @@ import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
 import FreeQuotaCard from './FreeQuotaCard';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon, ArrowPathIcon, WrenchScrewdriverIcon, SparklesIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon, ArrowPathIcon, WrenchScrewdriverIcon, SparklesIcon, QuestionMarkCircleIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { CustomProviderIcon, CommandCodeIcon, OpenCodeIcon } from './icons/providers';
 import { fetchProviderModelList, providerSupportsModelListSync } from '../services/providerModels';
 import { testCerebellumConnection } from '../services/cerebellumConnection';
+import Tooltip from './Tooltip';
 import { useDispatch, useSelector } from 'react-redux';
 import { setAvailableModels, setSelectedModel } from '../store/slices/modelSlice';
 import { RootState } from '../store';
@@ -2452,9 +2453,14 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice, openNe
                 {i18nService.t('experimentalAutomation')}
               </h4>
               <label className="flex items-center justify-between cursor-pointer">
-                <span className="text-sm dark:text-claude-darkSecondaryText text-claude-secondaryText">
-                  {i18nService.t('experimentalAutomationDescription')}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm dark:text-claude-darkSecondaryText text-claude-secondaryText">
+                    {i18nService.t('experimentalAutomationDescription')}
+                  </span>
+                  <Tooltip content={i18nService.t('experimentalAutomationTooltip')}>
+                    <QuestionMarkCircleIcon className="w-4 h-4 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 flex-shrink-0" />
+                  </Tooltip>
+                </div>
                 <button
                   type="button"
                   role="switch"

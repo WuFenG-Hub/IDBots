@@ -2213,7 +2213,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     autoLaunch: '开机自启动',
     autoLaunchDescription: '系统启动时自动运行应用',
     experimentalAutomation: '实验性自动化（全局开关）',
-    experimentalAutomationDescription: '允许各 Bot 开启浏览器自动化与桌面操作（实验）。关闭则立即对所有 Bot 一刀切停用，下一轮对话生效',
+    experimentalAutomationDescription: '允许各 Bot 开启浏览器自动化与桌面操作（实验）',
+    experimentalAutomationTooltip: '允许各 Bot 开启浏览器自动化与桌面操作（实验）。关闭则立即对所有 Bot 一刀切停用，下一轮对话生效。开关位于 Bot 编辑 → 高级。',
     preventDeviceSleep: '阻止设备休眠',
     preventDeviceSleepDescription: 'IDBots 工作期间保持设备唤醒',
 
@@ -5433,7 +5434,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     autoLaunch: 'Launch at Login',
     autoLaunchDescription: 'Automatically start the app when you log in',
     experimentalAutomation: 'Experimental Automation (global)',
-    experimentalAutomationDescription: 'Allow bots to opt into browser automation and desktop computer use (experimental). Turning this off disables both for every bot from the next turn',
+    experimentalAutomationDescription: 'Allow bots to opt into browser automation and desktop use',
+    experimentalAutomationTooltip: 'Allow bots to opt into browser automation and desktop computer use (experimental). Turning this off disables both for every bot from the next turn. Individual switches are in Bot Edit → Advanced.',
     preventDeviceSleep: 'Prevent Device Sleep',
     preventDeviceSleepDescription: 'Keep your device awake while IDBots is working',
 
