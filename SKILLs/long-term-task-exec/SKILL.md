@@ -58,6 +58,15 @@ Exactly one of these per turn, in this priority:
 1. **Advance** when the current sub-project is actionable: begin it
    (`longterm_subtask_begin`, refused while dependencies are unmet), continue
    the agreed channel, or finish work already in flight.
+   **CRITICAL: When you call `longterm_subtask_begin`, you MUST immediately
+   begin the first work step in the SAME turn or the very next message.** Do
+   not stop after calling `begin` — that only marks the state change. The
+   actual work must start right away. Examples:
+   - Begin → immediately start research/analysis in this session
+   - Begin → immediately create a work session and delegate to a worker
+   - Begin → immediately ask the first clarifying question if scope is unclear
+   The heartbeat is only a fallback mechanism for stalled work, NOT the primary
+   trigger for starting work after `begin`.
 2. **Ask the owner** when a decision is theirs: channel choice, scope call,
    budget, anything irreversible. Question rules (same as creation):
    - exactly ONE question per message;
