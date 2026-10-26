@@ -45,6 +45,7 @@ function isUnexpectedRuntimeExitError(error: unknown): boolean {
 import type { DshKernelOptions } from './dshKernel/dshKernel'
 import { dshModelReasoningDeclaration } from './dshModelReasoning'
 import { currentClientTimeZone } from './dshKernel/clientTimeZone'
+import type { DshWebToolsProxyDescriptor } from '../services/dshWebToolsProxy'
 import type {
   DshApprovalAsk,
   DshHostToolImagePayload,
@@ -106,8 +107,10 @@ function automationSlotFlagsOf(state: DshAutomationSlotState): DshAutomationSlot
   return { browser: state.browserUse !== undefined, computer: state.computerUse }
 }
 
-/** Env var carrying the DeepSeek key for the runtime's web-search provider. */
-const DSH_WEBSEARCH_API_KEY_ENV = 'IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'
+/** Env var carrying the loopback token for the host web-tools proxy that every
+ *  runtime's web-search provider talks to (see services/dshWebToolsProxy). The
+ *  user's DeepSeek key never rides a runtime env: the proxy holds the ladder. */
+export const DSH_WEBSEARCH_TOKEN_ENV = 'IDBOTS_DSH_WEBSEARCH_TOKEN'
 /** Model serving the auxiliary search call (cheap + fast; search quality is
  *  provider-side, the model only formats the query — official DSH default). */
 const DSH_WEBSEARCH_MODEL = 'deepseek-flash'
@@ -156,24 +159,6 @@ export function isNativeDeepSeekChatRoute(
   return route.provider === 'deepseek'
     && route.apiFormat !== 'anthropic'
     && hostnameOf(String(route.baseUrl ?? '')) === 'api.deepseek.com'
-}
-
-/**
- * Normalize any DeepSeek provider base URL onto the Anthropic-compatible root
- * the web-search provider expects (`/messages` is appended by the package):
- * `https://api.deepseek.com` / `.../v1` / `.../anthropic` / `.../responses`-style
- * bases all resolve to `<root>/anthropic/v1`.
- */
-export function deepSeekWebSearchBaseURL(baseUrl: string): string {
-  let base = baseUrl.trim().replace(/\/+$/, '')
-  base = base.replace(/\/responses$/, '')
-  if (/\/anthropic\/v\d+$/.test(base)) return base
-  if (/\/anthropic$/.test(base)) return `${base}/v1`
-  // A chat-completions-style `.../v1` base (the common OpenAI-format DeepSeek
-  // config) must collapse to the host root first — the Anthropic-compatible
-  // endpoint is NOT nested under it, so `/v1/anthropic/v1/messages` 404s.
-  base = base.replace(/\/v\d+$/, '')
-  return `${base}/anthropic/v1`
 }
 
 export interface DshTurnCallbacks {
@@ -369,6 +354,12 @@ export interface DshHubOptions {
    *  runtime); those values are written to a DSH_SESSION_ID-keyed env file
    *  that bash sources via BASH_ENV after the KEY/TOKEN scrub. */
   skillHostEnvProvider?: () => Record<string, string>
+  /** The host web-tools proxy every slot mounts its web-search block against
+   *  (services/dshWebToolsProxy: user DeepSeek first, IDBots-Free relay
+   *  fallback). Re-read on every config build; null (proxy not running)
+   *  mounts no web seam and logs one notice per hub. The descriptor is
+   *  constant for the app run, so the block never flaps a slot. */
+  webToolsProxy?: () => DshWebToolsProxyDescriptor | null
   /** Close a slot's runtime after this long with no in-flight turns
    *  (default 30min; 0 disables; tests shrink it). Next turn on that slot
    *  cold-starts and resumes sessions from disk. Also sweeps drained
@@ -392,7 +383,8 @@ export interface DshHubOptions {
  *  channels as Claude subprocesses. */
 export function buildDshChildEnv(parts: {
   routeApiKeys: Iterable<{ envName: string; apiKey: string }>
-  webSearchApiKey?: string
+  /** Loopback token for the host web-tools proxy (never a provider key). */
+  webSearchToken?: string
   rpcToken: string
   rpcAuthFile: string
   skillHostEnv?: Record<string, string>
@@ -405,7 +397,7 @@ export function buildDshChildEnv(parts: {
     ...Object.fromEntries(
       [...parts.routeApiKeys].map(({ envName, apiKey }) => [envName, apiKey])
     ),
-    ...(parts.webSearchApiKey ? { [DSH_WEBSEARCH_API_KEY_ENV]: parts.webSearchApiKey } : {}),
+    ...(parts.webSearchToken ? { [DSH_WEBSEARCH_TOKEN_ENV]: parts.webSearchToken } : {}),
     IDBOTS_RPC_TOKEN: parts.rpcToken,
     [METAID_RPC_AUTHFILE_ENV]: parts.rpcAuthFile,
     // 0.1.7: pin the kernel home under userData so the DeepSeek Files-API
@@ -493,22 +485,6 @@ interface DshRuntimeSlot {
   workspaceSeen: DshRuntimeConfigInput['workspace']
   providersSeen: Map<string, DshProviderRoute>
   routeApiKeys: Map<string, { envName: string; apiKey: string }>
-  /** DeepSeek server-side web search mount state for THIS slot: set once the
-   *  slot's own provider union contains an official DeepSeek route with an
-   *  API key. Per-slot by design (fix/websearch-provider-gating): the search
-   *  endpoint is DeepSeek-account-bound, so a slot whose provider is not
-   *  DeepSeek must not mount the trio — the pre-fix hub-level stickiness
-   *  mounted it into every runtime after ANY DeepSeek route was seen, and an
-   *  out-of-balance DeepSeek account then turned every model web_search call
-   *  into an HTTP 402. Slot-level state is also what keeps the block stable
-   *  from each slot's boot #1: rememberTurnInputs sets it before the first
-   *  buildRuntimeConfig, and no other slot's config ever changes because of
-   *  it — so the 2026-10-16 successor-boot storm (a hub-global flag flipping
-   *  ON mid-flight and restarting every older slot) cannot recur, which is
-   *  why the construction-time webSearchSeed that used to guard it is gone. */
-  webSearchSeen: { apiKey: string; baseURL: string } | null
-  /** Guard for the one-time provider-gate notice (see buildRuntimeConfig). */
-  webSearchGateNoticeSent: boolean
   mcpServersSeen: Map<string, DshMcpServerDefinition>
   /** The slot key already encodes this combo, so every turn landing here
    *  carries the same values — these simply record them for config rebuilds
@@ -575,6 +551,8 @@ export class DshTurnHub {
   /** Set the moment close() begins: turns submitted afterwards fail soft
    *  (DshShutdownError) instead of booting orphan runtimes during shutdown. */
   private closed = false
+  /** One notice per hub when the web-tools proxy is absent (see buildRuntimeConfig). */
+  private webToolsGateNoticeSent = false
   /** Hub-wide FIFO for process spawns (2026-10-16 boot-storm fix): app start
    *  plus webSearch/MCP config flaps used to boot 4-6 Electron-as-node
    *  runtimes (each ~250 plugins) CONCURRENTLY, starving the main process
@@ -1481,8 +1459,6 @@ export class DshTurnHub {
       workspaceSeen: undefined,
       providersSeen: new Map(),
       routeApiKeys: new Map(),
-      webSearchSeen: null,
-      webSearchGateNoticeSent: false,
       mcpServersSeen: new Map(),
       browserUseSeen: undefined,
       computerUseSeen: false,
@@ -1612,23 +1588,22 @@ export class DshTurnHub {
         slot.computerUseSeen = true
       }
     }
-    if (isOfficialDeepSeekRoute(input.provider) && input.provider.apiKey) {
-      slot.webSearchSeen = {
-        apiKey: input.provider.apiKey,
-        baseURL: deepSeekWebSearchBaseURL(input.provider.baseUrl),
-      }
-    }
     if (options?.pinWorkspace !== false && !slot.workspaceSeen && input.workspace) {
       slot.workspaceSeen = input.workspace
     }
   }
 
   private buildRuntimeConfig(slot: DshRuntimeSlot, input: DshTurnInput): DshRuntimeConfigInput {
-    if (!slot.webSearchSeen && !slot.webSearchGateNoticeSent) {
-      slot.webSearchGateNoticeSent = true
-      this.opts.log?.('info', 'dshTurnHub.webSearchProviderGated', {
+    // Every slot mounts the same web seam: the host web-tools proxy, which
+    // owns the credential ladder (user DeepSeek first, IDBots-Free relay when
+    // that key is missing or out of quota). The descriptor is constant for
+    // the app run, so this block never changes a slot's config after boot #1.
+    const webTools = this.opts.webToolsProxy?.() ?? null
+    if (!webTools && !this.webToolsGateNoticeSent) {
+      this.webToolsGateNoticeSent = true
+      this.opts.log?.('info', 'dshTurnHub.webSearchProxyUnavailable', {
         runtime: slot.key,
-        detail: 'built-in web_search not mounted: the search endpoint is DeepSeek-account-bound and this provider slot has no official DeepSeek route; use the browser-search skill (SKILLs/web-search) if web search is needed',
+        detail: 'built-in web_search not mounted: the host web-tools proxy is not running; use the browser-search skill (SKILLs/web-search) if web search is needed',
       })
     }
     return {
@@ -1647,10 +1622,10 @@ export class DshTurnHub {
       mcpServers: [...slot.mcpServersSeen.values()],
       ...(slot.browserUseSeen !== undefined ? { browserUse: slot.browserUseSeen } : {}),
       ...(slot.computerUseSeen ? { computerUse: true } : {}),
-      ...(slot.webSearchSeen ? {
+      ...(webTools ? {
         webSearch: {
-          apiKeyEnv: DSH_WEBSEARCH_API_KEY_ENV,
-          baseURL: slot.webSearchSeen.baseURL,
+          apiKeyEnv: DSH_WEBSEARCH_TOKEN_ENV,
+          baseURL: webTools.baseURL,
           model: DSH_WEBSEARCH_MODEL,
         },
       } : {}),
@@ -1662,7 +1637,7 @@ export class DshTurnHub {
       extraEntries: [...(this.opts.extraEntries ?? []), ...(this.opts.extraEntriesProvider?.() ?? [])],
       env: buildDshChildEnv({
         routeApiKeys: slot.routeApiKeys.values(),
-        webSearchApiKey: slot.webSearchSeen?.apiKey,
+        webSearchToken: webTools?.token,
         rpcToken: getMetaidRpcToken(),
         rpcAuthFile: getMetaidRpcTokenFilePath(app.getPath('userData')),
         skillHostEnv: this.opts.skillHostEnvProvider?.(),
