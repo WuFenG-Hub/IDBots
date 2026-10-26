@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { performResync } from '../src/mobile/app/hooks/useResync.ts';
-import { mergeResyncedMessages } from '../src/mobile/app/hooks/useChat.ts';
-import type { ChatMessageView } from '../src/mobile/app/hooks/useChat.ts';
+import { mergeCoworkSnapshotMessages } from '../src/renderer/services/coworkSessionState.ts';
+import type { CoworkMessage } from '../src/renderer/types/cowork.ts';
 
 /**
  * REQ-E-5 reconnect resync: on every (re)connect the shell re-pulls hot state
@@ -42,6 +42,7 @@ function makeFakeElectron(options: { failGetSession?: boolean } = {}) {
           session: {
             id: sessionId,
             title: 'Demo',
+            status: 'running',
             messages: [
               { id: 'm-1', type: 'user', content: 'hello', timestamp: 1 },
               { id: 'm-2', type: 'assistant', content: 'hi there', timestamp: 2 },
@@ -113,39 +114,39 @@ test('performResync skips the session and stream pulls when nothing is open', as
   assert.equal(snapshot.liveContent, null);
 });
 
-test('mergeResyncedMessages dedupes by message id and drops the landed offline send', () => {
-  const existing: ChatMessageView[] = [
-    { id: 'local-1', role: 'user', text: 'hello', streaming: false },
-    { id: 'm-2', role: 'assistant', text: 'partial', streaming: true },
-  ];
-  // The server persisted the offline send under its own id: the local
-  // 'local-1' row is a content duplicate and must not survive the merge.
-  const detail: ChatMessageView[] = [
-    { id: 'm-1', role: 'user', text: 'hello', streaming: false },
-    { id: 'm-2', role: 'assistant', text: 'hi there', streaming: false },
-  ];
-  const merged = mergeResyncedMessages(existing, detail);
+function raw(id: string, type: CoworkMessage['type'], content: string, metadata?: CoworkMessage['metadata']): CoworkMessage {
+  return { id, type, content, timestamp: 1, ...(metadata ? { metadata } : {}) };
+}
 
-  const userMessages = merged.filter((message) => message.role === 'user');
-  assert.equal(userMessages.length, 1, 'exactly one copy of the user message survives');
-  assert.equal(userMessages[0].id, 'm-1');
-  const assistant = merged.find((message) => message.id === 'm-2');
-  assert.equal(assistant?.text, 'hi there', 'the fresh detail text wins');
-  assert.equal(assistant?.streaming, true, 'the event-driven streaming flag is preserved');
+test('snapshot merge uses stable ids and never text equality for optimistic sends', () => {
+  const merged = mergeCoworkSnapshotMessages(
+    [
+      raw('local-1', 'user', 'hello'),
+      raw('m-2', 'assistant', 'partial', { isStreaming: true }),
+    ],
+    [
+      raw('m-1', 'user', 'hello'),
+      raw('m-2', 'assistant', 'hi there', { isStreaming: true }),
+    ],
+    { 'm-2': 1 },
+    { baseMessageRevisions: { 'm-2': 1 } },
+  );
+
+  assert.deepEqual(merged.map((entry) => entry.id), ['m-1', 'm-2', 'local-1']);
+  assert.equal(merged.filter((entry) => entry.type === 'user').length, 2);
+  assert.equal(merged.find((entry) => entry.id === 'm-2')?.content, 'hi there');
 });
 
-test('mergeResyncedMessages keeps unacked local messages and rows the detail dropped', () => {
-  const existing: ChatMessageView[] = [
-    { id: 'm-0', role: 'assistant', text: 'older', streaming: false },
-    { id: 'local-2', role: 'user', text: 'offline question', streaming: false },
-  ];
-  const detail: ChatMessageView[] = [
-    { id: 'm-1', role: 'user', text: 'hello', streaming: false },
-  ];
-  const merged = mergeResyncedMessages(existing, detail);
-  const ids = merged.map((message) => message.id);
-  assert.ok(ids.includes('local-2'), 'a local message the server never saw stays');
-  assert.ok(ids.includes('m-0'), 'an existing row the trimmed detail lost stays');
-  assert.ok(ids.includes('m-1'), 'new server rows are appended');
-  assert.equal(new Set(ids).size, ids.length, 'no duplicate ids');
+test('snapshot merge keeps unacked local sends without retaining stale non-local rows', () => {
+  const merged = mergeCoworkSnapshotMessages(
+    [
+      raw('m-0', 'assistant', 'older'),
+      raw('local-2', 'user', 'offline question'),
+    ],
+    [raw('m-1', 'user', 'hello')],
+  );
+  const ids = merged.map((entry) => entry.id);
+  assert.deepEqual(ids, ['m-1', 'local-2']);
+  assert.ok(!ids.includes('m-0'));
+  assert.equal(new Set(ids).size, ids.length);
 });

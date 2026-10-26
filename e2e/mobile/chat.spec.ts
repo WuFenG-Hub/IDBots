@@ -33,21 +33,19 @@ test.describe('chat', () => {
     await attachScreen(testInfo, page, 'chat-stopped');
   });
 
-  test('permission request surfaces, approves, and completes the turn', async ({ page }, testInfo) => {
+  test('permission request surfaces, answers, and completes the turn', async ({ page }, testInfo) => {
     await page.goto('/app/');
     await sendMessage(page, 'please run the permission demo');
 
-    await expect(page.getByText('Tool permission requested')).toBeVisible();
-    await expect(page.getByText('Tool: write_file')).toBeVisible();
+    const dialog = page.getByRole('dialog', { name: 'Tool permission requested' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText(/write_file/).first()).toBeVisible();
     await attachScreen(testInfo, page, 'chat-permission-sheet');
 
-    await page.getByRole('button', { name: 'Approve' }).click();
-    await expect(page.getByText('Approved', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Allow once' }).click();
+    await expect(dialog).toHaveCount(0);
     await expect(page.getByText('the write completed')).toBeVisible({ timeout: 30_000 });
-
-    // The tool-call summary records the approved call.
-    await expect(page.getByTestId('tool-call-list')).toContainText('Tool call: write_file');
-    await expect(page.getByTestId('tool-call-list')).toContainText('approved');
+    await expect(page.getByTestId('tool-call-list')).toHaveCount(0);
     await attachScreen(testInfo, page, 'chat-permission-approved');
   });
 

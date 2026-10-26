@@ -2,10 +2,10 @@ import { test, expect } from './fixtures';
 
 const isGatewayRun = Boolean(process.env.E2E_GATEWAY);
 
-test.describe('WP0 gateway defect reproductions', () => {
+test.describe('WP1 gateway regressions', () => {
   test.skip(!isGatewayRun, 'requires the real gateway harness');
 
-  test.fail('WP0 repro: running session is restored after full reload @gateway', async ({ page }) => {
+  test('running session is restored after full reload @gateway', async ({ page }) => {
     await page.goto('/app/');
     await page.getByPlaceholder('Type a message…').fill('restore this running session');
     await page.getByRole('button', { name: 'Send' }).click();

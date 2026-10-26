@@ -41,6 +41,7 @@ import type {
   MetabotCreateInput,
   MetabotUpdateInput,
   MobileMockBridge,
+  MobileMockCoworkStreamChannel,
   MockBridgeOptions,
   MockBundleOrder,
   MockElectronAPI,
@@ -1349,6 +1350,9 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     },
     getConnectionState: () => connectionState,
     getOpenedUrls: () => [...openedUrls],
+    emitCoworkStream: (channel: MobileMockCoworkStreamChannel, payload: unknown) => {
+      emitter.emit(`cowork:stream:${channel}`, payload);
+    },
   };
 
   return {

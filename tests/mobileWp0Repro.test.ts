@@ -1,50 +1,40 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
-import { mergeResyncedMessages } from '../src/mobile/app/hooks/useChat';
+import { mergeCoworkSnapshotMessages } from '../src/renderer/services/coworkSessionState';
 import { performResync } from '../src/mobile/app/hooks/useResync';
-import type { ChatMessageView } from '../src/mobile/app/hooks/useChat';
+import type { CoworkMessage } from '../src/renderer/types/cowork';
 
-function expectWp0Defect(name: string, verify: () => void | Promise<void>): void {
-  it(name, async () => {
-    let caught: unknown = null;
-    try {
-      await verify();
-    } catch (error) {
-      caught = error;
-      console.info(`WP0 defect reproduced: ${name}: ${String(error)}`);
-    }
-    if (!caught) {
-      assert.fail(`WP0 defect no longer reproduces: ${name}. Convert this expected-defect test into a normal regression test.`);
-    }
-  });
+function message(id: string, type: CoworkMessage['type'], text: string): CoworkMessage {
+  return { id, type, content: text, timestamp: 1 };
 }
 
-function assistant(id: string, text: string): ChatMessageView {
-  return { id, role: 'assistant', text, streaming: false };
-}
-
-expectWp0Defect('stale resync snapshot must not overwrite newer streamed text', () => {
-  const merged = mergeResyncedMessages([assistant('m1', 'newer text')], [assistant('m1', 'older text')]);
-  assert.equal(merged[0]?.text, 'newer text');
-});
-
-expectWp0Defect('identical text alone must not dedupe an optimistic send', () => {
-  const merged = mergeResyncedMessages(
-    [{ id: 'local-new', role: 'user', text: 'repeat', streaming: false }],
-    [{ id: 'server-old', role: 'user', text: 'repeat', streaming: false }],
+it('stale resync snapshot must not overwrite newer streamed text', () => {
+  const merged = mergeCoworkSnapshotMessages(
+    [message('m1', 'assistant', 'newer text')],
+    [message('m1', 'assistant', 'older text')],
+    { m1: 2 },
+    { baseMessageRevisions: { m1: 1 } },
   );
-  assert.ok(merged.some((message) => message.id === 'local-new'));
+  assert.equal(merged[0]?.content, 'newer text');
 });
 
-expectWp0Defect('unacknowledged optimistic sends stay after server history in display order', () => {
-  const merged = mergeResyncedMessages(
-    [{ id: 'local-new', role: 'user', text: 'new', streaming: false }],
-    [{ id: 'server-old', role: 'assistant', text: 'old', streaming: false }],
+it('identical text alone must not dedupe an optimistic send', () => {
+  const merged = mergeCoworkSnapshotMessages(
+    [message('local-new', 'user', 'repeat')],
+    [message('server-old', 'user', 'repeat')],
   );
-  assert.deepEqual(merged.map((message) => message.id), ['server-old', 'local-new']);
+  assert.ok(merged.some((entry) => entry.id === 'local-new'));
 });
 
-expectWp0Defect('resync derives active stream from the running session, not a local streaming flag', async () => {
+it('unacknowledged optimistic sends stay after server history in display order', () => {
+  const merged = mergeCoworkSnapshotMessages(
+    [message('local-new', 'user', 'new')],
+    [message('server-old', 'assistant', 'old')],
+  );
+  assert.deepEqual(merged.map((entry) => entry.id), ['server-old', 'local-new']);
+});
+
+it('resync derives active stream from the running session, not a local streaming flag', async () => {
   const liveCalls: string[] = [];
   const electron = {
     cowork: {

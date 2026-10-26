@@ -90,6 +90,53 @@ const FIXTURE_REPLY =
     ? `\n\n文件已生成：[${FIXTURE_FILE_NAME}](file://${path.join(paths.workspaceRoot, FIXTURE_FILE_NAME)})\n\n[工作目录](${paths.workspaceRoot})`
     : '');
 
+const metabots = [
+  {
+    id: 1,
+    wallet_id: 1,
+    name: 'Gateway Twin',
+    avatar: null,
+    enabled: true,
+    globalmetaid: 'gmid-gateway-twin',
+    metabot_type: 'twin',
+    role: 'chief of staff',
+    soul: 'Synthetic gateway twin',
+    goal: null,
+    bio: 'Twin fixture for real C2 mobile tests',
+    background: null,
+    boss_id: null,
+    boss_global_metaid: null,
+    llm_id: null,
+    tools: [],
+    skills: ['web-search'],
+    allow_chat_skills: [],
+    created_at: 1,
+    updated_at: 1,
+  },
+  {
+    id: 2,
+    wallet_id: 2,
+    name: 'Gateway Worker',
+    avatar: null,
+    enabled: true,
+    globalmetaid: 'gmid-gateway-worker',
+    metabot_type: 'worker',
+    role: 'research worker',
+    soul: 'Synthetic gateway worker',
+    goal: null,
+    bio: 'Worker fixture for real C2 mobile tests',
+    background: null,
+    boss_id: null,
+    boss_global_metaid: null,
+    llm_id: null,
+    tools: [],
+    skills: [],
+    allow_chat_skills: [],
+    created_at: 1,
+    updated_at: 1,
+  },
+];
+
 const sessions = new Map();
 const liveMessages = new Map(); // `${sessionId}${messageId}` -> message
 const sessionTimers = new Map(); // sessionId -> timer handles
@@ -206,9 +253,16 @@ async function invokeHandler(channel, clientId, args) {
       const input = args[0] ?? {};
       const session = sessions.get(input.sessionId);
       if (!session) return { success: false, code: 'session_not_found', error: 'session not found' };
-      session.messages.push({ id: `gw-msg-${++messageSeq}`, type: 'user', content: input.text || '', timestamp: Date.now() });
+      const message = {
+        id: `gw-msg-${++messageSeq}`,
+        type: 'user',
+        content: input.text || '',
+        timestamp: Date.now(),
+        metadata: { submissionId: input.submissionId },
+      };
+      session.messages.push(message);
       startFixtureTurn(session, input.text || '');
-      return { success: true, mode: 'steer' };
+      return { success: true, mode: 'steer', message };
     }
     case 'cowork:session:get': {
       const session = sessions.get(args[0]);
@@ -269,7 +323,27 @@ async function invokeHandler(channel, clientId, args) {
     case 'app:getSystemLocale':
       return 'en-US';
     case 'metabot:list':
-      return { success: true, list: [] };
+      return { success: true, list: metabots.map((bot) => ({ ...bot })) };
+    case 'metabot:get': {
+      const bot = metabots.find((entry) => entry.id === args[0]);
+      return bot ? { success: true, metabot: { ...bot } } : { success: false, error: 'metabot not found' };
+    }
+    case 'cowork:getConfig':
+      return {
+        success: true,
+        config: {
+          workingDirectory: paths.workspaceRoot,
+          systemPrompt: '',
+          executionMode: 'local',
+          memoryEnabled: true,
+          memoryImplicitUpdateEnabled: true,
+          memoryLlmJudgeEnabled: false,
+          memoryGuardLevel: 'standard',
+          memoryUserMemoriesMaxItems: 100,
+          memoryPromptMaxChars: 4000,
+          lastWorkspaceSelection: null,
+        },
+      };
     case 'startup:rendererInitialized':
       return { success: true, elapsedMs: 0, startedAt: Date.now() };
     default:

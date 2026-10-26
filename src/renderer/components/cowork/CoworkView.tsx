@@ -6,6 +6,7 @@ import { clearCurrentSession, setCurrentSession, setStreaming, clearPreferredMet
 import { clearActiveSkills, setActiveSkillIds } from '../../store/slices/skillSlice';
 import { setActions, selectAction, clearSelection } from '../../store/slices/quickActionSlice';
 import { coworkService } from '../../services/cowork';
+import { resolveDefaultMetabotId } from '../../services/coworkSessionStart';
 import { configService } from '../../services/config';
 import { localStore } from '../../services/store';
 import { CONFIG_KEYS, type AppConfig, type ChatExperienceMode } from '../../config';
@@ -287,15 +288,8 @@ const CoworkView: React.FC<CoworkViewProps> = ({
 
   useEffect(() => {
     if (!metabotsLoaded) return;
-    if (metabots.length === 0) {
-      setSelectedMetabotId(null);
-      return;
-    }
-    if (selectedMetabotId != null && metabots.some((metabot) => metabot.id === selectedMetabotId)) {
-      return;
-    }
-    const twin = metabots.find((metabot) => metabot.metabot_type === 'twin');
-    setSelectedMetabotId(twin ? twin.id : metabots[0].id);
+    const resolvedId = resolveDefaultMetabotId(metabots, selectedMetabotId);
+    if (resolvedId !== selectedMetabotId) setSelectedMetabotId(resolvedId);
   }, [metabots, metabotsLoaded, selectedMetabotId, setSelectedMetabotId]);
 
   useEffect(() => {

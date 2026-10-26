@@ -1,37 +1,59 @@
 import { test, expect } from './fixtures';
 
 type Wp0Message = { id: string; type: string; content: string; timestamp: number; metadata?: Record<string, unknown> };
+type Wp0Window = Window & {
+  electron: { cowork: Record<string, (...args: unknown[]) => unknown> };
+  idbotsMobile: {
+    mock: {
+      emitCoworkStream: (
+        channel: 'message' | 'complete' | 'permission' | 'permissionResolved',
+        payload: unknown,
+      ) => void;
+    };
+  };
+  __wp0StartOptions: unknown[];
+  __wp0SessionId: string | null;
+};
 
 async function capture(page: import('@playwright/test').Page): Promise<void> {
   await page.evaluate(() => {
-    const w = window as unknown as {
-      electron: { cowork: Record<string, (...args: unknown[]) => unknown> };
-      __wp0StartOptions: unknown[];
-      __wp0Listeners: Record<string, (payload: unknown) => void>;
-    };
+    const w = window as unknown as Wp0Window;
     w.__wp0StartOptions = [];
-    w.__wp0Listeners = {};
+    w.__wp0SessionId = null;
     const cowork = w.electron.cowork;
     const originalStart = cowork.startSession;
     cowork.startSession = async (options: unknown) => {
       w.__wp0StartOptions.push(options);
-      return originalStart(options);
+      const result = await originalStart(options);
+      const session = (result as { session?: { id?: string } }).session;
+      if (session?.id) w.__wp0SessionId = session.id;
+      return result;
     };
-    for (const method of ['onStreamMessage', 'onStreamComplete', 'onStreamPermission', 'onStreamPermissionResolved']) {
-      const original = cowork[method];
-      cowork[method] = (callback: (payload: unknown) => void) => {
-        w.__wp0Listeners[method] = callback;
-        return original(callback);
-      };
-    }
   });
 }
 
-async function emit(page: import('@playwright/test').Page, method: string, payload: unknown): Promise<void> {
-  await page.evaluate(({ method: name, payload: data }) => {
-    const w = window as unknown as { __wp0Listeners: Record<string, (payload: unknown) => void> };
-    w.__wp0Listeners[name](data);
-  }, { method, payload });
+async function emit(
+  page: import('@playwright/test').Page,
+  method: 'onStreamMessage' | 'onStreamComplete' | 'onStreamPermission' | 'onStreamPermissionResolved',
+  payload: unknown,
+): Promise<void> {
+  const channels = {
+    onStreamMessage: 'message',
+    onStreamComplete: 'complete',
+    onStreamPermission: 'permission',
+    onStreamPermissionResolved: 'permissionResolved',
+  } as const;
+  const channel = channels[method];
+  await page.evaluate(({ channel: name, payload: data }) => {
+    const w = window as unknown as Wp0Window;
+    w.idbotsMobile.mock.emitCoworkStream(name, data);
+  }, { channel, payload });
+}
+
+async function currentSessionId(page: import('@playwright/test').Page): Promise<string> {
+  const id = await page.evaluate(() => (window as unknown as Wp0Window).__wp0SessionId);
+  if (!id) throw new Error('No started session captured');
+  return id;
 }
 
 async function sendMessage(page: import('@playwright/test').Page, text: string): Promise<void> {
@@ -43,18 +65,18 @@ function message(id: string, type: string, content: string, metadata?: Record<st
   return { id, type, content, timestamp: Date.now(), ...(metadata ? { metadata } : {}) };
 }
 
-test.fail('WP0 repro: first chat binds the actual Twin, not metabotId=null', async ({ page }) => {
+test('WP1 regression: first chat binds the actual Twin, not metabotId=null', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
   await sendMessage(page, 'bind my Twin');
   const options = await page.evaluate(() => {
-    const w = window as unknown as { __wp0StartOptions: Array<{ metabotId?: number | null }> };
-    return w.__wp0StartOptions[0];
+    const w = window as unknown as Wp0Window;
+    return w.__wp0StartOptions[0] as { metabotId?: number | null } | undefined;
   });
   expect(options?.metabotId).toBe(1);
 });
 
-test.fail('WP0 repro: another session cannot append into the open transcript', async ({ page }) => {
+test('WP1 regression: another session cannot append into the open transcript', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
   await emit(page, 'onStreamMessage', {
@@ -64,7 +86,7 @@ test.fail('WP0 repro: another session cannot append into the open transcript', a
   await expect(page.getByText('BACKGROUND_MUST_NOT_APPEAR')).toHaveCount(0, { timeout: 1200 });
 });
 
-test.fail('WP0 repro: another session cannot complete the visible turn', async ({ page }) => {
+test('WP1 regression: another session cannot complete the visible turn', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
   await sendMessage(page, 'keep this turn running');
@@ -73,7 +95,7 @@ test.fail('WP0 repro: another session cannot complete the visible turn', async (
   await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible({ timeout: 1200 });
 });
 
-test.fail('WP0 repro: another session cannot raise a permission sheet', async ({ page }) => {
+test('WP1 regression: another session cannot raise a permission sheet', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
   await emit(page, 'onStreamPermission', {
@@ -88,50 +110,59 @@ test.fail('WP0 repro: another session cannot raise a permission sheet', async ({
   await expect(page.getByText('Tool permission requested')).toHaveCount(0, { timeout: 1200 });
 });
 
-test.fail('WP0 repro: unknown remote resolution is not displayed as approval', async ({ page }) => {
+test('WP1 regression: unknown remote resolution is not displayed as approval', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
+  await sendMessage(page, 'start the permission session');
+  const sessionId = await currentSessionId(page);
   await emit(page, 'onStreamPermission', {
-    sessionId: 'current-session',
+    sessionId,
     request: {
-      sessionId: 'current-session',
+      sessionId,
       requestId: 'remote-resolution',
       toolName: 'write_file',
       toolInput: { path: '/data/workspace/result.txt' },
     },
   });
   await expect(page.getByText('Tool permission requested')).toBeVisible();
-  await emit(page, 'onStreamPermissionResolved', { sessionId: 'current-session', requestId: 'remote-resolution' });
+  await emit(page, 'onStreamPermissionResolved', { sessionId, requestId: 'remote-resolution' });
   await expect(page.getByText('Approved', { exact: true })).toHaveCount(0, { timeout: 1200 });
+  await expect(page.getByText('Tool permission requested')).toHaveCount(0, { timeout: 1200 });
 });
 
-test.fail('WP0 repro: tool_use is not rendered as an ordinary Assistant answer', async ({ page }) => {
+test('WP1 regression: tool_use is not rendered as an ordinary Assistant answer', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
+  await sendMessage(page, 'start the tool session');
+  const sessionId = await currentSessionId(page);
   await emit(page, 'onStreamMessage', {
-    sessionId: 'current-session',
+    sessionId,
     message: message('tool-1', 'tool_use', 'RAW_TOOL_EVENT', { toolName: 'bash', toolUseId: 'tool-1' }),
   });
   await expect(page.getByText('RAW_TOOL_EVENT')).toHaveCount(0, { timeout: 1200 });
 });
 
-test.fail('WP0 repro: raw thinking is not rendered as an ordinary Assistant answer', async ({ page }) => {
+test('WP1 regression: raw thinking is not rendered as an ordinary Assistant answer', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
+  await sendMessage(page, 'start the thinking session');
+  const sessionId = await currentSessionId(page);
   await emit(page, 'onStreamMessage', {
-    sessionId: 'current-session',
+    sessionId,
     message: message('thinking-1', 'assistant', 'RAW_THINKING', { isThinking: true }),
   });
   await expect(page.getByText('RAW_THINKING')).toHaveCount(0, { timeout: 1200 });
 });
 
-test.fail('WP0 repro: AskUserQuestion renders real options, not only JSON allow/deny', async ({ page }) => {
+test('WP1 regression: AskUserQuestion renders real options, not only JSON allow/deny', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
+  await sendMessage(page, 'start the clarification session');
+  const sessionId = await currentSessionId(page);
   await emit(page, 'onStreamPermission', {
-    sessionId: 'current-session',
+    sessionId,
     request: {
-      sessionId: 'current-session',
+      sessionId,
       requestId: 'question-1',
       toolName: 'AskUserQuestion',
       toolInput: {
@@ -149,17 +180,18 @@ test.fail('WP0 repro: AskUserQuestion renders real options, not only JSON allow/
       },
     },
   });
-  await expect(page.getByRole('radio', { name: 'Use plan A' })).toHaveCount(0, { timeout: 1200 });
+  await expect(page.getByRole('radio', { name: /Use plan A/ })).toBeVisible({ timeout: 1200 });
 });
 
-test.fail('WP0 repro: start failure has a visible recovery state', async ({ page }) => {
+test('WP1 regression: start failure has a visible recovery state', async ({ page }) => {
   await page.goto('/app/');
   await page.evaluate(() => {
-    const w = window as unknown as { electron: { cowork: Record<string, (...args: unknown[]) => unknown> } };
+    const w = window as unknown as Wp0Window;
     w.electron.cowork.startSession = async () => {
       throw new Error('WP0_START_FAILED');
     };
   });
   await sendMessage(page, 'trigger a start failure');
   await expect(page.getByText(/WP0_START_FAILED/)).toBeVisible({ timeout: 1200 });
+  await expect(page.getByTestId('chat-action-status')).toBeVisible();
 });

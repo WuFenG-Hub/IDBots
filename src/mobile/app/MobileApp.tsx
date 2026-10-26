@@ -38,14 +38,18 @@ export default function MobileApp(): JSX.Element {
   const [tab, setTab] = useState<MobileTab>('chat');
   const [rechargeOpen, setRechargeOpen] = useState(false);
   // Chat state lives at the shell level so switching tabs keeps the stream.
-  const chat = useChat();
-  const { bots } = useMetabots();
+  const { bots, error: botsError, reload: reloadBots } = useMetabots();
+  const chat = useChat(bots);
   // Terminal gateway states (REQ-E-2 close codes) replace the whole shell.
   const { terminal, versionMismatch } = useTerminalBridgeState();
   // Reconnect resync (REQ-E-5): refresh on every (re)connect, whichever
   // bridge is active; the counter drives the tasks/meters/me list refresh.
   const resyncCounter = useResync(
-    { getOpenSessionId: chat.getOpenSessionId, getStreamingMessage: chat.getStreamingMessage },
+    {
+      getOpenSessionId: chat.getOpenSessionId,
+      getStreamingMessage: chat.getStreamingMessage,
+      beginResync: chat.beginResync,
+    },
     chat.applyResync,
   );
 
@@ -83,7 +87,13 @@ export default function MobileApp(): JSX.Element {
       <div className="flex min-h-0 flex-1 flex-col">
         {tab === 'chat' ? (
           <Suspense fallback={<TabFallback />}>
-            <ChatScreen chat={chat} bots={bots} onOpenRecharge={() => setRechargeOpen(true)} />
+            <ChatScreen
+              chat={chat}
+              bots={bots}
+              botsError={botsError}
+              onReloadBots={() => void reloadBots()}
+              onOpenRecharge={() => setRechargeOpen(true)}
+            />
           </Suspense>
         ) : null}
         {tab === 'tasks' ? (
