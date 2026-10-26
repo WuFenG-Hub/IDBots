@@ -20,6 +20,15 @@ import {
   CoworkStreamReassembler,
   type CoworkStreamUpdatePayload,
 } from './coworkStreamReassembly';
+import {
+  composeCoworkSubmitPrompt,
+  submitCoworkComposerDraft,
+} from '../components/cowork/coworkComposerAttachments';
+import {
+  CoworkSessionDraftStore,
+  type CoworkSessionDraft,
+  type MobileChatAttachment,
+} from './coworkSessionDrafts';
 
 export const MOBILE_OPEN_SESSION_STORAGE_KEY = 'idbots.mobile.openSessionId.v1';
 export const MOBILE_DRAFTS_STORAGE_KEY = 'idbots.mobile.sessionDrafts.v1';
@@ -62,6 +71,9 @@ export interface CoworkSubmissionAttempt {
   kind: 'start' | 'submit';
   sessionId: string | null;
   text: string;
+  draftToken: string;
+  draftText: string;
+  draftAttachments: MobileChatAttachment[];
   status: CoworkSubmissionStatus;
   error: string | null;
   createdAt: number;
@@ -86,7 +98,7 @@ export interface CoworkSessionControllerSnapshot {
   sessions: CoworkSessionSummary[];
   currentSessionId: string | null;
   attempts: CoworkSubmissionAttempt[];
-  drafts: Readonly<Record<string, string>>;
+  drafts: Readonly<Record<string, CoworkSessionDraft>>;
   actionErrors: Readonly<Record<string, string>>;
   streamErrors: Readonly<Record<string, CoworkStreamErrorState>>;
   respondingPermissionIds: ReadonlySet<string>;
@@ -124,7 +136,7 @@ export class CoworkSessionController {
   private sessions: CoworkSessionSummary[] = [];
   private currentSessionId: string | null = null;
   private attempts: CoworkSubmissionAttempt[] = [];
-  private drafts: Record<string, string> = {};
+  private readonly draftStore: CoworkSessionDraftStore;
   private actionErrors: Record<string, string> = {};
   private streamErrors: Record<string, CoworkStreamErrorState> = {};
   private respondingPermissionIds = new Set<string>();
@@ -144,7 +156,11 @@ export class CoworkSessionController {
     this.storage = options.storage ?? null;
     this.now = options.now ?? Date.now;
     this.createSubmissionId = options.createSubmissionId ?? uuidv4;
-    this.drafts = this.readDrafts();
+    this.draftStore = new CoworkSessionDraftStore(
+      this.storage,
+      MOBILE_DRAFTS_STORAGE_KEY,
+      () => this.publish(),
+    );
     this.snapshot = this.makeSnapshot();
     this.attach();
   }
@@ -158,7 +174,19 @@ export class CoworkSessionController {
 
   getOpenSessionId = (): string | null => this.currentSessionId;
 
-  getDraft = (): string => this.drafts[this.currentSessionId ?? 'new'] ?? '';
+  getDraft = (): string => this.draftStore.getText(this.currentSessionId);
+
+  getDraftToken = (): string => this.draftStore.tokenForSession(this.currentSessionId);
+
+  getAttachments = (): MobileChatAttachment[] => this.draftStore.getAttachments(this.currentSessionId);
+
+  addAttachments(token: string, attachments: MobileChatAttachment[]): void {
+    this.draftStore.addAttachments(token, attachments);
+  }
+
+  removeAttachment(token: string, path: string): void {
+    this.draftStore.removeAttachment(token, path);
+  }
 
   getStreamingMessage = (): { sessionId: string; messageId: string } | null => {
     const state = this.currentSessionId ? this.states.get(this.currentSessionId) : null;
@@ -185,7 +213,7 @@ export class CoworkSessionController {
       sessions: this.sessions,
       currentSessionId: this.currentSessionId,
       attempts: this.attempts,
-      drafts: this.drafts,
+      drafts: this.draftStore.snapshot(),
       actionErrors: this.actionErrors,
       streamErrors: this.streamErrors,
       respondingPermissionIds: this.respondingPermissionIds,
@@ -202,27 +230,6 @@ export class CoworkSessionController {
     if (this.destroyed) return;
     this.snapshot = this.makeSnapshot();
     for (const listener of [...this.listeners]) listener();
-  }
-
-  private readDrafts(): Record<string, string> {
-    if (!this.storage) return {};
-    try {
-      const parsed: unknown = JSON.parse(this.storage.getItem(MOBILE_DRAFTS_STORAGE_KEY) ?? '{}');
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-      return Object.fromEntries(
-        Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
-      );
-    } catch {
-      return {};
-    }
-  }
-
-  private persistDrafts(): void {
-    try {
-      this.storage?.setItem(MOBILE_DRAFTS_STORAGE_KEY, JSON.stringify(this.drafts));
-    } catch {
-      return;
-    }
   }
 
   private persistOpenSession(): void {
@@ -245,17 +252,7 @@ export class CoworkSessionController {
   }
 
   setDraft(text: string): void {
-    const key = this.currentSessionId ?? 'new';
-    this.drafts = { ...this.drafts, [key]: text };
-    this.persistDrafts();
-    this.publish();
-  }
-
-  private clearDraftIfUnchanged(sessionId: string | null, text: string): void {
-    const key = sessionId ?? 'new';
-    if (this.drafts[key] !== text) return;
-    this.drafts = { ...this.drafts, [key]: '' };
-    this.persistDrafts();
+    this.draftStore.setText(this.currentSessionId, text);
   }
 
   private stateFor(sessionId: string): CoworkSessionEventState {
@@ -419,6 +416,7 @@ export class CoworkSessionController {
 
   newChat(): void {
     this.generation += 1;
+    this.draftStore.resetNew();
     this.currentSessionId = null;
     this.persistOpenSession();
     this.publish();
@@ -489,12 +487,7 @@ export class CoworkSessionController {
       if (this.currentSessionId === null && generation === this.generation) {
         this.generation += 1;
         this.currentSessionId = session.id;
-        if (this.drafts.new) {
-          const drafts = { ...this.drafts, [session.id]: this.drafts.new };
-          delete drafts.new;
-          this.drafts = drafts;
-          this.persistDrafts();
-        }
+        this.draftStore.migrateNew(session.id);
         this.persistOpenSession();
       }
       this.publish();
@@ -624,7 +617,7 @@ export class CoworkSessionController {
 
   private finishAttempt(attempt: CoworkSubmissionAttempt): void {
     this.attempts = this.attempts.filter((entry) => entry.submissionId !== attempt.submissionId);
-    this.clearDraftIfUnchanged(attempt.sessionId, attempt.text);
+    this.draftStore.clearIfUnchanged(attempt.draftToken, attempt.draftText, attempt.draftAttachments);
     this.publish();
   }
 
@@ -640,10 +633,18 @@ export class CoworkSessionController {
   async send(
     text: string,
     startOptions: Omit<CoworkStartOptions, 'prompt'>,
+    attachments: MobileChatAttachment[] = [],
+    inputFileLabel = 'Input file',
   ): Promise<CoworkActionResult> {
-    const trimmed = text.trim();
-    if (!trimmed) return { status: 'failed', error: 'Message is empty' };
     const sessionId = this.currentSessionId;
+    const draftToken = this.draftStore.tokenForSession(sessionId);
+    const draftAttachments = attachments.map((attachment) => ({ ...attachment }));
+    const composition = composeCoworkSubmitPrompt({
+      submittedValue: text,
+      attachments: draftAttachments,
+      inputFileLabel,
+    });
+    if (!composition.finalPrompt) return { status: 'failed', error: 'Message is empty' };
     if (this.attempts.some((attempt) => attempt.sessionId === sessionId && attempt.status === 'sending')) {
       return { status: 'failed', error: 'A message is already being sent', sessionId };
     }
@@ -651,7 +652,10 @@ export class CoworkSessionController {
       submissionId: this.createSubmissionId(),
       kind: sessionId ? 'submit' : 'start',
       sessionId,
-      text: trimmed,
+      text: composition.finalPrompt,
+      draftToken,
+      draftText: text,
+      draftAttachments,
       status: 'sending',
       error: null,
       createdAt: this.now(),
@@ -668,7 +672,20 @@ export class CoworkSessionController {
       this.streamErrors = remainingStreamErrors;
     }
     this.publish();
-    return sessionId ? this.submitAttempt(attempt) : this.startAttempt(attempt);
+    let outcome: CoworkActionResult | undefined;
+    try {
+      await submitCoworkComposerDraft({
+        draftField: this.draftStore.field(draftToken, 'text', text, { clearOnTake: false }),
+        attachmentField: this.draftStore.field(draftToken, 'attachments', draftAttachments, { clearOnTake: false }),
+        onSubmit: async () => {
+          outcome = sessionId ? await this.submitAttempt(attempt) : await this.startAttempt(attempt);
+          return outcome.status === 'accepted';
+        },
+      });
+    } catch (error) {
+      return this.failAttempt(attempt, 'uncertain', errorText(error, 'Connection lost while submitting'));
+    }
+    return outcome ?? this.failAttempt(attempt, 'failed', 'Submission did not complete');
   }
 
   private async submitAttempt(attempt: CoworkSubmissionAttempt): Promise<CoworkActionResult> {
@@ -700,7 +717,11 @@ export class CoworkSessionController {
       const result = await this.electron.cowork.startSession({
         ...(attempt.startOptions ?? {}),
         prompt: attempt.text,
-        title: attempt.startOptions?.title ?? attempt.text.split('\n')[0]!.slice(0, 50),
+        title: attempt.startOptions?.title ?? (
+          attempt.draftText.trim().split('\n')[0]!.slice(0, 50)
+          || attempt.draftAttachments[0]?.name.slice(0, 50)
+          || 'New chat'
+        ),
       });
       if (result?.success && result.session) {
         const session = result.session;
@@ -708,6 +729,7 @@ export class CoworkSessionController {
         if (this.currentSessionId === null && this.generation === generation) {
           this.generation += 1;
           this.currentSessionId = session.id;
+          this.draftStore.migrateNew(session.id);
           this.persistOpenSession();
         }
         this.finishAttempt(attempt);

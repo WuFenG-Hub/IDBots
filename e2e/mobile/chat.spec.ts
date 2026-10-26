@@ -65,4 +65,65 @@ test.describe('chat', () => {
     await page.getByRole('button', { name: 'Close' }).click();
     await expect(quotaCard).toBeVisible();
   });
+
+  test('multiple attachments survive reload and enter the final prompt in order', async ({ page }, testInfo) => {
+    await page.goto('/app/');
+    await page.getByRole('button', { name: 'Sessions' }).click();
+    await page.getByRole('button', { name: 'New chat' }).click();
+    await chooseFiles(page, [
+      { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('notes') },
+      { name: 'report.pdf', mimeType: 'application/pdf', buffer: Buffer.from('pdf') },
+    ]);
+    await expect(page.getByTestId('chat-attachment')).toHaveText(['notes.txt', 'report.pdf']);
+    await page.getByPlaceholder('Type a message…').fill('compare documents');
+    await page.reload();
+    await expect(page.getByTestId('chat-attachment')).toHaveText(['notes.txt', 'report.pdf']);
+    await expect(page.getByPlaceholder('Type a message…')).toHaveValue('compare documents');
+    await page.getByRole('button', { name: 'Send' }).click();
+    await expect(page.getByTestId('chat-user-message').last()).toHaveText(
+      'compare documents\n\nInput file: /data/workspace/uploads/mock-1-notes.txt\nInput file: /data/workspace/uploads/mock-2-report.pdf',
+    );
+    await expect(page.getByTestId('chat-attachments')).toHaveCount(0);
+    await attachScreen(testInfo, page, 'chat-attachments-submitted');
+  });
+
+  test('attachment-only follow-up can steer a running turn', async ({ page }) => {
+    await page.goto('/app/');
+    await sendMessage(page, 'start work');
+    await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
+    await chooseFiles(page, [{ name: 'follow-up.txt', mimeType: 'text/plain', buffer: Buffer.from('follow up') }]);
+    await expect(page.getByRole('button', { name: 'Send' })).toBeEnabled();
+    await page.getByRole('button', { name: 'Send' }).click();
+    await expect(page.getByTestId('chat-user-message').last()).toHaveText(
+      'Input file: /data/workspace/uploads/mock-1-follow-up.txt',
+    );
+  });
+
+  test('removed pending uploads stay removed and typed errors preserve the text draft', async ({ page }) => {
+    await page.goto('/app/');
+    await page.getByRole('button', { name: 'Sessions' }).click();
+    await page.getByRole('button', { name: 'New chat' }).click();
+    await page.getByPlaceholder('Type a message…').fill('keep this draft');
+    await chooseFiles(page, [{ name: 'fixture-slow.txt', mimeType: 'text/plain', buffer: Buffer.from('slow') }]);
+    const pending = page.locator('[data-testid="chat-upload"][data-upload-status="uploading"]');
+    await expect(pending).toHaveAttribute('data-upload-status', 'uploading');
+    await page.getByRole('button', { name: 'Remove pending upload fixture-slow.txt' }).click();
+    await expect(page.getByTestId('chat-upload')).toHaveCount(0);
+    await expect(page.getByTestId('chat-attachment')).toHaveCount(0);
+
+    await chooseFiles(page, [{ name: 'fixture-quota.txt', mimeType: 'text/plain', buffer: Buffer.from('quota') }]);
+    await expect(page.getByRole('alert')).toContainText('Cloud storage is full');
+    await expect(page.getByPlaceholder('Type a message…')).toHaveValue('keep this draft');
+    await expect(page.getByRole('button', { name: 'Send' })).toBeEnabled();
+  });
 });
+
+async function chooseFiles(
+  page: import('@playwright/test').Page,
+  files: Array<{ name: string; mimeType: string; buffer: Buffer }>,
+): Promise<void> {
+  const chooserPromise = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: 'Add photo or file' }).click();
+  const chooser = await chooserPromise;
+  await chooser.setFiles(files);
+}

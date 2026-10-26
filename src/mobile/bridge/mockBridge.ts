@@ -55,6 +55,8 @@ import type {
   ScheduledTaskMemoryAccess,
   ScheduledTaskRun,
 } from './types';
+import { selectFileOnPhone, type PhoneFileSelectionOptions } from './installShim';
+import { uploadFile, type UploadTransport } from './upload';
 
 const DEFAULT_STREAM_TOKEN_INTERVAL_MS = 40;
 const DEFAULT_ORDER_COMPLETE_DELAY_MS = 10_000;
@@ -97,6 +99,30 @@ export const MOCK_CANNED_REPLIES = {
 } as const;
 
 const MOCK_WORKSPACE = '/data/workspace';
+
+function createMockUploadTransport(): UploadTransport {
+  let uploadSequence = 0;
+  return {
+    async upload(request) {
+      const name = new URL(request.url, 'https://mock.invalid').searchParams.get('name') ?? 'file';
+      if (name.startsWith('fixture-quota')) return { status: 507, body: 'fixture quota exhausted' };
+      if (name.startsWith('fixture-network')) throw new Error('fixture network failure');
+      if (/\.(exe|dll|bat|sh)$/i.test(name)) return { status: 415, body: 'fixture blocked type' };
+      if (name.startsWith('fixture-slow')) await sleep(2_000);
+      request.onProgress?.(request.body.size, request.body.size);
+      const basename = name.split(/[\\/]/).pop()?.replace(/[\u0000-\u001F\u007F]/g, '').trim() || 'file';
+      uploadSequence += 1;
+      return {
+        status: 200,
+        body: JSON.stringify({
+          path: `${MOCK_WORKSPACE}/uploads/mock-${uploadSequence}-${basename}`,
+          size: request.body.size,
+          mime: request.body.type || 'application/octet-stream',
+        }),
+      };
+    },
+  };
+}
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -210,6 +236,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
   let destroyed = false;
   let connectionState: ConnectionState = 'online';
   const openedUrls: string[] = [];
+  const mockUploadTransport = createMockUploadTransport();
 
   /** Invokes made while "disconnected" reject with an offline error (REQ-E-2 semantics). */
   const guardOnline = <T>(fn: () => Promise<T>): Promise<T> =>
@@ -1174,9 +1201,13 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       onStateChanged: () => () => undefined,
     },
     dialog: {
-      // Desktop cancelled shapes: success with a null path (main.ts dialog handlers).
       selectDirectory: () => Promise.resolve({ success: true, path: null }),
-      selectFile: () => Promise.resolve({ success: true, path: null, paths: [] }),
+      selectFile: (options?: PhoneFileSelectionOptions) => selectFileOnPhone({
+        uploadFile: (file, uploadOptions) => uploadFile(file, {
+          ...uploadOptions,
+          fetchImpl: mockUploadTransport,
+        }),
+      }, options),
       saveInlineFile: () => Promise.resolve({ success: true, path: null }),
     },
     shell: {

@@ -40,7 +40,7 @@ async function startSession(page: import('@playwright/test').Page): Promise<stri
   });
   await page.getByRole('button', { name: 'Sessions' }).click();
   await page.getByRole('button', { name: 'New chat' }).click();
-  await page.getByPlaceholder('Type a message…').fill('start the permission test');
+  await page.getByPlaceholder('Type a message…').fill('start the clarification test');
   await page.getByRole('button', { name: 'Send' }).click();
   await page.waitForFunction(() => Boolean((window as unknown as PermissionWindow).__sessionId));
   return (await page.evaluate(() => (window as unknown as PermissionWindow).__sessionId))!;

@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Bars3Icon, PlusIcon, PaperAirplaneIcon, StopIcon } from '@heroicons/react/24/outline';
+import { Bars3Icon, PlusIcon, PaperAirplaneIcon, PaperClipIcon, StopIcon } from '@heroicons/react/24/outline';
 import MarkdownContent from '@/components/MarkdownContent';
 import CoworkPermissionPanel from '@/components/cowork/CoworkPermissionPanel';
+import { coworkAttachmentAdmission } from '@/components/cowork/coworkComposerAttachments';
+import ChatComposerAttachments from '../components/ChatComposerAttachments';
 import { t } from '../../i18n';
 import type { MockMetabot } from '../../bridge/types';
 import type { useChat } from '../hooks/useChat';
@@ -119,7 +121,7 @@ function MessageRow({ message }: { message: ChatMessageView }): JSX.Element {
   if (message.role === 'user') {
     return (
       <div className="mb-3 flex justify-end">
-        <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl bg-[var(--color-primary)] px-3.5 py-2.5 text-[15px] text-black">
+        <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl bg-[var(--color-primary)] px-3.5 py-2.5 text-[15px] text-black" data-testid="chat-user-message">
           {message.text}
         </div>
       </div>
@@ -197,7 +199,21 @@ export default function ChatScreen(props: {
   const listRef = useRef<HTMLDivElement | null>(null);
   const keyboardInset = useKeyboardInset();
   const draft = chat.draft ?? '';
+  const attachments = chat.attachments ?? [];
   const turnPhase = chat.turnPhase ?? (chat.isStreaming ? 'running' : 'idle');
+  const composerBlocked = chat.isSending
+    || chat.restoring
+    || chat.pendingPermissionCount > 0
+    || turnPhase === 'stopping'
+    || (!chat.sessionId && chat.metabotId === null);
+  const canSubmit = Boolean(draft.trim() || attachments.length > 0)
+    && !composerBlocked
+    && !chat.isUploading;
+  const canAttach = coworkAttachmentAdmission({
+    disabled: chat.isSending || chat.restoring || (!chat.sessionId && chat.metabotId === null),
+    isStreaming: chat.isStreaming,
+    steerDisabled: chat.pendingPermissionCount > 0 || turnPhase === 'stopping',
+  }) && !chat.isUploading;
 
   useEffect(() => {
     const list = listRef.current;
@@ -205,8 +221,8 @@ export default function ChatScreen(props: {
   }, [chat.messages, chat.isStreaming]);
 
   const submit = () => {
-    if (!draft.trim() || chat.isSending || chat.restoring || chat.pendingPermissionCount > 0 || turnPhase === 'stopping') return;
-    void chat.send(draft);
+    if (!canSubmit) return;
+    void chat.send(draft, attachments);
   };
 
   return (
@@ -301,7 +317,17 @@ export default function ChatScreen(props: {
       <SubmissionStatus chat={chat} />
 
       <div className="shrink-0 border-t border-[var(--border-color)] bg-[var(--bg-panel)] px-3 pt-2" style={{ paddingBottom: `calc(max(env(safe-area-inset-bottom), ${keyboardInset}px) + 8px)` }}>
+        <ChatComposerAttachments chat={chat} />
         <div className="flex items-end gap-2">
+          <button
+            type="button"
+            onClick={() => void chat.pickAttachments()}
+            disabled={!canAttach}
+            aria-label={t('mobile.chat.addAttachment')}
+            className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl border border-[var(--border-color)] text-[var(--text-primary)] active:bg-[var(--bg-hover)] disabled:opacity-40"
+          >
+            <PaperClipIcon className="h-5 w-5" aria-hidden />
+          </button>
           <textarea
             value={draft}
             onChange={(event) => chat.setDraft(event.target.value)}
@@ -323,7 +349,7 @@ export default function ChatScreen(props: {
           <button
             type="button"
             onClick={submit}
-            disabled={!draft.trim() || chat.isSending || chat.restoring || chat.pendingPermissionCount > 0 || turnPhase === 'stopping' || (!chat.sessionId && chat.metabotId === null)}
+            disabled={!canSubmit}
             aria-label={t('mobile.chat.send')}
             className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl bg-[var(--color-primary)] px-3 text-black active:opacity-80 disabled:opacity-40"
           >
