@@ -102,6 +102,22 @@ export function deepSeekWebToolsRoot(baseUrl: string): string {
   return `${root}/v1/tools`;
 }
 
+/**
+ * Derive the IDBots-Free relay's tools base (`<llm root>/v1/tools`, the ABS
+ * route `/v2/assist/llm/v1/tools/search|fetch`) from the relay base the client
+ * stores. That stored base is the chat base and already ends in `/v1`
+ * (`…/v2/assist/llm/v1`, the bootstrap PublicBaseURL), so a naive
+ * `${base}/v1/tools` would double the version segment — the shape the first
+ * production probe caught (2026-10-26). Accepts the bare llm root too.
+ */
+export function relayWebToolsBase(relayBaseUrl: string): string {
+  const root = String(relayBaseUrl ?? '').trim()
+    .replace(/\/+$/, '')
+    .replace(/\/tools$/i, '')
+    .replace(/\/v\d+$/i, '');
+  return `${root}/v1/tools`;
+}
+
 let activeProxy: DshWebToolsProxy | null = null;
 
 /** Descriptor for the running proxy, or null before startup / after stop. */

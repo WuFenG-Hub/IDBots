@@ -97,7 +97,7 @@ import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
 import { generateSessionTitle, setSessionTitleBrainProvider, setTurnAckReplyBrainProvider } from './libs/coworkUtil';
 import { ensureSandboxReady, getSandboxStatus, onSandboxProgress } from './libs/coworkSandboxRuntime';
 import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps, setFreeQuotaExhaustedListener } from './libs/coworkOpenAICompatProxy';
-import { startDshWebToolsProxy, stopDshWebToolsProxy, resolveDeepSeekWebToolsUpstream } from './services/dshWebToolsProxy';
+import { startDshWebToolsProxy, stopDshWebToolsProxy, resolveDeepSeekWebToolsUpstream, relayWebToolsBase } from './services/dshWebToolsProxy';
 import { isOfficialDeepSeekRoute } from './libs/coworkDshTurn';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
 import { isWorkspaceMetabotId, resolveBotWorkspaceCwd, resolveSessionWorkingDirectory, shouldUseBotWorkspaceCwd } from './libs/botWorkspace';
@@ -19248,9 +19248,9 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
       resolveDeepSeekUpstream: () => resolveDeepSeekWebToolsUpstream(getAppConfigProviders(), isOfficialDeepSeekRoute),
       resolveRelayUpstream: async () => {
         const credentials = await resolveJevRelayCredentials();
-        const baseUrl = credentials.baseUrl.replace(/\/+$/, '');
+        const baseUrl = credentials.baseUrl.trim();
         return baseUrl && credentials.apiKey
-          ? { label: 'idbots-free', baseURL: `${baseUrl}/v1/tools`, apiKey: credentials.apiKey }
+          ? { label: 'idbots-free', baseURL: relayWebToolsBase(baseUrl), apiKey: credentials.apiKey }
           : null;
       },
       log: (line) => coworkLog('INFO', 'dshWebToolsProxy', line),
