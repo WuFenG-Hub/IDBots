@@ -33,6 +33,7 @@ export interface UserBotsPinBotEntry {
   globalMetaId: string;
   name: string;
   type: 'twin' | 'worker';
+  enabled: boolean;
   role: string;
   mvcAddress: string;
   chatPublicKey: string;
@@ -79,6 +80,7 @@ export function buildUserBotsPinPayload(
   bots: Array<{
     name: string;
     metabot_type: string;
+    enabled: boolean;
     role: string;
     mvc_address: string;
     globalmetaid: string | null;
@@ -95,6 +97,7 @@ export function buildUserBotsPinPayload(
       globalMetaId,
       name: bot.name ?? '',
       type: bot.metabot_type === 'twin' ? 'twin' : 'worker',
+      enabled: bot.enabled,
       role: bot.role ?? '',
       mvcAddress: bot.mvc_address ?? '',
       chatPublicKey: bot.chat_public_key ?? '',
@@ -143,7 +146,7 @@ export async function syncUserBotsToMobile(
 
   const bots = metabotStore
     .listMetabots()
-    .filter((bot) => bot.enabled && bot.metabot_type !== 'welcome' && (bot.globalmetaid ?? '').trim());
+    .filter((bot) => bot.metabot_type !== 'welcome' && (bot.globalmetaid ?? '').trim());
 
   const txids: string[] = [];
   const skippedUnbound: string[] = [];
@@ -177,7 +180,7 @@ export async function syncUserBotsToMobile(
   // 2. Re-read pin ids (syncBotOwnerPin persisted them) and build the manifest.
   const freshBots = metabotStore
     .listMetabots()
-    .filter((bot) => bot.enabled && bot.metabot_type !== 'welcome' && (bot.globalmetaid ?? '').trim());
+    .filter((bot) => bot.metabot_type !== 'welcome' && (bot.globalmetaid ?? '').trim());
   const payloadJson = buildUserBotsPinPayload(freshBots);
   const boundCount = freshBots.filter((bot) => (bot.owner_binding_pinid ?? '').trim()).length;
 

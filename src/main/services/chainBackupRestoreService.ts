@@ -1,21 +1,12 @@
-/**
- * Chain backup restore (MVP): rebuilds the local Bot fleet from the user
- * mnemonic alone.
- *
- * Flow: user mnemonic → backup key (chainBackupCrypto) → /info/bots discovery
- * (owner's public manifest) → per-Bot `/protocols/metabot-backup/manifest`
- * (public pointers) → encrypted object segments → decrypt + verify → recreate
- * the Bot skeleton via restoreMetabotFromMnemonicCore → idempotent row-level
- * import (chainBackupData) with metabot_id remapped to the new local id.
- *
- * Reads go through the public MANAPI indexer; nothing here mutates chain
- * state.
- */
-
-import { listPinsByPath, DEFAULT_MANAPI_BASE_URL } from './manapiPinService';
-import { restoreMetabotFromMnemonicCore } from './metabotRestoreService';
-import { decryptJson, deriveBackupKey, objectId } from './chainBackupCrypto';
-import { importBackupObjects, rebuildChainBackupStateFromManifest, selectLatestBackupObjects, type ChainBackupObject } from './chainBackupData';
+import { DEFAULT_MANAPI_BASE_URL } from './manapiPinService';
+import { restoreMetabotFromMnemonicCore, type MetaidRestoreProfile } from './metabotRestoreService';
+import { chainBackupObjectId, decryptJson, deriveBackupKey, objectId } from './chainBackupCrypto';
+import {
+  importBackupObjects,
+  rebuildChainBackupStateFromManifest,
+  selectLatestBackupObjects,
+  type ChainBackupObject,
+} from './chainBackupData';
 import {
   CHAIN_BACKUP_CIPHER,
   CHAIN_BACKUP_KDF,
@@ -25,10 +16,11 @@ import {
 import type { SqliteDatabase } from '../sqliteTypes';
 import type { MetabotStore } from '../metabotStore';
 import type { UserIdentityStore } from '../userIdentityStore';
-import type { Metabot } from '../types/metabot';
+import type { Metabot, MetabotUpdate } from '../types/metabot';
 
 const USER_BOTS_PATH = '/info/bots';
 const DEFAULT_TIMEOUT_MS = 15_000;
+const MAX_INDEXER_PAGES = 50;
 
 export interface ChainBackupRestoreProgress {
   phase: 'discover' | 'manifest' | 'segments' | 'skeleton' | 'import' | 'done' | 'error';
@@ -47,12 +39,6 @@ export interface ChainBackupRestoreBotResult {
   imported: number;
   skipped: number;
   error?: string;
-  /**
-   * Non-fatal per-segment failures: the bot restored from the segments that
-   * did decrypt, but at least one manifest segment pin could not be fetched
-   * or verified. The restore is partial by design rather than failing the
-   * whole bot; the next full backup re-publishes a complete baseline.
-   */
   warnings?: string[];
 }
 
@@ -62,9 +48,50 @@ export interface ChainBackupRestoreResult {
   error?: string;
 }
 
-// ---------------------------------------------------------------------------
-// indexer fetch helpers
-// ---------------------------------------------------------------------------
+interface FetchOptions {
+  baseUrl?: string;
+}
+
+interface PinCandidate {
+  pinId: string;
+  timestamp: number;
+  address: string;
+  globalMetaId: string;
+  modifyHistory: string[];
+}
+
+interface UserBotsManifestEntry {
+  globalMetaId: string;
+  name: string;
+  type: string;
+  mvcAddress: string;
+}
+
+interface BackupManifest {
+  bot: string;
+  botName: string;
+  updatedAt?: number;
+  segments: ChainBackupSegmentRef[];
+}
+
+interface SegmentEnvelope {
+  version: number;
+  bot: string;
+  segment: string;
+  cipher: string;
+  kdf: string;
+  payload: string;
+}
+
+interface PendingRestore {
+  entry: UserBotsManifestEntry;
+  botResult: ChainBackupRestoreBotResult;
+  botIndex: number;
+  manifestHit: { pinId: string; manifest: BackupManifest };
+  objects: ChainBackupObject[];
+  warnings: string[];
+  metabot?: Metabot;
+}
 
 async function fetchJson(url: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Record<string, unknown>> {
   const controller = new AbortController();
@@ -102,164 +129,291 @@ export async function fetchPinContentText(
   }
 }
 
-/** Newest pins of one MetaID under one path (manapi /api/metaid/pin/list/{metaid}). */
-async function listPinsByMetaid(
-  metaid: string,
-  path: string,
-  options?: { baseUrl?: string },
-): Promise<Array<{ pinId: string; timestamp: number }>> {
-  const baseUrl = (options?.baseUrl || DEFAULT_MANAPI_BASE_URL).replace(/\/+$/, '');
-  const query = new URLSearchParams({ path, size: '10' });
-  const body = await fetchJson(`${baseUrl}/api/metaid/pin/list/${encodeURIComponent(metaid)}?${query.toString()}`);
+function text(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeCandidate(raw: unknown): PinCandidate {
+  const record = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const pinId = text(record.id);
+  const history = Array.isArray(record.modify_history)
+    ? record.modify_history.map(text).filter(Boolean)
+    : [];
+  return {
+    pinId,
+    timestamp: Number(record.timestamp) || 0,
+    address: text(record.address),
+    globalMetaId: text(record.globalMetaId),
+    modifyHistory: history.length > 0 ? history : [pinId],
+  };
+}
+
+function readCandidatePage(body: Record<string, unknown>): { pins: PinCandidate[]; nextCursor: string | null } {
   const data = (body.data && typeof body.data === 'object' ? body.data : {}) as Record<string, unknown>;
   const list = Array.isArray(data.list) ? data.list : [];
-  return list.map((raw) => {
-    const record = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-    return {
-      pinId: typeof record.id === 'string' ? record.id.trim() : '',
-      timestamp: Number(record.timestamp) || 0,
-    };
-  }).filter((item) => item.pinId);
+  return {
+    pins: list.map(normalizeCandidate).filter((pin) => pin.pinId),
+    nextCursor: text(data.nextCursor) || null,
+  };
 }
 
-interface UserBotsManifestEntry {
+async function listPinsByAddress(address: string, path: string, options?: FetchOptions): Promise<PinCandidate[]> {
+  const normalizedAddress = address.trim();
+  if (!normalizedAddress) return [];
+  const baseUrl = (options?.baseUrl || DEFAULT_MANAPI_BASE_URL).replace(/\/+$/, '');
+  const pins: PinCandidate[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < MAX_INDEXER_PAGES; page += 1) {
+    const query = new URLSearchParams({ path, size: '100' });
+    if (cursor) query.set('cursor', cursor);
+    const body = await fetchJson(`${baseUrl}/api/address/pin/list/${encodeURIComponent(normalizedAddress)}?${query.toString()}`);
+    const pageResult = readCandidatePage(body);
+    pins.push(...pageResult.pins);
+    if (!pageResult.nextCursor || pageResult.pins.length === 0) break;
+    cursor = pageResult.nextCursor;
+  }
+  return pins;
+}
+
+async function listPinsByGlobalPath(path: string, options?: FetchOptions): Promise<PinCandidate[]> {
+  const baseUrl = (options?.baseUrl || DEFAULT_MANAPI_BASE_URL).replace(/\/+$/, '');
+  const pins: PinCandidate[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < MAX_INDEXER_PAGES; page += 1) {
+    const query = new URLSearchParams({ path, size: '100' });
+    if (cursor) query.set('cursor', cursor);
+    const body = await fetchJson(`${baseUrl}/api/pin/path/list?${query.toString()}`);
+    const pageResult = readCandidatePage(body);
+    pins.push(...pageResult.pins);
+    if (!pageResult.nextCursor || pageResult.pins.length === 0) break;
+    cursor = pageResult.nextCursor;
+  }
+  return pins;
+}
+
+async function listOwnedPins(input: {
+  address: string;
   globalMetaId: string;
-  name: string;
-  type: string;
-  mvcAddress: string;
+  path: string;
+}, options?: FetchOptions): Promise<PinCandidate[]> {
+  let scopedError: unknown = null;
+  try {
+    const scoped = await listPinsByAddress(input.address, input.path, options);
+    if (scoped.length > 0) return scoped;
+  } catch (error) {
+    scopedError = error;
+  }
+  const address = input.address.trim().toLowerCase();
+  const globalMetaId = input.globalMetaId.trim();
+  try {
+    const globalPins = await listPinsByGlobalPath(input.path, options);
+    return globalPins.filter((pin) => (
+      (address && pin.address.toLowerCase() === address)
+      || (globalMetaId && pin.globalMetaId === globalMetaId)
+    ));
+  } catch (error) {
+    if (scopedError) throw scopedError;
+    throw error;
+  }
 }
 
-/** Decode the bot list out of one /info/bots pin text. */
-function parseUserBotsManifest(text: string): UserBotsManifestEntry[] {
-  const parsed = JSON.parse(text) as { bots?: unknown };
+function headPinId(candidate: PinCandidate): string {
+  return candidate.modifyHistory[candidate.modifyHistory.length - 1]?.trim() || candidate.pinId;
+}
+
+function parseUserBotsManifest(rawText: string): UserBotsManifestEntry[] {
+  const parsed = JSON.parse(rawText) as { bots?: unknown };
   const bots = Array.isArray(parsed.bots) ? parsed.bots : [];
   return bots.map((raw) => {
     const record = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
     return {
-      globalMetaId: typeof record.globalMetaId === 'string' ? record.globalMetaId.trim() : '',
+      globalMetaId: text(record.globalMetaId),
       name: typeof record.name === 'string' ? record.name : '',
       type: typeof record.type === 'string' ? record.type : 'worker',
-      mvcAddress: typeof record.mvcAddress === 'string' ? record.mvcAddress.trim() : '',
+      mvcAddress: text(record.mvcAddress),
     };
   }).filter((entry) => entry.globalMetaId);
 }
 
-/**
- * Locate the owner's newest /info/bots pin and decode the bot list.
- *
- * Primary source is the metaid-scoped pin listing: the platform-global path
- * feed carries every user's pins newest-first and each backup run publishes
- * a fresh pin, so a device-loss restore performed after ~1000 newer
- * platform pins would scan past the owner's manifest and find nothing even
- * though the data is on-chain. The scoped listing returns the owner's own
- * pins regardless of global feed depth; the global address scan stays only
- * as a fallback.
- */
 async function fetchUserBotsEntries(
   identity: { globalMetaId: string; mvcAddress: string },
-  options?: { baseUrl?: string },
+  options?: FetchOptions,
 ): Promise<UserBotsManifestEntry[]> {
-  const scopedPins = await listPinsByMetaid(identity.globalMetaId, USER_BOTS_PATH, options);
-  for (const pin of scopedPins) {
+  const pins = await listOwnedPins({
+    address: identity.mvcAddress,
+    globalMetaId: identity.globalMetaId,
+    path: USER_BOTS_PATH,
+  }, options);
+  for (const pin of pins) {
     try {
-      const entries = parseUserBotsManifest(await fetchPinContentText(pin.pinId, options));
+      const entries = parseUserBotsManifest(await fetchPinContentText(headPinId(pin), options));
       if (entries.length > 0) return entries;
     } catch {
-      // fall through to the next (older) pin
+      continue;
     }
-  }
-  return fetchUserBotsEntriesByAddress(identity.mvcAddress, options);
-}
-
-/** Legacy discovery: match the owner's address against the global path feed. */
-async function fetchUserBotsEntriesByAddress(
-  userMvcAddress: string,
-  options?: { baseUrl?: string },
-): Promise<UserBotsManifestEntry[]> {
-  const address = userMvcAddress.trim();
-  if (!address) return [];
-  let cursor: string | undefined;
-  for (let page = 0; page < 10; page += 1) {
-    const result = await listPinsByPath(
-      { path: USER_BOTS_PATH, size: 100, cursor },
-      options?.baseUrl ? { baseUrl: options.baseUrl } : undefined,
-    );
-    const mine = result.items.find((item) => item.address.trim().toLowerCase() === address.toLowerCase());
-    if (mine) {
-      return parseUserBotsManifest(await fetchPinContentText(mine.pinId, options));
-    }
-    if (!result.hasMore || !result.nextCursor) break;
-    cursor = result.nextCursor;
   }
   return [];
 }
 
-interface BackupManifest {
-  bot: string;
-  botName: string;
-  updatedAt?: number;
-  segments: ChainBackupSegmentRef[];
-}
-
 async function fetchLatestBackupManifest(
-  botGlobalMetaId: string,
-  options?: { baseUrl?: string },
+  entry: UserBotsManifestEntry,
+  options?: FetchOptions,
 ): Promise<{ pinId: string; manifest: BackupManifest } | null> {
-  const pins = await listPinsByMetaid(botGlobalMetaId, CHAIN_BACKUP_MANIFEST_PATH, options);
+  const pins = await listOwnedPins({
+    address: entry.mvcAddress,
+    globalMetaId: entry.globalMetaId,
+    path: CHAIN_BACKUP_MANIFEST_PATH,
+  }, options);
   for (const pin of pins) {
     try {
-      const text = await fetchPinContentText(pin.pinId, options);
-      const parsed = JSON.parse(text) as BackupManifest;
-      if (parsed && Array.isArray(parsed.segments)) {
-        return { pinId: pin.pinId, manifest: parsed };
+      const pinId = headPinId(pin);
+      const parsed = JSON.parse(await fetchPinContentText(pinId, options)) as BackupManifest;
+      if (
+        parsed
+        && parsed.bot === entry.globalMetaId
+        && Array.isArray(parsed.segments)
+        && parsed.segments.every((ref) => (
+          text(ref?.pinId)
+          && text(ref?.segment)
+          && Array.isArray(ref?.objectIds)
+        ))
+      ) {
+        return { pinId, manifest: parsed };
       }
     } catch {
-      // fall through to the next (older) manifest candidate
+      continue;
     }
   }
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// restore run
-// ---------------------------------------------------------------------------
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+}
+
+function nullableString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function profileOf(objects: ChainBackupObject[]): Record<string, unknown> | null {
+  return objects.find((obj) => obj.kind === 'bot_profile')?.data ?? null;
+}
+
+function profileOverride(
+  profile: Record<string, unknown> | null,
+  entry: UserBotsManifestEntry,
+): MetaidRestoreProfile | undefined {
+  if (!profile) return undefined;
+  const name = typeof profile.name === 'string' && profile.name.trim() ? profile.name : entry.name;
+  return {
+    name,
+    avatarDataUrl: nullableString(profile.avatar),
+    metabotInfoPinId: nullableString(profile.metabot_info_pinid),
+    chatpubkeyPinId: nullableString(profile.chat_public_key_pin_id),
+    bio: {
+      role: typeof profile.role === 'string' ? profile.role : '',
+      soul: typeof profile.soul === 'string' ? profile.soul : '',
+      goal: nullableString(profile.goal),
+      bio: nullableString(profile.bio),
+      background: nullableString(profile.background),
+      llm_id: nullableString(profile.llm_id),
+      llm_provider: nullableString(profile.llm_provider),
+      llm_effort: nullableString(profile.llm_effort),
+      tools: stringArray(profile.tools),
+      skills: stringArray(profile.skills),
+      allowChatSkills: stringArray(profile.allow_chat_skills),
+      boss_id: null,
+      boss_global_metaid: nullableString(profile.boss_global_metaid),
+      created_by: typeof profile.created_by === 'string' && profile.created_by ? profile.created_by : '0000',
+    },
+    raw: { name },
+  };
+}
+
+const PROFILE_UPDATE_FIELDS = [
+  'name',
+  'avatar',
+  'enabled',
+  'globalmetaid',
+  'metabot_info_pinid',
+  'chat_public_key_pin_id',
+  'created_by',
+  'role',
+  'soul',
+  'goal',
+  'bio',
+  'background',
+  'boss_global_metaid',
+  'owner_binding_pinid',
+  'llm_id',
+  'llm_provider',
+  'llm_effort',
+  'fallback_llm_id',
+  'fallback_llm_provider',
+  'fallback_llm_effort',
+  'tools',
+  'skills',
+  'allow_chat_skills',
+  'a2a_max_incoming_turns',
+  'a2a_bye_cooldown_ms',
+  'a2a_auto_reply_enabled',
+  'homepage',
+] as const;
+
+function applyBackupProfile(
+  metabotStore: MetabotStore,
+  metabotId: number,
+  profile: Record<string, unknown>,
+  metabotIdMap: ReadonlyMap<number, number>,
+): void {
+  const rawPatch: Record<string, unknown> = {};
+  for (const key of PROFILE_UPDATE_FIELDS) {
+    if (profile[key] !== undefined) rawPatch[key] = profile[key];
+  }
+  const sourceBossId = Number(profile.boss_id);
+  rawPatch.boss_id = Number.isInteger(sourceBossId) && sourceBossId > 0
+    ? metabotIdMap.get(sourceBossId) ?? null
+    : null;
+  metabotStore.updateMetabot(metabotId, rawPatch as MetabotUpdate);
+}
+
+function sourceMetabotId(profile: Record<string, unknown> | null): number | null {
+  const value = Number(profile?.source_metabot_id);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function isTwinTarget(pending: PendingRestore): boolean {
+  const profileType = profileOf(pending.objects)?.metabot_type;
+  return profileType === 'twin' || (profileType === undefined && pending.entry.type === 'twin');
+}
 
 export interface RunChainBackupRestoreDeps {
   db: SqliteDatabase;
   metabotStore: MetabotStore;
   userStore: UserIdentityStore;
+  saveDb?: () => void;
   onProgress?: (progress: ChainBackupRestoreProgress) => void;
-  /** Injected into restoreMetabotFromMnemonicCore (skill assignment mirror). */
   applyAssignedSkills?: (metabotId: number, skills: string[]) => void;
-  /** Test hook: point at a stub indexer. */
   baseUrl?: string;
-}
-
-interface SegmentEnvelope {
-  version: number;
-  bot: string;
-  segment: string;
-  cipher: string;
-  kdf: string;
-  payload: string;
 }
 
 export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Promise<ChainBackupRestoreResult> {
   const { db, metabotStore, userStore } = deps;
-  const emit = (p: ChainBackupRestoreProgress) => deps.onProgress?.(p);
+  const emit = (progress: ChainBackupRestoreProgress) => deps.onProgress?.(progress);
   const fetchOptions = deps.baseUrl ? { baseUrl: deps.baseUrl } : undefined;
 
   const identity = userStore.get();
   if (!identity?.mnemonic || !identity.globalmetaid?.trim()) {
     return { success: false, bots: [], error: 'USER_IDENTITY_MISSING' };
   }
-  const backupKey = deriveBackupKey(identity.mnemonic, identity.globalmetaid.trim());
+  const userGlobalMetaId = identity.globalmetaid.trim();
+  const backupKey = deriveBackupKey(identity.mnemonic, userGlobalMetaId);
 
   emit({ phase: 'discover' });
   let entries: UserBotsManifestEntry[];
   try {
     entries = await fetchUserBotsEntries(
-      { globalMetaId: identity.globalmetaid.trim(), mvcAddress: identity.mvc_address },
+      { globalMetaId: userGlobalMetaId, mvcAddress: identity.mvc_address },
       fetchOptions,
     );
   } catch (error) {
@@ -270,6 +424,7 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
   }
 
   const result: ChainBackupRestoreResult = { success: true, bots: [] };
+  const pending: PendingRestore[] = [];
 
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
@@ -283,118 +438,175 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
     result.bots.push(botResult);
     try {
       emit({ phase: 'manifest', botName: entry.name, botIndex: i, botCount: entries.length });
-      const manifestHit = await fetchLatestBackupManifest(entry.globalMetaId, fetchOptions);
-      if (!manifestHit) {
-        botResult.error = 'NO_BACKUP_MANIFEST';
-        continue;
-      }
-      const { manifest } = manifestHit;
-
-      // Decrypt + verify each segment. The manifest only ever grows, so any
-      // historical segment pin (expired, pruned, indexer gap) would otherwise
-      // be a single point of failure sinking the whole bot. A failed segment
-      // is recorded as a warning instead; the bot restores from whatever
-      // decrypted, and the next full backup re-publishes a fresh complete
-      // baseline (the journal rebuild below is skipped for partial restores).
+      const manifestHit = await fetchLatestBackupManifest(entry, fetchOptions);
+      if (!manifestHit) throw new Error('NO_BACKUP_MANIFEST');
       const objects: ChainBackupObject[] = [];
       const warnings: string[] = [];
-      for (let s = 0; s < manifest.segments.length; s += 1) {
-        const ref = manifest.segments[s];
+
+      for (let s = 0; s < manifestHit.manifest.segments.length; s += 1) {
+        const ref = manifestHit.manifest.segments[s];
         try {
-          const text = await fetchPinContentText(ref.pinId, fetchOptions);
-          const envelope = JSON.parse(text) as SegmentEnvelope;
+          const envelope = JSON.parse(await fetchPinContentText(ref.pinId, fetchOptions)) as SegmentEnvelope;
           if (envelope.cipher !== CHAIN_BACKUP_CIPHER || envelope.kdf !== CHAIN_BACKUP_KDF) {
             throw new Error(`unsupported backup envelope (cipher=${envelope.cipher}, kdf=${envelope.kdf})`);
+          }
+          if (text(envelope.bot) !== entry.globalMetaId) throw new Error('SEGMENT_BOT_MISMATCH');
+          if (text(envelope.segment) && envelope.segment !== ref.segment) {
+            throw new Error(`segment reference mismatch for pin ${ref.pinId}`);
           }
           const plaintext = decryptJson(backupKey, Buffer.from(envelope.payload, 'base64'));
           if (objectId(plaintext) !== ref.segment) {
             throw new Error(`segment hash mismatch for pin ${ref.pinId}`);
           }
-          const segment = plaintext as { objects?: Array<{ id: string; kind: ChainBackupObject['kind']; data: Record<string, unknown> }> };
+          const segment = plaintext as {
+            bot?: unknown;
+            objects?: Array<{ id: string; kind: ChainBackupObject['kind']; data: Record<string, unknown> }>;
+          };
+          if (text(segment.bot) !== entry.globalMetaId) throw new Error('SEGMENT_BOT_MISMATCH');
           for (const obj of segment.objects ?? []) {
+            if (!obj?.id || !obj.kind || !obj.data || typeof obj.data !== 'object') {
+              throw new Error(`invalid backup object in pin ${ref.pinId}`);
+            }
+            if (
+              objectId({ kind: obj.kind, data: obj.data }) !== obj.id
+              && chainBackupObjectId(obj.kind, obj.data) !== obj.id
+            ) {
+              throw new Error(`object hash mismatch for pin ${ref.pinId}`);
+            }
+            if (ref.objectIds.length > 0 && !ref.objectIds.includes(obj.id)) {
+              throw new Error(`object ${obj.id} is not listed by the manifest`);
+            }
             objects.push({ id: obj.id, kind: obj.kind, data: obj.data });
           }
         } catch (error) {
-          warnings.push(`segment ${s + 1}/${manifest.segments.length} (${ref.pinId}): ${error instanceof Error ? error.message : String(error)}`);
+          warnings.push(`segment ${s + 1}/${manifestHit.manifest.segments.length} (${ref.pinId}): ${error instanceof Error ? error.message : String(error)}`);
           continue;
         }
         emit({
-          phase: 'segments', botName: entry.name, botIndex: i, botCount: entries.length,
-          segmentsDone: s + 1, segmentsTotal: manifest.segments.length,
+          phase: 'segments',
+          botName: entry.name,
+          botIndex: i,
+          botCount: entries.length,
+          segmentsDone: s + 1,
+          segmentsTotal: manifestHit.manifest.segments.length,
         });
       }
-      if (warnings.length > 0) {
-        botResult.warnings = warnings;
-      }
+
+      if (warnings.length > 0) botResult.warnings = warnings;
       if (objects.length === 0 && warnings.length > 0) {
-        // Every segment failed — there is nothing to import for this bot.
-        botResult.error = warnings[warnings.length - 1] ?? 'ALL_SEGMENTS_FAILED';
-        result.success = false;
-        emit({ phase: 'error', botName: entry.name, botIndex: i, botCount: entries.length, message: botResult.error });
-        continue;
+        throw new Error(warnings[warnings.length - 1] ?? 'ALL_SEGMENTS_FAILED');
       }
-
-      // One final version per row: segments arrive oldest-first and in-place
-      // edits re-publish the same row id, so without this the import's
-      // first-wins semantics would restore the OLDEST snapshot of every
-      // edited row, and rows deleted after their snapshot would resurrect.
-      const latestObjects = selectLatestBackupObjects(objects);
-
-      // Skeleton: reuse the local row when the bot already exists here.
-      emit({ phase: 'skeleton', botName: entry.name, botIndex: i, botCount: entries.length });
-      let metabot: Metabot | null = metabotStore
-        .listMetabots()
-        .find((m) => (m.globalmetaid ?? '').trim() === entry.globalMetaId) ?? null;
-
-      if (!metabot) {
-        const envelopeObj = latestObjects.find((obj) => obj.kind === 'key_envelope');
-        const mnemonic = typeof envelopeObj?.data?.mnemonic === 'string' ? envelopeObj.data.mnemonic : '';
-        if (!mnemonic) {
-          botResult.error = 'KEY_ENVELOPE_MISSING';
-          continue;
-        }
-        const restored = await restoreMetabotFromMnemonicCore(
-          metabotStore,
-          {
-            mnemonic,
-            path: typeof envelopeObj.data.path === 'string' ? envelopeObj.data.path : undefined,
-          },
-          { applyAssignedSkills: deps.applyAssignedSkills },
-        );
-        if (!restored.success) {
-          botResult.error = 'error' in restored ? restored.error : 'RESTORE_FAILED';
-          continue;
-        }
-        metabot = restored.metabot;
-        botResult.restored = true;
-      }
-
-      emit({ phase: 'import', botName: entry.name, botIndex: i, botCount: entries.length });
-      const { imported, skipped } = importBackupObjects(db, metabot.id, latestObjects);
-      botResult.imported = imported;
-      botResult.skipped = skipped;
-
-      // Rebuild the local backup journal from the on-chain manifest so the
-      // next backup on this device diffs against what is already on-chain
-      // instead of re-uploading the restored objects as duplicates — but
-      // only for a fully verified segment set: a partial restore must not
-      // tell the next backup the missing objects are already on-chain, so
-      // the next run re-publishes a complete fresh baseline instead.
-      if (warnings.length === 0) {
-        rebuildChainBackupStateFromManifest(db, {
-          botGlobalMetaId: entry.globalMetaId,
-          manifestPinId: manifestHit.pinId,
-          segments: manifest.segments,
-          manifestUpdatedAt: manifest.updatedAt ?? Math.floor(Date.now() / 1000),
-        });
-      }
+      pending.push({
+        entry,
+        botResult,
+        botIndex: i,
+        manifestHit,
+        objects: selectLatestBackupObjects(objects),
+        warnings,
+      });
     } catch (error) {
       botResult.error = error instanceof Error ? error.message : String(error);
-      result.success = false;
       emit({ phase: 'error', botName: entry.name, botIndex: i, botCount: entries.length, message: botResult.error });
     }
   }
 
+  for (const item of pending) {
+    try {
+      emit({ phase: 'skeleton', botName: item.entry.name, botIndex: item.botIndex, botCount: entries.length });
+      let metabot = metabotStore.listMetabots().find(
+        (candidate) => (candidate.globalmetaid ?? '').trim() === item.entry.globalMetaId,
+      ) ?? null;
+      if (!metabot) {
+        const envelope = item.objects.find((obj) => obj.kind === 'key_envelope');
+        const mnemonic = typeof envelope?.data.mnemonic === 'string' ? envelope.data.mnemonic : '';
+        if (!mnemonic) throw new Error('KEY_ENVELOPE_MISSING');
+        const profile = profileOf(item.objects);
+        const restored = await restoreMetabotFromMnemonicCore(
+          metabotStore,
+          {
+            mnemonic,
+            path: typeof envelope?.data.path === 'string' ? envelope.data.path : undefined,
+            boss_global_metaid: nullableString(profile?.boss_global_metaid),
+            expectedGlobalMetaId: item.entry.globalMetaId,
+            metabotType: 'worker',
+            profileOverride: profileOverride(profile, item.entry),
+          },
+          { applyAssignedSkills: deps.applyAssignedSkills },
+        );
+        if (!restored.success) throw new Error('error' in restored ? restored.error : 'RESTORE_FAILED');
+        metabot = restored.metabot;
+        item.botResult.restored = true;
+      }
+      item.metabot = metabot;
+    } catch (error) {
+      item.botResult.error = error instanceof Error ? error.message : String(error);
+      emit({ phase: 'error', botName: item.entry.name, botIndex: item.botIndex, botCount: entries.length, message: item.botResult.error });
+    }
+  }
+
+  const metabotIdMap = new Map<number, number>();
+  for (const item of pending) {
+    if (!item.metabot) continue;
+    const sourceId = sourceMetabotId(profileOf(item.objects));
+    if (sourceId != null) metabotIdMap.set(sourceId, item.metabot.id);
+  }
+
+  for (const item of pending) {
+    if (!item.metabot || item.botResult.error) continue;
+    try {
+      const profile = profileOf(item.objects);
+      if (profile) {
+        applyBackupProfile(metabotStore, item.metabot.id, profile, metabotIdMap);
+        if (deps.applyAssignedSkills) {
+          deps.applyAssignedSkills(item.metabot.id, stringArray(profile.allow_chat_skills));
+        }
+      }
+      if (!isTwinTarget(item) && item.metabot.metabot_type !== 'welcome') {
+        metabotStore.updateMetabot(item.metabot.id, { metabot_type: 'worker' });
+      }
+      item.metabot = metabotStore.getMetabotById(item.metabot.id) ?? item.metabot;
+    } catch (error) {
+      item.botResult.error = error instanceof Error ? error.message : String(error);
+      emit({ phase: 'error', botName: item.entry.name, botIndex: item.botIndex, botCount: entries.length, message: item.botResult.error });
+    }
+  }
+
+  const twinTarget = pending.find((item) => item.metabot && !item.botResult.error && isTwinTarget(item));
+  if (twinTarget?.metabot) {
+    twinTarget.metabot = metabotStore.updateMetabot(twinTarget.metabot.id, { metabot_type: 'twin' }) ?? twinTarget.metabot;
+  } else {
+    metabotStore.ensureTwinExists();
+  }
+
+  for (const item of pending) {
+    if (!item.metabot || item.botResult.error) continue;
+    try {
+      emit({ phase: 'import', botName: item.entry.name, botIndex: item.botIndex, botCount: entries.length });
+      const { imported, skipped, errors } = importBackupObjects(db, item.metabot.id, item.objects, { metabotIdMap });
+      item.botResult.imported = imported;
+      item.botResult.skipped = skipped;
+      if (errors.length > 0) throw new Error(`IMPORT_FAILED: ${errors.join('; ')}`);
+      if (item.warnings.length === 0) {
+        rebuildChainBackupStateFromManifest(db, {
+          botGlobalMetaId: item.entry.globalMetaId,
+          manifestPinId: item.manifestHit.pinId,
+          segments: item.manifestHit.manifest.segments,
+          manifestUpdatedAt: item.manifestHit.manifest.updatedAt ?? Math.floor(Date.now() / 1000),
+        });
+      }
+      deps.saveDb?.();
+    } catch (error) {
+      item.botResult.error = error instanceof Error ? error.message : String(error);
+      emit({ phase: 'error', botName: item.entry.name, botIndex: item.botIndex, botCount: entries.length, message: item.botResult.error });
+    }
+  }
+
+  try {
+    deps.saveDb?.();
+  } catch (error) {
+    result.error = error instanceof Error ? error.message : String(error);
+  }
+  result.success = !result.error && result.bots.length > 0 && result.bots.every((bot) => !bot.error);
   emit({ phase: 'done', botCount: entries.length });
   return result;
 }

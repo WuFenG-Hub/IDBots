@@ -3,16 +3,23 @@
  * idempotent import back into it. Pure db-level module (no Electron, no
  * chain imports) so unit tests can run it against an in-memory SqliteStore.
  *
- * Whitelist (MVP = L0 + L3): user_memories (+sources), metabot_daily_summaries,
- * metabot_weekly_summaries, metaid_knowledge_entries (+revisions),
- * metaid_knowledge_procedures, and the Bot's wallet mnemonic (key envelope).
- * Deletions ride as minimal tombstone objects (soft-deleted memories from the
- * table, hard deletes from the chain_backup_tombstones ledger) so restore can
- * keep the newest version of every row instead of resurrecting old ones.
- * NEVER add user_identity, kv, im_config or raw metabot_wallets rows here.
+ * The explicit whitelist covers soul data, Bot configuration, capabilities,
+ * active task state, and recent conversations. Deletions ride as minimal
+ * tombstone objects so restore keeps the newest version without resurrecting
+ * deleted rows. Device-local numeric Bot references are excluded from object
+ * identity but retained in the encrypted payload for remapping on restore.
+ * NEVER add user_identity, app_config secrets, im_config, arbitrary kv rows,
+ * or raw metabot_wallets rows here. Only the whitelisted skills_scope kv row
+ * and memoryHygiene cowork_config row are shared configuration exceptions.
  */
 
-import { objectId } from './chainBackupCrypto';
+import { chainBackupObjectId } from './chainBackupCrypto';
+import {
+  extendedBackupRowKey,
+  extractExtendedBackupObjects,
+  importExtendedBackupObject,
+  type ExtractExtendedBackupOptions,
+} from './chainBackupExtendedData';
 import { listChainBackupTombstones } from '../libs/chainBackupTombstones';
 import type { SqliteDatabase } from '../sqliteTypes';
 
@@ -25,7 +32,25 @@ export type ChainBackupObjectKind =
   | 'knowledge_tombstone'
   | 'knowledge_revision'
   | 'knowledge_procedure'
-  | 'key_envelope';
+  | 'key_envelope'
+  | 'bot_profile'
+  | 'setting'
+  | 'memory_policy'
+  | 'experience'
+  | 'impression_observation'
+  | 'impression_snapshot'
+  | 'culture'
+  | 'schedule'
+  | 'longterm'
+  | 'orchestration'
+  | 'conversation'
+  | 'conversation_message'
+  | 'shared_config'
+  | 'skill_scope';
+
+export interface ChainBackupImportOptions {
+  metabotIdMap?: ReadonlyMap<number, number>;
+}
 
 export interface ChainBackupObject {
   id: string;
@@ -47,7 +72,7 @@ export function queryRows(db: SqliteDatabase, sql: string, params: unknown[] = [
 }
 
 function makeObject(kind: ChainBackupObjectKind, data: Record<string, unknown>): ChainBackupObject {
-  return { id: objectId({ kind, data }), kind, data };
+  return { id: chainBackupObjectId(kind, data), kind, data };
 }
 
 /**
@@ -59,6 +84,7 @@ export function extractBackupObjects(
   db: SqliteDatabase,
   metabotId: number,
   wallet: { mnemonic: string; path: string } | null,
+  options: ExtractExtendedBackupOptions = {},
 ): ChainBackupObject[] {
   const objects: ChainBackupObject[] = [];
 
@@ -120,7 +146,13 @@ export function extractBackupObjects(
     objects.push(makeObject('key_envelope', { mnemonic: wallet.mnemonic.trim(), path: wallet.path }));
   }
 
-  return objects;
+  objects.push(...extractExtendedBackupObjects(db, metabotId, options));
+  const botGlobalMetaId = options.bot?.globalmetaid?.trim()
+    || String(queryRows(db, 'SELECT globalmetaid FROM metabots WHERE id = ? LIMIT 1', [metabotId])[0]?.globalmetaid ?? '').trim();
+  return objects.map((obj) => {
+    const data = { ...obj.data, _backup_bot: botGlobalMetaId };
+    return { id: chainBackupObjectId(obj.kind, data), kind: obj.kind, data };
+  });
 }
 
 /**
@@ -136,6 +168,8 @@ export function extractBackupObjects(
  */
 export function selectLatestBackupObjects(objects: ChainBackupObject[]): ChainBackupObject[] {
   const rowKeyOf = (obj: ChainBackupObject): string => {
+    const extendedKey = extendedBackupRowKey(obj);
+    if (extendedKey) return extendedKey;
     const stableId = typeof obj.data?.id === 'string' && obj.data.id.trim() ? obj.data.id.trim() : null;
     switch (obj.kind) {
       case 'memory':
@@ -300,19 +334,20 @@ function rowExists(db: SqliteDatabase, table: string, where: Record<string, unkn
 }
 
 /**
- * Import one Bot's decrypted backup objects. Only `metabot_id` is remapped;
- * every other column (including TEXT ids, fingerprints, timestamps) is copied
- * verbatim. Idempotent: unique-constrained tables use INSERT OR IGNORE; tables
- * without one (user_memories, user_memory_sources, knowledge revisions) get a
- * natural-key pre-check.
+ * Import one Bot's decrypted backup objects. Device-local Bot references are
+ * remapped through the restored source-ID map; chain-safe row IDs, fingerprints,
+ * and timestamps are preserved. Imports are idempotent and return every row
+ * error so a silent partial import cannot be reported as a successful restore.
  */
 export function importBackupObjects(
   db: SqliteDatabase,
   newMetabotId: number,
   objects: ChainBackupObject[],
-): { imported: number; skipped: number } {
+  options: ChainBackupImportOptions = {},
+): { imported: number; skipped: number; errors: string[] } {
   let imported = 0;
   let skipped = 0;
+  const errors: string[] = [];
 
   for (const obj of objects) {
     const data = obj.data;
@@ -387,14 +422,23 @@ export function importBackupObjects(
           // handled by the skeleton-restore step, never inserted into a table
           skipped += 1;
           break;
-        default:
-          skipped += 1;
+        default: {
+          const extended = importExtendedBackupObject(db, newMetabotId, obj, options);
+          if (extended.handled) {
+            imported += extended.imported;
+            skipped += extended.skipped;
+          } else {
+            skipped += 1;
+          }
+        }
       }
     } catch (error) {
-      console.warn('[ChainBackup] import object failed', obj.kind, obj.id, error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn('[ChainBackup] import object failed', obj.kind, obj.id, message);
+      errors.push(`${obj.kind}:${obj.id}: ${message}`);
       skipped += 1;
     }
   }
 
-  return { imported, skipped };
+  return { imported, skipped, errors };
 }
