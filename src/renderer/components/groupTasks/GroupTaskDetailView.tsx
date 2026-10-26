@@ -7,7 +7,6 @@ import type {
 } from '../../types/groupTask';
 import GroupTaskMessageItem from './GroupTaskMessageItem';
 import GroupTaskComposer from './GroupTaskComposer';
-import AcceptanceSummaryCard from './AcceptanceSummaryCard';
 import { GroupTaskTinyAvatar } from './GroupTaskListMeta';
 import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
 import GroupTaskRatingStars from './GroupTaskRatingStars';
@@ -35,7 +34,7 @@ import {
   shouldStickToBottom,
 } from './groupTaskUtils';
 import { groupTaskStatusLabelKey } from './GroupTasksView';
-import { ArrowLeftIcon, ChatBubbleLeftRightIcon, ChevronRightIcon, ClipboardDocumentIcon, CheckIcon, XMarkIcon, InformationCircleIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, ChatBubbleLeftRightIcon, ClipboardDocumentIcon, CheckIcon, XMarkIcon, InformationCircleIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
@@ -46,11 +45,6 @@ const LOAD_OLDER_THRESHOLD = 48;
 // HITL: the pause-banner decision summary is truncated at this length; the
 // "expand" toggle reveals the full body (the transcript holds it anyway).
 const CHECKPOINT_SUMMARY_MAX_LEN = 120;
-// The header goal renders COLLAPSED by default: only the first paragraph (up to
-// the first line break, capped at this length) shows — long single-paragraph
-// goals stay scannable too (task #33's goal is one 2528-char line). Same cap as
-// the acceptance card's preview (mirrors the backend 160-char message preview).
-const GOAL_PREVIEW_MAX_CHARS = 160;
 
 /**
  * Copyable group/room id pill. The group_id is the room id (stored locally on
