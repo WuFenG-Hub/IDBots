@@ -3834,6 +3834,10 @@ export class CoworkRunner extends EventEmitter {
       try {
         const session = this.store.getSessionWithoutMessages(sessionId);
         if (!session?.autoOrigin) return;
+        // Orchestration tasks are ALWAYS Twin-Bot-driven delegation and should
+        // stay in the "Autonomous Tasks" fold, not surface in "Follow-Up Tasks".
+        // Only 'longterm' and 'schedule' auto-origins may need human follow-up.
+        if (session.autoOrigin === 'orchestration') return;
         const page = this.store.getSessionMessagesPage(sessionId, { limit: 20 });
         const input = extractTurnEndFollowUpInput(page.messages);
         if (!input) return;
@@ -3877,6 +3881,9 @@ export class CoworkRunner extends EventEmitter {
     try {
       const session = this.store.getSessionWithoutMessages(sessionId);
       if (!session?.autoOrigin) return;
+      // Orchestration tasks are Twin-Bot-driven: even an AskUserQuestion in an
+      // orchestration session is meant for the Twin Bot, not the human owner.
+      if (session.autoOrigin === 'orchestration') return;
       this.store.setSessionFollowUp(sessionId, 'ask_user');
     } catch (error) {
       coworkLog('WARN', 'followUp:askUser', 'failed to persist ask_user follow-up', {
