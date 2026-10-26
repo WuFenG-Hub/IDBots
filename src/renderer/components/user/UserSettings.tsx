@@ -19,6 +19,7 @@ import {
 import { i18nService } from '../../services/i18n';
 import MnemonicWordGrid from './MnemonicWordGrid';
 import UserBackupMnemonicModal from './UserBackupMnemonicModal';
+import ChainBackupRestorePrompt from './ChainBackupRestorePrompt';
 
 type ViewState = 'loading' | 'empty' | 'create' | 'backup' | 'import' | 'profile';
 
@@ -168,6 +169,7 @@ const UserSettings: React.FC = () => {
   const [chainBackupRestoring, setChainBackupRestoring] = useState(false);
   const [chainBackupResult, setChainBackupResult] = useState<Awaited<ReturnType<typeof window.electron.chainBackup.backup>> | null>(null);
   const [chainRestoreResult, setChainRestoreResult] = useState<Awaited<ReturnType<typeof window.electron.chainBackup.restore>> | null>(null);
+  const [chainRestorePrompt, setChainRestorePrompt] = useState<{ botCount: number; backupBotCount: number } | null>(null);
   const [chainBackupProgressText, setChainBackupProgressText] = useState('');
   const [chainBackupLastRun, setChainBackupLastRun] = useState<number | null>(null);
   const [subsidyRetrying, setSubsidyRetrying] = useState(false);
@@ -338,6 +340,7 @@ const UserSettings: React.FC = () => {
   const handleImport = async () => {
     if (!canImport) return;
     setImportError('');
+    setChainRestorePrompt(null);
     setImporting(true);
     try {
       const result = await window.electron.userIdentity.importFromMnemonic({
@@ -349,6 +352,14 @@ const UserSettings: React.FC = () => {
         return;
       }
       setIdentity(result.identity);
+      if (result.chainBackup?.success && result.chainBackup.hasBackup) {
+        setChainRestorePrompt({
+          botCount: result.chainBackup.botCount,
+          backupBotCount: result.chainBackup.backupBotCount,
+        });
+      } else if (result.chainBackup && !result.chainBackup.success) {
+        console.warn('[ChainBackup] post-import availability probe failed:', result.chainBackup.error);
+      }
       setImportWordCount(12);
       setImportWords(Array.from({ length: 12 }, () => ''));
       setImportPath(DEFAULT_DERIVATION_PATH);
@@ -429,7 +440,30 @@ const UserSettings: React.FC = () => {
   };
 
   useEffect(() => {
-    const formatProgress = (p: { phase: string; botName?: string; segmentsDone?: number; segmentsTotal?: number }) => {
+    const formatProgress = (p: {
+      phase: string;
+      botName?: string;
+      segmentsDone?: number;
+      segmentsTotal?: number;
+      resumedSegments?: number;
+      retryAttempt?: number;
+      retryDelayMs?: number;
+    }) => {
+      const bot = p.botName ?? 'Backup';
+      if (p.retryAttempt && p.retryDelayMs) {
+        return i18nService.t('userSettingsChainBackupRetryProgress')
+          .replace('{bot}', bot)
+          .replace('{attempt}', String(p.retryAttempt))
+          .replace('{seconds}', String(Math.ceil(p.retryDelayMs / 1000)));
+      }
+      if ((p.resumedSegments ?? 0) > 0) {
+        const seg = typeof p.segmentsDone === 'number' && typeof p.segmentsTotal === 'number'
+          ? ` ${p.segmentsDone}/${p.segmentsTotal}`
+          : '';
+        return `${i18nService.t('userSettingsChainBackupResumeProgress')
+          .replace('{bot}', bot)
+          .replace('{resumed}', String(p.resumedSegments))}${seg}`;
+      }
       const seg = typeof p.segmentsDone === 'number' && typeof p.segmentsTotal === 'number'
         ? ` ${p.segmentsDone}/${p.segmentsTotal}`
         : '';
@@ -460,6 +494,8 @@ const UserSettings: React.FC = () => {
       if (result.success) {
         setChainBackupLastRun(Date.now());
         showToast(i18nService.t('userSettingsChainBackupSuccess'));
+      } else if (result.resumable) {
+        showToast(i18nService.t('userSettingsChainBackupPaused'));
       } else {
         showToast(`${i18nService.t('userSettingsChainBackupFailed')}: ${result.error ?? ''}`);
       }
@@ -471,9 +507,9 @@ const UserSettings: React.FC = () => {
     }
   };
 
-  const handleChainRestore = async () => {
+  const handleChainRestore = async (skipConfirm = false) => {
     if (chainBackupRunning || chainBackupRestoring) return;
-    if (!window.confirm(i18nService.t('userSettingsChainBackupRestoreConfirm'))) return;
+    if (!skipConfirm && !window.confirm(i18nService.t('userSettingsChainBackupRestoreConfirm'))) return;
     setChainBackupRestoring(true);
     setChainRestoreResult(null);
     setChainBackupProgressText('');
@@ -1033,7 +1069,22 @@ const UserSettings: React.FC = () => {
                       .replace('{skipped}', String(chainBackupResult.bots.reduce((n, b) => n + b.skippedObjects, 0)))
                       .replace('{segments}', String(chainBackupResult.bots.reduce((n, b) => n + b.segments, 0)))
                       .replace('{cost}', String(chainBackupResult.totalCostSats))
-                  : (chainBackupResult.error ?? chainBackupResult.bots.find((b) => b.error)?.error ?? '')}
+                  : chainBackupResult.resumable
+                    ? i18nService.t('userSettingsChainBackupPaused')
+                    : (chainBackupResult.error ?? chainBackupResult.bots.find((b) => b.error)?.error ?? '')}
+              </p>
+            )}
+            {chainBackupResult && (
+              chainBackupResult.bots.some((bot) => bot.resumedSegments > 0 || bot.networkRetries > 0)
+              || (chainBackupResult.discoveryNetworkRetries ?? 0) > 0
+            ) && (
+              <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('userSettingsChainBackupResumeStats')
+                  .replace('{resumed}', String(chainBackupResult.bots.reduce((n, bot) => n + bot.resumedSegments, 0)))
+                  .replace('{retries}', String(
+                    chainBackupResult.bots.reduce((n, bot) => n + bot.networkRetries, 0)
+                    + (chainBackupResult.discoveryNetworkRetries ?? 0),
+                  ))}
               </p>
             )}
             {chainBackupResult?.botsManifestError && (
@@ -1073,7 +1124,11 @@ const UserSettings: React.FC = () => {
               className="btn-idchat-primary-filled px-3 py-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <ArrowPathIcon className={`h-3.5 w-3.5 mr-1.5 inline ${chainBackupRunning ? 'animate-spin' : ''}`} />
-              {chainBackupRunning ? i18nService.t('userSettingsChainBackupRunning') : i18nService.t('userSettingsChainBackupButton')}
+              {chainBackupRunning
+                ? i18nService.t('userSettingsChainBackupRunning')
+                : chainBackupResult?.resumable
+                  ? i18nService.t('userSettingsChainBackupContinueButton')
+                  : i18nService.t('userSettingsChainBackupButton')}
             </button>
             <button
               type="button"
@@ -1164,6 +1219,19 @@ const UserSettings: React.FC = () => {
               </div>
             </div>
           </div>
+        )}
+
+        {chainRestorePrompt && (
+          <ChainBackupRestorePrompt
+            botCount={chainRestorePrompt.botCount}
+            backupBotCount={chainRestorePrompt.backupBotCount}
+            restoring={chainBackupRestoring}
+            onCancel={() => setChainRestorePrompt(null)}
+            onConfirm={() => {
+              setChainRestorePrompt(null);
+              void handleChainRestore(true);
+            }}
+          />
         )}
 
         {/* Backup mnemonic modal */}

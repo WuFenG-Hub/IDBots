@@ -146,7 +146,7 @@ import {
 } from './services/userIdentityService';
 import { signOwnerBinding } from './services/ownerBindingService';
 import { listChainBackupStates, runChainBackup } from './services/chainBackupService';
-import { runChainBackupRestore } from './services/chainBackupRestoreService';
+import { probeChainBackupAvailability, runChainBackupRestore } from './services/chainBackupRestoreService';
 import { fetchMetaidInfoByAddress, fetchMetaidInfoByMetaid, fetchMetaidRestoreProfile, restoreMetabotFromMnemonicCore, type MetaidAddressInfo } from './services/metabotRestoreService';
 import { fetchDeepSeekBalance } from './services/deepseekBalanceService';
 import { requestMvcGasSubsidy } from './services/mvcSubsidyService';
@@ -15668,6 +15668,11 @@ if (!gotTheLock) {
       const relayCloseout = await applyRelayIdentityChange({ reason: 'import' });
       // Replacement invalidates stale Actor/grant state from the old identity.
       onHumanIdentityChanged();
+      const chainBackup = await probeChainBackupAvailability({ userStore: getUserIdentityStore() }).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn('[ChainBackup] post-import availability probe failed:', message);
+        return { success: false, hasBackup: false, botCount: 0, backupBotCount: 0, error: message };
+      });
       return {
         success: true,
         identity: toPublicUserIdentity(result.identity ?? null),
@@ -15675,6 +15680,7 @@ if (!gotTheLock) {
         subsidy: result.subsidy,
         chainSync: result.chainSync,
         relayCloseout,
+        chainBackup,
       };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);

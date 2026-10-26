@@ -184,6 +184,39 @@ inside encrypted object pins.
   next run re-packs the live set into fresh full segments (a new baseline), so
   restore read amplification stays bounded.
 
+### 6.4 Durable resume and idempotent publication
+
+- `chain_backup_runs` records an active plan, its stable `planHash`, progress,
+  manifest target/hash, attempts, and terminal state. `chain_backup_segment_uploads`
+  records each segment's `pending` / `uploading` / `published` state, pin ID,
+  attempt count, and error. Both are created idempotently on first backup use;
+  existing user databases are never reset.
+- A deterministic `segmentKey` identifies the same logical segment independent
+  of run timestamps. Resumed runs keep their original `createdAt` and manifest
+  `updatedAt`, so hashes are stable across process restarts. Changed source data
+  starts a new plan without invalidating reusable published segments.
+- Every upload state transition is saved immediately, not only after the whole
+  Bot completes. Before any retry with prior attempts, the publisher reconciles
+  by `segmentKey` (or legacy segment hash) and adopts an already accepted pin.
+  A second reconciliation with backoff is required before republishing a miss,
+  so an indexer that merely lags the chain is not treated as proof of absence.
+  A network read failure is never treated as proof that a new pin is needed.
+- Manifest writes use a deterministic content hash. A retry adopts the current
+  head when its content already matches; otherwise it advances the modify
+  target to the actual head rather than forking the revision chain.
+- Transient transport/rate-limit/server errors use bounded exponential backoff
+  with jitter. Exhaustion returns a resumable paused result, not an unrecoverable
+  failure. Permanent input, identity, permission, and funding errors do not
+  retry. The next click on the same backup button resumes pending plans.
+
+### 6.5 Oversized objects
+
+Objects that cannot fit the 256 KiB plaintext segment budget, including its
+framing allowance, are split into deterministic indexed `object_chunk` records.
+The manifest carries both original and chunk IDs. Restore reassembles chunks in
+order, verifies the original object hash, and only then selects latest versions
+and imports rows. This preserves byte-for-byte content and incremental dedup.
+
 ## 7. Backup flow
 
 1. User panel button **"一键备份 / Backup to chain"** (plus an opt-in nightly
@@ -198,14 +231,23 @@ inside encrypted object pins.
    (decision 4), indexer reachable.
 4. For every non-`welcome` Bot, including disabled Bots: extract whitelist rows
    → build objects → diff against the local journal (`chain_backup_state`) →
-   pack segments by UTF-8 byte size → encrypt → `createPin` per segment
+   create/resume a durable run → pack/chunk segments by UTF-8 byte size →
+   reconcile before each attempted pin → publish and checkpoint each segment
    (published by each Bot's own wallet, serialized through the existing spend
-   coordinator) → publish manifest modify. Disabled state is preserved in the
-   encrypted Bot profile and the public discovery entry.
-5. Progress + cost report in the UI (objects uploaded, bytes, SPACE spent).
+   coordinator) → reconcile/publish manifest. Disabled state is preserved in
+   the encrypted Bot profile and the public discovery entry.
+5. Progress + cost report in the UI (new objects/segments, resumed segments,
+  network retries, bytes, and SPACE spent); paused runs offer Continue Backup.
 
 ## 8. Restore flow (new device / cloud)
 
+0. Immediately after a successful user-mnemonic import, the main process runs a
+   read-only availability probe with bounded concurrency and returns its result
+   with the existing import response. A valid backup requires a manifest with a
+   non-empty segment list. Probe failure is logged but never blocks the import
+   or gets misreported as “no backup”. When a valid backup exists, the UI opens
+   an immediate restore prompt; only explicit user confirmation executes the
+   restore. No new IPC channel or silent auto-restore is introduced.
 1. Import user mnemonic → identity restored (existing
    `userIdentityService.restore`).
 2. Read `/info/bots` through the production address-scoped endpoint
@@ -263,9 +305,10 @@ inside encrypted object pins.
 
 - **MVP, implemented**: L0 + L3 envelope (scheme A) + manifest/object protocol
   + restore importer + one-click button.
-- **V2 data coverage, implemented**: Bot profiles/settings/capabilities, L1
-  continuity, L2 rolling 60-day conversations, disabled-Bot preservation,
-  cross-device incremental identity, and durable restore. Nightly automatic
+- **V2 data coverage and reliability, implemented**: Bot profiles/settings/
+  capabilities, L1 continuity, L2 rolling 60-day conversations, disabled-Bot
+  preservation, cross-device incremental identity, durable restore, resumable
+  idempotent backup, and oversized-object chunking. Nightly automatic
   incremental backup and checkpoint re-packing remain future work.
 - **V3**: scheme-B derived Bot wallets for new Bots, KB raw opt-in upload,
   cloud-version restore (no userData — consumes chain state only), user-
@@ -275,7 +318,7 @@ inside encrypted object pins.
 
 - Segment size target (256 KB, measured in UTF-8 bytes) vs pin-count trade-off
   — continue validating against production indexer fetch limits.
-- Whether restore should auto-run on first launch after mnemonic import, or
-  stay an explicit user action per Bot.
+- Restore timing is now settled: a successful mnemonic import triggers a
+  read-only probe and an immediate restore prompt, but never a silent restore.
 - Cloud version's write path: who pays for backups when there is no local
   wallet UX (still the user identity, but UX needs design).

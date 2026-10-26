@@ -1,6 +1,7 @@
 import { DEFAULT_MANAPI_BASE_URL } from './manapiPinService';
 import { restoreMetabotFromMnemonicCore, type MetaidRestoreProfile } from './metabotRestoreService';
 import { chainBackupObjectId, decryptJson, deriveBackupKey, objectId } from './chainBackupCrypto';
+import { materializeBackupObjects } from './chainBackupSegments';
 import {
   importBackupObjects,
   rebuildChainBackupStateFromManifest,
@@ -258,12 +259,14 @@ async function fetchUserBotsEntries(
 async function fetchLatestBackupManifest(
   entry: UserBotsManifestEntry,
   options?: FetchOptions,
+  strict = false,
 ): Promise<{ pinId: string; manifest: BackupManifest } | null> {
   const pins = await listOwnedPins({
     address: entry.mvcAddress,
     globalMetaId: entry.globalMetaId,
     path: CHAIN_BACKUP_MANIFEST_PATH,
   }, options);
+  let lastError: unknown = null;
   for (const pin of pins) {
     try {
       const pinId = headPinId(pin);
@@ -280,11 +283,78 @@ async function fetchLatestBackupManifest(
       ) {
         return { pinId, manifest: parsed };
       }
-    } catch {
+    } catch (error) {
+      lastError = error;
       continue;
     }
   }
+  if (strict && lastError) throw lastError;
   return null;
+}
+
+export interface ChainBackupAvailability {
+  success: boolean;
+  hasBackup: boolean;
+  botCount: number;
+  backupBotCount: number;
+  error?: string;
+}
+
+export async function probeChainBackupAvailability(deps: {
+  userStore: UserIdentityStore;
+  baseUrl?: string;
+}): Promise<ChainBackupAvailability> {
+  const identity = deps.userStore.get();
+  if (!identity?.globalmetaid?.trim()) {
+    return { success: false, hasBackup: false, botCount: 0, backupBotCount: 0, error: 'USER_IDENTITY_MISSING' };
+  }
+  let entries: UserBotsManifestEntry[];
+  try {
+    entries = await fetchUserBotsEntries(
+      { globalMetaId: identity.globalmetaid.trim(), mvcAddress: identity.mvc_address },
+      deps.baseUrl ? { baseUrl: deps.baseUrl } : undefined,
+    );
+  } catch (error) {
+    return {
+      success: false,
+      hasBackup: false,
+      botCount: 0,
+      backupBotCount: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  let nextIndex = 0;
+  let backupBotCount = 0;
+  let failure: unknown = null;
+  const workerCount = Math.min(4, entries.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < entries.length) {
+      const entry = entries[nextIndex];
+      nextIndex += 1;
+      try {
+        const manifestHit = await fetchLatestBackupManifest(
+          entry,
+          deps.baseUrl ? { baseUrl: deps.baseUrl } : undefined,
+          true,
+        );
+        if (manifestHit && manifestHit.manifest.segments.length > 0) backupBotCount += 1;
+      } catch (error) {
+        failure = error;
+      }
+    }
+  }));
+
+  if (failure) {
+    return {
+      success: false,
+      hasBackup: backupBotCount > 0,
+      botCount: entries.length,
+      backupBotCount,
+      error: failure instanceof Error ? failure.message : String(failure),
+    };
+  }
+  return { success: true, hasBackup: backupBotCount > 0, botCount: entries.length, backupBotCount };
 }
 
 function stringArray(value: unknown): string[] {
@@ -361,6 +431,7 @@ const PROFILE_UPDATE_FIELDS = [
 ] as const;
 
 function applyBackupProfile(
+  db: SqliteDatabase,
   metabotStore: MetabotStore,
   metabotId: number,
   profile: Record<string, unknown>,
@@ -375,6 +446,26 @@ function applyBackupProfile(
     ? metabotIdMap.get(sourceBossId) ?? null
     : null;
   metabotStore.updateMetabot(metabotId, rawPatch as MetabotUpdate);
+
+  if ('a2a_max_incoming_turns' in profile) {
+    db.run('UPDATE metabots SET a2a_max_incoming_turns = ? WHERE id = ?', [
+      profile.a2a_max_incoming_turns == null ? null : Number(profile.a2a_max_incoming_turns),
+      metabotId,
+    ]);
+  }
+  if ('a2a_bye_cooldown_ms' in profile) {
+    db.run('UPDATE metabots SET a2a_bye_cooldown_ms = ? WHERE id = ?', [
+      profile.a2a_bye_cooldown_ms == null ? null : Number(profile.a2a_bye_cooldown_ms),
+      metabotId,
+    ]);
+  }
+  if ('a2a_auto_reply_enabled' in profile) {
+    const enabled = profile.a2a_auto_reply_enabled;
+    db.run('UPDATE metabots SET a2a_auto_reply_enabled = ? WHERE id = ?', [
+      enabled == null ? null : (enabled === false || enabled === 0 ? 0 : 1),
+      metabotId,
+    ]);
+  }
 }
 
 function sourceMetabotId(profile: Record<string, unknown> | null): number | null {
@@ -501,7 +592,7 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
         botResult,
         botIndex: i,
         manifestHit,
-        objects: selectLatestBackupObjects(objects),
+        objects: selectLatestBackupObjects(materializeBackupObjects(objects)),
         warnings,
       });
     } catch (error) {
@@ -556,7 +647,7 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
     try {
       const profile = profileOf(item.objects);
       if (profile) {
-        applyBackupProfile(metabotStore, item.metabot.id, profile, metabotIdMap);
+        applyBackupProfile(db, metabotStore, item.metabot.id, profile, metabotIdMap);
         if (deps.applyAssignedSkills) {
           deps.applyAssignedSkills(item.metabot.id, stringArray(profile.allow_chat_skills));
         }

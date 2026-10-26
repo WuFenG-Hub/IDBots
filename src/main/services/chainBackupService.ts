@@ -1,52 +1,60 @@
-/**
- * Chain backup service: publishes every non-welcome Bot's restorable data to
- * the chain, encrypted to the owner's backup key (see chainBackupCrypto.ts).
- * Disabled Bots are included and remain disabled after a cross-device restore.
- *
- * Design: docs/design/2026-10-10-chain-backup-restore-design.md
- *
- * - Object pins at `/protocols/metabot-backup/object` carry encrypted segments
- *   (many small objects packed into one JSON container per pin).
- * - A public manifest at `/protocols/metabot-backup/manifest` (one per Bot,
- *   refreshed via `modify`) lists segment pinIds + content hashes only.
- * - Pins are published by each Bot's own wallet via createPin(), so the global
- *   traffic/selfpay fee setting applies and the write ledger is recorded.
- * - Incremental: objects are content-addressed (sha256 of canonical JSON);
- *   objects already listed in `chain_backup_state` are never re-uploaded.
- *
- * The whitelist lives in chainBackupData.ts and never includes user_identity
- * or raw metabot_wallets rows — the Bot mnemonic travels only inside the
- * encrypted `key_envelope` object.
- */
-
 import { createPin } from './metaidCore';
 import { buildModifyMetaidPayload } from './metaidPinMutationService';
 import { getRate as getGlobalFeeRate } from './feeRateStore';
 import { syncUserBotsToMobile } from './userBotsPinService';
-import { canonicalJson, deriveBackupKey, encryptJson, objectId } from './chainBackupCrypto';
+import { deriveBackupKey, objectId } from './chainBackupCrypto';
 import {
   extractBackupObjects,
   readChainBackupState,
   writeChainBackupState,
-  type ChainBackupObject,
   type ChainBackupSegmentRef,
 } from './chainBackupData';
-
-export { listChainBackupStates, type ChainBackupStateRow } from './chainBackupData';
-export type { ChainBackupSegmentRef } from './chainBackupData';
+import {
+  buildManifestContent,
+  buildObjectPinContent,
+  chainBackupSegmentRefKey,
+  packSegments,
+} from './chainBackupSegments';
+import {
+  CHAIN_BACKUP_MANIFEST_PATH,
+  CHAIN_BACKUP_OBJECT_PATH,
+} from './chainBackupProtocol';
+import {
+  ChainBackupPausedError,
+  computeBackupRetryDelayMs,
+  fetchChainBackupManifestState,
+  findPublishedSegmentPin,
+  isChainBackupNetworkError,
+} from './chainBackupPublication';
+import {
+  createChainBackupRun,
+  ensureChainBackupRunSchema,
+  getActiveChainBackupRun,
+  getChainBackupSegmentUpload,
+  saveChainBackupRun,
+  saveChainBackupSegmentUpload,
+  type ChainBackupRunRow,
+  type ChainBackupSegmentUploadRow,
+} from './chainBackupRunStore';
 import type { SqliteDatabase } from '../sqliteTypes';
 import type { MetabotStore } from '../metabotStore';
 import type { UserIdentityStore } from '../userIdentityStore';
 import type { Metabot } from '../types/metabot';
 
-export const CHAIN_BACKUP_OBJECT_PATH = '/protocols/metabot-backup/object';
-export const CHAIN_BACKUP_MANIFEST_PATH = '/protocols/metabot-backup/manifest';
-export const CHAIN_BACKUP_VERSION = 1;
-export const CHAIN_BACKUP_CIPHER = 'aes-256-gcm';
-export const CHAIN_BACKUP_KDF = 'hkdf-sha256:user-globalmetaid';
+export { listChainBackupStates, type ChainBackupStateRow } from './chainBackupData';
+export type { ChainBackupSegmentRef } from './chainBackupData';
+export { buildManifestContent, buildObjectPinContent } from './chainBackupSegments';
+export {
+  CHAIN_BACKUP_OBJECT_PATH,
+  CHAIN_BACKUP_MANIFEST_PATH,
+  CHAIN_BACKUP_VERSION,
+  CHAIN_BACKUP_CIPHER,
+  CHAIN_BACKUP_KDF,
+  CHAIN_BACKUP_SEGMENT_PLAINTEXT_LIMIT,
+} from './chainBackupProtocol';
 
-/** Plaintext budget per segment pin; keeps single pins well under the 5 MiB /file ceiling. */
-export const CHAIN_BACKUP_SEGMENT_PLAINTEXT_LIMIT = 256 * 1024;
+const DEFAULT_NETWORK_ATTEMPTS = 4;
+const RECONCILE_MISS_CONFIRMATIONS = 2;
 
 export interface ChainBackupProgress {
   phase: 'extract' | 'publish' | 'manifest' | 'done' | 'error';
@@ -55,6 +63,9 @@ export interface ChainBackupProgress {
   botCount?: number;
   segmentsDone?: number;
   segmentsTotal?: number;
+  resumedSegments?: number;
+  retryAttempt?: number;
+  retryDelayMs?: number;
   message?: string;
 }
 
@@ -64,6 +75,8 @@ export interface ChainBackupBotResult {
   uploadedObjects: number;
   skippedObjects: number;
   segments: number;
+  resumedSegments: number;
+  networkRetries: number;
   bytes: number;
   costSats: number;
   manifestPinId?: string;
@@ -72,96 +85,15 @@ export interface ChainBackupBotResult {
 
 export interface ChainBackupResult {
   success: boolean;
+  resumable?: boolean;
   bots: ChainBackupBotResult[];
   totalBytes: number;
   totalCostSats: number;
-  /** Whether the /info/bots discovery manifest was refreshed before backing up. */
+  discoveryNetworkRetries?: number;
   botsManifestSynced?: boolean;
   botsManifestError?: string;
   error?: string;
 }
-
-// ---------------------------------------------------------------------------
-// segment packing + envelope
-// ---------------------------------------------------------------------------
-
-function packSegments(botGlobalMetaId: string, objects: ChainBackupObject[]): Array<{
-  plaintext: Record<string, unknown>;
-  objects: ChainBackupObject[];
-}> {
-  const segments: Array<{ plaintext: Record<string, unknown>; objects: ChainBackupObject[] }> = [];
-  let current: ChainBackupObject[] = [];
-  let currentSize = 64; // envelope framing allowance
-  for (const obj of objects) {
-    const size = Buffer.byteLength(canonicalJson(obj), 'utf8');
-    if (current.length > 0 && currentSize + size > CHAIN_BACKUP_SEGMENT_PLAINTEXT_LIMIT) {
-      segments.push(buildSegment(botGlobalMetaId, current));
-      current = [];
-      currentSize = 64;
-    }
-    current.push(obj);
-    currentSize += size;
-  }
-  if (current.length > 0) {
-    segments.push(buildSegment(botGlobalMetaId, current));
-  }
-  return segments;
-}
-
-function buildSegment(botGlobalMetaId: string, objects: ChainBackupObject[]): {
-  plaintext: Record<string, unknown>;
-  objects: ChainBackupObject[];
-} {
-  return {
-    plaintext: {
-      version: CHAIN_BACKUP_VERSION,
-      bot: botGlobalMetaId,
-      createdAt: Math.floor(Date.now() / 1000),
-      objects: objects.map((o) => ({ id: o.id, kind: o.kind, data: o.data })),
-    },
-    objects,
-  };
-}
-
-/** On-chain object-pin content (public envelope around the encrypted segment). */
-export function buildObjectPinContent(
-  backupKey: Buffer,
-  botGlobalMetaId: string,
-  segmentPlaintext: Record<string, unknown>,
-): string {
-  const encrypted = encryptJson(backupKey, segmentPlaintext);
-  return canonicalJson({
-    version: CHAIN_BACKUP_VERSION,
-    bot: botGlobalMetaId,
-    segment: objectId(segmentPlaintext),
-    cipher: CHAIN_BACKUP_CIPHER,
-    kdf: CHAIN_BACKUP_KDF,
-    payload: encrypted.toString('base64'),
-  });
-}
-
-/** Public manifest content (hashes/pointers only, no secrets). */
-export function buildManifestContent(input: {
-  botGlobalMetaId: string;
-  botName: string;
-  segments: ChainBackupSegmentRef[];
-}): string {
-  const totalObjects = input.segments.reduce((sum, s) => sum + s.objectIds.length, 0);
-  const totalBytes = input.segments.reduce((sum, s) => sum + s.bytes, 0);
-  return canonicalJson({
-    version: CHAIN_BACKUP_VERSION,
-    bot: input.botGlobalMetaId,
-    botName: input.botName,
-    keyCustody: 'envelope',
-    updatedAt: Math.floor(Date.now() / 1000),
-    segments: input.segments,
-    stats: { objects: totalObjects, bytes: totalBytes },
-  });
-}
-
-// ---------------------------------------------------------------------------
-// backup run
-// ---------------------------------------------------------------------------
 
 export interface RunChainBackupDeps {
   db: SqliteDatabase;
@@ -169,10 +101,11 @@ export interface RunChainBackupDeps {
   userStore: UserIdentityStore;
   saveDb?: () => void;
   onProgress?: (progress: ChainBackupProgress) => void;
-  /** Test hook. */
   createPinImpl?: typeof createPin;
-  /** Test hook. */
   syncBotsManifestImpl?: typeof syncUserBotsToMobile;
+  findPublishedSegmentPinImpl?: typeof findPublishedSegmentPin;
+  fetchManifestStateImpl?: typeof fetchChainBackupManifestState;
+  maxNetworkAttempts?: number;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -180,38 +113,110 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function parseStringArray(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function refFromUpload(row: ChainBackupSegmentUploadRow): ChainBackupSegmentRef {
+  if (!row.pin_id) throw new Error(`segment ${row.segment_key} has no published pin`);
+  return {
+    pinId: row.pin_id,
+    segment: row.segment_hash,
+    segmentKey: row.segment_key,
+    bytes: row.bytes,
+    kinds: parseStringArray(row.kinds_json),
+    objectIds: parseStringArray(row.object_ids_json),
+  };
+}
+
+function normalizeSegmentRefs(botGlobalMetaId: string, refs: ChainBackupSegmentRef[]): ChainBackupSegmentRef[] {
+  const seen = new Set<string>();
+  const normalized: ChainBackupSegmentRef[] = [];
+  for (const ref of refs) {
+    const key = ref.pinId || ref.segment;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({ ...ref, segmentKey: chainBackupSegmentRefKey(botGlobalMetaId, ref) });
+  }
+  return normalized;
+}
+
+function manifestHash(content: string): string {
+  return objectId(JSON.parse(content));
+}
+
+async function syncDiscoveryWithRetry(
+  deps: RunChainBackupDeps,
+  syncBotsManifest: typeof syncUserBotsToMobile,
+  maxAttempts: number,
+  sleep: (ms: number) => Promise<void>,
+): Promise<{ success: boolean; error?: string; resumable: boolean; retries: number }> {
+  let retries = 0;
+  while (true) {
+    try {
+      const sync = await syncBotsManifest(deps.userStore, deps.metabotStore);
+      if (sync.success) return { success: true, resumable: false, retries };
+      const message = sync.error ?? 'BOTS_MANIFEST_SYNC_FAILED';
+      if (!isChainBackupNetworkError(new Error(message))) {
+        return { success: false, error: message, resumable: false, retries };
+      }
+      retries += 1;
+      if (retries >= maxAttempts) return { success: false, error: message, resumable: true, retries };
+      const delay = computeBackupRetryDelayMs(retries);
+      deps.onProgress?.({ phase: 'manifest', retryAttempt: retries, retryDelayMs: delay });
+      await sleep(delay);
+    } catch (error) {
+      const message = errorMessage(error);
+      if (!isChainBackupNetworkError(error)) {
+        return { success: false, error: message, resumable: false, retries };
+      }
+      retries += 1;
+      if (retries >= maxAttempts) return { success: false, error: message, resumable: true, retries };
+      const delay = computeBackupRetryDelayMs(retries);
+      deps.onProgress?.({ phase: 'manifest', retryAttempt: retries, retryDelayMs: delay });
+      await sleep(delay);
+    }
+  }
+}
+
 export async function runChainBackup(deps: RunChainBackupDeps): Promise<ChainBackupResult> {
   const { db, metabotStore, userStore } = deps;
   const createPinFn = deps.createPinImpl ?? createPin;
   const syncBotsManifest = deps.syncBotsManifestImpl ?? syncUserBotsToMobile;
+  const findSegmentPin = deps.findPublishedSegmentPinImpl ?? findPublishedSegmentPin;
+  const fetchManifestState = deps.fetchManifestStateImpl ?? fetchChainBackupManifestState;
   const sleep = deps.sleep ?? defaultSleep;
-  const emit = (p: ChainBackupProgress) => deps.onProgress?.(p);
+  const maxAttempts = Math.max(1, Math.floor(deps.maxNetworkAttempts ?? DEFAULT_NETWORK_ATTEMPTS));
+  const emit = (progress: ChainBackupProgress) => deps.onProgress?.(progress);
 
   const identity = userStore.get();
   if (!identity?.mnemonic || !identity.globalmetaid?.trim()) {
     return { success: false, bots: [], totalBytes: 0, totalCostSats: 0, error: 'USER_IDENTITY_MISSING' };
   }
+  ensureChainBackupRunSchema(db);
   const backupKey = deriveBackupKey(identity.mnemonic, identity.globalmetaid.trim());
-
-  // Refresh the public /info/bots discovery manifest first — without it a new
-  // device cannot find the per-Bot backup manifests at restore time. Failure
-  // here does not abort the backup (an older manifest pin may still exist);
-  // the result flags it so the UI can warn.
-  let botsManifestSynced = false;
-  let botsManifestError: string | undefined;
-  try {
-    const sync = await syncBotsManifest(userStore, metabotStore);
-    botsManifestSynced = sync.success;
-    if (!sync.success) botsManifestError = sync.error ?? 'BOTS_MANIFEST_SYNC_FAILED';
-  } catch (error) {
-    botsManifestError = error instanceof Error ? error.message : String(error);
-  }
+  const discovery = await syncDiscoveryWithRetry(deps, syncBotsManifest, maxAttempts, sleep);
 
   const bots = metabotStore
     .listMetabots()
     .filter((bot) => bot.metabot_type !== 'welcome' && (bot.globalmetaid ?? '').trim());
-
-  const result: ChainBackupResult = { success: true, bots: [], totalBytes: 0, totalCostSats: 0 };
+  const result: ChainBackupResult = {
+    success: true,
+    resumable: discovery.resumable,
+    bots: [],
+    totalBytes: 0,
+    totalCostSats: 0,
+    discoveryNetworkRetries: discovery.retries,
+  };
   const feeRate = getGlobalFeeRate('mvc');
 
   for (let i = 0; i < bots.length; i += 1) {
@@ -223,127 +228,335 @@ export async function runChainBackup(deps: RunChainBackupDeps): Promise<ChainBac
       uploadedObjects: 0,
       skippedObjects: 0,
       segments: 0,
+      resumedSegments: 0,
+      networkRetries: 0,
       bytes: 0,
       costSats: 0,
     };
     result.bots.push(botResult);
+    let run: ChainBackupRunRow | null = null;
     try {
       emit({ phase: 'extract', botName: bot.name, botIndex: i, botCount: bots.length });
-
       const wallet = metabotStore.getMetabotWalletByMetabotId(bot.id);
       const objects = extractBackupObjects(db, bot.id, wallet, {
         bot,
         includeShared: bot.metabot_type === 'twin',
       });
       const state = readChainBackupState(db, botGid);
-      const alreadyUploaded = new Set<string>(
-        JSON.parse(state?.uploaded_object_ids_json || '[]') as string[],
+      const alreadyUploaded = new Set<string>(parseStringArray(state?.uploaded_object_ids_json || '[]'));
+      const previousSegments = normalizeSegmentRefs(
+        botGid,
+        state ? JSON.parse(state.segments_json || '[]') as ChainBackupSegmentRef[] : [],
       );
-      const previousSegments = state
-        ? (JSON.parse(state.segments_json || '[]') as ChainBackupSegmentRef[])
-        : [];
-
-      const newObjects = objects.filter((o) => !alreadyUploaded.has(o.id));
+      const newObjects = objects.filter((obj) => !alreadyUploaded.has(obj.id));
       botResult.skippedObjects = objects.length - newObjects.length;
+      const planHash = objectId({
+        newObjectIds: newObjects.map((obj) => obj.id),
+        previousSegments: previousSegments.map((ref) => ({
+          pinId: ref.pinId,
+          segment: ref.segment,
+          segmentKey: ref.segmentKey,
+          objectIds: ref.objectIds,
+        })),
+      });
+
+      run = getActiveChainBackupRun(db, botGid, planHash)
+        ?? createChainBackupRun(db, { botGlobalMetaId: botGid, planHash, totalSegments: 0 });
+      const segments = packSegments(botGid, newObjects, Math.floor(run.created_at / 1000));
+      run.total_segments = segments.length;
+      run.last_error = null;
+      saveChainBackupRun(db, run);
+      deps.saveDb?.();
 
       const newSegmentRefs: ChainBackupSegmentRef[] = [];
-      const segments = packSegments(botGid, newObjects);
       emit({
-        phase: 'publish', botName: bot.name, botIndex: i, botCount: bots.length,
-        segmentsDone: 0, segmentsTotal: segments.length,
+        phase: 'publish',
+        botName: bot.name,
+        botIndex: i,
+        botCount: bots.length,
+        segmentsDone: 0,
+        segmentsTotal: segments.length,
+        resumedSegments: 0,
       });
 
       for (let s = 0; s < segments.length; s += 1) {
-        const segment = segments[s];
-        const content = buildObjectPinContent(backupKey, botGid, segment.plaintext);
-        const pin = await createPinFn(metabotStore, bot.id, {
-          operation: 'create',
-          path: CHAIN_BACKUP_OBJECT_PATH,
-          encryption: '0',
-          version: '1.0.0',
-          contentType: 'application/json',
-          payload: content,
-        }, { feeRate, origin: 'internal:chain-backup' });
-        const contentBytes = Buffer.byteLength(content, 'utf8');
-        newSegmentRefs.push({
-          pinId: pin.pinId,
-          segment: objectId(segment.plaintext),
-          bytes: contentBytes,
-          kinds: [...new Set(segment.objects.map((o) => o.kind))],
-          objectIds: segment.objects.map((o) => o.id),
-        });
-        botResult.bytes += contentBytes;
-        botResult.costSats += pin.totalCost || 0;
+        const packed = segments[s];
+        let upload = getChainBackupSegmentUpload(db, botGid, packed.segmentKey);
+        if (upload?.status === 'published' && upload.pin_id) {
+          upload.run_id = run.run_id;
+          saveChainBackupSegmentUpload(db, upload);
+          newSegmentRefs.push(refFromUpload(upload));
+          botResult.resumedSegments += 1;
+        } else {
+          const plaintextCreatedAt = upload?.plaintext_created_at ?? Number(packed.plaintext.createdAt);
+          const plaintext = { ...packed.plaintext, createdAt: plaintextCreatedAt };
+          const segmentHash = objectId(plaintext);
+          upload = upload ?? {
+            bot_globalmetaid: botGid,
+            segment_key: packed.segmentKey,
+            run_id: run.run_id,
+            segment_hash: segmentHash,
+            pin_id: null,
+            status: 'pending',
+            object_ids_json: JSON.stringify(packed.journalObjectIds),
+            kinds_json: JSON.stringify([...new Set(packed.objects.map((obj) => obj.kind))]),
+            plaintext_created_at: plaintextCreatedAt,
+            bytes: 0,
+            attempt_count: 0,
+            last_error: null,
+            created_at: Date.now(),
+            updated_at: Date.now(),
+          };
+          upload.run_id = run.run_id;
+          upload.segment_hash = segmentHash;
+          upload.object_ids_json = JSON.stringify(packed.journalObjectIds);
+          upload.kinds_json = JSON.stringify([...new Set(packed.objects.map((obj) => obj.kind))]);
+          upload.plaintext_created_at = plaintextCreatedAt;
+          saveChainBackupSegmentUpload(db, upload);
+          deps.saveDb?.();
+
+          let retries = 0;
+          let reconcileMisses = 0;
+          while (true) {
+            try {
+              if (upload.attempt_count > 0) {
+                const existing = await findSegmentPin({
+                  mvcAddress: bot.mvc_address,
+                  botGlobalMetaId: botGid,
+                  segmentKey: packed.segmentKey,
+                  segmentHash,
+                });
+                if (existing) {
+                  upload.status = 'published';
+                  upload.pin_id = existing.pinId;
+                  upload.last_error = null;
+                  if (!upload.bytes) upload.bytes = Buffer.byteLength(buildObjectPinContent(backupKey, botGid, plaintext, packed.segmentKey), 'utf8');
+                  saveChainBackupSegmentUpload(db, upload);
+                  deps.saveDb?.();
+                  newSegmentRefs.push(refFromUpload(upload));
+                  botResult.resumedSegments += 1;
+                  break;
+                }
+                reconcileMisses += 1;
+                if (reconcileMisses < RECONCILE_MISS_CONFIRMATIONS) {
+                  const delay = computeBackupRetryDelayMs(reconcileMisses);
+                  emit({
+                    phase: 'publish',
+                    botName: bot.name,
+                    botIndex: i,
+                    botCount: bots.length,
+                    segmentsDone: s,
+                    segmentsTotal: segments.length,
+                    retryAttempt: reconcileMisses,
+                    retryDelayMs: delay,
+                  });
+                  await sleep(delay);
+                  continue;
+                }
+              }
+
+              upload.status = 'uploading';
+              upload.attempt_count += 1;
+              upload.last_error = null;
+              saveChainBackupSegmentUpload(db, upload);
+              deps.saveDb?.();
+              const content = buildObjectPinContent(backupKey, botGid, plaintext, packed.segmentKey);
+              const pin = await createPinFn(metabotStore, bot.id, {
+                operation: 'create',
+                path: CHAIN_BACKUP_OBJECT_PATH,
+                encryption: '0',
+                version: '1.0.0',
+                contentType: 'application/json',
+                payload: content,
+              }, { feeRate, origin: 'internal:chain-backup' });
+              upload.status = 'published';
+              upload.pin_id = pin.pinId;
+              upload.bytes = Buffer.byteLength(content, 'utf8');
+              upload.last_error = null;
+              saveChainBackupSegmentUpload(db, upload);
+              deps.saveDb?.();
+              newSegmentRefs.push(refFromUpload(upload));
+              botResult.segments += 1;
+              botResult.bytes += upload.bytes;
+              botResult.costSats += pin.totalCost || 0;
+              break;
+            } catch (error) {
+              const message = errorMessage(error);
+              upload.status = 'pending';
+              upload.last_error = message;
+              saveChainBackupSegmentUpload(db, upload);
+              deps.saveDb?.();
+              if (!isChainBackupNetworkError(error)) throw error;
+              retries += 1;
+              botResult.networkRetries += 1;
+              if (retries >= maxAttempts) throw new ChainBackupPausedError(message);
+              const delay = computeBackupRetryDelayMs(retries);
+              emit({
+                phase: 'publish',
+                botName: bot.name,
+                botIndex: i,
+                botCount: bots.length,
+                segmentsDone: s,
+                segmentsTotal: segments.length,
+                retryAttempt: retries,
+                retryDelayMs: delay,
+              });
+              await sleep(delay);
+            }
+          }
+        }
+        run.published_segments = newSegmentRefs.length;
+        saveChainBackupRun(db, run);
+        deps.saveDb?.();
         emit({
-          phase: 'publish', botName: bot.name, botIndex: i, botCount: bots.length,
-          segmentsDone: s + 1, segmentsTotal: segments.length,
+          phase: 'publish',
+          botName: bot.name,
+          botIndex: i,
+          botCount: bots.length,
+          segmentsDone: s + 1,
+          segmentsTotal: segments.length,
+          resumedSegments: botResult.resumedSegments,
         });
         if (s + 1 < segments.length) await sleep(500);
       }
 
-      emit({ phase: 'manifest', botName: bot.name, botIndex: i, botCount: bots.length });
-      const allSegments = [...previousSegments, ...newSegmentRefs];
+      const allSegments = normalizeSegmentRefs(botGid, [...previousSegments, ...newSegmentRefs]);
       const manifestContent = buildManifestContent({
         botGlobalMetaId: botGid,
         botName: bot.name,
         segments: allSegments,
+        updatedAt: Math.floor(run.created_at / 1000),
       });
+      const expectedManifestHash = manifestHash(manifestContent);
+      run.manifest_hash = expectedManifestHash;
+      run.manifest_target_pinid = run.manifest_target_pinid ?? run.manifest_pinid ?? state?.manifest_pinid ?? null;
+      run.published_segments = segments.length;
+      saveChainBackupRun(db, run);
+      deps.saveDb?.();
+      emit({ phase: 'manifest', botName: bot.name, botIndex: i, botCount: bots.length });
 
-      let manifestPinId: string;
-      if (state?.manifest_pinid) {
-        const modify = await createPinFn(
-          metabotStore,
-          bot.id,
-          buildModifyMetaidPayload({ targetPinId: state.manifest_pinid, payload: manifestContent }),
-          { feeRate, origin: 'internal:chain-backup' },
-        );
-        // Advance the modify target to the newest revision each run — the
-        // gig-square / MetaApp convention (target the chain head) — instead of
-        // re-modifying the original create pin forever, which forks the
-        // revision chain at the root on every backup after the first.
-        const nextPinId = typeof modify.pinId === 'string' ? modify.pinId.trim() : '';
-        manifestPinId = nextPinId || state.manifest_pinid;
-        botResult.costSats += modify.totalCost || 0;
-      } else {
-        const created = await createPinFn(metabotStore, bot.id, {
-          operation: 'create',
-          path: CHAIN_BACKUP_MANIFEST_PATH,
-          encryption: '0',
-          version: '1.0.0',
-          contentType: 'application/json',
-          payload: manifestContent,
-        }, { feeRate, origin: 'internal:chain-backup' });
-        manifestPinId = created.pinId;
-        botResult.costSats += created.totalCost || 0;
+      let manifestPinId = '';
+      let manifestRetries = 0;
+      let manifestReconcileMisses = 0;
+      while (true) {
+        try {
+          if (run.manifest_attempts > 0) {
+            const current = await fetchManifestState({
+              mvcAddress: bot.mvc_address,
+              botGlobalMetaId: botGid,
+            });
+            if (current && manifestHash(current.content) === expectedManifestHash) {
+              manifestPinId = current.pinId;
+              break;
+            }
+            manifestReconcileMisses += 1;
+            if (manifestReconcileMisses < RECONCILE_MISS_CONFIRMATIONS) {
+              const delay = computeBackupRetryDelayMs(manifestReconcileMisses);
+              emit({
+                phase: 'manifest',
+                botName: bot.name,
+                botIndex: i,
+                botCount: bots.length,
+                retryAttempt: manifestReconcileMisses,
+                retryDelayMs: delay,
+              });
+              await sleep(delay);
+              continue;
+            }
+            if (current) {
+              run.manifest_target_pinid = current.pinId;
+              saveChainBackupRun(db, run);
+              deps.saveDb?.();
+            }
+          }
+
+          run.manifest_attempts += 1;
+          saveChainBackupRun(db, run);
+          deps.saveDb?.();
+          if (run.manifest_target_pinid) {
+            const modified = await createPinFn(
+              metabotStore,
+              bot.id,
+              buildModifyMetaidPayload({ targetPinId: run.manifest_target_pinid, payload: manifestContent }),
+              { feeRate, origin: 'internal:chain-backup' },
+            );
+            manifestPinId = modified.pinId?.trim() || run.manifest_target_pinid;
+            botResult.costSats += modified.totalCost || 0;
+          } else {
+            const created = await createPinFn(metabotStore, bot.id, {
+              operation: 'create',
+              path: CHAIN_BACKUP_MANIFEST_PATH,
+              encryption: '0',
+              version: '1.0.0',
+              contentType: 'application/json',
+              payload: manifestContent,
+            }, { feeRate, origin: 'internal:chain-backup' });
+            manifestPinId = created.pinId;
+            botResult.costSats += created.totalCost || 0;
+          }
+          break;
+        } catch (error) {
+          const message = errorMessage(error);
+          run.last_error = message;
+          saveChainBackupRun(db, run);
+          deps.saveDb?.();
+          if (!isChainBackupNetworkError(error)) throw error;
+          manifestRetries += 1;
+          botResult.networkRetries += 1;
+          if (manifestRetries >= maxAttempts) throw new ChainBackupPausedError(message);
+          const delay = computeBackupRetryDelayMs(manifestRetries);
+          emit({
+            phase: 'manifest',
+            botName: bot.name,
+            botIndex: i,
+            botCount: bots.length,
+            retryAttempt: manifestRetries,
+            retryDelayMs: delay,
+          });
+          await sleep(delay);
+        }
       }
 
-      const uploadedIds = [...alreadyUploaded, ...newObjects.map((o) => o.id)];
+      run.manifest_pinid = manifestPinId;
+      run.status = 'complete';
+      run.last_error = null;
+      saveChainBackupRun(db, run);
       writeChainBackupState(db, {
         botGlobalMetaId: botGid,
         manifestPinId,
         segments: allSegments,
-        uploadedObjectIds: uploadedIds,
+        uploadedObjectIds: [
+          ...alreadyUploaded,
+          ...newObjects.filter((obj) => !alreadyUploaded.has(obj.id)).map((obj) => obj.id),
+        ],
         lastBackupAt: Date.now(),
       });
       deps.saveDb?.();
 
       botResult.uploadedObjects = newObjects.length;
-      botResult.segments = newSegmentRefs.length;
       botResult.manifestPinId = manifestPinId;
       result.totalBytes += botResult.bytes;
       result.totalCostSats += botResult.costSats;
     } catch (error) {
-      botResult.error = error instanceof Error ? error.message : String(error);
+      const paused = error instanceof ChainBackupPausedError;
+      botResult.error = paused ? 'BACKUP_NETWORK_PAUSED' : errorMessage(error);
+      if (run) {
+        run.last_error = botResult.error;
+        saveChainBackupRun(db, run);
+        deps.saveDb?.();
+      }
+      if (paused) result.resumable = true;
       result.success = false;
       emit({ phase: 'error', botName: bot.name, botIndex: i, botCount: bots.length, message: botResult.error });
     }
   }
 
-  result.botsManifestSynced = botsManifestSynced;
-  result.botsManifestError = botsManifestError;
-  if (!botsManifestSynced) {
+  result.botsManifestSynced = discovery.success;
+  result.botsManifestError = discovery.error;
+  if (!discovery.success) {
     result.success = false;
-    result.error = botsManifestError ?? 'BOTS_MANIFEST_SYNC_FAILED';
+    result.error = discovery.error ?? 'BOTS_MANIFEST_SYNC_FAILED';
+    if (discovery.resumable) result.resumable = true;
   }
   emit({ phase: 'done', botCount: bots.length });
   return result;
