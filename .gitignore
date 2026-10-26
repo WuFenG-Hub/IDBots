@@ -756,3 +756,6 @@ blob-report/
 !tests/scheduledTaskMemoryAccess.test.mjs
 !tests/markdownContentLinkifyNoDoubleWrap.test.tsx
 !tests/a2aMessageItemIdAnchors.test.tsx
+
+# Poll-loop backoff ladder + circuit breaker (PR #101)
+!tests/pollBackoffController.test.mjs
