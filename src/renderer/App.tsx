@@ -229,12 +229,17 @@ const App: React.FC = () => {
   const checkAndShowUpdateNotification = useCallback(async () => {
     try {
       const currentVersion = await window.electron.appInfo.getVersion();
+      // Force-show (dev test path) is consulted first: it must bypass every
+      // gate below, including the fresh-install classification.
+      const forceShow = await window.electron.updateNotification.shouldForceShow();
 
-      // Get or set first install version
-      const firstInstallVersion = await window.electron.updateNotification.getFirstInstallVersion();
-      if (!firstInstallVersion) {
-        // This is a fresh install
-        await window.electron.updateNotification.setFirstInstallVersion(currentVersion);
+      // Resolve (and seed once) the first-install version. An upgrader from
+      // <= 1.0.7 — which never recorded the key — is detected main-side from
+      // prior data and seeded at the legacy floor instead of the current
+      // version; a fresh install seeds at the current version.
+      const firstInstallVersion = await window.electron.updateNotification.resolveFirstInstallVersion(currentVersion);
+      if (!forceShow && (!firstInstallVersion || firstInstallVersion === currentVersion)) {
+        // Fresh install: upgrade notices never apply.
         return;
       }
 
@@ -242,12 +247,14 @@ const App: React.FC = () => {
       const notificationsData = await loadUpdateNotifications();
       if (!notificationsData) return;
 
-      // Get notification for current version
-      const notification = getNotificationForVersion(notificationsData, currentVersion);
+      // Notification for the running version; under force-show, fall back to
+      // the newest defined notice so the modal is previewable regardless of
+      // which version the announcement targets.
+      let notification = getNotificationForVersion(notificationsData, currentVersion);
+      if (!notification && forceShow) {
+        notification = notificationsData.notifications[notificationsData.notifications.length - 1] ?? null;
+      }
       if (!notification) return;
-
-      // Check if force show is enabled (for testing)
-      const forceShow = await window.electron.updateNotification.shouldForceShow();
 
       // Check if already viewed
       const hasViewed = await window.electron.updateNotification.hasViewed(currentVersion);

@@ -196,6 +196,7 @@ import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/me
 import {
   getFirstInstallVersion,
   setFirstInstallVersion,
+  resolveFirstInstallVersion,
   hasViewedNotification,
   markNotificationAsViewed,
 } from './updateNotificationStore';
@@ -10583,6 +10584,10 @@ if (!gotTheLock) {
   // Update notification IPC handlers
   registerIpcHandler('updateNotification:shouldForceShow', () => {
     return process.env.FORCE_UPDATE_NOTIFICATION === '1';
+  });
+  registerIpcHandler('updateNotification:resolveFirstInstallVersion', (_event, version: unknown) => {
+    if (typeof version !== 'string') return null;
+    return resolveFirstInstallVersion(getStore(), version);
   });
   registerIpcHandler('updateNotification:getFirstInstallVersion', () => {
     return getFirstInstallVersion(getStore());
