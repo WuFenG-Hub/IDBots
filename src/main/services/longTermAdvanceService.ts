@@ -675,6 +675,14 @@ export class LongTermAdvanceService {
         // P1: supervision outranks the plain quiet push — a stalling or
         // looping delegation gets a supervision turn, not just "push it".
         if (supervision) return supervision.reasons;
+        // Special case: just began but no session bound yet — the twin called
+        // longterm_subtask_begin but never started the first work turn. This
+        // should not happen (the skill instructs the twin to push immediately
+        // after begin), but when it does the heartbeat must not wait 30 min.
+        const latestEvent = detail.events[0];
+        if (!current.sessionId && latestEvent?.kind === 'began') {
+          return ['current sub-project just began but no work session was started — starting first turn'];
+        }
         // A fresh begin/work event means a turn just ran — only re-push once
         // the work has gone quiet for a full throttle window.
         if (quietMs > this.nudgeThrottleMs) {

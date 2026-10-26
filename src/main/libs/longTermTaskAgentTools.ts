@@ -420,7 +420,7 @@ export function buildLongTermTaskAgentTools(deps: { tool: SdkToolFactory; contro
 
   const beginSubtask = tool(
     'longterm_subtask_begin',
-    'Start pushing a sub-project (pins it as the board focus). Refused while its dependencies are not yet accepted. Pick the execution channel you and the owner agreed on.',
+    'Start pushing a sub-project (pins it as the board focus). Refused while its dependencies are not yet accepted. Pick the execution channel you and the owner agreed on. IMPORTANT: After calling this tool, you MUST immediately begin the first work step in the same turn or a follow-up message — do not wait for the heartbeat to trigger work. The heartbeat is only a fallback mechanism.',
     {
       subtaskId: z.string().min(1),
       channel: z.enum(CHANNEL_ENUM).optional(),
