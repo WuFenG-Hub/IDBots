@@ -56,6 +56,11 @@ async function currentSessionId(page: import('@playwright/test').Page): Promise<
   return id;
 }
 
+async function startNewChat(page: import('@playwright/test').Page): Promise<void> {
+  await page.getByRole('button', { name: 'Sessions' }).click();
+  await page.getByRole('button', { name: 'New chat' }).click();
+}
+
 async function sendMessage(page: import('@playwright/test').Page, text: string): Promise<void> {
   await page.getByPlaceholder('Type a message…').fill(text);
   await page.getByRole('button', { name: 'Send' }).click();
@@ -68,6 +73,7 @@ function message(id: string, type: string, content: string, metadata?: Record<st
 test('WP1 regression: first chat binds the actual Twin, not metabotId=null', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
+  await startNewChat(page);
   await sendMessage(page, 'bind my Twin');
   const options = await page.evaluate(() => {
     const w = window as unknown as Wp0Window;
@@ -89,6 +95,7 @@ test('WP1 regression: another session cannot append into the open transcript', a
 test('WP1 regression: another session cannot complete the visible turn', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
+  await startNewChat(page);
   await sendMessage(page, 'keep this turn running');
   await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
   await emit(page, 'onStreamComplete', { sessionId: 'background-session', claudeSessionId: null });
@@ -113,6 +120,7 @@ test('WP1 regression: another session cannot raise a permission sheet', async ({
 test('WP1 regression: unknown remote resolution is not displayed as approval', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
+  await startNewChat(page);
   await sendMessage(page, 'start the permission session');
   const sessionId = await currentSessionId(page);
   await emit(page, 'onStreamPermission', {
@@ -133,6 +141,7 @@ test('WP1 regression: unknown remote resolution is not displayed as approval', a
 test('WP1 regression: tool_use is not rendered as an ordinary Assistant answer', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
+  await startNewChat(page);
   await sendMessage(page, 'start the tool session');
   const sessionId = await currentSessionId(page);
   await emit(page, 'onStreamMessage', {
@@ -145,6 +154,7 @@ test('WP1 regression: tool_use is not rendered as an ordinary Assistant answer',
 test('WP1 regression: raw thinking is not rendered as an ordinary Assistant answer', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
+  await startNewChat(page);
   await sendMessage(page, 'start the thinking session');
   const sessionId = await currentSessionId(page);
   await emit(page, 'onStreamMessage', {
@@ -157,6 +167,7 @@ test('WP1 regression: raw thinking is not rendered as an ordinary Assistant answ
 test('WP1 regression: AskUserQuestion renders real options, not only JSON allow/deny', async ({ page }) => {
   await page.goto('/app/');
   await capture(page);
+  await startNewChat(page);
   await sendMessage(page, 'start the clarification session');
   const sessionId = await currentSessionId(page);
   await emit(page, 'onStreamPermission', {
@@ -191,7 +202,14 @@ test('WP1 regression: start failure has a visible recovery state', async ({ page
       throw new Error('WP0_START_FAILED');
     };
   });
+  await startNewChat(page);
   await sendMessage(page, 'trigger a start failure');
   await expect(page.getByText(/WP0_START_FAILED/)).toBeVisible({ timeout: 1200 });
   await expect(page.getByTestId('chat-action-status')).toBeVisible();
+});
+
+test('WP1 regression: first entry creates a Twin greeting when no session can be restored', async ({ page }) => {
+  await page.goto('/app/');
+  await expect(page.getByRole('heading', { name: 'Welcome' })).toBeVisible();
+  await expect(page.getByText('Tell me what you want to accomplish')).toBeVisible();
 });

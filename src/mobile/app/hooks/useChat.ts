@@ -151,7 +151,12 @@ export function useChat(bots: MockMetabot[] = []) {
   useEffect(() => {
     if (!controller || metabotId === null || restoreStartedRef.current) return;
     restoreStartedRef.current = true;
-    void controller.restore(metabotId);
+    void controller.restore(metabotId, {
+      title: t('mobile.chat.greetingTitle'),
+      fallbackGreeting: t('mobile.chat.greetingFallback'),
+      cwd: configRef.current?.workingDirectory,
+      systemPrompt: configRef.current?.systemPrompt,
+    });
   }, [controller, metabotId]);
 
   const snapshot = controller?.getSnapshot() ?? EMPTY_SNAPSHOT;

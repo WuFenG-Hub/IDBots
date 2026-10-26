@@ -7,6 +7,8 @@ test.describe('WP1 gateway regressions', () => {
 
   test('running session is restored after full reload @gateway', async ({ page }) => {
     await page.goto('/app/');
+    await page.getByRole('button', { name: 'Sessions' }).click();
+    await page.getByRole('button', { name: 'New chat' }).click();
     await page.getByPlaceholder('Type a message…').fill('restore this running session');
     await page.getByRole('button', { name: 'Send' }).click();
     await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
@@ -14,4 +16,5 @@ test.describe('WP1 gateway regressions', () => {
     await expect(page.getByRole('heading', { name: 'restore this running session' })).toBeVisible({ timeout: 2000 });
     await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible({ timeout: 2000 });
   });
+
 });

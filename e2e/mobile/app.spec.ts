@@ -19,7 +19,7 @@ test.describe('app shell', () => {
     await attachScreen(testInfo, page, 'shell-me-tab');
 
     await page.getByRole('button', { name: 'Chat' }).click();
-    await expect(page.getByText('Start a conversation')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Welcome' })).toBeVisible();
     await attachScreen(testInfo, page, 'shell-chat-tab');
   });
 

@@ -53,6 +53,7 @@ function makeHarness() {
   let current = session('s1');
   const harness = {
     startOptions: null as CoworkStartOptions | null,
+    sessionsEmpty: false,
     submitCalls: [] as CoworkSubmitInput[],
     permissionResults: [] as CoworkPermissionResult[],
     pending: [] as PendingPermissionEntry[],
@@ -75,6 +76,14 @@ function makeHarness() {
       onStreamComplete: on('complete'),
       onStreamError: on('error'),
       onStreamSessionTitle: on('title'),
+      createGreetingSession: async (options: { title: string; fallbackGreeting: string; metabotId: number }) => {
+        current = session('greeting', 'completed', [
+          message('greeting-message', 'assistant', options.fallbackGreeting, { isFinal: true }),
+        ]);
+        current.title = options.title;
+        current.metabotId = options.metabotId;
+        return { success: true, session: structuredClone(current) };
+      },
       startSession: async (options: CoworkStartOptions) => {
         harness.startOptions = options;
         current = session('started', 'running', [message('u1', 'user', options.prompt)]);
@@ -96,7 +105,10 @@ function makeHarness() {
         if (harness.getSessionHandler) return harness.getSessionHandler();
         return { success: true, session: structuredClone(current) };
       },
-      listSessions: async () => ({ success: true, sessions: [structuredClone(current)] }),
+      listSessions: async () => ({
+        success: true,
+        sessions: harness.sessionsEmpty ? [] : [structuredClone(current)],
+      }),
       getSessionMessagesPage: async () => ({
         success: true,
         page: { messages: [], hasMoreBefore: false, beforeSequence: null },
@@ -271,5 +283,20 @@ describe('cowork session controller', () => {
     assert.deepEqual(controller.getStreamingMessage(), { sessionId: 's1', messageId: 'a1' });
     controller.setDraft('preserved draft');
     assert.equal(controller.getDraft(), 'preserved draft');
+  });
+
+  it('creates a Twin greeting only when no session can be restored', async (t) => {
+    const { harness, electron } = makeHarness();
+    harness.sessionsEmpty = true;
+    const controller = controllerFor(electron);
+    t.after(() => controller.destroy());
+
+    await controller.restore(1, { title: 'Welcome', fallbackGreeting: 'Hello from Twin' });
+    const snapshot = controller.getSnapshot();
+    assert.equal(snapshot.currentSessionId, 'greeting');
+    assert.equal(snapshot.states.get('greeting')?.metabotId, 1);
+    assert.equal(snapshot.states.get('greeting')?.title, 'Welcome');
+    assert.equal(snapshot.states.get('greeting')?.messages[0]?.content, 'Hello from Twin');
+    assert.equal(snapshot.restoring, false);
   });
 });

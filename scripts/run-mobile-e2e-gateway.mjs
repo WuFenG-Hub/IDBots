@@ -221,6 +221,35 @@ async function invokeHandler(channel, clientId, args) {
     console.log(`[fixture] invoke ${channel} ${JSON.stringify(args)?.slice(0, 120)}`);
   }
   switch (channel) {
+    case 'cowork:session:createGreeting': {
+      const options = args[0] ?? {};
+      const now = Date.now();
+      const session = {
+        id: `gw-session-${++sessionSeq}`,
+        title: options.title || 'Welcome',
+        claudeSessionId: `claude-${sessionSeq}`,
+        status: 'completed',
+        pinned: false,
+        cwd: paths.workspaceRoot,
+        systemPrompt: options.systemPrompt || '',
+        executionMode: 'auto',
+        activeSkillIds: [],
+        messages: [{
+          id: `gw-msg-${++messageSeq}`,
+          type: 'assistant',
+          content: options.fallbackGreeting,
+          timestamp: now,
+          metadata: { isFinal: true },
+        }],
+        createdAt: now,
+        updatedAt: now,
+        metabotId: options.metabotId ?? null,
+        sessionType: 'standard',
+        autoOrigin: null,
+      };
+      sessions.set(session.id, session);
+      return { success: true, session: { ...session, messages: [...session.messages] } };
+    }
     case 'cowork:session:start': {
       const options = args[0] ?? {};
       const now = Date.now();
@@ -471,7 +500,7 @@ async function main() {
 
     const run = spawn(
       process.execPath,
-      [playwrightCli, 'test', '--grep', '@gateway', ...process.argv.slice(2)],
+      [playwrightCli, 'test', '--grep', '@gateway', '--workers=1', ...process.argv.slice(2)],
       {
         cwd: repoRoot,
         env: { ...process.env, E2E_BASE_URL: BASE_URL, E2E_GATEWAY: '1' },

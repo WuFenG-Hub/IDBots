@@ -48,6 +48,13 @@ export interface CoworkRecoveryStorage {
   setItem: (key: string, value: string) => void;
 }
 
+export interface CoworkGreetingOptions {
+  title: string;
+  fallbackGreeting: string;
+  cwd?: string;
+  systemPrompt?: string;
+}
+
 export type CoworkSubmissionStatus = 'sending' | 'failed' | 'uncertain';
 
 export interface CoworkSubmissionAttempt {
@@ -414,13 +421,14 @@ export class CoworkSessionController {
     this.publish();
   }
 
-  async restore(metabotId: number | null): Promise<void> {
+  async restore(metabotId: number | null, greeting?: CoworkGreetingOptions): Promise<void> {
     if (this.restorePromise) return this.restorePromise;
+    const generation = this.generation;
     this.restoring = true;
     this.publish();
     this.restorePromise = (async () => {
       await this.reloadSessions();
-      if (this.destroyed) return;
+      if (this.destroyed || generation !== this.generation) return;
       const saved = this.savedOpenSession();
       let restored = saved ? await this.openSession(saved) : false;
       if (!restored && saved) this.newChat();
@@ -437,13 +445,55 @@ export class CoworkSessionController {
           })[0]?.id;
         if (target) restored = await this.openSession(target);
       }
-      if (!this.currentSessionId) await this.refreshPendingPermissions();
+      if (!restored && this.currentSessionId) this.newChat();
+      if (!this.currentSessionId) {
+        if (greeting && metabotId !== null) await this.createGreeting(metabotId, greeting);
+        else await this.refreshPendingPermissions();
+      }
     })().finally(() => {
       this.restoring = false;
       this.restorePromise = null;
       this.publish();
     });
     return this.restorePromise;
+  }
+
+  private async createGreeting(metabotId: number, options: CoworkGreetingOptions): Promise<boolean> {
+    const generation = this.generation;
+    try {
+      const result = await this.electron.cowork.createGreetingSession({
+        title: options.title,
+        cwd: options.cwd,
+        systemPrompt: options.systemPrompt,
+        fallbackGreeting: options.fallbackGreeting,
+        metabotId,
+      });
+      if (this.destroyed) return false;
+      if (!result?.success || !result.session) {
+        this.actionErrors = {
+          ...this.actionErrors,
+          new: result?.error ?? 'Failed to create the greeting session',
+        };
+        this.publish();
+        return false;
+      }
+      const session = result.session;
+      this.ingestSessionSnapshot(session, {});
+      if (this.currentSessionId === null && generation === this.generation) {
+        this.generation += 1;
+        this.currentSessionId = session.id;
+        this.persistOpenSession();
+      }
+      this.publish();
+      await this.reloadSessions();
+      return true;
+    } catch (error) {
+      if (!this.destroyed) {
+        this.actionErrors = { ...this.actionErrors, new: errorText(error, 'Failed to create the greeting session') };
+        this.publish();
+      }
+      return false;
+    }
   }
 
   beginResync = (): CoworkResyncGuard => {

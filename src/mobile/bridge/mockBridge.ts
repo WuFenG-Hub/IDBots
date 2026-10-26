@@ -418,6 +418,27 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
   }
 
   const coworkImpl: Record<string, unknown> = {
+    createGreetingSession: (input: {
+      title?: string;
+      fallbackGreeting: string;
+      metabotId?: number | null;
+    }) =>
+      guardOnline(async () => {
+        const session = createSession({
+          title: input.title || 'Welcome',
+          prompt: '',
+          metabotId: input.metabotId,
+        });
+        session.status = 'completed';
+        session.messages.push({
+          id: nextMessageId(),
+          type: 'assistant',
+          content: input.fallbackGreeting,
+          timestamp: now(),
+          metadata: { isFinal: true },
+        });
+        return { success: true, session: { ...session, messages: [...session.messages] } };
+      }),
     startSession: (input: { prompt?: string; title?: string; metabotId?: number | null }) =>
       guardOnline(async () => {
         const session = createSession({
