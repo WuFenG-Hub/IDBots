@@ -27,7 +27,7 @@
  *
  * Brain prose: ONE chat-completion call (dream-style ladder injected by the
  * service: twin/system brain primary → fallback) writes the three sections.
- * Bounded input (facts JSON ≤48KB), bounded output (~2000 tokens), 120s wall
+ * Bounded input (facts JSON ≤80KB), bounded output (~2000 tokens), 120s wall
  * timeout. On timeout/failure/no-brain the report degrades to the
  * deterministic briefing (owner-task table, machine rollups, deterministic
  * bot lines) — the report always ships.

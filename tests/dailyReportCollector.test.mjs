@@ -170,24 +170,25 @@ test('computeDailyReportHasAnyActivity: E10 skip bit, digests excluded', () => {
   );
 });
 
-test('enforceDailyReportFactsCap: shrinks digests then excerpts to fit the budget', () => {
+test('enforceDailyReportFactsCap: shrinks bot excerpts first; never drops bots while text still trims', () => {
   const nowMs = Date.now();
+  const bigSession = () => ({
+    sessionId: 's',
+    title: 't',
+    botName: null,
+    sessionType: 'standard',
+    humanUserMessages: 1,
+    assistantMessages: 1,
+    lastAssistantExcerpt: 'x'.repeat(3000),
+    lastUserExcerpt: null,
+  });
   const facts = {
     generatedAtMs: nowMs,
     windowStartMs: nowMs - DAY_MS,
     windowEndMs: nowMs,
     pendingFollowUps: [],
     ownerOrchestrations: [],
-    humanSessions: [{
-      sessionId: 's1',
-      title: 't',
-      botName: null,
-      sessionType: 'standard',
-      humanUserMessages: 1,
-      assistantMessages: 1,
-      lastAssistantExcerpt: 'x'.repeat(1500),
-      lastUserExcerpt: null,
-    }],
+    humanSessions: [bigSession()],
     machineActivity: {
       scheduledRuns: [],
       groupTaskTransitions: [],
@@ -195,26 +196,40 @@ test('enforceDailyReportFactsCap: shrinks digests then excerpts to fit the budge
       longTermProgress: [],
       twinDelegateOrchestrationsInWindow: 0,
     },
-    botDigests: Array.from({ length: 12 }, (_, i) => ({
+    onlineActivity: [],
+    botActivity: Array.from({ length: 20 }, (_, i) => ({
       botName: `bot${i}`,
       isTwin: false,
-      summaryDate: '2026-10-21',
-      summaryText: 'd'.repeat(1200),
+      totalSessions: 3,
+      totalMessages: 300,
+      sessions: Array.from({ length: 3 }, (_, j) => ({
+        sessionId: `s${i}-${j}`,
+        title: 'Big work',
+        sessionType: 'standard',
+        messageCount: 100,
+        lastAssistantExcerpt: 'y'.repeat(3000),
+      })),
+      scheduledRuns: [],
+      scheduledRunCount: 0,
+      externalChats: [{ peerName: 'peer', messageCount: 4, lastExcerpt: 'z'.repeat(2000) }],
+      openTeam: [],
+      chainInteractions: [{ kind: 'paylike', count: 3, lastSummary: 'w'.repeat(2000) }],
+      groupMessages: 0,
     })),
-    onlineActivity: [],
-    botActivity: [],
     upcoming: { scheduledFires: [], scheduledFiresTotal: 0, openOrchestrations: [], openOrchestrationByStatus: {} },
     hourlyActivity: { local: new Array(12).fill(0), online: new Array(12).fill(0) },
-    knownBotCount: 0,
+    knownBotCount: 20,
     newSessionCount: 0,
     hasAnyActivity: true,
   };
   const capped = enforceDailyReportFactsCap(facts, DAILY_REPORT_MAX_FACTS_JSON_BYTES);
   assert.ok(
     Buffer.byteLength(JSON.stringify(capped), 'utf8') <= DAILY_REPORT_MAX_FACTS_JSON_BYTES,
-    'fits the 20KB ledger budget',
+    'fits the 80KB budget',
   );
-  assert.equal(capped.botDigests.length <= facts.botDigests.length, true);
+  assert.equal(capped.botActivity.length, 20, 'all 20 bots survive — text trim suffices');
+  assert.equal(capped.botActivity[0].sessions.length, 3, 'sessions per bot intact at rung 1');
+  assert.ok(capped.botActivity[0].sessions[0].lastAssistantExcerpt.length <= 100, 'excerpts trimmed to 100');
 });
 
 test('collectDailyReportFacts: full pass over a fake db; broken buckets fail soft', () => {
@@ -286,9 +301,6 @@ test('collectDailyReportFacts: full pass over a fake db; broken buckets fail sof
       if (sql.includes('FROM group_task_transitions')) return [];
       if (sql.includes('FROM long_term_events')) return [];
       if (sql.includes('FROM long_term_tasks t')) return [];
-      if (sql.includes('FROM metabot_daily_summaries')) {
-        return [{ metabot_id: 7, bot_name: 'W', metabot_type: 'worker', summary_date: '2026-10-21', summary_text: 'Quiet day' }];
-      }
       if (sql.includes('FROM private_chat_messages')) return [{ metabot_id: 7, bot_name: 'W', message_count: 5 }];
       if (sql.includes('FROM group_chat_messages')) return [{ metabot_id: 7, bot_name: 'W', message_count: 2 }];
       if (sql.includes('COUNT(*) AS cnt FROM cowork_sessions')) return [{ cnt: 3 }];
@@ -304,8 +316,6 @@ test('collectDailyReportFacts: full pass over a fake db; broken buckets fail sof
   assert.equal(facts.humanSessions[0].lastAssistantExcerpt, 'assistant says hi');
   assert.equal(facts.humanSessions[0].lastUserExcerpt, 'user asked');
   assert.equal(facts.machineActivity.scheduledRuns.length, 1);
-  assert.equal(facts.botDigests.length, 1);
-  assert.equal(facts.botDigests[0].isTwin, true, 'digest of twinId 7 is flagged');
   assert.equal(facts.onlineActivity.length, 1);
   assert.equal(facts.onlineActivity[0].privateMessageCount, 5);
   assert.equal(facts.newSessionCount, 3);
@@ -346,7 +356,6 @@ test('collectDailyReportFacts: full pass over a fake db; broken buckets fail sof
   const empty = collectDailyReportFacts({ db: brokenDb, windowStartMs, windowEndMs: nowMs, twinId: 7 });
   assert.equal(empty.pendingFollowUps.length, 0);
   assert.equal(empty.humanSessions.length, 0);
-  assert.equal(empty.botDigests.length, 0);
   assert.equal(empty.hasAnyActivity, false, 'zero activity → skippable day');
 });
 

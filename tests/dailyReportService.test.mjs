@@ -55,7 +55,6 @@ const activeFacts = (overrides = {}) => ({
     longTermProgress: [],
     twinDelegateOrchestrationsInWindow: 0,
   },
-  botDigests: [],
   onlineActivity: [],
   botActivity: [],
   upcoming: {
