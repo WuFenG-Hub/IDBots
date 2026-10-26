@@ -2022,12 +2022,15 @@ interface IElectronAPI {
   chainBackup: {
     backup: () => Promise<{
       success: boolean;
+      resumable?: boolean;
       bots: Array<{
         globalMetaId: string;
         name: string;
         uploadedObjects: number;
         skippedObjects: number;
         segments: number;
+        resumedSegments: number;
+        networkRetries: number;
         bytes: number;
         costSats: number;
         manifestPinId?: string;
@@ -2035,6 +2038,7 @@ interface IElectronAPI {
       }>;
       totalBytes: number;
       totalCostSats: number;
+      discoveryNetworkRetries?: number;
       botsManifestSynced?: boolean;
       botsManifestError?: string;
       error?: string;
@@ -2072,6 +2076,9 @@ interface IElectronAPI {
       botCount?: number;
       segmentsDone?: number;
       segmentsTotal?: number;
+      resumedSegments?: number;
+      retryAttempt?: number;
+      retryDelayMs?: number;
       message?: string;
     }) => void) => () => void;
     onRestoreProgress: (callback: (data: {

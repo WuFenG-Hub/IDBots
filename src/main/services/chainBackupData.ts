@@ -45,6 +45,7 @@ export type ChainBackupObjectKind =
   | 'orchestration'
   | 'conversation'
   | 'conversation_message'
+  | 'object_chunk'
   | 'shared_config'
   | 'skill_scope';
 
@@ -216,6 +217,7 @@ export function selectLatestBackupObjects(objects: ChainBackupObject[]): ChainBa
 export interface ChainBackupSegmentRef {
   pinId: string;
   segment: string;
+  segmentKey?: string;
   bytes: number;
   kinds: string[];
   objectIds: string[];

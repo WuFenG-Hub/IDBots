@@ -1,6 +1,7 @@
 import { DEFAULT_MANAPI_BASE_URL } from './manapiPinService';
 import { restoreMetabotFromMnemonicCore, type MetaidRestoreProfile } from './metabotRestoreService';
 import { chainBackupObjectId, decryptJson, deriveBackupKey, objectId } from './chainBackupCrypto';
+import { materializeBackupObjects } from './chainBackupSegments';
 import {
   importBackupObjects,
   rebuildChainBackupStateFromManifest,
@@ -361,6 +362,7 @@ const PROFILE_UPDATE_FIELDS = [
 ] as const;
 
 function applyBackupProfile(
+  db: SqliteDatabase,
   metabotStore: MetabotStore,
   metabotId: number,
   profile: Record<string, unknown>,
@@ -375,6 +377,26 @@ function applyBackupProfile(
     ? metabotIdMap.get(sourceBossId) ?? null
     : null;
   metabotStore.updateMetabot(metabotId, rawPatch as MetabotUpdate);
+
+  if ('a2a_max_incoming_turns' in profile) {
+    db.run('UPDATE metabots SET a2a_max_incoming_turns = ? WHERE id = ?', [
+      profile.a2a_max_incoming_turns == null ? null : Number(profile.a2a_max_incoming_turns),
+      metabotId,
+    ]);
+  }
+  if ('a2a_bye_cooldown_ms' in profile) {
+    db.run('UPDATE metabots SET a2a_bye_cooldown_ms = ? WHERE id = ?', [
+      profile.a2a_bye_cooldown_ms == null ? null : Number(profile.a2a_bye_cooldown_ms),
+      metabotId,
+    ]);
+  }
+  if ('a2a_auto_reply_enabled' in profile) {
+    const enabled = profile.a2a_auto_reply_enabled;
+    db.run('UPDATE metabots SET a2a_auto_reply_enabled = ? WHERE id = ?', [
+      enabled == null ? null : (enabled === false || enabled === 0 ? 0 : 1),
+      metabotId,
+    ]);
+  }
 }
 
 function sourceMetabotId(profile: Record<string, unknown> | null): number | null {
@@ -501,7 +523,7 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
         botResult,
         botIndex: i,
         manifestHit,
-        objects: selectLatestBackupObjects(objects),
+        objects: selectLatestBackupObjects(materializeBackupObjects(objects)),
         warnings,
       });
     } catch (error) {
@@ -556,7 +578,7 @@ export async function runChainBackupRestore(deps: RunChainBackupRestoreDeps): Pr
     try {
       const profile = profileOf(item.objects);
       if (profile) {
-        applyBackupProfile(metabotStore, item.metabot.id, profile, metabotIdMap);
+        applyBackupProfile(db, metabotStore, item.metabot.id, profile, metabotIdMap);
         if (deps.applyAssignedSkills) {
           deps.applyAssignedSkills(item.metabot.id, stringArray(profile.allow_chat_skills));
         }
