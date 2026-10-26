@@ -41,6 +41,7 @@ import KnowledgeBasePanel from './KnowledgeBasePanel';
 import SurfSection from './SurfSection';
 import DailyReportSection from './DailyReportSection';
 import { buildMetaBotToggleViewModel, canShowMetabotTwinSwitch } from './metaBotCardPresentation.js';
+import Tooltip from '../ui/Tooltip';
 
 const AVATAR_MAX_SIZE_BYTES = 200 * 1024; // 200KB
 
@@ -1291,6 +1292,12 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
           <div className={rowClass}>
             <label id="metabot-cowork-mcp-tools-label" className={labelClass}>
               {i18nService.t('metabotCoworkMcpTools')}
+              <Tooltip content={i18nService.t('metabotCoworkMcpToolsTooltip')}>
+                <QuestionMarkCircleIcon
+                  className="h-4 w-4 inline ml-1.5 cursor-help dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-accent hover:text-claude-accent transition-colors"
+                  aria-label={i18nService.t('metabotCoworkMcpToolsTooltip')}
+                />
+              </Tooltip>
             </label>
             <div className="min-w-0">
               <div className="flex items-center gap-3 pt-1">
@@ -1299,16 +1306,13 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
                   aria-checked={coworkMcpTools}
                   aria-labelledby="metabot-cowork-mcp-tools-label"
                   data-slot="metabot-cowork-mcp-tools-switch"
-                  title={i18nService.t('metabotCoworkMcpToolsHint')}
+                  title={i18nService.t('metabotCoworkMcpToolsTooltip')}
                   className={coworkMcpToolsToggleView.trackClass}
                   onClick={handleCoworkMcpToolsToggle}
                 >
                   <div className={coworkMcpToolsToggleView.knobClass} />
                 </div>
               </div>
-              <p className={hintClass}>
-                {i18nService.t('metabotCoworkMcpToolsHint')}
-              </p>
             </div>
           </div>
 
@@ -1316,6 +1320,12 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
           <div className={rowClass}>
             <label id="metabot-cowork-browser-automation-label" className={labelClass}>
               {i18nService.t('metabotCoworkBrowserAutomation')}
+              <Tooltip content={i18nService.t('metabotCoworkBrowserAutomationTooltip')}>
+                <QuestionMarkCircleIcon
+                  className="h-4 w-4 inline ml-1.5 cursor-help dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-accent hover:text-claude-accent transition-colors"
+                  aria-label={i18nService.t('metabotCoworkBrowserAutomationTooltip')}
+                />
+              </Tooltip>
             </label>
             <div className="min-w-0">
               <div className="flex items-center gap-3 pt-1">
@@ -1324,16 +1334,13 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
                   aria-checked={coworkBrowserAutomation}
                   aria-labelledby="metabot-cowork-browser-automation-label"
                   data-slot="metabot-cowork-browser-automation-switch"
-                  title={i18nService.t('metabotCoworkBrowserAutomationHint')}
+                  title={i18nService.t('metabotCoworkBrowserAutomationTooltip')}
                   className={coworkBrowserAutomationToggleView.trackClass}
                   onClick={handleCoworkBrowserAutomationToggle}
                 >
                   <div className={coworkBrowserAutomationToggleView.knobClass} />
                 </div>
               </div>
-              <p className={hintClass}>
-                {i18nService.t('metabotCoworkBrowserAutomationHint')}
-              </p>
             </div>
           </div>
 
@@ -1341,6 +1348,12 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
           <div className={rowClass}>
             <label id="metabot-cowork-computer-use-label" className={labelClass}>
               {i18nService.t('metabotCoworkComputerUse')}
+              <Tooltip content={i18nService.t('metabotCoworkComputerUseTooltip')}>
+                <QuestionMarkCircleIcon
+                  className="h-4 w-4 inline ml-1.5 cursor-help dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-accent hover:text-claude-accent transition-colors"
+                  aria-label={i18nService.t('metabotCoworkComputerUseTooltip')}
+                />
+              </Tooltip>
             </label>
             <div className="min-w-0">
               <div className="flex items-center gap-3 pt-1">
@@ -1349,16 +1362,13 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
                   aria-checked={coworkComputerUse}
                   aria-labelledby="metabot-cowork-computer-use-label"
                   data-slot="metabot-cowork-computer-use-switch"
-                  title={i18nService.t('metabotCoworkComputerUseHint')}
+                  title={i18nService.t('metabotCoworkComputerUseTooltip')}
                   className={coworkComputerUseToggleView.trackClass}
                   onClick={handleCoworkComputerUseToggle}
                 >
                   <div className={coworkComputerUseToggleView.knobClass} />
                 </div>
               </div>
-              <p className={hintClass}>
-                {i18nService.t('metabotCoworkComputerUseHint')}
-              </p>
             </div>
           </div>
         </div>

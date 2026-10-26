@@ -15,9 +15,10 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { NewspaperIcon, PlayIcon } from '@heroicons/react/24/outline';
+import { NewspaperIcon, PlayIcon, QuestionMarkCircleIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { buildMetaBotToggleViewModel } from './metaBotCardPresentation.js';
+import Tooltip from './Tooltip';
 
 // Keep in sync with src/main/services/dailyReportSettings.ts (keys whitelisted
 // main-side in RENDERER_SETTING_DEFS with a normalizeValue each).
@@ -234,7 +235,15 @@ const DailyReportSection: React.FC<DailyReportSectionProps> = ({ metabotId }) =>
           {i18nService.t('dailyReportExperimentalBadge')}
         </span>
       </div>
-      <p className={hintClass}>{i18nService.t('dailyReportSectionHint')}</p>
+      <div className="flex items-center gap-2">
+        <p className={hintClass}>{i18nService.t('dailyReportSectionHint')}</p>
+        <Tooltip content={i18nService.t('dailyReportSectionTooltip')}>
+          <QuestionMarkCircleIcon
+            className="h-4 w-4 dark:text-claude-darkTextSecondary text-claude-textSecondary shrink-0 cursor-help"
+            aria-label="More info"
+          />
+        </Tooltip>
+      </div>
       {!experimentalAllowed ? (
         <p className="text-xs text-amber-600 dark:text-amber-400 whitespace-pre-wrap break-words">
           {i18nService.t('dailyReportGlobalSwitchRequired')}

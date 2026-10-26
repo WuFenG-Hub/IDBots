@@ -9,10 +9,11 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { GlobeAltIcon, RocketLaunchIcon } from '@heroicons/react/24/outline';
+import { GlobeAltIcon, RocketLaunchIcon, QuestionMarkCircleIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { buildMetaBotToggleViewModel } from './metaBotCardPresentation.js';
 import SurfReportsPanel from './SurfReportsPanel';
+import Tooltip from './Tooltip';
 
 // Keep in sync with src/main/services/surfSettings.ts (pinned by
 // tests/quotaRendererSync.test.mjs — the quota audit 2026-09-17 raised the
@@ -262,7 +263,15 @@ const SurfSection: React.FC<SurfSectionProps> = ({ metabotId }) => {
         <GlobeAltIcon className="h-3.5 w-3.5" aria-hidden />
         <span>{i18nService.t('surfSectionTitle')}</span>
       </div>
-      <p className={hintClass}>{i18nService.t('surfSectionHint')}</p>
+      <div className="flex items-center gap-2">
+        <p className={hintClass}>{i18nService.t('surfSectionHint')}</p>
+        <Tooltip content={i18nService.t('surfSectionTooltip')}>
+          <QuestionMarkCircleIcon
+            className="h-4 w-4 dark:text-claude-darkTextSecondary text-claude-textSecondary shrink-0 cursor-help"
+            aria-label="More info"
+          />
+        </Tooltip>
+      </div>
       {settingsError ? (
         <p className="text-xs text-red-600 dark:text-red-400 whitespace-pre-wrap break-words">{settingsError}</p>
       ) : null}
