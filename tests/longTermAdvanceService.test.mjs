@@ -740,10 +740,23 @@ test('session rotation does not blind the failure streak (history spans all boun
   assert.deepEqual(after.sessionHistory, [firstSessionId, report.escalated[0].sessionId], 'history spans both sessions');
 });
 
-test('in_progress with fresh work events is NOT re-pushed (quiet rule)', async () => {
+test('in_progress without a bound session starts the first work turn immediately', async () => {
   const { store, advance } = await openWorld();
   const taskId = await createActive(store);
   const subtask = store.getTask(taskId).subtasks[0];
+  assert.ok(store.beginSubtask(subtask.id, 'twin').ok, 'begin did not start a work session');
+
+  const report = await advance.run(Date.now());
+  assert.equal(report.escalated.length, 1, JSON.stringify(report));
+  assert.match(report.escalated[0].reasons[0], /just began but no work session was started/);
+});
+
+test('in_progress with a bound session and fresh work events is NOT re-pushed (quiet rule)', async () => {
+  const { store, cowork, advance } = await openWorld();
+  const taskId = await createActive(store);
+  const subtask = store.getTask(taskId).subtasks[0];
+  cowork.registerSession('sess-existing', 7, 'longterm');
+  assert.ok(store.bindSession(subtask.id, 'sess-existing', 'twin').ok);
   assert.ok(store.beginSubtask(subtask.id, 'twin').ok, 'a turn just began it');
 
   const report = await advance.run(Date.now());
