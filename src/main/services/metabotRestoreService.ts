@@ -2,7 +2,7 @@ import { Buffer } from 'buffer';
 import * as bip39 from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english';
 import type { MetabotStore } from '../metabotStore';
-import type { Metabot } from '../types/metabot';
+import type { Metabot, MetabotType } from '../types/metabot';
 import { createMetaBotWallet } from './metabotWalletService';
 import { assertCanCreateMetabot, normalizeMetabotLlmEffort } from './metabotManageService';
 import { fetchContentWithFallback, fetchJsonWithFallbackOnMiss } from './localIndexerProxy';
@@ -482,15 +482,19 @@ export const fetchMetaidRestoreProfile = async (address: string): Promise<Metaid
 // ---------------------------------------------------------------------------
 
 /**
- * Core of the `idbots:restoreMetaBotFromMnemonic` flow, extracted so the chain
- * backup restore can reuse it verbatim: derive wallet → pull the on-chain
- * /info profile → recreate the metabots row → mirror chat-skill assignments →
- * heal the zero-Twin edge. Kept behavior-identical to the original IPC body.
+ * Core of the `idbots:restoreMetaBotFromMnemonic` flow: derive the wallet,
+ * optionally verify its expected GlobalMetaID, build the local Bot from either
+ * an encrypted-backup profile or the on-chain /info profile, mirror chat-skill
+ * assignments, and heal the zero-Twin edge. The standalone IPC flow keeps the
+ * original chain-profile behavior when no override is supplied.
  */
 export interface RestoreMetabotCoreInput {
   mnemonic: string;
   path?: string;
   boss_global_metaid?: string | null;
+  expectedGlobalMetaId?: string;
+  metabotType?: Exclude<MetabotType, 'welcome'>;
+  profileOverride?: MetaidRestoreProfile;
 }
 
 export interface RestoreMetabotCoreDeps {
@@ -550,8 +554,12 @@ export const restoreMetabotFromMnemonicCore = async (
       globalmetaid: walletResult.globalmetaid,
       reusedWalletRow: Boolean(existingWallet),
     });
+    const expectedGlobalMetaId = input.expectedGlobalMetaId?.trim();
+    if (expectedGlobalMetaId && walletResult.globalmetaid.trim() !== expectedGlobalMetaId) {
+      return { success: false, error: 'BOT_IDENTITY_MISMATCH' };
+    }
 
-    const profile = await fetchMetaidRestoreProfile(walletResult.mvc_address);
+    const profile = input.profileOverride ?? await fetchMetaidRestoreProfile(walletResult.mvc_address);
     const name = profile.name.trim();
     if (!name) {
       return { success: false, error: 'NAME_EMPTY' };
@@ -583,7 +591,7 @@ export const restoreMetabotFromMnemonicCore = async (
       metaid: walletResult.metaid,
       globalmetaid: walletResult.globalmetaid,
       metabot_info_pinid: profile.metabotInfoPinId ?? null,
-      metabot_type: 'worker',
+      metabot_type: input.metabotType ?? 'worker',
       created_by: profile.bio.created_by || '0000',
       role: profile.bio.role || '',
       soul: profile.bio.soul || '',
@@ -618,7 +626,8 @@ export const restoreMetabotFromMnemonicCore = async (
       }
     }
     console.log('[MetaBot] restore success', { id: metabot.id, name: metabot.name });
-    // Restore hardcodes 'worker'; heal the zero-Twin edge (e.g. first-ever bot).
+    // The chain-backup orchestrator finalizes the original Twin after all IDs
+    // are known; standalone restore still heals a fleet with no Twin here.
     store.ensureTwinExists();
     // Re-read: ensureTwinExists may have promoted this bot to twin.
     return { success: true, metabot: store.getMetabotById(metabot.id) ?? metabot };

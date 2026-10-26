@@ -63,6 +63,32 @@ export function objectId(plaintext: unknown): string {
   return createHash('sha256').update(canonicalJson(plaintext), 'utf8').digest('hex');
 }
 
+const DEVICE_LOCAL_METABOT_REFERENCES = new Set([
+  'metabot_id',
+  'source_metabot_id',
+  'boss_id',
+  'twin_metabot_id',
+  'assignee_metabot_id',
+  'worker_metabot_id',
+]);
+
+function withoutDeviceLocalReferences(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutDeviceLocalReferences);
+  if (value && typeof value === 'object') {
+    const output: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      output[key] = DEVICE_LOCAL_METABOT_REFERENCES.has(key) ? null : withoutDeviceLocalReferences(nested);
+    }
+    return output;
+  }
+  return value;
+}
+
+/** Device-independent object identity; the encrypted payload still retains restorable local references. */
+export function chainBackupObjectId(kind: string, data: Record<string, unknown>): string {
+  return objectId({ kind, data: withoutDeviceLocalReferences(data) });
+}
+
 /** Encrypt a JSON-serializable value: returns nonce || tag || ciphertext. */
 export function encryptJson(key: Buffer, plaintext: unknown): Buffer {
   const nonce = randomBytes(CHAIN_BACKUP_NONCE_BYTES);

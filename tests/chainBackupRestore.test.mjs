@@ -10,23 +10,29 @@ const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
 const { MetaIDKnowledgeStore } = require('../dist-electron/main/metaidKnowledgeStore.js');
 const { DreamStore } = require('../dist-electron/main/dreamStore.js');
+const { CoworkStore } = require('../dist-electron/main/coworkStore.js');
+const { LongTermTaskStore } = require('../dist-electron/main/longTermTaskStore.js');
 const { UserIdentityStore } = require('../dist-electron/main/userIdentityStore.js');
+const { ensureMetaIDImpressionSchema } = require('../dist-electron/main/metaidImpressionStore.js');
+const { ensureTeamCultureSchema } = require('../dist-electron/main/teamCultureStore.js');
+const { ensureSkillAssignmentSchema, setMetabotAssignedSkills, listAssignedSkillIds } = require('../dist-electron/main/libs/skillAssignmentStore.js');
+const { createMetaBotWallet } = require('../dist-electron/main/services/metabotWalletService.js');
 const { deriveBackupKey, encryptJson, objectId } = require('../dist-electron/main/services/chainBackupCrypto.js');
 const { extractBackupObjects } = require('../dist-electron/main/services/chainBackupData.js');
-const { CHAIN_BACKUP_CIPHER, CHAIN_BACKUP_KDF, CHAIN_BACKUP_MANIFEST_PATH } = require('../dist-electron/main/services/chainBackupService.js');
+const { CHAIN_BACKUP_CIPHER, CHAIN_BACKUP_KDF, CHAIN_BACKUP_MANIFEST_PATH, runChainBackup } = require('../dist-electron/main/services/chainBackupService.js');
 const { runChainBackupRestore } = require('../dist-electron/main/services/chainBackupRestoreService.js');
 
 /**
- * Chain-backup restore regression tests: discovery must ride the
- * metaid-scoped pin listing (not the platform-global path feed), and a dead
- * segment pin degrades to a partial restore instead of failing the whole
- * bot. Run `pnpm run compile:electron` first.
+ * Run `pnpm run compile:electron` first. Indexer fixtures mirror production:
+ * MetaID-scoped listing is unavailable, address-scoped listing works.
  */
 
 const USER_MNEMONIC = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
 const USER_GID = 'idqtestuserglobalmetaid0000000000000001';
-const BOT_GID = 'idqtestbotglobalmetaid0000000000000000001';
-const BOT2_GID = 'idqtestbotglobalmetaid0000000000000000002';
+const BOT_WALLET = await createMetaBotWallet({ mnemonic: USER_MNEMONIC, path: "m/44'/10001'/0'/0/0" });
+const BOT2_WALLET = await createMetaBotWallet({ mnemonic: USER_MNEMONIC, path: "m/44'/10001'/0'/0/1" });
+const BOT_GID = BOT_WALLET.globalmetaid;
+const BOT2_GID = BOT2_WALLET.globalmetaid;
 
 async function openStore(prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -34,23 +40,29 @@ async function openStore(prefix) {
   const db = sqliteStore.getDatabase();
   const save = sqliteStore.getSaveFunction();
   new MetaIDKnowledgeStore(db, save);
-  new DreamStore(db, save);
+  const dreamStore = new DreamStore(db, save);
+  new CoworkStore(db, save, { deferHeavyStartupMaintenance: true });
+  new LongTermTaskStore(db, save);
+  ensureMetaIDImpressionSchema(db);
+  ensureTeamCultureSchema(db);
+  ensureSkillAssignmentSchema(db);
   const metabotStore = new MetabotStore(db, save);
-  return { sqliteStore, db, metabotStore };
+  return { sqliteStore, db, metabotStore, dreamStore, dir };
 }
 
-function createBot(metabotStore, name, gid, mnemonic = USER_MNEMONIC) {
-  const wallet = metabotStore.insertMetabotWallet({ mnemonic, path: "m/44'/10001'/0'/0/0" });
+async function createBot(metabotStore, name, gid, mnemonic = USER_MNEMONIC, path = "m/44'/10001'/0'/0/0") {
+  const derived = await createMetaBotWallet({ mnemonic, path });
+  const wallet = metabotStore.insertMetabotWallet({ mnemonic, path });
   return metabotStore.createMetabot({
     wallet_id: wallet.id,
-    mvc_address: `mvc-${name}`,
-    btc_address: `btc-${name}`,
-    doge_address: `doge-${name}`,
-    public_key: `pub-${name}`,
-    chat_public_key: `chat-${name}`,
+    mvc_address: derived.mvc_address,
+    btc_address: derived.btc_address,
+    doge_address: derived.doge_address,
+    public_key: derived.public_key,
+    chat_public_key: derived.chat_public_key,
     name,
     enabled: true,
-    metaid: `metaid-${name}`,
+    metaid: derived.metaid,
     globalmetaid: gid,
     metabot_type: 'worker',
     created_by: '0000',
@@ -110,8 +122,20 @@ function buildSegmentEnvelope(backupKey, botGid, objects) {
  * page and records that it was touched.
  */
 function stubIndexer(pins, scopedListings) {
-  const calls = { globalPathList: 0 };
+  const calls = { globalPathList: 0, addressList: 0, metaidList: 0 };
   const originalFetch = globalThis.fetch;
+  const ownerByAddress = { 'mvc-user': USER_GID };
+  for (const body of Object.values(pins)) {
+    if (typeof body !== 'string') continue;
+    try {
+      const parsed = JSON.parse(body);
+      for (const bot of Array.isArray(parsed.bots) ? parsed.bots : []) {
+        if (bot.mvcAddress && bot.globalMetaId) ownerByAddress[bot.mvcAddress] = bot.globalMetaId;
+      }
+    } catch {
+      // Non-JSON pin content.
+    }
+  }
   globalThis.fetch = async (url, init) => {
     const href = String(url);
     const respond = (status, body, contentType = 'application/json') => ({
@@ -121,20 +145,32 @@ function stubIndexer(pins, scopedListings) {
       text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
       headers: { get: () => contentType },
     });
-    const scoped = href.match(/\/api\/metaid\/pin\/list\/([^/?]+)\?/);
-    if (scoped) {
-      const metaid = decodeURIComponent(scoped[1]);
-      const list = (scopedListings[`${metaid}|${new URL(href).searchParams.get('path')}`] ?? [])
-        .map((pinId) => ({ id: pinId, timestamp: Math.floor(Date.now() / 1000) }));
-      return respond(200, { code: 1, data: { list } });
+    if (href.includes('/api/metaid/pin/list/')) {
+      calls.metaidList += 1;
+      return respond(200, { code: 404, message: 'Parameter error.' });
+    }
+    const addressScoped = href.match(/\/api\/address\/pin\/list\/([^/?]+)\?/);
+    if (addressScoped) {
+      calls.addressList += 1;
+      const address = decodeURIComponent(addressScoped[1]);
+      const owner = ownerByAddress[address];
+      const path = new URL(href).searchParams.get('path');
+      const list = (scopedListings[`${owner}|${path}`] ?? []).map((raw) => {
+        const item = typeof raw === 'string' ? { id: raw } : raw;
+        return {
+          id: item.id,
+          timestamp: Math.floor(Date.now() / 1000),
+          address,
+          globalMetaId: owner,
+          modify_history: item.modify_history ?? [item.id],
+        };
+      });
+      return respond(200, { code: 1, data: { list, nextCursor: null } });
     }
     if (href.includes('/api/pin/path/list')) {
       calls.globalPathList += 1;
-      return respond(200, { code: 1, data: { list: [], cursor: null } });
+      return respond(200, { code: 1, data: { list: [], nextCursor: null } });
     }
-    // restoreMetabotFromMnemonicCore pulls the on-chain /info profile: the
-    // local-node probe answers with a semantic miss (no name), the remote
-    // indexer serves the profile the skeleton is built from.
     if (href.includes('/api/v1/users/info/address/')) {
       return respond(200, { code: 1, data: {} });
     }
@@ -158,8 +194,8 @@ function stubIndexer(pins, scopedListings) {
   };
 }
 
-async function seedSourceBot(source, gid, name) {
-  const bot = createBot(source.metabotStore, name, gid);
+async function seedSourceBot(source, gid, name, walletPath = "m/44'/10001'/0'/0/0", extractOptions = {}, mnemonic = USER_MNEMONIC) {
+  const bot = await createBot(source.metabotStore, name, gid, mnemonic, walletPath);
   const now = Date.now();
   source.db.run(
     `INSERT INTO user_memories (id, metabot_id, text, fingerprint, confidence, is_explicit, status, scope_kind, scope_key, usage_class, visibility, origin, importance, created_at, updated_at)
@@ -167,10 +203,63 @@ async function seedSourceBot(source, gid, name) {
     [`mem-${name}`, bot.id, `user fact for ${name}`, `fp-${name}`, now, now],
   );
   const wallet = source.metabotStore.getMetabotWalletByMetabotId(bot.id);
-  return { bot, objects: extractBackupObjects(source.db, bot.id, wallet) };
+  return { bot, objects: extractBackupObjects(source.db, bot.id, wallet, { bot, ...extractOptions }) };
 }
 
-test('discovery rides the metaid-scoped listing; a dead segment degrades to a partial restore', async () => {
+function createBackupHarness() {
+  const pins = {};
+  const scopedListings = {};
+  const modifyTargets = [];
+  let sequence = 0;
+
+  const createPinImpl = async (metabotStore, metabotId, metaidData) => {
+    const bot = metabotStore.getMetabotById(metabotId);
+    const owner = bot.globalmetaid;
+    sequence += 1;
+    const pinId = `pin-live-${sequence}`;
+    pins[pinId] = metaidData.payload;
+    if (metaidData.operation === 'modify') {
+      const target = metaidData.path.slice(1);
+      modifyTargets.push({ owner, target, pinId });
+      const candidates = scopedListings[`${owner}|${CHAIN_BACKUP_MANIFEST_PATH}`] ?? [];
+      const current = candidates.find((item) => item.modify_history.includes(target));
+      if (!current) throw new Error(`modify target not found: ${target}`);
+      current.modify_history.push(pinId);
+    } else {
+      const key = `${owner}|${metaidData.path}`;
+      scopedListings[key] = scopedListings[key] ?? [];
+      scopedListings[key].unshift({ id: pinId, modify_history: [pinId] });
+    }
+    return { pinId, txids: [`tx-live-${sequence}`], totalCost: 0 };
+  };
+
+  const runBackup = async (metabotStore, userStore, sqliteStore) => runChainBackup({
+    db: sqliteStore.getDatabase(),
+    metabotStore,
+    userStore,
+    saveDb: sqliteStore.getSaveFunction(),
+    createPinImpl,
+    syncBotsManifestImpl: async (_users, store) => {
+      const bots = store.listMetabots()
+        .filter((bot) => bot.metabot_type !== 'welcome' && bot.globalmetaid)
+        .map((bot) => ({
+          globalMetaId: bot.globalmetaid,
+          name: bot.name,
+          type: bot.metabot_type,
+          enabled: bot.enabled,
+          mvcAddress: bot.mvc_address,
+        }));
+      pins['pin-bots'] = JSON.stringify({ version: 1, updatedAt: Math.floor(Date.now() / 1000), bots });
+      scopedListings[`${USER_GID}|/info/bots`] = [{ id: 'pin-bots', modify_history: ['pin-bots'] }];
+      return { success: true, botCount: bots.length, boundCount: bots.length, newlyBound: 0, skippedUnbound: [], txids: [] };
+    },
+    sleep: async () => undefined,
+  });
+
+  return { pins, scopedListings, modifyTargets, runBackup };
+}
+
+test('discovery rides the address-scoped listing; a dead segment degrades to a partial restore', async () => {
   const source = await openStore('idbots-restore-src-');
   const { objects: botObjects } = await seedSourceBot(source, BOT_GID, 'alpha');
 
@@ -216,8 +305,9 @@ test('discovery rides the metaid-scoped listing; a dead segment degrades to a pa
       baseUrl: 'http://stub.test',
     });
 
-    // Discovery never touched the platform-global path feed.
-    assert.equal(stub.calls.globalPathList, 0, 'discovery must use the metaid-scoped listing');
+    assert.equal(stub.calls.globalPathList, 0, 'address-scoped discovery avoids the global path feed');
+    assert.equal(stub.calls.metaidList, 0, 'the unavailable MetaID endpoint is never called');
+    assert.ok(stub.calls.addressList > 0, 'discovery uses the production address-scoped endpoint');
     assert.equal(result.success, true);
     assert.equal(result.bots.length, 1);
     const bot = result.bots[0];
@@ -249,7 +339,7 @@ test('discovery rides the metaid-scoped listing; a dead segment degrades to a pa
 
 test('a fully verified restore rebuilds the journal baseline', async () => {
   const source = await openStore('idbots-restore-src2-');
-  const { objects: botObjects } = await seedSourceBot(source, BOT2_GID, 'beta');
+  const { objects: botObjects } = await seedSourceBot(source, BOT2_GID, 'beta', "m/44'/10001'/0'/0/1");
 
   const backupKey = deriveBackupKey(USER_MNEMONIC, USER_GID);
   const seg = buildSegmentEnvelope(backupKey, BOT2_GID, botObjects);
@@ -339,6 +429,9 @@ test('restore applies the newest segment version and never resurrects deleted ro
       created_at: Date.now(), updated_at: Date.now(), sources: [],
     },
   };
+  for (const obj of [memoryV2, knowledgeV1, knowledgeTombstone, memoryTombstone, memoryGoneV1]) {
+    obj.id = objectId({ kind: obj.kind, data: obj.data });
+  }
 
   const backupKey = deriveBackupKey(USER_MNEMONIC, USER_GID);
   const seg1 = buildSegmentEnvelope(backupKey, BOT_GID, [envelopeObj, memoryV1, knowledgeV1, memoryGoneV1]);
@@ -388,6 +481,323 @@ test('restore applies the newest segment version and never resurrects deleted ro
     // The hard-deleted knowledge entry stays deleted.
     const knowledge = target.db.exec(`SELECT COUNT(*) FROM metaid_knowledge_entries WHERE id = ?`, ['kn-gamma']);
     assert.equal(knowledge[0].values[0][0], 0);
+  } finally {
+    stub.restore();
+  }
+});
+
+function scalar(db, sql, params = []) {
+  return db.exec(sql, params)[0]?.values?.[0]?.[0];
+}
+
+test('ten bots survive backup, modified-manifest restore, reopen, and the next incremental backup', async () => {
+  const source = await openStore('idbots-full-source-');
+  const sourceUser = insertUserIdentity(source.db, source.sqliteStore.getSaveFunction());
+  const now = Date.now();
+  const bots = [];
+  const a2aLimits = [20, 30, 50, 80, 100, 150, 200];
+
+  for (let i = 0; i < 10; i += 1) {
+    const walletPath = `m/44'/10001'/0'/0/${i}`;
+    const derived = await createMetaBotWallet({ path: walletPath });
+    const seeded = await seedSourceBot(source, derived.globalmetaid, `bot-${i}`, walletPath, {}, derived.mnemonic);
+    bots.push(seeded.bot);
+  }
+  bots[4] = source.metabotStore.updateMetabot(bots[4].id, { metabot_type: 'twin' });
+
+  for (let i = 0; i < bots.length; i += 1) {
+    const bot = bots[i];
+    bots[i] = source.metabotStore.updateMetabot(bot.id, {
+      enabled: i !== 9,
+      role: `role-${i}`,
+      soul: `soul-${i}`,
+      goal: `goal-${i}`,
+      bio: `bio-${i}`,
+      boss_id: i === 0 ? null : bots[0].id,
+      boss_global_metaid: i === 0 ? null : bots[0].globalmetaid,
+      owner_binding_pinid: `owner-binding-${i}`,
+      llm_id: `model-${i}`,
+      llm_provider: 'test-provider',
+      llm_effort: 'high',
+      fallback_llm_id: `fallback-${i}`,
+      fallback_llm_provider: 'fallback-provider',
+      fallback_llm_effort: 'low',
+      tools: [`tool-${i}`],
+      skills: [`bundled-skill-${i}`],
+      allow_chat_skills: [`external-skill-${i}`],
+      a2a_max_incoming_turns: a2aLimits[i % a2aLimits.length],
+      a2a_bye_cooldown_ms: [60_000, 300_000, 600_000, 1_800_000, 3_600_000][i % 5],
+      a2a_auto_reply_enabled: i % 2 === 0,
+      homepage: `metaapp://home-${i}`,
+    });
+    source.metabotStore.setMetabotSetting(bot.id, 'dailyReport.hour', String(8 + i));
+    setMetabotAssignedSkills(source.db, source.sqliteStore.getSaveFunction(), bot.id, [`external-skill-${i}`], 'migration');
+    source.db.run(
+      `INSERT INTO metabot_memory_policies (metabot_id, memory_user_memories_max_items, dream_enabled, updated_at)
+       VALUES (?, ?, 1, ?)`,
+      [bot.id, 20 + i, now],
+    );
+    source.dreamStore.upsertDailySummary({
+      metabotId: bot.id,
+      summaryDate: '2026-10-25',
+      summaryText: `dream-${i}`,
+      sections: { identity: `identity-${i}` },
+      stats: { memories: 1 },
+      llmId: `model-${i}`,
+    });
+    source.db.run(
+      `INSERT INTO metaid_knowledge_entries
+        (id, metabot_id, topic, topic_fingerprint, summary, kind, confidence, status, origin, version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'know_how', 0.8, 'active', 'dream', 1, ?, ?)`,
+      [`knowledge-${i}`, bot.id, `topic-${i}`, `topic-fp-${i}`, `knowledge-summary-${i}`, now, now],
+    );
+    source.db.run(
+      `INSERT INTO scheduled_tasks (id, name, schedule_json, prompt, metabot_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [`schedule-${i}`, `schedule-name-${i}`, JSON.stringify({ type: 'interval', minutes: 30 }), `schedule-prompt-${i}`, bot.id, new Date(now).toISOString(), new Date(now).toISOString()],
+    );
+    source.db.run(
+      `INSERT INTO cowork_sessions (id, title, status, cwd, metabot_id, created_at, updated_at)
+       VALUES (?, ?, 'idle', '/tmp', ?, ?, ?)`,
+      [`session-${i}`, `session-title-${i}`, bot.id, now, now],
+    );
+    source.db.run(
+      `INSERT INTO cowork_messages (id, session_id, type, content, created_at, sequence)
+       VALUES (?, ?, 'user', ?, ?, 1)`,
+      [`message-${i}`, `session-${i}`, `conversation-${i}`, now],
+    );
+    source.db.run(
+      `INSERT INTO cowork_conversation_mappings
+        (channel, external_conversation_id, metabot_id, cowork_session_id, created_at, last_active_at)
+       VALUES ('cowork_ui', ?, ?, ?, ?, ?)`,
+      [`session-${i}`, bot.id, `session-${i}`, now, now],
+    );
+  }
+
+  const twin = bots[4];
+  const subject = bots[0].globalmetaid;
+  const experienceTimestamp = now - 61 * 24 * 60 * 60 * 1000;
+  source.db.run(
+    `INSERT INTO metaid_experience_episodes
+      (id, owner_globalmetaid, episode_type, source_channel, source_key, status, started_at, created_at, updated_at)
+     VALUES ('episode-twin', ?, 'direct_interaction', 'cowork_ui', 'session-4', 'open', ?, ?, ?)`,
+    [twin.globalmetaid, experienceTimestamp, experienceTimestamp, experienceTimestamp],
+  );
+  source.db.run(
+    `INSERT INTO metaid_experience_participants
+      (episode_id, participant_key, globalmetaid, identity_state, role, source, created_at)
+     VALUES ('episode-twin', 'owner', ?, 'known', 'owner', 'test', ?)`,
+    [twin.globalmetaid, now],
+  );
+  source.db.run(
+    `INSERT INTO metaid_experience_evidence
+      (id, episode_id, evidence_type, source_key, occurred_at, created_at)
+     VALUES ('evidence-twin', 'episode-twin', 'message', 'message-4', ?, ?)`,
+    [experienceTimestamp, experienceTimestamp],
+  );
+  source.db.run(
+    `INSERT INTO metaid_impression_observations
+      (id, observer_globalmetaid, subject_globalmetaid, episode_id, observation_text, interpretation_text,
+       dimensions_json, confidence_json, dream_date, dream_version, source_hash, idempotency_key, status, created_at)
+     VALUES ('observation-twin', ?, ?, 'episode-twin', 'observation', 'interpretation', '{}', '{}',
+             '2026-10-25', 1, 'source-hash', 'idempotency-twin', 'active', ?)`,
+    [twin.globalmetaid, subject, experienceTimestamp],
+  );
+  source.db.run(
+    `INSERT INTO metaid_impression_observation_evidence (observation_id, evidence_id, relevance, created_at)
+     VALUES ('observation-twin', 'evidence-twin', 'direct', ?)`,
+    [experienceTimestamp],
+  );
+  source.db.run(
+    `INSERT INTO metaid_impression_snapshots
+      (observer_globalmetaid, subject_globalmetaid, first_seen_at, last_seen_at, interaction_count,
+       direct_interaction_count, summary_text, latest_observation_id, snapshot_version, source_hash, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 1, 1, 'snapshot-summary', 'observation-twin', 1, 'source-hash', ?, ?)`,
+    [twin.globalmetaid, subject, experienceTimestamp, experienceTimestamp, experienceTimestamp, experienceTimestamp],
+  );
+  source.db.run(
+    `INSERT INTO team_culture_entries
+      (id, kind, topic, topic_fingerprint, text, status, version, origin, pending_approval, times_injected, created_at, updated_at)
+     VALUES ('culture-twin', 'team_lesson', 'culture-topic', 'culture-fp', 'culture-text', 'active', 1, 'owner', 0, 0, ?, ?)`,
+    [now, now],
+  );
+  source.db.run(
+    `INSERT INTO team_culture_revisions (id, entry_id, version, kind, topic, text, origin, created_at)
+     VALUES ('culture-revision-twin', 'culture-twin', 1, 'team_lesson', 'culture-topic', 'culture-text', 'owner', ?)`,
+    [now],
+  );
+  source.db.run(
+    `INSERT INTO long_term_tasks (id, title, goal, stage, created_at, updated_at)
+     VALUES ('longterm-twin', 'longterm-title', 'longterm-goal', 'active', ?, ?)`,
+    [new Date(now).toISOString(), new Date(now).toISOString()],
+  );
+  source.db.run(
+    `INSERT INTO long_term_subtasks (id, task_id, ordinal, title, created_at, updated_at)
+     VALUES ('longterm-subtask-twin', 'longterm-twin', 1, 'subtask-title', ?, ?)`,
+    [new Date(now).toISOString(), new Date(now).toISOString()],
+  );
+  source.db.run(
+    `INSERT INTO long_term_events (id, task_id, subtask_id, kind, actor, detail, created_at)
+     VALUES (1, 'longterm-twin', 'longterm-subtask-twin', 'note', 'owner', 'event-detail', ?)`,
+    [new Date(now).toISOString()],
+  );
+  source.db.run(
+    `INSERT INTO orchestration_tasks
+      (id, owner_intent, twin_metabot_id, owner_global_meta_id, status, created_at, updated_at)
+     VALUES ('orchestration-twin', 'orchestration-intent', ?, ?, 'running', ?, ?)`,
+    [twin.id, USER_GID, new Date(now).toISOString(), new Date(now).toISOString()],
+  );
+  source.db.run(
+    `INSERT INTO orchestration_steps
+      (id, task_id, ordinal, title, objective, assignee_metabot_id, status, created_at, updated_at)
+     VALUES ('orchestration-step-twin', 'orchestration-twin', 1, 'step-title', 'step-objective', ?, 'ready', ?, ?)`,
+    [bots[1].id, new Date(now).toISOString(), new Date(now).toISOString()],
+  );
+  source.db.run(
+    `INSERT INTO orchestration_attempts
+      (id, step_id, idempotency_key, worker_metabot_id, status, prompt, queued_at)
+     VALUES ('orchestration-attempt-twin', 'orchestration-step-twin', 'attempt-key-twin', ?, 'queued', 'attempt-prompt', ?)`,
+    [bots[1].id, new Date(now).toISOString()],
+  );
+  source.db.run(
+    `INSERT INTO cowork_config (key, value, updated_at) VALUES ('memoryHygiene', ?, ?)`,
+    [JSON.stringify({ enabled: true, retentionDays: 60 }), now],
+  );
+  source.sqliteStore.set('skills_scope', { 'shared-external-skill': 'global' });
+
+  const harness = createBackupHarness();
+  const firstBackup = await harness.runBackup(source.metabotStore, sourceUser, source.sqliteStore);
+  assert.equal(firstBackup.success, true, JSON.stringify(firstBackup));
+  assert.equal(firstBackup.bots.length, 10);
+  const secondBackup = await harness.runBackup(source.metabotStore, sourceUser, source.sqliteStore);
+  assert.equal(secondBackup.success, true, JSON.stringify(secondBackup));
+  assert.ok(secondBackup.bots.every((bot) => bot.uploadedObjects === 0), 'unchanged backup is fully incremental');
+  const manifestHeads = new Map(secondBackup.bots.map((bot) => [bot.globalMetaId, bot.manifestPinId]));
+  const secondModifyCount = harness.modifyTargets.length;
+
+  const stub = stubIndexer(harness.pins, harness.scopedListings);
+  let target;
+  try {
+    target = await openStore('idbots-full-target-');
+    const targetUser = insertUserIdentity(target.db, target.sqliteStore.getSaveFunction());
+    const restored = await runChainBackupRestore({
+      db: target.db,
+      metabotStore: target.metabotStore,
+      userStore: targetUser,
+      saveDb: target.sqliteStore.getSaveFunction(),
+      applyAssignedSkills: (metabotId, skills) => {
+        setMetabotAssignedSkills(target.db, target.sqliteStore.getSaveFunction(), metabotId, skills, 'migration');
+      },
+      baseUrl: 'http://stub.test',
+    });
+    assert.equal(restored.success, true, JSON.stringify(restored));
+    assert.equal(restored.bots.length, 10);
+    assert.ok(restored.bots.every((bot) => bot.restored));
+    const restoredBots = target.metabotStore.listMetabots();
+    assert.equal(restoredBots.length, 10);
+    assert.equal(restoredBots.filter((bot) => bot.metabot_type === 'twin').length, 1);
+    assert.equal(restoredBots.find((bot) => bot.metabot_type === 'twin').name, 'bot-4');
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM user_memories'), 10);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM metabot_daily_summaries'), 10);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM metaid_knowledge_entries'), 10);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM scheduled_tasks'), 10);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM cowork_sessions'), 10);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM cowork_messages'), 10);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM metaid_experience_episodes'), 1);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM metaid_impression_observations'), 1);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM metaid_impression_snapshots'), 1);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM team_culture_entries'), 1);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM team_culture_revisions'), 1);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM long_term_tasks'), 1);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM long_term_subtasks'), 1);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM orchestration_tasks'), 1);
+    assert.equal(scalar(target.db, 'SELECT COUNT(*) FROM orchestration_attempts'), 1);
+    assert.equal(scalar(target.db, 'SELECT value FROM cowork_config WHERE key = ?', ['memoryHygiene']), JSON.stringify({ enabled: true, retentionDays: 60 }));
+
+    for (let i = 0; i < bots.length; i += 1) {
+      const sourceBot = bots[i];
+      const restoredBot = restoredBots.find((bot) => bot.globalmetaid === sourceBot.globalmetaid);
+      assert.ok(restoredBot, `missing bot-${i}`);
+      assert.equal(restoredBot.enabled, i !== 9);
+      assert.equal(restoredBot.role, `role-${i}`);
+      assert.equal(restoredBot.soul, `soul-${i}`);
+      assert.equal(restoredBot.fallback_llm_id, `fallback-${i}`);
+      assert.equal(restoredBot.a2a_max_incoming_turns, a2aLimits[i % a2aLimits.length]);
+      assert.equal(restoredBot.homepage, `metaapp://home-${i}`);
+      assert.equal(restoredBot.boss_global_metaid, sourceBot.boss_global_metaid);
+      assert.equal(restoredBot.boss_id, i === 0 ? null : restoredBots.find((bot) => bot.globalmetaid === bots[0].globalmetaid).id);
+      assert.equal(target.metabotStore.getMetabotSetting(restoredBot.id, 'dailyReport.hour'), String(8 + i));
+      assert.deepEqual(listAssignedSkillIds(target.db, restoredBot.id), [`external-skill-${i}`]);
+      assert.equal(scalar(target.db, 'SELECT memory_user_memories_max_items FROM metabot_memory_policies WHERE metabot_id = ?', [restoredBot.id]), 20 + i);
+    }
+    const mappedAttempt = target.db.exec('SELECT worker_metabot_id FROM orchestration_attempts WHERE id = ?', ['orchestration-attempt-twin']);
+    const expectedWorker = restoredBots.find((bot) => bot.globalmetaid === bots[1].globalmetaid).id;
+    assert.equal(mappedAttempt[0].values[0][0], expectedWorker);
+
+    const targetDir = target.dir;
+    target.sqliteStore.close();
+    const reopened = await SqliteStore.create(targetDir);
+    const reopenedDb = reopened.getDatabase();
+    const reopenedMetabotStore = new MetabotStore(reopenedDb, reopened.getSaveFunction());
+    const reopenedUser = new UserIdentityStore(reopenedDb, reopened.getSaveFunction());
+    assert.equal(reopenedMetabotStore.listMetabots().length, 10, 'bot fleet survives a real database reopen');
+    assert.equal(scalar(reopenedDb, 'SELECT COUNT(*) FROM user_memories'), 10, 'memories are durable');
+    assert.equal(scalar(reopenedDb, 'SELECT COUNT(*) FROM cowork_messages'), 10, 'conversations are durable');
+    assert.equal(scalar(reopenedDb, 'SELECT COUNT(*) FROM chain_backup_state'), 10, 'backup journals are durable');
+
+    const restoredAgain = await runChainBackupRestore({
+      db: reopenedDb,
+      metabotStore: reopenedMetabotStore,
+      userStore: reopenedUser,
+      saveDb: reopened.getSaveFunction(),
+      applyAssignedSkills: (metabotId, skills) => {
+        setMetabotAssignedSkills(reopenedDb, reopened.getSaveFunction(), metabotId, skills, 'migration');
+      },
+      baseUrl: 'http://stub.test',
+    });
+    assert.equal(restoredAgain.success, true, JSON.stringify(restoredAgain));
+    assert.equal(reopenedMetabotStore.listMetabots().length, 10, 'repeat restore is idempotent');
+    assert.equal(scalar(reopenedDb, 'SELECT COUNT(*) FROM user_memories'), 10);
+    assert.equal(scalar(reopenedDb, 'SELECT COUNT(*) FROM cowork_messages'), 10);
+
+    const thirdBackup = await harness.runBackup(reopenedMetabotStore, reopenedUser, reopened);
+    assert.equal(thirdBackup.success, true, JSON.stringify(thirdBackup));
+    assert.ok(
+      thirdBackup.bots.every((bot) => bot.uploadedObjects === 0),
+      `restored device does not republish unchanged data: ${JSON.stringify(thirdBackup.bots.map((bot) => ({ name: bot.name, uploaded: bot.uploadedObjects, segments: bot.segments })))}`,
+    );
+    const newModifyCalls = harness.modifyTargets.slice(secondModifyCount);
+    assert.equal(newModifyCalls.length, 10);
+    for (const call of newModifyCalls) {
+      assert.equal(call.target, manifestHeads.get(call.owner), 'next backup modifies the restored manifest head');
+    }
+    reopened.close();
+  } finally {
+    stub.restore();
+  }
+});
+
+test('a bot without a backup manifest fails the overall restore', async () => {
+  const stub = stubIndexer(
+    {
+      'pin-bots': JSON.stringify({
+        bots: [{ globalMetaId: BOT_GID, name: 'missing', type: 'worker', mvcAddress: BOT_WALLET.mvc_address }],
+      }),
+    },
+    { [`${USER_GID}|/info/bots`]: ['pin-bots'] },
+  );
+  try {
+    const target = await openStore('idbots-missing-manifest-');
+    const userStore = insertUserIdentity(target.db, target.sqliteStore.getSaveFunction());
+    const result = await runChainBackupRestore({
+      db: target.db,
+      metabotStore: target.metabotStore,
+      userStore,
+      baseUrl: 'http://stub.test',
+    });
+    assert.equal(result.success, false);
+    assert.equal(result.bots[0].error, 'NO_BACKUP_MANIFEST');
+    assert.equal(target.metabotStore.listMetabots().length, 0);
   } finally {
     stub.restore();
   }

@@ -1,7 +1,7 @@
 # Chain Backup & Restore — Design
 
 Date: 2026-10-10
-Status: Approved direction (owner decisions recorded below), MVP schema draft
+Status: Approved direction; L0/L1/L2 cross-device backup and restore implemented with v1-backup compatibility
 
 ## 1. Goal
 
@@ -77,8 +77,11 @@ WAL-aware read).
 - **Cipher**: AES-256-GCM, random 12-byte nonce per object, nonce prepended to
   ciphertext. Plaintext is canonical JSON (`UTF-8`, sorted keys) so object
   hashes are stable.
-- **Object id**: `sha256(plaintext)` — content addressing gives dedup and
-  incrementality for free.
+- **Object id**: `sha256(canonicalJson({kind,data}))` after normalizing
+  device-local numeric Bot references and including the owner's stable
+  GlobalMetaID. The encrypted payload retains those local references for ID
+  remapping, while the same logical row keeps its identity across devices.
+  Restore also accepts legacy v1 object hashes created before this rule.
 - **Key envelope (scheme A)**: each Bot mnemonic is a normal backup object of
   `kind: "key_envelope"`, encrypted with the same backup key. The chain never
   sees plaintext key material.
@@ -188,37 +191,48 @@ inside encrypted object pins.
    time slot discipline).
 2. **Refresh the public `/info/bots` discovery manifest first** (reusing
    `syncUserBotsToMobile`): without it a new device cannot find the per-Bot
-   backup manifests at restore time. A refresh failure does not abort the
-   backup (an older manifest pin may still exist) but is flagged in the
-   result so the UI can warn.
+   backup manifests at restore time. Object publication may continue so the
+   run can be inspected or retried, but a discovery-refresh failure marks the
+   overall backup unsuccessful; it is never presented as a completed backup.
 3. Pre-flight: identity present, subsidy/fee mode per global setting
    (decision 4), indexer reachable.
-4. For each enabled Bot (skip `welcome`): extract whitelist rows → build
-   objects → diff against the local journal (`chain_backup_state`) →
-   pack segments → encrypt → `createPin` per segment (published by each Bot's
-   own wallet, serialized through the existing spend coordinator) → publish
-   manifest modify.
+4. For every non-`welcome` Bot, including disabled Bots: extract whitelist rows
+   → build objects → diff against the local journal (`chain_backup_state`) →
+   pack segments by UTF-8 byte size → encrypt → `createPin` per segment
+   (published by each Bot's own wallet, serialized through the existing spend
+   coordinator) → publish manifest modify. Disabled state is preserved in the
+   encrypted Bot profile and the public discovery entry.
 5. Progress + cost report in the UI (objects uploaded, bytes, SPACE spent).
 
 ## 8. Restore flow (new device / cloud)
 
 1. Import user mnemonic → identity restored (existing
    `userIdentityService.restore`).
-2. Read `/info/bots` → Bot list (existing).
-3. For each Bot: fetch latest `metabot-backup/manifest` under the Bot's own
-   GlobalMetaID
-   (`pins_by_metaid` + path filter) → fetch object pins → decrypt with the
-   re-derived backup key → verify object hashes.
+2. Read `/info/bots` through the production address-scoped endpoint
+   (`/api/address/pin/list/{mvcAddress}?path=...`) → Bot list. A bounded global
+   path scan remains only as a legacy fallback; the unavailable
+   `/api/metaid/pin/list/{globalMetaId}` route is not used.
+3. For each Bot: list its manifest by MVC address, follow `modify_history` to
+   the head revision → fetch object pins → decrypt with the re-derived backup
+   key → verify Bot identity, segment hashes, and object hashes. The head pin ID
+   is retained in the restored journal so the next backup cannot fork history.
 4. Bot identity: scheme-B Bots re-derived from the mnemonic; scheme-A Bots via
-   their decrypted envelope mnemonic → existing
-   `idbots:restoreMetaBotFromMnemonic` rebuilds persona/`/info/*` from chain.
+   their decrypted envelope mnemonic. New backups supply the encrypted Bot
+   profile directly, so skeleton restoration does not depend on a separate
+   `/info/name` lookup; old backups keep the chain-profile fallback. All local
+   Bot IDs are mapped before boss/worker references and the original Twin are
+   finalized.
 5. Whitelist importers write L0/L1/L2 rows into `idbots.sqlite`
    (idempotent upserts keyed by object id / natural keys; memory rows keep
-   `fingerprint` dedup).
+   `fingerprint` dedup). Conversation sessions and individual messages are
+   separate objects to bound segment size. Import errors fail the affected Bot,
+   and imported rows plus the journal are saved after every Bot and at the end.
 6. Chain-native data self-heals: private/group chat backfill services,
-   MetaTask replay (`metatask/collector.ts`), service-order anchors.
-7. KB: re-fetch MetaWeb-sourced docs from chain, restore opt-in Web2 docs from
-   MetaFile, then full relearn rebuilds `kb.sqlite` (deterministic, no LLM).
+   MetaTask replay (`metatask/collector.ts`), service-order anchors. The
+   scheduler is rescheduled and skill/quota consumers are notified after restore.
+7. **V3, planned**: re-fetch MetaWeb-sourced KB docs from chain, restore opt-in
+   Web2 docs from MetaFile, then full relearn rebuilds `kb.sqlite`
+   (deterministic, no LLM).
 8. First dream on the new device resumes the nightly cycle; `self_identity`
    continues from the restored row (dream only overwrites with newer dates, so
    a stale local row can never clobber a newer restored one).
@@ -247,19 +261,20 @@ inside encrypted object pins.
 
 ## 11. Phasing
 
-- **MVP**: L0 + L3 envelope (scheme A) + manifest/object protocol + restore
-  importer + one-click button. After MVP, "memory is permanently preserved
-  on-chain" is literally true.
-- **V2**: L1 + L2 rolling 60-day window + nightly auto-incremental + checkpoint
-  re-packing.
+- **MVP, implemented**: L0 + L3 envelope (scheme A) + manifest/object protocol
+  + restore importer + one-click button.
+- **V2 data coverage, implemented**: Bot profiles/settings/capabilities, L1
+  continuity, L2 rolling 60-day conversations, disabled-Bot preservation,
+  cross-device incremental identity, and durable restore. Nightly automatic
+  incremental backup and checkpoint re-packing remain future work.
 - **V3**: scheme-B derived Bot wallets for new Bots, KB raw opt-in upload,
   cloud-version restore (no userData — consumes chain state only), user-
   selectable indexers.
 
 ## 12. Open questions
 
-- Segment size target (256 KB proposed) vs pin-count trade-off — validate
-  against indexer fetch limits during MVP.
+- Segment size target (256 KB, measured in UTF-8 bytes) vs pin-count trade-off
+  — continue validating against production indexer fetch limits.
 - Whether restore should auto-run on first launch after mnemonic import, or
   stay an explicit user action per Bot.
 - Cloud version's write path: who pays for backups when there is no local

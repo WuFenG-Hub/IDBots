@@ -483,7 +483,8 @@ const UserSettings: React.FC = () => {
       if (result.success) {
         showToast(i18nService.t('userSettingsChainBackupRestoreSuccess'));
       } else {
-        showToast(`${i18nService.t('userSettingsChainBackupRestoreFailed')}: ${result.error ?? ''}`);
+        const restoreError = result.error ?? result.bots.find((bot) => bot.error)?.error ?? '';
+        showToast(`${i18nService.t('userSettingsChainBackupRestoreFailed')}: ${restoreError}`);
       }
     } catch (error: any) {
       showToast(`${i18nService.t('userSettingsChainBackupRestoreFailed')}: ${error?.message || ''}`);

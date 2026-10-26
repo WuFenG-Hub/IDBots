@@ -1,6 +1,7 @@
 /**
- * Chain backup service (MVP): publishes each enabled Bot's "soul" data to the
- * chain, encrypted to the owner's backup key (see chainBackupCrypto.ts).
+ * Chain backup service: publishes every non-welcome Bot's restorable data to
+ * the chain, encrypted to the owner's backup key (see chainBackupCrypto.ts).
+ * Disabled Bots are included and remain disabled after a cross-device restore.
  *
  * Design: docs/design/2026-10-10-chain-backup-restore-design.md
  *
@@ -92,7 +93,7 @@ function packSegments(botGlobalMetaId: string, objects: ChainBackupObject[]): Ar
   let current: ChainBackupObject[] = [];
   let currentSize = 64; // envelope framing allowance
   for (const obj of objects) {
-    const size = canonicalJson(obj).length;
+    const size = Buffer.byteLength(canonicalJson(obj), 'utf8');
     if (current.length > 0 && currentSize + size > CHAIN_BACKUP_SEGMENT_PLAINTEXT_LIMIT) {
       segments.push(buildSegment(botGlobalMetaId, current));
       current = [];
@@ -166,6 +167,7 @@ export interface RunChainBackupDeps {
   db: SqliteDatabase;
   metabotStore: MetabotStore;
   userStore: UserIdentityStore;
+  saveDb?: () => void;
   onProgress?: (progress: ChainBackupProgress) => void;
   /** Test hook. */
   createPinImpl?: typeof createPin;
@@ -207,7 +209,7 @@ export async function runChainBackup(deps: RunChainBackupDeps): Promise<ChainBac
 
   const bots = metabotStore
     .listMetabots()
-    .filter((bot) => bot.enabled && bot.metabot_type !== 'welcome' && (bot.globalmetaid ?? '').trim());
+    .filter((bot) => bot.metabot_type !== 'welcome' && (bot.globalmetaid ?? '').trim());
 
   const result: ChainBackupResult = { success: true, bots: [], totalBytes: 0, totalCostSats: 0 };
   const feeRate = getGlobalFeeRate('mvc');
@@ -229,7 +231,10 @@ export async function runChainBackup(deps: RunChainBackupDeps): Promise<ChainBac
       emit({ phase: 'extract', botName: bot.name, botIndex: i, botCount: bots.length });
 
       const wallet = metabotStore.getMetabotWalletByMetabotId(bot.id);
-      const objects = extractBackupObjects(db, bot.id, wallet);
+      const objects = extractBackupObjects(db, bot.id, wallet, {
+        bot,
+        includeShared: bot.metabot_type === 'twin',
+      });
       const state = readChainBackupState(db, botGid);
       const alreadyUploaded = new Set<string>(
         JSON.parse(state?.uploaded_object_ids_json || '[]') as string[],
@@ -259,14 +264,15 @@ export async function runChainBackup(deps: RunChainBackupDeps): Promise<ChainBac
           contentType: 'application/json',
           payload: content,
         }, { feeRate, origin: 'internal:chain-backup' });
+        const contentBytes = Buffer.byteLength(content, 'utf8');
         newSegmentRefs.push({
           pinId: pin.pinId,
           segment: objectId(segment.plaintext),
-          bytes: content.length,
+          bytes: contentBytes,
           kinds: [...new Set(segment.objects.map((o) => o.kind))],
           objectIds: segment.objects.map((o) => o.id),
         });
-        botResult.bytes += content.length;
+        botResult.bytes += contentBytes;
         botResult.costSats += pin.totalCost || 0;
         emit({
           phase: 'publish', botName: bot.name, botIndex: i, botCount: bots.length,
@@ -319,6 +325,7 @@ export async function runChainBackup(deps: RunChainBackupDeps): Promise<ChainBac
         uploadedObjectIds: uploadedIds,
         lastBackupAt: Date.now(),
       });
+      deps.saveDb?.();
 
       botResult.uploadedObjects = newObjects.length;
       botResult.segments = newSegmentRefs.length;
@@ -334,6 +341,10 @@ export async function runChainBackup(deps: RunChainBackupDeps): Promise<ChainBac
 
   result.botsManifestSynced = botsManifestSynced;
   result.botsManifestError = botsManifestError;
+  if (!botsManifestSynced) {
+    result.success = false;
+    result.error = botsManifestError ?? 'BOTS_MANIFEST_SYNC_FAILED';
+  }
   emit({ phase: 'done', botCount: bots.length });
   return result;
 }

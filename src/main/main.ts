@@ -83,7 +83,7 @@ import {
   type DelegationRequest,
 } from './libs/coworkRunner';
 import { SkillManager } from './skillManager';
-import { listAssignedSkillIds, removeMetabotAssignments, runSkillAssignmentMigration } from './libs/skillAssignmentStore';
+import { listAssignedSkillIds, removeMetabotAssignments, runSkillAssignmentMigration, setMetabotAssignedSkills } from './libs/skillAssignmentStore';
 import { MetaAppManager } from './metaAppManager';
 import type { PermissionResult } from './libs/coworkPermissionTypes';
 import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools, getPersistedCoworkPermissionMode, getPersistedCoworkEffortLevel, setPersistedCoworkPreference, getAppConfigProviders } from './libs/claudeSettings';
@@ -15808,6 +15808,7 @@ if (!gotTheLock) {
         db: getStore().getDatabase(),
         metabotStore: getMetabotStore(),
         userStore: getUserIdentityStore(),
+        saveDb: getStore().getSaveFunction(),
         onProgress: (progress) => broadcastChainBackupProgress('chainBackup:progress', progress),
       });
       console.log('[ChainBackup] backup result', {
@@ -15830,11 +15831,18 @@ if (!gotTheLock) {
         db: getStore().getDatabase(),
         metabotStore: getMetabotStore(),
         userStore: getUserIdentityStore(),
+        saveDb: getStore().getSaveFunction(),
         onProgress: (progress) => broadcastChainBackupProgress('chainBackup:restoreProgress', progress),
         applyAssignedSkills: (metabotId, skills) => {
-          getSkillManager().applyMetabotAssignedSkills(metabotId, skills, 'migration');
+          const store = getStore();
+          setMetabotAssignedSkills(store.getDatabase(), store.getSaveFunction(), metabotId, skills, 'migration');
         },
       });
+      if (result.bots.some((bot) => bot.restored || bot.imported > 0)) {
+        scheduler?.reschedule();
+        broadcastToRenderers('skills:changed');
+        void quotaNudgeController?.refresh().catch(() => undefined);
+      }
       console.log('[ChainBackup] restore result', { success: result.success, bots: result.bots.length });
       return result;
     } catch (error) {
