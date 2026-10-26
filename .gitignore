@@ -753,3 +753,5 @@ blob-report/
 
 # Scheduled-task memory-access opt-in
 !tests/scheduledTaskMemoryAccess.test.mjs
+!tests/markdownContentLinkifyNoDoubleWrap.test.tsx
+!tests/a2aMessageItemIdAnchors.test.tsx

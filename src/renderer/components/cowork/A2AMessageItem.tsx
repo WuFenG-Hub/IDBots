@@ -795,7 +795,12 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
         <span className={messengerNameClassName}>
           {fromName}
         </span>
-        <div className={messengerBubbleClassName(displayRight)}>
+        {/* data-message-id mounts the innermost transcript anchor: the turn
+            navigator scrolls to the outermost same-id wrapper (the row, set in
+            CoworkSessionDetail's A2A branch) but rings the innermost one, so
+            the highlight hugs the bubble instead of drawing a rule across the
+            full row width. */}
+        <div className={messengerBubbleClassName(displayRight)} data-message-id={message.id}>
           <MarkdownContent content={contentToRender} className={markdownClassName} />
         </div>
         {metafileItems.length > 0 && (

@@ -5193,6 +5193,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                   ? 'rounded-lg ring-2 ring-amber-500/40 ring-offset-2 ring-offset-claude-bg transition-shadow dark:ring-offset-claude-darkBg'
                   : undefined}
                 data-order-focus-target={focusedOrderMessageId === msg.id ? 'true' : undefined}
+                // Turn-navigator rail: the transcript lookup contract. Without
+                // this id the rail renders in A2A sessions but every jump and
+                // active-mark resolve misses silently (standard-session paths
+                // mount the same id on their turn wrappers).
+                data-message-id={msg.id}
               >
                 <A2AMessageItem
                   message={msg}
