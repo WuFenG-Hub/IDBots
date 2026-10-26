@@ -6,8 +6,11 @@
 //
 //   1. queueKernelBoot serializes process spawns hub-wide (one boot at a
 //      time; reuse/no-op ensures never queue).
-//   2. webSearchSeed puts the web-search block in every slot's config from
-//      boot #1, so the mid-flight appearance flap never happens.
+//   2. The web-search mount state is per SLOT (fix/websearch-provider-gating,
+//      PR #100): a DeepSeek-route slot carries the block from its own boot #1
+//      and a non-DeepSeek slot never carries it, so no slot's config can flap
+//      because of another slot's turn. That structurally retired the
+//      construction-time webSearchSeed this file used to exercise.
 //   3. App-start warmup boots the top combo first and the rest strictly
 //      serially (covered in coworkDshWarmup.test.mjs — its two-slot
 //      expectation now also proves serialization).
@@ -54,31 +57,7 @@ function loadModules() {
 const loaded = loadModules()
 
 // ---------------------------------------------------------------------------
-// Unit: the seed scanner.
-// ---------------------------------------------------------------------------
-
-test('dshWebSearchSeedFromProviders picks the enabled official DeepSeek entry', () => {
-  const { dshWebSearchSeedFromProviders } = loaded.coworkDshTurn
-  const seed = dshWebSearchSeedFromProviders({
-    'gw-other': { enabled: true, apiKey: 'sk-x', baseUrl: 'http://other.example/v1' },
-    deepseek: { enabled: true, apiKey: 'sk-ds', baseUrl: 'https://api.deepseek.com' },
-  })
-  assert.deepEqual(seed, { apiKey: 'sk-ds', baseURL: 'https://api.deepseek.com/anthropic/v1' })
-})
-
-test('dshWebSearchSeedFromProviders skips disabled/keyless entries and non-official hosts', () => {
-  const { dshWebSearchSeedFromProviders } = loaded.coworkDshTurn
-  assert.equal(dshWebSearchSeedFromProviders({
-    deepseek: { enabled: false, apiKey: 'sk-ds', baseUrl: 'https://api.deepseek.com' },
-  }), null)
-  assert.equal(dshWebSearchSeedFromProviders({
-    'gw-relay': { enabled: true, apiKey: 'sk-r', baseUrl: 'http://relay.example/v1' },
-  }), null)
-  assert.equal(dshWebSearchSeedFromProviders({}), null)
-})
-
-// ---------------------------------------------------------------------------
-// Integration: serialized boots + seeded webSearch block.
+// Integration: serialized boots + per-slot webSearch block from boot #1.
 // ---------------------------------------------------------------------------
 
 test('concurrent cold boots serialize through the hub boot queue', {
@@ -126,50 +105,71 @@ test('concurrent cold boots serialize through the hub boot queue', {
   assert.equal(hub.runtimeSlotCount, 2, 'both slots booted through the queue')
 })
 
-test('a seeded hub writes webSearch into every slot config from boot #1', {
+test('the web-search block is fixed per slot from boot #1: DeepSeek slot carries it, a non-DeepSeek slot never flaps', {
   skip: runtimeReady ? false : 'dsh-runtime node_modules not installed',
-  timeout: 120000,
+  timeout: 180000,
 }, async (t) => {
   const { DshTurnHub } = loaded.coworkDshTurn
   const { startMockServer } = await import(path.join(runtimeDir, 'test', 'fixtures', 'mock-openai.mjs'))
-  const { server } = await startMockServer(48843)
-  const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-dsh-wsseed-'))
+  const deepSeekServer = await startMockServer(48843)
+  const otherServer = await startMockServer(48844)
+  const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-dsh-wsslot-'))
   const logs = []
   const hub = new DshTurnHub({
     runtimeDir,
     sessionRoot,
-    webSearchSeed: { apiKey: 'sk-ds-seed', baseURL: 'https://api.deepseek.com/anthropic/v1' },
     log: (level, message, detail) => logs.push({ level, message, detail: detail ?? {} }),
   })
-  // A NON-DeepSeek route: before the seed, this slot's config carried no
-  // webSearch block until an official turn appeared (the flap).
-  const provider = {
-    key: 'mockgw', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48843/v1',
+  const otherProvider = {
+    key: 'mockgw', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48844/v1',
     apiKey: 'sk-a', model: 'mock-1',
+  }
+  const deepSeekProvider = {
+    key: 'deepseek', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48843',
+    apiKey: 'sk-ds', model: 'mock-1',
   }
   t.after(async () => {
     await hub.close().catch(() => undefined)
-    server.close()
+    deepSeekServer.server.close()
+    otherServer.server.close()
     fs.rmSync(sessionRoot, { recursive: true, force: true })
   })
 
-  await hub.prewarmTurnSlot({ sessionId: 'seed-check', provider, workspace: { cwd: sessionRoot } })
+  // Boot the NON-DeepSeek slot first — the pre-#100 shape where a later
+  // DeepSeek turn used to flip a hub-global flag and successor-boot it.
+  await hub.prewarmTurnSlot({ sessionId: 'other-boot', provider: otherProvider, workspace: { cwd: sessionRoot } })
+  const otherConfigPath = path.join(sessionRoot, 'cordis.runtime.mockgw.json')
+  assert.ok(fs.existsSync(otherConfigPath), `the non-DeepSeek slot config landed at ${otherConfigPath}`)
+  const otherConfigBefore = fs.readFileSync(otherConfigPath, 'utf8')
+  assert.ok(!otherConfigBefore.includes('@deepseek-ai/dsh-web'), 'a non-DeepSeek slot never mounts the web trio')
+  assert.ok(!otherConfigBefore.includes('IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'), 'and never references the DeepSeek search key env')
 
-  // The generated cordis config lands directly under sessionRoot
-  // (dshRuntimeConfigFileName) — the web-search trio must ride boot #1.
-  const configPath = path.join(sessionRoot, 'cordis.runtime.mockgw.json')
-  assert.ok(fs.existsSync(configPath), `the slot config landed at ${configPath}`)
-  const configText = fs.readFileSync(configPath, 'utf8')
+  // The DeepSeek slot's very first config carries the block — rememberTurnInputs
+  // sets the slot state before buildRuntimeConfig, so there is no second boot.
+  await hub.prewarmTurnSlot({ sessionId: 'deepseek-boot', provider: deepSeekProvider, workspace: { cwd: sessionRoot } })
+  const deepSeekConfigPath = path.join(sessionRoot, 'cordis.runtime.deepseek.json')
+  assert.ok(fs.existsSync(deepSeekConfigPath), `the DeepSeek slot config landed at ${deepSeekConfigPath}`)
+  const deepSeekConfig = fs.readFileSync(deepSeekConfigPath, 'utf8')
   assert.ok(
-    configText.includes('@deepseek-ai/dsh-web-search-deepseek'),
-    'the web-search provider entry is in the very first boot config',
+    deepSeekConfig.includes('@deepseek-ai/dsh-web-search-deepseek'),
+    'the web-search provider entry is in the DeepSeek slot\'s very first boot config',
   )
   assert.ok(
-    configText.includes('https://api.deepseek.com/anthropic/v1'),
-    'the seeded baseURL rides the entry',
+    deepSeekConfig.includes('127.0.0.1:48843/anthropic/v1'),
+    'the baseURL derived from the slot\'s own DeepSeek route rides the entry',
   )
   assert.ok(
-    configText.includes('IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'),
+    deepSeekConfig.includes('IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'),
     'the key is referenced by env NAME (the value rides the child env)',
   )
+
+  // The DeepSeek boot must not have touched the other slot: same config text,
+  // and a repeat prewarm is a reuse, not a successor boot.
+  assert.equal(fs.readFileSync(otherConfigPath, 'utf8'), otherConfigBefore, 'the non-DeepSeek slot config did not change')
+  await hub.prewarmTurnSlot({ sessionId: 'other-again', provider: otherProvider, workspace: { cwd: sessionRoot } })
+  assert.ok(
+    logs.some((l) => l.message === 'dshTurnHub.prewarmTurnSlot.reuse' && l.detail.runtime === 'mockgw'),
+    'the non-DeepSeek slot was reused — no flap-driven successor boot',
+  )
+  assert.equal(hub.runtimeSlotCount, 2, 'exactly the two slots exist')
 })

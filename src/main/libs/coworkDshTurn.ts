@@ -176,29 +176,6 @@ export function deepSeekWebSearchBaseURL(baseUrl: string): string {
   return `${base}/anthropic/v1`
 }
 
-/**
- * Scan the provider catalog for the official DeepSeek entry and return the
- * web-search seed the DSH hub carries from construction (see
- * DshHubOptions.webSearchSeed). null when no enabled official-DeepSeek
- * provider with a key exists — the hub then behaves exactly as before (the
- * block appears with the first official turn, acceptable when the user has
- * no such provider at all).
- */
-export function dshWebSearchSeedFromProviders(
-  providers: Record<string, { enabled?: boolean; apiKey?: string | null; baseUrl?: string | null } | undefined>,
-): { apiKey: string; baseURL: string } | null {
-  for (const [key, cfg] of Object.entries(providers ?? {})) {
-    if (!cfg || cfg.enabled === false) continue
-    const apiKey = String(cfg.apiKey ?? '').trim()
-    const baseUrl = String(cfg.baseUrl ?? '').trim()
-    if (!apiKey || !baseUrl) continue
-    if (isOfficialDeepSeekRoute({ key, baseUrl })) {
-      return { apiKey, baseURL: deepSeekWebSearchBaseURL(baseUrl) }
-    }
-  }
-  return null
-}
-
 export interface DshTurnCallbacks {
   onMessage: (
     message: { type: string; content: string; metadata?: Record<string, unknown> },
@@ -407,17 +384,6 @@ export interface DshHubOptions {
    * tests that need deterministic retirement).
    */
   kernelActivityGraceMs?: number
-  /**
-   * DeepSeek web-search credential resolved from the provider catalog at hub
-   * construction (dshWebSearchSeedFromProviders). Without it the first
-   * official-DeepSeek turn of an app run flips webSearchSeen ON mid-flight —
-   * a hub-global config change that restarted EVERY slot booted earlier
-   * (the 2026-10-16 [env, webSearch] successor-boot storm behind the 12-16s
-   * main-process stalls). Seeding puts the block in every slot's config from
-   * boot #1, so the appearance flap never happens; per-turn reassignment in
-   * rememberTurnInputs still picks up later key rotations.
-   */
-  webSearchSeed?: { apiKey: string; baseURL: string } | null
 }
 
 /** Child-env map for the shared DSH runtime. Route credentials and the RPC
@@ -527,6 +493,22 @@ interface DshRuntimeSlot {
   workspaceSeen: DshRuntimeConfigInput['workspace']
   providersSeen: Map<string, DshProviderRoute>
   routeApiKeys: Map<string, { envName: string; apiKey: string }>
+  /** DeepSeek server-side web search mount state for THIS slot: set once the
+   *  slot's own provider union contains an official DeepSeek route with an
+   *  API key. Per-slot by design (fix/websearch-provider-gating): the search
+   *  endpoint is DeepSeek-account-bound, so a slot whose provider is not
+   *  DeepSeek must not mount the trio — the pre-fix hub-level stickiness
+   *  mounted it into every runtime after ANY DeepSeek route was seen, and an
+   *  out-of-balance DeepSeek account then turned every model web_search call
+   *  into an HTTP 402. Slot-level state is also what keeps the block stable
+   *  from each slot's boot #1: rememberTurnInputs sets it before the first
+   *  buildRuntimeConfig, and no other slot's config ever changes because of
+   *  it — so the 2026-10-16 successor-boot storm (a hub-global flag flipping
+   *  ON mid-flight and restarting every older slot) cannot recur, which is
+   *  why the construction-time webSearchSeed that used to guard it is gone. */
+  webSearchSeen: { apiKey: string; baseURL: string } | null
+  /** Guard for the one-time provider-gate notice (see buildRuntimeConfig). */
+  webSearchGateNoticeSent: boolean
   mcpServersSeen: Map<string, DshMcpServerDefinition>
   /** The slot key already encodes this combo, so every turn landing here
    *  carries the same values — these simply record them for config rebuilds
@@ -573,10 +555,6 @@ export class DshTurnHub {
   private hostToolSurfaceByDsh = new Map<string, string>()
   /** Approval / ask ids belong to the kernel that raised them. */
   private askKernelById = new Map<string, DshKernel>()
-  /** DeepSeek server-side web search is composition-level and shared across
-   *  every provider slot once an official DeepSeek route has been seen —
-   *  same stickiness as the pre-split single runtime. */
-  private webSearchSeen: { apiKey: string; baseURL: string } | null = null
   private reapTimer: ReturnType<typeof setTimeout> | null = null
   /** Per-DSH-session turn chain: a runTurn for a session whose previous turn
    *  is still in flight must queue, never overwrite the live controller —
@@ -610,10 +588,6 @@ export class DshTurnHub {
 
   constructor(opts: DshHubOptions) {
     this.opts = opts
-    // See DshHubOptions.webSearchSeed: the web-search block must exist in
-    // every slot's config from boot #1, or its mid-flight appearance flaps
-    // every older slot into a successor boot.
-    this.webSearchSeen = opts.webSearchSeed ?? null
   }
 
   get running(): boolean {
@@ -1507,6 +1481,8 @@ export class DshTurnHub {
       workspaceSeen: undefined,
       providersSeen: new Map(),
       routeApiKeys: new Map(),
+      webSearchSeen: null,
+      webSearchGateNoticeSent: false,
       mcpServersSeen: new Map(),
       browserUseSeen: undefined,
       computerUseSeen: false,
@@ -1637,7 +1613,7 @@ export class DshTurnHub {
       }
     }
     if (isOfficialDeepSeekRoute(input.provider) && input.provider.apiKey) {
-      this.webSearchSeen = {
+      slot.webSearchSeen = {
         apiKey: input.provider.apiKey,
         baseURL: deepSeekWebSearchBaseURL(input.provider.baseUrl),
       }
@@ -1648,6 +1624,13 @@ export class DshTurnHub {
   }
 
   private buildRuntimeConfig(slot: DshRuntimeSlot, input: DshTurnInput): DshRuntimeConfigInput {
+    if (!slot.webSearchSeen && !slot.webSearchGateNoticeSent) {
+      slot.webSearchGateNoticeSent = true
+      this.opts.log?.('info', 'dshTurnHub.webSearchProviderGated', {
+        runtime: slot.key,
+        detail: 'built-in web_search not mounted: the search endpoint is DeepSeek-account-bound and this provider slot has no official DeepSeek route; use the browser-search skill (SKILLs/web-search) if web search is needed',
+      })
+    }
     return {
       sessionRoot: this.opts.sessionRoot,
       runtimeId: slot.key,
@@ -1664,10 +1647,10 @@ export class DshTurnHub {
       mcpServers: [...slot.mcpServersSeen.values()],
       ...(slot.browserUseSeen !== undefined ? { browserUse: slot.browserUseSeen } : {}),
       ...(slot.computerUseSeen ? { computerUse: true } : {}),
-      ...(this.webSearchSeen ? {
+      ...(slot.webSearchSeen ? {
         webSearch: {
           apiKeyEnv: DSH_WEBSEARCH_API_KEY_ENV,
-          baseURL: this.webSearchSeen.baseURL,
+          baseURL: slot.webSearchSeen.baseURL,
           model: DSH_WEBSEARCH_MODEL,
         },
       } : {}),
@@ -1679,7 +1662,7 @@ export class DshTurnHub {
       extraEntries: [...(this.opts.extraEntries ?? []), ...(this.opts.extraEntriesProvider?.() ?? [])],
       env: buildDshChildEnv({
         routeApiKeys: slot.routeApiKeys.values(),
-        webSearchApiKey: this.webSearchSeen?.apiKey,
+        webSearchApiKey: slot.webSearchSeen?.apiKey,
         rpcToken: getMetaidRpcToken(),
         rpcAuthFile: getMetaidRpcTokenFilePath(app.getPath('userData')),
         skillHostEnv: this.opts.skillHostEnvProvider?.(),

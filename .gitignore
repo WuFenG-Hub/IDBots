@@ -147,6 +147,7 @@ tests/*
 !tests/coworkDshIdleStreamFallback.test.mjs
 !tests/coworkDshDeletePolicy.test.mjs
 !tests/coworkDshWebSearch.test.mjs
+!tests/coworkDshWebSearchProviderGating.test.mjs
 !tests/coworkDshModelSwitch.test.mjs
 !tests/turnNavigator.test.mjs
 !tests/llmSafeText.test.mjs

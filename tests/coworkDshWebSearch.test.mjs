@@ -4,8 +4,12 @@
 // file on disk), with the 0.2.1 direct Search/Fetch API providers selected
 // and the legacy Messages-turn provider kept mounted as rollback; the model
 // must see the `web_search` tool, and a search round trip must execute
-// against the Search API endpoint. A later non-DeepSeek turn must NOT unmount
-// the seam (sticky, like MCP servers).
+// against the Search API endpoint. The mount is per-slot
+// (fix/websearch-provider-gating): the seam stays on its own DeepSeek slot
+// across later non-DeepSeek turns (sticky like MCP servers), while a
+// non-DeepSeek slot never mounts it — the search endpoint is
+// DeepSeek-account-bound, so mounting it elsewhere only burns 402s when the
+// DeepSeek account is out of balance.
 // Requires: npm run compile:electron + dsh-runtime/node_modules.
 
 import assert from 'node:assert/strict'
@@ -67,7 +71,12 @@ test('deepseek web search: hub mounts the dsh-web trio and executes a search rou
     const { server, seen } = await startMockServer(PORT)
     const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-websearch-'))
     const messages = []
-    const hub = new DshTurnHub({ runtimeDir, sessionRoot, log: () => undefined })
+    const hubLogs = []
+    const hub = new DshTurnHub({
+      runtimeDir,
+      sessionRoot,
+      log: (level, event, data) => { hubLogs.push({ level, event, data }) },
+    })
     const callbacks = {
       onMessage: (message) => { messages.push(message); return `msg-${messages.length}` },
       onMessageUpdate: () => undefined,
@@ -132,9 +141,11 @@ test('deepseek web search: hub mounts the dsh-web trio and executes a search rou
       const toolContent = typeof toolMsg?.content === 'string' ? toolMsg.content : JSON.stringify(toolMsg?.content ?? '')
       assert.match(toolContent, /Sources:/, 'follow-up request carries the search result to the model')
 
-      // Shared web search: a later non-DeepSeek provider boots its own
-      // process but still mounts the DeepSeek web seam (hub-level, same
-      // as the pre-split single runtime).
+      // Provider gating (fix/websearch-provider-gating): a later non-DeepSeek
+      // provider boots its own process WITHOUT the DeepSeek web seam — the
+      // pre-fix hub-level stickiness mounted it everywhere after any DeepSeek
+      // route was seen, and an out-of-balance DeepSeek account then turned
+      // every model web_search call into an HTTP 402.
       await runOneTurn(`ws2-${Date.now().toString(36)}`, {
         key: 'mockgw',
         apiFormat: 'openai',
@@ -143,10 +154,30 @@ test('deepseek web search: hub mounts the dsh-web trio and executes a search rou
         model: 'mock-1',
       }, 'HELLO_MOCK')
       const cfg2 = JSON.parse(fs.readFileSync(path.join(sessionRoot, dshRuntimeConfigFileName('deepseek')), 'utf8'))
-      assert.ok(cfg2.some((e) => e.name === '@deepseek-ai/dsh-web'), 'DeepSeek web trio survives a later non-deepseek turn')
+      assert.ok(cfg2.some((e) => e.name === '@deepseek-ai/dsh-web'), 'DeepSeek web trio survives on its own slot (sticky)')
       assert.equal(hub.runtimeSlotCount, 2, 'the second provider must spawn its own runtime')
-      const cfgOther = JSON.parse(fs.readFileSync(path.join(sessionRoot, dshRuntimeConfigFileName('mockgw')), 'utf8'))
-      assert.ok(cfgOther.some((e) => e.name === '@deepseek-ai/dsh-web'), 'non-DeepSeek slot still mounts the shared web trio')
+      const rawOther = fs.readFileSync(path.join(sessionRoot, dshRuntimeConfigFileName('mockgw')), 'utf8')
+      const cfgOther = JSON.parse(rawOther)
+      assert.ok(!cfgOther.some((e) => e.name === '@deepseek-ai/dsh-web'), 'non-DeepSeek slot does NOT mount the DeepSeek web trio')
+      assert.ok(!cfgOther.some((e) => e.name === '@deepseek-ai/dsh-web-search-deepseek'), 'non-DeepSeek slot does NOT mount the DeepSeek search provider')
+      assert.ok(!cfgOther.some((e) => e.name === '@deepseek-ai/dsh-tool-web'), 'non-DeepSeek slot does NOT mount the web tool (no web_search/web_fetch)')
+      assert.ok(!rawOther.includes('IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'), 'non-DeepSeek composition never references the DeepSeek search key env')
+
+      // The non-DeepSeek turn's model-facing request must not offer the
+      // web_search tool at all. (/v1/chat/completions is only the mockgw
+      // provider's URL space in this test — the DeepSeek provider's chat and
+      // aux search requests never carry the /v1 prefix.)
+      const gwRequests = seen.filter((r) => r.method === 'POST' && String(r.url).endsWith('/v1/chat/completions'))
+      assert.ok(gwRequests.length > 0, 'non-DeepSeek turn reached its gateway')
+      const gwTools = gwRequests.at(-1)?.body?.tools ?? []
+      assert.ok(!gwTools.some((t) => t?.function?.name === 'web_search' || t?.name === 'web_search'), 'non-DeepSeek turn does NOT offer web_search to the model')
+
+      // The gate is explainable, never silent: exactly one notice for the
+      // gated slot, pointing at the browser-search skill fallback.
+      const gateNotices = hubLogs.filter((l) => l.event === 'dshTurnHub.webSearchProviderGated')
+      assert.equal(gateNotices.length, 1, 'exactly one provider-gate notice for the non-DeepSeek slot')
+      assert.equal(gateNotices[0]?.data?.runtime, 'mockgw')
+      assert.equal(gateNotices[0]?.data?.detail?.includes('browser-search skill'), true, 'notice points at the browser-search skill fallback')
     } finally {
       await hub.close()
       server.close()
