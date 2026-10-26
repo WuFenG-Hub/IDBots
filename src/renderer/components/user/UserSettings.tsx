@@ -19,6 +19,7 @@ import {
 import { i18nService } from '../../services/i18n';
 import MnemonicWordGrid from './MnemonicWordGrid';
 import UserBackupMnemonicModal from './UserBackupMnemonicModal';
+import ChainBackupRestorePrompt from './ChainBackupRestorePrompt';
 
 type ViewState = 'loading' | 'empty' | 'create' | 'backup' | 'import' | 'profile';
 
@@ -168,6 +169,7 @@ const UserSettings: React.FC = () => {
   const [chainBackupRestoring, setChainBackupRestoring] = useState(false);
   const [chainBackupResult, setChainBackupResult] = useState<Awaited<ReturnType<typeof window.electron.chainBackup.backup>> | null>(null);
   const [chainRestoreResult, setChainRestoreResult] = useState<Awaited<ReturnType<typeof window.electron.chainBackup.restore>> | null>(null);
+  const [chainRestorePrompt, setChainRestorePrompt] = useState<{ botCount: number; backupBotCount: number } | null>(null);
   const [chainBackupProgressText, setChainBackupProgressText] = useState('');
   const [chainBackupLastRun, setChainBackupLastRun] = useState<number | null>(null);
   const [subsidyRetrying, setSubsidyRetrying] = useState(false);
@@ -338,6 +340,7 @@ const UserSettings: React.FC = () => {
   const handleImport = async () => {
     if (!canImport) return;
     setImportError('');
+    setChainRestorePrompt(null);
     setImporting(true);
     try {
       const result = await window.electron.userIdentity.importFromMnemonic({
@@ -349,6 +352,14 @@ const UserSettings: React.FC = () => {
         return;
       }
       setIdentity(result.identity);
+      if (result.chainBackup?.success && result.chainBackup.hasBackup) {
+        setChainRestorePrompt({
+          botCount: result.chainBackup.botCount,
+          backupBotCount: result.chainBackup.backupBotCount,
+        });
+      } else if (result.chainBackup && !result.chainBackup.success) {
+        console.warn('[ChainBackup] post-import availability probe failed:', result.chainBackup.error);
+      }
       setImportWordCount(12);
       setImportWords(Array.from({ length: 12 }, () => ''));
       setImportPath(DEFAULT_DERIVATION_PATH);
@@ -496,9 +507,9 @@ const UserSettings: React.FC = () => {
     }
   };
 
-  const handleChainRestore = async () => {
+  const handleChainRestore = async (skipConfirm = false) => {
     if (chainBackupRunning || chainBackupRestoring) return;
-    if (!window.confirm(i18nService.t('userSettingsChainBackupRestoreConfirm'))) return;
+    if (!skipConfirm && !window.confirm(i18nService.t('userSettingsChainBackupRestoreConfirm'))) return;
     setChainBackupRestoring(true);
     setChainRestoreResult(null);
     setChainBackupProgressText('');
@@ -1208,6 +1219,19 @@ const UserSettings: React.FC = () => {
               </div>
             </div>
           </div>
+        )}
+
+        {chainRestorePrompt && (
+          <ChainBackupRestorePrompt
+            botCount={chainRestorePrompt.botCount}
+            backupBotCount={chainRestorePrompt.backupBotCount}
+            restoring={chainBackupRestoring}
+            onCancel={() => setChainRestorePrompt(null)}
+            onConfirm={() => {
+              setChainRestorePrompt(null);
+              void handleChainRestore(true);
+            }}
+          />
         )}
 
         {/* Backup mnemonic modal */}

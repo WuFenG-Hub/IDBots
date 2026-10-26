@@ -259,12 +259,14 @@ async function fetchUserBotsEntries(
 async function fetchLatestBackupManifest(
   entry: UserBotsManifestEntry,
   options?: FetchOptions,
+  strict = false,
 ): Promise<{ pinId: string; manifest: BackupManifest } | null> {
   const pins = await listOwnedPins({
     address: entry.mvcAddress,
     globalMetaId: entry.globalMetaId,
     path: CHAIN_BACKUP_MANIFEST_PATH,
   }, options);
+  let lastError: unknown = null;
   for (const pin of pins) {
     try {
       const pinId = headPinId(pin);
@@ -281,11 +283,78 @@ async function fetchLatestBackupManifest(
       ) {
         return { pinId, manifest: parsed };
       }
-    } catch {
+    } catch (error) {
+      lastError = error;
       continue;
     }
   }
+  if (strict && lastError) throw lastError;
   return null;
+}
+
+export interface ChainBackupAvailability {
+  success: boolean;
+  hasBackup: boolean;
+  botCount: number;
+  backupBotCount: number;
+  error?: string;
+}
+
+export async function probeChainBackupAvailability(deps: {
+  userStore: UserIdentityStore;
+  baseUrl?: string;
+}): Promise<ChainBackupAvailability> {
+  const identity = deps.userStore.get();
+  if (!identity?.globalmetaid?.trim()) {
+    return { success: false, hasBackup: false, botCount: 0, backupBotCount: 0, error: 'USER_IDENTITY_MISSING' };
+  }
+  let entries: UserBotsManifestEntry[];
+  try {
+    entries = await fetchUserBotsEntries(
+      { globalMetaId: identity.globalmetaid.trim(), mvcAddress: identity.mvc_address },
+      deps.baseUrl ? { baseUrl: deps.baseUrl } : undefined,
+    );
+  } catch (error) {
+    return {
+      success: false,
+      hasBackup: false,
+      botCount: 0,
+      backupBotCount: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  let nextIndex = 0;
+  let backupBotCount = 0;
+  let failure: unknown = null;
+  const workerCount = Math.min(4, entries.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < entries.length) {
+      const entry = entries[nextIndex];
+      nextIndex += 1;
+      try {
+        const manifestHit = await fetchLatestBackupManifest(
+          entry,
+          deps.baseUrl ? { baseUrl: deps.baseUrl } : undefined,
+          true,
+        );
+        if (manifestHit && manifestHit.manifest.segments.length > 0) backupBotCount += 1;
+      } catch (error) {
+        failure = error;
+      }
+    }
+  }));
+
+  if (failure) {
+    return {
+      success: false,
+      hasBackup: backupBotCount > 0,
+      botCount: entries.length,
+      backupBotCount,
+      error: failure instanceof Error ? failure.message : String(failure),
+    };
+  }
+  return { success: true, hasBackup: backupBotCount > 0, botCount: entries.length, backupBotCount };
 }
 
 function stringArray(value: unknown): string[] {

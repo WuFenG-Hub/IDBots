@@ -2006,6 +2006,13 @@ interface IElectronAPI {
       profileSource?: 'chain' | 'local';
       subsidy?: UserIdentitySubsidyResult;
       chainSync?: UserIdentityChainSyncResult;
+      chainBackup?: {
+        success: boolean;
+        hasBackup: boolean;
+        botCount: number;
+        backupBotCount: number;
+        error?: string;
+      };
       error?: string;
     }>;
     updateName: (input: { name: string }) => Promise<{

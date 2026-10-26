@@ -241,6 +241,13 @@ and imports rows. This preserves byte-for-byte content and incremental dedup.
 
 ## 8. Restore flow (new device / cloud)
 
+0. Immediately after a successful user-mnemonic import, the main process runs a
+   read-only availability probe with bounded concurrency and returns its result
+   with the existing import response. A valid backup requires a manifest with a
+   non-empty segment list. Probe failure is logged but never blocks the import
+   or gets misreported as “no backup”. When a valid backup exists, the UI opens
+   an immediate restore prompt; only explicit user confirmation executes the
+   restore. No new IPC channel or silent auto-restore is introduced.
 1. Import user mnemonic → identity restored (existing
    `userIdentityService.restore`).
 2. Read `/info/bots` through the production address-scoped endpoint
@@ -311,7 +318,7 @@ and imports rows. This preserves byte-for-byte content and incremental dedup.
 
 - Segment size target (256 KB, measured in UTF-8 bytes) vs pin-count trade-off
   — continue validating against production indexer fetch limits.
-- Whether restore should auto-run on first launch after mnemonic import, or
-  stay an explicit user action per Bot.
+- Restore timing is now settled: a successful mnemonic import triggers a
+  read-only probe and an immediate restore prompt, but never a silent restore.
 - Cloud version's write path: who pays for backups when there is no local
   wallet UX (still the user identity, but UX needs design).
