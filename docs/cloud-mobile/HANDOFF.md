@@ -1,15 +1,25 @@
 # Handoff — Cloud and Mobile
 
-Start here. This file is the continuity record for the planning session that
-ended on 2026-10-16. The package index is
-[`README.md`](README.md). Requirements and acceptance live in the numbered
-files. This file says what is already decided, what is not built, and the
-order to build it.
+Start here. The package index is [`README.md`](README.md). Requirements and
+acceptance live in the numbered files.
 
-No product code for this program exists yet. The session wrote documents
-only. They are on `main`, merged as `20240bc5` (`merge: docs/mobile-cloud-design`).
-The branch `docs/mobile-cloud-design` and its worktree were removed after
-that merge. Do not recreate them. New work branches from current `main`.
+## Current status (2026-10-26)
+
+The program now has real server-mode, gateway, control-plane, tenant-image,
+and PWA code plus delivery records. It is a working main-flow prototype, not
+an accepted product. The current productization plan is
+[`70-phase-2-optimization-and-iteration-plan.md`](70-phase-2-optimization-and-iteration-plan.md):
+it prioritizes a correctly bound Twin Bot conversation, shared desktop/mobile
+session behavior, complete work and artifact journeys, and PWA/cloud recovery
+before native shells or fine polish. Read it after `00-program-plan.md` and
+before starting new implementation work.
+
+The sections below are the historical continuity record for the planning
+session that ended on 2026-10-16. At that point no product code existed; the
+session had written documents only, merged as `20240bc5`
+(`merge: docs/mobile-cloud-design`). The branch `docs/mobile-cloud-design` and
+its worktree were removed after that merge. Do not recreate them. New work
+branches from current `main`.
 
 ## Read in this order
 

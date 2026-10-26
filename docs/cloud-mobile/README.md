@@ -63,6 +63,7 @@ it has to satisfy.
 | [`51-ws-e-implementation-plan.md`](51-ws-e-implementation-plan.md) | Mobile client, in branch order | Mobile development |
 | [`50-ws-e-mobile-client.md`](50-ws-e-mobile-client.md) | WS-E requirements and acceptance | Mobile development |
 | [`60-acceptance-and-go-live.md`](60-acceptance-and-go-live.md) | End-to-end scenarios, security, go-live, sign-off | Owner, acceptance, every party |
+| [`70-phase-2-optimization-and-iteration-plan.md`](70-phase-2-optimization-and-iteration-plan.md) | Current productization baseline, Twin-first vertical plan, capability matrix, CR backlog, and acceptance gates | Everyone, especially cloud/mobile and acceptance |
 
 Phase 0 has passed (GO, signed 2026-10-15). Its plan stays at
 [`docs/superpowers/plans/2026-10-14-phase0-linux-headless-spike.md`](../superpowers/plans/2026-10-14-phase0-linux-headless-spike.md).
@@ -103,3 +104,4 @@ not in the repository.
 | M0 Phase 0 | GO, signed by the owner on 2026-10-15. Results archived outside the repo; see `HANDOFF.md` |
 | M1 contracts | `01` and `02` frozen at 1.0.0 on 2026-10-15. Party findings come back as change requests |
 | Implementation plans | Ready to hand out: WS-A, WS-B, WS-C, WS-D, WS-E, and operations |
+| Phase 2 productization | [`70-phase-2-optimization-and-iteration-plan.md`](70-phase-2-optimization-and-iteration-plan.md) proposed on 2026-10-26; implementation and acceptance not yet signed |
