@@ -55,6 +55,7 @@ import {
   initJevRelayService,
   registerJevRelayIpcHandlers,
   resolveCerebellumRuntimeConfig,
+  resolveJevRelayCredentials,
   setJevRelayCallStatsSink,
 } from './services/jevRelayService';
 import { rankMemoriesWithCerebellum } from './cerebellum/memoryRank';
@@ -85,7 +86,7 @@ import { SkillManager } from './skillManager';
 import { listAssignedSkillIds, removeMetabotAssignments, runSkillAssignmentMigration } from './libs/skillAssignmentStore';
 import { MetaAppManager } from './metaAppManager';
 import type { PermissionResult } from './libs/coworkPermissionTypes';
-import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools, getPersistedCoworkPermissionMode, getPersistedCoworkEffortLevel, setPersistedCoworkPreference } from './libs/claudeSettings';
+import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools, getPersistedCoworkPermissionMode, getPersistedCoworkEffortLevel, setPersistedCoworkPreference, getAppConfigProviders } from './libs/claudeSettings';
 import { getOsLocale, getPersistedAppLanguage, setAppLanguageStoreGetter, tApp } from './libs/appLanguage';
 import { setGroupTaskCopyLanguageGetter } from './libs/groupTaskCopy';
 import { mapDshSubagentList, mapDshSubagentMessages, sessionUsesDshSubagents } from './libs/coworkSubagentTranscript';
@@ -96,6 +97,8 @@ import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
 import { generateSessionTitle, setSessionTitleBrainProvider, setTurnAckReplyBrainProvider } from './libs/coworkUtil';
 import { ensureSandboxReady, getSandboxStatus, onSandboxProgress } from './libs/coworkSandboxRuntime';
 import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps, setFreeQuotaExhaustedListener } from './libs/coworkOpenAICompatProxy';
+import { startDshWebToolsProxy, stopDshWebToolsProxy, resolveDeepSeekWebToolsUpstream } from './services/dshWebToolsProxy';
+import { isOfficialDeepSeekRoute } from './libs/coworkDshTurn';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
 import { isWorkspaceMetabotId, resolveBotWorkspaceCwd, resolveSessionWorkingDirectory, shouldUseBotWorkspaceCwd } from './libs/botWorkspace';
 import { getGitBranch } from './libs/gitWorkspace';
@@ -18847,6 +18850,7 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
         }
       },
       stopOpenAICompatProxy: () => stopCoworkOpenAICompatProxy(),
+      stopWebToolsProxy: () => stopDshWebToolsProxy(),
       stopSkillServices: async () => {
         const skillServices = getSkillServiceManager();
         await skillServices.stopAll();
@@ -19234,6 +19238,24 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
 
     await startCoworkOpenAICompatProxy().catch((error) => {
       console.error('Failed to start OpenAI compatibility proxy:', error);
+    });
+
+    // Loopback web-tools proxy every DSH slot searches through. Must be up
+    // before the first runtime boots so the mounted block is stable from
+    // boot #1: user DeepSeek key first, IDBots-Free relay (separate free
+    // search bucket) when that key is missing or answers 401/402/403.
+    await startDshWebToolsProxy({
+      resolveDeepSeekUpstream: () => resolveDeepSeekWebToolsUpstream(getAppConfigProviders(), isOfficialDeepSeekRoute),
+      resolveRelayUpstream: async () => {
+        const credentials = await resolveJevRelayCredentials();
+        const baseUrl = credentials.baseUrl.replace(/\/+$/, '');
+        return baseUrl && credentials.apiKey
+          ? { label: 'idbots-free', baseURL: `${baseUrl}/v1/tools`, apiKey: credentials.apiKey }
+          : null;
+      },
+      log: (line) => coworkLog('INFO', 'dshWebToolsProxy', line),
+    }).catch((error) => {
+      console.error('Failed to start the DSH web-tools proxy:', error);
     });
 
     // Inject scheduled task dependencies into the proxy server

@@ -6,11 +6,12 @@
 //
 //   1. queueKernelBoot serializes process spawns hub-wide (one boot at a
 //      time; reuse/no-op ensures never queue).
-//   2. The web-search mount state is per SLOT (fix/websearch-provider-gating,
-//      PR #100): a DeepSeek-route slot carries the block from its own boot #1
-//      and a non-DeepSeek slot never carries it, so no slot's config can flap
-//      because of another slot's turn. That structurally retired the
-//      construction-time webSearchSeed this file used to exercise.
+//   2. The web-search block is CONSTANT: every slot mounts the host web-tools
+//      proxy (services/dshWebToolsProxy — user DeepSeek first, IDBots-Free
+//      relay fallback) with the same loopback URL and env name, so the block
+//      is identical from every slot's boot #1 and no slot's config can flap
+//      because of another slot's turn or a credential change. That retired
+//      both the construction-time webSearchSeed and the per-slot gating.
 //   3. App-start warmup boots the top combo first and the rest strictly
 //      serially (covered in coworkDshWarmup.test.mjs — its two-slot
 //      expectation now also proves serialization).
@@ -57,7 +58,7 @@ function loadModules() {
 const loaded = loadModules()
 
 // ---------------------------------------------------------------------------
-// Integration: serialized boots + per-slot webSearch block from boot #1.
+// Integration: serialized boots + one constant proxy web block from boot #1.
 // ---------------------------------------------------------------------------
 
 test('concurrent cold boots serialize through the hub boot queue', {
@@ -105,7 +106,7 @@ test('concurrent cold boots serialize through the hub boot queue', {
   assert.equal(hub.runtimeSlotCount, 2, 'both slots booted through the queue')
 })
 
-test('the web-search block is fixed per slot from boot #1: DeepSeek slot carries it, a non-DeepSeek slot never flaps', {
+test('the web-search block is one constant proxy descriptor for every slot from boot #1 — no slot flaps for another slot\'s route', {
   skip: runtimeReady ? false : 'dsh-runtime node_modules not installed',
   timeout: 180000,
 }, async (t) => {
@@ -115,9 +116,14 @@ test('the web-search block is fixed per slot from boot #1: DeepSeek slot carries
   const otherServer = await startMockServer(48844)
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-dsh-wsslot-'))
   const logs = []
+  // Prewarm boots never search, so a static descriptor stands in for the
+  // running host proxy: what matters is that every slot mounts THIS and only
+  // this, with the token riding the env rather than the config file.
+  const webToolsProxy = { baseURL: 'http://127.0.0.1:48899/anthropic/v1', token: 'proxy-token-for-test' }
   const hub = new DshTurnHub({
     runtimeDir,
     sessionRoot,
+    webToolsProxy: () => webToolsProxy,
     log: (level, message, detail) => logs.push({ level, message, detail: detail ?? {} }),
   })
   const otherProvider = {
@@ -134,34 +140,28 @@ test('the web-search block is fixed per slot from boot #1: DeepSeek slot carries
     otherServer.server.close()
     fs.rmSync(sessionRoot, { recursive: true, force: true })
   })
+  const webApiEntry = (configText) => JSON.parse(configText).find((e) => e.name === '@deepseek-ai/dsh-web-deepseek-api')
 
-  // Boot the NON-DeepSeek slot first — the pre-#100 shape where a later
+  // Boot the NON-DeepSeek slot first — the pre-fix shape where a later
   // DeepSeek turn used to flip a hub-global flag and successor-boot it.
   await hub.prewarmTurnSlot({ sessionId: 'other-boot', provider: otherProvider, workspace: { cwd: sessionRoot } })
   const otherConfigPath = path.join(sessionRoot, 'cordis.runtime.mockgw.json')
   assert.ok(fs.existsSync(otherConfigPath), `the non-DeepSeek slot config landed at ${otherConfigPath}`)
   const otherConfigBefore = fs.readFileSync(otherConfigPath, 'utf8')
-  assert.ok(!otherConfigBefore.includes('@deepseek-ai/dsh-web'), 'a non-DeepSeek slot never mounts the web trio')
-  assert.ok(!otherConfigBefore.includes('IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'), 'and never references the DeepSeek search key env')
+  assert.ok(otherConfigBefore.includes('@deepseek-ai/dsh-web'), 'a non-DeepSeek slot mounts the web seam from its boot #1')
+  assert.equal(webApiEntry(otherConfigBefore)?.config?.baseURL, 'http://127.0.0.1:48899/v1/tools', 'and it points at the host proxy')
+  assert.ok(otherConfigBefore.includes('IDBOTS_DSH_WEBSEARCH_TOKEN'), 'the token env NAME is referenced')
+  assert.ok(!otherConfigBefore.includes('proxy-token-for-test') && !otherConfigBefore.includes('sk-a'), 'no token value, no provider key in the file')
 
-  // The DeepSeek slot's very first config carries the block — rememberTurnInputs
-  // sets the slot state before buildRuntimeConfig, so there is no second boot.
+  // The DeepSeek slot's very first config carries the SAME block: the web
+  // base is the proxy, never the slot's own DeepSeek route.
   await hub.prewarmTurnSlot({ sessionId: 'deepseek-boot', provider: deepSeekProvider, workspace: { cwd: sessionRoot } })
   const deepSeekConfigPath = path.join(sessionRoot, 'cordis.runtime.deepseek.json')
   assert.ok(fs.existsSync(deepSeekConfigPath), `the DeepSeek slot config landed at ${deepSeekConfigPath}`)
   const deepSeekConfig = fs.readFileSync(deepSeekConfigPath, 'utf8')
-  assert.ok(
-    deepSeekConfig.includes('@deepseek-ai/dsh-web-search-deepseek'),
-    'the web-search provider entry is in the DeepSeek slot\'s very first boot config',
-  )
-  assert.ok(
-    deepSeekConfig.includes('127.0.0.1:48843/anthropic/v1'),
-    'the baseURL derived from the slot\'s own DeepSeek route rides the entry',
-  )
-  assert.ok(
-    deepSeekConfig.includes('IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'),
-    'the key is referenced by env NAME (the value rides the child env)',
-  )
+  assert.deepEqual(webApiEntry(deepSeekConfig), webApiEntry(otherConfigBefore), 'identical web block across slots')
+  assert.ok(!deepSeekConfig.includes('48843/anthropic/v1') && !deepSeekConfig.includes('48843/v1/tools'), 'the DeepSeek route is not the web base')
+  assert.ok(!deepSeekConfig.includes('sk-ds'), 'the DeepSeek key never enters the config file')
 
   // The DeepSeek boot must not have touched the other slot: same config text,
   // and a repeat prewarm is a reuse, not a successor boot.
@@ -172,4 +172,5 @@ test('the web-search block is fixed per slot from boot #1: DeepSeek slot carries
     'the non-DeepSeek slot was reused — no flap-driven successor boot',
   )
   assert.equal(hub.runtimeSlotCount, 2, 'exactly the two slots exist')
+  assert.equal(logs.filter((l) => l.message === 'dshTurnHub.webSearchProxyUnavailable').length, 0, 'the proxy was present, nothing to gate')
 })

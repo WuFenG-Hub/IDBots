@@ -39,7 +39,7 @@ test('DSH child env carries IDBOTS_API_BASE_URL from skillHostEnv', () => {
   const routeEnv = dshProviderApiKeyEnv('deepseek')
   const env = buildDshChildEnv({
     routeApiKeys: [{ envName: routeEnv, apiKey: 'sk-test' }],
-    webSearchApiKey: 'sk-search',
+    webSearchToken: 'proxy-token',
     rpcToken: 'token-secret',
     rpcAuthFile: '/tmp/metaid-rpc-token',
     skillHostEnv: {
@@ -52,7 +52,10 @@ test('DSH child env carries IDBOTS_API_BASE_URL from skillHostEnv', () => {
   assert.equal(env.IDBOTS_RPC_TOKEN, 'token-secret')
   assert.equal(env.IDBOTS_RPC_AUTHFILE, '/tmp/metaid-rpc-token')
   assert.equal(env[routeEnv], 'sk-test')
-  assert.equal(env.IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY, 'sk-search')
+  // The web-search env carries the loopback web-tools proxy token, never a
+  // provider key (the proxy holds the DeepSeek/relay ladder host-side).
+  assert.equal(env.IDBOTS_DSH_WEBSEARCH_TOKEN, 'proxy-token')
+  assert.equal(env.IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY, undefined)
 })
 
 test('DSH child env omits IDBOTS_API_BASE_URL when skill host env is absent', () => {

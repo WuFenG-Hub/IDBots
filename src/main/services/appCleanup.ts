@@ -19,6 +19,9 @@ export interface AppCleanupDeps {
   stopGroupTaskDaemon?: () => void;
   stopOpenTeamGuestDaemon?: () => void;
   stopOpenAICompatProxy: () => Promise<void>;
+  /** Loopback web-tools proxy the DSH runtimes search through; stopped after
+   *  the runtime closes (optional so older cleanup callers still type-check). */
+  stopWebToolsProxy?: () => Promise<void>;
   stopSkillServices: () => Promise<void>;
   stopIMGateways: () => Promise<void>;
   stopScheduler: () => void;
@@ -57,6 +60,10 @@ export async function runAppCleanup(deps: AppCleanupDeps): Promise<void> {
   }
   await deps.closeDshRuntime?.().catch((error) => {
     deps.error('Failed to close DSH runtime:', error);
+  });
+
+  await deps.stopWebToolsProxy?.().catch((error) => {
+    deps.error('Failed to stop the DSH web-tools proxy:', error);
   });
 
   await deps.stopOpenAICompatProxy().catch((error) => {

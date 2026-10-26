@@ -15,6 +15,7 @@ import { getCurrentApiConfig, resolveCurrentModelLimits, resolveModelOptions, ge
 import { resolveCoworkExecutionMode } from './coworkExecutionMode';
 import { buildGoalPromptSection, type CoworkSessionGoal } from './coworkSessionGoal';
 import { DshTurnHub, dshSessionRootFor, isNativeDeepSeekChatRoute, DSH_RUNTIME_IDLE_TTL_MS, type DshTurnProviderRoute } from './coworkDshTurn';
+import { getDshWebToolsProxyDescriptor } from '../services/dshWebToolsProxy';
 import { filterServerModeAgentTools, resolveDshRuntimeIdleTtlMs } from '../server/serverMode';
 import { isDshShutdownError } from './dshShutdownError';
 import { truncateUtf16Units } from './llmSafeText';
@@ -9770,6 +9771,10 @@ export class CoworkRunner extends EventEmitter {
         sessionRoot: dshSessionRootFor(app.getPath('userData')),
         extraEntries: this.dshRuntimeExtraEntries,
         extraEntriesProvider: this.dshExtraEntriesProvider,
+        // Every slot's web_search/web_fetch rides the host web-tools proxy
+        // (user DeepSeek first, IDBots-Free relay fallback) — see
+        // services/dshWebToolsProxy. Started in main.ts before any turn.
+        webToolsProxy: () => getDshWebToolsProxyDescriptor(),
         // Shared DSH runtime: bash skill scripts never see Claude's
         // per-session env. Inject the global host channels (proxy URL,
         // SKILLS_ROOT, RPC authfile) plus the BASH_ENV loader so each turn's
