@@ -17,6 +17,7 @@ const {
   createDshWebToolsProxy,
   resolveDeepSeekWebToolsUpstream,
   deepSeekWebToolsRoot,
+  relayWebToolsBase,
 } = require('../dist-electron/main/services/dshWebToolsProxy.js')
 
 /** Tiny scripted upstream: records requests, answers from a queue of responses. */
@@ -64,6 +65,19 @@ test('deepSeekWebToolsRoot mirrors the runtime generator for every base shape', 
   assert.equal(deepSeekWebToolsRoot('https://api.deepseek.com/anthropic/v1'), 'https://api.deepseek.com/v1/tools')
   assert.equal(deepSeekWebToolsRoot('https://api.deepseek.com/v1/tools'), 'https://api.deepseek.com/v1/tools')
   assert.equal(deepSeekWebToolsRoot('http://127.0.0.1:4000/anthropic/v1'), 'http://127.0.0.1:4000/v1/tools')
+})
+
+test('relayWebToolsBase derives <llm root>/v1/tools from the stored relay chat base without doubling /v1', () => {
+  // The client stores the bootstrap PublicBaseURL, which already ends in /v1
+  // (`…/v2/assist/llm/v1`): the 2026-10-26 production probe caught a naive
+  // `${base}/v1/tools` producing `…/v1/v1/tools` (a 404 on the relay).
+  const root = 'https://www.metaso.network/assist-open-api/v2/assist/llm'
+  assert.equal(relayWebToolsBase(`${root}/v1`), `${root}/v1/tools`)
+  assert.equal(relayWebToolsBase(`${root}/v1/`), `${root}/v1/tools`)
+  assert.equal(relayWebToolsBase(root), `${root}/v1/tools`)
+  assert.equal(relayWebToolsBase(`${root}/`), `${root}/v1/tools`)
+  assert.equal(relayWebToolsBase(`${root}/v1/tools`), `${root}/v1/tools`, 'idempotent on an already-derived base')
+  assert.equal(relayWebToolsBase(` ${root}/v1 `), `${root}/v1/tools`, 'whitespace trimmed')
 })
 
 test('resolveDeepSeekWebToolsUpstream picks the enabled official DeepSeek entry only', () => {
