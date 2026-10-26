@@ -392,3 +392,53 @@ test('issue #24: a tick with no active groups keeps the backoff state untouched'
     h.cleanup();
   }
 });
+
+// ── issue #24 (review nit b): re-entry guard existence pinned per loop ───────
+
+test('issue #24 (guard): a second runTick while one is in flight is skipped without new fetches (single-flight)', async () => {
+  const tempDir = makeTempDir();
+  const store = await SqliteStore.create(tempDir);
+  try {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let fetchCalls = 0;
+    const clock = { value: 1_000_000 };
+    const backoff = new PollBackoffController({
+      name: 'test-group-backfill',
+      baseMs: 15_000,
+      now: () => clock.value,
+      random: () => 0.5,
+      emitLog: () => {},
+    });
+    const fetchJson = async (url) => {
+      fetchCalls += 1;
+      await gate; // park every fetch until the test releases the first round
+      return pageEnvelope([]);
+    };
+    setGroupChatBackfillActiveGroupIdsGetter(() => [GROUP_ID]);
+    const loop = createGroupChatBackfillLoop({
+      db: store.getDatabase(),
+      saveDb: () => {},
+      fetchJson,
+      emitLog: () => {},
+      intervalMs: 15_000,
+      backoff,
+    });
+
+    const first = loop.runTick();
+    await new Promise((resolve) => setImmediate(resolve)); // let the first tick reach the network
+    const callsWhileInFlight = fetchCalls;
+    assert.ok(callsWhileInFlight >= 1, 'the first tick reached the network');
+
+    const second = loop.runTick(); // re-entry while syncOnce is parked — must be skipped
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(fetchCalls, callsWhileInFlight, 'the guarded second tick must not start new fetches');
+
+    release();
+    await Promise.all([first, second]);
+    assert.equal(backoff.getState().circuit, 'closed');
+    assert.equal(backoff.getState().consecutiveFailures, 0);
+  } finally {
+    store.close();
+  }
+});

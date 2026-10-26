@@ -510,3 +510,59 @@ test('issue #24: shouldRun()=false ticks attempt nothing and keep the ladder sta
     sqlite.close?.();
   }
 });
+
+// ── issue #24 (review nit b): re-entry guard existence pinned per loop ───────
+
+test('issue #24 (guard): a second runTick while one is in flight is skipped without new downstream calls (single-flight)', async () => {
+  const sqlite = await createSqliteStore();
+  try {
+    seedPrivateChatRow(sqlite.db, {
+      pinId: 'pin-guard-single-flight',
+      fromGlobalMetaId: LOCAL_GLOBAL_META_ID,
+      toGlobalMetaId: PEER_GLOBAL_META_ID,
+      chainTimestamp: 10_000,
+    });
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let downstreamCalls = 0;
+    const clock = { value: 1_785_000_000_000 };
+    const backoff = new PollBackoffController({
+      name: 'test-private-backfill',
+      baseMs: 15_000,
+      now: () => clock.value,
+      random: () => 0.5,
+      emitLog: () => {},
+    });
+    const harness = createHarness({
+      deps: {
+        fetchDirectoryJson: async () => {
+          downstreamCalls += 1;
+          await gate; // park the directory round
+          return { data: { list: [] } };
+        },
+      },
+    });
+    const loop = createPrivateChatBackfillLoop({
+      ...harness.deps,
+      db: sqlite.db,
+      saveDb: () => {},
+      intervalMs: 15_000,
+      backoff,
+    });
+
+    const first = loop.runTick();
+    await new Promise((resolve) => setImmediate(resolve));
+    const callsWhileInFlight = downstreamCalls;
+    assert.ok(callsWhileInFlight >= 1, 'the first tick reached the directory fetch');
+
+    const second = loop.runTick();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(downstreamCalls, callsWhileInFlight, 'the guarded second tick must not start new downstream calls');
+
+    release();
+    await Promise.all([first, second]);
+    assert.equal(backoff.getState().circuit, 'closed');
+  } finally {
+    sqlite.close?.();
+  }
+});

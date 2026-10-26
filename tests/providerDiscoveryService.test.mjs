@@ -404,3 +404,47 @@ test('issue #24: a refresh with no provider ids records nothing (no network atte
     h.service.dispose();
   }
 });
+
+test('issue #24 (guard): an in-flight tick that finishes after stopPolling never reschedules (no zombie chain)', async () => {
+  const clock = { value: 1_790_000_000_000 };
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let statusCalls = 0;
+  const presence = {
+    async fetchOnlineStatus(globalMetaIds) {
+      statusCalls += 1;
+      await gate; // park the in-flight probe
+      return {
+        total: globalMetaIds.length,
+        onlineCount: 0,
+        list: globalMetaIds.map((id) => ({
+          globalMetaId: id, isOnline: false, lastSeenAt: 0, lastSeenAgoSeconds: 0, deviceCount: 0,
+        })),
+      };
+    },
+  };
+  const backoff = new PollBackoffController({
+    name: 'test-provider-discovery',
+    baseMs: 1, // tiny cadence: if the guard is ever refactored away, a zombie reschedule fires within ms
+    now: () => clock.value,
+    random: () => 0.5,
+    emitLog: () => {},
+  });
+  const { ProviderDiscoveryService } = loadProviderDiscoveryService();
+  const service = new ProviderDiscoveryService({ presence, now: () => clock.value, backoff });
+  const getServices = () => [
+    { providerGlobalMetaId: 'idq1providerguard', providerAddress: 'mvc-x', serviceName: 'svc' },
+  ];
+  try {
+    service.startPolling(getServices); // the immediate initial tick parks on the gated fetch
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(statusCalls, 1, 'the initial tick is in flight');
+    service.stopPolling(); // stop while the tick is still parked
+    release(); // the in-flight tick completes now
+    await new Promise((resolve) => setTimeout(resolve, 50)); // a zombie reschedule (baseMs=1) would fire here
+    assert.equal(statusCalls, 1, 'no automatic tick after stop — the in-flight finish must not reschedule');
+  } finally {
+    service.stopPolling();
+    service.dispose?.();
+  }
+});
