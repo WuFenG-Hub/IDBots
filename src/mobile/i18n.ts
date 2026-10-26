@@ -17,15 +17,18 @@ type MobileDictionary = Record<string, string>;
 
 /**
  * Login-demo mock switch, mirroring loginApi.ts: `true` only with
- * `VITE_MOBILE_MOCK=1` outside production builds (`pnpm dev:mobile`). Vite's
- * define statically replaces `process.env.NODE_ENV` with a literal, so every
- * production build folds this to a constant `false` and the demo-notice
- * constants below collapse to empty strings that minify away.
+ * `VITE_MOBILE_MOCK=1` outside production builds. `import.meta.env.PROD`
+ * folds production copy away; the process fallback supports node tests, and
+ * `typeof process` guards keep real Vite dev-server execution safe in the
+ * browser where no Node global exists.
  */
+const IS_PRODUCTION_BUILD =
+  (import.meta as { env?: { PROD?: boolean } }).env?.PROD ??
+  (typeof process !== 'undefined' && process.env.NODE_ENV === 'production');
 const MOCK_LOGIN_API =
-  process.env.NODE_ENV !== 'production' &&
+  !IS_PRODUCTION_BUILD &&
   ((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_MOBILE_MOCK === '1' ||
-    process.env.VITE_MOBILE_MOCK === '1');
+    (typeof process !== 'undefined' && process.env.VITE_MOBILE_MOCK === '1'));
 
 /**
  * Demo notice values (mobile.login.demoNote). Defined as constants so

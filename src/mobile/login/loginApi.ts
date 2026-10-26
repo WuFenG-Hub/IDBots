@@ -80,18 +80,18 @@ interface ApiErrorBody {
 
 /**
  * Mock-mode switch (REQ-E-8). `true` only with `VITE_MOBILE_MOCK=1` outside
- * production builds: `pnpm dev:mobile` sets it, `pnpm build:mobile` leaves it
- * unset. Vite's define statically replaces `process.env.NODE_ENV` with a
- * literal, so in every production bundle this folds to a constant `false`,
- * esbuild dead-code-eliminates every mock branch below, and none of the mock
- * code or copy reaches the shipped bundle. On the node test runner
- * `import.meta.env` is absent and process.env drives the switch, so the mock
- * suite (VITE_MOBILE_MOCK=1) and the real-C3 suite stay testable.
+ * production builds. `import.meta.env.PROD` lets Vite fold production mock
+ * branches away; the process fallback keeps the node test runner working.
+ * `typeof process` guards also make real Vite dev-server operation safe when
+ * no Node global exists in the browser.
  */
+const IS_PRODUCTION_BUILD =
+  (import.meta as { env?: { PROD?: boolean } }).env?.PROD ??
+  (typeof process !== 'undefined' && process.env.NODE_ENV === 'production');
 const MOCK_LOGIN_API =
-  process.env.NODE_ENV !== 'production' &&
+  !IS_PRODUCTION_BUILD &&
   ((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_MOBILE_MOCK === '1' ||
-    process.env.VITE_MOBILE_MOCK === '1');
+    (typeof process !== 'undefined' && process.env.VITE_MOBILE_MOCK === '1'));
 
 function errorWithCode(code: string): Error & { code: string } {
   const error = new Error(`loginApi: ${code}`) as Error & { code: string };

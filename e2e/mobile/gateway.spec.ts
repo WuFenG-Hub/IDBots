@@ -60,7 +60,7 @@ test.describe('gateway-backed smoke', () => {
   });
 
   test('F-11: chat file links render as same-origin /files downloads and really download @gateway', async ({ page }, testInfo) => {
-    test.skip(process.env.GW_FIXTURE_FILE !== '1', 'requires the file-delivery fixture (GW_FIXTURE_FILE=1)');
+    test.skip(process.env.GW_FIXTURE_FILE === '0', 'requires the default file-delivery fixture (explicitly disabled with GW_FIXTURE_FILE=0)');
 
     // Mirror of FIXTURE_FILE_BYTES in scripts/run-mobile-e2e-gateway.mjs.
     const expectedPayload = 'PK\x03\x04 gateway fixture docx payload 0123456789abcdef';

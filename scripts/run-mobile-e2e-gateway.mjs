@@ -66,14 +66,15 @@ const paths = {
 fs.mkdirSync(paths.uploadsRoot, { recursive: true });
 
 /**
- * F-11 file-delivery mode (`GW_FIXTURE_FILE=1`): seeds a deterministic
- * "document" into the fixture workspace and appends file:// links to the
- * canned reply — exactly the shape a tenant bot produces after generating a
- * docx/pdf. The e2e spec (e2e/mobile/gateway.spec.ts) then proves the mobile
- * UI renders a clickable same-origin /files/{token} download link instead of
- * the dead container path.
+ * F-11 file delivery is enabled by default so the complete gateway matrix
+ * cannot be skipped accidentally. Set GW_FIXTURE_FILE=0 only for a deliberate
+ * no-file debugging run. The fixture seeds a deterministic document and
+ * appends file:// links to the canned reply — exactly the shape a tenant bot
+ * produces after generating a docx/pdf. The e2e spec then proves the mobile UI
+ * renders a clickable same-origin /files/{token} download link instead of the
+ * dead container path.
  */
-const GW_FILE_E2E = process.env.GW_FIXTURE_FILE === '1';
+const GW_FILE_E2E = process.env.GW_FIXTURE_FILE !== '0';
 const FIXTURE_FILE_NAME = 'gateway-e2e-report.docx';
 /** Mirror of the payload asserted in e2e/mobile/gateway.spec.ts. */
 const FIXTURE_FILE_BYTES = Buffer.from('PK\x03\x04 gateway fixture docx payload 0123456789abcdef');
