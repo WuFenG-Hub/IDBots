@@ -132,6 +132,9 @@ function startFixtureTurn(session, userText) {
 
   const chunks = [];
   for (let i = 0; i < FIXTURE_REPLY.length; i += 8) chunks.push(FIXTURE_REPLY.slice(i, i + 8));
+  // Tests can slow the stream to exercise reload/reconnect recovery without
+  // changing the default 40 ms cadence used by the acceptance matrix.
+  const streamTokenIntervalMs = Number(process.env.GW_FIXTURE_STREAM_INTERVAL_MS ?? 40);
   const timers = [];
   let accumulated = '';
   chunks.forEach((chunk, index) => {
@@ -149,7 +152,7 @@ function startFixtureTurn(session, userText) {
             { sessionId: session.id, messageId: message.id, delta: chunk, baseLength: accumulated.length - chunk.length },
           ]);
         }
-      }, 40 * (index + 1)),
+      }, streamTokenIntervalMs * (index + 1)),
     );
   });
   timers.push(
@@ -157,7 +160,7 @@ function startFixtureTurn(session, userText) {
       if (session.status !== 'running') return;
       session.status = 'completed';
       broadcast('cowork:stream:complete', [{ sessionId: session.id, claudeSessionId: session.claudeSessionId }]);
-    }, 40 * (chunks.length + 1)),
+    }, streamTokenIntervalMs * (chunks.length + 1)),
   );
   sessionTimers.set(session.id, timers);
 }
