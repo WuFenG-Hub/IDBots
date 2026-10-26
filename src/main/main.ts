@@ -10581,6 +10581,9 @@ if (!gotTheLock) {
   registerIpcHandler('app:getSystemLocale', () => getOsLocale());
 
   // Update notification IPC handlers
+  registerIpcHandler('updateNotification:shouldForceShow', () => {
+    return process.env.FORCE_UPDATE_NOTIFICATION === '1';
+  });
   registerIpcHandler('updateNotification:getFirstInstallVersion', () => {
     return getFirstInstallVersion(getStore());
   });

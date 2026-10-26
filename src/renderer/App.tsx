@@ -247,11 +247,14 @@ const App: React.FC = () => {
       const notification = getNotificationForVersion(notificationsData, currentVersion);
       if (!notification) return;
 
+      // Check if force show is enabled (for testing)
+      const forceShow = await window.electron.updateNotification.shouldForceShow();
+
       // Check if already viewed
       const hasViewed = await window.electron.updateNotification.hasViewed(currentVersion);
 
-      // Check if should show
-      if (shouldShowNotification(firstInstallVersion, currentVersion, notification, hasViewed)) {
+      // Check if should show (force show bypasses all checks)
+      if (forceShow || shouldShowNotification(firstInstallVersion, currentVersion, notification, hasViewed)) {
         const lang = i18nService.getLanguage();
         setUpdateNotificationData({
           version: currentVersion,
