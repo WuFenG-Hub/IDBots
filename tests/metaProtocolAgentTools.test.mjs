@@ -251,11 +251,12 @@ test('schema validation: missing title/protocolName and body/protocolContent XOR
 test('draft-07 gate: invalid path/version payloads are rejected before the wallet', async () => {
   const { byName, calls } = makeHarness();
 
-  // protocolName with a dash derives a path outside ^/protocols/[a-z0-9_]+$.
+  // protocolName with a space derives a path outside ^/protocols/[a-z0-9_-]+$
+  // (hyphens are allowed since the charset relax; spaces still are not).
   const badPath = await byName.post_metaprotocol.handler({
     action: 'publish',
     title: 'T',
-    protocolName: 'Bad-Name',
+    protocolName: 'Bad Name',
     body: { task: '' },
   });
   assert.equal(badPath.isError, true);
@@ -272,6 +273,69 @@ test('draft-07 gate: invalid path/version payloads are rejected before the walle
   assert.equal(badVersion.isError, true);
   assert.match(badVersion.content[0].text, /Invalid protocol payload: .*version: .*\. Fix the fields and retry\./);
   assert.equal(calls.createPin.length, 0);
+});
+
+test('hyphenated protocolName: publish passes the schema gate, derived path keeps the hyphen and lowercases', async () => {
+  const { byName, calls } = makeHarness();
+  const result = await byName.post_metaprotocol.handler({
+    action: 'publish',
+    title: 'Skill Service Protocol',
+    protocolName: 'Skill-Service',
+    intro: 'Charged single-shot skill offerings.',
+    body: { skill: '' },
+  });
+  assert.equal(result.isError, undefined, 'hyphenated names must pass the (relaxed) draft-07 gate');
+  assert.equal(calls.createPin.length, 1);
+  const { metaidData } = calls.createPin[0];
+  assert.equal(metaidData.operation, 'create');
+  const payload = JSON.parse(metaidData.payload);
+  assert.equal(payload.path, '/protocols/skill-service', 'name → path keeps the hyphen, lowercases');
+  assert.equal(payload.protocolName, 'Skill-Service');
+});
+
+test('registry read resolves a hyphenated protocolPath (read side is charset-agnostic)', async () => {
+  const { byName } = makeHarness({
+    detail: async () =>
+      makeDetail(
+        makeRecord({
+          protocolPath: '/protocols/skill-service',
+          title: 'Skill Service Protocol',
+          payload: { path: '/protocols/skill-service', protocolName: 'Skill-Service' },
+        }),
+      ),
+  });
+  const result = await byName.metaprotocol_registry.handler({
+    action: 'read',
+    protocolPath: '/protocols/skill-service',
+  });
+  assert.equal(result.isError, undefined);
+  const text = result.content[0].text;
+  assert.match(text, /Protocol \/protocols\/skill-service \(Skill Service Protocol\):/);
+  assert.match(text, /<metaweb_protocol_content>/);
+});
+
+test('update of a hyphenated protocol keeps the registered path through the read-resolution chain', async () => {
+  const { byName, calls } = makeHarness({
+    detail: async () =>
+      makeDetail(
+        makeRecord({
+          protocolPath: '/protocols/skill-service',
+          payload: { path: '/protocols/skill-service', protocolName: 'Skill-Service', version: '1.0.9' },
+        }),
+      ),
+  });
+  const result = await byName.post_metaprotocol.handler({
+    action: 'update',
+    target: '/protocols/skill-service',
+    title: 'Skill Service Protocol v2',
+    protocolName: 'Skill-Service',
+    protocolContent: '{}',
+  });
+  assert.equal(result.isError, undefined);
+  assert.equal(calls.createPin.length, 1);
+  const payload = JSON.parse(calls.createPin[0].metaidData.payload);
+  assert.equal(payload.path, '/protocols/skill-service', 'update keeps the registered hyphenated path');
+  assert.equal(payload.version, '1.1.0');
 });
 
 test('publish without an acting MetaBot is refused before anything else', async () => {
@@ -595,7 +659,7 @@ test('protocolContentFile: the owner gate runs only after the calls that would b
   const bad = await schemaInvalid.byName.post_metaprotocol.handler({
     action: 'publish',
     title: 'T',
-    protocolName: 'Bad-Name',
+    protocolName: 'Bad Name',
     protocolContentFile: filePath,
   });
   assert.equal(bad.isError, true);

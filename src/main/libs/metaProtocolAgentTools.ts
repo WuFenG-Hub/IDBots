@@ -74,7 +74,7 @@ const METAPROTOCOL_PIN_SCHEMA: Record<string, unknown> = {
   required: ['title', 'path', 'version', 'authors', 'intro', 'protocolName', 'protocolAttachments', 'metadata', 'protocolContent', 'protocolContentType'],
   properties: {
     title: { type: 'string', minLength: 1 },
-    path: { type: 'string', pattern: '^/protocols/[a-z0-9_]+(/[a-z0-9_]+)*$' },
+    path: { type: 'string', pattern: '^/protocols/[a-z0-9_-]+(/[a-z0-9_-]+)*$' },
     version: { type: 'string', pattern: '^[0-9]+\\.[0-9]+\\.[0-9]+$' },
     authors: { type: 'string' },
     intro: { type: 'string' },
