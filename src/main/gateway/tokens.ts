@@ -7,6 +7,10 @@
  *   `p` resolved path, `d` disposition, `e` expiry (ms), `t` tenant id.
  * - Reverify tokens (C2 "Sensitive Route: Mnemonic Export"):
  *     payload = base64url(JSON.stringify({ t, p, e, n }))
+ *     token   = payload + "." + base64url(HMAC-SHA256(secret, JSON))
+ *   The signature input is the DECODED JSON string, not the base64url text —
+ *   the control plane is the minter (cloud/control-plane/src/routes/
+ *   sensitive.ts) and contract 01 §Sensitive Route defines it that way.
  *   `p` purpose, `n` random nonce; the tenant rejects reused nonces.
  *
  * Verification returns null on bad signature, wrong tenant, or expiry — the
@@ -135,8 +139,10 @@ export function signReverifyToken(
   expiresAt: number,
   nonce: string,
 ): string {
-  const payload = base64urlEncode(JSON.stringify({ t: tenantId, p: purpose, e: expiresAt, n: nonce }));
-  return `${payload}.${hmacSignature(secret, payload)}`;
+  // Test/dev stand-in for the control-plane minter: signature over the raw
+  // JSON string (see the module header — NOT over the base64url payload text).
+  const json = JSON.stringify({ t: tenantId, p: purpose, e: expiresAt, n: nonce });
+  return `${base64urlEncode(json)}.${hmacSignature(secret, json)}`;
 }
 
 export interface VerifyReverifyOptions {
@@ -156,9 +162,12 @@ export function verifyReverifyToken(
   const now = options.now ?? Date.now();
   const parts = splitToken(token);
   if (!parts) return null;
-  if (!constantTimeEqual(hmacSignature(secret, parts.payload), parts.signature)) return null;
+  // The control plane signs the decoded JSON string, so the HMAC input here
+  // must be the decoded payload too (unlike file tokens, which are minted and
+  // verified inside this process over the base64url text).
   const decoded = base64urlDecode(parts.payload);
   if (!decoded) return null;
+  if (!constantTimeEqual(hmacSignature(secret, decoded.toString('utf8')), parts.signature)) return null;
   let payload: ReverifyTokenPayload;
   try {
     payload = JSON.parse(decoded.toString('utf8'));

@@ -63,6 +63,7 @@ tests/*
 !tests/startupTiers.test.mjs
 !tests/webSearchRuntimeDir.test.mjs
 !tests/gatewayServer.test.mjs
+!tests/reverifyTokenCrossImpl.test.mjs
 !tests/bundleService.test.mjs
 !tests/mobileChannels.test.mjs
 !tests/mobileShim.test.ts
