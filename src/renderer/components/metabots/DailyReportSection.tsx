@@ -18,7 +18,7 @@ import React, { useEffect, useState } from 'react';
 import { NewspaperIcon, PlayIcon, QuestionMarkCircleIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { buildMetaBotToggleViewModel } from './metaBotCardPresentation.js';
-import Tooltip from './Tooltip';
+import Tooltip from '../ui/Tooltip';
 
 // Keep in sync with src/main/services/dailyReportSettings.ts (keys whitelisted
 // main-side in RENDERER_SETTING_DEFS with a normalizeValue each).

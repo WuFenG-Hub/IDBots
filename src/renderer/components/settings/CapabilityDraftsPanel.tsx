@@ -1,7 +1,7 @@
 import React from 'react';
 import { InformationCircleIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
-import Tooltip from '../common/Tooltip';
+import Tooltip from '../ui/Tooltip';
 
 /**
  * Capability drafts list (memory/persona audit P1): the bot's dream-distilled

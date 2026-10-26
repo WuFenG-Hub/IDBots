@@ -16,7 +16,7 @@ import BrainIcon from './icons/BrainIcon';
 import { CustomProviderIcon, CommandCodeIcon, OpenCodeIcon } from './icons/providers';
 import { fetchProviderModelList, providerSupportsModelListSync } from '../services/providerModels';
 import { testCerebellumConnection } from '../services/cerebellumConnection';
-import Tooltip from './Tooltip';
+import Tooltip from './ui/Tooltip';
 import { useDispatch, useSelector } from 'react-redux';
 import { setAvailableModels, setSelectedModel } from '../store/slices/modelSlice';
 import { RootState } from '../store';

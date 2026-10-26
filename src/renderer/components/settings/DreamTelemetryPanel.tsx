@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
 import { InformationCircleIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
-import Tooltip from '../common/Tooltip';
+import Tooltip from '../ui/Tooltip';
 import {
   cumulative,
   diaryTrustRatios,

@@ -13,7 +13,7 @@ import { GlobeAltIcon, RocketLaunchIcon, QuestionMarkCircleIcon } from '@heroico
 import { i18nService } from '../../services/i18n';
 import { buildMetaBotToggleViewModel } from './metaBotCardPresentation.js';
 import SurfReportsPanel from './SurfReportsPanel';
-import Tooltip from './Tooltip';
+import Tooltip from '../ui/Tooltip';
 
 // Keep in sync with src/main/services/surfSettings.ts (pinned by
 // tests/quotaRendererSync.test.mjs — the quota audit 2026-09-17 raised the
