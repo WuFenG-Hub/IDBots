@@ -209,6 +209,11 @@ export class TwinOrchestrationService {
    * task was silently swallowed by the first failure's guard.
    * Never throws into the orchestration flow: any failure (missing session,
    * A2A target, kv absence) is logged and skipped.
+   *
+   * 方案 A: when the orchestration task is linked to a long-term sub-project,
+   * ALSO notify the long-term task's definition session (the owner-facing
+   * conversation about the task), so progress is visible where the owner expects
+   * it rather than buried in a Worker session.
    */
   private notifyTwinTerminalState(
     task: OrchestrationTask,
@@ -252,6 +257,29 @@ export class TwinOrchestrationService {
       }
       this.deps.kv?.set(guardKey, '1');
       console.log(`[TwinOrchestration] Twin notified (${task.id} → ${outcome}): ${text}`);
+
+      // 方案 A: secondary notification to the long-term task's definition session.
+      // When the orchestration task carries long-term linkage AND the report
+      // session differs from the delegation session, send a second notification
+      // so the owner/Twin conversation about the long-term task sees the progress.
+      if (task.longtermReportSessionId && task.longtermReportSessionId !== targetSessionId) {
+        const ltResult = this.insertCrossSession({
+          sourceSessionId: workerSessionId,
+          targetSessionId: task.longtermReportSessionId,
+          message: `📋 长期任务子项进展汇报\n\n${text}\n\n（此汇报来自编排任务 ${task.id}，对应长期任务 ${task.longtermTaskId} 的子项 ${task.longtermSubtaskId}）`,
+        });
+        if ('code' in ltResult) {
+          console.warn(
+            `[TwinOrchestration] Long-term report notification failed (${task.id} → ${task.longtermReportSessionId}): ` +
+            `${ltResult.code} ${ltResult.message}`
+          );
+        } else {
+          console.log(
+            `[TwinOrchestration] Long-term task notified (${task.id} → ${task.longtermReportSessionId}): ` +
+            `subtask ${task.longtermSubtaskId} ${outcome}`
+          );
+        }
+      }
     } catch (error) {
       console.warn(
         `[TwinOrchestration] Twin notification failed: ` +
@@ -602,6 +630,28 @@ export class TwinOrchestrationService {
     // this service makes it structural).
     const delegatedObjective = this.withLongTermAnchor(sourceSessionId, objective);
 
+    // 方案 A: extract long-term task context from the source session if present.
+    // When the Twin delegates from a session bound to a long-term sub-project,
+    // the orchestration task inherits that linkage so terminal-state notifications
+    // can report back to the long-term task's definition session.
+    let longtermContext: { taskId: string; subtaskId: string; reportSessionId: string } | null = null;
+    const ltStore = this.deps.longTermTaskStore?.();
+    if (ltStore) {
+      const hit = ltStore.findBySessionId(sourceSessionId);
+      if (hit?.subtask) {
+        // findBySessionId returns a summary; read the detail to get definitionSessionId.
+        const detail = ltStore.getTask(hit.task.id);
+        longtermContext = {
+          taskId: hit.task.id,
+          subtaskId: hit.subtask.id,
+          // Report to the long-term task's definition session (where the owner
+          // and Twin converse about this task), NOT the sub-task's bound session
+          // (the work session, which may differ).
+          reportSessionId: detail?.definitionSessionId ?? sourceSessionId,
+        };
+      }
+    }
+
     const requestedIdempotencyKey = String(input.idempotencyKey ?? '').trim();
     if (requestedIdempotencyKey) {
       const existingAttempt = this.deps.orchestrationStore.getAttemptByIdempotencyKey(requestedIdempotencyKey);
@@ -645,6 +695,10 @@ export class TwinOrchestrationService {
         // itself is Twin-closable — it never lands in the owner's pending
         // closure queue. Every other createTask path omits origin ('owner').
         origin: 'twin_delegate',
+        // 方案 A: wire the long-term task linkage into the orchestration ledger.
+        longtermTaskId: longtermContext?.taskId ?? null,
+        longtermSubtaskId: longtermContext?.subtaskId ?? null,
+        longtermReportSessionId: longtermContext?.reportSessionId ?? null,
       });
     }
 

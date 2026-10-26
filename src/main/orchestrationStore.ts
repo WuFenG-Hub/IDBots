@@ -24,6 +24,21 @@ export interface OrchestrationTask {
   status: OrchestrationTaskStatus;
   planVersion: number;
   origin: OrchestrationTaskOrigin;
+  /**
+   * Long-term task context (方案 A: explicit linkage for reporting back).
+   * When set, this orchestration task is executing a slice of that long-term
+   * sub-project; on terminal state (completed/failed) the orchestration service
+   * reports back to the long-term task's definition session.
+   */
+  longtermTaskId: string | null;
+  longtermSubtaskId: string | null;
+  /**
+   * The session to report back to when this orchestration completes. Typically
+   * the long-term task's definition session, which may differ from both
+   * sourceSessionId (Twin's delegation session) and the sub-task's bound
+   * session (the work session).
+   */
+  longtermReportSessionId: string | null;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -72,6 +87,13 @@ export interface CreateOrchestrationTaskInput {
   planVersion?: number;
   /** v1.5: omitted = 'owner'. Only delegateLocalWorker passes 'twin_delegate'. */
   origin?: OrchestrationTaskOrigin;
+  /**
+   * Long-term task context (方案 A): when the Twin delegates a slice of a
+   * long-term sub-project, these fields link the orchestration back to it.
+   */
+  longtermTaskId?: string | null;
+  longtermSubtaskId?: string | null;
+  longtermReportSessionId?: string | null;
 }
 
 export interface CreateOrchestrationStepInput {
@@ -188,6 +210,9 @@ function taskFromRow(row: Row): OrchestrationTask {
     // before the ALTER ran, or a rogue writer) keeps the card owner-closable —
     // the quiet direction. Only the exact literal is a Twin delegation.
     origin: row.origin === 'twin_delegate' ? 'twin_delegate' : 'owner',
+    longtermTaskId: row.longterm_task_id == null ? null : String(row.longterm_task_id),
+    longtermSubtaskId: row.longterm_subtask_id == null ? null : String(row.longterm_subtask_id),
+    longtermReportSessionId: row.longterm_report_session_id == null ? null : String(row.longterm_report_session_id),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     completedAt: row.completed_at == null ? null : String(row.completed_at),
@@ -318,18 +343,38 @@ export class OrchestrationStore {
       CREATE INDEX IF NOT EXISTS idx_orchestration_attempts_step_status
         ON orchestration_attempts(step_id, status, queued_at DESC);
     `);
+
+    // 方案 A: additive migration for long-term task linkage columns (idempotent).
+    // Databases created before these columns get them via guarded ALTERs; new
+    // databases carry them from the CREATE TABLE (once the IF NOT EXISTS guard
+    // stops entering). Each ALTER is safe on existing rows: NULL = no linkage.
+    const taskColumns = this.getAll<{ name: unknown }>('PRAGMA table_info(orchestration_tasks)').map((row) => String(row.name));
+    if (!taskColumns.includes('longterm_task_id')) {
+      this.db.run('ALTER TABLE orchestration_tasks ADD COLUMN longterm_task_id TEXT');
+    }
+    if (!taskColumns.includes('longterm_subtask_id')) {
+      this.db.run('ALTER TABLE orchestration_tasks ADD COLUMN longterm_subtask_id TEXT');
+    }
+    if (!taskColumns.includes('longterm_report_session_id')) {
+      this.db.run('ALTER TABLE orchestration_tasks ADD COLUMN longterm_report_session_id TEXT');
+    }
+    this.saveDb();
   }
 
   createTask(input: CreateOrchestrationTaskInput): OrchestrationTask {
     const id = uuidv4();
     const now = new Date().toISOString();
     this.db.run(`INSERT INTO orchestration_tasks
-      (id, owner_intent, enriched_goal, acceptance_criteria_json, source_session_id, twin_metabot_id, owner_global_meta_id, plan_version, origin, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      (id, owner_intent, enriched_goal, acceptance_criteria_json, source_session_id, twin_metabot_id, owner_global_meta_id, plan_version, origin, longterm_task_id, longterm_subtask_id, longterm_report_session_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       id, input.ownerIntent.trim(), input.enrichedGoal?.trim() || null,
       JSON.stringify(input.acceptanceCriteria ?? []), input.sourceSessionId ?? null,
       input.twinMetabotId, input.ownerGlobalMetaId.trim(), input.planVersion ?? 1,
-      input.origin === 'twin_delegate' ? 'twin_delegate' : 'owner', now, now,
+      input.origin === 'twin_delegate' ? 'twin_delegate' : 'owner',
+      input.longtermTaskId ?? null,
+      input.longtermSubtaskId ?? null,
+      input.longtermReportSessionId ?? null,
+      now, now,
     ]);
     this.saveDb();
     return this.getTask(id)!;
