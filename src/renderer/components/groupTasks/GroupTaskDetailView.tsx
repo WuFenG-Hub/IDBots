@@ -12,6 +12,7 @@ import { GroupTaskTinyAvatar } from './GroupTaskListMeta';
 import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
 import GroupTaskRatingStars from './GroupTaskRatingStars';
 import GroupTaskKickConfirmModal from './GroupTaskKickConfirmModal';
+import GroupTaskInfoModal from './GroupTaskInfoModal';
 import {
   canAcceptGroupTask,
   canReopenGroupTask,
@@ -34,7 +35,7 @@ import {
   shouldStickToBottom,
 } from './groupTaskUtils';
 import { groupTaskStatusLabelKey } from './GroupTasksView';
-import { ArrowLeftIcon, ChatBubbleLeftRightIcon, ChevronRightIcon, ClipboardDocumentIcon, CheckIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, ChatBubbleLeftRightIcon, ChevronRightIcon, ClipboardDocumentIcon, CheckIcon, XMarkIcon, InformationCircleIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
@@ -168,10 +169,8 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const [sentHint, setSentHint] = useState(false);
   // HITL: whether the pause-banner decision summary shows in full (expand).
   const [checkpointSummaryExpanded, setCheckpointSummaryExpanded] = useState(false);
-  // Goal collapse: default collapsed (first-paragraph preview); expanded shows
-  // the full text. Both the triangle before the label and the inline toggle
-  // drive this single flag.
-  const [goalExpanded, setGoalExpanded] = useState(false);
+  // Info modal visibility
+  const [infoModalOpen, setInfoModalOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState<'done' | 'cancelled' | null>(null);
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState<string | null>(null);
@@ -316,7 +315,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   useEffect(() => {
     setMessages([]);
     setMessagesError(null);
-    setGoalExpanded(false);
+    setInfoModalOpen(false);
     oldestLoadedIdRef.current = null;
     hasMoreRef.current = true;
     loadingOlderRef.current = false;
@@ -687,16 +686,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     ? `${openCheckpointSummary.slice(0, CHECKPOINT_SUMMARY_MAX_LEN).trimEnd()}…`
     : openCheckpointSummary;
   const chairMember = members.find((member) => member.role === 'chair');
-  // Goal collapse: preview = first paragraph (up to the first line break),
-  // further capped so a single long line still folds. Anything beyond the
-  // preview stays behind the triangle / inline expand toggle.
-  const goalText = detail.goal ?? '';
-  const goalFirstBreak = goalText.search(/\r?\n/);
-  const goalFirstParagraph = goalFirstBreak === -1 ? goalText : goalText.slice(0, goalFirstBreak);
-  const goalHasMore = goalFirstBreak !== -1 || goalText.length > GOAL_PREVIEW_MAX_CHARS;
-  const goalPreview = goalFirstParagraph.length > GOAL_PREVIEW_MAX_CHARS
-    ? `${goalFirstParagraph.slice(0, GOAL_PREVIEW_MAX_CHARS).trimEnd()}…`
-    : goalFirstParagraph;
   const memberDisplayName = (member: GroupTaskDetail['members'][number]): string =>
     member.name ?? (member.metabotId != null
       ? `bot-${member.metabotId}`
@@ -802,160 +791,97 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
       {/* Body: transcript column + right rail */}
       <div className="flex-1 flex min-h-0">
         <div className="flex-1 flex flex-col min-w-0">
-          {/* Goal / acceptance */}
-          <div className="px-4 py-3 border-b dark:border-claude-darkBorder/50 border-claude-border/50 shrink-0">
-            <div className="flex items-start gap-1">
-              {goalHasMore && (
-                <button
-                  type="button"
-                  onClick={() => setGoalExpanded((expanded) => !expanded)}
-                  aria-expanded={goalExpanded}
-                  aria-label={i18nService.t(goalExpanded ? 'groupTasksGoalCollapse' : 'groupTasksGoalExpand')}
-                  title={i18nService.t(goalExpanded ? 'groupTasksGoalCollapse' : 'groupTasksGoalExpand')}
-                  className="non-draggable mt-0.5 shrink-0 inline-flex h-5 w-5 items-center justify-center rounded dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-                >
-                  <ChevronRightIcon
-                    className={`h-4 w-4 transition-transform ${goalExpanded ? 'rotate-90' : ''}`}
-                  />
-                </button>
-              )}
-              <p className="min-w-0 flex-1 text-sm dark:text-claude-darkText text-claude-text whitespace-pre-wrap break-words">
-                <span className="font-medium">{i18nService.t('groupTasksGoalLabel')}</span>
-                {': '}
-                {goalHasMore ? (goalExpanded ? goalText : goalPreview) : goalText}
-                {goalHasMore && (
-                  <button
-                    type="button"
-                    onClick={() => setGoalExpanded((expanded) => !expanded)}
-                    className="ml-1 whitespace-nowrap text-claude-accent hover:underline"
-                  >
-                    {i18nService.t(goalExpanded ? 'groupTasksGoalCollapse' : 'groupTasksGoalExpand')}
-                  </button>
-                )}
-              </p>
-            </div>
-            {/* The generic stall banner is for UNEXPLAINED silence only. When a
-                human gate already has its own banner below (open checkpoint /
-                review / supervisor pause), the task is waiting on the owner —
-                not stuck — and showing both banners reads as a contradiction. */}
-            {detail.stall === true && !openCheckpoint && detail.status !== 'review' && detail.dispatchPausedAt == null && (
-              <div className="mt-2 rounded-lg border border-orange-300 dark:border-orange-500/40 bg-orange-50 dark:bg-orange-900/20 px-3 py-2 text-xs dark:text-orange-200 text-orange-800">
-                {i18nService
-                  .t('groupTasksStallBanner')
-                  .replace('{minutes}', String(detail.stallAfterMinutes ?? 30))}
-              </div>
-            )}
-            {detail.status === 'review' && (
-              <div className="mt-2 rounded-lg border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs dark:text-amber-200 text-amber-800">
-                {i18nService.t('groupTasksReviewSilenceHint')}
-              </div>
-            )}
-            {detail.dispatchPausedAt != null && !isTerminal && (
-              <div className="mt-2 rounded-lg border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs dark:text-amber-200 text-amber-800">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span>⏸️ {i18nService.t('groupTasksPausedBanner')}</span>
-                  <button
-                    type="button"
-                    onClick={() => void handleResumePaused()}
-                    disabled={resumingPaused}
-                    className="ml-auto shrink-0 rounded-lg border border-amber-400/60 px-2.5 py-1 text-xs font-medium text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors disabled:opacity-50"
-                  >
-                    {resumingPaused
-                      ? i18nService.t('groupTasksResuming')
-                      : i18nService.t('groupTasksResumeDispatch')}
-                  </button>
-                </div>
-                {resumeError && (
-                  <div className="mt-1 text-red-600 dark:text-red-400">{resumeError}</div>
-                )}
-              </div>
-            )}
-            {openCheckpoint && (
-              <div className="mt-2 rounded-lg border border-sky-300 dark:border-sky-500/40 bg-sky-50 dark:bg-sky-900/20 px-3 py-2 text-xs dark:text-sky-200 text-sky-800">
-                <div>
-                  {i18nService
-                    .t('groupTasksCheckpointBanner')
-                    .replace('{topic}', openCheckpoint.topic?.trim() || i18nService.t('groupTasksCheckpointNoTopic'))}
-                </div>
-                {openCheckpointSummary && (
-                  <div className="mt-1">
-                    <span className="font-medium">{i18nService.t('groupTasksCheckpointDecisionPrefix')}</span>
-                    <span className="whitespace-pre-wrap">{checkpointSummaryShown}</span>
-                    {openCheckpointSummary.length > CHECKPOINT_SUMMARY_MAX_LEN && (
-                      <button
-                        type="button"
-                        className="ml-1 underline cursor-pointer"
-                        onClick={() => setCheckpointSummaryExpanded((expanded) => !expanded)}
-                      >
-                        {i18nService.t(checkpointSummaryExpanded ? 'groupTasksCheckpointCollapse' : 'groupTasksCheckpointExpand')}
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+          {/* Compact info bar */}
+          <div className="px-4 py-2 border-b dark:border-claude-darkBorder/50 border-claude-border/50 shrink-0 flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setInfoModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary border dark:border-claude-darkBorder/60 border-claude-border/60 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+            >
+              <InformationCircleIcon className="h-4 w-4" />
+              <span>{i18nService.t('groupTasksShowInfo')}</span>
+            </button>
             {detail.acceptanceSummary && (
-              <div className="mt-2">
-                <AcceptanceSummaryCard
-                  summary={detail.acceptanceSummary}
-                  actions={
-                    detail.status === 'review'
-                      ? {
-                          onAccept: () => setConfirmAction('done'),
-                          onRework: () => void handleReopen(),
-                          reworking: reopening,
-                        }
-                      : undefined
-                  }
-                />
-              </div>
-            )}
-            {detail.acceptanceCriteria && (
-              <details className="mt-1">
-                <summary className="text-xs cursor-pointer dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text">
-                  {i18nService.t('groupTasksFormAcceptance')}
-                </summary>
-                <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary whitespace-pre-wrap">
-                  {detail.acceptanceCriteria}
-                </p>
-              </details>
-            )}
-            {isTerminal && (
-              <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {i18nService.t('groupTasksClosedState')}
-                {detail.closedAt ? ` · ${formatGroupTaskTime(detail.closedAt)}` : ''}
-              </p>
+              <button
+                type="button"
+                onClick={() => setInfoModalOpen(true)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg text-emerald-600 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-500/40 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition-colors"
+              >
+                <CheckIcon className="h-3.5 w-3.5" />
+                <span>{i18nService.t('groupTasksAcceptanceSummaryTitle')}</span>
+              </button>
             )}
             {detail.status === 'done' && detail.rating != null && (
-              <div className="mt-2 rounded-lg border dark:border-claude-darkBorder/60 border-claude-border/60 px-3 py-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('groupTasksYourRating')}
-                  </span>
-                  <GroupTaskRatingStars value={detail.rating} sizeClass="h-4 w-4" />
-                  {detail.ratedAt && (
-                    <span className="text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
-                      {formatGroupTaskTime(detail.ratedAt)}
-                    </span>
-                  )}
-                </div>
-                {detail.ratingComment && (
-                  <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary whitespace-pre-wrap">
-                    {detail.ratingComment}
-                  </p>
-                )}
-              </div>
-            )}
-            {detail.driver && (
-              <p className="mt-1 text-[11px] dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60">
-                {i18nService.t('groupTasksDriverInfo')}
-                {` ${detail.driver.instanceId.slice(0, 8)} · ${formatGroupTaskTime(detail.driver.atMs)}`}
-              </p>
-            )}
-            {reopenError && (
-              <p className="mt-1 text-xs text-red-500">{reopenError}</p>
+              <button
+                type="button"
+                onClick={() => setInfoModalOpen(true)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary border dark:border-claude-darkBorder/60 border-claude-border/60 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+              >
+                <GroupTaskRatingStars value={detail.rating} sizeClass="h-3.5 w-3.5" />
+              </button>
             )}
           </div>
+
+          {/* Banners (stall/review/paused/checkpoint) */}
+          {detail.stall === true && !openCheckpoint && detail.status !== 'review' && detail.dispatchPausedAt == null && (
+            <div className="mx-4 mt-2 rounded-lg border border-orange-300 dark:border-orange-500/40 bg-orange-50 dark:bg-orange-900/20 px-3 py-2 text-xs dark:text-orange-200 text-orange-800">
+              {i18nService
+                .t('groupTasksStallBanner')
+                .replace('{minutes}', String(detail.stallAfterMinutes ?? 30))}
+            </div>
+          )}
+          {detail.status === 'review' && (
+            <div className="mx-4 mt-2 rounded-lg border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs dark:text-amber-200 text-amber-800">
+              {i18nService.t('groupTasksReviewSilenceHint')}
+            </div>
+          )}
+          {detail.dispatchPausedAt != null && !isTerminal && (
+            <div className="mx-4 mt-2 rounded-lg border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs dark:text-amber-200 text-amber-800">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span>⏸️ {i18nService.t('groupTasksPausedBanner')}</span>
+                <button
+                  type="button"
+                  onClick={() => void handleResumePaused()}
+                  disabled={resumingPaused}
+                  className="ml-auto shrink-0 rounded-lg border border-amber-400/60 px-2.5 py-1 text-xs font-medium text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors disabled:opacity-50"
+                >
+                  {resumingPaused
+                    ? i18nService.t('groupTasksResuming')
+                    : i18nService.t('groupTasksResumeDispatch')}
+                </button>
+              </div>
+              {resumeError && (
+                <div className="mt-1 text-red-600 dark:text-red-400">{resumeError}</div>
+              )}
+            </div>
+          )}
+          {openCheckpoint && (
+            <div className="mx-4 mt-2 rounded-lg border border-sky-300 dark:border-sky-500/40 bg-sky-50 dark:bg-sky-900/20 px-3 py-2 text-xs dark:text-sky-200 text-sky-800">
+              <div>
+                {i18nService
+                  .t('groupTasksCheckpointBanner')
+                  .replace('{topic}', openCheckpoint.topic?.trim() || i18nService.t('groupTasksCheckpointNoTopic'))}
+              </div>
+              {openCheckpointSummary && (
+                <div className="mt-1">
+                  <span className="font-medium">{i18nService.t('groupTasksCheckpointDecisionPrefix')}</span>
+                  <span className="whitespace-pre-wrap">{checkpointSummaryShown}</span>
+                  {openCheckpointSummary.length > CHECKPOINT_SUMMARY_MAX_LEN && (
+                    <button
+                      type="button"
+                      className="ml-1 underline cursor-pointer"
+                      onClick={() => setCheckpointSummaryExpanded((expanded) => !expanded)}
+                    >
+                      {i18nService.t(checkpointSummaryExpanded ? 'groupTasksCheckpointCollapse' : 'groupTasksCheckpointExpand')}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+          {reopenError && (
+            <p className="mx-4 mt-2 text-xs text-red-500">{reopenError}</p>
+          )}
 
           {/* Transcript */}
           <div
@@ -1316,6 +1242,16 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             setConfirmAction(null);
             setCloseError(null);
           }}
+        />
+      )}
+      {/* Info modal */}
+      {infoModalOpen && (
+        <GroupTaskInfoModal
+          detail={detail}
+          onClose={() => setInfoModalOpen(false)}
+          onAccept={detail.status === 'review' ? () => { setInfoModalOpen(false); setConfirmAction('done'); } : undefined}
+          onRework={detail.status === 'review' ? () => { setInfoModalOpen(false); void handleReopen(); } : undefined}
+          reworking={reopening}
         />
       )}
       {/* Member removal confirmation */}
