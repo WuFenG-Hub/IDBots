@@ -17,6 +17,7 @@ import type {
   SubagentTaskState,
   SubagentTaskStatus,
 } from '../../types/cowork';
+import { updateCoworkMessage, upsertCoworkMessage } from '../../services/coworkSessionState';
 
 /**
  * Composer draft of one session. `quotedSelections` is optional and stays
@@ -360,9 +361,9 @@ const coworkSlice = createSlice({
       const isUserTurn = message.type === 'user';
 
       if (state.currentSession?.id === sessionId) {
-        const exists = state.currentSession.messages.some((item) => item.id === message.id);
-        if (!exists) {
-          state.currentSession.messages.push(message);
+        const result = upsertCoworkMessage(state.currentSession.messages, message);
+        if (result.added) {
+          state.currentSession.messages = result.messages;
           if (isUserTurn) {
             state.currentSession.updatedAt = message.timestamp;
           }
@@ -404,18 +405,10 @@ const coworkSlice = createSlice({
       const { sessionId, messageId, content, metadata } = action.payload;
 
       if (state.currentSession?.id === sessionId) {
-        const messageIndex = state.currentSession.messages.findIndex(m => m.id === messageId);
-        if (messageIndex !== -1) {
-          if (content !== undefined) {
-            state.currentSession.messages[messageIndex].content = content;
-          }
-          if (metadata !== undefined) {
-            state.currentSession.messages[messageIndex].metadata = {
-              ...(state.currentSession.messages[messageIndex].metadata ?? {}),
-              ...metadata,
-            };
-          }
-        }
+        state.currentSession.messages = updateCoworkMessage(state.currentSession.messages, messageId, {
+          ...(content !== undefined ? { content } : {}),
+          ...(metadata !== undefined ? { metadata } : {}),
+        });
       }
 
       // Same rule as addMessage: a heartbeat-driven turn never raises the
