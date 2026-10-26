@@ -82,13 +82,17 @@ The full prose and the raw tables no longer appear in the HTML at all.
   status), active long-term tasks (title/stage/%).
 - `hourlyActivity{}`: 12×2h message buckets (local + online) for the visual
   timeline chart.
-- Budget: `DAILY_REPORT_MAX_FACTS_JSON_BYTES` 20KB → **64KB** (one idle-time
+- Budget: `DAILY_REPORT_MAX_FACTS_JSON_BYTES` 20KB → **80KB** (one idle-time
   call/day; per-turn context constraint untouched — this is a background job).
-  Note: the initially approved 48KB turned out to be physically too small — a
-  real full day (20 active bots, 60+ sessions) needs ~60KB of facts, and
-  shrinking to 48KB forced the cap ladder to drop entire bots, defeating the
-  one-line-per-active-bot contract. The ladder now trims per-item text and
-  sessions first; bot-dropping is the last resort.
+  History: the approved-then-implemented 48KB and then 64KB both turned out
+  too tight — a real full day (20 bots = the system-wide cap, 60+ sessions,
+  dream digests landed) needs ~60-70KB, and tight budgets forced the cap
+  ladder to drop entire bots or narrated sessions, defeating the
+  one-line-per-active-bot contract. At 80KB the real 10-25 day fits at 62KB
+  with every bot at its full 3 sessions and 160-char excerpts (no rung fires).
+  botDigests were REMOVED entirely (owner call 2026-10-26): mostly absent at
+  the 08:00 fire time and fully covered by botActivity. The ladder still
+  trims per-item text first; bot-dropping stays the last resort.
 
 ### Phase 2 — Generator: new prompt, new markdown, new HTML (`dailyReportGenerator.ts`)
 

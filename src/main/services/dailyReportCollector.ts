@@ -8,8 +8,8 @@
  * fails soft to empty, so a broken query can shrink a section but can never
  * sink the report. Every bucket is hard-capped (top-N by recency plus char
  * caps) and the assembled facts are capped again at the JSON level so the
- * ledger row stays ≤ ~48 KB (raised from 20KB with the v2 per-bot bucket —
- * one idle-time brain call a day, no per-turn context cost).
+ * facts stay ≤ ~80 KB (one idle-time brain call a day, no per-turn context
+ * cost; 20 bots is the system-wide bot cap, so a full fleet day must fit).
  *
  * Skip decision (owner-aligned rule E10): a day is skippable only when the
  * window holds literally zero activity — no new cowork sessions of any kind,
@@ -64,13 +64,12 @@ export const DAILY_REPORT_GROUP_TASK_TITLE_MAX_CHARS = 100;
 export const DAILY_REPORT_MAX_LONG_TERM_EVENTS = 10;
 export const DAILY_REPORT_MAX_LONG_TERM_TASKS = 8;
 export const DAILY_REPORT_LONG_TERM_TITLE_MAX_CHARS = 100;
-export const DAILY_REPORT_MAX_BOT_DIGESTS = 12;
-export const DAILY_REPORT_DIGEST_MAX_CHARS = 1200;
 export const DAILY_REPORT_MAX_ONLINE_BOTS = 20;
-/** 64KB: a full 20-bot day does not fit 48KB without dropping entire bots
- * (which defeats the one-line-per-active-bot contract), and the facts feed
- * ONE idle-time brain call a day — no per-turn context cost. */
-export const DAILY_REPORT_MAX_FACTS_JSON_BYTES = 64 * 1024;
+/** 80KB: a full 20-bot day (the system-wide bot cap) with dream digests
+ * landed needs ~60-70KB; smaller budgets forced the shrink ladder to drop
+ * entire bots, which defeats the one-line-per-active-bot contract. The facts
+ * feed ONE idle-time brain call a day — no per-turn context cost. */
+export const DAILY_REPORT_MAX_FACTS_JSON_BYTES = 80 * 1024;
 
 // ── v2 owner rework (2026-10-26): per-bot activity + upcoming buckets ──────
 
@@ -171,13 +170,6 @@ export interface DailyReportLongTermProgress {
   percentComplete: number;
 }
 
-export interface DailyReportBotDigest {
-  botName: string;
-  isTwin: boolean;
-  summaryDate: string;
-  summaryText: string;
-}
-
 export interface DailyReportOnlineActivity {
   botName: string;
   privateMessageCount: number;
@@ -275,7 +267,6 @@ export interface DailyReportFacts {
     longTermProgress: DailyReportLongTermProgress[];
     twinDelegateOrchestrationsInWindow: number;
   };
-  botDigests: DailyReportBotDigest[];
   onlineActivity: DailyReportOnlineActivity[];
   /** v2: per-bot "what did this bot do" rollup (all session types + runs + external). */
   botActivity: DailyReportBotActivity[];
@@ -590,7 +581,7 @@ export const computeDailyReportHasAnyActivity = (facts: {
 
 /**
  * Final JSON-level cap: shrink the cheapest-to-lose text fields until the
- * serialized facts fit the ledger budget (48KB — one idle-time brain call a
+ * serialized facts fit the ledger budget (80KB — one idle-time brain call a
  * day, raised from 20KB with the v2 per-bot bucket). Bot-dropping is the LAST
  * resort — the whole point of the v2 briefing is one line per ACTIVE bot, so
  * the ladder trims per-item text first, then sessions/peers per bot, and only
@@ -631,12 +622,6 @@ export const enforceDailyReportFactsCap = (
 
   candidate = {
     ...candidate,
-    botDigests: candidate.botDigests.map((d) => ({ ...d, summaryText: capDailyReportText(d.summaryText, 400) })),
-  };
-  if (fits(candidate)) return candidate;
-
-  candidate = {
-    ...candidate,
     humanSessions: candidate.humanSessions.map((s) => ({
       ...s,
       lastAssistantExcerpt: s.lastAssistantExcerpt ? capDailyReportText(s.lastAssistantExcerpt, 300) : null,
@@ -664,7 +649,6 @@ export const enforceDailyReportFactsCap = (
   return {
     ...candidate,
     botActivity: candidate.botActivity.slice(0, 10),
-    botDigests: candidate.botDigests.slice(0, 4),
     humanSessions: candidate.humanSessions.slice(0, 6),
   };
 };
@@ -888,23 +872,10 @@ export const collectDailyReportFacts = (input: {
     return Number(row?.cnt ?? 0) || 0;
   });
 
-  const botDigests = safeCollect('botDigests', [] as DailyReportBotDigest[], () => {
-    const dateFrom = formatDailyReportLocalDate(msStart);
-    const dateTo = formatDailyReportLocalDate(msEnd);
-    return db.queryAll<Record<string, unknown>>(`
-      SELECT mb.id AS metabot_id, mb.name AS bot_name, mb.metabot_type, ds.summary_date, ds.summary_text
-      FROM metabot_daily_summaries ds
-      JOIN metabots mb ON mb.id = ds.metabot_id
-      WHERE ds.summary_date >= ? AND ds.summary_date <= ?
-      ORDER BY ds.summary_date DESC, mb.id ASC
-      LIMIT ?
-    `, [dateFrom, dateTo, DAILY_REPORT_MAX_BOT_DIGESTS]).map((row) => ({
-      botName: row.bot_name ? String(row.bot_name) : '(bot)',
-      isTwin: Number(row.metabot_id) === input.twinId,
-      summaryDate: String(row.summary_date ?? ''),
-      summaryText: capDailyReportText(row.summary_text, DAILY_REPORT_DIGEST_MAX_CHARS),
-    }));
-  });
+  // botDigests (dream daily summaries) were dropped with the v2 rework: at the
+  // 08:00 report time they mostly do not exist yet (bots dream late night),
+  // and facts.botActivity now covers their information surface — owner call
+  // 2026-10-26, keep the facts lean.
 
   const onlineActivity = safeCollect('onlineActivity', [] as DailyReportOnlineActivity[], () => {
     const privateRows = db.queryAll<Record<string, unknown>>(`
@@ -1335,7 +1306,6 @@ export const collectDailyReportFacts = (input: {
       longTermProgress,
       twinDelegateOrchestrationsInWindow,
     },
-    botDigests,
     onlineActivity,
     botActivity,
     upcoming,
