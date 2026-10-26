@@ -82,3 +82,14 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - Any database schema change must include a safe, idempotent first-run migration path so upgraded users get required tables, columns, indexes, and defaults before new code depends on them.
 - Any change to field meaning, data shape, or storage semantics must include an explicit migration or compatibility strategy for existing user data on first launch after upgrade.
 - Do not delete, reset, or casually discard user data. Maintain old-user database continuity across releases unless a deliberate, well-documented migration plan says otherwise.
+
+## Cloud & Mobile handoff package
+
+Any work touching the mobile client (`src/mobile/`), the control plane
+(`cloud/control-plane/`), server mode / gateway (`src/main/server/`,
+`src/main/gateway/`), or the tenant image (`deploy/tenant-image/`) starts at
+`docs/cloud-mobile/HANDOFF.md`, then the index in `docs/cloud-mobile/README.md`
+and the workstream plan in `00-program-plan.md`. Interface contracts
+(`01-interface-contracts.md`, `02-ipc-allowlist-v1.md`) are frozen: propose a
+change request instead of editing them. Production deploys come from `main`
+only (see the rule above).
