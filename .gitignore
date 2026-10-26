@@ -625,6 +625,7 @@ man_base_data_pebble/
 !tests/coworkStreamFlushCoalescing.test.mjs
 !tests/coworkStreamGapHeal.test.mjs
 !tests/coworkConversationTurnReuse.test.mjs
+!tests/coworkConversationProjection.test.ts
 !tests/coworkCompactedNotice.test.tsx
 !tests/sessionListRenderBudget.test.mjs
 !tests/sessionListRevealBudget.test.ts
