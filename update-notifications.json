@@ -1,0 +1,17 @@
+{
+  "notifications": [
+    {
+      "version": "1.0.7",
+      "minShowVersion": "1.0.0",
+      "title": {
+        "zh": "重要功能变更通知",
+        "en": "Important Feature Change Notice"
+      },
+      "content": {
+        "zh": "## 关于冲浪功能的重要变更\n\n为了优化系统性能和提升用户体验，我们对冲浪功能进行了以下调整：\n\n### 主要变更\n\n- **新建 Bot 默认关闭冲浪功能**：从本版本开始，所有新创建的 Bot 将不再默认启用冲浪功能\n- **建议关闭现有 Bot 的冲浪功能**：为避免不必要的资源消耗，建议您将已启用冲浪功能的 Bot 手动关闭\n\n### 如何操作\n\n1. 进入 **Bot 设置**页面\n2. 找到 **冲浪功能** 选项\n3. 将其切换为 **关闭** 状态\n\n### 为什么要做这个调整？\n\n冲浪功能虽然强大，但会持续消耗系统资源和网络流量。通过将其设为可选功能，可以让系统运行更加高效，同时让需要该功能的用户可以按需开启。\n\n如有任何疑问，欢迎通过社区反馈渠道联系我们。",
+        "en": "## Important Changes to Surfing Feature\n\nTo optimize system performance and enhance user experience, we've made the following adjustments to the surfing feature:\n\n### Key Changes\n\n- **Surfing disabled by default for new Bots**: Starting from this version, all newly created Bots will no longer have surfing enabled by default\n- **Recommend disabling surfing for existing Bots**: To avoid unnecessary resource consumption, we recommend manually disabling the surfing feature for Bots that currently have it enabled\n\n### How to Disable\n\n1. Go to **Bot Settings** page\n2. Find the **Surfing Feature** option\n3. Toggle it to **Off**\n\n### Why This Change?\n\nWhile powerful, the surfing feature continuously consumes system resources and network bandwidth. By making it an opt-in feature, the system can run more efficiently while still allowing users who need it to enable it on demand.\n\nIf you have any questions, feel free to reach out through our community feedback channels."
+      },
+      "type": "info"
+    }
+  ]
+}

@@ -194,6 +194,12 @@ import { probeMediaFile, convertMediaFile, grabVideoFrame } from './services/med
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
 import {
+  getFirstInstallVersion,
+  setFirstInstallVersion,
+  hasViewedNotification,
+  markNotificationAsViewed,
+} from './updateNotificationStore';
+import {
   applyChainSyncProgress,
   createMetaBotOnChainCore,
   deleteMetaBotCore,
@@ -10573,6 +10579,24 @@ if (!gotTheLock) {
 
   registerIpcHandler('app:getVersion', () => app.getVersion());
   registerIpcHandler('app:getSystemLocale', () => getOsLocale());
+
+  // Update notification IPC handlers
+  registerIpcHandler('updateNotification:getFirstInstallVersion', () => {
+    return getFirstInstallVersion(getStore());
+  });
+  registerIpcHandler('updateNotification:setFirstInstallVersion', (_event, version: unknown) => {
+    if (typeof version !== 'string') return;
+    setFirstInstallVersion(getStore(), version);
+  });
+  registerIpcHandler('updateNotification:hasViewed', (_event, version: unknown) => {
+    if (typeof version !== 'string') return false;
+    return hasViewedNotification(getStore(), version);
+  });
+  registerIpcHandler('updateNotification:markAsViewed', (_event, version: unknown) => {
+    if (typeof version !== 'string') return;
+    markNotificationAsViewed(getStore(), version);
+  });
+
   registerIpcHandler('startup:rendererInitialized', () => {
     startupLog('renderer initialization complete');
     return {

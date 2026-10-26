@@ -867,6 +867,12 @@ contextBridge.exposeInMainWorld('electron', {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
     getSystemLocale: () => ipcRenderer.invoke('app:getSystemLocale'),
   },
+  updateNotification: {
+    getFirstInstallVersion: () => ipcRenderer.invoke('updateNotification:getFirstInstallVersion') as Promise<string | null>,
+    setFirstInstallVersion: (version: string) => ipcRenderer.invoke('updateNotification:setFirstInstallVersion', version),
+    hasViewed: (version: string) => ipcRenderer.invoke('updateNotification:hasViewed', version) as Promise<boolean>,
+    markAsViewed: (version: string) => ipcRenderer.invoke('updateNotification:markAsViewed', version),
+  },
   startup: {
     rendererInitialized: () => ipcRenderer.invoke('startup:rendererInitialized') as Promise<{
       success: boolean;

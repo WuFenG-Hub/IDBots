@@ -66,6 +66,14 @@ import { openBotBrowserConversationInCowork } from './features/botBrowser/conver
 import type { BotBrowserConversationRequest } from './features/botBrowser/types';
 import SidebarToggleIcon from './components/icons/SidebarToggleIcon';
 import { FREE_PROVIDER_DISPLAY_NAME, LLM_FREE_PROVIDER_KEY } from './services/llmFreeQuotaGate.js';
+import {
+  loadUpdateNotifications,
+  getNotificationForVersion,
+  shouldShowNotification,
+  type UpdateNotification as UpdateNotificationData,
+} from './services/updateNotification';
+
+const UpdateNotificationModal = React.lazy(() => import('./components/update/UpdateNotificationModal'));
 
 /**
  * Everything the user cannot see on first paint is split into its own chunk:
@@ -171,6 +179,13 @@ const App: React.FC = () => {
     setUpdatePhaseState(phase);
   }, []);
   const [focusedOrderTarget, setFocusedOrderTarget] = useState<FocusedOrderTarget | null>(null);
+  // Update notification modal state
+  const [showUpdateNotification, setShowUpdateNotification] = useState(false);
+  const [updateNotificationData, setUpdateNotificationData] = useState<{
+    version: string;
+    title: string;
+    content: string;
+  } | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const mockUpdateModeRef = useRef(false);
   const mockDownloadTimerRef = useRef<number | null>(null);
@@ -211,6 +226,52 @@ const App: React.FC = () => {
       console.warn('[Startup] Failed to report renderer initialization:', error);
     }
   }, []);
+
+  const checkAndShowUpdateNotification = useCallback(async () => {
+    try {
+      const currentVersion = await window.electron.appInfo.getVersion();
+
+      // Get or set first install version
+      const firstInstallVersion = await window.electron.updateNotification.getFirstInstallVersion();
+      if (!firstInstallVersion) {
+        // This is a fresh install
+        await window.electron.updateNotification.setFirstInstallVersion(currentVersion);
+        return;
+      }
+
+      // Load notification definitions
+      const notificationsData = await loadUpdateNotifications();
+      if (!notificationsData) return;
+
+      // Get notification for current version
+      const notification = getNotificationForVersion(notificationsData, currentVersion);
+      if (!notification) return;
+
+      // Check if already viewed
+      const hasViewed = await window.electron.updateNotification.hasViewed(currentVersion);
+
+      // Check if should show
+      if (shouldShowNotification(firstInstallVersion, currentVersion, notification, hasViewed)) {
+        const lang = i18nService.getLanguage();
+        setUpdateNotificationData({
+          version: currentVersion,
+          title: notification.title[lang] || notification.title.en,
+          content: notification.content[lang] || notification.content.en,
+        });
+        setShowUpdateNotification(true);
+      }
+    } catch (error) {
+      console.warn('[UpdateNotification] Failed to check update notification:', error);
+    }
+  }, []);
+
+  const handleCloseUpdateNotification = useCallback(async () => {
+    if (updateNotificationData) {
+      await window.electron.updateNotification.markAsViewed(updateNotificationData.version);
+    }
+    setShowUpdateNotification(false);
+    setUpdateNotificationData(null);
+  }, [updateNotificationData]);
 
   const clearMockTimers = useCallback(() => {
     if (mockDownloadTimerRef.current != null) {
@@ -413,6 +474,9 @@ const App: React.FC = () => {
         }
         setIsInitialized(true);
         void reportRendererStartupComplete();
+
+        // Check and show update notification if needed
+        void checkAndShowUpdateNotification();
       } catch (error) {
         console.error('Failed to initialize app:', error);
         setInitError(i18nService.t('initializationError'));
@@ -1501,6 +1565,16 @@ const App: React.FC = () => {
       )}
       {pendingConsent && (
         <AgentGameConsentCard info={pendingConsent} onRespond={handleConsentResponse} />
+      )}
+      {showUpdateNotification && updateNotificationData && (
+        <Suspense fallback={null}>
+          <UpdateNotificationModal
+            version={updateNotificationData.version}
+            title={updateNotificationData.title}
+            content={updateNotificationData.content}
+            onClose={handleCloseUpdateNotification}
+          />
+        </Suspense>
       )}
     </div>
   );
