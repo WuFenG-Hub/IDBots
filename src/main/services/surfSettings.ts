@@ -4,9 +4,10 @@
  * Persisted through the generic metabot_settings kv store and whitelisted for
  * the renderer in metabotSettingsService. Read helpers centralize the defaults
  * so a bot that never touched the settings gets the product defaults
- * (surf-before-dream ON — owner decision 2026-09-28, interaction budget 50;
- * the renderer copy in SurfSection.tsx is pinned to these values by
- * tests/quotaRendererSync.test.mjs).
+ * (surf-before-dream ON for the Twin bot only, OFF for every other bot —
+ * owner decision 2026-10-26 nightly-token audit, flipping the 2026-09-28
+ * default-on; interaction budget 50; the renderer copy in SurfSection.tsx is
+ * pinned to these values by tests/quotaRendererSync.test.mjs).
  */
 
 import type { MetabotStore } from '../metabotStore';
@@ -14,9 +15,18 @@ import type { MetabotStore } from '../metabotStore';
 /** Structural subset of MetabotStore the surf settings need (test-friendly). */
 export interface SurfSettingsReader {
   getMetabotSetting(metabotId: number, key: string): string | null;
+  /** Whether this bot is the machine's Twin (metabot_type = 'twin'). Absent in test stubs → not the Twin. */
+  isTwinMetabot?(metabotId: number): boolean;
 }
 
-/** '1'/'0' toggle; unset means ON (default since 2026-09-28) — an explicit '0' opts a bot out. */
+/**
+ * '1'/'0' toggle. Unset means the type default: ON for the Twin bot, OFF for
+ * every other bot (owner decision 2026-10-26, flipping the 2026-09-28
+ * default-on). Bots that existed before the flip are pinned to an explicit
+ * '1' by the one-time MetabotStore migration, so existing users keep their
+ * current behavior and opt out manually; only bots created after the flip
+ * ride the new default.
+ */
 export const SURF_BEFORE_DREAM_ENABLED_KEY = 'surf_before_dream_enabled';
 /** Integer string; chain-writing interactions allowed per surf run. */
 export const SURF_INTERACTION_BUDGET_KEY = 'surf_interaction_budget';
@@ -45,13 +55,19 @@ export const normalizeSurfBudgetValue = (value: unknown): string | null => {
 };
 
 /**
- * Default ON (owner decision, 2026-09-28 — flips the 2026-09-14 opt-in
- * default): pre-dream surfing ships enabled for every bot, and only an
- * explicit '0' opts out — users who turned it off keep it off; an explicit
- * '1' is a no-op against the default.
+ * Twin-only default (owner decision, 2026-10-26 nightly-token audit — flips
+ * the 2026-09-28 default-on): unset means ON for the Twin bot and OFF for
+ * every other bot. An explicit '0' always opts out and an explicit '1'
+ * always opts in, whatever the type. Bots that predate the flip carry an
+ * explicit '1' from the one-time migration, so existing users keep surfing
+ * until they opt out themselves (announced release note).
  */
-export const isSurfBeforeDreamEnabled = (reader: SurfSettingsReader, metabotId: number): boolean =>
-  reader.getMetabotSetting(metabotId, SURF_BEFORE_DREAM_ENABLED_KEY) !== '0';
+export const isSurfBeforeDreamEnabled = (reader: SurfSettingsReader, metabotId: number): boolean => {
+  const explicit = reader.getMetabotSetting(metabotId, SURF_BEFORE_DREAM_ENABLED_KEY);
+  if (explicit === '0') return false;
+  if (explicit === '1') return true;
+  return reader.isTwinMetabot?.(metabotId) ?? false;
+};
 
 export const getSurfInteractionBudget = (reader: SurfSettingsReader, metabotId: number): number => {
   const raw = reader.getMetabotSetting(metabotId, SURF_INTERACTION_BUDGET_KEY);

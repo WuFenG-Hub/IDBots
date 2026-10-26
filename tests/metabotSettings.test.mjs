@@ -58,3 +58,67 @@ test('getMetabotSetting defaults to null and setMetabotSetting persists per meta
     store.close();
   }
 });
+
+// --- Surf-before-dream twin-only default (owner decision 2026-10-26) ---------
+
+const SURF_KEY = 'surf_before_dream_enabled';
+
+async function insertBot(db, id, type) {
+  db.run(
+    `INSERT INTO metabot_wallets (id, mnemonic, path, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [id, 'abandon ability able about above absent absorb abstract absurd abuse access accident ' + id, "m/44'/10001'/0'/0/" + id, Date.now()],
+  );
+  db.run(
+    `INSERT INTO metabots (
+      id, wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key,
+      name, enabled, metaid, metabot_type, created_by, role, soul,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id, id, 'mvc-' + id, 'btc-' + id, 'doge-' + id, 'public-' + id, 'chat-' + id,
+      'bot-' + id, 1, 'metaid-' + id, type, '0000', 'role', 'soul',
+      Date.now(), Date.now(),
+    ],
+  );
+}
+
+test('surf legacy-pin migration pins pre-flip bots to 1; post-flip bots ride the twin-only default', async () => {
+  const tempDir = makeTempDir();
+  const store = await SqliteStore.create(tempDir);
+  const db = store.getDatabase();
+  try {
+    // Two bots existed BEFORE the default flip (one Twin, one worker).
+    await insertBot(db, 1, 'worker');
+    await insertBot(db, 2, 'twin');
+
+    // Constructing the store runs the one-time legacy-pin migration.
+    const metabotStore = new MetabotStore(db, store.getSaveFunction());
+    assert.equal(metabotStore.getMetabotSetting(1, SURF_KEY), '1', 'pre-flip worker pinned ON');
+    assert.equal(metabotStore.getMetabotSetting(2, SURF_KEY), '1', 'pre-flip Twin pinned ON');
+    // A user opt-out predating the flip is never overwritten.
+    metabotStore.setMetabotSetting(1, SURF_KEY, '0');
+
+    // Bots created AFTER the flip carry no row → the twin-only read default.
+    await insertBot(db, 3, 'worker');
+    assert.equal(metabotStore.getMetabotSetting(3, SURF_KEY), null, 'post-flip worker has no pinned row');
+
+    const { isSurfBeforeDreamEnabled } = require('../dist-electron/main/services/surfSettings.js');
+    assert.equal(isSurfBeforeDreamEnabled(metabotStore, 1), false, 'explicit 0 stays off');
+    assert.equal(isSurfBeforeDreamEnabled(metabotStore, 2), true, 'pinned Twin stays on');
+    assert.equal(isSurfBeforeDreamEnabled(metabotStore, 3), false, 'unset worker defaults OFF');
+    assert.equal(metabotStore.isTwinMetabot(2), true);
+    assert.equal(metabotStore.isTwinMetabot(1), false);
+    assert.equal(metabotStore.isTwinMetabot(3), false);
+    assert.equal(metabotStore.isTwinMetabot(999), false, 'unknown bot is not the Twin');
+
+    // Idempotency: a second construction (app restart) must not pin the
+    // post-flip bot — the marker row short-circuits the migration.
+    await insertBot(db, 4, 'worker');
+    const again = new MetabotStore(db, store.getSaveFunction());
+    assert.equal(again.getMetabotSetting(3, SURF_KEY), null, 'restart does not pin post-flip bots');
+    assert.equal(again.getMetabotSetting(4, SURF_KEY), null, 'restart does not pin post-flip bots');
+  } finally {
+    store.close();
+  }
+});

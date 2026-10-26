@@ -10,6 +10,12 @@ import type {
 
 const DEFAULT_WALLET_PATH = "m/44'/10001'/0'/0/0";
 
+// Defined locally rather than imported from services/surfSettings to keep the
+// store free of service-layer imports; the strings are the stable kv contract
+// shared with that module.
+const SURF_BEFORE_DREAM_ENABLED_KEY = 'surf_before_dream_enabled';
+const SURF_LEGACY_PIN_MARKER_KEY = '_migrated_surf_before_dream_legacy_pin';
+
 /** sql.js rejects undefined in bind params; normalize to null. */
 function sanitizeBindParams(params: unknown[]): (string | number | Buffer | Uint8Array | null)[] {
   return params.map((v) =>
@@ -167,6 +173,48 @@ export class MetabotStore {
   constructor(db: Database, saveDb: () => void) {
     this.db = db;
     this.saveDb = saveDb;
+    // One-time data migration (see ensureSurfBeforeDreamLegacyPin): pins the
+    // pre-flip surf default onto bots that existed before it, so the
+    // twin-only default only touches bots created afterwards. Never blocks
+    // construction — a schema race just retries on the next launch.
+    try {
+      this.ensureSurfBeforeDreamLegacyPin();
+    } catch (error) {
+      console.warn(
+        '[MetabotStore] surf_before_dream legacy pin migration deferred:',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  /**
+   * Owner decision 2026-10-26 (nightly-token audit): the surf-before-dream
+   * default flipped from "every bot ON" to "Twin only ON". To keep existing
+   * users exactly where they were (announced release note asks them to opt
+   * out manually), this one-time migration writes an explicit '1' for every
+   * bot that has no value yet. Bots created after the flip carry no row and
+   * therefore ride the new twin-only default. Idempotent via a marker row at
+   * metabot_id = 0 (getMetabotSetting refuses non-positive ids, so the
+   * marker is unreachable through the public readers).
+   */
+  private ensureSurfBeforeDreamLegacyPin(): void {
+    this.ensureMetabotSettingsTable();
+    const marker = this.getOne<{ value: string }>(
+      'SELECT value FROM metabot_settings WHERE metabot_id = 0 AND key = ? LIMIT 1',
+      [SURF_LEGACY_PIN_MARKER_KEY],
+    );
+    if (marker) return;
+    this.db.run(
+      `INSERT INTO metabot_settings (metabot_id, key, value, updated_at)
+       SELECT id, ?, '1', ? FROM metabots
+       WHERE id NOT IN (SELECT metabot_id FROM metabot_settings WHERE key = ?)`,
+      [SURF_BEFORE_DREAM_ENABLED_KEY, Date.now(), SURF_BEFORE_DREAM_ENABLED_KEY],
+    );
+    this.db.run(
+      'INSERT OR REPLACE INTO metabot_settings (metabot_id, key, value, updated_at) VALUES (0, ?, ?, ?)',
+      [SURF_LEGACY_PIN_MARKER_KEY, new Date().toISOString(), Date.now()],
+    );
+    this.saveDb();
   }
 
   private hasAvatarBlobColumn(): boolean {
@@ -367,6 +415,15 @@ export class MetabotStore {
       [metabotId, normalizedKey],
     );
     return row ? String(row.value) : null;
+  }
+
+  /** Whether the bot is the machine's Twin (metabot_type = 'twin'). */
+  isTwinMetabot(metabotId: number): boolean {
+    if (!Number.isInteger(metabotId) || metabotId <= 0) return false;
+    return this.getOne<{ one: number }>(
+      "SELECT 1 AS one FROM metabots WHERE id = ? AND metabot_type = 'twin' LIMIT 1",
+      [metabotId],
+    ) != null;
   }
 
   /** Write one per-metabot setting value. Returns the stored value. */
