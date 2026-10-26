@@ -1,5 +1,7 @@
 import React from 'react';
+import { InformationCircleIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
+import Tooltip from '../common/Tooltip';
 
 /**
  * Capability drafts list (memory/persona audit P1): the bot's dream-distilled
@@ -84,12 +86,14 @@ export default function CapabilityDraftsPanel(props: {
   return (
     <div className="rounded-lg border dark:border-claude-darkBorder border-claude-border">
       <div className="px-3 py-2 border-b dark:border-claude-darkBorder border-claude-border">
-        <div className="text-xs font-medium dark:text-claude-darkText text-claude-text">
-          {i18nService.t('capabilityDraftsTitle')}
-          {drafts.length > 0 ? ` (${drafts.length})` : ''}
-        </div>
-        <div className="mt-0.5 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-          {i18nService.t('capabilityDraftsHint')}
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-medium dark:text-claude-darkText text-claude-text">
+            {i18nService.t('capabilityDraftsTitle')}
+            {drafts.length > 0 ? ` (${drafts.length})` : ''}
+          </span>
+          <Tooltip content={i18nService.t('capabilityDraftsHint')}>
+            <InformationCircleIcon className="h-3.5 w-3.5 dark:text-claude-darkTextTertiary text-claude-textTertiary cursor-help flex-shrink-0" />
+          </Tooltip>
         </div>
       </div>
       {loading ? (

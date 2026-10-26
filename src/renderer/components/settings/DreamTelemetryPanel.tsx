@@ -1,5 +1,7 @@
 import React, { useMemo } from 'react';
+import { InformationCircleIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
+import Tooltip from '../common/Tooltip';
 import {
   cumulative,
   diaryTrustRatios,
@@ -101,20 +103,28 @@ const ChartSvg: React.FC<{ children: React.ReactNode }> = ({ children }) => (
 interface ChartCardProps {
   title: string;
   headline: string;
-  caption: string;
+  caption?: string;
+  tooltip?: string;
   legend?: React.ReactNode;
   children: React.ReactNode;
 }
 
-const ChartCard: React.FC<ChartCardProps> = ({ title, headline, caption, legend, children }) => (
+const ChartCard: React.FC<ChartCardProps> = ({ title, headline, caption, tooltip, legend, children }) => (
   <div className="rounded-lg border dark:border-claude-darkBorder border-claude-border px-2.5 py-2">
     <div className="flex items-baseline justify-between gap-2">
-      <span className="text-[11px] font-medium dark:text-claude-darkText text-claude-text truncate">{title}</span>
+      <div className="flex items-center gap-1">
+        <span className="text-[11px] font-medium dark:text-claude-darkText text-claude-text truncate">{title}</span>
+        {tooltip && (
+          <Tooltip content={tooltip}>
+            <InformationCircleIcon className="h-3.5 w-3.5 dark:text-claude-darkTextTertiary text-claude-textTertiary cursor-help flex-shrink-0" />
+          </Tooltip>
+        )}
+      </div>
       <span className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary whitespace-nowrap">{headline}</span>
     </div>
     <div className="mt-1">{children}</div>
     {legend}
-    <div className="mt-1 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{caption}</div>
+    {caption && <div className="mt-1 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{caption}</div>}
   </div>
 );
 
@@ -291,7 +301,7 @@ const DreamTelemetryPanel: React.FC<DreamTelemetryPanelProps> = ({ runs }) => {
         <ChartCard
           title={i18nService.t('dreamTelemetryFailures')}
           headline={failureMaLatest == null ? '–' : failureMaLatest.toFixed(1)}
-          caption={i18nService.t('dreamTelemetryFailuresHint')}
+          tooltip={i18nService.t('dreamTelemetryFailuresHint')}
           legend={(
             <div className="mt-1 flex items-center gap-3 text-[9px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
               <LegendDot color={COLOR_GRAY} label={i18nService.t('dreamTelemetryNoFeedback')} />
@@ -318,7 +328,7 @@ const DreamTelemetryPanel: React.FC<DreamTelemetryPanelProps> = ({ runs }) => {
         <ChartCard
           title={i18nService.t('dreamTelemetrySediment')}
           headline={`${skillsTotal} · ${lessonsTotal}`}
-          caption={i18nService.t('dreamTelemetrySedimentHint')}
+          tooltip={i18nService.t('dreamTelemetrySedimentHint')}
           legend={(
             <div className="mt-1 flex items-center gap-3 text-[9px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
               <LegendDot color={COLOR_EMERALD} label={i18nService.t('dreamTelemetrySedimentSkills')} />
@@ -357,7 +367,7 @@ const DreamTelemetryPanel: React.FC<DreamTelemetryPanelProps> = ({ runs }) => {
         <ChartCard
           title={i18nService.t('dreamTelemetryDiaryTrust')}
           headline={refsLatest == null ? '–' : `${refsLatest.toFixed(0)}%${refsLatestCounts ? ` (${refsLatestCounts})` : ''}`}
-          caption={i18nService.t('dreamTelemetryDiaryTrustHint')}
+          tooltip={i18nService.t('dreamTelemetryDiaryTrustHint')}
         >
           <ChartSvg>
             {toSegments(toPoints(refsValues, refsMax)).map((segment, index) => (
@@ -378,7 +388,7 @@ const DreamTelemetryPanel: React.FC<DreamTelemetryPanelProps> = ({ runs }) => {
         <ChartCard
           title={i18nService.t('dreamTelemetryGate')}
           headline={String(gateTotalChecked)}
-          caption={i18nService.t('dreamTelemetryGateHint')}
+          tooltip={i18nService.t('dreamTelemetryGateHint')}
         >
           <ChartSvg>{renderGateBars()}</ChartSvg>
         </ChartCard>
@@ -386,7 +396,7 @@ const DreamTelemetryPanel: React.FC<DreamTelemetryPanelProps> = ({ runs }) => {
           <ChartCard
             title={i18nService.t('dreamTelemetryExam')}
             headline={examLatest == null ? '–' : `${(examLatest * 100).toFixed(0)}%`}
-            caption={i18nService.t('dreamTelemetryExamHint')}
+            tooltip={i18nService.t('dreamTelemetryExamHint')}
           >
             <ChartSvg>
               {toSegments(toPoints(examValues, 1)).map((segment, index) => (
