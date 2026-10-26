@@ -41,6 +41,7 @@ import type {
   MetabotCreateInput,
   MetabotUpdateInput,
   MobileMockBridge,
+  MobileMockCoworkStreamChannel,
   MockBridgeOptions,
   MockBundleOrder,
   MockElectronAPI,
@@ -417,6 +418,27 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
   }
 
   const coworkImpl: Record<string, unknown> = {
+    createGreetingSession: (input: {
+      title?: string;
+      fallbackGreeting: string;
+      metabotId?: number | null;
+    }) =>
+      guardOnline(async () => {
+        const session = createSession({
+          title: input.title || 'Welcome',
+          prompt: '',
+          metabotId: input.metabotId,
+        });
+        session.status = 'completed';
+        session.messages.push({
+          id: nextMessageId(),
+          type: 'assistant',
+          content: input.fallbackGreeting,
+          timestamp: now(),
+          metadata: { isFinal: true },
+        });
+        return { success: true, session: { ...session, messages: [...session.messages] } };
+      }),
     startSession: (input: { prompt?: string; title?: string; metabotId?: number | null }) =>
       guardOnline(async () => {
         const session = createSession({
@@ -1349,6 +1371,31 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     },
     getConnectionState: () => connectionState,
     getOpenedUrls: () => [...openedUrls],
+    emitCoworkStream: (channel: MobileMockCoworkStreamChannel, payload: unknown) => {
+      if (channel === 'permission') {
+        const event = payload as {
+          sessionId: string;
+          request: PendingPermissionRequest['request'];
+        };
+        pendingPermissions.set(event.request.requestId, {
+          sessionId: event.sessionId,
+          request: event.request,
+          createdAt: now(),
+        });
+        permissionWaiters.set(event.request.requestId, () => {
+          pendingPermissions.delete(event.request.requestId);
+          emitter.emit('cowork:stream:permissionResolved', {
+            sessionId: event.sessionId,
+            requestId: event.request.requestId,
+          });
+        });
+      } else if (channel === 'permissionResolved') {
+        const event = payload as { requestId: string };
+        pendingPermissions.delete(event.requestId);
+        permissionWaiters.delete(event.requestId);
+      }
+      emitter.emit(`cowork:stream:${channel}`, payload);
+    },
   };
 
   return {

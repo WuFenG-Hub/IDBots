@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { MockMetabot } from '../../bridge/types';
 import { getMobileElectron, hasAppBridge } from '../appBridge';
+import { t } from '../../i18n';
 
 /** MetaBot roster for the chat switcher and the Me screen management list. */
 export function useMetabots(): {
   bots: MockMetabot[];
+  error: string | null;
   reload: () => Promise<void>;
   createBot: (input: { name: string; role: string; soul: string; bio: string }) => Promise<boolean>;
   updateBot: (
@@ -13,12 +15,23 @@ export function useMetabots(): {
   ) => Promise<boolean>;
 } {
   const [bots, setBots] = useState<MockMetabot[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
-    if (!hasAppBridge()) return;
-    const result = await getMobileElectron().metabot.list();
-    if (result?.success && Array.isArray(result.list)) {
-      setBots(result.list);
+    if (!hasAppBridge()) {
+      setError(t('mobile.chat.rosterUnavailable'));
+      return;
+    }
+    try {
+      const result = await getMobileElectron().metabot.list();
+      if (result?.success && Array.isArray(result.list)) {
+        setBots(result.list);
+        setError(null);
+      } else {
+        setError(t('mobile.chat.rosterUnavailable'));
+      }
+    } catch {
+      setError(t('mobile.chat.rosterUnavailable'));
     }
   }, []);
 
@@ -54,5 +67,5 @@ export function useMetabots(): {
     [reload],
   );
 
-  return { bots, reload, createBot, updateBot };
+  return { bots, error, reload, createBot, updateBot };
 }

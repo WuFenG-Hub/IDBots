@@ -22,6 +22,11 @@ async function screenTo(page: import('@playwright/test').Page, testInfo: import(
   }
 }
 
+async function startNewChat(page: import('@playwright/test').Page): Promise<void> {
+  await page.getByRole('button', { name: 'Sessions' }).click();
+  await page.getByRole('button', { name: 'New chat' }).click();
+}
+
 test.describe('gateway-backed smoke', () => {
   test.skip(!isGatewayRun, 'requires the gateway harness (scripts/run-mobile-e2e-gateway.mjs)');
 
@@ -41,6 +46,7 @@ test.describe('gateway-backed smoke', () => {
     await expect(page.getByRole('button', { name: 'Chat' })).toBeVisible();
     await attachScreen(testInfo, page, 'gateway-app-shell');
 
+    await startNewChat(page);
     await page.getByPlaceholder('Type a message…').fill('hello over the gateway');
     await page.getByRole('button', { name: 'Send' }).click();
 
@@ -60,12 +66,13 @@ test.describe('gateway-backed smoke', () => {
   });
 
   test('F-11: chat file links render as same-origin /files downloads and really download @gateway', async ({ page }, testInfo) => {
-    test.skip(process.env.GW_FIXTURE_FILE !== '1', 'requires the file-delivery fixture (GW_FIXTURE_FILE=1)');
+    test.skip(process.env.GW_FIXTURE_FILE === '0', 'requires the default file-delivery fixture (explicitly disabled with GW_FIXTURE_FILE=0)');
 
     // Mirror of FIXTURE_FILE_BYTES in scripts/run-mobile-e2e-gateway.mjs.
     const expectedPayload = 'PK\x03\x04 gateway fixture docx payload 0123456789abcdef';
 
     await page.goto('/app/');
+    await startNewChat(page);
     await page.getByPlaceholder('Type a message…').fill('generate a report');
     await page.getByRole('button', { name: 'Send' }).click();
 

@@ -144,6 +144,15 @@ export interface OfflineError extends Error {
   retryable: true;
 }
 
+export type MobileMockCoworkStreamChannel =
+  | 'message'
+  | 'messageUpdate'
+  | 'permission'
+  | 'permissionResolved'
+  | 'complete'
+  | 'error'
+  | 'sessionTitle';
+
 /** Controls the mock exposes to the demo page and the tests. */
 export interface MobileMockControl {
   /** Flips connection state online -> reconnecting -> online over the blackout delay. */
@@ -151,6 +160,7 @@ export interface MobileMockControl {
   getConnectionState: () => ConnectionState;
   /** URLs passed to shell:openExternal while http(s) (for test assertions). */
   getOpenedUrls: () => string[];
+  emitCoworkStream: (channel: MobileMockCoworkStreamChannel, payload: unknown) => void;
 }
 
 /** Timer/scenario knobs; tests shrink these to keep the suite fast. */

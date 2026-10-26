@@ -26,6 +26,18 @@ const TasksScreen = lazy(() => import('./screens/TasksScreen'));
 const MeScreen = lazy(() => import('./screens/MeScreen'));
 const RechargeScreen = lazy(() => import('./screens/RechargeScreen'));
 
+const ACTIVE_TAB_STORAGE_KEY = 'idbots.mobile.activeTab.v1';
+const MOBILE_TABS: readonly MobileTab[] = ['chat', 'tasks', 'me'];
+
+function readActiveTab(): MobileTab {
+  try {
+    const saved = window.localStorage.getItem(ACTIVE_TAB_STORAGE_KEY);
+    return MOBILE_TABS.includes(saved as MobileTab) ? saved as MobileTab : 'chat';
+  } catch {
+    return 'chat';
+  }
+}
+
 function TabFallback(): JSX.Element {
   return (
     <div className="flex flex-1 items-center justify-center py-16 text-sm text-[var(--text-secondary)]">
@@ -35,17 +47,28 @@ function TabFallback(): JSX.Element {
 }
 
 export default function MobileApp(): JSX.Element {
-  const [tab, setTab] = useState<MobileTab>('chat');
+  const [tab, setTab] = useState<MobileTab>(readActiveTab);
   const [rechargeOpen, setRechargeOpen] = useState(false);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, tab);
+    } catch {
+      return;
+    }
+  }, [tab]);
   // Chat state lives at the shell level so switching tabs keeps the stream.
-  const chat = useChat();
-  const { bots } = useMetabots();
+  const { bots, error: botsError, reload: reloadBots } = useMetabots();
+  const chat = useChat(bots);
   // Terminal gateway states (REQ-E-2 close codes) replace the whole shell.
   const { terminal, versionMismatch } = useTerminalBridgeState();
   // Reconnect resync (REQ-E-5): refresh on every (re)connect, whichever
   // bridge is active; the counter drives the tasks/meters/me list refresh.
   const resyncCounter = useResync(
-    { getOpenSessionId: chat.getOpenSessionId, getStreamingMessage: chat.getStreamingMessage },
+    {
+      getOpenSessionId: chat.getOpenSessionId,
+      getStreamingMessage: chat.getStreamingMessage,
+      beginResync: chat.beginResync,
+    },
     chat.applyResync,
   );
 
@@ -83,7 +106,13 @@ export default function MobileApp(): JSX.Element {
       <div className="flex min-h-0 flex-1 flex-col">
         {tab === 'chat' ? (
           <Suspense fallback={<TabFallback />}>
-            <ChatScreen chat={chat} bots={bots} onOpenRecharge={() => setRechargeOpen(true)} />
+            <ChatScreen
+              chat={chat}
+              bots={bots}
+              botsError={botsError}
+              onReloadBots={() => void reloadBots()}
+              onOpenRecharge={() => setRechargeOpen(true)}
+            />
           </Suspense>
         ) : null}
         {tab === 'tasks' ? (

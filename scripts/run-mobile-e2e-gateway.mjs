@@ -66,14 +66,15 @@ const paths = {
 fs.mkdirSync(paths.uploadsRoot, { recursive: true });
 
 /**
- * F-11 file-delivery mode (`GW_FIXTURE_FILE=1`): seeds a deterministic
- * "document" into the fixture workspace and appends file:// links to the
- * canned reply — exactly the shape a tenant bot produces after generating a
- * docx/pdf. The e2e spec (e2e/mobile/gateway.spec.ts) then proves the mobile
- * UI renders a clickable same-origin /files/{token} download link instead of
- * the dead container path.
+ * F-11 file delivery is enabled by default so the complete gateway matrix
+ * cannot be skipped accidentally. Set GW_FIXTURE_FILE=0 only for a deliberate
+ * no-file debugging run. The fixture seeds a deterministic document and
+ * appends file:// links to the canned reply — exactly the shape a tenant bot
+ * produces after generating a docx/pdf. The e2e spec then proves the mobile UI
+ * renders a clickable same-origin /files/{token} download link instead of the
+ * dead container path.
  */
-const GW_FILE_E2E = process.env.GW_FIXTURE_FILE === '1';
+const GW_FILE_E2E = process.env.GW_FIXTURE_FILE !== '0';
 const FIXTURE_FILE_NAME = 'gateway-e2e-report.docx';
 /** Mirror of the payload asserted in e2e/mobile/gateway.spec.ts. */
 const FIXTURE_FILE_BYTES = Buffer.from('PK\x03\x04 gateway fixture docx payload 0123456789abcdef');
@@ -88,6 +89,53 @@ const FIXTURE_REPLY =
   (GW_FILE_E2E
     ? `\n\n文件已生成：[${FIXTURE_FILE_NAME}](file://${path.join(paths.workspaceRoot, FIXTURE_FILE_NAME)})\n\n[工作目录](${paths.workspaceRoot})`
     : '');
+
+const metabots = [
+  {
+    id: 1,
+    wallet_id: 1,
+    name: 'Gateway Twin',
+    avatar: null,
+    enabled: true,
+    globalmetaid: 'gmid-gateway-twin',
+    metabot_type: 'twin',
+    role: 'chief of staff',
+    soul: 'Synthetic gateway twin',
+    goal: null,
+    bio: 'Twin fixture for real C2 mobile tests',
+    background: null,
+    boss_id: null,
+    boss_global_metaid: null,
+    llm_id: null,
+    tools: [],
+    skills: ['web-search'],
+    allow_chat_skills: [],
+    created_at: 1,
+    updated_at: 1,
+  },
+  {
+    id: 2,
+    wallet_id: 2,
+    name: 'Gateway Worker',
+    avatar: null,
+    enabled: true,
+    globalmetaid: 'gmid-gateway-worker',
+    metabot_type: 'worker',
+    role: 'research worker',
+    soul: 'Synthetic gateway worker',
+    goal: null,
+    bio: 'Worker fixture for real C2 mobile tests',
+    background: null,
+    boss_id: null,
+    boss_global_metaid: null,
+    llm_id: null,
+    tools: [],
+    skills: [],
+    allow_chat_skills: [],
+    created_at: 1,
+    updated_at: 1,
+  },
+];
 
 const sessions = new Map();
 const liveMessages = new Map(); // `${sessionId}${messageId}` -> message
@@ -131,6 +179,9 @@ function startFixtureTurn(session, userText) {
 
   const chunks = [];
   for (let i = 0; i < FIXTURE_REPLY.length; i += 8) chunks.push(FIXTURE_REPLY.slice(i, i + 8));
+  // Tests can slow the stream to exercise reload/reconnect recovery without
+  // changing the default 40 ms cadence used by the acceptance matrix.
+  const streamTokenIntervalMs = Number(process.env.GW_FIXTURE_STREAM_INTERVAL_MS ?? 40);
   const timers = [];
   let accumulated = '';
   chunks.forEach((chunk, index) => {
@@ -148,7 +199,7 @@ function startFixtureTurn(session, userText) {
             { sessionId: session.id, messageId: message.id, delta: chunk, baseLength: accumulated.length - chunk.length },
           ]);
         }
-      }, 40 * (index + 1)),
+      }, streamTokenIntervalMs * (index + 1)),
     );
   });
   timers.push(
@@ -156,7 +207,7 @@ function startFixtureTurn(session, userText) {
       if (session.status !== 'running') return;
       session.status = 'completed';
       broadcast('cowork:stream:complete', [{ sessionId: session.id, claudeSessionId: session.claudeSessionId }]);
-    }, 40 * (chunks.length + 1)),
+    }, streamTokenIntervalMs * (chunks.length + 1)),
   );
   sessionTimers.set(session.id, timers);
 }
@@ -170,6 +221,35 @@ async function invokeHandler(channel, clientId, args) {
     console.log(`[fixture] invoke ${channel} ${JSON.stringify(args)?.slice(0, 120)}`);
   }
   switch (channel) {
+    case 'cowork:session:createGreeting': {
+      const options = args[0] ?? {};
+      const now = Date.now();
+      const session = {
+        id: `gw-session-${++sessionSeq}`,
+        title: options.title || 'Welcome',
+        claudeSessionId: `claude-${sessionSeq}`,
+        status: 'completed',
+        pinned: false,
+        cwd: paths.workspaceRoot,
+        systemPrompt: options.systemPrompt || '',
+        executionMode: 'auto',
+        activeSkillIds: [],
+        messages: [{
+          id: `gw-msg-${++messageSeq}`,
+          type: 'assistant',
+          content: options.fallbackGreeting,
+          timestamp: now,
+          metadata: { isFinal: true },
+        }],
+        createdAt: now,
+        updatedAt: now,
+        metabotId: options.metabotId ?? null,
+        sessionType: 'standard',
+        autoOrigin: null,
+      };
+      sessions.set(session.id, session);
+      return { success: true, session: { ...session, messages: [...session.messages] } };
+    }
     case 'cowork:session:start': {
       const options = args[0] ?? {};
       const now = Date.now();
@@ -202,9 +282,16 @@ async function invokeHandler(channel, clientId, args) {
       const input = args[0] ?? {};
       const session = sessions.get(input.sessionId);
       if (!session) return { success: false, code: 'session_not_found', error: 'session not found' };
-      session.messages.push({ id: `gw-msg-${++messageSeq}`, type: 'user', content: input.text || '', timestamp: Date.now() });
+      const message = {
+        id: `gw-msg-${++messageSeq}`,
+        type: 'user',
+        content: input.text || '',
+        timestamp: Date.now(),
+        metadata: { submissionId: input.submissionId },
+      };
+      session.messages.push(message);
       startFixtureTurn(session, input.text || '');
-      return { success: true, mode: 'steer' };
+      return { success: true, mode: 'steer', message };
     }
     case 'cowork:session:get': {
       const session = sessions.get(args[0]);
@@ -265,7 +352,27 @@ async function invokeHandler(channel, clientId, args) {
     case 'app:getSystemLocale':
       return 'en-US';
     case 'metabot:list':
-      return { success: true, list: [] };
+      return { success: true, list: metabots.map((bot) => ({ ...bot })) };
+    case 'metabot:get': {
+      const bot = metabots.find((entry) => entry.id === args[0]);
+      return bot ? { success: true, metabot: { ...bot } } : { success: false, error: 'metabot not found' };
+    }
+    case 'cowork:getConfig':
+      return {
+        success: true,
+        config: {
+          workingDirectory: paths.workspaceRoot,
+          systemPrompt: '',
+          executionMode: 'local',
+          memoryEnabled: true,
+          memoryImplicitUpdateEnabled: true,
+          memoryLlmJudgeEnabled: false,
+          memoryGuardLevel: 'standard',
+          memoryUserMemoriesMaxItems: 100,
+          memoryPromptMaxChars: 4000,
+          lastWorkspaceSelection: null,
+        },
+      };
     case 'startup:rendererInitialized':
       return { success: true, elapsedMs: 0, startedAt: Date.now() };
     default:
@@ -393,7 +500,7 @@ async function main() {
 
     const run = spawn(
       process.execPath,
-      [playwrightCli, 'test', '--grep', '@gateway', ...process.argv.slice(2)],
+      [playwrightCli, 'test', '--grep', '@gateway', '--workers=1', ...process.argv.slice(2)],
       {
         cwd: repoRoot,
         env: { ...process.env, E2E_BASE_URL: BASE_URL, E2E_GATEWAY: '1' },

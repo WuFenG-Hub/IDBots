@@ -1,39 +1,40 @@
 import { useEffect, useRef, useState } from 'react';
-import type { CoworkSessionDetail, PendingPermissionRequest } from '../../bridge/types';
+import type { CoworkSession } from '@/types/cowork';
+import type {
+  CoworkResyncGuard,
+  CoworkResyncSnapshot,
+  PendingPermissionEntry,
+} from '@/services/coworkSessionController';
 import type { MockElectronAPI } from '../../bridge/types';
 import { getAppBridge, getMobileElectron, hasAppBridge } from '../appBridge';
 
-/**
- * Reconnect resync (REQ-E-5). On every gateway (re)connect the client may
- * have missed stream events, permission requests, or list mutations while the
- * socket was down, so the shell re-pulls the hot state in a fixed C2-ordered
- * sequence before bumping a counter the screens' hooks depend on:
- *
- *   1. `cowork.getSession` for the open session (rebuilds the transcript)
- *   2. `cowork.getStreamLiveContent` for any in-flight stream (heals the
- *      delta the reassembler may have desynced on)
- *   3. `mobile.listPendingPermissions` (surfaces a permission request that
- *      arrived while offline)
- *   4. bump `resyncCounter` → tasks/meters/me hooks refresh their lists
- *
- * The trigger differs per bridge: the real gateway fires `onReconnected` on
- * every successful connect (first included); the mock bridge's connection
- * bus only signals transitions back to `online`.
- */
+export type ResyncSnapshot = CoworkResyncSnapshot;
 
-export interface ResyncSnapshot {
-  /** Step 1: fresh detail of the open session, null when none is open. */
-  session: CoworkSessionDetail | null;
-  /** Step 2: live text of the in-flight stream, null when idle. */
-  liveContent: { sessionId: string; messageId: string; content: string } | null;
-  /** Step 3: permission requests still waiting for a decision. */
-  pendingPermissions: PendingPermissionRequest[];
-}
-
-/** Fresh (non-stale) chat context, supplied by the shell via useChat refs. */
 export interface ResyncContextSource {
   getOpenSessionId: () => string | null;
   getStreamingMessage: () => { sessionId: string; messageId: string } | null;
+  beginResync?: () => CoworkResyncGuard;
+}
+
+export function findResyncStream(
+  session: CoworkSession | null,
+  fallback: { sessionId: string; messageId: string } | null,
+): { sessionId: string; messageId: string } | null {
+  if (!session) return fallback;
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    const message = session.messages[index]!;
+    if (message.type === 'assistant' && message.metadata?.isStreaming) {
+      return { sessionId: session.id, messageId: message.id };
+    }
+  }
+  if (session.status !== 'running') return null;
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    const message = session.messages[index]!;
+    if (message.type === 'assistant' && !message.metadata?.isFinal) {
+      return { sessionId: session.id, messageId: message.id };
+    }
+  }
+  return fallback?.sessionId === session.id ? fallback : null;
 }
 
 /**
@@ -45,23 +46,22 @@ export async function performResync(
   electron: Pick<MockElectronAPI, 'cowork' | 'mobile'>,
   context: ResyncContextSource,
 ): Promise<ResyncSnapshot> {
-  // Step 1: open-session transcript.
-  let session: CoworkSessionDetail | null = null;
+  const guard = context.beginResync?.();
+  let session: CoworkSession | null = null;
   const sessionId = context.getOpenSessionId();
   if (sessionId) {
     try {
       const result = await electron.cowork.getSession(sessionId, { messageLimit: 200 });
       if (result?.success && result.session) {
-        session = result.session as CoworkSessionDetail;
+        session = result.session as CoworkSession;
       }
     } catch {
-      // Still offline or session gone: leave the current transcript as-is.
+      // Keep the current transcript while the connection is unavailable.
     }
   }
 
-  // Step 2: in-flight stream live content.
   let liveContent: ResyncSnapshot['liveContent'] = null;
-  const streaming = context.getStreamingMessage();
+  const streaming = findResyncStream(session, context.getStreamingMessage());
   if (streaming) {
     try {
       const live = await electron.cowork.getStreamLiveContent(streaming);
@@ -69,22 +69,21 @@ export async function performResync(
         liveContent = { ...streaming, content: live.content };
       }
     } catch {
-      // A missed live-content pull heals on the next stream event instead.
+      // The next stream event or reconnect retries this heal.
     }
   }
 
-  // Step 3: pending permission requests.
-  let pendingPermissions: PendingPermissionRequest[] = [];
+  let pendingPermissions: PendingPermissionEntry[] = [];
   try {
     const pending = await electron.mobile.listPendingPermissions();
     if (Array.isArray(pending)) {
-      pendingPermissions = pending as PendingPermissionRequest[];
+      pendingPermissions = pending as PendingPermissionEntry[];
     }
   } catch {
-    // Permission surfacing is best-effort; the next resync retries.
+    // Permission surfacing retries on the next reconnect.
   }
 
-  return { session, liveContent, pendingPermissions };
+  return { session, liveContent, pendingPermissions, ...(guard ? { guard } : {}) };
 }
 
 /**

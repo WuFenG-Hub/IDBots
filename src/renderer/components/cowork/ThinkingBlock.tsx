@@ -3,13 +3,8 @@ import { ChevronRightIcon, LightBulbIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { CoworkMessage } from '../../types/cowork';
 
-const OPEN_RE = /<think(?:ing)?>/i;
-const CLOSE_RE = /<\/think(?:ing)?>/i;
-
-export type SplitThinkTaggedContent = {
-  thinking: string;
-  text: string;
-};
+export { splitThinkTaggedContent } from '../../services/coworkAssistantText';
+export type { SplitThinkTaggedContent } from '../../services/coworkAssistantText';
 
 /**
  * Collapsed Think-row summary, matching DSH web `ReasoningRow`:
@@ -24,49 +19,6 @@ export function thinkingSummaryLine(text: string, running: boolean): string {
   }
   const newline = visible.indexOf('\n');
   return newline === -1 ? visible : visible.slice(0, newline);
-}
-
-/**
- * Split assistant text that embeds chain-of-thought in <think>/<thinking>
- * tags so the visible reply can reuse the Think row chrome.
- */
-export function splitThinkTaggedContent(input: string): SplitThinkTaggedContent {
-  if (!input) return { thinking: '', text: '' };
-  if (!OPEN_RE.test(input) && !CLOSE_RE.test(input)) {
-    return { thinking: '', text: input };
-  }
-
-  let thinking = '';
-  let text = '';
-  let remaining = input;
-  let inThink = false;
-
-  while (remaining.length > 0) {
-    if (inThink) {
-      const close = remaining.search(CLOSE_RE);
-      if (close === -1) {
-        thinking += remaining;
-        break;
-      }
-      thinking += remaining.slice(0, close);
-      const matched = remaining.slice(close).match(CLOSE_RE);
-      remaining = remaining.slice(close + (matched?.[0].length ?? 0));
-      inThink = false;
-      continue;
-    }
-
-    const open = remaining.search(OPEN_RE);
-    if (open === -1) {
-      text += remaining;
-      break;
-    }
-    text += remaining.slice(0, open);
-    const matched = remaining.slice(open).match(OPEN_RE);
-    remaining = remaining.slice(open + (matched?.[0].length ?? 0));
-    inThink = true;
-  }
-
-  return { thinking, text };
 }
 
 /**

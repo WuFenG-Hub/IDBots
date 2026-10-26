@@ -12,6 +12,8 @@ import { defineConfig, devices } from '@playwright/test';
  * explicit screenshot per screen via testInfo.attach.
  */
 
+const chromiumExecutablePath = process.env.E2E_CHROMIUM_EXECUTABLE_PATH;
+
 export default defineConfig({
   testDir: './e2e/mobile',
   timeout: 90_000,
@@ -33,7 +35,12 @@ export default defineConfig({
     },
     {
       name: 'pixel7',
-      use: { ...devices['Pixel 7'] },
+      use: {
+        ...devices['Pixel 7'],
+        ...(chromiumExecutablePath
+          ? { launchOptions: { executablePath: chromiumExecutablePath } }
+          : {}),
+      },
     },
   ],
 });

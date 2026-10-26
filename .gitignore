@@ -625,6 +625,11 @@ man_base_data_pebble/
 !tests/coworkStreamFlushCoalescing.test.mjs
 !tests/coworkStreamGapHeal.test.mjs
 !tests/coworkConversationTurnReuse.test.mjs
+!tests/coworkConversationProjection.test.ts
+!tests/coworkSessionState.test.ts
+!tests/coworkSessionController.test.ts
+!tests/coworkSessionStart.test.ts
+!tests/mobileChatProjection.test.ts
 !tests/coworkCompactedNotice.test.tsx
 !tests/sessionListRenderBudget.test.mjs
 !tests/sessionListRevealBudget.test.ts
@@ -709,6 +714,8 @@ deploy/hosts/prometheus.yml
 
 # WS-E login API seam tests
 !tests/mobileLoginApi.test.ts
+!tests/mobileLoginApiReal.test.ts
+!tests/mobileI18nMockNotice.test.ts
 
 # WS-E login in-app browser detection tests
 !tests/mobileInAppBrowser.test.ts
@@ -722,6 +729,7 @@ deploy/hosts/prometheus.yml
 
 # WS-E T3 integration slice: reconnect resync (REQ-E-5) tests
 !tests/mobileResync.test.ts
+!tests/mobileTwinRuntimeContext.test.mjs
 
 # REQ-E-15 recharge expiry unit guard (contract 01 expiresAt is seconds)
 !tests/mobileRechargeExpire.test.ts

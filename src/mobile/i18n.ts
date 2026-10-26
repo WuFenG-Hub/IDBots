@@ -15,6 +15,30 @@ export type MobileLanguage = 'zh' | 'en';
 
 type MobileDictionary = Record<string, string>;
 
+/**
+ * Login-demo mock switch, mirroring loginApi.ts: `true` only with
+ * `VITE_MOBILE_MOCK=1` outside production builds. `import.meta.env.PROD`
+ * folds production copy away; the process fallback supports node tests, and
+ * `typeof process` guards keep real Vite dev-server execution safe in the
+ * browser where no Node global exists.
+ */
+const IS_PRODUCTION_BUILD =
+  (import.meta as { env?: { PROD?: boolean } }).env?.PROD ??
+  (typeof process !== 'undefined' && process.env.NODE_ENV === 'production');
+const MOCK_LOGIN_API =
+  !IS_PRODUCTION_BUILD &&
+  ((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_MOBILE_MOCK === '1' ||
+    (typeof process !== 'undefined' && process.env.VITE_MOBILE_MOCK === '1'));
+
+/**
+ * Demo notice values (mobile.login.demoNote). Defined as constants so
+ * mobileI18nStatic's dictionary parser can verify the referenced copy is
+ * non-empty for the mock mode, while a production build folds
+ * `MOCK_LOGIN_API ? copy : ''` to `''` and never ships the notice string.
+ */
+const DEMO_NOTE_ZH = MOCK_LOGIN_API ? '演示环境：登录接口为 mock。' : '';
+const DEMO_NOTE_EN = MOCK_LOGIN_API ? 'Demo build: the login API is mocked.' : '';
+
 const zhTranslations: MobileDictionary = {
   'mobile.common.loading': '加载中…',
   'mobile.common.error': '出了点问题',
@@ -47,6 +71,8 @@ const zhTranslations: MobileDictionary = {
   'mobile.chat.streaming': '正在生成…',
   'mobile.chat.emptyTitle': '开始对话',
   'mobile.chat.emptyBody': '给 Bot 发一条消息；试试包含 permission 或 quota 的内容。',
+  'mobile.chat.greetingTitle': '欢迎',
+  'mobile.chat.greetingFallback': '你好，我是你的 Twin Bot。告诉我你想完成什么，我会澄清需求、推进任务并交付结果。',
   'mobile.chat.permissionTitle': '工具权限请求',
   'mobile.chat.permissionTool': '工具：{name}',
   'mobile.chat.permissionApprove': '允许',
@@ -63,6 +89,38 @@ const zhTranslations: MobileDictionary = {
   'mobile.chat.quotaBodyPurchased': '充值后即可继续与 Bot 对话。',
   'mobile.chat.quotaRecharge': '去充值',
   'mobile.chat.quotaDismiss': '关闭',
+  'mobile.chat.emptyMessage': '消息不能为空',
+  'mobile.chat.twinUnavailable': 'Twin Bot 尚未准备好，请稍后重试。',
+  'mobile.chat.rosterUnavailable': '暂时无法加载你的 Bot 列表。请重试；不会创建未绑定的会话。',
+  'mobile.chat.permissionUnavailable': '该请求已处理或不存在。',
+  'mobile.chat.actionRequired': '{count} 个请求等待你处理',
+  'mobile.chat.loadEarlier': '加载更早的消息',
+  'mobile.chat.reconcile': '核对状态',
+  'mobile.chat.discard': '丢弃此尝试',
+  'mobile.chat.submission.sending': '正在发送并等待云端确认…',
+  'mobile.chat.submission.failed': '发送失败。草稿已保留，你可以核对或重试。',
+  'mobile.chat.submission.uncertain': '发送结果未知。请先核对云端状态，避免重复执行。',
+  'mobile.chat.phase.idle': '空闲',
+  'mobile.chat.phase.starting': '正在创建会话…',
+  'mobile.chat.phase.running': 'Twin 正在工作…',
+  'mobile.chat.phase.waiting_permission': '等待你处理请求…',
+  'mobile.chat.phase.steering': '正在发送补充指令…',
+  'mobile.chat.phase.stopping': '正在停止…',
+  'mobile.chat.phase.completed': '已完成',
+  'mobile.chat.phase.error': '本轮执行失败',
+  'mobile.chat.phase.cancelled': '已停止',
+  'mobile.chat.phase.offline_unknown': '连接中断，云端状态待确认',
+  'mobile.chat.diagnostic.compaction': '已压缩较早的上下文，当前任务会继续。',
+  'mobile.chat.diagnostic.compactBoundary': '已到上下文压缩边界。',
+  'mobile.chat.diagnostic.permissionDenied': '工具权限已被拒绝。',
+  'mobile.chat.diagnostic.rateLimit': '模型服务触发限流，请稍后重试。',
+  'mobile.chat.diagnostic.conversationReset': '模型会话已重置，请核对后重试。',
+  'mobile.chat.diagnostic.emptyTerminal': '本轮没有生成可展示的回答。请让 Twin 继续或重试。',
+  'mobile.chat.diagnostic.replyTruncated': '回答被截断，请让 Twin 继续。',
+  'mobile.chat.diagnostic.turnStalled': '本轮执行停滞，已停止等待。请重试。',
+  'mobile.chat.diagnostic.turnInterrupted': '本轮执行已中断。',
+  'mobile.chat.diagnostic.steerInterrupted': '已中断当前执行并转入你的补充指令。',
+  'mobile.chat.diagnostic.routeFallback': '模型路由已切换，任务将继续使用可用通道。',
   'mobile.tasks.title': '定时任务',
   'mobile.tasks.empty': '还没有任务',
   'mobile.tasks.create': '新建任务',
@@ -186,7 +244,7 @@ const zhTranslations: MobileDictionary = {
   'mobile.login.verified': '登录成功，正在准备你的 Bot（{status}）',
   'mobile.login.invalidPhone': '手机号格式不正确',
   'mobile.login.invalidCode': '验证码不正确，请重试',
-  'mobile.login.demoNote': '演示环境：登录接口为 mock。',
+  'mobile.login.demoNote': DEMO_NOTE_ZH,
   'mobile.login.resendIn': '重新发送验证码（{sec} 秒）',
   'mobile.login.invitePlaceholder': '邀请码',
   'mobile.login.inviteRequired': '注册需要邀请码。请输入邀请码后重试。',
@@ -264,6 +322,8 @@ const enTranslations: MobileDictionary = {
   'mobile.chat.streaming': 'Generating…',
   'mobile.chat.emptyTitle': 'Start a conversation',
   'mobile.chat.emptyBody': 'Send your Bot a message; try one containing permission or quota.',
+  'mobile.chat.greetingTitle': 'Welcome',
+  'mobile.chat.greetingFallback': 'Hi, I’m your Twin Bot. Tell me what you want to accomplish, and I’ll clarify, carry out the work, and deliver the result.',
   'mobile.chat.permissionTitle': 'Tool permission requested',
   'mobile.chat.permissionTool': 'Tool: {name}',
   'mobile.chat.permissionApprove': 'Approve',
@@ -280,6 +340,38 @@ const enTranslations: MobileDictionary = {
   'mobile.chat.quotaBodyPurchased': 'Recharge to keep chatting with your Bot.',
   'mobile.chat.quotaRecharge': 'Recharge',
   'mobile.chat.quotaDismiss': 'Dismiss',
+  'mobile.chat.emptyMessage': 'Message cannot be empty',
+  'mobile.chat.twinUnavailable': 'Your Twin Bot is not ready yet. Please try again shortly.',
+  'mobile.chat.rosterUnavailable': 'Your Bot list could not be loaded. Retry; no unbound session will be started.',
+  'mobile.chat.permissionUnavailable': 'This request was already resolved or no longer exists.',
+  'mobile.chat.actionRequired': '{count} requests need your attention',
+  'mobile.chat.loadEarlier': 'Load earlier messages',
+  'mobile.chat.reconcile': 'Check status',
+  'mobile.chat.discard': 'Discard attempt',
+  'mobile.chat.submission.sending': 'Sending and waiting for tenant confirmation…',
+  'mobile.chat.submission.failed': 'Sending failed. Your draft is preserved; check status or retry.',
+  'mobile.chat.submission.uncertain': 'The outcome is unknown. Check the tenant state before retrying to avoid duplicate work.',
+  'mobile.chat.phase.idle': 'Idle',
+  'mobile.chat.phase.starting': 'Starting the session…',
+  'mobile.chat.phase.running': 'Your Twin is working…',
+  'mobile.chat.phase.waiting_permission': 'Waiting for your response…',
+  'mobile.chat.phase.steering': 'Sending your follow-up…',
+  'mobile.chat.phase.stopping': 'Stopping…',
+  'mobile.chat.phase.completed': 'Completed',
+  'mobile.chat.phase.error': 'This turn failed',
+  'mobile.chat.phase.cancelled': 'Stopped',
+  'mobile.chat.phase.offline_unknown': 'Disconnected; tenant state needs confirmation',
+  'mobile.chat.diagnostic.compaction': 'Earlier context was compacted; the current work continues.',
+  'mobile.chat.diagnostic.compactBoundary': 'The conversation reached a context-compaction boundary.',
+  'mobile.chat.diagnostic.permissionDenied': 'Tool permission was denied.',
+  'mobile.chat.diagnostic.rateLimit': 'The model provider rate-limited this turn. Please retry shortly.',
+  'mobile.chat.diagnostic.conversationReset': 'The model conversation was reset. Review and try again.',
+  'mobile.chat.diagnostic.emptyTerminal': 'This turn produced no visible answer. Ask your Twin to continue or retry.',
+  'mobile.chat.diagnostic.replyTruncated': 'The answer was truncated. Ask your Twin to continue.',
+  'mobile.chat.diagnostic.turnStalled': 'This turn stalled and stopped waiting. Please retry.',
+  'mobile.chat.diagnostic.turnInterrupted': 'This turn was interrupted.',
+  'mobile.chat.diagnostic.steerInterrupted': 'The current turn was interrupted and is continuing with your follow-up.',
+  'mobile.chat.diagnostic.routeFallback': 'The model route changed; work continues through an available provider.',
   'mobile.tasks.title': 'Scheduled tasks',
   'mobile.tasks.empty': 'No tasks yet',
   'mobile.tasks.create': 'New task',
@@ -403,7 +495,7 @@ const enTranslations: MobileDictionary = {
   'mobile.login.verified': 'Signed in; preparing your Bot ({status})',
   'mobile.login.invalidPhone': 'Invalid phone number',
   'mobile.login.invalidCode': 'Invalid code, please try again',
-  'mobile.login.demoNote': 'Demo build: the login API is mocked.',
+  'mobile.login.demoNote': DEMO_NOTE_EN,
   'mobile.login.resendIn': 'Resend code ({sec}s)',
   'mobile.login.invitePlaceholder': 'Invite code',
   'mobile.login.inviteRequired': 'An invite code is required to sign up. Enter one and try again.',
@@ -485,10 +577,13 @@ class MobileI18nService {
 
   t(key: string, params?: Record<string, string | number>): string {
     let translation = dictionaries[this.currentLanguage][key];
-    if (!translation) {
+    if (translation === undefined) {
+      // Missing key (e.g. the deleted demo notice outside VITE_MOBILE_MOCK
+      // builds): warn loudly for development, but render nothing — falling
+      // back to the key name would leak an internal identifier into the UI.
       console.warn(`[mobile-i18n] missing key: ${key} (${this.currentLanguage})`);
       translation = dictionaries.en[key];
-      if (!translation) return key;
+      if (translation === undefined) return '';
     }
     if (params) {
       translation = translation.replace(/\{(\w+)\}/g, (match, name: string) =>

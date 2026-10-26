@@ -343,6 +343,10 @@ const POST_FREEZE_INVOKE: Record<string, AllowlistEntry> = {
   'preference:commit': { tier: 'N', note: 'Not in `02` v1.0.0 (preload addition of 2026-10-14); denied by `02` default-deny pending a change request.' },
   'preference:telemetry': { tier: 'N', note: 'Not in `02` v1.0.0 (preload addition of 2026-10-14); denied by `02` default-deny pending a change request.' },
   'preference:refresh': { tier: 'N', note: 'Not in `02` v1.0.0 (preload addition of 2026-10-14); denied by `02` default-deny pending a change request.' },
+  'standingPages:create': { tier: 'N', note: 'Not in `02` v1.0.0; denied by `02` default-deny pending a change request.' },
+  'standingPages:list': { tier: 'N', note: 'Not in `02` v1.0.0; denied by `02` default-deny pending a change request.' },
+  'standingPages:remove': { tier: 'N', note: 'Not in `02` v1.0.0; denied by `02` default-deny pending a change request.' },
+  'standingPages:restore': { tier: 'N', note: 'Not in `02` v1.0.0; denied by `02` default-deny pending a change request.' },
 };
 
 export const INVOKE_ALLOWLIST: Record<string, AllowlistEntry> = {
