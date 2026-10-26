@@ -233,11 +233,14 @@ export class CoworkSessionController {
     }
   }
 
-  private savedOpenSession(): string | null {
+  private savedOpenSession(): { id: string | null; explicitNew: boolean } {
     try {
-      return this.storage?.getItem(MOBILE_OPEN_SESSION_STORAGE_KEY)?.trim() || null;
+      const raw = this.storage?.getItem(MOBILE_OPEN_SESSION_STORAGE_KEY);
+      if (raw === null || raw === undefined) return { id: null, explicitNew: false };
+      const id = raw.trim();
+      return { id: id || null, explicitNew: id.length === 0 };
     } catch {
-      return null;
+      return { id: null, explicitNew: false };
     }
   }
 
@@ -430,8 +433,12 @@ export class CoworkSessionController {
       await this.reloadSessions();
       if (this.destroyed || generation !== this.generation) return;
       const saved = this.savedOpenSession();
-      let restored = saved ? await this.openSession(saved) : false;
-      if (!restored && saved) this.newChat();
+      if (saved.explicitNew) {
+        await this.refreshPendingPermissions();
+        return;
+      }
+      let restored = saved.id ? await this.openSession(saved.id) : false;
+      if (!restored && saved.id) this.newChat();
       if (!restored) {
         const target = this.sessions
           .filter((session) => (
@@ -482,6 +489,12 @@ export class CoworkSessionController {
       if (this.currentSessionId === null && generation === this.generation) {
         this.generation += 1;
         this.currentSessionId = session.id;
+        if (this.drafts.new) {
+          const drafts = { ...this.drafts, [session.id]: this.drafts.new };
+          delete drafts.new;
+          this.drafts = drafts;
+          this.persistDrafts();
+        }
         this.persistOpenSession();
       }
       this.publish();

@@ -26,6 +26,18 @@ const TasksScreen = lazy(() => import('./screens/TasksScreen'));
 const MeScreen = lazy(() => import('./screens/MeScreen'));
 const RechargeScreen = lazy(() => import('./screens/RechargeScreen'));
 
+const ACTIVE_TAB_STORAGE_KEY = 'idbots.mobile.activeTab.v1';
+const MOBILE_TABS: readonly MobileTab[] = ['chat', 'tasks', 'me'];
+
+function readActiveTab(): MobileTab {
+  try {
+    const saved = window.localStorage.getItem(ACTIVE_TAB_STORAGE_KEY);
+    return MOBILE_TABS.includes(saved as MobileTab) ? saved as MobileTab : 'chat';
+  } catch {
+    return 'chat';
+  }
+}
+
 function TabFallback(): JSX.Element {
   return (
     <div className="flex flex-1 items-center justify-center py-16 text-sm text-[var(--text-secondary)]">
@@ -35,8 +47,15 @@ function TabFallback(): JSX.Element {
 }
 
 export default function MobileApp(): JSX.Element {
-  const [tab, setTab] = useState<MobileTab>('chat');
+  const [tab, setTab] = useState<MobileTab>(readActiveTab);
   const [rechargeOpen, setRechargeOpen] = useState(false);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, tab);
+    } catch {
+      return;
+    }
+  }, [tab]);
   // Chat state lives at the shell level so switching tabs keeps the stream.
   const { bots, error: botsError, reload: reloadBots } = useMetabots();
   const chat = useChat(bots);

@@ -40,4 +40,18 @@ test.describe('app shell', () => {
     await expect(banner).toHaveAttribute('data-connection-state', 'online', { timeout: 15_000 });
     await attachScreen(testInfo, page, 'shell-back-online');
   });
+
+  test('restores the active tab and unsent draft after reload', async ({ page }) => {
+    await page.goto('/app/');
+    await page.getByRole('button', { name: 'Tasks' }).click();
+    await expect(page.getByText('Scheduled tasks').first()).toBeVisible();
+    await page.reload();
+    await expect(page.getByText('Scheduled tasks').first()).toBeVisible();
+    await page.getByRole('button', { name: 'Chat' }).click();
+    await page.getByRole('button', { name: 'Sessions' }).click();
+    await page.getByRole('button', { name: 'New chat' }).click();
+    await page.getByPlaceholder('Type a message…').fill('unsent recovery draft');
+    await page.reload();
+    await expect(page.getByPlaceholder('Type a message…')).toHaveValue('unsent recovery draft');
+  });
 });

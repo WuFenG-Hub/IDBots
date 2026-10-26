@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type {
   CoworkMessage,
+  CoworkMessagePage,
   CoworkPermissionResult,
   CoworkSession,
   CoworkSessionStatus,
@@ -10,6 +11,7 @@ import type {
 } from '../src/renderer/types/cowork';
 import {
   CoworkSessionController,
+  MOBILE_DRAFTS_STORAGE_KEY,
   MOBILE_OPEN_SESSION_STORAGE_KEY,
   type CoworkRecoveryStorage,
   type PendingPermissionEntry,
@@ -59,6 +61,7 @@ function makeHarness() {
     pending: [] as PendingPermissionEntry[],
     submitHandler: null as ((input: CoworkSubmitInput) => Promise<unknown>) | null,
     getSessionHandler: null as (() => Promise<unknown>) | null,
+    historyPage: null as CoworkMessagePage | null,
     get session() { return current; },
     set session(value: CoworkSession) { current = value; },
     emit(name: string, payload: unknown) { listeners.get(name)?.(payload); },
@@ -111,7 +114,7 @@ function makeHarness() {
       }),
       getSessionMessagesPage: async () => ({
         success: true,
-        page: { messages: [], hasMoreBefore: false, beforeSequence: null },
+        page: harness.historyPage ?? { messages: [], hasMoreBefore: false, beforeSequence: null },
       }),
       getStreamLiveContent: async ({ messageId }: { messageId: string }) => ({
         success: true,
@@ -291,6 +294,7 @@ describe('cowork session controller', () => {
     const controller = controllerFor(electron);
     t.after(() => controller.destroy());
 
+    controller.setDraft('greeting draft');
     await controller.restore(1, { title: 'Welcome', fallbackGreeting: 'Hello from Twin' });
     const snapshot = controller.getSnapshot();
     assert.equal(snapshot.currentSessionId, 'greeting');
@@ -298,5 +302,65 @@ describe('cowork session controller', () => {
     assert.equal(snapshot.states.get('greeting')?.title, 'Welcome');
     assert.equal(snapshot.states.get('greeting')?.messages[0]?.content, 'Hello from Twin');
     assert.equal(snapshot.restoring, false);
+    assert.equal(controller.getDraft(), 'greeting draft');
+    assert.equal(snapshot.drafts.new, undefined);
+  });
+
+  it('restores an explicit new composer instead of opening an older session', async (t) => {
+    const { harness, electron } = makeHarness();
+    const values = new Map<string, string>([
+      [MOBILE_OPEN_SESSION_STORAGE_KEY, ''],
+      [MOBILE_DRAFTS_STORAGE_KEY, JSON.stringify({ new: 'unsent new-chat draft' })],
+    ]);
+    const storage: CoworkRecoveryStorage = {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => { values.set(key, value); },
+    };
+    const controller = controllerFor(electron, storage);
+    t.after(() => controller.destroy());
+
+    await controller.restore(1, { title: 'Welcome', fallbackGreeting: 'Hello from Twin' });
+    assert.equal(controller.getSnapshot().currentSessionId, null);
+    assert.equal(controller.getDraft(), 'unsent new-chat draft');
+    assert.equal(controller.getSnapshot().restoring, false);
+  });
+
+  it('keeps earlier history pages in order through pagination and later snapshots', async (t) => {
+    const { harness, electron } = makeHarness();
+    harness.session = session('s1', 'running', [{ ...message('latest', 'assistant', 'latest'), sequence: 5 }]);
+    harness.session.messageHistory = {
+      hasMoreBefore: true,
+      beforeSequence: 5,
+      beforeTranscriptCursor: 'cursor-5',
+      pageSize: 1,
+    };
+    harness.historyPage = {
+      messages: [{ ...message('older', 'assistant', 'older'), sequence: 4 }],
+      hasMoreBefore: false,
+      beforeSequence: 4,
+      beforeTranscriptCursor: 'cursor-4',
+    };
+    const controller = controllerFor(electron);
+    t.after(() => controller.destroy());
+    await controller.openSession('s1');
+    assert.equal(await controller.loadEarlierMessages(), true);
+    assert.deepEqual(
+      controller.getSnapshot().states.get('s1')?.messages.map((entry) => entry.id),
+      ['older', 'latest'],
+    );
+
+    harness.session.messages = [{ ...message('latest', 'assistant', 'latest'), sequence: 5 }];
+    harness.session.messageHistory = {
+      hasMoreBefore: false,
+      beforeSequence: 4,
+      beforeTranscriptCursor: 'cursor-4',
+      pageSize: 1,
+    };
+    await controller.refreshSession('s1');
+    assert.deepEqual(
+      controller.getSnapshot().states.get('s1')?.messages.map((entry) => entry.id),
+      ['older', 'latest'],
+    );
+    assert.equal(controller.getSnapshot().states.get('s1')?.messageHistory?.hasMoreBefore, false);
   });
 });

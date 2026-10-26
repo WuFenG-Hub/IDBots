@@ -115,6 +115,13 @@ export function mergeCoworkSnapshotMessages(
 ): CoworkMessage[] {
   const existingById = new Map(existing.map((message) => [message.id, message]));
   const incomingIds = new Set(incoming.map((message) => message.id));
+  let firstIncomingSequence: number | null = null;
+  for (const message of incoming) {
+    const sequence = messageSequence(message);
+    if (sequence !== null && (firstIncomingSequence === null || sequence < firstIncomingSequence)) {
+      firstIncomingSequence = sequence;
+    }
+  }
   const baseRevisions = options.baseMessageRevisions ?? {};
   const isNewerLiveMessage = (id: string): boolean => (
     (messageRevisions[id] ?? 0) > (baseRevisions[id] ?? 0)
@@ -135,7 +142,9 @@ export function mergeCoworkSnapshotMessages(
     const isLocal = message.id.startsWith('local-');
     const isLive = isNewerLiveMessage(message.id)
       || (options.baseMessageRevisions === undefined && message.metadata?.isStreaming === true);
-    if (options.preserveMissingMessages && !isLocal && !isLive) retainedEarlier.push(message);
+    const sequence = messageSequence(message);
+    const isEarlierHistory = sequence !== null && firstIncomingSequence !== null && sequence < firstIncomingSequence;
+    if ((options.preserveMissingMessages || isEarlierHistory) && !isLocal && !isLive) retainedEarlier.push(message);
     else if (isLocal || isLive) retainedTail.push(message);
   }
   return [...retainedEarlier, ...merged, ...retainedTail];

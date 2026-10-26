@@ -17,4 +17,18 @@ test.describe('WP1 gateway regressions', () => {
     await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible({ timeout: 2000 });
   });
 
+  test('active tab and unsent draft survive a real-gateway reload @gateway', async ({ page }) => {
+    await page.goto('/app/');
+    await page.getByRole('button', { name: 'Tasks' }).click();
+    await expect(page.getByText('Scheduled tasks').first()).toBeVisible();
+    await page.reload();
+    await expect(page.getByText('Scheduled tasks').first()).toBeVisible();
+    await page.getByRole('button', { name: 'Chat' }).click();
+    await page.getByRole('button', { name: 'Sessions' }).click();
+    await page.getByRole('button', { name: 'New chat' }).click();
+    await page.getByPlaceholder('Type a message…').fill('unsent gateway draft');
+    await page.reload();
+    await expect(page.getByPlaceholder('Type a message…')).toHaveValue('unsent gateway draft');
+  });
+
 });
