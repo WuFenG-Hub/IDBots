@@ -18,14 +18,21 @@ import {
   DAILY_REPORT_MAX_FACTS_JSON_BYTES,
   DAILY_REPORT_MAX_HUMAN_SESSIONS,
   DAILY_REPORT_MAX_PENDING_FOLLOW_UPS,
+  chainKindFromPath,
   computeDailyReportHasAnyActivity,
   computeDailyReportWindow,
   capDailyReportText,
   collectDailyReportFacts,
   enforceDailyReportFactsCap,
+  shapeBotSessionsForBot,
+  shapeChainInteractionFacts,
+  shapeExternalChatFacts,
+  shapeHourlyActivity,
   shapeHumanSessionRows,
   shapeOwnerOrchestrationRows,
   shapePendingFollowUpRows,
+  shapeUpcomingFires,
+  stripDailyReportSessionTitlePrefix,
 } from '../src/main/services/dailyReportCollector.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -127,8 +134,8 @@ test('shapeHumanSessionRows: excerpts capped, assistant + user kept separate', (
   const excerpts = new Map([{ assistant: 'A'.repeat(2000), user: 'U'.repeat(800) }].map((e) => ['s1', e]));
   const shaped = shapeHumanSessionRows(rows, excerpts);
   assert.equal(shaped.length, 1);
-  assert.equal(shaped[0].lastAssistantExcerpt.length, 1500);
-  assert.equal(shaped[0].lastUserExcerpt.length, 500);
+  assert.equal(shaped[0].lastAssistantExcerpt.length, 600);
+  assert.equal(shaped[0].lastUserExcerpt.length, 300);
   assert.equal(shaped[0].humanUserMessages, 3);
   assert.equal(shaped[0].assistantMessages, 9);
 });
@@ -195,6 +202,10 @@ test('enforceDailyReportFactsCap: shrinks digests then excerpts to fit the budge
       summaryText: 'd'.repeat(1200),
     })),
     onlineActivity: [],
+    botActivity: [],
+    upcoming: { scheduledFires: [], scheduledFiresTotal: 0, openOrchestrations: [], openOrchestrationByStatus: {} },
+    hourlyActivity: { local: new Array(12).fill(0), online: new Array(12).fill(0) },
+    knownBotCount: 0,
     newSessionCount: 0,
     hasAnyActivity: true,
   };
@@ -231,6 +242,44 @@ test('collectDailyReportFacts: full pass over a fake db; broken buckets fail sof
       }
       if (sql.includes("m.type = 'assistant'")) return [{ content: 'assistant says hi' }];
       if (sql.includes("m.type = 'user'")) return [{ content: 'user asked' }];
+      // v2 botActivity: per-bot sessions (all types) with in-window counts.
+      if (sql.includes('s.metabot_id IS NOT NULL')) {
+        return [
+          { metabot_id: 7, bot_name: 'W', session_id: 'bs1', session_title: '[编排任务] Deep work', session_type: 'standard', message_count: 10 },
+          { metabot_id: 7, bot_name: 'W', session_id: 'bs2', session_title: 'Chit chat', session_type: 'a2a', message_count: 2 },
+        ];
+      }
+      // v2 external DM peers (matched BEFORE the generic private-chat query).
+      if (sql.includes('peer_global')) {
+        return [{ metabot_id: 7, bot_name: 'W', bot_global: 'g-w', peer_global: 'g-peer', peer_name: 'BOT-007', message_count: 6 }];
+      }
+      if (sql.includes('m.to_global_metaid = ?')) return [{ content: 'peer chat excerpt' }];
+      // v2 OpenTeam participation.
+      if (sql.includes('FROM openteam_memberships')) {
+        return [{ metabot_id: 7, bot_name: 'W', task_title: 'Remote jam', member_status: 'active', group_id: 'grp-1', joined_in_window: 1, status_in_window: 0 }];
+      }
+      if (sql.includes('g.group_id = ?')) return [{ cnt: 2 }];
+      // v2 chain interactions.
+      if (sql.includes('w.metabot_id = ? AND w.path')) return [{ summary: 'liked a pin' }];
+      if (sql.includes('FROM metabot_chain_writes')) {
+        return [{ metabot_id: 7, bot_name: 'W', path: '/protocols/paylike', cnt: 9 }];
+      }
+      // v2 hourly buckets.
+      if (sql.includes('Datetime(m.created_at/1000')) return [{ h: 9, cnt: 4 }];
+      if (sql.includes("strftime('%H', m.created_at, 'localtime')")) return [{ h: 1, cnt: 3 }];
+      if (sql.includes('SELECT s.id FROM cowork_sessions s')) return [{ id: 'bs1' }];
+      // v2 upcoming.
+      if (sql.includes('next_run_at_ms')) {
+        return [
+          { next_run_at_ms: nowMs + 3600e3, name: 'Server patrol', bot_name: 'W' },
+          { next_run_at_ms: nowMs + 7200e3, name: 'Digest', bot_name: null },
+        ];
+      }
+      if (sql.includes('GROUP BY o.status')) return [{ status: 'review', cnt: 2 }];
+      if (sql.includes("o.status IN ('planning','running','review')")) {
+        return [{ owner_intent: 'Fix mobile login', status: 'review' }];
+      }
+      if (sql.includes('COUNT(*) AS cnt FROM metabots')) return [{ cnt: 4 }];
       if (sql.includes('FROM scheduled_task_runs')) {
         return [{ task_name: 'Nightly inspect', bot_name: 'W', status: 'success', skip_reason: null, started_at: new Date(nowMs - 3600e3).toISOString(), error: null }];
       }
@@ -260,6 +309,32 @@ test('collectDailyReportFacts: full pass over a fake db; broken buckets fail sof
   assert.equal(facts.onlineActivity.length, 1);
   assert.equal(facts.onlineActivity[0].privateMessageCount, 5);
   assert.equal(facts.newSessionCount, 3);
+  // v2 buckets.
+  assert.equal(facts.botActivity.length, 1);
+  const bot = facts.botActivity[0];
+  assert.equal(bot.botName, 'W');
+  assert.equal(bot.isTwin, true, 'twinId 7 → isTwin');
+  assert.equal(bot.totalSessions, 2);
+  assert.equal(bot.totalMessages, 12);
+  assert.equal(bot.sessions.length, 2);
+  assert.equal(bot.sessions[0].title, '[编排任务] Deep work', 'sessions sorted by volume');
+  assert.equal(bot.sessions[0].lastAssistantExcerpt, 'assistant says hi');
+  assert.equal(bot.scheduledRunCount, 1);
+  assert.deepEqual(bot.scheduledRuns, [{ taskName: 'Nightly inspect', status: 'success' }]);
+  assert.equal(bot.externalChats.length, 1);
+  assert.equal(bot.externalChats[0].peerName, 'BOT-007');
+  assert.equal(bot.externalChats[0].lastExcerpt, 'peer chat excerpt');
+  assert.deepEqual(bot.openTeam, [{ taskTitle: 'Remote jam', memberStatus: 'active', windowMessageCount: 2 }]);
+  assert.deepEqual(bot.chainInteractions, [{ kind: 'paylike', count: 9, lastSummary: 'liked a pin' }]);
+  assert.equal(bot.groupMessages, 2, 'merged from onlineActivity');
+  assert.equal(facts.upcoming.scheduledFiresTotal, 2);
+  assert.equal(facts.upcoming.scheduledFires[0].taskName, 'Server patrol');
+  assert.match(facts.upcoming.scheduledFires[0].fireAtLocal, /^\d{2}:\d{2}$/);
+  assert.deepEqual(facts.upcoming.openOrchestrationByStatus, { review: 2 });
+  assert.equal(facts.upcoming.openOrchestrations.length, 1);
+  assert.equal(facts.knownBotCount, 4);
+  assert.equal(facts.hourlyActivity.local.reduce((sum, n) => sum + n, 0), 4);
+  assert.equal(facts.hourlyActivity.online.reduce((sum, n) => sum + n, 0), 6, 'private + group online tables');
   assert.equal(facts.hasAnyActivity, true);
   assert.ok(
     Buffer.byteLength(JSON.stringify(facts), 'utf8') <= DAILY_REPORT_MAX_FACTS_JSON_BYTES,
@@ -281,4 +356,79 @@ test('collectDailyReportFacts: zero activity window sets hasAnyActivity false', 
   const facts = collectDailyReportFacts({ db: emptyDb, windowStartMs: nowMs - DAY_MS, windowEndMs: nowMs, twinId: 1 });
   assert.equal(facts.hasAnyActivity, false);
   assert.equal(facts.newSessionCount, 0);
+});
+
+// ---------------------------------------------------------------------------
+// v2 shaping: per-bot activity / upcoming / hourly
+// ---------------------------------------------------------------------------
+
+test('stripDailyReportSessionTitlePrefix: folds host-generated prefixes only', () => {
+  assert.equal(stripDailyReportSessionTitlePrefix('[编排任务] MetaWeb Surf'), 'MetaWeb Surf');
+  assert.equal(stripDailyReportSessionTitlePrefix('[定时] Patrol'), 'Patrol');
+  assert.equal(stripDailyReportSessionTitlePrefix('[Orchestration Task] Build'), 'Build');
+  assert.equal(stripDailyReportSessionTitlePrefix('[私聊] keep'), '[私聊] keep', 'non-generated prefixes stay');
+});
+
+test('shapeBotSessionsForBot: totals over all rows, top-N narrated with capped excerpts', () => {
+  const rows = [
+    { session_id: 'a', session_title: 'Big', session_type: 'standard', message_count: 10 },
+    { session_id: 'b', session_title: 'Small', session_type: 'a2a', message_count: 2 },
+    { session_id: 'c', session_title: 'Mid', session_type: 'browser', message_count: 5 },
+  ];
+  const shaped = shapeBotSessionsForBot(rows, new Map([['a', 'x'.repeat(300)]]), 2);
+  assert.equal(shaped.totalSessions, 3);
+  assert.equal(shaped.totalMessages, 17);
+  assert.equal(shaped.sessions.length, 2);
+  assert.deepEqual(shaped.sessions.map((s) => s.title), ['Big', 'Mid'], 'sorted by volume');
+  assert.equal(shaped.sessions[0].lastAssistantExcerpt.length, 160, 'excerpt capped');
+});
+
+test('shapeExternalChatFacts: named peer, volume sort, metaid fallback, excerpt cap', () => {
+  const rows = [
+    { peer_global: 'p1', peer_name: 'BOT-007', message_count: 3 },
+    { peer_global: 'p2', peer_name: null, message_count: 9 },
+  ];
+  const shaped = shapeExternalChatFacts(rows, new Map([['p2', 'y'.repeat(300)]]));
+  assert.equal(shaped.length, 2);
+  assert.equal(shaped[0].peerName, 'p2', 'unnamed peer falls back to the metaid prefix');
+  assert.equal(shaped[0].messageCount, 9);
+  assert.equal(shaped[0].lastExcerpt.length, 120);
+  assert.equal(shaped[1].peerName, 'BOT-007');
+});
+
+test('chainKindFromPath + shapeChainInteractionFacts: last path segment, top-N', () => {
+  assert.equal(chainKindFromPath('/protocols/paylike'), 'paylike');
+  assert.equal(chainKindFromPath(''), 'write');
+  const shaped = shapeChainInteractionFacts(
+    [{ path: '/protocols/paylike', cnt: 2 }, { path: '/protocols/paycomment', cnt: 7 }],
+    new Map([['/protocols/paycomment', 'replied']]),
+  );
+  assert.equal(shaped[0].kind, 'paycomment');
+  assert.equal(shaped[0].lastSummary, 'replied');
+});
+
+test('shapeUpcomingFires: local HH:MM, sorted, total kept beyond the display cap', () => {
+  const base = new Date(2026, 9, 22, 9, 0, 0).getTime();
+  const shaped = shapeUpcomingFires([
+    { next_run_at_ms: base + 7200e3, name: 'Later', bot_name: 'B' },
+    { next_run_at_ms: base + 3600e3, name: 'Sooner', bot_name: null },
+    { next_run_at_ms: 0, name: 'broken' },
+  ], 1);
+  assert.equal(shaped.scheduledFiresTotal, 2);
+  assert.equal(shaped.scheduledFires.length, 1);
+  assert.equal(shaped.scheduledFires[0].taskName, 'Sooner');
+  assert.equal(shaped.scheduledFires[0].fireAtLocal, '10:00');
+});
+
+test('shapeHourlyActivity: 12 buckets, out-of-range hours dropped', () => {
+  const shaped = shapeHourlyActivity(
+    [{ h: 9, cnt: 4 }, { h: 25, cnt: 10 }, { bucket: 3, cnt: 2 }],
+    [{ h: 1, cnt: 3 }],
+  );
+  assert.equal(shaped.local.length, 12);
+  assert.equal(shaped.online.length, 12);
+  assert.equal(shaped.local[4], 4, 'hour 9 lands in the 8-10 bucket');
+  assert.equal(shaped.local[1], 2, 'bucket-style rows still feed in');
+  assert.equal(shaped.online[0], 3);
+  assert.equal(shaped.local.reduce((sum, n) => sum + n, 0), 6, 'hour 25 dropped');
 });

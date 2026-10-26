@@ -8,7 +8,8 @@
  * fails soft to empty, so a broken query can shrink a section but can never
  * sink the report. Every bucket is hard-capped (top-N by recency plus char
  * caps) and the assembled facts are capped again at the JSON level so the
- * ledger row stays ≤ ~20 KB.
+ * ledger row stays ≤ ~48 KB (raised from 20KB with the v2 per-bot bucket —
+ * one idle-time brain call a day, no per-turn context cost).
  *
  * Skip decision (owner-aligned rule E10): a day is skippable only when the
  * window holds literally zero activity — no new cowork sessions of any kind,
@@ -54,8 +55,8 @@ export const DAILY_REPORT_MAX_OWNER_ORCHESTRATIONS = 10;
 export const DAILY_REPORT_ORCHESTRATION_TITLE_MAX_CHARS = 200;
 export const DAILY_REPORT_MAX_HUMAN_SESSIONS = 12;
 export const DAILY_REPORT_SESSION_TITLE_MAX_CHARS = 120;
-export const DAILY_REPORT_SESSION_EXCERPT_MAX_CHARS = 1500;
-export const DAILY_REPORT_SESSION_USER_EXCERPT_MAX_CHARS = 500;
+export const DAILY_REPORT_SESSION_EXCERPT_MAX_CHARS = 600;
+export const DAILY_REPORT_SESSION_USER_EXCERPT_MAX_CHARS = 300;
 export const DAILY_REPORT_MAX_SCHEDULED_RUNS = 10;
 export const DAILY_REPORT_TASK_NAME_MAX_CHARS = 100;
 export const DAILY_REPORT_MAX_GROUP_TASK_TRANSITIONS = 8;
@@ -66,7 +67,37 @@ export const DAILY_REPORT_LONG_TERM_TITLE_MAX_CHARS = 100;
 export const DAILY_REPORT_MAX_BOT_DIGESTS = 12;
 export const DAILY_REPORT_DIGEST_MAX_CHARS = 1200;
 export const DAILY_REPORT_MAX_ONLINE_BOTS = 20;
-export const DAILY_REPORT_MAX_FACTS_JSON_BYTES = 20 * 1024;
+/** 64KB: a full 20-bot day does not fit 48KB without dropping entire bots
+ * (which defeats the one-line-per-active-bot contract), and the facts feed
+ * ONE idle-time brain call a day — no per-turn context cost. */
+export const DAILY_REPORT_MAX_FACTS_JSON_BYTES = 64 * 1024;
+
+// ── v2 owner rework (2026-10-26): per-bot activity + upcoming buckets ──────
+
+/** Active bots kept in facts.botActivity (sorted by activity score). */
+export const DAILY_REPORT_MAX_BOT_ACTIVITY = 20;
+/** Sessions narrated per bot (by in-window message volume). */
+export const DAILY_REPORT_BOT_SESSIONS_MAX = 3;
+export const DAILY_REPORT_BOT_SESSION_TITLE_MAX_CHARS = 90;
+export const DAILY_REPORT_BOT_EXCERPT_MAX_CHARS = 160;
+/** Scheduled runs kept per bot (failures always kept first). */
+export const DAILY_REPORT_BOT_RUNS_MAX = 5;
+/** External peers narrated per bot (by DM volume). */
+export const DAILY_REPORT_BOT_EXTERNAL_CHATS_MAX = 2;
+export const DAILY_REPORT_EXTERNAL_EXCERPT_MAX_CHARS = 120;
+/** OpenTeam tasks narrated per bot (active-in-window memberships). */
+export const DAILY_REPORT_BOT_OPENTEAM_MAX = 2;
+/** On-chain interaction kinds kept per bot (path-derived). */
+export const DAILY_REPORT_BOT_CHAIN_KINDS_MAX = 3;
+export const DAILY_REPORT_CHAIN_SUMMARY_MAX_CHARS = 120;
+/** Rows scanned for the per-bot run grouping (window cap, not output cap). */
+export const DAILY_REPORT_SCHEDULED_RUNS_SCAN_CAP = 60;
+/** Active session rows scanned for the bot bucket (safety valve). */
+export const DAILY_REPORT_BOT_SESSION_SCAN_CAP = 200;
+/** Upcoming scheduled fires listed (the total count is kept separately). */
+export const DAILY_REPORT_UPCOMING_FIRES_MAX = 12;
+export const DAILY_REPORT_UPCOMING_ORCHESTRATIONS_MAX = 8;
+export const DAILY_REPORT_UPCOMING_TITLE_MAX_CHARS = 120;
 
 // ── Fact shapes ────────────────────────────────────────────────────────────
 
@@ -153,6 +184,83 @@ export interface DailyReportOnlineActivity {
   groupMessageCount: number;
 }
 
+/** One local session a bot was active in during the window (any session type). */
+export interface DailyReportBotSessionFact {
+  sessionId: string;
+  title: string;
+  sessionType: string | null;
+  messageCount: number;
+  lastAssistantExcerpt: string | null;
+}
+
+/** One external peer a bot exchanged DMs with during the window. */
+export interface DailyReportExternalChatFact {
+  peerName: string;
+  messageCount: number;
+  lastExcerpt: string | null;
+}
+
+/** One OpenTeam task a bot was actively participating in during the window. */
+export interface DailyReportOpenTeamFact {
+  taskTitle: string;
+  memberStatus: string;
+  windowMessageCount: number;
+}
+
+/** One on-chain interaction kind a bot performed during the window
+ * (surf comments/likes/publishes — kind is the last path segment, e.g.
+ * 'paylike' from '/protocols/paylike'). */
+export interface DailyReportChainInteractionFact {
+  kind: string;
+  count: number;
+  lastSummary: string | null;
+}
+
+export interface DailyReportBotScheduledRunFact {
+  taskName: string;
+  status: string;
+}
+
+/**
+ * Per-bot activity rollup for the v2 briefing — the "what did each bot DO
+ * today" bucket the brain distills into one-liners. Aggregates ALL session
+ * types (standard / a2a / browser / group_task / longterm), scheduled runs,
+ * external DM peers, OpenTeam participation and on-chain interactions.
+ */
+export interface DailyReportBotActivity {
+  botName: string;
+  isTwin: boolean;
+  totalSessions: number;
+  totalMessages: number;
+  sessions: DailyReportBotSessionFact[];
+  scheduledRuns: DailyReportBotScheduledRunFact[];
+  scheduledRunCount: number;
+  externalChats: DailyReportExternalChatFact[];
+  openTeam: DailyReportOpenTeamFact[];
+  chainInteractions: DailyReportChainInteractionFact[];
+  groupMessages: number;
+}
+
+export interface DailyReportUpcomingFire {
+  /** Local 'HH:MM' of the next fire (date implied by the report date). */
+  fireAtLocal: string;
+  taskName: string;
+  botName: string | null;
+}
+
+export interface DailyReportUpcoming {
+  scheduledFires: DailyReportUpcomingFire[];
+  scheduledFiresTotal: number;
+  openOrchestrations: DailyReportBotScheduledRunFact[];
+  openOrchestrationByStatus: Record<string, number>;
+}
+
+/** 12 two-hour buckets of message volume for the visual timeline. */
+export interface DailyReportHourlyActivity {
+  local: number[];
+  online: number[];
+}
+
 export interface DailyReportFacts {
   generatedAtMs: number;
   windowStartMs: number;
@@ -169,6 +277,14 @@ export interface DailyReportFacts {
   };
   botDigests: DailyReportBotDigest[];
   onlineActivity: DailyReportOnlineActivity[];
+  /** v2: per-bot "what did this bot do" rollup (all session types + runs + external). */
+  botActivity: DailyReportBotActivity[];
+  /** v2: what the next 24h holds (scheduled fires, open orchestrations). */
+  upcoming: DailyReportUpcoming;
+  /** v2: 12×2h message buckets for the visual timeline. */
+  hourlyActivity: DailyReportHourlyActivity;
+  /** v2: total bots known on this machine (for the X/Y active KPI). */
+  knownBotCount: number;
   /** Any cowork session created in the window (the E10 "new sessions" bit). */
   newSessionCount: number;
   /** E10 skip bit: true only when the window holds literally zero activity. */
@@ -302,6 +418,152 @@ export const shapeHumanSessionRows = (
     };
   }).filter((item) => item.sessionId);
 
+// ── v2 shaping: per-bot activity / upcoming / hourly (pure, unit-tested) ───
+
+/** Fold the host-generated delegation/schedule prefixes away so fallback
+ * bot-lines read like work, not protocol labels (fixed generated markers,
+ * not natural-language intent matching). */
+export const stripDailyReportSessionTitlePrefix = (title: string): string =>
+  title.replace(/^\[(?:编排任务|Orchestration Task|定时)\]\s*/, '').trim() || title;
+
+export interface ShapedBotSessions {
+  sessions: DailyReportBotSessionFact[];
+  totalSessions: number;
+  totalMessages: number;
+}
+
+/** One bot's window sessions: every row counts toward the totals, only the
+ * top-N by message volume are narrated (with excerpts). */
+export const shapeBotSessionsForBot = (
+  rows: ReadonlyArray<Record<string, unknown>>,
+  excerptBySessionId: ReadonlyMap<string, string | null>,
+  maxItems: number = DAILY_REPORT_BOT_SESSIONS_MAX,
+): ShapedBotSessions => {
+  const mapped = rows
+    .map((row) => ({
+      sessionId: String(row.session_id ?? row.id ?? ''),
+      title: capDailyReportText(row.session_title ?? row.title, DAILY_REPORT_BOT_SESSION_TITLE_MAX_CHARS) || '(untitled)',
+      sessionType: row.session_type ? String(row.session_type) : null,
+      messageCount: Math.max(0, Number(row.message_count ?? 0) || 0),
+    }))
+    .filter((session) => session.sessionId);
+  const sorted = [...mapped].sort((a, b) => b.messageCount - a.messageCount);
+  const sessions = sorted.slice(0, maxItems).map((session) => {
+    const excerpt = excerptBySessionId.get(session.sessionId);
+    return { ...session, lastAssistantExcerpt: excerpt ? capDailyReportText(excerpt, DAILY_REPORT_BOT_EXCERPT_MAX_CHARS) : null };
+  });
+  return {
+    sessions,
+    totalSessions: mapped.length,
+    totalMessages: mapped.reduce((sum, session) => sum + session.messageCount, 0),
+  };
+};
+
+/** One bot's external DM peers: top-N by volume with a last-message excerpt. */
+export const shapeExternalChatFacts = (
+  rows: ReadonlyArray<Record<string, unknown>>,
+  excerptByPeerGlobal: ReadonlyMap<string, string | null>,
+  maxItems: number = DAILY_REPORT_BOT_EXTERNAL_CHATS_MAX,
+): DailyReportExternalChatFact[] =>
+  rows
+    .map((row) => {
+      const peerGlobal = row.peer_global ? String(row.peer_global) : '';
+      const named = row.peer_name ? String(row.peer_name) : '';
+      return {
+        peerGlobal,
+        peerName: named || peerGlobal.slice(0, 10),
+        messageCount: Math.max(0, Number(row.message_count ?? 0) || 0),
+      };
+    })
+    .filter((entry) => entry.peerName && entry.peerGlobal)
+    .sort((a, b) => b.messageCount - a.messageCount)
+    .slice(0, maxItems)
+    .map((entry) => {
+      const excerpt = excerptByPeerGlobal.get(entry.peerGlobal);
+      return {
+        peerName: entry.peerName,
+        messageCount: entry.messageCount,
+        lastExcerpt: excerpt ? capDailyReportText(excerpt, DAILY_REPORT_EXTERNAL_EXCERPT_MAX_CHARS) : null,
+      };
+    });
+
+/** On-chain interaction kind from a protocol path ('/protocols/paylike' → 'paylike'). */
+export const chainKindFromPath = (path: unknown): string => {
+  const segments = String(path ?? '').split('/').filter(Boolean);
+  return segments[segments.length - 1] || 'write';
+};
+
+export const shapeChainInteractionFacts = (
+  rows: ReadonlyArray<Record<string, unknown>>,
+  summaryByKind: ReadonlyMap<string, string | null>,
+  maxItems: number = DAILY_REPORT_BOT_CHAIN_KINDS_MAX,
+): DailyReportChainInteractionFact[] =>
+  rows
+    .map((row) => ({
+      rawPath: String(row.path ?? ''),
+      count: Math.max(0, Number(row.cnt ?? 0) || 0),
+    }))
+    .filter((row) => row.count > 0 && row.rawPath)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, maxItems)
+    .map((row) => {
+      const summary = summaryByKind.get(row.rawPath);
+      return {
+        kind: chainKindFromPath(row.rawPath),
+        count: row.count,
+        lastSummary: summary ? capDailyReportText(summary, DAILY_REPORT_CHAIN_SUMMARY_MAX_CHARS) : null,
+      };
+    });
+
+/** Local 'HH:MM' for a ms timestamp. */
+const formatLocalHourMinute = (ms: number): string => {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+
+export const shapeUpcomingFires = (
+  rows: ReadonlyArray<Record<string, unknown>>,
+  maxItems: number = DAILY_REPORT_UPCOMING_FIRES_MAX,
+): Pick<DailyReportUpcoming, 'scheduledFires' | 'scheduledFiresTotal'> => {
+  const mapped = rows
+    .map((row) => ({
+      fireAtMs: Number(row.next_run_at_ms ?? 0) || 0,
+      taskName: capDailyReportText(row.name, DAILY_REPORT_TASK_NAME_MAX_CHARS) || '(untitled)',
+      botName: row.bot_name ? String(row.bot_name) : null,
+    }))
+    .filter((fire) => fire.fireAtMs > 0)
+    .sort((a, b) => a.fireAtMs - b.fireAtMs);
+  return {
+    scheduledFires: mapped.slice(0, maxItems).map((fire) => ({
+      fireAtLocal: formatLocalHourMinute(fire.fireAtMs),
+      taskName: fire.taskName,
+      botName: fire.botName,
+    })),
+    scheduledFiresTotal: mapped.length,
+  };
+};
+
+/** Fill the 12×2h bucket arrays from (hour, count) rows. */
+export const shapeHourlyActivity = (
+  localRows: ReadonlyArray<Record<string, unknown>>,
+  onlineRows: ReadonlyArray<Record<string, unknown>>,
+): DailyReportHourlyActivity => {
+  const local = new Array<number>(12).fill(0);
+  const online = new Array<number>(12).fill(0);
+  const fill = (target: number[], rows: ReadonlyArray<Record<string, unknown>>): void => {
+    for (const row of rows) {
+      const hour = Math.trunc(Number(row.h ?? row.bucket ?? NaN));
+      const count = Math.max(0, Number(row.cnt ?? 0) || 0);
+      if (!Number.isFinite(hour) || hour < 0 || hour > 23) continue;
+      const index = Math.max(0, Math.min(11, Math.floor(hour / 2)));
+      target[index] += count;
+    }
+  };
+  fill(local, localRows);
+  fill(online, onlineRows);
+  return { local, online };
+};
+
 /** E10 skip bit over the collected buckets. */
 export const computeDailyReportHasAnyActivity = (facts: {
   pendingFollowUps: readonly unknown[];
@@ -328,8 +590,11 @@ export const computeDailyReportHasAnyActivity = (facts: {
 
 /**
  * Final JSON-level cap: shrink the cheapest-to-lose text fields until the
- * serialized facts fit the ledger budget. Deterministic: digests first, then
- * human-session excerpts.
+ * serialized facts fit the ledger budget (48KB — one idle-time brain call a
+ * day, raised from 20KB with the v2 per-bot bucket). Bot-dropping is the LAST
+ * resort — the whole point of the v2 briefing is one line per ACTIVE bot, so
+ * the ladder trims per-item text first, then sessions/peers per bot, and only
+ * then gives up entire bots.
  */
 export const enforceDailyReportFactsCap = (
   facts: DailyReportFacts,
@@ -337,23 +602,70 @@ export const enforceDailyReportFactsCap = (
 ): DailyReportFacts => {
   const fits = (value: DailyReportFacts): boolean => Buffer.byteLength(JSON.stringify(value), 'utf8') <= maxBytes;
   if (fits(facts)) return facts;
-  const shrunk: DailyReportFacts = {
-    ...facts,
-    botDigests: facts.botDigests.map((d) => ({ ...d, summaryText: capDailyReportText(d.summaryText, 400) })),
+
+  const shrinkBotExcerpts = (source: DailyReportFacts, excerptChars: number, summaryChars: number): DailyReportFacts => ({
+    ...source,
+    botActivity: source.botActivity.map((bot) => ({
+      ...bot,
+      sessions: bot.sessions.map((session) => ({
+        ...session,
+        lastAssistantExcerpt: session.lastAssistantExcerpt
+          ? capDailyReportText(session.lastAssistantExcerpt, excerptChars)
+          : null,
+      })),
+      externalChats: bot.externalChats.map((chat) => ({
+        ...chat,
+        lastExcerpt: chat.lastExcerpt
+          ? capDailyReportText(chat.lastExcerpt, Math.min(excerptChars, DAILY_REPORT_EXTERNAL_EXCERPT_MAX_CHARS))
+          : null,
+      })),
+      chainInteractions: bot.chainInteractions.map((chain) => ({
+        ...chain,
+        lastSummary: chain.lastSummary ? capDailyReportText(chain.lastSummary, summaryChars) : null,
+      })),
+    })),
+  });
+
+  let candidate = shrinkBotExcerpts(facts, 100, 60);
+  if (fits(candidate)) return candidate;
+
+  candidate = {
+    ...candidate,
+    botDigests: candidate.botDigests.map((d) => ({ ...d, summaryText: capDailyReportText(d.summaryText, 400) })),
   };
-  if (fits(shrunk)) return shrunk;
-  const shrunkMore: DailyReportFacts = {
-    ...shrunk,
-    humanSessions: shrunk.humanSessions.map((s) => ({
+  if (fits(candidate)) return candidate;
+
+  candidate = {
+    ...candidate,
+    humanSessions: candidate.humanSessions.map((s) => ({
       ...s,
       lastAssistantExcerpt: s.lastAssistantExcerpt ? capDailyReportText(s.lastAssistantExcerpt, 300) : null,
     })),
   };
-  if (fits(shrunkMore)) return shrunkMore;
+  if (fits(candidate)) return candidate;
+
+  // Structural trim that keeps every bot: fewer narrated sessions/peers.
+  candidate = {
+    ...candidate,
+    botActivity: candidate.botActivity.map((bot) => ({
+      ...bot,
+      sessions: bot.sessions.slice(0, 2),
+      externalChats: bot.externalChats.slice(0, 1),
+    })),
+  };
+  if (fits(candidate)) return candidate;
+
+  candidate = {
+    ...candidate,
+    botActivity: candidate.botActivity.slice(0, 14).map((bot) => ({ ...bot, sessions: bot.sessions.slice(0, 1) })),
+  };
+  if (fits(candidate)) return candidate;
+
   return {
-    ...shrunkMore,
-    botDigests: shrunkMore.botDigests.slice(0, 4),
-    humanSessions: shrunkMore.humanSessions.slice(0, 6),
+    ...candidate,
+    botActivity: candidate.botActivity.slice(0, 10),
+    botDigests: candidate.botDigests.slice(0, 4),
+    humanSessions: candidate.humanSessions.slice(0, 6),
   };
 };
 
@@ -381,6 +693,10 @@ const HUMAN_USER_MESSAGE_SQL = `
 
 /** Daily-report sessions are excluded from the human-work bucket by title. */
 const DAILY_REPORT_TITLE_LIKE = '每日汇报 %';
+
+/** Run statuses that count as not-succeeded (mirrors the generator's set). */
+const isFailedOrSkippedRunStatus = (status: string): boolean =>
+  status === 'failed' || status === 'error' || status === 'skipped';
 
 export const collectDailyReportFacts = (input: {
   db: DailyReportDb;
@@ -636,6 +952,375 @@ export const collectDailyReportFacts = (input: {
     return Number(row?.cnt ?? 0) || 0;
   });
 
+  // ── v2: per-bot "what did this bot do" rollup ────────────────────────────
+  const botActivity = safeCollect('botActivity', [] as DailyReportBotActivity[], () => {
+    interface BotAccumulator {
+      metabotId: number;
+      botName: string;
+      isTwin: boolean;
+      sessionRows: Record<string, unknown>[];
+      runRows: Record<string, unknown>[];
+      externalRows: Record<string, unknown>[];
+      openTeamRows: Record<string, unknown>[];
+      chainRows: Record<string, unknown>[];
+      groupMessages: number;
+    }
+    const byBot = new Map<string, BotAccumulator>();
+    const accumulator = (botName: string): BotAccumulator | null => {
+      const name = typeof botName === 'string' ? botName.trim() : '';
+      if (!name) return null;
+      const existing = byBot.get(name);
+      if (existing) return existing;
+      const created: BotAccumulator = {
+        metabotId: 0,
+        botName: name,
+        isTwin: false,
+        sessionRows: [],
+        runRows: [],
+        externalRows: [],
+        openTeamRows: [],
+        chainRows: [],
+        groupMessages: 0,
+      };
+      byBot.set(name, created);
+      return created;
+    };
+
+    // 1. sessions (all types) with in-window message counts. Worker sessions
+    //    (orchestration/surf/group-task delegation) are hidden_from_session_list
+    //    but ARE the bot's work — only archived rows and the daily report's
+    //    own sessions stay out, otherwise bots whose only activity is worker
+    //    sessions vanish from the fleet section.
+    const sessionRows = db.queryAll<Record<string, unknown>>(`
+      SELECT s.metabot_id AS metabot_id, mb.name AS bot_name,
+        s.id AS session_id, s.title AS session_title, s.session_type AS session_type,
+        (SELECT COUNT(*) FROM cowork_messages m
+          WHERE m.session_id = s.id AND m.created_at >= ? AND m.created_at < ?) AS message_count
+      FROM cowork_sessions s
+      LEFT JOIN metabots mb ON mb.id = s.metabot_id
+      WHERE s.metabot_id IS NOT NULL
+        AND s.archived_at IS NULL
+        AND s.title NOT LIKE ?
+        AND s.updated_at >= ? AND s.updated_at < ?
+        AND EXISTS(
+          SELECT 1 FROM cowork_messages m
+          WHERE m.session_id = s.id AND m.created_at >= ? AND m.created_at < ?
+        )
+        AND NOT EXISTS(
+          SELECT 1 FROM cowork_messages dm
+          WHERE dm.session_id = s.id AND dm.metadata LIKE '%"origin":"daily_report"%'
+        )
+      ORDER BY s.updated_at DESC
+      LIMIT ?
+    `, [msStart, msEnd, DAILY_REPORT_TITLE_LIKE, msStart, msEnd, msStart, msEnd, DAILY_REPORT_BOT_SESSION_SCAN_CAP]);
+    const sessionIdsForHourly: string[] = [];
+    for (const row of sessionRows) {
+      const acc = accumulator(String(row.bot_name ?? ''));
+      if (!acc) continue;
+      acc.metabotId = Number(row.metabot_id ?? 0) || acc.metabotId;
+      acc.isTwin = acc.metabotId === input.twinId;
+      acc.sessionRows.push(row);
+      const sessionId = String(row.session_id ?? '');
+      if (sessionId) sessionIdsForHourly.push(sessionId);
+    }
+
+    // 2. scheduled runs (scan-capped; grouped per bot below)
+    const runRows = db.queryAll<Record<string, unknown>>(`
+      SELECT t.name AS task_name, mb.name AS bot_name, r.status, r.started_at
+      FROM scheduled_task_runs r
+      JOIN scheduled_tasks t ON t.id = r.task_id
+      LEFT JOIN metabots mb ON mb.id = t.metabot_id
+      WHERE r.started_at >= ? AND r.started_at < ?
+      ORDER BY r.started_at DESC
+      LIMIT ?
+    `, [isoStart, isoEnd, DAILY_REPORT_SCHEDULED_RUNS_SCAN_CAP]);
+    for (const row of runRows) {
+      const acc = accumulator(String(row.bot_name ?? ''));
+      if (acc) acc.runRows.push(row);
+    }
+
+    // 3. external DM peers (who the bot talked to, how much, about what)
+    const externalRows = db.queryAll<Record<string, unknown>>(`
+      SELECT mb.id AS metabot_id, mb.name AS bot_name, mb.globalmetaid AS bot_global,
+        CASE WHEN mb.globalmetaid = m.from_global_metaid THEN m.to_global_metaid ELSE m.from_global_metaid END AS peer_global,
+        MAX(CASE WHEN mb.globalmetaid != m.from_global_metaid THEN m.from_name END) AS peer_name,
+        COUNT(*) AS message_count
+      FROM private_chat_messages m
+      JOIN metabots mb ON (mb.globalmetaid IS NOT NULL AND mb.globalmetaid != ''
+        AND (mb.globalmetaid = m.from_global_metaid OR mb.globalmetaid = m.to_global_metaid))
+      WHERE datetime(m.created_at) >= datetime(?) AND datetime(m.created_at) < datetime(?)
+      GROUP BY mb.id, peer_global
+      ORDER BY message_count DESC
+      LIMIT 60
+    `, [isoStart, isoEnd]);
+    for (const row of externalRows) {
+      const acc = accumulator(String(row.bot_name ?? ''));
+      if (acc) acc.externalRows.push(row);
+    }
+
+    // 4. OpenTeam participation: active memberships that joined / changed task
+    //    status / carried group messages in the window.
+    const openTeamRows = db.queryAll<Record<string, unknown>>(`
+      SELECT om.metabot_id, mb.name AS bot_name, om.task_title, om.status AS member_status,
+        om.group_id,
+        (datetime(om.created_at) >= datetime(?) AND datetime(om.created_at) < datetime(?)) AS joined_in_window,
+        (datetime(COALESCE(om.task_status_updated_at, om.created_at)) >= datetime(?)
+          AND datetime(COALESCE(om.task_status_updated_at, om.created_at)) < datetime(?)) AS status_in_window
+      FROM openteam_memberships om
+      JOIN metabots mb ON mb.id = om.metabot_id
+      WHERE om.status = 'active'
+      LIMIT 200
+    `, [isoStart, isoEnd, isoStart, isoEnd]);
+    for (const row of openTeamRows) {
+      const groupId = row.group_id ? String(row.group_id) : '';
+      let windowMessageCount = 0;
+      if (groupId) {
+        try {
+          const countRow = db.queryAll<{ cnt: number }>(`
+            SELECT COUNT(*) AS cnt FROM group_chat_messages g
+            WHERE g.group_id = ? AND datetime(g.created_at) >= datetime(?) AND datetime(g.created_at) < datetime(?)
+          `, [groupId, isoStart, isoEnd])[0];
+          windowMessageCount = Number(countRow?.cnt ?? 0) || 0;
+        } catch {
+          // One group's count is not worth the bucket.
+        }
+      }
+      const activeNow = Number(row.joined_in_window ?? 0) === 1
+        || Number(row.status_in_window ?? 0) === 1
+        || windowMessageCount > 0;
+      if (!activeNow) continue;
+      const acc = accumulator(String(row.bot_name ?? ''));
+      if (!acc) continue;
+      acc.openTeamRows.push({ ...row, window_message_count: windowMessageCount });
+    }
+
+    // 5. on-chain interactions (surf comments/likes/publishes)
+    const chainRows = db.queryAll<Record<string, unknown>>(`
+      SELECT w.metabot_id, mb.name AS bot_name, w.path, COUNT(*) AS cnt
+      FROM metabot_chain_writes w
+      JOIN metabots mb ON mb.id = w.metabot_id
+      WHERE w.occurred_at_ms >= ? AND w.occurred_at_ms < ?
+      GROUP BY w.metabot_id, w.path
+      ORDER BY cnt DESC
+      LIMIT 60
+    `, [msStart, msEnd]);
+    for (const row of chainRows) {
+      const acc = accumulator(String(row.bot_name ?? ''));
+      if (acc) acc.chainRows.push(row);
+    }
+
+    // 6. online group messages merge (already counted per bot above)
+    for (const online of onlineActivity) {
+      const acc = accumulator(online.botName);
+      if (acc) acc.groupMessages += online.groupMessageCount;
+    }
+
+    const activityScore = (bot: BotAccumulator): number =>
+      bot.sessionRows.reduce((sum, row) => sum + (Number(row.message_count ?? 0) || 0), 0)
+      + bot.runRows.length * 5
+      + bot.externalRows.reduce((sum, row) => sum + (Number(row.message_count ?? 0) || 0), 0) * 2
+      + bot.groupMessages * 2
+      + bot.chainRows.reduce((sum, row) => sum + (Number(row.cnt ?? 0) || 0), 0)
+      + bot.openTeamRows.length * 5;
+
+    const bots = [...byBot.values()]
+      .filter((bot) => bot.sessionRows.length > 0 || bot.runRows.length > 0
+        || bot.externalRows.length > 0 || bot.openTeamRows.length > 0
+        || bot.chainRows.length > 0 || bot.groupMessages > 0)
+      .sort((a, b) => activityScore(b) - activityScore(a) || a.botName.localeCompare(b.botName))
+      .slice(0, DAILY_REPORT_MAX_BOT_ACTIVITY);
+
+    return bots.map((bot) => {
+      // Sessions: shape first (top-N by volume), then fetch excerpts for kept ids only.
+      const shaped = shapeBotSessionsForBot(bot.sessionRows, new Map());
+      const excerptBySessionId = new Map<string, string | null>();
+      for (const session of shaped.sessions) {
+        try {
+          const rows = db.queryAll<{ content: string | null }>(`
+            SELECT m.content FROM cowork_messages m
+            WHERE m.session_id = ? AND m.created_at >= ? AND m.created_at < ?
+              AND m.type = 'assistant' AND COALESCE(m.content, '') != ''
+            ORDER BY m.created_at DESC LIMIT 1
+          `, [session.sessionId, msStart, msEnd]);
+          excerptBySessionId.set(session.sessionId, rows[0]?.content ?? null);
+        } catch {
+          excerptBySessionId.set(session.sessionId, null);
+        }
+      }
+      const sessionFacts = shapeBotSessionsForBot(bot.sessionRows, excerptBySessionId);
+
+      // Runs: failures first, then recency; a couple of names for the brain.
+      const failedFirst = [
+        ...bot.runRows.filter((row) => isFailedOrSkippedRunStatus(String(row.status ?? ''))),
+        ...bot.runRows.filter((row) => !isFailedOrSkippedRunStatus(String(row.status ?? ''))),
+      ];
+      const scheduledRuns = failedFirst.slice(0, DAILY_REPORT_BOT_RUNS_MAX).map((row) => ({
+        taskName: capDailyReportText(row.task_name, DAILY_REPORT_TASK_NAME_MAX_CHARS) || '(untitled)',
+        status: String(row.status ?? 'unknown'),
+      }));
+
+      // External chats: top peers, then one excerpt per kept peer.
+      const shapedPeers = shapeExternalChatFacts(bot.externalRows, new Map());
+      const peerGlobals = bot.externalRows
+        .map((row) => ({ peerGlobal: String(row.peer_global ?? ''), count: Number(row.message_count ?? 0) || 0 }))
+        .filter((entry) => entry.peerGlobal)
+        .sort((a, b) => b.count - a.count);
+      const excerptByPeerGlobal = new Map<string, string | null>();
+      for (const entry of peerGlobals.slice(0, shapedPeers.length)) {
+        const botGlobal = String(bot.externalRows.find((row) => String(row.peer_global ?? '') === entry.peerGlobal)?.bot_global ?? '');
+        if (!botGlobal) continue;
+        try {
+          const rows = db.queryAll<{ content: string | null }>(`
+            SELECT m.content FROM private_chat_messages m
+            WHERE ((m.from_global_metaid = ? AND m.to_global_metaid = ?)
+                OR (m.from_global_metaid = ? AND m.to_global_metaid = ?))
+              AND datetime(m.created_at) >= datetime(?) AND datetime(m.created_at) < datetime(?)
+            ORDER BY m.created_at DESC LIMIT 1
+          `, [botGlobal, entry.peerGlobal, entry.peerGlobal, botGlobal, isoStart, isoEnd]);
+          excerptByPeerGlobal.set(entry.peerGlobal, rows[0]?.content ?? null);
+        } catch {
+          excerptByPeerGlobal.set(entry.peerGlobal, null);
+        }
+      }
+      const externalChats = shapeExternalChatFacts(bot.externalRows, excerptByPeerGlobal);
+
+      const openTeam = [...bot.openTeamRows]
+        .sort((a, b) => (Number(b.window_message_count ?? 0) || 0) - (Number(a.window_message_count ?? 0) || 0))
+        .slice(0, DAILY_REPORT_BOT_OPENTEAM_MAX)
+        .map((row) => ({
+          taskTitle: capDailyReportText(row.task_title, DAILY_REPORT_BOT_SESSION_TITLE_MAX_CHARS) || '(untitled)',
+          memberStatus: String(row.member_status ?? 'active'),
+          windowMessageCount: Number(row.window_message_count ?? 0) || 0,
+        }));
+
+      const chainKinds = shapeChainInteractionFacts(bot.chainRows, new Map());
+      const summaryByKind = new Map<string, string | null>();
+      for (const kind of chainKinds) {
+        const rawPath = String(bot.chainRows.find((row) => chainKindFromPath(row.path) === kind.kind)?.path ?? '');
+        if (!rawPath || !bot.metabotId) continue;
+        try {
+          const rows = db.queryAll<{ summary: string | null }>(`
+            SELECT w.summary FROM metabot_chain_writes w
+            WHERE w.metabot_id = ? AND w.path = ? AND w.occurred_at_ms >= ? AND w.occurred_at_ms < ?
+              AND COALESCE(w.summary, '') != ''
+            ORDER BY w.occurred_at_ms DESC LIMIT 1
+          `, [bot.metabotId, rawPath, msStart, msEnd]);
+          summaryByKind.set(rawPath, rows[0]?.summary ?? null);
+        } catch {
+          summaryByKind.set(rawPath, null);
+        }
+      }
+      const chainInteractions = shapeChainInteractionFacts(bot.chainRows, summaryByKind);
+
+      return {
+        botName: bot.botName,
+        isTwin: bot.isTwin,
+        totalSessions: sessionFacts.totalSessions,
+        totalMessages: sessionFacts.totalMessages,
+        sessions: sessionFacts.sessions,
+        scheduledRuns,
+        scheduledRunCount: bot.runRows.length,
+        externalChats,
+        openTeam,
+        chainInteractions,
+        groupMessages: bot.groupMessages,
+      };
+    });
+  });
+
+  // ── v2: what the next 24h holds ──────────────────────────────────────────
+  const upcoming = safeCollect('upcoming', {
+    scheduledFires: [] as DailyReportUpcomingFire[],
+    scheduledFiresTotal: 0,
+    openOrchestrations: [] as DailyReportBotScheduledRunFact[],
+    openOrchestrationByStatus: {} as Record<string, number>,
+  } as DailyReportUpcoming, () => {
+    const fireRows = db.queryAll<Record<string, unknown>>(`
+      SELECT t.next_run_at_ms, t.name, mb.name AS bot_name
+      FROM scheduled_tasks t
+      LEFT JOIN metabots mb ON mb.id = t.metabot_id
+      WHERE t.enabled = 1 AND t.next_run_at_ms >= ? AND t.next_run_at_ms < ?
+      ORDER BY t.next_run_at_ms
+      LIMIT 64
+    `, [msEnd, msEnd + DAY_MS]);
+    const orchRows = db.queryAll<Record<string, unknown>>(`
+      SELECT o.owner_intent, o.status
+      FROM orchestration_tasks o
+      WHERE o.status IN ('planning','running','review')
+      ORDER BY o.updated_at DESC
+      LIMIT ?
+    `, [DAILY_REPORT_UPCOMING_ORCHESTRATIONS_MAX]);
+    const statusRows = db.queryAll<{ status: string; cnt: number }>(`
+      SELECT o.status, COUNT(*) AS cnt
+      FROM orchestration_tasks o
+      WHERE o.status IN ('planning','running','review')
+      GROUP BY o.status
+    `);
+    const openOrchestrationByStatus: Record<string, number> = {};
+    for (const row of statusRows) {
+      openOrchestrationByStatus[String(row.status ?? '')] = Number(row.cnt ?? 0) || 0;
+    }
+    return {
+      ...shapeUpcomingFires(fireRows),
+      openOrchestrations: orchRows.map((row) => ({
+        taskName: capDailyReportText(row.owner_intent, DAILY_REPORT_UPCOMING_TITLE_MAX_CHARS) || '(untitled)',
+        status: String(row.status ?? 'planning'),
+      })),
+      openOrchestrationByStatus,
+    };
+  });
+
+  // ── v2: hourly buckets for the visual timeline ───────────────────────────
+  const hourlyActivity = safeCollect('hourlyActivity', {
+    local: new Array<number>(12).fill(0),
+    online: new Array<number>(12).fill(0),
+  } as DailyReportHourlyActivity, () => {
+    // Local: per active session over the (session_id, created_at) index —
+    // cowork_messages has no standalone created_at index, so a bare window
+    // scan of the whole table is off the table.
+    const activeSessionIds = db.queryAll<{ id: string }>(`
+      SELECT s.id FROM cowork_sessions s
+      WHERE s.updated_at >= ? AND s.updated_at < ?
+        AND EXISTS(
+          SELECT 1 FROM cowork_messages m
+          WHERE m.session_id = s.id AND m.created_at >= ? AND m.created_at < ?
+        )
+      LIMIT 250
+    `, [msStart, msEnd, msStart, msEnd]).map((row) => String(row.id ?? '')).filter(Boolean);
+    const localRows: Record<string, unknown>[] = [];
+    for (const sessionId of activeSessionIds) {
+      try {
+        localRows.push(...db.queryAll<Record<string, unknown>>(`
+          SELECT CAST(strftime('%H', Datetime(m.created_at/1000,'unixepoch','localtime')) AS INTEGER) AS h, COUNT(*) AS cnt
+          FROM cowork_messages m
+          WHERE m.session_id = ? AND m.created_at >= ? AND m.created_at < ?
+          GROUP BY h
+        `, [sessionId, msStart, msEnd]));
+      } catch {
+        // One session's buckets are not worth the section.
+      }
+    }
+    const onlineRows: Record<string, unknown>[] = [];
+    for (const [table] of [['private_chat_messages'], ['group_chat_messages']] as const) {
+      try {
+        onlineRows.push(...db.queryAll<Record<string, unknown>>(`
+          SELECT CAST(strftime('%H', m.created_at, 'localtime') AS INTEGER) AS h, COUNT(*) AS cnt
+          FROM ${table} m
+          WHERE datetime(m.created_at) >= datetime(?) AND datetime(m.created_at) < datetime(?)
+          GROUP BY h
+        `, [isoStart, isoEnd]));
+      } catch {
+        // One table's buckets are not worth the section.
+      }
+    }
+    return shapeHourlyActivity(localRows, onlineRows);
+  });
+
+  const knownBotCount = safeCollect('knownBotCount', 0, () => {
+    const row = db.queryAll<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM metabots')[0];
+    return Number(row?.cnt ?? 0) || 0;
+  });
+
   const partial: DailyReportFacts = {
     generatedAtMs: msEnd,
     windowStartMs: msStart,
@@ -652,6 +1337,10 @@ export const collectDailyReportFacts = (input: {
     },
     botDigests,
     onlineActivity,
+    botActivity,
+    upcoming,
+    hourlyActivity,
+    knownBotCount,
     newSessionCount,
     hasAnyActivity: false,
   };

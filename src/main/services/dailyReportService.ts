@@ -439,6 +439,8 @@ export const startDailyReportService = (deps: DailyReportServiceDeps): DailyRepo
           longTermEvents: facts.machineActivity.longTermEvents.length,
           botDigests: facts.botDigests.length,
           onlineBots: facts.onlineActivity.length,
+          botActivity: facts.botActivity.length,
+          upcomingFires: facts.upcoming.scheduledFiresTotal,
           newSessions: facts.newSessionCount,
         },
       };

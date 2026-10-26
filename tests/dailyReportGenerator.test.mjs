@@ -1,6 +1,6 @@
 // src/main/services/dailyReportGenerator.ts — briefing + HTML report builder.
 //
-// Contract under test (no LLM in tests), owner rework 2026-10-23:
+// Contract under test (no LLM in tests), v2 owner rework 2026-10-26:
 //   a. follow-up list — `[title](idbots://session/<id>)` links + overdue
 //      badges; the section is OMITTED ENTIRELY when pendingFollowUps is
 //      empty (markdown + HTML), never an empty-state line;
@@ -9,18 +9,21 @@
 //      succeeded" when true; only failed/skipped NAMED, max 3, with bot),
 //      one group-task count line, twin-delegate count; long-term journal
 //      events never appear;
-//   d. per-bot rollup — one table row per bot with any activity (sessions /
-//      runs / DMs / group msgs) computed from existing facts; digest TEXT
-//      never reaches markdown or HTML (brain input only); the
-//      humanSessions listing is gone from both;
-//   e. brain prompt — locale-native (zh prompt is Chinese and demands
-//      Simplified Chinese output), principle-based, NO mandated section
-//      names (no "## Headline" template);
-//   f. prose renderer — escape-first markdown→HTML (headings/bullets/bold);
-//   g. HTML — self-contained, data escaped, deep links preserved, new-
-//      session count only in the meta line;
-//   h. generateDailyReport — no brain / failing brain → deterministic
-//      fallback ships; brain prose splices in and embeds in the HTML.
+//   d. per-bot one-liners — deterministic text (title prefix folded, volume,
+//      top external peer, OpenTeam, chain interactions) replacing the v1
+//      counts table; the counts table is GONE from markdown and HTML;
+//   e. agenda — next-24h scheduled fires (named, total, +N more), open
+//      orchestrations by status, long-term one-liners; deterministic;
+//   f. brain prompt — locale-native with THREE FIXED section headings
+//      (昨日总览 / 各 Bot 一句话 / 需要你拍板) that fold in external chats,
+//      OpenTeam and on-chain interactions;
+//   g. prose parser — tolerant lift of bot lines + 🔴/🟡 needs bullets for
+//      the HTML cards; anything unexpected degrades to empty;
+//   h. HTML — self-contained visuals (KPI row, chart svg, bot cards, needs
+//      cards, progress, agenda), data escaped, deep links preserved; the
+//      brain prose is NOT embedded (headline line only);
+//   i. generateDailyReport — no brain / failing brain → deterministic
+//      fallback ships; brain path markdown = prose + follow-up links + agenda.
 //
 // The pure module is loaded straight from src/ (Node type stripping); there
 // are no runtime relative imports in this test file.
@@ -32,16 +35,19 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  buildDailyReportBotRollupMarkdown,
-  buildDailyReportBotRollupRows,
+  buildDailyReportAgendaMarkdown,
+  buildDailyReportBotLineText,
+  buildDailyReportBrainSystemPrompt,
   buildDailyReportFollowUpListMarkdown,
+  buildDailyReportHtml,
   buildDailyReportMachineRollupMarkdown,
   buildDailyReportOwnerTasksMarkdown,
-  buildDailyReportBrainSystemPrompt,
+  buildDeterministicBotLines,
   buildDeterministicBriefing,
-  buildDailyReportHtml,
+  DAILY_REPORT_BRAIN_MAX_TOKENS,
+  extractDailyReportHeadlineLine,
   generateDailyReport,
-  renderDailyReportProseMarkdown,
+  parseDailyReportBrainProse,
   resolveDailyReportStrings,
   DAILY_REPORT_STRINGS_EN,
   DAILY_REPORT_STRINGS_ZH,
@@ -72,6 +78,51 @@ const sampleFacts = (overrides = {}) => ({
   },
   botDigests: [{ botName: 'Ops', isTwin: false, summaryDate: '2026-10-21', summaryText: 'Inspected 12 hosts.' }],
   onlineActivity: [{ botName: 'Ops', privateMessageCount: 4, groupMessageCount: 1 }],
+  botActivity: [
+    {
+      botName: 'Twin',
+      isTwin: true,
+      totalSessions: 2,
+      totalMessages: 120,
+      sessions: [
+        { sessionId: 'bs1', title: '[编排任务] MetaWeb Surf 2026-10-25', sessionType: 'standard', messageCount: 100, lastAssistantExcerpt: '{"summary":"surf report"}' },
+        { sessionId: 'bs2', title: '移动化跟进', sessionType: 'standard', messageCount: 20, lastAssistantExcerpt: null },
+      ],
+      scheduledRuns: [{ taskName: 'Morning brief', status: 'success' }],
+      scheduledRunCount: 2,
+      externalChats: [{ peerName: 'BOT-007', messageCount: 12, lastExcerpt: 'judgement criteria settled' }],
+      openTeam: [],
+      chainInteractions: [{ kind: 'paylike', count: 9, lastSummary: 'liked a pin' }, { kind: 'paycomment', count: 3, lastSummary: null }],
+      groupMessages: 3,
+    },
+    {
+      botName: 'Ops',
+      isTwin: false,
+      totalSessions: 0,
+      totalMessages: 0,
+      sessions: [],
+      scheduledRuns: [{ taskName: 'Nightly inspect', status: 'success' }],
+      scheduledRunCount: 1,
+      externalChats: [],
+      openTeam: [{ taskTitle: 'Remote jam session', memberStatus: 'active', windowMessageCount: 4 }],
+      chainInteractions: [],
+      groupMessages: 1,
+    },
+  ],
+  upcoming: {
+    scheduledFires: [
+      { fireAtLocal: '06:00', taskName: 'Server patrol', botName: 'Ops' },
+      { fireAtLocal: '09:00', taskName: 'Topic digest', botName: 'Scout' },
+    ],
+    scheduledFiresTotal: 7,
+    openOrchestrations: [{ taskName: 'Fix mobile login', status: 'review' }],
+    openOrchestrationByStatus: { review: 12, planning: 1 },
+  },
+  hourlyActivity: {
+    local: [10, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+    online: [1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  },
+  knownBotCount: 21,
   newSessionCount: 5,
   hasAnyActivity: true,
   ...overrides,
@@ -108,7 +159,6 @@ test('follow-up list: empty pending set → section omitted entirely (no empty-s
     DAILY_REPORT_STRINGS_EN,
   );
   assert.equal(markdown, '');
-  assert.doesNotMatch(markdown, /Nothing is waiting/);
   const zh = buildDailyReportFollowUpListMarkdown(
     sampleFacts({ pendingFollowUps: [] }),
     DAILY_REPORT_STRINGS_ZH,
@@ -154,41 +204,60 @@ test('machine rollups: failed/skipped runs named (max 3) with bot; success still
   assert.equal(named.length, 3, 'at most 3 failed/skipped runs are named');
   assert.match(named.join('\n'), /Backup check · Ops — failed/);
   assert.match(named.join('\n'), /Site patrol · Guard — skipped \(already_running\)/);
-  assert.match(named.join('\n'), /Feed fetch/);
   assert.doesNotMatch(named.join('\n'), /Sixth failure/, 'failures beyond the cap are not named');
-  assert.doesNotMatch(named.join('\n'), /Nightly inspect/, 'successful runs stay unnamed');
 });
 
-test('bot rollup rows: computed from humanSessions / scheduledRuns / onlineActivity by botName', () => {
-  const rows = buildDailyReportBotRollupRows(sampleFacts());
-  const byBot = new Map(rows.map((row) => [row.botName, row]));
-  assert.deepEqual(byBot.get('Ops'), { botName: 'Ops', sessions: 0, scheduledRuns: 1, dms: 4, groupMessages: 1 });
-  assert.deepEqual(byBot.get('Writer'), { botName: 'Writer', sessions: 1, scheduledRuns: 0, dms: 0, groupMessages: 0 });
+test('bot one-liner text: prefix folded, volume + peer + OpenTeam + chain folded in', () => {
+  const [twin] = sampleFacts().botActivity;
+  const zh = buildDailyReportBotLineText(twin, DAILY_REPORT_STRINGS_ZH);
+  assert.match(zh, /MetaWeb Surf 2026-10-25、移动化跟进/, 'delegation prefix folded, top-2 titles joined');
+  assert.match(zh, /2 会话 · 120 消息 · 2 次定时/);
+  assert.match(zh, /与 BOT-007 12 私信/);
+  assert.match(zh, /链上 9 赞 \/ 3 评论/);
+  assert.match(zh, /3 群消息/);
+  const [ops] = sampleFacts().botActivity.slice(1);
+  const enOps = buildDailyReportBotLineText(ops, DAILY_REPORT_STRINGS_EN);
+  assert.match(enOps, /OpenTeam: Remote jam session/);
 });
 
-test('bot rollup markdown: one table, digest text absent', () => {
-  const markdown = buildDailyReportBotRollupMarkdown(sampleFacts(), DAILY_REPORT_STRINGS_ZH);
-  assert.match(markdown, /\| Bot \| 会话 \| 定时任务 \| 私信 \| 群消息 \|/);
-  assert.match(markdown, /\| Ops \| 0 \| 1 \| 4 \| 1 \|/);
-  assert.match(markdown, /\| Writer \| 1 \| 0 \| 0 \| 0 \|/);
-  assert.doesNotMatch(markdown, /Inspected 12 hosts/, 'digest diary never reaches the table');
+test('deterministic bot lines: one bullet per bot under the section title', () => {
+  const markdown = buildDeterministicBotLines(sampleFacts(), DAILY_REPORT_STRINGS_ZH);
+  assert.match(markdown, /\*\*各 Bot 一句话\*\*/);
+  assert.match(markdown, /- \*\*Twin\*\*：/);
+  assert.match(markdown, /- \*\*Ops\*\*：/);
+  assert.equal(buildDeterministicBotLines(sampleFacts({ botActivity: [] }), DAILY_REPORT_STRINGS_ZH), '');
 });
 
-test('deterministic briefing: follow-ups + owner tasks + rollups; no流水账 sections', () => {
+test('agenda: fires named with total, +N more, orchestration statuses, long-term', () => {
+  const markdown = buildDailyReportAgendaMarkdown(sampleFacts(), DAILY_REPORT_STRINGS_ZH);
+  assert.match(markdown, /\*\*今日预告\*\*/);
+  assert.match(markdown, /定时任务 7：06:00 Server patrol（Ops）、09:00 Topic digest（Scout） 等 5 项/);
+  assert.match(markdown, /编排待办：review 12 · planning 1/);
+  assert.match(markdown, /长期项目：Q4 roadmap 25%（active）/);
+  assert.equal(
+    buildDailyReportAgendaMarkdown(
+      sampleFacts({ upcoming: { scheduledFires: [], scheduledFiresTotal: 0, openOrchestrations: [], openOrchestrationByStatus: {} }, machineActivity: { ...sampleFacts().machineActivity, longTermProgress: [] } }),
+      DAILY_REPORT_STRINGS_ZH,
+    ),
+    '',
+    'empty upcoming → section omitted',
+  );
+});
+
+test('deterministic briefing: needs-you + bot lines + owner tasks + fleet + agenda; counts table gone', () => {
   const markdown = buildDeterministicBriefing(sampleFacts(), DAILY_REPORT_STRINGS_ZH);
   assert.match(markdown, /需要你处理/);
   assert.match(markdown, /idbots:\/\/session\/sess-1/);
+  assert.match(markdown, /各 Bot 一句话/);
+  assert.match(markdown, /- \*\*Twin\*\*：/);
   assert.match(markdown, /你发起的任务：/);
   assert.match(markdown, /长期项目：/);
   assert.match(markdown, /Bot 与自动化/);
   assert.match(markdown, /定时任务 1 · 全部成功/);
-  assert.match(markdown, /群任务动态 1/);
-  assert.match(markdown, /Twin 自动派单触及： 2/);
-  assert.match(markdown, /\| Bot \| 会话 \| 定时任务 \| 私信 \| 群消息 \|/);
-  // Owner rework: these listings are gone from the owner-facing briefing.
+  assert.match(markdown, /今日预告/);
+  assert.doesNotMatch(markdown, /\| Bot \| 会话 \|/, 'v1 per-bot counts table is gone');
   assert.doesNotMatch(markdown, /Landing copy/, 'humanSessions listing removed (brain input only)');
   assert.doesNotMatch(markdown, /Inspected 12 hosts/, 'digest diary removed (brain input only)');
-  assert.doesNotMatch(markdown, /新建会话/, 'new-session count dropped from the chat message');
   assert.doesNotMatch(markdown, /stage_changed/, 'long-term journal events removed');
 });
 
@@ -198,87 +267,132 @@ test('deterministic briefing: empty follow-ups → no needs-you section, rest in
     DAILY_REPORT_STRINGS_EN,
   );
   assert.doesNotMatch(markdown, /Needs you/);
-  assert.doesNotMatch(markdown, /Nothing is waiting/, 'no empty-state line');
+  assert.match(markdown, /Bot one-liners/, 'bot lines still ship');
   assert.match(markdown, /Owner-sourced tasks:/, 'other sections still ship');
   assert.match(markdown, /Scheduled runs 1 · all succeeded/);
 });
 
 // ---------------------------------------------------------------------------
-// Brain prompt (locale-native, principle-based)
+// Brain prompt (locale-native, three FIXED section headings)
 // ---------------------------------------------------------------------------
 
-test('brain prompt: zh is locale-native and follows the user UI language', () => {
+test('brain prompt: zh mandates the three fixed sections and the external dimensions', () => {
   const prompt = buildDailyReportBrainSystemPrompt(DAILY_REPORT_STRINGS_ZH);
   assert.match(prompt, /执行助理/);
-  assert.match(prompt, /与用户界面一致的语言/);
-  assert.doesNotMatch(prompt, /简体|繁体/, 'no hardcoded Chinese variant');
-  assert.match(prompt, /不设固定章节标题/);
-  assert.doesNotMatch(prompt, /## Headline/, 'no mandated English section names');
-  assert.doesNotMatch(prompt, /## Progress/);
-  assert.doesNotMatch(prompt, /## Needs you/);
+  assert.match(prompt, /## 昨日总览/);
+  assert.match(prompt, /## 各 Bot 一句话/);
+  assert.match(prompt, /## 需要你拍板/);
+  assert.match(prompt, /外部 bot/);
+  assert.match(prompt, /OpenTeam/);
+  assert.match(prompt, /链上/);
+  assert.match(prompt, /🔴/);
 });
 
-test('brain prompt: en mirrors the principles without fixed headings', () => {
+test('brain prompt: en mirrors the fixed headings and external dimensions', () => {
   const prompt = buildDailyReportBrainSystemPrompt(DAILY_REPORT_STRINGS_EN);
-  assert.match(prompt, /executive assistant/i);
-  assert.match(prompt, /same language as the user's UI/i);
-  assert.match(prompt, /not fixed headings/i);
-  assert.match(prompt, /real titles/);
-  assert.doesNotMatch(prompt, /## Headline/);
-  assert.doesNotMatch(prompt, /## Progress/);
-  assert.doesNotMatch(prompt, /## Needs you/);
+  assert.match(prompt, /## Yesterday at a glance/);
+  assert.match(prompt, /## Bot one-liners/);
+  assert.match(prompt, /## Needs you/);
+  assert.match(prompt, /external bot/i);
+  assert.match(prompt, /OpenTeam/);
+  assert.match(prompt, /on-chain/);
+  assert.doesNotMatch(prompt, /昨日总览/, 'locale-native, no zh headings in the en prompt');
 });
 
 // ---------------------------------------------------------------------------
-// Prose renderer (escape-first)
+// Prose parser (tolerant lift for the HTML cards)
 // ---------------------------------------------------------------------------
 
-test('renderDailyReportProseMarkdown: escape-first, lifts headings/bullets/bold only', () => {
-  const html = renderDailyReportProseMarkdown(
-    '## 今日态势\n**Bold** <script>alert(1)</script>\n- first **item**\n- [click](javascript:evil)\nplain',
-  );
-  assert.match(html, /<h2>今日态势<\/h2>/);
-  assert.match(html, /<strong>Bold<\/strong> &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
-  assert.match(html, /<li>first <strong>item<\/strong><\/li>/);
-  assert.match(html, /\[click\]\(javascript:evil\)/, 'link text inert — escaped, not an anchor');
-  assert.match(html, /<p>plain<\/p>/);
-  assert.ok(!html.includes('<script>alert'));
+test('parseDailyReportBrainProse: lifts overview, bot lines and needs levels', () => {
+  const sections = parseDailyReportBrainProse([
+    '## 昨日总览',
+    '主线 A 推进到 50%，无阻塞。',
+    '## 各 Bot 一句话',
+    '- **Twin**：移动端验收通过，挖出充值页故障。',
+    '- **Ops**：巡检两次全部成功。',
+    '## 需要你拍板',
+    '- 🔴 充值页密钥失效——建议今天修。',
+    '- 🟡 外包单转账被拒——放行或撤件。',
+    '## 未知小节',
+    'ignored',
+  ].join('\n'));
+  assert.equal(sections.overviewMarkdown, '主线 A 推进到 50%，无阻塞。');
+  assert.deepEqual(sections.botLines, [
+    { botName: 'Twin', text: '移动端验收通过，挖出充值页故障。' },
+    { botName: 'Ops', text: '巡检两次全部成功。' },
+  ]);
+  assert.deepEqual(sections.needsYou.map((need) => need.level), ['red', 'amber']);
+  assert.match(sections.needsYou[0].text, /充值页/);
+});
+
+test('parseDailyReportBrainProse: garbage degrades to empty, never throws', () => {
+  assert.deepEqual(parseDailyReportBrainProse(''), { overviewMarkdown: null, botLines: [], needsYou: [] });
+  assert.deepEqual(parseDailyReportBrainProse('random text\nno headings'), { overviewMarkdown: null, botLines: [], needsYou: [] });
+});
+
+test('extractDailyReportHeadlineLine: first non-heading non-empty line', () => {
+  assert.equal(extractDailyReportHeadlineLine('## 昨日总览\n\n总览第一句。\n第二句。'), '总览第一句。');
+  assert.equal(extractDailyReportHeadlineLine(''), null);
 });
 
 // ---------------------------------------------------------------------------
-// HTML report
+// HTML report (visuals; no prose duplication)
 // ---------------------------------------------------------------------------
 
-test('buildDailyReportHtml: rollups + per-bot table, diary/listings removed', () => {
+test('buildDailyReportHtml: KPI row, chart svg, bot cards, needs cards, agenda; prose not embedded', () => {
   const html = buildDailyReportHtml({
     facts: sampleFacts(),
-    strings: DAILY_REPORT_STRINGS_EN,
+    strings: DAILY_REPORT_STRINGS_ZH,
     dateLabel: '2026-10-22',
-    proseHtml: '<p>brain <strong>prose</strong></p>',
+    headlineText: '总览首句。',
+    proseMarkdown: [
+      '## 昨日总览',
+      '总览首句。只出现在标题带里的第二段句子 SECOND-PROSE-ONLY-LINE 不应出现在 HTML。',
+      '## 各 Bot 一句话',
+      '- **Twin**：LLM 写的一句话。',
+      '## 需要你拍板',
+      '- 🔴 充值页密钥失效。',
+    ].join('\n'),
   });
-  assert.match(html, /<title>Daily Report 2026-10-22<\/title>/);
-  assert.match(html, /brain <strong>prose<\/strong>/, 'brain prose embedded');
+  assert.match(html, /<title>每日汇报 2026-10-22<\/title>/);
+  // KPI row.
+  assert.match(html, /2<small>\/21<\/small>/);
+  assert.match(html, /本地消息/);
+  assert.match(html, /全部成功/);
+  // Chart: svg + polyline present.
+  assert.match(html, /<svg viewBox="0 0 880 150"/);
+  assert.match(html, /<polyline fill="none" stroke="#fbbf24"/);
+  // Bot cards: LLM line preferred, meter + chips rendered; bots without a
+  // brain line fall back to the deterministic text (chain/OpenTeam words).
+  assert.match(html, /LLM 写的一句话。/);
+  assert.match(html, /class="bot"/);
+  assert.match(html, /OpenTeam: Remote jam session/, 'deterministic fallback text on the Ops card');
+  // Needs cards: 🔴 card + follow-up deep link.
+  assert.match(html, /need red/);
+  assert.match(html, /充值页密钥失效/);
   assert.match(html, /href="idbots:\/\/session\/sess-1"/);
   assert.match(html, /Pick a color &lt;script&gt;/, 'title escaped');
   assert.ok(!html.includes('<script>alert'));
-  assert.match(html, /Scheduled runs 1 · all succeeded/);
-  assert.match(html, /Per-bot activity/);
-  assert.match(html, /<td>Ops<\/td>\s*<td>0<\/td>\s*<td>1<\/td>\s*<td>4<\/td>\s*<td>1<\/td>/);
-  assert.match(html, /New sessions: 5/, 'session count kept in the meta line');
-  // Owner rework removals.
-  assert.doesNotMatch(html, /Inspected 12 hosts/, 'digest table removed from HTML');
+  // Agenda.
+  assert.match(html, /今日预告/);
+  assert.match(html, /Server patrol/);
+  // Prose duplication guard: only the headline line rides along.
+  assert.doesNotMatch(html, /SECOND-PROSE-ONLY-LINE/);
+  assert.match(html, /总览首句。/);
+  // v1 counts table is gone.
+  assert.doesNotMatch(html, /各 Bot 活动/);
+  assert.doesNotMatch(html, /Inspected 12 hosts/, 'digest diary removed from HTML');
   assert.doesNotMatch(html, /Landing copy/, 'human-session table removed from HTML');
-  assert.doesNotMatch(html, /stage_changed/, 'machine item list removed from HTML');
+  assert.match(html, /新建会话: 5/, 'session count kept in the meta line');
 });
 
-test('buildDailyReportHtml: empty follow-ups → no needs-you section at all', () => {
+test('buildDailyReportHtml: empty follow-ups and no brain needs → no needs-you section at all', () => {
   const html = buildDailyReportHtml({
     facts: sampleFacts({ pendingFollowUps: [] }),
     strings: DAILY_REPORT_STRINGS_EN,
     dateLabel: '2026-10-22',
   });
   assert.doesNotMatch(html, /Needs you/);
-  assert.doesNotMatch(html, /Nothing is waiting/);
   assert.match(html, /Owner tasks/, 'other sections still render');
 });
 
@@ -299,13 +413,12 @@ test('generateDailyReport: no brain → deterministic fallback ships + HTML writ
   assert.equal(result.usedFallback, true);
   assert.match(result.briefingMarkdown, /Here is your daily briefing\./);
   assert.match(result.briefingMarkdown, /idbots:\/\/session\/sess-1/);
-  assert.match(result.briefingMarkdown, /Scheduled runs 1 · all succeeded/);
+  assert.match(result.briefingMarkdown, /Bot one-liners/);
+  assert.match(result.briefingMarkdown, /Today ahead/);
   assert.doesNotMatch(result.briefingMarkdown, /Inspected 12 hosts/);
   assert.equal(path.basename(result.htmlFilePath), '2026-10-22.html');
   assert.ok(fs.existsSync(result.htmlFilePath), 'HTML file written');
   assert.match(result.htmlFileUrl, /^file:\/\//);
-  const html = fs.readFileSync(result.htmlFilePath, 'utf8');
-  assert.match(html, /Approve deploy plan/);
   fs.rmSync(reportDir, { recursive: true, force: true });
 });
 
@@ -325,7 +438,7 @@ test('generateDailyReport: failing brain degrades to fallback (report never goes
   fs.rmSync(reportDir, { recursive: true, force: true });
 });
 
-test('generateDailyReport: brain prose is spliced in and embedded in the HTML', async () => {
+test('generateDailyReport: brain prose spliced with links + agenda; HTML carries cards not prose', async () => {
   const reportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-report-test-'));
   let seen = null;
   const result = await generateDailyReport({
@@ -336,23 +449,34 @@ test('generateDailyReport: brain prose is spliced in and embedded in the HTML', 
     brain: { llmId: 'glm-test', fallbackLlmId: 'glm-backup' },
     performChat: async (systemPrompt, userMessage, llmId, options) => {
       seen = { systemPrompt, userMessage, llmId, options };
-      return 'A calm day overall: "Build landing page" is halfway there on Writer, nothing is blocked.\n\n- **Build landing page** — 2/4 steps done (50%), driven by Writer.\n\n"Approve deploy plan" is waiting on you; it is 3 days old — suggest confirming the rollout window.';
+      return [
+        '## Yesterday at a glance',
+        'A calm day overall: "Build landing page" is halfway there, nothing blocked.',
+        '## Bot one-liners',
+        '- **Twin**: pushed mobile acceptance through; surfaced a paywall key issue.',
+        '## Needs you',
+        '- 🔴 Approve the rollout window today.',
+      ].join('\n');
     },
   });
   assert.equal(result.usedFallback, false);
   assert.equal(seen.llmId, 'glm-test');
   assert.equal(seen.options.fallbackLlmId, 'glm-backup', 'brain ladder rides primary→fallback');
+  assert.equal(seen.options.maxTokens, DAILY_REPORT_BRAIN_MAX_TOKENS);
   assert.equal(seen.options.webSearch, false);
-  assert.match(seen.systemPrompt, /daily briefing/);
+  assert.match(seen.systemPrompt, /## Bot one-liners/);
   assert.match(seen.userMessage, /"sessionId":"sess-1"/);
+  // Markdown = prose, then follow-up links, then agenda.
   assert.match(result.briefingMarkdown, /A calm day overall/, 'prose first');
-  assert.match(result.briefingMarkdown, /\[Approve deploy plan\]\(idbots:\/\/session\/sess-1\)/, 'deterministic links still attached');
+  assert.match(result.briefingMarkdown, /\[Approve deploy plan\]\(idbots:\/\/session\/sess-1\)/, 'deterministic links attached');
+  assert.match(result.briefingMarkdown, /Today ahead/, 'agenda appended after prose');
   const html = fs.readFileSync(result.htmlFilePath, 'utf8');
-  assert.match(html, /<strong>Build landing page<\/strong>/, 'brain prose embedded in HTML');
+  assert.match(html, /pushed mobile acceptance through/, 'bot line rendered as an HTML card');
+  assert.doesNotMatch(html, /A calm day overall: "Build landing page"/, 'full prose paragraph not duplicated into HTML');
   fs.rmSync(reportDir, { recursive: true, force: true });
 });
 
-test('generateDailyReport: zh locale keeps the Chinese prompt and Chinese fallback', async () => {
+test('generateDailyReport: zh locale keeps the Chinese prompt and no needs-you when empty', async () => {
   const reportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-report-test-'));
   let seen = null;
   const result = await generateDailyReport({
@@ -363,13 +487,14 @@ test('generateDailyReport: zh locale keeps the Chinese prompt and Chinese fallba
     brain: { llmId: 'glm-test' },
     performChat: async (systemPrompt) => {
       seen = systemPrompt;
-      return '今天整体平稳："Build landing page" 由 Writer 推进到 50%，没有阻塞，也没有待拍板的事项。';
+      return '## 昨日总览\n今天整体平稳：主线推进 50%，没有阻塞。\n\n## 各 Bot 一句话\n- **Twin**：主线推进与验收。';
     },
   });
-  assert.match(seen, /与用户界面一致的语言/);
+  assert.match(seen, /## 各 Bot 一句话/);
   assert.equal(result.usedFallback, false);
   assert.match(result.briefingMarkdown, /今天整体平稳/);
   assert.doesNotMatch(result.briefingMarkdown, /需要你处理/, 'needs-you header absent when no follow-ups');
-  assert.doesNotMatch(result.briefingMarkdown, /当前没有等待你处理的事项/, 'no empty-state line');
+  assert.doesNotMatch(result.briefingMarkdown, /待跟进入口/, 'links block omitted when nothing is pending');
+  assert.match(result.briefingMarkdown, /今日预告/, 'agenda still ships');
   fs.rmSync(reportDir, { recursive: true, force: true });
 });
