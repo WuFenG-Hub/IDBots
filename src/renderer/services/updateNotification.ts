@@ -2,10 +2,13 @@
  * Update notification service
  *
  * Manages app update notifications shown to users after upgrading.
- * - Loads notification definitions from update-notifications.json
+ * - Notification definitions are bundled at build time from the repo-root
+ *   update-notifications.json
  * - Checks if the user should see a notification based on their install/upgrade history
  * - Records when notifications are viewed
  */
+
+import notificationsJson from '../../../update-notifications.json';
 
 export interface UpdateNotification {
   version: string;
@@ -26,17 +29,17 @@ export interface UpdateNotificationsData {
 }
 
 /**
- * Load and parse update-notifications.json
+ * Notification definitions, bundled at build time. The packaged renderer runs
+ * from file:// (loadFile), where fetch() cannot load anything — the earlier
+ * runtime fetch('/update-notifications.json') only worked under the vite dev
+ * server and silently 404'd in every packaged build. The repo-root JSON stays
+ * the single source; editing it requires a rebuild, which the packaged app
+ * needed anyway since the file never shipped.
  */
 export async function loadUpdateNotifications(): Promise<UpdateNotificationsData | null> {
-  try {
-    const response = await fetch('/update-notifications.json');
-    if (!response.ok) return null;
-    return await response.json();
-  } catch (error) {
-    console.warn('[UpdateNotification] Failed to load update-notifications.json:', error);
-    return null;
-  }
+  const data = notificationsJson as UpdateNotificationsData | null;
+  if (!data || !Array.isArray(data.notifications)) return null;
+  return data;
 }
 
 /**

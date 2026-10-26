@@ -1630,6 +1630,13 @@ interface IElectronAPI {
     getVersion: () => Promise<string>;
     getSystemLocale: () => Promise<string>;
   };
+  updateNotification: {
+    shouldForceShow: () => Promise<boolean>;
+    getFirstInstallVersion: () => Promise<string | null>;
+    setFirstInstallVersion: (version: string) => Promise<void>;
+    hasViewed: (version: string) => Promise<boolean>;
+    markAsViewed: (version: string) => Promise<void>;
+  };
   startup: {
     rendererInitialized: () => Promise<{
       success: boolean;

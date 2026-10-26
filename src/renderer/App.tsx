@@ -70,10 +70,9 @@ import {
   loadUpdateNotifications,
   getNotificationForVersion,
   shouldShowNotification,
-  type UpdateNotification as UpdateNotificationData,
 } from './services/updateNotification';
 
-const UpdateNotificationModal = React.lazy(() => import('./components/update/UpdateNotificationModal'));
+const UpdateNotificationModal = React.lazy(() => import('./components/UpdateNotificationModal'));
 
 /**
  * Everything the user cannot see on first paint is split into its own chunk:
@@ -1572,7 +1571,6 @@ const App: React.FC = () => {
       {showUpdateNotification && updateNotificationData && (
         <Suspense fallback={null}>
           <UpdateNotificationModal
-            version={updateNotificationData.version}
             title={updateNotificationData.title}
             content={updateNotificationData.content}
             onClose={handleCloseUpdateNotification}
