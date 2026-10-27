@@ -76,10 +76,12 @@ test.describe('gateway-backed smoke', () => {
     await page.getByPlaceholder('Type a message…').fill('generate a report');
     await page.getByRole('button', { name: 'Send' }).click();
 
-    // Wait for the whole streamed artifact list before checking for raw paths.
+    // Wait for the settled turn and the final directory label, not only the artifact list.
     await expect(page.getByRole('link', { name: 'gateway-e2e-refresh.md', exact: true })).toBeVisible({ timeout: 30_000 });
     const link = page.getByRole('link', { name: /gateway-e2e-report\.docx/ });
     await expect(link).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId('turn-phase')).toHaveCount(0, { timeout: 30_000 });
+    await expect(page.getByText('工作目录', { exact: true })).toBeVisible({ timeout: 30_000 });
     await screenTo(page, testInfo, 'f11-message-before-click');
 
     // F-11 criterion: zero container paths in the rendered surface — no
