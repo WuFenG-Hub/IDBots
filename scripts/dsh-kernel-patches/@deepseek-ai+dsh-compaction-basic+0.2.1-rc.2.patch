@@ -1,0 +1,109 @@
+--- a/dsh-runtime/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js
++++ b/dsh-runtime/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js
+@@ -1,6 +1,6 @@
+ import z from "@deepseek-ai/schemastery";
+ import { CompactionEngine, CompactionId, ManualCompactionError, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
+-import { BlockAssembler, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, contentHasImage, createUserMessage, errorChain } from "@deepseek-ai/dsh-llm";
++import { BlockAssembler, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, contentHasImage, createUserMessage, errorChain, isContextWindowExceededError } from "@deepseek-ai/dsh-llm";
+ import { assertNever, deepFreeze } from "@deepseek-ai/dsh-util-values";
+ import { randomUUID } from "node:crypto";
+ import { isDeepStrictEqual } from "node:util";
+@@ -430,8 +430,54 @@
+ 		start: surfaceNodes[firstIdx],
+ 		end: surfaceNodes[keepFromIdx - 1]
+ 	};
++}
++/**
++* IDBots patch (overflow-shrink): bound on the context-overflow shrink ladder.
++* Each rung halves the compacted region, so four rungs reach 1/16 of the
++* region that overflowed before the original request error is preserved.
++*/
++const OVERFLOW_SHRINK_MAX_ATTEMPTS = 4;
++/**
++* IDBots patch (overflow-shrink): whether a failed summarization was itself
++* rejected for exceeding the route's context window — the adapter's
++* `CONTEXT_WINDOW_EXCEEDED` code anywhere on the cause chain, or provider
++* overflow wording in the rendered chain (a gateway 400 whose body carries
++* `context_length_exceeded`).
++* @param error - the caught summarization failure.
++* @returns true only for a context-window overflow of the summary request.
++*/
++function isOverflowSummaryError(error) {
++	for (let current = error; typeof current === "object" && current !== null; current = current.cause) {
++		if (current.code === CONTEXT_WINDOW_EXCEEDED_CODE) return true;
++	}
++	return isContextWindowExceededError(errorChain(error));
+ }
+ /**
++* IDBots patch (overflow-shrink): the retained-tail budget whose
++* `selectCompactableRange` result is the OLDER half of `range`. The
++* summarization request replays the compacted region as its prefix, so a
++* region sized like the request that just overflowed overflows the same way on
++* the same route; retaining the recent tail plus the newer half of the region
++* leaves only the older half to summarize.
++* @param measurement - meter measurement the range was selected from.
++* @param range - the inclusive surface-seq range whose summary overflowed.
++* @param retainTokens - the retained-tail budget that produced `range`.
++* @returns a strictly larger retention budget, or `null` when the region can
++*   shrink no further (single node, or not found in the measurement).
++*/
++function overflowShrinkRetainTokens(measurement, range, retainTokens) {
++	const nodes = measurement.nodes;
++	const startIdx = nodes.findIndex((node) => node.seq === range.start);
++	const endIdx = nodes.findIndex((node) => node.seq === range.end);
++	if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return null;
++	let regionTokens = 0;
++	for (let index = startIdx; index <= endIdx; index += 1) regionTokens += nodes[index].tokens;
++	let tailTokens = 0;
++	for (let index = endIdx + 1; index < nodes.length; index += 1) tailTokens += nodes[index].tokens;
++	const next = tailTokens + Math.ceil(regionTokens / 2);
++	return next > retainTokens ? next : null;
++}
++/**
+ * Run the single compaction transaction over one selected positional span.
+ * Selection and validation are read-only. Idle/log validation and
+ * `compaction/start` are synchronously adjacent, so the durable opening marker is
+@@ -929,9 +975,34 @@
+ 				prune.pruneSession(agent.session);
+ 				measurement = meter.measure(agent.session);
+ 			}
+-			const range = selectCompactableRange(agent.session, measurement, 0);
+-			if (range === null) return null;
+-			return this.compactRegion(range.start, range.end, agent, signal);
++			// IDBots patch (overflow-shrink): the summarization request replays the
++			// shadowed region as its prefix on the route that just overflowed, so a
++			// region sized like the failed request is rejected the same way (three
++			// identical gateway 400s in a row, each ending the turn). When the
++			// summarizer itself overflows, keep the newer half of the region as
++			// retained tail and summarize only the older half; repeat down the
++			// ladder until a summary fits, then let the kernel retry the request
++			// against the shrunken surface.
++			let retainTokens = 0;
++			let lastOverflow;
++			for (let attempt = 0; ; attempt += 1) {
++				const range = selectCompactableRange(agent.session, measurement, retainTokens);
++				if (range === null) {
++					if (lastOverflow !== void 0) throw lastOverflow;
++					return null;
++				}
++				try {
++					return await this.compactRegion(range.start, range.end, agent, signal);
++				} catch (error) {
++					if (signal?.aborted === true || attempt >= OVERFLOW_SHRINK_MAX_ATTEMPTS || !isOverflowSummaryError(error)) throw error;
++					const next = overflowShrinkRetainTokens(measurement, range, retainTokens);
++					if (next === null) throw error;
++					this.ctx.logger.warn(`context-overflow compaction: the summarization request itself exceeded the context window (region ${range.start}-${range.end}); retrying on the older half of the region (retaining ~${next} tail tokens)`);
++					lastOverflow = error;
++					retainTokens = next;
++					measurement = meter.measure(agent.session);
++				}
++			}
+ 		}
+ 		const info = await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal);
+ 		assertNoActiveCompaction(agent.session, "automatic pressure compaction");
+@@ -1024,4 +1095,4 @@
+ 	}
+ };
+ //#endregion
+-export { BasicCompactionEngine, BasicCompactionEngine as default };
++export { BasicCompactionEngine, BasicCompactionEngine as default, isOverflowSummaryError, overflowShrinkRetainTokens };

@@ -46,7 +46,11 @@ const sessionRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-compact-pol
     { provider: 'big-gw', model: 'm-1m', thresholdRatio: 0.8, headroomTokens: 40000 },
   )
   const { modelPolicies: _ignored, ...globals } = entryConfig
-  assert.deepEqual(globals, { thresholdRatio: 0.8, retainRatio: 0.16, maxTokens: 8192, compactionRetries: 1 })
+  // maxOverflowRetries 2: the overflow-shrink patch summarizes only the older
+  // half of the surface when the summary request itself overflows, so a
+  // second recovery round is available when the shrunken request still
+  // exceeds a provider cap that sits below the declared window.
+  assert.deepEqual(globals, { thresholdRatio: 0.8, retainRatio: 0.16, maxTokens: 8192, compactionRetries: 1, maxOverflowRetries: 2 })
   fs.rmSync(root, { recursive: true, force: true })
   console.log('PASS  per-route threshold tiers at 90%/80% (boundary 256K), headroom scales at 4% of the window, clamped to [2K, 64K]')
 }

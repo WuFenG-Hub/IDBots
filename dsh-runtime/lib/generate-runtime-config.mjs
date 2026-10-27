@@ -218,6 +218,47 @@ const COMPACTION_HEADROOM_RATIO = 0.04
 const COMPACTION_HEADROOM_MIN_TOKENS = 2_048
 const COMPACTION_HEADROOM_MAX_TOKENS = 65_536
 
+/** Command Code gateway (api.commandcode.ai) GLM relay routes refuse to START a
+ *  request far below the model's advertised window. 2026-10-27 session
+ *  cw-2c70849f on `commandcode/z-ai/glm-5.3-flash` (declared 1,048,576):
+ *  cold starts up to 623,755 upstream-counted tokens and a warm continuation
+ *  at 716,532 were accepted, ~730K was rejected with `400
+ *  context_length_exceeded` ("The prompt exceeds the context window this
+ *  endpoint can start from. Compact the conversation and retry."). The tiered
+ *  threshold above (0.8 → 838,860) therefore never fired, every turn died with
+ *  the request 400 plus an identical compaction 400, and only the DeepSeek
+ *  fallback brain could carry the session. The gateway documents no such cap
+ *  (its own CLI compacts at 90%), and the same session's Zhipu-direct
+ *  `glm-5.3` route accepted 798K — so the policy is scoped to Command Code +
+ *  GLM-family ids on large windows, not to GLM everywhere. 0.5 × 1,048,576 =
+ *  524,288 sits ~100K under the highest accepted cold start, leaving a whole
+ *  tool-heavy step of growth between pre-step checks; the compaction-basic
+ *  overflow-shrink kernel patch (scripts/dsh-kernel-patches) is the safety
+ *  net if the gateway moves the line again, this policy is what keeps the
+ *  route proactive so that net is rarely needed. */
+const COMPACTION_THRESHOLD_RATIO_COMMANDCODE_GLM = 0.5
+const COMMANDCODE_GATEWAY_HOST = 'commandcode.ai'
+
+const isCommandCodeGatewayRoute = (provider) => {
+  if (provider?.key === 'commandcode') return true
+  try {
+    const host = new URL(String(provider?.baseUrl ?? '')).hostname.toLowerCase()
+    return host === COMMANDCODE_GATEWAY_HOST || host.endsWith(`.${COMMANDCODE_GATEWAY_HOST}`)
+  } catch {
+    return false
+  }
+}
+
+/** GLM-family model id in any gateway spelling: `glm-5.3-flash`,
+ *  `z-ai/glm-5.3-flash`, `zai-org/GLM-5.3`. */
+const isGlmFamilyModelId = (modelId) => /(?:^|\/)glm-/i.test(String(modelId ?? ''))
+
+const compactionThresholdRatio = (provider, modelId, window) => {
+  if (window < COMPACTION_SMALL_WINDOW_TOKENS) return COMPACTION_THRESHOLD_RATIO_SMALL_WINDOW
+  if (isCommandCodeGatewayRoute(provider) && isGlmFamilyModelId(modelId)) return COMPACTION_THRESHOLD_RATIO_COMMANDCODE_GLM
+  return COMPACTION_THRESHOLD_RATIO_DEFAULT
+}
+
 const compactionHeadroomTokens = (contextWindow) => {
   const window = Number.isFinite(contextWindow) ? Math.floor(contextWindow) : 0
   if (window <= 0) return undefined
@@ -244,9 +285,7 @@ const compactionModelPolicies = (providers) => {
       byTarget.set(JSON.stringify([routeKey, model.id]), {
         provider: routeKey,
         model: model.id,
-        thresholdRatio: window < COMPACTION_SMALL_WINDOW_TOKENS
-          ? COMPACTION_THRESHOLD_RATIO_SMALL_WINDOW
-          : COMPACTION_THRESHOLD_RATIO_DEFAULT,
+        thresholdRatio: compactionThresholdRatio(provider, model.id, window),
         headroomTokens,
       })
     }
@@ -583,6 +622,13 @@ export function generateRuntimeConfig(input) {
         retainRatio: 0.16,
         maxTokens: 8192,
         compactionRetries: 1,
+        // Context-overflow recovery rounds per request error (upstream default
+        // 1). The overflow-shrink kernel patch summarizes only the older half
+        // of the surface when the full summary request itself overflows, so the
+        // retried request can still exceed a provider cap that sits far below
+        // the declared window; a second round halves what is left before the
+        // original 400 is preserved.
+        maxOverflowRetries: 2,
         // Per-route tiered threshold + window-scaled headroom (see
         // compactionModelPolicies) — without it the flat 64K default zeroes
         // the pressure budget on small-window routes and proactive

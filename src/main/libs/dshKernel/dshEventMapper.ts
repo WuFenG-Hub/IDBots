@@ -58,6 +58,7 @@
 import type { DshMapperAction, DshSessionEventEnvelope, DshUsageSnapshot } from './types'
 import { splitThinkTaggedContent } from './thinkTags'
 import { foldsToolRideTextIntoThinking } from '../dshModelReasoning'
+import { tApp } from '../appLanguage'
 
 const textOf = (blocks: Array<{ type: string; text?: string }> | undefined): string =>
   (blocks ?? []).filter((b) => b.type === 'text').map((b) => b.text ?? '').join('')
@@ -70,6 +71,60 @@ const hasToolCallIn = (blocks: Array<{ type: string }> | undefined): boolean =>
 
 const joinThinking = (parts: string[]): string =>
   parts.filter((part) => part.length > 0).join('\n\n')
+
+/** Provider wording that identifies a context-window rejection of the
+ *  compaction request itself (Command Code gateway, OpenAI/Anthropic and
+ *  DeepSeek dialects). Matched against the raw error detail — the kernel's
+ *  `compaction/end` error is the adapter's rendered chain, not a stable code. */
+const COMPACTION_OVERFLOW_RE = /context[\s_-]*(?:length|window)[\s_-]*(?:exceed|overflow|limit)|exceeds the context window|context window this endpoint can start from|prompt is too long|too (?:long|large) for (?:this |the )?model|maximum context length/i
+
+/** Unwrap the innermost provider message from a kernel compaction-error
+ *  detail. The chain looks like `400: {"message":"{\"error\":{\"message\":
+ *  \"...\"}}"}` — one or two nested JSON layers that would otherwise render
+ *  as a raw JSON blob in the transcript. */
+export const innermostProviderMessage = (detail: string): string => {
+  let current: unknown = detail
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (typeof current !== 'string') break
+    const stripped = current.replace(/^\d{3}:\s*/, '')
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(stripped)
+    } catch {
+      break
+    }
+    if (parsed && typeof parsed === 'object') {
+      const next = (parsed as { message?: unknown }).message
+      if (typeof next === 'string' && next.length > 0) {
+        current = next
+        continue
+      }
+      const errorLike = (parsed as { error?: { message?: unknown } }).error
+      if (errorLike && typeof errorLike.message === 'string' && errorLike.message.length > 0) {
+        current = errorLike.message
+        continue
+      }
+    }
+    break
+  }
+  return typeof current === 'string' ? current : detail
+}
+
+/** Human-readable compaction failure line. A context-window rejection gets a
+ *  factual explanation (the compaction request itself overflowed — the kernel
+ *  replays the region as the summary request's prefix on the same route)
+ *  instead of the raw `400: {…nested JSON…}` dump the transcript used to show. */
+export function compactionFailureContent(detail: string): string {
+  const providerMessage = innermostProviderMessage(detail)
+  if (COMPACTION_OVERFLOW_RE.test(detail)) {
+    const origin = providerMessage && providerMessage !== detail ? ` (provider: ${providerMessage})` : ''
+    return tApp(
+      `压缩失败：压缩请求本身超出了该模型路由可接受的上下文上限${origin}。内核会缩小压缩范围后重试；若本轮仍失败，会话将切换备用模型继续。`,
+      `Compaction failed: the compaction request itself exceeded the context this model route accepts${origin}. The kernel will retry with a smaller range; if the turn still fails, the session continues on the fallback model.`,
+    )
+  }
+  return `Compaction failed: ${detail}`
+}
 
 type TextPhase = 'commentary' | 'final_answer'
 
@@ -404,7 +459,7 @@ export class DshEventMapper {
             kind: 'message',
             message: {
               type: 'system',
-              content: `Compaction failed: ${detail}`,
+              content: compactionFailureContent(detail),
               metadata: { compaction: true, isError: true },
             },
           })
