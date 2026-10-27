@@ -600,7 +600,7 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
     enabled: coworkComputerUse,
     disabled: !coworkComputerUseLoaded || coworkComputerUseSaving,
   });
-  const rowClass = 'grid grid-cols-1 md:grid-cols-[132px_minmax(0,1fr)] gap-2 md:gap-4 items-start';
+  const rowClass = 'grid grid-cols-1 md:grid-cols-[152px_minmax(0,1fr)] gap-2 md:gap-4 items-start';
   const labelClass = 'pt-2 text-sm font-medium dark:text-claude-darkText text-claude-text';
   const hintClass = 'text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-1';
   // Keep primary and fallback brain pickers the same half-column width.
