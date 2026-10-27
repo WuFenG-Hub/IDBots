@@ -882,6 +882,7 @@ const createMarkdownComponents = (
           <MobileFileLink
             filePath={filePath}
             isDirectory={looksLikeDirectory(filePath)}
+            onOpen={onOpenLocalFile}
           >
             {children}
           </MobileFileLink>

@@ -14,7 +14,7 @@ test.describe('app shell', () => {
     await expect(page.getByText('Scheduled tasks').first()).toBeVisible();
     await attachScreen(testInfo, page, 'shell-tasks-tab');
 
-    await page.getByRole('button', { name: 'Me' }).click();
+    await page.getByRole('button', { name: 'Me', exact: true }).click();
     await expect(page.getByText('Balance')).toBeVisible();
     await attachScreen(testInfo, page, 'shell-me-tab');
 

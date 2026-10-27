@@ -19,6 +19,8 @@ import {
 import { getMobileElectron, hasAppBridge } from '../appBridge';
 import type { MockMetabot } from '../../bridge/types';
 import { projectChatMessages } from '../chatProjection';
+import { useChatAttachments } from './useChatAttachments';
+import type { MobileChatAttachment } from '@/services/coworkSessionDrafts';
 import { t } from '../../i18n';
 
 export type { ChatMessageView } from '../chatProjection';
@@ -161,6 +163,7 @@ export function useChat(bots: MockMetabot[] = []) {
 
   const snapshot = controller?.getSnapshot() ?? EMPTY_SNAPSHOT;
   const sessionId = snapshot.currentSessionId;
+  const attachmentUploads = useChatAttachments(controller, sessionId);
   const state = sessionId ? snapshot.states.get(sessionId) : undefined;
   const messages = useMemo(() => projectChatMessages(state?.messages ?? []), [state?.messages]);
   const attempts = useMemo(
@@ -222,23 +225,30 @@ export function useChat(bots: MockMetabot[] = []) {
     if (state?.status === 'running') setQuotaDismissedSession(null);
   }, [state?.status]);
 
-  const send = useCallback(async (text: string): Promise<CoworkActionResult> => {
+  const send = useCallback(async (
+    text: string,
+    attachments: MobileChatAttachment[] = [],
+  ): Promise<CoworkActionResult> => {
     if (!controller) return { status: 'failed', error: t('mobile.bridge.unavailableBody') };
     const trimmed = text.trim();
-    if (!trimmed) return { status: 'failed', error: t('mobile.chat.emptyMessage') };
+    if (!trimmed && attachments.length === 0) {
+      return { status: 'failed', error: t('mobile.chat.emptyMessage') };
+    }
     if (!sessionId && metabotId === null) {
       return { status: 'failed', error: t('mobile.chat.twinUnavailable') };
     }
-    const title = trimmed.split('\n')[0]!.slice(0, 50);
+    const title = trimmed
+      ? trimmed.split('\n')[0]!.slice(0, 50)
+      : attachments[0]?.name.slice(0, 50) || t('mobile.chat.attachmentTitle');
     const startOptions = metabotId === null
       ? { title }
       : buildCoworkSessionStartOptions({ metabotId, title, config: configRef.current });
-    return controller.send(trimmed, startOptions);
+    return controller.send(text, startOptions, attachments, t('mobile.chat.inputFile'));
   }, [controller, metabotId, sessionId]);
 
-  const openSession = useCallback(async (id: string): Promise<void> => {
-    await controller?.openSession(id);
-  }, [controller]);
+  const openSession = useCallback(async (id: string): Promise<boolean> => (
+    controller?.openSession(id) ?? false
+  ), [controller]);
 
   const applyResync = useCallback((resync: CoworkResyncSnapshot): void => {
     controller?.applyResync(resync);
@@ -270,6 +280,11 @@ export function useChat(bots: MockMetabot[] = []) {
     quotaExhausted,
     quotaKind,
     draft: controller?.getDraft() ?? '',
+    attachments: controller?.getAttachments() ?? [],
+    ...attachmentUploads,
+    removeAttachment: (path: string) => {
+      if (controller) controller.removeAttachment(controller.getDraftToken(), path);
+    },
     attempts,
     actionError: snapshot.actionErrors[sessionId ?? 'new']
       ?? attempts.slice().reverse().find((attempt) => attempt.error)?.error

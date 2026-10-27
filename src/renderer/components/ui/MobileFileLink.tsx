@@ -27,6 +27,7 @@ interface MobileFileLinkProps {
   children: React.ReactNode;
   isDirectory?: boolean;
   className?: string;
+  onOpen?: (filePath: string, event: React.MouseEvent) => boolean | void;
 }
 
 const MobileFileLink: React.FC<MobileFileLinkProps> = ({
@@ -34,6 +35,7 @@ const MobileFileLink: React.FC<MobileFileLinkProps> = ({
   children,
   isDirectory = false,
   className = '',
+  onOpen,
 }) => {
   const { url, error } = useLocalFileUrl(
     isDirectory ? null : filePath,
@@ -68,6 +70,9 @@ const MobileFileLink: React.FC<MobileFileLinkProps> = ({
     <a
       href={url}
       download={downloadName}
+      onClick={(event) => {
+        if (onOpen?.(filePath, event) === true) event.preventDefault();
+      }}
       className={`text-claude-accent underline decoration-claude-accent/50 cursor-pointer break-all inline-flex items-center gap-1 ${className}`}
     >
       <DocumentIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />

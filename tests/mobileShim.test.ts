@@ -6,6 +6,9 @@ import {
   installShim,
   type GatewayInvoker,
   type IpcContractFile,
+  type PhoneFileSelectionOptions,
+  type PhoneFileSelectionResult,
+  type PhoneUploadProgress,
   type ShimDeps,
 } from '../src/mobile/bridge/installShim.ts';
 
@@ -63,6 +66,7 @@ type Listener = (event?: unknown) => void;
 class FakeInput {
   type = '';
   accept = '';
+  multiple = false;
   files: File[] = [];
   clicked = false;
   private listeners = new Map<string, Set<Listener>>();
@@ -387,6 +391,112 @@ test('dialog.selectFile uploads the picked file and returns the server paths', a
     paths: ['/data/workspace/uploads/note.txt'],
   });
   assert.equal(fake.calls.length, 0, 'dialog:selectFile must never reach the gateway');
+});
+
+test('dialog.selectFile honors multi-select and preserves upload and progress order', async (t) => {
+  const dom = makeFakeDom();
+  installGlobals(dom);
+  t.after(clearGlobals);
+  const uploadedNames: string[] = [];
+  const progress: PhoneUploadProgress[] = [];
+  const { deps } = makeDeps({
+    uploadFile: async (file, options) => {
+      uploadedNames.push(file.name);
+      options?.onProgress?.(file.size, file.size);
+      return { path: `/data/workspace/uploads/${file.name}`, size: file.size, mime: file.type };
+    },
+  });
+  const electron = buildElectronFromContract(CONTRACT, deps);
+  const selectFile = electron.dialog.selectFile as unknown as (
+    options: PhoneFileSelectionOptions,
+  ) => Promise<PhoneFileSelectionResult>;
+
+  const picking = selectFile({ multi: true, onUploadProgress: (event) => progress.push(event) });
+  const input = dom.created[0];
+  assert.equal(input.multiple, true);
+  input.files = [
+    new File(['first'], 'first.txt', { type: 'text/plain' }),
+    new File(['second'], 'second.pdf', { type: 'application/pdf' }),
+  ];
+  input.dispatch('change');
+  const result = await picking;
+
+  assert.deepEqual(uploadedNames, ['first.txt', 'second.pdf']);
+  assert.deepEqual(result.paths, [
+    '/data/workspace/uploads/first.txt',
+    '/data/workspace/uploads/second.pdf',
+  ]);
+  assert.deepEqual(progress.filter((event) => event.path).map((event) => event.fileName), [
+    'first.txt',
+    'second.pdf',
+  ]);
+  assert.deepEqual(progress.find((event) => event.fileName === 'first.txt' && !event.path), {
+    fileIndex: 0,
+    fileName: 'first.txt',
+    fileSize: 5,
+    mime: 'text/plain',
+    loaded: 0,
+    total: 5,
+  });
+});
+
+test('dialog.selectFile limits a single-file picker to one upload', async (t) => {
+  const dom = makeFakeDom();
+  installGlobals(dom);
+  t.after(clearGlobals);
+  const uploadedNames: string[] = [];
+  const { deps } = makeDeps({
+    uploadFile: async (file) => {
+      uploadedNames.push(file.name);
+      return { path: `/data/workspace/uploads/${file.name}`, size: file.size, mime: file.type };
+    },
+  });
+  const electron = buildElectronFromContract(CONTRACT, deps);
+  const picking = electron.dialog.selectFile({ multi: false });
+  const input = dom.created[0];
+  assert.equal(input.multiple, false);
+  input.files = [new File(['a'], 'a.txt'), new File(['b'], 'b.txt')];
+  input.dispatch('change');
+  const result = await picking;
+  assert.deepEqual(uploadedNames, ['a.txt']);
+  assert.deepEqual(result.paths, ['/data/workspace/uploads/a.txt']);
+});
+
+test('dialog.selectFile reports typed failure after preserving completed upload events', async (t) => {
+  const dom = makeFakeDom();
+  installGlobals(dom);
+  t.after(clearGlobals);
+  const uploadedNames: string[] = [];
+  const progress: PhoneUploadProgress[] = [];
+  const { deps } = makeDeps({
+    uploadFile: async (file) => {
+      uploadedNames.push(file.name);
+      if (file.name === 'blocked.exe') {
+        throw Object.assign(new Error('executable blocked'), { code: 'BLOCKED_TYPE' });
+      }
+      return { path: `/data/workspace/uploads/${file.name}`, size: file.size, mime: file.type };
+    },
+  });
+  const electron = buildElectronFromContract(CONTRACT, deps);
+  const selectFile = electron.dialog.selectFile as unknown as (
+    options: PhoneFileSelectionOptions,
+  ) => Promise<PhoneFileSelectionResult>;
+  const picking = selectFile({ multi: true, onUploadProgress: (event) => progress.push(event) });
+  dom.created[0].files = [
+    new File(['good'], 'good.txt'),
+    new File(['bad'], 'blocked.exe'),
+    new File(['never'], 'never.txt'),
+  ];
+  dom.created[0].dispatch('change');
+  const result = await picking;
+
+  assert.deepEqual(uploadedNames, ['good.txt', 'blocked.exe']);
+  assert.equal(result.success, false);
+  assert.equal(result.path, '/data/workspace/uploads/good.txt');
+  assert.deepEqual(result.paths, ['/data/workspace/uploads/good.txt']);
+  assert.equal(result.errorCode, 'BLOCKED_TYPE');
+  assert.equal(result.failedIndex, 1);
+  assert.deepEqual(progress.filter((event) => event.path).map((event) => event.fileName), ['good.txt']);
 });
 
 test('dialog.selectFile falls back to the cancelled shape on cancel, without an uploader, or without a DOM', async (t) => {

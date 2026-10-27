@@ -9,7 +9,8 @@
  */
 
 export const IPC_STRING_MAX_CHARS = 4_000;
-export const IPC_MAX_DEPTH = 5;
+// Response envelopes around long-term boards need six levels for participant and evidence objects.
+export const IPC_MAX_DEPTH = 6;
 export const IPC_MAX_KEYS = 80;
 export const IPC_MAX_ITEMS = 40;
 export const IPC_UPDATE_CONTENT_MAX_CHARS = 120_000;

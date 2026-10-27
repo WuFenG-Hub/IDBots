@@ -224,6 +224,28 @@ test('restrictions: R-cwd accepts cwd inside the workspace root, missing, and em
   );
 });
 
+test('restrictions: scheduledTask:update checks its input, not the task ID, as cwd', (t) => {
+  const { paths } = makeTenantTree(t);
+  const entry = { tier: 'P1', restrictions: ['R-cwd', 'R-exec'] };
+  const partialUpdate = { name: 'Edited task', prompt: 'Continue the work', schedule: { type: 'cron', expression: '0 9 * * *' } };
+  assert.equal(
+    restrictions.validateInvokeRestrictions('scheduledTask:update', ['gw-task-2', partialUpdate], entry, paths),
+    null,
+    'an opaque relative task ID is not a workspace path',
+  );
+  const outside = path.join(path.dirname(paths.workspaceRoot), 'outside-workspace');
+  assert.equal(
+    restrictions.validateInvokeRestrictions(
+      'scheduledTask:update',
+      ['gw-task-2', { ...partialUpdate, workingDirectory: outside }],
+      entry,
+      paths,
+    ).code,
+    'ARG_RESTRICTED',
+    'the update payload still cannot escape the tenant workspace',
+  );
+});
+
 test('restrictions: R-exec rejects sandbox execution mode', (t) => {
   const { paths } = makeTenantTree(t);
   const entry = { tier: 'P1', restrictions: ['R-exec'] };

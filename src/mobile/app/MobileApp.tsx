@@ -1,6 +1,7 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { t } from '../i18n';
-import { hasAppBridge } from './appBridge';
+import { getMobileElectron, hasAppBridge } from './appBridge';
+import { resolveTwinMetabotId } from './activity';
 import { useChat } from './hooks/useChat';
 import { useMetabots } from './hooks/useMetabots';
 import { useResync } from './hooks/useResync';
@@ -59,6 +60,26 @@ export default function MobileApp(): JSX.Element {
   // Chat state lives at the shell level so switching tabs keeps the stream.
   const { bots, error: botsError, reload: reloadBots } = useMetabots();
   const chat = useChat(bots);
+  const twinMetabotId = resolveTwinMetabotId(bots);
+  const twinName = bots.find((bot) => bot.id === twinMetabotId)?.name ?? 'Twin Bot';
+  const openWorkSession = useCallback(async (sessionId: string): Promise<boolean> => {
+    try {
+      const result = await getMobileElectron().cowork.getSession(sessionId, { messageLimit: 1 });
+      if (!result?.success || !result.session) return false;
+    } catch {
+      return false;
+    }
+    const previousSessionId = chat.getOpenSessionId();
+    const opened = await chat.openSession(sessionId);
+    if (opened) {
+      setTab('chat');
+      return true;
+    }
+    if (previousSessionId && previousSessionId !== sessionId) {
+      await chat.openSession(previousSessionId);
+    }
+    return false;
+  }, [chat.getOpenSessionId, chat.openSession]);
   // Terminal gateway states (REQ-E-2 close codes) replace the whole shell.
   const { terminal, versionMismatch } = useTerminalBridgeState();
   // Reconnect resync (REQ-E-5): refresh on every (re)connect, whichever
@@ -117,7 +138,12 @@ export default function MobileApp(): JSX.Element {
         ) : null}
         {tab === 'tasks' ? (
           <Suspense fallback={<TabFallback />}>
-            <TasksScreen resyncCounter={resyncCounter} />
+            <TasksScreen
+              resyncCounter={resyncCounter}
+              twinMetabotId={twinMetabotId}
+              twinName={twinName}
+              onOpenSession={openWorkSession}
+            />
           </Suspense>
         ) : null}
         {tab === 'me' ? (

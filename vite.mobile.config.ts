@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import crypto from 'node:crypto';
 import path from 'path';
+import { getMockArtifact, mockArtifactFilename } from './src/mobile/bridge/mockArtifacts';
 
 /**
  * Mobile builds (REQ-E-1): two bundles from one config, selected by the
@@ -87,6 +88,31 @@ function mobileDevEntriesPlugin() {
   return {
     name: 'idbots-mobile-dev-entries',
     configureServer(server: import('vite').ViteDevServer) {
+      server.middlewares.use((req, res, next) => {
+        if (process.env.VITE_MOBILE_MOCK !== '1' || (req.method !== 'GET' && req.method !== 'HEAD')) {
+          next();
+          return;
+        }
+        const url = new URL(req.url ?? '/', 'http://mobile.invalid');
+        if (!url.pathname.startsWith('/files/mock/')) {
+          next();
+          return;
+        }
+        const filePath = decodeURIComponent(url.pathname.slice('/files/mock/'.length));
+        const artifact = getMockArtifact(filePath);
+        if (!artifact) {
+          res.statusCode = 404;
+          res.end('Artifact not found');
+          return;
+        }
+        const bytes = artifact.bytes();
+        const disposition = url.searchParams.get('disposition') === 'inline' ? 'inline' : 'attachment';
+        res.statusCode = 200;
+        res.setHeader('Content-Type', artifact.mime);
+        res.setHeader('Content-Length', bytes.byteLength);
+        res.setHeader('Content-Disposition', `${disposition}; filename="${mockArtifactFilename(filePath)}"`);
+        res.end(req.method === 'HEAD' ? undefined : bytes);
+      });
       server.middlewares.use((req, res, next) => {
         const url = req.url?.split('?')[0] ?? '';
         // The login page navigates to /app/ after sign-in; serve the app

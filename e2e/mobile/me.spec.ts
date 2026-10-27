@@ -40,8 +40,8 @@ test.describe('me screen', () => {
     // once; switching tabs then re-renders the shell's tab bar in zh.
     await expect(page.getByText('语言', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Tasks' }).click();
-    await expect(page.getByRole('button', { name: '任务' })).toBeVisible();
-    await expect(page.getByRole('button', { name: '我的' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '任务', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '我的', exact: true })).toBeVisible();
     await attachScreen(testInfo, page, 'me-language-zh');
   });
 });

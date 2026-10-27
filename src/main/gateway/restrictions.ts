@@ -87,9 +87,11 @@ function argRestricted(message: string): GatewayError {
 
 const CWD_KEYS = ['cwd', 'workingDirectory'] as const;
 
-function checkCwd(args: unknown[], workspaceRoot: string): GatewayError | null {
+function checkCwd(args: unknown[], workspaceRoot: string, channel: string): GatewayError | null {
   const root = canonicalRoot(workspaceRoot);
   for (const [index, arg] of args.entries()) {
+    // The first scheduledTask:update argument is an opaque task ID, not a path.
+    if (channel === 'scheduledTask:update' && index === 0) continue;
     const candidates: Array<{ raw: unknown; source: string }> = [];
     if (typeof arg === 'string') {
       // A bare positional string on an R-cwd channel is treated as a cwd.
@@ -199,7 +201,7 @@ function checkConfigKeys(args: unknown[], paths: GatewayPaths): GatewayError | n
       }
     }
   }
-  const cwdError = checkCwd(args, paths.workspaceRoot);
+  const cwdError = checkCwd(args, paths.workspaceRoot, 'cowork:config:set');
   if (cwdError) return cwdError;
   return checkExecMode(args);
 }
@@ -239,7 +241,7 @@ export function validateInvokeRestrictions(
   for (const rule of restrictions) {
     switch (rule) {
       case 'R-cwd': {
-        const error = checkCwd(args, paths.workspaceRoot);
+        const error = checkCwd(args, paths.workspaceRoot, channel);
         if (error) return error;
         break;
       }

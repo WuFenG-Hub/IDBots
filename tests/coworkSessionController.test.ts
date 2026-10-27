@@ -16,6 +16,7 @@ import {
   type CoworkRecoveryStorage,
   type PendingPermissionEntry,
 } from '../src/renderer/services/coworkSessionController';
+import { MOBILE_DRAFTS_V2_STORAGE_KEY } from '../src/renderer/services/coworkSessionDrafts';
 
 type Listener = (payload: unknown) => void;
 
@@ -295,6 +296,9 @@ describe('cowork session controller', () => {
     t.after(() => controller.destroy());
 
     controller.setDraft('greeting draft');
+    controller.addAttachments(controller.getDraftToken(), [{
+      path: '/data/workspace/uploads/greeting.txt', name: 'greeting.txt', size: 4, mime: 'text/plain',
+    }]);
     await controller.restore(1, { title: 'Welcome', fallbackGreeting: 'Hello from Twin' });
     const snapshot = controller.getSnapshot();
     assert.equal(snapshot.currentSessionId, 'greeting');
@@ -303,7 +307,153 @@ describe('cowork session controller', () => {
     assert.equal(snapshot.states.get('greeting')?.messages[0]?.content, 'Hello from Twin');
     assert.equal(snapshot.restoring, false);
     assert.equal(controller.getDraft(), 'greeting draft');
+    assert.deepEqual(controller.getAttachments().map((attachment) => attachment.name), ['greeting.txt']);
     assert.equal(snapshot.drafts.new, undefined);
+  });
+
+  it('composes attachment-only starts and running-session steers with the desktop manifest', async (t) => {
+    const { harness, electron } = makeHarness();
+    const controller = controllerFor(electron);
+    t.after(() => controller.destroy());
+    const attachments = [
+      { path: '/data/workspace/uploads/a.txt', name: 'a.txt', size: 1, mime: 'text/plain' },
+      { path: '/data/workspace/uploads/b.pdf', name: 'b.pdf', size: 2, mime: 'application/pdf' },
+    ];
+
+    const started = await controller.send('', { metabotId: 1 }, attachments, 'Input file');
+    assert.equal(started.status, 'accepted');
+    assert.equal(harness.startOptions?.prompt, 'Input file: /data/workspace/uploads/a.txt\nInput file: /data/workspace/uploads/b.pdf');
+    assert.equal(harness.startOptions?.title, 'a.txt');
+    assert.equal(harness.startOptions?.title.includes('/data/'), false);
+    assert.deepEqual(controller.getAttachments(), []);
+
+    harness.session = session('s1', 'running', [
+      message('live', 'assistant', 'working', { isStreaming: true }),
+    ]);
+    await controller.openSession('s1');
+    assert.equal(controller.getSnapshot().states.get('s1')?.status, 'running');
+    const steered = await controller.send('inspect', { metabotId: 1 }, attachments, 'Input file');
+    assert.equal(steered.status, 'accepted');
+    assert.equal(harness.submitCalls[0]?.text, 'inspect\n\nInput file: /data/workspace/uploads/a.txt\nInput file: /data/workspace/uploads/b.pdf');
+  });
+
+  it('restores text and attachments on failed or uncertain sends without changing the retry prompt', async (t) => {
+    const { harness, electron } = makeHarness();
+    const controller = controllerFor(electron);
+    t.after(() => controller.destroy());
+    await controller.openSession('s1');
+    const attachments = [{ path: '/data/workspace/uploads/a.txt', name: 'a.txt', size: 1, mime: 'text/plain' }];
+    controller.setDraft('review this');
+    controller.addAttachments(controller.getDraftToken(), attachments);
+    let calls = 0;
+    harness.submitHandler = async (input) => {
+      calls += 1;
+      if (calls === 1) return { success: false, error: 'refused' };
+      if (calls === 2) throw new Error('connection lost');
+      const persisted = message('accepted-after-retry', 'user', input.text, { submissionId: input.submissionId });
+      harness.session.messages.push(persisted);
+      return { success: true, mode: 'steer', message: persisted };
+    };
+
+    const first = await controller.send('review this', { metabotId: 1 }, attachments, 'Input file');
+    assert.equal(first.status, 'failed');
+    assert.equal(controller.getDraft(), 'review this');
+    assert.deepEqual(controller.getAttachments(), attachments);
+    const second = await controller.retrySubmission(first.submissionId!);
+    assert.equal(second.status, 'uncertain');
+    assert.equal(controller.getDraft(), 'review this');
+    assert.deepEqual(controller.getAttachments(), attachments);
+    const third = await controller.retrySubmission(first.submissionId!);
+    assert.equal(third.status, 'accepted');
+    const prompt = 'review this\n\nInput file: /data/workspace/uploads/a.txt';
+    assert.deepEqual(harness.submitCalls.map((call) => call.text), [prompt, prompt, prompt]);
+    assert.equal(harness.submitCalls[0]?.text.split('/data/workspace/uploads/a.txt').length, 2);
+    assert.equal(controller.getDraft(), '');
+    assert.deepEqual(controller.getAttachments(), []);
+  });
+
+  it('keeps text and attachments durable until the tenant accepts the submission', async (t) => {
+    const { harness, electron } = makeHarness();
+    const values = new Map<string, string>();
+    const storage: CoworkRecoveryStorage = {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => { values.set(key, value); },
+    };
+    const controller = controllerFor(electron, storage);
+    t.after(() => controller.destroy());
+    await controller.openSession('s1');
+    const attachments = [{ path: '/data/workspace/uploads/a.txt', name: 'a.txt', size: 1, mime: 'text/plain' }];
+    controller.setDraft('preserve while pending');
+    controller.addAttachments(controller.getDraftToken(), attachments);
+    let accept!: () => void;
+    harness.submitHandler = (input) => new Promise((resolve) => {
+      accept = () => {
+        const persisted = message('accepted-after-reload', 'user', input.text, { submissionId: input.submissionId });
+        harness.session.messages.push(persisted);
+        resolve({ success: true, mode: 'steer', message: persisted });
+      };
+    });
+
+    const sending = controller.send('preserve while pending', { metabotId: 1 }, attachments, 'Input file');
+    assert.equal(controller.getDraft(), 'preserve while pending');
+    assert.deepEqual(controller.getAttachments(), attachments);
+    const pendingReload = controllerFor(electron, storage);
+    t.after(() => pendingReload.destroy());
+    await pendingReload.openSession('s1');
+    assert.equal(pendingReload.getDraft(), 'preserve while pending');
+    assert.deepEqual(pendingReload.getAttachments(), attachments);
+
+    accept();
+    assert.equal((await sending).status, 'accepted');
+    assert.equal(controller.getDraft(), '');
+    assert.deepEqual(controller.getAttachments(), []);
+    const acceptedReload = controllerFor(electron, storage);
+    t.after(() => acceptedReload.destroy());
+    await acceptedReload.openSession('s1');
+    assert.equal(acceptedReload.getDraft(), '');
+    assert.deepEqual(acceptedReload.getAttachments(), []);
+  });
+
+  it('keeps legacy text and attachment metadata per session through reload and late uploads', async (t) => {
+    const { harness, electron } = makeHarness();
+    const values = new Map<string, string>([
+      [MOBILE_OPEN_SESSION_STORAGE_KEY, 's1'],
+      [MOBILE_DRAFTS_STORAGE_KEY, JSON.stringify({ s1: 'legacy text' })],
+    ]);
+    const storage: CoworkRecoveryStorage = {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => { values.set(key, value); },
+    };
+    const controller = controllerFor(electron, storage);
+    t.after(() => controller.destroy());
+    await controller.restore(1);
+    const first = { path: '/data/workspace/uploads/first.txt', name: 'first.txt', size: 1, mime: 'text/plain' };
+    const late = { path: '/data/workspace/uploads/late.txt', name: 'late.txt', size: 2, mime: 'text/plain' };
+    const other = { path: '/data/workspace/uploads/other.txt', name: 'other.txt', size: 3, mime: 'text/plain' };
+    const firstToken = controller.getDraftToken();
+    controller.addAttachments(firstToken, [first]);
+    harness.session = session('s2');
+    await controller.openSession('s2');
+    assert.deepEqual(controller.getAttachments(), []);
+    controller.addAttachments(firstToken, [late]);
+    controller.addAttachments(controller.getDraftToken(), [other]);
+    controller.removeAttachment(firstToken, first.path);
+    assert.deepEqual(controller.getAttachments(), [other]);
+    await controller.openSession('s1');
+    assert.deepEqual(controller.getAttachments(), [late]);
+
+    const reloaded = controllerFor(electron, storage);
+    t.after(() => reloaded.destroy());
+    await reloaded.openSession('s1');
+    assert.equal(reloaded.getDraft(), 'legacy text');
+    assert.deepEqual(reloaded.getAttachments(), [late]);
+    const persisted = JSON.parse(values.get(MOBILE_DRAFTS_V2_STORAGE_KEY)!) as {
+      version: number;
+      drafts: Record<string, { attachments: Array<Record<string, unknown>> }>;
+    };
+    assert.equal(persisted.version, 2);
+    assert.equal(persisted.drafts.s1?.attachments[0]?.path, late.path);
+    assert.equal('bytes' in persisted.drafts.s1!.attachments[0]!, false);
   });
 
   it('restores an explicit new composer instead of opening an older session', async (t) => {

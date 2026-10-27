@@ -25,6 +25,7 @@
  */
 
 import type { IdbotsMobileOs, IdbotsMobileShell } from './types';
+import type { UploadErrorCode, UploadFileOptions } from './upload';
 import { toBrowserFileUrl } from '../../renderer/services/localFileUrl';
 import rawIpcContract from '../generated/ipc-contract.json';
 
@@ -41,7 +42,36 @@ export interface UploadedFileInfo {
   mime: string;
 }
 
-export type UploadFileFn = (file: File) => Promise<UploadedFileInfo>;
+export type UploadFileFn = (
+  file: File,
+  options?: Pick<UploadFileOptions, 'onProgress'>,
+) => Promise<UploadedFileInfo>;
+
+export interface PhoneUploadProgress {
+  fileIndex: number;
+  fileName: string;
+  fileSize: number;
+  mime: string;
+  loaded: number;
+  total: number;
+  path?: string;
+}
+
+export interface PhoneFileSelectionOptions {
+  title?: string;
+  filters?: { name: string; extensions: string[] }[];
+  multi?: boolean;
+  onUploadProgress?: (progress: PhoneUploadProgress) => void;
+}
+
+export interface PhoneFileSelectionResult {
+  success: boolean;
+  path: string | null;
+  paths?: string[];
+  error?: string;
+  errorCode?: UploadErrorCode;
+  failedIndex?: number;
+}
 
 export interface ShimDeps {
   gateway: GatewayInvoker;
@@ -202,13 +232,7 @@ async function signAndOpen(
   }
 }
 
-interface SelectFileOptions {
-  title?: string;
-  filters?: { name: string; extensions: string[] }[];
-  multi?: boolean;
-}
-
-function acceptFromFilters(filters: SelectFileOptions['filters']): string {
+function acceptFromFilters(filters: PhoneFileSelectionOptions['filters']): string {
   if (!Array.isArray(filters)) return '';
   const extensions = filters.flatMap((filter) => (Array.isArray(filter?.extensions) ? filter.extensions : []));
   return extensions
@@ -217,10 +241,11 @@ function acceptFromFilters(filters: SelectFileOptions['filters']): string {
     .join(',');
 }
 
-function pickFiles(doc: Document, accept: string): Promise<File[] | null> {
+function pickFiles(doc: Document, accept: string, multi: boolean): Promise<File[] | null> {
   return new Promise((resolve) => {
     const input = doc.createElement('input');
     input.type = 'file';
+    input.multiple = multi;
     if (accept) input.accept = accept;
     let settled = false;
     const finish = (result: File[] | null) => {
@@ -231,7 +256,7 @@ function pickFiles(doc: Document, accept: string): Promise<File[] | null> {
       input.remove();
       resolve(result);
     };
-    const onChange = () => finish(Array.from(input.files ?? []));
+    const onChange = () => finish(Array.from(input.files ?? []).slice(0, multi ? undefined : 1));
     const onCancel = () => finish(null);
     input.addEventListener('change', onChange);
     input.addEventListener('cancel', onCancel);
@@ -240,11 +265,18 @@ function pickFiles(doc: Document, accept: string): Promise<File[] | null> {
   });
 }
 
-async function selectFileOnPhone(
-  deps: ShimDeps,
+function uploadErrorCode(error: unknown): UploadErrorCode {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === 'TOO_LARGE' || code === 'BLOCKED_TYPE' || code === 'QUOTA_EXCEEDED') return code;
+  return 'UPLOAD_FAILED';
+}
+
+export async function selectFileOnPhone(
+  deps: Pick<ShimDeps, 'uploadFile'>,
   options: unknown,
-): Promise<{ success: boolean; path: string | null; paths?: string[]; error?: string }> {
-  if (typeof deps.uploadFile !== 'function') {
+): Promise<PhoneFileSelectionResult> {
+  const upload = deps.uploadFile;
+  if (typeof upload !== 'function') {
     console.warn('[mobile-shim] dialog.selectFile: no uploadFile provided; returning a cancelled result');
     return { success: true, path: null, paths: [] };
   }
@@ -253,23 +285,47 @@ async function selectFileOnPhone(
     console.warn('[mobile-shim] dialog.selectFile: no document available; returning a cancelled result');
     return { success: true, path: null, paths: [] };
   }
-  const opts = (options ?? {}) as SelectFileOptions;
-  const files = await pickFiles(doc, acceptFromFilters(opts.filters));
+  const opts = (options ?? {}) as PhoneFileSelectionOptions;
+  const files = await pickFiles(doc, acceptFromFilters(opts.filters), opts.multi === true);
   if (!files || files.length === 0) {
     // Cancelled shape matches the desktop dialog: success with null path.
     return { success: true, path: null, paths: [] };
   }
-  try {
-    const paths: string[] = [];
-    for (const file of files) {
-      const uploaded = await deps.uploadFile(file);
+  const paths: string[] = [];
+  for (const [fileIndex, file] of files.entries()) {
+    const progress = {
+      fileIndex,
+      fileName: file.name,
+      fileSize: file.size,
+      mime: file.type,
+    };
+    try {
+      opts.onUploadProgress?.({ ...progress, loaded: 0, total: file.size });
+      const uploaded = await upload(file, {
+        onProgress: (loaded, total) => opts.onUploadProgress?.({ ...progress, loaded, total }),
+      });
       paths.push(uploaded.path);
+      opts.onUploadProgress?.({
+        ...progress,
+        fileSize: uploaded.size,
+        mime: uploaded.mime,
+        loaded: uploaded.size,
+        total: uploaded.size,
+        path: uploaded.path,
+      });
+    } catch (error) {
+      return {
+        success: false,
+        path: paths[0] ?? null,
+        paths,
+        error: error instanceof Error ? error.message : 'Upload failed',
+        errorCode: uploadErrorCode(error),
+        failedIndex: fileIndex,
+      };
     }
-    // Desktop success shape (main.ts:17345): first path plus the full list.
-    return { success: true, path: paths[0], paths };
-  } catch (error) {
-    return { success: false, path: null, paths: [], error: error instanceof Error ? error.message : 'Upload failed' };
   }
+  // Desktop success shape (main.ts:17345): first path plus the full list.
+  return { success: true, path: paths[0], paths };
 }
 
 // ---------------------------------------------------------------------------

@@ -55,6 +55,10 @@ import type {
   ScheduledTaskMemoryAccess,
   ScheduledTaskRun,
 } from './types';
+import { selectFileOnPhone, type PhoneFileSelectionOptions } from './installShim';
+import { uploadFile, type UploadTransport } from './upload';
+import { getMockArtifact, MOCK_ARTIFACT_PATHS } from './mockArtifacts';
+import { applyLongTermStage, createLongTermFixture, longTermBoard } from './backgroundFixtures';
 
 const DEFAULT_STREAM_TOKEN_INTERVAL_MS = 40;
 const DEFAULT_ORDER_COMPLETE_DELAY_MS = 10_000;
@@ -87,9 +91,12 @@ const REPLY_PERMISSION_DENIED =
 const REPLY_QUOTA_PREFIX =
   'Let me check your remaining quota first';
 
+const REPLY_ARTIFACT = `**Mock artifacts ready.**\n\n[chart.png](${MOCK_ARTIFACT_PATHS.image})\n[report.pdf](${MOCK_ARTIFACT_PATHS.pdf})\n[notes.md](${MOCK_ARTIFACT_PATHS.markdown})\n[refresh.md](${MOCK_ARTIFACT_PATHS.refresh})\n[result.txt](${MOCK_ARTIFACT_PATHS.text})`;
+
 /** Canned replies, exported for the mock-bridge tests. */
 export const MOCK_CANNED_REPLIES = {
   normal: REPLY_NORMAL,
+  artifact: REPLY_ARTIFACT,
   permissionPart1: REPLY_PERMISSION_PART1,
   permissionPart2: REPLY_PERMISSION_PART2,
   permissionDenied: REPLY_PERMISSION_DENIED,
@@ -97,6 +104,30 @@ export const MOCK_CANNED_REPLIES = {
 } as const;
 
 const MOCK_WORKSPACE = '/data/workspace';
+
+function createMockUploadTransport(): UploadTransport {
+  let uploadSequence = 0;
+  return {
+    async upload(request) {
+      const name = new URL(request.url, 'https://mock.invalid').searchParams.get('name') ?? 'file';
+      if (name.startsWith('fixture-quota')) return { status: 507, body: 'fixture quota exhausted' };
+      if (name.startsWith('fixture-network')) throw new Error('fixture network failure');
+      if (/\.(exe|dll|bat|sh)$/i.test(name)) return { status: 415, body: 'fixture blocked type' };
+      if (name.startsWith('fixture-slow')) await sleep(2_000);
+      request.onProgress?.(request.body.size, request.body.size);
+      const basename = name.split(/[\\/]/).pop()?.replace(/[\u0000-\u001F\u007F]/g, '').trim() || 'file';
+      uploadSequence += 1;
+      return {
+        status: 200,
+        body: JSON.stringify({
+          path: `${MOCK_WORKSPACE}/uploads/mock-${uploadSequence}-${basename}`,
+          size: request.body.size,
+          mime: request.body.type || 'application/octet-stream',
+        }),
+      };
+    },
+  };
+}
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -129,7 +160,7 @@ interface MockCoworkSession {
   createdAt: number;
   updatedAt: number;
   metabotId: number | null;
-  sessionType: 'standard';
+  sessionType: 'standard' | 'longterm';
   autoOrigin: 'schedule' | null;
 }
 
@@ -210,6 +241,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
   let destroyed = false;
   let connectionState: ConnectionState = 'online';
   const openedUrls: string[] = [];
+  const mockUploadTransport = createMockUploadTransport();
 
   /** Invokes made while "disconnected" reject with an offline error (REQ-E-2 semantics). */
   const guardOnline = <T>(fn: () => Promise<T>): Promise<T> =>
@@ -250,6 +282,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     prompt: string;
     metabotId?: number | null;
     autoOrigin?: MockCoworkSession['autoOrigin'];
+    sessionType?: MockCoworkSession['sessionType'];
   }): MockCoworkSession {
     const ts = now();
     const session: MockCoworkSession = {
@@ -266,7 +299,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       createdAt: ts,
       updatedAt: ts,
       metabotId: input.metabotId ?? null,
-      sessionType: 'standard',
+      sessionType: input.sessionType ?? 'standard',
       autoOrigin: input.autoOrigin ?? null,
     };
     sessions.set(session.id, session);
@@ -283,6 +316,19 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     session.messages.push(message);
     session.updatedAt = now();
     return message;
+  }
+
+  function completeArtifactSession(session: MockCoworkSession, prompt: string): void {
+    pushUserMessage(session, prompt);
+    session.messages.push({
+      id: nextMessageId(),
+      type: 'assistant',
+      content: REPLY_ARTIFACT,
+      timestamp: now(),
+      metadata: { isFinal: true },
+    });
+    session.status = 'completed';
+    session.updatedAt = now();
   }
 
   // ------------------------------------------------------------- permissions
@@ -343,11 +389,14 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
 
     const wantsQuota = /quota/i.test(userText);
     const wantsPermission = !wantsQuota && /permission/i.test(userText);
+    const wantsArtifacts = !wantsQuota && !wantsPermission && /artifact|preview/i.test(userText);
 
     if (wantsQuota) {
       await streamChunks(session, assistantMessage, REPLY_QUOTA_PREFIX);
     } else if (wantsPermission) {
       await streamChunks(session, assistantMessage, REPLY_PERMISSION_PART1);
+    } else if (wantsArtifacts) {
+      await streamChunks(session, assistantMessage, REPLY_ARTIFACT);
     } else {
       await streamChunks(session, assistantMessage, REPLY_NORMAL);
     }
@@ -552,6 +601,23 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
 
   // -------------------------------------------------------- scheduled tasks
   const bootAt = now();
+  const longTermSession = createSession({
+    title: 'Long-term document result',
+    prompt: 'Produce a document',
+    metabotId: 1,
+    sessionType: 'longterm',
+  });
+  completeArtifactSession(longTermSession, 'Produce a document');
+  let longTermDetail = createLongTermFixture(longTermSession.id);
+  let longTermSeq = 0;
+  const emitLongTermUpdate = (reason: string) => {
+    longTermSeq += 1;
+    emitter.emit('longtermTask:update', {
+      seq: longTermSeq,
+      taskIds: [longTermDetail.id],
+      reason,
+    });
+  };
 
   const scheduledTasks: ScheduledTask[] = [
     {
@@ -685,6 +751,8 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
    * quickly; manual runs run for `manualRunDelayMs` so the UI can show the
    * running state.
    */
+  const activeRuns = new Map<string, { taskId: string; cancel: () => void }>();
+
   function startTaskRun(task: ScheduledTask, trigger: 'scheduled' | 'manual', finishDelayMs: number): ScheduledTaskRun {
     const runSession = createSession({
       title: `Scheduled run: ${task.name}`,
@@ -693,6 +761,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       autoOrigin: 'schedule',
     });
     const startedMs = now();
+    runSession.status = 'running';
     task.state = {
       ...task.state,
       lastStatus: 'running',
@@ -712,22 +781,22 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       trigger,
       skipReason: null,
     };
-    if (trigger === 'manual') {
-      // Manual runs surface the running entry immediately so the UI can show
-      // progress; the scheduled demo tick keeps its single success event.
-      const runs = scheduledRuns.get(task.id) ?? [];
-      runs.unshift(run);
-      scheduledRuns.set(task.id, runs);
-      emitter.emit('scheduledTask:runUpdate', { run: { ...run } });
-    }
+    const runs = scheduledRuns.get(task.id) ?? [];
+    runs.unshift(run);
+    scheduledRuns.set(task.id, runs);
+    if (trigger === 'manual') emitter.emit('scheduledTask:runUpdate', { run: { ...run } });
+    let cancelled = false;
+    activeRuns.set(run.id, { taskId: task.id, cancel: () => { cancelled = true; } });
     const finishRun = () => {
-      if (destroyed) return;
+      if (destroyed || cancelled || !taskById(task.id)) return;
+      activeRuns.delete(run.id);
       const finishedMs = now();
       run.status = 'success';
       run.finishedAt = new Date(finishedMs).toISOString();
       run.durationMs = finishedMs - startedMs;
+      task.fireCount += 1;
       task.state = {
-        nextRunAtMs: nextRunAtMsFor(task.schedule, finishedMs),
+        nextRunAtMs: task.enabled ? nextRunAtMsFor(task.schedule, finishedMs) : null,
         lastRunAtMs: finishedMs,
         lastStatus: 'success',
         lastError: null,
@@ -736,15 +805,44 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
         consecutiveErrors: 0,
       };
       task.updatedAt = new Date(finishedMs).toISOString();
-      runSession.status = 'completed';
-      const runs = scheduledRuns.get(task.id) ?? [];
-      if (!runs.some((existing) => existing.id === run.id)) runs.unshift(run);
-      scheduledRuns.set(task.id, runs);
+      completeArtifactSession(runSession, task.prompt);
       emitter.emit('scheduledTask:runUpdate', { run: { ...run } });
       emitter.emit('scheduledTask:statusUpdate', { taskId: task.id, state: { ...task.state } });
     };
     later(finishRun, finishDelayMs);
     return run;
+  }
+
+  function stopActiveTaskRuns(taskId: string): boolean {
+    const active = [...activeRuns.entries()].filter(([, entry]) => entry.taskId === taskId);
+    if (active.length === 0) return false;
+    const task = taskById(taskId);
+    const finishedMs = now();
+    for (const [runId, entry] of active) {
+      entry.cancel();
+      activeRuns.delete(runId);
+      const run = (scheduledRuns.get(taskId) ?? []).find((candidate) => candidate.id === runId);
+      if (!run || run.status !== 'running') continue;
+      run.status = 'error';
+      run.error = 'Stopped by user';
+      run.finishedAt = new Date(finishedMs).toISOString();
+      run.durationMs = finishedMs - Date.parse(run.startedAt);
+      const runSession = run.sessionId ? sessions.get(run.sessionId) : undefined;
+      if (runSession) runSession.status = 'idle';
+      emitter.emit('scheduledTask:runUpdate', { run: { ...run } });
+    }
+    if (task) {
+      task.state = {
+        ...task.state,
+        lastRunAtMs: finishedMs,
+        lastStatus: 'error',
+        lastError: 'Stopped by user',
+        runningAtMs: null,
+      };
+      task.updatedAt = new Date(finishedMs).toISOString();
+      emitter.emit('scheduledTask:statusUpdate', { taskId, state: { ...task.state } });
+    }
+    return true;
   }
 
   later(() => {
@@ -804,6 +902,42 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
         emitter.emit('scheduledTask:statusUpdate', { taskId: task.id, state: { ...task.state } });
         return { success: true, task: { ...task } };
       }),
+    update: (id: string, input: Partial<ScheduledTaskInput>) =>
+      guardOnline(async () => {
+        const task = taskById(id);
+        if (!task) return { success: false, error: `Task not found: ${id}` };
+        if (!input || typeof input !== 'object') return { success: false, error: 'input must be an object' };
+        const editableFields = [
+          'name', 'description', 'schedule', 'prompt', 'workingDirectory', 'systemPrompt',
+          'executionMode', 'metabotId', 'targetSessionId', 'memoryAccess', 'expiresAt',
+          'notifyPlatforms', 'enabled', 'exitCondition', 'maxFires',
+        ] as const;
+        const changes: Partial<ScheduledTaskInput> = {};
+        for (const key of editableFields) {
+          if (Object.prototype.hasOwnProperty.call(input, key) && input[key] !== undefined) {
+            Object.assign(changes, { [key]: input[key] });
+          }
+        }
+        const candidate = { ...task, ...changes } as ScheduledTaskInput;
+        const invalid = validateTaskInput(candidate);
+        if (invalid) return { success: false, error: `invalid task: ${invalid}` };
+        const previousMetabotId = task.metabotId;
+        Object.assign(task, changes, {
+          name: candidate.name.trim(),
+          workingDirectory: candidate.workingDirectory.trim() || task.workingDirectory,
+          updatedAt: new Date(now()).toISOString(),
+        });
+        if (input.metabotId !== undefined && input.metabotId !== previousMetabotId) {
+          task.coworkSessionId = null;
+          task.targetSessionId = null;
+        }
+        task.state = {
+          ...task.state,
+          nextRunAtMs: task.enabled ? nextRunAtMsFor(task.schedule, now()) : null,
+        };
+        emitter.emit('scheduledTask:statusUpdate', { taskId: task.id, state: { ...task.state } });
+        return { success: true, task: { ...task } };
+      }),
     toggle: (id: string, enabled: boolean) =>
       guardOnline(async () => {
         const task = taskById(id);
@@ -837,8 +971,49 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
         const all = [...scheduledRuns.values()].flat();
         return { success: true, runs: all.slice(offset, offset + limit) };
       }),
+    stop: (id: string) => guardOnline(async () => ({ success: true, result: stopActiveTaskRuns(id) })),
+    delete: (id: string) =>
+      guardOnline(async () => {
+        stopActiveTaskRuns(id);
+        const index = scheduledTasks.findIndex((task) => task.id === id);
+        if (index < 0) return { success: true, result: false };
+        scheduledTasks.splice(index, 1);
+        scheduledRuns.delete(id);
+        return { success: true, result: true };
+      }),
     onRunUpdate: (callback: (data: unknown) => void) => emitter.on('scheduledTask:runUpdate', callback as never),
     onStatusUpdate: (callback: (data: unknown) => void) => emitter.on('scheduledTask:statusUpdate', callback as never),
+  };
+
+  const longtermTaskImpl: Record<string, unknown> = {
+    board: () => guardOnline(async () => ({
+      success: true,
+      board: longTermBoard(structuredClone(longTermDetail)),
+    })),
+    get: (input: { taskId: string }) =>
+      guardOnline(async () => (
+        input?.taskId === longTermDetail.id
+          ? { success: true, detail: structuredClone(longTermDetail) }
+          : { success: false, error: 'Task not found' }
+      )),
+    setStage: (input: { taskId: string; action: 'pause' | 'resume' | 'cancel' }) =>
+      guardOnline(async () => {
+        if (input?.taskId !== longTermDetail.id) {
+          return { ok: false, code: 'NOT_FOUND', error: 'Task not found' };
+        }
+        const validTransition = input.action === 'pause'
+          ? longTermDetail.stage === 'active'
+          : input.action === 'resume'
+            ? longTermDetail.stage === 'paused' || longTermDetail.stage === 'defining'
+            : input.action === 'cancel' && longTermDetail.stage !== 'done' && longTermDetail.stage !== 'cancelled';
+        if (!validTransition) {
+          return { ok: false, code: 'VALIDATION', error: 'Invalid task stage transition' };
+        }
+        longTermDetail = applyLongTermStage(longTermDetail, input.action, new Date(now()).toISOString());
+        emitLongTermUpdate(`stage_${input.action}`);
+        return { ok: true, value: input.action === 'cancel' ? null : structuredClone(longTermDetail) };
+      }),
+    onUpdate: (callback: (data: unknown) => void) => emitter.on('longtermTask:update', callback as never),
   };
 
   // ----------------------------------------------------- plans and payment
@@ -1174,9 +1349,13 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       onStateChanged: () => () => undefined,
     },
     dialog: {
-      // Desktop cancelled shapes: success with a null path (main.ts dialog handlers).
       selectDirectory: () => Promise.resolve({ success: true, path: null }),
-      selectFile: () => Promise.resolve({ success: true, path: null, paths: [] }),
+      selectFile: (options?: PhoneFileSelectionOptions) => selectFileOnPhone({
+        uploadFile: (file, uploadOptions) => uploadFile(file, {
+          ...uploadOptions,
+          fetchImpl: mockUploadTransport,
+        }),
+      }, options),
       saveInlineFile: () => Promise.resolve({ success: true, path: null }),
     },
     shell: {
@@ -1204,6 +1383,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     store: storeImpl,
     cowork: coworkImpl,
     scheduledTasks: scheduledTasksImpl,
+    longtermTask: longtermTaskImpl,
     bundle: bundleImpl,
     mobile: {
       // Channel names aligned with the generated IPC contract / real preload
@@ -1233,12 +1413,18 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       // Real shape per src/renderer/types/electron.d.ts: the success variant
       // carries {url, expiresAt, size, mime} directly (no success envelope).
       fileSign: (input: { path: string; disposition?: 'inline' | 'attachment' }) =>
-        guardOnline(async () => ({
-          url: `/files/mock-${encodeURIComponent(String(input?.path ?? '').slice(-24))}`,
-          expiresAt: now() + 10 * 60 * 1000,
-          size: 1024,
-          mime: 'application/octet-stream',
-        })),
+        guardOnline(async () => {
+          const filePath = String(input?.path ?? '');
+          const artifact = getMockArtifact(filePath);
+          const disposition = input?.disposition === 'inline' ? 'inline' : 'attachment';
+          const expiresAt = now() + (filePath === MOCK_ARTIFACT_PATHS.refresh ? 61_500 : 10 * 60 * 1000);
+          return {
+            url: `/files/mock/${encodeURIComponent(filePath)}?disposition=${disposition}&expires=${expiresAt}`,
+            expiresAt,
+            size: artifact?.bytes().byteLength ?? 0,
+            mime: artifact?.mime ?? 'application/octet-stream',
+          };
+        }),
     },
     metabot: metabotImpl,
     userIdentity: {
