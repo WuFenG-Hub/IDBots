@@ -4,9 +4,9 @@ import { getMobileElectron } from '../appBridge';
 
 /**
  * App-level preferences (language, theme) persisted in the R-store's
- * `app_config` key, mirroring the desktop shape. Reads/writes go through the
- * bridge so the T3 gateway shim keeps working unchanged; failures (e.g. the
- * store is offline) fall back to in-memory values.
+ * `app_config` key, mirroring the desktop shape. Writes are field patches;
+ * the gateway serializes them against the latest stored config. A setting is
+ * applied locally only after the tenant confirms the write and readback.
  */
 
 export type ThemeMode = 'light' | 'dark' | 'system';
@@ -63,27 +63,28 @@ export async function loadSettings(): Promise<void> {
       mobileI18n.setLanguage(config.language as MobileLanguage);
     }
     applyThemeMode(normalizeTheme(config?.theme));
-  } catch {
-    // Offline or no stored config: device locale + system theme stay active.
+  } catch (error) {
+    console.warn('[mobile-settings] hydration failed; using device defaults', error);
     applyThemeMode('system');
   }
 }
 
 async function persistSettings(patch: Partial<MobileAppConfig>): Promise<void> {
-  try {
-    const current = ((await getMobileElectron().store.get('app_config')) as MobileAppConfig | null) ?? {};
-    await getMobileElectron().store.set('app_config', { ...current, ...patch });
-  } catch {
-    // Persistence is best-effort; the in-memory value still applies.
+  await getMobileElectron().store.set('app_config', patch);
+  const saved = (await getMobileElectron().store.get('app_config')) as MobileAppConfig | null;
+  for (const [key, value] of Object.entries(patch)) {
+    if (saved?.[key] !== value) {
+      throw new Error(`Settings save could not be confirmed for ${key}`);
+    }
   }
 }
 
 export async function setLanguage(language: MobileLanguage): Promise<void> {
-  mobileI18n.setLanguage(language);
   await persistSettings({ language });
+  mobileI18n.setLanguage(language);
 }
 
 export async function setThemeMode(mode: ThemeMode): Promise<void> {
-  applyThemeMode(mode);
   await persistSettings({ theme: mode });
+  applyThemeMode(mode);
 }

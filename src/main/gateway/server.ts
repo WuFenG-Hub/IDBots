@@ -679,6 +679,22 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
     onInvoke(state, frame.id, frame.channel, frame.args);
   };
 
+  let storeSetQueue: Promise<void> = Promise.resolve();
+  const enqueueStoreSet = (clientId: string, incoming: unknown): Promise<unknown> => {
+    const run = storeSetQueue.then(() => {
+      const merged = mergeAppConfigSet(options.storeGet?.('app_config'), incoming);
+      if (merged === null) {
+        throw new Error('app_config providers cannot be added, removed, or re-shaped');
+      }
+      return options.invokeHandler('store:set', clientId, ['app_config', merged]);
+    });
+    storeSetQueue = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
+  };
+
   const onInvoke = (state: ClientSocketState, id: string, channel: string, args: unknown[]): void => {
     // Token bucket (C2: 50/s, burst 100).
     if (!bucketAllow(state, Date.now())) {
@@ -719,16 +735,12 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
       return;
     }
 
-    // R-store set-merge: provider entries are pinned to the stored values
-    // before dispatch; the handler keeps its own validation.
-    let dispatchArgs = args;
     if (channel === 'store:set' && options.storeGet) {
       const merged = mergeAppConfigSet(options.storeGet('app_config'), args[1]);
       if (merged === null) {
         sendResult(state, makeResultError(id, makeError('INVALID_ARGS', 'app_config providers cannot be added, removed, or re-shaped')));
         return;
       }
-      dispatchArgs = ['app_config', merged];
     }
 
     state.inFlight += 1;
@@ -753,8 +765,10 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayHand
         const sleeper = setTimeout(() => resolve({ sleptMs: sleepMs }), sleepMs);
         sleeper.unref?.();
       });
+    } else if (channel === 'store:set' && options.storeGet) {
+      invokePromise = enqueueStoreSet(state.clientId, args[1]);
     } else {
-      invokePromise = options.invokeHandler(channel, state.clientId, dispatchArgs);
+      invokePromise = options.invokeHandler(channel, state.clientId, args);
     }
 
     invokePromise

@@ -466,6 +466,19 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     emitter.emit('cowork:stream:complete', { sessionId: session.id, claudeSessionId: session.claudeSessionId });
   }
 
+  const coworkConfig = {
+    workingDirectory: MOCK_WORKSPACE,
+    systemPrompt: '',
+    executionMode: 'auto' as const,
+    memoryEnabled: true,
+    memoryImplicitUpdateEnabled: true,
+    memoryLlmJudgeEnabled: false,
+    memoryGuardLevel: 'standard' as const,
+    memoryUserMemoriesMaxItems: 50,
+    memoryPromptMaxChars: 4000,
+    lastWorkspaceSelection: null,
+  };
+
   const coworkImpl: Record<string, unknown> = {
     createGreetingSession: (input: {
       title?: string;
@@ -584,19 +597,13 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     getConfig: () =>
       guardOnline(async () => ({
         success: true,
-        config: {
-          workingDirectory: MOCK_WORKSPACE,
-          systemPrompt: '',
-          executionMode: 'auto',
-          memoryEnabled: true,
-          memoryImplicitUpdateEnabled: true,
-          memoryLlmJudgeEnabled: false,
-          memoryGuardLevel: 'standard',
-          memoryUserMemoriesMaxItems: 50,
-          memoryPromptMaxChars: 4000,
-          lastWorkspaceSelection: null,
-        },
+        config: { ...coworkConfig },
       })),
+    setConfig: (input: Partial<typeof coworkConfig>) =>
+      guardOnline(async () => {
+        Object.assign(coworkConfig, input);
+        return { success: true };
+      }),
   };
 
   // -------------------------------------------------------- scheduled tasks
@@ -1158,7 +1165,10 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       guardOnline(async () => {
         const denied = storeGuard('set', key);
         if (denied) throw new Error(denied);
-        appConfigStore.set(key, value);
+        const current = appConfigStore.get(key);
+        const currentRecord = current && typeof current === 'object' && !Array.isArray(current) ? current : {};
+        const patch = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+        appConfigStore.set(key, { ...currentRecord, ...patch });
         for (const listener of [...storeListeners]) listener({ key });
       }),
     remove: (_key: string) =>

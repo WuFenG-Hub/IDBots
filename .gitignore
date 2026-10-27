@@ -71,6 +71,8 @@ tests/*
 !tests/update-notification.test.mjs
 !tests/serverMode.test.mjs
 !tests/serverBootstrap.test.mjs
+!tests/relayCatalogFreshness.test.mjs
+!tests/mobileSettings.test.ts
 !tests/fixtures/
 !tests/agentGameConvergence.test.mjs
 !tests/fixtures/longTaskBoardSeed.mjs

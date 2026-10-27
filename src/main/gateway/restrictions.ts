@@ -362,18 +362,19 @@ function redactProviderEntry(node: unknown): unknown {
 }
 
 /**
- * Merge an incoming `app_config` set (`02` R-store): provider entries cannot
- * be added or removed, and each provider's `apiKey`, `baseUrl`, and
- * `apiFormat` are kept from the stored value. Returns the value to store, or
- * null when the incoming shape violates the rule (the server layer maps null
- * to ARG_RESTRICTED / INVALID_ARGS).
+ * Merge an incoming `app_config` set (`02` R-store) into the latest stored
+ * value so field-scoped writes cannot erase concurrent bootstrap or preference
+ * updates. Provider entries cannot be added or removed, and each provider's
+ * `apiKey`, `baseUrl`, and `apiFormat` are kept from the stored value. Returns
+ * the value to store, or null when the incoming shape violates the rule (the
+ * server layer maps null to ARG_RESTRICTED / INVALID_ARGS).
  */
 export function mergeAppConfigSet(stored: unknown, incoming: unknown): unknown | null {
   if (!isPlainRecord(incoming)) return null;
   const storedRecord = isPlainRecord(stored) ? stored : {};
   const storedProviders = isPlainRecord(storedRecord.providers) ? storedRecord.providers : null;
 
-  const merged: Record<string, unknown> = {};
+  const merged = deepClonePlain(storedRecord) as Record<string, unknown>;
   for (const [key, value] of Object.entries(incoming)) {
     if (key === 'providers') continue; // handled below
     merged[key] = deepClonePlain(value);

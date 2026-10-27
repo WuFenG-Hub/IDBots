@@ -9,6 +9,7 @@ import { logout, requestAccountDeletion } from '../../login/loginApi';
 import { useIdentity } from '../hooks/useIdentity';
 import { useMeters } from '../hooks/useMeters';
 import { useSettings } from '../hooks/useSettings';
+import { useMemorySettings } from '../hooks/useMemorySettings';
 import { useSkills } from '../hooks/useSkills';
 import { useMetabots } from '../hooks/useMetabots';
 import { formatBytes, formatCount } from '../format';
@@ -20,6 +21,7 @@ function Segmented<T extends string>(props: {
   value: T;
   options: Array<{ value: T; labelKey: string }>;
   onChange: (value: T) => void;
+  disabled?: boolean;
 }): JSX.Element {
   return (
     <div className="flex gap-2">
@@ -27,8 +29,9 @@ function Segmented<T extends string>(props: {
         <button
           key={option.value}
           type="button"
+          disabled={props.disabled}
           onClick={() => props.onChange(option.value)}
-          className={`min-h-[44px] flex-1 rounded-xl border px-2 text-sm ${
+          className={`min-h-[44px] flex-1 rounded-xl border px-2 text-sm disabled:opacity-40 ${
             props.value === option.value
               ? 'border-[var(--color-primary)] bg-[var(--color-primary)] text-black'
               : 'border-[var(--border-color)] text-[var(--text-secondary)]'
@@ -243,7 +246,13 @@ function SkillsSection(): JSX.Element {
 }
 
 function SettingsSection(): JSX.Element {
-  const { language, theme, changeLanguage, changeTheme } = useSettings();
+  const { language, theme, saveState, changeLanguage, changeTheme } = useSettings();
+  const memory = useMemorySettings();
+  const memoryRows = [
+    { field: 'memoryEnabled' as const, labelKey: 'mobile.me.memoryEnabled' },
+    { field: 'memoryImplicitUpdateEnabled' as const, labelKey: 'mobile.me.memoryImplicitUpdate' },
+    { field: 'memoryLlmJudgeEnabled' as const, labelKey: 'mobile.me.memoryLlmJudge' },
+  ];
   return (
     <Section title={t('mobile.me.settingsTitle')}>
       <p className="mb-2 text-xs font-medium uppercase text-[var(--text-secondary)]">{t('mobile.me.languageLabel')}</p>
@@ -253,6 +262,7 @@ function SettingsSection(): JSX.Element {
           { value: 'zh', labelKey: 'mobile.me.languageZh' },
           { value: 'en', labelKey: 'mobile.me.languageEn' },
         ]}
+        disabled={saveState.status === 'saving'}
         onChange={(value) => void changeLanguage(value)}
       />
       <p className="mb-2 mt-4 text-xs font-medium uppercase text-[var(--text-secondary)]">{t('mobile.me.themeLabel')}</p>
@@ -263,8 +273,37 @@ function SettingsSection(): JSX.Element {
           { value: 'dark', labelKey: 'mobile.me.themeDark' },
           { value: 'system', labelKey: 'mobile.me.themeSystem' },
         ]}
+        disabled={saveState.status === 'saving'}
         onChange={(value) => void changeTheme(value)}
       />
+      {saveState.status !== 'idle' ? (
+        <p aria-live="polite" className={`mt-2 text-xs ${saveState.status === 'error' ? 'text-red-600' : 'text-[var(--text-secondary)]'}`}>
+          {t(`mobile.me.settings${saveState.status === 'saving' ? 'Saving' : saveState.status === 'saved' ? 'Saved' : 'SaveFailed'}`)}
+        </p>
+      ) : null}
+
+      <p className="mb-2 mt-5 text-xs font-medium uppercase text-[var(--text-secondary)]">{t('mobile.me.memoryTitle')}</p>
+      {memory.loading ? <p className="py-2 text-sm text-[var(--text-secondary)]">{t('mobile.common.loading')}</p> : null}
+      {memoryRows.map((row) => (
+        <div key={row.field} className="flex min-h-[44px] items-center justify-between gap-3 border-b border-[var(--border-color)] py-2 last:border-b-0">
+          <span className="text-sm text-[var(--text-primary)]">{t(row.labelKey)}</span>
+          <Switch
+            checked={memory.config?.[row.field] ?? false}
+            disabled={memory.loading || !memory.config || memory.saving !== null}
+            onChange={(checked) => void memory.setEnabled(row.field, checked)}
+            label={t(row.labelKey)}
+          />
+        </div>
+      ))}
+      {memory.error ? (
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <p className="text-xs text-red-600">{memory.error}</p>
+          <button type="button" onClick={() => void memory.reload()} className="min-h-[44px] px-2 text-xs text-[var(--text-primary)]">
+            {t('mobile.common.retry')}
+          </button>
+        </div>
+      ) : null}
+      {memory.saved ? <p aria-live="polite" className="mt-2 text-xs text-emerald-600">{t('mobile.me.settingsSaved')}</p> : null}
     </Section>
   );
 }
