@@ -231,6 +231,11 @@ export function BotManagementSection(): JSX.Element {
                     ? t('mobile.me.botChainSynced')
                     : t('mobile.me.botChainPending', { steps: pendingSteps.join(', ') })}
                 </p>
+                {busyId === bot.id ? (
+                  <p className="mt-1 text-xs text-[var(--text-secondary)]" data-testid={`bot-syncing-${bot.id}`} aria-live="polite">
+                    {t('mobile.me.botSyncing')}
+                  </p>
+                ) : null}
               </div>
               <Switch
                 checked={bot.enabled}
