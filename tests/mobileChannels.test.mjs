@@ -125,6 +125,21 @@ test('mobile:permission:listPending payload survives the IPC sanitizer', (t) => 
   assert.equal(sanitized[0].request.toolName, 'Bash');
 });
 
+test('long-term board participants survive the bounded IPC sanitizer', () => {
+  const sanitized = sanitizeIpcPayload({
+    success: true,
+    board: {
+      generatedAtMs: 1,
+      columns: [],
+      cards: [{ id: 'lt-1', participants: [{ id: 1, name: 'Gateway Twin', avatar: null }] }],
+    },
+  });
+  assert.deepEqual(sanitized.board.cards[0].participants, [{ id: 1, name: 'Gateway Twin', avatar: null }]);
+
+  const deep = sanitizeIpcPayload({ a: { b: { c: { d: { e: { f: { g: 'too deep' } } } } } } });
+  assert.equal(deep.a.b.c.d.e.f, '[truncated-depth]', 'the depth cap remains enforced');
+});
+
 // ---------------------------------------------------------------------------
 // mobile:bootstrap:status (readiness provider seam)
 // ---------------------------------------------------------------------------

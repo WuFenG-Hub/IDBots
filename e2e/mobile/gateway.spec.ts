@@ -134,20 +134,35 @@ test.describe('gateway-backed smoke', () => {
     expect(dirLinks).toBe(0);
   });
 
-  test('real uploads reach start and steer prompts in picker order @gateway', async ({ page }, testInfo) => {
+  test('real uploads reach start and steer prompts in picker order @gateway', async ({ page, browserName }, testInfo) => {
     const uploads: Array<{ path: string; size: number }> = [];
-    await page.route('**/upload?*', async (route) => {
-      const response = await route.fetch();
-      uploads.push(await response.json() as { path: string; size: number });
-      await route.fulfill({ response });
-    });
+    const uploadErrors: unknown[] = [];
+    // WebKit can drop a proxied large request; Chromium can evict the inspector response body.
+    if (browserName === 'webkit') {
+      page.on('response', (response) => {
+        if (new URL(response.url()).pathname !== '/upload') return;
+        void response.json().then((body: { path: string; size: number }) => {
+          uploads.push(body);
+        }).catch((error: unknown) => uploadErrors.push(error));
+      });
+    } else {
+      await page.route('**/upload?*', async (route) => {
+        const response = await route.fetch();
+        uploads.push(await response.json() as { path: string; size: number });
+        await route.fulfill({ response });
+      });
+    }
+    const waitForUploads = (count: number) => expect.poll(() => {
+      if (uploadErrors.length) throw new Error(`Upload response read failed: ${String(uploadErrors[0])}`);
+      return uploads.length;
+    }, { timeout: 30_000 }).toBe(count);
     await page.goto('/app/');
     await startNewChat(page);
     await chooseFiles(page, [
       { name: 'twenty-megabytes.pdf', mimeType: 'application/pdf', buffer: Buffer.alloc(20 * 1024 * 1024, 7) },
       { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('notes') },
     ]);
-    await expect.poll(() => uploads.length).toBe(2);
+    await waitForUploads(2);
     expect(uploads[0].size).toBe(20 * 1024 * 1024);
     await expect(page.getByTestId('chat-attachment')).toHaveText(['twenty-megabytes.pdf', 'notes.txt']);
     await page.getByPlaceholder('Type a message…').fill('review uploaded files');
@@ -157,7 +172,7 @@ test.describe('gateway-backed smoke', () => {
     );
 
     await chooseFiles(page, [{ name: 'follow-up.txt', mimeType: 'text/plain', buffer: Buffer.from('follow up') }]);
-    await expect.poll(() => uploads.length).toBe(3);
+    await waitForUploads(3);
     await page.getByRole('button', { name: 'Send' }).click();
     await expect(page.getByTestId('chat-user-message').last()).toHaveText(`Input file: ${uploads[2].path}`);
     const promptBox = page.getByTestId('chat-user-message').last();

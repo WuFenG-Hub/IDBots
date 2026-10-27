@@ -29,6 +29,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createMockArtifactImage, createMockArtifactPdf } from '../src/mobile/bridge/mockArtifacts.ts';
+import { applyLongTermStage, createLongTermFixture, longTermBoard } from '../src/mobile/bridge/backgroundFixtures.ts';
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -156,6 +157,231 @@ const sessionTimers = new Map(); // sessionId -> timer handles
 let sessionSeq = 0;
 let messageSeq = 0;
 let broadcast = null;
+
+function nextScheduledAt(schedule, fromMs) {
+  if (schedule.type === 'interval') return fromMs + schedule.intervalMs;
+  if (schedule.type === 'at') {
+    const timestamp = Date.parse(schedule.datetime);
+    return Number.isFinite(timestamp) && timestamp > fromMs ? timestamp : null;
+  }
+  const parts = schedule.expression.trim().split(/\s+/);
+  const minute = Number(parts[0]);
+  const hour = Number(parts[1]);
+  if (parts.length !== 5 || !Number.isInteger(minute) || !Number.isInteger(hour)) return null;
+  const next = new Date(fromMs);
+  next.setSeconds(0, 0);
+  for (let day = 0; day < 8; day += 1) {
+    next.setHours(hour, minute, 0, 0);
+    const weekdayMatches = parts[4] === '*' || Number(parts[4]) % 7 === next.getDay();
+    if (next.getTime() > fromMs && weekdayMatches) return next.getTime();
+    next.setDate(next.getDate() + 1);
+  }
+  return null;
+}
+
+function fixtureTask(id, name, enabled, schedule) {
+  const timestamp = Date.now();
+  return {
+    id,
+    name,
+    description: 'Gateway background-work fixture',
+    enabled,
+    schedule,
+    prompt: `Complete ${name}`,
+    workingDirectory: paths.workspaceRoot,
+    systemPrompt: 'Preserve this scheduled-task context',
+    executionMode: 'auto',
+    metabotId: 1,
+    coworkSessionId: null,
+    targetSessionId: null,
+    memoryAccess: 'none',
+    expiresAt: null,
+    notifyPlatforms: [],
+    origin: 'human',
+    originSessionId: null,
+    originContext: 'ui',
+    exitCondition: null,
+    maxFires: null,
+    fireCount: 0,
+    state: {
+      nextRunAtMs: enabled ? nextScheduledAt(schedule, timestamp) : null,
+      lastRunAtMs: null,
+      lastStatus: null,
+      lastError: null,
+      lastDurationMs: null,
+      runningAtMs: null,
+      consecutiveErrors: 0,
+    },
+    createdAt: new Date(timestamp).toISOString(),
+    updatedAt: new Date(timestamp).toISOString(),
+  };
+}
+
+const scheduledTasks = [
+  fixtureTask('gw-task-1', 'Gateway daily job', true, {
+    type: 'interval', intervalMs: 86_400_000, unit: 'days', value: 1,
+  }),
+  {
+    ...fixtureTask('gw-task-2', 'Gateway weekly job', false, { type: 'cron', expression: '0 9 * * 1' }),
+    memoryAccess: 'read-write',
+    coworkSessionId: 'gw-preserved-cowork',
+    targetSessionId: 'gw-preserved-target',
+  },
+];
+const scheduledRuns = new Map();
+const activeRuns = new Map();
+let taskSeq = 2;
+let runSeq = 0;
+
+function storeScheduledRun(run) {
+  const runs = scheduledRuns.get(run.taskId) ?? [];
+  const index = runs.findIndex((candidate) => candidate.id === run.id);
+  if (index < 0) runs.unshift(run);
+  else runs[index] = run;
+  scheduledRuns.set(run.taskId, runs);
+}
+
+function startScheduledRun(task, trigger) {
+  const startedMs = Date.now();
+  const session = {
+    id: `gw-scheduled-session-${++sessionSeq}`,
+    title: `Scheduled run: ${task.name}`,
+    claudeSessionId: `claude-scheduled-${sessionSeq}`,
+    status: 'running',
+    pinned: false,
+    cwd: paths.workspaceRoot,
+    systemPrompt: task.systemPrompt,
+    executionMode: task.executionMode,
+    activeSkillIds: [],
+    messages: [],
+    createdAt: startedMs,
+    updatedAt: startedMs,
+    metabotId: task.metabotId,
+    sessionType: 'standard',
+    autoOrigin: 'schedule',
+  };
+  sessions.set(session.id, session);
+  const run = {
+    id: `gw-run-${++runSeq}`,
+    taskId: task.id,
+    sessionId: session.id,
+    status: 'running',
+    startedAt: new Date(startedMs).toISOString(),
+    finishedAt: null,
+    durationMs: null,
+    error: null,
+    trigger,
+    skipReason: null,
+  };
+  storeScheduledRun(run);
+  task.state = { ...task.state, lastStatus: 'running', runningAtMs: startedMs };
+  task.updatedAt = new Date(startedMs).toISOString();
+  broadcast?.('scheduledTask:statusUpdate', [{ taskId: task.id, state: { ...task.state } }]);
+  broadcast?.('scheduledTask:runUpdate', [{ run: { ...run } }]);
+  const delay = trigger === 'manual' ? Number(process.env.GW_FIXTURE_MANUAL_RUN_DELAY_MS ?? 2500) : 500;
+  const timer = setTimeout(() => {
+    if (!activeRuns.delete(run.id)) return;
+    const finishedMs = Date.now();
+    run.status = 'success';
+    run.finishedAt = new Date(finishedMs).toISOString();
+    run.durationMs = finishedMs - startedMs;
+    session.messages.push(
+      { id: `gw-msg-${++messageSeq}`, type: 'user', content: task.prompt, timestamp: startedMs },
+      {
+        id: `gw-msg-${++messageSeq}`,
+        type: 'assistant',
+        content: `**Gateway scheduled result.**\n\n${FIXTURE_REPLY}`,
+        timestamp: finishedMs,
+        metadata: { isFinal: true },
+      },
+    );
+    session.status = 'completed';
+    session.updatedAt = finishedMs;
+    task.fireCount += 1;
+    task.state = {
+      ...task.state,
+      nextRunAtMs: task.enabled ? nextScheduledAt(task.schedule, finishedMs) : null,
+      lastRunAtMs: finishedMs,
+      lastStatus: 'success',
+      lastError: null,
+      lastDurationMs: run.durationMs,
+      runningAtMs: null,
+      consecutiveErrors: 0,
+    };
+    task.updatedAt = new Date(finishedMs).toISOString();
+    storeScheduledRun(run);
+    broadcast?.('scheduledTask:runUpdate', [{ run: { ...run } }]);
+    broadcast?.('scheduledTask:statusUpdate', [{ taskId: task.id, state: { ...task.state } }]);
+  }, delay);
+  activeRuns.set(run.id, { taskId: task.id, timer });
+  return run;
+}
+
+function stopScheduledRuns(taskId) {
+  let stopped = false;
+  for (const [runId, active] of [...activeRuns]) {
+    if (active.taskId !== taskId) continue;
+    clearTimeout(active.timer);
+    activeRuns.delete(runId);
+    const run = (scheduledRuns.get(taskId) ?? []).find((candidate) => candidate.id === runId);
+    if (!run || run.status !== 'running') continue;
+    stopped = true;
+    const finishedMs = Date.now();
+    run.status = 'error';
+    run.error = 'Stopped by user';
+    run.finishedAt = new Date(finishedMs).toISOString();
+    run.durationMs = finishedMs - Date.parse(run.startedAt);
+    const session = sessions.get(run.sessionId);
+    if (session) session.status = 'idle';
+    const task = scheduledTasks.find((candidate) => candidate.id === taskId);
+    if (task) {
+      task.state = {
+        ...task.state,
+        lastRunAtMs: finishedMs,
+        lastStatus: 'error',
+        lastError: run.error,
+        runningAtMs: null,
+      };
+      task.updatedAt = new Date(finishedMs).toISOString();
+      broadcast?.('scheduledTask:statusUpdate', [{ taskId, state: { ...task.state } }]);
+    }
+    storeScheduledRun(run);
+    broadcast?.('scheduledTask:runUpdate', [{ run: { ...run } }]);
+  }
+  return stopped;
+}
+
+const longTermSessionId = 'gw-longterm-session-1';
+const longTermTimestamp = Date.now();
+sessions.set(longTermSessionId, {
+  id: longTermSessionId,
+  title: 'Gateway long-term result',
+  claudeSessionId: 'claude-gw-longterm-1',
+  status: 'completed',
+  pinned: false,
+  cwd: paths.workspaceRoot,
+  systemPrompt: '',
+  executionMode: 'auto',
+  activeSkillIds: [],
+  messages: [
+    { id: `gw-msg-${++messageSeq}`, type: 'user', content: 'Produce the long-term document', timestamp: longTermTimestamp - 1000 },
+    {
+      id: `gw-msg-${++messageSeq}`,
+      type: 'assistant',
+      content: `**Gateway long-term result.**\n\n${FIXTURE_REPLY}`,
+      timestamp: longTermTimestamp,
+      metadata: { isFinal: true },
+    },
+  ],
+  createdAt: longTermTimestamp - 1000,
+  updatedAt: longTermTimestamp,
+  metabotId: 1,
+  sessionType: 'longterm',
+  autoOrigin: null,
+});
+let longTermDetail = createLongTermFixture(longTermSessionId);
+longTermDetail.participants = [{ id: 1, name: 'Gateway Twin', avatar: null }];
+let longTermSeq = 0;
 
 const summaryOf = (session) => ({
   id: session.id,
@@ -368,13 +594,141 @@ async function invokeHandler(channel, clientId, args) {
       return '0.0.0-gateway-e2e';
     case 'app:getSystemLocale':
       return 'en-US';
+    case 'scheduledTask:list':
+      return { success: true, tasks: structuredClone(scheduledTasks) };
+    case 'scheduledTask:get': {
+      const task = scheduledTasks.find((candidate) => candidate.id === args[0]);
+      return task ? { success: true, task: structuredClone(task) } : { success: false, error: 'task not found' };
+    }
+    case 'scheduledTask:create': {
+      const input = args[0] ?? {};
+      if (typeof input.name !== 'string' || !input.name.trim() || typeof input.prompt !== 'string' || !input.prompt.trim()) {
+        return { success: false, error: 'name and prompt are required' };
+      }
+      if (!input.schedule || (input.schedule.type === 'interval' && !(input.schedule.intervalMs > 0))) {
+        return { success: false, error: 'invalid schedule' };
+      }
+      const task = fixtureTask(`gw-task-${++taskSeq}`, input.name.trim(), input.enabled !== false, input.schedule);
+      task.description = typeof input.description === 'string' ? input.description : '';
+      task.prompt = input.prompt;
+      task.workingDirectory = typeof input.workingDirectory === 'string' && input.workingDirectory.trim()
+        ? input.workingDirectory
+        : paths.workspaceRoot;
+      task.systemPrompt = typeof input.systemPrompt === 'string' ? input.systemPrompt : '';
+      task.executionMode = input.executionMode === 'local' ? 'local' : 'auto';
+      task.metabotId = Number.isInteger(input.metabotId) && input.metabotId > 0 ? input.metabotId : null;
+      task.targetSessionId = typeof input.targetSessionId === 'string' ? input.targetSessionId : null;
+      task.memoryAccess = ['none', 'read-only', 'read-write'].includes(input.memoryAccess) ? input.memoryAccess : 'none';
+      task.expiresAt = typeof input.expiresAt === 'string' ? input.expiresAt : null;
+      task.notifyPlatforms = Array.isArray(input.notifyPlatforms) ? [...input.notifyPlatforms] : [];
+      task.exitCondition = typeof input.exitCondition === 'string' ? input.exitCondition : null;
+      task.maxFires = typeof input.maxFires === 'number' ? input.maxFires : null;
+      scheduledTasks.push(task);
+      broadcast?.('scheduledTask:statusUpdate', [{ taskId: task.id, state: { ...task.state } }]);
+      return { success: true, task: structuredClone(task) };
+    }
+    case 'scheduledTask:update': {
+      const task = scheduledTasks.find((candidate) => candidate.id === args[0]);
+      if (!task) return { success: false, error: `Task not found: ${args[0]}` };
+      const changes = args[1] && typeof args[1] === 'object' ? args[1] : {};
+      const previousMetabotId = task.metabotId;
+      const updated = { ...task };
+      const editable = [
+        'name', 'description', 'schedule', 'prompt', 'workingDirectory', 'systemPrompt',
+        'executionMode', 'metabotId', 'targetSessionId', 'memoryAccess', 'expiresAt',
+        'notifyPlatforms', 'enabled', 'exitCondition', 'maxFires',
+      ];
+      for (const key of editable) {
+        if (Object.hasOwn(changes, key) && changes[key] !== undefined) updated[key] = changes[key];
+      }
+      if (typeof updated.name !== 'string' || !updated.name.trim() || typeof updated.prompt !== 'string' || !updated.prompt.trim()) {
+        return { success: false, error: 'name and prompt are required' };
+      }
+      Object.assign(task, updated, {
+        name: updated.name.trim(),
+        updatedAt: new Date().toISOString(),
+        state: {
+          ...task.state,
+          nextRunAtMs: updated.enabled ? nextScheduledAt(updated.schedule, Date.now()) : null,
+        },
+      });
+      if (Object.hasOwn(changes, 'metabotId') && updated.metabotId !== previousMetabotId) {
+        task.coworkSessionId = null;
+        task.targetSessionId = null;
+      }
+      broadcast?.('scheduledTask:statusUpdate', [{ taskId: task.id, state: { ...task.state } }]);
+      return { success: true, task: structuredClone(task) };
+    }
+    case 'scheduledTask:toggle': {
+      const task = scheduledTasks.find((candidate) => candidate.id === args[0]);
+      if (!task) return { success: false, error: 'task not found' };
+      task.enabled = Boolean(args[1]);
+      task.state = {
+        ...task.state,
+        nextRunAtMs: task.enabled ? nextScheduledAt(task.schedule, Date.now()) : null,
+      };
+      task.updatedAt = new Date().toISOString();
+      broadcast?.('scheduledTask:statusUpdate', [{ taskId: task.id, state: { ...task.state } }]);
+      return { success: true, task: structuredClone(task) };
+    }
+    case 'scheduledTask:runManually': {
+      const task = scheduledTasks.find((candidate) => candidate.id === args[0]);
+      if (!task) return { success: false, error: 'task not found' };
+      startScheduledRun(task, 'manual');
+      return { success: true };
+    }
+    case 'scheduledTask:stop':
+      return { success: true, result: stopScheduledRuns(args[0]) };
+    case 'scheduledTask:delete': {
+      const id = args[0];
+      stopScheduledRuns(id);
+      const index = scheduledTasks.findIndex((candidate) => candidate.id === id);
+      if (index < 0) return { success: true, result: false };
+      scheduledTasks.splice(index, 1);
+      scheduledRuns.delete(id);
+      return { success: true, result: true };
+    }
+    case 'scheduledTask:listRuns': {
+      const runs = scheduledRuns.get(args[0]) ?? [];
+      const offset = args[2] ?? 0;
+      const limit = args[1] ?? 50;
+      return { success: true, runs: structuredClone(runs.slice(offset, offset + limit)) };
+    }
+    case 'scheduledTask:countRuns':
+      return { success: true, count: (scheduledRuns.get(args[0]) ?? []).length };
+    case 'scheduledTask:listAllRuns': {
+      const runs = [...scheduledRuns.values()].flat().sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+      const limit = args[0] ?? 50;
+      const offset = args[1] ?? 0;
+      return { success: true, runs: structuredClone(runs.slice(offset, offset + limit)) };
+    }
+    case 'longtermTask:board':
+      return { success: true, board: longTermBoard(structuredClone(longTermDetail)) };
+    case 'longtermTask:get': {
+      if (args[0]?.taskId !== longTermDetail.id) return { success: false, error: 'Task not found' };
+      return { success: true, detail: structuredClone(longTermDetail) };
+    }
+    case 'longtermTask:setStage': {
+      const input = args[0] ?? {};
+      if (input.taskId !== longTermDetail.id) return { ok: false, code: 'NOT_FOUND', error: 'Task not found' };
+      const validTransition = input.action === 'pause'
+        ? longTermDetail.stage === 'active'
+        : input.action === 'resume'
+          ? longTermDetail.stage === 'paused' || longTermDetail.stage === 'defining'
+          : input.action === 'cancel' && longTermDetail.stage !== 'done' && longTermDetail.stage !== 'cancelled';
+      if (!validTransition) return { ok: false, code: 'VALIDATION', error: 'Invalid task stage transition' };
+      longTermDetail = applyLongTermStage(longTermDetail, input.action, new Date().toISOString());
+      longTermSeq += 1;
+      broadcast?.('longtermTask:update', [{ seq: longTermSeq, taskIds: [longTermDetail.id], reason: `stage_${input.action}` }]);
+      return { ok: true, value: input.action === 'cancel' ? null : structuredClone(longTermDetail) };
+    }
     case 'metabot:list':
       return { success: true, list: metabots.map((bot) => ({ ...bot })) };
     case 'metabot:get': {
       const bot = metabots.find((entry) => entry.id === args[0]);
       return bot ? { success: true, metabot: { ...bot } } : { success: false, error: 'metabot not found' };
     }
-    case 'cowork:getConfig':
+    case 'cowork:config:get':
       return {
         success: true,
         config: {
@@ -490,6 +844,22 @@ process.on('SIGTERM', () => {
 });
 
 async function main() {
+  const forwardedArgs = process.argv.slice(2);
+  const hasProject = forwardedArgs.some((arg) => arg === '--project' || arg.startsWith('--project='));
+  if (!hasProject) {
+    for (const project of ['iphone14', 'pixel7']) {
+      console.log(`[gateway-e2e] starting an isolated ${project} fixture`);
+      const run = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--project', project, ...forwardedArgs], {
+        cwd: repoRoot,
+        env: process.env,
+        stdio: 'inherit',
+      });
+      if (run.error) throw run.error;
+      if (run.status !== 0) process.exit(run.status ?? 1);
+    }
+    process.exit(0);
+  }
+
   let fixture;
   try {
     fixture = await startFixture();
@@ -532,6 +902,8 @@ async function main() {
   } finally {
     cleanup();
     for (const sessionId of [...sessionTimers.keys()]) clearTurnTimers(sessionId);
+    for (const { timer } of activeRuns.values()) clearTimeout(timer);
+    activeRuns.clear();
     await fixture.close();
     fs.rmSync(base, { recursive: true, force: true });
   }

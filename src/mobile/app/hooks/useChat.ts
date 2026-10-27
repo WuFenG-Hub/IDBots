@@ -246,9 +246,9 @@ export function useChat(bots: MockMetabot[] = []) {
     return controller.send(text, startOptions, attachments, t('mobile.chat.inputFile'));
   }, [controller, metabotId, sessionId]);
 
-  const openSession = useCallback(async (id: string): Promise<void> => {
-    await controller?.openSession(id);
-  }, [controller]);
+  const openSession = useCallback(async (id: string): Promise<boolean> => (
+    controller?.openSession(id) ?? false
+  ), [controller]);
 
   const applyResync = useCallback((resync: CoworkResyncSnapshot): void => {
     controller?.applyResync(resync);
