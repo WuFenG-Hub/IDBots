@@ -286,6 +286,7 @@ async function openGatewayArtifact(page: import('@playwright/test').Page, filena
   await page.getByRole('button', { name: 'Send' }).click();
   const link = page.getByRole('link', { name: filename, exact: true });
   await expect(link).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId('turn-phase')).toHaveCount(0, { timeout: 30_000 });
   await link.click();
   await expect(page.getByRole('dialog', { name: filename, exact: true })).toBeVisible();
 }
