@@ -116,7 +116,128 @@ test.describe('chat', () => {
     await expect(page.getByPlaceholder('Type a message…')).toHaveValue('keep this draft');
     await expect(page.getByRole('button', { name: 'Send' })).toBeEnabled();
   });
+
+  test('image preview downloads real bytes and shares the signed URL without leaving chat', async ({ page }, testInfo) => {
+    await openMockArtifact(page, 'chart.png');
+    const image = page.getByTestId('artifact-image');
+    await expect(image).toBeVisible();
+    await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(1);
+    const src = await image.getAttribute('src');
+    const response = await page.evaluate(async (url) => {
+      const result = await fetch(url, { credentials: 'include' });
+      return {
+        type: result.headers.get('content-type'),
+        disposition: result.headers.get('content-disposition'),
+        bytes: Array.from(new Uint8Array(await result.arrayBuffer()).slice(0, 8)),
+      };
+    }, src);
+    expect(response.type).toBe('image/png');
+    expect(response.disposition).toContain('inline');
+    expect(response.bytes).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    await attachScreen(testInfo, page, 'artifact-image-preview');
+
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByTestId('artifact-download').click(),
+    ]);
+    expect(download.suggestedFilename()).toBe('chart.png');
+    const { readFileSync } = await import('node:fs');
+    expect(Array.from(readFileSync(await download.path()).subarray(0, 8))).toEqual(response.bytes);
+
+    await page.evaluate(() => {
+      const host = window as unknown as { __sharedArtifactUrl?: string };
+      Object.defineProperty(navigator, 'share', {
+        configurable: true,
+        value: async (data: { url: string }) => { host.__sharedArtifactUrl = data.url; },
+      });
+    });
+    await page.getByTestId('artifact-share').click();
+    const downloadHref = await page.getByTestId('artifact-download').getAttribute('href');
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __sharedArtifactUrl?: string }).__sharedArtifactUrl))
+      .toBe(new URL(downloadHref, page.url()).toString());
+    await page.getByPlaceholder('Type a message…').fill('continue working');
+    await closeMockArtifact(page, 'chart.png');
+    await expect(page.getByPlaceholder('Type a message…')).toHaveValue('continue working');
+  });
+
+  test('PDF preview uses the real inline document and keeps an open-new-tab fallback', async ({ page }, testInfo) => {
+    await openMockArtifact(page, 'report.pdf');
+    const frame = page.getByTestId('artifact-pdf');
+    await expect(frame).toBeVisible();
+    const src = await frame.getAttribute('src');
+    const response = await page.evaluate(async (url) => {
+      const result = await fetch(url, { credentials: 'include' });
+      return {
+        type: result.headers.get('content-type'),
+        disposition: result.headers.get('content-disposition'),
+        startsWithPdf: (await result.text()).startsWith('%PDF-'),
+      };
+    }, src);
+    expect(response.type).toBe('application/pdf');
+    expect(response.disposition).toContain('inline');
+    expect(response.startsWithPdf).toBe(true);
+    await expect(page.getByTestId('artifact-open-new-tab')).toHaveAttribute('target', '_blank');
+    await attachScreen(testInfo, page, 'artifact-pdf-preview');
+  });
+
+  test('Markdown preview reads signed content and supports download and copy fallback', async ({ page }, testInfo) => {
+    await openMockArtifact(page, 'notes.md');
+    const preview = page.getByTestId('artifact-markdown');
+    await expect(preview).toContainText('This Markdown came from the signed file.');
+    await expect(preview).toContainText('Preview stays in chat.');
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByTestId('artifact-download').click(),
+    ]);
+    expect(download.suggestedFilename()).toBe('notes.md');
+    const { readFileSync } = await import('node:fs');
+    expect(readFileSync(await download.path(), 'utf8')).toContain('This **Markdown** came from the signed file.');
+
+    await page.evaluate(() => {
+      const host = window as unknown as { __copiedArtifactUrl?: string };
+      Object.defineProperty(navigator, 'share', { configurable: true, value: undefined });
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: async (text: string) => { host.__copiedArtifactUrl = text; } },
+      });
+    });
+    await page.getByTestId('artifact-share').click();
+    await expect(page.getByRole('status').filter({ hasText: 'File link copied.' })).toBeVisible();
+    const downloadHref = await page.getByTestId('artifact-download').getAttribute('href');
+    expect(await page.evaluate(() => (window as unknown as { __copiedArtifactUrl?: string }).__copiedArtifactUrl))
+      .toBe(new URL(downloadHref, page.url()).toString());
+    await page.getByPlaceholder('Type a message…').fill('preserve this draft');
+    await closeMockArtifact(page, 'notes.md');
+    await expect(page.getByPlaceholder('Type a message…')).toHaveValue('preserve this draft');
+    await attachScreen(testInfo, page, 'artifact-markdown-preview');
+  });
+
+  test('link refresh keeps the same preview and composer state', async ({ page }) => {
+    await openMockArtifact(page, 'refresh.md');
+    const download = page.getByTestId('artifact-download');
+    const initialHref = await download.getAttribute('href');
+    await expect.poll(() => download.getAttribute('href'), { timeout: 10_000 }).not.toBe(initialHref);
+    await expect(page.getByRole('dialog', { name: 'refresh.md', exact: true })).toBeVisible();
+    await expect(page.getByTestId('artifact-markdown')).toContainText('The preview remains open when this URL rotates.');
+    await page.getByPlaceholder('Type a message…').fill('draft during refresh');
+    await closeMockArtifact(page, 'refresh.md');
+    await expect(page.getByPlaceholder('Type a message…')).toHaveValue('draft during refresh');
+  });
 });
+
+async function openMockArtifact(page: import('@playwright/test').Page, filename: string): Promise<void> {
+  await page.goto('/app/');
+  await sendMessage(page, 'show artifacts');
+  const link = page.getByRole('link', { name: filename, exact: true });
+  await expect(link).toBeVisible({ timeout: 30_000 });
+  await link.click();
+  await expect(page.getByRole('dialog', { name: filename, exact: true })).toBeVisible();
+}
+
+async function closeMockArtifact(page: import('@playwright/test').Page, filename: string): Promise<void> {
+  await page.getByRole('button', { name: '✕', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: filename, exact: true })).toHaveCount(0);
+}
 
 async function chooseFiles(
   page: import('@playwright/test').Page,

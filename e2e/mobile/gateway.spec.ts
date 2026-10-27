@@ -76,7 +76,8 @@ test.describe('gateway-backed smoke', () => {
     await page.getByPlaceholder('Type a message…').fill('generate a report');
     await page.getByRole('button', { name: 'Send' }).click();
 
-    // The fixture streams the reply with [gateway-e2e-report.docx](file://…).
+    // Wait for the whole streamed artifact list before checking for raw paths.
+    await expect(page.getByRole('link', { name: 'gateway-e2e-refresh.md', exact: true })).toBeVisible({ timeout: 30_000 });
     const link = page.getByRole('link', { name: /gateway-e2e-report\.docx/ });
     await expect(link).toBeVisible({ timeout: 30_000 });
     await screenTo(page, testInfo, 'f11-message-before-click');
@@ -98,10 +99,12 @@ test.describe('gateway-backed smoke', () => {
     expect(href).toMatch(/^\/files\/[^/]+/);
     expect(href).not.toContain('/gateway/v1/');
 
-    // Clicking really downloads the bytes the tenant generated.
+    // The preview opens first; its download action really fetches the bytes.
+    await link.click();
+    await expect(page.getByRole('dialog', { name: 'gateway-e2e-report.docx', exact: true })).toBeVisible();
     const [download] = await Promise.all([
       page.waitForEvent('download', { timeout: 30_000 }),
-      link.click(),
+      page.getByTestId('artifact-download').click(),
     ]);
     expect(download.suggestedFilename()).toBe('gateway-e2e-report.docx');
     const downloadedPath = await download.path();
@@ -186,7 +189,96 @@ test.describe('gateway-backed smoke', () => {
     await expect.poll(() => uploadStatuses).toContain(415);
     expect(uploadRequests).toHaveLength(1);
   });
+
+  test('real image, PDF, Markdown and other artifacts open in-app and download @gateway', async ({ page }, testInfo) => {
+    await openGatewayArtifact(page, 'gateway-e2e-image.png');
+    const image = page.getByTestId('artifact-image');
+    await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(1);
+    const imageSrc = await image.getAttribute('src');
+    const imageResponse = await page.evaluate(async (url) => {
+      const response = await fetch(url, { credentials: 'include' });
+      return {
+        type: response.headers.get('content-type'),
+        disposition: response.headers.get('content-disposition'),
+        bytes: Array.from(new Uint8Array(await response.arrayBuffer()).slice(0, 8)),
+      };
+    }, imageSrc);
+    expect(imageResponse.type).toBe('image/png');
+    expect(imageResponse.disposition).toContain('inline');
+    expect(imageResponse.bytes).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    await closeGatewayArtifact(page, 'gateway-e2e-image.png');
+
+    await openGatewayArtifact(page, 'gateway-e2e-preview.pdf');
+    const pdf = page.getByTestId('artifact-pdf');
+    await expect(pdf).toBeVisible();
+    const pdfSrc = await pdf.getAttribute('src');
+    const pdfResponse = await page.evaluate(async (url) => {
+      const response = await fetch(url, { credentials: 'include' });
+      return {
+        type: response.headers.get('content-type'),
+        disposition: response.headers.get('content-disposition'),
+        startsWithPdf: (await response.text()).startsWith('%PDF-'),
+      };
+    }, pdfSrc);
+    expect(pdfResponse.type).toBe('application/pdf');
+    expect(pdfResponse.disposition).toContain('inline');
+    expect(pdfResponse.startsWithPdf).toBe(true);
+    await expect(page.getByTestId('artifact-open-new-tab')).toHaveAttribute('target', '_blank');
+    await closeGatewayArtifact(page, 'gateway-e2e-preview.pdf');
+
+    await openGatewayArtifact(page, 'gateway-e2e-notes.md');
+    await expect(page.getByTestId('artifact-markdown')).toContainText('This Markdown was served by the tenant.');
+    const [notes] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByTestId('artifact-download').click(),
+    ]);
+    expect(notes.suggestedFilename()).toBe('gateway-e2e-notes.md');
+    const { readFileSync } = await import('node:fs');
+    expect(readFileSync(await notes.path(), 'utf8')).toBe('# Gateway notes\n\nThis Markdown was served by the tenant.\n');
+    await attachScreen(testInfo, page, 'gateway-artifact-markdown');
+    await closeGatewayArtifact(page, 'gateway-e2e-notes.md');
+
+    await openGatewayArtifact(page, 'gateway-e2e-report.docx');
+    await expect(page.getByTestId('artifact-preview')).toHaveAttribute('data-artifact-kind', 'other');
+    await expect(page.getByTestId('artifact-pdf')).toHaveCount(0);
+    await expect(page.getByTestId('artifact-image')).toHaveCount(0);
+    const [docx] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByTestId('artifact-download').click(),
+    ]);
+    expect(docx.suggestedFilename()).toBe('gateway-e2e-report.docx');
+    expect(readFileSync(await docx.path(), 'utf8')).toBe('PK\x03\x04 gateway fixture docx payload 0123456789abcdef');
+    await page.getByPlaceholder('Type a message…').fill('continue after previews');
+    await closeGatewayArtifact(page, 'gateway-e2e-report.docx');
+    await expect(page.getByPlaceholder('Type a message…')).toHaveValue('continue after previews');
+  });
+
+  test('signed link rotation keeps the gateway artifact and chat alive @gateway', async ({ page }) => {
+    await openGatewayArtifact(page, 'gateway-e2e-refresh.md');
+    const download = page.getByTestId('artifact-download');
+    const initialHref = await download.getAttribute('href');
+    await expect.poll(() => download.getAttribute('href'), { timeout: 10_000 }).not.toBe(initialHref);
+    await expect(page.getByRole('dialog', { name: 'gateway-e2e-refresh.md', exact: true })).toBeVisible();
+    await expect(page.getByTestId('artifact-markdown')).toContainText('The tenant link rotated without closing this preview.');
+    await expect(page).toHaveURL(/\/app\/$/);
+  });
 });
+
+async function openGatewayArtifact(page: import('@playwright/test').Page, filename: string): Promise<void> {
+  await page.goto('/app/');
+  await startNewChat(page);
+  await page.getByPlaceholder('Type a message…').fill('generate a report');
+  await page.getByRole('button', { name: 'Send' }).click();
+  const link = page.getByRole('link', { name: filename, exact: true });
+  await expect(link).toBeVisible({ timeout: 30_000 });
+  await link.click();
+  await expect(page.getByRole('dialog', { name: filename, exact: true })).toBeVisible();
+}
+
+async function closeGatewayArtifact(page: import('@playwright/test').Page, filename: string): Promise<void> {
+  await page.getByRole('button', { name: '✕', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: filename, exact: true })).toHaveCount(0);
+}
 
 async function chooseFiles(
   page: import('@playwright/test').Page,

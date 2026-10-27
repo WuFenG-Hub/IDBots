@@ -28,6 +28,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createMockArtifactImage, createMockArtifactPdf } from '../src/mobile/bridge/mockArtifacts.ts';
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -78,16 +79,28 @@ const GW_FILE_E2E = process.env.GW_FIXTURE_FILE !== '0';
 const FIXTURE_FILE_NAME = 'gateway-e2e-report.docx';
 /** Mirror of the payload asserted in e2e/mobile/gateway.spec.ts. */
 const FIXTURE_FILE_BYTES = Buffer.from('PK\x03\x04 gateway fixture docx payload 0123456789abcdef');
+const GATEWAY_ARTIFACTS = [
+  { name: 'gateway-e2e-image.png', bytes: createMockArtifactImage() },
+  { name: 'gateway-e2e-preview.pdf', bytes: createMockArtifactPdf() },
+  { name: 'gateway-e2e-notes.md', bytes: Buffer.from('# Gateway notes\n\nThis Markdown was served by the tenant.\n') },
+  { name: 'gateway-e2e-refresh.md', bytes: Buffer.from('# Refresh\n\nThe tenant link rotated without closing this preview.\n') },
+];
 
 if (GW_FILE_E2E) {
   fs.writeFileSync(path.join(paths.workspaceRoot, FIXTURE_FILE_NAME), FIXTURE_FILE_BYTES);
+  for (const artifact of GATEWAY_ARTIFACTS) {
+    fs.writeFileSync(path.join(paths.workspaceRoot, artifact.name), artifact.bytes);
+  }
 }
+const GATEWAY_ARTIFACT_LINKS = GATEWAY_ARTIFACTS
+  .map((artifact) => `[${artifact.name}](file://${path.join(paths.workspaceRoot, artifact.name)})`)
+  .join(' · ');
 
 /** Canned reply streamed by the fixture turn (not UI copy). */
 const FIXTURE_REPLY =
   '**Gateway fixture online.**\n\nThis reply streamed over a real C2 gateway socket.' +
   (GW_FILE_E2E
-    ? `\n\n文件已生成：[${FIXTURE_FILE_NAME}](file://${path.join(paths.workspaceRoot, FIXTURE_FILE_NAME)})\n\n[工作目录](${paths.workspaceRoot})`
+    ? `\n\n文件已生成：[${FIXTURE_FILE_NAME}](file://${path.join(paths.workspaceRoot, FIXTURE_FILE_NAME)})\n\nArtifacts: ${GATEWAY_ARTIFACT_LINKS}\n\n[工作目录](${paths.workspaceRoot})`
     : '');
 
 const metabots = [
@@ -322,9 +335,13 @@ async function invokeHandler(channel, clientId, args) {
           disposition: input.disposition === 'inline' ? 'inline' : 'attachment',
         },
       );
-      return fileSignCore.isSignedFileDownload(result)
-        ? result
-        : { success: false, error: result.message, code: result.code };
+      if (fileSignCore.isSignedFileDownload(result)) {
+        return {
+          ...result,
+          expiresAt: input.path.endsWith('gateway-e2e-refresh.md') ? Date.now() + 61_500 : result.expiresAt,
+        };
+      }
+      return { success: false, error: result.message, code: result.code };
     }
     case 'cowork:permission:respond':
       return { success: false, error: 'no pending permission in the fixture' };

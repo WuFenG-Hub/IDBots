@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Bars3Icon, PlusIcon, PaperAirplaneIcon, PaperClipIcon, StopIcon } from '@heroicons/react/24/outline';
 import MarkdownContent from '@/components/MarkdownContent';
+import MobileArtifactPreview from '../components/MobileArtifactPreview';
 import CoworkPermissionPanel from '@/components/cowork/CoworkPermissionPanel';
 import { coworkAttachmentAdmission } from '@/components/cowork/coworkComposerAttachments';
 import ChatComposerAttachments from '../components/ChatComposerAttachments';
@@ -117,7 +118,7 @@ function messageText(message: ChatMessageView): string {
   return message.diagnostic ? t(`mobile.chat.diagnostic.${message.diagnostic}`) : message.text;
 }
 
-function MessageRow({ message }: { message: ChatMessageView }): JSX.Element {
+function MessageRow({ message, onOpenFile }: { message: ChatMessageView; onOpenFile: (filePath: string) => boolean }): JSX.Element {
   if (message.role === 'user') {
     return (
       <div className="mb-3 flex justify-end">
@@ -148,7 +149,7 @@ function MessageRow({ message }: { message: ChatMessageView }): JSX.Element {
   return (
     <div className="mb-3 flex justify-start">
       <div className="max-w-[90%] rounded-2xl border border-[var(--border-color)] bg-[var(--bg-panel)] px-3.5 py-2.5">
-        <MarkdownContent content={message.text} chatExperienceMode="assistant" compact />
+        <MarkdownContent content={message.text} chatExperienceMode="assistant" compact onOpenLocalFile={onOpenFile} />
         {message.streaming ? <span className="mt-1 inline-block h-4 w-2 animate-pulse bg-[var(--color-primary)]" aria-hidden /> : null}
       </div>
     </div>
@@ -196,10 +197,15 @@ export default function ChatScreen(props: {
 }): JSX.Element {
   const { chat, bots } = props;
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const keyboardInset = useKeyboardInset();
   const draft = chat.draft ?? '';
   const attachments = chat.attachments ?? [];
+  const openPreview = useCallback((filePath: string): boolean => {
+    setPreviewPath(filePath);
+    return true;
+  }, []);
   const turnPhase = chat.turnPhase ?? (chat.isStreaming ? 'running' : 'idle');
   const composerBlocked = chat.isSending
     || chat.restoring
@@ -219,6 +225,7 @@ export default function ChatScreen(props: {
     const list = listRef.current;
     if (list) list.scrollTop = list.scrollHeight;
   }, [chat.messages, chat.isStreaming]);
+  useEffect(() => setPreviewPath(null), [chat.sessionId]);
 
   const submit = () => {
     if (!canSubmit) return;
@@ -278,7 +285,7 @@ export default function ChatScreen(props: {
             {!chat.restoring ? <p className="text-sm text-[var(--text-secondary)]">{t('mobile.chat.emptyBody')}</p> : null}
           </div>
         ) : (
-          chat.messages.map((message) => <MessageRow key={message.id} message={message} />)
+          chat.messages.map((message) => <MessageRow key={message.id} message={message} onOpenFile={openPreview} />)
         )}
         {turnPhase !== 'idle' && turnPhase !== 'completed' ? (
           <p className="px-2 py-1 text-xs text-[var(--text-secondary)]" data-testid="turn-phase">
@@ -359,6 +366,9 @@ export default function ChatScreen(props: {
       </div>
 
       <SessionDrawer chat={chat} open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+      {previewPath ? (
+        <MobileArtifactPreview key={previewPath} path={previewPath} onClose={() => setPreviewPath(null)} />
+      ) : null}
       <PermissionSheet chat={chat} />
     </div>
   );

@@ -57,6 +57,7 @@ import type {
 } from './types';
 import { selectFileOnPhone, type PhoneFileSelectionOptions } from './installShim';
 import { uploadFile, type UploadTransport } from './upload';
+import { getMockArtifact, MOCK_ARTIFACT_PATHS } from './mockArtifacts';
 
 const DEFAULT_STREAM_TOKEN_INTERVAL_MS = 40;
 const DEFAULT_ORDER_COMPLETE_DELAY_MS = 10_000;
@@ -89,9 +90,12 @@ const REPLY_PERMISSION_DENIED =
 const REPLY_QUOTA_PREFIX =
   'Let me check your remaining quota first';
 
+const REPLY_ARTIFACT = `**Mock artifacts ready.**\n\n[chart.png](${MOCK_ARTIFACT_PATHS.image})\n[report.pdf](${MOCK_ARTIFACT_PATHS.pdf})\n[notes.md](${MOCK_ARTIFACT_PATHS.markdown})\n[refresh.md](${MOCK_ARTIFACT_PATHS.refresh})\n[result.txt](${MOCK_ARTIFACT_PATHS.text})`;
+
 /** Canned replies, exported for the mock-bridge tests. */
 export const MOCK_CANNED_REPLIES = {
   normal: REPLY_NORMAL,
+  artifact: REPLY_ARTIFACT,
   permissionPart1: REPLY_PERMISSION_PART1,
   permissionPart2: REPLY_PERMISSION_PART2,
   permissionDenied: REPLY_PERMISSION_DENIED,
@@ -370,11 +374,14 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
 
     const wantsQuota = /quota/i.test(userText);
     const wantsPermission = !wantsQuota && /permission/i.test(userText);
+    const wantsArtifacts = !wantsQuota && !wantsPermission && /artifact|preview/i.test(userText);
 
     if (wantsQuota) {
       await streamChunks(session, assistantMessage, REPLY_QUOTA_PREFIX);
     } else if (wantsPermission) {
       await streamChunks(session, assistantMessage, REPLY_PERMISSION_PART1);
+    } else if (wantsArtifacts) {
+      await streamChunks(session, assistantMessage, REPLY_ARTIFACT);
     } else {
       await streamChunks(session, assistantMessage, REPLY_NORMAL);
     }
@@ -1264,12 +1271,18 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       // Real shape per src/renderer/types/electron.d.ts: the success variant
       // carries {url, expiresAt, size, mime} directly (no success envelope).
       fileSign: (input: { path: string; disposition?: 'inline' | 'attachment' }) =>
-        guardOnline(async () => ({
-          url: `/files/mock-${encodeURIComponent(String(input?.path ?? '').slice(-24))}`,
-          expiresAt: now() + 10 * 60 * 1000,
-          size: 1024,
-          mime: 'application/octet-stream',
-        })),
+        guardOnline(async () => {
+          const filePath = String(input?.path ?? '');
+          const artifact = getMockArtifact(filePath);
+          const disposition = input?.disposition === 'inline' ? 'inline' : 'attachment';
+          const expiresAt = now() + (filePath === MOCK_ARTIFACT_PATHS.refresh ? 61_500 : 10 * 60 * 1000);
+          return {
+            url: `/files/mock/${encodeURIComponent(filePath)}?disposition=${disposition}&expires=${expiresAt}`,
+            expiresAt,
+            size: artifact?.bytes().byteLength ?? 0,
+            mime: artifact?.mime ?? 'application/octet-stream',
+          };
+        }),
     },
     metabot: metabotImpl,
     userIdentity: {
