@@ -1,6 +1,7 @@
 # Delivery Note — WP3 Account and Daily-Use Breadth
 
 - **Date:** 2026-10-27
+- **Updated:** 2026-10-28 (two reviewer S2 fixes and full re-verification)
 - **Branch:** `feat/cloud-mobile-wp3-account-daily-use`
 - **Base:** local `main` at `f19de10d` (WP2 merged)
 - **Status:** implementation and deterministic verification complete on branch; real-environment acceptance pending
@@ -22,8 +23,17 @@ The frozen files `01-interface-contracts.md` and `02-ipc-allowlist-v1.md` were n
 | `70315a3b` | Show in-flight Bot synchronization state | `2f979edd95407d61d4b51810742da33cb417292f05d656bad0ff2f51483febd0i0` |
 | `44cd2513` | Harden real gateway account coverage | `7bbb4eb7357e36f02a1101b2a2ccda15a11a740c8466550e2a75101b62ca4bffi0` |
 | `9c8d923e` | Add the WP3 Delivery Note | `2ac0a40e221fa743d324fb3c340585ac5392e54bd376b909094a4ce1e104f831i0` |
+| `9ee415eb` | Prevent uncertain bundle order retries | `4fdfb63a9035feebc5610c5beb7e14540e73f7f0d8c09c57b13a648dddad3d26i0` |
+| `486a3b36` | Reconcile expired bundle orders before retry | `2a75716f9c3c9cf641fd5d94b7fcd669bf441e2f75f9a43f088445c28cea58b0i0` |
 
 Each journal was published with the required `metabot-post-buzz` flow in English. The journals are development records, not product acceptance evidence.
+
+## Reviewer S2 Follow-Up
+
+1. **Uncertain create results can no longer clear the creation attempt.** Only `BUNDLE_ORDER_REJECTED`, emitted for a definite local business rejection, allows a corrected retry. Network failures, HTTP 5xx, and unknown outcomes remain blocked. The accepted-but-lost-response regression proves no second order is created.
+2. **Local expiry now triggers a final server reconciliation instead of allowing a new order.** Status 1/2 remains uncertain and blocked; status 3 shows credited; only status 4 closes and permits later creation. Order ID and operation generation are still required. Invalid expiry and malformed recovery data fail closed.
+
+No known S1/S2 defect remains in the covered deterministic matrix. This is not a real-product acceptance claim.
 
 ## Requirement Mapping
 
@@ -41,7 +51,8 @@ Each journal was published with the required `metabot-post-buzz` flow in English
 - QR handoff is strictly bound to the current order. A new order with no QR never inherits the previous order's QR.
 - Terminal updates require both the expected order ID and operation generation, so an old poll cannot complete a newer order.
 - The current order, plan, QR, expiry, and status recover after close/reload. Foreground and reconnect paths resynchronize plans, meters, and order state. Leaving the payment page does not cancel the order.
-- Active orders block duplicate creation. An uncertain create is persisted and blocks blind retries for the unpaid-order recovery window. No automatic retry follows a lost create result.
+- Active orders block duplicate creation. An uncertain create is persisted and blocks blind retries for the unpaid-order recovery window. No automatic retry follows a lost create result. Only an authoritative business rejection can clear that attempt.
+- Expired but unsettled orders receive a final server status check before any later creation is allowed. Expired unpaid/unclosed orders remain blocked; late credit succeeds; authoritative closure unblocks. Invalid expiry and malformed recovery data fail closed.
 - Polling has degraded and timeout states. Meters bypass cached traffic snapshots. Repeated order polls are verified not to credit again in the deterministic services and gateway journeys.
 - Mock and real-C2 browser journeys cover quota exhaustion, credited meters, and a successful next message. This does not prove a real Alipay payment or the external backend's exactly-once transaction.
 - `CR-WP3-001-bundle-order-recovery.md` proposes server-side `clientRequestId` idempotency and authoritative order/QR/expiry recovery. It is a proposal only, not an approved contract change.
@@ -87,9 +98,9 @@ Each journal was published with the required `metabot-post-buzz` flow in English
 | Check | Result |
 |---|---|
 | Full standard `pnpm test` | Completed with exit code 0; the entire standard chain passed |
-| `pnpm run test:mobile` | Passed: 161 TypeScript tests, 3 static tests, and 47 additional tests |
+| `pnpm run test:mobile` | Passed: 164 TypeScript tests, 3 static tests, and 47 additional tests |
 | `pnpm run lint` | Passed |
-| `pnpm run build:mobile` | Passed; app initial JS 90.2 KB gzip (limit 500), login 60.8 KB gzip (limit 80); production no-mock check passed |
+| `pnpm run build:mobile` | Passed; app initial JS 90.3 KB gzip (limit 500), login 60.9 KB gzip (limit 80); production no-mock check passed |
 | `pnpm run build:skills` | Passed |
 | Desktop renderer build via `test:memory` | Passed |
 | Desktop Electron compile | Passed |
@@ -98,10 +109,12 @@ Each journal was published with the required `metabot-post-buzz` flow in English
 | Long-term task suite | 89/89 passed |
 | Twin/bootstrap/workspace focused suite | 30/30 passed |
 | Model binding focused suite | 7/7 passed |
-| Bundle service and relay/gateway focused tests | Passed |
-| Mock mobile E2E, iPhone WebKit + Pixel Chromium | 90/90 passed across both profiles |
-| Real-C2 E2E, iPhone WebKit | 15/15 passed |
-| Real-C2 E2E, Pixel Chromium | 15/15 passed |
+| Bundle service and relay/gateway focused tests | Passed; 10/10 bundle service and 7/7 recovery domain tests |
+| Create-failure recovery E2E | 5/5 on each device profile, including accepted-but-lost-response and authoritative rejection |
+| Expiry reconciliation E2E | 4/4 on each device profile, including late credit, unpaid-unclosed, invalid expiry, and malformed data |
+| Mock mobile E2E, iPhone WebKit + Pixel Chromium | 102/102 passed across both profiles |
+| Real-C2 E2E, iPhone WebKit | 16/16 passed |
+| Real-C2 E2E, Pixel Chromium | 16/16 passed |
 | `git diff --check` | Passed; no `MERGE_HEAD` |
 
 Real C2 means the real gateway server, C2 WebSocket, allowlist/restrictions, and mobile shim with deterministic tenant handlers. It is not a real tenant/model or public staging result.
@@ -119,6 +132,7 @@ Real C2 means the real gateway server, C2 WebSocket, allowlist/restrictions, and
 
 1. **Order idempotency is not server-authoritative yet.** CR-WP3-001 needs WS-A/WS-D/owner review. Local unresolved-create blocking is a compatibility guard, not proof that an unknown server order can be reconciled.
 2. **QR/expiry recovery depends on the current client's persisted order handoff.** Clearing that state can strand a created order until the additive recovery contract exists. No new order is blindly created to hide this limitation.
-3. **Relay freshness depends on relay availability.** A failed refresh keeps the last good catalog and logs a warning; real relay freshness and availability remain staging acceptance items.
-4. **Real chain/payment effects remain unverified.** Deterministic tests deliberately avoid claiming real fees, chain confirmation, model quality, or external exactly-once payment behavior.
-5. **Branch delivery is not acceptance.** The branch must be reviewed by the acceptance session, merged only with owner approval, and rebuilt from `main` before staging or production verification.
+3. **External rejection taxonomy is still limited.** Only a definite local business rejection automatically clears an uncertain attempt. Other failures conservatively remain blocked and may need support or the unpaid-order recovery window to elapse; this is deliberate duplicate-payment protection, not proof of server reconciliation.
+4. **Relay freshness depends on relay availability.** A failed refresh keeps the last good catalog and logs a warning; real relay freshness and availability remain staging acceptance items.
+5. **Real chain/payment effects remain unverified.** Deterministic tests deliberately avoid claiming real fees, chain confirmation, model quality, or external exactly-once payment behavior.
+6. **Branch delivery is not acceptance.** The branch must be reviewed by the acceptance session, merged only with owner approval, and rebuilt from `main` before staging or production verification.
