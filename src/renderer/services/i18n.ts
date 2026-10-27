@@ -1878,7 +1878,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     metabotCoworkMcpToolsHint: '默认关闭：关闭时该 Bot 的 cowork 会话不挂载你在设置中配置的 MCP server，每轮请求不再携带 MCP 工具 schema（首请求更小、token 费用更低）。仅对确实需要 MCP 工具的 Bot 开启，切换立即生效。注意：DSH 会话共享同一运行时，任一 Bot 挂载后所有 DSH 会话都会看到这些工具，直至应用重启。',
     metabotCoworkMcpToolsTooltip: '默认关闭。开启后将你配置的 MCP 工具挂载到该 Bot 的 cowork 会话中。未启用时首次请求更小、token 费用更低。注意：DSH 会话共享运行时，一旦挂载，所有 DSH 会话可见直至重启。',
     metabotCoworkMcpToolsSaveFailed: 'MCP 工具设置保存失败',
-    metabotCoworkBrowserAutomation: '浏览器自动化（实验）',
+    metabotCoworkBrowserAutomation: '浏览器操作（实验）',
     metabotCoworkBrowserAutomationHint: '默认开启：开启后该 Bot 的 cowork 会话会通过 Playwright MCP 操作一个独立的 headless Chromium（每个会话一个浏览器），可导航/点击/填表/截图任意公开网站。Bot Browser（链上内容）不受其影响也不可被其读取。浏览器工具只会挂载到该 Bot 的会话（开启的 Bot 运行在独立的运行时上，不会泄漏给其他 Bot）；显式关闭后下一轮对话即生效。',
     metabotCoworkBrowserAutomationTooltip: '默认开启。使用 Playwright 自动化浏览器，可导航网站、截图、填表。每个会话独立浏览器，不影响 Bot Browser。工具仅挂载到该 Bot 会话。',
     metabotCoworkBrowserAutomationSaveFailed: '浏览器自动化设置保存失败',
