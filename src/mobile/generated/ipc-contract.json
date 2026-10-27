@@ -3021,6 +3021,50 @@
       ]
     },
     {
+      "path": "updateNotification.getFirstInstallVersion",
+      "kind": "invoke",
+      "channel": "updateNotification:getFirstInstallVersion",
+      "args": []
+    },
+    {
+      "path": "updateNotification.hasViewed",
+      "kind": "invoke",
+      "channel": "updateNotification:hasViewed",
+      "args": [
+        "version"
+      ]
+    },
+    {
+      "path": "updateNotification.markAsViewed",
+      "kind": "invoke",
+      "channel": "updateNotification:markAsViewed",
+      "args": [
+        "version"
+      ]
+    },
+    {
+      "path": "updateNotification.resolveFirstInstallVersion",
+      "kind": "invoke",
+      "channel": "updateNotification:resolveFirstInstallVersion",
+      "args": [
+        "currentVersion"
+      ]
+    },
+    {
+      "path": "updateNotification.setFirstInstallVersion",
+      "kind": "invoke",
+      "channel": "updateNotification:setFirstInstallVersion",
+      "args": [
+        "version"
+      ]
+    },
+    {
+      "path": "updateNotification.shouldForceShow",
+      "kind": "invoke",
+      "channel": "updateNotification:shouldForceShow",
+      "args": []
+    },
+    {
       "path": "userIdentity.create",
       "kind": "invoke",
       "channel": "userIdentity:create",

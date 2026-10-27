@@ -347,6 +347,12 @@ const POST_FREEZE_INVOKE: Record<string, AllowlistEntry> = {
   'standingPages:list': { tier: 'N', note: 'Not in `02` v1.0.0; denied by `02` default-deny pending a change request.' },
   'standingPages:remove': { tier: 'N', note: 'Not in `02` v1.0.0; denied by `02` default-deny pending a change request.' },
   'standingPages:restore': { tier: 'N', note: 'Not in `02` v1.0.0; denied by `02` default-deny pending a change request.' },
+  'updateNotification:resolveFirstInstallVersion': { tier: 'N', note: 'Not in `02` v1.0.0 (desktop-only announcement system, 2026-10-26); denied by `02` default-deny pending a change request.' },
+  'updateNotification:getFirstInstallVersion': { tier: 'N', note: 'Not in `02` v1.0.0 (desktop-only announcement system, 2026-10-26); denied by `02` default-deny pending a change request.' },
+  'updateNotification:setFirstInstallVersion': { tier: 'N', note: 'Not in `02` v1.0.0 (desktop-only announcement system, 2026-10-26); denied by `02` default-deny pending a change request.' },
+  'updateNotification:hasViewed': { tier: 'N', note: 'Not in `02` v1.0.0 (desktop-only announcement system, 2026-10-26); denied by `02` default-deny pending a change request.' },
+  'updateNotification:markAsViewed': { tier: 'N', note: 'Not in `02` v1.0.0 (desktop-only announcement system, 2026-10-26); denied by `02` default-deny pending a change request.' },
+  'updateNotification:shouldForceShow': { tier: 'N', note: 'Not in `02` v1.0.0 (desktop-only announcement system, 2026-10-26); denied by `02` default-deny pending a change request.' },
 };
 
 export const INVOKE_ALLOWLIST: Record<string, AllowlistEntry> = {
