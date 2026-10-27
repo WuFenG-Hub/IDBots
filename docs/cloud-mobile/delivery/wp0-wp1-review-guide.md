@@ -188,7 +188,7 @@ These seven commits are the WP1 delivery range `e4a82807..8bbf50fd`:
 
 The WP0/WP1 merge at `9dc7da9e` was also verified with the full standard test chain in an isolated worktree. The follow-up `39d85bc7` checkpoint removed the unused-symbol desktop build failure and passed the full standard chain again.
 
-Production bundle measurements recorded at WP1 were 56.5 KB gzip for login and 81.3 KB gzip for initial app JavaScript. The lazy Chat chunk was measured separately and was not part of the initial-bundle claim.
+Production bundle measurements recorded at WP1 were 56.5 KB gzip for login and 81.3 KB gzip for initial app JavaScript. These are totals reported by `scripts/check-mobile-budgets.mjs`, not Vite's per-entry figures: login counts all emitted JS/CSS assets, while app initial JS counts the entry plus its static-import closure, including the shared `vendor-react` chunk. At `39d85bc7`, Vite printed 12.43 KB for the login entry and 37.84 KB for the app entry alone; those entry-only figures are not substitutes for the budget totals. The lazy Chat chunk was measured separately and was not part of the initial-bundle claim.
 
 ## 6. Recommended Code-Review Path
 
