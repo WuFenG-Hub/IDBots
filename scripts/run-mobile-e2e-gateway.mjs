@@ -33,7 +33,7 @@ import { applyLongTermStage, createLongTermFixture, longTermBoard } from '../src
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const GATEWAY_PORT = 8790;
+const GATEWAY_PORT = Number(process.env.IDBOTS_GATEWAY_PORT || 8790);
 const APP_PORT = process.env.E2E_PORT || '5197';
 const BASE_URL = `http://localhost:${APP_PORT}`;
 const SECRET = process.env.IDBOTS_GATEWAY_SECRET || crypto.randomBytes(32).toString('base64url');
@@ -508,9 +508,60 @@ const appConfigStore = {
       },
     },
     model: { defaultProvider: 'metaid-free', defaultModel: 'deepseek-flash' },
+    bootstrap: { workspace: paths.workspaceRoot, languageInitialized: true },
     memoryEnabled: true,
   },
 };
+
+const coworkConfig = {
+  workingDirectory: paths.workspaceRoot,
+  systemPrompt: '',
+  executionMode: 'local',
+  memoryEnabled: true,
+  memoryImplicitUpdateEnabled: true,
+  memoryLlmJudgeEnabled: false,
+  memoryGuardLevel: 'standard',
+  memoryUserMemoriesMaxItems: 100,
+  memoryPromptMaxChars: 4000,
+  lastWorkspaceSelection: null,
+};
+
+const bundlePlans = [
+  {
+    planId: 'bundle_basic_cny',
+    name: 'Basic',
+    nameEn: 'Basic',
+    payCurrency: 'CNY',
+    payAmount: '129.00',
+    trafficBytes: 10 * 1024 * 1024 * 1024,
+    llmQuota: 50_000_000,
+    llmQuotaUnit: 'tokens',
+    status: 1,
+    sort: 10,
+    remark: '',
+  },
+];
+const bundleOrders = new Map();
+const bundleMeters = {
+  traffic: {
+    accountId: 'gateway-traffic-account',
+    identityAddress: 'gateway-identity',
+    balanceBytes: 500 * 1024 * 1024,
+    reservedBytes: 0,
+    grantedBytesTotal: 1024 * 1024 * 1024,
+    spentBytesTotal: 500 * 1024 * 1024,
+    status: 1,
+  },
+  llm: {
+    quotaTotal: 2_000_000,
+    quotaUsed: 350_000,
+    quotaRemaining: 1_650_000,
+    quotaFree: 2_000_000,
+    quotaPurchased: 0,
+    unit: 'tokens',
+  },
+};
+let bundleOrderSeq = 0;
 
 async function invokeHandler(channel, clientId, args) {
   if (process.env.GW_FIXTURE_DEBUG) {
@@ -869,19 +920,57 @@ async function invokeHandler(channel, clientId, args) {
     case 'skills:list':
       return { success: true, skills: skillFixtures.map((skill) => ({ ...skill })) };
     case 'cowork:config:get':
+      return { success: true, config: { ...coworkConfig } };
+    case 'cowork:config:set': {
+      Object.assign(coworkConfig, args[0] ?? {});
+      return { success: true };
+    }
+    case 'bundle:getPlans':
+      return { success: true, plans: bundlePlans.map((plan) => ({ ...plan })) };
+    case 'bundle:createOrder': {
+      const plan = bundlePlans.find((entry) => entry.planId === args[0]?.planId && entry.status === 1);
+      if (!plan) return { success: false, error: 'plan not found or off sale' };
+      const orderId = `gw-bundle-${++bundleOrderSeq}`;
+      const order = {
+        orderId,
+        planId: plan.planId,
+        status: 1,
+        payAmount: plan.payAmount,
+        payCurrency: plan.payCurrency,
+        trafficBytes: plan.trafficBytes,
+        llmQuota: plan.llmQuota,
+        gatewayParams: { qrCode: `https://qr.alipay.com/gateway-${orderId}` },
+        expiresAt: Math.floor(Date.now() / 1000) + 900,
+        paidAt: undefined,
+        creditedAt: undefined,
+      };
+      bundleOrders.set(orderId, order);
+      setTimeout(() => {
+        if (order.status === 3) return;
+        order.status = 3;
+        order.paidAt = Math.floor(Date.now() / 1000);
+        order.creditedAt = order.paidAt;
+        bundleMeters.traffic.balanceBytes += order.trafficBytes;
+        bundleMeters.traffic.grantedBytesTotal += order.trafficBytes;
+        bundleMeters.llm.quotaTotal += order.llmQuota;
+        bundleMeters.llm.quotaPurchased += order.llmQuota;
+        bundleMeters.llm.quotaRemaining = bundleMeters.llm.quotaTotal - bundleMeters.llm.quotaUsed;
+      }, 8000);
+      const { status: _status, paidAt: _paidAt, creditedAt: _creditedAt, ...created } = order;
+      return { success: true, order: created };
+    }
+    case 'bundle:getOrder': {
+      const order = bundleOrders.get(args[0]?.orderId);
+      if (!order) return { success: false, error: 'order not found' };
+      const { gatewayParams: _gatewayParams, expiresAt: _expiresAt, ...status } = order;
+      return { success: true, order: status };
+    }
+    case 'bundle:getMeters':
       return {
         success: true,
-        config: {
-          workingDirectory: paths.workspaceRoot,
-          systemPrompt: '',
-          executionMode: 'local',
-          memoryEnabled: true,
-          memoryImplicitUpdateEnabled: true,
-          memoryLlmJudgeEnabled: false,
-          memoryGuardLevel: 'standard',
-          memoryUserMemoriesMaxItems: 100,
-          memoryPromptMaxChars: 4000,
-          lastWorkspaceSelection: null,
+        meters: {
+          traffic: { ...bundleMeters.traffic },
+          llm: { ...bundleMeters.llm },
         },
       };
     case 'startup:rendererInitialized':
