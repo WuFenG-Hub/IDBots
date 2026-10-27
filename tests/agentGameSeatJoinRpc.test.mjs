@@ -466,6 +466,12 @@ test('rpc agent-game/session: validation, local-bot gate, and dispatch', { timeo
       if (request === 'electron') return electronStubRpc;
       if (request === './httpListenWithRetry' || request.endsWith('/httpListenWithRetry')) {
         return {
+          listenWithPortFallback(server, _port, host, options = {}) {
+            server.listen(0, host, () => {
+              if (typeof options.onPortSelected === 'function') options.onPortSelected(server.address().port);
+              if (typeof options.onListening === 'function') options.onListening();
+            });
+          },
           listenWithRetry(server, _port, host, options = {}) {
             server.listen(0, host, () => {
               if (typeof options.onListening === 'function') options.onListening();

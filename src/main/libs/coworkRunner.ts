@@ -30,6 +30,7 @@ import {
   ensureDshSkillEnvChannel,
   writeDshSkillSessionEnvFile,
 } from './dshSkillSessionEnv';
+import { METAID_RPC_AUTHFILE_ENV, getMetaidRpcTokenFilePath } from '../services/metaidRpcEndpoint';
 import { mapDshReasoningEffort } from './dshReasoningEffort';
 import { shouldIncludeMetawebDeepSections, nextMetawebPromptTier, type MetawebPromptMode, type MetawebPromptTier } from './metawebPromptTier';
 import { dshModelReasoningDeclaration, undeclaredReasoningRouteWarning } from './dshModelReasoning';
@@ -9954,6 +9955,16 @@ export class CoworkRunner extends EventEmitter {
     const overrides = await this.getSkillSessionEnvOverrides?.(coworkSessionId) ?? {};
     const tempDir = ensureCoworkTempDir(cwd);
     writeDshSkillSessionEnvFile(userData, dshSessionId, {
+      // Instance-level channels every DSH session needs regardless of metabot
+      // identity: the scrub-proof RPC authfile (its IDBOTS_RPC_* siblings ride
+      // the identity overrides below), and the instance's own data dirs so a
+      // session can always locate ITS app instance's storage instead of
+      // guessing the default install path — a dev-fresh profile guessing
+      // ~/Library/Application Support/IDBots is how the 2026-10-27 OpenTeam
+      // test ended up editing the production app's SQLite directly.
+      [METAID_RPC_AUTHFILE_ENV]: getMetaidRpcTokenFilePath(userData),
+      IDBOTS_USER_DATA_PATH: userData,
+      IDBOTS_APP_DATA_PATH: app.getPath('appData'),
       ...overrides,
       TMPDIR: tempDir,
       TMP: tempDir,

@@ -112,12 +112,15 @@ async function startRpcServerForTestWithOverrides({
       };
     }
     if (request === './httpListenWithRetry' || request.endsWith('/httpListenWithRetry')) {
+      const randomBind = (server, _port, host, options = {}) => {
+        server.listen(0, host, () => {
+          if (typeof options.onPortSelected === 'function') options.onPortSelected(server.address().port);
+          if (typeof options.onListening === 'function') options.onListening();
+        });
+      };
       return {
-        listenWithRetry(server, _port, host, options = {}) {
-          server.listen(0, host, () => {
-            if (typeof options.onListening === 'function') options.onListening();
-          });
-        },
+        listenWithRetry: randomBind,
+        listenWithPortFallback: randomBind,
       };
     }
     if (utxoWalletService && request === '@metalet/utxo-wallet-service') {

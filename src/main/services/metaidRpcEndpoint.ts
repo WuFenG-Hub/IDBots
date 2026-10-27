@@ -8,8 +8,32 @@ export const METAID_RPC_PORT_ENV = 'IDBOTS_METAID_RPC_PORT';
 export const METAID_RPC_TOKEN_ENV = 'IDBOTS_RPC_TOKEN';
 export const METAID_RPC_AUTHFILE_ENV = 'IDBOTS_RPC_AUTHFILE';
 export const METAID_RPC_TOKEN_FILENAME = 'metaid-rpc-token';
+export const METAID_RPC_PORT_FILENAME = 'metaid-rpc-port';
 
 let cachedMetaidRpcToken: string | null = null;
+
+/**
+ * Port this process's gateway actually bound.
+ *
+ * The default port is shared by every app instance on the machine, so a
+ * second instance with its own userData (dev-fresh profile, e2e) cannot
+ * bind it while the first instance is running. The bind fallback then
+ * moves this instance to a spare port, and EVERY session env this process
+ * injects must point at that port — pointing at the default would send
+ * this instance's skill RPC into whatever app owns the default port
+ * (observed 2026-10-27: a dev-fresh OpenTeam test drove the production
+ * app's gateway, database and session notifications). Null until the
+ * server binds; consumers then fall back to the configured port.
+ */
+let activeMetaidRpcPort: number | null = null;
+
+export function setActiveMetaidRpcPort(port: number): void {
+  activeMetaidRpcPort = port;
+}
+
+export function getActiveMetaidRpcPort(): number | null {
+  return activeMetaidRpcPort;
+}
 
 /** Shape of a host-generated token: randomBytes(24) hex. */
 const METAID_RPC_GENERATED_TOKEN_RE = /^[0-9a-f]{48}$/;
@@ -152,5 +176,27 @@ export function resolveMetaidRpcPort(env: NodeJS.ProcessEnv = process.env): numb
 }
 
 export function getMetaidRpcBase(env: NodeJS.ProcessEnv = process.env): string {
-  return `http://${DEFAULT_METAID_RPC_HOST}:${resolveMetaidRpcPort(env)}`;
+  const port = activeMetaidRpcPort ?? resolveMetaidRpcPort(env);
+  return `http://${DEFAULT_METAID_RPC_HOST}:${port}`;
+}
+
+/** Path of the per-launch port mirror file inside the Electron userData dir. */
+export function getMetaidRpcPortFilePath(userDataPath: string): string {
+  return join(userDataPath, METAID_RPC_PORT_FILENAME);
+}
+
+/**
+ * Mirror the gateway's actually-bound port into a plain file under userData.
+ *
+ * Purely observational (session env injection reads the in-process value via
+ * getMetaidRpcBase), but it makes "which app instance owns which port"
+ * answerable from the filesystem — the exact question that took a forensic
+ * session to settle in the cross-instance data-blend incident.
+ */
+export function writeMetaidRpcPortFile(userDataPath: string, port: number): void {
+  try {
+    writeFileSync(getMetaidRpcPortFilePath(userDataPath), `${port}\n`, 'utf8');
+  } catch {
+    // Observability only; never fail startup over it.
+  }
 }
