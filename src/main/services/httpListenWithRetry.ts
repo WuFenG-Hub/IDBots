@@ -119,3 +119,100 @@ export function listenWithRetry(
 
   tryListen();
 }
+
+export interface ListenWithPortFallbackOptions extends ListenWithRetryOptions {
+  /**
+   * How many consecutive ports to try above the preferred one. 0 disables
+   * fallback (preferred port only).
+   */
+  fallbackPortSpan?: number;
+  /** Called once with the port the server actually bound. */
+  onPortSelected?: (port: number) => void;
+}
+
+/**
+ * Bind on the preferred port, stepping upward while it stays busy.
+ *
+ * Companion to listenWithRetry for instances that own their own userData:
+ * when another app instance permanently holds the preferred port (production
+ * app alongside a dev-fresh profile), waiting forever strands this instance
+ * without a gateway while its session env still advertises the busy port —
+ * every skill RPC then lands in the OTHER instance (cross-instance data
+ * blend, 2026-10-27 incident). A brief in-place retry absorbs transient
+ * conflicts (a restarting sibling); past that, take the next free port and
+ * report it via onPortSelected so env injection follows the real bind.
+ *
+ * If every port in the span is busy, degrade to listenWithRetry's indefinite
+ * background rebind on the preferred port rather than giving up.
+ */
+export function listenWithPortFallback(
+  server: http.Server,
+  port: number,
+  host: string,
+  options: ListenWithPortFallbackOptions = {},
+): void {
+  const {
+    fallbackPortSpan = 64,
+    onPortSelected,
+    onListening,
+    logger = console,
+    ...retryOptions
+  } = options;
+  // Short in-place budget for transient conflicts before stepping sideways.
+  const transientAttempts = retryOptions.maxAttempts ?? 3;
+  const transientDelayMs = retryOptions.retryDelayMs ?? 500;
+
+  const tryBind = (candidate: number, maxAttempts: number, delayMs: number) =>
+    new Promise<'listening' | 'busy'>((resolve) => {
+      let attempt = 0;
+      const attemptOnce = () => {
+        attempt += 1;
+        const onError = (error: NodeJS.ErrnoException) => {
+          server.removeListener('listening', onListeningOnce);
+          if (error.code === 'EADDRINUSE' && attempt < maxAttempts) {
+            logger.warn(
+              `[MetaID RPC] Port ${host}:${candidate} busy; retrying bind (${attempt}/${maxAttempts})`,
+            );
+            setTimeout(attemptOnce, delayMs).unref?.();
+            return;
+          }
+          resolve('busy');
+        };
+        const onListeningOnce = () => {
+          server.removeListener('error', onError);
+          resolve('listening');
+        };
+        server.once('error', onError);
+        server.once('listening', onListeningOnce);
+        server.listen(candidate, host);
+      };
+      attemptOnce();
+    });
+
+  void (async () => {
+    for (let candidate = port; candidate <= port + fallbackPortSpan; candidate += 1) {
+      // Preferred port gets the transient retry budget; step-up candidates
+      // are tried once — a busy step-up port is a real conflict, not a race.
+      const result = await tryBind(
+        candidate,
+        candidate === port ? transientAttempts : 1,
+        transientDelayMs,
+      );
+      if (result === 'listening') {
+        if (candidate !== port) {
+          logger.warn(
+            `[MetaID RPC] Port ${host}:${port} held by another instance; gateway bound on fallback port ${candidate}`,
+          );
+        }
+        onPortSelected?.(candidate);
+        onListening?.();
+        return;
+      }
+    }
+    logger.error(
+      `[MetaID RPC] No free port in ${host}:${port}-${port + fallbackPortSpan}; ` +
+      `falling back to background rebind on ${port}`,
+    );
+    listenWithRetry(server, port, host, { ...retryOptions, onListening, logger });
+  })();
+}

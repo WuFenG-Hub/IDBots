@@ -70,14 +70,17 @@ import {
 import { executeWalletMvcTransfer } from './walletTransferService';
 import { BotWalletTransferStore } from './botWalletTransferStore';
 import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers, resolveCreatePinFeeRate } from './feeRateStore';
-import { listenWithRetry } from './httpListenWithRetry';
+import { listenWithPortFallback, listenWithRetry } from './httpListenWithRetry';
 import {
   DEFAULT_METAID_RPC_HOST,
+  METAID_RPC_PORT_ENV,
   getMetaidRpcBase,
   getMetaidRpcToken,
   isAllowedMetaidRpcOrigin,
   isMetaidRpcTokenAuthorized,
   resolveMetaidRpcPort,
+  setActiveMetaidRpcPort,
+  writeMetaidRpcPortFile,
   writeMetaidRpcTokenFile,
 } from './metaidRpcEndpoint';
 import { getMetabotAccountSummary } from './metabotAccountService';
@@ -2980,16 +2983,39 @@ export function startMetaidRpcServer(
   if (!writeMetaidRpcTokenFile(app.getPath('userData'))) {
     console.warn('[MetaID RPC] Failed to write the token mirror file; DSH SKILL RPC keeps env-only token injection');
   }
-  listenWithRetry(server, rpcPort, RPC_HOST, {
-    // Never give up for good: a port conflict (sibling dev instance, zombie
-    // process) can clear at any time, and every local skill RPC channel stays
-    // dead until we bind. Fast retries for ~2 minutes, then a slow background
-    // rebind until the port frees up or the app quits.
-    rebindDelayMs: 15_000,
-    onListening: () => {
-      console.log(`[MetaID RPC] Gateway listening on ${getMetaidRpcBase()}`);
-    },
-  });
+  // An env-pinned port is a contract with external integrations: hold it with
+  // the indefinite rebind semantics rather than stepping to a spare port.
+  // The default port carries no such contract, so when another app instance
+  // with a DIFFERENT userData holds it (production app vs dev-fresh/e2e),
+  // binding a fallback port keeps this instance's session env pointing at
+  // its own gateway instead of silently driving the other instance's —
+  // that cross-instance blend shipped an OpenTeam test into the production
+  // app's database and sessions (2026-10-27). A same-userData sibling is
+  // unaffected either way: it shares this token file, so RPC into either
+  // instance's gateway hits the same data.
+  if (process.env[METAID_RPC_PORT_ENV]?.trim()) {
+    listenWithRetry(server, rpcPort, RPC_HOST, {
+      // Never give up for good: a port conflict (sibling dev instance, zombie
+      // process) can clear at any time, and every local skill RPC channel stays
+      // dead until we bind. Fast retries for ~2 minutes, then a slow background
+      // rebind until the port frees up or the app quits.
+      rebindDelayMs: 15_000,
+      onListening: () => {
+        console.log(`[MetaID RPC] Gateway listening on ${getMetaidRpcBase()}`);
+      },
+    });
+  } else {
+    listenWithPortFallback(server, rpcPort, RPC_HOST, {
+      fallbackPortSpan: 64,
+      onPortSelected: (port) => {
+        setActiveMetaidRpcPort(port);
+        writeMetaidRpcPortFile(app.getPath('userData'), port);
+      },
+      onListening: () => {
+        console.log(`[MetaID RPC] Gateway listening on ${getMetaidRpcBase()}`);
+      },
+    });
+  }
 
   return server;
 }

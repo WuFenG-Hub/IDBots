@@ -161,6 +161,7 @@ tests/*
 !tests/dshKernelDefault.test.mjs
 !tests/metaidRpcTokenFile.test.mjs
 !tests/httpListenWithRetry.test.mjs
+!tests/metaidRpcGatewayPortFallback.test.mjs
 !tests/coworkDshRestartDefer.test.mjs
 !tests/coworkDshEncodingHeal.test.mjs
 !tests/coworkCwdSelfHeal.test.mjs

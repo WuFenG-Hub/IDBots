@@ -92,6 +92,12 @@ async function startRpcServerForTest() {
     }
     if (request === './httpListenWithRetry' || request.endsWith('/httpListenWithRetry')) {
       return {
+        listenWithPortFallback(server, _port, host, options = {}) {
+          server.listen(0, host, () => {
+            if (typeof options.onPortSelected === 'function') options.onPortSelected(server.address().port);
+            if (typeof options.onListening === 'function') options.onListening();
+          });
+        },
         listenWithRetry(server, _port, host, options = {}) {
           server.listen(0, host, () => {
             if (typeof options.onListening === 'function') options.onListening();
