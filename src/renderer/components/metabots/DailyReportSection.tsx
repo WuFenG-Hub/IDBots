@@ -30,7 +30,7 @@ const MAX_DAILY_REPORT_HOUR = 23;
 
 // Same row/label/input chrome the edit form uses, so the section blends in
 // (replicated from SurfSection / MetaBotEditTabs).
-const rowClass = 'grid grid-cols-1 md:grid-cols-[132px_minmax(0,1fr)] gap-2 md:gap-4 items-start';
+const rowClass = 'grid grid-cols-1 md:grid-cols-[152px_minmax(0,1fr)] gap-2 md:gap-4 items-start';
 const labelClass = 'pt-2 text-sm font-medium dark:text-claude-darkText text-claude-text';
 const hintClass = 'text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-1';
 const inputChromeClass = 'px-3 py-2 text-sm rounded-xl dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text border dark:border-claude-darkBorder border-claude-border focus:outline-none focus:ring-2 focus:ring-claude-accent disabled:opacity-50 disabled:cursor-not-allowed';
