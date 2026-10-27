@@ -7,7 +7,7 @@ import test from 'node:test'
 import Module from 'node:module'
 
 const require = Module.createRequire(import.meta.url)
-const { DshEventMapper } = require('../dist-electron/main/libs/dshKernel/dshEventMapper.js')
+const { DshEventMapper, innermostProviderMessage, compactionFailureContent } = require('../dist-electron/main/libs/dshKernel/dshEventMapper.js')
 const { splitThinkTaggedContent } = require('../dist-electron/main/libs/dshKernel/thinkTags.js')
 const { foldsToolRideTextIntoThinking } = require('../dist-electron/main/libs/dshModelReasoning.js')
 
@@ -587,6 +587,33 @@ test('compaction/start is silent; compaction/end only reports failures', () => {
   assert.equal(failed[0].message.type, 'system')
   assert.equal(failed[0].message.metadata.isError, true)
   assert.match(failed[0].message.content, /Compaction failed: summary unavailable/)
+})
+
+test('a context-overflow compaction failure renders a readable line instead of the raw gateway JSON', () => {
+  const mapper = new DshEventMapper()
+  // Verbatim Command Code gateway 400 from session cw-2c70849f (turn 182).
+  const gateway400 = '400: {"message":"{\\"error\\":{\\"message\\":\\"The prompt exceeds the context window this endpoint can start from. Compact the conversation and retry.\\",\\"type\\":\\"invalid_request_error\\",\\"param\\":\\"messages\\",\\"code\\":\\"context_length_exceeded\\"}}","type":"invalid_request_error"}'
+  const failed = mapper.consume({
+    type: 'compaction/end',
+    data: { turn: null, error: gateway400 },
+  })
+  const content = failed[0].message.content
+  assert.equal(failed[0].message.metadata.isError, true)
+  assert.ok(!content.includes('400: {"message"'), content)
+  assert.ok(/压缩失败|the compaction request itself exceeded/i.test(content), content)
+  // The provider's own wording stays visible for support/diagnosis.
+  assert.ok(content.includes('The prompt exceeds the context window this endpoint can start from'), content)
+})
+
+test('innermostProviderMessage unwraps nested gateway JSON and passes plain text through', () => {
+  const nested = '400: {"message":"{\\"error\\":{\\"message\\":\\"inner provider text\\",\\"code\\":\\"context_length_exceeded\\"}}"}'
+  assert.equal(innermostProviderMessage(nested), 'inner provider text')
+  assert.equal(innermostProviderMessage('summary unavailable'), 'summary unavailable')
+  assert.equal(innermostProviderMessage('400: {"message":"plain single layer"}'), 'plain single layer')
+})
+
+test('compactionFailureContent keeps the raw prefix for non-overflow failures', () => {
+  assert.equal(compactionFailureContent('summary unavailable'), 'Compaction failed: summary unavailable')
 })
 
 // ---- Effort-"off" tool-call commentary (reasoning-disabled route) ---------
