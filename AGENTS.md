@@ -93,3 +93,47 @@ and the workstream plan in `00-program-plan.md`. Interface contracts
 (`01-interface-contracts.md`, `02-ipc-allowlist-v1.md`) are frozen: propose a
 change request instead of editing them. Production deploys come from `main`
 only (see the rule above).
+
+## Workspace instructions injected into cowork sessions
+
+When a cowork session's working directory (the per-session `cwd` passed to
+`session/ensure`, which bash/fs tools resolve from) has an `AGENTS.md` or
+`CLAUDE.md` at its root — or anywhere between the project root and the cwd —
+the DSH runtime injects those files into the conversation before the first
+model request, so the agent follows the repository's conventions just like
+other harness projects do.
+
+- Mechanism: the pinned `@deepseek-ai/dsh-agent-instructions` package, mounted
+  by `dsh-runtime/lib/generate-runtime-config.mjs` whenever the composition has
+  a workspace (the fs provider it reads through). Same package and defaults the
+  DeepSeek Harness web UI uses.
+- Discovery: then the root-to-cwd ancestor chain found by walking up to the
+  first `.git` marker. In each directory the ordered candidates `AGENTS.md`,
+  `CLAUDE.md` (plus the `.local` overlays `AGENTS.local.md`, `CLAUDE.local.md`)
+  are loaded; `AGENTS.md` renders before `CLAUDE.md`, and more specific (deeper)
+  directories override broader ones.
+- Boundary (product decision): ancestor discovery is intentional — a session
+  may inject instruction files from OUTSIDE the user-chosen workspace (e.g.
+  the git repo root above the cwd, or anything a symlinked file points at).
+  This matches DeepSeek Harness behavior; the folder selector popover shows a
+  hint telling users sessions follow conventions from the folder AND its
+  parent Git repos. Do not silently disable ancestor discovery.
+- User-global instructions are disabled by design: the host pins
+  `workspaceInstructions.dshHome` to an empty directory under userData
+  (`join(app.getPath('userData'), 'dsh-home')`, see `buildRuntimeConfig` in
+  `coworkDshTurn.ts`), so a `~/.dsh/AGENTS.md` left over from another harness
+  never enters IDBots sessions.
+- Injection: rendered as a durable user-role baseline message
+  (`<system-reminder>` frame, "Instructions from: <path>" per file) with a
+  64 KiB byte budget; fs tool edits to instruction files are reconciled into
+  the session automatically.
+- Controls: `workspaceInstructions.maxBytes` / `workspaceInstructions.dshHome`
+  in the runtime config input (defaults match the official bundle).
+- Not injected when the session has no workspace cwd or the composition mounts
+  no fs provider — providerless runs stay hermetic.
+
+## Keeping CLAUDE.md in sync
+
+`CLAUDE.md` is a byte-copy of this file except its first line, which addresses
+Claude Code instead of Codex. When this file changes, update `CLAUDE.md` in
+the same commit.

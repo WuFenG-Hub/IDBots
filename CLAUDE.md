@@ -2,126 +2,99 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## File edits in worktrees
+## Commit and Merge Rules
 
-When the session working directory is a git worktree, all Edit/Write file paths must stay under the worktree root, not the parent repo. Before each edit, verify the path prefix matches the working directory shown in the session context.
+- If you notice unfamiliar or unrelated file changes, continue working and stay focused on your own scoped edits unless the user asks you to inspect them.
+- All IDBots-related edits must stay within this IDBots project directory; modifying files outside the IDBots project is strictly forbidden.
+- Unless the user explicitly asks to work on `main`, make every change on a new branch paired with a same-named worktree (path and name following project convention — e.g. branch `fix/foo` or `feat/foo` uses worktree `.worktrees/foo`); you do not need to ask for confirmation before creating it. Edit directly on `main` only when the user explicitly says so.
+- If the task is a new change request or a new feature, and the current checkout is `main`, do not start editing in that working directory. Create a new branch named for the task together with a matching local worktree, then implement the work in that worktree. Skip this only when the user explicitly instructs you to make the change on `main`.
+- Every new branch must be created together with a dedicated local worktree; use one worktree working directory per branch, and do not create or switch branches in the main working directory.
+- All feature or temporary branches must branch directly from `main`; never create a new branch from another branch. Branch depth is capped at 1.
+- When the user says "commit", stage and commit only the files you changed and understand.
+- After each commit, do not push to the remote GitHub repository unless the user explicitly asks you to push.
+- Prefer small, frequent commits. Commit each independent, verifiable unit of work as soon as it is complete.
+- ** For every modification or newly added feature, create one commit. **
+- For every commit, use Codex's `metabot-post-buzz` skill (not this repository's `SKILLs/metabot-post-buzz` implementation) to post a detailed development-journal entry on-chain describing the change.
+- Use commit messages in the format `<type>: <short description>`, where `<type>` is one of `feat`, `fix`, `refactor`, `docs`, or `chore`.
+- Before committing, make sure the relevant local tests or verification steps pass for your changes.
+- When merging completed work into `main`, use `git merge --no-ff` to preserve the feature merge point.
+- Do not merge a feature branch back into `main` on your own initiative; wait for an explicit user instruction to merge or close out the work.
+- When the user asks to merge a branch back into `main`, after the merge you may delete that branch and its worktree without asking, provided the branch is now fully absorbed into `main` (safe to delete). Do not delete branches that still carry unmerged or uncommitted work.
 
-## Project
+### Production deployments come from `main` only
 
-IDBots is a local-first desktop platform for on-chain AI agents ("MetaBots") built on the MetaID protocol. It pairs an Electron 40 + React 18 desktop app with an embedded `man-p2p` P2P data-sync runtime.
+- **Every deployment to a production (or production-like staging) environment must be built from `main`. Never deploy straight off a feature branch.** One running version, one source of truth: what is live must be reconstructible by anyone who checks out `main`.
+- A branch may be built and run only for local verification. The moment a branch's change is accepted, merge it into `main` and deploy from `main` — do not let an accepted-but-unmerged branch stay live, because the next rebuild from `main` silently reverts it (a fixed bug comes back with no diff to explain it).
+- Acceptance is not complete until the change is in `main`. A verified fix that exists only on a branch is an unfinished delivery, and it must be called out as such in any status report.
+- When a deployment has already happened from a branch, treat that as a debt to clear immediately: merge the branch into `main`, rebuild, redeploy from `main`, and confirm the running artifact matches the `main` commit.
 
-## Commands
+## Language Conventions
 
-```bash
-# Install (runs patch-package, electron-builder install-app-deps, SKILLs/web-search deps)
-npm install
+- Write all documentation in English: Markdown docs, design notes, code comments, and commit messages.
+- Default UI copy (labels, messages, and prompts shown in the app) must be in English.
+- Development-journal entries posted on-chain via the `metabot-post-buzz` skill must be written in English.
+- The defaults above apply unless the user explicitly requests another language for that specific artifact.
+- When replying to the user or otherwise communicating with them, always use the user's own language.
 
-# Development (compiles Electron TS, builds skills, starts Vite on port 5175 + Electron)
-npm run electron:dev
+## Package Manager
 
-# Compile only the Electron main-process TypeScript
-npm run compile:electron
+- Supported Node.js: `>=24 <27` (24 LTS and 26 LTS both verified; 26 verification: full `dist:mac` packaging + packaged-app smoke launch on v26.7.0).
+- Package manager: pnpm only (pinned via `packageManager` in `package.json`; run `corepack enable` once). `pnpm-lock.yaml` is committed; never reintroduce `package-lock.json`.
+- Three packages, three lockfiles: the repository root, `dsh-runtime/`, and `SKILLs/web-search/` are installed separately (`pnpm install` in each; the root `postinstall` covers the two nested ones automatically). pnpm settings live in each directory's `pnpm-workspace.yaml` (root and nested: hoisted `nodeLinker` + overrides + build approvals) — pnpm 11 ignores `.npmrc` for settings, so do not move them there.
+- `nodeLinker: hoisted` is a hard requirement, not a preference: electron-builder packages production `node_modules` into the app and copies `dsh-runtime/` + `SKILLs/` (with their `node_modules`) as extraResources — the default isolated linker would ship symlinks into the developer's pnpm store and break the packaged app. Packages are still hard-linked from the global pnpm store, so per-worktree install cost stays near zero.
+- Never call `npm install` / `npm ci` anywhere in this repository (root, CI, scripts, or nested packages); use `pnpm install --frozen-lockfile` so installs stay deterministic and store-backed.
 
-# Build renderer + main bundles
-npm run build
+## Worktree Closeout
 
-# Lint (must pass before any commit)
-npm run lint
+- Every task branch lives in a git worktree under `.worktrees/<branch>`.
+- Every automated verification flow (gate, wt, gt, rsi-audit, and similar agent-driven task runners) MUST remove its own worktree with `git worktree remove` when the task finishes — success or failure alike. Leftover worktrees are the main source of disk bloat; each one that survives keeps a full dependency checkout.
+- After a branch merges back to `main`, remove its worktree and delete the branch immediately: `git worktree remove .worktrees/<branch> && git branch -d <branch>`.
+- Regular maintenance entry point: `scripts/prune-worktrees.sh` lists every worktree whose branch is fully merged into `main` and, after confirmation, removes the worktrees and deletes the branches. `--dry-run` only lists; `--force` also removes merged worktrees that have uncommitted changes.
+- A fresh worktree needs `pnpm install` in the root before building (the postinstall covers `dsh-runtime/` and `SKILLs/web-search/`); thanks to the shared pnpm store the install is fast and adds almost no new disk usage.
 
-# Run all node-based tests
-node --test tests/*.test.mjs
+### Worktrees live on the internal disk
 
-# Run a single test file (compile first if testing main-process code)
-npm run compile:electron && node --test tests/<file>.test.mjs
+- `.worktrees/` is a plain, git-ignored directory in the repository root on the internal disk — not a symlink to an external volume. Always create worktrees as `git worktree add .worktrees/<name> ...`; never invent other temp directories.
+- Worktrees used to live on an external exFAT SSD behind a `.worktrees` symlink (`/Volumes/Seagate/MacWork/worktrees/IDBots`). That setup was abandoned because it hurt performance: pnpm fell back from hard links to copy mode and every build and test ran against slow external I/O, on top of the exFAT workarounds the volume needed (`core.filemode false`, `._*` AppleDouble sidecars). None of that applies to a fresh worktree today: do not set `core.filemode false`, and do not expect a `Seagate` volume to be mounted.
+- A few legacy worktrees may still show up under `/Volumes/Seagate/MacWork/worktrees/IDBots/` in `git worktree list`. Do not create new ones there; close them out with the normal `git worktree remove` flow once their branches are merged.
 
-# Grouped test suites
-npm run test:memory    # memory-scoped CRUD, migration, prompt blocks
-npm run test:wallet    # wallet service
-npm run test:im-gateway # IM gateway connectivity
+## Important Runtime Rules
 
-# Refresh bundled man-p2p binaries from sibling repo
-npm run sync:man-p2p
+- Windows NSIS uninstall policy is to preserve user data (`electron-builder.json` -> `nsis.deleteAppDataOnUninstall=false`); do not flip this unless a release explicitly requires destructive uninstall behavior.
+- The team preference is `main` as the only long-lived shared branch. Temporary branches should be short-lived and deleted after merge.
 
-# Package release artifacts
-npm run dist:mac
-npm run dist:win
-```
+## DSH Runtime Dependencies
 
-## Architecture
+- `dsh-runtime/` is a nested pnpm package with its own `package.json` / `pnpm-lock.yaml` / `node_modules`; the root `pnpm install` only reinstalls it via `postinstall`, and a plain `git pull` or merge does NOT reinstall it.
+- After pulling, merging, or switching to any commit that touches `dsh-runtime/package.json`, `dsh-runtime/pnpm-workspace.yaml`, or `dsh-runtime/pnpm-lock.yaml`, immediately run `pnpm --dir dsh-runtime install`. A stale `dsh-runtime/node_modules` crashes the spawned DSH runtime process at plugin-load time (`ERR_MODULE_NOT_FOUND` / "JSON-RPC input closed").
+- ANY command that reinstalls `dsh-runtime/node_modules` (`pnpm --dir dsh-runtime install`, including manual invocations) wipes the kernel patches under `scripts/dsh-kernel-patches/`. Re-run `node scripts/apply-dsh-kernel-patches.cjs` after it — the root `postinstall` does this automatically, but a manual install does NOT. A missing patch keeps builds and tests green and only shows up as a runtime regression in the shipped package — and the blast radius is no longer Windows-only: the set carries the Windows console-flash fix (the v0.9.3 incident), the fail-closed browser/desktop automation approval gates, the exFAT session/attachment fixes, AND the deferred browser mount behind assistant-mode first-sentence latency (losing it silently re-locks every new session's first turn to a synchronous Chromium spawn — ~15s-class stalls on memory-tight hosts). `pnpm run check:dsh-deps` and `node scripts/apply-dsh-kernel-patches.cjs --check` both detect it. The per-patch inventory and rationale live in `scripts/dsh-kernel-patches/README.md`; release-side verification lives in the build/release SOP (`scripts/verify-dsh-kernel-patches.cjs` fingerprints).
+- `pnpm run check:dsh-deps` (scripts/check-dsh-runtime-deps.cjs) verifies installed dsh-runtime packages match `package.json` AND that `dsh-runtime/pnpm-lock.yaml` is in sync with it (importer-block specs both ways + resolved versions for exact pins); it is wired as a pre-hook of `electron:dev` / `electron:dev:dsh`. Any commit that bumps dsh-runtime dependencies must keep this gate green.
 
-### Process Model
+### Upgrading the DSH runtime version
 
-Strict Electron IPC boundary — Node integration is disabled in the renderer.
+- To bump the `@deepseek-ai/*` kernel versions, use the one-command path: `pnpm run upgrade:dsh -- <version>` (rewrites all pins in `dsh-runtime/package.json` plus the override lines in `dsh-runtime/pnpm-workspace.yaml`, regenerates the lockfile via `pnpm --dir dsh-runtime install`, re-runs the gate). Do NOT hand-edit `dsh-runtime/package.json`, `dsh-runtime/pnpm-workspace.yaml`, or `dsh-runtime/pnpm-lock.yaml` — every historical DSH upgrade incident (stale-lock ERESOLVE, the 0.1.3-alpha.1 lockfile left behind by the 0.1.2-rc.1 pin) came from manual partial edits.
+- `dsh-runtime/package.json`, `dsh-runtime/pnpm-workspace.yaml`, and `dsh-runtime/pnpm-lock.yaml` must be committed together in the SAME commit; never commit one without the others.
+- Before committing a dsh-runtime version change, `pnpm run check:dsh-deps` must pass (it also validates the lockfile sync, so an inconsistent bump cannot land silently).
 
-- **Main process** (`src/main/`): orchestration, IPC handlers, SQLite persistence, subprocess management, wallet/MetaBot logic, IM gateways, runtime path resolution.
-  - `main.ts` — app entrypoint, IPC handler registration (large file, ~226 KB).
-  - `preload.ts` — contextBridge API exposed to renderer.
-  - `coworkStore.ts` — cowork (chat/agent session) persistence and orchestration.
-  - `sqliteStore.ts` — SQLite schema, migrations, all direct DB access.
-  - `metabotStore.ts` — MetaBot CRUD and lifecycle.
-  - `skillManager.ts` — skill loading, registration, execution bridge.
-  - `serviceOrderStore.ts` — Gig Square service-order persistence.
-  - `scheduledTaskStore.ts` — cron/scheduled task persistence.
-  - `memory/` — scoped agent memory (per-bot, per-chat context recall).
-  - `services/` — runtime services: P2P lifecycle, MetaID RPC, wallet, indexer proxy, cognitive orchestration, Gig Square, payment/settlement.
-  - `im/` — IM gateway integrations (Telegram, Discord, Feishu, DingTalk, NIM, Xiaomifeng).
-  - `libs/` — lower-level utilities: cowork runner/sandbox, Claude SDK bridge, runtime paths, wallet TX workers, app updater.
+## Database Upgrade Safety
 
-- **Renderer** (`src/renderer/`): React UI, client-side services, Redux state.
-  - `App.tsx` — root component, routing, layout.
-  - `components/` — UI surfaces: onboarding, MetaBots, cowork, skills, Gig Square, IM, P2P status, settings, scheduled tasks, update.
-  - `services/` — API calls, LLM connection, encryption, i18n, MCP, theme, shortcuts.
-  - `store/slices/` — Redux slices: cowork, IM, MCP, model, quickAction, scheduledTask, skill.
-  - Path alias: `@/` → `src/renderer/` (configured in both Vite and tsconfig).
+- Treat user-directory SQLite databases as persistent upgrade state. Auto-update does not replace or reset them.
+- Any database schema change must include a safe, idempotent first-run migration path so upgraded users get required tables, columns, indexes, and defaults before new code depends on them.
+- Any change to field meaning, data shape, or storage semantics must include an explicit migration or compatibility strategy for existing user data on first launch after upgrade.
+- Do not delete, reset, or casually discard user data. Maintain old-user database continuity across releases unless a deliberate, well-documented migration plan says otherwise.
 
-### Compilation
+## Cloud & Mobile handoff package
 
-Two separate TypeScript configs:
-- `tsconfig.json` — renderer (ESNext modules, bundler resolution, `noEmit`, includes `src/renderer`).
-- `electron-tsconfig.json` — main process (CommonJS, node resolution, emits to `dist-electron/`, includes `src/main`).
+Any work touching the mobile client (`src/mobile/`), the control plane
+(`cloud/control-plane/`), server mode / gateway (`src/main/server/`,
+`src/main/gateway/`), or the tenant image (`deploy/tenant-image/`) starts at
+`docs/cloud-mobile/HANDOFF.md`, then the index in `docs/cloud-mobile/README.md`
+and the workstream plan in `00-program-plan.md`. Interface contracts
+(`01-interface-contracts.md`, `02-ipc-allowlist-v1.md`) are frozen: propose a
+change request instead of editing them. Production deploys come from `main`
+only (see the rule above).
 
-### Skills System
-
-`SKILLs/` contains bundled skill packages. Each skill is a self-contained directory with its own manifest. Skills are compiled via `npm run build:skills`. The registry is `SKILLs/skills.config.json`.
-
-### Data Layer
-
-- SQLite via `sql.js` (in-process, no native bindings). All schema and migrations live in `sqliteStore.ts`.
-- Key tables: `metabots`, `metabot_wallets` (append-only, encrypted mnemonics), `llm_configs`, `cowork_sessions`, `cowork_messages`.
-- Database schema changes require safe, idempotent migration paths — user databases persist across auto-updates.
-
-### P2P Runtime
-
-The `man-p2p` binary runs as a managed subprocess. Key services:
-- `p2pIndexerService.ts` — subprocess lifecycle, health checks, status polling.
-- `p2pConfigService.ts` — persisted P2P config.
-- `localIndexerProxy.ts` — local-first HTTP/content fallback (local P2P first, remote MetaID fallback only when local misses).
-
-## Key Rules
-
-- **IPC boundary**: never bypass IPC. All renderer↔main communication goes through `preload.ts` contextBridge.
-- **No window.confirm/alert in renderer**: `window.confirm()` and `window.alert()` are blocked or hidden by Electron in this app. Use React state-based modals for user confirmations instead.
-- **Local-first**: local P2P/API hit first, remote/MetaID fallback only when local semantics miss.
-- **P2P truth model**: healthy + `peerCount === 0` → online peerless state (not "Connecting..."); startup failure → offline with error detail.
-- **DB safety**: never delete/reset user data. Schema changes need idempotent first-run migrations. Treat user SQLite as persistent upgrade state.
-- **i18n**: all user-facing strings must be internationalized (EN + ZH) via `src/renderer/services/i18n.ts`.
-- **Theme**: use CSS variables (`var(--bg-main)`, `var(--bg-panel)`, `var(--text-primary)`, `var(--color-primary)`). Do not hardcode `dark:` Tailwind utilities.
-- **Code comments**: English only.
-- **Code style**: functional React with hooks, 2-space indent, single quotes, semicolons, strong TypeScript typing. Keep business logic in `services/` or Redux slices, not in UI components.
-- **Commits**: `<type>: <short description>` where type is `feat`, `fix`, `refactor`, `docs`, or `chore`. Run `npm run lint` before committing.
-- **Pre-commit verification**: before claiming work is done, always run: (1) `npm run compile:electron` — 0 errors, (2) `npm run build:skills` — 0 errors, (3) `npm run lint` — 0 errors/warnings, (4) `node --test tests/*.test.mjs` — all pass.
-- **Worktree gotchas**: git worktrees have no `node_modules`. Before running `electron:dev` or `build:skills` in a worktree: (1) symlink node_modules from the main repo: `ln -s /path/to/main/repo/node_modules node_modules` (required for sql.js wasm, electron, and all runtime deps), (2) run `npm install --prefix SKILLs/web-search` for web-search skill dependencies, (3) `compile:electron` uses `npx -p typescript@5 tsc` to pin TS 5.x — do NOT use bare `tsc` or unpinned `npx -p typescript tsc` which may pull TS 6.x with breaking deprecation rules, (4) `tests/` is in `.gitignore` — use `git add -f tests/` to stage test files.
-- **Branching**: `main` is the only long-lived branch. Merge with `--no-ff`. Delete branches after merge.
-- **Dev port**: Vite dev server uses port 5175. If another process holds that port, Electron loads the wrong frontend.
-- **Release validation**: always test with packaged builds, not just `electron:dev`.
-
-## Additional Context
-
-- `AGENTS.md` — extended repo guidance with known useful files and runtime rules.
-- `localdocs/` — local-only working notes (disposable, not committed).
-- `docs/superpowers/` — specs and plans from P2P/alpha integration work.
-
-## Workspace Instructions (AGENTS.md / CLAUDE.md Injection)
+## Workspace instructions injected into cowork sessions
 
 When a cowork session's working directory (the per-session `cwd` passed to
 `session/ensure`, which bash/fs tools resolve from) has an `AGENTS.md` or
@@ -158,3 +131,9 @@ other harness projects do.
   in the runtime config input (defaults match the official bundle).
 - Not injected when the session has no workspace cwd or the composition mounts
   no fs provider — providerless runs stay hermetic.
+
+## Keeping CLAUDE.md in sync
+
+`CLAUDE.md` is a byte-copy of this file except its first line, which addresses
+Claude Code instead of Codex. When this file changes, update `CLAUDE.md` in
+the same commit.
