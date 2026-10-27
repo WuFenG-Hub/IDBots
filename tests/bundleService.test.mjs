@@ -16,11 +16,15 @@ const { mvc } = require('meta-contract');
 
 const {
   BUNDLE_ORDER_STATUS,
+  BUNDLE_ORDER_CREATION_REJECTED,
+  BUNDLE_ORDER_OUTCOME_UNCERTAIN,
+  BundleOrderCreationRejectedError,
   getBundleMeters,
   getBundleOrder,
   getBundlePlans,
   createBundleOrder,
   initBundleService,
+  registerBundleIpcHandlers,
   isBundleStubMode,
   resetBundleServiceForTests,
   resolveBundleApiBaseUrl,
@@ -409,4 +413,34 @@ test('base URL precedence: IDBOTS_METASO_API_BASE env beats the injected overrid
   });
   t.after(restore);
   assert.equal(resolveBundleApiBaseUrl(), 'https://env.test');
+});
+
+test('createOrder IPC distinguishes a definite business rejection from an uncertain outcome', async (t) => {
+  const handlers = {};
+  registerBundleIpcHandlers({
+    registerIpcHandler: (channel, handler) => {
+      handlers[channel] = handler;
+    },
+  });
+
+  const rejected = await handlers['bundle:createOrder'](null, { planId: '' });
+  assert.equal(rejected.success, false);
+  assert.equal(rejected.errorCode, BUNDLE_ORDER_CREATION_REJECTED);
+
+  const restoreStub = initService({ baseUrl: 'stub://local' });
+  await assert.rejects(
+    createBundleOrder({ planId: 'not-on-sale' }),
+    BundleOrderCreationRejectedError,
+  );
+  restoreStub();
+
+  const fetchImpl = createFetchStub([
+    ['/v1/bundle/orders', { __httpStatus: 500, __body: { code: 500, message: 'upstream unavailable' } }],
+  ]);
+  const restore = initService({ baseUrl: 'https://bundle.test', fetchImpl });
+  t.after(restore);
+  const uncertain = await handlers['bundle:createOrder'](null, { planId: 'bundle_basic_cny' });
+  assert.equal(uncertain.success, false);
+  assert.equal(uncertain.errorCode, BUNDLE_ORDER_OUTCOME_UNCERTAIN);
+  assert.equal(uncertain.error.includes('upstream unavailable'), true);
 });

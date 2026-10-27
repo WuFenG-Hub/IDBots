@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   isActiveOrder,
   isCurrentOrderOperation,
+  isDefinitiveCreateRejection,
   isUncertainCreateBlocked,
   loadRechargeRecovery,
   makeCreationAttempt,
@@ -93,4 +94,11 @@ test('only the current order ID and operation generation may apply a terminal re
   assert.equal(isCurrentOrderOperation(current, 2, 'bo_old', 2), false);
   assert.equal(isCurrentOrderOperation(current, 2, 'bo_new', 1), false);
   assert.equal(isCurrentOrderOperation(null, 2, 'bo_new', 2), false);
+});
+
+test('only an authoritative business rejection can clear an uncertain create attempt', () => {
+  assert.equal(isDefinitiveCreateRejection({ errorCode: 'BUNDLE_ORDER_REJECTED' }), true);
+  assert.equal(isDefinitiveCreateRejection({ errorCode: 'BUNDLE_ORDER_OUTCOME_UNCERTAIN' }), false);
+  assert.equal(isDefinitiveCreateRejection({}), false);
+  assert.equal(isDefinitiveCreateRejection(undefined), false);
 });

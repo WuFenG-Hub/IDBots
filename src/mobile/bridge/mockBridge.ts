@@ -1099,7 +1099,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     createOrder: (input: { planId: string }) =>
       guardOnline(async () => {
         const plan = plans.find((p) => p.planId === input?.planId && p.status === 1);
-        if (!plan) return { success: false, error: 'plan not found or off sale' };
+        if (!plan) return { success: false, error: 'plan not found or off sale', errorCode: 'BUNDLE_ORDER_REJECTED' };
         const createdAt = now();
         const order: MockBundleOrder = {
           orderId: `bo_mock_${++orderSeq}`,

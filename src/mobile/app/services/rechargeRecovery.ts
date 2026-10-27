@@ -36,6 +36,12 @@ export function isUncertainCreateBlocked(attempt: RechargeCreationAttempt | null
   return Boolean(attempt && nowMs < attempt.retryAfterMs);
 }
 
+export const BUNDLE_ORDER_CREATION_REJECTED = 'BUNDLE_ORDER_REJECTED';
+
+export function isDefinitiveCreateRejection(result: { errorCode?: string } | null | undefined): boolean {
+  return result?.errorCode === BUNDLE_ORDER_CREATION_REJECTED;
+}
+
 export function isCurrentOrderOperation(
   current: RechargeOrderView | null,
   currentGeneration: number,

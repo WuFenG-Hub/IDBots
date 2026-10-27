@@ -66,6 +66,16 @@ export class BundleApiError extends Error {
   }
 }
 
+export const BUNDLE_ORDER_CREATION_REJECTED = 'BUNDLE_ORDER_REJECTED';
+export const BUNDLE_ORDER_OUTCOME_UNCERTAIN = 'BUNDLE_ORDER_OUTCOME_UNCERTAIN';
+
+export class BundleOrderCreationRejectedError extends BundleApiError {
+  constructor(message: string) {
+    super({ stage: 'orders', message });
+    this.name = 'BundleOrderCreationRejectedError';
+  }
+}
+
 /** C4 plan row; `payAmount` is a decimal string (C4: "Amounts are decimal strings"). */
 export interface BundlePlan {
   planId: string;
@@ -496,7 +506,7 @@ function syncStubQuotaDerived(): void {
 function stubCreateOrder(planId: string): BundleOrder {
   const plan = STUB_PLANS.find((entry) => entry.planId === planId && entry.status === 1);
   if (!plan) {
-    throw new BundleApiError({ stage: 'orders', message: `Unknown or off-sale bundle plan: ${planId || '(empty)'}` });
+    throw new BundleOrderCreationRejectedError(`Unknown or off-sale bundle plan: ${planId || '(empty)'}`);
   }
   const orderId = `bo_stub_${randomBytes(8).toString('hex')}`;
   const now = nowSeconds();
@@ -572,7 +582,7 @@ export async function getBundlePlans(): Promise<BundlePlan[]> {
 export async function createBundleOrder(input: { planId?: unknown; gateway?: unknown }): Promise<BundleOrder> {
   const planId = normalizeText(input?.planId);
   if (!planId) {
-    throw new BundleApiError({ stage: 'orders', message: 'planId is required' });
+    throw new BundleOrderCreationRejectedError('planId is required');
   }
   const gateway = normalizeText(input?.gateway) || 'alipay';
   if (isBundleStubMode()) {
@@ -676,7 +686,13 @@ export function registerBundleIpcHandlers(deps: { registerIpcHandler: RegisterIp
     try {
       return { success: true, order: await createBundleOrder(input ?? {}) };
     } catch (error) {
-      return { success: false, error: getErrorMessage(error) };
+      return {
+        success: false,
+        error: getErrorMessage(error),
+        errorCode: error instanceof BundleOrderCreationRejectedError
+          ? BUNDLE_ORDER_CREATION_REJECTED
+          : BUNDLE_ORDER_OUTCOME_UNCERTAIN,
+      };
     }
   });
   registerIpcHandler('bundle:getOrder', async (_event, input: { orderId?: unknown }) => {

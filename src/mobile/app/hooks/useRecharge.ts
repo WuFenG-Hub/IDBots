@@ -4,6 +4,7 @@ import { getAppBridge, getMobileElectron } from '../appBridge';
 import {
   isActiveOrder,
   isCurrentOrderOperation,
+  isDefinitiveCreateRejection,
   isOrderExpired,
   isUncertainCreateBlocked,
   loadRechargeRecovery,
@@ -253,9 +254,13 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
       try {
         const result = await getMobileElectron().bundle.createOrder({ planId });
         if (!result?.success) {
-          commitAttempt(null);
-          setActionError(result?.error || 'Order creation failed');
-          setStage('error');
+          if (isDefinitiveCreateRejection(result)) {
+            commitAttempt(null);
+            setActionError(result?.error || 'Order creation was rejected');
+            setStage('error');
+          } else {
+            setStage('uncertain');
+          }
           return;
         }
         const created = result.order;
