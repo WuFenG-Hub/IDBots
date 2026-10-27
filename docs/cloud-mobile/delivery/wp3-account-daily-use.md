@@ -21,6 +21,7 @@ The frozen files `01-interface-contracts.md` and `02-ipc-allowlist-v1.md` were n
 | `bc8f70a4` | Complete mobile Bot lifecycle and configuration | `2ebf82ed08c8853ef04ede50829f427abcb0623dd74186a4590c62ad8fd54b89i0` |
 | `70315a3b` | Show in-flight Bot synchronization state | `2f979edd95407d61d4b51810742da33cb417292f05d656bad0ff2f51483febd0i0` |
 | `44cd2513` | Harden real gateway account coverage | `7bbb4eb7357e36f02a1101b2a2ccda15a11a740c8466550e2a75101b62ca4bffi0` |
+| `9c8d923e` | Add the WP3 Delivery Note | `2ac0a40e221fa743d324fb3c340585ac5392e54bd376b909094a4ce1e104f831i0` |
 
 Each journal was published with the required `metabot-post-buzz` flow in English. The journals are development records, not product acceptance evidence.
 
