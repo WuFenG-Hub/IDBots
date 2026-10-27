@@ -4,7 +4,10 @@ import {
   isActiveOrder,
   isCurrentOrderOperation,
   isDefinitiveCreateRejection,
+  isOrderCreationBlocked,
+  isOrderExpired,
   isUncertainCreateBlocked,
+  isUnsettledOrder,
   loadRechargeRecovery,
   makeCreationAttempt,
   persistCreationAttempt,
@@ -66,22 +69,29 @@ test('recharge recovery restores the exact current order, plan, QR, expiry and s
   assert.equal(isUncertainCreateBlocked(recovered.creationAttempt), true);
 });
 
-test('recharge recovery does not invent a QR or accept malformed order data', (t) => {
+test('recharge recovery does not invent a QR and fails closed on malformed order data', (t) => {
   const values = installStorage(t);
   persistRechargeOrder(makeOrder({ qrCode: '' }));
   assert.equal(loadRechargeRecovery().order?.qrCode, '');
+  assert.equal(loadRechargeRecovery().invalidOrder, false);
   values.set('idbots.mobile.bundleOrder.v1', JSON.stringify({ orderId: 'bo_missing_fields' }));
   assert.equal(loadRechargeRecovery().order, null);
+  assert.equal(loadRechargeRecovery().invalidOrder, true);
   values.set('idbots.mobile.bundleOrder.v1', '{not json');
   assert.equal(loadRechargeRecovery().order, null);
+  assert.equal(loadRechargeRecovery().invalidOrder, true);
 });
 
-test('terminal or expired orders do not block creation, while an unresolved attempt does', (t) => {
+test('terminal orders do not block creation, while expired unsettled orders and attempts do', (t) => {
   installStorage(t);
   const now = Date.now();
   assert.equal(isActiveOrder(makeOrder({ status: 3 }), now), false);
   assert.equal(isActiveOrder(makeOrder({ status: 4 }), now), false);
+  assert.equal(isUnsettledOrder(makeOrder({ status: 3 })), false);
+  assert.equal(isOrderCreationBlocked({ order: makeOrder({ status: 4 }), creationAttempt: null }, now), false);
   assert.equal(isActiveOrder(makeOrder({ expiresAt: Math.floor(now / 1000) - 1 }), now), false);
+  assert.equal(isUnsettledOrder(makeOrder({ expiresAt: Math.floor(now / 1000) - 1 })), true);
+  assert.equal(isOrderCreationBlocked({ order: makeOrder({ expiresAt: Math.floor(now / 1000) - 1 }), creationAttempt: null }, now), true);
   assert.equal(isUncertainCreateBlocked(makeCreationAttempt('bundle_basic_cny', now), now), true);
   assert.equal(isUncertainCreateBlocked(makeCreationAttempt('bundle_basic_cny', now - 25 * 60 * 60 * 1000), now), false);
   persistCreationAttempt(null);
@@ -94,6 +104,27 @@ test('only the current order ID and operation generation may apply a terminal re
   assert.equal(isCurrentOrderOperation(current, 2, 'bo_old', 2), false);
   assert.equal(isCurrentOrderOperation(current, 2, 'bo_new', 1), false);
   assert.equal(isCurrentOrderOperation(null, 2, 'bo_new', 2), false);
+});
+
+test('invalid expiry still allows server reconciliation but blocks another order', (t) => {
+  installStorage(t);
+  persistRechargeOrder(makeOrder({ expiresAt: 0 }));
+  const recovered = loadRechargeRecovery();
+  assert.equal(recovered.invalidOrder, false);
+  assert.ok(recovered.order);
+  assert.equal(isOrderExpired(recovered.order.expiresAt), true);
+  assert.equal(isActiveOrder(recovered.order), false);
+  assert.equal(isUnsettledOrder(recovered.order), true);
+  assert.equal(isOrderCreationBlocked(recovered), true);
+});
+
+test('invalid creation-attempt recovery data fails closed', (t) => {
+  const values = installStorage(t);
+  values.set('idbots.mobile.bundleCreateAttempt.v1', '{invalid');
+  const recovered = loadRechargeRecovery();
+  assert.equal(recovered.creationAttempt, null);
+  assert.equal(recovered.invalidCreationAttempt, true);
+  assert.equal(isOrderCreationBlocked(recovered), true);
 });
 
 test('only an authoritative business rejection can clear an uncertain create attempt', () => {

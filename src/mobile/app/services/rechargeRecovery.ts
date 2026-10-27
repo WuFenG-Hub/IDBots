@@ -18,6 +18,8 @@ export interface RechargeCreationAttempt {
 export interface RechargeRecoveryState {
   order: RechargeOrderView | null;
   creationAttempt: RechargeCreationAttempt | null;
+  invalidOrder: boolean;
+  invalidCreationAttempt: boolean;
 }
 
 const ORDER_KEY = 'idbots.mobile.bundleOrder.v1';
@@ -30,6 +32,20 @@ export function isOrderExpired(expiresAt: number, nowMs: number = Date.now()): b
 
 export function isActiveOrder(order: RechargeOrderView | null, nowMs: number = Date.now()): boolean {
   return Boolean(order && (order.status === 1 || order.status === 2) && !isOrderExpired(order.expiresAt, nowMs));
+}
+
+export function isUnsettledOrder(order: RechargeOrderView | null): boolean {
+  return Boolean(order && (order.status === 1 || order.status === 2));
+}
+
+export function isOrderCreationBlocked(input: {
+  order: RechargeOrderView | null;
+  creationAttempt: RechargeCreationAttempt | null;
+  invalidOrder?: boolean;
+  invalidCreationAttempt?: boolean;
+}, nowMs: number = Date.now()): boolean {
+  if (input.invalidOrder || input.invalidCreationAttempt) return true;
+  return isUnsettledOrder(input.order) || isUncertainCreateBlocked(input.creationAttempt, nowMs);
 }
 
 export function isUncertainCreateBlocked(attempt: RechargeCreationAttempt | null, nowMs: number = Date.now()): boolean {
@@ -68,16 +84,16 @@ function normalizeOrder(value: unknown): RechargeOrderView | null {
   if (!isRecord(value)) return null;
   if (typeof value.orderId !== 'string' || !value.orderId.trim()) return null;
   if (typeof value.qrCode !== 'string') return null;
-  if (typeof value.expiresAt !== 'number' || !Number.isFinite(value.expiresAt) || value.expiresAt <= 0) return null;
   if (typeof value.createdAtMs !== 'number' || !Number.isFinite(value.createdAtMs) || value.createdAtMs <= 0) return null;
   if (![1, 2, 3, 4].includes(Number(value.status))) return null;
   const plan = normalizePlan(value.plan);
   if (!plan) return null;
+  const expiresAt = typeof value.expiresAt === 'number' && Number.isFinite(value.expiresAt) ? value.expiresAt : 0;
   return {
     orderId: value.orderId,
     qrCode: value.qrCode,
     plan,
-    expiresAt: value.expiresAt,
+    expiresAt,
     status: Number(value.status),
     createdAtMs: value.createdAtMs,
   };
@@ -91,13 +107,19 @@ function normalizeAttempt(value: unknown): RechargeCreationAttempt | null {
   return { planId: value.planId, startedAtMs: value.startedAtMs, retryAfterMs: value.retryAfterMs };
 }
 
-function readJson(key: string): unknown {
+function readJson(key: string): { present: boolean; value: unknown; invalid: boolean } {
   try {
     const raw = window.localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return { present: false, value: null, invalid: false };
+    try {
+      return { present: true, value: JSON.parse(raw), invalid: false };
+    } catch (error) {
+      console.warn(`[mobile-recharge] could not parse ${key}`, error);
+      return { present: true, value: null, invalid: true };
+    }
   } catch (error) {
     console.warn(`[mobile-recharge] could not read ${key}`, error);
-    return null;
+    return { present: true, value: null, invalid: true };
   }
 }
 
@@ -110,9 +132,15 @@ function writeJson(key: string, value: unknown): void {
 }
 
 export function loadRechargeRecovery(): RechargeRecoveryState {
+  const orderRead = readJson(ORDER_KEY);
+  const attemptRead = readJson(CREATE_ATTEMPT_KEY);
+  const order = normalizeOrder(orderRead.value);
+  const creationAttempt = normalizeAttempt(attemptRead.value);
   return {
-    order: normalizeOrder(readJson(ORDER_KEY)),
-    creationAttempt: normalizeAttempt(readJson(CREATE_ATTEMPT_KEY)),
+    order,
+    creationAttempt,
+    invalidOrder: orderRead.present && (orderRead.invalid || !order),
+    invalidCreationAttempt: attemptRead.present && (attemptRead.invalid || !creationAttempt),
   };
 }
 

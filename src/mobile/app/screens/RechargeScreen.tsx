@@ -3,7 +3,7 @@ import { useEffect } from 'react';
 import { t } from '../../i18n';
 import type { BundlePlan } from '../../bridge/types';
 import { useRecharge } from '../hooks/useRecharge';
-import { isActiveOrder } from '../services/rechargeRecovery';
+import { isUnsettledOrder } from '../services/rechargeRecovery';
 import { formatBytes, formatCount } from '../format';
 import { Section } from '../components/Section';
 import { QrCanvas } from './recharge/QrCanvas';
@@ -48,7 +48,7 @@ function StatusMessage(props: { degraded: boolean; timedOut: boolean; onCheck: (
 export default function RechargeScreen(props: { onClose: () => void; onMetersUpdated?: () => void }): JSX.Element {
   const recharge = useRecharge(() => props.onMetersUpdated?.());
   const { stage, order, alipayOpen, meters } = recharge;
-  const activeOrder = isActiveOrder(order);
+  const pendingOrder = isUnsettledOrder(order);
 
   useEffect(() => {
     if (stage === 'paying' && order?.qrCode) recharge.openAlipayApp();
@@ -80,7 +80,7 @@ export default function RechargeScreen(props: { onClose: () => void; onMetersUpd
 
         {stage === 'plans' || stage === 'error' ? (
           <div className="space-y-3">
-            {activeOrder && order ? (
+            {pendingOrder && order ? (
               <div className="rounded-2xl border border-[var(--color-primary)] bg-[var(--bg-panel)] p-4" data-testid="recharge-pending-order">
                 <p className="text-sm font-semibold text-[var(--text-primary)]">{t('mobile.recharge.pendingTitle')}</p>
                 <p className="mt-1 text-xs text-[var(--text-secondary)]">
@@ -153,9 +153,11 @@ export default function RechargeScreen(props: { onClose: () => void; onMetersUpd
           <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4" data-testid="recharge-uncertain">
             <p className="text-sm font-semibold text-amber-800">{t('mobile.recharge.uncertainTitle')}</p>
             <p className="mt-2 text-sm text-amber-800">
-              {t(order ? 'mobile.recharge.uncertainOrderBody' : 'mobile.recharge.uncertainCreateBody', {
-                time: recharge.creationAttempt ? new Date(recharge.creationAttempt.retryAfterMs).toLocaleString() : '',
-              })}
+              {recharge.invalidRecovery
+                ? t('mobile.recharge.invalidRecoveryBody')
+                : t(order ? 'mobile.recharge.uncertainOrderBody' : 'mobile.recharge.uncertainCreateBody', {
+                  time: recharge.creationAttempt ? new Date(recharge.creationAttempt.retryAfterMs).toLocaleString() : '',
+                })}
             </p>
             {order ? <StatusMessage degraded={recharge.pollingDegraded} timedOut={recharge.pollTimedOut} onCheck={recharge.checkStatus} /> : null}
             <button

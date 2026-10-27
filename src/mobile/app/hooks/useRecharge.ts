@@ -5,8 +5,10 @@ import {
   isActiveOrder,
   isCurrentOrderOperation,
   isDefinitiveCreateRejection,
+  isOrderCreationBlocked,
   isOrderExpired,
   isUncertainCreateBlocked,
+  isUnsettledOrder,
   loadRechargeRecovery,
   makeCreationAttempt,
   persistCreationAttempt,
@@ -25,8 +27,14 @@ const POLL_INTERVAL_MS = 4_000;
 const POLL_BUDGET_MS = 10 * 60_000;
 const APP_OPEN_GRACE_MS = 1_800;
 
-function initialStage(order: RechargeOrderView | null, attempt: RechargeCreationAttempt | null): RechargeStage {
-  if (isActiveOrder(order)) return order?.qrCode ? 'paying' : 'uncertain';
+function initialStage(
+  order: RechargeOrderView | null,
+  attempt: RechargeCreationAttempt | null,
+  invalidOrder: boolean,
+  invalidCreationAttempt: boolean,
+): RechargeStage {
+  if (invalidOrder || invalidCreationAttempt) return 'uncertain';
+  if (isUnsettledOrder(order)) return isActiveOrder(order) && order?.qrCode ? 'paying' : 'uncertain';
   if (order?.status === 3) return 'success';
   if (order?.status === 4) return 'closed';
   if (order && isOrderExpired(order.expiresAt)) return 'expired';
@@ -40,6 +48,7 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
   stage: RechargeStage;
   order: RechargeOrderView | null;
   creationAttempt: RechargeCreationAttempt | null;
+  invalidRecovery: boolean;
   creationBlocked: boolean;
   alipayOpen: AlipayOpenState;
   buying: boolean;
@@ -62,7 +71,13 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
   const [meters, setMeters] = useState<BundleMeters | null>(null);
   const [order, setOrder] = useState<RechargeOrderView | null>(initialRecovery.order);
   const [creationAttempt, setCreationAttempt] = useState<RechargeCreationAttempt | null>(initialRecovery.creationAttempt);
-  const [stage, setStage] = useState<RechargeStage>(() => initialStage(initialRecovery.order, initialRecovery.creationAttempt));
+  const invalidRecovery = initialRecovery.invalidOrder || initialRecovery.invalidCreationAttempt;
+  const [stage, setStage] = useState<RechargeStage>(() => initialStage(
+    initialRecovery.order,
+    initialRecovery.creationAttempt,
+    initialRecovery.invalidOrder,
+    initialRecovery.invalidCreationAttempt,
+  ));
   const [alipayOpen, setAlipayOpen] = useState<AlipayOpenState>('opening');
   const [buying, setBuying] = useState(false);
   const [plansError, setPlansError] = useState(false);
@@ -155,29 +170,37 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
     const current = orderRef.current;
     if (!current || pollInFlightRef.current) return;
     const expectedGeneration = generationRef.current;
-    if (isOrderExpired(current.expiresAt)) {
-      stopPolling();
-      stopAppOpenWatch();
-      setStage('expired');
-      return;
-    }
+    const expiredLocally = isOrderExpired(current.expiresAt);
     pollInFlightRef.current = true;
     try {
       const result = await getMobileElectron().bundle.getOrder({ orderId: current.orderId });
       if (!result?.success || !result.order) throw new Error('order status unavailable');
       if (generationRef.current !== expectedGeneration) return;
       if (result.order.orderId !== current.orderId) throw new Error('order status identity mismatch');
+      if (![1, 2, 3, 4].includes(result.order.status)) throw new Error('order status value is invalid');
       if (result.order.status === 3 || result.order.status === 4) {
         finishWithStatus(current.orderId, expectedGeneration, result.order.status);
       } else {
         const latest = orderRef.current;
         if (latest?.orderId === current.orderId && generationRef.current === expectedGeneration) {
           commitOrder({ ...latest, status: result.order.status });
+          if (expiredLocally) {
+            stopPolling();
+            stopAppOpenWatch();
+            setStage('uncertain');
+          }
         }
       }
       if (generationRef.current === expectedGeneration) setPollingDegraded(false);
     } catch {
-      if (generationRef.current === expectedGeneration) setPollingDegraded(true);
+      if (generationRef.current === expectedGeneration) {
+        setPollingDegraded(true);
+        if (expiredLocally) {
+          stopPolling();
+          stopAppOpenWatch();
+          setStage('uncertain');
+        }
+      }
     } finally {
       pollInFlightRef.current = false;
     }
@@ -201,7 +224,7 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
   useEffect(() => {
     void refreshPlans();
     void refreshMeters();
-    if (isActiveOrder(orderRef.current)) startPolling();
+    if (isUnsettledOrder(orderRef.current)) startPolling();
   }, [refreshMeters, refreshPlans, startPolling]);
 
   useEffect(() => {
@@ -209,7 +232,7 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
       if (document.visibilityState !== 'visible') return;
       void refreshPlans();
       void refreshMeters();
-      if (isActiveOrder(orderRef.current)) startPolling();
+      if (isUnsettledOrder(orderRef.current)) startPolling();
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => {
@@ -223,21 +246,25 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
     if (state !== 'online') return;
     void refreshPlans();
     void refreshMeters();
-    if (isActiveOrder(orderRef.current)) startPolling();
+    if (isUnsettledOrder(orderRef.current)) startPolling();
   }), [refreshMeters, refreshPlans, startPolling]);
 
   const resumeOrder = useCallback(() => {
     const current = orderRef.current;
-    if (!isActiveOrder(current)) return;
+    if (!isUnsettledOrder(current)) return;
     setActionError(null);
-    setStage(current?.qrCode ? 'paying' : 'uncertain');
+    setStage(isActiveOrder(current) && current?.qrCode ? 'paying' : 'uncertain');
     setAlipayOpen('opening');
     startPolling();
   }, [startPolling]);
 
   const selectPlan = useCallback(
     async (planId: string) => {
-      if (isActiveOrder(orderRef.current)) {
+      if (invalidRecovery) {
+        setStage('uncertain');
+        return;
+      }
+      if (isUnsettledOrder(orderRef.current)) {
         resumeOrder();
         return;
       }
@@ -301,7 +328,7 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
         setBuying(false);
       }
     },
-    [commitAttempt, commitOrder, plans, resumeOrder, startPolling],
+    [commitAttempt, commitOrder, invalidRecovery, plans, resumeOrder, startPolling],
   );
 
   const openAlipayApp = useCallback(() => {
@@ -344,7 +371,8 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
     stage,
     order,
     creationAttempt,
-    creationBlocked: isActiveOrder(order) || isUncertainCreateBlocked(creationAttempt),
+    invalidRecovery,
+    creationBlocked: isOrderCreationBlocked({ order, creationAttempt, invalidOrder: invalidRecovery }),
     alipayOpen,
     buying,
     plansError,
@@ -357,7 +385,7 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
     checkStatus: () => {
       void refreshPlans();
       void refreshMeters();
-      if (isActiveOrder(orderRef.current)) startPolling();
+      if (isUnsettledOrder(orderRef.current)) startPolling();
     },
     openAlipayApp,
     openInBrowser,
