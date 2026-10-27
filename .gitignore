@@ -713,6 +713,8 @@ deploy/hosts/prometheus.yml
 # WS-E mobile client (T1 mock bridge + i18n static checks)
 !tests/mobileMockBridge.test.ts
 !tests/mobileI18nStatic.test.mjs
+!tests/mobileBuildFlags.test.mjs
+!tests/mobileE2eRunnerArgs.test.mjs
 
 # WS-E login API seam tests
 !tests/mobileLoginApi.test.ts

@@ -1,3 +1,5 @@
+import { MOCK_LOGIN_API } from './buildFlags';
+
 /**
  * Standalone mobile i18n service (REQ-E-18).
  *
@@ -14,21 +16,6 @@
 export type MobileLanguage = 'zh' | 'en';
 
 type MobileDictionary = Record<string, string>;
-
-/**
- * Login-demo mock switch, mirroring loginApi.ts: `true` only with
- * `VITE_MOBILE_MOCK=1` outside production builds. `import.meta.env.PROD`
- * folds production copy away; the process fallback supports node tests, and
- * `typeof process` guards keep real Vite dev-server execution safe in the
- * browser where no Node global exists.
- */
-const IS_PRODUCTION_BUILD =
-  (import.meta as { env?: { PROD?: boolean } }).env?.PROD ??
-  (typeof process !== 'undefined' && process.env.NODE_ENV === 'production');
-const MOCK_LOGIN_API =
-  !IS_PRODUCTION_BUILD &&
-  ((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_MOBILE_MOCK === '1' ||
-    (typeof process !== 'undefined' && process.env.VITE_MOBILE_MOCK === '1'));
 
 /**
  * Demo notice values (mobile.login.demoNote). Defined as constants so

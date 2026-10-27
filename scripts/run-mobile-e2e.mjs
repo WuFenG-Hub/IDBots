@@ -9,6 +9,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getMobileE2eArgs } from './mobile-e2e-args.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = process.env.E2E_PORT || '5196';
@@ -74,7 +75,7 @@ async function main() {
     await waitForServer(BASE_URL);
     console.log(`[mobile-e2e] dev server up at ${BASE_URL} (mock bridge)`);
 
-    const playwrightArgs = ['test', '--grep-invert', '@gateway', ...process.argv.slice(2)];
+    const playwrightArgs = ['test', '--grep-invert', '@gateway', ...getMobileE2eArgs()];
     const run = spawn(process.execPath, [playwrightCli, ...playwrightArgs], {
       cwd: repoRoot,
       env: { ...process.env, E2E_BASE_URL: BASE_URL },

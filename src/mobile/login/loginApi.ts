@@ -1,3 +1,5 @@
+import { MOCK_LOGIN_API } from '../buildFlags';
+
 /**
  * Login API seam (C3 control-plane auth endpoints).
  *
@@ -77,21 +79,6 @@ export interface AccountDeletionResult {
 interface ApiErrorBody {
   error?: { code?: string; message?: string };
 }
-
-/**
- * Mock-mode switch (REQ-E-8). `true` only with `VITE_MOBILE_MOCK=1` outside
- * production builds. `import.meta.env.PROD` lets Vite fold production mock
- * branches away; the process fallback keeps the node test runner working.
- * `typeof process` guards also make real Vite dev-server operation safe when
- * no Node global exists in the browser.
- */
-const IS_PRODUCTION_BUILD =
-  (import.meta as { env?: { PROD?: boolean } }).env?.PROD ??
-  (typeof process !== 'undefined' && process.env.NODE_ENV === 'production');
-const MOCK_LOGIN_API =
-  !IS_PRODUCTION_BUILD &&
-  ((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_MOBILE_MOCK === '1' ||
-    (typeof process !== 'undefined' && process.env.VITE_MOBILE_MOCK === '1'));
 
 function errorWithCode(code: string): Error & { code: string } {
   const error = new Error(`loginApi: ${code}`) as Error & { code: string };
