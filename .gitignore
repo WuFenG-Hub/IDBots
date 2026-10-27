@@ -123,6 +123,7 @@ tests/*
 !tests/agentGameCursorStateHeal.test.mjs
 !tests/dshKernelRuntime.test.mjs
 !tests/dshDeepseekToolInputRepair.test.mjs
+!tests/dshCompactionOverflowShrink.test.mjs
 !tests/dshRuntimeConfigEfforts.test.mjs
 !tests/dshRuntimeGlmResponsesBoot.test.mjs
 !tests/dshRuntimeOpencodeSessionHeaders.test.mjs

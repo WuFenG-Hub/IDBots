@@ -187,6 +187,44 @@ optional `onToolInputRepaired` dependency (wired to `ctx.logger.warn` in
 adapter's public types declare the new optional dependency. Regression
 test: `tests/dshDeepseekToolInputRepair.test.mjs`.
 
+### `@deepseek-ai+dsh-compaction-basic+0.2.1-rc.2.patch`
+
+Context-overflow recovery can now succeed on the route that overflowed.
+Upstream's `agent/request-error` handler reacts to a `CONTEXT_WINDOW_EXCEEDED`
+request failure by compacting once with `retainTokens: 0`, i.e. the region to
+summarize is the whole surface minus its last node — and `summarizeWithLlm`
+replays that region as the request prefix (system prompt, tools, region
+messages, then the compaction instruction) on the same provider/model that
+just rejected the request. A summary request sized like the request that
+overflowed is rejected the same way, so the recovery fails deterministically,
+the turn dies with the original 400, and the next turn repeats the cycle.
+
+Incident (2026-10-27, session `cw-2c70849f`, Command Code gateway route
+`commandcode/z-ai/glm-5.3-flash`, declared 1,048,576 window): the gateway
+refuses to start a request above roughly 720K upstream-counted tokens
+(`400 context_length_exceeded`, "The prompt exceeds the context window this
+endpoint can start from. Compact the conversation and retry.") — accepted
+cold starts up to 623,755 and a warm continuation at 716,532, rejected at
+~730K. The kernel's proactive threshold for that route was 838,860, so
+pressure compaction never fired; turns 182/184/186 each died with the request
+400 followed two seconds later by the identical compaction 400. Only the
+host's fallback-brain switch (DeepSeek, 1M real window) carried the turns,
+and the session recovered only when DeepSeek's own pressure compaction ran.
+
+The patch keeps the first attempt unchanged and adds a shrink ladder: when the
+summarization itself fails with a context-window overflow (`code ===
+CONTEXT_WINDOW_EXCEEDED` on the cause chain, or overflow wording in the
+rendered chain), `overflowShrinkRetainTokens` computes the retained-tail budget
+whose `selectCompactableRange` result is the OLDER half of the region (tail +
+newer half retained verbatim), re-measures, and retries — up to four rungs
+(1/2, 1/4, 1/8, 1/16). A successful rung replaces only the older span with a
+checkpoint, after which the kernel's existing `{ kind: "retry" }` resends the
+request against the shrunken surface. Non-overflow errors, cancellation, and
+an unshrinkable (single-node) region rethrow immediately so the original
+request error is preserved exactly as upstream does. The two helpers are
+exported for the regression test `tests/dshCompactionOverflowShrink.test.mjs`,
+which drives the real patched engine with a stubbed `compactRegion`.
+
 ## Adding / rebasing a patch
 
 1. Edit the installed file under `dsh-runtime/node_modules/<pkg>/` directly.

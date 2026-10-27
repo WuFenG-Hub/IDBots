@@ -96,6 +96,22 @@
           "count": 1
         }
       ]
+    },
+    {
+      "patch": "@deepseek-ai+dsh-compaction-basic+0.2.1-rc.2.patch",
+      "why": "context-overflow recovery shrinks the summarized region (older half per rung) when the summarization request itself overflows the route's context window — without it a provider whose real prompt cap sits below the declared window (Command Code GLM, 2026-10-27 session 2c70849f) fails every turn with the same 400 and only a fallback brain on another provider can compact",
+      "targets": [
+        {
+          "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js",
+          "match": "IDBots patch (overflow-shrink)",
+          "count": 4
+        },
+        {
+          "file": "dsh-runtime/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js",
+          "match": "overflowShrinkRetainTokens(measurement, range, retainTokens)",
+          "count": 2
+        }
+      ]
     }
   ]
 }
