@@ -1098,7 +1098,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
             qrCode: `https://qr.alipay.com/mock?id=${plan.planId}&n=${orderSeq}`,
             alipayOutTradeNo: `mock-out-${orderSeq}`,
           },
-          expiresAt: createdAt + 15 * 60 * 1000,
+          expiresAt: Math.floor(createdAt / 1000) + 15 * 60,
           createdAt,
         };
         orders.set(order.orderId, order);
@@ -1107,8 +1107,8 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
         later(() => {
           if (destroyed) return;
           order.status = 3;
-          order.paidAt = order.createdAt + orderCompleteDelayMs;
-          order.creditedAt = now();
+          order.paidAt = Math.floor((order.createdAt + orderCompleteDelayMs) / 1000);
+          order.creditedAt = Math.floor(now() / 1000);
           meters.traffic.balanceBytes += order.trafficBytes;
           meters.traffic.grantedBytesTotal += order.trafficBytes;
           meters.llm.quotaTotal += order.llmQuota;
@@ -1120,7 +1120,9 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     getOrder: (input: { orderId: string }) =>
       guardOnline(async () => {
         const order = orders.get(input?.orderId);
-        return order ? { success: true, order: { ...order } } : { success: false, error: 'order not found' };
+        if (!order) return { success: false, error: 'order not found' };
+        const { gatewayParams: _gatewayParams, expiresAt: _expiresAt, createdAt: _createdAt, ...status } = order;
+        return { success: true, order: status };
       }),
     getMeters: () =>
       guardOnline(async () => ({

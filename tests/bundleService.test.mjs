@@ -225,6 +225,11 @@ test('stub getMeters reflects credited purchases without exposing any key', asyn
   assert.equal(after.llm.quotaTotal, after.llm.quotaFree + after.llm.quotaPurchased);
   assert.equal(after.llm.quotaRemaining, after.llm.quotaTotal - after.llm.quotaUsed);
   assert.ok(!JSON.stringify(after).includes('apiKey'));
+
+  await getBundleOrder({ orderId: order.orderId });
+  await getBundleOrder({ orderId: order.orderId });
+  const repeated = await getBundleMeters();
+  assert.deepEqual(repeated.llm, after.llm, 'repeated order polls must not credit the plan again');
 });
 
 // ---------------------------------------------------------------------------
@@ -335,14 +340,19 @@ test('getMeters rebuilds the C4 quota shape and never exposes an API key', async
     spentBytesTotal: 0,
     status: 1,
   };
+  let trafficOptions;
   const restore = initService({
     baseUrl: 'https://bundle.test',
     fetchImpl,
-    getTrafficBalanceImpl: async () => trafficRecord,
+    getTrafficBalanceImpl: async (options) => {
+      trafficOptions = options;
+      return trafficRecord;
+    },
   });
   t.after(restore);
 
   const meters = await getBundleMeters();
+  assert.deepEqual(trafficOptions, { forceRefresh: true });
   assert.deepEqual(meters.traffic, trafficRecord);
   assert.deepEqual(meters.llm, {
     quotaTotal: 2100000,

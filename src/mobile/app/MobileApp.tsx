@@ -50,6 +50,7 @@ function TabFallback(): JSX.Element {
 export default function MobileApp(): JSX.Element {
   const [tab, setTab] = useState<MobileTab>(readActiveTab);
   const [rechargeOpen, setRechargeOpen] = useState(false);
+  const [billingRevision, setBillingRevision] = useState(0);
   useEffect(() => {
     try {
       window.localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, tab);
@@ -148,7 +149,7 @@ export default function MobileApp(): JSX.Element {
         ) : null}
         {tab === 'me' ? (
           <Suspense fallback={<TabFallback />}>
-            <MeScreen resyncCounter={resyncCounter} onOpenRecharge={() => setRechargeOpen(true)} />
+            <MeScreen resyncCounter={resyncCounter + billingRevision} onOpenRecharge={() => setRechargeOpen(true)} />
           </Suspense>
         ) : null}
       </div>
@@ -156,7 +157,7 @@ export default function MobileApp(): JSX.Element {
       {rechargeOpen ? (
         <div className="fixed inset-0 z-50">
           <Suspense fallback={<TabFallback />}>
-            <RechargeScreen onClose={() => setRechargeOpen(false)} />
+            <RechargeScreen onClose={() => setRechargeOpen(false)} onMetersUpdated={() => setBillingRevision((value) => value + 1)} />
           </Suspense>
         </div>
       ) : null}

@@ -34,4 +34,21 @@ test.describe('recharge', () => {
     await page.getByRole('button', { name: 'Done' }).click();
     await expect(page.getByText('Balance')).toBeVisible();
   });
+
+  test('quota exhaustion → credited order → next message works', async ({ page }, testInfo) => {
+    await page.goto('/app/');
+    await page.getByPlaceholder('Type a message…').fill('check my quota');
+    await page.getByRole('button', { name: 'Send' }).click();
+    const quotaCard = page.getByTestId('quota-card');
+    await expect(quotaCard).toBeVisible({ timeout: 30_000 });
+    await quotaCard.getByRole('button', { name: 'Recharge' }).click();
+
+    await page.getByRole('button', { name: /CNY 129\.00/ }).click();
+    await expect(page.getByTestId('recharge-success')).toBeVisible({ timeout: 45_000 });
+    await page.getByRole('button', { name: 'Done' }).click();
+    await page.getByPlaceholder('Type a message…').fill('next message after recharge');
+    await page.getByRole('button', { name: 'Send' }).click();
+    await expect(page.getByText(/Every reply in this demo is streamed/)).toBeVisible({ timeout: 30_000 });
+    await attachScreen(testInfo, page, 'recharge-next-message-works');
+  });
 });

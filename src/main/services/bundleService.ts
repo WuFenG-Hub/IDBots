@@ -619,15 +619,16 @@ export async function getBundleOrder(input: { orderId?: unknown }): Promise<Bund
 /**
  * Combined meters for the mobile recharge screen: the public traffic account
  * record (null when the traffic service is unavailable) plus the identity's
- * C4 LLM quota. The traffic half degrades to null instead of failing the
- * whole read; the LLM half is stubbed in stub mode.
+ * C4 LLM quota. Both halves bypass cached snapshots so a credited order is
+ * visible immediately. The traffic half degrades to null instead of failing
+ * the whole read; the LLM half is stubbed in stub mode.
  */
 export async function getBundleMeters(): Promise<BundleMeters> {
   const deps = getDeps();
   let traffic: TrafficAccountRecord | null = null;
   try {
     const readTraffic = deps.getTrafficBalanceImpl ?? getTrafficBalance;
-    traffic = await readTraffic();
+    traffic = await readTraffic({ forceRefresh: true });
   } catch {
     traffic = null;
   }

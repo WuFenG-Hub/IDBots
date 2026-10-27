@@ -45,7 +45,7 @@ function Segmented<T extends string>(props: {
 }
 
 function BalanceCard(props: { onOpenRecharge: () => void; resyncCounter?: number }): JSX.Element {
-  const { meters } = useMeters(props.resyncCounter);
+  const { meters, loading, error, reload } = useMeters(props.resyncCounter);
   return (
     <Section title={t('mobile.me.balanceTitle')}>
       <div className="mb-3 flex gap-3">
@@ -62,6 +62,15 @@ function BalanceCard(props: { onOpenRecharge: () => void; resyncCounter?: number
           </p>
         </div>
       </div>
+      {loading ? <p className="mb-2 text-xs text-[var(--text-secondary)]">{t('mobile.common.loading')}</p> : null}
+      {error ? (
+        <div className="mb-2 flex items-center justify-between gap-2" data-testid="balance-load-error">
+          <p className="text-xs text-red-600">{t('mobile.me.balanceLoadFailed')}</p>
+          <button type="button" onClick={() => void reload()} className="min-h-[44px] px-2 text-xs text-[var(--text-primary)]">
+            {t('mobile.common.retry')}
+          </button>
+        </div>
+      ) : null}
       <div className="flex gap-2">
         <button
           type="button"
