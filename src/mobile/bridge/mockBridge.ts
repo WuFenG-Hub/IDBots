@@ -42,10 +42,10 @@ import type {
   MetabotUpdateInput,
   MobileMockBridge,
   MobileMockCoworkStreamChannel,
+  MobileMetabot,
   MockBridgeOptions,
   MockBundleOrder,
   MockElectronAPI,
-  MockMetabot,
   MockSkill,
   OfflineError,
   PendingPermissionRequest,
@@ -160,6 +160,8 @@ interface MockCoworkSession {
   createdAt: number;
   updatedAt: number;
   metabotId: number | null;
+  model: string | null;
+  modelProvider: string | null;
   sessionType: 'standard' | 'longterm';
   autoOrigin: 'schedule' | null;
 }
@@ -277,10 +279,17 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     };
   }
 
+  function mockBotBrain(metabotId: number | null | undefined): { model: string | null; modelProvider: string | null } {
+    const bot = metabotFixtures.find((entry) => entry.id === metabotId);
+    return { model: bot?.llm_id ?? null, modelProvider: bot?.llm_provider ?? null };
+  }
+
   function createSession(input: {
     title: string;
     prompt: string;
     metabotId?: number | null;
+    model?: string | null;
+    modelProvider?: string | null;
     autoOrigin?: MockCoworkSession['autoOrigin'];
     sessionType?: MockCoworkSession['sessionType'];
   }): MockCoworkSession {
@@ -299,6 +308,8 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       createdAt: ts,
       updatedAt: ts,
       metabotId: input.metabotId ?? null,
+      model: input.model ?? null,
+      modelProvider: input.modelProvider ?? null,
       sessionType: input.sessionType ?? 'standard',
       autoOrigin: input.autoOrigin ?? null,
     };
@@ -490,6 +501,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
           title: input.title || 'Welcome',
           prompt: '',
           metabotId: input.metabotId,
+          ...mockBotBrain(input.metabotId),
         });
         session.status = 'completed';
         session.messages.push({
@@ -501,12 +513,15 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
         });
         return { success: true, session: { ...session, messages: [...session.messages] } };
       }),
-    startSession: (input: { prompt?: string; title?: string; metabotId?: number | null }) =>
+    startSession: (input: { prompt?: string; title?: string; metabotId?: number | null; model?: string | null; modelProvider?: string | null }) =>
       guardOnline(async () => {
+        const brain = mockBotBrain(input?.metabotId);
         const session = createSession({
           title: input?.title || 'Mock chat',
           prompt: input?.prompt || '',
           metabotId: input?.metabotId ?? null,
+          model: input?.model === undefined ? brain.model : input.model,
+          modelProvider: input?.modelProvider === undefined ? brain.modelProvider : input.modelProvider,
         });
         const text = input?.prompt || '';
         if (text) pushUserMessage(session, text);
@@ -1141,7 +1156,20 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       {
         language: 'en',
         theme: 'system',
-        providers: {},
+        providers: {
+          'metaid-free': {
+            enabled: true,
+            apiKey: '__redacted__',
+            baseUrl: 'https://mock.invalid/relay',
+            apiFormat: 'openai',
+            name: 'IDBots-Free',
+            models: [
+              { id: 'deepseek-flash', name: 'DeepSeek Flash', contextWindow: 1000000, maxOutputTokens: 100000 },
+              { id: 'glm-flash', name: 'GLM Flash', contextWindow: 128000, maxOutputTokens: 32768 },
+            ],
+          },
+        },
+        model: { defaultProvider: 'metaid-free', defaultModel: 'deepseek-flash' },
         memoryEnabled: true,
       },
     ],
@@ -1193,7 +1221,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     return 'en';
   };
 
-  const metabotFixtures: MockMetabot[] = [
+  const metabotFixtures: MobileMetabot[] = [
     {
       id: 1,
       wallet_id: 1,
@@ -1209,10 +1237,17 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       background: null,
       boss_id: null,
       boss_global_metaid: null,
-      llm_id: null,
+      llm_id: 'deepseek-flash',
+      llm_provider: 'metaid-free',
+      llm_effort: null,
+      mvc_address: 'mock-mvc-twin',
+      metabot_info_pinid: 'mock-info-twin',
+      chain_sync_state: 'synced',
+      chain_sync_pending_steps: [],
+      subsidy_state: 'claimed',
       tools: [],
       skills: ['web-search'],
-      allow_chat_skills: [],
+      allow_chat_skills: ['web-search'],
       created_at: bootAt,
       updated_at: bootAt,
     },
@@ -1231,10 +1266,17 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       background: null,
       boss_id: null,
       boss_global_metaid: null,
-      llm_id: null,
+      llm_id: 'deepseek-flash',
+      llm_provider: 'metaid-free',
+      llm_effort: null,
+      mvc_address: 'mock-mvc-worker',
+      metabot_info_pinid: 'mock-info-worker',
+      chain_sync_state: 'synced',
+      chain_sync_pending_steps: [],
+      subsidy_state: 'claimed',
       tools: [],
       skills: [],
-      allow_chat_skills: [],
+      allow_chat_skills: ['web-search'],
       created_at: bootAt,
       updated_at: bootAt,
     },
@@ -1258,7 +1300,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
           return { success: false, error: 'name is required' };
         }
         const ts = now();
-        const bot: MockMetabot = {
+        const bot: MobileMetabot = {
           id: ++metabotSeq,
           wallet_id: metabotSeq,
           name: input.name.trim(),
@@ -1274,6 +1316,13 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
           boss_id: input.boss_id ?? null,
           boss_global_metaid: input.boss_global_metaid ?? null,
           llm_id: input.llm_id ?? null,
+          llm_provider: input.llm_provider ?? null,
+          llm_effort: input.llm_effort ?? null,
+          mvc_address: `mock-mvc-${metabotSeq}`,
+          metabot_info_pinid: null,
+          chain_sync_state: 'partial',
+          chain_sync_pending_steps: ['name', 'chatpubkey', 'llm'],
+          subsidy_state: 'unknown',
           tools: [],
           skills: [],
           allow_chat_skills: input.allow_chat_skills ?? [],
@@ -1296,10 +1345,17 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
           if (typeof input.soul === 'string') bot.soul = input.soul;
           if (input.bio !== undefined) bot.bio = input.bio;
           if (input.goal !== undefined) bot.goal = input.goal;
+          if (input.llm_id !== undefined) bot.llm_id = input.llm_id;
+          if (input.llm_provider !== undefined) bot.llm_provider = input.llm_provider;
+          if (input.llm_effort !== undefined) bot.llm_effort = input.llm_effort;
+          if (input.allow_chat_skills !== undefined) bot.allow_chat_skills = [...input.allow_chat_skills];
           if (typeof input.enabled === 'boolean') bot.enabled = input.enabled;
         }
+        bot.metabot_info_pinid = bot.metabot_info_pinid ?? `mock-info-${bot.id}`;
+        bot.chain_sync_state = 'synced';
+        bot.chain_sync_pending_steps = [];
         bot.updated_at = now();
-        return { success: true, metabot: { ...bot } };
+        return { success: true, metabot: { ...bot }, sync: { skipped: false, success: true, syncedSteps: ['persona', 'llm', 'chatSkills'] } };
       }),
     setEnabled: (id: number, enabled: boolean) =>
       guardOnline(async () => {
@@ -1437,6 +1493,61 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
             mime: artifact?.mime ?? 'application/octet-stream',
           };
         }),
+    },
+    idbots: {
+      createMetaBotOnChain: (input: MetabotCreateInput) =>
+        guardOnline(async () => {
+          if (!input.llm_id) return { success: false, error: 'LLM Brain is required when creating a MetaBot' };
+          const createLocal = metabotImpl.create as (value: MetabotCreateInput) => Promise<{
+            success: boolean;
+            metabot?: MobileMetabot;
+            error?: string;
+          }>;
+          const created = await createLocal(input);
+          if (!created.success || !created.metabot) return created;
+          const createdBot = created.metabot;
+          const bot = metabotFixtures.find((entry) => entry.id === createdBot.id) ?? createdBot;
+          bot.metabot_info_pinid = `mock-info-${bot.id}`;
+          bot.chain_sync_state = 'synced';
+          bot.chain_sync_pending_steps = [];
+          bot.subsidy_state = 'claimed';
+          return { success: true, metabot: { ...bot }, subsidy: { success: true } };
+        }),
+      resumeMetabotSetup: (input: { metabotId: number; mode: 'subsidized' | 'self-funded' }) =>
+        guardOnline(async () => {
+          const bot = metabotFixtures.find((entry) => entry.id === input.metabotId);
+          if (!bot) return { success: false, mode: input.mode, error: 'metabot not found' };
+          bot.metabot_info_pinid = bot.metabot_info_pinid ?? `mock-info-${bot.id}`;
+          bot.chain_sync_state = 'synced';
+          bot.chain_sync_pending_steps = [];
+          bot.subsidy_state = 'claimed';
+          return {
+            success: true,
+            mode: input.mode,
+            metabot: { ...bot },
+            subsidy: { success: true },
+            chain: { success: true, txids: [`mock-resume-${bot.id}`] },
+          };
+        }),
+      syncMetaBot: (metabotId: number) =>
+        guardOnline(async () => {
+          const bot = metabotFixtures.find((entry) => entry.id === metabotId);
+          if (!bot) return { success: false, error: 'metabot not found' };
+          bot.metabot_info_pinid = bot.metabot_info_pinid ?? `mock-info-${bot.id}`;
+          bot.chain_sync_state = 'synced';
+          bot.chain_sync_pending_steps = [];
+          return { success: true, metabotInfoPinId: bot.metabot_info_pinid, txids: [`mock-sync-${bot.id}`] };
+        }),
+      getAddressBalance: (options?: { metabotId?: number }) =>
+        guardOnline(async () => ({
+          success: true,
+          balance: {
+            mvc: {
+              value: options?.metabotId ? 0.0002 : 0.001,
+              unit: 'MVC',
+            },
+          },
+        })),
     },
     metabot: metabotImpl,
     userIdentity: {

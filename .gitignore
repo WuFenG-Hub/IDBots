@@ -75,6 +75,7 @@ tests/*
 !tests/relayCatalogFreshness.test.mjs
 !tests/mobileSettings.test.ts
 !tests/mobileRechargeRecovery.test.ts
+!tests/mobileBotLifecycle.test.ts
 !tests/fixtures/
 !tests/agentGameConvergence.test.mjs
 !tests/fixtures/longTaskBoardSeed.mjs

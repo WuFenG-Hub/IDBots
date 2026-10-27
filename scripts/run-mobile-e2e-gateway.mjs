@@ -120,10 +120,17 @@ const metabots = [
     background: null,
     boss_id: null,
     boss_global_metaid: null,
-    llm_id: null,
+    llm_id: 'deepseek-flash',
+    llm_provider: 'metaid-free',
+    llm_effort: null,
+    mvc_address: 'gw-mvc-bot',
+    metabot_info_pinid: 'gw-info-bot',
+    chain_sync_state: 'synced',
+    chain_sync_pending_steps: [],
+    subsidy_state: 'claimed',
     tools: [],
     skills: ['web-search'],
-    allow_chat_skills: [],
+    allow_chat_skills: ['web-search'],
     created_at: 1,
     updated_at: 1,
   },
@@ -142,12 +149,44 @@ const metabots = [
     background: null,
     boss_id: null,
     boss_global_metaid: null,
-    llm_id: null,
+    llm_id: 'deepseek-flash',
+    llm_provider: 'metaid-free',
+    llm_effort: null,
+    mvc_address: 'gw-mvc-bot',
+    metabot_info_pinid: 'gw-info-bot',
+    chain_sync_state: 'synced',
+    chain_sync_pending_steps: [],
+    subsidy_state: 'claimed',
     tools: [],
     skills: [],
-    allow_chat_skills: [],
+    allow_chat_skills: ['web-search'],
     created_at: 1,
     updated_at: 1,
+  },
+];
+let metabotSeq = 2;
+const skillFixtures = [
+  {
+    id: 'web-search',
+    name: 'web-search',
+    description: 'Searches the web',
+    enabled: true,
+    isOfficial: true,
+    isBuiltIn: false,
+    updatedAt: 1,
+    prompt: '',
+    skillPath: '/data/appdata/SKILLs/web-search',
+  },
+  {
+    id: 'memory',
+    name: 'memory',
+    description: 'Long-term memory',
+    enabled: true,
+    isOfficial: true,
+    isBuiltIn: true,
+    updatedAt: 1,
+    prompt: '',
+    skillPath: '/data/appdata/SKILLs/memory',
   },
 ];
 
@@ -452,7 +491,25 @@ function startFixtureTurn(session, userText) {
 }
 
 const appConfigStore = {
-  app_config: { language: 'en', theme: 'system', providers: {}, memoryEnabled: true },
+  app_config: {
+    language: 'en',
+    theme: 'system',
+    providers: {
+      'metaid-free': {
+        enabled: true,
+        apiKey: 'gateway-fixture-relay-key',
+        baseUrl: 'https://gateway.fixture/relay',
+        apiFormat: 'openai',
+        name: 'IDBots-Free',
+        models: [
+          { id: 'deepseek-flash', name: 'DeepSeek Flash', contextWindow: 1000000, maxOutputTokens: 100000 },
+          { id: 'glm-flash', name: 'GLM Flash', contextWindow: 128000, maxOutputTokens: 32768 },
+        ],
+      },
+    },
+    model: { defaultProvider: 'metaid-free', defaultModel: 'deepseek-flash' },
+    memoryEnabled: true,
+  },
 };
 
 async function invokeHandler(channel, clientId, args) {
@@ -483,6 +540,8 @@ async function invokeHandler(channel, clientId, args) {
         createdAt: now,
         updatedAt: now,
         metabotId: options.metabotId ?? null,
+        model: options.model ?? metabots.find((bot) => bot.id === options.metabotId)?.llm_id ?? null,
+        modelProvider: options.modelProvider ?? metabots.find((bot) => bot.id === options.metabotId)?.llm_provider ?? null,
         sessionType: 'standard',
         autoOrigin: null,
       };
@@ -506,6 +565,8 @@ async function invokeHandler(channel, clientId, args) {
         createdAt: now,
         updatedAt: now,
         metabotId: options.metabotId ?? null,
+        model: options.model ?? metabots.find((bot) => bot.id === options.metabotId)?.llm_id ?? null,
+        modelProvider: options.modelProvider ?? metabots.find((bot) => bot.id === options.metabotId)?.llm_provider ?? null,
         sessionType: 'standard',
         autoOrigin: null,
       };
@@ -728,6 +789,85 @@ async function invokeHandler(channel, clientId, args) {
       const bot = metabots.find((entry) => entry.id === args[0]);
       return bot ? { success: true, metabot: { ...bot } } : { success: false, error: 'metabot not found' };
     }
+    case 'metabot:update': {
+      const bot = metabots.find((entry) => entry.id === args[0]);
+      if (!bot) return { success: false, error: 'metabot not found' };
+      const input = args[1] ?? {};
+      for (const key of ['name', 'role', 'soul', 'bio', 'goal', 'llm_id', 'llm_provider', 'llm_effort', 'allow_chat_skills', 'enabled']) {
+        if (Object.hasOwn(input, key) && input[key] !== undefined) bot[key] = input[key];
+      }
+      bot.metabot_info_pinid = bot.metabot_info_pinid ?? `gw-info-${bot.id}`;
+      bot.chain_sync_state = 'synced';
+      bot.chain_sync_pending_steps = [];
+      bot.updated_at = Date.now();
+      return { success: true, metabot: { ...bot }, sync: { skipped: false, success: true, syncedSteps: ['persona', 'llm', 'chatSkills'] } };
+    }
+    case 'metabot:setEnabled': {
+      const bot = metabots.find((entry) => entry.id === args[0]);
+      if (!bot) return { success: false, error: 'metabot not found' };
+      bot.enabled = Boolean(args[1]);
+      bot.updated_at = Date.now();
+      return { success: true, metabot: { ...bot } };
+    }
+    case 'idbots:createMetaBotOnChain': {
+      const input = args[0] ?? {};
+      if (typeof input.name !== 'string' || !input.name.trim()) return { success: false, error: 'name is required' };
+      if (!input.llm_id) return { success: false, error: 'LLM Brain is required when creating a MetaBot' };
+      const timestamp = Date.now();
+      const bot = {
+        id: ++metabotSeq,
+        wallet_id: metabotSeq,
+        name: input.name.trim(),
+        avatar: input.avatar ?? null,
+        enabled: true,
+        globalmetaid: `gmid-gateway-${metabotSeq}`,
+        metabot_type: input.metabot_type === 'twin' ? 'twin' : 'worker',
+        role: input.role ?? '',
+        soul: input.soul ?? '',
+        goal: input.goal ?? null,
+        bio: input.bio ?? null,
+        background: input.background ?? null,
+        boss_id: null,
+        boss_global_metaid: input.boss_global_metaid ?? null,
+        llm_id: input.llm_id,
+        llm_provider: input.llm_provider ?? null,
+        llm_effort: input.llm_effort ?? null,
+        mvc_address: `gw-mvc-${metabotSeq}`,
+        metabot_info_pinid: `gw-info-${metabotSeq}`,
+        chain_sync_state: 'synced',
+        chain_sync_pending_steps: [],
+        subsidy_state: 'claimed',
+        tools: [],
+        skills: [],
+        allow_chat_skills: [...(input.allow_chat_skills ?? [])],
+        created_at: timestamp,
+        updated_at: timestamp,
+      };
+      metabots.push(bot);
+      return { success: true, metabot: { ...bot }, subsidy: { success: true } };
+    }
+    case 'idbots:resumeMetabotSetup': {
+      const input = args[0] ?? {};
+      const bot = metabots.find((entry) => entry.id === input.metabotId);
+      if (!bot) return { success: false, mode: input.mode, error: 'metabot not found' };
+      bot.metabot_info_pinid = bot.metabot_info_pinid ?? `gw-info-${bot.id}`;
+      bot.chain_sync_state = 'synced';
+      bot.chain_sync_pending_steps = [];
+      bot.subsidy_state = 'claimed';
+      return { success: true, mode: input.mode, metabot: { ...bot }, subsidy: { success: true }, chain: { success: true } };
+    }
+    case 'idbots:syncMetaBot': {
+      const bot = metabots.find((entry) => entry.id === args[0]);
+      if (!bot) return { success: false, error: 'metabot not found' };
+      bot.metabot_info_pinid = bot.metabot_info_pinid ?? `gw-info-${bot.id}`;
+      bot.chain_sync_state = 'synced';
+      bot.chain_sync_pending_steps = [];
+      return { success: true, metabotInfoPinId: bot.metabot_info_pinid, txids: [`gw-sync-${bot.id}`] };
+    }
+    case 'idbots:getAddressBalance':
+      return { success: true, balance: { mvc: { value: args[0]?.metabotId ? 0.0002 : 0.001, unit: 'MVC' } } };
+    case 'skills:list':
+      return { success: true, skills: skillFixtures.map((skill) => ({ ...skill })) };
     case 'cowork:config:get':
       return {
         success: true,

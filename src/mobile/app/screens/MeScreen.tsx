@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react';
-import { ChevronRightIcon, PencilSquareIcon, PlusIcon } from '@heroicons/react/24/outline';
+import { ChevronRightIcon } from '@heroicons/react/24/outline';
 import { t } from '../../i18n';
 import type { MobileLanguage } from '../../i18n';
-import type { MockMetabot } from '../../bridge/types';
 import { CONTRACT_VERSION } from '../../bridge/types';
 import { getMobileElectron } from '../appBridge';
 import { logout, requestAccountDeletion } from '../../login/loginApi';
@@ -11,9 +10,9 @@ import { useMeters } from '../hooks/useMeters';
 import { useSettings } from '../hooks/useSettings';
 import { useMemorySettings } from '../hooks/useMemorySettings';
 import { useSkills } from '../hooks/useSkills';
-import { useMetabots } from '../hooks/useMetabots';
 import { formatBytes, formatCount } from '../format';
 import { BottomSheet } from '../components/BottomSheet';
+import { BotManagementSection } from '../components/BotManagementSection';
 import { Section } from '../components/Section';
 import { Switch } from '../components/Switch';
 
@@ -141,100 +140,8 @@ function RedeemButton(): JSX.Element {
   );
 }
 
-function BotFormSheet(props: {
-  bot: MockMetabot | null;
-  onSave: (input: { name: string; role: string; soul: string; bio: string }) => Promise<boolean>;
-  busy: boolean;
-  onClose: () => void;
-}): JSX.Element {
-  const [name, setName] = useState(props.bot?.name ?? '');
-  const [role, setRole] = useState(props.bot?.role ?? '');
-  const [soul, setSoul] = useState(props.bot?.soul ?? '');
-  const [bio, setBio] = useState(props.bot?.bio ?? '');
-  const inputClass =
-    'min-h-[44px] w-full rounded-xl border border-[var(--border-color)] bg-[var(--bg-main)] px-3 py-2.5 text-[15px] text-[var(--text-primary)] outline-none';
-
-  return (
-    <BottomSheet title={props.bot ? t('mobile.me.botEdit') : t('mobile.me.botCreate')} onClose={props.onClose}>
-      <div className="flex flex-col gap-3">
-        <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t('mobile.me.botNamePlaceholder')} className={inputClass} />
-        <input value={role} onChange={(event) => setRole(event.target.value)} placeholder={t('mobile.me.botRolePlaceholder')} className={inputClass} />
-        <textarea value={soul} onChange={(event) => setSoul(event.target.value)} placeholder={t('mobile.me.botSoulPlaceholder')} rows={2} className={`${inputClass} resize-none`} />
-        <textarea value={bio} onChange={(event) => setBio(event.target.value)} placeholder={t('mobile.me.botBioPlaceholder')} rows={2} className={`${inputClass} resize-none`} />
-        <button
-          type="button"
-          disabled={props.busy || !name.trim()}
-          onClick={() => {
-            void props.onSave({ name: name.trim(), role: role.trim(), soul: soul.trim(), bio: bio.trim() }).then((ok) => {
-              if (ok) props.onClose();
-            });
-          }}
-          className="min-h-[44px] rounded-xl bg-[var(--color-primary)] py-2 font-medium text-black active:opacity-80 disabled:opacity-40"
-        >
-          {t('mobile.me.botSave')}
-        </button>
-      </div>
-    </BottomSheet>
-  );
-}
-
 function BotsSection(): JSX.Element {
-  const { bots, createBot, updateBot } = useMetabots();
-  const [formState, setFormState] = useState<{ bot: MockMetabot | null; busy: boolean } | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!notice) return undefined;
-    const timer = setTimeout(() => setNotice(null), 2000);
-    return () => clearTimeout(timer);
-  }, [notice]);
-
-  return (
-    <Section title={t('mobile.me.botsTitle')}>
-      {notice ? <p className="mb-2 text-sm text-emerald-600">{notice}</p> : null}
-      {bots.map((bot) => (
-        <div key={bot.id} className="flex min-h-[44px] items-center gap-2 border-b border-[var(--border-color)] py-2 last:border-b-0">
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[15px] text-[var(--text-primary)]">{bot.name}</p>
-            <p className="truncate text-xs text-[var(--text-secondary)]">
-              {t(bot.metabot_type === 'twin' ? 'mobile.me.botType.twin' : 'mobile.me.botType.worker')}
-              {bot.role ? ` · ${bot.role}` : ''}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setFormState({ bot, busy: false })}
-            aria-label={`${t('mobile.me.botEdit')} · ${bot.name}`}
-            className="flex min-h-[44px] min-w-[44px] items-center justify-center text-[var(--text-secondary)] active:text-[var(--text-primary)]"
-          >
-            <PencilSquareIcon className="h-5 w-5" aria-hidden />
-          </button>
-        </div>
-      ))}
-      <button
-        type="button"
-        onClick={() => setFormState({ bot: null, busy: false })}
-        className="mt-2 flex min-h-[44px] w-full items-center justify-center gap-1 rounded-xl border border-[var(--border-color)] py-2 text-sm text-[var(--text-primary)] active:bg-[var(--bg-hover)]"
-      >
-        <PlusIcon className="h-4 w-4" aria-hidden />
-        {t('mobile.me.botCreate')}
-      </button>
-      {formState ? (
-        <BotFormSheet
-          bot={formState.bot}
-          busy={formState.busy}
-          onClose={() => setFormState(null)}
-          onSave={async (input) => {
-            setFormState((prev) => (prev ? { ...prev, busy: true } : prev));
-            const ok = formState.bot ? await updateBot(formState.bot.id, input) : await createBot(input);
-            if (ok) setNotice(t(formState.bot ? 'mobile.me.botUpdated' : 'mobile.me.botCreated'));
-            setFormState(null);
-            return ok;
-          }}
-        />
-      ) : null}
-    </Section>
-  );
+  return <BotManagementSection />;
 }
 
 function SkillsSection(): JSX.Element {
