@@ -140,6 +140,17 @@ test('long-term board participants survive the bounded IPC sanitizer', () => {
   assert.equal(deep.a.b.c.d.e.f, '[truncated-depth]', 'the depth cap remains enforced');
 });
 
+test('IPC sanitizer preserves depth-six values and truncates depth-eight objects', () => {
+  const nested = (value, depth) => {
+    let result = value;
+    for (let index = 0; index < depth; index += 1) result = { child: result };
+    return result;
+  };
+  const atDepthSix = (value) => value.child.child.child.child.child.child;
+  assert.equal(atDepthSix(sanitizeIpcPayload(nested('keep', 6))), 'keep');
+  assert.equal(atDepthSix(sanitizeIpcPayload(nested('drop', 8))), '[truncated-depth]');
+});
+
 // ---------------------------------------------------------------------------
 // mobile:bootstrap:status (readiness provider seam)
 // ---------------------------------------------------------------------------
