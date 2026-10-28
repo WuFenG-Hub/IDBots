@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Bars3Icon, PlusIcon, PaperAirplaneIcon, PaperClipIcon, StopIcon } from '@heroicons/react/24/outline';
+import { Bars3Icon, PlusIcon, PaperAirplaneIcon, PaperClipIcon, FaceSmileIcon, StopIcon } from '@heroicons/react/24/outline';
 import MarkdownContent from '@/components/MarkdownContent';
 import MobileArtifactPreview from '../components/MobileArtifactPreview';
 import CoworkPermissionPanel from '@/components/cowork/CoworkPermissionPanel';
 import { coworkAttachmentAdmission } from '@/components/cowork/coworkComposerAttachments';
 import ChatComposerAttachments from '../components/ChatComposerAttachments';
+import { EmojiPickerPanel, rememberRecentEmoji } from '../components/EmojiPickerPanel';
+import { insertEmojiAtCaret } from '../chat/emojiTextInsert';
+import { mapWechatBracketCodesForDisplay } from '../chat/wechatEmojiDisplay';
 import { t } from '../../i18n';
 import type { MockMetabot } from '../../bridge/types';
 import type { useChat } from '../hooks/useChat';
@@ -123,7 +126,8 @@ function MessageRow({ message, onOpenFile }: { message: ChatMessageView; onOpenF
     return (
       <div className="mb-3 flex justify-end">
         <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl bg-[var(--color-primary)] px-3.5 py-2.5 text-[15px] text-black" data-testid="chat-user-message">
-          {message.text}
+          {/* Display-only mapping (wechatEmojiDisplay.ts). */}
+          {mapWechatBracketCodesForDisplay(message.text)}
         </div>
       </div>
     );
@@ -149,7 +153,8 @@ function MessageRow({ message, onOpenFile }: { message: ChatMessageView; onOpenF
   return (
     <div className="mb-3 flex justify-start">
       <div className="max-w-[90%] rounded-2xl border border-[var(--border-color)] bg-[var(--bg-panel)] px-3.5 py-2.5">
-        <MarkdownContent content={message.text} chatExperienceMode="assistant" compact onOpenLocalFile={onOpenFile} />
+        {/* Display-only mapping (wechatEmojiDisplay.ts). */}
+        <MarkdownContent content={mapWechatBracketCodesForDisplay(message.text)} chatExperienceMode="assistant" compact onOpenLocalFile={onOpenFile} />
         {message.streaming ? <span className="mt-1 inline-block h-4 w-2 animate-pulse bg-[var(--color-primary)]" aria-hidden /> : null}
       </div>
     </div>
@@ -200,8 +205,12 @@ export default function ChatScreen(props: {
 }): JSX.Element {
   const { chat, bots } = props;
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [emojiPanelOpen, setEmojiPanelOpen] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  // Refs (caret notes: emojiTextInsert.ts).
   const listRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const pendingCaretRef = useRef<number | null>(null);
   const keyboardInset = useKeyboardInset();
   const draft = chat.draft ?? '';
   const attachments = chat.attachments ?? [];
@@ -229,6 +238,38 @@ export default function ChatScreen(props: {
     if (list) list.scrollTop = list.scrollHeight;
   }, [chat.messages, chat.isStreaming]);
   useEffect(() => setPreviewPath(null), [chat.sessionId]);
+
+  // Insertion point: DOM selection (focused) / pending caret / end.
+  const currentEmojiSelection = (): { start: number; end: number } | null => {
+    const textarea = textareaRef.current;
+    if (
+      textarea
+      && typeof document !== 'undefined'
+      && document.activeElement === textarea
+      && typeof textarea.selectionStart === 'number'
+    ) {
+      return { start: textarea.selectionStart, end: textarea.selectionEnd };
+    }
+    const pending = pendingCaretRef.current;
+    return pending == null ? null : { start: pending, end: pending };
+  };
+
+  const insertEmoji = (emoji: string) => {
+    rememberRecentEmoji(emoji);
+    const insertion = insertEmojiAtCaret(draft, emoji, currentEmojiSelection());
+    pendingCaretRef.current = insertion.caret;
+    chat.setDraft(insertion.text);
+    // No refocus (WeChat-style flow).
+  };
+
+  // Caret restore (post-render).
+  useEffect(() => {
+    const caret = pendingCaretRef.current;
+    const textarea = textareaRef.current;
+    if (caret == null || !textarea) return;
+    pendingCaretRef.current = null;
+    textarea.setSelectionRange(caret, caret);
+  }, [draft]);
 
   const submit = () => {
     if (!canSubmit) return;
@@ -327,8 +368,22 @@ export default function ChatScreen(props: {
       <SubmissionStatus chat={chat} />
 
       <div className="shrink-0 border-t border-[var(--border-color)] bg-[var(--bg-panel)] px-3 pt-2" style={{ paddingBottom: `calc(max(env(safe-area-inset-bottom), ${keyboardInset}px) + 8px)` }}>
+        {emojiPanelOpen ? (
+          <EmojiPickerPanel onSelect={insertEmoji} onClose={() => setEmojiPanelOpen(false)} />
+        ) : null}
         <ChatComposerAttachments chat={chat} />
         <div className="flex items-end gap-2">
+          <button
+            type="button"
+            onClick={() => setEmojiPanelOpen((open) => !open)}
+            aria-label={t('mobile.chat.emojiPicker')}
+            aria-expanded={emojiPanelOpen}
+            aria-haspopup="dialog"
+            aria-controls="mobile-chat-emoji-panel"
+            className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl border border-[var(--border-color)] text-[var(--text-primary)] active:bg-[var(--bg-hover)]"
+          >
+            <FaceSmileIcon className="h-5 w-5" aria-hidden />
+          </button>
           <button
             type="button"
             onClick={() => void chat.pickAttachments()}
@@ -339,8 +394,10 @@ export default function ChatScreen(props: {
             <PaperClipIcon className="h-5 w-5" aria-hidden />
           </button>
           <textarea
+            ref={textareaRef}
             value={draft}
             onChange={(event) => chat.setDraft(event.target.value)}
+            onFocus={() => setEmojiPanelOpen(false)}
             placeholder={t('mobile.chat.composerPlaceholder')}
             rows={1}
             className="max-h-32 min-h-[44px] flex-1 resize-none rounded-xl border border-[var(--border-color)] bg-[var(--bg-main)] px-3 py-2.5 text-[15px] text-[var(--text-primary)] outline-none"
