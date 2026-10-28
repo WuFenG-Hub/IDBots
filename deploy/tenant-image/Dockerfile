@@ -76,12 +76,8 @@ RUN pnpm run build \
  && pnpm run compile:electron \
  && pnpm run build:skills
 
-# build:mobile ships with WS-E; skip until the script exists.
-RUN if node -e "const p=require('./package.json');process.exit(p.scripts&&p.scripts['build:mobile']?0:1)"; then \
-      pnpm run build:mobile; \
-    else \
-      echo '[tenant-image] build:mobile not present yet (WS-E) — skipping'; \
-    fi
+# The PWA is served by the tenant; a missing or failed build must fail the image.
+RUN pnpm run build:mobile
 
 # ---------------------------------------------------------------------------
 # Stage 3: prod-deps — production-only node_modules for the runtime payload.
@@ -241,6 +237,7 @@ ARG ROLLBACK_SAFE_TO=""
 RUN test -n "$APP_VERSION" \
  && test -n "$GIT_COMMIT" \
  && echo "[tenant-image] version=$APP_VERSION commit=$GIT_COMMIT rollback-safe-to='${ROLLBACK_SAFE_TO}'"
+ENV IDBOTS_COMMIT=${GIT_COMMIT}
 
 # C1 image labels.
 LABEL org.idbots.version="${APP_VERSION}" \

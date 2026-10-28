@@ -114,9 +114,18 @@ test("build gates fail the build (kernel patches --check and dsh-deps)", () => {
   assert.match(dockerfile, /pnpm run check:dsh-deps/);
 });
 
-test("build:mobile is guarded so the build survives its absence", () => {
-  assert.match(dockerfile, /build:mobile not present yet/);
-  assert.match(dockerfile, /pnpm run build:mobile/);
+test("tenant images require the PWA build and expose exact commit provenance", () => {
+  assert.match(dockerfile, /RUN pnpm run build:mobile/);
+  assert.doesNotMatch(dockerfile, /build:mobile not present yet/);
+  assert.match(dockerfile, /^ENV IDBOTS_COMMIT=\$\{GIT_COMMIT\}$/m);
+});
+
+test("cloud image CI requires the control-plane and conformance legs", () => {
+  const workflow = readFileSync(resolve(import.meta.dirname, "../.github/workflows/cloud-images.yml"), "utf8");
+  assert.doesNotMatch(workflow, /hashFiles\('cloud\/control-plane\/Dockerfile'\)/);
+  assert.doesNotMatch(workflow, /hashFiles\('cloud\/conformance\/run\.mjs'\)/);
+  assert.match(workflow, /node cloud\/conformance\/run\.mjs/);
+  assert.match(workflow, /ready\.commit !== expected/);
 });
 
 test("runtime stage carries the Phase 0 apt stack and the skills venv", () => {
