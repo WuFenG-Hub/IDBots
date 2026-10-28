@@ -24,6 +24,7 @@ import {
   isInFollowUpSection,
   parseAutoTasksExpandedPreference,
   parseFollowUpExpandedPreference,
+  resolveSessionSidebarSection,
   serializeAutoTasksExpandedPreference,
   serializeFollowUpExpandedPreference,
   shouldFoldIntoAutonomousTasks,
@@ -163,6 +164,20 @@ test('isInFollowUpSection is the membership the menu label and placement share',
   assert.equal(isInFollowUpSection(mkSession('owed'), true), true,
     'a live board decision alone lands the row in the section');
   assert.equal(isInFollowUpSection(mkSession('pending-owed', undefined, undefined, 'pending'), true), true);
+});
+
+test('resolveSessionSidebarSection is the per-row view of the three-way split', () => {
+  // Precedence mirrors splitSessionsWithFollowUp: manual fold placement, then
+  // the follow-up lanes, then the auto-origin policy, then the main list.
+  assert.equal(resolveSessionSidebarSection(mkSession('human'), false), 'normal');
+  assert.equal(resolveSessionSidebarSection(mkSession('lt', 'longterm'), false), 'autonomous');
+  assert.equal(resolveSessionSidebarSection(mkSession('pending', undefined, undefined, 'pending'), false), 'follow-up');
+  assert.equal(resolveSessionSidebarSection(mkSession('owed'), true), 'follow-up',
+    'a live board decision alone lands the row in Follow-Up');
+  assert.equal(resolveSessionSidebarSection(mkSession('in', undefined, 'in', 'pending'), true), 'autonomous',
+    'a manual fold placement beats both follow-up lanes');
+  assert.equal(resolveSessionSidebarSection(mkSession('out', 'longterm', 'out', 'pending'), true), 'normal',
+    "'out' beats the follow-up lanes too — the row renders in the main list");
 });
 
 test('three-way split preserves input order per bucket and handles empty lists', () => {
@@ -407,94 +422,61 @@ test('the fold header carries label + unread count + latest activity, and no tot
   assert.equal((i18n.match(/coworkAutonomousTasksCount:/g) ?? []).length, 2, 'still one per locale');
 });
 
-test('the row menu offers the fold move, labels it by current membership, and only renders when wired', () => {
+test('the row menu offers one unified "Move to…" submenu, current section disabled, only when wired', () => {
   const item = readSource('src/renderer/components/cowork/CoworkSessionItem.tsx');
 
-  // The entry sits between pin and archive, and its label mirrors where the row
-  // is now (move IN while in the main list, OUT while folded). The gap budget
-  // covers the follow-up entry that now rides between the fold entry and
-  // archive.
+  // The entry sits between pin and archive. It is a submenu, not a toggle: one
+  // 'move-to' entry replaces the old fold/follow-up toggle pair, wherever the
+  // host offers the move at all (the target list is the same for every row —
+  // section placement is no longer auto-origin-gated at the menu).
   assert.match(
     item,
-    /\{ key: 'pin'[\s\S]{0,600}\{ key: 'autonomous-fold'[\s\S]{0,700}\{ key: 'archive'/,
+    /\{ key: 'pin'[\s\S]{0,400}\{ key: 'move-to'[\s\S]{0,500}\{ key: 'archive'/,
     'between pin and archive',
   );
-  assert.match(item, /onToggleAutonomousFold\?\.\(session\.id, isInAutonomousFoldWithDecision\(session, decisionPending \?\? false\)\)/);
-  assert.match(item, /inAutonomousFold = isInAutonomousFoldWithDecision\(session, decisionPending \?\? false\)/);
-  assert.match(item, /inAutonomousFold \? 'coworkMoveOutOfAutonomous' : 'coworkMoveToAutonomous'/);
-  // Optional prop: hidden, not dead, when the host does not offer the move.
-  assert.match(item, /onToggleAutonomousFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);
-  assert.match(item, /\.\.\.\(onToggleAutonomousFold\s*\n?\s*\? \[\{ key: 'autonomous-fold'/);
+  assert.match(item, /onMoveToSection\?: \(sessionId: string, target: SessionSidebarSection\) => void;/);
+  assert.match(item, /\.\.\.\(onMoveToSection\s*\n?\s*\? \[\{ key: 'move-to'/);
+  assert.match(item, /onMoveToSection\?\.\(session\.id, target\)/);
+  // The submenu offers all three sidebar sections, and the row's current one
+  // comes from the shared resolver (the same precedence as the list's
+  // three-way split) — it renders disabled, so a same-section pick (a no-op by
+  // design) can never reach the caller.
+  assert.match(item, /currentSection = resolveSessionSidebarSection\(session, decisionPending \?\? false\)/);
+  assert.equal((item.match(/key: 'autonomous', label: i18nService\.t\('coworkMoveToSectionAutonomous'\)/g) ?? []).length, 1);
+  assert.equal((item.match(/key: 'follow-up', label: i18nService\.t\('coworkMoveToSectionFollowUp'\)/g) ?? []).length, 1);
+  assert.equal((item.match(/key: 'normal', label: i18nService\.t\('coworkMoveToSectionNormal'\)/g) ?? []).length, 1);
+  assert.match(item, /const isCurrent = target\.key === currentSection;/);
+  assert.match(item, /disabled=\{isCurrent\}/);
 
   // The list threads it through to the rows (and keeps a stable identity for
   // the memoized rows, like every other action).
   const list = readSource('src/renderer/components/cowork/CoworkSessionList.tsx');
-  assert.match(list, /onToggleAutonomousFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);
-  assert.match(list, /const toggleAutonomousFold = useStableCallback\(onToggleAutonomousFold \?\? noopToggleAutonomousFold\)/);
-  assert.match(list, /onToggleAutonomousFold=\{onToggleAutonomousFold \? toggleAutonomousFold : undefined\}/);
-
-  // The sidebar owns the override decision and gives the list a stable handler;
-  // only the local tab (the fold's own list) offers the move.
-  const sidebar = readSource('src/renderer/components/Sidebar.tsx');
-  assert.match(sidebar, /const handleToggleAutonomousFold = async \(sessionId: string, currentlyFolded: boolean\) => \{/);
-  assert.match(sidebar, /\? \(shouldFoldIntoAutonomousTasks\(session\) \? 'out' : null\)/);
-  assert.match(sidebar, /: 'in';/);
-  assert.match(sidebar, /await coworkService\.setSessionFoldOverride\(sessionId, override\)/);
-  assert.match(sidebar, /const listOnToggleAutonomousFold = useStableCallback\(handleToggleAutonomousFold\)/);
-  assert.match(sidebar, /onToggleAutonomousFold=\{taskRecordTab === 'local' \? listOnToggleAutonomousFold : undefined\}/);
-  // The search modal renders the same rows, so it offers the move too.
-  assert.match(sidebar, /<CoworkSearchModal[\s\S]{0,400}onToggleAutonomousFold=\{handleToggleAutonomousFold\}/);
-  const modal = readSource('src/renderer/components/cowork/CoworkSearchModal.tsx');
-  assert.match(modal, /onToggleAutonomousFold\?: \(sessionId: string, currentlyFolded: boolean\) => void;/);
-  assert.match(modal, /onToggleAutonomousFold=\{onToggleAutonomousFold\}/);
-
-  // The service dispatches the local patch on success (mirrors setSessionPinned).
-  const service = readSource('src/renderer/services/cowork.ts');
-  assert.match(service, /async setSessionFoldOverride\(\s*sessionId: string,\s*override: CoworkSessionFoldOverride \| null,\s*\)/);
-  assert.match(service, /await cowork\.setSessionFoldOverride\(\{ sessionId, override \}\)/);
-  assert.match(service, /store\.dispatch\(updateSessionFoldOverride\(\{ sessionId, override \}\)\)/);
-
-  // Both menu labels exist once per locale.
-  const i18n = readSource('src/renderer/services/i18n.ts');
-  assert.equal((i18n.match(/coworkMoveToAutonomous:/g) ?? []).length, 2, 'one per locale');
-  assert.equal((i18n.match(/coworkMoveOutOfAutonomous:/g) ?? []).length, 2, 'one per locale');
+  assert.match(list, /onMoveSessionToSection\?: \(sessionId: string, target: SessionSidebarSection\) => void;/);
+  assert.match(list, /const moveToSection = useStableCallback\(onMoveSessionToSection \?\? noopMoveToSection\)/);
+  assert.match(list, /onMoveToSection=\{onMoveSessionToSection \? moveToSection : undefined\}/);
 });
 
-test('the row menu offers the follow-up move next to the fold move, auto-origin rows only, labeled by placement', () => {
-  const item = readSource('src/renderer/components/cowork/CoworkSessionItem.tsx');
-
-  // The entry sits right next to the fold entry (before archive), and its
-  // label mirrors where the row sits now (move IN while outside the section,
-  // OUT while inside it).
-  assert.match(item, /onToggleFollowUp\?: \(sessionId: string, currentlyInFollowUp: boolean\) => void;/);
-  assert.match(item, /onToggleFollowUp\?\.\(session\.id, inFollowUpSection\)/);
-  assert.match(item, /inFollowUpSection = isInFollowUpSection\(session, decisionPending \?\? false\)/);
-  assert.match(item, /inFollowUpSection \? 'coworkMoveOutOfFollowUp' : 'coworkMoveToFollowUp'/);
-  // v1 scope: the entry renders only for auto-origin rows (and only where the
-  // host offers the move at all).
-  assert.match(
-    item,
-    /\.\.\.\(onToggleFollowUp && session\.autoOrigin != null\s*\n?\s*\? \[\{ key: 'follow-up'/,
-  );
-  assert.match(item, /\{ key: 'follow-up', label: followUpLabel, onClick: handleToggleFollowUp \}/);
-
-  // The list threads it through to the rows (stable identity, like the fold).
-  const list = readSource('src/renderer/components/cowork/CoworkSessionList.tsx');
-  assert.match(list, /onToggleFollowUp\?: \(sessionId: string, currentlyInFollowUp: boolean\) => void;/);
-  assert.match(list, /const toggleFollowUp = useStableCallback\(onToggleFollowUp \?\? noopToggleFollowUp\)/);
-  assert.match(list, /onToggleFollowUp=\{onToggleFollowUp \? toggleFollowUp : undefined\}/);
-
-  // The sidebar owns the handler; only the local tab offers the move, and the
-  // search modal offers it too (same reach as the fold move).
+test('the sidebar owns the three-way move writes, and the search modal offers the same submenu', () => {
+  // The sidebar normalizes BOTH placement lanes per target (see the handler's
+  // comment for the precedence reasoning): the fold override and the follow-up
+  // marker. The row menu disables the current section, so no branch ever runs
+  // for a session that already sits in the target — picking it changes nothing.
   const sidebar = readSource('src/renderer/components/Sidebar.tsx');
-  assert.match(sidebar, /const handleToggleFollowUp = async \(sessionId: string, currentlyInFollowUp: boolean\) => \{/);
-  assert.match(sidebar, /await coworkService\.setSessionFollowUp\(sessionId, !currentlyInFollowUp\)/);
-  assert.match(sidebar, /const listOnToggleFollowUp = useStableCallback\(handleToggleFollowUp\)/);
-  assert.match(sidebar, /onToggleFollowUp=\{taskRecordTab === 'local' \? listOnToggleFollowUp : undefined\}/);
-  assert.match(sidebar, /<CoworkSearchModal[\s\S]{0,600}onToggleFollowUp=\{handleToggleFollowUp\}/);
+  assert.match(sidebar, /const handleMoveSessionToSection = async \(sessionId: string, target: SessionSidebarSection\) => \{/);
+  // To the fold: drop the marker, park the override.
+  assert.match(sidebar, /target === 'autonomous'[\s\S]{0,200}setSessionFollowUp\(sessionId, false\)[\s\S]{0,200}setSessionFoldOverride\(sessionId, 'in'\)/);
+  // To Follow-Up: neutralize the override (it outranks the marker), mark pending.
+  assert.match(sidebar, /target === 'follow-up'[\s\S]{0,200}setSessionFoldOverride\(sessionId, null\)[\s\S]{0,200}setSessionFollowUp\(sessionId, true\)/);
+  // To the normal list: clear the marker, and 'out' only where the auto-origin
+  // policy would otherwise fold the row back.
+  assert.match(sidebar, /shouldFoldIntoAutonomousTasks\(session\) \? 'out' : null/);
+  // Only the local tab offers the move; the search modal (same rows) offers it too.
+  assert.match(sidebar, /const listOnMoveSessionToSection = useStableCallback\(handleMoveSessionToSection\)/);
+  assert.match(sidebar, /onMoveSessionToSection=\{taskRecordTab === 'local' \? listOnMoveSessionToSection : undefined\}/);
+  assert.match(sidebar, /<CoworkSearchModal[\s\S]{0,600}onMoveSessionToSection=\{handleMoveSessionToSection\}/);
   const modal = readSource('src/renderer/components/cowork/CoworkSearchModal.tsx');
-  assert.match(modal, /onToggleFollowUp\?: \(sessionId: string, currentlyInFollowUp: boolean\) => void;/);
-  assert.match(modal, /onToggleFollowUp=\{onToggleFollowUp\}/);
+  assert.match(modal, /onMoveSessionToSection\?: \(sessionId: string, target: SessionSidebarSection\) => void;/);
+  assert.match(modal, /onMoveSessionToSection=\{onMoveSessionToSection\}/);
 
   // The service dispatches the local patch on success (mirrors
   // setSessionFoldOverride), and the slice reducer patches both the list row
@@ -508,10 +490,12 @@ test('the row menu offers the follow-up move next to the fold move, auto-origin 
   assert.match(slice, /session\.followUpState = followUp \? 'pending' : null;/);
   assert.match(slice, /updateSessionFollowUp,/);
 
-  // Both menu labels exist once per locale.
+  // All four submenu labels exist once per locale.
   const i18n = readSource('src/renderer/services/i18n.ts');
-  assert.equal((i18n.match(/coworkMoveToFollowUp:/g) ?? []).length, 2, 'one per locale');
-  assert.equal((i18n.match(/coworkMoveOutOfFollowUp:/g) ?? []).length, 2, 'one per locale');
+  assert.equal((i18n.match(/coworkMoveTo:/g) ?? []).length, 2, 'one per locale');
+  assert.equal((i18n.match(/coworkMoveToSectionAutonomous:/g) ?? []).length, 2, 'one per locale');
+  assert.equal((i18n.match(/coworkMoveToSectionFollowUp:/g) ?? []).length, 2, 'one per locale');
+  assert.equal((i18n.match(/coworkMoveToSectionNormal:/g) ?? []).length, 2, 'one per locale');
 });
 
 test('follow-up pending sessions light the unread dot even for heartbeat turns', () => {

@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CoworkSessionSummary, CoworkSessionStatus } from '../../types/cowork';
-import { ArchiveBoxIcon, ArrowRightOnRectangleIcon, ClipboardDocumentIcon, EllipsisHorizontalIcon, PencilSquareIcon } from '@heroicons/react/24/outline';
+import { ArchiveBoxIcon, ArrowRightOnRectangleIcon, CheckIcon, ChevronRightIcon, ClipboardDocumentIcon, EllipsisHorizontalIcon, PencilSquareIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { getCoworkSessionTitleClassName, getAssistantSessionDisplayTitle, shouldShowCoworkA2ADot } from './coworkSessionPresentation.js';
 import { copyCoworkSessionLinkToClipboard } from './coworkSessionLink.js';
 import { isRenderableAvatarSource } from '../../utils/avatarSource';
-import { isInAutonomousFoldWithDecision, isInFollowUpSection } from '../../utils/sessionAutoGrouping';
+import { resolveSessionSidebarSection } from '../../utils/sessionAutoGrouping';
+import type { SessionSidebarSection } from '../../utils/sessionAutoGrouping';
 import { scrollEventMovesAnchor } from '../../utils/anchoredPopover';
 
 interface CoworkSessionItemProps {
@@ -23,22 +24,15 @@ interface CoworkSessionItemProps {
   onTogglePin: (sessionId: string, pinned: boolean) => void;
   onRename: (sessionId: string, title: string) => void;
   /**
-   * Move this session in or out of the sidebar's Autonomous Tasks fold.
-   * Optional: lists that do not offer the move (and the A2A tab) leave it off,
-   * and the row then omits the menu entry entirely rather than showing a dead
-   * action.
+   * Move this session to one of the three sidebar sections — the Autonomous
+   * Tasks fold, the Follow-Up Tasks section, or the normal list — via the row
+   * menu's "Move to…" submenu. Optional: lists that do not offer the move (and
+   * the A2A tab) leave it off, and the row then omits the menu entry entirely
+   * rather than showing a dead action. The row's current section is disabled
+   * inside the submenu, so a same-section pick (a no-op by design) can never
+   * reach the caller.
    */
-  onToggleAutonomousFold?: (sessionId: string, currentlyFolded: boolean) => void;
-  /**
-   * Move this session in or out of the sidebar's Follow-Up Tasks section
-   * (移入待跟进 / 移出待跟进). Optional, same as the fold move: lists that do
-   * not offer it leave it off and the row omits the menu entry. Only rendered
-   * for auto-origin sessions — v1 scope covers exactly the machine-created
-   * rows. `currentlyInFollowUp` is the row's section membership at menu-open
-   * time (persisted marker OR a live board decision), so the label and the
-   * caller's next write agree with what the user sees.
-   */
-  onToggleFollowUp?: (sessionId: string, currentlyInFollowUp: boolean) => void;
+  onMoveToSection?: (sessionId: string, target: SessionSidebarSection) => void;
   /** Batch-selection mode (e.g. batch archive): the row shows a checkbox and
    * clicking it toggles selection instead of opening the session. */
   selectionMode?: boolean;
@@ -89,6 +83,13 @@ const statusLabels: Record<CoworkSessionStatus, string> = {
   // never masquerades as running.
   stopped: 'coworkStatusStopped',
 };
+
+// "Move to…" flyout metrics: enough for the widest of the three section labels
+// (bilingual), three rows tall, and a short grace period for the pointer to
+// cross the row→flyout gap without the submenu snapping shut.
+const MOVE_SUBMENU_WIDTH = 160;
+const MOVE_SUBMENU_HEIGHT = 120;
+const MOVE_SUBMENU_CLOSE_DELAY_MS = 150;
 
 const PushPinIcon: React.FC<React.SVGProps<SVGSVGElement> & { slashed?: boolean }> = ({
   slashed,
@@ -277,8 +278,7 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   onDelete,
   onTogglePin,
   onRename,
-  onToggleAutonomousFold,
-  onToggleFollowUp,
+  onMoveToSection,
   selectionMode = false,
   isSelected = false,
   onToggleSelected,
@@ -289,6 +289,12 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(session.title);
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
+  // The "Move to…" flyout. It is a fixed-position child of the menu panel
+  // (fixed elements are not clipped by the panel's overflow-hidden), so it
+  // dies with the panel and the panel's outside-click / Escape handling
+  // covers it.
+  const [moveSubmenuPosition, setMoveSubmenuPosition] = useState<{ x: number; y: number } | null>(null);
+  const moveSubmenuCloseTimerRef = useRef<number | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const actionButtonRef = useRef<HTMLButtonElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -358,6 +364,7 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
 
   const closeMenu = () => {
     setMenuPosition(null);
+    setMoveSubmenuPosition(null);
   };
 
   const handleTogglePin = (e: React.MouseEvent) => {
@@ -366,19 +373,9 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
     closeMenu();
   };
 
-  const handleToggleAutonomousFold = (e: React.MouseEvent) => {
+  const handleMoveToSection = (target: SessionSidebarSection) => (e: React.MouseEvent) => {
     e.stopPropagation();
-    // The row tells the handler where it is NOW; the caller turns that into the
-    // next override ('in' when moving in, 'out'/null when moving out).
-    onToggleAutonomousFold?.(session.id, isInAutonomousFoldWithDecision(session, decisionPending ?? false));
-    closeMenu();
-  };
-
-  const handleToggleFollowUp = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    // Same contract as the fold move: the row reports its current section
-    // membership, the caller turns it into the next write (pending vs cleared).
-    onToggleFollowUp?.(session.id, inFollowUpSection);
+    onMoveToSection?.(session.id, target);
     closeMenu();
   };
 
@@ -495,18 +492,59 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
   const copySessionIdLabel = i18nService.t('coworkCopySessionId');
   const renameLabel = i18nService.t('renameConversation');
   const archiveLabel = i18nService.t('archiveSession');
-  // The label mirrors where the row sits right now, so the menu always reads as
-  // the action it will perform.
-  const inAutonomousFold = isInAutonomousFoldWithDecision(session, decisionPending ?? false);
-  const autonomousFoldLabel = i18nService.t(
-    inAutonomousFold ? 'coworkMoveOutOfAutonomous' : 'coworkMoveToAutonomous',
-  );
-  // Follow-Up membership is the section placement: the persisted marker OR a
-  // live board decision owed on the row both land it in the section.
-  const inFollowUpSection = isInFollowUpSection(session, decisionPending ?? false);
-  const followUpLabel = i18nService.t(
-    inFollowUpSection ? 'coworkMoveOutOfFollowUp' : 'coworkMoveToFollowUp',
-  );
+  // Where the row renders right now (same precedence as the list's three-way
+  // split). The submenu marks this section as current — the one disabled,
+  // no-op target — so the menu always agrees with what the user sees.
+  const currentSection = resolveSessionSidebarSection(session, decisionPending ?? false);
+  const moveToLabel = i18nService.t('coworkMoveTo');
+  // Submenu targets in sidebar order: the Autonomous fold, the Follow-Up
+  // section, then the normal list. Read per render (not memoized) so a
+  // language switch relabels them like every other menu entry.
+  const moveTargets: Array<{ key: SessionSidebarSection; label: string }> = [
+    { key: 'autonomous', label: i18nService.t('coworkMoveToSectionAutonomous') },
+    { key: 'follow-up', label: i18nService.t('coworkMoveToSectionFollowUp') },
+    { key: 'normal', label: i18nService.t('coworkMoveToSectionNormal') },
+  ];
+  /** Place the flyout to the right of the "Move to…" row, flipping to its left
+   * when that would leave the viewport; vertically clamped like the menu. */
+  const openMoveSubmenuFromRect = (rect: DOMRect) => {
+    const padding = 8;
+    const x = rect.right + 4 + MOVE_SUBMENU_WIDTH > window.innerWidth - padding
+      ? Math.max(padding, rect.left - MOVE_SUBMENU_WIDTH - 4)
+      : rect.right + 4;
+    const y = Math.min(
+      Math.max(padding, rect.top - 4),
+      window.innerHeight - MOVE_SUBMENU_HEIGHT - padding,
+    );
+    setMoveSubmenuPosition({ x, y });
+  };
+  const handleMoveSubmenuEnter = (e: React.MouseEvent) => {
+    cancelMoveSubmenuClose();
+    openMoveSubmenuFromRect((e.currentTarget as HTMLElement).getBoundingClientRect());
+  };
+  const handleMoveSubmenuToggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (moveSubmenuPosition) {
+      setMoveSubmenuPosition(null);
+      return;
+    }
+    openMoveSubmenuFromRect((e.currentTarget as HTMLElement).getBoundingClientRect());
+  };
+  /** Leave the row or the flyout: close shortly after, unless the pointer
+   * reaches the flyout across the small gap between them. */
+  const scheduleMoveSubmenuClose = () => {
+    if (moveSubmenuCloseTimerRef.current != null) window.clearTimeout(moveSubmenuCloseTimerRef.current);
+    moveSubmenuCloseTimerRef.current = window.setTimeout(() => {
+      moveSubmenuCloseTimerRef.current = null;
+      setMoveSubmenuPosition(null);
+    }, MOVE_SUBMENU_CLOSE_DELAY_MS);
+  };
+  const cancelMoveSubmenuClose = () => {
+    if (moveSubmenuCloseTimerRef.current != null) {
+      window.clearTimeout(moveSubmenuCloseTimerRef.current);
+      moveSubmenuCloseTimerRef.current = null;
+    }
+  };
   const relativeTime = formatRelativeTime(session.updatedAt, nowMs);
   const showRunningIndicator = session.status === 'running';
   const showUnreadIndicator = !showRunningIndicator && hasUnread;
@@ -535,30 +573,22 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
       { key: 'rename', label: renameLabel, onClick: handleRenameClick },
       { key: 'pin', label: pinButtonLabel, onClick: handleTogglePin },
       // Only offered where the move can actually happen (the local list and the
-      // search modal); the A2A/group lists have no fold, so they get no entry.
-      ...(onToggleAutonomousFold
-        ? [{ key: 'autonomous-fold', label: autonomousFoldLabel, onClick: handleToggleAutonomousFold }]
-        : []),
-      // Follow-Up moves target exactly the auto-origin rows (v1 scope): a human
-      // session is never follow-up eligible, so the entry stays hidden on those.
-      ...(onToggleFollowUp && session.autoOrigin != null
-        ? [{ key: 'follow-up', label: followUpLabel, onClick: handleToggleFollowUp }]
+      // search modal); the A2A/group lists have no sections, so they get no entry.
+      ...(onMoveToSection
+        ? [{ key: 'move-to', label: moveToLabel, onClick: handleMoveSubmenuToggle }]
         : []),
       { key: 'archive', label: archiveLabel, onClick: handleDeleteClick },
     ];
   }, [
     copySessionIdLabel,
     archiveLabel,
-    autonomousFoldLabel,
-    followUpLabel,
+    moveToLabel,
     handleCopySessionIdClick,
     handleDeleteClick,
+    handleMoveSubmenuToggle,
     handleRenameClick,
-    handleToggleAutonomousFold,
-    handleToggleFollowUp,
     handleTogglePin,
-    onToggleAutonomousFold,
-    onToggleFollowUp,
+    onMoveToSection,
     pinButtonLabel,
     renameLabel,
   ]);
@@ -703,6 +733,12 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
               key={item.key}
               type="button"
               onClick={item.onClick}
+              onMouseEnter={
+                item.key === 'move-to'
+                  ? handleMoveSubmenuEnter
+                  : () => setMoveSubmenuPosition(null)
+              }
+              onMouseLeave={item.key === 'move-to' ? scheduleMoveSubmenuClose : undefined}
               className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
             >
               {item.key === 'copy-session-id' && <ClipboardDocumentIcon className="h-4 w-4" />}
@@ -713,15 +749,42 @@ const CoworkSessionItemRow: React.FC<CoworkSessionItemProps> = ({
                   className={`h-4 w-4 ${session.pinned ? 'opacity-60' : ''}`}
                 />
               )}
-              {item.key === 'autonomous-fold' && (
-                <ArrowRightOnRectangleIcon
-                  className={`h-4 w-4 ${inAutonomousFold ? 'rotate-180' : ''}`}
-                />
-              )}
+              {item.key === 'move-to' && <ArrowRightOnRectangleIcon className="h-4 w-4" />}
               {item.key === 'archive' && <ArchiveBoxIcon className="h-4 w-4" />}
-              {item.label}
+              <span className="flex-1">{item.label}</span>
+              {item.key === 'move-to' && <ChevronRightIcon className="h-3.5 w-3.5 opacity-60" />}
             </button>
           ))}
+          {moveSubmenuPosition && (
+            <div
+              className="fixed z-50 min-w-[150px] rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-lg overflow-hidden"
+              style={{ top: moveSubmenuPosition.y, left: moveSubmenuPosition.x }}
+              role="menu"
+              onMouseEnter={cancelMoveSubmenuClose}
+              onMouseLeave={scheduleMoveSubmenuClose}
+            >
+              {moveTargets.map((target) => {
+                const isCurrent = target.key === currentSection;
+                return (
+                  <button
+                    key={target.key}
+                    type="button"
+                    disabled={isCurrent}
+                    aria-current={isCurrent ? 'true' : undefined}
+                    onClick={handleMoveToSection(target.key)}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors dark:text-claude-darkText text-claude-text ${
+                      isCurrent
+                        ? 'cursor-default opacity-60'
+                        : 'hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover'
+                    }`}
+                  >
+                    <span className="flex-1">{target.label}</span>
+                    {isCurrent && <CheckIcon className="h-4 w-4 text-claude-accent" />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>

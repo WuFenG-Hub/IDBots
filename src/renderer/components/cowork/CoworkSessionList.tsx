@@ -30,6 +30,7 @@ import {
   serializeAutoTasksExpandedPreference,
   serializeFollowUpExpandedPreference,
 } from '../../utils/sessionAutoGrouping';
+import type { SessionSidebarSection } from '../../utils/sessionAutoGrouping';
 import { ChevronDownIcon, Cog6ToothIcon, FolderIcon, HandRaisedIcon, PlusIcon } from '@heroicons/react/24/outline';
 
 interface CoworkSessionListProps {
@@ -79,21 +80,14 @@ interface CoworkSessionListProps {
    */
   decisionSessionIds?: ReadonlySet<string>;
   /**
-   * Move one session in or out of the Autonomous Tasks fold (the row menu's
-   * 移入自主任务 / 移出自主任务 entry). Optional: callers that do not offer the
-   * move (and every non-local list) simply leave it off, and the row then hides
-   * the menu entry. `currentlyFolded` is the membership at menu-open time, so
-   * the caller decides the next override without re-deriving it.
+   * Move one session to one of the three sidebar sections (the row menu's
+   * "Move to…" submenu: Autonomous Tasks, Follow-Up Tasks, or the normal
+   * list). Optional: callers that do not offer the move (and every non-local
+   * list) simply leave it off, and the row then hides the menu entry. The row
+   * disables the section it already sits in, so the caller never receives a
+   * same-section move.
    */
-  onToggleAutonomousFold?: (sessionId: string, currentlyFolded: boolean) => void;
-  /**
-   * Move one session in or out of the Follow-Up Tasks section (the row menu's
-   * 移入待跟进 / 移出待跟进 entry). Optional: callers that do not offer the move
-   * (and every non-local list) simply leave it off, and the row then hides the
-   * menu entry. `currentlyInFollowUp` is the section membership at menu-open
-   * time, so the caller decides the next write without re-deriving it.
-   */
-  onToggleFollowUp?: (sessionId: string, currentlyInFollowUp: boolean) => void;
+  onMoveSessionToSection?: (sessionId: string, target: SessionSidebarSection) => void;
   /** Online-chats (A2A) Bot selector — that list's ONLY selector. When on, the
    * list reuses the shared MetaBotSelector (the same component the cowork home
    * and Bot Internet composer use) above the flat list, with `allowAll` adding
@@ -140,11 +134,8 @@ const RELATIVE_TIME_TICK_MS = 60_000;
  */
 const noopToggleSelected = (): void => {};
 
-/** Placeholder for the optional fold move; hidden behind the menu entry's own guard. */
-const noopToggleAutonomousFold = (): void => {};
-
-/** Placeholder for the optional follow-up move; hidden behind the menu entry's own guard. */
-const noopToggleFollowUp = (): void => {};
+/** Placeholder for the optional section move; hidden behind the menu entry's own guard. */
+const noopMoveToSection = (): void => {};
 
 /**
  * Shallow equality, one level deep: `Object.is` per key, and for nested objects
@@ -243,8 +234,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   autoSessions: incomingAutoSessions,
   followUpSessions: incomingFollowUpSessions,
   decisionSessionIds,
-  onToggleAutonomousFold,
-  onToggleFollowUp,
+  onMoveSessionToSection,
   language: languageProp,
   onQuickCreateTask,
 }) => {
@@ -276,11 +266,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
   // Optional, so it needs the same no-op treatment as batch selection: a
   // memoized row must never receive an undefined callback and then have to
   // guard every click itself.
-  const toggleAutonomousFold = useStableCallback(onToggleAutonomousFold ?? noopToggleAutonomousFold);
-  // Optional, so it needs the same no-op treatment as the fold move: a
-  // memoized row must never receive an undefined callback and then have to
-  // guard every click itself.
-  const toggleFollowUp = useStableCallback(onToggleFollowUp ?? noopToggleFollowUp);
+  const moveToSection = useStableCallback(onMoveSessionToSection ?? noopMoveToSection);
   // Batch selection is the one optional action (the search modal never enters
   // selection mode). A no-op keeps the memoized prop a function, so the row's
   // guard cannot silently let an undefined callback through to a click.
@@ -562,8 +548,7 @@ const CoworkSessionListRow: React.FC<CoworkSessionListProps> = ({
         onTogglePin={togglePin}
         onRename={renameSession}
         onToggleSelected={toggleSessionSelected}
-        onToggleAutonomousFold={onToggleAutonomousFold ? toggleAutonomousFold : undefined}
-        onToggleFollowUp={onToggleFollowUp ? toggleFollowUp : undefined}
+        onMoveToSection={onMoveSessionToSection ? moveToSection : undefined}
         decisionPending={decisionSessionIds?.has(session.id)}
       />
     );

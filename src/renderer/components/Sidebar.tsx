@@ -35,6 +35,7 @@ import type {
   SessionViewMode,
 } from '../utils/sessionViewGrouping';
 import { shouldFoldIntoAutonomousTasks, splitSessionsWithFollowUp } from '../utils/sessionAutoGrouping';
+import type { SessionSidebarSection } from '../utils/sessionAutoGrouping';
 import { useStableCallback } from '../utils/useStableCallback';
 import { selectTrackedTasksNeedingAttention } from '../utils/trackedTaskAttention';
 import type { SettingsOpenOptions } from './Settings';
@@ -420,34 +421,43 @@ const Sidebar: React.FC<SidebarProps> = ({
   };
 
   /**
-   * Move a session in or out of the Autonomous Tasks fold.
+   * Move a session to one of the three sidebar sections — the Autonomous Tasks
+   * fold, the Follow-Up Tasks section, or the normal list — the single write
+   * path behind the row menu's "Move to…" submenu (the row disables the
+   * section the session already sits in, so a same-section pick never lands
+   * here and nothing changes for it).
    *
-   * The override the move writes depends on WHICH LIST the row came from:
-   *  - moving out of the fold: an auto-created run (the fold's own policy put it
-   *    there) needs an explicit 'out' to survive the policy, while a row that
-   *    was manually moved in only has to drop its override back to null;
-   *  - moving in: always 'in', which parks a human row in the fold.
+   * Placement is two independent persisted lanes, so each target normalizes
+   * BOTH of them (order within a pair does not matter — each write patches its
+   * own field):
+   *  - to the fold: 'in' parks the row there whatever its origin, and any
+   *    follow-up pending is cleared so no stale marker resurfaces the row in
+   *    Follow-Up if the override is later dropped;
+   *  - to Follow-Up: the override must stop fighting the marker (both 'in'
+   *    and 'out' outrank it in the placement precedence), so it resets to
+   *    null, and the marker persists 'pending' with source 'manual';
+   *  - to the normal list: an auto-created run (the fold's own policy put it
+   *    there) needs an explicit 'out' to survive the policy, a row with no
+   *    policy pull only has to drop its override back to null; the follow-up
+   *    marker is cleared either way (clearSessionFollowUp clears ANY pending
+   *    source main-side — the same manual move-out the old menu performed).
    */
-  const handleToggleAutonomousFold = async (sessionId: string, currentlyFolded: boolean) => {
+  const handleMoveSessionToSection = async (sessionId: string, target: SessionSidebarSection) => {
     const session = sessions.find((item) => item.id === sessionId);
     if (!session) return;
-    const override = currentlyFolded
-      ? (shouldFoldIntoAutonomousTasks(session) ? 'out' : null)
-      : 'in';
-    await coworkService.setSessionFoldOverride(sessionId, override);
-  };
-
-  /**
-   * Move a session in or out of the Follow-Up Tasks section.
-   *
-   * Simpler than the fold override: the follow-up marker is a single boolean
-   * lane. Moving in persists 'pending' with source 'manual'; moving out clears
-   * ANY pending source main-side, and the row falls back to whatever the
-   * auto-origin policy says (the fold for machine runs). The row reports where
-   * it sits NOW, so the write is just the inverse of the membership.
-   */
-  const handleToggleFollowUp = async (sessionId: string, currentlyInFollowUp: boolean) => {
-    await coworkService.setSessionFollowUp(sessionId, !currentlyInFollowUp);
+    if (target === 'autonomous') {
+      await coworkService.setSessionFollowUp(sessionId, false);
+      await coworkService.setSessionFoldOverride(sessionId, 'in');
+    } else if (target === 'follow-up') {
+      await coworkService.setSessionFoldOverride(sessionId, null);
+      await coworkService.setSessionFollowUp(sessionId, true);
+    } else {
+      await coworkService.setSessionFollowUp(sessionId, false);
+      await coworkService.setSessionFoldOverride(
+        sessionId,
+        shouldFoldIntoAutonomousTasks(session) ? 'out' : null,
+      );
+    }
   };
 
   const handleRenameSession = async (sessionId: string, title: string) => {
@@ -463,8 +473,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const listOnSelectSession = useStableCallback(handleSelectSession);
   const listOnDeleteSession = useStableCallback(handleDeleteSession);
   const listOnTogglePin = useStableCallback(handleTogglePin);
-  const listOnToggleAutonomousFold = useStableCallback(handleToggleAutonomousFold);
-  const listOnToggleFollowUp = useStableCallback(handleToggleFollowUp);
+  const listOnMoveSessionToSection = useStableCallback(handleMoveSessionToSection);
   const listOnRenameSession = useStableCallback(handleRenameSession);
   const listOnToggleSessionSelected = useStableCallback(handleToggleBatchSelected);
 
@@ -856,8 +865,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                 onSelectSession={listOnSelectSession}
                 onDeleteSession={listOnDeleteSession}
                 onTogglePin={listOnTogglePin}
-                onToggleAutonomousFold={taskRecordTab === 'local' ? listOnToggleAutonomousFold : undefined}
-                onToggleFollowUp={taskRecordTab === 'local' ? listOnToggleFollowUp : undefined}
+                onMoveSessionToSection={taskRecordTab === 'local' ? listOnMoveSessionToSection : undefined}
                 onRenameSession={listOnRenameSession}
                 emptyText={i18nService.t(activeTaskRecordTab.emptyKey)}
                 selectionMode={isBatchArchiveMode && taskRecordTab === 'local'}
@@ -903,8 +911,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
         onTogglePin={handleTogglePin}
-        onToggleAutonomousFold={handleToggleAutonomousFold}
-        onToggleFollowUp={handleToggleFollowUp}
+        onMoveSessionToSection={handleMoveSessionToSection}
         onRenameSession={handleRenameSession}
       />
       <div className="px-3 pb-3 pt-1">

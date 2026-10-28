@@ -120,6 +120,28 @@ export const splitSessionsWithFollowUp = (
   return { humanSessions, followUpSessions, autoSessions };
 };
 
+/** The three sidebar sections a local-chats row can sit in. */
+export type SessionSidebarSection = 'autonomous' | 'follow-up' | 'normal';
+
+/**
+ * Which sidebar section the row renders in right now — the same precedence as
+ * splitSessionsWithFollowUp, per row: a manual fold placement wins ('in' →
+ * the fold, 'out' → the main list), then the follow-up marker or a live board
+ * decision, then the auto-origin policy, then the main list. This is what the
+ * row menu's "Move to…" submenu marks as the current section (the no-op
+ * target) and what the move handler compares against.
+ */
+export const resolveSessionSidebarSection = (
+  session: Pick<CoworkSessionSummary, 'autoOrigin' | 'foldOverride' | 'followUpState'>,
+  decisionPending: boolean,
+): SessionSidebarSection => {
+  if (session.foldOverride === 'in') return 'autonomous';
+  if (session.foldOverride === 'out') return 'normal';
+  if (isInFollowUpSection(session, decisionPending)) return 'follow-up';
+  if (shouldFoldIntoAutonomousTasks(session)) return 'autonomous';
+  return 'normal';
+};
+
 /**
  * Per-row fold membership. `decisionPending` is the caller-resolved answer of
  * "is this session currently owed an owner verdict" (the list looks the row up
