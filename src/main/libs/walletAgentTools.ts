@@ -520,12 +520,12 @@ export function buildWalletAgentTools(deps: {
 
   const formatSellOrder = (order: MvcNftSellOrder): string => {
     const parts = [
-      `#${order.tokenIndex ?? '?'} ${order.genesis ? `(genesis ${order.genesis})` : ''}`.trim(),
+      `#${order.tokenIndex ?? '?'} ${order.name || order.seriesName || ''}`.trim(),
+      order.genesis ? `(genesis ${order.genesis})` : '',
       `sellUtxo ${order.txId}:${order.outputIndex}`,
-      order.priceSats != null ? `price ${order.priceSats} sats` : 'price ?',
-    ];
+      order.priceSats != null ? `price ${order.priceSats} sats` : 'price: embedded in the sell contract (resolved on-chain at buy/cancel)',
+    ].filter(Boolean);
     if (order.address) parts.push(`seller ${order.address}`);
-    if (order.isReady != null) parts.push(`ready=${order.isReady}`);
     return `  - ${parts.join(' | ')}`;
   };
 

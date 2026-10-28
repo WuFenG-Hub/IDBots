@@ -67,25 +67,39 @@ interface RawMvcNftUtxoRow {
 }
 
 /**
- * wallet-api sell utxo row. The endpoint answers PascalCase keys (Address,
- * TxId, TxIndex, Price, Satoshi, IsReady, SensibleId, ...); the parser reads
- * both cases so a field-name flip on the wire stays visible instead of
- * silently dropping rows.
+ * wallet-api sell utxo row (live wire shape, mainnet 2026-10-28): camelCase
+ * keys, NO outputIndex and NO ask price. The outputIndex is derivable — the
+ * NftManager always appends the sell-contract output first (createSellTx
+ * adds the contract output before change/op_return), so it sits at vout 0;
+ * cross-checked on-chain against open-api-mvc /contract/nft/sell/address/
+ * <addr>/utxo (txIndex=0) during the S2 live-fire drill. The ask price is
+ * embedded in the sell contract script — the cancel/buy signer resolves it
+ * on-chain, so this listing view carries the contract utxo ref + NFT facts.
  */
 interface RawMvcNftSellUtxoRow {
-  Address?: string;
-  ContractAddress?: string;
+  address?: string;
+  txId?: string;
+  txIndex?: number | string;
+  codeHash?: string;
+  genesis?: string;
+  tokenIndex?: number | string;
+  sensibleId?: string;
+  satoshi?: number | string;
+  satoshiString?: string;
+  height?: number | string;
+  metaTxId?: string;
+  tokenSupply?: number | string;
+  flag?: string;
+  name?: string;
+  icon?: string;
+  seriesName?: string;
+  // Legacy PascalCase fallbacks (open-api-mvc rows use txid/txIndex/address).
   TxId?: string;
   TxIndex?: number | string;
-  CodeHash?: string;
-  Genesis?: string;
-  TokenIndex?: number | string;
-  SensibleId?: string;
+  Address?: string;
+  ContractAddress?: string;
   Price?: number | string;
-  Satoshi?: number | string;
   IsReady?: boolean | string | number;
-  Height?: number | string;
-  flag?: string;
 }
 
 interface MvcNftServiceDeps {
@@ -355,6 +369,9 @@ export interface MvcNftSellOrder {
   satoshis?: number;
   isReady?: boolean;
   height?: number;
+  name?: string;
+  seriesName?: string;
+  icon?: string;
 }
 
 export interface MvcNftSellOrders {
@@ -364,31 +381,37 @@ export interface MvcNftSellOrders {
 }
 
 export function normalizeMvcNftSellOrderRow(row: RawMvcNftSellUtxoRow): MvcNftSellOrder | null {
-  const txId = String(row.TxId ?? '').trim();
-  const outputIndex = normalizeOutpointIndex(row.TxIndex);
+  const txId = String(row.txId ?? row.TxId ?? '').trim();
+  const rawIndex = row.txIndex ?? row.TxIndex;
+  // The wallet-api sell view carries no output index: the NftManager always
+  // places the sell-contract output at vout 0 (see interface doc).
+  const outputIndex = rawIndex != null ? normalizeOutpointIndex(rawIndex) : 0;
   if (!/^[0-9a-fA-F]{64}$/.test(txId)) return null;
   const price = Number(row.Price);
-  const satoshis = Number(row.Satoshi ?? row.Price);
+  const satoshis = Number(row.satoshi ?? row.satoshiString);
+  const tokenIndex = normalizeTokenIndex(row.tokenIndex);
+  const height = normalizeHeight(row.height);
   const isReadyRaw = row.IsReady;
-  const isReady = typeof isReadyRaw === 'boolean'
-    ? isReadyRaw
-    : isReadyRaw === 1 || String(isReadyRaw ?? '').toLowerCase() === 'true';
-  const tokenIndex = normalizeTokenIndex(row.TokenIndex);
-  const height = normalizeHeight(row.Height);
-  return {
-    address: String(row.Address ?? '').trim(),
+  const order: MvcNftSellOrder = {
+    address: String(row.address ?? row.Address ?? '').trim(),
     contractAddress: String(row.ContractAddress ?? '').trim() || undefined,
     txId,
     outputIndex,
-    codeHash: String(row.CodeHash ?? '').trim() || undefined,
-    genesis: String(row.Genesis ?? '').trim() || undefined,
+    codeHash: String(row.codeHash ?? '').trim() || undefined,
+    genesis: String(row.genesis ?? '').trim() || undefined,
     tokenIndex: tokenIndex || undefined,
-    sensibleId: String(row.SensibleId ?? '').trim() || undefined,
+    sensibleId: String(row.sensibleId ?? '').trim() || undefined,
     priceSats: Number.isFinite(price) && price > 0 ? Math.round(price) : undefined,
     satoshis: Number.isFinite(satoshis) && satoshis > 0 ? Math.round(satoshis) : undefined,
-    isReady,
     height: height > 0 ? height : undefined,
+    name: String(row.name ?? '').trim() || undefined,
+    seriesName: String(row.seriesName ?? '').trim() || undefined,
+    icon: normalizeIcon(row.icon),
   };
+  if (typeof isReadyRaw === 'boolean') order.isReady = isReadyRaw;
+  else if (isReadyRaw === 1 || String(isReadyRaw ?? '').toLowerCase() === 'true') order.isReady = true;
+  else if (isReadyRaw != null) order.isReady = false;
+  return order;
 }
 
 /**
