@@ -1,0 +1,2 @@
+# Independent native package: do not add it to the root postinstall or Electron package.
+nodeLinker: hoisted

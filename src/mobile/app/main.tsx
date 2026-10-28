@@ -1,8 +1,9 @@
 /**
- * Mobile app entry (REQ-E-1). `./installBridgeFirst` must stay the first
- * import: it installs the mock bridge before any app module evaluates.
+ * Mobile app entry (REQ-E-1). Native bootstrap is validated first, then the
+ * C2/mock bridge is installed before any other app module evaluates.
  */
 
+import '../native/installNativeBootstrapFirst';
 import './installBridgeFirst';
 import { mountMobileApp } from './bootstrap';
 

@@ -1,0 +1,14 @@
+node_modules/
+.tooling/
+artifacts/
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/app/src/main/assets/idbots-native-bootstrap.js
+ios/App/App/public/
+ios/App/App/NativeShellFlavor.plist
+ios/App/App/idbots-native-bootstrap.js
+ios/App/Pods/
+ios/App/build/
+ios/DerivedData/

@@ -13,6 +13,7 @@
  * no redux, no Tailwind, no window.electron: styling is inline.
  */
 
+import '../native/installNativeBootstrapFirst';
 import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import { mobileI18n, t } from '../i18n';
