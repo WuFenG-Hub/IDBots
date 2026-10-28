@@ -15,6 +15,11 @@ test.describe('me screen', () => {
     // Fixture meters: 500 MiB traffic balance, 1,650,000 tokens LLM remaining.
     await expect(page.getByText('500 MB')).toBeVisible();
     await expect(page.getByText(/1,650,000 tokens/)).toBeVisible();
+    // F-16 regression guard: the LLM meter tile must render the payload
+    // number, never the '\u2014' placeholder of a failed meters read.
+    const llmTile = page.locator('div.rounded-xl').filter({ hasText: 'LLM' }).first();
+    await expect(llmTile).toContainText(/[\d,]+ tokens/);
+    await expect(llmTile).not.toContainText('\u2014');
     await attachScreen(testInfo, page, 'me-balance');
   });
 
