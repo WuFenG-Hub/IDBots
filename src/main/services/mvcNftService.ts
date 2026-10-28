@@ -142,17 +142,23 @@ const defaultDeps: MvcNftServiceDeps = {
   fetchUtxoList: async (address) => {
     const all: RawMvcNftUtxoRow[] = [];
     let flag: string | undefined;
-    while (true) {
+    // The endpoint echoes flag "0" on the last page — a truthy string, so an
+    // unguarded `if (!flag) break` would loop forever on it (the MVC utxo
+    // endpoints return an empty page for flag=0; this one repeats the list).
+    // Treat "0" (or an unchanged cursor) as the end, plus a hard page cap.
+    for (let page = 0; page < 50; page += 1) {
       const params = new URLSearchParams({ net: NET, address });
       if (flag) params.set('flag', flag);
+      const previousFlag = flag;
       const response = await fetchJson<{ list?: RawMvcNftUtxoRow[] }>(
         `${METALET_HOST}/wallet-api/v4/mvc/address/contract/nft/utxo-list?${params}`,
       );
       const list = Array.isArray(response?.list) ? response.list : [];
       if (!list.length) break;
       all.push(...list);
-      flag = typeof list[list.length - 1]?.flag === 'string' ? String(list[list.length - 1].flag) : undefined;
-      if (!flag) break;
+      const nextFlag = typeof list[list.length - 1]?.flag === 'string' ? String(list[list.length - 1].flag) : undefined;
+      if (!nextFlag || nextFlag === '0' || nextFlag === previousFlag) break;
+      flag = nextFlag;
     }
     return all;
   },

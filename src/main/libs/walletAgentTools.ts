@@ -380,7 +380,7 @@ export function buildWalletAgentTools(deps: {
           sections.push(`# ${label} ${result.address}\n- lookup failed: ${result.error}`);
           continue;
         }
-        sections.push(`# ${label}${formatMvcNftBalance(result.balance!)}`);
+        sections.push(`# ${label}\n${formatMvcNftBalance(result.balance!)}`);
       }
       if (sections.length === 0) {
         return textResult('wallet_nft_balance: nothing to query.', true);
