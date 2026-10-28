@@ -10,12 +10,17 @@ import type { MockMetabot } from '../../bridge/types';
 import type { useChat } from '../hooks/useChat';
 import type { ChatMessageView } from '../chatProjection';
 import { useKeyboardInset } from '../hooks/useKeyboardInset';
+import { useNativeBackHandler } from '../hooks/useNativeBackHandler';
 import { BottomSheet } from '../components/BottomSheet';
 
 type Chat = ReturnType<typeof useChat>;
 
 function SessionDrawer(props: { chat: Chat; open: boolean; onClose: () => void }): JSX.Element | null {
   const { chat } = props;
+  useNativeBackHandler(() => {
+    props.onClose();
+    return true;
+  }, props.open, 100);
   if (!props.open) return null;
   return (
     <div className="fixed inset-0 z-30">

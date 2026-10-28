@@ -15,6 +15,8 @@ import {
 } from './components/GatewayTerminalScreens';
 import { TabBar } from './components/TabBar';
 import type { MobileTab } from './components/TabBar';
+import { handleMobileRootBack } from './nativeBack';
+import { useNativeBackHandler } from './hooks/useNativeBackHandler';
 
 /**
  * App shell (REQ-E-11): connection banner on top, three lazy-loaded tabs,
@@ -93,6 +95,10 @@ export default function MobileApp(): JSX.Element {
     },
     chat.applyResync,
   );
+  useNativeBackHandler(() => handleMobileRootBack(
+    { rechargeOpen, tab },
+    { closeRecharge: () => setRechargeOpen(false), showChat: () => setTab('chat') },
+  ));
 
   // 4001/4003 unauthorized: the session is no longer valid — sign in again.
   useEffect(() => {

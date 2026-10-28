@@ -7,6 +7,8 @@ import type {
 } from '@/services/coworkSessionController';
 import type { MockElectronAPI } from '../../bridge/types';
 import { getAppBridge, getMobileElectron, hasAppBridge } from '../appBridge';
+import type { AppBridge } from '../appBridge';
+import { getNativeAdapter } from '../../native/nativeAdapter';
 
 export type ResyncSnapshot = CoworkResyncSnapshot;
 
@@ -86,6 +88,19 @@ export async function performResync(
   return { session, liveContent, pendingPermissions, ...(guard ? { guard } : {}) };
 }
 
+export function recoverNativeAppState(
+  active: boolean,
+  bridge: Pick<AppBridge, 'connection' | 'gateway'>,
+  resync: () => void,
+): void {
+  if (!active) return;
+  if (bridge.connection.getState() === 'online') {
+    resync();
+    return;
+  }
+  bridge.gateway?.reconnectNow();
+}
+
 /**
  * Subscribes to whichever bridge is active and runs the resync sequence on
  * every (re)connect. `onSnapshot` (useChat.applyResync) consumes steps 1–3
@@ -133,27 +148,28 @@ export function useResync(
       }
     };
 
+    let offReconnect: () => void;
     if (bridge.gateway) {
-      const off = bridge.gateway.onReconnected(() => void run());
-      return () => {
-        disposed = true;
-        off();
-      };
+      offReconnect = bridge.gateway.onReconnected(() => void run());
+    } else {
+      // Mock bridge: only a transition back to online from a non-online state
+      // counts as a reconnect (the initial 'online' fires no event).
+      let previous = bridge.connection.getState();
+      offReconnect = bridge.connection.onChange((state) => {
+        const wasNonOnline = previous !== 'online';
+        previous = state;
+        if (state === 'online' && wasNonOnline) {
+          void run();
+        }
+      });
     }
-
-    // Mock bridge: only a transition back to online from a non-online state
-    // counts as a reconnect (the initial 'online' fires no event).
-    let previous = bridge.connection.getState();
-    const off = bridge.connection.onChange((state) => {
-      const wasNonOnline = previous !== 'online';
-      previous = state;
-      if (state === 'online' && wasNonOnline) {
-        void run();
-      }
+    const offAppState = getNativeAdapter().onAppStateChange((active) => {
+      if (!disposed) recoverNativeAppState(active, bridge, () => void run());
     });
     return () => {
       disposed = true;
-      off();
+      offReconnect();
+      offAppState();
     };
   }, []);
 
