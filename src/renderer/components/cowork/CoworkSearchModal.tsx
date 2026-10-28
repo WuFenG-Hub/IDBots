@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { MagnifyingGlassIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { CoworkSessionSummary } from '../../types/cowork';
+import type { SessionSidebarSection } from '../../utils/sessionAutoGrouping';
 import CoworkSessionList from './CoworkSessionList';
 
 interface CoworkSearchModalProps {
@@ -17,12 +18,12 @@ interface CoworkSearchModalProps {
   onDeleteSession: (sessionId: string) => void;
   onTogglePin: (sessionId: string, pinned: boolean) => void;
   onRenameSession: (sessionId: string, title: string) => void;
-  /** Move a result row in or out of the Autonomous Tasks fold; optional, so a
-   * host without the fold (or without the handler) simply omits the menu entry. */
-  onToggleAutonomousFold?: (sessionId: string, currentlyFolded: boolean) => void;
-  /** Move a result row in or out of the Follow-Up Tasks section; optional, so a
-   * host without the section (or without the handler) omits the menu entry. */
-  onToggleFollowUp?: (sessionId: string, currentlyInFollowUp: boolean) => void;
+  /**
+   * Move a result row to one of the three sidebar sections via the row menu's
+   * "Move to…" submenu; optional, so a host without the sections (or without
+   * the handler) simply omits the menu entry.
+   */
+  onMoveSessionToSection?: (sessionId: string, target: SessionSidebarSection) => void;
 }
 
 const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
@@ -36,8 +37,7 @@ const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
   onDeleteSession,
   onTogglePin,
   onRenameSession,
-  onToggleAutonomousFold,
-  onToggleFollowUp,
+  onMoveSessionToSection,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [scopedOnly, setScopedOnly] = useState(true);
@@ -139,8 +139,7 @@ const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
               onDeleteSession={onDeleteSession}
               onTogglePin={onTogglePin}
               onRenameSession={onRenameSession}
-              onToggleAutonomousFold={onToggleAutonomousFold}
-              onToggleFollowUp={onToggleFollowUp}
+              onMoveSessionToSection={onMoveSessionToSection}
               /** The modal re-renders with the app on a language switch; the
                * memoized list needs to see it to refresh its labels. */
               language={i18nService.getLanguage()}
