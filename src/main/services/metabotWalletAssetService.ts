@@ -4,6 +4,7 @@ import { getAddressBalance } from './addressBalanceService';
 import { getMetabotAccountAddresses } from './metabotAccountService';
 import { listMrc20Assets as listMrc20AssetsService } from './mrc20Service';
 import { listMvcFtAssets as listMvcFtAssetsService } from './mvcFtService';
+import { getMvcNftBalance as getMvcNftBalanceService } from './mvcNftService';
 
 export interface NativeAsset {
   kind: 'native';
@@ -52,11 +53,30 @@ export interface MvcFtAsset {
   };
 }
 
+export interface MvcNftAsset {
+  kind: 'mvc-nft';
+  chain: 'mvc';
+  seriesName: string;
+  genesis: string;
+  codeHash: string;
+  sensibleId?: string;
+  address: string;
+  count: number;
+  tokenSupply?: number;
+  items: Array<{
+    tokenIndex: string;
+    name: string;
+    satoshi: number;
+    icon?: string;
+  }>;
+}
+
 export interface MetabotWalletAssets {
   metabotId: number;
   nativeAssets: NativeAsset[];
   mrc20Assets: Mrc20Asset[];
   mvcFtAssets: MvcFtAsset[];
+  mvcNftAssets: MvcNftAsset[];
 }
 
 interface MetabotWalletAssetInput {
@@ -105,6 +125,22 @@ interface MvcFtAssetInput {
   };
 }
 
+interface MvcNftAssetInput {
+  genesis: string;
+  codeHash: string;
+  sensibleId?: string;
+  seriesName: string;
+  tokenSupply?: number;
+  address: string;
+  count: number;
+  items: Array<{
+    tokenIndex: string;
+    name: string;
+    satoshi: number;
+    icon?: string;
+  }>;
+}
+
 interface MetabotWalletAssetServiceDeps {
   getNativeBalances: (summary: {
     metabot_id: number;
@@ -114,6 +150,7 @@ interface MetabotWalletAssetServiceDeps {
   }) => Promise<NativeBalances>;
   listMrc20Assets: (btcAddress: string) => Promise<Mrc20AssetInput[]>;
   listMvcFtAssets: (mvcAddress: string) => Promise<MvcFtAssetInput[]>;
+  listMvcNftAssets: (mvcAddress: string) => Promise<MvcNftAssetInput[]>;
 }
 
 const SATOSHIS_PER_UNIT = 100_000_000;
@@ -172,6 +209,24 @@ const defaultDeps: MetabotWalletAssetServiceDeps = {
   },
   async listMvcFtAssets(mvcAddress) {
     return await listMvcFtAssetsService(mvcAddress);
+  },
+  async listMvcNftAssets(mvcAddress) {
+    const balance = await getMvcNftBalanceService(mvcAddress);
+    return balance.collections.map((collection) => ({
+      genesis: collection.genesis,
+      codeHash: collection.codeHash,
+      sensibleId: collection.sensibleId,
+      seriesName: collection.seriesName,
+      tokenSupply: collection.tokenSupply,
+      address: balance.address,
+      count: collection.count,
+      items: collection.items.map((item) => ({
+        tokenIndex: item.tokenIndex,
+        name: item.name,
+        satoshi: item.satoshi,
+        icon: item.icon,
+      })),
+    }));
   },
 };
 
@@ -307,6 +362,26 @@ function mapMvcFtAssets(rows: MvcFtAssetInput[]): MvcFtAsset[] {
   });
 }
 
+function mapMvcNftAssets(rows: MvcNftAssetInput[]): MvcNftAsset[] {
+  return rows.map((row) => ({
+    kind: 'mvc-nft',
+    chain: 'mvc',
+    seriesName: String(row.seriesName || ''),
+    genesis: String(row.genesis || ''),
+    codeHash: String(row.codeHash || ''),
+    sensibleId: row.sensibleId,
+    address: String(row.address || ''),
+    count: normalizeDecimal(row.count),
+    tokenSupply: row.tokenSupply != null ? normalizeDecimal(row.tokenSupply) : undefined,
+    items: (Array.isArray(row.items) ? row.items : []).map((item) => ({
+      tokenIndex: String(item.tokenIndex || ''),
+      name: String(item.name || ''),
+      satoshi: normalizeDecimal(item.satoshi),
+      icon: item.icon,
+    })),
+  }));
+}
+
 export async function getMetabotWalletAssets(
   store: MetabotStore,
   input: MetabotWalletAssetInput,
@@ -317,7 +392,7 @@ export async function getMetabotWalletAssets(
   }
 
   const summary = getMetabotAccountAddresses(store, input.metabotId);
-  const [nativeBalances, mrc20Assets, mvcFtAssets] = await Promise.all([
+  const [nativeBalances, mrc20Assets, mvcFtAssets, mvcNftAssets] = await Promise.all([
     deps.getNativeBalances(summary),
     deps.listMrc20Assets(summary.btc_address).catch((error) => {
       if (isTokenSoftFailure(error)) {
@@ -333,6 +408,13 @@ export async function getMetabotWalletAssets(
       }
       throw error;
     }),
+    deps.listMvcNftAssets(summary.mvc_address).catch((error) => {
+      if (isTokenSoftFailure(error)) {
+        logSoftFailure('MVC NFT asset list', error);
+        return [];
+      }
+      throw error;
+    }),
   ]);
 
   return {
@@ -340,5 +422,6 @@ export async function getMetabotWalletAssets(
     nativeAssets: mapNativeAssets(nativeBalances),
     mrc20Assets: mapMrc20Assets(mrc20Assets),
     mvcFtAssets: mapMvcFtAssets(mvcFtAssets),
+    mvcNftAssets: mapMvcNftAssets(mvcNftAssets),
   };
 }

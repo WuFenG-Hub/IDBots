@@ -10,6 +10,7 @@ import type {
   WalletBalanceSnapshot,
   WalletQueryChain,
 } from '../services/walletQueryService';
+import type { MvcNftBalance } from '../services/mvcNftService';
 
 /**
  * Host control surface for the wallet tools, wired in main.ts: UTXO-sum
@@ -27,6 +28,22 @@ export type WalletToolsControl = {
     host?: { confirmExternal?: (info: ExternalTransferInfo) => Promise<boolean> },
   ): Promise<WalletTransferResult>;
   listTransfers(limit?: number, metabotId?: number): unknown[];
+  listMvcNfts(input: {
+    metabotIds?: number[];
+    address?: string;
+  }): Promise<Array<{
+    metabotId: number | null;
+    address: string;
+    balance?: MvcNftBalance;
+    error?: string;
+  }>>;
+  transferNft(params: {
+    metabotId: number;
+    genesis: string;
+    codehash: string;
+    tokenIndex: string;
+    toAddress: string;
+  }): Promise<{ txId: string }>;
 };
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
@@ -88,6 +105,18 @@ function formatTransferFailure(result: WalletTransferResult & { success: false }
   const lines = [`Transfer failed (${result.error_code}): ${result.error}`];
   if (result.have_sats != null) lines.push(`- have: ${result.have_sats} sats (${(result.have_sats / SATOSHI_PER_UNIT).toFixed(8)} SPACE)`);
   if (result.need_sats != null) lines.push(`- need: ${result.need_sats} sats (${(result.need_sats / SATOSHI_PER_UNIT).toFixed(8)} SPACE, amount + estimated fee)`);
+  return lines.join('\n');
+}
+
+function formatMvcNftBalance(balance: MvcNftBalance): string {
+  const lines: string[] = [`- ${balance.address}: ${balance.count} NFT(s)`];
+  for (const collection of balance.collections) {
+    const supply = collection.tokenSupply != null ? ` / supply ${collection.tokenSupply}` : '';
+    lines.push(`- ${collection.seriesName || '(unnamed series)'}: ${collection.count} owned${supply} [genesis ${collection.genesis}]`);
+    for (const item of collection.items) {
+      lines.push(`  - #${item.tokenIndex} ${item.name || '(unnamed)'} (${item.satoshi} sats, tx ${item.txId}:${item.outputIndex})`);
+    }
+  }
   return lines.join('\n');
 }
 
@@ -294,5 +323,170 @@ export function buildWalletAgentTools(deps: {
     }
   );
 
-  return [walletBalance, walletTransfer];
+  const walletNftBalance = tool(
+    'wallet_nft_balance',
+    [
+      'Query MVC NFT (MetaContract) holdings for local MetaBots by id or name, or for a raw address.',
+      'Use when the user asks what NFTs a bot holds, before planning an NFT transfer, or to cross-check a transfer landed.',
+      'Returns structured on-chain data per address: total count, per-series aggregation (series name / owned / supply / genesis) and item details (tokenIndex, name, satoshi, outpoint) via the wallet-api count/summary-list/utxo-list endpoints.',
+      'Read-only public chain data. Batch multiple metabot_ids in ONE call.',
+    ].join(' '),
+    {
+      metabot_ids: z
+        .array(z.number().int().positive())
+        .optional()
+        .describe('Local MetaBot ids to query, e.g. [1, 15]. Batch in one call.'),
+      names: z
+        .array(z.string())
+        .optional()
+        .describe('Local MetaBot names to resolve and query, e.g. ["AI_Sunny", "Builder阿码"].'),
+      address: z
+        .string()
+        .optional()
+        .describe('Explicit MVC address to query (used as-is).'),
+    },
+    async (args: {
+      metabot_ids?: number[];
+      names?: string[];
+      address?: string;
+    }) => {
+      const metabotIds: number[] = [];
+      for (const raw of args.metabot_ids ?? []) {
+        const id = Number(raw);
+        if (Number.isInteger(id) && id > 0 && !metabotIds.includes(id)) metabotIds.push(id);
+      }
+      for (const rawName of args.names ?? []) {
+        const name = asString(rawName);
+        if (!name) continue;
+        const id = control.resolveMetabotIdByName(name);
+        if (id == null) {
+          return textResult(`wallet_nft_balance: local MetaBot not found by name: ${name}`, true);
+        }
+        if (!metabotIds.includes(id)) metabotIds.push(id);
+      }
+      const address = asString(args.address);
+      if (metabotIds.length === 0 && !address) {
+        return textResult(
+          'wallet_nft_balance requires metabot_ids, names, or address (pass the ids you want in ONE call).',
+          true,
+        );
+      }
+
+      const sections: string[] = [];
+      const results = await control.listMvcNfts({ metabotIds, address });
+      for (const result of results) {
+        const label = result.metabotId != null ? `metabot_id ${result.metabotId}` : 'address';
+        if (result.error) {
+          sections.push(`# ${label} ${result.address}\n- lookup failed: ${result.error}`);
+          continue;
+        }
+        sections.push(`# ${label}${formatMvcNftBalance(result.balance!)}`);
+      }
+      if (sections.length === 0) {
+        return textResult('wallet_nft_balance: nothing to query.', true);
+      }
+      return textResult(sections.join('\n'));
+    }
+  );
+
+  const walletNftTransfer = tool(
+    'wallet_nft_transfer',
+    [
+      'Transfer ONE MVC NFT (MetaContract token identified by genesis + codehash + tokenIndex) from THIS session MetaBot\'s own wallet to a target address or local MetaBot.',
+      'Use when the owner asks to send/give an NFT to another bot or address. `to` accepts a local metabot_id, a local bot name, or a raw MVC address; the token is identified by its series genesis, codehash and tokenIndex (see wallet_nft_balance).',
+      'Signing runs in a subprocess worker; the raw tx broadcasts via wallet-api. Returns the txid; verify ownership change with wallet_nft_balance afterwards.',
+      'NFT transfers are irreversible on-chain — confirm the token index and receiver with the owner before calling when ambiguous.',
+    ].join(' '),
+    {
+      to: z
+        .string()
+        .min(1)
+        .describe('Target: local metabot_id (e.g. "15"), local bot name, or MVC address.'),
+      genesis: z.string().min(1).describe('NFT series genesis id (64 hex).'),
+      codehash: z.string().min(1).describe('NFT series codehash (40 hex).'),
+      token_index: z
+        .string()
+        .regex(/^\d+$/)
+        .describe('Token index of the single NFT to transfer, e.g. "2671".'),
+    },
+    async (args: {
+      to: string;
+      genesis: string;
+      codehash: string;
+      token_index: string;
+    }) => {
+      const metabotId = resolveMetabotId(sessionId);
+      if (metabotId == null) {
+        return textResult(
+          'wallet_nft_transfer could not determine which MetaBot owns this session; transfers must spend the session bot\'s own wallet.',
+          true,
+        );
+      }
+
+      const toRaw = asString(args.to);
+      if (!toRaw) {
+        return textResult('wallet_nft_transfer requires `to` (metabot_id, name, or address).', true);
+      }
+      let toAddress = '';
+      let toMetabotId: number | null = null;
+      if (/^\d+$/.test(toRaw)) {
+        const id = Number(toRaw);
+        const address = control.getMetabotMvcAddress(id);
+        if (address) {
+          toAddress = address;
+          toMetabotId = id;
+        } else {
+          return textResult(`wallet_nft_transfer: local MetaBot not found: ${toRaw}`, true);
+        }
+      } else if (!looksLikeMvcAddress(toRaw)) {
+        const id = control.resolveMetabotIdByName(toRaw);
+        if (id == null) {
+          return textResult(
+            `wallet_nft_transfer: "${toRaw}" is neither a local MetaBot name nor an address. For an external address pass the full MVC address.`,
+            true,
+          );
+        }
+        toMetabotId = id;
+        toAddress = control.getMetabotMvcAddress(id) ?? '';
+        if (!toAddress) {
+          return textResult(`wallet_nft_transfer: MetaBot ${toRaw} has no mvc address.`, true);
+        }
+      } else {
+        toAddress = toRaw;
+      }
+
+      const genesis = asString(args.genesis);
+      const codehash = asString(args.codehash);
+      const tokenIndex = asString(args.token_index);
+      if (!genesis || !codehash || !/^\d+$/.test(tokenIndex)) {
+        return textResult(
+          'wallet_nft_transfer requires genesis, codehash, and token_index (digits). Use wallet_nft_balance to look them up.',
+          true,
+        );
+      }
+
+      try {
+        const result = await control.transferNft({
+          metabotId,
+          genesis,
+          codehash,
+          tokenIndex,
+          toAddress,
+        });
+        const lines = [
+          'NFT transfer broadcast on-chain.',
+          `- txid: ${result.txId}`,
+          `- token: #${tokenIndex} (genesis ${genesis})`,
+          `- to: ${toAddress}${toMetabotId != null ? ` (metabot_id ${toMetabotId})` : ''}`,
+          '- Verify with wallet_nft_balance after the tx confirms.',
+        ];
+        return textResult(lines.join('\n'));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return textResult(`wallet_nft_transfer failed: ${msg}`, true);
+      }
+    }
+  );
+
+  return [walletBalance, walletTransfer, walletNftBalance, walletNftTransfer];
 }
