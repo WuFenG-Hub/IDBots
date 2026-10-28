@@ -11,6 +11,7 @@ import type {
 } from '../src/renderer/types/cowork';
 import {
   CoworkSessionController,
+  detectSideEffectOutcome,
   MOBILE_DRAFTS_STORAGE_KEY,
   MOBILE_OPEN_SESSION_STORAGE_KEY,
   type CoworkRecoveryStorage,
@@ -407,6 +408,93 @@ describe('cowork session controller', () => {
     assert.equal(harness.submitCalls[0]?.text.split('/data/workspace/uploads/a.txt').length, 2);
     assert.equal(controller.getDraft(), '');
     assert.deepEqual(controller.getAttachments(), []);
+  });
+
+  it('F-17b: a 120s timeout that actually succeeded reconciles to verified, not unknown (阿燃 case)', async (t) => {
+    const { harness, electron } = makeHarness();
+    const controller = controllerFor(electron);
+    t.after(() => controller.destroy());
+    await controller.openSession('s1');
+    harness.submitHandler = async () => {
+      // Gateway C2 TIMEOUT: "no result within 120000ms" (tenant side kept the
+      // handler running; the work actually completed).
+      throw new Error('no result within 120000ms');
+    };
+    const first = await controller.send('帮我创建一个新 bot');
+    assert.equal(first.status, 'uncertain');
+
+    // Tenant keeps running while the phone shows the unknown card: the tool
+    // finishes on the server with its completion certificate in the
+    // transcript. Uses the exact tool_result text the tenant persisted.
+    harness.session.messages.push(
+      { id: 't-u', type: 'user', content: '帮我创建一个新 bot', timestamp: 90, metadata: {} } as never,
+      {
+        id: 't-use', type: 'tool_use', content: 'Using tool: metabot_create', timestamp: 95,
+        metadata: { toolName: 'metabot_create', toolUseId: 'call_01_sj7v', isError: false },
+      } as never,
+      {
+        id: 't-result', type: 'tool_result', content: 'MetaBot created: 阿燃 (id=2, type=worker)',
+        timestamp: 130,
+        metadata: {
+          toolResult: 'MetaBot created: 阿燃 (id=2, type=worker, llm=deepseek-4.1-flash).\nIdentity registered on-chain (globalMetaID: idq12waww7cx7rwnwyffegdf4zqr2u2gumdcdav40y).',
+          toolUseId: 'call_01_sj7v', isError: false,
+        },
+      } as never,
+    );
+
+    // Auto reconcile fires without any user click.
+    let verified = false;
+    for (let attempt = 0; attempt < 50 && !verified; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      verified = controller.getSnapshot().attempts.some((entry) => entry.status === 'verified');
+    }
+    assert.ok(verified, 'auto reconcile must surface the verified conclusion');
+    const entry = controller.getSnapshot().attempts.find((attempt) => attempt.status === 'verified')!;
+    assert.match(entry.error ?? '', /MetaBot created: 阿燃/);
+    // Verify is terminal: no manual reconcile click needed, no retry prompt.
+    assert.equal(entry.error?.includes('The tenant has not confirmed'), false);
+  });
+
+  it('F-17b: reconcile with no server evidence stays uncertain and clears the auto pin', async (t) => {
+    const { harness, electron } = makeHarness();
+    const controller = controllerFor(electron);
+    t.after(() => controller.destroy());
+    await controller.openSession('s1');
+    harness.submitHandler = async () => {
+      throw new Error('no result within 120000ms');
+    };
+    const first = await controller.send('plain request');
+    assert.equal(first.status, 'uncertain');
+    let settled = false;
+    for (let attempt = 0; attempt < 50 && !settled; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      settled = controller.getSnapshot().attempts.every(
+        (entry) => entry.status === 'uncertain' || entry.status === 'reconciling',
+      );
+    }
+    const statuses = controller.getSnapshot().attempts.map((entry) => entry.status);
+    assert.notEqual(statuses.length, 0);
+    assert.ok(statuses.every((status) => status === 'uncertain'), `settled back to uncertain, got: ${statuses.join()}`);
+    // Draft survives — the user can still decide (retry / discard).
+    assert.equal(controller.getDraft().length > 0, true);
+  });
+
+  it('detectSideEffectOutcome maps the incident transcript to the completion certificate', () => {
+    const attempt = { createdAt: 100 };
+    const created = [
+      { id: 'u', type: 'user' as const, content: 'hi', timestamp: 1, metadata: {} },
+      { id: 'use', type: 'tool_use' as const, content: '', timestamp: 110, metadata: { toolName: 'metabot_create', toolUseId: 'id-a', isError: false } },
+      { id: 'res', type: 'tool_result' as const, content: '', timestamp: 120, metadata: { toolResult: 'MetaBot created: 测试号 (id=3).', toolUseId: 'id-a', isError: false } },
+    ];
+    assert.match(detectSideEffectOutcome(created, attempt) ?? '', /MetaBot created: 测试号/);
+    // A failed creation (isError) is NOT a completion certificate.
+    const failed = [...created];
+    (failed[2].metadata as Record<string, unknown>).isError = true;
+    assert.equal(detectSideEffectOutcome(failed, attempt), null);
+    // Older off-attempt tool uses cannot fabricate the certificate either.
+    const stale = [{ id: 'use2', type: 'tool_use' as const, content: '', timestamp: 1, metadata: { toolName: 'metabot_create', toolUseId: 'id-b', isError: false } },
+      { id: 'res2', type: 'tool_result' as const, content: '', timestamp: 2, metadata: { toolResult: 'MetaBot created: 旧的 (id=9).', toolUseId: 'id-b', isError: false } }];
+    assert.equal(detectSideEffectOutcome(stale, { createdAt: 100_000_000 }), null);
   });
 
   it('keeps text and attachments durable until the tenant accepts the submission', async (t) => {

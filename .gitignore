@@ -787,3 +787,7 @@ blob-report/
 
 # Poll-loop backoff ladder + circuit breaker (PR #101)
 !tests/pollBackoffController.test.mjs
+
+# F-17: mobile permission payload rendering + uncertain-outcome reconcile
+!tests/ipcSanitizeDepth.test.ts
+!tests/coworkPermissionPanelFallback.test.tsx

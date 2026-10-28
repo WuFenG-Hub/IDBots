@@ -193,6 +193,22 @@ const skillFixtures = [
 const sessions = new Map();
 const liveMessages = new Map(); // `${sessionId}${messageId}` -> message
 const sessionTimers = new Map(); // sessionId -> timer handles
+const F17A_REAL_ASK_TOOL_INPUT = {
+  questions: [{
+    id: 'confirm_create',
+    header: '确认入职',
+    question: '这张卡可以照着建吗？',
+    multi_select: false,
+    detail: '建完他会是一个独立的本地 Worker Bot：有自己的钱包和链上身份（globalMetaId）。',
+    options: [
+      { label: '就这个（推荐）', description: '按现在的名字、人格、火箭头像创建。' },
+      { label: '名字换一个', description: '保留人格和头像，我再出 3 个名字备选。' },
+      { label: '头像换一个', description: '保留名字和人格，从其它图里再挑。' },
+    ],
+  }],
+};
+const pendingPermissions = [];
+
 let sessionSeq = 0;
 let messageSeq = 0;
 let broadcast = null;
@@ -626,6 +642,29 @@ async function invokeHandler(channel, clientId, args) {
       if (text) {
         session.messages.push({ id: `gw-msg-${++messageSeq}`, type: 'user', content: text, timestamp: now });
       }
+      // F-17a fixture: raise a REAL ask_user_question permission event over
+      // the gateway event fan-out with the exact 阿燃 incident payload shape —
+      // regression gate for the IPC sanitize depth crush that made the mobile
+      // permission panel render the unanswerable "Request unavailable" card.
+      if (text.includes('__f17a_emit_ask__')) {
+        pendingPermissions.push({
+          sessionId: session.id,
+          request: {
+            sessionId: session.id,
+            requestId: 'gw-ask-f17a',
+            toolName: 'AskUserQuestion',
+            toolInput: F17A_REAL_ASK_TOOL_INPUT,
+            perQuestionTimeoutMs: null,
+          },
+        });
+        setTimeout(() => {
+          const bound = broadcast;
+          if (!bound || !pendingPermissions.length) return;
+          const pending = pendingPermissions.at(-1);
+          bound('cowork:stream:permission', [{ sessionId: pending.sessionId, request: pending.request }]);
+        }, 60);
+        return { success: true, session: { ...session, messages: [...session.messages] } };
+      }
       startFixtureTurn(session, text);
       return { success: true, session: { ...session, messages: [...session.messages] } };
     }
@@ -681,10 +720,30 @@ async function invokeHandler(channel, clientId, args) {
       }
       return { success: false, error: result.message, code: result.code };
     }
-    case 'cowork:permission:respond':
-      return { success: false, error: 'no pending permission in the fixture' };
+    case 'cowork:permission:respond': {
+      const input = args[0] ?? {};
+      const index = pendingPermissions.findIndex((entry) => entry.request.requestId === input.requestId);
+      if (index === -1) return { success: false, error: 'no pending permission in the fixture' };
+      const [removed] = pendingPermissions.splice(index, 1);
+      const resolution = input.result?.behavior === 'allow'
+        ? { resolved: true, behavior: 'allow' }
+        : { resolved: true, behavior: 'deny' };
+      const parent = sessions.get(removed.sessionId);
+      if (parent) {
+        parent.messages.push({
+          id: `gw-msg-${++messageSeq}`,
+          type: 'tool_use',
+          content: `Permission ${resolution.behavior}: ${input.requestId}`,
+          timestamp: Date.now(),
+          metadata: { submissionId: input.requestId },
+        });
+      }
+      broadcast?.('cowork:stream:permissionResolved', [{ sessionId: removed.sessionId, requestId: input.requestId }]);
+      broadcast?.('cowork:stream:message', [{ sessionId: removed.sessionId, message: { id: `gw-msg-${messageSeq}`, type: 'tool_use', content: `Permission ${resolution.behavior}: ${input.requestId}`, timestamp: Date.now(), metadata: { submissionId: input.requestId } } }]);
+      return { success: true, resolution };
+    }
     case 'mobile:permission:listPending':
-      return [];
+      return [...pendingPermissions];
     case 'mobile:bootstrap:status':
       return {
         identity: 'done',

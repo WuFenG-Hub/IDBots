@@ -179,14 +179,78 @@ test('safety approval returns the first safety option', async ({ page }) => {
   expect(answered.result.updatedInput?.answers).toEqual({ 'Delete this directory?': 'Delete once' });
 });
 
-test('malformed clarification fails closed with only denial available', async ({ page }) => {
+test('real tenant ask payload renders options and submits by question text (F-17a regression)', async ({ page }) => {
+  // Byte-faithful shape of the 2026-10-28 阿燃 incident payload (tenant row
+  // e9083d66, session 64c3d955): `id` + snake_case `multi_select` ride along
+  // with the standard question fields — they must not break parsing.
+  const sessionId = await startSession(page);
+  await emitPermission(page, sessionId, 'f17a-real', {
+    questions: [{
+      id: 'confirm_create',
+      header: '确认入职',
+      question: '这张卡可以照着建吗？',
+      multi_select: false,
+      detail: '建完他会是一个独立的本地 Worker Bot：有自己的钱包和链上身份（globalMetaId）。',
+      options: [
+        { label: '就这个（推荐）', description: '按现在的名字、人格、火箭头像创建。' },
+        { label: '名字换一个', description: '保留人格和头像，我再出 3 个名字备选。' },
+        { label: '头像换一个', description: '保留名字和人格，我从铃铛/猫头鹰/狮子等其它图里再挑。' },
+      ],
+    }],
+  });
+  const dialog = page.getByRole('dialog', { name: 'Tool permission requested' });
+  await expect(dialog).toBeVisible();
+  await expect(page.getByText('这张卡可以照着建吗？')).toBeVisible();
+  await expect(page.getByRole('radio', { name: /就这个（推荐）/ })).toBeVisible();
+  await page.getByRole('radio', { name: /就这个（推荐）/ }).click();
+  await page.getByRole('button', { name: 'Submit', exact: true }).click();
+  const [answered] = await results(page);
+  expect(answered.result.behavior).toBe('allow');
+  expect(answered.result.updatedInput?.answers).toEqual({ '这张卡可以照着建吗？': '就这个（推荐）' });
+});
+
+test('string-only options still render as selectable choices (F-17a tolerance)', async ({ page }) => {
+  const sessionId = await startSession(page);
+  await emitPermission(page, sessionId, 'string-options', {
+    questions: [{
+      question: 'Pick a lane?',
+      options: ['Fast path', 'Slow path'],
+    }],
+  });
+  const dialog = page.getByRole('dialog', { name: 'Tool permission requested' });
+  await expect(dialog).toBeVisible();
+  await expect(page.getByRole('radio', { name: 'Fast path' })).toBeVisible();
+  await page.getByRole('radio', { name: 'Fast path' }).click();
+  await page.getByRole('button', { name: 'Submit', exact: true }).click();
+  const [answered] = await results(page);
+  expect(answered.result.behavior).toBe('allow');
+  expect(answered.result.updatedInput?.answers).toEqual({ 'Pick a lane?': 'Fast path' });
+});
+
+test('malformed clarification degrades to a plain-text card with Allow and Deny (F-17a)', async ({ page }) => {
   const sessionId = await startSession(page);
   await emitPermission(page, sessionId, 'malformed', { questions: [] });
   await expect(page.getByText('Request unavailable')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Allow once' })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Deny', exact: true }).click();
+  // F-17a: the payload is still readable (raw JSON fallback) and the user is
+  // never boxed into deny-only — Allow forwards the payload unchanged.
+  await expect(page.getByText('"questions"')).toBeVisible();
+  const denyButton = page.getByRole('button', { name: 'Deny', exact: true });
+  await expect(denyButton).toBeVisible();
+  const allowButton = page.getByRole('button', { name: 'Allow once' });
+  await expect(allowButton).toBeVisible();
+  await denyButton.click();
   await expect.poll(async () => (await results(page)).length).toBe(1);
   const [answered] = await results(page);
   expect(answered.result.behavior).toBe('deny');
   expect(answered.result.message).toBe('Permission denied');
+});
+
+test('malformed clarification Allow forwards the payload unchanged (F-17a fallback)', async ({ page }) => {
+  const sessionId = await startSession(page);
+  await emitPermission(page, sessionId, 'malformed-allow', { questions: [] });
+  await expect(page.getByText('Request unavailable')).toBeVisible();
+  await page.getByRole('button', { name: 'Allow once' }).click();
+  await expect.poll(async () => (await results(page)).length).toBe(1);
+  const [answered] = await results(page);
+  expect(answered.result.behavior).toBe('allow');
 });

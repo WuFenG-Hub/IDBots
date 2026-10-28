@@ -9,8 +9,16 @@
  */
 
 export const IPC_STRING_MAX_CHARS = 4_000;
-// Response envelopes around long-term boards need six levels for participant and evidence objects.
-export const IPC_MAX_DEPTH = 6;
+// Depth budget notes (2026-10-28 F-17a): the gateway re-sanitizes payloads that
+// main handlers have already sanitized, and the extra wrapper levels (event
+// {sessionId, request/message} + the parent object) shift every nested value
+// down. The ask_user_question permission payload needs the deepest budget of
+// the known families — options[].label/description sit 8–9 levels below the
+// gateway's root — so the cap is 10: still a hard bound against runaway
+// payloads (strings/keys/items stay capped), but no longer short enough to
+// crush option objects into the string '[truncated-depth]', which made the
+// mobile permission panel render an answerable ask as "Request unavailable".
+export const IPC_MAX_DEPTH = 10;
 export const IPC_MAX_KEYS = 80;
 export const IPC_MAX_ITEMS = 40;
 export const IPC_UPDATE_CONTENT_MAX_CHARS = 120_000;
