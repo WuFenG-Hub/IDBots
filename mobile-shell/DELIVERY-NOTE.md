@@ -2,9 +2,9 @@
 
 ## 1. Delivery State
 
-NS0 code and Android/iOS emulator WebView evidence are complete. This is not a production release, a signed release candidate, or a claim of full native acceptance.
+NS0 code and Android/iOS emulator WebView evidence are complete. This is not a production release, a signed release candidate, or a claim of owner acceptance.
 
-One inherited S2 verification blocker remains: the existing real-C2 Bot lifecycle E2E fails on both mobile profiles because it attempts to select `Default model` while the existing `Advanced options` section is collapsed. It reproduced independently on iPhone WebKit and Pixel Chromium, including a standalone rerun. The failed test and the UI code involved are unchanged by NS0. Full native acceptance remains blocked until the owner triages this baseline failure and the explicit NOT RUN items below.
+Both independent-review S2 findings are resolved. `mobile-shell/android/gradlew` is committed as `100755` and covered by a Git-index/on-disk regression check; a fresh detached worktree built Android successfully without any manual `chmod`. The real-C2 Bot lifecycle test now follows the current Advanced/Model/Skills UI and passes 17/17 on iPhone WebKit and 17/17 on Pixel Chromium, restoring 34/34 without skipping tests or increasing timeouts. The package is ready for the independent acceptance process; the explicit NOT RUN items below remain unclaimed.
 
 No push, merge, deployment, production rollout, signing-key access, TestFlight upload, store submission, or owner-secret access was performed. Frozen contracts were not edited.
 
@@ -16,7 +16,7 @@ No push, merge, deployment, production rollout, signing-key access, TestFlight u
 | Worktree | `/Users/tusm/Documents/MetaID_Projects/IDBots/IDBots/.worktrees/mobile-shell-foundation` |
 | Base SHA | `6d95a10ac10d972596d9cd6fc9d0f05e758d01b3` |
 | Implementation SHA | `ae6e8108096ea89184ce69d6e9a9c2e22003d65d` |
-| Final SHA | This delivery-note commit; resolve with `git rev-parse HEAD`. The exact final SHA and both journal pins are recorded in `mobile-shell/artifacts/ns0-handoff.json` after the commit and in the independent-review handoff. |
+| Final SHA | This review-remediation commit; resolve with `git rev-parse HEAD`. The exact final SHA and all journal pins are recorded in `mobile-shell/artifacts/ns0-handoff.json` after the commit and in the independent-review handoff. |
 | Native package version | `0.1.0` |
 | Native bridge version | `1` |
 | C2 / allowlist version | `1.0.0` / `1.0.0` |
@@ -31,7 +31,10 @@ The remote `origin/main` could not be fetched because GitHub was unreachable. Th
 | Commit | Subject | On-chain journal pin |
 |---|---|---|
 | `ae6e8108096ea89184ce69d6e9a9c2e22003d65d` | `feat: add native mobile shell foundation` | `f2807841ba3aca1990268ab740e5ff1597763637c3cb43dede83a91fd7e83660i0` |
-| This delivery-note commit | `docs: add native shell foundation delivery note` | Recorded with the final SHA in `mobile-shell/artifacts/ns0-handoff.json` |
+| `03ce703094c656aca7f37c8974b1a00afa31b61a` | `docs: add native shell foundation delivery note` | `2cad0c069884f6039aaa6672059df0a02521b8c288e6ac1290b62fc77cabc990i0` |
+| `fcd765ebbd115ae8fa60051f4baeb628b1d5fe7e` | `fix: make Android Gradle wrapper executable` | `e27556cb6ffff817988c4aef0d9b10f5dbdced48059a55dad8a1b5f8031c9011i0` |
+| `5db97398976df6552f6eac9ac11dddbd96395908` | `fix: align gateway Bot lifecycle test with current UI` | `d326dc16d8ff9220f5dd3d0da6fc507feabe404d90061d35f95788e4a6948b7di0` |
+| This review-remediation commit | `docs: record NS0 review remediation` | Recorded with the final SHA in `mobile-shell/artifacts/ns0-handoff.json` |
 
 Journal entries were published through the required `metabot-post-buzz` skill on MVC. No GitHub push occurred.
 
@@ -43,6 +46,8 @@ The implementation contains 106 files in the implementation commit, primarily th
 - `mobile-shell/android/`, `mobile-shell/ios/`: Capacitor 8.5.3 native projects, App plugin 8.1.2, platform build files, and local tests (NS-A-01, NS-A-15).
 - `mobile-shell/scripts/flavors.mjs`, `select-flavor.mjs`, `build-android.mjs`, `build-ios.mjs`: reproducible staging/production selection and debug builds (NS-A-02).
 - `mobile-shell/android/app/src/main/java/world/idbots/app/`: exact-origin policy, document-start bootstrap, WebView/navigation scaffolding, and debug-only sanitized evidence (NS-A-02 through NS-A-05).
+- `mobile-shell/android/gradlew`, `mobile-shell/tests/config.test.mjs`: executable mode `100755` plus Git-index/on-disk regression coverage.
+- `e2e/mobile/bots-gateway.spec.ts`: current Advanced/Model/Skills navigation for the restored 34/34 real-C2 gate (NS-A-14).
 - `mobile-shell/ios/App/App/Native*`: flavor validation, main-frame document-start injection, exact-origin navigation proxy, bundled-error handling, and DEBUG-only smoke support (NS-A-02 through NS-A-05).
 - `mobile-shell/native/idbots-native-bootstrap.js`: shared versioned native surface and client facts (NS-A-04).
 - `mobile-shell/www/`: small bilingual offline/error UI only; no cached online PWA or service worker (NS-A-05).
@@ -85,7 +90,7 @@ All commands ran on the deliverable worktree unless noted.
 | Command / lane | Result |
 |---|---|
 | `pnpm install --frozen-lockfile` (root and `mobile-shell/`) | PASS; root postinstall and kernel patches completed. `mobile-shell/` was not added to root postinstall. |
-| `pnpm test` (native package) | PASS, 11/11 |
+| `pnpm test` (native package) | PASS, 12/12, including the Gradle executable-bit regression check |
 | `pnpm exec tsx --test tests/mobileNativeBootstrap.test.ts` | PASS, 6/6 |
 | `pnpm run test:mobile` | PASS, 235/235 (178 + 6 + 51) |
 | `pnpm test` (root) | PASS; every suite summary passed, 2,163 tests aggregated from the current output |
@@ -93,9 +98,9 @@ All commands ran on the deliverable worktree unless noted.
 | `pnpm run build:mobile` | PASS; login 62.4 KB gzip and app initial JS 92.5 KB gzip, within 80 KB / 500 KB budgets |
 | `pnpm run build:skills` | PASS |
 | `pnpm run test:e2e:mobile` | PASS, 110/110 across iPhone WebKit and Pixel Chromium; 2 skipped |
-| `pnpm run test:e2e:mobile:gateway` | PARTIAL/FAIL, 16/17 on iPhone; inherited Bot advanced-options failure |
-| `pnpm run test:e2e:mobile:gateway --project=pixel7` | PARTIAL/FAIL, 16/17 on Pixel; same failure. Combined real-C2 result: 32/34 |
+| `pnpm run test:e2e:mobile:gateway` | PASS, 34/34: 17/17 on iPhone WebKit and 17/17 on Pixel Chromium; no skipped test or increased timeout. Evidence: `mobile-shell/artifacts/real-c2-34-34.log` |
 | `./gradlew --no-daemon --offline --init-script ../.tooling/init-mirrors.gradle assembleStagingDebug testStagingDebugUnitTest` (from `mobile-shell/android/`) | PASS; APK built and 4/4 JVM tests passed (3 origin-policy + 1 template test) |
+| `pnpm run build:android:staging` in a fresh detached worktree at `fcd765eb` | PASS, `BUILD SUCCESSFUL in 15s`, 91 tasks, no manual `chmod`. Evidence: `mobile-shell/artifacts/fresh-worktree-android-build.log`; temporary worktree removed after verification |
 | `pnpm run build:ios:staging` | PASS, `** BUILD SUCCEEDED **` |
 | `git diff --check` / `git -c core.whitespace=cr-at-eol diff --cached --check` | PASS; standard `gradlew.bat` CRLF preserved |
 | `git diff --name-only -- docs/cloud-mobile/01-interface-contracts.md docs/cloud-mobile/02-ipc-allowlist-v1.md` | No changes |
@@ -168,11 +173,11 @@ DEBUG-only smoke commands used `SIMCTL_CHILD_NS0_SMOKE=external`, `offline`, and
 | App-state reconnect/resync, route-aware Android back, keyboard/theme/lifecycle recovery, iOS recharge policy | NOT RUN — NS1 |
 | Push notifications | NOT RUN — explicitly outside NS0–NS3 |
 | S1 | None found in NS0 scope |
-| S2 | One inherited verification blocker: real-C2 Bot lifecycle E2E fails on iPhone and Pixel because `Default model` is selected while `Advanced options` is collapsed. Reproduced twice; 32/34 overall. Blocks full native acceptance until triaged. |
+| S2 | Both review findings resolved: Gradle wrapper is `100755` with a regression check and fresh-worktree build proof; real-C2 is 34/34. No open S2 remains in the NS0 delivery. |
 | S3 | No additional NS0 finding recorded |
 
 ## 11. Rollback and Next Step
 
 There is no deployed artifact to roll back. Deleting the local APK, Simulator app, or feature branch does not affect staging or production. The remote PWA was not changed or deployed, so no remote-PWA rollback is required. Native-binary and remote-PWA rollback remain separate release concerns for NS3.
 
-Stop for independent NS0 review. Do not start NS1 until the owner accepts and merges NS0 and resolves or explicitly triages the inherited S2 verification blocker.
+Stop for independent NS0 acceptance. Do not start NS1 until the owner accepts and merges NS0.
