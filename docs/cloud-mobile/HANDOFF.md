@@ -6,10 +6,13 @@ ended on 2026-10-16. The package index is
 files. This file says what is already decided, what is not built, and the
 order to build it.
 
-No product code for this program exists yet. The session wrote documents
-only. They are on `main`, merged as `20240bc5` (`merge: docs/mobile-cloud-design`).
-The branch `docs/mobile-cloud-design` and its worktree were removed after
-that merge. Do not recreate them. New work branches from current `main`.
+The design was merged as `20240bc5` (`merge: docs/mobile-cloud-design`).
+Implementation now exists across server mode, the tenant image, control plane,
+and PWA. WP0–WP3 cover the core internal-test journeys; their delivery notes
+are under `delivery/`. The current operator entry point is
+[`delivery/internal-test-release.md`](delivery/internal-test-release.md).
+Real staging, device, model, chain, and payment acceptance remains a separate
+gate. New work branches from current `main`.
 
 ## Read in this order
 
