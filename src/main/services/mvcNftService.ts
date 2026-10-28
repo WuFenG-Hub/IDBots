@@ -1,5 +1,5 @@
 import type { MetabotStore } from '../metabotStore';
-import { buildMvcNftTransferRawTx } from './walletRawTxService';
+import { buildMvcNftTransferRawTx, buildMvcNftTradeRawTx, type MvcNftSellUtxoRef } from './walletRawTxService';
 import { isRetryableMvcBroadcastError, resolveBroadcastTxResult } from '../libs/mvcSpend';
 import { freshGetUrlAndInit } from './freshFetch';
 
@@ -7,6 +7,9 @@ const METALET_HOST = 'https://www.metalet.space';
 const NET = 'livenet';
 const RETRYABLE_MVC_NFT_BUILD_ATTEMPTS = 3;
 const RETRYABLE_MVC_NFT_BROADCAST_DELAY_MS = 750;
+// NftManager floors the sell price at 22000 sats; validate on this side with
+// the same message so callers fail before any UTXO work.
+export const MVC_NFT_MIN_SELL_PRICE_SATS = 22000;
 
 export interface MvcNftItem {
   tokenIndex: string;
@@ -63,11 +66,35 @@ interface RawMvcNftUtxoRow {
   seriesName?: string;
 }
 
+/**
+ * wallet-api sell utxo row. The endpoint answers PascalCase keys (Address,
+ * TxId, TxIndex, Price, Satoshi, IsReady, SensibleId, ...); the parser reads
+ * both cases so a field-name flip on the wire stays visible instead of
+ * silently dropping rows.
+ */
+interface RawMvcNftSellUtxoRow {
+  Address?: string;
+  ContractAddress?: string;
+  TxId?: string;
+  TxIndex?: number | string;
+  CodeHash?: string;
+  Genesis?: string;
+  TokenIndex?: number | string;
+  SensibleId?: string;
+  Price?: number | string;
+  Satoshi?: number | string;
+  IsReady?: boolean | string | number;
+  Height?: number | string;
+  flag?: string;
+}
+
 interface MvcNftServiceDeps {
   fetchCount: (address: string) => Promise<number>;
   fetchSummaryList: (address: string) => Promise<RawMvcNftSummaryRow[]>;
   fetchUtxoList: (address: string) => Promise<RawMvcNftUtxoRow[]>;
+  fetchSellUtxoList: (address: string) => Promise<RawMvcNftSellUtxoRow[]>;
   buildRawTx: typeof buildMvcNftTransferRawTx;
+  buildTradeRawTx: typeof buildMvcNftTradeRawTx;
   broadcastTx: (rawTx: string) => Promise<string>;
 }
 
@@ -163,6 +190,13 @@ const defaultDeps: MvcNftServiceDeps = {
     return all;
   },
   buildRawTx: buildMvcNftTransferRawTx,
+  buildTradeRawTx: buildMvcNftTradeRawTx,
+  fetchSellUtxoList: async (address) => {
+    const response = await fetchJson<{ list?: RawMvcNftSellUtxoRow[] }>(
+      `${METALET_HOST}/wallet-api/v4/mvc/address/contract/nft/sell/utxo-list?net=${NET}&address=${encodeURIComponent(address)}`,
+    );
+    return Array.isArray(response?.list) ? response.list : [];
+  },
   broadcastTx: async (rawTx) => {
     const response = await fetch(`${METALET_HOST}/wallet-api/v3/tx/broadcast`, {
       method: 'POST',
@@ -304,4 +338,219 @@ export async function executeMvcNftTransfer(
   }
 
   throw new Error(getErrorMessage(lastError ?? 'MVC NFT transfer failed'));
+}
+
+export interface MvcNftSellOrder {
+  address: string;
+  contractAddress?: string;
+  /** txid of the tx carrying the sell contract utxo. */
+  txId: string;
+  outputIndex: number;
+  codeHash?: string;
+  genesis?: string;
+  tokenIndex?: string;
+  sensibleId?: string;
+  /** Ask price in satoshis (the amount a buyer pays for the token). */
+  priceSats?: number;
+  satoshis?: number;
+  isReady?: boolean;
+  height?: number;
+}
+
+export interface MvcNftSellOrders {
+  address: string;
+  count: number;
+  orders: MvcNftSellOrder[];
+}
+
+export function normalizeMvcNftSellOrderRow(row: RawMvcNftSellUtxoRow): MvcNftSellOrder | null {
+  const txId = String(row.TxId ?? '').trim();
+  const outputIndex = normalizeOutpointIndex(row.TxIndex);
+  if (!/^[0-9a-fA-F]{64}$/.test(txId)) return null;
+  const price = Number(row.Price);
+  const satoshis = Number(row.Satoshi ?? row.Price);
+  const isReadyRaw = row.IsReady;
+  const isReady = typeof isReadyRaw === 'boolean'
+    ? isReadyRaw
+    : isReadyRaw === 1 || String(isReadyRaw ?? '').toLowerCase() === 'true';
+  const tokenIndex = normalizeTokenIndex(row.TokenIndex);
+  const height = normalizeHeight(row.Height);
+  return {
+    address: String(row.Address ?? '').trim(),
+    contractAddress: String(row.ContractAddress ?? '').trim() || undefined,
+    txId,
+    outputIndex,
+    codeHash: String(row.CodeHash ?? '').trim() || undefined,
+    genesis: String(row.Genesis ?? '').trim() || undefined,
+    tokenIndex: tokenIndex || undefined,
+    sensibleId: String(row.SensibleId ?? '').trim() || undefined,
+    priceSats: Number.isFinite(price) && price > 0 ? Math.round(price) : undefined,
+    satoshis: Number.isFinite(satoshis) && satoshis > 0 ? Math.round(satoshis) : undefined,
+    isReady,
+    height: height > 0 ? height : undefined,
+  };
+}
+
+/**
+ * List the on-chain sell orders (sell contract utxos) held by one address via
+ * the wallet-api sell utxo-list endpoint. This is the discovery side of the
+ * trade flow: buyers and sellers read orders here, then feed the row's txId +
+ * outputIndex (+ sellerAddress, price) into cancelSell/buy as sellUtxo.
+ */
+export async function getMvcNftSellOrders(
+  address: string,
+  deps: Pick<MvcNftServiceDeps, 'fetchSellUtxoList'> = defaultDeps,
+): Promise<MvcNftSellOrders> {
+  if (!address || typeof address !== 'string') throw new Error('address is required');
+  const rows = await deps.fetchSellUtxoList(address);
+  const orders: MvcNftSellOrder[] = [];
+  for (const row of rows) {
+    const order = normalizeMvcNftSellOrderRow(row);
+    if (order) orders.push(order);
+  }
+  return { address, count: orders.length, orders };
+}
+
+export type MvcNftTradeAction = 'sell' | 'cancelSell' | 'buy';
+
+export interface MvcNftTradeInput {
+  metabotId: number;
+  action: MvcNftTradeAction;
+  genesis: string;
+  codehash: string;
+  tokenIndex: string;
+  /** sell only: ask price in satoshis (>= MVC_NFT_MIN_SELL_PRICE_SATS). */
+  priceSats?: number;
+  /** cancelSell/buy only: on-chain sell order reference. */
+  sellUtxo?: MvcNftSellUtxoRef;
+  feeRate: number;
+}
+
+export interface MvcNftTradeResult {
+  action: MvcNftTradeAction;
+  /** Stage-2 (final state) tx: the listing, the cancel, or the purchase. */
+  txId: string;
+  rawTx: string;
+  /** Stage-1 tx (sell contract funding / unlock check), broadcast first. */
+  fundingTxId: string;
+  fundingRawTx: string;
+}
+
+/**
+ * Run one NftManager trade operation (sell/cancelSell/buy) through the
+ * subprocess worker. Every operation mints two chained txs: stage 1 (sell:
+ * contract funding; cancel/buy: unlock check) must confirm-index before stage
+ * 2, which carries the final on-chain state. Broadcast policy:
+ *  - stage-1 retryable failure: rebuild the whole pair excluding the spent
+ *    wallet utxos (same loop as transfers);
+ *  - stage-2 retryable failure: re-broadcast the SAME stage-2 hex after a
+ *    short delay (its inputs are stage-1 outputs; a rebuild would orphan the
+ *    already-broadcast stage-1 tx);
+ *  - stage-2 hard failure: stage 1 may already be on chain, so the error
+ *    carries the funding txid plus the preserved stage-2 hex for manual
+ *    recovery instead of silently rebuilding.
+ */
+export async function executeMvcNftTrade(
+  store: MetabotStore,
+  input: MvcNftTradeInput,
+  deps: MvcNftServiceDeps = defaultDeps,
+): Promise<MvcNftTradeResult> {
+  if (!Number.isInteger(input?.metabotId) || input.metabotId <= 0) {
+    throw new Error('metabotId must be a positive integer');
+  }
+  if (input.action !== 'sell' && input.action !== 'cancelSell' && input.action !== 'buy') {
+    throw new Error('action must be sell, cancelSell, or buy');
+  }
+  if (!input?.genesis?.trim() || !input?.codehash?.trim()) {
+    throw new Error('genesis and codehash are required');
+  }
+  const tokenIndex = normalizeTokenIndex(input.tokenIndex);
+  if (!tokenIndex) throw new Error('tokenIndex must be a positive integer string');
+  if (!Number.isFinite(input?.feeRate) || input.feeRate <= 0) throw new Error('feeRate must be positive');
+
+  let priceSats: number | undefined;
+  if (input.action === 'sell') {
+    priceSats = Number(input.priceSats);
+    if (!Number.isInteger(priceSats) || priceSats <= 0) {
+      throw new Error('priceSats must be a positive integer for sell');
+    }
+    if (priceSats < MVC_NFT_MIN_SELL_PRICE_SATS) {
+      throw new Error(`Selling Price must be greater than or equals to ${MVC_NFT_MIN_SELL_PRICE_SATS} satoshis. 销售价格最低为${MVC_NFT_MIN_SELL_PRICE_SATS}聪。`);
+    }
+  }
+
+  let sellUtxo: MvcNftSellUtxoRef | undefined;
+  if (input.action !== 'sell' && input.sellUtxo != null) {
+    const txId = String(input.sellUtxo.txId || '').trim();
+    const outputIndex = Number(input.sellUtxo.outputIndex);
+    if (!/^[0-9a-fA-F]{64}$/.test(txId) || !Number.isInteger(outputIndex) || outputIndex < 0) {
+      throw new Error('sellUtxo.txId (64 hex) and sellUtxo.outputIndex (integer >= 0) are required');
+    }
+    sellUtxo = {
+      txId,
+      outputIndex,
+      sellerAddress: input.sellUtxo.sellerAddress?.trim() || undefined,
+      price: Number.isFinite(Number(input.sellUtxo.price)) && Number(input.sellUtxo.price) > 0
+        ? Math.round(Number(input.sellUtxo.price))
+        : undefined,
+    };
+  }
+
+  const excludedOutpoints = new Set<string>();
+  let buildParams = {
+    metabotId: input.metabotId,
+    genesis: input.genesis.trim(),
+    codehash: input.codehash.trim(),
+    tokenIndex,
+    priceSats,
+    sellUtxo,
+    feeRate: input.feeRate,
+    excludeOutpoints: [] as string[],
+  };
+
+  for (let attempt = 1; attempt <= RETRYABLE_MVC_NFT_BUILD_ATTEMPTS; attempt += 1) {
+    buildParams = {
+      ...buildParams,
+      excludeOutpoints: Array.from(excludedOutpoints),
+    };
+    const built = await deps.buildTradeRawTx(store, { action: input.action, ...buildParams });
+
+    try {
+      await deps.broadcastTx(built.funding_raw_tx);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      if (attempt < RETRYABLE_MVC_NFT_BUILD_ATTEMPTS && isRetryableMvcBroadcastError(message)) {
+        for (const outpoint of built.funding_spent_outpoints || []) {
+          excludedOutpoints.add(String(outpoint).toLowerCase());
+        }
+        await sleep(RETRYABLE_MVC_NFT_BROADCAST_DELAY_MS);
+        continue;
+      }
+      throw error;
+    }
+
+    for (let stage2Attempt = 1; stage2Attempt <= RETRYABLE_MVC_NFT_BUILD_ATTEMPTS; stage2Attempt += 1) {
+      try {
+        await deps.broadcastTx(built.raw_tx);
+        return {
+          action: input.action,
+          txId: built.txid,
+          rawTx: built.raw_tx,
+          fundingTxId: built.funding_txid,
+          fundingRawTx: built.funding_raw_tx,
+        };
+      } catch (error) {
+        const message = getErrorMessage(error);
+        if (stage2Attempt < RETRYABLE_MVC_NFT_BUILD_ATTEMPTS && isRetryableMvcBroadcastError(message)) {
+          await sleep(RETRYABLE_MVC_NFT_BROADCAST_DELAY_MS);
+          continue;
+        }
+        throw new Error(
+          `${message} [stage-1 tx ${built.funding_txid} is already broadcast; stage-2 raw tx preserved for manual recovery: ${built.raw_tx}]`,
+        );
+      }
+    }
+  }
+
+  throw new Error('MVC NFT trade failed after retries');
 }

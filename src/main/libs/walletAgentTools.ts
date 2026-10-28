@@ -10,7 +10,7 @@ import type {
   WalletBalanceSnapshot,
   WalletQueryChain,
 } from '../services/walletQueryService';
-import type { MvcNftBalance } from '../services/mvcNftService';
+import type { MvcNftBalance, MvcNftSellOrders, MvcNftSellOrder } from '../services/mvcNftService';
 
 /**
  * Host control surface for the wallet tools, wired in main.ts: UTXO-sum
@@ -44,6 +44,36 @@ export type WalletToolsControl = {
     tokenIndex: string;
     toAddress: string;
   }): Promise<{ txId: string }>;
+  sellNft(params: {
+    metabotId: number;
+    genesis: string;
+    codehash: string;
+    tokenIndex: string;
+    priceSats: number;
+  }): Promise<{ txId: string; fundingTxId: string }>;
+  cancelNftSell(params: {
+    metabotId: number;
+    genesis: string;
+    codehash: string;
+    tokenIndex: string;
+    sellUtxo?: { txId: string; outputIndex: number; sellerAddress?: string; price?: number };
+  }): Promise<{ txId: string; fundingTxId: string }>;
+  buyNft(params: {
+    metabotId: number;
+    genesis: string;
+    codehash: string;
+    tokenIndex: string;
+    sellUtxo?: { txId: string; outputIndex: number; sellerAddress?: string; price?: number };
+  }): Promise<{ txId: string; fundingTxId: string }>;
+  listMvcNftSellOrders(input: {
+    metabotIds?: number[];
+    address?: string;
+  }): Promise<Array<{
+    metabotId: number | null;
+    address: string;
+    orders?: MvcNftSellOrders;
+    error?: string;
+  }>>;
 };
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
@@ -488,5 +518,271 @@ export function buildWalletAgentTools(deps: {
     }
   );
 
-  return [walletBalance, walletTransfer, walletNftBalance, walletNftTransfer];
+  const formatSellOrder = (order: MvcNftSellOrder): string => {
+    const parts = [
+      `#${order.tokenIndex ?? '?'} ${order.genesis ? `(genesis ${order.genesis})` : ''}`.trim(),
+      `sellUtxo ${order.txId}:${order.outputIndex}`,
+      order.priceSats != null ? `price ${order.priceSats} sats` : 'price ?',
+    ];
+    if (order.address) parts.push(`seller ${order.address}`);
+    if (order.isReady != null) parts.push(`ready=${order.isReady}`);
+    return `  - ${parts.join(' | ')}`;
+  };
+
+  const walletNftSellOrders = tool(
+    'wallet_nft_sell_orders',
+    [
+      'Query on-chain MVC NFT sell orders (MetaContract sell contract UTXOs) for local MetaBots by id or name, or for a raw address.',
+      'Use to discover listings before a buy (wallet_nft_buy) or to verify a wallet_nft_sell landed / a wallet_nft_cancel_sell removed the order.',
+      'Returns per address: order count and each order with token index, genesis, sellUtxo (txid:outputIndex), ask price in sats and seller address.',
+      'Read-only public chain data via the wallet-api sell utxo-list endpoint. Batch multiple metabot_ids in ONE call.',
+    ].join(' '),
+    {
+      metabot_ids: z
+        .array(z.number().int().positive())
+        .optional()
+        .describe('Local MetaBot ids to query, e.g. [1, 15]. Batch in one call.'),
+      names: z
+        .array(z.string())
+        .optional()
+        .describe('Local MetaBot names to resolve and query.'),
+      address: z
+        .string()
+        .optional()
+        .describe('Explicit MVC address to query (used as-is).'),
+    },
+    async (args: {
+      metabot_ids?: number[];
+      names?: string[];
+      address?: string;
+    }) => {
+      const metabotIds: number[] = [];
+      for (const raw of args.metabot_ids ?? []) {
+        const id = Number(raw);
+        if (Number.isInteger(id) && id > 0 && !metabotIds.includes(id)) metabotIds.push(id);
+      }
+      for (const rawName of args.names ?? []) {
+        const id = control.resolveMetabotIdByName(String(rawName || '').trim());
+        if (id != null && !metabotIds.includes(id)) metabotIds.push(id);
+      }
+      const address = asString(args.address);
+      if (!metabotIds.length && !address) {
+        return textResult('wallet_nft_sell_orders requires metabot_ids, names, or address.', true);
+      }
+      try {
+        const entries = await control.listMvcNftSellOrders({ metabotIds, address: address || undefined });
+        const lines: string[] = [];
+        for (const entry of entries) {
+          if (entry.error) {
+            lines.push(`- ${entry.metabotId != null ? `metabot_id ${entry.metabotId}` : entry.address}: lookup failed: ${entry.error}`);
+            continue;
+          }
+          const orders = entry.orders;
+          if (!orders || orders.count === 0) {
+            lines.push(`- ${entry.address}: 0 open sell order(s)`);
+            continue;
+          }
+          lines.push(`- ${entry.address}: ${orders.count} open sell order(s)`);
+          for (const order of orders.orders) lines.push(formatSellOrder(order));
+        }
+        return textResult(lines.join('\n') || 'No addresses resolved.');
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return textResult(`wallet_nft_sell_orders failed: ${msg}`, true);
+      }
+    }
+  );
+
+  const walletNftSell = tool(
+    'wallet_nft_sell',
+    [
+      'List ONE MVC NFT (MetaContract token) owned by THIS session MetaBot for sale on-chain.',
+      'The token is identified by genesis + codehash + token_index (see wallet_nft_balance); price_sats is the ask price in satoshis (minimum 22000, e.g. 0.001 SPACE = 100000).',
+      'Signing runs in a subprocess worker; two chained txs broadcast (contract funding, then the listing). Returns both txids.',
+      'Verify the open order with wallet_nft_sell_orders afterwards; take it down with wallet_nft_cancel_sell. Listing is irreversible until cancelled — confirm the price with the owner when ambiguous.',
+    ].join(' '),
+    {
+      genesis: z.string().min(1).describe('NFT series genesis id (64 hex).'),
+      codehash: z.string().min(1).describe('NFT series codehash (40 hex).'),
+      token_index: z.string().regex(/^\d+$/).describe('Token index of the NFT to list, e.g. "5421".'),
+      price_sats: z.number().int().positive().describe('Ask price in satoshis, minimum 22000 (0.001 SPACE = 100000).'),
+    },
+    async (args: {
+      genesis: string;
+      codehash: string;
+      token_index: string;
+      price_sats: number;
+    }) => {
+      const metabotId = resolveMetabotId(sessionId);
+      if (metabotId == null) {
+        return textResult('wallet_nft_sell could not determine which MetaBot owns this session; sells must spend the session bot\'s own wallet.', true);
+      }
+      const genesis = asString(args.genesis);
+      const codehash = asString(args.codehash);
+      const tokenIndex = asString(args.token_index);
+      const priceSats = Number(args.price_sats);
+      if (!genesis || !codehash || !/^\d+$/.test(tokenIndex) || !Number.isInteger(priceSats) || priceSats <= 0) {
+        return textResult('wallet_nft_sell requires genesis, codehash, token_index (digits) and an integer price_sats > 0.', true);
+      }
+      if (priceSats < 22000) {
+        return textResult('wallet_nft_sell: price_sats must be at least 22000 (the NftManager sell floor; 0.001 SPACE = 100000).', true);
+      }
+      try {
+        const result = await control.sellNft({ metabotId, genesis, codehash, tokenIndex, priceSats });
+        const lines = [
+          'NFT listed for sale on-chain.',
+          `- listing txid: ${result.txId}`,
+          `- funding txid: ${result.fundingTxId}`,
+          `- token: #${tokenIndex} (genesis ${genesis})`,
+          `- ask price: ${priceSats} sats (${(priceSats / 100000000).toFixed(8)} SPACE)`,
+          '- Verify with wallet_nft_sell_orders; cancel with wallet_nft_cancel_sell.',
+        ];
+        return textResult(lines.join('\n'));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return textResult(`wallet_nft_sell failed: ${msg}`, true);
+      }
+    }
+  );
+
+  const buildSellUtxoArg = (args: {
+    sell_txid?: string;
+    sell_output_index?: number;
+    seller_address?: string;
+    sell_price_sats?: number;
+  }): { txId: string; outputIndex: number; sellerAddress?: string; price?: number } | null => {
+    const txId = asString(args.sell_txid);
+    const outputIndex = Number(args.sell_output_index);
+    if (!/^[0-9a-fA-F]{64}$/.test(txId) || !Number.isInteger(outputIndex) || outputIndex < 0) return null;
+    const sellerAddress = asString(args.seller_address);
+    const price = Number(args.sell_price_sats);
+    return {
+      txId,
+      outputIndex,
+      ...(sellerAddress ? { sellerAddress } : {}),
+      ...(Number.isFinite(price) && price > 0 ? { price } : {}),
+    };
+  };
+
+  const walletNftCancelSell = tool(
+    'wallet_nft_cancel_sell',
+    [
+      'Take down ONE of THIS session MetaBot\'s on-chain MVC NFT sell orders (cancels the listing, the NFT returns to the bot\'s wallet).',
+      'The order is identified by genesis + codehash + token_index; optionally pass the sell order outpoint from wallet_nft_sell_orders (sell_txid + sell_output_index + seller_address + sell_price_sats) instead of letting the signer resolve it on-chain.',
+      'Signing runs in a subprocess worker; two chained txs broadcast (unlock check, then the cancel). Returns both txids.',
+      'Verify the order disappeared with wallet_nft_sell_orders afterwards.',
+    ].join(' '),
+    {
+      genesis: z.string().min(1).describe('NFT series genesis id (64 hex).'),
+      codehash: z.string().min(1).describe('NFT series codehash (40 hex).'),
+      token_index: z.string().regex(/^\d+$/).describe('Token index of the listed NFT.'),
+      sell_txid: z.string().optional().describe('Sell order txid from wallet_nft_sell_orders (optional; with sell_output_index).'),
+      sell_output_index: z.number().int().nonnegative().optional().describe('Sell order output index from wallet_nft_sell_orders.'),
+      seller_address: z.string().optional().describe('Seller address of the order (optional, from wallet_nft_sell_orders).'),
+      sell_price_sats: z.number().int().positive().optional().describe('Ask price in sats of the order (optional, from wallet_nft_sell_orders).'),
+    },
+    async (args: {
+      genesis: string;
+      codehash: string;
+      token_index: string;
+      sell_txid?: string;
+      sell_output_index?: number;
+      seller_address?: string;
+      sell_price_sats?: number;
+    }) => {
+      const metabotId = resolveMetabotId(sessionId);
+      if (metabotId == null) {
+        return textResult('wallet_nft_cancel_sell could not determine which MetaBot owns this session; cancels must spend the session bot\'s own wallet.', true);
+      }
+      const genesis = asString(args.genesis);
+      const codehash = asString(args.codehash);
+      const tokenIndex = asString(args.token_index);
+      if (!genesis || !codehash || !/^\d+$/.test(tokenIndex)) {
+        return textResult('wallet_nft_cancel_sell requires genesis, codehash, and token_index (digits).', true);
+      }
+      let sellUtxo: { txId: string; outputIndex: number; sellerAddress?: string; price?: number } | undefined;
+      if (args.sell_txid != null || args.sell_output_index != null) {
+        sellUtxo = buildSellUtxoArg(args);
+        if (!sellUtxo) {
+          return textResult('wallet_nft_cancel_sell: sell_txid must be 64 hex and sell_output_index a non-negative integer.', true);
+        }
+      }
+      try {
+        const result = await control.cancelNftSell({ metabotId, genesis, codehash, tokenIndex, sellUtxo });
+        const lines = [
+          'NFT sell order cancelled on-chain.',
+          `- cancel txid: ${result.txId}`,
+          `- check txid: ${result.fundingTxId}`,
+          `- token: #${tokenIndex} (genesis ${genesis})`,
+          '- Verify the order is gone with wallet_nft_sell_orders.',
+        ];
+        return textResult(lines.join('\n'));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return textResult(`wallet_nft_cancel_sell failed: ${msg}`, true);
+      }
+    }
+  );
+
+  const walletNftBuy = tool(
+    'wallet_nft_buy',
+    [
+      'Buy ONE listed MVC NFT (take an on-chain sell order) with THIS session MetaBot\'s own wallet: pays the ask price + fees, receives the token.',
+      'Look up the open order first with wallet_nft_sell_orders; pass its sell order outpoint (sell_txid + sell_output_index, plus seller_address + sell_price_sats when known) or let the signer resolve the current order on-chain from genesis + codehash + token_index.',
+      'Signing runs in a subprocess worker; two chained txs broadcast (unlock check, then the purchase). Returns both txids.',
+      'The ask price + fees leave the bot\'s wallet irreversibly — confirm the order (price_sats shown by wallet_nft_sell_orders) with the owner before calling when ambiguous.',
+    ].join(' '),
+    {
+      genesis: z.string().min(1).describe('NFT series genesis id (64 hex).'),
+      codehash: z.string().min(1).describe('NFT series codehash (40 hex).'),
+      token_index: z.string().regex(/^\d+$/).describe('Token index of the listed NFT to buy.'),
+      sell_txid: z.string().optional().describe('Sell order txid from wallet_nft_sell_orders (optional; with sell_output_index).'),
+      sell_output_index: z.number().int().nonnegative().optional().describe('Sell order output index from wallet_nft_sell_orders.'),
+      seller_address: z.string().optional().describe('Seller address of the order (optional, from wallet_nft_sell_orders).'),
+      sell_price_sats: z.number().int().positive().optional().describe('Ask price in sats of the order (optional, from wallet_nft_sell_orders).'),
+    },
+    async (args: {
+      genesis: string;
+      codehash: string;
+      token_index: string;
+      sell_txid?: string;
+      sell_output_index?: number;
+      seller_address?: string;
+      sell_price_sats?: number;
+    }) => {
+      const metabotId = resolveMetabotId(sessionId);
+      if (metabotId == null) {
+        return textResult('wallet_nft_buy could not determine which MetaBot owns this session; buys must spend the session bot\'s own wallet.', true);
+      }
+      const genesis = asString(args.genesis);
+      const codehash = asString(args.codehash);
+      const tokenIndex = asString(args.token_index);
+      if (!genesis || !codehash || !/^\d+$/.test(tokenIndex)) {
+        return textResult('wallet_nft_buy requires genesis, codehash, and token_index (digits). Use wallet_nft_sell_orders to find listed tokens.', true);
+      }
+      let sellUtxo: { txId: string; outputIndex: number; sellerAddress?: string; price?: number } | undefined;
+      if (args.sell_txid != null || args.sell_output_index != null) {
+        sellUtxo = buildSellUtxoArg(args);
+        if (!sellUtxo) {
+          return textResult('wallet_nft_buy: sell_txid must be 64 hex and sell_output_index a non-negative integer.', true);
+        }
+      }
+      try {
+        const result = await control.buyNft({ metabotId, genesis, codehash, tokenIndex, sellUtxo });
+        const lines = [
+          'NFT purchase broadcast on-chain.',
+          `- purchase txid: ${result.txId}`,
+          `- check txid: ${result.fundingTxId}`,
+          `- token: #${tokenIndex} (genesis ${genesis})`,
+          '- Verify ownership with wallet_nft_balance and the order closure with wallet_nft_sell_orders after the txs confirm.',
+        ];
+        return textResult(lines.join('\n'));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return textResult(`wallet_nft_buy failed: ${msg}`, true);
+      }
+    }
+  );
+
+  return [walletBalance, walletTransfer, walletNftBalance, walletNftTransfer, walletNftSellOrders, walletNftSell, walletNftCancelSell, walletNftBuy];
 }

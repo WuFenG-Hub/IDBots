@@ -76,6 +76,13 @@ interface WorkerTransferResult {
   amountCheckRawTx?: string;
 }
 
+/** Result of the sell/cancelSell/buy worker: two chained raw txs. */
+interface WorkerTradeResult extends WorkerTransferResult {
+  fundingTxHex: string;
+  fundingTxid?: string;
+  fundingSpentOutpoints?: string[];
+}
+
 interface WalletRawTxServiceDeps {
   runMvcTransferRawTxWorker?: (params: {
     mnemonic: string;
@@ -106,6 +113,21 @@ interface WalletRawTxServiceDeps {
     feeRate: number;
     excludeOutpoints: string[];
   }) => Promise<WorkerTransferResult>;
+  runMvcNftSellRawTxWorker?: (params: BuildMvcNftSellRawTxParams & {
+    mnemonic: string;
+    path: string;
+    excludeOutpoints: string[];
+  }) => Promise<WorkerTradeResult>;
+  runMvcNftCancelSellRawTxWorker?: (params: BuildMvcNftCancelSellRawTxParams & {
+    mnemonic: string;
+    path: string;
+    excludeOutpoints: string[];
+  }) => Promise<WorkerTradeResult>;
+  runMvcNftBuyRawTxWorker?: (params: BuildMvcNftBuyRawTxParams & {
+    mnemonic: string;
+    path: string;
+    excludeOutpoints: string[];
+  }) => Promise<WorkerTradeResult>;
 }
 
 export interface BuildMvcNftTransferRawTxParams {
@@ -114,6 +136,47 @@ export interface BuildMvcNftTransferRawTxParams {
   codehash: string;
   tokenIndex: string;
   toAddress: string;
+  feeRate: number;
+  excludeOutpoints?: string[];
+}
+
+/** Chain-side sell order reference, straight from wallet-api sell utxo rows. */
+export interface MvcNftSellUtxoRef {
+  txId: string;
+  outputIndex: number;
+  sellerAddress?: string;
+  price?: number;
+}
+
+export interface BuildMvcNftSellRawTxParams {
+  metabotId: number;
+  genesis: string;
+  codehash: string;
+  tokenIndex: string;
+  /** Ask price in satoshis; NftManager enforces a 22000 sat minimum. */
+  priceSats: number;
+  feeRate: number;
+  excludeOutpoints?: string[];
+}
+
+export interface BuildMvcNftCancelSellRawTxParams {
+  metabotId: number;
+  genesis: string;
+  codehash: string;
+  tokenIndex: string;
+  /** Optional: when omitted the NftManager resolves the sell utxo on-chain. */
+  sellUtxo?: MvcNftSellUtxoRef;
+  feeRate: number;
+  excludeOutpoints?: string[];
+}
+
+export interface BuildMvcNftBuyRawTxParams {
+  metabotId: number;
+  genesis: string;
+  codehash: string;
+  tokenIndex: string;
+  /** Optional: when omitted the NftManager resolves the sell utxo on-chain. */
+  sellUtxo?: MvcNftSellUtxoRef;
   feeRate: number;
   excludeOutpoints?: string[];
 }
@@ -138,6 +201,18 @@ interface BuildMvcFtTransferRawTxResult {
 interface BuildMvcNftTransferRawTxResult {
   raw_tx: string;
   txid: string;
+  spent_outpoints: string[];
+}
+
+interface BuildMvcNftTradeRawTxResult {
+  /** Stage-1 tx (sell: contract funding; cancel/buy: unlock check). */
+  funding_raw_tx: string;
+  funding_txid: string;
+  /** Stage-2 tx carrying the final on-chain state. */
+  raw_tx: string;
+  txid: string;
+  /** Wallet inputs consumed by the stage-1 tx (safe to exclude on rebuild). */
+  funding_spent_outpoints: string[];
   spent_outpoints: string[];
 }
 
@@ -287,7 +362,7 @@ export function summarizeMvcTransferTx(params: {
   };
 }
 
-async function runWorker(workerBasename: string, payload: unknown, env: NodeJS.ProcessEnv): Promise<WorkerTransferResult> {
+async function runWorker<T extends WorkerTransferResult = WorkerTransferResult>(workerBasename: string, payload: unknown, env: NodeJS.ProcessEnv): Promise<T> {
   const appPath = app.getAppPath();
   const candidatePaths = getMainWorkerCandidatePaths({
     moduleDir: __dirname,
@@ -313,7 +388,7 @@ async function runWorker(workerBasename: string, payload: unknown, env: NodeJS.P
   delete baseEnv.ELECTRON_NO_ATTACH_CONSOLE;
   delete baseEnv.NODE_PATH;
 
-  return await new Promise<WorkerTransferResult>((resolve, reject) => {
+  return await new Promise<T>((resolve, reject) => {
     const child = spawn(electronExe, [workerPath], {
       cwd: app.getPath('userData'),
       env: {
@@ -357,7 +432,7 @@ async function runWorker(workerBasename: string, payload: unknown, env: NodeJS.P
           reject(new Error('Worker did not return txHex'));
           return;
         }
-        resolve(parsed);
+        resolve(parsed as T);
       } catch {
         reject(new Error(output));
       }
@@ -596,6 +671,165 @@ export async function buildMvcNftTransferRawTx(
     txid: workerResult.txid || tx.id,
     spent_outpoints: workerResult.spentOutpoints ?? extractSpentOutpoints(tx),
   };
+}
+
+async function runMvcNftSellRawTxWorker(params: BuildMvcNftSellRawTxParams & {
+  mnemonic: string;
+  path: string;
+  excludeOutpoints: string[];
+}): Promise<WorkerTradeResult> {
+  // The trade worker contract extends the transfer one with the funding tx
+  // fields; summarizeNftTradeWorkerResult re-checks them at runtime.
+  return await runWorker<WorkerTradeResult>(
+    'buildMvcNftTradeRawTxWorker.js',
+    {
+      action: 'sell',
+      genesis: params.genesis,
+      codehash: params.codehash,
+      tokenIndex: params.tokenIndex,
+      price: params.priceSats,
+      feeRate: params.feeRate,
+      excludeOutpoints: params.excludeOutpoints,
+    },
+    {
+      IDBOTS_METABOT_MNEMONIC: params.mnemonic,
+      IDBOTS_METABOT_PATH: params.path,
+    },
+  );
+}
+
+async function runMvcNftCancelSellRawTxWorker(params: BuildMvcNftCancelSellRawTxParams & {
+  mnemonic: string;
+  path: string;
+  excludeOutpoints: string[];
+}): Promise<WorkerTradeResult> {
+  return await runWorker<WorkerTradeResult>(
+    'buildMvcNftTradeRawTxWorker.js',
+    {
+      action: 'cancelSell',
+      genesis: params.genesis,
+      codehash: params.codehash,
+      tokenIndex: params.tokenIndex,
+      sellUtxo: params.sellUtxo,
+      feeRate: params.feeRate,
+      excludeOutpoints: params.excludeOutpoints,
+    },
+    {
+      IDBOTS_METABOT_MNEMONIC: params.mnemonic,
+      IDBOTS_METABOT_PATH: params.path,
+    },
+  );
+}
+
+async function runMvcNftBuyRawTxWorker(params: BuildMvcNftBuyRawTxParams & {
+  mnemonic: string;
+  path: string;
+  excludeOutpoints: string[];
+}): Promise<WorkerTradeResult> {
+  return await runWorker<WorkerTradeResult>(
+    'buildMvcNftTradeRawTxWorker.js',
+    {
+      action: 'buy',
+      genesis: params.genesis,
+      codehash: params.codehash,
+      tokenIndex: params.tokenIndex,
+      sellUtxo: params.sellUtxo,
+      feeRate: params.feeRate,
+      excludeOutpoints: params.excludeOutpoints,
+    },
+    {
+      IDBOTS_METABOT_MNEMONIC: params.mnemonic,
+      IDBOTS_METABOT_PATH: params.path,
+    },
+  );
+}
+
+function summarizeNftTradeWorkerResult(workerResult: WorkerTradeResult): BuildMvcNftTradeRawTxResult {
+  if (!workerResult.fundingTxHex || typeof workerResult.fundingTxHex !== 'string') {
+    throw new Error('Worker did not return fundingTxHex');
+  }
+  const tx = parseTx(workerResult.txHex);
+  const txid = workerResult.txid || tx.id;
+  const fundingTxid = workerResult.fundingTxid || parseTx(workerResult.fundingTxHex).id;
+  return {
+    funding_raw_tx: workerResult.fundingTxHex,
+    funding_txid: fundingTxid,
+    raw_tx: workerResult.txHex,
+    txid,
+    funding_spent_outpoints: workerResult.fundingSpentOutpoints ?? extractSpentOutpoints(parseTx(workerResult.fundingTxHex)),
+    spent_outpoints: workerResult.spentOutpoints ?? extractSpentOutpoints(tx),
+  };
+}
+
+/**
+ * Shared builder for the NftManager trade operations (sell/cancelSell/buy):
+ * the worker emits two chained raw txs and the caller broadcasts stage 1 then
+ * stage 2 (see executeMvcNftTrade in mvcNftService).
+ */
+export async function buildMvcNftTradeRawTx(
+  store: MetabotStore,
+  params: Omit<BuildMvcNftSellRawTxParams | BuildMvcNftCancelSellRawTxParams | BuildMvcNftBuyRawTxParams, 'priceSats' | 'sellUtxo'> & {
+    action: 'sell' | 'cancelSell' | 'buy';
+    priceSats?: number;
+    sellUtxo?: MvcNftSellUtxoRef;
+  },
+  deps: WalletRawTxServiceDeps = {},
+): Promise<BuildMvcNftTradeRawTxResult> {
+  // No toAddress on trade operations, so the common transfer validation is
+  // replaced by the metabotId + exclusion-list checks it would have covered.
+  if (!Number.isInteger(params.metabotId) || params.metabotId <= 0) {
+    throw new Error('metabot_id must be a positive integer');
+  }
+  const excludeOutpoints = validateExcludeOutpoints(params.excludeOutpoints);
+  const tokenIndex = String(params.tokenIndex ?? '').trim();
+  if (!/^\d+$/.test(tokenIndex)) {
+    throw new Error('tokenIndex must be a positive integer string');
+  }
+  if (!params.genesis?.trim() || !params.codehash?.trim()) {
+    throw new Error('genesis and codehash are required');
+  }
+  if (!Number.isFinite(params.feeRate) || params.feeRate <= 0) {
+    throw new Error('feeRate must be positive');
+  }
+  if (params.action === 'sell' && (!Number.isInteger(params.priceSats) || (params.priceSats as number) <= 0)) {
+    throw new Error('priceSats must be a positive integer for sell');
+  }
+
+  const wallet = store.getMetabotWalletByMetabotId(params.metabotId);
+  if (!wallet?.mnemonic?.trim()) {
+    throw new Error('MetaBot wallet not found');
+  }
+
+  const runners = {
+    sell: deps.runMvcNftSellRawTxWorker ?? runMvcNftSellRawTxWorker,
+    cancelSell: deps.runMvcNftCancelSellRawTxWorker ?? runMvcNftCancelSellRawTxWorker,
+    buy: deps.runMvcNftBuyRawTxWorker ?? runMvcNftBuyRawTxWorker,
+  };
+  const base = {
+    metabotId: params.metabotId,
+    mnemonic: wallet.mnemonic,
+    path: wallet.path || DEFAULT_PATH,
+    genesis: params.genesis.trim(),
+    codehash: params.codehash.trim(),
+    tokenIndex,
+    feeRate: params.feeRate,
+    excludeOutpoints,
+  };
+  let workerResult: WorkerTradeResult;
+  if (params.action === 'sell') {
+    workerResult = await runners.sell({ ...base, priceSats: params.priceSats as number });
+  } else {
+    const sellUtxo = params.sellUtxo;
+    if (sellUtxo != null) {
+      if (!/^[0-9a-fA-F]{64}$/.test(String(sellUtxo.txId || '').trim()) || !Number.isInteger(Number(sellUtxo.outputIndex)) || Number(sellUtxo.outputIndex) < 0) {
+        throw new Error('sellUtxo.txId (64 hex) and sellUtxo.outputIndex (integer) are required');
+      }
+    }
+    workerResult = params.action === 'cancelSell'
+      ? await runners.cancelSell({ ...base, sellUtxo })
+      : await runners.buy({ ...base, sellUtxo });
+  }
+  return summarizeNftTradeWorkerResult(workerResult);
 }
 
 function resolveBundleFunding(params: {
