@@ -5,6 +5,7 @@ import { i18nService } from '../../services/i18n';
 import { getDefaultMetabotAvatarUrl } from '../../utils/rendererAssetPaths';
 import { pickRenderableAvatarSource as pickSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import MarkdownContent from '../MarkdownContent';
+import { mapWechatBracketCodesForDisplay } from '../chat/wechatEmojiDisplay';
 import {
   messengerBubbleClassName,
   messengerColumnClassName,
@@ -801,7 +802,9 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
             the highlight hugs the bubble instead of drawing a rule across the
             full row width. */}
         <div className={messengerBubbleClassName(displayRight)} data-message-id={message.id}>
-          <MarkdownContent content={contentToRender} className={markdownClassName} />
+          {/* Display-time WeChat bracket-code mapping; the raw message
+              (copy, delivery parsing, chain data) is untouched. */}
+          <MarkdownContent content={mapWechatBracketCodesForDisplay(contentToRender)} className={markdownClassName} />
         </div>
         {metafileItems.length > 0 && (
           <div className="w-full mt-2 space-y-2">

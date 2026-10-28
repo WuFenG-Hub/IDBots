@@ -13,6 +13,7 @@ import {
   messengerRowClassName,
   messengerTxidRowClassName,
 } from '../chat/messengerBubble';
+import { mapWechatBracketCodesForDisplay } from '../chat/wechatEmojiDisplay';
 import type { GroupChatTranscriptMessage } from '../../types/groupTask';
 import { formatGroupTaskMessengerTime } from './groupTaskUtils';
 import { openBotPageInBotBrowser } from './GroupTaskListMeta';
@@ -310,7 +311,9 @@ const GroupTaskMessageItem = React.memo(({
               </span>
             </button>
           ) : (
-            <MarkdownContent content={rawContent} className={markdownClassName} />
+            // Display-time WeChat bracket-code mapping; raw transcript text
+            // (fold labels, copying, chain data) stays untouched.
+            <MarkdownContent content={mapWechatBracketCodesForDisplay(rawContent)} className={markdownClassName} />
           )}
           {(longDeliverable || acceptanceSummaryFold) && deliverableExpanded && (
             <button

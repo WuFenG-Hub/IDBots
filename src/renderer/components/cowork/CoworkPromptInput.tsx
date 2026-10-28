@@ -56,6 +56,7 @@ import {
   type ComposerHeightMeasurement,
 } from './composerTextareaResize';
 import CoworkAttachmentPreview from './CoworkAttachmentPreview';
+import EmojiMenuButton from '../chat/EmojiPickerPopover';
 
 // The attachment chip shape; the gate/composition rules live in
 // coworkComposerAttachments.ts so paste, drop and the '+' picker share one door.
@@ -433,6 +434,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const [showFolderMenu, setShowFolderMenu] = useState(false);
     const [showFolderRequiredWarning, setShowFolderRequiredWarning] = useState(false);
     const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+    const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
     const [skillsMenuOpen, setSkillsMenuOpen] = useState(false);
     // '/' picker: dismissal is user intent (Escape), tracked separately from
     // the query so re-typing '/' after a dismissal still reopens the picker.
@@ -448,6 +450,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const dragDepthRef = useRef(0);
     const contextMenuRef = useRef<HTMLDivElement>(null);
     const plusButtonRef = useRef<HTMLButtonElement>(null);
+    const emojiButtonRef = useRef<HTMLButtonElement>(null);
     const backdropRef = useRef<HTMLDivElement>(null);
     const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     // Selection captured when the context menu opened; only drives the
@@ -1348,6 +1351,22 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
   };
 
+  /**
+   * Emoji pick from the picker: insert the codepoint at the caret through the
+   * same DOM path as paste (setRangeText + input event), so the versioned
+   * draft field, auto-resize measurement and submit gate all observe it.
+   * setRangeText's 'end' selection mode lands the caret right after the
+   * inserted emoji, ready for the next character (multi-codepoint emoji
+   * sequences insert verbatim). The panel stays open for multi-pick.
+   */
+  const handlePickEmoji = (emoji: string) => {
+    const textarea = textareaRef.current;
+    if (!textarea || emojiPickerDisabled) return;
+    const { start, end } = readLiveSelection();
+    applyTextareaChange(start, end, emoji);
+    textarea.focus();
+  };
+
   const runContextMenuSelectAll = () => {
     closeContextMenu();
     const textarea = textareaRef.current;
@@ -1439,6 +1458,9 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     attachmentCount: attachments.length,
     quotedSelectionCount: quotedSelections.length,
   });
+  // Emoji input is text input: the picker follows the textarea's own gate
+  // (plain typing stays available while steering; both lock when disabled).
+  const emojiPickerDisabled = disabled || (isStreaming && steerDisabled);
   const effectivePlaceholder = deriveCoworkComposerPlaceholder({
     isStreaming,
     steerDisabled,
@@ -1553,6 +1575,13 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   onUseSkill={handlePlusMenuUseSkill}
                   onUseCommand={handlePlusMenuUseCommand}
                 />
+                <EmojiMenuButton
+                  open={emojiPickerOpen}
+                  buttonRef={emojiButtonRef}
+                  disabled={emojiPickerDisabled}
+                  onToggle={() => setEmojiPickerOpen(!emojiPickerOpen)}
+                  onPick={handlePickEmoji}
+                />
                 {/* Model/effort + pinned-skill chips are session configuration,
                     not message content, so they keep freezing while a turn
                     streams. Only the '+' attachment door follows the steering
@@ -1620,6 +1649,13 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               onAddAttachment={handlePlusMenuAddAttachment}
               onUseSkill={handlePlusMenuUseSkill}
               onUseCommand={handlePlusMenuUseCommand}
+            />
+            <EmojiMenuButton
+              open={emojiPickerOpen}
+              buttonRef={emojiButtonRef}
+              disabled={emojiPickerDisabled}
+              onToggle={() => setEmojiPickerOpen(!emojiPickerOpen)}
+              onPick={handlePickEmoji}
             />
             <textarea
               ref={textareaRef}
