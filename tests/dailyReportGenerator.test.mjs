@@ -494,3 +494,68 @@ test('generateDailyReport: zh locale keeps the Chinese prompt and no needs-you w
   assert.match(result.briefingMarkdown, /今日预告/, 'agenda still ships');
   fs.rmSync(reportDir, { recursive: true, force: true });
 });
+
+// ── Waiting-on-external follow-ups (2026-10-28) ─────────────────────────────
+//
+// Contract: a follow-up whose work waits on an external condition keeps its
+// age suffix but shows the waiting badge INSTEAD of the overdue badge, in
+// both markdown and HTML, in both locales.
+
+test('follow-up list: waiting-on-external badge replaces overdue (markdown en/zh)', () => {
+  const facts = sampleFacts({
+    pendingFollowUps: [
+      { sessionId: 'sess-w', title: 'Wait for upstream merge', botName: 'Twin', source: 'cerebellum', ageDays: 5, overdue: false, waitingOnExternal: true },
+      { sessionId: 'sess-o', title: 'Approve deploy plan', botName: 'Twin', source: 'cerebellum', ageDays: 3, overdue: true, waitingOnExternal: false },
+    ],
+  });
+  const en = buildDailyReportFollowUpListMarkdown(facts, DAILY_REPORT_STRINGS_EN);
+  const waitingLineEn = en.split('\n').find((line) => line.includes('sess-w'));
+  const overdueLineEn = en.split('\n').find((line) => line.includes('sess-o'));
+  assert.ok(waitingLineEn.includes('waiting on external'), 'waiting badge present');
+  assert.ok(!waitingLineEn.includes('overdue'), 'waiting line never says overdue');
+  assert.ok(waitingLineEn.includes('5d waiting'), 'age suffix kept');
+  assert.ok(overdueLineEn.includes('**overdue**'), 'plain overdue item unaffected');
+
+  const zh = buildDailyReportFollowUpListMarkdown(facts, DAILY_REPORT_STRINGS_ZH);
+  const waitingLineZh = zh.split('\n').find((line) => line.includes('sess-w'));
+  const overdueLineZh = zh.split('\n').find((line) => line.includes('sess-o'));
+  assert.ok(waitingLineZh.includes('等待外部'), 'zh waiting badge present');
+  assert.ok(!waitingLineZh.includes('已逾期'), 'zh waiting line never says overdue');
+  assert.ok(waitingLineZh.includes('5天待处理'), 'zh age suffix kept');
+  assert.ok(overdueLineZh.includes('**已逾期**'), 'zh plain overdue item unaffected');
+});
+
+test('follow-up list: overdue forced false for waiting items even if facts disagree', () => {
+  // Defensive: if an older facts shape ever stamped overdue=true on a
+  // waiting item, the renderer still shows waiting, never both.
+  const facts = sampleFacts({
+    pendingFollowUps: [
+      { sessionId: 'sess-x', title: 'Contradictory', botName: null, source: 'cerebellum', ageDays: 4, overdue: true, waitingOnExternal: true },
+    ],
+  });
+  const en = buildDailyReportFollowUpListMarkdown(facts, DAILY_REPORT_STRINGS_EN);
+  const line = en.split('\n').find((l) => l.includes('sess-x'));
+  assert.ok(line.includes('waiting on external'));
+  assert.ok(!line.includes('overdue**'), 'overdue loses to waiting');
+});
+
+test('HTML needs cards: waiting badge shown, overdue badge suppressed for waiting items', () => {
+  const facts = sampleFacts({
+    pendingFollowUps: [
+      { sessionId: 'sess-w', title: 'Wait for upstream merge', botName: 'Twin', source: 'cerebellum', ageDays: 5, overdue: false, waitingOnExternal: true },
+      { sessionId: 'sess-o', title: 'Approve deploy plan', botName: 'Twin', source: 'cerebellum', ageDays: 3, overdue: true, waitingOnExternal: false },
+    ],
+  });
+  const html = buildDailyReportHtml({
+    facts,
+    strings: DAILY_REPORT_STRINGS_ZH,
+    dateLabel: '2026-10-28',
+  });
+  const waitingCard = html.split('class="need link"').find((chunk) => chunk.includes('sess-w'));
+  const overdueCard = html.split('class="need link"').find((chunk) => chunk.includes('sess-o'));
+  assert.ok(waitingCard, 'waiting card rendered');
+  assert.ok(waitingCard.includes('等待外部'), 'zh waiting badge in HTML');
+  assert.ok(!waitingCard.includes('已逾期'), 'no overdue badge on the waiting card');
+  assert.ok(waitingCard.includes('5天待处理'), 'age suffix kept in HTML');
+  assert.ok(overdueCard.includes('已逾期'), 'plain overdue card unaffected');
+});

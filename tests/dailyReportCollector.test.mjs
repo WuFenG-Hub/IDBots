@@ -23,6 +23,7 @@ import {
   computeDailyReportWindow,
   capDailyReportText,
   collectDailyReportFacts,
+  collectPendingFollowUpLifecycle,
   enforceDailyReportFactsCap,
   shapeBotSessionsForBot,
   shapeChainInteractionFacts,
@@ -298,6 +299,11 @@ test('collectDailyReportFacts: full pass over a fake db; broken buckets fail sof
       if (sql.includes('FROM scheduled_task_runs')) {
         return [{ task_name: 'Nightly inspect', bot_name: 'W', status: 'success', skip_reason: null, started_at: new Date(nowMs - 3600e3).toISOString(), error: null }];
       }
+      // Pending follow-up lifecycle lanes (2026-10-28): no done/stopped
+      // signals in this fixture → the 'fu1' row stays listed with no
+      // exclusions, exactly what the assertions below expect.
+      if (sql.includes('FROM scheduled_tasks st')) return [];
+      if (sql.includes('FROM long_term_subtasks l')) return [];
       if (sql.includes('FROM group_task_transitions')) return [];
       if (sql.includes('FROM long_term_events')) return [];
       if (sql.includes('FROM long_term_tasks t')) return [];
@@ -440,4 +446,225 @@ test('shapeHourlyActivity: 12 buckets, out-of-range hours dropped', () => {
   assert.equal(shaped.local[1], 2, 'bucket-style rows still feed in');
   assert.equal(shaped.online[0], 3);
   assert.equal(shaped.local.reduce((sum, n) => sum + n, 0), 6, 'hour 25 dropped');
+});
+
+// ── Pending follow-up lifecycle cross-check (2026-10-28) ───────────────────
+//
+// Contract: rows whose underlying work is verifiably done or stopped are
+// excluded from the pending list (before the cap slice); rows waiting on an
+// external condition are flagged waitingExternal instead of overdue; manual
+// pins are never lifecycle-excluded; every lane fails soft.
+
+const lifecycleDb = (lanes) => ({
+  queryAll(sql, params = []) {
+    if (sql.includes('FROM scheduled_tasks st')) return lanes.tasks ?? [];
+    if (sql.includes('FROM scheduled_task_runs r')) return lanes.runs ?? [];
+    if (sql.includes('FROM orchestration_attempts a')) return lanes.orchestration ?? [];
+    if (sql.includes('FROM long_term_subtasks l')) return lanes.subtasks ?? [];
+    throw new Error(`unexpected SQL: ${sql.slice(0, 60)}`);
+  },
+});
+
+const pendingRow = (id, overrides = {}) => ({
+  id,
+  title: `Session ${id}`,
+  follow_up_source: 'cerebellum',
+  follow_up_at: new Date(Date.now() - 3 * DAY_MS).toISOString(),
+  auto_origin: 'schedule',
+  ...overrides,
+});
+
+test('lifecycle: scheduled lane — all-linked-disabled / expired excluded, any-enabled kept', () => {
+  const rows = [pendingRow('s-disabled'), pendingRow('s-enabled'), pendingRow('s-expired'), pendingRow('s-mixed')];
+  const db = lifecycleDb({
+    tasks: [
+      { session_id: 's-disabled', target_session_id: null, enabled: 0, expires_at: null },
+      // Secondary linkage column counts too: same session, still all-disabled.
+      { session_id: null, target_session_id: 's-disabled', enabled: 0, expires_at: null },
+      { session_id: 's-enabled', target_session_id: null, enabled: 1, expires_at: null },
+      // Scheduler skips expired tasks but never disables them — treated as stopped.
+      { session_id: 's-expired', target_session_id: null, enabled: 1, expires_at: '2020-01-01' },
+      // One live task + one stopped task → live wins, session kept.
+      { session_id: 's-mixed', target_session_id: null, enabled: 0, expires_at: null },
+      { session_id: null, target_session_id: 's-mixed', enabled: 1, expires_at: null },
+    ],
+  });
+  const lifecycle = collectPendingFollowUpLifecycle(db, rows);
+  assert.deepEqual([...lifecycle.excluded].sort(), ['s-disabled', 's-expired']);
+  assert.equal(lifecycle.excluded.has('s-enabled'), false);
+  assert.equal(lifecycle.excluded.has('s-mixed'), false);
+  assert.equal(lifecycle.waitingExternal.size, 0);
+});
+
+test('lifecycle: orphan schedule sessions — latest successful run excluded, failures kept', () => {
+  const rows = [
+    pendingRow('s-ok'),
+    pendingRow('s-ok2'),
+    pendingRow('s-fail'),
+    pendingRow('s-multi'),
+    pendingRow('s-notschedule', { auto_origin: 'longterm' }),
+  ];
+  const db = lifecycleDb({
+    // Rows arrive started_at ASC; the LAST status per session wins.
+    runs: [
+      { session_id: 's-ok', status: 'success' },
+      { session_id: 's-ok2', status: 'error' },
+      { session_id: 's-ok2', status: 'success' },
+      { session_id: 's-fail', status: 'error' },
+      { session_id: 's-multi', status: 'success' },
+      { session_id: 's-multi', status: 'error' },
+      { session_id: 's-notschedule', status: 'success' },
+    ],
+  });
+  const lifecycle = collectPendingFollowUpLifecycle(db, rows);
+  assert.deepEqual([...lifecycle.excluded].sort(), ['s-ok', 's-ok2']);
+  // A failed one-shot may still deserve attention; a non-schedule-origin
+  // session with a successful run is not a scheduled-work orphan.
+  assert.equal(lifecycle.excluded.has('s-fail'), false);
+  assert.equal(lifecycle.excluded.has('s-multi'), false);
+  assert.equal(lifecycle.excluded.has('s-notschedule'), false);
+});
+
+test('lifecycle: orchestration lane — closed tasks excluded, live/mixed kept', () => {
+  const rows = [pendingRow('s-cancelled'), pendingRow('s-review'), pendingRow('s-mixed'), pendingRow('s-unlinked')];
+  const db = lifecycleDb({
+    orchestration: [
+      { session_id: 's-cancelled', status: 'cancelled' },
+      { session_id: 's-review', status: 'review' },
+      // A session carrying attempts of several tasks is excluded only when
+      // EVERY task is terminal.
+      { session_id: 's-mixed', status: 'cancelled' },
+      { session_id: 's-mixed', status: 'running' },
+      // Rows without a resolvable session/status are ignored.
+      { worker_session_id: 'shape-mismatch' },
+    ],
+  });
+  const lifecycle = collectPendingFollowUpLifecycle(db, rows);
+  assert.deepEqual([...lifecycle.excluded], ['s-cancelled']);
+  assert.equal(lifecycle.excluded.has('s-review'), false);
+  assert.equal(lifecycle.excluded.has('s-mixed'), false);
+});
+
+test('lifecycle: long-term lane — primary done excluded, history all-done excluded, waiting flagged', () => {
+  const rows = [
+    pendingRow('s-primary-done'),
+    pendingRow('s-primary-live'),
+    pendingRow('s-parent-done'),
+    pendingRow('s-hist-done'),
+    pendingRow('s-hist-wait'),
+    pendingRow('s-hist-mixed'),
+    pendingRow('s-prod-precedence'),
+    pendingRow('s-badjson'),
+    pendingRow('s-unlinked'),
+  ];
+  const db = lifecycleDb({
+    subtasks: [
+      // Primary seat accepted → the session's own sub-project is finished.
+      { session_id: 's-primary-done', session_history_json: '[]', status: 'accepted', wait_until: null, parent_stage: 'active', parent_done_at: null },
+      { session_id: 's-primary-live', session_history_json: '[]', status: 'in_progress', wait_until: null, parent_stage: 'active', parent_done_at: null },
+      // Parent task done closes every live sub-project under it.
+      { session_id: 's-parent-done', session_history_json: '[]', status: 'in_progress', wait_until: null, parent_stage: 'done', parent_done_at: '2026-10-27T00:00:00Z' },
+      // History-only participation: all linked sub-projects done → excluded.
+      { session_id: 'other-a', session_history_json: '["s-hist-done"]', status: 'accepted', wait_until: null, parent_stage: 'active', parent_done_at: null },
+      // History-only with a live waiting_external sub-project → waiting flag.
+      { session_id: 'other-b', session_history_json: '["s-hist-wait"]', status: 'waiting_external', wait_until: '2026-11-01T00:00:00+08:00', parent_stage: 'active', parent_done_at: null },
+      // History with one done + one live → kept, not waiting.
+      { session_id: 'other-c', session_history_json: '["s-hist-mixed"]', status: 'accepted', wait_until: null, parent_stage: 'active', parent_done_at: null },
+      { session_id: 'other-d', session_history_json: '["s-hist-mixed"]', status: 'in_progress', wait_until: null, parent_stage: 'active', parent_done_at: null },
+      // Prod precedence case (session 688c44f7 shape): primary seat accepted
+      // AND participation history in a waiting sub-project — done beats waiting.
+      { session_id: 's-prod-precedence', session_history_json: '[]', status: 'accepted', wait_until: null, parent_stage: 'active', parent_done_at: null },
+      { session_id: 'other-e', session_history_json: '["s-prod-precedence"]', status: 'waiting_external', wait_until: '2026-11-02T00:00:00+08:00', parent_stage: 'active', parent_done_at: null },
+      // Malformed history JSON must not crash the lane.
+      { session_id: 'other-f', session_history_json: 'not-json', status: 'accepted', wait_until: null, parent_stage: 'active', parent_done_at: null },
+      // Non-array history JSON is ignored too.
+      { session_id: 's-badjson', session_history_json: '{"oops":1}', status: 'waiting_external', wait_until: null, parent_stage: 'active', parent_done_at: null },
+    ],
+  });
+  const lifecycle = collectPendingFollowUpLifecycle(db, rows);
+  assert.deepEqual(
+    [...lifecycle.excluded].sort(),
+    ['s-hist-done', 's-parent-done', 's-primary-done', 's-prod-precedence'],
+  );
+  assert.equal(lifecycle.excluded.has('s-primary-live'), false);
+  assert.equal(lifecycle.excluded.has('s-hist-mixed'), false);
+  assert.equal(lifecycle.excluded.has('s-unlinked'), false);
+  assert.equal(lifecycle.excluded.has('s-badjson'), false, 'non-array history is not a link');
+  assert.deepEqual([...lifecycle.waitingExternal].sort(), ['s-hist-wait']);
+});
+
+test('lifecycle: manual pins are never lifecycle-excluded', () => {
+  const rows = [pendingRow('s-manual', { follow_up_source: 'manual' }), pendingRow('s-auto')];
+  const db = lifecycleDb({
+    tasks: [
+      { session_id: 's-manual', target_session_id: null, enabled: 0, expires_at: null },
+      { session_id: 's-auto', target_session_id: null, enabled: 0, expires_at: null },
+    ],
+  });
+  const lifecycle = collectPendingFollowUpLifecycle(db, rows);
+  assert.deepEqual([...lifecycle.excluded], ['s-auto']);
+});
+
+test('lifecycle: every lane broken → no exclusions, no throw (fail soft)', () => {
+  const rows = [pendingRow('s-1'), pendingRow('s-2')];
+  const db = { queryAll: () => { throw new Error('db gone'); } };
+  const lifecycle = collectPendingFollowUpLifecycle(db, rows);
+  assert.equal(lifecycle.excluded.size, 0);
+  assert.equal(lifecycle.waitingExternal.size, 0);
+});
+
+test('lifecycle: no pending rows → no queries issued', () => {
+  let calls = 0;
+  const db = { queryAll: () => { calls += 1; return []; } };
+  const lifecycle = collectPendingFollowUpLifecycle(db, []);
+  assert.equal(lifecycle.excluded.size, 0);
+  assert.equal(calls, 0);
+});
+
+test('shapePendingFollowUpRows: waitingOnExternal suppresses overdue', () => {
+  const nowMs = Date.now();
+  const old = new Date(nowMs - 5 * DAY_MS).toISOString();
+  const rows = [
+    { id: 'w1', title: 'Wait on upstream', follow_up_source: 'cerebellum', follow_up_at: old },
+    { id: 'o1', title: 'Old plain', follow_up_source: 'cerebellum', follow_up_at: old },
+  ];
+  const shaped = shapePendingFollowUpRows(rows, nowMs, 10, new Set(['w1']));
+  assert.equal(shaped[0].ageDays, 5);
+  assert.equal(shaped[0].waitingOnExternal, true);
+  assert.equal(shaped[0].overdue, false, 'waiting items never carry the overdue badge');
+  assert.equal(shaped[1].waitingOnExternal, false);
+  assert.equal(shaped[1].overdue, true);
+});
+
+test('collectDailyReportFacts: exclusions apply BEFORE the 10-item cap; waiting survives with flag', () => {
+  const nowMs = new Date(2026, 9, 28, 8, 0, 0).getTime();
+  const windowStartMs = nowMs - DAY_MS;
+  const old = new Date(nowMs - 5 * DAY_MS).toISOString();
+  const fresh = new Date(nowMs - 30 * 60 * 1000).toISOString();
+  // 12 pending rows: 10 stale zombies first (oldest order), then 2 live ones.
+  const pendingRows = [];
+  for (let i = 1; i <= 10; i += 1) {
+    pendingRows.push({ id: `zombie-${i}`, title: `Zombie ${i}`, follow_up_source: 'cerebellum', follow_up_at: old, auto_origin: 'schedule', bot_name: 'W' });
+  }
+  pendingRows.push({ id: 'live-plain', title: 'Live decision', follow_up_source: 'cerebellum', follow_up_at: fresh, auto_origin: 'schedule', bot_name: 'W' });
+  pendingRows.push({ id: 'live-wait', title: 'Live wait', follow_up_source: 'cerebellum', follow_up_at: old, auto_origin: 'longterm', bot_name: 'W' });
+  const fakeDb = {
+    queryAll(sql, params = []) {
+      if (sql.includes('FROM cowork_sessions s') && sql.includes('follow_up_state')) return pendingRows;
+      if (sql.includes('FROM scheduled_tasks st')) {
+        return pendingRows.slice(0, 10).map((row) => ({ session_id: row.id, target_session_id: null, enabled: 0, expires_at: null }));
+      }
+      if (sql.includes('FROM long_term_subtasks l')) {
+        return [{ session_id: 'other', session_history_json: '["live-wait"]', status: 'waiting_external', wait_until: '2026-11-01T00:00:00+08:00', parent_stage: 'active', parent_done_at: null }];
+      }
+      return [];
+    },
+  };
+  const facts = collectDailyReportFacts({ db: fakeDb, windowStartMs, windowEndMs: nowMs, twinId: 7 });
+  // Zombies never occupy cap slots: both live items are listed.
+  assert.deepEqual(facts.pendingFollowUps.map((item) => item.sessionId), ['live-plain', 'live-wait']);
+  assert.equal(facts.pendingFollowUps[0].overdue, false);
+  assert.equal(facts.pendingFollowUps[1].waitingOnExternal, true);
+  assert.equal(facts.pendingFollowUps[1].overdue, false, 'waiting item keeps age but drops overdue');
+  assert.equal(facts.pendingFollowUps[1].ageDays, 5);
 });
