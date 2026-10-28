@@ -35,6 +35,13 @@ export type SafetyContext = {
   requestedToolInput: Record<string, unknown>;
 };
 
+/**
+ * The gateway/IPC sanitizer replaces over-deep values with this exact
+ * sentinel string; a payload carrying it as option labels has lost its
+ * structure and must not render as selectable choices (F-17a).
+ */
+const isTruncatedDepthSentinel = (value: string): boolean => value === '[truncated-depth]';
+
 const toRecord = (value: unknown): Record<string, unknown> | null => (
   value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -53,6 +60,17 @@ export const parseQuestions = (permission: CoworkPermissionRequest): QuestionIte
       const options = Array.isArray(record.options)
         ? record.options
             .map((option) => {
+              // Ask-payload tolerance (F-17a): older/brokered relays may pass
+              // option entries as bare strings or payload labels as
+              // non-strings; degrade to {label} instead of dropping the whole
+              // question into the malformed fallback card. The IPC sanitizer's
+              // '[truncated-depth]' sentinel is NOT readable content — treat a
+              // payload whose options are only sentinels as unusable so it
+              // takes the plain-text fallback (raw payload + Allow/Deny)
+              // instead of offering bogus clickable choices.
+              if (typeof option === 'string' && option.trim() && !isTruncatedDepthSentinel(option)) {
+                return { label: option } as QuestionOption;
+              }
               const optionRecord = toRecord(option);
               if (!optionRecord || typeof optionRecord.label !== 'string' || !optionRecord.label.trim()) return null;
               return {
@@ -69,7 +87,7 @@ export const parseQuestions = (permission: CoworkPermissionRequest): QuestionIte
         question: record.question,
         header: typeof record.header === 'string' ? record.header : undefined,
         options,
-        multiSelect: record.multiSelect === true,
+        multiSelect: record.multiSelect === true || record.multi_select === true,
         detail: typeof record.detail === 'string' && record.detail.trim() ? record.detail : undefined,
       } as QuestionItem;
     })
@@ -528,9 +546,15 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
             {approvalTitle}
           </h2>
           {isMalformedQuestion ? (
-            <p className="mt-1 mb-0 text-xs leading-5 text-claude-textSecondary dark:text-claude-darkTextSecondary">
-              {i18nService.t('coworkApprovalUnavailableBody')}
-            </p>
+            <>
+              <p className="mt-1 mb-0 text-xs leading-5 text-claude-textSecondary dark:text-claude-darkTextSecondary">
+                {i18nService.t('coworkApprovalUnavailableBody')}
+              </p>
+              {/* Plain-text fallback (F-17a): the payload is still the agent's
+                  question — render its raw content and keep both Allow/Deny
+                  available so the user is never boxed into a deny-only card. */}
+              <pre className="mt-2 mb-0 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-xl border border-claude-border/70 dark:border-claude-darkBorder/70 bg-claude-bg/65 dark:bg-claude-darkBg/65 px-3 py-2 text-[11px] leading-5 font-mono text-claude-textSecondary dark:text-claude-darkTextSecondary">{stringifyInput(permission.toolInput)}</pre>
+            </>
           ) : inputSummary ? (
             <code className="block mt-1 truncate text-xs leading-5 text-claude-textSecondary dark:text-claude-darkTextSecondary font-mono" title={inputSummary}>{inputSummary}</code>
           ) : !isSafetyApproval && nativeReason ? null : (
@@ -557,17 +581,15 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
         <button type="button" onClick={handleDeny} disabled={responding} className="px-3 py-2 rounded-lg border border-claude-border dark:border-claude-darkBorder text-xs font-medium text-claude-textSecondary dark:text-claude-darkTextSecondary hover:bg-red-50 hover:text-red-600 hover:border-red-200 dark:hover:bg-red-900/20 dark:hover:text-red-300 disabled:opacity-60">
           {i18nService.t('coworkDeny')}
         </button>
-        {!isMalformedQuestion && (
-          <button type="button" onClick={handleApprove} disabled={responding} className={isDestructive
-            ? 'px-3 py-2 rounded-lg border-2 border-red-700 bg-red-600 text-white text-xs font-medium shadow-[2px_2px_0_#991b1b] hover:bg-red-700 active:translate-x-[1px] active:translate-y-[1px] active:shadow-none disabled:opacity-50 disabled:cursor-not-allowed'
-            : 'btn-idchat-primary-filled px-3 py-2 text-xs disabled:opacity-50 disabled:cursor-not-allowed'}>
-            {responding
-              ? i18nService.t('processing')
-              : isDestructive
-                ? i18nService.t('coworkApprovalAllowDelete')
-                : i18nService.t('coworkApprovalAllowOnce')}
-          </button>
-        )}
+        <button type="button" onClick={handleApprove} disabled={responding} className={isDestructive
+          ? 'px-3 py-2 rounded-lg border-2 border-red-700 bg-red-600 text-white text-xs font-medium shadow-[2px_2px_0_#991b1b] hover:bg-red-700 active:translate-x-[1px] active:translate-y-[1px] active:shadow-none disabled:opacity-50 disabled:cursor-not-allowed'
+          : 'btn-idchat-primary-filled px-3 py-2 text-xs disabled:opacity-50 disabled:cursor-not-allowed'}>
+          {responding
+            ? i18nService.t('processing')
+            : isDestructive
+              ? i18nService.t('coworkApprovalAllowDelete')
+              : i18nService.t('coworkApprovalAllowOnce')}
+        </button>
       </div>
     </section>
   );

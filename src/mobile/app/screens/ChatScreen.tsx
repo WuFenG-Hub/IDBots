@@ -166,18 +166,21 @@ function SubmissionStatus({ chat }: { chat: Chat }): JSX.Element | null {
         <div key={attempt.submissionId} className="flex flex-wrap items-center gap-2 py-1">
           <span className="min-w-0 flex-1 text-xs text-[var(--text-secondary)]">
             {t(`mobile.chat.submission.${attempt.status}`)}
+            {attempt.status === 'verified' && attempt.error ? (
+              <span className="block whitespace-pre-wrap break-words">{attempt.error}</span>
+            ) : null}
           </span>
           {attempt.status !== 'sending' ? (
             <>
-              <button type="button" onClick={() => void chat.reconcileSubmission(attempt.submissionId)} className="min-h-[36px] px-2 text-xs text-[var(--text-primary)]">
+              <button type="button" onClick={() => void chat.reconcileSubmission(attempt.submissionId)} disabled={attempt.status === 'reconciling'} className="min-h-[36px] px-2 text-xs text-[var(--text-primary)] disabled:opacity-40">
                 {t('mobile.chat.reconcile')}
               </button>
               {attempt.kind === 'submit' || attempt.status === 'failed' ? (
-                <button type="button" onClick={() => void chat.retrySubmission(attempt.submissionId)} className="min-h-[36px] px-2 text-xs text-[var(--text-primary)]">
+                <button type="button" onClick={() => void chat.retrySubmission(attempt.submissionId)} disabled={attempt.status === 'reconciling' || attempt.status === 'verified'} className="min-h-[36px] px-2 text-xs text-[var(--text-primary)] disabled:opacity-40">
                   {t('mobile.common.retry')}
                 </button>
               ) : null}
-              <button type="button" onClick={() => chat.discardSubmission(attempt.submissionId)} className="min-h-[36px] px-2 text-xs text-[var(--text-secondary)]">
+              <button type="button" onClick={() => chat.discardSubmission(attempt.submissionId)} disabled={attempt.status === 'reconciling'} className="min-h-[36px] px-2 text-xs text-[var(--text-secondary)] disabled:opacity-40">
                 {t('mobile.chat.discard')}
               </button>
             </>

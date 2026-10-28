@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type {
+  CoworkMessage,
   CoworkMessageHistoryState,
   CoworkMessagePage,
   CoworkPermissionRequest,
@@ -33,6 +34,57 @@ import {
 export const MOBILE_OPEN_SESSION_STORAGE_KEY = 'idbots.mobile.openSessionId.v1';
 export const MOBILE_DRAFTS_STORAGE_KEY = 'idbots.mobile.sessionDrafts.v1';
 
+/**
+ * F-17b uncertain-outcome reconcile (2026-10-28 阿燃 incident): a gateway
+ * invoke timeout ("no result within 120000ms") leaves the submission status
+ * "uncertain" even when the tenant main actually completed the work, so the
+ * user has no signal that retrying would duplicate side effects. Reconciliation
+ * translates those outcomes against the server-side session transcript: any
+ * tool result that deterministically proves completion ends "verified".
+ *
+ * The map is deliberately narrow: each entry is a tool whose result text
+ * doubles as a completion certificate. Detection reads only persisted tool_use
+ * / tool_result message metadata (the same transcript the user sees).
+ */
+/** Tool-use entries older than this window relative to the attempt are ignored. */
+export const COWORK_RECONCILE_TOOL_USE_LOOKBACK_MS = 120_000;
+
+const SIDE_EFFECT_TOOL_CERTIFICATES: Record<string, { ok: RegExp }> = {
+  metabot_create: { ok: /MetaBot created/ },
+};
+
+export function detectSideEffectOutcome(
+  messages: CoworkMessage[],
+  attempt: Pick<CoworkSubmissionAttempt, 'createdAt'>,
+): string | null {
+  for (const [toolName, certificate] of Object.entries(SIDE_EFFECT_TOOL_CERTIFICATES)) {
+    const uses = messages.filter((message) => (
+      message.type === 'tool_use'
+      && message.metadata?.toolName === toolName
+      && typeof message.metadata?.toolUseId === 'string'
+      && (typeof message.timestamp !== 'number'
+        || typeof attempt.createdAt !== 'number'
+        || message.timestamp >= attempt.createdAt - COWORK_RECONCILE_TOOL_USE_LOOKBACK_MS)
+    ));
+    for (const use of uses) {
+      const useId = use.metadata.toolUseId as string;
+      const result = messages.find((message) => (
+        message.type === 'tool_result'
+        && message.metadata?.toolUseId === useId
+        && message.metadata?.isError !== true
+      ));
+      if (!result) continue;
+      const text = typeof result.metadata?.toolResult === 'string'
+        ? result.metadata.toolResult
+        : result.content;
+      if (text && certificate.ok.test(text)) {
+        return text;
+      }
+    }
+  }
+  return null;
+}
+
 export interface PendingPermissionEntry {
   sessionId: string;
   request: CoworkPermissionRequest;
@@ -64,7 +116,7 @@ export interface CoworkGreetingOptions {
   systemPrompt?: string;
 }
 
-export type CoworkSubmissionStatus = 'sending' | 'failed' | 'uncertain';
+export type CoworkSubmissionStatus = 'sending' | 'failed' | 'uncertain' | 'reconciling' | 'verified';
 
 export interface CoworkSubmissionAttempt {
   submissionId: string;
@@ -81,7 +133,7 @@ export interface CoworkSubmissionAttempt {
 }
 
 export interface CoworkActionResult {
-  status: 'accepted' | 'failed' | 'uncertain';
+  status: 'accepted' | 'failed' | 'uncertain' | 'verified';
   error: string | null;
   submissionId?: string;
   sessionId?: string | null;
@@ -143,6 +195,11 @@ export class CoworkSessionController {
   private dismissedPermissionIds = new Set<string>();
   private stoppingSessionIds = new Set<string>();
   private uncertainSessionIds = new Set<string>();
+  // F-17b: one automatic server reconcile per uncertain submission; the pin
+  // blocks stacked timers while the reconcile runs, and any deliberate state
+  // change (retry, discard, finish, an accepted round) releases it.
+  private readonly reconcilingSubmissionIds = new Set<string>();
+  private readonly reconcileTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private restoring = false;
   private restorePromise: Promise<void> | null = null;
   private generation = 0;
@@ -622,8 +679,55 @@ export class CoworkSessionController {
 
   private finishAttempt(attempt: CoworkSubmissionAttempt): void {
     this.attempts = this.attempts.filter((entry) => entry.submissionId !== attempt.submissionId);
+    this.clearReconcilePin(attempt.submissionId);
     this.draftStore.clearIfUnchanged(attempt.draftToken, attempt.draftText, attempt.draftAttachments);
     this.publish();
+  }
+
+  /**
+   * F-17b: when a submission ends uncertain (a gateway invoke timeout — the
+   * tenant may still have completed the work), run ONE server reconcile
+   * automatically instead of leaving the user with a bare "result unknown"
+   * card to prod manually. The reconcile turns the transcript into a
+   * definite verdict: accepted (submission landed) or verified (a known
+   * side-effect tool finished), only falling back to "uncertain" when the
+   * server still gives no proof.
+   */
+  private scheduleAutoReconcile(attempt: CoworkSubmissionAttempt): void {
+    const submissionId = attempt.submissionId;
+    if (this.reconcilingSubmissionIds.has(submissionId)) return;
+    this.reconcilingSubmissionIds.add(submissionId);
+    const existing = this.reconcileTimers.get(submissionId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.reconcileTimers.delete(submissionId);
+      void this.runReconcile(submissionId).catch(() => undefined);
+    }, 30);
+    timer.unref?.();
+    this.reconcileTimers.set(submissionId, timer);
+  }
+
+  private clearReconcilePin(submissionId: string): void {
+    const timer = this.reconcileTimers.get(submissionId);
+    if (timer) clearTimeout(timer);
+    this.reconcileTimers.delete(submissionId);
+    this.reconcilingSubmissionIds.delete(submissionId);
+  }
+
+  async runReconcile(submissionId: string): Promise<CoworkActionResult> {
+    const attempt = this.attempts.find((entry) => entry.submissionId === submissionId);
+    // Deliberate user actions (retry / discard / a resolved attempt) always
+    // release the auto-reconcile pin so a later timeout of the same attempt
+    // can schedule a fresh reconcile.
+    if (!attempt) {
+      this.clearReconcilePin(submissionId);
+      return { status: 'failed', error: 'Submission no longer exists', submissionId };
+    }
+    const result = await this.reconcileSubmission(submissionId);
+    if (result.status !== 'accepted' && result.status !== 'verified') {
+      this.clearReconcilePin(submissionId);
+    }
+    return result;
   }
 
   private failAttempt(
@@ -632,6 +736,7 @@ export class CoworkSessionController {
     error: string,
   ): CoworkActionResult {
     this.updateAttempt({ ...attempt, status, error });
+    if (status === 'uncertain') this.scheduleAutoReconcile(attempt);
     return { status, error, submissionId: attempt.submissionId, sessionId: attempt.sessionId };
   }
 
@@ -759,6 +864,7 @@ export class CoworkSessionController {
       };
     }
     const retry = { ...attempt, status: 'sending' as const, error: null };
+    this.clearReconcilePin(retry.submissionId);
     this.updateAttempt(retry);
     return retry.kind === 'start' ? this.startAttempt(retry) : this.submitAttempt(retry);
   }
@@ -775,19 +881,46 @@ export class CoworkSessionController {
       );
     }
     const sessionId = attempt.sessionId!;
+    if (attempt.status === 'uncertain') {
+      // Visible reconcile round (manual click or the F-17b auto pass).
+      this.updateAttempt({ ...attempt, status: 'reconciling', error: null });
+    }
     await this.refreshSession(sessionId);
-    const landed = this.stateFor(sessionId).messages.some(
+    // The user's retry outranks the reconcile: an in-flight reconcile that
+    // finishes after the attempt was resubmitted must never overwrite the
+    // live 'sending' status.
+    const liveAttempt = this.attempts.find((entry) => entry.submissionId === submissionId);
+    if (!liveAttempt || (liveAttempt.status !== 'reconciling' && liveAttempt.status !== 'failed')) {
+      return { status: 'uncertain', error: null, submissionId, sessionId };
+    }
+    const messages = this.stateFor(sessionId).messages;
+    const landed = messages.some(
       (message) => message.metadata?.submissionId === submissionId,
     );
     if (landed) {
       this.finishAttempt(attempt);
       return { status: 'accepted', error: null, submissionId, sessionId };
     }
+    // F-17b: the delivery of the text is not the only ledger — a side-effect
+    // tool that already finished proves the work is done even if the user's
+    // message text got lost in transport sizing. E.g. the 2026-10-28 阿燃
+    // case: submit timed out at 120000ms, while the tenant transcript showed
+    // `metabot_create` → 'MetaBot created: 阿燃 (id=2 …)'.
+    const verdict = detectSideEffectOutcome(messages, attempt);
+    if (verdict) {
+      this.updateAttempt({
+        ...attempt,
+        status: 'verified',
+        error: verdict.length > 200 ? `${verdict.slice(0, 200)}…` : verdict,
+      });
+      return { status: 'verified', error: null, submissionId, sessionId };
+    }
     return this.failAttempt(attempt, 'uncertain', 'The tenant has not confirmed this submission yet');
   }
 
   discardSubmission(submissionId: string): void {
     this.attempts = this.attempts.filter((attempt) => attempt.submissionId !== submissionId);
+    this.clearReconcilePin(submissionId);
     this.publish();
   }
 
@@ -887,6 +1020,9 @@ export class CoworkSessionController {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    for (const submissionId of [...this.reconcileTimers.keys()]) {
+      this.clearReconcilePin(submissionId);
+    }
     for (const cleanup of this.cleanups.splice(0)) cleanup();
     for (const timer of this.healTimers.values()) clearTimeout(timer);
     this.healTimers.clear();
