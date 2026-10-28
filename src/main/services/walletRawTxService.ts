@@ -96,6 +96,26 @@ interface WalletRawTxServiceDeps {
     fundingRawTx?: string;
     fundingOutpoint?: string;
   }) => Promise<WorkerTransferResult>;
+  runMvcNftTransferRawTxWorker?: (params: {
+    mnemonic: string;
+    path: string;
+    genesis: string;
+    codehash: string;
+    tokenIndex: string;
+    toAddress: string;
+    feeRate: number;
+    excludeOutpoints: string[];
+  }) => Promise<WorkerTransferResult>;
+}
+
+export interface BuildMvcNftTransferRawTxParams {
+  metabotId: number;
+  genesis: string;
+  codehash: string;
+  tokenIndex: string;
+  toAddress: string;
+  feeRate: number;
+  excludeOutpoints?: string[];
 }
 
 interface BuildMvcTransferRawTxResult {
@@ -113,6 +133,12 @@ interface BuildMvcFtTransferRawTxResult {
   amount_check_raw_tx: string;
   spent_outpoints: string[];
   change_outpoint: string | null;
+}
+
+interface BuildMvcNftTransferRawTxResult {
+  raw_tx: string;
+  txid: string;
+  spent_outpoints: string[];
 }
 
 interface BuildMvcOrderedRawTxBundleResultStepBase {
@@ -395,6 +421,33 @@ async function runMvcFtTransferRawTxWorker(params: {
   );
 }
 
+async function runMvcNftTransferRawTxWorker(params: {
+  mnemonic: string;
+  path: string;
+  genesis: string;
+  codehash: string;
+  tokenIndex: string;
+  toAddress: string;
+  feeRate: number;
+  excludeOutpoints: string[];
+}): Promise<WorkerTransferResult> {
+  return await runWorker(
+    'buildMvcNftTransferRawTxWorker.js',
+    {
+      genesis: params.genesis,
+      codehash: params.codehash,
+      tokenIndex: params.tokenIndex,
+      toAddress: params.toAddress,
+      feeRate: params.feeRate,
+      excludeOutpoints: params.excludeOutpoints,
+    },
+    {
+      IDBOTS_METABOT_MNEMONIC: params.mnemonic,
+      IDBOTS_METABOT_PATH: params.path,
+    },
+  );
+}
+
 export async function buildMvcTransferRawTx(
   store: MetabotStore,
   params: BuildMvcTransferRawTxParams,
@@ -500,6 +553,48 @@ export async function buildMvcFtTransferRawTx(
     amount_check_raw_tx: workerResult.amountCheckRawTx,
     spent_outpoints: workerResult.spentOutpoints ?? extractSpentOutpoints(tx),
     change_outpoint: changeOutpoint,
+  };
+}
+
+export async function buildMvcNftTransferRawTx(
+  store: MetabotStore,
+  params: BuildMvcNftTransferRawTxParams,
+  deps: WalletRawTxServiceDeps = {},
+): Promise<BuildMvcNftTransferRawTxResult> {
+  const excludeOutpoints = validateCommonTransferFields(params);
+  const tokenIndex = String(params.tokenIndex ?? '').trim();
+  if (!/^\d+$/.test(tokenIndex)) {
+    throw new Error('tokenIndex must be a positive integer string');
+  }
+  if (!params.genesis?.trim() || !params.codehash?.trim()) {
+    throw new Error('genesis and codehash are required');
+  }
+  if (!Number.isFinite(params.feeRate) || params.feeRate <= 0) {
+    throw new Error('feeRate must be positive');
+  }
+
+  const wallet = store.getMetabotWalletByMetabotId(params.metabotId);
+  if (!wallet?.mnemonic?.trim()) {
+    throw new Error('MetaBot wallet not found');
+  }
+
+  const runner = deps.runMvcNftTransferRawTxWorker ?? runMvcNftTransferRawTxWorker;
+  const workerResult = await runner({
+    mnemonic: wallet.mnemonic,
+    path: wallet.path || DEFAULT_PATH,
+    genesis: params.genesis.trim(),
+    codehash: params.codehash.trim(),
+    tokenIndex,
+    toAddress: params.toAddress.trim(),
+    feeRate: params.feeRate,
+    excludeOutpoints,
+  });
+
+  const tx = parseTx(workerResult.txHex);
+  return {
+    raw_tx: workerResult.txHex,
+    txid: workerResult.txid || tx.id,
+    spent_outpoints: workerResult.spentOutpoints ?? extractSpentOutpoints(tx),
   };
 }
 
