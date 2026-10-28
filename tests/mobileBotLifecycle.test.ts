@@ -104,3 +104,37 @@ test('local pending Bots resume and full-sync through the existing lifecycle cha
   assert.equal(enabled.success, true);
   assert.equal(enabled.metabot.enabled, false);
 });
+
+test('the fallback brain (fallback_llm triad) persists through create, update and clear', async (t) => {
+  const api = makeBridge(t);
+  const result = await api.idbots.createMetaBotOnChain({
+    name: 'Fallback worker',
+    metabot_type: 'worker',
+    role: 'Runner',
+    soul: 'Runs things',
+    bio: 'Fallback triad fixture',
+    llm_id: 'glm-flash',
+    llm_provider: 'metaid-free',
+    llm_effort: 'low',
+    fallback_llm_id: 'deepseek-flash',
+    fallback_llm_provider: 'metaid-free',
+    fallback_llm_effort: 'high',
+    allow_chat_skills: [],
+  });
+  assert.equal(result.success, true);
+  const bot = result.metabot as MobileMetabot;
+  assert.equal(bot.fallback_llm_id, 'deepseek-flash');
+  assert.equal(bot.fallback_llm_provider, 'metaid-free');
+  assert.equal(bot.fallback_llm_effort, 'high');
+
+  const cleared = await api.metabot.update(bot.id, {
+    fallback_llm_id: null,
+    fallback_llm_provider: null,
+    fallback_llm_effort: null,
+  });
+  assert.equal(cleared.success, true);
+  const updated = cleared.metabot as MobileMetabot;
+  assert.equal(updated.fallback_llm_id ?? null, null);
+  assert.equal(updated.fallback_llm_provider ?? null, null);
+  assert.equal(updated.fallback_llm_effort ?? null, null);
+});

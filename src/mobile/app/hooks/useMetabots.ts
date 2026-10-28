@@ -12,6 +12,10 @@ export interface MobileBotInput {
   llmId: string;
   llmProvider: string;
   llmEffort: string | null;
+  /** Fallback brain, aligned with the desktop Basic tab; '' = none. */
+  fallbackLlmId: string;
+  fallbackLlmProvider: string;
+  fallbackLlmEffort: string | null;
   allowChatSkills: string[];
 }
 
@@ -93,6 +97,9 @@ export function useMetabots(): {
         llm_id: input.llmId,
         llm_provider: input.llmProvider || null,
         llm_effort: input.llmEffort,
+        fallback_llm_id: input.fallbackLlmId || null,
+        fallback_llm_provider: input.fallbackLlmProvider || null,
+        fallback_llm_effort: input.fallbackLlmEffort,
         allow_chat_skills: input.allowChatSkills,
       });
       await reload();
@@ -122,6 +129,9 @@ export function useMetabots(): {
         llm_id: input.llmId,
         llm_provider: input.llmProvider || null,
         llm_effort: input.llmEffort,
+        fallback_llm_id: input.fallbackLlmId || null,
+        fallback_llm_provider: input.fallbackLlmProvider || null,
+        fallback_llm_effort: input.fallbackLlmEffort,
         allow_chat_skills: input.allowChatSkills,
       });
       await reload();

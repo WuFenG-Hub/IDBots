@@ -64,6 +64,16 @@ export type MobileMetabot = MockMetabot & {
 };
 export type MetabotCreateInput = Parameters<MetabotChannelAPI['create']>[0];
 export type MetabotUpdateInput = Parameters<MetabotChannelAPI['update']>[1];
+/**
+ * Optional fallback-brain payload carried by the on-chain create channel
+ * (`idbots.createMetaBotOnChain`) and the update channel; the metabot
+ * fixture keeps mock parity with it.
+ */
+export interface MetabotFallbackInput {
+  fallback_llm_id?: string | null;
+  fallback_llm_provider?: string | null;
+  fallback_llm_effort?: string | null;
+}
 /** Fixture skill row, derived from the real `skills:list` payload. */
 export type MockSkill = NonNullable<Awaited<ReturnType<SkillsChannelAPI['list']>>['skills']>[number];
 /** traffic:redeemCode success payload (TrafficRedeemCodeInfo). */

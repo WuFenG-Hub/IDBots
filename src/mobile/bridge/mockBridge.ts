@@ -40,6 +40,7 @@ import type {
   ConnectionState,
   MetabotCreateInput,
   MetabotUpdateInput,
+  MetabotFallbackInput,
   MobileMockBridge,
   MobileMockCoworkStreamChannel,
   MobileMetabot,
@@ -1294,7 +1295,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
         const bot = metabotFixtures.find((entry) => entry.id === id);
         return bot ? { success: true, metabot: { ...bot } } : { success: false, error: 'metabot not found' };
       }),
-    create: (input: MetabotCreateInput) =>
+    create: (input: MetabotCreateInput & MetabotFallbackInput) =>
       guardOnline(async () => {
         if (!input || typeof input.name !== 'string' || !input.name.trim()) {
           return { success: false, error: 'name is required' };
@@ -1318,6 +1319,9 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
           llm_id: input.llm_id ?? null,
           llm_provider: input.llm_provider ?? null,
           llm_effort: input.llm_effort ?? null,
+          fallback_llm_id: input.fallback_llm_id ?? null,
+          fallback_llm_provider: input.fallback_llm_provider ?? null,
+          fallback_llm_effort: input.fallback_llm_effort ?? null,
           mvc_address: `mock-mvc-${metabotSeq}`,
           metabot_info_pinid: null,
           chain_sync_state: 'partial',
@@ -1332,7 +1336,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
         metabotFixtures.push(bot);
         return { success: true, metabot: { ...bot } };
       }),
-    update: (id: number, input: MetabotUpdateInput) =>
+    update: (id: number, input: MetabotUpdateInput & MetabotFallbackInput) =>
       guardOnline(async () => {
         const bot = metabotFixtures.find((entry) => entry.id === id);
         if (!bot) return { success: false, error: 'metabot not found' };
@@ -1348,6 +1352,9 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
           if (input.llm_id !== undefined) bot.llm_id = input.llm_id;
           if (input.llm_provider !== undefined) bot.llm_provider = input.llm_provider;
           if (input.llm_effort !== undefined) bot.llm_effort = input.llm_effort;
+          if (input.fallback_llm_id !== undefined) bot.fallback_llm_id = input.fallback_llm_id ?? null;
+          if (input.fallback_llm_provider !== undefined) bot.fallback_llm_provider = input.fallback_llm_provider ?? null;
+          if (input.fallback_llm_effort !== undefined) bot.fallback_llm_effort = input.fallback_llm_effort ?? null;
           if (input.allow_chat_skills !== undefined) bot.allow_chat_skills = [...input.allow_chat_skills];
           if (typeof input.enabled === 'boolean') bot.enabled = input.enabled;
         }

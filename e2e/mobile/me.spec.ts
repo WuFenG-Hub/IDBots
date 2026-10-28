@@ -18,17 +18,15 @@ test.describe('me screen', () => {
     await attachScreen(testInfo, page, 'me-balance');
   });
 
-  test('skill toggle flips and sticks', async ({ page }, testInfo) => {
+  test('skills section stays hidden on the Me page (UX batch 2026-10-28)', async ({ page }, testInfo) => {
     await page.goto('/app/');
     await page.getByRole('button', { name: 'Me' }).click();
 
-    const skill = page.getByRole('switch', { name: 'web-search · Enabled' });
-    await expect(skill).toHaveAttribute('aria-checked', 'true');
-    await skill.click();
-    await expect(skill).toHaveAttribute('aria-checked', 'false');
-    await attachScreen(testInfo, page, 'me-skill-toggled');
-    await skill.click();
-    await expect(skill).toHaveAttribute('aria-checked', 'true');
+    // The reversible hide leaves no blank gap: Settings follows MetaBots directly.
+    await expect(page.getByText('Skills', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('Mock User')).toBeVisible();
+    await expect(page.getByText('web-search')).toHaveCount(0);
+    await attachScreen(testInfo, page, 'me-skills-hidden');
   });
 
   test('language switch flips the UI language', async ({ page }, testInfo) => {

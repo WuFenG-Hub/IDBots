@@ -76,6 +76,7 @@ tests/*
 !tests/mobileSettings.test.ts
 !tests/mobileRechargeRecovery.test.ts
 !tests/mobileBotLifecycle.test.ts
+!tests/mobileBotSort.test.ts
 !tests/fixtures/
 !tests/agentGameConvergence.test.mjs
 !tests/fixtures/longTaskBoardSeed.mjs
