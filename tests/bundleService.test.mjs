@@ -7,8 +7,11 @@ import { createRequire } from 'node:module';
  *
  * Covers the local stub (plan shape per the C4 example, order creation with a
  * fake QR, first-poll crediting), the real-mode HTTP layer (identity headers
- * on the signed endpoints, unsigned reads per C4), and the getMeters key
- * hygiene (no API key may leak into the result).
+ * on signed bundle order writes, unsigned reads per C4), and the getMeters
+ * key hygiene (no API key may leak into the result). The quota read inside
+ * getMeters is Bearer-relay-key authenticated (F-16, verified live
+ * 2026-10-28: /v2/assist/llm/quota ignores identity X-* headers) and stays
+ * identity-guarded against key/identity splitting.
  */
 
 const require = createRequire(import.meta.url);
@@ -315,7 +318,17 @@ test('real mode: getOrder reads the unsigned status endpoint', async (t) => {
 
 const SECRET_KEY_VALUE = 'sk-relay-secret-key-value';
 
-test('getMeters rebuilds the C4 quota shape and never exposes an API key', async (t) => {
+const SECRET_RELAY_KEY = 'mrk-relay-bearer-test-key-value';
+
+function makeKvStore(appConfig) {
+  return { get: (key) => (key === 'app_config' ? appConfig : null) };
+}
+
+function appConfigWithRelayKey(apiKey = SECRET_RELAY_KEY) {
+  return { providers: { 'metaid-free': { apiKey } } };
+}
+
+test('getMeters rebuilds the C4 quota shape and never exposes an API key (Bearer relay key auth)', async (t) => {
   let quotaCapture = null;
   const fetchImpl = createFetchStub([
     ['/v2/assist/llm/quota', (init) => {
@@ -348,6 +361,7 @@ test('getMeters rebuilds the C4 quota shape and never exposes an API key', async
   const restore = initService({
     baseUrl: 'https://bundle.test',
     fetchImpl,
+    store: makeKvStore(appConfigWithRelayKey()),
     getTrafficBalanceImpl: async (options) => {
       trafficOptions = options;
       return trafficRecord;
@@ -369,19 +383,16 @@ test('getMeters rebuilds the C4 quota shape and never exposes an API key', async
 
   const serialized = JSON.stringify(meters);
   assert.ok(!serialized.includes(SECRET_KEY_VALUE), 'no API key may appear in getMeters output');
+  assert.ok(!serialized.includes(SECRET_RELAY_KEY), 'the Bearer relay key must never leak into getMeters output');
   assert.ok(!serialized.includes('keyPrefix'));
   assert.ok(!serialized.includes('relay.internal'));
 
-  assert.equal(quotaCapture.headers['X-Identity-Address'], IDENTITY_ADDRESS);
-  const timestamp = Number(quotaCapture.headers['X-Timestamp']);
-  assert.ok(
-    verifyMessage(
-      IDENTITY_ADDRESS,
-      `llm-relay-quota:${IDENTITY_ADDRESS}:${timestamp}`,
-      quotaCapture.headers['X-Signature'],
-    ),
-    'quota read signs llm-relay-quota:<identityAddress>:<ts> (C4 sibling of the ledger convention)',
-  );
+  assert.equal(quotaCapture.headers['Authorization'], `Bearer ${SECRET_RELAY_KEY}`,
+    'F-16 (verified live 2026-10-28): /v2/assist/llm/quota is Bearer-relay-key authenticated');
+  assert.ok(!('X-Identity-Address' in quotaCapture.headers),
+    'identity headers are ignored by the quota route and must not be sent');
+  assert.ok(!('X-Signature' in quotaCapture.headers),
+    'the old llm-relay-quota identity message is rejected by the relay; no signature may be sent');
 });
 
 test('getMeters degrades traffic to null when the traffic read fails', async (t) => {
@@ -391,6 +402,7 @@ test('getMeters degrades traffic to null when the traffic read fails', async (t)
   const restore = initService({
     baseUrl: 'https://bundle.test',
     fetchImpl,
+    store: makeKvStore(appConfigWithRelayKey()),
     getTrafficBalanceImpl: async () => {
       throw new Error('traffic offline');
     },
@@ -400,6 +412,121 @@ test('getMeters degrades traffic to null when the traffic read fails', async (t)
   const meters = await getBundleMeters();
   assert.equal(meters.traffic, null);
   assert.equal(meters.llm.quotaTotal, 100000);
+});
+
+test('getMeters quota read maps the snake_case backend variants field-by-field', async (t) => {
+  const fetchImpl = createFetchStub([
+    ['/v2/assist/llm/quota', {
+      quota_total: 25000000,
+      quota_used: 7400544,
+      quota_remaining: 17599456,
+      quota_free: 5000000,
+      quota_purchased: 20000000,
+      unit: 'tokens',
+    }],
+  ]);
+  const restore = initService({
+    baseUrl: 'https://bundle.test',
+    fetchImpl,
+    store: makeKvStore(appConfigWithRelayKey()),
+    getTrafficBalanceImpl: async () => null,
+  });
+  t.after(restore);
+
+  const meters = await getBundleMeters();
+  // Field-level contract of the live backend payload (F-16 owner tenant,
+  // 2026-10-28): camelCase primary, snake_case fallback, unit defaulted when
+  // absent — normalizeBundleLlmQuota must rebuild all six fields.
+  assert.equal(meters.llm.quotaTotal, 25000000);
+  assert.equal(meters.llm.quotaUsed, 7400544);
+  assert.equal(meters.llm.quotaRemaining, 17599456);
+  assert.equal(meters.llm.quotaFree, 5000000);
+  assert.equal(meters.llm.quotaPurchased, 20000000);
+  assert.equal(meters.llm.unit, 'tokens');
+});
+
+test('getMeters quota read without a locally provisioned relay key fails at the quota stage without hitting the wire', async (t) => {
+  const fetchImpl = createFetchStub([]);
+  const restore = initService({
+    baseUrl: 'https://bundle.test',
+    fetchImpl,
+    store: makeKvStore({ providers: {} }),
+    getTrafficBalanceImpl: async () => null,
+  });
+  t.after(restore);
+
+  await assert.rejects(
+    () => getBundleMeters(),
+    (error) => error instanceof Error
+      && /relay key is not provisioned/i.test(String(error.message)),
+    'a missing metaid-free relay key must fail fast with a provisioning hint',
+  );
+  assert.equal(fetchImpl.calls.filter((call) => call.url.includes('/v2/assist/llm/quota')).length, 0,
+    'no quota request may leave without the Bearer credential');
+});
+
+test('getMeters rejects a quota payload that names a foreign identity (key/identity split backstop)', async (t) => {
+  const foreignAddressStubs = createFetchStub([
+    ['/v2/assist/llm/quota', {
+      identityAddress: '1ForeignAddressNotTheLocalIdentity',
+      quotaTotal: 2100000, quotaUsed: 100000, quotaRemaining: 2000000,
+      quotaFree: 100000, quotaPurchased: 2000000, unit: 'tokens',
+    }],
+  ]);
+  const foreignGlobalStubs = createFetchStub([
+    ['/v2/assist/llm/quota', {
+      // Address-empty backend that only reports a different globalMetaId.
+      globalMetaId: 'idq1otheridentity',
+      quotaTotal: 2100000, quotaUsed: 100000, quotaRemaining: 2000000,
+      quotaFree: 100000, quotaPurchased: 2000000, unit: 'tokens',
+    }],
+  ]);
+
+  const restoreGlobal = initService({
+    baseUrl: 'https://bundle.test',
+    fetchImpl: foreignGlobalStubs,
+    store: makeKvStore(appConfigWithRelayKey()),
+    getTrafficBalanceImpl: async () => null,
+  });
+  t.after(restoreGlobal);
+  await assert.rejects(
+    () => getBundleMeters(),
+    (error) => error instanceof Error && /belongs to another identity/i.test(String(error.message)),
+    'a globalMetaId-only mismatch must read as a foreign key',
+  );
+
+  const restoreAddress = initService({
+    baseUrl: 'https://bundle.test',
+    fetchImpl: foreignAddressStubs,
+    store: makeKvStore(appConfigWithRelayKey()),
+    getTrafficBalanceImpl: async () => null,
+  });
+  t.after(restoreAddress);
+  await assert.rejects(
+    () => getBundleMeters(),
+    (error) => error instanceof Error && /belongs to another identity/i.test(String(error.message)),
+    'an identityAddress mismatch must read as a foreign key',
+  );
+});
+
+test('getMeters passes the identity guard when the backend reports no identity fields', async (t) => {
+  const fetchImpl = createFetchStub([
+    ['/v2/assist/llm/quota', {
+      quotaTotal: 2100000, quotaUsed: 100000, quotaRemaining: 2000000,
+      quotaFree: 100000, quotaPurchased: 2000000, unit: 'tokens',
+    }],
+  ]);
+  const restore = initService({
+    baseUrl: 'https://bundle.test',
+    fetchImpl,
+    store: makeKvStore(appConfigWithRelayKey()),
+    getTrafficBalanceImpl: async () => null,
+  });
+  t.after(restore);
+
+  const meters = await getBundleMeters();
+  assert.equal(meters.llm.quotaTotal, 2100000,
+    'backends without the identity echo fields stay additive (no false mismatch)');
 });
 
 // ---------------------------------------------------------------------------

@@ -19,7 +19,11 @@
  * `getMeters` is the only meter aggregation and it never exposes an API key:
  * the traffic side returns the public account record and the LLM side is a
  * field-by-field rebuild of the C4 quota shape (no apiKey/keyPrefix/baseUrl
- * passthrough).
+ * passthrough). The quota read is Bearer-relay-key authenticated, NOT
+ * identity-signed — verified live on 2026-10-28 against metaso
+ * /v2/assist/llm/quota: identity X-* headers are ignored there (always
+ * code:2 "relay key invalid or revoked") and the Bearer key from the local
+ * metaid-free provider config is the only accepted credential (F-16).
  *
  * Electron-free (store/identity/fetch are injected) so plain node:test
  * coverage works, mirroring trafficAccountService/llmRelayService.
@@ -27,6 +31,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { signMvcAddressMessage } from './mvcSponsorClient';
+import { relayIdentityMatchesLocalIdentity } from './llmRelayService';
 import { getConfiguredTrafficApiBase, getTrafficBalance, type TrafficAccountRecord } from './trafficAccountService';
 import { TRAFFIC_API_BASE_KEY } from './trafficSettings';
 import type { SqliteStore } from '../sqliteStore';
@@ -248,18 +253,46 @@ function buildBundleOrderMessage(accountId: string, planId: string, timestamp: n
   return `bundle-order:${accountId}:${planId}:${timestamp}`;
 }
 
-// Identity-signed LLM quota read. C4 documents identity-header signing for the
-// sibling ledger endpoint (`llm-relay-ledger:<identityAddress>:<timestamp>`)
-// and leaves the quota endpoint's identity message unstated; this follows the
-// same llm-relay-<purpose> convention — confirm against the WS-D deployment
-// before pointing real tenants at a backend that enforces it.
-function buildLlmRelayQuotaMessage(identityAddress: string, timestamp: number): string {
-  return `llm-relay-quota:${identityAddress}:${timestamp}`;
-}
+// Bearer-authenticated LLM quota read (F-16, 2026-10-28): the quota endpoint
+// rejects identity-header signing entirely — only the Bearer relay key is
+// accepted. The relay key lives in the metaid-free provider config
+// (app_config kv), read per call by readFreeRelayApiKey below.
 
 // ---------------------------------------------------------------------------
 // Identity + signing (same machinery as trafficAccountService)
 // ---------------------------------------------------------------------------
+
+/**
+ * The relay credential the free LLM pool serves behind: metaid-free provider
+ * apiKey from the app_config kv row — the same single source of truth
+ * readMetaIdFreeProviderApiKey uses in llmRelayService. Kept local (not
+ * imported there) so this module keeps its own injected getStore test seam.
+ */
+function readFreeRelayApiKey(): string {
+  try {
+    const appConfig = depsRef?.getStore()?.get('app_config') as
+      | { providers?: Record<string, { apiKey?: unknown } | undefined> }
+      | null;
+    const apiKey = appConfig?.providers?.['metaid-free']?.apiKey;
+    return typeof apiKey === 'string' ? apiKey.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+/** Local identity fields for the quota response's identity guard (null-safe). */
+function readLocalIdentityForQuotaGuard(): { mvc_address: string; globalmetaid: string } | null {
+  try {
+    const identity = depsRef?.getUserIdentityStore().get() ?? null;
+    if (!identity) return null;
+    return {
+      mvc_address: normalizeText(identity.mvc_address),
+      globalmetaid: normalizeText(identity.globalmetaid),
+    };
+  } catch {
+    return null;
+  }
+}
 
 function requireIdentity(): { mnemonic: string; path: string; mvcAddress: string; globalMetaId: string } {
   const identity = getDeps().getUserIdentityStore().get();
@@ -292,6 +325,8 @@ async function bundleRequestJson(input: {
   path: string;
   body?: Record<string, unknown>;
   identity?: { address: string; timestamp: number; signature: string };
+  /** Bearer relay key (quota reads; ignored when identity is present). */
+  bearer?: string;
 }): Promise<Record<string, unknown> | unknown[]> {
   const deps = getDeps();
   const fetchImpl = deps.fetchImpl ?? fetch;
@@ -299,6 +334,9 @@ async function bundleRequestJson(input: {
   const headers: Record<string, string> = { accept: 'application/json' };
   if (input.body) {
     headers['content-type'] = 'application/json';
+  }
+  if (input.bearer) {
+    headers['Authorization'] = `Bearer ${input.bearer}`;
   }
   if (input.identity) {
     headers['X-Identity-Address'] = input.identity.address;
@@ -648,21 +686,34 @@ export async function getBundleMeters(): Promise<BundleMeters> {
     syncStubQuotaDerived();
     llm = { ...stubState.quota };
   } else {
-    const identity = requireIdentity();
-    const timestamp = nowSeconds();
-    const message = buildLlmRelayQuotaMessage(identity.mvcAddress, timestamp);
-    const { signature } = await signMvcAddressMessage({
-      mnemonic: identity.mnemonic,
-      path: identity.path,
-      message,
-    });
+    // Quota reads authenticate with the metaid-free Bearer relay key —
+    // identity-header signing is rejected by /v2/assist/llm/quota (code:2
+    // "relay key invalid or revoked"; verified live 2026-10-28, F-16).
+    const relayKey = readFreeRelayApiKey();
+    if (!relayKey) {
+      throw new BundleApiError({
+        stage: 'quota',
+        message: 'free-quota relay key is not provisioned locally (send one chat so bootstrapLlmRelay can provision it)',
+      });
+    }
     const data = await bundleRequestJson({
       stage: 'quota',
       method: 'GET',
       path: '/v2/assist/llm/quota',
-      identity: { address: identity.mvcAddress, timestamp, signature },
+      bearer: relayKey,
     });
-    llm = normalizeBundleLlmQuota(data as Record<string, unknown>);
+    const dataRecord = data as Record<string, unknown>;
+    // Same key-vs-identity backstop the relay quota read applies: a response
+    // that names a different identity than the local user_identity row means
+    // the cached key belongs elsewhere and must never display as this
+    // account's meters (2026-10 identity-split incident class).
+    if (!relayIdentityMatchesLocalIdentity(dataRecord, readLocalIdentityForQuotaGuard())) {
+      throw new BundleApiError({
+        stage: 'quota',
+        message: `LLM relay quota belongs to another identity (${normalizeText(dataRecord.identityAddress) || 'unknown'}); re-provision the relay key with the local identity.`,
+      });
+    }
+    llm = normalizeBundleLlmQuota(dataRecord);
   }
   return { traffic, llm };
 }
