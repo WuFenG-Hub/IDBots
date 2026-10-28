@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <title>IDBots — Offline</title>
+    <style>
+      :root { font-family: system-ui, -apple-system, sans-serif; color: #20242a; background: #f5f7f9; }
+      body { margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom)); box-sizing: border-box; }
+      main { width: min(100%, 420px); }
+      h1 { font-size: 28px; margin: 0 0 12px; }
+      p { font-size: 16px; line-height: 1.6; margin: 0 0 24px; }
+      button { min-width: 120px; min-height: 48px; border: 0; border-radius: 12px; background: #315efb; color: white; font: inherit; font-weight: 600; padding: 12px 24px; }
+      button:focus-visible { outline: 3px solid #8da6ff; outline-offset: 3px; }
+      @media (prefers-color-scheme: dark) { :root { color: #f3f5f8; background: #17191d; } button { background: #8da6ff; color: #101728; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="title">You’re offline</h1>
+      <p id="message">IDBots could not reach the cloud. Check your connection, then try again. Your Bot keeps running in the cloud; this page does not provide offline Agent execution.</p>
+      <button id="retry" type="button">Try again</button>
+    </main>
+    <script>
+      (() => {
+        const chinese = /^zh\b/i.test(navigator.language || '');
+        const copy = chinese ? {
+          title: '当前无法连接',
+          message: 'IDBots 无法连接云端。请检查网络后重试。你的 Bot 仍在云端运行；此页面不提供离线 Agent 执行。',
+          retry: '重试',
+        } : {
+          title: 'You’re offline',
+          message: 'IDBots could not reach the cloud. Check your connection, then try again. Your Bot keeps running in the cloud; this page does not provide offline Agent execution.',
+          retry: 'Try again',
+        };
+        document.documentElement.lang = chinese ? 'zh-CN' : 'en';
+        document.title = `IDBots — ${copy.title}`;
+        for (const key of ['title', 'message', 'retry']) document.getElementById(key).textContent = copy[key];
+        document.getElementById('retry').addEventListener('click', () => {
+          try {
+            const retry = new URL(new URLSearchParams(location.search).get('retry') || '');
+            const allowed = retry.protocol === 'https:' && retry.port === '' && retry.username === '' && retry.password === '' && (retry.hostname === 'staging.idbots.world' || retry.hostname === 'app.idbots.world');
+            if (allowed) location.assign(retry.href);
+          } catch {}
+        });
+      })();
+    </script>
+  </body>
+</html>

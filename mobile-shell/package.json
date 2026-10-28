@@ -1,0 +1,31 @@
+{
+  "name": "@idbots/mobile-shell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Capacitor native shells for the remote IDBots PWA",
+  "engines": {
+    "node": ">=24 <27"
+  },
+  "packageManager": "pnpm@11.24.0",
+  "scripts": {
+    "sync": "pnpm run sync:staging",
+    "sync:staging": "node scripts/select-flavor.mjs staging && cap sync",
+    "sync:production": "node scripts/select-flavor.mjs production && cap sync",
+    "build:android": "pnpm run build:android:staging",
+    "build:android:staging": "node scripts/build-android.mjs staging",
+    "build:android:production": "node scripts/build-android.mjs production",
+    "build:ios": "pnpm run build:ios:staging",
+    "build:ios:staging": "node scripts/build-ios.mjs staging",
+    "build:ios:production": "node scripts/build-ios.mjs production",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.3",
+    "@capacitor/app": "8.1.2",
+    "@capacitor/core": "8.5.3",
+    "@capacitor/ios": "8.5.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.3"
+  }
+}
