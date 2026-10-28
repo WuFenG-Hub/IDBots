@@ -2404,11 +2404,30 @@ interface ElectronNativeWalletAsset {
   };
 }
 
+interface ElectronMvcNftAsset {
+  kind: 'mvc-nft';
+  chain: 'mvc';
+  seriesName: string;
+  genesis: string;
+  codeHash: string;
+  sensibleId?: string;
+  address: string;
+  count: number;
+  tokenSupply?: number;
+  items: Array<{
+    tokenIndex: string;
+    name: string;
+    satoshi: number;
+    icon?: string;
+  }>;
+}
+
 interface ElectronMetabotWalletAssets {
   metabotId: number;
   nativeAssets: ElectronNativeWalletAsset[];
   mrc20Assets: ElectronMrc20Asset[];
   mvcFtAssets: ElectronMvcFtAsset[];
+  mvcNftAssets: ElectronMvcNftAsset[];
 }
 
 type ElectronTokenTransferAsset = ElectronMrc20Asset | ElectronMvcFtAsset;

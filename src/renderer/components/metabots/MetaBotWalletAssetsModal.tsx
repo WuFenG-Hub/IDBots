@@ -51,13 +51,32 @@ export interface MvcFtWalletAsset {
   };
 }
 
-export type WalletDisplayAsset = NativeWalletAsset | Mrc20WalletAsset | MvcFtWalletAsset;
+export interface MvcNftWalletAsset {
+  kind: 'mvc-nft';
+  chain: 'mvc';
+  seriesName: string;
+  genesis: string;
+  codeHash: string;
+  sensibleId?: string;
+  address: string;
+  count: number;
+  tokenSupply?: number;
+  items: Array<{
+    tokenIndex: string;
+    name: string;
+    satoshi: number;
+    icon?: string;
+  }>;
+}
+
+export type WalletDisplayAsset = NativeWalletAsset | Mrc20WalletAsset | MvcFtWalletAsset | MvcNftWalletAsset;
 
 export interface MetaBotWalletAssetsBundle {
   metabotId: number;
   nativeAssets: NativeWalletAsset[];
   mrc20Assets: Mrc20WalletAsset[];
   mvcFtAssets: MvcFtWalletAsset[];
+  mvcNftAssets: MvcNftWalletAsset[];
 }
 
 interface MetaBotWalletAssetsModalProps {
@@ -164,45 +183,92 @@ const MetaBotWalletAssetsModal: React.FC<MetaBotWalletAssetsModalProps> = ({
 
               {section.state === 'loaded' && section.items.map((asset: WalletDisplayAsset) => (
                 <div
-                  key={`${asset.kind}-${asset.address}-${asset.kind === 'mrc20' ? asset.mrc20Id : asset.kind === 'mvc-ft' ? asset.genesis : asset.symbol}`}
+                  key={`${asset.kind}-${asset.address}-${asset.kind === 'mrc20' ? asset.mrc20Id : asset.kind === 'mvc-ft' ? asset.genesis : asset.kind === 'mvc-nft' ? asset.genesis : asset.symbol}`}
                   className="rounded-xl border dark:border-claude-darkBorder border-claude-border bg-[var(--bg-panel)] dark:bg-claude-darkSurface px-4 py-3"
                 >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium dark:text-claude-darkText text-claude-text">
-                          {asset.kind === 'native' ? asset.symbol : (asset.tokenName || asset.symbol)}
-                        </span>
-                        <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                          {asset.symbol}
+                  {asset.kind === 'mvc-nft' ? (
+                    <div>
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                              {asset.seriesName || asset.genesis}
+                            </span>
+                            <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                              MVC NFT
+                            </span>
+                          </div>
+                          <div className="mt-1 flex items-center gap-1.5 text-xs font-mono dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                            <span>{formatShortAddress(asset.address)}</span>
+                            <button
+                              type="button"
+                              onClick={() => copyAddress(asset.address)}
+                              className="p-1 rounded hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
+                              title={i18nService.t('metabotCopyAddress')}
+                            >
+                              <DocumentDuplicateIcon className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                        <span className="text-sm font-semibold tabular-nums dark:text-claude-darkText text-claude-text shrink-0">
+                          {asset.count}
                         </span>
                       </div>
-                      <div className="mt-1 flex items-center gap-1.5 text-xs font-mono dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                        <span>{formatShortAddress(asset.address)}</span>
+                      {asset.items.length > 0 && (
+                        <ul className="mt-2 space-y-1 border-t dark:border-claude-darkBorder border-claude-border pt-2">
+                          {asset.items.map((item) => (
+                            <li
+                              key={item.tokenIndex}
+                              className="flex items-center justify-between gap-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary"
+                            >
+                              <span className="truncate">
+                                <span className="font-mono">#{item.tokenIndex}</span>
+                                {item.name ? ` ${item.name}` : ''}
+                              </span>
+                              <span className="font-mono shrink-0">{item.satoshi} sats</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                            {asset.kind === 'native' ? asset.symbol : (asset.tokenName || asset.symbol)}
+                          </span>
+                          <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                            {asset.symbol}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex items-center gap-1.5 text-xs font-mono dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                          <span>{formatShortAddress(asset.address)}</span>
+                          <button
+                            type="button"
+                            onClick={() => copyAddress(asset.address)}
+                            className="p-1 rounded hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
+                            title={i18nService.t('metabotCopyAddress')}
+                          >
+                            <DocumentDuplicateIcon className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col items-end gap-2 shrink-0">
+                        <span className="text-sm font-semibold tabular-nums dark:text-claude-darkText text-claude-text">
+                          {asset.balance.display}
+                        </span>
                         <button
                           type="button"
-                          onClick={() => copyAddress(asset.address)}
-                          className="p-1 rounded hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
-                          title={i18nService.t('metabotCopyAddress')}
+                          onClick={() => onTransfer(asset)}
+                          className="shrink-0 px-2 py-1 rounded text-xs bg-claude-accent/20 dark:bg-claude-accent/30 text-claude-accent hover:bg-claude-accent/30 dark:hover:bg-claude-accent/40"
                         >
-                          <DocumentDuplicateIcon className="h-3.5 w-3.5" />
+                          {i18nService.t('metabotTransfer')}
                         </button>
                       </div>
                     </div>
-
-                    <div className="flex flex-col items-end gap-2 shrink-0">
-                      <span className="text-sm font-semibold tabular-nums dark:text-claude-darkText text-claude-text">
-                        {asset.balance.display}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => onTransfer(asset)}
-                        className="shrink-0 px-2 py-1 rounded text-xs bg-claude-accent/20 dark:bg-claude-accent/30 text-claude-accent hover:bg-claude-accent/30 dark:hover:bg-claude-accent/40"
-                      >
-                        {i18nService.t('metabotTransfer')}
-                      </button>
-                    </div>
-                  </div>
+                  )}
                 </div>
               ))}
             </section>

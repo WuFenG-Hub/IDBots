@@ -139,6 +139,9 @@ const MetaBotWalletBalanceModal: React.FC<MetaBotWalletBalanceModalProps> = ({
       setTransferModal({ chain: asset.chain });
       return;
     }
+    // NFT cards render no transfer button (transfers go through the agent
+    // tool); this branch only satisfies the widened WalletDisplayAsset type.
+    if (asset.kind === 'mvc-nft') return;
     setTokenTransferAsset(asset);
   };
 
