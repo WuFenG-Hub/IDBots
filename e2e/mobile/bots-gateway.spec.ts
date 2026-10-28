@@ -20,9 +20,14 @@ test.describe('gateway Bot lifecycle', () => {
     const form = page.getByTestId('bot-form');
     await form.getByPlaceholder('Name').fill('C2 Worker');
     await form.getByPlaceholder('Role').fill('Gateway research worker');
+    await form.getByRole('button', { name: 'Advanced options' }).click();
+    await form.getByTestId('bot-tab-model').click();
     await form.getByLabel('Default model').selectOption({ label: 'IDBots-Free · GLM Flash' });
-    await form.getByLabel('Default reasoning effort').selectOption('high');
-    await form.getByRole('checkbox', { name: 'web-search' }).check();
+    await form.getByLabel('Reasoning effort', { exact: true }).first().selectOption('high');
+    await form.getByTestId('bot-tab-skills').click();
+    await expect(form.getByTestId('bot-skills-toggle')).toHaveAttribute('aria-expanded', 'false');
+    await form.getByTestId('bot-skills-toggle').click();
+    await form.getByLabel('web-search').check();
     await form.getByTestId('bot-save').click();
 
     const row = page.locator('[data-testid^="bot-row-"]').filter({ hasText: 'C2 Worker' });
@@ -38,6 +43,8 @@ test.describe('gateway Bot lifecycle', () => {
     expect(created.allow_chat_skills).toEqual(['web-search']);
 
     await row.getByRole('button', { name: 'Edit · C2 Worker' }).click();
+    await page.getByTestId('bot-form').getByTestId('bot-tab-skills').click();
+    await page.getByTestId('bot-form').getByTestId('bot-skills-toggle').click();
     await page.getByTestId('bot-form').getByRole('checkbox', { name: 'memory' }).check();
     await page.getByTestId('bot-save').click();
     await expect(page.getByText('Bot updated', { exact: true })).toBeVisible();
