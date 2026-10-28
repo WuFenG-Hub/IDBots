@@ -202,6 +202,7 @@ export default function ChatScreen(props: {
   botsError?: string | null;
   onReloadBots?: () => void;
   onOpenRecharge: () => void;
+  rechargeAllowed?: boolean;
 }): JSX.Element {
   const { chat, bots } = props;
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -319,9 +320,11 @@ export default function ChatScreen(props: {
             {t(chat.quotaKind === 'purchased' ? 'mobile.chat.quotaBodyPurchased' : 'mobile.chat.quotaBodyFree')}
           </p>
           <div className="flex gap-2">
-            <button type="button" onClick={props.onOpenRecharge} className="min-h-[44px] flex-1 rounded-xl bg-[var(--color-primary)] px-3 py-2 text-sm font-medium text-black active:opacity-80">
-              {t('mobile.chat.quotaRecharge')}
-            </button>
+            {props.rechargeAllowed !== false ? (
+              <button type="button" onClick={props.onOpenRecharge} className="min-h-[44px] flex-1 rounded-xl bg-[var(--color-primary)] px-3 py-2 text-sm font-medium text-black active:opacity-80">
+                {t('mobile.chat.quotaRecharge')}
+              </button>
+            ) : null}
             <button type="button" onClick={chat.dismissQuota} className="min-h-[44px] rounded-xl border border-amber-300 px-3 py-2 text-sm text-amber-800 active:bg-amber-100">
               {t('mobile.chat.quotaDismiss')}
             </button>

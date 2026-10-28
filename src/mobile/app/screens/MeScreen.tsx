@@ -43,7 +43,7 @@ function Segmented<T extends string>(props: {
   );
 }
 
-function BalanceCard(props: { onOpenRecharge: () => void; resyncCounter?: number }): JSX.Element {
+function BalanceCard(props: { onOpenRecharge: () => void; resyncCounter?: number; rechargeAllowed?: boolean }): JSX.Element {
   const { meters, loading, error, reload } = useMeters(props.resyncCounter);
   return (
     <Section title={t('mobile.me.balanceTitle')}>
@@ -71,13 +71,15 @@ function BalanceCard(props: { onOpenRecharge: () => void; resyncCounter?: number
         </div>
       ) : null}
       <div className="flex gap-2">
-        <button
-          type="button"
-          onClick={props.onOpenRecharge}
-          className="min-h-[44px] flex-1 rounded-xl bg-[var(--color-primary)] py-2 text-sm font-medium text-black active:opacity-80"
-        >
-          {t('mobile.me.rechargeEntry')}
-        </button>
+        {props.rechargeAllowed !== false ? (
+          <button
+            type="button"
+            onClick={props.onOpenRecharge}
+            className="min-h-[44px] flex-1 rounded-xl bg-[var(--color-primary)] py-2 text-sm font-medium text-black active:opacity-80"
+          >
+            {t('mobile.me.rechargeEntry')}
+          </button>
+        ) : null}
         <RedeemButton />
       </div>
     </Section>
@@ -359,7 +361,11 @@ function AboutSection(): JSX.Element {
 }
 
 /** Me tab (REQ-E-14). */
-export default function MeScreen(props: { resyncCounter?: number; onOpenRecharge: () => void }): JSX.Element {
+export default function MeScreen(props: {
+  resyncCounter?: number;
+  onOpenRecharge: () => void;
+  rechargeAllowed?: boolean;
+}): JSX.Element {
   const identity = useIdentity(props.resyncCounter);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -368,7 +374,11 @@ export default function MeScreen(props: { resyncCounter?: number; onOpenRecharge
         <p className="truncate text-sm text-[var(--text-secondary)]">{identity.name ?? ''}</p>
       </div>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-        <BalanceCard resyncCounter={props.resyncCounter} onOpenRecharge={props.onOpenRecharge} />
+        <BalanceCard
+          resyncCounter={props.resyncCounter}
+          onOpenRecharge={props.onOpenRecharge}
+          rechargeAllowed={props.rechargeAllowed}
+        />
         <BotsSection />
         {SHOW_SKILLS_SECTION ? <SkillsSection /> : null}
         <SettingsSection />

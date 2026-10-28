@@ -43,6 +43,7 @@ test('Android has API 26 and explicit staging and production variants', () => {
   const manifest = read('../android/app/src/main/AndroidManifest.xml');
   assert.match(manifest, /android:allowBackup="false"/);
   assert.match(manifest, /android:usesCleartextTraffic="false"/);
+  assert.match(manifest, /android:windowSoftInputMode="adjustResize"/);
 });
 
 test('Gradle wrapper remains executable in Git and on disk', () => {
