@@ -144,6 +144,13 @@ function BotsSection(): JSX.Element {
   return <BotManagementSection />;
 }
 
+/**
+ * UX batch 2026-10-28: skills are deprioritized for the mobile MVP, so the
+ * Me-page skills list is HIDDEN behind this reversible flag (no code is
+ * deleted: flip to `true` to restore the section).
+ */
+const SHOW_SKILLS_SECTION = false;
+
 function SkillsSection(): JSX.Element {
   const { skills, setEnabled } = useSkills();
   return (
@@ -363,7 +370,7 @@ export default function MeScreen(props: { resyncCounter?: number; onOpenRecharge
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         <BalanceCard resyncCounter={props.resyncCounter} onOpenRecharge={props.onOpenRecharge} />
         <BotsSection />
-        <SkillsSection />
+        {SHOW_SKILLS_SECTION ? <SkillsSection /> : null}
         <SettingsSection />
         <AccountSection />
         <AboutSection />
