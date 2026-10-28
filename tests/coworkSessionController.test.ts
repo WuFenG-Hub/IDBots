@@ -289,6 +289,43 @@ describe('cowork session controller', () => {
     assert.equal(controller.getDraft(), 'preserved draft');
   });
 
+  it('keeps a restored session when a newer refresh supersedes the open request', async (t) => {
+    const { harness, electron } = makeHarness();
+    harness.session = session('s1', 'running', [message('a1', 'assistant', 'partial', { isStreaming: true })]);
+    const values = new Map<string, string>([[MOBILE_OPEN_SESSION_STORAGE_KEY, 's1']]);
+    const storage: CoworkRecoveryStorage = {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => { values.set(key, value); },
+    };
+    const controller = controllerFor(electron, storage);
+    t.after(() => controller.destroy());
+
+    let releaseFirst!: () => void;
+    let firstRequest = true;
+    harness.getSessionHandler = () => {
+      if (firstRequest) {
+        firstRequest = false;
+        return new Promise((resolve) => {
+          releaseFirst = () => resolve({ success: true, session: structuredClone(harness.session) });
+        });
+      }
+      return Promise.resolve({ success: true, session: structuredClone(harness.session) });
+    };
+    const restoring = controller.restore(1, { title: 'Welcome', fallbackGreeting: 'Unexpected greeting' });
+    for (let index = 0; index < 20 && !releaseFirst; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    assert.equal(typeof releaseFirst, 'function');
+    assert.equal(await controller.refreshSession('s1'), true);
+    harness.getSessionHandler = async () => ({ success: false, error: 'Fallback refresh must not be needed' });
+    releaseFirst();
+    await restoring;
+
+    assert.equal(controller.getSnapshot().currentSessionId, 's1');
+    assert.equal(controller.getSnapshot().states.get('s1')?.status, 'running');
+    assert.equal(harness.session.id, 's1');
+  });
+
   it('creates a Twin greeting only when no session can be restored', async (t) => {
     const { harness, electron } = makeHarness();
     harness.sessionsEmpty = true;

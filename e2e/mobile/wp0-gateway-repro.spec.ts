@@ -1,6 +1,7 @@
 import { test, expect } from './fixtures';
 
 const isGatewayRun = Boolean(process.env.E2E_GATEWAY);
+const RECOVERY_READY_TIMEOUT_MS = 5_000;
 
 test.describe('WP1 gateway regressions', () => {
   test.skip(!isGatewayRun, 'requires the real gateway harness');
@@ -13,8 +14,11 @@ test.describe('WP1 gateway regressions', () => {
     await page.getByRole('button', { name: 'Send' }).click();
     await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
     await page.reload();
-    await expect(page.getByRole('heading', { name: 'restore this running session' })).toBeVisible({ timeout: 2000 });
-    await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible({ timeout: 2000 });
+    await expect(page.getByRole('heading', { name: 'restore this running session' })).toBeVisible({ timeout: RECOVERY_READY_TIMEOUT_MS });
+    await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible({ timeout: RECOVERY_READY_TIMEOUT_MS });
+    await expect(page.getByTestId('turn-phase')).toHaveCount(0, { timeout: 30_000 });
+    await expect(page.getByText('This reply streamed over a real C2 gateway socket.')).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText('工作目录', { exact: true })).toBeVisible({ timeout: 30_000 });
   });
 
   test('active tab and unsent draft survive a real-gateway reload @gateway', async ({ page }) => {

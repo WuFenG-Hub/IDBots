@@ -379,25 +379,30 @@ export class CoworkSessionController {
     this.publish();
   }
 
-  async refreshSession(sessionId: string): Promise<boolean> {
+  private async refreshSessionOutcome(sessionId: string): Promise<'loaded' | 'superseded' | 'failed'> {
     const request = (this.sessionRequests.get(sessionId) ?? 0) + 1;
     this.sessionRequests.set(sessionId, request);
     const epoch = this.epoch;
     const baseMessageRevisions = { ...this.stateFor(sessionId).messageRevisions };
     try {
       const result = await this.electron.cowork.getSession(sessionId, { messageLimit: 200 });
-      if (this.destroyed || epoch !== this.epoch || this.sessionRequests.get(sessionId) !== request) return false;
-      if (!result?.success || !result.session) return false;
+      if (this.destroyed) return 'failed';
+      if (epoch !== this.epoch || this.sessionRequests.get(sessionId) !== request) return 'superseded';
+      if (!result?.success || !result.session) return 'failed';
       this.ingestSessionSnapshot(result.session, baseMessageRevisions);
-      return true;
+      return 'loaded';
     } catch (error) {
       if (!this.destroyed && epoch === this.epoch && this.sessionRequests.get(sessionId) === request) {
         this.uncertainSessionIds = new Set(this.uncertainSessionIds).add(sessionId);
         this.actionErrors = { ...this.actionErrors, [sessionId]: errorText(error, 'Failed to refresh the session') };
         this.publish();
       }
-      return false;
+      return 'failed';
     }
+  }
+
+  async refreshSession(sessionId: string): Promise<boolean> {
+    return (await this.refreshSessionOutcome(sessionId)) === 'loaded';
   }
 
   async openSession(sessionId: string): Promise<boolean> {
@@ -407,11 +412,11 @@ export class CoworkSessionController {
     this.setState(this.stateFor(sessionId));
     this.persistOpenSession();
     this.publish();
-    const [loaded] = await Promise.all([
-      this.refreshSession(sessionId),
+    const [outcome] = await Promise.all([
+      this.refreshSessionOutcome(sessionId),
       this.refreshPendingPermissions(),
     ]);
-    return loaded;
+    return this.currentSessionId === sessionId && outcome !== 'failed';
   }
 
   newChat(): void {
