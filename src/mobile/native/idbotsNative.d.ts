@@ -9,6 +9,18 @@ interface MobileNativeCapabilities {
   secureScreen: boolean;
 }
 
+interface IdbotsNativeListenerHandle {
+  remove(): Promise<void>;
+}
+
+interface IdbotsNativeAppPlugin {
+  addListener?(
+    eventName: 'appStateChange' | 'backButton',
+    listener: (event: { isActive?: boolean; canGoBack?: boolean }) => void,
+  ): Promise<IdbotsNativeListenerHandle>;
+  exitApp?(): Promise<void>;
+}
+
 interface IdbotsNativeBridge {
   readonly nativeBridgeVersion: 1;
   readonly bootstrap: {
@@ -17,6 +29,9 @@ interface IdbotsNativeBridge {
     readonly platform: 'android' | 'ios';
   };
   getCapabilities(): MobileNativeCapabilities;
+  openExternal?(url: string): Promise<void>;
+  onAppStateChange?(callback: (active: boolean) => void): () => void;
+  onBackButton?(callback: () => boolean): () => void;
 }
 
 interface IdbotsNativeProof {
@@ -31,10 +46,19 @@ declare global {
   interface Window {
     Capacitor?: {
       isNativePlatform?: () => boolean;
+      Plugins?: {
+        App?: IdbotsNativeAppPlugin;
+      };
     };
     idbotsNative?: IdbotsNativeBridge;
     idbotsNativeProof?: IdbotsNativeProof;
   }
 }
 
-export type { IdbotsNativeBridge, IdbotsNativeProof, MobileNativeCapabilities };
+export type {
+  IdbotsNativeAppPlugin,
+  IdbotsNativeBridge,
+  IdbotsNativeListenerHandle,
+  IdbotsNativeProof,
+  MobileNativeCapabilities,
+};

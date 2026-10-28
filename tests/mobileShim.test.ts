@@ -11,6 +11,7 @@ import {
   type PhoneUploadProgress,
   type ShimDeps,
 } from '../src/mobile/bridge/installShim.ts';
+import { createNativeAdapter } from '../src/mobile/native/nativeAdapter.ts';
 
 /**
  * REQ-E-25 (shim part): contract coverage for the real bridge (REQ-E-3) and
@@ -262,6 +263,38 @@ test('shell.openExternal opens only http(s) URLs in a new browsing context', asy
   const bad = await electron.shell.openExternal('not a url');
   assert.deepEqual(bad, { success: false, error: 'Invalid URL' });
   assert.equal(dom.opened.length, 0, 'non-http(s) URLs must never reach window.open');
+});
+
+test('shell.openExternal uses the injected native adapter and reports native failure', async () => {
+  const nativeUrls: string[] = [];
+  const nativeWindow = {
+    Capacitor: { isNativePlatform: () => true },
+    idbotsNative: {
+      nativeBridgeVersion: 1,
+      bootstrap: { phase: 'document-start', origin: 'https://staging.idbots.world', platform: 'android' },
+      getCapabilities: () => ({
+        camera: false, photos: false, files: false, share: false,
+        appState: true, backButton: true, externalUrls: true, secureScreen: false,
+      }),
+      openExternal: async (url: string) => { nativeUrls.push(url); },
+    },
+  } as unknown as Window;
+  const { deps } = makeDeps({ nativeAdapter: createNativeAdapter(nativeWindow) });
+  const electron = buildElectronFromContract(CONTRACT, deps);
+  assert.deepEqual(await electron.shell.openExternal(' https://example.com/native '), { success: true });
+  assert.deepEqual(nativeUrls, ['https://example.com/native']);
+
+  const failing = makeDeps({
+    nativeAdapter: {
+      ...createNativeAdapter(nativeWindow),
+      openExternal: async () => { throw new Error('handoff failed'); },
+    },
+  });
+  const failingElectron = buildElectronFromContract(CONTRACT, failing.deps);
+  assert.deepEqual(await failingElectron.shell.openExternal('https://example.com/'), {
+    success: false,
+    error: 'Failed to open external URL',
+  });
 });
 
 test('shell.openPath signs the /data path and opens the signed URL', async (t) => {
