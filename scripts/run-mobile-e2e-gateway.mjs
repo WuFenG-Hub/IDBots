@@ -33,7 +33,7 @@ import { applyLongTermStage, createLongTermFixture, longTermBoard } from '../src
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const GATEWAY_PORT = 8790;
+const GATEWAY_PORT = Number(process.env.IDBOTS_GATEWAY_PORT || 8790);
 const APP_PORT = process.env.E2E_PORT || '5197';
 const BASE_URL = `http://localhost:${APP_PORT}`;
 const SECRET = process.env.IDBOTS_GATEWAY_SECRET || crypto.randomBytes(32).toString('base64url');
@@ -120,10 +120,17 @@ const metabots = [
     background: null,
     boss_id: null,
     boss_global_metaid: null,
-    llm_id: null,
+    llm_id: 'deepseek-flash',
+    llm_provider: 'metaid-free',
+    llm_effort: null,
+    mvc_address: 'gw-mvc-bot',
+    metabot_info_pinid: 'gw-info-bot',
+    chain_sync_state: 'synced',
+    chain_sync_pending_steps: [],
+    subsidy_state: 'claimed',
     tools: [],
     skills: ['web-search'],
-    allow_chat_skills: [],
+    allow_chat_skills: ['web-search'],
     created_at: 1,
     updated_at: 1,
   },
@@ -142,12 +149,44 @@ const metabots = [
     background: null,
     boss_id: null,
     boss_global_metaid: null,
-    llm_id: null,
+    llm_id: 'deepseek-flash',
+    llm_provider: 'metaid-free',
+    llm_effort: null,
+    mvc_address: 'gw-mvc-bot',
+    metabot_info_pinid: 'gw-info-bot',
+    chain_sync_state: 'synced',
+    chain_sync_pending_steps: [],
+    subsidy_state: 'claimed',
     tools: [],
     skills: [],
-    allow_chat_skills: [],
+    allow_chat_skills: ['web-search'],
     created_at: 1,
     updated_at: 1,
+  },
+];
+let metabotSeq = 2;
+const skillFixtures = [
+  {
+    id: 'web-search',
+    name: 'web-search',
+    description: 'Searches the web',
+    enabled: true,
+    isOfficial: true,
+    isBuiltIn: false,
+    updatedAt: 1,
+    prompt: '',
+    skillPath: '/data/appdata/SKILLs/web-search',
+  },
+  {
+    id: 'memory',
+    name: 'memory',
+    description: 'Long-term memory',
+    enabled: true,
+    isOfficial: true,
+    isBuiltIn: true,
+    updatedAt: 1,
+    prompt: '',
+    skillPath: '/data/appdata/SKILLs/memory',
   },
 ];
 
@@ -452,8 +491,77 @@ function startFixtureTurn(session, userText) {
 }
 
 const appConfigStore = {
-  app_config: { language: 'en', theme: 'system', providers: {}, memoryEnabled: true },
+  app_config: {
+    language: 'en',
+    theme: 'system',
+    providers: {
+      'metaid-free': {
+        enabled: true,
+        apiKey: 'gateway-fixture-relay-key',
+        baseUrl: 'https://gateway.fixture/relay',
+        apiFormat: 'openai',
+        name: 'IDBots-Free',
+        models: [
+          { id: 'deepseek-flash', name: 'DeepSeek Flash', contextWindow: 1000000, maxOutputTokens: 100000 },
+          { id: 'glm-flash', name: 'GLM Flash', contextWindow: 128000, maxOutputTokens: 32768 },
+        ],
+      },
+    },
+    model: { defaultProvider: 'metaid-free', defaultModel: 'deepseek-flash' },
+    bootstrap: { workspace: paths.workspaceRoot, languageInitialized: true },
+    memoryEnabled: true,
+  },
 };
+
+const coworkConfig = {
+  workingDirectory: paths.workspaceRoot,
+  systemPrompt: '',
+  executionMode: 'local',
+  memoryEnabled: true,
+  memoryImplicitUpdateEnabled: true,
+  memoryLlmJudgeEnabled: false,
+  memoryGuardLevel: 'standard',
+  memoryUserMemoriesMaxItems: 100,
+  memoryPromptMaxChars: 4000,
+  lastWorkspaceSelection: null,
+};
+
+const bundlePlans = [
+  {
+    planId: 'bundle_basic_cny',
+    name: 'Basic',
+    nameEn: 'Basic',
+    payCurrency: 'CNY',
+    payAmount: '129.00',
+    trafficBytes: 10 * 1024 * 1024 * 1024,
+    llmQuota: 50_000_000,
+    llmQuotaUnit: 'tokens',
+    status: 1,
+    sort: 10,
+    remark: '',
+  },
+];
+const bundleOrders = new Map();
+const bundleMeters = {
+  traffic: {
+    accountId: 'gateway-traffic-account',
+    identityAddress: 'gateway-identity',
+    balanceBytes: 500 * 1024 * 1024,
+    reservedBytes: 0,
+    grantedBytesTotal: 1024 * 1024 * 1024,
+    spentBytesTotal: 500 * 1024 * 1024,
+    status: 1,
+  },
+  llm: {
+    quotaTotal: 2_000_000,
+    quotaUsed: 350_000,
+    quotaRemaining: 1_650_000,
+    quotaFree: 2_000_000,
+    quotaPurchased: 0,
+    unit: 'tokens',
+  },
+};
+let bundleOrderSeq = 0;
 
 async function invokeHandler(channel, clientId, args) {
   if (process.env.GW_FIXTURE_DEBUG) {
@@ -483,6 +591,8 @@ async function invokeHandler(channel, clientId, args) {
         createdAt: now,
         updatedAt: now,
         metabotId: options.metabotId ?? null,
+        model: options.model ?? metabots.find((bot) => bot.id === options.metabotId)?.llm_id ?? null,
+        modelProvider: options.modelProvider ?? metabots.find((bot) => bot.id === options.metabotId)?.llm_provider ?? null,
         sessionType: 'standard',
         autoOrigin: null,
       };
@@ -506,6 +616,8 @@ async function invokeHandler(channel, clientId, args) {
         createdAt: now,
         updatedAt: now,
         metabotId: options.metabotId ?? null,
+        model: options.model ?? metabots.find((bot) => bot.id === options.metabotId)?.llm_id ?? null,
+        modelProvider: options.modelProvider ?? metabots.find((bot) => bot.id === options.metabotId)?.llm_provider ?? null,
         sessionType: 'standard',
         autoOrigin: null,
       };
@@ -728,20 +840,137 @@ async function invokeHandler(channel, clientId, args) {
       const bot = metabots.find((entry) => entry.id === args[0]);
       return bot ? { success: true, metabot: { ...bot } } : { success: false, error: 'metabot not found' };
     }
+    case 'metabot:update': {
+      const bot = metabots.find((entry) => entry.id === args[0]);
+      if (!bot) return { success: false, error: 'metabot not found' };
+      const input = args[1] ?? {};
+      for (const key of ['name', 'role', 'soul', 'bio', 'goal', 'llm_id', 'llm_provider', 'llm_effort', 'allow_chat_skills', 'enabled']) {
+        if (Object.hasOwn(input, key) && input[key] !== undefined) bot[key] = input[key];
+      }
+      bot.metabot_info_pinid = bot.metabot_info_pinid ?? `gw-info-${bot.id}`;
+      bot.chain_sync_state = 'synced';
+      bot.chain_sync_pending_steps = [];
+      bot.updated_at = Date.now();
+      return { success: true, metabot: { ...bot }, sync: { skipped: false, success: true, syncedSteps: ['persona', 'llm', 'chatSkills'] } };
+    }
+    case 'metabot:setEnabled': {
+      const bot = metabots.find((entry) => entry.id === args[0]);
+      if (!bot) return { success: false, error: 'metabot not found' };
+      bot.enabled = Boolean(args[1]);
+      bot.updated_at = Date.now();
+      return { success: true, metabot: { ...bot } };
+    }
+    case 'idbots:createMetaBotOnChain': {
+      const input = args[0] ?? {};
+      if (typeof input.name !== 'string' || !input.name.trim()) return { success: false, error: 'name is required' };
+      if (!input.llm_id) return { success: false, error: 'LLM Brain is required when creating a MetaBot' };
+      const timestamp = Date.now();
+      const bot = {
+        id: ++metabotSeq,
+        wallet_id: metabotSeq,
+        name: input.name.trim(),
+        avatar: input.avatar ?? null,
+        enabled: true,
+        globalmetaid: `gmid-gateway-${metabotSeq}`,
+        metabot_type: input.metabot_type === 'twin' ? 'twin' : 'worker',
+        role: input.role ?? '',
+        soul: input.soul ?? '',
+        goal: input.goal ?? null,
+        bio: input.bio ?? null,
+        background: input.background ?? null,
+        boss_id: null,
+        boss_global_metaid: input.boss_global_metaid ?? null,
+        llm_id: input.llm_id,
+        llm_provider: input.llm_provider ?? null,
+        llm_effort: input.llm_effort ?? null,
+        mvc_address: `gw-mvc-${metabotSeq}`,
+        metabot_info_pinid: `gw-info-${metabotSeq}`,
+        chain_sync_state: 'synced',
+        chain_sync_pending_steps: [],
+        subsidy_state: 'claimed',
+        tools: [],
+        skills: [],
+        allow_chat_skills: [...(input.allow_chat_skills ?? [])],
+        created_at: timestamp,
+        updated_at: timestamp,
+      };
+      metabots.push(bot);
+      return { success: true, metabot: { ...bot }, subsidy: { success: true } };
+    }
+    case 'idbots:resumeMetabotSetup': {
+      const input = args[0] ?? {};
+      const bot = metabots.find((entry) => entry.id === input.metabotId);
+      if (!bot) return { success: false, mode: input.mode, error: 'metabot not found' };
+      bot.metabot_info_pinid = bot.metabot_info_pinid ?? `gw-info-${bot.id}`;
+      bot.chain_sync_state = 'synced';
+      bot.chain_sync_pending_steps = [];
+      bot.subsidy_state = 'claimed';
+      return { success: true, mode: input.mode, metabot: { ...bot }, subsidy: { success: true }, chain: { success: true } };
+    }
+    case 'idbots:syncMetaBot': {
+      const bot = metabots.find((entry) => entry.id === args[0]);
+      if (!bot) return { success: false, error: 'metabot not found' };
+      bot.metabot_info_pinid = bot.metabot_info_pinid ?? `gw-info-${bot.id}`;
+      bot.chain_sync_state = 'synced';
+      bot.chain_sync_pending_steps = [];
+      return { success: true, metabotInfoPinId: bot.metabot_info_pinid, txids: [`gw-sync-${bot.id}`] };
+    }
+    case 'idbots:getAddressBalance':
+      return { success: true, balance: { mvc: { value: args[0]?.metabotId ? 0.0002 : 0.001, unit: 'MVC' } } };
+    case 'skills:list':
+      return { success: true, skills: skillFixtures.map((skill) => ({ ...skill })) };
     case 'cowork:config:get':
+      return { success: true, config: { ...coworkConfig } };
+    case 'cowork:config:set': {
+      Object.assign(coworkConfig, args[0] ?? {});
+      return { success: true };
+    }
+    case 'bundle:getPlans':
+      return { success: true, plans: bundlePlans.map((plan) => ({ ...plan })) };
+    case 'bundle:createOrder': {
+      const plan = bundlePlans.find((entry) => entry.planId === args[0]?.planId && entry.status === 1);
+      if (!plan) return { success: false, error: 'plan not found or off sale' };
+      const orderId = `gw-bundle-${++bundleOrderSeq}`;
+      const order = {
+        orderId,
+        planId: plan.planId,
+        status: 1,
+        payAmount: plan.payAmount,
+        payCurrency: plan.payCurrency,
+        trafficBytes: plan.trafficBytes,
+        llmQuota: plan.llmQuota,
+        gatewayParams: { qrCode: `https://qr.alipay.com/gateway-${orderId}` },
+        expiresAt: Math.floor(Date.now() / 1000) + 900,
+        paidAt: undefined,
+        creditedAt: undefined,
+      };
+      bundleOrders.set(orderId, order);
+      setTimeout(() => {
+        if (order.status === 3) return;
+        order.status = 3;
+        order.paidAt = Math.floor(Date.now() / 1000);
+        order.creditedAt = order.paidAt;
+        bundleMeters.traffic.balanceBytes += order.trafficBytes;
+        bundleMeters.traffic.grantedBytesTotal += order.trafficBytes;
+        bundleMeters.llm.quotaTotal += order.llmQuota;
+        bundleMeters.llm.quotaPurchased += order.llmQuota;
+        bundleMeters.llm.quotaRemaining = bundleMeters.llm.quotaTotal - bundleMeters.llm.quotaUsed;
+      }, 8000);
+      const { status: _status, paidAt: _paidAt, creditedAt: _creditedAt, ...created } = order;
+      return { success: true, order: created };
+    }
+    case 'bundle:getOrder': {
+      const order = bundleOrders.get(args[0]?.orderId);
+      if (!order) return { success: false, error: 'order not found' };
+      const { gatewayParams: _gatewayParams, expiresAt: _expiresAt, ...status } = order;
+      return { success: true, order: status };
+    }
+    case 'bundle:getMeters':
       return {
         success: true,
-        config: {
-          workingDirectory: paths.workspaceRoot,
-          systemPrompt: '',
-          executionMode: 'local',
-          memoryEnabled: true,
-          memoryImplicitUpdateEnabled: true,
-          memoryLlmJudgeEnabled: false,
-          memoryGuardLevel: 'standard',
-          memoryUserMemoriesMaxItems: 100,
-          memoryPromptMaxChars: 4000,
-          lastWorkspaceSelection: null,
+        meters: {
+          traffic: { ...bundleMeters.traffic },
+          llm: { ...bundleMeters.llm },
         },
       };
     case 'startup:rendererInitialized':

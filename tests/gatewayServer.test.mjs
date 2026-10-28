@@ -481,6 +481,59 @@ test('ws: store:set merges provider entries against the stored config before dis
   assert.equal(calls.length, 1, 'invalid set-merge must not dispatch');
 });
 
+test('ws: store:set serializes field patches against the latest config and preserves bootstrap/provider data', async (t) => {
+  let stored = {
+    language: 'en',
+    language_initialized: true,
+    theme: 'system',
+    bootstrap: { workspace: '/data/workspace' },
+    providers: {
+      'metaid-free': {
+        enabled: true,
+        apiKey: 'relay-secret',
+        baseUrl: 'https://relay.example',
+        apiFormat: 'openai',
+        models: [{ id: 'model-a' }],
+      },
+    },
+  };
+  let releaseFirstSet;
+  let setCount = 0;
+  const { handle } = await startServer(t, {
+    storeGet: () => stored,
+    invokeHandler: async (channel, _clientId, args) => {
+      if (channel === 'store:get') return stored;
+      if (channel !== 'store:set') return { ok: true };
+      setCount += 1;
+      if (setCount === 1) {
+        await new Promise((resolve) => {
+          releaseFirstSet = resolve;
+        });
+      }
+      stored = args[1];
+      return { success: true };
+    },
+  });
+  const client = await openClient(handle.port);
+  t.after(() => client.close());
+  await client.welcome();
+
+  const languageWrite = client.invoke('store:set', ['app_config', { language: 'zh' }]);
+  const themeWrite = client.invoke('store:set', ['app_config', { theme: 'dark' }]);
+  while (!releaseFirstSet) await new Promise((resolve) => setTimeout(resolve, 2));
+  releaseFirstSet();
+  assert.equal((await languageWrite).ok, true);
+  assert.equal((await themeWrite).ok, true);
+
+  assert.equal(stored.language, 'zh');
+  assert.equal(stored.theme, 'dark');
+  assert.equal(stored.language_initialized, true);
+  assert.deepEqual(stored.bootstrap, { workspace: '/data/workspace' });
+  assert.equal(stored.providers['metaid-free'].apiKey, 'relay-secret');
+  assert.equal(stored.providers['metaid-free'].baseUrl, 'https://relay.example');
+  assert.equal(stored.providers['metaid-free'].apiFormat, 'openai');
+});
+
 test('ws: store:remove and store:get of another key → ARG_RESTRICTED', async (t) => {
   const { handle, calls } = await startServer(t);
   const client = await openClient(handle.port);

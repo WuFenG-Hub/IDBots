@@ -35,6 +35,7 @@ CLAUDE.md
 localdocs/
 docs/*
 !docs/twin-bot-orchestration.md
+!docs/cloud-mobile/
 !docs/metaid_protocols/
 !docs/metaid_protocols/**
 !docs/deepseek-optimization.md
@@ -71,6 +72,10 @@ tests/*
 !tests/update-notification.test.mjs
 !tests/serverMode.test.mjs
 !tests/serverBootstrap.test.mjs
+!tests/relayCatalogFreshness.test.mjs
+!tests/mobileSettings.test.ts
+!tests/mobileRechargeRecovery.test.ts
+!tests/mobileBotLifecycle.test.ts
 !tests/fixtures/
 !tests/agentGameConvergence.test.mjs
 !tests/fixtures/longTaskBoardSeed.mjs

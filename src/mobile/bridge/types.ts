@@ -56,6 +56,12 @@ export type TrafficChannelAPI = Window['electron']['traffic'];
 
 /** Fixture MetaBot row, derived from the real `metabot:list` payload. */
 export type MockMetabot = NonNullable<Awaited<ReturnType<MetabotChannelAPI['list']>>['list']>[number];
+export type MobileMetabot = MockMetabot & {
+  chain_sync_state?: 'synced' | 'partial';
+  chain_sync_pending_steps?: string[];
+  subsidy_state?: 'unknown' | 'claimed' | 'failed';
+  subsidy_error?: string | null;
+};
 export type MetabotCreateInput = Parameters<MetabotChannelAPI['create']>[0];
 export type MetabotUpdateInput = Parameters<MetabotChannelAPI['update']>[1];
 /** Fixture skill row, derived from the real `skills:list` payload. */

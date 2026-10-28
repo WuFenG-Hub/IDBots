@@ -232,10 +232,12 @@ test('bundle order: created -> credited after the delay, meters rise', async (t)
   const created = await api.bundle.createOrder({ planId: 'bundle_basic_cny' });
   assert.equal(created.success, true);
   assert.ok(created.order.gatewayParams.qrCode.startsWith('https://qr.alipay.com/mock'));
-  assert.ok(created.order.expiresAt > Date.now());
+  assert.ok(created.order.expiresAt > Math.floor(Date.now() / 1000));
 
   const early = await api.bundle.getOrder({ orderId: created.order.orderId });
   assert.equal(early.order.status, 1);
+  assert.equal('gatewayParams' in early.order, false);
+  assert.equal('expiresAt' in early.order, false);
 
   let late = early;
   const deadline = Date.now() + 3000;
@@ -248,8 +250,8 @@ test('bundle order: created -> credited after the delay, meters rise', async (t)
     late = latest;
   }
   assert.equal(late.order.status, 3);
-  assert.ok(late.order.paidAt);
-  assert.ok(late.order.creditedAt);
+  assert.ok(late.order.paidAt <= Math.floor(Date.now() / 1000));
+  assert.ok(late.order.creditedAt <= Math.floor(Date.now() / 1000));
 
   const after = await api.bundle.getMeters();
   assert.equal(after.meters.traffic.balanceBytes, trafficBefore + basic.trafficBytes);

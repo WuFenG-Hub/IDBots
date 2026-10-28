@@ -1,18 +1,18 @@
 import { useEffect, useState } from 'react';
-import { ChevronRightIcon, PencilSquareIcon, PlusIcon } from '@heroicons/react/24/outline';
+import { ChevronRightIcon } from '@heroicons/react/24/outline';
 import { t } from '../../i18n';
 import type { MobileLanguage } from '../../i18n';
-import type { MockMetabot } from '../../bridge/types';
 import { CONTRACT_VERSION } from '../../bridge/types';
 import { getMobileElectron } from '../appBridge';
 import { logout, requestAccountDeletion } from '../../login/loginApi';
 import { useIdentity } from '../hooks/useIdentity';
 import { useMeters } from '../hooks/useMeters';
 import { useSettings } from '../hooks/useSettings';
+import { useMemorySettings } from '../hooks/useMemorySettings';
 import { useSkills } from '../hooks/useSkills';
-import { useMetabots } from '../hooks/useMetabots';
 import { formatBytes, formatCount } from '../format';
 import { BottomSheet } from '../components/BottomSheet';
+import { BotManagementSection } from '../components/BotManagementSection';
 import { Section } from '../components/Section';
 import { Switch } from '../components/Switch';
 
@@ -20,6 +20,7 @@ function Segmented<T extends string>(props: {
   value: T;
   options: Array<{ value: T; labelKey: string }>;
   onChange: (value: T) => void;
+  disabled?: boolean;
 }): JSX.Element {
   return (
     <div className="flex gap-2">
@@ -27,8 +28,9 @@ function Segmented<T extends string>(props: {
         <button
           key={option.value}
           type="button"
+          disabled={props.disabled}
           onClick={() => props.onChange(option.value)}
-          className={`min-h-[44px] flex-1 rounded-xl border px-2 text-sm ${
+          className={`min-h-[44px] flex-1 rounded-xl border px-2 text-sm disabled:opacity-40 ${
             props.value === option.value
               ? 'border-[var(--color-primary)] bg-[var(--color-primary)] text-black'
               : 'border-[var(--border-color)] text-[var(--text-secondary)]'
@@ -42,7 +44,7 @@ function Segmented<T extends string>(props: {
 }
 
 function BalanceCard(props: { onOpenRecharge: () => void; resyncCounter?: number }): JSX.Element {
-  const { meters } = useMeters(props.resyncCounter);
+  const { meters, loading, error, reload } = useMeters(props.resyncCounter);
   return (
     <Section title={t('mobile.me.balanceTitle')}>
       <div className="mb-3 flex gap-3">
@@ -59,6 +61,15 @@ function BalanceCard(props: { onOpenRecharge: () => void; resyncCounter?: number
           </p>
         </div>
       </div>
+      {loading ? <p className="mb-2 text-xs text-[var(--text-secondary)]">{t('mobile.common.loading')}</p> : null}
+      {error ? (
+        <div className="mb-2 flex items-center justify-between gap-2" data-testid="balance-load-error">
+          <p className="text-xs text-red-600">{t('mobile.me.balanceLoadFailed')}</p>
+          <button type="button" onClick={() => void reload()} className="min-h-[44px] px-2 text-xs text-[var(--text-primary)]">
+            {t('mobile.common.retry')}
+          </button>
+        </div>
+      ) : null}
       <div className="flex gap-2">
         <button
           type="button"
@@ -129,100 +140,8 @@ function RedeemButton(): JSX.Element {
   );
 }
 
-function BotFormSheet(props: {
-  bot: MockMetabot | null;
-  onSave: (input: { name: string; role: string; soul: string; bio: string }) => Promise<boolean>;
-  busy: boolean;
-  onClose: () => void;
-}): JSX.Element {
-  const [name, setName] = useState(props.bot?.name ?? '');
-  const [role, setRole] = useState(props.bot?.role ?? '');
-  const [soul, setSoul] = useState(props.bot?.soul ?? '');
-  const [bio, setBio] = useState(props.bot?.bio ?? '');
-  const inputClass =
-    'min-h-[44px] w-full rounded-xl border border-[var(--border-color)] bg-[var(--bg-main)] px-3 py-2.5 text-[15px] text-[var(--text-primary)] outline-none';
-
-  return (
-    <BottomSheet title={props.bot ? t('mobile.me.botEdit') : t('mobile.me.botCreate')} onClose={props.onClose}>
-      <div className="flex flex-col gap-3">
-        <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t('mobile.me.botNamePlaceholder')} className={inputClass} />
-        <input value={role} onChange={(event) => setRole(event.target.value)} placeholder={t('mobile.me.botRolePlaceholder')} className={inputClass} />
-        <textarea value={soul} onChange={(event) => setSoul(event.target.value)} placeholder={t('mobile.me.botSoulPlaceholder')} rows={2} className={`${inputClass} resize-none`} />
-        <textarea value={bio} onChange={(event) => setBio(event.target.value)} placeholder={t('mobile.me.botBioPlaceholder')} rows={2} className={`${inputClass} resize-none`} />
-        <button
-          type="button"
-          disabled={props.busy || !name.trim()}
-          onClick={() => {
-            void props.onSave({ name: name.trim(), role: role.trim(), soul: soul.trim(), bio: bio.trim() }).then((ok) => {
-              if (ok) props.onClose();
-            });
-          }}
-          className="min-h-[44px] rounded-xl bg-[var(--color-primary)] py-2 font-medium text-black active:opacity-80 disabled:opacity-40"
-        >
-          {t('mobile.me.botSave')}
-        </button>
-      </div>
-    </BottomSheet>
-  );
-}
-
 function BotsSection(): JSX.Element {
-  const { bots, createBot, updateBot } = useMetabots();
-  const [formState, setFormState] = useState<{ bot: MockMetabot | null; busy: boolean } | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!notice) return undefined;
-    const timer = setTimeout(() => setNotice(null), 2000);
-    return () => clearTimeout(timer);
-  }, [notice]);
-
-  return (
-    <Section title={t('mobile.me.botsTitle')}>
-      {notice ? <p className="mb-2 text-sm text-emerald-600">{notice}</p> : null}
-      {bots.map((bot) => (
-        <div key={bot.id} className="flex min-h-[44px] items-center gap-2 border-b border-[var(--border-color)] py-2 last:border-b-0">
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[15px] text-[var(--text-primary)]">{bot.name}</p>
-            <p className="truncate text-xs text-[var(--text-secondary)]">
-              {t(bot.metabot_type === 'twin' ? 'mobile.me.botType.twin' : 'mobile.me.botType.worker')}
-              {bot.role ? ` · ${bot.role}` : ''}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setFormState({ bot, busy: false })}
-            aria-label={`${t('mobile.me.botEdit')} · ${bot.name}`}
-            className="flex min-h-[44px] min-w-[44px] items-center justify-center text-[var(--text-secondary)] active:text-[var(--text-primary)]"
-          >
-            <PencilSquareIcon className="h-5 w-5" aria-hidden />
-          </button>
-        </div>
-      ))}
-      <button
-        type="button"
-        onClick={() => setFormState({ bot: null, busy: false })}
-        className="mt-2 flex min-h-[44px] w-full items-center justify-center gap-1 rounded-xl border border-[var(--border-color)] py-2 text-sm text-[var(--text-primary)] active:bg-[var(--bg-hover)]"
-      >
-        <PlusIcon className="h-4 w-4" aria-hidden />
-        {t('mobile.me.botCreate')}
-      </button>
-      {formState ? (
-        <BotFormSheet
-          bot={formState.bot}
-          busy={formState.busy}
-          onClose={() => setFormState(null)}
-          onSave={async (input) => {
-            setFormState((prev) => (prev ? { ...prev, busy: true } : prev));
-            const ok = formState.bot ? await updateBot(formState.bot.id, input) : await createBot(input);
-            if (ok) setNotice(t(formState.bot ? 'mobile.me.botUpdated' : 'mobile.me.botCreated'));
-            setFormState(null);
-            return ok;
-          }}
-        />
-      ) : null}
-    </Section>
-  );
+  return <BotManagementSection />;
 }
 
 function SkillsSection(): JSX.Element {
@@ -243,7 +162,13 @@ function SkillsSection(): JSX.Element {
 }
 
 function SettingsSection(): JSX.Element {
-  const { language, theme, changeLanguage, changeTheme } = useSettings();
+  const { language, theme, saveState, changeLanguage, changeTheme } = useSettings();
+  const memory = useMemorySettings();
+  const memoryRows = [
+    { field: 'memoryEnabled' as const, labelKey: 'mobile.me.memoryEnabled' },
+    { field: 'memoryImplicitUpdateEnabled' as const, labelKey: 'mobile.me.memoryImplicitUpdate' },
+    { field: 'memoryLlmJudgeEnabled' as const, labelKey: 'mobile.me.memoryLlmJudge' },
+  ];
   return (
     <Section title={t('mobile.me.settingsTitle')}>
       <p className="mb-2 text-xs font-medium uppercase text-[var(--text-secondary)]">{t('mobile.me.languageLabel')}</p>
@@ -253,6 +178,7 @@ function SettingsSection(): JSX.Element {
           { value: 'zh', labelKey: 'mobile.me.languageZh' },
           { value: 'en', labelKey: 'mobile.me.languageEn' },
         ]}
+        disabled={saveState.status === 'saving'}
         onChange={(value) => void changeLanguage(value)}
       />
       <p className="mb-2 mt-4 text-xs font-medium uppercase text-[var(--text-secondary)]">{t('mobile.me.themeLabel')}</p>
@@ -263,8 +189,37 @@ function SettingsSection(): JSX.Element {
           { value: 'dark', labelKey: 'mobile.me.themeDark' },
           { value: 'system', labelKey: 'mobile.me.themeSystem' },
         ]}
+        disabled={saveState.status === 'saving'}
         onChange={(value) => void changeTheme(value)}
       />
+      {saveState.status !== 'idle' ? (
+        <p aria-live="polite" className={`mt-2 text-xs ${saveState.status === 'error' ? 'text-red-600' : 'text-[var(--text-secondary)]'}`}>
+          {t(`mobile.me.settings${saveState.status === 'saving' ? 'Saving' : saveState.status === 'saved' ? 'Saved' : 'SaveFailed'}`)}
+        </p>
+      ) : null}
+
+      <p className="mb-2 mt-5 text-xs font-medium uppercase text-[var(--text-secondary)]">{t('mobile.me.memoryTitle')}</p>
+      {memory.loading ? <p className="py-2 text-sm text-[var(--text-secondary)]">{t('mobile.common.loading')}</p> : null}
+      {memoryRows.map((row) => (
+        <div key={row.field} className="flex min-h-[44px] items-center justify-between gap-3 border-b border-[var(--border-color)] py-2 last:border-b-0">
+          <span className="text-sm text-[var(--text-primary)]">{t(row.labelKey)}</span>
+          <Switch
+            checked={memory.config?.[row.field] ?? false}
+            disabled={memory.loading || !memory.config || memory.saving !== null}
+            onChange={(checked) => void memory.setEnabled(row.field, checked)}
+            label={t(row.labelKey)}
+          />
+        </div>
+      ))}
+      {memory.error ? (
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <p className="text-xs text-red-600">{memory.error}</p>
+          <button type="button" onClick={() => void memory.reload()} className="min-h-[44px] px-2 text-xs text-[var(--text-primary)]">
+            {t('mobile.common.retry')}
+          </button>
+        </div>
+      ) : null}
+      {memory.saved ? <p aria-live="polite" className="mt-2 text-xs text-emerald-600">{t('mobile.me.settingsSaved')}</p> : null}
     </Section>
   );
 }

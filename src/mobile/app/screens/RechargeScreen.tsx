@@ -3,17 +3,18 @@ import { useEffect } from 'react';
 import { t } from '../../i18n';
 import type { BundlePlan } from '../../bridge/types';
 import { useRecharge } from '../hooks/useRecharge';
+import { isUnsettledOrder } from '../services/rechargeRecovery';
 import { formatBytes, formatCount } from '../format';
 import { Section } from '../components/Section';
 import { QrCanvas } from './recharge/QrCanvas';
 
-function PlanCard(props: { plan: BundlePlan; buying: boolean; onSelect: () => void }): JSX.Element {
+function PlanCard(props: { plan: BundlePlan; disabled: boolean; onSelect: () => void }): JSX.Element {
   const { plan } = props;
   return (
     <button
       type="button"
       onClick={props.onSelect}
-      disabled={props.buying}
+      disabled={props.disabled}
       className="flex min-h-[64px] w-full items-center justify-between gap-3 rounded-xl border border-[var(--border-color)] bg-[var(--bg-main)] px-4 py-3 text-left active:bg-[var(--bg-hover)] disabled:opacity-40"
     >
       <div className="min-w-0">
@@ -30,18 +31,28 @@ function PlanCard(props: { plan: BundlePlan; buying: boolean; onSelect: () => vo
   );
 }
 
-/** Full-screen recharge page (REQ-E-15), pushed over the shell from Me / chat. */
-export default function RechargeScreen(props: { onClose: () => void }): JSX.Element {
-  const recharge = useRecharge();
-  const { stage, order, alipayOpen, meters } = recharge;
+function StatusMessage(props: { degraded: boolean; timedOut: boolean; onCheck: () => void }): JSX.Element | null {
+  if (!props.degraded && !props.timedOut) return null;
+  return (
+    <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3" data-testid="recharge-poll-degraded">
+      <p className="text-xs text-amber-800">
+        {t(props.timedOut ? 'mobile.recharge.pollTimedOut' : 'mobile.recharge.pollDegraded')}
+      </p>
+      <button type="button" onClick={props.onCheck} className="mt-1 min-h-[44px] text-sm font-medium text-amber-900">
+        {t('mobile.recharge.checkStatus')}
+      </button>
+    </div>
+  );
+}
 
-  // REQ-E-15 tier 1: try to hand the payment straight to the Alipay app.
-  // The effect intentionally fires once per stage flip to 'paying'.
+export default function RechargeScreen(props: { onClose: () => void; onMetersUpdated?: () => void }): JSX.Element {
+  const recharge = useRecharge(() => props.onMetersUpdated?.());
+  const { stage, order, alipayOpen, meters } = recharge;
+  const pendingOrder = isUnsettledOrder(order);
+
   useEffect(() => {
-    if (stage === 'paying') {
-      recharge.openAlipayApp();
-    }
-  }, [stage]);
+    if (stage === 'paying' && order?.qrCode) recharge.openAlipayApp();
+  }, [stage, order?.orderId, order?.qrCode, recharge.openAlipayApp]);
 
   return (
     <div className="flex h-full flex-col bg-[var(--bg-main)]">
@@ -61,18 +72,71 @@ export default function RechargeScreen(props: { onClose: () => void }): JSX.Elem
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        {recharge.metersError ? (
+          <p className="mb-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800" data-testid="recharge-meters-error">
+            {t('mobile.recharge.metersFailed')}
+          </p>
+        ) : null}
+
         {stage === 'plans' || stage === 'error' ? (
           <div className="space-y-3">
+            {pendingOrder && order ? (
+              <div className="rounded-2xl border border-[var(--color-primary)] bg-[var(--bg-panel)] p-4" data-testid="recharge-pending-order">
+                <p className="text-sm font-semibold text-[var(--text-primary)]">{t('mobile.recharge.pendingTitle')}</p>
+                <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                  {`${order.plan.payCurrency} ${order.plan.payAmount} · ${t('mobile.recharge.expiresAt', { time: new Date(order.expiresAt * 1000).toLocaleString() })}`}
+                </p>
+                <button
+                  type="button"
+                  onClick={recharge.resumeOrder}
+                  className="mt-3 min-h-[44px] w-full rounded-xl bg-[var(--color-primary)] py-2 text-sm font-medium text-black"
+                >
+                  {t('mobile.recharge.resumeOrder')}
+                </button>
+              </div>
+            ) : null}
+            {recharge.creationAttempt ? (
+              <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4" data-testid="recharge-uncertain-attempt">
+                <p className="text-sm font-semibold text-amber-800">{t('mobile.recharge.uncertainTitle')}</p>
+                <p className="mt-1 text-xs text-amber-800">
+                  {t('mobile.recharge.uncertainCreateBody', { time: new Date(recharge.creationAttempt.retryAfterMs).toLocaleString() })}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void recharge.selectPlan(recharge.creationAttempt!.planId)}
+                  className="mt-2 min-h-[44px] text-sm font-medium text-amber-900"
+                >
+                  {t('mobile.recharge.reviewUncertain')}
+                </button>
+              </div>
+            ) : null}
             <Section title={t('mobile.recharge.plansTitle')}>
               <div className="space-y-2">
                 {recharge.plans.map((plan) => (
-                  <PlanCard key={plan.planId} plan={plan} buying={recharge.buying} onSelect={() => void recharge.selectPlan(plan.planId)} />
+                  <PlanCard
+                    key={plan.planId}
+                    plan={plan}
+                    disabled={recharge.buying || recharge.creationBlocked}
+                    onSelect={() => void recharge.selectPlan(plan.planId)}
+                  />
                 ))}
+                {!recharge.plans.length && !recharge.plansError ? (
+                  <p className="py-3 text-sm text-[var(--text-secondary)]">{t('mobile.common.loading')}</p>
+                ) : null}
               </div>
             </Section>
+            {recharge.plansError ? (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 p-3">
+                <p className="text-xs text-amber-800">{t('mobile.recharge.plansFailed')}</p>
+                <button type="button" onClick={recharge.checkStatus} className="min-h-[44px] text-sm font-medium text-amber-900">
+                  {t('mobile.common.retry')}
+                </button>
+              </div>
+            ) : null}
             {stage === 'error' ? (
-              <div className="rounded-2xl border border-red-300 bg-red-50 p-3">
+              <div className="rounded-2xl border border-red-300 bg-red-50 p-3" data-testid="recharge-create-error">
                 <p className="text-sm font-semibold text-red-700">{t('mobile.recharge.errorTitle')}</p>
+                {recharge.actionError ? <p className="mt-1 text-xs text-red-700">{recharge.actionError}</p> : null}
                 <button
                   type="button"
                   onClick={recharge.backToPlans}
@@ -85,12 +149,43 @@ export default function RechargeScreen(props: { onClose: () => void }): JSX.Elem
           </div>
         ) : null}
 
+        {stage === 'uncertain' ? (
+          <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4" data-testid="recharge-uncertain">
+            <p className="text-sm font-semibold text-amber-800">{t('mobile.recharge.uncertainTitle')}</p>
+            <p className="mt-2 text-sm text-amber-800">
+              {recharge.invalidRecovery
+                ? t('mobile.recharge.invalidRecoveryBody')
+                : t(order ? 'mobile.recharge.uncertainOrderBody' : 'mobile.recharge.uncertainCreateBody', {
+                  time: recharge.creationAttempt ? new Date(recharge.creationAttempt.retryAfterMs).toLocaleString() : '',
+                })}
+            </p>
+            {order ? <StatusMessage degraded={recharge.pollingDegraded} timedOut={recharge.pollTimedOut} onCheck={recharge.checkStatus} /> : null}
+            <button
+              type="button"
+              onClick={order?.qrCode ? recharge.resumeOrder : recharge.checkStatus}
+              className="mt-3 min-h-[44px] w-full rounded-xl bg-amber-700 py-2 text-sm font-medium text-white"
+            >
+              {t(order?.qrCode ? 'mobile.recharge.resumeOrder' : 'mobile.recharge.checkStatus')}
+            </button>
+            <button
+              type="button"
+              onClick={recharge.backToPlans}
+              className="mt-2 min-h-[44px] w-full rounded-xl border border-amber-400 py-2 text-sm text-amber-900"
+            >
+              {t('mobile.recharge.backToPlans')}
+            </button>
+          </div>
+        ) : null}
+
         {stage === 'paying' && order ? (
           <div className="space-y-3">
-            <div className="rounded-2xl border border-[var(--border-color)] bg-[var(--bg-panel)] p-4" data-testid="recharge-paying">
+            <div className="rounded-2xl border border-[var(--border-color)] bg-[var(--bg-panel)] p-4" data-testid="recharge-paying" data-order-id={order.orderId}>
               <p className="mb-1 text-sm text-[var(--text-secondary)]">{t('mobile.recharge.orderCreated')}</p>
-              <p className="mb-3 text-base font-semibold text-[var(--text-primary)]">
+              <p className="mb-1 text-base font-semibold text-[var(--text-primary)]">
                 {`${order.plan.payCurrency} ${order.plan.payAmount}`}
+              </p>
+              <p className="mb-3 text-xs text-[var(--text-secondary)]">
+                {t('mobile.recharge.expiresAt', { time: new Date(order.expiresAt * 1000).toLocaleString() })}
               </p>
 
               {alipayOpen === 'opening' ? (
@@ -122,13 +217,14 @@ export default function RechargeScreen(props: { onClose: () => void }): JSX.Elem
               ) : null}
 
               {alipayOpen === 'qr' && order.qrCode ? (
-                <div className="flex flex-col items-center gap-2 py-2">
+                <div className="flex flex-col items-center gap-2 py-2" data-testid="recharge-qr">
                   <QrCanvas value={order.qrCode} />
                   <p className="text-xs text-[var(--text-secondary)]">{t('mobile.recharge.qrHint')}</p>
                 </div>
               ) : null}
 
               <p className="mt-3 text-center text-xs text-[var(--text-secondary)]">{t('mobile.recharge.waiting')}</p>
+              <StatusMessage degraded={recharge.pollingDegraded} timedOut={recharge.pollTimedOut} onCheck={recharge.checkStatus} />
             </div>
             <button
               type="button"
@@ -169,6 +265,13 @@ export default function RechargeScreen(props: { onClose: () => void }): JSX.Elem
                 </div>
               </div>
             </Section>
+            <button
+              type="button"
+              onClick={recharge.backToPlans}
+              className="min-h-[44px] w-full rounded-xl border border-[var(--border-color)] py-2 text-sm text-[var(--text-primary)]"
+            >
+              {t('mobile.recharge.backToPlans')}
+            </button>
             <button
               type="button"
               onClick={props.onClose}

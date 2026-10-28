@@ -178,6 +178,7 @@ import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { initBundleService, registerBundleIpcHandlers } from './services/bundleService';
 import { initLlmRelayService, registerLlmRelayIpcHandlers, getLlmRelayQuota } from './services/llmRelayService';
+import { createRelayCatalogRefresh, RELAY_CATALOG_REFRESH_INTERVAL_MS } from './services/relayCatalogFreshness';
 import { createQuotaNudgeController, type QuotaNudgeController, type QuotaNudgeState } from './services/quotaNudgeService';
 import { switchFreePrimaryBrainsToProvider } from './services/brainSwitchService';
 
@@ -2831,6 +2832,8 @@ let serviceOrderTimeoutScanInterval: ReturnType<typeof setInterval> | null = nul
 let serviceRefundSyncInterval: ReturnType<typeof setInterval> | null = null;
 let sqliteMaintenanceInterval: ReturnType<typeof setInterval> | null = null;
 let sqliteRecoveryRelaunchRequested = false;
+let relayCatalogRefresh: ReturnType<typeof createRelayCatalogRefresh> | null = null;
+let relayCatalogRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -18853,6 +18856,11 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
     // Release the sleep guard first so the device may sleep normally during
     // shutdown even if a later cleanup step stalls.
     stopSleepGuardRefresh();
+    if (relayCatalogRefreshTimer) {
+      clearInterval(relayCatalogRefreshTimer);
+      relayCatalogRefreshTimer = null;
+    }
+    relayCatalogRefresh = null;
     await stopMetaAppServer().catch((error) => {
       console.error('[metaapps] Failed to stop local server during cleanup:', error);
     });
@@ -19051,6 +19059,25 @@ registerIpcHandler('gigSquare:sendOrder', async (_event, params: {
       serverBootstrapRun = startServerModeBootstrap();
       startupLog('server bootstrap started');
     }
+
+    relayCatalogRefresh = createRelayCatalogRefresh({
+      getStore: () => getStoreOrNull(),
+      getQuota: getLlmRelayQuota,
+      onChanged: () => broadcastStoreChanged('app_config'),
+    });
+    const refreshRelayCatalog = async (): Promise<void> => {
+      if (serverBootstrapRun) await serverBootstrapRun.finished;
+      const result = await relayCatalogRefresh?.();
+      if (result) startupLog(`relay catalog refresh: ${result.status}`);
+    };
+    const runRelayCatalogRefresh = (): void => {
+      void refreshRelayCatalog().catch((error) => {
+        console.warn('[relay-catalog] refresh failed:', error instanceof Error ? error.message : String(error));
+      });
+    };
+    runRelayCatalogRefresh();
+    relayCatalogRefreshTimer = setInterval(runRelayCatalogRefresh, RELAY_CATALOG_REFRESH_INTERVAL_MS);
+    relayCatalogRefreshTimer.unref?.();
 
     // REQ-A-22: mobile gateway (C2). Starts only in desktop dev mode
     // (IDBOTS_GATEWAY_DEV=1, never in packaged builds) or server mode

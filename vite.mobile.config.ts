@@ -35,7 +35,7 @@ const loginHtml = path.resolve(__dirname, 'src/mobile/login/index.html');
  * random secret when IDBOTS_GATEWAY_SECRET is unset (server mode fails fast
  * instead; here we degrade to a generated dev secret with a warning).
  */
-const GATEWAY_TARGET_HOST = '127.0.0.1:8790';
+const GATEWAY_TARGET_HOST = `127.0.0.1:${process.env.IDBOTS_GATEWAY_PORT || '8790'}`;
 
 function gatewayDevSecret(): string | undefined {
   const fromEnv = process.env.IDBOTS_GATEWAY_SECRET;

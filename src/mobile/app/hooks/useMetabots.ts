@@ -1,71 +1,208 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { MockMetabot } from '../../bridge/types';
+import type { MobileMetabot, MockSkill } from '../../bridge/types';
 import { getMobileElectron, hasAppBridge } from '../appBridge';
 import { t } from '../../i18n';
+import { buildModelGroupsFromConfig, type CatalogProviderGroup } from '../../../renderer/services/modelCatalog';
 
-/** MetaBot roster for the chat switcher and the Me screen management list. */
+export interface MobileBotInput {
+  name: string;
+  role: string;
+  soul: string;
+  bio: string;
+  llmId: string;
+  llmProvider: string;
+  llmEffort: string | null;
+  allowChatSkills: string[];
+}
+
+export interface BotOperationResult {
+  state: 'synced' | 'partial' | 'local' | 'failed' | 'uncertain';
+  metabot?: MobileMetabot;
+  message?: string;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : String(error);
+}
+
 export function useMetabots(): {
-  bots: MockMetabot[];
+  bots: MobileMetabot[];
+  skills: MockSkill[];
+  modelGroups: CatalogProviderGroup[];
+  loading: boolean;
   error: string | null;
+  catalogError: string | null;
   reload: () => Promise<void>;
-  createBot: (input: { name: string; role: string; soul: string; bio: string }) => Promise<boolean>;
-  updateBot: (
-    id: number,
-    input: { name: string; role: string; soul: string; bio: string },
-  ) => Promise<boolean>;
+  createBot: (input: MobileBotInput) => Promise<BotOperationResult>;
+  updateBot: (id: number, input: MobileBotInput) => Promise<BotOperationResult>;
+  resumeBot: (id: number, mode: 'subsidized' | 'self-funded') => Promise<BotOperationResult>;
+  syncBot: (id: number) => Promise<BotOperationResult>;
+  setBotEnabled: (id: number, enabled: boolean) => Promise<BotOperationResult>;
+  getBotBalance: (id: number) => Promise<{ success: boolean; value?: string; error?: string }>;
 } {
-  const [bots, setBots] = useState<MockMetabot[]>([]);
+  const [bots, setBots] = useState<MobileMetabot[]>([]);
+  const [skills, setSkills] = useState<MockSkill[]>([]);
+  const [modelGroups, setModelGroups] = useState<CatalogProviderGroup[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     if (!hasAppBridge()) {
       setError(t('mobile.chat.rosterUnavailable'));
+      setCatalogError(t('mobile.me.botCatalogUnavailable'));
+      setLoading(false);
       return;
     }
-    try {
-      const result = await getMobileElectron().metabot.list();
-      if (result?.success && Array.isArray(result.list)) {
-        setBots(result.list);
-        setError(null);
-      } else {
-        setError(t('mobile.chat.rosterUnavailable'));
-      }
-    } catch {
+    setLoading(true);
+    const [rosterResult, skillsResult, configResult] = await Promise.allSettled([
+      getMobileElectron().metabot.list(),
+      getMobileElectron().skills.list(),
+      getMobileElectron().store.get('app_config'),
+    ]);
+    if (rosterResult.status === 'fulfilled' && rosterResult.value?.success && Array.isArray(rosterResult.value.list)) {
+      setBots(rosterResult.value.list);
+      setError(null);
+    } else {
       setError(t('mobile.chat.rosterUnavailable'));
     }
+    if (skillsResult.status === 'fulfilled' && skillsResult.value?.success && Array.isArray(skillsResult.value.skills)) {
+      setSkills(skillsResult.value.skills.filter((skill) => skill.enabled));
+    }
+    if (configResult.status === 'fulfilled') {
+      setModelGroups(buildModelGroupsFromConfig((configResult.value ?? {}) as Parameters<typeof buildModelGroupsFromConfig>[0]));
+      setCatalogError(null);
+    } else {
+      setCatalogError(t('mobile.me.botCatalogUnavailable'));
+    }
+    setLoading(false);
   }, []);
 
   useEffect(() => {
     void reload();
   }, [reload]);
 
-  const createBot = useCallback(
-    async (input: { name: string; role: string; soul: string; bio: string }) => {
-      if (!hasAppBridge()) return false;
-      const result = await getMobileElectron().metabot.create({
+  const createBot = useCallback(async (input: MobileBotInput): Promise<BotOperationResult> => {
+    try {
+      const result = await getMobileElectron().idbots.createMetaBotOnChain({
         name: input.name,
         metabot_type: 'worker',
         role: input.role,
         soul: input.soul,
         bio: input.bio,
+        llm_id: input.llmId,
+        llm_provider: input.llmProvider || null,
+        llm_effort: input.llmEffort,
+        allow_chat_skills: input.allowChatSkills,
       });
-      if (!result?.success) return false;
       await reload();
-      return true;
-    },
-    [reload],
-  );
-
-  const updateBot = useCallback(
-    async (id: number, input: { name: string; role: string; soul: string; bio: string }) => {
-      if (!hasAppBridge()) return false;
-      const result = await getMobileElectron().metabot.update(id, input);
-      if (!result?.success) return false;
+      if (!result?.success) return { state: 'failed', metabot: result?.metabot, message: result?.error };
+      if (result.chainSetupPending) {
+        return { state: 'local', metabot: result.metabot, message: result.chainError || result.subsidy?.error };
+      }
+      if (result.chainPartial) {
+        return { state: 'partial', metabot: result.metabot, message: result.chainError };
+      }
+      return result.metabot
+        ? { state: 'synced', metabot: result.metabot }
+        : { state: 'uncertain', message: 'The create result did not include the Bot' };
+    } catch (error) {
       await reload();
-      return true;
-    },
-    [reload],
-  );
+      return { state: 'uncertain', message: errorMessage(error) };
+    }
+  }, [reload]);
 
-  return { bots, error, reload, createBot, updateBot };
+  const updateBot = useCallback(async (id: number, input: MobileBotInput): Promise<BotOperationResult> => {
+    try {
+      const result = await getMobileElectron().metabot.update(id, {
+        name: input.name,
+        role: input.role,
+        soul: input.soul,
+        bio: input.bio,
+        llm_id: input.llmId,
+        llm_provider: input.llmProvider || null,
+        llm_effort: input.llmEffort,
+        allow_chat_skills: input.allowChatSkills,
+      });
+      await reload();
+      if (!result?.metabot) return { state: 'failed', message: result?.error || 'Bot update failed' };
+      if (!result?.success) return { state: 'partial', metabot: result.metabot, message: result.error || result.sync?.error };
+      if (result.sync && !result.sync.skipped && !result.sync.success) {
+        return { state: 'partial', metabot: result.metabot, message: result.sync.error };
+      }
+      return { state: 'synced', metabot: result.metabot };
+    } catch (error) {
+      await reload();
+      return { state: 'uncertain', message: errorMessage(error) };
+    }
+  }, [reload]);
+
+  const resumeBot = useCallback(async (id: number, mode: 'subsidized' | 'self-funded'): Promise<BotOperationResult> => {
+    try {
+      const result = await getMobileElectron().idbots.resumeMetabotSetup({ metabotId: id, mode });
+      await reload();
+      if (result?.success) return { state: 'synced', metabot: result.metabot };
+      return {
+        state: result?.selfFundedBlocked ? 'failed' : 'partial',
+        metabot: result?.metabot,
+        message: result?.error || result?.chain?.error || result?.subsidy?.error,
+      };
+    } catch (error) {
+      await reload();
+      return { state: 'uncertain', message: errorMessage(error) };
+    }
+  }, [reload]);
+
+  const syncBot = useCallback(async (id: number): Promise<BotOperationResult> => {
+    try {
+      const result = await getMobileElectron().idbots.syncMetaBot(id);
+      await reload();
+      return result?.success
+        ? { state: 'synced' }
+        : { state: 'partial', message: result?.error || 'Chain sync is still pending' };
+    } catch (error) {
+      await reload();
+      return { state: 'uncertain', message: errorMessage(error) };
+    }
+  }, [reload]);
+
+  const setBotEnabled = useCallback(async (id: number, enabled: boolean): Promise<BotOperationResult> => {
+    try {
+      const result = await getMobileElectron().metabot.setEnabled(id, enabled);
+      await reload();
+      return result?.success
+        ? { state: 'synced', metabot: result.metabot }
+        : { state: 'failed', message: result?.error };
+    } catch (error) {
+      return { state: 'uncertain', message: errorMessage(error) };
+    }
+  }, [reload]);
+
+  const getBotBalance = useCallback(async (id: number) => {
+    try {
+      const result = await getMobileElectron().idbots.getAddressBalance({ metabotId: id });
+      if (!result?.success) return { success: false, error: result?.error || 'Balance unavailable' };
+      const mvc = result.balance?.mvc;
+      if (!mvc || !Number.isFinite(mvc.value)) return { success: false, error: 'MVC balance unavailable' };
+      return { success: true, value: `${mvc.value} ${mvc.unit}` };
+    } catch (error) {
+      return { success: false, error: errorMessage(error) };
+    }
+  }, []);
+
+  return {
+    bots,
+    skills,
+    modelGroups,
+    loading,
+    error,
+    catalogError,
+    reload,
+    createBot,
+    updateBot,
+    resumeBot,
+    syncBot,
+    setBotEnabled,
+    getBotBalance,
+  };
 }

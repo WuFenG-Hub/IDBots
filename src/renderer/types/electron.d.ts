@@ -1608,7 +1608,7 @@ interface IElectronAPI {
   };
   bundle: {
     getPlans: () => Promise<{ success: boolean; plans?: BundlePlanInfo[]; error?: string }>;
-    createOrder: (input: { planId: string; gateway?: string }) => Promise<{ success: boolean; order?: BundleOrderInfo; error?: string }>;
+    createOrder: (input: { planId: string; gateway?: string }) => Promise<{ success: boolean; order?: BundleOrderInfo; error?: string; errorCode?: string }>;
     getOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: BundleOrderStatusInfo; error?: string }>;
     getMeters: () => Promise<{ success: boolean; meters?: BundleMetersInfo; error?: string }>;
   };

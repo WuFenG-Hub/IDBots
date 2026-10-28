@@ -16,11 +16,15 @@ const { mvc } = require('meta-contract');
 
 const {
   BUNDLE_ORDER_STATUS,
+  BUNDLE_ORDER_CREATION_REJECTED,
+  BUNDLE_ORDER_OUTCOME_UNCERTAIN,
+  BundleOrderCreationRejectedError,
   getBundleMeters,
   getBundleOrder,
   getBundlePlans,
   createBundleOrder,
   initBundleService,
+  registerBundleIpcHandlers,
   isBundleStubMode,
   resetBundleServiceForTests,
   resolveBundleApiBaseUrl,
@@ -225,6 +229,11 @@ test('stub getMeters reflects credited purchases without exposing any key', asyn
   assert.equal(after.llm.quotaTotal, after.llm.quotaFree + after.llm.quotaPurchased);
   assert.equal(after.llm.quotaRemaining, after.llm.quotaTotal - after.llm.quotaUsed);
   assert.ok(!JSON.stringify(after).includes('apiKey'));
+
+  await getBundleOrder({ orderId: order.orderId });
+  await getBundleOrder({ orderId: order.orderId });
+  const repeated = await getBundleMeters();
+  assert.deepEqual(repeated.llm, after.llm, 'repeated order polls must not credit the plan again');
 });
 
 // ---------------------------------------------------------------------------
@@ -335,14 +344,19 @@ test('getMeters rebuilds the C4 quota shape and never exposes an API key', async
     spentBytesTotal: 0,
     status: 1,
   };
+  let trafficOptions;
   const restore = initService({
     baseUrl: 'https://bundle.test',
     fetchImpl,
-    getTrafficBalanceImpl: async () => trafficRecord,
+    getTrafficBalanceImpl: async (options) => {
+      trafficOptions = options;
+      return trafficRecord;
+    },
   });
   t.after(restore);
 
   const meters = await getBundleMeters();
+  assert.deepEqual(trafficOptions, { forceRefresh: true });
   assert.deepEqual(meters.traffic, trafficRecord);
   assert.deepEqual(meters.llm, {
     quotaTotal: 2100000,
@@ -399,4 +413,34 @@ test('base URL precedence: IDBOTS_METASO_API_BASE env beats the injected overrid
   });
   t.after(restore);
   assert.equal(resolveBundleApiBaseUrl(), 'https://env.test');
+});
+
+test('createOrder IPC distinguishes a definite business rejection from an uncertain outcome', async (t) => {
+  const handlers = {};
+  registerBundleIpcHandlers({
+    registerIpcHandler: (channel, handler) => {
+      handlers[channel] = handler;
+    },
+  });
+
+  const rejected = await handlers['bundle:createOrder'](null, { planId: '' });
+  assert.equal(rejected.success, false);
+  assert.equal(rejected.errorCode, BUNDLE_ORDER_CREATION_REJECTED);
+
+  const restoreStub = initService({ baseUrl: 'stub://local' });
+  await assert.rejects(
+    createBundleOrder({ planId: 'not-on-sale' }),
+    BundleOrderCreationRejectedError,
+  );
+  restoreStub();
+
+  const fetchImpl = createFetchStub([
+    ['/v1/bundle/orders', { __httpStatus: 500, __body: { code: 500, message: 'upstream unavailable' } }],
+  ]);
+  const restore = initService({ baseUrl: 'https://bundle.test', fetchImpl });
+  t.after(restore);
+  const uncertain = await handlers['bundle:createOrder'](null, { planId: 'bundle_basic_cny' });
+  assert.equal(uncertain.success, false);
+  assert.equal(uncertain.errorCode, BUNDLE_ORDER_OUTCOME_UNCERTAIN);
+  assert.equal(uncertain.error.includes('upstream unavailable'), true);
 });
