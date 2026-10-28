@@ -141,8 +141,8 @@ test('long-term board participants survive the bounded IPC sanitizer', () => {
   // survives, depth ten is the hard cut.
   const deep = sanitizeIpcPayload({ a: { b: { c: { d: { e: { f: { g: 'too deep' } } } } } } });
   assert.equal(deep.a.b.c.d.e.f.g, 'too deep', 'depth six values still survive');
-  const past = sanitizeIpcPayload({ a: { b: { c: { d: { e: { f: { g: { h: { i: { j: 'past the cap' } } } } } } } } } });
-  assert.equal(past.a.b.c.d.e.f.g.h.i, '[truncated-depth]', 'the depth cap remains enforced');
+  const past = sanitizeIpcPayload({ a: { b: { c: { d: { e: { f: { g: { h: { i: { j: { k: 'past the cap' } } } } } } } } } } });
+  assert.equal(past.a.b.c.d.e.f.g.h.i.j, '[truncated-depth]', 'the depth cap remains enforced');
 });
 
 test('IPC sanitizer preserves deep gateway-wrapped objects and truncates past the cap', () => {
