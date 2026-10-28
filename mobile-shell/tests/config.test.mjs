@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, statSync } from 'node:fs';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { createCapacitorConfig, getFlavor } from '../scripts/flavors.mjs';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
+const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 const rootPackage = JSON.parse(read('../../package.json'));
 const nativePackage = JSON.parse(read('../package.json'));
 
@@ -40,6 +43,15 @@ test('Android has API 26 and explicit staging and production variants', () => {
   const manifest = read('../android/app/src/main/AndroidManifest.xml');
   assert.match(manifest, /android:allowBackup="false"/);
   assert.match(manifest, /android:usesCleartextTraffic="false"/);
+});
+
+test('Gradle wrapper remains executable in Git and on disk', () => {
+  const entry = execFileSync('git', ['ls-files', '--stage', 'mobile-shell/android/gradlew'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  assert.match(entry, /^100755 /);
+  assert.ok(statSync(new URL('../android/gradlew', import.meta.url)).mode & 0o111);
 });
 
 test('both platforms install the adapter before remote application scripts', () => {
