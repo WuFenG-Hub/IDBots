@@ -136,19 +136,26 @@ test('long-term board participants survive the bounded IPC sanitizer', () => {
   });
   assert.deepEqual(sanitized.board.cards[0].participants, [{ id: 1, name: 'Gateway Twin', avatar: null }]);
 
+  // F-17a raised IPC_MAX_DEPTH 6 -> 10 (the gateway event fan-out needs headroom
+  // for ask-option objects), so the cap now bites one level deeper: depth six
+  // survives, depth ten is the hard cut.
   const deep = sanitizeIpcPayload({ a: { b: { c: { d: { e: { f: { g: 'too deep' } } } } } } });
-  assert.equal(deep.a.b.c.d.e.f, '[truncated-depth]', 'the depth cap remains enforced');
+  assert.equal(deep.a.b.c.d.e.f.g, 'too deep', 'depth six values still survive');
+  const past = sanitizeIpcPayload({ a: { b: { c: { d: { e: { f: { g: { h: { i: { j: 'past the cap' } } } } } } } } } });
+  assert.equal(past.a.b.c.d.e.f.g.h.i, '[truncated-depth]', 'the depth cap remains enforced');
 });
 
-test('IPC sanitizer preserves depth-six values and truncates depth-eight objects', () => {
+test('IPC sanitizer preserves deep gateway-wrapped objects and truncates past the cap', () => {
   const nested = (value, depth) => {
     let result = value;
     for (let index = 0; index < depth; index += 1) result = { child: result };
     return result;
   };
   const atDepthSix = (value) => value.child.child.child.child.child.child;
+  const atDepthTen = (value) => value.child.child.child.child.child.child.child.child.child.child;
   assert.equal(atDepthSix(sanitizeIpcPayload(nested('keep', 6))), 'keep');
-  assert.equal(atDepthSix(sanitizeIpcPayload(nested('drop', 8))), '[truncated-depth]');
+  assert.deepEqual(atDepthSix(sanitizeIpcPayload(nested('drop', 8))), { child: { child: 'drop' } }, 'event-fan-out depth survives the raised cap');
+  assert.equal(atDepthTen(sanitizeIpcPayload(nested('drop', 12))), '[truncated-depth]');
 });
 
 // ---------------------------------------------------------------------------
