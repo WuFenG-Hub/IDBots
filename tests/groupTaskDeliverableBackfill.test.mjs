@@ -134,3 +134,82 @@ test('backfill inserts the missing multi-line URI rows as delivered and is idemp
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test('backfill repairs task #131 bare-tag deliveries ("[DELIVERABLE]" alone, URI on the next line)', async () => {
+  const tempDir = makeTempDir();
+  const { groupTaskStore, db } = await openStores(tempDir);
+  try {
+    const groupId131 = '66ab9cb84195cc3348cd2ed6ab9441caf8ee3aa2ecd1134ced9dc5de31c4843fi0';
+    const task = groupTaskStore.createTask({
+      groupId: groupId131,
+      title: 'Task 131',
+      goal: 'Daily skill intro MetaApp (EP86)',
+      chairMetabotId: 1,
+      createdBy: 'user',
+      createPinId: 'create-pin-131',
+    });
+
+    // The exact shapes task #131 shipped (2026-10-28/29): bare tag line with
+    // the URI on the NEXT non-blank line — the dispatch prompt taught
+    // "回执独立成条、链上 URI 裸文本独占一行" — minted zero ledger rows.
+    const insert = (pinId, gmid, content) => {
+      db.run(
+        `INSERT INTO group_chat_messages (pin_id, group_id, sender_metaid, sender_global_metaid, sender_name, protocol, content)
+         VALUES (?, ?, 'metabot-1', ?, 'member', 'simplegroupchat', ?)`,
+        [pinId, groupId131, gmid, content],
+      );
+    };
+    // Dispatch prose: tag mentions mid-line only — never rows.
+    insert('pin-dispatch-131', GMID_CHAIR, [
+      '[GROUP TASK] EP86',
+      '',
+      '【六、群内消息纪律】[DELIVERABLE] 回执独立成条、链上 URI 裸文本独占一行。',
+    ].join('\n'));
+    // Lucy: two bare-tag deliveries in one message.
+    insert('pin-lucy-131', 'gmid-lucy', [
+      '[WORKING] 文案+分镜棒交付完毕。',
+      '',
+      '[DELIVERABLE]',
+      'pin://08f355f5764e4fb9dfa522b66fdbf2c85acd655c430f89e4fac9cf874c087a2di0',
+      '',
+      '[DELIVERABLE]',
+      'metafile://8100fed610d34755ad2e03e2eb343a45d94a27bfbc0b2c768fe586203f63229ei0',
+    ].join('\n'));
+    // Eleven: two bare-tag metafiles with a prose tail.
+    insert('pin-eleven-131', 'gmid-eleven', [
+      '[DELIVERABLE]',
+      'metafile://f2eaeb6ca31fad1ce97dcaefcb8c3e5a59245bc6d8b6eb5c2249f7bbf2924243i0',
+      '',
+      '[DELIVERABLE]',
+      'metafile://957d549a74a0b8817c4bc4974986a3a05fe604596d05738fe26176e15c07a1a3i0',
+      '',
+      '媒体棒前两件落地。视频主件渲染中。',
+    ].join('\n'));
+    // A bare tag whose window is prose only stays dropped.
+    insert('pin-promisepin-131', 'gmid-eleven', [
+      '[DELIVERABLE]',
+      '（尚未上链，稍后补全）',
+    ].join('\n'));
+
+    const first = backfillMultiLineDeliverables(groupTaskStore);
+    assert.equal(first.inserted, 4, JSON.stringify(first));
+    const rows = groupTaskStore.listDeliverables(task.id);
+    assert.equal(rows.length, 4);
+    const uris = new Set(rows.map((row) => row.uri));
+    assert.ok(uris.has('pin://08f355f5764e4fb9dfa522b66fdbf2c85acd655c430f89e4fac9cf874c087a2di0'));
+    assert.ok(uris.has('metafile://8100fed610d34755ad2e03e2eb343a45d94a27bfbc0b2c768fe586203f63229ei0'));
+    assert.ok(uris.has('metafile://f2eaeb6ca31fad1ce97dcaefcb8c3e5a59245bc6d8b6eb5c2249f7bbf2924243i0'));
+    assert.ok(uris.has('metafile://957d549a74a0b8817c4bc4974986a3a05fe604596d05738fe26176e15c07a1a3i0'));
+    for (const row of rows) {
+      assert.equal(row.status, 'delivered');
+      assert.equal(row.confirmation, 'unconfirmed');
+    }
+
+    // Idempotent on re-run.
+    const second = backfillMultiLineDeliverables(groupTaskStore);
+    assert.equal(second.inserted, 0, JSON.stringify(second));
+    assert.equal(groupTaskStore.listDeliverables(task.id).length, 4);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
