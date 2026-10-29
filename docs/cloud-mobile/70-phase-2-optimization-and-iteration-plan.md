@@ -6,6 +6,17 @@
 - **Planning branch:** `feat/cloud-mobile-phase-2`
 - **Scope:** cloud tenancy, control plane, tenant gateway/server mode, PWA, mobile-relevant desktop/shared code, verification, and release operations
 
+> **Delivery status (updated 2026-10-29):** the "Proposed for owner review"
+> status describes this document at writing time. The plan was approved and
+> executed: WP0–WP3 are delivered and merged to `main` — see
+> [`delivery/wp0-baseline.md`](delivery/wp0-baseline.md),
+> [`delivery/wp1-twin-session.md`](delivery/wp1-twin-session.md),
+> [`delivery/wp2-work-artifacts.md`](delivery/wp2-work-artifacts.md),
+> [`delivery/wp3-account-daily-use.md`](delivery/wp3-account-daily-use.md),
+> and the operator entry point
+> [`delivery/internal-test-release.md`](delivery/internal-test-release.md).
+> WP4, WP5, and the contract CR backlog in section 6 remain forward-looking.
+
 ## 1. Purpose and Product Outcome
 
 Phase 2 turns the working main-flow prototype into a dependable cloud product. It is not a visual-polish phase and it is not the native-app phase. It closes both the unfinished original Phase 1 foundation and the broader capabilities needed for an IDBots mobile user to achieve approximately the same outcomes as on desktop, with interactions adapted to a phone.
