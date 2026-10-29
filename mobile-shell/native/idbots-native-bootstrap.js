@@ -37,6 +37,7 @@
     if (!allowed || !parsed.host || parsed.username || parsed.password) throw new Error('External URL is not allowed');
     return value.trim();
   };
+  const isProductRootRoute = () => ['/', '/app', '/app/', '/login', '/login/'].includes(window.location.pathname);
   const bridge = Object.freeze({
     nativeBridgeVersion: 1,
     bootstrap: Object.freeze({ phase: 'document-start', origin: remoteOrigin, platform }),
@@ -67,7 +68,7 @@
           handled = false;
         }
         if (handled) return;
-        if (event?.canGoBack && typeof window.history?.back === 'function') {
+        if (event?.canGoBack && !isProductRootRoute() && typeof window.history?.back === 'function') {
           window.history.back();
           return;
         }

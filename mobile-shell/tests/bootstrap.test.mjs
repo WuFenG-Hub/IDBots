@@ -120,6 +120,17 @@ test('Android back consumes current UI handlers before history or app exit', () 
   assert.equal(window.exits, 1);
 });
 
+test('Android Back exits at product roots instead of returning to login history', () => {
+  for (const pathname of ['/app/', '/login']) {
+    const window = bootstrap('https://staging.idbots.world');
+    window.location.pathname = pathname;
+    window.idbotsNative.onBackButton(() => false);
+    window.listeners.get('backButton')({ canGoBack: true });
+    assert.equal(window.historyBacks, 0, pathname);
+    assert.equal(window.exits, 1, pathname);
+  }
+});
+
 test('native external opening uses main-frame navigation only for approved URLs', async () => {
   const window = bootstrap('https://staging.idbots.world');
   await window.idbotsNative.openExternal(' https://example.com/path ');
