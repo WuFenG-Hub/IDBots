@@ -1,25 +1,31 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ChevronDownIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import { t } from '../../i18n';
 import type { MobileMetabot } from '../../bridge/types';
 import type { BotOperationResult, MobileBotInput } from '../hooks/useMetabots';
+import { BotAvatar } from './BotAvatar';
+import { fileToAvatarDataUrl } from '../avatarUpload';
+import {
+  A2A_BYE_COOLDOWN_MS_OPTIONS,
+  A2A_MAX_INCOMING_TURNS_OPTIONS,
+  cooldownMinutes,
+} from '../a2aLimits';
 
 /**
- * Tabbed MetaBot editor used by the Me screen's create/edit bottom sheet
- * (UX batch 2026-10-28).
+ * MetaBot create/edit forms, split per the UE rework (2026-10-29, A5):
  *
- * Design contract (owner-approved, desktop-aligned):
- * - Edit mode: four tabs (Basic / Model / Skills / Other). Tab panels stay
- *   mounted and are only CSS-hidden, so edits survive tab switches — the
- *   same rule the desktop tabbed form follows.
- * - All inputs carry visible labels (label + htmlFor) — no bare inputs.
- * - The chat-skills block starts COLLAPSED and must be expanded before use.
- * - Model & reasoning effort merge into one block; a fallback model
- *   (fallback_llm, desktop-aligned with provider + effort) is selectable.
- * - Create mode: only Name + Role are required to submit (the primary brain
- *   is auto-filled from the catalog when untouched, because the real
- *   createMetaBotOnChain contract requires one); everything else moves into
- *   a collapsible Advanced section.
+ * - CREATE: only Name + Role. Nothing else — no Advanced section, no tabs.
+ *   Humans don't slowly fill a dozen fields at birth; everything else is
+ *   completed afterwards through Edit. The real createMetaBotOnChain
+ *   contract requires a primary model (`requireMetabotLlmIdForCreate`), so
+ *   the form transparently auto-fills the first catalog model and says so
+ *   in copy — UI transparency, not a relaxed backend contract.
+ * - EDIT: full desktop-aligned field set in five tabs (Basic / Persona /
+ *   Model / Chat settings / Other), mirroring the desktop edit tabs'
+ *   ownership: avatar+bio (Basic), soul+goal (Persona), primary+fallback
+ *   brain (Model), chat skills + A2A limits (Chat settings). Tab panels
+ *   STAY MOUNTED and are only CSS-hidden, so edits survive tab switches —
+ *   the same rule the desktop tabbed form follows.
  */
 
 export interface EditorBrainOption {
@@ -34,7 +40,7 @@ interface BotEditorState {
   outcome: BotOperationResult | null;
 }
 
-type EditorTabKey = 'basic' | 'model' | 'skills' | 'other';
+type EditorTabKey = 'basic' | 'persona' | 'model' | 'chatSettings' | 'other';
 
 const EFFORT_LEVELS: ReadonlyArray<string> = ['', 'off', 'low', 'high', 'max'];
 
@@ -69,7 +75,6 @@ function Field(props: {
   );
 }
 
-/** Tab strip shared by edit mode and the create-mode advanced section. */
 function TabStrip(props: {
   tabs: ReadonlyArray<EditorTabKey>;
   value: EditorTabKey;
@@ -77,7 +82,7 @@ function TabStrip(props: {
   onChange: (key: EditorTabKey) => void;
 }): JSX.Element {
   return (
-    <div className="flex gap-2" role="tablist">
+    <div className="flex gap-2 overflow-x-auto" role="tablist">
       {props.tabs.map((entry) => (
         <button
           key={entry}
@@ -87,7 +92,7 @@ function TabStrip(props: {
           disabled={props.disabled}
           data-testid={`bot-tab-${entry}`}
           onClick={() => props.onChange(entry)}
-          className={`min-h-[40px] flex-1 rounded-xl border px-2 text-sm disabled:opacity-40 ${
+          className={`min-h-[40px] shrink-0 rounded-xl border px-3 text-sm disabled:opacity-40 ${
             props.value === entry
               ? 'border-[var(--color-primary)] bg-[var(--color-primary)] text-black'
               : 'border-[var(--border-color)] text-[var(--text-secondary)]'
@@ -264,6 +269,58 @@ function FallbackBrainBlock(props: {
   );
 }
 
+/** Avatar picker: preview + file input; data URLs are downscaled to 256px. */
+function AvatarField(props: {
+  name: string;
+  avatar: string | null;
+  busy: boolean;
+  onPick: (dataUrl: string) => void;
+  onRemove: () => void;
+}): JSX.Element {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-[var(--border-color)] p-3">
+      <BotAvatar name={props.name} avatar={props.avatar} testId="bot-avatar-preview" />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <button
+          type="button"
+          data-testid="bot-avatar-change"
+          disabled={props.busy}
+          onClick={() => inputRef.current?.click()}
+          className="min-h-[36px] self-start rounded-lg border border-[var(--border-color)] px-3 text-sm text-[var(--text-primary)] active:bg-[var(--bg-hover)] disabled:opacity-40"
+        >
+          {t('mobile.me.botAvatarChange')}
+        </button>
+        {props.avatar ? (
+          <button
+            type="button"
+            data-testid="bot-avatar-remove"
+            disabled={props.busy}
+            onClick={props.onRemove}
+            className="min-h-[36px] self-start px-1 text-xs text-red-600 disabled:opacity-40"
+          >
+            {t('mobile.me.botAvatarRemove')}
+          </button>
+        ) : null}
+        <p className="text-[11px] text-[var(--text-secondary)]">{t('mobile.me.botAvatarNote')}</p>
+      </div>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        data-testid="bot-avatar-input"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = '';
+          if (!file) return;
+          void fileToAvatarDataUrl(file).then(props.onPick).catch(() => undefined);
+        }}
+      />
+    </div>
+  );
+}
+
 export function BotEditorForm(props: {
   state: BotEditorState;
   brainOptions: EditorBrainOption[];
@@ -272,14 +329,14 @@ export function BotEditorForm(props: {
   getBalance: (id: number) => Promise<{ success: boolean; value?: string; error?: string }>;
   onSave: (input: MobileBotInput) => Promise<void>;
   onClose: () => void;
+  /** A6: surfaced so the botEdit page can guard back navigation (IA-PLAN §2.5). */
+  onDirtyChange?: (dirty: boolean) => void;
 }): JSX.Element {
   const { bot, busy, outcome } = props.state;
   const isEdit = Boolean(bot);
-  const tabs: ReadonlyArray<EditorTabKey> = ['basic', 'model', 'skills', 'other'];
-  const advancedTabs: ReadonlyArray<EditorTabKey> = ['basic', 'model', 'skills', 'other'];
+  const tabs: ReadonlyArray<EditorTabKey> = ['basic', 'persona', 'model', 'chatSettings', 'other'];
 
-  const [tab, setTab] = useState<EditorTabKey>('basic');
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [tab, setTab] = useState<EditorTabKey>(isEdit ? 'basic' : 'basic');
 
   const options = [...props.brainOptions];
   if (bot?.llm_id && !options.some((option) => option.modelId === bot.llm_id && option.providerKey === (bot.llm_provider ?? ''))) {
@@ -292,7 +349,10 @@ export function BotEditorForm(props: {
   const [name, setName] = useState(bot?.name ?? '');
   const [role, setRole] = useState(bot?.role ?? '');
   const [soul, setSoul] = useState(bot?.soul ?? '');
+  const [goal, setGoal] = useState(bot?.goal ?? '');
   const [bio, setBio] = useState(bot?.bio ?? '');
+  const [avatar, setAvatar] = useState<string | null>(bot?.avatar ?? null);
+  const [avatarTouched, setAvatarTouched] = useState(false);
   const [brain, setBrain] = useState<EditorBrainOption | null>(() => {
     if (!bot?.llm_id) return options[0] ?? null;
     const current = options.find(
@@ -316,8 +376,48 @@ export function BotEditorForm(props: {
   const [fallbackEffort, setFallbackEffort] = useState(bot?.fallback_llm_effort ?? '');
   const [selectedSkills, setSelectedSkills] = useState<string[]>(bot?.allow_chat_skills ?? []);
   const [skillsExpanded, setSkillsExpanded] = useState(false);
+  const [a2aAutoReply, setA2aAutoReply] = useState<boolean>(bot?.a2a_auto_reply_enabled ?? true);
+  const [a2aMaxIncomingTurns, setA2aMaxIncomingTurns] = useState<number>(
+    bot?.a2a_max_incoming_turns ?? 50,
+  );
+  const [a2aByeCooldownMs, setA2aByeCooldownMs] = useState<number>(
+    bot?.a2a_bye_cooldown_ms ?? 300_000,
+  );
   const [balance, setBalance] = useState<{ loading: boolean; value?: string; error?: string }>({ loading: Boolean(bot) });
-  const [advancedTab, setAdvancedTab] = useState<EditorTabKey>('model');
+
+  // Dirty detection (A6, IA-PLAN §2.5 rule 2): any editor field differing
+  // from the values the form was initialized with. avatarTouched gates the
+  // avatar so an untouched pass-through never reads as dirty.
+  const dirtyFields = [
+    name,
+    role,
+    soul,
+    goal,
+    bio,
+    avatarTouched ? avatar : null,
+    brain?.providerKey ?? null,
+    brain?.modelId ?? null,
+    effort,
+    fallbackBrain?.providerKey ?? null,
+    fallbackBrain?.modelId ?? null,
+    fallbackBrain ? fallbackEffort : null,
+    [...selectedSkills].sort().join(','),
+    a2aAutoReply,
+    a2aMaxIncomingTurns,
+    a2aByeCooldownMs,
+  ];
+  const dirtySnapshot = JSON.stringify(dirtyFields);
+  const initialSnapshotRef = useRef<string | null>(null);
+  if (initialSnapshotRef.current === null) {
+    initialSnapshotRef.current = dirtySnapshot;
+  }
+  const dirty = dirtySnapshot !== initialSnapshotRef.current;
+  useEffect(() => {
+    props.onDirtyChange?.(dirty);
+    // The callback is a stable ref-setter on the Me screen; dirty is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty]);
+  useEffect(() => () => props.onDirtyChange?.(false), []);
 
   useEffect(() => {
     if (!bot) return;
@@ -334,7 +434,9 @@ export function BotEditorForm(props: {
     name: name.trim(),
     role: role.trim(),
     soul: soul.trim(),
+    goal: goal.trim(),
     bio: bio.trim(),
+    avatar: avatarTouched ? avatar : undefined,
     llmId: brain?.modelId ?? (isEdit ? '' : options[0]?.modelId ?? ''),
     llmProvider: brain?.providerKey ?? (isEdit ? '' : options[0]?.providerKey ?? ''),
     llmEffort: effort || null,
@@ -342,19 +444,26 @@ export function BotEditorForm(props: {
     fallbackLlmProvider: fallbackBrain?.providerKey ?? '',
     fallbackLlmEffort: fallbackBrain ? (fallbackEffort || null) : null,
     allowChatSkills: selectedSkills,
+    a2aAutoReply,
+    a2aMaxIncomingTurns,
+    a2aByeCooldownMs,
   });
 
-  // Save gating (parity with the pre-tab form): edit keeps `name + primary
-  // brain required`; create accepts `name only` and resolves a default brain
-  // from the catalog (the real createMetaBotOnChain contract needs one).
+  // Save gating: create accepts `name only` (a default brain is auto-filled
+  // from the catalog — the createMetaBotOnChain contract requires one); edit
+  // keeps `name + primary brain required`.
   const saveDisabled = busy
     || !name.trim()
     || Boolean(props.catalogError)
     || (isEdit ? !brain?.modelId : options.length === 0);
 
+  const panelHidden = (key: EditorTabKey): React.CSSProperties | undefined =>
+    tab === key ? undefined : { display: 'none' };
+
   return (
     <div className="flex flex-col gap-3" data-testid="bot-form">
-      {/* Basic identity: name + role always visible in both modes. */}
+      {/* Identity pair: name + role are the only create-mode fields and stay
+          top-level in edit mode (desktop persona parity). */}
       <Field htmlFor="bot-name" label={t('mobile.me.botNameLabel')}>
         <input
           id="bot-name"
@@ -378,22 +487,33 @@ export function BotEditorForm(props: {
         />
       </Field>
 
-      {isEdit ? (
+      {!isEdit ? (
+        <div data-testid="bot-create-guide" className="rounded-xl bg-[var(--bg-main)] p-3">
+          <p className={`mb-1 ${labelClass}`}>{t('mobile.me.botCreateBasicTitle')}</p>
+          <p className="text-sm text-[var(--text-primary)]">{t('mobile.me.botNameMinNote')}</p>
+          <p className="mt-1 text-xs text-[var(--text-secondary)]">{t('mobile.me.botCreateGuide')}</p>
+          <p className="mt-1 text-xs text-[var(--text-secondary)]">{t('mobile.me.botDefaultBrainNote')}</p>
+        </div>
+      ) : (
         <>
           <TabStrip tabs={tabs} value={tab} disabled={busy} onChange={setTab} />
-          <div data-testid={`bot-panel-basic`} className={TAB_PANEL_CLASS} style={tab === 'basic' ? undefined : { display: 'none' }}>
-            <Field htmlFor="bot-soul" label={t('mobile.me.botSoulLabel')}>
-              <textarea
-                id="bot-soul"
-                data-testid="bot-soul"
-                value={soul}
-                disabled={busy}
-                onChange={(event) => setSoul(event.target.value)}
-                placeholder={t('mobile.me.botSoulPlaceholder')}
-                rows={2}
-                className={`${inputClass} resize-none`}
-              />
-            </Field>
+
+          {/* Basic: avatar + bio (desktop Basic-tab ownership minus the
+              identity pair above; metabot_type/boss stay desktop-only). */}
+          <div data-testid="bot-panel-basic" className={TAB_PANEL_CLASS} style={panelHidden('basic')}>
+            <AvatarField
+              name={name}
+              avatar={avatar}
+              busy={busy}
+              onPick={(dataUrl) => {
+                setAvatar(dataUrl);
+                setAvatarTouched(true);
+              }}
+              onRemove={() => {
+                setAvatar(null);
+                setAvatarTouched(true);
+              }}
+            />
             <Field htmlFor="bot-bio" label={t('mobile.me.botBioLabel')}>
               <textarea
                 id="bot-bio"
@@ -407,121 +527,139 @@ export function BotEditorForm(props: {
               />
             </Field>
           </div>
-        </>
-      ) : (
-        <div data-testid="bot-create-guide" className="rounded-xl bg-[var(--bg-main)] p-3">
-          <p className={`mb-1 ${labelClass}`}>{t('mobile.me.botCreateBasicTitle')}</p>
-          <p className="text-sm text-[var(--text-primary)]">{t('mobile.me.botNameMinNote')}</p>
-          <p className="mt-1 text-xs text-[var(--text-secondary)]">{t('mobile.me.botCreateGuide')}</p>
-          <p className="mt-1 text-xs text-[var(--text-secondary)]">{t('mobile.me.botDefaultBrainNote')}</p>
-          <button
-            type="button"
-            aria-expanded={advancedOpen}
-            data-testid="bot-advanced-toggle"
-            disabled={busy}
-            onClick={() => setAdvancedOpen((current) => !current)}
-            className="mt-2 flex min-h-[44px] w-full items-center justify-between gap-2 rounded-xl border border-[var(--border-color)] px-3 text-sm text-[var(--text-primary)] active:bg-[var(--bg-hover)]"
-          >
-            <span>{t('mobile.me.botAdvancedToggle')}</span>
-            {advancedOpen
-              ? <ChevronDownIcon className="h-4 w-4 text-[var(--text-secondary)]" aria-hidden />
-              : <ChevronRightIcon className="h-4 w-4 text-[var(--text-secondary)]" aria-hidden />}
-          </button>
-          {advancedOpen ? (
-            <div data-testid="bot-advanced" className="mt-3 flex flex-col gap-3">
-              <p className="text-xs text-[var(--text-secondary)]">{t('mobile.me.botAdvancedHint')}</p>
-              <TabStrip tabs={advancedTabs} value={advancedTab} disabled={busy} onChange={setAdvancedTab} />
-              <div
-                data-testid="bot-panel-advanced-basic"
-                className={TAB_PANEL_CLASS}
-                style={advancedTab === 'basic' ? undefined : { display: 'none' }}
-              >
-                <Field htmlFor="bot-soul" label={t('mobile.me.botSoulLabel')}>
-                  <textarea
-                    id="bot-soul"
-                    data-testid="bot-soul"
-                    value={soul}
+
+          {/* Persona: soul + goal (role lives top-level above). */}
+          <div data-testid="bot-panel-persona" className={TAB_PANEL_CLASS} style={panelHidden('persona')}>
+            <Field htmlFor="bot-soul" label={t('mobile.me.botSoulLabel')}>
+              <textarea
+                id="bot-soul"
+                data-testid="bot-soul"
+                value={soul}
+                disabled={busy}
+                onChange={(event) => setSoul(event.target.value)}
+                placeholder={t('mobile.me.botSoulPlaceholder')}
+                rows={2}
+                className={`${inputClass} resize-none`}
+              />
+            </Field>
+            <Field htmlFor="bot-goal" label={t('mobile.me.botGoalLabel')}>
+              <textarea
+                id="bot-goal"
+                data-testid="bot-goal"
+                value={goal}
+                disabled={busy}
+                onChange={(event) => setGoal(event.target.value)}
+                placeholder={t('mobile.me.botGoalPlaceholder')}
+                rows={2}
+                className={`${inputClass} resize-none`}
+              />
+            </Field>
+          </div>
+
+          {/* Model: primary brain + effort + fallback brain. */}
+          <div data-testid="bot-panel-model" className={TAB_PANEL_CLASS} style={panelHidden('model')}>
+            <BrainBlock
+              options={options}
+              brain={brain}
+              effort={effort}
+              busy={busy}
+              selectable={isEdit || options.length > 0}
+              onBrainChange={setBrain}
+              onEffortChange={setEffort}
+            />
+            <FallbackBrainBlock
+              options={options}
+              brain={fallbackBrain}
+              effort={fallbackEffort}
+              busy={busy}
+              onBrainChange={setFallbackBrain}
+              onEffortChange={setFallbackEffort}
+            />
+          </div>
+
+          {/* Chat settings: chat skills + A2A private-chat limits (desktop
+              Chat Settings tab). */}
+          <div data-testid="bot-panel-chatSettings" className={TAB_PANEL_CLASS} style={panelHidden('chatSettings')}>
+            <SkillsBlock
+              skills={props.skills}
+              selected={selectedSkills}
+              busy={busy}
+              expanded={skillsExpanded}
+              onToggleExpand={() => setSkillsExpanded((current) => !current)}
+              onSelect={setSelectedSkills}
+            />
+            <div className="rounded-xl border border-[var(--border-color)] p-3">
+              <p className={`mb-2 ${labelClass}`}>{t('mobile.me.botA2aSectionLabel')}</p>
+              <label className="flex min-h-[44px] items-center justify-between gap-3 text-sm text-[var(--text-primary)]" htmlFor="bot-a2a-auto-reply">
+                <span>
+                  {t('mobile.me.botA2aAutoReplyLabel')}
+                  <span className="block text-[11px] text-[var(--text-secondary)]">{t('mobile.me.botA2aAutoReplyHint')}</span>
+                </span>
+                <input
+                  id="bot-a2a-auto-reply"
+                  type="checkbox"
+                  role="switch"
+                  data-testid="bot-a2a-auto-reply"
+                  checked={a2aAutoReply}
+                  disabled={busy}
+                  onChange={(event) => setA2aAutoReply(event.target.checked)}
+                  className="h-6 w-11 shrink-0"
+                />
+              </label>
+              <div className="mt-2">
+                <Field htmlFor="bot-a2a-max-turns" label={t('mobile.me.botA2aMaxTurnsLabel')}>
+                  <select
+                    id="bot-a2a-max-turns"
+                    data-testid="bot-a2a-max-turns"
+                    value={a2aMaxIncomingTurns}
                     disabled={busy}
-                    onChange={(event) => setSoul(event.target.value)}
-                    placeholder={t('mobile.me.botSoulPlaceholder')}
-                    rows={2}
-                    className={`${inputClass} resize-none`}
-                  />
+                    onChange={(event) => setA2aMaxIncomingTurns(Number(event.target.value))}
+                    className={inputClass}
+                  >
+                    {A2A_MAX_INCOMING_TURNS_OPTIONS.map((value) => (
+                      <option key={value} value={value}>{value}</option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-[var(--text-secondary)]">{t('mobile.me.botA2aMaxTurnsHint')}</p>
                 </Field>
-                <Field htmlFor="bot-bio" label={t('mobile.me.botBioLabel')}>
-                  <textarea
-                    id="bot-bio"
-                    data-testid="bot-bio"
-                    value={bio}
+              </div>
+              <div className="mt-2">
+                <Field htmlFor="bot-a2a-bye-cooldown" label={t('mobile.me.botA2aByeCooldownLabel')}>
+                  <select
+                    id="bot-a2a-bye-cooldown"
+                    data-testid="bot-a2a-bye-cooldown"
+                    value={a2aByeCooldownMs}
                     disabled={busy}
-                    onChange={(event) => setBio(event.target.value)}
-                    placeholder={t('mobile.me.botBioPlaceholder')}
-                    rows={2}
-                    className={`${inputClass} resize-none`}
-                  />
+                    onChange={(event) => setA2aByeCooldownMs(Number(event.target.value))}
+                    className={inputClass}
+                  >
+                    {A2A_BYE_COOLDOWN_MS_OPTIONS.map((value) => (
+                      <option key={value} value={value}>
+                        {cooldownMinutes(value)} {t('mobile.me.botA2aByeCooldownMinutes')}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-[var(--text-secondary)]">{t('mobile.me.botA2aByeCooldownHint')}</p>
                 </Field>
               </div>
             </div>
-          ) : null}
-        </div>
-      )}
+          </div>
 
-      {/* Model / skills / other panels + hints */}
-      <div
-        data-testid="bot-panel-model"
-        className={TAB_PANEL_CLASS}
-        style={(isEdit ? tab === 'model' : advancedOpen && advancedTab === 'model') ? undefined : { display: 'none' }}
-      >
-        <BrainBlock
-          options={options}
-          brain={brain}
-          effort={effort}
-          busy={busy}
-          selectable={isEdit || options.length > 0}
-          onBrainChange={setBrain}
-          onEffortChange={setEffort}
-        />
-        <FallbackBrainBlock
-          options={options}
-          brain={fallbackBrain}
-          effort={fallbackEffort}
-          busy={busy}
-          onBrainChange={setFallbackBrain}
-          onEffortChange={setFallbackEffort}
-        />
-      </div>
-      <div
-        data-testid="bot-panel-skills"
-        className={TAB_PANEL_CLASS}
-        style={(isEdit ? tab === 'skills' : advancedOpen && advancedTab === 'skills') ? undefined : { display: 'none' }}
-      >
-        <SkillsBlock
-          skills={props.skills}
-          selected={selectedSkills}
-          busy={busy}
-          expanded={skillsExpanded}
-          onToggleExpand={() => setSkillsExpanded((current) => !current)}
-          onSelect={setSelectedSkills}
-        />
-      </div>
-      <div
-        data-testid="bot-panel-other"
-        className={TAB_PANEL_CLASS}
-        style={(isEdit ? tab === 'other' : advancedOpen && advancedTab === 'other') ? undefined : { display: 'none' }}
-      >
-        <p className="text-xs text-[var(--text-secondary)]">{t('mobile.me.botModelBindingNote')}</p>
-        <p className="text-xs text-[var(--text-secondary)]">{t('mobile.me.botFeeHint')}</p>
-        {bot ? (
-          <p className="text-xs text-[var(--text-secondary)]" data-testid="bot-balance-hint">
-            {balance.loading
-              ? t('mobile.common.loading')
-              : balance.error
-                ? t('mobile.me.botBalanceUnavailable')
-                : t('mobile.me.botBalance', { balance: balance.value ?? '' })}
-          </p>
-        ) : null}
-        {props.catalogError ? <p className="text-xs text-red-600">{props.catalogError}</p> : null}
-      </div>
+          {/* Other: binding notes, fees, live balance. */}
+          <div data-testid="bot-panel-other" className={TAB_PANEL_CLASS} style={panelHidden('other')}>
+            <p className="text-xs text-[var(--text-secondary)]">{t('mobile.me.botModelBindingNote')}</p>
+            <p className="text-xs text-[var(--text-secondary)]">{t('mobile.me.botFeeHint')}</p>
+            <p className="text-xs text-[var(--text-secondary)]" data-testid="bot-balance-hint">
+              {balance.loading
+                ? t('mobile.common.loading')
+                : balance.error
+                  ? t('mobile.me.botBalanceUnavailable')
+                  : t('mobile.me.botBalance', { balance: balance.value ?? '' })}
+            </p>
+            {props.catalogError ? <p className="text-xs text-red-600">{props.catalogError}</p> : null}
+          </div>
+        </>
+      )}
 
       {busy ? (
         <p className="rounded-xl bg-[var(--bg-main)] p-3 text-sm text-[var(--text-secondary)]" data-testid="bot-create-progress" aria-live="polite">

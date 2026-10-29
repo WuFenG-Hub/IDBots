@@ -110,9 +110,13 @@ test.describe('gateway account and daily use', () => {
     try {
       await page.goto('/app/');
       await page.getByRole('button', { name: 'Me', exact: true }).click();
+      // A6: memory toggles live on the memory page, language/theme on general.
+      await page.getByTestId('me-entry-memory').click();
       const memory = page.getByRole('switch', { name: 'Enable memory' });
       await memory.click();
       await expect(memory).toHaveAttribute('aria-checked', 'false');
+      await page.getByTestId('me-secondary-back').click();
+      await page.getByTestId('me-entry-general').click();
       await page.getByRole('button', { name: 'Dark', exact: true }).click();
       await expect(page.locator('html')).toHaveClass(/dark/);
       await page.getByRole('button', { name: '中文', exact: true }).click();
@@ -120,7 +124,10 @@ test.describe('gateway account and daily use', () => {
 
       await page.reload();
       await page.getByRole('button', { name: '我的', exact: true }).click();
+      await page.getByTestId('me-entry-general').click();
       await expect(page.getByText('语言', { exact: true })).toBeVisible();
+      await page.getByTestId('me-secondary-back').click();
+      await page.getByTestId('me-entry-memory').click();
       await expect(page.getByRole('switch', { name: '启用记忆' })).toHaveAttribute('aria-checked', 'false');
       await expect(page.locator('html')).toHaveClass(/dark/);
       const config = await page.evaluate(async () => {

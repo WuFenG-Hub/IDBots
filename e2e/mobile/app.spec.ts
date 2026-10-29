@@ -49,7 +49,14 @@ test.describe('app shell', () => {
     await expect(page.getByText('Scheduled tasks').first()).toBeVisible();
     await page.getByRole('button', { name: 'Chat' }).click();
     await page.getByRole('button', { name: 'Sessions' }).click();
-    await page.getByRole('button', { name: 'New chat' }).click();
+    // A3 rework: "New chat" opens the Bot picker first — a conversation
+    // starts FOR a specific MetaBot (avatar visible in the picker).
+    await page.getByTestId('session-new-chat').click();
+    const picker = page.getByTestId('bot-picker-list');
+    await expect(picker).toBeVisible();
+    await expect(picker.getByTestId(/bot-picker-avatar-/).first()).toBeVisible();
+    await picker.getByRole('button').first().click();
+    await expect(picker).toBeHidden();
     await page.getByPlaceholder('Type a message…').fill('unsent recovery draft');
     await page.reload();
     await expect(page.getByPlaceholder('Type a message…')).toHaveValue('unsent recovery draft');

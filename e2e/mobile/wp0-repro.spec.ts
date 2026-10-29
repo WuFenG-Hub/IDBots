@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures';
+import { test, expect, startNewChatViaPicker } from './fixtures';
 
 type Wp0Message = { id: string; type: string; content: string; timestamp: number; metadata?: Record<string, unknown> };
 type Wp0Window = Window & {
@@ -58,7 +58,7 @@ async function currentSessionId(page: import('@playwright/test').Page): Promise<
 
 async function startNewChat(page: import('@playwright/test').Page): Promise<void> {
   await page.getByRole('button', { name: 'Sessions' }).click();
-  await page.getByRole('button', { name: 'New chat' }).click();
+  await startNewChatViaPicker(page);
 }
 
 async function sendMessage(page: import('@playwright/test').Page, text: string): Promise<void> {

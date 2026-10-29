@@ -78,6 +78,14 @@ export interface MetabotFallbackInput {
 export type MockSkill = NonNullable<Awaited<ReturnType<SkillsChannelAPI['list']>>['skills']>[number];
 /** traffic:redeemCode success payload (TrafficRedeemCodeInfo). */
 export type TrafficRedeemResult = NonNullable<Awaited<ReturnType<TrafficChannelAPI['redeemCode']>>['result']>;
+/** traffic ledger row (TrafficLedgerEntryInfo) — A6 traffic page. */
+export type TrafficLedgerEntryInfo = NonNullable<
+  Awaited<ReturnType<TrafficChannelAPI['getLedger']>>['entries']
+>[number];
+/** traffic daily usage row (TrafficDailyUsageRowInfo) — A6 traffic page. */
+export type TrafficDailyUsageRowInfo = NonNullable<
+  Awaited<ReturnType<TrafficChannelAPI['getDailyUsage']>>['rows']
+>[number];
 
 /** Cowork session/message projections the chat screen hydrates from. */
 export type CoworkChannelAPI = Window['electron']['cowork'];

@@ -3,7 +3,8 @@ import { PencilSquareIcon, PlusIcon } from '@heroicons/react/24/outline';
 import { t } from '../../i18n';
 import type { MobileMetabot } from '../../bridge/types';
 import { useMetabots, type BotOperationResult } from '../hooks/useMetabots';
-import { sortBotsForList, avatarInitial } from '../botList';
+import { sortBotsForList } from '../botList';
+import { BotAvatar } from './BotAvatar';
 import { BotEditorForm, type EditorBrainOption } from './BotEditorForm';
 import { BottomSheet } from './BottomSheet';
 import { Section } from './Section';
@@ -69,22 +70,7 @@ export function BotManagementSection(): JSX.Element {
         return (
           <div key={bot.id} className="border-b border-[var(--border-color)] py-3 last:border-b-0" data-testid={`bot-row-${bot.id}`}>
             <div className="flex min-h-[44px] items-center gap-2">
-              {bot.avatar ? (
-                <img
-                  src={bot.avatar}
-                  alt=""
-                  data-testid={`bot-avatar-${bot.id}`}
-                  className="h-10 w-10 shrink-0 rounded-full border border-[var(--border-color)] object-cover"
-                />
-              ) : (
-                <span
-                  data-testid={`bot-avatar-${bot.id}`}
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--border-color)] bg-[var(--bg-main)] text-base font-semibold text-[var(--text-secondary)]"
-                  aria-hidden
-                >
-                  {avatarInitial(bot.name)}
-                </span>
-              )}
+              <BotAvatar name={bot.name} avatar={bot.avatar} testId={`bot-avatar-${bot.id}`} />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-[15px] text-[var(--text-primary)]">
                   {bot.name}

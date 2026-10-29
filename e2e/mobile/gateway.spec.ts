@@ -24,7 +24,9 @@ async function screenTo(page: import('@playwright/test').Page, testInfo: import(
 
 async function startNewChat(page: import('@playwright/test').Page): Promise<void> {
   await page.getByRole('button', { name: 'Sessions' }).click();
-  await page.getByRole('button', { name: 'New chat' }).click();
+  // A3 rework: New chat opens the Bot picker; pick the first (Twin-first).
+  await page.getByTestId('session-new-chat').click();
+  await page.getByTestId('bot-picker-list').getByRole('button').first().click();
 }
 
 test.describe('gateway-backed smoke', () => {

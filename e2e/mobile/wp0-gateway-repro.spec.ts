@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures';
+import { test, expect, startNewChatViaPicker } from './fixtures';
 
 const isGatewayRun = Boolean(process.env.E2E_GATEWAY);
 const RECOVERY_READY_TIMEOUT_MS = 5_000;
@@ -9,7 +9,7 @@ test.describe('WP1 gateway regressions', () => {
   test('running session is restored after full reload @gateway', async ({ page }) => {
     await page.goto('/app/');
     await page.getByRole('button', { name: 'Sessions' }).click();
-    await page.getByRole('button', { name: 'New chat' }).click();
+    await startNewChatViaPicker(page);
     await page.getByPlaceholder('Type a message…').fill('restore this running session');
     await page.getByRole('button', { name: 'Send' }).click();
     await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
@@ -29,7 +29,7 @@ test.describe('WP1 gateway regressions', () => {
     await expect(page.getByText('Scheduled tasks').first()).toBeVisible();
     await page.getByRole('button', { name: 'Chat' }).click();
     await page.getByRole('button', { name: 'Sessions' }).click();
-    await page.getByRole('button', { name: 'New chat' }).click();
+    await startNewChatViaPicker(page);
     await page.getByPlaceholder('Type a message…').fill('unsent gateway draft');
     await page.reload();
     await expect(page.getByPlaceholder('Type a message…')).toHaveValue('unsent gateway draft');

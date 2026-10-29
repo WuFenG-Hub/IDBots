@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures';
+import { test, expect, startNewChatViaPicker } from './fixtures';
 
 type PermissionWindow = Window & {
   electron: { cowork: Record<string, (...args: unknown[]) => unknown> };
@@ -39,7 +39,7 @@ async function startSession(page: import('@playwright/test').Page): Promise<stri
     };
   });
   await page.getByRole('button', { name: 'Sessions' }).click();
-  await page.getByRole('button', { name: 'New chat' }).click();
+  await startNewChatViaPicker(page);
   await page.getByPlaceholder('Type a message…').fill('start the clarification test');
   await page.getByRole('button', { name: 'Send' }).click();
   await page.waitForFunction(() => Boolean((window as unknown as PermissionWindow).__sessionId));

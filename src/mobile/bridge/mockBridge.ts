@@ -1080,8 +1080,7 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       grantedBytesTotal: 1024 * 1024 * 1024,
       spentBytesTotal: 524 * 1024 * 1024,
       status: 1,
-    },
-    llm: {
+    },    llm: {
       quotaTotal: 2_000_000,
       quotaUsed: 350_000,
       quotaRemaining: 1_650_000,
@@ -1090,6 +1089,56 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       unit: 'tokens',
     },
   };
+
+  /**
+   * A6 mock identity row (IA-PLAN §5): mutable so the profile page's
+   * updateName round-trips through get() like the real channel does.
+   */
+  const mockIdentity = {
+    id: 1,
+    path: "m/44'/10001'/0'/0/0",
+    mvc_address: 'mock-mvc-address',
+    btc_address: 'mock-btc-address',
+    doge_address: 'mock-doge-address',
+    public_key: 'mock-public-key',
+    chat_public_key: 'mock-chat-public-key',
+    chat_public_key_pin_id: null,
+    metaid: 'mock-metaid',
+    globalmetaid: 'idq1mock0user0meta0id000000000000000000',
+    name: 'Mock User',
+    avatar: null,
+    subsidy_state: 'claimed',
+    subsidy_error: null,
+    name_pin_id: null,
+    avatar_pin_id: null,
+    sync_state: 'synced',
+    sync_error: null,
+    created_at: bootAt,
+    updated_at: bootAt,
+  };
+
+  // Traffic page fixtures (A6, IA-PLAN §4.4): ledger pages, usage summary,
+  // daily usage rows, and a once-only free grant. Amounts mirror the meter
+  // fixture scale so the pages read plausibly in e2e.
+  const FREE_GRANT_BYTES = 10 * 1_000_000; // desktop DEFAULT_FREE_GRANT_BYTES parity
+  let freeGrantClaimed = false;
+  const ledgerPageBytes = (page: number): number[] =>
+    Array.from({ length: page === 0 ? 20 : 6 }, (_, index) => (index + 1) * (1024 * 1024) + page);
+  const makeLedgerEntries = (page: number, baseId: number) =>
+    ledgerPageBytes(page).map((amountBytes, index) => ({
+      id: baseId + index,
+      direction: index % 2 === 0 ? 1 : -1,
+      amountBytes,
+      balanceAfter: meters.traffic.balanceBytes,
+      sourceType: index % 2 === 0 ? 'grant' : 'usage',
+      sourceId: `mock-ledger-${baseId + index}`,
+      remark: index % 2 === 0 ? 'Mock grant' : 'Mock usage',
+      timestamp: bootAt - (baseId + index) * 60_000,
+    }));
+  const ledgerEntries: ReturnType<typeof makeLedgerEntries> = [
+    ...makeLedgerEntries(0, 100),
+    ...makeLedgerEntries(1, 200),
+  ];
 
   const bundleImpl: BundleChannelAPI = {
     getPlans: () =>
@@ -1356,6 +1405,11 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
           if (input.fallback_llm_provider !== undefined) bot.fallback_llm_provider = input.fallback_llm_provider ?? null;
           if (input.fallback_llm_effort !== undefined) bot.fallback_llm_effort = input.fallback_llm_effort ?? null;
           if (input.allow_chat_skills !== undefined) bot.allow_chat_skills = [...input.allow_chat_skills];
+          // A2A chat settings — the real metabot:update handler persists
+          // these; keep mock parity (UE rework 2026-10-29, A5).
+          if (input.a2a_auto_reply_enabled !== undefined) bot.a2a_auto_reply_enabled = input.a2a_auto_reply_enabled;
+          if (input.a2a_max_incoming_turns !== undefined) bot.a2a_max_incoming_turns = input.a2a_max_incoming_turns;
+          if (input.a2a_bye_cooldown_ms !== undefined) bot.a2a_bye_cooldown_ms = input.a2a_bye_cooldown_ms;
           if (typeof input.enabled === 'boolean') bot.enabled = input.enabled;
         }
         bot.metabot_info_pinid = bot.metabot_info_pinid ?? `mock-info-${bot.id}`;
@@ -1561,28 +1615,30 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
       get: () =>
         guardOnline(async () => ({
           success: true,
-          identity: {
-            id: 1,
-            path: "m/44'/10001'/0'/0/0",
-            mvc_address: 'mock-mvc-address',
-            btc_address: 'mock-btc-address',
-            doge_address: 'mock-doge-address',
-            public_key: 'mock-public-key',
-            chat_public_key: 'mock-chat-public-key',
-            chat_public_key_pin_id: null,
-            metaid: 'mock-metaid',
-            globalmetaid: 'mock-globalmetaid',
-            name: 'Mock User',
-            avatar: null,
-            subsidy_state: 'claimed',
-            subsidy_error: null,
-            name_pin_id: null,
-            avatar_pin_id: null,
-            sync_state: 'synced',
-            sync_error: null,
-            created_at: bootAt,
-            updated_at: bootAt,
-          },
+          identity: { ...mockIdentity },
+        })),
+      // A6 mock parity (IA-PLAN §5): the profile page drives updateName and
+      // the two retry channels; all three are in the real IPC contract.
+      updateName: (input: { name: string }) =>
+        guardOnline(async () => {
+          const name = typeof input?.name === 'string' ? input.name.trim() : '';
+          if (!name) return { success: false, error: 'name is required' };
+          mockIdentity.name = name;
+          mockIdentity.updated_at = now();
+          return { success: true, identity: { ...mockIdentity }, chainSync: { success: true, txids: [`mock-name-${now()}`] } };
+        }),
+      retrySubsidy: () =>
+        guardOnline(async () => ({
+          success: true,
+          identity: { ...mockIdentity },
+          subsidy: { success: true },
+        })),
+      retryChainSync: () =>
+        guardOnline(async () => ({
+          success: true,
+          identity: { ...mockIdentity },
+          subsidy: { success: true },
+          chainSync: { success: true, txids: [`mock-sync-${now()}`] },
         })),
     },
     skills: {
@@ -1605,6 +1661,50 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
     traffic: {
       getBalance: () =>
         guardOnline(async () => ({ success: true, balance: { ...meters.traffic } })),
+      // A6 mock parity (IA-PLAN §4.4): ledger / usage / free-grant channels
+      // for the traffic secondary page; all in the real IPC contract.
+      getLedger: (input?: { cursor?: number; limit?: number; direction?: number }) =>
+        guardOnline(async () => {
+          const cursor = typeof input?.cursor === 'number' && input.cursor >= 0 ? input.cursor : 0;
+          const limit = typeof input?.limit === 'number' && input.limit > 0 ? Math.min(input.limit, 100) : 20;
+          const slice = ledgerEntries.slice(cursor, cursor + limit);
+          const next = cursor + slice.length;
+          return {
+            success: true,
+            entries: slice.map((entry) => ({ ...entry })),
+            nextCursor: next < ledgerEntries.length ? next : undefined,
+          };
+        }),
+      getUsageSummary: () =>
+        guardOnline(async () => ({
+          success: true,
+          summary: {
+            todayBytes: 3 * 1024 * 1024,
+            weekBytes: 21 * 1024 * 1024,
+            monthBytes: 66 * 1024 * 1024,
+          },
+        })),
+      getDailyUsage: () =>
+        guardOnline(async () => ({
+          success: true,
+          rows: [
+            { date: '2026-10-29', botAddress: 'mock-twin-address', bytes: 2 * 1024 * 1024, txCount: 12 },
+            { date: '2026-10-28', botAddress: 'mock-worker-address', bytes: 1024 * 1024, txCount: 5 },
+          ],
+        })),
+      claimFreeGrant: () =>
+        guardOnline(async () => {
+          if (freeGrantClaimed) {
+            return { success: false, error: 'free grant already claimed', errorCode: 'FREE_GRANT_ALREADY_CLAIMED' };
+          }
+          freeGrantClaimed = true;
+          meters.traffic.balanceBytes += FREE_GRANT_BYTES;
+          meters.traffic.grantedBytesTotal += FREE_GRANT_BYTES;
+          return {
+            success: true,
+            claim: { grantId: 1, grantBytes: FREE_GRANT_BYTES, balanceAfter: meters.traffic.balanceBytes },
+          };
+        }),
       redeemCode: (input: { code: string }) =>
         guardOnline(async () => {
           const code = typeof input?.code === 'string' ? input.code.trim() : '';
