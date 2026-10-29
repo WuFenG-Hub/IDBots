@@ -8,7 +8,10 @@ export interface MobileBotInput {
   name: string;
   role: string;
   soul: string;
+  goal: string;
   bio: string;
+  /** Editor-state avatar; undefined = untouched, null = explicitly removed. */
+  avatar?: string | null;
   llmId: string;
   llmProvider: string;
   llmEffort: string | null;
@@ -17,6 +20,10 @@ export interface MobileBotInput {
   fallbackLlmProvider: string;
   fallbackLlmEffort: string | null;
   allowChatSkills: string[];
+  /** A2A chat settings, aligned with the desktop Chat Settings tab. */
+  a2aAutoReply: boolean;
+  a2aMaxIncomingTurns: number;
+  a2aByeCooldownMs: number;
 }
 
 export interface BotOperationResult {
@@ -93,6 +100,7 @@ export function useMetabots(): {
         metabot_type: 'worker',
         role: input.role,
         soul: input.soul,
+        goal: input.goal || null,
         bio: input.bio,
         llm_id: input.llmId,
         llm_provider: input.llmProvider || null,
@@ -123,8 +131,13 @@ export function useMetabots(): {
     try {
       const result = await getMobileElectron().metabot.update(id, {
         name: input.name,
+        // undefined keys are dropped by the gateway's JSON frame, so an
+        // untouched avatar (undefined) never reaches the handler, while an
+        // explicit null removes it — matching metabot:update semantics.
+        avatar: input.avatar,
         role: input.role,
         soul: input.soul,
+        goal: input.goal || null,
         bio: input.bio,
         llm_id: input.llmId,
         llm_provider: input.llmProvider || null,
@@ -133,6 +146,9 @@ export function useMetabots(): {
         fallback_llm_provider: input.fallbackLlmProvider || null,
         fallback_llm_effort: input.fallbackLlmEffort,
         allow_chat_skills: input.allowChatSkills,
+        a2a_auto_reply_enabled: input.a2aAutoReply,
+        a2a_max_incoming_turns: input.a2aMaxIncomingTurns,
+        a2a_bye_cooldown_ms: input.a2aByeCooldownMs,
       });
       await reload();
       if (!result?.metabot) return { state: 'failed', message: result?.error || 'Bot update failed' };

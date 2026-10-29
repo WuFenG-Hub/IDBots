@@ -1356,6 +1356,11 @@ export function createMobileMockBridge(options: MockBridgeOptions = {}): MobileM
           if (input.fallback_llm_provider !== undefined) bot.fallback_llm_provider = input.fallback_llm_provider ?? null;
           if (input.fallback_llm_effort !== undefined) bot.fallback_llm_effort = input.fallback_llm_effort ?? null;
           if (input.allow_chat_skills !== undefined) bot.allow_chat_skills = [...input.allow_chat_skills];
+          // A2A chat settings — the real metabot:update handler persists
+          // these; keep mock parity (UE rework 2026-10-29, A5).
+          if (input.a2a_auto_reply_enabled !== undefined) bot.a2a_auto_reply_enabled = input.a2a_auto_reply_enabled;
+          if (input.a2a_max_incoming_turns !== undefined) bot.a2a_max_incoming_turns = input.a2a_max_incoming_turns;
+          if (input.a2a_bye_cooldown_ms !== undefined) bot.a2a_bye_cooldown_ms = input.a2a_bye_cooldown_ms;
           if (typeof input.enabled === 'boolean') bot.enabled = input.enabled;
         }
         bot.metabot_info_pinid = bot.metabot_info_pinid ?? `mock-info-${bot.id}`;

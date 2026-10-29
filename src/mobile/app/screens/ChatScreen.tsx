@@ -11,12 +11,22 @@ import type { useChat } from '../hooks/useChat';
 import type { ChatMessageView } from '../chatProjection';
 import { useKeyboardInset } from '../hooks/useKeyboardInset';
 import { BottomSheet } from '../components/BottomSheet';
+import { BotAvatar } from '../components/BotAvatar';
+import { groupSessionsByDay, resolveSessionBot } from '../sessionList';
+import { sortBotsForList } from '../botList';
 
 type Chat = ReturnType<typeof useChat>;
 
-function SessionDrawer(props: { chat: Chat; open: boolean; onClose: () => void }): JSX.Element | null {
-  const { chat } = props;
+const GROUP_LABEL_KEYS = {
+  today: 'mobile.chat.group.today',
+  yesterday: 'mobile.chat.group.yesterday',
+  earlier: 'mobile.chat.group.earlier',
+} as const;
+
+function SessionDrawer(props: { chat: Chat; bots: MockMetabot[]; open: boolean; onPickBot: () => void; onClose: () => void }): JSX.Element | null {
+  const { chat, bots } = props;
   if (!props.open) return null;
+  const groups = groupSessionsByDay(chat.sessions);
   return (
     <div className="fixed inset-0 z-30">
       <button type="button" aria-label={t('mobile.common.close')} className="absolute inset-0 bg-black/40" onClick={props.onClose} tabIndex={-1} />
@@ -26,9 +36,9 @@ function SessionDrawer(props: { chat: Chat; open: boolean; onClose: () => void }
           <button
             type="button"
             onClick={() => {
-              chat.newChat();
-              props.onClose();
+              props.onPickBot();
             }}
+            data-testid="session-new-chat"
             className="flex min-h-[44px] items-center gap-1 px-2 text-sm text-[var(--text-secondary)] active:text-[var(--text-primary)]"
           >
             <PlusIcon className="h-4 w-4" aria-hidden />
@@ -36,31 +46,90 @@ function SessionDrawer(props: { chat: Chat; open: boolean; onClose: () => void }
           </button>
         </div>
         <div className="flex-1 overflow-y-auto" data-testid="session-drawer-list">
-          {chat.sessions.length === 0 ? (
+          {groups.length === 0 ? (
             <p className="px-4 py-6 text-sm text-[var(--text-secondary)]">{t('mobile.chat.drawerEmpty')}</p>
           ) : (
-            chat.sessions.map((session) => (
-              <button
-                key={session.id}
-                type="button"
-                onClick={() => {
-                  void chat.openSession(session.id);
-                  props.onClose();
-                }}
-                className={`block w-full min-h-[44px] border-b border-[var(--border-color)] px-4 py-3 text-left text-sm active:bg-[var(--bg-hover)] ${
-                  session.id === chat.sessionId ? 'bg-[var(--bg-hover)]' : ''
-                }`}
-              >
-                <span className="flex items-center gap-2">
-                  {session.status === 'running' ? <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--color-primary)]" aria-hidden /> : null}
-                  <span className="truncate text-[var(--text-primary)]">{session.title}</span>
-                </span>
-              </button>
+            groups.map((group) => (
+              <section key={group.key}>
+                <p
+                  className="sticky top-0 bg-[var(--bg-panel)] px-4 py-1.5 text-xs font-medium text-[var(--text-secondary)]"
+                  data-testid={`session-group-${group.key}`}
+                >
+                  {t(GROUP_LABEL_KEYS[group.key])}
+                </p>
+                {group.sessions.map((session) => {
+                  const bot = resolveSessionBot(chat.sessions, session.id, null, bots);
+                  return (
+                    <button
+                      key={session.id}
+                      type="button"
+                      onClick={() => {
+                        void chat.openSession(session.id);
+                        props.onClose();
+                      }}
+                      className={`block w-full min-h-[52px] border-b border-[var(--border-color)] px-4 py-2 text-left text-sm active:bg-[var(--bg-hover)] ${
+                        session.id === chat.sessionId ? 'bg-[var(--bg-hover)]' : ''
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <BotAvatar name={bot.name} avatar={bot.avatar} size={32} testId={`session-bot-avatar-${session.id}`} />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center gap-2">
+                            {session.status === 'running' ? <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--color-primary)]" aria-hidden /> : null}
+                            <span className="truncate text-[var(--text-primary)]">{session.title}</span>
+                          </span>
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </section>
             ))
           )}
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * New-chat Bot picker (UE rework 2026-10-29, A3): a conversation is started
+ * FOR a specific MetaBot, so the picker is the only place a Bot is chosen —
+ * aligned with the desktop "start a conversation" flow. Rows carry the Bot
+ * avatar; the Twin ranks first (shared sortBotsForList order).
+ */
+function BotPickerSheet(props: { chat: Chat; bots: MockMetabot[]; open: boolean; onClose: () => void }): JSX.Element | null {
+  const { chat } = props;
+  if (!props.open) return null;
+  const sorted = sortBotsForList(props.bots);
+  return (
+    <BottomSheet title={t('mobile.chat.pickBotTitle')} onClose={props.onClose}>
+      <p className="text-xs text-[var(--text-secondary)]">{t('mobile.chat.pickBotHint')}</p>
+      <div className="mt-2 flex flex-col" data-testid="bot-picker-list">
+        {sorted.map((bot) => (
+          <button
+            key={bot.id}
+            type="button"
+            data-testid={`bot-picker-option-${bot.id}`}
+            onClick={() => {
+              chat.setMetabotId(bot.id);
+              chat.newChat();
+              props.onClose();
+            }}
+            className="flex min-h-[56px] items-center gap-3 border-b border-[var(--border-color)] px-1 py-2 text-left last:border-b-0 active:bg-[var(--bg-hover)]"
+          >
+            <BotAvatar name={bot.name} avatar={bot.avatar} testId={`bot-picker-avatar-${bot.id}`} />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[15px] text-[var(--text-primary)]">{bot.name}</span>
+              {bot.role ? <span className="block truncate text-xs text-[var(--text-secondary)]">{bot.role}</span> : null}
+            </span>
+            {bot.metabot_type === 'twin' ? (
+              <span className="shrink-0 text-xs text-[var(--color-primary)]">{t('mobile.me.botType.twin')}</span>
+            ) : null}
+          </button>
+        ))}
+      </div>
+    </BottomSheet>
   );
 }
 
@@ -200,9 +269,11 @@ export default function ChatScreen(props: {
 }): JSX.Element {
   const { chat, bots } = props;
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const keyboardInset = useKeyboardInset();
+  const headerBot = resolveSessionBot(chat.sessions, chat.sessionId, chat.metabotId, bots);
   const draft = chat.draft ?? '';
   const attachments = chat.attachments ?? [];
   const openPreview = useCallback((filePath: string): boolean => {
@@ -237,30 +308,18 @@ export default function ChatScreen(props: {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/* A2 (UE rework 2026-10-29): the in-conversation MetaBot switcher tab
+          strip is gone — a conversation belongs to exactly one Bot, so the
+          header is just that Bot's avatar next to the title. Bots are chosen
+          when STARTING a conversation (drawer → New chat → picker). */}
       <div className="flex items-center gap-2 border-b border-[var(--border-color)] bg-[var(--bg-panel)] px-2 py-1.5">
         <button type="button" onClick={() => setDrawerOpen(true)} aria-label={t('mobile.chat.drawerTitle')} className="flex min-h-[44px] min-w-[44px] items-center justify-center text-[var(--text-primary)] active:bg-[var(--bg-hover)]">
           <Bars3Icon className="h-6 w-6" aria-hidden />
         </button>
-        <h1 className="min-w-0 flex-1 truncate text-base font-semibold text-[var(--text-primary)]">
+        <BotAvatar name={headerBot.name} avatar={headerBot.avatar} size={32} testId="chat-header-avatar" />
+        <h1 className="min-w-0 flex-1 truncate text-base font-semibold text-[var(--text-primary)]" data-testid="chat-header-title">
           {chat.sessionTitle ?? t('mobile.chat.title')}
         </h1>
-      </div>
-
-      <div className="flex gap-2 overflow-x-auto border-b border-[var(--border-color)] bg-[var(--bg-panel)] px-3 py-2" aria-label={t('mobile.chat.switcherLabel')}>
-        {bots.map((bot) => (
-          <button
-            key={bot.id}
-            type="button"
-            onClick={() => chat.setMetabotId(bot.id)}
-            className={`min-h-[36px] shrink-0 rounded-full border px-3 text-sm ${
-              chat.metabotId === bot.id
-                ? 'border-[var(--color-primary)] bg-[var(--color-primary)] text-black'
-                : 'border-[var(--border-color)] text-[var(--text-secondary)]'
-            }`}
-          >
-            {bot.name}
-          </button>
-        ))}
       </div>
 
       {props.botsError ? (
@@ -368,7 +427,22 @@ export default function ChatScreen(props: {
         </div>
       </div>
 
-      <SessionDrawer chat={chat} open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+      <SessionDrawer
+        chat={chat}
+        bots={bots}
+        open={drawerOpen}
+        onPickBot={() => {
+          setDrawerOpen(false);
+          setPickerOpen(true);
+        }}
+        onClose={() => setDrawerOpen(false)}
+      />
+      <BotPickerSheet
+        chat={chat}
+        bots={bots}
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+      />
       {previewPath ? (
         <MobileArtifactPreview key={previewPath} path={previewPath} onClose={() => setPreviewPath(null)} />
       ) : null}

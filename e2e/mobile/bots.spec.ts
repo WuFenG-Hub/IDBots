@@ -14,21 +14,11 @@ test.describe('Bot lifecycle and configuration', () => {
     await openMe(page);
     await page.getByTestId('bot-create').click();
     const form = page.getByTestId('bot-form');
+    // A5 rework: create mode is name+role ONLY — no tabs, no advanced area.
+    await expect(form.getByTestId('bot-advanced-toggle')).toHaveCount(0);
+    await expect(form.getByTestId('bot-tab-basic')).toHaveCount(0);
     await form.getByLabel('Name').fill('WP3 Worker');
     await form.getByLabel('Role').fill('Research worker');
-    // Create mode: non-required fields live behind the Advanced section.
-    await form.getByTestId('bot-advanced-toggle').click();
-    await form.getByTestId('bot-tab-basic').click();
-    await form.getByLabel('Persona (soul)').fill('Careful and concise');
-    await form.getByLabel('Bio').fill('Created through the shared on-chain flow');
-    await form.getByTestId('bot-tab-model').click();
-    await form.getByLabel('Default model').selectOption({ label: 'IDBots-Free · GLM Flash' });
-    await form.getByLabel('Reasoning effort', { exact: true }).first().selectOption('high');
-    // Skills start collapsed (UX batch rule); expand before selecting.
-    await form.getByTestId('bot-tab-skills').click();
-    await expect(form.getByTestId('bot-skills-toggle')).toHaveAttribute('aria-expanded', 'false');
-    await form.getByTestId('bot-skills-toggle').click();
-    await form.getByLabel('web-search').check();
     await form.getByTestId('bot-save').click();
 
     const row = botRow(page, 'WP3 Worker');
@@ -38,28 +28,43 @@ test.describe('Bot lifecycle and configuration', () => {
     await expect(row.getByTestId(/bot-avatar-/)).toBeVisible();
     await attachScreen(testInfo, page, 'bot-created-on-chain');
 
+    // Edit mode: everything else is completed here (desktop-aligned tabs).
     await row.getByRole('button', { name: 'Edit · WP3 Worker' }).click();
     const editForm = page.getByTestId('bot-form');
-    // Edit mode: Basic tab first, four-tab layout with role wiring.
     await expect(editForm.getByTestId('bot-tab-basic')).toHaveAttribute('aria-selected', 'true');
-    await expect(editForm.getByTestId('bot-tab-model')).toBeVisible();
-    await expect(editForm.getByTestId('bot-tab-skills')).toBeVisible();
-    await expect(editForm.getByTestId('bot-tab-other')).toBeVisible();
-    await editForm.getByLabel('Role').fill('Updated research worker');
+    for (const tab of ['persona', 'model', 'chatSettings', 'other']) {
+      await expect(editForm.getByTestId(`bot-tab-${tab}`)).toBeVisible();
+    }
+    await editForm.getByTestId('bot-tab-basic').click();
+    await editForm.getByLabel('Bio').fill('Created through the shared on-chain flow');
+    await editForm.getByTestId('bot-tab-persona').click();
+    await editForm.getByLabel('Persona (soul)').fill('Careful and concise');
     await editForm.getByTestId('bot-tab-model').click();
-    await expect(editForm.getByLabel('Fallback model')).toBeVisible();
-    await editForm.getByTestId('bot-tab-skills').click();
+    await editForm.getByLabel('Default model').selectOption({ label: 'IDBots-Free · GLM Flash' });
+    await editForm.getByLabel('Reasoning effort', { exact: true }).first().selectOption('high');
+    await editForm.getByTestId('bot-tab-chatSettings').click();
+    await expect(editForm.getByTestId('bot-skills-toggle')).toHaveAttribute('aria-expanded', 'false');
     await editForm.getByTestId('bot-skills-toggle').click();
-    await editForm.getByLabel('memory').check();
+    await editForm.getByLabel('web-search').check();
+    // A2A chat settings (desktop Chat Settings parity).
+    await editForm.getByTestId('bot-a2a-auto-reply').uncheck();
+    await editForm.getByTestId('bot-a2a-max-turns').selectOption('80');
+    await editForm.getByTestId('bot-a2a-bye-cooldown').selectOption({ label: '10 min' });
     await editForm.getByTestId('bot-save').click();
     await expect(page.getByText('Bot updated', { exact: true })).toBeVisible();
 
+    // Re-open: everything saved through the desktop-aligned tabs persists.
     await row.getByRole('button', { name: 'Edit · WP3 Worker' }).click();
-    await expect(page.getByTestId('bot-form').getByLabel('Role')).toHaveValue('Updated research worker');
-    await page.getByTestId('bot-form').getByTestId('bot-tab-skills').click();
-    await page.getByTestId('bot-form').getByTestId('bot-skills-toggle').click();
-    await expect(page.getByTestId('bot-form').getByLabel('web-search')).toBeChecked();
-    await expect(page.getByTestId('bot-form').getByLabel('memory')).toBeChecked();
+    const reopenForm = page.getByTestId('bot-form');
+    await expect(reopenForm.getByLabel('Role')).toHaveValue('Research worker');
+    await reopenForm.getByTestId('bot-tab-persona').click();
+    await expect(reopenForm.getByLabel('Persona (soul)')).toHaveValue('Careful and concise');
+    await reopenForm.getByTestId('bot-tab-chatSettings').click();
+    await reopenForm.getByTestId('bot-skills-toggle').click();
+    await expect(reopenForm.getByLabel('web-search')).toBeChecked();
+    await expect(reopenForm.getByTestId('bot-a2a-auto-reply')).not.toBeChecked();
+    await expect(reopenForm.getByTestId('bot-a2a-max-turns')).toHaveValue('80');
+    await expect(reopenForm.getByTestId('bot-a2a-bye-cooldown')).toContainText('10 min');
     await page.getByRole('button', { name: '✕', exact: true }).click();
 
     const enabled = row.getByRole('switch');
@@ -112,10 +117,6 @@ test.describe('Bot lifecycle and configuration', () => {
     const form = page.getByTestId('bot-form');
     await form.getByLabel('Name').fill('WP3 Pending');
     await form.getByLabel('Role').fill('Pending worker');
-    await form.getByTestId('bot-advanced-toggle').click();
-    await form.getByTestId('bot-tab-skills').click();
-    await form.getByTestId('bot-skills-toggle').click();
-    await form.getByLabel('web-search').check();
     await form.getByTestId('bot-save').click();
     await expect(page.getByTestId('bot-operation-result')).toHaveAttribute('data-state', 'local');
     await expect(form).toBeVisible();
@@ -127,6 +128,11 @@ test.describe('Bot lifecycle and configuration', () => {
     await row.getByRole('button', { name: 'Resume subsidy & publish' }).click();
     await expect(row.locator('[data-testid^="bot-chain-"]')).toHaveAttribute('data-state', 'synced');
     await expect(page.getByText('Chain state confirmed', { exact: true })).toBeVisible();
+    // Skills persist through the resume: the pending bot was saved with the
+    // default skill set (create is name+role only since the A5 rework).
+    await row.getByRole('button', { name: 'Edit · WP3 Pending' }).click();
+    await expect(page.getByTestId('bot-form').getByTestId('bot-skills-toggle')).toHaveAttribute('aria-expanded', 'false');
+    await page.getByRole('button', { name: '✕', exact: true }).click();
     expect(await page.evaluate(() => (window as unknown as { __botCreateCalls: number }).__botCreateCalls)).toBe(1);
     await attachScreen(testInfo, page, 'bot-resume-confirmed');
   });
@@ -135,10 +141,11 @@ test.describe('Bot lifecycle and configuration', () => {
     await openMe(page);
     await page.getByTestId('bot-create').click();
     const form = page.getByTestId('bot-form');
-    // Guidance copy is visible on the create sheet.
+    // Guidance copy is visible on the create sheet; the A5 rework removed
+    // the Advanced area entirely — only Name + Role exist at birth.
     await expect(form.getByTestId('bot-create-guide')).toContainText('Twin Bot');
-    // Advanced stays collapsed — only Name + Role are filled.
-    await expect(form.getByTestId('bot-advanced-toggle')).toHaveAttribute('aria-expanded', 'false');
+    await expect(form.getByTestId('bot-advanced-toggle')).toHaveCount(0);
+    await expect(form.getByTestId('bot-tab-basic')).toHaveCount(0);
     await form.getByLabel('Name').fill('Minimal Bot');
     await form.getByLabel('Role').fill('Starter helper');
     await form.getByTestId('bot-save').click();

@@ -1,4 +1,4 @@
-import { test, expect, attachScreen } from './fixtures';
+import { test, expect, attachScreen, startNewChatViaPicker } from './fixtures';
 
 /**
  * Chat tab (REQ-E-12): streamed reply, stop, the permission bottom sheet,
@@ -69,7 +69,7 @@ test.describe('chat', () => {
   test('multiple attachments survive reload and enter the final prompt in order', async ({ page }, testInfo) => {
     await page.goto('/app/');
     await page.getByRole('button', { name: 'Sessions' }).click();
-    await page.getByRole('button', { name: 'New chat' }).click();
+    await startNewChatViaPicker(page);
     await chooseFiles(page, [
       { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('notes') },
       { name: 'report.pdf', mimeType: 'application/pdf', buffer: Buffer.from('pdf') },
@@ -102,7 +102,7 @@ test.describe('chat', () => {
   test('removed pending uploads stay removed and typed errors preserve the text draft', async ({ page }) => {
     await page.goto('/app/');
     await page.getByRole('button', { name: 'Sessions' }).click();
-    await page.getByRole('button', { name: 'New chat' }).click();
+    await startNewChatViaPicker(page);
     await page.getByPlaceholder('Type a message…').fill('keep this draft');
     await chooseFiles(page, [{ name: 'fixture-slow.txt', mimeType: 'text/plain', buffer: Buffer.from('slow') }]);
     const pending = page.locator('[data-testid="chat-upload"][data-upload-status="uploading"]');

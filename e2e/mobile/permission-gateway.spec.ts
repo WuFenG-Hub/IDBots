@@ -1,4 +1,4 @@
-import { test, expect, attachScreen } from './fixtures';
+import { test, expect, attachScreen, startNewChatViaPicker } from './fixtures';
 
 /**
  * F-17a gateway regression (2026-10-28 阿燃 incident): a real ask_user_question
@@ -19,7 +19,7 @@ test.describe('gateway permission rendering (F-17a)', () => {
     await page.goto('/app/');
     await expect(page.getByRole('button', { name: 'Chat' })).toBeVisible();
     await page.getByRole('button', { name: 'Sessions' }).click();
-    await page.getByRole('button', { name: 'New chat' }).click();
+    await startNewChatViaPicker(page);
     await page.getByPlaceholder('Type a message…').fill('__f17a_emit_ask__');
     await page.getByRole('button', { name: 'Send' }).click();
 
