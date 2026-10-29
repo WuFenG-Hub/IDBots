@@ -4,6 +4,7 @@ const SECTION_DEFS = [
   { key: "nativeAssets", titleKey: "metabotWalletNativeAssets" },
   { key: "mrc20Assets", titleKey: "metabotWalletMrc20Assets" },
   { key: "mvcFtAssets", titleKey: "metabotWalletMvcFtAssets" },
+  { key: "mvcNftAssets", titleKey: "metabotWalletMvcNftAssets" },
 ];
 function toItems(value) {
   return Array.isArray(value) ? value : [];

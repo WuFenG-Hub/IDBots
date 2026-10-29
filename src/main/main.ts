@@ -168,6 +168,7 @@ import {
   type WalletQueryChain,
 } from './services/walletQueryService';
 import { executeWalletMvcTransfer } from './services/walletTransferService';
+import { executeMvcNftTransfer, executeMvcNftTrade, getMvcNftBalance, getMvcNftSellOrders } from './services/mvcNftService';
 import { BotWalletTransferStore } from './services/botWalletTransferStore';
 import {
   buildTokenTransferPreview as buildTokenTransferPreviewService,
@@ -7410,6 +7411,100 @@ const getCoworkRunner = () => {
         ),
         listTransfers: (limit, metabotId) =>
           getBotWalletTransferStore().list(limit, metabotId),
+        // wallet_nft_balance backend: structured MVC NFT holdings per local
+        // MetaBot address or raw address (wallet-api count/summary/utxo).
+        listMvcNfts: async (input) => {
+          const store = getMetabotStore();
+          const entries: Array<{ metabotId: number | null; address: string; error?: string }> = [];
+          for (const metabotId of input.metabotIds ?? []) {
+            const address = store.getMetabotById(metabotId)?.mvc_address ?? '';
+            entries.push(
+              address
+                ? { metabotId, address }
+                : { metabotId, address: '', error: 'local MetaBot not found or has no mvc address' },
+            );
+          }
+          if (input.address?.trim()) {
+            entries.push({ metabotId: null, address: input.address.trim() });
+          }
+          return await Promise.all(
+            entries.map(async (entry) => {
+              if (entry.error) return entry;
+              try {
+                return { ...entry, balance: await getMvcNftBalance(entry.address) };
+              } catch (error) {
+                return { ...entry, error: error instanceof Error ? error.message : String(error) };
+              }
+            }),
+          );
+        },
+        // wallet_nft_transfer backend: subprocess-signed NftManager transfer
+        // spending the session bot's OWN wallet; fee rate follows the global
+        // MVC tier like every other host transfer.
+        transferNft: (params) => withChainWriteBudget(
+          'wallet_nft_transfer',
+          () => executeMvcNftTransfer(getMetabotStore(), {
+            ...params,
+            feeRate: getGlobalFeeRate('mvc'),
+          }),
+        ),
+        // wallet_nft_sell backend: subprocess-signed NftManager sell listing
+        // the session bot's OWN token (two chained txs, see executeMvcNftTrade).
+        sellNft: (params) => withChainWriteBudget(
+          'wallet_nft_sell',
+          () => executeMvcNftTrade(getMetabotStore(), {
+            ...params,
+            action: 'sell',
+            feeRate: getGlobalFeeRate('mvc'),
+          }),
+        ),
+        // wallet_nft_cancel_sell backend: takes down the session bot's OWN
+        // open sell order (NFT returns to its wallet).
+        cancelNftSell: (params) => withChainWriteBudget(
+          'wallet_nft_cancel_sell',
+          () => executeMvcNftTrade(getMetabotStore(), {
+            ...params,
+            action: 'cancelSell',
+            feeRate: getGlobalFeeRate('mvc'),
+          }),
+        ),
+        // wallet_nft_buy backend: the session bot takes an on-chain sell
+        // order, paying the ask price + fees from its OWN wallet.
+        buyNft: (params) => withChainWriteBudget(
+          'wallet_nft_buy',
+          () => executeMvcNftTrade(getMetabotStore(), {
+            ...params,
+            action: 'buy',
+            feeRate: getGlobalFeeRate('mvc'),
+          }),
+        ),
+        // wallet_nft_sell_orders backend: read-only on-chain sell order
+        // listing per local MetaBot address or raw address.
+        listMvcNftSellOrders: async (input) => {
+          const store = getMetabotStore();
+          const entries: Array<{ metabotId: number | null; address: string; error?: string }> = [];
+          for (const metabotId of input.metabotIds ?? []) {
+            const address = store.getMetabotById(metabotId)?.mvc_address ?? '';
+            entries.push(
+              address
+                ? { metabotId, address }
+                : { metabotId, address: '', error: 'local MetaBot not found or has no mvc address' },
+            );
+          }
+          if (input.address?.trim()) {
+            entries.push({ metabotId: null, address: input.address.trim() });
+          }
+          return await Promise.all(
+            entries.map(async (entry) => {
+              if (entry.error) return entry;
+              try {
+                return { ...entry, orders: await getMvcNftSellOrders(entry.address) };
+              } catch (error) {
+                return { ...entry, error: error instanceof Error ? error.message : String(error) };
+              }
+            }),
+          );
+        },
       },
       // send_private_chat tool backend (replacing metabot-chat-privatechat).
       // Mirrors the skill script: resolve the peer chatpubkey on-chain, then
