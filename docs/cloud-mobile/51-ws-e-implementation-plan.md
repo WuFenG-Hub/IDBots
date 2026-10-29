@@ -46,14 +46,17 @@ Done when AC-E-2 passes against desktop dev mode.
 Replace the mocks. Phase 1 device pass (REQ-E-27, the M3 half): iPhone
 Safari, and Android Chrome on Xiaomi, Huawei, and OPPO or vivo.
 
-## Phase 2, after M3
+## Native shells and remaining Phase 2 scope
 
-### T5 — `feat/mobile-p2` then `feat/mobile-shell` (REQ-E-16, REQ-E-17, REQ-E-22 to REQ-E-24)
+### T5 — P2 features plus the native-shell packages (REQ-E-16, REQ-E-17, REQ-E-22 to REQ-E-24)
 
-Square, Buzz, private chat, mnemonic export. Capacitor shells. The APK can
-be signed as soon as the ops checklist has the Android keystore. TestFlight
-waits on the Apple Developer account. Do not submit to the public App Store
-in this release.
+Square, Buzz, private chat, and mnemonic export remain Phase 2 feature work.
+The detailed native package is [`native-shell/README.md`](native-shell/README.md).
+It splits the Capacitor shell into NS0–NS3 so native code development can run
+in parallel with PWA staging acceptance; native release acceptance remains
+gated on the core M3/M4 journeys. The APK can be signed as soon as the ops
+checklist has the Android keystore. TestFlight waits on the Apple Developer
+account. Do not submit to the public App Store in this release.
 
 ## Handback
 

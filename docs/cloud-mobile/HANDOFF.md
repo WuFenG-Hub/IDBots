@@ -14,6 +14,12 @@ are under `delivery/`. The current operator entry point is
 Real staging, device, model, chain, and payment acceptance remains a separate
 gate. New work branches from current `main`.
 
+Android and iOS native development uses the dedicated
+[`native-shell/README.md`](native-shell/README.md) package. It keeps the PWA,
+adds a separate Capacitor `mobile-shell/` package in this repository, and
+allows code development in parallel with staging acceptance while keeping
+native release acceptance gated on the core journeys.
+
 ## Read in this order
 
 1. This file.

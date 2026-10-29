@@ -64,6 +64,7 @@ it has to satisfy.
 | [`50-ws-e-mobile-client.md`](50-ws-e-mobile-client.md) | WS-E requirements and acceptance | Mobile development |
 | [`60-acceptance-and-go-live.md`](60-acceptance-and-go-live.md) | End-to-end scenarios, security, go-live, sign-off | Owner, acceptance, every party |
 | [`delivery/internal-test-release.md`](delivery/internal-test-release.md) | Current WP0–WP3 internal-test build, canary deployment, acceptance, and rollback handoff | Operations, owner, acceptance |
+| [`native-shell/README.md`](native-shell/README.md) | Capacitor native-shell architecture, NS0–NS3 implementation packages, acceptance, and copy-paste development/review prompts | Native mobile development, owner, acceptance |
 
 Phase 0 has passed (GO, signed 2026-10-15). Its plan stays at
 [`docs/superpowers/plans/2026-10-14-phase0-linux-headless-spike.md`](../superpowers/plans/2026-10-14-phase0-linux-headless-spike.md).
