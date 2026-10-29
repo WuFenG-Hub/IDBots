@@ -342,6 +342,7 @@ import {
   shouldRestartA2APrivateChatForGuidance,
 } from './services/a2aGuidanceRestart';
 import { sendEncryptedSimplemsg } from './services/encryptedSimplemsg';
+import { describeA2APrivateChatSendBlock } from './services/a2aChatLimits';
 import {
   chatCompletionWithTools,
   performChatCompletionForOrchestrator,
@@ -7346,6 +7347,13 @@ const getCoworkRunner = () => {
       privateChat: {
         send: async ({ metabotId, toGlobalMetaId, content, replyPin }) => {
           const metabotStore = getMetabotStore();
+          // The A2A auto-reply toggle gates the bot's whole A2A private-chat
+          // capability (2026-10-29): a bot that cannot answer peer DMs must
+          // not fire DMs whose replies it would then suppress locally.
+          const sendBlock = describeA2APrivateChatSendBlock(metabotStore.getMetabotById(metabotId));
+          if (sendBlock) {
+            throw new Error(sendBlock);
+          }
           const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);
           if (!wallet?.mnemonic?.trim()) {
             throw new Error('the session MetaBot wallet is unavailable');
@@ -10951,6 +10959,13 @@ if (!gotTheLock) {
 
       const metabotStoreInst = getMetabotStore();
       const metabot = metabotStoreInst.getMetabotById(metabotId);
+      // Same capability gate as the send_private_chat tool: the toggle off
+      // means no outbound A2A DMs from this bot, even owner-initiated from
+      // the Bot Browser — the peer's replies would be suppressed locally.
+      const browserSendBlock = describeA2APrivateChatSendBlock(metabot);
+      if (browserSendBlock) {
+        return { success: false, error: browserSendBlock };
+      }
       const wallet = metabotStoreInst.getMetabotWalletByMetabotId(metabotId);
       const localGlobalMetaId = toSafeString(metabot?.globalmetaid).trim();
       if (!metabot || !wallet?.mnemonic?.trim() || !localGlobalMetaId) {
