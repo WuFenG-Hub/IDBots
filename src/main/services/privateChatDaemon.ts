@@ -54,6 +54,17 @@ import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { recordMetaIDPrivateA2AExperience } from './metaidExperienceRecorder';
 import { buildScopedMemoryPromptBlocksDetailed } from '../memory/memoryPromptBlocks';
 import { renderBotDirectivesBlock } from '../botDirectives';
+import {
+  buildFriendFollowRecord,
+  executeFriendFollowWrite,
+  executeFriendUnfollowWrite,
+  extractFriendActionTags,
+  FRIEND_FOLLOW_PIN_METADATA_KEY,
+  readFriendFollowRecord,
+  type FriendActionKind,
+  type FriendCreatePinFn,
+} from './friendFollowService';
+import type { FriendPairState } from './metaidRelationshipResolver';
 import { CEREBELLUM_MEMORY_MIN_POOL } from '../cerebellum/memoryRank';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
@@ -256,6 +267,27 @@ export type PrivateChatCerebellumMemoryRankerFn = (input: {
   memories: Array<{ id: string; text: string }>;
 }) => Promise<ReadonlyMap<string, number> | null>;
 
+/**
+ * Owner-authorization bridge for A2A friend actions (invite/remove). Wired to
+ * CoworkRunner.requestSuspendedApproval in main.ts: the request surfaces in the
+ * renderer's CoworkPermissionOverlay and SUSPENDS until the owner clicks —
+ * no 60s auto-deny applies. Only an explicit allow resolves 'approved'.
+ */
+export type RequestFriendActionApprovalFn = (params: {
+  sessionId: string;
+  metabotId: number;
+  metabotName?: string | null;
+  action: FriendActionKind;
+  peerGlobalMetaId: string;
+  peerName?: string | null;
+}) => Promise<'approved' | 'denied'>;
+
+/** Best-effort pair-state gate (S4 provider/resolver); null/unknown never blocks the owner ask. */
+export type ResolveFriendPairStateFn = (input: {
+  observerGlobalMetaID: string;
+  peerGlobalMetaID: string;
+}) => Promise<FriendPairState | null>;
+
 export interface PrivateChatA2AContextMessage {
   speaker: string;
   content: string;
@@ -336,6 +368,205 @@ function appendPrivateChatBrainNotice(params: {
       message,
     });
   } catch { /* the owner notice is best-effort and must never break the reply pipeline */ }
+}
+
+/**
+ * Owner-visible local notice for A2A friend actions (invite pending / approved
+ * / denied / write result). Never delivered on-chain; rendered on the local
+ * bot's side via direction metadata and kept visible in the A2A transcript by
+ * the privateChatFriendNotice carve-out in a2aInternalMessageFilter.
+ */
+function appendPrivateChatFriendNotice(params: {
+  coworkStore: Pick<CoworkStore, 'addMessage'>;
+  sessionId: string;
+  externalConversationId: string;
+  content: string;
+  emitToRenderer?: RendererEmitter;
+}): void {
+  try {
+    const message = params.coworkStore.addMessage(params.sessionId, {
+      type: 'system',
+      content: params.content,
+      metadata: {
+        sourceChannel: 'metaweb_private',
+        externalConversationId: params.externalConversationId,
+        direction: 'outgoing',
+        privateChatFriendNotice: true,
+        suppressRunningStatus: true,
+      },
+    });
+    params.emitToRenderer?.('cowork:stream:message', {
+      sessionId: params.sessionId,
+      message,
+    });
+  } catch { /* friend-action notices are best-effort */ }
+}
+
+/**
+ * In-flight friend-action approvals, keyed `${metabotId}:${peerGlobalMetaId}`.
+ * The approval SUSPENDS waiting for the owner's overlay click, which can
+ * outlive daemon restarts — the map intentionally survives stopPrivateChatDaemon
+ * so a re-invite while an authorization is still pending is deduped instead of
+ * stacking a second overlay card.
+ */
+const pendingFriendActionApprovals = new Map<string, { action: FriendActionKind; startedAt: number }>();
+
+/**
+ * Drive one owner-authorized friend chain write AFTER the natural-language
+ * reply has been delivered to the peer. Runs detached from the reply turn
+ * (trackPrivateChatDetachedWork): the peer already received the invite text,
+ * and the owner's authorization can arrive minutes or hours later — the
+ * daemon's poll loop must never block on it.
+ */
+async function runPendingFriendAction(params: {
+  coworkStore: CoworkStore;
+  sessionId: string;
+  externalConversationId: string;
+  metabot: { id: number; name: string; globalmetaid: string };
+  peerGlobalMetaId: string;
+  peerName?: string | null;
+  action: FriendActionKind;
+  createPin: FriendCreatePinFn;
+  metabotStore: MetabotStore;
+  requestFriendActionApproval?: RequestFriendActionApprovalFn;
+  resolveFriendPairState?: ResolveFriendPairStateFn;
+  emitLog: (msg: string) => void;
+  emitToRenderer?: RendererEmitter;
+}): Promise<void> {
+  const {
+    coworkStore, sessionId, externalConversationId, metabot, peerGlobalMetaId,
+    action, createPin, metabotStore, requestFriendActionApproval, resolveFriendPairState,
+    emitLog, emitToRenderer,
+  } = params;
+  const peerLabel = peerGlobalMetaId.slice(0, 12) + '…';
+  const dedupeKey = `${metabot.id}:${peerGlobalMetaId}`;
+  if (pendingFriendActionApprovals.has(dedupeKey)) {
+    emitLog(`[PrivateChat] Friend ${action} toward ${peerLabel} skipped: another friend-action approval is already pending for this pair.`);
+    return;
+  }
+  if (!requestFriendActionApproval) {
+    emitLog(`[PrivateChat] Friend ${action} tag received for ${peerLabel} but no approval bridge is wired; no authorization request, no chain write.`);
+    return;
+  }
+  pendingFriendActionApprovals.set(dedupeKey, { action, startedAt: Date.now() });
+  const notice = (content: string): void => appendPrivateChatFriendNotice({
+    coworkStore,
+    sessionId,
+    externalConversationId,
+    content,
+    emitToRenderer,
+  });
+  const readMappingMeta = (): Record<string, unknown> => parseConversationMappingMetadata(
+    coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabot.id)?.metadataJson
+  );
+  try {
+    let followRecord: ReturnType<typeof readFriendFollowRecord> = null;
+    if (action === 'invite') {
+      // Best-effort relationship gate: skip pointless authorization asks when
+      // the aggregation already answers; unknown/null proceeds to the owner.
+      let pair: FriendPairState | null = null;
+      if (resolveFriendPairState) {
+        try {
+          pair = await resolveFriendPairState({
+            observerGlobalMetaID: metabot.globalmetaid,
+            peerGlobalMetaID: peerGlobalMetaId,
+          });
+        } catch {
+          pair = null;
+        }
+      }
+      if (pair?.status === 'confirmed') {
+        emitLog(`[PrivateChat] Friend invite toward ${peerLabel} skipped: already friends.`);
+        notice(tApp(
+          '[Host] 与对方已经是链上好友（互相关注），无需再次邀请。',
+          '[Host] Already on-chain friends (mutual /follow) with this peer — invite skipped.'
+        ));
+        return;
+      }
+      if (pair?.blocking === true || pair?.blockedBy === true) {
+        emitLog(`[PrivateChat] Friend invite toward ${peerLabel} skipped: a simpleblock is active in at least one direction.`);
+        notice(tApp(
+          '[Host] 当前与对方存在拉黑关系（至少一方已拉黑），已跳过好友邀请。',
+          '[Host] A block is active in at least one direction — friend invite skipped.'
+        ));
+        return;
+      }
+    } else {
+      followRecord = readFriendFollowRecord(readMappingMeta());
+      if (!followRecord) {
+        emitLog(`[PrivateChat] Friend remove toward ${peerLabel} skipped: no locally recorded /follow pin to revoke.`);
+        notice(tApp(
+          '[Host] 本地没有记录到本会话发起的 /follow pin，无法执行取消关注（revoke 需要指向原 pin）。',
+          '[Host] No locally recorded /follow pin for this conversation, so there is nothing to revoke (a revoke must target the original pin).'
+        ));
+        return;
+      }
+    }
+    notice(tApp(
+      `[Host] 已向主人发起「${action === 'invite' ? '添加好友' : '取消关注'}」授权请求，挂起等待点击确认……`,
+      `[Host] Owner authorization requested (${action === 'invite' ? 'add friend' : 'unfollow'}); suspended, waiting for the owner's click…`
+    ));
+    const outcome = await requestFriendActionApproval({
+      sessionId,
+      metabotId: metabot.id,
+      metabotName: metabot.name,
+      action,
+      peerGlobalMetaId,
+      peerName: params.peerName ?? null,
+    });
+    if (outcome !== 'approved') {
+      emitLog(`[PrivateChat] Friend ${action} toward ${peerLabel} not authorized by the owner; no chain write.`);
+      notice(tApp(
+        action === 'invite'
+          ? '[Host] 主人未授权本次加好友，未写链，也不会再重复请求。'
+          : '[Host] 主人未授权本次取消关注，未写链，也不会再重复请求。',
+        '[Host] The owner did not authorize this friend action — nothing was written on-chain and the request will not repeat.'
+      ));
+      return;
+    }
+    if (action === 'remove' && followRecord) {
+      const written = await executeFriendUnfollowWrite({
+        createPin,
+        metabotStore,
+        metabotId: metabot.id,
+        followPinId: followRecord.pinId,
+      });
+      const nextMeta = readMappingMeta();
+      delete nextMeta[FRIEND_FOLLOW_PIN_METADATA_KEY];
+      coworkStore.updateConversationMappingMetadata('metaweb_private', externalConversationId, metabot.id, nextMeta);
+      emitLog(`[PrivateChat] /follow revoke published for ${peerLabel}: pinId=${written.pinId} txid=${written.txid || 'n/a'}`);
+      notice(tApp(
+        `[Host] 已取消关注（revoke 原 /follow pin ${followRecord.pinId}）：revoke pinId=${written.pinId}${written.txid ? ` txid=${written.txid}` : ''}`,
+        `[Host] Unfollowed (revoked /follow pin ${followRecord.pinId}): revoke pinId=${written.pinId}${written.txid ? ` txid=${written.txid}` : ''}`
+      ));
+      return;
+    }
+    const written = await executeFriendFollowWrite({
+      createPin,
+      metabotStore,
+      metabotId: metabot.id,
+      peerGlobalMetaId,
+    });
+    coworkStore.updateConversationMappingMetadata('metaweb_private', externalConversationId, metabot.id, {
+      ...readMappingMeta(),
+      [FRIEND_FOLLOW_PIN_METADATA_KEY]: buildFriendFollowRecord(written.pinId, written.txid),
+    });
+    emitLog(`[PrivateChat] /follow pin published for ${peerLabel}: pinId=${written.pinId} txid=${written.txid || 'n/a'}`);
+    notice(tApp(
+      `[Host] 已写 /follow（contentBody=对方 GlobalMetaID）：pinId=${written.pinId}${written.txid ? ` txid=${written.txid}` : ''}`,
+      `[Host] /follow written (contentBody = peer GlobalMetaID): pinId=${written.pinId}${written.txid ? ` txid=${written.txid}` : ''}`
+    ));
+  } catch (error) {
+    rethrowSqliteWasmBoundsError(error);
+    const messageText = error instanceof Error ? error.message : String(error);
+    emitLog(`[PrivateChat] Friend ${action} toward ${peerLabel} failed: ${messageText}`);
+    notice(tApp(
+      `[Host] 好友操作失败：${messageText}`,
+      `[Host] Friend action failed: ${messageText}`
+    ));
+  } finally {
+    pendingFriendActionApprovals.delete(dedupeKey);
+  }
 }
 
 /**
@@ -1670,6 +1901,16 @@ export function buildPrivateChatA2ASystemPrompt(params: {
       ? '- A brief wait notice has already been sent for this local-skill turn. Do not repeat it as the final answer; use the skill if needed and then answer with the result.'
       : '- If local skill execution actually starts, the host will send a brief wait notice to the peer at that moment. Do not preface normal replies with wait notices; answer directly when no skill is needed.'
     : '';
+  // Friend invite/remove capability (S5): the one-shot reply chain has no
+  // tool surface, so the LLM signals chain-level friendship intent with an
+  // inline tag the host strips before delivery. Only offered on real turns —
+  // never on a forced-bye turn.
+  const friendActionRule = params.analysis.shouldForceBye
+    ? ''
+    : [
+        '- Becoming on-chain friends: when you want to propose (or accept the peer\'s proposal of) a mutual on-chain friendship, include the exact tag `[FRIEND_INVITE]` on its own line in your reply, together with a natural sentence telling the peer the invite is pending your owner\'s on-device confirmation (e.g. "I\'ve submitted the friend request — once my owner approves it, we\'ll be mutual /follow friends on-chain"). The tag itself is stripped before delivery and never reaches the peer. The host then SUSPENDS waiting for your owner\'s authorization and only writes the /follow pin after the owner approves; an unapproved invite writes nothing. Use the tag at most once per conversation while the outcome is unknown, and skip it entirely when the context already shows a confirmed friend or an active block in either direction.',
+        '- Ending a friendship this conversation established: include the exact tag `[FRIEND_REMOVE]` on its own line the same way (also pending your owner\'s confirmation — the host revokes the original /follow pin only after approval).',
+      ].join('\n');
 
   const basePrompt = [
     buildPrivateReplySystemPrompt(params.metabot),
@@ -1691,6 +1932,7 @@ export function buildPrivateChatA2ASystemPrompt(params: {
     '- Peer relationship & trade trust: the <metaid_cognition_context> block (when present in the context) states the peer\'s friend current state and block current state — treat them as authoritative facts, not vibes. Friend means a MUTUAL on-chain /follow. With a NON-friend peer (not_confirmed, or no friend state at all), when an NFT/asset point-to-point transaction comes up, proactively suggest routing it through a trusted escrow/middleman before any transfer — the group-chat Scenario B convention is the reference flow: seller and buyer each transfer to the escrow first, the escrow verifies both arrivals, then releases both ways. With a confirmed friend, a direct point-to-point transfer is acceptable; do not push escrow unnecessarily. If the block state shows a block active in either direction, keep the exchange minimal and factual — no new transactions, no extended trust; end the topic politely once nothing is owed.',
     skillPolicyRule,
     skillWaitNoticeRule,
+    friendActionRule,
     forceByeRule,
     closingPhaseRule,
     '- When you say "bye", say exactly "bye" and nothing else.',
@@ -3986,6 +4228,15 @@ async function processOne(
   cerebellumMemoryRanker?: PrivateChatCerebellumMemoryRankerFn,
   /** Dream review P1: knowledge/procedures hot-layer source (direct answer path). */
   getKnowledgeStore?: () => CoworkKnowledgeStore | null,
+  /**
+   * Owner-authorization bridge for friend invite/remove tags in A2A replies
+   * (S5): suspended permission request surfaced in CoworkPermissionOverlay.
+   * Absent (older harnesses) ⇒ tags are still stripped from the delivered
+   * text but no authorization is asked and no chain write happens.
+   */
+  requestFriendActionApproval?: RequestFriendActionApprovalFn,
+  /** Best-effort relationship gate for invites (S4 provider); optional. */
+  resolveFriendPairState?: ResolveFriendPairStateFn,
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
@@ -5873,6 +6124,10 @@ async function processOne(
     ].filter(Boolean).join('');
     let reply = '';
     let trimmed = '';
+    // S5 friend invite/remove action extracted from the reply (inline tag);
+    // declared at turn scope because the owner-authorization launch happens
+    // after the reply is delivered, outside the generation try-block.
+    let friendAction: FriendActionKind | null = null;
     let skillAssistantMessageId: string | null = null;
     const guidanceTurn = trackInterruptibleA2AGuidanceTurn({
       sessionId,
@@ -6003,6 +6258,23 @@ async function processOne(
       ).byeSent === true;
 
       trimmed = (reply ?? '').trim();
+      // Friend invite/remove tag (S5): the LLM signals chain-level friendship
+      // intent with an inline tag; strip it from the delivered text and carry
+      // the action for the post-delivery owner-authorization flow. Forced-bye
+      // and completed-turn pickups never carry a friend action.
+      if (!conversationAnalysis.shouldForceBye && !completedTurnReply) {
+        const extracted = extractFriendActionTags(trimmed);
+        trimmed = extracted.text;
+        friendAction = extracted.action;
+      }
+      if (friendAction && !trimmed) {
+        // Bare tag with no sentence: the protocol asked for a natural line
+        // alongside the tag; deliver a minimal fallback so the peer is never
+        // left waiting on an empty reply (language follows the peer).
+        trimmed = /[\u4e00-\u9fff]/.test(plaintext)
+          ? '（我已发起好友邀请，正在等待我的主人确认授权；确认后我们就会互相 follow，成为链上好友。）'
+          : '(Friend invite submitted — waiting for my owner\'s confirmation; once approved we will follow each other on-chain.)';
+      }
       if (!trimmed) {
         // The turn COMPLETED but produced no deliverable text. Observed shape
         // (2026-09-16 stall): the model drafts the whole answer inside its
@@ -6164,7 +6436,11 @@ async function processOne(
           privateChatReplyForPinId: normalizePrivateChatPinId(row.pin_id),
           privateChatReplyForTxid: getPrivateChatRowTxid(row),
         };
-        coworkStore.updateMessage(sessionId, existingAssistant.id, { metadata });
+        // The skill-turn bubble may still carry the friend-action tag (S5);
+        // normalize it to the same stripped text that goes on-chain so the
+        // local transcript matches what the peer received.
+        coworkStore.updateMessage(sessionId, existingAssistant.id, { content: trimmed, metadata });
+        existingAssistant.content = trimmed;
         existingAssistant.metadata = metadata;
         assistantMessage = existingAssistant;
         if (emitToRenderer) {
@@ -6298,6 +6574,31 @@ async function processOne(
       // A delivered reply (including bye) means the conversation tail is no
       // longer silent — any pending wake for it is obsolete.
       cancelPrivateChatA2AWakesForConversation(externalConversationId, 'a reply was delivered', emitLog);
+      // Friend invite/remove (S5): the peer already received the natural
+      // reply; drive the owner-authorized /follow (or revoke) chain write
+      // detached from this turn so the suspended authorization (which waits
+      // for the owner's overlay click, unbounded) never blocks the poll loop.
+      if (friendAction) {
+        trackPrivateChatDetachedWork(runPendingFriendAction({
+          coworkStore,
+          sessionId,
+          externalConversationId,
+          metabot: {
+            id: metabot.id,
+            name: metabot.name,
+            globalmetaid: metabot.globalmetaid,
+          },
+          peerGlobalMetaId: fromGlobalMetaId,
+          peerName: (row.from_name as string | null) ?? null,
+          action: friendAction,
+          createPin,
+          metabotStore,
+          requestFriendActionApproval,
+          resolveFriendPairState,
+          emitLog,
+          emitToRenderer,
+        }));
+      }
     } catch (e) {
       rethrowSqliteWasmBoundsError(e);
       const errorMessage = e instanceof Error ? e.message : String(e);
@@ -6387,6 +6688,10 @@ export function startPrivateChatDaemon(
    * are untouched — these blocks describe the bot's own skills.
    */
   getKnowledgeStore?: () => CoworkKnowledgeStore | null,
+  /** Owner-authorization bridge for A2A friend invite/remove (S5); see processOne. */
+  requestFriendActionApproval?: RequestFriendActionApprovalFn,
+  /** Best-effort relationship gate for invites (S4 provider); optional. */
+  resolveFriendPairState?: ResolveFriendPairStateFn,
 ): void {
   void stopPrivateChatDaemon();
   const daemonGeneration = ++privateChatDaemonGeneration;
@@ -6475,6 +6780,8 @@ export function startPrivateChatDaemon(
               reDrivenWakeDispositions.get(row.id),
               cerebellumMemoryRanker,
               getKnowledgeStore,
+              requestFriendActionApproval,
+              resolveFriendPairState,
             );
           } catch (e) {
             console.error('[PrivateChat] processOne error:', e);

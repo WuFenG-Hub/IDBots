@@ -46,14 +46,22 @@ test('CoworkSessionDetail renders ordinary private A2A sessionid with copy actio
 });
 
 test('CoworkSessionDetail hides A2A transport handshake bubbles', () => {
+  // The handshake detector moved into coworkConversationProjection (mobile
+  // projection refactor); the component wires it next to the A2A internal
+  // filter. Assert the split shape — asserting only the component went stale.
   const source = fs.readFileSync(sourcePath, 'utf8');
+  const projectionSource = fs.readFileSync(
+    path.join(projectRoot, 'src', 'renderer', 'services', 'coworkConversationProjection.ts'),
+    'utf8'
+  );
 
-  assert.match(source, /isA2ATransportHandshakeMessage/);
-  assert.match(source, /sourceChannel === 'metaweb_private'/);
-  assert.match(source, /normalizedContent === 'ping'/);
-  assert.match(source, /normalizedContent === 'pong'/);
+  assert.match(projectionSource, /isA2ATransportHandshakeMessage/);
+  assert.match(projectionSource, /sourceChannel === 'metaweb_private'/);
+  assert.match(projectionSource, /normalizedContent === 'ping'/);
+  assert.match(projectionSource, /normalizedContent === 'pong'/);
+  assert.match(projectionSource, /shouldHideControlMessage/);
+  assert.match(source, /shouldHideControlMessage/);
   assert.match(source, /shouldHideControlMessage\(message\)/);
-  assert.match(source, /isA2ATransportHandshakeMessage\(message\)/);
 });
 
 test('CoworkSessionDetail wires resend digital delivery to order-scoped A2A messages', () => {
@@ -152,7 +160,9 @@ test('A2A guidance IPC queues active sessions and restarts ended private chats',
     'utf8'
   );
 
-  assert.match(mainSource, /ipcMain\.handle\('cowork:session:queueA2AGuidance'/);
+  // IPC handlers migrated to the registerIpcHandler gateway wrapper; the raw
+  // ipcMain.handle spelling is gone.
+  assert.match(mainSource, /registerIpcHandler\('cowork:session:queueA2AGuidance'/);
   assert.match(mainSource, /Only MetaWeb private-chat A2A sessions support guided dialogue/);
   assert.match(
     mainSource,

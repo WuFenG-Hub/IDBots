@@ -50,6 +50,7 @@ import UsageStatsChip from './UsageStatsChip';
 import LongTermTaskOriginChip from '../longTermTasks/LongTermTaskOriginChip';
 import ManualCompactButton from './ManualCompactButton';
 import A2AMessageItem from './A2AMessageItem';
+import FriendBadge from './FriendBadge';
 import UserMessageOriginBadge from './UserMessageOriginBadge';
 import MessageFeedbackControls from './MessageFeedbackControls';
 import FeedbackNudgeHint from './FeedbackNudgeHint';
@@ -3198,6 +3199,34 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       : null;
   }, [currentSession?.sessionType, currentSession?.peerGlobalMetaId, currentSession?.messages]);
 
+  // S5 friend badge: pair state between the session bot and the A2A peer
+  // (S4 metaso provider behind the social:getPairRelationship IPC, main-side
+  // 60s TTL cache + breaker). Refreshed when the transcript changes so a
+  // just-accepted mutual /follow flips the badge once the indexer catches up.
+  const [peerFriendStatus, setPeerFriendStatus] = useState<'confirmed' | 'not_confirmed' | 'unknown' | null>(null);
+  const a2aTranscriptLength = currentSession?.messages?.length ?? 0;
+  useEffect(() => {
+    if (!isA2ASession || !a2aPeerGlobalMetaId || !sessionMetabot?.globalmetaid) {
+      setPeerFriendStatus(null);
+      return;
+    }
+    let cancelled = false;
+    const observerGlobalMetaId = sessionMetabot.globalmetaid;
+    void window.electron?.social?.getPairRelationship({
+      observerGlobalMetaId,
+      peerGlobalMetaId: a2aPeerGlobalMetaId,
+    }).then((result) => {
+      if (cancelled) return;
+      setPeerFriendStatus(result?.success && result.relationship ? result.relationship.status : null);
+    }).catch(() => {
+      if (!cancelled) setPeerFriendStatus(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isA2ASession, a2aPeerGlobalMetaId, sessionMetabot?.globalmetaid, a2aTranscriptLength]);
+  const a2aPeerIsFriend = peerFriendStatus === 'confirmed';
+
   // Local user identity (Settings > Users). When the A2A peer IS the
   // configured local user, this session is a direct owner<->bot chat: the
   // local bot's bubbles move to the left, the human's read on the right, and
@@ -4765,6 +4794,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               {i18nService.t('coworkOnChainBadge')}
             </span>
           )}
+          {isA2ASession && a2aPeerIsFriend && (
+            <FriendBadge />
+          )}
           {/* 会话 → 所属长期任务（新一等实体看板）；0 关联时该组件不渲染任何东西 */}
           <LongTermTaskOriginChip sessionId={currentSession.id} />
           {normalizedFocusedOrderTxid && (
@@ -5009,6 +5041,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                   isResendingDigitalDelivery={Boolean(resendingDeliveryOrderTxid)}
                   onResendDigitalDelivery={handleResendDigitalDelivery}
                   isAssistantMode={isAssistantMode}
+                  peerIsFriend={a2aPeerIsFriend}
                 />
               </div>
             );

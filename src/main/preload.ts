@@ -1220,6 +1220,11 @@ contextBridge.exposeInMainWorld('electron', {
     retrySubsidy: () => ipcRenderer.invoke('userIdentity:retrySubsidy'),
     retryChainSync: () => ipcRenderer.invoke('userIdentity:retryChainSync'),
   },
+  social: {
+    /** S5 friend badge data source: pair state via the S4 metaso provider (main-side TTL cache). */
+    getPairRelationship: (input: { observerGlobalMetaId: string; peerGlobalMetaId: string }) =>
+      ipcRenderer.invoke('social:getPairRelationship', input),
+  },
   chainBackup: {
     backup: () => ipcRenderer.invoke('chainBackup:backup'),
     restore: () => ipcRenderer.invoke('chainBackup:restore'),

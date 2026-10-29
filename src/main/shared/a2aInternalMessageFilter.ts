@@ -128,8 +128,12 @@ export const shouldHideA2AInternalMessage = (
 ): boolean => {
   if (isA2AOrderRelatedMessage(message)) return false;
   if (message.type === 'tool_use' || message.type === 'tool_result') return true;
-  if (message.type === 'system') return true;
   const metadata = readMetadata(message);
+  // Owner-facing friend-action notices (invite pending / approved / denied /
+  // write result) stay visible like the end-of-conversation marker: the
+  // authorization trail must be readable even though nothing went on-chain.
+  if (metadata.privateChatFriendNotice === true) return false;
+  if (message.type === 'system') return true;
   if (metadata.isThinking === true) return true;
   if (metadata.privateChatNoReply === true) return true;
   if (

@@ -157,6 +157,7 @@ const IDENTITY_INVOKE: Record<string, AllowlistEntry> = {
   'idbots:getMetaBotMnemonic': { tier: 'H', note: '`02`: C2 sensitive route only, never over the WebSocket.' },
   'idbots:restoreMetaBotFromMnemonic': { tier: 'N', note: '`02`: mnemonic input over the socket; later release.' },
   'userIdentity:get': { tier: 'P1' },
+  'social:getPairRelationship': { tier: 'P1', note: '`S5`: friend badge pair state; read-only, cached.' },
   'userIdentity:updateName': { tier: 'P1' },
   'userIdentity:retryChainSync': { tier: 'P1' },
   'userIdentity:retrySubsidy': { tier: 'P1' },

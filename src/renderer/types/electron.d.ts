@@ -2034,6 +2034,18 @@ interface IElectronAPI {
     retrySubsidy: () => Promise<{ success: boolean; identity?: PublicUserIdentity | null; subsidy?: UserIdentitySubsidyResult; error?: string }>;
     retryChainSync: () => Promise<{ success: boolean; identity?: PublicUserIdentity | null; subsidy?: UserIdentitySubsidyResult; chainSync?: UserIdentityChainSyncResult; error?: string }>;
   };
+  social: {
+    /** S5 friend badge data source: pair state via the S4 metaso provider. */
+    getPairRelationship: (input: { observerGlobalMetaId: string; peerGlobalMetaId: string }) => Promise<{
+      success: boolean;
+      relationship?: {
+        status: 'confirmed' | 'not_confirmed' | 'unknown';
+        blocking: boolean | null;
+        blockedBy: boolean | null;
+      } | null;
+      error?: string;
+    }>;
+  };
   chainBackup: {
     backup: () => Promise<{
       success: boolean;

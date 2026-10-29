@@ -7642,6 +7642,74 @@ export class CoworkRunner extends EventEmitter {
     return 'denied';
   }
 
+  /**
+   * Public bridge for out-of-turn permission requests raised by services that
+   * run OUTSIDE a cowork ActiveSession — currently the A2A private-chat
+   * daemon's friend invite/remove actions. Unlike requestSafetyApproval this
+   * request SUSPENDS INDEFINITELY (no 60s watchdog): the owner-gated chain
+   * write waits for the owner to actually click the overlay whenever they
+   * next see it, so the 60s auto-deny semantics must NOT apply. The renderer
+   * renders the prompt through the same CoworkPermissionOverlay queue
+   * (A2A sessions are always covered by the global overlay).
+   *
+   * There is no ActiveSession here, so the request also never touches
+   * activeSession.pendingPermission (the cowork stall-watchdog integration).
+   * Resolution paths: renderer allow (overlay one-click or option pick) →
+   * 'approved'; renderer deny, dismissal, or any non-allow behavior →
+   * 'denied' (callers treat that as "do not write, do not retry").
+   */
+  async requestSuspendedApproval(params: {
+    sessionId: string;
+    header?: string;
+    question: string;
+    context?: Record<string, unknown>;
+  }): Promise<'approved' | 'denied'> {
+    const question = String(params.question || '').trim();
+    if (!question) {
+      return 'denied';
+    }
+    const request: PermissionRequest = {
+      requestId: uuidv4(),
+      toolName: 'AskUserQuestion',
+      toolInput: {
+        questions: [
+          {
+            header: params.header?.trim() || tApp('安全确认', 'Safety confirmation'),
+            question,
+            options: [
+              {
+                label: tApp(SAFETY_APPROVAL_ALLOW_OPTION, SAFETY_APPROVAL_ALLOW_OPTION_EN),
+                description: tApp('仅允许当前这一次操作继续执行。', 'Allow only this one operation to continue.'),
+              },
+              {
+                label: tApp(SAFETY_APPROVAL_DENY_OPTION, SAFETY_APPROVAL_DENY_OPTION_EN),
+                description: tApp('拒绝当前操作，保持安全边界。', 'Deny this operation and keep the safety boundary.'),
+              },
+            ],
+          },
+        ],
+        answers: {},
+        context: {
+          ...(params.context ?? {}),
+        },
+      },
+    };
+
+    this.emit('permissionRequest', params.sessionId, request);
+
+    // Suspend with no watchdog: only an explicit owner answer resolves this.
+    const result = await this.waitForPermissionResponse(
+      params.sessionId,
+      request.requestId,
+      undefined,
+      { timeoutMs: null }
+    );
+    if (this.isSafetyApproval(result, question)) {
+      return 'approved';
+    }
+    return 'denied';
+  }
+
   private async enforceToolSafetyPolicy(
     sessionId: string,
     signal: AbortSignal,
@@ -15757,8 +15825,13 @@ export class CoworkRunner extends EventEmitter {
   private waitForPermissionResponse(
     sessionId: string,
     requestId: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: { timeoutMs?: number | null }
   ): Promise<PermissionResult> {
+    // timeoutMs: null suspends the request INDEFINITELY (no watchdog) — for
+    // owner-gated actions that must wait for a human click whenever it comes
+    // (A2A friend invites), not burn the 60s default into an auto-deny.
+    const timeoutMs = options?.timeoutMs === undefined ? PERMISSION_RESPONSE_TIMEOUT_MS : options.timeoutMs;
     return new Promise(resolve => {
       let settled = false;
       let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -15789,12 +15862,14 @@ export class CoworkRunner extends EventEmitter {
         resolve: finalize,
       });
 
-      timeoutId = setTimeout(() => {
-        finalize({
-          behavior: 'deny',
-          message: 'Permission request timed out after 60s',
-        });
-      }, PERMISSION_RESPONSE_TIMEOUT_MS);
+      timeoutId = timeoutMs === null
+        ? null
+        : setTimeout(() => {
+          finalize({
+            behavior: 'deny',
+            message: 'Permission request timed out after 60s',
+          });
+        }, timeoutMs);
 
       if (signal) {
         signal.addEventListener('abort', abortHandler, { once: true });
