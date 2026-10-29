@@ -15,68 +15,112 @@ import { EMOJI_CATEGORIES, searchEmoji } from '../chat/emojiData';
  * - the panel STAYS OPEN after a pick (chat muscle memory: several emoji
  *   in a row); the ✕ button, or tapping the composer's textarea (handled
  *   by ChatScreen), closes it;
- * - category tabs are a horizontally scrollable row, so narrow screens
- *   never clip them;
+ * - ONE flat emoji page (owner call 2026-10-29: no category tabs): a
+ *   "recent emojis" strip embedded ABOVE the main grid, like WeChat's own
+ *   first panel, then the whole 85-entry catalog in one grid;
  * - search swaps the grid for results and shows a t()-localized empty
  *   state.
  *
- * Recents are session-memory only (same policy as the desktop picker);
- * nothing is persisted to disk or the chain.
+ * Recents persist to window.localStorage (local-only user habit; same
+ * policy as the desktop picker — this mobile app is a Vite/React-DOM web
+ * build, so localStorage IS the platform persistence API) — nothing goes
+ * to the chain or any protocol write, and malformed storage falls back to
+ * an empty list.
  */
 
 const RECENT_LIMIT = 16;
+const EMOJI_RECENTS_STORAGE_KEY = 'idbots.mobile.chat.emojiRecents.v1';
+
+type RecentStorage = Pick<Storage, 'getItem' | 'setItem'>;
+
 const recentChars: string[] = [];
 
-/** Record a picked emoji as most-recently-used (session memory only). */
+const dedupeRecentChars = (chars: string[]): string[] => [...new Set(chars)];
+
+/**
+ * Parse the persisted recents JSON. Defensive against malformed shapes
+ * (bad JSON, non-array, non-string entries); keeps first occurrence =
+ * most-recent one because the list is stored MRU-first.
+ */
+export const parsePersistedRecentEmoji = (raw: string | null): string[] => {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return dedupeRecentChars(parsed.filter((c): c is string => typeof c === 'string' && c.length > 0)).slice(0, RECENT_LIMIT);
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * Replace in-memory recents from storage. Runs at module init (= app
+ * boot); exported so tests can simulate a restart with a storage stub.
+ */
+export const restoreRecentEmojiFromStorage = (storage: RecentStorage | null): string[] => {
+  let persisted: string[] = [];
+  if (storage) {
+    try {
+      persisted = parsePersistedRecentEmoji(storage.getItem(EMOJI_RECENTS_STORAGE_KEY));
+    } catch {
+      persisted = [];
+    }
+  }
+  recentChars.length = 0;
+  recentChars.push(...persisted);
+  return recentChars;
+};
+
+/** Write the current recents; a failed write keeps session-memory behavior. */
+const persistRecentEmoji = (): void => {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.setItem(EMOJI_RECENTS_STORAGE_KEY, JSON.stringify(recentChars));
+  } catch {
+    // localStorage unavailable: recents stay in memory for this session.
+  }
+};
+
+/** Record a pick as most-recently-used (dedupe, MRU-first, cap 16) and persist. */
 export const rememberRecentEmoji = (char: string): void => {
   const next = [char, ...recentChars.filter((c) => c !== char)];
   recentChars.length = 0;
   recentChars.push(...next.slice(0, RECENT_LIMIT));
+  persistRecentEmoji();
 };
 
 /** Current recents, oldest last (test/inspection helper). */
 export const recentEmojiChars = (): readonly string[] => recentChars;
 
-const RECENT_CATEGORY_ID = 'recent';
-
-interface VisibleTab {
-  id: string;
-  label: string;
-}
+// App-boot hydration: a fresh app restores the persisted list (LRU order
+// intact). Without a window (SSR tests) this is a no-op.
+restoreRecentEmojiFromStorage(
+  typeof window === 'undefined' ? null : window.localStorage,
+);
 
 export function EmojiPickerPanel(props: {
   onSelect: (emoji: string) => void;
   onClose: () => void;
 }): JSX.Element {
   const [query, setQuery] = useState('');
-  const [activeCategory, setActiveCategory] = useState(EMOJI_CATEGORIES[0].id);
 
   const searching = query.trim().length > 0;
-  const searchResults = useMemo(
-    () => (searching ? searchEmoji(query, 96) : null),
-    [query, searching],
-  );
+  const searchResults = useMemo(() => {
+    return searching ? searchEmoji(query, 96) : null;
+  }, [query, searching]);
 
-  // Recents: read per render (picks surface immediately).
+  // One flat page (single category): the whole catalog in WeChat code-table
+  // order. flatMap keeps this correct even if categories are ever re-added.
+  const catalogEmojis = useMemo(() => {
+    return EMOJI_CATEGORIES.flatMap((category) => category.emojis);
+  }, []);
+
+  // Recents: read per render (picks surface immediately - ChatScreen
+  // re-renders this panel on every insert). Empty while searching and on a
+  // fresh install (nothing used yet).
   const recents = recentEmojiChars();
-  const tabs: VisibleTab[] = useMemo(() => {
-    const list: VisibleTab[] = recents.length > 0
-      ? [{ id: RECENT_CATEGORY_ID, label: t('mobile.chat.emojiCategoryRecent') }]
-      : [];
-    for (const category of EMOJI_CATEGORIES) {
-      list.push({ id: category.id, label: t(`mobile.chat.${category.labelKey}`) });
-    }
-    return list;
-  }, [recents.length]);
 
-  const activeEntries = useMemo(() => {
-    if (searchResults) return searchResults;
-    if (activeCategory === RECENT_CATEGORY_ID) {
-      return recents.map((char) => ({ char, keywords: '' }));
-    }
-    return EMOJI_CATEGORIES.find((category) => category.id === activeCategory)?.emojis
-      ?? EMOJI_CATEGORIES[0].emojis;
-  }, [searchResults, activeCategory, recents]);
+  const activeEntries = searchResults ?? catalogEmojis;
 
   return (
     <div
@@ -108,34 +152,35 @@ export function EmojiPickerPanel(props: {
         </button>
       </div>
 
-      <div
-        role="tablist"
-        aria-label={t('mobile.chat.emojiPicker')}
-        className="flex gap-1 overflow-x-auto px-3 py-2"
-      >
-        {tabs.map((tab) => {
-          const active = !searching && tab.id === activeCategory;
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              onClick={() => {
-                setActiveCategory(tab.id);
-                setQuery('');
-              }}
-              className={`min-h-[36px] shrink-0 rounded-full border px-3 text-xs ${
-                active
-                  ? 'border-[var(--color-primary)] bg-[var(--color-primary)] text-black'
-                  : 'border-[var(--border-color)] text-[var(--text-secondary)]'
-              }`}
-            >
-              {tab.label}
-            </button>
-          );
-        })}
-      </div>
+      {/* Recent strip - WeChat style, embedded ABOVE the main grid inside
+          the single emoji panel (no Recent tab). Hidden while searching and
+          when empty. Touch targets keep the 36px minimum. */}
+      {!searching && recents.length > 0 && (
+        <div className="px-3 pt-2" aria-label={t('mobile.chat.emojiCategoryRecent')}>
+          <div className="px-0.5 pb-1 text-[11px] text-[var(--text-secondary)]">
+            {t('mobile.chat.emojiCategoryRecent')}
+          </div>
+          <div
+            role="listbox"
+            aria-label={t('mobile.chat.emojiCategoryRecent')}
+            className="flex flex-wrap gap-0.5"
+          >
+            {recents.map((char) => (
+              <button
+                key={char}
+                type="button"
+                role="option"
+                aria-label={char}
+                aria-selected={false}
+                onClick={() => props.onSelect(char)}
+                className="flex h-[36px] w-[36px] items-center justify-center text-[20px] leading-none active:bg-[var(--bg-hover)]"
+              >
+                {char}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {activeEntries.length === 0 ? (
         <p
