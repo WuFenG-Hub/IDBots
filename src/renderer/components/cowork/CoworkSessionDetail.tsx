@@ -1424,6 +1424,75 @@ const ToolCallGroup: React.FC<{
 };
 
 
+// Copy button component: the user bubble's hover row (below the bubble) —
+// copies the message text and flips to a green check for two seconds. This is
+// the pre-actions-menu affordance the owner asked back (2026-10-28): the
+// "⋯" menu keeps copy too, the two coexist. The direct copy needs no menu
+// round-trip, which is what the user side had before the 2026-10-19 hover
+// redesign folded it away.
+const CopyButton: React.FC<{
+  content: string;
+  visible: boolean;
+}> = ({ content, visible }) => {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  return (
+    <button
+      onClick={handleCopy}
+      className={`p-1.5 rounded-md dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-all duration-200 ${
+        visible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+      }`}
+      title={i18nService.t('copyToClipboard')}
+    >
+      {copied ? (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="w-4 h-4 text-green-500"
+          aria-hidden="true"
+        >
+          <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+      ) : (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="w-4 h-4 dark:text-claude-darkTextSecondary text-claude-textSecondary"
+          aria-hidden="true"
+        >
+          <rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect>
+          <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path>
+        </svg>
+      )}
+    </button>
+  );
+};
+
 // Message timestamp on the turn-end line, sharing the hover-visibility
 // logic and visual style of the action row it sits in.
 // hover-visibility logic and visual style.
@@ -1702,6 +1771,19 @@ const UserMessageItem: React.FC<{
                       </span>
                     </div>
                   ))}
+                  {/* Restored hover row (owner, 2026-10-28): the sent time and a
+                      direct copy button, the same below-the-bubble pair this row
+                      carried before the 2026-10-19 actions-menu redesign folded
+                      them into the "⋯". The menu stays; the two coexist. Visible
+                      on hover in every session state — running included. */}
+                  <MessageTimestamp
+                    timestamp={message.timestamp}
+                    visible={isHovered}
+                  />
+                  <CopyButton
+                    content={message.content}
+                    visible={isHovered}
+                  />
                 </div>
               </div>
             </div>
@@ -2229,7 +2311,6 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   resolveLocalFilePath,
   mapDisplayText,
   showTypingIndicator = false,
-  showCopyButtons = true,
   showImagePreviews = true,
   sessionLive = false,
   isActiveTurn = false,
@@ -2245,7 +2326,6 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
   resolveLocalFilePath?: (href: string, text: string) => string | null;
   mapDisplayText?: (value: string) => string;
   showTypingIndicator?: boolean;
-  showCopyButtons?: boolean;
   showImagePreviews?: boolean;
   sessionLive?: boolean;
   /** This turn is the session's current in-flight turn (live session, last turn). */
@@ -2492,7 +2572,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
           message={item.message}
           resolveLocalFilePath={resolveLocalFilePath}
           mapDisplayText={mapDisplayText}
-          showCopyButton={showCopyButtons && !hasToolGroupAfter}
+          showCopyButton={!hasToolGroupAfter}
           onOpenLocalFile={onOpenLocalFile}
           onBranch={onBranch}
           onQuoteReply={onQuoteReply}
@@ -2628,7 +2708,7 @@ const AssistantTurnBlock = React.memo(function AssistantTurnBlock({
                   message={deliveryMessage!}
                   resolveLocalFilePath={resolveLocalFilePath}
                   mapDisplayText={mapDisplayText}
-                  showCopyButton={showCopyButtons}
+                  showCopyButton
                   onOpenLocalFile={onOpenLocalFile}
                   onBranch={onBranch}
                   onQuoteReply={onQuoteReply}
@@ -4632,7 +4712,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             }}
             resolveLocalFilePath={resolveLocalFilePath}
             showTypingIndicator
-            showCopyButtons={!isStreaming}
             showImagePreviews
             sessionLive={isStreaming || currentSession?.status === 'running'}
             isActiveTurn={currentSession?.status === 'running'}
@@ -4688,12 +4767,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 resolveLocalFilePath={resolveLocalFilePath}
                 mapDisplayText={mapDisplayText}
                 showTypingIndicator={showTypingIndicator}
-                showCopyButtons={!isStreaming}
                 showImagePreviews
                 sessionLive={isStreaming || currentSession?.status === 'running'}
                 isActiveTurn={currentSession?.status === 'running' && isLastTurn}
                 onOpenLocalFile={handleOpenLocalFile}
-                onBranch={handleBranchFromMessage}
+                // Streaming turns keep every hover affordance (owner,
+                // 2026-10-28) — the "⋯", the timestamp, feedback. Only the
+                // branch entry drops out, because forking from a message whose
+                // turn is still being written is meaningless; the handler
+                // carries the same guard as defense in depth.
+                onBranch={isStreaming ? undefined : handleBranchFromMessage}
                 onQuoteReply={handleQuoteReplyMessage}
                 isAssistantMode={isAssistantMode}
                 activityAvatar={sessionMetabot?.avatar ?? currentSession.metabotAvatar ?? null}

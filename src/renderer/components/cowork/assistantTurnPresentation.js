@@ -59,8 +59,11 @@ export const findDeliveryAssistantIndex = (visibleAssistantItems) => {
  * bubbles a bot conversation mostly consists of; the final-reply-only and
  * narration-exclusion conditions were quirks of that one-toolbar layout, not
  * requirements of the reply feature, so they are gone.
- * `showCopyButton` keeps the mode-shared gate that hides action toolbars
- * while the turn still streams.
+ * `showCopyButton` now carries only the per-item gate (an item trailed by a
+ * tool group keeps its own rows clean). The old mode-wide streaming gate —
+ * toolbars hidden while the turn still streamed — is gone (owner,
+ * 2026-10-28): hover affordances must exist in every session state, running
+ * included; the branch action guards itself at the handler instead.
  */
 export const shouldShowAssistantBubbleActions = ({ isAssistantMode, showCopyButton }) => (
   Boolean(isAssistantMode && showCopyButton)
