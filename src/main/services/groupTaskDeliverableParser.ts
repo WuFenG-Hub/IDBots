@@ -190,7 +190,11 @@ function parseSegment(segment: string): ParsedDeliverable {
  * One [DELIVERABLE] tag occurrence in a message.
  */
 interface ScannedTagSegment {
-  /** Same-line text after the tag, trimmed (never empty — empty parts are skipped). */
+  /**
+   * Same-line text after the tag, trimmed. Empty ONLY for a bare tag line
+   * ("[DELIVERABLE]" alone) whose lookahead window carries the delivery —
+   * those entries exist so the lookahead line can be parsed as the candidate.
+   */
   segment: string;
   /**
    * Bounded lookahead for the multi-line delivery format
@@ -223,7 +227,6 @@ function scanDeliverableTagSegments(content: string): ScannedTagSegment[] {
     const parts = line.split(DELIVERABLE_TAG_SPLIT);
     for (let p = 1; p < parts.length; p += 1) {
       const segment = parts[p].trim();
-      if (!segment) continue;
       let nextLine: string | null = null;
       if (p === parts.length - 1) {
         for (let j = i + 1; j <= Math.min(i + 3, lines.length - 1); j += 1) {
@@ -234,6 +237,21 @@ function scanDeliverableTagSegments(content: string): ScannedTagSegment[] {
             break;
           }
         }
+      }
+      // Task #131/#132 (2026-10-29): a BARE tag line — "[DELIVERABLE]" alone,
+      // the exact shape the dispatch prompt teaches ("回执独立成条、链上 URI
+      // 裸文本独占一行") — used to be dropped here TOGETHER with its lookahead,
+      // so every such delivery silently minted no ledger row while the chair
+      // still woke on hasDeliverableTagLine. The lookahead line IS the
+      // candidate. A bare tag stays skipped only when its window announces
+      // nothing positively URI-shaped: plain prose under a bare tag is no
+      // artifact and must not mint a text process-note row.
+      if (!segment) {
+        const windowIsUriShaped = nextLine != null
+          && (HAS_SCHEME_TOKEN_RE.test(nextLine)
+            || HAS_HTTP_TOKEN_RE.test(nextLine)
+            || BARE_PINID_RE.test(nextLine));
+        if (!windowIsUriShaped) continue;
       }
       entries.push({ segment, nextLine });
     }
@@ -250,7 +268,10 @@ function scanDeliverableTagSegments(content: string): ScannedTagSegment[] {
  * Bounded multi-line upgrade: a tag line whose description leaves the URI to
  * the next non-blank line ("[DELIVERABLE] <desc>：\n\n<uri>" — task #62 msg
  * c48d2eb6 delivered a skill pin in that shape) is re-parsed over the segment
- * + lookahead line. Upgrade-ONLY: a clean URI on the lookahead line replaces
+ * + lookahead line. The bare-tag form ("[DELIVERABLE]" alone, URI on the next
+ * non-blank line — the dispatch-prompt shape "回执独立成条、链上 URI 裸文本
+ * 独占一行", tasks #131/#132) parses the lookahead line as the whole
+ * candidate. Upgrade-ONLY: a clean URI on the lookahead line replaces
  * a text/invalid same-line verdict; anything ambiguous there (placeholder,
  * truncated hex) keeps the same-line result, so the strict P1-4 semantics
  * never gain new invalid rows. Only the FIRST URI of the lookahead line is
@@ -258,6 +279,12 @@ function scanDeliverableTagSegments(content: string): ScannedTagSegment[] {
  */
 export function parseDeliverableLines(content: string): ParsedDeliverable[] {
   return scanDeliverableTagSegments(content).map(({ segment, nextLine }) => {
+    if (!segment) {
+      // Bare tag line: the lookahead line is the WHOLE candidate and carries
+      // its own verdict — valid records, honestly invalid rejects (the scan
+      // only emits bare entries when that line is URI-shaped).
+      return parseSegment(nextLine ?? '');
+    }
     const candidate = parseSegment(segment);
     if (candidate.valid && candidate.uri) return candidate;
     if (!nextLine) return candidate;

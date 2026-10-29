@@ -484,6 +484,104 @@ test('ambiguous lookahead line keeps the same-line verdict (local-file bullets s
   assert.equal(parsed[0].uri, null);
 });
 
+// ---------------------------------------------------------------------------
+// BARE tag line + URI on the next non-blank line (tasks #131/#132,
+// 2026-10-28/29): the dispatch prompt teaches "[DELIVERABLE] 回执独立成条、
+// 链上 URI 裸文本独占一行", so the bots stopped writing the URI after the tag
+// on the SAME line (task #130's shape, 11 ledger rows) and every delivery
+// minted no row at all — the scan dropped the bare tag line together with its
+// lookahead. The lookahead line IS the candidate now.
+// ---------------------------------------------------------------------------
+
+const PIN_LUCY = '08f355f5764e4fb9dfa522b66fdbf2c85acd655c430f89e4fac9cf874c087a2di0';
+const PIN_VIDEO = '8100fed610d34755ad2e03e2eb343a45d94a27bfbc0b2c768fe586203f63229ei0';
+const PIN_HERO = 'f2eaeb6ca31fad1ce97dcaefcb8c3e5a59245bc6d8b6eb5c2249f7bbf2924243i0';
+const PIN_COVER = '957d549a74a0b8817c4bc4974986a3a05fe604596d05738fe26176e15c07a1a3i0';
+const PIN_APP86 = '524f47c8c5a0baa15c5bb9c5be643620b51411ec7bba4bb4aa39f9df55b705e4i0';
+const PIN_SKILL86 = '4ed13ef585871f6de749f1f1c2f47fa2f986ca6ab96bf6abe4771888f5abe015i0';
+const PIN_ZIP86 = 'd0e3eb93817e9b37435d295ab96ffd203b060e3f94b6b14e4538254f33d2679ci0';
+
+test('#131 msg10062: bare tag line + URI next line → two rows (pinid + metafile)', () => {
+  const content = [
+    '[WORKING] 文案+分镜棒交付完毕（07:41，DEADLINE 07:57 内）。',
+    '',
+    '@AI_Sunny 请验收。交付两件：',
+    '',
+    '[DELIVERABLE]',
+    `pin://${PIN_LUCY}`,
+    '',
+    '[DELIVERABLE]',
+    `metafile://${PIN_VIDEO}`,
+    '',
+    '内含三节 + 诚实边界：①亲测记录（真装真跑全命令）②MetaApp 全文案六板块 ③46 秒逐镜分镜表。',
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  assert.equal(parsed.length, 2);
+  assert.deepEqual(parsed[0], { kind: 'pinid', uri: `pin://${PIN_LUCY}`, valid: true, note: null });
+  assert.deepEqual(parsed[1], { kind: 'metafile', uri: `metafile://${PIN_VIDEO}`, valid: true, note: null });
+  // Segment alignment preserved for the daemon's local-file enhancement.
+  assert.equal(parseDeliverableSegments(content).length, 2);
+  // The bare tag lines still count as protocol lines (wakeups stay wired).
+  assert.equal(hasDeliverableTagLine(content), true);
+});
+
+test('#131 msg10079: three bare tags in one message → three rows, .zip suffix kept', () => {
+  const content = [
+    '[WORKING] ④⑤ 组装上链棒交付（08:24，DEADLINE 09:05 内）。',
+    '',
+    '[DELIVERABLE]',
+    `metaapp://${PIN_APP86}`,
+    '',
+    '[DELIVERABLE]',
+    `pin://${PIN_SKILL86}`,
+    '',
+    '[DELIVERABLE]',
+    `metafile://${PIN_ZIP86}.zip`,
+    '',
+    '三行依次：MetaApp 本体、metabot-skill 封装 pin、skill_file zip。',
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  assert.equal(parsed.length, 3);
+  assert.deepEqual(parsed[0], { kind: 'metaapp', uri: `metaapp://${PIN_APP86}`, valid: true, note: null });
+  assert.deepEqual(parsed[1], { kind: 'pinid', uri: `pin://${PIN_SKILL86}`, valid: true, note: null });
+  assert.deepEqual(parsed[2], { kind: 'metafile', uri: `metafile://${PIN_ZIP86}.zip`, valid: true, note: null });
+  assert.equal(parseDeliverableSegments(content).length, 3);
+});
+
+test('#131 msg10071: back-to-back bare tag blocks with prose between stay one-per-tag', () => {
+  const content = [
+    '[DELIVERABLE]',
+    `metafile://${PIN_HERO}`,
+    '',
+    '[DELIVERABLE]',
+    `metafile://${PIN_COVER}`,
+    '',
+    '媒体棒前两件落地：① 头图（16:9 hero）② 内文配图。视频主件渲染中。',
+  ].join('\n');
+  const parsed = parseDeliverableLines(content);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].uri, `metafile://${PIN_HERO}`);
+  assert.equal(parsed[1].uri, `metafile://${PIN_COVER}`);
+});
+
+test('bare tag + prose-only window stays dropped (no text process-note row)', () => {
+  const content = [
+    '[DELIVERABLE]',
+    '（尚未上链，稍后补全）',
+  ].join('\n');
+  assert.deepEqual(parseDeliverableLines(content), []);
+  // …but a bare tag whose window carries an uri-SHAPED token that fails
+  // validation is honestly rejected, never silently swallowed.
+  const truncated = [
+    '[DELIVERABLE]',
+    'metaapp://ab12cd34（截断）',
+  ].join('\n');
+  const parsed = parseDeliverableLines(truncated);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].valid, false);
+  assert.match(parsed[0].note, /pinid|truncation|placeholder/i);
+});
+
 test('prose tag mention (mid-line) is a citation, never a candidate (task #63)', () => {
   const content = [
     '状态澄清，非误期：前置条件是 Builder 的 S3 上链产物，尚未落地，故此时不可能有 [DELIVERABLE]。',
