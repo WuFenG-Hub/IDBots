@@ -25,6 +25,7 @@ import {
 } from './inAppBrowser';
 import { getMe, logout, sendCode, verifyCode } from './loginApi';
 import type { LoginTenant } from './loginApi';
+import { probeSessionRecovery } from './sessionRecovery';
 
 mobileI18n.initFromDeviceLocale();
 
@@ -203,7 +204,7 @@ function PreparingScreen(props: { onSignOut: () => void }): JSX.Element {
         // reduced functionality instead of blocking the user.
         if (me.tenant.status === 'ready' || me.tenant.status === 'degraded') {
           navigated = true;
-          window.location.assign('/app/');
+          window.location.replace('/app/');
         }
       } catch {
         // Transient poll failure: the next 3 s tick retries.
@@ -248,6 +249,20 @@ function PreparingScreen(props: { onSignOut: () => void }): JSX.Element {
   );
 }
 
+function SessionRecoveryScreen(props: { failed: boolean; onRetry: () => void }): JSX.Element {
+  return (
+    <div style={styles.page}>
+      <div style={styles.logo}>ID</div>
+      <h1 style={styles.title}>{t(props.failed ? 'mobile.login.restoreFailed' : 'mobile.login.restoreTitle')}</h1>
+      {props.failed ? (
+        <button type="button" style={styles.button} onClick={props.onRetry}>
+          {t('mobile.common.retry')}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function LoginPage(): JSX.Element {
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
@@ -262,6 +277,28 @@ function LoginPage(): JSX.Element {
   const [agreeTerms, setAgreeTerms] = useState(false);
   const [hkConsent, setHkConsent] = useState(false);
   const [preparing, setPreparing] = useState(false);
+  const [sessionState, setSessionState] = useState<'checking' | 'login' | 'retry'>('checking');
+  const [sessionAttempt, setSessionAttempt] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSessionState('checking');
+    void probeSessionRecovery(getMe).then((action) => {
+      if (cancelled) return;
+      if (action === 'open-app') {
+        window.location.replace('/app/');
+        return;
+      }
+      if (action === 'preparing') {
+        setPreparing(true);
+        return;
+      }
+      setSessionState(action);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionAttempt]);
 
   // 1 s ticks for the resend countdown started by sendCode's resendAfterSec.
   useEffect(() => {
@@ -325,6 +362,7 @@ function LoginPage(): JSX.Element {
       await logout();
     } finally {
       setPreparing(false);
+      setSessionState('login');
     }
   };
 
@@ -334,6 +372,15 @@ function LoginPage(): JSX.Element {
         onSignOut={() => {
           void onSignOut();
         }}
+      />
+    );
+  }
+
+  if (sessionState !== 'login') {
+    return (
+      <SessionRecoveryScreen
+        failed={sessionState === 'retry'}
+        onRetry={() => setSessionAttempt((value) => value + 1)}
       />
     );
   }

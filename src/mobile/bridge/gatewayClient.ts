@@ -904,6 +904,12 @@ export class GatewayClient {
     this.reconnectNow();
   };
 
+  private readonly handleWindowOffline = (): void => {
+    if (!this.closed && !this.isTerminalState(this.state)) {
+      this.setState('offline');
+    }
+  };
+
   private readonly handleVisibilityChange = (): void => {
     const doc = (globalThis as { document?: { visibilityState?: string } }).document;
     if (!doc || doc.visibilityState === undefined || doc.visibilityState === 'visible') {
@@ -924,8 +930,10 @@ export class GatewayClient {
     };
     if (g.window?.addEventListener && g.window.removeEventListener) {
       g.window.addEventListener('online', this.handleWindowOnline);
+      g.window.addEventListener('offline', this.handleWindowOffline);
       this.domUnsubscribers.push(() => {
         g.window?.removeEventListener?.('online', this.handleWindowOnline);
+        g.window?.removeEventListener?.('offline', this.handleWindowOffline);
       });
     }
     if (g.document?.addEventListener && g.document.removeEventListener) {

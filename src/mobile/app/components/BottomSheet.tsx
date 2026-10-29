@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { useNativeBackHandler } from '../hooks/useNativeBackHandler';
 
 /**
  * Bottom sheet used by the chat permission request and the Me screen's
@@ -10,6 +11,10 @@ export function BottomSheet(props: {
   children: ReactNode;
   onClose?: () => void;
 }): JSX.Element {
+  useNativeBackHandler(() => {
+    props.onClose?.();
+    return true;
+  }, true, 100);
   return (
     <div className="fixed inset-0 z-40 flex flex-col justify-end">
       <button

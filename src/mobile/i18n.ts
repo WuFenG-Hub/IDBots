@@ -503,6 +503,8 @@ const zhTranslations: MobileDictionary = {
   // Wording pending legal review before launch.
   'mobile.login.hkDataConsent': '我同意将我的数据存储和处理于香港。',
   'mobile.login.signOut': '退出登录',
+  'mobile.login.restoreTitle': '正在恢复登录状态…',
+  'mobile.login.restoreFailed': '暂时无法恢复登录状态，请检查网络后重试。',
   'mobile.login.preparingTitle': '正在准备你的 Bot',
   'mobile.login.preparingNote': '首次开通可能需要几分钟，请保持本页面打开。',
   'mobile.login.preparingFailed': '准备过程中出现问题：{message}',
@@ -1007,6 +1009,8 @@ const enTranslations: MobileDictionary = {
   // Wording pending legal review before launch.
   'mobile.login.hkDataConsent': 'I consent to my data being stored and processed in Hong Kong.',
   'mobile.login.signOut': 'Sign out',
+  'mobile.login.restoreTitle': 'Restoring your session…',
+  'mobile.login.restoreFailed': 'We could not restore your session. Check your connection and try again.',
   'mobile.login.preparingTitle': 'Preparing your Bot',
   'mobile.login.preparingNote': 'First-time setup can take a few minutes. Keep this page open.',
   'mobile.login.preparingFailed': 'Something went wrong while preparing your Bot: {message}',

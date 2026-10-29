@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { BundleMeters, BundlePlan } from '../../bridge/types';
 import { getAppBridge, getMobileElectron } from '../appBridge';
+import { getNativeAdapter } from '../../native/nativeAdapter';
 import {
   isActiveOrder,
   isCurrentOrderOperation,
@@ -338,7 +339,8 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
       return;
     }
     setAlipayOpen('opening');
-    window.location.href = `alipays://platformapi/startapp?saId=10000007&qrcode=${encodeURIComponent(current.qrCode)}`;
+    const alipayUrl = `alipays://platformapi/startapp?saId=10000007&qrcode=${encodeURIComponent(current.qrCode)}`;
+    void getNativeAdapter().openExternal(alipayUrl).catch(() => setAlipayOpen('offer-browser'));
     stopAppOpenWatch();
     timersRef.current.appOpen = setTimeout(() => {
       if (document.visibilityState === 'visible') setAlipayOpen('offer-browser');
@@ -348,7 +350,7 @@ export function useRecharge(onMetersRefreshed?: (meters: BundleMeters) => void):
   const openInBrowser = useCallback(() => {
     const current = orderRef.current;
     if (!current?.qrCode || !isActiveOrder(current)) return;
-    window.open(current.qrCode, '_blank', 'noopener,noreferrer');
+    void getNativeAdapter().openExternal(current.qrCode).catch(() => setAlipayOpen('qr'));
   }, []);
 
   const showQrFallback = useCallback(() => {

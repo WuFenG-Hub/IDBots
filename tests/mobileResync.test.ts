@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { performResync } from '../src/mobile/app/hooks/useResync.ts';
+import { performResync, recoverNativeAppState } from '../src/mobile/app/hooks/useResync.ts';
 import { mergeCoworkSnapshotMessages } from '../src/renderer/services/coworkSessionState.ts';
 import type { CoworkMessage } from '../src/renderer/types/cowork.ts';
 
@@ -112,6 +112,44 @@ test('performResync skips the session and stream pulls when nothing is open', as
   );
   assert.equal(snapshot.session, null);
   assert.equal(snapshot.liveContent, null);
+});
+
+test('native foreground resyncs an already-online bridge without reconnecting', () => {
+  let reconnects = 0;
+  let resyncs = 0;
+  const bridge = {
+    connection: { getState: () => 'online' },
+    gateway: { reconnectNow: () => { reconnects += 1; } },
+  };
+  recoverNativeAppState(true, bridge as never, () => { resyncs += 1; });
+  assert.equal(reconnects, 0);
+  assert.equal(resyncs, 1);
+});
+
+test('native foreground reconnects a disconnected gateway and lets onReconnected resync', () => {
+  let reconnects = 0;
+  let resyncs = 0;
+  const bridge = {
+    connection: { getState: () => 'reconnecting' },
+    gateway: { reconnectNow: () => { reconnects += 1; } },
+  };
+  recoverNativeAppState(true, bridge as never, () => { resyncs += 1; });
+  assert.equal(reconnects, 1);
+  assert.equal(resyncs, 0, 'the existing reconnect notification owns the resync');
+});
+
+test('native background and disconnected mock events do not trigger recovery work', () => {
+  let reconnects = 0;
+  let resyncs = 0;
+  const real = {
+    connection: { getState: () => 'offline' },
+    gateway: { reconnectNow: () => { reconnects += 1; } },
+  };
+  recoverNativeAppState(false, real as never, () => { resyncs += 1; });
+  const mock = { connection: { getState: () => 'offline' } };
+  recoverNativeAppState(true, mock as never, () => { resyncs += 1; });
+  assert.equal(reconnects, 0);
+  assert.equal(resyncs, 0);
 });
 
 function raw(id: string, type: CoworkMessage['type'], content: string, metadata?: CoworkMessage['metadata']): CoworkMessage {

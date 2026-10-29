@@ -1,17 +1,20 @@
-# IDBots Native Mobile Shell — NS0
+# IDBots Native Mobile Shell — NS1
 
 This package contains the Android and iOS Capacitor shells for the deployed IDBots PWA. It is an independent pnpm package: the repository root `postinstall` does not install it, and Electron does not package it.
 
-NS0 provides only the native foundation:
+NS0 provides the native foundation, and NS1 adds lifecycle and navigation integration:
 
 - staging and production remote-PWA flavors;
-- exact-origin privileged navigation and system handoff for approved external links;
+- exact-origin privileged navigation and system handoff for approved external links and Alipay;
 - a bundled bilingual offline/error page with retry;
 - a versioned native bootstrap installed at document start, before React use;
-- Android App/Back plugin scaffolding and iOS shell scaffolding;
-- focused static, bootstrap, origin-policy, build, and WebView evidence.
+- a typed local adapter with browser/PWA and per-capability fallbacks;
+- native app-state recovery through the existing reconnect/read-only-resync flow;
+- Android Back through current sheets, drawers, recharge state, and tabs without a second history;
+- keyboard, safe-area, theme, and iOS-native recharge policy integration;
+- focused static, adapter, lifecycle, navigation, origin-policy, build, and WebView evidence.
 
-NS1 lifecycle/reconnect/navigation integration, NS2 camera/photos/files/share, push notifications, signing, TestFlight, and release rollout are intentionally not implemented.
+NS2 camera/photos/files/share, push notifications, signing, TestFlight, and release rollout are intentionally not implemented.
 
 ## Architecture
 
@@ -23,7 +26,7 @@ The shell installs `window.idbotsNative` at document start on the exact remote o
 
 ## Toolchain
 
-Verified NS0 versions:
+Verified NS0/NS1 toolchain versions:
 
 | Component | Version / requirement |
 |---|---|
@@ -79,7 +82,7 @@ pnpm run build:ios:staging
 pnpm run build:ios:production
 ```
 
-NS0 iOS builds are Simulator Debug builds with `CODE_SIGNING_ALLOWED=NO`. Production-flavor debug builds are not production releases. No signing key, Apple credential, store submission, TestFlight upload, staging deployment, or production deployment is used.
+iOS builds are Simulator Debug builds with `CODE_SIGNING_ALLOWED=NO`. Production-flavor debug builds are not production releases. No signing key, Apple credential, store submission, TestFlight upload, staging deployment, or production deployment is used.
 
 For a particular iOS Simulator, set `IDBOTS_IOS_DESTINATION`, for example `platform=iOS Simulator,id=<device-udid>`.
 
@@ -102,19 +105,31 @@ pnpm run test:e2e:mobile
 pnpm run test:e2e:mobile:gateway
 ```
 
-## NS0 Native Surface
+## NS1 Native Surface
 
 `nativeBridgeVersion` is `1`. `getCapabilities()` returns a fresh object with these values:
 
-| Capability | NS0 value | Meaning |
+| Capability | NS1 value | Meaning |
 |---|---|---|
 | `camera`, `photos`, `files`, `share` | `false` | NS2 is not implemented |
-| `appState` | `true` | `@capacitor/app` is present; reconnect/resync wiring is NS1 |
-| `backButton` | Android only | App plugin scaffolding exists; existing-route integration is NS1 |
+| `appState` | `true` when the App listener exists | Native foreground/background events are available; otherwise the adapter falls back |
+| `backButton` | Android when the App listener exists | Current UI handlers run first; product roots exit rather than history-returning to login |
 | `externalUrls` | `true` | Native exact-origin policy and system handoff are implemented |
 | `secureScreen` | `false` | No secure-screen claim is made |
 
-The bootstrap also records `phase: 'document-start'`, the expected origin, and the platform. The PWA adds a separate `before-react` proof after validation. Browser and PWA execution do not require or synthesize `window.idbotsNative`.
+The bootstrap also records `phase: 'document-start'`, the expected origin, and the platform. The PWA adds a separate `before-react` proof after validation. Browser and PWA execution do not require or synthesize `window.idbotsNative`; the local adapter supplies no-op lifecycle/back fallbacks and normal browser external opening. A native bootstrap that is missing, late, from the wrong origin/platform, or has an unsupported bridge version remains fail-closed before React.
+
+## Lifecycle and Navigation
+
+Native foreground events call the existing `reconnectNow()` when the gateway is not online. If the gateway is already online, they run the existing coalesced read-only resync; reconnect completion uses the same path through `onReconnected`. Background events do no recovery work. No native lifecycle handler starts a session, submits or retries a message, creates an order, or performs a chain write.
+
+Every cold login entry probes the existing C3 `getMe()` with the persisted HttpOnly cookie. Ready/degraded tenants open `/app/` with `location.replace`, provisioning/failed tenants continue through the existing preparing flow, only `UNAUTHORIZED` opens the login form, and transient failures offer retry. Browser `offline` moves a non-terminal gateway connection to the existing offline banner immediately; `online` still calls `reconnectNow()`.
+
+Android Back closes the highest-priority mounted BottomSheet or session drawer, then closes recharge or returns Tasks/Me to Chat. An unhandled `/app/` or `/login` product root exits through `App.exitApp()` instead of history-returning to login; non-product-root WebView history remains available. The dispatcher stores mounted callbacks, not navigation entries, so browser/PWA history remains unchanged.
+
+Approved HTTP(S) and Alipay URLs use main-frame navigation to reach the NS0 native system-handoff delegates. The PWA keeps `window.open` for HTTP(S), same-tab Alipay navigation, QR fallback, and existing order recovery. A failed native handoff is not blindly repeated through a second path.
+
+Android declares `adjustResize`; the PWA retains its visual-viewport composer inset, safe-area padding, connection banners, and light/dark/system themes. Recharge is hidden only when the existing client facts report `shell=capacitor` and `os=ios`; iOS PWA, Android native, browsers, and redeem-code behavior remain unchanged. OS eviction reloads the remote PWA through the existing native delegates and restores authoritative tenant state rather than a native session snapshot.
 
 ## DEBUG WebView Smoke
 
@@ -147,6 +162,6 @@ Normal launches and Release builds do not run these actions. Screenshots and log
 
 ## Storage and Secrets
 
-NS0 adds no custom native persistent storage and no native preferences for account or product data. Capacitor may keep non-secret binary-version bookkeeping; the WebView owns the existing HttpOnly session cookie. No session cookie is copied into native preferences, files, logs, JavaScript bridge values, or analytics.
+NS0 and NS1 add no custom native persistent storage and no native preferences for account or product data. Capacitor may keep non-secret binary-version bookkeeping; the WebView owns the existing HttpOnly session cookie. No session cookie is copied into native preferences, files, logs, JavaScript bridge values, or analytics.
 
 Do not place signing keys, Apple credentials, device tokens, phone numbers, message contents, mnemonics, provider keys, redeem codes, payment QR payloads, signed file URLs, or session tokens in this package or its evidence.

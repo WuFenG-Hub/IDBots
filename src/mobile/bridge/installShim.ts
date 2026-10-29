@@ -28,6 +28,8 @@ import type { IdbotsMobileOs, IdbotsMobileShell } from './types';
 import type { UploadErrorCode, UploadFileOptions } from './upload';
 import { toBrowserFileUrl } from '../../renderer/services/localFileUrl';
 import rawIpcContract from '../generated/ipc-contract.json';
+import { getNativeAdapter } from '../native/nativeAdapter';
+import type { MobileNativeAdapter } from '../native/nativeAdapter';
 
 /** Structural view of the C2 gateway client this shim is wired against. */
 export interface GatewayInvoker {
@@ -77,6 +79,7 @@ export interface ShimDeps {
   gateway: GatewayInvoker;
   /** REQ-E-6 upload seam; required for `dialog.selectFile`, optional elsewhere. */
   uploadFile?: UploadFileFn;
+  nativeAdapter?: MobileNativeAdapter;
 }
 
 export interface ShimHandle {
@@ -161,7 +164,7 @@ function buildSTierHandlers(deps: ShimDeps): Record<string, STierHandler> {
     'dialog:saveInlineFile': () => Promise.resolve({ success: true, path: null }),
     'dialog:selectFile': ((options?: unknown) => selectFileOnPhone(deps, options)) as STierHandler,
     // main.ts:17419-17428 — http(s) only, desktop error wording preserved.
-    'shell:openExternal': ((url?: unknown) => openExternalOnPhone(url)) as STierHandler,
+    'shell:openExternal': ((url?: unknown) => openExternalOnPhone(deps, url)) as STierHandler,
     // `02`: sign the /data path (C2 File Download) and open the signed URL.
     'shell:openPath': ((filePath?: unknown) => signAndOpen(deps.gateway, filePath)) as STierHandler,
     'shell:showItemInFolder': ((filePath?: unknown) => signAndOpen(deps.gateway, filePath)) as STierHandler,
@@ -173,23 +176,25 @@ function buildSTierHandlers(deps: ShimDeps): Record<string, STierHandler> {
   };
 }
 
-function openExternalOnPhone(url: unknown): Promise<{ success: boolean; error?: string }> {
+async function openExternalOnPhone(deps: ShimDeps, url: unknown): Promise<{ success: boolean; error?: string }> {
   const trimmed = typeof url === 'string' ? url.trim() : '';
   if (!trimmed) {
-    return Promise.resolve({ success: false, error: 'URL is empty' });
+    return { success: false, error: 'URL is empty' };
   }
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      // Silently ignored means: never handed to window.open; the desktop
-      // error string keeps renderer error paths identical.
-      return Promise.resolve({ success: false, error: 'Only http and https URLs are allowed' });
+      return { success: false, error: 'Only http and https URLs are allowed' };
     }
   } catch {
-    return Promise.resolve({ success: false, error: 'Invalid URL' });
+    return { success: false, error: 'Invalid URL' };
   }
-  browserWindow()?.open?.(trimmed, '_blank', 'noopener,noreferrer');
-  return Promise.resolve({ success: true });
+  try {
+    await (deps.nativeAdapter ?? getNativeAdapter()).openExternal(trimmed);
+    return { success: true };
+  } catch {
+    return { success: false, error: 'Failed to open external URL' };
+  }
 }
 
 async function signAndOpen(

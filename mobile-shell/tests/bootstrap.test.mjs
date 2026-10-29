@@ -9,9 +9,32 @@ function bootstrap(origin, platform = 'android', remoteOrigin = 'https://staging
   const script = template
     .replace('__IDBOTS_REMOTE_ORIGIN_JSON__', JSON.stringify(remoteOrigin))
     .replace('__IDBOTS_PLATFORM_JSON__', JSON.stringify(platform));
-  const window = { location: { origin } };
+  const listeners = new Map();
+  const window = {
+    location: {
+      origin,
+      assign(url) { window.assigned.push(url); },
+    },
+    history: { back() { window.historyBacks += 1; } },
+    assigned: [],
+    historyBacks: 0,
+    exits: 0,
+    nativeExits: 0,
+    listeners,
+    Capacitor: {
+      Plugins: {
+        App: {
+          async addListener(eventName, callback) {
+            listeners.set(eventName, callback);
+            return { remove: async () => listeners.delete(eventName) };
+          },
+          async exitApp() { window.exits += 1; },
+        },
+      },
+    },
+  };
   window.top = window;
-  runInContext(script, createContext({ window }));
+  runInContext(script, createContext({ window, URL }));
   return window;
 }
 
@@ -58,4 +81,78 @@ test('the bridge is non-writable and capabilities cannot be mutated globally', (
   const first = window.idbotsNative.getCapabilities();
   first.camera = true;
   assert.equal(window.idbotsNative.getCapabilities().camera, false);
+});
+
+test('capabilities reflect an unavailable App plugin instead of claiming lifecycle support', () => {
+  const window = bootstrap('https://staging.idbots.world');
+  delete window.Capacitor.Plugins.App;
+  assert.equal(window.idbotsNative.getCapabilities().appState, false);
+  assert.equal(window.idbotsNative.getCapabilities().backButton, false);
+  assert.equal(window.idbotsNative.onAppStateChange(() => {})(), undefined);
+  assert.equal(window.idbotsNative.onBackButton(() => false)(), undefined);
+});
+
+test('app-state subscriptions forward booleans and remove asynchronous listeners', async () => {
+  const window = bootstrap('https://staging.idbots.world');
+  const states = [];
+  const unsubscribe = window.idbotsNative.onAppStateChange((active) => states.push(active));
+  window.listeners.get('appStateChange')({ isActive: false });
+  window.listeners.get('appStateChange')({ isActive: true });
+  assert.deepEqual(states, [false, true]);
+  await new Promise((resolve) => setImmediate(resolve));
+  unsubscribe();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(window.listeners.has('appStateChange'), false);
+});
+
+test('Android back consumes current UI handlers before history or app exit', () => {
+  const window = bootstrap('https://staging.idbots.world');
+  let handled = true;
+  window.idbotsNative.onBackButton(() => handled);
+  window.listeners.get('backButton')({ canGoBack: true });
+  assert.equal(window.historyBacks, 0);
+  assert.equal(window.exits, 0);
+
+  handled = false;
+  window.listeners.get('backButton')({ canGoBack: true });
+  assert.equal(window.historyBacks, 1);
+  assert.equal(window.exits, 0);
+  window.listeners.get('backButton')({ canGoBack: false });
+  assert.equal(window.exits, 1);
+});
+
+test('Android Back exits at product roots instead of returning to login history', () => {
+  for (const pathname of ['/app/', '/login']) {
+    const window = bootstrap('https://staging.idbots.world');
+    window.location.pathname = pathname;
+    window.idbotsNative.onBackButton(() => false);
+    window.listeners.get('backButton')({ canGoBack: true });
+    assert.equal(window.historyBacks, 0, pathname);
+    assert.equal(window.exits, 1, pathname);
+  }
+});
+
+test('Android root Back prefers the deterministic NativeBack plugin', () => {
+  const window = bootstrap('https://staging.idbots.world');
+  window.location.pathname = '/app/';
+  window.Capacitor.Plugins.NativeBack = {
+    exitApp: async () => { window.nativeExits += 1; },
+  };
+  window.idbotsNative.onBackButton(() => false);
+  window.listeners.get('backButton')({ canGoBack: true });
+  assert.equal(window.nativeExits, 1);
+  assert.equal(window.exits, 0, 'App exitApp must not be used when NativeBack exists');
+});
+
+test('native external opening uses main-frame navigation only for approved URLs', async () => {
+  const window = bootstrap('https://staging.idbots.world');
+  await window.idbotsNative.openExternal(' https://example.com/path ');
+  await window.idbotsNative.openExternal('alipays://platformapi/startapp?saId=10000007');
+  assert.deepEqual(window.assigned, [
+    'https://example.com/path',
+    'alipays://platformapi/startapp?saId=10000007',
+  ]);
+  await assert.rejects(async () => window.idbotsNative.openExternal('javascript:alert(1)'));
+  await assert.rejects(async () => window.idbotsNative.openExternal('https://user@example.com/'));
+  assert.equal(window.assigned.length, 2);
 });

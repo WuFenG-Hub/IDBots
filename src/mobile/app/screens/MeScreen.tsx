@@ -76,11 +76,14 @@ function UserCard(props: {
  * Balance card: the whole card opens the traffic page while the recharge
  * button keeps its one-tap path into the cashier overlay (IA-PLAN §2.2 —
  * the conversion path stays one jump; hard gate 2 depends on it).
+ * rechargeAllowed=false (native shell, NS1 policy) hides the web cashier
+ * entry while the card itself stays tappable into the traffic page.
  */
 function BalanceCard(props: {
   resyncCounter?: number;
   onOpenRecharge: () => void;
   onOpenTraffic: () => void;
+  rechargeAllowed?: boolean;
 }): JSX.Element {
   const { meters, loading, error, reload } = useMeters(props.resyncCounter);
   // Desktop parity threshold (TrafficSettings TRAFFIC_LOW_BALANCE_BYTES).
@@ -127,23 +130,29 @@ function BalanceCard(props: {
         </div>
       ) : null}
       <div className="flex gap-2">
-        <button
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            props.onOpenRecharge();
-          }}
-          className="min-h-[44px] flex-1 rounded-xl bg-[var(--color-primary)] py-2 text-sm font-medium text-black active:opacity-80"
-        >
-          {t('mobile.me.rechargeEntry')}
-        </button>
+        {props.rechargeAllowed !== false ? (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              props.onOpenRecharge();
+            }}
+            className="min-h-[44px] flex-1 rounded-xl bg-[var(--color-primary)] py-2 text-sm font-medium text-black active:opacity-80"
+          >
+            {t('mobile.me.rechargeEntry')}
+          </button>
+        ) : null}
         <RedeemButton />
       </div>
     </Section>
   );
 }
 
-export default function MeScreen(props: { resyncCounter?: number; onOpenRecharge: () => void }): JSX.Element {
+export default function MeScreen(props: {
+  resyncCounter?: number;
+  onOpenRecharge: () => void;
+  rechargeAllowed?: boolean;
+}): JSX.Element {
   const identity = useIdentity(props.resyncCounter);
   const [stack, setStack] = useState<MeStackEntry[]>([]);
   const [editingBotId, setEditingBotId] = useState<number | null>(null);
@@ -321,6 +330,7 @@ export default function MeScreen(props: { resyncCounter?: number; onOpenRecharge
           resyncCounter={props.resyncCounter}
           onOpenRecharge={props.onOpenRecharge}
           onOpenTraffic={() => pushRoute('traffic')}
+          rechargeAllowed={props.rechargeAllowed}
         />
         {ME_ENTRY_GROUPS.map((group) => (
           <div

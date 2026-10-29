@@ -15,6 +15,9 @@ import {
 } from './components/GatewayTerminalScreens';
 import { TabBar } from './components/TabBar';
 import type { MobileTab } from './components/TabBar';
+import { handleMobileRootBack } from './nativeBack';
+import { useNativeBackHandler } from './hooks/useNativeBackHandler';
+import { isRechargeAllowed } from '../native/rechargePolicy';
 
 /**
  * App shell (REQ-E-11): connection banner on top, three lazy-loaded tabs,
@@ -51,6 +54,10 @@ export default function MobileApp(): JSX.Element {
   const [tab, setTab] = useState<MobileTab>(readActiveTab);
   const [rechargeOpen, setRechargeOpen] = useState(false);
   const [billingRevision, setBillingRevision] = useState(0);
+  const rechargeAllowed = isRechargeAllowed(window.idbotsMobile);
+  const openRecharge = useCallback(() => {
+    if (rechargeAllowed) setRechargeOpen(true);
+  }, [rechargeAllowed]);
   useEffect(() => {
     try {
       window.localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, tab);
@@ -93,6 +100,10 @@ export default function MobileApp(): JSX.Element {
     },
     chat.applyResync,
   );
+  useNativeBackHandler(() => handleMobileRootBack(
+    { rechargeOpen, tab },
+    { closeRecharge: () => setRechargeOpen(false), showChat: () => setTab('chat') },
+  ));
 
   // 4001/4003 unauthorized: the session is no longer valid — sign in again.
   useEffect(() => {
@@ -133,7 +144,8 @@ export default function MobileApp(): JSX.Element {
               bots={bots}
               botsError={botsError}
               onReloadBots={() => void reloadBots()}
-              onOpenRecharge={() => setRechargeOpen(true)}
+              onOpenRecharge={openRecharge}
+              rechargeAllowed={rechargeAllowed}
             />
           </Suspense>
         ) : null}
@@ -149,12 +161,16 @@ export default function MobileApp(): JSX.Element {
         ) : null}
         {tab === 'me' ? (
           <Suspense fallback={<TabFallback />}>
-            <MeScreen resyncCounter={resyncCounter + billingRevision} onOpenRecharge={() => setRechargeOpen(true)} />
+            <MeScreen
+              resyncCounter={resyncCounter + billingRevision}
+              onOpenRecharge={openRecharge}
+              rechargeAllowed={rechargeAllowed}
+            />
           </Suspense>
         ) : null}
       </div>
       <TabBar active={tab} onSelect={setTab} />
-      {rechargeOpen ? (
+      {rechargeAllowed && rechargeOpen ? (
         <div className="fixed inset-0 z-50">
           <Suspense fallback={<TabFallback />}>
             <RechargeScreen onClose={() => setRechargeOpen(false)} onMetersUpdated={() => setBillingRevision((value) => value + 1)} />

@@ -232,9 +232,33 @@ const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, 
  * (a phone verified at least once is a returning user and needs no invite);
  * `mockSessionPhone` / `mockMePollCount` stand in for the session cookie and
  * the tenant provisioning progression that the control plane would drive.
+ * The synthetic session marker uses tab sessionStorage so full-page mock
+ * navigations can exercise the same returning-cookie path without a real token.
  */
+const MOCK_SESSION_STORAGE_KEY = 'idbots.mockLoginSession';
+
+function readMockSession(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.sessionStorage.getItem(MOCK_SESSION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeMockSession(phone: string | null): void {
+  mockSessionPhone = phone;
+  if (typeof window === 'undefined') return;
+  try {
+    if (phone) window.sessionStorage.setItem(MOCK_SESSION_STORAGE_KEY, phone);
+    else window.sessionStorage.removeItem(MOCK_SESSION_STORAGE_KEY);
+  } catch {
+    return;
+  }
+}
+
 const verifiedPhones = new Set<string>();
-let mockSessionPhone: string | null = null;
+let mockSessionPhone: string | null = readMockSession();
 let mockMePollCount = 0;
 
 async function mockSendCode(phone: string, purpose: string): Promise<SendCodeResult> {
@@ -283,7 +307,7 @@ async function mockVerifyCode(
     throw errorWithCode('INVITE_INVALID');
   }
   verifiedPhones.add(phone);
-  mockSessionPhone = phone;
+  writeMockSession(phone);
   mockMePollCount = 0;
   return {
     user: {
@@ -349,7 +373,7 @@ async function mockGetMe(): Promise<GetMeResult> {
 async function mockLogout(): Promise<LogoutResult> {
   console.info('[loginApi] logout called (mock)');
   await wait(MOCK_LATENCY_MS);
-  mockSessionPhone = null;
+  writeMockSession(null);
   mockMePollCount = 0;
   return { success: true };
 }
@@ -366,7 +390,7 @@ async function mockRequestAccountDeletion(reason?: string): Promise<AccountDelet
   if (!mockSessionPhone) {
     throw errorWithCode('UNAUTHORIZED');
   }
-  mockSessionPhone = null;
+  writeMockSession(null);
   mockMePollCount = 0;
   return { success: true };
 }

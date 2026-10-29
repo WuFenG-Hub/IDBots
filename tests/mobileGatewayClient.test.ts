@@ -754,6 +754,34 @@ test('window "online" and visibilitychange->visible trigger an immediate reconne
   }
 });
 
+test('window "offline" shows the offline banner immediately and "online" reconnects', (t) => {
+  const handlers: Record<string, () => void> = {};
+  const g = globalThis as Record<string, unknown>;
+  g.window = {
+    addEventListener: (type: string, cb: () => void) => {
+      handlers[type] = cb;
+    },
+    removeEventListener: () => {},
+  };
+
+  try {
+    const { client, socket, connect } = setup();
+    t.after(() => client.close());
+    connect();
+    assert.equal(client.getState(), 'online');
+
+    handlers.offline();
+    assert.equal(client.getState(), 'offline');
+
+    handlers.online();
+    assert.equal(FakeWebSocket.instances.length, 2, 'online must open a socket immediately');
+    connect();
+    assert.equal(client.getState(), 'online');
+  } finally {
+    delete g.window;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 12. onReconnected hook (REQ-E-5 anchor) and teardown
 // ---------------------------------------------------------------------------

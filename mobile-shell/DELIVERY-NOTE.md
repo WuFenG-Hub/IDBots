@@ -1,22 +1,23 @@
-# NS0 Native Shell Foundation — Independent Review Delivery Note
+# NS1 Native Lifecycle and Navigation — Independent Review Delivery Note
 
 ## 1. Delivery State
 
-NS0 code and Android/iOS emulator WebView evidence are complete. This is not a production release, a signed release candidate, or a claim of owner acceptance.
+NS1 implementation is complete within the requested scope. The branch adds the typed local adapter, capability fallbacks, native lifecycle recovery, Android Back integration, native external/Alipay handoff, iOS-native recharge policy, and Android keyboard configuration. It does not include NS2/NS3 work, a native API client, product business logic, native account/token storage, signing, TestFlight, store work, push, deployment, or frozen-contract changes.
 
-Both independent-review S2 findings are resolved. `mobile-shell/android/gradlew` is committed as `100755` and covered by a Git-index/on-disk regression check; a fresh detached worktree built Android successfully without any manual `chmod`. The real-C2 Bot lifecycle test now follows the current Advanced/Model/Skills UI and passes 17/17 on iPhone WebKit and 17/17 on Pixel Chromium, restoring 34/34 without skipping tests or increasing timeouts. The package is ready for the independent acceptance process; the explicit NOT RUN items below remain unclaimed.
+Root/mobile tests, Mock and real-C2 dual-browser regressions, Android/iOS staging Debug builds, and unauthenticated WebView smoke passed. Android also proved native Back and foreground/background event transport through CDP and adb. The external reviewer's DEF-1 cold-start recovery and DEF-2 root-Back defects are remediated; OBS-2 offline-banner feedback is also implemented. Authenticated re-review journeys and physical-device scenarios remain explicit NOT RUN items; this is not a claim of final native acceptance, production readiness, or owner sign-off.
 
-No push, merge, deployment, production rollout, signing-key access, TestFlight upload, store submission, or owner-secret access was performed. Frozen contracts were not edited.
+No GitHub push, main merge, staging/production deployment, signing-key access, TestFlight upload, store submission, or owner-secret access was performed. `docs/cloud-mobile/01-interface-contracts.md` and `02-ipc-allowlist-v1.md` are unchanged.
 
 ## 2. Provenance
 
 | Item | Value |
 |---|---|
-| Branch | `feat/mobile-shell-foundation` |
-| Worktree | `/Users/tusm/Documents/MetaID_Projects/IDBots/IDBots/.worktrees/mobile-shell-foundation` |
-| Base SHA | `6d95a10ac10d972596d9cd6fc9d0f05e758d01b3` |
-| Implementation SHA | `ae6e8108096ea89184ce69d6e9a9c2e22003d65d` |
-| Final SHA | This review-remediation commit; resolve with `git rev-parse HEAD`. The exact final SHA and all journal pins are recorded in `mobile-shell/artifacts/ns0-handoff.json` after the commit and in the independent-review handoff. |
+| Branch | `feat/mobile-native-lifecycle` |
+| Worktree | `/Users/tusm/Documents/MetaID_Projects/IDBots/IDBots/.worktrees/mobile-native-lifecycle` |
+| Base SHA | `cf3eb764b4c96fdb93ffff4617cfeb777d84bf69` (NS0 merge on local `main`) |
+| Implementation SHA | `77e526c2` (resolve with `git rev-parse 77e526c2`) |
+| Review-remediation range | `6a0a5e49..77e526c2` on this branch |
+| Final SHA | This delivery commit; resolve with `git rev-parse HEAD`. The exact final SHA and all journal pins are recorded in `mobile-shell/artifacts/ns1-handoff.json` after the commit and in the independent-review handoff. |
 | Native package version | `0.1.0` |
 | Native bridge version | `1` |
 | C2 / allowlist version | `1.0.0` / `1.0.0` |
@@ -24,160 +25,176 @@ No push, merge, deployment, production rollout, signing-key access, TestFlight u
 | Explicit production flavor | `production` → `https://app.idbots.world/` (configuration tested; WebView NOT RUN) |
 | Application ID | `world.idbots.app` |
 
-The remote `origin/main` could not be fetched because GitHub was unreachable. The branch was created directly from the then-current local `main` at the base SHA above. No feature branch was used as its parent.
+The branch was created directly from the named local `main` SHA with `git worktree add -b feat/mobile-native-lifecycle .worktrees/mobile-native-lifecycle main`. No feature branch was used as its parent and no remote fetch was needed. The NS1 planning documents were read from the separate `docs/cloud-mobile-native-shell` worktree because they are not present on this `main`; that documentation branch was not modified or merged.
 
 ## 3. Commits and Development Journals
 
 | Commit | Subject | On-chain journal pin |
 |---|---|---|
-| `ae6e8108096ea89184ce69d6e9a9c2e22003d65d` | `feat: add native mobile shell foundation` | `f2807841ba3aca1990268ab740e5ff1597763637c3cb43dede83a91fd7e83660i0` |
-| `03ce703094c656aca7f37c8974b1a00afa31b61a` | `docs: add native shell foundation delivery note` | `2cad0c069884f6039aaa6672059df0a02521b8c288e6ac1290b62fc77cabc990i0` |
-| `fcd765ebbd115ae8fa60051f4baeb628b1d5fe7e` | `fix: make Android Gradle wrapper executable` | `e27556cb6ffff817988c4aef0d9b10f5dbdced48059a55dad8a1b5f8031c9011i0` |
-| `5db97398976df6552f6eac9ac11dddbd96395908` | `fix: align gateway Bot lifecycle test with current UI` | `d326dc16d8ff9220f5dd3d0da6fc507feabe404d90061d35f95788e4a6948b7di0` |
-| This review-remediation commit | `docs: record NS0 review remediation` | Recorded with the final SHA in `mobile-shell/artifacts/ns0-handoff.json` |
+| `d30c7ca408b239fbc55cf61c2ab72e50513e85de` | `feat: add native mobile adapter and external handoff` | `69167031ce73e4ff2dac8e8281dff48d779e417a3bc308a262fd34069be0d880i0` |
+| `b3df77b03b52d06ed69ab2681582983b0a657291` | `feat: connect native lifecycle and Android back` | `23a008bf8462fe97d2b0e64c4ced3d42a3d7cc84ffec67da6d27e9be739c9454i0` |
+| `3887d0d8670619421f29f56b1836ddbabf418485` | `feat: enforce native recharge and keyboard policies` | `9eeaf8e53374683c620e68c0902ee4c0625b4d5a15521b70d8198f42d51604d8i0` |
+| `6a0a5e49` | `fix: restore mobile sessions on cold start` (DEF-1) | `6c2e354c3a3f99a23b36240096bd20ca56a477014a5d4637d54ef4791c1330dci0` |
+| `063a4152` | `fix: exit Android product roots on back` (DEF-2) | `52640e4f21ff7fb32350bacc4e29596d3c52c0f9ccf9a27063539186bd6568edi0` |
+| `d1911adb` | `fix: surface browser offline state immediately` (OBS-2) | `1ac3c27ab223e00404e1c4cea4be346dbd3c91a553686b35cd83a4717bae9d1ai0` |
+| `77e526c2` | `fix: finish Android activity on root back` (DEF-2 real-device follow-up) | `f317fb7e335125c42199cee5c70326f86d6c5f9c576b82b86d84aa21f7734312i0` |
+| This delivery commit | `docs: record NS1 review remediation` | Recorded with the final SHA in `mobile-shell/artifacts/ns1-handoff.json` |
 
-Journal entries were published through the required `metabot-post-buzz` skill on MVC. No GitHub push occurred.
+Each implementation commit was published through the required user-scope `metabot-post-buzz` skill on MVC. No GitHub push occurred.
 
-## 4. Changed Files and Requirement Mapping
+## 4. Changed Files and NS1 Requirement Mapping
 
-The implementation contains 106 files in the implementation commit, primarily the generated Android/iOS projects and their image resources.
+| NS1 requirement | Implementation and evidence |
+|---|---|
+| Versioned local adapter, capability detection, and full Web fallback | `src/mobile/native/nativeAdapter.ts`, `idbotsNative.d.ts`, `mobile-shell/native/idbots-native-bootstrap.js`; browser/PWA no-op lifecycle/back fallback, web external opening, per-capability method fallback, and fail-closed native bootstrap validation. Tests: `tests/mobileNativeAdapter.test.ts`, `mobileNativeBootstrap.test.ts`, `mobile-shell/tests/bootstrap.test.mjs`. |
+| Native app state uses existing reconnect/resync without blind writes | `src/mobile/app/hooks/useResync.ts` subscribes through the adapter. Online foreground runs the existing coalesced read-only resync; disconnected foreground calls only `reconnectNow()`, with `onReconnected` owning subsequent resync. Tests: `tests/mobileResync.test.ts`, adapter/bootstrap subscription tests. No session start, submit/retry, order, or chain call was added. |
+| Android Back uses current routes, sheets, and navigation state | `src/mobile/app/nativeBack.ts`, `hooks/useNativeBackHandler.ts`, `MobileApp.tsx`, `components/BottomSheet.tsx`, and `screens/ChatScreen.tsx`. Mounted callbacks close drawer/sheets, recharge, then return Tasks/Me to Chat. An unhandled `/app/` or `/login` product root exits deterministically through `NativeBack.exitApp` (App plugin fallback), never history-returning to login; non-product-root WebView history remains available. Tests: `tests/mobileNativeBack.test.ts`, native bootstrap root/NativeBack tests, and real Android `ns1-android-root-exit.json`. No second route history exists. |
+| External links and Alipay use native system capabilities while preserving PWA | `src/mobile/bridge/installShim.ts`, `src/mobile/app/hooks/useRecharge.ts`, and bootstrap `openExternal`. Main-frame navigation reaches the existing exact-origin Android/iOS system-handoff delegates. HTTP(S) web opening, same-tab Alipay, QR, timeout, and order-recovery behavior remain. Tests: adapter, shim, bootstrap, and existing recharge/E2E coverage. No second handoff is attempted after an uncertain native result. |
+| WebView authentication, returning login, dual-device and logout isolation | Every cold login entry probes the existing C3 `getMe()` with the persisted HttpOnly cookie (`src/mobile/login/sessionRecovery.ts`). Ready/degraded opens `/app/` with `location.replace`, provisioning/failed uses the existing preparing flow, only `UNAUTHORIZED` opens login, and transient failures retry. No native account/session storage or logging was added. Tests: `tests/mobileSessionRecovery.test.ts`, returning-session login E2E, root login/logout API tests, and real-C2 browser regression. Authenticated native cookie, dual-device, and logout-isolation re-review are NOT RUN as detailed below. |
+| Keyboard, safe areas, themes, offline/reconnect, and OS eviction | Android `AndroidManifest.xml` declares `adjustResize`. `GatewayClient` registers browser `offline` to show the existing offline banner immediately while retaining `online`/`reconnectNow()`. Existing visual-viewport composer inset, safe-area CSS, light/dark/system settings, and tenant session restoration are retained. iOS keeps Capacitor `bridge.reset()` + `webView.reload()` after WebContent termination; Android Activity recreation reloads the PWA. Tests: `tests/mobileGatewayClient.test.ts`, static/config/resync tests; native UI/OS-eviction specifics not exercised are NOT RUN. |
+| Recharge hidden only in the iOS native shell | `src/mobile/native/rechargePolicy.ts`, `MobileApp.tsx`, `ChatScreen.tsx`, and `MeScreen.tsx` use only `window.idbotsMobile` `os`/`shell`. iOS Capacitor hides both entries and the overlay guard; iOS PWA, Android, browsers, and redeem remain. Tests: `tests/mobileRechargePolicy.test.tsx` and existing quota tests. |
+| Browser/PWA and missing-capability degradation | The adapter validates version/capabilities per method and never requires Capacitor imports in root code. Mock 110/110 and real-C2 34/34 on iPhone WebKit and Pixel Chromium passed. Camera/photos/files/share/secureScreen remain false; no NS2 fallback was falsely presented as a native success. |
 
-- `mobile-shell/package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`: independent native package and pinned toolchain (NS-A-01).
-- `mobile-shell/android/`, `mobile-shell/ios/`: Capacitor 8.5.3 native projects, App plugin 8.1.2, platform build files, and local tests (NS-A-01, NS-A-15).
-- `mobile-shell/scripts/flavors.mjs`, `select-flavor.mjs`, `build-android.mjs`, `build-ios.mjs`: reproducible staging/production selection and debug builds (NS-A-02).
-- `mobile-shell/android/app/src/main/java/world/idbots/app/`: exact-origin policy, document-start bootstrap, WebView/navigation scaffolding, and debug-only sanitized evidence (NS-A-02 through NS-A-05).
-- `mobile-shell/android/gradlew`, `mobile-shell/tests/config.test.mjs`: executable mode `100755` plus Git-index/on-disk regression coverage.
-- `e2e/mobile/bots-gateway.spec.ts`: current Advanced/Model/Skills navigation for the restored 34/34 real-C2 gate (NS-A-14).
-- `mobile-shell/ios/App/App/Native*`: flavor validation, main-frame document-start injection, exact-origin navigation proxy, bundled-error handling, and DEBUG-only smoke support (NS-A-02 through NS-A-05).
-- `mobile-shell/native/idbots-native-bootstrap.js`: shared versioned native surface and client facts (NS-A-04).
-- `mobile-shell/www/`: small bilingual offline/error UI only; no cached online PWA or service worker (NS-A-05).
-- `src/mobile/native/`, `src/mobile/app/main.tsx`, `src/mobile/login/main.tsx`: narrow typings and pre-React native validation with unchanged browser behavior (NS-A-04, NS-A-14).
-- `tests/mobileNativeBootstrap.test.ts`, `mobile-shell/tests/`, `mobile-shell/android/app/src/test/`: bootstrap, configuration, external-origin, offline, and origin-policy coverage (NS-A-03 through NS-A-05, NS-A-14).
-- `mobile-shell/scripts/android-webview-smoke.mjs`: real Android WebView bootstrap, external-navigation, offline, and retry proof (NS-A-03 through NS-A-05).
-- `mobile-shell/README.md`: toolchain, flavors, commands, DEBUG smoke, capabilities, and secret-free operation.
-- `AGENTS.md`, `CLAUDE.md`, `.gitignore`, root `package.json`: synchronized four-package guidance, test registration, and native test tracking (NS-A-01).
-- `mobile-shell/DELIVERY-NOTE.md`: this review package.
-
-No NS1 lifecycle/reconnect/route-back integration, NS2 media/system capabilities, push, NS3 signing/release work, native API client, or product business logic was added.
+Root `package.json` and `.gitignore` register and track the new tests; `mobile-shell/README.md` documents the NS1 behavior, and this file is the review package. No control-plane, tenant, gateway, C2, IPC allowlist, Agent, LLM, skill, memory, wallet, chain, session, or task implementation was added or moved into the shell. Root `postinstall` and Electron packaging remain independent of `mobile-shell/`.
 
 ## 5. Toolchain and Dependency Provenance
 
-| Component | Verified version |
+| Component | Verified version / state |
 |---|---|
 | Node.js | 26.7.0 |
-| pnpm | 11.24.0 |
+| pnpm | 11.24.0, frozen lockfiles |
 | Capacitor core / CLI / Android / iOS | 8.5.3 |
 | `@capacitor/app` | 8.1.2 |
-| Android JDK | Azul Zulu 21.0.8; Microsoft JDK 21.0.8 was also checked during TLS diagnosis |
+| Android JDK | Azul Zulu 21.0.8 (`Zulu21.44+17-CA`), worktree-local |
 | Android Gradle Plugin | 8.13.0 |
-| Gradle | 8.14.3, official SHA-256 verified |
+| Gradle | 8.14.3 |
 | AndroidX WebKit | 1.14.0 |
-| Android compile / target / minimum SDK | 36 / 36 / 26 (Android 8) |
-| Android emulator | Android SDK built for arm64, Android 15, API 35 |
-| Android System WebView | 124.0.6367.219 |
+| Android compile / target / minimum SDK | 36 / 36 / 26 |
+| Android emulator | `test35`, Android 15, API 35, arm64 |
 | Xcode | 27.1 (27A9275) |
 | CocoaPods | 1.16.2 |
-| iOS Simulator | iPhone 17, iOS 26.5, WKWebView |
+| iOS Simulator | `IDBots-NS0-iPhone-17`, iOS 26.5, WKWebView |
 
-The host's Java TLS connections to official Maven hosts failed. A local-only, ignored Gradle init script selected Aliyun Maven mirrors for dependency resolution. The final builds reused that cache with Gradle `--offline`; the init script is not committed and is not part of the product configuration. Playwright Chromium used the same pinned browser build from its binary mirror after the official CDN proved too slow.
+The host's default nested pnpm launcher belonged to Node 20, so an ignored worktree-local launcher invoked the same pnpm 11.24.0 with Node 26. No dependency or lockfile changed. The global Xcode DerivedData symlink pointed to an unmounted legacy external volume; an ignored worktree `xcodebuild` wrapper supplied the supported local DerivedData/scheme arguments. No global setting or symlink was changed.
 
-A worktree-local Node 26 pnpm launcher was used because the host's default pnpm launcher belonged to an unsupported Node 20 installation. Build scripts now invoke the package's Capacitor CLI directly with the current Node process and do not depend on that launcher.
+Gradle's official distribution route stalled on the host. A Tencent mirror was used only after checking the archive against the official Gradle 8.14.3 `-all` SHA-256 published at `https://gradle.org/release-checksums/`: `ed1a8d686605fd7c23bdf62c7fc7add1c5b23b2bbc3721e661934ef4a4911d7c`. Google Maven also timed out, so an ignored `GRADLE_USER_HOME/init.gradle` selected Aliyun Maven mirrors for local dependency resolution. The wrapper's official distribution URL is restored after local verification; neither mirror configuration is committed in the delivery. Earlier environment-only attempts also rejected an `-I` value incorrectly placed in `GRADLE_OPTS` and then reported a missing explicit `ANDROID_HOME`; the corrected standard init-script/SDK configuration completed the same build and test tasks. No test was skipped, no assertion was removed, and no test timeout was increased.
 
 ## 6. Verification Commands and Actual Results
 
-All commands ran on the deliverable worktree unless noted.
+All commands ran on the deliverable worktree. The Node 26 pnpm launcher is omitted below for readability; commands otherwise match the listed package scripts.
 
 | Command / lane | Result |
 |---|---|
-| `pnpm install --frozen-lockfile` (root and `mobile-shell/`) | PASS; root postinstall and kernel patches completed. `mobile-shell/` was not added to root postinstall. |
-| `pnpm test` (native package) | PASS, 12/12, including the Gradle executable-bit regression check |
-| `pnpm exec tsx --test tests/mobileNativeBootstrap.test.ts` | PASS, 6/6 |
-| `pnpm run test:mobile` | PASS, 235/235 (178 + 6 + 51) |
-| `pnpm test` (root) | PASS; every suite summary passed, 2,163 tests aggregated from the current output |
-| `pnpm run lint` | PASS |
-| `pnpm run build:mobile` | PASS; login 62.4 KB gzip and app initial JS 92.5 KB gzip, within 80 KB / 500 KB budgets |
+| `pnpm install --frozen-lockfile` (root) | PASS; root postinstall and DSH/MVC patches completed |
+| `pnpm install --frozen-lockfile` (`mobile-shell/`) | PASS; independent package, not added to root postinstall |
+| Focused adapter/bootstrap/shim/recharge tests | PASS, 33/33 root tests and 16/16 native tests before commit `d30c7ca4` |
+| Focused lifecycle/Back/resync/quota tests | PASS, 17/17 before commit `b3df77b0` |
+| Focused recharge-policy/quota tests | PASS, 8/8 before commit `3887d0d8` |
+| Focused DEF-1 recovery tests | PASS, 4/4 before commit `6a0a5e49` |
+| Returning-session login E2E (`--grep "login sign-up flow"`) | PASS, 2/2 on iPhone WebKit + Pixel Chromium before commit `6a0a5e49` |
+| Focused gateway offline/online tests | PASS, 32/32 before commit `d1911adb` |
+| `pnpm run test:mobile` | PASS, 258/258 aggregated: 201 + 6 + 51; `tsc --noEmit` also passed |
+| `pnpm test` (root) | PASS, 2,186/2,186 aggregated from 22 current suite summaries, 0 failed |
+| `pnpm run lint` | PASS, repository ESLint with zero warnings |
+| `pnpm run build:mobile` | PASS; login 62.7 KB gzip within 80 KB, app initial JS 93.6 KB gzip within 500 KB; mock-notice check passed |
 | `pnpm run build:skills` | PASS |
-| `pnpm run test:e2e:mobile` | PASS, 110/110 across iPhone WebKit and Pixel Chromium; 2 skipped |
-| `pnpm run test:e2e:mobile:gateway` | PASS, 34/34: 17/17 on iPhone WebKit and 17/17 on Pixel Chromium; no skipped test or increased timeout. Evidence: `mobile-shell/artifacts/real-c2-34-34.log` |
-| `./gradlew --no-daemon --offline --init-script ../.tooling/init-mirrors.gradle assembleStagingDebug testStagingDebugUnitTest` (from `mobile-shell/android/`) | PASS; APK built and 4/4 JVM tests passed (3 origin-policy + 1 template test) |
-| `pnpm run build:android:staging` in a fresh detached worktree at `fcd765eb` | PASS, `BUILD SUCCESSFUL in 15s`, 91 tasks, no manual `chmod`. Evidence: `mobile-shell/artifacts/fresh-worktree-android-build.log`; temporary worktree removed after verification |
-| `pnpm run build:ios:staging` | PASS, `** BUILD SUCCEEDED **` |
-| `git diff --check` / `git -c core.whitespace=cr-at-eol diff --cached --check` | PASS; standard `gradlew.bat` CRLF preserved |
-| `git diff --name-only -- docs/cloud-mobile/01-interface-contracts.md docs/cloud-mobile/02-ipc-allowlist-v1.md` | No changes |
+| `pnpm test` (`mobile-shell/`) | PASS, 18/18 including adapter, Back/product-root/NativeBack, capability, offline, origin, package-boundary, and keyboard checks |
+| `pnpm run test:e2e:mobile` | PASS, 110/110 across iPhone WebKit and Pixel Chromium, including returning-session login; the 2 pre-existing UX screenshot skips remained unchanged |
+| `pnpm run test:e2e:mobile:gateway` | PASS, 34/34: 17/17 iPhone WebKit + 17/17 Pixel Chromium, no skipped test or increased timeout |
+| `pnpm run build:ios:staging` | PASS after remediation, `** BUILD SUCCEEDED **`, Simulator Debug with `CODE_SIGNING_ALLOWED=NO` |
+| `pnpm run build:android:staging` / underlying build script | PASS after remediation, `BUILD SUCCESSFUL in 2s`, 91 actionable tasks (24 executed, 67 up-to-date); earlier clean remediation build also passed |
+| `./gradlew --no-daemon testStagingDebugUnitTest` | PASS; the `testStagingDebugUnitTest` task completed successfully in the preceding clean build |
+| `git diff --check` and staged diff checks | PASS at every implementation commit and before delivery |
+| Frozen-contract diff | No changes to either frozen file |
 
-The Android online build with the same local mirror init script also passed before the final offline rebuild. No official Maven or deployment service was contacted during the final offline build.
+Evidence logs for the remediated mobile unit/static and dual-browser runs are in ignored `mobile-shell/artifacts/ns1-test-mobile.log` and `ns1-mock-real-c2.log` regenerated by the final rerun. Android build and WebView results are in `ns1-android-build.log`, `ns1-android-webview.log`, `android-bootstrap.json`, `android-external.json`, `android-offline.json`, `ns1-android-lifecycle.json`, and `ns1-android-root-exit.json`.
 
 ## 7. Native Artifacts
 
 | Artifact | Type / flavor | SHA-256 |
 |---|---|---|
-| `mobile-shell/artifacts/idbots-ns0-android-staging-debug.apk` | Android `stagingDebug`, version `0.1.0`, code `1`, minSdk 26, targetSdk 36 | `bb6712c2ee285a894902ea4576d68ffbb3caac5296f4c5dd9cd49e44386c7872` |
-| `mobile-shell/artifacts/idbots-ns0-ios-staging-simulator.tar.gz` | iOS Simulator Debug, staging, version `0.1.0`, build `1` | `542b27db6e9e9fd0dc5b040c722b9ca09af7b843dbf86c4d91db82e81b2fcefb` |
+| `mobile-shell/artifacts/idbots-ns1-ios-staging-simulator.tar.gz` | iOS Simulator Debug, staging, unsigned | `dbd6a900c2714abbac61c143bf134e7394cd94768c8978cde098c29be1c720b8` |
 | `ios/DerivedData/Build/Products/Debug-iphonesimulator/App.app/App` | iOS Simulator executable | `2e12226e0c9f15da563f7dde36989e5711e86bf28b0d7bb73ed71b3a5ee597b2` |
+| `mobile-shell/artifacts/idbots-ns1-android-staging-debug.apk` | Android `stagingDebug` | `bf6cd3b37a0c13d6fa59219839cab2dc0b00f9d63ec3facb85e9165fa594edb6` |
 
-`apksigner verify --verbose` passed for the standard Android DEBUG signature (v2 true, one signer). No owner signing material was used. The iOS build used `CODE_SIGNING_ALLOWED=NO` for Simulator only.
+These are local verification artifacts, not signed releases or deployment candidates. Android `apksigner verify --verbose` passed for the standard DEBUG signature (v2 true, one signer); no owner signing material was used. The iOS build used `CODE_SIGNING_ALLOWED=NO`. Packaged Android/iOS bootstrap files matched the remediated shared source SHA-256 (`7b5b5ac061128b76b21b05a9882900b994b5fbdd039813e5de54a96e06850ca1`).
 
 ## 8. WebView Evidence
 
-Evidence is stored outside git under `mobile-shell/artifacts/`. No test account or tenant identifier was used; staging was loaded only to its unauthenticated login screen.
-
-### Android — Android 15 / WebView 124.0.6367.219
-
-| Check | Evidence and result |
-|---|---|
-| Staging login loads | `android-staging-login.png`; `android-bootstrap.json` = PASS |
-| Bootstrap and client facts | `android-native.log`: origin `https://staging.idbots.world`, `nativeBridgeVersion=1`, `document-start`, `platform=android`, `shell=capacitor`, `os=android` |
-| Capability honesty | `android-bootstrap.json`: App state/back/external URLs true; camera/photos/files/share/secureScreen false |
-| External content leaves privileged WebView | `android-external.json`, `android-external.png`, and `NS0_EXTERNAL_HANDOFF scheme=https host=example.com`; privileged WebView remains on staging |
-| Offline/error UI | `android-offline.json` and `android-offline.png`: bundled page, retry present, no native surface, no cached online app |
-| Retry | `android-offline.json` and `android-offline-retry.png`: network restored and staging bootstrap re-established |
-
-Commands: `node scripts/android-webview-smoke.mjs bootstrap`, `external`, and `offline` against the forwarded real WebView CDP socket. The offline leg used CDP network emulation, not a cached PWA.
+Evidence is stored outside git under `mobile-shell/artifacts/`. No test account, phone number, tenant identifier, message content, or tenant secret was used.
 
 ### iOS — iPhone 17 Simulator / iOS 26.5 / WKWebView
 
 | Check | Evidence and result |
 |---|---|
-| Staging login loads | `ios-staging-login.png`; `ios-bootstrap.log` |
-| Bootstrap and client facts | `ios-bootstrap.log`: `nativeBridgeVersion=1`, `document-start`, `platform=ios`, `shell=capacitor`, `os=ios` |
-| External content leaves privileged WebView | `ios-external-handoff.log`: `NS0_EXTERNAL_HANDOFF scheme=https host=example.com`; `ios-external-handoff.png` shows Safari at `example.com` |
-| Offline/error UI | `ios-offline.png` and `ios-offline.log`: bundled bilingual error UI and `NS0_OFFLINE page=bundled` |
-| Retry | `ios-offline-retry.png` and `ios-offline-retry.log`: offline → retry → staging login and bootstrap again |
+| Staging login loads | `ns1-ios-staging-login.png`; native log confirms the exact staging origin |
+| NS1 bootstrap and client facts | `ns1-ios-webview.log`: `nativeBridgeVersion=1`, `document-start`, `platform=ios`, `shell=capacitor`, `os=ios` |
+| Capability honesty | `appState=true`, `backButton=false`, `externalUrls=true`; camera/photos/files/share/secureScreen=false |
+| External content leaves the privileged WebView | `ns1-ios-external.png` and `NS0_EXTERNAL_HANDOFF scheme=https host=example.com`; Safari displays example.com |
+| Offline/error UI | `ns1-ios-offline.png` and `NS0_OFFLINE page=bundled`; bilingual bundled retry page, no cached online app |
+| Retry restores staging | `ns1-ios-offline-retry.png` and repeated bootstrap/offline log sequence; offline → retry → staging login/bootstrap |
 
-DEBUG-only smoke commands used `SIMCTL_CHILD_NS0_SMOKE=external`, `offline`, and `offline-retry`. Normal launches and Release builds do not execute these actions.
+The deployed staging PWA was not changed. It does not contain this branch's NS1 PWA integration, so these checks prove the new native shell/bootstrap around the currently deployed login bundle, not authenticated NS1 PWA behavior. The bootstrap log has no `pwaProof` claim.
+
+### Android — Android 15 / API 35 emulator
+
+The `test35` emulator booted successfully (`sys.boot_completed=1`). The new staging Debug APK was installed and verified through the forwarded real WebView CDP socket.
+
+| Check | Evidence and result |
+|---|---|
+| Staging login and bootstrap | `android-staging-login.png` and `android-bootstrap.json`: exact origin, `nativeBridgeVersion=1`, `document-start`, `platform=android`, `shell=capacitor`, `os=android` |
+| Capability honesty | `appState=true`, `backButton=true`, `externalUrls=true`; camera/photos/files/share/secureScreen=false |
+| Real Android Back event | `ns1-android-lifecycle.json`: CDP subscription recorded one `back` event after `adb shell input keyevent 4`; the temporary handler consumed it |
+| Real Android product-root Back exit | `ns1-android-root-exit.json`: with an unconsumed Back callback at `/login` and again at authenticated `/app/`, hardware Back closed MainActivity and focus returned to Launcher. `pidof` may retain the Android-cached process; UI/Activity exit is the product check. CDP instrumentation also proved the bootstrap selected `exitApp` rather than history. |
+| Real Android Tasks-tab DOM repro | `ns1-android-task-repro.mjs`: authorized synthetic login followed by a DOM click on Tasks set `activeTab=tasks` and rendered the Tasks screen; this resolves OBS-3 as a coordinate/input issue, not a product defect. Test credentials were supplied only through process environment and were not committed. |
+| Real foreground/background events | The same evidence records `appState active=false` after HOME and `active=true` after returning to the existing Activity |
+| External content leaves the privileged WebView | `android-external.json`: system handoff completed while the privileged WebView retained the staging bootstrap |
+| Offline/error UI and retry | `android-offline.png`, `android-offline.json`, and `android-offline-retry.png`: bundled page had retry/no native surface/no cached app; network restoration returned to staging bootstrap |
+
+The offline leg initially paused because the external handoff had left the app in the background; returning the existing Activity to the foreground allowed the unchanged smoke script to finish. No timeout or assertion was changed. As on iOS, `pwaProof` is null because the currently deployed staging PWA does not include this branch. These results prove native bootstrap, event transport, product-root Back exit, and Tasks DOM behavior; authenticated reconnect/resync and branch-PWA cold-start restore still require the reviewer re-run described below.
 
 ### PWA / browser
 
-`tests/mobileNativeBootstrap.test.ts` proves the normal browser path needs no adapter and creates no native proof, while Android/iOS validate version, phase, origin, platform, and capabilities before client facts and React use. Mock browser E2E remains 110/110. The deployed staging PWA was not modified; its WebView evidence therefore has `pwaProof: null`, while the branch's new pre-React guard is covered by local tests and production builds.
+The adapter tests prove presence/absence, version mismatch, capability/method fallback, external schemes, subscriptions, and Back behavior. Mock and real-C2 suites passed on both browser profiles. These are shared PWA regressions, not substitutes for native-device acceptance.
 
 ## 9. Security, Storage, and Log Review
 
-- Exact-origin checks cover HTTPS scheme, host, default/443 port, and userinfo. Lookalike hosts, embedded-userinfo hosts, arbitrary schemes, and external subframes are rejected.
-- External main-frame HTTP(S) and Alipay links leave the privileged WebView. External pages do not receive `idbotsNative`.
-- Android uses `usesCleartextTraffic=false`, `allowBackup=false`, and minSdk 26. iOS keeps default ATS behavior; no ATS relaxation was added.
-- No custom native persistent storage was introduced. Capacitor may keep non-secret binary-version bookkeeping; existing WebView cookies remain in WebView storage and are not copied elsewhere.
-- DEBUG logs were inspected. Final `NS0_*` records contain only origin, platform, bridge version, phase, capability booleans, and client facts. No cookie, token, phone number, message content, signed URL, QR payload, mnemonic, provider key, redeem code, or account identifier was logged.
-- No keystore, certificate, provisioning profile, `.env`, private-key, or signing-secret files were added.
-- Root Electron packaging excludes `mobile-shell/`; root postinstall does not install it.
-- `docs/cloud-mobile/01-interface-contracts.md` and `02-ipc-allowlist-v1.md` are unchanged. No CSP, CORS, Origin, gateway, or IPC policy was weakened.
+- Exact-origin privileged navigation remains unchanged. External pages leave the privileged WebView and never receive `idbotsNative`.
+- Native `openExternal` accepts only HTTP(S)/Alipay URLs with a host and no userinfo; dangerous schemes are rejected before either native or web opening.
+- No custom native persistent storage, native preference, cookie export, session snapshot, token file, native API client, or analytics payload was introduced. Existing WebView cookies and local PWA state remain under their current ownership. The mock-only login marker is a synthetic phone string in browser tab `sessionStorage`, enabled only by `VITE_MOBILE_MOCK=1`; it is not a credential, native storage, or a production path.
+- Lifecycle recovery performs only existing reconnect/read-only resync operations. In-flight invokes are never replayed; session starts, submissions, orders, and chain writes are not blindly retried.
+- DEBUG evidence logs contain only origin, platform, bridge version, phase, capability booleans, and client facts. No cookie, token, phone number, message content, signed URL, QR payload, mnemonic, provider key, redeem code, or account identifier was logged.
+- No keystore, certificate, provisioning profile, `.env`, private-key, signing-secret, or owner-account file was added or read.
+- Root Electron packaging excludes `mobile-shell/`; root postinstall does not install it. No Capacitor dependency entered the root package.
+- Frozen contracts and existing CSP/CORS/Origin/gateway/IPC policies were not weakened.
 
 ## 10. Explicit NOT RUN and Open Findings
 
 | Item | State / owner |
 |---|---|
-| Authenticated login, returning login, two-device behavior, logout isolation, and cookie persistence | NOT RUN — owner/staging test account; NS1 acceptance, not claimed by the NS0 login-page proof |
-| Physical Android/iOS hardware | NOT RUN — owner device matrix; NS0 evidence is emulator/Simulator only |
+| Android build, JVM, unauthenticated WebView smoke, native Back/app-state transport, authenticated `/app/` root Back, and Tasks DOM repro | PASS — see Sections 6–8; reconnect/resync and branch-PWA cold-start restore remain separate |
+| Native authenticated login and returning login cookie persistence | DEF-1 code/tests complete; native re-review requires the reviewer's authorized synthetic account and a branch-matched deployed PWA |
+| Native ordinary chat, older-session restore, duplicate/lost-message checks | NOT RUN — authenticated staging account and branch-matched remote PWA required |
+| Native background/foreground reconnect/resync and network recovery | NOT RUN — native event transport and offline banner passed, but authenticated reconnect/resync acceptance requires a branch-matched deployed PWA |
+| Native Android Back through nested routes/sheets | `/login` and authenticated `/app/` product-root exit passed on real Android; nested route/sheet behavior requires the branch-matched PWA and an authorized synthetic account |
+| Two-device behavior and logout isolation | NOT RUN — owner/staging test account and second client required |
+| OBS-1 Me balance refresh in native WebView | OPEN — evidence shows a failure banner while chat works; insufficient evidence to distinguish tenant relay state from WebView transport. No speculative code change; owner/tenant-state recheck required |
+| OBS-3 one missed Tasks-tab tap | RESOLVED — DOM repro successfully selected Tasks and set `activeTab=tasks`; the observation was coordinate/input related, not a product defect |
+| iOS-native recharge UI and Android/PWA recharge parity in WebViews | NOT RUN — branch PWA was not deployed; pure policy/render tests passed |
+| Real Alipay app handoff and payment/order behavior | NOT RUN — owner-approved staging account/order required; no order was created |
+| Native keyboard, safe areas, light/dark themes | NOT RUN — physical/interactive native UI evidence unavailable; configuration and existing shared tests passed |
+| OS eviction and control-plane restart recovery | NOT RUN — authenticated native session and controlled eviction/restart required |
+| Physical Android/iOS hardware | NOT RUN — all current native evidence is emulator/Simulator only |
 | Production-flavor WebView | NOT RUN — no production deployment or release was authorized |
-| Signed Android release, TestFlight, store submission | NOT RUN — NS3 and owner credentials |
+| Signed Android release, TestFlight, store submission | NOT RUN — NS3 and owner credentials, explicitly out of scope |
 | Camera, photos, files, system share, permissions, secure screen | NOT RUN — NS2, capabilities correctly report false |
-| App-state reconnect/resync, route-aware Android back, keyboard/theme/lifecycle recovery, iOS recharge policy | NOT RUN — NS1 |
-| Push notifications | NOT RUN — explicitly outside NS0–NS3 |
-| S1 | None found in NS0 scope |
-| S2 | Both review findings resolved: Gradle wrapper is `100755` with a regression check and fresh-worktree build proof; real-C2 is 34/34. No open S2 remains in the NS0 delivery. |
-| S3 | No additional NS0 finding recorded |
+| Push notifications | NOT RUN — outside NS0–NS3 |
+| S1 | None found in the implemented NS1 code scope |
+| S2 | None found in the implemented NS1 code scope; required NOT RUN evidence blocks corresponding native acceptance |
+| S3 | No additional NS1 defect recorded |
 
 ## 11. Rollback and Next Step
 
-There is no deployed artifact to roll back. Deleting the local APK, Simulator app, or feature branch does not affect staging or production. The remote PWA was not changed or deployed, so no remote-PWA rollback is required. Native-binary and remote-PWA rollback remain separate release concerns for NS3.
+There is no deployed artifact to roll back. Deleting the local APK, Simulator app, artifacts, or feature branch does not affect staging or production. The remote PWA was not changed or deployed, so no remote-PWA rollback is required. Native-binary and remote-PWA rollback remain separate NS3 release concerns.
 
-Stop for independent NS0 acceptance. Do not start NS1 until the owner accepts and merges NS0.
+Stop for independent NS1 review and acceptance. Do not start NS2 until the owner accepts and merges NS1.
