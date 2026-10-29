@@ -1,0 +1,11 @@
+{
+  "name": "nft-trade-skill",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone MVC MetaContract NFT CLI (sell-orders / transfer / buy). Dependencies are only needed for the signing modes (transfer/buy); mode=sell-orders runs on plain Node >= 18.",
+  "type": "module",
+  "dependencies": {
+    "meta-contract": "0.4.16",
+    "@metalet/utxo-wallet-service": "0.3.33-beta.5"
+  }
+}
