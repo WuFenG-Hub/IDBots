@@ -8,8 +8,8 @@ export const TRAFFIC_BYTES_PER_KB = 1000;
 export const TRAFFIC_BYTES_PER_MB = 1_000_000;
 /** Low-balance banner threshold (5 MB). */
 export const TRAFFIC_LOW_BALANCE_BYTES = 5 * TRAFFIC_BYTES_PER_MB;
-/** Fallback grant size when campaign status has not returned grantBytes. */
-export const DEFAULT_FREE_GRANT_BYTES = 10 * TRAFFIC_BYTES_PER_MB;
+/** Fallback grant size when campaign status has not returned grantBytes (production campaign: 50 MB). */
+export const DEFAULT_FREE_GRANT_BYTES = 50 * TRAFFIC_BYTES_PER_MB;
 
 export type TrafficDisplayUnit = 'bytes' | 'kb' | 'mb';
 

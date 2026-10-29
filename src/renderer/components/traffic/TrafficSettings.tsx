@@ -29,6 +29,7 @@ import {
   splitTrafficAmount,
   type TrafficDisplayUnit,
 } from './formatTraffic';
+import { resolveFreeGrantBanner } from './freeGrantVisibility';
 
 type TrafficSettingsInfo = {
   mode: 'traffic' | 'selfpay';
@@ -256,6 +257,14 @@ const formatLedgerTimestamp = (timestamp: number): string => {
   if (Number.isNaN(date.getTime())) return '—';
   const pad = (value: number): string => String(value).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+};
+
+// Cooldown lift time for the repeat-campaign banner (MM-DD HH:mm, local time).
+const formatCooldownLiftTime = (timestamp: number): string => {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '—';
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
 // Copyable short TXID badge (same interaction as the group-task TxIdBadge):
@@ -987,10 +996,23 @@ const TrafficSettings: React.FC = () => {
   // Repeat campaign: the server keeps `claimed` true after the first claim
   // and flips `claimable` back on once the balance drops below the campaign
   // threshold and the cooldown has passed — so `claimed` must not gate the
-  // banner, only `claimable` does.
-  const canClaimFreeGrant = campaign
-    ? Boolean(campaign.claimable || (!campaign.claimed && campaign.enabled))
-    : Boolean(campaignReady && balance);
+  // banner, only `claimable` does. Below the threshold the banner stays
+  // visible even while the cooldown runs (product contract: the repeat
+  // campaign must not disappear at low balance); the button disables until
+  // the cooldown lifts instead.
+  const freeGrantBanner = resolveFreeGrantBanner({
+    campaign,
+    campaignReady,
+    hasBalance: Boolean(balance),
+    balanceBytes: balance?.balanceBytes ?? 0,
+    nowMs: Date.now(),
+  });
+  const {
+    visible: canClaimFreeGrant,
+    repeatBelowThreshold,
+    cooldownUntil,
+    thresholdBytes: repeatThresholdBytes,
+  } = freeGrantBanner;
   const freeGrantBytes = campaign?.grantBytes || DEFAULT_FREE_GRANT_BYTES;
 
   if (!identityChecked) {
@@ -1135,7 +1157,10 @@ const TrafficSettings: React.FC = () => {
               <button
                 type="button"
                 className={ghostButtonClass}
-                onClick={() => refreshBalance(true)}
+                onClick={() => {
+                  refreshBalance(true);
+                  loadCampaign();
+                }}
                 disabled={balanceLoading}
               >
                 {i18nService.t('trafficRefresh')}
@@ -1166,14 +1191,24 @@ const TrafficSettings: React.FC = () => {
         {(canClaimFreeGrant || claimNotice) && (
           <div className="flex items-center gap-2 mt-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-2">
             <p className="text-xs text-emerald-600 dark:text-emerald-400 flex-1">
-              {claimNotice || i18nService.t('trafficFreeGrantHint')}
+              {claimNotice
+                || (repeatBelowThreshold && cooldownUntil
+                  ? i18nService.t('trafficFreeGrantRepeatCooldownHint')
+                      .replace('{threshold}', formatTraffic(repeatThresholdBytes))
+                      .replace('{time}', formatCooldownLiftTime(cooldownUntil))
+                      .replace('{amount}', formatTraffic(freeGrantBytes))
+                  : repeatBelowThreshold
+                    ? i18nService.t('trafficFreeGrantRepeatHint')
+                        .replace('{threshold}', formatTraffic(repeatThresholdBytes))
+                        .replace('{amount}', formatTraffic(freeGrantBytes))
+                    : i18nService.t('trafficFreeGrantHint'))}
             </p>
             {canClaimFreeGrant && !claimNotice ? (
               <button
                 type="button"
                 className={primaryButtonClass}
                 onClick={handleClaimFreeGrant}
-                disabled={claiming}
+                disabled={claiming || Boolean(cooldownUntil)}
               >
                 {claiming
                   ? i18nService.t('trafficFreeGrantClaiming')

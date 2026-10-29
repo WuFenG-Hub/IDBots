@@ -403,6 +403,7 @@ man_base_data_pebble/
 !tests/browserSessionUnreadDot.test.ts
 !tests/sidebarWidth.test.ts
 !tests/formatTraffic.test.ts
+!tests/freeGrantVisibility.test.ts
 !tests/botBrowserMetaAppFork.test.mjs
 !tests/botBrowserMetaAppPublish.test.mjs
 !tests/botBrowserCoworkPanel.test.ts
