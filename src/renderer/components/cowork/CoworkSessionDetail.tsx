@@ -2786,6 +2786,23 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
     return ended;
   }, [currentSession?.messages]);
+  // Explains a flipped-off auto-reply toggle in the transcript itself
+  // (2026-10-29 kiop incident: with a2a_auto_reply_enabled=0 every peer reply
+  // used to vanish, looking like messages lost in transit). Every processed
+  // inbound A2A bubble stamps which way the bot's auto-reply policy went
+  // (a2aAutoReplyActive vs autoReplySuppressed); the last marker wins, so the
+  // banner clears itself as soon as a newer message was answered again — no
+  // metabot-settings plumbing into the session view needed. Bubbles from
+  // before the markers existed carry neither and stay neutral.
+  const a2aAutoReplySuppressed = useMemo(() => {
+    if (!isPrivateA2ASession) return false;
+    let suppressed = false;
+    for (const message of currentSession?.messages ?? []) {
+      if (message.metadata?.a2aAutoReplyActive === true) suppressed = false;
+      if (message.metadata?.autoReplySuppressed === true) suppressed = true;
+    }
+    return suppressed;
+  }, [isPrivateA2ASession, currentSession?.messages]);
   // Quota call-to-action banner (REQ-A-25): follows the LIVE error state
   // (status 'error' + newest system error carries the quota code), never the
   // whole transcript — see quotaErrorBanner.ts for why. Covers both machine
@@ -5137,6 +5154,19 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               >
                 <XMarkIcon className="h-3.5 w-3.5" />
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isPrivateA2ASession && a2aAutoReplySuppressed && (
+        <div className="px-4 pb-2 shrink-0">
+          <div className="max-w-[clamp(680px,64%,920px)] mx-auto">
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
+              <InformationCircleIcon className="h-4 w-4 mt-0.5 text-amber-500 shrink-0" />
+              <span className="text-xs leading-4 text-amber-700 dark:text-amber-300">
+                {i18nService.t('coworkA2AAutoReplySuppressedBanner')}
+              </span>
             </div>
           </div>
         </div>

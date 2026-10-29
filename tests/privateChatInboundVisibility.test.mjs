@@ -75,3 +75,22 @@ test('every no-reply policy reason gets a stored-not-answered notice', () => {
   const fallback = buildAutoReplySuppressedNotice('owner');
   assert.match(fallback, /System notice/);
 });
+
+test('session view renders an auto-reply-suppressed banner driven by the message markers', () => {
+  const detailPath = path.join(__dirname, '..', 'src', 'renderer', 'components', 'cowork', 'CoworkSessionDetail.tsx');
+  const detailSource = readFileSync(detailPath, 'utf8');
+  // The banner keys off the same markers the daemon stamps (last marker wins,
+  // active clears suppressed), not off metabot settings plumbing.
+  assert.ok(detailSource.includes('a2aAutoReplyActive === true'), 'active-marker scan missing');
+  assert.ok(detailSource.includes('autoReplySuppressed === true'), 'suppressed-marker scan missing');
+  assert.ok(
+    detailSource.indexOf('a2aAutoReplyActive === true') < detailSource.indexOf('autoReplySuppressed === true'),
+    'active marker must clear before suppressed marker can set (last wins)',
+  );
+  assert.ok(detailSource.includes("t('coworkA2AAutoReplySuppressedBanner')"), 'banner render missing');
+
+  const i18nPath = path.join(__dirname, '..', 'src', 'renderer', 'services', 'i18n.ts');
+  const i18nSource = readFileSync(i18nPath, 'utf8');
+  const occurrences = i18nSource.split('coworkA2AAutoReplySuppressedBanner:').length - 1;
+  assert.equal(occurrences, 2, 'banner copy must exist in both zh and en dictionaries');
+});
