@@ -2,7 +2,7 @@
 
 - **Status:** NS0 (`mobile-shell/` foundation) and NS1 (native lifecycle and
   navigation) are implemented, reviewed, and merged to `main` — see
-  [`mobile-shell/DELIVERY-NOTE.md`](../../../../mobile-shell/DELIVERY-NOTE.md).
+  [`mobile-shell/DELIVERY-NOTE.md`](../../../mobile-shell/DELIVERY-NOTE.md).
   NS2 (native capabilities) and NS3 (signed release) remain to be started.
   The original handoff status ("ready for development handoff; native
   implementation has not started") describes this document at writing time
