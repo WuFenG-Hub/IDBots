@@ -2829,6 +2829,14 @@
       ]
     },
     {
+      "path": "social.getPairRelationship",
+      "kind": "invoke",
+      "channel": "social:getPairRelationship",
+      "args": [
+        "input"
+      ]
+    },
+    {
       "path": "startup.rendererInitialized",
       "kind": "invoke",
       "channel": "startup:rendererInitialized",

@@ -304,11 +304,14 @@ test('A2A order protocol messages hide routing tags in chat bubbles', () => {
     },
   ];
 
-  for (const item of cases) {
+  cases.forEach((item, i) => {
     const markup = renderToStaticMarkup(
       <A2AMessageItem
         message={{
-          id: `msg-${item.hidden}`,
+          // Neutral fixture id: embedding the tag in the id would leak it into
+          // the data-message-id anchor attribute and defeat the full-markup
+          // doesNotMatch assertion below (false positive, seen on 90da59fb).
+          id: `msg-order-protocol-${i}`,
           type: 'assistant',
           content: item.content,
           timestamp: 1_744_444_445_500,
@@ -320,7 +323,7 @@ test('A2A order protocol messages hide routing tags in chat bubbles', () => {
 
     assert.match(markup, new RegExp(item.visible.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     assert.doesNotMatch(markup, new RegExp(item.hidden.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  }
+  });
 });
 
 test('A2A upload notice renders an order-scoped resend digital delivery action', () => {
@@ -671,4 +674,61 @@ test('A2A delivery renders pin id and download button for metafile without exten
   assert.match(markup, /PINID/);
   assert.match(markup, /下载文件|Download file/);
   assert.match(markup, /metafile:\/\/8899aabbccddeeff0011223344556677i0/);
+});
+
+test('A2A incoming message renders the friend badge beside the peer name when confirmed friends', () => {
+  const txid = '9'.repeat(64);
+  const markup = renderToStaticMarkup(
+    <A2AMessageItem
+      message={{
+        id: 'msg-friend-1',
+        type: 'user',
+        content: '合作愉快！',
+        timestamp: 1_744_444_460_000,
+        metadata: { direction: 'incoming', senderName: 'Peer Bot', txid },
+      }}
+      peerName="Peer Bot"
+      peerIsFriend
+    />
+  );
+
+  assert.match(markup, /data-friend-badge="true"/);
+  assert.match(markup, /好友|Friend/);
+});
+
+test('A2A message without a confirmed friendship renders no friend badge', () => {
+  const txid = '9'.repeat(64);
+  const markup = renderToStaticMarkup(
+    <A2AMessageItem
+      message={{
+        id: 'msg-friend-2',
+        type: 'user',
+        content: '初次见面。',
+        timestamp: 1_744_444_461_000,
+        metadata: { direction: 'incoming', senderName: 'Peer Bot', txid },
+      }}
+      peerName="Peer Bot"
+    />
+  );
+
+  assert.doesNotMatch(markup, /data-friend-badge/);
+});
+
+test('A2A friend badge never renders on the local bot side', () => {
+  const txid = '9'.repeat(64);
+  const markup = renderToStaticMarkup(
+    <A2AMessageItem
+      message={{
+        id: 'msg-friend-3',
+        type: 'assistant',
+        content: '本地回复',
+        timestamp: 1_744_444_462_000,
+        metadata: { direction: 'outgoing', txid },
+      }}
+      metabotName="Local Bot"
+      peerIsFriend
+    />
+  );
+
+  assert.doesNotMatch(markup, /data-friend-badge/);
 });

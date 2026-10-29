@@ -333,6 +333,7 @@ import {
   MetasoFriendRelationshipProvider,
   type SocialApiOptions,
 } from './services/friendRelationshipService';
+import { normalizeGlobalMetaID } from './shared/globalMetaId';
 import { createMetasoFriendControl } from './libs/friendAgentTools';
 import { A2A_GUIDANCE_MAX_LENGTH, a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
 import { coworkLog } from './libs/coworkLogger';
@@ -3733,6 +3734,72 @@ const socialApiOptions = (): SocialApiOptions | undefined => {
   return baseUrl ? { baseUrl } : undefined;
 };
 
+// Lazy singleton pair-state provider (S4 metaso client): the short TTL cache
+// and failure breaker are shared by the A2A daemon's invite gate and the
+// renderer badge IPC so both views agree without hammering the endpoint.
+let socialPairStateProvider: MetasoFriendRelationshipProvider | null = null;
+const getSocialPairStateProvider = (): MetasoFriendRelationshipProvider => {
+  socialPairStateProvider ??= new MetasoFriendRelationshipProvider({
+    ...socialApiOptions(),
+    timeoutMs: 3_000,
+  });
+  return socialPairStateProvider;
+};
+
+/** S5 daemon dep: best-effort pair-state gate for friend invites. Never throws; null = unknown. */
+const resolveDaemonFriendPairState = async (input: {
+  observerGlobalMetaID: string;
+  peerGlobalMetaID: string;
+}) => {
+  try {
+    return await getSocialPairStateProvider().resolvePairState({
+      firstGlobalMetaID: input.observerGlobalMetaID,
+      secondGlobalMetaID: input.peerGlobalMetaID,
+    });
+  } catch {
+    return null;
+  }
+};
+
+/** S5 daemon dep: friend invite/remove owner gate via the runner's SUSPENDED approval (overlay; no 60s auto-deny). */
+const requestDaemonFriendActionApproval = async (params: {
+  sessionId: string;
+  metabotId: number;
+  metabotName?: string | null;
+  action: 'invite' | 'remove';
+  peerGlobalMetaId: string;
+  peerName?: string | null;
+}): Promise<'approved' | 'denied'> => {
+  const peerLabel = (params.peerName && params.peerName.trim())
+    || `${params.peerGlobalMetaId.slice(0, 12)}…`;
+  const botLabel = (params.metabotName && params.metabotName.trim()) || `MetaBot#${params.metabotId}`;
+  const question = params.action === 'invite'
+    ? tApp(
+      `机器人「${botLabel}」请求与「${peerLabel}」互加好友：授权后将用该机器人的钱包写链 /follow（contentBody=对方 GlobalMetaID，链上公开且不可撤销）。是否授权？`,
+      `Bot "${botLabel}" requests to add "${peerLabel}" as an on-chain friend: once approved, a /follow pin (contentBody = the peer's GlobalMetaID) is published from the bot's wallet — public and irreversible. Allow?`
+    )
+    : tApp(
+      `机器人「${botLabel}」请求取消对「${peerLabel}」的关注：授权后将 revoke 原 /follow pin（链上公开且不可撤销）。是否授权？`,
+      `Bot "${botLabel}" requests to unfollow "${peerLabel}": once approved, the original /follow pin is revoked on-chain — public and irreversible. Allow?`
+    );
+  try {
+    return await getCoworkRunner().requestSuspendedApproval({
+      sessionId: params.sessionId,
+      header: tApp('好友确认', 'Friend confirmation'),
+      question,
+      context: {
+        action: params.action,
+        peerGlobalMetaId: params.peerGlobalMetaId,
+        peerName: params.peerName ?? null,
+        metabotId: params.metabotId,
+      },
+    });
+  } catch (error) {
+    console.error('[FriendAction] suspended approval failed:', error instanceof Error ? error.message : String(error));
+    return 'denied';
+  }
+};
+
 /** Audit ledger for bot wallet transfers (botWalletTransferStore), memoized. */
 let botWalletTransferStore: BotWalletTransferStore | undefined;
 function getBotWalletTransferStore(): BotWalletTransferStore {
@@ -4425,6 +4492,12 @@ const startStartupMessageTier = (): void => {
     // Dream review P1: knowledge/procedures hot layer for the direct answer
     // path (A2A turns) — same builders and hot selection as the cowork runner.
     () => getMetaIDKnowledgeStore(),
+    // S5 friend invite/remove: owner-authorization bridge → the runner's
+    // SUSPENDED approval (CoworkPermissionOverlay; no 60s auto-deny applies —
+    // the request waits for the owner's click) + best-effort pair-state gate
+    // from the S4 metaso provider.
+    requestDaemonFriendActionApproval,
+    resolveDaemonFriendPairState,
   );
 
   // Periodically reconcile private chat history with the MetaSO API so
@@ -15677,6 +15750,38 @@ if (!gotTheLock) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[MetaBot] idbots:createMetaBotOnChain failed:', errMsg);
       return { success: false, error: errMsg };
+    }
+  });
+
+  registerIpcHandler('social:getPairRelationship', async (
+    _event,
+    input: { observerGlobalMetaId?: unknown; peerGlobalMetaId?: unknown } | undefined
+  ) => {
+    // S5 renderer badge data source: the same S4 metaso pair-state provider
+    // (TTL cache + breaker) that feeds the private-chat cognition context.
+    // Degrades to { success: false } so the badge simply renders nothing.
+    try {
+      const observer = normalizeGlobalMetaID(input?.observerGlobalMetaId);
+      const peer = normalizeGlobalMetaID(input?.peerGlobalMetaId);
+      if (!observer || !peer || observer === peer) {
+        return { success: true, relationship: null };
+      }
+      const pair = await getSocialPairStateProvider().resolvePairState({
+        firstGlobalMetaID: observer,
+        secondGlobalMetaID: peer,
+      });
+      return {
+        success: true,
+        relationship: {
+          status: pair.status,
+          blocking: pair.blocking,
+          blockedBy: pair.blockedBy,
+        },
+      };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[Social] social:getPairRelationship failed:', errMsg);
+      return { success: false, error: errMsg, relationship: null };
     }
   });
 

@@ -5,6 +5,7 @@ import { i18nService } from '../../services/i18n';
 import { getDefaultMetabotAvatarUrl } from '../../utils/rendererAssetPaths';
 import { pickRenderableAvatarSource as pickSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import MarkdownContent from '../MarkdownContent';
+import FriendBadge from './FriendBadge';
 import {
   messengerBubbleClassName,
   messengerColumnClassName,
@@ -56,6 +57,12 @@ interface A2AMessageItemProps {
   onResendDigitalDelivery?: (orderTxid: string) => void;
   /** Assistant mode hides raw thinking and tool-call chrome entirely. */
   isAssistantMode?: boolean;
+  /**
+   * S5 friend badge: true when the local bot and the session peer are
+   * confirmed on-chain friends (mutual /follow, S4 pair-state source).
+   * Renders a green chip beside the PEER's name only.
+   */
+  peerIsFriend?: boolean;
 }
 
 const formatTime = (timestamp: number): string => {
@@ -657,6 +664,7 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
   isResendingDigitalDelivery = false,
   onResendDigitalDelivery,
   isAssistantMode = false,
+  peerIsFriend = false,
 }) => {
   // tool_use / tool_result: compact collapsible block (collapsed by default)
   if (message.type === 'tool_use' || message.type === 'tool_result') {
@@ -794,6 +802,7 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
       <div className={messengerColumnClassName(displayRight)}>
         <span className={messengerNameClassName}>
           {fromName}
+          {peerIsFriend && !isLocal && <FriendBadge className="ml-1 align-middle" />}
         </span>
         {/* data-message-id mounts the innermost transcript anchor: the turn
             navigator scrolls to the outermost same-id wrapper (the row, set in
