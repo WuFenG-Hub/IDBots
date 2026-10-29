@@ -6399,10 +6399,7 @@ async function processOne(
 }
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-/** sql.js Database must not be used concurrently; skip overlapping ticks. */
-let privateChatPollTickRunning = false;
 let privateChatDaemonGeneration = 0;
-let privateChatActiveTickPromise: Promise<void> | null = null;
 const privateChatDetachedWork = new Set<Promise<void>>();
 
 function trackPrivateChatDetachedWork(work: Promise<void>): void {
@@ -6411,6 +6408,111 @@ function trackPrivateChatDetachedWork(work: Promise<void>): void {
     privateChatDetachedWork.delete(work);
   });
 }
+
+/**
+ * Cross-conversation concurrency for the private-chat poll loop.
+ *
+ * The loop used to run every row strictly serially inside one 5s tick, so a
+ * single long reply turn (LLM + skill execution — observed: 23 minutes) froze
+ * private-chat handling for EVERY bot and BOTH direction; queued rows only
+ * drained when the turn finished (2026-10-29: an outgoing message reached its
+ * session ~14 minutes after it was broadcast).
+ *
+ * Rows are now grouped per conversation into FIFO chains — reply ordering
+ * within one conversation is preserved — while different conversations run
+ * concurrently, bounded by PRIVATE_CHAT_MAX_CONCURRENT_PROCESSES so a burst
+ * of peers cannot stampede the LLM providers. All sql.js statements stay
+ * synchronous, so interleaving across chains never re-enters the database
+ * mid-statement; the same-row re-pick guard (isTracked) keeps a row that is
+ * queued or running from being enqueued twice before it leaves
+ * is_processed = 0.
+ */
+export const PRIVATE_CHAT_MAX_CONCURRENT_PROCESSES = 4;
+
+export interface PrivateChatRowScheduler {
+  enqueue(rowId: number, conversationKey: string, run: () => Promise<void>): void;
+  isTracked(rowId: number): boolean;
+  /** Resolves when every enqueued chain has settled (queued + running). */
+  idle(): Promise<void>;
+  clear(): void;
+}
+
+export function createPrivateChatRowScheduler(params: {
+  maxConcurrent?: number;
+  onRowError?: (error: unknown) => void;
+}): PrivateChatRowScheduler {
+  const maxConcurrent = Math.max(1, params.maxConcurrent ?? PRIVATE_CHAT_MAX_CONCURRENT_PROCESSES);
+  const chains = new Map<string, Promise<void>>();
+  const tracked = new Set<number>();
+  let active = 0;
+  const waiters: Array<() => void> = [];
+
+  const acquireSlot = () => new Promise<void>((resolve) => {
+    if (active < maxConcurrent) {
+      active += 1;
+      resolve();
+      return;
+    }
+    waiters.push(() => {
+      active += 1;
+      resolve();
+    });
+  });
+  const releaseSlot = () => {
+    active -= 1;
+    waiters.shift()?.();
+  };
+
+  return {
+    enqueue(rowId, conversationKey, run) {
+      if (tracked.has(rowId)) return;
+      tracked.add(rowId);
+      const prev = chains.get(conversationKey) ?? Promise.resolve();
+      const chained = prev
+        .catch(() => undefined)
+        .then(async () => {
+          await acquireSlot();
+          try {
+            await run();
+          } finally {
+            releaseSlot();
+          }
+        });
+      chains.set(conversationKey, chained);
+      void chained
+        .catch((error) => {
+          params.onRowError?.(error);
+        })
+        .finally(() => {
+          tracked.delete(rowId);
+          if (chains.get(conversationKey) === chained) {
+            chains.delete(conversationKey);
+          }
+        });
+    },
+    isTracked: (rowId) => tracked.has(rowId),
+    idle: () => Promise.allSettled([...chains.values()]).then(() => undefined),
+    clear() {
+      chains.clear();
+      tracked.clear();
+    },
+  };
+}
+
+/**
+ * Direction-agnostic pair key: both directions of one conversation — including
+ * local-to-local DMs, where a single row is processed by BOTH bots — stay
+ * strictly ordered, closest to the old serial semantics.
+ */
+function privateChatConversationQueueKey(row: PrivateChatMessageRow): string {
+  return [
+    normalizeIdentity(row.from_global_metaid ?? row.from_metaid),
+    normalizeIdentity(row.to_global_metaid ?? row.to_metaid),
+  ].sort().join('~');
+}
+
+/** Scheduler of the running daemon; swapped per start, cleared per stop. */
+let activeRowScheduler: PrivateChatRowScheduler | null = null;
 
 export function startPrivateChatDaemon(
   db: Database,
@@ -6471,38 +6573,56 @@ export function startPrivateChatDaemon(
   const isSessionTurnActive = typeof (coworkRunner as Partial<CoworkRunner> | undefined)?.isSessionActive === 'function'
     ? (sessionId: string) => coworkRunner.isSessionActive(sessionId)
     : undefined;
-  const runPollTick = async (): Promise<void> => {
+  const rowScheduler = createPrivateChatRowScheduler({
+    onRowError: (e) => {
+      console.error('[PrivateChat] processOne error:', e);
+      if (isSqliteWasmBoundsError(e)) {
+        void stopPrivateChatDaemon();
+        onWasmBoundsError?.();
+      }
+    },
+  });
+  activeRowScheduler = rowScheduler;
+  // The tick itself is fully synchronous (wake fires + one SELECT + enqueue):
+  // it can never overlap itself, and rows no longer block the loop while
+  // their reply turns run. Each row's processOne is awaited inside its
+  // conversation chain, so one slow turn only delays its OWN conversation.
+  const runPollTick = (): void => {
     if (daemonGeneration !== privateChatDaemonGeneration) return;
-    if (privateChatPollTickRunning) return;
-    privateChatPollTickRunning = true;
-    const runActiveTickWork = async (): Promise<void> => {
-      try {
-        // Fire due wakes first: a fired wake resets its row to unprocessed so
-        // the query below re-drives it in this same tick. The returned
-        // dispositions ride along with those rows into processOne.
-        const reDrivenWakeDispositions = fireDuePrivateChatA2AWakes({
-          db,
-          saveDb,
-          coworkStore,
-          emitLog,
-          emitToRenderer,
-        });
-        let rows: PrivateChatMessageRow[];
-        try {
-          rows = parsePrivateChatRows(db);
-        } catch (e) {
-          console.error('[PrivateChat] parsePrivateChatRows error:', e);
-          if (isSqliteWasmBoundsError(e)) {
-            void stopPrivateChatDaemon();
-            onWasmBoundsError?.();
-          }
-          return;
-        }
-        for (const row of rows) {
-          if (daemonGeneration !== privateChatDaemonGeneration) {
-            return;
-          }
-          try {
+    // Fire due wakes first: a fired wake resets its row to unprocessed so
+    // the query below re-drives it in this same tick. The returned
+    // dispositions ride along with those rows into processOne. (If the row
+    // is still mid-run from an earlier chain, the disposition is dropped:
+    // the running turn re-decides its own silence and re-arms a wake.)
+    const reDrivenWakeDispositions = fireDuePrivateChatA2AWakes({
+      db,
+      saveDb,
+      coworkStore,
+      emitLog,
+      emitToRenderer,
+    });
+    let rows: PrivateChatMessageRow[];
+    try {
+      rows = parsePrivateChatRows(db);
+    } catch (e) {
+      console.error('[PrivateChat] parsePrivateChatRows error:', e);
+      if (isSqliteWasmBoundsError(e)) {
+        void stopPrivateChatDaemon();
+        onWasmBoundsError?.();
+      }
+      return;
+    }
+    for (const row of rows) {
+      if (daemonGeneration !== privateChatDaemonGeneration) {
+        return;
+      }
+      if (rowScheduler.isTracked(row.id)) continue;
+      rowScheduler.enqueue(
+        row.id,
+        privateChatConversationQueueKey(row),
+        () => {
+          const work = (async () => {
+            if (daemonGeneration !== privateChatDaemonGeneration) return;
             await processOne(
               row,
               db,
@@ -6533,48 +6653,33 @@ export function startPrivateChatDaemon(
               cerebellumMemoryRanker,
               getKnowledgeStore,
             );
-          } catch (e) {
-            console.error('[PrivateChat] processOne error:', e);
-            if (isSqliteWasmBoundsError(e)) {
-              void stopPrivateChatDaemon();
-              onWasmBoundsError?.();
-              return;
-            }
-          }
-        }
-      } finally {
-        if (daemonGeneration === privateChatDaemonGeneration) {
-          privateChatPollTickRunning = false;
-        }
-        if (privateChatActiveTickPromise === activeTick) {
-          privateChatActiveTickPromise = null;
-        }
-      }
-    };
-    const activeTick = new Promise<void>((resolve, reject) => {
-      queueMicrotask(() => {
-        runActiveTickWork().then(resolve, reject);
-      });
-    });
-    privateChatActiveTickPromise = activeTick;
-    await activeTick;
+          })();
+          trackPrivateChatDetachedWork(work);
+          return work;
+        },
+      );
+    }
   };
   pollTimer = setInterval(() => {
-    void runPollTick();
+    runPollTick();
   }, POLL_INTERVAL_MS);
-  void runPollTick();
+  runPollTick();
   emitLog('[PrivateChat] Daemon started.');
 }
 
 export async function stopPrivateChatDaemon(options?: { waitForTick?: boolean }): Promise<void> {
   privateChatDaemonGeneration += 1;
-  const activeTickPromise = privateChatActiveTickPromise;
+  const scheduler = activeRowScheduler;
+  activeRowScheduler = null;
   const detachedWork = [...privateChatDetachedWork];
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
-  privateChatPollTickRunning = false;
+  // Drop queued-not-started rows immediately; already-running chains keep
+  // going (their runs check the bumped generation and no-op) but are still
+  // awaited below when waitForTick is set — same contract as the old tick.
+  scheduler?.clear();
   orderCowork?.dispose();
   orderCowork = null;
   thinkingTasks.clear();
@@ -6584,7 +6689,7 @@ export async function stopPrivateChatDaemon(options?: { waitForTick?: boolean })
   privateChatA2AWakes.clear();
   privateChatDecryptFailedIds.clear();
   if (options?.waitForTick) {
-    await activeTickPromise?.catch(() => undefined);
+    await scheduler?.idle().catch(() => undefined);
     await Promise.allSettled(detachedWork);
   }
 }
