@@ -9,9 +9,10 @@ import {
 } from './emojiData';
 
 /**
- * Chat emoji picker: a toolbar trigger + a popover panel with category tabs,
- * a search box, and a Unicode emoji grid. Pure-Unicode catalog (see
- * emojiData.ts) — no bundled artwork, no third-party assets.
+ * Chat emoji picker: a toolbar trigger + a popover panel with a search box,
+ * a "recent emojis" strip, and one flat WeChat-style Unicode emoji grid
+ * (single page, no category tabs — owner call 2026-10-29). Pure-Unicode
+ * catalog (see emojiData.ts) — no bundled artwork, no third-party assets.
  *
  * Placement follows the composer's '+' menu: the panel floats with
  * position:fixed ABOVE the trigger (chat composers sit at the bottom of the
@@ -25,17 +26,87 @@ import {
 const EMOJI_PANEL_WIDTH = 344;
 const EMOJI_PANEL_HEIGHT = 288;
 
-/** In-memory recents (session-only; nothing is persisted to disk). */
+/**
+ * Recent emojis, persisted to window.localStorage so the Recent row
+ * survives app restarts (recents capture user habit). Renderer-local
+ * only — nothing goes to disk stores, the chain, or any protocol write.
+ * Same LRU order and 16-entry cap as before; malformed storage falls
+ * back to an empty list.
+ */
 const RECENT_LIMIT = 16;
+const EMOJI_RECENTS_STORAGE_KEY = 'idbots.chat.emojiRecents.v1';
+
+type RecentStorage = Pick<Storage, 'getItem' | 'setItem'>;
+
 const recentChars: string[] = [];
-const rememberRecent = (char: string) => {
+
+const dedupeRecentChars = (chars: string[]): string[] => [...new Set(chars)];
+
+/**
+ * Parse the persisted recents JSON. Defensive against any malformed shape
+ * (bad JSON, non-array, non-string entries); keeps first occurrence, which
+ * is the most-recent one because the list is stored MRU-first.
+ */
+export const parsePersistedRecentChars = (raw: string | null): string[] => {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return dedupeRecentChars(parsed.filter((c): c is string => typeof c === 'string' && c.length > 0)).slice(0, RECENT_LIMIT);
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * Replace the in-memory recents from storage — exactly what module init
+ * (= app boot) runs on every launch. Exported so tests can simulate a
+ * restart against a storage stub.
+ */
+export const restoreRecentChars = (storage: RecentStorage | null): string[] => {
+  let persisted: string[] = [];
+  if (storage) {
+    try {
+      persisted = parsePersistedRecentChars(storage.getItem(EMOJI_RECENTS_STORAGE_KEY));
+    } catch {
+      persisted = [];
+    }
+  }
+  recentChars.length = 0;
+  recentChars.push(...persisted);
+  return recentChars;
+};
+
+/** Current recents, most-recently-used first (test/inspection helper). */
+export const recentEmojiChars = (): readonly string[] => recentChars;
+
+/** Write the current recents; a failed write keeps session-memory behavior. */
+const persistRecentChars = (): void => {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.setItem(EMOJI_RECENTS_STORAGE_KEY, JSON.stringify(recentChars));
+  } catch {
+    // localStorage unavailable (privacy mode/quota): recents stay in memory.
+  }
+};
+
+/** Record a pick as most-recently-used (dedupe, MRU-first, cap 16) and persist. */
+export const rememberRecent = (char: string): void => {
   const next = [char, ...recentChars.filter((c) => c !== char)];
   recentChars.length = 0;
   recentChars.push(...next.slice(0, RECENT_LIMIT));
+  persistRecentChars();
 };
 
+// App-boot hydration: a fresh renderer restores the persisted list (LRU
+// order intact) before the first render. Without a window (SSR tests)
+// this is a no-op and recents start empty.
+restoreRecentChars(
+  typeof window === 'undefined' ? null : window.localStorage,
+);
+
 export interface EmojiPickerPanelProps {
-  /** Rendered inside the popover shell; shared by the tabbed and search views. */
+  /** Rendered inside the popover shell; shared by the recents-strip and search views. */
   onSelect: (emoji: string) => void;
 }
 
@@ -66,12 +137,15 @@ const EmojiGrid: React.FC<{
 );
 
 const EmojiPickerPanel: React.FC<EmojiPickerPanelProps> = ({ onSelect }) => {
-  const [activeCategory, setActiveCategory] = useState<string>(EMOJI_CATEGORIES[0].id);
   const [query, setQuery] = useState('');
+  // Recents live in module state; a pick must surface in the strip on the
+  // same render, so handleSelect bumps this counter after rememberRecent.
+  const [recentsTick, setRecentsTick] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const handleSelect = useCallback((emoji: string) => {
     rememberRecent(emoji);
+    setRecentsTick((tick) => tick + 1);
     onSelect(emoji);
   }, [onSelect]);
 
@@ -83,23 +157,17 @@ const EmojiPickerPanel: React.FC<EmojiPickerPanelProps> = ({ onSelect }) => {
   const results = useMemo(() => searchEmoji(query), [query]);
   const searching = query.trim().length > 0;
 
-  const tabs = useMemo(() => {
-    const base = EMOJI_CATEGORIES.map((category) => ({
-      id: category.id,
-      labelKey: category.labelKey,
-      sample: category.emojis[0]?.char ?? '',
-    }));
-    if (recentChars.length === 0) return base;
-    return [{ id: 'recent', labelKey: 'emojiCategoryRecent', sample: recentChars[0] }, ...base];
-  }, []);
+  const recents = useMemo<EmojiEntry[]>(
+    () => recentEmojiChars().map((char) => ({ char, keywords: '' })),
+    [recentsTick],
+  );
 
-  const activeEmojis = useMemo<EmojiEntry[]>(() => {
-    if (searching) return results;
-    if (activeCategory === 'recent') {
-      return recentChars.map((char) => ({ char, keywords: '' }));
-    }
-    return EMOJI_CATEGORIES.find((category) => category.id === activeCategory)?.emojis ?? [];
-  }, [activeCategory, results, searching]);
+  // One flat page (single category): the whole catalog in WeChat code-table
+  // order. flatMap keeps this correct even if categories are ever re-added.
+  const catalogEmojis = useMemo(
+    () => EMOJI_CATEGORIES.flatMap((category) => category.emojis),
+    [],
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -128,39 +196,43 @@ const EmojiPickerPanel: React.FC<EmojiPickerPanelProps> = ({ onSelect }) => {
           />
         </div>
       </div>
-      {/* Category tabs */}
-      {!searching && (
-        <div
-          role="tablist"
-          aria-label={i18nService.t('composerEmojiTitle')}
-          className="flex items-center gap-0.5 px-2 pb-1 overflow-x-auto flex-shrink-0"
-        >
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              role="tab"
-              aria-selected={activeCategory === tab.id}
-              title={i18nService.t(tab.labelKey)}
-              onClick={() => setActiveCategory(tab.id)}
-              className={`h-7 w-7 flex-shrink-0 flex items-center justify-center rounded-lg text-[15px] leading-none transition-colors ${
-                activeCategory === tab.id
-                  ? 'bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover ring-1 ring-claude-accent/50'
-                  : 'hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover'
-              }`}
-            >
-              {tab.sample}
-            </button>
-          ))}
+      {/* Recent strip — WeChat style, embedded ABOVE the main grid inside the
+          single emoji panel (no Recent tab). Hidden while searching and when
+          empty (fresh install: nothing used yet). */}
+      {!searching && recents.length > 0 && (
+        <div className="px-2 pb-1 flex-shrink-0">
+          <div
+            className="px-1 pb-0.5 text-[10px] font-medium tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary"
+          >
+            {i18nService.t('emojiCategoryRecent')}
+          </div>
+          <div className="flex flex-wrap gap-0.5" role="listbox" aria-label={i18nService.t('emojiCategoryRecent')}>
+            {recents.map((emoji) => (
+              <button
+                key={emoji.char}
+                type="button"
+                role="option"
+                aria-label={emoji.char}
+                onClick={() => handleSelect(emoji.char)}
+                className="h-7 w-7 flex items-center justify-center rounded-lg text-[17px] leading-none transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover focus:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/60"
+              >
+                {emoji.char}
+              </button>
+            ))}
+          </div>
         </div>
       )}
-      {/* Grid */}
-      {activeEmojis.length > 0 ? (
-        <EmojiGrid emojis={activeEmojis} onSelect={handleSelect} aria-label={i18nService.t('composerEmojiTitle')} />
+      {/* Main grid — the single emoji page */}
+      {searching ? (
+        results.length > 0 ? (
+          <EmojiGrid emojis={results} onSelect={handleSelect} aria-label={i18nService.t('composerEmojiTitle')} />
+        ) : (
+          <div className="flex flex-1 items-center justify-center px-4 pb-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('emojiPickerNoResults')}
+          </div>
+        )
       ) : (
-        <div className="flex flex-1 items-center justify-center px-4 pb-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-          {i18nService.t('emojiPickerNoResults')}
-        </div>
+        <EmojiGrid emojis={catalogEmojis} onSelect={handleSelect} aria-label={i18nService.t('composerEmojiTitle')} />
       )}
     </div>
   );

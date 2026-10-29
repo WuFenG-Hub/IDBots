@@ -8,9 +8,15 @@ import {
   countEmojiCatalogEntries,
   searchEmoji,
 } from '../src/renderer/components/chat/emojiData';
+import { WECHAT_BRACKET_EMOJI_MAP } from '../src/renderer/components/chat/wechatEmojiDisplay';
 
-test('the catalog has a full set of non-empty categories with valid entries', () => {
-  assert.ok(EMOJI_CATEGORIES.length >= 8, `expected >= 8 categories, got ${EMOJI_CATEGORIES.length}`);
+test('the catalog is a single WeChat-style first-panel page with valid entries', () => {
+  // Owner call 2026-10-29 (final scope): ONE tab — the smileys/emotion page
+  // with recents embedded as a strip, like WeChat's own first panel. Exactly
+  // 85 entries: the 78 WeChat bracket-code targets (77 unique chars —
+  // [得意]/[奸笑] share 😏) plus the curated laugh/think family, 🙏 and 🎉.
+  assert.equal(EMOJI_CATEGORIES.length, 1, `expected a single category, got ${EMOJI_CATEGORIES.length}`);
+  assert.equal(EMOJI_CATEGORIES[0].id, 'smileys');
   const ids = new Set<string>();
   const labelKeys = new Set<string>();
   for (const category of EMOJI_CATEGORIES) {
@@ -18,7 +24,7 @@ test('the catalog has a full set of non-empty categories with valid entries', ()
     ids.add(category.id);
     assert.ok(category.labelKey && !labelKeys.has(category.labelKey), `labelKey empty or duplicated: ${category.labelKey}`);
     labelKeys.add(category.labelKey);
-    assert.ok(category.emojis.length >= 24, `category ${category.id} too thin: ${category.emojis.length}`);
+    assert.ok(category.emojis.length >= 10, `category ${category.id} too thin: ${category.emojis.length}`);
     const seen = new Set<string>();
     for (const emoji of category.emojis) {
       // Every entry is a real Unicode glyph (no ASCII-only junk, no empty
@@ -34,7 +40,38 @@ test('the catalog has a full set of non-empty categories with valid entries', ()
       seen.add(emoji.char);
     }
   }
-  assert.ok(countEmojiCatalogEntries() >= 600, `catalog too small: ${countEmojiCatalogEntries()}`);
+  const total = countEmojiCatalogEntries();
+  assert.equal(total, 85, `catalog must be the 85-entry WeChat first panel, got ${total}`);
+});
+
+test('the ordered catalog matches the pinned WeChat-panel sequence (desktop/mobile identity anchor)', () => {
+  // The mobile picker vendors this exact catalog; both worktrees pin the
+  // same 85-char ordered sequence in their tests, so any drift between the
+  // two ends fails one of the two suites.
+  const expected = [
+    '🙂', '😕', '😍', '😳', '😏', '😢', '🤐', '😴', '😭', '😓',
+    '😠', '😜', '😁', '😮', '😔', '😎', '😅', '😫', '🤮', '🤭',
+    '👃', '🤦', '🙁', '🥰', '🙄', '😤', '💦', '😥', '😃', '😌',
+    '🥺', '😿', '😱', '😊', '😵', '🤯', '😩', '💀', '🔨', '👋',
+    '💪', '🤬', '❓', '🤫', '😨', '😒', '😀', '😄', '😆', '🤣',
+    '😂', '🤔', '🤗', '👍', '👎', '🤝', '✌️', '👊', '✊', '😘',
+    '💋', '👏', '🙇', '👌', '⛔', '🙏', '🐷', '🐔', '🌙', '☀️',
+    '🌧', '☕', '🍰', '🍺', '🍚', '🍉', '⚽', '🌹', '🥀', '❤️',
+    '💔', '🎁', '🧧', '🧨', '🎉',
+  ];
+  assert.equal(expected.length, 85, 'the pinned anchor itself must have 85 members');
+  const actual = EMOJI_CATEGORIES.flatMap((c) => c.emojis.map((e) => e.char));
+  assert.deepEqual(actual, expected, 'catalog order/content drifted from the pinned WeChat-panel sequence');
+});
+
+test('every WeChat bracket-code emoji target is pickable in the catalog', () => {
+  // The display map (wechatEmojiDisplay.ts) rewrites bracket codes like
+  // [微笑] at render time; each mapped emoji must also exist in the picker
+  // catalog so users can insert it directly.
+  const catalogChars = new Set(EMOJI_CATEGORIES.flatMap((c) => c.emojis.map((e) => e.char)));
+  for (const [code, emoji] of Object.entries(WECHAT_BRACKET_EMOJI_MAP)) {
+    assert.ok(catalogChars.has(emoji), `[${code}] target ${emoji} missing from the picker catalog`);
+  }
 });
 
 test('search matches English and Chinese keywords and dedupes across categories', () => {
@@ -49,7 +86,7 @@ test('search matches English and Chinese keywords and dedupes across categories'
   assert.equal(rose[0].char, '🌹');
 
   const thumbs = searchEmoji('点赞');
-  assert.equal(thumbs.length, 1, '👍 lives in several categories; search must dedupe');
+  assert.equal(thumbs.length, 1, 'search must return 👍 exactly once');
   assert.equal(thumbs[0].char, '👍');
 
   // Case-insensitive and whitespace-tolerant.
@@ -66,10 +103,14 @@ test('search matches English and Chinese keywords and dedupes across categories'
 });
 
 test('emoji chars include full multi-codepoint sequences (never truncated)', () => {
-  // VS16 sequences and ZWJ joins must be present verbatim in the catalog;
-  // insertion depends on the sequence staying intact.
+  // VS16 sequences must be present verbatim in the catalog; insertion
+  // depends on the sequence staying intact. (The trimmed WeChat-scale set
+  // carries VS16 sequences — ❤️/✌️ — but no ZWJ joins anymore; the bare vs
+  // VS16 distinction below is the truncation guard that matters.)
   const hearts = EMOJI_CATEGORIES.flatMap((c) => c.emojis.map((e) => e.char));
   assert.ok(hearts.includes('❤️'), 'red heart must keep its VS16');
   assert.ok(hearts.includes('✌️'), 'victory hand must keep its VS16');
-  assert.ok(hearts.some((c) => c.includes('\u200d')), 'catalog should carry at least one ZWJ sequence');
+  for (const ch of hearts) {
+    assert.notEqual([...ch].length, 0, `no empty char: ${JSON.stringify(ch)}`);
+  }
 });

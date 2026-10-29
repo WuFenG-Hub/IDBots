@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import EmojiMenuButton from '../src/renderer/components/chat/EmojiPickerPopover';
+import EmojiMenuButton, { rememberRecent, restoreRecentChars } from '../src/renderer/components/chat/EmojiPickerPopover';
 import GroupTaskMessageItem from '../src/renderer/components/groupTasks/GroupTaskMessageItem';
 import A2AMessageItem from '../src/renderer/components/cowork/A2AMessageItem';
 import { i18nService } from '../src/renderer/services/i18n';
@@ -51,20 +51,22 @@ test('emoji trigger renders a toolbar button with picker aria wiring', () => {
   assert.doesNotMatch(markup, /role="dialog"/);
 });
 
-test('open picker renders search box, category tabs, and a Unicode emoji grid', () => {
+test('open picker renders one flat panel: search box, no tabs, single emoji grid', () => {
   const markup = renderToStaticMarkup(
     <EmojiMenuButton open buttonRef={{ current: null }} onToggle={() => {}} onPick={() => {}} />,
   );
   assert.match(markup, /role="dialog"/);
   // Search input present with its placeholder copy.
   assert.match(markup, /type="text"[^>]*placeholder="[^"]+"/);
-  // Category tablist with tabs (>= 8 categories in the catalog).
-  assert.match(markup, /role="tablist"/);
-  const tabCount = (markup.match(/role="tab"/g) ?? []).length;
-  assert.ok(tabCount >= 8, `expected >= 8 category tabs, got ${tabCount}`);
-  // Emoji grid options (role=option) carry the emoji as button text.
-  assert.match(markup, /role="option"/);
-  assert.ok(markup.includes('😀'), 'grid should render the first smileys category');
+  // Single WeChat-style page: NO tab bar anywhere.
+  assert.doesNotMatch(markup, /role="tablist"/);
+  assert.doesNotMatch(markup, /role="tab"/);
+  // One flat grid of 85 emoji options carrying the emoji as button text.
+  const optionCount = (markup.match(/role="option"/g) ?? []).length;
+  assert.equal(optionCount, 85, `expected 85 grid options, got ${optionCount}`);
+  assert.ok(markup.includes('🙂'), 'grid starts with the WeChat code-table order (微笑 first)');
+  // Fresh install: no recents yet -> no recent strip, no recents label.
+  assert.ok(!markup.includes(i18nService.t('emojiCategoryRecent')), 'recent strip hidden while recents are empty');
 });
 
 test('disabled trigger renders disabled', () => {
@@ -72,6 +74,32 @@ test('disabled trigger renders disabled', () => {
     <EmojiMenuButton open={false} buttonRef={{ current: null }} disabled onToggle={() => {}} onPick={() => {}} />,
   );
   assert.match(markup, /disabled/);
+});
+
+test('recents render as a strip embedded ABOVE the main grid (WeChat style, no Recent tab)', () => {
+  // Prime module recents exactly like real picks would (SSR tests cannot
+  // fire events); the strip must appear inside the single panel, above the
+  // 85-entry main grid, and must not reintroduce a tab bar.
+  restoreRecentChars(null);
+  rememberRecent('🎉');
+  rememberRecent('👍');
+  try {
+    const markup = renderToStaticMarkup(
+      <EmojiMenuButton open buttonRef={{ current: null }} onToggle={() => {}} onPick={() => {}} />,
+    );
+    assert.ok(markup.includes(i18nService.t('emojiCategoryRecent')), 'recent strip label present');
+    assert.doesNotMatch(markup, /role="tab"/, 'recents must be a strip, not a tab');
+    // Strip (2 recents) + main grid (85) = 87 options; strip markup must
+    // come BEFORE the main grid's first catalog emoji 🙂.
+    const optionCount = (markup.match(/role="option"/g) ?? []).length;
+    assert.equal(optionCount, 87, `expected 2 recent + 85 catalog options, got ${optionCount}`);
+    const stripLabelIndex = markup.indexOf(i18nService.t('emojiCategoryRecent'));
+    const firstGridEmojiIndex = markup.indexOf('🙂');
+    assert.ok(stripLabelIndex >= 0 && stripLabelIndex < firstGridEmojiIndex, 'recent strip sits above the main grid');
+    assert.ok(markup.indexOf('🎉') < firstGridEmojiIndex, 'most-recent emoji leads the strip');
+  } finally {
+    restoreRecentChars(null);
+  }
 });
 
 test('composer wires the emoji button next to the + button in both layout branches, inserting at the caret', () => {
