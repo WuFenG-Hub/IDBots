@@ -3,12 +3,26 @@
 // ASCII junk from hand-editing, working bilingual search).
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   EMOJI_CATEGORIES,
   countEmojiCatalogEntries,
   searchEmoji,
 } from '../src/renderer/components/chat/emojiData';
 import { WECHAT_BRACKET_EMOJI_MAP } from '../src/renderer/components/chat/wechatEmojiDisplay';
+import {
+  TWEMOJI_CHARS,
+  TWEMOJI_ASSET_COUNT,
+  twemojiUrlFor,
+} from '../src/renderer/components/chat/twemoji';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+
+/** Upstream Twemoji file name for a char: hex codepoints minus fe0f. */
+const twemojiFileName = (ch: string): string =>
+  [...ch].map((cp) => cp.codePointAt(0)!.toString(16)).filter((h) => h !== 'fe0f').join('-') + '.svg';
 
 test('the catalog is a single WeChat-style first-panel page with valid entries', () => {
   // Owner call 2026-10-29 (final scope): ONE tab — the smileys/emotion page
@@ -113,4 +127,37 @@ test('emoji chars include full multi-codepoint sequences (never truncated)', () 
   for (const ch of hearts) {
     assert.notEqual([...ch].length, 0, `no empty char: ${JSON.stringify(ch)}`);
   }
+});
+
+test('every catalog emoji has a bundled Twemoji asset (85-file subset, no CDN)', () => {
+  // Display artwork: the picker/bubble images come from the bundled
+  // Twemoji 14.0.2 subset (CC-BY 4.0 — see LICENSES/twemoji-NOTICE.md).
+  // The manifest must mirror the catalog 1:1 (same chars, same order) and
+  // every URL must resolve to a local file — no runtime CDN fetch.
+  assert.equal(TWEMOJI_ASSET_COUNT, 85, `expected 85 bundled assets, got ${TWEMOJI_ASSET_COUNT}`);
+  const catalogChars = EMOJI_CATEGORIES.flatMap((c) => c.emojis.map((e) => e.char));
+  assert.deepEqual(
+    [...TWEMOJI_CHARS],
+    [...new Set(catalogChars)],
+    'manifest chars must equal the catalog chars in order',
+  );
+  for (const char of catalogChars) {
+    const url = twemojiUrlFor(char);
+    assert.ok(url, `no bundled asset for ${char}`);
+    assert.match(url, /\/twemoji\/[0-9a-z-]+\.svg$/, `${char} asset URL must point at the local twemoji dir`);
+    assert.ok(!/^https?:/.test(url), `${char} asset must not be a CDN URL`);
+  }
+  // The assets dir carries exactly the 85-file subset (never the full set).
+  const assetsDir = path.join(here, '..', 'src', 'renderer', 'components', 'chat', 'assets', 'twemoji');
+  const svgs = fs.readdirSync(assetsDir).filter((f) => f.endsWith('.svg')).sort();
+  assert.equal(svgs.length, 85, `assets dir must hold exactly 85 SVGs, got ${svgs.length}`);
+  const referenced = new Set(catalogChars.map((ch) => twemojiFileName(ch)));
+  for (const file of svgs) {
+    assert.ok(referenced.has(file), `orphan asset not referenced by the manifest: ${file}`);
+  }
+  // VS16 naming: upstream asset names strip fe0f (✌️ -> 270c.svg).
+  assert.match(twemojiUrlFor('✌️')!, /270c\.svg$/);
+  assert.match(twemojiUrlFor('❤️')!, /2764\.svg$/);
+  // Non-catalog chars fall back to the raw glyph (no asset, no throw).
+  assert.equal(twemojiUrlFor('🚀'), null);
 });

@@ -312,8 +312,9 @@ const GroupTaskMessageItem = React.memo(({
             </button>
           ) : (
             // Display-time WeChat bracket-code mapping; raw transcript text
-            // (fold labels, copying, chain data) stays untouched.
-            <MarkdownContent content={mapWechatBracketCodesForDisplay(rawContent)} className={markdownClassName} />
+            // (fold labels, copying, chain data) stays untouched. emojiImages:
+            // catalog emoji render as bundled Twemoji artwork (display-only).
+            <MarkdownContent content={mapWechatBracketCodesForDisplay(rawContent)} className={markdownClassName} emojiImages />
           )}
           {(longDeliverable || acceptanceSummaryFold) && deliverableExpanded && (
             <button

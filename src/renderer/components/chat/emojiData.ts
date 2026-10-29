@@ -4,9 +4,11 @@
  * 2026-10-29: "就一个 tab，常用的直接嵌入到表情管理的第一层，像微信这样").
  *
  * Design notes:
- * - Standard Unicode emoji ONLY (rendered by the platform emoji font). No
- *   third-party artwork is bundled or referenced — the picker never ships
- *   proprietary emoji images (e.g. Tencent's WeChat artwork).
+ * - Standard Unicode codepoints only — `char` is what the picker inserts
+ *   and what gets stored/sent (never artwork, never Tencent's proprietary
+ *   WeChat images). For DISPLAY, the panel and bubbles render these chars
+ *   through bundled Twemoji artwork (twemoji.ts, Twemoji 14.0.2, CC-BY 4.0);
+ *   a char without a bundled asset falls back to the platform emoji font.
  * - Single flat page, ordered like the WeChat code table: every emoji
  *   targeted by the WeChat bracket-code display map (wechatEmojiDisplay.ts,
  *   78 codes → 77 unique chars — [得意] and [奸笑] both map to 😏) is

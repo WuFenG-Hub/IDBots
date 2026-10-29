@@ -7,12 +7,15 @@ import {
   searchEmoji,
   type EmojiEntry,
 } from './emojiData';
+import { TwemojiGlyph } from './TwemojiText';
 
 /**
  * Chat emoji picker: a toolbar trigger + a popover panel with a search box,
  * a "recent emojis" strip, and one flat WeChat-style Unicode emoji grid
- * (single page, no category tabs — owner call 2026-10-29). Pure-Unicode
- * catalog (see emojiData.ts) — no bundled artwork, no third-party assets.
+ * (single page, no category tabs — owner call 2026-10-29). Catalog emoji
+ * render as bundled Twemoji artwork (Twemoji 14.0.2, CC-BY 4.0 — see
+ * twemoji.ts / LICENSES/twemoji-NOTICE.md); picks still insert the plain
+ * Unicode codepoint, so storage and protocol stay untouched.
  *
  * Placement follows the composer's '+' menu: the panel floats with
  * position:fixed ABOVE the trigger (chat composers sit at the bottom of the
@@ -130,7 +133,8 @@ const EmojiGrid: React.FC<{
         onClick={() => onSelect(emoji.char)}
         className="h-8 w-8 flex items-center justify-center rounded-lg text-[19px] leading-none transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover focus:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/60"
       >
-        {emoji.char}
+        {/* Twemoji <img> (alt = codepoint); non-catalog chars fall back to the font glyph. */}
+        <TwemojiGlyph char={emoji.char} px={19} />
       </button>
     ))}
   </div>
@@ -216,7 +220,7 @@ const EmojiPickerPanel: React.FC<EmojiPickerPanelProps> = ({ onSelect }) => {
                 onClick={() => handleSelect(emoji.char)}
                 className="h-7 w-7 flex items-center justify-center rounded-lg text-[17px] leading-none transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover focus:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/60"
               >
-                {emoji.char}
+                <TwemojiGlyph char={emoji.char} px={17} />
               </button>
             ))}
           </div>

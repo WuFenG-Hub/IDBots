@@ -997,10 +997,12 @@ const UserMessageBody: React.FC<{
       {body ? (
         // Display-time WeChat bracket-code mapping (user bubbles only — the
         // same display-only contract as the messenger surfaces); the stored
-        // transcript text stays verbatim.
+        // transcript text stays verbatim. emojiImages: catalog emoji render
+        // as bundled Twemoji artwork (display-only swap).
         <MarkdownContent
           content={mapWechatBracketCodesForDisplay(body)}
           className="max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
+          emojiImages
         />
       ) : null}
       {imagePaths.length > 0 && <ImagePreviewStrip imagePaths={imagePaths} inline />}

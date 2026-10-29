@@ -11,7 +11,9 @@
  * - Standard Unicode codepoints only. WeChat's own emoji artwork is
  *   proprietary (Tencent) and is neither bundled nor referenced; each mapped
  *   value is a rough Unicode stand-in for the code's meaning, not a
- *   reproduction of any Tencent asset.
+ *   reproduction of any Tencent asset. (The DISPLAY of the mapped char may
+ *   render through bundled Twemoji artwork — see twemoji.ts — which changes
+ *   nothing about this mapping or the stored text.)
  * - Code spans stay verbatim: fenced code blocks (```…```) and inline code
  *   (`` `…` ``) are skipped, so a message that *talks about* `[微笑]`
  *   (or carries it inside code) still shows the literal brackets.

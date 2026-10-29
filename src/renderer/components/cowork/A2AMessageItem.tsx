@@ -803,8 +803,9 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
             full row width. */}
         <div className={messengerBubbleClassName(displayRight)} data-message-id={message.id}>
           {/* Display-time WeChat bracket-code mapping; the raw message
-              (copy, delivery parsing, chain data) is untouched. */}
-          <MarkdownContent content={mapWechatBracketCodesForDisplay(contentToRender)} className={markdownClassName} />
+              (copy, delivery parsing, chain data) is untouched. emojiImages:
+              catalog emoji render as bundled Twemoji artwork (display-only). */}
+          <MarkdownContent content={mapWechatBracketCodesForDisplay(contentToRender)} className={markdownClassName} emojiImages />
         </div>
         {metafileItems.length > 0 && (
           <div className="w-full mt-2 space-y-2">

@@ -61,10 +61,19 @@ test('open picker renders one flat panel: search box, no tabs, single emoji grid
   // Single WeChat-style page: NO tab bar anywhere.
   assert.doesNotMatch(markup, /role="tablist"/);
   assert.doesNotMatch(markup, /role="tab"/);
-  // One flat grid of 85 emoji options carrying the emoji as button text.
+  // One flat grid of 85 emoji options; every catalog cell renders the
+  // bundled Twemoji image (alt = codepoint) instead of a font glyph.
   const optionCount = (markup.match(/role="option"/g) ?? []).length;
   assert.equal(optionCount, 85, `expected 85 grid options, got ${optionCount}`);
-  assert.ok(markup.includes('🙂'), 'grid starts with the WeChat code-table order (微笑 first)');
+  const imgCount = (markup.match(/<img /g) ?? []).length;
+  assert.equal(imgCount, 85, `expected 85 Twemoji <img> cells, got ${imgCount}`);
+  // Grid starts with the WeChat code-table order (微笑 first)…
+  assert.match(markup, /<img[^>]*alt="🙂"/, 'grid starts with 🙂 (微笑) as a Twemoji image');
+  // …backed by the bundled asset (no runtime CDN URL anywhere).
+  assert.match(markup, /src="[^"]*twemoji\/1f642\.svg"/);
+  assert.doesNotMatch(markup, /src="https?:\/\//, 'assets must be bundled, never fetched from a CDN');
+  // The button's a11y identity stays the codepoint itself.
+  assert.match(markup, /aria-label="🙂"/);
   // Fresh install: no recents yet -> no recent strip, no recents label.
   assert.ok(!markup.includes(i18nService.t('emojiCategoryRecent')), 'recent strip hidden while recents are empty');
 });
@@ -97,6 +106,9 @@ test('recents render as a strip embedded ABOVE the main grid (WeChat style, no R
     const firstGridEmojiIndex = markup.indexOf('🙂');
     assert.ok(stripLabelIndex >= 0 && stripLabelIndex < firstGridEmojiIndex, 'recent strip sits above the main grid');
     assert.ok(markup.indexOf('🎉') < firstGridEmojiIndex, 'most-recent emoji leads the strip');
+    // Recents render as Twemoji images too (alt carries the codepoint).
+    assert.match(markup, /<img[^>]*alt="🎉"/, 'recent picks render as bundled Twemoji images');
+    assert.match(markup, /<img[^>]*alt="👍"/);
   } finally {
     restoreRecentChars(null);
   }
@@ -128,12 +140,14 @@ test('composer wires the emoji button next to the + button in both layout branch
   assert.match(source, /const emojiPickerDisabled = disabled \|\| \(isStreaming && steerDisabled\)/);
 });
 
-test('group-task message bubbles render WeChat bracket codes as Unicode emoji (display-only)', () => {
+test('group-task message bubbles render WeChat bracket codes as Twemoji images (display-only)', () => {
   const markup = renderToStaticMarkup(
     <GroupTaskMessageItem message={groupMessage('收到[强]，马上开始[奋斗]')} senderDisplayName="Worker Bot" />,
   );
-  assert.ok(markup.includes('👍'), 'bubble should show 👍 for [强]');
-  assert.ok(markup.includes('💪'), 'bubble should show 💪 for [奋斗]');
+  // Mapped codes render as inline Twemoji images; alt carries the codepoint.
+  assert.match(markup, /<img[^>]*alt="👍"/, 'bubble should show 👍 (as an image) for [强]');
+  assert.match(markup, /<img[^>]*alt="💪"/, 'bubble should show 💪 (as an image) for [奋斗]');
+  assert.match(markup, /src="[^"]*twemoji\/1f44d\.svg"/, '👍 maps to the bundled 1f44d.svg asset');
   assert.ok(!markup.includes('[强]') && !markup.includes('[奋斗]'), 'bracket codes must not leak into the bubble');
   // The raw pin id and txid still render verbatim (chain data untouched).
   assert.match(markup, /txid:/);
@@ -144,10 +158,10 @@ test('group-task bubbles keep bracket codes verbatim inside code spans', () => {
     <GroupTaskMessageItem message={groupMessage('跑 `code [强] here` 然后[微笑]')} senderDisplayName="Worker Bot" />,
   );
   assert.ok(markup.includes('[强]'), 'inline code span must keep the literal bracket code');
-  assert.ok(markup.includes('🙂'), 'prose outside code still maps');
+  assert.match(markup, /<img[^>]*alt="🙂"/, 'prose outside code still renders as a Twemoji image');
 });
 
-test('A2A private-chat bubbles render WeChat bracket codes as Unicode emoji', () => {
+test('A2A private-chat bubbles render WeChat bracket codes as Twemoji images', () => {
   const markup = renderToStaticMarkup(
     <A2AMessageItem
       message={{
@@ -160,8 +174,8 @@ test('A2A private-chat bubbles render WeChat bracket codes as Unicode emoji', ()
       peerName="Peer"
     />,
   );
-  assert.ok(markup.includes('🙂'), 'A2A bubble should show 🙂 for [微笑]');
-  assert.ok(markup.includes('👊'), 'A2A bubble should show 👊 for [抱拳]');
+  assert.match(markup, /<img[^>]*alt="🙂"/, 'A2A bubble should show 🙂 (as an image) for [微笑]');
+  assert.match(markup, /<img[^>]*alt="👊"/, 'A2A bubble should show 👊 (as an image) for [抱拳]');
   assert.ok(!markup.includes('[微笑]') && !markup.includes('[抱拳]'), 'bracket codes must not leak');
 });
 
@@ -171,8 +185,8 @@ test('cowork user bubbles route their body through the display mapping', () => {
   const source = readSource('../src/renderer/components/cowork/CoworkSessionDetail.tsx');
   assert.match(
     source,
-    /content=\{mapWechatBracketCodesForDisplay\(body\)\}/,
-    'UserMessageBody must pass its body through the display-only mapping',
+    /content=\{mapWechatBracketCodesForDisplay\(body\)\}[\s\S]{0,120}?emojiImages/,
+    'UserMessageBody must pass its body through the display-only mapping and opt into Twemoji rendering',
   );
 });
 
