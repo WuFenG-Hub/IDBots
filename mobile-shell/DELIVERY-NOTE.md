@@ -145,12 +145,13 @@ The `test35` emulator booted successfully (`sys.boot_completed=1`). The new stag
 | Staging login and bootstrap | `android-staging-login.png` and `android-bootstrap.json`: exact origin, `nativeBridgeVersion=1`, `document-start`, `platform=android`, `shell=capacitor`, `os=android` |
 | Capability honesty | `appState=true`, `backButton=true`, `externalUrls=true`; camera/photos/files/share/secureScreen=false |
 | Real Android Back event | `ns1-android-lifecycle.json`: CDP subscription recorded one `back` event after `adb shell input keyevent 4`; the temporary handler consumed it |
-| Real Android product-root Back exit | `ns1-android-root-exit.json`: with an unconsumed Back callback at `/login`, hardware Back closed MainActivity and focus returned to Launcher. `pidof` may retain the Android-cached process; UI/Activity exit is the product check. CDP instrumentation also proved the bootstrap selected `exitApp` rather than history. |
+| Real Android product-root Back exit | `ns1-android-root-exit.json`: with an unconsumed Back callback at `/login` and again at authenticated `/app/`, hardware Back closed MainActivity and focus returned to Launcher. `pidof` may retain the Android-cached process; UI/Activity exit is the product check. CDP instrumentation also proved the bootstrap selected `exitApp` rather than history. |
+| Real Android Tasks-tab DOM repro | `ns1-android-task-repro.mjs`: authorized synthetic login followed by a DOM click on Tasks set `activeTab=tasks` and rendered the Tasks screen; this resolves OBS-3 as a coordinate/input issue, not a product defect. Test credentials were supplied only through process environment and were not committed. |
 | Real foreground/background events | The same evidence records `appState active=false` after HOME and `active=true` after returning to the existing Activity |
 | External content leaves the privileged WebView | `android-external.json`: system handoff completed while the privileged WebView retained the staging bootstrap |
 | Offline/error UI and retry | `android-offline.png`, `android-offline.json`, and `android-offline-retry.png`: bundled page had retry/no native surface/no cached app; network restoration returned to staging bootstrap |
 
-The offline leg initially paused because the external handoff had left the app in the background; returning the existing Activity to the foreground allowed the unchanged smoke script to finish. No timeout or assertion was changed. As on iOS, `pwaProof` is null because the currently deployed staging PWA does not include this branch. These results prove native bootstrap and event transport, not authenticated route-specific Back or reconnect/resync behavior.
+The offline leg initially paused because the external handoff had left the app in the background; returning the existing Activity to the foreground allowed the unchanged smoke script to finish. No timeout or assertion was changed. As on iOS, `pwaProof` is null because the currently deployed staging PWA does not include this branch. These results prove native bootstrap, event transport, product-root Back exit, and Tasks DOM behavior; authenticated reconnect/resync and branch-PWA cold-start restore still require the reviewer re-run described below.
 
 ### PWA / browser
 
@@ -171,14 +172,14 @@ The adapter tests prove presence/absence, version mismatch, capability/method fa
 
 | Item | State / owner |
 |---|---|
-| Android build, JVM, unauthenticated WebView smoke, and native Back/app-state transport | PASS — see Sections 6–8; this is not authenticated route/recovery acceptance |
-| Native authenticated login and returning login cookie persistence | Code/tests complete (DEF-1); native re-review requires the reviewer's authorized synthetic account and a branch-matched deployed PWA |
+| Android build, JVM, unauthenticated WebView smoke, native Back/app-state transport, authenticated `/app/` root Back, and Tasks DOM repro | PASS — see Sections 6–8; reconnect/resync and branch-PWA cold-start restore remain separate |
+| Native authenticated login and returning login cookie persistence | DEF-1 code/tests complete; native re-review requires the reviewer's authorized synthetic account and a branch-matched deployed PWA |
 | Native ordinary chat, older-session restore, duplicate/lost-message checks | NOT RUN — authenticated staging account and branch-matched remote PWA required |
 | Native background/foreground reconnect/resync and network recovery | NOT RUN — native event transport and offline banner passed, but authenticated reconnect/resync acceptance requires a branch-matched deployed PWA |
-| Native Android Back through real routes/sheets | Product-root exit passed on real Android; authenticated route/sheet behavior requires the branch-matched PWA and an authorized synthetic account |
+| Native Android Back through nested routes/sheets | `/login` and authenticated `/app/` product-root exit passed on real Android; nested route/sheet behavior requires the branch-matched PWA and an authorized synthetic account |
 | Two-device behavior and logout isolation | NOT RUN — owner/staging test account and second client required |
 | OBS-1 Me balance refresh in native WebView | OPEN — evidence shows a failure banner while chat works; insufficient evidence to distinguish tenant relay state from WebView transport. No speculative code change; owner/tenant-state recheck required |
-| OBS-3 one missed Tasks-tab tap | OPEN — one coordinate-related observation with no reproducible product defect; no code change claimed |
+| OBS-3 one missed Tasks-tab tap | RESOLVED — DOM repro successfully selected Tasks and set `activeTab=tasks`; the observation was coordinate/input related, not a product defect |
 | iOS-native recharge UI and Android/PWA recharge parity in WebViews | NOT RUN — branch PWA was not deployed; pure policy/render tests passed |
 | Real Alipay app handoff and payment/order behavior | NOT RUN — owner-approved staging account/order required; no order was created |
 | Native keyboard, safe areas, light/dark themes | NOT RUN — physical/interactive native UI evidence unavailable; configuration and existing shared tests passed |
