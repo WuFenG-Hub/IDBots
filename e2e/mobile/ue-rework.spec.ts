@@ -83,6 +83,8 @@ test.describe('chat UE rework', () => {
       };
     });
     await page.getByRole('button', { name: 'Me', exact: true }).click();
+    // A6: the bot list moved to the My Bots secondary page.
+    await page.getByTestId('me-entry-bots').click();
     const rows = page.locator('[data-testid^="bot-row-"]');
     await expect(rows.first()).toBeVisible();
     const avatars = rows.locator('[data-testid^="bot-avatar-"]');

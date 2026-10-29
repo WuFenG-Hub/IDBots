@@ -80,6 +80,7 @@ tests/*
 !tests/mobileBotSort.test.ts
 !tests/mobileSessionList.test.ts
 !tests/mobileA2aLimits.test.ts
+!tests/mobileMeIa.test.tsx
 !tests/fixtures/
 !tests/agentGameConvergence.test.mjs
 !tests/fixtures/longTaskBoardSeed.mjs

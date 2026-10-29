@@ -1,65 +1,121 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronRightIcon } from '@heroicons/react/24/outline';
 import { t } from '../../i18n';
-import type { MobileLanguage } from '../../i18n';
-import { CONTRACT_VERSION } from '../../bridge/types';
 import { getMobileElectron } from '../appBridge';
-import { logout, requestAccountDeletion } from '../../login/loginApi';
 import { useIdentity } from '../hooks/useIdentity';
 import { useMeters } from '../hooks/useMeters';
 import { useSettings } from '../hooks/useSettings';
 import { useMemorySettings } from '../hooks/useMemorySettings';
 import { useSkills } from '../hooks/useSkills';
+import { useMetabots } from '../hooks/useMetabots';
 import { formatBytes, formatCount } from '../format';
+import { BotAvatar } from '../components/BotAvatar';
+import { RedeemButton } from '../components/RedeemButton';
 import { BottomSheet } from '../components/BottomSheet';
-import { BotManagementSection } from '../components/BotManagementSection';
 import { Section } from '../components/Section';
-import { Switch } from '../components/Switch';
+import {
+  ME_ENTRY_GROUPS,
+  meEntriesForGroup,
+  type MeEntrySummaryInput,
+  type MeRoute,
+} from './me/registry';
+import { ProfilePage } from './me/ProfilePage';
+import { TrafficPage } from './me/TrafficPage';
+import { BotsPage } from './me/BotsPage';
+import { BotEditPage } from './me/BotEditPage';
+import { SkillsPage } from './me/SkillsPage';
+import { MemoryPage } from './me/MemoryPage';
+import { GeneralPage } from './me/GeneralPage';
+import { AccountPage } from './me/AccountPage';
+import { AboutPage } from './me/AboutPage';
 
-function Segmented<T extends string>(props: {
-  value: T;
-  options: Array<{ value: T; labelKey: string }>;
-  onChange: (value: T) => void;
-  disabled?: boolean;
+/**
+ * Me tab (REQ-E-14), A6 settings IA rework (IA-PLAN v1):
+ * primary page = user card + balance card + registry-rendered entry list;
+ * every entry pushes a secondary page on a local stack. No router
+ * dependency — the stack rides on history entries so Android system back /
+ * browser back and the top-bar back button pop the same way (§2.4/§2.5).
+ */
+
+/** 'botEdit' is the only third-level entry, pushed only on top of 'bots'. */
+type MeStackEntry = MeRoute | 'botEdit';
+
+function UserCard(props: {
+  identity: ReturnType<typeof useIdentity>['identity'];
+  onOpen: () => void;
 }): JSX.Element {
+  const { identity } = props;
+  const syncOk = Boolean(identity && identity.sync_state === 'synced' && !identity.sync_error);
+  const shortId = identity?.globalmetaid ? `${identity.globalmetaid.slice(0, 10)}…` : '';
   return (
-    <div className="flex gap-2">
-      {props.options.map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          disabled={props.disabled}
-          onClick={() => props.onChange(option.value)}
-          className={`min-h-[44px] flex-1 rounded-xl border px-2 text-sm disabled:opacity-40 ${
-            props.value === option.value
-              ? 'border-[var(--color-primary)] bg-[var(--color-primary)] text-black'
-              : 'border-[var(--border-color)] text-[var(--text-secondary)]'
-          }`}
-        >
-          {t(option.labelKey)}
-        </button>
-      ))}
-    </div>
+    <button
+      type="button"
+      data-testid="user-card"
+      onClick={props.onOpen}
+      className="flex min-h-[64px] w-full items-center gap-3 rounded-2xl border border-[var(--border-color)] bg-[var(--bg-panel)] p-4 text-left shadow-sm active:bg-[var(--bg-hover)]"
+    >
+      <BotAvatar name={identity?.name} avatar={identity?.avatar} size={48} testId="user-card-avatar" />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-[15px] font-semibold text-[var(--text-primary)]">{identity?.name ?? ''}</p>
+        {shortId ? <p className="truncate text-xs text-[var(--text-secondary)]">{shortId}</p> : null}
+      </div>
+      {identity && !syncOk ? (
+        <span className="flex shrink-0 items-center gap-1 text-xs text-red-600" data-testid="user-card-sync-badge" data-state="error">
+          <span aria-hidden className="h-2 w-2 rounded-full bg-red-600" />
+          {t('mobile.me.profile.syncError')}
+        </span>
+      ) : (
+        <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-[var(--border-color)]" data-testid="user-card-sync-badge" data-state="ok" />
+      )}
+      <ChevronRightIcon className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" aria-hidden />
+    </button>
   );
 }
 
-function BalanceCard(props: { onOpenRecharge: () => void; resyncCounter?: number }): JSX.Element {
+/**
+ * Balance card: the whole card opens the traffic page while the recharge
+ * button keeps its one-tap path into the cashier overlay (IA-PLAN §2.2 —
+ * the conversion path stays one jump; hard gate 2 depends on it).
+ */
+function BalanceCard(props: {
+  resyncCounter?: number;
+  onOpenRecharge: () => void;
+  onOpenTraffic: () => void;
+}): JSX.Element {
   const { meters, loading, error, reload } = useMeters(props.resyncCounter);
+  // Desktop parity threshold (TrafficSettings TRAFFIC_LOW_BALANCE_BYTES).
+  const lowBalance = Boolean(meters?.traffic && meters.traffic.balanceBytes < 5_000_000);
   return (
     <Section title={t('mobile.me.balanceTitle')}>
-      <div className="mb-3 flex gap-3">
-        <div className="flex-1 rounded-xl bg-[var(--bg-main)] p-3">
-          <p className="text-xs text-[var(--text-secondary)]">{t('mobile.me.trafficLabel')}</p>
-          <p className="text-lg font-semibold text-[var(--text-primary)]">
-            {meters?.traffic ? formatBytes(meters.traffic.balanceBytes) : '—'}
-          </p>
+      <div
+        role="button"
+        tabIndex={0}
+        data-testid="balance-card"
+        onClick={props.onOpenTraffic}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') props.onOpenTraffic();
+        }}
+        className="mb-3 cursor-pointer rounded-xl"
+      >
+        <div className="flex gap-3">
+          <div className="flex-1 rounded-xl bg-[var(--bg-main)] p-3">
+            <p className="text-xs text-[var(--text-secondary)]">{t('mobile.me.trafficLabel')}</p>
+            <p className="text-lg font-semibold text-[var(--text-primary)]">
+              {meters?.traffic ? formatBytes(meters.traffic.balanceBytes) : '—'}
+            </p>
+          </div>
+          <div className="flex-1 rounded-xl bg-[var(--bg-main)] p-3">
+            <p className="text-xs text-[var(--text-secondary)]">{t('mobile.me.llmLabel')}</p>
+            <p className="text-lg font-semibold text-[var(--text-primary)]">
+              {meters ? `${formatCount(meters.llm.quotaRemaining)} ${meters.llm.unit}` : '—'}
+            </p>
+          </div>
         </div>
-        <div className="flex-1 rounded-xl bg-[var(--bg-main)] p-3">
-          <p className="text-xs text-[var(--text-secondary)]">{t('mobile.me.llmLabel')}</p>
-          <p className="text-lg font-semibold text-[var(--text-primary)]">
-            {meters ? `${formatCount(meters.llm.quotaRemaining)} ${meters.llm.unit}` : '—'}
+        {lowBalance ? (
+          <p className="mt-2 text-xs text-amber-600" data-testid="balance-low-warning">
+            {t('mobile.me.traffic.lowBalance')}
           </p>
-        </div>
+        ) : null}
       </div>
       {loading ? <p className="mb-2 text-xs text-[var(--text-secondary)]">{t('mobile.common.loading')}</p> : null}
       {error ? (
@@ -73,7 +129,10 @@ function BalanceCard(props: { onOpenRecharge: () => void; resyncCounter?: number
       <div className="flex gap-2">
         <button
           type="button"
-          onClick={props.onOpenRecharge}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onOpenRecharge();
+          }}
           className="min-h-[44px] flex-1 rounded-xl bg-[var(--color-primary)] py-2 text-sm font-medium text-black active:opacity-80"
         >
           {t('mobile.me.rechargeEntry')}
@@ -84,265 +143,19 @@ function BalanceCard(props: { onOpenRecharge: () => void; resyncCounter?: number
   );
 }
 
-function RedeemButton(): JSX.Element {
-  const [open, setOpen] = useState(false);
-  const [code, setCode] = useState('');
-  const [feedback, setFeedback] = useState<{ ok: boolean; message: string } | null>(null);
-  const { meters, reload } = useMeters();
+export default function MeScreen(props: { resyncCounter?: number; onOpenRecharge: () => void }): JSX.Element {
+  const identity = useIdentity(props.resyncCounter);
+  const [stack, setStack] = useState<MeStackEntry[]>([]);
+  const [editingBotId, setEditingBotId] = useState<number | null>(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const dirtyRef = useRef(false);
+  const pushedRef = useRef(0);
 
-  const submit = async () => {
-    const result = await getMobileElectron().traffic.redeemCode({ code });
-    if (result?.success && result.result) {
-      setFeedback({ ok: true, message: t('mobile.me.redeemSuccess', { amount: formatBytes(result.result.trafficBytes) }) });
-      await reload();
-      setCode('');
-    } else {
-      setFeedback({ ok: false, message: t('mobile.me.redeemError') });
-    }
-  };
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="min-h-[44px] flex-1 rounded-xl border border-[var(--border-color)] py-2 text-sm text-[var(--text-primary)] active:bg-[var(--bg-hover)]"
-      >
-        {t('mobile.me.redeemEntry')}
-      </button>
-      {open ? (
-        <BottomSheet title={t('mobile.me.redeemTitle')} onClose={() => setOpen(false)}>
-          <div className="flex flex-col gap-3">
-            <input
-              value={code}
-              onChange={(event) => setCode(event.target.value)}
-              placeholder={t('mobile.me.redeemPlaceholder')}
-              className="min-h-[44px] w-full rounded-xl border border-[var(--border-color)] bg-[var(--bg-main)] px-3 py-2.5 text-[15px] text-[var(--text-primary)] outline-none"
-            />
-            {feedback ? (
-              <p className={`text-sm ${feedback.ok ? 'text-emerald-600' : 'text-red-600'}`}>{feedback.message}</p>
-            ) : null}
-            <p className="text-xs text-[var(--text-secondary)]">
-              {`${t('mobile.me.trafficLabel')}: ${meters?.traffic ? formatBytes(meters.traffic.balanceBytes) : '—'}`}
-            </p>
-            <button
-              type="button"
-              onClick={() => void submit()}
-              disabled={!code.trim()}
-              className="min-h-[44px] rounded-xl bg-[var(--color-primary)] py-2 text-sm font-medium text-black active:opacity-80 disabled:opacity-40"
-            >
-              {t('mobile.me.redeemSubmit')}
-            </button>
-          </div>
-        </BottomSheet>
-      ) : null}
-    </>
-  );
-}
-
-function BotsSection(): JSX.Element {
-  return <BotManagementSection />;
-}
-
-/**
- * UX batch 2026-10-28: skills are deprioritized for the mobile MVP, so the
- * Me-page skills list is HIDDEN behind this reversible flag (no code is
- * deleted: flip to `true` to restore the section).
- */
-const SHOW_SKILLS_SECTION = false;
-
-function SkillsSection(): JSX.Element {
-  const { skills, setEnabled } = useSkills();
-  return (
-    <Section title={t('mobile.me.skillsTitle')}>
-      {skills.map((skill) => (
-        <div key={skill.id} className="flex min-h-[44px] items-center gap-2 border-b border-[var(--border-color)] py-2 last:border-b-0">
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[15px] text-[var(--text-primary)]">{skill.name}</p>
-            <p className="truncate text-xs text-[var(--text-secondary)]">{skill.description}</p>
-          </div>
-          <Switch checked={skill.enabled} onChange={(checked) => void setEnabled(skill.id, checked)} label={`${skill.name} · ${t('mobile.tasks.enabled')}`} />
-        </div>
-      ))}
-    </Section>
-  );
-}
-
-function SettingsSection(): JSX.Element {
-  const { language, theme, saveState, changeLanguage, changeTheme } = useSettings();
+  // Registry summaries (IA-PLAN §4.1): count/enabled/combo/version.
+  const settings = useSettings();
   const memory = useMemorySettings();
-  const memoryRows = [
-    { field: 'memoryEnabled' as const, labelKey: 'mobile.me.memoryEnabled' },
-    { field: 'memoryImplicitUpdateEnabled' as const, labelKey: 'mobile.me.memoryImplicitUpdate' },
-    { field: 'memoryLlmJudgeEnabled' as const, labelKey: 'mobile.me.memoryLlmJudge' },
-  ];
-  return (
-    <Section title={t('mobile.me.settingsTitle')}>
-      <p className="mb-2 text-xs font-medium uppercase text-[var(--text-secondary)]">{t('mobile.me.languageLabel')}</p>
-      <Segmented<MobileLanguage>
-        value={language}
-        options={[
-          { value: 'zh', labelKey: 'mobile.me.languageZh' },
-          { value: 'en', labelKey: 'mobile.me.languageEn' },
-        ]}
-        disabled={saveState.status === 'saving'}
-        onChange={(value) => void changeLanguage(value)}
-      />
-      <p className="mb-2 mt-4 text-xs font-medium uppercase text-[var(--text-secondary)]">{t('mobile.me.themeLabel')}</p>
-      <Segmented<'light' | 'dark' | 'system'>
-        value={theme}
-        options={[
-          { value: 'light', labelKey: 'mobile.me.themeLight' },
-          { value: 'dark', labelKey: 'mobile.me.themeDark' },
-          { value: 'system', labelKey: 'mobile.me.themeSystem' },
-        ]}
-        disabled={saveState.status === 'saving'}
-        onChange={(value) => void changeTheme(value)}
-      />
-      {saveState.status !== 'idle' ? (
-        <p aria-live="polite" className={`mt-2 text-xs ${saveState.status === 'error' ? 'text-red-600' : 'text-[var(--text-secondary)]'}`}>
-          {t(`mobile.me.settings${saveState.status === 'saving' ? 'Saving' : saveState.status === 'saved' ? 'Saved' : 'SaveFailed'}`)}
-        </p>
-      ) : null}
-
-      <p className="mb-2 mt-5 text-xs font-medium uppercase text-[var(--text-secondary)]">{t('mobile.me.memoryTitle')}</p>
-      {memory.loading ? <p className="py-2 text-sm text-[var(--text-secondary)]">{t('mobile.common.loading')}</p> : null}
-      {memoryRows.map((row) => (
-        <div key={row.field} className="flex min-h-[44px] items-center justify-between gap-3 border-b border-[var(--border-color)] py-2 last:border-b-0">
-          <span className="text-sm text-[var(--text-primary)]">{t(row.labelKey)}</span>
-          <Switch
-            checked={memory.config?.[row.field] ?? false}
-            disabled={memory.loading || !memory.config || memory.saving !== null}
-            onChange={(checked) => void memory.setEnabled(row.field, checked)}
-            label={t(row.labelKey)}
-          />
-        </div>
-      ))}
-      {memory.error ? (
-        <div className="mt-2 flex items-center justify-between gap-2">
-          <p className="text-xs text-red-600">{memory.error}</p>
-          <button type="button" onClick={() => void memory.reload()} className="min-h-[44px] px-2 text-xs text-[var(--text-primary)]">
-            {t('mobile.common.retry')}
-          </button>
-        </div>
-      ) : null}
-      {memory.saved ? <p aria-live="polite" className="mt-2 text-xs text-emerald-600">{t('mobile.me.settingsSaved')}</p> : null}
-    </Section>
-  );
-}
-
-function AccountSection(): JSX.Element {
-  const [sheet, setSheet] = useState<'logout' | 'delete' | null>(null);
-  const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(false);
-
-  const doLogout = async () => {
-    setBusy(true);
-    try {
-      await logout();
-      window.location.assign('/login');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const doDelete = async () => {
-    setBusy(true);
-    try {
-      await requestAccountDeletion(reason.trim() || undefined);
-      setDone(true);
-      setTimeout(() => window.location.assign('/login'), 1200);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Section title={t('mobile.me.accountTitle')}>
-      <button
-        type="button"
-        onClick={() => setSheet('logout')}
-        className="flex min-h-[44px] w-full items-center justify-between border-b border-[var(--border-color)] py-2 text-[15px] text-[var(--text-primary)] last:border-b-0"
-      >
-        {t('mobile.me.logout')}
-        <ChevronRightIcon className="h-4 w-4 text-[var(--text-secondary)]" aria-hidden />
-      </button>
-      <button
-        type="button"
-        onClick={() => {
-          setDone(false);
-          setReason('');
-          setSheet('delete');
-        }}
-        className="flex min-h-[44px] w-full items-center justify-between py-2 text-[15px] text-red-600"
-      >
-        {t('mobile.me.deleteAccount')}
-        <ChevronRightIcon className="h-4 w-4" aria-hidden />
-      </button>
-      {sheet === 'logout' ? (
-        <BottomSheet title={t('mobile.me.logoutTitle')} onClose={() => setSheet(null)}>
-          <p className="mb-4 text-sm text-[var(--text-secondary)]">{t('mobile.me.logoutBody')}</p>
-          <div className="flex gap-3">
-            <button
-              type="button"
-              onClick={() => setSheet(null)}
-              className="min-h-[44px] flex-1 rounded-xl border border-[var(--border-color)] py-2 text-[var(--text-primary)] active:bg-[var(--bg-hover)]"
-            >
-              {t('mobile.me.botCancel')}
-            </button>
-            <button
-              type="button"
-              onClick={() => void doLogout()}
-              disabled={busy}
-              className="min-h-[44px] flex-1 rounded-xl bg-[var(--color-primary)] py-2 font-medium text-black active:opacity-80 disabled:opacity-40"
-            >
-              {t('mobile.me.logoutConfirm')}
-            </button>
-          </div>
-        </BottomSheet>
-      ) : null}
-      {sheet === 'delete' ? (
-        <BottomSheet title={t('mobile.me.deleteTitle')} onClose={() => setSheet(null)}>
-          {done ? (
-            <p className="min-h-[44px] py-3 text-center text-sm font-medium text-emerald-600">
-              {t('mobile.me.deleteDone')}
-            </p>
-          ) : (
-            <div className="flex flex-col gap-3">
-              <p className="text-sm text-[var(--text-secondary)]">{t('mobile.me.deleteBody')}</p>
-              <input
-                value={reason}
-                onChange={(event) => setReason(event.target.value)}
-                placeholder={t('mobile.me.deleteReasonPlaceholder')}
-                className="min-h-[44px] w-full rounded-xl border border-[var(--border-color)] bg-[var(--bg-main)] px-3 py-2.5 text-[15px] text-[var(--text-primary)] outline-none"
-              />
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  onClick={() => setSheet(null)}
-                  className="min-h-[44px] flex-1 rounded-xl border border-[var(--border-color)] py-2 text-[var(--text-primary)] active:bg-[var(--bg-hover)]"
-                >
-                  {t('mobile.me.botCancel')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void doDelete()}
-                  disabled={busy}
-                  className="min-h-[44px] flex-1 rounded-xl bg-red-600 py-2 font-medium text-white active:opacity-80 disabled:opacity-40"
-                >
-                  {t('mobile.me.deleteConfirm')}
-                </button>
-              </div>
-            </div>
-          )}
-        </BottomSheet>
-      ) : null}
-    </Section>
-  );
-}
-
-function AboutSection(): JSX.Element {
+  const skills = useSkills();
+  const metabots = useMetabots();
   const [appVersion, setAppVersion] = useState<string | null>(null);
   useEffect(() => {
     void getMobileElectron()
@@ -350,31 +163,226 @@ function AboutSection(): JSX.Element {
       .then((version) => setAppVersion(version))
       .catch(() => setAppVersion(null));
   }, []);
-  return (
-    <Section title={t('mobile.me.aboutTitle')}>
-      <p className="text-sm text-[var(--text-secondary)]">{t('mobile.me.appVersion', { version: appVersion ?? '—' })}</p>
-      <p className="text-sm text-[var(--text-secondary)]">{t('mobile.me.contractVersion', { version: CONTRACT_VERSION })}</p>
-    </Section>
-  );
-}
 
-/** Me tab (REQ-E-14). */
-export default function MeScreen(props: { resyncCounter?: number; onOpenRecharge: () => void }): JSX.Element {
-  const identity = useIdentity(props.resyncCounter);
+  const top: MeStackEntry | null = stack.length > 0 ? stack[stack.length - 1] : null;
+
+  const pushHistoryEntry = useCallback(() => {
+    try {
+      window.history.pushState({ idbotsMe: pushedRef.current + 1 }, '');
+      pushedRef.current += 1;
+    } catch {
+      // History unavailable: the top-bar back button still pops via fallback.
+    }
+  }, []);
+
+  const pushRoute = useCallback((route: MeStackEntry, botId?: number) => {
+    dirtyRef.current = false;
+    setConfirmDiscard(false);
+    if (route === 'botEdit') {
+      if (botId === undefined) return;
+      setEditingBotId(botId);
+    }
+    setStack((current) => [...current, route]);
+    pushHistoryEntry();
+  }, [pushHistoryEntry]);
+
+  const popRoute = useCallback(() => {
+    if (top === 'botEdit') setEditingBotId(null);
+    dirtyRef.current = false;
+    setConfirmDiscard(false);
+    setStack((current) => current.slice(0, -1));
+  }, [top]);
+
+  /** Top-bar back / discard-confirm back: route through history when we own
+   * an entry, so the browser back stack never desyncs from the stack. */
+  const requestBack = useCallback(() => {
+    if (dirtyRef.current) {
+      setConfirmDiscard(true);
+      return;
+    }
+    if (pushedRef.current > 0) window.history.back();
+    else popRoute();
+  }, [popRoute]);
+
+  // Browser/Android back pops the same stack (§2.4). While a page is dirty,
+  // consume the gesture as "ask first" and restore our history entry so the
+  // page stays mounted until the confirm sheet is answered.
+  useEffect(() => {
+    const onPop = () => {
+      if (pushedRef.current <= 0) return;
+      pushedRef.current -= 1;
+      if (dirtyRef.current) {
+        pushHistoryEntry();
+        setConfirmDiscard(true);
+        return;
+      }
+      if (top === 'botEdit') setEditingBotId(null);
+      setStack((current) => current.slice(0, -1));
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [top, pushHistoryEntry]);
+
+  // Leaving the Me tab with pages open: give the pushed entries back.
+  useEffect(() => () => {
+    if (pushedRef.current > 0) {
+      try {
+        window.history.go(-pushedRef.current);
+      } catch {
+        // noop
+      }
+      pushedRef.current = 0;
+    }
+  }, []);
+
+  const discardAndBack = useCallback(() => {
+    dirtyRef.current = false;
+    setConfirmDiscard(false);
+    if (pushedRef.current > 0) window.history.back();
+    else popRoute();
+  }, [popRoute]);
+
+  const summaryInput: MeEntrySummaryInput = {
+    botCount: metabots.loading && metabots.bots.length === 0 ? null : metabots.bots.length,
+    skillsEnabledCount: skills.skills.length === 0 ? null : skills.skills.filter((skill) => skill.enabled).length,
+    memoryEnabled: memory.config ? memory.config.memoryEnabled : null,
+    languageLabel: t(settings.language === 'zh' ? 'mobile.me.languageZh' : 'mobile.me.languageEn'),
+    themeLabel: t(
+      settings.theme === 'light'
+        ? 'mobile.me.themeLight'
+        : settings.theme === 'dark'
+          ? 'mobile.me.themeDark'
+          : 'mobile.me.themeSystem',
+    ),
+    appVersion,
+  };
+
+  if (top) {
+    switch (top) {
+      case 'profile':
+        return (
+          <>
+            <ProfilePage
+              identity={identity.identity}
+              onBack={requestBack}
+              onDirtyChange={(dirty) => {
+                dirtyRef.current = dirty;
+              }}
+              onNameSaved={() => identity.reload()}
+            />
+            {confirmDiscard ? <DiscardConfirmSheet onCancel={() => setConfirmDiscard(false)} onDiscard={discardAndBack} /> : null}
+          </>
+        );
+      case 'traffic':
+        return (
+          <TrafficPage
+            onBack={requestBack}
+            onOpenRecharge={props.onOpenRecharge}
+            resyncCounter={props.resyncCounter}
+          />
+        );
+      case 'bots':
+        return <BotsPage onBack={requestBack} onOpenEdit={(botId) => pushRoute('botEdit', botId)} />;
+      case 'botEdit':
+        return (
+          <>
+            <BotEditPage
+              botId={editingBotId}
+              onBack={requestBack}
+              onSaved={requestBack}
+              onDirtyChange={(dirty) => {
+                dirtyRef.current = dirty;
+              }}
+            />
+            {confirmDiscard ? <DiscardConfirmSheet onCancel={() => setConfirmDiscard(false)} onDiscard={discardAndBack} /> : null}
+          </>
+        );
+      case 'skills':
+        return <SkillsPage onBack={requestBack} />;
+      case 'memory':
+        return <MemoryPage onBack={requestBack} />;
+      case 'general':
+        return <GeneralPage onBack={requestBack} />;
+      case 'account':
+        return <AccountPage onBack={requestBack} />;
+      case 'about':
+        return <AboutPage onBack={requestBack} />;
+    }
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="border-b border-[var(--border-color)] bg-[var(--bg-panel)] px-4 py-3">
         <h1 className="text-base font-semibold text-[var(--text-primary)]">{t('mobile.me.title')}</h1>
-        <p className="truncate text-sm text-[var(--text-secondary)]">{identity.name ?? ''}</p>
       </div>
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-        <BalanceCard resyncCounter={props.resyncCounter} onOpenRecharge={props.onOpenRecharge} />
-        <BotsSection />
-        {SHOW_SKILLS_SECTION ? <SkillsSection /> : null}
-        <SettingsSection />
-        <AccountSection />
-        <AboutSection />
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3" data-testid="me-primary-page">
+        <UserCard identity={identity.identity} onOpen={() => pushRoute('profile')} />
+        <BalanceCard
+          resyncCounter={props.resyncCounter}
+          onOpenRecharge={props.onOpenRecharge}
+          onOpenTraffic={() => pushRoute('traffic')}
+        />
+        {ME_ENTRY_GROUPS.map((group) => (
+          <div
+            key={group.group}
+            className="rounded-2xl border border-[var(--border-color)] bg-[var(--bg-panel)] px-4 py-1 shadow-sm"
+            data-testid={`me-group-${group.group}`}
+          >
+            {group.titleKey ? (
+              <p className="pt-3 text-xs font-medium uppercase text-[var(--text-secondary)]">{t(group.titleKey)}</p>
+            ) : null}
+            {meEntriesForGroup(group.group).map((entry) => {
+              const Icon = entry.icon;
+              const summary = entry.summary ? entry.summary(summaryInput) : null;
+              return (
+                <button
+                  key={entry.id}
+                  type="button"
+                  data-testid={entry.testId}
+                  onClick={() => pushRoute(entry.id)}
+                  className={`flex min-h-[52px] w-full items-center gap-3 border-b border-[var(--border-color)] py-2 text-left last:border-b-0 ${
+                    entry.danger ? 'text-red-600' : 'text-[var(--text-primary)]'
+                  }`}
+                >
+                  <Icon className="h-5 w-5 shrink-0 text-[var(--text-secondary)]" aria-hidden />
+                  <span className="flex-1 truncate text-[15px]">{t(entry.titleKey)}</span>
+                  {summary ? (
+                    <span className="shrink-0 text-[13px] text-[var(--text-secondary)]" data-testid={`${entry.testId}-summary`}>
+                      {summary}
+                    </span>
+                  ) : null}
+                  <ChevronRightIcon className="h-4 w-4 shrink-0 text-[var(--text-secondary)]" aria-hidden />
+                </button>
+              );
+            })}
+          </div>
+        ))}
       </div>
     </div>
+  );
+}
+
+function DiscardConfirmSheet(props: { onCancel: () => void; onDiscard: () => void }): JSX.Element {
+  return (
+    <BottomSheet title={t('mobile.me.discardTitle')} onClose={props.onCancel}>
+      <p className="mb-4 text-sm text-[var(--text-secondary)]">{t('mobile.me.discardBody')}</p>
+      <div className="flex gap-3">
+        <button
+          type="button"
+          onClick={props.onCancel}
+          className="min-h-[44px] flex-1 rounded-xl bg-[var(--color-primary)] py-2 font-medium text-black active:opacity-80"
+        >
+          {t('mobile.me.discardCancel')}
+        </button>
+        <button
+          type="button"
+          data-testid="discard-confirm"
+          onClick={props.onDiscard}
+          className="min-h-[44px] flex-1 rounded-xl border border-[var(--border-color)] py-2 text-[var(--text-primary)] active:bg-[var(--bg-hover)]"
+        >
+          {t('mobile.me.discardConfirm')}
+        </button>
+      </div>
+    </BottomSheet>
   );
 }

@@ -329,6 +329,8 @@ export function BotEditorForm(props: {
   getBalance: (id: number) => Promise<{ success: boolean; value?: string; error?: string }>;
   onSave: (input: MobileBotInput) => Promise<void>;
   onClose: () => void;
+  /** A6: surfaced so the botEdit page can guard back navigation (IA-PLAN §2.5). */
+  onDirtyChange?: (dirty: boolean) => void;
 }): JSX.Element {
   const { bot, busy, outcome } = props.state;
   const isEdit = Boolean(bot);
@@ -382,6 +384,40 @@ export function BotEditorForm(props: {
     bot?.a2a_bye_cooldown_ms ?? 300_000,
   );
   const [balance, setBalance] = useState<{ loading: boolean; value?: string; error?: string }>({ loading: Boolean(bot) });
+
+  // Dirty detection (A6, IA-PLAN §2.5 rule 2): any editor field differing
+  // from the values the form was initialized with. avatarTouched gates the
+  // avatar so an untouched pass-through never reads as dirty.
+  const dirtyFields = [
+    name,
+    role,
+    soul,
+    goal,
+    bio,
+    avatarTouched ? avatar : null,
+    brain?.providerKey ?? null,
+    brain?.modelId ?? null,
+    effort,
+    fallbackBrain?.providerKey ?? null,
+    fallbackBrain?.modelId ?? null,
+    fallbackBrain ? fallbackEffort : null,
+    [...selectedSkills].sort().join(','),
+    a2aAutoReply,
+    a2aMaxIncomingTurns,
+    a2aByeCooldownMs,
+  ];
+  const dirtySnapshot = JSON.stringify(dirtyFields);
+  const initialSnapshotRef = useRef<string | null>(null);
+  if (initialSnapshotRef.current === null) {
+    initialSnapshotRef.current = dirtySnapshot;
+  }
+  const dirty = dirtySnapshot !== initialSnapshotRef.current;
+  useEffect(() => {
+    props.onDirtyChange?.(dirty);
+    // The callback is a stable ref-setter on the Me screen; dirty is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty]);
+  useEffect(() => () => props.onDirtyChange?.(false), []);
 
   useEffect(() => {
     if (!bot) return;

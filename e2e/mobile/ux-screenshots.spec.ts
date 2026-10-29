@@ -3,9 +3,9 @@ import path from 'node:path';
 import fs from 'node:fs';
 
 /**
- * Evidence capture spec for the UX batch 2026-10-28 (owner mobile feedback).
- * Only runs when E2E_EVIDENCE_DIR is set (evidence mode); full suite runs
- * keep it skipped so default e2e runs are untouched.
+ * Evidence capture spec for the UX batch 2026-10-28 + A6 IA rework
+ * (2026-10-29). Only runs when E2E_EVIDENCE_DIR is set (evidence mode);
+ * full suite runs keep it skipped so default e2e runs are untouched.
  */
 const EVIDENCE_DIR = process.env.E2E_EVIDENCE_DIR ?? '';
 
@@ -17,34 +17,67 @@ test.describe('UX batch evidence screenshots (390x844 via iPhone 14 project)', (
     await page.screenshot({ path: path.join(EVIDENCE_DIR, `${name}.png`), fullPage });
   }
 
-  test('captures Me list, edit tabs, create form and cleaned Me page', async ({ page }) => {
+  test('captures the A6 Me primary page and every secondary page', async ({ page }) => {
     await page.goto('/app/');
     await page.getByRole('button', { name: 'Me', exact: true }).click();
+    await expect(page.getByTestId('me-primary-page')).toBeVisible();
+    await expect(page.getByTestId('me-entry-about')).toBeVisible();
+    await page.waitForTimeout(400);
+    await shot(page, 'a6-me-primary');
+
+    // User card → profile.
+    await page.getByTestId('user-card').click();
+    await expect(page.getByTestId('me-page-profile')).toBeVisible();
+    await page.waitForTimeout(300);
+    await shot(page, 'a6-page-profile');
+    await page.getByTestId('me-secondary-back').click();
+
+    // Balance card → traffic.
+    await page.getByTestId('balance-card').click();
+    await expect(page.getByTestId('me-page-traffic')).toBeVisible();
+    await page.waitForTimeout(400);
+    await shot(page, 'a6-page-traffic');
+    await page.getByTestId('me-secondary-back').click();
+
+    // Registry pages.
+    const pages: Array<[string, string, string]> = [
+      ['me-entry-bots', 'me-page-bots', 'a6-page-bots'],
+      ['me-entry-skills', 'me-page-skills', 'a6-page-skills'],
+      ['me-entry-memory', 'me-page-memory', 'a6-page-memory'],
+      ['me-entry-general', 'me-page-general', 'a6-page-general'],
+      ['me-entry-account', 'me-page-account', 'a6-page-account'],
+      ['me-entry-about', 'me-page-about', 'a6-page-about'],
+    ];
+    for (const [entry, pageId, shotName] of pages) {
+      await page.getByTestId(entry).click();
+      await expect(page.getByTestId(pageId)).toBeVisible();
+      await page.waitForTimeout(300);
+      await shot(page, shotName);
+      await page.getByTestId('me-secondary-back').click();
+      await expect(page.getByTestId('me-primary-page')).toBeVisible();
+    }
+
+    // Third level: bot edit.
+    await page.getByTestId('me-entry-bots').click();
+    await expect(page.getByTestId('bot-row-1')).toBeVisible();
+    await page.getByTestId('bot-row-1').click();
+    await expect(page.getByTestId('me-page-bot-edit')).toBeVisible();
+    await expect(page.getByTestId('bot-form')).toBeVisible();
+    await page.waitForTimeout(300);
+    await shot(page, 'a6-page-bot-edit');
+  });
+
+  test('captures the A5 create sheet from the bots page (A6 navigation)', async ({ page }) => {
+    await page.goto('/app/');
+    await page.getByRole('button', { name: 'Me', exact: true }).click();
+    await page.getByTestId('me-entry-bots').click();
+    await expect(page.getByTestId('me-page-bots')).toBeVisible();
 
     // Owner contract: Twin Bot is always row 1; the rest follow created_at ascending.
     const rows = page.locator('[data-testid^="bot-row-"]');
     await expect(rows.first()).toBeVisible();
     const firstRowName = await rows.first().innerText();
     expect(firstRowName).toContain('Twin Bot');
-    await shot(page, 'me-bot-list');
-
-    // Edit sheet: one shot per tab (Basic / Model / Skills / Other).
-    const twinRow = page.locator('[data-testid^="bot-row-"]').filter({ hasText: 'Twin Bot' }).first();
-    await twinRow.getByRole('button', { name: 'Edit · Twin Bot' }).click();
-    const form = page.getByTestId('bot-form');
-    await expect(form.getByTestId('bot-tab-model')).toBeVisible();
-    await shot(page, 'edit-tab-basic');
-    await form.getByTestId('bot-tab-model').click();
-    await shot(page, 'edit-tab-model');
-    await form.getByTestId('bot-tab-persona').click();
-    await shot(page, 'edit-tab-persona');
-    await form.getByTestId('bot-tab-chatSettings').click();
-    await shot(page, 'edit-tab-chatsettings-skills-collapsed');
-    await form.getByTestId('bot-skills-toggle').click();
-    await shot(page, 'edit-tab-chatsettings-skills-expanded');
-    await form.getByTestId('bot-tab-other').click();
-    await shot(page, 'edit-tab-other');
-    await page.getByRole('button', { name: '✕', exact: true }).click();
 
     // Create sheet: name+role only — the A5 rework removed the Advanced
     // area entirely (the old 'create-form-advanced-open' shot is obsolete).
@@ -56,16 +89,6 @@ test.describe('UX batch evidence screenshots (390x844 via iPhone 14 project)', (
     await createForm.getByLabel('Role').fill('Demo role');
     await shot(page, 'create-form-name-role');
     await page.getByRole('button', { name: '✕', exact: true }).click();
-
-    // Cleaned Me page after removing the skills block (skills hidden flag).
-    await expect(page.locator('[data-testid^="bot-row-"]').first()).toBeVisible();
-    // Scroll past the bot list so the frame shows Settings directly under it.
-    await page.evaluate(() => {
-      const scroller = document.querySelector('.overflow-y-auto');
-      if (scroller instanceof HTMLElement) scroller.scrollTop = Math.round(scroller.scrollHeight / 2.6);
-    });
-    await page.waitForTimeout(300);
-    await shot(page, 'me-after-skills-hidden');
   });
 
   test('captures the chat UE rework screens (A2 header, A4 groups, A3 picker)', async ({ page }) => {
