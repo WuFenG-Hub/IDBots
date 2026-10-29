@@ -247,7 +247,7 @@ All commands below were verified against the live chain during S2/S3 tooling
 | SPACE 付款 | bot 会话宿主工具 `wallet_transfer` | `{"to":"<mvc地址>","amount":<SPACE十进制>}`；本机 bot 间亦可用 bot 名 |
 | 卖单查询 | CLI `mode=sell-orders` 或 curl | 只读 |
 | NFT 到账核验 | curl `utxo-list`（§6.3） | 只读；任何人可查 |
-| 上架/吃单/撤单 | 宿主工具 `wallet_nft_sell / wallet_nft_buy / wallet_nft_cancel_sell`；吃单亦可用 CLI `mode=buy` | 见 Part I §3/§4 |
+| 上架/吃单/撤单 | CLI `mode=sell` / `mode=buy` / `mode=cancel-sell`（技能包 v1.1.0 起五模式，`dry=1` 先构造自检）；IDBots 宿主 bot 亦可用内置工具 wallet_nft_sell / wallet_nft_buy / wallet_nft_cancel_sell | 见 Part I §3/§4 与 §9.1 |
 
 助记词纪律：只从环境变量 `IDBOTS_METABOT_MNEMONIC` 读取（worker 会话已自动注入各自 bot 的）；绝不写入命令行参数、文件或聊天消息。
 
@@ -523,8 +523,25 @@ wallet_transfer { "to": "1GrqX7K9jdnUor8hAoAfDx99uFH2tT75Za", "amount": 0.001 }
 ### 9.1 流程与命令行
 
 ```bash
-# ① 卖方上架（宿主工具，标价 >= 22000 sats）
-wallet_nft_sell { "genesis": "…", "codehash": "…", "token_index": "…", "price_sats": 100000 }
+# ① 卖方上架（CLI v1.1.0；标价 >= 22000 sats；dry=1 先构造自检，去掉即实弹）
+node scripts/nft-trade-cli.mjs mode=sell \
+  genesis=005d69cba8c80e6978157e146f998c21288a9d49 \
+  codehash=e205939ad9956673ce7da9fbd40514b30f66dc35 \
+  token_index=5421 \
+  price_sats=100000
+# 实弹输出 listing txid —— 即播报四元组的 sellUtxo txid（sell_output_index 恒为 0）
+# （IDBots 宿主 bot 亦可用内置工具 wallet_nft_sell，同一 NftManager 底座）
+
+# ①' 卖方撤单（CLI v1.1.0；显式四元组，价格取 NFT_LISTED 播报值）
+node scripts/nft-trade-cli.mjs mode=cancel-sell \
+  genesis=005d69cba8c80e6978157e146f998c21288a9d49 \
+  codehash=e205939ad9956673ce7da9fbd40514b30f66dc35 \
+  token_index=5421 \
+  sell_txid=<NFT_LISTED 的 sellUtxo txid> \
+  sell_output_index=0 \
+  seller_address=<自己的mvc地址> \
+  sell_price_sats=<播报价>
+# 实弹输出 cancel + check 两个 txid；播报 NFT_CANCELLED（§3.2）
 
 # ② 卖方播报：按 §3.1 逐字发 NFT_LISTED（四元组 + sellUtxo + price_sats 必须齐全）
 

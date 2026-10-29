@@ -1,14 +1,16 @@
 ---
 name: nft-trade
-description: MVC 链 MetaContract NFT 交易技能：查持仓、转账、查卖单、显式四元组吃单。当用户/bot 提到「NFT 转账」「转 NFT」「NFT 上架」「NFT 购买/吃单」「撤单」「查卖单」「担保交易/escrow」「MetaBot NFT 交易」「MetaContract NFT」「MVC NFT」等时使用。自带 standalone CLI（三模式）与完整聊天交易协议手册（三场景 + 担保人规则 + 已知坑清单），外部 bot 只需 npm install 两个公网包即可真实操作主网。
-version: 1.0.0
+description: MVC 链 MetaContract NFT 交易技能：查持仓、转账、上架、撤单、查卖单、显式四元组吃单。当用户/bot 提到「NFT 转账」「转 NFT」「NFT 上架」「NFT 购买/吃单」「撤单」「查卖单」「担保交易/escrow」「MetaBot NFT 交易」「MetaContract NFT」「MVC NFT」等时使用。自带 standalone CLI（五模式）与完整聊天交易协议手册（三场景 + 担保人规则 + 已知坑清单），外部 bot 只需 npm install 两个公网包即可真实操作主网。
+version: 1.1.0
 ---
 
 # NFT Trade（MVC MetaContract NFT 交易）
 
-MVC 主网 MetaContract NFT 的查询 / 转账 / 吃单 CLI，外加一整套
+MVC 主网 MetaContract NFT 的查询 / 转账 / 上架 / 撤单 / 吃单 CLI，外加一整套
 bot 间聊天交易协议（私聊点对点、群聊担保人、上架播报三场景）。
-CLI 与协议均于 2026-10-28/29 在 MVC 主网实弹验证（MetaBot Avatar 系列）。
+CLI 与协议均于 2026-10-28/29 在 MVC 主网实弹验证（MetaBot Avatar 系列）；
+v1.1.0 补齐 sell / cancel-sell 两模式（外部 bot 此前无法自行上架，是真实
+外部测试抓到的硬缺口）。
 
 ## 0. 安装与前置（外部 bot 唯一需要的准备）
 
@@ -27,13 +29,13 @@ npm install        # 仅装两个公网包：meta-contract@0.4.16 + @metalet/utx
 - 启动时的 `ExperimentalWarning: localStorage is not available` 来自
   @metalet/utxo-wallet-service，无害，可忽略。
 - 只读模式 `sell-orders` **零依赖**，npm install 都可以跳过。
-- 签名模式（transfer/buy）需要环境变量 `IDBOTS_METABOT_MNEMONIC`
+- 签名模式（transfer/sell/cancel-sell/buy）需要环境变量 `IDBOTS_METABOT_MNEMONIC`
   （BIP39 助记词；只从环境读，绝不写进命令行/文件/聊天）。
   可选 `IDBOTS_METABOT_PATH`，默认 `m/44'/10001'/0'/0/0`。
-- 钱包需留手续费余量：transfer 一笔 tx、buy 两笔 tx（feeb 默认 1，
-  可 `fee_rate=<n>` 覆盖）；地址需有 value ≥ 600 sats 的普通 UTXO。
+- 钱包需留手续费余量：transfer 一笔 tx、sell/cancel-sell/buy 各两笔 tx
+  （feeb 默认 1，可 `fee_rate=<n>` 覆盖）；地址需有 value ≥ 600 sats 的普通 UTXO。
 
-## 1. CLI 三模式
+## 1. CLI 五模式
 
 ```bash
 # ① 查某地址在链卖单（只读、零依赖）
@@ -44,7 +46,19 @@ node scripts/nft-trade-cli.mjs mode=transfer \
   genesis=<40hex> codehash=<40hex> token_index=<编号> \
   receiver_address=<对方mvc地址> dry=1      # 输出 DRY transfer built successfully 后去掉 dry=1 实弹
 
-# ③ 显式四元组吃单（价格取 NFT_LISTED 播报值，卖单接口不返回价格！）
+# ③ 上架一枚自己持有的 NFT（v1.1.0 新增；标价 >= 22000 sats，dry 先行！）
+node scripts/nft-trade-cli.mjs mode=sell \
+  genesis=<40hex> codehash=<40hex> token_index=<编号> \
+  price_sats=100000 dry=1   # 输出 DRY sell built successfully 后去掉 dry=1 实弹
+# 实弹成功的 listing txid 即播报四元组的 sell_txid（sell_output_index 恒为 0）
+
+# ④ 撤下自己的一笔挂单（v1.1.0 新增；显式四元组，价格取 NFT_LISTED 播报值）
+node scripts/nft-trade-cli.mjs mode=cancel-sell \
+  genesis=<40hex> codehash=<40hex> token_index=<编号> \
+  sell_txid=<NFT_LISTED 的 sellUtxo txid> sell_output_index=0 \
+  seller_address=<自己的mvc地址> sell_price_sats=<播报价> dry=1
+
+# ⑤ 显式四元组吃单（价格取 NFT_LISTED 播报值，卖单接口不返回价格！）
 node scripts/nft-trade-cli.mjs mode=buy \
   genesis=<40hex> codehash=<40hex> token_index=<编号> \
   sell_txid=<NFT_LISTED 的 sellUtxo txid> sell_output_index=0 \
@@ -52,7 +66,10 @@ node scripts/nft-trade-cli.mjs mode=buy \
 ```
 
 实弹成功输出：transfer → `NFT transfer broadcast on-chain.` + txid；
-buy → `NFT purchase broadcast on-chain.` + purchase/check 两个 txid。
+sell → `NFT sell listed on-chain.` + listing/funding 两个 txid
+（listingOutpoint 即 `<sell_txid>:0`）；cancel-sell → `NFT sell cancelled
+on-chain.` + cancel/check 两个 txid；buy → `NFT purchase broadcast
+on-chain.` + purchase/check 两个 txid。
 结果行最后一行恒为 JSON（便于程序化解析）。
 
 ## 2. 查持仓 / 到账核验（curl 照抄，net=mainnet 实测可用）
@@ -112,19 +129,20 @@ curl -s 'https://www.metalet.space/wallet-api/v4/mvc/address/contract/nft/count?
 - 读路径基址：`https://www.metalet.space/wallet-api`
   （v4/mvc/...，net=mainnet；广播走 `v3/tx/broadcast`，
   body `{chain:"mvc", net:"livenet", rawTx}`）。
-- SDK：`meta-contract@0.4.16` 的 `NftManager`（transfer/buy/cancelSell/sell，
+- SDK：`meta-contract@0.4.16` 的 `NftManager`（transfer/sell/cancelSell/buy，
   `noBroadcast:true` 本地构造 + 自管广播与重试：stage-1 失败重建排除已花
   outpoint，stage-2 失败重发同一 hex）。
 - 钱包派生：`@metalet/utxo-wallet-service` 的 `MvcWallet`
   （CoinType.MVC + AddressType.LegacyMvc + network livenet + addressIndex）。
-- 上架/撤单：宿主工具 wallet_nft_sell / wallet_nft_cancel_sell（IDBots 内置）
-  ——外部 bot 可用 SDK 的 sell/cancelSell 复刻，两阶段广播同 buy。
+- 上架/撤单（v1.1.0 起）：CLI `mode=sell` / `mode=cancel-sell`（同 buy 的
+  两阶段广播；IDBots 宿主 bot 亦可用内置工具 wallet_nft_sell /
+  wallet_nft_cancel_sell，同一 NftManager 底座）。
 
 ## 6. 目录
 
 ```
 SKILL.md                      # 本文件
 package.json                  # 两个公网依赖（npm install）
-scripts/nft-trade-cli.mjs     # standalone CLI（三模式）
+scripts/nft-trade-cli.mjs     # standalone CLI（五模式）
 docs/nft-trade-protocol.md    # 协议手册（唯一事实源副本，三场景+坑清单）
 ```

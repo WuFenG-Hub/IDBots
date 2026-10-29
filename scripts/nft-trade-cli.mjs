@@ -3,7 +3,7 @@
  * nft-trade-cli.mjs — standalone MVC MetaContract NFT CLI (sell-order
  * queries, direct transfers, explicit-four-tuple buys).
  *
- * Three modes:
+ * Five modes:
  *   mode=sell-orders  list one address's on-chain NFT sell orders
  *                     (reuses the compiled mvcNftService wire-shape parser).
  *   mode=transfer     transfer ONE held NFT (genesis/codehash/token_index)
@@ -14,6 +14,21 @@
  *                     the same rebuild-excluding-spent-outpoints retry policy
  *                     as the host's executeMvcNftTransfer. Pass dry=1 to
  *                     build only (no broadcast).
+ *   mode=sell         list ONE held NFT at price_sats (>= 22000, the
+ *                     NftManager floor); the seller is the session wallet.
+ *                     Two chained txs via the compiled
+ *                     buildMvcNftTradeRawTxWorker.js (stage 1 funds the sell
+ *                     contract, stage 2 moves the NFT into the listing — the
+ *                     listing outpoint buyers quote is stage-2 txid vout 0),
+ *                     broadcast stage 1 then stage 2. Pass dry=1 to build
+ *                     only (no broadcast).
+ *   mode=cancel-sell  take down ONE of your own listings with the EXPLICIT
+ *                     four-tuple (sell_txid + sell_output_index +
+ *                     seller_address + sell_price_sats) plus
+ *                     genesis/codehash/token_index. Two chained txs (unlock
+ *                     check, then NFT back to the seller) via the same trade
+ *                     worker, broadcast stage 1 then stage 2. dry=1 builds
+ *                     only.
  *   mode=buy          take one sell order with the EXPLICIT four-tuple
  *                     (sell_txid + sell_output_index + seller_address +
  *                     sell_price_sats) plus genesis/codehash/token_index.
@@ -32,6 +47,13 @@
  *   node scripts/nft-trade-cli.mjs mode=transfer \
  *     genesis=<40hex> codehash=<40hex> token_index=<digits> \
  *     receiver_address=<mvc-addr> [fee_rate=<n>] [dry=1]
+ *   node scripts/nft-trade-cli.mjs mode=sell \
+ *     genesis=<40hex> codehash=<40hex> token_index=<digits> \
+ *     price_sats=<n> [fee_rate=<n>] [dry=1]
+ *   node scripts/nft-trade-cli.mjs mode=cancel-sell \
+ *     genesis=<40hex> codehash=<40hex> token_index=<digits> \
+ *     sell_txid=<64hex> sell_output_index=<n> seller_address=<addr> \
+ *     sell_price_sats=<n> [fee_rate=<n>] [dry=1]
  *   node scripts/nft-trade-cli.mjs mode=buy \
  *     genesis=<40hex> codehash=<40hex> token_index=<digits> \
  *     sell_txid=<64hex> sell_output_index=<n> seller_address=<addr> \
@@ -69,6 +91,7 @@ const KNOWN_KEYS = new Set([
   'sell_output_index',
   'seller_address',
   'sell_price_sats',
+  'price_sats',
   'fee_rate',
   'dry',
 ]);
@@ -80,12 +103,19 @@ function usageAndExit(code = 1) {
     '  node scripts/nft-trade-cli.mjs mode=transfer \\',
     '      genesis=<40hex> codehash=<40hex> token_index=<digits> receiver_address=<mvc-addr> \\',
     '      [fee_rate=<n>] [dry=1]',
+    '  node scripts/nft-trade-cli.mjs mode=sell \\',
+    '      genesis=<40hex> codehash=<40hex> token_index=<digits> price_sats=<n> \\',
+    '      [fee_rate=<n>] [dry=1]   (price_sats >= 22000; seller = your derived wallet)',
+    '  node scripts/nft-trade-cli.mjs mode=cancel-sell \\',
+    '      genesis=<40hex> codehash=<40hex> token_index=<digits> \\',
+    '      sell_txid=<64hex> sell_output_index=<n> seller_address=<addr> sell_price_sats=<n> \\',
+    '      [fee_rate=<n>] [dry=1]',
     '  node scripts/nft-trade-cli.mjs mode=buy \\',
     '      genesis=<40hex> codehash=<40hex> token_index=<digits> \\',
     '      sell_txid=<64hex> sell_output_index=<n> seller_address=<addr> sell_price_sats=<n> \\',
     '      [fee_rate=<n>] [dry=1]',
     '',
-    'Env: IDBOTS_METABOT_MNEMONIC (required for transfer/buy; never passed as an argument)',
+    'Env: IDBOTS_METABOT_MNEMONIC (required for transfer/sell/cancel-sell/buy; never passed as an argument)',
     '     IDBOTS_METABOT_PATH (optional; worker default m/44\'/10001\'/0\'/0/0)',
   ];
   console.error(lines.join('\n'));
@@ -163,7 +193,7 @@ async function broadcastTx(rawTx, expectedTxid) {
 async function runWalletWorker(workerPath, payload) {
   const mnemonic = process.env.IDBOTS_METABOT_MNEMONIC?.trim();
   if (!mnemonic) {
-    throw new Error('IDBOTS_METABOT_MNEMONIC is required in the environment for signing modes (transfer/buy); never pass it as an argument');
+    throw new Error('IDBOTS_METABOT_MNEMONIC is required in the environment for signing modes (transfer/sell/cancel-sell/buy); never pass it as an argument');
   }
   if (!existsSync(workerPath)) {
     throw new Error(`Worker not found (run the electron build first): ${workerPath}`);
@@ -249,6 +279,162 @@ async function modeSellOrders(address) {
   console.log(JSON.stringify({ mode: 'sell-orders', address: result.address, count: result.count }));
 }
 
+// Two-stage broadcast driver (shared by sell / cancel-sell / buy): stage-1
+// retryable failure → rebuild excluding the spent wallet utxos; stage-2
+// retryable failure → re-send the SAME hex (its inputs are the
+// already-broadcast stage-1 outputs); stage-2 hard failure → surface the
+// funding txid + preserved stage-2 hex for manual recovery.
+async function broadcastTwoStageTrade(mode, buildTrade) {
+  const excludedOutpoints = new Set();
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const built = await buildTrade(Array.from(excludedOutpoints));
+    try {
+      await broadcastTx(built.fundingTxHex, built.fundingTxid);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt < MAX_ATTEMPTS && isRetryableBroadcastError(message)) {
+        for (const outpoint of built.fundingSpentOutpoints || []) {
+          excludedOutpoints.add(String(outpoint).toLowerCase());
+        }
+        await sleep(RETRY_DELAY_MS);
+        continue;
+      }
+      throw error;
+    }
+
+    for (let stage2Attempt = 1; stage2Attempt <= MAX_ATTEMPTS; stage2Attempt += 1) {
+      try {
+        await broadcastTx(built.txHex, built.txid);
+        return built;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (stage2Attempt < MAX_ATTEMPTS && isRetryableBroadcastError(message)) {
+          await sleep(RETRY_DELAY_MS);
+          continue;
+        }
+        throw new Error(
+          `${message} [stage-1 tx ${built.fundingTxid} is already broadcast; stage-2 raw tx preserved for manual recovery: ${built.txHex}]`,
+        );
+      }
+    }
+  }
+  throw new Error(`MVC NFT ${mode} failed after retries`);
+}
+
+async function modeSell(args) {
+  const genesis = String(args.genesis || '').trim();
+  const codehash = String(args.codehash || '').trim();
+  const tokenIndex = String(args.token_index || '').trim();
+  const price = Number(args.price_sats);
+  const feeRate = args.fee_rate != null ? Number(args.fee_rate) : 1;
+
+  // MVC MetaContract genesis/codehash are 20-byte script hashes → 40 hex.
+  if (!isHex(genesis, 40) || !isHex(codehash, 40) || !/^\d+$/.test(tokenIndex)) {
+    console.error('sell requires genesis (40 hex), codehash (40 hex) and token_index (digits)');
+    usageAndExit();
+  }
+  // Mirrors the NftManager.sell guard inside the trade worker (and the host
+  // wallet_nft_sell tool): listings below 22000 sats are rejected outright.
+  if (!Number.isInteger(price) || price < 22000) {
+    console.error('sell requires price_sats (integer >= 22000; the NftManager sell floor. 0.001 SPACE = 100000 sats)');
+    usageAndExit();
+  }
+  if (!Number.isFinite(feeRate) || feeRate <= 0) {
+    console.error('fee_rate must be a positive number');
+    usageAndExit();
+  }
+
+  const buildSell = (excludeOutpoints) => runTradeWorker({
+    action: 'sell',
+    genesis,
+    codehash,
+    tokenIndex,
+    price,
+    feeRate,
+    excludeOutpoints,
+  });
+
+  // Dry mode: build both txs, report, never touch the broadcast endpoint —
+  // a dry run creates NO listing. The worker signs with the session wallet;
+  // NftManager.sell does not prove the caller holds the token (pitfall #4
+  // discipline: verify holdings via utxo-list before a live run).
+  if (args.dry) {
+    const built = await buildSell([]);
+    console.log('DRY sell built successfully (nothing was broadcast; no listing exists yet):');
+    console.log(`- listing txid: ${built.txid} (${built.txHex.length / 2} bytes; quote as sell_txid=${built.txid} sell_output_index=0 after the live run)`);
+    console.log(`- funding txid: ${built.fundingTxid} (${built.fundingTxHex.length / 2} bytes)`);
+    console.log(JSON.stringify({ mode: 'sell', dry: true, listingTxid: built.txid, fundingTxid: built.fundingTxid, priceSats: price }));
+    return;
+  }
+
+  // Stage 1 funds the sell contract; stage 2 moves the NFT into the listing
+  // and carries the sell-contract output at vout 0 — that outpoint
+  // (stage-2 txid:0) is what buyers quote as sell_txid.
+  const built = await broadcastTwoStageTrade('sell', buildSell);
+  console.log('NFT sell listed on-chain.');
+  console.log(`- listing txid: ${built.txid} (quote as sell_txid=${built.txid} sell_output_index=0)`);
+  console.log(`- funding txid: ${built.fundingTxid}`);
+  console.log(JSON.stringify({ mode: 'sell', dry: false, listingTxid: built.txid, fundingTxid: built.fundingTxid, listingOutpoint: `${built.txid}:0`, priceSats: price }));
+}
+
+async function modeCancelSell(args) {
+  const genesis = String(args.genesis || '').trim();
+  const codehash = String(args.codehash || '').trim();
+  const tokenIndex = String(args.token_index || '').trim();
+  const sellTxid = String(args.sell_txid || '').trim();
+  const outputIndex = Number(args.sell_output_index);
+  const sellerAddress = String(args.seller_address || '').trim();
+  const price = Number(args.sell_price_sats);
+  const feeRate = args.fee_rate != null ? Number(args.fee_rate) : 1;
+
+  if (!isHex(genesis, 40) || !isHex(codehash, 40) || !/^\d+$/.test(tokenIndex)) {
+    console.error('cancel-sell requires genesis (40 hex), codehash (40 hex) and token_index (digits)');
+    usageAndExit();
+  }
+  // Explicit four-tuple, same discipline as buy: the bare-outpoint path is
+  // rejected by the API ("please include address data"). Only the original
+  // seller can take an order down — seller_address is your own address.
+  if (!isHex(sellTxid, 64) || !Number.isInteger(outputIndex) || outputIndex < 0 || !sellerAddress || !Number.isInteger(price) || price <= 0) {
+    console.error('cancel-sell requires the explicit four-tuple: sell_txid (64 hex), sell_output_index (int >= 0), seller_address, sell_price_sats (int > 0)');
+    usageAndExit();
+  }
+  if (!Number.isFinite(feeRate) || feeRate <= 0) {
+    console.error('fee_rate must be a positive number');
+    usageAndExit();
+  }
+
+  const buildCancel = (excludeOutpoints) => runTradeWorker({
+    action: 'cancelSell',
+    genesis,
+    codehash,
+    tokenIndex,
+    sellUtxo: { txId: sellTxid, outputIndex, sellerAddress, price },
+    feeRate,
+    excludeOutpoints,
+  });
+
+  // Dry mode: build both txs, report, never touch the broadcast endpoint —
+  // the order stays open until the real run.
+  if (args.dry) {
+    const built = await buildCancel([]);
+    console.log('DRY cancel-sell built successfully (nothing was broadcast; the order stays open):');
+    console.log(`- cancel txid: ${built.txid} (${built.txHex.length / 2} bytes)`);
+    console.log(`- check txid:  ${built.fundingTxid} (${built.fundingTxHex.length / 2} bytes)`);
+    console.log(`- order: #${tokenIndex} ${sellTxid}:${outputIndex} ask ${price} sats from ${sellerAddress}`);
+    console.log(JSON.stringify({ mode: 'cancel-sell', dry: true, cancelTxid: built.txid, checkTxid: built.fundingTxid }));
+    return;
+  }
+
+  // Stage 1 is the unlock check; stage 2 cancels the listing (NFT back to
+  // the seller).
+  const built = await broadcastTwoStageTrade('cancel-sell', buildCancel);
+  console.log('NFT sell cancelled on-chain.');
+  console.log(`- cancel txid: ${built.txid}`);
+  console.log(`- check txid:  ${built.fundingTxid}`);
+  console.log(`- order: #${tokenIndex} ${sellTxid}:${outputIndex} ask ${price} sats from ${sellerAddress}`);
+  console.log(JSON.stringify({ mode: 'cancel-sell', dry: false, cancelTxid: built.txid, checkTxid: built.fundingTxid }));
+}
+
 async function modeBuy(args) {
   const genesis = String(args.genesis || '').trim();
   const codehash = String(args.codehash || '').trim();
@@ -298,50 +484,13 @@ async function modeBuy(args) {
     return;
   }
 
-  // Two-stage broadcast with the same retry policy as executeMvcNftTrade:
-  // stage-1 retryable failure → rebuild excluding the spent wallet utxos;
-  // stage-2 retryable failure → re-send the SAME hex (its inputs are the
-  // already-broadcast stage-1 outputs); stage-2 hard failure → surface the
-  // funding txid + preserved stage-2 hex for manual recovery.
-  const excludedOutpoints = new Set();
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    const built = await buildTrade(Array.from(excludedOutpoints));
-    try {
-      await broadcastTx(built.fundingTxHex, built.fundingTxid);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (attempt < MAX_ATTEMPTS && isRetryableBroadcastError(message)) {
-        for (const outpoint of built.fundingSpentOutpoints || []) {
-          excludedOutpoints.add(String(outpoint).toLowerCase());
-        }
-        await sleep(RETRY_DELAY_MS);
-        continue;
-      }
-      throw error;
-    }
-
-    for (let stage2Attempt = 1; stage2Attempt <= MAX_ATTEMPTS; stage2Attempt += 1) {
-      try {
-        await broadcastTx(built.txHex, built.txid);
-        console.log('NFT purchase broadcast on-chain.');
-        console.log(`- purchase txid: ${built.txid}`);
-        console.log(`- check txid:    ${built.fundingTxid}`);
-        console.log(`- order: #${tokenIndex} ${sellTxid}:${outputIndex} ask ${price} sats from ${sellerAddress}`);
-        console.log(JSON.stringify({ mode: 'buy', dry: false, purchaseTxid: built.txid, fundingTxid: built.fundingTxid }));
-        return;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (stage2Attempt < MAX_ATTEMPTS && isRetryableBroadcastError(message)) {
-          await sleep(RETRY_DELAY_MS);
-          continue;
-        }
-        throw new Error(
-          `${message} [stage-1 tx ${built.fundingTxid} is already broadcast; stage-2 raw tx preserved for manual recovery: ${built.txHex}]`,
-        );
-      }
-    }
-  }
-  throw new Error('MVC NFT buy failed after retries');
+  // Two-stage broadcast via the shared driver (see broadcastTwoStageTrade).
+  const built = await broadcastTwoStageTrade('buy', buildTrade);
+  console.log('NFT purchase broadcast on-chain.');
+  console.log(`- purchase txid: ${built.txid}`);
+  console.log(`- check txid:    ${built.fundingTxid}`);
+  console.log(`- order: #${tokenIndex} ${sellTxid}:${outputIndex} ask ${price} sats from ${sellerAddress}`);
+  console.log(JSON.stringify({ mode: 'buy', dry: false, purchaseTxid: built.txid, fundingTxid: built.fundingTxid }));
 }
 
 async function modeTransfer(args) {
@@ -421,10 +570,14 @@ async function main() {
     await modeSellOrders(String(args.address || '').trim());
   } else if (mode === 'transfer') {
     await modeTransfer(args);
+  } else if (mode === 'sell') {
+    await modeSell(args);
+  } else if (mode === 'cancel-sell') {
+    await modeCancelSell(args);
   } else if (mode === 'buy') {
     await modeBuy(args);
   } else {
-    console.error('mode must be sell-orders, transfer or buy');
+    console.error('mode must be sell-orders, transfer, sell, cancel-sell or buy');
     usageAndExit();
   }
 }
