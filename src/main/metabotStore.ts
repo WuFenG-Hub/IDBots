@@ -659,6 +659,19 @@ export class MetabotStore {
       input.a2a_auto_reply_enabled !== undefined
         ? (normalizeA2AAutoReplyEnabled(input.a2a_auto_reply_enabled) ? 1 : 0)
         : (existing.a2a_auto_reply_enabled == null ? null : (existing.a2a_auto_reply_enabled ? 1 : 0));
+    // Every effective toggle change lands in main.log — a silent flip (owner
+    // edit, Twin metabot_update, restore) must stay explainable after the fact
+    // (2026-10-29 twin auto-reply report).
+    const previousA2aAutoReplyEnabled =
+      existing.a2a_auto_reply_enabled == null ? null : (existing.a2a_auto_reply_enabled ? 1 : 0);
+    if (previousA2aAutoReplyEnabled !== a2aAutoReplyEnabled) {
+      const describeA2aAutoReply = (value: number | null): string =>
+        value === null ? 'default(on)' : value === 1 ? 'on' : 'off';
+      console.log(
+        `[a2a-audit] metabot ${id} (${existing.name}): a2a_auto_reply_enabled`
+        + ` ${describeA2aAutoReply(previousA2aAutoReplyEnabled)} -> ${describeA2aAutoReply(a2aAutoReplyEnabled)}`
+      );
+    }
 
     const nextMetabotType = this.resolveNextMetabotType(existing.metabot_type, input.metabot_type, id);
     if (nextMetabotType === 'twin' && existing.metabot_type !== 'twin') {

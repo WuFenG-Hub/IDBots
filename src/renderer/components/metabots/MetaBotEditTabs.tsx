@@ -53,6 +53,8 @@ const A2A_MAX_INCOMING_TURNS_OPTIONS: readonly number[] = [20, 30, 50, 80, 100, 
 const A2A_BYE_COOLDOWN_MS_OPTIONS: readonly number[] = [60_000, 300_000, 600_000, 1_800_000, 3_600_000];
 const DEFAULT_A2A_MAX_INCOMING_TURNS = 50;
 const DEFAULT_A2A_BYE_COOLDOWN_MS = 300_000;
+// Pinned to src/main/services/a2aChatLimits.ts by tests/quotaRendererSync.test.mjs.
+export const DEFAULT_A2A_AUTO_REPLY_ENABLED = true;
 
 export const normalizeA2AMaxIncomingTurnsOption = (value: unknown): number =>
   A2A_MAX_INCOMING_TURNS_OPTIONS.includes(Number(value)) ? Number(value) : DEFAULT_A2A_MAX_INCOMING_TURNS;
@@ -60,7 +62,11 @@ export const normalizeA2AByeCooldownMsOption = (value: unknown): number =>
   A2A_BYE_COOLDOWN_MS_OPTIONS.includes(Number(value)) ? Number(value) : DEFAULT_A2A_BYE_COOLDOWN_MS;
 // NULL/undefined means "use default" (on); accepts booleans and the 1/0 integer form.
 export const normalizeA2AAutoReplyEnabledOption = (value: unknown): boolean =>
-  value == null ? true : typeof value === 'number' ? value !== 0 : Boolean(value);
+  value == null
+    ? DEFAULT_A2A_AUTO_REPLY_ENABLED
+    : typeof value === 'number'
+      ? value !== 0
+      : Boolean(value);
 
 // Keep in sync with OPENTEAM_ALLOW_REMOTE_COLLAB_KEY in src/main/services/openTeamGuestService.ts.
 const OPENTEAM_ALLOW_REMOTE_COLLAB_KEY = 'openteam.allowRemoteCollab';
@@ -169,7 +175,7 @@ const defaultValues: MetaBotEditValues = {
   allow_chat_skills: [],
   a2a_max_incoming_turns: DEFAULT_A2A_MAX_INCOMING_TURNS,
   a2a_bye_cooldown_ms: DEFAULT_A2A_BYE_COOLDOWN_MS,
-  a2a_auto_reply_enabled: true,
+  a2a_auto_reply_enabled: DEFAULT_A2A_AUTO_REPLY_ENABLED,
   homepage_source: 'default',
   homepage_metafile_uri: '',
   homepage_metafile_content_type: '',
