@@ -104,6 +104,7 @@ import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
 import { buildAssistantModePrompt } from './assistantModePrompt';
 import { CHAIN_IDENTIFIER_VERBATIM_RULE } from './chainIdentifierPrompt';
 import { QA_BEHAVIOR_RULE } from './qaBehaviorPrompt';
+import { SOCIAL_TRUST_RULE } from './socialTrustPrompt';
 import { hasEmbeddedSkillCatalog } from './skillPromptMarkers';
 import { buildMetabotPersonaPrompt } from './metabotPersonaPrompt';
 import { readBootstrapDoc } from './welcomeBootstrap';
@@ -185,6 +186,10 @@ import {
   buildMetaIdSearchAgentTools,
   type MetaIdSearchControl,
 } from './metaIdSearchAgentTools';
+import {
+  buildFriendAgentTools,
+  type FriendRelationshipControl,
+} from './friendAgentTools';
 import {
   buildNetworkServicesAgentTools,
   type NetworkServicesControl,
@@ -2237,6 +2242,13 @@ export interface CoworkRunnerOptions {
    */
   metaIdSearch?: MetaIdSearchControl;
   /**
+   * When set, every cowork session gets check_peer_relationship and
+   * list_social_connections backed by the metaso-p2p friend & simpleblock
+   * aggregation (read-only lookups; the acting identity is resolved per
+   * session from the memory backend + metabot store).
+   */
+  friendRelationship?: FriendRelationshipControl;
+  /**
    * When set, every cowork session gets list_online_services backed by the
    * Gig Square live directory (ProviderDiscoveryService.availableServices).
    * Browser sessions may open a provider bot page via bot_browser_open_uri;
@@ -2668,6 +2680,7 @@ export class CoworkRunner extends EventEmitter {
   private buildTeamCultureBlock?: () => string | null;
   private episodeTimelineProvider?: CoworkEpisodeTimeline;
   private metaIdSearch?: MetaIdSearchControl;
+  private friendRelationship?: FriendRelationshipControl;
   private networkServices?: NetworkServicesControl;
   private onlineBots?: OnlineBotsControl;
   private projects?: ProjectsControl;
@@ -2850,6 +2863,7 @@ export class CoworkRunner extends EventEmitter {
     this.buildTeamCultureBlock = options?.buildTeamCultureBlock;
     this.episodeTimelineProvider = options?.episodeTimelineProvider;
     this.metaIdSearch = options?.metaIdSearch;
+    this.friendRelationship = options?.friendRelationship;
     this.networkServices = options?.networkServices;
     this.onlineBots = options?.onlineBots;
     this.projects = options?.projects;
@@ -6748,6 +6762,14 @@ export class CoworkRunner extends EventEmitter {
         name: 'idbots:metaweb-worldview',
         order: PROMPT_SECTION_ORDER.METAWEB_WORLDVIEW,
         text: this.buildMetawebWorldviewPrompt(),
+      },
+      // Peer-relationship trade trust: how friend/follow/block states ground
+      // NFT/asset deal posture. Static strategy prose, cacheable head; the
+      // per-peer state itself rides the private-chat cognition context.
+      {
+        name: 'idbots:social-trust',
+        order: PROMPT_SECTION_ORDER.SOCIAL_TRUST,
+        text: SOCIAL_TRUST_RULE,
       },
       // Deep MetaWeb sections (learning loop + Q&A participation) are Tier 1:
       // in the default 'tiered' profile mode they mount only after the session
@@ -13036,6 +13058,23 @@ export class CoworkRunner extends EventEmitter {
           tool,
           metaIdSearch: this.metaIdSearch,
           openBestMatchInBrowser: isBrowserSession,
+        })
+      );
+    }
+    // Friend/block relationship lookups for every cowork surface: read-only
+    // queries against the metaso-p2p friend & simpleblock aggregation; the
+    // acting identity rides the session's metabot binding (the same
+    // resolution the recall tools use), so both kernels share one definition.
+    if (this.friendRelationship) {
+      memoryTools.push(
+        ...buildFriendAgentTools({
+          tool,
+          control: this.friendRelationship,
+          getSelfGlobalMetaId: () => {
+            const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+            if (metabotId == null) return null;
+            return this.getMetabotById?.(metabotId)?.globalmetaid?.trim() || null;
+          },
         })
       );
     }

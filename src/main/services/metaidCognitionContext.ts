@@ -292,6 +292,8 @@ function renderGroupMemberCognitionBlock(
   if (context.friendRelationship && context.friendRelationship.status !== 'unknown') {
     relationshipLabels.push(`friend:${context.friendRelationship.status}`);
   }
+  if (context.friendRelationship?.blocking === true) relationshipLabels.push('blocking-this-member');
+  if (context.friendRelationship?.blockedBy === true) relationshipLabels.push('blocked-by-this-member');
   const contactLabel = context.directInteractionCount > 0
     ? `prior direct private interaction (${context.directInteractionCount} direct of ${context.interactionCount} total episodes)`
     : context.interactionCount > 0
@@ -331,6 +333,15 @@ function renderMetaIDCognitionPromptBlock(context: MetaIDCognitionContext): stri
   if (context.friendRelationship && context.friendRelationship.status !== 'unknown') {
     relationshipLines.push(
       `- friend current state: ${context.friendRelationship.status} (authoritative source=${context.friendRelationship.source})`,
+    );
+  }
+  if (
+    context.friendRelationship
+    && context.friendRelationship.blocking !== null
+    && context.friendRelationship.blockedBy !== null
+  ) {
+    relationshipLines.push(
+      `- block current state: you block this peer=${context.friendRelationship.blocking}; this peer blocks you=${context.friendRelationship.blockedBy} (authoritative source=${context.friendRelationship.source})`,
     );
   }
 

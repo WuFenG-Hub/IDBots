@@ -60,6 +60,10 @@ docs/*
 !docs/tickets/
 !docs/tickets/**
 tests/*
+!tests/friendAgentTools.test.mjs
+!tests/friendRelationshipService.test.mjs
+!tests/friendWiringIntegration.test.mjs
+!tests/socialTrustPrompt.test.mjs
 !tests/gatewayCore.test.mjs
 !tests/startupTiers.test.mjs
 !tests/webSearchRuntimeDir.test.mjs

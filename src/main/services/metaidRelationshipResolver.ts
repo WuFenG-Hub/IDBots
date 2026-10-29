@@ -6,6 +6,13 @@ import {
 export type HardRelationshipType = 'boss' | 'twin';
 export type FriendRelationshipStatus = 'confirmed' | 'not_confirmed' | 'unknown';
 
+/** Full pair state from a friend/block aggregator: friend tri-state plus bidirectional block flags (null = unknown). */
+export interface FriendPairState {
+  status: FriendRelationshipStatus;
+  blocking: boolean | null;
+  blockedBy: boolean | null;
+}
+
 /** Minimum Bot identity projection required by the relationship resolver. */
 export interface MetaIDRelationshipBot {
   id?: number | null;
@@ -29,6 +36,15 @@ export interface FriendRelationshipProvider {
     firstGlobalMetaID: GlobalMetaID;
     secondGlobalMetaID: GlobalMetaID;
   }): Promise<FriendRelationshipStatus>;
+  /**
+   * Optional richer resolution feeding block-aware rendering: the friend
+   * tri-state plus bidirectional simpleblock flags in one call. When absent
+   * the resolver falls back to resolveFriendStatus with null block flags.
+   */
+  resolvePairState?(input: {
+    firstGlobalMetaID: GlobalMetaID;
+    secondGlobalMetaID: GlobalMetaID;
+  }): Promise<FriendPairState>;
 }
 
 export interface FriendRelationshipFact {
@@ -36,6 +52,10 @@ export interface FriendRelationshipFact {
   subjectGlobalMetaID: GlobalMetaID;
   relationship: 'friend';
   status: FriendRelationshipStatus;
+  /** True when the observer currently blocks the subject; null = unknown. */
+  blocking: boolean | null;
+  /** True when the subject currently blocks the observer; null = unknown. */
+  blockedBy: boolean | null;
   source: 'friend_api' | 'unavailable';
   authoritative: true;
   checkedAt: number;
@@ -147,6 +167,8 @@ export class MetaIDRelationshipResolver {
         subjectGlobalMetaID,
         relationship: 'friend',
         status: 'unknown',
+        blocking: null,
+        blockedBy: null,
         source: 'unavailable',
         authoritative: true,
         checkedAt,
@@ -154,10 +176,23 @@ export class MetaIDRelationshipResolver {
     }
 
     try {
-      const status = await this.friendProvider.resolveFriendStatus({
-        firstGlobalMetaID: observerGlobalMetaID,
-        secondGlobalMetaID: subjectGlobalMetaID,
-      });
+      let status: FriendRelationshipStatus;
+      let blocking: boolean | null = null;
+      let blockedBy: boolean | null = null;
+      if (typeof this.friendProvider.resolvePairState === 'function') {
+        const pairState = await this.friendProvider.resolvePairState({
+          firstGlobalMetaID: observerGlobalMetaID,
+          secondGlobalMetaID: subjectGlobalMetaID,
+        });
+        status = pairState.status;
+        blocking = pairState.blocking === null ? null : pairState.blocking === true;
+        blockedBy = pairState.blockedBy === null ? null : pairState.blockedBy === true;
+      } else {
+        status = await this.friendProvider.resolveFriendStatus({
+          firstGlobalMetaID: observerGlobalMetaID,
+          secondGlobalMetaID: subjectGlobalMetaID,
+        });
+      }
       const normalizedStatus: FriendRelationshipStatus =
         status === 'confirmed' || status === 'not_confirmed' ? status : 'unknown';
       return {
@@ -165,6 +200,8 @@ export class MetaIDRelationshipResolver {
         subjectGlobalMetaID,
         relationship: 'friend',
         status: normalizedStatus,
+        blocking,
+        blockedBy,
         source: 'friend_api',
         authoritative: true,
         checkedAt,
@@ -177,6 +214,8 @@ export class MetaIDRelationshipResolver {
         subjectGlobalMetaID,
         relationship: 'friend',
         status: 'unknown',
+        blocking: null,
+        blockedBy: null,
         source: 'unavailable',
         authoritative: true,
         checkedAt,

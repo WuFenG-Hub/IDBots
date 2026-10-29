@@ -95,6 +95,8 @@ test('Friend provider states are current tri-state facts', async () => {
     subjectGlobalMetaID: PEER,
     relationship: 'friend',
     status: 'confirmed',
+    blocking: null,
+    blockedBy: null,
     source: 'friend_api',
     authoritative: true,
     checkedAt: 5678,
@@ -111,6 +113,57 @@ test('Friend provider failure and absent provider resolve to unknown, never not_
     },
     now: 9876,
   });
-  assert.equal((await failing.resolveFriend(WORKER, PEER)).status, 'unknown');
-  assert.equal((await createResolver().resolveFriend(WORKER, PEER)).status, 'unknown');
+  const failingFact = await failing.resolveFriend(WORKER, PEER);
+  assert.equal(failingFact.status, 'unknown');
+  assert.equal(failingFact.blocking, null);
+  assert.equal(failingFact.blockedBy, null);
+  const absentFact = await createResolver().resolveFriend(WORKER, PEER);
+  assert.equal(absentFact.status, 'unknown');
+  assert.equal(absentFact.blockedBy, null);
+});
+
+test('resolvePairState feeds the friend tri-state and bidirectional block flags', async () => {
+  const resolver = createResolver({
+    friendProvider: {
+      async resolveFriendStatus() {
+        throw new Error('must not be called when resolvePairState exists');
+      },
+      async resolvePairState({ firstGlobalMetaID, secondGlobalMetaID }) {
+        assert.equal(firstGlobalMetaID, WORKER);
+        assert.equal(secondGlobalMetaID, PEER);
+        return { status: 'not_confirmed', blocking: false, blockedBy: true };
+      },
+    },
+    now: 4242,
+  });
+  assert.deepEqual(await resolver.resolveFriend(WORKER, PEER), {
+    observerGlobalMetaID: WORKER,
+    subjectGlobalMetaID: PEER,
+    relationship: 'friend',
+    status: 'not_confirmed',
+    blocking: false,
+    blockedBy: true,
+    source: 'friend_api',
+    authoritative: true,
+    checkedAt: 4242,
+  });
+});
+
+test('resolvePairState failure degrades to unknown with null block flags', async () => {
+  const resolver = createResolver({
+    friendProvider: {
+      async resolveFriendStatus() {
+        throw new Error('unreachable');
+      },
+      async resolvePairState() {
+        throw new Error('breaker open');
+      },
+    },
+    now: 1111,
+  });
+  const fact = await resolver.resolveFriend(WORKER, PEER);
+  assert.equal(fact.status, 'unknown');
+  assert.equal(fact.blocking, null);
+  assert.equal(fact.blockedBy, null);
+  assert.equal(fact.source, 'unavailable');
 });

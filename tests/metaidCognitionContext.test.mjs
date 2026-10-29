@@ -69,12 +69,13 @@ function createInteraction(experience, {
   return { episode, evidence };
 }
 
-function createService(experience, impressions) {
+function createService(experience, impressions, friendProvider) {
   const resolver = new MetaIDRelationshipResolver({
     listMetabots: () => [
       { id: 1, globalmetaid: TWIN, metabot_type: 'twin', boss_global_metaid: BOSS },
       { id: 2, globalmetaid: OWNER, metabot_type: 'worker', boss_global_metaid: BOSS },
     ],
+    ...(friendProvider ? { friendProvider } : {}),
   });
   return new MetaIDCognitionContextService({
     experienceStore: experience,
@@ -287,6 +288,95 @@ test('group cognition block surfaces the per-member reputation temperature', asy
     });
     // Single 0.75 sample from a neutral 0.5 prior: 0.5*0.7 + 0.75*0.3 = 0.575.
     assert.match(block, /Cooperation temperature: 57\.5\/100 \(low confidence: few samples\)/);
+  } finally {
+    db.close();
+  }
+});
+
+test('friend and block current states render in the private-chat cognition block', async () => {
+  const db = await createLegacyMemoryDb();
+  try {
+    const experience = new MetaIDExperienceStore(db, () => {}, () => 1_800_000_000_000);
+    const impressions = new MetaIDImpressionStore(db, () => {}, () => 1_800_000_000_000);
+    const friendProvider = {
+      async resolveFriendStatus() {
+        throw new Error('must not be called when resolvePairState exists');
+      },
+      async resolvePairState() {
+        return { status: 'confirmed', blocking: false, blockedBy: false };
+      },
+    };
+    const service = createService(experience, impressions, friendProvider);
+    const rendered = await service.buildPromptBlock({
+      observerGlobalMetaID: OWNER,
+      subjectGlobalMetaID: PEER,
+    });
+    assert.match(rendered, /friend current state: confirmed \(authoritative source=friend_api\)/);
+    assert.match(rendered, /block current state: you block this peer=false; this peer blocks you=false \(authoritative source=friend_api\)/);
+
+    const blockedProvider = {
+      async resolveFriendStatus() {
+        throw new Error('unreachable');
+      },
+      async resolvePairState() {
+        return { status: 'not_confirmed', blocking: true, blockedBy: true };
+      },
+    };
+    const blockedService = createService(experience, impressions, blockedProvider);
+    const blockedRendered = await blockedService.buildPromptBlock({
+      observerGlobalMetaID: OWNER,
+      subjectGlobalMetaID: PEER,
+    });
+    assert.match(blockedRendered, /friend current state: not_confirmed/);
+    assert.match(blockedRendered, /you block this peer=true; this peer blocks you=true/);
+
+    // Unknown state (provider failure folds to unknown + null flags): neither
+    // the friend line nor the block line renders — absence is the honest view.
+    const failingService = createService(experience, impressions, {
+      async resolveFriendStatus() {
+        throw new Error('breaker open');
+      },
+    });
+    const failingRendered = await failingService.buildPromptBlock({
+      observerGlobalMetaID: OWNER,
+      subjectGlobalMetaID: PEER,
+    });
+    assert.doesNotMatch(failingRendered, /friend current state/);
+    assert.doesNotMatch(failingRendered, /block current state/);
+  } finally {
+    db.close();
+  }
+});
+
+test('group projection labels bidirectional block state per member', async () => {
+  const db = await createLegacyMemoryDb();
+  try {
+    const experience = new MetaIDExperienceStore(db, () => {}, () => 1_800_000_000_000);
+    const impressions = new MetaIDImpressionStore(db, () => {}, () => 1_800_000_000_000);
+    let pairState = { status: 'confirmed', blocking: false, blockedBy: false };
+    const friendProvider = {
+      async resolveFriendStatus() {
+        throw new Error('unreachable');
+      },
+      async resolvePairState() {
+        return pairState;
+      },
+    };
+    const service = createService(experience, impressions, friendProvider);
+    const friendBlock = await service.buildGroupPromptBlock({
+      observerGlobalMetaID: OWNER,
+      roster: [{ globalMetaID: PEER, name: 'Peer Bot', role: 'worker' }],
+    });
+    assert.match(friendBlock, /Authoritative relationships: friend:confirmed\b/);
+    assert.doesNotMatch(friendBlock, /blocking-this-member/);
+    assert.doesNotMatch(friendBlock, /blocked-by-this-member/);
+
+    pairState = { status: 'not_confirmed', blocking: true, blockedBy: true };
+    const blockedBlock = await service.buildGroupPromptBlock({
+      observerGlobalMetaID: OWNER,
+      roster: [{ globalMetaID: PEER, name: 'Peer Bot', role: 'worker' }],
+    });
+    assert.match(blockedBlock, /friend:not_confirmed, blocking-this-member, blocked-by-this-member/);
   } finally {
     db.close();
   }
