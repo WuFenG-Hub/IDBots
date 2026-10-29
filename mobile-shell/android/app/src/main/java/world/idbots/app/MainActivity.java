@@ -20,6 +20,7 @@ public class MainActivity extends BridgeActivity {
             .setInitialFocus(true)
             .setBackgroundColor("#F5F7F9")
             .create();
+        registerPlugin(NativeBackPlugin.class);
         super.onCreate(savedInstanceState);
     }
 

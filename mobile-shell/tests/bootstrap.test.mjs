@@ -19,6 +19,7 @@ function bootstrap(origin, platform = 'android', remoteOrigin = 'https://staging
     assigned: [],
     historyBacks: 0,
     exits: 0,
+    nativeExits: 0,
     listeners,
     Capacitor: {
       Plugins: {
@@ -129,6 +130,18 @@ test('Android Back exits at product roots instead of returning to login history'
     assert.equal(window.historyBacks, 0, pathname);
     assert.equal(window.exits, 1, pathname);
   }
+});
+
+test('Android root Back prefers the deterministic NativeBack plugin', () => {
+  const window = bootstrap('https://staging.idbots.world');
+  window.location.pathname = '/app/';
+  window.Capacitor.Plugins.NativeBack = {
+    exitApp: async () => { window.nativeExits += 1; },
+  };
+  window.idbotsNative.onBackButton(() => false);
+  window.listeners.get('backButton')({ canGoBack: true });
+  assert.equal(window.nativeExits, 1);
+  assert.equal(window.exits, 0, 'App exitApp must not be used when NativeBack exists');
 });
 
 test('native external opening uses main-frame navigation only for approved URLs', async () => {

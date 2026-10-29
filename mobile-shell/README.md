@@ -113,7 +113,7 @@ pnpm run test:e2e:mobile:gateway
 |---|---|---|
 | `camera`, `photos`, `files`, `share` | `false` | NS2 is not implemented |
 | `appState` | `true` when the App listener exists | Native foreground/background events are available; otherwise the adapter falls back |
-| `backButton` | Android when the App listener exists | Current UI handlers run before existing WebView history or app exit |
+| `backButton` | Android when the App listener exists | Current UI handlers run first; product roots exit rather than history-returning to login |
 | `externalUrls` | `true` | Native exact-origin policy and system handoff are implemented |
 | `secureScreen` | `false` | No secure-screen claim is made |
 
@@ -123,7 +123,9 @@ The bootstrap also records `phase: 'document-start'`, the expected origin, and t
 
 Native foreground events call the existing `reconnectNow()` when the gateway is not online. If the gateway is already online, they run the existing coalesced read-only resync; reconnect completion uses the same path through `onReconnected`. Background events do no recovery work. No native lifecycle handler starts a session, submits or retries a message, creates an order, or performs a chain write.
 
-Android Back closes the highest-priority mounted BottomSheet or session drawer, then closes recharge or returns Tasks/Me to Chat. Only an unhandled root uses existing WebView history or `App.exitApp()`. The dispatcher stores mounted callbacks, not navigation entries, so browser/PWA history remains unchanged.
+Every cold login entry probes the existing C3 `getMe()` with the persisted HttpOnly cookie. Ready/degraded tenants open `/app/` with `location.replace`, provisioning/failed tenants continue through the existing preparing flow, only `UNAUTHORIZED` opens the login form, and transient failures offer retry. Browser `offline` moves a non-terminal gateway connection to the existing offline banner immediately; `online` still calls `reconnectNow()`.
+
+Android Back closes the highest-priority mounted BottomSheet or session drawer, then closes recharge or returns Tasks/Me to Chat. An unhandled `/app/` or `/login` product root exits through `App.exitApp()` instead of history-returning to login; non-product-root WebView history remains available. The dispatcher stores mounted callbacks, not navigation entries, so browser/PWA history remains unchanged.
 
 Approved HTTP(S) and Alipay URLs use main-frame navigation to reach the NS0 native system-handoff delegates. The PWA keeps `window.open` for HTTP(S), same-tab Alipay navigation, QR fallback, and existing order recovery. A failed native handoff is not blindly repeated through a second path.
 

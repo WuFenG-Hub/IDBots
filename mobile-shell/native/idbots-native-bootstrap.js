@@ -8,7 +8,14 @@
   }
 
   const appPlugin = () => window.Capacitor?.Plugins?.App;
+  const nativeBackPlugin = () => window.Capacitor?.Plugins?.NativeBack;
   const hasAppListeners = () => typeof appPlugin()?.addListener === 'function';
+  const exitAndroidApp = () => {
+    const plugin = nativeBackPlugin();
+    if (typeof plugin?.exitApp !== 'function') return false;
+    void Promise.resolve(plugin.exitApp()).catch(noop);
+    return true;
+  };
   const noop = () => {};
   const addAppListener = (eventName, listener) => {
     const plugin = appPlugin();
@@ -72,6 +79,7 @@
           window.history.back();
           return;
         }
+        if (exitAndroidApp()) return;
         const plugin = appPlugin();
         if (typeof plugin?.exitApp === 'function') void plugin.exitApp().catch(noop);
       });
