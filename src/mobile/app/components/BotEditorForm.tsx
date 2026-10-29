@@ -8,6 +8,9 @@ import { fileToAvatarDataUrl } from '../avatarUpload';
 import {
   A2A_BYE_COOLDOWN_MS_OPTIONS,
   A2A_MAX_INCOMING_TURNS_OPTIONS,
+  DEFAULT_A2A_AUTO_REPLY_ENABLED,
+  DEFAULT_A2A_BYE_COOLDOWN_MS,
+  DEFAULT_A2A_MAX_INCOMING_TURNS,
   cooldownMinutes,
 } from '../a2aLimits';
 
@@ -376,12 +379,14 @@ export function BotEditorForm(props: {
   const [fallbackEffort, setFallbackEffort] = useState(bot?.fallback_llm_effort ?? '');
   const [selectedSkills, setSelectedSkills] = useState<string[]>(bot?.allow_chat_skills ?? []);
   const [skillsExpanded, setSkillsExpanded] = useState(false);
-  const [a2aAutoReply, setA2aAutoReply] = useState<boolean>(bot?.a2a_auto_reply_enabled ?? true);
+  const [a2aAutoReply, setA2aAutoReply] = useState<boolean>(
+    bot?.a2a_auto_reply_enabled ?? DEFAULT_A2A_AUTO_REPLY_ENABLED,
+  );
   const [a2aMaxIncomingTurns, setA2aMaxIncomingTurns] = useState<number>(
-    bot?.a2a_max_incoming_turns ?? 50,
+    bot?.a2a_max_incoming_turns ?? DEFAULT_A2A_MAX_INCOMING_TURNS,
   );
   const [a2aByeCooldownMs, setA2aByeCooldownMs] = useState<number>(
-    bot?.a2a_bye_cooldown_ms ?? 300_000,
+    bot?.a2a_bye_cooldown_ms ?? DEFAULT_A2A_BYE_COOLDOWN_MS,
   );
   const [balance, setBalance] = useState<{ loading: boolean; value?: string; error?: string }>({ loading: Boolean(bot) });
 

@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import MetaBotEditTabs, {
   EDIT_TAB_FIELDS,
   EDIT_TAB_SYNC_GROUPS,
+  normalizeA2AAutoReplyEnabledOption,
   type MetaBotEditValues,
 } from '../src/renderer/components/metabots/MetaBotEditTabs';
 import {
@@ -175,6 +176,20 @@ test('tab field and sync group mappings pin each editable field to its tab', () 
   // A2A chat limits are local-only runtime knobs and must also stay off-chain.
   assert.ok(!allSyncGroups.includes('a2a_max_incoming_turns'), 'a2a_max_incoming_turns must stay out of the chain sync groups');
   assert.ok(!allSyncGroups.includes('a2a_bye_cooldown_ms'), 'a2a_bye_cooldown_ms must stay out of the chain sync groups');
+});
+
+test('A2A auto-reply: an unstored (null/undefined) value defaults to ON for every bot', () => {
+  assert.equal(normalizeA2AAutoReplyEnabledOption(null), true);
+  assert.equal(normalizeA2AAutoReplyEnabledOption(undefined), true);
+  assert.equal(normalizeA2AAutoReplyEnabledOption(1), true);
+  assert.equal(normalizeA2AAutoReplyEnabledOption(0), false);
+  assert.equal(normalizeA2AAutoReplyEnabledOption(true), true);
+  assert.equal(normalizeA2AAutoReplyEnabledOption(false), false);
+
+  // The edit form renders the switch checked when the bot has no stored value.
+  const panel = panelMarkup(renderTabsMarkup({ a2a_auto_reply_enabled: normalizeA2AAutoReplyEnabledOption(null) }), 'chatSettings');
+  assert.match(panel, /data-slot="metabot-a2a-auto-reply-switch"/);
+  assert.match(panel, /aria-checked="true"/);
 });
 
 test('Basic panel renders the Twin switch, demote-confirm enabled for the current Twin', () => {

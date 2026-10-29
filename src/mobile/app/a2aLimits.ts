@@ -20,6 +20,9 @@ export const A2A_BYE_COOLDOWN_MS_OPTIONS: readonly number[] = [
 ];
 export const DEFAULT_A2A_BYE_COOLDOWN_MS = 300_000;
 
+/** Whether a bot auto-replies in A2A private chats; NULL storage means this default. */
+export const DEFAULT_A2A_AUTO_REPLY_ENABLED = true;
+
 /** "1 / 5 / 10 / 30 / 60" — the labels render the unit via i18n. */
 export function cooldownMinutes(ms: number): number {
   return Math.round(ms / 60_000);

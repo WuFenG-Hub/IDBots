@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
   A2A_BYE_COOLDOWN_MS_OPTIONS,
   A2A_MAX_INCOMING_TURNS_OPTIONS,
+  DEFAULT_A2A_AUTO_REPLY_ENABLED,
   DEFAULT_A2A_BYE_COOLDOWN_MS,
   DEFAULT_A2A_MAX_INCOMING_TURNS,
   cooldownMinutes,
@@ -11,6 +12,7 @@ import {
 import {
   A2A_BYE_COOLDOWN_MS_OPTIONS as MAIN_COOLDOWN_OPTIONS,
   A2A_MAX_INCOMING_TURNS_OPTIONS as MAIN_TURNS_OPTIONS,
+  DEFAULT_A2A_AUTO_REPLY_ENABLED as MAIN_DEFAULT_AUTO_REPLY,
   DEFAULT_A2A_BYE_COOLDOWN_MS as MAIN_DEFAULT_COOLDOWN,
   DEFAULT_A2A_MAX_INCOMING_TURNS as MAIN_DEFAULT_TURNS,
 } from '../src/main/services/a2aChatLimits';
@@ -29,6 +31,11 @@ describe('mobile A2A limits mirror the main-process contract', () => {
   it('cooldown options and default match a2aChatLimits', () => {
     assert.deepEqual(A2A_BYE_COOLDOWN_MS_OPTIONS, MAIN_COOLDOWN_OPTIONS);
     assert.equal(DEFAULT_A2A_BYE_COOLDOWN_MS, MAIN_DEFAULT_COOLDOWN);
+  });
+
+  it('auto-reply default is ON and matches a2aChatLimits', () => {
+    assert.equal(DEFAULT_A2A_AUTO_REPLY_ENABLED, MAIN_DEFAULT_AUTO_REPLY);
+    assert.equal(DEFAULT_A2A_AUTO_REPLY_ENABLED, true);
   });
 
   it('cooldownMinutes renders whole minutes', () => {

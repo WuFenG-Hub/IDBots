@@ -396,6 +396,7 @@ man_base_data_pebble/
 !tests/botBrowserCaptureFit.test.mjs
 !tests/metabotManageService.test.mjs
 !tests/metabotManageAgentTools.test.mjs
+!tests/metabotAutoReplyDefault.test.mjs
 !tests/metabotChainSyncState.test.mjs
 !tests/metabotSetupResumeUi.test.mjs
 !tests/browserCoworkSlice.test.ts

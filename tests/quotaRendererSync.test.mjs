@@ -122,4 +122,21 @@ test('A2A limit constants: the MetaBotEditTabs copy matches a2aChatLimits.ts', (
     extractNumberArray(main, 'A2A_BYE_COOLDOWN_MS_OPTIONS', 'a2aChatLimits'),
     'the selectable cooldown options must match',
   );
+  // The auto-reply toggle must default to ON on both sides: an unstored
+  // (NULL) value renders and behaves as enabled, never silently off.
+  const extractBool = (source, label) => {
+    const match = source.match(/DEFAULT_A2A_AUTO_REPLY_ENABLED\s*=\s*(true|false)/);
+    assert.ok(match, `${label}: expected a DEFAULT_A2A_AUTO_REPLY_ENABLED boolean literal`);
+    return match[1] === 'true';
+  };
+  assert.equal(
+    extractBool(renderer, 'MetaBotEditTabs'),
+    extractBool(main, 'a2aChatLimits'),
+    'MetaBotEditTabs DEFAULT_A2A_AUTO_REPLY_ENABLED must match the main-process default',
+  );
+  assert.equal(
+    extractBool(main, 'a2aChatLimits'),
+    true,
+    'A2A auto-reply must default to ON for every bot (NULL storage = on)',
+  );
 });
