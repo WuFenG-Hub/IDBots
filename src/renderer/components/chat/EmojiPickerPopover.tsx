@@ -121,7 +121,7 @@ const EmojiGrid: React.FC<{
   <div
     role="listbox"
     aria-label={ariaLabel}
-    className="grid grid-cols-8 gap-0.5 p-1 overflow-y-auto flex-1 min-h-0"
+    className="grid grid-cols-7 gap-0.5 p-1 overflow-y-auto flex-1 min-h-0"
   >
     {emojis.map((emoji) => (
       <button
@@ -131,10 +131,10 @@ const EmojiGrid: React.FC<{
         aria-label={emoji.char}
         title={emoji.keywords}
         onClick={() => onSelect(emoji.char)}
-        className="h-8 w-8 flex items-center justify-center rounded-lg text-[19px] leading-none transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover focus:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/60"
+        className="h-[38px] w-[38px] flex items-center justify-center rounded-lg text-[26px] leading-none transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover focus:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/60"
       >
         {/* Twemoji <img> (alt = codepoint); non-catalog chars fall back to the font glyph. */}
-        <TwemojiGlyph char={emoji.char} px={19} />
+        <TwemojiGlyph char={emoji.char} px={26} />
       </button>
     ))}
   </div>
@@ -218,9 +218,9 @@ const EmojiPickerPanel: React.FC<EmojiPickerPanelProps> = ({ onSelect }) => {
                 role="option"
                 aria-label={emoji.char}
                 onClick={() => handleSelect(emoji.char)}
-                className="h-7 w-7 flex items-center justify-center rounded-lg text-[17px] leading-none transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover focus:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/60"
+                className="h-[33px] w-[33px] flex items-center justify-center rounded-lg text-[22px] leading-none transition-colors hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover focus:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/60"
               >
-                <TwemojiGlyph char={emoji.char} px={17} />
+                <TwemojiGlyph char={emoji.char} px={22} />
               </button>
             ))}
           </div>
