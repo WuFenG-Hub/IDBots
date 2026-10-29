@@ -28,6 +28,7 @@ import { EMOJI_CATEGORIES, countEmojiCatalogEntries, searchEmoji } from '../src/
 import { mapWechatBracketCodesForDisplay, WECHAT_BRACKET_EMOJI_MAP, WECHAT_BRACKET_CODE_COUNT } from '../src/mobile/app/chat/wechatEmojiDisplay.ts';
 import { insertEmojiAtCaret } from '../src/mobile/app/chat/emojiTextInsert.ts';
 import { mobileI18n, t } from '../src/mobile/i18n.ts';
+import { TWEMOJI_CHARS, TWEMOJI_ASSET_COUNT, twemojiUrlFor } from '../src/renderer/components/chat/twemoji.ts';
 import type { useChat } from '../src/mobile/app/hooks/useChat.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -81,6 +82,30 @@ test('the ordered catalog matches the pinned WeChat-panel sequence (desktop/mobi
   assert.equal(expected.length, 85, 'the pinned anchor itself must have 85 members');
   const actual = EMOJI_CATEGORIES.flatMap((c) => c.emojis.map((e) => e.char));
   assert.deepEqual(actual, expected, 'catalog order/content drifted from the pinned WeChat-panel sequence');
+});
+
+test('every catalog emoji has a bundled Twemoji asset (85-file subset, no CDN)', () => {
+  // Display artwork: panel cells and bubbles render the bundled Twemoji
+  // 14.0.2 subset (CC-BY 4.0 — LICENSES/twemoji-NOTICE.md), vendored into
+  // src/renderer/components/chat/assets/twemoji/ for both build targets.
+  // The manifest must mirror the catalog 1:1 and resolve to LOCAL files.
+  assert.equal(TWEMOJI_ASSET_COUNT, 85, `expected 85 bundled assets, got ${TWEMOJI_ASSET_COUNT}`);
+  const catalogChars = EMOJI_CATEGORIES.flatMap((c) => c.emojis.map((e) => e.char));
+  assert.deepEqual([...TWEMOJI_CHARS], [...new Set(catalogChars)], 'manifest chars must equal the catalog chars in order');
+  for (const char of catalogChars) {
+    const url = twemojiUrlFor(char);
+    assert.ok(url, `no bundled asset for ${char}`);
+    assert.match(url, /\/twemoji\/[0-9a-z-]+\.svg$/);
+    assert.ok(!/^https?:/.test(url), `${char} asset must not be a CDN URL`);
+  }
+  // Exactly the 85-file subset lives in the assets dir (never the full set).
+  const assetsDir = path.join(here, '..', 'src', 'renderer', 'components', 'chat', 'assets', 'twemoji');
+  const svgs = fs.readdirSync(assetsDir).filter((f) => f.endsWith('.svg'));
+  assert.equal(svgs.length, 85, `assets dir must hold exactly 85 SVGs, got ${svgs.length}`);
+  // VS16 naming: upstream asset names strip fe0f.
+  assert.match(twemojiUrlFor('✌️')!, /270c\.svg$/);
+  // Non-catalog chars fall back to the raw glyph (no asset, no throw).
+  assert.equal(twemojiUrlFor('🚀'), null);
 });
 
 test('every category labelKey resolves in BOTH mobile dictionaries (zh + en)', () => {
@@ -201,7 +226,7 @@ test('insertEmojiAtCaret inserts at the caret, replaces selections, and appends 
 // 4. EmojiPickerPanel (SSR)
 // ---------------------------------------------------------------------------
 
-test('panel renders as one flat dialog: search, NO tabs, recents strip, single Unicode grid', () => {
+test('panel renders as one flat dialog: search, NO tabs, recents strip, single Twemoji grid', () => {
   restoreRecentEmojiFromStorage(null); // fresh-install view for this test
   const markup = renderToStaticMarkup(
     <EmojiPickerPanel onSelect={() => undefined} onClose={() => undefined} />,
@@ -212,10 +237,15 @@ test('panel renders as one flat dialog: search, NO tabs, recents strip, single U
   // Single WeChat-style page: NO tab bar anywhere.
   assert.doesNotMatch(markup, /role="tablist"/);
   assert.doesNotMatch(markup, /role="tab"/);
-  // One flat grid of 85 options.
+  // One flat grid of 85 options, every cell a bundled Twemoji image
+  // (alt = codepoint; NO runtime CDN URL).
   const optionCount = (markup.match(/role="option"/g) ?? []).length;
   assert.equal(optionCount, 85, `expected 85 grid options, got ${optionCount}`);
-  assert.ok(markup.includes('🙂'), 'grid starts with the WeChat code-table order (微笑 first)');
+  const imgCount = (markup.match(/<img /g) ?? []).length;
+  assert.equal(imgCount, 85, `expected 85 Twemoji <img> cells, got ${imgCount}`);
+  assert.match(markup, /<img[^>]*alt="🙂"/, 'grid starts with the WeChat code-table order (微笑 first)');
+  assert.match(markup, /src="[^"]*twemoji\/1f642\.svg"/);
+  assert.doesNotMatch(markup, /src="https?:\/\//, 'assets must be bundled, never fetched from a CDN');
   // Fresh install: no recents -> no recents strip.
   assert.ok(!markup.includes(t('mobile.chat.emojiCategoryRecent')), 'recents strip hidden while recents are empty');
   // Touch targets: every grid cell is a 44px-tall button (min-h convention).
@@ -245,9 +275,12 @@ test('recents render as a strip ABOVE the main grid after picks (no Recent tab)'
   const optionCount = (after.match(/role="option"/g) ?? []).length;
   assert.equal(optionCount, 87, `expected 2 recents + 85 catalog options, got ${optionCount}`);
   const stripLabelIndex = after.indexOf(t('mobile.chat.emojiCategoryRecent'));
-  const firstGridEmojiIndex = after.indexOf('🙂');
+  const firstGridEmojiIndex = after.indexOf('alt="🙂"');
   assert.ok(stripLabelIndex >= 0 && stripLabelIndex < firstGridEmojiIndex, 'recents strip sits above the main grid');
-  assert.ok(after.indexOf('😀') < firstGridEmojiIndex, 'most-recent emoji leads the strip');
+  // Recents render as Twemoji images too (alt = codepoint), most-recent first.
+  assert.match(after, /<img[^>]*alt="😀"/, 'most-recent emoji leads the strip as an image');
+  assert.match(after, /<img[^>]*alt="🥰"/);
+  assert.ok(after.indexOf('alt="😀"') < firstGridEmojiIndex, 'most-recent emoji leads the strip');
   restoreRecentEmojiFromStorage(null);
 });
 
@@ -449,7 +482,7 @@ test('composer renders the emoji trigger button with picker aria wiring, adjacen
   assert.ok(emojiIdx >= 0 && emojiIdx < attachIdx, 'emoji trigger precedes the attach button');
 });
 
-test('user bubble renders WeChat bracket codes as emoji (display-only), unknown codes verbatim', () => {
+test('user bubble renders WeChat bracket codes as Twemoji images (display-only), unknown codes verbatim', () => {
   const markup = renderToStaticMarkup(
     <ChatScreen
       chat={chatFixture({
@@ -462,7 +495,15 @@ test('user bubble renders WeChat bracket codes as emoji (display-only), unknown 
       onOpenRecharge={() => undefined}
     />,
   );
-  assert.ok(markup.includes('早上好🙂👍'), 'mapped codes render as emoji in the user bubble');
+  // Mixed text + inline images: prose stays, mapped codes become <img>
+  // with alt = codepoint (no font glyph, no contiguous emoji string).
+  assert.ok(markup.includes('早上好'), 'prose text survives the mixed rendering');
+  assert.match(markup, /<img[^>]*alt="🙂"/, 'mapped [微笑] renders as a Twemoji image');
+  assert.match(markup, /<img[^>]*alt="👍"/, 'mapped [强] renders as a Twemoji image');
+  assert.ok(
+    markup.indexOf('alt="🙂"') < markup.indexOf('alt="👍"'),
+    'image order follows the mapped text order',
+  );
   assert.ok(markup.includes('[不存在的表情]'), 'unknown codes stay literal');
   assert.ok(!markup.includes('[微笑]'), 'the stored bracket form never leaks into the user bubble markup');
 });
@@ -480,8 +521,11 @@ test('assistant bubble maps bracket codes ahead of markdown rendering, code span
       onOpenRecharge={() => undefined}
     />,
   );
-  assert.ok(markup.includes(WECHAT_BRACKET_EMOJI_MAP['抱拳']), 'prose code mapped via markdown preprocessing');
-  assert.ok(markup.includes(WECHAT_BRACKET_EMOJI_MAP['玫瑰']), 'prose code outside code spans mapped');
+  // Prose codes render as inline Twemoji images (alt carries the codepoint).
+  assert.match(markup, new RegExp(`<img[^>]*alt="${WECHAT_BRACKET_EMOJI_MAP['抱拳']}"`), 'prose code mapped via markdown preprocessing');
+  assert.match(markup, new RegExp(`<img[^>]*alt="${WECHAT_BRACKET_EMOJI_MAP['玫瑰']}"`), 'prose code outside code spans mapped');
+  // Code spans keep the LITERAL bracket codes (text nodes in code nodes are
+  // structurally immune to the Twemoji remark swap).
   assert.ok(markup.includes('[玫瑰]'), 'inline code span keeps the literal bracket code');
   assert.ok(markup.includes('[强]'), 'fenced code block keeps the literal bracket code');
 });
@@ -498,8 +542,12 @@ test('ChatScreen source contract: caret insertion wiring, panel flow, display-on
   assert.match(source, /onFocus=\{\(\) => setEmojiPanelOpen\(false\)\}/);
   // The panel toggles from the toolbar trigger.
   assert.match(source, /setEmojiPanelOpen\(\(open\) => !open\)/);
-  // Both bubble kinds map at DISPLAY time only.
+  // Both bubble kinds map at DISPLAY time only — and only the display layer
+  // swaps in Twemoji artwork (user bubble via TwemojiText, assistant via
+  // MarkdownContent's opt-in emojiImages prop).
   assert.match(source, /mapWechatBracketCodesForDisplay\(message\.text\)/);
+  assert.match(source, /<TwemojiText text=\{mapWechatBracketCodesForDisplay\(message\.text\)\} \/>/);
+  assert.match(source, /onOpenLocalFile=\{onOpenFile\} emojiImages \/>/);
   // The projection layer must NOT map (stored text untouched) — the mapping
   // imports live only in the screen module, not the projection.
   const projection = readSource('../src/mobile/app/chatProjection.ts');

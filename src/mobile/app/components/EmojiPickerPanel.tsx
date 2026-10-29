@@ -2,13 +2,17 @@ import { useMemo, useState } from 'react';
 import { MagnifyingGlassIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { t } from '../../i18n';
 import { EMOJI_CATEGORIES, searchEmoji } from '../chat/emojiData';
+import { TwemojiGlyph } from '@/components/chat/TwemojiText';
 
 /**
  * Chat emoji picker panel (mobile). A touch-first, WeChat-style inline
  * panel that renders ABOVE the composer inside its container (no backdrop,
- * the message list stays visible/scrollable while picking). Standard
- * Unicode emoji only — the catalog lives in app/chat/emojiData.ts and no
- * third-party artwork is bundled or referenced.
+ * the message list stays visible/scrollable while picking). The catalog
+ * lives in app/chat/emojiData.ts (standard Unicode codepoints — picks
+ * still insert the plain char); catalog cells render as bundled Twemoji
+ * artwork (Twemoji 14.0.2, CC-BY 4.0 — see renderer chat/twemoji.ts and
+ * LICENSES/twemoji-NOTICE.md), with a raw-glyph fallback for any char
+ * without a bundled asset.
  *
  * Interaction contract (mobile-native, zero hover assumptions):
  * - every touch target is at least 36px tall (grid cells 44px);
@@ -175,7 +179,8 @@ export function EmojiPickerPanel(props: {
                 onClick={() => props.onSelect(char)}
                 className="flex h-[36px] w-[36px] items-center justify-center text-[20px] leading-none active:bg-[var(--bg-hover)]"
               >
-                {char}
+                {/* Twemoji <img> (alt = codepoint); non-catalog recents fall back to the font glyph. */}
+                <TwemojiGlyph char={char} px={20} />
               </button>
             ))}
           </div>
@@ -206,7 +211,7 @@ export function EmojiPickerPanel(props: {
               onClick={() => props.onSelect(entry.char)}
               className="flex h-[44px] w-full items-center justify-center text-[22px] leading-none active:bg-[var(--bg-hover)]"
             >
-              {entry.char}
+              <TwemojiGlyph char={entry.char} px={22} />
             </button>
           ))}
         </div>

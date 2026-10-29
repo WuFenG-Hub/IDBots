@@ -8,6 +8,7 @@ import ChatComposerAttachments from '../components/ChatComposerAttachments';
 import { EmojiPickerPanel, rememberRecentEmoji } from '../components/EmojiPickerPanel';
 import { insertEmojiAtCaret } from '../chat/emojiTextInsert';
 import { mapWechatBracketCodesForDisplay } from '../chat/wechatEmojiDisplay';
+import TwemojiText from '@/components/chat/TwemojiText';
 import { t } from '../../i18n';
 import type { MockMetabot } from '../../bridge/types';
 import type { useChat } from '../hooks/useChat';
@@ -126,8 +127,9 @@ function MessageRow({ message, onOpenFile }: { message: ChatMessageView; onOpenF
     return (
       <div className="mb-3 flex justify-end">
         <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl bg-[var(--color-primary)] px-3.5 py-2.5 text-[15px] text-black" data-testid="chat-user-message">
-          {/* Display-only mapping (wechatEmojiDisplay.ts). */}
-          {mapWechatBracketCodesForDisplay(message.text)}
+          {/* Display-only mapping (wechatEmojiDisplay.ts); catalog emoji
+              render as bundled Twemoji images (alt = codepoint). */}
+          <TwemojiText text={mapWechatBracketCodesForDisplay(message.text)} />
         </div>
       </div>
     );
@@ -153,8 +155,9 @@ function MessageRow({ message, onOpenFile }: { message: ChatMessageView; onOpenF
   return (
     <div className="mb-3 flex justify-start">
       <div className="max-w-[90%] rounded-2xl border border-[var(--border-color)] bg-[var(--bg-panel)] px-3.5 py-2.5">
-        {/* Display-only mapping (wechatEmojiDisplay.ts). */}
-        <MarkdownContent content={mapWechatBracketCodesForDisplay(message.text)} chatExperienceMode="assistant" compact onOpenLocalFile={onOpenFile} />
+        {/* Display-only mapping (wechatEmojiDisplay.ts); emojiImages renders
+            catalog emoji as bundled Twemoji artwork inside the markdown. */}
+        <MarkdownContent content={mapWechatBracketCodesForDisplay(message.text)} chatExperienceMode="assistant" compact onOpenLocalFile={onOpenFile} emojiImages />
         {message.streaming ? <span className="mt-1 inline-block h-4 w-2 animate-pulse bg-[var(--color-primary)]" aria-hidden /> : null}
       </div>
     </div>
