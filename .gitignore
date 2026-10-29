@@ -596,6 +596,7 @@ man_base_data_pebble/
 !tests/privateChatNoReplySentinel.test.mjs
 !tests/privateChatEmptyReplyRetry.test.mjs
 !tests/privateChatNoReplyWake.test.mjs
+!tests/privateChatInboundVisibility.test.mjs
 !tests/a2aEpisodeRollover.test.mjs
 !tests/a2aEpisodeHistoryLoad.test.mjs
 !tests/dshShutdownSoftFail.test.mjs

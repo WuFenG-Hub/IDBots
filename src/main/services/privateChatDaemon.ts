@@ -339,6 +339,41 @@ function appendPrivateChatBrainNotice(params: {
 }
 
 /**
+ * One-per-conversation system notice for an inbound message that was stored
+ * but not answered because the bot's auto-reply policy declined
+ * (auto-reply toggle off, disabled bot, stranger policy). Visibility-first:
+ * the peer's message is always kept, so the transcript must also say why
+ * nothing was sent back — a flipped-off toggle used to look exactly like a
+ * message lost in transit (2026-10-29 kiop incident).
+ */
+export function buildAutoReplySuppressedNotice(
+  reason: PrivateChatAutoReplyPolicyReason
+): string {
+  if (reason === 'disabled_metabot') {
+    return tApp(
+      `（系统提示：已收下对方这条消息；该 MetaBot 当前处于停用状态，因此不会自动回复。启用后新消息将恢复正常应答。）`,
+      ` (System notice: this peer message was received and stored; the MetaBot is currently disabled, so no auto-reply was sent. New messages will be answered normally once the bot is enabled.)`,
+    );
+  }
+  if (reason === 'auto_reply_disabled') {
+    return tApp(
+      `（系统提示：已收下对方这条消息；该 Bot 的「A2A 自动回复」开关当前是关闭的（Bot 编辑 → 聊天设置），所以只收信、不会自动回复，也无法通过工具发送 A2A 私信。要恢复应答，请到该 Bot 的聊天设置里打开开关。）`,
+      ` (System notice: this peer message was received and stored; this bot's "A2A auto-reply" toggle is currently OFF (bot editor → Chat settings), so incoming A2A messages are kept but not answered, and outbound A2A DMs via tools are blocked. Re-enable the toggle in the bot's chat settings to restore replies.)`,
+    );
+  }
+  if (reason === 'stranger_blocked') {
+    return tApp(
+      `（系统提示：已收下对方这条消息；当前设置不响应陌生人私信，因此未自动回复。该 Bot 自己发起或回复过的会话不受影响。）`,
+      ` (System notice: this peer message was received and stored; the current settings do not respond to stranger private messages, so no auto-reply was sent. Conversations this bot initiated or already replied to are unaffected.)`,
+    );
+  }
+  return tApp(
+    `（系统提示：已收下对方这条消息；该 Bot 当前不会自动回复这条私信。）`,
+    ` (System notice: this peer message was received and stored; this bot will not auto-reply to it.)`,
+  );
+}
+
+/**
  * Row ids whose ciphertext failed to decrypt with every known shared-secret
  * variant. Those rows stay unprocessed (is_processed = 0) so a later daemon
  * start — e.g. after an app update adds the missing key variant — retries
@@ -5287,43 +5322,22 @@ async function processOne(
       );
     }
 
-    if (hasNewerPrivateChatMessage(db, {
+    // Burst suppression, reply-side only (visibility-first 2026-10-29): when
+    // a newer message from the same peer is already queued, this older row
+    // normally gets no reply of its own — the newer message carries the
+    // conversation. The row itself is still RENDERED below; this check moved
+    // after the append so the bubble can no longer vanish together with the
+    // reply it used to swallow. A completed-but-undelivered reply turn
+    // (watchdog detachment, app restart) is still picked up below before the
+    // newer message is answered, so it cannot stay stranded as a local-only
+    // "internal status" bubble.
+    const newerPeerMessageQueued = hasNewerPrivateChatMessage(db, {
       currentRowId: row.id,
       fromGlobalMetaId: row.from_global_metaid,
       fromMetaId: row.from_metaid,
       toGlobalMetaId: row.to_global_metaid,
       toMetaId: row.to_metaid,
-    })) {
-      // A stale row normally gets no reply of its own — the newer peer
-      // message carries the conversation. But when an earlier turn already
-      // completed and its reply was never delivered (watchdog detachment,
-      // app restart), dropping this row would strand that reply forever as a
-      // local-only "internal status" bubble. Fall through so the pickup
-      // below delivers it before the newer message is answered.
-      const pendingCompletedReply = mappedSessionId
-        ? (() => {
-          const trigger = findPrivateChatA2AInboundMessage({
-            coworkStore,
-            sessionId: mappedSessionId,
-            externalConversationId,
-            row,
-          });
-          return trigger
-            ? findDeliverableCompletedTurnReply({
-              coworkStore,
-              sessionId: mappedSessionId,
-              triggerMessageId: trigger.id,
-            })
-            : null;
-        })()
-        : null;
-      if (!pendingCompletedReply) {
-        emitLog(`[PrivateChat] Skip stale private chat message ${row.id}; a newer peer message is queued.`);
-        markProcessed(db, row.id, saveDb);
-        return;
-      }
-      emitLog(`[PrivateChat] Message ${row.id} has a newer peer message queued, but a completed reply turn was never delivered; delivering it first.`);
-    }
+    });
 
     const mappingMeta = parseConversationMappingMetadata(existingMapping?.metadataJson);
     if (mappingMeta.byeSent === true) {
@@ -5403,13 +5417,12 @@ async function processOne(
       metabotStore,
       hasPriorLocalOutbound,
     });
-    if (!autoReplyPolicy.shouldReply) {
-      emitLog(
-        `[PrivateChat] Auto-reply skipped for ${fromGlobalMetaId.slice(0, 12)}… (reason: ${autoReplyPolicy.reason}).`
-      );
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
+    // Visibility-first (2026-10-29): a declined auto-reply no longer drops
+    // the row before it is rendered. The exit moved below the inbound append,
+    // so the peer's message always lands in the session (tagged with the
+    // suppression reason) and only the reply turn is skipped. Everything
+    // between here and that exit (session resolution, episode rollover,
+    // append) is safe to run for a row that will not be answered.
 
     const resolvedConversation = await resolvePrivateConversationSession(
       coworkStore,
@@ -5483,6 +5496,17 @@ async function processOne(
           privateChatReServed: true,
           privateChatReServedForMessageId: String(wakeDisposition?.originalRowId ?? wakeEntry?.rowId ?? row.id),
         } : {}),
+        // Renderer-facing suppression evidence (2026-10-29): every inbound
+        // bubble carries which way the auto-reply policy went at processing
+        // time, so the session view can explain "message received but no
+        // answer" and clear its banner once replies flow again. Messages from
+        // before this change carry neither marker and stay neutral.
+        ...(autoReplyPolicy.shouldReply
+          ? { a2aAutoReplyActive: true }
+          : {
+            autoReplySuppressed: true,
+            autoReplySuppressedReason: autoReplyPolicy.reason,
+          }),
         ...(episodeStarted ? {
           refreshSessionSummary: true,
           a2aEpisodeStarted: true,
@@ -5491,6 +5515,28 @@ async function processOne(
       },
       emitToRenderer,
     });
+
+    // No-reply exit, AFTER the render: the peer's message above is durable in
+    // the session; only the reply turn is skipped. A one-per-conversation
+    // system notice states why the bot will not answer, so a flipped-off
+    // auto-reply toggle is discoverable in the transcript itself instead of
+    // looking like the peer is being ignored.
+    if (!autoReplyPolicy.shouldReply) {
+      emitLog(
+        `[PrivateChat] Auto-reply skipped for ${fromGlobalMetaId.slice(0, 12)}… (reason: ${autoReplyPolicy.reason}); inbound message stored.`
+      );
+      if (shouldEmitPrivateChatBrainNotice(`${metabot.id}:${externalConversationId}`, `auto-reply-${autoReplyPolicy.reason}`)) {
+        appendPrivateChatBrainNotice({
+          coworkStore,
+          sessionId,
+          externalConversationId,
+          content: buildAutoReplySuppressedNotice(autoReplyPolicy.reason),
+          emitToRenderer,
+        });
+      }
+      markProcessed(db, row.id, saveDb);
+      return;
+    }
 
     // A previous reply turn for this conversation may have completed after
     // the daemon stopped waiting for it (skill-turn watchdog, app restart).
@@ -5507,6 +5553,17 @@ async function processOne(
         });
     if (completedTurnReply) {
       emitLog(`[PrivateChat] Picking up the completed reply turn for message ${row.id} instead of starting a new turn.`);
+    }
+
+    // Stale-suppression exit, AFTER the render: a newer peer message is
+    // queued and will drive the conversation's reply, so this older row only
+    // needed its bubble (it is stored above). A completed-but-undelivered
+    // reply (checked above) still wins — it is delivered before the newer
+    // message is answered.
+    if (newerPeerMessageQueued && !completedTurnReply) {
+      emitLog(`[PrivateChat] Stored stale message ${row.id} without reply; a newer peer message carries the conversation.`);
+      markProcessed(db, row.id, saveDb);
+      return;
     }
 
     const memoryBackend = coworkStore.getMemoryBackend();
