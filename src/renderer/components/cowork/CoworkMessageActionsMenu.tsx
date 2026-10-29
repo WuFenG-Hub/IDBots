@@ -5,7 +5,10 @@
  * "⋯" beside the bubble; the menu behind it carries the conversation-level
  * actions — quote / copy / branch. The turn-end line keeps the timestamp and
  * the feedback thumbs, so "did I react to this?" stays visible at a glance
- * instead of hiding behind a menu.
+ * instead of hiding behind a menu. The user bubble additionally got its old
+ * below-the-bubble hover pair back (owner's call, 2026-10-28): the sent time
+ * and a direct copy button ride the metadata row beside the "⋯" — the menu
+ * and the direct copy coexist.
  *
  * Two existing visual families are reused so this looks like something the app
  * already had:
