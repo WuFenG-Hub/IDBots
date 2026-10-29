@@ -59,6 +59,13 @@ export const PROMPT_SECTION_ORDER = {
    */
   METAWEB_WORLDVIEW: 42,
   /**
+   * Peer-relationship trust: how friend/follow/block states (metaso-p2p
+   * aggregation + the metaid cognition context) ground trade trust — the
+   * escrow rule for non-friend NFT/asset deals. Static strategy prose —
+   * safe for the cacheable head.
+   */
+  SOCIAL_TRUST: 42.5,
+  /**
    * MetaWeb learning loop: how to follow on-chain tutorials — on-chain skill
    * resolution, declare-before-install, verify, report with provenance,
    * record the outcome. Static policy prose, right after the worldview.

@@ -329,6 +329,11 @@ import {
   stopOpenTeamInviteWatchers,
 } from './services/openTeamService';
 import { getMetaIdDetail, searchMetaIds } from './services/metaIdSearchService';
+import {
+  MetasoFriendRelationshipProvider,
+  type SocialApiOptions,
+} from './services/friendRelationshipService';
+import { createMetasoFriendControl } from './libs/friendAgentTools';
 import { A2A_GUIDANCE_MAX_LENGTH, a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
 import { coworkLog } from './libs/coworkLogger';
 import {
@@ -3720,6 +3725,14 @@ function estimateMvcPinNeedSats(): number {
   return Math.ceil(resolveCreatePinFeeRate('mvc') * 600);
 }
 
+// metaso-p2p social (friend & simpleblock) API options: IDBOTS_SOCIAL_API_BASE_URL
+// overrides the default so.metaid.io base for staging integration ahead of
+// the production rollout (same convention as IDBOTS_METAWEB_API_BASE_URL).
+const socialApiOptions = (): SocialApiOptions | undefined => {
+  const baseUrl = process.env.IDBOTS_SOCIAL_API_BASE_URL?.trim();
+  return baseUrl ? { baseUrl } : undefined;
+};
+
 /** Audit ledger for bot wallet transfers (botWalletTransferStore), memoized. */
 let botWalletTransferStore: BotWalletTransferStore | undefined;
 function getBotWalletTransferStore(): BotWalletTransferStore {
@@ -4332,6 +4345,13 @@ const startStartupMessageTier = (): void => {
       impressionStore: getMetaIDImpressionStore(),
       relationshipResolver: new MetaIDRelationshipResolver({
         listMetabots: () => getMetabotStore().listMetabots(),
+        // metaso-p2p friend & simpleblock aggregation (S1 spec). The provider
+        // degrades to 'unknown' on any failure and opens a short breaker, so
+        // a not-yet-deployed endpoint never blocks the private-chat path.
+        friendProvider: new MetasoFriendRelationshipProvider({
+          ...socialApiOptions(),
+          timeoutMs: 3_000,
+        }),
       }),
     });
   } catch (error) {
@@ -6902,6 +6922,10 @@ const getCoworkRunner = () => {
           return { ...profile, isOwn };
         },
       },
+      // Friend/block relationship tool backends (check_peer_relationship /
+      // list_social_connections): the shared metaso-p2p control — same
+      // mapping main.ts and the integration harness exercise.
+      friendRelationship: createMetasoFriendControl(socialApiOptions),
       networkServices: {
         listOnlineServices: async () => {
           try {
