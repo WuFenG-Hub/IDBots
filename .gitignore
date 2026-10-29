@@ -72,6 +72,7 @@ tests/*
 !tests/mobileNativeAdapter.test.ts
 !tests/mobileNativeBack.test.ts
 !tests/mobileRechargePolicy.test.tsx
+!tests/mobileSessionRecovery.test.ts
 !tests/quotaExhaustedStreamError.test.mjs
 !tests/update-notification.test.mjs
 !tests/serverMode.test.mjs
