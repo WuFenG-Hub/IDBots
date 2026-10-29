@@ -33,6 +33,32 @@ export function normalizeA2AAutoReplyEnabled(value: unknown): boolean {
   return Boolean(value);
 }
 
+/**
+ * Send-side twin of the auto-reply policy (2026-10-29): a bot with the A2A
+ * auto-reply toggle off cannot answer peer DMs, so letting it (or its owner,
+ * via the Bot Browser) fire conversational DMs at peers would only harvest
+ * replies that this same toggle then suppresses locally. The toggle therefore
+ * gates the bot's A2A private-chat send capability as a whole. Returns the
+ * block reason for the user/agent, or null when sending is allowed.
+ * Order-protocol and OpenTeam transport sends are intentionally NOT gated —
+ * they are transactional notifications, not conversation openers.
+ */
+export function describeA2APrivateChatSendBlock(metabot: {
+  name?: string | null;
+  a2a_auto_reply_enabled?: boolean | null;
+} | null | undefined): string | null {
+  if (!metabot || normalizeA2AAutoReplyEnabled(metabot.a2a_auto_reply_enabled)) {
+    return null;
+  }
+  const name = metabot.name?.trim() || 'This MetaBot';
+  return (
+    `${name} has A2A private chat disabled: the "A2A auto-reply" toggle is off `
+    + `(bot editor → Chat settings), so the bot cannot send A2A private messages `
+    + `and would not be able to answer the peer's replies either. `
+    + `Re-enable the toggle in the bot's chat settings to restore both.`
+  );
+}
+
 export function normalizeA2AMaxIncomingTurns(value: unknown): number {
   const numeric = typeof value === 'number' ? value : Number(value);
   return A2A_MAX_INCOMING_TURNS_OPTIONS.includes(numeric) ? numeric : DEFAULT_A2A_MAX_INCOMING_TURNS;
