@@ -115,6 +115,7 @@ import {
   countNegativeSignalsForDay,
   evaluatePromptLayerRollback,
 } from '../libs/promptLayerRollback';
+import { formatParseFailureExcerpt } from '../libs/parseFailureExcerpt';
 import {
   WEEKLY_DREAM_MIN_DAYS,
   buildWeeklyDreamPrompt,
@@ -1018,6 +1019,7 @@ export class DreamService {
         chunk,
       });
       const output = await this.generateAndParse(
+        metabot.id,
         prompt.system,
         prompt.user,
         brain,
@@ -1128,6 +1130,7 @@ export class DreamService {
         practiceEnabled,
       }, dropCounters);
       const output = await this.generateAndParse(
+        metabot.id,
         prompt.system,
         prompt.user,
         brain,
@@ -1159,6 +1162,7 @@ export class DreamService {
         practiceEnabled,
       }, dropCounters);
       const output = await this.generateAndParse(
+        metabot.id,
         prompt.system,
         prompt.user,
         brain,
@@ -1208,6 +1212,7 @@ export class DreamService {
       practiceEnabled,
     }, dropCounters);
     const output = await this.generateAndParse(
+      metabot.id,
       prompt.system,
       prompt.user,
       brain,
@@ -1423,6 +1428,7 @@ export class DreamService {
       // expansion retry instead of burning an extra LLM call on it.
       if (!isRepair) {
         output = await this.ensureSelfIdentity(
+          metabotId,
           output,
           prepared.prompt.system,
           prepared.prompt.user,
@@ -1595,8 +1601,14 @@ export class DreamService {
     }
   }
 
-  /** First attempt + one retry when the output is not parseable JSON. */
+  /**
+   * First attempt + one retry when the output is not parseable JSON. Every
+   * parse failure leaves ONE forensic log line carrying the raw output's
+   * head/tail excerpt (issue #22: the raw text used to be discarded, so
+   * failures could be counted but never located afterwards).
+   */
   private async generateAndParse(
+    metabotId: number,
     system: string,
     user: string,
     brain: DreamBrainPair,
@@ -1608,6 +1620,9 @@ export class DreamService {
     const first = parseDreamOutput(firstRaw, dropCounters);
     if (first.ok) return first.output;
     const firstError = (first as { ok: false; error: string }).error;
+    console.warn(
+      `[DreamService] Dream output parse failed (attempt 1/2) for metabot ${metabotId}: ${firstError}; raw output (${firstRaw.length} chars): ${formatParseFailureExcerpt(firstRaw)}`,
+    );
 
     const retryRaw = await this.callDreamLlm(
       system,
@@ -1618,11 +1633,15 @@ export class DreamService {
     );
     const retry = parseDreamOutput(retryRaw, dropCounters);
     if (retry.ok) return retry.output;
+    console.warn(
+      `[DreamService] Dream output unparseable after retry for metabot ${metabotId}: ${(retry as { ok: false; error: string }).error}; raw output (${retryRaw.length} chars): ${formatParseFailureExcerpt(retryRaw)}`,
+    );
     throw new Error(`dream output unparseable after retry: ${(retry as { ok: false; error: string }).error}`);
   }
 
   /** One retry when self_identity is missing or under the 200-char minimum. */
   private async ensureSelfIdentity(
+    metabotId: number,
     output: DreamOutput,
     system: string,
     _user: string,
@@ -1650,7 +1669,10 @@ export class DreamService {
       return { ...output, selfIdentity: retryText };
     }
     // Keep the original output rather than failing the whole run over length.
-    console.warn('[DreamService] self_identity still below minimum after retry; keeping best effort output');
+    // The repair output is forensic evidence too (#22): keep its excerpt.
+    console.warn(
+      `[DreamService] self_identity still below minimum after retry for metabot ${metabotId}; keeping best effort output; repair output (${retryRaw.length} chars): ${formatParseFailureExcerpt(retryRaw)}`,
+    );
     return output;
   }
 
@@ -4083,7 +4105,9 @@ export class DreamService {
       const raw = await this.callDreamLlm(prompt.system, prompt.user, brain, 4096);
       const parsed = parseWeeklyDreamOutput(raw);
       if (!parsed.ok) {
-        console.warn(`[DreamService] Weekly long dream parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}`);
+        console.warn(
+          `[DreamService] Weekly long dream parse failed for metabot ${metabot.id}: ${(parsed as { ok: false; error: string }).error}; raw output (${raw.length} chars): ${formatParseFailureExcerpt(raw)}`,
+        );
         return false;
       }
       this.deps.dreamStore.upsertWeeklySummary({
