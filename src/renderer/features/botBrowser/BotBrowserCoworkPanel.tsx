@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { ClockIcon, XMarkIcon, TrashIcon, FolderIcon } from '@heroicons/react/24/outline';
 import ComposeIcon from '../../components/icons/ComposeIcon';
 import MarkdownContent from '../../components/MarkdownContent';
+import TwemojiText from '../../components/chat/TwemojiText';
 import CoworkPromptInput, { type CoworkPromptInputRef } from '../../components/cowork/CoworkPromptInput';
 import { buildSessionComposerCommands } from '../../components/cowork/composerCommandCatalog';
 import FolderSelectorPopover from '../../components/cowork/FolderSelectorPopover';
@@ -56,8 +57,11 @@ const PanelMessage: React.FC<{
   if (message.type === 'user') {
     return (
       <div className="flex justify-end">
+        {/* TwemojiText: plain-text bubble face (no markdown pass here) — catalog
+            emoji render through the same bundled pipeline as every other bubble;
+            stored/sent text is untouched. */}
         <div className="max-w-[90%] min-w-0 whitespace-pre-wrap break-words rounded-2xl px-3 py-2 text-[13px] dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text shadow-subtle">
-          {message.content}
+          <TwemojiText text={message.content} />
         </div>
       </div>
     );
@@ -70,14 +74,14 @@ const PanelMessage: React.FC<{
     return (
       <div className="min-w-0">
         <div className="assistant-bubble w-fit max-w-[92%] rounded-[22px] px-[16px] py-[10px] text-[13px] leading-5 dark:text-claude-darkText text-claude-text shadow-subtle [&_h1]:text-sm [&_h1]:mt-3 [&_h1]:mb-1.5 [&_h2]:text-[13px] [&_h2]:mt-2.5 [&_h2]:mb-1 [&_h3]:text-[13px] [&_h3]:mt-2 [&_h3]:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:text-xs [&_code]:break-all [&_a]:break-all">
-          <MarkdownContent content={message.content} compact onOpenBotBrowserUri={onOpenUri} />
+          <MarkdownContent content={message.content} compact onOpenBotBrowserUri={onOpenUri} emojiImages />
         </div>
       </div>
     );
   }
   return (
     <div className="min-w-0 text-[13px] leading-5 dark:text-claude-darkText text-claude-text [&_h1]:text-sm [&_h1]:mt-3 [&_h1]:mb-1.5 [&_h2]:text-[13px] [&_h2]:mt-2.5 [&_h2]:mb-1 [&_h3]:text-[13px] [&_h3]:mt-2 [&_h3]:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:text-xs [&_code]:break-all [&_a]:break-all">
-      <MarkdownContent content={message.content} compact onOpenBotBrowserUri={onOpenUri} />
+      <MarkdownContent content={message.content} compact onOpenBotBrowserUri={onOpenUri} emojiImages />
     </div>
   );
 };
