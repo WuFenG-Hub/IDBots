@@ -7,6 +7,7 @@ import { configureStore } from '@reduxjs/toolkit';
 import coworkReducer, {
   enqueuePendingPermission,
   setSessions,
+  setCurrentSession,
 } from '../src/renderer/store/slices/coworkSlice';
 import CoworkPermissionOverlay from '../src/renderer/components/cowork/CoworkPermissionOverlay';
 import { i18nService } from '../src/renderer/services/i18n';
@@ -37,10 +38,18 @@ const sessionSummary = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-function renderOverlay(permissions: Array<Record<string, unknown>>, inlineSessionId: string | null, sessions: Array<Record<string, unknown>> = []) {
+function renderOverlay(
+  permissions: Array<Record<string, unknown>>,
+  inlineSessionId: string | null,
+  sessions: Array<Record<string, unknown>> = [],
+  currentSession: Record<string, unknown> | null = null,
+) {
   const store = configureStore({ reducer: { cowork: coworkReducer } });
   if (sessions.length > 0) {
     store.dispatch(setSessions(sessions as never));
+  }
+  if (currentSession) {
+    store.dispatch(setCurrentSession(currentSession as never));
   }
   permissions.forEach((entry) => store.dispatch(enqueuePendingPermission(entry as never)));
   return renderToStaticMarkup(
@@ -142,4 +151,62 @@ test('overlay shows the first prompt that has no inline seat when several queue 
 
   assert.ok(markup.includes('Write'), 'uncovered prompt rendered');
   assert.ok(!markup.includes('Read'), 'inline-covered prompt not duplicated');
+});
+
+/**
+ * Real-device regression (2026-10-30 S6 final verification): the A2A friend
+ * invite's owner authorization must render in the global overlay while the
+ * owner is watching that exact A2A conversation. The prompt carries the
+ * payload requestSuspendedApproval builds (AskUserQuestion + safety-style
+ * options + context) for a session the owner has open.
+ */
+const friendInvitePermission = () => permission({
+  sessionId: 'sess-a2a-invite',
+  requestId: 'req-invite-1',
+  toolName: 'AskUserQuestion',
+  toolInput: {
+    questions: [
+      {
+        header: '好友确认',
+        question: '机器人「瑞幸店员」请求与「AI_Sunny」互加好友：授权后将用该机器人的钱包写链 /follow（contentBody=对方 GlobalMetaID，链上公开且不可撤销）。是否授权？',
+        options: [
+          { label: '允许本次操作', description: '仅允许当前这一次操作继续执行。' },
+          { label: '拒绝本次操作', description: '拒绝当前操作，保持安全边界。' },
+        ],
+      },
+    ],
+    answers: {},
+    context: { action: 'invite', peerGlobalMetaId: 'idq1peer', peerName: 'AI_Sunny', metabotId: 31 },
+  },
+});
+
+test('A2A friend-invite approval renders in the overlay while that A2A chat is the open session', () => {
+  const markup = renderOverlay(
+    [friendInvitePermission()],
+    'sess-a2a-invite',
+    [sessionSummary({ id: 'sess-a2a-invite', sessionType: 'a2a', title: 'AI_Sunny' })],
+  );
+
+  assert.ok(markup.includes('data-cowork-permission-overlay="true"'), 'invite overlay rendered for the open A2A session');
+  assert.ok(markup.includes('互加好友'), 'invite question rendered as the summary');
+  // The invite context carries friend-action fields, not safety-tool fields
+  // (requestedToolName/requestedToolInput), so the plain allow-once label —
+  // not the destructive allow — is the correct render, matching production.
+  assert.ok(markup.includes(i18nService.t('coworkApprovalAllowOnce')), 'plain allow-once action rendered');
+  assert.ok(markup.includes(i18nService.t('coworkDeny')), 'deny action rendered');
+});
+
+test('A2A invite approval still renders when the sessions list has not loaded (currentSession fallback)', () => {
+  // List-reload gap: the open A2A chat is missing from state.cowork.sessions
+  // but is loaded as currentSession. Skipping the prompt here would leave it
+  // with no render seat anywhere — the invisible-dialog defect class.
+  const markup = renderOverlay(
+    [friendInvitePermission()],
+    'sess-a2a-invite',
+    [],
+    sessionSummary({ id: 'sess-a2a-invite', sessionType: 'a2a', title: 'AI_Sunny' }),
+  );
+
+  assert.ok(markup.includes('data-cowork-permission-overlay="true"'), 'overlay rendered via the currentSession fallback');
+  assert.ok(markup.includes('互加好友'), 'invite question rendered');
 });

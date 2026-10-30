@@ -7,7 +7,9 @@
  * confirmation question is posted into the session transcript as a chat
  * message and the next incoming user message (允许/拒绝) is routed back to
  * respondToPermission. Unanswered prompts still auto-deny after 60s, aligned
- * with the runner watchdog.
+ * with the runner watchdog. Owner-gated SUSPENDED approvals
+ * (requestSuspendedApproval) are exempt: they have no watchdog, and this
+ * relay must not arm one for them (see handlePermissionRequest).
  *
  * Dependency-light by design (type-only runner import): unit tests import
  * this module directly with stub runner/store objects.
@@ -160,15 +162,28 @@ function handlePermissionRequest(
   if (!state.managedSessions.has(sessionId)) return;
   // IM chats / gig orders own their text flow end to end; never double-handle.
   if (runner.hasTextPermissionRelay(sessionId)) return;
+  // Owner-gated SUSPENDED approvals (requestSuspendedApproval — A2A friend
+  // invites) have NO watchdog by design: they must wait for the owner's
+  // overlay click however long that takes. Relaying them here would post a
+  // text confirmation nothing can answer (A2A view hides system messages)
+  // and arm exactly the 60s auto-deny the suspension was built to avoid —
+  // the 2026-10-30 real-device defect where the invite overlay vanished and
+  // the daemon logged "not authorized" with the owner never clicking. The
+  // renderer's global CoworkPermissionOverlay is the one and only seat.
+  if (runner.isPermissionSuspended?.(request.requestId)) return;
 
   const existing = state.pendingBySession.get(sessionId);
   if (existing && existing.request.requestId !== request.requestId) {
-    clearTimeout(existing.timeoutId);
-    state.pendingBySession.delete(sessionId);
-    runner.respondToPermission(existing.request.requestId, {
-      behavior: 'deny',
-      message: 'Superseded by a newer permission request.',
-    });
+    // A suspended approval is never superseded either: replacing it would
+    // resolve the owner-gated wait without an owner answer.
+    if (!runner.isPermissionSuspended?.(existing.request.requestId)) {
+      clearTimeout(existing.timeoutId);
+      state.pendingBySession.delete(sessionId);
+      runner.respondToPermission(existing.request.requestId, {
+        behavior: 'deny',
+        message: 'Superseded by a newer permission request.',
+      });
+    }
   }
 
   const timeoutId = setTimeout(() => {

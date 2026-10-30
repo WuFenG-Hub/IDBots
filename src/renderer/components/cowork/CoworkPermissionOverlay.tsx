@@ -66,6 +66,7 @@ const buildAllowResult = (permission: CoworkPermissionRequest): CoworkPermission
 const CoworkPermissionOverlay: React.FC<CoworkPermissionOverlayProps> = ({ inlineSessionId }) => {
   const pendingPermissions = useSelector((state: RootState) => state.cowork.pendingPermissions);
   const sessions = useSelector((state: RootState) => state.cowork.sessions);
+  const currentSession = useSelector((state: RootState) => state.cowork.currentSession);
   const [respondingRequestId, setRespondingRequestId] = useState<string | null>(null);
   const sessionsById = useMemo(
     () => new Map(sessions.map((session) => [session.id, session])),
@@ -76,10 +77,18 @@ const CoworkPermissionOverlay: React.FC<CoworkPermissionOverlayProps> = ({ inlin
       if (entry.sessionId !== inlineSessionId) return true;
       // The open session is assumed to answer inline — but A2A conversations
       // have no inline permission seat, so the overlay must keep covering
-      // their prompts instead of hiding them.
-      return sessionsById.get(entry.sessionId)?.sessionType === 'a2a';
+      // their prompts instead of hiding them. The A2A check reads the
+      // sessions list first and falls back to the loaded currentSession:
+      // during list-reload gaps the open A2A chat can be missing from
+      // `sessions`, and skipping its prompt then would leave it with NO
+      // render seat anywhere (invisible-dialog defect class).
+      const entrySessionType = sessionsById.get(entry.sessionId)?.sessionType
+        ?? (currentSession && currentSession.id === entry.sessionId
+          ? currentSession.sessionType
+          : undefined);
+      return entrySessionType === 'a2a';
     }) ?? null,
-    [pendingPermissions, inlineSessionId, sessionsById],
+    [pendingPermissions, inlineSessionId, sessionsById, currentSession],
   );
   const sessionTitle = useMemo(() => {
     if (!permission) return null;
