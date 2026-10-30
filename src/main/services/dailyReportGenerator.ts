@@ -74,6 +74,9 @@ export interface DailyReportStrings {
   fleetTitle: string;
   overdueBadge: string;
   waitingDaysSuffix: string;
+  /** Badge for follow-ups whose work waits on an external condition
+   * (shown instead of the overdue badge — nobody here is late). */
+  waitingBadge: string;
   ownerTasksIntro: string;
   columnTask: string;
   columnStatus: string;
@@ -138,6 +141,7 @@ export const DAILY_REPORT_STRINGS_EN: DailyReportStrings = {
   fleetTitle: 'Fleet & automation',
   overdueBadge: 'overdue',
   waitingDaysSuffix: 'd waiting',
+  waitingBadge: 'waiting on external',
   ownerTasksIntro: 'Owner-sourced tasks:',
   columnTask: 'Task',
   columnStatus: 'Status',
@@ -200,6 +204,7 @@ export const DAILY_REPORT_STRINGS_ZH: DailyReportStrings = {
   fleetTitle: 'Bot 与自动化',
   overdueBadge: '已逾期',
   waitingDaysSuffix: '天待处理',
+  waitingBadge: '等待外部',
   ownerTasksIntro: '你发起的任务：',
   columnTask: '任务',
   columnStatus: '状态',
@@ -316,9 +321,15 @@ export const buildDailyReportFollowUpListMarkdown = (
     const age = item.ageDays !== null && item.ageDays > 0
       ? ` · ${item.ageDays}${strings.waitingDaysSuffix}`
       : '';
-    const overdue = item.overdue ? ` · **${strings.overdueBadge}**` : '';
+    // Waiting-on-external carries the waiting badge INSTEAD of overdue — the
+    // collector already forces overdue=false for waiting items, and if an
+    // inconsistent facts shape ever stamps both, the softer, more specific
+    // waiting state wins (an externally-blocked item is not "overdue").
+    const statusBadge = item.waitingOnExternal
+      ? ` · ${strings.waitingBadge}`
+      : (item.overdue ? ` · **${strings.overdueBadge}**` : '');
     const bot = item.botName ? ` · ${item.botName}` : '';
-    return `- [${sanitizeMarkdownLinkText(item.title)}](${sessionDeepLink(item.sessionId)})${bot}${age}${overdue}`;
+    return `- [${sanitizeMarkdownLinkText(item.title)}](${sessionDeepLink(item.sessionId)})${bot}${age}${statusBadge}`;
   });
   return [`**${titleOverride ?? strings.needsYouTitle}**`, ...lines].join('\n');
 };
@@ -643,7 +654,11 @@ const buildNeedsHtml = (
     const badges = [
       item.botName ? escapeHtml(item.botName) : '',
       item.ageDays !== null && item.ageDays > 0 ? `${item.ageDays}${escapeHtml(strings.waitingDaysSuffix)}` : '',
-      item.overdue ? escapeHtml(strings.overdueBadge) : '',
+      // Waiting wins over overdue on inconsistent facts shapes (see the
+      // markdown follow-up list for the rationale).
+      item.waitingOnExternal
+        ? escapeHtml(strings.waitingBadge)
+        : (item.overdue ? escapeHtml(strings.overdueBadge) : ''),
     ].filter(Boolean).join(' · ');
     cards.push(`<div class="need link"><div class="t"><a href="${sessionDeepLink(item.sessionId)}">${escapeHtml(item.title)}</a></div><div class="act">${badges}</div></div>`);
   }

@@ -107,6 +107,10 @@ export interface DailyReportPendingFollowUp {
   source: string | null;
   ageDays: number | null;
   overdue: boolean;
+  /** The session's work waits on an external condition (e.g. its long-term
+   * sub-project is waiting_external). Waiting items keep the age suffix but
+   * never carry the overdue badge. */
+  waitingOnExternal: boolean;
 }
 
 export interface DailyReportOwnerOrchestration {
@@ -339,21 +343,284 @@ export const shapePendingFollowUpRows = (
   rows: ReadonlyArray<Record<string, unknown>>,
   windowEndMs: number,
   maxItems: number = DAILY_REPORT_MAX_PENDING_FOLLOW_UPS,
+  waitingExternalSessionIds?: ReadonlySet<string>,
 ): DailyReportPendingFollowUp[] =>
   rows.slice(0, maxItems).map((row) => {
     const followUpAtMs = row.follow_up_at ? Date.parse(String(row.follow_up_at)) : NaN;
     const ageDays = Number.isFinite(followUpAtMs)
       ? Math.max(0, Math.floor((windowEndMs - followUpAtMs) / DAY_MS))
       : null;
+    const sessionId = String(row.id ?? '');
+    const waitingOnExternal = waitingExternalSessionIds?.has(sessionId) ?? false;
     return {
-      sessionId: String(row.id ?? ''),
+      sessionId,
       title: capDailyReportText(row.title, DAILY_REPORT_FOLLOW_UP_TITLE_MAX_CHARS) || '(untitled)',
       botName: row.bot_name ? String(row.bot_name) : null,
       source: row.follow_up_source ? String(row.follow_up_source) : null,
       ageDays,
-      overdue: ageDays !== null && ageDays >= DAILY_REPORT_FOLLOW_UP_OVERDUE_DAYS,
+      // Waiting-on-external items show a waiting badge instead of overdue —
+      // nobody on this machine is late, the clock is simply not ours.
+      overdue: !waitingOnExternal && ageDays !== null && ageDays >= DAILY_REPORT_FOLLOW_UP_OVERDUE_DAYS,
+      waitingOnExternal,
     };
   }).filter((item) => item.sessionId);
+
+// ── Pending follow-up lifecycle cross-check (2026-10-28) ───────────────────
+//
+// A follow_up_state='pending' marker is set at turn end by the cerebellum
+// classifier and only ever cleared by a LATER turn on the same session. When
+// the underlying work finishes without another turn — a scheduled task gets
+// disabled or deleted after a successful one-shot run, an orchestration task
+// closes, a long-term sub-project is accepted — the marker goes stale forever
+// and the report used to list it as "pending · overdue" indefinitely. This
+// cross-check drops rows whose work is verifiably done or stopped, BEFORE the
+// 10-item cap slice, and flags rows that wait on an external condition so the
+// generator shows them as waiting instead of overdue.
+//
+// 'manual' follow-up pins are exempt: the owner deliberately parked those rows
+// (setSessionFollowUp's manual stickiness), so an explicit pin outranks any
+// task lifecycle. Design: docs/design/2026-10-28-daily-report-pending-criteria.md
+
+/** IN(?) chunk size for the lifecycle queries — SQLite's default host-parameter
+ * cap is 999, so 400 keeps every statement comfortably below it. */
+const PENDING_FOLLOW_UP_IN_CHUNK = 400;
+
+/** Terminal orchestration statuses (schema CHECK, orchestrationStore.ts):
+ * the task closed and will never run again. */
+const CLOSED_ORCHESTRATION_STATUSES: ReadonlySet<string> = new Set(['completed', 'cancelled', 'failed']);
+
+/** Long-term subtask statuses that mean the sub-project is finished. */
+const DONE_SUBTASK_STATUSES: ReadonlySet<string> = new Set(['accepted', 'skipped', 'rejected']);
+
+export interface PendingFollowUpLifecycle {
+  /** Session ids whose underlying work is verifiably done or stopped. */
+  excluded: Set<string>;
+  /** Session ids whose work waits on an external condition (never overdue). */
+  waitingExternal: Set<string>;
+}
+
+const chunkStrings = (values: readonly string[], size: number): string[][] => {
+  const chunks: string[][] = [];
+  for (let i = 0; i < values.length; i += size) chunks.push(values.slice(i, i + size));
+  return chunks;
+};
+
+/** Parse a session_history_json array ("["id1","id2"]") without trusting it. */
+const parseSessionHistoryIds = (raw: unknown): string[] => {
+  if (typeof raw !== 'string' || raw.length === 0) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is string => typeof entry === 'string');
+  } catch {
+    return [];
+  }
+};
+
+/** Long-term subtask row flattened by the lane query. */
+interface SubtaskLaneRow {
+  sessionId: string;
+  status: string;
+  waitUntil: string | null;
+  parentStage: string | null;
+  parentDoneAt: string | null;
+  historyIds: string[];
+}
+
+/** A sub-project is finished when its own status is a done verdict or its
+ * parent long-term task is done/cancelled. */
+const isSubtaskDone = (row: SubtaskLaneRow): boolean =>
+  DONE_SUBTASK_STATUSES.has(row.status)
+  || row.parentStage === 'done'
+  || row.parentStage === 'cancelled'
+  || (row.parentDoneAt !== null && row.parentDoneAt.length > 0);
+
+/** A live sub-project waits on an external condition. */
+const isSubtaskWaiting = (row: SubtaskLaneRow): boolean =>
+  row.status === 'waiting_external'
+  || (row.waitUntil !== null && row.waitUntil.length > 0);
+
+const toSubtaskLaneRow = (row: Record<string, unknown>): SubtaskLaneRow => ({
+  sessionId: typeof row.session_id === 'string' ? row.session_id : '',
+  status: row.status ? String(row.status) : '',
+  waitUntil: typeof row.wait_until === 'string' && row.wait_until.length > 0 ? row.wait_until : null,
+  parentStage: typeof row.parent_stage === 'string' && row.parent_stage.length > 0 ? row.parent_stage : null,
+  parentDoneAt: typeof row.parent_done_at === 'string' && row.parent_done_at.length > 0 ? row.parent_done_at : null,
+  historyIds: parseSessionHistoryIds(row.session_history_json),
+});
+
+/**
+ * Lifecycle cross-check over the RAW pending follow-up rows. Four lanes, each
+ * fail-soft on its own (a broken query degrades to "no verdict from that
+ * lane", never to an exception):
+ *  - scheduled tasks linked via cowork_session_id / target_session_id:
+ *    exclude when at least one task row links AND every linked task is
+ *    stopped (enabled=0, or its expires_at day is already over — the
+ *    scheduler skips expired tasks but never disables them);
+ *  - orphan schedule sessions (no task row at all, auto_origin='schedule'):
+ *    exclude when the latest scheduled_task_runs row succeeded (one-shot
+ *    'at' tasks self-disable after execution, scheduler.ts; a deleted task
+ *    row with a successful last run is the same done state). A failed last
+ *    run keeps the row — a genuinely failed one-shot may still need the
+ *    owner's attention;
+ *  - orchestration worker sessions (orchestration_attempts.worker_session_id
+ *    → steps → tasks): exclude when EVERY task the session worked for is
+ *    terminal (completed/cancelled/failed);
+ *  - long-term subtasks (primary seat via session_id, participation via
+ *    session_history_json): primary-seat sub-project done ⇒ exclude;
+ *    otherwise exclude only when EVERY linked sub-project is done, and flag
+ *    waitingExternal when a live linked sub-project waits externally. Done
+ *    beats waiting.
+ */
+export const collectPendingFollowUpLifecycle = (
+  db: DailyReportDb,
+  rows: ReadonlyArray<Record<string, unknown>>,
+): PendingFollowUpLifecycle => {
+  const excluded = new Set<string>();
+  const waitingExternal = new Set<string>();
+  // Manual pins are the owner's explicit parking decision — never lifecycle-excluded.
+  const candidateIds = rows
+    .filter((row) => String(row.follow_up_source ?? '') !== 'manual')
+    .map((row) => String(row.id ?? ''))
+    .filter(Boolean);
+  if (candidateIds.length === 0) return { excluded, waitingExternal };
+  const candidateIdSet = new Set(candidateIds);
+  const scheduleOriginIds = new Set(
+    rows
+      .filter((row) => String(row.auto_origin ?? '') === 'schedule')
+      .map((row) => String(row.id ?? ''))
+      .filter(Boolean),
+  );
+
+  // ── Scheduled lanes: live task rows + run history ────────────────────────
+  const todayDate = new Date().toISOString().slice(0, 10);
+  const scheduleLanes = safeCollect('pendingFollowUps.scheduleLane', { taskRows: [], runRows: [] }, () => {
+    const taskRows: Record<string, unknown>[] = [];
+    const runRows: Record<string, unknown>[] = [];
+    for (const chunk of chunkStrings(candidateIds, PENDING_FOLLOW_UP_IN_CHUNK)) {
+      const placeholders = chunk.map(() => '?').join(',');
+      taskRows.push(...db.queryAll<Record<string, unknown>>(`
+        SELECT st.cowork_session_id AS session_id, st.target_session_id AS target_session_id,
+               st.enabled AS enabled, st.expires_at AS expires_at
+        FROM scheduled_tasks st
+        WHERE st.cowork_session_id IN (${placeholders})
+           OR st.target_session_id IN (${placeholders})
+      `, [...chunk, ...chunk]));
+      runRows.push(...db.queryAll<Record<string, unknown>>(`
+        SELECT r.session_id AS session_id, r.status AS status
+        FROM scheduled_task_runs r
+        WHERE r.session_id IN (${placeholders})
+        ORDER BY r.started_at ASC
+      `, [...chunk]));
+    }
+    return { taskRows, runRows };
+  });
+
+  // session → linked task rows (either linkage column counts).
+  const linkedTasks = new Map<string, { enabled: unknown; expiresAt: unknown }[]>();
+  for (const row of scheduleLanes.taskRows) {
+    for (const key of ['session_id', 'target_session_id']) {
+      const sessionId = row[key] ? String(row[key]) : '';
+      if (!sessionId) continue;
+      const list = linkedTasks.get(sessionId) ?? [];
+      list.push({ enabled: row.enabled, expiresAt: row.expires_at });
+      linkedTasks.set(sessionId, list);
+    }
+  }
+  // Latest run status per session (rows arrive started_at ASC, last write wins).
+  const latestRunStatus = new Map<string, string>();
+  for (const row of scheduleLanes.runRows) {
+    const sessionId = row.session_id ? String(row.session_id) : '';
+    const status = row.status ? String(row.status) : '';
+    if (sessionId && status) latestRunStatus.set(sessionId, status);
+  }
+  const isStoppedTask = (task: { enabled: unknown; expiresAt: unknown }): boolean =>
+    Number(task.enabled ?? 1) === 0
+    || (typeof task.expiresAt === 'string' && task.expiresAt.slice(0, 10) <= todayDate && task.expiresAt.trim().length >= 10);
+  for (const sessionId of candidateIds) {
+    const tasks = linkedTasks.get(sessionId);
+    if (tasks && tasks.length > 0) {
+      // Any live (enabled, unexpired) task keeps the session listed.
+      if (tasks.every(isStoppedTask)) excluded.add(sessionId);
+      continue;
+    }
+    // Orphan: no task row references the session at all.
+    if (scheduleOriginIds.has(sessionId) && latestRunStatus.get(sessionId) === 'success') {
+      excluded.add(sessionId);
+    }
+  }
+
+  // ── Orchestration lane: worker sessions of attempts ─────────────────────
+  const orchestrationStatuses = safeCollect('pendingFollowUps.orchestrationLane', new Map<string, Set<string>>(), () => {
+    const statuses = new Map<string, Set<string>>();
+    for (const chunk of chunkStrings(candidateIds, PENDING_FOLLOW_UP_IN_CHUNK)) {
+      const placeholders = chunk.map(() => '?').join(',');
+      for (const row of db.queryAll<Record<string, unknown>>(`
+        SELECT a.worker_session_id AS session_id, t.status AS status
+        FROM orchestration_attempts a
+        JOIN orchestration_steps sp ON sp.id = a.step_id
+        JOIN orchestration_tasks t ON t.id = sp.task_id
+        WHERE a.worker_session_id IN (${placeholders})
+      `, [...chunk])) {
+        const sessionId = row.session_id ? String(row.session_id) : '';
+        const status = row.status ? String(row.status) : '';
+        if (!sessionId || !status) continue;
+        const set = statuses.get(sessionId) ?? new Set<string>();
+        set.add(status);
+        statuses.set(sessionId, set);
+      }
+    }
+    return statuses;
+  });
+  for (const [sessionId, statuses] of orchestrationStatuses) {
+    if (statuses.size > 0 && [...statuses].every((status) => CLOSED_ORCHESTRATION_STATUSES.has(status))) {
+      excluded.add(sessionId);
+    }
+  }
+
+  // ── Long-term lane: primary seats + participation history ───────────────
+  // Small table (one row per sub-project), so a full scan + TS-side JSON
+  // matching beats LIKE-injection-prone SQL containment.
+  const subtaskRows = safeCollect('pendingFollowUps.longtermLane', [], () =>
+    db.queryAll<Record<string, unknown>>(`
+      SELECT l.session_id AS session_id, l.session_history_json AS session_history_json,
+             l.status AS status, l.wait_until AS wait_until,
+             lt.stage AS parent_stage, lt.done_at AS parent_done_at
+      FROM long_term_subtasks l
+      LEFT JOIN long_term_tasks lt ON lt.id = l.task_id
+    `)).map(toSubtaskLaneRow);
+  const primarySubtasks = new Map<string, SubtaskLaneRow[]>();
+  const linkedSubtasks = new Map<string, SubtaskLaneRow[]>();
+  const linkSubtask = (map: Map<string, SubtaskLaneRow[]>, sessionId: string, row: SubtaskLaneRow): void => {
+    const list = map.get(sessionId) ?? [];
+    list.push(row);
+    map.set(sessionId, list);
+  };
+  for (const row of subtaskRows) {
+    if (row.sessionId) linkSubtask(primarySubtasks, row.sessionId, row);
+    for (const historyId of row.historyIds) linkSubtask(linkedSubtasks, historyId, row);
+  }
+  for (const sessionId of candidateIdSet) {
+    // Primary seat: the session IS a sub-project's work seat.
+    if ((primarySubtasks.get(sessionId) ?? []).some(isSubtaskDone)) {
+      excluded.add(sessionId);
+      continue;
+    }
+    const linked = linkedSubtasks.get(sessionId) ?? [];
+    if (linked.length === 0) continue;
+    // Participation history only: every linked sub-project must be done
+    // before the session itself counts as stopped.
+    if (linked.every(isSubtaskDone)) {
+      excluded.add(sessionId);
+      continue;
+    }
+    if (linked.some((row) => !isSubtaskDone(row) && isSubtaskWaiting(row))) {
+      waitingExternal.add(sessionId);
+    }
+  }
+
+  return { excluded, waitingExternal };
+};
 
 export const shapeOwnerOrchestrationRows = (
   taskRows: ReadonlyArray<Record<string, unknown>>,
@@ -694,16 +961,27 @@ export const collectDailyReportFacts = (input: {
   const msStart = input.windowStartMs;
   const msEnd = input.windowEndMs;
 
-  const pendingFollowUps = safeCollect('pendingFollowUps', [], () =>
-    shapePendingFollowUpRows(db.queryAll<Record<string, unknown>>(`
-      SELECT s.id, s.title, s.follow_up_source, s.follow_up_at, mb.name AS bot_name
+  const pendingFollowUps = safeCollect('pendingFollowUps', [], () => {
+    const rows = db.queryAll<Record<string, unknown>>(`
+      SELECT s.id, s.title, s.follow_up_source, s.follow_up_at, s.auto_origin, mb.name AS bot_name
       FROM cowork_sessions s
       LEFT JOIN metabots mb ON mb.id = s.metabot_id
       WHERE s.follow_up_state = 'pending'
         AND COALESCE(s.hidden_from_session_list, 0) = 0
         AND s.archived_at IS NULL
       ORDER BY COALESCE(s.follow_up_at, '') ASC, s.updated_at DESC
-    `), msEnd));
+    `);
+    // Drop rows whose underlying work is verifiably done or stopped BEFORE
+    // the 10-item cap slice, so surviving legitimate items do not lose slots
+    // to stale markers ahead of them in follow_up_at order.
+    const lifecycle = collectPendingFollowUpLifecycle(db, rows);
+    return shapePendingFollowUpRows(
+      rows.filter((row) => !lifecycle.excluded.has(String(row.id ?? ''))),
+      msEnd,
+      DAILY_REPORT_MAX_PENDING_FOLLOW_UPS,
+      lifecycle.waitingExternal,
+    );
+  });
 
   const ownerOrchestrations = safeCollect('ownerOrchestrations', [], () => {
     const taskRows = db.queryAll<Record<string, unknown>>(`
