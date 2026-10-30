@@ -27,7 +27,26 @@ async function openStore(prefix) {
   const db = sqliteStore.getDatabase();
   const save = sqliteStore.getSaveFunction();
   const metabotStore = new MetabotStore(db, save);
-  return { db, metabotStore, dir };
+  return { db, metabotStore, sqliteStore, dir };
+}
+
+/**
+ * Windows teardown: the sql.js DB file can keep a handle briefly after the
+ * last write, and an open handle turns rmSync into EPERM on Windows (macOS
+ * POSIX semantics hide it). Close the store first, then best-effort remove —
+ * leftover temp dirs are harmless and the OS sweeps them.
+ */
+function disposeStore(sqliteStore, dir) {
+  try {
+    sqliteStore.close();
+  } catch {
+    // already closed
+  }
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // a lingering Windows handle must never fail the test during cleanup
+  }
 }
 
 async function createBot(metabotStore, name, suffix, metabotType = 'worker') {
@@ -61,7 +80,7 @@ const storedColumn = (db, id) => {
 };
 
 test('createMetabot stores no auto-reply value (NULL = default on) for every bot type', async () => {
-  const { db, metabotStore, dir } = await openStore('idbots-a2a-default-');
+  const { db, metabotStore, sqliteStore, dir } = await openStore('idbots-a2a-default-');
   try {
     for (const [index, type] of ['worker', 'twin'].entries()) {
       const bot = await createBot(metabotStore, `${type}-bot`, index, type);
@@ -69,12 +88,12 @@ test('createMetabot stores no auto-reply value (NULL = default on) for every bot
       assert.equal(bot.metabot_type, type);
     }
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    disposeStore(sqliteStore, dir);
   }
 });
 
 test('updateMetabot preserves the stored auto-reply value unless the field is sent', async () => {
-  const { db, metabotStore, dir } = await openStore('idbots-a2a-preserve-');
+  const { db, metabotStore, sqliteStore, dir } = await openStore('idbots-a2a-preserve-');
   try {
     const bot = await createBot(metabotStore, 'preserve-bot', 0);
     assert.equal(storedColumn(db, bot.id), null);
@@ -99,6 +118,6 @@ test('updateMetabot preserves the stored auto-reply value unless the field is se
     const mapped = metabotStore.getMetabotById(bot.id);
     assert.equal(mapped.a2a_auto_reply_enabled, true);
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    disposeStore(sqliteStore, dir);
   }
 });
