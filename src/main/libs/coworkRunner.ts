@@ -1804,6 +1804,14 @@ interface ActiveSession {
 interface PendingPermission {
   sessionId: string;
   resolve: (result: PermissionResult) => void;
+  /**
+   * True for owner-gated SUSPENDED waits (waitForPermissionResponse with
+   * timeoutMs:null — the A2A friend invite/remove approvals): no watchdog,
+   * only an explicit owner click may resolve them. Auto-answering bridges
+   * (orchestratorPermissionRelay) must check isPermissionSuspended and leave
+   * these to the renderer overlay.
+   */
+  suspended?: boolean;
 }
 
 type SystemPromptProfileId = 'default' | 'service_order_a2a' | 'memory_read_only_automation';
@@ -7695,14 +7703,20 @@ export class CoworkRunner extends EventEmitter {
       },
     };
 
-    this.emit('permissionRequest', params.sessionId, request);
-
     // Suspend with no watchdog: only an explicit owner answer resolves this.
+    // The permissionRequest emit fires INSIDE waitForPermissionResponse,
+    // after the pending entry is registered: synchronous listeners
+    // (auto-answer bridges like orchestratorPermissionRelay) must be able to
+    // see the suspension via isPermissionSuspended at emit time — emitting
+    // before registration made the relay treat the suspended approval as a
+    // turn-scoped 60s prompt and auto-deny it (2026-10-30 real-device
+    // defect: the friend-invite overlay vanished and the daemon logged
+    // "not authorized" with the owner never clicking).
     const result = await this.waitForPermissionResponse(
       params.sessionId,
       request.requestId,
       undefined,
-      { timeoutMs: null }
+      { timeoutMs: null, emitRequest: request }
     );
     if (this.isSafetyApproval(result, question)) {
       return 'approved';
@@ -8880,6 +8894,16 @@ export class CoworkRunner extends EventEmitter {
   /** True while the runner still waits on this permission request. */
   isPermissionPending(requestId: string): boolean {
     return this.pendingPermissions.has(requestId) || this.sandboxPermissions.has(requestId);
+  }
+
+  /**
+   * True while this pending permission is an owner-gated SUSPENDED wait
+   * (waitForPermissionResponse timeoutMs:null — requestSuspendedApproval):
+   * it has no watchdog and must only be resolved by an explicit owner
+   * answer. Auto-answering bridges use this to keep hands off.
+   */
+  isPermissionSuspended(requestId: string): boolean {
+    return this.pendingPermissions.get(requestId)?.suspended === true;
   }
 
   private isMetabotTypeSession(sessionId: string, metabotType: 'twin' | 'welcome'): boolean {
@@ -15826,7 +15850,7 @@ export class CoworkRunner extends EventEmitter {
     sessionId: string,
     requestId: string,
     signal?: AbortSignal,
-    options?: { timeoutMs?: number | null }
+    options?: { timeoutMs?: number | null; emitRequest?: PermissionRequest }
   ): Promise<PermissionResult> {
     // timeoutMs: null suspends the request INDEFINITELY (no watchdog) — for
     // owner-gated actions that must wait for a human click whenever it comes
@@ -15860,7 +15884,15 @@ export class CoworkRunner extends EventEmitter {
       this.pendingPermissions.set(requestId, {
         sessionId,
         resolve: finalize,
+        suspended: timeoutMs === null,
       });
+
+      // Optional raise-time emit (requestSuspendedApproval): broadcast only
+      // AFTER the entry is live so synchronous permissionRequest listeners
+      // can classify the request (suspended vs turn-scoped) at emit time.
+      if (options?.emitRequest) {
+        this.emit('permissionRequest', sessionId, options.emitRequest);
+      }
 
       timeoutId = timeoutMs === null
         ? null
@@ -15891,6 +15923,12 @@ export class CoworkRunner extends EventEmitter {
     this.clearAskUserFollowUp(sessionId);
     for (const [requestId, pending] of this.pendingPermissions.entries()) {
       if (pending.sessionId === sessionId) {
+        // Owner-gated SUSPENDED approvals (requestSuspendedApproval) are
+        // OUT-OF-TURN by design: they must survive turn settlements, later
+        // turns of the same session (a follow-up message, a 15-min A2A wake
+        // turn) and session teardown sweeps, waiting for the owner's overlay
+        // click however long that takes. Turn-scoped prompts keep the sweep.
+        if (pending.suspended === true) continue;
         pending.resolve({ behavior: 'deny', message: 'Session aborted' });
         this.pendingPermissions.delete(requestId);
       }
