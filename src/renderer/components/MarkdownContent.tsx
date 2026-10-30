@@ -372,6 +372,22 @@ const safeUrlTransform = (url: string): string => {
   const trimmed = url.trim();
   if (!trimmed) return trimmed;
 
+  // Bundled Twemoji artwork arrives as embedded data:image/svg+xml URI
+  // literals (chat/twemoji.ts holds the 85 SVGs inline, bundler-independent).
+  // ONLY those exact 85 build-time literals may pass: membership is a set
+  // check against the bundled-artwork manifest, so neither user nor chain
+  // markdown can smuggle any other data: URI through here — arbitrary
+  // data:image/svg+xml hrefs stay washed just like data:text/html. Without
+  // this branch the prod build (artwork = data URI, vs dev's plain asset
+  // path with no scheme) had its <img src> stripped to '' and fell back to
+  // alt text / system glyphs — the "dev normal, packaged fallback" bug that
+  // shipped in 1.0.9. Design note: an exact-set allow beats a `data:image/`
+  // prefix allow — identical behavior for the artwork, strictly tighter for
+  // everything else.
+  if (isTwemojiAssetUrl(trimmed)) {
+    return trimmed;
+  }
+
   const match = trimmed.match(/^([a-z][a-z0-9+.-]*):/i);
   if (!match) {
     return trimmed;
