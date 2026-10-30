@@ -82,7 +82,9 @@ export const parseQuestions = (permission: CoworkPermissionRequest): QuestionIte
             })
             .filter(Boolean) as QuestionOption[]
         : [];
-      if (options.length === 0) return null;
+      // Option-less questions are kept on purpose: the ask schema makes
+      // options optional per question, and the wizard's free-text input below
+      // is the answer path for them (wire: non-option-label text → custom).
       return {
         question: record.question,
         header: typeof record.header === 'string' ? record.header : undefined,
@@ -138,7 +140,14 @@ const CoworkPermissionPanel: React.FC<CoworkPermissionPanelProps> = ({
   const questions = useMemo(() => parseQuestions(permission), [permission]);
   const safetyContext = useMemo(() => parseSafetyContext(permission), [permission]);
   const isAskRequest = permission.toolName === 'AskUserQuestion';
-  const isSafetyApproval = safetyContext !== null && questions.length > 0;
+  // A safety approval requires its fixed allow/deny options (host-built asks
+  // always carry both). parseQuestions now also keeps option-less questions,
+  // so an ask with safety context but no usable options must fall through to
+  // the question wizard — handleApprove's safety branch dereferences
+  // questions[0].options[0] and must never see an empty options list.
+  const isSafetyApproval = safetyContext !== null
+    && questions.length > 0
+    && questions[0].options.length > 0;
   const isQuestionRequest = isAskRequest && !isSafetyApproval && questions.length > 0;
   const isMalformedQuestion = isAskRequest && !isSafetyApproval && questions.length === 0;
 
