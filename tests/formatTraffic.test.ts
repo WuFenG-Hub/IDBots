@@ -12,8 +12,13 @@ import {
 test('traffic units are decimal (1000 B = 1 KB, 1_000_000 B = 1 MB)', () => {
   assert.equal(TRAFFIC_BYTES_PER_KB, 1000);
   assert.equal(TRAFFIC_BYTES_PER_MB, 1_000_000);
-  assert.equal(DEFAULT_FREE_GRANT_BYTES, 10_000_000);
+  assert.equal(DEFAULT_FREE_GRANT_BYTES, 50_000_000);
   assert.equal(TRAFFIC_LOW_BALANCE_BYTES, 5_000_000);
+});
+
+test('splitTrafficAmount shows the 50 MB free grant as 50 MB, not 49.5', () => {
+  assert.deepEqual(splitTrafficAmount(50_000_000), { amount: '50', unit: 'mb' });
+  assert.notEqual(splitTrafficAmount(50_000_000).amount, '49.5');
 });
 
 test('splitTrafficAmount shows the 10 MB free grant as 10 MB, not 9.5', () => {
