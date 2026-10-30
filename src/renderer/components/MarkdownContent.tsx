@@ -54,6 +54,8 @@ import InlineMetaAppBlock from './cowork/InlineMetaAppBlock';
 import { parseMetaAppEmbedUri } from './cowork/inlineMetaAppBridge';
 import { dispatchViewSession, parseIdbotsSessionUri } from '../utils/sessionDeepLink';
 import { buildLocalFileUrl, isMobileBridgeRuntime } from '../services/localFileUrl';
+import { isTwemojiAssetUrl } from './chat/twemoji';
+import remarkTwemoji from './chat/remarkTwemoji';
 
 /**
  * Code-block languages worth highlighting in chat output.
@@ -720,6 +722,20 @@ const createMarkdownComponents = (
     </td>
   ),
   img: ({ node, className, src, alt, ...props }: any) => {
+    // Inline Twemoji swap (emojiImages prop): the remarkTwemoji plugin emits
+    // image nodes pointing at the bundled assets; those render as inline
+    // text-scale glyphs, not block images (Twemoji 14.0.2, CC-BY 4.0 — see
+    // chat/twemoji.ts).
+    if (typeof src === 'string' && isTwemojiAssetUrl(src)) {
+      return (
+        <img
+          src={src}
+          alt={alt}
+          draggable={false}
+          className="inline-block h-[1.25em] w-[1.25em] align-[-0.2em] mx-[0.06em]"
+        />
+      );
+    }
     // `![name](metaapp://<pin>)` is the Bot's "show this app here" form; the
     // link form keeps opening the Bot Browser. Assistant mode renders the app
     // in place, every other surface degrades to the same Bot Browser link so
@@ -955,6 +971,12 @@ interface MarkdownContentProps {
   resolveLocalFilePath?: (href: string, text: string) => string | null;
   /** Intercept local file link clicks; return true to suppress the default shell.openPath. */
   onOpenLocalFile?: (filePath: string, event: React.MouseEvent) => boolean | void;
+  /**
+   * Render catalog emoji as inline Twemoji images (bundled assets, display
+   * only). Opt-in: chat message bubbles turn it on; other markdown surfaces
+   * keep platform font glyphs.
+   */
+  emojiImages?: boolean;
   /** Chat surface mode; 'assistant' renders local HTML report links as inline
    * blocks (falling back to cards when the file cannot be read).
    * Defaults to 'professional' (plain inline links). */
@@ -969,10 +991,17 @@ const MarkdownContent = React.memo(({
   resolveLocalFilePath,
   onOpenLocalFile,
   chatExperienceMode = 'professional',
+  emojiImages = false,
 }: MarkdownContentProps) => {
   const components = useMemo(
     () => createMarkdownComponents(resolveLocalFilePath, onOpenBotBrowserUri, onOpenLocalFile, chatExperienceMode),
     [resolveLocalFilePath, onOpenBotBrowserUri, onOpenLocalFile, chatExperienceMode]
+  );
+  const remarkPlugins = useMemo(
+    () => (emojiImages
+      ? [[remarkGfm, { singleTilde: false }], remarkTwemoji] as never[]
+      : [[remarkGfm, { singleTilde: false }]] as never[]),
+    [emojiImages]
   );
   const normalizedContent = useMemo(
     () => encodeFileUrlsInMarkdown(linkifyAgentInternetUris(content)),
@@ -984,7 +1013,7 @@ const MarkdownContent = React.memo(({
         // singleTilde: false — bot output uses `~` as a range separator
         // ("一周 1~3 次，单次 100~300 元"), which GFM would otherwise pair into
         // a false strikethrough. Real strikethrough (~~text~~) keeps working.
-        remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
+        remarkPlugins={remarkPlugins}
         urlTransform={safeUrlTransform}
         components={components}
       >
