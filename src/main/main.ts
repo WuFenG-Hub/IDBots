@@ -169,6 +169,7 @@ import {
 } from './services/walletQueryService';
 import { executeWalletMvcTransfer } from './services/walletTransferService';
 import { executeMvcNftTransfer, executeMvcNftTrade, getMvcNftBalance, getMvcNftSellOrders } from './services/mvcNftService';
+import { executeMvcTokenSellTrade, getMvcFtTokenBalance, verifyMvcTokenSellListing } from './services/mvcTokenSellService';
 import { BotWalletTransferStore } from './services/botWalletTransferStore';
 import {
   buildTokenTransferPreview as buildTokenTransferPreviewService,
@@ -7506,6 +7507,60 @@ const getCoworkRunner = () => {
             }),
           );
         },
+      // ----- FT TokenSell backends (wallet_token_* tools; mirror the NFT
+      // block above — same chain-write budget gate, same session-own-wallet
+      // posture enforced in the tools layer). -----
+      listMvcFtTokens: async (input) => {
+        const store = getMetabotStore();
+        const entries: Array<{ metabotId: number | null; address: string; error?: string }> = [];
+        for (const metabotId of input.metabotIds ?? []) {
+          const address = store.getMetabotById(metabotId)?.mvc_address ?? '';
+          entries.push(
+            address
+              ? { metabotId, address }
+              : { metabotId, address: '', error: 'local MetaBot not found or has no mvc address' },
+          );
+        }
+        if (input.address?.trim()) {
+          entries.push({ metabotId: null, address: input.address.trim() });
+        }
+        return await Promise.all(
+          entries.map(async (entry) => {
+            if (entry.error) return entry;
+            try {
+              return { ...entry, balance: await getMvcFtTokenBalance(entry.address) };
+            } catch (error) {
+              return { ...entry, error: error instanceof Error ? error.message : String(error) };
+            }
+          }),
+        );
+      },
+      // read-only: no chain-write budget for listing verification.
+      verifyMvcTokenSellListing: (listing) => verifyMvcTokenSellListing(listing),
+      sellToken: (params) => withChainWriteBudget(
+        'wallet_token_sell',
+        () => executeMvcTokenSellTrade(getMetabotStore(), {
+          ...params,
+          action: 'sell',
+          feeRate: getGlobalFeeRate('mvc'),
+        }),
+      ),
+      takeToken: (params) => withChainWriteBudget(
+        'wallet_token_take',
+        () => executeMvcTokenSellTrade(getMetabotStore(), {
+          ...params,
+          action: 'take',
+          feeRate: getGlobalFeeRate('mvc'),
+        }),
+      ),
+      cancelTokenSell: (params) => withChainWriteBudget(
+        'wallet_token_cancel_sell',
+        () => executeMvcTokenSellTrade(getMetabotStore(), {
+          ...params,
+          action: 'cancel',
+          feeRate: getGlobalFeeRate('mvc'),
+        }),
+      ),
       },
       // send_private_chat tool backend (replacing metabot-chat-privatechat).
       // Mirrors the skill script: resolve the peer chatpubkey on-chain, then

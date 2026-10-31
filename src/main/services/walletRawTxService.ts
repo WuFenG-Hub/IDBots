@@ -128,6 +128,93 @@ interface WalletRawTxServiceDeps {
     path: string;
     excludeOutpoints: string[];
   }) => Promise<WorkerTradeResult>;
+  runMvcTokenSellRawTxWorker?: (params: BuildMvcTokenSellTradeParams & {
+    mnemonic: string;
+    path: string;
+    excludeOutpoints: string[];
+  }) => Promise<WorkerTokenSellResult>;
+}
+
+// ---------------------------------------------------------------------------
+// FT TokenSell (LIST / take / cancel=self-take) — mirrors the NFT trade
+// surface; the worker never broadcasts, the parent stages the fundingTxs in
+// order before the final tx (see mvcTokenSellService).
+// ---------------------------------------------------------------------------
+
+/** Listing four-tuple + seed pointer carried off-chain between counterparties. */
+export interface MvcTokenSellListingRef {
+  sell_txid: string;
+  sell_output_index: number;
+  sell_price_sats: number;
+  seller_address: string;
+  seed_txid?: string;
+  seed_vout?: number;
+  token_txid?: string;
+  token_vout?: number;
+  prev_token_txid?: string;
+  token_genesis?: string;
+  token_codehash?: string;
+}
+
+export interface BuildMvcTokenSellTradeParams {
+  metabotId: number;
+  action: 'sell' | 'take' | 'cancel';
+  feeRate: number;
+  excludeOutpoints?: string[];
+  /** sell only */
+  genesis?: string;
+  codehash?: string;
+  tokenTxid?: string;
+  tokenVout?: number;
+  /** full-utxo listing only; omit to list the whole utxo (amount gates apply) */
+  tokenAmount?: string;
+  priceSats?: number;
+  seedSats?: number;
+  checkerSats?: number;
+  /** take / cancel only */
+  listing?: MvcTokenSellListingRef;
+  receiverAddress?: string;
+  prevTokenInputIndex?: number;
+}
+
+export interface MvcTokenSellListing {
+  sell_txid: string;
+  sell_output_index: number;
+  seller_address: string;
+  sell_price_sats: number;
+  seed_txid: string;
+  seed_vout: number;
+  seed_sats: number;
+  token_amount: string;
+  token_genesis?: string;
+  token_codehash?: string;
+}
+
+/** Result of the TokenSell worker: ordered funding txs + the final tx + listing. */
+export interface WorkerTokenSellResult {
+  txHex: string;
+  txid?: string;
+  success?: boolean;
+  action?: string;
+  fundingTxs?: Array<{ name: string; txid: string; txHex: string }>;
+  listing?: MvcTokenSellListing;
+  priceSats?: number;
+  tokenAmount?: string;
+  receiverAddress?: string;
+  fee?: number;
+  size?: number;
+  spentOutpoints?: string[];
+}
+
+export interface BuildMvcTokenSellRawTxResult {
+  /** Funding txs in broadcast order (checker mint → seed for sell; checker mint for take). */
+  funding_txs: Array<{ name: string; txid: string; raw_tx: string }>;
+  funding_txids: string[];
+  /** Final tx carrying the on-chain state change. */
+  raw_tx: string;
+  txid: string;
+  listing?: MvcTokenSellListing;
+  spent_outpoints: string[];
 }
 
 export interface BuildMvcNftTransferRawTxParams {
@@ -857,6 +944,106 @@ function resolveBundleFunding(params: {
   return {
     rawTx: sourceStep.raw_tx,
     outpoint: sourceStep.change_outpoint,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// FT TokenSell builders (worker spawn + validation; see buildMvcTokenSellRawTxWorker)
+// ---------------------------------------------------------------------------
+
+async function runMvcTokenSellRawTxWorker(params: BuildMvcTokenSellTradeParams & {
+  mnemonic: string;
+  path: string;
+  excludeOutpoints: string[];
+}): Promise<WorkerTokenSellResult> {
+  return await runWorker<WorkerTokenSellResult>(
+    'buildMvcTokenSellRawTxWorker.js',
+    {
+      action: params.action,
+      genesis: params.genesis,
+      codehash: params.codehash,
+      tokenTxid: params.tokenTxid,
+      tokenVout: params.tokenVout,
+      tokenAmount: params.tokenAmount,
+      sellPriceSats: params.priceSats,
+      seedSats: params.seedSats,
+      checkerSats: params.checkerSats,
+      listing: params.listing,
+      receiverAddress: params.receiverAddress,
+      prevTokenInputIndex: params.prevTokenInputIndex,
+      feeRate: params.feeRate,
+      excludeOutpoints: params.excludeOutpoints,
+    },
+    {
+      IDBOTS_METABOT_MNEMONIC: params.mnemonic,
+      IDBOTS_METABOT_PATH: params.path,
+    },
+  );
+}
+
+export async function buildMvcTokenSellRawTx(
+  store: MetabotStore,
+  params: BuildMvcTokenSellTradeParams,
+  deps: WalletRawTxServiceDeps = {},
+): Promise<BuildMvcTokenSellRawTxResult> {
+  if (!Number.isInteger(params.metabotId) || params.metabotId <= 0) {
+    throw new Error('metabot_id must be a positive integer');
+  }
+  const excludeOutpoints = validateExcludeOutpoints(params.excludeOutpoints);
+  if (!Number.isFinite(params.feeRate) || params.feeRate <= 0) {
+    throw new Error('feeRate must be positive');
+  }
+  if (params.action === 'sell') {
+    if (!/^[0-9a-fA-F]{64}$/.test(String(params.genesis || '').trim())) throw new Error('genesis (64 hex) is required for sell');
+    if (!/^[0-9a-fA-F]{40}$/.test(String(params.codehash || '').trim())) throw new Error('codehash (40 hex) is required for sell');
+    if (!Number.isSafeInteger(params.priceSats) || (params.priceSats as number) <= 0) {
+      throw new Error('priceSats must be a positive integer (sats; 1 SPACE = 1e8 sats)');
+    }
+  } else if (params.action === 'take' || params.action === 'cancel') {
+    const listing = params.listing;
+    if (!listing || !/^[0-9a-fA-F]{64}$/.test(String(listing.sell_txid || ''))) {
+      throw new Error('listing.sell_txid (64 hex) is required for take/cancel');
+    }
+    if (!Number.isSafeInteger(listing.sell_price_sats) || listing.sell_price_sats <= 0) {
+      throw new Error('listing.sell_price_sats must be a positive integer (sats)');
+    }
+    if (!String(listing.seller_address || '').trim()) throw new Error('listing.seller_address is required');
+    if (params.action === 'take' && !String(params.receiverAddress || '').trim()) {
+      throw new Error('receiverAddress is required for take');
+    }
+  } else {
+    throw new Error('action must be sell, take, or cancel');
+  }
+
+  const wallet = store.getMetabotWalletByMetabotId(params.metabotId);
+  if (!wallet?.mnemonic?.trim()) {
+    throw new Error('MetaBot wallet not found');
+  }
+
+  const runner = deps.runMvcTokenSellRawTxWorker ?? runMvcTokenSellRawTxWorker;
+  const workerResult = await runner({
+    ...params,
+    mnemonic: wallet.mnemonic,
+    path: wallet.path || DEFAULT_PATH,
+    excludeOutpoints,
+  });
+
+  const fundingTxs = Array.isArray(workerResult.fundingTxs) ? workerResult.fundingTxs : [];
+  if (!fundingTxs.length) throw new Error('Worker did not return fundingTxs');
+  for (const funding of fundingTxs) {
+    if (!funding?.txHex || !/^[0-9a-f]+$/i.test(funding.txHex)) {
+      throw new Error(`Funding tx ${funding?.name ?? '?'} malformed`);
+    }
+  }
+  const tx = parseTx(workerResult.txHex);
+  const txid = workerResult.txid || tx.id;
+  return {
+    funding_txs: fundingTxs.map((f) => ({ name: f.name, txid: f.txid || parseTx(f.txHex).id, raw_tx: f.txHex })),
+    funding_txids: fundingTxs.map((f) => f.txid || parseTx(f.txHex).id),
+    raw_tx: workerResult.txHex,
+    txid,
+    listing: workerResult.listing,
+    spent_outpoints: workerResult.spentOutpoints ?? extractSpentOutpoints(tx),
   };
 }
 
