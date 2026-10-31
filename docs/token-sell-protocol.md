@@ -15,7 +15,7 @@ can list and take FT orders the same way they already trade NFTs:
 | `wallet_token_balance` | read | FT holdings per address (open-api-mvc `contract/ft`) |
 | `wallet_token_sell` | LIST | op=1 TRANSFER into a TokenSell seed lock |
 | `wallet_token_sell_orders` | read | verify a listing tuple against the chain |
-| `wallet_token_take` | TAKE | op=2 UNLOCK_FROM_CONTRACT |
+| `wallet_token_buy` | TAKE（buy/take 同义，动词与 NFT 线对齐） | op=2 UNLOCK_FROM_CONTRACT |
 | `wallet_token_cancel_sell` | CANCEL | self-take (seller==taker; price circles back, fees spent) |
 
 All signing runs in the subprocess worker
