@@ -1,0 +1,23 @@
+{
+  "note": "live-fire anchors 2026-10-30, public chain data, zero key material",
+  "seller_address": "1EwGrbMCpfPSpcJi9ixPwLMme5NCAiQAVr",
+  "seller_h160": "98dd550e032df42f04bef20ec3549e371712ed9c",
+  "price_sats": 500000000,
+  "token_amount": "100000000",
+  "token_txid": "f518099daaa0e0d3548b5bc47c71d6d697ac7ff37e401c74271ec4fb748b0953",
+  "header_wire_hash": "53098b74fbc41e27741c407ef37fac97d6d6717cc45b8b54d3e0a0aa9d0918f5",
+  "seed_txid": "3663e0f341d08772983c6d195697662af7740ed0914854d16ab52aec90ea634c",
+  "list_txid": "e281d9a2d0475da86c59e0973ebda42ac3a8fa96b25adad084f59f519e5d267b",
+  "take_txid": "cda834c57e7c9c94c90ad311259d4e0d1e372b1741fff8e698f2474f7008a279",
+  "reverse_txids": [
+    "6be46ade",
+    "d385c3b3",
+    "3c675b1d"
+  ],
+  "checker_sha256": "128d88f8812a838837126b4cc1436099620e736e8f4b07e26ddedbbbceb79c64",
+  "checker_total_len": 3507,
+  "checker_code_header_len": 84,
+  "checker_desc_len": 3423,
+  "seed_sats": 2032,
+  "checker_sats": 3000
+}
