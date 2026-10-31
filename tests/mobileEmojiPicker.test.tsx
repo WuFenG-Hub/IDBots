@@ -84,26 +84,59 @@ test('the ordered catalog matches the pinned WeChat-panel sequence (desktop/mobi
   assert.deepEqual(actual, expected, 'catalog order/content drifted from the pinned WeChat-panel sequence');
 });
 
-test('every catalog emoji has a bundled Twemoji asset (85-file subset, no CDN)', () => {
+test('every catalog emoji has an embedded Twemoji data URI (85-entry subset, no CDN, packager-decoupled)', () => {
   // Display artwork: panel cells and bubbles render the bundled Twemoji
-  // 14.0.2 subset (CC-BY 4.0 — LICENSES/twemoji-NOTICE.md), vendored into
-  // src/renderer/components/chat/assets/twemoji/ for both build targets.
-  // The manifest must mirror the catalog 1:1 and resolve to LOCAL files.
+  // 14.0.2 subset (CC-BY 4.0 — LICENSES/twemoji-NOTICE.md). The manifest
+  // must mirror the catalog 1:1 and resolve to EMBEDDED data:image/svg+xml
+  // string literals carried inside twemoji.ts itself (the same single-module
+  // contract as the desktop gate scripts/verify-twemoji-bundle.mjs) — no
+  // `new URL(...)` asset files, which are the desktop-1.0.9-asar loss mode
+  // ("dev fine, packaged fallback"). Each literal must be the EXACT Vite
+  // svgToDataURL encoding of the vendored SVG on disk.
   assert.equal(TWEMOJI_ASSET_COUNT, 85, `expected 85 bundled assets, got ${TWEMOJI_ASSET_COUNT}`);
   const catalogChars = EMOJI_CATEGORIES.flatMap((c) => c.emojis.map((e) => e.char));
   assert.deepEqual([...TWEMOJI_CHARS], [...new Set(catalogChars)], 'manifest chars must equal the catalog chars in order');
+  const manifestSource = readSource('../src/renderer/components/chat/twemoji.ts');
+  const manifestCode = manifestSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.ok(!manifestCode.includes('new URL('), 'manifest must not regress to packager-dependent new URL() asset delivery');
+  assert.ok(!manifestCode.includes('TWEMOJI_DATA_URLS'), 'manifest must not import a separate generated values module (single-module literal contract)');
+  // The exact data URI encoding the manifest generator embeds (Vite svgToDataURL branch).
+  const svgToDataUri = (content: string): string =>
+    'data:image/svg+xml,' +
+    content
+      .replace(/"/g, "'")
+      .replace(/%/g, '%25')
+      .replace(/#/g, '%23')
+      .replace(/</g, '%3c')
+      .replace(/>/g, '%3e')
+      .replace(/\?/g, '%3f')
+      .replace(/\[/g, '%5b')
+      .replace(/\]/g, '%5d')
+      .replace(/\\/g, '%5c')
+      .replace(/\{/g, '%7b')
+      .replace(/\}/g, '%7d')
+      .replace(/\|/g, '%7c')
+      .replace(/\^/g, '%5e')
+      .replace(/`/g, '%60')
+      .replace(/\s/g, '%20');
+  const stemOf = (ch: string): string =>
+    [...ch].map((c) => c.codePointAt(0)!.toString(16)).filter((h) => h !== 'fe0f').join('-');
+  const assetsDir = path.join(here, '..', 'src', 'renderer', 'components', 'chat', 'assets', 'twemoji');
   for (const char of catalogChars) {
     const url = twemojiUrlFor(char);
     assert.ok(url, `no bundled asset for ${char}`);
-    assert.match(url, /\/twemoji\/[0-9a-z-]+\.svg$/);
+    assert.ok(url.startsWith('data:image/svg+xml,'), `${char} asset must be an embedded svg data URI, got ${url.slice(0, 40)}`);
     assert.ok(!/^https?:/.test(url), `${char} asset must not be a CDN URL`);
+    const stem = stemOf(char);
+    const vendored = fs.readFileSync(path.join(assetsDir, `${stem}.svg`), 'utf8');
+    assert.equal(url, svgToDataUri(vendored), `${char} embedded artwork must be the exact svgToDataURL encoding of the vendored ${stem}.svg`);
   }
-  // Exactly the 85-file subset lives in the assets dir (never the full set).
-  const assetsDir = path.join(here, '..', 'src', 'renderer', 'components', 'chat', 'assets', 'twemoji');
+  // Exactly the 85-file subset lives in the assets dir (generation input,
+  // never the full set).
   const svgs = fs.readdirSync(assetsDir).filter((f) => f.endsWith('.svg'));
   assert.equal(svgs.length, 85, `assets dir must hold exactly 85 SVGs, got ${svgs.length}`);
-  // VS16 naming: upstream asset names strip fe0f.
-  assert.match(twemojiUrlFor('✌️')!, /270c\.svg$/);
+  // VS16 naming: upstream asset names strip fe0f (✌️ -> 270c).
+  assert.match(stemOf('✌️'), /^270c$/);
   // Non-catalog chars fall back to the raw glyph (no asset, no throw).
   assert.equal(twemojiUrlFor('🚀'), null);
 });
@@ -244,8 +277,8 @@ test('panel renders as one flat dialog: search, NO tabs, recents strip, single T
   const imgCount = (markup.match(/<img /g) ?? []).length;
   assert.equal(imgCount, 85, `expected 85 Twemoji <img> cells, got ${imgCount}`);
   assert.match(markup, /<img[^>]*alt="🙂"/, 'grid starts with the WeChat code-table order (微笑 first)');
-  assert.match(markup, /src="[^"]*twemoji\/1f642\.svg"/);
-  assert.doesNotMatch(markup, /src="https?:\/\//, 'assets must be bundled, never fetched from a CDN');
+  assert.match(markup, /src="data:image\/svg\+xml,/);
+  assert.doesNotMatch(markup, /src="https?:\/\//, 'assets must be embedded, never fetched from a CDN');
   // Fresh install: no recents -> no recents strip.
   assert.ok(!markup.includes(t('mobile.chat.emojiCategoryRecent')), 'recents strip hidden while recents are empty');
   // Touch targets: every grid cell is a 44px-tall button (min-h convention).
@@ -530,6 +563,92 @@ test('assistant bubble maps bracket codes ahead of markdown rendering, code span
   assert.ok(markup.includes('[强]'), 'fenced code block keeps the literal bracket code');
 });
 
+test('assistant bubble img src survives safeUrlTransform: exact-set Twemoji literals stay alive, off-manifest data: URIs stay blocked', () => {
+  // Regression for the SAFE_URL_PROTOCOLS wash: safeUrlTransform (the
+  // urlTransform of ReactMarkdown) rewrote every scheme outside its whitelist
+  // to ''. The embedded-Twemoji pipeline (chat/twemoji.ts data URIs) emits
+  // `data:image/svg+xml,...` srcs, so the assistant bubble's markdown <img>
+  // rendered as `<img src="">` + alt fallback ("dev fine, packaged broken"
+  // under the old new-URL pipeline; shape-independent since the decoupling).
+  // alt SURVIVES the wash, so an alt-only assertion stays green on a broken
+  // render — this test pins the src alive at SSR level.
+  mobileI18n.setLanguage('zh');
+  const markup = renderToStaticMarkup(
+    <ChatScreen
+      chat={chatFixture({
+        messages: [
+          view('assistant', '收到[玫瑰] 👊 看图'),
+          // Security-boundary companions: ONLY the 85 exact bundled-artwork
+          // literals pass safeUrlTransform (isTwemojiAssetUrl membership) —
+          // never `data:` wholesale, and not even a `data:image/` prefix.
+          view('assistant', '![pwn](data:text/html;base64,PHNjcmlwdD4=)'),
+          view(
+            'assistant',
+            '![x](data:image/svg+xml,%3Csvg%3E%3Cscript%3E%3C%2Fscript%3E%3C%2Fsvg%3E)',
+          ),
+        ] as never,
+      })}
+      bots={[]}
+      onOpenRecharge={() => undefined}
+    />,
+  );
+  const twemojiImgs = markup.match(/<img[^>]*alt="(🌹|👊)"[^>]*>/g) ?? [];
+  assert.equal(
+    twemojiImgs.length,
+    2,
+    `expected both catalog emoji as <img> in the assistant bubble, got ${twemojiImgs.length}`,
+  );
+  for (const tag of twemojiImgs) {
+    assert.match(
+      tag,
+      /src="data:image\/svg\+xml,/,
+      `twemoji img src must survive safeUrlTransform (live data:image/svg+xml src), got: ${tag}`,
+    );
+    assert.doesNotMatch(tag, /src=""/, `washed empty src is the bug shape, got: ${tag}`);
+  }
+  // data:text/html stays washed: only the exact bundled-artwork manifest
+  // passes, never `data:` wholesale (companion assertion kept byte-identical
+  // from the data:image/ prefix era).
+  assert.doesNotMatch(markup, /src="data:text\/html/, 'non-image data: URIs must stay blocked (no wholesale data: allow)');
+  assert.match(markup, /src=""/, 'the data:text/html image must render with the washed empty src');
+  // Off-manifest data:image/svg+xml must ALSO stay washed: the allow is
+  // exact-set membership over the 85 embedded literals (isTwemojiAssetUrl),
+  // NOT a data:image/ prefix — a foreign scriptable svg data URI is exactly
+  // the smuggling shape a prefix allow would have passed through.
+  assert.doesNotMatch(
+    markup,
+    /src="data:image\/svg\+xml,[^"]*%3Cscript%3E/,
+    'off-manifest data:image/svg+xml must stay washed (exact-set allow, not a prefix allow)',
+  );
+  const liveSvgSrcs = markup.match(/src="data:image\/svg\+xml,/g) ?? [];
+  assert.equal(
+    liveSvgSrcs.length,
+    2,
+    `exactly the two catalog Twemoji <img> keep a live svg data src, got ${liveSvgSrcs.length} — an off-manifest svg URI must add none`,
+  );
+});
+
+test('error and system bubbles render catalog emoji as Twemoji (display-only), non-catalog glyphs verbatim', () => {
+  const markup = renderToStaticMarkup(
+    <ChatScreen
+      chat={chatFixture({
+        messages: [
+          view('error', '失败了 💀 请重试'),
+          view('system', '[微笑] 会话已压缩'),
+          view('system', '🫠 non-catalog emoji stay native'),
+        ] as never,
+      })}
+      bots={[]}
+      onOpenRecharge={() => undefined}
+    />,
+  );
+  assert.ok(markup.includes('data-testid="error-bubble"'), 'error bubble rendered');
+  assert.ok(markup.includes('data-testid="system-notice"'), 'system notice rendered');
+  assert.match(markup, /<img[^>]*alt="💀"/, 'catalog emoji inside the error bubble renders as Twemoji');
+  assert.match(markup, new RegExp(`<img[^>]*alt="${WECHAT_BRACKET_EMOJI_MAP['微笑']}"`), 'bracket codes inside the system notice map and render as Twemoji');
+  assert.ok(markup.includes('🫠'), 'non-catalog emoji falls back to the raw platform glyph');
+});
+
 test('ChatScreen source contract: caret insertion wiring, panel flow, display-only boundary', () => {
   const source = readSource('../src/mobile/app/screens/ChatScreen.tsx');
   // Insertion goes through the pure caret helper with a pending-caret
@@ -542,12 +661,15 @@ test('ChatScreen source contract: caret insertion wiring, panel flow, display-on
   assert.match(source, /onFocus=\{\(\) => setEmojiPanelOpen\(false\)\}/);
   // The panel toggles from the toolbar trigger.
   assert.match(source, /setEmojiPanelOpen\(\(open\) => !open\)/);
-  // Both bubble kinds map at DISPLAY time only — and only the display layer
-  // swaps in Twemoji artwork (user bubble via TwemojiText, assistant via
-  // MarkdownContent's opt-in emojiImages prop).
+  // All four bubble kinds map at DISPLAY time only — and only the display
+  // layer swaps in Twemoji artwork (user/error/system bubbles via
+  // TwemojiText, assistant via MarkdownContent's opt-in emojiImages prop).
   assert.match(source, /mapWechatBracketCodesForDisplay\(message\.text\)/);
   assert.match(source, /<TwemojiText text=\{mapWechatBracketCodesForDisplay\(message\.text\)\} \/>/);
   assert.match(source, /onOpenLocalFile=\{onOpenFile\} emojiImages \/>/);
+  // Error + system bubbles route through the same display pipeline.
+  const twemojiTextFaces = source.match(/<TwemojiText text=\{mapWechatBracketCodesForDisplay\(messageText\(message\)\)\} \/>/g) ?? [];
+  assert.equal(twemojiTextFaces.length, 2, 'error + system bubbles both route through TwemojiText');
   // The projection layer must NOT map (stored text untouched) — the mapping
   // imports live only in the screen module, not the projection.
   const projection = readSource('../src/mobile/app/chatProjection.ts');

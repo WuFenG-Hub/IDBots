@@ -212,7 +212,10 @@ function MessageRow({ message, onOpenFile }: { message: ChatMessageView; onOpenF
     return (
       <div className="mb-3 flex justify-start">
         <div className="w-full whitespace-pre-wrap break-words rounded-2xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-sm text-red-700" data-testid="error-bubble">
-          {messageText(message)}
+          {/* Display-only mapping (wechatEmojiDisplay.ts); catalog emoji
+              render as bundled Twemoji images (alt = codepoint). Same
+              display convention as the user/assistant bubbles. */}
+          <TwemojiText text={mapWechatBracketCodesForDisplay(messageText(message))} />
         </div>
       </div>
     );
@@ -221,7 +224,10 @@ function MessageRow({ message, onOpenFile }: { message: ChatMessageView; onOpenF
     return (
       <div className="mb-3 flex justify-start">
         <div className="w-full whitespace-pre-wrap break-words rounded-xl border border-[var(--border-color)] bg-[var(--bg-panel)] px-3 py-2 text-xs leading-5 text-[var(--text-secondary)]" data-testid="system-notice">
-          {messageText(message)}
+          {/* Display-only mapping (wechatEmojiDisplay.ts); catalog emoji
+              render as bundled Twemoji images (alt = codepoint). Same
+              display convention as the user/assistant bubbles. */}
+          <TwemojiText text={mapWechatBracketCodesForDisplay(messageText(message))} />
         </div>
       </div>
     );
