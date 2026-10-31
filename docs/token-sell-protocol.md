@@ -128,3 +128,10 @@ instead of listing orders; misquotes and non-TokenSell outputs fail closed.
 `tests/fixtures/tokenSell/` — public chain data only, zero key material:
 `f518099d` raw + 112B header, prev-token raw, live checker cast, live seed
 TxA, live LIST TxB, and the anchor constants in `meta.json`.
+
+
+## 读路径族与端点约定（wallet_token_balance 实现注记）
+
+- FT（token）读路径走 **open-api-mvc** 族：`https://api.microvisionchain.com/open-api-mvc/contract/ft/address/{address}/balance` 与 `.../utxo?codeHash=...&genesis=...`。**必须带 `/open-api-mvc/...` 完整路径前缀**——裸 host（api.microvisionchain.com/）返回 nginx 占位页，不是错误码而是 200+占位 HTML，极易误判。
+- 该族端点**不取 net 参数**（mainnet 单网口径）；NFT 侧 wallet-api v4 端点才使用 `?net=mainnet`。
+- 两侧返回形状不同：FT balance 返回数组（每 genesis 一行：decimal/base-unit balance/genesis/codehash）；NFT 端点返回 `{code,data:{list:[...]}}` 包裹。错误处理勿共用解析器。
